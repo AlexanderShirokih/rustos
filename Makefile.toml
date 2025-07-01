@@ -1,0 +1,29 @@
+[tasks.build]
+command = "cargo"
+args = ["build"]
+
+[tasks.qemu]
+dependencies = ["build"]
+command = "qemu-system-aarch64"
+args = [
+    "-machine", "virt",
+    "-cpu", "cortex-a53",
+    "-nographic",
+    "-kernel", "target/aarch64-unknown-none/debug/kernel",
+]
+
+[tasks.debug]
+dependencies = ["build"]
+script = [
+    """
+    # Run QEMU with a 60-second timeout in the background
+    qemu-system-aarch64 -machine virt -cpu cortex-a53 -nographic \
+    -kernel target/aarch64-unknown-none/debug/kernel -s -S &
+
+    # Run GDB with our initialization script
+    gdb-multiarch target/aarch64-unknown-none/debug/kernel
+
+    # Kill QEMU if it's still running
+    pkill -f "qemu-system-aarch64.*-kernel.*-s -S" 2>/dev/null || true
+    """
+]
