@@ -1,3 +1,4 @@
 pub mod arch;
 pub mod core;
-pub mod dev;
+pub mod device;
+pub mod panic;

@@ -1,22 +1,16 @@
 #![no_std]
 #![no_main]
-
 mod kernel;
 
 use crate::kernel::core::streams::OutputStreamExt;
-use crate::kernel::dev::registry::DeviceRegistry;
+use crate::kernel::device::registry::DeviceRegistry;
+use crate::kernel::panic::init_panic_handler;
 use core::hint;
-use core::panic::PanicInfo;
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {}
-}
 
 pub fn main(registry: DeviceRegistry) -> ! {
-    let hello = "Hello world using Device tree blob!";
+    init_panic_handler(&registry);
 
-    registry.uart().write_str(hello).unwrap();
+    registry.uart().write_str("Hello world").unwrap();
 
     loop {
         hint::spin_loop();

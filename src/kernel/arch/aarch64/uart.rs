@@ -1,6 +1,6 @@
 use crate::kernel::core::streams::{InputStream, OutputStream};
-use crate::kernel::dev::device::Device;
-use crate::kernel::dev::uart::Uart;
+use crate::kernel::device::device::Device;
+use crate::kernel::device::uart::Uart;
 
 pub struct UartImpl {
     base_address: *mut u32,

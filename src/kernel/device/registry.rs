@@ -1,4 +1,4 @@
-use crate::kernel::dev::uart::Uart;
+use crate::kernel::device::uart::Uart;
 
 // Type alias for the UART trait object pointer
 pub type UartPtr = *mut dyn Uart<ReadError = (), WriteError = ()>;

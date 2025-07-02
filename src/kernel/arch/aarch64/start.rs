@@ -1,5 +1,5 @@
 use crate::kernel::arch::aarch64::uart::UartImpl;
-use crate::kernel::dev::registry::{DeviceRegistry, UartPtr};
+use crate::kernel::device::registry::{DeviceRegistry, UartPtr};
 use crate::main;
 use core::arch::asm;
 
