@@ -8,7 +8,6 @@ command = "qemu-system-aarch64"
 args = [
     "-machine", "virt",
     "-cpu", "cortex-a53",
-    "-nographic",
     "-kernel", "target/aarch64-unknown-none/debug/kernel",
 ]
 
