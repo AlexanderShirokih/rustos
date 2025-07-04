@@ -9,6 +9,8 @@ args = [
     "-machine", "virt",
     "-cpu", "cortex-a53",
     "-kernel", "target/aarch64-unknown-none/debug/kernel",
+    "-nographic",
+    "-serial", "mon:stdio",
 ]
 
 [tasks.debug]
@@ -17,7 +19,7 @@ script = [
     """
     # Run QEMU with a 60-second timeout in the background
     qemu-system-aarch64 -machine virt -cpu cortex-a53 -nographic \
-    -kernel target/aarch64-unknown-none/debug/kernel -s -S &
+    -serial mon:stdio -kernel target/aarch64-unknown-none/debug/kernel -s -S &
 
     # Run GDB with our initialization script
     gdb-multiarch target/aarch64-unknown-none/debug/kernel

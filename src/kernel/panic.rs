@@ -3,13 +3,13 @@ use core::panic::PanicInfo;
 // Handle a panic by writing information to the UART
 #[panic_handler]
 pub fn handle_panic(info: &PanicInfo) -> ! {
-    crate::logger::log("\n\rPANIC: ");
+    crate::log::print("\n\rPANIC: ");
 
     // Write panic message if available
     if let Some(location) = info.location() {
-        crate::logger::log("at ");
-        crate::logger::log(location.file());
-        crate::logger::log(":");
+        crate::log::print("at ");
+        crate::log::print(location.file());
+        crate::log::print(":");
 
         // Convert line number to string manually
         let mut line = location.line();
@@ -31,15 +31,15 @@ pub fn handle_panic(info: &PanicInfo) -> ! {
         // Print digits in reverse order
         while i > 0 {
             i -= 1;
-            crate::logger::log(digits_map[digits[i] as usize]);
+            crate::log::print(digits_map[digits[i] as usize]);
         }
     }
 
     // Write a simple message
     let message = info.message().as_str().unwrap_or("Unknown panic");
-    crate::logger::log("\n\r");
-    crate::logger::log(message);
-    crate::logger::log("\n\r");
+    crate::log::print("\n\r");
+    crate::log::print(message);
+    crate::log::print("\n\r");
 
     loop {}
 }

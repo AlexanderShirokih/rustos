@@ -1,48 +1,53 @@
 use crate::kernel::core::streams::{InputStream, OutputStream};
 use crate::kernel::device::device::Device;
-use crate::kernel::device::uart::Uart;
+use spin::Mutex;
 
-pub struct UartImpl {
+pub struct Uart {
     base_address: *mut u32,
+    lock: Mutex<()>,
 }
 
-impl UartImpl {
+unsafe impl Send for Uart {}
+unsafe impl Sync for Uart {}
+
+impl Uart {
     pub const fn new(base_address: usize) -> Self {
         Self {
             base_address: base_address as *mut u32,
+            lock: Mutex::new(()),
         }
     }
 }
 
-impl OutputStream for UartImpl {
+impl OutputStream for Uart {
     type WriteError = ();
 
-    fn write(&mut self, byte: u8) -> Result<(), Self::WriteError> {
+    fn write(&self, byte: u8) -> Result<(), Self::WriteError> {
+        let _guard = self.lock.lock();
+
         unsafe {
             core::ptr::write_volatile(self.base_address, byte as u32);
-
-            Ok(())
         }
+
+        Ok(())
     }
 }
 
-impl InputStream for UartImpl {
+impl InputStream for Uart {
     type ReadError = ();
 
-    fn read(&mut self) -> Result<u8, Self::ReadError> {
+    fn read(&self) -> Result<u8, Self::ReadError> {
         let byte = unsafe { core::ptr::read_volatile(self.base_address) } as u8;
         Ok(byte)
     }
 }
 
-impl<T: Uart> Device for T {
-    fn init(&mut self) {
+impl Device for Uart {
+    fn init(&self) {
         // we think it will be enabled from the start
     }
 
-    fn deinit(&mut self) {
+    fn deinit(&self) {
         // disable device register?
     }
 }
-
-impl Uart for UartImpl {}

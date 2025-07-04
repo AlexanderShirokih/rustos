@@ -1,19 +1,17 @@
-use crate::kernel::device::uart::Uart;
+use crate::kernel::device::device::StreamedDevice;
 
-// Type alias for the UART trait object pointer
-pub type UartPtr = *mut dyn Uart<ReadError = (), WriteError = ()>;
-
-// Instance-based device registry
 pub struct DeviceRegistry {
-    pub(crate) uart0: UartPtr,
+    uart0: &'static (dyn StreamedDevice<ReadError = (), WriteError = ()> + Sync),
 }
 
 impl DeviceRegistry {
-    pub fn new(uart0: UartPtr) -> Self {
+    pub fn new(
+        uart0: &'static (dyn StreamedDevice<ReadError = (), WriteError = ()> + Sync),
+    ) -> Self {
         Self { uart0 }
     }
 
-    pub fn uart(&self) -> &mut dyn Uart<ReadError = (), WriteError = ()> {
-        unsafe { &mut *self.uart0 }
+    pub fn uart(&self) -> &'static (dyn StreamedDevice<ReadError = (), WriteError = ()> + Sync) {
+        self.uart0
     }
 }
