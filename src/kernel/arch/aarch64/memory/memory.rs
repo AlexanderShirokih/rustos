@@ -21,6 +21,8 @@ pub struct MemoryLayout {
     pub kernel_end: PhysicalAddress,
     pub memory_start: PhysicalAddress,
     pub memory_end: PhysicalAddress,
+    pub device_memory_start: PhysicalAddress,
+    pub device_memory_end: PhysicalAddress,
 }
 
 impl MemoryLayout {
@@ -35,6 +37,10 @@ impl MemoryLayout {
         let memory_start = kernel_end;
         let memory_end = kernel_end.offset_bytes(0x0800_0000); // 128MB total
 
+        // Device memory is the first 64MB
+        let device_memory_start = PhysicalAddress::new(0);
+        let device_memory_end = PhysicalAddress::new(0x4000_0000);
+
         MemoryLayout {
             stack_start,
             stack_end,
@@ -42,6 +48,8 @@ impl MemoryLayout {
             kernel_end,
             memory_start,
             memory_end,
+            device_memory_start,
+            device_memory_end,
         }
     }
 }

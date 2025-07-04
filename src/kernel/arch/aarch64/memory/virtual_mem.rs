@@ -3,10 +3,10 @@
 //! This module provides functionality for managing virtual memory,
 //! including page tables and address translation for aarch64.
 
+use crate::kernel::arch::aarch64::memory::memory::MemoryLayout;
 use crate::kernel::memory::physical::{
     Frame, FrameAllocator, PhysicalAddress, PhysicalMemoryManager,
 };
-use core::fmt;
 use core::ops::{Index, IndexMut};
 
 /// Virtual memory address
@@ -24,17 +24,6 @@ impl VirtualAddress {
         self.0
     }
 
-    /// Align the address down to the page boundary
-    pub fn align_down(&self, page_size: usize) -> VirtualAddress {
-        VirtualAddress(self.0 & !(page_size - 1))
-    }
-
-    /// Align the address up to the page boundary
-    pub fn align_up(&self, page_size: usize) -> VirtualAddress {
-        let aligned = (self.0 + page_size - 1) & !(page_size - 1);
-        VirtualAddress(aligned)
-    }
-
     /// Get the page table indices for this address (aarch64 4-level paging)
     pub fn page_table_indices(&self) -> [usize; 4] {
         let addr = self.0;
@@ -44,17 +33,6 @@ impl VirtualAddress {
             (addr >> 21) & 0x1FF, // Level 2
             (addr >> 12) & 0x1FF, // Level 3 (bottom level)
         ]
-    }
-
-    /// Get the page offset for this address
-    pub fn page_offset(&self, page_size: usize) -> usize {
-        self.0 & (page_size - 1)
-    }
-}
-
-impl fmt::Display for VirtualAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "VirtAddr(0x{:x})", self.0)
     }
 }
 
@@ -374,6 +352,9 @@ impl PageTableManager {
         // Create the final mapping
         leaf_table[idx].set(PageTableEntry::new_frame(frame, flags, self.frame_size));
 
+        // Flush the TLB for this page
+        self.flush_tlb_page(page.start_address(self.frame_size));
+
         Ok(())
     }
 
@@ -401,8 +382,13 @@ impl PageTableManager {
 
         // At the leaf level
         let idx = indices[3];
-        if !table[idx].is_valid() || !table[idx].is_block() {
+        if !table[idx].is_valid() {
             return Err("Page is not mapped");
+        }
+
+        // At level 3, the entry should be a block/page mapping, not a table
+        if table[idx].is_table() {
+            return Err("Expected a page mapping, found a table");
         }
 
         // Get the frame before unmapping
@@ -410,6 +396,9 @@ impl PageTableManager {
 
         // Clear the entry
         table[idx].set(PageTableEntry::new());
+
+        // Flush the TLB for this page
+        self.flush_tlb_page(page.start_address(self.frame_size));
 
         Ok(frame)
     }
@@ -420,8 +409,9 @@ impl PageTableManager {
 
         // Start at the root table
         let mut table_frame = self.root_table;
-        let mut table =
-            unsafe { &*(table_frame.start_address(4096).as_usize() as *const PageTable) };
+        let mut table = unsafe {
+            &*(table_frame.start_address(self.frame_size).as_usize() as *const PageTable)
+        };
 
         // Navigate through the page table levels
         for level in 0..4 {
@@ -432,19 +422,24 @@ impl PageTableManager {
                 return None; // Not mapped
             }
 
+            // Level 0 entries must be table entries in ARMv8
+            if level == 0 && entry.is_block() {
+                return None; // Invalid configuration
+            }
+
             if level == 3 || (entry.is_block() && level > 0) {
                 // This is a leaf entry (either at level 3 or a block entry at levels 1-2)
                 // Calculate the physical address
                 let frame_addr = entry.address().as_usize();
 
                 let page_mask = if level == 1 {
-                    // 1GB page
+                    // 1GB page (level 1 block)
                     0x3FFF_FFFF
                 } else if level == 2 {
-                    // 2MB page
+                    // 2MB page (level 2 block)
                     0x1F_FFFF
                 } else {
-                    // 4KB page
+                    // 4KB page (level 3 entry)
                     0xFFF
                 };
 
@@ -467,6 +462,27 @@ impl PageTableManager {
         self.root_table
     }
 
+    /// Flush the TLB for all entries
+    pub fn flush_tlb_all(&self) {
+        unsafe {
+            // Flush the entire TLB
+            core::arch::asm!("tlbi vmalle1", "dsb sy", "isb");
+        }
+    }
+
+    /// Flush the TLB for a specific virtual address
+    pub fn flush_tlb_page(&self, addr: VirtualAddress) {
+        unsafe {
+            // Flush a specific page from the TLB
+            core::arch::asm!(
+                "tlbi vaae1is, {0}",
+                "dsb sy",
+                "isb",
+                in(reg) (addr.as_usize() >> 12) & 0xFFFFFFFFFF
+            );
+        }
+    }
+
     /// Set the TTBRx register to use this page table
     pub fn activate(&self) {
         let ttbr0_val = self.root_table.start_address(self.frame_size).as_usize() as u64;
@@ -480,31 +496,40 @@ impl PageTableManager {
             );
 
             // Flush the TLB
-            core::arch::asm!("tlbi vmalle1", "dsb sy", "isb");
+            self.flush_tlb_all();
         }
     }
 }
 
 /// Initialize the virtual memory system
-pub fn init(physical_memory_manager: &mut PhysicalMemoryManager) -> PageTableManager {
+pub fn init(physical_memory_manager: &mut PhysicalMemoryManager, memory_layout: &MemoryLayout) -> PageTableManager {
     // Create a new page table manager
     let mut page_table_manager = PageTableManager::new(physical_memory_manager);
     let page_size = page_table_manager.frame_size();
 
-    // Identity-map the first 128MB of physical memory
+    // Get memory region boundaries from the memory layout
+    let device_memory_start = memory_layout.device_memory_start.as_usize();
+    let device_memory_end = memory_layout.device_memory_end.as_usize();
+    let stack_start = memory_layout.stack_start.as_usize();
+    let stack_end = memory_layout.stack_end.as_usize();
+    let kernel_start = memory_layout.kernel_start.as_usize();
+    let kernel_end = memory_layout.kernel_end.as_usize();
+    let memory_end = memory_layout.memory_end.as_usize();
+
+    // Identity-map the physical memory up to memory_end
     // This ensures the kernel and essential memory regions remain accessible
-    for addr in (0..0x8000_0000).step_by(page_size) {
+    for addr in (0..memory_end).step_by(page_size) {
         let page = Page::containing_address(VirtualAddress::new(addr), page_size);
         let frame = Frame::containing_address(PhysicalAddress::new(addr), page_size);
 
         // Use different flags based on the memory region
-        let flags = if addr < 0x4000_0000 {
-            // First 64MB: Device memory (for MMIO)
+        let flags = if addr >= device_memory_start && addr < device_memory_end {
+            // Device memory (for MMIO)
             EntryFlags::DEVICE
-        } else if addr < 0x4020_0000 {
+        } else if addr >= stack_start && addr < stack_end {
             // Kernel stack: Read-write
             EntryFlags::KERNEL_RW
-        } else if addr < 0x4040_0000 {
+        } else if addr >= kernel_start && addr < kernel_end {
             // Kernel code: Read-only
             EntryFlags::KERNEL_RO
         } else {
@@ -512,8 +537,12 @@ pub fn init(physical_memory_manager: &mut PhysicalMemoryManager) -> PageTableMan
             EntryFlags::KERNEL_RW
         };
 
-        // Ignore errors - some pages might already be mapped
-        let _ = page_table_manager.map(page, frame, flags, physical_memory_manager);
+        // Map the page, but don't panic if it fails (some pages might already be mapped)
+        if let Err(_) = page_table_manager.map(page, frame, flags, physical_memory_manager) {
+            // In a real kernel, we might want to log this error
+            // For now, we'll just ignore it as it's likely due to pages already being mapped
+            // crate::kernel::util::log::debug(&format!("Failed to map page at {:x}: {}", addr, err));
+        }
     }
 
     page_table_manager

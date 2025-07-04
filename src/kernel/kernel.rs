@@ -1,5 +1,5 @@
 use crate::kernel::device::registry::DeviceRegistry;
-use crate::kernel::memory::memory_map::MemoryMap;
+use crate::kernel::memory::memory_map::{MemoryMap, MemoryRegion};
 use crate::kernel::memory::physical::PhysicalMemoryManager;
 
 /// Kernel struct that contains core kernel components
@@ -16,15 +16,38 @@ pub trait AbstractKernel {
 
 pub struct BootInfo {
     pub(crate) memory_map: MemoryMap,
+    pub(crate) memory_layout: MemoryLayout,
+}
+
+/// Memory layout information for the system
+pub struct MemoryLayout {
+    /// Device memory region (for MMIO)
+    pub device_memory: MemoryRegion,
 }
 
 impl BootInfo {
     pub(crate) fn new(memory_map: MemoryMap) -> Self {
-        Self { memory_map }
+        // Create a default memory layout with device memory from the memory map
+        let device_memory = MemoryRegion::new(
+            memory_map.memory().start,
+            memory_map.memory().end,
+            memory_map.memory().frame_size,
+        );
+
+        Self { 
+            memory_map,
+            memory_layout: MemoryLayout { device_memory },
+        }
     }
+
     /// Get a reference to the memory map
     pub fn memory_map(&self) -> &MemoryMap {
         &self.memory_map
+    }
+
+    /// Get a reference to the memory layout
+    pub fn memory_layout(&self) -> &MemoryLayout {
+        &self.memory_layout
     }
 }
 

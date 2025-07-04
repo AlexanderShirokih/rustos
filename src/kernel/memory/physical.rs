@@ -151,6 +151,9 @@ impl FrameBitmap {
                 let entry_ptr = self.bitmap_ptr.as_ptr().add(word_idx);
                 *entry_ptr &= !(1u64 << bit_idx);
             }
+        } else {
+            // Out-of-range frames are considered allocated, so clearing them is a no-op
+            // This makes the behavior consistent with is_set
         }
     }
 
@@ -215,7 +218,7 @@ impl PhysicalMemoryManager {
 
         log::print("Expanding RAM region from 0x");
         log::print(usize_to_hex_str(start_frame.number()));
-        log::print("to ");
+        log::print(" to ");
         log::print(usize_to_hex_str(end_frame.number()));
         log::print(" physical memory. Which is ");
         log::print(usize_to_str(memory.size() / 1024));
@@ -303,10 +306,17 @@ impl FrameAllocator for PhysicalMemoryManager {
     fn deallocate_frame(&mut self, frame: Frame) {
         let start_frame_num =
             Frame::containing_address(self.memory.start, self.memory.frame_size).number();
-        let idx = frame.number() - start_frame_num;
+        let frame_num = frame.number();
 
-        let mut bitmap = self.allocated_frames.lock();
-        bitmap.clear(idx);
+        // Check if the frame is within the valid range
+        if frame_num >= start_frame_num && frame_num < start_frame_num + self.total_frames() {
+            let idx = frame_num - start_frame_num;
+            let mut bitmap = self.allocated_frames.lock();
+            bitmap.clear(idx);
+        } else {
+            // Frame is outside the managed memory range
+            log::print("Warning: Attempted to deallocate frame outside managed memory range\n\r");
+        }
     }
 }
 
