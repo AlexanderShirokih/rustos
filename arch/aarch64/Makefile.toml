@@ -9,8 +9,8 @@ args = [
     "-machine", "virt",
     "-cpu", "cortex-a53",
     "-kernel", "../../target/aarch64-unknown-none/debug/kernel-aarch64",
-    "-nographic",
-    "-serial", "mon:stdio",
+#    "-nographic",
+#    "-serial", "mon:stdio",
 ]
 
 [tasks.debug]

@@ -7,6 +7,7 @@ edition = "2024"
 kernel-core = { path = "../../core" }
 arch-common = { path = "../common" }
 memory = { path = "../../memory" }
+util = { path = "../../util" }
 spin = "0.10.0"
 log = "0.4.27"
 

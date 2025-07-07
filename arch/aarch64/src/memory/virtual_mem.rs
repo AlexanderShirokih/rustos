@@ -5,13 +5,13 @@
 
 use crate::memory::entry_flags::EntryFlags;
 use crate::memory::layout::{MemoryLayout, MemoryRegion};
+use crate::memory::virtual_address::{VirtualAddress, VirtualAddressExt};
 use core::ops::{Index, IndexMut};
+use log::debug;
 use kernel_core::log::{debug, info};
 use memory::memory_backend::{MemoryBackend, MemoryBackendExt, MemoryPtr};
 use memory::physical::{Frame, FrameAllocator, PhysicalAddress};
-use crate::memory::virtual_address::{VirtualAddress, VirtualAddressExt};
-
-
+use util::string::usize_to_str;
 
 /// A virtual memory page
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +222,9 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
             .allocate_frame()
             .ok_or(VmError::FrameAllocationFailed)?;
 
+        debug("Allocated root page addr: ");
+        debug(usize_to_str(root_frame.start_address(backend.frame_size()).as_usize()));
+
         let frame_address = root_frame.start_address(backend.frame_size());
         let root_ptr: MemoryPtr<PageTable> = frame_address.into();
 
@@ -247,14 +250,12 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
 
     /// Identity map a memory region
     fn identity_map_region(
-        &mut self,
+        &self,
         from: PhysicalAddress,
         to: PhysicalAddress,
         flags: EntryFlags,
     ) -> Result<(), VmError> {
-        if from.as_usize() >= to.as_usize() {
-            return Ok(());
-        }
+        assert!(from.as_usize() < to.as_usize());
 
         for addr in (from.as_usize()..to.as_usize()).step_by(self.frame_size) {
             let page = Page::containing_address(VirtualAddress::new(addr), self.frame_size);
@@ -367,7 +368,7 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
 
     /// Map a range of pages to a range of frames
     pub fn map_range(
-        &mut self,
+        &self,
         pages: impl Iterator<Item = Page>,
         frames: impl Iterator<Item = Frame>,
         flags: EntryFlags,
@@ -514,7 +515,7 @@ pub(crate) fn init<B: MemoryBackend + 'static>(
     }
 
     // Create the page table manager
-    let mut page_table_manager =
+    let page_table_manager =
         PageTableManager::new(frame_allocator, memory_backend, memory_layout.heap)?;
 
     // Identity map all direct regions
