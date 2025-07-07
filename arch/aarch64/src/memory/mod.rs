@@ -5,3 +5,4 @@ pub mod memory_mapper;
 pub mod ram_memory;
 pub mod setup;
 pub mod virtual_mem;
+pub mod virtual_address;

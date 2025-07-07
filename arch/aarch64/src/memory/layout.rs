@@ -23,6 +23,7 @@ pub struct MemoryLayout {
 }
 
 pub struct MemoryRegion {
+    pub label: &'static str,
     pub start: PhysicalAddress,
     pub end: PhysicalAddress,
     pub flags: EntryFlags,
@@ -54,24 +55,28 @@ impl MemoryLayout {
 
         MemoryLayout {
             devices: MemoryRegion {
+                label: "devices (MMIO)",
                 start: device_memory_start,
                 end: device_memory_end,
                 flags: EntryFlags::DEVICE,
                 frame_size: alignment,
             },
             stack: MemoryRegion {
+                label: "kernel stack",
                 start: stack_start,
                 end: stack_end,
                 flags: EntryFlags::KERNEL_RW,
                 frame_size: alignment,
             },
             kernel: MemoryRegion {
+                label: "kernel",
                 start: kernel_start,
                 end: kernel_end,
                 flags: EntryFlags::KERNEL_RW,
                 frame_size: alignment,
             },
             heap: MemoryRegion {
+                label: "heap",
                 start: heap_start,
                 end: heap_end,
                 flags: EntryFlags::KERNEL_RW,

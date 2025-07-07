@@ -6,50 +6,12 @@
 use crate::memory::entry_flags::EntryFlags;
 use crate::memory::layout::{MemoryLayout, MemoryRegion};
 use core::ops::{Index, IndexMut};
+use kernel_core::log::{debug, info};
 use memory::memory_backend::{MemoryBackend, MemoryBackendExt, MemoryPtr};
 use memory::physical::{Frame, FrameAllocator, PhysicalAddress};
+use crate::memory::virtual_address::{VirtualAddress, VirtualAddressExt};
 
-/// Virtual memory address
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct VirtualAddress(pub usize);
 
-impl VirtualAddress {
-    /// Create a new virtual address
-    pub const fn new(address: usize) -> Self {
-        VirtualAddress(address)
-    }
-
-    /// Get the raw address value
-    pub const fn as_usize(&self) -> usize {
-        self.0
-    }
-
-    /// Get the page table indices for this address (aarch64 4-level paging)
-    pub fn page_table_indices(&self) -> [usize; 4] {
-        let addr = self.0;
-        [
-            (addr >> 39) & 0x1FF, // Level 0 (PGD)
-            (addr >> 30) & 0x1FF, // Level 1 (PUD)
-            (addr >> 21) & 0x1FF, // Level 2 (PMD)
-            (addr >> 12) & 0x1FF, // Level 3 (PTE)
-        ]
-    }
-
-    /// Get the page offset (bits 0-11)
-    pub fn page_offset(&self) -> usize {
-        self.0 & 0xFFF
-    }
-
-    /// Align down to page boundary
-    pub fn page_aligned_down(&self, page_size: usize) -> Self {
-        VirtualAddress(self.0 & !(page_size - 1))
-    }
-
-    /// Align up to page boundary
-    pub fn page_aligned_up(&self, page_size: usize) -> Self {
-        VirtualAddress((self.0 + page_size - 1) & !(page_size - 1))
-    }
-}
 
 /// A virtual memory page
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,9 +240,9 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
     }
 
     /// Enable or disable virtual memory mode
-    pub fn set_virtual_mode_enabled(&self, is_enabled: bool) {
+    pub fn enable_virtual_mode(&self) {
         self.backend
-            .set_virtual_mode_enabled(is_enabled, self.root_table.start_address(self.frame_size));
+            .enable_virtual_mode(self.root_table.start_address(self.frame_size));
     }
 
     /// Identity map a memory region
@@ -293,13 +255,6 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
         if from.as_usize() >= to.as_usize() {
             return Ok(());
         }
-
-        // println!(
-        //     "Identity mapping region from {:#x} to {:#x}, pages: {}",
-        //     from.as_usize(),
-        //     to.as_usize(),
-        //     (to.as_usize() - from.as_usize()) / self.frame_size
-        // );
 
         for addr in (from.as_usize()..to.as_usize()).step_by(self.frame_size) {
             let page = Page::containing_address(VirtualAddress::new(addr), self.frame_size);
@@ -360,6 +315,10 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
         // Create the final mapping
         leaf_table[idx].set(PageTableEntry::new_frame(frame, flags, self.frame_size));
         self.backend.write(leaf_address, leaf_table);
+
+        let phys_addr = frame.start_address(self.frame_size);
+        self.backend.clean_dcache_page(phys_addr);
+        self.backend.invalidate_cache();
 
         Ok(())
     }
@@ -542,6 +501,9 @@ pub(crate) fn init<B: MemoryBackend + 'static>(
 
     // Reserve frames for direct-mapped regions first
     for region in &identity_map_regions {
+        debug("Allocating frames for direct-mapped region: ");
+        debug(region.label);
+
         let frame_count =
             (region.end.as_usize() - region.start.as_usize()) / frame_allocator.frame_size();
         if frame_count > 0 {
@@ -560,8 +522,12 @@ pub(crate) fn init<B: MemoryBackend + 'static>(
         page_table_manager.identity_map_region(region.start, region.end, region.flags)?;
     }
 
+    info("Direct-mapped regions initialized");
+
     // Enable virtual memory
-    page_table_manager.set_virtual_mode_enabled(true);
+    page_table_manager.enable_virtual_mode();
+
+    info("Virtual memory enabled");
 
     Ok(page_table_manager)
 }

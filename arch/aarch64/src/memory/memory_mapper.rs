@@ -4,7 +4,8 @@
 //! for the kernel heap allocator.
 
 use crate::memory::allocator::MemoryMapper;
-use crate::memory::virtual_mem::{Page, PageTableManager, VirtualAddress, VmError};
+use crate::memory::virtual_address::VirtualAddress;
+use crate::memory::virtual_mem::{Page, PageTableManager, VmError};
 use memory::memory_backend::MemoryBackend;
 use memory::physical::FrameAllocator;
 

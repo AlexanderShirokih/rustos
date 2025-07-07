@@ -47,7 +47,9 @@ pub trait MemoryBackend {
     fn frame_size(&self) -> usize;
     fn read_bytes(&self, addr: PhysicalAddress, buf: &mut [u8]);
     fn write_bytes(&self, addr: PhysicalAddress, buf: &[u8]);
-    fn set_virtual_mode_enabled(&self, enabled: bool, root_page: PhysicalAddress);
+    fn enable_virtual_mode(&self, root_page: PhysicalAddress);
+    fn clean_dcache_page(&self, address: PhysicalAddress);
+    fn invalidate_cache(&self);
 }
 
 pub trait MemoryBackendExt: MemoryBackend {
