@@ -1,13 +1,15 @@
-[package]
-name = "kernel"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = [
+    "arch/aarch64",
+    "arch/common",
+    "core",
+    "memory",
+    "util",
+]
 
 [profile.dev]
 panic = "abort"
 
 [profile.release]
 panic = "abort"
-
-[dependencies]
-spin = "0.10.0"

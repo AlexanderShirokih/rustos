@@ -1,0 +1,15 @@
+[package]
+name = "arch-aarch64"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kernel-core = { path = "../../core" }
+arch-common = { path = "../common" }
+memory = { path = "../../memory" }
+spin = "0.10.0"
+log = "0.4.27"
+
+[[bin]]
+name = "kernel-aarch64"
+path = "src/start.rs"

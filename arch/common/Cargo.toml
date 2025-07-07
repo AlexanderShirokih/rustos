@@ -1,0 +1,10 @@
+[package]
+name = "arch-common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memory = { path = "../../memory" }
+kernel-core = { path = "../../core" }
+util = { path = "../../util" }
+spin = "0.10.0"
