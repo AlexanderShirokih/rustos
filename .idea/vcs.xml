@@ -8,5 +8,7 @@
   </component>
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tools/dtbTool" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tools/extract-dtb" vcs="Git" />
   </component>
 </project>

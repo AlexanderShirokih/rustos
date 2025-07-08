@@ -20,17 +20,17 @@ use spin::Once;
 pub extern "C" fn _start() -> () {
     unsafe {
         asm!(
-            // Init SP
-            "ldr    x0, =_stack_top",
-            "mov    sp, x0",
-            // Enable FP/SIMD
-            "mrs    x0, cpacr_el1",
-            "orr    x0, x0, #(0x3 << 20)",
-            "msr    cpacr_el1, x0",
-            "isb",
-            // Make a call here to keep the function clean until SP are set
-            "b      early_main",
-            options(noreturn)
+        // Init SP
+        "ldr    x0, =_stack_top",
+        "mov    sp, x0",
+        // Enable FP/SIMD
+        "mrs    x0, cpacr_el1",
+        "orr    x0, x0, #(0x3 << 20)",
+        "msr    cpacr_el1, x0",
+        "isb",
+        // Make a call here to keep the function clean until SP are set
+        "b      early_main",
+        options(noreturn)
         )
     }
 }

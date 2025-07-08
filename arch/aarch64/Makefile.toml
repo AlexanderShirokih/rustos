@@ -1,6 +1,50 @@
+[tasks.all]
+dependencies = ["bootimg"]
+
 [tasks.build]
 command = "cargo"
 args = ["build"]
+
+[tasks.clean]
+command = "cargo"
+args = ["clean"]
+
+[tasks.image]
+dependencies = ["clean"]
+script = [
+    "mkdir -p ../../target/build/",
+    "cargo objcopy --release -- -O binary ../../target/build/kernel.raw",
+    "gzip -c ../../target/build/kernel.raw > ../../target/build/kernel.gz"
+]
+
+[tasks.concat]
+dependencies = ["image"]
+script = [
+    "pwd",
+    "cat ../../target/build/kernel.gz dtb/dtbs.img > ../../target/build/Image.gz+dtb"
+]
+
+[tasks.ramdisk]
+script = [
+    "echo | cpio -o --format=newc | gzip > ../../target/build/ramdisk.cpio.gz"
+]
+
+[tasks.bootimg]
+dependencies = ["concat", "ramdisk"]
+script = [
+    '''
+    mkbootimg \
+      --kernel ../../target/build/Image.gz+dtb \
+      --ramdisk ../../target/build/ramdisk.cpio.gz \
+      --base 0x00000000 \
+      --kernel_offset 0x00008000 \
+      --ramdisk_offset 0x01000000 \
+      --tags_offset 0x00000100 \
+      --pagesize 4096 \
+      --header_version 1 \
+      --output ../../target/build/boot.img
+    '''
+]
 
 [tasks.qemu]
 dependencies = ["build"]
