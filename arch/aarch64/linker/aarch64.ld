@@ -3,13 +3,8 @@ ENTRY(_boot);
 
 STACK_SIZE = 2M;
 
-
 SECTIONS {
     . = 0x00008000;
-
-    _stack_bottom = .;
-    . += STACK_SIZE;
-    _stack_top = .;
 
     .head ALIGN(8) : {
         KEEP(*(.head))
@@ -33,6 +28,10 @@ SECTIONS {
         *(.bss*)
         *(COMMON)
     }
+
+    _stack_bottom = .;
+    . += STACK_SIZE;
+    _stack_top = .;
 
     _kernel_end = .;
 
