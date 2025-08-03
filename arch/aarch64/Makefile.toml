@@ -13,37 +13,40 @@ args = ["clean"]
 dependencies = ["clean"]
 script = [
     "mkdir -p ../../target/build/",
-    "cargo objcopy --release -- -O binary ../../target/build/kernel.raw",
-    "gzip -c ../../target/build/kernel.raw > ../../target/build/kernel.gz"
+    "cargo objcopy --release -- -O binary ../../target/build/kernel.bin",
+]
+
+[tasks.compress]
+dependencies = [ "image"]
+script = [
+    "gzip -9c ../../target/build/kernel.bin > ../../target/build/kernel.gz"
+]
+
+[tasks.dtb]
+script = [
+    "dtc -I dts -O dtb -o ../../target/build/qcom-lavender-min.dtb dtb/qcom-lavender-min.dts"
 ]
 
 [tasks.concat]
-dependencies = ["image"]
+dependencies = ["compress", "dtb"]
 script = [
-    "pwd",
-    "cat ../../target/build/kernel.gz dtb/dtbs.img > ../../target/build/Image.gz+dtb"
-]
-
-[tasks.ramdisk]
-script = [
-    "echo | cpio -o --format=newc | gzip > ../../target/build/ramdisk.cpio.gz"
+    "cat ../../target/build/kernel.gz /home/alexander/Загрузки/split/out.dtb > ../../target/build/kernel.gz+dtb"
 ]
 
 [tasks.bootimg]
-dependencies = ["concat", "ramdisk"]
+dependencies = ["concat"]
 script = [
     '''
-    mkbootimg \
-      --kernel ../../target/build/Image.gz+dtb \
-      --ramdisk ../../target/build/ramdisk.cpio.gz \
-      --base 0x00000000 \
-      --kernel_offset 0x00008000 \
-      --ramdisk_offset 0x01000000 \
-      --tags_offset 0x00000100 \
-      --pagesize 4096 \
-      --header_version 1 \
-      --output ../../target/build/boot.img
-    '''
+  mkbootimg \
+    --kernel ../../target/build/kernel.gz+dtb \
+    --ramdisk /dev/null \
+    --base 0x00000000 \
+    --kernel_offset 0x00008000 \
+    --ramdisk_offset 0x01000000 \
+    --pagesize 4096 \
+    --header_version 1 \
+    --output ../../target/build/boot.img
+  '''
 ]
 
 [tasks.qemu]
@@ -61,14 +64,10 @@ args = [
 dependencies = ["build"]
 script = [
     """
-    # Run QEMU with a 60-second timeout in the background
     qemu-system-aarch64 -machine virt -cpu cortex-a53 -nographic \
     -serial mon:stdio -kernel ../../target/aarch64-unknown-none/debug/kernel-aarch64 -s -S &
 
     # Run GDB with our initialization script
     gdb-multiarch ../../target/aarch64-unknown-none/debug/kernel-aarch64
-
-    # Kill QEMU if it's still running
-    pkill -f "qemu-system-aarch64.*-kernel.*-s -S" 2>/dev/null || true
     """
 ]

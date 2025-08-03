@@ -7,14 +7,23 @@ pub mod uart;
 
 use core::arch::asm;
 
-use crate::memory::setup::{MemorySetupError, setup_memory};
-use crate::uart::Uart;
-use arch_common::kernel::{BootInfo, Kernel};
-use kernel_core::device::registry::DeviceRegistry;
-use kernel_core::log;
-use kernel_core::log::{Logger, OutputStreamLogger, set_logger};
-use kernel_core::streams::OutputStreamExt;
-use spin::Once;
+// --- ARM64 Image header
+core::arch::global_asm!(
+    r#"
+    .section .head, "a"
+    .global _boot
+_boot:
+    b _start                            // code0: branch to _start
+    .word 0                             // code1
+    .quad 0                             // text_offset
+    .quad _kernel_size                  // image_size
+    .quad 0                             // flags
+    .quad 0                             // res2
+    .quad 0                             // res3
+    .ascii "ARM\x64"                    // magic "ARMd"
+    .word 0                             // res4
+"#
+);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> () {
@@ -28,37 +37,117 @@ pub extern "C" fn _start() -> () {
         "orr    x0, x0, #(0x3 << 20)",
         "msr    cpacr_el1, x0",
         "isb",
-        // Make a call here to keep the function clean until SP are set
-        "b      early_main",
+        // Jump to early_main
+        "b      {early_main}",
+        early_main = sym early_main,
         options(noreturn)
         )
     }
 }
 
-static UART0: Once<Uart> = Once::new();
-static DEV_REG: Once<DeviceRegistry> = Once::new();
-static KERNEL: Once<Kernel> = Once::new();
+const UART_BASE: usize = 0x0C17_0000; // базу возьми из DT для lavender
+const UART_TF: usize = 0x000C;
+const UARTDM_TF: usize = 0x0070;
+const UART_SR: usize = 0x0008;
+const UART_SR_TX_READY: u32 = 1 << 2;
 
-#[unsafe(no_mangle)]
-extern "C" fn early_main() {
-    let uart0: &'static Uart = UART0.call_once(|| Uart::new(0x0900_0000));
-    let registry: &'static DeviceRegistry = DEV_REG.call_once(|| DeviceRegistry::new(uart0));
-    let static_kernel: &'static Kernel =
-        KERNEL.call_once(|| Kernel::new(registry, OutputStreamLogger::new(uart0), BootInfo::new()));
+#[inline(always)]
+unsafe fn mmio32(p: usize) -> *mut u32 {
+    p as *mut u32
+}
+#[inline(always)]
+unsafe fn mmio8(p: usize) -> *mut u8 {
+    p as *mut u8
+}
+#[inline(always)]
+unsafe fn barrier() {
+    core::arch::asm!("dsb ish; isb", options(nostack, preserves_flags));
+}
 
-    set_logger(static_kernel.logger());
-    log::info("Starting kernel");
+// Обычный MSM-UART: по 1 байту
+pub unsafe fn uart_write_byte(c: u8) {
+    while (core::ptr::read_volatile(mmio32(UART_BASE + UART_SR)) & (1 << 2)) == 0 {}
+    core::ptr::write_volatile(mmio8(UART_BASE + UART_TF), c);
+    barrier();
+}
 
-    if let Err(e) = setup_memory() {
-        match e {
-            MemorySetupError::AllocatorInitializationError => {
-                uart0.write_str("Memory allocation fatal error").unwrap()
+// UARTDM: можно паковать до 4 байт и писать словом в UARTDM_TF
+pub unsafe fn uartdm_write_chunk(chunk: [u8; 4]) {
+    while (core::ptr::read_volatile(mmio32(UART_BASE + UART_SR)) & (1 << 2)) == 0 {}
+    let w = u32::from_le_bytes(chunk);
+    core::ptr::write_volatile(mmio32(UART_BASE + UARTDM_TF), w);
+    barrier();
+}
+
+pub unsafe fn uart_putc(c: u8) {
+    // core::ptr::write_volatile((UART_BASE) as *mut u8, c)
+    while (core::ptr::read_volatile(mmio32(UART_BASE + UART_SR)) & UART_SR_TX_READY) == 0 {}
+    core::ptr::write_volatile(mmio32(UART_BASE + UARTDM_TF), c as u32);
+    core::arch::asm!("dsb ish; isb", options(nostack, preserves_flags));
+}
+
+pub fn uart_puts(s: &str) {
+    unsafe {
+        for &b in s.as_bytes() {
+            if b == b'\n' {
+                uart_putc(b'\r')
             }
-            MemorySetupError::VirtualManagerSetupError => uart0
-                .write_str("Virtual manager setup fatal error")
-                .unwrap(),
+            uart_putc(b);
         }
-    } else {
-        arch_common::start::main(static_kernel);
+    }
+}
+
+fn early_main() -> ! {
+    unsafe {
+        psci_system_reset();
+        // uart_puts("Hello, world44444!\n");
+        // loop {
+        //     asm!("wfi");
+        // }
+    }
+}
+
+#[inline(always)]
+fn psci_system_reset() -> ! {
+    unsafe {
+        core::arch::asm!(
+        // x9 = CurrentEL >> 2 (1=EL1, 2=EL2, 3=EL3)
+        "mrs x9, CurrentEL",
+        "lsr x9, x9, #2",
+
+        // --- Try SMC64 at EL1
+        "cmp x9, #1",
+        "b.ne 2f",
+        "mov x1, xzr; mov x2, xzr; mov x3, xzr",
+        // SYSTEM_RESET, SMCCC 64
+        "mov x0, #0x0009",
+        "movk x0, #0xC400, lsl #16",
+        "smc #0",
+        // If returned, try SMC32
+        "mov x1, xzr; mov x2, xzr; mov x3, xzr",
+        "mov x0, #0x0009",
+        "movk x0, #0x8400, lsl #16",
+        "smc #0",
+        "b 4f",
+
+        // --- Try HVC at EL2
+        "2:",
+        "cmp x9, #2",
+        "b.ne 4f",
+        "mov x1, xzr; mov x2, xzr; mov x3, xzr",
+        // SYSTEM_RESET, SMCCC 64 via HVC
+        "mov x0, #0x0009",
+        "movk x0, #0xC400, lsl #16",
+        "hvc #0",
+        // If returned, try SMC32 via HVC
+        "mov x1, xzr; mov x2, xzr; mov x3, xzr",
+        "mov x0, #0x0009",
+        "movk x0, #0x8400, lsl #16",
+        "hvc #0",
+
+        // --- If still here: hang (значит PSCI не сработал или код не дошёл)
+        "4: wfi; b 4b",
+        options(noreturn)
+        )
     }
 }

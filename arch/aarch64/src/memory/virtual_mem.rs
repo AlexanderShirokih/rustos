@@ -7,7 +7,6 @@ use crate::memory::entry_flags::EntryFlags;
 use crate::memory::layout::{MemoryLayout, MemoryRegion};
 use crate::memory::virtual_address::{VirtualAddress, VirtualAddressExt};
 use core::ops::{Index, IndexMut};
-use log::debug;
 use kernel_core::log::{debug, info};
 use memory::memory_backend::{MemoryBackend, MemoryBackendExt, MemoryPtr};
 use memory::physical::{Frame, FrameAllocator, PhysicalAddress};

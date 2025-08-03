@@ -2,7 +2,7 @@ use crate::kernel::Kernel;
 use core::hint;
 use kernel_core::log::*;
 
-pub fn main(kernel: &'static Kernel) -> ! {
+pub fn main(_kernel: &'static Kernel) -> ! {
     info("Kernel started!");
 
     loop {
