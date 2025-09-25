@@ -6,7 +6,7 @@ use crate::memory_range::MemoryRange;
 use core::mem::size_of;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use kernel_core::log;
+use kernel_core::console;
 use spin::Mutex;
 use util::string::{usize_to_hex_str, usize_to_str};
 
@@ -224,13 +224,13 @@ impl PhysicalMemoryManager {
 
         assert!(start_frame.number() <= end_frame.number());
 
-        log::print("Using RAM region from 0x");
-        log::print(usize_to_hex_str(start_frame.number()));
-        log::print(" to ");
-        log::print(usize_to_hex_str(end_frame.number()));
-        log::print(" physical memory. Which is ");
-        log::print(usize_to_str(memory.size() / 1024));
-        log::print("KB total\n\r");
+        console::print("Using RAM region from 0x");
+        console::print(usize_to_hex_str(start_frame.number()));
+        console::print(" to ");
+        console::print(usize_to_hex_str(end_frame.number()));
+        console::print(" physical memory. Which is ");
+        console::print(usize_to_str(memory.size() / 1024));
+        console::print("KB total\r\n");
 
         // Create the aligned memory region for the manager
         let aligned_memory = MemoryRange::new(
@@ -338,7 +338,7 @@ impl FrameAllocator for PhysicalMemoryManager {
             bitmap.clear(idx);
         } else {
             // Frame is outside the managed memory range
-            log::print("Warning: Attempted to deallocate frame outside managed memory range\n\r");
+            console::print("Warning: Attempted to deallocate frame outside managed memory range\r\n");
         }
     }
 }

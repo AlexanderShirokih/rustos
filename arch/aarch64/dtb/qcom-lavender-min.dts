@@ -1,8 +1,0 @@
-/dts-v1/;
-
-/ {
-    model = "Xiaomi Redmi Note 7 (lavender)";
-    compatible = "xiaomi,lavender", "qcom,sdm660";
-
-    qcom,msm-id = <317 0x0>;
-};

@@ -9,7 +9,6 @@ arch-common = { path = "../common" }
 memory = { path = "../../memory" }
 util = { path = "../../util" }
 spin = "0.10.0"
-log = "0.4.27"
 
 [[bin]]
 name = "kernel-aarch64"

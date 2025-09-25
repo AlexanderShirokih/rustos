@@ -3,14 +3,14 @@ dependencies = ["bootimg"]
 
 [tasks.build]
 command = "cargo"
-args = ["build"]
+args = ["build", "--release"]
 
 [tasks.clean]
 command = "cargo"
 args = ["clean"]
 
 [tasks.image]
-dependencies = ["clean"]
+dependencies = ["clean", "build"]
 script = [
     "mkdir -p ../../target/build/",
     "cargo objcopy --release -- -O binary ../../target/build/kernel.bin",
@@ -24,13 +24,13 @@ script = [
 
 [tasks.dtb]
 script = [
-    "dtc -I dts -O dtb -o ../../target/build/qcom-lavender-min.dtb dtb/qcom-lavender-min.dts"
+#    "dtc -I dts -O dtb -o dtb/qcom/sdm660-xiaomi-lavender.dtb dtb/qcom/sdm660-xiaomi-lavender.dts"
 ]
 
 [tasks.concat]
 dependencies = ["compress", "dtb"]
 script = [
-    "cat ../../target/build/kernel.gz /home/alexander/Загрузки/split/out.dtb > ../../target/build/kernel.gz+dtb"
+    "cat ../../target/build/kernel.gz dtb/qcom/sdm660-xiaomi-lavender.dtb > ../../target/build/kernel.gz+dtb"
 ]
 
 [tasks.bootimg]
@@ -38,15 +38,24 @@ dependencies = ["concat"]
 script = [
     '''
   mkbootimg \
-    --kernel ../../target/build/kernel.gz+dtb \
+    --kernel ../../target/build/kernel.gz \
     --ramdisk /dev/null \
+    --dtb dtb/qcom/sdm660-xiaomi-lavender.dtb \
     --base 0x00000000 \
     --kernel_offset 0x00008000 \
     --ramdisk_offset 0x01000000 \
     --pagesize 4096 \
-    --header_version 1 \
+    --header_version 2 \
     --output ../../target/build/boot.img
   '''
+]
+
+[tasks.boot]
+dependencies = ["bootimg"]
+script = [
+    """
+    fastboot boot ../../target/build/boot.img
+    """
 ]
 
 [tasks.qemu]

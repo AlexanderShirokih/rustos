@@ -1,11 +1,5 @@
-use crate::kernel::Kernel;
-use core::hint;
-use kernel_core::log::*;
+use kernel_core::console::*;
 
-pub fn main(_kernel: &'static Kernel) -> ! {
+pub fn main() -> () {
     info("Kernel started!");
-
-    loop {
-        hint::spin_loop();
-    }
 }

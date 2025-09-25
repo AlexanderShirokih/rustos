@@ -1,10 +1,8 @@
 OUTPUT_ARCH(aarch64);
-ENTRY(_boot);
-
-STACK_SIZE = 2M;
+ENTRY(_header_start);
 
 SECTIONS {
-    . = 0x00008000;
+    . = 0;
 
     .head ALIGN(8) : {
         KEEP(*(.head))
@@ -12,8 +10,14 @@ SECTIONS {
 
     _kernel_start = .;
 
+    . = 0x80000;
+
     .text : ALIGN(4K) {
         *(.text*)
+    }
+
+    .text.vectors : ALIGN(2K) {
+        KEEP(*(.text.vectors))
     }
 
     .rodata : ALIGN(4K) {
@@ -24,14 +28,16 @@ SECTIONS {
         *(.data*)
     }
 
-    .bss : ALIGN(4K) {
+    .bss (NOLOAD) : ALIGN(4K) {
+        __bss_start = .;
         *(.bss*)
         *(COMMON)
+        __bss_end = .;
     }
 
-    _stack_bottom = .;
-    . += STACK_SIZE;
-    _stack_top = .;
+    .bss.stack (NOLOAD) : ALIGN(16) {
+            *(.bss.stack)
+    }
 
     _kernel_end = .;
 
