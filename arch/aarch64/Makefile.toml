@@ -13,7 +13,7 @@ args = ["clean"]
 dependencies = ["clean", "build"]
 script = [
     "mkdir -p ../../target/build/",
-    "cargo objcopy --release -- -O binary ../../target/build/kernel.bin",
+    "cargo objcopy --release -- --set-section-flags .bss=alloc,load,data -O binary ../../target/build/kernel.bin",
 ]
 
 [tasks.compress]

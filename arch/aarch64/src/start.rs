@@ -10,9 +10,9 @@ use arch_common::start::main;
 use core::arch::asm;
 use core::hint;
 use kernel_core::console;
-use kernel_core::console::{get_console, BasicConsole, Console};
+use kernel_core::console::{BasicConsole, Console};
 use kernel_core::device::device::Device;
-use kernel_core::writer::{BlockingWriter, Writer};
+use kernel_core::writer::BlockingWriter;
 use spin::Once;
 
 // Заголовок формата Linux ARM64, для совместимости со стоковыми Android-загрузчиками
@@ -70,8 +70,6 @@ __el1_trap:
 static mut STACK: [u8; 16 * 1024] = [0; 16 * 1024];
 
 unsafe extern "C" {
-    static __bss_start: u8;
-    static __bss_end: u8;
     static __el1_vectors: u8;
 }
 
@@ -147,9 +145,6 @@ static UART0: Once<UartMmio> = Once::new();
 static EARLY_CONSOLE: Once<BasicConsole<BlockingWriter<'static, UartMmio>>> = Once::new();
 
 fn early_main(_dtb: usize) -> ! {
-    // Очищаем область глобальных/статических переменных
-    zero_bss();
-
     // Настраиваем ранний обработчик прерываний
     setup_vectors_el1();
 
@@ -160,53 +155,13 @@ fn early_main(_dtb: usize) -> ! {
     let w = BlockingWriter::new(uart0);
     let cons_ref = EARLY_CONSOLE.call_once(|| BasicConsole::new(w));
 
-    cons_ref.print("Hello, world 3!\n");
-    cons_ref.print("Hello, world 4!\n");
+    cons_ref.print("Hello, world!\n");
+    console::set_console(cons_ref);
 
-    console::set_console(cons_ref as &'static dyn Console);
-
-    let same = core::ptr::eq::<dyn Console>(
-        console::get_console(),
-        cons_ref as &dyn Console,
-    );
-
-    if same {
-        cons_ref.print("Same!\n");
-    } else {
-        cons_ref.print("Not the same!\n");
-
-    }
-    // 1) Прямо через глобалку — должен работать
-    kernel_core::console::get_console().print("ok via get_console\n");
-
-    // 2) UFCS по трейту — тоже должен работать
-    <dyn kernel_core::console::Console>::print(
-        kernel_core::console::get_console(),
-        "ok via UFCS\n",
-    );
-
-    cons_ref.print("Hello, world 5!\n");
-
-    console::print("[P2] second print completed\n");
-    console::info("[I1] info");
-    console::print("[P3] ok\n");
-    // main();
+    main();
 
     loop {
         hint::spin_loop();
-    }
-}
-
-#[inline(always)]
-fn zero_bss() -> () {
-    unsafe {
-        let start = &__bss_start as *const u8 as *mut u8;
-        let end = &__bss_end as *const u8 as usize;
-        let size = end - (start as usize);
-
-        core::ptr::write_bytes(start, 0, size);
-
-        asm!("dsb sy; isb", options(nostack, preserves_flags));
     }
 }
 

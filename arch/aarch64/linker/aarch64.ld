@@ -1,8 +1,10 @@
 OUTPUT_ARCH(aarch64);
 ENTRY(_header_start);
 
+KERNEL_BASE = 0xe5800000;
+
 SECTIONS {
-    . = 0;
+    . = KERNEL_BASE;
 
     .head ALIGN(8) : {
         KEEP(*(.head))
@@ -10,7 +12,7 @@ SECTIONS {
 
     _kernel_start = .;
 
-    . = 0x80000;
+    . = KERNEL_BASE + 0x80000;
 
     .text : ALIGN(4K) {
         *(.text*)
@@ -28,16 +30,13 @@ SECTIONS {
         *(.data*)
     }
 
-    .bss (NOLOAD) : ALIGN(4K) {
-        __bss_start = .;
+    .bss : ALIGN(4K) {
         *(.bss*)
         *(COMMON)
-        __bss_end = .;
-    }
-
-    .bss.stack (NOLOAD) : ALIGN(16) {
-            *(.bss.stack)
-    }
+        . = ALIGN(16);
+        __stack_start = .;
+        *(.bss.stack)
+    } =0
 
     _kernel_end = .;
 
