@@ -38,6 +38,22 @@ dependencies = ["concat"]
 script = [
     '''
   mkbootimg \
+    --kernel ../../target/build/kernel.gz+dtb \
+    --ramdisk /dev/null \
+    --base 0x00000000 \
+    --kernel_offset 0x00008000 \
+    --ramdisk_offset 0x01000000 \
+    --pagesize 4096 \
+    --header_version 1 \
+    --output ../../target/build/boot.img
+  '''
+]
+
+[tasks.bootimgv2]
+dependencies = ["concat"]
+script = [
+    '''
+  mkbootimg \
     --kernel ../../target/build/kernel.gz \
     --ramdisk /dev/null \
     --dtb dtb/qcom/sdm660-xiaomi-lavender.dtb \

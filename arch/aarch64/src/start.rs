@@ -4,6 +4,8 @@
 
 pub mod memory;
 pub mod uart_mmio;
+pub mod fdt;
+pub mod framebuffer;
 
 use crate::uart_mmio::UartMmio;
 use arch_common::start::main;
@@ -14,11 +16,13 @@ use kernel_core::console::{BasicConsole, Console};
 use kernel_core::device::device::Device;
 use kernel_core::writer::BlockingWriter;
 use spin::Once;
+use util::string::{usize_to_hex_str, usize_to_str};
 
 // Заголовок формата Linux ARM64, для совместимости со стоковыми Android-загрузчиками
 core::arch::global_asm!(
     r#"
     .section .head, "ax"
+    .balign 8
     .global _header_start
 _header_start:
     b _start                            // code0: branch to _start
@@ -28,8 +32,9 @@ _header_start:
     .quad 0                             // flags
     .quad 0                             // res2
     .quad 0                             // res3
-    .ascii "ARM\x64"                    // magic "ARMd"
-    .word 0                             // res4
+    .quad 0                             // res4
+    .word 0x644D5241                    // magic "ARM\x64" as string
+    .word 0                             // res5
 "#
 );
 
@@ -144,7 +149,7 @@ pub extern "C" fn _start() -> ! {
 static UART0: Once<UartMmio> = Once::new();
 static EARLY_CONSOLE: Once<BasicConsole<BlockingWriter<'static, UartMmio>>> = Once::new();
 
-fn early_main(_dtb: usize) -> ! {
+fn early_main(dtb: usize) -> ! {
     // Настраиваем ранний обработчик прерываний
     setup_vectors_el1();
 
@@ -157,6 +162,53 @@ fn early_main(_dtb: usize) -> ! {
 
     cons_ref.print("Hello, world!\n");
     console::set_console(cons_ref);
+
+    // Попытка найти и отрисовать framebuffer из DTB
+    unsafe {
+        if let Some(info) = fdt::find_framebuffer(dtb) {
+            use crate::framebuffer::{Framebuffer, PixelFormat as FbPixelFormat, flush_framebuffer};
+            let fmt = match info.format {
+                fdt::PixelFormat::Argb8888 => FbPixelFormat::Argb8888,
+                fdt::PixelFormat::Xrgb8888 => FbPixelFormat::Xrgb8888,
+                fdt::PixelFormat::Rgb565 => FbPixelFormat::Rgb565,
+                _ => FbPixelFormat::Xrgb8888,
+            };
+            let mut fb = Framebuffer {
+                ptr: info.paddr as *mut u8,
+                width: info.width as usize,
+                height: info.height as usize,
+                stride_bytes: info.stride as usize,
+                bpp: info.bpp as usize,
+                format: fmt,
+            };
+            console::info("Framebuffer detected via DTB");
+            // Сообщим параметры в UART
+            console::print("FB paddr=");
+            console::print(usize_to_hex_str(info.paddr));
+            console::print(" size=");
+            console::print(usize_to_str(info.size));
+            console::print(" width=");
+            console::print(usize_to_str(info.width as usize));
+            console::print(" height=");
+            console::print(usize_to_str(info.height as usize));
+            console::print(" stride=");
+            console::print(usize_to_str(info.stride as usize));
+            console::print(" bpp=");
+            console::print(usize_to_str(info.bpp as usize));
+            console::print("\r\n");
+            // Заливка фона и прямоугольника
+            fb.clear(0xFF1E1E1E);
+            let rect_w = (fb.width / 4).max(50);
+            let rect_h = (fb.height / 6).max(30);
+            fb.fill_rect(20, 20, rect_w, rect_h, 0xFFFF5500);
+            // Полоса снизу
+            fb.fill_rect(0, fb.height.saturating_sub(16), fb.width, 16, 0xFF00AAFF);
+            // Сброс кэша, если включен
+            flush_framebuffer(fb.ptr, fb.stride_bytes * fb.height);
+        } else {
+            console::warn("No framebuffer node found in DTB");
+        }
+    }
 
     main();
 
