@@ -107,18 +107,18 @@ impl ByteSink for UartMmio {
             return Ok(0);
         }
 
-        // Задаём размер выпуска и сбрасываем TX_READY
-        self.w32(NCF_TX, out_len as u32);
-        self.w32(CR, CMD_CLEAR_TX_READY);
-
-        // Ждём место в FIFO
-        if (self.r32(SR) & SR_TXRDY) == 0 {
-            return Err(WouldBlock);
-        }
-
         let mut word = 0u32;
         for i in 0..out_len {
             word |= (out_buf[i] as u32) << (i * 8);
+        }
+
+        // Задаём размер выпуска и сбрасываем TX_READY (старт передачи после записи в TF)
+        self.w32(NCF_TX, out_len as u32);
+        self.w32(CR, CMD_CLEAR_TX_READY);
+
+        // Ждём место в FIFO и кладём слово
+        if (self.r32(SR) & SR_TXRDY) == 0 {
+            return Err(WouldBlock);
         }
         self.w32(TF, word);
 
@@ -128,33 +128,14 @@ impl ByteSink for UartMmio {
     #[inline(always)]
     fn flush(&self) {
         // Ждём полного опустошения передатчика
-        while (self.r32(SR) & SR_TXRDY) == 0 {
+        while (self.r32(SR) & SR_TXEMT) == 0 {
             core::hint::spin_loop();
         }
     }
 }
 
 impl Device for UartMmio {
-    fn init(&self) {
-        unsafe {
-            // Глушим IRQ (работаем busy-wait)
-            self.w32(IMR, 0);
-
-            // Сбросим каналы/флаги ошибок
-            self.w32(CR, CMD_RESET_RX);
-            self.w32(CR, CMD_RESET_TX);
-            self.w32(CR, CMD_RESET_ERR);
-            self.w32(CR, CMD_RESET_BREAK_INT);
-
-            self.w32(TFWR, 1);
-            self.w32(RFWR, 1);
-
-            // Включим RX/TX (битовые enable в CR)
-            self.w32(CR, CR_RX_EN | CR_TX_EN);
-
-            asm!("dsb sy; isb", options(nostack, preserves_flags));
-        }
-    }
+    fn init(&self) { }
 
     fn uninit(&self) {
         // выключить регистры UART?

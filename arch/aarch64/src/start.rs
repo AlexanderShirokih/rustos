@@ -27,7 +27,7 @@ core::arch::global_asm!(
 _header_start:
     b _start                            // code0: branch to _start
     .word 0                             // code1
-    .quad 0x80000                       // text_offset
+    .quad 0                             // text_offset
     .quad _kernel_size                  // image_size
     .quad 0                             // flags
     .quad 0                             // res2
@@ -89,46 +89,7 @@ pub extern "C" fn _start() -> ! {
         asm!(
         // Cохранить DTB из x0
         "mov    x19, x0",
-
-        // определить текущий EL
-        "mrs    x1, CurrentEL",
-        "lsr    x1, x1, #2",       // 1=EL1, 2=EL2, 3=EL3
-
-        // EL2 -> EL1
-        "cmp    x1, #2",
-        "b.ne   1f",
-        "msr    sp_el1, {sp_top}",
-        // SPSR_EL2: DAIF=1111, M=EL1h (0101)
-        "mov    x2, #(0b0101 | (1<<9) | (1<<8) | (1<<7) | (1<<6))",
-        "msr    spsr_el2, x2",
-        "adr    x2, 2f",
-        "msr    elr_el2, x2",
-        "mov    x2, #(1 << 31)",   // HCR_EL2.RW = 1 (EL1 = AArch64)
-        "msr    hcr_el2, x2",
-        "eret",
-
-        // EL3 (вдруг) -> EL2 -> EL1
-        "1:",
-        "cmp    x1, #3",
-        "b.ne   2f",
-        "mov    x2, #(1<<8)",      // SCR_EL3.HCE = 1 (разрешить EL2)
-        "msr    scr_el3, x2",
-        // SPSR_EL3: DAIF=1111, M=EL2h (1001)
-        "mov    x2, #(0b1001 | (1<<9) | (1<<8) | (1<<7) | (1<<6))",
-        "adr    x3, 3f",
-        "msr    elr_el3, x3",
-        "eret",
-
-        "3:",
-        "msr    sp_el1, {sp_top}",
-        "mov    x2, #(0b0101 | (1<<9) | (1<<8) | (1<<7) | (1<<6))",
-        "msr    spsr_el2, x2",
-        "adr    x2, 2f",
-        "msr    elr_el2, x2",
-        "eret",
-
-        // Инициализация SP EL1
-        "2:",
+        // Инициализация SP EL1 (вход гарантированно в EL1)
         "mov    sp, {sp_top}",
         // Включаем FP/SIMD
         "mrs    x0, cpacr_el1",
@@ -136,7 +97,7 @@ pub extern "C" fn _start() -> ! {
         "msr    cpacr_el1, x0",
         "isb",
 
-        // Jump to early_main
+        // Переход в early_main
         "mov    x0, x19",
         "b      {early_main}",
         early_main = sym early_main,
@@ -162,6 +123,8 @@ fn early_main(dtb: usize) -> ! {
 
     cons_ref.print("Hello, world!\n");
     console::set_console(cons_ref);
+
+    
 
     // Попытка найти и отрисовать framebuffer из DTB
     unsafe {
