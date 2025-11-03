@@ -1,25 +1,20 @@
 OUTPUT_ARCH(aarch64);
 ENTRY(_header_start);
 
-KERNEL_BASE = 0xe5800000;
+# Будем передавать KERNEL_OFFSET через флаги линкера, чтобы менять его динамечески
+PROVIDE(KERNEL_OFFSET = 0);
 
 SECTIONS {
-    . = KERNEL_BASE;
+    . = KERNEL_OFFSET;
 
     .head ALIGN(8) : {
         KEEP(*(.head))
     }
 
-    . = KERNEL_BASE + 0x80000;
-
     _kernel_start = .;
 
     .text : ALIGN(4K) {
         *(.text*)
-    }
-
-    .text.vectors : ALIGN(2K) {
-        KEEP(*(.text.vectors))
     }
 
     .rodata : ALIGN(4K) {
@@ -34,7 +29,6 @@ SECTIONS {
         *(.bss*)
         *(COMMON)
         . = ALIGN(16);
-        __stack_start = .;
         *(.bss.stack)
     } =0
 

@@ -21,7 +21,7 @@ pub trait ByteSink {
         if n == 0 { Err(WouldBlock) } else { Ok(n) }
     }
 
-    /// Дождаться полного опустошения передатчика (по умолчанию — no-op).
+    /// Дождаться полного опустошения буфера устройства.
     #[inline(always)]
     fn flush(&self) {}
 }

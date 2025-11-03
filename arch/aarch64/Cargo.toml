@@ -3,13 +3,9 @@ name = "arch-aarch64"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-kernel-core = { path = "../../core" }
-arch-common = { path = "../common" }
-memory = { path = "../../memory" }
-util = { path = "../../util" }
-spin = "0.10.0"
-
 [[bin]]
 name = "kernel-aarch64"
 path = "src/start.rs"
+
+[dependencies]
+kernel-core = { path = "../../core" }

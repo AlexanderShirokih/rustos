@@ -1,6 +1,3 @@
-[tasks.all]
-dependencies = ["bootimg"]
-
 [tasks.build]
 command = "cargo"
 args = ["build", "--release"]
@@ -22,48 +19,26 @@ script = [
     "gzip -9c ../../target/build/kernel.bin > ../../target/build/kernel.gz"
 ]
 
-[tasks.dtb]
-script = [
-#    "dtc -I dts -O dtb -o dtb/qcom/sdm660-xiaomi-lavender.dtb dtb/qcom/sdm660-xiaomi-lavender.dts"
-]
-
 [tasks.concat]
-dependencies = ["compress", "dtb"]
+dependencies = ["compress"]
 script = [
-    "cat ../../target/build/kernel.gz dtb/qcom/sdm660-xiaomi-lavender.dtb > ../../target/build/kernel.gz+dtb"
+    "cat ../../target/build/kernel.gz devices/xiaomi/sdm660-lavender.dtb > ../../target/build/kernel.gz+dtb"
 ]
 
 [tasks.bootimg]
 dependencies = ["concat"]
 script = [
-    '''
-  mkbootimg \
-    --kernel ../../target/build/kernel.gz+dtb \
-    --ramdisk /dev/null \
-    --base 0x00000000 \
-    --kernel_offset 0x00008000 \
-    --ramdisk_offset 0x01000000 \
-    --pagesize 4096 \
-    --header_version 1 \
-    --output ../../target/build/boot.img
-  '''
-]
-
-[tasks.bootimgv2]
-dependencies = ["concat"]
-script = [
-    '''
-  mkbootimg \
-    --kernel ../../target/build/kernel.gz \
-    --ramdisk /dev/null \
-    --dtb dtb/qcom/sdm660-xiaomi-lavender.dtb \
-    --base 0x00000000 \
-    --kernel_offset 0x00008000 \
-    --ramdisk_offset 0x01000000 \
-    --pagesize 4096 \
-    --header_version 2 \
-    --output ../../target/build/boot.img
-  '''
+    """
+    mkbootimg \
+        --kernel ../../target/build/kernel.gz+dtb \
+        --ramdisk /dev/null \
+        --base 0x0 \
+        --kernel_offset 0x0 \
+        --ramdisk_offset 0x01000000 \
+        --pagesize 4096 \
+        --header_version 1 \
+        --output ../../target/build/boot.img
+  """
 ]
 
 [tasks.boot]
@@ -71,28 +46,5 @@ dependencies = ["bootimg"]
 script = [
     """
     fastboot boot ../../target/build/boot.img
-    """
-]
-
-[tasks.qemu]
-dependencies = ["build"]
-command = "qemu-system-aarch64"
-args = [
-    "-machine", "virt",
-    "-cpu", "cortex-a53",
-    "-kernel", "../../target/aarch64-unknown-none/debug/kernel-aarch64",
-#    "-nographic",
-#    "-serial", "mon:stdio",
-]
-
-[tasks.debug]
-dependencies = ["build"]
-script = [
-    """
-    qemu-system-aarch64 -machine virt -cpu cortex-a53 -nographic \
-    -serial mon:stdio -kernel ../../target/aarch64-unknown-none/debug/kernel-aarch64 -s -S &
-
-    # Run GDB with our initialization script
-    gdb-multiarch ../../target/aarch64-unknown-none/debug/kernel-aarch64
     """
 ]

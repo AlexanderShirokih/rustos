@@ -1,28 +1,15 @@
-use core::arch::asm;
 use kernel_core::byte_sink::{ByteSink, WouldBlock};
-use kernel_core::device::device::Device;
 
 // UARTDM v1.4 offsets (байтовые) и маски:
-const TFWR: usize = 0x01C;
-const RFWR: usize = 0x020;
 const NCF_TX: usize = 0x040; // "number of chars for TX"
 const SR: usize = 0x0A4; // status
 const CR: usize = 0x0A8; // command / enable
-const IMR: usize = 0x0B0; // interrupt mask
 const TF: usize = 0x100; // TX FIFO (32-битные записи)
 
 // Биты/команды (см. msm_serial_hs_hwreg.h):
 const SR_TXRDY: u32 = 1 << 2;
 const SR_TXEMT: u32 = 1 << 3;
 
-const CR_RX_EN: u32 = 1 << 0;
-const CR_TX_EN: u32 = 1 << 2;
-
-// Команды в поле [8:4] CR:
-const CMD_RESET_RX: u32 = 0x10;
-const CMD_RESET_TX: u32 = 0x20;
-const CMD_RESET_ERR: u32 = 0x30;
-const CMD_RESET_BREAK_INT: u32 = 0x40;
 const CMD_CLEAR_TX_READY: u32 = 0x300; // запускает передачу NCF_TX символов
 
 pub struct UartMmio {
@@ -131,13 +118,5 @@ impl ByteSink for UartMmio {
         while (self.r32(SR) & SR_TXEMT) == 0 {
             core::hint::spin_loop();
         }
-    }
-}
-
-impl Device for UartMmio {
-    fn init(&self) { }
-
-    fn uninit(&self) {
-        // выключить регистры UART?
     }
 }

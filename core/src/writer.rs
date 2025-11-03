@@ -13,6 +13,11 @@ impl<'a, S: ByteSink + ?Sized> BlockingWriter<'a, S> {
     pub const fn new(sink: &'a S) -> Self {
         Self { sink }
     }
+
+    pub fn print(&self, s: &str) {
+        self.write_all(s.as_bytes());
+        self.flush();
+    }
 }
 
 impl<'a, S: ByteSink + ?Sized> Writer for BlockingWriter<'a, S> {
