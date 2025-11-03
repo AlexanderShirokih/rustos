@@ -1,4 +1,4 @@
-use crate::byte_sink::ByteSink;
+use crate::io::byte_sink::ByteSink;
 
 pub trait Writer {
     fn write_all(&self, bytes: &[u8]);

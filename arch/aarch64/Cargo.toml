@@ -9,3 +9,7 @@ path = "src/start.rs"
 
 [dependencies]
 kernel-core = { path = "../../core" }
+util = { path = "../../util" }
+
+[features]
+qemu_virt = []

@@ -25,7 +25,7 @@ pub struct FramebufferInfo {
 /// Описатель уже отмапленного/готового к записи буфера.
 #[derive(Copy, Clone, Debug)]
 pub struct Framebuffer {
-    pub ptr: *mut u8,       // виртуальный адрес начала буфера
+    pub ptr: *mut u8, // виртуальный адрес начала буфера
     pub width: usize,
     pub height: usize,
     pub stride_bytes: usize, // длина строки в байтах
@@ -154,13 +154,8 @@ fn parse_pixel_format(fmt: &[u8]) -> (PixelFormat, u32) {
 }
 
 /// Ищет simple-framebuffer в DTB и возвращает параметры фреймбуфера.
-pub unsafe fn find_in_dtb(dtb_ptr: usize) -> Option<FramebufferInfo> {
-    let dt = match unsafe { DeviceTree::from_ptr(dtb_ptr) } {
-        Some(d) => d,
-        None => return None,
-    };
-
-    let node = dt.find_first(|n| {
+pub unsafe fn find_in_dtb(device_tree: &DeviceTree) -> Option<FramebufferInfo> {
+    let node = device_tree.find_first(|n| {
         let name = n.name();
         if name == b"framebuffer"
             || name.starts_with(b"framebuffer@")
@@ -216,7 +211,11 @@ pub unsafe fn find_in_dtb(dtb_ptr: usize) -> Option<FramebufferInfo> {
 
     // Если stride не указан — вычисляем от width*bpp.
     if reg_base != 0 && width != 0 && height != 0 && (stride != 0 || bpp != 0) {
-        let final_stride = if stride != 0 { stride } else { width * (bpp / 8) };
+        let final_stride = if stride != 0 {
+            stride
+        } else {
+            width * (bpp / 8)
+        };
         let final_bpp = if bpp != 0 { bpp } else { 32 };
         return Some(FramebufferInfo {
             paddr: reg_base,

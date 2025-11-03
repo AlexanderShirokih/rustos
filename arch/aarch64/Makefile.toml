@@ -14,7 +14,7 @@ script = [
 ]
 
 [tasks.compress]
-dependencies = [ "image"]
+dependencies = ["image"]
 script = [
     "gzip -9c ../../target/build/kernel.bin > ../../target/build/kernel.gz"
 ]
@@ -48,3 +48,23 @@ script = [
     fastboot boot ../../target/build/boot.img
     """
 ]
+
+[tasks.qemu-build]
+command = "cargo"
+args = ["build", "--release", "--features", "qemu_virt"]
+
+[tasks.qemu-run]
+dependencies = ["qemu-build"]
+script = [
+    """
+    qemu-system-aarch64 \
+        -machine virt \
+        -cpu cortex-a53 \
+        -m 512M \
+        -nographic -serial mon:stdio \
+        -kernel ../../target/aarch64-unknown-none/release/kernel-aarch64
+    """
+]
+
+[tasks.qemu]
+dependencies = ["qemu-run"]

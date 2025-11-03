@@ -1,4 +1,4 @@
-use crate::writer::Writer;
+use crate::io::writer::Writer;
 use spin::Once;
 
 pub enum Level {

@@ -2,16 +2,19 @@
 #![no_std]
 #![no_main]
 
-use crate::uart_mmio::UartMmio;
+use crate::drivers::uart_dm::UartDm;
+use crate::drivers::uart_pl011::UartPl011;
+
+use crate::fdt::DeviceTree;
 use core::arch::asm;
 use core::arch::global_asm;
 use core::hint::spin_loop;
 use core::ptr::addr_of;
-use kernel_core::writer::BlockingWriter;
+use drivers::framebuffer;
+use kernel_core::io::writer::BlockingWriter;
 
+mod drivers;
 mod fdt;
-mod framebuffer;
-pub mod uart_mmio;
 
 // Заголовок формата Linux ARM64, для совместимости со стоковыми Android-загрузчиками
 global_asm!(
@@ -68,17 +71,24 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
-fn early_main(dtb: usize) -> ! {
-    // Захардкодим адрес. Нужный адрес для вашего устройства можно найти в DTS файлах
-    let uart_base = 0x0C170000;
-    let uart = UartMmio::new(uart_base);
+fn early_main(dtb: usize) {
+    let device_tree = match unsafe { DeviceTree::from_ptr(dtb) } {
+        Some(d) => d,
+        None => return,
+    };
+
+    #[cfg(feature = "qemu_virt")]
+    let uart = UartPl011::new(0x09000000);
+    #[cfg(not(feature = "qemu_virt"))]
+    let uart = UartDm::new(0x0C170000);
+
     let console = BlockingWriter::new(&uart);
 
     console.print("Hello, world\n");
 
     unsafe {
-        if let Some(info) = framebuffer::find_in_dtb(dtb) {
-            use crate::framebuffer::{Framebuffer, flush_framebuffer};
+        if let Some(info) = framebuffer::find_in_dtb(&device_tree) {
+            use drivers::framebuffer::{Framebuffer, flush_framebuffer};
 
             let mut fb = Framebuffer {
                 ptr: info.paddr as *mut u8,
