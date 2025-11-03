@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = [
+    "arch/aarch64",
+    "core",
+]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

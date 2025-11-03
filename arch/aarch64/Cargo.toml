@@ -1,0 +1,11 @@
+[package]
+name = "arch-aarch64"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "kernel-aarch64"
+path = "src/start.rs"
+
+[dependencies]
+kernel-core = { path = "../../core" }
