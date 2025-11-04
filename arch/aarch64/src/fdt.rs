@@ -43,6 +43,7 @@ pub fn align4(v: usize) -> usize {
 /// Корневой объект «живого» представления FDT.
 /// Держит смещения на секции `structure` и `strings`.
 pub struct DeviceTree {
+    base_addr: usize,
     struct_base: usize,
     strings_base: usize,
 }
@@ -78,9 +79,23 @@ impl DeviceTree {
         let struct_off = be32(hdr.off_dt_struct) as usize;
         let strings_off = be32(hdr.off_dt_strings) as usize;
         Some(DeviceTree {
+            base_addr: dtb_ptr,
             struct_base: dtb_ptr + struct_off,
             strings_base: dtb_ptr + strings_off,
         })
+    }
+
+    /// Возвращает размер DTB blob в байтах
+    pub fn size(&self) -> usize {
+        unsafe {
+            let header = self.base_addr as *const FdtHeader;
+            be32((*header).totalsize) as usize
+        }
+    }
+
+    /// Возвращает базовый адрес DTB
+    pub fn base_address(&self) -> usize {
+        self.base_addr
     }
 
     /// Возвращает корневой узел `/` (если blob корректен).

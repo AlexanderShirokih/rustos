@@ -1,121 +1,113 @@
-//! Virtual memory management
-//!
-//! This module provides functionality for managing virtual memory,
-//! including page tables and address translation for aarch64.
+//! Управление виртуальной памятью
 
 use crate::memory::entry_flags::EntryFlags;
 use crate::memory::layout::{MemoryLayout, MemoryRegion};
 use crate::memory::virtual_address::{VirtualAddress, VirtualAddressExt};
 use core::ops::{Index, IndexMut};
-use kernel_core::console::{debug, info};
+use kernel_core::console::console;
+use kernel_core::{debug, info};
 use memory::memory_backend::{MemoryBackend, MemoryBackendExt, MemoryPtr};
-use memory::physical::{Frame, FrameAllocator, PhysicalAddress};
-use util::string::usize_to_str;
+use memory::physical::{Frame, PageAlignedAddress, PhysicalAddress};
+use memory::physical_manager::{FrameAllocator, ReserveFrameError};
 
-/// A virtual memory page
+/// Страница виртуальной памяти
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Page {
     number: usize,
 }
 
 impl Page {
-    /// Create a new page from a page number
+    /// Создать новую страницу из номера страницы
     pub const fn new(number: usize) -> Self {
         Page { number }
     }
 
-    /// Create a page containing the given virtual address
+    /// Создать страницу, содержащую заданный виртуальный адрес
     pub fn containing_address(address: VirtualAddress, page_size: usize) -> Self {
         Page {
             number: address.as_usize() / page_size,
         }
     }
 
-    /// Get the starting virtual address of this page
+    /// Получить начальный виртуальный адрес этой страницы
     pub fn start_address(&self, page_size: usize) -> VirtualAddress {
         VirtualAddress(self.number * page_size)
     }
 
-    /// Get the page number
+    /// Получить номер страницы
     pub const fn number(&self) -> usize {
         self.number
     }
 
-    /// Get the next page
+    /// Получить следующую страницу
     pub fn next(&self) -> Self {
         Page::new(self.number + 1)
     }
 
-    /// Create a range of pages
+    /// Создать диапазон страниц
     pub fn range_inclusive(start: Page, end: Page) -> impl Iterator<Item = Page> {
         (start.number..=end.number).map(Page::new)
     }
 }
 
-/// Page table entry for aarch64
+/// Запись таблицы страниц для aarch64
 #[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
 pub struct PageTableEntry(u64);
 
 impl PageTableEntry {
-    /// Create a new empty page table entry
     pub const fn new() -> Self {
         PageTableEntry(0)
     }
 
-    /// Create a page table entry pointing to a physical frame with flags
-    pub fn new_frame(frame: Frame, flags: EntryFlags, frame_size: usize) -> Self {
+    fn new_frame(frame: Frame, flags: EntryFlags, frame_size: usize) -> Self {
         let addr = frame.start_address(frame_size).as_usize() as u64;
-        // Ensure address is properly aligned and within valid range
+        // Убеждаемся, что адрес правильно выровнен и находится в допустимом диапазоне
         let masked_addr = addr & 0x0000_FFFF_FFFF_F000;
         PageTableEntry(masked_addr | flags.bits())
     }
 
-    /// Create a page table entry pointing to another page table
-    pub fn new_table(table_frame: Frame, frame_size: usize) -> Self {
+    fn new_table(table_frame: Frame, frame_size: usize) -> Self {
         let addr = table_frame.start_address(frame_size).as_usize() as u64;
         let masked_addr = addr & 0x0000_FFFF_FFFF_F000;
         let flags = EntryFlags::combine(&[EntryFlags::VALID, EntryFlags::TABLE]);
         PageTableEntry(masked_addr | flags.bits())
     }
 
-    /// Check if the entry is valid (present)
-    pub fn is_valid(&self) -> bool {
+    fn is_valid(&self) -> bool {
         (self.0 & EntryFlags::VALID.bits()) != 0
     }
 
-    /// Check if the entry points to a page table
-    pub fn is_table(&self) -> bool {
+    fn is_table(&self) -> bool {
         self.is_valid() && (self.0 & EntryFlags::TABLE.bits()) != 0
     }
 
-    /// Check if the entry points to a block/page
-    pub fn is_block(&self) -> bool {
+    fn is_block(&self) -> bool {
         self.is_valid() && (self.0 & EntryFlags::TABLE.bits()) == 0
     }
 
-    /// Get the physical address this entry points to
+    /// Получить физический адрес, на который указывает эта запись
     pub fn address(&self) -> PhysicalAddress {
-        PhysicalAddress::new((self.0 & 0x0000_FFFF_FFFF_F000) as usize)
+        ((self.0 & 0x0000_FFFF_FFFF_F000) as usize).into()
     }
 
-    /// Get the frame this entry points to
+    /// Получить фрейм, на который указывает эта запись
     pub fn frame(&self, frame_size: usize) -> Frame {
         Frame::containing_address(self.address(), frame_size)
     }
 
-    /// Set the entry to a new value
+    /// Установить запись в новое значение
     pub fn set(&mut self, entry: PageTableEntry) {
         self.0 = entry.0;
     }
 
-    /// Clear the entry
+    /// Очистить запись
     pub fn clear(&mut self) {
         self.0 = 0;
     }
 }
 
-/// A page table (512 entries for aarch64)
+/// Таблица страниц
 #[repr(align(4096))]
 #[derive(Copy, Clone)]
 pub struct PageTable {
@@ -123,28 +115,17 @@ pub struct PageTable {
 }
 
 impl PageTable {
-    /// Create a new empty page table
     pub fn new() -> Self {
         PageTable {
             entries: [PageTableEntry::new(); 512],
         }
     }
 
-    /// Clear all entries in the page table
+    /// Очистить все записи в таблице страниц
     pub fn clear(&mut self) {
         for entry in &mut self.entries {
             entry.clear();
         }
-    }
-
-    /// Get an iterator over all entries
-    pub fn iter(&self) -> impl Iterator<Item = &PageTableEntry> {
-        self.entries.iter()
-    }
-
-    /// Get a mutable iterator over all entries
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PageTableEntry> {
-        self.entries.iter_mut()
     }
 }
 
@@ -162,96 +143,106 @@ impl IndexMut<usize> for PageTable {
     }
 }
 
-/// Error types for virtual memory operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum VmError {
-    /// Page is already mapped
+    /// Страница уже отображена
     AlreadyMapped,
-    /// Page is not mapped
+    /// Страница не отображена
     NotMapped,
-    /// Cannot map page due to existing block mapping
+    /// Невозможно отобразить страницу из-за существующего блокового отображения
     BlockMappingExists,
-    /// Frame allocation failed
-    FrameAllocationFailed,
-    /// Invalid table entry found
+    /// Не удалось выделить фрейм для корневой таблицы
+    RootFrameAllocationFailed,
+
+    /// Не удалось выделить фрейм для 1:1 мапинга
+    DmaFrameAllocationFailed {
+        reserver_frame_error: ReserveFrameError,
+    },
+
+    /// Не удалось выделить фрейм для таблицы
+    FrameAllocationFailed { level: usize, index: usize },
+    /// Найдена недействительная запись таблицы
     InvalidTableEntry,
-    /// Invalid page table level
+    /// Недействительный уровень таблицы страниц
     InvalidLevel,
 }
 
-impl From<&'static str> for VmError {
-    fn from(s: &'static str) -> Self {
-        match s {
-            "Page is already mapped" => VmError::AlreadyMapped,
-            "Page is not mapped" => VmError::NotMapped,
-            "Cannot map page: entry is already a block mapping" => VmError::BlockMappingExists,
-            "Failed to allocate frame for page table" => VmError::FrameAllocationFailed,
-            _ => VmError::InvalidTableEntry,
-        }
-    }
-}
-
-/// Page table manager for aarch64
-pub struct PageTableManager<B: MemoryBackend + 'static> {
+/// Менеджер таблиц страниц для aarch64
+pub struct PageTableManager<'a, FA: FrameAllocator, B: MemoryBackend> {
     frame_size: usize,
-    /// Root page table (level 0)
+    /// Корневая таблица страниц (уровень 0)
     root_table: Frame,
 
-    /// Backend for memory operations
-    backend: &'static B,
+    /// Бэкенд для операций с памятью
+    backend: &'a B,
 
-    frame_allocator: &'static dyn FrameAllocator,
-    /// Heap memory region
-    pub heap: MemoryRegion,
+    frame_allocator: &'a FA,
+
+    /// Регион памяти кучи
+    pub heap: MemoryRegion<PageAlignedAddress>,
 }
 
-impl<B: MemoryBackend + 'static> PageTableManager<B> {
-    /// Get the frame size
+// Safety: PageTableManager хранит сырые указатели, но гарантирует их валидность
+// через время жизни владельца (MemoryManager)
+unsafe impl<FA: FrameAllocator, B: MemoryBackend> Send for PageTableManager<'_, FA, B> {}
+unsafe impl<FA: FrameAllocator, B: MemoryBackend> Sync for PageTableManager<'_, FA, B> {}
+
+impl<'a, FA: FrameAllocator, B: MemoryBackend> PageTableManager<'a, FA, B> {
+    /// Получить размер фрейма
     pub fn frame_size(&self) -> usize {
         self.frame_size
     }
 
-    /// Create a new page table manager with a new root table
+    /// Получить ссылку на backend (безопасно, так как гарантируется владельцем)
+    fn backend(&self) -> &B {
+        self.backend
+    }
+
+    /// Создать новый менеджер таблиц страниц с новой корневой таблицей
     pub fn new(
-        frame_allocator: &'static dyn FrameAllocator,
-        backend: &'static B,
-        heap: MemoryRegion,
+        frame_allocator: &'a FA,
+        backend: &'a B,
+        heap: MemoryRegion<PageAlignedAddress>,
     ) -> Result<Self, VmError> {
-        let root_frame = frame_allocator
+        let root_table = frame_allocator
             .allocate_frame()
-            .ok_or(VmError::FrameAllocationFailed)?;
+            .ok_or(VmError::RootFrameAllocationFailed)?;
 
-        debug("Allocated root page addr: ");
-        debug(usize_to_str(root_frame.start_address(backend.frame_size()).as_usize()));
+        debug!(
+            console(),
+            "Allocated root page: 0x{:x}",
+            root_table.start_address(backend.frame_size()).as_usize(),
+        );
 
-        let frame_address = root_frame.start_address(backend.frame_size());
+        let frame_address = root_table.start_address(backend.frame_size());
         let root_ptr: MemoryPtr<PageTable> = frame_address.into();
 
-        // Clear the root table
+        // Очищаем корневую таблицу
         let mut page_table = PageTable::new();
         page_table.clear();
+
         root_ptr.write(backend, page_table);
 
         Ok(PageTableManager {
             frame_size: frame_allocator.frame_size(),
-            root_table: root_frame,
+            root_table,
             frame_allocator,
             backend,
             heap,
         })
     }
 
-    /// Enable or disable virtual memory mode
+    /// Включить или выключить режим виртуальной памяти
     pub fn enable_virtual_mode(&self) {
-        self.backend
+        self.backend()
             .enable_virtual_mode(self.root_table.start_address(self.frame_size));
     }
 
-    /// Identity map a memory region
+    /// Отобразить регион памяти с идентичным маппингом
     fn identity_map_region(
         &self,
-        from: PhysicalAddress,
-        to: PhysicalAddress,
+        from: PageAlignedAddress,
+        to: PageAlignedAddress,
         flags: EntryFlags,
     ) -> Result<(), VmError> {
         assert!(from.as_usize() < to.as_usize());
@@ -265,73 +256,73 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
         Ok(())
     }
 
-    /// Map a virtual page to a physical frame
+    /// Отобразить виртуальную страницу на физический фрейм
     pub fn map(&self, page: Page, frame: Frame, flags: EntryFlags) -> Result<(), VmError> {
         let indices = page.start_address(self.frame_size).page_table_indices();
         let mut table_frame = self.root_table;
 
-        // Navigate through the page table levels (0-2)
+        // Проходим через уровни таблиц страниц (0-2)
         for level in 0..3 {
             let table_address = table_frame.start_address(self.frame_size);
-            let mut table: PageTable = self.backend.read(table_address);
-            let idx = indices[level];
+            let mut table: PageTable = self.backend().read(table_address);
+            let index = indices[level];
 
-            if !table[idx].is_valid() {
-                // Create a new page table
+            if !table[index].is_valid() {
+                // Создаем новую таблицу страниц
                 let new_table_frame = self
                     .frame_allocator
                     .allocate_frame()
-                    .ok_or(VmError::FrameAllocationFailed)?;
+                    .ok_or(VmError::FrameAllocationFailed { level, index })?;
 
-                // Initialize the new table
+                // Инициализируем новую таблицу
                 let new_table_address = new_table_frame.start_address(self.frame_size);
                 let mut new_table = PageTable::new();
                 new_table.clear();
-                self.backend.write(new_table_address, new_table);
+                self.backend().write(new_table_address, new_table);
 
-                // Link it from the parent table
-                table[idx].set(PageTableEntry::new_table(new_table_frame, self.frame_size));
-                self.backend.write(table_address, table);
+                // Связываем ее с родительской таблицей
+                table[index].set(PageTableEntry::new_table(new_table_frame, self.frame_size));
+                self.backend().write(table_address, table);
 
                 table_frame = new_table_frame;
-            } else if table[idx].is_table() {
-                // Follow the existing table
-                table_frame = table[idx].frame(self.frame_size);
+            } else if table[index].is_table() {
+                // Следуем за существующей таблицей
+                table_frame = table[index].frame(self.frame_size);
             } else {
-                // Entry is a block mapping, which conflicts with our page mapping
+                // Запись является блоковым маппингом, что конфликтует с нашим страничным маппингом
                 return Err(VmError::BlockMappingExists);
             }
         }
 
-        // Now we're at the level 3 (leaf) page table
+        // Теперь мы на уровне 3 (конечная) таблица страниц
         let leaf_address = table_frame.start_address(self.frame_size);
-        let mut leaf_table: PageTable = self.backend.read(leaf_address);
+        let mut leaf_table: PageTable = self.backend().read(leaf_address);
         let idx = indices[3];
 
         if leaf_table[idx].is_valid() {
             return Err(VmError::AlreadyMapped);
         }
 
-        // Create the final mapping
+        // Создаем финальное отображение
         leaf_table[idx].set(PageTableEntry::new_frame(frame, flags, self.frame_size));
-        self.backend.write(leaf_address, leaf_table);
+        self.backend().write(leaf_address, leaf_table);
 
         let phys_addr = frame.start_address(self.frame_size);
-        self.backend.clean_dcache_page(phys_addr);
-        self.backend.invalidate_cache();
+        self.backend().clean_page_cache(phys_addr);
+        self.backend().invalidate_cache();
 
         Ok(())
     }
 
-    /// Unmap a virtual page
+    /// Размапить виртуальную страницу
     pub fn unmap(&self, page: Page) -> Result<Frame, VmError> {
         let indices = page.start_address(self.frame_size).page_table_indices();
         let mut table_frame = self.root_table;
 
-        // Navigate to the leaf page table
+        // Переходим к конечной таблице страниц
         for level in 0..3 {
             let table_address = table_frame.start_address(self.frame_size);
-            let table: PageTable = self.backend.read(table_address);
+            let table: PageTable = self.backend().read(table_address);
             let idx = indices[level];
 
             if !table[idx].is_valid() || !table[idx].is_table() {
@@ -340,9 +331,9 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
             table_frame = table[idx].frame(self.frame_size);
         }
 
-        // At the leaf level (level 3)
+        // На конечном уровне (уровень 3)
         let leaf_address = table_frame.start_address(self.frame_size);
-        let mut leaf_table: PageTable = self.backend.read(leaf_address);
+        let mut leaf_table: PageTable = self.backend().read(leaf_address);
         let idx = indices[3];
 
         if !leaf_table[idx].is_valid() {
@@ -353,19 +344,19 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
             return Err(VmError::InvalidTableEntry);
         }
 
-        // Get the frame before unmapping
+        // Получаем фрейм перед размапом
         let frame = leaf_table[idx].frame(self.frame_size);
 
-        // Clear the entry
+        // Очищаем запись
         leaf_table[idx].clear();
-        self.backend.write(leaf_address, leaf_table);
+        self.backend().write(leaf_address, leaf_table);
 
-        // TODO: Consider deallocating empty page tables to prevent memory leaks
+        // TODO: Рассмотреть освобождение пустых таблиц страниц для предотвращения утечек памяти
 
         Ok(frame)
     }
 
-    /// Map a range of pages to a range of frames
+    /// Отобразить диапазон страниц на диапазон фреймов
     pub fn map_range(
         &self,
         pages: impl Iterator<Item = Page>,
@@ -378,15 +369,15 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
         Ok(())
     }
 
-    /// Translate a virtual address to a physical address
+    /// Транслировать виртуальный адрес в физический адрес
     pub fn translate(&self, addr: VirtualAddress) -> Option<PhysicalAddress> {
         let indices = addr.page_table_indices();
         let mut table_frame = self.root_table;
 
-        // Navigate through the page table levels
+        // Проходим через уровни таблиц страниц
         for level in 0..4 {
             let table_address = table_frame.start_address(self.frame_size);
-            let table: PageTable = self.backend.read(table_address);
+            let table: PageTable = self.backend().read(table_address);
             let idx = indices[level];
             let entry = table[idx];
 
@@ -394,31 +385,31 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
                 return None;
             }
 
-            // Check for block mappings at levels 1 and 2
+            // Проверяем блоковые маппинги на уровнях 1 и 2
             if level > 0 && entry.is_block() {
                 let block_size = match level {
                     1 => 1024 * 1024 * 1024, // 1GB
                     2 => 2 * 1024 * 1024,    // 2MB
-                    _ => return None,        // Invalid
+                    _ => return None,        // Недействительно
                 };
 
                 let block_mask = block_size - 1;
                 let offset = addr.as_usize() & block_mask;
-                return Some(entry.address().offset_bytes(offset));
+                return Some(entry.address().add(offset));
             }
 
-            // At level 3, we should have a page mapping
+            // На уровне 3 должно быть страничное отображение
             if level == 3 {
                 if entry.is_table() {
-                    return None; // Invalid: level 3 cannot have table entries
+                    return None; // Недействительно: уровень 3 не может иметь записи таблиц
                 }
                 let offset = addr.page_offset();
-                return Some(entry.address().offset_bytes(offset));
+                return Some(entry.address().add(offset));
             }
 
-            // Continue to the next level
+            // Продолжаем к следующему уровню
             if !entry.is_table() {
-                return None; // Should be a table entry at levels 0-2
+                return None; // Должна быть запись таблицы на уровнях 0-2
             }
 
             table_frame = entry.frame(self.frame_size);
@@ -427,107 +418,35 @@ impl<B: MemoryBackend + 'static> PageTableManager<B> {
         None
     }
 
-    /// Check if a virtual address is mapped
+    /// Проверить, отображен ли виртуальный адрес
     pub fn is_mapped(&self, addr: VirtualAddress) -> bool {
         self.translate(addr).is_some()
     }
 
-    /// Get the root page table frame
+    /// Получить фрейм корневой таблицы страниц
     pub fn root_frame(&self) -> Frame {
         self.root_table
     }
-
-    /// Get memory usage statistics
-    pub fn memory_stats(&self) -> MemoryStats {
-        let mut stats = MemoryStats::default();
-        self.collect_stats_recursive(self.root_table, 0, &mut stats);
-        stats
-    }
-
-    /// Recursively collect memory usage statistics
-    fn collect_stats_recursive(&self, table_frame: Frame, level: usize, stats: &mut MemoryStats) {
-        if level >= 4 {
-            return;
-        }
-
-        let table_address = table_frame.start_address(self.frame_size);
-        let table: PageTable = self.backend.read(table_address);
-        stats.page_tables += 1;
-
-        for entry in table.iter() {
-            if entry.is_valid() {
-                if entry.is_table() && level < 3 {
-                    self.collect_stats_recursive(entry.frame(self.frame_size), level + 1, stats);
-                } else if entry.is_block() || level == 3 {
-                    stats.mapped_pages += 1;
-                }
-            }
-        }
-    }
 }
 
-/// Memory usage statistics
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MemoryStats {
-    /// Number of page tables allocated
-    pub page_tables: usize,
-    /// Number of mapped pages
-    pub mapped_pages: usize,
-}
-
-impl MemoryStats {
-    /// Get the total memory used by page tables
-    pub fn page_table_memory(&self, frame_size: usize) -> usize {
-        self.page_tables * frame_size
-    }
-
-    /// Get the total memory used by mapped pages
-    pub fn mapped_memory(&self, frame_size: usize) -> usize {
-        self.mapped_pages * frame_size
-    }
-}
-
-/// Initialize the virtual memory system
-pub(crate) fn init<B: MemoryBackend + 'static>(
-    frame_allocator: &'static dyn FrameAllocator,
-    memory_backend: &'static B,
+/// Инициализировать систему виртуальной памяти без статических времен жизни
+pub(crate) fn create_page_table_manager<'a, FA: FrameAllocator, B: MemoryBackend>(
+    frame_allocator: &'a FA,
+    memory_backend: &'a B,
     memory_layout: MemoryLayout,
-) -> Result<PageTableManager<B>, VmError> {
-    let identity_map_regions = [
-        memory_layout.devices,
-        memory_layout.kernel,
-        memory_layout.stack,
-    ];
-
-    // Reserve frames for direct-mapped regions first
-    for region in &identity_map_regions {
-        debug("Allocating frames for direct-mapped region: ");
-        debug(region.label);
-
-        let frame_count =
-            (region.end.as_usize() - region.start.as_usize()) / frame_allocator.frame_size();
-        if frame_count > 0 {
-            frame_allocator
-                .allocate_frames_exact(region.start, frame_count)
-                .ok_or(VmError::FrameAllocationFailed)?;
-        }
-    }
-
-    // Create the page table manager
+    identity_map_regions: &[MemoryRegion<PageAlignedAddress>],
+) -> Result<PageTableManager<'a, FA, B>, VmError> {
+    // Создаем менеджер таблиц страниц
     let page_table_manager =
         PageTableManager::new(frame_allocator, memory_backend, memory_layout.heap)?;
 
-    // Identity map all direct regions
-    for region in &identity_map_regions {
+    // Отображаем все прямые регионы с идентичным маппингом
+    for region in identity_map_regions {
         page_table_manager.identity_map_region(region.start, region.end, region.flags)?;
+        debug!(console(), "Direct-mapped region: {}", region.label);
     }
 
-    info("Direct-mapped regions initialized");
-
-    // Enable virtual memory
-    page_table_manager.enable_virtual_mode();
-
-    info("Virtual memory enabled");
+    info!(console(), "Direct-mapped regions initialized");
 
     Ok(page_table_manager)
 }

@@ -1,153 +1,158 @@
-//! Kernel memory allocator
+//! Аллокатор памяти ядра
 //!
-//! This module provides a heap allocator for the kernel using a first-fit
-//! free list algorithm with automatic heap expansion.
+//! Этот модуль предоставляет аллокатор кучи для ядра, использующий алгоритм
+//! first-fit со свободным списком и автоматическим расширением кучи.
 
 use crate::memory::memory_mapper::MemoryMappingError;
-use crate::memory::virtual_mem::PageTableManager;
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::size_of;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
 use memory::memory_backend::{MemoryBackend, MemoryBackendExt};
 use memory::physical::PhysicalAddress;
+use spin::Mutex;
 
-/// Heap-start virtual address
+/// Начальный виртуальный адрес кучи
 pub const HEAP_START: usize = 0xFFFF_0000_0000_0000;
 
-/// Initial heap size (1MB)
+/// Начальный размер кучи (1MB)
 pub const HEAP_INITIAL_SIZE: usize = 1024 * 1024;
 
-/// Maximum heap size (64MB)
+/// Максимальный размер кучи (64MB)
 pub const HEAP_MAX_SIZE: usize = 64 * 1024 * 1024;
 
-/// Minimum allocation size (16 bytes)
+/// Минимальный размер выделения (16 байт)
 const MIN_ALLOC_SIZE: usize = 16;
 
-/// Alignment for all allocations
+/// Выравнивание для всех выделений
 const ALLOC_ALIGN: usize = 8;
 
-/// Error types for allocation failures
-#[derive(Debug, Clone, Copy)]
+/// Типы ошибок при сбое выделения памяти
+#[derive(Debug, Clone)]
 pub enum AllocationError {
     OutOfMemory,
     MappingFailed(MemoryMappingError),
     InvalidLayout,
 }
 
-/// Memory mapper trait for virtual memory operations
+/// Трейт маппера памяти для операций виртуальной памяти
 pub trait MemoryMapper: Send + Sync {
-    /// Map physical frames to virtual memory for the heap
+    /// Отобразить физические фреймы в виртуальную память для кучи
     fn map_heap_frames(&self, start_addr: usize, size: usize) -> Result<(), MemoryMappingError>;
     fn unmap_heap_frames(&self, start_addr: usize, size: usize) -> Result<(), MemoryMappingError>;
 }
 
-/// A free block in the heap
+/// Свободный блок в куче
 #[derive(Clone, Copy, Debug)]
 struct FreeBlock {
     size: usize,
     next: Option<NonNull<FreeBlock>>,
 }
 
-// Safety: FreeBlock is only used within our controlled heap allocator
-// with proper synchronization through the Mutex wrapper
+// Safety: FreeBlock используется только внутри нашего контролируемого аллокатора кучи
+// с правильной синхронизацией через обертку Mutex
 unsafe impl Send for FreeBlock {}
 unsafe impl Sync for FreeBlock {}
 
 impl FreeBlock {
-    /// Create a new free block
+    /// Создать новый свободный блок
     const fn new(size: usize) -> Self {
         FreeBlock { size, next: None }
     }
 
-    /// Split this block if it's large enough for the requested size
-    /// Returns the new block created from the split, if any
+    /// Разделить этот блок, если он достаточно большой для запрошенного размера
+    /// Возвращает новый блок, созданный из разделения, если возможно
     fn split(&mut self, requested_size: usize) -> Option<NonNull<FreeBlock>> {
         let aligned_size = align_up(requested_size, ALLOC_ALIGN);
         let block_header_size = size_of::<FreeBlock>();
 
-        // Check if we can split: need space for requested size + new block header + minimum size
+        // Проверяем, можем ли разделить: нужно место для запрошенного размера + заголовок нового блока + минимальный размер
         let min_remaining = block_header_size + MIN_ALLOC_SIZE;
         if self.size < aligned_size + min_remaining {
             return None;
         }
 
-        // Calculate the position and size of the new block
+        // Вычисляем позицию и размер нового блока
         let new_block_offset = aligned_size;
         let new_block_size = self.size - aligned_size;
 
-        // Create the new block at the calculated position
+        // Создаем новый блок в вычисленной позиции
         let new_block_ptr = unsafe {
             let base_ptr = self as *mut FreeBlock as usize;
             let new_ptr = (base_ptr + new_block_offset) as *mut FreeBlock;
 
-            // Initialize the new block
+            // Инициализируем новый блок
             *new_ptr = FreeBlock::new(new_block_size);
 
             NonNull::new_unchecked(new_ptr)
         };
 
-        // Update this block's size to the allocated portion
+        // Обновляем размер этого блока до выделенной части
         self.size = aligned_size;
 
         Some(new_block_ptr)
     }
 }
 
-/// A first-fit heap allocator with automatic expansion
-pub struct HeapAllocator<B: MemoryBackend + 'static, M: MemoryMapper + 'static> {
-    /// Head of the free list
+/// First-fit аллокатор кучи с автоматическим расширением
+pub struct HeapAllocator<B: MemoryBackend, M: MemoryMapper> {
+    /// Голова списка свободных блоков
     free_list: Option<NonNull<FreeBlock>>,
 
-    /// Current heap size in bytes
+    /// Текущий размер кучи в байтах
     current_size: usize,
 
-    /// Next allocation position for heap expansion
+    /// Следующая позиция выделения для расширения кучи
     next_alloc_addr: AtomicUsize,
 
-    /// Memory mapper for virtual memory operations
-    memory_mapper: M,
+    /// Маппер памяти для операций виртуальной памяти (указатель вместо владения)
+    memory_mapper: *const M,
 
-    /// Backend for reading/writing memory
-    memory_backend: &'static B,
+    /// Бэкенд для чтения/записи памяти
+    memory_backend: *const B,
 
-    /// Frame size for memory mapping
+    /// Размер фрейма для маппинга памяти
     frame_size: usize,
 }
 
-// Safety: HeapAllocator is designed to be used in a single-threaded context
-// or protected by external synchronization (Mutex in KernelAllocator)
-unsafe impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> Send for HeapAllocator<B, M> {}
-unsafe impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> Sync for HeapAllocator<B, M> {}
+// Safety: HeapAllocator сырой указатель на backend, но гарантирует его валидность
+// через время жизни владельца (MemoryManager)
+unsafe impl<B: MemoryBackend, M: MemoryMapper> Send for HeapAllocator<B, M> {}
+unsafe impl<B: MemoryBackend, M: MemoryMapper> Sync for HeapAllocator<B, M> {}
 
-impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> HeapAllocator<B, M> {
-    /// Create a new heap allocator
-    pub fn new(
-        memory_mapper: M,
-        memory_backend: &'static B,
-        frame_size: usize,
-    ) -> Self {
+impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
+    /// Получить ссылку на memory_backend (безопасно, так как гарантируется владельцем)
+    fn memory_backend(&self) -> &B {
+        unsafe { &*self.memory_backend }
+    }
+
+    /// Получить ссылку на memory_mapper (безопасно, так как гарантируется владельцем)
+    fn memory_mapper(&self) -> &M {
+        unsafe { &*self.memory_mapper }
+    }
+
+    /// Создать новый аллокатор кучи
+    pub fn new(memory_mapper: &M, memory_backend: &B, frame_size: usize) -> Self {
         HeapAllocator {
             free_list: None,
             current_size: 0,
             next_alloc_addr: AtomicUsize::new(HEAP_START),
-            memory_mapper,
-            memory_backend,
+            memory_mapper: memory_mapper as *const M,
+            memory_backend: memory_backend as *const B,
             frame_size,
         }
     }
 
-    /// Initialize the allocator with the initial heap space
+    /// Инициализировать аллокатор с начальным пространством кучи
     pub fn init(&mut self) -> Result<(), AllocationError> {
         self.expand_heap(HEAP_INITIAL_SIZE)
     }
 
-    /// Expand the heap by allocating more memory
+    /// Расширить кучу путем выделения дополнительной памяти
     fn expand_heap(&mut self, additional_size: usize) -> Result<(), AllocationError> {
         let aligned_size = align_up(additional_size, self.frame_size);
 
-        // Check if expansion would exceed maximum heap size
+        // Проверяем, не превысит ли расширение максимальный размер кучи
         if self.current_size + aligned_size > HEAP_MAX_SIZE {
             return Err(AllocationError::OutOfMemory);
         }
@@ -155,9 +160,9 @@ impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> HeapAllocator<B, M> 
         let mut start_addr = self.next_alloc_addr.load(Ordering::Relaxed);
 
         loop {
-            // Map physical frames to the virtual heap area
+            // Отображаем физические фреймы в виртуальную область кучи
             let error = self
-                .memory_mapper
+                .memory_mapper()
                 .map_heap_frames(start_addr, aligned_size)
                 .err();
 
@@ -173,18 +178,18 @@ impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> HeapAllocator<B, M> 
             }
         }
 
-        // Create a new free block for the expanded area
+        // Создаем новый свободный блок для расширенной области
         let block_addr = PhysicalAddress(start_addr);
         let block_size = aligned_size - size_of::<FreeBlock>();
         let new_block = FreeBlock::new(block_size);
 
-        // Write the new block to memory
-        self.memory_backend.write(block_addr, new_block);
+        // Записываем новый блок в память
+        self.memory_backend().write(block_addr, new_block);
 
-        // Add to free list
+        // Добавляем в список свободных блоков
         self.add_to_free_list(start_addr);
 
-        // Update allocator state
+        // Обновляем состояние аллокатора
         self.current_size += aligned_size;
         self.next_alloc_addr
             .store(start_addr + aligned_size, Ordering::Relaxed);
@@ -192,54 +197,54 @@ impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> HeapAllocator<B, M> 
         Ok(())
     }
 
-    /// Add a block to the free list
+    /// Добавить блок в список свободных
     fn add_to_free_list(&mut self, addr: usize) {
         let block_ptr = NonNull::new(addr as *mut FreeBlock).expect("Invalid address");
 
-        // Read the block, update its next pointer, and write it back
-        let mut block: FreeBlock = self.memory_backend.read(PhysicalAddress(addr));
+        // Читаем блок, обновляем его указатель next и записываем обратно
+        let mut block: FreeBlock = self.memory_backend().read(PhysicalAddress(addr));
         block.next = self.free_list;
-        self.memory_backend.write(PhysicalAddress(addr), block);
+        self.memory_backend().write(PhysicalAddress(addr), block);
 
-        // Update the free list head
+        // Обновляем голову списка свободных блоков
         self.free_list = Some(block_ptr);
     }
 
-    /// Find and remove a suitable block from the free list
+    /// Найти и удалить подходящий блок из списка свободных
     fn find_free_block(&mut self, size: usize) -> Option<NonNull<FreeBlock>> {
         let mut current = self.free_list;
         let mut prev: Option<NonNull<FreeBlock>> = None;
 
         while let Some(block_ptr) = current {
             let addr = block_ptr.as_ptr() as usize;
-            let mut block: FreeBlock = self.memory_backend.read(PhysicalAddress(addr));
+            let mut block: FreeBlock = self.memory_backend().read(PhysicalAddress(addr));
 
-            // Check if this block is large enough
+            // Проверяем, достаточно ли велик этот блок
             if block.size >= size {
-                // Remove from free list
+                // Удаляем из списка свободных
                 if let Some(prev_ptr) = prev {
                     let mut prev_block: FreeBlock = self
-                        .memory_backend
+                        .memory_backend()
                         .read(PhysicalAddress(prev_ptr.as_ptr() as usize));
                     prev_block.next = block.next;
-                    self.memory_backend
+                    self.memory_backend()
                         .write(PhysicalAddress(prev_ptr.as_ptr() as usize), prev_block);
                 } else {
                     self.free_list = block.next;
                 }
 
-                // Split the block if it's significantly larger than needed
+                // Разделяем блок, если он значительно больше, чем нужно
                 if let Some(new_block_ptr) = block.split(size) {
                     let new_addr = new_block_ptr.as_ptr() as usize;
                     self.add_to_free_list(new_addr);
                 }
 
-                // Write back the allocated block
-                self.memory_backend.write(PhysicalAddress(addr), block);
+                // Записываем обратно выделенный блок
+                self.memory_backend().write(PhysicalAddress(addr), block);
                 return Some(block_ptr);
             }
 
-            // Move to next block
+            // Переходим к следующему блоку
             prev = current;
             current = block.next;
         }
@@ -247,7 +252,7 @@ impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> HeapAllocator<B, M> 
         None
     }
 
-    /// Allocate memory with the given layout
+    /// Выделить память с заданным layout
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocationError> {
         if layout.size() == 0 {
             return Err(AllocationError::InvalidLayout);
@@ -255,19 +260,19 @@ impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> HeapAllocator<B, M> 
 
         let size = layout.size().max(MIN_ALLOC_SIZE);
 
-        // Try to find a suitable block
+        // Пытаемся найти подходящий блок
         if let Some(block_ptr) = self.find_free_block(size) {
             let ptr = block_ptr.as_ptr() as *mut u8;
             return Ok(NonNull::new(ptr).expect("Block pointer should not be null"));
         }
 
-        // No suitable block found, expand the heap
+        // Подходящий блок не найден, расширяем кучу
         let needed_size = size + size_of::<FreeBlock>();
         let expand_size = needed_size.max(self.frame_size);
 
         self.expand_heap(expand_size)?;
 
-        // Try allocation again after expansion
+        // Пытаемся выделить снова после расширения
         if let Some(block_ptr) = self.find_free_block(size) {
             let ptr = block_ptr.as_ptr() as *mut u8;
             Ok(NonNull::new(ptr).expect("Block pointer should not be null"))
@@ -276,15 +281,15 @@ impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> HeapAllocator<B, M> 
         }
     }
 
-    /// Deallocate memory
+    /// Освободить память
     pub fn deallocate(&mut self, ptr: NonNull<u8>) {
         let addr = ptr.as_ptr() as usize;
         self.add_to_free_list(addr);
 
-        // TODO: Implement coalescing of adjacent free blocks to reduce fragmentation
+        // TODO: Реализовать слияние смежных свободных блоков для уменьшения фрагментации
     }
 
-    /// Get current heap statistics
+    /// Получить текущую статистику кучи
     pub fn stats(&self) -> HeapStats {
         HeapStats {
             total_size: self.current_size,
@@ -293,51 +298,34 @@ impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> HeapAllocator<B, M> 
     }
 }
 
-/// Heap statistics for monitoring
+/// Статистика кучи для мониторинга
 #[derive(Debug, Clone, Copy)]
 pub struct HeapStats {
     pub total_size: usize,
     pub max_size: usize,
 }
 
-/// Global kernel allocator
-pub struct KernelAllocator<B: MemoryBackend + 'static, M: MemoryMapper + 'static> {
+/// Глобальный аллокатор ядра
+pub struct KernelAllocator<B: MemoryBackend, M: MemoryMapper> {
     inner: Mutex<Option<HeapAllocator<B, M>>>,
 }
 
-impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> KernelAllocator<B, M> {
-    /// Create a new kernel allocator
+impl<'a, B: MemoryBackend, M: MemoryMapper> KernelAllocator<B, M> {
+    /// Создать новый аллокатор ядра
     pub const fn new() -> Self {
         KernelAllocator {
             inner: Mutex::new(None),
         }
     }
 
-    /// Initialize the allocator
-    pub fn init(
-        &self,
-        backend: &'static B,
-        memory_mapper: M,
-        page_table_manager: &PageTableManager<B>,
-    ) -> Result<(), AllocationError> {
-        let mut inner = self.inner.lock();
-        if inner.is_none() {
-            let mut allocator =
-                HeapAllocator::new(memory_mapper, backend, page_table_manager.frame_size());
-            allocator.init()?;
-            *inner = Some(allocator);
-        }
-        Ok(())
-    }
-
-    /// Get heap statistics
+    /// Получить статистику кучи
     pub fn stats(&self) -> Option<HeapStats> {
         let inner = self.inner.lock();
         inner.as_ref().map(|allocator| allocator.stats())
     }
 }
 
-unsafe impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> GlobalAlloc for KernelAllocator<B, M> {
+unsafe impl<B: MemoryBackend, M: MemoryMapper> GlobalAlloc for KernelAllocator<B, M> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut inner = self.inner.lock();
 
@@ -347,7 +335,7 @@ unsafe impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> GlobalAlloc f
                 Err(_) => core::ptr::null_mut(),
             }
         } else {
-            // Return null if the allocator is not initialized
+            // Возвращаем null, если аллокатор не инициализирован
             core::ptr::null_mut()
         }
     }
@@ -364,12 +352,11 @@ unsafe impl<B: MemoryBackend + 'static, M: MemoryMapper + 'static> GlobalAlloc f
                 allocator.deallocate(non_null_ptr);
             }
         }
-        // If allocator is not initialized, we silently ignore the deallocation
-        // This is consistent with the behavior of many allocators
+        // Если аллокатор не инициализирован, молча игнорируем освобождение
     }
 }
 
-/// Helper function to align up to the specified alignment
+/// Вспомогательная функция для выравнивания вверх до указанного выравнивания
 const fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }

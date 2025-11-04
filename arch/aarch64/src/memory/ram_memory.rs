@@ -20,10 +20,12 @@ impl Aarch64RamMemory {
 }
 
 impl MemoryBackend for Aarch64RamMemory {
+    #[inline(always)]
     fn frame_size(&self) -> usize {
         self.frame_size
     }
 
+    #[inline(always)]
     fn read_bytes(&self, addr: PhysicalAddress, buf: &mut [u8]) {
         unsafe {
             asm!("dsb ish", options(nostack, preserves_flags));
@@ -33,11 +35,12 @@ impl MemoryBackend for Aarch64RamMemory {
         };
     }
 
+    #[inline(always)]
     fn write_bytes(&self, addr: PhysicalAddress, buf: &[u8]) {
         let src = self.to_ptr(addr);
         unsafe { ptr::copy_nonoverlapping(buf.as_ptr(), src, buf.len()) };
 
-        self.clean_dcache_page(addr);
+        self.clean_page_cache(addr);
     }
 
     fn enable_virtual_mode(&self, root_page: PhysicalAddress) {
@@ -81,7 +84,7 @@ impl MemoryBackend for Aarch64RamMemory {
     }
 
     #[inline(always)]
-    fn clean_dcache_page(&self, address: PhysicalAddress) {
+    fn clean_page_cache(&self, address: PhysicalAddress) {
         unsafe {
             let cache_line_size = 64; // Should be queried from CTR_EL0
             let mut addr = address.as_usize();

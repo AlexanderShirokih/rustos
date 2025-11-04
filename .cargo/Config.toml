@@ -3,9 +3,9 @@ target = "aarch64-unknown-none"
 
 [target.aarch64-unknown-none]
 rustflags = [
+    "-C", "link-arg=--defsym=KERNEL_OFFSET=0x40200000",
     "-C", "link-arg=-T./arch/aarch64/linker/aarch64.ld",
     "-C", "link-arg=--gc-sections",
     "-C", "link-arg=--build-id=none",
-    "-C", "link-arg=--defsym=KERNEL_OFFSET=0x40008000"
 ]
 linker = "rust-lld"

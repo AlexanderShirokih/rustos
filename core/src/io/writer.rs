@@ -1,6 +1,7 @@
 use crate::io::byte_sink::ByteSink;
+use core::fmt::Write;
 
-pub trait Writer {
+pub trait Writer: Write {
     fn write_all(&self, bytes: &[u8]);
     fn flush(&self) {}
 }
@@ -13,10 +14,13 @@ impl<'a, S: ByteSink + ?Sized> BlockingWriter<'a, S> {
     pub const fn new(sink: &'a S) -> Self {
         Self { sink }
     }
+}
 
-    pub fn print(&self, s: &str) {
+impl<'a, S: ByteSink + ?Sized> Write for BlockingWriter<'a, S> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.write_all(s.as_bytes());
         self.flush();
+        Ok(())
     }
 }
 

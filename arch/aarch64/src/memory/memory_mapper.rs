@@ -1,72 +1,66 @@
-//! Architecture-specific memory allocator implementation for AArch64
-//!
-//! This module provides the AArch64-specific implementation of the memory mapper
-//! for the kernel heap allocator.
-
 use crate::memory::allocator::MemoryMapper;
 use crate::memory::virtual_address::VirtualAddress;
 use crate::memory::virtual_mem::{Page, PageTableManager, VmError};
 use memory::memory_backend::MemoryBackend;
-use memory::physical::FrameAllocator;
+use memory::physical_manager::FrameAllocator;
 
-/// AArch64-specific memory mapper
-pub struct Aarch64MemoryMapper<B: MemoryBackend + 'static> {
-    frame_allocator: &'static dyn FrameAllocator,
-    page_table_manager: &'static PageTableManager<B>,
+/// Маппер памяти для AArch64
+pub struct Aarch64MemoryMapper<'a, FA: FrameAllocator, B: MemoryBackend> {
+    frame_allocator: &'a FA,
+    page_table_manager: &'a PageTableManager<'a, FA, B>,
     frame_size: usize,
 }
 
-// Safety: The pointers are only used in a controlled environment within our kernel,
-// and we ensure proper synchronization through atomic operations.
-unsafe impl<B: MemoryBackend + 'static> Send for Aarch64MemoryMapper<B> {}
-unsafe impl<B: MemoryBackend + 'static> Sync for Aarch64MemoryMapper<B> {}
+unsafe impl<FA: FrameAllocator, B: MemoryBackend> Send for Aarch64MemoryMapper<'_, FA, B> {}
+unsafe impl<FA: FrameAllocator, B: MemoryBackend> Sync for Aarch64MemoryMapper<'_, FA, B> {}
 
-impl<B: MemoryBackend + 'static> Aarch64MemoryMapper<B> {
-    /// Create a new AArch64 memory mapper
-    pub fn new(
-        frame_allocator: &'static dyn FrameAllocator,
-        page_table_manager: &'static PageTableManager<B>,
-    ) -> Self {
+impl<'a, FA: FrameAllocator, B: MemoryBackend> Aarch64MemoryMapper<'a, FA, B> {
+    pub fn new(frame_allocator: &'a FA, page_table_manager: &'a PageTableManager<FA, B>) -> Self {
         Aarch64MemoryMapper {
             frame_allocator,
             page_table_manager,
             frame_size: page_table_manager.frame_size(),
         }
     }
+
+    /// Получить ссылку на frame_allocator (безопасно, так как гарантируется владельцем)
+    fn frame_allocator(&self) -> &'a FA {
+        self.frame_allocator
+    }
 }
 
-impl<B: MemoryBackend + 'static> MemoryMapper for Aarch64MemoryMapper<B> {
+impl<'a, FA: FrameAllocator, B: MemoryBackend> MemoryMapper for Aarch64MemoryMapper<'a, FA, B> {
     fn map_heap_frames(&self, start_addr: usize, size: usize) -> Result<(), MemoryMappingError> {
         let frame_size = self.frame_size;
 
-        // Validate input parameters
+        // Проверяем входные параметры
         if size == 0 {
             return Ok(());
         }
 
-        // Ensure the start address is page-aligned
+        // Убеждаемся, что начальный адрес выровнен по странице
         if start_addr % frame_size != 0 {
             return Err(MemoryMappingError::InvalidAddress(
                 "Start address must be page-aligned".into(),
             ));
         }
 
-        // Round size up to the nearest multiple of frame_size
+        // Округляем размер вверх до ближайшего кратного frame_size
         let aligned_size = (size + frame_size - 1) / frame_size * frame_size;
 
-        // Get the page table manager and frame allocator
+        // Получаем менеджер таблиц страниц и аллокатор фреймов
         let page_table_manager = self.page_table_manager;
-        let frame_allocator = self.frame_allocator;
+        let frame_allocator = self.frame_allocator();
 
-        // Map physical frames to the virtual heap area
+        // Отображаем физические фреймы в виртуальную область кучи
         for offset in (0..aligned_size).step_by(frame_size) {
             let virt_addr = VirtualAddress::new(start_addr + offset);
             let page = Page::containing_address(virt_addr, frame_size);
 
-            // Allocate a physical frame
+            // Выделяем физический фрейм
             match frame_allocator.allocate_frame() {
                 Some(frame) => {
-                    // Map it to the virtual address
+                    // Отображаем его на виртуальный адрес
                     match page_table_manager
                         .map(page, frame, page_table_manager.heap.flags)
                         .map_err(|e| match e {
@@ -81,7 +75,7 @@ impl<B: MemoryBackend + 'static> MemoryMapper for Aarch64MemoryMapper<B> {
                     }
                 }
                 None => {
-                    // Cleanup: unmap all previously mapped pages
+                    // Очистка: размапить все ранее отображенные страницы
                     // for mapped_page in mapped_pages {
                     //     let _ = page_table_manager.unmap(mapped_page);
                     // }
@@ -98,32 +92,32 @@ impl<B: MemoryBackend + 'static> MemoryMapper for Aarch64MemoryMapper<B> {
     fn unmap_heap_frames(&self, start_addr: usize, size: usize) -> Result<(), MemoryMappingError> {
         let frame_size = self.frame_size;
 
-        // Validate input parameters
+        // Проверяем входные параметры
         if size == 0 {
             return Ok(());
         }
 
-        // Ensure the start address is page-aligned
+        // Убеждаемся, что начальный адрес выровнен по странице
         if start_addr % frame_size != 0 {
             return Err(MemoryMappingError::InvalidAddress(
                 "Start address must be page-aligned".into(),
             ));
         }
 
-        // Round size up to the nearest multiple of frame_size
+        // Округляем размер вверх до ближайшего кратного frame_size
         let aligned_size = (size + frame_size - 1) / frame_size * frame_size;
 
         let page_table_manager = self.page_table_manager;
 
-        // Unmap all pages in the range
+        // Размапить все страницы в диапазоне
         for offset in (0..aligned_size).step_by(frame_size) {
             let virt_addr = VirtualAddress::new(start_addr + offset);
             let page = Page::containing_address(virt_addr, frame_size);
 
-            // Unmap the page and free the frame
+            // Размапить страницу и освободить фрейм
             if let Err(_) = page_table_manager.unmap(page) {
-                // Log the error but continue unmapping other pages
-                // In a real kernel, you might want to use a proper logging mechanism
+                // Логируем ошибку, но продолжаем размапить другие страницы
+                // В реальном ядре лучше использовать правильный механизм логирования
             }
         }
 
@@ -131,8 +125,8 @@ impl<B: MemoryBackend + 'static> MemoryMapper for Aarch64MemoryMapper<B> {
     }
 }
 
-/// Error types for allocation failures
-#[derive(Debug, Clone, Copy)]
+/// Типы ошибок при сбое маппинга памяти
+#[derive(Debug, Clone)]
 pub enum MemoryMappingError {
     InvalidAddress(&'static str),
     VirtualMappingError(VmError),

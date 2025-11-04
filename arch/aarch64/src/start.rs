@@ -2,19 +2,26 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(feature = "qemu_virt"))]
 use crate::drivers::uart_dm::UartDm;
+#[cfg(feature = "qemu_virt")]
 use crate::drivers::uart_pl011::UartPl011;
 
+use crate::drivers::setup::MemoryLayoutBuilder;
 use crate::fdt::DeviceTree;
+use crate::memory::layout::MemoryLayout;
+use crate::memory::manager::MemoryManager;
 use core::arch::asm;
 use core::arch::global_asm;
 use core::hint::spin_loop;
-use core::ptr::addr_of;
-use drivers::framebuffer;
+use core::ptr::{addr_of, addr_of_mut};
+use kernel_core::console::{BasicConsole, Console, set_console};
 use kernel_core::io::writer::BlockingWriter;
+use kernel_core::{info, printf};
 
 mod drivers;
 mod fdt;
+mod memory;
 
 // Заголовок формата Linux ARM64, для совместимости со стоковыми Android-загрузчиками
 global_asm!(
@@ -44,73 +51,130 @@ static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    let dtb: usize;
+
     unsafe {
+        asm!(
+        "mov {dtb}, x0",
+        dtb = lateout(reg) dtb,
+        );
+
         // верх стека = адрес сразу за массивом
         let top = (addr_of!(STACK).wrapping_add(1) as usize) & !0xF;
 
         asm!(
-            // Cохранить DTB из x0
-            "mov    x19, x0",
-            // Используем SP_EL1
-            "msr     spsel, #1",
-            // Инициализация SP_EL1 (загрузчик должен передать управление в EL1)
-            "mov    sp, {sp_top}",
+        // Используем SP_EL1
+        "msr     spsel, #1",
+        // Инициализация SP_EL1 (загрузчик должен передать управление в EL1)
+        "mov    sp, {sp_top}",
 
-            // Включаем FP/SIMD
-            "mrs    x0, cpacr_el1",
-            "orr    x0, x0, #(0x3 << 20)",
-            "msr    cpacr_el1, x0",
-            "isb",
-
-            "mov    x0, x19",
-            "b      {early_main}",
-            early_main = sym early_main,
-            sp_top = in(reg) top,
-            options(noreturn)
+        // Включаем FP/SIMD
+        "mrs    x0, cpacr_el1",
+        "orr    x0, x0, #(0x3 << 20)",
+        "msr    cpacr_el1, x0",
+        "isb",
+        "mov    x0, {dtb}",
+        "b      {early_main}",
+        sp_top = in(reg) top,
+        dtb = in(reg) dtb,
+        early_main = sym early_main,
+        options(noreturn)
         )
     }
 }
 
-fn early_main(dtb: usize) {
+unsafe extern "C" {
+    static _kernel_start: u8;
+    static _kernel_end: u8;
+}
+
+unsafe fn early_main(dtb: usize) {
     let device_tree = match unsafe { DeviceTree::from_ptr(dtb) } {
         Some(d) => d,
         None => return,
     };
 
+    // Инициализируем bump allocator для ранних объектов
+    let bump = memory::bump_allocator::bump_allocator();
+    bump.init();
+
+    // Размещаем UART и консоль в bump allocator
     #[cfg(feature = "qemu_virt")]
-    let uart = UartPl011::new(0x09000000);
+    let console: &'static BasicConsole<BlockingWriter<'static, UartPl011>> = unsafe {
+        let uart_ptr = bump
+            .alloc_ptr(UartPl011::new(0x09000000))
+            .expect("Failed to allocate UART");
+
+        let console_ptr = bump
+            .alloc_ptr(BasicConsole::new(BlockingWriter::new(&*uart_ptr)))
+            .expect("Failed to allocate console");
+
+        &*console_ptr
+    };
+
     #[cfg(not(feature = "qemu_virt"))]
-    let uart = UartDm::new(0x0C170000);
+    let console: &'static BasicConsole<BlockingWriter<'static, UartDm>> = unsafe {
+        let uart_ptr = bump
+            .alloc_ptr(UartDm::new(0x0C170000))
+            .expect("Failed to allocate UART");
 
-    let console = BlockingWriter::new(&uart);
+        let console_ptr = bump
+            .alloc_ptr(BasicConsole::new(BlockingWriter::new(&*uart_ptr)))
+            .expect("Failed to allocate console");
 
-    console.print("Hello, world\n");
+        &*console_ptr
+    };
+
+    printf!(console, "Hello, world!\n");
+
+    info!(console, "Early console initialized! {}", "UART");
+
+    let (kernel_start, kernel_end) = (
+        addr_of!(_kernel_start) as usize,
+        addr_of!(_kernel_end) as usize,
+    );
+    let (dtb_base, dtb_size) = (device_tree.base_address(), device_tree.size());
+
+    let memory_layout_builder = MemoryLayoutBuilder {
+        device_tree,
+        kernel_start,
+        kernel_end,
+    };
+
+    info!(
+        console,
+        "Kernel start address: {:#x} (size {} bytes)",
+        kernel_start,
+        kernel_end - kernel_start
+    );
+    info!(
+        console,
+        "DTB start address: {:#x} (size {} bytes)", dtb_base, dtb_size
+    );
+
+    set_console(console);
+
+    // Создаем центральный менеджер памяти, который владеет всеми компонентами
+    let memory_layout = MemoryLayout::from(memory_layout_builder);
+    let mut memory_manager = match MemoryManager::new(memory_layout) {
+        Ok(m) => m,
+        Err(error) => {
+            printf!(console, "FATAL: Memory setup error {:?}\n", error);
+            return;
+        }
+    };
+
+    info!(console, "Memory manager initialized!");
 
     unsafe {
-        if let Some(info) = framebuffer::find_in_dtb(&device_tree) {
-            use drivers::framebuffer::{Framebuffer, flush_framebuffer};
-
-            let mut fb = Framebuffer {
-                ptr: info.paddr as *mut u8,
-                width: info.width as usize,
-                height: info.height as usize,
-                stride_bytes: info.stride as usize,
-                bpp: info.bpp as usize,
-                format: info.format,
-            };
-
-            // Заливка фона и прямоугольника
-            fb.clear(0xFF1E1E1E);
-            let rect_w = (fb.width / 4).max(50);
-            let rect_h = (fb.height / 6).max(30);
-            fb.fill_rect(20, 20, rect_w, rect_h, 0xFFFF5500);
-
-            // Сброс кэша, если включен
-            flush_framebuffer(fb.ptr, fb.stride_bytes * fb.height);
-        } else {
-            console.print("No framebuffer node found in DTB\n");
+        match memory_manager.enable() {
+            Ok(_) => printf!(console, "Memory setup done!\n"),
+            Err(_) => {
+                printf!(console, "FATAL: Memory enable error\n");
+                return;
+            }
         }
-    }
+    };
 
     loop {
         spin_loop();

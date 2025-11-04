@@ -30,6 +30,7 @@ SECTIONS {
         *(COMMON)
         . = ALIGN(16);
         *(.bss.stack)
+        *(.bss.heap)
     } =0
 
     _kernel_end = .;

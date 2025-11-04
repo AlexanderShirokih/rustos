@@ -13,6 +13,9 @@ pub struct Mmio {
     base: *mut u8, // базовый указатель на регистры
 }
 
+// Mmio использует только volatile операции, которые безопасны для многопоточного доступа
+unsafe impl Sync for Mmio {}
+
 impl Mmio {
     /// Создаёт хэндлер по физ. адресу базы.
     #[inline(always)]

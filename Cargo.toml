@@ -13,3 +13,5 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+debug = true  # Включить отладочные символы даже для release сборки
+opt-level = 2  # Оптимизация с сохранением возможности отладки

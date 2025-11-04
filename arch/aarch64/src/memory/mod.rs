@@ -1,8 +1,10 @@
 pub mod allocator;
 pub mod entry_flags;
+pub mod global_allocator;
 pub mod layout;
+pub mod manager;
 pub mod memory_mapper;
 pub mod ram_memory;
-pub mod setup;
-pub mod virtual_mem;
 pub mod virtual_address;
+pub mod virtual_mem;
+pub(crate) mod bump_allocator;

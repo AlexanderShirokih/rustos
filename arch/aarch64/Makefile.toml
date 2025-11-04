@@ -53,8 +53,15 @@ script = [
 command = "cargo"
 args = ["build", "--release", "--features", "qemu_virt"]
 
-[tasks.qemu-run]
+[tasks.qemu-image]
 dependencies = ["qemu-build"]
+script = [
+    "mkdir -p ../../target/build/",
+    "cargo objcopy --release --features qemu_virt -- -O binary ../../target/build/kernel-qemu.bin"
+]
+
+[tasks.qemu-run]
+dependencies = ["qemu-image"]
 script = [
     """
     qemu-system-aarch64 \
@@ -62,9 +69,23 @@ script = [
         -cpu cortex-a53 \
         -m 512M \
         -nographic -serial mon:stdio \
-        -kernel ../../target/aarch64-unknown-none/release/kernel-aarch64
+        -kernel ../../target/build/kernel-qemu.bin
     """
 ]
 
 [tasks.qemu]
 dependencies = ["qemu-run"]
+
+[tasks.qemu-debug]
+dependencies = ["qemu-image"]
+script = [
+    """
+    qemu-system-aarch64 \
+        -machine virt \
+        -cpu cortex-a53 \
+        -m 512M \
+        -nographic -serial mon:stdio \
+        -kernel ../../target/build/kernel-qemu.bin \
+        -s -S
+    """
+]

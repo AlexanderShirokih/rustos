@@ -1,39 +1,34 @@
-//! Memory layout definitions
-//!
-//! This module defines the memory layout for the system, including
-//! physical memory regions, device memory regions, and other memory-related constants.
-
-/// Page table entry flags for aarch64
+/// Флаги записи таблицы страниц для aarch64
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryFlags(u64);
 
 impl EntryFlags {
-    // Basic flags
+    // Базовые флаги
     pub const VALID: Self = EntryFlags(1 << 0);
     pub const TABLE: Self = EntryFlags(1 << 1);
     pub const BLOCK: Self = EntryFlags(0 << 1);
     pub const ACCESS: Self = EntryFlags(1 << 10);
 
-    // Memory attributes (MAIR index)
+    // Атрибуты памяти (индекс MAIR)
     pub const NORMAL_MEMORY: Self = EntryFlags(0 << 2);
     pub const DEVICE_MEMORY: Self = EntryFlags(1 << 2);
 
-    // Shareability
+    // Разделяемость
     pub const NON_SHAREABLE: Self = EntryFlags(0 << 8);
     pub const OUTER_SHAREABLE: Self = EntryFlags(2 << 8);
     pub const INNER_SHAREABLE: Self = EntryFlags(3 << 8);
 
-    // Access permissions (AP bits)
+    // Права доступа (биты AP)
     pub const KERNEL_RW: Self = EntryFlags(0 << 6);
     pub const KERNEL_RO: Self = EntryFlags(2 << 6);
     pub const USER_RW: Self = EntryFlags(1 << 6);
     pub const USER_RO: Self = EntryFlags(3 << 6);
 
-    // Execute permissions
+    // Права на выполнение
     pub const EXECUTE_NEVER: Self = EntryFlags(1 << 54);
     pub const PRIVILEGED_EXECUTE_NEVER: Self = EntryFlags(1 << 53);
 
-    // Common combinations
+    // Распространенные комбинации
     pub const KERNEL_CODE: Self = Self::combine(&[
         Self::VALID,
         Self::BLOCK,
@@ -85,7 +80,7 @@ impl EntryFlags {
         Self::PRIVILEGED_EXECUTE_NEVER,
     ]);
 
-    /// Combine multiple flags
+    /// Объединить несколько флагов
     pub const fn combine(flags: &[Self]) -> Self {
         let mut result = 0;
         let mut i = 0;
@@ -96,22 +91,22 @@ impl EntryFlags {
         EntryFlags(result)
     }
 
-    /// Check if a flag is set
+    /// Проверить, установлен ли флаг
     pub fn contains(&self, flag: Self) -> bool {
         (self.0 & flag.0) == flag.0
     }
 
-    /// Add a flag
+    /// Добавить флаг
     pub fn insert(&mut self, flag: Self) {
         self.0 |= flag.0;
     }
 
-    /// Remove a flag
+    /// Удалить флаг
     pub fn remove(&mut self, flag: Self) {
         self.0 &= !flag.0;
     }
 
-    /// Get the raw value
+    /// Получить сырое значение
     pub const fn bits(&self) -> u64 {
         self.0
     }
