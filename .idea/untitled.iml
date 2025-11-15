@@ -9,6 +9,10 @@
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/util/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/main/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/arch/aarch64-paging/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/arch/aarch64-paging/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/arch/aarch64/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/memory/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/arch/aarch64/target" />
       <excludeFolder url="file://$MODULE_DIR$/arch/common/target" />
       <excludeFolder url="file://$MODULE_DIR$/core/target" />

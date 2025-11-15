@@ -5,9 +5,9 @@ use crate::memory::global_allocator::GlobalKernelAllocator;
 use crate::memory::layout::MemoryLayout;
 use crate::memory::memory_mapper::Aarch64MemoryMapper;
 use crate::memory::ram_memory::Aarch64RamMemory;
-use crate::memory::virtual_mem::{PageTableManager, VmError, create_page_table_manager};
+use crate::memory::virtual_mem::{PageTableManager, create_page_table_manager};
 use kernel_core::console::console;
-use kernel_core::printf;
+use kernel_core::{debug, printf};
 use memory::memory_range::MemoryRange;
 use memory::physical::PageAlignedAddress;
 use memory::physical_manager::{ManagerError, PhysicalMemoryManager};
@@ -65,27 +65,33 @@ impl MemoryManager {
                 })?;
 
             let excluded_regions = [
-                (&memory_layout.kernel).clone(),
+                (&memory_layout.kernel_code).clone(),
+                (&memory_layout.kernel_rodata).clone(),
+                (&memory_layout.kernel_data).clone(),
+                (&memory_layout.additional).clone(),
                 (&memory_layout.dtb).clone(),
             ];
 
             let excluded_memory_range =
                 excluded_regions.map(|e| Into::<MemoryRange<PageAlignedAddress>>::into(e));
 
-            let frame_allocator = PhysicalMemoryManager::new(&*backend_ptr, &*range_ptr, &excluded_memory_range)
-                .map_err(|error| match error {
-                    ManagerError::BitmapCreationFailed(_) => {
-                        MemorySetupError::BitmapAllocationError
-                    }
-                    ManagerError::InvalidRange => MemorySetupError::PhysicalMemoryInvalidRangeError,
-                })?;
-
-            let frame_allocator_ptr =
-                heap.alloc_ptr(frame_allocator)
-                    .map_err(|error| MemorySetupError::AllocationError {
-                        name: "physical memory manager",
-                        error,
+            let frame_allocator =
+                PhysicalMemoryManager::new(&*backend_ptr, &*range_ptr, &excluded_memory_range)
+                    .map_err(|error| match error {
+                        ManagerError::BitmapCreationFailed(_) => {
+                            MemorySetupError::BitmapAllocationError
+                        }
+                        ManagerError::InvalidRange => {
+                            MemorySetupError::PhysicalMemoryInvalidRangeError
+                        }
                     })?;
+
+            let frame_allocator_ptr = heap.alloc_ptr(frame_allocator).map_err(|error| {
+                MemorySetupError::AllocationError {
+                    name: "physical memory manager",
+                    error,
+                }
+            })?;
 
             let ptm = create_page_table_manager(
                 &*frame_allocator_ptr,
@@ -93,7 +99,7 @@ impl MemoryManager {
                 memory_layout,
                 &excluded_regions,
             )
-            .map_err(|error| MemorySetupError::VirtualManagerSetupError(error))?;
+            .map_err(|_| MemorySetupError::VirtualManagerSetupError)?;
             let page_table_manager_ptr =
                 heap.alloc_ptr(ptm)
                     .map_err(|error| MemorySetupError::AllocationError {
@@ -119,25 +125,27 @@ impl MemoryManager {
     }
 
     /// Инициализировать и активировать систему памяти
-    pub unsafe fn enable(&mut self) -> Result<(), MemorySetupError> {
+    pub fn enable(&mut self) -> Result<(), MemorySetupError> {
+        // Включаем виртуальную память (таблицы страниц уже созданы и заполнены)
+        self.page_table_manager.enable_virtual_mode();
+
+        debug!(console(), "Paging enabled!");
+
+        // Инициализируем аллокатор кучи
+        self.heap_allocator
+            .init()
+            .or(Err(MemorySetupError::HeapAllocatorInitializationError))?;
+
+        debug!(console(), "Heap allocator initialized!");
+
+        // Устанавливаем глобальный аллокатор
         unsafe {
-            // Инициализируем аллокатор кучи
-            self.heap_allocator
-                .init()
-                .or(Err(MemorySetupError::HeapAllocatorInitializationError))?;
-
-            printf!(console(), "Heap allocator initialized!");
-
-            // Устанавливаем глобальный аллокатор
             GLOBAL_ALLOCATOR.set_heap_allocator(&mut self.heap_allocator);
-
-            printf!(console(), "Global allocator set!");
-
-            // Включаем виртуальную память
-            self.page_table_manager.enable_virtual_mode();
-
-            Ok(())
         }
+
+        printf!(console(), "Global allocator set!");
+
+        Ok(())
     }
 }
 
@@ -150,5 +158,5 @@ pub enum MemorySetupError {
     BitmapAllocationError,
     PhysicalMemoryInvalidRangeError,
     HeapAllocatorInitializationError,
-    VirtualManagerSetupError(#[allow(dead_code)] VmError),
+    VirtualManagerSetupError,
 }

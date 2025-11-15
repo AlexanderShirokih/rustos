@@ -1,47 +1,26 @@
-#![cfg(target_arch = "aarch64")]
 #![no_std]
 #![no_main]
 
-#[cfg(not(feature = "qemu_virt"))]
-use crate::drivers::uart_dm::UartDm;
-#[cfg(feature = "qemu_virt")]
-use crate::drivers::uart_pl011::UartPl011;
-
-use crate::drivers::setup::MemoryLayoutBuilder;
-use crate::fdt::DeviceTree;
-use crate::memory::layout::MemoryLayout;
-use crate::memory::manager::MemoryManager;
-use core::arch::asm;
-use core::arch::global_asm;
-use core::hint::spin_loop;
-use core::ptr::{addr_of, addr_of_mut};
-use kernel_core::console::{BasicConsole, Console, set_console};
-use kernel_core::io::writer::BlockingWriter;
-use kernel_core::{info, printf};
-
+mod boot_header;
 mod drivers;
 mod fdt;
 mod memory;
 
-// Заголовок формата Linux ARM64, для совместимости со стоковыми Android-загрузчиками
-global_asm!(
-    r#"
-    .section .head, "ax"
-    .balign 8
-    .global _header_start
-_header_start:
-    b _start                            // code0: branch to _start
-    .word 0                             // code1
-    .quad 0                             // text_offset
-    .quad _kernel_size                  // image_size
-    .quad 0                             // flags
-    .quad 0                             // res2
-    .quad 0                             // res3
-    .quad 0                             // res4
-    .word 0x644D5241                    // magic "ARM\x64"
-    .word 0                             // res5
-"#
-);
+use crate::drivers::setup::build_memory_layout;
+#[cfg(not(feature = "qemu_virt"))]
+use crate::drivers::uart_dm::UartDm;
+#[cfg(feature = "qemu_virt")]
+use crate::drivers::uart_pl011::UartPl011;
+use crate::fdt::DeviceTree;
+use crate::memory::manager::MemoryManager;
+use ::memory::physical::PageAlignedAddress;
+use aarch64_paging::{EntryFlags, MemoryRegion};
+use core::arch::asm;
+use core::hint::spin_loop;
+use core::ptr::addr_of;
+use kernel_core::console::{BasicConsole, Console, set_console};
+use kernel_core::io::writer::BlockingWriter;
+use kernel_core::{fatal, info, printf};
 
 // Стек — 16 KiB
 const STACK_SIZE: usize = 16 * 1024;
@@ -83,17 +62,7 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
-unsafe extern "C" {
-    static _kernel_start: u8;
-    static _kernel_end: u8;
-}
-
 unsafe fn early_main(dtb: usize) {
-    let device_tree = match unsafe { DeviceTree::from_ptr(dtb) } {
-        Some(d) => d,
-        None => return,
-    };
-
     // Инициализируем bump allocator для ранних объектов
     let bump = memory::bump_allocator::bump_allocator();
     bump.init();
@@ -125,54 +94,51 @@ unsafe fn early_main(dtb: usize) {
         &*console_ptr
     };
 
-    printf!(console, "Hello, world!\n");
+    info!(console, "Kernel started!");
 
-    info!(console, "Early console initialized! {}", "UART");
-
-    let (kernel_start, kernel_end) = (
-        addr_of!(_kernel_start) as usize,
-        addr_of!(_kernel_end) as usize,
+    let mmio = MemoryRegion::new(
+        "UART",
+        PageAlignedAddress::from_usize_unchecked(0x09000000).as_usize(),
+        PageAlignedAddress::from_usize_unchecked(0x09000000)
+            .next_aligned()
+            .as_usize(),
+        EntryFlags::DEVICE,
     );
-    let (dtb_base, dtb_size) = (device_tree.base_address(), device_tree.size());
 
-    let memory_layout_builder = MemoryLayoutBuilder {
-        device_tree,
-        kernel_start,
-        kernel_end,
+    let device_tree = match unsafe { DeviceTree::from_ptr(dtb) } {
+        Some(d) => d,
+        None => {
+            fatal!(console, "Failed to parse device tree");
+            return;
+        }
     };
-
-    info!(
-        console,
-        "Kernel start address: {:#x} (size {} bytes)",
-        kernel_start,
-        kernel_end - kernel_start
-    );
-    info!(
-        console,
-        "DTB start address: {:#x} (size {} bytes)", dtb_base, dtb_size
-    );
 
     set_console(console);
 
     // Создаем центральный менеджер памяти, который владеет всеми компонентами
-    let memory_layout = MemoryLayout::from(memory_layout_builder);
+    let memory_layout = match build_memory_layout(&device_tree, mmio) {
+        Ok(m) => m,
+        Err(error) => {
+            fatal!(console, "Memory layout error {:?}", error.message);
+            return;
+        }
+    };
+
     let mut memory_manager = match MemoryManager::new(memory_layout) {
         Ok(m) => m,
         Err(error) => {
-            printf!(console, "FATAL: Memory setup error {:?}\n", error);
+            fatal!(console, "Memory setup error {:?}", error);
             return;
         }
     };
 
     info!(console, "Memory manager initialized!");
 
-    unsafe {
-        match memory_manager.enable() {
-            Ok(_) => printf!(console, "Memory setup done!\n"),
-            Err(_) => {
-                printf!(console, "FATAL: Memory enable error\n");
-                return;
-            }
+    match memory_manager.enable() {
+        Ok(_) => printf!(console, "Memory setup done!\n"),
+        Err(_) => {
+            printf!(console, "FATAL: Memory enable error\n");
+            return;
         }
     };
 

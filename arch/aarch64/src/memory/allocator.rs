@@ -4,13 +4,12 @@
 //! first-fit со свободным списком и автоматическим расширением кучи.
 
 use crate::memory::memory_mapper::MemoryMappingError;
-use core::alloc::{GlobalAlloc, Layout};
+use core::alloc::Layout;
 use core::mem::size_of;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use memory::memory_backend::{MemoryBackend, MemoryBackendExt};
-use memory::physical::PhysicalAddress;
-use spin::Mutex;
+use memory::memory_backend::MemoryBackend;
+use memory::physical::{PageAlignedAddress, PhysicalAddress};
 
 /// Начальный виртуальный адрес кучи
 pub const HEAP_START: usize = 0xFFFF_0000_0000_0000;
@@ -31,15 +30,24 @@ const ALLOC_ALIGN: usize = 8;
 #[derive(Debug, Clone)]
 pub enum AllocationError {
     OutOfMemory,
-    MappingFailed(MemoryMappingError),
+    MappingFailed,
     InvalidLayout,
+    AlignmentError,
 }
 
 /// Трейт маппера памяти для операций виртуальной памяти
-pub trait MemoryMapper: Send + Sync {
+pub trait MemoryMapper {
     /// Отобразить физические фреймы в виртуальную память для кучи
-    fn map_heap_frames(&self, start_addr: usize, size: usize) -> Result<(), MemoryMappingError>;
-    fn unmap_heap_frames(&self, start_addr: usize, size: usize) -> Result<(), MemoryMappingError>;
+    fn map_heap_frames(
+        &self,
+        start_address: PageAlignedAddress,
+        size: usize,
+    ) -> Result<(), MemoryMappingError>;
+    fn unmap_heap_frames(
+        &self,
+        start_address: PageAlignedAddress,
+        size: usize,
+    ) -> Result<(), MemoryMappingError>;
 }
 
 /// Свободный блок в куче
@@ -49,18 +57,13 @@ struct FreeBlock {
     next: Option<NonNull<FreeBlock>>,
 }
 
-// Safety: FreeBlock используется только внутри нашего контролируемого аллокатора кучи
-// с правильной синхронизацией через обертку Mutex
-unsafe impl Send for FreeBlock {}
-unsafe impl Sync for FreeBlock {}
-
 impl FreeBlock {
     /// Создать новый свободный блок
     const fn new(size: usize) -> Self {
         FreeBlock { size, next: None }
     }
 
-    /// Разделить этот блок, если он достаточно большой для запрошенного размера
+    /// Разделить этот блок, если он достаточно большой для запрошенного размера.
     /// Возвращает новый блок, созданный из разделения, если возможно
     fn split(&mut self, requested_size: usize) -> Option<NonNull<FreeBlock>> {
         let aligned_size = align_up(requested_size, ALLOC_ALIGN);
@@ -115,11 +118,6 @@ pub struct HeapAllocator<B: MemoryBackend, M: MemoryMapper> {
     frame_size: usize,
 }
 
-// Safety: HeapAllocator сырой указатель на backend, но гарантирует его валидность
-// через время жизни владельца (MemoryManager)
-unsafe impl<B: MemoryBackend, M: MemoryMapper> Send for HeapAllocator<B, M> {}
-unsafe impl<B: MemoryBackend, M: MemoryMapper> Sync for HeapAllocator<B, M> {}
-
 impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
     /// Получить ссылку на memory_backend (безопасно, так как гарантируется владельцем)
     fn memory_backend(&self) -> &B {
@@ -157,7 +155,9 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
             return Err(AllocationError::OutOfMemory);
         }
 
-        let mut start_addr = self.next_alloc_addr.load(Ordering::Relaxed);
+        let mut start_addr =
+            PageAlignedAddress::from_usize(self.next_alloc_addr.load(Ordering::Relaxed))
+                .ok_or(AllocationError::AlignmentError)?;
 
         loop {
             // Отображаем физические фреймы в виртуальную область кучи
@@ -169,9 +169,9 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
             match error {
                 Some(e) => match e {
                     MemoryMappingError::AlreadyMapped => {
-                        start_addr = start_addr + self.frame_size;
+                        start_addr = start_addr.next_aligned();
                     }
-                    _ => return Err(AllocationError::MappingFailed(e)),
+                    _ => return Err(AllocationError::MappingFailed),
                 },
 
                 None => break,
@@ -179,7 +179,7 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
         }
 
         // Создаем новый свободный блок для расширенной области
-        let block_addr = PhysicalAddress(start_addr);
+        let block_addr = start_addr.as_physical_address();
         let block_size = aligned_size - size_of::<FreeBlock>();
         let new_block = FreeBlock::new(block_size);
 
@@ -187,12 +187,16 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
         self.memory_backend().write(block_addr, new_block);
 
         // Добавляем в список свободных блоков
-        self.add_to_free_list(start_addr);
+        self.add_to_free_list(start_addr.as_usize());
+
+        let next_aligned_alloc_addr =
+            PageAlignedAddress::new(start_addr.as_physical_address().add(aligned_size))
+                .ok_or(AllocationError::AlignmentError)?;
 
         // Обновляем состояние аллокатора
         self.current_size += aligned_size;
         self.next_alloc_addr
-            .store(start_addr + aligned_size, Ordering::Relaxed);
+            .store(next_aligned_alloc_addr.as_usize(), Ordering::Relaxed);
 
         Ok(())
     }
@@ -287,72 +291,6 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
         self.add_to_free_list(addr);
 
         // TODO: Реализовать слияние смежных свободных блоков для уменьшения фрагментации
-    }
-
-    /// Получить текущую статистику кучи
-    pub fn stats(&self) -> HeapStats {
-        HeapStats {
-            total_size: self.current_size,
-            max_size: HEAP_MAX_SIZE,
-        }
-    }
-}
-
-/// Статистика кучи для мониторинга
-#[derive(Debug, Clone, Copy)]
-pub struct HeapStats {
-    pub total_size: usize,
-    pub max_size: usize,
-}
-
-/// Глобальный аллокатор ядра
-pub struct KernelAllocator<B: MemoryBackend, M: MemoryMapper> {
-    inner: Mutex<Option<HeapAllocator<B, M>>>,
-}
-
-impl<'a, B: MemoryBackend, M: MemoryMapper> KernelAllocator<B, M> {
-    /// Создать новый аллокатор ядра
-    pub const fn new() -> Self {
-        KernelAllocator {
-            inner: Mutex::new(None),
-        }
-    }
-
-    /// Получить статистику кучи
-    pub fn stats(&self) -> Option<HeapStats> {
-        let inner = self.inner.lock();
-        inner.as_ref().map(|allocator| allocator.stats())
-    }
-}
-
-unsafe impl<B: MemoryBackend, M: MemoryMapper> GlobalAlloc for KernelAllocator<B, M> {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let mut inner = self.inner.lock();
-
-        if let Some(ref mut allocator) = *inner {
-            match allocator.allocate(layout) {
-                Ok(ptr) => ptr.as_ptr(),
-                Err(_) => core::ptr::null_mut(),
-            }
-        } else {
-            // Возвращаем null, если аллокатор не инициализирован
-            core::ptr::null_mut()
-        }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        if ptr.is_null() {
-            return;
-        }
-
-        let mut inner = self.inner.lock();
-
-        if let Some(ref mut allocator) = *inner {
-            if let Some(non_null_ptr) = NonNull::new(ptr) {
-                allocator.deallocate(non_null_ptr);
-            }
-        }
-        // Если аллокатор не инициализирован, молча игнорируем освобождение
     }
 }
 

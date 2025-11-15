@@ -42,7 +42,7 @@ impl PhysicalAddress {
     }
 
     #[inline]
-    pub fn add(&self, x: usize) -> Self {
+    pub const fn add(&self, x: usize) -> Self {
         Self(self.0 + x)
     }
 
@@ -93,6 +93,16 @@ impl<const ALIGNMENT: usize> AlignedPhysicalAddress<ALIGNMENT> {
         }
     }
 
+    /// Создаёт выровненный адрес без проверки выравнивания
+    pub const fn new_unchecked(address: PhysicalAddress) -> Self {
+        Self(address)
+    }
+
+    /// Создаёт выровненный адрес из usize без проверки выравнивания
+    pub const fn from_usize_unchecked(address: usize) -> Self {
+        Self(PhysicalAddress(address))
+    }
+
     /// Создаёт выровненный адрес, выравнивая вниз
     pub fn aligned_down(address: PhysicalAddress) -> Self {
         let aligned = (address.0 / ALIGNMENT) * ALIGNMENT;
@@ -112,6 +122,10 @@ impl<const ALIGNMENT: usize> AlignedPhysicalAddress<ALIGNMENT> {
 
     pub const fn as_usize(self) -> usize {
         self.0.as_usize()
+    }
+
+    pub const fn next_aligned(&self) -> Self {
+        Self(self.0.add(ALIGNMENT))
     }
 
     /// Получить размер выравнивания
@@ -139,7 +153,7 @@ impl<const ALIGNMENT: usize> From<AlignedPhysicalAddress<ALIGNMENT>> for Physica
     }
 }
 
-// Псевдонимы для частых случаев
+// Псевдоним для частного случая
 pub type PageAlignedAddress = AlignedPhysicalAddress<4096>; // 4KB страницы
 
 /// Фрейм физической памяти
@@ -160,19 +174,13 @@ impl Frame {
         Self::new(self.0 - frames_offset)
     }
 
-    pub(crate) fn page_address(&self) -> PageAlignedAddress {
-        PageAlignedAddress::from_usize(self.0 * PageAlignedAddress::alignment()).unwrap()
+    pub fn page_address(&self) -> PageAlignedAddress {
+        PageAlignedAddress::from_usize_unchecked(self.0 * PageAlignedAddress::alignment())
     }
 
     #[inline]
-    pub const fn containing_address(address: PhysicalAddress, frame_size: usize) -> Self {
-        debug_assert!(frame_size > 0);
-
-        Self(address.as_usize() / frame_size)
-    }
-
-    pub const fn start_address(&self, frame_size: usize) -> PhysicalAddress {
-        PhysicalAddress(self.0 * frame_size)
+    pub fn containing_address<A: AddressType>(address: A) -> Self {
+        Self(address.as_usize() / PageAlignedAddress::alignment())
     }
 
     #[inline]
@@ -183,6 +191,6 @@ impl Frame {
 
 impl From<PageAlignedAddress> for Frame {
     fn from(addr: PageAlignedAddress) -> Self {
-        Frame(addr.as_usize() / PageAlignedAddress::alignment())
+        Frame::new(addr.as_usize() / PageAlignedAddress::alignment())
     }
 }

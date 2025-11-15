@@ -1,10 +1,7 @@
 pub mod allocator;
-pub mod entry_flags;
+pub(crate) mod bump_allocator;
 pub mod global_allocator;
-pub mod layout;
 pub mod manager;
 pub mod memory_mapper;
 pub mod ram_memory;
-pub mod virtual_address;
-pub mod virtual_mem;
-pub(crate) mod bump_allocator;
+pub use aarch64_paging::{entry_flags, layout, virtual_address, virtual_mem};

@@ -1,6 +1,8 @@
-use crate::memory_backend::{MemoryBackend, MemoryBackendExt};
-use crate::memory_range::{AvailableRegions, MemoryRange};
+use crate::memory_backend::MemoryBackend;
+use crate::memory_range::MemoryRange;
 use crate::physical::{Frame, PageAlignedAddress};
+use core::cmp::{max, min};
+use core::mem::size_of;
 
 /// Битовая карта для отслеживания статуса выделения фреймов
 pub struct FrameBitmap<'a, B: MemoryBackend> {
@@ -15,10 +17,9 @@ pub struct FrameBitmap<'a, B: MemoryBackend> {
 
     // Физический адрес, выделенный под хранение данного экземпляра FrameBitmap
     bitmap_address: PageAlignedAddress,
-}
 
-unsafe impl<'a, B: MemoryBackend> Send for FrameBitmap<'a, B> {}
-unsafe impl<'a, B: MemoryBackend> Sync for FrameBitmap<'a, B> {}
+    bitmap_end_address: PageAlignedAddress,
+}
 
 #[derive(Debug)]
 pub enum FrameBitmapError {
@@ -26,12 +27,43 @@ pub enum FrameBitmapError {
     UnableToAllocate,
 }
 
-impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
-    // Количество байт необходимых для одной записи
-    const ENTRY_SIZE: usize = size_of::<u64>();
+const MAX_FORBIDDEN_INTERVALS: usize = 64;
 
-    // Количество фреймов, помечаемых в одну запись (один бит на фрейм)
-    const FRAMES_PER_ENTRY: usize = FrameBitmap::<'a, B>::ENTRY_SIZE * 8; // 64 фрейма на u64
+#[derive(Clone, Copy)]
+struct FrameInterval {
+    start: usize,
+    end: usize,
+}
+
+impl FrameInterval {
+    const fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EntryPos {
+    word: usize,
+    bit: usize,
+}
+
+impl EntryPos {
+    const fn new(word: usize, bit: usize) -> Self {
+        Self { word, bit }
+    }
+
+    #[inline]
+    fn is_before(self, other: EntryPos) -> bool {
+        self.word < other.word || (self.word == other.word && self.bit < other.bit)
+    }
+}
+
+impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
+    // Количество байт, необходимых для одной записи в битовой карте
+    const ENTRY_BYTES: usize = size_of::<u64>();
+
+    // Количество фреймов (битов), описываемых одной записью
+    const BITS_PER_ENTRY: usize = FrameBitmap::<'a, B>::ENTRY_BYTES * 8;
 
     pub fn new(
         memory_backend: &'a B,
@@ -40,116 +72,168 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
     ) -> Result<Self, FrameBitmapError> {
         let required_frames = Self::calc_required_frames_for_bitmap(target_region);
 
-        let mut target_areas: heapless::Vec<MemoryRange<PageAlignedAddress>, 32> =
-            heapless::Vec::new();
+        let forbidden = Self::collect_forbidden_intervals(target_region, excluded_regions)?;
 
-        // Добавляем начальный регион.
-        target_areas
-            .push(target_region.clone())
-            .map_err(|_| FrameBitmapError::UnableToAllocate)?;
-
-        // Строим список "чистых" областей, в которых можно найти место под FrameBitmap
-        Self::find_suitable_regions(&mut target_areas, excluded_regions, required_frames)
-            .map_err(|_| FrameBitmapError::TooManyRegions)?;
-
-        let alloc_area = target_areas
-            .first()
-            .ok_or(FrameBitmapError::UnableToAllocate)?;
+        let bitmap_interval =
+            Self::find_bitmap_interval(target_region, &forbidden, required_frames)
+                .ok_or(FrameBitmapError::UnableToAllocate)?;
+        let bitmap_start_frame = Frame::new(bitmap_interval.start);
+        let bitmap_end_frame = Frame::new(bitmap_interval.end);
 
         let frame_bitmap = FrameBitmap {
             memory_backend,
             base_frame: Frame::from(target_region.start()),
             target_region: target_region.clone(),
-            bitmap_address: alloc_area.start(),
+            bitmap_address: bitmap_start_frame.page_address(),
+            bitmap_end_address: bitmap_end_frame.page_address(),
         };
 
         // Очищаем физическую память для аллокатора (обнуляем всю битовую карту)
         frame_bitmap.clear_bitmap(required_frames);
 
         // Помечаем сам регион битовой карты как использованный
-        frame_bitmap.set_range_unchecked(
-            Frame::from(alloc_area.start()),
-            Frame::from(
-                alloc_area
-                    .start()
-                    .as_physical_address()
-                    .add(required_frames * alloc_area.frame_size)
-                    .align_down(alloc_area.frame_size),
-            ),
-        );
+        if required_frames > 0 {
+            frame_bitmap.set_range_unchecked(
+                Frame::new(bitmap_interval.start),
+                Frame::new(bitmap_interval.end),
+            );
+        }
 
         for exclude in excluded_regions {
-            frame_bitmap
-                .set_range_unchecked(Frame::from(exclude.start()), Frame::from(exclude.end()))
+            frame_bitmap.set_range_unchecked(
+                Frame::from(exclude.start()),
+                Frame::from(exclude.end()).add(1),
+            )
         }
 
         Ok(frame_bitmap)
     }
 
     fn clear_bitmap(&self, required_frames: usize) {
-        let bitmap_size_bytes = required_frames * PageAlignedAddress::alignment();
-        let zero_buffer = [0u8; 4096]; // Буфер для записи нулей
-        let mut offset = 0;
-        while offset < bitmap_size_bytes {
-            let chunk_size = core::cmp::min(zero_buffer.len(), bitmap_size_bytes - offset);
-            self.memory_backend.write_bytes(
-                self.bitmap_address.as_physical_address().add(offset),
-                &zero_buffer[..chunk_size],
-            );
-            offset += chunk_size;
+        let entries = (required_frames + (Self::BITS_PER_ENTRY - 1)) / Self::BITS_PER_ENTRY;
+
+        for i in 0..entries {
+            let addr = self
+                .bitmap_address
+                .as_physical_address()
+                .add(i * size_of::<u64>());
+            self.memory_backend.write::<u64>(addr, 0);
         }
     }
 
     fn calc_required_frames_for_bitmap(region: &MemoryRange<PageAlignedAddress>) -> usize {
-        let bitmap_size = region.frame_count().div_ceil(Self::ENTRY_SIZE);
-        bitmap_size.div_ceil(region.frame_size)
+        let entry_count = region.frame_count().div_ceil(Self::BITS_PER_ENTRY);
+        let bitmap_bytes = entry_count * Self::ENTRY_BYTES;
+        bitmap_bytes.div_ceil(region.frame_size)
     }
 
-    fn find_suitable_regions(
-        targets_out: &mut heapless::Vec<MemoryRange<PageAlignedAddress>, 32>,
-        excludes: &[MemoryRange<PageAlignedAddress>],
-        required_frames: usize,
-    ) -> Result<(), ()> {
-        for exclude in excludes {
-            let src = core::mem::take(targets_out);
+    fn collect_forbidden_intervals(
+        region: &MemoryRange<PageAlignedAddress>,
+        excluded_regions: &[MemoryRange<PageAlignedAddress>],
+    ) -> Result<heapless::Vec<FrameInterval, MAX_FORBIDDEN_INTERVALS>, FrameBitmapError> {
+        let mut intervals: heapless::Vec<FrameInterval, MAX_FORBIDDEN_INTERVALS> =
+            heapless::Vec::new();
+        let region_start = Frame::from(region.start()).number();
+        let region_end = Frame::from(region.end()).add(1).number();
 
-            for area in src.iter() {
-                // Вырезаем исключаемый регион
-                let subtract_result = area.subtract(exclude);
+        for exclude in excluded_regions {
+            let start = Frame::from(exclude.start()).number();
+            let end = Frame::from(exclude.end()).add(1).number();
 
-                match subtract_result {
-                    AvailableRegions::None => {}
+            let clamped_start = max(start, region_start);
+            let clamped_end = min(end, region_end);
 
-                    AvailableRegions::One(updated_area) => {
-                        if updated_area.frame_count() >= required_frames {
-                            targets_out.push(updated_area).map_err(|_| ())?;
-                        }
-                    }
+            if clamped_start >= clamped_end {
+                continue;
+            }
 
-                    AvailableRegions::Two { left, right } => {
-                        if left.frame_count() >= required_frames {
-                            targets_out.push(left).map_err(|_| ())?;
-                        }
-                        if right.frame_count() >= required_frames {
-                            targets_out.push(right).map_err(|_| ())?;
-                        }
-                    }
-                }
+            intervals
+                .push(FrameInterval::new(clamped_start, clamped_end))
+                .map_err(|_| FrameBitmapError::TooManyRegions)?;
+        }
+
+        Self::merge_intervals(&mut intervals);
+
+        Ok(intervals)
+    }
+
+    fn merge_intervals(intervals: &mut heapless::Vec<FrameInterval, MAX_FORBIDDEN_INTERVALS>) {
+        if intervals.is_empty() {
+            return;
+        }
+
+        intervals.sort_unstable_by(|a, b| a.start.cmp(&b.start));
+
+        let mut write_idx = 0;
+        for i in 1..intervals.len() {
+            let current = intervals[i];
+            let last = intervals[write_idx];
+
+            if current.start <= last.end {
+                let merged_end = max(last.end, current.end);
+                intervals[write_idx].end = merged_end;
+            } else {
+                write_idx += 1;
+                intervals[write_idx] = current;
             }
         }
 
-        Ok(())
+        intervals.truncate(write_idx + 1);
+    }
+
+    fn find_bitmap_interval(
+        region: &MemoryRange<PageAlignedAddress>,
+        forbidden: &[FrameInterval],
+        required_frames: usize,
+    ) -> Option<FrameInterval> {
+        let region_start = Frame::from(region.start()).number();
+        let region_end = Frame::from(region.end()).add(1).number();
+
+        if required_frames == 0 {
+            return Some(FrameInterval::new(region_start, region_start));
+        }
+
+        let mut cursor = region_start;
+
+        for interval in forbidden {
+            if interval.start > region_end {
+                break;
+            }
+
+            if cursor < interval.start {
+                let gap = interval.start - cursor;
+                if gap >= required_frames {
+                    return Some(FrameInterval::new(cursor, cursor + required_frames));
+                }
+            }
+
+            cursor = max(cursor, interval.end);
+
+            if cursor >= region_end {
+                break;
+            }
+        }
+
+        if cursor < region_end {
+            let remaining = region_end - cursor;
+            if remaining >= required_frames {
+                return Some(FrameInterval::new(cursor, cursor + required_frames));
+            }
+        }
+
+        None
     }
 
     #[inline]
-    fn write<F: Fn(u64) -> u64>(&self, offset: usize, update: F) {
-        let address = self
+    fn write<F: Fn(u64) -> u64>(&self, index: usize, update: F) {
+        let addr = self
             .bitmap_address
             .as_physical_address()
-            .add(offset * Self::ENTRY_SIZE);
-        let value = update(self.memory_backend.read::<u64>(address));
-        self.memory_backend
-            .write_bytes(address, &value.to_le_bytes());
+            .add(index * Self::ENTRY_BYTES);
+
+        let old = self.memory_backend.read::<u64>(addr);
+        let new = update(old);
+        self.memory_backend.write::<u64>(addr, new);
     }
 
     #[inline]
@@ -157,8 +241,17 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
         let address = self
             .bitmap_address
             .as_physical_address()
-            .add(offset * Self::ENTRY_SIZE);
+            .add(offset * Self::ENTRY_BYTES);
+
         self.memory_backend.read::<u64>(address)
+    }
+
+    pub fn get_alloc_range(&self) -> MemoryRange<PageAlignedAddress> {
+        MemoryRange::new(
+            self.bitmap_address,
+            self.bitmap_end_address,
+            PageAlignedAddress::alignment(),
+        )
     }
 
     /// Помечает область фреймов как выделенную
@@ -170,37 +263,31 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
             return;
         }
 
-        let (start_word, start_bit) = self.relative_frame_indexes(from_inclusive);
-        let (end_word, end_bit) = self.relative_frame_indexes(to_exclusive.sub(1));
+        let start = self.entry_pos(from_inclusive);
+        let end = self.entry_pos(to_exclusive);
 
-        if start_word == end_word {
-            // Если начальный и конечный фреймы находятся в одном слове, нужно установить
-            // только определенные биты в этом слове, а не все 64 бита.
-            let mask = if end_bit == Self::FRAMES_PER_ENTRY - 1 {
-                !((1u64 << start_bit) - 1)
-            } else {
-                ((1u64 << (end_bit + 1)) - 1) & !((1u64 << start_bit) - 1)
-            };
-            self.write(start_word, |v| v | mask);
-        } else {
-            // Первое частичное слово
-            let first_mask = !((1u64 << start_bit) - 1);
-            self.write(start_word, |v| v | first_mask);
-
-            // Полные промежуточные слова
-            for word_index in (start_word + 1)..end_word {
-                self.write(word_index, |_| 0xFFFF_FFFF_FFFF_FFFF);
+        if start.word == end.word {
+            let mask = Self::mask_range(start.bit, end.bit);
+            if mask != 0 {
+                self.write(start.word, |v| v | mask);
             }
+            return;
+        }
 
-            // Последнее частичное слово
-            let last_mask = (1u64 << (end_bit + 1)) - 1;
-            self.write(end_word, |v| v | last_mask);
+        self.write(start.word, |v| v | Self::mask_from(start.bit));
+
+        for word_index in (start.word + 1)..end.word {
+            self.write(word_index, |_| u64::MAX);
+        }
+
+        if end.bit > 0 {
+            self.write(end.word, |v| v | Self::mask_until(end.bit));
         }
     }
 
     fn set_unchecked(&self, frame: Frame) {
-        let (word_index, bit_index) = self.relative_frame_indexes(frame);
-        self.write(word_index, |v| v | (1u64 << bit_index));
+        let pos = self.entry_pos(frame);
+        self.write(pos.word, |v| v | (1u64 << pos.bit));
     }
 
     #[inline]
@@ -214,34 +301,45 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
             return;
         }
 
-        let (word_index, bit_index) = self.relative_frame_indexes(frame);
-        self.write(word_index, |v| v & !(1u64 << bit_index));
+        let pos = self.entry_pos(frame);
+        self.write(pos.word, |v| v & !(1u64 << pos.bit));
     }
 
     #[inline]
-    fn relative_frame_indexes(&self, frame: Frame) -> (usize, usize) {
-        let relative_frame_index = frame.number().saturating_sub(self.base_frame.number());
-        let word_index = relative_frame_index / Self::FRAMES_PER_ENTRY;
-        let bit_index = relative_frame_index % Self::FRAMES_PER_ENTRY;
-
-        (word_index, bit_index)
+    fn entry_pos(&self, frame: Frame) -> EntryPos {
+        let relative = frame.number().saturating_sub(self.base_frame.number());
+        EntryPos::new(
+            relative / Self::BITS_PER_ENTRY,
+            relative % Self::BITS_PER_ENTRY,
+        )
     }
 
-    /// Находит первый свободный бит (0) в слове. Возвращает индекс бита или None, если слово полностью занято.
+    /// Находит первый свободный бит (0) в слове в пределах указанной маски.
     #[inline]
-    fn find_free_bit_in_word(word: u64) -> Option<usize> {
-        if word == 0xFFFF_FFFF_FFFF_FFFF {
+    fn first_free_bit(word: u64, allowed_mask: u64) -> Option<usize> {
+        let free_bits = !word & allowed_mask;
+        if free_bits == 0 {
+            None
+        } else {
+            Some(free_bits.trailing_zeros() as usize)
+        }
+    }
+
+    #[inline]
+    fn try_allocate_in_word(&self, word_index: usize, allowed_mask: u64) -> Option<Frame> {
+        if allowed_mask == 0 {
             return None;
         }
-        // Находим первый нулевой бит, инвертируя слово и используя trailing_zeros
-        Some((!word).trailing_zeros() as usize)
+
+        let word_value = self.read(word_index);
+        let bit_index = Self::first_free_bit(word_value, allowed_mask)?;
+        Some(self.allocate_frame_at(word_index, bit_index))
     }
 
     /// Выделяет фрейм по индексу слова и индексу бита
     #[inline]
     fn allocate_frame_at(&self, word_index: usize, bit_index: usize) -> Frame {
-        let frame_number =
-            self.base_frame.number() + word_index * Self::FRAMES_PER_ENTRY + bit_index;
+        let frame_number = self.base_frame.number() + word_index * Self::BITS_PER_ENTRY + bit_index;
         let frame = Frame::new(frame_number);
         self.set_unchecked(frame);
         frame
@@ -249,70 +347,99 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
 
     /// Выделяет в памяти свободный фрейм, начиная поиск с offset
     pub fn alloc_from(&self, offset: Frame) -> Option<Frame> {
-        let target_region_end_frame = Frame::from(self.target_region.end());
-
-        let (start_word, start_bit) = self.relative_frame_indexes(offset);
-        let (end_word, _) = self.relative_frame_indexes(target_region_end_frame);
+        let region_end_exclusive = Frame::from(self.target_region.end()).add(1);
+        let start = self.entry_pos(offset);
+        let region_end = self.entry_pos(region_end_exclusive);
 
         // Поиск от offset до конца региона
-        if let Some(frame) = self.search_range(start_word, start_bit, end_word, 0) {
+        if let Some(frame) = self.search_range(start, region_end) {
             return Some(frame);
         }
 
         // Если не нашли, ищем от начала региона до offset
-        let (offset_word, offset_bit) = self.relative_frame_indexes(offset);
-        self.search_range(0, 0, offset_word, offset_bit)
+        let region_begin = self.entry_pos(self.base_frame);
+        self.search_range(region_begin, start)
     }
 
     /// Вспомогательный метод для поиска свободного фрейма в диапазоне слов
-    fn search_range(
-        &self,
-        start_word: usize,
-        start_bit: usize,
-        end_word: usize,
-        end_bit: usize,
-    ) -> Option<Frame> {
-        if start_word > end_word || (start_word == end_word && start_bit >= end_bit) {
+    fn search_range(&self, start: EntryPos, end: EntryPos) -> Option<Frame> {
+        if !start.is_before(end) {
             return None;
         }
 
-        // Обрабатываем первое слово (может быть частичным)
-        let word_value = self.read(start_word);
-        let masked_word = if start_word == end_word {
-            // Все в одном слове - маскируем оба конца
-            let mask = ((1u64 << end_bit) - 1) & !((1u64 << start_bit) - 1);
-            word_value | !mask
-        } else {
-            // Маскируем начало
-            word_value | ((1u64 << start_bit) - 1)
-        };
-
-        if let Some(bit_index) = Self::find_free_bit_in_word(masked_word) {
-            return Some(self.allocate_frame_at(start_word, bit_index));
+        if start.word == end.word {
+            return self.try_allocate_in_word(start.word, Self::mask_range(start.bit, end.bit));
         }
 
-        // Если все в одном слове и не нашли - выходим
-        if start_word == end_word {
-            return None;
+        if let Some(frame) = self.try_allocate_in_word(start.word, Self::mask_from(start.bit)) {
+            return Some(frame);
         }
 
-        // Обрабатываем полные промежуточные слова
-        for word_index in (start_word + 1)..end_word {
-            let word_value = self.read(word_index);
-            if let Some(bit_index) = Self::find_free_bit_in_word(word_value) {
-                return Some(self.allocate_frame_at(word_index, bit_index));
+        for word in (start.word + 1)..end.word {
+            if let Some(frame) = self.try_allocate_in_word(word, u64::MAX) {
+                return Some(frame);
             }
         }
 
-        // Обрабатываем последнее слово (может быть частичным)
-        if end_bit > 0 {
-            let word_value = self.read(end_word);
-            let masked_word = word_value | !((1u64 << end_bit) - 1);
-            if let Some(bit_index) = Self::find_free_bit_in_word(masked_word) {
-                return Some(self.allocate_frame_at(end_word, bit_index));
-            }
+        if end.bit > 0 {
+            return self.try_allocate_in_word(end.word, Self::mask_until(end.bit));
         }
 
         None
+    }
+
+    #[cfg_attr(not(test), doc(hidden))]
+    pub fn bitmap_address(&self) -> PageAlignedAddress {
+        self.bitmap_address
+    }
+
+    #[cfg_attr(not(test), doc(hidden))]
+    pub fn managed_region(&self) -> &MemoryRange<PageAlignedAddress> {
+        &self.target_region
+    }
+
+    #[cfg_attr(not(test), doc(hidden))]
+    pub fn is_allocated(&self, frame: Frame) -> bool {
+        if !self.is_in_range(frame) {
+            return false;
+        }
+
+        let pos = self.entry_pos(frame);
+        let value = self.read(pos.word);
+        (value & (1u64 << pos.bit)) != 0
+    }
+
+    #[inline]
+    fn mask_lower(bits: usize) -> u64 {
+        if bits == 0 {
+            0
+        } else if bits >= Self::BITS_PER_ENTRY {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        }
+    }
+
+    #[inline]
+    fn mask_from(bit: usize) -> u64 {
+        if bit >= Self::BITS_PER_ENTRY {
+            0
+        } else {
+            !Self::mask_lower(bit)
+        }
+    }
+
+    #[inline]
+    fn mask_until(bits: usize) -> u64 {
+        Self::mask_lower(bits)
+    }
+
+    #[inline]
+    fn mask_range(start: usize, end: usize) -> u64 {
+        if start >= end {
+            0
+        } else {
+            Self::mask_until(end) & Self::mask_from(start)
+        }
     }
 }

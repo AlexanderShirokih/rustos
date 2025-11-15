@@ -6,6 +6,7 @@ impl EntryFlags {
     // Базовые флаги
     pub const VALID: Self = EntryFlags(1 << 0);
     pub const TABLE: Self = EntryFlags(1 << 1);
+    pub const PAGE: Self = EntryFlags(1 << 1);
     pub const BLOCK: Self = EntryFlags(0 << 1);
     pub const ACCESS: Self = EntryFlags(1 << 10);
 
@@ -29,29 +30,24 @@ impl EntryFlags {
     pub const PRIVILEGED_EXECUTE_NEVER: Self = EntryFlags(1 << 53);
 
     // Распространенные комбинации
-    pub const KERNEL_CODE: Self = Self::combine(&[
-        Self::VALID,
-        Self::BLOCK,
-        Self::ACCESS,
-        Self::NORMAL_MEMORY,
-        Self::INNER_SHAREABLE,
-        Self::KERNEL_RO,
-    ]);
+    pub const KERNEL_CODE: Self =
+        Self::combine(&[Self::NORMAL_MEMORY, Self::INNER_SHAREABLE, Self::KERNEL_RO]);
 
     pub const KERNEL_DATA: Self = Self::combine(&[
-        Self::VALID,
-        Self::BLOCK,
-        Self::ACCESS,
         Self::NORMAL_MEMORY,
         Self::INNER_SHAREABLE,
         Self::KERNEL_RW,
         Self::EXECUTE_NEVER,
     ]);
 
+    pub const KERNEL_RODATA: Self = Self::combine(&[
+        EntryFlags::NORMAL_MEMORY,
+        EntryFlags::INNER_SHAREABLE,
+        EntryFlags::KERNEL_RO,
+        EntryFlags::EXECUTE_NEVER,
+    ]);
+
     pub const USER_CODE: Self = Self::combine(&[
-        Self::VALID,
-        Self::BLOCK,
-        Self::ACCESS,
         Self::NORMAL_MEMORY,
         Self::INNER_SHAREABLE,
         Self::USER_RO,
@@ -59,9 +55,6 @@ impl EntryFlags {
     ]);
 
     pub const USER_DATA: Self = Self::combine(&[
-        Self::VALID,
-        Self::BLOCK,
-        Self::ACCESS,
         Self::NORMAL_MEMORY,
         Self::INNER_SHAREABLE,
         Self::USER_RW,
@@ -70,9 +63,6 @@ impl EntryFlags {
     ]);
 
     pub const DEVICE: Self = Self::combine(&[
-        Self::VALID,
-        Self::BLOCK,
-        Self::ACCESS,
         Self::DEVICE_MEMORY,
         Self::OUTER_SHAREABLE,
         Self::KERNEL_RW,
@@ -97,13 +87,8 @@ impl EntryFlags {
     }
 
     /// Добавить флаг
-    pub fn insert(&mut self, flag: Self) {
-        self.0 |= flag.0;
-    }
-
-    /// Удалить флаг
-    pub fn remove(&mut self, flag: Self) {
-        self.0 &= !flag.0;
+    pub fn set(&self, flag: Self) -> Self {
+        Self(self.0 | flag.0)
     }
 
     /// Получить сырое значение

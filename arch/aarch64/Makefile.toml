@@ -86,6 +86,6 @@ script = [
         -m 512M \
         -nographic -serial mon:stdio \
         -kernel ../../target/build/kernel-qemu.bin \
-        -s -S
+        -S -gdb tcp::1234
     """
 ]

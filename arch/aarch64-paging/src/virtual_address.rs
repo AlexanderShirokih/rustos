@@ -14,7 +14,7 @@ impl VirtualAddress {
     }
 }
 
-pub(crate) trait VirtualAddressExt {
+pub trait VirtualAddressExt {
     /// Получить смещение страницы (биты 0-11)
     fn page_offset(&self) -> usize;
 

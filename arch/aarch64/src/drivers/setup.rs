@@ -1,74 +1,67 @@
 use crate::fdt::DeviceTree;
 use crate::memory::entry_flags::EntryFlags;
-use crate::memory::layout::{MemoryLayout, MemoryRegion};
-use memory::physical::{PageAlignedAddress, PhysicalAddress};
+use crate::memory::layout::MemoryRegion;
+use aarch64_paging::MemoryLayout;
+use memory::physical::PageAlignedAddress;
 
-const DEFAULT_FRAME_SIZE: usize = 4096;
+unsafe extern "C" {
+    static _text_start: u8;
+    static _text_end: u8;
 
-pub(crate) struct MemoryLayoutBuilder {
-    pub device_tree: DeviceTree,
-    pub kernel_start: usize,
-    pub kernel_end: usize,
+    static _rodata_start: u8;
+    static _rodata_end: u8;
+
+    static _rw_start: u8;
+    static _rw_end: u8;
 }
 
-impl From<MemoryLayoutBuilder> for MemoryLayout {
-    fn from(memory_layout_builder: MemoryLayoutBuilder) -> Self {
-        let dt = memory_layout_builder.device_tree;
-        let (ram_start, ram_size) = find_primary_ram_region(&dt).unwrap_or((0, 0));
+pub(crate) struct MemoryLayoutBuildError {
+    pub message: &'static str,
+}
 
-        let frame_size = DEFAULT_FRAME_SIZE;
-        let kernel_start =
-            PhysicalAddress::new(memory_layout_builder.kernel_start).align_down(frame_size);
-        let kernel_end =
-            PhysicalAddress::new(memory_layout_builder.kernel_end).align_up(frame_size);
+pub(crate) fn build_memory_layout(
+    dt: &DeviceTree,
+    additional: MemoryRegion<PageAlignedAddress>,
+) -> Result<MemoryLayout, MemoryLayoutBuildError> {
+    let (heap_start, heap_end) = find_primary_ram_region(&dt).ok_or(MemoryLayoutBuildError {
+        message: "Can't extract memory nodes",
+    })?;
 
-        let kernel_region = MemoryRegion {
-            label: "kernel",
-            start: kernel_start,
-            end: kernel_end,
-            flags: EntryFlags::KERNEL_DATA,
-            frame_size,
-        };
+    let heap_region = MemoryRegion::new("Heap", heap_start, heap_end, EntryFlags::KERNEL_DATA);
 
-        // Создаем DTB регион
-        let dtb_size = dt.size();
-        let dtb_start = PhysicalAddress::new(dt.base_address()).align_down(frame_size);
-        let dtb_end = PhysicalAddress::new(dt.base_address() + dtb_size).align_up(frame_size);
+    let device_tree_region = MemoryRegion::new(
+        "Device Tree",
+        dt.base_address(),
+        dt.base_address() + dt.size(),
+        EntryFlags::KERNEL_DATA,
+    );
 
-        let dtb_region = MemoryRegion {
-            label: "dtb",
-            start: dtb_start,
-            end: dtb_end,
-            flags: EntryFlags::KERNEL_DATA,
-            frame_size,
-        };
+    unsafe {
+        let kernel_code_region = MemoryRegion::new_raw(
+            "Kernel code",
+            &_text_start,
+            &_text_end,
+            EntryFlags::KERNEL_CODE,
+        );
 
-        let heap_region = build_heap_region(ram_start, ram_size, frame_size);
+        let kernel_data_region =
+            MemoryRegion::new_raw("Kernel data", &_rw_start, &_rw_end, EntryFlags::KERNEL_DATA);
 
-        MemoryLayout {
-            kernel: kernel_region,
-            dtb: dtb_region,
+        let kernel_rodata_region = MemoryRegion::new_raw(
+            "Kernel read-only data",
+            &_rodata_start,
+            &_rodata_end,
+            EntryFlags::KERNEL_RODATA,
+        );
+
+        Ok(MemoryLayout {
+            kernel_code: kernel_code_region,
+            kernel_rodata: kernel_rodata_region,
+            kernel_data: kernel_data_region,
+            dtb: device_tree_region,
             heap: heap_region,
-        }
-    }
-}
-
-fn build_heap_region(
-    ram_start: usize,
-    ram_size: usize,
-    frame_size: usize,
-) -> MemoryRegion<PageAlignedAddress> {
-    let ram_end = ram_start.saturating_add(ram_size);
-
-    let start = PhysicalAddress::new(ram_start).align_up(frame_size);
-    let end = PhysicalAddress::new(ram_end).align_down(frame_size);
-
-    MemoryRegion {
-        label: "heap",
-        start,
-        end,
-        flags: EntryFlags::NORMAL_MEMORY,
-        frame_size,
+            additional,
+        })
     }
 }
 
@@ -101,7 +94,7 @@ fn find_primary_ram_region(dt: &DeviceTree) -> Option<(usize, usize)> {
         if let Some(reg) = node.get_prop(b"reg") {
             if let Some((start, size)) = parse_first_reg(reg, address_cells, size_cells) {
                 if size != 0 {
-                    return Some((start as usize, size as usize));
+                    return Some((start as usize, (start + size) as usize));
                 }
             }
         }

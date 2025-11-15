@@ -7,3 +7,10 @@ edition = "2024"
 spin = "0.10.0"
 heapless = "0.9.1"
 kernel-core = { path = "../core" }
+
+[features]
+default = []
+mem-bench = []
+
+[dev-dependencies]
+proptest = "1.4"

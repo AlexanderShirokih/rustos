@@ -1,0 +1,8 @@
+[package]
+name = "aarch64-paging"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kernel-core = { path = "../../core" }
+memory = { path = "../../memory" }

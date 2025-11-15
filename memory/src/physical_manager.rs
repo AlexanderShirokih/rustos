@@ -36,12 +36,7 @@ pub enum ManagerError {
 
 /// Трейт аллокатора фреймов физической памяти.
 ///
-/// Предоставляет интерфейс для выделения и освобождения фреймов физической памяти.
-/// Реализации этого трейта должны быть потокобезопасными (Send + Sync).
-pub trait FrameAllocator: Send + Sync {
-    /// Возвращает размер физического фрейма в байтах
-    fn frame_size(&self) -> usize;
-
+pub trait FrameAllocator {
     /// Резервирует область физической памяти начиная с указанного адреса.
     /// Помечает фреймы как занятые без проверки их текущего состояния.
     fn reserve_frames_exact(
@@ -55,6 +50,8 @@ pub trait FrameAllocator: Send + Sync {
 
     /// Освободить фрейм
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError>;
+
+    fn get_self_area(&self) -> MemoryRange<PageAlignedAddress>;
 }
 
 /// Менеджер физической памяти.
@@ -96,7 +93,7 @@ impl<'a, B: MemoryBackend> PhysicalMemoryManager<'a, B> {
 
         info!(
             console(),
-            "Using RAM region from 0x{:x} to 0x{:x}. Which is {}KB total\r\n",
+            "Using RAM region from 0x{:x} to 0x{:x}. Which is {}KB total",
             memory.start().as_usize(),
             memory.end().as_usize(),
             memory.size() / 1024
@@ -105,8 +102,8 @@ impl<'a, B: MemoryBackend> PhysicalMemoryManager<'a, B> {
         let frame_bitmap = FrameBitmap::new(memory_backend, &memory, excluded_regions)
             .map_err(ManagerError::BitmapCreationFailed)?;
 
-        let start_frame: Frame = Frame::from(memory.start());
-        let end_frame: Frame = Frame::from(memory.end());
+        let start_frame = Frame::from(memory.start());
+        let end_frame = Frame::from(memory.end());
         let manager = PhysicalMemoryManager {
             allocated_frames: Mutex::new(frame_bitmap),
             memory: memory.clone(),
@@ -120,35 +117,30 @@ impl<'a, B: MemoryBackend> PhysicalMemoryManager<'a, B> {
 }
 
 impl<'a, B: MemoryBackend> FrameAllocator for PhysicalMemoryManager<'a, B> {
-    /// Возвращает размер физического фрейма в байтах
-    #[inline]
-    fn frame_size(&self) -> usize {
-        self.memory.frame_size
-    }
-
     fn reserve_frames_exact(
         &self,
         from_inclusive: Frame,
         to_exclusive: Frame,
     ) -> Result<Frame, ReserveFrameError> {
-        if from_inclusive > self.start_frame || to_exclusive < self.end_frame {
-            let bitmap = self.allocated_frames.lock();
-
-            bitmap.set_range_unchecked(from_inclusive, to_exclusive);
-
-            Ok(from_inclusive)
-        } else {
-            // Требуемая область находится за пределами области памяти
-            Err(ReserveFrameError::OutOfTargetBoundary {
+        let region_end_exclusive = self.end_frame.add(1);
+        if from_inclusive < self.start_frame
+            || to_exclusive > region_end_exclusive
+            || from_inclusive >= to_exclusive
+        {
+            return Err(ReserveFrameError::OutOfTargetBoundary {
                 boundary: self.memory.clone(),
                 from_inclusive,
                 to_exclusive,
-            })
+            });
         }
+
+        let bitmap = self.allocated_frames.lock();
+        bitmap.set_range_unchecked(from_inclusive, to_exclusive);
+
+        Ok(from_inclusive)
     }
 
     /// Выделяет один фрейм памяти
-    #[inline]
     fn allocate_frame(&self) -> Option<Frame> {
         // Начинаем с подсказки next_frame_hint
         let current = self.next_frame_hint.load(Ordering::Relaxed);
@@ -185,5 +177,9 @@ impl<'a, B: MemoryBackend> FrameAllocator for PhysicalMemoryManager<'a, B> {
             // Фрейм находится за пределами управляемого диапазона памяти
             Err(FrameError::OutOfRange)
         }
+    }
+
+    fn get_self_area(&self) -> MemoryRange<PageAlignedAddress> {
+        self.allocated_frames.lock().get_alloc_range()
     }
 }

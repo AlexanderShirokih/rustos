@@ -64,16 +64,12 @@ impl<A: AddressType> MemoryRange<A> {
 
         match (has_left, has_right) {
             (false, false) => AvailableRegions::None, // self целиком внутри other
-            (true, false) => AvailableRegions::One(MemoryRange::new(
-                left_start,
-                left_end,
-                self.frame_size,
-            )),
-            (false, true) => AvailableRegions::One(MemoryRange::new(
-                right_start,
-                right_end,
-                self.frame_size,
-            )),
+            (true, false) => {
+                AvailableRegions::One(MemoryRange::new(left_start, left_end, self.frame_size))
+            }
+            (false, true) => {
+                AvailableRegions::One(MemoryRange::new(right_start, right_end, self.frame_size))
+            }
             (true, true) => AvailableRegions::Two {
                 left: MemoryRange::new(left_start, left_end, self.frame_size),
                 right: MemoryRange::new(right_start, right_end, self.frame_size),
