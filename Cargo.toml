@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "arch/aarch64", "arch/aarch64-paging",
     "arch/common",
-    "core",
+    "core", "fdt",
     "memory",
     "util",
 ]

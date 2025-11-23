@@ -13,7 +13,7 @@ aarch64-paging = { path = "../aarch64-paging" }
 kernel-core = { path = "../../core" }
 memory = { path = "../../memory" }
 util = { path = "../../util" }
-spin = "0.10.0"
+fdt = { path = "../../fdt" }
 
 [features]
 qemu_virt = []

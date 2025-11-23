@@ -31,10 +31,7 @@ fn map_and_translate_single_page() {
     let translated = manager
         .translate(page.start_address())
         .expect("translation succeeds");
-    assert_eq!(
-        translated.as_usize(),
-        frame.page_address().as_usize()
-    );
+    assert_eq!(translated.as_usize(), frame.page_address().as_usize());
 
     let _ = verify_leaf_entry(&backend, &manager, page, frame);
 }
@@ -66,10 +63,7 @@ fn map_range_maps_multiple_pages() {
         let translated = manager
             .translate(page.start_address())
             .expect("translation succeeds");
-        assert_eq!(
-            translated.as_usize(),
-            frame.page_address().as_usize()
-        );
+        assert_eq!(translated.as_usize(), frame.page_address().as_usize());
     }
 }
 
@@ -111,9 +105,7 @@ fn unmap_returns_original_frame_and_clears_entry() {
     let unmapped = manager.unmap(page).expect("unmap succeeds");
     assert_eq!(unmapped.number(), frame.number());
     assert!(
-        manager
-            .translate(page.start_address())
-            .is_none(),
+        manager.translate(page.start_address()).is_none(),
         "translation should fail after unmap"
     );
 
@@ -154,11 +146,10 @@ fn block_mapping_conflict_is_reported() {
     let root_addr = manager.root_frame().page_address();
     let mut root: PageTable = backend.read(root_addr.as_physical_address());
     // Создаем block descriptor (VALID=1, TABLE/PAGE=0)
-    let block_flags = EntryFlags::KERNEL_DATA.set(EntryFlags::VALID).set(EntryFlags::ACCESS);
-    root[indices[0]].set(PageTableEntry::new_frame(
-        Frame::new(10),
-        block_flags,
-    ));
+    let block_flags = EntryFlags::KERNEL_DATA
+        .set(EntryFlags::VALID)
+        .set(EntryFlags::ACCESS);
+    root[indices[0]].set(PageTableEntry::new_frame(Frame::new(10), block_flags));
     backend.write(root_addr.as_physical_address(), root);
 
     let err = manager
@@ -210,10 +201,7 @@ fn enable_virtual_mode_records_root_page() {
         .last_root_page()
         .expect("backend should store root page")
         .as_usize();
-    let expected = manager
-        .root_frame()
-        .page_address()
-        .as_usize();
+    let expected = manager.root_frame().page_address().as_usize();
     assert_eq!(recorded, expected);
 }
 
@@ -222,11 +210,11 @@ fn adjacent_identity_regions_with_misaligned_boundaries_fail() {
     let total_frames = 512;
     let backend = mock_backend(total_frames);
     let allocator = build_frame_allocator(&backend, total_frames, &[]);
-    
+
     // Создаем два смежных региона с НЕВЫРОВНЕННЫМИ границами и РАЗНЫМИ флагами
     // Оба региона пытаются замапить фрейм 5 с разными флагами - должна быть ошибка
     let frame_size = TEST_FRAME_SIZE;
-    
+
     // kernel_code: заканчивается в середине фрейма 5
     let kernel_start = PageAlignedAddress::from_usize(frame_size * 4).unwrap();
     let kernel_end_unaligned = frame_size * 5 + frame_size / 2;
@@ -238,9 +226,11 @@ fn adjacent_identity_regions_with_misaligned_boundaries_fail() {
         flags: EntryFlags::KERNEL_CODE,
         frame_size,
     };
-    
+
     // kernel_rodata: начинается в середине фрейма 5 (делит фрейм с kernel_code!)
-    let rodata_start = PageAlignedAddress::new_unchecked(PhysicalAddress::from(frame_size * 5 + frame_size / 2 + 1));
+    let rodata_start = PageAlignedAddress::new_unchecked(PhysicalAddress::from(
+        frame_size * 5 + frame_size / 2 + 1,
+    ));
     let rodata_end_unaligned = frame_size * 8 - 1;
     // Округляем вверх до границы следующего фрейма для exclusive границы
     let rodata_end = PageAlignedAddress::aligned_up(PhysicalAddress::from(rodata_end_unaligned));
@@ -251,7 +241,7 @@ fn adjacent_identity_regions_with_misaligned_boundaries_fail() {
         flags: EntryFlags::KERNEL_RODATA,
         frame_size,
     };
-    
+
     let heap_region = make_region("heap", 64, total_frames - 64, EntryFlags::KERNEL_DATA);
     let layout = layout_from_regions(kernel_region, rodata_region, heap_region);
     let identity = [kernel_region, rodata_region];
@@ -272,7 +262,7 @@ fn adjacent_identity_regions_with_aligned_boundaries_succeed() {
     let total_frames = 512;
     let backend = mock_backend(total_frames);
     let allocator = build_frame_allocator(&backend, total_frames, &[]);
-    
+
     // Создаем два смежных региона с ВЫРОВНЕННЫМИ границами - не должно быть конфликтов
     let kernel_region = make_region("kernel", 4, 3, EntryFlags::KERNEL_CODE);
     let rodata_region = make_region("rodata", 7, 2, EntryFlags::KERNEL_RODATA);
@@ -289,7 +279,12 @@ fn adjacent_identity_regions_with_aligned_boundaries_succeed() {
         for addr in (region.start.as_usize()..region.end.as_usize()).step_by(TEST_FRAME_SIZE) {
             let virt = VirtualAddress::new(addr);
             let phys = manager.translate(virt).expect("address must be mapped");
-            assert_eq!(phys.as_usize(), addr, "identity map for region {}", region.label);
+            assert_eq!(
+                phys.as_usize(),
+                addr,
+                "identity map for region {}",
+                region.label
+            );
         }
     }
 }

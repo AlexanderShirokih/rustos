@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
+extern crate alloc;
 
 mod boot_header;
 mod drivers;
-mod fdt;
 mod memory;
 
 use crate::drivers::setup::build_memory_layout;
@@ -11,13 +11,13 @@ use crate::drivers::setup::build_memory_layout;
 use crate::drivers::uart_dm::UartDm;
 #[cfg(feature = "qemu_virt")]
 use crate::drivers::uart_pl011::UartPl011;
-use crate::fdt::DeviceTree;
 use crate::memory::manager::MemoryManager;
 use ::memory::physical::PageAlignedAddress;
 use aarch64_paging::{EntryFlags, MemoryRegion};
 use core::arch::asm;
 use core::hint::spin_loop;
 use core::ptr::addr_of;
+use fdt::devicetree::DeviceTree;
 use kernel_core::console::{BasicConsole, Console, set_console};
 use kernel_core::io::writer::BlockingWriter;
 use kernel_core::{fatal, info, printf};
@@ -105,10 +105,10 @@ unsafe fn early_main(dtb: usize) {
         EntryFlags::DEVICE,
     );
 
-    let device_tree = match unsafe { DeviceTree::from_ptr(dtb) } {
-        Some(d) => d,
-        None => {
-            fatal!(console, "Failed to parse device tree");
+    let device_tree = match DeviceTree::from_ptr(dtb) {
+        Ok(d) => d,
+        Err(e) => {
+            fatal!(console, "Failed to parse device tree: {:?}", e);
             return;
         }
     };

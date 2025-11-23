@@ -12,5 +12,5 @@ pub use entry_flags::EntryFlags;
 pub use layout::{MemoryLayout, MemoryRegion};
 pub use virtual_address::{VirtualAddress, VirtualAddressExt};
 pub use virtual_mem::{
-    create_page_table_manager, Page, PageTable, PageTableEntry, PageTableManager, VmError,
+    Page, PageTable, PageTableEntry, PageTableManager, VmError, create_page_table_manager,
 };

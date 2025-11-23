@@ -1,7 +1,8 @@
-use crate::fdt::DeviceTree;
 use crate::memory::entry_flags::EntryFlags;
 use crate::memory::layout::MemoryRegion;
 use aarch64_paging::MemoryLayout;
+use fdt::devicetree::DeviceTree;
+use fdt::devicetreeext::{DeviceTreeExt, OffsetSize, PropExt};
 use memory::physical::PageAlignedAddress;
 
 unsafe extern "C" {
@@ -23,10 +24,11 @@ pub(crate) fn build_memory_layout(
     dt: &DeviceTree,
     additional: MemoryRegion<PageAlignedAddress>,
 ) -> Result<MemoryLayout, MemoryLayoutBuildError> {
-    let (heap_start, heap_end) = find_primary_ram_region(&dt).ok_or(MemoryLayoutBuildError {
+    let offset_size = find_primary_ram_region(&dt).ok_or(MemoryLayoutBuildError {
         message: "Can't extract memory nodes",
     })?;
 
+    let (heap_start, heap_end) = (offset_size.start(), offset_size.end());
     let heap_region = MemoryRegion::new("Heap", heap_start, heap_end, EntryFlags::KERNEL_DATA);
 
     let device_tree_region = MemoryRegion::new(
@@ -65,85 +67,17 @@ pub(crate) fn build_memory_layout(
     }
 }
 
-fn find_primary_ram_region(dt: &DeviceTree) -> Option<(usize, usize)> {
-    let root = dt.root()?;
+fn find_primary_ram_region(dt: &DeviceTree) -> Option<OffsetSize> {
+    let cells_size = dt.cells_size()?;
 
-    let address_cells = root
-        .get_prop(b"#address-cells")
-        .and_then(|v| read_be_u32(v, 0))
-        .map(|v| v as usize)
-        .unwrap_or(2);
-
-    let size_cells = root
-        .get_prop(b"#size-cells")
-        .and_then(|v| read_be_u32(v, 0))
-        .map(|v| v as usize)
-        .unwrap_or(1);
-
-    let mut children = root.children();
-    while let Some(node) = children.next() {
-        let is_memory = node
-            .get_prop(b"device_type")
-            .map(|v| starts_with_str(v, b"memory"))
-            .unwrap_or_else(|| node.name().starts_with(b"memory"));
-
-        if !is_memory {
-            continue;
-        }
-
-        if let Some(reg) = node.get_prop(b"reg") {
-            if let Some((start, size)) = parse_first_reg(reg, address_cells, size_cells) {
-                if size != 0 {
-                    return Some((start as usize, (start + size) as usize));
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn parse_first_reg(data: &[u8], address_cells: usize, size_cells: usize) -> Option<(u64, u64)> {
-    let stride = (address_cells + size_cells) * 4;
-    if stride == 0 || data.len() < stride {
-        return None;
-    }
-
-    let mut addr: u64 = 0;
-    for cell in 0..address_cells {
-        let off = cell * 4;
-        let value = read_be_u32(data, off)? as u64;
-        addr = (addr << 32) | value;
-    }
-
-    let mut size: u64 = 0;
-    for cell in 0..size_cells {
-        let off = (address_cells + cell) * 4;
-        let value = read_be_u32(data, off)? as u64;
-        size = (size << 32) | value;
-    }
-
-    Some((addr, size))
-}
-
-fn read_be_u32(data: &[u8], offset: usize) -> Option<u32> {
-    if offset + 4 > data.len() {
-        return None;
-    }
-
-    let b0 = data[offset] as u32;
-    let b1 = data[offset + 1] as u32;
-    let b2 = data[offset + 2] as u32;
-    let b3 = data[offset + 3] as u32;
-
-    Some((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
-}
-
-fn starts_with_str(buf: &[u8], needle: &[u8]) -> bool {
-    let until_nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let slice = &buf[..until_nul];
-    if slice.len() < needle.len() {
-        return false;
-    }
-    slice[..needle.len()] == needle[..]
+    dt.root()?
+        .children()
+        .filter(|node| {
+            node.prop("device_type")
+                .and_then(|device_type| device_type.as_cstr().map(|str| str.starts_with("memory")))
+                .unwrap_or_else(|| node.name().starts_with("memory"))
+        })
+        .filter_map(|node| node.prop("reg"))
+        .filter_map(|prop| prop.as_offset_size(cells_size))
+        .find(|offset_size| offset_size.size > 0)
 }

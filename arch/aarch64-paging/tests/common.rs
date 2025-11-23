@@ -1,6 +1,6 @@
-use core::assert;
 use aarch64_paging::entry_flags::EntryFlags;
 use aarch64_paging::layout::{MemoryLayout, MemoryRegion};
+use core::assert;
 use memory::memory_backend::MockMemoryBackend;
 use memory::memory_range::MemoryRange;
 use memory::physical::PageAlignedAddress;
@@ -36,7 +36,10 @@ pub fn make_region(
     }
 }
 
-pub fn make_empty_region(label: &'static str, flags: EntryFlags) -> MemoryRegion<PageAlignedAddress> {
+pub fn make_empty_region(
+    label: &'static str,
+    flags: EntryFlags,
+) -> MemoryRegion<PageAlignedAddress> {
     let addr = frame_to_address(0);
     MemoryRegion {
         label,

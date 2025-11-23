@@ -1,6 +1,7 @@
-use crate::fdt::DeviceTree;
 use core::arch::asm;
 use core::ptr::write_volatile;
+use fdt::devicetree::DeviceTree;
+use fdt::devicetreeext::NodeExt;
 
 /// Форматы пикселей, встречающиеся в simple-framebuffer/qualcomm fb.
 #[derive(Copy, Clone, Debug)]
@@ -138,15 +139,15 @@ pub fn flush_framebuffer(ptr: *const u8, len: usize) {
     }
 }
 
-fn parse_pixel_format(fmt: &[u8]) -> (PixelFormat, u32) {
-    if fmt.starts_with(b"a8r8g8b8") {
+fn parse_pixel_format(fmt: &str) -> (PixelFormat, u32) {
+    if fmt.starts_with("a8r8g8b8") {
         (PixelFormat::Argb8888, 32)
-    } else if fmt.starts_with(b"x8r8g8b8") {
+    } else if fmt.starts_with("x8r8g8b8") {
         (PixelFormat::Xrgb8888, 32)
-    } else if fmt.starts_with(b"r8g8b8a8") {
+    } else if fmt.starts_with("r8g8b8a8") {
         // В некоторых DT встречается как r8g8b8a8 для XRGB.
         (PixelFormat::Xrgb8888, 32)
-    } else if fmt.starts_with(b"r5g6b5") {
+    } else if fmt.starts_with("r5g6b5") {
         (PixelFormat::Rgb565, 16)
     } else {
         (PixelFormat::Unknown, 0)
@@ -155,19 +156,9 @@ fn parse_pixel_format(fmt: &[u8]) -> (PixelFormat, u32) {
 
 /// Ищет simple-framebuffer в DTB и возвращает параметры фреймбуфера.
 pub unsafe fn find_in_dtb(device_tree: &DeviceTree) -> Option<FramebufferInfo> {
-    let node = device_tree.find_first(|n| {
-        let name = n.name();
-        if name == b"framebuffer"
-            || name.starts_with(b"framebuffer@")
-            || name.starts_with(b"simple-framebuffer")
-        {
-            return true;
-        }
-        if let Some(compat) = n.get_prop(b"compatible") {
-            return compat.starts_with(b"simple-framebuffer");
-        }
-        false
-    })?;
+    let framebuffer = device_tree
+        .nodes()
+        .find(|node| node.is_compatible("simple-framebuffer"))?;
 
     let mut reg_base: usize = 0;
     let mut width: u32 = 0;
@@ -176,36 +167,49 @@ pub unsafe fn find_in_dtb(device_tree: &DeviceTree) -> Option<FramebufferInfo> {
     let mut bpp: u32 = 0;
     let mut fmt = PixelFormat::Unknown;
 
-    let mut it = node.props();
-    while let Some(p) = it.next() {
-        if p.name == b"reg" {
-            if p.value.len() >= 16 {
-                let addr_hi = read_be_u32(p.value, 0) as u64;
-                let addr_lo = read_be_u32(p.value, 4) as u64;
-                reg_base = ((addr_hi << 32) | addr_lo) as usize;
-            } else if p.value.len() >= 8 {
-                reg_base = read_be_u32(p.value, 0) as usize;
+    while let Some(p) = framebuffer.properties().next() {
+        let name = p.name();
+        let value = p.value();
+
+        match name {
+            "reg" => {
+                if value.len() >= 16 {
+                    let addr_hi = p.try_as_u32(0).unwrap() as u64;
+                    let addr_lo = p.try_as_u32(4).unwrap() as u64;
+                    reg_base = ((addr_hi << 32) | addr_lo) as usize;
+                } else if value.len() >= 8 {
+                    reg_base = p.try_as_u32(0).unwrap() as usize;
+                }
             }
-        } else if p.name == b"width" && p.value.len() >= 4 {
-            width = read_be_u32(p.value, 0);
-        } else if p.name == b"height" && p.value.len() >= 4 {
-            height = read_be_u32(p.value, 0);
-        } else if (p.name == b"stride" || p.name == b"line_length") && p.value.len() >= 4 {
-            stride = read_be_u32(p.value, 0);
-        } else if (p.name == b"format" || p.name == b"pixel_format") && !p.value.is_empty() {
-            // Строка формата может быть с NUL в конце — отрежем его.
-            let nul = p
-                .value
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(p.value.len());
-            let (pf, bits) = parse_pixel_format(&p.value[..nul]);
-            fmt = pf;
-            if bits != 0 {
-                bpp = bits;
+
+            "width" => {
+                width = p.try_as_u32(0).unwrap_or(0);
             }
-        } else if p.name == b"bits-per-pixel" && p.value.len() >= 4 {
-            bpp = read_be_u32(p.value, 0);
+
+            "height" => {
+                height = p.try_as_u32(0).unwrap_or(0);
+            }
+
+            "stride" | "line_length" => {
+                stride = p.try_as_u32(0).unwrap_or(0);
+            }
+
+            "format" | "pixel_format" => {
+                if let Some((pf, bits)) = p.as_cstr().map(|s| parse_pixel_format(s)) {
+                    fmt = pf;
+                    if bits != 0 {
+                        bpp = bits;
+                    }
+                }
+            }
+
+            "bits-per-pixel" => {
+                if let Some(parsed_bpp) = p.try_as_u32(0) {
+                    bpp = parsed_bpp;
+                }
+            }
+
+            _ => {}
         }
     }
 
@@ -216,7 +220,9 @@ pub unsafe fn find_in_dtb(device_tree: &DeviceTree) -> Option<FramebufferInfo> {
         } else {
             width * (bpp / 8)
         };
+
         let final_bpp = if bpp != 0 { bpp } else { 32 };
+
         return Some(FramebufferInfo {
             paddr: reg_base,
             width,
@@ -228,13 +234,4 @@ pub unsafe fn find_in_dtb(device_tree: &DeviceTree) -> Option<FramebufferInfo> {
     }
 
     None
-}
-
-#[inline(always)]
-fn read_be_u32(buf: &[u8], off: usize) -> u32 {
-    let b0 = *buf.get(off).unwrap_or(&0) as u32;
-    let b1 = *buf.get(off + 1).unwrap_or(&0) as u32;
-    let b2 = *buf.get(off + 2).unwrap_or(&0) as u32;
-    let b3 = *buf.get(off + 3).unwrap_or(&0) as u32;
-    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 }

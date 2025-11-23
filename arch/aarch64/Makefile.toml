@@ -60,6 +60,17 @@ script = [
     "cargo objcopy --release --features qemu_virt -- -O binary ../../target/build/kernel-qemu.bin"
 ]
 
+[tasks.rpi5-build]
+command = "cargo"
+args = ["build", "--release", "--features", "rpi5"]
+
+[tasks.rpi5-image]
+dependencies = ["rpi5-build"]
+script = [
+    "mkdir -p ../../target/build/rpi5/",
+    "cargo objcopy --release --features rpi5 -- -O binary ../../target/build/rpi5/kernel8.img"
+]
+
 [tasks.qemu-run]
 dependencies = ["qemu-image"]
 script = [

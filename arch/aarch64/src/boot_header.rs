@@ -20,4 +20,3 @@ global_asm!(
         .word 0                             // res5
     "#
 );
-
