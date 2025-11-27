@@ -1,66 +1,51 @@
-use core::mem::{MaybeUninit, align_of, size_of};
-use core::ptr::addr_of_mut;
-
-// Встроенная мини-куча для хранения объектов до момента настройки полноценной кучи
-#[unsafe(link_section = ".bss.heap")]
-static mut EMBEDDED_BUMP_ALLOCATOR: MaybeUninit<BumpAllocator> = MaybeUninit::uninit();
+use core::alloc::Layout;
+use core::fmt::Formatter;
+use core::ptr::NonNull;
+use memory::physical::Frame;
 
 pub struct BumpAllocator {
-    buffer: [u8; 8192],
+    start: usize,
+    end: usize,
     offset: usize,
 }
 
 impl BumpAllocator {
-    pub fn init(&mut self) {
-        self.offset = 0;
+    pub fn new(from: Frame, to: Frame) -> Self {
+        Self {
+            start: from.page_address().as_usize(),
+            end: to.page_address().as_usize(),
+            offset: 0,
+        }
     }
 
-    #[inline]
-    fn align_up(address: usize, align: usize) -> usize {
-        (address + (align - 1)) & !(align - 1)
+    fn remaining(&self) -> usize {
+        self.end - self.start - self.offset
     }
 
-    pub fn alloc_uninit<T>(&mut self) -> Result<&mut MaybeUninit<T>, BumpAllocError> {
-        let align = align_of::<T>();
-        let size = size_of::<T>();
-
-        let base = self.buffer.as_mut_ptr() as usize;
-        let start = base + self.offset;
-        let aligned = Self::align_up(start, align);
+    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, BumpAllocError> {
+        let align = layout.align();
+        let size = layout.size();
+        let base = self.start;
+        let current = base + self.offset;
+        let aligned = current.div_ceil(align) * align;
 
         let new_offset = (aligned - base)
             .checked_add(size)
             .ok_or(BumpAllocError::AddressOverflow)?;
 
-        if new_offset > self.buffer.len() {
+        if base + new_offset > self.end {
             return Err(BumpAllocError::OutOfMemory {
                 required_size: size,
-                available_size: self.buffer.len() - self.offset,
+                available_size: self.remaining(),
             });
         }
 
-        let ptr = aligned as *mut MaybeUninit<T>;
         self.offset = new_offset;
 
-        unsafe { Ok(&mut *ptr) }
-    }
-
-    /// Выделяет память и инициализирует значением, возвращая сырой указатель.
-    /// Полезно, когда нужно избежать проблем с заимствованием
-    #[inline]
-    pub fn alloc_ptr<T>(&mut self, value: T) -> Result<*const T, BumpAllocError> {
-        let uninit = self.alloc_uninit::<T>()?;
-        let ptr = uninit.as_ptr();
-        uninit.write(value);
-        Ok(ptr)
+        unsafe { Ok(NonNull::new_unchecked(aligned as *mut u8)) }
     }
 }
 
-pub fn bump_allocator() -> &'static mut BumpAllocator {
-    unsafe { &mut *addr_of_mut!(EMBEDDED_BUMP_ALLOCATOR).cast::<BumpAllocator>() }
-}
-
-#[derive(Debug)]
 pub enum BumpAllocError {
     AddressOverflow,
 
@@ -68,4 +53,23 @@ pub enum BumpAllocError {
         required_size: usize,
         available_size: usize,
     },
+}
+
+impl core::fmt::Display for BumpAllocError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            BumpAllocError::AddressOverflow => write!(f, "Address overflow"),
+
+            BumpAllocError::OutOfMemory {
+                required_size,
+                available_size,
+            } => {
+                write!(
+                    f,
+                    "Out of memory: required {} bytes, available {} bytes",
+                    required_size, available_size
+                )
+            }
+        }
+    }
 }

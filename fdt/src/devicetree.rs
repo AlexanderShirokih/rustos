@@ -62,28 +62,14 @@ impl<'a> Property<'a> {
 
     pub fn try_as_u32(&self, offset: usize) -> Option<u32> {
         let bytes = self.value;
-
-        if bytes.len() - offset < 4 {
-            return None;
-        }
-
-        let mut arr = [0u8; 4];
-        arr.copy_from_slice(bytes);
-
-        Some(u32::from_be_bytes(arr))
+        let slice = bytes.get(offset..offset + size_of::<u32>())?;
+        Some(u32::from_be_bytes(slice.try_into().unwrap()))
     }
 
     pub fn try_as_u64(&self, offset: usize) -> Option<u64> {
         let bytes = self.value;
-
-        if bytes.len() - offset < 8 {
-            return None;
-        }
-
-        let mut arr = [0u8; 8];
-        arr.copy_from_slice(bytes);
-
-        Some(u64::from_be_bytes(arr))
+        let slice = bytes.get(offset..offset + size_of::<u64>())?;
+        Some(u64::from_be_bytes(slice.try_into().unwrap()))
     }
 
     /// Возвращает value интерпретируя как usize
@@ -142,9 +128,10 @@ impl<'a> DeviceTree<'a> {
     }
 
     pub fn nodes(&'a self) -> NodeIter<'a> {
-        let walker =
-            DeviceTreeWalker::new(self.buffer, &self.header, self.header.struct_off as usize);
-        NodeIter { walker }
+        match self.root() {
+            Some(root) => root.children(),
+            None => self.root_nodes(),
+        }
     }
 
     /// Ищет узел в списке структур. Принимает как абсолютный путь, так и alias
@@ -190,7 +177,13 @@ impl<'a> DeviceTree<'a> {
     }
 
     pub fn root(&'a self) -> Option<Node<'a>> {
-        self.nodes().next()
+        self.root_nodes().next()
+    }
+
+    fn root_nodes(&'a self) -> NodeIter<'a> {
+        let walker =
+            DeviceTreeWalker::new(self.buffer, &self.header, self.header.struct_off as usize);
+        NodeIter { walker }
     }
 }
 

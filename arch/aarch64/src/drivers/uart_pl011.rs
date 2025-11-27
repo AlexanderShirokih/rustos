@@ -1,10 +1,14 @@
+use alloc::boxed::Box;
 use core::hint::spin_loop;
+use fdt::devicetreeext::PropExt;
+use kernel_core::console::BasicConsole;
+use kernel_core::driver::early::{EarlyDriverHandle, ProbeContext};
+use kernel_core::driver::probe::{NodeProbeExt, ProbeError, ProbeResult};
+use kernel_core::driver::register_early_driver;
 use kernel_core::io::byte_sink::{ByteSink, WouldBlock};
 use kernel_core::io::mmio::{Mmio, Register};
+use kernel_core::io::writer::BlockingWriter;
 use util::crlf::Crlf;
-
-// Драйвер UART PL011 (ARM PrimeCell)
-// Используется QEMU virt: базовый адрес по умолчанию 0x09000000
 
 const DR: Register<u32> = Register::new(0x00); // Data Register
 const FR: Register<u32> = Register::new(0x18); // Flag Register
@@ -17,6 +21,7 @@ pub struct UartPl011 {
     mmio: Mmio,
 }
 
+// Драйвер UART PL011 (ARM PrimeCell)
 impl UartPl011 {
     pub(crate) const fn new(base: usize) -> Self {
         Self {
@@ -26,7 +31,6 @@ impl UartPl011 {
 }
 
 impl ByteSink for UartPl011 {
-    #[inline(always)]
     fn try_write(&self, b: u8) -> Result<(), WouldBlock> {
         // Выходим, если очередь не пуста
         if (self.mmio.read_reg(FR) & FR_TXFF) != 0 {
@@ -37,7 +41,6 @@ impl ByteSink for UartPl011 {
         Ok(())
     }
 
-    #[inline(always)]
     fn try_write_slice(&self, buf: &[u8]) -> Result<usize, WouldBlock> {
         if buf.is_empty() {
             return Ok(0);
@@ -63,10 +66,28 @@ impl ByteSink for UartPl011 {
         Ok(consumed)
     }
 
-    #[inline(always)]
     fn flush(&self) {
         while (self.mmio.read_reg(FR) & FR_BUSY) != 0 {
             spin_loop();
         }
     }
 }
+
+fn uart_pl011_probe(context: &ProbeContext<'_>) -> ProbeResult<EarlyDriverHandle> {
+    let reg_property = context.node().require_prop("reg")?;
+    let reg = reg_property
+        .try_as_offset_size(context.cells_size())
+        .ok_or(ProbeError::Other("invalid reg"))?;
+
+    let uart = UartPl011::new(reg.offset);
+    let writer = BlockingWriter::new(uart);
+    let console = BasicConsole::new(writer);
+
+    Ok(EarlyDriverHandle::Console(Box::new(console)))
+}
+
+register_early_driver!(
+    UART_PL011_EARLY,
+    compatible = &["arm,pl011", "arm,primecell"],
+    probe = uart_pl011_probe
+);

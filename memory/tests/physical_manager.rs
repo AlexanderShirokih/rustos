@@ -1,26 +1,22 @@
 mod common;
 
-use common::{TEST_FRAME_SIZE, make_excluded, make_range, mock_backend};
+use common::{make_excluded, make_range};
 use memory::physical::Frame;
-use memory::physical_manager::{
-    FrameAllocator, FrameError, PhysicalMemoryManager, ReserveFrameError,
-};
+use memory::physical_manager::{FrameAllocator, FrameError, PhysicalMemoryManager, ReserveFrameError};
 use std::collections::HashSet;
 
-fn build_manager<'a>(
-    backend: &'a memory::memory_backend::MockMemoryBackend,
+fn build_manager(
     region_frames: usize,
     excluded_specs: &[(usize, usize)],
-) -> PhysicalMemoryManager<'a, memory::memory_backend::MockMemoryBackend> {
+) -> PhysicalMemoryManager {
     let region = make_range(0, region_frames);
     let excluded = make_excluded(excluded_specs);
-    PhysicalMemoryManager::new(backend, &region, &excluded).expect("manager should be created")
+    PhysicalMemoryManager::new(&region, excluded.into_iter())
 }
 
 #[test]
 fn reserve_exact_protects_frames() {
-    let backend = mock_backend(256);
-    let manager = build_manager(&backend, 128, &[]);
+    let manager = build_manager(128, &[]);
 
     let reserve_start = Frame::from(common::frame_to_address(8));
     let reserve_end = Frame::from(common::frame_to_address(16));
@@ -45,8 +41,7 @@ fn reserve_exact_protects_frames() {
 
 #[test]
 fn reserve_exact_out_of_bounds_is_error() {
-    let backend = mock_backend(64);
-    let manager = build_manager(&backend, 32, &[]);
+    let manager = build_manager(32, &[]);
     let start = Frame::new(40);
     let end = Frame::new(42);
 
@@ -60,8 +55,7 @@ fn reserve_exact_out_of_bounds_is_error() {
 
 #[test]
 fn allocate_and_deallocate_recycles_frames() {
-    let backend = mock_backend(128);
-    let manager = build_manager(&backend, 32, &[]);
+    let manager = build_manager(32, &[]);
 
     let first = manager.allocate_frame().expect("frame available");
     let second = manager.allocate_frame().expect("second frame available");
@@ -84,8 +78,7 @@ fn allocate_and_deallocate_recycles_frames() {
 
 #[test]
 fn deallocate_out_of_range_fails() {
-    let backend = mock_backend(64);
-    let manager = build_manager(&backend, 16, &[]);
+    let manager = build_manager(16, &[]);
     let invalid_frame = Frame::new(64);
 
     let err = manager.deallocate_frame(invalid_frame).unwrap_err();
@@ -94,8 +87,7 @@ fn deallocate_out_of_range_fails() {
 
 #[test]
 fn allocation_stops_when_exhausted() {
-    let backend = mock_backend(64);
-    let manager = build_manager(&backend, 16, &[(0, 4)]);
+    let manager = build_manager(16, &[(0, 4)]);
 
     let expected = available_frames(16, &[(0, 4)]);
     for _ in 0..expected {
@@ -109,13 +101,6 @@ fn allocation_stops_when_exhausted() {
 
 fn available_frames(region_frames: usize, excluded_specs: &[(usize, usize)]) -> usize {
     let excluded: usize = excluded_specs.iter().map(|(_, len)| *len).sum();
-    let bitmap = required_bitmap_frames(region_frames);
-    region_frames
-        .saturating_sub(excluded)
-        .saturating_sub(bitmap)
-}
-
-fn required_bitmap_frames(region_frames: usize) -> usize {
-    let bytes = region_frames.div_ceil(8);
-    bytes.div_ceil(TEST_FRAME_SIZE)
+    // Теперь bitmap не занимает фреймы, он выделяется через глобальный аллокатор
+    region_frames.saturating_sub(excluded)
 }

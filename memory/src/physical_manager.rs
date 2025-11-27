@@ -1,9 +1,8 @@
-use crate::frame_bitmap::{FrameBitmap, FrameBitmapError};
-use crate::memory_backend::MemoryBackend;
+use crate::frame_bitmap::FrameBitmap;
 use crate::memory_range::MemoryRange;
 use crate::physical::{Frame, PageAlignedAddress};
 use core::sync::atomic::{AtomicUsize, Ordering};
-use kernel_core::console::console;
+use kernel_core::console::stdout;
 use kernel_core::info;
 use spin::Mutex;
 
@@ -25,17 +24,7 @@ pub enum ReserveFrameError {
     },
 }
 
-/// Ошибки при создании менеджера физической памяти
-#[derive(Debug)]
-pub enum ManagerError {
-    /// Не удалось создать битовую карту
-    BitmapCreationFailed(FrameBitmapError),
-    /// Некорректный диапазон памяти
-    InvalidRange,
-}
-
 /// Трейт аллокатора фреймов физической памяти.
-///
 pub trait FrameAllocator {
     /// Резервирует область физической памяти начиная с указанного адреса.
     /// Помечает фреймы как занятые без проверки их текущего состояния.
@@ -51,20 +40,13 @@ pub trait FrameAllocator {
     /// Освободить фрейм
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError>;
 
-    fn get_self_area(&self) -> MemoryRange<PageAlignedAddress>;
+    /// Возвращает управляемую область памяти
+    fn get_managed_region(&self) -> MemoryRange<PageAlignedAddress>;
 }
 
 /// Менеджер физической памяти.
-///
 /// Управляет выделением и освобождением фреймов физической памяти в заданном регионе ОЗУ.
-/// Использует битовую карту для эффективного отслеживания состояния фреймов и атомарную
-/// подсказку для оптимизации поиска следующего свободного фрейма.
-///
-/// # Параметры типа
-///
-/// * `'a` - время жизни ссылки на backend памяти
-/// * `B` - тип backend'а для доступа к физической памяти
-pub struct PhysicalMemoryManager<'a, B: MemoryBackend> {
+pub struct PhysicalMemoryManager {
     /// Управляемый регион оперативной памяти
     memory: MemoryRange<PageAlignedAddress>,
 
@@ -78,45 +60,46 @@ pub struct PhysicalMemoryManager<'a, B: MemoryBackend> {
     next_frame_hint: AtomicUsize,
 
     /// Битовая карта выделенных фреймов
-    allocated_frames: Mutex<FrameBitmap<'a, B>>,
+    allocated_frames: Mutex<FrameBitmap>,
 }
 
-impl<'a, B: MemoryBackend> PhysicalMemoryManager<'a, B> {
+impl PhysicalMemoryManager {
     pub fn new(
-        memory_backend: &'a B,
         memory: &MemoryRange<PageAlignedAddress>,
-        excluded_regions: &[MemoryRange<PageAlignedAddress>],
-    ) -> Result<Self, ManagerError> {
-        if memory.start() > memory.end() {
-            return Err(ManagerError::InvalidRange);
-        }
-
+        excluded_regions: impl Iterator<Item = MemoryRange<PageAlignedAddress>>,
+    ) -> Self {
         info!(
-            console(),
-            "Using RAM region from 0x{:x} to 0x{:x}. Which is {}KB total",
+            stdout(),
+            "Using RAM region from 0x{:#} to 0x{:#}. Which is {}KB total",
             memory.start().as_usize(),
             memory.end().as_usize(),
             memory.size() / 1024
         );
 
-        let frame_bitmap = FrameBitmap::new(memory_backend, &memory, excluded_regions)
-            .map_err(ManagerError::BitmapCreationFailed)?;
+        let mut frame_bitmap = FrameBitmap::new(memory);
+
+        // Помечаем исключённые регионы как занятые
+        for exclude in excluded_regions {
+            frame_bitmap.set_range_unchecked(
+                Frame::from(exclude.start()),
+                Frame::from(exclude.end()).add(1),
+            )
+        }
 
         let start_frame = Frame::from(memory.start());
         let end_frame = Frame::from(memory.end());
-        let manager = PhysicalMemoryManager {
+
+        Self {
             allocated_frames: Mutex::new(frame_bitmap),
             memory: memory.clone(),
             start_frame,
             end_frame,
             next_frame_hint: AtomicUsize::new(start_frame.number()),
-        };
-
-        Ok(manager)
+        }
     }
 }
 
-impl<'a, B: MemoryBackend> FrameAllocator for PhysicalMemoryManager<'a, B> {
+impl FrameAllocator for PhysicalMemoryManager {
     fn reserve_frames_exact(
         &self,
         from_inclusive: Frame,
@@ -134,7 +117,7 @@ impl<'a, B: MemoryBackend> FrameAllocator for PhysicalMemoryManager<'a, B> {
             });
         }
 
-        let bitmap = self.allocated_frames.lock();
+        let mut bitmap = self.allocated_frames.lock();
         bitmap.set_range_unchecked(from_inclusive, to_exclusive);
 
         Ok(from_inclusive)
@@ -144,7 +127,7 @@ impl<'a, B: MemoryBackend> FrameAllocator for PhysicalMemoryManager<'a, B> {
     fn allocate_frame(&self) -> Option<Frame> {
         // Начинаем с подсказки next_frame_hint
         let current = self.next_frame_hint.load(Ordering::Relaxed);
-        let bitmap = self.allocated_frames.lock();
+        let mut bitmap = self.allocated_frames.lock();
 
         if let Some(frame) = bitmap.alloc_from(Frame::new(current)) {
             let next_frame_number = frame.add(1);
@@ -169,7 +152,7 @@ impl<'a, B: MemoryBackend> FrameAllocator for PhysicalMemoryManager<'a, B> {
         let frame_address = frame.page_address();
 
         if self.memory.contains(frame_address) {
-            let bitmap = self.allocated_frames.lock();
+            let mut bitmap = self.allocated_frames.lock();
             bitmap.clear(frame);
 
             Ok(())
@@ -179,7 +162,7 @@ impl<'a, B: MemoryBackend> FrameAllocator for PhysicalMemoryManager<'a, B> {
         }
     }
 
-    fn get_self_area(&self) -> MemoryRange<PageAlignedAddress> {
-        self.allocated_frames.lock().get_alloc_range()
+    fn get_managed_region(&self) -> MemoryRange<PageAlignedAddress> {
+        self.memory.clone()
     }
 }

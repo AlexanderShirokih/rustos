@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
-    "arch/aarch64", "arch/aarch64-paging",
+    "arch/aarch64",
+    "arch/aarch64-paging",
     "arch/common",
     "core", "fdt",
     "memory",
@@ -13,5 +14,5 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
-debug = true  # Включить отладочные символы даже для release сборки
-opt-level = 2  # Оптимизация с сохранением возможности отладки
+debug = true
+opt-level = 2

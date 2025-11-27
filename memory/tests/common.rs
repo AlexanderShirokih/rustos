@@ -1,4 +1,3 @@
-use memory::memory_backend::MockMemoryBackend;
 use memory::memory_range::MemoryRange;
 use memory::physical::PageAlignedAddress;
 
@@ -19,8 +18,4 @@ pub fn make_excluded(spec: &[(usize, usize)]) -> Vec<MemoryRange<PageAlignedAddr
     spec.iter()
         .map(|(start, len)| make_range(*start, *len))
         .collect()
-}
-
-pub fn mock_backend(total_frames: usize) -> MockMemoryBackend {
-    MockMemoryBackend::new(TEST_FRAME_SIZE, total_frames)
 }

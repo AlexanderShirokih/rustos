@@ -16,6 +16,7 @@ pub trait Console: Sync {
     fn logf(&self, level: Level, arguments: Arguments);
 }
 
+#[derive(Copy, Clone)]
 struct Nil;
 static NIL_CONSOLE: Nil = Nil;
 impl Console for Nil {
@@ -64,18 +65,17 @@ impl<W: Writer + Sync> Console for BasicConsole<W> {
 
 static CONS: Once<&'static dyn Console> = Once::new();
 
-#[inline(always)]
-pub fn set_console(c: &'static dyn Console) {
+pub fn set_stdout(c: &'static dyn Console) {
     let _ = CONS.call_once(|| c);
 }
 
 #[inline(always)]
-pub fn console() -> &'static dyn Console {
+pub fn stdout() -> &'static dyn Console {
     CONS.get().copied().unwrap_or(&NIL_CONSOLE)
 }
 
 pub fn log_fmt(level: Level, args: Arguments) {
-    console().logf(level, args)
+    stdout().logf(level, args)
 }
 
 #[macro_export]

@@ -1,65 +1,91 @@
-//! Глобальный аллокатор без использования статических полей
-//!
-//! Этот модуль предоставляет глобальный аллокатор, который можно использовать
-//! с атрибутом #[global_allocator]. Он хранит только указатель на HeapAllocator,
-//! который владеется MemoryManager.
-
-use crate::memory::allocator::{HeapAllocator, MemoryMapper};
+use crate::memory::allocator::HeapAllocator;
+use crate::memory::bump_allocator::BumpAllocator;
+use crate::memory::memory_mapper::Aarch64MemoryMapper;
+use crate::memory::ram_memory::Aarch64RamMemory;
 use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+use core::mem::MaybeUninit;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicPtr, Ordering};
-use memory::memory_backend::MemoryBackend;
+use core::sync::atomic::{AtomicU8, Ordering};
 use memory::physical_manager::PhysicalMemoryManager;
 
-/// Глобальный аллокатор, который хранит указатель на HeapAllocator
+/// Фазы работы аллокатора
+const PHASE_UNINIT: u8 = 0;
+const PHASE_BUMP: u8 = 1;
+const PHASE_HEAP: u8 = 2;
+
+pub type KernelHeapAllocator = HeapAllocator<
+    Aarch64RamMemory,
+    Aarch64MemoryMapper<PhysicalMemoryManager, Aarch64RamMemory>,
+>;
+
+/// Двухфазный глобальный аллокатор ядра
 pub struct GlobalKernelAllocator {
-    heap_allocator: AtomicPtr<u8>,
+    /// Текущая фаза: 0 = не инициализирован, 1 = bump, 2 = heap
+    phase: AtomicU8,
+    /// Bump-аллокатор для ранней инициализации
+    bump: UnsafeCell<MaybeUninit<BumpAllocator>>,
+    /// Полноценный heap-аллокатор
+    heap: UnsafeCell<MaybeUninit<KernelHeapAllocator>>,
 }
+
+// SAFETY: GlobalKernelAllocator использует атомарные операции для синхронизации
+// и гарантирует, что только одна фаза активна в любой момент времени
+unsafe impl Sync for GlobalKernelAllocator {}
 
 impl GlobalKernelAllocator {
     pub const fn new() -> Self {
         GlobalKernelAllocator {
-            heap_allocator: AtomicPtr::new(core::ptr::null_mut()),
+            phase: AtomicU8::new(PHASE_UNINIT),
+            bump: UnsafeCell::new(MaybeUninit::uninit()),
+            heap: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
 
-    pub unsafe fn set_heap_allocator<B: MemoryBackend, M: MemoryMapper>(
-        &self,
-        allocator: *mut HeapAllocator<B, M>,
-    ) {
-        self.heap_allocator
-            .store(allocator as *mut u8, Ordering::Release);
+    /// Инициализирует bump фазу аллокатор
+    pub fn init_bump_phase(&self, bump_allocator: BumpAllocator) {
+        let bump_ptr = self.bump.get();
+        unsafe {
+            (*bump_ptr).write(bump_allocator);
+        }
+        self.phase.store(PHASE_BUMP, Ordering::Release);
     }
 
-    fn get_heap_allocator<B: MemoryBackend, M: MemoryMapper>(
-        &self,
-    ) -> Option<&mut HeapAllocator<B, M>> {
-        let ptr = self.heap_allocator.load(Ordering::Acquire);
-        if ptr.is_null() {
-            None
-        } else {
-            unsafe { Some(&mut *(ptr as *mut HeapAllocator<B, M>)) }
+    /// Переключает аллокатор на heap фазу работы
+    pub fn switch_to_heap(&self, heap_allocator: KernelHeapAllocator) {
+        let heap_ptr = self.heap.get();
+        unsafe {
+            (*heap_ptr).write(heap_allocator);
         }
+        self.phase.store(PHASE_HEAP, Ordering::Release);
+    }
+
+    #[inline]
+    fn bump_allocator(&self) -> &mut BumpAllocator {
+        unsafe { (*self.bump.get()).assume_init_mut() }
+    }
+
+    #[inline]
+    fn heap_allocator(&self) -> &mut KernelHeapAllocator {
+        unsafe { (*self.heap.get()).assume_init_mut() }
     }
 }
 
-unsafe impl<'a> GlobalAlloc for GlobalKernelAllocator {
+unsafe impl GlobalAlloc for GlobalKernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // Получаем типизированный указатель на HeapAllocator
-        // Здесь мы используем конкретные типы, которые используются в системе
-        use crate::memory::memory_mapper::Aarch64MemoryMapper;
-        use crate::memory::ram_memory::Aarch64RamMemory;
-
-        if let Some(allocator) =
-            self.get_heap_allocator::<Aarch64RamMemory, Aarch64MemoryMapper<PhysicalMemoryManager<'a, Aarch64RamMemory>, Aarch64RamMemory>>()
-        {
-            match allocator.allocate(layout) {
+        match self.phase.load(Ordering::Acquire) {
+            PHASE_BUMP => match self.bump_allocator().allocate(layout) {
                 Ok(ptr) => ptr.as_ptr(),
                 Err(_) => core::ptr::null_mut(),
+            },
+            PHASE_HEAP => match self.heap_allocator().allocate(layout) {
+                Ok(ptr) => ptr.as_ptr(),
+                Err(_) => core::ptr::null_mut(),
+            },
+            _ => {
+                // Аллокатор не инициализирован
+                core::ptr::null_mut()
             }
-        } else {
-            // Аллокатор не инициализирован
-            core::ptr::null_mut()
         }
     }
 
@@ -68,14 +94,26 @@ unsafe impl<'a> GlobalAlloc for GlobalKernelAllocator {
             return;
         }
 
-        use crate::memory::memory_mapper::Aarch64MemoryMapper;
-        use crate::memory::ram_memory::Aarch64RamMemory;
+        match self.phase.load(Ordering::Acquire) {
+            PHASE_BUMP => {
+                // Bump-фаза: освобождение памяти - no-op
+            }
+            PHASE_HEAP => {
+                let bump_start = self.bump.get() as usize;
+                let bump_end = bump_start + size_of::<BumpAllocator>();
+                let ptr_addr = ptr as usize;
 
-        if let Some(allocator) =
-            self.get_heap_allocator::<Aarch64RamMemory, Aarch64MemoryMapper<PhysicalMemoryManager<Aarch64RamMemory>, Aarch64RamMemory>>()
-        {
-            if let Some(non_null_ptr) = NonNull::new(ptr) {
-                allocator.deallocate(non_null_ptr);
+                if ptr_addr >= bump_start && ptr_addr < bump_end {
+                    // Память из bump-аллокатора - не освобождаем
+                    return;
+                }
+
+                if let Some(non_null_ptr) = NonNull::new(ptr) {
+                    self.heap_allocator().deallocate(non_null_ptr);
+                }
+            }
+            _ => {
+                // Аллокатор не инициализирован - игнорируем
             }
         }
     }

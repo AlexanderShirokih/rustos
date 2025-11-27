@@ -1,162 +1,85 @@
 use crate::memory::allocator::HeapAllocator;
-use crate::memory::bump_allocator;
-use crate::memory::bump_allocator::BumpAllocError;
-use crate::memory::global_allocator::GlobalKernelAllocator;
-use crate::memory::layout::MemoryLayout;
+use crate::memory::global_allocator::KernelHeapAllocator;
 use crate::memory::memory_mapper::Aarch64MemoryMapper;
 use crate::memory::ram_memory::Aarch64RamMemory;
 use crate::memory::virtual_mem::{PageTableManager, create_page_table_manager};
-use kernel_core::console::console;
-use kernel_core::{debug, printf};
+use aarch64_paging::MemoryLayout;
+use alloc::sync::Arc;
+use kernel_core::console::stdout;
+use kernel_core::debug;
 use memory::memory_range::MemoryRange;
 use memory::physical::PageAlignedAddress;
-use memory::physical_manager::{ManagerError, PhysicalMemoryManager};
+use memory::physical_manager::PhysicalMemoryManager;
 
-// Глобальный аллокатор кучи (не содержит статических полей внутри)
-#[global_allocator]
-#[unsafe(link_section = ".bss.heap")]
-static GLOBAL_ALLOCATOR: GlobalKernelAllocator = GlobalKernelAllocator::new();
+type FrameAllocatorType = PhysicalMemoryManager;
+type PageTableManagerType = PageTableManager<FrameAllocatorType, Aarch64RamMemory>;
 
 /// Центральный менеджер памяти, который владеет всеми компонентами системы памяти.
 pub struct MemoryManager {
-    heap_allocator: HeapAllocator<
-        Aarch64RamMemory,
-        Aarch64MemoryMapper<
-            'static,
-            PhysicalMemoryManager<'static, Aarch64RamMemory>,
-            Aarch64RamMemory,
-        >,
-    >,
-
-    /// Ссылка на PageTableManager для enable_virtual_mode()
-    page_table_manager: &'static PageTableManager<
-        'static,
-        PhysicalMemoryManager<'static, Aarch64RamMemory>,
-        Aarch64RamMemory,
-    >,
+    heap_allocator: KernelHeapAllocator,
+    page_table_manager: Arc<PageTableManagerType>,
 }
 
 impl MemoryManager {
-    /// Создать новый менеджер памяти из layout
-    ///
-    /// Использует embedded_heap для размещения компонентов с self-referential зависимостями.
     pub fn new(memory_layout: MemoryLayout) -> Result<Self, MemorySetupError> {
-        let frame_size = memory_layout.heap.frame_size;
+        let heap = memory_layout
+            .heap()
+            .next()
+            .ok_or(MemorySetupError::IllegalStateError)?;
 
-        unsafe {
-            let heap = bump_allocator::bump_allocator();
+        let frame_size = heap.frame_size();
 
-            let backend_ptr =
-                heap.alloc_ptr(Aarch64RamMemory::new(frame_size))
-                    .map_err(|error| MemorySetupError::AllocationError {
-                        name: "RAM memory",
-                        error,
-                    })?;
+        let backend = Aarch64RamMemory::new(frame_size);
 
-            let range_ptr = heap
-                .alloc_ptr(MemoryRange::new(
-                    memory_layout.heap.start,
-                    memory_layout.heap.end,
-                    memory_layout.heap.frame_size,
-                ))
-                .map_err(|error| MemorySetupError::AllocationError {
-                    name: "memory range",
-                    error,
-                })?;
+        let heap_range: MemoryRange<PageAlignedAddress> = heap.into();
 
-            let excluded_regions = [
-                (&memory_layout.kernel_code).clone(),
-                (&memory_layout.kernel_rodata).clone(),
-                (&memory_layout.kernel_data).clone(),
-                (&memory_layout.additional).clone(),
-                (&memory_layout.dtb).clone(),
-            ];
+        let identity_map_regions = memory_layout
+            .iter()
+            .filter(|region| region.identity_map)
+            .map(|region| MemoryRange::new(region.start, region.end, region.frame_size()));
 
-            let excluded_memory_range =
-                excluded_regions.map(|e| Into::<MemoryRange<PageAlignedAddress>>::into(e));
+        let frame_allocator = Arc::new(PhysicalMemoryManager::new(
+            &heap_range,
+            identity_map_regions,
+        ));
 
-            let frame_allocator =
-                PhysicalMemoryManager::new(&*backend_ptr, &*range_ptr, &excluded_memory_range)
-                    .map_err(|error| match error {
-                        ManagerError::BitmapCreationFailed(_) => {
-                            MemorySetupError::BitmapAllocationError
-                        }
-                        ManagerError::InvalidRange => {
-                            MemorySetupError::PhysicalMemoryInvalidRangeError
-                        }
-                    })?;
+        let page_table_manager = Arc::new(
+            create_page_table_manager(frame_allocator.clone(), backend, memory_layout)
+                .map_err(|_| MemorySetupError::VirtualManagerSetupError)?,
+        );
 
-            let frame_allocator_ptr = heap.alloc_ptr(frame_allocator).map_err(|error| {
-                MemorySetupError::AllocationError {
-                    name: "physical memory manager",
-                    error,
-                }
-            })?;
+        // Создаём MemoryMapper с Arc ссылками
+        let memory_mapper = Arc::new(Aarch64MemoryMapper::new(
+            frame_allocator.clone(),
+            page_table_manager.clone(),
+        ));
 
-            let ptm = create_page_table_manager(
-                &*frame_allocator_ptr,
-                &*backend_ptr,
-                memory_layout,
-                &excluded_regions,
-            )
-            .map_err(|_| MemorySetupError::VirtualManagerSetupError)?;
-            let page_table_manager_ptr =
-                heap.alloc_ptr(ptm)
-                    .map_err(|error| MemorySetupError::AllocationError {
-                        name: "page table manager",
-                        error,
-                    })?;
+        let heap_allocator = HeapAllocator::new(memory_mapper, backend, frame_size);
 
-            let mm = Aarch64MemoryMapper::new(&*frame_allocator_ptr, &*page_table_manager_ptr);
-            let memory_mapper_ptr =
-                heap.alloc_ptr(mm)
-                    .map_err(|error| MemorySetupError::AllocationError {
-                        name: "memory mapper",
-                        error,
-                    })?;
-
-            let heap_allocator = HeapAllocator::new(&*memory_mapper_ptr, &*backend_ptr, frame_size);
-
-            Ok(MemoryManager {
-                heap_allocator,
-                page_table_manager: &*page_table_manager_ptr,
-            })
-        }
+        Ok(MemoryManager {
+            heap_allocator,
+            page_table_manager,
+        })
     }
 
-    /// Инициализировать и активировать систему памяти
-    pub fn enable(&mut self) -> Result<(), MemorySetupError> {
+    pub fn enable(mut self) -> Result<KernelHeapAllocator, MemorySetupError> {
         // Включаем виртуальную память (таблицы страниц уже созданы и заполнены)
         self.page_table_manager.enable_virtual_mode();
 
-        debug!(console(), "Paging enabled!");
+        debug!(stdout(), "Paging enabled!");
 
         // Инициализируем аллокатор кучи
         self.heap_allocator
             .init()
             .or(Err(MemorySetupError::HeapAllocatorInitializationError))?;
 
-        debug!(console(), "Heap allocator initialized!");
-
-        // Устанавливаем глобальный аллокатор
-        unsafe {
-            GLOBAL_ALLOCATOR.set_heap_allocator(&mut self.heap_allocator);
-        }
-
-        printf!(console(), "Global allocator set!");
-
-        Ok(())
+        Ok(self.heap_allocator)
     }
 }
 
 #[derive(Debug)]
 pub enum MemorySetupError {
-    AllocationError {
-        name: &'static str,
-        error: BumpAllocError,
-    },
-    BitmapAllocationError,
-    PhysicalMemoryInvalidRangeError,
     HeapAllocatorInitializationError,
     VirtualManagerSetupError,
+    IllegalStateError,
 }

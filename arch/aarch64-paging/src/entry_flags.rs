@@ -3,6 +3,10 @@
 pub struct EntryFlags(u64);
 
 impl EntryFlags {
+    pub const fn empty() -> Self {
+        EntryFlags(0)
+    }
+
     // Базовые флаги
     pub const VALID: Self = EntryFlags(1 << 0);
     pub const TABLE: Self = EntryFlags(1 << 1);

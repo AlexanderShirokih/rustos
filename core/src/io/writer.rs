@@ -6,17 +6,17 @@ pub trait Writer: Write {
     fn flush(&self) {}
 }
 
-pub struct BlockingWriter<'a, S: ByteSink + ?Sized> {
-    sink: &'a S,
+pub struct BlockingWriter<S: ByteSink> {
+    sink: S,
 }
 
-impl<'a, S: ByteSink + ?Sized> BlockingWriter<'a, S> {
-    pub const fn new(sink: &'a S) -> Self {
+impl<S: ByteSink> BlockingWriter<S> {
+    pub const fn new(sink: S) -> Self {
         Self { sink }
     }
 }
 
-impl<'a, S: ByteSink + ?Sized> Write for BlockingWriter<'a, S> {
+impl<S: ByteSink> Write for BlockingWriter<S> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.write_all(s.as_bytes());
         self.flush();
@@ -24,7 +24,7 @@ impl<'a, S: ByteSink + ?Sized> Write for BlockingWriter<'a, S> {
     }
 }
 
-impl<'a, S: ByteSink + ?Sized> Writer for BlockingWriter<'a, S> {
+impl<S: ByteSink> Writer for BlockingWriter<S> {
     fn write_all(&self, mut s: &[u8]) {
         while !s.is_empty() {
             match self.sink.try_write_slice(s) {

@@ -28,6 +28,15 @@ impl CellsSize {
     }
 }
 
+impl Default for CellsSize {
+    fn default() -> Self {
+        CellsSize {
+            address_cells: 2,
+            size_cells: 1,
+        }
+    }
+}
+
 pub trait DeviceTreeExt {
     fn cells_size(&self) -> Option<CellsSize>;
 }
@@ -62,13 +71,13 @@ impl NodeExt for Node<'_> {
 }
 
 pub trait PropExt<'a> {
-    fn as_offset_size(&self, cells_size: CellsSize) -> Option<OffsetSize>;
+    fn try_as_offset_size(&self, cells_size: CellsSize) -> Option<OffsetSize>;
 
     fn into_string_list_iter(self) -> impl Iterator<Item = &'a str> + 'a;
 }
 
 impl<'a> PropExt<'a> for Property<'a> {
-    fn as_offset_size(&self, cells_size: CellsSize) -> Option<OffsetSize> {
+    fn try_as_offset_size(&self, cells_size: CellsSize) -> Option<OffsetSize> {
         let stride = cells_size.stride();
 
         if stride == 0 || self.value().len() < stride {
@@ -79,10 +88,12 @@ impl<'a> PropExt<'a> for Property<'a> {
         let size_cells = cells_size.size_cells;
 
         let mut offset = 0usize;
+
+        let mut address = 0usize;
         for _ in 0..address_cells {
             let value = self.try_as_u32(offset)? as usize;
             offset += size_of::<u32>();
-            offset = (offset << 32) | value;
+            address = (address << 32) | value;
         }
 
         let mut size = 0usize;
@@ -92,7 +103,10 @@ impl<'a> PropExt<'a> for Property<'a> {
             size = (size << 32) | value;
         }
 
-        Some(OffsetSize { offset, size })
+        Some(OffsetSize {
+            offset: address,
+            size,
+        })
     }
 
     fn into_string_list_iter(self) -> impl Iterator<Item = &'a str> + 'a {

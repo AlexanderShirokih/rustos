@@ -1,44 +1,19 @@
-use crate::memory_backend::MemoryBackend;
 use crate::memory_range::MemoryRange;
 use crate::physical::{Frame, PageAlignedAddress};
-use core::cmp::{max, min};
+use alloc::boxed::Box;
+use alloc::vec;
 use core::mem::size_of;
 
 /// Битовая карта для отслеживания статуса выделения фреймов
-pub struct FrameBitmap<'a, B: MemoryBackend> {
-    // Интерфейс для обращения к физической памяти
-    memory_backend: &'a B,
+pub struct FrameBitmap {
+    // Битовая карта, выделенная через глобальный аллокатор
+    bitmap: Box<[u64]>,
 
     // Область памяти, которая управляется битовой картой
     target_region: MemoryRange<PageAlignedAddress>,
 
     // Фрейм начала [target_region]
     base_frame: Frame,
-
-    // Физический адрес, выделенный под хранение данного экземпляра FrameBitmap
-    bitmap_address: PageAlignedAddress,
-
-    bitmap_end_address: PageAlignedAddress,
-}
-
-#[derive(Debug)]
-pub enum FrameBitmapError {
-    TooManyRegions,
-    UnableToAllocate,
-}
-
-const MAX_FORBIDDEN_INTERVALS: usize = 64;
-
-#[derive(Clone, Copy)]
-struct FrameInterval {
-    start: usize,
-    end: usize,
-}
-
-impl FrameInterval {
-    const fn new(start: usize, end: usize) -> Self {
-        Self { start, end }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,204 +33,53 @@ impl EntryPos {
     }
 }
 
-impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
+impl FrameBitmap {
     // Количество байт, необходимых для одной записи в битовой карте
     const ENTRY_BYTES: usize = size_of::<u64>();
 
     // Количество фреймов (битов), описываемых одной записью
-    const BITS_PER_ENTRY: usize = FrameBitmap::<'a, B>::ENTRY_BYTES * 8;
+    const BITS_PER_ENTRY: usize = Self::ENTRY_BYTES * 8;
 
-    pub fn new(
-        memory_backend: &'a B,
-        target_region: &MemoryRange<PageAlignedAddress>,
-        excluded_regions: &[MemoryRange<PageAlignedAddress>],
-    ) -> Result<Self, FrameBitmapError> {
-        let required_frames = Self::calc_required_frames_for_bitmap(target_region);
+    /// Создаёт новый FrameBitmap, выделяя память для битовой карты через глобальный аллокатор
+    pub fn new(target_region: &MemoryRange<PageAlignedAddress>) -> Self {
+        let entry_count = Self::calc_entry_count(target_region);
 
-        let forbidden = Self::collect_forbidden_intervals(target_region, excluded_regions)?;
+        let bitmap = vec![0u64; entry_count].into_boxed_slice();
 
-        let bitmap_interval =
-            Self::find_bitmap_interval(target_region, &forbidden, required_frames)
-                .ok_or(FrameBitmapError::UnableToAllocate)?;
-        let bitmap_start_frame = Frame::new(bitmap_interval.start);
-        let bitmap_end_frame = Frame::new(bitmap_interval.end);
-
-        let frame_bitmap = FrameBitmap {
-            memory_backend,
+        FrameBitmap {
+            bitmap,
             base_frame: Frame::from(target_region.start()),
             target_region: target_region.clone(),
-            bitmap_address: bitmap_start_frame.page_address(),
-            bitmap_end_address: bitmap_end_frame.page_address(),
-        };
-
-        // Очищаем физическую память для аллокатора (обнуляем всю битовую карту)
-        frame_bitmap.clear_bitmap(required_frames);
-
-        // Помечаем сам регион битовой карты как использованный
-        if required_frames > 0 {
-            frame_bitmap.set_range_unchecked(
-                Frame::new(bitmap_interval.start),
-                Frame::new(bitmap_interval.end),
-            );
-        }
-
-        for exclude in excluded_regions {
-            frame_bitmap.set_range_unchecked(
-                Frame::from(exclude.start()),
-                Frame::from(exclude.end()).add(1),
-            )
-        }
-
-        Ok(frame_bitmap)
-    }
-
-    fn clear_bitmap(&self, required_frames: usize) {
-        let entries = (required_frames + (Self::BITS_PER_ENTRY - 1)) / Self::BITS_PER_ENTRY;
-
-        for i in 0..entries {
-            let addr = self
-                .bitmap_address
-                .as_physical_address()
-                .add(i * size_of::<u64>());
-            self.memory_backend.write::<u64>(addr, 0);
         }
     }
 
-    fn calc_required_frames_for_bitmap(region: &MemoryRange<PageAlignedAddress>) -> usize {
-        let entry_count = region.frame_count().div_ceil(Self::BITS_PER_ENTRY);
-        let bitmap_bytes = entry_count * Self::ENTRY_BYTES;
-        bitmap_bytes.div_ceil(region.frame_size)
-    }
-
-    fn collect_forbidden_intervals(
-        region: &MemoryRange<PageAlignedAddress>,
-        excluded_regions: &[MemoryRange<PageAlignedAddress>],
-    ) -> Result<heapless::Vec<FrameInterval, MAX_FORBIDDEN_INTERVALS>, FrameBitmapError> {
-        let mut intervals: heapless::Vec<FrameInterval, MAX_FORBIDDEN_INTERVALS> =
-            heapless::Vec::new();
-        let region_start = Frame::from(region.start()).number();
-        let region_end = Frame::from(region.end()).add(1).number();
-
-        for exclude in excluded_regions {
-            let start = Frame::from(exclude.start()).number();
-            let end = Frame::from(exclude.end()).add(1).number();
-
-            let clamped_start = max(start, region_start);
-            let clamped_end = min(end, region_end);
-
-            if clamped_start >= clamped_end {
-                continue;
-            }
-
-            intervals
-                .push(FrameInterval::new(clamped_start, clamped_end))
-                .map_err(|_| FrameBitmapError::TooManyRegions)?;
-        }
-
-        Self::merge_intervals(&mut intervals);
-
-        Ok(intervals)
-    }
-
-    fn merge_intervals(intervals: &mut heapless::Vec<FrameInterval, MAX_FORBIDDEN_INTERVALS>) {
-        if intervals.is_empty() {
-            return;
-        }
-
-        intervals.sort_unstable_by(|a, b| a.start.cmp(&b.start));
-
-        let mut write_idx = 0;
-        for i in 1..intervals.len() {
-            let current = intervals[i];
-            let last = intervals[write_idx];
-
-            if current.start <= last.end {
-                let merged_end = max(last.end, current.end);
-                intervals[write_idx].end = merged_end;
-            } else {
-                write_idx += 1;
-                intervals[write_idx] = current;
-            }
-        }
-
-        intervals.truncate(write_idx + 1);
-    }
-
-    fn find_bitmap_interval(
-        region: &MemoryRange<PageAlignedAddress>,
-        forbidden: &[FrameInterval],
-        required_frames: usize,
-    ) -> Option<FrameInterval> {
-        let region_start = Frame::from(region.start()).number();
-        let region_end = Frame::from(region.end()).add(1).number();
-
-        if required_frames == 0 {
-            return Some(FrameInterval::new(region_start, region_start));
-        }
-
-        let mut cursor = region_start;
-
-        for interval in forbidden {
-            if interval.start > region_end {
-                break;
-            }
-
-            if cursor < interval.start {
-                let gap = interval.start - cursor;
-                if gap >= required_frames {
-                    return Some(FrameInterval::new(cursor, cursor + required_frames));
-                }
-            }
-
-            cursor = max(cursor, interval.end);
-
-            if cursor >= region_end {
-                break;
-            }
-        }
-
-        if cursor < region_end {
-            let remaining = region_end - cursor;
-            if remaining >= required_frames {
-                return Some(FrameInterval::new(cursor, cursor + required_frames));
-            }
-        }
-
-        None
+    /// Вычисляет количество u64 записей, необходимых для битовой карты
+    fn calc_entry_count(region: &MemoryRange<PageAlignedAddress>) -> usize {
+        region.frame_count().div_ceil(Self::BITS_PER_ENTRY)
     }
 
     #[inline]
-    fn write<F: Fn(u64) -> u64>(&self, index: usize, update: F) {
-        let addr = self
-            .bitmap_address
-            .as_physical_address()
-            .add(index * Self::ENTRY_BYTES);
-
-        let old = self.memory_backend.read::<u64>(addr);
-        let new = update(old);
-        self.memory_backend.write::<u64>(addr, new);
+    fn write<F: Fn(u64) -> u64>(&mut self, index: usize, update: F) {
+        if index < self.bitmap.len() {
+            self.bitmap[index] = update(self.bitmap[index]);
+        }
     }
 
     #[inline]
     fn read(&self, offset: usize) -> u64 {
-        let address = self
-            .bitmap_address
-            .as_physical_address()
-            .add(offset * Self::ENTRY_BYTES);
-
-        self.memory_backend.read::<u64>(address)
+        if offset < self.bitmap.len() {
+            self.bitmap[offset]
+        } else {
+            u64::MAX // За пределами - считаем все биты занятыми
+        }
     }
 
-    pub fn get_alloc_range(&self) -> MemoryRange<PageAlignedAddress> {
-        MemoryRange::new(
-            self.bitmap_address,
-            self.bitmap_end_address,
-            PageAlignedAddress::alignment(),
-        )
+    pub fn get_managed_region(&self) -> &MemoryRange<PageAlignedAddress> {
+        &self.target_region
     }
 
     /// Помечает область фреймов как выделенную
-    pub fn set_range_unchecked(&self, from_inclusive: Frame, to_exclusive: Frame) {
+    pub fn set_range_unchecked(&mut self, from_inclusive: Frame, to_exclusive: Frame) {
         let from = from_inclusive.number();
         let to = to_exclusive.number();
 
@@ -285,7 +109,7 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
         }
     }
 
-    fn set_unchecked(&self, frame: Frame) {
+    fn set_unchecked(&mut self, frame: Frame) {
         let pos = self.entry_pos(frame);
         self.write(pos.word, |v| v | (1u64 << pos.bit));
     }
@@ -296,7 +120,7 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
     }
 
     /// Очистить бит в битовой карте (пометить как свободный)
-    pub fn clear(&self, frame: Frame) {
+    pub fn clear(&mut self, frame: Frame) {
         if !self.is_in_range(frame) {
             return;
         }
@@ -326,7 +150,7 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
     }
 
     #[inline]
-    fn try_allocate_in_word(&self, word_index: usize, allowed_mask: u64) -> Option<Frame> {
+    fn try_allocate_in_word(&mut self, word_index: usize, allowed_mask: u64) -> Option<Frame> {
         if allowed_mask == 0 {
             return None;
         }
@@ -338,7 +162,7 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
 
     /// Выделяет фрейм по индексу слова и индексу бита
     #[inline]
-    fn allocate_frame_at(&self, word_index: usize, bit_index: usize) -> Frame {
+    fn allocate_frame_at(&mut self, word_index: usize, bit_index: usize) -> Frame {
         let frame_number = self.base_frame.number() + word_index * Self::BITS_PER_ENTRY + bit_index;
         let frame = Frame::new(frame_number);
         self.set_unchecked(frame);
@@ -346,7 +170,7 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
     }
 
     /// Выделяет в памяти свободный фрейм, начиная поиск с offset
-    pub fn alloc_from(&self, offset: Frame) -> Option<Frame> {
+    pub fn alloc_from(&mut self, offset: Frame) -> Option<Frame> {
         let region_end_exclusive = Frame::from(self.target_region.end()).add(1);
         let start = self.entry_pos(offset);
         let region_end = self.entry_pos(region_end_exclusive);
@@ -362,7 +186,7 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
     }
 
     /// Вспомогательный метод для поиска свободного фрейма в диапазоне слов
-    fn search_range(&self, start: EntryPos, end: EntryPos) -> Option<Frame> {
+    fn search_range(&mut self, start: EntryPos, end: EntryPos) -> Option<Frame> {
         if !start.is_before(end) {
             return None;
         }
@@ -389,11 +213,6 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
     }
 
     #[cfg_attr(not(test), doc(hidden))]
-    pub fn bitmap_address(&self) -> PageAlignedAddress {
-        self.bitmap_address
-    }
-
-    #[cfg_attr(not(test), doc(hidden))]
     pub fn managed_region(&self) -> &MemoryRange<PageAlignedAddress> {
         &self.target_region
     }
@@ -409,7 +228,6 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
         (value & (1u64 << pos.bit)) != 0
     }
 
-    #[inline]
     fn mask_lower(bits: usize) -> u64 {
         if bits == 0 {
             0
@@ -420,7 +238,6 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
         }
     }
 
-    #[inline]
     fn mask_from(bit: usize) -> u64 {
         if bit >= Self::BITS_PER_ENTRY {
             0
@@ -429,12 +246,10 @@ impl<'a, B: MemoryBackend> FrameBitmap<'a, B> {
         }
     }
 
-    #[inline]
     fn mask_until(bits: usize) -> u64 {
         Self::mask_lower(bits)
     }
 
-    #[inline]
     fn mask_range(start: usize, end: usize) -> u64 {
         if start >= end {
             0

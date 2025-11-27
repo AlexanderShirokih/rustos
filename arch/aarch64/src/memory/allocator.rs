@@ -4,6 +4,7 @@
 //! first-fit со свободным списком и автоматическим расширением кучи.
 
 use crate::memory::memory_mapper::MemoryMappingError;
+use alloc::sync::Arc;
 use core::alloc::Layout;
 use core::mem::size_of;
 use core::ptr::NonNull;
@@ -43,6 +44,8 @@ pub trait MemoryMapper {
         start_address: PageAlignedAddress,
         size: usize,
     ) -> Result<(), MemoryMappingError>;
+
+    #[allow(unused)]
     fn unmap_heap_frames(
         &self,
         start_address: PageAlignedAddress,
@@ -108,35 +111,35 @@ pub struct HeapAllocator<B: MemoryBackend, M: MemoryMapper> {
     /// Следующая позиция выделения для расширения кучи
     next_alloc_addr: AtomicUsize,
 
-    /// Маппер памяти для операций виртуальной памяти (указатель вместо владения)
-    memory_mapper: *const M,
+    /// Маппер памяти для операций виртуальной памяти (shared ownership)
+    memory_mapper: Arc<M>,
 
-    /// Бэкенд для чтения/записи памяти
-    memory_backend: *const B,
+    /// Бэкенд для чтения/записи памяти (owned, B is typically Copy)
+    memory_backend: B,
 
     /// Размер фрейма для маппинга памяти
     frame_size: usize,
 }
 
 impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
-    /// Получить ссылку на memory_backend (безопасно, так как гарантируется владельцем)
+    /// Получить ссылку на memory_backend
     fn memory_backend(&self) -> &B {
-        unsafe { &*self.memory_backend }
+        &self.memory_backend
     }
 
-    /// Получить ссылку на memory_mapper (безопасно, так как гарантируется владельцем)
+    /// Получить ссылку на memory_mapper
     fn memory_mapper(&self) -> &M {
-        unsafe { &*self.memory_mapper }
+        &self.memory_mapper
     }
 
     /// Создать новый аллокатор кучи
-    pub fn new(memory_mapper: &M, memory_backend: &B, frame_size: usize) -> Self {
+    pub fn new(memory_mapper: Arc<M>, memory_backend: B, frame_size: usize) -> Self {
         HeapAllocator {
             free_list: None,
             current_size: 0,
             next_alloc_addr: AtomicUsize::new(HEAP_START),
-            memory_mapper: memory_mapper as *const M,
-            memory_backend: memory_backend as *const B,
+            memory_mapper,
+            memory_backend,
             frame_size,
         }
     }
@@ -256,7 +259,6 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
         None
     }
 
-    /// Выделить память с заданным layout
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocationError> {
         if layout.size() == 0 {
             return Err(AllocationError::InvalidLayout);

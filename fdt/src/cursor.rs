@@ -20,10 +20,6 @@ impl<'a> Cursor<'a> {
         self.position
     }
 
-    pub fn len(&self) -> usize {
-        self.buffer.len()
-    }
-
     pub(crate) fn align_up4(&mut self) {
         let p = (self.position + 3) & !3;
         self.set_position(p);

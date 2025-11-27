@@ -1,7 +1,7 @@
 OUTPUT_ARCH(aarch64);
 ENTRY(_header_start);
 
-PROVIDE(KERNEL_OFFSET = 0);
+PROVIDE(KERNEL_OFFSET = 0x0);
 
 SECTIONS {
     . = KERNEL_OFFSET;
@@ -21,6 +21,14 @@ SECTIONS {
     _rodata_start = ALIGN(4K);
 
     .rodata : ALIGN(4K) {
+        __drivers_early_start = .;
+        KEEP(*(.drivers.early))
+        __drivers_early_end = .;
+
+        __drivers_kernel_start = .;
+        KEEP(*(.drivers.kernel))
+        __drivers_kernel_end = .;
+
         *(.rodata*)
     }
     
@@ -37,11 +45,9 @@ SECTIONS {
     } =0
 
     .stack (NOLOAD) : ALIGN(4K) {
-        *(.bss.stack)
-    } =0
-
-    .heap (NOLOAD) : ALIGN(4K) {
-        *(.bss.heap)
+        _stack_bottom = .;
+        . += 16K;
+        _stack_top = .;
     } =0
 
     _rw_end = .;

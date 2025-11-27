@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 spin = "0.10.0"
 heapless = "0.9.1"
+fdt = { path = "../fdt" }

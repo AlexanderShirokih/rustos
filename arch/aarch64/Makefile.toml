@@ -49,30 +49,8 @@ script = [
     """
 ]
 
-[tasks.qemu-build]
-command = "cargo"
-args = ["build", "--release", "--features", "qemu_virt"]
-
-[tasks.qemu-image]
-dependencies = ["qemu-build"]
-script = [
-    "mkdir -p ../../target/build/",
-    "cargo objcopy --release --features qemu_virt -- -O binary ../../target/build/kernel-qemu.bin"
-]
-
-[tasks.rpi5-build]
-command = "cargo"
-args = ["build", "--release", "--features", "rpi5"]
-
-[tasks.rpi5-image]
-dependencies = ["rpi5-build"]
-script = [
-    "mkdir -p ../../target/build/rpi5/",
-    "cargo objcopy --release --features rpi5 -- -O binary ../../target/build/rpi5/kernel8.img"
-]
-
-[tasks.qemu-run]
-dependencies = ["qemu-image"]
+[tasks.qemu]
+dependencies = ["image"]
 script = [
     """
     qemu-system-aarch64 \
@@ -80,15 +58,12 @@ script = [
         -cpu cortex-a53 \
         -m 512M \
         -nographic -serial mon:stdio \
-        -kernel ../../target/build/kernel-qemu.bin
+        -kernel ../../target/build/kernel.bin
     """
 ]
-
-[tasks.qemu]
-dependencies = ["qemu-run"]
 
 [tasks.qemu-debug]
-dependencies = ["qemu-image"]
+dependencies = ["image"]
 script = [
     """
     qemu-system-aarch64 \
@@ -96,7 +71,7 @@ script = [
         -cpu cortex-a53 \
         -m 512M \
         -nographic -serial mon:stdio \
-        -kernel ../../target/build/kernel-qemu.bin \
+        -kernel ../../target/build/kernel.bin \
         -S -gdb tcp::1234
     """
 ]

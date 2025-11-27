@@ -1,16 +1,11 @@
 //! Управление виртуальной памятью
-//!
-//! Модуль инкапсулирует четырёхуровневую таблицу страниц архитектуры
-//! AArch64. Он предоставляет примитивы (`Page`, `PageTableEntry`,
-//! `PageTable`) и высокоуровневый `PageTableManager`, который отвечает за
-//! построение и обслуживание иерархии, identity-маппинг ключевых регионов и
-//! синхронизацию с абстрактным `MemoryBackend`.
 
 use crate::entry_flags::EntryFlags;
 use crate::layout::{MemoryLayout, MemoryRegion};
 use crate::virtual_address::{VirtualAddress, VirtualAddressExt};
+use alloc::sync::Arc;
 use core::ops::{Index, IndexMut};
-use kernel_core::console::console;
+use kernel_core::console::stdout;
 use kernel_core::debug;
 use memory::memory_backend::{MemoryBackend, MemoryPtr};
 use memory::physical::{Frame, PageAlignedAddress, PhysicalAddress};
@@ -176,41 +171,40 @@ pub enum VmError {
     },
 
     /// Не удалось выделить фрейм для таблицы
-    FrameAllocationFailed { level: usize, index: usize },
+    FrameAllocationFailed {
+        level: usize,
+        index: usize,
+    },
     /// Найдена недействительная запись таблицы
     InvalidTableEntry,
     /// Недействительный уровень таблицы страниц
     InvalidLevel,
+
+    OtherError,
 }
 
 /// Менеджер таблиц страниц для aarch64
-pub struct PageTableManager<'a, FA: FrameAllocator, B: MemoryBackend> {
+pub struct PageTableManager<FA: FrameAllocator, B: MemoryBackend> {
     /// Корневая таблица страниц (уровень 0)
     root_table: Frame,
 
-    /// Бэкенд для операций с памятью
-    backend: &'a B,
+    /// Бэкенд для операций с памятью (owned, B is typically Copy)
+    backend: B,
 
-    frame_allocator: &'a FA,
+    /// Аллокатор фреймов (shared via Arc)
+    frame_allocator: Arc<FA>,
 
     /// Регион памяти кучи
     heap: MemoryRegion<PageAlignedAddress>,
 }
 
-impl<'a, FA: FrameAllocator, B: MemoryBackend> PageTableManager<'a, FA, B> {
+impl<FA: FrameAllocator, B: MemoryBackend> PageTableManager<FA, B> {
     fn table_address(&self, frame: Frame) -> PageAlignedAddress {
         frame.page_address()
     }
 
     fn write_table(&self, frame: Frame, table: PageTable) {
         let addr = self.table_address(frame).as_physical_address();
-
-        debug!(
-            console(),
-            "write table frame: {:#x}. addr: {:#x}",
-            frame.number(),
-            addr.as_usize()
-        );
 
         self.backend().write(addr, table);
     }
@@ -247,16 +241,7 @@ impl<'a, FA: FrameAllocator, B: MemoryBackend> PageTableManager<'a, FA, B> {
         for level in 0..3 {
             let index = indices[level];
 
-            debug!(
-                console(),
-                "reading entry at level {}; frame={:#x}",
-                level,
-                table_frame.page_address().as_usize()
-            );
-
             let entry = self.read_entry(table_frame, index);
-
-            debug!(console(), "entry: {:?}", entry);
 
             if entry.is_table() {
                 table_frame = entry.frame();
@@ -271,30 +256,9 @@ impl<'a, FA: FrameAllocator, B: MemoryBackend> PageTableManager<'a, FA, B> {
                 return Err(VmError::NotMapped);
             }
 
-            debug!(
-                console(),
-                "prepare to alloc. level={}, index={}", level, index
-            );
-
             let child_frame = self.alloc_table_frame(level, index)?;
 
-            debug!(
-                console(),
-                "child frame: {:?}; writing at: {:#x}, {}",
-                child_frame,
-                table_frame.number(),
-                index
-            );
-
             self.write_entry(table_frame, index, PageTableEntry::new_table(child_frame));
-
-            debug!(
-                console(),
-                "allocated child frame at level={}. idx={}. frame={:#x}",
-                level,
-                index,
-                child_frame.number()
-            );
 
             // Настраиваем 1:1 маппинг для доступа к таблице после включения MMU
             self.identity_map_region(
@@ -320,13 +284,6 @@ impl<'a, FA: FrameAllocator, B: MemoryBackend> PageTableManager<'a, FA, B> {
     {
         let indices = page.table_indices();
 
-        debug!(
-            console(),
-            "indices: {:?} for page {:#x}",
-            indices,
-            page.number()
-        );
-
         let table_frame = match self.walk_to_leaf(indices, create_missing) {
             Err(VmError::BlockMappingExists) if !create_missing => return Err(VmError::NotMapped),
             other => other?,
@@ -345,12 +302,12 @@ impl<'a, FA: FrameAllocator, B: MemoryBackend> PageTableManager<'a, FA, B> {
     }
 
     fn backend(&self) -> &B {
-        self.backend
+        &self.backend
     }
 
     pub fn new(
-        frame_allocator: &'a FA,
-        backend: &'a B,
+        frame_allocator: Arc<FA>,
+        backend: B,
         heap: MemoryRegion<PageAlignedAddress>,
     ) -> Result<Self, VmError> {
         let root_table = frame_allocator
@@ -358,15 +315,15 @@ impl<'a, FA: FrameAllocator, B: MemoryBackend> PageTableManager<'a, FA, B> {
             .ok_or(VmError::RootFrameAllocationFailed)?;
 
         debug!(
-            console(),
+            stdout(),
             "Allocated root page: 0x{:x}",
             root_table.page_address().as_usize()
         );
 
         let root_table_address = root_table.page_address();
-        let root_ptr: MemoryPtr<PageTable> = root_table_address.as_physical_address().into();
+        let root_ptr: MemoryPtr<PageTable> = root_table_address.into();
 
-        root_ptr.write(backend, PageTable::new());
+        root_ptr.write(&backend, PageTable::new());
 
         let page_table_manager = PageTableManager {
             root_table,
@@ -522,45 +479,30 @@ impl<'a, FA: FrameAllocator, B: MemoryBackend> PageTableManager<'a, FA, B> {
     }
 }
 
-/// Инициализировать систему виртуальной памяти без статических времен жизни
-pub fn create_page_table_manager<'a, FA: FrameAllocator, B: MemoryBackend>(
-    frame_allocator: &'a FA,
-    memory_backend: &'a B,
+/// Инициализировать систему виртуальной памяти
+pub fn create_page_table_manager<FA: FrameAllocator, B: MemoryBackend>(
+    frame_allocator: Arc<FA>,
+    memory_backend: B,
     memory_layout: MemoryLayout,
-    identity_map_regions: &[MemoryRegion<PageAlignedAddress>],
-) -> Result<PageTableManager<'a, FA, B>, VmError> {
-    // Создаем менеджер таблиц страниц
-    let page_table_manager =
-        PageTableManager::new(frame_allocator, memory_backend, memory_layout.heap)?;
+) -> Result<PageTableManager<FA, B>, VmError> {
+    let heap = memory_layout.heap().next().ok_or(VmError::OtherError)?;
+
+    let page_table_manager = PageTableManager::new(frame_allocator, memory_backend, heap)?;
 
     // Отображаем все прямые регионы с идентичным маппингом
-    for region in identity_map_regions {
+    for region in memory_layout.iter().filter(|r| r.identity_map) {
         debug!(
-            console(),
+            stdout(),
             "Identity-mapping region: {} ({:#x} - {:#x})",
             region.label,
             region.start.as_usize(),
             region.end.as_usize()
         );
 
-        page_table_manager.identity_map_region(region.start, region.end, region.flags)?;
+        // region.end — inclusive граница, но identity_map_region ожидает exclusive
+        let end_exclusive = region.end.next_aligned();
+        page_table_manager.identity_map_region(region.start, end_exclusive, region.flags)?;
     }
-
-    // Маппим пямять под нужны собственного аллокатора
-    let self_area = frame_allocator.get_self_area();
-    debug!(
-        console(),
-        "Identity-mapping region: {} ({:#x} - {:#x})",
-        "Self area",
-        self_area.start().as_usize(),
-        self_area.end().as_usize()
-    );
-
-    page_table_manager.identity_map_region(
-        self_area.start(),
-        self_area.end(),
-        page_table_manager.heap_flags(),
-    )?;
 
     Ok(page_table_manager)
 }

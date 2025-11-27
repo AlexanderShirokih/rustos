@@ -3,6 +3,10 @@ pub trait AddressType: Copy + Clone + PartialOrd {
     fn as_physical_address(self) -> PhysicalAddress;
 }
 
+pub trait Aligned {
+    fn alignment() -> usize;
+}
+
 impl AddressType for PhysicalAddress {
     #[inline]
     fn as_usize(self) -> usize {
@@ -77,6 +81,10 @@ impl From<usize> for PhysicalAddress {
 pub struct AlignedPhysicalAddress<const ALIGNMENT: usize>(PhysicalAddress);
 
 impl<const ALIGNMENT: usize> AlignedPhysicalAddress<ALIGNMENT> {
+    pub const fn zero() -> Self {
+        Self(PhysicalAddress(0))
+    }
+
     pub fn new(address: PhysicalAddress) -> Option<Self> {
         if address.0 % ALIGNMENT == 0 {
             Some(Self(address))
@@ -146,6 +154,12 @@ impl<const ALIGNMENT: usize> AddressType for AlignedPhysicalAddress<ALIGNMENT> {
     }
 }
 
+impl<const ALIGNMENT: usize> Aligned for AlignedPhysicalAddress<ALIGNMENT> {
+    fn alignment() -> usize {
+        ALIGNMENT
+    }
+}
+
 // Автоматическое преобразование в PhysicalAddress
 impl<const ALIGNMENT: usize> From<AlignedPhysicalAddress<ALIGNMENT>> for PhysicalAddress {
     fn from(addr: AlignedPhysicalAddress<ALIGNMENT>) -> Self {
@@ -183,7 +197,6 @@ impl Frame {
         Self(address.as_usize() / PageAlignedAddress::alignment())
     }
 
-    #[inline]
     pub const fn number(&self) -> usize {
         self.0
     }
