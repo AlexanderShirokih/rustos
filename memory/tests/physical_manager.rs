@@ -2,13 +2,12 @@ mod common;
 
 use common::{make_excluded, make_range};
 use memory::physical::Frame;
-use memory::physical_manager::{FrameAllocator, FrameError, PhysicalMemoryManager, ReserveFrameError};
+use memory::physical_manager::{
+    FrameAllocator, FrameError, PhysicalMemoryManager, ReserveFrameError,
+};
 use std::collections::HashSet;
 
-fn build_manager(
-    region_frames: usize,
-    excluded_specs: &[(usize, usize)],
-) -> PhysicalMemoryManager {
+fn build_manager(region_frames: usize, excluded_specs: &[(usize, usize)]) -> PhysicalMemoryManager {
     let region = make_range(0, region_frames);
     let excluded = make_excluded(excluded_specs);
     PhysicalMemoryManager::new(&region, excluded.into_iter())

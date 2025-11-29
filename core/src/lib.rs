@@ -2,5 +2,5 @@
 extern crate alloc;
 
 pub mod console;
-pub mod io;
 pub mod driver;
+pub mod io;

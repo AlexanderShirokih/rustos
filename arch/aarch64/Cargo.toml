@@ -15,3 +15,7 @@ memory = { path = "../../memory" }
 util = { path = "../../util" }
 fdt = { path = "../../fdt" }
 heapless = "0.9.1"
+
+[build-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"

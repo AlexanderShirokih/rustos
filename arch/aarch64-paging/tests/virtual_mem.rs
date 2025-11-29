@@ -9,9 +9,7 @@ use aarch64_paging::virtual_mem::{
     Page, PageTable, PageTableEntry, PageTableManager, VmError, create_page_table_manager,
 };
 use alloc::vec::Vec;
-use common::{
-    TEST_FRAME_SIZE, build_frame_allocator, layout_from_regions, make_region,
-};
+use common::{TEST_FRAME_SIZE, build_frame_allocator, layout_from_regions, make_region};
 use memory::memory_backend::{MemoryBackend, MockMemoryBackend};
 use memory::physical::{Frame, PageAlignedAddress, PhysicalAddress};
 use memory::physical_manager::PhysicalMemoryManager;
@@ -183,7 +181,12 @@ fn identity_regions_are_direct_mapped() {
     kernel_region.identity_map = true;
     let mut dtb_region = make_region("dtb", 8, 2, EntryFlags::DEVICE);
     dtb_region.identity_map = true;
-    let heap_region = make_region(MemoryRegion::HEAP, 64, total_frames - 64, EntryFlags::KERNEL_DATA);
+    let heap_region = make_region(
+        MemoryRegion::HEAP,
+        64,
+        total_frames - 64,
+        EntryFlags::KERNEL_DATA,
+    );
     let layout = layout_from_regions(kernel_region, dtb_region, heap_region);
     let identity = [kernel_region, dtb_region];
 
@@ -260,7 +263,12 @@ fn adjacent_identity_regions_with_misaligned_boundaries_fail() {
         identity_map: true,
     };
 
-    let heap_region = make_region(MemoryRegion::HEAP, 64, total_frames - 64, EntryFlags::KERNEL_DATA);
+    let heap_region = make_region(
+        MemoryRegion::HEAP,
+        64,
+        total_frames - 64,
+        EntryFlags::KERNEL_DATA,
+    );
     let layout = layout_from_regions(kernel_region, rodata_region, heap_region);
 
     // Попытка замапить регионы с конфликтующими флагами должна вызвать ошибку AlreadyMapped
@@ -285,7 +293,12 @@ fn adjacent_identity_regions_with_aligned_boundaries_succeed() {
     kernel_region.identity_map = true;
     let mut rodata_region = make_region("rodata", 7, 2, EntryFlags::KERNEL_RODATA);
     rodata_region.identity_map = true;
-    let heap_region = make_region(MemoryRegion::HEAP, 64, total_frames - 64, EntryFlags::KERNEL_DATA);
+    let heap_region = make_region(
+        MemoryRegion::HEAP,
+        64,
+        total_frames - 64,
+        EntryFlags::KERNEL_DATA,
+    );
     let layout = layout_from_regions(kernel_region, rodata_region, heap_region);
 
     let manager = create_page_table_manager(allocator, backend.clone(), layout)

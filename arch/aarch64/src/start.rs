@@ -2,6 +2,7 @@
 #![no_main]
 extern crate alloc;
 
+#[cfg(boot_format_android)]
 mod boot_header;
 mod drivers;
 mod memory;
@@ -13,13 +14,14 @@ use crate::memory::manager::MemoryManager;
 use aarch64_paging::MemoryLayout;
 use alloc::boxed::Box;
 use core::arch::{asm, naked_asm};
+use core::fmt::Write;
 use core::hint::spin_loop;
 use fdt::devicetree::DeviceTree;
-use kernel_core::console::{BasicConsole, Console, set_stdout, stdout};
+use kernel_core::console::{set_stdout, stdout};
 use kernel_core::driver::early::{EarlyDriverHandle, EarlyDriverRegistry};
 use kernel_core::driver::{DriverRegistry, scanner};
 use kernel_core::io::writer::BlockingWriter;
-use kernel_core::{fatal, info, printf};
+use kernel_core::{fatal, info};
 
 /// Глобальный двухфазный аллокатор ядра
 #[global_allocator]
@@ -31,6 +33,7 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
+#[unsafe(link_section = ".text.boot")]
 pub extern "C" fn _start() -> ! {
     naked_asm!(
         // Сохраняем DTB (x0) в callee-saved регистре
@@ -58,6 +61,12 @@ pub extern "C" fn _start() -> ! {
 }
 
 unsafe fn early_main(dtb: usize) {
+    let uart = UartPl011::new(0x900_0000);
+    // let uart = UartPl011::new(0x107d001000);
+    let mut writer = BlockingWriter::new(uart);
+
+    writer.write_str("Hello Raspberry Pi!").unwrap();
+
     let device_tree = match DeviceTree::from_ptr(dtb) {
         Ok(tree) => tree,
         Err(_) => return,
@@ -75,6 +84,8 @@ unsafe fn early_main(dtb: usize) {
 
     // Инициализируем ранний аллокатор
     GLOBAL_ALLOCATOR.init_bump_phase(bump_allocator);
+
+    set_stdout(Box::leak(Box::new(writer)));
 
     let mut early_registry = EarlyDriverRegistry::new();
     early_registry.scan_and_probe(&device_tree);
@@ -109,10 +120,10 @@ fn setup_memory(memory_layout: MemoryLayout) {
             // Переключаем глобальный аллокатор на heap-фазу
             GLOBAL_ALLOCATOR.switch_to_heap(heap);
 
-            printf!(stdout(), "Memory setup done!\n")
+            writeln!(stdout(), "Memory setup done!").unwrap()
         }
         Err(_) => {
-            printf!(stdout(), "FATAL: Memory enable error\n");
+            writeln!(stdout(), "FATAL: Memory enable error\n").unwrap();
             return;
         }
     };
@@ -122,12 +133,12 @@ fn bind_stdout(device_tree: &DeviceTree, registry: &mut EarlyDriverRegistry) {
     let early_console_node = scanner::find_console(&device_tree);
 
     let name = early_console_node.as_ref().unwrap().name();
-    printf!(stdout(), "Early console: {:?}\n", name);
+    writeln!(stdout(), "Early console: {:?}\n", name).unwrap();
 
     let console_handle = early_console_node
-        .and_then(|early_console_node| registry.take(early_console_node.name()))
+        .and_then(|early_console_node| registry.take(&early_console_node.key()))
         .and_then(|early_console| match early_console {
-            EarlyDriverHandle::Console(console) => Some(console),
+            EarlyDriverHandle::Writer(console) => Some(console),
             EarlyDriverHandle::Opaque => None,
         });
 
@@ -141,10 +152,9 @@ fn bind_stdout(device_tree: &DeviceTree, registry: &mut EarlyDriverRegistry) {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     unsafe {
         let uart = UartPl011::new(0x0900_0000);
-        let writer = BlockingWriter::new(uart);
-        let console = BasicConsole::new(writer);
+        let mut writer = BlockingWriter::new(uart);
 
-        console.printf(format_args!("[PANIC] {}\n", info));
+        writeln!(writer, "[PANIC] {}\n", info).unwrap();
 
         loop {
             asm!("wfi", options(nomem, nostack));

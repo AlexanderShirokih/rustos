@@ -39,20 +39,6 @@ pub fn make_region(
     }
 }
 
-pub fn make_empty_region(
-    label: &'static str,
-    flags: EntryFlags,
-) -> MemoryRegion<PageAlignedAddress> {
-    let addr = frame_to_address(0);
-    MemoryRegion {
-        label,
-        start: addr,
-        end: addr,
-        flags,
-        identity_map: false,
-    }
-}
-
 pub fn excluded_regions(specs: &[(usize, usize)]) -> Vec<MemoryRange<PageAlignedAddress>> {
     specs
         .iter()
@@ -66,20 +52,10 @@ pub fn build_frame_allocator(
 ) -> Arc<PhysicalMemoryManager> {
     let region = make_range(0, total_frames);
     let excluded_regions = excluded_regions(excluded);
-    Arc::new(PhysicalMemoryManager::new(&region, excluded_regions.into_iter()))
-}
-
-pub fn basic_layout(heap_start_frame: usize, heap_frames: usize) -> MemoryLayout {
-    let mut layout = MemoryLayout::new();
-    layout.add(make_region("kernel_code", 0, 1, EntryFlags::KERNEL_CODE));
-    layout.add(make_region("dtb", 1, 1, EntryFlags::DEVICE));
-    layout.add(make_region(
-        MemoryRegion::HEAP,
-        heap_start_frame,
-        heap_frames,
-        EntryFlags::KERNEL_DATA,
-    ));
-    layout
+    Arc::new(PhysicalMemoryManager::new(
+        &region,
+        excluded_regions.into_iter(),
+    ))
 }
 
 pub fn layout_from_regions(

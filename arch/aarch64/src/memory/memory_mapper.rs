@@ -1,7 +1,7 @@
-use alloc::sync::Arc;
 use crate::memory::allocator::MemoryMapper;
 use crate::memory::virtual_address::VirtualAddress;
 use crate::memory::virtual_mem::{Page, PageTableManager, VmError};
+use alloc::sync::Arc;
 use kernel_core::console::stdout;
 use kernel_core::debug;
 use memory::memory_backend::MemoryBackend;
@@ -15,10 +15,7 @@ pub struct Aarch64MemoryMapper<FA: FrameAllocator, B: MemoryBackend> {
 }
 
 impl<FA: FrameAllocator, B: MemoryBackend> Aarch64MemoryMapper<FA, B> {
-    pub fn new(
-        frame_allocator: Arc<FA>,
-        page_table_manager: Arc<PageTableManager<FA, B>>,
-    ) -> Self {
+    pub fn new(frame_allocator: Arc<FA>, page_table_manager: Arc<PageTableManager<FA, B>>) -> Self {
         Aarch64MemoryMapper {
             frame_allocator,
             page_table_manager,

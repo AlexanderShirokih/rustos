@@ -1,8 +1,10 @@
 use crate::cursor::Cursor;
+use alloc::string::{String, ToString};
 use core::ops::Sub;
 use core::slice::from_raw_parts;
 
 /// Узел дерева
+#[derive(Clone, Copy)]
 pub struct Node<'a> {
     name: &'a str,
     offset: usize,
@@ -10,9 +12,22 @@ pub struct Node<'a> {
     buffer: &'a [u8],
 }
 
+#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
+pub struct NodeKey {
+    name: String,
+    offset: usize,
+}
+
 impl<'a> Node<'a> {
     pub const fn name(&self) -> &'a str {
         self.name
+    }
+
+    pub fn key(&self) -> NodeKey {
+        NodeKey {
+            name: self.name.to_string(),
+            offset: self.offset,
+        }
     }
 
     pub fn properties(&self) -> PropertyIter<'a> {

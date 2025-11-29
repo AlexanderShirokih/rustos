@@ -1,7 +1,7 @@
 OUTPUT_ARCH(aarch64);
-ENTRY(_header_start);
+ENTRY(__start);
 
-PROVIDE(KERNEL_OFFSET = 0x0);
+PROVIDE(KERNEL_OFFSET = 0);
 
 SECTIONS {
     . = KERNEL_OFFSET;

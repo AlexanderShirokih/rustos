@@ -1,4 +1,4 @@
-//! Заголовок формата Linux ARM64 для совместимости со стоковыми Android-загрузчиками
+//! Заголовок формата Linux ARM64 для совместимости с загрузчиками работающих c binary форматом
 
 use core::arch::global_asm;
 
@@ -6,8 +6,8 @@ global_asm!(
     r#"
         .section .head, "ax"
         .balign 8
-        .global _header_start
-    _header_start:
+        .global __start
+    __start:
         b _start                            // code0: branch to _start
         .word 0                             // code1
         .quad 0                             // text_offset

@@ -1,8 +1,7 @@
+use crate::drivers::commons::ProbeContextExt;
 use alloc::boxed::Box;
-use fdt::devicetreeext::PropExt;
-use kernel_core::console::BasicConsole;
 use kernel_core::driver::early::{EarlyDriverHandle, ProbeContext};
-use kernel_core::driver::probe::{NodeProbeExt, ProbeError, ProbeResult};
+use kernel_core::driver::probe::ProbeResult;
 use kernel_core::driver::register_early_driver;
 use kernel_core::io::byte_sink::{ByteSink, WouldBlock};
 use kernel_core::io::mmio::{Mmio, Register};
@@ -82,17 +81,10 @@ impl ByteSink for UartDm {
 }
 
 fn uart_dm_probe(context: &ProbeContext) -> ProbeResult<EarlyDriverHandle> {
-    let node = context.node();
-    let reg_property = node.require_prop("reg")?;
-    let reg = reg_property
-        .try_as_offset_size(context.cells_size())
-        .ok_or(ProbeError::Other("invalid reg"))?;
-
-    let uart = UartDm::new(reg.offset);
+    let uart = UartDm::new(context.reg_offset());
     let writer = BlockingWriter::new(uart);
-    let console = BasicConsole::new(writer);
 
-    Ok(EarlyDriverHandle::Console(Box::new(console)))
+    Ok(EarlyDriverHandle::Writer(Box::new(writer)))
 }
 
 register_early_driver!(

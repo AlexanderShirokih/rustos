@@ -2,14 +2,7 @@ mod common;
 
 use common::make_range;
 use memory::FrameBitmap;
-use memory::memory_range::MemoryRange;
-use memory::physical::{Frame, PageAlignedAddress};
-
-fn range_frames(range: &MemoryRange<PageAlignedAddress>) -> Vec<Frame> {
-    let start = Frame::from(range.start());
-    let end = Frame::from(range.end());
-    (start.number()..=end.number()).map(Frame::new).collect()
-}
+use memory::physical::Frame;
 
 #[test]
 fn set_and_clear_range_controls_allocation() {

@@ -1,0 +1,12 @@
+device:
+  name: Xiaomi Redmi Note 7
+  arch: aarch64
+
+boot:
+  dtb: /devices/dtb/sdm660-lavender.dtb
+  format: android_boot_v1
+  offset: 0x80080000
+
+run: [
+  "fastboot -boot target/build/boot.img"
+]

@@ -14,10 +14,8 @@ const PHASE_UNINIT: u8 = 0;
 const PHASE_BUMP: u8 = 1;
 const PHASE_HEAP: u8 = 2;
 
-pub type KernelHeapAllocator = HeapAllocator<
-    Aarch64RamMemory,
-    Aarch64MemoryMapper<PhysicalMemoryManager, Aarch64RamMemory>,
->;
+pub type KernelHeapAllocator =
+    HeapAllocator<Aarch64RamMemory, Aarch64MemoryMapper<PhysicalMemoryManager, Aarch64RamMemory>>;
 
 /// Двухфазный глобальный аллокатор ядра
 pub struct GlobalKernelAllocator {

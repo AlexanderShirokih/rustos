@@ -1,6 +1,6 @@
 use crate::io::writer::Writer;
-use core::fmt::Arguments;
-use spin::Once;
+use core::fmt::{Arguments, Write};
+use spin::Mutex;
 
 pub enum Level {
     Fatal,
@@ -10,44 +10,40 @@ pub enum Level {
     Debug,
 }
 
-/// Logger trait for system-wide logging
+/// Консоль для вывода форматированных сообщений
 pub trait Console: Sync {
     fn printf(&self, arguments: Arguments);
     fn logf(&self, level: Level, arguments: Arguments);
 }
 
-#[derive(Copy, Clone)]
-struct Nil;
-static NIL_CONSOLE: Nil = Nil;
-impl Console for Nil {
-    fn printf(&self, _: Arguments) {}
-    fn logf(&self, _: Level, _: Arguments) {}
+struct NilWriter;
+
+static NIL_WRITER: NilWriter = NilWriter;
+static STDOUT: Stdout = Stdout {
+    writer: Mutex::new(&NIL_WRITER),
+};
+
+impl Writer for NilWriter {
+    fn write_all(&self, _bytes: &[u8]) {}
+
+    fn flush(&self) {}
 }
 
-pub struct BasicConsole<W: Writer> {
-    w: W,
-}
+/// Адаптер для использования `&dyn Writer` с `core::fmt::Write`
+struct WriterAdapter<'a>(&'a dyn Writer);
 
-impl<W: Writer> BasicConsole<W> {
-    pub fn new(w: W) -> Self {
-        Self { w }
+impl Write for WriterAdapter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.0.write_all(s.as_bytes());
+        Ok(())
     }
 }
 
-impl<W: Writer + Sync> Console for BasicConsole<W> {
+impl Console for Stdout {
     fn printf(&self, arguments: Arguments) {
-        if let Some(s) = arguments.as_str() {
-            self.w.write_all(s.as_bytes());
-            self.w.flush();
-        } else {
-            use core::fmt::Write;
-            use heapless::String;
-            let mut buffer = String::<256>::new();
-            if buffer.write_fmt(arguments).is_ok() {
-                self.w.write_all(buffer.as_bytes());
-                self.w.flush();
-            }
-        }
+        WriterAdapter(*self.writer.lock())
+            .write_fmt(arguments)
+            .unwrap()
     }
 
     fn logf(&self, lvl: Level, arguments: Arguments) {
@@ -63,15 +59,25 @@ impl<W: Writer + Sync> Console for BasicConsole<W> {
     }
 }
 
-static CONS: Once<&'static dyn Console> = Once::new();
-
-pub fn set_stdout(c: &'static dyn Console) {
-    let _ = CONS.call_once(|| c);
+pub struct Stdout {
+    writer: Mutex<&'static dyn Writer>,
 }
 
-#[inline(always)]
-pub fn stdout() -> &'static dyn Console {
-    CONS.get().copied().unwrap_or(&NIL_CONSOLE)
+unsafe impl Sync for Stdout {}
+unsafe impl Send for Stdout {}
+
+impl Write for &Stdout {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        WriterAdapter(*self.writer.lock()).write_str(s)
+    }
+}
+
+pub fn set_stdout(w: &'static dyn Writer) {
+    *STDOUT.writer.lock() = w;
+}
+
+pub fn stdout() -> &'static Stdout {
+    &STDOUT
 }
 
 pub fn log_fmt(level: Level, args: Arguments) {
@@ -79,43 +85,36 @@ pub fn log_fmt(level: Level, args: Arguments) {
 }
 
 #[macro_export]
-macro_rules! printf {
-    ($console:expr, $($arg:tt)*) => {
-        $console.printf(format_args!($($arg)*))
-    };
-}
-
-#[macro_export]
 macro_rules! fatal {
     ($console:expr, $($arg:tt)*) => {
-        $console.logf($crate::console::Level::Fatal, format_args!($($arg)*))
+        $crate::console::Console::logf($console, $crate::console::Level::Fatal, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! error {
     ($console:expr, $($arg:tt)*) => {
-        $console.logf($crate::console::Level::Error, format_args!($($arg)*))
+        $crate::console::Console::logf($console, $crate::console::Level::Error, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! warn {
     ($console:expr, $($arg:tt)*) => {
-        $console.logf($crate::console::Level::Warn, format_args!($($arg)*))
+        $crate::console::Console::logf($console, $crate::console::Level::Warn, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! info {
     ($console:expr, $($arg:tt)*) => {
-        $console.logf($crate::console::Level::Info, format_args!($($arg)*))
+        $crate::console::Console::logf($console, $crate::console::Level::Info, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! debug {
     ($console:expr, $($arg:tt)*) => {
-        $console.logf($crate::console::Level::Debug, format_args!($($arg)*))
+        $crate::console::Console::logf($console, $crate::console::Level::Debug, format_args!($($arg)*))
     };
 }
