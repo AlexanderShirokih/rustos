@@ -19,3 +19,20 @@ pub fn make_excluded(spec: &[(usize, usize)]) -> Vec<MemoryRange<PageAlignedAddr
         .map(|(start, len)| make_range(*start, *len))
         .collect()
 }
+
+#[test]
+fn test_mock_backend_basic() {
+    use memory::memory_backend::MemoryBackend;
+    use memory::test_utils::MockMemoryBackend;
+    use memory::physical::PhysicalAddress;
+
+    let backend = MockMemoryBackend::new(4096, 10);
+
+    assert_eq!(backend.frame_size(), 4096);
+    assert_eq!(backend.total_frames(), 10);
+
+    let addr = PhysicalAddress::new(0);
+    backend.write(addr, 42u32);
+    let value: u32 = backend.read(addr);
+    assert_eq!(value, 42);
+}

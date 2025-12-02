@@ -1,2 +1,2 @@
-/// Kernel struct that contains core kernel components
+/// Kernel struct that contains kernel kernel components
 pub struct Kernel {}

@@ -5,8 +5,8 @@ use crate::layout::{MemoryLayout, MemoryRegion};
 use crate::virtual_address::{VirtualAddress, VirtualAddressExt};
 use alloc::sync::Arc;
 use core::ops::{Index, IndexMut};
-use kernel_core::console::stdout;
-use kernel_core::debug;
+use kernel::console::stdout;
+use kernel::debug;
 use memory::memory_backend::{MemoryBackend, MemoryPtr};
 use memory::physical::{Frame, PageAlignedAddress, PhysicalAddress};
 use memory::physical_manager::{FrameAllocator, ReserveFrameError};
@@ -487,7 +487,7 @@ pub fn create_page_table_manager<FA: FrameAllocator, B: MemoryBackend>(
 ) -> Result<PageTableManager<FA, B>, VmError> {
     let heap = memory_layout.heap().next().ok_or(VmError::OtherError)?;
 
-    let page_table_manager = PageTableManager::new(frame_allocator, memory_backend, heap)?;
+    let page_table_manager = PageTableManager::new(frame_allocator, memory_backend, heap.clone())?;
 
     // Отображаем все прямые регионы с идентичным маппингом
     for region in memory_layout.iter().filter(|r| r.identity_map) {

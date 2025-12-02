@@ -1,10 +1,10 @@
-use crate::memory::bump_allocator::BumpAllocator;
+use memory::bump_allocator::BumpAllocator;
 use crate::memory::entry_flags::EntryFlags;
 use crate::memory::layout::MemoryRegion;
 use aarch64_paging::MemoryLayout;
 use core::cmp::{max, min};
 use fdt::devicetree::DeviceTree;
-use fdt::devicetreeext::{DeviceTreeExt, OffsetSize, PropExt};
+use fdt::devicetreeext::{AddressSpace, NodeExt, PropExt};
 use memory::physical::Frame;
 
 unsafe extern "C" {
@@ -78,12 +78,11 @@ pub(crate) fn build_memory_layout<'a>(
     }
 }
 
-fn find_ram_regions(dt: &DeviceTree) -> Option<impl Iterator<Item = OffsetSize>> {
-    let cells_size = dt.cells_size()?;
+fn find_ram_regions(dt: &DeviceTree) -> Option<impl Iterator<Item = AddressSpace>> {
+    let root = dt.root()?;
 
     Some(
-        dt.root()?
-            .children()
+        root.children()
             .filter(|node| {
                 node.prop("device_type")
                     .and_then(|device_type| {
@@ -92,7 +91,12 @@ fn find_ram_regions(dt: &DeviceTree) -> Option<impl Iterator<Item = OffsetSize>>
                     .unwrap_or_else(|| node.name().starts_with("memory"))
             })
             .filter_map(|node| node.prop("reg"))
-            .filter_map(move |prop| prop.try_as_offset_size(cells_size))
+            .filter_map(move |prop| {
+                let cells_size = root.cells_size().unwrap_or_default();
+                let offsets_array = prop.try_as_reg_list::<1>(cells_size);
+
+                offsets_array.and_then(|array| array.get(0).copied())
+            })
             .filter(|offset_size| offset_size.size > 0),
     )
 }
@@ -116,7 +120,7 @@ impl FrameInterval {
 }
 
 pub(crate) fn create_bump_allocator(layout: &MemoryLayout) -> Result<BumpAllocator, ()> {
-    let mut free_regions: heapless::Vec<FrameInterval, MAX_REGIONS> = heapless::Vec::new();
+    let mut free_regions: collections::Vec<FrameInterval, MAX_REGIONS> = collections::Vec::new();
 
     layout.heap().for_each(|heap| {
         let heap_start = Frame::from(heap.start).number();
@@ -141,12 +145,12 @@ pub(crate) fn create_bump_allocator(layout: &MemoryLayout) -> Result<BumpAllocat
 /// Собирает свободные регионы в heap, вырезая исключённые области
 fn collect_free_regions(
     layout: &MemoryLayout,
-    free_regions: &mut heapless::Vec<FrameInterval, MAX_REGIONS>,
+    free_regions: &mut collections::Vec<FrameInterval, MAX_REGIONS>,
     heap_start: usize,
     heap_end: usize,
 ) {
     // Сначала собираем и объединяем исключённые интервалы
-    let mut excluded: heapless::Vec<FrameInterval, MAX_REGIONS> = heapless::Vec::new();
+    let mut excluded = collections::Vec::<FrameInterval, MAX_REGIONS>::new();
 
     for region in layout.iter().filter(|r| r.identity_map) {
         let start = Frame::from(region.start).number();
@@ -178,7 +182,7 @@ fn collect_free_regions(
     }
 }
 
-fn merge_intervals(intervals: &mut heapless::Vec<FrameInterval, MAX_REGIONS>) {
+fn merge_intervals(intervals: &mut collections::Vec<FrameInterval, MAX_REGIONS>) {
     if intervals.is_empty() {
         return;
     }

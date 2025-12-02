@@ -1,5 +1,4 @@
 pub mod allocator;
-pub(crate) mod bump_allocator;
 pub mod global_allocator;
 pub mod manager;
 pub mod memory_mapper;

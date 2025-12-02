@@ -10,11 +10,12 @@ test = false
 
 [dependencies]
 aarch64-paging = { path = "../aarch64-paging" }
-kernel-core = { path = "../../core" }
+kernel = { path = "../../kernel" }
 memory = { path = "../../memory" }
+collections = { path = "../../collections" }
 util = { path = "../../util" }
 fdt = { path = "../../fdt" }
-heapless = "0.9.1"
+io = { path = "../../io" }
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }

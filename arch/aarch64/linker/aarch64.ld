@@ -40,8 +40,10 @@ SECTIONS {
     }
 
     .bss (NOLOAD) : ALIGN(4K) {
+        _bss_start = .;
         *(.bss*)
         *(COMMON)
+        _bss_end = .;
     } =0
 
     .stack (NOLOAD) : ALIGN(4K) {

@@ -5,8 +5,8 @@ use crate::memory::ram_memory::Aarch64RamMemory;
 use crate::memory::virtual_mem::{PageTableManager, create_page_table_manager};
 use aarch64_paging::MemoryLayout;
 use alloc::sync::Arc;
-use kernel_core::console::stdout;
-use kernel_core::debug;
+use kernel::console::stdout;
+use kernel::debug;
 use memory::memory_range::MemoryRange;
 use memory::physical::PageAlignedAddress;
 use memory::physical_manager::PhysicalMemoryManager;
@@ -31,7 +31,7 @@ impl MemoryManager {
 
         let backend = Aarch64RamMemory::new(frame_size);
 
-        let heap_range: MemoryRange<PageAlignedAddress> = heap.into();
+        let heap_range: MemoryRange<PageAlignedAddress> = heap.clone().into();
 
         let identity_map_regions = memory_layout
             .iter()

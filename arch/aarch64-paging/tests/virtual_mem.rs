@@ -10,9 +10,11 @@ use aarch64_paging::virtual_mem::{
 };
 use alloc::vec::Vec;
 use common::{TEST_FRAME_SIZE, build_frame_allocator, layout_from_regions, make_region};
-use memory::memory_backend::{MemoryBackend, MockMemoryBackend};
+use memory;
+use memory::memory_backend::MemoryBackend;
 use memory::physical::{Frame, PageAlignedAddress, PhysicalAddress};
 use memory::physical_manager::PhysicalMemoryManager;
+use memory::test_utils::MockMemoryBackend;
 
 fn mock_backend(total_frames: usize) -> MockMemoryBackend {
     MockMemoryBackend::new(TEST_FRAME_SIZE, total_frames)
@@ -25,6 +27,28 @@ fn heap_region(heap_start_frame: usize, heap_frames: usize) -> MemoryRegion<Page
         heap_frames,
         EntryFlags::KERNEL_DATA,
     )
+}
+
+#[test]
+fn test_frame_bitmap() {
+    let region = common::make_range(0, 512);
+    let _bitmap = memory::FrameBitmap::new(&region);
+}
+
+#[test]
+fn test_physical_memory_manager() {
+    let region = common::make_range(0, 512);
+    let _manager = PhysicalMemoryManager::new(&region, std::iter::empty());
+}
+
+#[test]
+fn test_create_page_table_manager() {
+    let total_frames = 512;
+    let backend = mock_backend(total_frames);
+    let allocator = build_frame_allocator(total_frames, &[]);
+    let heap = heap_region(32, total_frames - 32);
+    let _manager =
+        PageTableManager::new(allocator, backend.clone(), heap).expect("manager should init");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use core::alloc::Layout;
 use core::fmt::Formatter;
 use core::ptr::NonNull;
-use memory::physical::Frame;
+use crate::physical::Frame;
 
 pub struct BumpAllocator {
     start: usize,

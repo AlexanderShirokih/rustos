@@ -3,8 +3,8 @@ resolver = "3"
 members = [
     "arch/aarch64",
     "arch/aarch64-paging",
-    "arch/common",
-    "core", "fdt",
+    "arch/common", "collections",
+    "kernel", "fdt", "io",
     "memory",
     "util",
     "xtask",

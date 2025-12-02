@@ -1,4 +1,4 @@
-use crate::io::byte_sink::ByteSink;
+use crate::byte_sink::ByteSink;
 use core::fmt::Write;
 
 pub trait Writer {

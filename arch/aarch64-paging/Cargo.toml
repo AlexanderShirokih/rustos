@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-kernel-core = { path = "../../core" }
+kernel = { path = "../../kernel" }
 memory = { path = "../../memory" }
+collections = { path = "../../collections" }

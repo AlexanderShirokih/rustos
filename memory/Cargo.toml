@@ -5,6 +5,6 @@ edition = "2024"
 
 [dependencies]
 spin = "0.10.0"
-kernel-core = { path = "../core" }
+kernel = { path = "../kernel" }
 
 [dev-dependencies]

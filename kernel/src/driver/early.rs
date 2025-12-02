@@ -1,11 +1,10 @@
 use crate::driver::probe::CompatibleList;
 use crate::driver::probe::{NodeProbeExt, ProbeError, ProbeResult};
-use crate::io::writer::Writer;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use fdt::devicetree::{DeviceTree, Node, NodeKey};
-use fdt::devicetreeext::{CellsSize, DeviceTreeExt};
+use io::writer::Writer;
 
 type EarlyDriverId = NodeKey;
 
@@ -25,30 +24,22 @@ impl EarlyDriverRegistry {
     }
 
     pub fn scan_and_probe(&mut self, dt: &DeviceTree<'_>) {
-        let cells_size = dt.cells_size().unwrap_or_default();
-
         match dt.root() {
             Some(root) => {
                 let mut paths = Vec::<Node>::new();
-                self.visit_node(&mut paths, &root, &cells_size);
+                self.visit_node(&mut paths, &root);
             }
 
             None => return,
         }
     }
 
-    fn visit_node<'a>(
-        &mut self,
-        paths: &mut Vec<Node<'a>>,
-        node: &Node<'a>,
-        cells_size: &CellsSize,
-    ) {
+    fn visit_node<'a>(&mut self, paths: &mut Vec<Node<'a>>, node: &Node<'a>) {
         paths.push(node.clone());
 
         if node.prop("compatible").is_some() {
             let context = ProbeContext {
                 node,
-                cells_size,
                 hierarchy: paths,
             };
 
@@ -56,7 +47,7 @@ impl EarlyDriverRegistry {
         }
 
         for child in node.children() {
-            self.visit_node(paths, &child, cells_size);
+            self.visit_node(paths, &child);
         }
 
         paths.pop();
@@ -84,11 +75,10 @@ pub enum EarlyDriverHandle {
 
 pub struct ProbeContext<'a> {
     node: &'a Node<'a>,
-    hierarchy: &'a Vec<Node<'a>>,
-    cells_size: &'a CellsSize,
+    hierarchy: &'a [Node<'a>],
 }
 
-impl ProbeContext<'_> {
+impl<'a> ProbeContext<'a> {
     pub fn node(&self) -> &Node<'_> {
         &self.node
     }
@@ -97,19 +87,27 @@ impl ProbeContext<'_> {
         &self.hierarchy
     }
 
+    pub fn parent(&self, node: &Node) -> Option<&'a Node<'a>> {
+        self.hierarchy
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.key() == node.key())
+            .and_then(|(index, _)| self.hierarchy.get(index - 1))
+    }
+
     pub fn fold<F, S>(&self, fold: F) -> S
     where
-        F: Fn(&Node, &ProbeContext) -> Option<S>,
+        F: Fn(Option<&Node>, &Node, &ProbeContext) -> Option<S>,
         S: core::iter::Sum,
     {
         self.hierarchy
             .iter()
-            .filter_map(|node| fold(node, self))
+            .enumerate()
+            .filter_map(|(index, node)| {
+                let parent = self.hierarchy.get(index - 1);
+                fold(parent, node, self)
+            })
             .sum::<S>()
-    }
-
-    pub fn cells_size(&self) -> CellsSize {
-        self.cells_size.clone()
     }
 }
 

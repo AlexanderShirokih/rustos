@@ -2,8 +2,8 @@ use crate::frame_bitmap::FrameBitmap;
 use crate::memory_range::MemoryRange;
 use crate::physical::{Frame, PageAlignedAddress};
 use core::sync::atomic::{AtomicUsize, Ordering};
-use kernel_core::console::stdout;
-use kernel_core::info;
+use kernel::console::stdout;
+use kernel::info;
 use spin::Mutex;
 
 /// Ошибки при работе с фреймами

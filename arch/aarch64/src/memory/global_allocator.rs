@@ -1,5 +1,5 @@
 use crate::memory::allocator::HeapAllocator;
-use crate::memory::bump_allocator::BumpAllocator;
+use memory::bump_allocator::BumpAllocator;
 use crate::memory::memory_mapper::Aarch64MemoryMapper;
 use crate::memory::ram_memory::Aarch64RamMemory;
 use core::alloc::{GlobalAlloc, Layout};

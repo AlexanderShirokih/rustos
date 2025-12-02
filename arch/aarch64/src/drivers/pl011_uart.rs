@@ -1,20 +1,23 @@
 use crate::drivers::commons::ProbeContextExt;
 use alloc::boxed::Box;
 use core::hint::spin_loop;
-use kernel_core::driver::early::{EarlyDriverHandle, ProbeContext};
-use kernel_core::driver::probe::ProbeResult;
-use kernel_core::driver::register_early_driver;
-use kernel_core::io::byte_sink::{ByteSink, WouldBlock};
-use kernel_core::io::mmio::{Mmio, Register};
-use kernel_core::io::writer::BlockingWriter;
+use io::byte_sink::{ByteSink, WouldBlock};
+use io::mmio::{Mmio, Reg};
+use io::writer::BlockingWriter;
+use kernel::driver::early::{EarlyDriverHandle, ProbeContext};
+use kernel::driver::probe::ProbeResult;
+use kernel::driver::register_early_driver;
 use util::crlf::Crlf;
 
-const DR: Register<u32> = Register::new(0x00); // Data Register
-const FR: Register<u32> = Register::new(0x18); // Flag Register
+const DR: Reg<u32> = Reg::new(0x00); // Data Reg
+const FR: Reg<u32> = Reg::new(0x18); // Flag Reg
 
 // Биты регистра FR
 const FR_TXFF: u32 = 1 << 5; // Передающий FIFO заполнен
 const FR_BUSY: u32 = 1 << 3; // UART занят передачей
+
+const REG_UART_INDEX: usize = 0;
+const REG_UART_SIZE: usize = 1;
 
 pub struct UartPl011 {
     mmio: Mmio,
@@ -73,9 +76,8 @@ impl ByteSink for UartPl011 {
 }
 
 fn uart_pl011_probe(context: &ProbeContext<'_>) -> ProbeResult<EarlyDriverHandle> {
-    let offset = context.reg_offset();
+    let uart = UartPl011::new(context.reg_offset::<REG_UART_SIZE>(REG_UART_INDEX));
 
-    let uart = UartPl011::new(offset);
     let writer = BlockingWriter::new(uart);
 
     Ok(EarlyDriverHandle::Writer(Box::new(writer)))

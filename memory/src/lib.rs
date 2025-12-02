@@ -8,6 +8,8 @@ pub mod memory_backend;
 pub mod memory_range;
 pub mod physical;
 pub mod physical_manager;
+pub mod bump_allocator;
+pub mod test_utils;
 
 mod frame_bitmap;
 

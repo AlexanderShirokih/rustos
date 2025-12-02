@@ -1,4 +1,5 @@
 use crate::entry_flags::EntryFlags;
+use collections::Vec;
 use memory::memory_range::MemoryRange;
 use memory::physical::{AddressType, Aligned, PageAlignedAddress, PhysicalAddress};
 
@@ -6,28 +7,25 @@ const MAX_MEMORY_REGIONS: usize = 32;
 
 /// Раскладка физической памяти ядра
 pub struct MemoryLayout {
-    regions: [MemoryRegion<PageAlignedAddress>; MAX_MEMORY_REGIONS],
-    regions_count: usize,
+    regions: Vec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
 }
 
 impl MemoryLayout {
     pub fn new() -> Self {
         Self {
-            regions: [MemoryRegion::empty(); MAX_MEMORY_REGIONS],
-            regions_count: 0,
+            regions: Vec::new(),
         }
     }
 
     pub fn add(&mut self, region: MemoryRegion<PageAlignedAddress>) {
-        self.regions[self.regions_count] = region;
-        self.regions_count += 1;
+        self.regions.push(region).expect("Too many memory regions");
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = MemoryRegion<PageAlignedAddress>> {
-        self.regions[0..self.regions_count].iter().copied()
+    pub fn iter(&self) -> impl Iterator<Item = &MemoryRegion<PageAlignedAddress>> {
+        self.regions.iter()
     }
 
-    pub fn heap(&self) -> impl Iterator<Item = MemoryRegion<PageAlignedAddress>> {
+    pub fn heap(&self) -> impl Iterator<Item = &MemoryRegion<PageAlignedAddress>> {
         self.iter()
             .filter(|&region| region.label.eq(MemoryRegion::HEAP))
     }

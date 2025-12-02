@@ -1,5 +1,5 @@
-use kernel_core::console::stdout;
-use kernel_core::info;
+use kernel::console::stdout;
+use kernel::info;
 
 pub fn main() -> () {
     info!(stdout(), "Kernel started!");

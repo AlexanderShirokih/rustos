@@ -1,76 +1,7 @@
-use core::arch::{asm, global_asm};
+use core::arch::asm;
 use core::ptr;
 use memory::memory_backend::MemoryBackend;
 use memory::physical::PhysicalAddress;
-
-global_asm!(
-    r#"
-.global vectors
-.align 11        // 2KB alignment (0x800) с запасом
-
-vectors:
-    // 0x000: sync, current EL, SP0
-    b sync_el1_sp0
-    .balign 0x80
-
-    // 0x080: IRQ, current EL, SP0
-    b irq_el1_sp0
-    .balign 0x80
-
-    // 0x100: sync, current EL, SPx
-    b sync_el1_spx
-    .balign 0x80
-
-    // 0x180: IRQ, current EL, SPx
-    b irq_el1_spx
-    .balign 0x80
-
-    // 0x200: sync, lower EL, aarch64
-    b sync_el0_a64
-    .balign 0x80
-
-    // дальше по желанию...
-"#
-);
-
-#[unsafe(no_mangle)]
-extern "C" fn sync_el1_sp0() -> ! {
-    // пока просто висим и печатаем что-нибудь
-    // тут потом вытащишь ESR_EL1 / FAR_EL1 / ELR_EL1
-    loop {}
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn irq_el1_sp0() -> ! {
-    // пока просто висим и печатаем что-нибудь
-    // тут потом вытащишь ESR_EL1 / FAR_EL1 / ELR_EL1
-    loop {}
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn sync_el1_spx() -> ! {
-    // пока просто висим и печатаем что-нибудь
-    // тут потом вытащишь ESR_EL1 / FAR_EL1 / ELR_EL1
-    loop {}
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn irq_el1_spx() -> ! {
-    // пока просто висим и печатаем что-нибудь
-    // тут потом вытащишь ESR_EL1 / FAR_EL1 / ELR_EL1
-    loop {}
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn sync_el0_a64() -> ! {
-    // пока просто висим и печатаем что-нибудь
-    // тут потом вытащишь ESR_EL1 / FAR_EL1 / ELR_EL1
-    loop {}
-}
-
-unsafe extern "C" {
-    static vectors: u8;
-}
 
 #[derive(Copy, Clone)]
 pub struct Aarch64RamMemory {
@@ -107,9 +38,6 @@ impl MemoryBackend for Aarch64RamMemory {
         unsafe {
             // 1) Барьер перед изменениями регистров
             asm!("dsb ish; isb", options(nostack, preserves_flags));
-
-            let base = &vectors as *const _ as u64;
-            asm!("msr VBAR_EL1, {0}", in(reg) base, options(nostack, preserves_flags));
 
             asm!(
                 "msr DAIFSet, #0b1111", // маскируем IRQ

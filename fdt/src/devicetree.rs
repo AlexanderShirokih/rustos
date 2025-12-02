@@ -1,5 +1,4 @@
 use crate::cursor::Cursor;
-use alloc::string::{String, ToString};
 use core::ops::Sub;
 use core::slice::from_raw_parts;
 
@@ -14,7 +13,6 @@ pub struct Node<'a> {
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub struct NodeKey {
-    name: String,
     offset: usize,
 }
 
@@ -25,7 +23,6 @@ impl<'a> Node<'a> {
 
     pub fn key(&self) -> NodeKey {
         NodeKey {
-            name: self.name.to_string(),
             offset: self.offset,
         }
     }
@@ -115,6 +112,10 @@ pub enum DtError {
 
 impl<'a> DeviceTree<'a> {
     pub fn from_ptr(address: usize) -> Result<Self, DtError> {
+        if address == 0 {
+            return Err(DtError::InvalidMagic(0));
+        }
+
         let ptr_u8 = address as *const u8;
 
         let hdr_buf = unsafe { from_raw_parts(ptr_u8, size_of::<u32>() * 4) };

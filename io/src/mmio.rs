@@ -52,22 +52,22 @@ impl Mmio {
     }
 
     #[inline(always)]
-    pub fn read_reg<T: VolatileInt>(&self, reg: Register<T>) -> T {
+    pub fn read_reg<T: VolatileInt>(&self, reg: Reg<T>) -> T {
         self.read::<T>(reg.offset)
     }
     #[inline(always)]
-    pub fn write_reg<T: VolatileInt>(&self, reg: Register<T>, v: T) {
+    pub fn write_reg<T: VolatileInt>(&self, reg: Reg<T>, v: T) {
         self.write::<T>(reg.offset, v)
     }
 }
 
 /// Типобезопасный дескриптор регистра со смещением и ожидаемым типом.
-pub struct Register<T> {
+pub struct Reg<T> {
     pub offset: usize,
     _t: PhantomData<T>,
 }
 
-impl<T> Register<T> {
+impl<T> Reg<T> {
     #[inline(always)]
     pub const fn new(offset: usize) -> Self {
         Self {

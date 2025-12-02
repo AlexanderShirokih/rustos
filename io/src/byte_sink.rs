@@ -9,7 +9,6 @@ pub trait ByteSink {
     /// Попытаться записать сразу несколько байт.
     /// Возвращает: Ok(n) — фактически записано n (может быть < buf.len()),
     /// Err(WouldBlock) — не удалось записать ни одного байта.
-    #[inline(always)]
     fn try_write_slice(&self, buf: &[u8]) -> Result<usize, WouldBlock> {
         let mut n = 0;
         for &b in buf {
@@ -22,6 +21,5 @@ pub trait ByteSink {
     }
 
     /// Дождаться полного опустошения буфера устройства.
-    #[inline(always)]
     fn flush(&self) {}
 }

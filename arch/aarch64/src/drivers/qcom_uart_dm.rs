@@ -1,22 +1,25 @@
 use crate::drivers::commons::ProbeContextExt;
 use alloc::boxed::Box;
-use kernel_core::driver::early::{EarlyDriverHandle, ProbeContext};
-use kernel_core::driver::probe::ProbeResult;
-use kernel_core::driver::register_early_driver;
-use kernel_core::io::byte_sink::{ByteSink, WouldBlock};
-use kernel_core::io::mmio::{Mmio, Register};
-use kernel_core::io::writer::BlockingWriter;
+use io::byte_sink::{ByteSink, WouldBlock};
+use io::mmio::{Mmio, Reg};
+use io::writer::BlockingWriter;
+use kernel::driver::early::{EarlyDriverHandle, ProbeContext};
+use kernel::driver::probe::ProbeResult;
+use kernel::driver::register_early_driver;
 use util::crlf::Crlf;
 
 // --- UARTDM v1.4 регистры и биты ---
-const NCF_TX: Register<u32> = Register::new(0x040); // number of chars for TX
-const SR: Register<u32> = Register::new(0x0A4); // status
-const CR: Register<u32> = Register::new(0x0A8); // command/enable
-const TF: Register<u32> = Register::new(0x100); // TX FIFO (32-bit writes)
+const NCF_TX: Reg<u32> = Reg::new(0x040); // number of chars for TX
+const SR: Reg<u32> = Reg::new(0x0A4); // status
+const CR: Reg<u32> = Reg::new(0x0A8); // command/enable
+const TF: Reg<u32> = Reg::new(0x100); // TX FIFO (32-bit writes)
 
 const SR_TXRDY: u32 = 1 << 2;
 const SR_TXEMT: u32 = 1 << 3;
 const CMD_CLEAR_TX_READY: u32 = 0x300; // kick NCF_TX
+
+const REG_UART_INDEX: usize = 0;
+const REG_UART_SIZE: usize = 1;
 
 pub struct UartDm {
     mmio: Mmio,
@@ -31,7 +34,6 @@ impl UartDm {
 }
 
 impl ByteSink for UartDm {
-    #[inline(always)]
     fn try_write(&self, b: u8) -> Result<(), WouldBlock> {
         match self.try_write_slice(core::slice::from_ref(&b)) {
             Ok(1) => Ok(()),
@@ -39,7 +41,6 @@ impl ByteSink for UartDm {
         }
     }
 
-    #[inline(always)]
     fn try_write_slice(&self, buf: &[u8]) -> Result<usize, WouldBlock> {
         if buf.is_empty() {
             return Ok(0);
@@ -71,7 +72,6 @@ impl ByteSink for UartDm {
         Ok(in_consumed)
     }
 
-    #[inline(always)]
     fn flush(&self) {
         // Ждём полного опустошения передатчика
         while (self.mmio.read_reg(SR) & SR_TXEMT) == 0 {
@@ -81,7 +81,7 @@ impl ByteSink for UartDm {
 }
 
 fn uart_dm_probe(context: &ProbeContext) -> ProbeResult<EarlyDriverHandle> {
-    let uart = UartDm::new(context.reg_offset());
+    let uart = UartDm::new(context.reg_offset::<REG_UART_SIZE>(REG_UART_INDEX));
     let writer = BlockingWriter::new(uart);
 
     Ok(EarlyDriverHandle::Writer(Box::new(writer)))
