@@ -11,6 +11,24 @@ use memory::memory_backend::{MemoryBackend, MemoryPtr};
 use memory::physical::{Frame, PageAlignedAddress, PhysicalAddress};
 use memory::physical_manager::{FrameAllocator, ReserveFrameError};
 
+/// Размер отображения (4K страница или блок).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSize {
+    Size4K,
+    Size2M,
+    Size1G,
+}
+
+impl PageSize {
+    pub const fn bytes(self) -> usize {
+        match self {
+            PageSize::Size4K => 4 * 1024,
+            PageSize::Size2M => 2 * 1024 * 1024,
+            PageSize::Size1G => 1024 * 1024 * 1024,
+        }
+    }
+}
+
 /// Страница виртуальной памяти
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Page {
@@ -70,20 +88,64 @@ impl Page {
 pub struct PageTableEntry(u64);
 
 impl PageTableEntry {
-    const PHYS_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
+    /// Маска адресной части дескриптора для 4KB гранулы (выходной адрес), биты [47:12].
+    const ADDR_4K_MASK: u64 = 0x0000_FFFF_FFFF_F000;
+    /// Маска адреса для 1GB block entry (L1, 4K granule), биты [47:30]
+    const BLOCK_1GB_ADDR_MASK: u64 = 0x0000_FFFF_C000_0000;
+    /// Маска адреса для 2MB block entry (L2, 4K granule), биты [47:21]
+    const BLOCK_2MB_ADDR_MASK: u64 = 0x0000_FFFF_FFE0_0000;
 
-    pub const fn new() -> Self {
+    /// Пустая (нулевая) запись таблицы страниц.
+    pub const fn empty() -> Self {
         PageTableEntry(0)
     }
 
     const fn with_address_and_flags(address: PageAlignedAddress, flags: EntryFlags) -> Self {
-        let masked_addr = (address.as_usize() as u64) & Self::PHYS_ADDR_MASK;
+        let masked_addr = (address.as_usize() as u64) & Self::ADDR_4K_MASK;
         PageTableEntry(masked_addr | flags.bits())
     }
 
     pub fn new_frame(frame: Frame, flags: EntryFlags) -> Self {
         let addr = frame.page_address();
         Self::with_address_and_flags(addr, flags)
+    }
+
+    /// Создать leaf-дескриптор (страница 4K или блок 2MB/1GB) по физическому адресу.
+    ///
+    /// - Для `Size4K` будет выставлен `PAGE` (bit1=1).
+    /// - Для `Size2M/Size1G` это block entry (bit1=0).
+    ///
+    /// `phys_addr` должен быть выровнен на соответствующий размер.
+    pub const fn new_leaf(phys_addr: PhysicalAddress, size: PageSize, flags: EntryFlags) -> Self {
+        let addr_mask = match size {
+            PageSize::Size4K => Self::ADDR_4K_MASK,
+            PageSize::Size2M => Self::BLOCK_2MB_ADDR_MASK,
+            PageSize::Size1G => Self::BLOCK_1GB_ADDR_MASK,
+        };
+
+        let mut bits = flags.bits() | EntryFlags::VALID.bits() | EntryFlags::ACCESS.bits();
+        match size {
+            PageSize::Size4K => {
+                // L3 page entry: bit1=1
+                bits |= EntryFlags::PAGE.bits();
+            }
+            PageSize::Size2M | PageSize::Size1G => {
+                // block entry: bit1=0 (на случай если флаги принесли PAGE/TABLE)
+                bits &= !EntryFlags::TABLE.bits();
+            }
+        }
+
+        let masked_addr = (phys_addr.as_usize() as u64) & addr_mask;
+        PageTableEntry(masked_addr | bits)
+    }
+
+    /// Создать запись-указатель на таблицу из сырого указателя.
+    ///
+    /// Указатель должен быть 4KB-aligned и указывать на физически доступную таблицу.
+    pub fn new_table_from_ptr(table_ptr: *const PageTable) -> Self {
+        let masked_addr = (table_ptr as u64) & Self::ADDR_4K_MASK;
+        let flags_bits = EntryFlags::VALID.bits() | EntryFlags::TABLE.bits();
+        PageTableEntry(masked_addr | flags_bits)
     }
 
     fn new_table(table_frame: Frame) -> Self {
@@ -106,7 +168,7 @@ impl PageTableEntry {
 
     /// Получить физический адрес, на который указывает эта запись
     pub fn address(&self) -> PhysicalAddress {
-        ((self.0 & Self::PHYS_ADDR_MASK) as usize).into()
+        ((self.0 & Self::ADDR_4K_MASK) as usize).into()
     }
 
     /// Получить фрейм, на который указывает эта запись
@@ -133,9 +195,9 @@ pub struct PageTable {
 }
 
 impl PageTable {
-    pub fn new() -> Self {
+    pub fn empty() -> Self {
         PageTable {
-            entries: [PageTableEntry::new(); 512],
+            entries: [PageTableEntry::empty(); 512],
         }
     }
 }
@@ -188,10 +250,10 @@ pub struct PageTableManager<FA: FrameAllocator, B: MemoryBackend> {
     /// Корневая таблица страниц (уровень 0)
     root_table: Frame,
 
-    /// Бэкенд для операций с памятью (owned, B is typically Copy)
+    /// Бэкенд для операций с памятью
     backend: B,
 
-    /// Аллокатор фреймов (shared via Arc)
+    /// Аллокатор фреймов
     frame_allocator: Arc<FA>,
 
     /// Регион памяти кучи
@@ -230,7 +292,7 @@ impl<FA: FrameAllocator, B: MemoryBackend> PageTableManager<FA, B> {
             .allocate_frame()
             .ok_or(VmError::FrameAllocationFailed { level, index })?;
 
-        self.write_table(frame, PageTable::new());
+        self.write_table(frame, PageTable::empty());
 
         Ok(frame)
     }
@@ -323,7 +385,7 @@ impl<FA: FrameAllocator, B: MemoryBackend> PageTableManager<FA, B> {
         let root_table_address = root_table.page_address();
         let root_ptr: MemoryPtr<PageTable> = root_table_address.into();
 
-        root_ptr.write(&backend, PageTable::new());
+        root_ptr.write(&backend, PageTable::empty());
 
         let page_table_manager = PageTableManager {
             root_table,
@@ -342,12 +404,7 @@ impl<FA: FrameAllocator, B: MemoryBackend> PageTableManager<FA, B> {
         Ok(page_table_manager)
     }
 
-    /// Включить или выключить режим виртуальной памяти
-    pub fn enable_virtual_mode(&self) {
-        self.backend()
-            .enable_virtual_mode(self.root_table.page_address().as_physical_address());
-    }
-
+    /// Включить или выключить режим виртуальной памяти.
     /// Отобразить регион памяти с идентичным маппингом
     fn identity_map_region(
         &self,

@@ -1,7 +1,95 @@
+use alloc::boxed::Box;
 use core::arch::asm;
 use core::ptr::write_volatile;
-use fdt::devicetree::DeviceTree;
-use fdt::devicetreeext::NodeExt;
+use fdt::devicetree::Node;
+use kernel::driver::Device;
+use kernel::driver::probe::ProbeError;
+use kernel::register_kernel_driver;
+
+register_kernel_driver!(
+    SIMPLE_FRAMEBUFFER,
+    compatible = &["simple-framebuffer"],
+    probe = simple_framebuffer_probe
+);
+
+fn simple_framebuffer_probe(node: &Node) -> Result<Box<dyn Device>, ProbeError> {
+    let mut reg_base: usize = 0;
+    let mut width: u32 = 0;
+    let mut height: u32 = 0;
+    let mut stride: u32 = 0;
+    let mut bpp: u32 = 0;
+    let mut fmt = PixelFormat::Unknown;
+
+    while let Some(p) = node.properties().next() {
+        let name = p.name();
+        let value = p.value();
+
+        match name {
+            "reg" => {
+                if value.len() >= 16 {
+                    let addr_hi = p.try_as_u32(0).unwrap() as u64;
+                    let addr_lo = p.try_as_u32(4).unwrap() as u64;
+                    reg_base = ((addr_hi << 32) | addr_lo) as usize;
+                } else if value.len() >= 8 {
+                    reg_base = p.try_as_u32(0).unwrap() as usize;
+                }
+            }
+
+            "width" => {
+                width = p.try_as_u32(0).unwrap_or(0);
+            }
+
+            "height" => {
+                height = p.try_as_u32(0).unwrap_or(0);
+            }
+
+            "stride" | "line_length" => {
+                stride = p.try_as_u32(0).unwrap_or(0);
+            }
+
+            "format" | "pixel_format" => {
+                if let Some((pf, bits)) = p.as_cstr().map(|s| parse_pixel_format(s)) {
+                    fmt = pf;
+                    if bits != 0 {
+                        bpp = bits;
+                    }
+                }
+            }
+
+            "bits-per-pixel" => {
+                if let Some(parsed_bpp) = p.try_as_u32(0) {
+                    bpp = parsed_bpp;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    // Если stride не указан — вычисляем от width*bpp.
+    if reg_base != 0 && width != 0 && height != 0 && (stride != 0 || bpp != 0) {
+        let final_stride = if stride != 0 {
+            stride
+        } else {
+            width * (bpp / 8)
+        };
+
+        let final_bpp = if bpp != 0 { bpp } else { 32 };
+
+        return Ok(Box::new(FramebufferInfo {
+            paddr: reg_base,
+            width,
+            height,
+            stride: final_stride,
+            bpp: final_bpp,
+            format: fmt,
+        }));
+    }
+
+    Err(ProbeError::Unsupported(
+        "invalid params for simple-framebuffer",
+    ))
+}
 
 /// Форматы пикселей, встречающиеся в simple-framebuffer/qualcomm fb.
 #[derive(Copy, Clone, Debug)]
@@ -23,6 +111,12 @@ pub struct FramebufferInfo {
     pub format: PixelFormat,
 }
 
+impl Device for FramebufferInfo {
+    fn name(&self) -> &str {
+        "framebuffer"
+    }
+}
+
 /// Описатель уже отмапленного/готового к записи буфера.
 #[derive(Copy, Clone, Debug)]
 pub struct Framebuffer {
@@ -36,7 +130,6 @@ pub struct Framebuffer {
 
 impl Framebuffer {
     /// Записывает один пиксель с учётом bpp/stride и формата (LE).
-    #[inline]
     pub fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x >= self.width || y >= self.height {
             return;
@@ -122,7 +215,6 @@ fn pack32_le(fmt: PixelFormat, argb: u32) -> u32 {
 }
 
 /// Принудительно очищает кэш данных для области фреймбуфера до PoC.
-#[inline(always)]
 pub fn flush_framebuffer(ptr: *const u8, len: usize) {
     let line_size: usize = 64; // типичное значение
     let mut p = (ptr as usize) & !(line_size - 1);
@@ -152,86 +244,4 @@ fn parse_pixel_format(fmt: &str) -> (PixelFormat, u32) {
     } else {
         (PixelFormat::Unknown, 0)
     }
-}
-
-/// Ищет simple-framebuffer в DTB и возвращает параметры фреймбуфера.
-pub unsafe fn find_in_dtb(device_tree: &DeviceTree) -> Option<FramebufferInfo> {
-    let framebuffer = device_tree
-        .nodes()
-        .find(|node| node.is_compatible("simple-framebuffer"))?;
-
-    let mut reg_base: usize = 0;
-    let mut width: u32 = 0;
-    let mut height: u32 = 0;
-    let mut stride: u32 = 0;
-    let mut bpp: u32 = 0;
-    let mut fmt = PixelFormat::Unknown;
-
-    while let Some(p) = framebuffer.properties().next() {
-        let name = p.name();
-        let value = p.value();
-
-        match name {
-            "reg" => {
-                if value.len() >= 16 {
-                    let addr_hi = p.try_as_u32(0).unwrap() as u64;
-                    let addr_lo = p.try_as_u32(4).unwrap() as u64;
-                    reg_base = ((addr_hi << 32) | addr_lo) as usize;
-                } else if value.len() >= 8 {
-                    reg_base = p.try_as_u32(0).unwrap() as usize;
-                }
-            }
-
-            "width" => {
-                width = p.try_as_u32(0).unwrap_or(0);
-            }
-
-            "height" => {
-                height = p.try_as_u32(0).unwrap_or(0);
-            }
-
-            "stride" | "line_length" => {
-                stride = p.try_as_u32(0).unwrap_or(0);
-            }
-
-            "format" | "pixel_format" => {
-                if let Some((pf, bits)) = p.as_cstr().map(|s| parse_pixel_format(s)) {
-                    fmt = pf;
-                    if bits != 0 {
-                        bpp = bits;
-                    }
-                }
-            }
-
-            "bits-per-pixel" => {
-                if let Some(parsed_bpp) = p.try_as_u32(0) {
-                    bpp = parsed_bpp;
-                }
-            }
-
-            _ => {}
-        }
-    }
-
-    // Если stride не указан — вычисляем от width*bpp.
-    if reg_base != 0 && width != 0 && height != 0 && (stride != 0 || bpp != 0) {
-        let final_stride = if stride != 0 {
-            stride
-        } else {
-            width * (bpp / 8)
-        };
-
-        let final_bpp = if bpp != 0 { bpp } else { 32 };
-
-        return Some(FramebufferInfo {
-            paddr: reg_base,
-            width,
-            height,
-            stride: final_stride,
-            bpp: final_bpp,
-            format: fmt,
-        });
-    }
-
-    None
 }

@@ -1,6 +1,7 @@
 use crate::memory::allocator::HeapAllocator;
 use crate::memory::global_allocator::KernelHeapAllocator;
 use crate::memory::memory_mapper::Aarch64MemoryMapper;
+use crate::memory::mmu::{Mmu, RootTableConfig};
 use crate::memory::ram_memory::Aarch64RamMemory;
 use crate::memory::virtual_mem::{PageTableManager, create_page_table_manager};
 use aarch64_paging::MemoryLayout;
@@ -64,7 +65,14 @@ impl MemoryManager {
 
     pub fn enable(mut self) -> Result<KernelHeapAllocator, MemorySetupError> {
         // Включаем виртуальную память (таблицы страниц уже созданы и заполнены)
-        self.page_table_manager.enable_virtual_mode();
+        let root_page = self
+            .page_table_manager
+            .root_frame()
+            .page_address()
+            .as_physical_address();
+
+        let mmu = Mmu::new();
+        mmu.enable(RootTableConfig::new(root_page));
 
         debug!(stdout(), "Paging enabled!");
 

@@ -49,7 +49,6 @@ pub trait MemoryBackend {
     fn read<T>(&self, addr: PhysicalAddress) -> T;
     fn write<T: Copy>(&self, addr: PhysicalAddress, val: T);
 
-    fn enable_virtual_mode(&self, root_page: PhysicalAddress);
     fn clean_page_cache(&self, address: PhysicalAddress);
     fn invalidate_cache(&self);
 }

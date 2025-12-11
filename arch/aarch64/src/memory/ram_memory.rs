@@ -34,53 +34,6 @@ impl MemoryBackend for Aarch64RamMemory {
         unsafe { ptr::write_unaligned(self.to_ptr(addr) as *mut T, val) }
     }
 
-    fn enable_virtual_mode(&self, root_page: PhysicalAddress) {
-        unsafe {
-            // 1) Барьер перед изменениями регистров
-            asm!("dsb ish; isb", options(nostack, preserves_flags));
-
-            asm!(
-                "msr DAIFSet, #0b1111", // маскируем IRQ
-                options(nostack, preserves_flags),
-            );
-
-            asm!("isb");
-
-            // 2) Записываем корень таблицы
-            let ttbr0 = root_page.as_usize() as u64;
-            asm!("msr ttbr0_el1, {}", in(reg) ttbr0);
-
-            // 3) MAIR_EL1: Attr0=WB, Attr1=Device
-            let mair = (0xffu64 << 0) | (0x04u64 << 8);
-            asm!("msr mair_el1, {}", in(reg) mair);
-
-            // 4) TCR_EL1: 48-bit VA, inner-WB, shareable, TG0=4K
-            let tcr = (16u64 << 0)    // T0SZ = 64-48
-                | (0b01 << 8)    // IRGN0
-                | (0b01 << 10)   // ORGN0
-                | (0b11 << 12)      // SH0 = Inner
-                | (0b00 << 14); // TG0 = 4K
-            asm!("msr tcr_el1, {}", in(reg) tcr);
-
-            // 5) Сброс TLB
-            asm!(
-                "dsb ish; tlbi vmalle1; dsb ish; isb",
-                options(nostack, preserves_flags)
-            );
-
-            // 6) Включаем MMU + кэши
-            let sctlr_flags: u64 = (1 << 0) | (1 << 2) | (1 << 12);
-            asm!(
-                "mrs x0, sctlr_el1",
-                "orr x0, x0, {flags}",
-                "msr sctlr_el1, x0",
-                "dsb ish; isb",
-            flags = in(reg) sctlr_flags,
-            options(nostack, preserves_flags)
-            );
-        }
-    }
-
     fn clean_page_cache(&self, address: PhysicalAddress) {
         unsafe {
             let cache_line_size = 64; // Should be queried from CTR_EL0

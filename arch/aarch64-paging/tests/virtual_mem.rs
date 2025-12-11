@@ -232,25 +232,6 @@ fn identity_regions_are_direct_mapped() {
 }
 
 #[test]
-fn enable_virtual_mode_records_root_page() {
-    let total_frames = 256;
-    let backend = mock_backend(total_frames);
-    let allocator = build_frame_allocator(total_frames, &[]);
-    let heap = heap_region(32, total_frames - 32);
-    let manager =
-        PageTableManager::new(allocator, backend.clone(), heap).expect("manager should init");
-
-    manager.enable_virtual_mode();
-
-    let recorded = backend
-        .last_root_page()
-        .expect("backend should store root page")
-        .as_usize();
-    let expected = manager.root_frame().page_address().as_usize();
-    assert_eq!(recorded, expected);
-}
-
-#[test]
 fn adjacent_identity_regions_with_misaligned_boundaries_fail() {
     let total_frames = 512;
     let backend = mock_backend(total_frames);

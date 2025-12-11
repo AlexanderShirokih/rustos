@@ -9,11 +9,15 @@ mod boot_header;
 
 mod drivers;
 mod memory;
+mod system;
 
 use crate::drivers::pl011_uart::UartPl011;
 use crate::drivers::setup::{build_memory_layout, create_bump_allocator};
+use crate::memory::early_paging::EarlyMMUConfig;
 use crate::memory::global_allocator::GlobalKernelAllocator;
 use crate::memory::manager::MemoryManager;
+use crate::memory::mmu::EL1Mmu;
+use crate::memory::ram_memory::Aarch64RamMemory;
 use aarch64_paging::MemoryLayout;
 use alloc::boxed::Box;
 use core::arch::{asm, naked_asm};
@@ -84,7 +88,28 @@ pub extern "C" fn _start() -> ! {
     )
 }
 
+static mut WAIT_FLAG: u8 = 1u8;
+
 unsafe fn early_main(dtb: usize) {
+    unsafe {
+        loop {
+            if core::ptr::read_volatile(core::ptr::addr_of!(WAIT_FLAG)) == 0 {
+                break;
+            }
+        }
+    }
+
+    // Раннее включение MMU + D-cache (identity mapping) первых 4GB памяти.
+    // Делаем это как можно раньше, чтобы можно было использовать операции с эксклюзивным доступом
+    // (например Mutex)
+    let early_backend = Aarch64RamMemory::new(4096);
+    EL1Mmu::new().enable(EarlyMMUConfig::create(&early_backend));
+
+    let uart = UartPl011::new(0x107d001000);
+    let mut writer = BlockingWriter::new(uart);
+
+    writeln!(writer, "early MMU set!\n").unwrap();
+
     let device_tree = match DeviceTree::from_ptr(dtb) {
         Ok(tree) => tree,
         Err(_) => return,
@@ -108,7 +133,12 @@ unsafe fn early_main(dtb: usize) {
 
     bind_stdout(&device_tree, &mut early_registry);
 
+    writeln!(writer, "bound std_out\n").unwrap();
+
     info!(stdout(), "Kernel started!");
+
+    writeln!(writer, "kernel started!\n").unwrap();
+
     setup_memory(memory_layout);
 
     let mut driver_registry = DriverRegistry::new();

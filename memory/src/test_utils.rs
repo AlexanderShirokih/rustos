@@ -14,7 +14,6 @@ struct MockMemoryBackendInner {
     frame_size: usize,
     len: usize,
     data: Mutex<Vec<u8>>,
-    last_root_page: Mutex<Option<PhysicalAddress>>,
 }
 
 /// Простая реализация MemoryBackend для модульных тестов.
@@ -47,7 +46,6 @@ impl MockMemoryBackend {
                 frame_size,
                 len,
                 data: Mutex::new(vec![0u8; len]),
-                last_root_page: Mutex::new(None),
             }),
         }
     }
@@ -60,11 +58,6 @@ impl MockMemoryBackend {
     /// Количество фреймов.
     pub fn total_frames(&self) -> usize {
         self.inner.len / self.inner.frame_size
-    }
-
-    /// Возвращает адрес корневой таблицы, переданный при enable_virtual_mode().
-    pub fn last_root_page(&self) -> Option<PhysicalAddress> {
-        *self.inner.last_root_page.lock()
     }
 
     /// Снимок диапазона памяти (для проверок в тестах).
@@ -115,10 +108,6 @@ impl MemoryBackend for MockMemoryBackend {
             let buf = core::slice::from_raw_parts(&val as *const T as *const u8, size_of::<T>());
             self.write_bytes(addr, buf);
         }
-    }
-
-    fn enable_virtual_mode(&self, root_page: PhysicalAddress) {
-        *self.inner.last_root_page.lock() = Some(root_page);
     }
 
     fn clean_page_cache(&self, _address: PhysicalAddress) {}
