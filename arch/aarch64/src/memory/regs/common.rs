@@ -1,4 +1,5 @@
-pub struct EL1;
+pub enum EL0 {}
+pub enum EL1 {}
 
 #[macro_export]
 macro_rules! combine_bits {

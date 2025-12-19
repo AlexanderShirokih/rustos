@@ -1,57 +1,55 @@
+use crate::memory::regs::ctr;
+use crate::system;
 use core::arch::asm;
+use core::mem::size_of;
 use core::ptr;
-use memory::memory_backend::MemoryBackend;
-use memory::physical::PhysicalAddress;
+use memory::aligned::{Address, Aligned};
+use memory::memory::MemoryAccessProvider;
+use memory::virtual_address::{AlignedVirtualAddress, VirtualAddress};
 
-#[derive(Copy, Clone)]
-pub struct Aarch64RamMemory {
-    frame_size: usize,
-}
+pub struct Aarch64VirtualRamMemory;
 
-impl Aarch64RamMemory {
-    pub const fn new(frame_size: usize) -> Self {
-        Self { frame_size }
+impl Aarch64VirtualRamMemory {
+    pub const fn new() -> Self {
+        Self
     }
 
     #[inline]
-    fn to_ptr(&self, addr: PhysicalAddress) -> *mut u8 {
-        addr.0 as *mut u8
+    fn to_ptr(&self, addr: VirtualAddress) -> *mut u8 {
+        addr.as_u64() as *mut u8
     }
 }
 
-impl MemoryBackend for Aarch64RamMemory {
-    fn frame_size(&self) -> usize {
-        self.frame_size
-    }
-
+impl MemoryAccessProvider for Aarch64VirtualRamMemory {
     #[inline]
-    fn read<T>(&self, addr: PhysicalAddress) -> T {
+    fn read<T>(&self, addr: VirtualAddress) -> T {
         unsafe { ptr::read_unaligned(self.to_ptr(addr) as *const T) }
     }
 
     #[inline]
-    fn write<T: Copy>(&self, addr: PhysicalAddress, val: T) {
-        unsafe { ptr::write_unaligned(self.to_ptr(addr) as *mut T, val) }
+    fn write<T>(&self, addr: VirtualAddress, val: &T) {
+        unsafe {
+            ptr::copy_nonoverlapping(
+                val as *const T as *const u8,
+                self.to_ptr(addr),
+                size_of::<T>(),
+            )
+        }
     }
 
-    fn clean_page_cache(&self, address: PhysicalAddress) {
+    fn clean_cache<const SHIFT: u8>(&self, address: AlignedVirtualAddress<SHIFT>) {
         unsafe {
-            let cache_line_size = 64; // Should be queried from CTR_EL0
-            let mut addr = address.as_usize();
-            let end_addr = addr + self.frame_size;
+            let ctr = ctr::CacheTypeRegister::new();
+            let cache_line_size = ctr.get_line_size();
+            let mut start = address.as_usize();
+            let end = start + AlignedVirtualAddress::<SHIFT>::ALIGNMENT;
 
-            while addr < end_addr {
-                asm!("dc cvau, {}", in(reg) addr, options(nostack, preserves_flags));
-                addr += cache_line_size;
+            while start < end {
+                asm!("dc cvac, {}", in(reg) start, options(nostack, preserves_flags));
+                start += cache_line_size;
             }
 
-            addr = address.as_usize();
-            while addr < end_addr {
-                asm!("ic ivau, {}", in(reg) addr, options(nostack, preserves_flags));
-                addr += cache_line_size;
-            }
-
-            asm!("dsb ish; isb", options(nostack, preserves_flags));
+            system::barrier::barrier();
         }
     }
 

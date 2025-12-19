@@ -1,7 +1,9 @@
+use memory::aligned::Aligned;
 use memory::memory_range::MemoryRange;
-use memory::physical::PageAlignedAddress;
+use memory::physical_address::PageAlignedAddress;
+use memory::virtual_address::VirtualAddress;
 
-pub const TEST_FRAME_SIZE: usize = PageAlignedAddress::alignment();
+pub const TEST_FRAME_SIZE: usize = PageAlignedAddress::ALIGNMENT;
 
 pub fn frame_to_address(frame: usize) -> PageAlignedAddress {
     PageAlignedAddress::from_usize(frame * TEST_FRAME_SIZE).expect("frame_to_address: not aligned")
@@ -14,25 +16,17 @@ pub fn make_range(start_frame: usize, frame_count: usize) -> MemoryRange<PageAli
     MemoryRange::new(start, end, TEST_FRAME_SIZE)
 }
 
-pub fn make_excluded(spec: &[(usize, usize)]) -> Vec<MemoryRange<PageAlignedAddress>> {
-    spec.iter()
-        .map(|(start, len)| make_range(*start, *len))
-        .collect()
-}
-
 #[test]
-fn test_mock_backend_basic() {
-    use memory::memory_backend::MemoryBackend;
-    use memory::test_utils::MockMemoryBackend;
-    use memory::physical::PhysicalAddress;
+fn test_mock_memory_access_provider_basic() {
+    use memory::memory::MemoryAccessProvider;
+    use memory::test_utils::MockMemoryAccessProvider;
 
-    let backend = MockMemoryBackend::new(4096, 10);
+    let memory = MockMemoryAccessProvider::new(4096, 10);
 
-    assert_eq!(backend.frame_size(), 4096);
-    assert_eq!(backend.total_frames(), 10);
+    assert_eq!(memory.total_frames(), 10);
 
-    let addr = PhysicalAddress::new(0);
-    backend.write(addr, 42u32);
-    let value: u32 = backend.read(addr);
+    let addr = VirtualAddress::new(0);
+    memory.write(addr, &42u32);
+    let value: u32 = memory.read(addr);
     assert_eq!(value, 42);
 }

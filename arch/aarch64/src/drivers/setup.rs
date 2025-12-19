@@ -1,11 +1,10 @@
-use memory::bump_allocator::BumpAllocator;
-use crate::memory::entry_flags::EntryFlags;
-use crate::memory::layout::MemoryRegion;
-use aarch64_paging::MemoryLayout;
+use crate::memory::layout::{MemoryLayout, MemoryRegion};
+use aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
 use core::cmp::{max, min};
 use fdt::devicetree::DeviceTree;
 use fdt::devicetreeext::{AddressSpace, NodeExt, PropExt};
-use memory::physical::Frame;
+use memory::bump_allocator::BumpAllocator;
+use memory::frame::Frame;
 
 unsafe extern "C" {
     /** Код ядра */
@@ -36,7 +35,7 @@ pub(crate) fn build_memory_layout<'a>(
             MemoryRegion::HEAP,
             ram_region.start(),
             ram_region.end(),
-            EntryFlags::KERNEL_DATA,
+            KernelData::flags(),
             false,
         ));
     }
@@ -45,7 +44,7 @@ pub(crate) fn build_memory_layout<'a>(
         "Device tree",
         dt.base_address(),
         dt.base_address() + dt.size(),
-        EntryFlags::KERNEL_DATA,
+        KernelData::flags(),
         true,
     ));
 
@@ -54,7 +53,7 @@ pub(crate) fn build_memory_layout<'a>(
             "Kernel code",
             &_text_start,
             &_text_end,
-            EntryFlags::KERNEL_CODE,
+            KernelText::flags(),
             true,
         ));
 
@@ -62,7 +61,7 @@ pub(crate) fn build_memory_layout<'a>(
             "Kernel data",
             &_rw_start,
             &_rw_end,
-            EntryFlags::KERNEL_DATA,
+            KernelData::flags(),
             true,
         ));
 
@@ -70,7 +69,7 @@ pub(crate) fn build_memory_layout<'a>(
             "Kernel read-only data",
             &_rodata_start,
             &_rodata_end,
-            EntryFlags::KERNEL_RODATA,
+            KernelRoData::flags(),
             true,
         ));
 
@@ -123,8 +122,8 @@ pub(crate) fn create_bump_allocator(layout: &MemoryLayout) -> Result<BumpAllocat
     let mut free_regions: collections::Vec<FrameInterval, MAX_REGIONS> = collections::Vec::new();
 
     layout.heap().for_each(|heap| {
-        let heap_start = Frame::from(heap.start).number();
-        let heap_end = Frame::from(heap.end).number();
+        let heap_start = Frame::from(&heap.start).number();
+        let heap_end = Frame::from(&heap.end).number();
 
         // Собираем свободные регионы для данного heap
         collect_free_regions(&layout, &mut free_regions, heap_start, heap_end);
@@ -153,8 +152,8 @@ fn collect_free_regions(
     let mut excluded = collections::Vec::<FrameInterval, MAX_REGIONS>::new();
 
     for region in layout.iter().filter(|r| r.identity_map) {
-        let start = Frame::from(region.start).number();
-        let end = Frame::from(region.end).number();
+        let start = Frame::from(&region.start).number();
+        let end = Frame::from(&region.end).number();
 
         let clamped_start = max(start, heap_start);
         let clamped_end = min(end, heap_end);

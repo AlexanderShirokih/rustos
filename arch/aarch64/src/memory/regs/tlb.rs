@@ -16,6 +16,14 @@ impl TranslationLookasideBuffer<EL1> {
     }
 
     pub fn invalidate(&self) {
-        unsafe { asm!("dsb ish", "tlbi vmalle1", options(nostack, preserves_flags)) };
+        unsafe {
+            asm!(
+                "dsb ishst",      // Убедиться, что page tables записаны
+                "tlbi vmalle1",   // Инвалидировать TLB
+                "dsb ish",        // Убедиться, что tlbi завершён
+                "isb",            // Синхронизировать pipeline
+                options(nostack, preserves_flags)
+            )
+        };
     }
 }

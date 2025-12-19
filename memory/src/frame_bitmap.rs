@@ -1,5 +1,6 @@
+use crate::frame::Frame;
 use crate::memory_range::MemoryRange;
-use crate::physical::{Frame, PageAlignedAddress};
+use crate::physical_address::PageAlignedAddress;
 use alloc::boxed::Box;
 use alloc::vec;
 use core::mem::size_of;
@@ -72,10 +73,6 @@ impl FrameBitmap {
         } else {
             u64::MAX // За пределами - считаем все биты занятыми
         }
-    }
-
-    pub fn get_managed_region(&self) -> &MemoryRange<PageAlignedAddress> {
-        &self.target_region
     }
 
     /// Помечает область фреймов как выделенную

@@ -3,23 +3,19 @@
 //! Этот модуль предоставляет аллокатор кучи для ядра, использующий алгоритм
 //! first-fit со свободным списком и автоматическим расширением кучи.
 
-use crate::memory::memory_mapper::MemoryMappingError;
-use alloc::sync::Arc;
+use crate::memory::MemoryAccessProvider;
+use crate::memory_mapper::{MemoryMapper, MemoryMappingError};
+use crate::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 use core::alloc::Layout;
 use core::mem::size_of;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use memory::memory_backend::MemoryBackend;
-use memory::physical::{PageAlignedAddress, PhysicalAddress};
 
-/// Начальный виртуальный адрес кучи
+/// Начальный виртуальный адрес кучи.
 pub const HEAP_START: usize = 0xFFFF_0000_0000_0000;
 
 /// Начальный размер кучи (1MB)
 pub const HEAP_INITIAL_SIZE: usize = 1024 * 1024;
-
-/// Максимальный размер кучи (64MB)
-pub const HEAP_MAX_SIZE: usize = 64 * 1024 * 1024;
 
 /// Минимальный размер выделения (16 байт)
 const MIN_ALLOC_SIZE: usize = 16;
@@ -34,23 +30,6 @@ pub enum AllocationError {
     MappingFailed,
     InvalidLayout,
     AlignmentError,
-}
-
-/// Трейт маппера памяти для операций виртуальной памяти
-pub trait MemoryMapper {
-    /// Отобразить физические фреймы в виртуальную память для кучи
-    fn map_heap_frames(
-        &self,
-        start_address: PageAlignedAddress,
-        size: usize,
-    ) -> Result<(), MemoryMappingError>;
-
-    #[allow(unused)]
-    fn unmap_heap_frames(
-        &self,
-        start_address: PageAlignedAddress,
-        size: usize,
-    ) -> Result<(), MemoryMappingError>;
 }
 
 /// Свободный блок в куче
@@ -101,7 +80,7 @@ impl FreeBlock {
 }
 
 /// First-fit аллокатор кучи с автоматическим расширением
-pub struct HeapAllocator<B: MemoryBackend, M: MemoryMapper> {
+pub struct HeapAllocator<MA: MemoryAccessProvider, M: MemoryMapper> {
     /// Голова списка свободных блоков
     free_list: Option<NonNull<FreeBlock>>,
 
@@ -111,35 +90,23 @@ pub struct HeapAllocator<B: MemoryBackend, M: MemoryMapper> {
     /// Следующая позиция выделения для расширения кучи
     next_alloc_addr: AtomicUsize,
 
-    /// Маппер памяти для операций виртуальной памяти (shared ownership)
-    memory_mapper: Arc<M>,
+    mapper: M,
 
-    /// Бэкенд для чтения/записи памяти (owned, B is typically Copy)
-    memory_backend: B,
+    /// Абстракция чтения/записи памяти
+    memory: MA,
 
     /// Размер фрейма для маппинга памяти
     frame_size: usize,
 }
 
-impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
-    /// Получить ссылку на memory_backend
-    fn memory_backend(&self) -> &B {
-        &self.memory_backend
-    }
-
-    /// Получить ссылку на memory_mapper
-    fn memory_mapper(&self) -> &M {
-        &self.memory_mapper
-    }
-
-    /// Создать новый аллокатор кучи
-    pub fn new(memory_mapper: Arc<M>, memory_backend: B, frame_size: usize) -> Self {
+impl<MA: MemoryAccessProvider, M: MemoryMapper> HeapAllocator<MA, M> {
+    pub fn new(mapper: M, memory: MA, frame_size: usize) -> Self {
         HeapAllocator {
             free_list: None,
             current_size: 0,
             next_alloc_addr: AtomicUsize::new(HEAP_START),
-            memory_mapper,
-            memory_backend,
+            mapper,
+            memory,
             frame_size,
         }
     }
@@ -153,21 +120,13 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
     fn expand_heap(&mut self, additional_size: usize) -> Result<(), AllocationError> {
         let aligned_size = align_up(additional_size, self.frame_size);
 
-        // Проверяем, не превысит ли расширение максимальный размер кучи
-        if self.current_size + aligned_size > HEAP_MAX_SIZE {
-            return Err(AllocationError::OutOfMemory);
-        }
-
         let mut start_addr =
-            PageAlignedAddress::from_usize(self.next_alloc_addr.load(Ordering::Relaxed))
+            PageAlignedVirtualAddress::from_usize(self.next_alloc_addr.load(Ordering::Relaxed))
                 .ok_or(AllocationError::AlignmentError)?;
 
         loop {
             // Отображаем физические фреймы в виртуальную область кучи
-            let error = self
-                .memory_mapper()
-                .map_heap_frames(start_addr, aligned_size)
-                .err();
+            let error = self.mapper.map_frames(&start_addr, aligned_size).err();
 
             match error {
                 Some(e) => match e {
@@ -182,19 +141,19 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
         }
 
         // Создаем новый свободный блок для расширенной области
-        let block_addr = start_addr.as_physical_address();
+        let block_addr: VirtualAddress = start_addr.into();
         let block_size = aligned_size - size_of::<FreeBlock>();
         let new_block = FreeBlock::new(block_size);
 
         // Записываем новый блок в память
-        self.memory_backend().write(block_addr, new_block);
+        self.memory.write(block_addr, &new_block);
 
         // Добавляем в список свободных блоков
         self.add_to_free_list(start_addr.as_usize());
 
-        let next_aligned_alloc_addr =
-            PageAlignedAddress::new(start_addr.as_physical_address().add(aligned_size))
-                .ok_or(AllocationError::AlignmentError)?;
+        let virt: VirtualAddress = start_addr.into();
+        let next_aligned_alloc_addr = PageAlignedVirtualAddress::new(virt.add(aligned_size))
+            .ok_or(AllocationError::AlignmentError)?;
 
         // Обновляем состояние аллокатора
         self.current_size += aligned_size;
@@ -209,9 +168,9 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
         let block_ptr = NonNull::new(addr as *mut FreeBlock).expect("Invalid address");
 
         // Читаем блок, обновляем его указатель next и записываем обратно
-        let mut block: FreeBlock = self.memory_backend().read(PhysicalAddress(addr));
+        let mut block: FreeBlock = self.memory.read(VirtualAddress::new(addr));
         block.next = self.free_list;
-        self.memory_backend().write(PhysicalAddress(addr), block);
+        self.memory.write(VirtualAddress::new(addr), &block);
 
         // Обновляем голову списка свободных блоков
         self.free_list = Some(block_ptr);
@@ -224,18 +183,18 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
 
         while let Some(block_ptr) = current {
             let addr = block_ptr.as_ptr() as usize;
-            let mut block: FreeBlock = self.memory_backend().read(PhysicalAddress(addr));
+            let mut block: FreeBlock = self.memory.read(VirtualAddress::new(addr));
 
             // Проверяем, достаточно ли велик этот блок
             if block.size >= size {
                 // Удаляем из списка свободных
                 if let Some(prev_ptr) = prev {
                     let mut prev_block: FreeBlock = self
-                        .memory_backend()
-                        .read(PhysicalAddress(prev_ptr.as_ptr() as usize));
+                        .memory
+                        .read(VirtualAddress::new(prev_ptr.as_ptr() as usize));
                     prev_block.next = block.next;
-                    self.memory_backend()
-                        .write(PhysicalAddress(prev_ptr.as_ptr() as usize), prev_block);
+                    self.memory
+                        .write(VirtualAddress::new(prev_ptr.as_ptr() as usize), &prev_block);
                 } else {
                     self.free_list = block.next;
                 }
@@ -247,7 +206,7 @@ impl<B: MemoryBackend, M: MemoryMapper> HeapAllocator<B, M> {
                 }
 
                 // Записываем обратно выделенный блок
-                self.memory_backend().write(PhysicalAddress(addr), block);
+                self.memory.write(VirtualAddress::new(addr), &block);
                 return Some(block_ptr);
             }
 

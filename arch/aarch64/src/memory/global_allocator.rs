@@ -1,21 +1,25 @@
-use crate::memory::allocator::HeapAllocator;
-use memory::bump_allocator::BumpAllocator;
 use crate::memory::memory_mapper::Aarch64MemoryMapper;
-use crate::memory::ram_memory::Aarch64RamMemory;
+use crate::memory::ram_memory::Aarch64VirtualRamMemory;
+use collections::NoLockCell;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
-use core::mem::MaybeUninit;
+use core::mem::{MaybeUninit, size_of};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
-use memory::physical_manager::PhysicalMemoryManager;
+use memory::FrameBitmap;
+use memory::bump_allocator::BumpAllocator;
+use memory::frame_allocator::PhysicalFrameAllocator;
+use memory::heap_allocator::HeapAllocator;
 
 /// Фазы работы аллокатора
 const PHASE_UNINIT: u8 = 0;
 const PHASE_BUMP: u8 = 1;
 const PHASE_HEAP: u8 = 2;
 
-pub type KernelHeapAllocator =
-    HeapAllocator<Aarch64RamMemory, Aarch64MemoryMapper<PhysicalMemoryManager, Aarch64RamMemory>>;
+pub type EarlyKernelHeapAllocator = HeapAllocator<
+    Aarch64VirtualRamMemory,
+    Aarch64MemoryMapper<'static, PhysicalFrameAllocator<NoLockCell<FrameBitmap>>>,
+>;
 
 /// Двухфазный глобальный аллокатор ядра
 pub struct GlobalKernelAllocator {
@@ -24,7 +28,7 @@ pub struct GlobalKernelAllocator {
     /// Bump-аллокатор для ранней инициализации
     bump: UnsafeCell<MaybeUninit<BumpAllocator>>,
     /// Полноценный heap-аллокатор
-    heap: UnsafeCell<MaybeUninit<KernelHeapAllocator>>,
+    heap: UnsafeCell<MaybeUninit<EarlyKernelHeapAllocator>>,
 }
 
 // SAFETY: GlobalKernelAllocator использует атомарные операции для синхронизации
@@ -50,7 +54,7 @@ impl GlobalKernelAllocator {
     }
 
     /// Переключает аллокатор на heap фазу работы
-    pub fn switch_to_heap(&self, heap_allocator: KernelHeapAllocator) {
+    pub fn switch_to_heap(&self, heap_allocator: EarlyKernelHeapAllocator) {
         let heap_ptr = self.heap.get();
         unsafe {
             (*heap_ptr).write(heap_allocator);
@@ -58,13 +62,11 @@ impl GlobalKernelAllocator {
         self.phase.store(PHASE_HEAP, Ordering::Release);
     }
 
-    #[inline]
     fn bump_allocator(&self) -> &mut BumpAllocator {
         unsafe { (*self.bump.get()).assume_init_mut() }
     }
 
-    #[inline]
-    fn heap_allocator(&self) -> &mut KernelHeapAllocator {
+    fn heap_allocator(&self) -> &mut EarlyKernelHeapAllocator {
         unsafe { (*self.heap.get()).assume_init_mut() }
     }
 }

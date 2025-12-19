@@ -8,27 +8,23 @@ extern crate std;
 mod boot_header;
 
 mod drivers;
+mod exceptions;
 mod memory;
 mod system;
 
-use crate::drivers::pl011_uart::UartPl011;
 use crate::drivers::setup::{build_memory_layout, create_bump_allocator};
-use crate::memory::early_paging::EarlyMMUConfig;
 use crate::memory::global_allocator::GlobalKernelAllocator;
-use crate::memory::manager::MemoryManager;
-use crate::memory::mmu::EL1Mmu;
-use crate::memory::ram_memory::Aarch64RamMemory;
-use aarch64_paging::MemoryLayout;
+use crate::memory::layout::{MemoryLayout, MemoryRegion};
+use crate::memory::manager::{MemoryManager, Prepared};
+use aarch64_paging::preset::Mmio;
 use alloc::boxed::Box;
 use core::arch::{asm, naked_asm};
-use core::fmt::Write;
 use core::hint::spin_loop;
 use fdt::devicetree::DeviceTree;
-use io::writer::BlockingWriter;
-use kernel::console::{set_stdout, stdout};
+use kernel::console::{GlobalWriter, set_early_stdout, set_stdout};
 use kernel::driver::early::{EarlyDriverHandle, EarlyDriverRegistry};
 use kernel::driver::{DriverRegistry, scanner};
-use kernel::{fatal, info};
+use kernel::{debug, fatal, info};
 
 /// Глобальный двухфазный аллокатор ядра
 #[global_allocator]
@@ -48,6 +44,29 @@ pub extern "C" fn _start() -> ! {
         // Сохраняем DTB (x0) в callee-saved регистре
         "mov    x19, x0",
 
+        // Проверяем EL
+        "mrs    x0, CurrentEL",
+        "cmp    x0, #0x8",          // Мы получили управление с EL2 (гипервизор)?
+        "b.ne   .boot_el1",
+
+        // Обработчик EL2
+
+        // HCR_EL2: EL1 будет работать в 64-битном режиме
+        "mov    x0, #(1 << 31)",
+        "msr    hcr_el2, x0",
+
+        // Отключаем ловушки для SIMD/FP
+        "mov    x0, #0x33ff",
+        "msr    cptr_el2, x0",
+
+        // SPSR_EL2: возврат в EL1h с замаскированными DAIF
+        "mov    x0, #0x3c5",
+        "msr    spsr_el2, x0",
+        "adr    x0, .boot_el1",
+        "msr    elr_el2, x0",
+        "eret",
+
+        ".boot_el1:",
         // Инициализация SP_EL1
         "msr    spsel, #1",
         "adrp   x1, {stack_top}",
@@ -75,6 +94,11 @@ pub extern "C" fn _start() -> ! {
 
         // Восстанавливаем DTB в x0
         "mov    x0, x19",
+
+        // "mov x20, xzr",
+        // "2: wfe",
+        // "cbz x20, 2b",
+
         "b      {early_main}",
 
         // Если мы вернулись из early_main, то выключаем прерывания и зацикливаемся в WaitForEvent
@@ -88,34 +112,15 @@ pub extern "C" fn _start() -> ! {
     )
 }
 
-static mut WAIT_FLAG: u8 = 1u8;
-
-unsafe fn early_main(dtb: usize) {
-    unsafe {
-        loop {
-            if core::ptr::read_volatile(core::ptr::addr_of!(WAIT_FLAG)) == 0 {
-                break;
-            }
-        }
-    }
-
-    // Раннее включение MMU + D-cache (identity mapping) первых 4GB памяти.
-    // Делаем это как можно раньше, чтобы можно было использовать операции с эксклюзивным доступом
-    // (например Mutex)
-    let early_backend = Aarch64RamMemory::new(4096);
-    EL1Mmu::new().enable(EarlyMMUConfig::create(&early_backend));
-
-    let uart = UartPl011::new(0x107d001000);
-    let mut writer = BlockingWriter::new(uart);
-
-    writeln!(writer, "early MMU set!\n").unwrap();
+fn early_main(dtb: usize) {
+    exceptions::init();
 
     let device_tree = match DeviceTree::from_ptr(dtb) {
         Ok(tree) => tree,
         Err(_) => return,
     };
 
-    let memory_layout = match build_memory_layout(&device_tree) {
+    let mut memory_layout = match build_memory_layout(&device_tree) {
         Ok(m) => m,
         Err(_) => return,
     };
@@ -131,15 +136,22 @@ unsafe fn early_main(dtb: usize) {
     let mut early_registry = EarlyDriverRegistry::new();
     early_registry.scan_and_probe(&device_tree);
 
-    bind_stdout(&device_tree, &mut early_registry);
+    let early_stdout = bind_early_stdout(&device_tree, &mut early_registry);
+    info!("Early console set");
 
-    writeln!(writer, "bound std_out\n").unwrap();
+    for mmio_region in early_registry.mmio_region_requests() {
+        memory_layout.add(MemoryRegion::new(
+            "mmio",
+            mmio_region.base,
+            mmio_region.base + mmio_region.size,
+            Mmio::flags(),
+            true,
+        ));
+    }
 
-    info!(stdout(), "Kernel started!");
-
-    writeln!(writer, "kernel started!\n").unwrap();
-
-    setup_memory(memory_layout);
+    if setup_memory(memory_layout, early_stdout).is_err() {
+        return;
+    }
 
     let mut driver_registry = DriverRegistry::new();
     driver_registry.scan_and_probe(&device_tree);
@@ -149,32 +161,44 @@ unsafe fn early_main(dtb: usize) {
     }
 }
 
-fn setup_memory(memory_layout: MemoryLayout) {
-    let memory_manager = match MemoryManager::new(memory_layout) {
-        Ok(m) => m,
-        Err(error) => {
-            fatal!(&stdout(), "Memory setup error {:?}", error);
-            return;
-        }
-    };
+fn setup_memory(
+    memory_layout: MemoryLayout,
+    early_stdout: Option<&'static GlobalWriter>,
+) -> Result<(), ()> {
+    // Создаем экземпляр менеджера памяти
+    let memory_manager = MemoryManager::<Prepared>::create(memory_layout)
+        .inspect_err(|err| fatal!("Memory setup failed: {:?}", err))
+        .map_err(|_| ())?;
+    debug!("Memory manager prepared!");
 
-    info!(stdout(), "Memory manager initialized!");
+    // Делаем identity mapping b включаем MMU
+    let memory_manager = memory_manager
+        .enable()
+        .inspect_err(|err| fatal!("Unable to enable MMU: {:?}", err))
+        .map_err(|_| ())?;
+    debug!("MMU enabled!");
 
-    match memory_manager.enable() {
-        Ok(heap) => {
-            // Переключаем глобальный аллокатор на heap-фазу
-            GLOBAL_ALLOCATOR.switch_to_heap(heap);
+    // Перемещаем ядро в higher half
+    let _ = memory_manager.relocate();
+    debug!("Kernel was relocated to higher half address space");
 
-            writeln!(stdout(), "Memory setup done!").unwrap()
-        }
-        Err(_) => {
-            writeln!(stdout(), "FATAL: Memory enable error\n").unwrap();
-            return;
-        }
-    };
+    // Переключаем глобальный аллокатор на heap-фазу
+    // GLOBAL_ALLOCATOR.switch_to_heap(heap);
+
+    if let Some(writer) = early_stdout {
+        // После включения MMU можно включить normal mode и начать синхронизированный вывод.
+        set_stdout(writer);
+    }
+
+    info!("Memory setup done!");
+
+    Ok(())
 }
 
-fn bind_stdout(device_tree: &DeviceTree, registry: &mut EarlyDriverRegistry) {
+fn bind_early_stdout(
+    device_tree: &DeviceTree,
+    registry: &mut EarlyDriverRegistry,
+) -> Option<&'static GlobalWriter> {
     let early_console_node = scanner::find_console(&device_tree);
 
     let console_handle = early_console_node
@@ -184,18 +208,20 @@ fn bind_stdout(device_tree: &DeviceTree, registry: &mut EarlyDriverRegistry) {
             EarlyDriverHandle::Opaque => None,
         });
 
-    if let Some(console) = console_handle {
-        set_stdout(Box::leak(console));
-    }
+    console_handle.map(|console| {
+        let writer: &'static mut GlobalWriter = Box::leak(console);
+        let writer: &'static GlobalWriter = writer;
+        set_early_stdout(writer);
+        writer
+    })
 }
 
 // Поскольку мы находимся в no_std окружении, то нам нужен свой panic handler
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     unsafe {
-        let uart = UartPl011::new(0x107d001000);
-        let mut writer = BlockingWriter::new(uart);
-        writeln!(writer, "[PANIC] {}\n", info).unwrap();
+        fatal!("Kernel panic: {}", info);
 
         loop {
             asm!("wfi", options(nomem, nostack));

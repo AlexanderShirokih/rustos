@@ -1,4 +1,5 @@
 pub mod common;
+pub mod ctr;
 pub mod mair;
 pub mod sctrl;
 pub mod tcr;

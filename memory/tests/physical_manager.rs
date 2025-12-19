@@ -1,30 +1,37 @@
 mod common;
 
-use common::{make_excluded, make_range};
-use memory::physical::Frame;
-use memory::physical_manager::{
-    FrameAllocator, FrameError, PhysicalMemoryManager, ReserveFrameError,
+use collections::MutexCell;
+use common::make_range;
+use memory::FrameBitmap;
+use memory::frame::Frame;
+use memory::frame_allocator::{
+    FrameAllocator, FrameError, PhysicalFrameAllocator, ReserveFrameError,
 };
+use memory::memory_range::MemoryRange;
+use memory::physical_address::PageAlignedAddress;
 use std::collections::HashSet;
 
-fn build_manager(region_frames: usize, excluded_specs: &[(usize, usize)]) -> PhysicalMemoryManager {
+fn frame_allocator(
+    region_frames: usize,
+    excluded_specs: &[(usize, usize)],
+) -> PhysicalFrameAllocator<MutexCell<FrameBitmap>> {
     let region = make_range(0, region_frames);
     let excluded = make_excluded(excluded_specs);
-    PhysicalMemoryManager::new(&region, excluded.into_iter())
+    PhysicalFrameAllocator::new(&region, &excluded)
 }
 
 #[test]
 fn reserve_exact_protects_frames() {
-    let manager = build_manager(128, &[]);
+    let frame_allocator = frame_allocator(128, &[]);
 
-    let reserve_start = Frame::from(common::frame_to_address(8));
-    let reserve_end = Frame::from(common::frame_to_address(16));
-    manager
+    let reserve_start = Frame::from(&common::frame_to_address(8));
+    let reserve_end = Frame::from(&common::frame_to_address(16));
+    frame_allocator
         .reserve_frames_exact(reserve_start, reserve_end)
         .expect("reservation should succeed");
 
     let mut allocated = HashSet::new();
-    while let Some(frame) = manager.allocate_frame() {
+    while let Some(frame) = frame_allocator.allocate_frame() {
         assert!(
             frame.number() < reserve_start.number() || frame.number() >= reserve_end.number(),
             "reserved frame {} must not be allocated",
@@ -40,11 +47,13 @@ fn reserve_exact_protects_frames() {
 
 #[test]
 fn reserve_exact_out_of_bounds_is_error() {
-    let manager = build_manager(32, &[]);
+    let frame_allocator = frame_allocator(32, &[]);
     let start = Frame::new(40);
     let end = Frame::new(42);
 
-    let err = manager.reserve_frames_exact(start, end).unwrap_err();
+    let err = frame_allocator
+        .reserve_frames_exact(start, end)
+        .unwrap_err();
     match err {
         ReserveFrameError::OutOfTargetBoundary { from_inclusive, .. } => {
             assert_eq!(from_inclusive, start);
@@ -54,19 +63,27 @@ fn reserve_exact_out_of_bounds_is_error() {
 
 #[test]
 fn allocate_and_deallocate_recycles_frames() {
-    let manager = build_manager(32, &[]);
+    let frame_allocator = frame_allocator(32, &[]);
 
-    let first = manager.allocate_frame().expect("frame available");
-    let second = manager.allocate_frame().expect("second frame available");
+    let first = frame_allocator.allocate_frame().expect("frame available");
+    let second = frame_allocator
+        .allocate_frame()
+        .expect("second frame available");
 
     // Выделяем остальные фреймы, чтобы аллокатор исчерпал пространство
-    while manager.allocate_frame().is_some() {}
+    while frame_allocator.allocate_frame().is_some() {}
 
-    manager.deallocate_frame(first).expect("valid frame");
-    manager.deallocate_frame(second).expect("valid frame");
+    frame_allocator
+        .deallocate_frame(first)
+        .expect("valid frame");
+    frame_allocator
+        .deallocate_frame(second)
+        .expect("valid frame");
 
-    let recycled_first = manager.allocate_frame().expect("should recycle");
-    let recycled_second = manager.allocate_frame().expect("should recycle second");
+    let recycled_first = frame_allocator.allocate_frame().expect("should recycle");
+    let recycled_second = frame_allocator
+        .allocate_frame()
+        .expect("should recycle second");
 
     let numbers = [recycled_first.number(), recycled_second.number()];
     assert!(
@@ -77,23 +94,25 @@ fn allocate_and_deallocate_recycles_frames() {
 
 #[test]
 fn deallocate_out_of_range_fails() {
-    let manager = build_manager(16, &[]);
+    let frame_allocator = frame_allocator(16, &[]);
     let invalid_frame = Frame::new(64);
 
-    let err = manager.deallocate_frame(invalid_frame).unwrap_err();
+    let err = frame_allocator.deallocate_frame(invalid_frame).unwrap_err();
     assert!(matches!(err, FrameError::OutOfRange));
 }
 
 #[test]
 fn allocation_stops_when_exhausted() {
-    let manager = build_manager(16, &[(0, 4)]);
+    let frame_allocator = frame_allocator(16, &[(0, 4)]);
 
     let expected = available_frames(16, &[(0, 4)]);
     for _ in 0..expected {
-        manager.allocate_frame().expect("frame should be available");
+        frame_allocator
+            .allocate_frame()
+            .expect("frame should be available");
     }
     assert!(
-        manager.allocate_frame().is_none(),
+        frame_allocator.allocate_frame().is_none(),
         "allocator must return None when exhausted"
     );
 }
@@ -102,4 +121,10 @@ fn available_frames(region_frames: usize, excluded_specs: &[(usize, usize)]) -> 
     let excluded: usize = excluded_specs.iter().map(|(_, len)| *len).sum();
     // Теперь bitmap не занимает фреймы, он выделяется через глобальный аллокатор
     region_frames.saturating_sub(excluded)
+}
+
+fn make_excluded(spec: &[(usize, usize)]) -> Vec<MemoryRange<PageAlignedAddress>> {
+    spec.iter()
+        .map(|(start, len)| make_range(*start, *len))
+        .collect()
 }

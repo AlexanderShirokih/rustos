@@ -4,48 +4,47 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::aligned::Address;
+use crate::memory::MemoryAccessProvider;
+use crate::virtual_address::{AlignedVirtualAddress, VirtualAddress};
 use core::mem::{MaybeUninit, size_of};
 use core::ops::Range;
-use crate::memory_backend::MemoryBackend;
-use crate::physical::PhysicalAddress;
-use spin::Mutex;
 
-struct MockMemoryBackendInner {
+struct MockMemoryAccessProviderInner {
     frame_size: usize,
     len: usize,
-    data: Mutex<Vec<u8>>,
+    data: spin::Mutex<Vec<u8>>,
 }
 
-/// Простая реализация MemoryBackend для модульных тестов.
+/// Простая реализация MemoryAccessProvider для модульных тестов.
 ///
 /// Хранит содержимое памяти в векторе и позволяет инспектировать его из тестов.
 /// Clone создаёт ещё одну ссылку на те же данные.
 #[derive(Debug, Clone)]
-pub struct MockMemoryBackend {
-    inner: Arc<MockMemoryBackendInner>,
+pub struct MockMemoryAccessProvider {
+    inner: Arc<MockMemoryAccessProviderInner>,
 }
 
-impl core::fmt::Debug for MockMemoryBackendInner {
+impl core::fmt::Debug for MockMemoryAccessProviderInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("MockMemoryBackendInner")
+        f.debug_struct("MockMemoryAccessProviderInner")
             .field("frame_size", &self.frame_size)
             .field("len", &self.len)
             .finish_non_exhaustive()
     }
 }
 
-impl MockMemoryBackend {
-    /// Создаёт backend с заданным размером фрейма и количеством фреймов.
+impl MockMemoryAccessProvider {
     pub fn new(frame_size: usize, total_frames: usize) -> Self {
         let len = frame_size
             .checked_mul(total_frames)
             .expect("frame_size * total_frames overflow");
 
         Self {
-            inner: Arc::new(MockMemoryBackendInner {
+            inner: Arc::new(MockMemoryAccessProviderInner {
                 frame_size,
                 len,
-                data: Mutex::new(vec![0u8; len]),
+                data: spin::Mutex::new(vec![0u8; len]),
             }),
         }
     }
@@ -67,34 +66,30 @@ impl MockMemoryBackend {
         data[offset..offset + len].to_vec()
     }
 
-    fn checked_range(&self, addr: PhysicalAddress, len: usize) -> Range<usize> {
+    fn checked_range(&self, addr: VirtualAddress, len: usize) -> Range<usize> {
         let start = addr.as_usize();
         let end = start
             .checked_add(len)
-            .expect("address + len overflow in MockMemoryBackend");
+            .expect("address + len overflow in MockMemoryAccessProvider");
         assert!(end <= self.inner.len, "memory access out of bounds");
         start..end
     }
 
-    fn read_bytes(&self, addr: PhysicalAddress, buf: &mut [u8]) {
+    fn read_bytes(&self, addr: VirtualAddress, buf: &mut [u8]) {
         let range = self.checked_range(addr, buf.len());
         let data = self.inner.data.lock();
         buf.copy_from_slice(&data[range]);
     }
 
-    fn write_bytes(&self, addr: PhysicalAddress, buf: &[u8]) {
+    fn write_bytes(&self, addr: VirtualAddress, buf: &[u8]) {
         let range = self.checked_range(addr, buf.len());
         let mut data = self.inner.data.lock();
         data[range].copy_from_slice(buf);
     }
 }
 
-impl MemoryBackend for MockMemoryBackend {
-    fn frame_size(&self) -> usize {
-        self.inner.frame_size
-    }
-
-    fn read<T>(&self, addr: PhysicalAddress) -> T {
+impl MemoryAccessProvider for MockMemoryAccessProvider {
+    fn read<T>(&self, addr: VirtualAddress) -> T {
         let mut val = MaybeUninit::<T>::uninit();
         unsafe {
             let buf = core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, size_of::<T>());
@@ -103,14 +98,14 @@ impl MemoryBackend for MockMemoryBackend {
         }
     }
 
-    fn write<T: Copy>(&self, addr: PhysicalAddress, val: T) {
+    fn write<T>(&self, addr: VirtualAddress, val: &T) {
         unsafe {
-            let buf = core::slice::from_raw_parts(&val as *const T as *const u8, size_of::<T>());
+            let buf = core::slice::from_raw_parts(val as *const T as *const u8, size_of::<T>());
             self.write_bytes(addr, buf);
         }
     }
 
-    fn clean_page_cache(&self, _address: PhysicalAddress) {}
+    fn clean_cache<const SHIFT: u8>(&self, _address: AlignedVirtualAddress<SHIFT>) {}
 
     fn invalidate_cache(&self) {}
 }

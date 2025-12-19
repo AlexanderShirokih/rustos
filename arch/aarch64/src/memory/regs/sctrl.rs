@@ -2,7 +2,7 @@ use crate::memory::regs::common::EL1;
 use crate::{combine_bits, system};
 use core::arch::asm;
 
-// Главный регистр управляющий MMU/кэшами для EL1.
+// Главный регистр управляющий MMU/кэшами
 
 /// Биты, которые мы выставляем в `SCTLR` при включении MMU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

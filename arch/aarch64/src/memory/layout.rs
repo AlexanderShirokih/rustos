@@ -1,7 +1,8 @@
-use crate::entry_flags::EntryFlags;
+use aarch64_paging::mem_flags::MemFlags;
 use collections::Vec;
+use memory::aligned::{Address, Aligned};
 use memory::memory_range::MemoryRange;
-use memory::physical::{AddressType, Aligned, PageAlignedAddress, PhysicalAddress};
+use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 
 const MAX_MEMORY_REGIONS: usize = 32;
 
@@ -32,37 +33,26 @@ impl MemoryLayout {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemoryRegion<A: AddressType + Aligned> {
+pub struct MemoryRegion<A: Address + Aligned + Copy> {
     pub label: &'static str,
     pub start: A,
     pub end: A,
-    pub flags: EntryFlags,
+    pub flags: MemFlags,
     pub identity_map: bool,
 }
 
 impl MemoryRegion<PageAlignedAddress> {
     pub const HEAP: &'static str = "Heap";
 
-    /// Создает пустой регион
-    pub const fn empty() -> Self {
-        Self {
-            label: "",
-            flags: EntryFlags::empty(),
-            start: PageAlignedAddress::zero(),
-            end: PageAlignedAddress::zero(),
-            identity_map: false,
-        }
-    }
-
     pub fn frame_size(&self) -> usize {
-        PageAlignedAddress::alignment()
+        PageAlignedAddress::ALIGNMENT
     }
 
     pub fn new_raw(
         label: &'static str,
         start: &u8,
         end: &u8,
-        flags: EntryFlags,
+        flags: MemFlags,
         identity_map: bool,
     ) -> Self {
         let start_addr = start as *const u8 as usize;
@@ -75,7 +65,7 @@ impl MemoryRegion<PageAlignedAddress> {
         label: &'static str,
         start_addr: usize,
         end_addr: usize,
-        flags: EntryFlags,
+        flags: MemFlags,
         identity_map: bool,
     ) -> Self {
         Self {
@@ -88,8 +78,8 @@ impl MemoryRegion<PageAlignedAddress> {
     }
 }
 
-impl<A: AddressType + Aligned> Into<MemoryRange<A>> for MemoryRegion<A> {
+impl<A: Aligned + Address> Into<MemoryRange<A>> for MemoryRegion<A> {
     fn into(self) -> MemoryRange<A> {
-        MemoryRange::new(self.start, self.end, A::alignment())
+        MemoryRange::new(self.start, self.end, A::ALIGNMENT)
     }
 }

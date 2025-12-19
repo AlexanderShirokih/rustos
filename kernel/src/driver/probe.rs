@@ -12,7 +12,6 @@ pub type EndpointId = u64;
 /// Запрос на маппинг MMIO региона от драйвера
 #[derive(Debug, Clone, Copy)]
 pub struct MmioRequest {
-    pub name: &'static str,
     pub base: MmioAddress,
     pub size: usize,
 }

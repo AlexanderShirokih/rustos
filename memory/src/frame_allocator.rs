@@ -1,10 +1,9 @@
+use crate::frame::Frame;
 use crate::frame_bitmap::FrameBitmap;
 use crate::memory_range::MemoryRange;
-use crate::physical::{Frame, PageAlignedAddress};
+use crate::physical_address::PageAlignedAddress;
+use collections::{LockCell, MutexCell};
 use core::sync::atomic::{AtomicUsize, Ordering};
-use kernel::console::stdout;
-use kernel::info;
-use spin::Mutex;
 
 /// Ошибки при работе с фреймами
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,14 +38,11 @@ pub trait FrameAllocator {
 
     /// Освободить фрейм
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError>;
-
-    /// Возвращает управляемую область памяти
-    fn get_managed_region(&self) -> MemoryRange<PageAlignedAddress>;
 }
 
 /// Менеджер физической памяти.
 /// Управляет выделением и освобождением фреймов физической памяти в заданном регионе ОЗУ.
-pub struct PhysicalMemoryManager {
+pub struct PhysicalFrameAllocator<L: LockCell<FrameBitmap>> {
     /// Управляемый регион оперативной памяти
     memory: MemoryRange<PageAlignedAddress>,
 
@@ -60,22 +56,14 @@ pub struct PhysicalMemoryManager {
     next_frame_hint: AtomicUsize,
 
     /// Битовая карта выделенных фреймов
-    allocated_frames: Mutex<FrameBitmap>,
+    allocated_frames: L,
 }
 
-impl PhysicalMemoryManager {
+impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
     pub fn new(
         memory: &MemoryRange<PageAlignedAddress>,
-        excluded_regions: impl Iterator<Item = MemoryRange<PageAlignedAddress>>,
+        excluded_regions: &alloc::vec::Vec<MemoryRange<PageAlignedAddress>>,
     ) -> Self {
-        info!(
-            stdout(),
-            "Using RAM region from 0x{:#} to 0x{:#}. Which is {}KB total",
-            memory.start().as_usize(),
-            memory.end().as_usize(),
-            memory.size() / 1024
-        );
-
         let mut frame_bitmap = FrameBitmap::new(memory);
 
         // Помечаем исключённые регионы как занятые
@@ -90,16 +78,26 @@ impl PhysicalMemoryManager {
         let end_frame = Frame::from(memory.end());
 
         Self {
-            allocated_frames: Mutex::new(frame_bitmap),
+            allocated_frames: L::new(frame_bitmap),
             memory: memory.clone(),
             start_frame,
             end_frame,
             next_frame_hint: AtomicUsize::new(start_frame.number()),
         }
     }
+
+    pub fn into_mutex(self) -> PhysicalFrameAllocator<MutexCell<FrameBitmap>> {
+        PhysicalFrameAllocator::<MutexCell<FrameBitmap>> {
+            memory: self.memory,
+            start_frame: self.start_frame,
+            end_frame: self.end_frame,
+            next_frame_hint: self.next_frame_hint,
+            allocated_frames: MutexCell::new(self.allocated_frames.into_inner()), // Ошибка
+        }
+    }
 }
 
-impl FrameAllocator for PhysicalMemoryManager {
+impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
     fn reserve_frames_exact(
         &self,
         from_inclusive: Frame,
@@ -117,8 +115,8 @@ impl FrameAllocator for PhysicalMemoryManager {
             });
         }
 
-        let mut bitmap = self.allocated_frames.lock();
-        bitmap.set_range_unchecked(from_inclusive, to_exclusive);
+        self.allocated_frames
+            .with_lock(|bitmap| bitmap.set_range_unchecked(from_inclusive, to_exclusive));
 
         Ok(from_inclusive)
     }
@@ -127,42 +125,38 @@ impl FrameAllocator for PhysicalMemoryManager {
     fn allocate_frame(&self) -> Option<Frame> {
         // Начинаем с подсказки next_frame_hint
         let current = self.next_frame_hint.load(Ordering::Relaxed);
-        let mut bitmap = self.allocated_frames.lock();
 
-        if let Some(frame) = bitmap.alloc_from(Frame::new(current)) {
-            let next_frame_number = frame.add(1);
+        self.allocated_frames.with_lock(|bitmap| {
+            if let Some(frame) = bitmap.alloc_from(Frame::new(current)) {
+                let next_frame_number = frame.add(1);
 
-            let next_frame_hint = if next_frame_number.number() > self.end_frame.number() {
-                self.start_frame
+                let next_frame_hint = if next_frame_number.number() > self.end_frame.number() {
+                    self.start_frame
+                } else {
+                    next_frame_number
+                };
+
+                self.next_frame_hint
+                    .store(next_frame_hint.number(), Ordering::Relaxed);
+
+                Some(frame)
             } else {
-                next_frame_number
-            };
-
-            self.next_frame_hint
-                .store(next_frame_hint.number(), Ordering::Relaxed);
-
-            Some(frame)
-        } else {
-            // Нет свободных фреймов
-            None
-        }
+                // Нет свободных фреймов
+                None
+            }
+        })
     }
 
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {
         let frame_address = frame.page_address();
 
         if self.memory.contains(frame_address) {
-            let mut bitmap = self.allocated_frames.lock();
-            bitmap.clear(frame);
-
+            self.allocated_frames
+                .with_lock(|bitmap| bitmap.clear(frame));
             Ok(())
         } else {
             // Фрейм находится за пределами управляемого диапазона памяти
             Err(FrameError::OutOfRange)
         }
-    }
-
-    fn get_managed_region(&self) -> MemoryRange<PageAlignedAddress> {
-        self.memory.clone()
     }
 }

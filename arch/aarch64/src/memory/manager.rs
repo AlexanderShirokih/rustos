@@ -1,93 +1,152 @@
-use crate::memory::allocator::HeapAllocator;
-use crate::memory::global_allocator::KernelHeapAllocator;
+use crate::memory::layout::{MemoryLayout, MemoryRegion};
 use crate::memory::memory_mapper::Aarch64MemoryMapper;
-use crate::memory::mmu::{Mmu, RootTableConfig};
-use crate::memory::ram_memory::Aarch64RamMemory;
-use crate::memory::virtual_mem::{PageTableManager, create_page_table_manager};
-use aarch64_paging::MemoryLayout;
-use alloc::sync::Arc;
-use kernel::console::stdout;
-use kernel::debug;
+use crate::memory::mmu::{Mmu, NormalDualSpaceConfig, NormalSpaceConfig};
+use crate::memory::ram_memory::Aarch64VirtualRamMemory;
+use aarch64_paging::level::L0;
+use aarch64_paging::mem_flags::MemFlags;
+use aarch64_paging::page_table::PageTable;
+use collections::{MutexCell, NoLockCell};
+use memory::FrameBitmap;
+use memory::aligned::{Address, Aligned};
+use memory::frame_allocator::{FrameAllocator, PhysicalFrameAllocator};
+use memory::heap_allocator::HeapAllocator;
+use memory::memory_mapper::MemoryMapper;
 use memory::memory_range::MemoryRange;
-use memory::physical::PageAlignedAddress;
-use memory::physical_manager::PhysicalMemoryManager;
+use memory::physical_address::PageAlignedAddress;
+use memory::virtual_address::PageAlignedVirtualAddress;
 
-type FrameAllocatorType = PhysicalMemoryManager;
-type PageTableManagerType = PageTableManager<FrameAllocatorType, Aarch64RamMemory>;
-
-/// Центральный менеджер памяти, который владеет всеми компонентами системы памяти.
-pub struct MemoryManager {
-    heap_allocator: KernelHeapAllocator,
-    page_table_manager: Arc<PageTableManagerType>,
+pub struct Prepared {
+    root_page: PageAlignedAddress,
+    frame_allocator: PhysicalFrameAllocator<NoLockCell<FrameBitmap>>,
+    identity_map_regions: alloc::vec::Vec<MemoryRegion<PageAlignedAddress>>,
 }
 
-impl MemoryManager {
-    pub fn new(memory_layout: MemoryLayout) -> Result<Self, MemorySetupError> {
-        let heap = memory_layout
-            .heap()
-            .next()
-            .ok_or(MemorySetupError::IllegalStateError)?;
+pub struct Enabled {
+    root_page: PageAlignedAddress,
+    root_table: &'static mut PageTable<L0>,
+    frame_allocator: PhysicalFrameAllocator<MutexCell<FrameBitmap>>,
+}
 
-        let frame_size = heap.frame_size();
+pub struct HigherHalf {}
 
-        let backend = Aarch64RamMemory::new(frame_size);
+/// Центральный менеджер памяти, который владеет всеми компонентами системы памяти.
+pub struct MemoryManager<Stage> {
+    mem_flags: MemFlags,
+    state: Stage,
+}
 
+impl MemoryManager<Prepared> {
+    pub fn create(
+        memory_layout: MemoryLayout,
+    ) -> Result<MemoryManager<Prepared>, MemorySetupError> {
+        let primary_heap = &memory_layout.heap().next();
+
+        let heap = primary_heap.ok_or(MemorySetupError::NoHeapRegionFound)?;
         let heap_range: MemoryRange<PageAlignedAddress> = heap.clone().into();
 
-        let identity_map_regions = memory_layout
+        let identity_map_regions: alloc::vec::Vec<_> = memory_layout
             .iter()
-            .filter(|region| region.identity_map)
-            .map(|region| MemoryRange::new(region.start, region.end, region.frame_size()));
+            .filter(|&region| region.identity_map)
+            .map(|region| region.clone())
+            .collect();
 
-        let frame_allocator = Arc::new(PhysicalMemoryManager::new(
-            &heap_range,
-            identity_map_regions,
-        ));
+        let identity_map_ranges = identity_map_regions
+            .iter()
+            .map(|region| MemoryRange::new(region.start, region.end, region.frame_size()))
+            .collect();
 
-        let page_table_manager = Arc::new(
-            create_page_table_manager(frame_allocator.clone(), backend, memory_layout)
-                .map_err(|_| MemorySetupError::VirtualManagerSetupError)?,
-        );
+        let frame_allocator = PhysicalFrameAllocator::new(&heap_range, &identity_map_ranges);
 
-        // Создаём MemoryMapper с Arc ссылками
-        let memory_mapper = Arc::new(Aarch64MemoryMapper::new(
-            frame_allocator.clone(),
-            page_table_manager.clone(),
-        ));
+        let root_page = frame_allocator
+            .allocate_frame()
+            .map(|frame| frame.page_address())
+            .ok_or(MemorySetupError::OutOfMemory)?;
 
-        let heap_allocator = HeapAllocator::new(memory_mapper, backend, frame_size);
-
-        Ok(MemoryManager {
-            heap_allocator,
-            page_table_manager,
+        Ok(MemoryManager::<Prepared> {
+            state: Prepared {
+                frame_allocator,
+                root_page,
+                identity_map_regions,
+            },
+            mem_flags: heap.flags,
         })
     }
 
-    pub fn enable(mut self) -> Result<KernelHeapAllocator, MemorySetupError> {
-        // Включаем виртуальную память (таблицы страниц уже созданы и заполнены)
-        let root_page = self
-            .page_table_manager
-            .root_frame()
-            .page_address()
-            .as_physical_address();
+    pub fn enable(self) -> Result<MemoryManager<Enabled>, MemorySetupError> {
+        let root_table: &'static mut PageTable<L0> =
+            unsafe { &mut *(self.state.root_page.as_u64() as *mut PageTable<L0>) };
+        *root_table = PageTable::new();
 
-        let mmu = Mmu::new();
-        mmu.enable(RootTableConfig::new(root_page));
+        let mut memory_mapper =
+            Aarch64MemoryMapper::new(&self.state.frame_allocator, root_table, self.mem_flags);
 
-        debug!(stdout(), "Paging enabled!");
+        for region in self.state.identity_map_regions.iter() {
+            let range = MemoryRange::new(region.start, region.end, region.frame_size());
 
-        // Инициализируем аллокатор кучи
-        self.heap_allocator
-            .init()
-            .or(Err(MemorySetupError::HeapAllocatorInitializationError))?;
+            debug_assert_eq!(range.size() % PageAlignedVirtualAddress::ALIGNMENT, 0);
 
-        Ok(self.heap_allocator)
+            memory_mapper
+                .map_exact(
+                    range.start(),
+                    &PageAlignedVirtualAddress::identity(range.start()),
+                    range.size(),
+                    region.flags.bits(),
+                )
+                .map_err(|_| MemorySetupError::OutOfMemory)?;
+        }
+
+        // Включаем Memory Management Unit (MMU)
+        // После включения весь доступ к памяти будет через виртуальные адреса
+        Mmu::new().enable(NormalSpaceConfig::new(
+            self.state.root_page.as_physical_address(),
+        ));
+
+        let frame_allocator = self.state.frame_allocator.into_mutex();
+
+        Ok(MemoryManager::<Enabled> {
+            mem_flags: self.mem_flags,
+            state: Enabled {
+                root_page: self.state.root_page,
+                root_table,
+                frame_allocator,
+            },
+        })
+    }
+}
+
+impl MemoryManager<Enabled> {
+    pub fn relocate(self) -> Result<MemoryManager<HigherHalf>, MemorySetupError> {
+        let higher_half_root = self
+            .state
+            .frame_allocator
+            .allocate_frame()
+            .map(|frame| frame.page_address())
+            .ok_or(MemorySetupError::OutOfMemory)?;
+
+        // Настраиваем сплит верхней/нижней половины адресного пространства
+        Mmu::new().enable(NormalDualSpaceConfig::new(
+            self.state.root_page.as_physical_address(),
+            higher_half_root.as_physical_address(),
+        ));
+
+        let ram_memory = Aarch64VirtualRamMemory::new();
+        let memory_mapper = Aarch64MemoryMapper::new(
+            &self.state.frame_allocator,
+            self.state.root_table,
+            self.mem_flags,
+        );
+
+        let _ = HeapAllocator::new(memory_mapper, ram_memory, higher_half_root.alignment());
+
+        Ok(MemoryManager::<HigherHalf> {
+            mem_flags: self.mem_flags,
+            state: HigherHalf {},
+        })
     }
 }
 
 #[derive(Debug)]
 pub enum MemorySetupError {
-    HeapAllocatorInitializationError,
-    VirtualManagerSetupError,
-    IllegalStateError,
+    OutOfMemory,
+    NoHeapRegionFound,
 }

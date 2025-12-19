@@ -1,7 +1,8 @@
-use crate::driver::probe::CompatibleList;
+use crate::driver::probe::{CompatibleList, MmioAddress, MmioRequest};
 use crate::driver::probe::{NodeProbeExt, ProbeError, ProbeResult};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::vec;
 use alloc::vec::Vec;
 use fdt::devicetree::{DeviceTree, Node, NodeKey};
 use io::writer::Writer;
@@ -10,13 +11,19 @@ type EarlyDriverId = NodeKey;
 
 pub struct EarlyDriverRegistry {
     handles: BTreeMap<EarlyDriverId, EarlyDriverHandle>,
+    mmio_requests: Vec<MmioRequest>,
 }
 
 impl EarlyDriverRegistry {
     pub fn new() -> Self {
         Self {
             handles: BTreeMap::new(),
+            mmio_requests: vec![],
         }
+    }
+
+    pub fn mmio_region_requests(self) -> Vec<MmioRequest> {
+        self.mmio_requests
     }
 
     pub fn take(&mut self, key: &NodeKey) -> Option<EarlyDriverHandle> {
@@ -38,12 +45,15 @@ impl EarlyDriverRegistry {
         paths.push(node.clone());
 
         if node.prop("compatible").is_some() {
+            let mut mmio_requests: Vec<MmioRequest> = vec![];
             let context = ProbeContext {
                 node,
                 hierarchy: paths,
+                mmio_requests: &mut mmio_requests,
             };
 
             self.try_probe(&context).ok();
+            self.mmio_requests.extend(mmio_requests);
         }
 
         for child in node.children() {
@@ -69,16 +79,24 @@ impl EarlyDriverRegistry {
 
 /// Результат probe early драйвера
 pub enum EarlyDriverHandle {
-    Writer(Box<dyn Writer>),
+    Writer(Box<dyn Writer + Sync>),
     Opaque,
 }
 
 pub struct ProbeContext<'a> {
     node: &'a Node<'a>,
     hierarchy: &'a [Node<'a>],
+    mmio_requests: &'a mut Vec<MmioRequest>,
 }
 
 impl<'a> ProbeContext<'a> {
+    pub fn request_mmio(&mut self, address: MmioAddress, size: usize) {
+        self.mmio_requests.push(MmioRequest {
+            base: address,
+            size,
+        });
+    }
+
     pub fn node(&self) -> &Node<'_> {
         &self.node
     }

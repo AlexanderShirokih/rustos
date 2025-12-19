@@ -2,15 +2,15 @@ mod common;
 
 use common::make_range;
 use memory::FrameBitmap;
-use memory::physical::Frame;
+use memory::frame::Frame;
 
 #[test]
 fn set_and_clear_range_controls_allocation() {
     let region = make_range(0, 64);
     let mut bitmap = FrameBitmap::new(&region);
 
-    let reserve_start = Frame::from(common::frame_to_address(8));
-    let reserve_end = Frame::from(common::frame_to_address(16));
+    let reserve_start = Frame::from(&common::frame_to_address(8));
+    let reserve_end = Frame::from(&common::frame_to_address(16));
     bitmap.set_range_unchecked(reserve_start, reserve_end);
 
     let first = bitmap
