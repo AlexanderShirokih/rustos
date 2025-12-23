@@ -44,10 +44,6 @@ pub struct MemoryRegion<A: Address + Aligned + Copy> {
 impl MemoryRegion<PageAlignedAddress> {
     pub const HEAP: &'static str = "Heap";
 
-    pub fn frame_size(&self) -> usize {
-        PageAlignedAddress::ALIGNMENT
-    }
-
     pub fn new_raw(
         label: &'static str,
         start: &u8,
@@ -80,6 +76,6 @@ impl MemoryRegion<PageAlignedAddress> {
 
 impl<A: Aligned + Address> Into<MemoryRange<A>> for MemoryRegion<A> {
     fn into(self) -> MemoryRange<A> {
-        MemoryRange::new(self.start, self.end, A::ALIGNMENT)
+        MemoryRange::new(self.start, self.end)
     }
 }

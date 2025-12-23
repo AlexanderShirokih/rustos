@@ -18,7 +18,7 @@ unsafe impl Sync for Mmio {}
 
 impl Mmio {
     /// Создаёт хэндлер по физ. адресу базы.
-    #[inline(always)]
+    #[inline]
     pub const fn new(base_addr: usize) -> Self {
         Self {
             base: base_addr as *mut u8,

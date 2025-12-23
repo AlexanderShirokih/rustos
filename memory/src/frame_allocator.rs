@@ -92,7 +92,7 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
             start_frame: self.start_frame,
             end_frame: self.end_frame,
             next_frame_hint: self.next_frame_hint,
-            allocated_frames: MutexCell::new(self.allocated_frames.into_inner()), // Ошибка
+            allocated_frames: MutexCell::new(self.allocated_frames.into_inner()),
         }
     }
 }

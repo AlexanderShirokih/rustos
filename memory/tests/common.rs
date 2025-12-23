@@ -13,7 +13,7 @@ pub fn make_range(start_frame: usize, frame_count: usize) -> MemoryRange<PageAli
     assert!(frame_count > 0, "frame_count must be > 0");
     let start = frame_to_address(start_frame);
     let end = frame_to_address(start_frame + frame_count - 1);
-    MemoryRange::new(start, end, TEST_FRAME_SIZE)
+    MemoryRange::new(start, end)
 }
 
 #[test]

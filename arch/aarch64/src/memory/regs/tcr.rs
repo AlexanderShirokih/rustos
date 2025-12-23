@@ -22,6 +22,9 @@ pub trait TtbrSel {
     // Размер виртуального пространства
     const TNSZ_SHIFT: u64;
 
+    // Флаг включения текущей половины адресного пространства
+    const EDP_SHIFT: u64;
+
     // Политика кэширования памяти
     const IRGN_SHIFT: u64;
     const ORGN_SHIFT: u64;
@@ -37,6 +40,7 @@ pub trait TtbrSel {
 // Биты TTBR0 (lower half):
 impl TtbrSel for LowerHalf {
     const TNSZ_SHIFT: u64 = 0;
+    const EDP_SHIFT: u64 = 7;
     const IRGN_SHIFT: u64 = 8;
     const ORGN_SHIFT: u64 = 10;
     const SH_SHIFT: u64 = 12;
@@ -47,6 +51,7 @@ impl TtbrSel for LowerHalf {
 // Биты TTBR1 (higher half):
 impl TtbrSel for HigherHalf {
     const TNSZ_SHIFT: u64 = 16;
+    const EDP_SHIFT: u64 = 23;
     const IRGN_SHIFT: u64 = 24;
     const ORGN_SHIFT: u64 = 26;
     const SH_SHIFT: u64 = 28;
@@ -81,6 +86,15 @@ impl TCRBit {
     /// 4K страницы
     pub const fn tg_4k<Sel: TtbrSel>() -> Self {
         Self(Sel::TG_4K_VALUE << Sel::TG_SHIFT)
+    }
+
+    pub const fn epd<Sel: TtbrSel>(enable: bool) -> Self {
+        let bit = match enable {
+            true => 0b0,
+            false => 0b1 << Sel::EDP_SHIFT,
+        };
+
+        Self(bit)
     }
 
     const fn encode(self) -> u64 {
@@ -124,13 +138,14 @@ impl<T: TtbrSel> AddressTranslationConfig<T> {
     }
 
     /// Настраивает конфиг "по-красоте"
-    pub const fn default() -> Self {
+    pub const fn create(enable: bool) -> Self {
         Self::combine(&[
             TCRBit::size_48bit::<T>(),
             TCRBit::irgn_wb_wa::<T>(),
             TCRBit::orgn_wb_wa::<T>(),
             TCRBit::sh_inner::<T>(),
             TCRBit::tg_4k::<T>(),
+            TCRBit::epd::<T>(enable),
         ])
     }
 }

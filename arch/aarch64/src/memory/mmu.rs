@@ -17,23 +17,12 @@ pub struct AddressSpaceConfig<T: TtbrSel> {
     config: tcr::AddressTranslationConfig<T>,
 }
 
-impl<T: TtbrSel> Default for AddressSpaceConfig<T> {
-    fn default() -> Self {
-        Self {
-            base: PhysicalAddress::new(0),
-            config: tcr::AddressTranslationConfig::default(),
-        }
-    }
-}
-
 /// Конфигурация для включения MMU.
 pub trait MmuConfig {
     fn lower_half_config(&self) -> AddressSpaceConfig<LowerHalf>;
 
     /// Физический адрес корня таблиц страниц для верхней половины адресного пространства.
-    fn higher_half_config(&self) -> Option<AddressSpaceConfig<HigherHalf>> {
-        None
-    }
+    fn higher_half_config(&self) -> AddressSpaceConfig<HigherHalf>;
 
     /// Свойства памяти для обычной памяти (RAM)
     fn normal_memory_config(&self) -> mair::NormalAttr {
@@ -69,7 +58,14 @@ impl MmuConfig for NormalSpaceConfig {
     fn lower_half_config(&self) -> AddressSpaceConfig<LowerHalf> {
         AddressSpaceConfig {
             base: self.root.as_physical_address(),
-            config: tcr::AddressTranslationConfig::default(),
+            config: tcr::AddressTranslationConfig::create(true),
+        }
+    }
+
+    fn higher_half_config(&self) -> AddressSpaceConfig<HigherHalf> {
+        AddressSpaceConfig {
+            base: PhysicalAddress::new(0usize),
+            config: tcr::AddressTranslationConfig::create(false),
         }
     }
 }
@@ -92,15 +88,15 @@ impl MmuConfig for NormalDualSpaceConfig {
     fn lower_half_config(&self) -> AddressSpaceConfig<LowerHalf> {
         AddressSpaceConfig {
             base: self.lower_root,
-            config: tcr::AddressTranslationConfig::default(),
+            config: tcr::AddressTranslationConfig::create(true),
         }
     }
 
-    fn higher_half_config(&self) -> Option<AddressSpaceConfig<HigherHalf>> {
-        Some(AddressSpaceConfig {
+    fn higher_half_config(&self) -> AddressSpaceConfig<HigherHalf> {
+        AddressSpaceConfig {
             base: self.higher_root,
-            config: tcr::AddressTranslationConfig::default(),
-        })
+            config: tcr::AddressTranslationConfig::create(true),
+        }
     }
 }
 
@@ -111,7 +107,7 @@ pub struct Mmu<EL> {
     tcr: TranslationControlRegister<EL>,
     mair: MemoryAttributeIndirectionRegister<EL>,
     tlb: TranslationLookasideBuffer<EL>,
-    sctrl: SystemControlRegister<EL1>,
+    sctlr: SystemControlRegister<EL1>,
 }
 
 impl Mmu<EL1> {
@@ -122,7 +118,7 @@ impl Mmu<EL1> {
             tcr: TranslationControlRegister::new(),
             mair: MemoryAttributeIndirectionRegister::new(),
             tlb: TranslationLookasideBuffer::new(),
-            sctrl: SystemControlRegister::new(),
+            sctlr: SystemControlRegister::new(),
         }
     }
 }
@@ -132,29 +128,28 @@ impl Mmu<EL1> {
     pub fn enable<C: MmuConfig>(&self, config: C) {
         // 1) Барьер перед изменениями регистров + Маскируем прерывания
         system::barrier::barrier();
-        system::interrupts::mask();
 
-        // 2) Записываем корень таблицы и конфигурацию адресации
-        let lower_config = config.lower_half_config();
-        let higher_config = config.higher_half_config().unwrap_or_default();
-
-        self.lower_half_base.set(lower_config.base);
-        self.higher_half_base.set(higher_config.base);
-        self.tcr.set(lower_config.config, higher_config.config);
-
-        // 3) Записываем слоты атрибутов памяти
+        // 2) Записываем слоты атрибутов памяти
         self.mair.set(mair::MairBits::combine(&[
             mair::MairEntry::Normal(config.normal_memory_config()), // слот #0
             mair::MairEntry::Device(config.device_memory_config()), // слот #1
         ]));
 
+        // 3) Записываем корень таблицы и конфигурацию адресации
+        let lower_config = config.lower_half_config();
+        let higher_config = config.higher_half_config();
+
+        self.tcr.set(lower_config.config, higher_config.config);
+        self.lower_half_base.set(lower_config.base);
+        self.higher_half_base.set(higher_config.base);
+
         // 4) Сброс TLB
         self.tlb.invalidate();
 
         // 5) Включаем MMU + кэши
-        self.sctrl.set(config.mmu_config());
+        self.sctlr.set(config.mmu_config());
 
-        // 7) Барьер после изменения всех регистров
+        // 6) Барьер после изменения всех регистров
         system::barrier::barrier();
     }
 }

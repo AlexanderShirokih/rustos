@@ -1,5 +1,5 @@
+use crate::combine_bits;
 use crate::memory::regs::common::EL1;
-use crate::{combine_bits, system};
 use core::arch::asm;
 
 // Главный регистр управляющий MMU/кэшами
@@ -50,7 +50,5 @@ impl SystemControlRegister<EL1> {
             asm!("mrs {0}, sctlr_el1", out(reg) value, options(nostack, preserves_flags));
             asm!("msr sctlr_el1, {0}", in(reg) value| mask.0, options(nostack, preserves_flags));
         };
-
-        system::barrier::barrier();
     }
 }

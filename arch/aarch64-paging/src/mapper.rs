@@ -19,7 +19,7 @@ impl<'a, A: TableAlloc> PageMapper<'a, A> {
         Self {
             root,
             alloc,
-            table_flags: TableFlags::new().pxn_table(false).uxn_table(false),
+            table_flags: TableFlags::new().pxn_table(false).uxn_table(true),
         }
     }
 

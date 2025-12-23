@@ -3,8 +3,8 @@ use alloc::boxed::Box;
 use core::hint::spin_loop;
 use io::byte_sink::{ByteSink, WouldBlock};
 use io::mmio::{Mmio, Reg};
-use io::writer::BlockingWriter;
-use kernel::driver::early::{EarlyDriverHandle, ProbeContext};
+use io::writer::{BlockingWriter, Writer};
+use kernel::driver::early::{EarlyDriver, EarlyDriverContext, ProbeContext};
 use kernel::driver::probe::ProbeResult;
 use kernel::driver::register_early_driver;
 use util::crlf::Crlf;
@@ -17,10 +17,11 @@ const FR_TXFF: u32 = 1 << 5; // Передающий FIFO заполнен
 const FR_BUSY: u32 = 1 << 3; // UART занят передачей
 
 const REG_UART_INDEX: usize = 0;
-const REG_UART_SIZE: usize = 1;
+const REG_UART_SIZE_INDEX: usize = 1;
 
 pub struct UartPl011 {
     mmio: Mmio,
+    base: usize,
 }
 
 // Драйвер UART PL011 (ARM PrimeCell)
@@ -28,6 +29,7 @@ impl UartPl011 {
     pub(crate) const fn new(base: usize) -> Self {
         Self {
             mmio: Mmio::new(base),
+            base,
         }
     }
 }
@@ -75,12 +77,22 @@ impl ByteSink for UartPl011 {
     }
 }
 
-fn uart_pl011_probe(context: &ProbeContext<'_>) -> ProbeResult<EarlyDriverHandle> {
-    let uart = UartPl011::new(context.reg_offset::<REG_UART_SIZE>(REG_UART_INDEX));
+impl EarlyDriver for UartPl011 {
+    fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
+        context.request_mmio(self.base, 4096);
 
-    let writer = BlockingWriter::new(uart);
+        Ok(())
+    }
 
-    Ok(EarlyDriverHandle::Writer(Box::new(writer)))
+    fn output(&self) -> Option<Box<dyn Writer + Sync + '_>> {
+        Some(Box::new(BlockingWriter::new(self)))
+    }
+}
+
+fn uart_pl011_probe(context: &mut ProbeContext<'_>) -> ProbeResult<Box<dyn EarlyDriver>> {
+    let base = context.reg_offset::<REG_UART_SIZE_INDEX>(REG_UART_INDEX);
+
+    Ok(Box::new(UartPl011::new(base)))
 }
 
 register_early_driver!(

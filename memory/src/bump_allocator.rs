@@ -10,7 +10,7 @@ pub struct BumpAllocator {
 }
 
 impl BumpAllocator {
-    pub fn new(from: Frame, to: Frame) -> Self {
+    pub const fn new(from: Frame, to: Frame) -> Self {
         Self {
             start: from.page_address().as_usize(),
             end: to.page_address().as_usize(),

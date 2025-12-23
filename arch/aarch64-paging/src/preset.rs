@@ -8,9 +8,9 @@ pub struct Mmio;
 impl KernelText {
     pub const fn flags() -> MemFlags {
         MemFlags::new()
-            .af()
+            .af(true)
             .sh(Shareability::Inner)
-            .ap(Access::KernelRO)
+            .ap(Access::KernelRW)
             .attr_index(0) // Normal WB
             .pxn(false)
             .uxn(true)
@@ -20,7 +20,7 @@ impl KernelText {
 impl KernelData {
     pub const fn flags() -> MemFlags {
         MemFlags::new()
-            .af()
+            .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRW)
             .attr_index(0)
@@ -32,19 +32,19 @@ impl KernelData {
 impl KernelRoData {
     pub const fn flags() -> MemFlags {
         MemFlags::new()
-            .af()
+            .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRO)
             .attr_index(0) // Normal WB
             .pxn(false)
-            .uxn(false)
+            .uxn(true)
     }
 }
 
 impl Mmio {
     pub const fn flags() -> MemFlags {
         MemFlags::new()
-            .af()
+            .af(true)
             .sh(Shareability::None)
             .ap(Access::KernelRW)
             .attr_index(1) // Device-nGnRE

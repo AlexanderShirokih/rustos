@@ -5,6 +5,7 @@ use crate::memory::ram_memory::Aarch64VirtualRamMemory;
 use aarch64_paging::level::L0;
 use aarch64_paging::mem_flags::MemFlags;
 use aarch64_paging::page_table::PageTable;
+use aarch64_paging::preset::KernelData;
 use collections::{MutexCell, NoLockCell};
 use memory::FrameBitmap;
 use memory::aligned::{Address, Aligned};
@@ -12,7 +13,7 @@ use memory::frame_allocator::{FrameAllocator, PhysicalFrameAllocator};
 use memory::heap_allocator::HeapAllocator;
 use memory::memory_mapper::MemoryMapper;
 use memory::memory_range::MemoryRange;
-use memory::physical_address::PageAlignedAddress;
+use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::PageAlignedVirtualAddress;
 
 pub struct Prepared {
@@ -52,7 +53,7 @@ impl MemoryManager<Prepared> {
 
         let identity_map_ranges = identity_map_regions
             .iter()
-            .map(|region| MemoryRange::new(region.start, region.end, region.frame_size()))
+            .map(|region| MemoryRange::new(region.start, region.end))
             .collect();
 
         let frame_allocator = PhysicalFrameAllocator::new(&heap_range, &identity_map_ranges);
@@ -73,15 +74,13 @@ impl MemoryManager<Prepared> {
     }
 
     pub fn enable(self) -> Result<MemoryManager<Enabled>, MemorySetupError> {
-        let root_table: &'static mut PageTable<L0> =
-            unsafe { &mut *(self.state.root_page.as_u64() as *mut PageTable<L0>) };
-        *root_table = PageTable::new();
+        let root_table = Self::create_root_table(self.state.root_page);
 
         let mut memory_mapper =
             Aarch64MemoryMapper::new(&self.state.frame_allocator, root_table, self.mem_flags);
 
         for region in self.state.identity_map_regions.iter() {
-            let range = MemoryRange::new(region.start, region.end, region.frame_size());
+            let range = MemoryRange::new(region.start, region.end);
 
             debug_assert_eq!(range.size() % PageAlignedVirtualAddress::ALIGNMENT, 0);
 
@@ -91,6 +90,27 @@ impl MemoryManager<Prepared> {
                     &PageAlignedVirtualAddress::identity(range.start()),
                     range.size(),
                     region.flags.bits(),
+                )
+                .map_err(|_| MemorySetupError::OutOfMemory)?;
+        }
+
+        let regions = [
+            (0x48100000, 0x48101000),
+        ];
+
+        for reg in regions.iter() {
+            let (start, end) = *reg;
+            let mem = MemoryRange::new(
+                PageAlignedAddress::new_unchecked(PhysicalAddress::new(start)),
+                PageAlignedAddress::new_unchecked(PhysicalAddress::new(end)),
+            );
+
+            memory_mapper
+                .map_exact(
+                    mem.start(),
+                    &PageAlignedVirtualAddress::identity(mem.start()),
+                    mem.size(),
+                    KernelData::flags().bits(),
                 )
                 .map_err(|_| MemorySetupError::OutOfMemory)?;
         }
@@ -123,6 +143,8 @@ impl MemoryManager<Enabled> {
             .map(|frame| frame.page_address())
             .ok_or(MemorySetupError::OutOfMemory)?;
 
+        let _ = Self::create_root_table(higher_half_root);
+
         // Настраиваем сплит верхней/нижней половины адресного пространства
         Mmu::new().enable(NormalDualSpaceConfig::new(
             self.state.root_page.as_physical_address(),
@@ -142,6 +164,15 @@ impl MemoryManager<Enabled> {
             mem_flags: self.mem_flags,
             state: HigherHalf {},
         })
+    }
+}
+
+impl<Any> MemoryManager<Any> {
+    fn create_root_table(root: PageAlignedAddress) -> &'static mut PageTable<L0> {
+        let higher_table: &'static mut PageTable<L0> =
+            unsafe { &mut *(root.as_u64() as *mut PageTable<L0>) };
+        *higher_table = PageTable::new();
+        higher_table
     }
 }
 

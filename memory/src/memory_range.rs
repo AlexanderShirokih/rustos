@@ -6,7 +6,6 @@ use core::ops::RangeInclusive;
 #[derive(Clone, Debug)]
 pub struct MemoryRange<A: Address> {
     pub range: RangeInclusive<A>,
-    pub frame_size: usize,
 }
 
 impl MemoryRange<PageAlignedAddress> {
@@ -19,11 +18,8 @@ impl MemoryRange<PageAlignedAddress> {
 }
 
 impl<A: Address> MemoryRange<A> {
-    pub const fn new(start: A, end: A, frame_size: usize) -> Self {
-        Self {
-            range: start..=end,
-            frame_size,
-        }
+    pub const fn new(start: A, end: A) -> Self {
+        Self { range: start..=end }
     }
 
     pub const fn start(&self) -> &A {

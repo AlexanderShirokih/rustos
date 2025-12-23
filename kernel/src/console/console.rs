@@ -3,7 +3,7 @@ use core::fmt::{Arguments, Write as _};
 use core::sync::atomic::{AtomicBool, Ordering};
 use io::writer::Writer;
 
-pub type GlobalWriter = dyn Writer + Sync + 'static;
+type StaticWriter = dyn Writer + Sync + 'static;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Level {
@@ -24,9 +24,9 @@ static NIL: NilWriter = NilWriter;
 
 struct ConsoleHolder {
     /// Ранний writer (до включения MMU). Запись/чтение предполагается однопоточной.
-    early: NoLockCell<&'static GlobalWriter>,
+    early: NoLockCell<&'static StaticWriter>,
     /// Нормальный writer (после включения MMU).
-    normal: MutexCell<&'static GlobalWriter>,
+    normal: MutexCell<&'static StaticWriter>,
     /// Флаг перехода в normal mode.
     is_normal: AtomicBool,
 }
@@ -40,7 +40,7 @@ impl ConsoleHolder {
         }
     }
 
-    fn with_writer<R>(&self, fun: impl FnOnce(&mut &'static GlobalWriter) -> R) -> R {
+    fn with_writer<R>(&self, fun: impl FnOnce(&mut &'static StaticWriter) -> R) -> R {
         if self.is_normal.load(Ordering::Acquire) {
             self.normal.with_lock(fun)
         } else {
@@ -56,7 +56,7 @@ unsafe impl Sync for ConsoleHolder {}
 
 static STDOUT: ConsoleHolder = ConsoleHolder::new();
 
-struct FmtWriter<'a>(&'a GlobalWriter);
+struct FmtWriter<'a>(&'a StaticWriter);
 
 impl core::fmt::Write for FmtWriter<'_> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
@@ -66,13 +66,14 @@ impl core::fmt::Write for FmtWriter<'_> {
 }
 
 /// Вызывается на раннем этапе (однопоточно). Разрешено вызвать только один раз.
-pub fn set_early_stdout(w: &'static GlobalWriter) {
-    STDOUT.early.with_lock(|writer| *writer = w);
+pub fn set_early_stdout(w: alloc::boxed::Box<StaticWriter>) {
+    let leaked: &'static StaticWriter = alloc::boxed::Box::leak(w);
+    STDOUT.early.with_lock(|writer| *writer = leaked);
 }
 
 /// Вызывается после включения MMU.
 /// Можно вызывать повторно, чтобы заменить writer.
-pub fn set_stdout(w: &'static GlobalWriter) {
+pub fn set_stdout(w: &'static StaticWriter) {
     STDOUT.normal.with_lock(|writer| *writer = w);
 
     // Публикуем переход в normal mode после установки writer.

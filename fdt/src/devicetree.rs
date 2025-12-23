@@ -12,9 +12,7 @@ pub struct Node<'a> {
 }
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
-pub struct NodeKey {
-    offset: usize,
-}
+pub struct NodeKey(usize);
 
 impl<'a> Node<'a> {
     pub const fn name(&self) -> &'a str {
@@ -22,9 +20,7 @@ impl<'a> Node<'a> {
     }
 
     pub fn key(&self) -> NodeKey {
-        NodeKey {
-            offset: self.offset,
-        }
+        NodeKey(self.offset)
     }
 
     pub fn properties(&self) -> PropertyIter<'a> {
@@ -164,8 +160,7 @@ impl<'a> DeviceTree<'a> {
     }
 
     /// Возвращает узел по названию псевдонима (секция aliases)
-    /// Например: find_by_alias("serial10")
-    pub fn find_by_alias(&'a self, alias: &str) -> Option<Node<'a>> {
+    fn find_by_alias(&'a self, alias: &str) -> Option<Node<'a>> {
         let root = self.root()?;
         let aliases = root.children().find(|n| n.name == "aliases")?;
         let prop = aliases.properties().find(|p| p.name == alias)?;
@@ -176,7 +171,7 @@ impl<'a> DeviceTree<'a> {
 
     /// Ищет узел в списке структур. Принимает только абсолютный путь
     /// Например: find("/soc@107c000000/serial@7d001000")
-    pub fn find_node(&'a self, path: &str) -> Option<Node<'a>> {
+    fn find_node(&'a self, path: &str) -> Option<Node<'a>> {
         // Быстрый путь. "/" → корень
         if path == "/" {
             return self.root();

@@ -18,12 +18,13 @@ use crate::memory::layout::{MemoryLayout, MemoryRegion};
 use crate::memory::manager::{MemoryManager, Prepared};
 use aarch64_paging::preset::Mmio;
 use alloc::boxed::Box;
+use alloc::fmt;
 use core::arch::{asm, naked_asm};
 use core::hint::spin_loop;
 use fdt::devicetree::DeviceTree;
-use kernel::console::{GlobalWriter, set_early_stdout, set_stdout};
-use kernel::driver::early::{EarlyDriverHandle, EarlyDriverRegistry};
-use kernel::driver::{DriverRegistry, scanner};
+use kernel::console::set_early_stdout;
+use kernel::driver::early::EarlyDriverRegistry;
+use kernel::driver::scanner;
 use kernel::{debug, fatal, info};
 
 /// Глобальный двухфазный аллокатор ядра
@@ -136,12 +137,16 @@ fn early_main(dtb: usize) {
     let mut early_registry = EarlyDriverRegistry::new();
     early_registry.scan_and_probe(&device_tree);
 
-    let early_stdout = bind_early_stdout(&device_tree, &mut early_registry);
+    // Утекаем реестр в статическую память — драйверы живут до конца работы ядра
+    let early_registry: &'static mut EarlyDriverRegistry = Box::leak(Box::new(early_registry));
+
+    bind_early_stdout(&device_tree, early_registry);
     info!("Early console set");
 
     for mmio_region in early_registry.mmio_region_requests() {
+        let name = fmt::format(format_args!("mmio@{:#x}", mmio_region.base));
         memory_layout.add(MemoryRegion::new(
-            "mmio",
+            name.leak(),
             mmio_region.base,
             mmio_region.base + mmio_region.size,
             Mmio::flags(),
@@ -149,29 +154,34 @@ fn early_main(dtb: usize) {
         ));
     }
 
-    if setup_memory(memory_layout, early_stdout).is_err() {
+    for region in memory_layout.iter() {
+        debug!(
+            "mapping \"{}\", from {:#x} to {:#x}",
+            region.label,
+            region.start.as_usize(),
+            region.end.as_usize()
+        );
+    }
+
+    if setup_memory(memory_layout).is_err() {
         return;
     }
 
-    let mut driver_registry = DriverRegistry::new();
-    driver_registry.scan_and_probe(&device_tree);
+    debug!("Setup done!");
 
     loop {
         spin_loop();
     }
 }
 
-fn setup_memory(
-    memory_layout: MemoryLayout,
-    early_stdout: Option<&'static GlobalWriter>,
-) -> Result<(), ()> {
+fn setup_memory(memory_layout: MemoryLayout) -> Result<(), ()> {
     // Создаем экземпляр менеджера памяти
     let memory_manager = MemoryManager::<Prepared>::create(memory_layout)
         .inspect_err(|err| fatal!("Memory setup failed: {:?}", err))
         .map_err(|_| ())?;
     debug!("Memory manager prepared!");
 
-    // Делаем identity mapping b включаем MMU
+    // Делаем identity mapping и включаем MMU
     let memory_manager = memory_manager
         .enable()
         .inspect_err(|err| fatal!("Unable to enable MMU: {:?}", err))
@@ -184,36 +194,17 @@ fn setup_memory(
 
     // Переключаем глобальный аллокатор на heap-фазу
     // GLOBAL_ALLOCATOR.switch_to_heap(heap);
-
-    if let Some(writer) = early_stdout {
-        // После включения MMU можно включить normal mode и начать синхронизированный вывод.
-        set_stdout(writer);
-    }
-
-    info!("Memory setup done!");
-
     Ok(())
 }
 
-fn bind_early_stdout(
-    device_tree: &DeviceTree,
-    registry: &mut EarlyDriverRegistry,
-) -> Option<&'static GlobalWriter> {
+fn bind_early_stdout(device_tree: &DeviceTree, registry: &'static EarlyDriverRegistry) {
     let early_console_node = scanner::find_console(&device_tree);
 
-    let console_handle = early_console_node
-        .and_then(|early_console_node| registry.take(&early_console_node.key()))
-        .and_then(|early_console| match early_console {
-            EarlyDriverHandle::Writer(console) => Some(console),
-            EarlyDriverHandle::Opaque => None,
-        });
-
-    console_handle.map(|console| {
-        let writer: &'static mut GlobalWriter = Box::leak(console);
-        let writer: &'static GlobalWriter = writer;
-        set_early_stdout(writer);
-        writer
-    })
+    early_console_node
+        .map(|node| node.key())
+        .and_then(|key| registry.get(&key))
+        .and_then(|driver| driver.output())
+        .map(|writer| set_early_stdout(writer));
 }
 
 // Поскольку мы находимся в no_std окружении, то нам нужен свой panic handler

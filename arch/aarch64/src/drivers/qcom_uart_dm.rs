@@ -2,8 +2,8 @@ use crate::drivers::commons::ProbeContextExt;
 use alloc::boxed::Box;
 use io::byte_sink::{ByteSink, WouldBlock};
 use io::mmio::{Mmio, Reg};
-use io::writer::BlockingWriter;
-use kernel::driver::early::{EarlyDriverHandle, ProbeContext};
+use io::writer::{BlockingWriter, Writer};
+use kernel::driver::early::{EarlyDriver, EarlyDriverContext, ProbeContext};
 use kernel::driver::probe::ProbeResult;
 use kernel::driver::register_early_driver;
 use util::crlf::Crlf;
@@ -19,17 +19,33 @@ const SR_TXEMT: u32 = 1 << 3;
 const CMD_CLEAR_TX_READY: u32 = 0x300; // kick NCF_TX
 
 const REG_UART_INDEX: usize = 0;
-const REG_UART_SIZE: usize = 1;
+const REG_UART_SIZE_INDEX: usize = 1;
 
 pub struct UartDm {
     mmio: Mmio,
+    base: usize,
 }
 
 impl UartDm {
     pub(crate) const fn new(base: usize) -> Self {
         Self {
             mmio: Mmio::new(base),
+            base,
         }
+    }
+}
+
+impl EarlyDriver for UartDm {
+    fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
+        context.request_mmio(self.base, 4096);
+
+        Ok(())
+    }
+
+    fn output(&self) -> Option<Box<dyn Writer + Sync + '_>> {
+        let writer = BlockingWriter::new(self);
+
+        Some(Box::new(writer))
     }
 }
 
@@ -80,11 +96,10 @@ impl ByteSink for UartDm {
     }
 }
 
-fn uart_dm_probe(context: &ProbeContext) -> ProbeResult<EarlyDriverHandle> {
-    let uart = UartDm::new(context.reg_offset::<REG_UART_SIZE>(REG_UART_INDEX));
-    let writer = BlockingWriter::new(uart);
+fn uart_dm_probe(context: &mut ProbeContext) -> ProbeResult<Box<dyn EarlyDriver>> {
+    let base = context.reg_offset::<REG_UART_SIZE_INDEX>(REG_UART_INDEX);
 
-    Ok(EarlyDriverHandle::Writer(Box::new(writer)))
+    Ok(Box::new(UartDm::new(base)))
 }
 
 register_early_driver!(

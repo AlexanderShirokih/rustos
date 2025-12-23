@@ -10,7 +10,7 @@ use io::writer::Writer;
 type EarlyDriverId = NodeKey;
 
 pub struct EarlyDriverRegistry {
-    handles: BTreeMap<EarlyDriverId, EarlyDriverHandle>,
+    handles: BTreeMap<EarlyDriverId, Box<dyn EarlyDriver>>,
     mmio_requests: Vec<MmioRequest>,
 }
 
@@ -22,12 +22,12 @@ impl EarlyDriverRegistry {
         }
     }
 
-    pub fn mmio_region_requests(self) -> Vec<MmioRequest> {
-        self.mmio_requests
+    pub fn mmio_region_requests(&self) -> &[MmioRequest] {
+        &self.mmio_requests
     }
 
-    pub fn take(&mut self, key: &NodeKey) -> Option<EarlyDriverHandle> {
-        self.handles.remove(key)
+    pub fn get(&self, key: &NodeKey) -> Option<&Box<dyn EarlyDriver>> {
+        self.handles.get(key)
     }
 
     pub fn scan_and_probe(&mut self, dt: &DeviceTree<'_>) {
@@ -45,15 +45,12 @@ impl EarlyDriverRegistry {
         paths.push(node.clone());
 
         if node.prop("compatible").is_some() {
-            let mut mmio_requests: Vec<MmioRequest> = vec![];
-            let context = ProbeContext {
+            let mut context = ProbeContext {
                 node,
                 hierarchy: paths,
-                mmio_requests: &mut mmio_requests,
             };
 
-            self.try_probe(&context).ok();
-            self.mmio_requests.extend(mmio_requests);
+            self.try_probe(&mut context).ok();
         }
 
         for child in node.children() {
@@ -63,13 +60,21 @@ impl EarlyDriverRegistry {
         paths.pop();
     }
 
-    fn try_probe(&mut self, context: &ProbeContext) -> Result<(), ProbeError> {
-        for driver in early_drivers() {
+    fn try_probe(&mut self, context: &mut ProbeContext) -> Result<(), ProbeError> {
+        for driver_info in early_drivers() {
             let node = context.node();
-            if node.is_compatible_any(driver.compatible) {
-                let device = (driver.probe)(context)?;
-                self.handles.insert(node.key(), device);
-                return Ok(());
+            let key = node.key();
+            if node.is_compatible_any(driver_info.compatible) {
+                let driver = (driver_info.probe)(context)?;
+                let context = &mut EarlyDriverContext {
+                    mmio_requests: &mut self.mmio_requests,
+                };
+
+                if !self.handles.contains_key(&key) {
+                    if driver.init(context).is_ok() {
+                        self.handles.insert(key, driver);
+                    }
+                }
             }
         }
 
@@ -77,26 +82,35 @@ impl EarlyDriverRegistry {
     }
 }
 
-/// Результат probe early драйвера
-pub enum EarlyDriverHandle {
-    Writer(Box<dyn Writer + Sync>),
-    Opaque,
+pub struct EarlyDriverContext<'a> {
+    mmio_requests: &'a mut Vec<MmioRequest>,
+}
+
+impl EarlyDriverContext<'_> {
+    pub fn request_mmio(&mut self, address: MmioAddress, size: usize) {
+        debug_assert_eq!(address % 4096, 0);
+
+        self.mmio_requests.push(MmioRequest {
+            base: address,
+            size,
+        })
+    }
+}
+
+pub trait EarlyDriver {
+    fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str>;
+
+    fn output(&self) -> Option<Box<dyn Writer + Sync + '_>> {
+        None
+    }
 }
 
 pub struct ProbeContext<'a> {
     node: &'a Node<'a>,
     hierarchy: &'a [Node<'a>],
-    mmio_requests: &'a mut Vec<MmioRequest>,
 }
 
 impl<'a> ProbeContext<'a> {
-    pub fn request_mmio(&mut self, address: MmioAddress, size: usize) {
-        self.mmio_requests.push(MmioRequest {
-            base: address,
-            size,
-        });
-    }
-
     pub fn node(&self) -> &Node<'_> {
         &self.node
     }
@@ -129,7 +143,7 @@ impl<'a> ProbeContext<'a> {
     }
 }
 
-pub type EarlyProbeFn = fn(&ProbeContext) -> ProbeResult<EarlyDriverHandle>;
+pub type EarlyProbeFn = fn(&mut ProbeContext) -> ProbeResult<Box<dyn EarlyDriver>>;
 
 #[repr(C)]
 pub struct EarlyDriverInfo {
