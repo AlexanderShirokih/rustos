@@ -112,7 +112,8 @@ pub struct VecIter<'a, T> {
 }
 
 impl<T, const N: usize> Vec<T, N> {
-    pub fn iter(&'_ self) -> impl Iterator<Item = &'_ T> + '_ {
+
+    pub fn iter(&self) -> VecIter<'_, T> {
         VecIter {
             items: &self.items,
             len: self.len,
@@ -138,5 +139,63 @@ impl<'a, T> Iterator for VecIter<'a, T> {
 impl<'a, T> ExactSizeIterator for VecIter<'a, T> {
     fn len(&self) -> usize {
         self.len - self.index
+    }
+}
+
+pub struct VecIntoIter<T, const N: usize> {
+    vec: Vec<T, N>,
+    index: usize,
+}
+
+impl<T, const N: usize> Iterator for VecIntoIter<T, N> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.vec.len() {
+            None
+        } else {
+            let item = self.vec.items[self.index].take();
+            self.index += 1;
+            item
+        }
+    }
+}
+
+impl<T, const N: usize> ExactSizeIterator for VecIntoIter<T, N> {
+    fn len(&self) -> usize {
+        self.vec.len() - self.index
+    }
+}
+
+impl<T, const N: usize> IntoIterator for Vec<T, N> {
+    type Item = T;
+    type IntoIter = VecIntoIter<T, N>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        VecIntoIter {
+            vec: self,
+            index: 0,
+        }
+    }
+}
+
+impl <'a, T, const N: usize> IntoIterator for &'a Vec<T, N> {
+    type Item = &'a T;
+    type IntoIter = VecIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T, const N: usize> FromIterator<T> for Vec<T, N> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut vec = Self::new();
+
+        for item in iter {
+            vec.push(item).unwrap();
+        }
+
+        vec
     }
 }

@@ -3,6 +3,6 @@ pub mod layout;
 pub mod manager;
 pub mod memory_mapper;
 pub mod mmu;
-pub mod ram_memory;
 mod regs;
 mod relocation_trampoline;
+pub(crate) mod setup;

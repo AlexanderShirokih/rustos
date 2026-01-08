@@ -6,5 +6,5 @@ pub trait TableAlloc {
     fn alloc_table_page(&mut self) -> Option<PagePa>;
 
     /// Получить указатель на PageTable<L> по физическому адресу таблицы.
-    unsafe fn table_ptr<L: Level>(&self, pa: &PagePa) -> *mut PageTable<L>;
+    unsafe fn table_ptr<L: Level>(&self, pa: PagePa) -> *mut PageTable<L>;
 }

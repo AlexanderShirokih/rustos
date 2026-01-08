@@ -12,10 +12,8 @@ mod exceptions;
 mod memory;
 mod system;
 
-use crate::drivers::setup::{build_memory_layout, create_bump_allocator};
-use crate::memory::global_allocator::GlobalKernelAllocator;
 use crate::memory::layout::{MemoryLayout, MemoryRegion};
-use crate::memory::manager::{MemoryManager, Prepared};
+use crate::memory::manager::{Early, MemoryManager, Prepared};
 use aarch64_paging::preset::Mmio;
 use alloc::boxed::Box;
 use alloc::fmt;
@@ -26,10 +24,7 @@ use kernel::console::set_early_stdout;
 use kernel::driver::early::EarlyDriverRegistry;
 use kernel::driver::scanner;
 use kernel::{debug, fatal, info};
-
-/// Глобальный двухфазный аллокатор ядра
-#[global_allocator]
-static GLOBAL_ALLOCATOR: GlobalKernelAllocator = GlobalKernelAllocator::new();
+use memory::setup::build_memory_layout;
 
 unsafe extern "C" {
     static _stack_top: u8;
@@ -126,13 +121,10 @@ fn early_main(dtb: usize) {
         Err(_) => return,
     };
 
-    let bump_allocator = match create_bump_allocator(&memory_layout) {
-        Ok(allocator) => allocator,
+    match MemoryManager::<Early>::create(&memory_layout) {
+        Ok(memory_manager) => memory_manager.install(),
         Err(_) => return,
     };
-
-    // Инициализируем ранний аллокатор
-    GLOBAL_ALLOCATOR.init_bump_phase(bump_allocator);
 
     let mut early_registry = EarlyDriverRegistry::new();
     early_registry.scan_and_probe(&device_tree);
@@ -154,9 +146,10 @@ fn early_main(dtb: usize) {
         ));
     }
 
+    info!("Memory layout:");
     for region in memory_layout.iter() {
-        debug!(
-            "mapping \"{}\", from {:#x} to {:#x}",
+        info!(
+            "- \"{}\", from {:#x} to {:#x}",
             region.label,
             region.start.as_usize(),
             region.end.as_usize()
@@ -174,9 +167,9 @@ fn early_main(dtb: usize) {
     }
 }
 
-fn setup_memory(memory_layout: MemoryLayout) -> Result<(), ()> {
+fn setup_memory(layout: MemoryLayout) -> Result<(), ()> {
     // Создаем экземпляр менеджера памяти
-    let memory_manager = MemoryManager::<Prepared>::create(memory_layout)
+    let memory_manager = MemoryManager::<Prepared>::create(&layout)
         .inspect_err(|err| fatal!("Memory setup failed: {:?}", err))
         .map_err(|_| ())?;
     debug!("Memory manager prepared!");
@@ -186,7 +179,14 @@ fn setup_memory(memory_layout: MemoryLayout) -> Result<(), ()> {
         .enable()
         .inspect_err(|err| fatal!("Unable to enable MMU: {:?}", err))
         .map_err(|_| ())?;
+
     debug!("MMU enabled!");
+
+    let memory_manager = memory_manager
+        .install()
+        .inspect_err(|_| fatal!("Unable to set heap allocator"))?;
+
+    debug!("Global allocator switched to heap phase");
 
     // Перемещаем ядро в higher half
     let _ = memory_manager.relocate();

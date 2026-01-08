@@ -20,8 +20,8 @@ pub trait MemoryMapper {
 
     fn map_exact(
         &mut self,
-        source_address: &PageAlignedAddress,
-        target_address: &PageAlignedVirtualAddress,
+        source_address: PageAlignedAddress,
+        target_address: PageAlignedVirtualAddress,
         size: usize,
         mem_flags: u64,
     ) -> Result<(), MemoryMappingError>;

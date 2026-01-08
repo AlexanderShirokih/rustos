@@ -17,15 +17,15 @@ fn frame_allocator(
 ) -> PhysicalFrameAllocator<MutexCell<FrameBitmap>> {
     let region = make_range(0, region_frames);
     let excluded = make_excluded(excluded_specs);
-    PhysicalFrameAllocator::new(&region, &excluded)
+    PhysicalFrameAllocator::new(&region, excluded)
 }
 
 #[test]
 fn reserve_exact_protects_frames() {
     let frame_allocator = frame_allocator(128, &[]);
 
-    let reserve_start = Frame::from(&common::frame_to_address(8));
-    let reserve_end = Frame::from(&common::frame_to_address(16));
+    let reserve_start = Frame::from(common::frame_to_address(8));
+    let reserve_end = Frame::from(common::frame_to_address(16));
     frame_allocator
         .reserve_frames_exact(reserve_start, reserve_end)
         .expect("reservation should succeed");

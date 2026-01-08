@@ -3,16 +3,15 @@
 //! Этот модуль предоставляет аллокатор кучи для ядра, использующий алгоритм
 //! first-fit со свободным списком и автоматическим расширением кучи.
 
-use crate::memory::MemoryAccessProvider;
+use crate::aligned::Aligned;
 use crate::memory_mapper::{MemoryMapper, MemoryMappingError};
+use crate::memory_range::MemoryRange;
+use crate::physical_address::PageAlignedAddress;
 use crate::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 use core::alloc::Layout;
 use core::mem::size_of;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
-
-/// Начальный виртуальный адрес кучи.
-pub const HEAP_START: usize = 0xFFFF_0000_0000_0000;
 
 /// Начальный размер кучи (1MB)
 pub const HEAP_INITIAL_SIZE: usize = 1024 * 1024;
@@ -34,6 +33,7 @@ pub enum AllocationError {
 
 /// Свободный блок в куче
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 struct FreeBlock {
     size: usize,
     next: Option<NonNull<FreeBlock>>,
@@ -80,7 +80,7 @@ impl FreeBlock {
 }
 
 /// First-fit аллокатор кучи с автоматическим расширением
-pub struct HeapAllocator<MA: MemoryAccessProvider, M: MemoryMapper> {
+pub struct HeapAllocator<M: MemoryMapper> {
     /// Голова списка свободных блоков
     free_list: Option<NonNull<FreeBlock>>,
 
@@ -92,22 +92,17 @@ pub struct HeapAllocator<MA: MemoryAccessProvider, M: MemoryMapper> {
 
     mapper: M,
 
-    /// Абстракция чтения/записи памяти
-    memory: MA,
-
-    /// Размер фрейма для маппинга памяти
-    frame_size: usize,
+    heap_region: MemoryRange<PageAlignedAddress>,
 }
 
-impl<MA: MemoryAccessProvider, M: MemoryMapper> HeapAllocator<MA, M> {
-    pub fn new(mapper: M, memory: MA, frame_size: usize) -> Self {
+impl<M: MemoryMapper> HeapAllocator<M> {
+    pub fn new(mapper: M, heap_region: MemoryRange<PageAlignedAddress>) -> Self {
         HeapAllocator {
             free_list: None,
             current_size: 0,
-            next_alloc_addr: AtomicUsize::new(HEAP_START),
+            next_alloc_addr: AtomicUsize::new(heap_region.start().as_usize()),
+            heap_region,
             mapper,
-            memory,
-            frame_size,
         }
     }
 
@@ -118,11 +113,15 @@ impl<MA: MemoryAccessProvider, M: MemoryMapper> HeapAllocator<MA, M> {
 
     /// Расширить кучу путем выделения дополнительной памяти
     fn expand_heap(&mut self, additional_size: usize) -> Result<(), AllocationError> {
-        let aligned_size = align_up(additional_size, self.frame_size);
+        let aligned_size = align_up(additional_size, PageAlignedVirtualAddress::ALIGNMENT);
 
         let mut start_addr =
             PageAlignedVirtualAddress::from_usize(self.next_alloc_addr.load(Ordering::Relaxed))
                 .ok_or(AllocationError::AlignmentError)?;
+
+        if (start_addr.as_usize() + aligned_size) > self.heap_region.end().as_usize() {
+            return Err(AllocationError::OutOfMemory);
+        }
 
         loop {
             // Отображаем физические фреймы в виртуальную область кучи
@@ -146,7 +145,9 @@ impl<MA: MemoryAccessProvider, M: MemoryMapper> HeapAllocator<MA, M> {
         let new_block = FreeBlock::new(block_size);
 
         // Записываем новый блок в память
-        self.memory.write(block_addr, &new_block);
+        unsafe {
+            block_addr.write(&new_block);
+        }
 
         // Добавляем в список свободных блоков
         self.add_to_free_list(start_addr.as_usize());
@@ -155,7 +156,6 @@ impl<MA: MemoryAccessProvider, M: MemoryMapper> HeapAllocator<MA, M> {
         let next_aligned_alloc_addr = PageAlignedVirtualAddress::new(virt.add(aligned_size))
             .ok_or(AllocationError::AlignmentError)?;
 
-        // Обновляем состояние аллокатора
         self.current_size += aligned_size;
         self.next_alloc_addr
             .store(next_aligned_alloc_addr.as_usize(), Ordering::Relaxed);
@@ -166,11 +166,15 @@ impl<MA: MemoryAccessProvider, M: MemoryMapper> HeapAllocator<MA, M> {
     /// Добавить блок в список свободных
     fn add_to_free_list(&mut self, addr: usize) {
         let block_ptr = NonNull::new(addr as *mut FreeBlock).expect("Invalid address");
+        let addr = VirtualAddress::new(addr);
 
         // Читаем блок, обновляем его указатель next и записываем обратно
-        let mut block: FreeBlock = self.memory.read(VirtualAddress::new(addr));
-        block.next = self.free_list;
-        self.memory.write(VirtualAddress::new(addr), &block);
+        unsafe {
+            let mut block: FreeBlock = core::ptr::read(addr.as_ptr());
+            block.next = self.free_list;
+
+            core::ptr::write(addr.as_ptr(), block);
+        }
 
         // Обновляем голову списка свободных блоков
         self.free_list = Some(block_ptr);
@@ -182,37 +186,38 @@ impl<MA: MemoryAccessProvider, M: MemoryMapper> HeapAllocator<MA, M> {
         let mut prev: Option<NonNull<FreeBlock>> = None;
 
         while let Some(block_ptr) = current {
-            let addr = block_ptr.as_ptr() as usize;
-            let mut block: FreeBlock = self.memory.read(VirtualAddress::new(addr));
+            unsafe {
+                let block_ptr = block_ptr.as_ptr();
+                let mut block: FreeBlock = core::ptr::read(block_ptr);
 
-            // Проверяем, достаточно ли велик этот блок
-            if block.size >= size {
-                // Удаляем из списка свободных
-                if let Some(prev_ptr) = prev {
-                    let mut prev_block: FreeBlock = self
-                        .memory
-                        .read(VirtualAddress::new(prev_ptr.as_ptr() as usize));
-                    prev_block.next = block.next;
-                    self.memory
-                        .write(VirtualAddress::new(prev_ptr.as_ptr() as usize), &prev_block);
-                } else {
-                    self.free_list = block.next;
+                // Проверяем, достаточно ли велик этот блок
+                if block.size >= size {
+                    // Удаляем из списка свободных
+                    if let Some(prev_ptr) = prev {
+                        let mut prev_block: FreeBlock = core::ptr::read(prev_ptr.as_ptr());
+                        prev_block.next = block.next;
+
+                        core::ptr::write(block_ptr, prev_block);
+                    } else {
+                        self.free_list = block.next;
+                    }
+
+                    // Разделяем блок, если он значительно больше, чем нужно
+                    if let Some(new_block_ptr) = block.split(size) {
+                        let new_addr = new_block_ptr.as_ptr() as usize;
+                        self.add_to_free_list(new_addr);
+                    }
+
+                    // Записываем обратно выделенный блок
+                    core::ptr::write(block_ptr, block);
+
+                    return NonNull::new(block_ptr);
                 }
 
-                // Разделяем блок, если он значительно больше, чем нужно
-                if let Some(new_block_ptr) = block.split(size) {
-                    let new_addr = new_block_ptr.as_ptr() as usize;
-                    self.add_to_free_list(new_addr);
-                }
-
-                // Записываем обратно выделенный блок
-                self.memory.write(VirtualAddress::new(addr), &block);
-                return Some(block_ptr);
+                // Переходим к следующему блоку
+                prev = current;
+                current = block.next;
             }
-
-            // Переходим к следующему блоку
-            prev = current;
-            current = block.next;
         }
 
         None
@@ -233,7 +238,7 @@ impl<MA: MemoryAccessProvider, M: MemoryMapper> HeapAllocator<MA, M> {
 
         // Подходящий блок не найден, расширяем кучу
         let needed_size = size + size_of::<FreeBlock>();
-        let expand_size = needed_size.max(self.frame_size);
+        let expand_size = needed_size.max(PageAlignedVirtualAddress::ALIGNMENT);
 
         self.expand_heap(expand_size)?;
 

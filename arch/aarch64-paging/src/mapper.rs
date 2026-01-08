@@ -8,14 +8,14 @@ use crate::virtual_address::VirtualAddressExt;
 use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress};
 
-pub struct PageMapper<'a, A: TableAlloc> {
-    root: &'a mut PageTable<L0>,
+pub struct PageMapper<A: TableAlloc> {
+    root: *mut PageTable<L0>,
     alloc: A,
     table_flags: TableFlags,
 }
 
-impl<'a, A: TableAlloc> PageMapper<'a, A> {
-    pub fn new(root: &'a mut PageTable<L0>, alloc: A) -> Self {
+impl<'a, A: TableAlloc> PageMapper<A> {
+    pub fn new(root: *mut PageTable<L0>, alloc: A) -> Self {
         Self {
             root,
             alloc,
@@ -29,7 +29,7 @@ impl<'a, A: TableAlloc> PageMapper<'a, A> {
         phys: PageAlignedAddress,
         flags: MemFlags,
     ) -> Result<(), MapError> {
-        let l0 = self.root as *mut PageTable<L0>;
+        let l0 = self.root;
         let l1 = self.ensure_next::<L0, L1, _>(l0, virt)?;
         let l2 = self.ensure_next::<L1, L2, _>(l1, virt)?;
         let l3 = self.ensure_next::<L2, L3, _>(l2, virt)?;
@@ -64,13 +64,13 @@ impl<'a, A: TableAlloc> PageMapper<'a, A> {
                 let child_pa = extract_table_pa(te.raw());
 
                 // SAFETY: child_pa указывает на существующую таблицу, созданную ранее
-                let child = unsafe { self.alloc.table_ptr::<CL>(&child_pa) };
+                let child = unsafe { self.alloc.table_ptr::<CL>(child_pa) };
                 Ok(child)
             }
 
             AnyEntry::Invalid(_) => {
                 let child_pa = self.alloc.alloc_table_page().ok_or(MapError::OutOfMemory)?;
-                let child = unsafe { self.alloc.table_ptr::<CL>(&child_pa) };
+                let child = unsafe { self.alloc.table_ptr::<CL>(child_pa) };
 
                 unsafe { child.write(PageTable::new()) };
                 unsafe { (*parent).set(idx, Entry::<PL, Table>::new(child_pa, self.table_flags)) };

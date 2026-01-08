@@ -4,11 +4,8 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::aligned::Address;
 use crate::memory::MemoryAccessProvider;
-use crate::virtual_address::{AlignedVirtualAddress, VirtualAddress};
-use core::mem::{MaybeUninit, size_of};
-use core::ops::Range;
+use crate::virtual_address::AlignedVirtualAddress;
 
 struct MockMemoryAccessProviderInner {
     frame_size: usize,
@@ -65,46 +62,9 @@ impl MockMemoryAccessProvider {
         let data = self.inner.data.lock();
         data[offset..offset + len].to_vec()
     }
-
-    fn checked_range(&self, addr: VirtualAddress, len: usize) -> Range<usize> {
-        let start = addr.as_usize();
-        let end = start
-            .checked_add(len)
-            .expect("address + len overflow in MockMemoryAccessProvider");
-        assert!(end <= self.inner.len, "memory access out of bounds");
-        start..end
-    }
-
-    fn read_bytes(&self, addr: VirtualAddress, buf: &mut [u8]) {
-        let range = self.checked_range(addr, buf.len());
-        let data = self.inner.data.lock();
-        buf.copy_from_slice(&data[range]);
-    }
-
-    fn write_bytes(&self, addr: VirtualAddress, buf: &[u8]) {
-        let range = self.checked_range(addr, buf.len());
-        let mut data = self.inner.data.lock();
-        data[range].copy_from_slice(buf);
-    }
 }
 
 impl MemoryAccessProvider for MockMemoryAccessProvider {
-    fn read<T>(&self, addr: VirtualAddress) -> T {
-        let mut val = MaybeUninit::<T>::uninit();
-        unsafe {
-            let buf = core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, size_of::<T>());
-            self.read_bytes(addr, buf);
-            val.assume_init()
-        }
-    }
-
-    fn write<T>(&self, addr: VirtualAddress, val: &T) {
-        unsafe {
-            let buf = core::slice::from_raw_parts(val as *const T as *const u8, size_of::<T>());
-            self.write_bytes(addr, buf);
-        }
-    }
-
     fn clean_cache<const SHIFT: u8>(&self, _address: AlignedVirtualAddress<SHIFT>) {}
 
     fn invalidate_cache(&self) {}

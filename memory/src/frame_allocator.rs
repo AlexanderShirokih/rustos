@@ -60,19 +60,20 @@ pub struct PhysicalFrameAllocator<L: LockCell<FrameBitmap>> {
 }
 
 impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
-    pub fn new(
-        memory: &MemoryRange<PageAlignedAddress>,
-        excluded_regions: &alloc::vec::Vec<MemoryRange<PageAlignedAddress>>,
-    ) -> Self {
+    pub fn new<T>(memory: &MemoryRange<PageAlignedAddress>, excluded_regions: T) -> Self
+    where
+        T: IntoIterator<Item = MemoryRange<PageAlignedAddress>>,
+    {
         let mut frame_bitmap = FrameBitmap::new(memory);
 
         // Помечаем исключённые регионы как занятые
-        for exclude in excluded_regions {
+        let iter = excluded_regions.into_iter();
+        iter.for_each(|exclude| {
             frame_bitmap.set_range_unchecked(
                 Frame::from(exclude.start()),
                 Frame::from(exclude.end()).add(1),
             )
-        }
+        });
 
         let start_frame = Frame::from(memory.start());
         let end_frame = Frame::from(memory.end());
@@ -84,6 +85,13 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
             end_frame,
             next_frame_hint: AtomicUsize::new(start_frame.number()),
         }
+    }
+
+    pub fn heap_range(&self) -> MemoryRange<PageAlignedAddress> {
+        MemoryRange::new(
+            self.start_frame.page_address(),
+            self.end_frame.page_address(),
+        )
     }
 
     pub fn into_mutex(self) -> PhysicalFrameAllocator<MutexCell<FrameBitmap>> {

@@ -1,4 +1,4 @@
-use aarch64_paging::level::{L0, Level, PagePa};
+use aarch64_paging::level::{L0, Level};
 use aarch64_paging::mapper::{MapError, PageMapper};
 use aarch64_paging::mem_flags::MemFlags;
 use aarch64_paging::page_table::PageTable;
@@ -15,13 +15,13 @@ struct FrameTableAlloc<'a, FA: FrameAllocator>(&'a FA);
 
 impl<'a, FA: FrameAllocator> TableAlloc for FrameTableAlloc<'a, FA> {
     #[inline]
-    fn alloc_table_page(&mut self) -> Option<PagePa> {
+    fn alloc_table_page(&mut self) -> Option<PageAlignedAddress> {
         let frame = self.0.allocate_frame()?;
         Some(frame.page_address())
     }
 
     #[inline]
-    unsafe fn table_ptr<L: Level>(&self, pa: &PagePa) -> *mut PageTable<L> {
+    unsafe fn table_ptr<L: Level>(&self, pa: PageAlignedAddress) -> *mut PageTable<L> {
         pa.as_u64() as *mut PageTable<L>
     }
 }
@@ -30,19 +30,19 @@ impl<'a, FA: FrameAllocator> TableAlloc for FrameTableAlloc<'a, FA> {
 pub struct Aarch64MemoryMapper<'a, FA: FrameAllocator> {
     frame_allocator: &'a FA,
     mem_flags: MemFlags,
-    mapper: UnsafeCell<PageMapper<'a, FrameTableAlloc<'a, FA>>>,
+    mapper: UnsafeCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 }
 
 // SAFETY: доступ к frame allocator должен быть синхронизирован снаружи.
 unsafe impl<'a, FA: FrameAllocator + Sync> Sync for Aarch64MemoryMapper<'a, FA> {}
 
 impl<'a, FA: FrameAllocator> Aarch64MemoryMapper<'a, FA> {
-    pub fn new(frame_allocator: &'a FA, root: &'a mut PageTable<L0>, mem_flags: MemFlags) -> Self {
-        let mapper = PageMapper::new(root, FrameTableAlloc(frame_allocator));
+    pub fn new(frame_allocator: &'a FA, root_ptr: *mut PageTable<L0>, mem_flags: MemFlags) -> Self {
+
         Self {
             frame_allocator,
             mem_flags,
-            mapper: UnsafeCell::new(mapper),
+            mapper: UnsafeCell::new(PageMapper::new(root_ptr, FrameTableAlloc(&frame_allocator))),
         }
     }
 
@@ -95,8 +95,8 @@ impl<'a, FA: FrameAllocator> MemoryMapper for Aarch64MemoryMapper<'a, FA> {
 
     fn map_exact(
         &mut self,
-        source_address: &PageAlignedAddress,
-        target_address: &PageAlignedVirtualAddress,
+        source_address: PageAlignedAddress,
+        target_address: PageAlignedVirtualAddress,
         size: usize,
         mem_flags: u64,
     ) -> Result<(), MemoryMappingError> {

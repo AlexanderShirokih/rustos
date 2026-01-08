@@ -1,4 +1,6 @@
 use crate::frame::Frame;
+use crate::memory_range::MemoryRange;
+use crate::physical_address::PhysicalAddress;
 use core::alloc::Layout;
 use core::fmt::Formatter;
 use core::ptr::NonNull;
@@ -20,6 +22,13 @@ impl BumpAllocator {
 
     fn remaining(&self) -> usize {
         self.end - self.start - self.offset
+    }
+
+    pub fn get_used_area(&self) -> MemoryRange<PhysicalAddress> {
+        MemoryRange::new(
+            PhysicalAddress::new(self.start),
+            PhysicalAddress::new(self.start + self.offset),
+        )
     }
 
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, BumpAllocError> {

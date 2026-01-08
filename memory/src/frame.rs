@@ -33,8 +33,8 @@ impl Frame {
     }
 }
 
-impl From<&PageAlignedAddress> for Frame {
-    fn from(addr: &PageAlignedAddress) -> Self {
+impl From<PageAlignedAddress> for Frame {
+    fn from(addr: PageAlignedAddress) -> Self {
         Frame::new(addr.as_usize() / PageAlignedAddress::ALIGNMENT)
     }
 }

@@ -1,11 +1,36 @@
 use crate::aligned::Address;
 use crate::frame::Frame;
 use crate::physical_address::PageAlignedAddress;
-use core::ops::RangeInclusive;
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct MemoryRange<A: Address> {
-    pub range: RangeInclusive<A>,
+    from_inclusive: A,
+    to_inclusive: A,
+}
+
+impl<A: Address> MemoryRange<A> {
+    pub const fn new(start: A, end: A) -> Self {
+        Self {
+            from_inclusive: start,
+            to_inclusive: end,
+        }
+    }
+
+    pub const fn start(&self) -> A {
+        self.from_inclusive
+    }
+
+    pub const fn end(&self) -> A {
+        self.to_inclusive
+    }
+
+    pub fn contains(&self, addr: A) -> bool {
+        self.from_inclusive <= addr && addr <= self.to_inclusive
+    }
+
+    pub fn size(&self) -> usize {
+        self.end().as_usize() - self.start().as_usize()
+    }
 }
 
 impl MemoryRange<PageAlignedAddress> {
@@ -14,27 +39,5 @@ impl MemoryRange<PageAlignedAddress> {
         let end_frame = Frame::from(self.end()).number();
 
         end_frame - start_frame + 1
-    }
-}
-
-impl<A: Address> MemoryRange<A> {
-    pub const fn new(start: A, end: A) -> Self {
-        Self { range: start..=end }
-    }
-
-    pub const fn start(&self) -> &A {
-        self.range.start()
-    }
-
-    pub const fn end(&self) -> &A {
-        self.range.end()
-    }
-
-    pub fn contains(&self, addr: A) -> bool {
-        self.range.contains(&addr)
-    }
-
-    pub fn size(&self) -> usize {
-        self.end().as_usize() - self.start().as_usize()
     }
 }
