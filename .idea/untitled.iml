@@ -17,6 +17,7 @@
       <sourceFolder url="file://$MODULE_DIR$/collections/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/io/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/log/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/arch/aarch64/target" />
       <excludeFolder url="file://$MODULE_DIR$/arch/common/target" />
       <excludeFolder url="file://$MODULE_DIR$/memory/target" />

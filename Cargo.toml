@@ -5,6 +5,7 @@ members = [
     "arch/aarch64-paging",
     "arch/common", "collections",
     "kernel", "fdt", "io",
+    "log",
     "memory",
     "util",
     "xtask",

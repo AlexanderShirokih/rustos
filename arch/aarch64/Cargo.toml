@@ -16,6 +16,7 @@ collections = { path = "../../collections" }
 util = { path = "../../util" }
 fdt = { path = "../../fdt" }
 io = { path = "../../io" }
+klog = { path = "../../log" }
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }

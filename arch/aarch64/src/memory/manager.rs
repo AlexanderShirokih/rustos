@@ -8,7 +8,7 @@ use aarch64_paging::page_table::PageTable;
 use alloc::boxed::Box;
 use collections::{MutexCell, NoLockCell, Vec};
 use core::cmp::{max, min};
-use kernel::debug;
+use klog::debug;
 use memory::FrameBitmap;
 use memory::aligned::Address;
 use memory::bump_allocator::BumpAllocator;

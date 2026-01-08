@@ -1,3 +1,6 @@
+#![no_std]
+extern crate alloc;
+
 use collections::{LockCell, MutexCell, NoLockCell};
 use core::fmt::{Arguments, Write as _};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -105,34 +108,34 @@ pub fn logf(lvl: Level, arguments: Arguments) {
 #[macro_export]
 macro_rules! fatal {
     ($($arg:tt)*) => {
-        $crate::console::logf($crate::console::Level::Fatal, format_args!($($arg)*))
+        $crate::logf($crate::Level::Fatal, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => {
-        $crate::console::logf($crate::console::Level::Error, format_args!($($arg)*))
+        $crate::logf($crate::Level::Error, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {
-        $crate::console::logf($crate::console::Level::Warn, format_args!($($arg)*))
+        $crate::logf($crate::Level::Warn, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {
-        $crate::console::logf($crate::console::Level::Info, format_args!($($arg)*))
+        $crate::logf($crate::Level::Info, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {
-        $crate::console::logf($crate::console::Level::Debug, format_args!($($arg)*))
+        $crate::logf($crate::Level::Debug, format_args!($($arg)*))
     };
 }

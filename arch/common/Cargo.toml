@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 kernel = { path = "../../kernel" }
+klog = { path = "../../log" }

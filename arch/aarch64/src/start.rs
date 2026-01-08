@@ -20,10 +20,9 @@ use alloc::fmt;
 use core::arch::{asm, naked_asm};
 use core::hint::spin_loop;
 use fdt::devicetree::DeviceTree;
-use kernel::console::set_early_stdout;
+use klog::{debug, fatal, info, set_early_stdout};
 use kernel::driver::early::EarlyDriverRegistry;
 use kernel::driver::scanner;
-use kernel::{debug, fatal, info};
 use memory::setup::build_memory_layout;
 
 unsafe extern "C" {
