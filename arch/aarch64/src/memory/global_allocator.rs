@@ -1,13 +1,9 @@
-use crate::memory::memory_mapper::Aarch64MemoryMapper;
-use collections::MutexCell;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::mem::{MaybeUninit, size_of};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
-use memory::FrameBitmap;
 use memory::bump_allocator::BumpAllocator;
-use memory::frame_allocator::PhysicalFrameAllocator;
 use memory::heap_allocator::HeapAllocator;
 
 /// Глобальный двухфазный аллокатор ядра
@@ -19,8 +15,7 @@ const PHASE_UNINIT: u8 = 0;
 const PHASE_BUMP: u8 = 1;
 const PHASE_HEAP: u8 = 2;
 
-pub type KernelHeapAllocator =
-    HeapAllocator<Aarch64MemoryMapper<'static, PhysicalFrameAllocator<MutexCell<FrameBitmap>>>>;
+pub type KernelHeapAllocator = HeapAllocator<'static>;
 
 /// Двухфазный глобальный аллокатор ядра
 pub struct GlobalKernelAllocator {
@@ -65,13 +60,6 @@ impl GlobalKernelAllocator {
 
     fn bump_allocator(&self) -> &mut BumpAllocator {
         unsafe { (*self.bump.get()).assume_init_mut() }
-    }
-
-    pub fn take_bump_allocator(&self) -> BumpAllocator {
-        debug_assert_eq!(self.phase.load(Ordering::Acquire), PHASE_BUMP);
-        self.phase.store(PHASE_UNINIT, Ordering::Release);
-
-        unsafe { (*self.bump.get()).assume_init_read() }
     }
 
     fn heap_allocator(&self) -> &mut KernelHeapAllocator {

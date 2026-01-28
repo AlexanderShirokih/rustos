@@ -1,4 +1,4 @@
-use crate::aligned::{Address, Aligned};
+use crate::aligned::Aligned;
 use crate::physical_address::{PageAlignedAddress, PhysicalAddress};
 
 /// Фрейм физической памяти
@@ -24,7 +24,7 @@ impl Frame {
         PageAlignedAddress::new_unchecked(PhysicalAddress::new(address))
     }
 
-    pub fn containing_address<A: Address>(address: A) -> Self {
+    pub fn containing_address(address: PhysicalAddress) -> Self {
         Self(address.as_usize() / PageAlignedAddress::ALIGNMENT)
     }
 

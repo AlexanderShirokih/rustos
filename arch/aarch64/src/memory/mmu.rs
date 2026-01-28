@@ -6,7 +6,6 @@ use crate::memory::regs::tlb::TranslationLookasideBuffer;
 use crate::memory::regs::ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister};
 use crate::memory::regs::{mair, sctrl, tcr};
 use crate::system;
-use memory::aligned::Address;
 use memory::physical_address::PhysicalAddress;
 
 pub struct AddressSpaceConfig<T: TtbrSel> {
@@ -57,7 +56,7 @@ impl NormalSpaceConfig {
 impl MmuConfig for NormalSpaceConfig {
     fn lower_half_config(&self) -> AddressSpaceConfig<LowerHalf> {
         AddressSpaceConfig {
-            base: self.root.as_physical_address(),
+            base: self.root,
             config: tcr::AddressTranslationConfig::create(true),
         }
     }

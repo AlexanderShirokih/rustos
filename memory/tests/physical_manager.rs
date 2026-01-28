@@ -16,8 +16,7 @@ fn frame_allocator(
     excluded_specs: &[(usize, usize)],
 ) -> PhysicalFrameAllocator<MutexCell<FrameBitmap>> {
     let region = make_range(0, region_frames);
-    let excluded = make_excluded(excluded_specs);
-    PhysicalFrameAllocator::new(&region, excluded)
+    PhysicalFrameAllocator::new(&region)
 }
 
 #[test]

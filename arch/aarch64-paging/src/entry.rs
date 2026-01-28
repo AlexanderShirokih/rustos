@@ -112,6 +112,33 @@ impl<L: Level + seal::CanPage> Entry<L, Page> {
     }
 }
 
+/// Внутренний трейт: как декодировать `0b01` для конкретного уровня.
+/// - L0: block недопустим
+/// - L1/L2: block допустим
+pub trait DecodeBlock: Level {
+    fn decode_block(raw: u64) -> Result<AnyEntry<Self>, DecodeError>
+    where
+        Self: Sized;
+}
+
+impl DecodeBlock for L0 {
+    fn decode_block(_: u64) -> Result<AnyEntry<Self>, DecodeError> {
+        Err(DecodeError::WrongKind)
+    }
+}
+
+impl DecodeBlock for L1 {
+    fn decode_block(raw: u64) -> Result<AnyEntry<Self>, DecodeError> {
+        Ok(AnyEntry::Block(Entry::<L1, Block>::from_raw_unchecked(raw)))
+    }
+}
+
+impl DecodeBlock for L2 {
+    fn decode_block(raw: u64) -> Result<AnyEntry<Self>, DecodeError> {
+        Ok(AnyEntry::Block(Entry::<L2, Block>::from_raw_unchecked(raw)))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
     Reserved,
@@ -141,13 +168,18 @@ fn desc_type(raw: u64) -> u64 {
     raw & 0b11
 }
 
-pub fn decode<L: Level + seal::CanTable>(raw: u64) -> Result<AnyEntry<L>, DecodeError> {
+pub fn decode<L>(raw: u64) -> Result<AnyEntry<L>, DecodeError>
+where
+    L: Level + seal::CanTable + DecodeBlock,
+{
     match desc_type(raw) {
         0b00 => Ok(AnyEntry::Invalid(Entry::<L, Invalid>::from_raw_unchecked(
             raw,
         ))),
 
         0b11 => Ok(AnyEntry::Table(Entry::<L, Table>::from_raw_unchecked(raw))),
+
+        0b01 => DecodeBlock::decode_block(raw),
 
         0b10 | _ => Err(DecodeError::Reserved),
     }

@@ -12,7 +12,7 @@ pub enum MemoryMappingError {
 /// Трейт маппера памяти для операций виртуальной памяти
 pub trait MemoryMapper {
     /// Отобразить физические фреймы в виртуальную память для кучи
-    fn map_frames(
+    fn map(
         &mut self,
         start_address: &PageAlignedVirtualAddress,
         size: usize,

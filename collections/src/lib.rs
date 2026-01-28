@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod interval_set;
 pub mod lock_cell;
 pub mod vec;
 

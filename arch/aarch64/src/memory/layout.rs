@@ -3,6 +3,7 @@ use collections::Vec;
 use memory::aligned::{Address, Aligned};
 use memory::memory_range::MemoryRange;
 use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
+use memory::virtual_address::PageAlignedVirtualAddress;
 
 const MAX_MEMORY_REGIONS: usize = 32;
 
@@ -12,7 +13,7 @@ pub struct MemoryLayout {
 }
 
 impl MemoryLayout {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             regions: Vec::new(),
         }
@@ -25,20 +26,15 @@ impl MemoryLayout {
     pub fn iter(&self) -> impl Iterator<Item = &MemoryRegion<PageAlignedAddress>> {
         self.regions.iter()
     }
-
-    pub fn heap(&self) -> impl Iterator<Item = &MemoryRegion<PageAlignedAddress>> {
-        self.iter()
-            .filter(|&region| region.label.eq(MemoryRegion::HEAP))
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemoryRegion<A: Address + Aligned + Copy> {
+pub struct MemoryRegion<A: Address + Aligned> {
     pub label: &'static str,
     pub start: A,
     pub end: A,
     pub flags: MemFlags,
-    pub identity_map: bool,
+    pub va_offset: usize,
 }
 
 impl MemoryRegion<PageAlignedAddress> {
@@ -49,32 +45,71 @@ impl MemoryRegion<PageAlignedAddress> {
         start: &u8,
         end: &u8,
         flags: MemFlags,
-        identity_map: bool,
+        va_offset: usize,
     ) -> Self {
         let start_addr = start as *const u8 as usize;
         let end_addr = end as *const u8 as usize;
 
-        Self::new(label, start_addr, end_addr, flags, identity_map)
+        Self::new(label, start_addr, end_addr, flags, va_offset)
     }
 
-    pub fn new(
+    pub const fn new(
         label: &'static str,
         start_addr: usize,
         end_addr: usize,
         flags: MemFlags,
-        identity_map: bool,
+        va_offset: usize,
     ) -> Self {
+        assert!(va_offset % 0x1000 == 0, "va_offset must be aligned to 4KiB");
+
         Self {
             label,
             flags,
-            identity_map,
-            start: PageAlignedAddress::aligned_down(PhysicalAddress::from(start_addr)),
-            end: PageAlignedAddress::aligned_up(PhysicalAddress::from(end_addr)),
+            va_offset,
+            start: PageAlignedAddress::aligned_down(PhysicalAddress::new(start_addr)),
+            end: PageAlignedAddress::aligned_up(PhysicalAddress::new(end_addr)),
         }
+    }
+
+    pub fn identity(
+        label: &'static str,
+        start_addr: usize,
+        end_addr: usize,
+        flags: MemFlags,
+    ) -> Self {
+        Self::new(label, start_addr, end_addr, flags, 0)
+    }
+
+    pub fn identity_raw(label: &'static str, start: &u8, end: &u8, flags: MemFlags) -> Self {
+        Self::new_raw(label, start, end, flags, 0)
+    }
+
+    pub fn size(&self) -> usize {
+        self.end.as_usize().saturating_sub(self.start.as_usize())
+    }
+
+    pub fn virtual_start(&self) -> PageAlignedVirtualAddress {
+        PageAlignedVirtualAddress::identity(self.start)
+            .offset(self.va_offset)
+            .unwrap()
+    }
+
+    pub fn virtual_end(&self) -> PageAlignedVirtualAddress {
+        PageAlignedVirtualAddress::identity(self.start)
+            .offset(self.va_offset)
+            .unwrap()
+    }
+
+    pub fn is_heap(&self) -> bool {
+        self.label == Self::HEAP
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.va_offset == 0
     }
 }
 
-impl<A: Aligned + Address> Into<MemoryRange<A>> for MemoryRegion<A> {
+impl<A: Address + Aligned> Into<MemoryRange<A>> for MemoryRegion<A> {
     fn into(self) -> MemoryRange<A> {
         MemoryRange::new(self.start, self.end)
     }

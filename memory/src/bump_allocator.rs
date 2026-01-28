@@ -1,6 +1,4 @@
-use crate::frame::Frame;
-use crate::memory_range::MemoryRange;
-use crate::physical_address::PhysicalAddress;
+use crate::physical_address::PageAlignedAddress;
 use core::alloc::Layout;
 use core::fmt::Formatter;
 use core::ptr::NonNull;
@@ -12,23 +10,16 @@ pub struct BumpAllocator {
 }
 
 impl BumpAllocator {
-    pub const fn new(from: Frame, to: Frame) -> Self {
+    pub const fn new(from: PageAlignedAddress, to: PageAlignedAddress) -> Self {
         Self {
-            start: from.page_address().as_usize(),
-            end: to.page_address().as_usize(),
+            start: from.as_usize(),
+            end: to.as_usize(),
             offset: 0,
         }
     }
 
     fn remaining(&self) -> usize {
         self.end - self.start - self.offset
-    }
-
-    pub fn get_used_area(&self) -> MemoryRange<PhysicalAddress> {
-        MemoryRange::new(
-            PhysicalAddress::new(self.start),
-            PhysicalAddress::new(self.start + self.offset),
-        )
     }
 
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, BumpAllocError> {

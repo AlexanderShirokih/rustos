@@ -40,4 +40,36 @@ impl MemoryRange<PageAlignedAddress> {
 
         end_frame - start_frame + 1
     }
+
+    pub fn iter(&self) -> MemoryRangeIter {
+        MemoryRangeIter::new(self.start(), self.end())
+    }
+}
+
+pub struct MemoryRangeIter {
+    current: PageAlignedAddress,
+    end: PageAlignedAddress,
+}
+
+impl MemoryRangeIter {
+    const fn new(start: PageAlignedAddress, end: PageAlignedAddress) -> Self {
+        Self {
+            current: start,
+            end,
+        }
+    }
+}
+
+impl Iterator for MemoryRangeIter {
+    type Item = PageAlignedAddress;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current > self.end {
+            return None;
+        }
+
+        let value = self.current;
+        self.current = self.current.next_aligned();
+        Some(value)
+    }
 }

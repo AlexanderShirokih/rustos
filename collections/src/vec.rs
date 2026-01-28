@@ -1,14 +1,15 @@
 use core::ops::{Index, IndexMut};
 
+#[derive(Clone, PartialEq, Eq)]
 pub struct Vec<T, const N: usize> {
     items: [Option<T>; N],
     len: usize,
 }
 
 impl<T, const N: usize> Vec<T, N> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            items: core::array::from_fn(|_| None),
+            items: [const { None }; N],
             len: 0,
         }
     }
@@ -112,7 +113,6 @@ pub struct VecIter<'a, T> {
 }
 
 impl<T, const N: usize> Vec<T, N> {
-
     pub fn iter(&self) -> VecIter<'_, T> {
         VecIter {
             items: &self.items,
@@ -179,7 +179,7 @@ impl<T, const N: usize> IntoIterator for Vec<T, N> {
     }
 }
 
-impl <'a, T, const N: usize> IntoIterator for &'a Vec<T, N> {
+impl<'a, T, const N: usize> IntoIterator for &'a Vec<T, N> {
     type Item = &'a T;
     type IntoIter = VecIter<'a, T>;
 

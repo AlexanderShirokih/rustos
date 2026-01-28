@@ -3,6 +3,9 @@ use aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
 use fdt::devicetree::DeviceTree;
 use fdt::devicetreeext::{AddressSpace, NodeExt, PropExt};
 
+/// База верхней половины виртуального адресного пространства
+pub const HIGHER_HALF_BASE: usize = 0xFFFF_FF80_0000_0000;
+
 unsafe extern "C" {
     /** Код ядра */
     static _text_start: u8;
@@ -20,54 +23,65 @@ unsafe extern "C" {
 pub(crate) struct MemoryLayoutBuildError;
 
 /// Строит раскладку памяти на основе device tree
-pub(crate) fn build_memory_layout<'a>(
+pub(crate) fn build_memory_layout(
     dt: &DeviceTree,
 ) -> Result<MemoryLayout, MemoryLayoutBuildError> {
     let mut layout = MemoryLayout::new();
 
     let ram_regions = find_ram_regions(&dt).ok_or(MemoryLayoutBuildError)?;
 
+    // RAM маппится дважды:
+    // 1. Identity (для bump памяти после MMU)
+    // 2. Higher half (для heap)
     for ram_region in ram_regions {
+        // Identity mapping (VA == PA) — для доступа к bump памяти после MMU
+        layout.add(MemoryRegion::new(
+            "RAM (identity)",
+            ram_region.start(),
+            ram_region.end(),
+            KernelData::flags(),
+            0, // identity: va_offset = 0
+        ));
+
+        // Higher half mapping — для heap
         layout.add(MemoryRegion::new(
             MemoryRegion::HEAP,
             ram_region.start(),
             ram_region.end(),
             KernelData::flags(),
-            false,
+            HIGHER_HALF_BASE,
         ));
     }
 
-    layout.add(MemoryRegion::new(
+    // Device tree — identity mapping
+    layout.add(MemoryRegion::identity(
         "Device tree",
         dt.base_address(),
         dt.base_address() + dt.size(),
         KernelData::flags(),
-        true,
     ));
 
     unsafe {
-        layout.add(MemoryRegion::new_raw(
+        // Kernel секции — identity mapping
+        layout.add(MemoryRegion::identity_raw(
             "Kernel code",
             &_text_start,
             &_text_end,
             KernelText::flags(),
-            true,
         ));
 
-        layout.add(MemoryRegion::new_raw(
+        layout.add(MemoryRegion::identity_raw(
             "Kernel data",
             &_rw_start,
             &_rw_end,
             KernelData::flags(),
-            true,
         ));
 
-        layout.add(MemoryRegion::new_raw(
+        layout.add(MemoryRegion::identity_raw(
             "Kernel read-only data",
             &_rodata_start,
             &_rodata_end,
             KernelRoData::flags(),
-            true,
         ));
 
         Ok(layout)

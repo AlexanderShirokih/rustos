@@ -1,9 +1,11 @@
+use kernel::driver::Device;
 use crate::mem_flags::{Access, MemFlags, Shareability};
 
 pub struct KernelText;
 pub struct KernelData;
 pub struct KernelRoData;
 pub struct Mmio;
+pub struct Heap;
 
 impl KernelText {
     pub const fn flags() -> MemFlags {
@@ -39,6 +41,18 @@ impl KernelRoData {
             .pxn(false)
             .uxn(true)
     }
+}
+
+impl Heap {
+    pub const fn flags() -> MemFlags {
+        MemFlags::new()
+            .af(true)
+            .sh(Shareability::Inner)
+            .ap(Access::KernelRW)
+            .attr_index(0) // Normal WB
+            .pxn(false)
+            .uxn(true)
+    } 
 }
 
 impl Mmio {

@@ -1,5 +1,7 @@
-use crate::entry::{AnyEntry, CanTable, DecodeError, Entry, Page, Table, decode};
-use crate::level::{L0, L1, L2, L3, Level};
+use crate::entry::{
+    AnyEntry, Block, CanTable, DecodeBlock, DecodeError, Entry, Page, Table, decode,
+};
+use crate::level::{L0, L1, L1BlockPa, L2, L2BlockPa, L3, Level, PagePa};
 use crate::mem_flags::MemFlags;
 use crate::page_table::PageTable;
 use crate::table_alloc::TableAlloc;
@@ -7,6 +9,87 @@ use crate::table_flags::TableFlags;
 use crate::virtual_address::VirtualAddressExt;
 use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress};
+
+pub trait MapLeaf<const SHIFT: u8>: Copy {
+    fn map_into<A: TableAlloc>(
+        mapper: &mut PageMapper<A>,
+        virt: AlignedVirtualAddress<SHIFT>,
+        phys: Self,
+        flags: MemFlags,
+    ) -> Result<(), MapError>;
+}
+
+impl MapLeaf<{ L3::SHIFT }> for PagePa {
+    fn map_into<A: TableAlloc>(
+        mapper: &mut PageMapper<A>,
+        virt: PageAlignedVirtualAddress,
+        phys: Self,
+        flags: MemFlags,
+    ) -> Result<(), MapError> {
+        let l0 = mapper.root;
+        let l1 = mapper.ensure_next::<L0, L1, { L3::SHIFT }>(l0, virt)?;
+        let l2 = mapper.ensure_next::<L1, L2, { L3::SHIFT }>(l1, virt)?;
+        let l3 = mapper.ensure_next::<L2, L3, { L3::SHIFT }>(l2, virt)?;
+        let idx = virt.index::<L3>();
+
+        // SAFETY: l3 получен через ensure_next, который гарантирует валидность указателя
+        let raw = unsafe { (*l3).get_raw(idx) };
+        if raw != 0 {
+            return Err(MapError::AlreadyMapped);
+        }
+        unsafe { (*l3).set(idx, Entry::<L3, Page>::new(phys, flags)) };
+        Ok(())
+    }
+}
+
+impl MapLeaf<{ L2::SHIFT }> for L2BlockPa {
+    fn map_into<A: TableAlloc>(
+        mapper: &mut PageMapper<A>,
+        virt: AlignedVirtualAddress<{ L2::SHIFT }>,
+        phys: Self,
+        flags: MemFlags,
+    ) -> Result<(), MapError> {
+        let l0 = mapper.root;
+        let l1 = mapper.ensure_next::<L0, L1, { L2::SHIFT }>(l0, virt)?;
+        let l2 = mapper.ensure_next::<L1, L2, { L2::SHIFT }>(l1, virt)?;
+        let idx = virt.index::<L2>();
+
+        // SAFETY: l2 получен через ensure_next, который гарантирует валидность указателя
+        let raw = unsafe { (*l2).get_raw(idx) };
+        match decode::<L2>(raw).map_err(MapError::Decode)? {
+            AnyEntry::Invalid(_) => {
+                unsafe { (*l2).set(idx, Entry::<L2, Block>::new(phys, flags)) };
+                Ok(())
+            }
+            AnyEntry::Table(_) => Err(MapError::NeedsSmallerPages),
+            AnyEntry::Block(_) | AnyEntry::Page(_) => Err(MapError::AlreadyMapped),
+        }
+    }
+}
+
+impl MapLeaf<{ L1::SHIFT }> for L1BlockPa {
+    fn map_into<A: TableAlloc>(
+        mapper: &mut PageMapper<A>,
+        virt: AlignedVirtualAddress<{ L1::SHIFT }>,
+        phys: Self,
+        flags: MemFlags,
+    ) -> Result<(), MapError> {
+        let l0 = mapper.root;
+        let l1 = mapper.ensure_next::<L0, L1, { L1::SHIFT }>(l0, virt)?;
+        let idx = virt.index::<L1>();
+
+        // SAFETY: l1 получен через ensure_next, который гарантирует валидность указателя
+        let raw = unsafe { (*l1).get_raw(idx) };
+        match decode::<L1>(raw).map_err(MapError::Decode)? {
+            AnyEntry::Invalid(_) => {
+                unsafe { (*l1).set(idx, Entry::<L1, Block>::new(phys, flags)) };
+                Ok(())
+            }
+            AnyEntry::Table(_) => Err(MapError::NeedsSmallerPages),
+            AnyEntry::Block(_) | AnyEntry::Page(_) => Err(MapError::AlreadyMapped),
+        }
+    }
+}
 
 pub struct PageMapper<A: TableAlloc> {
     root: *mut PageTable<L0>,
@@ -23,23 +106,13 @@ impl<'a, A: TableAlloc> PageMapper<A> {
         }
     }
 
-    pub fn map_page(
+    pub fn map_page<const SHIFT: u8, P: MapLeaf<SHIFT>>(
         &mut self,
-        virt: PageAlignedVirtualAddress,
-        phys: PageAlignedAddress,
+        virt: AlignedVirtualAddress<SHIFT>,
+        phys: P,
         flags: MemFlags,
     ) -> Result<(), MapError> {
-        let l0 = self.root;
-        let l1 = self.ensure_next::<L0, L1, _>(l0, virt)?;
-        let l2 = self.ensure_next::<L1, L2, _>(l1, virt)?;
-        let l3 = self.ensure_next::<L2, L3, _>(l2, virt)?;
-
-        let idx = virt.index::<L3>();
-
-        // SAFETY: l3 получен через ensure_next, который гарантирует валидность указателя
-        unsafe { (*l3).set(idx, Entry::<L3, Page>::new(phys, flags)) };
-
-        Ok(())
+        P::map_into(self, virt, phys, flags)
     }
 
     /// Убедиться, что в таблице `parent` по индексу для `virt` есть ссылка на дочернюю таблицу.
@@ -48,10 +121,10 @@ impl<'a, A: TableAlloc> PageMapper<A> {
     fn ensure_next<PL, CL, const SHIFT: u8>(
         &mut self,
         parent: *mut PageTable<PL>,
-        virt: AlignedVirtualAddress<SHIFT>,
+        virt: AlignedVirtualAddress<{ SHIFT }>,
     ) -> Result<*mut PageTable<CL>, MapError>
     where
-        PL: Level + CanTable,
+        PL: Level + CanTable + DecodeBlock,
         CL: Level,
     {
         let idx = virt.index::<PL>();
@@ -78,7 +151,7 @@ impl<'a, A: TableAlloc> PageMapper<A> {
                 Ok(child)
             }
 
-            AnyEntry::Block(_) | AnyEntry::Page(_) => Err(MapError::OccupiedByLeaf),
+            AnyEntry::Block(_) | AnyEntry::Page(_) => Err(MapError::AlreadyMapped),
         }
     }
 }
@@ -90,7 +163,9 @@ fn extract_table_pa(raw: u64) -> PageAlignedAddress {
 #[derive(Debug)]
 pub enum MapError {
     OutOfMemory,
-    OccupiedByLeaf, // вместо Table уже стоит Block/Page
-    BadAlignment,
+    /// В ячейке целевого уровня уже стоит `Table`, поэтому нужно маппить меньшими страницами.
+    NeedsSmallerPages,
+    /// В ячейке уже стоит leaf (Block/Page) — конфликт маппинга.
+    AlreadyMapped,
     Decode(DecodeError),
 }

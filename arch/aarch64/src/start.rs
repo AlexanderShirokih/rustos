@@ -20,9 +20,9 @@ use alloc::fmt;
 use core::arch::{asm, naked_asm};
 use core::hint::spin_loop;
 use fdt::devicetree::DeviceTree;
-use klog::{debug, fatal, info, set_early_stdout};
 use kernel::driver::early::EarlyDriverRegistry;
 use kernel::driver::scanner;
+use klog::{debug, fatal, info, set_early_stdout};
 use memory::setup::build_memory_layout;
 
 unsafe extern "C" {
@@ -136,12 +136,11 @@ fn early_main(dtb: usize) {
 
     for mmio_region in early_registry.mmio_region_requests() {
         let name = fmt::format(format_args!("mmio@{:#x}", mmio_region.base));
-        memory_layout.add(MemoryRegion::new(
+        memory_layout.add(MemoryRegion::identity(
             name.leak(),
             mmio_region.base,
             mmio_region.base + mmio_region.size,
             Mmio::flags(),
-            true,
         ));
     }
 
@@ -181,29 +180,26 @@ fn setup_memory(layout: MemoryLayout) -> Result<(), ()> {
 
     debug!("MMU enabled!");
 
-    let memory_manager = memory_manager
+    memory_manager
         .install()
         .inspect_err(|_| fatal!("Unable to set heap allocator"))?;
 
     debug!("Global allocator switched to heap phase");
 
-    // Перемещаем ядро в higher half
-    let _ = memory_manager.relocate();
-    debug!("Kernel was relocated to higher half address space");
-
-    // Переключаем глобальный аллокатор на heap-фазу
-    // GLOBAL_ALLOCATOR.switch_to_heap(heap);
     Ok(())
 }
 
 fn bind_early_stdout(device_tree: &DeviceTree, registry: &'static EarlyDriverRegistry) {
     let early_console_node = scanner::find_console(&device_tree);
 
-    early_console_node
+    let writer = early_console_node
         .map(|node| node.key())
         .and_then(|key| registry.get(&key))
-        .and_then(|driver| driver.output())
-        .map(|writer| set_early_stdout(writer));
+        .and_then(|driver| driver.output());
+
+    if let Some(writer) = writer {
+        set_early_stdout(writer);
+    }
 }
 
 // Поскольку мы находимся в no_std окружении, то нам нужен свой panic handler

@@ -3,32 +3,30 @@
 //! Этот модуль предоставляет аллокатор кучи для ядра, использующий алгоритм
 //! first-fit со свободным списком и автоматическим расширением кучи.
 
-use crate::aligned::Aligned;
-use crate::memory_mapper::{MemoryMapper, MemoryMappingError};
-use crate::memory_range::MemoryRange;
-use crate::physical_address::PageAlignedAddress;
-use crate::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
+use crate::region_manager::RegionManager;
+use crate::virtual_address::VirtualAddress;
 use core::alloc::Layout;
 use core::mem::size_of;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// Начальный размер кучи (1MB)
-pub const HEAP_INITIAL_SIZE: usize = 1024 * 1024;
-
-/// Минимальный размер выделения (16 байт)
+/// Минимальный размер выделения
+/// Должен вместить: указатель на заголовок + минимум полезных данных
 const MIN_ALLOC_SIZE: usize = 16;
 
 /// Выравнивание для всех выделений
 const ALLOC_ALIGN: usize = 8;
 
+/// Размер указателя на заголовок, хранимого перед пользовательскими данными
+const HEADER_PTR_SIZE: usize = size_of::<*mut FreeBlock>();
+
+/// Размер страницы для выравнивания при расширении
+const PAGE_SIZE: usize = 4096;
+
 /// Типы ошибок при сбое выделения памяти
 #[derive(Debug, Clone)]
 pub enum AllocationError {
     OutOfMemory,
-    MappingFailed,
     InvalidLayout,
-    AlignmentError,
 }
 
 /// Свободный блок в куче
@@ -41,25 +39,32 @@ struct FreeBlock {
 
 impl FreeBlock {
     /// Создать новый свободный блок
-    const fn new(size: usize) -> Self {
+    const fn from_size(size: usize) -> Self {
         FreeBlock { size, next: None }
     }
 
     /// Разделить этот блок, если он достаточно большой для запрошенного размера.
-    /// Возвращает новый блок, созданный из разделения, если возможно
+    /// Возвращает новый блок, созданный из разделения, если возможно.
+    ///
+    /// Схема памяти блока:
+    /// ```text
+    /// [FreeBlock header (size, next)][usable memory of size `self.size`]
+    /// ```
     fn split(&mut self, requested_size: usize) -> Option<NonNull<FreeBlock>> {
         let aligned_size = align_up(requested_size, ALLOC_ALIGN);
         let block_header_size = size_of::<FreeBlock>();
 
         // Проверяем, можем ли разделить: нужно место для запрошенного размера + заголовок нового блока + минимальный размер
         let min_remaining = block_header_size + MIN_ALLOC_SIZE;
+
         if self.size < aligned_size + min_remaining {
             return None;
         }
 
-        // Вычисляем позицию и размер нового блока
-        let new_block_offset = aligned_size;
-        let new_block_size = self.size - aligned_size;
+        // Вычисляем позицию нового блока: после заголовка текущего + выделяемая память
+        let new_block_offset = block_header_size + aligned_size;
+        // Размер нового блока: оригинальный размер - выделенный размер - заголовок нового блока
+        let new_block_size = self.size - aligned_size - block_header_size;
 
         // Создаем новый блок в вычисленной позиции
         let new_block_ptr = unsafe {
@@ -67,7 +72,7 @@ impl FreeBlock {
             let new_ptr = (base_ptr + new_block_offset) as *mut FreeBlock;
 
             // Инициализируем новый блок
-            *new_ptr = FreeBlock::new(new_block_size);
+            *new_ptr = FreeBlock::from_size(new_block_size);
 
             NonNull::new_unchecked(new_ptr)
         };
@@ -79,142 +84,86 @@ impl FreeBlock {
     }
 }
 
-/// First-fit аллокатор кучи с автоматическим расширением
-pub struct HeapAllocator<M: MemoryMapper> {
+pub struct HeapAllocator<'a> {
     /// Голова списка свободных блоков
-    free_list: Option<NonNull<FreeBlock>>,
+    free_list_head: Option<NonNull<FreeBlock>>,
 
     /// Текущий размер кучи в байтах
     current_size: usize,
 
-    /// Следующая позиция выделения для расширения кучи
-    next_alloc_addr: AtomicUsize,
+    /// Следующая позиция для расширения кучи
+    cursor: VirtualAddress,
 
-    mapper: M,
-
-    heap_region: MemoryRange<PageAlignedAddress>,
+    region_manager: &'a RegionManager,
 }
 
-impl<M: MemoryMapper> HeapAllocator<M> {
-    pub fn new(mapper: M, heap_region: MemoryRange<PageAlignedAddress>) -> Self {
+impl<'a> HeapAllocator<'a> {
+    pub fn new(region_manager: &'a RegionManager, start: VirtualAddress) -> Self {
         HeapAllocator {
-            free_list: None,
+            free_list_head: None,
             current_size: 0,
-            next_alloc_addr: AtomicUsize::new(heap_region.start().as_usize()),
-            heap_region,
-            mapper,
+            cursor: start,
+            region_manager,
         }
     }
 
-    /// Инициализировать аллокатор с начальным пространством кучи
-    pub fn init(&mut self) -> Result<(), AllocationError> {
-        self.expand_heap(HEAP_INITIAL_SIZE)
-    }
+    /// Увеличивает емкость кучи
+    fn expand(&mut self, expand_size: usize) -> Result<(), AllocationError> {
+        let aligned_size = align_up(expand_size, PAGE_SIZE);
 
-    /// Расширить кучу путем выделения дополнительной памяти
-    fn expand_heap(&mut self, additional_size: usize) -> Result<(), AllocationError> {
-        let aligned_size = align_up(additional_size, PageAlignedVirtualAddress::ALIGNMENT);
+        // Получаем подсказку от менеджера регионов - курсор перепрыгивает к ближайшей RAM области
+        let addr = self
+            .region_manager
+            .next_free(self.cursor, aligned_size)
+            .ok_or(AllocationError::OutOfMemory)?;
 
-        let mut start_addr =
-            PageAlignedVirtualAddress::from_usize(self.next_alloc_addr.load(Ordering::Relaxed))
-                .ok_or(AllocationError::AlignmentError)?;
-
-        if (start_addr.as_usize() + aligned_size) > self.heap_region.end().as_usize() {
-            return Err(AllocationError::OutOfMemory);
-        }
-
-        loop {
-            // Отображаем физические фреймы в виртуальную область кучи
-            let error = self.mapper.map_frames(&start_addr, aligned_size).err();
-
-            match error {
-                Some(e) => match e {
-                    MemoryMappingError::AlreadyMapped => {
-                        start_addr = start_addr.next_aligned();
-                    }
-                    _ => return Err(AllocationError::MappingFailed),
-                },
-
-                None => break,
-            }
-        }
-
-        // Создаем новый свободный блок для расширенной области
-        let block_addr: VirtualAddress = start_addr.into();
+        // Полезный размер блока
         let block_size = aligned_size - size_of::<FreeBlock>();
-        let new_block = FreeBlock::new(block_size);
 
-        // Записываем новый блок в память
         unsafe {
-            block_addr.write(&new_block);
+            // Располагаем метаданные по указателю начала блока
+            let block_ptr = addr.as_ptr();
+            *block_ptr = FreeBlock::from_size(block_size);
+
+            self.add_to_free_list(NonNull::new_unchecked(block_ptr));
         }
 
-        // Добавляем в список свободных блоков
-        self.add_to_free_list(start_addr.as_usize());
-
-        let virt: VirtualAddress = start_addr.into();
-        let next_aligned_alloc_addr = PageAlignedVirtualAddress::new(virt.add(aligned_size))
-            .ok_or(AllocationError::AlignmentError)?;
-
+        // Сдвигаем курсор на следующую позицию
+        self.cursor = addr.offset(aligned_size);
         self.current_size += aligned_size;
-        self.next_alloc_addr
-            .store(next_aligned_alloc_addr.as_usize(), Ordering::Relaxed);
 
         Ok(())
     }
 
-    /// Добавить блок в список свободных
-    fn add_to_free_list(&mut self, addr: usize) {
-        let block_ptr = NonNull::new(addr as *mut FreeBlock).expect("Invalid address");
-        let addr = VirtualAddress::new(addr);
-
-        // Читаем блок, обновляем его указатель next и записываем обратно
-        unsafe {
-            let mut block: FreeBlock = core::ptr::read(addr.as_ptr());
-            block.next = self.free_list;
-
-            core::ptr::write(addr.as_ptr(), block);
-        }
-
-        // Обновляем голову списка свободных блоков
-        self.free_list = Some(block_ptr);
-    }
-
     /// Найти и удалить подходящий блок из списка свободных
     fn find_free_block(&mut self, size: usize) -> Option<NonNull<FreeBlock>> {
-        let mut current = self.free_list;
+        let mut current = self.free_list_head;
         let mut prev: Option<NonNull<FreeBlock>> = None;
 
         while let Some(block_ptr) = current {
             unsafe {
-                let block_ptr = block_ptr.as_ptr();
-                let mut block: FreeBlock = core::ptr::read(block_ptr);
+                let mut block: FreeBlock = block_ptr.read();
 
-                // Проверяем, достаточно ли велик этот блок
+                // Блок подходит по размеру
                 if block.size >= size {
                     // Удаляем из списка свободных
                     if let Some(prev_ptr) = prev {
-                        let mut prev_block: FreeBlock = core::ptr::read(prev_ptr.as_ptr());
+                        let mut prev_block: FreeBlock = prev_ptr.read();
                         prev_block.next = block.next;
-
-                        core::ptr::write(block_ptr, prev_block);
+                        prev_ptr.write(prev_block);
                     } else {
-                        self.free_list = block.next;
+                        self.free_list_head = block.next;
                     }
 
-                    // Разделяем блок, если он значительно больше, чем нужно
+                    // Разделяем блок, если он значительно больше
                     if let Some(new_block_ptr) = block.split(size) {
-                        let new_addr = new_block_ptr.as_ptr() as usize;
-                        self.add_to_free_list(new_addr);
+                        self.add_to_free_list(new_block_ptr);
                     }
 
-                    // Записываем обратно выделенный блок
-                    core::ptr::write(block_ptr, block);
-
-                    return NonNull::new(block_ptr);
+                    block_ptr.write(block);
+                    return Some(block_ptr);
                 }
 
-                // Переходим к следующему блоку
                 prev = current;
                 current = block.next;
             }
@@ -223,44 +172,94 @@ impl<M: MemoryMapper> HeapAllocator<M> {
         None
     }
 
+    /// Добавить блок в список свободных
+    fn add_to_free_list(&mut self, block_ptr: NonNull<FreeBlock>) {
+        unsafe {
+            let mut block = block_ptr.read();
+            block.next = self.free_list_head;
+            block_ptr.write(block);
+            self.free_list_head = Some(block_ptr);
+        }
+    }
+
+    /// Выделить память
+    ///
+    /// Схема памяти выделенного блока:
+    /// ```text
+    /// [FreeBlock header][padding][ptr to header][user data (aligned)]
+    ///                            ^              ^
+    ///                   HEADER_PTR_SIZE         возвращаемый указатель
+    /// ```
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocationError> {
         if layout.size() == 0 {
             return Err(AllocationError::InvalidLayout);
         }
 
+        // Учитываем запрошенное выравнивание (минимум ALLOC_ALIGN)
+        let align = layout.align().max(ALLOC_ALIGN);
         let size = layout.size().max(MIN_ALLOC_SIZE);
 
-        // Пытаемся найти подходящий блок
-        if let Some(block_ptr) = self.find_free_block(size) {
-            let ptr = block_ptr.as_ptr() as *mut u8;
-            return Ok(NonNull::new(ptr).expect("Block pointer should not be null"));
+        // Нужно место для: данных + указателя на заголовок + возможный padding для выравнивания
+        // В худшем случае padding = align - 1
+        let alloc_size = size + HEADER_PTR_SIZE + align - 1;
+
+        // Сначала ищем в free list
+        if let Some(block_ptr) = self.find_free_block(alloc_size) {
+            return Ok(self.setup_allocated_block(block_ptr, align));
         }
 
-        // Подходящий блок не найден, расширяем кучу
-        let needed_size = size + size_of::<FreeBlock>();
-        let expand_size = needed_size.max(PageAlignedVirtualAddress::ALIGNMENT);
+        // Не нашли — расширяем
+        let needed_size = alloc_size + size_of::<FreeBlock>();
+        let expand_size = needed_size.max(PAGE_SIZE);
 
-        self.expand_heap(expand_size)?;
+        self.expand(expand_size)?;
 
-        // Пытаемся выделить снова после расширения
-        if let Some(block_ptr) = self.find_free_block(size) {
-            let ptr = block_ptr.as_ptr() as *mut u8;
-            Ok(NonNull::new(ptr).expect("Block pointer should not be null"))
+        // Теперь точно найдём
+        if let Some(block_ptr) = self.find_free_block(alloc_size) {
+            Ok(self.setup_allocated_block(block_ptr, align))
         } else {
             Err(AllocationError::OutOfMemory)
         }
     }
 
-    /// Освободить память
-    pub fn deallocate(&mut self, ptr: NonNull<u8>) {
-        let addr = ptr.as_ptr() as usize;
-        self.add_to_free_list(addr);
+    /// Подготовить выделенный блок: записать указатель на заголовок и вернуть выровненный указатель
+    fn setup_allocated_block(&self, block_ptr: NonNull<FreeBlock>, align: usize) -> NonNull<u8> {
+        unsafe {
+            // Начало области данных (после заголовка)
+            let data_start = (block_ptr.as_ptr() as *mut u8).add(size_of::<FreeBlock>());
 
-        // TODO: Реализовать слияние смежных свободных блоков для уменьшения фрагментации
+            // Вычисляем адрес для пользовательских данных с учётом выравнивания
+            // Нужно оставить HEADER_PTR_SIZE байт перед данными для указателя на заголовок
+            let min_user_addr = data_start as usize + HEADER_PTR_SIZE;
+            let aligned_user_addr = align_up(min_user_addr, align);
+            let user_ptr = aligned_user_addr as *mut u8;
+
+            // Записываем указатель на заголовок непосредственно перед пользовательскими данными
+            let header_ptr_location = (user_ptr as *mut *mut FreeBlock).sub(1);
+            *header_ptr_location = block_ptr.as_ptr();
+
+            NonNull::new_unchecked(user_ptr)
+        }
+    }
+
+    /// Освободить память
+    ///
+    /// Указатель на заголовок блока хранится непосредственно перед пользовательскими данными
+    pub fn deallocate(&mut self, ptr: NonNull<u8>) {
+        unsafe {
+            // Читаем указатель на заголовок блока, хранящийся перед пользовательскими данными
+            let header_ptr_location = (ptr.as_ptr() as *const *mut FreeBlock).sub(1);
+            let block_ptr = *header_ptr_location;
+
+            if let Some(block) = NonNull::new(block_ptr) {
+                self.add_to_free_list(block);
+            }
+        }
+
+        // TODO: Реализовать слияние смежных свободных блоков
     }
 }
 
-/// Вспомогательная функция для выравнивания вверх до указанного выравнивания
 const fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }

@@ -14,6 +14,7 @@ pub mod memory;
 pub mod memory_mapper;
 pub mod memory_range;
 pub mod physical_address;
+pub mod region_manager;
 pub mod test_utils;
 pub mod virtual_address;
 

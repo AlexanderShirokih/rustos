@@ -6,11 +6,6 @@ impl Address for PhysicalAddress {
     fn as_usize(self) -> usize {
         self.0
     }
-
-    #[inline]
-    fn as_physical_address(self) -> PhysicalAddress {
-        self
-    }
 }
 
 /// Адрес физической памяти
@@ -90,11 +85,7 @@ impl From<usize> for PhysicalAddress {
 pub struct AlignedPhysicalAddress<const SHIFT: u8>(usize);
 
 impl<const SHIFT: u8> AlignedPhysicalAddress<SHIFT> {
-    pub const fn as_usize(self) -> usize {
-        self.0
-    }
-
-    pub fn new(address: PhysicalAddress) -> Option<Self> {
+    pub const fn new(address: PhysicalAddress) -> Option<Self> {
         if address.0 % Self::ALIGNMENT == 0 {
             Some(Self(address.0))
         } else {
@@ -102,7 +93,7 @@ impl<const SHIFT: u8> AlignedPhysicalAddress<SHIFT> {
         }
     }
 
-    pub fn from_usize(address: usize) -> Option<Self> {
+    pub const fn from_usize(address: usize) -> Option<Self> {
         if address % Self::ALIGNMENT == 0 {
             Some(Self(address))
         } else {
@@ -127,6 +118,18 @@ impl<const SHIFT: u8> AlignedPhysicalAddress<SHIFT> {
         Self(aligned)
     }
 
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
+
+    pub const fn as_physical_address(self) -> PhysicalAddress {
+        PhysicalAddress(self.0)
+    }
+
+    pub const fn next_aligned(&self) -> Self {
+        Self::new_unchecked(PhysicalAddress::new(self.0 + Self::ALIGNMENT))
+    }
+
     pub const fn alignment(&self) -> usize {
         Self::ALIGNMENT
     }
@@ -148,11 +151,6 @@ impl<const SHIFT: u8> Address for AlignedPhysicalAddress<SHIFT> {
     #[inline]
     fn as_usize(self) -> usize {
         self.0
-    }
-
-    #[inline]
-    fn as_physical_address(self) -> PhysicalAddress {
-        PhysicalAddress(self.0)
     }
 }
 

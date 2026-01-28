@@ -5,18 +5,6 @@ use alloc::boxed::Box;
 use alloc::vec;
 use core::mem::size_of;
 
-/// Битовая карта для отслеживания статуса выделения фреймов
-pub struct FrameBitmap {
-    // Битовая карта, выделенная через глобальный аллокатор
-    bitmap: Box<[u64]>,
-
-    // Область памяти, которая управляется битовой картой
-    target_region: MemoryRange<PageAlignedAddress>,
-
-    // Фрейм начала [target_region]
-    base_frame: Frame,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EntryPos {
     word: usize,
@@ -34,6 +22,21 @@ impl EntryPos {
     }
 }
 
+/// Битовая карта для отслеживания статуса выделения фреймов
+pub struct FrameBitmap {
+    // Битовая карта, выделенная через глобальный аллокатор
+    bitmap: Box<[u64]>,
+
+    // Количество свободных фреймов
+    free: usize,
+
+    // Область памяти, которая управляется битовой картой
+    target_region: MemoryRange<PageAlignedAddress>,
+
+    // Фрейм начала [target_region]
+    base_frame: Frame,
+}
+
 impl FrameBitmap {
     // Количество байт, необходимых для одной записи в битовой карте
     const ENTRY_BYTES: usize = size_of::<u64>();
@@ -42,16 +45,21 @@ impl FrameBitmap {
     const BITS_PER_ENTRY: usize = Self::ENTRY_BYTES * 8;
 
     /// Создаёт новый FrameBitmap, выделяя память для битовой карты через глобальный аллокатор
-    pub fn new(target_region: &MemoryRange<PageAlignedAddress>) -> Self {
-        let entry_count = Self::calc_entry_count(target_region);
+    pub fn new(target_region: MemoryRange<PageAlignedAddress>) -> Self {
+        let entry_count = Self::calc_entry_count(&target_region);
 
         let bitmap = vec![0u64; entry_count].into_boxed_slice();
 
         FrameBitmap {
             bitmap,
+            free: target_region.frame_count(),
             base_frame: Frame::from(target_region.start()),
-            target_region: target_region.clone(),
+            target_region,
         }
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.free
     }
 
     /// Вычисляет количество u64 записей, необходимых для битовой карты
@@ -75,6 +83,14 @@ impl FrameBitmap {
         }
     }
 
+    pub const fn start(&self) -> PageAlignedAddress {
+        self.target_region.start()
+    }
+
+    pub const fn range(&self) -> MemoryRange<PageAlignedAddress> {
+        self.target_region
+    }
+
     /// Помечает область фреймов как выделенную
     pub fn set_range_unchecked(&mut self, from_inclusive: Frame, to_exclusive: Frame) {
         let from = from_inclusive.number();
@@ -87,23 +103,43 @@ impl FrameBitmap {
         let start = self.entry_pos(from_inclusive);
         let end = self.entry_pos(to_exclusive);
 
+        let mut allocated_count = 0usize;
+
         if start.word == end.word {
             let mask = Self::mask_range(start.bit, end.bit);
             if mask != 0 {
+                let old_value = self.read(start.word);
+                // Считаем только новые биты (те, что были 0 и станут 1)
+                let new_bits = mask & !old_value;
+                allocated_count += new_bits.count_ones() as usize;
                 self.write(start.word, |v| v | mask);
             }
+            self.free = self.free.saturating_sub(allocated_count);
             return;
         }
 
-        self.write(start.word, |v| v | Self::mask_from(start.bit));
+        // Первое слово
+        let first_mask = Self::mask_from(start.bit);
+        let old_first = self.read(start.word);
+        allocated_count += (first_mask & !old_first).count_ones() as usize;
+        self.write(start.word, |v| v | first_mask);
 
+        // Средние слова (полностью заполняем)
         for word_index in (start.word + 1)..end.word {
+            let old_value = self.read(word_index);
+            allocated_count += (!old_value).count_ones() as usize;
             self.write(word_index, |_| u64::MAX);
         }
 
+        // Последнее слово
         if end.bit > 0 {
-            self.write(end.word, |v| v | Self::mask_until(end.bit));
+            let last_mask = Self::mask_until(end.bit);
+            let old_last = self.read(end.word);
+            allocated_count += (last_mask & !old_last).count_ones() as usize;
+            self.write(end.word, |v| v | last_mask);
         }
+
+        self.free = self.free.saturating_sub(allocated_count);
     }
 
     fn set_unchecked(&mut self, frame: Frame) {
@@ -112,18 +148,30 @@ impl FrameBitmap {
     }
 
     #[inline]
-    fn is_in_range(&self, frame: Frame) -> bool {
+    pub fn is_in_range(&self, frame: Frame) -> bool {
         self.target_region.contains(frame.page_address())
     }
 
-    /// Очистить бит в битовой карте (пометить как свободный)
-    pub fn clear(&mut self, frame: Frame) {
+    /// Очистить бит в битовой карте (пометить как свободный).
+    /// Возвращает true, если фрейм был выделен и успешно освобождён.
+    /// Возвращает false, если фрейм уже был свободен или вне диапазона.
+    pub fn clear(&mut self, frame: Frame) -> bool {
         if !self.is_in_range(frame) {
-            return;
+            return false;
         }
 
         let pos = self.entry_pos(frame);
-        self.write(pos.word, |v| v & !(1u64 << pos.bit));
+        let mask = 1u64 << pos.bit;
+        let old_value = self.read(pos.word);
+
+        // Проверяем, был ли фрейм выделен
+        if (old_value & mask) == 0 {
+            return false; // Фрейм уже был свободен
+        }
+
+        self.write(pos.word, |v| v & !mask);
+        self.free += 1;
+        true
     }
 
     #[inline]
@@ -163,6 +211,9 @@ impl FrameBitmap {
         let frame_number = self.base_frame.number() + word_index * Self::BITS_PER_ENTRY + bit_index;
         let frame = Frame::new(frame_number);
         self.set_unchecked(frame);
+
+        self.free -= 1;
+
         frame
     }
 
@@ -207,11 +258,6 @@ impl FrameBitmap {
         }
 
         None
-    }
-
-    #[cfg_attr(not(test), doc(hidden))]
-    pub fn managed_region(&self) -> &MemoryRange<PageAlignedAddress> {
-        &self.target_region
     }
 
     #[cfg_attr(not(test), doc(hidden))]

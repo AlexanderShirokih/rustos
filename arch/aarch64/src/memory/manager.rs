@@ -1,46 +1,44 @@
 use crate::memory::global_allocator::{GLOBAL_ALLOCATOR, KernelHeapAllocator};
 use crate::memory::layout::{MemoryLayout, MemoryRegion};
 use crate::memory::memory_mapper::Aarch64MemoryMapper;
-use crate::memory::mmu::{Mmu, NormalDualSpaceConfig, NormalSpaceConfig};
+use crate::memory::mmu::{Mmu, NormalDualSpaceConfig};
+use crate::memory::setup::HIGHER_HALF_BASE;
 use aarch64_paging::level::L0;
-use aarch64_paging::mem_flags::MemFlags;
 use aarch64_paging::page_table::PageTable;
+use aarch64_paging::preset::Heap;
 use alloc::boxed::Box;
-use collections::{MutexCell, NoLockCell, Vec};
-use core::cmp::{max, min};
+use collections::interval_set::IntervalSet;
+use collections::{NoLockCell, Vec};
 use klog::debug;
 use memory::FrameBitmap;
-use memory::aligned::Address;
 use memory::bump_allocator::BumpAllocator;
-use memory::frame::Frame;
 use memory::frame_allocator::{FrameAllocator, PhysicalFrameAllocator};
 use memory::memory_mapper::MemoryMapper;
 use memory::memory_range::MemoryRange;
 use memory::physical_address::PageAlignedAddress;
-use memory::virtual_address::PageAlignedVirtualAddress;
+use memory::region_manager::RegionManager;
+use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 
-const MAX_MEMORY_REGIONS: usize = 32;
+const MAX_MEMORY_REGIONS: usize = 24;
 
 pub struct Early {
     bump_allocator: BumpAllocator,
 }
 
 pub struct Prepared {
-    root_page: PageAlignedAddress,
-    root_table: *mut PageTable<L0>,
-    mem_flags: MemFlags,
+    lower_root_pa: PageAlignedAddress,
+    higher_root_pa: PageAlignedAddress,
+    lower_root_table: *mut PageTable<L0>,
+    higher_root_table: *mut PageTable<L0>,
     frame_allocator: PhysicalFrameAllocator<NoLockCell<FrameBitmap>>,
-    identity_map_regions: Vec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
+    all_regions: Vec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
+    free_heap_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
 }
 
 pub struct Enabled {
-    root_page: PageAlignedAddress,
-    root_table: *mut PageTable<L0>,
-    mem_flags: MemFlags,
-    frame_allocator: &'static PhysicalFrameAllocator<MutexCell<FrameBitmap>>,
+    pub higher_half_base: PageAlignedVirtualAddress,
+    free_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
 }
-
-pub struct HigherHalf {}
 
 /// Центральный менеджер памяти, который владеет всеми компонентами системы памяти.
 pub struct MemoryManager<Stage> {
@@ -49,7 +47,9 @@ pub struct MemoryManager<Stage> {
 
 impl MemoryManager<Early> {
     pub fn create(layout: &MemoryLayout) -> Result<MemoryManager<Early>, MemorySetupError> {
-        let bump_allocator = create_bump_allocator(layout)?;
+        let free_regions = get_free_heap_regions(layout).map_err(|_| MemorySetupError::OutOfMemory)?;
+        let bump_allocator =
+            create_bump_allocator(&free_regions).map_err(|_| MemorySetupError::OutOfMemory)?;
 
         Ok(Self {
             state: Early { bump_allocator },
@@ -61,244 +61,185 @@ impl MemoryManager<Early> {
     }
 }
 
-fn create_bump_allocator(layout: &MemoryLayout) -> Result<BumpAllocator, MemorySetupError> {
-    let mut free_regions: Vec<FrameInterval, MAX_REGIONS> = Vec::new();
-
-    for heap in layout.heap() {
-        let heap_start = Frame::from(heap.start).number();
-        let heap_end = Frame::from(heap.end).number();
-
-        // Собираем свободные регионы для данного heap
-        collect_free_regions(&layout, &mut free_regions, heap_start, heap_end)?;
-    }
-
+fn create_bump_allocator(
+    free_regions: &IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
+) -> Result<BumpAllocator, ()> {
     // Находим самую большую свободную область
     let largest = free_regions
         .iter()
-        .max_by_key(|interval| interval.size())
-        .ok_or(MemorySetupError::OutOfMemory)?;
+        .max_by_key(|interval| interval.end.as_usize() - interval.start.as_usize())
+        .ok_or(())?;
 
-    Ok(BumpAllocator::new(
-        Frame::new(largest.start),
-        Frame::new(largest.end),
-    ))
-}
-
-/// Собирает свободные регионы в heap, вырезая исключённые области
-fn collect_free_regions(
-    layout: &MemoryLayout,
-    free_regions: &mut Vec<FrameInterval, MAX_REGIONS>,
-    heap_start: usize,
-    heap_end: usize,
-) -> Result<(), MemorySetupError> {
-    // Сначала собираем и объединяем исключённые интервалы
-    let mut excluded = Vec::<FrameInterval, MAX_REGIONS>::new();
-
-    for region in layout.iter().filter(|r| r.identity_map) {
-        let start = Frame::from(region.start).number();
-        let end = Frame::from(region.end).number();
-
-        let clamped_start = max(start, heap_start);
-        let clamped_end = min(end, heap_end);
-
-        if clamped_start < clamped_end {
-            excluded
-                .push(FrameInterval::new(clamped_start, clamped_end))
-                .ok_or(MemorySetupError::StaticOutOfMemory)?;
-        }
-    }
-
-    merge_intervals(&mut excluded);
-
-    // Теперь находим свободные промежутки между исключёнными интервалами
-    let mut cursor = heap_start;
-
-    for interval in excluded.iter() {
-        if cursor < interval.start {
-            free_regions
-                .push(FrameInterval::new(cursor, interval.start))
-                .ok_or(MemorySetupError::StaticOutOfMemory)?;
-        }
-        cursor = max(cursor, interval.end);
-    }
-
-    // Область после последнего исключённого интервала
-    if cursor < heap_end {
-        let _ = free_regions.push(FrameInterval::new(cursor, heap_end));
-    }
-
-    Ok(())
-}
-
-fn merge_intervals(intervals: &mut Vec<FrameInterval, MAX_REGIONS>) {
-    if intervals.is_empty() {
-        return;
-    }
-
-    intervals.sort_unstable_by_key(|&interval| interval.start);
-
-    let mut write_idx = 0;
-    for i in 1..intervals.len() {
-        let current = intervals[i];
-        let last = intervals[write_idx];
-
-        if current.start <= last.end {
-            intervals[write_idx].end = max(last.end, current.end);
-        } else {
-            write_idx += 1;
-            intervals[write_idx] = current;
-        }
-    }
-
-    intervals.truncate(write_idx + 1);
-}
-
-const MAX_REGIONS: usize = 32;
-
-#[derive(Clone, Copy)]
-struct FrameInterval {
-    start: usize,
-    end: usize,
-}
-
-impl FrameInterval {
-    const fn new(start: usize, end: usize) -> Self {
-        Self { start, end }
-    }
-
-    fn size(&self) -> usize {
-        self.end.saturating_sub(self.start)
-    }
+    Ok(BumpAllocator::new(largest.start, largest.end))
 }
 
 impl MemoryManager<Prepared> {
     pub fn create(layout: &MemoryLayout) -> Result<Self, MemorySetupError> {
-        let first_heap_region = layout.heap().next();
+        let free_heap_regions = get_free_heap_regions(layout).map_err(|_| MemorySetupError::OutOfMemory)?;
 
-        let heap = first_heap_region.ok_or(MemorySetupError::NoHeapRegionFound)?;
-        let heap_range: MemoryRange<PageAlignedAddress> = heap.clone().into();
-
-        let identity_map_regions: Vec<_, MAX_MEMORY_REGIONS> = layout
+        let free_heap_regions_iter = free_heap_regions
             .iter()
-            .filter(|&region| region.identity_map)
-            .map(|region| region.clone())
-            .take(MAX_MEMORY_REGIONS)
-            .collect();
+            .map(|interval| MemoryRange::new(interval.start, interval.end));
 
-        let identity_map_ranges: Vec<MemoryRange<PageAlignedAddress>, MAX_MEMORY_REGIONS> =
-            identity_map_regions
-                .iter()
-                .map(|region| MemoryRange::new(region.start, region.end))
-                .collect();
+        let frame_allocator = PhysicalFrameAllocator::new(free_heap_regions_iter);
 
-        let frame_allocator = PhysicalFrameAllocator::new(&heap_range, identity_map_ranges);
-
-        let root_page = frame_allocator
+        // Выделяем страницы под корень таблиц страниц
+        let lower_root_pa = frame_allocator
             .allocate_frame()
             .map(|frame| frame.page_address())
             .ok_or(MemorySetupError::OutOfMemory)?;
 
-        let root_table = Self::create_root_table(root_page);
+        let higher_root_pa = frame_allocator
+            .allocate_frame()
+            .map(|frame| frame.page_address())
+            .ok_or(MemorySetupError::OutOfMemory)?;
+
+        let lower_root_table = Self::create_root_table(lower_root_pa);
+        let higher_root_table = Self::create_root_table(higher_root_pa);
+
+        // Собираем все регионы
+        let all_regions: Vec<_, MAX_MEMORY_REGIONS> =
+            layout.iter().take(MAX_MEMORY_REGIONS).cloned().collect();
 
         Ok(MemoryManager::<Prepared> {
             state: Prepared {
                 frame_allocator,
-                root_page,
-                root_table,
-                mem_flags: heap.flags,
-                identity_map_regions,
+                lower_root_pa,
+                higher_root_pa,
+                lower_root_table,
+                higher_root_table,
+                all_regions,
+                free_heap_regions,
             },
         })
     }
 
     pub fn enable(self) -> Result<MemoryManager<Enabled>, MemorySetupError> {
-        let frame_allocator = self.state.frame_allocator.into_mutex();
+        let higher_half_base =
+            PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(HIGHER_HALF_BASE));
+
+        // Сначала создаём маппинг, пока аллокатор ещё внутри self (без частичного move).
+        self.linear_map(&self.state.frame_allocator, higher_half_base)?;
+
+        // После маппинга можем безопасно разбирать состояние на части.
+        let Prepared {
+            frame_allocator,
+            lower_root_pa,
+            higher_root_pa,
+            free_heap_regions,
+            ..
+        } = self.state;
+
+        let frame_allocator = frame_allocator.into_mutex();
         // Утекаем аллокатор в кучу, чтобы получить &'static ссылку
-        let frame_allocator = Box::leak(Box::new(frame_allocator));
-
-        let bump_allocator = GLOBAL_ALLOCATOR.take_bump_allocator();
-        let arena = bump_allocator.get_used_area();
-
-        let mut identity_regions = self.state.identity_map_regions;
-
-        identity_regions.push(MemoryRegion::new(
-            "arena",
-            arena.start().as_usize(),
-            arena.end().as_usize(),
-            self.state.mem_flags,
-            true,
-        ));
-
-        let mut mapper =
-            Aarch64MemoryMapper::new(frame_allocator, self.state.root_table, self.state.mem_flags);
-
-        for region in identity_regions.iter() {
-            let range = MemoryRange::new(region.start, region.end);
-            mapper
-                .map_exact(
-                    range.start(),
-                    PageAlignedVirtualAddress::identity(range.start()),
-                    range.size(),
-                    region.flags.bits(),
-                )
-                .map_err(|_| MemorySetupError::OutOfMemory)?;
-        }
+        let _frame_allocator: &'static _ = Box::leak(Box::new(frame_allocator));
 
         // Включаем Memory Management Unit (MMU)
-        // После включения весь доступ к памяти будет через виртуальные адреса
-        Mmu::new().enable(NormalSpaceConfig::new(
-            self.state.root_page.as_physical_address(),
+        Mmu::new().enable(NormalDualSpaceConfig::new(
+            lower_root_pa.as_physical_address(),
+            higher_root_pa.as_physical_address(),
         ));
 
         Ok(MemoryManager::<Enabled> {
             state: Enabled {
-                mem_flags: self.state.mem_flags,
-                root_table: self.state.root_table,
-                root_page: self.state.root_page,
-                frame_allocator,
+                higher_half_base,
+                free_regions: free_heap_regions,
             },
         })
+    }
+
+    fn linear_map<FA: FrameAllocator>(
+        &self,
+        frame_allocator: &FA,
+        higher_half_base: PageAlignedVirtualAddress,
+    ) -> Result<(), MemorySetupError> {
+        let heap_flags = Heap::flags();
+
+        let mut lower_half_mapper =
+            Aarch64MemoryMapper::new(frame_allocator, self.state.lower_root_table, heap_flags);
+
+        let mut higher_half_mapper =
+            Aarch64MemoryMapper::new(frame_allocator, self.state.higher_root_table, heap_flags);
+
+        for region in self.state.all_regions.iter() {
+            let va_aligned = region.virtual_start();
+
+            // Выбираем mapper по адресному пространству
+            let mapper = if va_aligned > higher_half_base {
+                &mut higher_half_mapper
+            } else {
+                &mut lower_half_mapper
+            };
+
+            mapper
+                .map_exact(region.start, va_aligned, region.size(), region.flags.bits())
+                .map_err(|_| MemorySetupError::OutOfMemory)?;
+        }
+
+        Ok(())
     }
 }
 
 impl MemoryManager<Enabled> {
     pub fn install(self) -> Result<Self, ()> {
-        let frame_allocator = self.state.frame_allocator;
-        let heap_range = frame_allocator.heap_range();
+        let free_regions: Vec<MemoryRange<VirtualAddress>, MAX_MEMORY_REGIONS> = self
+            .state
+            .free_regions
+            .iter()
+            .map(|interval| {
+                MemoryRange::new(
+                    VirtualAddress::new(interval.start.as_usize()),
+                    VirtualAddress::new(interval.end.as_usize()),
+                )
+            })
+            .collect();
 
-        let mapper =
-            Aarch64MemoryMapper::new(frame_allocator, self.state.root_table, self.state.mem_flags);
+        let region_manager = RegionManager::new(free_regions);
 
-        let mut allocator = KernelHeapAllocator::new(mapper, heap_range);
+        // Утекаем RegionManager чтобы получить &'static
+        let region_manager: &'static RegionManager = Box::leak(Box::new(region_manager));
 
-        allocator.init().map_err(|_| ())?;
-        debug!("Allocator initialized!");
+        // Создаём HeapAllocator
+        let allocator =
+            KernelHeapAllocator::new(region_manager, self.state.higher_half_base.into());
+
+        debug!("Heap allocator initialized!");
 
         GLOBAL_ALLOCATOR.switch_to_heap(allocator);
 
         Ok(self)
     }
+}
 
-    pub fn relocate(self) -> Result<MemoryManager<HigherHalf>, MemorySetupError> {
-        let higher_half_root = self
-            .state
-            .frame_allocator
-            .allocate_frame()
-            .map(|frame| frame.page_address())
-            .ok_or(MemorySetupError::OutOfMemory)?;
+fn get_free_heap_regions(
+    layout: &MemoryLayout,
+) -> Result<IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>, ()> {
+    let mut free_regions = IntervalSet::<PageAlignedAddress, MAX_MEMORY_REGIONS>::new();
 
-        let _ = Self::create_root_table(higher_half_root);
+    // Добавляем свободные области
+    let heap_regions = layout
+        .iter()
+        .filter(|region| region.is_heap() && region.is_identity());
 
-        // Настраиваем сплит верхней/нижней половины адресного пространства
-        Mmu::new().enable(NormalDualSpaceConfig::new(
-            self.state.root_page.as_physical_address(),
-            higher_half_root.as_physical_address(),
-        ));
+    for heap in heap_regions {
+        let result = free_regions.add(heap.start, heap.end);
 
-        Ok(MemoryManager::<HigherHalf> {
-            state: HigherHalf {},
-        })
+        if result.is_none() {
+            return Err(());
+        }
     }
+
+    // Вычитаем занятые (зарезервированные) области
+    let non_heap_regions = layout.iter().filter(|region| !region.is_heap());
+    for region in non_heap_regions {
+        let result = free_regions.remove(region.start, region.end);
+
+        if result.is_none() {
+            return Err(());
+        }
+    }
+
+    Ok(free_regions)
 }
 
 impl<Any> MemoryManager<Any> {
@@ -307,7 +248,7 @@ impl<Any> MemoryManager<Any> {
         let ptr = va.as_ptr::<PageTable<L0>>();
 
         unsafe {
-            core::ptr::write(ptr, PageTable::new());
+            *ptr = PageTable::new();
         };
 
         ptr
