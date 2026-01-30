@@ -142,30 +142,27 @@ impl<'a> HeapAllocator<'a> {
 
         while let Some(block_ptr) = current {
             unsafe {
-                let mut block: FreeBlock = block_ptr.read();
+                let block = block_ptr.as_ptr();
 
                 // Блок подходит по размеру
-                if block.size >= size {
+                if (*block).size >= size {
                     // Удаляем из списка свободных
                     if let Some(prev_ptr) = prev {
-                        let mut prev_block: FreeBlock = prev_ptr.read();
-                        prev_block.next = block.next;
-                        prev_ptr.write(prev_block);
+                        (*prev_ptr.as_ptr()).next = (*block).next;
                     } else {
-                        self.free_list_head = block.next;
+                        self.free_list_head = (*block).next;
                     }
 
                     // Разделяем блок, если он значительно больше
-                    if let Some(new_block_ptr) = block.split(size) {
+                    if let Some(new_block_ptr) = (*block).split(size) {
                         self.add_to_free_list(new_block_ptr);
                     }
 
-                    block_ptr.write(block);
                     return Some(block_ptr);
                 }
 
                 prev = current;
-                current = block.next;
+                current = (*block).next;
             }
         }
 
@@ -244,16 +241,21 @@ impl<'a> HeapAllocator<'a> {
 
     /// Освободить память
     ///
-    /// Указатель на заголовок блока хранится непосредственно перед пользовательскими данными
+    /// Указатель на заголовок блока хранится непосредственно перед пользовательскими данными.
+    /// После освобождения указатель обнуляется для защиты от double-free.
     pub fn deallocate(&mut self, ptr: NonNull<u8>) {
         unsafe {
             // Читаем указатель на заголовок блока, хранящийся перед пользовательскими данными
-            let header_ptr_location = (ptr.as_ptr() as *const *mut FreeBlock).sub(1);
+            let header_ptr_location = (ptr.as_ptr() as *mut *mut FreeBlock).sub(1);
             let block_ptr = *header_ptr_location;
 
             if let Some(block) = NonNull::new(block_ptr) {
+                // Обнуляем указатель на заголовок для защиты от double-free
+                *header_ptr_location = core::ptr::null_mut();
+
                 self.add_to_free_list(block);
             }
+            // Если block_ptr уже null (повторный deallocate), ничего не делаем
         }
 
         // TODO: Реализовать слияние смежных свободных блоков

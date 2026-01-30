@@ -43,32 +43,6 @@ pub trait MmuConfig {
     }
 }
 
-pub struct NormalSpaceConfig {
-    root: PhysicalAddress,
-}
-
-impl NormalSpaceConfig {
-    pub const fn new(root: PhysicalAddress) -> Self {
-        Self { root }
-    }
-}
-
-impl MmuConfig for NormalSpaceConfig {
-    fn lower_half_config(&self) -> AddressSpaceConfig<LowerHalf> {
-        AddressSpaceConfig {
-            base: self.root,
-            config: tcr::AddressTranslationConfig::create(true),
-        }
-    }
-
-    fn higher_half_config(&self) -> AddressSpaceConfig<HigherHalf> {
-        AddressSpaceConfig {
-            base: PhysicalAddress::new(0usize),
-            config: tcr::AddressTranslationConfig::create(false),
-        }
-    }
-}
-
 pub struct NormalDualSpaceConfig {
     lower_root: PhysicalAddress,
     higher_root: PhysicalAddress,

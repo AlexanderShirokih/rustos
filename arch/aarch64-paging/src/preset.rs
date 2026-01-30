@@ -1,4 +1,3 @@
-use kernel::driver::Device;
 use crate::mem_flags::{Access, MemFlags, Shareability};
 
 pub struct KernelText;

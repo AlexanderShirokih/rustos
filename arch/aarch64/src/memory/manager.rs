@@ -37,19 +37,20 @@ pub struct Prepared {
 
 pub struct Enabled {
     pub higher_half_base: PageAlignedVirtualAddress,
-    free_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
+    free_heap_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
 }
 
 /// Центральный менеджер памяти, который владеет всеми компонентами системы памяти.
 pub struct MemoryManager<Stage> {
-    pub(crate) state: Stage,
+    state: Stage,
 }
 
 impl MemoryManager<Early> {
     pub fn create(layout: &MemoryLayout) -> Result<MemoryManager<Early>, MemorySetupError> {
-        let free_regions = get_free_heap_regions(layout).map_err(|_| MemorySetupError::OutOfMemory)?;
-        let bump_allocator =
-            create_bump_allocator(&free_regions).map_err(|_| MemorySetupError::OutOfMemory)?;
+        let free_regions =
+            get_free_heap_regions(layout).map_err(|_| MemorySetupError::OutOfMemory)?;
+        let bump_allocator = Self::create_bump_allocator(&free_regions)
+            .map_err(|_| MemorySetupError::OutOfMemory)?;
 
         Ok(Self {
             state: Early { bump_allocator },
@@ -59,23 +60,24 @@ impl MemoryManager<Early> {
     pub fn install(self) {
         GLOBAL_ALLOCATOR.init_bump_phase(self.state.bump_allocator);
     }
-}
 
-fn create_bump_allocator(
-    free_regions: &IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
-) -> Result<BumpAllocator, ()> {
-    // Находим самую большую свободную область
-    let largest = free_regions
-        .iter()
-        .max_by_key(|interval| interval.end.as_usize() - interval.start.as_usize())
-        .ok_or(())?;
+    fn create_bump_allocator(
+        free_regions: &IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
+    ) -> Result<BumpAllocator, ()> {
+        // Находим самую большую свободную область
+        let largest = free_regions
+            .iter()
+            .max_by_key(|interval| interval.end.as_usize() - interval.start.as_usize())
+            .ok_or(())?;
 
-    Ok(BumpAllocator::new(largest.start, largest.end))
+        Ok(BumpAllocator::new(largest.start, largest.end))
+    }
 }
 
 impl MemoryManager<Prepared> {
     pub fn create(layout: &MemoryLayout) -> Result<Self, MemorySetupError> {
-        let free_heap_regions = get_free_heap_regions(layout).map_err(|_| MemorySetupError::OutOfMemory)?;
+        let free_heap_regions =
+            get_free_heap_regions(layout).map_err(|_| MemorySetupError::OutOfMemory)?;
 
         let free_heap_regions_iter = free_heap_regions
             .iter()
@@ -118,7 +120,7 @@ impl MemoryManager<Prepared> {
         let higher_half_base =
             PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(HIGHER_HALF_BASE));
 
-        // Сначала создаём маппинг, пока аллокатор ещё внутри self (без частичного move).
+        // Отображаем все физическое пространство в ядро.
         self.linear_map(&self.state.frame_allocator, higher_half_base)?;
 
         // После маппинга можем безопасно разбирать состояние на части.
@@ -143,7 +145,7 @@ impl MemoryManager<Prepared> {
         Ok(MemoryManager::<Enabled> {
             state: Enabled {
                 higher_half_base,
-                free_regions: free_heap_regions,
+                free_heap_regions,
             },
         })
     }
@@ -184,7 +186,7 @@ impl MemoryManager<Enabled> {
     pub fn install(self) -> Result<Self, ()> {
         let free_regions: Vec<MemoryRange<VirtualAddress>, MAX_MEMORY_REGIONS> = self
             .state
-            .free_regions
+            .free_heap_regions
             .iter()
             .map(|interval| {
                 MemoryRange::new(
@@ -258,6 +260,4 @@ impl<Any> MemoryManager<Any> {
 #[derive(Debug)]
 pub enum MemorySetupError {
     OutOfMemory,
-    StaticOutOfMemory,
-    NoHeapRegionFound,
 }

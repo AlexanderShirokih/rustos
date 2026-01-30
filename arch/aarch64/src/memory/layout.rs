@@ -94,12 +94,6 @@ impl MemoryRegion<PageAlignedAddress> {
             .unwrap()
     }
 
-    pub fn virtual_end(&self) -> PageAlignedVirtualAddress {
-        PageAlignedVirtualAddress::identity(self.start)
-            .offset(self.va_offset)
-            .unwrap()
-    }
-
     pub fn is_heap(&self) -> bool {
         self.label == Self::HEAP
     }

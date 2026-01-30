@@ -1,6 +1,7 @@
 use memory::aligned::Aligned;
 use memory::memory_range::MemoryRange;
 use memory::physical_address::PageAlignedAddress;
+use memory::virtual_address::VirtualAddress;
 
 pub const TEST_FRAME_SIZE: usize = PageAlignedAddress::ALIGNMENT;
 
@@ -13,4 +14,12 @@ pub fn make_range(start_frame: usize, frame_count: usize) -> MemoryRange<PageAli
     let start = frame_to_address(start_frame);
     let end = frame_to_address(start_frame + frame_count - 1);
     MemoryRange::new(start, end)
+}
+
+pub fn va(addr: usize) -> VirtualAddress {
+    VirtualAddress::new(addr)
+}
+
+pub fn make_va_range(start: usize, end: usize) -> MemoryRange<VirtualAddress> {
+    MemoryRange::new(VirtualAddress::new(start), VirtualAddress::new(end))
 }
