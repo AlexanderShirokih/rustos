@@ -11,10 +11,16 @@ use util::crlf::Crlf;
 
 const DR: Reg<u32> = Reg::new(0x00); // Data Reg
 const FR: Reg<u32> = Reg::new(0x18); // Flag Reg
+const CR: Reg<u32> = Reg::new(0x30); // Control Reg
 
 // Биты регистра FR
 const FR_TXFF: u32 = 1 << 5; // Передающий FIFO заполнен
 const FR_BUSY: u32 = 1 << 3; // UART занят передачей
+
+// Биты регистра CR
+const CR_UARTEN: u32 = 1 << 0; // Включение UART
+const CR_TXE: u32 = 1 << 8;    // Включение передатчика
+const CR_RXE: u32 = 1 << 9;    // Включение приёмника
 
 const REG_UART_INDEX: usize = 0;
 const REG_UART_SIZE_INDEX: usize = 1;
@@ -81,6 +87,9 @@ impl EarlyDriver for UartPl011 {
     fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
         context.request_mmio(self.base, 4096);
 
+        // Включаем UART и передатчик
+        self.mmio.write_reg(CR, CR_UARTEN | CR_TXE | CR_RXE);
+
         Ok(())
     }
 
@@ -97,6 +106,6 @@ fn uart_pl011_probe(context: &mut ProbeContext<'_>) -> ProbeResult<Box<dyn Early
 
 register_early_driver!(
     UART_PL011_EARLY,
-    compatible = &["arm,pl011", "arm,primecell"],
+    compatible = &["arm,pl011"],
     probe = uart_pl011_probe
 );

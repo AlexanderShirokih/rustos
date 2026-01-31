@@ -83,6 +83,17 @@ pub fn set_stdout(w: &'static StaticWriter) {
     STDOUT.is_normal.store(true, Ordering::Release);
 }
 
+/// Возвращает текущий early writer, если он установлен.
+pub fn get_early_writer() -> Option<&'static StaticWriter> {
+    STDOUT.early.with_lock(|w| {
+        if core::ptr::eq(*w, &NIL) {
+            None
+        } else {
+            Some(*w)
+        }
+    })
+}
+
 /// Печать форматированной строки без префикса уровня.
 pub fn printf(arguments: Arguments) {
     STDOUT.with_writer(|writer| {

@@ -11,6 +11,7 @@ use collections::interval_set::IntervalSet;
 use collections::{NoLockCell, Vec};
 use klog::{debug, warn};
 use memory::FrameBitmap;
+use memory::RelocatablePtr;
 use memory::bump_allocator::BumpAllocator;
 use memory::frame::Frame;
 use memory::frame_allocator::{FrameAllocator, PhysicalFrameAllocator};
@@ -325,7 +326,7 @@ impl MemoryManager<Prepared> {
                 })?;
         }
 
-        // 2. Bootstrap identity mapping — kernel регионы + bump allocator range + MMIO
+        // 3. Bootstrap identity mapping — kernel регионы + bump allocator range + MMIO
         //    Нужен для выполнения кода сразу после включения MMU, до прыжка в higher half.
         //    MMIO нужен для вывода отладки между включением MMU и прыжком в higher half.
         let identity_regions = self
@@ -405,6 +406,12 @@ impl MemoryManager<Enabled> {
             KernelHeapAllocator::new(region_manager, self.state.higher_half_base.into());
 
         GLOBAL_ALLOCATOR.switch_to_heap(allocator);
+
+        // Переключаем логгер на higher half
+        if let Some(writer) = klog::get_early_writer() {
+            let new_writer = unsafe { RelocatablePtr::new(writer).relocated(higher_half_base) };
+            klog::set_stdout(new_writer);
+        }
 
         Ok(self)
     }

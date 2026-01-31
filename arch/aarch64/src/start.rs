@@ -20,6 +20,7 @@ use core::hint::spin_loop;
 use fdt::devicetree::DeviceTree;
 use kernel::driver::early::EarlyDriverRegistry;
 use kernel::driver::scanner;
+use kernel::kmain::kmain;
 use klog::{debug, fatal, info, set_early_stdout};
 use memory::setup::build_memory_layout;
 
@@ -148,12 +149,14 @@ fn early_main(dtb: usize) {
         );
     }
 
-    // Передаём early_mm в setup_memory для перехода в Prepared фазу
     if setup_memory(memory_layout, early_mm).is_err() {
         return;
     }
 
-    debug!("Setup done!");
+    debug!("Early stage setup done!");
+
+    // Основная платформозависимая настройка завершена. Переходим к общей точке входа
+    kmain();
 
     loop {
         spin_loop();
