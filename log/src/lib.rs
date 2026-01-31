@@ -105,8 +105,24 @@ pub fn logf(lvl: Level, arguments: Arguments) {
     printf(format_args!("{}{}\r\n", level, arguments));
 }
 
+/// Лог с префиксом уровня, тегом и переводом строки.
+pub fn logf_tagged(lvl: Level, tag: &str, arguments: Arguments) {
+    let level = match lvl {
+        Level::Fatal => "[FATAL] ",
+        Level::Error => "[E] ",
+        Level::Warn => "[W] ",
+        Level::Info => "[I] ",
+        Level::Debug => "[D] ",
+    };
+
+    printf(format_args!("{}[{}] {}\r\n", level, tag, arguments));
+}
+
 #[macro_export]
 macro_rules! fatal {
+    ($tag:expr; $($arg:tt)*) => {
+        $crate::logf_tagged($crate::Level::Fatal, $tag, format_args!($($arg)*))
+    };
     ($($arg:tt)*) => {
         $crate::logf($crate::Level::Fatal, format_args!($($arg)*))
     };
@@ -114,6 +130,9 @@ macro_rules! fatal {
 
 #[macro_export]
 macro_rules! error {
+    ($tag:expr; $($arg:tt)*) => {
+        $crate::logf_tagged($crate::Level::Error, $tag, format_args!($($arg)*))
+    };
     ($($arg:tt)*) => {
         $crate::logf($crate::Level::Error, format_args!($($arg)*))
     };
@@ -121,6 +140,9 @@ macro_rules! error {
 
 #[macro_export]
 macro_rules! warn {
+    ($tag:expr; $($arg:tt)*) => {
+        $crate::logf_tagged($crate::Level::Warn, $tag, format_args!($($arg)*))
+    };
     ($($arg:tt)*) => {
         $crate::logf($crate::Level::Warn, format_args!($($arg)*))
     };
@@ -128,6 +150,9 @@ macro_rules! warn {
 
 #[macro_export]
 macro_rules! info {
+    ($tag:expr; $($arg:tt)*) => {
+        $crate::logf_tagged($crate::Level::Info, $tag, format_args!($($arg)*))
+    };
     ($($arg:tt)*) => {
         $crate::logf($crate::Level::Info, format_args!($($arg)*))
     };
@@ -135,6 +160,9 @@ macro_rules! info {
 
 #[macro_export]
 macro_rules! debug {
+    ($tag:expr; $($arg:tt)*) => {
+        $crate::logf_tagged($crate::Level::Debug, $tag, format_args!($($arg)*))
+    };
     ($($arg:tt)*) => {
         $crate::logf($crate::Level::Debug, format_args!($($arg)*))
     };

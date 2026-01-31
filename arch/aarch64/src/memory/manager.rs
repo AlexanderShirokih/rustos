@@ -51,20 +51,21 @@ pub struct MemoryManager<Stage> {
 
 impl MemoryManager<Early> {
     pub fn create(layout: &MemoryLayout) -> Result<MemoryManager<Early>, MemorySetupError> {
-        debug!("[MemoryManager::create] Starting Early phase...");
+        debug!("MemoryManager::create"; "Starting Early phase...");
 
         let free_regions =
             get_free_heap_regions(layout).map_err(|_| MemorySetupError::OutOfMemory)?;
 
         debug!(
-            "[MemoryManager::create] Found {} free heap regions",
+            "MemoryManager::create";
+            "Found {} free heap regions",
             free_regions.len()
         );
 
         let bump_allocator = Self::create_bump_allocator(&free_regions)
             .map_err(|_| MemorySetupError::OutOfMemory)?;
 
-        debug!("[MemoryManager::create] Bump allocator created successfully");
+        debug!("MemoryManager::create"; "Bump allocator created successfully");
 
         Ok(Self {
             state: Early { bump_allocator },
@@ -91,7 +92,8 @@ impl MemoryManager<Early> {
 
         let size = largest.end.as_usize() - largest.start.as_usize();
         debug!(
-            "[create_bump_allocator] Largest region: {:#x} - {:#x} (size: {} bytes)",
+            "create_bump_allocator";
+            "Largest region: {:#x} - {:#x} (size: {} bytes)",
             largest.start.as_usize(),
             largest.end.as_usize(),
             size
@@ -107,7 +109,7 @@ impl MemoryManager<Installed> {
         self,
         layout: &MemoryLayout,
     ) -> Result<MemoryManager<Prepared>, MemorySetupError> {
-        debug!("[MemoryManager::prepare] Starting Prepared phase...");
+        debug!("MemoryManager::prepare"; "Starting Prepared phase...");
 
         // Пересчитываем free regions с учётом новых MMIO
         let free_heap_regions =
@@ -115,7 +117,8 @@ impl MemoryManager<Installed> {
 
         free_heap_regions.iter().for_each(|interval| {
             debug!(
-                "[MemoryManager::prepare] Recalculated free heap region: {:#x} - {:#x} ({} bytes)",
+                "MemoryManager::prepare";
+                "Recalculated free heap region: {:#x} - {:#x} ({} bytes)",
                 interval.start.as_usize(),
                 interval.end.as_usize(),
                 interval.end.as_usize() - interval.start.as_usize()
@@ -131,16 +134,12 @@ impl MemoryManager<Installed> {
         // Резервируем фактически использованную область bump allocator'а
         let (bump_start, bump_end) = GLOBAL_ALLOCATOR.bump_used_range();
         debug!(
-            "[MemoryManager::prepare] Bump allocator used range: {:#x} - {:#x}",
+            "MemoryManager::prepare";
+            "Bump allocator used range: {:#x} - {:#x}",
             bump_start, bump_end,
         );
 
-        let bump_range = MemoryRegion::new(
-            RegionTag::Unknown,
-            bump_start,
-            bump_end,
-            Heap::flags(),
-        );
+        let bump_range = MemoryRegion::new(RegionTag::Unknown, bump_start, bump_end, Heap::flags());
 
         let bump_start_frame = Frame::from(PageAlignedAddress::aligned_down(PhysicalAddress::new(
             bump_start,
@@ -165,7 +164,8 @@ impl MemoryManager<Installed> {
             .ok_or(MemorySetupError::OutOfMemory)?;
 
         debug!(
-            "[MemoryManager::prepare] Allocated page table roots: lower={:#x}, higher={:#x}",
+            "MemoryManager::prepare";
+            "Allocated page table roots: lower={:#x}, higher={:#x}",
             lower_root_pa.as_usize(),
             higher_root_pa.as_usize()
         );
@@ -173,14 +173,15 @@ impl MemoryManager<Installed> {
         let lower_root_table = Self::create_root_table(lower_root_pa);
         let higher_root_table = Self::create_root_table(higher_root_pa);
 
-        debug!("[MemoryManager::prepare] Created root page tables");
+        debug!("MemoryManager::prepare"; "Created root page tables");
 
         // Собираем все регионы
         let all_regions: Vec<_, MAX_MEMORY_REGIONS> =
             layout.iter().take(MAX_MEMORY_REGIONS).cloned().collect();
 
         debug!(
-            "[MemoryManager::prepare] Collected {} memory regions",
+            "MemoryManager::prepare";
+            "Collected {} memory regions",
             all_regions.len()
         );
 
@@ -201,20 +202,21 @@ impl MemoryManager<Installed> {
 
 impl MemoryManager<Prepared> {
     pub fn enable(self) -> Result<MemoryManager<Enabled>, MemorySetupError> {
-        debug!("[MemoryManager::enable] Starting Enabled phase...");
+        debug!("MemoryManager::enable"; "Starting Enabled phase...");
 
         let higher_half_base =
             PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(HIGHER_HALF_BASE));
 
         debug!(
-            "[MemoryManager::enable] Higher half base: {:#x}",
+            "MemoryManager::enable";
+            "Higher half base: {:#x}",
             HIGHER_HALF_BASE
         );
 
         // Отображаем все регионы в higher half, bootstrap identity для kernel code
-        debug!("[MemoryManager::enable] Setting up linear mapping...");
+        debug!("MemoryManager::enable"; "Setting up linear mapping...");
         self.linear_map(&self.state.frame_allocator, higher_half_base)?;
-        debug!("[MemoryManager::enable] Linear mapping complete");
+        debug!("MemoryManager::enable"; "Linear mapping complete");
 
         // После маппинга можем безопасно разбирать состояние на части.
         let Prepared {
@@ -225,7 +227,8 @@ impl MemoryManager<Prepared> {
         } = self.state;
 
         debug!(
-            "[MemoryManager::enable] Enabling MMU with TTBR0={:#x}, TTBR1={:#x}",
+            "MemoryManager::enable";
+            "Enabling MMU with TTBR0={:#x}, TTBR1={:#x}",
             lower_root_pa.as_usize(),
             higher_root_pa.as_usize()
         );
@@ -236,7 +239,7 @@ impl MemoryManager<Prepared> {
             higher_root_pa.as_physical_address(),
         ));
 
-        debug!("[MemoryManager::enable] MMU enabled successfully!");
+        debug!("MemoryManager::enable"; "MMU enabled successfully!");
 
         Ok(MemoryManager::<Enabled> {
             state: Enabled {
@@ -266,14 +269,16 @@ impl MemoryManager<Prepared> {
         let non_heap_count = all_regions.iter().filter(|r| !r.is_heap()).count();
 
         debug!(
-            "[linear_map] Mapping {} non-heap regions to higher half",
+            "linear_map";
+            "Mapping {} non-heap regions to higher half",
             non_heap_count
         );
         for region in non_heap_regions {
             let va = region.virtual_start(higher_half_base_usize);
 
             debug!(
-                "[linear_map] Mapping region {:?}: PA {:#x} -> VA {:#x}, size={:#x}, flags={:#x}",
+                "linear_map";
+                "Mapping region {:?}: PA {:#x} -> VA {:#x}, size={:#x}, flags={:#x}",
                 region.tag,
                 region.start.as_usize(),
                 va.as_usize(),
@@ -285,7 +290,8 @@ impl MemoryManager<Prepared> {
                 .map_exact(region.start, va, region.size(), region.flags.bits())
                 .map_err(|e| {
                     warn!(
-                        "[linear_map] Failed to map region {:?} at PA {:#x}: {:?}",
+                        "linear_map";
+                        "Failed to map region {:?} at PA {:#x}: {:?}",
                         region.tag,
                         region.start.as_usize(),
                         e
@@ -296,7 +302,8 @@ impl MemoryManager<Prepared> {
 
         // 2. Маппим свободные части Heap (free_heap_regions)
         debug!(
-            "[linear_map] Mapping {} free heap regions",
+            "linear_map";
+            "Mapping {} free heap regions",
             self.state.free_heap_regions.len()
         );
         for interval in self.state.free_heap_regions.iter() {
@@ -306,7 +313,8 @@ impl MemoryManager<Prepared> {
                 .expect("address should be page aligned");
 
             debug!(
-                "[linear_map] Mapping free heap: PA {:#x} -> VA {:#x}, size={:#x}",
+                "linear_map";
+                "Mapping free heap: PA {:#x} -> VA {:#x}, size={:#x}",
                 pa.as_usize(),
                 va.as_usize(),
                 size
@@ -316,7 +324,8 @@ impl MemoryManager<Prepared> {
                 .map_exact(pa, va, size, heap_flags.bits())
                 .map_err(|e| {
                     warn!(
-                        "[linear_map] Failed to map free heap at PA {:#x}: {:?}",
+                        "linear_map";
+                        "Failed to map free heap at PA {:#x}: {:?}",
                         pa.as_usize(),
                         e
                     );
@@ -336,7 +345,8 @@ impl MemoryManager<Prepared> {
 
         for region in identity_regions {
             debug!(
-                "[linear_map] Bootstrap identity mapping for {:?}: PA {:#x}, size={:#x}",
+                "linear_map";
+                "Bootstrap identity mapping for {:?}: PA {:#x}, size={:#x}",
                 region.tag,
                 region.start.as_usize(),
                 region.size()
@@ -344,10 +354,16 @@ impl MemoryManager<Prepared> {
 
             let bootstrap_va = PageAlignedVirtualAddress::identity(region.start);
             lower_half_mapper
-                .map_exact(region.start, bootstrap_va, region.size(), region.flags.bits())
+                .map_exact(
+                    region.start,
+                    bootstrap_va,
+                    region.size(),
+                    region.flags.bits(),
+                )
                 .map_err(|e| {
                     warn!(
-                        "[linear_map] Failed to map bootstrap identity for {:?}: {:?}",
+                        "linear_map";
+                        "Failed to map bootstrap identity for {:?}: {:?}",
                         region.tag, e
                     );
                     MemorySetupError::MappingFailed(e)
@@ -360,7 +376,7 @@ impl MemoryManager<Prepared> {
 
 impl MemoryManager<Enabled> {
     pub fn install(self) -> Result<Self, ()> {
-        debug!("[MemoryManager<Enabled>::install] Setting up heap allocator...");
+        debug!("MemoryManager<Enabled>::install"; "Setting up heap allocator...");
 
         // Все регионы теперь в higher half
         let higher_half_base = self.state.higher_half_base.as_usize();
@@ -378,13 +394,15 @@ impl MemoryManager<Enabled> {
             .collect();
 
         debug!(
-            "[MemoryManager<Enabled>::install] Converted {} free regions to virtual addresses",
+            "MemoryManager<Enabled>::install";
+            "Converted {} free regions to virtual addresses",
             free_regions.len()
         );
 
         for region in free_regions.iter() {
             debug!(
-                "[MemoryManager<Enabled>::install] Free heap VA region: {:#x} - {:#x} ({} bytes)",
+                "MemoryManager<Enabled>::install";
+                "Free heap VA region: {:#x} - {:#x} ({} bytes)",
                 region.start().as_usize(),
                 region.end().as_usize(),
                 region.end().as_usize() - region.start().as_usize()
@@ -418,7 +436,7 @@ fn get_free_heap_regions(
         let result = free_regions.add(heap.start, heap.end);
 
         if result.is_none() {
-            warn!("[get_free_heap_regions] ERROR: Failed to add heap region");
+            warn!("get_free_heap_regions"; "ERROR: Failed to add heap region");
             return Err(());
         }
     }
@@ -429,7 +447,7 @@ fn get_free_heap_regions(
         let result = free_regions.remove(region.start, region.end);
 
         if result.is_none() {
-            warn!("[get_free_heap_regions] ERROR: Failed to remove reserved region");
+            warn!("get_free_heap_regions"; "ERROR: Failed to remove reserved region");
             return Err(());
         }
     }
@@ -453,5 +471,7 @@ impl<Any> MemoryManager<Any> {
 #[derive(Debug)]
 pub enum MemorySetupError {
     OutOfMemory,
+
+    #[allow(dead_code)]
     MappingFailed(memory::memory_mapper::MemoryMappingError),
 }
