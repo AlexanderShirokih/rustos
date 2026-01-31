@@ -23,6 +23,8 @@ pub enum RegionTag {
     DeviceTree,
     /// Memory-mapped I/O
     Mmio,
+    /// Неизвестный/служебный регион
+    Unknown,
 }
 
 /// Раскладка физической памяти ядра
@@ -99,6 +101,13 @@ impl MemoryRegion<PageAlignedAddress> {
 
     pub fn is_kernel_code(&self) -> bool {
         self.tag == RegionTag::KernelText
+    }
+
+    pub fn is_kernel(&self) -> bool {
+        matches!(
+            self.tag,
+            RegionTag::KernelText | RegionTag::KernelData | RegionTag::KernelRoData
+        )
     }
 }
 

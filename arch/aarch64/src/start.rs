@@ -127,8 +127,9 @@ fn early_main(dtb: usize) {
     let mut early_registry = EarlyDriverRegistry::new();
     early_registry.scan_and_probe(&device_tree);
 
-    // Утекаем реестр в статическую память — драйверы живут до конца работы ядра
-    let early_registry: &'static mut EarlyDriverRegistry = Box::leak(Box::new(early_registry));
+    // Утекаем реестр в статическую память — драйверы живут до конца работы ядра,
+    // потому что writer из output() сохраняется в статическую переменную STDOUT
+    let early_registry: &'static EarlyDriverRegistry = Box::leak(Box::new(early_registry));
 
     bind_early_stdout(&device_tree, early_registry);
     info!("Early console set");

@@ -4,7 +4,7 @@
 
 ## Требования
 
-- Rust (nightly)
+- Rust (stable)
 - `cargo-binutils` — для `cargo objcopy`
 - `mkbootimg` — для создания Android boot image
 
@@ -20,9 +20,6 @@ cargo install cargo-binutils
 ```bash
 # QEMU (формат binary)
 cargo xtask build devices/spec/qemu-aarch64.yaml
-
-# Raspberry Pi 5 (формат binary)
-cargo xtask build devices/spec/rpi5.yaml
 
 # Xiaomi Redmi Note 7 (формат android_boot_v1)
 cargo xtask build devices/spec/xiaomi-lavender.yaml
