@@ -48,7 +48,7 @@ SECTIONS {
 
     .stack (NOLOAD) : ALIGN(4K) {
         _stack_bottom = .;
-        . += 16K;
+        . += 64K;
         _stack_top = .;
     } =0
 
