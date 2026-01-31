@@ -1,12 +1,14 @@
 use aarch64_paging::mem_flags::MemFlags;
 use aarch64_paging::preset::Mmio;
 use collections::Vec;
+use collections::interval_set::IntervalSet;
+use klog::warn;
 use memory::aligned::{Address, Aligned};
 use memory::memory_range::MemoryRange;
 use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::PageAlignedVirtualAddress;
 
-const MAX_MEMORY_REGIONS: usize = 32;
+pub const MAX_MEMORY_REGIONS: usize = 32;
 
 /// Тег типа региона памяти
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +47,31 @@ impl MemoryLayout {
 
     pub fn iter(&self) -> impl Iterator<Item = &MemoryRegion<PageAlignedAddress>> {
         self.regions.iter()
+    }
+
+    /// Вычисляет свободные области heap (heap минус зарезервированные регионы)
+    pub fn free_heap_regions(
+        &self,
+    ) -> Result<IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>, ()> {
+        let mut free_regions = IntervalSet::<PageAlignedAddress, MAX_MEMORY_REGIONS>::new();
+
+        // Добавляем свободные области (heap-регионы)
+        for heap in self.iter().filter(|region| region.is_heap()) {
+            if free_regions.add(heap.start, heap.end).is_none() {
+                warn!("free_heap_regions"; "ERROR: Failed to add heap region");
+                return Err(());
+            }
+        }
+
+        // Вычитаем занятые (зарезервированные) области
+        for region in self.iter().filter(|region| !region.is_heap()) {
+            if free_regions.remove(region.start, region.end).is_none() {
+                warn!("free_heap_regions"; "ERROR: Failed to remove reserved region");
+                return Err(());
+            }
+        }
+
+        Ok(free_regions)
     }
 }
 

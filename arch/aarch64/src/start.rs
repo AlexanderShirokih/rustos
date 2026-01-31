@@ -13,7 +13,7 @@ mod memory;
 mod system;
 
 use crate::memory::layout::{MemoryLayout, MemoryRegion};
-use crate::memory::manager::{Early, Installed, MemoryManager};
+use crate::memory::memory_setup::{Early, Installed, MemorySetup};
 use alloc::boxed::Box;
 use core::arch::{asm, naked_asm};
 use core::hint::spin_loop;
@@ -119,9 +119,9 @@ fn early_main(dtb: usize) {
         Err(_) => return,
     };
 
-    // Создаём Early memory manager и устанавливаем bump allocator
-    let early_mm = match MemoryManager::<Early>::create(&memory_layout) {
-        Ok(mm) => mm.install(),
+    // Создаём Early memory setup и устанавливаем bump allocator
+    let early_setup = match MemorySetup::<Early>::create(&memory_layout) {
+        Ok(setup) => setup.install(),
         Err(_) => return,
     };
 
@@ -149,7 +149,7 @@ fn early_main(dtb: usize) {
         );
     }
 
-    if setup_memory(memory_layout, early_mm).is_err() {
+    if setup_memory(memory_layout, early_setup).is_err() {
         return;
     }
 
@@ -163,16 +163,16 @@ fn early_main(dtb: usize) {
     }
 }
 
-fn setup_memory(layout: MemoryLayout, installed_mm: MemoryManager<Installed>) -> Result<(), ()> {
+fn setup_memory(layout: MemoryLayout, installed: MemorySetup<Installed>) -> Result<(), ()> {
     // Переходим из Installed в Prepared фазу, резервируя bump region
-    let memory_manager = installed_mm
+    let memory_setup = installed
         .prepare(&layout)
         .inspect_err(|err| fatal!("Memory setup failed: {:?}", err))
         .map_err(|_| ())?;
-    debug!("Memory manager prepared!");
+    debug!("Memory setup prepared!");
 
     // Маппим higher half и включаем MMU
-    let memory_manager = memory_manager
+    let memory_setup = memory_setup
         .enable()
         .inspect_err(|err| fatal!("Unable to enable MMU: {:?}", err))
         .map_err(|_| ())?;
@@ -182,7 +182,7 @@ fn setup_memory(layout: MemoryLayout, installed_mm: MemoryManager<Installed>) ->
 
     info!("MMU enabled, running in higher half!");
 
-    memory_manager
+    memory_setup
         .install()
         .inspect_err(|_| fatal!("Unable to set heap allocator"))?;
 

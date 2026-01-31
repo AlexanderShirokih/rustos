@@ -41,7 +41,7 @@ impl<'a, FA: FrameAllocator> Aarch64MemoryMapper<'a, FA> {
         Self {
             frame_allocator,
             mem_flags,
-            mapper: UnsafeCell::new(PageMapper::new(root_ptr, FrameTableAlloc(&frame_allocator))),
+            mapper: UnsafeCell::new(PageMapper::new(root_ptr, FrameTableAlloc(frame_allocator))),
         }
     }
 

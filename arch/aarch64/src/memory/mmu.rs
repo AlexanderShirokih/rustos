@@ -100,7 +100,7 @@ impl Mmu<EL1> {
     /// Включить MMU/D-cache, используя подготовленную конфигурацию.
     pub fn enable<C: MmuConfig>(&self, config: C) {
         // 1) Барьер перед изменениями регистров + Маскируем прерывания
-        system::barrier::barrier();
+        system::barrier::full_system_barrier();
 
         // 2) Записываем слоты атрибутов памяти
         self.mair.set(mair::MairBits::combine(&[
@@ -123,6 +123,6 @@ impl Mmu<EL1> {
         self.sctlr.set(config.mmu_config());
 
         // 6) Барьер после изменения всех регистров
-        system::barrier::barrier();
+        system::barrier::full_system_barrier();
     }
 }

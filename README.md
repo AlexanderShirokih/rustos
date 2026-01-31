@@ -40,6 +40,13 @@ cargo xtask build devices/spec/qemu-aarch64.yaml --run
 cargo xtask build devices/spec/qemu-aarch64.yaml --debug
 ```
 
+## Разработка
+
+```bash
+cargo check --workspace   # проверка кода
+cargo test --workspace    # запуск тестов
+```
+
 ## Спецификации устройств
 
 Конфигурации устройств хранятся в `devices/spec/*.yaml`:
