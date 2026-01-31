@@ -1,54 +1,36 @@
 //! Менеджер регионов памяти
 //!
-//! Отвечает за знание о свободных и зарезервированных регионах памяти.
-//! Предоставляет hint для HeapAllocator о том, где можно выделить память.
+//! Отвечает за выделение физических страниц и преобразование в виртуальные адреса.
+//! Использует FrameAllocator для выделения смежных страниц.
 
-use crate::memory_range::MemoryRange;
+use crate::frame_allocator::FrameAllocator;
 use crate::virtual_address::VirtualAddress;
-use collections::Vec;
-use core::cmp::max;
-
-/// Максимальное количество регионов
-pub const MAX_REGIONS: usize = 24;
 
 /// Менеджер регионов памяти.
-/// Хранит информацию о свободных и зарезервированных регионах.
+/// Выделяет физические страницы через FrameAllocator и преобразует в VA.
 pub struct RegionManager {
-    /// Свободные регионы
-    regions: Vec<MemoryRange<VirtualAddress>, MAX_REGIONS>,
+    frame_allocator: &'static dyn FrameAllocator,
+    higher_half_base: usize,
 }
 
 impl RegionManager {
-    /// Создать пустой менеджер регионов
-    pub const fn new(regions: Vec<MemoryRange<VirtualAddress>, MAX_REGIONS>) -> Self {
-        Self { regions }
+    /// Создать менеджер регионов
+    pub fn new(
+        frame_allocator: &'static dyn FrameAllocator,
+        higher_half_base: usize,
+    ) -> Self {
+        Self {
+            frame_allocator,
+            higher_half_base,
+        }
     }
 
-    /// Найти свободное место размером >= size, начиная с cursor.
-    /// Пропускает зарезервированные области.
-    pub fn next_free(&self, cursor: VirtualAddress, size: usize) -> Option<VirtualAddress> {
-        for free in self.regions.iter() {
-            // Пропускаем регионы, которые полностью до cursor
-            if free.end() <= cursor {
-                continue;
-            }
-
-            let candidate = max(cursor, free.start());
-
-            // Ищем позицию, не пересекающуюся с reserved
-            loop {
-                let candidate_end = candidate.offset(size);
-
-                // Проверяем, что влезаем в free регион
-                if candidate_end > free.end() {
-                    break; // Не влезаем, переходим к следующему free региону
-                }
-
-                // Нашли подходящее место
-                return Some(candidate);
-            }
-        }
-
-        None
+    /// Выделяет до `max_pages` смежных страниц.
+    /// Возвращает (виртуальный адрес первой страницы, количество страниц).
+    pub fn allocate_pages(&self, max_pages: usize) -> Option<(VirtualAddress, usize)> {
+        let (frame, count) = self.frame_allocator.allocate_pages(max_pages)?;
+        let phys = frame.page_address().as_usize();
+        let va = VirtualAddress::new(phys + self.higher_half_base);
+        Some((va, count))
     }
 }

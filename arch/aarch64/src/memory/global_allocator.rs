@@ -15,7 +15,7 @@ const PHASE_UNINIT: u8 = 0;
 const PHASE_BUMP: u8 = 1;
 const PHASE_HEAP: u8 = 2;
 
-pub type KernelHeapAllocator = HeapAllocator<'static>;
+pub type KernelHeapAllocator = HeapAllocator;
 
 /// Двухфазный глобальный аллокатор ядра
 pub struct GlobalKernelAllocator {

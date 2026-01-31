@@ -260,7 +260,6 @@ impl FrameBitmap {
         None
     }
 
-    #[cfg_attr(not(test), doc(hidden))]
     pub fn is_allocated(&self, frame: Frame) -> bool {
         if !self.is_in_range(frame) {
             return false;
@@ -269,6 +268,64 @@ impl FrameBitmap {
         let pos = self.entry_pos(frame);
         let value = self.read(pos.word);
         (value & (1u64 << pos.bit)) != 0
+    }
+
+    /// Выделяет до `max_count` смежных страниц.
+    /// Возвращает (первый фрейм, количество выделенных).
+    ///
+    /// Алгоритм first-fit: находит первый свободный участок и выделяет
+    /// максимально возможное количество смежных страниц (до max_count).
+    pub fn alloc_contiguous(&mut self, max_count: usize) -> Option<(Frame, usize)> {
+        if max_count == 0 || self.free == 0 {
+            return None;
+        }
+
+        // Ищем первый свободный бит
+        let mut word_idx = 0;
+        while word_idx < self.bitmap.len() && self.bitmap[word_idx] == u64::MAX {
+            word_idx += 1;
+        }
+
+        if word_idx >= self.bitmap.len() {
+            return None;
+        }
+
+        // Находим первый свободный бит в этом слове
+        let first_bit = (!self.bitmap[word_idx]).trailing_zeros() as usize;
+        let start_frame_num = self.base_frame.number() + word_idx * Self::BITS_PER_ENTRY + first_bit;
+
+        // Считаем последовательные свободные биты (до max_count)
+        let mut count = 0;
+        let mut w = word_idx;
+        let mut b = first_bit;
+
+        while count < max_count && w < self.bitmap.len() {
+            let word = self.bitmap[w];
+            while b < Self::BITS_PER_ENTRY && count < max_count {
+                if (word & (1u64 << b)) != 0 {
+                    // Бит занят — прерываем
+                    break;
+                }
+                count += 1;
+                b += 1;
+            }
+            if b < Self::BITS_PER_ENTRY && (self.bitmap[w] & (1u64 << b)) != 0 {
+                break; // Встретили занятый бит
+            }
+            w += 1;
+            b = 0;
+        }
+
+        if count == 0 {
+            return None;
+        }
+
+        // Помечаем биты как занятые
+        let start_frame = Frame::new(start_frame_num);
+        let end_frame = Frame::new(start_frame_num + count);
+        self.set_range_unchecked(start_frame, end_frame);
+
+        Some((start_frame, count))
     }
 
     fn mask_lower(bits: usize) -> u64 {

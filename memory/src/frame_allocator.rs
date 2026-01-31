@@ -2,7 +2,7 @@ use crate::frame::Frame;
 use crate::frame_bitmap::FrameBitmap;
 use crate::memory_range::MemoryRange;
 use crate::physical_address::PageAlignedAddress;
-use collections::{LockCell, MutexCell, Vec};
+use collections::{LockCell, Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Ошибки при работе с фреймами
@@ -35,8 +35,14 @@ pub trait FrameAllocator {
     /// Выделить свободный фрейм
     fn allocate_frame(&self) -> Option<Frame>;
 
+    /// Выделяет до `max_count` смежных страниц.
+    /// Возвращает (первый фрейм, количество выделенных).
+    fn allocate_pages(&self, max_count: usize) -> Option<(Frame, usize)>;
+
     /// Освободить фрейм
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError>;
+
+    fn is_allocated(&self, frame: Frame) -> bool;
 }
 
 pub const MAX_REGIONS: usize = 24;
@@ -72,18 +78,6 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
             regions,
             current_region_index: 0,
             next_frame_hint: AtomicUsize::new(Frame::from(next_frame_hint).number()),
-        }
-    }
-
-    pub fn into_mutex(self) -> PhysicalFrameAllocator<MutexCell<FrameBitmap>> {
-        PhysicalFrameAllocator::<MutexCell<FrameBitmap>> {
-            regions: self
-                .regions
-                .into_iter()
-                .map(|region| MutexCell::new(region.into_inner()))
-                .collect(),
-            current_region_index: self.current_region_index,
-            next_frame_hint: self.next_frame_hint,
         }
     }
 
@@ -197,6 +191,26 @@ impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
         } else {
             // Фрейм находится за пределами управляемого диапазона памяти
             Err(FrameError::OutOfRange)
+        }
+    }
+
+    fn allocate_pages(&self, max_count: usize) -> Option<(Frame, usize)> {
+        for region in &self.regions {
+            let result = region.with_lock(|bitmap| bitmap.alloc_contiguous(max_count));
+            if result.is_some() {
+                return result;
+            }
+        }
+        None
+    }
+
+    fn is_allocated(&self, frame: Frame) -> bool {
+        let region = self.find_containing_region(frame, frame);
+
+        if let Some(region) = region {
+            region.with_lock(|bitmap| bitmap.is_allocated(frame))
+        } else {
+            false
         }
     }
 }

@@ -4,7 +4,6 @@
 //! first-fit со свободным списком и автоматическим расширением кучи.
 
 use crate::region_manager::RegionManager;
-use crate::virtual_address::VirtualAddress;
 use core::alloc::Layout;
 use core::mem::size_of;
 use core::ptr::NonNull;
@@ -84,53 +83,47 @@ impl FreeBlock {
     }
 }
 
-pub struct HeapAllocator<'a> {
+pub struct HeapAllocator {
     /// Голова списка свободных блоков
     free_list_head: Option<NonNull<FreeBlock>>,
 
     /// Текущий размер кучи в байтах
     current_size: usize,
 
-    /// Следующая позиция для расширения кучи
-    cursor: VirtualAddress,
-
-    region_manager: &'a RegionManager,
+    region_manager: &'static RegionManager,
 }
 
-impl<'a> HeapAllocator<'a> {
-    pub fn new(region_manager: &'a RegionManager, start: VirtualAddress) -> Self {
+impl HeapAllocator {
+    pub fn new(region_manager: &'static RegionManager) -> Self {
         HeapAllocator {
             free_list_head: None,
             current_size: 0,
-            cursor: start,
             region_manager,
         }
     }
 
-    /// Увеличивает емкость кучи
-    fn expand(&mut self, expand_size: usize) -> Result<(), AllocationError> {
-        let aligned_size = align_up(expand_size, PAGE_SIZE);
+    /// Увеличивает емкость кучи, выделяя смежные страницы
+    fn expand(&mut self, min_size: usize) -> Result<(), AllocationError> {
+        let mut remaining_pages = align_up(min_size, PAGE_SIZE) / PAGE_SIZE;
 
-        // Получаем подсказку от менеджера регионов - курсор перепрыгивает к ближайшей RAM области
-        let addr = self
-            .region_manager
-            .next_free(self.cursor, aligned_size)
-            .ok_or(AllocationError::OutOfMemory)?;
+        while remaining_pages > 0 {
+            let (addr, pages_allocated) = self
+                .region_manager
+                .allocate_pages(remaining_pages)
+                .ok_or(AllocationError::OutOfMemory)?;
 
-        // Полезный размер блока
-        let block_size = aligned_size - size_of::<FreeBlock>();
+            // Добавляем весь смежный блок как один FreeBlock
+            let block_size = pages_allocated * PAGE_SIZE - size_of::<FreeBlock>();
 
-        unsafe {
-            // Располагаем метаданные по указателю начала блока
-            let block_ptr = addr.as_ptr();
-            *block_ptr = FreeBlock::from_size(block_size);
+            unsafe {
+                let block_ptr: *mut FreeBlock = addr.as_ptr();
+                *block_ptr = FreeBlock::from_size(block_size);
+                self.add_to_free_list(NonNull::new_unchecked(block_ptr));
+            }
 
-            self.add_to_free_list(NonNull::new_unchecked(block_ptr));
+            self.current_size += pages_allocated * PAGE_SIZE;
+            remaining_pages -= pages_allocated;
         }
-
-        // Сдвигаем курсор на следующую позицию
-        self.cursor = addr.offset(aligned_size);
-        self.current_size += aligned_size;
 
         Ok(())
     }

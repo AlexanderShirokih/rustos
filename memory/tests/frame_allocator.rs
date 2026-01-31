@@ -202,71 +202,7 @@ fn reserve_in_gap_between_regions_fails() {
 }
 
 // =============================================================================
-// 5. Метод into_mutex
-// =============================================================================
-
-#[test]
-fn into_mutex_preserves_allocated_state() {
-    // Создаём с NoLockCell
-    let allocator = multi_region_allocator_no_lock(&[(0, 16)]);
-
-    // Выделяем несколько фреймов
-    let f1 = allocator.allocate_frame().unwrap();
-    let f2 = allocator.allocate_frame().unwrap();
-    let f3 = allocator.allocate_frame().unwrap();
-
-    // Конвертируем в MutexCell
-    let mutex_allocator = allocator.into_mutex();
-
-    // Освобождаем один из ранее выделенных - должно работать
-    assert!(mutex_allocator.deallocate_frame(f2).is_ok());
-
-    // Повторное освобождение того же фрейма должно вернуть ошибку
-    assert!(matches!(
-        mutex_allocator.deallocate_frame(f2),
-        Err(FrameError::NotAllocated)
-    ));
-
-    // Должны иметь возможность выделять дальше
-    let f4 = mutex_allocator.allocate_frame().unwrap();
-    assert!(f4.number() != f1.number() && f4.number() != f3.number());
-}
-
-#[test]
-fn into_mutex_preserves_reserved_state() {
-    let allocator = multi_region_allocator_no_lock(&[(0, 32)]);
-
-    // Резервируем диапазон
-    let reserve_start = Frame::new(8);
-    let reserve_end = Frame::new(16);
-    allocator
-        .reserve_frames_exact(reserve_start, reserve_end)
-        .unwrap();
-
-    // Конвертируем
-    let mutex_allocator = allocator.into_mutex();
-
-    // Выделяем все доступные фреймы
-    let mut allocated = HashSet::new();
-    while let Some(frame) = mutex_allocator.allocate_frame() {
-        allocated.insert(frame.number());
-    }
-
-    // Зарезервированные фреймы не должны быть выделены
-    for i in 8..16 {
-        assert!(
-            !allocated.contains(&i),
-            "reserved frame {} should not be allocated",
-            i
-        );
-    }
-
-    // Должно быть выделено 32 - 8 = 24 фрейма
-    assert_eq!(allocated.len(), 24);
-}
-
-// =============================================================================
-// 6. Работа с несколькими регионами
+// 5. Работа с несколькими регионами
 // =============================================================================
 
 #[test]

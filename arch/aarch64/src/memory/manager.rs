@@ -42,8 +42,8 @@ pub struct Prepared {
 }
 
 pub struct Enabled {
-    pub higher_half_base: PageAlignedVirtualAddress,
-    free_heap_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
+    frame_allocator: &'static dyn FrameAllocator,
+    higher_half_base: PageAlignedVirtualAddress,
 }
 
 pub struct MemoryManager<Stage> {
@@ -218,11 +218,11 @@ impl MemoryManager<Prepared> {
         debug!("MemoryManager::enable"; "Setting up linear mapping...");
         self.linear_map(&self.state.frame_allocator, higher_half_base)?;
 
-        // После маппинга можем безопасно разбирать состояние на части.
+        // Разбираем состояние на части
         let Prepared {
             lower_root_pa,
             higher_root_pa,
-            free_heap_regions,
+            frame_allocator,
             ..
         } = self.state;
 
@@ -239,10 +239,13 @@ impl MemoryManager<Prepared> {
             higher_root_pa.as_physical_address(),
         ));
 
+        // Leak frame_allocator для 'static lifetime
+        let frame_allocator: &'static dyn FrameAllocator = Box::leak(Box::new(frame_allocator));
+
         Ok(MemoryManager::<Enabled> {
             state: Enabled {
+                frame_allocator,
                 higher_half_base,
-                free_heap_regions,
             },
         })
     }
@@ -264,13 +267,7 @@ impl MemoryManager<Prepared> {
         //    Heap не маппим целиком, т.к. он перекрывает вложенные регионы
         let all_regions = &self.state.all_regions;
         let non_heap_regions = all_regions.iter().filter(|r| !r.is_heap());
-        let non_heap_count = all_regions.iter().filter(|r| !r.is_heap()).count();
 
-        debug!(
-            "linear_map";
-            "Mapping {} non-heap regions to higher half",
-            non_heap_count
-        );
         for region in non_heap_regions {
             let va = region.virtual_start(higher_half_base_usize);
 
@@ -371,39 +368,13 @@ impl MemoryManager<Enabled> {
     pub fn install(self) -> Result<Self, ()> {
         debug!("MemoryManager<Enabled>::install"; "Setting up heap allocator...");
 
-        // Все регионы теперь в higher half
         let higher_half_base = self.state.higher_half_base.as_usize();
 
-        let free_regions: Vec<MemoryRange<VirtualAddress>, MAX_MEMORY_REGIONS> = self
-            .state
-            .free_heap_regions
-            .iter()
-            .map(|interval| {
-                MemoryRange::new(
-                    VirtualAddress::new(interval.start.as_usize() + higher_half_base),
-                    VirtualAddress::new(interval.end.as_usize() + higher_half_base),
-                )
-            })
-            .collect();
-
-        for region in free_regions.iter() {
-            debug!(
-                "MemoryManager<Enabled>::install";
-                "Free heap VA region: {:#x} - {:#x} ({} bytes)",
-                region.start().as_usize(),
-                region.end().as_usize(),
-                region.end().as_usize() - region.start().as_usize()
-            );
-        }
-
-        let region_manager = RegionManager::new(free_regions);
-
-        // Утекаем RegionManager чтобы получить &'static
+        let region_manager = RegionManager::new(self.state.frame_allocator, higher_half_base);
         let region_manager: &'static RegionManager = Box::leak(Box::new(region_manager));
 
         // Создаём HeapAllocator
-        let allocator =
-            KernelHeapAllocator::new(region_manager, self.state.higher_half_base.into());
+        let allocator = KernelHeapAllocator::new(region_manager);
 
         GLOBAL_ALLOCATOR.switch_to_heap(allocator);
 
