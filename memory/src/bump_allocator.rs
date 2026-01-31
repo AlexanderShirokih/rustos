@@ -22,6 +22,16 @@ impl BumpAllocator {
         self.end - self.start - self.offset
     }
 
+    /// Возвращает диапазон памяти, управляемой аллокатором [start, end)
+    pub fn memory_range(&self) -> (usize, usize) {
+        (self.start, self.end)
+    }
+
+    /// Возвращает диапазон фактически использованной памяти [start, start + offset)
+    pub fn used_range(&self) -> (usize, usize) {
+        (self.start, self.start + self.offset)
+    }
+
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, BumpAllocError> {
         let align = layout.align();
         let size = layout.size();

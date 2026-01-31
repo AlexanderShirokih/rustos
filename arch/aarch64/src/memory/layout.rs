@@ -1,4 +1,5 @@
 use aarch64_paging::mem_flags::MemFlags;
+use aarch64_paging::preset::Mmio;
 use collections::Vec;
 use memory::aligned::{Address, Aligned};
 use memory::memory_range::MemoryRange;
@@ -6,6 +7,23 @@ use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::PageAlignedVirtualAddress;
 
 const MAX_MEMORY_REGIONS: usize = 32;
+
+/// Тег типа региона памяти
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionTag {
+    /// Код ядра (исполняемый, read-only)
+    KernelText,
+    /// Данные ядра (read-write)
+    KernelData,
+    /// Read-only данные ядра
+    KernelRoData,
+    /// Куча (свободная RAM)
+    Heap,
+    /// Device Tree
+    DeviceTree,
+    /// Memory-mapped I/O
+    Mmio,
+}
 
 /// Раскладка физической памяти ядра
 pub struct MemoryLayout {
@@ -30,76 +48,57 @@ impl MemoryLayout {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryRegion<A: Address + Aligned> {
-    pub label: &'static str,
+    pub tag: RegionTag,
     pub start: A,
     pub end: A,
     pub flags: MemFlags,
-    pub va_offset: usize,
 }
 
 impl MemoryRegion<PageAlignedAddress> {
-    pub const HEAP: &'static str = "Heap";
-
-    pub fn new_raw(
-        label: &'static str,
-        start: &u8,
-        end: &u8,
-        flags: MemFlags,
-        va_offset: usize,
-    ) -> Self {
+    /// Создать регион из raw указателей на символы линкера
+    pub fn new_raw(tag: RegionTag, start: &u8, end: &u8, flags: MemFlags) -> Self {
         let start_addr = start as *const u8 as usize;
         let end_addr = end as *const u8 as usize;
 
-        Self::new(label, start_addr, end_addr, flags, va_offset)
+        Self::new(tag, start_addr, end_addr, flags)
     }
 
-    pub const fn new(
-        label: &'static str,
-        start_addr: usize,
-        end_addr: usize,
-        flags: MemFlags,
-        va_offset: usize,
-    ) -> Self {
-        assert!(va_offset % 0x1000 == 0, "va_offset must be aligned to 4KiB");
-
+    /// Создать регион из адресов
+    pub const fn new(tag: RegionTag, start_addr: usize, end_addr: usize, flags: MemFlags) -> Self {
         Self {
-            label,
+            tag,
             flags,
-            va_offset,
             start: PageAlignedAddress::aligned_down(PhysicalAddress::new(start_addr)),
             end: PageAlignedAddress::aligned_up(PhysicalAddress::new(end_addr)),
         }
     }
 
-    pub fn identity(
-        label: &'static str,
-        start_addr: usize,
-        end_addr: usize,
-        flags: MemFlags,
-    ) -> Self {
-        Self::new(label, start_addr, end_addr, flags, 0)
+    pub const fn mmio(start_addr: usize, size: usize) -> Self {
+        Self::new(
+            RegionTag::Mmio,
+            start_addr,
+            start_addr + size,
+            Mmio::flags(),
+        )
     }
 
-    pub fn identity_raw(label: &'static str, start: &u8, end: &u8, flags: MemFlags) -> Self {
-        Self::new_raw(label, start, end, flags, 0)
-    }
-
+    /// Размер региона в байтах
     pub fn size(&self) -> usize {
         self.end.as_usize().saturating_sub(self.start.as_usize())
     }
 
-    pub fn virtual_start(&self) -> PageAlignedVirtualAddress {
-        PageAlignedVirtualAddress::identity(self.start)
-            .offset(self.va_offset)
-            .unwrap()
+    /// Виртуальный адрес в higher half
+    pub fn virtual_start(&self, higher_half_base: usize) -> PageAlignedVirtualAddress {
+        PageAlignedVirtualAddress::from_usize(higher_half_base + self.start.as_usize())
+            .expect("address should be page aligned")
     }
 
     pub fn is_heap(&self) -> bool {
-        self.label == Self::HEAP
+        self.tag == RegionTag::Heap
     }
 
-    pub fn is_identity(&self) -> bool {
-        self.va_offset == 0
+    pub fn is_kernel_code(&self) -> bool {
+        self.tag == RegionTag::KernelText
     }
 }
 

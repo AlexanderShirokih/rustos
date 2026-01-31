@@ -12,10 +12,11 @@ use collections::{NoLockCell, Vec};
 use klog::debug;
 use memory::FrameBitmap;
 use memory::bump_allocator::BumpAllocator;
+use memory::frame::Frame;
 use memory::frame_allocator::{FrameAllocator, PhysicalFrameAllocator};
 use memory::memory_mapper::MemoryMapper;
 use memory::memory_range::MemoryRange;
-use memory::physical_address::PageAlignedAddress;
+use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::region_manager::RegionManager;
 use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 
@@ -24,6 +25,9 @@ const MAX_MEMORY_REGIONS: usize = 24;
 pub struct Early {
     bump_allocator: BumpAllocator,
 }
+
+/// Состояние после установки bump allocator в GLOBAL_ALLOCATOR
+pub struct Installed {}
 
 pub struct Prepared {
     lower_root_pa: PageAlignedAddress,
@@ -40,7 +44,6 @@ pub struct Enabled {
     free_heap_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
 }
 
-/// Центральный менеджер памяти, который владеет всеми компонентами системы памяти.
 pub struct MemoryManager<Stage> {
     state: Stage,
 }
@@ -57,8 +60,13 @@ impl MemoryManager<Early> {
         })
     }
 
-    pub fn install(self) {
+    /// Устанавливает bump allocator и возвращает Installed для цепочки вызовов
+    pub fn install(self) -> MemoryManager<Installed> {
         GLOBAL_ALLOCATOR.init_bump_phase(self.state.bump_allocator);
+
+        MemoryManager::<Installed> {
+            state: Installed {},
+        }
     }
 
     fn create_bump_allocator(
@@ -74,8 +82,10 @@ impl MemoryManager<Early> {
     }
 }
 
-impl MemoryManager<Prepared> {
-    pub fn create(layout: &MemoryLayout) -> Result<Self, MemorySetupError> {
+impl MemoryManager<Installed> {
+    /// Переход в Prepared фазу с учётом bump региона
+    pub fn prepare(self, layout: &MemoryLayout) -> Result<MemoryManager<Prepared>, MemorySetupError> {
+        // Пересчитываем free regions с учётом новых MMIO
         let free_heap_regions =
             get_free_heap_regions(layout).map_err(|_| MemorySetupError::OutOfMemory)?;
 
@@ -84,6 +94,19 @@ impl MemoryManager<Prepared> {
             .map(|interval| MemoryRange::new(interval.start, interval.end));
 
         let frame_allocator = PhysicalFrameAllocator::new(free_heap_regions_iter);
+
+        // Резервируем фактически использованную область bump allocator'а
+        let (bump_start, bump_end) = GLOBAL_ALLOCATOR.bump_used_range();
+        let start_frame = Frame::from(PageAlignedAddress::aligned_down(
+            PhysicalAddress::new(bump_start),
+        ));
+        let end_frame = Frame::from(PageAlignedAddress::aligned_up(
+            PhysicalAddress::new(bump_end),
+        ));
+
+        frame_allocator
+            .reserve_frames_exact(start_frame, end_frame)
+            .map_err(|_| MemorySetupError::OutOfMemory)?;
 
         // Выделяем страницы под корень таблиц страниц
         let lower_root_pa = frame_allocator
@@ -115,12 +138,15 @@ impl MemoryManager<Prepared> {
             },
         })
     }
+}
+
+impl MemoryManager<Prepared> {
 
     pub fn enable(self) -> Result<MemoryManager<Enabled>, MemorySetupError> {
         let higher_half_base =
             PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(HIGHER_HALF_BASE));
 
-        // Отображаем все физическое пространство в ядро.
+        // Отображаем все регионы в higher half, bootstrap identity для kernel code
         self.linear_map(&self.state.frame_allocator, higher_half_base)?;
 
         // После маппинга можем безопасно разбирать состояние на части.
@@ -156,6 +182,7 @@ impl MemoryManager<Prepared> {
         higher_half_base: PageAlignedVirtualAddress,
     ) -> Result<(), MemorySetupError> {
         let heap_flags = Heap::flags();
+        let higher_half_base_usize = higher_half_base.as_usize();
 
         let mut lower_half_mapper =
             Aarch64MemoryMapper::new(frame_allocator, self.state.lower_root_table, heap_flags);
@@ -163,20 +190,33 @@ impl MemoryManager<Prepared> {
         let mut higher_half_mapper =
             Aarch64MemoryMapper::new(frame_allocator, self.state.higher_root_table, heap_flags);
 
+        // 1. Маппим ВСЕ регионы в higher half
         for region in self.state.all_regions.iter() {
-            let va_aligned = region.virtual_start();
+            let va = region.virtual_start(higher_half_base_usize);
 
-            // Выбираем mapper по адресному пространству
-            let mapper = if va_aligned > higher_half_base {
-                &mut higher_half_mapper
-            } else {
-                &mut lower_half_mapper
-            };
-
-            mapper
-                .map_exact(region.start, va_aligned, region.size(), region.flags.bits())
+            higher_half_mapper
+                .map_exact(region.start, va, region.size(), region.flags.bits())
                 .map_err(|_| MemorySetupError::OutOfMemory)?;
         }
+
+        // 2. Bootstrap identity mapping — только kernel code
+        //    Нужен для выполнения кода сразу после включения MMU, до прыжка в higher half
+        let kernel_code = self
+            .state
+            .all_regions
+            .iter()
+            .find(|r| r.is_kernel_code())
+            .ok_or(MemorySetupError::OutOfMemory)?;
+
+        let bootstrap_va = PageAlignedVirtualAddress::identity(kernel_code.start);
+        lower_half_mapper
+            .map_exact(
+                kernel_code.start,
+                bootstrap_va,
+                kernel_code.size(),
+                kernel_code.flags.bits(),
+            )
+            .map_err(|_| MemorySetupError::OutOfMemory)?;
 
         Ok(())
     }
@@ -184,14 +224,17 @@ impl MemoryManager<Prepared> {
 
 impl MemoryManager<Enabled> {
     pub fn install(self) -> Result<Self, ()> {
+        // Все регионы теперь в higher half
+        let higher_half_base = self.state.higher_half_base.as_usize();
+
         let free_regions: Vec<MemoryRange<VirtualAddress>, MAX_MEMORY_REGIONS> = self
             .state
             .free_heap_regions
             .iter()
             .map(|interval| {
                 MemoryRange::new(
-                    VirtualAddress::new(interval.start.as_usize()),
-                    VirtualAddress::new(interval.end.as_usize()),
+                    VirtualAddress::new(interval.start.as_usize() + higher_half_base),
+                    VirtualAddress::new(interval.end.as_usize() + higher_half_base),
                 )
             })
             .collect();
@@ -218,10 +261,8 @@ fn get_free_heap_regions(
 ) -> Result<IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>, ()> {
     let mut free_regions = IntervalSet::<PageAlignedAddress, MAX_MEMORY_REGIONS>::new();
 
-    // Добавляем свободные области
-    let heap_regions = layout
-        .iter()
-        .filter(|region| region.is_heap() && region.is_identity());
+    // Добавляем свободные области (heap-регионы)
+    let heap_regions = layout.iter().filter(|region| region.is_heap());
 
     for heap in heap_regions {
         let result = free_regions.add(heap.start, heap.end);

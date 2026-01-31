@@ -13,10 +13,8 @@ mod memory;
 mod system;
 
 use crate::memory::layout::{MemoryLayout, MemoryRegion};
-use crate::memory::manager::{Early, MemoryManager, Prepared};
-use aarch64_paging::preset::Mmio;
+use crate::memory::manager::{Early, Installed, MemoryManager};
 use alloc::boxed::Box;
-use alloc::fmt;
 use core::arch::{asm, naked_asm};
 use core::hint::spin_loop;
 use fdt::devicetree::DeviceTree;
@@ -120,8 +118,9 @@ fn early_main(dtb: usize) {
         Err(_) => return,
     };
 
-    match MemoryManager::<Early>::create(&memory_layout) {
-        Ok(memory_manager) => memory_manager.install(),
+    // Создаём Early memory manager и устанавливаем bump allocator
+    let early_mm = match MemoryManager::<Early>::create(&memory_layout) {
+        Ok(mm) => mm.install(),
         Err(_) => return,
     };
 
@@ -135,26 +134,21 @@ fn early_main(dtb: usize) {
     info!("Early console set");
 
     for mmio_region in early_registry.mmio_region_requests() {
-        let name = fmt::format(format_args!("mmio@{:#x}", mmio_region.base));
-        memory_layout.add(MemoryRegion::identity(
-            name.leak(),
-            mmio_region.base,
-            mmio_region.base + mmio_region.size,
-            Mmio::flags(),
-        ));
+        memory_layout.add(MemoryRegion::mmio(mmio_region.base, mmio_region.size));
     }
 
     info!("Memory layout:");
     for region in memory_layout.iter() {
         info!(
-            "- \"{}\", from {:#x} to {:#x}",
-            region.label,
+            "- {:?}, from {:#x} to {:#x}",
+            region.tag,
             region.start.as_usize(),
             region.end.as_usize()
         );
     }
 
-    if setup_memory(memory_layout).is_err() {
+    // Передаём early_mm в setup_memory для перехода в Prepared фазу
+    if setup_memory(memory_layout, early_mm).is_err() {
         return;
     }
 
@@ -165,20 +159,24 @@ fn early_main(dtb: usize) {
     }
 }
 
-fn setup_memory(layout: MemoryLayout) -> Result<(), ()> {
-    // Создаем экземпляр менеджера памяти
-    let memory_manager = MemoryManager::<Prepared>::create(&layout)
+fn setup_memory(layout: MemoryLayout, installed_mm: MemoryManager<Installed>) -> Result<(), ()> {
+    // Переходим из Installed в Prepared фазу, резервируя bump region
+    let memory_manager = installed_mm
+        .prepare(&layout)
         .inspect_err(|err| fatal!("Memory setup failed: {:?}", err))
         .map_err(|_| ())?;
     debug!("Memory manager prepared!");
 
-    // Делаем identity mapping и включаем MMU
+    // Маппим higher half и включаем MMU
     let memory_manager = memory_manager
         .enable()
         .inspect_err(|err| fatal!("Unable to enable MMU: {:?}", err))
         .map_err(|_| ())?;
 
-    debug!("MMU enabled!");
+    // Прыжок в higher half — после этого PC указывает на HIGHER_HALF_BASE + PA
+    unsafe { jump_to_higher_half() };
+
+    debug!("MMU enabled, running in higher half!");
 
     memory_manager
         .install()
@@ -187,6 +185,29 @@ fn setup_memory(layout: MemoryLayout) -> Result<(), ()> {
     debug!("Global allocator switched to heap phase");
 
     Ok(())
+}
+
+/// Прыжок с identity адреса на higher half адрес.
+/// После этого PC указывает на HIGHER_HALF_BASE + текущий PA.
+#[unsafe(naked)]
+unsafe extern "C" fn jump_to_higher_half() {
+    use crate::memory::setup::HIGHER_HALF_BASE;
+
+    // Разбиваем HIGHER_HALF_BASE на 16-битные части для movz/movk
+    const HALF_47_32: u64 = ((HIGHER_HALF_BASE as u64) >> 32) & 0xFFFF;
+    const HALF_63_48: u64 = ((HIGHER_HALF_BASE as u64) >> 48) & 0xFFFF;
+
+    naked_asm!(
+        "adr x0, 1f",                      // x0 = адрес метки 1 (identity)
+        "movz x1, #{half_32}, lsl #32",    // x1[47:32]
+        "movk x1, #{half_48}, lsl #48",    // x1[63:48]
+        "add x0, x0, x1",                  // x0 = identity + HIGHER_HALF_BASE
+        "br x0",                           // Прыжок на higher half адрес
+        "1:",                              // Метка — сюда придём уже по higher half адресу
+        "ret",
+        half_32 = const HALF_47_32,
+        half_48 = const HALF_63_48,
+    )
 }
 
 fn bind_early_stdout(device_tree: &DeviceTree, registry: &'static EarlyDriverRegistry) {

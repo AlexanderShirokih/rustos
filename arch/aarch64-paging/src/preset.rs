@@ -49,9 +49,9 @@ impl Heap {
             .sh(Shareability::Inner)
             .ap(Access::KernelRW)
             .attr_index(0) // Normal WB
-            .pxn(false)
+            .pxn(true) // Запрет исполнения из heap
             .uxn(true)
-    } 
+    }
 }
 
 impl Mmio {

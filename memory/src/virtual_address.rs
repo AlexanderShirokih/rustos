@@ -15,7 +15,7 @@ impl VirtualAddress {
         VirtualAddress::new(self.0 + offset)
     }
 
-    const fn as_usize(self) -> usize {
+    pub const fn as_usize(self) -> usize {
         self.0
     }
 

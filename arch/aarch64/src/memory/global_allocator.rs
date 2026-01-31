@@ -1,6 +1,6 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
-use core::mem::{MaybeUninit, size_of};
+use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
 use memory::bump_allocator::BumpAllocator;
@@ -58,6 +58,12 @@ impl GlobalKernelAllocator {
         self.phase.store(PHASE_HEAP, Ordering::Release);
     }
 
+    /// Возвращает фактически использованный диапазон bump allocator'а.
+    /// Должен вызываться только в PHASE_BUMP.
+    pub fn bump_used_range(&self) -> (usize, usize) {
+        self.bump_allocator().used_range()
+    }
+
     fn bump_allocator(&self) -> &mut BumpAllocator {
         unsafe { (*self.bump.get()).assume_init_mut() }
     }
@@ -95,8 +101,8 @@ unsafe impl GlobalAlloc for GlobalKernelAllocator {
                 // Bump-фаза: освобождение памяти - no-op
             }
             PHASE_HEAP => {
-                let bump_start = self.bump.get() as usize;
-                let bump_end = bump_start + size_of::<BumpAllocator>();
+                // Проверяем, не из bump-региона ли этот указатель
+                let (bump_start, bump_end) = self.bump_allocator().memory_range();
                 let ptr_addr = ptr as usize;
 
                 if ptr_addr >= bump_start && ptr_addr < bump_end {
