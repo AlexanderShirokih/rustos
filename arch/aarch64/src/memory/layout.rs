@@ -99,10 +99,6 @@ impl MemoryRegion<PageAlignedAddress> {
         self.tag == RegionTag::Heap
     }
 
-    pub fn is_kernel_code(&self) -> bool {
-        self.tag == RegionTag::KernelText
-    }
-
     pub fn is_kernel(&self) -> bool {
         matches!(
             self.tag,

@@ -177,13 +177,13 @@ fn setup_memory(layout: MemoryLayout, installed_mm: MemoryManager<Installed>) ->
     // Прыжок в higher half — после этого PC указывает на HIGHER_HALF_BASE + PA
     unsafe { jump_to_higher_half() };
 
-    debug!("MMU enabled, running in higher half!");
+    info!("MMU enabled, running in higher half!");
 
     memory_manager
         .install()
         .inspect_err(|_| fatal!("Unable to set heap allocator"))?;
 
-    debug!("Global allocator switched to heap phase");
+    info!("Global allocator switched to heap phase");
 
     Ok(())
 }

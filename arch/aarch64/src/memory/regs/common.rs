@@ -1,4 +1,3 @@
-pub enum EL0 {}
 pub enum EL1 {}
 
 #[macro_export]

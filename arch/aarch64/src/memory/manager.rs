@@ -216,7 +216,6 @@ impl MemoryManager<Prepared> {
         // Отображаем все регионы в higher half, bootstrap identity для kernel code
         debug!("MemoryManager::enable"; "Setting up linear mapping...");
         self.linear_map(&self.state.frame_allocator, higher_half_base)?;
-        debug!("MemoryManager::enable"; "Linear mapping complete");
 
         // После маппинга можем безопасно разбирать состояние на части.
         let Prepared {
@@ -238,8 +237,6 @@ impl MemoryManager<Prepared> {
             lower_root_pa.as_physical_address(),
             higher_root_pa.as_physical_address(),
         ));
-
-        debug!("MemoryManager::enable"; "MMU enabled successfully!");
 
         Ok(MemoryManager::<Enabled> {
             state: Enabled {
@@ -301,11 +298,6 @@ impl MemoryManager<Prepared> {
         }
 
         // 2. Маппим свободные части Heap (free_heap_regions)
-        debug!(
-            "linear_map";
-            "Mapping {} free heap regions",
-            self.state.free_heap_regions.len()
-        );
         for interval in self.state.free_heap_regions.iter() {
             let pa = interval.start;
             let size = interval.end.as_usize() - interval.start.as_usize();
@@ -392,12 +384,6 @@ impl MemoryManager<Enabled> {
                 )
             })
             .collect();
-
-        debug!(
-            "MemoryManager<Enabled>::install";
-            "Converted {} free regions to virtual addresses",
-            free_regions.len()
-        );
 
         for region in free_regions.iter() {
             debug!(
