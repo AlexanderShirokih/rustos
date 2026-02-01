@@ -142,7 +142,7 @@ impl FrameBitmap {
         self.free = self.free.saturating_sub(allocated_count);
     }
 
-    fn set_unchecked(&mut self, frame: Frame) {
+    pub fn set_unchecked(&mut self, frame: Frame) {
         let pos = self.entry_pos(frame);
         self.write(pos.word, |v| v | (1u64 << pos.bit));
     }

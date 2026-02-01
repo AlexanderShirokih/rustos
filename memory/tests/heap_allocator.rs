@@ -5,8 +5,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use memory::frame::Frame;
 use memory::frame_allocator::{FrameAllocator, FrameError, ReserveFrameError};
 use memory::heap_allocator::{AllocationError, HeapAllocator};
+use memory::memory_mapper::{MemoryMapper, MemoryMappingError};
 use memory::physical_address::PageAlignedAddress;
-use memory::region_manager::RegionManager;
+use memory::virtual_address::PageAlignedVirtualAddress;
 
 // =============================================================================
 // Мок-реализация FrameAllocator для тестов
@@ -39,15 +40,19 @@ impl MockFrameAllocator {
             next_page: AtomicUsize::new(0),
         }
     }
+
+    fn aligned_base(&self) -> usize {
+        self.base_addr
+    }
 }
 
 impl FrameAllocator for MockFrameAllocator {
     fn reserve_frames_exact(
         &self,
-        _from_inclusive: Frame,
+        from_inclusive: Frame,
         _to_exclusive: Frame,
     ) -> Result<Frame, ReserveFrameError> {
-        Ok(_from_inclusive)
+        Ok(from_inclusive)
     }
 
     fn allocate_frame(&self) -> Option<Frame> {
@@ -102,6 +107,50 @@ impl FrameAllocator for MockFrameAllocator {
 }
 
 // =============================================================================
+// Мок-реализация MemoryMapper для тестов
+// =============================================================================
+
+/// Мок-маппер памяти для тестов.
+/// В тестах память уже доступна (буфер выделен в адресном пространстве процесса),
+/// поэтому маппинг — это no-op. Просто записываем, что был вызов.
+struct MockMemoryMapper {
+    /// Счётчик вызовов map_exact для отладки
+    map_exact_calls: AtomicUsize,
+}
+
+impl MockMemoryMapper {
+    fn new() -> Self {
+        Self {
+            map_exact_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl MemoryMapper for MockMemoryMapper {
+    fn map(
+        &self,
+        _start_address: &PageAlignedVirtualAddress,
+        _size: usize,
+    ) -> Result<(), MemoryMappingError> {
+        // No-op в тестах — память уже доступна
+        Ok(())
+    }
+
+    fn map_exact(
+        &self,
+        _source_address: PageAlignedAddress,
+        _target_address: PageAlignedVirtualAddress,
+        _size: usize,
+        _mem_flags: u64,
+    ) -> Result<(), MemoryMappingError> {
+        self.map_exact_calls.fetch_add(1, Ordering::Relaxed);
+        // No-op в тестах — память уже доступна
+        // В реальном ядре здесь бы происходил маппинг PA -> VA
+        Ok(())
+    }
+}
+
+// =============================================================================
 // Вспомогательные функции
 // =============================================================================
 
@@ -115,14 +164,20 @@ fn allocate_test_buffer(size: usize) -> &'static mut [u8] {
 /// Создаёт инфраструктуру для тестирования HeapAllocator
 fn create_test_allocator() -> HeapAllocator {
     let buffer = allocate_test_buffer(TEST_HEAP_SIZE);
+    let mock_frame_allocator = MockFrameAllocator::new(buffer);
+    let aligned_base = mock_frame_allocator.aligned_base();
+
     let frame_allocator: &'static dyn FrameAllocator =
-        Box::leak(Box::new(MockFrameAllocator::new(buffer)));
+        Box::leak(Box::new(mock_frame_allocator));
+    let page_mapper: &'static dyn MemoryMapper =
+        Box::leak(Box::new(MockMemoryMapper::new()));
 
-    // higher_half_base = 0, так как мы работаем с реальными адресами буфера
-    let region_manager = RegionManager::new(frame_allocator, 0);
-    let region_manager: &'static RegionManager = Box::leak(Box::new(region_manager));
+    // В тестах PA == VA (буфер в памяти процесса)
+    let heap_start_va = PageAlignedVirtualAddress::from_usize(aligned_base)
+        .expect("should be page aligned");
 
-    HeapAllocator::new(region_manager)
+    // mem_flags = 0, так как MockMemoryMapper их игнорирует
+    HeapAllocator::new(frame_allocator, page_mapper, heap_start_va, 0)
 }
 
 // =============================================================================

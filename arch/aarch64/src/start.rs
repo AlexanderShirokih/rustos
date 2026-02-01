@@ -177,10 +177,12 @@ fn setup_memory(layout: MemoryLayout, installed: MemorySetup<Installed>) -> Resu
         .inspect_err(|err| fatal!("Unable to enable MMU: {:?}", err))
         .map_err(|_| ())?;
 
+    debug!("MMU enabled!");
+
     // Прыжок в higher half — после этого PC указывает на HIGHER_HALF_BASE + PA
     unsafe { jump_to_higher_half() };
 
-    info!("MMU enabled, running in higher half!");
+    info!("Running in higher half");
 
     memory_setup
         .install()

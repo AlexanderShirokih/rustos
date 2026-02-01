@@ -8,7 +8,7 @@ use aarch64_paging::page_table::PageTable;
 use aarch64_paging::preset::Heap;
 use alloc::boxed::Box;
 use collections::interval_set::IntervalSet;
-use collections::{NoLockCell, Vec};
+use collections::{MutexCell, NoLockCell, Vec};
 use klog::{debug, warn};
 use memory::FrameBitmap;
 use memory::RelocatablePtr;
@@ -18,7 +18,6 @@ use memory::frame_allocator::{FrameAllocator, PhysicalFrameAllocator};
 use memory::memory_mapper::MemoryMapper;
 use memory::memory_range::MemoryRange;
 use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
-use memory::region_manager::RegionManager;
 use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 
 pub struct Early {
@@ -43,12 +42,15 @@ pub struct Prepared {
     roots: PageTableRoots,
     frame_allocator: PhysicalFrameAllocator<NoLockCell<FrameBitmap>>,
     all_regions: Vec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
-    free_heap_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
     bump_range: MemoryRegion<PageAlignedAddress>,
+    /// Первый свободный PA для вычисления начального heap VA
+    first_free_pa: PageAlignedAddress,
 }
 
 pub struct Enabled {
     frame_allocator: &'static dyn FrameAllocator,
+    page_mapper: &'static dyn MemoryMapper,
+    heap_start_va: PageAlignedVirtualAddress,
     higher_half_base: PageAlignedVirtualAddress,
 }
 
@@ -132,6 +134,12 @@ impl MemorySetup<Installed> {
             free_heap_regions.remove(region.start, region.end);
         }
 
+        let first_free_pa = free_heap_regions
+            .iter()
+            .next()
+            .map(|interval| interval.start)
+            .ok_or(MemorySetupError::OutOfMemory)?;
+
         free_heap_regions.iter().for_each(|interval| {
             debug!(
                 "MemorySetup::prepare";
@@ -211,8 +219,8 @@ impl MemorySetup<Installed> {
                 roots,
                 frame_allocator,
                 all_regions,
-                free_heap_regions,
                 bump_range,
+                first_free_pa,
             },
         })
     }
@@ -229,7 +237,17 @@ impl MemorySetup<Prepared> {
             HIGHER_HALF_BASE
         );
 
-        // Отображаем все регионы в higher half, bootstrap identity для kernel code
+        let heap_start_va = PageAlignedVirtualAddress::from_usize(
+            HIGHER_HALF_BASE + self.state.first_free_pa.as_usize(),
+        )
+        .expect("heap_start_va should be page aligned");
+
+        debug!(
+            "MemorySetup::enable";
+            "Heap start VA: {:#x}",
+            heap_start_va.as_usize()
+        );
+
         self.linear_map(&self.state.frame_allocator, higher_half_base)?;
 
         // Разбираем состояние на части
@@ -252,12 +270,33 @@ impl MemorySetup<Prepared> {
             roots.higher_pa.as_physical_address(),
         ));
 
+        debug!("MemorySetup::enable"; "MMU enabled successfully");
+
         // Leak frame_allocator для 'static lifetime
-        let frame_allocator: &'static dyn FrameAllocator = Box::leak(Box::new(frame_allocator));
+        let frame_allocator: &'static PhysicalFrameAllocator<NoLockCell<FrameBitmap>> =
+            Box::leak(Box::new(frame_allocator));
+
+        debug!("MemorySetup::enable"; "Allocated frame_allocator");
+
+        // Создаём thread-safe page_mapper для higher half с MutexCell
+        let heap_flags = Heap::flags();
+        let page_mapper: &'static dyn MemoryMapper = Box::leak(Box::new(
+            Aarch64MemoryMapper::<_, MutexCell<_>>::new(
+                frame_allocator,
+                roots.higher_ptr,
+                heap_flags,
+            ),
+        ));
+
+        debug!("MemorySetup::enable"; "Created page_mapper for heap");
+
+        let frame_allocator: &'static dyn FrameAllocator = frame_allocator;
 
         Ok(MemorySetup::<Enabled> {
             state: Enabled {
                 frame_allocator,
+                page_mapper,
+                heap_start_va,
                 higher_half_base,
             },
         })
@@ -270,23 +309,21 @@ impl MemorySetup<Prepared> {
     ) -> Result<(), MemorySetupError> {
         let heap_flags = Heap::flags();
 
-        let mut lower_half_mapper =
-            Aarch64MemoryMapper::new(frame_allocator, self.state.roots.lower_ptr, heap_flags);
-        let mut higher_half_mapper =
-            Aarch64MemoryMapper::new(frame_allocator, self.state.roots.higher_ptr, heap_flags);
+        let lower_half_mapper =
+            Aarch64MemoryMapper::<_, NoLockCell<_>>::new(frame_allocator, self.state.roots.lower_ptr, heap_flags);
+        let higher_half_mapper =
+            Aarch64MemoryMapper::<_, NoLockCell<_>>::new(frame_allocator, self.state.roots.higher_ptr, heap_flags);
 
-        self.map_non_heap_regions(&mut higher_half_mapper, higher_half_base)?;
-        self.map_free_heap_regions(&mut higher_half_mapper, higher_half_base, heap_flags)?;
-        self.map_bootstrap_identity(&mut lower_half_mapper)?;
+        self.map_non_heap_regions(&higher_half_mapper, higher_half_base)?;
+        self.map_bootstrap_identity(&lower_half_mapper)?;
 
         Ok(())
     }
 
     /// Маппит non-heap регионы (KernelText, KernelData, DeviceTree, Mmio и т.д.)
-    /// Heap не маппим целиком, т.к. он перекрывает вложенные регионы
-    fn map_non_heap_regions<FA: FrameAllocator>(
+    fn map_non_heap_regions(
         &self,
-        mapper: &mut Aarch64MemoryMapper<FA>,
+        mapper: &impl MemoryMapper,
         higher_half_base: PageAlignedVirtualAddress,
     ) -> Result<(), MemorySetupError> {
         let higher_half_base_usize = higher_half_base.as_usize();
@@ -320,52 +357,9 @@ impl MemorySetup<Prepared> {
         Ok(())
     }
 
-    /// Маппит свободные части Heap (free_heap_regions)
-    fn map_free_heap_regions<FA: FrameAllocator>(
-        &self,
-        mapper: &mut Aarch64MemoryMapper<FA>,
-        higher_half_base: PageAlignedVirtualAddress,
-        heap_flags: aarch64_paging::mem_flags::MemFlags,
-    ) -> Result<(), MemorySetupError> {
-        let higher_half_base_usize = higher_half_base.as_usize();
-
-        for interval in self.state.free_heap_regions.iter() {
-            let pa = interval.start;
-            let size = interval.end.as_usize() - interval.start.as_usize();
-            let va = PageAlignedVirtualAddress::from_usize(higher_half_base_usize + pa.as_usize())
-                .expect("address should be page aligned");
-
-            debug!(
-                "map_free_heap_regions";
-                "Mapping free heap: PA {:#x} -> VA {:#x}, size={:#x}",
-                pa.as_usize(),
-                va.as_usize(),
-                size
-            );
-
-            mapper
-                .map_exact(pa, va, size, heap_flags.bits())
-                .map_err(|e| {
-                    warn!(
-                        "map_free_heap_regions";
-                        "Failed to map free heap at PA {:#x}: {:?}",
-                        pa.as_usize(),
-                        e
-                    );
-                    MemorySetupError::MappingFailed(e)
-                })?;
-        }
-
-        Ok(())
-    }
-
-    /// Bootstrap identity mapping — kernel регионы + bump allocator range + MMIO
+    /// Bootstrap identity mapping — kernel регионы + bump allocator range + MMIO.
     /// Нужен для выполнения кода сразу после включения MMU, до прыжка в higher half.
-    /// MMIO нужен для вывода отладки между включением MMU и прыжком в higher half.
-    fn map_bootstrap_identity<FA: FrameAllocator>(
-        &self,
-        mapper: &mut Aarch64MemoryMapper<FA>,
-    ) -> Result<(), MemorySetupError> {
+    fn map_bootstrap_identity(&self, mapper: &impl MemoryMapper) -> Result<(), MemorySetupError> {
         let identity_regions = self
             .state
             .all_regions
@@ -384,12 +378,7 @@ impl MemorySetup<Prepared> {
 
             let bootstrap_va = PageAlignedVirtualAddress::identity(region.start);
             mapper
-                .map_exact(
-                    region.start,
-                    bootstrap_va,
-                    region.size(),
-                    region.flags.bits(),
-                )
+                .map_exact(region.start, bootstrap_va, region.size(), region.flags.bits())
                 .map_err(|e| {
                     warn!(
                         "map_bootstrap_identity";
@@ -408,18 +397,24 @@ impl MemorySetup<Enabled> {
     pub fn install(self) -> Result<Self, ()> {
         debug!("MemorySetup<Enabled>::install"; "Setting up heap allocator...");
 
-        let higher_half_base = self.state.higher_half_base.as_usize();
+        let allocator = KernelHeapAllocator::new(
+            self.state.frame_allocator,
+            self.state.page_mapper,
+            self.state.heap_start_va,
+            Heap::flags().bits(),
+        );
 
-        let region_manager = RegionManager::new(self.state.frame_allocator, higher_half_base);
-        let region_manager: &'static RegionManager = Box::leak(Box::new(region_manager));
-
-        // Создаём HeapAllocator
-        let allocator = KernelHeapAllocator::new(region_manager);
+        debug!(
+            "MemorySetup<Enabled>::install";
+            "HeapAllocator created with heap_start_va={:#x}",
+            self.state.heap_start_va.as_usize()
+        );
 
         GLOBAL_ALLOCATOR.switch_to_heap(allocator);
 
         // Переключаем логгер на higher half
         if let Some(writer) = klog::get_early_writer() {
+            let higher_half_base = self.state.higher_half_base.as_usize();
             let new_writer = unsafe { RelocatablePtr::new(writer).relocated(higher_half_base) };
             klog::set_stdout(new_writer);
         }

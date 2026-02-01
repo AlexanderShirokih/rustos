@@ -13,13 +13,13 @@ pub enum MemoryMappingError {
 pub trait MemoryMapper {
     /// Отобразить физические фреймы в виртуальную память для кучи
     fn map(
-        &mut self,
+        &self,
         start_address: &PageAlignedVirtualAddress,
         size: usize,
     ) -> Result<(), MemoryMappingError>;
 
     fn map_exact(
-        &mut self,
+        &self,
         source_address: PageAlignedAddress,
         target_address: PageAlignedVirtualAddress,
         size: usize,

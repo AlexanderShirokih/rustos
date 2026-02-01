@@ -45,6 +45,9 @@ cargo xtask build devices/spec/qemu-aarch64.yaml --debug
 ```bash
 cargo check --workspace   # проверка кода
 cargo test --workspace    # запуск тестов
+
+# Сборка отдельного пакета для целевой архитектуры
+cargo build --package arch-aarch64 --target aarch64-unknown-none
 ```
 
 ## Спецификации устройств

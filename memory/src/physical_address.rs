@@ -122,6 +122,10 @@ impl<const SHIFT: u8> AlignedPhysicalAddress<SHIFT> {
         self.0
     }
 
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0usize
+    }
+
     pub const fn as_physical_address(self) -> PhysicalAddress {
         PhysicalAddress(self.0)
     }

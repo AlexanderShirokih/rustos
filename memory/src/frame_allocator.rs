@@ -66,13 +66,30 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
     {
         let regions: Vec<L, MAX_REGIONS> = memory
             .map(|range| L::new(FrameBitmap::new(range)))
+            .inspect(|region| {
+                region.with_lock(|bitmap| {
+                    // Резервируем нулевой фрейм, чтобы адрес 0x0 оставался маркером
+                    // невалидного указателя
+                    let start = bitmap.start();
+                    if start.is_zero() {
+                        bitmap.set_unchecked(Frame::from(start))
+                    }
+                })
+            })
             .collect();
 
         let next_frame_hint = regions
             .iter()
             .next()
             .expect("Managed memory regions should not be empty")
-            .with_lock(|bitmap| bitmap.start());
+            .with_lock(|bitmap| {
+                let start = bitmap.start();
+                if start.is_zero() {
+                    start.next_aligned()
+                } else {
+                    start
+                }
+            });
 
         Self {
             regions,
@@ -177,6 +194,16 @@ impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
         None
     }
 
+    fn allocate_pages(&self, max_count: usize) -> Option<(Frame, usize)> {
+        for region in &self.regions {
+            let result = region.with_lock(|bitmap| bitmap.alloc_contiguous(max_count));
+            if result.is_some() {
+                return result;
+            }
+        }
+        None
+    }
+
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {
         // Передаём эксклюзивную границу frame.add(1) для одного фрейма
         let target_region = self.find_containing_region(frame, frame.add(1));
@@ -192,16 +219,6 @@ impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
             // Фрейм находится за пределами управляемого диапазона памяти
             Err(FrameError::OutOfRange)
         }
-    }
-
-    fn allocate_pages(&self, max_count: usize) -> Option<(Frame, usize)> {
-        for region in &self.regions {
-            let result = region.with_lock(|bitmap| bitmap.alloc_contiguous(max_count));
-            if result.is_some() {
-                return result;
-            }
-        }
-        None
     }
 
     fn is_allocated(&self, frame: Frame) -> bool {
