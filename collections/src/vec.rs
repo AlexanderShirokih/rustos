@@ -17,6 +17,15 @@ impl<T, const N: usize> Vec<T, N> {
     pub fn len(&self) -> usize {
         self.len
     }
+}
+
+impl<T, const N: usize> Default for Vec<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, const N: usize> Vec<T, N> {
 
     pub fn is_empty(&self) -> bool {
         self.len == 0

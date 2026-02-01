@@ -64,8 +64,8 @@ impl<'a> Crlf<'a> {
         let mut buf = [0u8; 4];
         let (written, consumed) = self.fill(&mut buf);
         let mut w: u32 = 0;
-        for i in 0..written {
-            w |= (buf[i] as u32) << (i * 8);
+        for (i, &byte) in buf.iter().enumerate().take(written) {
+            w |= (byte as u32) << (i * 8);
         }
         (w, written, consumed)
     }

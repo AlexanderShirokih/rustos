@@ -36,7 +36,7 @@ pub struct AlignedVirtualAddress<const SHIFT: u8>(VirtualAddress);
 
 impl<const SHIFT: u8> AlignedVirtualAddress<SHIFT> {
     pub const fn new(address: VirtualAddress) -> Option<Self> {
-        if address.0 % Self::ALIGNMENT == 0 {
+        if address.0.is_multiple_of(Self::ALIGNMENT) {
             Some(Self(address))
         } else {
             None
@@ -60,7 +60,7 @@ impl<const SHIFT: u8> AlignedVirtualAddress<SHIFT> {
     }
 
     pub const fn from_usize(address: usize) -> Option<Self> {
-        if address % Self::ALIGNMENT == 0 {
+        if address.is_multiple_of(Self::ALIGNMENT) {
             Some(Self(VirtualAddress(address)))
         } else {
             None
@@ -84,9 +84,9 @@ impl<const SHIFT: u8> Aligned for AlignedVirtualAddress<SHIFT> {
     const ALIGNMENT: usize = 1usize << SHIFT;
 }
 
-impl<const SHIFT: u8> Into<VirtualAddress> for AlignedVirtualAddress<SHIFT> {
-    fn into(self) -> VirtualAddress {
-        self.0
+impl<const SHIFT: u8> From<AlignedVirtualAddress<SHIFT>> for VirtualAddress {
+    fn from(val: AlignedVirtualAddress<SHIFT>) -> Self {
+        val.0
     }
 }
 

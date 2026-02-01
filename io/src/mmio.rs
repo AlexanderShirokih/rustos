@@ -1,6 +1,12 @@
 use core::marker::PhantomData;
 
 /// Типы, допустимые для volatile-доступа (целые 8/16/32/64).
+///
+/// # Safety
+///
+/// Реализации должны гарантировать, что тип:
+/// - Имеет размер и выравнивание, поддерживаемые для volatile операций (1/2/4/8 байт)
+/// - Безопасен для побитового чтения/записи (не содержит padding или инвариантов)
 pub unsafe trait VolatileInt: Copy {}
 unsafe impl VolatileInt for u8 {}
 unsafe impl VolatileInt for u16 {}

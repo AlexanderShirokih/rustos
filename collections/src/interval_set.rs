@@ -54,6 +54,12 @@ impl<T, const N: usize> IntervalSet<T, N> {
     }
 }
 
+impl<T, const N: usize> Default for IntervalSet<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Ord + Copy, const N: usize> IntervalSet<T, N> {
     pub fn len(&self) -> usize {
         self.ranges.len()
@@ -155,17 +161,17 @@ impl<T: Ord + Copy, const N: usize> IntervalSet<T, N> {
             }
 
             // Left remainder: [r.start, cut.start)
-            if r.start < cut.start {
-                if let Some(left) = Interval::new(r.start, cut.start) {
-                    out.push(left)?;
-                }
+            if r.start < cut.start
+                && let Some(left) = Interval::new(r.start, cut.start)
+            {
+                out.push(left)?;
             }
 
             // Right remainder: [cut.end, r.end)
-            if cut.end < r.end {
-                if let Some(right) = Interval::new(cut.end, r.end) {
-                    out.push(right)?;
-                }
+            if cut.end < r.end
+                && let Some(right) = Interval::new(cut.end, r.end)
+            {
+                out.push(right)?;
             }
         }
 

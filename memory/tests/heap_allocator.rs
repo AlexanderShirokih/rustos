@@ -192,10 +192,8 @@ fn allocate_returns_valid_pointer() {
     let result = allocator.allocate(layout);
 
     assert!(result.is_ok(), "allocation should succeed");
-    let ptr = result.unwrap();
-
-    // Проверяем, что указатель не нулевой
-    assert!(!ptr.as_ptr().is_null(), "pointer should not be null");
+    // NonNull гарантирует, что указатель не нулевой
+    let _ptr = result.unwrap();
 }
 
 #[test]
@@ -314,9 +312,8 @@ fn deallocate_allows_reuse() {
     allocator.deallocate(ptr1);
 
     // Выделяем снова - должно переиспользовать освобождённую память
-    let ptr2 = allocator.allocate(layout).unwrap();
-
-    assert!(!ptr2.as_ptr().is_null(), "should be able to allocate after deallocation");
+    // NonNull гарантирует, что указатель не нулевой
+    let _ptr2 = allocator.allocate(layout).unwrap();
 }
 
 #[test]

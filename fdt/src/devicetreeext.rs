@@ -20,7 +20,7 @@ impl AddressSpace {
 }
 
 /// Адресное пространство шины
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct Ranges {
     /// Адрес устройства в координатах шины
     child: usize,
@@ -43,16 +43,6 @@ impl Ranges {
 
     pub fn size(&self) -> usize {
         self.size
-    }
-}
-
-impl Default for Ranges {
-    fn default() -> Self {
-        Self {
-            child: 0,
-            parent: 0,
-            size: 0,
-        }
     }
 }
 
@@ -91,9 +81,8 @@ pub trait NodeExt {
 
 impl NodeExt for Node<'_> {
     fn is_compatible(&self, name: &str) -> bool {
-        self.prop("compatible").map_or(false, |prop| {
-            prop.into_string_list_iter().any(|s| s == name)
-        })
+        self.prop("compatible")
+            .is_some_and(|prop| prop.into_string_list_iter().any(|s| s == name))
     }
 
     fn try_get_range(&self, parent_cells_size: CellsSize) -> Option<Ranges> {

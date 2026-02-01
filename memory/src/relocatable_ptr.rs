@@ -17,7 +17,10 @@ impl<T: ?Sized> RelocatablePtr<T> {
     }
 
     /// Релоцирует указатель на заданное смещение.
-    /// Safety: память по новому адресу должна быть замаплена.
+    ///
+    /// # Safety
+    ///
+    /// Память по новому адресу должна быть замаплена и содержать валидный объект типа T.
     pub unsafe fn relocated(self, offset: usize) -> &'static T {
         // Fat pointer = [data_ptr, vtable_ptr]
         let relocated_raw = [self.raw[0] + offset, self.raw[1] + offset];

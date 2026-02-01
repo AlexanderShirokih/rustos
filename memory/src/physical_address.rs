@@ -56,6 +56,7 @@ impl PhysicalAddress {
     }
 
     #[inline]
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(self, x: usize) -> Self {
         Self(self.0 - x)
     }
@@ -86,7 +87,7 @@ pub struct AlignedPhysicalAddress<const SHIFT: u8>(usize);
 
 impl<const SHIFT: u8> AlignedPhysicalAddress<SHIFT> {
     pub const fn new(address: PhysicalAddress) -> Option<Self> {
-        if address.0 % Self::ALIGNMENT == 0 {
+        if address.0.is_multiple_of(Self::ALIGNMENT) {
             Some(Self(address.0))
         } else {
             None
@@ -94,7 +95,7 @@ impl<const SHIFT: u8> AlignedPhysicalAddress<SHIFT> {
     }
 
     pub const fn from_usize(address: usize) -> Option<Self> {
-        if address % Self::ALIGNMENT == 0 {
+        if address.is_multiple_of(Self::ALIGNMENT) {
             Some(Self(address))
         } else {
             None

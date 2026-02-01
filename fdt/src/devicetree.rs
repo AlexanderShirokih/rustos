@@ -392,8 +392,8 @@ impl<'a> DeviceTreeWalker<'a> {
         ValueNode::Node(Node::<'a> {
             name,
             offset,
-            header: &self.header,
-            buffer: &self.cursor.buffer,
+            header: self.header,
+            buffer: self.cursor.buffer,
         })
     }
 

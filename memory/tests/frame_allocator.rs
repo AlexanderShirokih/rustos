@@ -1,6 +1,6 @@
 mod common;
 
-use collections::{MutexCell, NoLockCell};
+use collections::MutexCell;
 use common::make_range;
 use memory::frame::Frame;
 use memory::frame_allocator::{
@@ -31,16 +31,6 @@ fn multi_region_allocator(
     PhysicalFrameAllocator::new(ranges.into_iter())
 }
 
-fn multi_region_allocator_no_lock(
-    regions: &[(usize, usize)],
-) -> PhysicalFrameAllocator<NoLockCell<FrameBitmap>> {
-    let ranges: Vec<_> = regions
-        .iter()
-        .map(|(start, count)| make_range(*start, *count))
-        .collect();
-    PhysicalFrameAllocator::new(ranges.into_iter())
-}
-
 // =============================================================================
 // 1. Создание и инициализация
 // =============================================================================
@@ -64,6 +54,27 @@ fn new_with_multiple_regions_succeeds() {
 fn new_panics_on_empty_regions() {
     let _: PhysicalFrameAllocator<MutexCell<FrameBitmap>> =
         PhysicalFrameAllocator::new(std::iter::empty());
+}
+
+#[test]
+fn frame_zero_is_reserved_automatically() {
+    // Регион начинается с 0, но фрейм 0 должен быть зарезервирован
+    let allocator = single_region_allocator(0, 16);
+
+    // Фрейм 0 должен быть помечен как allocated (зарезервирован)
+    assert!(
+        allocator.is_allocated(Frame::new(0)),
+        "frame 0 should be reserved automatically to keep 0x0 as invalid pointer"
+    );
+
+    // Все аллокации должны возвращать фреймы != 0
+    for _ in 0..15 {
+        let frame = allocator.allocate_frame().unwrap();
+        assert_ne!(frame.number(), 0, "frame 0 should never be allocated");
+    }
+
+    // После выделения всех 15 фреймов (1-15), следующая аллокация вернёт None
+    assert!(allocator.allocate_frame().is_none());
 }
 
 // =============================================================================
@@ -207,13 +218,13 @@ fn reserve_in_gap_between_regions_fails() {
 
 #[test]
 fn multi_region_allocates_from_first_region_initially() {
-    let allocator = multi_region_allocator(&[(0, 8), (100, 8), (200, 8)]);
+    let allocator = multi_region_allocator(&[(10, 8), (100, 8), (200, 8)]);
 
-    // Первые аллокации должны быть из первого региона
+    // Первые аллокации должны быть из первого региона (фреймы 10-17)
     for _ in 0..8 {
         let frame = allocator.allocate_frame().unwrap();
         assert!(
-            frame.number() < 8,
+            frame.number() >= 10 && frame.number() < 18,
             "initial allocations should come from first region, got frame {}",
             frame.number()
         );

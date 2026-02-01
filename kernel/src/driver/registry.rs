@@ -22,6 +22,12 @@ pub struct DriverRegistry {
     devices: Vec<Box<dyn Device>>,
 }
 
+impl Default for DriverRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'dt> DriverRegistry {
     pub fn new() -> Self {
         Self {

@@ -14,6 +14,12 @@ pub struct EarlyDriverRegistry {
     mmio_requests: Vec<MmioRequest>,
 }
 
+impl Default for EarlyDriverRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EarlyDriverRegistry {
     pub fn new() -> Self {
         Self {
@@ -26,23 +32,19 @@ impl EarlyDriverRegistry {
         &self.mmio_requests
     }
 
-    pub fn get(&self, key: &NodeKey) -> Option<&Box<dyn EarlyDriver>> {
-        self.handles.get(key)
+    pub fn get(&self, key: &NodeKey) -> Option<&dyn EarlyDriver> {
+        self.handles.get(key).map(|b| b.as_ref())
     }
 
     pub fn scan_and_probe(&mut self, dt: &DeviceTree<'_>) {
-        match dt.root() {
-            Some(root) => {
-                let mut paths = Vec::<Node>::new();
-                self.visit_node(&mut paths, &root);
-            }
-
-            None => return,
+        if let Some(root) = dt.root() {
+            let mut paths = Vec::<Node>::new();
+            self.visit_node(&mut paths, &root);
         }
     }
 
     fn visit_node<'a>(&mut self, paths: &mut Vec<Node<'a>>, node: &Node<'a>) {
-        paths.push(node.clone());
+        paths.push(*node);
 
         if node.prop("compatible").is_some() {
             let mut context = ProbeContext {
@@ -70,10 +72,10 @@ impl EarlyDriverRegistry {
                     mmio_requests: &mut self.mmio_requests,
                 };
 
-                if !self.handles.contains_key(&key) {
-                    if driver.init(context).is_ok() {
-                        self.handles.insert(key, driver);
-                    }
+                if let alloc::collections::btree_map::Entry::Vacant(e) = self.handles.entry(key)
+                    && driver.init(context).is_ok()
+                {
+                    e.insert(driver);
                 }
             }
         }
@@ -112,11 +114,11 @@ pub struct ProbeContext<'a> {
 
 impl<'a> ProbeContext<'a> {
     pub fn node(&self) -> &Node<'_> {
-        &self.node
+        self.node
     }
 
     pub fn hierarchy(&self) -> &[Node<'_>] {
-        &self.hierarchy
+        self.hierarchy
     }
 
     pub fn parent(&self, node: &Node) -> Option<&'a Node<'a>> {
