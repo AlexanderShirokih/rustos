@@ -137,7 +137,6 @@ fn early_main(dtb: usize) {
     let early_registry: &'static EarlyDriverRegistry = Box::leak(Box::new(early_registry));
 
     bind_early_stdout(&device_tree, early_registry);
-    info!("Early console set");
 
     let mmio_requests: Vec<_> = early_registry
         .mmio_region_requests()
@@ -148,8 +147,6 @@ fn early_main(dtb: usize) {
     if setup_memory(mmio_requests, early_setup).is_err() {
         return;
     }
-
-    debug!("Early stage setup done!");
 
     // Основная платформозависимая настройка завершена. Переходим к общей точке входа
     kmain();
@@ -168,7 +165,6 @@ fn setup_memory(
         .prepare(mmio)
         .inspect_err(|err| fatal!("Memory setup failed: {:?}", err))
         .map_err(|_| ())?;
-    debug!("Memory setup prepared!");
 
     // Маппим higher half и включаем MMU
     let higher_half_base =

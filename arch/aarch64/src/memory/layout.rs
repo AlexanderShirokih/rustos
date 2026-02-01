@@ -119,10 +119,6 @@ impl MemoryRegion<PageAlignedAddress> {
     pub fn is_heap(&self) -> bool {
         self.tag == RegionTag::Heap
     }
-
-    pub fn is_kernel(&self) -> bool {
-        self.tag == RegionTag::Kernel
-    }
 }
 
 impl<A: Address + Aligned> Into<MemoryRange<A>> for MemoryRegion<A> {

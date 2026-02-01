@@ -6,7 +6,7 @@ use aarch64_paging::level::L0;
 use aarch64_paging::page_table::PageTable;
 use aarch64_paging::preset::Heap;
 use alloc::boxed::Box;
-use alloc::vec::{IntoIter, Vec};
+use alloc::vec::Vec;
 use collections::NoLockCell;
 use collections::Vec as StaticVec;
 use collections::interval_set::IntervalSet;
@@ -152,12 +152,6 @@ impl MemorySetup<Installed> {
         let bump_start = PageAlignedAddress::aligned_down(bump_used.start());
         let bump_end = PageAlignedAddress::aligned_up(bump_used.end());
 
-        for region in mmio.iter() {
-            frame_allocator
-                .reserve_frames_exact(region.start.into(), region.end.into())
-                .expect("Cannot reserve MMIO memory");
-        }
-
         frame_allocator
             .reserve_frames_exact(bump_start.into(), bump_end.into())
             .expect("Cannot reserve bump allocator memory");
@@ -186,9 +180,26 @@ impl MemorySetup<Installed> {
             Heap::flags(),
         );
 
-        let all_regions = layout
-            .iter()
-            .cloned()
+        // Вычиляем точно незанятые области RAM
+        let mut mapping_heap_regions = free_regions.clone();
+        mapping_heap_regions
+            .remove(bump_start, bump_end)
+            .expect("Failed to remove bump from heap regions");
+
+        let heap_regions = mapping_heap_regions.iter().map(|interval| {
+            MemoryRegion::new(
+                RegionTag::Heap,
+                interval.start.as_usize(),
+                interval.end.as_usize(),
+                Heap::flags(),
+            )
+        });
+
+        // Области, которые нужно замапить со своими флагами
+        let non_heap_regions = layout.iter().filter(|r| !r.is_heap()).cloned();
+
+        let all_regions = heap_regions
+            .chain(non_heap_regions)
             .chain(mmio.iter().cloned())
             .chain(core::iter::once(bump_range))
             .collect::<StaticVec<_, MAX_MEMORY_REGIONS>>();
@@ -228,8 +239,8 @@ impl MemorySetup<Prepared> {
         debug!(
             "MemorySetup::enable";
             "Enabling MMU with TTBR0={:#x}, TTBR1={:#x}",
-            roots.lower_pa.as_usize(),
-            roots.higher_pa.as_usize()
+            roots.lower_pa,
+            roots.higher_pa
         );
 
         // Включаем Memory Management Unit (MMU)
@@ -272,14 +283,13 @@ impl MemorySetup<Prepared> {
         // Маппим все регионы линейно: VA = higher_half_base + PA
         Self::map_higher_half_impl(&higher_half_mapper, all_regions, higher_half_base)?;
 
-        let identity_regions: Vec<_> = all_regions
+        // Маппим регионы, к которым нужен identity доступ после включения MMU.
+        // Используем итератор напрямую без аллокации Vec (bump allocator заморожен)
+        let identity_regions = all_regions
             .iter()
             .filter(|region| !region.is_heap())
-            .cloned()
-            .collect();
-
-        // Маппим регоины, к которым нужен identity доступ после включения MMU
-        Self::map_identity_impl(&lower_half_mapper, identity_regions.into_iter())?;
+            .cloned();
+        Self::map_identity_impl(&lower_half_mapper, identity_regions)?;
 
         Ok(())
     }
@@ -296,7 +306,7 @@ impl MemorySetup<Prepared> {
             let va = region.virtual_start(higher_half_base_usize);
 
             debug!(
-                "map_all_regions";
+                "map_higher_half";
                 "Mapping {:?}: PA {:#x} -> VA {:#x}, size={:#x}",
                 region.tag,
                 region.start.as_usize(),
@@ -308,7 +318,7 @@ impl MemorySetup<Prepared> {
                 .map_exact(region.start, va, region.size(), region.flags.bits())
                 .map_err(|e| {
                     warn!(
-                        "map_all_regions";
+                        "map_higher_half";
                         "Failed to map {:?} at PA {:#x}: {:?}",
                         region.tag,
                         region.start,
@@ -325,12 +335,12 @@ impl MemorySetup<Prepared> {
     /// Нужен для выполнения кода сразу после включения MMU, до прыжка в higher half.
     fn map_identity_impl(
         mapper: &impl MemoryMapper,
-        identity_regions: IntoIter<MemoryRegion<PageAlignedAddress>>,
+        identity_regions: impl Iterator<Item = MemoryRegion<PageAlignedAddress>>,
     ) -> Result<(), MemorySetupError> {
         for region in identity_regions {
             debug!(
-                "map_bootstrap_identity";
-                "Bootstrap identity for {:?}: PA {:#x}, size={:#x}",
+                "map_identity";
+                "Identity for {:?}: PA {:#x}, size={:#x}",
                 region.tag, region.start, region.size()
             );
 
@@ -344,7 +354,7 @@ impl MemorySetup<Prepared> {
                 )
                 .map_err(|e| {
                     warn!(
-                        "map_bootstrap_identity";
+                        "map_identity";
                         "Failed to map bootstrap identity for {:?}: {:?}",
                         region.tag, e
                     );
@@ -372,47 +382,13 @@ impl MemorySetup<Enabled> {
 
         GLOBAL_ALLOCATOR.set_heap(allocator);
 
-        // #region agent log [Hypothesis A]
-        debug!(
-            "MemorySetup<Enabled>::install";
-            "set_heap done, higher_half_base={:#x}",
-            self.state.higher_half_base
-        );
-        // #endregion
-
         // Переключаем логгер на higher half
         if let Some(writer) = klog::get_early_writer() {
-            // #region agent log [Hypothesis A]
-            // Проверяем адрес writer до релокации
-            let writer_ptr = writer as *const _ as *const u8 as usize;
-            debug!(
-                "MemorySetup<Enabled>::install";
-                "early_writer identity addr={:#x}, will relocate to {:#x}",
-                writer_ptr,
-                writer_ptr + higher_half_base.as_usize()
-            );
-            // #endregion
-
             let new_writer =
                 unsafe { RelocatablePtr::new(writer).relocated(higher_half_base.as_virtual()) };
 
-            // #region agent log [Hypothesis A]
-            debug!(
-                "MemorySetup<Enabled>::install";
-                "About to call set_stdout with relocated writer"
-            );
-            // #endregion
-
             klog::set_stdout(new_writer);
-
-            // #region agent log [Hypothesis A]
-            debug!("MemorySetup<Enabled>::install"; "set_stdout completed");
-            // #endregion
         }
-
-        // #region agent log [Hypothesis A]
-        debug!("MemorySetup<Enabled>::install"; "install() returning Ok");
-        // #endregion
 
         Ok(self)
     }

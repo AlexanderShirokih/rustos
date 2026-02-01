@@ -304,3 +304,149 @@ fn reserve_in_second_region_works() {
     // 16 + 16 - 4 = 28 фреймов
     assert_eq!(allocated.len(), 28);
 }
+
+// =============================================================================
+// 6. allocate_frames() — выделение нескольких смежных фреймов
+// =============================================================================
+
+#[test]
+fn allocate_frames_returns_contiguous_frames() {
+    let allocator = single_region_allocator(0, 64);
+
+    // Запрашиваем 8 смежных фреймов
+    let result = allocator.allocate_frames(8);
+    assert!(result.is_some(), "should allocate 8 contiguous frames");
+
+    let (first_frame, count) = result.unwrap();
+    assert_eq!(count, 8, "should return exactly 8 frames");
+
+    // Проверяем, что все фреймы помечены как allocated
+    for i in 0..8 {
+        let frame = Frame::new(first_frame.number() + i);
+        assert!(
+            allocator.is_allocated(frame),
+            "frame {} should be allocated",
+            frame.number()
+        );
+    }
+
+    // Следующие фреймы не должны быть затронуты
+    let next_frame = Frame::new(first_frame.number() + 8);
+    assert!(
+        !allocator.is_allocated(next_frame),
+        "frame after allocated range should be free"
+    );
+}
+
+#[test]
+fn allocate_frames_returns_less_when_not_enough() {
+    // Регион с 10 фреймами (фрейм 0 зарезервирован, остаётся 9)
+    let allocator = single_region_allocator(0, 10);
+
+    // Запрашиваем 100 фреймов, но доступно только 9
+    let result = allocator.allocate_frames(100);
+    assert!(result.is_some(), "should return available frames");
+
+    let (first_frame, count) = result.unwrap();
+    // Должно вернуть максимум 9 (10 - зарезервированный фрейм 0)
+    assert!(
+        count <= 9,
+        "should return at most 9 frames (10 - reserved frame 0), got {}",
+        count
+    );
+    assert!(count > 0, "should return at least some frames");
+
+    // Проверяем, что фреймы действительно выделены
+    for i in 0..count {
+        let frame = Frame::new(first_frame.number() + i);
+        assert!(
+            allocator.is_allocated(frame),
+            "frame {} should be allocated",
+            frame.number()
+        );
+    }
+}
+
+#[test]
+fn allocate_frames_returns_none_when_exhausted() {
+    let allocator = single_region_allocator(0, 16);
+
+    // Выделяем все фреймы по одному
+    while allocator.allocate_frame().is_some() {}
+
+    // Теперь allocate_frames должен вернуть None
+    let result = allocator.allocate_frames(4);
+    assert!(
+        result.is_none(),
+        "allocate_frames should return None when all frames exhausted"
+    );
+}
+
+#[test]
+fn allocate_frames_searches_multiple_regions() {
+    // Первый регион маленький (4 фрейма), второй большой (32 фрейма)
+    let allocator = multi_region_allocator(&[(0, 4), (100, 32)]);
+
+    // Полностью исчерпываем первый регион
+    // Фрейм 0 зарезервирован, остаётся 3 фрейма (1, 2, 3)
+    for _ in 0..3 {
+        allocator.allocate_frame().unwrap();
+    }
+
+    // Теперь первый регион исчерпан, allocate_frames должен найти во втором
+    let result = allocator.allocate_frames(8);
+    assert!(
+        result.is_some(),
+        "should find contiguous frames in second region"
+    );
+
+    let (first_frame, count) = result.unwrap();
+    assert_eq!(count, 8, "should allocate exactly 8 frames");
+
+    // Фреймы должны быть из второго региона (>= 100)
+    assert!(
+        first_frame.number() >= 100,
+        "frames should come from second region, got frame {}",
+        first_frame.number()
+    );
+}
+
+// =============================================================================
+// 7. Граничные случаи deallocate и is_allocated
+// =============================================================================
+
+#[test]
+fn deallocate_frame_outside_regions_returns_out_of_range() {
+    // Регион только 0-15
+    let allocator = single_region_allocator(0, 16);
+
+    // Пытаемся освободить фрейм вне управляемого диапазона
+    let outside_frame = Frame::new(1000);
+    let result = allocator.deallocate_frame(outside_frame);
+
+    assert!(result.is_err(), "deallocate outside regions should fail");
+    match result.unwrap_err() {
+        FrameError::OutOfRange => {}
+        err => panic!("expected OutOfRange, got {:?}", err),
+    }
+}
+
+#[test]
+fn is_allocated_returns_false_for_frame_outside_regions() {
+    // Регион только 0-15
+    let allocator = single_region_allocator(0, 16);
+
+    // Фрейм вне управляемого диапазона
+    let outside_frame = Frame::new(500);
+    assert!(
+        !allocator.is_allocated(outside_frame),
+        "is_allocated should return false for frame outside managed regions"
+    );
+
+    // Ещё один фрейм далеко за пределами
+    let far_outside = Frame::new(1_000_000);
+    assert!(
+        !allocator.is_allocated(far_outside),
+        "is_allocated should return false for frame far outside managed regions"
+    );
+}

@@ -1,6 +1,7 @@
 mod common;
 
 use core::alloc::Layout;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use memory::frame::Frame;
 use memory::frame_allocator::{FrameAllocator, FrameError, ReserveFrameError};
@@ -15,10 +16,11 @@ use memory::virtual_address::PageAlignedVirtualAddress;
 const PAGE_SIZE: usize = 4096;
 
 /// Мок-аллокатор фреймов для тестов.
-/// Выделяет "физические страницы" из заранее выделенного буфера.
+/// Возвращает "физические адреса" начиная с 0 (как в реальном ядре).
+/// Реальный буфер в памяти используется как higher_half mapping.
 struct MockFrameAllocator {
-    /// Начало буфера (имитирует физический адрес)
-    base_addr: usize,
+    /// Реальный адрес буфера (VA в терминах хоста = higher_half_base)
+    buffer_addr: usize,
     /// Общее количество страниц
     total_pages: usize,
     /// Следующая свободная страница
@@ -34,14 +36,15 @@ impl MockFrameAllocator {
         let total_pages = usable_size / PAGE_SIZE;
 
         Self {
-            base_addr: aligned_base,
+            buffer_addr: aligned_base,
             total_pages,
             next_page: AtomicUsize::new(0),
         }
     }
 
-    fn aligned_base(&self) -> usize {
-        self.base_addr
+    /// Возвращает реальный адрес буфера (используется как higher_half_base)
+    fn buffer_addr(&self) -> usize {
+        self.buffer_addr
     }
 }
 
@@ -60,9 +63,10 @@ impl FrameAllocator for MockFrameAllocator {
             self.next_page.fetch_sub(1, Ordering::Relaxed);
             return None;
         }
-        let addr = self.base_addr + page * PAGE_SIZE;
+        // Возвращаем PA начиная с 0 (как в реальном ядре)
+        let pa = page * PAGE_SIZE;
         Some(Frame::from(
-            PageAlignedAddress::from_usize(addr).expect("address should be page aligned"),
+            PageAlignedAddress::from_usize(pa).expect("address should be page aligned"),
         ))
     }
 
@@ -87,11 +91,12 @@ impl FrameAllocator for MockFrameAllocator {
         }
 
         let actual_count = count.min(self.total_pages - start_page);
-        let addr = self.base_addr + start_page * PAGE_SIZE;
+        // Возвращаем PA начиная с 0 (как в реальном ядре)
+        let pa = start_page * PAGE_SIZE;
 
         Some((
             Frame::from(
-                PageAlignedAddress::from_usize(addr).expect("address should be page aligned"),
+                PageAlignedAddress::from_usize(pa).expect("address should be page aligned"),
             ),
             actual_count,
         ))
@@ -99,6 +104,89 @@ impl FrameAllocator for MockFrameAllocator {
 
     fn deallocate_frame(&self, _frame: Frame) -> Result<(), FrameError> {
         // В моке не реализуем освобождение
+        Ok(())
+    }
+
+    fn is_allocated(&self, _frame: Frame) -> bool {
+        false
+    }
+}
+
+/// Мок-аллокатор, который выделяет максимум 1 страницу за вызов allocate_frames.
+/// Используется для тестирования цикла expand() с несколькими итерациями.
+struct LimitedMockFrameAllocator {
+    buffer_addr: usize,
+    total_pages: usize,
+    next_page: AtomicUsize,
+}
+
+impl LimitedMockFrameAllocator {
+    fn new(buffer: &[u8]) -> Self {
+        let base_addr = buffer.as_ptr() as usize;
+        let aligned_base = (base_addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let usable_size = buffer.len() - (aligned_base - base_addr);
+        let total_pages = usable_size / PAGE_SIZE;
+
+        Self {
+            buffer_addr: aligned_base,
+            total_pages,
+            next_page: AtomicUsize::new(0),
+        }
+    }
+
+    fn buffer_addr(&self) -> usize {
+        self.buffer_addr
+    }
+}
+
+impl FrameAllocator for LimitedMockFrameAllocator {
+    fn reserve_frames_exact(
+        &self,
+        from_inclusive: Frame,
+        _to_exclusive: Frame,
+    ) -> Result<Frame, ReserveFrameError> {
+        Ok(from_inclusive)
+    }
+
+    fn allocate_frame(&self) -> Option<Frame> {
+        let page = self.next_page.fetch_add(1, Ordering::Relaxed);
+        if page >= self.total_pages {
+            self.next_page.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        let pa = page * PAGE_SIZE;
+        Some(Frame::from(
+            PageAlignedAddress::from_usize(pa).expect("address should be page aligned"),
+        ))
+    }
+
+    fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)> {
+        if max_count == 0 {
+            return None;
+        }
+
+        let current = self.next_page.load(Ordering::Relaxed);
+        if current >= self.total_pages {
+            return None;
+        }
+
+        // Ограничиваем выделение до 1 страницы за вызов
+        let start_page = self.next_page.fetch_add(1, Ordering::Relaxed);
+        if start_page >= self.total_pages {
+            self.next_page.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+
+        let pa = start_page * PAGE_SIZE;
+        Some((
+            Frame::from(
+                PageAlignedAddress::from_usize(pa).expect("address should be page aligned"),
+            ),
+            1, // Всегда возвращаем только 1 страницу
+        ))
+    }
+
+    fn deallocate_frame(&self, _frame: Frame) -> Result<(), FrameError> {
         Ok(())
     }
 
@@ -122,13 +210,15 @@ fn allocate_test_buffer(size: usize) -> &'static mut [u8] {
 fn create_test_allocator() -> HeapAllocator {
     let buffer = allocate_test_buffer(TEST_HEAP_SIZE);
     let mock_frame_allocator = MockFrameAllocator::new(buffer);
-    let aligned_base = mock_frame_allocator.aligned_base();
+    // buffer_addr - реальный адрес буфера, используется как higher_half_base
+    // MockFrameAllocator возвращает PA=0, PAGE_SIZE, 2*PAGE_SIZE, ...
+    // HeapAllocator вычисляет VA = higher_half_base + PA = buffer_addr + offset
+    let buffer_addr = mock_frame_allocator.buffer_addr();
 
     let frame_allocator: &'static dyn FrameAllocator = Box::leak(Box::new(mock_frame_allocator));
 
-    // В тестах PA == VA (буфер в памяти процесса)
     let heap_start_va =
-        PageAlignedVirtualAddress::from_usize(aligned_base).expect("should be page aligned");
+        PageAlignedVirtualAddress::from_usize(buffer_addr).expect("should be page aligned");
 
     HeapAllocator::new(frame_allocator, heap_start_va)
 }
@@ -540,5 +630,154 @@ fn many_small_allocations() {
                 pattern
             );
         }
+    }
+}
+
+// =============================================================================
+// 6. Специфичные граничные случаи
+// =============================================================================
+
+/// Создаёт HeapAllocator с ограниченным frame allocator (1 страница за вызов)
+fn create_limited_test_allocator() -> HeapAllocator {
+    let buffer = allocate_test_buffer(TEST_HEAP_SIZE);
+    let mock_frame_allocator = LimitedMockFrameAllocator::new(buffer);
+    let buffer_addr = mock_frame_allocator.buffer_addr();
+
+    let frame_allocator: &'static dyn FrameAllocator = Box::leak(Box::new(mock_frame_allocator));
+
+    let heap_start_va =
+        PageAlignedVirtualAddress::from_usize(buffer_addr).expect("should be page aligned");
+
+    HeapAllocator::new(frame_allocator, heap_start_va)
+}
+
+/// Проверяем, что deallocate игнорирует указатели из lower half (bump allocator)
+#[test]
+fn deallocate_lower_half_pointer_is_ignored() {
+    let mut allocator = create_test_allocator();
+
+    // Выделяем блок, чтобы куча была инициализирована
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let valid_ptr = allocator.allocate(layout).unwrap();
+
+    // Создаём фиктивный указатель из lower half (адрес 0x1000, меньше higher_half_base)
+    // В реальном ядре это был бы указатель от bump allocator
+    let lower_half_addr = 0x1000usize;
+    let lower_half_ptr = unsafe { NonNull::new_unchecked(lower_half_addr as *mut u8) };
+
+    // Вызов deallocate с lower half указателем должен быть безопасно проигнорирован
+    allocator.deallocate(lower_half_ptr);
+
+    // Проверяем, что аллокатор всё ещё работает корректно
+    let ptr2 = allocator.allocate(layout).unwrap();
+    assert_ne!(valid_ptr.as_ptr(), ptr2.as_ptr(), "allocator should still work after ignoring lower half pointer");
+
+    // Освобождаем валидный указатель — это должно работать
+    allocator.deallocate(valid_ptr);
+
+    // И можем выделить снова
+    let ptr3 = allocator.allocate(layout).unwrap();
+    assert!(ptr3.as_ptr() as usize > 0, "allocation should succeed");
+}
+
+/// Проверяем, что expand() корректно работает когда allocate_frames
+/// возвращает меньше страниц чем запрошено (требует нескольких итераций цикла)
+#[test]
+fn expand_with_partial_frame_allocation() {
+    let mut allocator = create_limited_test_allocator();
+
+    // LimitedMockFrameAllocator выделяет по 1 странице за вызов.
+    // Делаем несколько выделений, которые заставят expand() работать в цикле.
+    // Каждое выделение < PAGE_SIZE, но в сумме они израсходуют несколько страниц.
+    let layout = Layout::from_size_align(2048, 8).unwrap();
+    let mut pointers = Vec::new();
+
+    // Выделяем блоки, чтобы инициировать несколько вызовов expand()
+    for i in 0..6 {
+        let ptr = allocator.allocate(layout);
+        assert!(
+            ptr.is_ok(),
+            "allocation {} should succeed with limited frame allocator",
+            i
+        );
+        pointers.push(ptr.unwrap());
+    }
+
+    // Проверяем, что все блоки независимы и доступны для записи
+    for (i, ptr) in pointers.iter().enumerate() {
+        unsafe {
+            core::ptr::write_bytes(ptr.as_ptr(), i as u8, 2048);
+        }
+    }
+
+    for (i, ptr) in pointers.iter().enumerate() {
+        unsafe {
+            let slice = core::slice::from_raw_parts(ptr.as_ptr(), 2048);
+            assert!(
+                slice.iter().all(|&b| b == i as u8),
+                "block {} data was corrupted",
+                i
+            );
+        }
+    }
+}
+
+/// Проверяем случай когда блок слишком мал для разделения и используется целиком
+#[test]
+fn block_too_small_to_split_uses_whole_block() {
+    let mut allocator = create_test_allocator();
+
+    // Сначала выделяем большой блок, чтобы создать свободный блок известного размера
+    let large_layout = Layout::from_size_align(3800, 8).unwrap();
+    let large_ptr = allocator.allocate(large_layout).unwrap();
+
+    // Освобождаем его — теперь есть свободный блок
+    allocator.deallocate(large_ptr);
+
+    // Выделяем блок почти такого же размера — остаток будет слишком мал для split
+    // (меньше MIN_ALLOC_SIZE + sizeof(FreeBlock))
+    let almost_same_layout = Layout::from_size_align(3780, 8).unwrap();
+    let ptr = allocator.allocate(almost_same_layout);
+
+    assert!(ptr.is_ok(), "allocation should succeed using whole block without split");
+
+    // Проверяем, что память доступна
+    unsafe {
+        let p = ptr.unwrap();
+        core::ptr::write_bytes(p.as_ptr(), 0xCD, 3780);
+        let slice = core::slice::from_raw_parts(p.as_ptr(), 3780);
+        assert!(
+            slice.iter().all(|&b| b == 0xCD),
+            "memory should be writable"
+        );
+    }
+}
+
+/// Проверяем выделение с выравниванием равным размеру страницы
+#[test]
+fn page_size_alignment_works() {
+    let mut allocator = create_test_allocator();
+
+    // Выравнивание 4096 байт (PAGE_SIZE)
+    let layout = Layout::from_size_align(64, 4096).unwrap();
+    let ptr = allocator.allocate(layout);
+
+    assert!(ptr.is_ok(), "allocation with PAGE_SIZE alignment should succeed");
+
+    let p = ptr.unwrap();
+    assert_eq!(
+        p.as_ptr() as usize % 4096,
+        0,
+        "pointer should be aligned to PAGE_SIZE (4096 bytes)"
+    );
+
+    // Проверяем, что можно записать данные
+    unsafe {
+        core::ptr::write_bytes(p.as_ptr(), 0xEF, 64);
+        let slice = core::slice::from_raw_parts(p.as_ptr(), 64);
+        assert!(
+            slice.iter().all(|&b| b == 0xEF),
+            "memory should be writable"
+        );
     }
 }

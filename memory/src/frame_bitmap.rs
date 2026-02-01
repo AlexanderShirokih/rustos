@@ -280,6 +280,10 @@ impl FrameBitmap {
             return None;
         }
 
+        // Максимальный номер фрейма в регионе (эксклюзивная граница)
+        let region_frame_count = self.target_region.frame_count();
+        let max_frame_num = self.base_frame.number() + region_frame_count;
+
         // Ищем первый свободный бит
         let mut word_idx = 0;
         while word_idx < self.bitmap.len() && self.bitmap[word_idx] == u64::MAX {
@@ -294,7 +298,12 @@ impl FrameBitmap {
         let first_bit = (!self.bitmap[word_idx]).trailing_zeros() as usize;
         let start_frame_num = self.base_frame.number() + word_idx * Self::BITS_PER_ENTRY + first_bit;
 
-        // Считаем последовательные свободные биты (до max_count)
+        // Проверяем, что первый свободный бит в пределах региона
+        if start_frame_num >= max_frame_num {
+            return None;
+        }
+
+        // Считаем последовательные свободные биты (до max_count), не выходя за границы региона
         let mut count = 0;
         let mut w = word_idx;
         let mut b = first_bit;
@@ -302,12 +311,25 @@ impl FrameBitmap {
         while count < max_count && w < self.bitmap.len() {
             let word = self.bitmap[w];
             while b < Self::BITS_PER_ENTRY && count < max_count {
+                // Проверяем, не вышли ли за границу региона
+                let current_frame_num = self.base_frame.number() + w * Self::BITS_PER_ENTRY + b;
+                if current_frame_num >= max_frame_num {
+                    // Достигли конца региона
+                    break;
+                }
+
                 if (word & (1u64 << b)) != 0 {
                     // Бит занят — прерываем
                     break;
                 }
                 count += 1;
                 b += 1;
+            }
+
+            // Проверяем причину выхода из внутреннего цикла
+            let current_frame_num = self.base_frame.number() + w * Self::BITS_PER_ENTRY + b;
+            if current_frame_num >= max_frame_num {
+                break; // Достигли конца региона
             }
             if b < Self::BITS_PER_ENTRY && (self.bitmap[w] & (1u64 << b)) != 0 {
                 break; // Встретили занятый бит
