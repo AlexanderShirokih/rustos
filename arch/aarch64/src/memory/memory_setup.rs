@@ -380,8 +380,6 @@ impl MemorySetup<Enabled> {
             "Heap allocator created with higher_half_base={higher_half_base:#x}"
         );
 
-        GLOBAL_ALLOCATOR.set_heap(allocator);
-
         // Переключаем логгер на higher half
         if let Some(writer) = klog::get_early_writer() {
             let new_writer =
@@ -389,6 +387,8 @@ impl MemorySetup<Enabled> {
 
             klog::set_stdout(new_writer);
         }
+
+        GLOBAL_ALLOCATOR.set_heap(allocator);
 
         Ok(self)
     }

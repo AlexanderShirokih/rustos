@@ -97,6 +97,11 @@ impl TCRBit {
         Self(bit)
     }
 
+    /// IPS = 40-bit PA (1TB), биты TCR[34:32] — для MMIO адресов > 4GB
+    pub const fn ips_40bit() -> Self {
+        Self(0b010 << 32)
+    }
+
     const fn encode(self) -> u64 {
         self.0
     }
@@ -146,6 +151,7 @@ impl<T: TtbrSel> AddressTranslationConfig<T> {
             TCRBit::sh_inner::<T>(),
             TCRBit::tg_4k::<T>(),
             TCRBit::epd::<T>(enable),
+            TCRBit::ips_40bit(),
         ])
     }
 }
