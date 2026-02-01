@@ -13,20 +13,14 @@ pub const MAX_MEMORY_REGIONS: usize = 32;
 /// Тег типа региона памяти
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionTag {
-    /// Код ядра (исполняемый, read-only)
-    KernelText,
-    /// Данные ядра (read-write)
-    KernelData,
-    /// Read-only данные ядра
-    KernelRoData,
+    /// Код и данные ядра
+    Kernel,
     /// Куча (свободная RAM)
     Heap,
-    /// Device Tree
-    DeviceTree,
     /// Memory-mapped I/O
     Mmio,
     /// Неизвестный/служебный регион
-    Unknown,
+    Other,
 }
 
 /// Раскладка физической памяти ядра
@@ -127,10 +121,7 @@ impl MemoryRegion<PageAlignedAddress> {
     }
 
     pub fn is_kernel(&self) -> bool {
-        matches!(
-            self.tag,
-            RegionTag::KernelText | RegionTag::KernelData | RegionTag::KernelRoData
-        )
+        self.tag == RegionTag::Kernel
     }
 }
 

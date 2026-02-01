@@ -1,5 +1,6 @@
 use crate::aligned::{Address, Aligned};
 use crate::physical_address::AlignedPhysicalAddress;
+use core::fmt::{Formatter, LowerHex};
 
 /// Адрес виртуальной памяти
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -87,6 +88,12 @@ impl<const SHIFT: u8> Aligned for AlignedVirtualAddress<SHIFT> {
 impl<const SHIFT: u8> From<AlignedVirtualAddress<SHIFT>> for VirtualAddress {
     fn from(val: AlignedVirtualAddress<SHIFT>) -> Self {
         val.0
+    }
+}
+
+impl<const SHIFT: u8> LowerHex for AlignedVirtualAddress<SHIFT> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        LowerHex::fmt(&self.as_usize(), f)
     }
 }
 

@@ -41,7 +41,7 @@ pub(crate) fn build_memory_layout(
 
     // Device tree
     layout.add(MemoryRegion::new(
-        RegionTag::DeviceTree,
+        RegionTag::Other,
         dt.base_address(),
         dt.base_address() + dt.size(),
         KernelRoData::flags(),
@@ -50,21 +50,21 @@ pub(crate) fn build_memory_layout(
     unsafe {
         // Kernel секции
         layout.add(MemoryRegion::new_raw(
-            RegionTag::KernelText,
+            RegionTag::Kernel,
             &_text_start,
             &_text_end,
             KernelText::flags(),
         ));
 
         layout.add(MemoryRegion::new_raw(
-            RegionTag::KernelData,
+            RegionTag::Kernel,
             &_rw_start,
             &_rw_end,
             KernelData::flags(),
         ));
 
         layout.add(MemoryRegion::new_raw(
-            RegionTag::KernelRoData,
+            RegionTag::Kernel,
             &_rodata_start,
             &_rodata_end,
             KernelRoData::flags(),

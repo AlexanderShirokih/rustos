@@ -26,10 +26,11 @@ impl MapLeaf<{ L3::SHIFT }> for PagePa {
         phys: Self,
         flags: MemFlags,
     ) -> Result<(), MapError> {
-        let l0 = mapper.root;
-        let l1 = mapper.ensure_next::<L0, L1, { L3::SHIFT }>(l0, virt)?;
-        let l2 = mapper.ensure_next::<L1, L2, { L3::SHIFT }>(l1, virt)?;
-        let l3 = mapper.ensure_next::<L2, L3, { L3::SHIFT }>(l2, virt)?;
+        let target_va = virt.as_usize();
+        let l0 = mapper.l0_ptr();
+        let l1 = mapper.ensure_next::<L0, L1>(l0, target_va)?;
+        let l2 = mapper.ensure_next::<L1, L2>(l1, target_va)?;
+        let l3 = mapper.ensure_next::<L2, L3>(l2, target_va)?;
         let idx = virt.index::<L3>();
 
         // SAFETY: l3 получен через ensure_next, который гарантирует валидность указателя
@@ -49,9 +50,10 @@ impl MapLeaf<{ L2::SHIFT }> for L2BlockPa {
         phys: Self,
         flags: MemFlags,
     ) -> Result<(), MapError> {
-        let l0 = mapper.root;
-        let l1 = mapper.ensure_next::<L0, L1, { L2::SHIFT }>(l0, virt)?;
-        let l2 = mapper.ensure_next::<L1, L2, { L2::SHIFT }>(l1, virt)?;
+        let target_va = virt.as_usize();
+        let l0 = mapper.l0_ptr();
+        let l1 = mapper.ensure_next::<L0, L1>(l0, target_va)?;
+        let l2 = mapper.ensure_next::<L1, L2>(l1, target_va)?;
         let idx = virt.index::<L2>();
 
         // SAFETY: l2 получен через ensure_next, который гарантирует валидность указателя
@@ -74,8 +76,9 @@ impl MapLeaf<{ L1::SHIFT }> for L1BlockPa {
         phys: Self,
         flags: MemFlags,
     ) -> Result<(), MapError> {
-        let l0 = mapper.root;
-        let l1 = mapper.ensure_next::<L0, L1, { L1::SHIFT }>(l0, virt)?;
+        let target_va = virt.as_usize();
+        let l0 = mapper.l0_ptr();
+        let l1 = mapper.ensure_next::<L0, L1>(l0, target_va)?;
         let idx = virt.index::<L1>();
 
         // SAFETY: l1 получен через ensure_next, который гарантирует валидность указателя
@@ -97,13 +100,24 @@ pub struct PageMapper<A: TableAlloc> {
     table_flags: TableFlags,
 }
 
-impl<'a, A: TableAlloc> PageMapper<A> {
+impl<A: TableAlloc> PageMapper<A> {
+    /// Создаёт новый PageMapper.
+    ///
+    /// # Arguments
+    /// * `root` - указатель на L0 page table
+    /// * `alloc` - аллокатор page tables
     pub fn new(root: *mut PageTable<L0>, alloc: A) -> Self {
         Self {
             root,
             alloc,
             table_flags: TableFlags::new().pxn_table(false).uxn_table(true),
         }
+    }
+
+    /// Возвращает указатель на L0 page table.
+    #[inline]
+    fn l0_ptr(&self) -> *mut PageTable<L0> {
+        self.root
     }
 
     pub fn map_page<const SHIFT: u8, P: MapLeaf<SHIFT>>(
@@ -115,38 +129,44 @@ impl<'a, A: TableAlloc> PageMapper<A> {
         P::map_into(self, virt, phys, flags)
     }
 
-    /// Убедиться, что в таблице `parent` по индексу для `virt` есть ссылка на дочернюю таблицу.
+    /// Убедиться, что в таблице `parent` по индексу для `target_va` есть ссылка на дочернюю таблицу.
     /// Если записи нет — выделить новую таблицу.
     /// Возвращает указатель на дочернюю таблицу уровня `CL`.
-    fn ensure_next<PL, CL, const SHIFT: u8>(
+    ///
+    /// # Arguments
+    /// * `parent` - указатель на родительскую таблицу
+    /// * `target_va` - целевой виртуальный адрес (для извлечения индексов)
+    fn ensure_next<PL, CL>(
         &mut self,
         parent: *mut PageTable<PL>,
-        virt: AlignedVirtualAddress<{ SHIFT }>,
+        target_va: usize,
     ) -> Result<*mut PageTable<CL>, MapError>
     where
         PL: Level + CanTable + DecodeBlock,
         CL: Level,
     {
-        let idx = virt.index::<PL>();
+        let idx = (target_va >> PL::SHIFT) & 0x1FF;
 
         // SAFETY: parent получен из self.root или предыдущего вызова ensure_next
         let raw = unsafe { (*parent).get_raw(idx) };
 
         match decode::<PL>(raw).map_err(MapError::Decode)? {
             AnyEntry::Table(te) => {
+                // Таблица существует — извлекаем PA и получаем указатель
                 let child_pa = extract_table_pa(te.raw());
-
-                // SAFETY: child_pa указывает на существующую таблицу, созданную ранее
-                let child = unsafe { self.alloc.table_ptr::<CL>(child_pa) };
+                let child = unsafe { self.alloc.table_ptr::<CL>(child_pa, target_va) };
                 Ok(child)
             }
 
             AnyEntry::Invalid(_) => {
                 let child_pa = self.alloc.alloc_table_page().ok_or(MapError::OutOfMemory)?;
-                let child = unsafe { self.alloc.table_ptr::<CL>(child_pa) };
 
-                unsafe { child.write(PageTable::new()) };
+                // Записываем entry в parent СНАЧАЛА — это создаёт маппинг через recursive
                 unsafe { (*parent).set(idx, Entry::<PL, Table>::new(child_pa, self.table_flags)) };
+
+                // Теперь получаем указатель и инициализируем таблицу
+                let child = unsafe { self.alloc.table_ptr::<CL>(child_pa, target_va) };
+                unsafe { child.write(PageTable::new()) };
 
                 Ok(child)
             }

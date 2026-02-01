@@ -1,3 +1,5 @@
+use crate::virtual_address::VirtualAddress;
+
 /// Указатель, который можно релоцировать между адресными пространствами.
 /// Корректно работает с fat pointers (dyn Trait).
 pub struct RelocatablePtr<T: ?Sized> {
@@ -21,7 +23,8 @@ impl<T: ?Sized> RelocatablePtr<T> {
     /// # Safety
     ///
     /// Память по новому адресу должна быть замаплена и содержать валидный объект типа T.
-    pub unsafe fn relocated(self, offset: usize) -> &'static T {
+    pub unsafe fn relocated(self, new_base: VirtualAddress) -> &'static T {
+        let offset = new_base.as_usize();
         // Fat pointer = [data_ptr, vtable_ptr]
         let relocated_raw = [self.raw[0] + offset, self.raw[1] + offset];
         unsafe {

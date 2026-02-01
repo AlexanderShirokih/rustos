@@ -14,12 +14,13 @@ pub(crate) static GLOBAL_ALLOCATOR: GlobalKernelAllocator = GlobalKernelAllocato
 const PHASE_UNINIT: u8 = 0;
 const PHASE_BUMP: u8 = 1;
 const PHASE_HEAP: u8 = 2;
+const PHASE_FROZEN: u8 = 3;
 
 pub type KernelHeapAllocator = HeapAllocator;
 
 /// Двухфазный глобальный аллокатор ядра
 pub struct GlobalKernelAllocator {
-    /// Текущая фаза: 0 = не инициализирован, 1 = bump, 2 = heap
+    /// Текущая фаза
     phase: AtomicU8,
     /// Bump-аллокатор для ранней инициализации
     bump: UnsafeCell<MaybeUninit<BumpAllocator>>,
@@ -41,7 +42,7 @@ impl GlobalKernelAllocator {
     }
 
     /// Инициализирует bump фазу аллокатор
-    pub fn init_bump_phase(&self, bump_allocator: BumpAllocator) {
+    pub fn set_bump(&self, bump_allocator: BumpAllocator) {
         let bump_ptr = self.bump.get();
         unsafe {
             (*bump_ptr).write(bump_allocator);
@@ -50,7 +51,7 @@ impl GlobalKernelAllocator {
     }
 
     /// Переключает аллокатор на heap фазу работы
-    pub fn switch_to_heap(&self, heap_allocator: KernelHeapAllocator) {
+    pub fn set_heap(&self, heap_allocator: KernelHeapAllocator) {
         let heap_ptr = self.heap.get();
         unsafe {
             (*heap_ptr).write(heap_allocator);
@@ -58,17 +59,16 @@ impl GlobalKernelAllocator {
         self.phase.store(PHASE_HEAP, Ordering::Release);
     }
 
-    /// Возвращает фактически использованный диапазон bump allocator'а.
-    /// Должен вызываться только в PHASE_BUMP.
-    pub fn bump_used_range(&self) -> (usize, usize) {
-        self.bump_allocator().used_range()
+    /// Замораживает аллокатор. После этого аллокации невозможны
+    pub fn set_freeze(&self) {
+        self.phase.store(PHASE_FROZEN, Ordering::Release);
     }
 
-    fn bump_allocator(&self) -> &mut BumpAllocator {
+    pub(crate) fn get_bump(&self) -> &mut BumpAllocator {
         unsafe { (*self.bump.get()).assume_init_mut() }
     }
 
-    fn heap_allocator(&self) -> &mut KernelHeapAllocator {
+    fn get_heap(&self) -> &mut KernelHeapAllocator {
         unsafe { (*self.heap.get()).assume_init_mut() }
     }
 }
@@ -76,18 +76,18 @@ impl GlobalKernelAllocator {
 unsafe impl GlobalAlloc for GlobalKernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match self.phase.load(Ordering::Acquire) {
-            PHASE_BUMP => match self.bump_allocator().allocate(layout) {
+            PHASE_BUMP => match self.get_bump().allocate(layout) {
                 Ok(ptr) => ptr.as_ptr(),
                 Err(_) => core::ptr::null_mut(),
             },
-            PHASE_HEAP => match self.heap_allocator().allocate(layout) {
-                Ok(ptr) => ptr.as_ptr(),
-                Err(_) => core::ptr::null_mut(),
-            },
-            _ => {
-                // Аллокатор не инициализирован
-                core::ptr::null_mut()
+            PHASE_FROZEN => {
+                panic!("Allocation attempted while bump allocator is frozen")
             }
+            PHASE_HEAP => match self.get_heap().allocate(layout) {
+                Ok(ptr) => ptr.as_ptr(),
+                Err(_) => core::ptr::null_mut(),
+            },
+            _ => core::ptr::null_mut(),
         }
     }
 
@@ -97,25 +97,13 @@ unsafe impl GlobalAlloc for GlobalKernelAllocator {
         }
 
         match self.phase.load(Ordering::Acquire) {
-            PHASE_BUMP => {
-                // Bump-фаза: освобождение памяти - no-op
-            }
             PHASE_HEAP => {
-                // Проверяем, не из bump-региона ли этот указатель
-                let (bump_start, bump_end) = self.bump_allocator().memory_range();
-                let ptr_addr = ptr as usize;
-
-                if ptr_addr >= bump_start && ptr_addr < bump_end {
-                    // Память из bump-аллокатора - не освобождаем
-                    return;
-                }
-
                 if let Some(non_null_ptr) = NonNull::new(ptr) {
-                    self.heap_allocator().deallocate(non_null_ptr);
+                    self.get_heap().deallocate(non_null_ptr);
                 }
             }
             _ => {
-                // Аллокатор не инициализирован - игнорируем
+                // no-op
             }
         }
     }

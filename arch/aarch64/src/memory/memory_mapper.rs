@@ -4,30 +4,38 @@ use aarch64_paging::mem_flags::MemFlags;
 use aarch64_paging::page_table::PageTable;
 use aarch64_paging::table_alloc::TableAlloc;
 use collections::LockCell;
-use memory::aligned::{Address, Aligned};
+use memory::aligned::Aligned;
 use memory::frame_allocator::FrameAllocator;
 use memory::memory_mapper::{MemoryMapper, MemoryMappingError};
 use memory::physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress};
 
 /// Адаптер: используем `FrameAllocator` как источник страниц под page tables.
-pub(crate) struct FrameTableAlloc<'a, FA: FrameAllocator>(pub(crate) &'a FA);
+/// Использует identity mapping (VA = PA) для доступа к page tables до MMU.
+pub(crate) struct FrameTableAlloc<'a, FA: FrameAllocator> {
+    allocator: &'a FA,
+}
+
+impl<'a, FA: FrameAllocator> FrameTableAlloc<'a, FA> {
+    /// Создаёт allocator с identity mapping (до MMU)
+    pub fn identity(allocator: &'a FA) -> Self {
+        Self { allocator }
+    }
+}
 
 impl<FA: FrameAllocator> TableAlloc for FrameTableAlloc<'_, FA> {
-    #[inline]
     fn alloc_table_page(&mut self) -> Option<PageAlignedAddress> {
-        let frame = self.0.allocate_frame()?;
+        let frame = self.allocator.allocate_frame()?;
         Some(frame.page_address())
     }
 
-    #[inline]
-    unsafe fn table_ptr<L: Level>(&self, pa: PageAlignedAddress) -> *mut PageTable<L> {
-        pa.as_u64() as *mut PageTable<L>
+    unsafe fn table_ptr<L: Level>(&self, pa: PageAlignedAddress, _target_va: usize) -> *mut PageTable<L> {
+        // Identity mapping: VA = PA
+        pa.as_usize() as *mut PageTable<L>
     }
 }
 
 /// Маппер памяти для AArch64.
-/// Параметризован типом LockCell для синхронизации доступа к PageMapper.
 pub struct Aarch64MemoryMapper<'a, FA, L>
 where
     FA: FrameAllocator,
@@ -41,11 +49,19 @@ where
 impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>>
     Aarch64MemoryMapper<'a, FA, L>
 {
-    pub fn new(frame_allocator: &'a FA, root_ptr: *mut PageTable<L0>, mem_flags: MemFlags) -> Self {
+    /// Создаёт маппер с identity mapping (для использования до MMU).
+    pub fn new(
+        frame_allocator: &'a FA,
+        root_ptr: *mut PageTable<L0>,
+        mem_flags: MemFlags,
+    ) -> Self {
         Self {
             frame_allocator,
             mem_flags,
-            mapper: L::new(PageMapper::new(root_ptr, FrameTableAlloc(frame_allocator))),
+            mapper: L::new(PageMapper::new(
+                root_ptr,
+                FrameTableAlloc::identity(frame_allocator),
+            )),
         }
     }
 
@@ -197,6 +213,11 @@ impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>> M
         size: usize,
         mem_flags: u64,
     ) -> Result<(), MemoryMappingError> {
-        self.map_exact_impl(source_address, target_address, size, MemFlags::from_bits(mem_flags))
+        self.map_exact_impl(
+            source_address,
+            target_address,
+            size,
+            MemFlags::from_bits(mem_flags),
+        )
     }
 }

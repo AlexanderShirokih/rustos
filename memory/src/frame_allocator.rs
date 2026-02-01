@@ -37,7 +37,7 @@ pub trait FrameAllocator {
 
     /// Выделяет до `max_count` смежных страниц.
     /// Возвращает (первый фрейм, количество выделенных).
-    fn allocate_pages(&self, max_count: usize) -> Option<(Frame, usize)>;
+    fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)>;
 
     /// Освободить фрейм
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError>;
@@ -194,7 +194,7 @@ impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
         None
     }
 
-    fn allocate_pages(&self, max_count: usize) -> Option<(Frame, usize)> {
+    fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)> {
         for region in &self.regions {
             let result = region.with_lock(|bitmap| bitmap.alloc_contiguous(max_count));
             if result.is_some() {

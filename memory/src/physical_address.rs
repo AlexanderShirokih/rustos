@@ -1,5 +1,5 @@
 use crate::aligned::{Address, Aligned};
-use core::fmt::{Debug, Display, Formatter};
+use core::fmt::{Debug, Display, Formatter, LowerHex};
 
 impl Address for PhysicalAddress {
     #[inline]
@@ -161,6 +161,12 @@ impl<const SHIFT: u8> Address for AlignedPhysicalAddress<SHIFT> {
 
 impl<const SHIFT: u8> Aligned for AlignedPhysicalAddress<SHIFT> {
     const ALIGNMENT: usize = 1usize << SHIFT;
+}
+
+impl<const SHIFT: u8> LowerHex for AlignedPhysicalAddress<SHIFT> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        LowerHex::fmt(&self.as_usize(), f)
+    }
 }
 
 impl<const SHIFT: u8> From<AlignedPhysicalAddress<SHIFT>> for PhysicalAddress {

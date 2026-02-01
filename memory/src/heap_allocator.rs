@@ -2,9 +2,12 @@
 //!
 //! Этот модуль предоставляет аллокатор кучи для ядра, использующий алгоритм
 //! first-fit со свободным списком и автоматическим расширением кучи.
+//!
+//! Работает с pre-mapped RAM: вся физическая память уже замаплена линейно
+//! (VA = higher_half_base + PA), поэтому при расширении кучи достаточно
+//! выделить физические фреймы и вычислить их виртуальные адреса.
 
 use crate::frame_allocator::FrameAllocator;
-use crate::memory_mapper::MemoryMapper;
 use crate::virtual_address::PageAlignedVirtualAddress;
 use core::alloc::Layout;
 use core::mem::size_of;
@@ -89,14 +92,8 @@ pub struct HeapAllocator {
     /// Аллокатор физических фреймов
     frame_allocator: &'static dyn FrameAllocator,
 
-    /// Маппер страниц для отображения физической памяти в виртуальную
-    page_mapper: &'static dyn MemoryMapper,
-
-    /// Следующий виртуальный адрес для расширения кучи (bump pointer)
-    next_va: PageAlignedVirtualAddress,
-
-    /// Флаги памяти для heap страниц
-    mem_flags: u64,
+    /// База higher half для преобразования PA → VA
+    higher_half_base: usize,
 
     /// Голова списка свободных блоков
     free_list_head: Option<NonNull<FreeBlock>>,
@@ -108,58 +105,47 @@ pub struct HeapAllocator {
 impl HeapAllocator {
     pub fn new(
         frame_allocator: &'static dyn FrameAllocator,
-        page_mapper: &'static dyn MemoryMapper,
-        heap_start_va: PageAlignedVirtualAddress,
-        mem_flags: u64,
+        higher_half_base: PageAlignedVirtualAddress,
     ) -> Self {
         HeapAllocator {
             frame_allocator,
-            page_mapper,
-            next_va: heap_start_va,
-            mem_flags,
+            higher_half_base: higher_half_base.as_usize(),
             free_list_head: None,
             current_size: 0,
         }
     }
 
-    /// Увеличивает емкость кучи, выделяя физические страницы и маппя их
-    /// в непрерывное виртуальное пространство начиная с next_va.
+    /// Увеличивает емкость кучи, выделяя физические страницы.
+    /// Память уже замаплена линейно (VA = higher_half_base + PA).
     fn expand(&mut self, min_size: usize) -> Result<(), AllocationError> {
         let pages_needed = align_up(min_size, PAGE_SIZE) / PAGE_SIZE;
-        let va_start = self.next_va;
-        let mut current_va = va_start;
         let mut remaining = pages_needed;
+        let mut total_allocated = 0usize;
 
         while remaining > 0 {
             let (frame, count) = self
                 .frame_allocator
-                .allocate_pages(remaining)
+                .allocate_frames(remaining)
                 .ok_or(AllocationError::OutOfMemory)?;
 
             let block_bytes = count * PAGE_SIZE;
 
-            self.page_mapper
-                .map_exact(frame.page_address(), current_va, block_bytes, self.mem_flags)
-                .map_err(|_| AllocationError::OutOfMemory)?;
+            // Вычисляем VA из PA: память уже замаплена линейно
+            let va = self.higher_half_base + frame.page_address().as_usize();
 
-            current_va = current_va
-                .offset(block_bytes)
-                .expect("VA offset should be valid");
+            // Создаём FreeBlock для этого блока
+            let block_size = block_bytes - size_of::<FreeBlock>();
+            unsafe {
+                let block_ptr = va as *mut FreeBlock;
+                *block_ptr = FreeBlock::from_size(block_size);
+                self.add_to_free_list(NonNull::new_unchecked(block_ptr));
+            }
+
+            total_allocated += block_bytes;
             remaining -= count;
         }
 
-        self.next_va = current_va;
-
-        // Один FreeBlock на весь виртуально-непрерывный блок
-        let block_size = pages_needed * PAGE_SIZE - size_of::<FreeBlock>();
-
-        unsafe {
-            let block_ptr: *mut FreeBlock = va_start.as_ptr();
-            *block_ptr = FreeBlock::from_size(block_size);
-            self.add_to_free_list(NonNull::new_unchecked(block_ptr));
-        }
-
-        self.current_size += pages_needed * PAGE_SIZE;
+        self.current_size += total_allocated;
         Ok(())
     }
 
@@ -271,7 +257,16 @@ impl HeapAllocator {
     ///
     /// Указатель на заголовок блока хранится непосредственно перед пользовательскими данными.
     /// После освобождения указатель обнуляется для защиты от double-free.
+    ///
+    /// Указатели из lower half (bump allocator) игнорируются.
     pub fn deallocate(&mut self, ptr: NonNull<u8>) {
+        let addr = ptr.as_ptr() as usize;
+
+        // Игнорируем указатели из lower half (bump allocator работает там)
+        if addr < self.higher_half_base {
+            return;
+        }
+
         unsafe {
             // Читаем указатель на заголовок блока, хранящийся перед пользовательскими данными
             let header_ptr_location = (ptr.as_ptr() as *mut *mut FreeBlock).sub(1);

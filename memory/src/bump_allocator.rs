@@ -1,4 +1,5 @@
-use crate::physical_address::PageAlignedAddress;
+use crate::memory_range::MemoryRange;
+use crate::physical_address::{PageAlignedAddress, PhysicalAddress};
 use core::alloc::Layout;
 use core::fmt::Formatter;
 use core::ptr::NonNull;
@@ -22,14 +23,12 @@ impl BumpAllocator {
         self.end - self.start - self.offset
     }
 
-    /// Возвращает диапазон памяти, управляемой аллокатором [start, end)
-    pub fn memory_range(&self) -> (usize, usize) {
-        (self.start, self.end)
-    }
-
     /// Возвращает диапазон фактически использованной памяти [start, start + offset)
-    pub fn used_range(&self) -> (usize, usize) {
-        (self.start, self.start + self.offset)
+    pub fn used(&self) -> MemoryRange<PhysicalAddress> {
+        MemoryRange::new(
+            PhysicalAddress::new(self.start),
+            PhysicalAddress::new(self.start).add(self.offset),
+        )
     }
 
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, BumpAllocError> {

@@ -5,7 +5,6 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use memory::frame::Frame;
 use memory::frame_allocator::{FrameAllocator, FrameError, ReserveFrameError};
 use memory::heap_allocator::{AllocationError, HeapAllocator};
-use memory::memory_mapper::{MemoryMapper, MemoryMappingError};
 use memory::physical_address::PageAlignedAddress;
 use memory::virtual_address::PageAlignedVirtualAddress;
 
@@ -67,7 +66,7 @@ impl FrameAllocator for MockFrameAllocator {
         ))
     }
 
-    fn allocate_pages(&self, max_count: usize) -> Option<(Frame, usize)> {
+    fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)> {
         if max_count == 0 {
             return None;
         }
@@ -91,7 +90,9 @@ impl FrameAllocator for MockFrameAllocator {
         let addr = self.base_addr + start_page * PAGE_SIZE;
 
         Some((
-            Frame::from(PageAlignedAddress::from_usize(addr).expect("address should be page aligned")),
+            Frame::from(
+                PageAlignedAddress::from_usize(addr).expect("address should be page aligned"),
+            ),
             actual_count,
         ))
     }
@@ -103,50 +104,6 @@ impl FrameAllocator for MockFrameAllocator {
 
     fn is_allocated(&self, _frame: Frame) -> bool {
         false
-    }
-}
-
-// =============================================================================
-// Мок-реализация MemoryMapper для тестов
-// =============================================================================
-
-/// Мок-маппер памяти для тестов.
-/// В тестах память уже доступна (буфер выделен в адресном пространстве процесса),
-/// поэтому маппинг — это no-op. Просто записываем, что был вызов.
-struct MockMemoryMapper {
-    /// Счётчик вызовов map_exact для отладки
-    map_exact_calls: AtomicUsize,
-}
-
-impl MockMemoryMapper {
-    fn new() -> Self {
-        Self {
-            map_exact_calls: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl MemoryMapper for MockMemoryMapper {
-    fn map(
-        &self,
-        _start_address: &PageAlignedVirtualAddress,
-        _size: usize,
-    ) -> Result<(), MemoryMappingError> {
-        // No-op в тестах — память уже доступна
-        Ok(())
-    }
-
-    fn map_exact(
-        &self,
-        _source_address: PageAlignedAddress,
-        _target_address: PageAlignedVirtualAddress,
-        _size: usize,
-        _mem_flags: u64,
-    ) -> Result<(), MemoryMappingError> {
-        self.map_exact_calls.fetch_add(1, Ordering::Relaxed);
-        // No-op в тестах — память уже доступна
-        // В реальном ядре здесь бы происходил маппинг PA -> VA
-        Ok(())
     }
 }
 
@@ -167,17 +124,13 @@ fn create_test_allocator() -> HeapAllocator {
     let mock_frame_allocator = MockFrameAllocator::new(buffer);
     let aligned_base = mock_frame_allocator.aligned_base();
 
-    let frame_allocator: &'static dyn FrameAllocator =
-        Box::leak(Box::new(mock_frame_allocator));
-    let page_mapper: &'static dyn MemoryMapper =
-        Box::leak(Box::new(MockMemoryMapper::new()));
+    let frame_allocator: &'static dyn FrameAllocator = Box::leak(Box::new(mock_frame_allocator));
 
     // В тестах PA == VA (буфер в памяти процесса)
-    let heap_start_va = PageAlignedVirtualAddress::from_usize(aligned_base)
-        .expect("should be page aligned");
+    let heap_start_va =
+        PageAlignedVirtualAddress::from_usize(aligned_base).expect("should be page aligned");
 
-    // mem_flags = 0, так как MockMemoryMapper их игнорирует
-    HeapAllocator::new(frame_allocator, page_mapper, heap_start_va, 0)
+    HeapAllocator::new(frame_allocator, heap_start_va)
 }
 
 // =============================================================================
@@ -499,7 +452,10 @@ fn large_alignment_works_correctly() {
     unsafe {
         core::ptr::write_bytes(ptr.as_ptr(), 0xFF, 64);
         let slice = core::slice::from_raw_parts(ptr.as_ptr(), 64);
-        assert!(slice.iter().all(|&b| b == 0xFF), "memory should be writable");
+        assert!(
+            slice.iter().all(|&b| b == 0xFF),
+            "memory should be writable"
+        );
     }
 }
 
@@ -555,7 +511,7 @@ fn many_small_allocations() {
     let mut allocator = create_test_allocator();
 
     let layout = Layout::from_size_align(16, 8).unwrap();
-    let mut pointers = std::vec::Vec::new();
+    let mut pointers = Vec::new();
 
     // Выделяем много мелких блоков
     for i in 0..100 {

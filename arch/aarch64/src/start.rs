@@ -12,9 +12,14 @@ mod exceptions;
 mod memory;
 mod system;
 
-use crate::memory::layout::{MemoryLayout, MemoryRegion};
+use crate::memory::layout::MemoryRegion;
 use crate::memory::memory_setup::{Early, Installed, MemorySetup};
+use crate::memory::setup::HIGHER_HALF_BASE;
+use crate::memory::setup::build_memory_layout;
+use ::memory::physical_address::PageAlignedAddress;
+use ::memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::arch::{asm, naked_asm};
 use core::hint::spin_loop;
 use fdt::devicetree::DeviceTree;
@@ -22,7 +27,6 @@ use kernel::driver::early::EarlyDriverRegistry;
 use kernel::driver::scanner;
 use kernel::kmain::kmain;
 use klog::{debug, fatal, info, set_early_stdout};
-use memory::setup::build_memory_layout;
 
 unsafe extern "C" {
     static _stack_top: u8;
@@ -114,13 +118,13 @@ fn early_main(dtb: usize) {
         Err(_) => return,
     };
 
-    let mut memory_layout = match build_memory_layout(&device_tree) {
+    let memory_layout = match build_memory_layout(&device_tree) {
         Ok(m) => m,
         Err(_) => return,
     };
 
     // Создаём Early memory setup и устанавливаем bump allocator
-    let early_setup = match MemorySetup::<Early>::create(&memory_layout) {
+    let early_setup = match MemorySetup::<Early>::create(memory_layout) {
         Ok(setup) => setup.install(),
         Err(_) => return,
     };
@@ -135,21 +139,13 @@ fn early_main(dtb: usize) {
     bind_early_stdout(&device_tree, early_registry);
     info!("Early console set");
 
-    for mmio_region in early_registry.mmio_region_requests() {
-        memory_layout.add(MemoryRegion::mmio(mmio_region.base, mmio_region.size));
-    }
+    let mmio_requests: Vec<_> = early_registry
+        .mmio_region_requests()
+        .iter()
+        .map(|mmio_request| MemoryRegion::mmio(mmio_request.base, mmio_request.size))
+        .collect();
 
-    info!("Memory layout:");
-    for region in memory_layout.iter() {
-        info!(
-            "- {:?}, from {:#x} to {:#x}",
-            region.tag,
-            region.start.as_usize(),
-            region.end.as_usize()
-        );
-    }
-
-    if setup_memory(memory_layout, early_setup).is_err() {
+    if setup_memory(mmio_requests, early_setup).is_err() {
         return;
     }
 
@@ -163,17 +159,22 @@ fn early_main(dtb: usize) {
     }
 }
 
-fn setup_memory(layout: MemoryLayout, installed: MemorySetup<Installed>) -> Result<(), ()> {
+fn setup_memory(
+    mmio: Vec<MemoryRegion<PageAlignedAddress>>,
+    installed: MemorySetup<Installed>,
+) -> Result<(), ()> {
     // Переходим из Installed в Prepared фазу, резервируя bump region
     let memory_setup = installed
-        .prepare(&layout)
+        .prepare(mmio)
         .inspect_err(|err| fatal!("Memory setup failed: {:?}", err))
         .map_err(|_| ())?;
     debug!("Memory setup prepared!");
 
     // Маппим higher half и включаем MMU
+    let higher_half_base =
+        PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(HIGHER_HALF_BASE));
     let memory_setup = memory_setup
-        .enable()
+        .enable(higher_half_base)
         .inspect_err(|err| fatal!("Unable to enable MMU: {:?}", err))
         .map_err(|_| ())?;
 
