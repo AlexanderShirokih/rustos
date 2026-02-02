@@ -37,76 +37,78 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start() -> () {
     naked_asm!(
-        // Сохраняем DTB (x0) в callee-saved регистре
-        "mov    x19, x0",
+    // Сохраняем DTB (x0) в callee-saved регистре
+    "mov    x19, x0",
 
-        // Проверяем EL
-        "mrs    x0, CurrentEL",
-        "cmp    x0, #0x8",          // Мы получили управление с EL2 (гипервизор)?
-        "b.ne   .boot_el1",
+    // Проверяем EL
+    "mrs    x0, CurrentEL",
+    "cmp    x0, #0x8",          // EL2?
+    "b.ne   1f",                // если не EL2, то идем сразу в EL1
 
-        // Обработчик EL2
+    // Обработчик EL2
 
-        // HCR_EL2: EL1 будет работать в 64-битном режиме
-        "mov    x0, #(1 << 31)",
-        "msr    hcr_el2, x0",
+    // HCR_EL2: EL1 в AArch64
+    "mov    x0, #(1 << 31)",
+    "msr    hcr_el2, x0",
 
-        // Отключаем ловушки для SIMD/FP
-        "mov    x0, #0x33ff",
-        "msr    cptr_el2, x0",
+    // Отключаем ловушки SIMD/FP
+    "mov    x0, #0x33ff",
+    "msr    cptr_el2, x0",
 
-        // SPSR_EL2: возврат в EL1h с замаскированными DAIF
-        "mov    x0, #0x3c5",
-        "msr    spsr_el2, x0",
-        "adr    x0, .boot_el1",
-        "msr    elr_el2, x0",
-        "eret",
+    // SPSR_EL2: возврат в EL1h, DAIF masked
+    "mov    x0, #0x3c5",
+    "msr    spsr_el2, x0",
+    "adr    x0, 1f",
+    "msr    elr_el2, x0",
+    "eret",
 
-        ".boot_el1:",
-        // Инициализация SP_EL1
-        "msr    spsel, #1",
-        "adrp   x1, {stack_top}",
-        "add    x1, x1, #:lo12:{stack_top}",
-        "mov    sp, x1",
+    // Обработчик EL1
+    "1:",
 
-        // Включаем FP/SIMD
-        "mrs    x0, cpacr_el1",
-        "orr    x0, x0, #(0x3 << 20)",
-        "msr    cpacr_el1, x0",
-        "isb",
+    // Инициализация SP_EL1
+    "msr    spsel, #1",
+    "adrp   x1, {stack_top}",
+    "add    x1, x1, #:lo12:{stack_top}",
+    "mov    sp, x1",
 
-        // Очистка BSS: x0 = &_bss_start, x1 = &_bss_end
-        "adrp   x0, {bss_start}",
-        "add    x0, x0, #:lo12:{bss_start}",
-        "adrp   x1, {bss_end}",
-        "add    x1, x1, #:lo12:{bss_end}",
-        "cmp    x0, x1",
-        "b.ge   2f",
-        "1:",
-        "str    xzr, [x0], #8",
-        "cmp    x0, x1",
-        "b.lt   1b",
-        "2:",
+    // Включаем FP/SIMD
+    "mrs    x0, cpacr_el1",
+    "orr    x0, x0, #(0x3 << 20)",
+    "msr    cpacr_el1, x0",
+    "isb",
 
-        // Восстанавливаем DTB в x0
-        "mov    x0, x19",
+    // Очистка BSS
+    "adrp   x0, {bss_start}",
+    "add    x0, x0, #:lo12:{bss_start}",
+    "adrp   x1, {bss_end}",
+    "add    x1, x1, #:lo12:{bss_end}",
+    "cmp    x0, x1",
+    "b.ge   11f",
 
-        // "mov x20, xzr",
-        // "2: wfe",
-        // "cbz x20, 2b",
+    "10:",
+    "str    xzr, [x0], #8",
+    "cmp    x0, x1",
+    "b.lt   10b",
+    "11:",
 
-        "b      {early_main}",
+    // Восстанавливаем DTB
+    "mov    x0, x19",
 
-        // Если мы вернулись из early_main, то выключаем прерывания и зацикливаемся в WaitForEvent
-        "msr    daifset, #0b0010",
-        "1:     wfe",
-        "b      1b",
-        bss_start = sym _bss_start,
-        bss_end = sym _bss_end,
-        stack_top = sym _stack_top,
-        early_main = sym early_main,
+    // Переход в Rust
+    "b      {early_main}",
+
+    // Если вернулись — уходим в WFE
+    "msr    daifset, #0b0010",
+    "20:",
+    "wfe",
+    "b      20b",
+
+    bss_start = sym _bss_start,
+    bss_end   = sym _bss_end,
+    stack_top = sym _stack_top,
+    early_main = sym early_main,
     )
 }
 

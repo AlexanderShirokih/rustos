@@ -94,15 +94,6 @@ impl MemorySetup<Early> {
             .max_by_key(|interval| interval.end.as_usize() - interval.start.as_usize())
             .ok_or(())?;
 
-        let size = largest.end.as_usize() - largest.start.as_usize();
-        debug!(
-            "create_bump_allocator";
-            "Largest region: {:#x} - {:#x} (size: {} bytes)",
-            largest.start,
-            largest.end,
-            size
-        );
-
         Ok(BumpAllocator::new(largest.start, largest.end))
     }
 }

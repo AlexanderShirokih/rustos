@@ -47,6 +47,7 @@ struct BootSection {
     #[allow(dead_code)]
     offset: u64,
     dtb: Option<String>,
+    base: Option<u64>,
 }
 
 struct BuildContext {
@@ -223,6 +224,11 @@ fn make_kernel_gz(ctx: &BuildContext) -> Result<()> {
 fn make_boot_img_v1(ctx: &BuildContext) -> Result<()> {
     let dtb_path = ctx.dtb_path()?;
 
+    // Вычисляем kernel_offset для boot.img header
+    let base = ctx.spec.boot.base.unwrap_or(0);
+    let kernel_offset = ctx.spec.boot.offset.saturating_sub(base);
+    let kernel_offset_str = format!("{:#x}", kernel_offset);
+
     let mut output = File::create(ctx.kernel_gz_dtb())?;
     let mut kernel = Vec::new();
     let mut dtb = Vec::new();
@@ -241,7 +247,7 @@ fn make_boot_img_v1(ctx: &BuildContext) -> Result<()> {
                 "--base",
                 "0x0",
                 "--kernel_offset",
-                "0x0",
+                &kernel_offset_str,
                 "--ramdisk_offset",
                 "0x01000000",
                 "--pagesize",
@@ -260,6 +266,11 @@ fn make_boot_img_v1(ctx: &BuildContext) -> Result<()> {
 fn make_boot_img_v2(ctx: &BuildContext) -> Result<()> {
     let dtb_path = ctx.dtb_path()?;
 
+    // Вычисляем kernel_offset для boot.img header
+    let base = ctx.spec.boot.base.unwrap_or(0);
+    let kernel_offset = ctx.spec.boot.offset.saturating_sub(base);
+    let kernel_offset_str = format!("{:#x}", kernel_offset);
+
     run_cmd(
         Command::new("mkbootimg")
             .args([
@@ -272,7 +283,7 @@ fn make_boot_img_v2(ctx: &BuildContext) -> Result<()> {
                 "--base",
                 "0x0",
                 "--kernel_offset",
-                "0x0",
+                &kernel_offset_str,
                 "--ramdisk_offset",
                 "0x01000000",
                 "--pagesize",

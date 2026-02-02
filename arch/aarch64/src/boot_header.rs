@@ -10,9 +10,9 @@ global_asm!(
     __start:
         b _start                            // code0: branch to _start
         .word 0                             // code1
-        .quad 0                             // text_offset
+        .quad 0x80000                       // text_offset (KERNEL_OFFSET - DRAM_BASE)
         .quad _kernel_size                  // image_size
-        .quad 0                             // flags
+        .quad 0xa                           // flags: LE, 4K pages, anywhere
         .quad 0                             // res2
         .quad 0                             // res3
         .quad 0                             // res4

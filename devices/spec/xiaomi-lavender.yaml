@@ -6,6 +6,7 @@ boot:
   dtb: /devices/dtb/sdm660-lavender.dtb
   format: android_boot_v1
   offset: 0x40080000
+  base: 0x40000000
 
 run: [
   "fastboot boot target/build/boot.img"
