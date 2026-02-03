@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use crate::memory::MemoryAccessProvider;
 use crate::virtual_address::AlignedVirtualAddress;
 
+/// Внутренние данные мока для MemoryAccessProvider
 struct MockMemoryAccessProviderInner {
     frame_size: usize,
     len: usize,

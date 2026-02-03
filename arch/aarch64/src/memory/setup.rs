@@ -1,9 +1,11 @@
+//! Построение раскладки памяти из DeviceTree.
+
 use crate::memory::layout::{MemoryLayout, MemoryRegion, RegionTag};
 use aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
 use fdt::devicetree::DeviceTree;
 use fdt::devicetreeext::{AddressSpace, NodeExt, PropExt};
 
-/// База верхней половины виртуального адресного пространства
+/// База higher half (верхней половины адресного пространства).
 pub const HIGHER_HALF_BASE: usize = 0xFFFF_FF80_0000_0000;
 
 unsafe extern "C" {
@@ -20,15 +22,16 @@ unsafe extern "C" {
     static _rw_end: u8;
 }
 
+/// Ошибка построения раскладки памяти.
 pub(crate) struct MemoryLayoutBuildError;
 
-/// Строит раскладку памяти на основе device tree
+/// Строит раскладку памяти из DeviceTree.
 pub(crate) fn build_memory_layout(
     dt: &DeviceTree,
 ) -> Result<MemoryLayout, MemoryLayoutBuildError> {
     let mut layout = MemoryLayout::new();
 
-    let ram_regions = find_ram_regions(&dt).ok_or(MemoryLayoutBuildError)?;
+    let ram_regions = find_ram_regions(dt).ok_or(MemoryLayoutBuildError)?;
 
     for ram_region in ram_regions {
         layout.add(MemoryRegion::new(

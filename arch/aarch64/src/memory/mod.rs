@@ -1,3 +1,5 @@
+//! Управление памятью AArch64.
+
 pub mod global_allocator;
 pub mod layout;
 pub mod memory_setup;

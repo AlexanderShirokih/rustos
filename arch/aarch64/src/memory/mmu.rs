@@ -1,3 +1,5 @@
+//! Управление MMU AArch64.
+
 use crate::memory::regs::common::EL1;
 use crate::memory::regs::mair::MemoryAttributeIndirectionRegister;
 use crate::memory::regs::sctrl::SystemControlRegister;
@@ -8,11 +10,11 @@ use crate::memory::regs::{mair, sctrl, tcr};
 use crate::system;
 use memory::physical_address::PhysicalAddress;
 
+/// Конфигурация адресного пространства.
 pub struct AddressSpaceConfig<T: TtbrSel> {
     /// Физический адрес корня таблиц страниц.
     base: PhysicalAddress,
-
-    /// Конфигурация адресного пространства
+    /// Параметры трансляции.
     config: tcr::AddressTranslationConfig<T>,
 }
 
@@ -36,15 +38,18 @@ pub trait MmuConfig {
     /// Конфигурация блока MMU
     fn mmu_config(&self) -> sctrl::SctlrBits {
         sctrl::SctlrBits::combine(&[
-            sctrl::SctlrBit::MmuEnable,
-            sctrl::SctlrBit::DCacheEnable,
-            sctrl::SctlrBit::ICacheEnable,
+            sctrl::SctlrBit::Mmu,
+            sctrl::SctlrBit::DCache,
+            sctrl::SctlrBit::ICache,
         ])
     }
 }
 
+/// Стандартная конфигурация с двумя адресными пространствами.
 pub struct NormalDualSpaceConfig {
+    /// Корень lower half (TTBR0).
     lower_root: PhysicalAddress,
+    /// Корень higher half (TTBR1).
     higher_root: PhysicalAddress,
 }
 
@@ -75,11 +80,17 @@ impl MmuConfig for NormalDualSpaceConfig {
 
 /// Операции с MMU.
 pub struct Mmu<EL> {
+    /// Регистр TTBR0 (lower half).
     lower_half_base: TranslationTableBaseRegister<EL, LowerHalf>,
+    /// Регистр TTBR1 (higher half).
     higher_half_base: TranslationTableBaseRegister<EL, HigherHalf>,
+    /// Регистр TCR (параметры трансляции).
     tcr: TranslationControlRegister<EL>,
+    /// Регистр MAIR (атрибуты памяти).
     mair: MemoryAttributeIndirectionRegister<EL>,
+    /// TLB (кэш трансляций).
     tlb: TranslationLookasideBuffer<EL>,
+    /// Регистр SCTLR (управление системой).
     sctlr: SystemControlRegister<EL1>,
 }
 
@@ -97,7 +108,7 @@ impl Mmu<EL1> {
 }
 
 impl Mmu<EL1> {
-    /// Включить MMU/D-cache, используя подготовленную конфигурацию.
+    /// Включает MMU и кэши.
     pub fn enable<C: MmuConfig>(&self, config: C) {
         // 1) Барьер перед изменениями регистров + Маскируем прерывания
         system::barrier::full_system_barrier();

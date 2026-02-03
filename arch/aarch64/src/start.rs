@@ -7,10 +7,11 @@ extern crate std;
 
 mod boot_header;
 
-mod drivers;
-mod exceptions;
 mod memory;
 mod system;
+
+// Подключаем крейт с драйверами AArch64, чтобы они попали в бинарник
+extern crate drivers_aarch64;
 
 use crate::memory::layout::MemoryRegion;
 use crate::memory::memory_setup::{Early, Installed, MemorySetup};
@@ -23,8 +24,8 @@ use alloc::vec::Vec;
 use core::arch::{asm, naked_asm};
 use core::hint::spin_loop;
 use fdt::devicetree::DeviceTree;
-use kernel::driver::early::EarlyDriverRegistry;
-use kernel::driver::scanner;
+use drivers_common::DriverRegistry;
+use arch_common::scanner;
 use kernel::kmain::kmain;
 use klog::{debug, fatal, info, set_early_stdout};
 
@@ -112,9 +113,8 @@ pub extern "C" fn _start() -> () {
     )
 }
 
+/// Ранняя инициализация ядра до включения MMU.
 fn early_main(dtb: usize) {
-    exceptions::init();
-
     let device_tree = match DeviceTree::from_ptr(dtb) {
         Ok(tree) => tree,
         Err(_) => return,
@@ -131,12 +131,11 @@ fn early_main(dtb: usize) {
         Err(_) => return,
     };
 
-    let mut early_registry = EarlyDriverRegistry::new();
+    let mut early_registry = DriverRegistry::new();
     early_registry.scan_and_probe(&device_tree);
 
-    // Утекаем реестр в статическую память — драйверы живут до конца работы ядра,
-    // потому что writer из output() сохраняется в статическую переменную STDOUT
-    let early_registry: &'static EarlyDriverRegistry = Box::leak(Box::new(early_registry));
+    // Сохраняем реестр в статическую память — драйверы живут до конца работы ядра
+    let early_registry: &'static DriverRegistry = Box::leak(Box::new(early_registry));
 
     bind_early_stdout(&device_tree, early_registry);
 
@@ -158,6 +157,7 @@ fn early_main(dtb: usize) {
     }
 }
 
+/// Настраивает MMU и переключает ядро в higher half.
 fn setup_memory(
     mmio: Vec<MemoryRegion<PageAlignedAddress>>,
     installed: MemorySetup<Installed>,
@@ -215,8 +215,9 @@ unsafe extern "C" fn jump_to_higher_half() {
     )
 }
 
-fn bind_early_stdout(device_tree: &DeviceTree, registry: &'static EarlyDriverRegistry) {
-    let early_console_node = scanner::find_console(&device_tree);
+/// Привязывает stdout к консольному драйверу из DeviceTree.
+fn bind_early_stdout(device_tree: &DeviceTree, registry: &'static DriverRegistry) {
+    let early_console_node = scanner::find_console(device_tree);
 
     let writer = early_console_node
         .map(|node| node.key())

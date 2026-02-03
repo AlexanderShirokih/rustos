@@ -2,9 +2,12 @@ use crate::aligned::Address;
 use crate::frame::Frame;
 use crate::physical_address::PageAlignedAddress;
 
+/// Диапазон адресов с включёнными границами.
 #[derive(Copy, Clone, Debug)]
 pub struct MemoryRange<A: Address> {
+    /// Начальный адрес (включительно).
     from_inclusive: A,
+    /// Конечный адрес (включительно).
     to_inclusive: A,
 }
 
@@ -29,7 +32,9 @@ impl<A: Address> MemoryRange<A> {
     }
 
     pub fn size(&self) -> usize {
-        self.end().as_usize() - self.start().as_usize()
+        let start = self.start().as_usize();
+        let end = self.end().as_usize();
+        end.saturating_sub(start).saturating_add(1)
     }
 }
 
@@ -46,8 +51,11 @@ impl MemoryRange<PageAlignedAddress> {
     }
 }
 
+/// Итератор по выровненным адресам в диапазоне.
 pub struct MemoryRangeIter {
+    /// Текущий адрес итерации.
     current: PageAlignedAddress,
+    /// Конечный адрес (включительно).
     end: PageAlignedAddress,
 }
 

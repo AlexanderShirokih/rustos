@@ -4,6 +4,7 @@
 use crate::memory::regs::common::EL1;
 use core::arch::asm;
 
+/// TLB (Translation Lookaside Buffer).
 pub struct TranslationLookasideBuffer<EL> {
     _phantom: core::marker::PhantomData<EL>,
 }
@@ -15,6 +16,7 @@ impl TranslationLookasideBuffer<EL1> {
         }
     }
 
+    /// Инвалидирует все записи TLB.
     pub fn invalidate(&self) {
         unsafe {
             asm!(

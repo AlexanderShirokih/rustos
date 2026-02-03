@@ -1,3 +1,5 @@
+//! Раскладка физической памяти ядра.
+
 use aarch64_paging::mem_flags::MemFlags;
 use aarch64_paging::preset::Mmio;
 use collections::Vec;
@@ -8,6 +10,7 @@ use memory::memory_range::MemoryRange;
 use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::PageAlignedVirtualAddress;
 
+/// Максимальное количество регионов памяти.
 pub const MAX_MEMORY_REGIONS: usize = 32;
 
 /// Тег типа региона памяти
@@ -23,8 +26,9 @@ pub enum RegionTag {
     Other,
 }
 
-/// Раскладка физической памяти ядра
+/// Раскладка физической памяти ядра.
 pub struct MemoryLayout {
+    /// Список регионов памяти.
     regions: Vec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
 }
 
@@ -69,16 +73,21 @@ impl MemoryLayout {
     }
 }
 
+/// Регион физической памяти.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryRegion<A: Address + Aligned> {
+    /// Тип региона.
     pub tag: RegionTag,
+    /// Начальный адрес (включительно).
     pub start: A,
+    /// Конечный адрес (исключительно).
     pub end: A,
+    /// Атрибуты памяти.
     pub flags: MemFlags,
 }
 
 impl MemoryRegion<PageAlignedAddress> {
-    /// Создать регион из raw указателей на символы линкера
+    /// Создаёт регион из указателей на символы линкера.
     pub fn new_raw(tag: RegionTag, start: &u8, end: &u8, flags: MemFlags) -> Self {
         let start_addr = start as *const u8 as usize;
         let end_addr = end as *const u8 as usize;
@@ -86,7 +95,7 @@ impl MemoryRegion<PageAlignedAddress> {
         Self::new(tag, start_addr, end_addr, flags)
     }
 
-    /// Создать регион из адресов
+    /// Создаёт регион из адресов.
     pub const fn new(tag: RegionTag, start_addr: usize, end_addr: usize, flags: MemFlags) -> Self {
         Self {
             tag,
@@ -105,12 +114,12 @@ impl MemoryRegion<PageAlignedAddress> {
         )
     }
 
-    /// Размер региона в байтах
+    /// Возвращает размер региона в байтах.
     pub fn size(&self) -> usize {
         self.end.as_usize().saturating_sub(self.start.as_usize())
     }
 
-    /// Виртуальный адрес в higher half
+    /// Возвращает виртуальный адрес в higher half.
     pub fn virtual_start(&self, higher_half_base: usize) -> PageAlignedVirtualAddress {
         PageAlignedVirtualAddress::from_usize(higher_half_base + self.start.as_usize())
             .expect("address should be page aligned")
@@ -121,8 +130,8 @@ impl MemoryRegion<PageAlignedAddress> {
     }
 }
 
-impl<A: Address + Aligned> Into<MemoryRange<A>> for MemoryRegion<A> {
-    fn into(self) -> MemoryRange<A> {
-        MemoryRange::new(self.start, self.end)
+impl<A: Address + Aligned> From<MemoryRegion<A>> for MemoryRange<A> {
+    fn from(region: MemoryRegion<A>) -> Self {
+        MemoryRange::new(region.start, region.end)
     }
 }

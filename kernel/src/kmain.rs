@@ -4,6 +4,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use klog::info;
 
+/// Главная функция ядра. Вызывается после инициализации памяти и драйверов.
 pub fn kmain() {
     test_allocator();
 }

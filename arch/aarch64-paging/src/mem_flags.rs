@@ -1,40 +1,57 @@
+//! Атрибуты памяти для записей таблицы страниц.
+
 use core::fmt::{Debug, Formatter};
 
+/// Атрибуты памяти страницы/блока.
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct MemFlags(u64);
 
-// Позиции битов и их маски
+/// Сдвиг поля AttrIndx (индекс MAIR).
 const ATTR_IDX_SHIFT: u32 = 2;
+/// Маска поля AttrIndx.
 const ATTR_IDX_MASK: u64 = 0b111;
 
+/// Сдвиг поля AP (права доступа).
 const AP_SHIFT: u32 = 6;
+/// Маска поля AP.
 const AP_MASK: u64 = 0b11;
 
+/// Сдвиг поля SH (режим совместного доступа).
 const SH_SHIFT: u32 = 8;
+/// Маска поля SH.
 const SH_MASK: u64 = 0b11;
 
+/// Бит Access Flag.
 const AF_BIT: u64 = 1 << 10;
+/// Бит Privileged Execute-Never.
 const PXN_BIT: u64 = 1 << 53;
+/// Бит Unprivileged Execute-Never.
 const UXN_BIT: u64 = 1 << 54;
 
+/// Режим совместного доступа к памяти (SH).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Shareability {
+    /// Не разделяемая.
     None = 0b00,
+    /// Зарезервировано.
     Reserved = 0b01,
+    /// Outer Shareable.
     Outer = 0b10,
+    /// Inner Shareable.
     Inner = 0b11,
 }
 
+/// Права доступа (AP).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Access {
-    /// EL1 read/write
+    /// EL1 чтение/запись.
     KernelRW = 0b00,
-    /// EL1 read-only
+    /// EL1 только чтение.
     KernelRO = 0b01,
-    /// EL0/EL1 read/write
+    /// EL0/EL1 чтение/запись.
     UserRW = 0b10,
-    /// EL0/EL1 read-only
+    /// EL0/EL1 только чтение.
     UserRO = 0b11,
 }
 
@@ -111,7 +128,7 @@ impl MemFlags {
         self.field(AP_SHIFT, AP_MASK, ap as u64)
     }
 
-    /// Stage-1 AttrIndx[2:0] (MAIR index)
+    /// Устанавливает индекс MAIR для атрибутов памяти.
     pub const fn attr_index(self, idx: u8) -> Self {
         self.field(ATTR_IDX_SHIFT, ATTR_IDX_MASK, idx as u64)
     }
@@ -138,6 +155,12 @@ impl MemFlags {
 
     pub const fn get_attr_index(self) -> u8 {
         self.get_field(ATTR_IDX_SHIFT, ATTR_IDX_MASK) as u8
+    }
+}
+
+impl Default for MemFlags {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

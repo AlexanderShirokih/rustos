@@ -57,10 +57,13 @@ impl Mmio {
         unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) }
     }
 
+    /// Читает значение из регистра.
     #[inline(always)]
     pub fn read_reg<T: VolatileInt>(&self, reg: Reg<T>) -> T {
         self.read::<T>(reg.offset)
     }
+
+    /// Записывает значение в регистр.
     #[inline(always)]
     pub fn write_reg<T: VolatileInt>(&self, reg: Reg<T>, v: T) {
         self.write::<T>(reg.offset, v)
@@ -69,7 +72,10 @@ impl Mmio {
 
 /// Типобезопасный дескриптор регистра со смещением и ожидаемым типом.
 pub struct Reg<T> {
+    /// Смещение регистра относительно базового адреса MMIO (в байтах).
     pub offset: usize,
+
+    /// Маркер типа для compile-time проверки размера регистра.
     _t: PhantomData<T>,
 }
 

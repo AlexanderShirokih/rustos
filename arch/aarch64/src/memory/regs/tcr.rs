@@ -18,22 +18,21 @@ use core::marker::PhantomData;
 // │ TTBR1   │ T1SZ    │ IRGN1   │ ORGN1   │ SH1     │ TG1           │
 // └─────────┴─────────┴─────────┴─────────┴─────────┴───────────────┘
 
+/// Селектор TTBR (lower/higher half).
 pub trait TtbrSel {
-    // Размер виртуального пространства
+    /// Сдвиг T0SZ/T1SZ.
     const TNSZ_SHIFT: u64;
-
-    // Флаг включения текущей половины адресного пространства
+    /// Сдвиг EPD (enable/disable).
     const EDP_SHIFT: u64;
-
-    // Политика кэширования памяти
+    /// Сдвиг IRGN (inner cacheability).
     const IRGN_SHIFT: u64;
+    /// Сдвиг ORGN (outer cacheability).
     const ORGN_SHIFT: u64;
-
-    // Sharability - как шарится память между кластером ядер
+    /// Сдвиг SH (shareability).
     const SH_SHIFT: u64;
-
-    // Гранулярность страниц памяти
+    /// Сдвиг TG (granule size).
     const TG_SHIFT: u64;
+    /// Значение для 4K страниц.
     const TG_4K_VALUE: u64;
 }
 
@@ -59,6 +58,7 @@ impl TtbrSel for HigherHalf {
     const TG_4K_VALUE: u64 = 0b10;
 }
 
+/// Бит TCR.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct TCRBit(u64);
 
@@ -107,6 +107,7 @@ impl TCRBit {
     }
 }
 
+/// Регистр TCR (Translation Control Register).
 pub struct TranslationControlRegister<EL> {
     _phantom: PhantomData<EL>,
 }
@@ -129,12 +130,15 @@ impl TranslationControlRegister<EL1> {
     }
 }
 
+/// Конфигурация трансляции адресов.
 pub struct AddressTranslationConfig<T: TtbrSel> {
+    /// Значение TCR.
     value: u64,
     _phantom: PhantomData<T>,
 }
 
 impl<T: TtbrSel> AddressTranslationConfig<T> {
+    /// Объединяет биты TCR.
     pub const fn combine(bits: &[TCRBit]) -> Self {
         Self {
             value: combine_bits!(bits),
@@ -142,7 +146,7 @@ impl<T: TtbrSel> AddressTranslationConfig<T> {
         }
     }
 
-    /// Настраивает конфиг "по-красоте"
+    /// Создаёт стандартную конфигурацию.
     pub const fn create(enable: bool) -> Self {
         Self::combine(&[
             TCRBit::size_48bit::<T>(),

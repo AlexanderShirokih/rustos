@@ -1,3 +1,5 @@
+//! Маппинг виртуальных адресов на физические для AArch64.
+
 use aarch64_paging::level::{L0, L1, L2, L3, Level};
 use aarch64_paging::mapper::{MapError, MapLeaf, PageMapper};
 use aarch64_paging::mem_flags::MemFlags;
@@ -10,14 +12,16 @@ use memory::memory_mapper::{MemoryMapper, MemoryMappingError};
 use memory::physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress};
 
-/// Адаптер: используем `FrameAllocator` как источник страниц под page tables.
-/// Использует identity mapping (VA = PA) для доступа к page tables до MMU.
+/// Адаптер FrameAllocator для выделения таблиц страниц.
+///
+/// Использует identity mapping (VA = PA) до включения MMU.
 pub(crate) struct FrameTableAlloc<'a, FA: FrameAllocator> {
+    /// Базовый аллокатор фреймов.
     allocator: &'a FA,
 }
 
 impl<'a, FA: FrameAllocator> FrameTableAlloc<'a, FA> {
-    /// Создаёт allocator с identity mapping (до MMU)
+    /// Создаёт аллокатор с identity mapping.
     pub fn identity(allocator: &'a FA) -> Self {
         Self { allocator }
     }
@@ -41,15 +45,18 @@ where
     FA: FrameAllocator,
     L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 {
+    /// Аллокатор физических фреймов.
     frame_allocator: &'a FA,
+    /// Флаги памяти по умолчанию.
     mem_flags: MemFlags,
+    /// Внутренний маппер таблиц страниц.
     mapper: L,
 }
 
 impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>>
     Aarch64MemoryMapper<'a, FA, L>
 {
-    /// Создаёт маппер с identity mapping (для использования до MMU).
+    /// Создаёт маппер с identity mapping.
     pub fn new(
         frame_allocator: &'a FA,
         root_ptr: *mut PageTable<L0>,
@@ -77,7 +84,7 @@ impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>>
         }
 
         let page_size = PageAlignedAddress::ALIGNMENT;
-        let total_size = (size + page_size - 1) / page_size * page_size;
+        let total_size = size.div_ceil(page_size) * page_size;
 
         self.mapper.with_lock(|mapper| {
             let mut remaining = total_size;
@@ -89,30 +96,30 @@ impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>>
             let size_4k = 1usize << L3::SHIFT;
 
             while remaining != 0 {
-                if remaining >= size_1g {
-                    if let (Some(v1g), Some(p1g)) = (
+                if remaining >= size_1g
+                    && let (Some(v1g), Some(p1g)) = (
                         AlignedVirtualAddress::<{ L1::SHIFT }>::new(virt),
                         AlignedPhysicalAddress::<{ L1::SHIFT }>::new(phys),
-                    ) {
-                        map_contiguous_inner::<FA, { L1::SHIFT }, _>(mapper, v1g, p1g, mem_flags)?;
-                        virt = virt.offset(size_1g);
-                        phys = phys.add(size_1g);
-                        remaining -= size_1g;
-                        continue;
-                    }
+                    )
+                {
+                    map_contiguous_inner::<FA, { L1::SHIFT }, _>(mapper, v1g, p1g, mem_flags)?;
+                    virt = virt.offset(size_1g);
+                    phys = phys.add(size_1g);
+                    remaining -= size_1g;
+                    continue;
                 }
 
-                if remaining >= size_2m {
-                    if let (Some(v2m), Some(p2m)) = (
+                if remaining >= size_2m
+                    && let (Some(v2m), Some(p2m)) = (
                         AlignedVirtualAddress::<{ L2::SHIFT }>::new(virt),
                         AlignedPhysicalAddress::<{ L2::SHIFT }>::new(phys),
-                    ) {
-                        map_contiguous_inner::<FA, { L2::SHIFT }, _>(mapper, v2m, p2m, mem_flags)?;
-                        virt = virt.offset(size_2m);
-                        phys = phys.add(size_2m);
-                        remaining -= size_2m;
-                        continue;
-                    }
+                    )
+                {
+                    map_contiguous_inner::<FA, { L2::SHIFT }, _>(mapper, v2m, p2m, mem_flags)?;
+                    virt = virt.offset(size_2m);
+                    phys = phys.add(size_2m);
+                    remaining -= size_2m;
+                    continue;
                 }
 
                 let v4k = PageAlignedVirtualAddress::new_unchecked(virt);
@@ -183,7 +190,7 @@ impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>> M
         }
 
         let page_size = PageAlignedVirtualAddress::ALIGNMENT;
-        let page_count = (size + page_size - 1) / page_size;
+        let page_count = size.div_ceil(page_size);
         let mem_flags = self.mem_flags;
         let frame_allocator = self.frame_allocator;
 

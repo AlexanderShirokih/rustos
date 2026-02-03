@@ -45,8 +45,8 @@ fn new_with_multiple_regions_succeeds() {
         allocated.insert(frame.number());
     }
 
-    // Должно быть выделено 32 + 64 + 16 = 112 фреймов
-    assert_eq!(allocated.len(), 112);
+    // Фрейм 0 зарезервирован, поэтому доступно 112 - 1 = 111 фреймов
+    assert_eq!(allocated.len(), 111);
 }
 
 #[test]
@@ -98,7 +98,8 @@ fn allocate_switches_to_next_region_when_exhausted() {
         }
     }
 
-    assert_eq!(first_region_frames.len(), 4, "should exhaust first region");
+    // Фрейм 0 зарезервирован, в первом регионе остаётся 3 фрейма
+    assert_eq!(first_region_frames.len(), 3, "should exhaust first region");
     assert_eq!(
         second_region_frames.len(),
         32,
@@ -243,9 +244,9 @@ fn multi_region_allocates_from_first_region_initially() {
 fn deallocate_works_across_multiple_regions() {
     let allocator = multi_region_allocator(&[(0, 8), (100, 8)]);
 
-    // Выделяем фреймы из обоих регионов
+    // Выделяем фреймы из обоих регионов (фрейм 0 зарезервирован)
     let mut frames = Vec::new();
-    for _ in 0..16 {
+    for _ in 0..15 {
         frames.push(allocator.allocate_frame().unwrap());
     }
 
@@ -253,7 +254,7 @@ fn deallocate_works_across_multiple_regions() {
     let first_region: Vec<_> = frames.iter().filter(|f| f.number() < 100).collect();
     let second_region: Vec<_> = frames.iter().filter(|f| f.number() >= 100).collect();
 
-    assert_eq!(first_region.len(), 8);
+    assert_eq!(first_region.len(), 7);
     assert_eq!(second_region.len(), 8);
 
     // Освобождаем по одному из каждого региона
@@ -301,8 +302,8 @@ fn reserve_in_second_region_works() {
         );
     }
 
-    // 16 + 16 - 4 = 28 фреймов
-    assert_eq!(allocated.len(), 28);
+    // 16 + 16 - 4 - 1(фрейм 0) = 27 фреймов
+    assert_eq!(allocated.len(), 27);
 }
 
 // =============================================================================

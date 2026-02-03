@@ -7,9 +7,12 @@ use core::arch::asm;
 use core::marker::PhantomData;
 use memory::physical_address::PhysicalAddress;
 
+/// Маркер lower half (TTBR0).
 pub enum LowerHalf {}
+/// Маркер higher half (TTBR1).
 pub enum HigherHalf {}
 
+/// Регистр TTBR (Translation Table Base Register).
 pub struct TranslationTableBaseRegister<EL, TTBRIndex> {
     _phantom: PhantomData<(EL, TTBRIndex)>,
 }

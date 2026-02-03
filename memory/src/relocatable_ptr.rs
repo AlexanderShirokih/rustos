@@ -1,10 +1,12 @@
 use crate::virtual_address::VirtualAddress;
 
 /// Указатель, который можно релоцировать между адресными пространствами.
+///
 /// Корректно работает с fat pointers (dyn Trait).
 pub struct RelocatablePtr<T: ?Sized> {
-    // Храним fat pointer как пару [data, vtable]
+    /// Fat pointer как пара [data_ptr, vtable_ptr].
     raw: [usize; 2],
+    /// Маркер для типа T.
     _marker: core::marker::PhantomData<*const T>,
 }
 

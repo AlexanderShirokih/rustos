@@ -1,3 +1,8 @@
+//! Крейт логирования ядра.
+//!
+//! Предоставляет макросы для вывода сообщений с уровнями логирования
+//! и поддержку раннего вывода до включения MMU.
+
 #![no_std]
 extern crate alloc;
 
@@ -6,14 +11,21 @@ use core::fmt::{Arguments, Write as _};
 use core::sync::atomic::{AtomicBool, Ordering};
 use io::writer::Writer;
 
+/// Тип статического writer'а для вывода логов.
 type StaticWriter = dyn Writer + Sync + 'static;
 
+/// Уровень важности сообщения.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Level {
+    /// Критическая ошибка, требующая остановки системы.
     Fatal,
+    /// Ошибка, не требующая остановки.
     Error,
+    /// Предупреждение.
     Warn,
+    /// Информационное сообщение.
     Info,
+    /// Отладочное сообщение.
     Debug,
 }
 
@@ -25,12 +37,13 @@ impl Writer for NilWriter {
 
 static NIL: NilWriter = NilWriter;
 
+/// Держатель консольного вывода с поддержкой раннего и нормального режимов.
 struct ConsoleHolder {
-    /// Ранний writer (до включения MMU). Запись/чтение предполагается однопоточной.
+    /// Ранний writer (до включения MMU). Запись/чтение однопоточные.
     early: NoLockCell<&'static StaticWriter>,
     /// Нормальный writer (после включения MMU).
     normal: MutexCell<&'static StaticWriter>,
-    /// Флаг перехода в normal mode.
+    /// Флаг перехода в нормальный режим.
     is_normal: AtomicBool,
 }
 

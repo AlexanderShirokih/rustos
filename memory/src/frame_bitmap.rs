@@ -5,6 +5,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use core::mem::size_of;
 
+/// Позиция бита в битовой карте
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EntryPos {
     word: usize,
@@ -144,7 +145,12 @@ impl FrameBitmap {
 
     pub fn set_unchecked(&mut self, frame: Frame) {
         let pos = self.entry_pos(frame);
-        self.write(pos.word, |v| v | (1u64 << pos.bit));
+        let mask = 1u64 << pos.bit;
+        let old_value = self.read(pos.word);
+        if (old_value & mask) == 0 {
+            self.write(pos.word, |v| v | mask);
+            self.free = self.free.saturating_sub(1);
+        }
     }
 
     #[inline]
@@ -211,8 +217,6 @@ impl FrameBitmap {
         let frame_number = self.base_frame.number() + word_index * Self::BITS_PER_ENTRY + bit_index;
         let frame = Frame::new(frame_number);
         self.set_unchecked(frame);
-
-        self.free -= 1;
 
         frame
     }

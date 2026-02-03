@@ -1,26 +1,32 @@
-use crate::driver::probe::{CompatibleList, MmioAddress, MmioRequest};
-use crate::driver::probe::{NodeProbeExt, ProbeError, ProbeResult};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use fdt::devicetree::{DeviceTree, Node, NodeKey};
-use io::writer::Writer;
+use foundation::{Driver, DriverContext, MmioRequest, ProbeError, ProbeResult};
 
-type EarlyDriverId = NodeKey;
+use crate::probe::{CompatibleList, NodeProbeExt};
 
-pub struct EarlyDriverRegistry {
-    handles: BTreeMap<EarlyDriverId, Box<dyn EarlyDriver>>,
+/// Идентификатор драйвера (ключ узла в DeviceTree).
+type DriverId = NodeKey;
+
+/// Реестр драйверов устройств.
+///
+/// Хранит инициализированные драйверы и запросы на маппинг MMIO-регионов.
+pub struct DriverRegistry {
+    /// Инициализированные драйверы, индексированные по ключу узла.
+    handles: BTreeMap<DriverId, Box<dyn Driver>>,
+    /// Запросы на маппинг MMIO-регионов от драйверов.
     mmio_requests: Vec<MmioRequest>,
 }
 
-impl Default for EarlyDriverRegistry {
+impl Default for DriverRegistry {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl EarlyDriverRegistry {
+impl DriverRegistry {
     pub fn new() -> Self {
         Self {
             handles: BTreeMap::new(),
@@ -32,7 +38,7 @@ impl EarlyDriverRegistry {
         &self.mmio_requests
     }
 
-    pub fn get(&self, key: &NodeKey) -> Option<&dyn EarlyDriver> {
+    pub fn get(&self, key: &NodeKey) -> Option<&dyn Driver> {
         self.handles.get(key).map(|b| b.as_ref())
     }
 
@@ -63,14 +69,12 @@ impl EarlyDriverRegistry {
     }
 
     fn try_probe(&mut self, context: &mut ProbeContext) -> Result<(), ProbeError> {
-        for driver_info in early_drivers() {
+        for driver_info in drivers() {
             let node = context.node();
             let key = node.key();
             if node.is_compatible_any(driver_info.compatible) {
                 let driver = (driver_info.probe)(context)?;
-                let context = &mut EarlyDriverContext {
-                    mmio_requests: &mut self.mmio_requests,
-                };
+                let context = &mut DriverContext::new(&mut self.mmio_requests);
 
                 if let alloc::collections::btree_map::Entry::Vacant(e) = self.handles.entry(key)
                     && driver.init(context).is_ok()
@@ -80,35 +84,16 @@ impl EarlyDriverRegistry {
             }
         }
 
-        Err(ProbeError::Unsupported("no early driver"))
+        Err(ProbeError::Unsupported("no driver"))
     }
 }
 
-pub struct EarlyDriverContext<'a> {
-    mmio_requests: &'a mut Vec<MmioRequest>,
-}
 
-impl EarlyDriverContext<'_> {
-    pub fn request_mmio(&mut self, address: MmioAddress, size: usize) {
-        debug_assert_eq!(address % 4096, 0);
-
-        self.mmio_requests.push(MmioRequest {
-            base: address,
-            size,
-        })
-    }
-}
-
-pub trait EarlyDriver {
-    fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str>;
-
-    fn output(&self) -> Option<Box<dyn Writer + Sync + '_>> {
-        None
-    }
-}
-
+/// Контекст пробирования устройства.
 pub struct ProbeContext<'a> {
+    /// Узел DeviceTree, который пробируется.
     node: &'a Node<'a>,
+    /// Иерархия узлов от корня до текущего.
     hierarchy: &'a [Node<'a>],
 }
 
@@ -145,40 +130,44 @@ impl<'a> ProbeContext<'a> {
     }
 }
 
-pub type EarlyProbeFn = fn(&mut ProbeContext) -> ProbeResult<Box<dyn EarlyDriver>>;
+/// Функция пробирования драйвера.
+pub type ProbeFn = fn(&mut ProbeContext) -> ProbeResult<Box<dyn Driver>>;
 
+/// Информация о зарегистрированном драйвере.
 #[repr(C)]
-pub struct EarlyDriverInfo {
+pub struct DriverInfo {
+    /// Имя драйвера.
     pub name: &'static str,
+    /// Список совместимых строк из DeviceTree.
     pub compatible: CompatibleList,
-    pub probe: EarlyProbeFn,
+    /// Функция пробирования.
+    pub probe: ProbeFn,
 }
 
-fn early_drivers() -> &'static [EarlyDriverInfo] {
+fn drivers() -> &'static [DriverInfo] {
     #[allow(improper_ctypes)]
     unsafe extern "C" {
-        static __drivers_early_start: EarlyDriverInfo;
-        static __drivers_early_end: EarlyDriverInfo;
+        static __drivers_early_start: DriverInfo;
+        static __drivers_early_end: DriverInfo;
     }
 
     unsafe {
-        let start = &__drivers_early_start as *const EarlyDriverInfo;
-        let end = &__drivers_early_end as *const EarlyDriverInfo;
+        let start = &__drivers_early_start as *const DriverInfo;
+        let end = &__drivers_early_end as *const DriverInfo;
         let length = end.offset_from(start) as usize;
         core::slice::from_raw_parts(start, length)
     }
 }
 
 #[macro_export]
-macro_rules! register_early_driver {
+macro_rules! register_driver {
     ($symbol:ident, compatible = $compatible:expr, probe = $probe:expr) => {
         #[unsafe(link_section = ".drivers.early")]
         #[used]
-        static $symbol: $crate::driver::early::EarlyDriverInfo =
-            $crate::driver::early::EarlyDriverInfo {
-                name: stringify!($symbol),
-                compatible: $compatible,
-                probe: $probe,
-            };
+        static $symbol: $crate::driver::DriverInfo = $crate::driver::DriverInfo {
+            name: stringify!($symbol),
+            compatible: $compatible,
+            probe: $probe,
+        };
     };
 }

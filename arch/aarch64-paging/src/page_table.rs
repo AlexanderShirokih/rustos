@@ -1,8 +1,14 @@
+//! Таблица страниц AArch64.
+
 use crate::entry::{Entry, Kind};
 use crate::level::Level;
 use core::marker::PhantomData;
 
+/// Таблица страниц уровня `L`.
+///
+/// Содержит 512 записей (4 КБ).
 pub struct PageTable<L: Level> {
+    /// 512 записей по 8 байт.
     entries: [u64; 512],
     _p: PhantomData<L>,
 }
@@ -15,11 +21,19 @@ impl<L: Level> PageTable<L> {
         }
     }
 
+    /// Записывает entry по индексу.
     pub fn set<K: Kind>(&mut self, idx: usize, e: Entry<L, K>) {
         self.entries[idx] = e.raw();
     }
 
+    /// Возвращает сырое значение записи по индексу.
     pub fn get_raw(&self, idx: usize) -> u64 {
         self.entries[idx]
+    }
+}
+
+impl<L: Level> Default for PageTable<L> {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -293,6 +293,20 @@ fn set_range_is_idempotent() {
 }
 
 #[test]
+fn set_unchecked_updates_remaining_once() {
+    let region = make_range(0, 64);
+    let mut bitmap = FrameBitmap::new(region);
+    let initial = bitmap.remaining();
+
+    bitmap.set_unchecked(Frame::new(10));
+    assert_eq!(bitmap.remaining(), initial - 1);
+
+    // Повторная установка не должна уменьшать free ещё раз
+    bitmap.set_unchecked(Frame::new(10));
+    assert_eq!(bitmap.remaining(), initial - 1);
+}
+
+#[test]
 fn set_range_with_partial_overlap() {
     let region = make_range(0, 64);
     let mut bitmap = FrameBitmap::new(region);

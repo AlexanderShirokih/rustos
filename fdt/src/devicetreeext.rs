@@ -71,11 +71,15 @@ impl Default for CellsSize {
     }
 }
 
+/// Дополнительные методы для работы с узлом.
 pub trait NodeExt {
+    /// Проверяет совместимость узла с указанным драйвером.
     fn is_compatible(&self, name: &str) -> bool;
 
+    /// Извлекает адресное пространство из свойства `ranges`.
     fn try_get_range(&self, parent_cells_size: CellsSize) -> Option<Ranges>;
 
+    /// Возвращает размерность ячеек адреса и размера для этого узла.
     fn cells_size(&self) -> Option<CellsSize>;
 }
 
@@ -86,7 +90,7 @@ impl NodeExt for Node<'_> {
     }
 
     fn try_get_range(&self, parent_cells_size: CellsSize) -> Option<Ranges> {
-        // Размета атрибута ranges:
+        // Разметка атрибута ranges:
         // <child_addr> <parent_addr_hi> <parent_addr_lo> <size>
         // Пример:
         // ranges = < 0x00      0x10      0x00      0x80000000 >
@@ -130,12 +134,15 @@ impl NodeExt for Node<'_> {
     }
 }
 
+/// Дополнительные методы для работы со свойством.
 pub trait PropExt<'a> {
+    /// Извлекает список регистров (адрес + размер) из свойства `reg`.
     fn try_as_reg_list<const N: usize>(
         &self,
         cells_size: CellsSize,
     ) -> Option<Vec<AddressSpace, N>>;
 
+    /// Возвращает итератор по строкам (например, для `compatible`).
     fn into_string_list_iter(self) -> impl Iterator<Item = &'a str> + 'a;
 }
 

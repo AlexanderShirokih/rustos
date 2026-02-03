@@ -1,6 +1,9 @@
-use fdt::devicetreeext::{NodeExt, PropExt};
-use kernel::driver::early::ProbeContext;
+//! Общие утилиты для драйверов.
 
+use drivers_common::ProbeContext;
+use fdt::devicetreeext::{NodeExt, PropExt};
+
+/// Расширение ProbeContext для работы с адресами регистров.
 pub(crate) trait ProbeContextExt {
     fn reg_offset<const N: usize>(&self, reg_index: usize) -> usize;
 }

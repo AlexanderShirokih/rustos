@@ -4,9 +4,16 @@ use core::alloc::Layout;
 use core::fmt::Formatter;
 use core::ptr::NonNull;
 
+/// Простой bump-аллокатор для непрерывного диапазона памяти.
+///
+/// Выделяет память последовательно, увеличивая смещение. Освобождение
+/// отдельных блоков не поддерживается — память освобождается только целиком.
 pub struct BumpAllocator {
+    /// Начальный адрес управляемого региона.
     start: usize,
+    /// Конечный адрес управляемого региона (эксклюзивный).
     end: usize,
+    /// Текущее смещение от начала (следующий свободный байт).
     offset: usize,
 }
 
@@ -19,7 +26,7 @@ impl BumpAllocator {
         }
     }
 
-    fn remaining(&self) -> usize {
+    const fn remaining(&self) -> usize {
         self.end - self.start - self.offset
     }
 
@@ -42,7 +49,10 @@ impl BumpAllocator {
             .checked_add(size)
             .ok_or(BumpAllocError::AddressOverflow)?;
 
-        if base + new_offset > self.end {
+        let end_addr = base
+            .checked_add(new_offset)
+            .ok_or(BumpAllocError::AddressOverflow)?;
+        if end_addr > self.end {
             return Err(BumpAllocError::OutOfMemory {
                 required_size: size,
                 available_size: self.remaining(),
@@ -55,11 +65,16 @@ impl BumpAllocator {
     }
 }
 
+/// Ошибки при выделении памяти через bump-аллокатор.
 pub enum BumpAllocError {
+    /// Переполнение адреса при вычислении нового смещения.
     AddressOverflow,
 
+    /// Недостаточно памяти для выделения.
     OutOfMemory {
+        /// Запрошенный размер в байтах.
         required_size: usize,
+        /// Доступный размер в байтах.
         available_size: usize,
     },
 }

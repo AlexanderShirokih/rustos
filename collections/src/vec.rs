@@ -1,8 +1,15 @@
 use core::ops::{Index, IndexMut};
 
+/// Вектор фиксированной ёмкости без аллокаций.
+///
+/// Хранит до `N` элементов на стеке. Используется в no_std окружении
+/// как замена `alloc::vec::Vec`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Vec<T, const N: usize> {
+    /// Массив слотов для элементов.
     items: [Option<T>; N],
+
+    /// Текущее количество элементов.
     len: usize,
 }
 
@@ -115,6 +122,7 @@ impl<T, const N: usize> IndexMut<usize> for Vec<T, N> {
     }
 }
 
+/// Итератор по ссылкам на элементы вектора.
 pub struct VecIter<'a, T> {
     items: &'a [Option<T>],
     len: usize,
@@ -151,6 +159,7 @@ impl<'a, T> ExactSizeIterator for VecIter<'a, T> {
     }
 }
 
+/// Итератор, потребляющий вектор и возвращающий элементы по значению.
 pub struct VecIntoIter<T, const N: usize> {
     vec: Vec<T, N>,
     index: usize,

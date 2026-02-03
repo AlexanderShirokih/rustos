@@ -1,6 +1,6 @@
 # Mobile Kernel
 
-Ядро для мобильных устройств на архитектуре AArch64.
+Экспериментальное дро для мобильных устройств на архитектуре AArch64.
 
 ## Требования
 
@@ -30,6 +30,9 @@ cargo xtask build devices/spec/xiaomi-lavender.yaml
 - `binary` — `target/build/kernel.bin`
 - `android_boot_v1`, `android_boot_v2` — `target/build/boot.img`
 
+## Прогон тестов
+- `cargo test`
+
 ## Запуск
 
 ```bash
@@ -38,15 +41,6 @@ cargo xtask build devices/spec/qemu-aarch64.yaml --run
 
 # Сборка + отладка (выполняет команды из 'debug' в YAML)
 cargo xtask build devices/spec/qemu-aarch64.yaml --debug
-```
-
-## Разработка
-
-```bash
-cargo check --workspace   # проверка кода
-
-# Сборка отдельного пакета для целевой архитектуры
-cargo build --package arch-aarch64 --target aarch64-unknown-none
 ```
 
 ## Спецификации устройств

@@ -1,19 +1,21 @@
+//! Аллокатор таблиц страниц.
+
 use crate::level::Level;
 use crate::page_table::PageTable;
 use memory::physical_address::PageAlignedAddress;
 
+/// Аллокатор таблиц страниц.
+///
+/// Отвечает за выделение памяти под новые таблицы и получение
+/// указателей на них по физическому адресу.
 pub trait TableAlloc {
-    /// Выделить физическую страницу 4K под page table и вернуть её PA.
+    /// Выделяет физическую страницу 4 КБ под таблицу.
     fn alloc_table_page(&mut self) -> Option<PageAlignedAddress>;
 
-    /// Получить указатель на page table уровня L.
+    /// Возвращает указатель на таблицу по её физическому адресу.
     ///
-    /// # Arguments
-    /// * `pa` - физический адрес page table
-    /// * `target_va` - целевой VA, который обслуживает эта таблица (для recursive mapping)
     /// # Safety
-    /// - Caller гарантирует, что page table существует
-    /// - `target_va` должен быть canonical address
+    /// Таблица по адресу `pa` должна существовать и быть валидной.
     unsafe fn table_ptr<L: Level>(
         &self,
         pa: PageAlignedAddress,

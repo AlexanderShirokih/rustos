@@ -1,38 +1,43 @@
+//! System Control Register (SCTLR).
+//!
+//! Управляет MMU и кэшами.
+
 use crate::combine_bits;
 use crate::memory::regs::common::EL1;
 use core::arch::asm;
 
-// Главный регистр управляющий MMU/кэшами
-
-/// Биты, которые мы выставляем в `SCTLR` при включении MMU.
+/// Бит SCTLR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SctlrBit {
     /// Включить MMU.
-    MmuEnable,
+    Mmu,
     /// Включить D-cache.
-    DCacheEnable,
+    DCache,
     /// Включить I-cache.
-    ICacheEnable,
+    ICache,
 }
 
 impl SctlrBit {
     const fn encode(self) -> u64 {
         match self {
-            SctlrBit::MmuEnable => 1 << 0,
-            SctlrBit::DCacheEnable => 1 << 2,
-            SctlrBit::ICacheEnable => 1 << 12,
+            SctlrBit::Mmu => 1 << 0,
+            SctlrBit::DCache => 1 << 2,
+            SctlrBit::ICache => 1 << 12,
         }
     }
 }
 
+/// Скомбинированные биты SCTLR.
 pub struct SctlrBits(u64);
 
 impl SctlrBits {
+    /// Объединяет биты SCTLR.
     pub const fn combine(bits: &[SctlrBit]) -> SctlrBits {
         SctlrBits(combine_bits!(bits))
     }
 }
 
+/// Регистр SCTLR (System Control Register).
 pub struct SystemControlRegister<EL> {
     _phantom: core::marker::PhantomData<EL>,
 }

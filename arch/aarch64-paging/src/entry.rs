@@ -1,12 +1,18 @@
+//! Записи таблицы страниц AArch64.
+
 use crate::level::{L0, L1, L1BlockPa, L2, L2BlockPa, L3, Level, PagePa};
 use crate::mem_flags::MemFlags;
 use crate::table_flags::TableFlags;
 use core::marker::PhantomData;
 use memory::aligned::Address;
 
+/// Sealed traits для ограничения типов записей на каждом уровне.
 mod seal {
+    /// Уровень поддерживает запись-таблицу.
     pub trait CanTable {}
+    /// Уровень поддерживает блочную запись.
     pub trait CanBlock: CanTable {}
+    /// Уровень поддерживает страничную запись.
     pub trait CanPage {}
 }
 
@@ -21,11 +27,16 @@ impl seal::CanBlock for L1 {}
 impl seal::CanBlock for L2 {}
 impl seal::CanPage for L3 {}
 
+/// Маркер типа записи.
 pub trait Kind {}
 
+/// Невалидная запись (биты [1:0] = 0b00).
 pub enum Invalid {}
+/// Запись-указатель на следующий уровень таблицы.
 pub enum Table {}
+/// Блочная запись (L1: 1 ГБ, L2: 2 МБ).
 pub enum Block {}
+/// Страничная запись (4 КБ, только L3).
 pub enum Page {}
 
 impl Kind for Invalid {}
@@ -33,8 +44,12 @@ impl Kind for Table {}
 impl Kind for Block {}
 impl Kind for Page {}
 
+/// Запись таблицы страниц уровня `L` с типом `K`.
+///
+/// Типизирована по уровню и виду записи для compile-time гарантий корректности.
 #[repr(transparent)]
 pub struct Entry<L: Level, K: Kind> {
+    /// Сырое 64-битное значение дескриптора.
     raw: u64,
     _p: PhantomData<(L, K)>,
 }
@@ -97,7 +112,6 @@ impl Entry<L2, Block> {
 
 impl<L: Level + seal::CanPage> Entry<L, Page> {
     pub fn new(page_pa: PagePa, flags: MemFlags) -> Self {
-        // bits[1:0] = 0b11 (page) для L3
         let addr = page_pa.as_u64() & 0x0000_FFFF_FFFF_F000;
         let raw = 0b11 | addr | flags.bits();
 
@@ -112,9 +126,9 @@ impl<L: Level + seal::CanPage> Entry<L, Page> {
     }
 }
 
-/// Внутренний трейт: как декодировать `0b01` для конкретного уровня.
-/// - L0: block недопустим
-/// - L1/L2: block допустим
+/// Декодирует дескриптор с битами [1:0] = 0b01.
+///
+/// L0 не поддерживает блоки, L1/L2 — поддерживают.
 pub trait DecodeBlock: Level {
     fn decode_block(raw: u64) -> Result<AnyEntry<Self>, DecodeError>
     where
@@ -139,16 +153,24 @@ impl DecodeBlock for L2 {
     }
 }
 
+/// Ошибка декодирования записи.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
+    /// Зарезервированное значение дескриптора.
     Reserved,
+    /// Тип записи недопустим для данного уровня.
     WrongKind,
 }
 
+/// Декодированная запись произвольного типа.
 pub enum AnyEntry<L: Level> {
+    /// Невалидная запись.
     Invalid(Entry<L, Invalid>),
+    /// Указатель на дочернюю таблицу.
     Table(Entry<L, Table>),
+    /// Блочный маппинг.
     Block(Entry<L, Block>),
+    /// Страничный маппинг (только L3).
     Page(Entry<L3, Page>),
 }
 
@@ -163,11 +185,13 @@ impl<L: Level> AnyEntry<L> {
     }
 }
 
+/// Извлекает тип дескриптора (биты [1:0]).
 #[inline]
 fn desc_type(raw: u64) -> u64 {
     raw & 0b11
 }
 
+/// Декодирует сырое значение в типизированную запись.
 pub fn decode<L>(raw: u64) -> Result<AnyEntry<L>, DecodeError>
 where
     L: Level + seal::CanTable + DecodeBlock,
@@ -181,6 +205,6 @@ where
 
         0b01 => DecodeBlock::decode_block(raw),
 
-        0b10 | _ => Err(DecodeError::Reserved),
+        _ => Err(DecodeError::Reserved),
     }
 }

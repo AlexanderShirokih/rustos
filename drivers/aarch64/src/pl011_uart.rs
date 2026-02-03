@@ -1,38 +1,48 @@
-use crate::drivers::commons::ProbeContextExt;
+//! Драйвер UART PL011 (ARM PrimeCell).
+
+use crate::commons::ProbeContextExt;
 use alloc::boxed::Box;
 use core::hint::spin_loop;
+use drivers_common::{Driver, DriverContext, ProbeContext, ProbeResult};
 use io::byte_sink::{ByteSink, WouldBlock};
 use io::mmio::{Mmio, Reg};
 use io::writer::{BlockingWriter, Writer};
-use kernel::driver::early::{EarlyDriver, EarlyDriverContext, ProbeContext};
-use kernel::driver::probe::ProbeResult;
-use kernel::driver::register_early_driver;
 use util::crlf::Crlf;
 
-const DR: Reg<u32> = Reg::new(0x00); // Data Reg
-const FR: Reg<u32> = Reg::new(0x18); // Flag Reg
-const CR: Reg<u32> = Reg::new(0x30); // Control Reg
+/// Регистр данных.
+const DR: Reg<u32> = Reg::new(0x00);
+/// Регистр флагов.
+const FR: Reg<u32> = Reg::new(0x18);
+/// Регистр управления.
+const CR: Reg<u32> = Reg::new(0x30);
 
-// Биты регистра FR
-const FR_TXFF: u32 = 1 << 5; // Передающий FIFO заполнен
-const FR_BUSY: u32 = 1 << 3; // UART занят передачей
+/// TX FIFO заполнен.
+const FR_TXFF: u32 = 1 << 5;
+/// UART занят передачей.
+const FR_BUSY: u32 = 1 << 3;
 
-// Биты регистра CR
-const CR_UARTEN: u32 = 1 << 0; // Включение UART
-const CR_TXE: u32 = 1 << 8;    // Включение передатчика
-const CR_RXE: u32 = 1 << 9;    // Включение приёмника
+/// Включение UART.
+const CR_UARTEN: u32 = 1 << 0;
+/// Включение передатчика.
+const CR_TXE: u32 = 1 << 8;
+/// Включение приёмника.
+const CR_RXE: u32 = 1 << 9;
 
+/// Индекс записи reg в DeviceTree.
 const REG_UART_INDEX: usize = 0;
+/// Индекс размера в записи reg.
 const REG_UART_SIZE_INDEX: usize = 1;
 
+/// Драйвер UART PL011.
 pub struct UartPl011 {
+    /// MMIO-доступ к регистрам.
     mmio: Mmio,
+    /// Базовый адрес регистров.
     base: usize,
 }
 
-// Драйвер UART PL011 (ARM PrimeCell)
 impl UartPl011 {
-    pub(crate) const fn new(base: usize) -> Self {
+    pub const fn new(base: usize) -> Self {
         Self {
             mmio: Mmio::new(base),
             base,
@@ -42,7 +52,6 @@ impl UartPl011 {
 
 impl ByteSink for UartPl011 {
     fn try_write(&self, b: u8) -> Result<(), WouldBlock> {
-        // Выходим, если очередь не пуста
         if (self.mmio.read_reg(FR) & FR_TXFF) != 0 {
             return Err(WouldBlock);
         }
@@ -83,8 +92,8 @@ impl ByteSink for UartPl011 {
     }
 }
 
-impl EarlyDriver for UartPl011 {
-    fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
+impl Driver for UartPl011 {
+    fn init(&self, context: &mut DriverContext) -> Result<(), &'static str> {
         context.request_mmio(self.base, 4096);
 
         // Включаем UART и передатчик
@@ -98,13 +107,13 @@ impl EarlyDriver for UartPl011 {
     }
 }
 
-fn uart_pl011_probe(context: &mut ProbeContext<'_>) -> ProbeResult<Box<dyn EarlyDriver>> {
+fn uart_pl011_probe(context: &mut ProbeContext<'_>) -> ProbeResult<Box<dyn Driver>> {
     let base = context.reg_offset::<REG_UART_SIZE_INDEX>(REG_UART_INDEX);
 
     Ok(Box::new(UartPl011::new(base)))
 }
 
-register_early_driver!(
+drivers_common::register_driver!(
     UART_PL011_EARLY,
     compatible = &["arm,pl011"],
     probe = uart_pl011_probe

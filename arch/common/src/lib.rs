@@ -1,4 +1,3 @@
 #![no_std]
 
-pub mod kernel;
-pub mod start;
+pub mod scanner;

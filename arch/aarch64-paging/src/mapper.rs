@@ -1,3 +1,5 @@
+//! Маппинг виртуальных адресов на физические.
+
 use crate::entry::{
     AnyEntry, Block, CanTable, DecodeBlock, DecodeError, Entry, Page, Table, decode,
 };
@@ -10,6 +12,7 @@ use crate::virtual_address::VirtualAddressExt;
 use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress};
 
+/// Физический адрес, который можно замапить на виртуальный.
 pub trait MapLeaf<const SHIFT: u8>: Copy {
     fn map_into<A: TableAlloc>(
         mapper: &mut PageMapper<A>,
@@ -33,7 +36,7 @@ impl MapLeaf<{ L3::SHIFT }> for PagePa {
         let l3 = mapper.ensure_next::<L2, L3>(l2, target_va)?;
         let idx = virt.index::<L3>();
 
-        // SAFETY: l3 получен через ensure_next, который гарантирует валидность указателя
+        // SAFETY: l3 валиден после ensure_next
         let raw = unsafe { (*l3).get_raw(idx) };
         if raw != 0 {
             return Err(MapError::AlreadyMapped);
@@ -56,7 +59,7 @@ impl MapLeaf<{ L2::SHIFT }> for L2BlockPa {
         let l2 = mapper.ensure_next::<L1, L2>(l1, target_va)?;
         let idx = virt.index::<L2>();
 
-        // SAFETY: l2 получен через ensure_next, который гарантирует валидность указателя
+        // SAFETY: l2 валиден после ensure_next
         let raw = unsafe { (*l2).get_raw(idx) };
         match decode::<L2>(raw).map_err(MapError::Decode)? {
             AnyEntry::Invalid(_) => {
@@ -81,7 +84,7 @@ impl MapLeaf<{ L1::SHIFT }> for L1BlockPa {
         let l1 = mapper.ensure_next::<L0, L1>(l0, target_va)?;
         let idx = virt.index::<L1>();
 
-        // SAFETY: l1 получен через ensure_next, который гарантирует валидность указателя
+        // SAFETY: l1 валиден после ensure_next
         let raw = unsafe { (*l1).get_raw(idx) };
         match decode::<L1>(raw).map_err(MapError::Decode)? {
             AnyEntry::Invalid(_) => {
@@ -94,18 +97,20 @@ impl MapLeaf<{ L1::SHIFT }> for L1BlockPa {
     }
 }
 
+/// Маппер виртуальных адресов.
+///
+/// Управляет иерархией таблиц страниц и создаёт маппинги.
 pub struct PageMapper<A: TableAlloc> {
+    /// Корневая таблица L0.
     root: *mut PageTable<L0>,
+    /// Аллокатор таблиц страниц.
     alloc: A,
+    /// Флаги для новых записей-таблиц.
     table_flags: TableFlags,
 }
 
 impl<A: TableAlloc> PageMapper<A> {
-    /// Создаёт новый PageMapper.
-    ///
-    /// # Arguments
-    /// * `root` - указатель на L0 page table
-    /// * `alloc` - аллокатор page tables
+    /// Создаёт маппер с заданной корневой таблицей и аллокатором.
     pub fn new(root: *mut PageTable<L0>, alloc: A) -> Self {
         Self {
             root,
@@ -114,12 +119,12 @@ impl<A: TableAlloc> PageMapper<A> {
         }
     }
 
-    /// Возвращает указатель на L0 page table.
     #[inline]
     fn l0_ptr(&self) -> *mut PageTable<L0> {
         self.root
     }
 
+    /// Создаёт маппинг виртуального адреса на физический.
     pub fn map_page<const SHIFT: u8, P: MapLeaf<SHIFT>>(
         &mut self,
         virt: AlignedVirtualAddress<SHIFT>,
@@ -129,13 +134,9 @@ impl<A: TableAlloc> PageMapper<A> {
         P::map_into(self, virt, phys, flags)
     }
 
-    /// Убедиться, что в таблице `parent` по индексу для `target_va` есть ссылка на дочернюю таблицу.
-    /// Если записи нет — выделить новую таблицу.
-    /// Возвращает указатель на дочернюю таблицу уровня `CL`.
+    /// Гарантирует наличие дочерней таблицы в `parent` для `target_va`.
     ///
-    /// # Arguments
-    /// * `parent` - указатель на родительскую таблицу
-    /// * `target_va` - целевой виртуальный адрес (для извлечения индексов)
+    /// Если записи нет — выделяет новую таблицу.
     fn ensure_next<PL, CL>(
         &mut self,
         parent: *mut PageTable<PL>,
@@ -176,16 +177,20 @@ impl<A: TableAlloc> PageMapper<A> {
     }
 }
 
+/// Извлекает физический адрес таблицы из дескриптора.
 fn extract_table_pa(raw: u64) -> PageAlignedAddress {
     PageAlignedAddress::new_unchecked(PhysicalAddress::new((raw & 0x0000_FFFF_FFFF_F000) as usize))
 }
 
+/// Ошибка маппинга.
 #[derive(Debug)]
 pub enum MapError {
+    /// Не удалось выделить память под таблицу.
     OutOfMemory,
-    /// В ячейке целевого уровня уже стоит `Table`, поэтому нужно маппить меньшими страницами.
+    /// В ячейке уже есть таблица — нужны страницы меньшего размера.
     NeedsSmallerPages,
-    /// В ячейке уже стоит leaf (Block/Page) — конфликт маппинга.
+    /// Адрес уже замаплен.
     AlreadyMapped,
+    /// Ошибка декодирования записи.
     Decode(DecodeError),
 }

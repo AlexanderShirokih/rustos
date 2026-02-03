@@ -2,7 +2,7 @@ use crate::aligned::{Address, Aligned};
 use crate::physical_address::AlignedPhysicalAddress;
 use core::fmt::{Formatter, LowerHex};
 
-/// Адрес виртуальной памяти
+/// Адрес виртуальной памяти.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct VirtualAddress(usize);
@@ -31,6 +31,7 @@ impl Address for VirtualAddress {
     }
 }
 
+/// Виртуальный адрес, выровненный на 2^SHIFT байт.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct AlignedVirtualAddress<const SHIFT: u8>(VirtualAddress);

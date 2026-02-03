@@ -1,3 +1,7 @@
+//! Поэтапная настройка памяти ядра.
+//!
+//! Фазы: Early → Installed → Prepared → Enabled.
+
 use crate::memory::global_allocator::{GLOBAL_ALLOCATOR, KernelHeapAllocator};
 use crate::memory::layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag};
 use crate::memory::memory_mapper::Aarch64MemoryMapper;
@@ -20,19 +24,20 @@ use memory::memory_range::MemoryRange;
 use memory::physical_address::PageAlignedAddress;
 use memory::virtual_address::PageAlignedVirtualAddress;
 
+/// Ранняя фаза: bump-аллокатор создан, но не установлен.
 pub struct Early {
     bump_allocator: BumpAllocator,
     free_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
     layout: MemoryLayout,
 }
 
-/// Состояние после установки bump allocator в GLOBAL_ALLOCATOR
+/// Фаза после установки bump-аллокатора.
 pub struct Installed {
     free_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
     layout: MemoryLayout,
 }
 
-/// Корневые таблицы страниц для lower и higher half
+/// Корневые таблицы страниц.
 struct PageTableRoots {
     lower_pa: PageAlignedAddress,
     higher_pa: PageAlignedAddress,
@@ -40,18 +45,27 @@ struct PageTableRoots {
     higher_ptr: *mut PageTable<L0>,
 }
 
+/// Фаза после подготовки таблиц страниц.
 pub struct Prepared {
+    /// Корневые таблицы.
     roots: PageTableRoots,
+    /// Аллокатор фреймов.
     frame_allocator: &'static PhysicalFrameAllocator<NoLockCell<FrameBitmap>>,
+    /// Все регионы для маппинга.
     all_regions: StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
 }
 
+/// Фаза после включения MMU.
 pub struct Enabled {
+    /// Аллокатор фреймов.
     frame_allocator: &'static dyn FrameAllocator,
+    /// База higher half.
     higher_half_base: PageAlignedVirtualAddress,
 }
 
+/// Машина состояний настройки памяти.
 pub struct MemorySetup<Stage> {
+    /// Текущее состояние.
     state: Stage,
 }
 
@@ -73,7 +87,7 @@ impl MemorySetup<Early> {
         })
     }
 
-    /// Устанавливает bump allocator и возвращает Installed для цепочки вызовов
+    /// Устанавливает bump-аллокатор и переходит в Installed.
     pub fn install(self) -> MemorySetup<Installed> {
         GLOBAL_ALLOCATOR.set_bump(self.state.bump_allocator);
 
@@ -139,7 +153,8 @@ impl MemorySetup<Installed> {
         GLOBAL_ALLOCATOR.set_freeze();
 
         // Исключаем только использованную часть bump
-        let bump_used = GLOBAL_ALLOCATOR.get_bump().used();
+        // SAFETY: bump инициализирован и заморожен, конкурентного доступа нет
+        let bump_used = unsafe { GLOBAL_ALLOCATOR.get_bump() }.used();
         let bump_start = PageAlignedAddress::aligned_down(bump_used.start());
         let bump_end = PageAlignedAddress::aligned_up(bump_used.end());
 
@@ -171,7 +186,7 @@ impl MemorySetup<Installed> {
             Heap::flags(),
         );
 
-        // Вычиляем точно незанятые области RAM
+        // Вычисляем точно незанятые области RAM
         let mut mapping_heap_regions = free_regions.clone();
         mapping_heap_regions
             .remove(bump_start, bump_end)
@@ -363,7 +378,6 @@ impl MemorySetup<Enabled> {
             frame_allocator,
             higher_half_base,
         } = self.state;
-        let higher_half_base = higher_half_base;
         let allocator = KernelHeapAllocator::new(frame_allocator, higher_half_base);
 
         debug!(
@@ -398,10 +412,12 @@ impl<Any> MemorySetup<Any> {
     }
 }
 
+/// Ошибка настройки памяти.
 #[derive(Debug)]
 pub enum MemorySetupError {
+    /// Недостаточно памяти.
     OutOfMemory,
-
+    /// Ошибка маппинга.
     #[allow(dead_code)]
     MappingFailed(memory::memory_mapper::MemoryMappingError),
 }

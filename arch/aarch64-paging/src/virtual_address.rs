@@ -1,7 +1,11 @@
+//! Расширения для виртуальных адресов.
+
 use crate::level::Level;
 use memory::virtual_address::AlignedVirtualAddress;
 
+/// Извлечение индекса таблицы страниц из виртуального адреса.
 pub trait VirtualAddressExt {
+    /// Возвращает индекс в таблице уровня `L` (0..511).
     fn index<L: Level>(self) -> usize;
 }
 

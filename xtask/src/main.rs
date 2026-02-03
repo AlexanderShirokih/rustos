@@ -19,14 +19,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build kernel for a device
+    /// Собрать ядро для устройства
     Build {
-        /// Path to device spec YAML
+        /// Путь к YAML-спеке устройства
         spec: PathBuf,
-        /// Run after build (execute commands from 'run' in YAML)
+        /// Запустить после сборки (команды из 'run' в YAML)
         #[arg(long)]
         run: bool,
-        /// Debug after build (execute commands from 'debug' in YAML)
+        /// Отладка после сборки (команды из 'debug' в YAML)
         #[arg(long)]
         debug: bool,
     },

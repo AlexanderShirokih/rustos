@@ -1,10 +1,14 @@
 use crate::vec::Vec;
 use core::cmp::Ordering;
 
+/// Полуоткрытый интервал [start, end).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Interval<T> {
+    /// Начало интервала (включительно).
     pub start: T,
-    pub end: T, // [start, end)
+
+    /// Конец интервала (исключительно).
+    pub end: T,
 }
 
 impl<T: Ord + Copy> Interval<T> {
@@ -17,19 +21,19 @@ impl<T: Ord + Copy> Interval<T> {
         }
     }
     
+    /// Проверяет пересечение или смежность с другим интервалом.
     #[inline]
     fn overlaps_or_touches(&self, other: &Self) -> bool {
-        // For half-open intervals:
-        // overlap if self.start < other.end && other.start < self.end
-        // touch if self.end == other.start || other.end == self.start
         !(self.end < other.start || other.end < self.start)
     }
 
+    /// Проверяет пересечение с другим интервалом.
     #[inline]
     fn overlaps(&self, other: &Self) -> bool {
         self.start < other.end && other.start < self.end
     }
 
+    /// Расширяет интервал, объединяя с другим.
     #[inline]
     fn merge_with(&mut self, other: &Self) {
         if other.start < self.start {
@@ -41,10 +45,15 @@ impl<T: Ord + Copy> Interval<T> {
     }
 }
 
-/// Set of disjoint, sorted half-open intervals [start, end).
-/// N — максимальная ёмкость (количество интервалов).
+/// Множество непересекающихся полуоткрытых интервалов.
+///
+/// Интервалы хранятся отсортированными. При добавлении смежные
+/// и пересекающиеся интервалы автоматически объединяются.
+///
+/// `N` — максимальное количество интервалов.
 #[derive(Clone, PartialEq, Eq)]
 pub struct IntervalSet<T, const N: usize> {
+    /// Отсортированный список непересекающихся интервалов.
     ranges: Vec<Interval<T>, N>,
 }
 
@@ -79,7 +88,7 @@ impl<T: Ord + Copy, const N: usize> IntervalSet<T, N> {
         self.ranges.iter()
     }
 
-    /// Бинарный поиск: возвращает индекс первого интервала, для которого predicate возвращает Greater.
+    /// Бинарный поиск первого интервала, удовлетворяющего предикату.
     fn binary_search_first_ge<F>(&self, mut predicate: F) -> usize
     where
         F: FnMut(&Interval<T>) -> Ordering,
@@ -98,8 +107,9 @@ impl<T: Ord + Copy, const N: usize> IntervalSet<T, N> {
         lo
     }
 
-    /// Add [start, end).
-    /// Возвращает None если не хватило ёмкости.
+    /// Добавляет интервал [start, end).
+    ///
+    /// Возвращает `None` при нехватке ёмкости.
     pub fn add(&mut self, start: T, end: T) -> Option<()> {
         let Some(mut incoming) = Interval::new(start, end) else {
             return Some(());
@@ -145,8 +155,9 @@ impl<T: Ord + Copy, const N: usize> IntervalSet<T, N> {
         Some(())
     }
 
-    /// Remove [start, end).
-    /// Возвращает None если не хватило ёмкости (split может увеличить число интервалов).
+    /// Удаляет интервал [start, end).
+    ///
+    /// Возвращает `None` при нехватке ёмкости (разрез может увеличить число интервалов).
     pub fn remove(&mut self, start: T, end: T) -> Option<()> {
         let Some(cut) = Interval::new(start, end) else {
             return Some(());

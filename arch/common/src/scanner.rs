@@ -1,7 +1,9 @@
-use crate::driver::probe::NodeProbeExt;
-use fdt::devicetree::{DeviceTree, Node};
+//! Поиск устройств в DeviceTree.
 
-/// Находит выбранный в stdout узел консоли.
+use fdt::devicetree::{DeviceTree, Node};
+use drivers_common::NodeProbeExt;
+
+/// Находит узел консоли из stdout-path или первый serial.
 pub fn find_console<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
     stdout_node(device_tree).or_else(|| first_serial(device_tree))
 }

@@ -1,16 +1,23 @@
 use crate::cursor::Cursor;
-use core::ops::Sub;
 use core::slice::from_raw_parts;
 
-/// Узел дерева
+/// Узел Device Tree.
 #[derive(Clone, Copy)]
 pub struct Node<'a> {
+    /// Имя узла (например, "serial@7d001000").
     name: &'a str,
+
+    /// Смещение содержимого узла в буфере.
     offset: usize,
+
+    /// Ссылка на заголовок FDT.
     header: &'a FdtHeader,
+
+    /// Буфер с данными всего дерева.
     buffer: &'a [u8],
 }
 
+/// Уникальный ключ узла для сравнения и хранения.
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub struct NodeKey(usize);
 
@@ -44,10 +51,13 @@ impl<'a> Node<'a> {
     }
 }
 
-/// Аттрибут узла дерева
+/// Свойство (атрибут) узла Device Tree.
 #[derive(Clone, Copy)]
 pub struct Property<'a> {
+    /// Имя свойства.
     name: &'a str,
+
+    /// Сырые байты значения свойства.
     value: &'a [u8],
 }
 
@@ -60,10 +70,10 @@ impl<'a> Property<'a> {
         self.value
     }
 
-    /// Возвращает value интерпретируя как &str
+    /// Возвращает значение как строку (без завершающего нуля).
     pub fn as_cstr(&self) -> Option<&'a str> {
         let bytes = self.value;
-        let len = bytes.len().sub(1);
+        let len = bytes.len().saturating_sub(1);
 
         str::from_utf8(&bytes[..len]).ok()
     }
@@ -80,7 +90,7 @@ impl<'a> Property<'a> {
         Some(u64::from_be_bytes(slice.try_into().unwrap()))
     }
 
-    /// Возвращает value интерпретируя как usize
+    /// Возвращает значение как `usize` (4 или 8 байт big-endian).
     pub fn as_usize(&self) -> usize {
         let bytes = self.value;
 
@@ -94,16 +104,28 @@ impl<'a> Property<'a> {
     }
 }
 
+/// Flattened Device Tree (FDT) — структура описания оборудования.
 pub struct DeviceTree<'a> {
+    /// Буфер с бинарными данными дерева.
     buffer: &'a [u8],
+
+    /// Разобранный заголовок FDT.
     header: FdtHeader,
 }
 
-/// Ошибки разбора Device Tree
+/// Ошибки разбора Device Tree.
 #[derive(Debug)]
 pub enum DtError {
+    /// Неверная сигнатура (magic) в заголовке.
     InvalidMagic(u32),
-    Incomplete { total_size: usize, actual: usize },
+
+    /// Буфер меньше заявленного размера дерева.
+    Incomplete {
+        /// Ожидаемый размер из заголовка.
+        total_size: usize,
+        /// Фактический размер буфера.
+        actual: usize,
+    },
 }
 
 impl<'a> DeviceTree<'a> {
@@ -198,19 +220,21 @@ impl<'a> DeviceTree<'a> {
     }
 }
 
+/// Заголовок Flattened Device Tree.
 #[derive(Clone, Copy)]
 struct FdtHeader {
-    /// Размер структуры
+    /// Полный размер FDT в байтах.
     total_size: usize,
 
-    /// Сдвиг от начала буфера до начала блока структур
+    /// Смещение блока структур от начала буфера.
     struct_off: u32,
 
-    /// Сдвиг от начала буфера до пула строковых констант
+    /// Смещение пула строк от начала буфера.
     strings_off: u32,
 }
 
 impl FdtHeader {
+    /// Магическое число FDT (0xD00DFEED).
     const MAGIC: u32 = 0xD00D_FEED;
 
     fn read_checked(cur: &mut Cursor<'_>) -> Result<Self, DtError> {
@@ -405,6 +429,7 @@ impl<'a> DeviceTreeWalker<'a> {
     }
 }
 
+/// Итератор по дочерним узлам.
 pub struct NodeIter<'a> {
     walker: DeviceTreeWalker<'a>,
 }
@@ -422,6 +447,7 @@ impl<'a> Iterator for NodeIter<'a> {
     }
 }
 
+/// Итератор по свойствам узла.
 pub struct PropertyIter<'a> {
     walker: DeviceTreeWalker<'a>,
 }

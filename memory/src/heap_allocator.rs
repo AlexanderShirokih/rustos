@@ -26,28 +26,32 @@ const HEADER_PTR_SIZE: usize = size_of::<*mut FreeBlock>();
 /// Размер страницы для выравнивания при расширении
 const PAGE_SIZE: usize = 4096;
 
-/// Типы ошибок при сбое выделения памяти
+/// Ошибки при выделении памяти в куче.
 #[derive(Debug, Clone)]
 pub enum AllocationError {
+    /// Недостаточно памяти для выделения.
     OutOfMemory,
+    /// Некорректный layout (например, нулевой размер).
     InvalidLayout,
 }
 
-/// Свободный блок в куче
+/// Свободный блок в куче.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 struct FreeBlock {
+    /// Размер полезной области блока в байтах (без заголовка).
     size: usize,
+    /// Указатель на следующий свободный блок.
     next: Option<NonNull<FreeBlock>>,
 }
 
 impl FreeBlock {
-    /// Создать новый свободный блок
+    /// Создает новый свободный блок
     const fn from_size(size: usize) -> Self {
         FreeBlock { size, next: None }
     }
 
-    /// Разделить этот блок, если он достаточно большой для запрошенного размера.
+    /// Разделяет этот блок, если он достаточно большой для запрошенного размера.
     /// Возвращает новый блок, созданный из разделения, если возможно.
     ///
     /// Схема памяти блока:
@@ -88,6 +92,7 @@ impl FreeBlock {
     }
 }
 
+/// Аллокатор кучи ядра на основе free list
 pub struct HeapAllocator {
     /// Аллокатор физических фреймов
     frame_allocator: &'static dyn FrameAllocator,
@@ -116,7 +121,6 @@ impl HeapAllocator {
     }
 
     /// Увеличивает емкость кучи, выделяя физические страницы.
-    /// Память уже замаплена линейно (VA = higher_half_base + PA).
     fn expand(&mut self, min_size: usize) -> Result<(), AllocationError> {
         let pages_needed = align_up(min_size, PAGE_SIZE) / PAGE_SIZE;
         let mut remaining = pages_needed;
@@ -149,7 +153,7 @@ impl HeapAllocator {
         Ok(())
     }
 
-    /// Найти и удалить подходящий блок из списка свободных
+    /// Находит и удаляет подходящий блок из списка свободных
     fn find_free_block(&mut self, size: usize) -> Option<NonNull<FreeBlock>> {
         let mut current = self.free_list_head;
         let mut prev: Option<NonNull<FreeBlock>> = None;
@@ -233,7 +237,7 @@ impl HeapAllocator {
         }
     }
 
-    /// Подготовить выделенный блок: записать указатель на заголовок и вернуть выровненный указатель
+    /// Подготавливает выделенный блок: записать указатель на заголовок и вернуть выровненный указатель
     fn setup_allocated_block(&self, block_ptr: NonNull<FreeBlock>, align: usize) -> NonNull<u8> {
         unsafe {
             // Начало области данных (после заголовка)
@@ -253,12 +257,10 @@ impl HeapAllocator {
         }
     }
 
-    /// Освободить память
+    /// Освобождает память
     ///
     /// Указатель на заголовок блока хранится непосредственно перед пользовательскими данными.
     /// После освобождения указатель обнуляется для защиты от double-free.
-    ///
-    /// Указатели из lower half (bump allocator) игнорируются.
     pub fn deallocate(&mut self, ptr: NonNull<u8>) {
         let addr = ptr.as_ptr() as usize;
 

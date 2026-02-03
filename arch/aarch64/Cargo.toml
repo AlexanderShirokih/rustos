@@ -10,12 +10,13 @@ test = false
 
 [dependencies]
 aarch64-paging = { path = "../aarch64-paging" }
+arch-common = { path = "../common" }
+drivers-aarch64 = { path = "../../drivers/aarch64" }
+drivers-common = { path = "../../drivers/common" }
 kernel = { path = "../../kernel" }
 memory = { path = "../../memory" }
 collections = { path = "../../collections" }
-util = { path = "../../util" }
 fdt = { path = "../../fdt" }
-io = { path = "../../io" }
 klog = { path = "../../log" }
 
 [build-dependencies]

@@ -1,3 +1,5 @@
+//! Системные регистры AArch64 для управления памятью.
+
 pub mod common;
 pub mod mair;
 pub mod sctrl;
