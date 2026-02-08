@@ -1,6 +1,6 @@
 [tasks.build]
 command = "cargo"
-args = ["build", "--release"]
+args = ["build", "--release", "--target", "aarch64-unknown-none"]
 
 [tasks.clean]
 command = "cargo"
@@ -10,41 +10,11 @@ args = ["clean"]
 dependencies = ["clean", "build"]
 script = [
     "mkdir -p ../../target/build/",
-    "cargo objcopy --release -- --set-section-flags .bss=alloc,load,data -O binary ../../target/build/kernel.bin",
+    "cargo objcopy --release --target aarch64-unknown-none -- --set-section-flags .bss=alloc,load,data -O binary ../../target/build/kernel.bin",
 ]
 
 [tasks.compress]
-dependencies = [ "image"]
+dependencies = ["image"]
 script = [
     "gzip -9c ../../target/build/kernel.bin > ../../target/build/kernel.gz"
-]
-
-[tasks.concat]
-dependencies = ["compress"]
-script = [
-    "cat ../../target/build/kernel.gz devices/xiaomi/sdm660-lavender.dtb > ../../target/build/kernel.gz+dtb"
-]
-
-[tasks.bootimg]
-dependencies = ["concat"]
-script = [
-    """
-    mkbootimg \
-        --kernel ../../target/build/kernel.gz+dtb \
-        --ramdisk /dev/null \
-        --base 0x0 \
-        --kernel_offset 0x0 \
-        --ramdisk_offset 0x01000000 \
-        --pagesize 4096 \
-        --header_version 1 \
-        --output ../../target/build/boot.img
-  """
-]
-
-[tasks.boot]
-dependencies = ["bootimg"]
-script = [
-    """
-    fastboot boot ../../target/build/boot.img
-    """
 ]

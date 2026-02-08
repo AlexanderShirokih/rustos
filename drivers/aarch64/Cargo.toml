@@ -1,0 +1,10 @@
+[package]
+name = "drivers-aarch64"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+drivers-common = { path = "../common" }
+fdt = { path = "../../fdt" }
+io = { path = "../../io" }
+util = { path = "../../util" }

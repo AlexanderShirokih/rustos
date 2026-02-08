@@ -1,0 +1,15 @@
+device:
+  name: QEMU AArch64
+  arch: aarch64
+
+boot:
+  format: binary
+  offset: 0x40200000
+
+run: [
+  "qemu-system-aarch64 -machine virt -cpu cortex-a53 -m 512M -nographic -serial mon:stdio -d int,mmu,guest_errors -D qemu.log -kernel target/build/kernel.bin"
+]
+
+debug: [
+  "qemu-system-aarch64 -machine virt -cpu cortex-a53 -m 512M -nographic -serial mon:stdio -kernel target/build/kernel.bin -S -gdb tcp::1234"
+]

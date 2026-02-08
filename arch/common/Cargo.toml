@@ -1,0 +1,8 @@
+[package]
+name = "arch-common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+drivers-common = { path = "../../drivers/common" }
+fdt = { path = "../../fdt" }

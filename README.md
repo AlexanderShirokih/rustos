@@ -2,160 +2,87 @@
 
 Проект по созданию минималистичного ядра операционной системы для мобильных устройств с нуля на языке Rust.
 
-## О проекте
+# RustOS Mobile - Экспериментальное ядро мобильной ОС на Rust
 
-Это экспериментальное ядро для ARM64 мобильных устройств, написанное полностью с нуля без использования Linux или Android компонентов. Ядро загружается напрямую через стандартный Android загрузчик (ABL) в формате Android Boot Image.
+Проект по созданию минималистичного ядра операционной системы для мобильных устройств с нуля на языке Rust.
 
-**Целевое устройство**: Проект тестирвоался на Xiaomi Redmi Note 7 (lavender, Qualcomm SDM660). Вы можете попробовать собрать для другой модели телефона, однако вам придется доработать код самомтоятельно
+**Целевое устройство**: Проект тестирвоался на Xiaomi Redmi Note 7 (lavender, Qualcomm SDM660), Raspberry Pi 5, QEMU. Вы можете попробовать собрать для другой модели телефона, однако вам придется доработать код самостоятельно
 **Архитектура**: ARMv8-A (aarch64)
 
-## Что реализовано
-
-- Минимальная инициализация ядра для ARM64
-- Настройка стека и регистров процессора
-- Парсинг Device Tree Blob (DTB) для получения конфигурации оборудования
-- Драйвер UART (MMIO) для отладочного вывода через последовательный порт
-- Базовая работа с framebuffer (вывод графики на экран)
-- Совместимость со стандартным Android загрузчиком (Linux ARM64 kernel header)
 
 ## Требования
 
-### Программное обеспечение
-
-- **Rust** (stable)
-  - Target: `aarch64-unknown-none`
-  - Компоненты: `llvm-tools-preview`
-- **cargo-make** для автоматизации сборки
-- **cargo-binutils** для работы с бинарными файлами
-- **fastboot** для прошивки устройства
-- **mkbootimg** для создания Android Boot Image ([скачать здесь](https://android.googlesource.com/platform/system/tools/mkbootimg))
-
-### Аппаратное обеспечение
-
-- Смартфон с **разблокированным загрузчиком** (Bootloader Unlock)
-- Рекомендуется: UART-TTL адаптер для отладочного вывода (например, на базе CH340)
-- USB-кабель для подключения к ПК
-
-## Установка зависимостей
-
-### Ubuntu/Debian
+- Rust (stable)
+- `cargo-binutils` — для `cargo objcopy`
+- `mkbootimg` — для создания Android boot image
 
 ```bash
-# Установка Rust
-curl https://sh.rustup.rs -sSf | sh
-source $HOME/.cargo/env
-
-# Настройка Rust
-rustup update
-rustup target add aarch64-unknown-none
 rustup component add llvm-tools-preview
-
-# Установка cargo утилит
 cargo install cargo-binutils
-cargo install cargo-make
-
-# Установка fastboot
-sudo apt install fastboot
 ```
 
-### macOS
+## Сборка
 
-Инстуркция похожа на Ubuntu, отличие в способе установки fastboot
-
-## Сборка проекта
-
-### 1. Клонирование репозитория
+Сборка выполняется через `cargo xtask` с указанием спецификации устройства:
 
 ```bash
-git clone <repository-url>
-cd rustos-mobile
+# QEMU (формат binary)
+cargo xtask build devices/spec/qemu-aarch64.yaml
+
+# Xiaomi Redmi Note 7 (формат android_boot_v1)
+cargo xtask build devices/spec/xiaomi-lavender.yaml
 ```
 
-### 2. Сборка ядра
+### Результат сборки
+
+- `binary` — `target/build/kernel.bin`
+- `android_boot_v1`, `android_boot_v2` — `target/build/boot.img`
+
+## Прогон тестов
+- `cargo test`
+
+## Запуск
 
 ```bash
-cd arch/aarch64
-cargo make build
+# Сборка + запуск (выполняет команды из 'run' в YAML)
+cargo xtask build devices/spec/qemu-aarch64.yaml --run
+
+# Сборка + отладка (выполняет команды из 'debug' в YAML)
+cargo xtask build devices/spec/qemu-aarch64.yaml --debug
 ```
 
-### 3. Результаты сборки
+## Спецификации устройств
 
-После успешной сборки в директории `target/build/` будут созданы следующие файлы:
+Конфигурации устройств хранятся в `devices/spec/*.yaml`:
 
-- `kernel.bin` - сырой бинарный код ядра
-- `kernel.gz` - сжатое ядро
-- `kernel.gz+dtb` - ядро + DTB
-- `boot.img` - финальный образ для прошивки
+```yaml
+device:
+  name: Device Name
+  arch: aarch64
 
-## Прошивка устройства
+boot:
+  format: binary | android_boot_v1 | android_boot_v2
+  offset: 0x40200000
+  dtb: /devices/dtb/device.dtb  # для android_boot_*
 
-### Загрузка в Fastboot режим
+run:
+  - "qemu-system-aarch64 -machine virt -cpu cortex-a53 -m 512M -nographic -kernel target/build/kernel.bin"
 
-1. Выключите телефон
-2. Зажмите **Volume Down** + **Power** для входа в Fastboot режим
-3. Подключите телефон к ПК через USB
-
-### Временная загрузка (без прошивки)
-
-```bash
-cd target/build
-fastboot boot boot.img
+debug:
+  - "qemu-system-aarch64 -machine virt ... -S -gdb tcp::1234"
 ```
 
-Ядро загрузится один раз без изменения системного раздела.
-
-### Постоянная прошивка
-
-**ВНИМАНИЕ**: Это перезапишет раздел boot!
-
-```bash
-cd target/build
-fastboot flash boot boot.img
-fastboot reboot
-```
-
-## Отладка
-
-### Подключение UART
-
-Для вывода отладочных сообщений требуется физическое подключение UART:
-
-1. Разберите устройство
-2. Найдите тестовые площадки UART (для Xiaomi Redmi Note 7 - см. [схему](https://wiki.postmarketos.org/wiki/File:Xiaomi-lavender-uart-pins-real-photo.jpg))
-3. Подключите UART-TTL адаптер (RX, TX, GND)
-4. Используйте программу для работы с последовательным портом (например, `minicom`, `screen`, `PuTTY`)
-
-```bash
-# Linux/macOS
-screen /dev/ttyUSB0 115200
-```
-
-## Советы по отладке
-
-- **Добавьте .dtb файл для вашей модели** и обновите Makefile.toml
-
-- **Скорректируйте адрес KERNEL_OFFSET** под адрес начала memory base address (kernel load addr в U-boot). Этот параметр должен соответствовать конфигурации вашего устройства.
-
-- **Проблемы с загрузкой через штатный загрузчик?** Если у вас возникают проблемы с загрузкой через стандартный Android загрузчик, попробуйте установить U-boot в качестве альтернативного загрузчика.
-
-- **Версия Android Boot Image для U-boot**: U-boot требует Android Boot Image v2. Обновите версию в `Makefile.toml`, если планируете использовать U-boot.
-
-- **Выбор устройства**: Проще всего использовать устройство на базе Qualcomm. Для устройств на других платформах (MediaTek, Exynos и т.д.) может потребоваться другой драйвер UART и дополнительные модификации кода.
-
-- **Реалистичные ожидания**: Сейчас вы видите только proof of concept систему. У вас может ничего не заработать с первого раза. Это нормально — экспериментируйте и изучайте документацию для вашей конкретной платформы.
-
-## Отказ от ответственности
-
-**ВАЖНО**: Этот проект является экспериментальным и создан исключительно в образовательных целях.
-
-- Автор **НЕ НЕСЁТ ОТВЕТСТВЕННОСТИ** за любые повреждения оборудования, потерю данных или другие проблемы, возникшие в результате использования этого кода
-- Используйте только на **СОБСТВЕННЫЙ РИСК** и только на устройствах, которые можете позволить себе испортить
-
-Рекомендуется использовать старые или ненужные устройства для экспериментов.
+- `format`:
+  - `binary` — простой бинарник (QEMU, RPi)
+  - `android_boot_v1` — boot.img с appended DTB, header version 1
+  - `android_boot_v2` — boot.img с отдельным DTB, header version 2
+- `offset` — адрес загрузки ядра (KERNEL_OFFSET)
+- `dtb` — путь к Device Tree Blob (для Android)
+- `run` — команды для запуска (`--run`)
+- `debug` — команды для отладки (`--debug`)
 
 ## Дальнейшие планы
 
-- [ ] Реализация менеджера памяти
 - [ ] Поддержка многозадачности
 - [ ] Обработка прерываний (GIC)
 - [ ] Драйверы для периферии (GPIO, I2C, SPI)

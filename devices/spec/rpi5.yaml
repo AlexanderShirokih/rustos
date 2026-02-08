@@ -1,0 +1,10 @@
+device:
+  name: Raspberry Pi 5
+  arch: aarch64
+
+boot:
+  format: binary
+  offset: 0x200000
+
+run:
+  - "cp target/build/kernel.bin target/build/kernel8.img"

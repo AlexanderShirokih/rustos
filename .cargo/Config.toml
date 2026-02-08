@@ -1,0 +1,9 @@
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "link-arg=--gc-sections",
+    "-C", "link-arg=--build-id=none",
+]
+linker = "rust-lld"
+
+[alias]
+xtask = "run --package xtask --target-dir target/xtask --"

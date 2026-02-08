@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/arch/aarch64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/arch/aarch64-paging/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/arch/aarch64/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/arch/common/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/collections/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/aarch64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/common/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/fdt/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/foundation/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/io/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/log/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/memory/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/memory/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/util/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/xtask/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/arch/aarch64/target" />
+      <excludeFolder url="file://$MODULE_DIR$/target" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

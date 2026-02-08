@@ -1,7 +1,6 @@
 OUTPUT_ARCH(aarch64);
-ENTRY(_header_start);
+ENTRY(__start);
 
-# Будем передавать KERNEL_OFFSET через флаги линкера, чтобы менять его динамечески
 PROVIDE(KERNEL_OFFSET = 0);
 
 SECTIONS {
@@ -12,26 +11,48 @@ SECTIONS {
     }
 
     _kernel_start = .;
-
+    _text_start = .;
+    
     .text : ALIGN(4K) {
         *(.text*)
     }
+    
+    _text_end = ALIGN(4K);
+    _rodata_start = ALIGN(4K);
 
     .rodata : ALIGN(4K) {
+        __drivers_early_start = .;
+        KEEP(*(.drivers.early))
+        __drivers_early_end = .;
+
+        __drivers_kernel_start = .;
+        KEEP(*(.drivers.kernel))
+        __drivers_kernel_end = .;
+
         *(.rodata*)
     }
+    
+    _rodata_end = ALIGN(4K);
+    _rw_start = ALIGN(4K);
 
     .data : ALIGN(4K) {
         *(.data*)
     }
 
-    .bss : ALIGN(4K) {
+    .bss (NOLOAD) : ALIGN(4K) {
+        _bss_start = .;
         *(.bss*)
         *(COMMON)
-        . = ALIGN(16);
-        *(.bss.stack)
+        _bss_end = .;
     } =0
 
+    .stack (NOLOAD) : ALIGN(4K) {
+        _stack_bottom = .;
+        . += 64K;
+        _stack_top = .;
+    } =0
+
+    _rw_end = .;
     _kernel_end = .;
 
     PROVIDE(_kernel_size = _kernel_end - _kernel_start);

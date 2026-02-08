@@ -2,7 +2,19 @@
 resolver = "3"
 members = [
     "arch/aarch64",
-    "core",
+    "arch/aarch64-paging",
+    "arch/common",
+    "collections",
+    "drivers/aarch64",
+    "drivers/common",
+    "foundation",
+    "kernel",
+    "fdt",
+    "io",
+    "log",
+    "memory",
+    "util",
+    "xtask",
 ]
 
 [profile.dev]
@@ -10,3 +22,5 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+debug = true
+opt-level = 2

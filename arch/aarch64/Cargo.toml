@@ -6,6 +6,19 @@ edition = "2024"
 [[bin]]
 name = "kernel-aarch64"
 path = "src/start.rs"
+test = false
 
 [dependencies]
-kernel-core = { path = "../../core" }
+aarch64-paging = { path = "../aarch64-paging" }
+arch-common = { path = "../common" }
+drivers-aarch64 = { path = "../../drivers/aarch64" }
+drivers-common = { path = "../../drivers/common" }
+kernel = { path = "../../kernel" }
+memory = { path = "../../memory" }
+collections = { path = "../../collections" }
+fdt = { path = "../../fdt" }
+klog = { path = "../../log" }
+
+[build-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
