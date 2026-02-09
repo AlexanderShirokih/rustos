@@ -5,9 +5,6 @@ use aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
 use fdt::devicetree::DeviceTree;
 use fdt::devicetreeext::{AddressSpace, NodeExt, PropExt};
 
-/// База higher half (верхней половины адресного пространства).
-pub const HIGHER_HALF_BASE: usize = 0xFFFF_FF80_0000_0000;
-
 unsafe extern "C" {
     /** Код ядра */
     static _text_start: u8;

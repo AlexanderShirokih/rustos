@@ -77,7 +77,7 @@ impl<'a> Crlf<'a> {
     }
 }
 
-// Универсальный итератор по байтам после замены LF → CRLF.
+// Универсальный итератор по байтам с заменой LF → CRLF
 impl<'a> Iterator for Crlf<'a> {
     type Item = u8;
     #[inline]

@@ -1,11 +1,11 @@
 //! Аллокатор памяти ядра
 //!
-//! Этот модуль предоставляет аллокатор кучи для ядра, использующий алгоритм
-//! first-fit со свободным списком и автоматическим расширением кучи.
+//! Модуль предоставляет аллокатор кучи для ядра с алгоритмом
+//! first-fit и автоматическим расширением.
 //!
-//! Работает с pre-mapped RAM: вся физическая память уже замаплена линейно
-//! (VA = higher_half_base + PA), поэтому при расширении кучи достаточно
-//! выделить физические фреймы и вычислить их виртуальные адреса.
+//! Работает с pre-mapped RAM: физическая память замаплена линейно
+//! (VA = higher_half_base + PA), достаточно выделить фреймы
+//! и вычислить их виртуальные адреса.
 
 use crate::frame_allocator::FrameAllocator;
 use crate::virtual_address::PageAlignedVirtualAddress;
@@ -51,12 +51,12 @@ impl FreeBlock {
         FreeBlock { size, next: None }
     }
 
-    /// Разделяет этот блок, если он достаточно большой для запрошенного размера.
-    /// Возвращает новый блок, созданный из разделения, если возможно.
+    /// Разделяет блок при достаточном размере.
+    /// Возвращает новый блок, если разделение возможно.
     ///
-    /// Схема памяти блока:
+    /// Схема памяти:
     /// ```text
-    /// [FreeBlock header (size, next)][usable memory of size `self.size`]
+    /// [FreeBlock header][usable memory]
     /// ```
     fn split(&mut self, requested_size: usize) -> Option<NonNull<FreeBlock>> {
         let aligned_size = align_up(requested_size, ALLOC_ALIGN);
@@ -137,7 +137,7 @@ impl HeapAllocator {
             // Вычисляем VA из PA: память уже замаплена линейно
             let va = self.higher_half_base + frame.page_address().as_usize();
 
-            // Создаём FreeBlock для этого блока
+            // Создание FreeBlock для этого блока
             let block_size = block_bytes - size_of::<FreeBlock>();
             unsafe {
                 let block_ptr = va as *mut FreeBlock;
@@ -199,26 +199,26 @@ impl HeapAllocator {
 
     /// Выделить память
     ///
-    /// Схема памяти выделенного блока:
+    /// Схема выделенного блока:
     /// ```text
-    /// [FreeBlock header][padding][ptr to header][user data (aligned)]
+    /// [FreeBlock header][padding][ptr to header][user data]
     ///                            ^              ^
-    ///                   HEADER_PTR_SIZE         возвращаемый указатель
+    ///                   HEADER_PTR_SIZE         возвращаемый адрес
     /// ```
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocationError> {
         if layout.size() == 0 {
             return Err(AllocationError::InvalidLayout);
         }
 
-        // Учитываем запрошенное выравнивание (минимум ALLOC_ALIGN)
+        // Учёт запрошенного выравнивания (минимум ALLOC_ALIGN)
         let align = layout.align().max(ALLOC_ALIGN);
         let size = layout.size().max(MIN_ALLOC_SIZE);
 
-        // Нужно место для: данных + указателя на заголовок + возможный padding для выравнивания
-        // В худшем случае padding = align - 1
+        // Необходимое место: данные + указатель на заголовок + padding для выравнивания
+        // Максимальный padding = align - 1
         let alloc_size = size + HEADER_PTR_SIZE + align - 1;
 
-        // Сначала ищем в free list
+        // Поиск в списке свободных блоков
         if let Some(block_ptr) = self.find_free_block(alloc_size) {
             return Ok(self.setup_allocated_block(block_ptr, align));
         }
@@ -244,7 +244,7 @@ impl HeapAllocator {
             let data_start = (block_ptr.as_ptr() as *mut u8).add(size_of::<FreeBlock>());
 
             // Вычисляем адрес для пользовательских данных с учётом выравнивания
-            // Нужно оставить HEADER_PTR_SIZE байт перед данными для указателя на заголовок
+            // Резервирование HEADER_PTR_SIZE байт перед данными для указателя на заголовок
             let min_user_addr = data_start as usize + HEADER_PTR_SIZE;
             let aligned_user_addr = align_up(min_user_addr, align);
             let user_ptr = aligned_user_addr as *mut u8;
@@ -259,12 +259,12 @@ impl HeapAllocator {
 
     /// Освобождает память
     ///
-    /// Указатель на заголовок блока хранится непосредственно перед пользовательскими данными.
-    /// После освобождения указатель обнуляется для защиты от double-free.
+    /// Указатель на заголовок хранится перед пользовательскими данными.
+    /// При освобождении указатель обнуляется для защиты от double-free.
     pub fn deallocate(&mut self, ptr: NonNull<u8>) {
         let addr = ptr.as_ptr() as usize;
 
-        // Игнорируем указатели из lower half (bump allocator работает там)
+        // Игнорирование указателей из lower half (область bump allocator)
         if addr < self.higher_half_base {
             return;
         }
@@ -275,7 +275,7 @@ impl HeapAllocator {
             let block_ptr = *header_ptr_location;
 
             if let Some(block) = NonNull::new(block_ptr) {
-                // Обнуляем указатель на заголовок для защиты от double-free
+                // Обнуление указателя на заголовок для защиты от double-free
                 *header_ptr_location = core::ptr::null_mut();
 
                 self.add_to_free_list(block);

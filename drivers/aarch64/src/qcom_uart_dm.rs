@@ -78,18 +78,18 @@ impl ByteSink for UartDm {
             return Err(WouldBlock);
         }
 
-        // Сформируем слово (LF -> CRLF, до 4 байт)
+        // Формирование слова (LF -> CRLF, до 4 байт)
         let mut crlf = Crlf::new(buf);
         let (word, out_len, in_consumed) = crlf.pack_u32_le();
         if out_len == 0 {
             return Ok(0);
         }
 
-        // Задаём размер выпуска и сбрасываем TX_READY (старт передачи после записи в TF)
+        // Установка размера выпуска и сброс TX_READY (старт передачи после записи в TF)
         self.mmio.write_reg(NCF_TX, out_len as u32);
         self.mmio.write_reg(CR, CMD_CLEAR_TX_READY);
 
-        // Проверяем готовность к приему слова
+        // Проверка готовности к приему слова
         if (self.mmio.read_reg(SR) & SR_TXRDY) == 0 {
             return Err(WouldBlock);
         }
@@ -100,7 +100,7 @@ impl ByteSink for UartDm {
     }
 
     fn flush(&self) {
-        // Ждём полного опустошения передатчика
+        // Ожидание полного опустошения передатчика
         while (self.mmio.read_reg(SR) & SR_TXEMT) == 0 {
             core::hint::spin_loop();
         }

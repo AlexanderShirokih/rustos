@@ -10,12 +10,10 @@ mod boot_header;
 mod memory;
 mod system;
 
-// Подключаем крейт с драйверами AArch64, чтобы они попали в бинарник
 extern crate drivers_aarch64;
 
 use crate::memory::layout::MemoryRegion;
 use crate::memory::memory_setup::{Early, Installed, MemorySetup};
-use crate::memory::setup::HIGHER_HALF_BASE;
 use crate::memory::setup::build_memory_layout;
 use ::memory::physical_address::PageAlignedAddress;
 use ::memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
@@ -29,6 +27,9 @@ use arch_common::scanner;
 use kernel::kmain::kmain;
 use klog::{debug, fatal, info, set_early_stdout};
 
+/// База higher half (верхней половины адресного пространства).
+pub const HIGHER_HALF_BASE: usize = 0xFFFF_FF80_0000_0000;
+
 unsafe extern "C" {
     static _stack_top: u8;
     static _kernel_start: u8;
@@ -40,7 +41,7 @@ unsafe extern "C" {
 #[unsafe(naked)]
 pub extern "C" fn _start() -> () {
     naked_asm!(
-    // Сохраняем DTB (x0) в callee-saved регистре
+    // Сохранение DTB (x0) в callee-saved регистре
     "mov    x19, x0",
 
     // Проверяем EL
@@ -54,7 +55,7 @@ pub extern "C" fn _start() -> () {
     "mov    x0, #(1 << 31)",
     "msr    hcr_el2, x0",
 
-    // Отключаем ловушки SIMD/FP
+    // Отключение ловушек SIMD/FP
     "mov    x0, #0x33ff",
     "msr    cptr_el2, x0",
 
@@ -74,7 +75,7 @@ pub extern "C" fn _start() -> () {
     "add    x1, x1, #:lo12:{stack_top}",
     "mov    sp, x1",
 
-    // Включаем FP/SIMD
+    // Включение FP/SIMD
     "mrs    x0, cpacr_el1",
     "orr    x0, x0, #(0x3 << 20)",
     "msr    cpacr_el1, x0",
@@ -100,7 +101,7 @@ pub extern "C" fn _start() -> () {
     // Переход в Rust
     "b      {early_main}",
 
-    // Если вернулись — уходим в WFE
+    // Если вернулись — уходим в WaitForEvent
     "msr    daifset, #0b0010",
     "20:",
     "wfe",
@@ -113,19 +114,21 @@ pub extern "C" fn _start() -> () {
     )
 }
 
-/// Ранняя инициализация ядра до включения MMU.
+/// Ранняя инициализация ядра
 fn early_main(dtb: usize) {
+    // Парсим DTB
     let device_tree = match DeviceTree::from_ptr(dtb) {
         Ok(tree) => tree,
         Err(_) => return,
     };
 
+    // Извлекаем из DTB информацию о регионах памяти.
     let memory_layout = match build_memory_layout(&device_tree) {
         Ok(m) => m,
         Err(_) => return,
     };
 
-    // Создаём Early memory setup и устанавливаем bump allocator
+    // Установка раннего bump аллокатора
     let early_setup = match MemorySetup::<Early>::create(memory_layout) {
         Ok(setup) => setup.install(),
         Err(_) => return,
@@ -162,13 +165,13 @@ fn setup_memory(
     mmio: Vec<MemoryRegion<PageAlignedAddress>>,
     installed: MemorySetup<Installed>,
 ) -> Result<(), ()> {
-    // Переходим из Installed в Prepared фазу, резервируя bump region
+    // Переход из Installed в Prepared фазу с резервированием bump region
     let memory_setup = installed
         .prepare(mmio)
         .inspect_err(|err| fatal!("Memory setup failed: {:?}", err))
         .map_err(|_| ())?;
 
-    // Маппим higher half и включаем MMU
+    // Маппинг higher half и включение MMU
     let higher_half_base =
         PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(HIGHER_HALF_BASE));
     let memory_setup = memory_setup
@@ -196,8 +199,6 @@ fn setup_memory(
 /// После этого PC указывает на HIGHER_HALF_BASE + текущий PA.
 #[unsafe(naked)]
 unsafe extern "C" fn jump_to_higher_half() {
-    use crate::memory::setup::HIGHER_HALF_BASE;
-
     // Разбиваем HIGHER_HALF_BASE на 16-битные части для movz/movk
     const HALF_47_32: u64 = ((HIGHER_HALF_BASE as u64) >> 32) & 0xFFFF;
     const HALF_63_48: u64 = ((HIGHER_HALF_BASE as u64) >> 48) & 0xFFFF;
@@ -229,7 +230,7 @@ fn bind_early_stdout(device_tree: &DeviceTree, registry: &'static DriverRegistry
     }
 }
 
-// Поскольку мы находимся в no_std окружении, то нам нужен свой panic handler
+// В no_std окружении требуется свой panic handler
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {

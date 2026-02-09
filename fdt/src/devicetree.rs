@@ -177,7 +177,7 @@ impl<'a> DeviceTree<'a> {
             return node;
         }
 
-        // Пытаемся найти через alias
+        // Попытка найти через alias
         self.find_by_alias(path)
     }
 

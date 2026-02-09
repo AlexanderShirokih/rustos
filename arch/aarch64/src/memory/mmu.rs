@@ -110,16 +110,16 @@ impl Mmu<EL1> {
 impl Mmu<EL1> {
     /// Включает MMU и кэши.
     pub fn enable<C: MmuConfig>(&self, config: C) {
-        // 1) Барьер перед изменениями регистров + Маскируем прерывания
+        // 1) Барьер перед изменениями регистров + маскирование прерываний
         system::barrier::full_system_barrier();
 
-        // 2) Записываем слоты атрибутов памяти
+        // 2) Запись слотов атрибутов памяти
         self.mair.set(mair::MairBits::combine(&[
             mair::MairEntry::Normal(config.normal_memory_config()), // слот #0
             mair::MairEntry::Device(config.device_memory_config()), // слот #1
         ]));
 
-        // 3) Записываем корень таблицы и конфигурацию адресации
+        // 3) Запись корня таблицы и конфигурации адресации
         let lower_config = config.lower_half_config();
         let higher_config = config.higher_half_config();
 
@@ -130,7 +130,7 @@ impl Mmu<EL1> {
         // 4) Сброс TLB
         self.tlb.invalidate();
 
-        // 5) Включаем MMU + кэши
+        // 5) Включение MMU + кэшей
         self.sctlr.set(config.mmu_config());
 
         // 6) Барьер после изменения всех регистров

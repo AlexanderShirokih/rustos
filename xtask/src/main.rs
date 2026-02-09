@@ -224,7 +224,7 @@ fn make_kernel_gz(ctx: &BuildContext) -> Result<()> {
 fn make_boot_img_v1(ctx: &BuildContext) -> Result<()> {
     let dtb_path = ctx.dtb_path()?;
 
-    // Вычисляем kernel_offset для boot.img header
+    // Вычисление kernel_offset для boot.img header
     let base = ctx.spec.boot.base.unwrap_or(0);
     let kernel_offset = ctx.spec.boot.offset.saturating_sub(base);
     let kernel_offset_str = format!("{:#x}", kernel_offset);
@@ -266,7 +266,7 @@ fn make_boot_img_v1(ctx: &BuildContext) -> Result<()> {
 fn make_boot_img_v2(ctx: &BuildContext) -> Result<()> {
     let dtb_path = ctx.dtb_path()?;
 
-    // Вычисляем kernel_offset для boot.img header
+    // Вычисление kernel_offset для boot.img header
     let base = ctx.spec.boot.base.unwrap_or(0);
     let kernel_offset = ctx.spec.boot.offset.saturating_sub(base);
     let kernel_offset_str = format!("{:#x}", kernel_offset);

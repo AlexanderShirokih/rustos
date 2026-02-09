@@ -61,7 +61,7 @@ fn frame_zero_is_reserved_automatically() {
     // Регион начинается с 0, но фрейм 0 должен быть зарезервирован
     let allocator = single_region_allocator(0, 16);
 
-    // Фрейм 0 должен быть помечен как allocated (зарезервирован)
+    // Фрейм 0 помечен как allocated (зарезервирован)
     assert!(
         allocator.is_allocated(Frame::new(0)),
         "frame 0 should be reserved automatically to keep 0x0 as invalid pointer"
@@ -73,7 +73,7 @@ fn frame_zero_is_reserved_automatically() {
         assert_ne!(frame.number(), 0, "frame 0 should never be allocated");
     }
 
-    // После выделения всех 15 фреймов (1-15), следующая аллокация вернёт None
+    // После выделения всех 15 фреймов (1-15) следующая аллокация возвращает None
     assert!(allocator.allocate_frame().is_none());
 }
 
@@ -147,7 +147,7 @@ fn deallocate_same_frame_twice_returns_not_allocated() {
     // Первое освобождение успешно
     assert!(allocator.deallocate_frame(frame).is_ok());
 
-    // Повторное освобождение должно вернуть ошибку NotAllocated
+    // Повторное освобождение возвращает ошибку NotAllocated
     let err = allocator.deallocate_frame(frame).unwrap_err();
     assert!(
         matches!(err, FrameError::NotAllocated),
@@ -321,7 +321,7 @@ fn allocate_frames_returns_contiguous_frames() {
     let (first_frame, count) = result.unwrap();
     assert_eq!(count, 8, "should return exactly 8 frames");
 
-    // Проверяем, что все фреймы помечены как allocated
+    // Проверка, что все фреймы помечены как allocated
     for i in 0..8 {
         let frame = Frame::new(first_frame.number() + i);
         assert!(
@@ -375,7 +375,7 @@ fn allocate_frames_returns_none_when_exhausted() {
     // Выделяем все фреймы по одному
     while allocator.allocate_frame().is_some() {}
 
-    // Теперь allocate_frames должен вернуть None
+    // Теперь allocate_frames возвращает None
     let result = allocator.allocate_frames(4);
     assert!(
         result.is_none(),
@@ -394,7 +394,7 @@ fn allocate_frames_searches_multiple_regions() {
         allocator.allocate_frame().unwrap();
     }
 
-    // Теперь первый регион исчерпан, allocate_frames должен найти во втором
+    // Первый регион исчерпан, allocate_frames ищет во втором
     let result = allocator.allocate_frames(8);
     assert!(
         result.is_some(),

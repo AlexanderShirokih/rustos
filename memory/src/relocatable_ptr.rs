@@ -12,7 +12,7 @@ pub struct RelocatablePtr<T: ?Sized> {
 
 impl<T: ?Sized> RelocatablePtr<T> {
     pub fn new(r: &'static T) -> Self {
-        // Копируем fat pointer как [data, vtable]
+        // Копирование fat pointer как [data, vtable]
         let raw: [usize; 2] = unsafe { core::mem::transmute_copy(&(r as *const T)) };
         Self {
             raw,

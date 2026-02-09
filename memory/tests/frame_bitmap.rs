@@ -139,7 +139,7 @@ fn alloc_returns_none_when_exhausted() {
         bitmap.alloc_from(Frame::new(0)).unwrap();
     }
 
-    // Следующая попытка должна вернуть None
+    // Следующая попытка возвращает None
     assert!(bitmap.alloc_from(Frame::new(0)).is_none());
     assert!(bitmap.alloc_from(Frame::new(0)).is_none());
 }
@@ -301,7 +301,7 @@ fn set_unchecked_updates_remaining_once() {
     bitmap.set_unchecked(Frame::new(10));
     assert_eq!(bitmap.remaining(), initial - 1);
 
-    // Повторная установка не должна уменьшать free ещё раз
+    // Повторная установка не уменьшает free ещё раз
     bitmap.set_unchecked(Frame::new(10));
     assert_eq!(bitmap.remaining(), initial - 1);
 }
@@ -379,7 +379,7 @@ fn alloc_from_with_single_free_frame() {
     bitmap.set_range_unchecked(Frame::new(16), Frame::new(32));
 
     // Освобождаем фрейм 15
-    // (он не был занят, так как set_range exclusive)
+    // Не был занят, так как set_range exclusive
     let frame = bitmap.alloc_from(Frame::new(0)).unwrap();
     assert_eq!(frame.number(), 15);
 }
@@ -410,7 +410,7 @@ fn cleared_frame_can_be_reallocated_via_wrap() {
     let first = frames[0];
     bitmap.clear(first);
 
-    // Ищем с конца - должен найти освобождённый через wrap
+    // Поиск с конца — находит освобождённый через wrap
     let reallocated = bitmap.alloc_from(Frame::from(region.end())).unwrap();
     assert_eq!(reallocated, first);
 }

@@ -53,7 +53,6 @@ impl<T: Ord + Copy> Interval<T> {
 /// `N` — максимальное количество интервалов.
 #[derive(Clone, PartialEq, Eq)]
 pub struct IntervalSet<T, const N: usize> {
-    /// Отсортированный список непересекающихся интервалов.
     ranges: Vec<Interval<T>, N>,
 }
 
@@ -115,7 +114,7 @@ impl<T: Ord + Copy, const N: usize> IntervalSet<T, N> {
             return Some(());
         };
 
-        // Find first range that might overlap/touch: range.end >= incoming.start
+        // Поиск первого диапазона, который может пересекаться или касаться: range.end >= incoming.start
         let mut i = self.binary_search_first_ge(|r| {
             if r.end < incoming.start {
                 Ordering::Less
@@ -124,20 +123,20 @@ impl<T: Ord + Copy, const N: usize> IntervalSet<T, N> {
             }
         });
 
-        // Maybe we need to look one step left if it touches from the left.
+        // Проверка необходимости смещения на шаг влево при касании слева
         if i > 0 && self.ranges[i - 1].end >= incoming.start {
             i -= 1;
         }
 
-        // Собираем результат в новый вектор
+        // Сборка результата в новый вектор
         let mut out: Vec<Interval<T>, N> = Vec::new();
 
-        // Копируем интервалы до i
+        // Копирование интервалов до i
         for idx in 0..i {
             out.push(self.ranges[idx])?;
         }
 
-        // Merge all overlapping/touching ranges into incoming.
+        // Слияние всех пересекающихся/касающихся диапазонов в incoming
         while i < self.ranges.len() && self.ranges[i].overlaps_or_touches(&incoming) {
             incoming.merge_with(&self.ranges[i]);
             i += 1;
@@ -145,7 +144,7 @@ impl<T: Ord + Copy, const N: usize> IntervalSet<T, N> {
 
         out.push(incoming)?;
 
-        // Копируем оставшиеся интервалы
+        // Копирование оставшихся интервалов
         while i < self.ranges.len() {
             out.push(self.ranges[i])?;
             i += 1;
@@ -171,14 +170,14 @@ impl<T: Ord + Copy, const N: usize> IntervalSet<T, N> {
                 continue;
             }
 
-            // Left remainder: [r.start, cut.start)
+            // Левый остаток: [r.start, cut.start)
             if r.start < cut.start
                 && let Some(left) = Interval::new(r.start, cut.start)
             {
                 out.push(left)?;
             }
 
-            // Right remainder: [cut.end, r.end)
+            // Правый остаток: [cut.end, r.end)
             if cut.end < r.end
                 && let Some(right) = Interval::new(cut.end, r.end)
             {

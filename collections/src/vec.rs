@@ -74,7 +74,7 @@ impl<T, const N: usize> Vec<T, N> {
         let slice = &mut self.items[..self.len];
 
         slice.sort_unstable_by(|a, b| {
-            // по инварианту в [0..len) всегда Some
+            // по инварианту [0..len) всегда Some
             let a = a.as_ref().unwrap();
             let b = b.as_ref().unwrap();
 

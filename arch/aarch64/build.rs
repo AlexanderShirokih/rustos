@@ -78,7 +78,7 @@ fn main() {
     );
     println!("cargo:rustc-link-arg=-Tarch/aarch64/linker/aarch64.ld");
 
-    // Экспортируем параметры в env для использования в коде и Makefile
+    // Экспорт параметров в env для использования в коде и Makefile
     println!("cargo:rustc-env=BOOT_FORMAT={}", boot_format);
 
     if let Some(ref dtb) = spec.boot.dtb {

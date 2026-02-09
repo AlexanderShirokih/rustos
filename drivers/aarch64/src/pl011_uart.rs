@@ -96,7 +96,7 @@ impl Driver for UartPl011 {
     fn init(&self, context: &mut DriverContext) -> Result<(), &'static str> {
         context.request_mmio(self.base, 4096);
 
-        // Включаем UART и передатчик
+        // Включение UART и передатчика
         self.mmio.write_reg(CR, CR_UARTEN | CR_TXE | CR_RXE);
 
         Ok(())

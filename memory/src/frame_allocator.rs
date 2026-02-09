@@ -63,7 +63,7 @@ pub struct PhysicalFrameAllocator<L: LockCell<FrameBitmap>> {
     /// Индекс текущего региона для поиска свободных фреймов.
     current_region_index: usize,
 
-    /// Подсказка: номер следующего фрейма для выделения.
+    /// Номер следующего фрейма для выделения.
     next_frame_hint: AtomicUsize,
 }
 
@@ -168,7 +168,7 @@ impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
     fn allocate_frame(&self) -> Option<Frame> {
         let next_frame_hint = Frame::new(self.next_frame_hint.load(Ordering::Relaxed));
 
-        // Начинаем с подсказки next_frame_hint в текущем регионе
+        // Начало поиска с подсказки next_frame_hint в текущем регионе
         let current_region_frame = self.regions[self.current_region_index]
             .with_lock(|current| Self::try_alloc_in(current, next_frame_hint));
 
@@ -213,7 +213,7 @@ impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
     }
 
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {
-        // Передаём эксклюзивную границу frame.add(1) для одного фрейма
+        // Передача эксклюзивной границы frame.add(1) для одного фрейма
         let target_region = self.find_containing_region(frame, frame.add(1));
 
         if let Some(region) = target_region {

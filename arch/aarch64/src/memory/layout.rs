@@ -53,7 +53,7 @@ impl MemoryLayout {
     ) -> Result<IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>, ()> {
         let mut free_regions = IntervalSet::<PageAlignedAddress, MAX_MEMORY_REGIONS>::new();
 
-        // Добавляем свободные области (heap-регионы)
+        // Добавление свободных областей (heap-регионы)
         for heap in self.iter().filter(|region| region.is_heap()) {
             if free_regions.add(heap.start, heap.end).is_none() {
                 warn!("free_heap_regions"; "ERROR: Failed to add heap region");

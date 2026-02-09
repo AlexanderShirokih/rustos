@@ -13,7 +13,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use collections::NoLockCell;
 use collections::Vec as StaticVec;
-use collections::interval_set::IntervalSet;
+use collections::interval_set::{Interval, IntervalSet};
 use klog::{debug, info, warn};
 use memory::FrameBitmap;
 use memory::RelocatablePtr;
@@ -75,8 +75,11 @@ impl MemorySetup<Early> {
             .free_heap_regions()
             .map_err(|_| MemorySetupError::OutOfMemory)?;
 
-        let bump_allocator = Self::create_bump_allocator(&free_regions)
-            .map_err(|_| MemorySetupError::OutOfMemory)?;
+        // Находим самую большую свободную область
+        let largest =
+            Self::get_largest_region(&free_regions).map_err(|_| MemorySetupError::OutOfMemory)?;
+
+        let bump_allocator = Self::create_bump_allocator(*largest);
 
         Ok(Self {
             state: Early {
@@ -99,16 +102,17 @@ impl MemorySetup<Early> {
         }
     }
 
-    fn create_bump_allocator(
+    fn get_largest_region(
         free_regions: &IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
-    ) -> Result<BumpAllocator, ()> {
-        // Находим самую большую свободную область
-        let largest = free_regions
+    ) -> Result<&Interval<PageAlignedAddress>, ()> {
+        free_regions
             .iter()
             .max_by_key(|interval| interval.end.as_usize() - interval.start.as_usize())
-            .ok_or(())?;
+            .ok_or(())
+    }
 
-        Ok(BumpAllocator::new(largest.start, largest.end))
+    fn create_bump_allocator(interval: Interval<PageAlignedAddress>) -> BumpAllocator {
+        BumpAllocator::new(interval.start, interval.end)
     }
 }
 
@@ -139,7 +143,7 @@ impl MemorySetup<Installed> {
             );
         });
 
-        // Создаём frame_allocator из очищенных регионов
+        // Создание frame_allocator из очищенных регионов
         let free_heap_regions_iter = free_regions
             .iter()
             .map(|interval| MemoryRange::new(interval.start, interval.end));
@@ -148,8 +152,8 @@ impl MemorySetup<Installed> {
             free_heap_regions_iter,
         )));
 
-        // Мы будем резервировать память, которая была использована bump аллокатором.
-        // Замораживаем аллокацию, чтобы состояние аллокатора не изменилось
+        // Резервирование памяти, использованной bump аллокатором.
+        // Заморозка аллокации для предотвращения изменений
         GLOBAL_ALLOCATOR.set_freeze();
 
         // Исключаем только использованную часть bump
@@ -249,7 +253,7 @@ impl MemorySetup<Prepared> {
             roots.higher_pa
         );
 
-        // Включаем Memory Management Unit (MMU)
+        // Включение Memory Management Unit (MMU)
         Mmu::new().enable(NormalDualSpaceConfig::new(
             roots.lower_pa.as_physical_address(),
             roots.higher_pa.as_physical_address(),
@@ -286,11 +290,11 @@ impl MemorySetup<Prepared> {
             heap_flags,
         );
 
-        // Маппим все регионы линейно: VA = higher_half_base + PA
+        // Маппинг всех регионов линейно: VA = higher_half_base + PA
         Self::map_higher_half_impl(&higher_half_mapper, all_regions, higher_half_base)?;
 
-        // Маппим регионы, к которым нужен identity доступ после включения MMU.
-        // Используем итератор напрямую без аллокации Vec (bump allocator заморожен)
+        // Маппинг регионов с identity доступом после включения MMU.
+        // Использование итератора без аллокации Vec (bump allocator заморожен)
         let identity_regions = all_regions
             .iter()
             .filter(|region| !region.is_heap())
@@ -385,7 +389,7 @@ impl MemorySetup<Enabled> {
             "Heap allocator created with higher_half_base={higher_half_base:#x}"
         );
 
-        // Переключаем логгер на higher half
+        // Переключение логгера на higher half
         if let Some(writer) = klog::get_early_writer() {
             let new_writer =
                 unsafe { RelocatablePtr::new(writer).relocated(higher_half_base.as_virtual()) };

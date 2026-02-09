@@ -8,7 +8,10 @@ use core::mem::size_of;
 /// Позиция бита в битовой карте
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EntryPos {
+    // Индекс 64-битного слова
     word: usize,
+
+    // индекс бита в слове
     bit: usize,
 }
 
@@ -25,7 +28,7 @@ impl EntryPos {
 
 /// Битовая карта для отслеживания статуса выделения фреймов
 pub struct FrameBitmap {
-    // Битовая карта, выделенная через глобальный аллокатор
+    // Битовая карта для отслеживания занятых участков
     bitmap: Box<[u64]>,
 
     // Количество свободных фреймов
@@ -39,16 +42,12 @@ pub struct FrameBitmap {
 }
 
 impl FrameBitmap {
-    // Количество байт, необходимых для одной записи в битовой карте
-    const ENTRY_BYTES: usize = size_of::<u64>();
-
     // Количество фреймов (битов), описываемых одной записью
-    const BITS_PER_ENTRY: usize = Self::ENTRY_BYTES * 8;
+    const BITS_PER_ENTRY: usize = size_of::<u64>() * 8;
 
-    /// Создаёт новый FrameBitmap, выделяя память для битовой карты через глобальный аллокатор
     pub fn new(target_region: MemoryRange<PageAlignedAddress>) -> Self {
+        // Считаем размер вектора - сколько понадобится для разметки региона памяти
         let entry_count = Self::calc_entry_count(&target_region);
-
         let bitmap = vec![0u64; entry_count].into_boxed_slice();
 
         FrameBitmap {
@@ -59,13 +58,12 @@ impl FrameBitmap {
         }
     }
 
-    pub fn remaining(&self) -> usize {
-        self.free
-    }
-
-    /// Вычисляет количество u64 записей, необходимых для битовой карты
     fn calc_entry_count(region: &MemoryRange<PageAlignedAddress>) -> usize {
         region.frame_count().div_ceil(Self::BITS_PER_ENTRY)
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.free
     }
 
     #[inline]
@@ -148,7 +146,7 @@ impl FrameBitmap {
         let mask = 1u64 << pos.bit;
         let old_value = self.read(pos.word);
         if (old_value & mask) == 0 {
-            self.write(pos.word, |v| v | mask);
+            self.write(pos.word, |val| val | mask);
             self.free = self.free.saturating_sub(1);
         }
     }
@@ -232,7 +230,7 @@ impl FrameBitmap {
             return Some(frame);
         }
 
-        // Если не нашли, ищем от начала региона до offset
+        // Поиск от начала региона до offset при неудаче
         let region_begin = self.entry_pos(self.base_frame);
         self.search_range(region_begin, start)
     }
@@ -307,7 +305,7 @@ impl FrameBitmap {
             return None;
         }
 
-        // Считаем последовательные свободные биты (до max_count), не выходя за границы региона
+        // Подсчёт последовательных свободных битов (до max_count) в пределах региона
         let mut count = 0;
         let mut w = word_idx;
         let mut b = first_bit;

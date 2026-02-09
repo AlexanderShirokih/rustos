@@ -7,10 +7,7 @@ use crate::physical_address::{PageAlignedAddress, PhysicalAddress};
 /// Хранит номер фрейма, а не адрес.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Frame(
-    /// Номер фрейма (индекс страницы в физической памяти).
-    pub usize,
-);
+pub struct Frame(usize);
 
 impl Frame {
     pub const fn new(number: usize) -> Self {

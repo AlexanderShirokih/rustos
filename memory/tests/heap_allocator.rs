@@ -210,7 +210,7 @@ fn allocate_test_buffer(size: usize) -> &'static mut [u8] {
 fn create_test_allocator() -> HeapAllocator {
     let buffer = allocate_test_buffer(TEST_HEAP_SIZE);
     let mock_frame_allocator = MockFrameAllocator::new(buffer);
-    // buffer_addr - реальный адрес буфера, используется как higher_half_base
+    // Преобразование адресов: buffer_addr как higher_half_base
     // MockFrameAllocator возвращает PA=0, PAGE_SIZE, 2*PAGE_SIZE, ...
     // HeapAllocator вычисляет VA = higher_half_base + PA = buffer_addr + offset
     let buffer_addr = mock_frame_allocator.buffer_addr();
@@ -235,7 +235,7 @@ fn allocate_returns_valid_pointer() {
     let result = allocator.allocate(layout);
 
     assert!(result.is_ok(), "allocation should succeed");
-    // NonNull гарантирует, что указатель не нулевой
+    // NonNull гарантирует ненулевой указатель
     let _ptr = result.unwrap();
 }
 
@@ -355,7 +355,7 @@ fn deallocate_allows_reuse() {
     allocator.deallocate(ptr1);
 
     // Выделяем снова - должно переиспользовать освобождённую память
-    // NonNull гарантирует, что указатель не нулевой
+    // NonNull гарантирует ненулевой указатель
     let _ptr2 = allocator.allocate(layout).unwrap();
 }
 
@@ -458,7 +458,7 @@ fn varying_sizes_work_correctly() {
 // 5. Тесты на потенциальные баги
 // =============================================================================
 
-/// Проверяем, что double-free безопасно игнорируется
+/// Тест double-free защиты
 #[test]
 fn double_free_is_safely_ignored() {
     let mut allocator = create_test_allocator();
@@ -468,11 +468,11 @@ fn double_free_is_safely_ignored() {
     // Выделяем блок
     let ptr1 = allocator.allocate(layout).unwrap();
 
-    // Double free - освобождаем дважды
+    // Double free — двойное освобождение
     allocator.deallocate(ptr1);
-    allocator.deallocate(ptr1); // Второй вызов должен быть безопасно проигнорирован
+    allocator.deallocate(ptr1); // Второй вызов игнорируется
 
-    // Два выделения должны вернуть РАЗНЫЕ указатели
+    // Два выделения возвращают разные указатели
     let ptr2 = allocator.allocate(layout).unwrap();
     let ptr3 = allocator.allocate(layout).unwrap();
 
@@ -483,7 +483,7 @@ fn double_free_is_safely_ignored() {
     );
 }
 
-/// Проверяем, что данные в разных блоках не перекрываются
+/// Тест отсутствия перекрытия блоков
 #[test]
 fn allocated_blocks_do_not_overlap() {
     let mut allocator = create_test_allocator();
@@ -523,7 +523,7 @@ fn allocated_blocks_do_not_overlap() {
     }
 }
 
-/// Проверяем корректность при большом выравнивании
+/// Тест больших выравниваний
 #[test]
 fn large_alignment_works_correctly() {
     let mut allocator = create_test_allocator();
@@ -549,7 +549,7 @@ fn large_alignment_works_correctly() {
     }
 }
 
-/// Тест на освобождение и повторное выделение с записью данных
+/// Тест освобождения и повторного выделения
 #[test]
 fn reused_memory_is_independent() {
     let mut allocator = create_test_allocator();
@@ -651,7 +651,7 @@ fn create_limited_test_allocator() -> HeapAllocator {
     HeapAllocator::new(frame_allocator, heap_start_va)
 }
 
-/// Проверяем, что deallocate игнорирует указатели из lower half (bump allocator)
+/// Тест игнорирования lower half указателей при deallocate
 #[test]
 fn deallocate_lower_half_pointer_is_ignored() {
     let mut allocator = create_test_allocator();
@@ -660,39 +660,38 @@ fn deallocate_lower_half_pointer_is_ignored() {
     let layout = Layout::from_size_align(64, 8).unwrap();
     let valid_ptr = allocator.allocate(layout).unwrap();
 
-    // Создаём фиктивный указатель из lower half (адрес 0x1000, меньше higher_half_base)
-    // В реальном ядре это был бы указатель от bump allocator
+    // Фиктивный указатель из lower half (адрес 0x1000, меньше higher_half_base)
+    // В реальном ядре это указатель от bump allocator
     let lower_half_addr = 0x1000usize;
     let lower_half_ptr = unsafe { NonNull::new_unchecked(lower_half_addr as *mut u8) };
 
-    // Вызов deallocate с lower half указателем должен быть безопасно проигнорирован
+    // Вызов deallocate с lower half указателем игнорируется
     allocator.deallocate(lower_half_ptr);
 
-    // Проверяем, что аллокатор всё ещё работает корректно
+    // Аллокатор продолжает работать корректно
     let ptr2 = allocator.allocate(layout).unwrap();
     assert_ne!(valid_ptr.as_ptr(), ptr2.as_ptr(), "allocator should still work after ignoring lower half pointer");
 
-    // Освобождаем валидный указатель — это должно работать
+    // Освобождение валидного указателя работает
     allocator.deallocate(valid_ptr);
 
-    // И можем выделить снова
+    // Выделение снова возможно
     let ptr3 = allocator.allocate(layout).unwrap();
     assert!(ptr3.as_ptr() as usize > 0, "allocation should succeed");
 }
 
-/// Проверяем, что expand() корректно работает когда allocate_frames
-/// возвращает меньше страниц чем запрошено (требует нескольких итераций цикла)
+/// Тест expand() с частичной аллокацией фреймов
+/// (allocate_frames возвращает меньше страниц чем запрошено)
 #[test]
 fn expand_with_partial_frame_allocation() {
     let mut allocator = create_limited_test_allocator();
 
     // LimitedMockFrameAllocator выделяет по 1 странице за вызов.
-    // Делаем несколько выделений, которые заставят expand() работать в цикле.
-    // Каждое выделение < PAGE_SIZE, но в сумме они израсходуют несколько страниц.
+    // Несколько выделений заставят expand() работать в цикле.
     let layout = Layout::from_size_align(2048, 8).unwrap();
     let mut pointers = Vec::new();
 
-    // Выделяем блоки, чтобы инициировать несколько вызовов expand()
+    // Выделение блоков для нескольких вызовов expand()
     for i in 0..6 {
         let ptr = allocator.allocate(layout);
         assert!(
@@ -722,7 +721,7 @@ fn expand_with_partial_frame_allocation() {
     }
 }
 
-/// Проверяем случай когда блок слишком мал для разделения и используется целиком
+/// Тест использования целого блока без разделения
 #[test]
 fn block_too_small_to_split_uses_whole_block() {
     let mut allocator = create_test_allocator();
@@ -734,8 +733,7 @@ fn block_too_small_to_split_uses_whole_block() {
     // Освобождаем его — теперь есть свободный блок
     allocator.deallocate(large_ptr);
 
-    // Выделяем блок почти такого же размера — остаток будет слишком мал для split
-    // (меньше MIN_ALLOC_SIZE + sizeof(FreeBlock))
+    // Остаток будет слишком мал для разделения (< MIN_ALLOC_SIZE + sizeof(FreeBlock))
     let almost_same_layout = Layout::from_size_align(3780, 8).unwrap();
     let ptr = allocator.allocate(almost_same_layout);
 
@@ -753,12 +751,12 @@ fn block_too_small_to_split_uses_whole_block() {
     }
 }
 
-/// Проверяем выделение с выравниванием равным размеру страницы
+/// Тест выравнивания PAGE_SIZE
 #[test]
 fn page_size_alignment_works() {
     let mut allocator = create_test_allocator();
 
-    // Выравнивание 4096 байт (PAGE_SIZE)
+    // Выравнивание PAGE_SIZE (4096 байт)
     let layout = Layout::from_size_align(64, 4096).unwrap();
     let ptr = allocator.allocate(layout);
 

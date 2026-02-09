@@ -92,7 +92,7 @@ pub fn set_early_stdout(w: alloc::boxed::Box<StaticWriter>) {
 pub fn set_stdout(w: &'static StaticWriter) {
     STDOUT.normal.with_lock(|writer| *writer = w);
 
-    // Публикуем переход в normal mode после установки writer.
+    // Публикация перехода в normal mode после установки writer
     STDOUT.is_normal.store(true, Ordering::Release);
 }
 

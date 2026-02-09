@@ -162,7 +162,7 @@ impl<A: TableAlloc> PageMapper<A> {
             AnyEntry::Invalid(_) => {
                 let child_pa = self.alloc.alloc_table_page().ok_or(MapError::OutOfMemory)?;
 
-                // Записываем entry в parent СНАЧАЛА — это создаёт маппинг через recursive
+                // Запись entry в parent — создание маппинга через recursive
                 unsafe { (*parent).set(idx, Entry::<PL, Table>::new(child_pa, self.table_flags)) };
 
                 // Теперь получаем указатель и инициализируем таблицу
