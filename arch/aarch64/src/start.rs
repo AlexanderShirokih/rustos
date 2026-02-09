@@ -19,13 +19,13 @@ use ::memory::physical_address::PageAlignedAddress;
 use ::memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use arch_common::scanner;
 use core::arch::{asm, naked_asm};
 use core::hint::spin_loop;
-use fdt::devicetree::DeviceTree;
 use drivers_common::DriverRegistry;
-use arch_common::scanner;
+use fdt::devicetree::DeviceTree;
 use kernel::kmain::kmain;
-use klog::{debug, fatal, info, set_early_stdout};
+use klog::{debug, fatal, set_early_stdout};
 
 /// База higher half (верхней половины адресного пространства).
 pub const HIGHER_HALF_BASE: usize = 0xFFFF_FF80_0000_0000;
@@ -184,13 +184,13 @@ fn setup_memory(
     // Прыжок в higher half — после этого PC указывает на HIGHER_HALF_BASE + PA
     unsafe { jump_to_higher_half() };
 
-    info!("Running in higher half");
+    debug!("Running in higher half");
 
     memory_setup
         .install()
         .inspect_err(|_| fatal!("Unable to set heap allocator"))?;
 
-    info!("Global allocator switched to heap phase");
+    debug!("Global allocator switched to heap phase");
 
     Ok(())
 }

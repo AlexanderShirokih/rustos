@@ -384,11 +384,6 @@ impl MemorySetup<Enabled> {
         } = self.state;
         let allocator = KernelHeapAllocator::new(frame_allocator, higher_half_base);
 
-        debug!(
-            "MemorySetup<Enabled>::install";
-            "Heap allocator created with higher_half_base={higher_half_base:#x}"
-        );
-
         // Переключение логгера на higher half
         if let Some(writer) = klog::get_early_writer() {
             let new_writer =
