@@ -87,11 +87,11 @@ fn find_ram_regions(dt: &DeviceTree) -> Option<impl Iterator<Item = AddressSpace
                     .unwrap_or_else(|| node.name().starts_with("memory"))
             })
             .filter_map(|node| node.prop("reg"))
-            .filter_map(move |prop| {
+            .flat_map(move |prop| {
                 let cells_size = root.cells_size().unwrap_or_default();
-                let offsets_array = prop.try_as_reg_list::<1>(cells_size);
-
-                offsets_array.and_then(|array| array.get(0).copied())
+                prop.try_as_reg_list::<8>(cells_size)
+                    .unwrap_or_default()
+                    .into_iter()
             })
             .filter(|offset_size| offset_size.size > 0),
     )
