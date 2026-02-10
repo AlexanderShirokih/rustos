@@ -6,9 +6,9 @@ extern crate alloc;
 extern crate std;
 
 mod boot_header;
+mod exception;
 mod memory;
 mod system;
-mod exception;
 
 extern crate drivers_aarch64;
 
@@ -22,8 +22,10 @@ use alloc::vec::Vec;
 use arch_common::scanner;
 use core::arch::{asm, naked_asm};
 use core::hint::spin_loop;
-use drivers_common::DriverRegistry;
-use fdt::devicetree::DeviceTree;
+use drivers_aarch64::fdt_adapter::adapt_tree;
+use drivers_common::early::EarlyDriverRegistry;
+use drivers_common::{IrqRegistrationError, RuntimeDriverRegistry, RuntimeRequestApplier};
+use fdt::devicetree::{DeviceTree, NodeKey};
 use kernel::kmain::kmain;
 use klog::{debug, fatal, set_early_stdout};
 
@@ -138,11 +140,14 @@ fn early_main(dtb: usize) {
         Err(_) => return,
     };
 
-    let mut early_registry = DriverRegistry::new();
-    early_registry.scan_and_probe(&device_tree);
+    let mut early_registry = EarlyDriverRegistry::<NodeKey>::new();
+    if let Some(root) = adapt_tree(&device_tree).root_node() {
+        let early_infos = drivers_aarch64::early_driver_infos();
+        early_registry.scan_and_probe(root, early_infos);
+    }
 
     // Сохраняем реестр в статическую память — драйверы живут до конца работы ядра
-    let early_registry: &'static DriverRegistry = Box::leak(Box::new(early_registry));
+    let early_registry: &'static EarlyDriverRegistry<NodeKey> = Box::leak(Box::new(early_registry));
 
     bind_early_stdout(&device_tree, early_registry);
 
@@ -158,6 +163,18 @@ fn early_main(dtb: usize) {
 
     // Релокация векторов исключений в higher half
     unsafe { vectors.relocated(VirtualAddress::new(HIGHER_HALF_BASE)) }.install();
+
+    // Инициализация runtime-драйверов после включения MMU/heap.
+    let mut runtime_registry = RuntimeDriverRegistry::<NodeKey>::new();
+    let mut mmio_mapper = |_address: usize, _size: usize| -> Result<(), &'static str> { Ok(()) };
+    let mut irq_registrar = |_irq, _handler| Err(IrqRegistrationError::Unsupported);
+    let mut runtime_applier = RuntimeRequestApplier::new(&mut mmio_mapper, &mut irq_registrar);
+    if let Some(root) = adapt_tree(&device_tree).root_node() {
+        let runtime_infos = drivers_aarch64::runtime_driver_infos();
+        runtime_registry.scan_and_probe(root, runtime_infos, &mut runtime_applier);
+    }
+    let _runtime_registry: &'static RuntimeDriverRegistry<NodeKey> =
+        Box::leak(Box::new(runtime_registry));
 
     // Основная платформозависимая настройка завершена. Переходим к общей точке входа
     kmain();
@@ -224,7 +241,7 @@ unsafe extern "C" fn jump_to_higher_half() {
 }
 
 /// Привязывает stdout к консольному драйверу из DeviceTree.
-fn bind_early_stdout(device_tree: &DeviceTree, registry: &'static DriverRegistry) {
+fn bind_early_stdout(device_tree: &DeviceTree, registry: &'static EarlyDriverRegistry<NodeKey>) {
     let early_console_node = scanner::find_console(device_tree);
 
     let writer = early_console_node

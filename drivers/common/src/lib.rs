@@ -6,12 +6,18 @@
 extern crate alloc;
 
 pub mod driver;
+pub mod early;
 pub mod probe;
+pub mod runtime;
+pub mod tree;
 
-// Реэкспорт из foundation (платформо-независимые типы)
-pub use foundation::{Driver, DriverContext, MmioAddress, MmioRequest, ProbeError, ProbeResult};
+#[path = "impl/mod.rs"]
+mod detail;
 
-// DeviceTree-специфичные типы
-pub use probe::{CompatibleList, CompatibleStrings, NodeProbeExt};
+pub use interrupts::{IrqHandler, IrqNumber, IrqRegistrationError, IrqRegistrationToken};
 
-pub use driver::{DriverRegistry, ProbeContext};
+pub use driver::{Driver, DriverContext, DriverDescriptor, InitOps, ProbeContext};
+pub use early::{EarlyDriver, EarlyDriverContext, EarlyDriverInfo, EarlyInitOps, EarlyProbeFn};
+pub use probe::{MmioAddress, MmioRequest, NodeProbeExt, ProbeError, ProbeResult};
+pub use runtime::{DriverInfo, ProbeFn, RuntimeDriverRegistry, RuntimeRequestApplier};
+pub use tree::{DeviceNode, DeviceTreeSource, NodeProperty};

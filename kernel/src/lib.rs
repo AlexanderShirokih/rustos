@@ -6,7 +6,4 @@
 #![no_std]
 extern crate alloc;
 
-// Реэкспорт foundation для совместимости
-pub use foundation;
-
 pub mod kmain;

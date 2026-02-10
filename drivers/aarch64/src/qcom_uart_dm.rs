@@ -1,8 +1,10 @@
 //! Драйвер Qualcomm UART DM (Data Mover).
 
+use crate::commons::FdtProbeContext;
 use crate::commons::ProbeContextExt;
+use crate::register_early_driver;
 use alloc::boxed::Box;
-use drivers_common::{register_driver, Driver, DriverContext, ProbeContext, ProbeResult};
+use drivers_common::{EarlyDriver, EarlyDriverContext, ProbeResult};
 use io::byte_sink::{ByteSink, WouldBlock};
 use io::mmio::{Mmio, Reg};
 use io::writer::{BlockingWriter, Writer};
@@ -46,9 +48,9 @@ impl UartDm {
     }
 }
 
-impl Driver for UartDm {
-    fn init(&self, context: &mut DriverContext) -> Result<(), &'static str> {
-        context.request_mmio(self.base, 4096);
+impl EarlyDriver for UartDm {
+    fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
+        context.map_mmio(self.base, 4096);
 
         Ok(())
     }
@@ -107,14 +109,17 @@ impl ByteSink for UartDm {
     }
 }
 
-fn uart_dm_probe(context: &mut ProbeContext) -> ProbeResult<Box<dyn Driver>> {
+pub(crate) fn uart_dm_probe(
+    context: &mut FdtProbeContext<'_>,
+) -> ProbeResult<Box<dyn EarlyDriver>> {
+    crate::commons::require_compatible(
+        context.node(),
+        &["qcom,msm-uartdm", "qcom,msm-hsuart"],
+    )?;
+
     let base = context.reg_offset::<REG_UART_SIZE_INDEX>(REG_UART_INDEX);
 
     Ok(Box::new(UartDm::new(base)))
 }
 
-register_driver!(
-    UART_DM_EARLY,
-    compatible = &["qcom,msm-uartdm", "qcom,msm-hsuart"],
-    probe = uart_dm_probe
-);
+register_early_driver!(UART_DM_EARLY, probe = uart_dm_probe);

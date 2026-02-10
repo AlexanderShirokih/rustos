@@ -3,3 +3,4 @@ qemu.log
 Cargo.lock
 __pycache__/
 .DS_Store
+.idea/

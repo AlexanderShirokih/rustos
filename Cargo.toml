@@ -7,7 +7,7 @@ members = [
     "collections",
     "drivers/aarch64",
     "drivers/common",
-    "foundation",
+    "interrupts",
     "kernel",
     "fdt",
     "io",

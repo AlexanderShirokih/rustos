@@ -1,9 +1,11 @@
 //! Драйвер UART PL011 (ARM PrimeCell).
 
+use crate::commons::FdtProbeContext;
 use crate::commons::ProbeContextExt;
+use crate::register_early_driver;
 use alloc::boxed::Box;
 use core::hint::spin_loop;
-use drivers_common::{Driver, DriverContext, ProbeContext, ProbeResult};
+use drivers_common::{EarlyDriver, EarlyDriverContext, ProbeResult};
 use io::byte_sink::{ByteSink, WouldBlock};
 use io::mmio::{Mmio, Reg};
 use io::writer::{BlockingWriter, Writer};
@@ -92,9 +94,9 @@ impl ByteSink for UartPl011 {
     }
 }
 
-impl Driver for UartPl011 {
-    fn init(&self, context: &mut DriverContext) -> Result<(), &'static str> {
-        context.request_mmio(self.base, 4096);
+impl EarlyDriver for UartPl011 {
+    fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
+        context.map_mmio(self.base, 4096);
 
         // Включение UART и передатчика
         self.mmio.write_reg(CR, CR_UARTEN | CR_TXE | CR_RXE);
@@ -107,14 +109,14 @@ impl Driver for UartPl011 {
     }
 }
 
-fn uart_pl011_probe(context: &mut ProbeContext<'_>) -> ProbeResult<Box<dyn Driver>> {
+pub(crate) fn uart_pl011_probe(
+    context: &mut FdtProbeContext<'_>,
+) -> ProbeResult<Box<dyn EarlyDriver>> {
+    crate::commons::require_compatible(context.node(), &["arm,pl011"])?;
+
     let base = context.reg_offset::<REG_UART_SIZE_INDEX>(REG_UART_INDEX);
 
     Ok(Box::new(UartPl011::new(base)))
 }
 
-drivers_common::register_driver!(
-    UART_PL011_EARLY,
-    compatible = &["arm,pl011"],
-    probe = uart_pl011_probe
-);
+register_early_driver!(UART_PL011_EARLY, probe = uart_pl011_probe);

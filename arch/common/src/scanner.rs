@@ -1,7 +1,4 @@
-//! Поиск устройств в DeviceTree.
-
 use fdt::devicetree::{DeviceTree, Node};
-use drivers_common::NodeProbeExt;
 
 /// Находит узел консоли из stdout-path или первый serial.
 pub fn find_console<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
@@ -25,10 +22,18 @@ fn first_serial<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
             .unwrap_or(false);
 
         let by_name = node.name().starts_with("serial");
-        let by_compat = node
-            .compatible_strings()
+        let by_compat = compatible_strings(node)
             .any(|value| value.contains("serial") || value.contains("uart"));
 
         by_device_type || by_name || by_compat
     })
+}
+
+/// Итерирует по null-terminated строкам из свойства `compatible`.
+fn compatible_strings<'a>(node: &'a Node<'a>) -> impl Iterator<Item = &'a str> {
+    let data = node.prop("compatible").map(|p| p.value()).unwrap_or(&[]);
+
+    data.split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .filter_map(|bytes| core::str::from_utf8(bytes).ok())
 }
