@@ -6,9 +6,9 @@ extern crate alloc;
 extern crate std;
 
 mod boot_header;
-
 mod memory;
 mod system;
+mod exception;
 
 extern crate drivers_aarch64;
 
@@ -116,6 +116,10 @@ pub extern "C" fn _start() -> () {
 
 /// Ранняя инициализация ядра
 fn early_main(dtb: usize) {
+    // Установка векторов исключений
+    let vectors = exception::ExceptionVectors::instance();
+    vectors.install();
+
     // Парсим DTB
     let device_tree = match DeviceTree::from_ptr(dtb) {
         Ok(tree) => tree,
@@ -151,6 +155,9 @@ fn early_main(dtb: usize) {
     if setup_memory(mmio_requests, early_setup).is_err() {
         return;
     }
+
+    // Релокация векторов исключений в higher half
+    unsafe { vectors.relocated(VirtualAddress::new(HIGHER_HALF_BASE)) }.install();
 
     // Основная платформозависимая настройка завершена. Переходим к общей точке входа
     kmain();
