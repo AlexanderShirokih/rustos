@@ -14,6 +14,8 @@ use alloc::boxed::Box;
 use drivers_common::{Driver, DriverInfo, EarlyDriver, EarlyDriverInfo, ProbeContext, ProbeResult};
 use fdt_adapter::FdtNode;
 
+pub use fdt_adapter::adapt_tree;
+
 type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
 type FdtEarlyProbeFn = for<'a> fn(&mut FdtProbeContext<'a>) -> ProbeResult<Box<dyn EarlyDriver>>;
 type FdtProbeFn = for<'a> fn(&mut FdtProbeContext<'a>) -> ProbeResult<Box<dyn Driver>>;

@@ -5,7 +5,7 @@ members = [
     "arch/aarch64-paging",
     "arch/common",
     "collections",
-    "drivers/aarch64",
+    "drivers/common-aarch64",
     "drivers/common",
     "interrupts",
     "kernel",

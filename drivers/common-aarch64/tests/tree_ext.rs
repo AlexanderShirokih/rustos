@@ -1,4 +1,4 @@
-use drivers_aarch64::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
+use drivers_common_aarch64::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
 use drivers_common::{DeviceNode, NodeProperty};
 use std::vec::Vec;
 

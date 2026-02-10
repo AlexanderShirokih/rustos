@@ -1,5 +1,5 @@
 [package]
-name = "drivers-aarch64"
+name = "drivers-common-aarch64"
 version = "0.1.0"
 edition = "2024"
 

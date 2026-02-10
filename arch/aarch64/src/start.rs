@@ -10,7 +10,7 @@ mod exception;
 mod memory;
 mod system;
 
-extern crate drivers_aarch64;
+extern crate drivers_common_aarch64;
 
 use crate::memory::layout::MemoryRegion;
 use crate::memory::memory_setup::{Early, Installed, MemorySetup};
@@ -20,11 +20,11 @@ use ::memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use arch_common::scanner;
-use core::arch::{asm, naked_asm};
+use core::arch::naked_asm;
 use core::hint::spin_loop;
-use drivers_aarch64::fdt_adapter::adapt_tree;
 use drivers_common::early::EarlyDriverRegistry;
 use drivers_common::{IrqRegistrationError, RuntimeDriverRegistry, RuntimeRequestApplier};
+use drivers_common_aarch64::adapt_tree;
 use fdt::devicetree::{DeviceTree, NodeKey};
 use kernel::kmain::kmain;
 use klog::{debug, fatal, set_early_stdout};
@@ -142,7 +142,7 @@ fn early_main(dtb: usize) {
 
     let mut early_registry = EarlyDriverRegistry::<NodeKey>::new();
     if let Some(root) = adapt_tree(&device_tree).root_node() {
-        let early_infos = drivers_aarch64::early_driver_infos();
+        let early_infos = drivers_common_aarch64::early_driver_infos();
         early_registry.scan_and_probe(root, early_infos);
     }
 
@@ -170,7 +170,7 @@ fn early_main(dtb: usize) {
     let mut irq_registrar = |_irq, _handler| Err(IrqRegistrationError::Unsupported);
     let mut runtime_applier = RuntimeRequestApplier::new(&mut mmio_mapper, &mut irq_registrar);
     if let Some(root) = adapt_tree(&device_tree).root_node() {
-        let runtime_infos = drivers_aarch64::runtime_driver_infos();
+        let runtime_infos = drivers_common_aarch64::runtime_driver_infos();
         runtime_registry.scan_and_probe(root, runtime_infos, &mut runtime_applier);
     }
     let _runtime_registry: &'static RuntimeDriverRegistry<NodeKey> =
@@ -262,7 +262,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         fatal!("Kernel panic: {}", info);
 
         loop {
-            asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("wfi", options(nomem, nostack));
         }
     }
 }
