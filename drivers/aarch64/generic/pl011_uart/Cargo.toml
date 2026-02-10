@@ -1,0 +1,10 @@
+[package]
+name = "pl011_uart"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+io = { path = "../../../../io" }
+util = { path = "../../../../util" }
+drivers-common = { path = "../../../common" }
+drivers-common-aarch64 = { path = "../../../common-aarch64" }

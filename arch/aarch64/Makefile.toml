@@ -12,9 +12,3 @@ script = [
     "mkdir -p ../../target/build/",
     "cargo objcopy --release --target aarch64-unknown-none -- --set-section-flags .bss=alloc,load,data -O binary ../../target/build/kernel.bin",
 ]
-
-[tasks.compress]
-dependencies = ["image"]
-script = [
-    "gzip -9c ../../target/build/kernel.bin > ../../target/build/kernel.gz"
-]

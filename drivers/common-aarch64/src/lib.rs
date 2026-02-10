@@ -7,21 +7,20 @@ extern crate alloc;
 mod commons;
 pub mod fdt_adapter;
 pub mod tree_ext;
-pub mod pl011_uart;
-pub mod qcom_uart_dm;
 
 use alloc::boxed::Box;
 use drivers_common::{Driver, DriverInfo, EarlyDriver, EarlyDriverInfo, ProbeContext, ProbeResult};
 use fdt_adapter::FdtNode;
 
+pub use commons::*;
 pub use fdt_adapter::adapt_tree;
 
-type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
-type FdtEarlyProbeFn = for<'a> fn(&mut FdtProbeContext<'a>) -> ProbeResult<Box<dyn EarlyDriver>>;
-type FdtProbeFn = for<'a> fn(&mut FdtProbeContext<'a>) -> ProbeResult<Box<dyn Driver>>;
+pub type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
+pub type FdtEarlyProbeFn =
+    for<'a> fn(&mut FdtProbeContext<'a>) -> ProbeResult<Box<dyn EarlyDriver>>;
+pub type FdtProbeFn = for<'a> fn(&mut FdtProbeContext<'a>) -> ProbeResult<Box<dyn Driver>>;
 
 pub fn early_driver_infos() -> &'static [EarlyDriverInfo<FdtEarlyProbeFn>] {
-    #[cfg(target_os = "none")]
     {
         #[allow(improper_ctypes)]
         unsafe extern "C" {
@@ -36,15 +35,9 @@ pub fn early_driver_infos() -> &'static [EarlyDriverInfo<FdtEarlyProbeFn>] {
             core::slice::from_raw_parts(start, length)
         }
     }
-
-    #[cfg(not(target_os = "none"))]
-    {
-        &[]
-    }
 }
 
 pub fn runtime_driver_infos() -> &'static [DriverInfo<FdtProbeFn>] {
-    #[cfg(target_os = "none")]
     {
         #[allow(improper_ctypes)]
         unsafe extern "C" {
@@ -58,12 +51,6 @@ pub fn runtime_driver_infos() -> &'static [DriverInfo<FdtProbeFn>] {
             let length = end.offset_from(start) as usize;
             core::slice::from_raw_parts(start, length)
         }
-    }
-
-    #[cfg(not(target_os = "none"))]
-    {
-        static DRIVERS: [DriverInfo<FdtProbeFn>; 0] = [];
-        &DRIVERS
     }
 }
 

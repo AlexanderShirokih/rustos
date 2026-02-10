@@ -1,13 +1,13 @@
 //! Общие утилиты для драйверов.
 
-use drivers_common::{DeviceNode, NodeProperty, ProbeContext};
-use crate::tree_ext::NodeAddressExt;
 use crate::fdt_adapter::FdtNode;
+use crate::tree_ext::NodeAddressExt;
+use drivers_common::{DeviceNode, NodeProperty, ProbeContext};
 
-pub(crate) type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
+pub type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
 
 /// Расширение ProbeContext для работы с адресами регистров.
-pub(crate) trait ProbeContextExt {
+pub trait ProbeContextExt {
     fn reg_offset<const N: usize>(&self, reg_index: usize) -> usize;
 }
 
@@ -26,10 +26,7 @@ impl ProbeContextExt for FdtProbeContext<'_> {
             .and_then(|parent| parent.range_to_parent(root_cell_size))
             .unwrap_or_default();
 
-        let address_space = node
-            .reg_list(parent_cell_size, N)
-            .get(reg_index)
-            .copied();
+        let address_space = node.reg_list(parent_cell_size, N).get(reg_index).copied();
 
         let offset = address_space
             .map(|address_space| address_space.offset)
@@ -40,7 +37,7 @@ impl ProbeContextExt for FdtProbeContext<'_> {
 }
 
 /// Проверяет, содержит ли узел хотя бы одну из указанных строк совместимости.
-pub(crate) fn is_compatible(node: &FdtNode, candidates: &[&str]) -> bool {
+pub fn is_compatible(node: &FdtNode, candidates: &[&str]) -> bool {
     let Some(prop) = node.prop("compatible") else {
         return false;
     };
@@ -53,10 +50,7 @@ pub(crate) fn is_compatible(node: &FdtNode, candidates: &[&str]) -> bool {
 }
 
 /// Возвращает ошибку, если узел не содержит ни одной из указанных строк совместимости.
-pub(crate) fn require_compatible(
-    node: &FdtNode,
-    candidates: &[&str],
-) -> drivers_common::ProbeResult<()> {
+pub fn require_compatible(node: &FdtNode, candidates: &[&str]) -> drivers_common::ProbeResult<()> {
     if is_compatible(node, candidates) {
         Ok(())
     } else {

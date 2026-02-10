@@ -1,11 +1,11 @@
 //! Драйвер UART PL011 (ARM PrimeCell).
 
-use crate::commons::FdtProbeContext;
-use crate::commons::ProbeContextExt;
-use crate::register_early_driver;
 use alloc::boxed::Box;
 use core::hint::spin_loop;
 use drivers_common::{EarlyDriver, EarlyDriverContext, ProbeResult};
+use drivers_common_aarch64::FdtProbeContext;
+use drivers_common_aarch64::ProbeContextExt;
+use drivers_common_aarch64::register_early_driver;
 use io::byte_sink::{ByteSink, WouldBlock};
 use io::mmio::{Mmio, Reg};
 use io::writer::{BlockingWriter, Writer};
@@ -109,10 +109,8 @@ impl EarlyDriver for UartPl011 {
     }
 }
 
-pub(crate) fn uart_pl011_probe(
-    context: &mut FdtProbeContext<'_>,
-) -> ProbeResult<Box<dyn EarlyDriver>> {
-    crate::commons::require_compatible(context.node(), &["arm,pl011"])?;
+pub fn uart_pl011_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult<Box<dyn EarlyDriver>> {
+    drivers_common_aarch64::require_compatible(context.node(), &["arm,pl011"])?;
 
     let base = context.reg_offset::<REG_UART_SIZE_INDEX>(REG_UART_INDEX);
 

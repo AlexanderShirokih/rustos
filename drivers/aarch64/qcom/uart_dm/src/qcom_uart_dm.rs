@@ -1,10 +1,10 @@
 //! Драйвер Qualcomm UART DM (Data Mover).
 
-use crate::commons::FdtProbeContext;
-use crate::commons::ProbeContextExt;
-use crate::register_early_driver;
 use alloc::boxed::Box;
 use drivers_common::{EarlyDriver, EarlyDriverContext, ProbeResult};
+use drivers_common_aarch64::FdtProbeContext;
+use drivers_common_aarch64::ProbeContextExt;
+use drivers_common_aarch64::register_early_driver;
 use io::byte_sink::{ByteSink, WouldBlock};
 use io::mmio::{Mmio, Reg};
 use io::writer::{BlockingWriter, Writer};
@@ -109,10 +109,8 @@ impl ByteSink for UartDm {
     }
 }
 
-pub(crate) fn uart_dm_probe(
-    context: &mut FdtProbeContext<'_>,
-) -> ProbeResult<Box<dyn EarlyDriver>> {
-    crate::commons::require_compatible(
+pub fn uart_dm_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult<Box<dyn EarlyDriver>> {
+    drivers_common_aarch64::require_compatible(
         context.node(),
         &["qcom,msm-uartdm", "qcom,msm-hsuart"],
     )?;
