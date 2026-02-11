@@ -6,7 +6,7 @@ use drivers_common::{EarlyDriver, EarlyDriverContext, ProbeResult};
 use drivers_common_aarch64::FdtProbeContext;
 use drivers_common_aarch64::ProbeContextExt;
 use drivers_common_aarch64::register_early_driver;
-use io::byte_sink::{ByteSink, WouldBlock};
+use io::byte_sink::{ByteSink, Pending};
 use io::mmio::{Mmio, Reg};
 use io::writer::{BlockingWriter, Writer};
 use util::crlf::Crlf;
@@ -53,16 +53,16 @@ impl UartPl011 {
 }
 
 impl ByteSink for UartPl011 {
-    fn try_write(&self, b: u8) -> Result<(), WouldBlock> {
+    fn try_write(&self, b: u8) -> Result<(), Pending> {
         if (self.mmio.read_reg(FR) & FR_TXFF) != 0 {
-            return Err(WouldBlock);
+            return Err(Pending);
         }
 
         self.mmio.write_reg(DR, b as u32);
         Ok(())
     }
 
-    fn try_write_slice(&self, buf: &[u8]) -> Result<usize, WouldBlock> {
+    fn try_write_slice(&self, buf: &[u8]) -> Result<usize, Pending> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -73,7 +73,7 @@ impl ByteSink for UartPl011 {
         while let Some(byte) = crlf.next() {
             if (self.mmio.read_reg(FR) & FR_TXFF) != 0 {
                 if consumed == 0 {
-                    return Err(WouldBlock);
+                    return Err(Pending);
                 }
                 while (self.mmio.read_reg(FR) & FR_TXFF) != 0 {
                     spin_loop();

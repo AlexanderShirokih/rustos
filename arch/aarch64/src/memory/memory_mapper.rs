@@ -33,7 +33,11 @@ impl<FA: FrameAllocator> TableAlloc for FrameTableAlloc<'_, FA> {
         Some(frame.page_address())
     }
 
-    unsafe fn table_ptr<L: Level>(&self, pa: PageAlignedAddress, _target_va: usize) -> *mut PageTable<L> {
+    unsafe fn table_ptr<L: Level>(
+        &self,
+        pa: PageAlignedAddress,
+        _target_va: usize,
+    ) -> *mut PageTable<L> {
         // Identity mapping: VA = PA
         pa.as_usize() as *mut PageTable<L>
     }
@@ -57,11 +61,7 @@ impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>>
     Aarch64MemoryMapper<'a, FA, L>
 {
     /// Создаёт маппер с identity mapping.
-    pub fn new(
-        frame_allocator: &'a FA,
-        root_ptr: *mut PageTable<L0>,
-        mem_flags: MemFlags,
-    ) -> Self {
+    pub fn new(frame_allocator: &'a FA, root_ptr: *mut PageTable<L0>, mem_flags: MemFlags) -> Self {
         Self {
             frame_allocator,
             mem_flags,
@@ -177,8 +177,10 @@ where
     }
 }
 
-impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>> MemoryMapper
-    for Aarch64MemoryMapper<'a, FA, L>
+impl<'a, FA, L> MemoryMapper for Aarch64MemoryMapper<'a, FA, L>
+where
+    FA: FrameAllocator,
+    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 {
     fn map(
         &self,

@@ -5,7 +5,7 @@ use drivers_common::{EarlyDriver, EarlyDriverContext, ProbeResult};
 use drivers_common_aarch64::FdtProbeContext;
 use drivers_common_aarch64::ProbeContextExt;
 use drivers_common_aarch64::register_early_driver;
-use io::byte_sink::{ByteSink, WouldBlock};
+use io::byte_sink::{ByteSink, Pending};
 use io::mmio::{Mmio, Reg};
 use io::writer::{BlockingWriter, Writer};
 use util::crlf::Crlf;
@@ -63,21 +63,21 @@ impl EarlyDriver for UartDm {
 }
 
 impl ByteSink for UartDm {
-    fn try_write(&self, b: u8) -> Result<(), WouldBlock> {
+    fn try_write(&self, b: u8) -> Result<(), Pending> {
         match self.try_write_slice(core::slice::from_ref(&b)) {
             Ok(1) => Ok(()),
-            _ => Err(WouldBlock),
+            _ => Err(Pending),
         }
     }
 
-    fn try_write_slice(&self, buf: &[u8]) -> Result<usize, WouldBlock> {
+    fn try_write_slice(&self, buf: &[u8]) -> Result<usize, Pending> {
         if buf.is_empty() {
             return Ok(0);
         }
 
         // Очередь должна быть пуста
         if (self.mmio.read_reg(SR) & SR_TXEMT) == 0 {
-            return Err(WouldBlock);
+            return Err(Pending);
         }
 
         // Формирование слова (LF -> CRLF, до 4 байт)
@@ -93,7 +93,7 @@ impl ByteSink for UartDm {
 
         // Проверка готовности к приему слова
         if (self.mmio.read_reg(SR) & SR_TXRDY) == 0 {
-            return Err(WouldBlock);
+            return Err(Pending);
         }
 
         self.mmio.write_reg(TF, word);
