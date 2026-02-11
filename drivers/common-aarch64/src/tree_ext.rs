@@ -1,7 +1,6 @@
 //! Расширения дерева устройств для FDT-адресации.
 
-use alloc::vec::Vec;
-use drivers_common::DeviceNode;
+use drivers_common::{DeviceNode, MmioAddress};
 
 /// Размерность адресных ячеек в узле.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +36,12 @@ pub struct AddressSpace {
     pub size: usize,
 }
 
+impl AddressSpace {
+    pub const fn as_mmio(&self) -> Option<MmioAddress> {
+        MmioAddress::new(self.offset, self.size)
+    }
+}
+
 /// Трансляция child -> parent для адресного пространства шины.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub struct BusRange {
@@ -55,5 +60,5 @@ pub trait NodeAddressExt: DeviceNode {
     /// Читает `ranges` и возвращает трансляцию child -> parent.
     fn range_to_parent(&self, parent_cells: CellsSize) -> Option<BusRange>;
     /// Читает `reg` как список адресных диапазонов.
-    fn reg_list(&self, cells_size: CellsSize, limit: usize) -> Vec<AddressSpace>;
+    fn reg_iter(&self, cells_size: CellsSize) -> impl Iterator<Item = AddressSpace>;
 }

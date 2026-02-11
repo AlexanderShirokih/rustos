@@ -1,6 +1,7 @@
 use crate::aligned::{Address, Aligned};
 use crate::physical_address::AlignedPhysicalAddress;
 use core::fmt::{Formatter, LowerHex};
+use core::ptr::NonNull;
 
 /// Адрес виртуальной памяти.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -22,6 +23,12 @@ impl VirtualAddress {
 
     pub fn as_ptr<T>(&self) -> *mut T {
         self.0 as *mut T
+    }
+}
+
+impl From<NonNull<u8>> for VirtualAddress {
+    fn from(value: NonNull<u8>) -> Self {
+        Self::new(value.as_ptr() as usize)
     }
 }
 

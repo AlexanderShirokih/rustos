@@ -1,6 +1,6 @@
 //! Раскладка физической памяти ядра.
 
-use aarch64_paging::mem_flags::MemFlags;
+use aarch64_paging::mem_flags::Aarch64MemFlags;
 use aarch64_paging::preset::Mmio;
 use collections::Vec;
 use collections::interval_set::IntervalSet;
@@ -83,12 +83,12 @@ pub struct MemoryRegion<A: Address + Aligned> {
     /// Конечный адрес (исключительно).
     pub end: A,
     /// Атрибуты памяти.
-    pub flags: MemFlags,
+    pub flags: Aarch64MemFlags,
 }
 
 impl MemoryRegion<PageAlignedAddress> {
     /// Создаёт регион из указателей на символы линкера.
-    pub fn new_raw(tag: RegionTag, start: &u8, end: &u8, flags: MemFlags) -> Self {
+    pub fn new_raw(tag: RegionTag, start: &u8, end: &u8, flags: Aarch64MemFlags) -> Self {
         let start_addr = start as *const u8 as usize;
         let end_addr = end as *const u8 as usize;
 
@@ -96,7 +96,7 @@ impl MemoryRegion<PageAlignedAddress> {
     }
 
     /// Создаёт регион из адресов.
-    pub const fn new(tag: RegionTag, start_addr: usize, end_addr: usize, flags: MemFlags) -> Self {
+    pub const fn new(tag: RegionTag, start_addr: usize, end_addr: usize, flags: Aarch64MemFlags) -> Self {
         Self {
             tag,
             flags,

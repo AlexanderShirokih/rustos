@@ -18,8 +18,7 @@ pub struct Node<'a> {
 }
 
 /// Уникальный ключ узла для сравнения и хранения.
-#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
-pub struct NodeKey(usize);
+pub type NodeKey = usize;
 
 impl<'a> Node<'a> {
     pub const fn name(&self) -> &'a str {
@@ -27,7 +26,7 @@ impl<'a> Node<'a> {
     }
 
     pub fn key(&self) -> NodeKey {
-        NodeKey(self.offset)
+        self.offset
     }
 
     pub fn properties(&self) -> PropertyIter<'a> {

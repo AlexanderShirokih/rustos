@@ -24,7 +24,6 @@ unsafe impl Sync for Mmio {}
 
 impl Mmio {
     /// Создаёт хэндлер по физ. адресу базы.
-    #[inline]
     pub const fn new(base_addr: usize) -> Self {
         Self {
             base: base_addr as *mut u8,
@@ -51,12 +50,6 @@ impl Mmio {
         }
     }
 
-    /// Барьер памяти DMB SY: упорядочивает все load/store по всей системе.
-    #[inline(always)]
-    pub fn dmb_system() {
-        unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) }
-    }
-
     /// Читает значение из регистра.
     #[inline(always)]
     pub fn read_reg<T: VolatileInt>(&self, reg: Reg<T>) -> T {
@@ -70,6 +63,12 @@ impl Mmio {
     }
 }
 
+impl Into<usize> for Mmio {
+    fn into(self) -> usize {
+        self.base as usize
+    }
+}
+
 /// Типобезопасный дескриптор регистра со смещением и ожидаемым типом.
 pub struct Reg<T> {
     /// Смещение регистра относительно базового адреса MMIO (в байтах).
@@ -80,7 +79,6 @@ pub struct Reg<T> {
 }
 
 impl<T> Reg<T> {
-    #[inline(always)]
     pub const fn new(offset: usize) -> Self {
         Self {
             offset,

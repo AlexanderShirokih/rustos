@@ -1,10 +1,8 @@
 extern crate alloc;
 
-use alloc::vec::Vec;
-use core::cmp::min;
+use crate::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
 use core::mem::size_of;
 use drivers_common::{DeviceNode, DeviceTreeSource, NodeProperty};
-use crate::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
 use fdt::devicetree::{DeviceTree, Node, NodeIter, NodeKey, Property};
 
 #[derive(Clone, Copy)]
@@ -26,6 +24,13 @@ pub struct FdtNodeIter<'a> {
     inner: NodeIter<'a>,
 }
 
+pub struct RegIter<'a> {
+    bytes: &'a [u8],
+    cells_size: CellsSize,
+    index: usize,
+    count: usize,
+}
+
 /// Обёртка над `DeviceTree` для передачи в драйверный слой.
 pub fn adapt_tree<'a>(device_tree: &'a DeviceTree<'a>) -> FdtTree<'a> {
     FdtTree { inner: device_tree }
@@ -33,7 +38,7 @@ pub fn adapt_tree<'a>(device_tree: &'a DeviceTree<'a>) -> FdtTree<'a> {
 
 impl<'dt> FdtTree<'dt> {
     /// Возвращает корневой узел.
-    pub fn root_node(&self) -> Option<FdtNode<'dt>> {
+    pub fn root(&self) -> Option<FdtNode<'dt>> {
         self.inner.root().map(FdtNode::new)
     }
 }
@@ -85,11 +90,11 @@ impl<'dt> DeviceNode for FdtNode<'dt> {
         self.inner.name()
     }
 
-    fn prop<'a>(&'a self, name: &str) -> Option<Self::Property<'a>> {
+    fn prop(&self, name: &str) -> Option<Self::Property<'_>> {
         self.inner.prop(name).map(|inner| FdtProperty { inner })
     }
 
-    fn children<'a>(&'a self) -> Self::ChildIter<'a> {
+    fn children(&self) -> Self::ChildIter<'_> {
         FdtNodeIter {
             inner: self.inner.children(),
         }
@@ -107,7 +112,7 @@ impl<'dt> DeviceTreeSource for FdtTree<'dt> {
         Self: 'a;
 
     fn root(&self) -> Option<Self::Node<'_>> {
-        self.root_node()
+        self.root()
     }
 
     fn nodes(&self) -> Self::NodeIter<'_> {
@@ -156,44 +161,70 @@ impl<'dt> NodeAddressExt for FdtNode<'dt> {
         })
     }
 
-    fn reg_list(&self, cells_size: CellsSize, limit: usize) -> Vec<AddressSpace> {
+    fn reg_iter(&self, cells_size: CellsSize) -> impl Iterator<Item = AddressSpace> {
         let Some(reg) = self.inner.prop("reg") else {
-            return Vec::new();
+            return RegIter::empty();
         };
 
         let stride_cells = cells_size.stride();
         if stride_cells == 0 {
-            return Vec::new();
+            return RegIter::empty();
         }
 
         let total_cells = reg.value().len() / size_of::<u32>();
         if total_cells < stride_cells {
-            return Vec::new();
+            return RegIter::empty();
         }
 
-        let count = min(limit, total_cells / stride_cells);
-        let mut out = Vec::with_capacity(count);
+        let count = total_cells / stride_cells;
+        RegIter::new(reg.value(), cells_size, count)
+    }
+}
 
-        for index in 0..count {
-            let base = index * stride_cells;
-            let Some(address) = try_read_cell(reg.value(), cells_size.address_cells, base) else {
+impl<'a> RegIter<'a> {
+    fn new(bytes: &'a [u8], cells_size: CellsSize, count: usize) -> Self {
+        Self {
+            bytes,
+            cells_size,
+            index: 0,
+            count,
+        }
+    }
+
+    fn empty() -> Self {
+        Self::new(&[], CellsSize::default(), 0)
+    }
+}
+
+impl<'a> Iterator for RegIter<'a> {
+    type Item = AddressSpace;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let stride_cells = self.cells_size.stride();
+        while self.index < self.count {
+            let base = self.index * stride_cells;
+            self.index += 1;
+
+            let Some(address) = try_read_cell(self.bytes, self.cells_size.address_cells, base)
+            else {
                 continue;
             };
+
             let Some(size) = try_read_cell(
-                reg.value(),
-                cells_size.size_cells,
-                base + cells_size.address_cells,
+                self.bytes,
+                self.cells_size.size_cells,
+                base + self.cells_size.address_cells,
             ) else {
                 continue;
             };
 
-            out.push(AddressSpace {
+            return Some(AddressSpace {
                 offset: address as usize,
                 size: size as usize,
             });
         }
 
-        out
+        None
     }
 }
 

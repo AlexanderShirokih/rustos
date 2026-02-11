@@ -2,18 +2,21 @@
 //!
 //! Фазы: Early → Installed → Prepared → Enabled.
 
+use crate::HIGHER_HALF_BASE;
 use crate::memory::global_allocator::{GLOBAL_ALLOCATOR, KernelHeapAllocator};
 use crate::memory::layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag};
-use crate::memory::memory_mapper::Aarch64MemoryMapper;
+use crate::memory::memory_mapper::{Aarch64MemoryMapper, FrameTableAlloc};
 use crate::memory::mmu::{Mmu, NormalDualSpaceConfig};
 use aarch64_paging::level::L0;
+use aarch64_paging::mapper::PageMapper;
+use aarch64_paging::mem_flags::Aarch64MemFlags;
 use aarch64_paging::page_table::PageTable;
 use aarch64_paging::preset::Heap;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use collections::NoLockCell;
 use collections::Vec as StaticVec;
 use collections::interval_set::{Interval, IntervalSet};
+use collections::{MutexCell, NoLockCell};
 use klog::{debug, info, warn};
 use memory::FrameBitmap;
 use memory::RelocatablePtr;
@@ -23,6 +26,11 @@ use memory::memory_mapper::MemoryMapper;
 use memory::memory_range::MemoryRange;
 use memory::physical_address::PageAlignedAddress;
 use memory::virtual_address::PageAlignedVirtualAddress;
+
+type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
+type NoLockPageMapper<'a, FA> = NoLockCell<PageMapper<FrameTableAlloc<'a, FA>>>;
+type FrameAllocatorImpl = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
+type NoLockAarch64MemoryMapper<'a, FA> = Aarch64MemoryMapper<'a, FA, NoLockPageMapper<'a, FA>>;
 
 /// Ранняя фаза: bump-аллокатор создан, но не установлен.
 pub struct Early {
@@ -35,6 +43,10 @@ pub struct Early {
 pub struct Installed {
     free_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
     layout: MemoryLayout,
+}
+
+pub struct MemoryManagerResult {
+    pub memory_mapper: Box<dyn MemoryMapper>,
 }
 
 /// Корневые таблицы страниц.
@@ -57,8 +69,10 @@ pub struct Prepared {
 
 /// Фаза после включения MMU.
 pub struct Enabled {
+    /// Корневые таблицы.
+    roots: PageTableRoots,
     /// Аллокатор фреймов.
-    frame_allocator: &'static dyn FrameAllocator,
+    frame_allocator: &'static FrameAllocatorImpl,
     /// База higher half.
     higher_half_base: PageAlignedVirtualAddress,
 }
@@ -259,14 +273,11 @@ impl MemorySetup<Prepared> {
             roots.higher_pa.as_physical_address(),
         ));
 
-        debug!("MemorySetup::enable"; "MMU enabled successfully");
-
-        let frame_allocator: &'static dyn FrameAllocator = frame_allocator;
-
         Ok(MemorySetup::<Enabled> {
             state: Enabled {
                 frame_allocator,
                 higher_half_base,
+                roots,
             },
         })
     }
@@ -279,16 +290,10 @@ impl MemorySetup<Prepared> {
     ) -> Result<(), MemorySetupError> {
         let heap_flags = Heap::flags();
 
-        let lower_half_mapper = Aarch64MemoryMapper::<_, NoLockCell<_>>::new(
-            frame_allocator,
-            roots.lower_ptr,
-            heap_flags,
-        );
-        let higher_half_mapper = Aarch64MemoryMapper::<_, NoLockCell<_>>::new(
-            frame_allocator,
-            roots.higher_ptr,
-            heap_flags,
-        );
+        let lower_half_mapper =
+            NoLockAarch64MemoryMapper::new(frame_allocator, roots.lower_ptr, heap_flags);
+        let higher_half_mapper =
+            NoLockAarch64MemoryMapper::new(frame_allocator, roots.higher_ptr, heap_flags);
 
         // Маппинг всех регионов линейно: VA = higher_half_base + PA
         Self::map_higher_half_impl(&higher_half_mapper, all_regions, higher_half_base)?;
@@ -299,14 +304,15 @@ impl MemorySetup<Prepared> {
             .iter()
             .filter(|region| !region.is_heap())
             .cloned();
+
         Self::map_identity_impl(&lower_half_mapper, identity_regions)?;
 
         Ok(())
     }
 
     /// Маппит все регионы линейно: VA = higher_half_base + PA.
-    fn map_higher_half_impl(
-        mapper: &impl MemoryMapper,
+    fn map_higher_half_impl<'a, FA: FrameAllocator>(
+        mapper: &NoLockAarch64MemoryMapper<'a, FA>,
         all_regions: &StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
         higher_half_base: PageAlignedVirtualAddress,
     ) -> Result<(), MemorySetupError> {
@@ -325,7 +331,7 @@ impl MemorySetup<Prepared> {
             );
 
             mapper
-                .map_exact(region.start, va, region.size(), region.flags.bits())
+                .map_exact_impl(va, region.start, region.size(), region.flags)
                 .map_err(|e| {
                     warn!(
                         "map_higher_half";
@@ -343,8 +349,8 @@ impl MemorySetup<Prepared> {
 
     /// Identity mapping — kernel регионы + bump allocator range + MMIO.
     /// Нужен для выполнения кода сразу после включения MMU, до прыжка в higher half.
-    fn map_identity_impl(
-        mapper: &impl MemoryMapper,
+    fn map_identity_impl<FA: FrameAllocator>(
+        mapper: &NoLockAarch64MemoryMapper<FA>,
         identity_regions: impl Iterator<Item = MemoryRegion<PageAlignedAddress>>,
     ) -> Result<(), MemorySetupError> {
         for region in identity_regions {
@@ -356,12 +362,7 @@ impl MemorySetup<Prepared> {
 
             let bootstrap_va = PageAlignedVirtualAddress::identity(region.start);
             mapper
-                .map_exact(
-                    region.start,
-                    bootstrap_va,
-                    region.size(),
-                    region.flags.bits(),
-                )
+                .map_exact_impl(bootstrap_va, region.start, region.size(), region.flags)
                 .map_err(|e| {
                     warn!(
                         "map_identity";
@@ -377,24 +378,41 @@ impl MemorySetup<Prepared> {
 }
 
 impl MemorySetup<Enabled> {
-    pub fn install(self) -> Result<Self, ()> {
+    pub fn install(self) -> Result<MemoryManagerResult, ()> {
         let Enabled {
+            roots,
             frame_allocator,
             higher_half_base,
         } = self.state;
-        let allocator = KernelHeapAllocator::new(frame_allocator, higher_half_base);
+
+        let frame_allocator_ptr = RelocatablePtr::new(frame_allocator as &dyn FrameAllocator);
+        let frame_allocator_rel =
+            unsafe { frame_allocator_ptr.relocated(higher_half_base.as_virtual()) };
+
+        let allocator = KernelHeapAllocator::new(frame_allocator_rel, higher_half_base);
 
         // Переключение логгера на higher half
         if let Some(writer) = klog::get_early_writer() {
-            let new_writer =
-                unsafe { RelocatablePtr::new(writer).relocated(higher_half_base.as_virtual()) };
+            let new_writer_ptr = RelocatablePtr::new(writer);
+            let new_writer = unsafe { new_writer_ptr.relocated(higher_half_base.as_virtual()) };
 
             klog::set_stdout(new_writer);
         }
 
         GLOBAL_ALLOCATOR.set_heap(allocator);
 
-        Ok(self)
+        let higher_ptr_rel = unsafe { roots.higher_ptr.byte_add(HIGHER_HALF_BASE) };
+        let memory_mapper: Aarch64MemoryMapper<'_, _, MutexPageMapper<'_, _>> =
+            Aarch64MemoryMapper::new_with_offset(
+                frame_allocator,
+                higher_ptr_rel,
+                Aarch64MemFlags::new(),
+                higher_half_base.as_usize(),
+            );
+
+        Ok(MemoryManagerResult {
+            memory_mapper: Box::new(memory_mapper),
+        })
     }
 }
 

@@ -2,10 +2,11 @@
 
 use aarch64_paging::level::{L0, L1, L2, L3, Level};
 use aarch64_paging::mapper::{MapError, MapLeaf, PageMapper};
-use aarch64_paging::mem_flags::MemFlags;
+use aarch64_paging::mem_flags::Aarch64MemFlags;
 use aarch64_paging::page_table::PageTable;
 use aarch64_paging::table_alloc::TableAlloc;
 use collections::LockCell;
+use memory::MemFlags;
 use memory::aligned::Aligned;
 use memory::frame_allocator::FrameAllocator;
 use memory::memory_mapper::{MemoryMapper, MemoryMappingError};
@@ -18,12 +19,17 @@ use memory::virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, 
 pub(crate) struct FrameTableAlloc<'a, FA: FrameAllocator> {
     /// Базовый аллокатор фреймов.
     allocator: &'a FA,
+    /// Смещение для VA относительно PA (0 для identity).
+    vaddr_offset: usize,
 }
 
 impl<'a, FA: FrameAllocator> FrameTableAlloc<'a, FA> {
-    /// Создаёт аллокатор с identity mapping.
-    pub fn identity(allocator: &'a FA) -> Self {
-        Self { allocator }
+    /// Создаёт аллокатор с линейным маппингом: VA = PA + offset.
+    pub fn new(allocator: &'a FA, offset: usize) -> Self {
+        Self {
+            allocator,
+            vaddr_offset: offset,
+        }
     }
 }
 
@@ -38,8 +44,8 @@ impl<FA: FrameAllocator> TableAlloc for FrameTableAlloc<'_, FA> {
         pa: PageAlignedAddress,
         _target_va: usize,
     ) -> *mut PageTable<L> {
-        // Identity mapping: VA = PA
-        pa.as_usize() as *mut PageTable<L>
+        // Линейное отображение таблиц страниц
+        (pa.as_usize() + self.vaddr_offset) as *mut PageTable<L>
     }
 }
 
@@ -52,32 +58,47 @@ where
     /// Аллокатор физических фреймов.
     frame_allocator: &'a FA,
     /// Флаги памяти по умолчанию.
-    mem_flags: MemFlags,
+    mem_flags: Aarch64MemFlags,
     /// Внутренний маппер таблиц страниц.
     mapper: L,
 }
 
-impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>>
-    Aarch64MemoryMapper<'a, FA, L>
+impl<'a, FA, L> Aarch64MemoryMapper<'a, FA, L>
+where
+    FA: FrameAllocator,
+    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 {
     /// Создаёт маппер с identity mapping.
-    pub fn new(frame_allocator: &'a FA, root_ptr: *mut PageTable<L0>, mem_flags: MemFlags) -> Self {
+    pub fn new(
+        frame_allocator: &'a FA,
+        root_ptr: *mut PageTable<L0>,
+        mem_flags: Aarch64MemFlags,
+    ) -> Self {
+        Self::new_with_offset(frame_allocator, root_ptr, mem_flags, 0)
+    }
+
+    pub fn new_with_offset(
+        frame_allocator: &'a FA,
+        root_ptr: *mut PageTable<L0>,
+        mem_flags: Aarch64MemFlags,
+        vaddr_offset: usize,
+    ) -> Self {
         Self {
             frame_allocator,
             mem_flags,
             mapper: L::new(PageMapper::new(
                 root_ptr,
-                FrameTableAlloc::identity(frame_allocator),
+                FrameTableAlloc::new(frame_allocator, vaddr_offset),
             )),
         }
     }
 
-    fn map_exact_impl(
+    pub fn map_exact_impl(
         &self,
-        source_address: PageAlignedAddress,
-        target_address: PageAlignedVirtualAddress,
+        source_address: PageAlignedVirtualAddress,
+        target_address: PageAlignedAddress,
         size: usize,
-        mem_flags: MemFlags,
+        mem_flags: Aarch64MemFlags,
     ) -> Result<(), MemoryMappingError> {
         if size == 0 {
             return Ok(());
@@ -88,8 +109,8 @@ impl<'a, FA: FrameAllocator, L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>>
 
         self.mapper.with_lock(|mapper| {
             let mut remaining = total_size;
-            let mut virt = VirtualAddress::new(target_address.as_usize());
-            let mut phys = PhysicalAddress::new(source_address.as_usize());
+            let mut virt = source_address.as_virtual();
+            let mut phys = target_address.as_physical_address();
 
             let size_1g = 1usize << L1::SHIFT;
             let size_2m = 1usize << L2::SHIFT;
@@ -139,7 +160,7 @@ fn map_contiguous_inner<FA: FrameAllocator, const SHIFT: u8, P>(
     mapper: &mut PageMapper<FrameTableAlloc<'_, FA>>,
     virt: AlignedVirtualAddress<SHIFT>,
     phys: P,
-    mem_flags: MemFlags,
+    mem_flags: Aarch64MemFlags,
 ) -> Result<(), MemoryMappingError>
 where
     P: MapLeaf<SHIFT> + Into<PhysicalAddress>,
@@ -217,16 +238,21 @@ where
 
     fn map_exact(
         &self,
-        source_address: PageAlignedAddress,
-        target_address: PageAlignedVirtualAddress,
+        source_address: PageAlignedVirtualAddress,
+        target_address: PageAlignedAddress,
         size: usize,
-        mem_flags: u64,
+        mem_flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
         self.map_exact_impl(
             source_address,
             target_address,
             size,
-            MemFlags::from_bits(mem_flags),
+            Aarch64MemFlags::from_memflags(mem_flags),
         )
+    }
+
+    fn unmap(&self, _address: PageAlignedVirtualAddress, _size: usize) -> Result<(), ()> {
+        // TODO: решить вопрос с unmapping
+        Ok(())
     }
 }

@@ -1,10 +1,10 @@
 //! Драйвер Qualcomm UART DM (Data Mover).
 
+use crate::register_early_driver;
 use alloc::boxed::Box;
-use drivers_common::{EarlyDriver, EarlyDriverContext, ProbeResult};
+use drivers_common::{EarlyDriver, EarlyDriverContext, EarlyProbeResult, MmioAddress, ProbeError};
 use drivers_common_aarch64::FdtProbeContext;
 use drivers_common_aarch64::ProbeContextExt;
-use drivers_common_aarch64::register_early_driver;
 use io::byte_sink::{ByteSink, Pending};
 use io::mmio::{Mmio, Reg};
 use io::writer::{BlockingWriter, Writer};
@@ -28,29 +28,28 @@ const CMD_CLEAR_TX_READY: u32 = 0x300;
 
 /// Индекс записи reg в DeviceTree.
 const REG_UART_INDEX: usize = 0;
-/// Индекс размера в записи reg.
-const REG_UART_SIZE_INDEX: usize = 1;
 
 /// Драйвер Qualcomm UART DM.
 pub struct UartDm {
     /// MMIO-доступ к регистрам.
     mmio: Mmio,
+
     /// Базовый адрес регистров.
-    base: usize,
+    address: MmioAddress,
 }
 
 impl UartDm {
-    pub const fn new(base: usize) -> Self {
+    pub const fn new(address: MmioAddress) -> Self {
         Self {
-            mmio: Mmio::new(base),
-            base,
+            mmio: Mmio::new(address.base()),
+            address,
         }
     }
 }
 
 impl EarlyDriver for UartDm {
     fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
-        context.map_mmio(self.base, 4096);
+        context.map_mmio(self.address);
 
         Ok(())
     }
@@ -109,15 +108,17 @@ impl ByteSink for UartDm {
     }
 }
 
-pub fn uart_dm_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult<Box<dyn EarlyDriver>> {
+pub fn uart_dm_probe(context: &mut FdtProbeContext<'_>) -> EarlyProbeResult {
     drivers_common_aarch64::require_compatible(
         context.node(),
         &["qcom,msm-uartdm", "qcom,msm-hsuart"],
     )?;
 
-    let base = context.reg_offset::<REG_UART_SIZE_INDEX>(REG_UART_INDEX);
+    let address = context
+        .reg_mmio_address(REG_UART_INDEX)
+        .ok_or(ProbeError::MissingProperty("base addr"))?;
 
-    Ok(Box::new(UartDm::new(base)))
+    Ok(Box::new(UartDm::new(address)))
 }
 
 register_early_driver!(UART_DM_EARLY, probe = uart_dm_probe);

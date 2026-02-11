@@ -15,6 +15,7 @@ pub mod frame;
 pub mod frame_allocator;
 mod frame_bitmap;
 pub mod heap_allocator;
+pub mod mem_flags;
 pub mod memory;
 pub mod memory_mapper;
 pub mod memory_range;
@@ -23,6 +24,7 @@ pub mod relocatable_ptr;
 pub mod test_utils;
 pub mod virtual_address;
 
+pub use mem_flags::MemFlags;
 pub use relocatable_ptr::RelocatablePtr;
 
 #[cfg_attr(not(test), doc(hidden))]

@@ -4,7 +4,7 @@ use crate::entry::{
     AnyEntry, Block, CanTable, DecodeBlock, DecodeError, Entry, Page, Table, decode,
 };
 use crate::level::{L0, L1, L1BlockPa, L2, L2BlockPa, L3, Level, PagePa};
-use crate::mem_flags::MemFlags;
+use crate::mem_flags::Aarch64MemFlags;
 use crate::page_table::PageTable;
 use crate::table_alloc::TableAlloc;
 use crate::table_flags::TableFlags;
@@ -18,7 +18,7 @@ pub trait MapLeaf<const SHIFT: u8>: Copy {
         mapper: &mut PageMapper<A>,
         virt: AlignedVirtualAddress<SHIFT>,
         phys: Self,
-        flags: MemFlags,
+        flags: Aarch64MemFlags,
     ) -> Result<(), MapError>;
 }
 
@@ -27,7 +27,7 @@ impl MapLeaf<{ L3::SHIFT }> for PagePa {
         mapper: &mut PageMapper<A>,
         virt: PageAlignedVirtualAddress,
         phys: Self,
-        flags: MemFlags,
+        flags: Aarch64MemFlags,
     ) -> Result<(), MapError> {
         let target_va = virt.as_usize();
         let l0 = mapper.l0_ptr();
@@ -51,7 +51,7 @@ impl MapLeaf<{ L2::SHIFT }> for L2BlockPa {
         mapper: &mut PageMapper<A>,
         virt: AlignedVirtualAddress<{ L2::SHIFT }>,
         phys: Self,
-        flags: MemFlags,
+        flags: Aarch64MemFlags,
     ) -> Result<(), MapError> {
         let target_va = virt.as_usize();
         let l0 = mapper.l0_ptr();
@@ -77,7 +77,7 @@ impl MapLeaf<{ L1::SHIFT }> for L1BlockPa {
         mapper: &mut PageMapper<A>,
         virt: AlignedVirtualAddress<{ L1::SHIFT }>,
         phys: Self,
-        flags: MemFlags,
+        flags: Aarch64MemFlags,
     ) -> Result<(), MapError> {
         let target_va = virt.as_usize();
         let l0 = mapper.l0_ptr();
@@ -129,7 +129,7 @@ impl<A: TableAlloc> PageMapper<A> {
         &mut self,
         virt: AlignedVirtualAddress<SHIFT>,
         phys: P,
-        flags: MemFlags,
+        flags: Aarch64MemFlags,
     ) -> Result<(), MapError> {
         P::map_into(self, virt, phys, flags)
     }

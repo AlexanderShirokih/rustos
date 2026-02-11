@@ -1,7 +1,7 @@
 //! Записи таблицы страниц AArch64.
 
 use crate::level::{L0, L1, L1BlockPa, L2, L2BlockPa, L3, Level, PagePa};
-use crate::mem_flags::MemFlags;
+use crate::mem_flags::Aarch64MemFlags;
 use crate::table_flags::TableFlags;
 use core::marker::PhantomData;
 use memory::aligned::Address;
@@ -97,21 +97,21 @@ impl<L: Level + seal::CanBlock> Entry<L, Block> {
 }
 
 impl Entry<L1, Block> {
-    pub fn new(block_pa: L1BlockPa, flags: MemFlags) -> Self {
+    pub fn new(block_pa: L1BlockPa, flags: Aarch64MemFlags) -> Self {
         let addr = block_pa.as_u64() & 0x0000_FFFF_C000_0000;
         Self::from_raw_unchecked(0b01 | addr | flags.bits())
     }
 }
 
 impl Entry<L2, Block> {
-    pub fn new(block_pa: L2BlockPa, flags: MemFlags) -> Self {
+    pub fn new(block_pa: L2BlockPa, flags: Aarch64MemFlags) -> Self {
         let addr = block_pa.as_u64() & 0x0000_FFFF_FFE0_0000;
         Self::from_raw_unchecked(0b01 | addr | flags.bits())
     }
 }
 
 impl<L: Level + seal::CanPage> Entry<L, Page> {
-    pub fn new(page_pa: PagePa, flags: MemFlags) -> Self {
+    pub fn new(page_pa: PagePa, flags: Aarch64MemFlags) -> Self {
         let addr = page_pa.as_u64() & 0x0000_FFFF_FFFF_F000;
         let raw = 0b11 | addr | flags.bits();
 

@@ -1,11 +1,13 @@
 //! Атрибуты памяти для записей таблицы страниц.
 
 use core::fmt::{Debug, Formatter};
+use memory::MemFlags;
+use memory::mem_flags::{AccessMode, Executable, Owners};
 
 /// Атрибуты памяти страницы/блока.
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
-pub struct MemFlags(u64);
+pub struct Aarch64MemFlags(u64);
 
 /// Сдвиг поля AttrIndx (индекс MAIR).
 const ATTR_IDX_SHIFT: u32 = 2;
@@ -28,6 +30,9 @@ const AF_BIT: u64 = 1 << 10;
 const PXN_BIT: u64 = 1 << 53;
 /// Бит Unprivileged Execute-Never.
 const UXN_BIT: u64 = 1 << 54;
+
+const ATTR_INDEX_NORMAL: u8 = 0;
+const ATTR_INDEX_DEVICE: u8 = 1;
 
 /// Режим совместного доступа к памяти (SH).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -77,7 +82,7 @@ impl Access {
     }
 }
 
-impl MemFlags {
+impl Aarch64MemFlags {
     const fn field(self, shift: u32, mask: u64, val: u64) -> Self {
         Self((self.0 & !(mask << shift)) | ((val & mask) << shift))
     }
@@ -95,9 +100,43 @@ impl MemFlags {
     }
 }
 
-impl MemFlags {
+impl Aarch64MemFlags {
     pub const fn new() -> Self {
         Self(0)
+    }
+
+    pub const fn from_memflags(flag: MemFlags) -> Self {
+        match flag {
+            MemFlags::Private(Owners { kernel, user }) => Aarch64MemFlags::new()
+                .attr_index(ATTR_INDEX_NORMAL)
+                .sh(Shareability::Inner)
+                .ap(Self::map_access_flags(kernel.access, user.access))
+                .pxn(matches!(kernel.executable, Executable::NotAllowed))
+                .uxn(matches!(user.executable, Executable::NotAllowed)),
+
+            MemFlags::Device(Owners { kernel, user }) => Aarch64MemFlags::new()
+                .attr_index(ATTR_INDEX_DEVICE)
+                .sh(Shareability::Inner)
+                .ap(Self::map_access_flags(kernel.access, user.access))
+                .pxn(true)
+                .uxn(true),
+        }
+    }
+
+    const fn map_access_flags(kernel: AccessMode, user: AccessMode) -> Access {
+        match (kernel, user) {
+            (AccessMode::Writable, AccessMode::Readonly) => {
+                panic!("Invalid AF combination: kRW+uR");
+            }
+
+            (_, AccessMode::Writable) => Access::UserRW,
+
+            (_, AccessMode::Readonly) => Access::UserRO,
+
+            (AccessMode::Writable, AccessMode::None) => Access::KernelRW,
+
+            (_, AccessMode::None) => Access::KernelRO,
+        }
     }
 
     pub const fn from_bits(bits: u64) -> Self {
@@ -158,15 +197,15 @@ impl MemFlags {
     }
 }
 
-impl Default for MemFlags {
+impl Default for Aarch64MemFlags {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Debug for MemFlags {
+impl Debug for Aarch64MemFlags {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("MemFlags")
+        f.debug_struct("Aarch64MemFlags")
             .field("sh", &self.get_sh())
             .field("ap", &self.get_ap())
             .field("attr_idx", &self.get_attr_index())

@@ -1,11 +1,11 @@
 //! Драйвер UART PL011 (ARM PrimeCell).
 
+use crate::register_early_driver;
 use alloc::boxed::Box;
 use core::hint::spin_loop;
-use drivers_common::{EarlyDriver, EarlyDriverContext, ProbeResult};
+use drivers_common::{EarlyDriver, EarlyDriverContext, EarlyProbeResult, MmioAddress, ProbeError};
 use drivers_common_aarch64::FdtProbeContext;
 use drivers_common_aarch64::ProbeContextExt;
-use drivers_common_aarch64::register_early_driver;
 use io::byte_sink::{ByteSink, Pending};
 use io::mmio::{Mmio, Reg};
 use io::writer::{BlockingWriter, Writer};
@@ -32,21 +32,19 @@ const CR_RXE: u32 = 1 << 9;
 
 /// Индекс записи reg в DeviceTree.
 const REG_UART_INDEX: usize = 0;
-/// Индекс размера в записи reg.
-const REG_UART_SIZE_INDEX: usize = 1;
 
 /// Драйвер UART PL011.
 pub struct UartPl011 {
     /// MMIO-доступ к регистрам.
     mmio: Mmio,
     /// Базовый адрес регистров.
-    base: usize,
+    base: MmioAddress,
 }
 
 impl UartPl011 {
-    pub const fn new(base: usize) -> Self {
+    pub const fn new(base: MmioAddress) -> Self {
         Self {
-            mmio: Mmio::new(base),
+            mmio: Mmio::new(base.base()),
             base,
         }
     }
@@ -96,7 +94,7 @@ impl ByteSink for UartPl011 {
 
 impl EarlyDriver for UartPl011 {
     fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
-        context.map_mmio(self.base, 4096);
+        context.map_mmio(self.base);
 
         // Включение UART и передатчика
         self.mmio.write_reg(CR, CR_UARTEN | CR_TXE | CR_RXE);
@@ -109,12 +107,14 @@ impl EarlyDriver for UartPl011 {
     }
 }
 
-pub fn uart_pl011_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult<Box<dyn EarlyDriver>> {
+pub fn uart_pl011_probe(context: &mut FdtProbeContext<'_>) -> EarlyProbeResult {
     drivers_common_aarch64::require_compatible(context.node(), &["arm,pl011"])?;
 
-    let base = context.reg_offset::<REG_UART_SIZE_INDEX>(REG_UART_INDEX);
+    let address = context
+        .reg_mmio_address(REG_UART_INDEX)
+        .ok_or(ProbeError::MissingProperty("base address"))?;
 
-    Ok(Box::new(UartPl011::new(base)))
+    Ok(Box::new(UartPl011::new(address)))
 }
 
 register_early_driver!(UART_PL011_EARLY, probe = uart_pl011_probe);

@@ -13,7 +13,7 @@ mod system;
 extern crate drivers_common_aarch64;
 
 use crate::memory::layout::MemoryRegion;
-use crate::memory::memory_setup::{Early, Installed, MemorySetup};
+use crate::memory::memory_setup::{Early, Installed, MemoryManagerResult, MemorySetup};
 use crate::memory::setup::build_memory_layout;
 use ::memory::physical_address::PageAlignedAddress;
 use ::memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
@@ -23,9 +23,10 @@ use arch_common::scanner;
 use core::arch::naked_asm;
 use core::hint::spin_loop;
 use drivers_common::early::EarlyDriverRegistry;
-use drivers_common::{IrqRegistrationError, RuntimeDriverRegistry, RuntimeRequestApplier};
+use drivers_common::scanner::DriverScanner;
 use drivers_common_aarch64::adapt_tree;
 use fdt::devicetree::{DeviceTree, NodeKey};
+use kernel::kernel_context::KernelContext;
 use kernel::kmain::kmain;
 use klog::{debug, fatal, set_early_stdout};
 
@@ -112,72 +113,68 @@ pub extern "C" fn _start() -> () {
     bss_start = sym _bss_start,
     bss_end   = sym _bss_end,
     stack_top = sym _stack_top,
-    early_main = sym early_main,
+    early_main = sym early_main0,
     )
 }
 
+fn early_main0(dtb: usize) {
+    let _ = early_main(dtb);
+}
+
 /// Ранняя инициализация ядра
-fn early_main(dtb: usize) {
+fn early_main(dtb: usize) -> Result<(), ()> {
     // Установка векторов исключений
     let vectors = exception::ExceptionVectors::instance();
     vectors.install();
 
     // Парсим DTB
-    let device_tree = match DeviceTree::from_ptr(dtb) {
-        Ok(tree) => tree,
-        Err(_) => return,
-    };
+    let device_tree = DeviceTree::from_ptr(dtb).map_err(|_| {})?;
 
     // Извлекаем из DTB информацию о регионах памяти.
-    let memory_layout = match build_memory_layout(&device_tree) {
-        Ok(m) => m,
-        Err(_) => return,
-    };
+    let memory_layout = build_memory_layout(&device_tree).map_err(|_| {})?;
 
     // Установка раннего bump аллокатора
-    let early_setup = match MemorySetup::<Early>::create(memory_layout) {
-        Ok(setup) => setup.install(),
-        Err(_) => return,
-    };
+    let early_setup = MemorySetup::<Early>::create(memory_layout).map_err(|_| {})?;
+    let early_setup = early_setup.install();
 
+    // Инициализация ранних драйверов
+    let root = adapt_tree(&device_tree).root().ok_or(())?;
+    let early_drivers = drivers_aarch64::early_drivers();
     let mut early_registry = EarlyDriverRegistry::<NodeKey>::new();
-    if let Some(root) = adapt_tree(&device_tree).root_node() {
-        let early_infos = drivers_common_aarch64::early_driver_infos();
-        early_registry.scan_and_probe(root, early_infos);
-    }
+    early_registry.scan_and_probe(root, early_drivers);
 
-    // Сохраняем реестр в статическую память — драйверы живут до конца работы ядра
+    // Сохраняем реестр в статическую память
     let early_registry: &'static EarlyDriverRegistry<NodeKey> = Box::leak(Box::new(early_registry));
-
     bind_early_stdout(&device_tree, early_registry);
 
     let mmio_requests: Vec<_> = early_registry
         .mmio_region_requests()
         .iter()
-        .map(|mmio_request| MemoryRegion::mmio(mmio_request.base, mmio_request.size))
+        .map(|mmio_request| {
+            MemoryRegion::mmio(mmio_request.address.base(), mmio_request.address.size())
+        })
         .collect();
 
-    if setup_memory(mmio_requests, early_setup).is_err() {
-        return;
-    }
+    let result = setup_memory(mmio_requests, early_setup)?;
 
     // Релокация векторов исключений в higher half
     unsafe { vectors.relocated(VirtualAddress::new(HIGHER_HALF_BASE)) }.install();
 
-    // Инициализация runtime-драйверов после включения MMU/heap.
-    let mut runtime_registry = RuntimeDriverRegistry::<NodeKey>::new();
-    let mut mmio_mapper = |_address: usize, _size: usize| -> Result<(), &'static str> { Ok(()) };
-    let mut irq_registrar = |_irq, _handler| Err(IrqRegistrationError::Unsupported);
-    let mut runtime_applier = RuntimeRequestApplier::new(&mut mmio_mapper, &mut irq_registrar);
-    if let Some(root) = adapt_tree(&device_tree).root_node() {
-        let runtime_infos = drivers_common_aarch64::runtime_driver_infos();
-        runtime_registry.scan_and_probe(root, runtime_infos, &mut runtime_applier);
-    }
-    let _runtime_registry: &'static RuntimeDriverRegistry<NodeKey> =
-        Box::leak(Box::new(runtime_registry));
+    let mut driver_scanner = DriverScanner::new();
+
+    let root_node = adapt_tree(&device_tree)
+        .root()
+        .expect("Device Tree root node is missing!");
+
+    // Инициализация драйверов
+    let drivers = drivers_aarch64::runtime_drivers();
+    driver_scanner.scan_and_probe(root_node, drivers);
 
     // Основная платформозависимая настройка завершена. Переходим к общей точке входа
-    kmain();
+    let kernel = KernelContext::new(result.memory_mapper);
+    let kernel = Box::leak(Box::new(kernel));
+
+    kmain(driver_scanner, kernel);
 
     loop {
         spin_loop();
@@ -188,7 +185,7 @@ fn early_main(dtb: usize) {
 fn setup_memory(
     mmio: Vec<MemoryRegion<PageAlignedAddress>>,
     installed: MemorySetup<Installed>,
-) -> Result<(), ()> {
+) -> Result<MemoryManagerResult, ()> {
     // Переход из Installed в Prepared фазу с резервированием bump region
     let memory_setup = installed
         .prepare(mmio)
@@ -210,13 +207,12 @@ fn setup_memory(
 
     debug!("Running in higher half");
 
-    memory_setup
+    let result = memory_setup
         .install()
+        .inspect(|_| debug!("Global allocator switched to heap phase"))
         .inspect_err(|_| fatal!("Unable to set heap allocator"))?;
 
-    debug!("Global allocator switched to heap phase");
-
-    Ok(())
+    Ok(result)
 }
 
 /// Прыжок с identity адреса на higher half адрес.

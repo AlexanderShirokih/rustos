@@ -1,6 +1,6 @@
+use drivers_common::{DeviceNode, NodeProperty, ProbeContext};
+use drivers_common_aarch64::ProbeContextExt;
 use drivers_common_aarch64::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
-use drivers_common::{DeviceNode, NodeProperty};
-use std::vec::Vec;
 
 #[derive(Clone, Copy, Debug)]
 struct TestProp<'a> {
@@ -53,14 +53,14 @@ impl DeviceNode for TestNode<'_> {
         self.name
     }
 
-    fn prop<'a>(&'a self, name: &str) -> Option<Self::Property<'a>> {
+    fn prop(&self, name: &str) -> Option<Self::Property<'_>> {
         self.props
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(n, raw)| TestProp { name: n, raw })
     }
 
-    fn children<'a>(&'a self) -> Self::ChildIter<'a> {
+    fn children(&self) -> Self::ChildIter<'_> {
         self.children.iter().copied()
     }
 }
@@ -74,8 +74,8 @@ impl NodeAddressExt for TestNode<'_> {
         self.range
     }
 
-    fn reg_list(&self, _cells_size: CellsSize, limit: usize) -> Vec<AddressSpace> {
-        self.regs.iter().copied().take(limit).collect()
+    fn reg_iter(&self, _cells_size: CellsSize) -> impl Iterator<Item = AddressSpace> {
+        self.regs.iter().copied()
     }
 }
 
@@ -110,14 +110,68 @@ fn node_address_ext_works_for_mmio_translation() {
         regs: &[],
     };
 
-    let regs = uart.reg_list(soc.cells_size().unwrap(), 8);
+    let first_reg = uart.reg_iter(soc.cells_size().unwrap()).next().unwrap();
+
     let range = soc
         .range_to_parent(CellsSize {
             address_cells: 2,
             size_cells: 1,
         })
         .unwrap();
-    let translated = range.parent + regs[0].offset - range.child;
+
+    let translated = range.parent + first_reg.offset - range.child;
 
     assert_eq!(translated, 0x1000_2000);
+}
+
+#[test]
+fn probe_context_ext_translates_reg_address_space() {
+    let uart = TestNode {
+        id: 3,
+        name: "serial@2000",
+        props: &[],
+        children: &[],
+        cells: None,
+        range: None,
+        regs: &[AddressSpace {
+            offset: 0x2000,
+            size: 0x1000,
+        }],
+    };
+    let soc_children = [uart];
+    let soc = TestNode {
+        id: 2,
+        name: "soc",
+        props: &[],
+        children: &soc_children,
+        cells: Some(CellsSize {
+            address_cells: 1,
+            size_cells: 1,
+        }),
+        range: Some(BusRange {
+            child: 0,
+            parent: 0x1000_0000,
+            size: 0x0010_0000,
+        }),
+        regs: &[],
+    };
+    let root_children = [soc];
+    let root = TestNode {
+        id: 1,
+        name: "",
+        props: &[],
+        children: &root_children,
+        cells: Some(CellsSize {
+            address_cells: 2,
+            size_cells: 1,
+        }),
+        range: None,
+        regs: &[],
+    };
+
+    let context = ProbeContext::new(uart, vec![root, soc, uart]);
+    let reg = context.reg_address(0);
+
+    assert_eq!(reg.offset, 0x1000_2000);
+    assert_eq!(reg.size, 0x1000);
 }

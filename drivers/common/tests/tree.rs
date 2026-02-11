@@ -1,4 +1,3 @@
-use drivers_common::probe::NodeProbeExt;
 use drivers_common::tree::{DeviceNode, DeviceTreeSource, NodeProperty};
 
 #[derive(Clone, Copy, Debug)]
@@ -82,36 +81,6 @@ impl DeviceTreeSource for TestTree<'_> {
     fn nodes(&self) -> Self::NodeIter<'_> {
         core::iter::once(self.root)
     }
-}
-
-#[test]
-fn node_probe_ext_require_prop_returns_property() {
-    let child = TestNode {
-        id: 2,
-        name: "serial@1000",
-        props: &[("status", b"okay\0")],
-        children: &[],
-    };
-
-    let prop = child.require_prop("status").unwrap();
-    assert_eq!(prop.name(), "status");
-    assert_eq!(prop.as_cstr(), Some("okay"));
-}
-
-#[test]
-fn node_probe_ext_require_prop_returns_error_on_missing() {
-    let child = TestNode {
-        id: 2,
-        name: "serial@1000",
-        props: &[],
-        children: &[],
-    };
-
-    let err = child.require_prop("missing").unwrap_err();
-    assert!(matches!(
-        err,
-        drivers_common::ProbeError::MissingProperty("missing")
-    ));
 }
 
 #[test]

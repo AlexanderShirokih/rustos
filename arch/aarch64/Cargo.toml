@@ -13,6 +13,7 @@ aarch64-paging = { path = "../aarch64-paging" }
 arch-common = { path = "../common" }
 drivers-common-aarch64 = { path = "../../drivers/common-aarch64" }
 drivers-common = { path = "../../drivers/common" }
+drivers-aarch64 = { path = "../../drivers/aarch64" }
 kernel = { path = "../../kernel" }
 memory = { path = "../../memory" }
 collections = { path = "../../collections" }

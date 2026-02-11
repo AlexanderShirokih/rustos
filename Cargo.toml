@@ -7,6 +7,7 @@ members = [
     "collections",
     "drivers/common-aarch64",
     "drivers/common",
+    "drivers/aarch64",
     "interrupts",
     "kernel",
     "fdt",
@@ -15,8 +16,6 @@ members = [
     "memory",
     "util",
     "xtask",
-    "drivers/aarch64/generic/pl011_uart",
-    "drivers/aarch64/qcom/uart_dm",
 ]
 
 [profile.dev]

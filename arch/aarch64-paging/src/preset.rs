@@ -1,6 +1,6 @@
 //! Готовые пресеты атрибутов памяти.
 
-use crate::mem_flags::{Access, MemFlags, Shareability};
+use crate::mem_flags::{Access, Aarch64MemFlags, Shareability};
 
 /// Исполняемый код ядра.
 pub struct KernelText;
@@ -19,8 +19,8 @@ pub struct Heap;
 
 impl KernelText {
     /// Возвращает флаги для исполняемого кода ядра.
-    pub const fn flags() -> MemFlags {
-        MemFlags::new()
+    pub const fn flags() -> Aarch64MemFlags {
+        Aarch64MemFlags::new()
             .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRW)
@@ -32,8 +32,8 @@ impl KernelText {
 
 impl KernelData {
     /// Возвращает флаги для данных ядра.
-    pub const fn flags() -> MemFlags {
-        MemFlags::new()
+    pub const fn flags() -> Aarch64MemFlags {
+        Aarch64MemFlags::new()
             .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRW)
@@ -45,8 +45,8 @@ impl KernelData {
 
 impl KernelRoData {
     /// Возвращает флаги для константных данных ядра.
-    pub const fn flags() -> MemFlags {
-        MemFlags::new()
+    pub const fn flags() -> Aarch64MemFlags {
+        Aarch64MemFlags::new()
             .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRO)
@@ -58,8 +58,8 @@ impl KernelRoData {
 
 impl Heap {
     /// Возвращает флаги для кучи ядра.
-    pub const fn flags() -> MemFlags {
-        MemFlags::new()
+    pub const fn flags() -> Aarch64MemFlags {
+        Aarch64MemFlags::new()
             .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRW)
@@ -71,8 +71,8 @@ impl Heap {
 
 impl Mmio {
     /// Возвращает флаги для MMIO-регионов.
-    pub const fn flags() -> MemFlags {
-        MemFlags::new()
+    pub const fn flags() -> Aarch64MemFlags {
+        Aarch64MemFlags::new()
             .af(true)
             .sh(Shareability::None)
             .ap(Access::KernelRW)

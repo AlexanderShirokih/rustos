@@ -1,34 +1,23 @@
 extern crate alloc;
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use klog::info;
+use crate::kernel_context::KernelContext;
+use drivers_common::scanner::DriverScanner;
+use drivers_common::{DriverContext, RuntimeRequestApplier};
+use klog::debug;
 
-/// Главная функция ядра. Вызывается после инициализации памяти и драйверов.
-pub fn kmain() {
-    test_allocator();
-}
+/// Главная функция ядра
+pub fn kmain(driver_scanner: DriverScanner, kernel: &mut KernelContext) {
+    debug!("Starting kmain");
 
-fn test_allocator() {
-    info!("Тест аллокатора");
+    let ops = RuntimeRequestApplier {
+        memory_mapper: kernel.memory_mapper(),
+    };
 
-    // Маленький объект
-    let small = Box::new(42u64);
-    info!("u64: ptr = {:p}, value = {}", small.as_ref(), *small);
-    drop(small);
+    for driver_factory in driver_scanner.into_iter() {
+        let mut context = DriverContext::new(&ops);
 
-    // Большой объект (2 страницы)
-    let huge = Box::new([0xAAu8; 8192]);
-    info!("[u8; 8192]: ptr = {:p}", huge.as_ref());
-    drop(huge);
-
-    // Vec больше страницы
-    let mut vec: Vec<u64> = Vec::with_capacity(600);
-    for i in 0..600 {
-        vec.push(i);
+        driver_factory
+            .create(&mut context)
+            .expect("Failed to initialize kernel driver");
     }
-    info!("Vec<u64>: len = {}, cap = {}, ptr = {:p}", vec.len(), vec.capacity(), vec.as_ptr());
-    drop(vec);
-
-    info!("Тест завершен");
 }

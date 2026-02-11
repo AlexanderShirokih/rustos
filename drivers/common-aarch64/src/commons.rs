@@ -1,18 +1,25 @@
 //! Общие утилиты для драйверов.
 
 use crate::fdt_adapter::FdtNode;
-use crate::tree_ext::NodeAddressExt;
-use drivers_common::{DeviceNode, NodeProperty, ProbeContext};
+use crate::tree_ext::{AddressSpace, NodeAddressExt};
+use drivers_common::{DeviceNode, MmioAddress, NodeProperty, ProbeContext, ProbeError};
 
 pub type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
 
 /// Расширение ProbeContext для работы с адресами регистров.
 pub trait ProbeContextExt {
-    fn reg_offset<const N: usize>(&self, reg_index: usize) -> usize;
+    fn reg_address(&self, reg_index: usize) -> AddressSpace;
+
+    fn reg_mmio_address(&self, reg_index: usize) -> Option<MmioAddress> {
+        self.reg_address(reg_index).as_mmio()
+    }
 }
 
-impl ProbeContextExt for FdtProbeContext<'_> {
-    fn reg_offset<const N: usize>(&self, reg_index: usize) -> usize {
+impl<N> ProbeContextExt for ProbeContext<N>
+where
+    N: NodeAddressExt,
+{
+    fn reg_address(&self, reg_index: usize) -> AddressSpace {
         let node = self.node();
         let bus = self.parent(node);
         let root = bus.and_then(|parent| self.parent(parent));
@@ -26,13 +33,16 @@ impl ProbeContextExt for FdtProbeContext<'_> {
             .and_then(|parent| parent.range_to_parent(root_cell_size))
             .unwrap_or_default();
 
-        let address_space = node.reg_list(parent_cell_size, N).get(reg_index).copied();
+        let address_space = node
+            .reg_iter(parent_cell_size)
+            .skip(reg_index)
+            .next()
+            .unwrap_or(AddressSpace { offset: 0, size: 0 });
 
-        let offset = address_space
-            .map(|address_space| address_space.offset)
-            .unwrap_or_default();
-
-        bus_range.parent + offset - bus_range.child
+        AddressSpace {
+            offset: bus_range.parent + address_space.offset - bus_range.child,
+            size: address_space.size,
+        }
     }
 }
 
@@ -50,10 +60,10 @@ pub fn is_compatible(node: &FdtNode, candidates: &[&str]) -> bool {
 }
 
 /// Возвращает ошибку, если узел не содержит ни одной из указанных строк совместимости.
-pub fn require_compatible(node: &FdtNode, candidates: &[&str]) -> drivers_common::ProbeResult<()> {
+pub fn require_compatible(node: &FdtNode, candidates: &[&str]) -> Result<(), ProbeError> {
     if is_compatible(node, candidates) {
         Ok(())
     } else {
-        Err(drivers_common::ProbeError::Unsupported("not compatible"))
+        Err(ProbeError::Unsupported("not compatible"))
     }
 }
