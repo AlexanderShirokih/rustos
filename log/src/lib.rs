@@ -142,13 +142,22 @@ pub fn logf_tagged(lvl: Level, tag: &str, arguments: Arguments) {
     printf(format_args!("{}[{}] {}\r\n", level, tag, arguments));
 }
 
+/// Возвращает имя файла без пути для использования в качестве тега.
+pub fn file_tag(path: &str) -> &str {
+    path.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(path)
+}
+
 #[macro_export]
 macro_rules! fatal {
     ($tag:expr; $($arg:tt)*) => {
         $crate::logf_tagged($crate::Level::Fatal, $tag, format_args!($($arg)*))
     };
     ($($arg:tt)*) => {
-        $crate::logf($crate::Level::Fatal, format_args!($($arg)*))
+        $crate::logf_tagged(
+            $crate::Level::Fatal,
+            $crate::file_tag(file!()),
+            format_args!($($arg)*),
+        )
     };
 }
 
@@ -158,7 +167,11 @@ macro_rules! error {
         $crate::logf_tagged($crate::Level::Error, $tag, format_args!($($arg)*))
     };
     ($($arg:tt)*) => {
-        $crate::logf($crate::Level::Error, format_args!($($arg)*))
+        $crate::logf_tagged(
+            $crate::Level::Error,
+            $crate::file_tag(file!()),
+            format_args!($($arg)*),
+        )
     };
 }
 
@@ -168,7 +181,11 @@ macro_rules! warn {
         $crate::logf_tagged($crate::Level::Warn, $tag, format_args!($($arg)*))
     };
     ($($arg:tt)*) => {
-        $crate::logf($crate::Level::Warn, format_args!($($arg)*))
+        $crate::logf_tagged(
+            $crate::Level::Warn,
+            $crate::file_tag(file!()),
+            format_args!($($arg)*),
+        )
     };
 }
 
@@ -178,7 +195,11 @@ macro_rules! info {
         $crate::logf_tagged($crate::Level::Info, $tag, format_args!($($arg)*))
     };
     ($($arg:tt)*) => {
-        $crate::logf($crate::Level::Info, format_args!($($arg)*))
+        $crate::logf_tagged(
+            $crate::Level::Info,
+            $crate::file_tag(file!()),
+            format_args!($($arg)*),
+        )
     };
 }
 
@@ -188,6 +209,10 @@ macro_rules! debug {
         $crate::logf_tagged($crate::Level::Debug, $tag, format_args!($($arg)*))
     };
     ($($arg:tt)*) => {
-        $crate::logf($crate::Level::Debug, format_args!($($arg)*))
+        $crate::logf_tagged(
+            $crate::Level::Debug,
+            $crate::file_tag(file!()),
+            format_args!($($arg)*),
+        )
     };
 }

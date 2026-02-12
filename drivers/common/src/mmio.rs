@@ -1,7 +1,5 @@
 use alloc::boxed::Box;
-use core::alloc::Layout;
 use core::fmt::{Display, Formatter};
-use core::ptr::NonNull;
 use io::mmio::Reg;
 use memory::virtual_address::PageAlignedVirtualAddress;
 
@@ -21,13 +19,6 @@ impl MmioAddress {
         }
     }
 
-    pub fn from_non_null(ptr: NonNull<u8>, size: usize) -> Self {
-        MmioAddress {
-            address: ptr.as_ptr() as usize,
-            size,
-        }
-    }
-
     pub const fn base(&self) -> usize {
         self.address
     }
@@ -43,13 +34,11 @@ impl Display for MmioAddress {
     }
 }
 
-pub type CleanupCallback = dyn FnOnce(NonNull<u8>, Layout, PageAlignedVirtualAddress, usize);
+pub type CleanupCallback = dyn FnOnce(PageAlignedVirtualAddress, usize);
 
 pub struct MmioBound {
-    ptr: NonNull<u8>,
-    layout: Layout,
+    mmio_address: MmioAddress,
     virtual_address: PageAlignedVirtualAddress,
-    size: usize,
     cleanup: Option<Box<CleanupCallback>>,
 }
 
@@ -57,28 +46,24 @@ unsafe impl Sync for MmioBound {}
 
 impl MmioBound {
     pub fn new(
-        ptr: NonNull<u8>,
-        layout: Layout,
+        mmio_address: MmioAddress,
         virtual_address: PageAlignedVirtualAddress,
-        size: usize,
         cleanup: Box<CleanupCallback>,
     ) -> Self {
         Self {
-            ptr,
-            layout,
+            mmio_address,
             virtual_address,
-            size,
             cleanup: Some(cleanup),
         }
     }
 
     pub fn base(&self) -> MmioAddress {
-        MmioAddress::from_non_null(self.ptr, self.size)
+        self.mmio_address
     }
 
     pub fn write<T>(&self, offset: usize, val: T) {
         unsafe {
-            let ptr = self.ptr.add(offset).cast();
+            let ptr: *mut T = self.virtual_address.as_ptr::<T>().byte_add(offset);
             ptr.write_volatile(val)
         }
     }
@@ -89,7 +74,7 @@ impl MmioBound {
 
     pub fn read<T>(&self, offset: usize) -> T {
         unsafe {
-            let ptr = self.ptr.add(offset).cast();
+            let ptr = self.virtual_address.as_ptr::<T>().byte_add(offset);
             ptr.read_volatile()
         }
     }
@@ -102,7 +87,7 @@ impl MmioBound {
 impl Drop for MmioBound {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
-            cleanup(self.ptr, self.layout, self.virtual_address, self.size)
+            cleanup(self.virtual_address, self.mmio_address.size)
         }
     }
 }

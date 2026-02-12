@@ -96,7 +96,12 @@ impl MemoryRegion<PageAlignedAddress> {
     }
 
     /// Создаёт регион из адресов.
-    pub const fn new(tag: RegionTag, start_addr: usize, end_addr: usize, flags: Aarch64MemFlags) -> Self {
+    pub const fn new(
+        tag: RegionTag,
+        start_addr: usize,
+        end_addr: usize,
+        flags: Aarch64MemFlags,
+    ) -> Self {
         Self {
             tag,
             flags,

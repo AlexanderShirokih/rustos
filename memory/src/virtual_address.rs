@@ -80,6 +80,13 @@ impl<const SHIFT: u8> AlignedVirtualAddress<SHIFT> {
         Self(VirtualAddress(address.as_usize()))
     }
 
+    pub const fn from_aligned_offset(
+        address: AlignedPhysicalAddress<SHIFT>,
+        offset: AlignedVirtualAddress<SHIFT>,
+    ) -> Self {
+        Self(VirtualAddress(address.as_usize()).offset(offset.as_usize()))
+    }
+
     pub const fn next_aligned(&self) -> Self {
         Self(self.0.offset(Self::ALIGNMENT))
     }

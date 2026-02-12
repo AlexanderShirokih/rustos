@@ -28,7 +28,7 @@ use drivers_common_aarch64::adapt_tree;
 use fdt::devicetree::{DeviceTree, NodeKey};
 use kernel::kernel_context::KernelContext;
 use kernel::kmain::kmain;
-use klog::{debug, fatal, set_early_stdout};
+use klog::{debug, fatal, info, set_early_stdout};
 
 /// База higher half (верхней половины адресного пространства).
 pub const HIGHER_HALF_BASE: usize = 0xFFFF_FF80_0000_0000;
@@ -117,6 +117,8 @@ pub extern "C" fn _start() -> () {
     )
 }
 
+const TAG: &str = "start";
+
 fn early_main0(dtb: usize) {
     let _ = early_main(dtb);
 }
@@ -138,6 +140,7 @@ fn early_main(dtb: usize) -> Result<(), ()> {
     let early_setup = early_setup.install();
 
     // Инициализация ранних драйверов
+    let device_tree: &'static DeviceTree = unsafe { core::mem::transmute(&device_tree) };
     let root = adapt_tree(&device_tree).root().ok_or(())?;
     let early_drivers = drivers_aarch64::early_drivers();
     let mut early_registry = EarlyDriverRegistry::<NodeKey>::new();
@@ -171,7 +174,7 @@ fn early_main(dtb: usize) -> Result<(), ()> {
     driver_scanner.scan_and_probe(root_node, drivers);
 
     // Основная платформозависимая настройка завершена. Переходим к общей точке входа
-    let kernel = KernelContext::new(result.memory_mapper);
+    let kernel = KernelContext::new(result.memory_mapper, result.base_offset);
     let kernel = Box::leak(Box::new(kernel));
 
     kmain(driver_scanner, kernel);
@@ -200,17 +203,17 @@ fn setup_memory(
         .inspect_err(|err| fatal!("Unable to enable MMU: {:?}", err))
         .map_err(|_| ())?;
 
-    debug!("MMU enabled!");
+    info!(TAG;"MMU enabled!");
 
     // Прыжок в higher half — после этого PC указывает на HIGHER_HALF_BASE + PA
     unsafe { jump_to_higher_half() };
 
-    debug!("Running in higher half");
+    debug!(TAG;"Running in higher half");
 
     let result = memory_setup
         .install()
-        .inspect(|_| debug!("Global allocator switched to heap phase"))
-        .inspect_err(|_| fatal!("Unable to set heap allocator"))?;
+        .inspect(|_| debug!(TAG;"Global allocator switched to heap phase"))
+        .inspect_err(|_| fatal!(TAG; "Unable to set heap allocator"))?;
 
     Ok(result)
 }

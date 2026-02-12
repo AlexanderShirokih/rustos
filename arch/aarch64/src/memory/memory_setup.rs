@@ -47,6 +47,7 @@ pub struct Installed {
 
 pub struct MemoryManagerResult {
     pub memory_mapper: Box<dyn MemoryMapper>,
+    pub base_offset: PageAlignedVirtualAddress,
 }
 
 /// Корневые таблицы страниц.
@@ -130,6 +131,10 @@ impl MemorySetup<Early> {
     }
 }
 
+const TAG_MEMORY_LAYOUT: &str = "Memory layout";
+const TAG_MEMORY_PREPARE: &str = "Memory setup: prepare";
+const TAG_MEMORY_ENABLE: &str = "Memory setup: enable";
+
 impl MemorySetup<Installed> {
     pub fn prepare(
         self,
@@ -142,7 +147,7 @@ impl MemorySetup<Installed> {
 
         for region in layout.iter() {
             info!(
-                "Memory layout";
+                TAG_MEMORY_LAYOUT;
                 "- {:?}, from {:#x} to {:#x}",
                 region.tag, region.start, region.end
             );
@@ -150,7 +155,7 @@ impl MemorySetup<Installed> {
 
         free_regions.iter().for_each(|interval| {
             debug!(
-                "MemorySetup::prepare";
+                TAG_MEMORY_PREPARE;
                 "Free heap region: {:#x} - {:#x} ({} bytes)",
                 interval.start, interval.end,
                 interval.end.as_usize() - interval.start.as_usize()
@@ -192,7 +197,7 @@ impl MemorySetup<Installed> {
             .ok_or(MemorySetupError::OutOfMemory)?;
 
         debug!(
-            "MemorySetup::prepare";
+            TAG_MEMORY_PREPARE;
             "Allocated page table roots: lower={lower_root_pa:#x}, higher={higher_root_pa:#x}",
         );
 
@@ -261,7 +266,7 @@ impl MemorySetup<Prepared> {
         Self::linear_map_impl(frame_allocator, &roots, &all_regions, higher_half_base)?;
 
         debug!(
-            "MemorySetup::enable";
+            TAG_MEMORY_ENABLE;
             "Enabling MMU with TTBR0={:#x}, TTBR1={:#x}",
             roots.lower_pa,
             roots.higher_pa
@@ -378,6 +383,7 @@ impl MemorySetup<Prepared> {
 }
 
 impl MemorySetup<Enabled> {
+    //noinspection RsUnstableItemUsage
     pub fn install(self) -> Result<MemoryManagerResult, ()> {
         let Enabled {
             roots,
@@ -412,6 +418,7 @@ impl MemorySetup<Enabled> {
 
         Ok(MemoryManagerResult {
             memory_mapper: Box::new(memory_mapper),
+            base_offset: higher_half_base,
         })
     }
 }

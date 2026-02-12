@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use drivers_common::driver::DriverFactory;
 use drivers_common::{
-    DeviceMemoryPermission, Driver, DriverContext, MmioAddress, MmioBound, Owners, ProbeResult,
+    DeviceMemoryPermission, Driver, DriverInitContext, MmioAddress, MmioBound, Owners, ProbeResult,
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatible};
 use interrupts::{
@@ -15,9 +15,6 @@ use interrupts::{
 };
 use io::mmio::Reg;
 use klog::debug;
-// ============================================================================
-// GICD (Distributor) регистры
-// ============================================================================
 
 /// GICD Control Register — включение distributor.
 const GICD_CTLR: Reg<u32> = Reg::new(0x000);
@@ -30,10 +27,6 @@ const GICD_IPRIORITYR: Reg<u32> = Reg::new(0x400);
 /// GICD Interrupt Processor Targets Registers (4 IRQ на регистр, по 8 бит на маску CPU).
 const GICD_ITARGETSR: Reg<u32> = Reg::new(0x800);
 
-// ============================================================================
-// GICC (CPU Interface) регистры
-// ============================================================================
-
 /// GICC Control Register — включение CPU interface.
 const GICC_CTLR: Reg<u32> = Reg::new(0x000);
 /// GICC Priority Mask Register — фильтр приоритетов.
@@ -43,12 +36,8 @@ const GICC_IAR: Reg<u32> = Reg::new(0x00C);
 /// GICC End Of Interrupt Register — подтверждение обработки.
 const GICC_EOIR: Reg<u32> = Reg::new(0x010);
 
-// ============================================================================
-// Константы
-// ============================================================================
-
 const SPURIOUS_IRQ_MIN: u32 = 1020;
-
+const TAG: &str = "GICv2";
 // ============================================================================
 // Драйвер GICv2
 // ============================================================================
@@ -86,9 +75,9 @@ impl Driver for Gicv2 {
 
 impl InterruptController for Gicv2 {
     fn init(&mut self) -> Result<(), InterruptControllerInitializationError> {
-        debug!("Initializing GICv2");
-        debug!("  GICD @ {}", self.gicd.base());
-        debug!("  GICC @ {}", self.gicc.base());
+        debug!(TAG;"Initializing GICv2");
+        debug!(TAG;"  GICD @ {}", self.gicd.base());
+        debug!(TAG;"  GICC @ {}", self.gicc.base());
 
         // 1. Включить Distributor
         self.gicd.write_reg(GICD_CTLR, 1);
@@ -99,7 +88,7 @@ impl InterruptController for Gicv2 {
         // 3. Установить маску приоритета (0xFF = разрешить все приоритеты)
         self.gicc.write_reg(GICC_PMR, 0xFF);
 
-        debug!("GICv2 initialized successfully");
+        debug!(TAG;"GICv2 initialized successfully");
         Ok(())
     }
 
@@ -184,7 +173,7 @@ struct Gicv2Factory {
 }
 
 impl DriverFactory for Gicv2Factory {
-    fn create(&self, context: &mut DriverContext) -> Result<Box<dyn Driver>, String> {
+    fn create(&self, context: &mut DriverInitContext) -> Result<Box<dyn Driver>, String> {
         let permissions =
             Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable());
 
@@ -218,7 +207,7 @@ pub fn gicv2_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
         .reg_mmio_address(1)
         .expect("failed to get GICC_BASE");
 
-    debug!("Probed GICv2: GICD={gicd}, GICC={gicc}");
+    debug!(TAG; "Probed GICv2: GICD={gicd}, GICC={gicc}");
 
     Ok(Box::new(Gicv2Factory { gicd, gicc }))
 }

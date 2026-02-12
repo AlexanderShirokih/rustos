@@ -19,8 +19,8 @@ pub use interrupts::{IrqHandler, IrqNumber, IrqRegistrationError};
 pub use memory::mem_flags::*;
 pub use mmio::*;
 pub use registry::*;
+pub use driver::*;
 
-pub use driver::{Driver, DriverContext, DriverDescriptor, ProbeContext};
 pub use early::{
     EarlyDriver, EarlyDriverContext, EarlyDriverInfo, EarlyInitOps, EarlyProbeFn, EarlyProbeResult,
 };

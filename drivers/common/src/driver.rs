@@ -28,13 +28,14 @@ pub struct DriverDescriptor<P> {
 }
 
 /// Контекст инициализации драйвера.
-pub struct DriverContext<'a> {
+pub struct DriverInitContext<'a> {
     pub(crate) ops: &'a dyn InitOps,
 }
 
 pub trait DriverFactory {
-    fn create(&self, context: &mut DriverContext) -> Result<Box<dyn Driver>, String>;
+    fn create(&self, context: &mut DriverInitContext) -> Result<Box<dyn Driver>, String>;
 }
+
 
 /// Трейт драйвера устройства
 pub trait Driver {
@@ -86,7 +87,7 @@ impl<N: DeviceNode> ProbeContext<N> {
     }
 }
 
-impl<'a> DriverContext<'a> {
+impl<'a> DriverInitContext<'a> {
     pub fn new(ops: &'a dyn InitOps) -> Self {
         Self { ops }
     }

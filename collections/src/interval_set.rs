@@ -340,6 +340,14 @@ where
     Some(())
 }
 
+impl<A> FromIterator<Interval<A>> for IntervalSet<A> {
+    fn from_iter<T: IntoIterator<Item = Interval<A>>>(iter: T) -> Self {
+        Self {
+            ranges: AllocVec::from_iter(iter),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
