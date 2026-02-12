@@ -9,7 +9,7 @@ use collections::LockCell;
 use memory::MemFlags;
 use memory::aligned::Aligned;
 use memory::frame_allocator::FrameAllocator;
-use memory::memory_mapper::{MemoryMapper, MemoryMappingError};
+use memory::memory_mapper::{MemoryMapper, MemoryMappingError, MemoryUnmappingError};
 use memory::physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress};
 
@@ -251,8 +251,12 @@ where
         )
     }
 
-    fn unmap(&self, _address: PageAlignedVirtualAddress, _size: usize) -> Result<(), ()> {
+    fn unmap(
+        &self,
+        _address: PageAlignedVirtualAddress,
+        _size: usize,
+    ) -> Result<(), MemoryUnmappingError> {
         // TODO: решить вопрос с unmapping
-        Ok(())
+        Err(MemoryUnmappingError::Unsupported)
     }
 }

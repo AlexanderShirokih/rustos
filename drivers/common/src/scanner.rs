@@ -24,10 +24,6 @@ impl DriverScanner {
         }
     }
 
-    pub fn into_iter(self) -> impl Iterator<Item = Box<dyn DriverFactory>> {
-        self.handles.into_values()
-    }
-
     /// Обходит дерево, подбирает и инициализирует runtime-драйверы.
     pub fn scan_and_probe<N, P>(&mut self, root: N, drivers: &[DriverInfo<P>])
     where
@@ -80,5 +76,20 @@ impl DriverScanner {
         }
 
         Err(ProbeError::Unsupported("no driver"))
+    }
+}
+
+impl Default for DriverScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IntoIterator for DriverScanner {
+    type Item = Box<dyn DriverFactory>;
+    type IntoIter = alloc::collections::btree_map::IntoValues<usize, Box<dyn DriverFactory>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.handles.into_values()
     }
 }

@@ -46,7 +46,7 @@ pub struct RuntimeRequestApplier {
     pub memory_mapper: &'static dyn MemoryMapper,
 }
 
-impl<'a> InitOps for RuntimeRequestApplier {
+impl InitOps for RuntimeRequestApplier {
     fn register_mmio(
         &self,
         address: MmioAddress,
@@ -117,5 +117,11 @@ impl RuntimeDriverRegistry {
         Self {
             _drivers: Vec::new(),
         }
+    }
+}
+
+impl Default for RuntimeDriverRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }

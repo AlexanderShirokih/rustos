@@ -63,9 +63,9 @@ impl Mmio {
     }
 }
 
-impl Into<usize> for Mmio {
-    fn into(self) -> usize {
-        self.base as usize
+impl From<Mmio> for usize {
+    fn from(val: Mmio) -> Self {
+        val.base as usize
     }
 }
 

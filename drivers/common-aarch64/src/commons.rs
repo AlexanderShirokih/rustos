@@ -35,8 +35,7 @@ where
 
         let address_space = node
             .reg_iter(parent_cell_size)
-            .skip(reg_index)
-            .next()
+            .nth(reg_index)
             .unwrap_or(AddressSpace { offset: 0, size: 0 });
 
         AddressSpace {

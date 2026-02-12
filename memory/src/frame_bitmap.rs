@@ -3,7 +3,6 @@ use crate::memory_range::MemoryRange;
 use crate::physical_address::PageAlignedAddress;
 use alloc::boxed::Box;
 use alloc::vec;
-use core::mem::size_of;
 
 /// Позиция бита в битовой карте
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +42,7 @@ pub struct FrameBitmap {
 
 impl FrameBitmap {
     // Количество фреймов (битов), описываемых одной записью
-    const BITS_PER_ENTRY: usize = size_of::<u64>() * 8;
+    const BITS_PER_ENTRY: usize = u64::BITS as usize;
 
     pub fn new(target_region: MemoryRange<PageAlignedAddress>) -> Self {
         // Считаем размер вектора - сколько понадобится для разметки региона памяти

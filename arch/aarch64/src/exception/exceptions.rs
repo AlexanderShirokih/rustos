@@ -11,7 +11,7 @@ use super::gpreg::GpReg;
 const EXCEPTION_BUF_SIZE: usize = 2048;
 
 // Размер фрейма должен быть кратен 16 (требование AArch64 ABI для выравнивания стека).
-const _: () = assert!(size_of::<ExceptionFrame>() % 16 == 0);
+const _: () = assert!(size_of::<ExceptionFrame>().is_multiple_of(16));
 
 /// Контекст процессора, сохраняемый при входе в обработчик исключения.
 #[repr(C)]
@@ -123,7 +123,7 @@ impl ExceptionVectors {
         unsafe extern "C" {
             static exception_vectors: ExceptionVectors;
         }
-        unsafe { &*(&raw const exception_vectors) }
+        unsafe { &exception_vectors }
     }
 
     /// Релоцирует ссылку на таблицу на `offset`.

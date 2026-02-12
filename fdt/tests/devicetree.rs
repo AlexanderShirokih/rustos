@@ -197,7 +197,7 @@ fn push_prop_bytes(buf: &mut Vec<u8>, name_off: u32, val: &[u8]) {
 }
 
 fn align4(buf: &mut Vec<u8>) {
-    while buf.len() % 4 != 0 {
+    while !buf.len().is_multiple_of(4) {
         buf.push(0);
     }
 }

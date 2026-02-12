@@ -3,8 +3,8 @@ use core::fmt::{self, Write};
 /// Строка фиксированной ёмкости на стеке.
 ///
 /// При переполнении тихо обрезает вывод.
-/// Реализует [`core::fmt::Write`]
-/// 
+/// Реализует [`Write`]
+///
 /// # Пример
 ///
 /// ```
@@ -57,6 +57,12 @@ impl<const N: usize> StaticString<N> {
 
     pub fn clear(&mut self) {
         self.len = 0;
+    }
+}
+
+impl<const N: usize> Default for StaticString<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

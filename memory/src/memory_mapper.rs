@@ -24,6 +24,21 @@ impl Display for MemoryMappingError {
     }
 }
 
+/// Ошибки при размаппинге памяти.
+#[derive(Debug, Clone)]
+pub enum MemoryUnmappingError {
+    /// Операция размаппинга не поддерживается.
+    Unsupported,
+}
+
+impl Display for MemoryUnmappingError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            MemoryUnmappingError::Unsupported => f.write_str("Unmapping is not supported"),
+        }
+    }
+}
+
 /// Трейт маппера памяти для операций виртуальной памяти.
 pub trait MemoryMapper {
     /// Отображает физические фреймы в виртуальную память.
@@ -42,5 +57,9 @@ pub trait MemoryMapper {
         mem_flags: MemFlags,
     ) -> Result<(), MemoryMappingError>;
 
-    fn unmap(&self, address: PageAlignedVirtualAddress, size: usize) -> Result<(), ()>;
+    fn unmap(
+        &self,
+        address: PageAlignedVirtualAddress,
+        size: usize,
+    ) -> Result<(), MemoryUnmappingError>;
 }
