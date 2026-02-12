@@ -4,10 +4,10 @@
 //! first-fit и автоматическим расширением.
 //!
 //! Работает с pre-mapped RAM: физическая память замаплена линейно
-//! (VA = higher_half_base + PA), достаточно выделить фреймы
-//! и вычислить их виртуальные адреса.
+//! (VA = higher_half_base + PA).
 
 use crate::frame_allocator::FrameAllocator;
+use crate::align::align_up;
 use crate::virtual_address::PageAlignedVirtualAddress;
 use core::alloc::Layout;
 use core::mem::size_of;
@@ -187,7 +187,7 @@ impl HeapAllocator {
         None
     }
 
-    /// Добавить блок в список свободных
+    /// Добавляет блок в список свободных
     fn add_to_free_list(&mut self, block_ptr: NonNull<FreeBlock>) {
         unsafe {
             let mut block = block_ptr.read();
@@ -197,7 +197,7 @@ impl HeapAllocator {
         }
     }
 
-    /// Выделить память
+    /// Выделяет память
     ///
     /// Схема выделенного блока:
     /// ```text
@@ -285,8 +285,4 @@ impl HeapAllocator {
 
         // TODO: Реализовать слияние смежных свободных блоков
     }
-}
-
-const fn align_up(addr: usize, align: usize) -> usize {
-    (addr + align - 1) & !(align - 1)
 }

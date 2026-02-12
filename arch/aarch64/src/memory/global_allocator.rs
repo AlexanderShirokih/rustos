@@ -8,7 +8,7 @@ use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
 use memory::bump_allocator::BumpAllocator;
-use memory::heap_allocator::HeapAllocator;
+use memory::heap_vm_allocator::HeapAllocator;
 
 #[global_allocator]
 pub(crate) static GLOBAL_ALLOCATOR: GlobalKernelAllocator = GlobalKernelAllocator::new();

@@ -36,14 +36,14 @@ pub trait FrameAllocator {
         to_exclusive: Frame,
     ) -> Result<Frame, ReserveFrameError>;
 
-    /// Выделить свободный фрейм
+    /// Выделяет свободный фрейм
     fn allocate_frame(&self) -> Option<Frame>;
 
     /// Выделяет до `max_count` смежных страниц.
     /// Возвращает (первый фрейм, количество выделенных).
     fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)>;
 
-    /// Освободить фрейм
+    /// Освобождает фрейм
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError>;
 
     fn is_allocated(&self, frame: Frame) -> bool;

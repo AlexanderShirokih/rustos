@@ -15,7 +15,7 @@ use aarch64_paging::preset::Heap;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use collections::Vec as StaticVec;
-use collections::interval_set::{Interval, IntervalSet};
+use collections::interval_set::{Interval, StaticIntervalSet};
 use collections::{MutexCell, NoLockCell};
 use klog::{debug, info, warn};
 use memory::FrameBitmap;
@@ -35,13 +35,13 @@ type NoLockAarch64MemoryMapper<'a, FA> = Aarch64MemoryMapper<'a, FA, NoLockPageM
 /// Ранняя фаза: bump-аллокатор создан, но не установлен.
 pub struct Early {
     bump_allocator: BumpAllocator,
-    free_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
+    free_regions: StaticIntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
     layout: MemoryLayout,
 }
 
 /// Фаза после установки bump-аллокатора.
 pub struct Installed {
-    free_regions: IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
+    free_regions: StaticIntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
     layout: MemoryLayout,
 }
 
@@ -117,7 +117,7 @@ impl MemorySetup<Early> {
     }
 
     fn get_largest_region(
-        free_regions: &IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
+        free_regions: &StaticIntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
     ) -> Result<&Interval<PageAlignedAddress>, ()> {
         free_regions
             .iter()

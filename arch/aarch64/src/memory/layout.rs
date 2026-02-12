@@ -3,7 +3,7 @@
 use aarch64_paging::mem_flags::Aarch64MemFlags;
 use aarch64_paging::preset::Mmio;
 use collections::Vec;
-use collections::interval_set::IntervalSet;
+use collections::interval_set::StaticIntervalSet;
 use klog::warn;
 use memory::aligned::{Address, Aligned};
 use memory::memory_range::MemoryRange;
@@ -50,8 +50,8 @@ impl MemoryLayout {
     /// Вычисляет свободные области heap (heap минус зарезервированные регионы)
     pub fn free_heap_regions(
         &self,
-    ) -> Result<IntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>, ()> {
-        let mut free_regions = IntervalSet::<PageAlignedAddress, MAX_MEMORY_REGIONS>::new();
+    ) -> Result<StaticIntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>, ()> {
+        let mut free_regions = StaticIntervalSet::<PageAlignedAddress, MAX_MEMORY_REGIONS>::new();
 
         // Добавление свободных областей (heap-регионы)
         for heap in self.iter().filter(|region| region.is_heap()) {

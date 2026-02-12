@@ -5,13 +5,9 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use memory::frame::Frame;
 use memory::frame_allocator::{FrameAllocator, FrameError, ReserveFrameError};
-use memory::heap_allocator::{AllocationError, HeapAllocator};
+use memory::heap_vm_allocator::{AllocationError, HeapAllocator};
 use memory::physical_address::PageAlignedAddress;
 use memory::virtual_address::PageAlignedVirtualAddress;
-
-// =============================================================================
-// Мок-реализация FrameAllocator для тестов
-// =============================================================================
 
 const PAGE_SIZE: usize = 4096;
 

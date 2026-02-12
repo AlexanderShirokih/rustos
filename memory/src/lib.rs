@@ -10,11 +10,13 @@ extern crate alloc;
 extern crate std;
 
 pub mod aligned;
+pub mod align;
 pub mod bump_allocator;
 pub mod frame;
 pub mod frame_allocator;
 mod frame_bitmap;
-pub mod heap_allocator;
+pub mod heap_vm_allocator;
+pub mod mmio_vm_allocator;
 pub mod mem_flags;
 pub mod memory;
 pub mod memory_mapper;
