@@ -23,9 +23,7 @@ unsafe extern "C" {
 pub(crate) struct MemoryLayoutBuildError;
 
 /// Строит раскладку памяти из DeviceTree.
-pub(crate) fn build_memory_layout(
-    dt: &DeviceTree,
-) -> Result<MemoryLayout, MemoryLayoutBuildError> {
+pub(crate) fn build_memory_layout(dt: &DeviceTree) -> Result<MemoryLayout, MemoryLayoutBuildError> {
     let mut layout = MemoryLayout::new();
 
     let ram_regions = find_ram_regions(dt).ok_or(MemoryLayoutBuildError)?;

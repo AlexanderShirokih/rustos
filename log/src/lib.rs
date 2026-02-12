@@ -144,7 +144,7 @@ pub fn logf_tagged(lvl: Level, tag: &str, arguments: Arguments) {
 
 /// Возвращает имя файла без пути для использования в качестве тега.
 pub fn file_tag(path: &str) -> &str {
-    path.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 #[macro_export]

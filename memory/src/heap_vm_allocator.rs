@@ -6,8 +6,8 @@
 //! Работает с pre-mapped RAM: физическая память замаплена линейно
 //! (VA = higher_half_base + PA).
 
-use crate::frame_allocator::FrameAllocator;
 use crate::align::align_up;
+use crate::frame_allocator::FrameAllocator;
 use crate::virtual_address::PageAlignedVirtualAddress;
 use core::alloc::Layout;
 use core::mem::size_of;

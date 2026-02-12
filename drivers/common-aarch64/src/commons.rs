@@ -2,16 +2,18 @@
 
 use crate::fdt_adapter::FdtNode;
 use crate::tree_ext::{AddressSpace, NodeAddressExt};
-use drivers_common::{DeviceNode, MmioAddress, NodeProperty, ProbeContext, ProbeError};
+use drivers_common::probe::{ProbeContext, ProbeError};
+use drivers_common::services::mmio::MmioAddress;
+use drivers_common::{DeviceNode, NodeProperty};
 
 pub type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
 
 /// Расширение ProbeContext для работы с адресами регистров.
 pub trait ProbeContextExt {
-    fn reg_address(&self, reg_index: usize) -> AddressSpace;
+    fn get_address(&self, reg_index: usize) -> AddressSpace;
 
-    fn reg_mmio_address(&self, reg_index: usize) -> Option<MmioAddress> {
-        self.reg_address(reg_index).as_mmio()
+    fn get_mmio_address(&self, reg_index: usize) -> Option<MmioAddress> {
+        self.get_address(reg_index).as_mmio()
     }
 }
 
@@ -19,7 +21,7 @@ impl<N> ProbeContextExt for ProbeContext<N>
 where
     N: NodeAddressExt,
 {
-    fn reg_address(&self, reg_index: usize) -> AddressSpace {
+    fn get_address(&self, reg_index: usize) -> AddressSpace {
         let node = self.node();
         let bus = self.parent(node);
         let root = bus.and_then(|parent| self.parent(parent));

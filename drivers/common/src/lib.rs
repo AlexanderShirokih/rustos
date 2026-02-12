@@ -5,26 +5,24 @@
 #![no_std]
 extern crate alloc;
 
+pub mod capabilities;
 pub mod driver;
 pub mod early;
 pub mod probe;
 pub mod scanner;
+pub mod services;
 pub mod tree;
 
-mod mmio;
 mod registry;
 
-pub use interrupts::{IrqHandler, IrqNumber, IrqRegistrationError};
-
-pub use memory::mem_flags::*;
-pub use mmio::*;
-pub use registry::*;
+pub use capabilities::*;
 pub use driver::*;
+pub use memory::mem_flags::*;
+pub use registry::*;
 
 pub use early::{
     EarlyDriver, EarlyDriverContext, EarlyDriverInfo, EarlyInitOps, EarlyProbeFn, EarlyProbeResult,
 };
 
-pub use probe::{ProbeError, ProbeResult};
 pub use scanner::{DriverInfo, ProbeFn};
 pub use tree::{DeviceNode, DeviceTreeSource, NodeProperty};

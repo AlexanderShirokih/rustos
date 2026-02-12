@@ -1,7 +1,9 @@
 extern crate alloc;
 
-use crate::driver::{DriverDescriptor, ProbeContext};
-use crate::{DeviceNode, MmioAddress, ProbeError};
+use crate::DeviceNode;
+use crate::driver::DriverDescriptor;
+use crate::probe::{ProbeContext, ProbeError};
+use crate::services::mmio::MmioAddress;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

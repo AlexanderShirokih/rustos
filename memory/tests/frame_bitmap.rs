@@ -1,12 +1,8 @@
 mod common;
 
 use common::{frame_to_address, make_range};
-use memory::frame::Frame;
 use memory::FrameBitmap;
-
-// =============================================================================
-// 1. Создание и начальное состояние
-// =============================================================================
+use memory::frame::Frame;
 
 #[test]
 fn new_bitmap_has_all_frames_free() {
@@ -48,10 +44,6 @@ fn new_bitmap_has_no_allocated_frames() {
         );
     }
 }
-
-// =============================================================================
-// 2. Аллокация одиночных фреймов
-// =============================================================================
 
 #[test]
 fn alloc_first_frame_succeeds() {
@@ -102,10 +94,6 @@ fn alloc_returns_different_frames_on_sequential_calls() {
     assert_ne!(frame1, frame3);
 }
 
-// =============================================================================
-// 3. Исчерпание памяти
-// =============================================================================
-
 #[test]
 fn alloc_exhausts_all_frames() {
     let region = make_range(0, 16);
@@ -144,17 +132,16 @@ fn alloc_returns_none_when_exhausted() {
     assert!(bitmap.alloc_from(Frame::new(0)).is_none());
 }
 
-// =============================================================================
-// 4. Освобождение фреймов (clear)
-// =============================================================================
-
 #[test]
 fn clear_allocated_frame_returns_true() {
     let region = make_range(0, 64);
     let mut bitmap = FrameBitmap::new(region);
 
     let frame = bitmap.alloc_from(Frame::new(0)).unwrap();
-    assert!(bitmap.clear(frame), "clearing allocated frame should return true");
+    assert!(
+        bitmap.clear(frame),
+        "clearing allocated frame should return true"
+    );
 }
 
 #[test]
@@ -217,10 +204,6 @@ fn clear_does_not_change_remaining_for_free_frame() {
 
     assert_eq!(bitmap.remaining(), initial);
 }
-
-// =============================================================================
-// 5. Работа set_range_unchecked
-// =============================================================================
 
 #[test]
 fn set_range_marks_frames_as_allocated() {
@@ -334,10 +317,6 @@ fn alloc_skips_reserved_range() {
     );
 }
 
-// =============================================================================
-// 6. Поиск с wrap-around (alloc_from)
-// =============================================================================
-
 #[test]
 fn alloc_from_finds_first_free_after_offset() {
     let region = make_range(0, 64);
@@ -415,10 +394,6 @@ fn cleared_frame_can_be_reallocated_via_wrap() {
     assert_eq!(reallocated, first);
 }
 
-// =============================================================================
-// 7. Проверка is_in_range
-// =============================================================================
-
 #[test]
 fn is_in_range_true_for_frames_inside() {
     let region = make_range(10, 20);
@@ -434,8 +409,8 @@ fn is_in_range_false_for_frames_outside() {
     let region = make_range(10, 20);
     let bitmap = FrameBitmap::new(region);
 
-    assert!(!bitmap.is_in_range(Frame::new(0)));  // до начала
-    assert!(!bitmap.is_in_range(Frame::new(9)));  // прямо перед началом
+    assert!(!bitmap.is_in_range(Frame::new(0))); // до начала
+    assert!(!bitmap.is_in_range(Frame::new(9))); // прямо перед началом
     assert!(!bitmap.is_in_range(Frame::new(30))); // сразу после конца
     assert!(!bitmap.is_in_range(Frame::new(100))); // далеко за концом
 }

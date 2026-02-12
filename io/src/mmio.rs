@@ -85,4 +85,8 @@ impl<T> Reg<T> {
             _t: PhantomData,
         }
     }
+
+    pub const fn with_offset(&self, additional: usize) -> Self {
+        Self::new(self.offset + additional)
+    }
 }

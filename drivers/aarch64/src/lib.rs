@@ -2,7 +2,8 @@
 
 extern crate alloc;
 
-use drivers_common::{DriverInfo, EarlyDriverInfo, EarlyProbeResult, ProbeContext, ProbeResult};
+use drivers_common::probe::{ProbeContext, ProbeResult};
+use drivers_common::{DriverInfo, EarlyDriverInfo, EarlyProbeResult};
 use drivers_common_aarch64::fdt_adapter::FdtNode;
 
 pub mod generic;

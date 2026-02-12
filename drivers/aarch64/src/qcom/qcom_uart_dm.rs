@@ -2,7 +2,9 @@
 
 use crate::register_early_driver;
 use alloc::boxed::Box;
-use drivers_common::{EarlyDriver, EarlyDriverContext, EarlyProbeResult, MmioAddress, ProbeError};
+use drivers_common::probe::ProbeError;
+use drivers_common::services::mmio::MmioAddress;
+use drivers_common::{EarlyDriver, EarlyDriverContext, EarlyProbeResult};
 use drivers_common_aarch64::FdtProbeContext;
 use drivers_common_aarch64::ProbeContextExt;
 use io::byte_sink::{ByteSink, Pending};
@@ -115,7 +117,7 @@ pub fn uart_dm_probe(context: &mut FdtProbeContext<'_>) -> EarlyProbeResult {
     )?;
 
     let address = context
-        .reg_mmio_address(REG_UART_INDEX)
+        .get_mmio_address(REG_UART_INDEX)
         .ok_or(ProbeError::MissingProperty("base addr"))?;
 
     Ok(Box::new(UartDm::new(address)))

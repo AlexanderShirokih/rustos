@@ -9,8 +9,8 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-pub mod aligned;
 pub mod align;
+pub mod aligned;
 pub mod bump_allocator;
 pub mod frame;
 pub mod frame_allocator;

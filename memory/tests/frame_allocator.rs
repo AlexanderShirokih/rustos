@@ -2,11 +2,11 @@ mod common;
 
 use collections::MutexCell;
 use common::make_range;
+use memory::FrameBitmap;
 use memory::frame::Frame;
 use memory::frame_allocator::{
     FrameAllocator, FrameError, PhysicalFrameAllocator, ReserveFrameError,
 };
-use memory::FrameBitmap;
 use std::collections::HashSet;
 
 // =============================================================================

@@ -1,14 +1,14 @@
+use crate::services::mmio::MmioServiceImpl;
 use alloc::boxed::Box;
-use drivers_common::RuntimeDriverRegistry;
-use interrupts::InterruptController;
+use alloc::sync::Arc;
+use drivers_common::services::mmio::MmioService;
+use drivers_common::{Capabilities, CapabilityStoreMutExt, RuntimeDriverRegistry};
 use memory::memory_mapper::MemoryMapper;
 use memory::virtual_address::PageAlignedVirtualAddress;
 use spin::Mutex;
 
 pub struct KernelContext {
-    base_offset: PageAlignedVirtualAddress,
-    memory_mapper: &'static dyn MemoryMapper,
-    _interrupts: Mutex<Option<&'static dyn InterruptController>>,
+    capabilities: Capabilities,
     driver_registry: Mutex<RuntimeDriverRegistry>,
 }
 
@@ -17,33 +17,29 @@ impl KernelContext {
         memory_mapper: Box<dyn MemoryMapper>,
         base_offset: PageAlignedVirtualAddress,
     ) -> KernelContext {
+        let memory_mapper = Box::leak(memory_mapper);
+
+        let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl {
+            memory_mapper,
+            linear_offset: base_offset,
+        });
+
+        let mut capabilities = Capabilities::new();
+
+        capabilities
+            .provide_service::<dyn MmioService>(mmio_service)
+            .expect("Failed to register MmioService service");
+
         Self {
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
-            _interrupts: Mutex::new(None),
-            memory_mapper: Box::leak(memory_mapper),
-            base_offset,
+            capabilities,
         }
     }
 
-    pub fn memory_mapper(&self) -> &'static dyn MemoryMapper {
-        self.memory_mapper
-    }
-
-    pub fn base_offset(&self) -> PageAlignedVirtualAddress {
-        self.base_offset
-    }
-
-    pub fn driver_registry_mut(&mut self) -> &mut RuntimeDriverRegistry {
-        self.driver_registry.get_mut()
+    pub fn with_runtime_state<R>(
+        &mut self,
+        map: impl FnOnce(&mut Capabilities, &mut RuntimeDriverRegistry) -> R,
+    ) -> R {
+        map(&mut self.capabilities, self.driver_registry.get_mut())
     }
 }
-
-// impl DriverRegistryBridge for KernelContext {
-//     fn memory_mapper(&self) -> &'static dyn MemoryMapper {
-//         self.memory_mapper
-//     }
-//
-//     fn interrupt_controller(&self) -> Option<&'static dyn InterruptController> {
-//         *self.interrupts.lock()
-//     }
-// }

@@ -179,9 +179,9 @@ fn sync_handler(frame: &ExceptionFrame) {
     panic!("{}", buf);
 }
 
-/// Заглушка для IRQ — пока обработчик прерываний не установлен.
+/// Обработчик IRQ делегирует диспетчеризацию bridge-слою ядра.
 fn irq_handler(_frame: &ExceptionFrame) {
-    panic!("IRQ received but no handler installed");
+    kernel::irq_bridge::dispatch_interrupt();
 }
 
 /// Обработчик FIQ — паника с диагностикой.

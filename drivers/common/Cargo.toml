@@ -6,5 +6,5 @@ edition = "2024"
 [dependencies]
 io = { path = "../../io" }
 memory = { path = "../../memory" }
-interrupts = { path = "../../interrupts" }
 klog = { path = "../../log" }
+spin = "0.10.0"

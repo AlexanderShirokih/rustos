@@ -3,7 +3,9 @@
 use crate::register_early_driver;
 use alloc::boxed::Box;
 use core::hint::spin_loop;
-use drivers_common::{EarlyDriver, EarlyDriverContext, EarlyProbeResult, MmioAddress, ProbeError};
+use drivers_common::probe::ProbeError;
+use drivers_common::services::mmio::MmioAddress;
+use drivers_common::{EarlyDriver, EarlyDriverContext, EarlyProbeResult};
 use drivers_common_aarch64::FdtProbeContext;
 use drivers_common_aarch64::ProbeContextExt;
 use io::byte_sink::{ByteSink, Pending};
@@ -111,7 +113,7 @@ pub fn uart_pl011_probe(context: &mut FdtProbeContext<'_>) -> EarlyProbeResult {
     drivers_common_aarch64::require_compatible(context.node(), &["arm,pl011"])?;
 
     let address = context
-        .reg_mmio_address(REG_UART_INDEX)
+        .get_mmio_address(REG_UART_INDEX)
         .ok_or(ProbeError::MissingProperty("base address"))?;
 
     Ok(Box::new(UartPl011::new(address)))

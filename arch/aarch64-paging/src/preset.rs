@@ -1,6 +1,6 @@
 //! Готовые пресеты атрибутов памяти.
 
-use crate::mem_flags::{Access, Aarch64MemFlags, Shareability};
+use crate::mem_flags::{Aarch64MemFlags, Access, Shareability};
 
 /// Исполняемый код ядра.
 pub struct KernelText;

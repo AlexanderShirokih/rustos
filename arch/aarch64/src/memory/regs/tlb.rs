@@ -20,10 +20,10 @@ impl TranslationLookasideBuffer<EL1> {
     pub fn invalidate(&self) {
         unsafe {
             asm!(
-                "dsb ishst",      // Ожидание записи page tables
-                "tlbi vmalle1",   // Инвалидация TLB
-                "dsb ish",        // Ожидание завершения tlbi
-                "isb",            // Синхронизация pipeline
+                "dsb ishst",    // Ожидание записи page tables
+                "tlbi vmalle1", // Инвалидация TLB
+                "dsb ish",      // Ожидание завершения tlbi
+                "isb",          // Синхронизация pipeline
                 options(nostack, preserves_flags)
             )
         };

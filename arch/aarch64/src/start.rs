@@ -141,14 +141,14 @@ fn early_main(dtb: usize) -> Result<(), ()> {
 
     // Инициализация ранних драйверов
     let device_tree: &'static DeviceTree = unsafe { core::mem::transmute(&device_tree) };
-    let root = adapt_tree(&device_tree).root().ok_or(())?;
+    let root = adapt_tree(device_tree).root().ok_or(())?;
     let early_drivers = drivers_aarch64::early_drivers();
     let mut early_registry = EarlyDriverRegistry::<NodeKey>::new();
     early_registry.scan_and_probe(root, early_drivers);
 
     // Сохраняем реестр в статическую память
     let early_registry: &'static EarlyDriverRegistry<NodeKey> = Box::leak(Box::new(early_registry));
-    bind_early_stdout(&device_tree, early_registry);
+    bind_early_stdout(device_tree, early_registry);
 
     let mmio_requests: Vec<_> = early_registry
         .mmio_region_requests()
@@ -165,7 +165,7 @@ fn early_main(dtb: usize) -> Result<(), ()> {
 
     let mut driver_scanner = DriverScanner::new();
 
-    let root_node = adapt_tree(&device_tree)
+    let root_node = adapt_tree(device_tree)
         .root()
         .expect("Device Tree root node is missing!");
 

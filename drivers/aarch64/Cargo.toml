@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-interrupts = { path = "../../interrupts" }
 io = { path = "../../io" }
 drivers-common = { path = "../common" }
 drivers-common-aarch64 = { path = "../common-aarch64" }
 klog = { path = "../../log" }
 util = { path = "../../util" }
+spin = "0.10.0"

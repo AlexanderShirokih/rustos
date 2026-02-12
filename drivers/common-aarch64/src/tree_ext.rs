@@ -1,6 +1,7 @@
 //! Расширения дерева устройств для FDT-адресации.
 
-use drivers_common::{DeviceNode, MmioAddress};
+use drivers_common::DeviceNode;
+use drivers_common::services::mmio::MmioAddress;
 
 /// Размерность адресных ячеек в узле.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

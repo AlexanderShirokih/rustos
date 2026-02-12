@@ -111,6 +111,7 @@ impl Aarch64MemFlags {
                 .attr_index(ATTR_INDEX_NORMAL)
                 .sh(Shareability::Inner)
                 .ap(Self::map_access_flags(kernel.access, user.access))
+                .af(true)
                 .pxn(matches!(kernel.executable, Executable::NotAllowed))
                 .uxn(matches!(user.executable, Executable::NotAllowed)),
 
@@ -118,6 +119,7 @@ impl Aarch64MemFlags {
                 .attr_index(ATTR_INDEX_DEVICE)
                 .sh(Shareability::Inner)
                 .ap(Self::map_access_flags(kernel.access, user.access))
+                .af(true)
                 .pxn(true)
                 .uxn(true),
         }

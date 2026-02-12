@@ -1,9 +1,11 @@
 use alloc::boxed::Box;
+use alloc::string::String;
 use core::fmt::{Display, Formatter};
 use io::mmio::Reg;
+use memory::mem_flags::{DeviceMemoryPermission, Owners};
 use memory::virtual_address::PageAlignedVirtualAddress;
 
-/// Адрес MMIO-региона.
+// Адрес MMIO-региона.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MmioAddress {
     address: usize,
@@ -90,4 +92,21 @@ impl Drop for MmioBound {
             cleanup(self.virtual_address, self.mmio_address.size)
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MmioMapError(pub String);
+
+impl Display for MmioMapError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        write!(f, "MmioMapError: {}", self.0)
+    }
+}
+
+pub trait MmioService: Send + Sync {
+    fn map_mmio(
+        &self,
+        address: MmioAddress,
+        permissions: Owners<DeviceMemoryPermission>,
+    ) -> Result<MmioBound, MmioMapError>;
 }

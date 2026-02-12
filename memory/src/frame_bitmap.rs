@@ -297,7 +297,8 @@ impl FrameBitmap {
 
         // Находим первый свободный бит в этом слове
         let first_bit = (!self.bitmap[word_idx]).trailing_zeros() as usize;
-        let start_frame_num = self.base_frame.number() + word_idx * Self::BITS_PER_ENTRY + first_bit;
+        let start_frame_num =
+            self.base_frame.number() + word_idx * Self::BITS_PER_ENTRY + first_bit;
 
         // Проверяем, что первый свободный бит в пределах региона
         if start_frame_num >= max_frame_num {

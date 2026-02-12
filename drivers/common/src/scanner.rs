@@ -1,8 +1,8 @@
 extern crate alloc;
 
-use crate::driver::{DriverDescriptor, DriverFactory, ProbeContext};
-use crate::probe::ProbeResult;
-use crate::{DeviceNode, ProbeError};
+use crate::DeviceNode;
+use crate::driver::{DriverDescriptor, DriverFactory};
+use crate::probe::{ProbeContext, ProbeError, ProbeResult};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -13,8 +13,13 @@ pub type ProbeFn<N> = fn(&mut ProbeContext<N>) -> ProbeResult;
 /// Дескриптор runtime-драйвера.
 pub type DriverInfo<P> = DriverDescriptor<P>;
 
+pub struct DriverHandle {
+    pub name: &'static str,
+    pub factory: Box<dyn DriverFactory>,
+}
+
 pub struct DriverScanner {
-    pub(crate) handles: BTreeMap<usize, Box<dyn DriverFactory>>,
+    pub(crate) handles: BTreeMap<usize, DriverHandle>,
 }
 
 impl DriverScanner {
@@ -54,7 +59,7 @@ impl DriverScanner {
     fn try_probe<N, P>(
         &mut self,
         context: &mut ProbeContext<N>,
-        drivers: &[DriverInfo<P>],
+        drivers: &[DriverDescriptor<P>],
     ) -> Result<(), ProbeError>
     where
         N: DeviceNode<Id = usize>,
@@ -69,7 +74,10 @@ impl DriverScanner {
             };
 
             if let alloc::collections::btree_map::Entry::Vacant(entry) = self.handles.entry(key) {
-                entry.insert(driver_factory);
+                entry.insert(DriverHandle {
+                    name: driver_info.name,
+                    factory: driver_factory,
+                });
 
                 return Ok(());
             }
@@ -86,8 +94,8 @@ impl Default for DriverScanner {
 }
 
 impl IntoIterator for DriverScanner {
-    type Item = Box<dyn DriverFactory>;
-    type IntoIter = alloc::collections::btree_map::IntoValues<usize, Box<dyn DriverFactory>>;
+    type Item = DriverHandle;
+    type IntoIter = alloc::collections::btree_map::IntoValues<usize, DriverHandle>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.handles.into_values()

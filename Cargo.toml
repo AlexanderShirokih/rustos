@@ -8,7 +8,6 @@ members = [
     "drivers/common-aarch64",
     "drivers/common",
     "drivers/aarch64",
-    "interrupts",
     "kernel",
     "fdt",
     "io",

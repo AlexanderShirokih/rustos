@@ -1,4 +1,5 @@
-use drivers_common::{DeviceNode, NodeProperty, ProbeContext};
+use drivers_common::probe::ProbeContext;
+use drivers_common::{DeviceNode, NodeProperty};
 use drivers_common_aarch64::ProbeContextExt;
 use drivers_common_aarch64::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
 
@@ -170,7 +171,7 @@ fn probe_context_ext_translates_reg_address_space() {
     };
 
     let context = ProbeContext::new(uart, vec![root, soc, uart]);
-    let reg = context.reg_address(0);
+    let reg = context.get_address(0);
 
     assert_eq!(reg.offset, 0x1000_2000);
     assert_eq!(reg.size, 0x1000);

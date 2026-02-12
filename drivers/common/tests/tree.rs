@@ -48,14 +48,14 @@ impl DeviceNode for TestNode<'_> {
         self.name
     }
 
-    fn prop<'a>(&'a self, name: &str) -> Option<Self::Property<'a>> {
+    fn prop(&self, name: &str) -> Option<Self::Property<'_>> {
         self.props
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(n, raw)| TestProp { name: n, raw })
     }
 
-    fn children<'a>(&'a self) -> Self::ChildIter<'a> {
+    fn children(&self) -> Self::ChildIter<'_> {
         self.children.iter().copied()
     }
 }

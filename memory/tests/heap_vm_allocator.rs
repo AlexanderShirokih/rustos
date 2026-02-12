@@ -666,7 +666,11 @@ fn deallocate_lower_half_pointer_is_ignored() {
 
     // Аллокатор продолжает работать корректно
     let ptr2 = allocator.allocate(layout).unwrap();
-    assert_ne!(valid_ptr.as_ptr(), ptr2.as_ptr(), "allocator should still work after ignoring lower half pointer");
+    assert_ne!(
+        valid_ptr.as_ptr(),
+        ptr2.as_ptr(),
+        "allocator should still work after ignoring lower half pointer"
+    );
 
     // Освобождение валидного указателя работает
     allocator.deallocate(valid_ptr);
@@ -733,7 +737,10 @@ fn block_too_small_to_split_uses_whole_block() {
     let almost_same_layout = Layout::from_size_align(3780, 8).unwrap();
     let ptr = allocator.allocate(almost_same_layout);
 
-    assert!(ptr.is_ok(), "allocation should succeed using whole block without split");
+    assert!(
+        ptr.is_ok(),
+        "allocation should succeed using whole block without split"
+    );
 
     // Проверяем, что память доступна
     unsafe {
@@ -756,7 +763,10 @@ fn page_size_alignment_works() {
     let layout = Layout::from_size_align(64, 4096).unwrap();
     let ptr = allocator.allocate(layout);
 
-    assert!(ptr.is_ok(), "allocation with PAGE_SIZE alignment should succeed");
+    assert!(
+        ptr.is_ok(),
+        "allocation with PAGE_SIZE alignment should succeed"
+    );
 
     let p = ptr.unwrap();
     assert_eq!(
