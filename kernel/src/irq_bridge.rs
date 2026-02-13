@@ -2,6 +2,7 @@
 
 use alloc::sync::Arc;
 use drivers_common::services::interrupts::InterruptsService;
+use klog::{debug, warn};
 use spin::Once;
 
 /// Мост между архитектурным IRQ-path и runtime-сервисом прерываний.
@@ -27,7 +28,8 @@ impl IrqBridge {
 
     pub fn dispatch(&self) {
         let Some(service) = self.service.get() else {
-            panic!("IRQ bridge is not initialized: InterruptsService is missing");
+            warn!("IRQ bridge is not initialized: InterruptsService is missing");
+            return;
         };
 
         service.dispatch_interrupt();
@@ -43,6 +45,7 @@ impl Default for IrqBridge {
 static IRQ_BRIDGE: IrqBridge = IrqBridge::new();
 
 pub fn install_interrupts_service(service: Arc<dyn InterruptsService>) {
+    debug!("Interrupts hook installed");
     IRQ_BRIDGE.install(service);
 }
 

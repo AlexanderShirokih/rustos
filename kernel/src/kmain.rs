@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 use drivers_common::CapabilityStoreExt;
 use drivers_common::scanner::DriverScanner;
 use drivers_common::services::interrupts::InterruptsService;
-use klog::info;
+use drivers_common::services::timer::TimerService;
+use klog::{debug, info};
 
 /// Главная функция ядра
 pub fn kmain(driver_scanner: DriverScanner, kernel: &mut KernelContext) {
@@ -18,6 +19,7 @@ pub fn kmain(driver_scanner: DriverScanner, kernel: &mut KernelContext) {
     run_all_drivers(kernel, pending);
 
     install_interrupts_hook(kernel);
+    smoke_check_timer_ticks(kernel);
 
     info!("Kernel drivers initialization completed")
 }
@@ -60,7 +62,21 @@ fn install_interrupts_hook(kernel: &mut KernelContext) {
             .require_service::<dyn InterruptsService>()
             .expect("InterruptsService must be available after driver initialization");
 
-        irq_bridge::install_interrupts_service(interrupts.clone());
         interrupts.enable();
+        irq_bridge::install_interrupts_service(interrupts.clone());
+    });
+}
+
+fn smoke_check_timer_ticks(kernel: &mut KernelContext) {
+    kernel.with_runtime_state(|caps, _| {
+        let timer = caps
+            .require_service::<dyn TimerService>()
+            .expect("TimerService must be available after driver initialization");
+
+        let elapsed_time_ms = timer.time_monotonic_elapsed() / 1_000_000;
+
+        timer.set_periodic(100u64);
+
+        debug!("elapsed_time_ms: {elapsed_time_ms}");
     });
 }

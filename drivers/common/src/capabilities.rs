@@ -1,5 +1,6 @@
 extern crate alloc;
 
+use crate::services::Service;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::any::{Any, TypeId, type_name};
@@ -72,7 +73,7 @@ pub trait CapabilityStoreMut: CapabilityStore {
     ) -> Result<(), CapabilityError>;
 }
 
-struct ServiceCapability<T: ?Sized + Send + Sync + 'static> {
+struct ServiceCapability<T: ?Sized + Service + 'static> {
     value: Arc<T>,
 }
 
@@ -84,7 +85,7 @@ pub trait CapabilityStoreExt: CapabilityStore {
             .map_err(|_| CapabilityError::mismatch_for::<T>())
     }
 
-    fn require_service<T: ?Sized + Send + Sync + 'static>(
+    fn require_service<T: ?Sized + Service + 'static>(
         &self,
     ) -> Result<Arc<T>, CapabilityError> {
         self.require_raw(TypeId::of::<ServiceCapability<T>>())
@@ -101,7 +102,7 @@ pub trait CapabilityStoreMutExt: CapabilityStoreMut {
             .map_err(remap_error_for::<T>)
     }
 
-    fn provide_service<T: ?Sized + Send + Sync + 'static>(
+    fn provide_service<T: ?Sized + Service + 'static>(
         &mut self,
         value: Arc<T>,
     ) -> Result<(), CapabilityError> {
@@ -221,7 +222,7 @@ mod tests {
         );
     }
 
-    trait TestService: Send + Sync {
+    trait TestService: Service {
         fn value(&self) -> u32;
     }
 
@@ -236,13 +237,13 @@ mod tests {
     #[test]
     fn provide_and_require_service_capability() {
         let mut caps = Capabilities::new();
-        let service: Arc<dyn TestService + Send + Sync> = Arc::new(TestServiceImpl(7));
+        let service: Arc<dyn TestService> = Arc::new(TestServiceImpl(7));
 
-        caps.provide_service::<dyn TestService + Send + Sync>(service.clone())
+        caps.provide_service::<dyn TestService>(service.clone())
             .expect("failed to publish service capability");
 
         let resolved = caps
-            .require_service::<dyn TestService + Send + Sync>()
+            .require_service::<dyn TestService>()
             .expect("missing service capability");
 
         assert_eq!(resolved.value(), 7);
@@ -252,17 +253,17 @@ mod tests {
     #[test]
     fn duplicate_service_capability() {
         let mut caps = Capabilities::new();
-        let first: Arc<dyn TestService + Send + Sync> = Arc::new(TestServiceImpl(7));
-        let second: Arc<dyn TestService + Send + Sync> = Arc::new(TestServiceImpl(8));
+        let first: Arc<dyn TestService> = Arc::new(TestServiceImpl(7));
+        let second: Arc<dyn TestService> = Arc::new(TestServiceImpl(8));
 
-        let first_result = caps.provide_service::<dyn TestService + Send + Sync>(first);
-        let second_result = caps.provide_service::<dyn TestService + Send + Sync>(second);
+        let first_result = caps.provide_service::<dyn TestService>(first);
+        let second_result = caps.provide_service::<dyn TestService>(second);
 
         assert!(first_result.is_ok());
         assert_eq!(
             second_result,
             Err(CapabilityError::Duplicate {
-                type_name: type_name::<dyn TestService + Send + Sync>()
+                type_name: type_name::<dyn TestService>()
             })
         );
     }

@@ -62,6 +62,11 @@ pub extern "C" fn _start() -> () {
     "mov    x0, #0x33ff",
     "msr    cptr_el2, x0",
 
+    // Разрешаем EL1 доступ к физическому таймеру/счётчику.
+    "mrs    x0, cnthctl_el2",
+    "orr    x0, x0, #0b11",      // EL1PCTEN | EL1PCEN
+    "msr    cnthctl_el2, x0",
+
     // SPSR_EL2: возврат в EL1h, DAIF masked
     "mov    x0, #0x3c5",
     "msr    spsr_el2, x0",

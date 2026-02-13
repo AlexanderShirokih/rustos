@@ -1,3 +1,4 @@
+use crate::services::Service;
 use alloc::boxed::Box;
 use alloc::string::String;
 use core::fmt::{Display, Formatter};
@@ -103,7 +104,7 @@ impl Display for MmioMapError {
     }
 }
 
-pub trait MmioService: Send + Sync {
+pub trait MmioService: Service {
     fn map_mmio(
         &self,
         address: MmioAddress,

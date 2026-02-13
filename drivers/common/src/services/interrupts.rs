@@ -1,5 +1,6 @@
 //! Контракты подсистемы прерываний.
 
+use crate::services::Service;
 use alloc::boxed::Box;
 
 /// Номер аппаратного прерывания.
@@ -158,7 +159,7 @@ impl IrqBinding {
 /// Контракт сервиса прерываний.
 ///
 /// Трейт определяет базовые операции для управления аппаратным контроллером прерываний.
-pub trait InterruptsService: Send + Sync {
+pub trait InterruptsService: Service {
     /// Глобально включает прерывания.
     fn enable(&self);
 

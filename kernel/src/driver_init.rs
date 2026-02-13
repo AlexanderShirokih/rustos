@@ -101,6 +101,7 @@ mod tests {
     use drivers_common::services::interrupts::{
         InterruptsService, IrqBinding, IrqBound, IrqRegistrationError,
     };
+    use drivers_common::services::Service;
     use drivers_common::{
         Capabilities, CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DriverRunError,
     };
@@ -151,13 +152,13 @@ mod tests {
         }
     }
 
-    struct PublishServiceDriver<T: ?Sized + Send + Sync + 'static> {
+    struct PublishServiceDriver<T: ?Sized + Service + 'static> {
         name: &'static str,
         logs: Arc<Mutex<Vec<&'static str>>>,
         value: Arc<T>,
     }
 
-    impl<T: ?Sized + Send + Sync + 'static> Driver for PublishServiceDriver<T> {
+    impl<T: ?Sized + Service + 'static> Driver for PublishServiceDriver<T> {
         fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
             self.logs.lock().push(self.name);
             caps.provide_service::<T>(self.value.clone())
@@ -165,13 +166,13 @@ mod tests {
         }
     }
 
-    struct RequireServiceDriver<T: ?Sized + Send + Sync + 'static> {
+    struct RequireServiceDriver<T: ?Sized + Service + 'static> {
         name: &'static str,
         logs: Arc<Mutex<Vec<&'static str>>>,
         _marker: PhantomData<T>,
     }
 
-    impl<T: ?Sized + Send + Sync + 'static> Driver for RequireServiceDriver<T> {
+    impl<T: ?Sized + Service + 'static> Driver for RequireServiceDriver<T> {
         fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
             self.logs.lock().push(self.name);
             caps.require_service::<T>()

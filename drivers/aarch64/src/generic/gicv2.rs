@@ -21,61 +21,43 @@ use io::mmio::Reg;
 use klog::debug;
 use spin::Mutex;
 
-/// GICD Control Register — включение distributor.
+/// Регистры Distributor interface
+
+/// Control Register — включение distributor.
 const GICD_CTLR: Reg<u32> = Reg::new(0x000);
-/// GICD Interrupt Set-Enable Registers (32 IRQ на регистр).
+/// Type Register — количество поддерживаемых линий IRQ.
+const GICD_TYPER: Reg<u32> = Reg::new(0x004);
+/// Interrupt Set-Enable Registers (32 IRQ на регистр).
 const GICD_ISENABLER: Reg<u32> = Reg::new(0x100);
-/// GICD Interrupt Clear-Enable Registers (32 IRQ на регистр).
+/// Interrupt Clear-Enable Registers (32 IRQ на регистр).
 const GICD_ICENABLER: Reg<u32> = Reg::new(0x180);
-/// GICD Interrupt Priority Registers (4 IRQ на регистр, по 8 бит на приоритет).
+/// Interrupt Clear-Pending Registers (32 IRQ на регистр).
+const GICD_ICPENDR: Reg<u32> = Reg::new(0x280);
+/// Interrupt Priority Registers (4 IRQ на регистр, по 8 бит на приоритет).
 const GICD_IPRIORITYR: Reg<u32> = Reg::new(0x400);
-/// GICD Interrupt Processor Targets Registers (4 IRQ на регистр, по 8 бит на маску CPU).
+/// Interrupt Processor Targets Registers (4 IRQ на регистр, по 8 бит на маску CPU).
 const GICD_ITARGETSR: Reg<u32> = Reg::new(0x800);
 
-/// GICC Control Register — включение CPU interface.
+/// Interrupt Configuration Registers
+const GICD_ICFGR: Reg<u32> = Reg::new(0xC00);
+
+/// Регистры CPU Interface
+
+/// CPU Interface Control Register — включение CPU interface.
 const GICC_CTLR: Reg<u32> = Reg::new(0x000);
-/// GICC Priority Mask Register — фильтр приоритетов.
+/// Interrupt Priority Mask Register — фильтр приоритетов.
 const GICC_PMR: Reg<u32> = Reg::new(0x004);
-/// GICC Interrupt Acknowledge Register — чтение номера прерывания.
+/// Binary Point — Определяет разделение между группой приоритета и подприоритетом (0-7)
+const GICC_BPR: Reg<u32> = Reg::new(0x008);
+/// Interrupt Acknowledge Register — чтение номера прерывания (Group 0, Secure view).
 const GICC_IAR: Reg<u32> = Reg::new(0x00C);
-/// GICC End Of Interrupt Register — подтверждение обработки.
+/// End of Interrupt Register — подтверждение обработки (Group 0, Secure view).
 const GICC_EOIR: Reg<u32> = Reg::new(0x010);
 
-const SPURIOUS_IRQ_MIN: u32 = 1020;
-const TAG: &str = "GICv2";
+const PRIORITY_MASK_ALL: u32 = 0xFF;
 
-fn enable_local_irq() {
-    // SAFETY: Очистка бита I в DAIF разрешает обработку IRQ на текущем CPU.
-    // Вызывается только после инициализации контроллера прерываний.
-    unsafe {
-        core::arch::asm!("msr daifclr, #0b0010", options(nostack, preserves_flags));
-    }
-}
-
-fn disable_local_irq() {
-    // SAFETY: Установка бита I в DAIF запрещает обработку IRQ на текущем CPU.
-    unsafe {
-        core::arch::asm!("msr daifset, #0b0010", options(nostack, preserves_flags));
-    }
-}
-
-struct IrqIndex {
-    pub reg_index: usize,
-    pub bit_index: u8,
-}
-
-impl IrqIndex {
-    fn new(irq: IrqNumber) -> Self {
-        let irq_raw = irq.raw();
-        let reg_index = irq_raw / 4;
-        let byte_offset = irq_raw % 4;
-
-        Self {
-            reg_index: reg_index as usize,
-            bit_index: byte_offset as u8,
-        }
-    }
-}
+// ITLinesNumber = количество блоков по 32 IRQ каждый.
+type ITLinesNumber = usize;
 
 /// Тип прерывания в контексте GIC.
 enum IrqType {
@@ -85,16 +67,17 @@ enum IrqType {
     Ppi,
     /// Shared Peripheral Interrupt (32–1019).
     Spi,
+    /// Spurious interrupt
+    Spurious,
 }
 
 impl IrqType {
-    /// Создаёт тип прерывания из номера.
-    const fn from_irq_number(irq: IrqNumber) -> Option<Self> {
+    const fn from_irq_number(irq: IrqNumber) -> Self {
         match irq.raw() {
-            0..=15 => Some(IrqType::Sgi),
-            16..=31 => Some(IrqType::Ppi),
-            32..=1019 => Some(IrqType::Spi),
-            _ => None,
+            0..=15 => IrqType::Sgi,
+            16..=31 => IrqType::Ppi,
+            32..=1019 => IrqType::Spi,
+            _ => IrqType::Spurious,
         }
     }
 }
@@ -109,7 +92,7 @@ pub struct Gicv2 {
 }
 
 // SAFETY: Gicv2 содержит только Mmio (который Sync).
-// Все операции с Mmio выполняются через volatile, что безопасно для многопоточности.
+// Все операции с Mmio выполняются через volatile
 unsafe impl Send for Gicv2 {}
 
 impl Gicv2 {
@@ -120,7 +103,7 @@ impl Gicv2 {
         }
     }
 
-    fn build_controller(&self, mmio: &dyn MmioService) -> Result<Gicv2Controller, String> {
+    fn create_controller(&self, mmio: &dyn MmioService) -> Result<Gicv2Controller, String> {
         let distributor = mmio
             .map_mmio(
                 self.distributor_address,
@@ -135,11 +118,7 @@ impl Gicv2 {
             )
             .map_err(|err| err.to_string())?;
 
-        Ok(Gicv2Controller {
-            distributor,
-            cpu_interface,
-            handlers: BTreeMap::new(),
-        })
+        Ok(Gicv2Controller::new(distributor, cpu_interface))
     }
 }
 
@@ -150,11 +129,15 @@ impl Driver for Gicv2 {
             .map_err(DriverRunError::from_capability_error)?;
 
         let controller = Arc::new(Mutex::new(
-            self.build_controller(mmio.as_ref())
+            self.create_controller(mmio.as_ref())
                 .map_err(DriverRunError::Fatal)?,
         ));
 
-        let handle = GicInterruptsHandle::new(controller);
+        {
+            controller.lock().init()
+        }
+
+        let handle = GicInterruptsService::new(controller);
 
         caps.provide_service::<dyn InterruptsService>(Arc::new(handle))
             .map_err(|err| DriverRunError::Fatal(err.to_string()))
@@ -165,6 +148,7 @@ impl Driver for Gicv2 {
 struct Gicv2Controller {
     distributor: MmioBound,
     cpu_interface: MmioBound,
+    interrupt_lines: ITLinesNumber,
     handlers: BTreeMap<IrqNumber, Box<dyn IrqHandler>>,
 }
 
@@ -173,144 +157,197 @@ struct Gicv2Controller {
 unsafe impl Send for Gicv2Controller {}
 
 impl Gicv2Controller {
-    fn enable_irq(&mut self, irq: IrqNumber) {
-        let IrqIndex {
-            reg_index,
-            bit_index,
-        } = IrqIndex::new(irq);
-
-        // GICD_ISENABLERn[bit] = 1
-        let reg = GICD_ISENABLER.with_offset(reg_index * 4);
-        self.distributor.write_reg(reg, 1 << bit_index);
+    pub(crate) fn new(distributor: MmioBound, cpu_interface: MmioBound) -> Self {
+        Self {
+            handlers: BTreeMap::new(),
+            interrupt_lines: Self::get_interrupts_lines(&distributor),
+            distributor,
+            cpu_interface,
+        }
     }
 
-    fn disable_irq(&mut self, irq: IrqNumber) {
-        let IrqIndex {
-            reg_index,
-            bit_index,
-        } = IrqIndex::new(irq);
+    fn init(&self) {
+        Self::set_irq_mask();
 
-        // GICD_ICENABLERn[bit] = 1
-        let reg = GICD_ICENABLER.with_offset(reg_index * 4);
-        self.distributor.write_reg(reg, 1 << bit_index);
+        debug!("Enabling GICv2");
+        debug!("  GICD @ {}", self.distributor.base());
+        debug!("  GICC @ {}", self.cpu_interface.base());
+
+        self.init_distributor();
+        self.init_cpu_interface();
     }
 
-    fn set_priority(&mut self, irq: IrqNumber, priority: IrqPriority) {
-        let IrqIndex {
-            reg_index,
-            bit_index,
-        } = IrqIndex::new(irq);
-
-        // GICD_IPRIORITYRn: 4 приоритета по 8 бит на регистр
-        let reg_offset = GICD_IPRIORITYR.offset + reg_index * 4;
-        let mut val = self.distributor.read::<u32>(reg_offset);
-
-        // Очистить старое значение и установить новое
-        let shift = bit_index * 8;
-        val &= !(0xFF << shift);
-        val |= (priority.raw() as u32) << shift;
-
-        self.distributor.write::<u32>(reg_offset, val);
+    fn enable_global(&self) {
+        Self::clear_irq_mask()
     }
 
-    fn set_target(&mut self, irq: IrqNumber, target: CpuMask) {
-        if !matches!(IrqType::from_irq_number(irq), Some(IrqType::Spi)) {
+    fn disable_global(&self) {
+        Self::set_irq_mask();
+
+        // self.cpu_interface.write_reg(GICC_CTLR, 0);
+        // self.distributor.write_reg(GICD_CTLR, 0);
+    }
+
+    fn init_distributor(&self) {
+        // Отключаем Distributor перед настройкой
+        self.distributor.write_reg(GICD_CTLR, 0);
+
+        // Сбрасываем прерывания, pending флаги и configuration
+        self.reset_interrupt_lines();
+        self.set_level_sensitive_mode();
+
+        // Включаем Distributor (EnableGrp0)
+        self.distributor.write_reg(GICD_CTLR, 1);
+    }
+
+    fn init_cpu_interface(&self) {
+        // Устанавливаем маски приоритета
+        self.cpu_interface.write_reg(GICC_PMR, PRIORITY_MASK_ALL);
+        self.cpu_interface.write_reg(GICC_BPR, 0);
+
+        // Включаем CPU interface (EnableGrp0)
+        self.cpu_interface.write_reg(GICC_CTLR, 0x01);
+    }
+
+    fn get_interrupts_lines(distributor: &MmioBound) -> ITLinesNumber {
+        let typer = distributor.read_reg(GICD_TYPER);
+        let it_lines_number = typer & 0x1F;
+
+        (it_lines_number + 1) as usize
+    }
+
+    fn reset_interrupt_lines(&self) {
+        for bank in 0..self.interrupt_lines {
+            let offset = bank * 4;
+
+            // Отключаем все прерывания
+            self.distributor
+                .write_reg(GICD_ICENABLER.with_offset(offset), u32::MAX);
+
+            // Сбрасываем pending флаги
+            self.distributor
+                .write_reg(GICD_ICPENDR.with_offset(offset), u32::MAX);
+        }
+    }
+
+    fn set_level_sensitive_mode(&self) {
+        let num_config_regs = self.interrupt_lines * 2;
+
+        for i in 0..num_config_regs {
+            self.distributor.write_reg(GICD_ICFGR.with_offset(i * 4), 0);
+        }
+    }
+
+    fn clear_irq_mask() {
+        // SAFETY: Очистка бита I в DAIF разрешает обработку IRQ на текущем CPU.
+        unsafe {
+            core::arch::asm!("msr daifclr, #0b0010", options(nostack, preserves_flags));
+        }
+    }
+
+    fn set_irq_mask() {
+        // SAFETY: Установка бита I в DAIF запрещает обработку IRQ на текущем CPU.
+        unsafe {
+            core::arch::asm!("msr daifset, #0b0010", options(nostack, preserves_flags));
+        }
+    }
+
+    fn enable(&self, irq: IrqNumber) {
+        let (reg, bit) = bit_offset(irq, 1);
+        self.distributor
+            .write_reg(GICD_ISENABLER.with_offset(reg * 4), 1 << bit);
+    }
+
+    fn disable(&self, irq: IrqNumber) {
+        let (reg, bit) = bit_offset(irq, 1);
+
+        self.distributor
+            .write_reg(GICD_ISENABLER.with_offset(reg * 4), 1 << bit);
+    }
+
+    fn set_priority(&self, irq: IrqNumber, priority: IrqPriority) {
+        let (reg, bit) = bit_offset(irq, 8);
+
+        let priority_reg = GICD_IPRIORITYR.with_offset(reg * 4);
+        let mut val = self.distributor.read_reg(priority_reg);
+
+        // Очищаем старое значение и устанавливаем новое
+        let bit_shift = bit * 8;
+        val &= !(0xFF << bit_shift);
+        val |= (priority.raw() as u32) << bit_shift;
+
+        self.distributor.write_reg(priority_reg, val);
+    }
+
+    fn set_target_cpu(&self, irq: IrqNumber, target: CpuMask) {
+        if !matches!(IrqType::from_irq_number(irq), IrqType::Spi) {
             return;
         }
 
-        let IrqIndex {
-            reg_index,
-            bit_index,
-        } = IrqIndex::new(irq);
+        let (reg, bit) = bit_offset(irq, 8);
 
-        // GICD_ITARGETSRn: 4 маски по 8 бит на регистр
-        let reg_offset = GICD_ITARGETSR.offset + reg_index * 4;
-        let mut val = self.distributor.read::<u32>(reg_offset);
+        let target_cpu_reg = GICD_ITARGETSR.with_offset(reg * 4);
+        let mut val = self.distributor.read_reg(target_cpu_reg);
 
-        // Очистить старое значение и установить новое
-        let shift = bit_index * 8;
-        val &= !(0xFF << shift);
-        val |= (target.raw() as u32) << shift;
+        // Очищаем старое значение и устанавливаем новое
+        let bit_shift = bit * 8;
+        val &= !(0xFF << bit_shift);
+        val |= (target.raw() as u32) << bit_shift;
 
-        self.distributor.write::<u32>(reg_offset, val);
+        self.distributor.write_reg(target_cpu_reg, val);
     }
 
-    fn acknowledge(&self) -> Option<IrqNumber> {
-        let raw = self.cpu_interface.read_reg(GICC_IAR) & 0x3FF;
+    fn dispatch_interrupt(&mut self) {
+        debug!("Dispatch interrupt");
 
-        if raw >= SPURIOUS_IRQ_MIN {
-            // Spurious interrupt (1020-1023)
-            None
-        } else {
-            Some(IrqNumber::new(raw as u16))
+        let Some(irq) = self.acknowledge() else {
+            return;
+        };
+
+        debug!("Dispatch interrupt acknowledged. IRQ: {:?}", irq);
+
+        if let Some(handler) = self.handlers.get(&irq) {
+            handler.handle();
+        }
+
+        debug!("End of interrupt");
+
+        self.end_of_interrupt(irq);
+    }
+
+    fn acknowledge(&mut self) -> Option<IrqNumber> {
+        let raw = (self.cpu_interface.read_reg(GICC_IAR) & 0x3FF) as u16;
+
+        match IrqType::from_irq_number(IrqNumber::new(raw)) {
+            IrqType::Spurious => None,
+            _ => Some(IrqNumber::new(raw)),
         }
     }
 
     fn end_of_interrupt(&self, irq: IrqNumber) {
         self.cpu_interface.write_reg(GICC_EOIR, irq.raw() as u32);
     }
-
-    fn unbind_irq(&mut self, irq: IrqNumber) {
-        self.disable_irq(irq);
-        self.handlers.remove(&irq);
-    }
-
-    fn enable_global(&self) {
-        debug!(TAG;"Enabling GICv2");
-        debug!(TAG;"  GICD @ {}", self.distributor.base());
-        debug!(TAG;"  GICC @ {}", self.cpu_interface.base());
-
-        // 1. Включить Distributor
-        self.distributor.write_reg(GICD_CTLR, 1);
-
-        // 2. Включить CPU Interface
-        self.cpu_interface.write_reg(GICC_CTLR, 1);
-
-        // 3. Установить маску приоритета (0xFF = разрешить все приоритеты)
-        self.cpu_interface.write_reg(GICC_PMR, 0xFF);
-    }
-
-    fn disable_global(&self) {
-        self.cpu_interface.write_reg(GICC_CTLR, 0);
-        self.distributor.write_reg(GICD_CTLR, 0);
-    }
-
-    fn dispatch_interrupt(&self) {
-        let Some(irq) = self.acknowledge() else {
-            return;
-        };
-
-        if let Some(handler) = self.handlers.get(&irq) {
-            handler.handle();
-        }
-
-        self.end_of_interrupt(irq);
-    }
 }
 
-struct GicInterruptsHandle {
+struct GicInterruptsService {
     controller: Arc<Mutex<Gicv2Controller>>,
 }
 
-impl GicInterruptsHandle {
+impl GicInterruptsService {
     fn new(controller: Arc<Mutex<Gicv2Controller>>) -> Self {
         Self { controller }
     }
 }
 
-impl InterruptsService for GicInterruptsHandle {
+impl InterruptsService for GicInterruptsService {
     fn enable(&self) {
         {
             let guard = self.controller.lock();
             guard.enable_global();
         }
-
-        enable_local_irq();
     }
 
     fn disable(&self) {
-        disable_local_irq();
-
         let guard = self.controller.lock();
         guard.disable_global();
     }
@@ -323,34 +360,50 @@ impl InterruptsService for GicInterruptsHandle {
             handler,
         } = binding;
 
-        let mut guard = self.controller.lock();
+        debug!("Binding {irq:?}");
 
-        if IrqType::from_irq_number(irq).is_none() {
+        if matches!(IrqType::from_irq_number(irq), IrqType::Spurious) {
             return Err(IrqRegistrationError::InvalidIrq);
         }
+
+        let mut guard = self.controller.lock();
 
         if guard.handlers.contains_key(&irq) {
             return Err(IrqRegistrationError::AlreadyRegistered);
         }
 
         guard.set_priority(irq, priority);
-        guard.set_target(irq, target);
+        guard.set_target_cpu(irq, target);
+
         guard.handlers.insert(irq, handler);
-        guard.enable_irq(irq);
+        guard.enable(irq);
 
         let controller = self.controller.clone();
         let cleanup = move || {
             let mut guard = controller.lock();
-            guard.unbind_irq(irq);
+
+            guard.disable(irq);
+            guard.handlers.remove(&irq);
         };
+
+        debug!("IRQ {irq:?} bound!");
 
         Ok(IrqBound::new(irq, cleanup))
     }
 
     fn dispatch_interrupt(&self) {
-        let guard = self.controller.lock();
+        let mut guard = self.controller.lock();
         guard.dispatch_interrupt();
     }
+}
+
+#[inline]
+const fn bit_offset(irq: IrqNumber, bits: usize) -> (usize, usize) {
+    let bank_width = u32::BITS as usize;
+    let entries_per_bank = bank_width / bits;
+    let raw = irq.raw() as usize;
+
+    (raw / entries_per_bank, raw % entries_per_bank)
 }
 
 struct Gicv2Factory {
@@ -374,8 +427,6 @@ pub fn gicv2_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
     let gicc = context
         .get_mmio_address(1)
         .expect("failed to get GICC_BASE");
-
-    debug!(TAG; "Probed GICv2: GICD={gicd}, GICC={gicc}");
 
     Ok(Box::new(Gicv2Factory { gicd, gicc }))
 }
