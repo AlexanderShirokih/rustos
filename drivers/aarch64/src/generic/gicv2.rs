@@ -298,19 +298,13 @@ impl Gicv2Controller {
     }
 
     fn dispatch_interrupt(&mut self) {
-        debug!("Dispatch interrupt");
-
         let Some(irq) = self.acknowledge() else {
             return;
         };
 
-        debug!("Dispatch interrupt acknowledged. IRQ: {:?}", irq);
-
         if let Some(handler) = self.handlers.get(&irq) {
             handler.handle();
         }
-
-        debug!("End of interrupt");
 
         self.end_of_interrupt(irq);
     }
