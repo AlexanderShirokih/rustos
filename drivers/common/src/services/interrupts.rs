@@ -75,14 +75,14 @@ impl CpuMask {
 
 pub struct IrqBound {
     irq: Option<IrqNumber>,
-    cleanup: Option<Box<dyn FnOnce() + Send + Sync>>,
+    cleanup: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl IrqBound {
     /// Создаёт RAII-объект для уже зарегистрированного IRQ.
     pub fn new<F>(irq: IrqNumber, cleanup: F) -> Self
     where
-        F: FnOnce() + Send + Sync + 'static,
+        F: FnOnce() + Send + 'static,
     {
         let cleanup = Box::new(cleanup);
 
@@ -128,7 +128,7 @@ pub enum IrqRegistrationError {
 }
 
 /// Контракт обработчика IRQ.
-pub trait IrqHandler: Send + Sync {
+pub trait IrqHandler: Send {
     /// Вызывается при срабатывании соответствующего IRQ.
     fn handle(&self);
 }
