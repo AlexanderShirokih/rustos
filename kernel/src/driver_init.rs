@@ -4,6 +4,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use drivers_common::{CapabilityStoreMut, Driver, DriverRunError, RuntimeDriverRegistry};
+use klog::info;
 
 pub struct PendingDriver {
     pub name: &'static str,
@@ -54,6 +55,9 @@ pub fn run_retry_passes(
                 Ok(()) => {
                     progress = true;
                     initialized += 1;
+
+                    info!("Running driver {}. OK", pending_driver.name);
+
                     registry.insert(pending_driver.name, pending_driver.driver);
                 }
 
@@ -66,6 +70,8 @@ pub fn run_retry_passes(
                 }
 
                 Err(DriverRunError::Fatal(reason)) => {
+                    info!("Running driver {}. Fatal: {}", pending_driver.name, reason);
+
                     return Err(InitSchedulerError::Fatal {
                         driver: pending_driver.name,
                         reason,
@@ -98,10 +104,10 @@ mod tests {
     use alloc::vec;
     use core::marker::PhantomData;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use drivers_common::services::Service;
     use drivers_common::services::interrupts::{
         InterruptsService, IrqBinding, IrqBound, IrqRegistrationError,
     };
-    use drivers_common::services::Service;
     use drivers_common::{
         Capabilities, CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DriverRunError,
     };
