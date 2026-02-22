@@ -4,7 +4,7 @@
 
 use crate::combine_bits;
 use crate::memory::regs::common::EL1;
-use core::arch::asm;
+use crate::{read_sysreg, write_sysreg};
 
 /// Бит SCTLR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,10 +50,11 @@ impl SystemControlRegister<EL1> {
     }
 
     pub fn set(&self, mask: SctlrBits) {
+        // SAFETY: Чтение и запись SCTLR_EL1 допустимы на EL1. Новое значение
+        // формируется как OR текущего значения и маски — MMU-инварианты не нарушаются.
         unsafe {
-            let value: u64;
-            asm!("mrs {0}, sctlr_el1", out(reg) value, options(nostack, preserves_flags));
-            asm!("msr sctlr_el1, {0}", in(reg) value| mask.0, options(nostack, preserves_flags));
+            let value = read_sysreg!(sctlr_el1);
+            write_sysreg!(sctlr_el1, value | mask.0);
         };
     }
 }

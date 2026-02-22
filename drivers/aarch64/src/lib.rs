@@ -8,6 +8,7 @@ use drivers_common_aarch64::fdt_adapter::FdtNode;
 
 pub mod generic;
 pub mod qcom;
+mod sysreg;
 
 pub type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
 pub type FdtEarlyProbeFn = for<'a> fn(&mut FdtProbeContext<'a>) -> EarlyProbeResult;

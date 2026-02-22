@@ -3,7 +3,7 @@
 //! lower half → TTBR0_EL1
 //! higher half → TTBR1_EL1
 use crate::memory::regs::common::EL1;
-use core::arch::asm;
+use crate::write_sysreg;
 use core::marker::PhantomData;
 use memory::physical_address::PhysicalAddress;
 
@@ -27,16 +27,16 @@ impl<EL, TTBRIndex> TranslationTableBaseRegister<EL, TTBRIndex> {
 
 impl TranslationTableBaseRegister<EL1, LowerHalf> {
     pub fn set(&self, root: PhysicalAddress) {
-        unsafe {
-            asm!("msr ttbr0_el1, {0}", in(reg) root.as_usize() as u64, options(nostack, preserves_flags))
-        };
+        // SAFETY: Запись в TTBR0_EL1 допустима на EL1. Адрес таблицы страниц
+        // выровнен и корректен — формируется вызывающим кодом до включения MMU.
+        unsafe { write_sysreg!(ttbr0_el1, root.as_usize() as u64) };
     }
 }
 
 impl TranslationTableBaseRegister<EL1, HigherHalf> {
     pub fn set(&self, root: PhysicalAddress) {
-        unsafe {
-            asm!("msr ttbr1_el1, {0}", in(reg) root.as_usize() as u64, options(nostack, preserves_flags))
-        };
+        // SAFETY: Запись в TTBR1_EL1 допустима на EL1. Адрес таблицы страниц
+        // выровнен и корректен — формируется вызывающим кодом до включения MMU.
+        unsafe { write_sysreg!(ttbr1_el1, root.as_usize() as u64) };
     }
 }

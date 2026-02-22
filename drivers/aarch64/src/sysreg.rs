@@ -1,7 +1,4 @@
-//! Общие типы и макросы для системных регистров.
-
-/// Маркер уровня исключения EL1.
-pub enum EL1 {}
+//! Макросы для доступа к системным регистрам AArch64.
 
 /// Читает системный регистр AArch64 через инструкцию `mrs`.
 ///
@@ -9,8 +6,8 @@ pub enum EL1 {}
 ///
 /// # Пример
 /// ```rust
-/// // SAFETY: Чтение SCTLR_EL1 допустимо на EL1.
-/// let value = unsafe { read_sysreg!(sctlr_el1) };
+/// // SAFETY: Чтение CNTFRQ_EL0 допустимо на EL1 при корректной конфигурации платформы.
+/// let freq = unsafe { read_sysreg!(cntfrq_el0) };
 /// ```
 #[macro_export]
 macro_rules! read_sysreg {
@@ -31,8 +28,8 @@ macro_rules! read_sysreg {
 ///
 /// # Пример
 /// ```rust
-/// // SAFETY: Запись в TTBR0_EL1 допустима на EL1 при корректном выравнивании адреса.
-/// unsafe { write_sysreg!(ttbr0_el1, root_addr) };
+/// // SAFETY: Запись в CNTP_CTL_EL0 меняет только биты управления физического таймера.
+/// unsafe { write_sysreg!(cntp_ctl_el0, CNTP_CTL_ENABLE as u64) };
 /// ```
 #[macro_export]
 macro_rules! write_sysreg {
@@ -43,19 +40,4 @@ macro_rules! write_sysreg {
             options(nomem, nostack, preserves_flags)
         )
     };
-}
-
-/// Объединяет биты из массива в одно значение u64.
-#[macro_export]
-macro_rules! combine_bits {
-    ($bits:expr $(,)?) => {{
-        let bits = $bits;
-        let mut out: u64 = 0;
-        let mut i: usize = 0;
-        while i < bits.len() {
-            out |= bits[i].encode();
-            i += 1;
-        }
-        out
-    }};
 }

@@ -2,6 +2,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use alloc::string::String;
+use crate::{read_sysreg, write_sysreg};
 
 pub(super) const CNTP_CTL_ENABLE: u32 = 1 << 0;
 
@@ -62,50 +63,34 @@ impl ArmGenericTimerState {
     }
 
     fn read_cntfrq_el0() -> u64 {
-        let value: u64;
         // SAFETY: Чтение системного регистра CNTFRQ_EL0 разрешено на EL1 при корректной
         // конфигурации платформы и не нарушает инварианты памяти.
-        unsafe {
-            core::arch::asm!("mrs {value}, cntfrq_el0", value = out(reg) value, options(nomem, nostack));
-        }
-        value
+        unsafe { read_sysreg!(cntfrq_el0) }
     }
 
     fn read_cntpct_el0() -> u64 {
-        let value: u64;
         // SAFETY: Чтение CNTPCT_EL0 является побочным только по времени и не модифицирует
         // память/состояние, влияющее на безопасность Rust-кода.
-        unsafe {
-            core::arch::asm!("mrs {value}, cntpct_el0", value = out(reg) value, options(nomem, nostack));
-        }
-        value
+        unsafe { read_sysreg!(cntpct_el0) }
     }
 
     fn write_cntp_tval_el0(value: u32) {
-        let value = value as u64;
         // SAFETY: Запись в CNTP_TVAL_EL0 программирует относительный дедлайн физического таймера.
-        // Аппаратно устанавливает CNTP_CVAL_EL0 = CNTPCT_EL0 + TVAL.
+        // Аппаратно устанавливает CNTP_CVAL_EL0 = CNTPCT_EL0 + TVAL. ISB гарантирует
+        // что следующая инструкция видит актуальное значение таймера.
         unsafe {
-            core::arch::asm!(
-            "msr cntp_tval_el0, {value}",
-            "isb",
-            value = in(reg) value,
-            options(nomem, nostack),
-            );
+            write_sysreg!(cntp_tval_el0, value as u64);
+            core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
         }
     }
 
     fn write_cntp_ctl_el0(value: u32) {
-        let value = value as u64;
         // SAFETY: Запись в CNTP_CTL_EL0 меняет только биты управления физического таймера.
-        // Используются только документированные значения (enable/unmask).
+        // Используются только документированные значения (enable/unmask). ISB гарантирует
+        // немедленное применение изменений управляющего регистра.
         unsafe {
-            core::arch::asm!(
-            "msr cntp_ctl_el0, {value}",
-            "isb",
-            value = in(reg) value,
-            options(nomem, nostack),
-            );
+            write_sysreg!(cntp_ctl_el0, value as u64);
+            core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
         }
     }
 }

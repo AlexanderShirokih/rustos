@@ -1,5 +1,6 @@
 use core::arch::{asm, global_asm, naked_asm};
 use core::fmt::Write;
+use crate::write_sysreg;
 
 use collections::StaticString;
 use memory::virtual_address::VirtualAddress;
@@ -138,14 +139,11 @@ impl ExceptionVectors {
 
     /// Записывает адрес таблицы в `VBAR_EL1`.
     pub fn install(&self) {
-        // SAFETY: Прерывания замаскированы (DAIF).
+        // SAFETY: Прерывания замаскированы (DAIF). Адрес таблицы векторов
+        // выровнен на 2KB (требование ARMv8) — обеспечивается repr(align(2048)).
         unsafe {
-            asm!(
-                "msr vbar_el1, {addr}",
-                "isb",
-                addr = in(reg) self as *const Self as usize,
-                options(nostack),
-            );
+            write_sysreg!(vbar_el1, self as *const Self as usize);
+            asm!("isb", options(nomem, nostack, preserves_flags));
         }
     }
 }

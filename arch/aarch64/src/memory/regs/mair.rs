@@ -3,7 +3,7 @@
 //!
 use crate::combine_bits;
 use crate::memory::regs::common::EL1;
-use core::arch::asm;
+use crate::write_sysreg;
 
 /// Атрибуты обычной памяти (Normal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +62,8 @@ impl MemoryAttributeIndirectionRegister<EL1> {
     }
 
     pub fn set(&self, value: MairBits) {
-        unsafe { asm!("msr mair_el1, {0}", in(reg) value.0, options(nostack, preserves_flags)) };
+        // SAFETY: Запись в MAIR_EL1 допустима на EL1 до включения MMU.
+        // Атрибуты памяти формируются из типобезопасных констант MairEntry.
+        unsafe { write_sysreg!(mair_el1, value.0) };
     }
 }

@@ -4,7 +4,7 @@
 use crate::combine_bits;
 use crate::memory::regs::common::EL1;
 use crate::memory::regs::ttbr::{HigherHalf, LowerHalf};
-use core::arch::asm;
+use crate::write_sysreg;
 use core::marker::PhantomData;
 
 // Поля TCR:
@@ -124,9 +124,9 @@ impl TranslationControlRegister<EL1> {
         lower: AddressTranslationConfig<LowerHalf>,
         higher: AddressTranslationConfig<HigherHalf>,
     ) {
-        unsafe {
-            asm ! ("msr tcr_el1, {0}", in (reg) lower.value | higher.value, options(nostack, preserves_flags))
-        };
+        // SAFETY: Запись в TCR_EL1 допустима на EL1 до включения MMU.
+        // Значение формируется из типобезопасных конфигураций LowerHalf/HigherHalf.
+        unsafe { write_sysreg!(tcr_el1, lower.value | higher.value) };
     }
 }
 
