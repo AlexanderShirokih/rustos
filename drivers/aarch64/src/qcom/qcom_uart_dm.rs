@@ -1,15 +1,19 @@
 //! Драйвер Qualcomm UART DM (Data Mover).
 
-use crate::register_early_driver;
+use crate::register_driver;
 use alloc::boxed::Box;
-use drivers_common::probe::ProbeError;
-use drivers_common::services::mmio::MmioAddress;
-use drivers_common::{EarlyDriver, EarlyDriverContext, EarlyProbeResult};
-use drivers_common_aarch64::FdtProbeContext;
-use drivers_common_aarch64::ProbeContextExt;
+use alloc::sync::Arc;
+use drivers_common::probe::{ProbeError, ProbeResult};
+use drivers_common::services::mmio::{MmioAddress, MmioBound, MmioService};
+use drivers_common::services::console::ConsoleService;
+use drivers_common::{
+    CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DeviceMemoryPermission, Driver,
+    DriverFactory, DriverRunError, Owners,
+};
+use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt};
 use io::byte_sink::{ByteSink, Pending};
-use io::mmio::{Mmio, Reg};
-use io::writer::{BlockingWriter, Writer};
+use io::mmio::Reg;
+use io::writer::Writer;
 use util::crlf::Crlf;
 
 /// Количество символов для передачи.
@@ -34,32 +38,12 @@ const REG_UART_INDEX: usize = 0;
 /// Драйвер Qualcomm UART DM.
 pub struct UartDm {
     /// MMIO-доступ к регистрам.
-    mmio: Mmio,
-
-    /// Базовый адрес регистров.
-    address: MmioAddress,
+    mmio: MmioBound,
 }
 
 impl UartDm {
-    pub const fn new(address: MmioAddress) -> Self {
-        Self {
-            mmio: Mmio::new(address.base()),
-            address,
-        }
-    }
-}
-
-impl EarlyDriver for UartDm {
-    fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
-        context.map_mmio(self.address);
-
-        Ok(())
-    }
-
-    fn output(&self) -> Option<Box<dyn Writer + Sync + '_>> {
-        let writer = BlockingWriter::new(self);
-
-        Some(Box::new(writer))
+    pub fn new(mmio: MmioBound) -> Self {
+        Self { mmio }
     }
 }
 
@@ -110,7 +94,69 @@ impl ByteSink for UartDm {
     }
 }
 
-pub fn uart_dm_probe(context: &mut FdtProbeContext<'_>) -> EarlyProbeResult {
+impl Writer for UartDm {
+    fn write_all(&self, mut s: &[u8]) {
+        while !s.is_empty() {
+            match self.try_write_slice(s) {
+                Ok(n) if n > 0 => s = &s[n..],
+                _ => core::hint::spin_loop(),
+            }
+        }
+    }
+
+    fn flush(&self) {
+        ByteSink::flush(self);
+    }
+}
+
+impl ConsoleService for UartDm {
+    fn writer(&self) -> &(dyn Writer + Sync) {
+        self
+    }
+}
+
+// SAFETY: UartDm содержит только MmioBound (Sync), операции через volatile.
+unsafe impl Send for UartDm {}
+
+struct UartDmDriver {
+    address: MmioAddress,
+}
+
+impl Driver for UartDmDriver {
+    fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+        let mmio = caps
+            .require_service::<dyn MmioService>()
+            .map_err(DriverRunError::from_capability_error)?;
+
+        let bound = mmio
+            .map_mmio(
+                self.address,
+                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+            )
+            .map_err(|e: drivers_common::services::mmio::MmioMapError| {
+                DriverRunError::Fatal(alloc::format!("{}", e))
+            })?;
+
+        let uart = UartDm::new(bound);
+
+        caps.provide_service::<dyn ConsoleService>(Arc::new(uart))
+            .map_err(|e| DriverRunError::Fatal(alloc::format!("{}", e)))
+    }
+}
+
+struct UartDmFactory {
+    address: MmioAddress,
+}
+
+impl DriverFactory for UartDmFactory {
+    fn create(&self) -> Result<Box<dyn Driver>, alloc::string::String> {
+        Ok(Box::new(UartDmDriver {
+            address: self.address,
+        }))
+    }
+}
+
+pub fn uart_dm_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
     drivers_common_aarch64::require_compatible(
         context.node(),
         &["qcom,msm-uartdm", "qcom,msm-hsuart"],
@@ -120,7 +166,7 @@ pub fn uart_dm_probe(context: &mut FdtProbeContext<'_>) -> EarlyProbeResult {
         .get_mmio_address(REG_UART_INDEX)
         .ok_or(ProbeError::MissingProperty("base addr"))?;
 
-    Ok(Box::new(UartDm::new(address)))
+    Ok(Box::new(UartDmFactory { address }))
 }
 
-register_early_driver!(UART_DM_EARLY, probe = uart_dm_probe);
+register_driver!(UART_DM_DRIVER, probe = uart_dm_probe);

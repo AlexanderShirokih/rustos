@@ -1,5 +1,4 @@
 use crate::services::mmio::MmioServiceImpl;
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use drivers_common::services::mmio::MmioService;
 use drivers_common::{Capabilities, CapabilityStoreMutExt, RuntimeDriverRegistry};
@@ -14,11 +13,9 @@ pub struct KernelContext {
 
 impl KernelContext {
     pub fn new(
-        memory_mapper: Box<dyn MemoryMapper>,
+        memory_mapper: &'static dyn MemoryMapper,
         base_offset: PageAlignedVirtualAddress,
     ) -> KernelContext {
-        let memory_mapper = Box::leak(memory_mapper);
-
         let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl {
             memory_mapper,
             linear_offset: base_offset,

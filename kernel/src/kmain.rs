@@ -1,22 +1,31 @@
 extern crate alloc;
 
-use crate::driver_init::{InitSchedulerError, PendingDriver, run_retry_passes};
+use crate::driver_init::{run_retry_passes, InitSchedulerError, PendingDriver};
 use crate::irq_bridge;
 use crate::kernel_context::KernelContext;
 use alloc::vec::Vec;
+use drivers_common::services::console::ConsoleService;
 use drivers_common::CapabilityStoreExt;
 use drivers_common::scanner::DriverScanner;
 use drivers_common::services::interrupts::InterruptsService;
 use drivers_common::services::timer::TimerService;
+use io::buffered_writer::BufferedWriter;
 use klog::{debug, info};
 
 /// Главная функция ядра
-pub fn kmain(driver_scanner: DriverScanner, kernel: &mut KernelContext) {
+pub fn kmain(
+    driver_scanner: DriverScanner,
+    kernel: &mut KernelContext,
+    kout: &BufferedWriter,
+) {
     info!("Starting kmain");
 
     let pending = collect_pending_drivers(driver_scanner);
 
     run_all_drivers(kernel, pending);
+
+    // Привязка консоли и flush буфера
+    bind_console(kernel, kout);
 
     install_interrupts_hook(kernel);
     smoke_check_timer_ticks(kernel);
@@ -53,6 +62,19 @@ fn run_all_drivers(kernel: &mut KernelContext, pending: Vec<PendingDriver>) {
             panic!("Unresolved driver dependencies: {:?}", entries);
         }
     }
+}
+
+fn bind_console(kernel: &mut KernelContext, buffered: &BufferedWriter) {
+    kernel.with_runtime_state(|caps, _| {
+        if let Ok(console) = caps.require_service::<dyn ConsoleService>() {
+            let writer = console.writer();
+            // Консоль живёт в capabilities, writer — ссылка на неё. Для attach нужен &'static.
+            // SAFETY: console — Arc в capabilities, не будет dropped. writer() возвращает &T где T: ConsoleService.
+            let writer_static: &'static (dyn io::writer::Writer + Sync) =
+                unsafe { core::mem::transmute(writer) };
+            buffered.attach(writer_static);
+        }
+    });
 }
 
 fn install_interrupts_hook(kernel: &mut KernelContext) {

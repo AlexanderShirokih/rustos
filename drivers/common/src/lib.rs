@@ -7,7 +7,6 @@ extern crate alloc;
 
 pub mod capabilities;
 pub mod driver;
-pub mod early;
 pub mod probe;
 pub mod scanner;
 pub mod services;
@@ -19,10 +18,6 @@ pub use capabilities::*;
 pub use driver::*;
 pub use memory::mem_flags::*;
 pub use registry::*;
-
-pub use early::{
-    EarlyDriver, EarlyDriverContext, EarlyDriverInfo, EarlyInitOps, EarlyProbeFn, EarlyProbeResult,
-};
 
 pub use scanner::{DriverInfo, ProbeFn};
 pub use tree::{DeviceNode, DeviceTreeSource, NodeProperty};

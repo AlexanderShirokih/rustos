@@ -3,7 +3,7 @@
 extern crate alloc;
 
 use drivers_common::probe::{ProbeContext, ProbeResult};
-use drivers_common::{DriverInfo, EarlyDriverInfo, EarlyProbeResult};
+use drivers_common::DriverInfo;
 use drivers_common_aarch64::fdt_adapter::FdtNode;
 
 pub mod generic;
@@ -11,27 +11,9 @@ pub mod qcom;
 mod sysreg;
 
 pub type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
-pub type FdtEarlyProbeFn = for<'a> fn(&mut FdtProbeContext<'a>) -> EarlyProbeResult;
 pub type FdtProbeFn = for<'a> fn(&mut FdtProbeContext<'a>) -> ProbeResult;
 
-pub fn early_drivers() -> &'static [EarlyDriverInfo<FdtEarlyProbeFn>] {
-    {
-        #[allow(improper_ctypes)]
-        unsafe extern "C" {
-            static __drivers_early_start: EarlyDriverInfo<FdtEarlyProbeFn>;
-            static __drivers_early_end: EarlyDriverInfo<FdtEarlyProbeFn>;
-        }
-
-        unsafe {
-            let start = &__drivers_early_start as *const EarlyDriverInfo<FdtEarlyProbeFn>;
-            let end = &__drivers_early_end as *const EarlyDriverInfo<FdtEarlyProbeFn>;
-            let length = end.offset_from(start) as usize;
-            core::slice::from_raw_parts(start, length)
-        }
-    }
-}
-
-pub fn runtime_drivers() -> &'static [DriverInfo<FdtProbeFn>] {
+pub fn drivers() -> &'static [DriverInfo<FdtProbeFn>] {
     {
         #[allow(improper_ctypes)]
         unsafe extern "C" {
@@ -46,19 +28,6 @@ pub fn runtime_drivers() -> &'static [DriverInfo<FdtProbeFn>] {
             core::slice::from_raw_parts(start, length)
         }
     }
-}
-
-#[macro_export]
-macro_rules! register_early_driver {
-    ($symbol:ident, probe = $probe:expr) => {
-        #[cfg_attr(target_os = "none", unsafe(link_section = ".drivers.early"))]
-        #[used]
-        static $symbol: drivers_common::EarlyDriverInfo<$crate::FdtEarlyProbeFn> =
-            drivers_common::EarlyDriverInfo {
-                name: stringify!($symbol),
-                probe: $probe as $crate::FdtEarlyProbeFn,
-            };
-    };
 }
 
 #[macro_export]

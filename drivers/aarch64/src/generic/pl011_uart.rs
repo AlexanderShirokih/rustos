@@ -1,16 +1,20 @@
 //! Драйвер UART PL011 (ARM PrimeCell).
 
-use crate::register_early_driver;
+use crate::register_driver;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::hint::spin_loop;
-use drivers_common::probe::ProbeError;
-use drivers_common::services::mmio::MmioAddress;
-use drivers_common::{EarlyDriver, EarlyDriverContext, EarlyProbeResult};
-use drivers_common_aarch64::FdtProbeContext;
-use drivers_common_aarch64::ProbeContextExt;
+use drivers_common::probe::{ProbeError, ProbeResult};
+use drivers_common::services::mmio::{MmioAddress, MmioBound, MmioService};
+use drivers_common::services::console::ConsoleService;
+use drivers_common::{
+    CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DeviceMemoryPermission, Driver,
+    DriverFactory, DriverRunError, Owners,
+};
+use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt};
 use io::byte_sink::{ByteSink, Pending};
-use io::mmio::{Mmio, Reg};
-use io::writer::{BlockingWriter, Writer};
+use io::mmio::Reg;
+use io::writer::Writer;
 use util::crlf::Crlf;
 
 /// Регистр данных.
@@ -38,17 +42,12 @@ const REG_UART_INDEX: usize = 0;
 /// Драйвер UART PL011.
 pub struct UartPl011 {
     /// MMIO-доступ к регистрам.
-    mmio: Mmio,
-    /// Базовый адрес регистров.
-    base: MmioAddress,
+    mmio: MmioBound,
 }
 
 impl UartPl011 {
-    pub const fn new(base: MmioAddress) -> Self {
-        Self {
-            mmio: Mmio::new(base.base()),
-            base,
-        }
+    pub fn new(mmio: MmioBound) -> Self {
+        Self { mmio }
     }
 }
 
@@ -94,29 +93,77 @@ impl ByteSink for UartPl011 {
     }
 }
 
-impl EarlyDriver for UartPl011 {
-    fn init(&self, context: &mut EarlyDriverContext) -> Result<(), &'static str> {
-        context.map_mmio(self.base);
-
-        // Включение UART и передатчика
-        self.mmio.write_reg(CR, CR_UARTEN | CR_TXE | CR_RXE);
-
-        Ok(())
+impl Writer for UartPl011 {
+    fn write_all(&self, mut s: &[u8]) {
+        while !s.is_empty() {
+            match self.try_write_slice(s) {
+                Ok(n) if n > 0 => s = &s[n..],
+                _ => core::hint::spin_loop(),
+            }
+        }
     }
 
-    fn output(&self) -> Option<Box<dyn Writer + Sync + '_>> {
-        Some(Box::new(BlockingWriter::new(self)))
+    fn flush(&self) {
+        ByteSink::flush(self);
     }
 }
 
-pub fn uart_pl011_probe(context: &mut FdtProbeContext<'_>) -> EarlyProbeResult {
+impl ConsoleService for UartPl011 {
+    fn writer(&self) -> &(dyn Writer + Sync) {
+        self
+    }
+}
+
+// SAFETY: UartPl011 содержит только MmioBound (Sync), операции через volatile.
+unsafe impl Send for UartPl011 {}
+
+struct UartPl011Driver {
+    address: MmioAddress,
+}
+
+impl Driver for UartPl011Driver {
+    fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+        let mmio = caps
+            .require_service::<dyn MmioService>()
+            .map_err(DriverRunError::from_capability_error)?;
+
+        let bound = mmio
+            .map_mmio(
+                self.address,
+                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+            )
+            .map_err(|e: drivers_common::services::mmio::MmioMapError| {
+                DriverRunError::Fatal(alloc::format!("{}", e))
+            })?;
+
+        let uart = UartPl011::new(bound);
+        uart.mmio.write_reg(CR, CR_UARTEN | CR_TXE | CR_RXE);
+
+        caps.provide_service::<dyn ConsoleService>(Arc::new(uart))
+            .map_err(|e| DriverRunError::Fatal(alloc::format!("{}", e)))
+    }
+}
+
+struct UartPl011Factory {
+    address: MmioAddress,
+}
+
+impl DriverFactory for UartPl011Factory {
+    fn create(&self) -> Result<Box<dyn Driver>, alloc::string::String> {
+        Ok(Box::new(UartPl011Driver {
+            address: self.address,
+        }))
+    }
+}
+
+pub fn uart_pl011_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
     drivers_common_aarch64::require_compatible(context.node(), &["arm,pl011"])?;
 
     let address = context
         .get_mmio_address(REG_UART_INDEX)
         .ok_or(ProbeError::MissingProperty("base address"))?;
 
-    Ok(Box::new(UartPl011::new(address)))
+    Ok(Box::new(UartPl011Factory { address }))
 }
 
-register_early_driver!(UART_PL011_EARLY, probe = uart_pl011_probe);
+register_driver!(UART_PL011_DRIVER, probe = uart_pl011_probe);

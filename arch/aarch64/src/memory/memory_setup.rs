@@ -2,7 +2,6 @@
 //!
 //! Фазы: Early → Installed → Prepared → Enabled.
 
-use crate::HIGHER_HALF_BASE;
 use crate::memory::global_allocator::{GLOBAL_ALLOCATOR, KernelHeapAllocator};
 use crate::memory::layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag};
 use crate::memory::memory_mapper::{Aarch64MemoryMapper, FrameTableAlloc};
@@ -13,18 +12,15 @@ use aarch64_paging::mem_flags::Aarch64MemFlags;
 use aarch64_paging::page_table::PageTable;
 use aarch64_paging::preset::Heap;
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 use collections::Vec as StaticVec;
 use collections::interval_set::{Interval, StaticIntervalSet};
 use collections::{MutexCell, NoLockCell};
-use klog::{debug, info, warn};
 use memory::FrameBitmap;
-use memory::RelocatablePtr;
 use memory::bump_allocator::BumpAllocator;
 use memory::frame_allocator::{FrameAllocator, PhysicalFrameAllocator};
 use memory::memory_mapper::MemoryMapper;
 use memory::memory_range::MemoryRange;
-use memory::physical_address::PageAlignedAddress;
+use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::PageAlignedVirtualAddress;
 
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
@@ -51,11 +47,11 @@ pub struct MemoryManagerResult {
 }
 
 /// Корневые таблицы страниц.
-struct PageTableRoots {
-    lower_pa: PageAlignedAddress,
-    higher_pa: PageAlignedAddress,
-    lower_ptr: *mut PageTable<L0>,
-    higher_ptr: *mut PageTable<L0>,
+pub struct PageTableRoots {
+    pub lower_pa: PageAlignedAddress,
+    pub higher_pa: PageAlignedAddress,
+    pub lower_ptr: *mut PageTable<L0>,
+    pub higher_ptr: *mut PageTable<L0>,
 }
 
 /// Фаза после подготовки таблиц страниц.
@@ -71,17 +67,15 @@ pub struct Prepared {
 /// Фаза после включения MMU.
 pub struct Enabled {
     /// Корневые таблицы.
-    roots: PageTableRoots,
-    /// Аллокатор фреймов.
-    frame_allocator: &'static FrameAllocatorImpl,
-    /// База higher half.
-    higher_half_base: PageAlignedVirtualAddress,
+    pub roots: PageTableRoots,
+    /// Аллокатор фреймов (физический адрес, был Box::leak в bump-памяти).
+    pub frame_allocator: &'static FrameAllocatorImpl,
 }
 
 /// Машина состояний настройки памяти.
 pub struct MemorySetup<Stage> {
     /// Текущее состояние.
-    state: Stage,
+    pub state: Stage,
 }
 
 impl MemorySetup<Early> {
@@ -131,38 +125,15 @@ impl MemorySetup<Early> {
     }
 }
 
-const TAG_MEMORY_LAYOUT: &str = "Memory layout";
-const TAG_MEMORY_PREPARE: &str = "Memory setup: prepare";
-const TAG_MEMORY_ENABLE: &str = "Memory setup: enable";
-
 impl MemorySetup<Installed> {
-    pub fn prepare(
-        self,
-        mmio: Vec<MemoryRegion<PageAlignedAddress>>,
-    ) -> Result<MemorySetup<Prepared>, MemorySetupError> {
+    /// Подготавливает таблицы страниц (frame allocator, корневые таблицы, регионы для маппинга).
+    pub fn prepare(self) -> Result<MemorySetup<Prepared>, MemorySetupError> {
         let Installed {
             layout,
             free_regions,
         } = self.state;
 
-        for region in layout.iter() {
-            info!(
-                TAG_MEMORY_LAYOUT;
-                "- {:?}, from {:#x} to {:#x}",
-                region.tag, region.start, region.end
-            );
-        }
-
-        free_regions.iter().for_each(|interval| {
-            debug!(
-                TAG_MEMORY_PREPARE;
-                "Free heap region: {:#x} - {:#x} ({} bytes)",
-                interval.start, interval.end,
-                interval.end.as_usize() - interval.start.as_usize()
-            );
-        });
-
-        // Создание frame_allocator из очищенных регионов
+        // Создание frame_allocator из свободных регионов
         let free_heap_regions_iter = free_regions
             .iter()
             .map(|interval| MemoryRange::new(interval.start, interval.end));
@@ -172,10 +143,8 @@ impl MemorySetup<Installed> {
         )));
 
         // Резервирование памяти, использованной bump аллокатором.
-        // Заморозка аллокации для предотвращения изменений
         GLOBAL_ALLOCATOR.set_freeze();
 
-        // Исключаем только использованную часть bump
         // SAFETY: bump инициализирован и заморожен, конкурентного доступа нет
         let bump_used = unsafe { GLOBAL_ALLOCATOR.get_bump() }.used();
         let bump_start = PageAlignedAddress::aligned_down(bump_used.start());
@@ -183,7 +152,7 @@ impl MemorySetup<Installed> {
 
         frame_allocator
             .reserve_frames_exact(bump_start.into(), bump_end.into())
-            .expect("Cannot reserve bump allocator memory");
+            .map_err(|_| MemorySetupError::OutOfMemory)?;
 
         // Выделяем страницы под корень таблиц страниц
         let lower_root_pa = frame_allocator
@@ -196,12 +165,6 @@ impl MemorySetup<Installed> {
             .map(|frame| frame.page_address())
             .ok_or(MemorySetupError::OutOfMemory)?;
 
-        debug!(
-            TAG_MEMORY_PREPARE;
-            "Allocated page table roots: lower={lower_root_pa:#x}, higher={higher_root_pa:#x}",
-        );
-
-        // Используем зафиксированный bump_used (заморожен в prepare)
         let bump_range = MemoryRegion::new(
             RegionTag::Other,
             bump_used.start().as_usize(),
@@ -209,11 +172,10 @@ impl MemorySetup<Installed> {
             Heap::flags(),
         );
 
-        // Вычисляем точно незанятые области RAM
         let mut mapping_heap_regions = free_regions.clone();
         mapping_heap_regions
             .remove(bump_start, bump_end)
-            .expect("Failed to remove bump from heap regions");
+            .ok_or(MemorySetupError::OutOfMemory)?;
 
         let heap_regions = mapping_heap_regions.iter().map(|interval| {
             MemoryRegion::new(
@@ -224,14 +186,18 @@ impl MemorySetup<Installed> {
             )
         });
 
-        // Области, которые нужно замапить со своими флагами
         let non_heap_regions = layout.iter().filter(|r| !r.is_heap()).cloned();
 
-        let all_regions = heap_regions
+        let mut all_regions: StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS> =
+            StaticVec::new();
+        for region in heap_regions
             .chain(non_heap_regions)
-            .chain(mmio.iter().cloned())
             .chain(core::iter::once(bump_range))
-            .collect::<StaticVec<_, MAX_MEMORY_REGIONS>>();
+        {
+            all_regions
+                .push(region)
+                .ok_or(MemorySetupError::OutOfMemory)?;
+        }
 
         let roots = PageTableRoots {
             lower_pa: lower_root_pa,
@@ -239,8 +205,6 @@ impl MemorySetup<Installed> {
             lower_ptr: Self::create_root_table(lower_root_pa),
             higher_ptr: Self::create_root_table(higher_root_pa),
         };
-
-        debug!("MemorySetup::prepare"; "Created root page tables");
 
         Ok(MemorySetup::<Prepared> {
             state: Prepared {
@@ -253,6 +217,7 @@ impl MemorySetup<Installed> {
 }
 
 impl MemorySetup<Prepared> {
+    /// Маппит все регионы и включает MMU.
     pub fn enable(
         self,
         higher_half_base: PageAlignedVirtualAddress,
@@ -262,15 +227,7 @@ impl MemorySetup<Prepared> {
             frame_allocator,
             all_regions,
         } = self.state;
-
         Self::linear_map_impl(frame_allocator, &roots, &all_regions, higher_half_base)?;
-
-        debug!(
-            TAG_MEMORY_ENABLE;
-            "Enabling MMU with TTBR0={:#x}, TTBR1={:#x}",
-            roots.lower_pa,
-            roots.higher_pa
-        );
 
         // Включение Memory Management Unit (MMU)
         Mmu::new().enable(NormalDualSpaceConfig::new(
@@ -281,7 +238,6 @@ impl MemorySetup<Prepared> {
         Ok(MemorySetup::<Enabled> {
             state: Enabled {
                 frame_allocator,
-                higher_half_base,
                 roots,
             },
         })
@@ -300,11 +256,9 @@ impl MemorySetup<Prepared> {
         let higher_half_mapper =
             NoLockAarch64MemoryMapper::new(frame_allocator, roots.higher_ptr, heap_flags);
 
-        // Маппинг всех регионов линейно: VA = higher_half_base + PA
         Self::map_higher_half_impl(&higher_half_mapper, all_regions, higher_half_base)?;
 
-        // Маппинг регионов с identity доступом после включения MMU.
-        // Использование итератора без аллокации Vec (bump allocator заморожен)
+        // Identity mapping — нужен только для перехода сразу после включения MMU
         let identity_regions = all_regions
             .iter()
             .filter(|region| !region.is_heap())
@@ -315,7 +269,6 @@ impl MemorySetup<Prepared> {
         Ok(())
     }
 
-    /// Маппит все регионы линейно: VA = higher_half_base + PA.
     fn map_higher_half_impl<'a, FA: FrameAllocator>(
         mapper: &NoLockAarch64MemoryMapper<'a, FA>,
         all_regions: &StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
@@ -325,57 +278,23 @@ impl MemorySetup<Prepared> {
 
         for region in all_regions.iter() {
             let va = region.virtual_start(higher_half_base_usize);
-
-            debug!(
-                "map_higher_half";
-                "Mapping {:?}: PA {:#x} -> VA {:#x}, size={:#x}",
-                region.tag,
-                region.start.as_usize(),
-                va.as_usize(),
-                region.size()
-            );
-
             mapper
                 .map_exact_impl(va, region.start, region.size(), region.flags)
-                .map_err(|e| {
-                    warn!(
-                        "map_higher_half";
-                        "Failed to map {:?} at PA {:#x}: {:?}",
-                        region.tag,
-                        region.start,
-                        e
-                    );
-                    MemorySetupError::MappingFailed(e)
-                })?;
+                .map_err(MemorySetupError::MappingFailed)?;
         }
 
         Ok(())
     }
 
-    /// Identity mapping — kernel регионы + bump allocator range + MMIO.
-    /// Нужен для выполнения кода сразу после включения MMU, до прыжка в higher half.
     fn map_identity_impl<FA: FrameAllocator>(
         mapper: &NoLockAarch64MemoryMapper<FA>,
         identity_regions: impl Iterator<Item = MemoryRegion<PageAlignedAddress>>,
     ) -> Result<(), MemorySetupError> {
         for region in identity_regions {
-            debug!(
-                "map_identity";
-                "Identity for {:?}: PA {:#x}, size={:#x}",
-                region.tag, region.start, region.size()
-            );
-
             let bootstrap_va = PageAlignedVirtualAddress::identity(region.start);
             mapper
                 .map_exact_impl(bootstrap_va, region.start, region.size(), region.flags)
-                .map_err(|e| {
-                    warn!(
-                        "map_identity";
-                        "Failed to map bootstrap identity for {:?}: {:?}",
-                        region.tag, e
-                    );
-                    MemorySetupError::MappingFailed(e)
-                })?;
+                .map_err(MemorySetupError::MappingFailed)?;
         }
 
         Ok(())
@@ -383,34 +302,36 @@ impl MemorySetup<Prepared> {
 }
 
 impl MemorySetup<Enabled> {
-    //noinspection RsUnstableItemUsage
-    pub fn install(self) -> Result<MemoryManagerResult, ()> {
-        let Enabled {
-            roots,
-            frame_allocator,
-            higher_half_base,
-        } = self.state;
+    /// Переключает глобальный аллокатор на heap-фазу и возвращает маппер памяти.
+    ///
+    /// Вызывается post-MMU
+    pub fn install_from_raw(
+        higher_root_pa: PageAlignedAddress,
+        frame_allocator_phys: PhysicalAddress,
+        higher_half_base: PageAlignedVirtualAddress,
+    ) -> Result<MemoryManagerResult, ()> {
+        // Аллокатор фреймов находится по физическому адресу (был Box::leak в bump-памяти).
+        let fa_virt: &'static FrameAllocatorImpl =
+            // SAFETY: PA + higher_half_base — корректный виртуальный адрес,
+            // замапленный через TTBR1. Аллокатор был создан в bump-памяти pre-MMU.
+            unsafe {
+                &*((frame_allocator_phys.as_usize() + higher_half_base.as_usize())
+                    as *const FrameAllocatorImpl)
+            };
 
-        let frame_allocator_ptr = RelocatablePtr::new(frame_allocator as &dyn FrameAllocator);
-        let frame_allocator_rel =
-            unsafe { frame_allocator_ptr.relocated(higher_half_base.as_virtual()) };
-
-        let allocator = KernelHeapAllocator::new(frame_allocator_rel, higher_half_base);
-
-        // Переключение логгера на higher half
-        if let Some(writer) = klog::get_early_writer() {
-            let new_writer_ptr = RelocatablePtr::new(writer);
-            let new_writer = unsafe { new_writer_ptr.relocated(higher_half_base.as_virtual()) };
-
-            klog::set_stdout(new_writer);
+        // SAFETY: MMU уже включён, используется линейное отображение PA->VA (+higher_half_base),
+        unsafe {
+            fa_virt.relocate_inner_pointers_by_offset(higher_half_base.as_usize());
         }
 
+        let allocator = KernelHeapAllocator::new(fa_virt, higher_half_base);
         GLOBAL_ALLOCATOR.set_heap(allocator);
 
-        let higher_ptr_rel = unsafe { roots.higher_ptr.byte_add(HIGHER_HALF_BASE) };
+        let higher_ptr_phys = PageAlignedVirtualAddress::identity(higher_root_pa).as_ptr::<PageTable<L0>>();
+        let higher_ptr_rel = unsafe { higher_ptr_phys.byte_add(higher_half_base.as_usize()) };
         let memory_mapper: Aarch64MemoryMapper<'_, _, MutexPageMapper<'_, _>> =
             Aarch64MemoryMapper::new_with_offset(
-                frame_allocator,
+                fa_virt,
                 higher_ptr_rel,
                 Aarch64MemFlags::new(),
                 higher_half_base.as_usize(),

@@ -1,6 +1,8 @@
 use alloc::boxed::Box;
 use alloc::format;
-use drivers_common::services::mmio::{MmioAddress, MmioBound, MmioMapError, MmioService};
+use drivers_common::services::mmio::{
+    CleanupCallback, MmioAddress, MmioBound, MmioMapError, MmioService,
+};
 use memory::MemFlags;
 use memory::mem_flags::{DeviceMemoryPermission, Owners};
 use memory::memory_mapper::MemoryMapper;
@@ -29,9 +31,7 @@ impl MmioService for MmioServiceImpl {
         let source_address =
             PageAlignedVirtualAddress::from_aligned_offset(target_address, self.linear_offset);
 
-        let mapper = self.memory_mapper;
-
-        mapper
+        self.memory_mapper
             .map_exact(
                 source_address,
                 target_address,
@@ -40,7 +40,8 @@ impl MmioService for MmioServiceImpl {
             )
             .map_err(|err| MmioMapError(format!("Mapping error: {err}")))?;
 
-        let cleanup = Box::new(
+        let mapper = self.memory_mapper;
+        let cleanup: Box<CleanupCallback> = Box::new(
             move |virtual_address: PageAlignedVirtualAddress, size: usize| {
                 let _ = mapper.unmap(virtual_address, size);
             },

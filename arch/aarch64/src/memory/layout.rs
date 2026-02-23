@@ -4,14 +4,13 @@ use aarch64_paging::mem_flags::Aarch64MemFlags;
 use aarch64_paging::preset::Mmio;
 use collections::Vec;
 use collections::interval_set::StaticIntervalSet;
-use klog::warn;
 use memory::aligned::{Address, Aligned};
 use memory::memory_range::MemoryRange;
 use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
 use memory::virtual_address::PageAlignedVirtualAddress;
 
 /// Максимальное количество регионов памяти.
-pub const MAX_MEMORY_REGIONS: usize = 32;
+pub const MAX_MEMORY_REGIONS: usize = 128;
 
 /// Тег типа региона памяти
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +55,6 @@ impl MemoryLayout {
         // Добавление свободных областей (heap-регионы)
         for heap in self.iter().filter(|region| region.is_heap()) {
             if free_regions.add(heap.start, heap.end).is_none() {
-                warn!("free_heap_regions"; "ERROR: Failed to add heap region");
                 return Err(());
             }
         }
@@ -64,7 +62,6 @@ impl MemoryLayout {
         // Вычитаем занятые (зарезервированные) области
         for region in self.iter().filter(|region| !region.is_heap()) {
             if free_regions.remove(region.start, region.end).is_none() {
-                warn!("free_heap_regions"; "ERROR: Failed to remove reserved region");
                 return Err(());
             }
         }

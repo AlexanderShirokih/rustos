@@ -3,57 +3,61 @@ ENTRY(__start);
 
 PROVIDE(KERNEL_OFFSET = 0);
 
-SECTIONS {
-    . = KERNEL_OFFSET;
+KERNEL_VIRT_BASE = 0xFFFFFF8000000000;
 
-    .head ALIGN(8) : {
+SECTIONS {
+    . = KERNEL_VIRT_BASE + KERNEL_OFFSET;
+
+    /* Загрузочный заголовок: LMA = KERNEL_OFFSET, VMA = KERNEL_VIRT_BASE + KERNEL_OFFSET */
+    .head : AT(. - KERNEL_VIRT_BASE) {
         KEEP(*(.head))
     }
 
     _kernel_start = .;
     _text_start = .;
-    
-    .text : ALIGN(4K) {
+
+    . = ALIGN(4K);
+    .text : AT(. - KERNEL_VIRT_BASE) {
         *(.text*)
     }
-    
+
     _text_end = ALIGN(4K);
     _rodata_start = ALIGN(4K);
 
-    .rodata : ALIGN(4K) {
-        __drivers_early_start = .;
-        KEEP(*(.drivers.early))
-        __drivers_early_end = .;
-
+    . = ALIGN(4K);
+    .rodata : AT(. - KERNEL_VIRT_BASE) {
         __drivers_kernel_start = .;
         KEEP(*(.drivers.kernel))
         __drivers_kernel_end = .;
 
         *(.rodata*)
     }
-    
+
     _rodata_end = ALIGN(4K);
     _rw_start = ALIGN(4K);
 
-    .data : ALIGN(4K) {
+    . = ALIGN(4K);
+    .data : AT(. - KERNEL_VIRT_BASE) {
         *(.data*)
     }
 
-    .bss (NOLOAD) : ALIGN(4K) {
+    /* NOLOAD-секции: LMA не важна, заполнение нулями обеспечивает загрузчик/BSS-очистка */
+    .bss (NOLOAD) : {
         _bss_start = .;
         *(.bss*)
         *(COMMON)
         _bss_end = .;
-    } =0
+    }
 
-    .stack (NOLOAD) : ALIGN(4K) {
+    .stack (NOLOAD) : {
         _stack_bottom = .;
         . += 64K;
         _stack_top = .;
-    } =0
+    }
 
     _rw_end = .;
     _kernel_end = .;
 
     PROVIDE(_kernel_size = _kernel_end - _kernel_start);
+    PROVIDE(_kernel_virt_base = KERNEL_VIRT_BASE);
 }

@@ -18,6 +18,7 @@ kernel = { path = "../../kernel" }
 memory = { path = "../../memory" }
 collections = { path = "../../collections" }
 fdt = { path = "../../fdt" }
+io = { path = "../../io" }
 klog = { path = "../../log" }
 
 [build-dependencies]

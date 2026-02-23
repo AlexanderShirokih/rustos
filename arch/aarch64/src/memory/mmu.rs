@@ -108,6 +108,20 @@ impl Mmu<EL1> {
 }
 
 impl Mmu<EL1> {
+    /// Отключает identity mapping: обнуляет TTBR0_EL1 и сбрасывает TLB.
+    ///
+    /// Вызывать только после перехода в higher half (виртуальный SP и PC).
+    pub fn disable_lower_half(&self) {
+        system::barrier::full_system_barrier();
+        // SAFETY: Вызывается post-MMU, после переключения SP и PC на виртуальные адреса.
+        // После этого вызова любое обращение к lower half вызовет Translation Fault.
+        unsafe {
+            core::arch::asm!("msr ttbr0_el1, xzr", "isb", options(nostack, preserves_flags));
+        }
+        self.tlb.invalidate();
+        system::barrier::full_system_barrier();
+    }
+
     /// Включает MMU и кэши.
     pub fn enable<C: MmuConfig>(&self, config: C) {
         // 1) Барьер перед изменениями регистров + маскирование прерываний

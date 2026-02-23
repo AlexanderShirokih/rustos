@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 spin = "0.10.0"
 drivers-common = { path = "../drivers/common" }
+io = { path = "../io" }
 memory = { path = "../memory" }
 klog = { path = "../log" }

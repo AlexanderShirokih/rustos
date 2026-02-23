@@ -142,6 +142,21 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
             bitmap.alloc_from(Frame::from(bitmap.start()))
         }
     }
+
+    /// Релоцирует внутренние указатели bitmap'ов в каждом регионе.
+    ///
+    /// # Safety
+    ///
+    /// Вызывать ровно один раз после включения MMU при линейном отображении
+    /// физической памяти в higher-half с константным `offset`.
+    pub unsafe fn relocate_inner_pointers_by_offset(&self, offset: usize) {
+        for region in &self.regions {
+            region.with_lock(|bitmap| {
+                // SAFETY: Выполняется в post-MMU фазе до первого использования allocator'а.
+                unsafe { bitmap.relocate_ptr_by_offset(offset) };
+            });
+        }
+    }
 }
 
 impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {

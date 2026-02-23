@@ -1,14 +1,12 @@
 //! Крейт логирования ядра.
 //!
-//! Предоставляет макросы для вывода сообщений с уровнями логирования
-//! и поддержку раннего вывода до включения MMU.
+//! Предоставляет макросы для вывода сообщений с уровнями логирования.
 
 #![no_std]
 extern crate alloc;
 
-use collections::{LockCell, MutexCell, NoLockCell};
+use collections::{LockCell, MutexCell};
 use core::fmt::{Arguments, Write as _};
-use core::sync::atomic::{AtomicBool, Ordering};
 use io::writer::Writer;
 
 /// Тип статического writer'а для вывода логов.
@@ -37,40 +35,7 @@ impl Writer for NilWriter {
 
 static NIL: NilWriter = NilWriter;
 
-/// Держатель консольного вывода с поддержкой раннего и нормального режимов.
-struct ConsoleHolder {
-    /// Ранний writer (до включения MMU). Запись/чтение однопоточные.
-    early: NoLockCell<&'static StaticWriter>,
-    /// Нормальный writer (после включения MMU).
-    normal: MutexCell<&'static StaticWriter>,
-    /// Флаг перехода в нормальный режим.
-    is_normal: AtomicBool,
-}
-
-impl ConsoleHolder {
-    pub const fn new() -> Self {
-        Self {
-            early: NoLockCell::new(&NIL),
-            normal: MutexCell::new(&NIL),
-            is_normal: AtomicBool::new(false),
-        }
-    }
-
-    fn with_writer<R>(&self, fun: impl FnOnce(&mut &'static StaticWriter) -> R) -> R {
-        if self.is_normal.load(Ordering::Acquire) {
-            self.normal.with_lock(fun)
-        } else {
-            self.early.with_lock(fun)
-        }
-    }
-}
-
-// SAFETY: `UnsafeCell` делает тип !Sync, но мы гарантируем корректность через режимы:
-// - до MMU запись/чтение однопоточно;
-// - после MMU ранний writer больше не меняется, а вывод идет через `normal` mutex.
-unsafe impl Sync for ConsoleHolder {}
-
-static STDOUT: ConsoleHolder = ConsoleHolder::new();
+static STDOUT: MutexCell<&'static StaticWriter> = MutexCell::new(&NIL);
 
 struct FmtWriter<'a>(&'a StaticWriter);
 
@@ -81,35 +46,15 @@ impl core::fmt::Write for FmtWriter<'_> {
     }
 }
 
-/// Вызывается на раннем этапе (однопоточно). Разрешено вызвать только один раз.
-pub fn set_early_stdout(w: alloc::boxed::Box<StaticWriter>) {
-    let leaked: &'static StaticWriter = alloc::boxed::Box::leak(w);
-    STDOUT.early.with_lock(|writer| *writer = leaked);
-}
-
-/// Вызывается после включения MMU.
+/// Устанавливает writer для вывода логов.
 /// Можно вызывать повторно, чтобы заменить writer.
 pub fn set_stdout(w: &'static StaticWriter) {
-    STDOUT.normal.with_lock(|writer| *writer = w);
-
-    // Публикация перехода в normal mode после установки writer
-    STDOUT.is_normal.store(true, Ordering::Release);
-}
-
-/// Возвращает текущий early writer, если он установлен.
-pub fn get_early_writer() -> Option<&'static StaticWriter> {
-    STDOUT.early.with_lock(|w| {
-        if core::ptr::eq(*w, &NIL) {
-            None
-        } else {
-            Some(*w)
-        }
-    })
+    STDOUT.with_lock(|writer| *writer = w);
 }
 
 /// Печать форматированной строки без префикса уровня.
 pub fn printf(arguments: Arguments) {
-    STDOUT.with_writer(|writer| {
+    STDOUT.with_lock(|writer| {
         let mut fmt = FmtWriter(*writer);
         let _ = fmt.write_fmt(arguments);
         writer.flush();

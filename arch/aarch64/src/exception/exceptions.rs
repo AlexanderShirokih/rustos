@@ -3,7 +3,6 @@ use core::fmt::Write;
 use crate::write_sysreg;
 
 use collections::StaticString;
-use memory::virtual_address::VirtualAddress;
 
 use super::esr::Esr;
 use super::gpreg::GpReg;
@@ -125,16 +124,6 @@ impl ExceptionVectors {
             static exception_vectors: ExceptionVectors;
         }
         unsafe { &exception_vectors }
-    }
-
-    /// Релоцирует ссылку на таблицу на `offset`.
-    ///
-    /// # Safety
-    ///
-    /// Маппинг по адресу `self + offset` должен покрывать таблицу.
-    pub unsafe fn relocated(&'static self, offset: VirtualAddress) -> &'static Self {
-        let addr = (self as *const Self as usize) + offset.as_usize();
-        unsafe { &*(addr as *const Self) }
     }
 
     /// Записывает адрес таблицы в `VBAR_EL1`.
