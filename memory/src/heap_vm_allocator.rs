@@ -262,8 +262,14 @@ impl HeapAllocator {
     /// Указатель на заголовок хранится перед пользовательскими данными.
     /// При освобождении указатель обнуляется для защиты от double-free.
     pub fn deallocate(&mut self, ptr: NonNull<u8>) {
+        let addr = ptr.as_ptr() as usize;
+        if addr < self.higher_half_base {
+            return;
+        }
+
         unsafe {
             // Читаем указатель на заголовок блока, хранящийся перед пользовательскими данными
+            // SAFETY: указатель находится в higher half, гарантирующей валидную mapped-память
             let header_ptr_location = (ptr.as_ptr() as *mut *mut FreeBlock).sub(1);
             let block_ptr = *header_ptr_location;
 

@@ -40,11 +40,11 @@ impl BufferedWriter {
             let mut state = self.state.lock();
             core::mem::replace(&mut *state, BufferState::Attached(writer))
         };
-        if let BufferState::Buffering(buf) = old {
-            if !buf.is_empty() {
-                writer.write_all(&buf);
-                writer.flush();
-            }
+        if let BufferState::Buffering(buf) = old
+            && !buf.is_empty()
+        {
+            writer.write_all(&buf);
+            writer.flush();
         }
     }
 }
