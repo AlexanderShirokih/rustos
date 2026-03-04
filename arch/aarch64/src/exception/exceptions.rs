@@ -16,17 +16,17 @@ const _: () = assert!(size_of::<ExceptionFrame>().is_multiple_of(16));
 /// Контекст процессора, сохраняемый при входе в обработчик исключения.
 #[repr(C)]
 pub struct ExceptionFrame {
-    /// Регистры общего назначения x0–x30.
+    /// Регистры общего назначения x0-x30.
     pub regs: [GpReg; 31],
     /// Указатель стека на момент исключения (до выделения фрейма).
     pub sp: u64,
-    /// Exception Link Register — адрес возврата.
+    /// Exception Link Register - адрес возврата.
     pub elr: u64,
     /// Saved Program Status Register.
     pub spsr: u64,
-    /// Exception Syndrome Register — описание причины исключения.
+    /// Exception Syndrome Register - описание причины исключения.
     pub esr: Esr,
-    /// Fault Address Register — адрес, вызвавший исключение (для aborts).
+    /// Fault Address Register - адрес, вызвавший исключение (для aborts).
     pub far: u64,
 }
 
@@ -129,7 +129,7 @@ impl ExceptionVectors {
     /// Записывает адрес таблицы в `VBAR_EL1`.
     pub fn install(&self) {
         // SAFETY: Прерывания замаскированы (DAIF). Адрес таблицы векторов
-        // выровнен на 2KB (требование ARMv8) — обеспечивается repr(align(2048)).
+        // выровнен на 2KB (требование ARMv8) - обеспечивается repr(align(2048)).
         unsafe {
             write_sysreg!(vbar_el1, self as *const Self as usize);
             asm!("isb", options(nomem, nostack, preserves_flags));
@@ -171,7 +171,7 @@ fn irq_handler(_frame: &ExceptionFrame) {
     kernel::irq_bridge::dispatch_interrupt();
 }
 
-/// Обработчик FIQ — паника с диагностикой.
+/// Обработчик FIQ - паника с диагностикой.
 fn fiq_handler(frame: &ExceptionFrame) {
     let mut buf = StaticString::<EXCEPTION_BUF_SIZE>::new();
     let _ = writeln!(buf, "FIQ");
@@ -180,7 +180,7 @@ fn fiq_handler(frame: &ExceptionFrame) {
     panic!("{}", buf);
 }
 
-/// Обработчик SError — паника с диагностикой.
+/// Обработчик SError - паника с диагностикой.
 fn serror_handler(frame: &ExceptionFrame) {
     let iss = frame.esr.iss();
 
@@ -232,7 +232,7 @@ macro_rules! exception_entry {
                 // Сохранение контекста
                 "sub sp, sp, #{frame_size}",
 
-                // Регистры общего назначения x0–x29 (15 пар)
+                // Регистры общего назначения x0-x29 (15 пар)
                 "stp x0,  x1,  [sp, #0]",
                 "stp x2,  x3,  [sp, #16]",
                 "stp x4,  x5,  [sp, #32]",
@@ -267,7 +267,7 @@ macro_rules! exception_entry {
                 "mov x1, #{kind}",
                 "bl  {handler}",
 
-                // Системные регистры (до восстановления GPR, т.к. x9/x10 — временные)
+                // Системные регистры (до восстановления GPR, т.к. x9/x10 - временные)
                 "ldp x9,  x10, [sp, #256]",
                 "msr elr_el1,  x9",
                 "msr spsr_el1, x10",

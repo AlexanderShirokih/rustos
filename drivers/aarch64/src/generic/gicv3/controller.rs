@@ -112,8 +112,8 @@ impl Gicv3Controller {
 
     /// Устанавливает affinity routing для SPI.
     ///
-    /// Если маска содержит несколько CPU — используется IRM=1 (любой доступный).
-    /// Если один CPU — используется специфический Aff0.
+    /// Если маска содержит несколько CPU - используется IRM=1 (любой доступный).
+    /// Если один CPU - используется специфический Aff0.
     pub(super) fn set_affinity(&self, irq: IrqNumber, target: CpuMask) {
         if !matches!(IrqType::from_irq_number(irq), IrqType::Spi) {
             return;
@@ -269,7 +269,7 @@ impl Gicv3Controller {
 
     fn acknowledge(&self) -> Option<IrqNumber> {
         // SAFETY: Чтение ICC_IAR1_EL1 возвращает INTID текущего pending прерывания группы 1
-        // и переводит его в active-состояние. Побочный эффект допустим — это штатная операция.
+        // и переводит его в active-состояние. Побочный эффект допустим - это штатная операция.
         let raw = (unsafe { read_sysreg!(icc_iar1_el1) } & 0x3FF) as u16;
 
         match IrqType::from_irq_number(IrqNumber::new(raw)) {

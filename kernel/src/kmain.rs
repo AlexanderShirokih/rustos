@@ -68,8 +68,8 @@ fn bind_console(kernel: &mut KernelContext, buffered: &BufferedWriter) {
     kernel.with_runtime_state(|caps, _| {
         if let Ok(console) = caps.require_service::<dyn ConsoleService>() {
             let writer = console.writer();
-            // Консоль живёт в capabilities, writer — ссылка на неё. Для attach нужен &'static.
-            // SAFETY: console — Arc в capabilities, не будет dropped. writer() возвращает &T где T: ConsoleService.
+            // Консоль живёт в capabilities, writer - ссылка на неё. Для attach нужен &'static.
+            // SAFETY: console - Arc в capabilities, не будет dropped. writer() возвращает &T где T: ConsoleService.
             let writer_static: &'static (dyn io::writer::Writer + Sync) =
                 unsafe { core::mem::transmute(writer) };
             buffered.attach(writer_static);

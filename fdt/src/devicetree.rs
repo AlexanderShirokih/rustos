@@ -103,7 +103,7 @@ impl<'a> Property<'a> {
     }
 }
 
-/// Flattened Device Tree (FDT) — структура описания оборудования.
+/// Flattened Device Tree (FDT) - структура описания оборудования.
 pub struct DeviceTree<'a> {
     /// Буфер с бинарными данными дерева.
     buffer: &'a [u8],
@@ -193,7 +193,7 @@ impl<'a> DeviceTree<'a> {
     /// Ищет узел в списке структур. Принимает только абсолютный путь
     /// Например: find("/soc@107c000000/serial@7d001000")
     fn find_node(&'a self, path: &str) -> Option<Node<'a>> {
-        // Быстрый путь. "/" → корень
+        // Быстрый путь. "/" -> корень
         if path == "/" {
             return self.root();
         }

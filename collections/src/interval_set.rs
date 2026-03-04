@@ -123,7 +123,7 @@ impl<T> IntervalStorage<T> for AllocVec<T> {
 /// Интервалы хранятся отсортированными. При добавлении смежные
 /// и пересекающиеся интервалы автоматически объединяются.
 ///
-/// `N` — максимальное количество интервалов.
+/// `N` - максимальное количество интервалов.
 #[derive(Clone, PartialEq, Eq)]
 pub struct StaticIntervalSet<T, const N: usize> {
     ranges: Vec<Interval<T>, N>,

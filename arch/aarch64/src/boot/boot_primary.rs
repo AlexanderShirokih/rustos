@@ -18,7 +18,7 @@ use crate::memory::memory_setup::{Enabled, MemorySetup};
 use crate::memory::mmu::Mmu;
 
 /// К этому моменту:
-/// - PC и SP — виртуальные адреса (TTBR1)
+/// - PC и SP - виртуальные адреса (TTBR1)
 /// - TTBR0 ещё активен (identity mapping)
 /// - GLOBAL_ALLOCATOR в PHASE_FROZEN
 pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys: usize) -> ! {
@@ -35,7 +35,7 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
     )
     .expect("Failed to install heap allocator");
 
-    // Немедленно удаляем identity mapping — SP и PC уже виртуальные
+    // Немедленно удаляем identity mapping - SP и PC уже виртуальные
     Mmu::new().disable_lower_half();
 
     // Устанавливаем векторы исключений

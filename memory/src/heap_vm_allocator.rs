@@ -97,7 +97,7 @@ pub struct HeapAllocator {
     /// Аллокатор физических фреймов
     frame_allocator: &'static dyn FrameAllocator,
 
-    /// База higher half для преобразования PA → VA
+    /// База higher half для преобразования PA -> VA
     higher_half_base: usize,
 
     /// Голова списка свободных блоков
@@ -223,7 +223,7 @@ impl HeapAllocator {
             return Ok(self.setup_allocated_block(block_ptr, align));
         }
 
-        // Не нашли — расширяем
+        // Не нашли - расширяем
         let needed_size = alloc_size + size_of::<FreeBlock>();
         let expand_size = needed_size.max(PAGE_SIZE);
 

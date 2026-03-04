@@ -18,7 +18,7 @@ pub trait LockCell<T> {
 
 /// Стратегия критической секции для защиты от прерываний.
 ///
-/// Перед захватом спинлока входим в критическую секцию, при выходе — восстанавливаем предыдущее состояние.
+/// Перед захватом спинлока входим в критическую секцию, при выходе - восстанавливаем предыдущее состояние.
 pub trait CriticalSection {
     /// RAII-guard, восстанавливающий состояние при Drop.
     type Guard;
@@ -49,7 +49,7 @@ impl CriticalSection for DaifCriticalSection {
 
     fn enter() -> DaifGuard {
         let daif: u64;
-        // SAFETY: Чтение DAIF — безопасная операция, не меняющая состояние процессора.
+        // SAFETY: Чтение DAIF - безопасная операция, не меняющая состояние процессора.
         unsafe {
             core::arch::asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack));
         }
@@ -65,7 +65,7 @@ impl CriticalSection for DaifCriticalSection {
 impl Drop for DaifGuard {
     fn drop(&mut self) {
         if self.0 & (1 << 7) == 0 {
-            // SAFETY: Восстанавливаем исходное состояние IRQ-маски —
+            // SAFETY: Восстанавливаем исходное состояние IRQ-маски -
             // IRQ были разрешены до входа в секцию.
             unsafe {
                 core::arch::asm!("msr daifclr, #0b0010", options(nostack, preserves_flags));

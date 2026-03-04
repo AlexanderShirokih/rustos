@@ -1,5 +1,5 @@
 //! Translation Lookaside Buffer
-//! Кэш трансляций VA → PA, чтобы MMU не ходил каждый раз по page tables
+//! Кэш трансляций VA -> PA, чтобы MMU не ходил каждый раз по page tables
 //!
 use crate::memory::regs::common::EL1;
 use core::arch::asm;

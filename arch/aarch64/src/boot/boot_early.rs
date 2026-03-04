@@ -1,7 +1,7 @@
 //! Pre-MMU фаза загрузки: от точки входа до включения MMU.
 //!
 //! Ограничения этой фазы (higher-half VMA, MMU выключен):
-//! - Абсолютные указатели в данных (vtable, fat ptr data) хранят VMA → недоступны.
+//! - Абсолютные указатели в данных (vtable, fat ptr data) хранят VMA -> недоступны.
 //! - Нельзя использовать `dyn Trait` dispatch, `klog`.
 
 use core::arch::naked_asm;
@@ -89,7 +89,7 @@ pub extern "C" fn _start() {
         "mov    x0, x19",
         "b      {boot_main}",
 
-        // Если вернулись — уходим в WaitForEvent
+        // Если вернулись - уходим в WaitForEvent
         "msr    daifset, #0b0010",
         "20:",
         "wfe",
@@ -110,7 +110,7 @@ fn boot_main_entry(dtb_phys: usize) -> ! {
     }
 }
 
-/// Pre-MMU фаза: DTB → память → bump allocator → page tables → MMU → jump.
+/// Pre-MMU фаза: DTB -> память -> bump allocator -> page tables -> MMU -> jump.
 fn boot_main(dtb_phys: usize) -> Result<(), ()> {
     let device_tree = DeviceTree::from_ptr(dtb_phys).map_err(|_| ())?;
 
@@ -137,7 +137,7 @@ fn boot_main(dtb_phys: usize) -> Result<(), ()> {
     let higher_root_pa = roots.higher_pa.as_usize();
     let frame_allocator_phys = frame_allocator as *const _ as usize;
 
-    // Прыжок в higher half — управление передаётся в primary_main и не возвращается
+    // Прыжок в higher half - управление передаётся в primary_main и не возвращается
     // SAFETY: MMU включён, TTBR1 содержит корректный маппинг higher-half.
     unsafe {
         jump_to_higher_half(
@@ -169,7 +169,7 @@ unsafe extern "C" fn jump_to_higher_half(
     const HALF_63_48: u64 = ((HIGHER_HALF_BASE as u64) >> 48) & 0xFFFF;
 
     naked_asm!(
-        // extern "C" ABI (AArch64): аргументы в x0–x2:
+        // extern "C" ABI (AArch64): аргументы в x0-x2:
         //   x0 = dtb_phys
         //   x1 = higher_root_pa
         //   x2 = frame_allocator_phys

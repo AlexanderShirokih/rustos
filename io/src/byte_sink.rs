@@ -1,4 +1,4 @@
-/// Сигнал «пока занято, попробуй позже».
+/// Сигнал "пока занято, попробуй позже".
 #[derive(Copy, Clone, Debug)]
 pub struct Pending;
 
@@ -11,8 +11,8 @@ pub trait ByteSink {
     fn try_write(&self, b: u8) -> Result<(), Pending>;
 
     /// Попытаться записать сразу несколько байт.
-    /// Возвращает: Ok(n) — фактически записано n (может быть < buf.len()),
-    /// Err(Pending) — не удалось записать ни одного байта.
+    /// Возвращает: Ok(n) - фактически записано n (может быть < buf.len()),
+    /// Err(Pending) - не удалось записать ни одного байта.
     fn try_write_slice(&self, buf: &[u8]) -> Result<usize, Pending> {
         let mut n = 0;
         for &b in buf {

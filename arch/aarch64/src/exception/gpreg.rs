@@ -1,6 +1,6 @@
 use core::fmt;
 
-/// Значение регистра общего назначения (x0–x30).
+/// Значение регистра общего назначения (x0-x30).
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct GpReg(u64);

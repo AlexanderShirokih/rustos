@@ -136,7 +136,7 @@ impl<A: TableAlloc> PageMapper<A> {
 
     /// Гарантирует наличие дочерней таблицы в `parent` для `target_va`.
     ///
-    /// Если записи нет — выделяет новую таблицу.
+    /// Если записи нет - выделяет новую таблицу.
     fn ensure_next<PL, CL>(
         &mut self,
         parent: *mut PageTable<PL>,
@@ -153,7 +153,7 @@ impl<A: TableAlloc> PageMapper<A> {
 
         match decode::<PL>(raw).map_err(MapError::Decode)? {
             AnyEntry::Table(te) => {
-                // Таблица существует — извлекаем PA и получаем указатель
+                // Таблица существует - извлекаем PA и получаем указатель
                 let child_pa = extract_table_pa(te.raw());
                 let child = unsafe { self.alloc.table_ptr::<CL>(child_pa, target_va) };
                 Ok(child)
@@ -162,7 +162,7 @@ impl<A: TableAlloc> PageMapper<A> {
             AnyEntry::Invalid(_) => {
                 let child_pa = self.alloc.alloc_table_page().ok_or(MapError::OutOfMemory)?;
 
-                // Запись entry в parent — создание маппинга через recursive
+                // Запись entry в parent - создание маппинга через recursive
                 unsafe { (*parent).set(idx, Entry::<PL, Table>::new(child_pa, self.table_flags)) };
 
                 // Теперь получаем указатель и инициализируем таблицу
@@ -187,7 +187,7 @@ fn extract_table_pa(raw: u64) -> PageAlignedAddress {
 pub enum MapError {
     /// Не удалось выделить память под таблицу.
     OutOfMemory,
-    /// В ячейке уже есть таблица — нужны страницы меньшего размера.
+    /// В ячейке уже есть таблица - нужны страницы меньшего размера.
     NeedsSmallerPages,
     /// Адрес уже замаплен.
     AlreadyMapped,

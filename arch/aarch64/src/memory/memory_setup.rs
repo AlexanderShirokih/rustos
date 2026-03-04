@@ -1,6 +1,6 @@
 //! Поэтапная настройка памяти ядра.
 //!
-//! Фазы: Early → Installed → Prepared → Enabled.
+//! Фазы: Early -> Installed -> Prepared -> Enabled.
 
 use crate::memory::global_allocator::{GLOBAL_ALLOCATOR, KernelHeapAllocator};
 use crate::memory::layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag};
@@ -258,7 +258,7 @@ impl MemorySetup<Prepared> {
 
         Self::map_higher_half_impl(&higher_half_mapper, all_regions, higher_half_base)?;
 
-        // Identity mapping — нужен только для перехода сразу после включения MMU
+        // Identity mapping - нужен только для перехода сразу после включения MMU
         let identity_regions = all_regions
             .iter()
             .filter(|region| !region.is_heap())
@@ -312,7 +312,7 @@ impl MemorySetup<Enabled> {
     ) -> Result<MemoryManagerResult, ()> {
         // Аллокатор фреймов находится по физическому адресу (был Box::leak в bump-памяти).
         let fa_virt: &'static FrameAllocatorImpl =
-            // SAFETY: PA + higher_half_base — корректный виртуальный адрес,
+            // SAFETY: PA + higher_half_base - корректный виртуальный адрес,
             // замапленный через TTBR1. Аллокатор был создан в bump-памяти pre-MMU.
             unsafe {
                 &*((frame_allocator_phys.as_usize() + higher_half_base.as_usize())

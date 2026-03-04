@@ -128,7 +128,7 @@ impl<L: Level + seal::CanPage> Entry<L, Page> {
 
 /// Декодирует дескриптор с битами [1:0] = 0b01.
 ///
-/// L0 не поддерживает блоки, L1/L2 — поддерживают.
+/// L0 не поддерживает блоки, L1/L2 - поддерживают.
 pub trait DecodeBlock: Level {
     fn decode_block(raw: u64) -> Result<AnyEntry<Self>, DecodeError>
     where

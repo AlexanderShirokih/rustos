@@ -1,4 +1,4 @@
-/// Exception Syndrome Register — содержит информацию о причине исключения.
+/// Exception Syndrome Register - содержит информацию о причине исключения.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Esr(u64);
@@ -18,7 +18,7 @@ impl Esr {
     }
 }
 
-/// Exception Class — тип синхронного исключения.
+/// Exception Class - тип синхронного исключения.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExceptionClass {
     /// Unknown reason.

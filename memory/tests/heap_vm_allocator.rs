@@ -464,7 +464,7 @@ fn double_free_is_safely_ignored() {
     // Выделяем блок
     let ptr1 = allocator.allocate(layout).unwrap();
 
-    // Double free — двойное освобождение
+    // Double free - двойное освобождение
     allocator.deallocate(ptr1);
     allocator.deallocate(ptr1); // Второй вызов игнорируется
 
@@ -730,7 +730,7 @@ fn block_too_small_to_split_uses_whole_block() {
     let large_layout = Layout::from_size_align(3800, 8).unwrap();
     let large_ptr = allocator.allocate(large_layout).unwrap();
 
-    // Освобождаем его — теперь есть свободный блок
+    // Освобождаем его - теперь есть свободный блок
     allocator.deallocate(large_ptr);
 
     // Остаток будет слишком мал для разделения (< MIN_ALLOC_SIZE + sizeof(FreeBlock))

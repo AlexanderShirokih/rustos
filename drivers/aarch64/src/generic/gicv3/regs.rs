@@ -5,9 +5,9 @@ use io::mmio::Reg;
 
 /// Регистры Distributor (GICD)
 
-/// Control Register — включение дистрибьютора (EnableGrp1NS, ARE_NS).
+/// Control Register - включение дистрибьютора (EnableGrp1NS, ARE_NS).
 pub(super) const GICD_CTLR: Reg<u32> = Reg::new(0x000);
-/// Type Register — количество поддерживаемых линий IRQ.
+/// Type Register - количество поддерживаемых линий IRQ.
 pub(super) const GICD_TYPER: Reg<u32> = Reg::new(0x004);
 /// Interrupt Group Registers (32 IRQ на регистр).
 pub(super) const GICD_IGROUPR: Reg<u32> = Reg::new(0x080);
@@ -29,9 +29,9 @@ pub(super) const GICD_IROUTER: Reg<u64> = Reg::new(0x6100);
 /// Биты GICD_CTLR
 /// Разрешить группу 1 Non-Secure.
 pub(super) const GICD_CTLR_ENABLE_GRP1NS: u32 = 1 << 1;
-/// Affinity Routing Enable для Non-Secure (ARE_NS) — бит 5 по спецификации GICv3.
+/// Affinity Routing Enable для Non-Secure (ARE_NS) - бит 5 по спецификации GICv3.
 pub(super) const GICD_CTLR_ARE_NS: u32 = 1 << 5;
-/// Register Write Pending — бит 31, сигнализирует о незавершённой записи GICD_CTLR.
+/// Register Write Pending - бит 31, сигнализирует о незавершённой записи GICD_CTLR.
 pub(super) const GICD_CTLR_RWP: u32 = 1 << 31;
 
 /// Регистры Redistributor (GICR)
@@ -40,13 +40,13 @@ pub(super) const GICD_CTLR_RWP: u32 = 1 << 31;
 /// - RD_base (смещение 0x00000): общие регистры
 /// - SGI_base (смещение 0x10000): регистры для SGI/PPI
 
-/// RD_base: Waker Register — управление переходом в сон/пробуждение.
+/// RD_base: Waker Register - управление переходом в сон/пробуждение.
 pub(super) const GICR_WAKER: Reg<u32> = Reg::new(0x014);
 
 /// Смещение SGI_base относительно RD_base.
 pub(super) const GICR_SGI_BASE_OFFSET: usize = 0x10000;
 
-/// SGI_base: Group Register для SGI/PPI (32 IRQ, биты 0–31).
+/// SGI_base: Group Register для SGI/PPI (32 IRQ, биты 0-31).
 pub(super) const GICR_IGROUPR0: Reg<u32> = Reg::new(GICR_SGI_BASE_OFFSET + 0x080);
 /// SGI_base: Set-Enable Register для SGI/PPI.
 pub(super) const GICR_ISENABLER0: Reg<u32> = Reg::new(GICR_SGI_BASE_OFFSET + 0x100);
@@ -70,18 +70,18 @@ pub(super) const GICR_WAKER_CHILDREN_ASLEEP: u32 = 1 << 2;
 /// Значение приоритетной маски, пропускающей все прерывания.
 pub(super) const PRIORITY_MASK_ALL: u64 = 0xFF;
 
-/// ITLinesNumber — количество банков по 32 IRQ.
+/// ITLinesNumber - количество банков по 32 IRQ.
 pub(super) type ITLinesNumber = usize;
 
 /// Тип прерывания в контексте GIC.
 pub(super) enum IrqType {
-    /// Software Generated Interrupt (0–15).
+    /// Software Generated Interrupt (0-15).
     Sgi,
-    /// Private Peripheral Interrupt (16–31).
+    /// Private Peripheral Interrupt (16-31).
     Ppi,
-    /// Shared Peripheral Interrupt (32–1019).
+    /// Shared Peripheral Interrupt (32-1019).
     Spi,
-    /// Поддельное прерывание (1020–1023).
+    /// Поддельное прерывание (1020-1023).
     Spurious,
 }
 
@@ -98,7 +98,7 @@ impl IrqType {
 
 /// Вычисляет индекс регистра и позицию бита для заданного IRQ.
 ///
-/// `bits` — ширина поля одного IRQ в регистре (1 для enable/disable, 8 для приоритетов).
+/// `bits` - ширина поля одного IRQ в регистре (1 для enable/disable, 8 для приоритетов).
 #[inline]
 pub(super) const fn bit_offset(irq: IrqNumber, bits: usize) -> (usize, usize) {
     let bank_width = u32::BITS as usize;

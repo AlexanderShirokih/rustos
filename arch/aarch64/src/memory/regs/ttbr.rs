@@ -1,7 +1,7 @@
 //! Translation Table Base Register.
 //! Регистр, указывающий на корень page tables:
-//! lower half → TTBR0_EL1
-//! higher half → TTBR1_EL1
+//! lower half -> TTBR0_EL1
+//! higher half -> TTBR1_EL1
 use crate::memory::regs::common::EL1;
 use crate::write_sysreg;
 use core::marker::PhantomData;
@@ -28,7 +28,7 @@ impl<EL, TTBRIndex> TranslationTableBaseRegister<EL, TTBRIndex> {
 impl TranslationTableBaseRegister<EL1, LowerHalf> {
     pub fn set(&self, root: PhysicalAddress) {
         // SAFETY: Запись в TTBR0_EL1 допустима на EL1. Адрес таблицы страниц
-        // выровнен и корректен — формируется вызывающим кодом до включения MMU.
+        // выровнен и корректен - формируется вызывающим кодом до включения MMU.
         unsafe { write_sysreg!(ttbr0_el1, root.as_usize() as u64) };
     }
 }
@@ -36,7 +36,7 @@ impl TranslationTableBaseRegister<EL1, LowerHalf> {
 impl TranslationTableBaseRegister<EL1, HigherHalf> {
     pub fn set(&self, root: PhysicalAddress) {
         // SAFETY: Запись в TTBR1_EL1 допустима на EL1. Адрес таблицы страниц
-        // выровнен и корректен — формируется вызывающим кодом до включения MMU.
+        // выровнен и корректен - формируется вызывающим кодом до включения MMU.
         unsafe { write_sysreg!(ttbr1_el1, root.as_usize() as u64) };
     }
 }

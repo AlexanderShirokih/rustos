@@ -51,7 +51,7 @@ impl SystemControlRegister<EL1> {
 
     pub fn set(&self, mask: SctlrBits) {
         // SAFETY: Чтение и запись SCTLR_EL1 допустимы на EL1. Новое значение
-        // формируется как OR текущего значения и маски — MMU-инварианты не нарушаются.
+        // формируется как OR текущего значения и маски - MMU-инварианты не нарушаются.
         unsafe {
             let value = read_sysreg!(sctlr_el1);
             write_sysreg!(sctlr_el1, value | mask.0);

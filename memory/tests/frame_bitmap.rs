@@ -389,7 +389,7 @@ fn cleared_frame_can_be_reallocated_via_wrap() {
     let first = frames[0];
     bitmap.clear(first);
 
-    // Поиск с конца — находит освобождённый через wrap
+    // Поиск с конца - находит освобождённый через wrap
     let reallocated = bitmap.alloc_from(Frame::from(region.end())).unwrap();
     assert_eq!(reallocated, first);
 }

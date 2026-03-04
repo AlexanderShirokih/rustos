@@ -1,27 +1,46 @@
 # AGENTS.md
 
+Машиночитаемый индекс документации проекта RustOS Mobile.
+
+> Детальная документация расположена в [`docs/`](docs/). Этот файл служит точкой входа и кратким справочником для автоматизированных агентов и сопровождающих проекта.
+
 ## Cursor Cloud specific instructions
 
-### Overview
+### Обзор проекта
 
-RustOS Mobile — bare-metal aarch64 kernel written in Rust (`#![no_std]`, Edition 2024). The workspace has 13 crates; see `Cargo.toml` for the full list. The `xtask` crate is the build orchestrator (host-side CLI).
+RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2024). 14 крейтов в workspace, `xtask` — хост-инструмент сборки.
 
-### Key commands
+-> Подробнее: [`docs/overview.md`](docs/overview.md)
 
-All standard commands are documented in `README.md`. Quick reference:
+### Команды
 
-| Action | Command |
+| Действие | Команда |
 |---|---|
-| Unit/integration tests (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
-| Lint (host crates) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
-| Lint (aarch64 crates) | `cargo clippy --workspace --target aarch64-unknown-none` |
-| Build kernel (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
-| Run in QEMU | `cargo xtask build devices/spec/qemu-aarch64.yaml --run` |
+| Тесты (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
+| Линтинг (host) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
+| Линтинг (aarch64) | `cargo clippy --workspace --target aarch64-unknown-none` |
+| Сборка (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
+| Запуск (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml --run` |
 
-### Non-obvious caveats
+-> Подробнее: [`docs/commands.md`](docs/commands.md)
 
-- **`cargo test` без `--exclude` упадёт** — крейты `drivers-aarch64`, `arch-aarch64` и `kernel` содержат aarch64 inline assembly, который не компилируется на x86_64. Используйте `--workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel`.
-- **QEMU runs indefinitely.** The kernel enters a timer-tick loop after boot. When running in CI or automated testing, wrap with `timeout`, e.g.: `timeout 10 qemu-system-aarch64 ...`
-- **No `rust-toolchain.toml`** exists. The toolchain must support Edition 2024 (Rust ≥ 1.85.0). The `aarch64-unknown-none` target, `llvm-tools-preview` component, and `cargo-binutils` must be installed.
-- **`Cargo.lock` is gitignored.** Dependencies are resolved fresh on each build.
-- **System dependency:** `qemu-system-arm` (provides `qemu-system-aarch64`) must be installed via apt for end-to-end kernel boot testing.
+### Окружение и подводные камни
+
+- `cargo test` без `--exclude` падает — aarch64 inline assembly не компилируется на x86_64.
+- QEMU работает бесконечно — оборачивайте в `timeout`.
+- Нет `rust-toolchain.toml` — нужен Rust ≥ 1.85.0, target `aarch64-unknown-none`, `llvm-tools-preview`, `cargo-binutils`.
+- `Cargo.lock` в `.gitignore` — зависимости разрешаются заново.
+- Системная зависимость: `qemu-system-arm` для boot-тестирования.
+
+-> Подробнее: [`docs/environment.md`](docs/environment.md)
+
+## Документация
+
+| Документ | Описание |
+|---|---|
+| [`docs/overview.md`](docs/overview.md) | Обзор проекта, граф крейтов, workspace |
+| [`docs/commands.md`](docs/commands.md) | Сборка, тестирование, линтинг, запуск |
+| [`docs/environment.md`](docs/environment.md) | Настройка окружения, зависимости, подводные камни |
+| [`docs/architecture.md`](docs/architecture.md) | Принципы архитектуры: слои, трейты, newtype, compile-time гарантии |
+| [`docs/code-style.md`](docs/code-style.md) | Стиль кода: структура файлов, комментарии, `no_std` |
+| [`docs/testing.md`](docs/testing.md) | Тестирование: интеграционные/юнит-тесты, именование, паттерны |
