@@ -1,9 +1,11 @@
 extern crate alloc;
 
-use crate::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
 use core::mem::size_of;
+
 use drivers_common::{DeviceNode, DeviceTreeSource, NodeProperty};
 use fdt::devicetree::{DeviceTree, Node, NodeIter, NodeKey, Property};
+
+use crate::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
 
 #[derive(Clone, Copy)]
 pub struct FdtTree<'a> {
@@ -57,7 +59,7 @@ impl<'dt> Iterator for FdtNodeIter<'dt> {
     }
 }
 
-impl<'dt> NodeProperty for FdtProperty<'dt> {
+impl NodeProperty for FdtProperty<'_> {
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -122,7 +124,7 @@ impl<'dt> DeviceTreeSource for FdtTree<'dt> {
     }
 }
 
-impl<'dt> NodeAddressExt for FdtNode<'dt> {
+impl NodeAddressExt for FdtNode<'_> {
     fn cells_size(&self) -> Option<CellsSize> {
         let address_cells = self
             .inner
@@ -196,7 +198,7 @@ impl<'a> RegIter<'a> {
     }
 }
 
-impl<'a> Iterator for RegIter<'a> {
+impl Iterator for RegIter<'_> {
     type Item = AddressSpace;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -234,7 +236,7 @@ fn try_read_cell(bytes: &[u8], cells: usize, offset_cells: usize) -> Option<u64>
     for cell in 0..cells {
         let offset = (offset_cells + cell) * size_of::<u32>();
         let slice = bytes.get(offset..offset + size_of::<u32>())?;
-        let reg = u32::from_be_bytes(slice.try_into().ok()?) as u64;
+        let reg = u64::from(u32::from_be_bytes(slice.try_into().ok()?));
         value = (value << 32) | reg;
     }
 

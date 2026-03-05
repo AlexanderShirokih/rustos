@@ -1,8 +1,11 @@
 //! Атрибуты памяти для записей таблицы страниц.
 
 use core::fmt::{Debug, Formatter};
-use memory::MemFlags;
-use memory::mem_flags::{AccessMode, Executable, Owners};
+
+use memory::{
+    MemFlags,
+    mem_flags::{AccessMode, Executable, Owners},
+};
 
 /// Атрибуты памяти страницы/блока.
 #[repr(transparent)]

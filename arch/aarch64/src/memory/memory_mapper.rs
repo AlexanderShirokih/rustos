@@ -1,17 +1,21 @@
 //! Маппинг виртуальных адресов на физические для AArch64.
 
-use aarch64_paging::level::{L0, L1, L2, L3, Level};
-use aarch64_paging::mapper::{MapError, MapLeaf, PageMapper};
-use aarch64_paging::mem_flags::Aarch64MemFlags;
-use aarch64_paging::page_table::PageTable;
-use aarch64_paging::table_alloc::TableAlloc;
+use aarch64_paging::{
+    level::{L0, L1, L2, L3, Level},
+    mapper::{MapError, MapLeaf, PageMapper},
+    mem_flags::Aarch64MemFlags,
+    page_table::PageTable,
+    table_alloc::TableAlloc,
+};
 use collections::LockCell;
-use memory::MemFlags;
-use memory::aligned::Aligned;
-use memory::frame_allocator::FrameAllocator;
-use memory::memory_mapper::{MemoryMapper, MemoryMappingError, MemoryUnmappingError};
-use memory::physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress};
-use memory::virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress};
+use memory::{
+    MemFlags,
+    aligned::Aligned,
+    frame_allocator::FrameAllocator,
+    memory_mapper::{MemoryMapper, MemoryMappingError, MemoryUnmappingError},
+    physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress},
+    virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress},
+};
 
 /// Адаптер FrameAllocator для выделения таблиц страниц.
 ///

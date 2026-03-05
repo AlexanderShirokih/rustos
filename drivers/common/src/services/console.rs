@@ -1,7 +1,8 @@
 //! Сервис консольного вывода.
 
-use crate::services::Service;
 use io::writer::Writer;
+
+use crate::services::Service;
 
 /// Сервис консольного вывода.
 ///

@@ -1,8 +1,7 @@
 extern crate alloc;
 
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, string::String, vec::Vec};
+
 use drivers_common::{CapabilityStoreMut, Driver, DriverRunError, RuntimeDriverRegistry};
 use klog::info;
 
@@ -98,20 +97,23 @@ pub fn run_retry_passes(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use alloc::string::ToString;
-    use alloc::sync::Arc;
-    use alloc::vec;
-    use core::marker::PhantomData;
-    use core::sync::atomic::{AtomicUsize, Ordering};
-    use drivers_common::services::Service;
-    use drivers_common::services::interrupts::{
-        InterruptsService, IrqBinding, IrqBound, IrqRegistrationError,
+    use alloc::{string::ToString, sync::Arc, vec};
+    use core::{
+        marker::PhantomData,
+        sync::atomic::{AtomicUsize, Ordering},
     };
+
     use drivers_common::{
-        Capabilities, CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DriverRunError,
+        Capabilities, CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt,
+        DriverRunError,
+        services::{
+            Service,
+            interrupts::{InterruptsService, IrqBinding, IrqBound, IrqRegistrationError},
+        },
     };
     use spin::Mutex;
+
+    use super::*;
 
     struct FooCap;
 

@@ -1,11 +1,14 @@
 //! Аппаратный контроллер GICv2: Distributor и CPU Interface.
 
-use super::regs::*;
-use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
-use drivers_common::services::interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority};
-use drivers_common::services::mmio::MmioBound;
+use alloc::{boxed::Box, collections::BTreeMap};
+
+use drivers_common::services::{
+    interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority},
+    mmio::MmioBound,
+};
 use klog::debug;
+
+use super::regs::*;
 
 /// Runtime-объект контроллера прерываний GICv2, публикуемый через capability.
 pub(super) struct Gicv2Controller {

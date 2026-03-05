@@ -1,8 +1,9 @@
-use crate::memory_range::MemoryRange;
-use crate::physical_address::{PageAlignedAddress, PhysicalAddress};
-use core::alloc::Layout;
-use core::fmt::Formatter;
-use core::ptr::NonNull;
+use core::{alloc::Layout, fmt::Formatter, ptr::NonNull};
+
+use crate::{
+    memory_range::MemoryRange,
+    physical_address::{PageAlignedAddress, PhysicalAddress},
+};
 
 /// Простой bump-аллокатор для непрерывного диапазона памяти.
 ///
@@ -90,8 +91,7 @@ impl core::fmt::Display for BumpAllocError {
             } => {
                 write!(
                     f,
-                    "Out of memory: required {} bytes, available {} bytes",
-                    required_size, available_size
+                    "Out of memory: required {required_size} bytes, available {available_size} bytes"
                 )
             }
         }

@@ -44,6 +44,28 @@ drivers-common-aarch64 = { path = "drivers/common-aarch64" }
 drivers-aarch64 = { path = "drivers/aarch64" }
 kernel = { path = "kernel" }
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+# Группы линтов
+pedantic = { level = "warn", priority = -1 }
+# Отключаем шумные pedantic-линты, не подходящие для bare-metal ядра
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_docs_in_private_items = "allow"
+doc_markdown = "allow"
+inline_always = "allow"
+return_self_not_must_use = "allow"
+# Ядерные unsafe-линты
+undocumented_unsafe_blocks = "warn"
+# Качество кода
+cast_possible_truncation = "allow"
+cast_sign_loss = "warn"
+cast_lossless = "warn"
+
 [profile.dev]
 panic = "abort"
 

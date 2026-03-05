@@ -1,6 +1,8 @@
-use crate::devicetree::{Node, Property};
-use collections::Vec;
 use core::cmp::min;
+
+use collections::Vec;
+
+use crate::devicetree::{Node, Property};
 
 /// Содержит пару адрес (сдвиг) и размер
 #[derive(Debug, Copy, Clone)]
@@ -151,7 +153,7 @@ impl Property<'_> {
         let mut value = 0u64;
 
         for cell in 0..cells {
-            let reg = self.try_as_u32((offset + cell) * size_of::<u32>())? as u64;
+            let reg = u64::from(self.try_as_u32((offset + cell) * size_of::<u32>())?);
             value = (value << 32) | reg;
         }
 

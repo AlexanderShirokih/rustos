@@ -2,26 +2,31 @@
 //!
 //! Фазы: Early -> Installed -> Prepared -> Enabled.
 
-use crate::memory::global_allocator::{GLOBAL_ALLOCATOR, KernelHeapAllocator};
-use crate::memory::layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag};
-use crate::memory::memory_mapper::{Aarch64MemoryMapper, FrameTableAlloc};
-use crate::memory::mmu::{Mmu, NormalDualSpaceConfig};
-use aarch64_paging::level::L0;
-use aarch64_paging::mapper::PageMapper;
-use aarch64_paging::mem_flags::Aarch64MemFlags;
-use aarch64_paging::page_table::PageTable;
-use aarch64_paging::preset::Heap;
 use alloc::boxed::Box;
-use collections::Vec as StaticVec;
-use collections::interval_set::{Interval, StaticIntervalSet};
-use collections::{MutexCell, NoLockCell};
-use memory::FrameBitmap;
-use memory::bump_allocator::BumpAllocator;
-use memory::frame_allocator::{FrameAllocator, PhysicalFrameAllocator};
-use memory::memory_mapper::MemoryMapper;
-use memory::memory_range::MemoryRange;
-use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
-use memory::virtual_address::PageAlignedVirtualAddress;
+
+use aarch64_paging::{
+    level::L0, mapper::PageMapper, mem_flags::Aarch64MemFlags, page_table::PageTable, preset::Heap,
+};
+use collections::{
+    MutexCell, NoLockCell, Vec as StaticVec,
+    interval_set::{Interval, StaticIntervalSet},
+};
+use memory::{
+    FrameBitmap,
+    bump_allocator::BumpAllocator,
+    frame_allocator::{FrameAllocator, PhysicalFrameAllocator},
+    memory_mapper::MemoryMapper,
+    memory_range::MemoryRange,
+    physical_address::{PageAlignedAddress, PhysicalAddress},
+    virtual_address::PageAlignedVirtualAddress,
+};
+
+use crate::memory::{
+    global_allocator::{GLOBAL_ALLOCATOR, KernelHeapAllocator},
+    layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},
+    memory_mapper::{Aarch64MemoryMapper, FrameTableAlloc},
+    mmu::{Mmu, NormalDualSpaceConfig},
+};
 
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 type NoLockPageMapper<'a, FA> = NoLockCell<PageMapper<FrameTableAlloc<'a, FA>>>;
@@ -327,7 +332,8 @@ impl MemorySetup<Enabled> {
         let allocator = KernelHeapAllocator::new(fa_virt, higher_half_base);
         GLOBAL_ALLOCATOR.set_heap(allocator);
 
-        let higher_ptr_phys = PageAlignedVirtualAddress::identity(higher_root_pa).as_ptr::<PageTable<L0>>();
+        let higher_ptr_phys =
+            PageAlignedVirtualAddress::identity(higher_root_pa).as_ptr::<PageTable<L0>>();
         let higher_ptr_rel = unsafe { higher_ptr_phys.byte_add(higher_half_base.as_usize()) };
         let memory_mapper: Aarch64MemoryMapper<'_, _, MutexPageMapper<'_, _>> =
             Aarch64MemoryMapper::new_with_offset(

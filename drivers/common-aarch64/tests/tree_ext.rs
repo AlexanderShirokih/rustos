@@ -1,7 +1,8 @@
-use drivers_common::probe::ProbeContext;
-use drivers_common::{DeviceNode, NodeProperty};
-use drivers_common_aarch64::ProbeContextExt;
-use drivers_common_aarch64::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
+use drivers_common::{DeviceNode, NodeProperty, probe::ProbeContext};
+use drivers_common_aarch64::{
+    ProbeContextExt,
+    tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt},
+};
 
 #[derive(Clone, Copy, Debug)]
 struct TestProp<'a> {

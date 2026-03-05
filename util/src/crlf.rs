@@ -65,7 +65,7 @@ impl<'a> Crlf<'a> {
         let (written, consumed) = self.fill(&mut buf);
         let mut w: u32 = 0;
         for (i, &byte) in buf.iter().enumerate().take(written) {
-            w |= (byte as u32) << (i * 8);
+            w |= u32::from(byte) << (i * 8);
         }
         (w, written, consumed)
     }
@@ -78,7 +78,7 @@ impl<'a> Crlf<'a> {
 }
 
 // Универсальный итератор по байтам с заменой LF -> CRLF
-impl<'a> Iterator for Crlf<'a> {
+impl Iterator for Crlf<'_> {
     type Item = u8;
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {

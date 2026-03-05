@@ -1,23 +1,23 @@
 extern crate alloc;
 
-use crate::driver_init::{run_retry_passes, InitSchedulerError, PendingDriver};
-use crate::irq_bridge;
-use crate::kernel_context::KernelContext;
 use alloc::vec::Vec;
-use drivers_common::services::console::ConsoleService;
-use drivers_common::CapabilityStoreExt;
-use drivers_common::scanner::DriverScanner;
-use drivers_common::services::interrupts::InterruptsService;
-use drivers_common::services::timer::TimerService;
+
+use drivers_common::{
+    CapabilityStoreExt,
+    scanner::DriverScanner,
+    services::{console::ConsoleService, interrupts::InterruptsService, timer::TimerService},
+};
 use io::buffered_writer::BufferedWriter;
 use klog::{debug, info};
 
+use crate::{
+    driver_init::{InitSchedulerError, PendingDriver, run_retry_passes},
+    irq_bridge,
+    kernel_context::KernelContext,
+};
+
 /// Главная функция ядра
-pub fn kmain(
-    driver_scanner: DriverScanner,
-    kernel: &mut KernelContext,
-    kout: &BufferedWriter,
-) {
+pub fn kmain(driver_scanner: DriverScanner, kernel: &mut KernelContext, kout: &BufferedWriter) {
     info!("Starting kmain");
 
     let pending = collect_pending_drivers(driver_scanner);

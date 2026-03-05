@@ -1,5 +1,4 @@
-use core::cell::UnsafeCell;
-use core::marker::PhantomData;
+use core::{cell::UnsafeCell, marker::PhantomData};
 
 /// Абстракция над ячейкой с эксклюзивным доступом.
 ///

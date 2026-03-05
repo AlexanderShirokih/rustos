@@ -1,13 +1,14 @@
 //! Адаптер InterruptsService для GICv2.
 
-use super::controller::Gicv2Controller;
-use super::regs::IrqType;
 use alloc::sync::Arc;
+
 use drivers_common::services::interrupts::{
     InterruptsService, IrqBinding, IrqBound, IrqRegistrationError,
 };
 use klog::debug;
 use spin::Mutex;
+
+use super::{controller::Gicv2Controller, regs::IrqType};
 
 pub(super) struct GicInterruptsService {
     pub(super) controller: Arc<Mutex<Gicv2Controller>>,

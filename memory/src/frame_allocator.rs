@@ -1,9 +1,11 @@
-use crate::frame::Frame;
-use crate::frame_bitmap::FrameBitmap;
-use crate::memory_range::MemoryRange;
-use crate::physical_address::PageAlignedAddress;
-use collections::{LockCell, Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+use collections::{LockCell, Vec};
+
+use crate::{
+    frame::Frame, frame_bitmap::FrameBitmap, memory_range::MemoryRange,
+    physical_address::PageAlignedAddress,
+};
 
 /// Ошибки при работе с фреймами
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,9 +82,9 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
                     // невалидного указателя
                     let start = bitmap.start();
                     if start.is_zero() {
-                        bitmap.set_unchecked(Frame::from(start))
+                        bitmap.set_unchecked(Frame::from(start));
                     }
-                })
+                });
             })
             .collect();
 

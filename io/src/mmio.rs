@@ -8,9 +8,13 @@ use core::marker::PhantomData;
 /// - Имеет размер и выравнивание, поддерживаемые для volatile операций (1/2/4/8 байт)
 /// - Безопасен для побитового чтения/записи (не содержит padding или инвариантов)
 pub unsafe trait VolatileInt: Copy {}
+// SAFETY: примитивный целый тип без padding, размер корректен для volatile-операций.
 unsafe impl VolatileInt for u8 {}
+// SAFETY: примитивный целый тип без padding, размер корректен для volatile-операций.
 unsafe impl VolatileInt for u16 {}
+// SAFETY: примитивный целый тип без padding, размер корректен для volatile-операций.
 unsafe impl VolatileInt for u32 {}
+// SAFETY: примитивный целый тип без padding, размер корректен для volatile-операций.
 unsafe impl VolatileInt for u64 {}
 
 /// Простая обёртка над базовым адресом MMIO.
@@ -19,7 +23,8 @@ pub struct Mmio {
     base: *mut u8, // базовый указатель на регистры
 }
 
-// Mmio использует только volatile операции, которые безопасны для многопоточного доступа
+// SAFETY: Mmio использует только volatile операции, которые атомарны
+// на уровне аппаратной шины и не требуют синхронизации.
 unsafe impl Sync for Mmio {}
 
 impl Mmio {
@@ -34,6 +39,7 @@ impl Mmio {
     /// Требует корректного выравнивания и валидного диапазона.
     #[inline(always)]
     pub fn read<T: VolatileInt>(&self, offset: usize) -> T {
+        // SAFETY: вызывающий гарантирует корректность base + offset и выравнивание под T.
         unsafe {
             let p = self.base.add(offset) as *const T;
             core::ptr::read_volatile(p)
@@ -44,9 +50,10 @@ impl Mmio {
     /// Требует корректного выравнивания и валидного диапазона.
     #[inline(always)]
     pub fn write<T: VolatileInt>(&self, offset: usize, value: T) {
+        // SAFETY: вызывающий гарантирует корректность base + offset и выравнивание под T.
         unsafe {
-            let p = self.base.add(offset) as *mut T;
-            core::ptr::write_volatile(p, value)
+            let p = self.base.add(offset).cast::<T>();
+            core::ptr::write_volatile(p, value);
         }
     }
 
@@ -59,7 +66,7 @@ impl Mmio {
     /// Записывает значение в регистр.
     #[inline(always)]
     pub fn write_reg<T: VolatileInt>(&self, reg: Reg<T>, v: T) {
-        self.write::<T>(reg.offset, v)
+        self.write::<T>(reg.offset, v);
     }
 }
 

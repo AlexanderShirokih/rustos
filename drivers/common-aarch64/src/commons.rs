@@ -1,10 +1,15 @@
 //! Общие утилиты для драйверов.
 
-use crate::fdt_adapter::FdtNode;
-use crate::tree_ext::{AddressSpace, NodeAddressExt};
-use drivers_common::probe::{ProbeContext, ProbeError};
-use drivers_common::services::mmio::MmioAddress;
-use drivers_common::{DeviceNode, NodeProperty};
+use drivers_common::{
+    DeviceNode, NodeProperty,
+    probe::{ProbeContext, ProbeError},
+    services::mmio::MmioAddress,
+};
+
+use crate::{
+    fdt_adapter::FdtNode,
+    tree_ext::{AddressSpace, NodeAddressExt},
+};
 
 pub type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
 
@@ -27,9 +32,11 @@ where
         let root = bus.and_then(|parent| self.parent(parent));
 
         let parent_cell_size = bus
-            .and_then(|parent| parent.cells_size())
+            .and_then(super::tree_ext::NodeAddressExt::cells_size)
             .unwrap_or_default();
-        let root_cell_size = root.and_then(|root| root.cells_size()).unwrap_or_default();
+        let root_cell_size = root
+            .and_then(super::tree_ext::NodeAddressExt::cells_size)
+            .unwrap_or_default();
 
         let bus_range = bus
             .and_then(|parent| parent.range_to_parent(root_cell_size))

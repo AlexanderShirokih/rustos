@@ -1,13 +1,13 @@
 //! Раскладка физической памяти ядра.
 
-use aarch64_paging::mem_flags::Aarch64MemFlags;
-use aarch64_paging::preset::Mmio;
-use collections::Vec;
-use collections::interval_set::StaticIntervalSet;
-use memory::aligned::{Address, Aligned};
-use memory::memory_range::MemoryRange;
-use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
-use memory::virtual_address::PageAlignedVirtualAddress;
+use aarch64_paging::{mem_flags::Aarch64MemFlags, preset::Mmio};
+use collections::{Vec, interval_set::StaticIntervalSet};
+use memory::{
+    aligned::{Address, Aligned},
+    memory_range::MemoryRange,
+    physical_address::{PageAlignedAddress, PhysicalAddress},
+    virtual_address::PageAlignedVirtualAddress,
+};
 
 /// Максимальное количество регионов памяти.
 pub const MAX_MEMORY_REGIONS: usize = 128;

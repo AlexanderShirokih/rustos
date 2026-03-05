@@ -2,13 +2,15 @@
 //!
 //! Сначала работает bump-аллокатор, затем переключается на heap.
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
-use core::mem::MaybeUninit;
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU8, Ordering};
-use memory::bump_allocator::BumpAllocator;
-use memory::heap_vm_allocator::HeapAllocator;
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    cell::UnsafeCell,
+    mem::MaybeUninit,
+    ptr::NonNull,
+    sync::atomic::{AtomicU8, Ordering},
+};
+
+use memory::{bump_allocator::BumpAllocator, heap_vm_allocator::HeapAllocator};
 
 #[global_allocator]
 pub(crate) static GLOBAL_ALLOCATOR: GlobalKernelAllocator = GlobalKernelAllocator::new();

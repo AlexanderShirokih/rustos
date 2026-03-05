@@ -1,8 +1,8 @@
 extern crate alloc;
 
+use alloc::{boxed::Box, vec::Vec};
+
 use crate::Driver;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 
 pub struct RuntimeDriverRegistry {
     drivers: Vec<RunningDriver>,

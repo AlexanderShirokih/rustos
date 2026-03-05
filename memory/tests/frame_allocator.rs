@@ -1,13 +1,14 @@
 mod common;
 
+use std::collections::HashSet;
+
 use collections::MutexCell;
 use common::make_range;
-use memory::FrameBitmap;
-use memory::frame::Frame;
-use memory::frame_allocator::{
-    FrameAllocator, FrameError, PhysicalFrameAllocator, ReserveFrameError,
+use memory::{
+    FrameBitmap,
+    frame::Frame,
+    frame_allocator::{FrameAllocator, FrameError, PhysicalFrameAllocator, ReserveFrameError},
 };
-use std::collections::HashSet;
 
 // =============================================================================
 // Вспомогательные функции

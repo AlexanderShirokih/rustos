@@ -1,7 +1,10 @@
 use core::alloc::Layout;
-use memory::aligned::Aligned;
-use memory::bump_allocator::{BumpAllocError, BumpAllocator};
-use memory::physical_address::PageAlignedAddress;
+
+use memory::{
+    aligned::Aligned,
+    bump_allocator::{BumpAllocError, BumpAllocator},
+    physical_address::PageAlignedAddress,
+};
 
 #[test]
 fn allocate_detects_address_overflow() {

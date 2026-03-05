@@ -1,13 +1,15 @@
-use alloc::boxed::Box;
-use alloc::format;
+use alloc::{boxed::Box, format};
+
 use drivers_common::services::mmio::{
     CleanupCallback, MmioAddress, MmioBound, MmioMapError, MmioService,
 };
-use memory::MemFlags;
-use memory::mem_flags::{DeviceMemoryPermission, Owners};
-use memory::memory_mapper::MemoryMapper;
-use memory::physical_address::PageAlignedAddress;
-use memory::virtual_address::PageAlignedVirtualAddress;
+use memory::{
+    MemFlags,
+    mem_flags::{DeviceMemoryPermission, Owners},
+    memory_mapper::MemoryMapper,
+    physical_address::PageAlignedAddress,
+    virtual_address::PageAlignedVirtualAddress,
+};
 
 pub struct MmioServiceImpl {
     pub(crate) memory_mapper: &'static dyn MemoryMapper,

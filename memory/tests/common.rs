@@ -1,6 +1,4 @@
-use memory::aligned::Aligned;
-use memory::memory_range::MemoryRange;
-use memory::physical_address::PageAlignedAddress;
+use memory::{aligned::Aligned, memory_range::MemoryRange, physical_address::PageAlignedAddress};
 
 // Каждый тест-файл в tests/ компилируется как отдельный crate.
 // Функции, используемые в одних тестах, показываются как dead_code при компиляции других.

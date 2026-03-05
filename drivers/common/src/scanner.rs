@@ -1,11 +1,12 @@
 extern crate alloc;
 
-use crate::DeviceNode;
-use crate::driver::{DriverDescriptor, DriverFactory};
-use crate::probe::{ProbeContext, ProbeError, ProbeResult};
-use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
+
+use crate::{
+    DeviceNode,
+    driver::{DriverDescriptor, DriverFactory},
+    probe::{ProbeContext, ProbeError, ProbeResult},
+};
 
 /// Функция пробирования runtime-драйвера.
 pub type ProbeFn<N> = fn(&mut ProbeContext<N>) -> ProbeResult;

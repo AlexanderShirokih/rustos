@@ -1,7 +1,8 @@
 //! Аппаратное состояние ARM Generic Timer.
 
-use core::sync::atomic::{AtomicU32, Ordering};
 use alloc::string::String;
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::{read_sysreg, write_sysreg};
 
 pub(super) const CNTP_CTL_ENABLE: u32 = 1 << 0;

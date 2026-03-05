@@ -1,16 +1,19 @@
 //! Маппинг виртуальных адресов на физические.
 
-use crate::entry::{
-    AnyEntry, Block, CanTable, DecodeBlock, DecodeError, Entry, Page, Table, decode,
+use memory::{
+    physical_address::{PageAlignedAddress, PhysicalAddress},
+    virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress},
 };
-use crate::level::{L0, L1, L1BlockPa, L2, L2BlockPa, L3, Level, PagePa};
-use crate::mem_flags::Aarch64MemFlags;
-use crate::page_table::PageTable;
-use crate::table_alloc::TableAlloc;
-use crate::table_flags::TableFlags;
-use crate::virtual_address::VirtualAddressExt;
-use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
-use memory::virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress};
+
+use crate::{
+    entry::{AnyEntry, Block, CanTable, DecodeBlock, DecodeError, Entry, Page, Table, decode},
+    level::{L0, L1, L1BlockPa, L2, L2BlockPa, L3, Level, PagePa},
+    mem_flags::Aarch64MemFlags,
+    page_table::PageTable,
+    table_alloc::TableAlloc,
+    table_flags::TableFlags,
+    virtual_address::VirtualAddressExt,
+};
 
 /// Физический адрес, который можно замапить на виртуальный.
 pub trait MapLeaf<const SHIFT: u8>: Copy {

@@ -1,7 +1,8 @@
 //! Расширения для виртуальных адресов.
 
-use crate::level::Level;
 use memory::virtual_address::AlignedVirtualAddress;
+
+use crate::level::Level;
 
 /// Извлечение индекса таблицы страниц из виртуального адреса.
 pub trait VirtualAddressExt {

@@ -1,11 +1,8 @@
 extern crate alloc;
 
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec, vec::Vec};
 
-use crate::memory::MemoryAccessProvider;
-use crate::virtual_address::AlignedVirtualAddress;
+use crate::{memory::MemoryAccessProvider, virtual_address::AlignedVirtualAddress};
 
 /// Внутренние данные мока для MemoryAccessProvider
 struct MockMemoryAccessProviderInner {

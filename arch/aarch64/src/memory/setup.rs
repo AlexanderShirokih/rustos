@@ -1,9 +1,12 @@
 //! Построение раскладки памяти из DeviceTree.
 
-use crate::memory::layout::{MemoryLayout, MemoryRegion, RegionTag};
 use aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
-use fdt::devicetree::DeviceTree;
-use fdt::devicetreeext::{AddressSpace, NodeExt, PropExt};
+use fdt::{
+    devicetree::DeviceTree,
+    devicetreeext::{AddressSpace, NodeExt, PropExt},
+};
+
+use crate::memory::layout::{MemoryLayout, MemoryRegion, RegionTag};
 
 unsafe extern "C" {
     /** Код ядра */

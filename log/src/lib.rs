@@ -5,8 +5,9 @@
 #![no_std]
 extern crate alloc;
 
-use collections::{LockCell, MutexCell};
 use core::fmt::{Arguments, Write as _};
+
+use collections::{LockCell, MutexCell};
 use io::writer::Writer;
 
 /// Тип статического writer'а для вывода логов.
@@ -58,7 +59,7 @@ pub fn printf(arguments: Arguments) {
         let mut fmt = FmtWriter(*writer);
         let _ = fmt.write_fmt(arguments);
         writer.flush();
-    })
+    });
 }
 
 /// Лог с префиксом уровня и переводом строки.
@@ -71,7 +72,7 @@ pub fn logf(lvl: Level, arguments: Arguments) {
         Level::Debug => "[D] ",
     };
 
-    printf(format_args!("{}{}\r\n", level, arguments));
+    printf(format_args!("{level}{arguments}\r\n"));
 }
 
 /// Лог с префиксом уровня, тегом и переводом строки.
@@ -84,7 +85,7 @@ pub fn logf_tagged(lvl: Level, tag: &str, arguments: Arguments) {
         Level::Debug => "[D] ",
     };
 
-    printf(format_args!("{}[{}] {}\r\n", level, tag, arguments));
+    printf(format_args!("{level}[{tag}] {arguments}\r\n"));
 }
 
 /// Возвращает имя файла без пути для использования в качестве тега.

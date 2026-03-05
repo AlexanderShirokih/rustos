@@ -1,9 +1,7 @@
-use crate::DeviceNode;
-use crate::driver::DriverFactory;
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
+
+use crate::{DeviceNode, driver::DriverFactory};
 
 /// Результат пробирования драйвера.
 pub type ProbeResult = Result<Box<dyn DriverFactory>, ProbeError>;
@@ -22,9 +20,9 @@ pub enum ProbeError {
 impl fmt::Display for ProbeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProbeError::DriverCreationFailed(msg) => write!(f, "Failed to create driver: {}", msg),
-            ProbeError::MissingProperty(prop) => write!(f, "Missing property '{}'", prop),
-            ProbeError::Unsupported(feature) => write!(f, "Unsupported: {}", feature),
+            ProbeError::DriverCreationFailed(msg) => write!(f, "Failed to create driver: {msg}"),
+            ProbeError::MissingProperty(prop) => write!(f, "Missing property '{prop}'"),
+            ProbeError::Unsupported(feature) => write!(f, "Unsupported: {feature}"),
         }
     }
 }

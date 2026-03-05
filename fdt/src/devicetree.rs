@@ -1,5 +1,6 @@
-use crate::cursor::Cursor;
 use core::slice::from_raw_parts;
+
+use crate::cursor::Cursor;
 
 /// Узел Device Tree.
 #[derive(Clone, Copy)]
@@ -135,12 +136,16 @@ impl<'a> DeviceTree<'a> {
 
         let ptr_u8 = address as *const u8;
 
+        // SAFETY: вызывающий гарантирует, что address указывает на валидный FDT-blob
+        // размером не менее 16 байт (4 × u32 заголовка).
         let hdr_buf = unsafe { from_raw_parts(ptr_u8, size_of::<u32>() * 4) };
 
         let mut cursor = Cursor::new(hdr_buf);
         let header = FdtHeader::read_checked(&mut cursor)?;
         let total_size = header.total_size;
 
+        // SAFETY: total_size прочитан из заголовка FDT; вызывающий гарантирует,
+        // что буфер по address содержит как минимум total_size валидных байт.
         let buffer = unsafe { from_raw_parts(ptr_u8, total_size) };
 
         Ok(DeviceTree { buffer, header })
@@ -337,7 +342,6 @@ impl<'a> DeviceTreeWalker<'a> {
                 AbstractNode::EndNode => {
                     if self.level > 0 {
                         self.level -= 1;
-                        continue;
                     } else {
                         return None;
                     }
@@ -355,7 +359,6 @@ impl<'a> DeviceTreeWalker<'a> {
                     if self.level == 0 {
                         return Some(self.map_property(name, offset, length));
                     }
-                    continue;
                 }
             }
         }
@@ -405,7 +408,6 @@ impl<'a> DeviceTreeWalker<'a> {
 
                 NodeToken::Nop => {
                     // пропускаем и читаем следующий токен
-                    continue;
                 }
             }
         }
@@ -440,7 +442,7 @@ impl<'a> Iterator for NodeIter<'a> {
         loop {
             match self.walker.next_value()? {
                 ValueNode::Node(n) => return Some(n),
-                ValueNode::Property(_) => continue,
+                ValueNode::Property(_) => {}
             }
         }
     }
@@ -458,7 +460,7 @@ impl<'a> Iterator for PropertyIter<'a> {
         loop {
             match self.walker.next_value()? {
                 ValueNode::Property(p) => return Some(p),
-                ValueNode::Node(_) => continue,
+                ValueNode::Node(_) => {}
             }
         }
     }

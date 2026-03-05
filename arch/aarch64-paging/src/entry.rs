@@ -1,10 +1,14 @@
 //! Записи таблицы страниц AArch64.
 
-use crate::level::{L0, L1, L1BlockPa, L2, L2BlockPa, L3, Level, PagePa};
-use crate::mem_flags::Aarch64MemFlags;
-use crate::table_flags::TableFlags;
 use core::marker::PhantomData;
+
 use memory::aligned::Address;
+
+use crate::{
+    level::{L0, L1, L1BlockPa, L2, L2BlockPa, L3, Level, PagePa},
+    mem_flags::Aarch64MemFlags,
+    table_flags::TableFlags,
+};
 
 /// Sealed traits для ограничения типов записей на каждом уровне.
 mod seal {

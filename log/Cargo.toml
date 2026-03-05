@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 collections = { workspace = true }
 io = { workspace = true }
+
+[lints]
+workspace = true

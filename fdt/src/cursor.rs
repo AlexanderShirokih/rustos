@@ -47,6 +47,7 @@ impl<'a> Cursor<'a> {
             end += 1;
         }
 
+        // SAFETY: FDT-строки гарантированно содержат валидный ASCII (подмножество UTF-8).
         unsafe { core::str::from_utf8_unchecked(&buffer[offset..end]) }
     }
 
@@ -58,6 +59,7 @@ impl<'a> Cursor<'a> {
             end += 1;
         }
         self.position = end + 1; // перескочить '\0'
+        // SAFETY: FDT-строки гарантированно содержат валидный ASCII (подмножество UTF-8).
         unsafe { core::str::from_utf8_unchecked(&buf[start..end]) }
     }
 }

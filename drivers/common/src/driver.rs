@@ -1,8 +1,11 @@
 extern crate alloc;
 
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+};
+
 use crate::{CapabilityError, CapabilityStoreMut};
-use alloc::boxed::Box;
-use alloc::string::{String, ToString};
 
 /// Дескриптор драйвера, связывающий имя и probe-функцию.
 #[repr(C)]

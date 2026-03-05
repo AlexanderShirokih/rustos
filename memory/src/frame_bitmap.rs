@@ -1,8 +1,6 @@
-use crate::frame::Frame;
-use crate::memory_range::MemoryRange;
-use crate::physical_address::PageAlignedAddress;
-use alloc::boxed::Box;
-use alloc::vec;
+use alloc::{boxed::Box, vec};
+
+use crate::{frame::Frame, memory_range::MemoryRange, physical_address::PageAlignedAddress};
 
 /// Позиция бита в битовой карте
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,7 +389,7 @@ impl FrameBitmap {
     pub unsafe fn relocate_ptr_by_offset(&mut self, offset: usize) {
         let len = self.bitmap.len();
         let raw_old: *mut [u64] = Box::into_raw(core::mem::take(&mut self.bitmap));
-        let raw_old_data = raw_old as *mut u64;
+        let raw_old_data = raw_old.cast::<u64>();
         let raw_new_data = (raw_old_data as usize + offset) as *mut u64;
         let raw_new: *mut [u64] = core::ptr::slice_from_raw_parts_mut(raw_new_data, len);
 

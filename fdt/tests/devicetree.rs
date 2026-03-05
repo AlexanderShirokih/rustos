@@ -1,5 +1,7 @@
-use fdt::devicetree::DeviceTree;
-use fdt::devicetreeext::{NodeExt, PropExt};
+use fdt::{
+    devicetree::DeviceTree,
+    devicetreeext::{NodeExt, PropExt},
+};
 
 // ─── Построение DTB ─────────────────────────────────────────────────────────
 

@@ -1,8 +1,7 @@
 mod common;
 
 use common::{frame_to_address, make_range};
-use memory::FrameBitmap;
-use memory::frame::Frame;
+use memory::{FrameBitmap, frame::Frame};
 
 #[test]
 fn new_bitmap_has_all_frames_free() {

@@ -1,13 +1,14 @@
-use std::env;
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::{
+    env,
+    fs::{self, File},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process::{Command, ExitStatus, Stdio},
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use flate2::Compression;
-use flate2::write::GzEncoder;
+use flate2::{Compression, write::GzEncoder};
 use serde::Deserialize;
 
 #[derive(Parser)]
@@ -59,7 +60,7 @@ struct BuildContext {
 
 impl BuildContext {
     fn new(spec_path: PathBuf) -> Result<Self> {
-        let project_root = project_root()?;
+        let project_root = project_root();
 
         let spec_path = if spec_path.is_absolute() {
             spec_path
@@ -116,14 +117,14 @@ impl BuildContext {
     }
 }
 
-fn project_root() -> Result<PathBuf> {
+fn project_root() -> PathBuf {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let path = Path::new(&manifest_dir);
 
     if path.ends_with("xtask") {
-        Ok(path.parent().unwrap().to_path_buf())
+        path.parent().unwrap().to_path_buf()
     } else {
-        Ok(path.to_path_buf())
+        path.to_path_buf()
     }
 }
 
@@ -133,7 +134,7 @@ fn load_spec(path: &Path) -> Result<DeviceSpec> {
 
     match spec.boot.format.as_str() {
         "binary" | "android_boot_v1" | "android_boot_v2" => {}
-        other => bail!("Unknown boot.format '{}'", other),
+        other => bail!("Unknown boot.format '{other}'"),
     }
 
     Ok(spec)
@@ -142,7 +143,7 @@ fn load_spec(path: &Path) -> Result<DeviceSpec> {
 fn run_cmd(cmd: &mut Command) -> Result<ExitStatus> {
     let status = cmd.status().context("Failed to execute command")?;
     if !status.success() {
-        bail!("Command failed with {}", status);
+        bail!("Command failed with {status}");
     }
     Ok(status)
 }
@@ -160,7 +161,7 @@ fn run_shell(command: &str, cwd: &Path) -> Result<()> {
     let status = child.wait().context("Failed to wait for command")?;
 
     if !status.success() {
-        bail!("Command failed: {}", command);
+        bail!("Command failed: {command}");
     }
     Ok(())
 }
@@ -227,7 +228,7 @@ fn make_boot_img_v1(ctx: &BuildContext) -> Result<()> {
     // Вычисление kernel_offset для boot.img header
     let base = ctx.spec.boot.base.unwrap_or(0);
     let kernel_offset = ctx.spec.boot.offset.saturating_sub(base);
-    let kernel_offset_str = format!("{:#x}", kernel_offset);
+    let kernel_offset_str = format!("{kernel_offset:#x}");
 
     let mut output = File::create(ctx.kernel_gz_dtb())?;
     let mut kernel = Vec::new();
@@ -269,7 +270,7 @@ fn make_boot_img_v2(ctx: &BuildContext) -> Result<()> {
     // Вычисление kernel_offset для boot.img header
     let base = ctx.spec.boot.base.unwrap_or(0);
     let kernel_offset = ctx.spec.boot.offset.saturating_sub(base);
-    let kernel_offset_str = format!("{:#x}", kernel_offset);
+    let kernel_offset_str = format!("{kernel_offset:#x}");
 
     run_cmd(
         Command::new("mkbootimg")

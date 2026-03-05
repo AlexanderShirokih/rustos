@@ -1,23 +1,29 @@
 //! Драйвер ARM Generic Timer: точка входа, фабрика и probe-функция.
 
-use super::service::{ArmGenericTimerHandle, ArmGenericTimerIrqHandler};
-use super::state::ArmGenericTimerState;
-use crate::register_driver;
-use alloc::boxed::Box;
-use alloc::format;
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use core::mem::size_of;
-use drivers_common::probe::{ProbeError, ProbeResult};
-use drivers_common::services::interrupts::{
-    CpuMask, InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqPriority,
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    sync::Arc,
 };
-use drivers_common::services::timer::TimerService;
+use core::mem::size_of;
+
 use drivers_common::{
     CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DeviceNode, Driver,
     DriverFactory, DriverRunError, NodeProperty,
+    probe::{ProbeError, ProbeResult},
+    services::{
+        interrupts::{CpuMask, InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqPriority},
+        timer::TimerService,
+    },
 };
 use drivers_common_aarch64::{FdtProbeContext, require_compatible};
+
+use super::{
+    service::{ArmGenericTimerHandle, ArmGenericTimerIrqHandler},
+    state::ArmGenericTimerState,
+};
+use crate::register_driver;
 
 const TIMER_IRQ_PRIORITY: IrqPriority = IrqPriority::HIGHEST;
 const GIC_TYPE_SPI: u32 = 0;

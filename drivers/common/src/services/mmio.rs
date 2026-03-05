@@ -1,10 +1,13 @@
-use crate::services::Service;
-use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::{boxed::Box, string::String};
 use core::fmt::{Display, Formatter};
+
 use io::mmio::Reg;
-use memory::mem_flags::{DeviceMemoryPermission, Owners};
-use memory::virtual_address::PageAlignedVirtualAddress;
+use memory::{
+    mem_flags::{DeviceMemoryPermission, Owners},
+    virtual_address::PageAlignedVirtualAddress,
+};
+
+use crate::services::Service;
 
 // Адрес MMIO-региона.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -67,12 +70,12 @@ impl MmioBound {
     pub fn write<T>(&self, offset: usize, val: T) {
         unsafe {
             let ptr: *mut T = self.virtual_address.as_ptr::<T>().byte_add(offset);
-            ptr.write_volatile(val)
+            ptr.write_volatile(val);
         }
     }
 
     pub fn write_reg<T>(&self, reg: Reg<T>, val: T) {
-        self.write(reg.offset, val)
+        self.write(reg.offset, val);
     }
 
     pub fn read<T>(&self, offset: usize) -> T {
@@ -90,7 +93,7 @@ impl MmioBound {
 impl Drop for MmioBound {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
-            cleanup(self.virtual_address, self.mmio_address.size)
+            cleanup(self.virtual_address, self.mmio_address.size);
         }
     }
 }

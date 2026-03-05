@@ -9,3 +9,6 @@ drivers-common = { workspace = true }
 io = { workspace = true }
 memory = { workspace = true }
 klog = { workspace = true }
+
+[lints]
+workspace = true

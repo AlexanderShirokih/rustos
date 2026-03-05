@@ -1,20 +1,25 @@
 //! Драйвер GICv3: точка входа, фабрика и probe-функция.
 
-use super::controller::Gicv3Controller;
-use super::service::GicV3InterruptsService;
-use crate::register_driver;
-use alloc::boxed::Box;
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use drivers_common::probe::{ProbeError, ProbeResult};
-use drivers_common::services::interrupts::InterruptsService;
-use drivers_common::services::mmio::{MmioAddress, MmioService};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    sync::Arc,
+};
+
 use drivers_common::{
     CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DeviceMemoryPermission, Driver,
     DriverFactory, DriverRunError, Owners,
+    probe::{ProbeError, ProbeResult},
+    services::{
+        interrupts::InterruptsService,
+        mmio::{MmioAddress, MmioService},
+    },
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatible};
 use spin::Mutex;
+
+use super::{controller::Gicv3Controller, service::GicV3InterruptsService};
+use crate::register_driver;
 
 /// Драйвер Generic Interrupt Controller v3.
 pub struct Gicv3 {

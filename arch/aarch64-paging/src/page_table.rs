@@ -1,8 +1,11 @@
 //! Таблица страниц AArch64.
 
-use crate::entry::{Entry, Kind};
-use crate::level::Level;
 use core::marker::PhantomData;
+
+use crate::{
+    entry::{Entry, Kind},
+    level::Level,
+};
 
 /// Таблица страниц уровня `L`.
 ///

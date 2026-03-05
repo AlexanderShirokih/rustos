@@ -5,5 +5,4 @@ mod driver;
 mod service;
 mod state;
 
-pub use driver::arm_generic_timer_probe;
-pub use driver::ArmGenericTimerDriver;
+pub use driver::{ArmGenericTimerDriver, arm_generic_timer_probe};

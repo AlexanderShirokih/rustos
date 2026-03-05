@@ -4,14 +4,12 @@
 
 ### Rust toolchain
 
-- Rust ≥ 1.85.0 (Edition 2024)
-- `rust-toolchain.toml` **отсутствует** — тулчейн нужно настраивать вручную
+- Rust nightly (Edition 2024), зафиксирован в `rust-toolchain.toml`
+- `rustup` автоматически подберёт нужную версию при первой сборке
 
-```bash
-rustup target add aarch64-unknown-none
-rustup component add llvm-tools-preview
-cargo install cargo-binutils
-```
+Компоненты, установленные через `rust-toolchain.toml`:
+- target `aarch64-unknown-none`
+- `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt`
 
 ### Системные зависимости
 
@@ -42,14 +40,6 @@ timeout 10 qemu-system-aarch64 ...
 ### `Cargo.lock` в `.gitignore`
 
 Зависимости разрешаются заново при каждой сборке. Это сделано намеренно — проект является ядром, а не библиотекой.
-
-### Нет `rust-toolchain.toml`
-
-Тулчейн нужно настраивать вручную. Убедитесь, что установлены:
-
-- target `aarch64-unknown-none`
-- компонент `llvm-tools-preview`
-- `cargo-binutils`
 
 ## Спецификации устройств
 

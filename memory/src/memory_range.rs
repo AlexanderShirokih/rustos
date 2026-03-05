@@ -1,6 +1,4 @@
-use crate::aligned::Address;
-use crate::frame::Frame;
-use crate::physical_address::PageAlignedAddress;
+use crate::{aligned::Address, frame::Frame, physical_address::PageAlignedAddress};
 
 /// Диапазон адресов с включёнными границами.
 #[derive(Copy, Clone, Debug)]

@@ -1,7 +1,8 @@
 //! Контракты подсистемы прерываний.
 
-use crate::services::Service;
 use alloc::boxed::Box;
+
+use crate::services::Service;
 
 /// Номер аппаратного прерывания.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -12,7 +13,7 @@ impl IrqNumber {
     pub const fn new(raw: u16) -> Self {
         Self(raw)
     }
-    
+
     /// Возвращает сырое значение IRQ.
     pub const fn raw(self) -> u16 {
         self.0
@@ -175,8 +176,9 @@ pub trait InterruptsService: Service {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
 
     struct TestIrqHandler;
     impl IrqHandler for TestIrqHandler {

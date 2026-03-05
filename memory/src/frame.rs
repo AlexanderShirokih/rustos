@@ -1,5 +1,7 @@
-use crate::aligned::Aligned;
-use crate::physical_address::{PageAlignedAddress, PhysicalAddress};
+use crate::{
+    aligned::Aligned,
+    physical_address::{PageAlignedAddress, PhysicalAddress},
+};
 
 /// Фрейм физической памяти.
 ///

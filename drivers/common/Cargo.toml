@@ -8,3 +8,6 @@ io = { workspace = true }
 memory = { workspace = true }
 klog = { workspace = true }
 spin = { workspace = true }
+
+[lints]
+workspace = true

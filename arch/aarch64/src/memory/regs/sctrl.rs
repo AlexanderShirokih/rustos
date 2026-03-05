@@ -2,9 +2,7 @@
 //!
 //! Управляет MMU и кэшами.
 
-use crate::combine_bits;
-use crate::memory::regs::common::EL1;
-use crate::{read_sysreg, write_sysreg};
+use crate::{combine_bits, memory::regs::common::EL1, read_sysreg, write_sysreg};
 
 /// Бит SCTLR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

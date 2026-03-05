@@ -1,11 +1,16 @@
 //! Translation Control Register
 //! Регистр, который описывает геометрию и правила трансляции адресов.
 //!
-use crate::combine_bits;
-use crate::memory::regs::common::EL1;
-use crate::memory::regs::ttbr::{HigherHalf, LowerHalf};
-use crate::write_sysreg;
 use core::marker::PhantomData;
+
+use crate::{
+    combine_bits,
+    memory::regs::{
+        common::EL1,
+        ttbr::{HigherHalf, LowerHalf},
+    },
+    write_sysreg,
+};
 
 // Поля TCR:
 // ┌─────────────────────────────────────────────────────────────────┐

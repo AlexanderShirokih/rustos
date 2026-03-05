@@ -1,6 +1,8 @@
-use std::env;
-use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    fs::File,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 

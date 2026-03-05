@@ -25,7 +25,7 @@ pub mod relocatable_ptr;
 pub mod test_utils;
 pub mod virtual_address;
 
-pub use mem_flags::MemFlags;
-
 #[cfg_attr(not(test), doc(hidden))]
 pub use frame_bitmap::FrameBitmap;
+pub use mem_flags::MemFlags;
+pub use relocatable_ptr::RelocatablePtr;

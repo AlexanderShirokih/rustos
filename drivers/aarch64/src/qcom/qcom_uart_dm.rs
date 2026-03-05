@@ -1,20 +1,25 @@
 //! Драйвер Qualcomm UART DM (Data Mover).
 
-use crate::register_driver;
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use drivers_common::probe::{ProbeError, ProbeResult};
-use drivers_common::services::mmio::{MmioAddress, MmioBound, MmioService};
-use drivers_common::services::console::ConsoleService;
+use alloc::{boxed::Box, sync::Arc};
+
 use drivers_common::{
     CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DeviceMemoryPermission, Driver,
     DriverFactory, DriverRunError, Owners,
+    probe::{ProbeError, ProbeResult},
+    services::{
+        console::ConsoleService,
+        mmio::{MmioAddress, MmioBound, MmioService},
+    },
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt};
-use io::byte_sink::{ByteSink, Pending};
-use io::mmio::Reg;
-use io::writer::Writer;
+use io::{
+    byte_sink::{ByteSink, Pending},
+    mmio::Reg,
+    writer::Writer,
+};
 use util::crlf::Crlf;
+
+use crate::register_driver;
 
 /// Количество символов для передачи.
 const NCF_TX: Reg<u32> = Reg::new(0x040);

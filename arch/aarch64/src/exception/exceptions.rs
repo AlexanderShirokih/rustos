@@ -1,11 +1,12 @@
-use core::arch::{asm, global_asm, naked_asm};
-use core::fmt::Write;
-use crate::write_sysreg;
+use core::{
+    arch::{asm, global_asm, naked_asm},
+    fmt::Write,
+};
 
 use collections::StaticString;
 
-use super::esr::Esr;
-use super::gpreg::GpReg;
+use super::{esr::Esr, gpreg::GpReg};
+use crate::write_sysreg;
 
 /// Ёмкость stack-буфера для диагностики исключений (байт).
 const EXCEPTION_BUF_SIZE: usize = 2048;

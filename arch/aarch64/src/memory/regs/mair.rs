@@ -1,9 +1,7 @@
 //! Memory Attribute Indirection Register
 //! Регистр, который описывает типы памяти (cacheable, device, write-back).
 //!
-use crate::combine_bits;
-use crate::memory::regs::common::EL1;
-use crate::write_sysreg;
+use crate::{combine_bits, memory::regs::common::EL1, write_sysreg};
 
 /// Атрибуты обычной памяти (Normal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

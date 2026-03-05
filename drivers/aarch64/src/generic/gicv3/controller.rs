@@ -1,13 +1,16 @@
 //! Аппаратный контроллер GICv3: Distributor, Redistributor и CPU Interface.
 
+use alloc::{boxed::Box, collections::BTreeMap};
+use core::hint::spin_loop;
+
+use drivers_common::services::{
+    interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority},
+    mmio::MmioBound,
+};
+use klog::debug;
+
 use super::regs::*;
 use crate::{read_sysreg, write_sysreg};
-use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
-use core::hint::spin_loop;
-use drivers_common::services::interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority};
-use drivers_common::services::mmio::MmioBound;
-use klog::debug;
 
 /// Runtime-объект контроллера прерываний GICv3, публикуемый через capability.
 pub(super) struct Gicv3Controller {

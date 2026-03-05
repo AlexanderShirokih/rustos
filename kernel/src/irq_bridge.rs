@@ -1,6 +1,7 @@
 //! Мост между архитектурным IRQ-path и runtime-сервисом прерываний.
 
 use alloc::sync::Arc;
+
 use drivers_common::services::interrupts::InterruptsService;
 use klog::{debug, warn};
 use spin::Once;
@@ -55,9 +56,11 @@ pub fn dispatch_interrupt() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use core::sync::atomic::{AtomicUsize, Ordering};
+
     use drivers_common::services::interrupts::{IrqBinding, IrqBound, IrqRegistrationError};
+
+    use super::*;
 
     struct SpyInterruptsService {
         dispatch_calls: AtomicUsize,

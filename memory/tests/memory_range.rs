@@ -1,5 +1,4 @@
-use memory::memory_range::MemoryRange;
-use memory::physical_address::PhysicalAddress;
+use memory::{memory_range::MemoryRange, physical_address::PhysicalAddress};
 
 #[test]
 fn size_is_inclusive() {

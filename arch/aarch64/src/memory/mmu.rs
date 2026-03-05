@@ -1,14 +1,21 @@
 //! Управление MMU AArch64.
 
-use crate::memory::regs::common::EL1;
-use crate::memory::regs::mair::MemoryAttributeIndirectionRegister;
-use crate::memory::regs::sctrl::SystemControlRegister;
-use crate::memory::regs::tcr::{TranslationControlRegister, TtbrSel};
-use crate::memory::regs::tlb::TranslationLookasideBuffer;
-use crate::memory::regs::ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister};
-use crate::memory::regs::{mair, sctrl, tcr};
-use crate::system;
 use memory::physical_address::PhysicalAddress;
+
+use crate::{
+    memory::regs::{
+        common::EL1,
+        mair,
+        mair::MemoryAttributeIndirectionRegister,
+        sctrl,
+        sctrl::SystemControlRegister,
+        tcr,
+        tcr::{TranslationControlRegister, TtbrSel},
+        tlb::TranslationLookasideBuffer,
+        ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister},
+    },
+    system,
+};
 
 /// Конфигурация адресного пространства.
 pub struct AddressSpaceConfig<T: TtbrSel> {
@@ -116,7 +123,11 @@ impl Mmu<EL1> {
         // SAFETY: Вызывается post-MMU, после переключения SP и PC на виртуальные адреса.
         // После этого вызова любое обращение к lower half вызовет Translation Fault.
         unsafe {
-            core::arch::asm!("msr ttbr0_el1, xzr", "isb", options(nostack, preserves_flags));
+            core::arch::asm!(
+                "msr ttbr0_el1, xzr",
+                "isb",
+                options(nostack, preserves_flags)
+            );
         }
         self.tlb.invalidate();
         system::barrier::full_system_barrier();

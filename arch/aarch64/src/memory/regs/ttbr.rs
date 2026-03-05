@@ -2,10 +2,11 @@
 //! Регистр, указывающий на корень page tables:
 //! lower half -> TTBR0_EL1
 //! higher half -> TTBR1_EL1
-use crate::memory::regs::common::EL1;
-use crate::write_sysreg;
 use core::marker::PhantomData;
+
 use memory::physical_address::PhysicalAddress;
+
+use crate::{memory::regs::common::EL1, write_sysreg};
 
 /// Маркер lower half (TTBR0).
 pub enum LowerHalf {}

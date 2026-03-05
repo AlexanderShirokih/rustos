@@ -1,9 +1,10 @@
 //! Адаптеры сервисов ARM Generic Timer.
 
-use super::state::ArmGenericTimerState;
 use alloc::sync::Arc;
-use drivers_common::services::interrupts::IrqHandler;
-use drivers_common::services::timer::TimerService;
+
+use drivers_common::services::{interrupts::IrqHandler, timer::TimerService};
+
+use super::state::ArmGenericTimerState;
 
 pub(super) struct ArmGenericTimerIrqHandler {
     state: Arc<ArmGenericTimerState>,

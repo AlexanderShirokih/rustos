@@ -9,3 +9,6 @@ serde_yaml = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 flate2 = { workspace = true }
+
+[lints]
+workspace = true

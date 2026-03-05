@@ -4,17 +4,19 @@
 //! - Абсолютные указатели в данных (vtable, fat ptr data) хранят VMA -> недоступны.
 //! - Нельзя использовать `dyn Trait` dispatch, `klog`.
 
-use core::arch::naked_asm;
-use core::hint::spin_loop;
+use core::{arch::naked_asm, hint::spin_loop};
 
 use fdt::devicetree::DeviceTree;
 use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 
-use crate::HIGHER_HALF_BASE;
-use crate::memory::memory_setup::{Early, Enabled, MemorySetup};
-use crate::memory::setup::build_memory_layout;
-
 use super::boot_primary::primary_main;
+use crate::{
+    HIGHER_HALF_BASE,
+    memory::{
+        memory_setup::{Early, Enabled, MemorySetup},
+        setup::build_memory_layout,
+    },
+};
 
 unsafe extern "C" {
     static _stack_top: u8;
@@ -139,13 +141,7 @@ fn boot_main(dtb_phys: usize) -> Result<(), ()> {
 
     // Прыжок в higher half - управление передаётся в primary_main и не возвращается
     // SAFETY: MMU включён, TTBR1 содержит корректный маппинг higher-half.
-    unsafe {
-        jump_to_higher_half(
-            dtb_phys,
-            higher_root_pa,
-            frame_allocator_phys,
-        )
-    };
+    unsafe { jump_to_higher_half(dtb_phys, higher_root_pa, frame_allocator_phys) };
 
     loop {
         spin_loop();

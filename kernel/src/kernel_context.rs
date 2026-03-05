@@ -1,10 +1,12 @@
-use crate::services::mmio::MmioServiceImpl;
 use alloc::sync::Arc;
-use drivers_common::services::mmio::MmioService;
-use drivers_common::{Capabilities, CapabilityStoreMutExt, RuntimeDriverRegistry};
-use memory::memory_mapper::MemoryMapper;
-use memory::virtual_address::PageAlignedVirtualAddress;
+
+use drivers_common::{
+    Capabilities, CapabilityStoreMutExt, RuntimeDriverRegistry, services::mmio::MmioService,
+};
+use memory::{memory_mapper::MemoryMapper, virtual_address::PageAlignedVirtualAddress};
 use spin::Mutex;
+
+use crate::services::mmio::MmioServiceImpl;
 
 pub struct KernelContext {
     capabilities: Capabilities,

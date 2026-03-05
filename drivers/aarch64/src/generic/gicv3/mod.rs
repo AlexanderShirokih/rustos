@@ -6,5 +6,4 @@ mod driver;
 mod regs;
 mod service;
 
-pub use driver::Gicv3;
-pub use driver::gicv3_probe;
+pub use driver::{Gicv3, gicv3_probe};

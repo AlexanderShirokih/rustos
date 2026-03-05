@@ -1,10 +1,12 @@
 extern crate alloc;
 
+use alloc::{collections::BTreeMap, sync::Arc};
+use core::{
+    any::{Any, TypeId, type_name},
+    fmt::{Display, Formatter},
+};
+
 use crate::services::Service;
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
-use core::any::{Any, TypeId, type_name};
-use core::fmt::{Display, Formatter};
 
 const UNKNOWN_CAPABILITY: &str = "<unknown>";
 
@@ -85,9 +87,7 @@ pub trait CapabilityStoreExt: CapabilityStore {
             .map_err(|_| CapabilityError::mismatch_for::<T>())
     }
 
-    fn require_service<T: ?Sized + Service + 'static>(
-        &self,
-    ) -> Result<Arc<T>, CapabilityError> {
+    fn require_service<T: ?Sized + Service + 'static>(&self) -> Result<Arc<T>, CapabilityError> {
         self.require_raw(TypeId::of::<ServiceCapability<T>>())
             .map_err(remap_error_for::<T>)?
             .downcast::<ServiceCapability<T>>()

@@ -7,6 +7,8 @@
 | Юнит/интеграционные тесты (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
 | Линтинг (host-крейты) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
 | Линтинг (aarch64-крейты) | `cargo clippy --workspace --target aarch64-unknown-none` |
+| Форматирование | `cargo fmt --all --check` |
+| Аудит зависимостей | `cargo deny check` |
 | Сборка ядра (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
 | Запуск в QEMU | `cargo xtask build devices/spec/qemu-aarch64.yaml --run` |
 | Отладка в QEMU | `cargo xtask build devices/spec/qemu-aarch64.yaml --debug` |
@@ -47,6 +49,26 @@ cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --excl
 # aarch64-крейты (требуется target aarch64-unknown-none)
 cargo clippy --workspace --target aarch64-unknown-none
 ```
+
+## Форматирование
+
+```bash
+# Проверка (CI-режим)
+cargo fmt --all --check
+
+# Автоформатирование
+cargo fmt --all
+```
+
+Конфигурация в `rustfmt.toml` (корень проекта).
+
+## Аудит зависимостей
+
+```bash
+cargo deny check
+```
+
+Конфигурация в `deny.toml`. Проверяет лицензии, уязвимости, дубликаты зависимостей.
 
 ## Запуск и отладка
 

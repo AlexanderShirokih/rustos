@@ -87,8 +87,9 @@ impl<const N: usize> fmt::Display for StaticString<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use core::fmt::Write;
+
+    use super::*;
 
     #[test]
     fn new_creates_empty_string() {

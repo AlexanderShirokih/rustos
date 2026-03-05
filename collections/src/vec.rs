@@ -103,9 +103,12 @@ impl<T, const N: usize> Index<usize> for Vec<T, N> {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
-        if index >= self.len {
-            panic!("index out of bounds: index {} >= len {}", index, self.len);
-        }
+        assert!(
+            index < self.len,
+            "index out of bounds: index {} >= len {}",
+            index,
+            self.len
+        );
 
         self.items[index].as_ref().unwrap()
     }
@@ -113,9 +116,12 @@ impl<T, const N: usize> Index<usize> for Vec<T, N> {
 
 impl<T, const N: usize> IndexMut<usize> for Vec<T, N> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        if index >= self.len {
-            panic!("index out of bounds: index {} >= len {}", index, self.len);
-        }
+        assert!(
+            index < self.len,
+            "index out of bounds: index {} >= len {}",
+            index,
+            self.len
+        );
 
         self.items[index].as_mut().unwrap()
     }
@@ -152,7 +158,7 @@ impl<'a, T> Iterator for VecIter<'a, T> {
     }
 }
 
-impl<'a, T> ExactSizeIterator for VecIter<'a, T> {
+impl<T> ExactSizeIterator for VecIter<'_, T> {
     fn len(&self) -> usize {
         self.len - self.index
     }

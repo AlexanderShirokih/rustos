@@ -1,7 +1,8 @@
-use crate::MemFlags;
-use crate::physical_address::PageAlignedAddress;
-use crate::virtual_address::PageAlignedVirtualAddress;
 use core::fmt::{Display, Formatter};
+
+use crate::{
+    MemFlags, physical_address::PageAlignedAddress, virtual_address::PageAlignedVirtualAddress,
+};
 
 /// Ошибки при маппинге памяти.
 #[derive(Debug, Clone)]

@@ -1,5 +1,6 @@
-use crate::vec::Vec;
 use core::cmp::Ordering;
+
+use crate::vec::Vec;
 
 extern crate alloc;
 

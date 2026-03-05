@@ -1,7 +1,12 @@
-use crate::aligned::{Address, Aligned};
-use crate::physical_address::AlignedPhysicalAddress;
-use core::fmt::{Formatter, LowerHex};
-use core::ptr::NonNull;
+use core::{
+    fmt::{Formatter, LowerHex},
+    ptr::NonNull,
+};
+
+use crate::{
+    aligned::{Address, Aligned},
+    physical_address::AlignedPhysicalAddress,
+};
 
 /// Адрес виртуальной памяти.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

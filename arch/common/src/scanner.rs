@@ -18,8 +18,7 @@ fn first_serial<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
         let by_device_type = node
             .prop("device_type")
             .and_then(|prop| prop.as_cstr())
-            .map(|value| value == "serial")
-            .unwrap_or(false);
+            .is_some_and(|value| value == "serial");
 
         let by_name = node.name().starts_with("serial");
         let by_compat = compatible_strings(node)
@@ -31,7 +30,7 @@ fn first_serial<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
 
 /// Итерирует по null-terminated строкам из свойства `compatible`.
 fn compatible_strings<'a>(node: &'a Node<'a>) -> impl Iterator<Item = &'a str> {
-    let data = node.prop("compatible").map(|p| p.value()).unwrap_or(&[]);
+    let data = node.prop("compatible").map_or(&[] as &[u8], |p| p.value());
 
     data.split(|&b| b == 0)
         .filter(|s| !s.is_empty())

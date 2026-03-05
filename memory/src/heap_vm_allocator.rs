@@ -6,12 +6,11 @@
 //! Работает с pre-mapped RAM: физическая память замаплена линейно
 //! (VA = higher_half_base + PA).
 
-use crate::align::align_up;
-use crate::frame_allocator::FrameAllocator;
-use crate::virtual_address::PageAlignedVirtualAddress;
-use core::alloc::Layout;
-use core::mem::size_of;
-use core::ptr::NonNull;
+use core::{alloc::Layout, mem::size_of, ptr::NonNull};
+
+use crate::{
+    align::align_up, frame_allocator::FrameAllocator, virtual_address::PageAlignedVirtualAddress,
+};
 
 /// Минимальный размер выделения
 /// Должен вместить: указатель на заголовок + минимум полезных данных
@@ -76,7 +75,7 @@ impl FreeBlock {
 
         // Создаем новый блок в вычисленной позиции
         let new_block_ptr = unsafe {
-            let base_ptr = self as *mut FreeBlock as usize;
+            let base_ptr = core::ptr::from_mut::<FreeBlock>(self) as usize;
             let new_ptr = (base_ptr + new_block_offset) as *mut FreeBlock;
 
             // Инициализируем новый блок
@@ -241,7 +240,7 @@ impl HeapAllocator {
     fn setup_allocated_block(&self, block_ptr: NonNull<FreeBlock>, align: usize) -> NonNull<u8> {
         unsafe {
             // Начало области данных (после заголовка)
-            let data_start = (block_ptr.as_ptr() as *mut u8).add(size_of::<FreeBlock>());
+            let data_start = block_ptr.as_ptr().cast::<u8>().add(size_of::<FreeBlock>());
 
             // Вычисляем адрес для пользовательских данных с учётом выравнивания
             // Резервирование HEADER_PTR_SIZE байт перед данными для указателя на заголовок
@@ -250,7 +249,7 @@ impl HeapAllocator {
             let user_ptr = aligned_user_addr as *mut u8;
 
             // Записываем указатель на заголовок непосредственно перед пользовательскими данными
-            let header_ptr_location = (user_ptr as *mut *mut FreeBlock).sub(1);
+            let header_ptr_location = user_ptr.cast::<*mut FreeBlock>().sub(1);
             *header_ptr_location = block_ptr.as_ptr();
 
             NonNull::new_unchecked(user_ptr)
@@ -270,7 +269,7 @@ impl HeapAllocator {
         unsafe {
             // Читаем указатель на заголовок блока, хранящийся перед пользовательскими данными
             // SAFETY: указатель находится в higher half, гарантирующей валидную mapped-память
-            let header_ptr_location = (ptr.as_ptr() as *mut *mut FreeBlock).sub(1);
+            let header_ptr_location = ptr.as_ptr().cast::<*mut FreeBlock>().sub(1);
             let block_ptr = *header_ptr_location;
 
             if let Some(block) = NonNull::new(block_ptr) {

@@ -1,5 +1,6 @@
-use crate::byte_sink::ByteSink;
 use core::fmt::Write;
+
+use crate::byte_sink::ByteSink;
 
 /// Трейт для потоковой записи данных.
 pub trait Writer {
@@ -24,7 +25,7 @@ impl<'a, S: ByteSink> BlockingWriter<'a, S> {
     }
 }
 
-impl<'a, S: ByteSink> Writer for BlockingWriter<'a, S> {
+impl<S: ByteSink> Writer for BlockingWriter<'_, S> {
     fn write_all(&self, mut s: &[u8]) {
         while !s.is_empty() {
             match self.sink.try_write_slice(s) {
@@ -35,11 +36,11 @@ impl<'a, S: ByteSink> Writer for BlockingWriter<'a, S> {
     }
 
     fn flush(&self) {
-        self.sink.flush()
+        self.sink.flush();
     }
 }
 
-impl<'a, S: ByteSink> Write for BlockingWriter<'a, S> {
+impl<S: ByteSink> Write for BlockingWriter<'_, S> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.write_all(s.as_bytes());
         self.flush();

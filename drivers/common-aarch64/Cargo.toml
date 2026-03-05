@@ -8,3 +8,6 @@ drivers-common = { workspace = true }
 fdt = { workspace = true }
 io = { workspace = true }
 util = { workspace = true }
+
+[lints]
+workspace = true

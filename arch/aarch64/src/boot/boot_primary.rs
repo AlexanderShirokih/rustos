@@ -6,16 +6,21 @@ use drivers_aarch64::drivers;
 use drivers_common::scanner::DriverScanner;
 use drivers_common_aarch64::adapt_tree;
 use io::buffered_writer::BufferedWriter;
-use kernel::kernel_context::KernelContext;
-use kernel::kmain::kmain;
+use kernel::{kernel_context::KernelContext, kmain::kmain};
 use klog::{debug, info, set_stdout};
-use memory::physical_address::{PageAlignedAddress, PhysicalAddress};
-use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
+use memory::{
+    physical_address::{PageAlignedAddress, PhysicalAddress},
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+};
 
-use crate::HIGHER_HALF_BASE;
-use crate::exception::ExceptionVectors;
-use crate::memory::memory_setup::{Enabled, MemorySetup};
-use crate::memory::mmu::Mmu;
+use crate::{
+    HIGHER_HALF_BASE,
+    exception::ExceptionVectors,
+    memory::{
+        memory_setup::{Enabled, MemorySetup},
+        mmu::Mmu,
+    },
+};
 
 /// К этому моменту:
 /// - PC и SP - виртуальные адреса (TTBR1)

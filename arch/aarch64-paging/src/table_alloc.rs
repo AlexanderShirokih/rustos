@@ -1,8 +1,8 @@
 //! Аллокатор таблиц страниц.
 
-use crate::level::Level;
-use crate::page_table::PageTable;
 use memory::physical_address::PageAlignedAddress;
+
+use crate::{level::Level, page_table::PageTable};
 
 /// Аллокатор таблиц страниц.
 ///

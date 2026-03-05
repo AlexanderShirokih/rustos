@@ -1,13 +1,18 @@
 mod common;
 
-use core::alloc::Layout;
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use memory::frame::Frame;
-use memory::frame_allocator::{FrameAllocator, FrameError, ReserveFrameError};
-use memory::heap_vm_allocator::{AllocationError, HeapAllocator};
-use memory::physical_address::PageAlignedAddress;
-use memory::virtual_address::PageAlignedVirtualAddress;
+use core::{
+    alloc::Layout,
+    ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+use memory::{
+    frame::Frame,
+    frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
+    heap_vm_allocator::{AllocationError, HeapAllocator},
+    physical_address::PageAlignedAddress,
+    virtual_address::PageAlignedVirtualAddress,
+};
 
 const PAGE_SIZE: usize = 4096;
 
