@@ -1,0 +1,52 @@
+stages:
+  - check
+  - test
+  - build
+
+variables:
+  CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
+  CARGO_TERM_COLOR: always
+
+
+default:
+  image: rust:latest
+  before_script:
+    - rustup show
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - .cargo/registry
+    - .cargo/git
+    - target/
+
+fmt:
+  stage: check
+  script:
+    - cargo fmt --all --check
+
+clippy:host:
+  stage: check
+  script:
+    - cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel
+
+clippy:aarch64:
+  stage: check
+  script:
+    - cargo clippy --workspace --target aarch64-unknown-none
+
+deny:
+  stage: check
+  script:
+    - cargo install --locked cargo-deny
+    - cargo deny check
+
+test:
+  stage: test
+  script:
+    - cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel
+
+build:qemu:
+  stage: build
+  script:
+    - cargo xtask build devices/spec/qemu-aarch64.yaml
