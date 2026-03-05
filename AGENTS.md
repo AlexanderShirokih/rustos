@@ -28,7 +28,7 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 
 - `cargo test` без `--exclude` падает — aarch64 inline assembly не компилируется на x86_64.
 - QEMU работает бесконечно — оборачивайте в `timeout`.
-- Нет `rust-toolchain.toml` — нужен Rust ≥ 1.85.0, target `aarch64-unknown-none`, `llvm-tools-preview`, `cargo-binutils`.
+- Toolchain зафиксирован в `rust-toolchain.toml` (nightly). `rustup` подберёт нужную версию автоматически.
 - `Cargo.lock` в `.gitignore` — зависимости разрешаются заново.
 - Системная зависимость: `qemu-system-arm` для boot-тестирования.
 
