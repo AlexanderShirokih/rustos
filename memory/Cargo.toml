@@ -1,11 +1,9 @@
 [package]
 name = "memory"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-collections = { path = "../collections" }
-klog = { path = "../log" }
-spin = "0.10.0"
-
-[dev-dependencies]
+collections = { workspace = true }
+klog = { workspace = true }
+spin = { workspace = true }

@@ -17,6 +17,33 @@ members = [
     "xtask",
 ]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+# Внешние зависимости
+spin = "0.10.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1.0"
+flate2 = "1.0"
+
+# Внутренние крейты workspace
+collections = { path = "collections" }
+io = { path = "io" }
+klog = { path = "log" }
+fdt = { path = "fdt" }
+memory = { path = "memory" }
+util = { path = "util" }
+arch-common = { path = "arch/common" }
+aarch64-paging = { path = "arch/aarch64-paging" }
+drivers-common = { path = "drivers/common" }
+drivers-common-aarch64 = { path = "drivers/common-aarch64" }
+drivers-aarch64 = { path = "drivers/aarch64" }
+kernel = { path = "kernel" }
+
 [profile.dev]
 panic = "abort"
 

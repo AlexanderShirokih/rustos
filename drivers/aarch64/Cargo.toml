@@ -1,12 +1,12 @@
 [package]
 name = "drivers-aarch64"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-io = { path = "../../io" }
-drivers-common = { path = "../common" }
-drivers-common-aarch64 = { path = "../common-aarch64" }
-klog = { path = "../../log" }
-util = { path = "../../util" }
-spin = "0.10.0"
+io = { workspace = true }
+drivers-common = { workspace = true }
+drivers-common-aarch64 = { workspace = true }
+klog = { workspace = true }
+util = { workspace = true }
+spin = { workspace = true }

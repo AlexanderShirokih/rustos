@@ -1,11 +1,11 @@
 [package]
 name = "kernel"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-spin = "0.10.0"
-drivers-common = { path = "../drivers/common" }
-io = { path = "../io" }
-memory = { path = "../memory" }
-klog = { path = "../log" }
+spin = { workspace = true }
+drivers-common = { workspace = true }
+io = { workspace = true }
+memory = { workspace = true }
+klog = { workspace = true }

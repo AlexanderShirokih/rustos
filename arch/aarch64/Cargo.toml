@@ -1,7 +1,7 @@
 [package]
 name = "arch-aarch64"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [[bin]]
 name = "kernel-aarch64"
@@ -9,18 +9,18 @@ path = "src/start.rs"
 test = false
 
 [dependencies]
-aarch64-paging = { path = "../aarch64-paging" }
-arch-common = { path = "../common" }
-drivers-common-aarch64 = { path = "../../drivers/common-aarch64" }
-drivers-common = { path = "../../drivers/common" }
-drivers-aarch64 = { path = "../../drivers/aarch64" }
-kernel = { path = "../../kernel" }
-memory = { path = "../../memory" }
-collections = { path = "../../collections" }
-fdt = { path = "../../fdt" }
-io = { path = "../../io" }
-klog = { path = "../../log" }
+aarch64-paging = { workspace = true }
+arch-common = { workspace = true }
+drivers-common-aarch64 = { workspace = true }
+drivers-common = { workspace = true }
+drivers-aarch64 = { workspace = true }
+kernel = { workspace = true }
+memory = { workspace = true }
+collections = { workspace = true }
+fdt = { workspace = true }
+io = { workspace = true }
+klog = { workspace = true }
 
 [build-dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_yaml = "0.9"
+serde = { workspace = true }
+serde_yaml = { workspace = true }
