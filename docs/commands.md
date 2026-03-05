@@ -6,7 +6,7 @@
 |---|---|
 | Юнит/интеграционные тесты (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
 | Линтинг (host-крейты) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
-| Линтинг (aarch64-крейты) | `cargo clippy --workspace --target aarch64-unknown-none` |
+| Линтинг (aarch64-крейты) | `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` |
 | Форматирование | `cargo fmt --all --check` |
 | Аудит зависимостей | `cargo deny check` |
 | Сборка ядра (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
@@ -47,7 +47,7 @@ cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclud
 cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel
 
 # aarch64-крейты (требуется target aarch64-unknown-none)
-cargo clippy --workspace --target aarch64-unknown-none
+cargo clippy --workspace --exclude xtask --target aarch64-unknown-none
 ```
 
 ## Форматирование

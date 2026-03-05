@@ -18,7 +18,7 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 |---|---|
 | Тесты (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
 | Линтинг (host) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
-| Линтинг (aarch64) | `cargo clippy --workspace --target aarch64-unknown-none` |
+| Линтинг (aarch64) | `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` |
 | Форматирование | `cargo fmt --all --check` |
 | Аудит зависимостей | `cargo deny check` |
 | Сборка (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
