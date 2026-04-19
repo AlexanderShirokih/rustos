@@ -12,8 +12,16 @@ impl ArchCpu for Aarch64Cpu {
     }
 
     unsafe fn install_cpu_local(cpu: *mut ()) {
-        // SAFETY: TPIDR_EL1 используется как CPU-local storage pointer на EL1.
+        // SAFETY: TPIDR_EL1 - kernel-private CPU-local pointer на EL1.
+        // Указатель должен жить всё время работы scheduler-а на этом CPU.
         unsafe { write_sysreg!(tpidr_el1, cpu as usize as u64) };
+    }
+
+    fn cpu_local_ptr() -> *mut () {
+        // SAFETY: TPIDR_EL1 ранее установлен через install_cpu_local; либо равен 0
+        // до bootstrap (валидное null-значение, scheduler выполняет fallback).
+        let raw = unsafe { read_sysreg!(tpidr_el1) };
+        raw as usize as *mut ()
     }
 
     fn idle() -> ! {

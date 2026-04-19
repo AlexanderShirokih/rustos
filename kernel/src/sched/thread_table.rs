@@ -15,7 +15,12 @@ impl<A: ArchContext, const N: usize> ThreadTable<A, N> {
         }
     }
 
-    pub fn insert(&mut self, mut thread: Thread<A>) -> Result<ThreadId, SpawnError> {
+    /// Резервирует свободный слот и заполняет его потоком, сконструированным
+    /// замыканием `builder` с использованием выделенного `ThreadId`.
+    pub fn insert_with<F>(&mut self, builder: F) -> Result<ThreadId, SpawnError>
+    where
+        F: FnOnce(ThreadId) -> Thread<A>,
+    {
         let Some((index, slot)) = self
             .slots
             .iter_mut()
@@ -27,7 +32,8 @@ impl<A: ArchContext, const N: usize> ThreadTable<A, N> {
 
         let raw = NonZeroU32::new((index + 1) as u32).expect("slot index must fit into u32");
         let id = ThreadId::new(raw);
-        thread.assign_id(id);
+        let thread = builder(id);
+        debug_assert_eq!(thread.id(), id, "builder must store assigned ThreadId");
         *slot = Some(thread);
         Ok(id)
     }

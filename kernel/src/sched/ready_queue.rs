@@ -34,13 +34,12 @@ impl<const PRIO: usize> ReadyQueue<PRIO> {
         if self.queues[level].is_empty() {
             self.bitmap &= !Self::mask_for(level);
         }
-        let priority = Priority::new(level as u8).expect("bitmap level must map to priority");
-        Some((id, priority))
+        Some((id, Priority::new(level as u8)))
     }
 
     pub fn peek_highest_priority(&self) -> Option<Priority> {
         let level = self.highest_level()?;
-        Priority::new(level as u8)
+        Some(Priority::new(level as u8))
     }
 
     pub fn is_empty(&self) -> bool {

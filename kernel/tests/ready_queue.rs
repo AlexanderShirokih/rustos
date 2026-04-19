@@ -15,12 +15,12 @@ fn pop_highest_prefers_lower_priority_number() {
     let low = thread_id(1);
     let high = thread_id(2);
 
-    queue.push(low, Priority::new(10).expect("priority"));
-    queue.push(high, Priority::new(2).expect("priority"));
+    queue.push(low, Priority::new(10));
+    queue.push(high, Priority::new(2));
 
     let (id, priority) = queue.pop_highest().expect("queue must not be empty");
     assert_eq!(id, high);
-    assert_eq!(priority, Priority::new(2).expect("priority"));
+    assert_eq!(priority, Priority::new(2));
 }
 
 #[test]
@@ -36,4 +36,14 @@ fn fifo_is_preserved_within_same_priority() {
     assert_eq!(queue.pop_highest().map(|(id, _)| id), Some(first));
     assert_eq!(queue.pop_highest().map(|(id, _)| id), Some(second));
     assert!(queue.is_empty());
+}
+
+#[test]
+fn arbitrary_priority_levels_supported() {
+    let mut queue = ReadyQueue::<8>::new();
+    let lowest = thread_id(1);
+    queue.push(lowest, Priority::new(7));
+    let (id, prio) = queue.pop_highest().expect("queue must not be empty");
+    assert_eq!(id, lowest);
+    assert_eq!(prio, Priority::new(7));
 }

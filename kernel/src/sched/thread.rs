@@ -1,7 +1,7 @@
 use drivers_common::services::scheduler::{Priority, ThreadId};
 
 use super::{
-    arch::{ArchContext, ThreadStack},
+    arch::{ArchContext, CpuId, ThreadStack},
     process::ProcessId,
 };
 
@@ -15,8 +15,9 @@ pub enum ThreadState {
 }
 
 pub struct Thread<A: ArchContext> {
-    id: Option<ThreadId>,
+    id: ThreadId,
     process: ProcessId,
+    cpu_affinity: CpuId,
     priority: Priority,
     state: ThreadState,
     time_slice_left: u32,
@@ -27,15 +28,18 @@ pub struct Thread<A: ArchContext> {
 
 impl<A: ArchContext> Thread<A> {
     pub fn new(
+        id: ThreadId,
         process: ProcessId,
+        cpu_affinity: CpuId,
         priority: Priority,
         arch: A,
         stack: ThreadStack,
         name: &'static str,
     ) -> Self {
         Self {
-            id: None,
+            id,
             process,
+            cpu_affinity,
             priority,
             state: ThreadState::Ready,
             time_slice_left: 0,
@@ -46,15 +50,15 @@ impl<A: ArchContext> Thread<A> {
     }
 
     pub fn id(&self) -> ThreadId {
-        self.id.expect("thread must be inserted before use")
-    }
-
-    pub(crate) fn assign_id(&mut self, id: ThreadId) {
-        self.id = Some(id);
+        self.id
     }
 
     pub fn process(&self) -> ProcessId {
         self.process
+    }
+
+    pub fn cpu_affinity(&self) -> CpuId {
+        self.cpu_affinity
     }
 
     pub fn priority(&self) -> Priority {

@@ -1,7 +1,7 @@
 //! Контракты подсистемы планировщика.
 
 use alloc::boxed::Box;
-use core::{num::NonZeroU32, ops::RangeInclusive};
+use core::num::NonZeroU32;
 
 use crate::services::Service;
 
@@ -20,22 +20,25 @@ impl ThreadId {
     }
 }
 
-/// Приоритет потока: `0` - наивысший.
+/// Приоритет потока: `0` - наивысший, большее число - меньший приоритет.
+///
+/// Допустимый верхний предел зависит от количества уровней приоритета,
+/// сконфигурированных в конкретном `Scheduler<_, _, _, PRIO, _, _>`. Поток с
+/// `priority.raw() >= PRIO` будет отвергнут планировщиком как
+/// `SpawnError::InvalidPriority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Priority(u8);
 
 impl Priority {
-    pub const MIN: Self = Self(0);
-    pub const MAX: Self = Self(31);
+    /// Высший возможный приоритет.
+    pub const HIGHEST: Self = Self(0);
+
+    /// Условный "средний" приоритет, удобный для пользовательских процессов.
     pub const NORMAL: Self = Self(15);
 
-    pub const fn new(raw: u8) -> Option<Self> {
-        if raw <= Self::MAX.raw() {
-            Some(Self(raw))
-        } else {
-            None
-        }
+    pub const fn new(raw: u8) -> Self {
+        Self(raw)
     }
 
     pub const fn raw(self) -> u8 {
@@ -46,8 +49,8 @@ impl Priority {
         Self::NORMAL
     }
 
-    pub const fn valid_range() -> RangeInclusive<u8> {
-        Self::MIN.raw()..=Self::MAX.raw()
+    pub const fn highest() -> Self {
+        Self::HIGHEST
     }
 }
 

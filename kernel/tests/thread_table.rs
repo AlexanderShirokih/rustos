@@ -1,16 +1,35 @@
 mod common;
 
-use drivers_common::services::scheduler::Priority;
-use kernel::sched::thread_table::ThreadTable;
+use std::num::NonZeroU32;
 
-use crate::common::make_thread;
+use drivers_common::services::scheduler::{Priority, ThreadId};
+use kernel::sched::{ProcessId, Thread, ThreadStack, thread_table::ThreadTable};
+
+use crate::common::{MockContext, MockStack};
+use kernel::sched::ArchStack;
+use kernel::sched::CpuId;
+
+fn build_thread(id: ThreadId, name: &'static str, priority: Priority) -> Thread<MockContext> {
+    let process = ProcessId::new(NonZeroU32::new(1).expect("non-zero"));
+    let stack: ThreadStack = MockStack::allocate(1).expect("mock stack allocation");
+    Thread::new(
+        id,
+        process,
+        CpuId::new(0),
+        priority,
+        MockContext,
+        stack,
+        name,
+    )
+}
 
 #[test]
 fn insert_get_and_remove_thread() {
-    let mut table = ThreadTable::<crate::common::MockContext, 4>::new();
-    let thread = make_thread("worker", Priority::normal());
+    let mut table = ThreadTable::<MockContext, 4>::new();
 
-    let id = table.insert(thread).expect("insert must succeed");
+    let id = table
+        .insert_with(|id| build_thread(id, "worker", Priority::normal()))
+        .expect("insert must succeed");
     let inserted = table.get(id).expect("thread must be present");
     assert_eq!(inserted.id(), id);
     assert_eq!(inserted.name(), "worker");
@@ -22,12 +41,12 @@ fn insert_get_and_remove_thread() {
 
 #[test]
 fn split_pair_mut_returns_distinct_threads() {
-    let mut table = ThreadTable::<crate::common::MockContext, 4>::new();
+    let mut table = ThreadTable::<MockContext, 4>::new();
     let first = table
-        .insert(make_thread("first", Priority::normal()))
+        .insert_with(|id| build_thread(id, "first", Priority::normal()))
         .expect("first insert");
     let second = table
-        .insert(make_thread("second", Priority::new(3).expect("priority")))
+        .insert_with(|id| build_thread(id, "second", Priority::new(3)))
         .expect("second insert");
 
     let (first_ref, second_ref) = table
@@ -45,4 +64,16 @@ fn split_pair_mut_returns_distinct_threads() {
         table.get(second).expect("second thread").time_slice_left(),
         3
     );
+}
+
+#[test]
+fn full_table_returns_no_free_slots_error() {
+    let mut table = ThreadTable::<MockContext, 1>::new();
+    let _ = table
+        .insert_with(|id| build_thread(id, "a", Priority::normal()))
+        .expect("first insert");
+    let err = table
+        .insert_with(|id| build_thread(id, "b", Priority::normal()))
+        .unwrap_err();
+    assert_eq!(err, drivers_common::services::scheduler::SpawnError::NoFreeThreadSlots);
 }

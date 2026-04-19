@@ -7,10 +7,13 @@ use drivers_common::services::{
 };
 
 use super::{
-    arch::{ArchContext, TimerSource},
+    arch::{ArchContext, ArchCpu, TimerSource},
     scheduler::{SchedulerInner, perform_schedule_action},
 };
 
+/// Капабилити-handle на scheduler. Регистрируется в `Capabilities` как
+/// `Arc<dyn SchedulerService>` и одновременно используется как `TickHandler`
+/// для системного таймера.
 pub struct SchedulerHandle<A, T, const PRIO: usize, const N_CPUS: usize, const N_THREADS: usize>
 where
     A: ArchContext,
@@ -29,6 +32,12 @@ where
         inner: Arc<collections::MutexCell<SchedulerInner<A, T, PRIO, N_CPUS, N_THREADS>>>,
     ) -> Self {
         Self { inner }
+    }
+
+    fn self_arc(&self) -> Arc<dyn SchedulerService> {
+        Arc::new(Self {
+            inner: self.inner.clone(),
+        })
     }
 }
 
@@ -55,27 +64,29 @@ where
         cfg: SpawnConfig,
         entry: Box<dyn FnOnce() + Send + 'static>,
     ) -> Result<ThreadId, SpawnError> {
-        self.inner.with_lock(|inner| inner.spawn_boxed(cfg, entry))
+        let exit_handle = self.self_arc();
+        self.inner
+            .with_lock(|inner| inner.spawn_boxed(cfg, entry, exit_handle))
     }
 
     fn yield_now(&self) {
-        <A::Cpu as super::arch::ArchCpu>::disable_preemption();
+        <A::Cpu as ArchCpu>::disable_preemption();
         let action = self.inner.with_lock(|inner| {
             let now_ns = inner.now_ns();
             inner.yield_now(now_ns)
         });
         perform_schedule_action::<A>(action);
-        <A::Cpu as super::arch::ArchCpu>::enable_preemption();
+        <A::Cpu as ArchCpu>::enable_preemption();
     }
 
     fn sleep_ns(&self, ns: u64) {
-        <A::Cpu as super::arch::ArchCpu>::disable_preemption();
+        <A::Cpu as ArchCpu>::disable_preemption();
         let action = self.inner.with_lock(|inner| {
             let now_ns = inner.now_ns();
             inner.sleep_current(ns, now_ns)
         });
         perform_schedule_action::<A>(action);
-        <A::Cpu as super::arch::ArchCpu>::enable_preemption();
+        <A::Cpu as ArchCpu>::enable_preemption();
     }
 
     fn current(&self) -> ThreadId {
@@ -83,12 +94,14 @@ where
     }
 
     fn exit(&self) -> ! {
-        <A::Cpu as super::arch::ArchCpu>::disable_preemption();
+        <A::Cpu as ArchCpu>::disable_preemption();
         let action = self.inner.with_lock(|inner| {
             let now_ns = inner.now_ns();
             inner.exit_current(now_ns)
         });
         perform_schedule_action::<A>(action);
-        panic!("terminated thread resumed after scheduler switch");
+        // После switch_to_next текущий поток уже не должен возвращаться.
+        // Если выполнение вернулось - это серьёзный bug в context-switch.
+        unreachable!("terminated thread resumed after scheduler switch")
     }
 }

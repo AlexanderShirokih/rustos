@@ -1,25 +1,25 @@
-use core::marker::PhantomData;
-
 use drivers_common::services::scheduler::ThreadId;
 
-use super::{arch::{ArchContext, CpuId}, ready_queue::ReadyQueue};
+use super::{arch::CpuId, ready_queue::ReadyQueue};
 
-pub struct Cpu<A: ArchContext, const PRIO: usize> {
+/// Per-CPU состояние scheduler-а.
+///
+/// Хранится по стабильному адресу (`Box<Cpu<PRIO>>`), указатель на который
+/// ARCH-слой записывает в CPU-local регистр (например, `TPIDR_EL1`).
+pub struct Cpu<const PRIO: usize> {
     id: CpuId,
     ready_queue: ReadyQueue<PRIO>,
     current: ThreadId,
     idle: ThreadId,
-    _marker: PhantomData<A>,
 }
 
-impl<A: ArchContext, const PRIO: usize> Cpu<A, PRIO> {
+impl<const PRIO: usize> Cpu<PRIO> {
     pub fn new(id: CpuId, idle: ThreadId) -> Self {
         Self {
             id,
             ready_queue: ReadyQueue::new(),
             current: idle,
             idle,
-            _marker: PhantomData,
         }
     }
 

@@ -4,21 +4,17 @@ use alloc::{boxed::Box, sync::Arc};
 
 use drivers_aarch64::drivers;
 use drivers_common::{
-    CapabilityStoreExt, CapabilityStoreMutExt,
     scanner::DriverScanner,
-    services::{
-        scheduler::{Priority, SchedulerService, SchedulerServiceExt, SpawnConfig},
-        timer::{TickHandler, TimerService},
-    },
+    services::scheduler::{Priority, SchedulerService, SchedulerServiceExt, SpawnConfig},
 };
 use drivers_common_aarch64::adapt_tree;
 use io::buffered_writer::BufferedWriter;
 use kernel::{
     kernel_context::KernelContext,
     kmain::kmain,
-    sched::{Scheduler, TimerSource, Uninit},
+    sched::{Bootstrapped, KernelTimerSource, Scheduler, bootstrap_scheduler},
 };
-use klog::{debug, info, set_stdout};
+use klog::{debug, info};
 use memory::{
     physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
@@ -31,12 +27,22 @@ use crate::{
         memory_setup::{Enabled, MemorySetup},
         mmu::Mmu,
     },
-    sched::Aarch64Context,
+    sched::{Aarch64Cpu, Aarch64Context},
 };
+use kernel::sched::ArchCpu;
 
 const SCHED_PRIO_LEVELS: usize = 32;
 const SCHED_CPU_COUNT: usize = 1;
 const SCHED_THREAD_COUNT: usize = 64;
+
+type AarchScheduler = Scheduler<
+    Aarch64Context,
+    KernelTimerSource,
+    Bootstrapped,
+    SCHED_PRIO_LEVELS,
+    SCHED_CPU_COUNT,
+    SCHED_THREAD_COUNT,
+>;
 
 /// К этому моменту:
 /// - PC и SP - виртуальные адреса (TTBR1)
@@ -56,30 +62,24 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
     )
     .expect("Failed to install heap allocator");
 
-    // Немедленно удаляем identity mapping - SP и PC уже виртуальные
     Mmu::new().disable_lower_half();
 
-    // Устанавливаем векторы исключений
     ExceptionVectors::instance().install();
 
-    // BufferedWriter как stdout до инициализации UART
     let buffered = Box::leak(Box::new(BufferedWriter::new()));
-    set_stdout(buffered);
+    klog::set_stdout(buffered);
 
     info!("primary_main: post-MMU initialization complete");
     debug!("primary_main: TTBR0 (identity) cleared, TTBR1 (higher-half) active");
 
-    // Парсим DTB по виртуальному адресу (phys + HIGHER_HALF_BASE)
     let dtb_virt = dtb_phys + HIGHER_HALF_BASE;
 
     let device_tree = fdt::devicetree::DeviceTree::from_ptr(dtb_virt)
         .expect("Failed to parse DTB at virtual address");
 
-    // Делаем DeviceTree 'static (он в mapped RAM, lifetime корректен на всё время работы ядра)
     let device_tree: &'static fdt::devicetree::DeviceTree =
         unsafe { core::mem::transmute(&device_tree) };
 
-    // Единый scan: все драйверы из .drivers.kernel
     let mut driver_scanner = DriverScanner::new();
     let root = adapt_tree(device_tree)
         .root()
@@ -92,60 +92,42 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
     let kernel = Box::leak(Box::new(kernel));
 
     kmain(driver_scanner, kernel, buffered);
-    start_scheduler(kernel)
+    boot_scheduler(kernel)
 }
 
-struct TimerSourceAdapter(Arc<dyn TimerService>);
+fn boot_scheduler(kernel: &mut KernelContext) -> ! {
+    // Гарантия: scheduler bootstrap'ится при замаскированных IRQ. Тики
+    // обработчика прилетят только после первого `enable_preemption()` внутри
+    // trampoline уже выбранного потока.
+    Aarch64Cpu::disable_preemption();
 
-impl TimerSource for TimerSourceAdapter {
-    fn now_ns(&self) -> u64 {
-        self.0.now_ns()
-    }
-
-    fn schedule_next(&self, deadline_ns: u64) {
-        self.0.schedule_next(deadline_ns);
-    }
-}
-
-fn start_scheduler(kernel: &mut KernelContext) -> ! {
-    let timer = kernel.with_runtime_state(|caps, _| {
-        caps.require_service::<dyn TimerService>()
-            .expect("TimerService must be available before scheduler startup")
-    });
-
-    let scheduler = Scheduler::<
+    let scheduler: AarchScheduler = bootstrap_scheduler::<
         Aarch64Context,
-        TimerSourceAdapter,
-        Uninit,
         SCHED_PRIO_LEVELS,
         SCHED_CPU_COUNT,
         SCHED_THREAD_COUNT,
-    >::new(TimerSourceAdapter(timer.clone()))
-    .bootstrap();
+    >(kernel);
 
-    let scheduler_handle = Arc::new(scheduler.handle());
-    let scheduler_service: Arc<dyn SchedulerService> = scheduler_handle.clone();
-    let tick_handler: Arc<dyn TickHandler> = scheduler_handle;
-
-    kernel.with_runtime_state(|caps, _| {
-        caps.provide_service::<dyn SchedulerService>(scheduler_service.clone())
-            .expect("SchedulerService registration must succeed");
+    let scheduler_service = kernel.with_runtime_state(|caps, _| {
+        use drivers_common::CapabilityStoreExt;
+        caps.require_service::<dyn SchedulerService>()
+            .expect("SchedulerService must be registered by bootstrap_scheduler")
     });
 
-    timer.set_handler(tick_handler);
-    spawn_demo_processes(scheduler_service);
+    spawn_demo_processes(&scheduler, scheduler_service);
+
     scheduler.start()
 }
 
-fn spawn_demo_processes(scheduler: Arc<dyn SchedulerService>) {
+fn spawn_demo_processes(scheduler: &AarchScheduler, service: Arc<dyn SchedulerService>) {
     for (idx, period_ms) in [(1_u32, 100_u64), (2, 300), (3, 700)] {
-        let thread_scheduler = scheduler.clone();
+        let thread_service = service.clone();
         scheduler
             .spawn(
                 SpawnConfig::new("demo").priority(Priority::normal()),
                 move || loop {
                     klog::info!("Process {idx} tick");
-                    thread_scheduler.sleep_ms(period_ms);
+                    thread_service.sleep_ms(period_ms);
                 },
             )
             .expect("demo process spawn must succeed");
