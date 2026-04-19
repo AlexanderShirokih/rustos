@@ -87,6 +87,7 @@ pub enum SpawnError {
     NoFreeThreadSlots,
     InvalidPriority,
     InvalidStackPages,
+    StackAllocationFailed,
 }
 
 /// Контракт сервиса планировщика.

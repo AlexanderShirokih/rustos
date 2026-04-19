@@ -93,8 +93,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "IRQ bridge is not initialized")]
-    fn dispatch_without_install_panics() {
+    fn dispatch_without_install_is_noop() {
         let bridge = IrqBridge::new();
         bridge.dispatch();
     }

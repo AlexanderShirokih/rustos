@@ -16,6 +16,7 @@ mod boot;
 mod boot_header;
 mod exception;
 mod memory;
+mod sched;
 mod system;
 
 extern crate drivers_common_aarch64;

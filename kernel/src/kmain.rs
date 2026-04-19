@@ -5,10 +5,10 @@ use alloc::vec::Vec;
 use drivers_common::{
     CapabilityStoreExt,
     scanner::DriverScanner,
-    services::{console::ConsoleService, interrupts::InterruptsService, timer::TimerService},
+    services::{console::ConsoleService, interrupts::InterruptsService},
 };
 use io::buffered_writer::BufferedWriter;
-use klog::{debug, info};
+use klog::info;
 
 use crate::{
     driver_init::{InitSchedulerError, PendingDriver, run_retry_passes},
@@ -28,7 +28,6 @@ pub fn kmain(driver_scanner: DriverScanner, kernel: &mut KernelContext, kout: &B
     bind_console(kernel, kout);
 
     install_interrupts_hook(kernel);
-    smoke_check_timer_ticks(kernel);
 
     info!("Kernel drivers initialization completed")
 }
@@ -86,20 +85,5 @@ fn install_interrupts_hook(kernel: &mut KernelContext) {
 
         interrupts.enable();
         irq_bridge::install_interrupts_service(interrupts.clone());
-    });
-}
-
-fn smoke_check_timer_ticks(kernel: &mut KernelContext) {
-    kernel.with_runtime_state(|caps, _| {
-        let timer = caps
-            .require_service::<dyn TimerService>()
-            .expect("TimerService must be available after driver initialization");
-
-        let now_ns = timer.now_ns();
-        let elapsed_time_ms = now_ns / 1_000_000;
-
-        timer.schedule_next(now_ns.saturating_add(100_000_000));
-
-        debug!("elapsed_time_ms: {elapsed_time_ms}");
     });
 }

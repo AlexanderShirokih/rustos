@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 spin = { workspace = true }
+collections = { workspace = true }
 drivers-common = { workspace = true }
 io = { workspace = true }
 memory = { workspace = true }
