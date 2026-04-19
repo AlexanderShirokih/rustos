@@ -95,9 +95,10 @@ fn smoke_check_timer_ticks(kernel: &mut KernelContext) {
             .require_service::<dyn TimerService>()
             .expect("TimerService must be available after driver initialization");
 
-        let elapsed_time_ms = timer.time_monotonic_elapsed() / 1_000_000;
+        let now_ns = timer.now_ns();
+        let elapsed_time_ms = now_ns / 1_000_000;
 
-        timer.set_periodic(100u64);
+        timer.schedule_next(now_ns.saturating_add(100_000_000));
 
         debug!("elapsed_time_ms: {elapsed_time_ms}");
     });

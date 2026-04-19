@@ -2,7 +2,10 @@
 
 use alloc::sync::Arc;
 
-use drivers_common::services::{interrupts::IrqHandler, timer::TimerService};
+use drivers_common::services::{
+    interrupts::IrqHandler,
+    timer::{TickHandler, TimerService},
+};
 
 use super::state::ArmGenericTimerState;
 
@@ -33,11 +36,15 @@ impl ArmGenericTimerHandle {
 }
 
 impl TimerService for ArmGenericTimerHandle {
-    fn time_monotonic_elapsed(&self) -> u64 {
+    fn now_ns(&self) -> u64 {
         self.state.get_elapsed_ns()
     }
 
-    fn set_periodic(&self, interval_ms: u64) {
-        self.state.set_periodic(interval_ms);
+    fn schedule_next(&self, deadline_ns: u64) {
+        self.state.schedule_next(deadline_ns);
+    }
+
+    fn set_handler(&self, handler: Arc<dyn TickHandler>) {
+        self.state.set_handler(handler);
     }
 }

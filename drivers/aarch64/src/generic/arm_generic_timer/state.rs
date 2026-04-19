@@ -1,7 +1,10 @@
 //! Аппаратное состояние ARM Generic Timer.
 
-use alloc::string::String;
-use core::sync::atomic::{AtomicU32, Ordering};
+use alloc::{string::String, sync::Arc};
+use core::cmp;
+
+use drivers_common::services::timer::TickHandler;
+use spin::Once;
 
 use crate::{read_sysreg, write_sysreg};
 
@@ -10,7 +13,7 @@ pub(super) const CNTP_CTL_ENABLE: u32 = 1 << 0;
 /// Runtime-состояние ARM Generic Timer.
 pub(super) struct ArmGenericTimerState {
     pub(super) frequency: u64,
-    pub(super) reload_value: AtomicU32,
+    pub(super) handler: Once<Arc<dyn TickHandler>>,
 }
 
 impl ArmGenericTimerState {
@@ -23,14 +26,22 @@ impl ArmGenericTimerState {
 
         Ok(Self {
             frequency,
-            reload_value: AtomicU32::new(0),
+            handler: Once::new(),
         })
     }
 
-    pub(super) fn set_periodic(&self, interval_ms: u64) {
-        let reload_value = Self::compute_counter_value(self.frequency, interval_ms).unwrap_or(1);
+    pub(super) fn set_handler(&self, handler: Arc<dyn TickHandler>) {
+        assert!(
+            self.handler.get().is_none(),
+            "TickHandler is already registered"
+        );
+        let _ = self.handler.call_once(|| handler);
+    }
 
-        self.reload_value.store(reload_value, Ordering::Relaxed);
+    pub(super) fn schedule_next(&self, deadline_ns: u64) {
+        let now_ns = self.get_elapsed_ns();
+        let delta_ns = deadline_ns.saturating_sub(now_ns);
+        let reload_value = Self::compute_counter_value(self.frequency, delta_ns).unwrap_or(1);
 
         Self::write_cntp_tval_el0(reload_value);
         Self::write_cntp_ctl_el0(CNTP_CTL_ENABLE);
@@ -45,22 +56,19 @@ impl ArmGenericTimerState {
     }
 
     pub(super) fn on_interrupt(&self) {
-        klog::debug!("timer tick...");
-
-        let reload_value = self.reload_value.load(Ordering::Relaxed);
-        if reload_value != 0 {
-            Self::write_cntp_tval_el0(reload_value);
+        if let Some(handler) = self.handler.get() {
+            handler.on_tick(self.get_elapsed_ns());
         }
     }
 
-    fn compute_counter_value(frequency: u64, interval_ms: u64) -> Option<u32> {
-        let ticks = frequency.checked_mul(interval_ms)? / 1_000;
+    fn compute_counter_value(frequency: u64, interval_ns: u64) -> Option<u32> {
+        let ticks = frequency.checked_mul(interval_ns)? / 1_000_000_000;
 
         if ticks == 0 {
             return None;
         }
 
-        ticks.try_into().ok()
+        Some(cmp::min(ticks, u32::MAX as u64) as u32)
     }
 
     fn read_cntfrq_el0() -> u64 {
