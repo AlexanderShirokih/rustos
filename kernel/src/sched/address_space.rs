@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-/// Общее адресное пространство ядра; user-space будет добавлен позже.
+/// Общее адресное пространство ядра
 #[derive(Debug)]
 pub struct AddressSpace;
 

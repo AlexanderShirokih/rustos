@@ -1,7 +1,7 @@
-//! Helpers для инициализации scheduler-а из ARCH-крейтов.
+//! Helpers для инициализации scheduler-а из platform-independent кода.
 //!
 //! Изолирует логику создания scheduler, регистрации `SchedulerService` в
-//! `Capabilities` и привязки к `TimerService`, чтобы ARCH-слой не дублировал её.
+//! `Capabilities` и привязки к `TimerService`.
 
 use alloc::sync::Arc;
 
@@ -17,7 +17,7 @@ use crate::kernel_context::KernelContext;
 
 use super::{
     arch::{ArchContext, TimerSource},
-    scheduler::{Bootstrapped, Scheduler, Uninit},
+    scheduler::{Bootstrapped, Scheduler, SchedulerConfig, Uninit},
 };
 
 /// Адаптер `TimerService` (capability) -> `TimerSource` (требование scheduler).
@@ -45,9 +45,10 @@ impl TimerSource for KernelTimerSource {
 /// Возвращает scheduler в состоянии [`Bootstrapped`] - вызывающий должен
 /// зарегистрировать начальные потоки и перевести scheduler в [`super::Running`]
 /// через [`Scheduler::start`].
-pub fn bootstrap_scheduler<A, const PRIO: usize, const N_CPUS: usize, const N_THREADS: usize>(
+pub fn bootstrap_scheduler<A>(
     kernel: &mut KernelContext,
-) -> Scheduler<A, KernelTimerSource, Bootstrapped, PRIO, N_CPUS, N_THREADS>
+    config: SchedulerConfig,
+) -> Scheduler<A, KernelTimerSource, Bootstrapped>
 where
     A: ArchContext,
 {
@@ -56,8 +57,9 @@ where
             .expect("TimerService must be available before scheduler startup")
     });
 
-    let scheduler = Scheduler::<A, KernelTimerSource, Uninit, PRIO, N_CPUS, N_THREADS>::new(
+    let scheduler = Scheduler::<A, KernelTimerSource, Uninit>::new(
         KernelTimerSource::new(timer.clone()),
+        config,
     )
     .bootstrap();
 

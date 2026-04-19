@@ -11,7 +11,7 @@ fn thread_id(raw: u32) -> ThreadId {
 
 #[test]
 fn pop_highest_prefers_lower_priority_number() {
-    let mut queue = ReadyQueue::<32>::new();
+    let mut queue = ReadyQueue::new(32);
     let low = thread_id(1);
     let high = thread_id(2);
 
@@ -25,7 +25,7 @@ fn pop_highest_prefers_lower_priority_number() {
 
 #[test]
 fn fifo_is_preserved_within_same_priority() {
-    let mut queue = ReadyQueue::<32>::new();
+    let mut queue = ReadyQueue::new(32);
     let first = thread_id(1);
     let second = thread_id(2);
     let priority = Priority::normal();
@@ -40,7 +40,7 @@ fn fifo_is_preserved_within_same_priority() {
 
 #[test]
 fn arbitrary_priority_levels_supported() {
-    let mut queue = ReadyQueue::<8>::new();
+    let mut queue = ReadyQueue::new(8);
     let lowest = thread_id(1);
     queue.push(lowest, Priority::new(7));
     let (id, prio) = queue.pop_highest().expect("queue must not be empty");

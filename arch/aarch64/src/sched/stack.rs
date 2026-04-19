@@ -1,6 +1,6 @@
 use alloc::vec;
 
-use kernel::sched::{ArchStack, StackError, ThreadStack};
+use kernel::sched::{ThreadStackAllocator, StackError, ThreadStack};
 
 const PAGE_SIZE: usize = 4096;
 
@@ -14,7 +14,7 @@ const PAGE_SIZE: usize = 4096;
 /// context-switch.
 pub struct Aarch64Stack;
 
-impl ArchStack for Aarch64Stack {
+impl ThreadStackAllocator for Aarch64Stack {
     fn allocate(pages: usize) -> Result<ThreadStack, StackError> {
         if pages == 0 {
             return Err(StackError::InvalidSize);

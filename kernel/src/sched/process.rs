@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
-use core::{array, num::NonZeroU32};
+use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use super::address_space::AddressSpace;
 
@@ -50,8 +51,9 @@ impl Process {
 ///
 /// `next_id` гарантирует уникальность `ProcessId` даже при удалении
 /// процессов из таблицы.
-pub struct ProcessTable<const N: usize> {
-    slots: [Option<Process>; N],
+pub struct ProcessTable {
+    slots: Vec<Option<Process>>,
+    max_processes: usize,
     next_id: u32,
 }
 
@@ -64,10 +66,11 @@ pub enum ProcessTableError {
     OutOfIds,
 }
 
-impl<const N: usize> ProcessTable<N> {
-    pub fn new() -> Self {
+impl ProcessTable {
+    pub fn new(max_processes: usize) -> Self {
         Self {
-            slots: array::from_fn(|_| None),
+            slots: Vec::new(),
+            max_processes,
             next_id: 1,
         }
     }
@@ -77,15 +80,20 @@ impl<const N: usize> ProcessTable<N> {
         name: &'static str,
         address_space: Arc<AddressSpace>,
     ) -> Result<ProcessId, ProcessTableError> {
-        let slot = self
-            .slots
-            .iter_mut()
-            .find(|slot| slot.is_none())
-            .ok_or(ProcessTableError::Full)?;
         let raw = NonZeroU32::new(self.next_id).ok_or(ProcessTableError::OutOfIds)?;
         let id = ProcessId::new(raw);
         self.next_id = self.next_id.checked_add(1).ok_or(ProcessTableError::OutOfIds)?;
-        *slot = Some(Process::new(id, name, address_space));
+
+        if let Some(index) = self.slots.iter().position(|slot| slot.is_none()) {
+            self.slots[index] = Some(Process::new(id, name, address_space));
+            return Ok(id);
+        }
+
+        if self.slots.len() >= self.max_processes {
+            return Err(ProcessTableError::Full);
+        }
+
+        self.slots.push(Some(Process::new(id, name, address_space)));
         Ok(id)
     }
 
@@ -94,8 +102,8 @@ impl<const N: usize> ProcessTable<N> {
     }
 }
 
-impl<const N: usize> Default for ProcessTable<N> {
+impl Default for ProcessTable {
     fn default() -> Self {
-        Self::new()
+        Self::new(64)
     }
 }

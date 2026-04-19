@@ -8,4 +8,4 @@ mod commons;
 pub mod fdt_adapter;
 pub mod tree_ext;
 pub use commons::*;
-pub use fdt_adapter::adapt_tree;
+pub use fdt_adapter::adapt_to_fdt_tree;

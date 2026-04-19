@@ -1,12 +1,12 @@
-use alloc::{boxed::Box, sync::Arc};
-use core::{array, marker::PhantomData};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::marker::PhantomData;
 
 use collections::{LockCell, MutexCell};
 use drivers_common::services::scheduler::{Priority, SpawnConfig, SpawnError, ThreadId};
 
 use super::{
     address_space::AddressSpace,
-    arch::{ArchContext, ArchCpu, CpuId, TimerSource},
+    arch::{ArchContext, ArchCpu, CpuId, TimerSource, with_preemption_disabled},
     cpu::Cpu,
     process::ProcessTable,
     thread::{Thread, ThreadState},
@@ -38,7 +38,7 @@ pub trait SchedulerStage {}
 /// Scheduler создан, но per-CPU состояние ещё не установлено.
 pub struct Uninit;
 
-/// Per-CPU состояние установлено (idle thread + Cpu в TPIDR_EL1).
+/// Per-CPU состояние установлено.
 /// Доступен `spawn` для bootstrap-кода и `handle()` для регистрации сервиса.
 pub struct Bootstrapped;
 
@@ -50,56 +50,78 @@ impl SchedulerStage for Uninit {}
 impl SchedulerStage for Bootstrapped {}
 impl SchedulerStage for Running {}
 
-pub struct Scheduler<A, T, S, const PRIO: usize, const N_CPUS: usize, const N_THREADS: usize>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulerConfig {
+    priority_levels: usize,
+    max_threads: usize,
+}
+
+impl SchedulerConfig {
+    pub const fn new(priority_levels: usize, max_threads: usize) -> Self {
+        assert!(priority_levels > 0 && priority_levels <= 32);
+        assert!(max_threads > 0);
+
+        Self {
+            priority_levels,
+            max_threads,
+        }
+    }
+
+    pub const fn priority_levels(self) -> usize {
+        self.priority_levels
+    }
+
+    pub const fn max_threads(self) -> usize {
+        self.max_threads
+    }
+}
+
+pub struct Scheduler<A, T, S>
 where
     A: ArchContext,
     T: TimerSource,
     S: SchedulerStage,
 {
-    pub(crate) inner: Arc<MutexCell<SchedulerInner<A, T, PRIO, N_CPUS, N_THREADS>>>,
+    pub(crate) inner: Arc<MutexCell<SchedulerInner<A, T>>>,
     _stage: PhantomData<S>,
 }
 
-pub(crate) struct SchedulerInner<
-    A,
-    T,
-    const PRIO: usize,
-    const N_CPUS: usize,
-    const N_THREADS: usize,
-> where
+pub(crate) struct SchedulerInner<A, T>
+where
     A: ArchContext,
     T: TimerSource,
 {
+    config: SchedulerConfig,
     timer: T,
-    threads: ThreadTable<A, N_THREADS>,
-    processes: ProcessTable<N_THREADS>,
-    /// Per-CPU состояние с фиксированными адресами для записи в `TPIDR_EL1`.
-    cpus: [Option<Box<Cpu<PRIO>>>; N_CPUS],
+    threads: ThreadTable<A>,
+    processes: ProcessTable,
+    cpus: Vec<Option<Box<Cpu>>>,
     sleepers: SleepQueue,
     kernel_address_space: Arc<AddressSpace>,
     quantum_ns: u64,
     time_slice_ticks: u32,
 }
 
-/// Возвращает приоритет, используемый для idle-потока в scheduler с `PRIO` уровнями.
-pub const fn lowest_priority<const PRIO: usize>() -> Priority {
-    assert!(PRIO > 0, "PRIO must be > 0");
-    Priority::new((PRIO - 1) as u8)
+/// Возвращает приоритет, используемый для idle-потока в scheduler с указанным
+/// количеством уровней приоритета.
+pub const fn lowest_priority(priority_levels: usize) -> Priority {
+    assert!(priority_levels > 0, "priority_levels must be > 0");
+    Priority::new((priority_levels - 1) as u8)
 }
 
-impl<A, T, const PRIO: usize, const N_CPUS: usize, const N_THREADS: usize>
-    Scheduler<A, T, Uninit, PRIO, N_CPUS, N_THREADS>
+impl<A, T> Scheduler<A, T, Uninit>
 where
     A: ArchContext,
     T: TimerSource,
 {
-    pub fn new(timer: T) -> Self {
+    pub fn new(timer: T, config: SchedulerConfig) -> Self {
         Self {
             inner: Arc::new(MutexCell::new(SchedulerInner {
+                config,
                 timer,
-                threads: ThreadTable::new(),
-                processes: ProcessTable::new(),
-                cpus: array::from_fn(|_| None),
+                threads: ThreadTable::new(config.max_threads()),
+                processes: ProcessTable::new(config.max_threads()),
+                cpus: Vec::new(),
                 sleepers: SleepQueue::new(),
                 kernel_address_space: AddressSpace::shared_kernel(),
                 quantum_ns: DEFAULT_QUANTUM_NS,
@@ -111,7 +133,7 @@ where
 
     /// Создаёт per-CPU state, idle-поток и устанавливает `TPIDR_EL1`.
     /// Должен вызываться при замаскированных IRQ.
-    pub fn bootstrap(self) -> Scheduler<A, T, Bootstrapped, PRIO, N_CPUS, N_THREADS> {
+    pub fn bootstrap(self) -> Scheduler<A, T, Bootstrapped> {
         let bootstrapped = Scheduler {
             inner: self.inner,
             _stage: PhantomData::<Bootstrapped>,
@@ -125,15 +147,14 @@ where
     }
 }
 
-impl<A, T, const PRIO: usize, const N_CPUS: usize, const N_THREADS: usize>
-    Scheduler<A, T, Bootstrapped, PRIO, N_CPUS, N_THREADS>
+impl<A, T> Scheduler<A, T, Bootstrapped>
 where
     A: ArchContext,
     T: TimerSource,
 {
     /// Возвращает thread-safe handle на scheduler для регистрации в `Capabilities`
     /// и использования в trampoline-замыканиях.
-    pub fn handle(&self) -> super::service::SchedulerHandle<A, T, PRIO, N_CPUS, N_THREADS> {
+    pub fn handle(&self) -> super::service::SchedulerHandle<A, T> {
         super::service::SchedulerHandle::new(self.inner.clone())
     }
 
@@ -146,25 +167,25 @@ where
         let exit_handle: Arc<dyn drivers_common::services::scheduler::SchedulerService> =
             Arc::new(self.handle());
         self.inner
-            .with_lock(|inner| inner.spawn::<PRIO, _>(cfg, entry, exit_handle))
+            .with_lock(|inner| inner.spawn(cfg, entry, exit_handle))
     }
 
     /// Тестовый путь старта. Выполняет первый switch через `A::switch`,
     /// возвращая управление вызывающему. Используется для unit-тестов с
     /// `MockContext`. В реальном boot-сценарии используйте [`start`].
-    pub fn run(self) -> Scheduler<A, T, Running, PRIO, N_CPUS, N_THREADS> {
+    pub fn run(self) -> Scheduler<A, T, Running> {
         let running = Scheduler {
             inner: self.inner,
             _stage: PhantomData::<Running>,
         };
 
-        <A::Cpu as ArchCpu>::disable_preemption();
-        let action = running.inner.with_lock(|inner| {
+        let action = with_preemption_disabled::<A::Cpu, _>(|| {
+            running.inner.with_lock(|inner| {
             let now_ns = inner.timer.now_ns();
             inner.switch_to_next(now_ns)
+            })
         });
         perform_schedule_action::<A>(action);
-        <A::Cpu as ArchCpu>::enable_preemption();
 
         running
     }
@@ -176,14 +197,16 @@ where
         let next_ptr = self
             .inner
             .with_lock(SchedulerInner::prepare_first_thread_start);
-        // SAFETY: первый поток выбран под scheduler-lock, его контекст живёт в shared heap state.
-        // IRQ остаются замаскированными до `enable_preemption()` внутри trampoline.
+        // SAFETY: `prepare_first_thread_start` под scheduler-lock выбирает первый
+        // runnable поток и возвращает указатель на его уже инициализированный
+        // архитектурный контекст, который хранится в таблице потоков scheduler-а.
+        // Preemption/IRQ здесь всё ещё замаскированы, как того требует `A::start`;
+        // они будут разрешены только после входа в поток через trampoline.
         unsafe { A::start(&*next_ptr) }
     }
 }
 
-impl<A, T, const PRIO: usize, const N_CPUS: usize, const N_THREADS: usize>
-    Scheduler<A, T, Running, PRIO, N_CPUS, N_THREADS>
+impl<A, T> Scheduler<A, T, Running>
 where
     A: ArchContext,
     T: TimerSource,
@@ -193,23 +216,23 @@ where
     }
 
     pub fn yield_now(&self) {
-        <A::Cpu as ArchCpu>::disable_preemption();
-        let action = self.inner.with_lock(|inner| {
+        let action = with_preemption_disabled::<A::Cpu, _>(|| {
+            self.inner.with_lock(|inner| {
             let now_ns = inner.timer.now_ns();
             inner.yield_now(now_ns)
+            })
         });
         perform_schedule_action::<A>(action);
-        <A::Cpu as ArchCpu>::enable_preemption();
     }
 
     pub fn sleep_ns(&self, ns: u64) {
-        <A::Cpu as ArchCpu>::disable_preemption();
-        let action = self.inner.with_lock(|inner| {
+        let action = with_preemption_disabled::<A::Cpu, _>(|| {
+            self.inner.with_lock(|inner| {
             let now_ns = inner.timer.now_ns();
             inner.sleep_current(ns, now_ns)
+            })
         });
         perform_schedule_action::<A>(action);
-        <A::Cpu as ArchCpu>::enable_preemption();
     }
 
     pub fn on_tick(&self, now_ns: u64) {
@@ -217,13 +240,12 @@ where
         perform_schedule_action::<A>(action);
     }
 
-    pub fn handle(&self) -> super::service::SchedulerHandle<A, T, PRIO, N_CPUS, N_THREADS> {
+    pub fn handle(&self) -> super::service::SchedulerHandle<A, T> {
         super::service::SchedulerHandle::new(self.inner.clone())
     }
 }
 
-impl<A, T, const PRIO: usize, const N_CPUS: usize, const N_THREADS: usize>
-    SchedulerInner<A, T, PRIO, N_CPUS, N_THREADS>
+impl<A, T> SchedulerInner<A, T>
 where
     A: ArchContext,
     T: TimerSource,
@@ -235,14 +257,14 @@ where
         exit_handle: Arc<dyn drivers_common::services::scheduler::SchedulerService>,
     ) -> Result<ThreadId, SpawnError> {
         // Box<dyn FnOnce()> уже реализует FnOnce(), поэтому передаём напрямую.
-        self.spawn::<PRIO, _>(cfg, entry, exit_handle)
+        self.spawn(cfg, entry, exit_handle)
     }
 
     fn bootstrap_current_cpu(&mut self) {
         let cpu_id = <A::Cpu as ArchCpu>::current_id();
-        let idle_priority = lowest_priority::<PRIO>();
+        let idle_priority = lowest_priority(self.config.priority_levels());
         let idle_id = self
-            .spawn::<PRIO, _>(
+            .spawn(
                 SpawnConfig::new("idle").priority(idle_priority),
                 || <A::Cpu as ArchCpu>::idle(),
                 Self::idle_exit_handle(),
@@ -256,13 +278,14 @@ where
         idle.set_state(ThreadState::Running);
         idle.set_time_slice_left(self.time_slice_ticks);
 
-        let mut cpu = Box::new(Cpu::new(cpu_id, idle_id));
-        let cpu_ptr = core::ptr::from_mut::<Cpu<PRIO>>(&mut cpu).cast::<()>();
+        let mut cpu = Box::new(Cpu::new(cpu_id, idle_id, self.config.priority_levels()));
+        let cpu_ptr = core::ptr::from_mut::<Cpu>(&mut cpu).cast::<()>();
 
+        self.ensure_cpu_slot(cpu_id);
         let slot = self
             .cpus
             .get_mut(cpu_id.as_index())
-            .expect("current CPU index must fit configured CPU count");
+            .expect("CPU slot must exist after ensure_cpu_slot");
         *slot = Some(cpu);
 
         // SAFETY: Box<Cpu> хранится в slot до конца жизни scheduler-а; адрес стабилен.
@@ -275,7 +298,7 @@ where
         Arc::new(IdleExitStub)
     }
 
-    fn spawn<const PRIO_: usize, F>(
+    fn spawn<F>(
         &mut self,
         cfg: SpawnConfig,
         entry: F,
@@ -287,11 +310,11 @@ where
         if cfg.stack_pages == 0 {
             return Err(SpawnError::InvalidStackPages);
         }
-        if (cfg.priority.raw() as usize) >= PRIO {
+        if (cfg.priority.raw() as usize) >= self.config.priority_levels() {
             return Err(SpawnError::InvalidPriority);
         }
 
-        let stack = <A::Stack as super::arch::ArchStack>::allocate(cfg.stack_pages)
+        let stack = <A::Stack as super::arch::ThreadStackAllocator>::allocate(cfg.stack_pages)
             .map_err(|_| SpawnError::StackAllocationFailed)?;
         let stack_top = stack.top();
 
@@ -543,7 +566,7 @@ where
         self.timer.schedule_next(deadline);
     }
 
-    fn current_cpu(&self) -> Option<&Cpu<PRIO>> {
+    fn current_cpu(&self) -> Option<&Cpu> {
         let ptr = <A::Cpu as ArchCpu>::cpu_local_ptr();
         if ptr.is_null() {
             // Fallback на индексацию через MPIDR - используется в bootstrap фазе,
@@ -553,10 +576,10 @@ where
         }
         // SAFETY: ptr был установлен через install_cpu_local; Box<Cpu> жив,
         // указатель валиден всё время жизни scheduler.
-        Some(unsafe { &*(ptr.cast::<Cpu<PRIO>>()) })
+        Some(unsafe { &*(ptr.cast::<Cpu>()) })
     }
 
-    fn current_cpu_mut(&mut self) -> Option<&mut Cpu<PRIO>> {
+    fn current_cpu_mut(&mut self) -> Option<&mut Cpu> {
         let ptr = <A::Cpu as ArchCpu>::cpu_local_ptr();
         if ptr.is_null() {
             let cpu_id = <A::Cpu as ArchCpu>::current_id();
@@ -566,13 +589,20 @@ where
                 .and_then(|s| s.as_deref_mut());
         }
         // SAFETY: cm. current_cpu().
-        Some(unsafe { &mut *(ptr.cast::<Cpu<PRIO>>()) })
+        Some(unsafe { &mut *(ptr.cast::<Cpu>()) })
     }
 
-    fn cpu_by_id_mut(&mut self, id: CpuId) -> Option<&mut Cpu<PRIO>> {
+    fn cpu_by_id_mut(&mut self, id: CpuId) -> Option<&mut Cpu> {
         self.cpus
             .get_mut(id.as_index())
             .and_then(|slot| slot.as_deref_mut())
+    }
+
+    fn ensure_cpu_slot(&mut self, id: CpuId) {
+        let required_len = id.as_index() + 1;
+        if self.cpus.len() < required_len {
+            self.cpus.resize_with(required_len, || None);
+        }
     }
 }
 

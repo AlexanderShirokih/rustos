@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 use spin::Mutex;
 
@@ -16,7 +16,7 @@ enum BufferState {
     /// Накопление данных в памяти.
     Buffering(Vec<u8>),
     /// Прямая запись в подключённый writer.
-    Attached(&'static (dyn Writer + Sync)),
+    Attached(Arc<dyn Writer + Send + Sync>),
 }
 
 /// Writer, буферизующий вывод до подключения реального устройства.
@@ -36,10 +36,10 @@ impl BufferedWriter {
     }
 
     /// Подключает реальный writer: сбрасывает буфер в него и переключается на прямую запись.
-    pub fn attach(&self, writer: &'static (dyn Writer + Sync)) {
+    pub fn attach(&self, writer: Arc<dyn Writer + Send + Sync>) {
         let old = {
             let mut state = self.state.lock();
-            core::mem::replace(&mut *state, BufferState::Attached(writer))
+            core::mem::replace(&mut *state, BufferState::Attached(Arc::clone(&writer)))
         };
         if let BufferState::Buffering(buf) = old
             && !buf.is_empty()
@@ -64,21 +64,19 @@ impl Writer for BufferedWriter {
                 buffer.extend_from_slice(buf);
             }
             BufferState::Attached(writer) => {
-                let w = *writer;
+                let writer = Arc::clone(writer);
                 drop(state);
-                w.write_all(buf);
+                writer.write_all(buf);
             }
         }
     }
 
     fn flush(&self) {
         let state = self.state.lock();
-        if let BufferState::Attached(writer) = *state {
+        if let BufferState::Attached(writer) = &*state {
+            let writer = Arc::clone(writer);
             drop(state);
             writer.flush();
         }
     }
 }
-
-// SAFETY: BufferedWriter использует Mutex для синхронизации доступа к состоянию.
-unsafe impl Sync for BufferedWriter {}

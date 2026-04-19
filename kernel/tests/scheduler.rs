@@ -3,20 +3,23 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use drivers_common::services::scheduler::{Priority, SpawnConfig};
-use kernel::sched::{ArchStack, Scheduler, Uninit};
+use kernel::sched::{ThreadStackAllocator, Scheduler, SchedulerConfig, Uninit};
 
 use crate::common::{
     MockContext, MockStack, MockTimer, MockTimerSource, max_irq_depth, reset_switches,
     switch_count,
 };
 
-type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit, 32, 1, 16>;
+type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
+
+const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 16);
+const SMALL_CONFIG: SchedulerConfig = SchedulerConfig::new(4, 8);
 
 #[test]
 fn run_starts_highest_priority_thread() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
     let low = scheduler
         .spawn(SpawnConfig::new("low").priority(Priority::new(8)), || {})
         .expect("spawn low");
@@ -37,7 +40,7 @@ fn run_starts_highest_priority_thread() {
 fn on_tick_round_robins_equal_priority_threads() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
     let first = scheduler
         .spawn(SpawnConfig::new("first"), || {})
         .expect("spawn first");
@@ -59,7 +62,7 @@ fn on_tick_round_robins_equal_priority_threads() {
 fn sleep_ns_blocks_and_wakes_thread_on_deadline() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
     let sleeper = scheduler
         .spawn(SpawnConfig::new("sleeper"), || {})
         .expect("spawn sleeper");
@@ -83,7 +86,7 @@ fn sleep_ns_blocks_and_wakes_thread_on_deadline() {
 fn yield_now_rotates_runnable_threads() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
     let a = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
     let b = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
 
@@ -100,7 +103,7 @@ fn yield_now_rotates_runnable_threads() {
 fn yield_now_with_no_other_threads_keeps_current() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
     let only = scheduler.spawn(SpawnConfig::new("only"), || {}).unwrap();
 
     let running = scheduler.run();
@@ -117,7 +120,7 @@ fn yield_now_with_no_other_threads_keeps_current() {
 fn time_slice_decrement_triggers_preemption() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
     let _a = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
     let b = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
     let running = scheduler.run();
@@ -131,8 +134,8 @@ fn time_slice_decrement_triggers_preemption() {
 #[test]
 fn invalid_priority_returns_error() {
     let timer = MockTimer::new();
-    type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit, 4, 1, 8>;
-    let scheduler = SmallScheduler::new(MockTimerSource(timer)).bootstrap();
+    type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
+    let scheduler = SmallScheduler::new(MockTimerSource(timer), SMALL_CONFIG).bootstrap();
     let err = scheduler
         .spawn(SpawnConfig::new("bad").priority(Priority::new(10)), || {})
         .unwrap_err();
@@ -146,8 +149,8 @@ fn invalid_priority_returns_error() {
 fn small_prio_scheduler_works_with_low_idle_priority() {
     reset_switches();
     let timer = MockTimer::new();
-    type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit, 4, 1, 8>;
-    let scheduler = SmallScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
+    let scheduler = SmallScheduler::new(MockTimerSource(timer.clone()), SMALL_CONFIG).bootstrap();
     let task = scheduler
         .spawn(SpawnConfig::new("task").priority(Priority::new(1)), || {})
         .unwrap();
@@ -159,7 +162,7 @@ fn small_prio_scheduler_works_with_low_idle_priority() {
 fn enable_preemption_balanced_during_yield() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
     let _ = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
     let _ = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
 
@@ -175,7 +178,7 @@ fn enable_preemption_balanced_during_yield() {
 fn sleep_queue_orders_multiple_sleepers_by_deadline() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
     let early = scheduler.spawn(SpawnConfig::new("early"), || {}).unwrap();
     let late = scheduler.spawn(SpawnConfig::new("late"), || {}).unwrap();
     let runner = scheduler.spawn(SpawnConfig::new("runner"), || {}).unwrap();
@@ -210,9 +213,11 @@ fn exit_current_releases_thread_slot_for_next_spawn() {
     use drivers_common::services::scheduler::SchedulerService;
     reset_switches();
     let timer = MockTimer::new();
-    type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit, 32, 1, 4>;
+    type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
     // 1 idle + 3 spawned заполнят все 4 слота.
-    let scheduler = SmallScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler =
+        SmallScheduler::new(MockTimerSource(timer.clone()), SchedulerConfig::new(32, 4))
+            .bootstrap();
     let _ = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
     let _ = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
     let _ = scheduler.spawn(SpawnConfig::new("c"), || {}).unwrap();
@@ -242,7 +247,7 @@ fn spawn_via_service_handle_works() {
     use drivers_common::services::scheduler::{SchedulerService, SchedulerServiceExt};
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone())).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
     let handle = Arc::new(scheduler.handle());
     let service: Arc<dyn SchedulerService> = handle;
     let executed = Arc::new(Mutex::new(false));

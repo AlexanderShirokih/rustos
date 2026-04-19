@@ -1,11 +1,15 @@
 extern crate alloc;
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 use drivers_common::{
     CapabilityStoreExt,
-    scanner::DriverScanner,
-    services::{console::ConsoleService, interrupts::InterruptsService},
+    scanner::EmbeddedDriversScanner,
+    services::{
+        console::ConsoleService,
+        interrupts::InterruptsService,
+        scheduler::{Priority, SchedulerService, SchedulerServiceExt, SpawnConfig},
+    },
 };
 use io::buffered_writer::BufferedWriter;
 use klog::info;
@@ -14,25 +18,42 @@ use crate::{
     driver_init::{InitSchedulerError, PendingDriver, run_retry_passes},
     irq_bridge,
     kernel_context::KernelContext,
+    sched::{self, ArchContext, ArchCpu, Bootstrapped, KernelTimerSource, Scheduler, SchedulerConfig},
 };
 
-/// Главная функция ядра
-pub fn kmain(driver_scanner: DriverScanner, kernel: &mut KernelContext, kout: &BufferedWriter) {
+/// Платформо-независимая точка входа ядра
+pub fn kmain<A>(
+    driver_scanner: EmbeddedDriversScanner,
+    context: &mut KernelContext,
+    kout: &BufferedWriter,
+    scheduler_config: SchedulerConfig,
+) -> !
+where
+    A: ArchContext,
+{
     info!("Starting kmain");
 
-    let pending = collect_pending_drivers(driver_scanner);
+    let pending = collect_into_pending_drivers(driver_scanner);
 
-    run_all_drivers(kernel, pending);
+    run_all_drivers(context, pending);
 
-    // Привязка консоли и flush буфера
-    bind_console(kernel, kout);
+    bind_console(context, kout);
 
-    install_interrupts_hook(kernel);
+    install_interrupts_hook(context);
 
-    info!("Kernel drivers initialization completed")
+    info!("Kernel drivers initialization completed");
+
+    // Гарантия: scheduler bootstrap'ится при замаскированных IRQ. Тики
+    // обработчика прилетят только после первого `enable_preemption()` внутри
+    // trampoline уже выбранного потока.
+    <A::Cpu as ArchCpu>::disable_preemption();
+
+    let scheduler = sched::bootstrap_scheduler::<A>(context, scheduler_config);
+    spawn_init_process(&scheduler, context);
+    scheduler.start()
 }
 
-fn collect_pending_drivers(driver_scanner: DriverScanner) -> Vec<PendingDriver> {
+fn collect_into_pending_drivers(driver_scanner: EmbeddedDriversScanner) -> Vec<PendingDriver> {
     driver_scanner
         .into_iter()
         .map(|driver_handle| {
@@ -66,18 +87,12 @@ fn run_all_drivers(kernel: &mut KernelContext, pending: Vec<PendingDriver>) {
 fn bind_console(kernel: &mut KernelContext, buffered: &BufferedWriter) {
     kernel.with_runtime_state(|caps, _| {
         if let Ok(console) = caps.require_service::<dyn ConsoleService>() {
-            let writer = console.writer();
-            // Консоль живёт в capabilities, writer - ссылка на неё. Для attach нужен &'static.
-            // SAFETY: console - Arc в capabilities, не будет dropped. writer() возвращает &T где T: ConsoleService.
-            let writer_static: &'static (dyn io::writer::Writer + Sync) =
-                unsafe { core::mem::transmute(writer) };
-            buffered.attach(writer_static);
+            buffered.attach(console as Arc<dyn io::writer::Writer + Send + Sync>);
         }
     });
 }
 
 fn install_interrupts_hook(kernel: &mut KernelContext) {
-    // Мост устанавливается после инициализации runtime-драйверов.
     kernel.with_runtime_state(|caps, _| {
         let interrupts = caps
             .require_service::<dyn InterruptsService>()
@@ -86,4 +101,39 @@ fn install_interrupts_hook(kernel: &mut KernelContext) {
         interrupts.enable();
         irq_bridge::install_interrupts_service(interrupts.clone());
     });
+}
+
+fn spawn_init_process<A>(
+    scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
+    kernel: &mut KernelContext,
+)
+where
+    A: ArchContext,
+{
+    let scheduler_service = kernel.with_runtime_state(|caps, _| {
+        caps.require_service::<dyn SchedulerService>()
+            .expect("SchedulerService must be registered before init task spawn")
+    });
+
+    scheduler
+        .spawn(
+            SpawnConfig::new("init").priority(Priority::highest()),
+            move || spawn_demo_processes(scheduler_service),
+        )
+        .expect("init process spawn must succeed");
+}
+
+fn spawn_demo_processes(scheduler_service: Arc<dyn SchedulerService>) {
+    for (idx, period_ms) in [(1_u32, 100_u64), (2, 300), (3, 700)] {
+        let thread_service = scheduler_service.clone();
+        scheduler_service
+            .spawn(
+                SpawnConfig::new("demo").priority(Priority::normal()),
+                move || loop {
+                    info!("Process {idx} tick");
+                    thread_service.sleep_ms(period_ms);
+                },
+            )
+            .expect("demo process spawn must succeed");
+    }
 }

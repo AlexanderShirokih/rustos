@@ -34,7 +34,7 @@ pub struct RegIter<'a> {
 }
 
 /// Обёртка над `DeviceTree` для передачи в драйверный слой.
-pub fn adapt_tree<'a>(device_tree: &'a DeviceTree<'a>) -> FdtTree<'a> {
+pub fn adapt_to_fdt_tree<'a>(device_tree: &'a DeviceTree<'a>) -> FdtTree<'a> {
     FdtTree { inner: device_tree }
 }
 

@@ -19,11 +19,11 @@ pub struct DriverHandle {
     pub factory: Box<dyn DriverFactory>,
 }
 
-pub struct DriverScanner {
+pub struct EmbeddedDriversScanner {
     pub(crate) handles: BTreeMap<usize, DriverHandle>,
 }
 
-impl DriverScanner {
+impl EmbeddedDriversScanner {
     pub fn new() -> Self {
         Self {
             handles: BTreeMap::new(),
@@ -88,13 +88,13 @@ impl DriverScanner {
     }
 }
 
-impl Default for DriverScanner {
+impl Default for EmbeddedDriversScanner {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl IntoIterator for DriverScanner {
+impl IntoIterator for EmbeddedDriversScanner {
     type Item = DriverHandle;
     type IntoIter = alloc::collections::btree_map::IntoValues<usize, DriverHandle>;
 

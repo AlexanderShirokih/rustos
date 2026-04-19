@@ -310,7 +310,7 @@ impl MemorySetup<Enabled> {
     /// Переключает глобальный аллокатор на heap-фазу и возвращает маппер памяти.
     ///
     /// Вызывается post-MMU
-    pub fn install_from_raw(
+    pub fn switch_to_heap_allocator(
         higher_root_pa: PageAlignedAddress,
         frame_allocator_phys: PhysicalAddress,
         higher_half_base: PageAlignedVirtualAddress,
@@ -343,8 +343,12 @@ impl MemorySetup<Enabled> {
                 higher_half_base.as_usize(),
             );
 
+        let memory_mapper = Box::new(memory_mapper);
+
+        Mmu::new().disable_lower_half();
+        
         Ok(MemoryManagerResult {
-            memory_mapper: Box::new(memory_mapper),
+            memory_mapper,
             base_offset: higher_half_base,
         })
     }

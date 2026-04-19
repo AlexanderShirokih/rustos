@@ -1,5 +1,5 @@
 use alloc::boxed::Box;
-use core::ptr::NonNull;
+use core::{marker::PhantomData, mem::size_of, ptr::NonNull};
 
 /// Идентификатор CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -34,19 +34,33 @@ pub type TrampolineFn = unsafe extern "C" fn(arg: *mut ()) -> !;
 /// Магическое значение, размещаемое в первых 16 байтах стека (canary).
 ///
 /// Проверяется планировщиком при каждом переключении контекста: повреждение
-/// сигнализирует о переполнении стека вниз. Полноценный MMU-based guard page
-/// (через `MemoryMapper::unmap`) пока не поддерживается AArch64-маппером и
-/// будет добавлен позже.
+/// сигнализирует о переполнении стека вниз.
 ///
 /// Хранится как `[u8; 16]` (а не `[u64; 2]`), чтобы избежать требований к
 /// выравниванию `Box<[u8]>` (align=1).
 const STACK_CANARY_VALUE: u128 = 0xDEAD_C0DE_FACE_FEED_BEEF_BAD0_DEAD_F00Du128;
 
 /// Размер canary в байтах.
-pub const STACK_CANARY_SIZE: usize = core::mem::size_of::<u128>();
+pub const STACK_CANARY_SIZE: usize = size_of::<u128>();
 
 /// Байтовое представление canary в little-endian.
 pub const STACK_CANARY: [u8; STACK_CANARY_SIZE] = STACK_CANARY_VALUE.to_le_bytes();
+
+struct PreemptionGuard<C: ArchCpu>(PhantomData<C>);
+
+impl<C: ArchCpu> Drop for PreemptionGuard<C> {
+    fn drop(&mut self) {
+        C::enable_preemption();
+    }
+}
+
+/// Выполняет `f` при замаскированном preemption/IRQ и гарантированно
+/// восстанавливает предыдущее состояние при выходе из scope.
+pub fn with_preemption_disabled<C: ArchCpu, R>(f: impl FnOnce() -> R) -> R {
+    C::disable_preemption();
+    let _guard = PreemptionGuard::<C>(PhantomData);
+    f()
+}
 
 /// Владеющий стек потока с canary в начале (low addresses) и опциональным
 /// cleanup hook.
@@ -138,7 +152,7 @@ impl Drop for ThreadStack {
 /// Архитектурно-зависимый контекст потока.
 pub trait ArchContext: Sized + Send + 'static {
     type Cpu: ArchCpu;
-    type Stack: ArchStack;
+    type Stack: ThreadStackAllocator;
 
     fn init(stack_top: NonNull<u8>, entry: TrampolineFn, arg: *mut ()) -> Self;
 
@@ -162,7 +176,7 @@ pub trait ArchContext: Sized + Send + 'static {
 pub trait ArchCpu: Send + Sync + 'static {
     fn current_id() -> CpuId;
 
-    /// Сохраняет указатель на per-CPU состояние (`Cpu<PRIO>`) в архитектурно-определённом
+    /// Сохраняет указатель на per-CPU состояние (`Cpu`) в архитектурно-определённом
     /// CPU-local регистре (например, `TPIDR_EL1` на AArch64).
     ///
     /// # Safety
@@ -183,12 +197,12 @@ pub trait ArchCpu: Send + Sync + 'static {
     fn disable_preemption() {}
 }
 
-/// Выделение архитектурного стека потока.
-pub trait ArchStack: Send + Sync + 'static {
+/// Выделение стека потока.
+pub trait ThreadStackAllocator: Send + Sync + 'static {
     fn allocate(pages: usize) -> Result<ThreadStack, StackError>;
 }
 
-/// Источник монотонного времени и программирование следующего тика.
+/// Источник монотонного времени.
 pub trait TimerSource: Send + Sync + 'static {
     fn now_ns(&self) -> u64;
 

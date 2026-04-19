@@ -1,29 +1,35 @@
-use alloc::collections::VecDeque;
-use core::array;
+use alloc::{collections::VecDeque, vec, vec::Vec};
 
 use drivers_common::services::scheduler::{Priority, ThreadId};
 
-const fn validate_priority_levels<const PRIO: usize>() {
-    assert!(PRIO > 0 && PRIO <= 32);
+const fn validate_priority_levels(priority_levels: usize) {
+    assert!(priority_levels > 0 && priority_levels <= 32);
 }
 
-pub struct ReadyQueue<const PRIO: usize> {
+/// Очередь runnable-потоков с фиксированным числом уровней приоритета.
+///
+/// Для каждого приоритета хранится отдельная FIFO-очередь, а `bitmap`
+/// позволяет за O(1) находить старший непустой приоритет без линейного
+/// прохода по всем уровням.
+pub struct ReadyQueue {
+    priority_levels: usize,
     bitmap: u32,
-    queues: [VecDeque<ThreadId>; PRIO],
+    queues: Vec<VecDeque<ThreadId>>,
 }
 
-impl<const PRIO: usize> ReadyQueue<PRIO> {
-    pub fn new() -> Self {
-        const { validate_priority_levels::<PRIO>() };
+impl ReadyQueue {
+    pub fn new(priority_levels: usize) -> Self {
+        validate_priority_levels(priority_levels);
 
         Self {
             bitmap: 0,
-            queues: array::from_fn(|_| VecDeque::new()),
+            priority_levels,
+            queues: vec![VecDeque::new(); priority_levels],
         }
     }
 
     pub fn push(&mut self, id: ThreadId, priority: Priority) {
-        let level = Self::priority_index(priority);
+        let level = self.priority_index(priority);
         self.queues[level].push_back(id);
         self.bitmap |= Self::mask_for(level);
     }
@@ -52,12 +58,20 @@ impl<const PRIO: usize> ReadyQueue<PRIO> {
         }
 
         let level = self.bitmap.leading_zeros() as usize;
-        if level < PRIO { Some(level) } else { None }
+        if level < self.priority_levels {
+            Some(level)
+        } else {
+            None
+        }
     }
 
-    fn priority_index(priority: Priority) -> usize {
+    fn priority_index(&self, priority: Priority) -> usize {
         let level = priority.raw() as usize;
-        assert!(level < PRIO, "priority level {level} exceeds queue size {PRIO}");
+        assert!(
+            level < self.priority_levels,
+            "priority level {level} exceeds queue size {}",
+            self.priority_levels
+        );
         level
     }
 
@@ -66,8 +80,8 @@ impl<const PRIO: usize> ReadyQueue<PRIO> {
     }
 }
 
-impl<const PRIO: usize> Default for ReadyQueue<PRIO> {
+impl Default for ReadyQueue {
     fn default() -> Self {
-        Self::new()
+        Self::new(32)
     }
 }

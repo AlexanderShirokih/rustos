@@ -4,7 +4,7 @@ use std::{cell::Cell, num::NonZeroU32, sync::Arc, vec};
 
 use drivers_common::services::scheduler::{Priority, ThreadId};
 use kernel::sched::{
-    ArchContext, ArchCpu, ArchStack, CpuId, ProcessId, StackError, Thread, ThreadStack,
+    ArchContext, ArchCpu, ThreadStackAllocator, CpuId, ProcessId, StackError, Thread, ThreadStack,
     TimerSource,
 };
 
@@ -119,7 +119,7 @@ impl ArchCpu for MockCpu {
     }
 }
 
-impl ArchStack for MockStack {
+impl ThreadStackAllocator for MockStack {
     fn allocate(pages: usize) -> Result<ThreadStack, StackError> {
         if pages == 0 {
             return Err(StackError::InvalidSize);

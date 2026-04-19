@@ -7,7 +7,6 @@ use crate::services::Service;
 /// Сервис консольного вывода.
 ///
 /// Предоставляет доступ к Writer для записи логов и отладочной информации.
-pub trait ConsoleService: Service {
-    /// Возвращает ссылку на writer для вывода.
-    fn writer(&self) -> &(dyn Writer + Sync);
-}
+pub trait ConsoleService: Service + Writer {}
+
+impl<T: ?Sized + Service + Writer> ConsoleService for T {}

@@ -114,12 +114,6 @@ impl Writer for UartDm {
     }
 }
 
-impl ConsoleService for UartDm {
-    fn writer(&self) -> &(dyn Writer + Sync) {
-        self
-    }
-}
-
 // SAFETY: UartDm содержит только MmioBound (Sync), операции через volatile.
 unsafe impl Send for UartDm {}
 

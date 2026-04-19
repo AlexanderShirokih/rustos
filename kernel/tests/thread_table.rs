@@ -6,7 +6,7 @@ use drivers_common::services::scheduler::{Priority, ThreadId};
 use kernel::sched::{ProcessId, Thread, ThreadStack, thread_table::ThreadTable};
 
 use crate::common::{MockContext, MockStack};
-use kernel::sched::ArchStack;
+use kernel::sched::ThreadStackAllocator;
 use kernel::sched::CpuId;
 
 fn build_thread(id: ThreadId, name: &'static str, priority: Priority) -> Thread<MockContext> {
@@ -25,7 +25,7 @@ fn build_thread(id: ThreadId, name: &'static str, priority: Priority) -> Thread<
 
 #[test]
 fn insert_get_and_remove_thread() {
-    let mut table = ThreadTable::<MockContext, 4>::new();
+    let mut table = ThreadTable::<MockContext>::new(4);
 
     let id = table
         .insert_with(|id| build_thread(id, "worker", Priority::normal()))
@@ -41,7 +41,7 @@ fn insert_get_and_remove_thread() {
 
 #[test]
 fn split_pair_mut_returns_distinct_threads() {
-    let mut table = ThreadTable::<MockContext, 4>::new();
+    let mut table = ThreadTable::<MockContext>::new(4);
     let first = table
         .insert_with(|id| build_thread(id, "first", Priority::normal()))
         .expect("first insert");
@@ -68,7 +68,7 @@ fn split_pair_mut_returns_distinct_threads() {
 
 #[test]
 fn full_table_returns_no_free_slots_error() {
-    let mut table = ThreadTable::<MockContext, 1>::new();
+    let mut table = ThreadTable::<MockContext>::new(1);
     let _ = table
         .insert_with(|id| build_thread(id, "a", Priority::normal()))
         .expect("first insert");

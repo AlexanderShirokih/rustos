@@ -1,17 +1,20 @@
-use core::{array, num::NonZeroU32};
+use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use drivers_common::services::scheduler::{SpawnError, ThreadId};
 
 use super::{arch::ArchContext, thread::Thread};
 
-pub struct ThreadTable<A: ArchContext, const N: usize> {
-    slots: [Option<Thread<A>>; N],
+pub struct ThreadTable<A: ArchContext> {
+    slots: Vec<Option<Thread<A>>>,
+    max_threads: usize,
 }
 
-impl<A: ArchContext, const N: usize> ThreadTable<A, N> {
-    pub fn new() -> Self {
+impl<A: ArchContext> ThreadTable<A> {
+    pub fn new(max_threads: usize) -> Self {
         Self {
-            slots: array::from_fn(|_| None),
+            slots: Vec::new(),
+            max_threads,
         }
     }
 
@@ -21,20 +24,25 @@ impl<A: ArchContext, const N: usize> ThreadTable<A, N> {
     where
         F: FnOnce(ThreadId) -> Thread<A>,
     {
-        let Some((index, slot)) = self
-            .slots
-            .iter_mut()
-            .enumerate()
-            .find(|(_, slot)| slot.is_none())
-        else {
-            return Err(SpawnError::NoFreeThreadSlots);
-        };
+        if let Some(index) = self.slots.iter().position(|slot| slot.is_none()) {
+            let raw = NonZeroU32::new((index + 1) as u32).expect("slot index must fit into u32");
+            let id = ThreadId::new(raw);
+            let thread = builder(id);
+            debug_assert_eq!(thread.id(), id, "builder must store assigned ThreadId");
+            self.slots[index] = Some(thread);
+            return Ok(id);
+        }
 
+        if self.slots.len() >= self.max_threads {
+            return Err(SpawnError::NoFreeThreadSlots);
+        }
+
+        let index = self.slots.len();
         let raw = NonZeroU32::new((index + 1) as u32).expect("slot index must fit into u32");
         let id = ThreadId::new(raw);
         let thread = builder(id);
         debug_assert_eq!(thread.id(), id, "builder must store assigned ThreadId");
-        *slot = Some(thread);
+        self.slots.push(Some(thread));
         Ok(id)
     }
 
@@ -80,8 +88,8 @@ impl<A: ArchContext, const N: usize> ThreadTable<A, N> {
     }
 }
 
-impl<A: ArchContext, const N: usize> Default for ThreadTable<A, N> {
+impl<A: ArchContext> Default for ThreadTable<A> {
     fn default() -> Self {
-        Self::new()
+        Self::new(64)
     }
 }
