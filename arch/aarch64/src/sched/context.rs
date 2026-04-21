@@ -2,8 +2,11 @@ use core::{mem, ptr::NonNull};
 
 use kernel::sched::ArchContext;
 
-use super::switch::context_start;
-use super::{cpu_local::Aarch64Cpu, stack::Aarch64Stack, switch::context_switch};
+use super::{
+    cpu_local::Aarch64Cpu,
+    stack::Aarch64Stack,
+    switch::{context_start, context_switch},
+};
 
 /// Callee-saved состояние потока согласно AAPCS64:
 /// - x19..x28 (10 GPR)

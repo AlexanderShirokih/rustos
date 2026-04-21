@@ -346,7 +346,7 @@ impl MemorySetup<Enabled> {
         let memory_mapper = Box::new(memory_mapper);
 
         Mmu::new().disable_lower_half();
-        
+
         Ok(MemoryManagerResult {
             memory_mapper,
             base_offset: higher_half_base,

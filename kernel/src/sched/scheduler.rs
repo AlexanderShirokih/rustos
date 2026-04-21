@@ -181,8 +181,8 @@ where
 
         let action = with_preemption_disabled::<A::Cpu, _>(|| {
             running.inner.with_lock(|inner| {
-            let now_ns = inner.timer.now_ns();
-            inner.switch_to_next(now_ns)
+                let now_ns = inner.timer.now_ns();
+                inner.switch_to_next(now_ns)
             })
         });
         perform_schedule_action::<A>(action);
@@ -218,8 +218,8 @@ where
     pub fn yield_now(&self) {
         let action = with_preemption_disabled::<A::Cpu, _>(|| {
             self.inner.with_lock(|inner| {
-            let now_ns = inner.timer.now_ns();
-            inner.yield_now(now_ns)
+                let now_ns = inner.timer.now_ns();
+                inner.yield_now(now_ns)
             })
         });
         perform_schedule_action::<A>(action);
@@ -228,8 +228,8 @@ where
     pub fn sleep_ns(&self, ns: u64) {
         let action = with_preemption_disabled::<A::Cpu, _>(|| {
             self.inner.with_lock(|inner| {
-            let now_ns = inner.timer.now_ns();
-            inner.sleep_current(ns, now_ns)
+                let now_ns = inner.timer.now_ns();
+                inner.sleep_current(ns, now_ns)
             })
         });
         perform_schedule_action::<A>(action);
@@ -336,7 +336,15 @@ where
             .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
 
         let id = self.threads.insert_with(|id| {
-            Thread::new(id, process_id, cpu_affinity, cfg.priority, arch, stack, cfg.name)
+            Thread::new(
+                id,
+                process_id,
+                cpu_affinity,
+                cfg.priority,
+                arch,
+                stack,
+                cfg.name,
+            )
         })?;
 
         if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
@@ -535,7 +543,9 @@ where
 
     fn prepare_first_thread_start(&mut self) -> *const A {
         let now_ns = self.timer.now_ns();
-        let cpu = self.current_cpu_mut().expect("scheduler must be bootstrapped");
+        let cpu = self
+            .current_cpu_mut()
+            .expect("scheduler must be bootstrapped");
         let idle_id = cpu.idle();
         let next_id = cpu
             .ready_queue_mut()

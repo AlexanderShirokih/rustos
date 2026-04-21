@@ -1,6 +1,6 @@
 use alloc::vec;
 
-use kernel::sched::{ThreadStackAllocator, StackError, ThreadStack};
+use kernel::sched::{StackError, ThreadStack, ThreadStackAllocator};
 
 const PAGE_SIZE: usize = 4096;
 
@@ -20,7 +20,9 @@ impl ThreadStackAllocator for Aarch64Stack {
             return Err(StackError::InvalidSize);
         }
 
-        let size = pages.checked_mul(PAGE_SIZE).ok_or(StackError::OutOfMemory)?;
+        let size = pages
+            .checked_mul(PAGE_SIZE)
+            .ok_or(StackError::OutOfMemory)?;
         let bytes = vec![0u8; size].into_boxed_slice();
         ThreadStack::from_boxed_bytes(bytes)
     }

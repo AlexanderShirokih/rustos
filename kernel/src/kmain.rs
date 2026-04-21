@@ -18,7 +18,9 @@ use crate::{
     driver_init::{InitSchedulerError, PendingDriver, run_retry_passes},
     irq_bridge,
     kernel_context::KernelContext,
-    sched::{self, ArchContext, ArchCpu, Bootstrapped, KernelTimerSource, Scheduler, SchedulerConfig},
+    sched::{
+        self, ArchContext, ArchCpu, Bootstrapped, KernelTimerSource, Scheduler, SchedulerConfig,
+    },
 };
 
 /// Платформо-независимая точка входа ядра
@@ -106,8 +108,7 @@ fn install_interrupts_hook(kernel: &mut KernelContext) {
 fn spawn_init_process<A>(
     scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
     kernel: &mut KernelContext,
-)
-where
+) where
     A: ArchContext,
 {
     let scheduler_service = kernel.with_runtime_state(|caps, _| {

@@ -61,7 +61,10 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
 
     let memory_mapper: &'static dyn memory::memory_mapper::MemoryMapper =
         Box::leak(result.memory_mapper);
-    let kernel = Box::leak(Box::new(KernelContext::new(memory_mapper, result.base_offset)));
+    let kernel = Box::leak(Box::new(KernelContext::new(
+        memory_mapper,
+        result.base_offset,
+    )));
 
     kmain::<Aarch64Context>(driver_scanner, kernel, buffered, SCHED_CONFIG)
 }

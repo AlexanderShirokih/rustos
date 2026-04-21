@@ -27,9 +27,7 @@ where
     A: ArchContext,
     T: TimerSource,
 {
-    pub(crate) fn new(
-        inner: Arc<collections::MutexCell<SchedulerInner<A, T>>>,
-    ) -> Self {
+    pub(crate) fn new(inner: Arc<collections::MutexCell<SchedulerInner<A, T>>>) -> Self {
         Self { inner }
     }
 
@@ -69,8 +67,8 @@ where
     fn yield_now(&self) {
         let action = with_preemption_disabled::<A::Cpu, _>(|| {
             self.inner.with_lock(|inner| {
-            let now_ns = inner.now_ns();
-            inner.yield_now(now_ns)
+                let now_ns = inner.now_ns();
+                inner.yield_now(now_ns)
             })
         });
         perform_schedule_action::<A>(action);
@@ -79,8 +77,8 @@ where
     fn sleep_ns(&self, ns: u64) {
         let action = with_preemption_disabled::<A::Cpu, _>(|| {
             self.inner.with_lock(|inner| {
-            let now_ns = inner.now_ns();
-            inner.sleep_current(ns, now_ns)
+                let now_ns = inner.now_ns();
+                inner.sleep_current(ns, now_ns)
             })
         });
         perform_schedule_action::<A>(action);

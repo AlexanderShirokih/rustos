@@ -13,12 +13,11 @@ use drivers_common::{
     },
 };
 
-use crate::kernel_context::KernelContext;
-
 use super::{
     arch::{ArchContext, TimerSource},
     scheduler::{Bootstrapped, Scheduler, SchedulerConfig, Uninit},
 };
+use crate::kernel_context::KernelContext;
 
 /// Адаптер `TimerService` (capability) -> `TimerSource` (требование scheduler).
 pub struct KernelTimerSource(Arc<dyn TimerService>);

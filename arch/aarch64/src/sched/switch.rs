@@ -6,10 +6,7 @@ use super::context::Aarch64Context;
 /// sp, pstate (NZCV), d8..d15. Любые изменения должны синхронизироваться с
 /// константами `CTX_OFFSET_*`.
 #[unsafe(naked)]
-pub unsafe extern "C" fn context_switch(
-    _prev: *mut Aarch64Context,
-    _next: *const Aarch64Context,
-) {
+pub unsafe extern "C" fn context_switch(_prev: *mut Aarch64Context, _next: *const Aarch64Context) {
     core::arch::naked_asm!(
         // Save GPR callee-saved
         "stp x19, x20, [x0, #0]",

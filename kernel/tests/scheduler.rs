@@ -3,11 +3,10 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use drivers_common::services::scheduler::{Priority, SpawnConfig};
-use kernel::sched::{ThreadStackAllocator, Scheduler, SchedulerConfig, Uninit};
+use kernel::sched::{Scheduler, SchedulerConfig, ThreadStackAllocator, Uninit};
 
 use crate::common::{
-    MockContext, MockStack, MockTimer, MockTimerSource, max_irq_depth, reset_switches,
-    switch_count,
+    MockContext, MockStack, MockTimer, MockTimerSource, max_irq_depth, reset_switches, switch_count,
 };
 
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
@@ -225,10 +224,10 @@ fn exit_current_releases_thread_slot_for_next_spawn() {
     let running = scheduler.run();
 
     // Ещё один spawn должен упасть с NoFreeThreadSlots.
-    let err = running.handle().spawn_boxed(
-        SpawnConfig::new("overflow"),
-        Box::new(|| {}),
-    ).unwrap_err();
+    let err = running
+        .handle()
+        .spawn_boxed(SpawnConfig::new("overflow"), Box::new(|| {}))
+        .unwrap_err();
     assert_eq!(
         err,
         drivers_common::services::scheduler::SpawnError::NoFreeThreadSlots
@@ -239,7 +238,10 @@ fn exit_current_releases_thread_slot_for_next_spawn() {
 #[test]
 fn stack_canary_is_initialized_in_mock_stack() {
     let stack = MockStack::allocate(1).expect("alloc");
-    assert!(stack.check_canary(), "freshly created stack must have valid canary");
+    assert!(
+        stack.check_canary(),
+        "freshly created stack must have valid canary"
+    );
 }
 
 #[test]

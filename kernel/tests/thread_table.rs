@@ -3,11 +3,11 @@ mod common;
 use std::num::NonZeroU32;
 
 use drivers_common::services::scheduler::{Priority, ThreadId};
-use kernel::sched::{ProcessId, Thread, ThreadStack, thread_table::ThreadTable};
+use kernel::sched::{
+    CpuId, ProcessId, Thread, ThreadStack, ThreadStackAllocator, thread_table::ThreadTable,
+};
 
 use crate::common::{MockContext, MockStack};
-use kernel::sched::ThreadStackAllocator;
-use kernel::sched::CpuId;
 
 fn build_thread(id: ThreadId, name: &'static str, priority: Priority) -> Thread<MockContext> {
     let process = ProcessId::new(NonZeroU32::new(1).expect("non-zero"));
@@ -56,10 +56,7 @@ fn split_pair_mut_returns_distinct_threads() {
     first_ref.set_time_slice_left(7);
     second_ref.set_time_slice_left(3);
 
-    assert_eq!(
-        table.get(first).expect("first thread").time_slice_left(),
-        7
-    );
+    assert_eq!(table.get(first).expect("first thread").time_slice_left(), 7);
     assert_eq!(
         table.get(second).expect("second thread").time_slice_left(),
         3
@@ -75,5 +72,8 @@ fn full_table_returns_no_free_slots_error() {
     let err = table
         .insert_with(|id| build_thread(id, "b", Priority::normal()))
         .unwrap_err();
-    assert_eq!(err, drivers_common::services::scheduler::SpawnError::NoFreeThreadSlots);
+    assert_eq!(
+        err,
+        drivers_common::services::scheduler::SpawnError::NoFreeThreadSlots
+    );
 }

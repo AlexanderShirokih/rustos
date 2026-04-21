@@ -1,5 +1,4 @@
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 
 use super::address_space::AddressSpace;
@@ -82,7 +81,10 @@ impl ProcessTable {
     ) -> Result<ProcessId, ProcessTableError> {
         let raw = NonZeroU32::new(self.next_id).ok_or(ProcessTableError::OutOfIds)?;
         let id = ProcessId::new(raw);
-        self.next_id = self.next_id.checked_add(1).ok_or(ProcessTableError::OutOfIds)?;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or(ProcessTableError::OutOfIds)?;
 
         if let Some(index) = self.slots.iter().position(|slot| slot.is_none()) {
             self.slots[index] = Some(Process::new(id, name, address_space));
@@ -98,7 +100,10 @@ impl ProcessTable {
     }
 
     pub fn get(&self, id: ProcessId) -> Option<&Process> {
-        self.slots.iter().filter_map(|s| s.as_ref()).find(|p| p.id() == id)
+        self.slots
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .find(|p| p.id() == id)
     }
 }
 

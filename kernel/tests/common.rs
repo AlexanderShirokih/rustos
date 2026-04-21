@@ -4,7 +4,7 @@ use std::{cell::Cell, num::NonZeroU32, sync::Arc, vec};
 
 use drivers_common::services::scheduler::{Priority, ThreadId};
 use kernel::sched::{
-    ArchContext, ArchCpu, ThreadStackAllocator, CpuId, ProcessId, StackError, Thread, ThreadStack,
+    ArchContext, ArchCpu, CpuId, ProcessId, StackError, Thread, ThreadStack, ThreadStackAllocator,
     TimerSource,
 };
 
