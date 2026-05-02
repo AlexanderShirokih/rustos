@@ -2,13 +2,14 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-vulnerability = "deny"
+# Устаревшие поля vulnerability/notice удалены в cargo-deny 0.19+:
+# уязвимости и notice теперь всегда считаются ошибкой, пока не в ignore.
 unmaintained = "workspace"
 yanked = "warn"
-notice = "warn"
 
 [licenses]
-unlicensed = "deny"
+# Устаревшие поля unlicensed/copyleft удалены в cargo-deny 0.19+:
+# лицензии вне allow по умолчанию запрещены.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -18,11 +19,22 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
 ]
-copyleft = "deny"
+
+[licenses.private]
+# Внутренние workspace-крейты без поля license в манифесте.
+ignore = true
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# workspace = true для path-зависимостей в непубликуемых крейтах - не semver-*.
+allow-wildcard-paths = true
+
+[bans.workspace-dependencies]
+# Не требовать дублирования объявлений path-членов в [workspace.dependencies].
+duplicates = "allow"
+include-path-dependencies = false
+unused = "allow"
 
 [sources]
 unknown-registry = "deny"
