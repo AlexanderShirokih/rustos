@@ -102,7 +102,7 @@ impl TCRBit {
         Self(bit)
     }
 
-    /// IPS = 40-bit PA (1TB), биты TCR[34:32] - для MMIO адресов > 4GB
+    /// IPS = 40-bit PA (1TB), биты `TCR[34:32]` - для MMIO адресов > 4GB
     pub const fn ips_40bit() -> Self {
         Self(0b010 << 32)
     }

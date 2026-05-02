@@ -1,5 +1,5 @@
 //! Реализация GICv3 (Generic Interrupt Controller версии 3).
-//! https://developer.arm.com/documentation/ihi0069/latest/
+//! <https://developer.arm.com/documentation/ihi0069/latest/>
 
 mod controller;
 mod driver;

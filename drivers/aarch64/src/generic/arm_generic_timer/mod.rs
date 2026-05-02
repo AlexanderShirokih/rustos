@@ -1,5 +1,5 @@
 //! Драйвер ARM Generic Timer.
-//! https://developer.arm.com/documentation/100403/latest/
+//! <https://developer.arm.com/documentation/100403/latest/>
 
 mod driver;
 mod service;

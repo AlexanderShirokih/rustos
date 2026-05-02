@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Pre-commit hook: проверка форматирования Rust-кода через rustfmt.
+#
+# Запускается автоматически перед `git commit`, если репозиторий настроен на
+# использование этой директории (см. README/BUILD.md):
+#
+#   git config core.hooksPath hooks
+#
+# Нужная версия rustfmt (nightly) подтягивается из rust-toolchain.toml.
+
+set -euo pipefail
+
+# Не запускаемся, если в индексе нет ни одного *.rs файла.
+if ! git diff --cached --name-only --diff-filter=ACMR | grep -q '\.rs$'; then
+    exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo не найден в PATH - пропускаю rustfmt." >&2
+    exit 0
+fi
+
+echo "pre-commit: cargo fmt --all --check"
+if ! cargo fmt --all --check; then
+    echo >&2
+    echo "pre-commit: обнаружены проблемы форматирования." >&2
+    echo "pre-commit: исправьте их командой: cargo fmt --all" >&2
+    exit 1
+fi

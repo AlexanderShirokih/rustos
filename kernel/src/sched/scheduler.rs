@@ -172,7 +172,7 @@ where
 
     /// Тестовый путь старта. Выполняет первый switch через `A::switch`,
     /// возвращая управление вызывающему. Используется для unit-тестов с
-    /// `MockContext`. В реальном boot-сценарии используйте [`start`].
+    /// `MockContext`. В реальном boot-сценарии используйте [`Scheduler::start`].
     pub fn run(self) -> Scheduler<A, T, Running> {
         let running = Scheduler {
             inner: self.inner,

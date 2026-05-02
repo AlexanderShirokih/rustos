@@ -61,6 +61,7 @@ jobs:
           targets: aarch64-unknown-none
           components: llvm-tools-preview, rust-src
       - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked cargo-binutils
       - run: cargo xtask build devices/spec/qemu-aarch64.yaml
 
   deny:
