@@ -1,0 +1,12 @@
+[package]
+name = "qemu-test-harness"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+io = { workspace = true }
+spin = { workspace = true }
+
+[lints]
+workspace = true

@@ -40,3 +40,24 @@ cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclud
 ```
 
 > Крейты `drivers-aarch64`, `arch-aarch64` и `kernel` содержат aarch64 inline assembly и не компилируются на x86_64. Всегда исключайте их при запуске на host.
+
+## QEMU integration tests
+
+Используется production boot path: MMU, GIC, scheduler, аллокатор —
+всё инициализируется штатно, init-таск вместо демо-процессов прогоняет
+кейсы и завершает QEMU через semihosting. Подходит для тестов
+аллокатора, многозадачности, driver-init, kobject-сценариев.
+
+Кейсы регистрируются `register_test!` в `kernel/src/qemu_tests.rs`
+(или другом модуле под `cfg(feature = "qemu-tests")`), вызывая живые
+сервисы ядра.
+
+```bash
+cargo xtask build devices/spec/qemu-aarch64-test.yaml \
+    --features qemu-tests --run
+```
+
+Контракт маркеров: `[TEST-RUN: N]`, `[TEST-START: name]`,
+`[TEST-PASS: name]`, `[TEST-DONE: N]` — успех; `[TEST-FAIL: <reason>]
+at <file>:<line>` — провал. QEMU выходит через ARM semihosting с
+реальным exit-кодом; ненулевой код пробрасывается как провал теста.

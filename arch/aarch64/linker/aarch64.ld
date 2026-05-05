@@ -30,6 +30,11 @@ SECTIONS {
         KEEP(*(.drivers.kernel))
         __drivers_kernel_end = .;
 
+        . = ALIGN(8);
+        __tests_kernel_start = .;
+        KEEP(*(.tests.kernel))
+        __tests_kernel_end = .;
+
         *(.rodata*)
     }
 

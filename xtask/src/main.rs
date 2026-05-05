@@ -30,6 +30,15 @@ enum Commands {
         /// Отладка после сборки (команды из 'debug' в YAML)
         #[arg(long)]
         debug: bool,
+        /// Cargo features `arch-aarch64` (через запятую).
+        #[arg(long)]
+        features: Option<String>,
+    },
+    /// Запустить QEMU integration tests
+    QemuTest {
+        /// Таймаут в секундах
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
     },
 }
 
@@ -56,10 +65,11 @@ struct BuildContext {
     build_dir: PathBuf,
     spec_path: PathBuf,
     spec: DeviceSpec,
+    features: Option<String>,
 }
 
 impl BuildContext {
-    fn new(spec_path: PathBuf) -> Result<Self> {
+    fn new(spec_path: PathBuf, features: Option<String>) -> Result<Self> {
         let project_root = project_root();
 
         let spec_path = if spec_path.is_absolute() {
@@ -82,6 +92,7 @@ impl BuildContext {
             build_dir,
             spec_path,
             spec,
+            features,
         })
     }
 
@@ -167,46 +178,52 @@ fn run_shell(command: &str, cwd: &Path) -> Result<()> {
 }
 
 fn cargo_build(ctx: &BuildContext) -> Result<()> {
-    run_cmd(
-        Command::new("cargo")
-            .args([
-                "build",
-                "-p",
-                "arch-aarch64",
-                "--target",
-                "aarch64-unknown-none",
-                "--release",
-            ])
-            .current_dir(&ctx.project_root)
-            .env("DEVICE_SPEC", &ctx.spec_path)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit()),
-    )?;
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "build",
+        "-p",
+        "arch-aarch64",
+        "--target",
+        "aarch64-unknown-none",
+        "--release",
+    ]);
+    if let Some(features) = ctx.features.as_deref() {
+        cmd.args(["--features", features]);
+    }
+    cmd.current_dir(&ctx.project_root)
+        .env("DEVICE_SPEC", &ctx.spec_path)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    run_cmd(&mut cmd)?;
     Ok(())
 }
 
 fn make_kernel_bin(ctx: &BuildContext) -> Result<()> {
-    run_cmd(
-        Command::new("cargo")
-            .args([
-                "objcopy",
-                "--release",
-                "-p",
-                "arch-aarch64",
-                "--target",
-                "aarch64-unknown-none",
-                "--",
-                "--set-section-flags",
-                ".bss=alloc,load,data",
-                "-O",
-                "binary",
-            ])
-            .arg(ctx.kernel_bin())
-            .current_dir(&ctx.project_root)
-            .env("DEVICE_SPEC", &ctx.spec_path)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit()),
-    )?;
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "objcopy",
+        "--release",
+        "-p",
+        "arch-aarch64",
+        "--target",
+        "aarch64-unknown-none",
+    ]);
+    if let Some(features) = ctx.features.as_deref() {
+        cmd.args(["--features", features]);
+    }
+    cmd.args([
+        "--",
+        "--set-section-flags",
+        ".bss=alloc,load,data",
+        "-O",
+        "binary",
+    ])
+    .arg(ctx.kernel_bin())
+    .current_dir(&ctx.project_root)
+    .env("DEVICE_SPEC", &ctx.spec_path)
+    .stdout(Stdio::inherit())
+    .stderr(Stdio::inherit());
+    run_cmd(&mut cmd)?;
     Ok(())
 }
 
@@ -327,12 +344,50 @@ fn execute_commands(commands: &[String], cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+fn qemu_test(timeout: u64) -> Result<()> {
+    let spec_path = PathBuf::from("devices/spec/qemu-aarch64-test.yaml");
+    let ctx = BuildContext::new(spec_path, Some("qemu-tests".to_string()))?;
+
+    build_binary(&ctx)?;
+
+    let qemu_cmd = ctx
+        .spec
+        .run
+        .first()
+        .context("No run commands in qemu-aarch64-test.yaml")?;
+
+    let full_cmd = format!("timeout {timeout} {qemu_cmd}");
+    let status = Command::new("sh")
+        .args(["-c", &full_cmd])
+        .current_dir(&ctx.project_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to launch QEMU")?;
+
+    if !status.success() {
+        let code = status.code().unwrap_or(1);
+        if code == 124 {
+            bail!("QEMU timed out after {timeout}s");
+        }
+        bail!("QEMU exited with code {code}");
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build { spec, run, debug } => {
-            let ctx = BuildContext::new(spec)?;
+        Commands::Build {
+            spec,
+            run,
+            debug,
+            features,
+        } => {
+            let ctx = BuildContext::new(spec, features)?;
 
             let output = match ctx.spec.boot.format.as_str() {
                 "binary" => build_binary(&ctx)?,
@@ -358,6 +413,7 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Commands::QemuTest { timeout } => qemu_test(timeout)?,
     }
 
     Ok(())

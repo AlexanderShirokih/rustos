@@ -9,6 +9,14 @@ name = "kernel-aarch64"
 path = "src/start.rs"
 test = false
 
+[features]
+default = []
+qemu-tests = [
+    "kernel/qemu-tests",
+    "dep:qemu-test-harness",
+    "dep:qemu-test-harness-aarch64",
+]
+
 [dependencies]
 aarch64-paging = { workspace = true }
 arch-common = { workspace = true }
@@ -21,6 +29,8 @@ collections = { workspace = true }
 fdt = { workspace = true }
 io = { workspace = true }
 klog = { workspace = true }
+qemu-test-harness = { workspace = true, optional = true }
+qemu-test-harness-aarch64 = { workspace = true, optional = true }
 
 [build-dependencies]
 serde = { workspace = true }

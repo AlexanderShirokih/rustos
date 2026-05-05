@@ -2,14 +2,14 @@ extern crate alloc;
 
 use alloc::{sync::Arc, vec::Vec};
 
+#[cfg(not(feature = "qemu-tests"))]
+use drivers_common::services::scheduler::{
+    Priority, SchedulerService, SchedulerServiceExt, SpawnConfig,
+};
 use drivers_common::{
     CapabilityStoreExt,
     scanner::EmbeddedDriversScanner,
-    services::{
-        console::ConsoleService,
-        interrupts::InterruptsService,
-        scheduler::{Priority, SchedulerService, SchedulerServiceExt, SpawnConfig},
-    },
+    services::{console::ConsoleService, interrupts::InterruptsService},
 };
 use io::buffered_writer::BufferedWriter;
 use klog::info;
@@ -51,8 +51,46 @@ where
     <A::Cpu as ArchCpu>::disable_preemption();
 
     let scheduler = sched::bootstrap_scheduler::<A>(context, scheduler_config);
+
+    #[cfg(feature = "qemu-tests")]
+    spawn_qemu_tests_process(&scheduler, context);
+    #[cfg(not(feature = "qemu-tests"))]
     spawn_init_process(&scheduler, context);
+
     scheduler.start()
+}
+
+#[cfg(feature = "qemu-tests")]
+fn spawn_qemu_tests_process<A>(
+    scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
+    kernel: &mut KernelContext,
+) where
+    A: ArchContext,
+{
+    /// `*mut KernelContext` не Send автоматически; обёртка делает его
+    /// перемещаемым в spawn-closure. Безопасность гарантируется тем, что
+    /// `kmain` после spawn-а уходит в `scheduler.start()` и не
+    /// обращается к контексту, а тестовый таск завершает QEMU через
+    /// semihosting и тоже не возвращается.
+    struct KernelCtxPtr(*mut KernelContext);
+
+    // SAFETY: см. комментарий выше - единственный читатель указателя.
+    unsafe impl Send for KernelCtxPtr {}
+
+    let kernel_ptr = KernelCtxPtr(core::ptr::from_mut(kernel));
+
+    scheduler
+        .spawn(
+            drivers_common::services::scheduler::SpawnConfig::new("qemu-tests")
+                .priority(drivers_common::services::scheduler::Priority::highest()),
+            move || {
+                let captured = kernel_ptr;
+                // SAFETY: см. комментарий выше.
+                let kernel = unsafe { &mut *captured.0 };
+                crate::qemu_tests::run(kernel)
+            },
+        )
+        .expect("qemu-tests process spawn must succeed");
 }
 
 fn collect_into_pending_drivers(driver_scanner: EmbeddedDriversScanner) -> Vec<PendingDriver> {
@@ -105,6 +143,7 @@ fn install_interrupts_hook(kernel: &mut KernelContext) {
     });
 }
 
+#[cfg(not(feature = "qemu-tests"))]
 fn spawn_init_process<A>(
     scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
     kernel: &mut KernelContext,
@@ -124,6 +163,7 @@ fn spawn_init_process<A>(
         .expect("init process spawn must succeed");
 }
 
+#[cfg(not(feature = "qemu-tests"))]
 fn spawn_demo_processes(scheduler_service: Arc<dyn SchedulerService>) {
     for (idx, period_ms) in [(1_u32, 100_u64), (2, 300), (3, 700)] {
         let thread_service = scheduler_service.clone();

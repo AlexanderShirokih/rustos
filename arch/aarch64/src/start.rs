@@ -24,7 +24,7 @@ extern crate drivers_common_aarch64;
 /// База higher-half (верхняя половина адресного пространства).
 pub const HIGHER_HALF_BASE: usize = 0xFFFF_FF80_0000_0000;
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "qemu-tests")))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     unsafe {
@@ -34,4 +34,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             core::arch::asm!("wfi", options(nomem, nostack));
         }
     }
+}
+
+#[cfg(all(not(test), feature = "qemu-tests"))]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    use qemu_test_harness::backend::Backend;
+
+    klog::fatal!("[TEST-FAIL: panic] {}", info);
+    qemu_test_harness_aarch64::BACKEND.exit(1)
 }

@@ -25,6 +25,7 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 | Аудит зависимостей | `cargo deny check` |
 | Сборка (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
 | Запуск (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml --run` |
+| QEMU integration tests | `cargo xtask build devices/spec/qemu-aarch64-test.yaml --features qemu-tests --run` |
 
 -> Подробнее: [`docs/commands.md`](docs/commands.md)
 

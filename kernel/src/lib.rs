@@ -12,4 +12,7 @@ pub mod kernel_context;
 pub mod kmain;
 pub mod sched;
 
+#[cfg(feature = "qemu-tests")]
+pub mod qemu_tests;
+
 mod services;

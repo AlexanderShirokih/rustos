@@ -13,6 +13,8 @@ members = [
     "io",
     "log",
     "memory",
+    "qemu-test-harness",
+    "qemu-test-harness-aarch64",
     "util",
     "xtask",
 ]
@@ -44,6 +46,8 @@ drivers-common = { path = "drivers/common" }
 drivers-common-aarch64 = { path = "drivers/common-aarch64" }
 drivers-aarch64 = { path = "drivers/aarch64" }
 kernel = { path = "kernel" }
+qemu-test-harness = { path = "qemu-test-harness" }
+qemu-test-harness-aarch64 = { path = "qemu-test-harness-aarch64" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
