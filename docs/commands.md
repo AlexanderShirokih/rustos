@@ -4,8 +4,8 @@
 
 | Действие | Команда |
 |---|---|
-| Юнит/интеграционные тесты (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
-| Линтинг (host-крейты) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel` |
+| Юнит/интеграционные тесты (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main` |
+| Линтинг (host-крейты) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main` |
 | Линтинг (aarch64-крейты) | `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` |
 | Форматирование | `cargo fmt --all --check` |
 | Аудит зависимостей | `cargo deny check` |
@@ -35,7 +35,7 @@ cargo xtask build devices/spec/xiaomi-lavender.yaml
 
 ```bash
 # Все host-совместимые крейты
-cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel
+cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
 ```
 
 > **Важно:** без `--exclude` сборка упадёт — крейты с inline assembly aarch64 не компилируются на x86_64.
@@ -44,7 +44,7 @@ cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclud
 
 ```bash
 # Host-крейты
-cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel
+cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
 
 # aarch64-крейты (требуется target aarch64-unknown-none)
 cargo clippy --workspace --exclude xtask --target aarch64-unknown-none

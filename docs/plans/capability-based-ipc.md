@@ -73,7 +73,7 @@ Single chokepoint проверки: `HandleTable::get(id, need_rights, need_type
 **Где жить коду:** `kernel/src/kobject/`, не отдельный крейт. Причины:
 
 1. KO нужен доступ к `sched::ProcessTable`, `Thread`, `WaitQueue`, `SleepQueue`. Вынос в отдельный крейт потянул бы туда scheduler.
-2. `drivers-common` сейчас ниже `kernel` в DAG; новый `kobject` крейт либо создаст цикл, либо дублирует scheduler-абстракции.
+2. `drivers-common` сейчас ниже `main` в DAG; новый `kobject` крейт либо создаст цикл, либо дублирует scheduler-абстракции.
 3. Когда дойдём до user-space ABI, имеет смысл выделить `kobject-abi` (no_std, без `alloc`, только `Rights`/`ObjectType`/packed `HandleId`/syscall-номера) — но не сейчас.
 
 **Файлы и крейты:**
@@ -101,7 +101,7 @@ kernel/src/kobject/
 - `kernel/src/kmain.rs` — Phase 3: spawn timer-server kernel-thread, переключение pilot на channel-based.
 - `drivers/common/src/services/timer.rs` — Phase 3: thin-adapter, который ходит через handle вместо `Arc<dyn TimerService>`. Старый trait сохраняется параллельно, помечается `// TODO(kobject-migration)`.
 
-Никаких изменений в `drivers-common-aarch64`, `drivers-aarch64`, `arch-aarch64`, `aarch64-paging` в этой итерации.
+Никаких изменений в `drivers-common-aarch64`, `drivers-aarch64`, `hal-aarch64`, `aarch64-paging` в этой итерации.
 
 ## Скелеты ключевых типов
 
@@ -203,7 +203,7 @@ pub enum IpcError {
    - `src/case.rs` — `pub struct TestCase { name: &'static str, run: fn() }` + макрос `register_test!(name, fn)`, кладущий дескрипторы в линкер-секцию `.tests.kernel` (`__tests_kernel_start`/`__tests_kernel_end` symbols), полностью аналогично существующему `register_driver!` (`drivers/aarch64/src/lib.rs:35`).
    - `src/runner.rs` — `pub fn run_all_tests()`: итерируется по секции, печатает в UART `[TEST-START: name]`, вызывает `run()`, на возврате — `[TEST-PASS: name]`. По завершении всех — `semihosting::exit(0)`. Любой panic во время `run()` -> harness panic-handler -> `exit(1)`.
    - `src/macros.rs` — `kassert!`, `kassert_eq!`, `kassert_ne!`. На провале печатают `[TEST-FAIL: <expr>] at <file>:<line>` и `semihosting::exit(1)` (без `core::panic!`, чтобы не зависеть от panic-handler в production-ядре).
-   - Зависимости: `io` (Writer), опционально `log` для удобного `klog!`. **Не зависит** от `kernel`/`arch-aarch64` — чтобы тесты могли существовать без полного ядра.
+   - Зависимости: `io` (Writer), опционально `log` для удобного `klog!`. **Не зависит** от `main`/`hal-aarch64` — чтобы тесты могли существовать без полного ядра.
 
 2. **Команда `cargo xtask qemu-test`**:
    - Принимает имя test-suite (smoke по умолчанию) и опциональный `--filter <substr>`.
@@ -226,7 +226,7 @@ pub enum IpcError {
 
 4. **Device spec для тестов:** `devices/spec/qemu-aarch64-test.yaml` — копия `qemu-aarch64.yaml` с добавлением `-semihosting` и без интерактивных run-команд.
 
-5. **Boot-стратегия:** test-бинарь использует **минимальный собственный** `_start` (см. `tests/qemu/smoke/src/main.rs`), не трогая `arch-aarch64` боевой boot. Это даёт быстрые тесты для изолированной логики (вся kobject-механика отлично туда ложится). Тестирование **реального** boot-пути ядра — отдельная Phase 0.5 после Phase 3, не блокирует начальную работу.
+5. **Boot-стратегия:** test-бинарь использует **минимальный собственный** `_start` (см. `tests/qemu/smoke/src/main.rs`), не трогая `hal-aarch64` боевой boot. Это даёт быстрые тесты для изолированной логики (вся kobject-механика отлично туда ложится). Тестирование **реального** boot-пути ядра — отдельная Phase 0.5 после Phase 3, не блокирует начальную работу.
 
 **Затрагивает:** новый крейт `qemu-test-harness/`, новая директория `tests/qemu/`, `xtask/src/qemu_test.rs`, `xtask/src/main.rs`, `Cargo.toml` (workspace members), `devices/spec/qemu-aarch64-test.yaml`.
 
@@ -286,7 +286,7 @@ Acceptance: интеграционный host-тест эмулирует RPC "r
 - On-target QEMU (boot-тест боевого ядра): `cargo xtask build devices/spec/qemu-aarch64.yaml --run` под `timeout 30s`, проверяется что pilot-демо-процесс тикает через channel-based Timer (по `info!`-маркерам), остальные демо-процессы (legacy `sleep_ms`) тоже тикают, нет паник. Этот шаг ручной — он не использует semihosting harness, потому что грузит полный boot. Автоматизация полного boot — Phase 0.5.
 
 Acceptance:
-- `cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64` зелёный.
+- `cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64` зелёный.
 - `cargo xtask build devices/spec/qemu-aarch64.yaml --run` под `timeout 30s` — pilot-демо тикает, нет паник, нет deadlock-ов.
 - `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` чистый.
 - В `kobject/mod.rs` доковый блок описывает "новый код пишется в kobject, legacy Capabilities живёт до миграции последнего сервиса"; все coexistence-точки помечены `// TODO(kobject-migration)`.
@@ -345,7 +345,7 @@ Acceptance:
 - `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` чисто.
 
 После Phase 1:
-- `cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64` — все новые юнит-тесты `kobject::handle_table` зелёные.
+- `cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64` — все новые юнит-тесты `kobject::handle_table` зелёные.
 - `cargo xtask qemu-test smoke` зелёный (включая `handle_table_basic` кейс).
 - `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` — чисто.
 - `cargo fmt --all --check`.
@@ -366,7 +366,7 @@ Acceptance:
 
 Следующие workstreams (отдельные планы):
 
-1. **Phase 0.5: Boot-path тестирование под harness.** Завести feature-flag `test_main` в `arch-aarch64`/`kernel`, чтобы боевой boot мог звать `run_all_tests()` после инициализации; покрыть driver-init и scheduler bootstrap on-target.
+1. **Phase 0.5: Boot-path тестирование под harness.** Завести feature-flag `test_main` в `hal-aarch64`/`main`, чтобы боевой boot мог звать `run_all_tests()` после инициализации; покрыть driver-init и scheduler bootstrap on-target.
 2. SVC handler в `arch/aarch64/src/exception/exceptions.rs:152` + syscall dispatch table + резолв current process через `TPIDR_EL1`.
 3. Per-process page tables: настоящий `AddressSpace` поверх `aarch64-paging` вместо заглушки.
 4. EL0 entry: первый user-space процесс, выход через ERET с SPSR=EL0t.

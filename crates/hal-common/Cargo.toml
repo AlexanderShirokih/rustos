@@ -1,0 +1,11 @@
+[package]
+name = "hal-common"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+fdt = { workspace = true }
+
+[lints]
+workspace = true

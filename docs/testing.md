@@ -36,10 +36,10 @@
 
 ```bash
 # Все host-совместимые крейты
-cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel
+cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
 ```
 
-> Крейты `drivers-aarch64`, `arch-aarch64` и `kernel` содержат aarch64 inline assembly и не компилируются на x86_64. Всегда исключайте их при запуске на host.
+> Крейты `drivers-aarch64`, `hal-aarch64` и `main` содержат aarch64 inline assembly и не компилируются на x86_64. Всегда исключайте их при запуске на host.
 
 ## QEMU integration tests
 

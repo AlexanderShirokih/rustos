@@ -5,14 +5,14 @@
 Крейты образуют DAG. Зависимости идут строго вниз:
 
 ```
-arch/aarch64 (точка входа)
+crates/hal-aarch64 (точка входа)
   -> kernel, drivers-aarch64, memory, aarch64-paging
     -> drivers-common
         -> io, collections (утилиты, без бизнес-логики)
 ```
 
 - Нижние слои не зависят от верхних.
-- Платформенный код изолирован в `arch/` и `drivers/aarch64/`.
+- Платформенный код изолирован в `crates/hal-aarch64/` и `crates/drivers-aarch64/`.
 - Переиспользуемая логика вынесена в отдельные крейты (`collections`, `io`, `util`, `fdt`).
 
 ## Трейты как абстракции

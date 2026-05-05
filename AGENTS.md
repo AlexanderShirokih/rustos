@@ -18,8 +18,8 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 
 | Действие | Команда |
 |---|---|
-| Тесты (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64` |
-| Линтинг (host) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64` |
+| Тесты (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64` |
+| Линтинг (host) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64` |
 | Линтинг (aarch64) | `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` |
 | Форматирование | `cargo fmt --all --check` |
 | Аудит зависимостей | `cargo deny check` |
@@ -38,6 +38,14 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 - Системная зависимость: `qemu-system-arm` для boot-тестирования.
 
 -> Подробнее: [`docs/environment.md`](docs/environment.md)
+
+### Правила разработки
+
+- **Никакого `unsafe` в архитектурно-независимом коде.** Запрет автоматизирован: `[workspace.lints.rust] unsafe_code = "deny"`. Платформенные крейты (`hal-*`, `drivers-*-aarch64`, `qemu-test-harness-aarch64`) опциируют разрешение целиком через `#![allow(unsafe_code)]` в корне крейта. В архитектурно-независимых крейтах (`memory`, `main`, `io`, `collections`, `fdt`, `drivers-common`, `qemu-test-harness`) `#![allow(unsafe_code)]` ставится **точечно — на уровне отдельного файла**, только если без `unsafe` обойтись невозможно (kernel-mechanism: allocators, scheduler, MMIO, raw-pointer relocation). Новый файл и новый крейт по умолчанию запрещают `unsafe` — добавление `#![allow]` видно в diff и требует обоснования при ревью.
+- **Архитектурная независимость по умолчанию.** Механизмы ядра, алгоритмы и структуры данных проектируются так, чтобы максимально не зависеть от платформы. Архитектурно-зависимая часть выносится за интерфейс и сводится к минимуму.
+- **Тестирование.** Архитектурно-независимый код должен покрываться meaningful юнит-тестами (не тесты-заглушки). Архитектурно-зависимый остаток по возможности покрывается интеграционными тестами (QEMU).
+- **Комментарии — по необходимости.** Не писать пространных объяснений того, что и так видно из кода. Комментарий уместен только когда объясняет неочевидное "почему" (инвариант, ограничение, обход бага).
+- **Не плодить сущности.** Не вводить новые механизмы, абстракции, трейты и слои без явной необходимости. Три похожих строки лучше преждевременной абстракции.
 
 ## Документация
 

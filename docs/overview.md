@@ -13,12 +13,12 @@ RustOS Mobile — bare-metal ядро для aarch64, написанное на 
 Зависимости образуют DAG. Стрелки — направление зависимости:
 
 ```
-arch/aarch64            <- точка входа, платформенный код
+crates/hal-aarch64     <- точка входа, платформенный код
   ├── kernel            <- основная логика ядра
   ├── drivers-aarch64   <- платформенные драйверы
   ├── memory            <- управление физической памятью
   ├── aarch64-paging    <- таблицы страниц aarch64
-  └── arch-common       <- общие типы архитектуры
+  └── hal-common       <- общие типы архитектуры
         └── drivers-common         <- интерфейс драйверов
         └── drivers-common-aarch64 <- aarch64-специфичные типы драйверов
               ├── io              <- ввод/вывод, ByteSink, Writer
@@ -34,17 +34,19 @@ arch/aarch64            <- точка входа, платформенный к�
 
 | Крейт | Путь | Описание |
 |---|---|---|
-| `arch-aarch64` | `arch/aarch64` | Точка входа, boot, платформа |
-| `aarch64-paging` | `arch/aarch64-paging` | Таблицы страниц ARM64 |
-| `arch-common` | `arch/common` | Общие типы архитектуры |
-| `collections` | `collections` | `Vec`, `IntervalSet` (`no_std`) |
-| `drivers-common` | `drivers/common` | Трейты и типы драйверов |
-| `drivers-common-aarch64` | `drivers/common-aarch64` | aarch64-специфичные типы драйверов |
-| `drivers-aarch64` | `drivers/aarch64` | Реализации драйверов (PL011, GIC) |
-| `kernel` | `kernel` | Основная логика ядра |
-| `fdt` | `fdt` | Парсер Flattened Device Tree |
-| `io` | `io` | `ByteSink`, `Writer`, форматирование |
-| `log` | `log` | Макросы логирования (`klog`) |
-| `memory` | `memory` | Frame allocator, bitmap |
-| `util` | `util` | Утилиты |
+| `hal-aarch64` | `crates/hal-aarch64` | Точка входа, boot, платформа |
+| `aarch64-paging` | `crates/hal-aarch64-paging` | Таблицы страниц ARM64 |
+| `hal-common` | `crates/hal-common` | Общие типы архитектуры |
+| `collections` | `crates/collections` | `Vec`, `IntervalSet` (`no_std`) |
+| `drivers-common` | `crates/drivers-common` | Трейты и типы драйверов |
+| `drivers-common-aarch64` | `crates/drivers-common-aarch64` | aarch64-специфичные типы драйверов |
+| `drivers-aarch64` | `crates/drivers-aarch64` | Реализации драйверов (PL011, GIC) |
+| `main` | `crates/main` | Основная логика ядра |
+| `fdt` | `crates/fdt` | Парсер Flattened Device Tree |
+| `io` | `crates/io` | `ByteSink`, `Writer`, форматирование |
+| `log` | `crates/log` | Макросы логирования (`klog`) |
+| `memory` | `crates/memory` | Frame allocator, bitmap |
+| `util` | `crates/util` | Утилиты |
+| `qemu-test-harness` | `crates/qemu-test-harness` | Хост-часть QEMU тест-харнесса |
+| `qemu-test-harness-aarch64` | `crates/qemu-test-harness-aarch64` | Гостевая часть QEMU тест-харнесса |
 | `xtask` | `xtask` | Хост-инструмент сборки (CLI) |

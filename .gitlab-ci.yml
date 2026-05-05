@@ -28,7 +28,7 @@ fmt:
 clippy:host:
   stage: check
   script:
-    - cargo clippy --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel
+    - cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
 
 clippy:aarch64:
   stage: check
@@ -44,7 +44,7 @@ deny:
 test:
   stage: test
   script:
-    - cargo test --workspace --exclude drivers-aarch64 --exclude arch-aarch64 --exclude kernel
+    - cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
 
 build:qemu:
   stage: build

@@ -30,7 +30,7 @@ enum Commands {
         /// Отладка после сборки (команды из 'debug' в YAML)
         #[arg(long)]
         debug: bool,
-        /// Cargo features `arch-aarch64` (через запятую).
+        /// Cargo features `hal-aarch64` (через запятую).
         #[arg(long)]
         features: Option<String>,
     },
@@ -182,7 +182,7 @@ fn cargo_build(ctx: &BuildContext) -> Result<()> {
     cmd.args([
         "build",
         "-p",
-        "arch-aarch64",
+        "hal-aarch64",
         "--target",
         "aarch64-unknown-none",
         "--release",
@@ -204,7 +204,7 @@ fn make_kernel_bin(ctx: &BuildContext) -> Result<()> {
         "objcopy",
         "--release",
         "-p",
-        "arch-aarch64",
+        "hal-aarch64",
         "--target",
         "aarch64-unknown-none",
     ]);
