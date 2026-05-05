@@ -114,3 +114,61 @@ fn handle_table_basic() {
 }
 
 register_test!(HANDLE_TABLE_BASIC, "handle_table_basic", handle_table_basic);
+
+fn channel_echo() {
+    use crate::kobject::{
+        CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, IpcError, Message,
+    };
+
+    let (a, b) = ChannelEndpoint::create_pair(4);
+
+    // Пустая очередь -> ShouldWait.
+    qemu_test_harness::kassert!(matches!(b.read(), Err(IpcError::ShouldWait)));
+
+    a.write(Message::from_bytes(b"echo-payload").expect("payload fits"))
+        .expect("write succeeds");
+    qemu_test_harness::kassert!(b.peek_signals() & CHANNEL_READABLE != 0);
+
+    let msg = b.read().expect("read succeeds");
+    qemu_test_harness::kassert_eq!(msg.bytes(), b"echo-payload");
+    qemu_test_harness::kassert!(b.peek_signals() & CHANNEL_READABLE == 0);
+
+    // Drop одного эндпоинта поднимает PEER_CLOSED на втором.
+    drop(a);
+    qemu_test_harness::kassert!(b.peek_signals() & CHANNEL_PEER_CLOSED != 0);
+    qemu_test_harness::kassert!(matches!(b.read(), Err(IpcError::PeerClosed)));
+}
+
+register_test!(CHANNEL_ECHO, "channel_echo", channel_echo);
+
+fn event_signal() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::kobject::{EVENT_SIGNALED, Event, Waker};
+
+    struct Flag {
+        fired: AtomicBool,
+    }
+    impl Waker for Flag {
+        fn wake(&self, _observed: u32) {
+            self.fired.store(true, Ordering::Release);
+        }
+    }
+
+    let event = Event::new();
+    qemu_test_harness::kassert_eq!(event.peek(), 0);
+
+    let flag = Arc::new(Flag {
+        fired: AtomicBool::new(false),
+    });
+    event
+        .signal_state()
+        .register_waiter(EVENT_SIGNALED, flag.clone());
+    qemu_test_harness::kassert!(!flag.fired.load(Ordering::Acquire));
+
+    event.signal(EVENT_SIGNALED, 0);
+    qemu_test_harness::kassert!(flag.fired.load(Ordering::Acquire));
+    qemu_test_harness::kassert!(event.peek() & EVENT_SIGNALED != 0);
+}
+
+register_test!(EVENT_SIGNAL, "event_signal", event_signal);
