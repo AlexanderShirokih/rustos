@@ -1,15 +1,15 @@
-//! Kernel-thread, обслуживающий channel-based Timer KO.
+//! Kernel-thread, обслуживающий channel-based timer-сервис.
 //!
-//! Сервер на старте создаёт ровно один [`Timer`] KO, отдаёт клиенту
-//! handle на этот таймер вместе с handle'ом на свой conn-эндпоинт и
-//! затем сидит в `read`-loop'е, исполняя команды:
+//! Сервер на старте создаёт ровно один [`Event`] KO как сигнал
+//! "дедлайн наступил" и отдаёт клиенту handle на этот event вместе с
+//! handle'ом на свой conn-эндпоинт. Затем сидит в `read`-loop'е,
+//! исполняя команды:
 //!
-//! - `SET_DEADLINE { period_ms: u64 }` - `arm()` таймера, sleep на
-//!   `period_ms`, затем `fire()`.
+//! - `SET_DEADLINE { period_ms: u64 }` - снять `TIMER_SIGNALED`,
+//!   sleep на `period_ms`, поднять `TIMER_SIGNALED`.
 //!
 //! Один сервер обслуживает одного клиента. Параллельные таймеры и
-//! cancel-операции - отложено до полноценной миграции сервиса
-//! (см. `// TODO(kobject-migration)` в `drivers-common`).
+//! cancel-операции - отложено до полноценной миграции сервиса.
 
 extern crate alloc;
 
@@ -21,9 +21,14 @@ use drivers_common::services::scheduler::{
 use klog::{info, warn};
 
 use crate::kobject::{
-    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, Handle, IpcError, KObject, Message,
-    Rights, TIMER_SIGNALED, Timer, install_handle, object_signal, object_wait_one,
+    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, Event, Handle, IpcError, KObject,
+    Message, Rights, install_handle, object_signal, object_wait_one,
 };
+
+/// Бит сигнала "timer expired". Convention протокола timer-server'а:
+/// клиент wait'ит на этом бите, сервер выставляет его при наступлении
+/// дедлайна.
+pub const TIMER_SIGNALED: u32 = 1 << 0;
 
 /// Заголовочный байт сообщения "установить дедлайн".
 pub const CMD_SET_DEADLINE: u8 = 0x01;
@@ -39,7 +44,8 @@ pub fn encode_set_deadline(period_ms: u64) -> Message {
 }
 
 /// Запускает kernel-thread "timer-server" и возвращает client-end канала.
-/// Из этого endpoint первое сообщение содержит handle на `Timer` KO.
+/// Из этого endpoint первое сообщение содержит handle на Event KO,
+/// который сервер сигналит при наступлении дедлайна.
 pub fn spawn_timer_server(
     scheduler: &Arc<dyn SchedulerService>,
 ) -> Result<Arc<ChannelEndpoint>, &'static str> {
@@ -59,16 +65,16 @@ pub fn spawn_timer_server(
 }
 
 fn run_server(scheduler: &Arc<dyn SchedulerService>, server_end: &Arc<ChannelEndpoint>) {
-    let timer = Timer::new();
+    let event = Event::new();
 
-    // Welcome-сообщение: handle на Timer KO передаётся клиенту.
+    // Welcome-сообщение: handle на Event KO передаётся клиенту.
     let mut welcome = Message::new();
     // Клиент получает право `SIGNAL`, чтобы уметь явно очистить
     // `TIMER_SIGNALED` между итерациями (избегая "залипания" бита от
     // предыдущего fire'а).
-    let timer_ko = KObject::Timer(timer.clone());
-    let timer_handle = Handle::new(timer_ko, Rights::WAIT | Rights::SIGNAL | Rights::INSPECT);
-    if welcome.push_handle(timer_handle).is_err() {
+    let event_ko = KObject::Event(event.clone());
+    let event_handle = Handle::new(event_ko, Rights::WAIT | Rights::SIGNAL | Rights::INSPECT);
+    if welcome.push_handle(event_handle).is_err() {
         warn!("timer-server: welcome build failed");
         return;
     }
@@ -120,11 +126,11 @@ fn run_server(scheduler: &Arc<dyn SchedulerService>, server_end: &Arc<ChannelEnd
             }
         };
 
-        handle_command(scheduler, &timer, &msg);
+        handle_command(scheduler, &event, &msg);
     }
 }
 
-fn handle_command(scheduler: &Arc<dyn SchedulerService>, timer: &Arc<Timer>, msg: &Message) {
+fn handle_command(scheduler: &Arc<dyn SchedulerService>, event: &Arc<Event>, msg: &Message) {
     let bytes = msg.bytes();
     if bytes.len() != SET_DEADLINE_LEN || bytes[0] != CMD_SET_DEADLINE {
         warn!("timer-server: unknown command, len={}", bytes.len());
@@ -135,9 +141,9 @@ fn handle_command(scheduler: &Arc<dyn SchedulerService>, timer: &Arc<Timer>, msg
     period_le.copy_from_slice(&bytes[1..9]);
     let period_ms = u64::from_le_bytes(period_le);
 
-    timer.arm();
+    event.signal(0, TIMER_SIGNALED);
     scheduler.sleep_ms(period_ms);
-    timer.fire();
+    event.signal(TIMER_SIGNALED, 0);
 }
 
 /// Клиентская сторона pilot: устанавливает channel- и timer-handle'ы
@@ -150,7 +156,7 @@ pub fn pilot_client_subscribe(client_end: Arc<ChannelEndpoint>) -> Result<PilotH
         Rights::READ | Rights::WRITE | Rights::WAIT | Rights::INSPECT,
     ))?;
 
-    // Первое сообщение от сервера: handle на Timer.
+    // Первое сообщение от сервера: handle на Event-сигнал таймера.
     object_wait_one(chan_id, CHANNEL_READABLE, None)?;
     let mut welcome = client_end.read()?;
 
@@ -162,8 +168,8 @@ pub fn pilot_client_subscribe(client_end: Arc<ChannelEndpoint>) -> Result<PilotH
     drop(drained);
 
     match timer_handle.object() {
-        KObject::Timer(_) => {}
-        _ => return Err(IpcError::WrongType),
+        KObject::Event(_) => {}
+        KObject::Channel(_) => return Err(IpcError::WrongType),
     }
 
     let timer_id = install_handle(timer_handle)?;

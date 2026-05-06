@@ -27,9 +27,9 @@ use crate::kernel_context::KernelContext;
 mod allocator;
 mod channel;
 mod event;
+mod event_via_scheduler;
 mod handle_table;
 mod smoke;
-mod timer;
 
 struct ConsoleAdapter(Arc<dyn ConsoleService>);
 
@@ -45,7 +45,7 @@ impl Writer for ConsoleAdapter {
 static ADAPTER: Once<ConsoleAdapter> = Once::new();
 
 /// Сервис scheduler-а, кэшируемый для тестов, которые спавнят
-/// дополнительные потоки (например, [`timer::timer_signal_after_deadline`]).
+/// дополнительные потоки (например, [`event_via_scheduler::event_signal_after_deadline`]).
 static SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
 
 /// Доступ к scheduler-сервису из test-кейсов.

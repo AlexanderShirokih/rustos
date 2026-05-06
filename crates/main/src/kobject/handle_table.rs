@@ -7,7 +7,6 @@ use super::{
     handle::{Handle, HandleId},
     object::KObject,
     rights::Rights,
-    timer::Timer,
 };
 
 /// Стандартная ёмкость таблицы handle'ов одного процесса.
@@ -138,7 +137,7 @@ impl HandleTable {
         }
         match &h.object {
             KObject::Channel(c) => Ok(c.clone()),
-            _ => Err(IpcError::WrongType),
+            KObject::Event(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -150,19 +149,7 @@ impl HandleTable {
         }
         match &h.object {
             KObject::Event(e) => Ok(e.clone()),
-            _ => Err(IpcError::WrongType),
-        }
-    }
-
-    /// Извлекает `Arc<Timer>` с проверкой прав и типа.
-    pub fn get_timer(&self, id: HandleId, need: Rights) -> Result<Arc<Timer>, IpcError> {
-        let h = self.lookup(id)?;
-        if !h.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        match &h.object {
-            KObject::Timer(t) => Ok(t.clone()),
-            _ => Err(IpcError::WrongType),
+            KObject::Channel(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -213,7 +200,7 @@ impl HandleTable {
                 return None;
             };
             self.free_head = next_free;
-            if slot.generation >= HandleId::MAX_GENERATION {
+            if slot.generation == HandleId::MAX_GENERATION {
                 slot.state = SlotState::Retired;
                 continue;
             }

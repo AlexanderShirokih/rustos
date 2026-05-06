@@ -80,7 +80,7 @@ impl Rights {
                     | Self::DUPLICATE.0
                     | Self::INSPECT.0,
             ),
-            KObject::Event(_) | KObject::Timer(_) => Self(SIGNALABLE),
+            KObject::Event(_) => Self(SIGNALABLE),
         }
     }
 }

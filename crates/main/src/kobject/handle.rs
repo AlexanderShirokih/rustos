@@ -5,13 +5,13 @@ use super::{errors::IpcError, koid::Koid, object::KObject, rights::Rights};
 /// Публичный идентификатор записи в `HandleTable`, используемый процессами для IPC.
 ///
 /// Внутреннее представление - упакованная пара `(generation, slot)`:
-/// 12 старших бит - generation (1..=4095), 20 младших - индекс слота
-/// (0..=2^20-1).
+/// 16 старших бит - generation (1..=65535), 16 младших - индекс слота
+/// (0..=2^16-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HandleId(NonZeroU32);
 
 impl HandleId {
-    pub(super) const SLOT_BITS: u32 = 20;
+    pub(super) const SLOT_BITS: u32 = 16;
     pub(super) const SLOT_MASK: u32 = (1 << Self::SLOT_BITS) - 1;
     pub(super) const MAX_SLOT_INDEX: u32 = Self::SLOT_MASK;
     pub(super) const MAX_GENERATION: u16 = ((1u32 << (32 - Self::SLOT_BITS)) - 1) as u16;
