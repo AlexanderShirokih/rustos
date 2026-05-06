@@ -72,9 +72,7 @@ impl Driver for Gicv2 {
                 .map_err(DriverRunError::Fatal)?,
         ));
 
-        {
-            controller.lock().init()
-        }
+        controller.lock().init();
 
         let handle = GicInterruptsService::new(controller);
 
@@ -97,15 +95,18 @@ impl DriverFactory for Gicv2Factory {
 pub fn gicv2_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
     require_compatible(context.node(), &["arm,cortex-a15-gic", "arm,gic-400"])?;
 
-    let gicd = context
+    let distributor = context
         .get_mmio_address(0)
         .expect("failed to get GICD_BASE");
 
-    let gicc = context
+    let cpu_interface = context
         .get_mmio_address(1)
         .expect("failed to get GICC_BASE");
 
-    Ok(Box::new(Gicv2Factory { gicd, gicc }))
+    Ok(Box::new(Gicv2Factory {
+        gicd: distributor,
+        gicc: cpu_interface,
+    }))
 }
 
 register_driver!(GIC_V2_DRIVER, probe = gicv2_probe);

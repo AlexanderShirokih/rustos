@@ -94,10 +94,7 @@ impl TCRBit {
     }
 
     pub const fn epd<Sel: TtbrSel>(enable: bool) -> Self {
-        let bit = match enable {
-            true => 0b0,
-            false => 0b1 << Sel::EDP_SHIFT,
-        };
+        let bit = if enable { 0b0 } else { 0b1 << Sel::EDP_SHIFT };
 
         Self(bit)
     }
@@ -118,14 +115,7 @@ pub struct TranslationControlRegister<EL> {
 }
 
 impl TranslationControlRegister<EL1> {
-    pub const fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
-    }
-
     pub fn set(
-        &self,
         lower: AddressTranslationConfig<LowerHalf>,
         higher: AddressTranslationConfig<HigherHalf>,
     ) {
@@ -140,6 +130,13 @@ pub struct AddressTranslationConfig<T: TtbrSel> {
     /// Значение TCR.
     value: u64,
     _phantom: PhantomData<T>,
+}
+
+impl<T: TtbrSel> Copy for AddressTranslationConfig<T> {}
+impl<T: TtbrSel> Clone for AddressTranslationConfig<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<T: TtbrSel> AddressTranslationConfig<T> {

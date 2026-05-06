@@ -32,7 +32,7 @@ impl<T: ?Sized> Koid<T> {
 
 impl<T: KernelObject + ?Sized> Koid<T> {
     pub fn of(obj: &T) -> Self {
-        let addr = obj as *const T as *const () as u64;
+        let addr = core::ptr::from_ref::<T>(obj).cast::<()>() as u64;
         let raw = ((obj.object_type() as u64) << TYPE_SHIFT) | (addr & ADDR_MASK);
         Self(
             NonZeroU64::new(raw).expect("ObjectType >= 1 keeps top byte non-zero"),

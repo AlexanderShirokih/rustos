@@ -58,6 +58,15 @@ pub struct Entry<L: Level, K: Kind> {
     _p: PhantomData<(L, K)>,
 }
 
+// Entry - `#[repr(transparent)]` обёртка над `u64`; параметры `L`/`K` живут только в `PhantomData`,
+// поэтому Copy/Clone безусловны.
+impl<L: Level, K: Kind> Copy for Entry<L, K> {}
+impl<L: Level, K: Kind> Clone for Entry<L, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 impl<L: Level, K: Kind> Entry<L, K> {
     pub const fn raw(&self) -> u64 {
         self.raw

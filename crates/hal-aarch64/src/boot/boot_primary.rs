@@ -37,8 +37,7 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
         higher_root,
         frame_allocator_phys,
         higher_half_base,
-    )
-    .expect("Failed to install heap allocator");
+    );
 
     ExceptionVectors::instance().install();
 
@@ -50,6 +49,9 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
     let dtb_virt = dtb_phys + HIGHER_HALF_BASE;
     let device_tree = fdt::devicetree::DeviceTree::from_ptr(dtb_virt)
         .expect("Failed to parse DTB at virtual address");
+    // SAFETY: DTB замаплен в higher-half и существует в течение всей жизни ядра, поэтому
+    // продление времени жизни ссылки до `'static` корректно. `transmute` тут используется
+    // только для удлинения lifetime - layout `&DeviceTree` остаётся прежним.
     let device_tree: &'static fdt::devicetree::DeviceTree =
         unsafe { core::mem::transmute(&device_tree) };
 

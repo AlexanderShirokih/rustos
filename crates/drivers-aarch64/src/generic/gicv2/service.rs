@@ -22,15 +22,13 @@ impl GicInterruptsService {
 
 impl InterruptsService for GicInterruptsService {
     fn enable(&self) {
-        {
-            let guard = self.controller.lock();
-            guard.enable_global();
-        }
+        let _guard = self.controller.lock();
+        Gicv2Controller::enable_global();
     }
 
     fn disable(&self) {
-        let guard = self.controller.lock();
-        guard.disable_global();
+        let _guard = self.controller.lock();
+        Gicv2Controller::disable_global();
     }
 
     fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {

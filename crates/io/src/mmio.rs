@@ -79,13 +79,20 @@ impl From<Mmio> for usize {
 }
 
 /// Типобезопасный дескриптор регистра со смещением и ожидаемым типом.
-#[derive(Copy, Clone)]
 pub struct Reg<T> {
     /// Смещение регистра относительно базового адреса MMIO (в байтах).
     pub offset: usize,
 
     /// Маркер типа для compile-time проверки размера регистра.
     _t: PhantomData<T>,
+}
+
+// `T` участвует только в `PhantomData`, поэтому Reg<T> Copy/Clone безусловно.
+impl<T> Copy for Reg<T> {}
+impl<T> Clone for Reg<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<T> Reg<T> {

@@ -86,8 +86,8 @@ pub struct MemoryRegion<A: Address + Aligned> {
 impl MemoryRegion<PageAlignedAddress> {
     /// Создаёт регион из указателей на символы линкера.
     pub fn new_raw(tag: RegionTag, start: &u8, end: &u8, flags: Aarch64MemFlags) -> Self {
-        let start_addr = start as *const u8 as usize;
-        let end_addr = end as *const u8 as usize;
+        let start_addr = core::ptr::from_ref::<u8>(start) as usize;
+        let end_addr = core::ptr::from_ref::<u8>(end) as usize;
 
         Self::new(tag, start_addr, end_addr, flags)
     }

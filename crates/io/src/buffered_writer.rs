@@ -36,10 +36,10 @@ impl BufferedWriter {
     }
 
     /// Подключает реальный writer: сбрасывает буфер в него и переключается на прямую запись.
-    pub fn attach(&self, writer: Arc<dyn Writer + Send + Sync>) {
+    pub fn attach(&self, writer: &Arc<dyn Writer + Send + Sync>) {
         let old = {
             let mut state = self.state.lock();
-            core::mem::replace(&mut *state, BufferState::Attached(Arc::clone(&writer)))
+            core::mem::replace(&mut *state, BufferState::Attached(Arc::clone(writer)))
         };
         if let BufferState::Buffering(buf) = old
             && !buf.is_empty()

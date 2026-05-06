@@ -26,6 +26,7 @@ impl SctlrBit {
 }
 
 /// Скомбинированные биты SCTLR.
+#[derive(Debug, Clone, Copy)]
 pub struct SctlrBits(u64);
 
 impl SctlrBits {
@@ -41,18 +42,12 @@ pub struct SystemControlRegister<EL> {
 }
 
 impl SystemControlRegister<EL1> {
-    pub const fn new() -> Self {
-        Self {
-            _phantom: core::marker::PhantomData,
-        }
-    }
-
-    pub fn set(&self, mask: SctlrBits) {
+    pub fn set(mask: SctlrBits) {
         // SAFETY: Чтение и запись SCTLR_EL1 допустимы на EL1. Новое значение
         // формируется как OR текущего значения и маски - MMU-инварианты не нарушаются.
         unsafe {
             let value = read_sysreg!(sctlr_el1);
             write_sysreg!(sctlr_el1, value | mask.0);
-        };
+        }
     }
 }

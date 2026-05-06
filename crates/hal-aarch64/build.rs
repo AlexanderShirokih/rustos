@@ -58,19 +58,18 @@ fn main() {
         )
     });
 
-    if spec.device.arch != "aarch64" {
-        panic!(
-            "device spec '{}' has arch='{}', but this crate targets 'aarch64'",
-            spec.device.name, spec.device.arch
-        );
-    }
+    assert!(
+        spec.device.arch == "aarch64",
+        "device spec '{}' has arch='{}', but this crate targets 'aarch64'",
+        spec.device.name,
+        spec.device.arch
+    );
 
     let boot_format = spec.boot.format.as_str();
     match boot_format {
         "binary" | "android_boot_v1" | "android_boot_v2" => {}
         _ => panic!(
-            "Unknown boot.format '{}'. Expected: binary, android_boot_v1, android_boot_v2",
-            boot_format
+            "Unknown boot.format '{boot_format}'. Expected: binary, android_boot_v1, android_boot_v2"
         ),
     }
 
@@ -83,10 +82,10 @@ fn main() {
     println!("cargo:rustc-link-arg=-T{}", linker_script.display());
 
     // Экспорт параметров в env для использования в коде и Makefile
-    println!("cargo:rustc-env=BOOT_FORMAT={}", boot_format);
+    println!("cargo:rustc-env=BOOT_FORMAT={boot_format}");
 
     if let Some(ref dtb) = spec.boot.dtb {
-        println!("cargo:rustc-env=BOOT_DTB={}", dtb);
+        println!("cargo:rustc-env=BOOT_DTB={dtb}");
     }
 }
 

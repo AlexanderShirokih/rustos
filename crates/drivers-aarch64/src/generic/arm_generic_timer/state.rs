@@ -52,7 +52,7 @@ impl ArmGenericTimerState {
     }
 
     fn ticks_to_ns(ticks: u64, frequency: u64) -> u64 {
-        (ticks as u128 * 1_000_000_000 / frequency as u128) as u64
+        (u128::from(ticks) * 1_000_000_000 / u128::from(frequency)) as u64
     }
 
     pub(super) fn on_interrupt(&self) {
@@ -68,7 +68,7 @@ impl ArmGenericTimerState {
             return None;
         }
 
-        Some(cmp::min(ticks, u32::MAX as u64) as u32)
+        Some(cmp::min(ticks, u64::from(u32::MAX)) as u32)
     }
 
     fn read_cntfrq_el0() -> u64 {
@@ -88,7 +88,7 @@ impl ArmGenericTimerState {
         // Аппаратно устанавливает CNTP_CVAL_EL0 = CNTPCT_EL0 + TVAL. ISB гарантирует
         // что следующая инструкция видит актуальное значение таймера.
         unsafe {
-            write_sysreg!(cntp_tval_el0, value as u64);
+            write_sysreg!(cntp_tval_el0, u64::from(value));
             core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
         }
     }
@@ -98,7 +98,7 @@ impl ArmGenericTimerState {
         // Используются только документированные значения (enable/unmask). ISB гарантирует
         // немедленное применение изменений управляющего регистра.
         unsafe {
-            write_sysreg!(cntp_ctl_el0, value as u64);
+            write_sysreg!(cntp_ctl_el0, u64::from(value));
             core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
         }
     }

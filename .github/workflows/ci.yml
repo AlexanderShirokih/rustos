@@ -13,61 +13,68 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: nightly
           components: rustfmt
+          cache: false
       - run: cargo fmt --all --check
 
   clippy-host:
     name: clippy (host)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: nightly
           components: clippy
-      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
 
   clippy-aarch64:
     name: clippy (aarch64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: nightly
           components: clippy
-          targets: aarch64-unknown-none
-      - uses: Swatinem/rust-cache@v2
+          target: aarch64-unknown-none
+          cache-shared-key: aarch64
       - run: cargo clippy --workspace --exclude xtask --target aarch64-unknown-none
 
   test:
     name: tests (host)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
       - run: cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
 
   qemu-test:
     name: qemu-test (aarch64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: aarch64-unknown-none
+          toolchain: nightly
+          target: aarch64-unknown-none
           components: llvm-tools-preview, rust-src
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get install -y qemu-system-arm
-      - run: cargo install --locked cargo-binutils
+          cache-shared-key: aarch64
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binutils
+      - run: sudo apt-get install -y --no-install-recommends qemu-system-arm
       - run: cargo xtask qemu-test
 
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2

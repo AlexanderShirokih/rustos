@@ -52,6 +52,8 @@ impl GlobalKernelAllocator {
     /// Переключает на bump-фазу.
     pub fn set_bump(&self, bump_allocator: BumpAllocator) {
         let bump_ptr = self.bump.get();
+        // SAFETY: caller вызывает `set_bump` ровно один раз в фазе UNINIT, до публикации
+        // аллокатора через `Release`-store, эксклюзивный доступ к `MaybeUninit` гарантирован.
         unsafe {
             (*bump_ptr).write(bump_allocator);
         }
@@ -61,6 +63,8 @@ impl GlobalKernelAllocator {
     /// Переключает на heap-фазу.
     pub fn set_heap(&self, heap_allocator: KernelHeapAllocator) {
         let heap_ptr = self.heap.get();
+        // SAFETY: caller вызывает `set_heap` ровно один раз перед переходом в PHASE_HEAP,
+        // в этот момент конкурентного доступа к `heap` нет; затем фаза публикуется через Release.
         unsafe {
             (*heap_ptr).write(heap_allocator);
         }
@@ -77,6 +81,8 @@ impl GlobalKernelAllocator {
     /// и не происходит конкурентного доступа.
     #[allow(clippy::mut_from_ref)]
     pub(crate) unsafe fn get_bump(&self) -> &mut BumpAllocator {
+        // SAFETY: caller гарантирует инициализацию `bump` (фаза >= PHASE_BUMP) и отсутствие гонок;
+        // `assume_init_mut` корректен.
         unsafe { (*self.bump.get()).assume_init_mut() }
     }
 
@@ -85,10 +91,17 @@ impl GlobalKernelAllocator {
     /// и не происходит конкурентного доступа.
     #[allow(clippy::mut_from_ref)]
     unsafe fn get_heap(&self) -> &mut KernelHeapAllocator {
+        // SAFETY: caller гарантирует инициализацию `heap` (фаза == PHASE_HEAP) и отсутствие гонок;
+        // `assume_init_mut` корректен.
         unsafe { (*self.heap.get()).assume_init_mut() }
     }
 }
 
+// SAFETY: `alloc`/`dealloc` корректны: переходы между фазами защищены атомарным `phase` с
+// `Acquire`/`Release`-семантикой, в каждой фазе соответствующий аллокатор инициализирован,
+// сами аллокаторы (`BumpAllocator`, `HeapAllocator`) внутренне сериализуют доступ через
+// исключительный `&mut` к статическому состоянию (ядро однопоточное на старте, после
+// инициализации scheduler-а - единственный поток в kernel-space на CPU0 для allocate-ops).
 unsafe impl GlobalAlloc for GlobalKernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match self.phase.load(Ordering::Acquire) {
@@ -114,16 +127,11 @@ unsafe impl GlobalAlloc for GlobalKernelAllocator {
             return;
         }
 
-        match self.phase.load(Ordering::Acquire) {
-            PHASE_HEAP => {
-                if let Some(non_null_ptr) = NonNull::new(ptr) {
-                    // SAFETY: фаза PHASE_HEAP гарантирует, что heap инициализирован
-                    unsafe { self.get_heap() }.deallocate(non_null_ptr);
-                }
-            }
-            _ => {
-                // no-op
-            }
+        if self.phase.load(Ordering::Acquire) == PHASE_HEAP
+            && let Some(non_null_ptr) = NonNull::new(ptr)
+        {
+            // SAFETY: фаза PHASE_HEAP гарантирует, что heap инициализирован
+            unsafe { self.get_heap() }.deallocate(non_null_ptr);
         }
     }
 }

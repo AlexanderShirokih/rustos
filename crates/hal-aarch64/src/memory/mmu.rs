@@ -87,38 +87,21 @@ impl MmuConfig for NormalDualSpaceConfig {
 
 /// Операции с MMU.
 pub struct Mmu<EL> {
-    /// Регистр TTBR0 (lower half).
-    lower_half_base: TranslationTableBaseRegister<EL, LowerHalf>,
-    /// Регистр TTBR1 (higher half).
-    higher_half_base: TranslationTableBaseRegister<EL, HigherHalf>,
-    /// Регистр TCR (параметры трансляции).
-    tcr: TranslationControlRegister<EL>,
-    /// Регистр MAIR (атрибуты памяти).
-    mair: MemoryAttributeIndirectionRegister<EL>,
-    /// TLB (кэш трансляций).
-    tlb: TranslationLookasideBuffer<EL>,
-    /// Регистр SCTLR (управление системой).
-    sctlr: SystemControlRegister<EL1>,
+    _phantom: core::marker::PhantomData<EL>,
 }
 
-impl Mmu<EL1> {
-    pub const fn new() -> Self {
-        Self {
-            lower_half_base: TranslationTableBaseRegister::new(),
-            higher_half_base: TranslationTableBaseRegister::new(),
-            tcr: TranslationControlRegister::new(),
-            mair: MemoryAttributeIndirectionRegister::new(),
-            tlb: TranslationLookasideBuffer::new(),
-            sctlr: SystemControlRegister::new(),
-        }
-    }
-}
+type Ttbr0 = TranslationTableBaseRegister<EL1, LowerHalf>;
+type Ttbr1 = TranslationTableBaseRegister<EL1, HigherHalf>;
+type Tcr = TranslationControlRegister<EL1>;
+type Mair = MemoryAttributeIndirectionRegister<EL1>;
+type Tlb = TranslationLookasideBuffer<EL1>;
+type Sctlr = SystemControlRegister<EL1>;
 
 impl Mmu<EL1> {
     /// Отключает identity mapping: обнуляет TTBR0_EL1 и сбрасывает TLB.
     ///
     /// Вызывать только после перехода в higher half (виртуальный SP и PC).
-    pub fn disable_lower_half(&self) {
+    pub fn disable_lower_half() {
         system::barrier::full_system_barrier();
         // SAFETY: Вызывается post-MMU, после переключения SP и PC на виртуальные адреса.
         // После этого вызова любое обращение к lower half вызовет Translation Fault.
@@ -129,17 +112,17 @@ impl Mmu<EL1> {
                 options(nostack, preserves_flags)
             );
         }
-        self.tlb.invalidate();
+        Tlb::invalidate();
         system::barrier::full_system_barrier();
     }
 
     /// Включает MMU и кэши.
-    pub fn enable<C: MmuConfig>(&self, config: C) {
+    pub fn enable<C: MmuConfig>(config: &C) {
         // 1) Барьер перед изменениями регистров + маскирование прерываний
         system::barrier::full_system_barrier();
 
         // 2) Запись слотов атрибутов памяти
-        self.mair.set(mair::MairBits::combine(&[
+        Mair::set(mair::MairBits::combine(&[
             mair::MairEntry::Normal(config.normal_memory_config()), // слот #0
             mair::MairEntry::Device(config.device_memory_config()), // слот #1
         ]));
@@ -148,15 +131,15 @@ impl Mmu<EL1> {
         let lower_config = config.lower_half_config();
         let higher_config = config.higher_half_config();
 
-        self.tcr.set(lower_config.config, higher_config.config);
-        self.lower_half_base.set(lower_config.base);
-        self.higher_half_base.set(higher_config.base);
+        Tcr::set(lower_config.config, higher_config.config);
+        Ttbr0::set(lower_config.base);
+        Ttbr1::set(higher_config.base);
 
         // 4) Сброс TLB
-        self.tlb.invalidate();
+        Tlb::invalidate();
 
         // 5) Включение MMU + кэшей
-        self.sctlr.set(config.mmu_config());
+        Sctlr::set(config.mmu_config());
 
         // 6) Барьер после изменения всех регистров
         system::barrier::full_system_barrier();

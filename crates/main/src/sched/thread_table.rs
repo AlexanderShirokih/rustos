@@ -24,7 +24,7 @@ impl<A: ArchContext> ThreadTable<A> {
     where
         F: FnOnce(ThreadId) -> Thread<A>,
     {
-        if let Some(index) = self.slots.iter().position(|slot| slot.is_none()) {
+        if let Some(index) = self.slots.iter().position(Option::is_none) {
             let raw = NonZeroU32::new((index + 1) as u32).expect("slot index must fit into u32");
             let id = ThreadId::new(raw);
             let thread = builder(id);

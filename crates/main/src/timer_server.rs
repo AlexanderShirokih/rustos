@@ -42,7 +42,7 @@ pub fn encode_set_deadline(period_ms: u64) -> Message {
 /// Запускает kernel-thread "timer-server" и возвращает client-end канала.
 /// Из этого endpoint первое сообщение содержит handle на `Timer` KO.
 pub fn spawn_timer_server(
-    scheduler: Arc<dyn SchedulerService>,
+    scheduler: &Arc<dyn SchedulerService>,
 ) -> Result<Arc<ChannelEndpoint>, &'static str> {
     let (server_end, client_end) = ChannelEndpoint::create_pair(8);
 
@@ -52,14 +52,14 @@ pub fn spawn_timer_server(
     scheduler
         .spawn(
             SpawnConfig::new("timer-server").priority(Priority::highest()),
-            move || run_server(scheduler_for_server, server_end_for_thread),
+            move || run_server(&scheduler_for_server, &server_end_for_thread),
         )
         .map_err(|_| "spawn timer-server failed")?;
 
     Ok(client_end)
 }
 
-fn run_server(scheduler: Arc<dyn SchedulerService>, server_end: Arc<ChannelEndpoint>) {
+fn run_server(scheduler: &Arc<dyn SchedulerService>, server_end: &Arc<ChannelEndpoint>) {
     let timer = Timer::new();
 
     // Welcome-сообщение: handle на Timer KO передаётся клиенту.
@@ -125,11 +125,11 @@ fn run_server(scheduler: Arc<dyn SchedulerService>, server_end: Arc<ChannelEndpo
             }
         };
 
-        handle_command(&scheduler, &timer, msg);
+        handle_command(scheduler, &timer, &msg);
     }
 }
 
-fn handle_command(scheduler: &Arc<dyn SchedulerService>, timer: &Arc<Timer>, msg: Message) {
+fn handle_command(scheduler: &Arc<dyn SchedulerService>, timer: &Arc<Timer>, msg: &Message) {
     let bytes = msg.bytes();
     if bytes.len() != SET_DEADLINE_LEN || bytes[0] != CMD_SET_DEADLINE {
         warn!("timer-server: unknown command, len={}", bytes.len());

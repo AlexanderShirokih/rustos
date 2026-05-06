@@ -69,12 +69,17 @@ impl ArchContext for Aarch64Context {
 
     unsafe fn start(next: &Self) -> ! {
         // SAFETY: используется только для первого входа в поток из boot context.
-        unsafe { context_start(next as *const Self) }
+        unsafe { context_start(core::ptr::from_ref::<Self>(next)) }
     }
 
     unsafe fn switch(prev: &mut Self, next: &Self) {
         // SAFETY: вызывается scheduler при эксклюзивном владении обоими контекстами.
-        unsafe { context_switch(prev as *mut Self, next as *const Self) };
+        unsafe {
+            context_switch(
+                core::ptr::from_mut::<Self>(prev),
+                core::ptr::from_ref::<Self>(next),
+            );
+        }
     }
 }
 

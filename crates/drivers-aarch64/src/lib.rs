@@ -24,10 +24,14 @@ pub fn drivers() -> &'static [DriverInfo<FdtProbeFn>] {
             static __drivers_kernel_end: DriverInfo<FdtProbeFn>;
         }
 
+        // SAFETY: символы `__drivers_kernel_start`/`__drivers_kernel_end` объявлены линкером
+        // и охватывают единый секционный массив `.drivers.kernel`, заполненный `DriverInfo`-ами
+        // через `register_driver!`. `offset_from` корректен: оба указателя из одного объекта,
+        // `start <= end` гарантировано раскладкой секции; результат не отрицателен.
         unsafe {
-            let start = &__drivers_kernel_start as *const DriverInfo<FdtProbeFn>;
-            let end = &__drivers_kernel_end as *const DriverInfo<FdtProbeFn>;
-            let length = end.offset_from(start) as usize;
+            let start = core::ptr::from_ref(&__drivers_kernel_start);
+            let end = core::ptr::from_ref(&__drivers_kernel_end);
+            let length = end.offset_from(start).cast_unsigned();
             core::slice::from_raw_parts(start, length)
         }
     }

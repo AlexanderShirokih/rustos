@@ -44,6 +44,7 @@ impl MapLeaf<{ L3::SHIFT }> for PagePa {
         if raw != 0 {
             return Err(MapError::AlreadyMapped);
         }
+        // SAFETY: см. выше - l3 валиден после ensure_next, idx в пределах 0..512.
         unsafe { (*l3).set(idx, Entry::<L3, Page>::new(phys, flags)) };
         Ok(())
     }
@@ -66,6 +67,7 @@ impl MapLeaf<{ L2::SHIFT }> for L2BlockPa {
         let raw = unsafe { (*l2).get_raw(idx) };
         match decode::<L2>(raw).map_err(MapError::Decode)? {
             AnyEntry::Invalid(_) => {
+                // SAFETY: см. выше - l2 валиден после ensure_next, idx в пределах 0..512.
                 unsafe { (*l2).set(idx, Entry::<L2, Block>::new(phys, flags)) };
                 Ok(())
             }
@@ -91,6 +93,7 @@ impl MapLeaf<{ L1::SHIFT }> for L1BlockPa {
         let raw = unsafe { (*l1).get_raw(idx) };
         match decode::<L1>(raw).map_err(MapError::Decode)? {
             AnyEntry::Invalid(_) => {
+                // SAFETY: см. выше - l1 валиден после ensure_next, idx в пределах 0..512.
                 unsafe { (*l1).set(idx, Entry::<L1, Block>::new(phys, flags)) };
                 Ok(())
             }
@@ -158,6 +161,9 @@ impl<A: TableAlloc> PageMapper<A> {
             AnyEntry::Table(te) => {
                 // Таблица существует - извлекаем PA и получаем указатель
                 let child_pa = extract_table_pa(te.raw());
+                // SAFETY: child_pa извлечён из валидного дескриптора уровня PL и указывает
+                // на ранее замапленную таблицу уровня CL; alloc.table_ptr транслирует PA->VA
+                // согласно своему контракту (recursive/linear mapping).
                 let child = unsafe { self.alloc.table_ptr::<CL>(child_pa, target_va) };
                 Ok(child)
             }
@@ -165,11 +171,15 @@ impl<A: TableAlloc> PageMapper<A> {
             AnyEntry::Invalid(_) => {
                 let child_pa = self.alloc.alloc_table_page().ok_or(MapError::OutOfMemory)?;
 
-                // Запись entry в parent - создание маппинга через recursive
+                // SAFETY: parent валиден (см. ensure_next caller), idx в пределах 0..512;
+                // запись Table-entry создаёт маппинг для свежевыделенной страницы.
                 unsafe { (*parent).set(idx, Entry::<PL, Table>::new(child_pa, self.table_flags)) };
 
-                // Теперь получаем указатель и инициализируем таблицу
+                // SAFETY: child_pa только что выделен alloc-ом и связан с parent[idx],
+                // alloc.table_ptr выдаёт корректный VA для последующей инициализации.
                 let child = unsafe { self.alloc.table_ptr::<CL>(child_pa, target_va) };
+                // SAFETY: child указывает на свежевыделенную страницу, эксклюзивно владеемую mapper-ом
+                // до конца этой функции; запись пустой PageTable инициализирует все 512 entries в Invalid.
                 unsafe { child.write(PageTable::new()) };
 
                 Ok(child)

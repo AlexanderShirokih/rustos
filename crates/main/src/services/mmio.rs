@@ -21,6 +21,8 @@ pub struct MmioServiceImpl {
 // SAFETY: Runtime memory mapper используется как глобальный сервис и должен быть
 // безопасен для конкурентного доступа в рамках ядра.
 unsafe impl Send for MmioServiceImpl {}
+// SAFETY: см. impl Send - глобальный mapper защищён внутренней синхронизацией,
+// `linear_offset` неизменяемое значение, `&self`-API не имеет интероп. состояния.
 unsafe impl Sync for MmioServiceImpl {}
 
 impl MmioService for MmioServiceImpl {

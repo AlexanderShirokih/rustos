@@ -38,6 +38,7 @@ impl MairEntry {
 }
 
 /// Скомбинированные биты MAIR.
+#[derive(Debug, Clone, Copy)]
 pub struct MairBits(u64);
 
 impl MairBits {
@@ -53,13 +54,7 @@ pub struct MemoryAttributeIndirectionRegister<EL> {
 }
 
 impl MemoryAttributeIndirectionRegister<EL1> {
-    pub const fn new() -> Self {
-        Self {
-            _phantom: core::marker::PhantomData,
-        }
-    }
-
-    pub fn set(&self, value: MairBits) {
+    pub fn set(value: MairBits) {
         // SAFETY: Запись в MAIR_EL1 допустима на EL1 до включения MMU.
         // Атрибуты памяти формируются из типобезопасных констант MairEntry.
         unsafe { write_sysreg!(mair_el1, value.0) };

@@ -9,7 +9,13 @@ use drivers_common::services::{
 };
 use klog::debug;
 
-use super::regs::*;
+use super::regs::{
+    GICD_CTLR, GICD_CTLR_ARE_NS, GICD_CTLR_ENABLE_GRP1NS, GICD_CTLR_RWP, GICD_ICENABLER,
+    GICD_ICFGR, GICD_ICPENDR, GICD_IGROUPR, GICD_IGRPMODR, GICD_IPRIORITYR, GICD_IROUTER,
+    GICD_ISENABLER, GICD_TYPER, GICR_ICENABLER0, GICR_ICFGR0, GICR_ICFGR1, GICR_IGROUPR0,
+    GICR_IGRPMODR0, GICR_IPRIORITYR, GICR_ISENABLER0, GICR_WAKER, GICR_WAKER_CHILDREN_ASLEEP,
+    GICR_WAKER_PROCESSOR_SLEEP, ITLinesNumber, IrqType, PRIORITY_MASK_ALL, bit_offset,
+};
 use crate::{read_sysreg, write_sysreg};
 
 /// Runtime-объект контроллера прерываний GICv3, публикуемый через capability.
@@ -44,18 +50,18 @@ impl Gicv3Controller {
         debug!("  GICD @ {}", self.distributor.base());
         debug!("  GICR @ {}", self.redistributor.base());
 
-        self.enable_sre();
+        Self::enable_sre();
         self.init_distributor();
         self.wakeup_redistributor();
         self.init_redistributor_sgi_ppi();
         self.configure_cpu_interface();
     }
 
-    pub(super) fn enable_global(&self) {
+    pub(super) fn enable_global() {
         Self::clear_irq_mask();
     }
 
-    pub(super) fn disable_global(&self) {
+    pub(super) fn disable_global() {
         Self::set_irq_mask();
     }
 
@@ -97,7 +103,7 @@ impl Gicv3Controller {
                 let mut val: u32 = self.redistributor.read_reg(reg_desc);
                 let shift = bit * 8;
                 val &= !(0xFF << shift);
-                val |= (priority.raw() as u32) << shift;
+                val |= u32::from(priority.raw()) << shift;
                 self.redistributor.write_reg(reg_desc, val);
             }
             IrqType::Spi => {
@@ -106,7 +112,7 @@ impl Gicv3Controller {
                 let mut val: u32 = self.distributor.read_reg(reg_desc);
                 let shift = bit * 8;
                 val &= !(0xFF << shift);
-                val |= (priority.raw() as u32) << shift;
+                val |= u32::from(priority.raw()) << shift;
                 self.distributor.write_reg(reg_desc, val);
             }
             IrqType::Spurious => {}
@@ -129,7 +135,7 @@ impl Gicv3Controller {
             1u64 << 31
         } else {
             // Специфическая маршрутизация: Aff0 = индекс CPU
-            target.raw().trailing_zeros() as u64
+            u64::from(target.raw().trailing_zeros())
         };
 
         self.distributor
@@ -137,7 +143,7 @@ impl Gicv3Controller {
     }
 
     pub(super) fn dispatch_interrupt(&mut self) {
-        let Some(irq) = self.acknowledge() else {
+        let Some(irq) = Self::acknowledge() else {
             return;
         };
 
@@ -145,12 +151,12 @@ impl Gicv3Controller {
             handler.handle();
         }
 
-        self.end_of_interrupt(irq);
+        Self::end_of_interrupt(irq);
     }
 
     // --- Приватные методы инициализации ---
 
-    fn enable_sre(&self) {
+    fn enable_sre() {
         // SAFETY: Запись в ICC_SRE_EL1 включает доступ к системным регистрам GIC CPU Interface.
         // Бит SRE=1 необходим для работы ICC_IAR1_EL1, ICC_EOIR1_EL1 и других ICC_* регистров.
         // ISB гарантирует видимость изменения до следующих инструкций.
@@ -186,13 +192,13 @@ impl Gicv3Controller {
 
         // Установить наинизший приоритет для всех SPI (4 IRQ на регистр, начиная с IRQ 32)
         let spi_count = (self.interrupt_lines * 32).saturating_sub(32);
-        for i in 0..(spi_count + 3) / 4 {
+        for i in 0..spi_count.div_ceil(4) {
             self.distributor
                 .write_reg(GICD_IPRIORITYR.with_offset((8 + i) * 4), 0xFFFF_FFFFu32);
         }
 
         // Level-sensitive конфигурация для всех SPI (2 бита на IRQ, банки 2+)
-        for i in 0..(spi_count + 15) / 16 {
+        for i in 0..spi_count.div_ceil(16) {
             self.distributor
                 .write_reg(GICD_ICFGR.with_offset((2 + i) * 4), 0u32);
         }
@@ -270,7 +276,7 @@ impl Gicv3Controller {
         (it_lines + 1) as usize
     }
 
-    fn acknowledge(&self) -> Option<IrqNumber> {
+    fn acknowledge() -> Option<IrqNumber> {
         // SAFETY: Чтение ICC_IAR1_EL1 возвращает INTID текущего pending прерывания группы 1
         // и переводит его в active-состояние. Побочный эффект допустим - это штатная операция.
         let raw = (unsafe { read_sysreg!(icc_iar1_el1) } & 0x3FF) as u16;
@@ -281,10 +287,10 @@ impl Gicv3Controller {
         }
     }
 
-    fn end_of_interrupt(&self, irq: IrqNumber) {
+    fn end_of_interrupt(irq: IrqNumber) {
         // SAFETY: Запись INTID в ICC_EOIR1_EL1 переводит прерывание из active в inactive,
         // сигнализируя GIC об окончании обработки прерывания группы 1.
-        unsafe { write_sysreg!(icc_eoir1_el1, irq.raw() as u64) };
+        unsafe { write_sysreg!(icc_eoir1_el1, u64::from(irq.raw())) };
     }
 
     fn set_irq_mask() {

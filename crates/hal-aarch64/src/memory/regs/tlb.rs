@@ -11,22 +11,18 @@ pub struct TranslationLookasideBuffer<EL> {
 }
 
 impl TranslationLookasideBuffer<EL1> {
-    pub const fn new() -> Self {
-        Self {
-            _phantom: core::marker::PhantomData,
-        }
-    }
-
     /// Инвалидирует все записи TLB.
-    pub fn invalidate(&self) {
+    pub fn invalidate() {
+        // SAFETY: `dsb`/`tlbi vmalle1`/`isb` - стандартная последовательность инвалидации TLB
+        // на EL1, не имеет операндов, не модифицирует регистры (preserves_flags) и память.
         unsafe {
             asm!(
                 "dsb ishst",    // Ожидание записи page tables
                 "tlbi vmalle1", // Инвалидация TLB
                 "dsb ish",      // Ожидание завершения tlbi
                 "isb",          // Синхронизация pipeline
-                options(nostack, preserves_flags)
-            )
-        };
+                options(nostack, preserves_flags),
+            );
+        }
     }
 }

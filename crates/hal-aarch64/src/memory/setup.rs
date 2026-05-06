@@ -48,8 +48,9 @@ pub(crate) fn build_memory_layout(dt: &DeviceTree) -> Result<MemoryLayout, Memor
         KernelRoData::flags(),
     ));
 
+    // SAFETY: символы `_text_start`/`_text_end`/`_rodata_*`/`_rw_*` определены линкером и
+    // указывают на границы соответствующих секций ядра - взятие `&` от них корректно.
     unsafe {
-        // Kernel секции
         layout.add(MemoryRegion::new_raw(
             RegionTag::Kernel,
             &_text_start,

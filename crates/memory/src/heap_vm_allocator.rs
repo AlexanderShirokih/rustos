@@ -76,11 +76,14 @@ impl FreeBlock {
         let new_block_size = self.size - aligned_size - block_header_size;
 
         // Создаем новый блок в вычисленной позиции
+        // SAFETY: `self` указывает на валидный FreeBlock в куче размера `self.size + size_of::<FreeBlock>()`;
+        // `new_block_offset = block_header_size + aligned_size` строго меньше этого размера
+        // (проверено `self.size >= aligned_size + min_remaining`), значит итоговый адрес лежит
+        // внутри той же выделенной области и подходит для записи `FreeBlock`.
         let new_block_ptr = unsafe {
             let base_ptr = core::ptr::from_mut::<FreeBlock>(self) as usize;
             let new_ptr = (base_ptr + new_block_offset) as *mut FreeBlock;
 
-            // Инициализируем новый блок
             *new_ptr = FreeBlock::from_size(new_block_size);
 
             NonNull::new_unchecked(new_ptr)
@@ -140,6 +143,9 @@ impl HeapAllocator {
 
             // Создание FreeBlock для этого блока
             let block_size = block_bytes - size_of::<FreeBlock>();
+            // SAFETY: `frame` свежевыделен `frame_allocator`-ом, физическая память замаплена линейно
+            // в higher half (инвариант аллокатора), поэтому `va` указывает на эксклюзивный валидный
+            // регион размера `block_bytes >= size_of::<FreeBlock>()` для записи заголовка.
             unsafe {
                 let block_ptr = va as *mut FreeBlock;
                 *block_ptr = FreeBlock::from_size(block_size);
@@ -160,6 +166,9 @@ impl HeapAllocator {
         let mut prev: Option<NonNull<FreeBlock>> = None;
 
         while let Some(block_ptr) = current {
+            // SAFETY: `block_ptr` - элемент односвязного free-list-а, инвариант аллокатора
+            // гарантирует, что все его узлы - валидные `FreeBlock`-и, лежащие в замапленной
+            // памяти кучи и эксклюзивно принадлежащие аллокатору, пока находятся в списке.
             unsafe {
                 let block = block_ptr.as_ptr();
 
@@ -190,6 +199,9 @@ impl HeapAllocator {
 
     /// Добавляет блок в список свободных
     fn add_to_free_list(&mut self, block_ptr: NonNull<FreeBlock>) {
+        // SAFETY: caller передаёт указатель на полностью владеемый аллокатором `FreeBlock`
+        // (либо только что выделенный `expand`-ом, либо только что вытащенный из free-list-а),
+        // память замаплена и эксклюзивно доступна - read/write по нему корректны.
         unsafe {
             let mut block = block_ptr.read();
             block.next = self.free_list_head;
@@ -221,7 +233,7 @@ impl HeapAllocator {
 
         // Поиск в списке свободных блоков
         if let Some(block_ptr) = self.find_free_block(alloc_size) {
-            return Ok(self.setup_allocated_block(block_ptr, align));
+            return Ok(Self::setup_allocated_block(block_ptr, align));
         }
 
         // Не нашли - расширяем
@@ -232,14 +244,19 @@ impl HeapAllocator {
 
         // Теперь точно найдём
         if let Some(block_ptr) = self.find_free_block(alloc_size) {
-            Ok(self.setup_allocated_block(block_ptr, align))
+            Ok(Self::setup_allocated_block(block_ptr, align))
         } else {
             Err(AllocationError::OutOfMemory)
         }
     }
 
     /// Подготавливает выделенный блок: записать указатель на заголовок и вернуть выровненный указатель
-    fn setup_allocated_block(&self, block_ptr: NonNull<FreeBlock>, align: usize) -> NonNull<u8> {
+    fn setup_allocated_block(block_ptr: NonNull<FreeBlock>, align: usize) -> NonNull<u8> {
+        // SAFETY: `block_ptr` только что вытащен из free-list-а - это валидный заголовок,
+        // за которым следует `block.size` байт принадлежащей аллокатору памяти. Алгоритм
+        // `allocate` запросил блок размера `alloc_size = size + HEADER_PTR_SIZE + align - 1`,
+        // поэтому смещения `data_start + HEADER_PTR_SIZE`, `aligned_user_addr` и
+        // `user_ptr - HEADER_PTR_SIZE` гарантированно лежат внутри этого блока.
         unsafe {
             // Начало области данных (после заголовка)
             let data_start = block_ptr.as_ptr().cast::<u8>().add(size_of::<FreeBlock>());
@@ -250,9 +267,14 @@ impl HeapAllocator {
             let aligned_user_addr = align_up(min_user_addr, align);
             let user_ptr = aligned_user_addr as *mut u8;
 
-            // Записываем указатель на заголовок непосредственно перед пользовательскими данными
-            let header_ptr_location = user_ptr.cast::<*mut FreeBlock>().sub(1);
-            *header_ptr_location = block_ptr.as_ptr();
+            // данными. Используем побайтовое копирование, чтобы не делать cast `*mut u8`
+            // в более строго выровненный указатель.
+            let header_ptr_value: *mut FreeBlock = block_ptr.as_ptr();
+            core::ptr::copy_nonoverlapping(
+                core::ptr::from_ref(&header_ptr_value).cast::<u8>(),
+                user_ptr.sub(HEADER_PTR_SIZE),
+                HEADER_PTR_SIZE,
+            );
 
             NonNull::new_unchecked(user_ptr)
         }
@@ -268,15 +290,29 @@ impl HeapAllocator {
             return;
         }
 
+        // SAFETY: `ptr` лежит в higher-half-области кучи (проверено выше через
+        // `addr >= self.higher_half_base`); в `setup_allocated_block` непосредственно перед
+        // `ptr` записаны байты `*mut FreeBlock`, поэтому чтение/запись `HEADER_PTR_SIZE` байт
+        // по `ptr - HEADER_PTR_SIZE` корректно. Используем побайтовое копирование, чтобы
+        // не делать cast `*mut u8` в более строго выровненный указатель.
         unsafe {
-            // Читаем указатель на заголовок блока, хранящийся перед пользовательскими данными
-            // SAFETY: указатель находится в higher half, гарантирующей валидную mapped-память
-            let header_ptr_location = ptr.as_ptr().cast::<*mut FreeBlock>().sub(1);
-            let block_ptr = *header_ptr_location;
+            let header_addr = ptr.as_ptr().sub(HEADER_PTR_SIZE);
+
+            let mut block_ptr: *mut FreeBlock = core::ptr::null_mut();
+            core::ptr::copy_nonoverlapping(
+                header_addr,
+                core::ptr::from_mut(&mut block_ptr).cast::<u8>(),
+                HEADER_PTR_SIZE,
+            );
 
             if let Some(block) = NonNull::new(block_ptr) {
                 // Обнуление указателя на заголовок для защиты от double-free
-                *header_ptr_location = core::ptr::null_mut();
+                let zero: *mut FreeBlock = core::ptr::null_mut();
+                core::ptr::copy_nonoverlapping(
+                    core::ptr::from_ref(&zero).cast::<u8>(),
+                    header_addr,
+                    HEADER_PTR_SIZE,
+                );
 
                 self.add_to_free_list(block);
             }

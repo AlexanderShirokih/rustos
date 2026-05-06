@@ -133,13 +133,13 @@ impl Driver for UartDmDriver {
                 Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
             )
             .map_err(|e: drivers_common::services::mmio::MmioMapError| {
-                DriverRunError::Fatal(alloc::format!("{}", e))
+                DriverRunError::Fatal(alloc::format!("{e}"))
             })?;
 
         let uart = UartDm::new(bound);
 
         caps.provide_service::<dyn ConsoleService>(Arc::new(uart))
-            .map_err(|e| DriverRunError::Fatal(alloc::format!("{}", e)))
+            .map_err(|e| DriverRunError::Fatal(alloc::format!("{e}")))
     }
 }
 

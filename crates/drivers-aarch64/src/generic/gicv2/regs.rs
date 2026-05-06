@@ -3,7 +3,7 @@
 use drivers_common::services::interrupts::IrqNumber;
 use io::mmio::Reg;
 
-/// Регистры Distributor interface
+// Регистры Distributor interface
 
 /// Control Register - включение distributor.
 pub(super) const GICD_CTLR: Reg<u32> = Reg::new(0x000);
@@ -22,7 +22,7 @@ pub(super) const GICD_ITARGETSR: Reg<u32> = Reg::new(0x800);
 /// Interrupt Configuration Registers.
 pub(super) const GICD_ICFGR: Reg<u32> = Reg::new(0xC00);
 
-/// Регистры CPU Interface
+// Регистры CPU Interface
 
 /// CPU Interface Control Register - включение CPU interface.
 pub(super) const GICC_CTLR: Reg<u32> = Reg::new(0x000);

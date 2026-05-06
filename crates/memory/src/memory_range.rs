@@ -49,6 +49,15 @@ impl MemoryRange<PageAlignedAddress> {
     }
 }
 
+impl IntoIterator for &MemoryRange<PageAlignedAddress> {
+    type Item = PageAlignedAddress;
+    type IntoIter = MemoryRangeIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// Итератор по выровненным адресам в диапазоне.
 pub struct MemoryRangeIter {
     /// Текущий адрес итерации.

@@ -116,43 +116,43 @@ where
             let mut virt = source_address.as_virtual();
             let mut phys = target_address.as_physical_address();
 
-            let size_1g = 1usize << L1::SHIFT;
-            let size_2m = 1usize << L2::SHIFT;
-            let size_4k = 1usize << L3::SHIFT;
+            let l1_block = 1usize << L1::SHIFT;
+            let l2_block = 1usize << L2::SHIFT;
+            let l3_page = 1usize << L3::SHIFT;
 
             while remaining != 0 {
-                if remaining >= size_1g
+                if remaining >= l1_block
                     && let (Some(v1g), Some(p1g)) = (
                         AlignedVirtualAddress::<{ L1::SHIFT }>::new(virt),
                         AlignedPhysicalAddress::<{ L1::SHIFT }>::new(phys),
                     )
                 {
                     map_contiguous_inner::<FA, { L1::SHIFT }, _>(mapper, v1g, p1g, mem_flags)?;
-                    virt = virt.offset(size_1g);
-                    phys = phys.add(size_1g);
-                    remaining -= size_1g;
+                    virt = virt.offset(l1_block);
+                    phys = phys.add(l1_block);
+                    remaining -= l1_block;
                     continue;
                 }
 
-                if remaining >= size_2m
+                if remaining >= l2_block
                     && let (Some(v2m), Some(p2m)) = (
                         AlignedVirtualAddress::<{ L2::SHIFT }>::new(virt),
                         AlignedPhysicalAddress::<{ L2::SHIFT }>::new(phys),
                     )
                 {
                     map_contiguous_inner::<FA, { L2::SHIFT }, _>(mapper, v2m, p2m, mem_flags)?;
-                    virt = virt.offset(size_2m);
-                    phys = phys.add(size_2m);
-                    remaining -= size_2m;
+                    virt = virt.offset(l2_block);
+                    phys = phys.add(l2_block);
+                    remaining -= l2_block;
                     continue;
                 }
 
                 let v4k = PageAlignedVirtualAddress::new_unchecked(virt);
                 let p4k = PageAlignedAddress::new_unchecked(phys);
                 map_contiguous_inner::<FA, { L3::SHIFT }, _>(mapper, v4k, p4k, mem_flags)?;
-                virt = virt.offset(size_4k);
-                phys = phys.add(size_4k);
-                remaining -= size_4k;
+                virt = virt.offset(l3_page);
+                phys = phys.add(l3_page);
+                remaining -= l3_page;
             }
 
             Ok(())

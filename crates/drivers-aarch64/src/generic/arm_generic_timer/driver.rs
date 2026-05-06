@@ -49,7 +49,7 @@ impl ArmGenericTimerDriver {
     fn map_irq_registration_error(
         err: drivers_common::services::interrupts::IrqRegistrationError,
     ) -> DriverRunError {
-        DriverRunError::Fatal(format!("failed to bind generic timer IRQ: {:?}", err))
+        DriverRunError::Fatal(format!("failed to bind generic timer IRQ: {err:?}"))
     }
 }
 
@@ -148,7 +148,7 @@ fn gic_specifier_to_irq(interrupt_type: u32, interrupt_number: u32) -> Option<Ir
         _ => return None,
     };
 
-    if irq_raw > u16::MAX as u32 {
+    if irq_raw > u32::from(u16::MAX) {
         return None;
     }
 

@@ -26,6 +26,7 @@ use crate::memory::{
     layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},
     memory_mapper::{Aarch64MemoryMapper, FrameTableAlloc},
     mmu::{Mmu, NormalDualSpaceConfig},
+    regs::common::EL1,
 };
 
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
@@ -87,19 +88,19 @@ impl MemorySetup<Early> {
     pub fn create(layout: MemoryLayout) -> Result<MemorySetup<Early>, MemorySetupError> {
         let free_regions = layout
             .free_heap_regions()
-            .map_err(|_| MemorySetupError::OutOfMemory)?;
+            .map_err(|()| MemorySetupError::OutOfMemory)?;
 
         // Находим самую большую свободную область
         let largest =
-            Self::get_largest_region(&free_regions).map_err(|_| MemorySetupError::OutOfMemory)?;
+            Self::get_largest_region(&free_regions).map_err(|()| MemorySetupError::OutOfMemory)?;
 
         let bump_allocator = Self::create_bump_allocator(*largest);
 
         Ok(Self {
             state: Early {
-                layout,
                 bump_allocator,
                 free_regions,
+                layout,
             },
         })
     }
@@ -191,7 +192,7 @@ impl MemorySetup<Installed> {
             )
         });
 
-        let non_heap_regions = layout.iter().filter(|r| !r.is_heap()).cloned();
+        let non_heap_regions = layout.iter().filter(|r| !r.is_heap()).copied();
 
         let mut all_regions: StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS> =
             StaticVec::new();
@@ -235,15 +236,15 @@ impl MemorySetup<Prepared> {
         Self::linear_map_impl(frame_allocator, &roots, &all_regions, higher_half_base)?;
 
         // Включение Memory Management Unit (MMU)
-        Mmu::new().enable(NormalDualSpaceConfig::new(
+        Mmu::<EL1>::enable(&NormalDualSpaceConfig::new(
             roots.lower_pa.as_physical_address(),
             roots.higher_pa.as_physical_address(),
         ));
 
         Ok(MemorySetup::<Enabled> {
             state: Enabled {
-                frame_allocator,
                 roots,
+                frame_allocator,
             },
         })
     }
@@ -267,21 +268,21 @@ impl MemorySetup<Prepared> {
         let identity_regions = all_regions
             .iter()
             .filter(|region| !region.is_heap())
-            .cloned();
+            .copied();
 
         Self::map_identity_impl(&lower_half_mapper, identity_regions)?;
 
         Ok(())
     }
 
-    fn map_higher_half_impl<'a, FA: FrameAllocator>(
-        mapper: &NoLockAarch64MemoryMapper<'a, FA>,
+    fn map_higher_half_impl<FA: FrameAllocator>(
+        mapper: &NoLockAarch64MemoryMapper<'_, FA>,
         all_regions: &StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
         higher_half_base: PageAlignedVirtualAddress,
     ) -> Result<(), MemorySetupError> {
         let higher_half_base_usize = higher_half_base.as_usize();
 
-        for region in all_regions.iter() {
+        for region in all_regions {
             let va = region.virtual_start(higher_half_base_usize);
             mapper
                 .map_exact_impl(va, region.start, region.size(), region.flags)
@@ -314,7 +315,7 @@ impl MemorySetup<Enabled> {
         higher_root_pa: PageAlignedAddress,
         frame_allocator_phys: PhysicalAddress,
         higher_half_base: PageAlignedVirtualAddress,
-    ) -> Result<MemoryManagerResult, ()> {
+    ) -> MemoryManagerResult {
         // Аллокатор фреймов находится по физическому адресу (был Box::leak в bump-памяти).
         let fa_virt: &'static FrameAllocatorImpl =
             // SAFETY: PA + higher_half_base - корректный виртуальный адрес,
@@ -334,6 +335,8 @@ impl MemorySetup<Enabled> {
 
         let higher_ptr_phys =
             PageAlignedVirtualAddress::identity(higher_root_pa).as_ptr::<PageTable<L0>>();
+        // SAFETY: `higher_ptr_phys` - валидный указатель на PageTable<L0> в higher-half identity-region;
+        // сдвиг на `higher_half_base` корректен (страница принадлежит замапленному региону).
         let higher_ptr_rel = unsafe { higher_ptr_phys.byte_add(higher_half_base.as_usize()) };
         let memory_mapper: Aarch64MemoryMapper<'_, _, MutexPageMapper<'_, _>> =
             Aarch64MemoryMapper::new_with_offset(
@@ -345,12 +348,12 @@ impl MemorySetup<Enabled> {
 
         let memory_mapper = Box::new(memory_mapper);
 
-        Mmu::new().disable_lower_half();
+        Mmu::<EL1>::disable_lower_half();
 
-        Ok(MemoryManagerResult {
+        MemoryManagerResult {
             memory_mapper,
             base_offset: higher_half_base,
-        })
+        }
     }
 }
 
@@ -359,9 +362,11 @@ impl<Any> MemorySetup<Any> {
         let va = PageAlignedVirtualAddress::identity(root);
         let ptr = va.as_ptr::<PageTable<L0>>();
 
+        // SAFETY: `root` - свежевыделенный фрейм, доступный через identity-mapping pre-MMU,
+        // эксклюзивно принадлежит вызывающему; запись пустой PageTable инициализирует все entries в Invalid.
         unsafe {
             *ptr = PageTable::new();
-        };
+        }
 
         ptr
     }

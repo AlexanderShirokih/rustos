@@ -20,9 +20,10 @@ impl IrqBridge {
 
     pub fn install(&self, service: Arc<dyn InterruptsService>) {
         // Повторная установка означает некорректный порядок инициализации.
-        if self.service.get().is_some() {
-            panic!("InterruptsService is already installed in IRQ bridge");
-        }
+        assert!(
+            self.service.get().is_none(),
+            "InterruptsService is already installed in IRQ bridge"
+        );
 
         let _ = self.service.call_once(|| service);
     }

@@ -137,7 +137,7 @@ fn boot_main(dtb_phys: usize) -> Result<(), ()> {
         ..
     } = enabled.state;
     let higher_root_pa = roots.higher_pa.as_usize();
-    let frame_allocator_phys = frame_allocator as *const _ as usize;
+    let frame_allocator_phys = core::ptr::from_ref(frame_allocator) as usize;
 
     // Прыжок в higher half - управление передаётся в primary_main и не возвращается
     // SAFETY: MMU включён, TTBR1 содержит корректный маппинг higher-half.

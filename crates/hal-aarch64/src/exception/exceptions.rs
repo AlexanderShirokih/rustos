@@ -124,6 +124,9 @@ impl ExceptionVectors {
         unsafe extern "C" {
             static exception_vectors: ExceptionVectors;
         }
+        // SAFETY: `exception_vectors` определён в ассемблерном `vectors.S` и линкер размещает
+        // его в .text вместе с ядром; символ существует в течение всей жизни ядра, так что
+        // ссылка `&'static` корректна.
         unsafe { &exception_vectors }
     }
 
@@ -132,7 +135,7 @@ impl ExceptionVectors {
         // SAFETY: Прерывания замаскированы (DAIF). Адрес таблицы векторов
         // выровнен на 2KB (требование ARMv8) - обеспечивается repr(align(2048)).
         unsafe {
-            write_sysreg!(vbar_el1, self as *const Self as usize);
+            write_sysreg!(vbar_el1, core::ptr::from_ref::<Self>(self) as usize);
             asm!("isb", options(nomem, nostack, preserves_flags));
         }
     }
@@ -161,7 +164,7 @@ fn sync_handler(frame: &ExceptionFrame) {
         frame.esr.raw() >> 26,
         ec.description()
     );
-    let _ = writeln!(buf, "  ISS:  {:#010x}", iss);
+    let _ = writeln!(buf, "  ISS:  {iss:#010x}");
     write_frame(&mut buf, frame);
 
     panic!("{}", buf);
@@ -187,7 +190,7 @@ fn serror_handler(frame: &ExceptionFrame) {
 
     let mut buf = StaticString::<EXCEPTION_BUF_SIZE>::new();
     let _ = writeln!(buf, "SError (asynchronous hardware error)");
-    let _ = writeln!(buf, "  ISS:  {:#010x}", iss);
+    let _ = writeln!(buf, "  ISS:  {iss:#010x}");
     write_frame(&mut buf, frame);
 
     panic!("{}", buf);

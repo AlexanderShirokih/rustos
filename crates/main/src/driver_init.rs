@@ -49,7 +49,7 @@ pub fn run_retry_passes(
         let mut pending_next = Vec::new();
         let mut unresolved_entries = Vec::new();
 
-        for mut pending_driver in pending.into_iter() {
+        for mut pending_driver in pending {
             match pending_driver.driver.run(caps) {
                 Ok(()) => {
                     progress = true;

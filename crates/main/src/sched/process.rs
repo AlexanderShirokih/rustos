@@ -105,7 +105,7 @@ impl ProcessTable {
             .checked_add(1)
             .ok_or(ProcessTableError::OutOfIds)?;
 
-        if let Some(index) = self.slots.iter().position(|slot| slot.is_none()) {
+        if let Some(index) = self.slots.iter().position(Option::is_none) {
             self.slots[index] = Some(Process::new(id, name, address_space));
             return Ok(id);
         }

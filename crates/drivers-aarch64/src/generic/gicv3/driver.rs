@@ -95,15 +95,18 @@ impl DriverFactory for Gicv3Factory {
 pub fn gicv3_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
     require_compatible(context.node(), &["arm,gic-v3"])?;
 
-    let gicd = context
+    let distributor = context
         .get_mmio_address(0)
         .ok_or(ProbeError::MissingProperty("GICD base address"))?;
 
-    let gicr = context
+    let redistributor = context
         .get_mmio_address(1)
         .ok_or(ProbeError::MissingProperty("GICR base address"))?;
 
-    Ok(Box::new(Gicv3Factory { gicd, gicr }))
+    Ok(Box::new(Gicv3Factory {
+        gicd: distributor,
+        gicr: redistributor,
+    }))
 }
 
 register_driver!(GIC_V3_DRIVER, probe = gicv3_probe);

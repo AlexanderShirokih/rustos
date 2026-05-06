@@ -28,6 +28,8 @@ pub const HIGHER_HALF_BASE: usize = 0xFFFF_FF80_0000_0000;
 #[cfg(all(not(test), not(feature = "qemu-tests")))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    // SAFETY: `wfi` без операндов; вызов помещён в panic-handler - однопоточный
+    // контекст, regular-инвариантов памяти не нарушает (nomem, nostack).
     unsafe {
         klog::fatal!("Kernel panic: {}", info);
 

@@ -62,7 +62,7 @@ impl ByteSink for UartPl011 {
             return Err(Pending);
         }
 
-        self.mmio.write_reg(DR, b as u32);
+        self.mmio.write_reg(DR, u32::from(b));
         Ok(())
     }
 
@@ -84,7 +84,7 @@ impl ByteSink for UartPl011 {
                 }
             }
 
-            self.mmio.write_reg(DR, byte as u32);
+            self.mmio.write_reg(DR, u32::from(byte));
             consumed = crlf.consumed();
         }
 
@@ -132,14 +132,14 @@ impl Driver for UartPl011Driver {
                 Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
             )
             .map_err(|e: drivers_common::services::mmio::MmioMapError| {
-                DriverRunError::Fatal(alloc::format!("{}", e))
+                DriverRunError::Fatal(alloc::format!("{e}"))
             })?;
 
         let uart = UartPl011::new(bound);
         uart.mmio.write_reg(CR, CR_UARTEN | CR_TXE | CR_RXE);
 
         caps.provide_service::<dyn ConsoleService>(Arc::new(uart))
-            .map_err(|e| DriverRunError::Fatal(alloc::format!("{}", e)))
+            .map_err(|e| DriverRunError::Fatal(alloc::format!("{e}")))
     }
 }
 

@@ -67,9 +67,7 @@ static RUNTIME: Once<Arc<dyn KernelRuntime>> = Once::new();
 /// после bootstrap-а scheduler-а; повторная установка - bug в порядке
 /// инициализации, `panic`.
 pub fn install_runtime(rt: Arc<dyn KernelRuntime>) {
-    if RUNTIME.get().is_some() {
-        panic!("KernelRuntime уже установлен");
-    }
+    assert!(RUNTIME.get().is_none(), "KernelRuntime уже установлен");
     let _ = RUNTIME.call_once(|| rt);
 }
 

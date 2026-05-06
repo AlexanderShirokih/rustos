@@ -37,10 +37,6 @@ cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude
 timeout 10 qemu-system-aarch64 ...
 ```
 
-### `Cargo.lock` в `.gitignore`
-
-Зависимости разрешаются заново при каждой сборке. Это сделано намеренно — проект является ядром, а не библиотекой.
-
 ## Спецификации устройств
 
 Конфигурации хранятся в `devices/spec/*.yaml`:

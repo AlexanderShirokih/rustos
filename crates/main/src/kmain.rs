@@ -121,7 +121,7 @@ fn run_all_drivers(kernel: &mut KernelContext, pending: Vec<PendingDriver>) {
         }
 
         Err(InitSchedulerError::Unresolved { entries }) => {
-            panic!("Unresolved driver dependencies: {:?}", entries);
+            panic!("Unresolved driver dependencies: {entries:?}");
         }
     }
 }
@@ -129,7 +129,7 @@ fn run_all_drivers(kernel: &mut KernelContext, pending: Vec<PendingDriver>) {
 fn bind_console(kernel: &mut KernelContext, buffered: &BufferedWriter) {
     kernel.with_runtime_state(|caps, _| {
         if let Ok(console) = caps.require_service::<dyn ConsoleService>() {
-            buffered.attach(console as Arc<dyn io::writer::Writer + Send + Sync>);
+            buffered.attach(&(console as Arc<dyn io::writer::Writer + Send + Sync>));
         }
     });
 }
@@ -160,19 +160,19 @@ fn spawn_init_process<A>(
     scheduler
         .spawn(
             SpawnConfig::new("init").priority(Priority::highest()),
-            move || spawn_demo_processes(scheduler_service),
+            move || spawn_demo_processes(&scheduler_service),
         )
         .expect("init process spawn must succeed");
 }
 
 #[cfg(not(feature = "qemu-tests"))]
-fn spawn_demo_processes(scheduler_service: Arc<dyn SchedulerService>) {
+fn spawn_demo_processes(scheduler_service: &Arc<dyn SchedulerService>) {
     use crate::timer_server::{pilot_client_subscribe, pilot_tick, spawn_timer_server};
 
     // TODO(kobject-migration): после миграции остальных сервисов на Timer KO
     // удалить ветку `legacy` и `dyn TimerService`.
     let client_end =
-        spawn_timer_server(scheduler_service.clone()).expect("timer-server spawn must succeed");
+        spawn_timer_server(scheduler_service).expect("timer-server spawn must succeed");
 
     scheduler_service
         .spawn(

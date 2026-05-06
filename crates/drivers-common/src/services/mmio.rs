@@ -50,6 +50,9 @@ pub struct MmioBound {
     cleanup: Option<Box<CleanupCallback>>,
 }
 
+// SAFETY: MMIO-доступы выполняются через `read_volatile`/`write_volatile` и потокобезопасны
+// на уровне устройства; единственное не-`Sync`-поле - `Box<dyn FnOnce>` cleanup-колбэк,
+// он используется только из `Drop` (эксклюзивный `&mut self`), поэтому гонок нет.
 unsafe impl Sync for MmioBound {}
 
 impl MmioBound {
@@ -70,6 +73,9 @@ impl MmioBound {
     }
 
     pub fn write<T>(&self, offset: usize, val: T) {
+        // SAFETY: `MmioBound` владеет замапленным `[virtual_address; mmio_address.size]`-регионом
+        // (инвариант `MmioService::map_mmio`); caller передаёт `offset < size` и тип `T`
+        // соответствующий регистру, `write_volatile` корректен для MMIO.
         unsafe {
             let ptr: *mut T = self.virtual_address.as_ptr::<T>().byte_add(offset);
             ptr.write_volatile(val);
@@ -81,6 +87,8 @@ impl MmioBound {
     }
 
     pub fn read<T>(&self, offset: usize) -> T {
+        // SAFETY: см. `write` - регион замаплен и принадлежит этому `MmioBound`,
+        // тип `T` соответствует регистру, `read_volatile` корректен для MMIO.
         unsafe {
             let ptr = self.virtual_address.as_ptr::<T>().byte_add(offset);
             ptr.read_volatile()

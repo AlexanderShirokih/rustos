@@ -8,7 +8,11 @@ use drivers_common::services::{
 };
 use klog::debug;
 
-use super::regs::*;
+use super::regs::{
+    GICC_BPR, GICC_CTLR, GICC_EOIR, GICC_IAR, GICC_PMR, GICD_CTLR, GICD_ICENABLER, GICD_ICFGR,
+    GICD_ICPENDR, GICD_IPRIORITYR, GICD_ISENABLER, GICD_ITARGETSR, GICD_TYPER, ITLinesNumber,
+    IrqType, PRIORITY_MASK_ALL, bit_offset,
+};
 
 /// Runtime-объект контроллера прерываний GICv2, публикуемый через capability.
 pub(super) struct Gicv2Controller {
@@ -43,11 +47,11 @@ impl Gicv2Controller {
         self.init_cpu_interface();
     }
 
-    pub(super) fn enable_global(&self) {
-        Self::clear_irq_mask()
+    pub(super) fn enable_global() {
+        Self::clear_irq_mask();
     }
 
-    pub(super) fn disable_global(&self) {
+    pub(super) fn disable_global() {
         Self::set_irq_mask();
 
         // self.cpu_interface.write_reg(GICC_CTLR, 0);
@@ -140,7 +144,7 @@ impl Gicv2Controller {
         // Очищаем старое значение и устанавливаем новое
         let bit_shift = bit * 8;
         val &= !(0xFF << bit_shift);
-        val |= (priority.raw() as u32) << bit_shift;
+        val |= u32::from(priority.raw()) << bit_shift;
 
         self.distributor.write_reg(priority_reg, val);
     }
@@ -158,7 +162,7 @@ impl Gicv2Controller {
         // Очищаем старое значение и устанавливаем новое
         let bit_shift = bit * 8;
         val &= !(0xFF << bit_shift);
-        val |= (target.raw() as u32) << bit_shift;
+        val |= u32::from(target.raw()) << bit_shift;
 
         self.distributor.write_reg(target_cpu_reg, val);
     }
@@ -185,6 +189,7 @@ impl Gicv2Controller {
     }
 
     fn end_of_interrupt(&self, irq: IrqNumber) {
-        self.cpu_interface.write_reg(GICC_EOIR, irq.raw() as u32);
+        self.cpu_interface
+            .write_reg(GICC_EOIR, u32::from(irq.raw()));
     }
 }

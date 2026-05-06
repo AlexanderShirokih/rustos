@@ -3,7 +3,7 @@
 use drivers_common::services::interrupts::IrqNumber;
 use io::mmio::Reg;
 
-/// Регистры Distributor (GICD)
+// Регистры Distributor (GICD)
 
 /// Control Register - включение дистрибьютора (EnableGrp1NS, ARE_NS).
 pub(super) const GICD_CTLR: Reg<u32> = Reg::new(0x000);
@@ -34,11 +34,11 @@ pub(super) const GICD_CTLR_ARE_NS: u32 = 1 << 5;
 /// Register Write Pending - бит 31, сигнализирует о незавершённой записи GICD_CTLR.
 pub(super) const GICD_CTLR_RWP: u32 = 1 << 31;
 
-/// Регистры Redistributor (GICR)
-///
-/// Каждый Redistributor содержит два фрейма по 64 KB:
-/// - RD_base (смещение 0x00000): общие регистры
-/// - SGI_base (смещение 0x10000): регистры для SGI/PPI
+// Регистры Redistributor (GICR)
+//
+// Каждый Redistributor содержит два фрейма по 64 KB:
+//   RD_base (смещение 0x00000): общие регистры
+//   SGI_base (смещение 0x10000): регистры для SGI/PPI
 
 /// RD_base: Waker Register - управление переходом в сон/пробуждение.
 pub(super) const GICR_WAKER: Reg<u32> = Reg::new(0x014);
