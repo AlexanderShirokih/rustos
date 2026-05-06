@@ -48,9 +48,14 @@ cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude
 кейсы и завершает QEMU через semihosting. Подходит для тестов
 аллокатора, многозадачности, driver-init, kobject-сценариев.
 
-Кейсы регистрируются `register_test!` в `kernel/src/qemu_tests.rs`
-(или другом модуле под `cfg(feature = "qemu-tests")`), вызывая живые
-сервисы ядра.
+Кейсы распределены по подмодулям `crates/main/src/qemu_tests/`
+(`smoke.rs`, `allocator.rs`, `channel.rs`, `event.rs`,
+`handle_table.rs`, …) и регистрируются `register_test!`. Линкер-секция
+`.tests.kernel` (`KEEP` в `crates/hal-aarch64/linker/aarch64.ld`)
+собирает их со всех модулей, поэтому новый файл достаточно объявить
+через `mod` в `qemu_tests/mod.rs` — раннер подхватит автоматически.
+Допустим и любой другой модуль под `cfg(feature = "qemu-tests")`,
+если так удобнее по логике крейта.
 
 ```bash
 cargo xtask build devices/spec/qemu-aarch64-test.yaml \
