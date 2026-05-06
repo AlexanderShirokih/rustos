@@ -1,6 +1,6 @@
 use core::num::NonZeroU32;
 
-use super::{errors::IpcError, object::KObject, koid::Koid, rights::Rights};
+use super::{errors::IpcError, koid::Koid, object::KObject, rights::Rights};
 
 /// Публичный идентификатор записи в `HandleTable`, используемый процессами для IPC.
 ///

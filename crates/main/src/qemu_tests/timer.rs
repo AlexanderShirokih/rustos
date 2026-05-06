@@ -2,10 +2,6 @@
 //! что сигнал, поднятый отдельным потоком после `sleep_ms`, корректно
 //! будит ожидающего на `TIMER_SIGNALED`.
 
-extern crate alloc;
-
-use alloc::sync::Arc;
-
 use drivers_common::services::scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
 use qemu_test_harness::register_test;
 
