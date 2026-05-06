@@ -14,8 +14,8 @@ use alloc::{
 use collections::{LockCell, MutexCell};
 
 use super::{
-    errors::IpcError, handle::Handle, kernel_object::KernelObject, koid::Koid,
-    object_type::ObjectType, wait::SignalState,
+    errors::IpcError, handle::Handle, kernel_object::KernelObject, object_type::ObjectType,
+    wait::SignalState,
 };
 
 /// Сигнал "в inbound-очереди есть хотя бы одно сообщение".
@@ -130,7 +130,6 @@ impl EndpointInner {
 
 /// Один из двух эндпоинтов канала. KO; ходит между процессами через `Handle::TRANSFER`.
 pub struct ChannelEndpoint {
-    koid: Koid,
     inner: MutexCell<EndpointInner>,
     signals: SignalState,
     peer: MutexCell<Weak<ChannelEndpoint>>,
@@ -148,13 +147,11 @@ impl ChannelEndpoint {
         };
 
         let a = Arc::new(Self {
-            koid: Koid::allocate(),
             inner: MutexCell::new(EndpointInner::with_capacity(cap)),
             signals: SignalState::new(0),
             peer: MutexCell::new(Weak::new()),
         });
         let b = Arc::new(Self {
-            koid: Koid::allocate(),
             inner: MutexCell::new(EndpointInner::with_capacity(cap)),
             signals: SignalState::new(0),
             peer: MutexCell::new(Weak::new()),
@@ -164,10 +161,6 @@ impl ChannelEndpoint {
         b.peer.with_lock(|p| *p = Arc::downgrade(&a));
 
         (a, b)
-    }
-
-    pub fn koid(&self) -> Koid {
-        self.koid
     }
 
     /// Снимок текущих сигналов (lockless).
@@ -238,10 +231,6 @@ impl ChannelEndpoint {
 }
 
 impl KernelObject for ChannelEndpoint {
-    fn koid(&self) -> Koid {
-        self.koid
-    }
-
     fn object_type(&self) -> ObjectType {
         ObjectType::Channel
     }
@@ -271,7 +260,7 @@ mod tests {
 
     use super::{
         super::{
-            handle::Handle, handle_table::HandleTable, kernel_object::KernelObject, koid::Koid,
+            handle::Handle, handle_table::HandleTable, kernel_object::KernelObject,
             object_type::ObjectType, rights::Rights, wait::MockWaker,
         },
         *,
@@ -371,8 +360,8 @@ mod tests {
     /// в `read`. Если из очереди вычитан не последний элемент, бит
     /// `READABLE` обязан остаться поднятым - иначе любой waiter,
     /// зарегистрированный сразу после успешного `read`, увидит "нет
-    /// данных" при непустой очереди и (в Phase 3) уйдёт спать поверх
-    /// уже доступного payload'а.
+    /// данных" при непустой очереди и уйдёт спать поверх уже
+    /// доступного payload'а.
     #[test]
     fn read_keeps_readable_when_queue_non_empty() {
         let (a, b) = ChannelEndpoint::create_pair(4);
@@ -595,22 +584,15 @@ mod tests {
     }
 
     /// Простейший KO для тестов трансфера.
-    struct DummyEvent {
-        koid: Koid,
-    }
+    struct DummyEvent;
 
     impl DummyEvent {
         fn new() -> Self {
-            Self {
-                koid: Koid::allocate(),
-            }
+            Self
         }
     }
 
     impl KernelObject for DummyEvent {
-        fn koid(&self) -> Koid {
-            self.koid
-        }
         fn object_type(&self) -> ObjectType {
             ObjectType::Event
         }

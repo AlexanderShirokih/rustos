@@ -1,6 +1,7 @@
 use alloc::{boxed::Box, sync::Arc};
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use collections::LockCell;
+use collections::{LockCell, MutexCell};
 use drivers_common::services::{
     scheduler::{SchedulerService, SpawnConfig, SpawnError, ThreadId},
     timer::TickHandler,
@@ -8,8 +9,9 @@ use drivers_common::services::{
 
 use super::{
     arch::{ArchContext, ArchCpu, TimerSource, with_preemption_disabled},
-    scheduler::{SchedulerInner, perform_schedule_action},
+    scheduler::{ScheduleAction, SchedulerInner, perform_schedule_action},
 };
+use crate::kobject::{HandleTable, KernelRuntime, ParkState};
 
 /// Капабилити-handle на scheduler. Регистрируется в `Capabilities` как
 /// `Arc<dyn SchedulerService>` и одновременно используется как `TickHandler`
@@ -98,5 +100,40 @@ where
         // После switch_to_next текущий поток не должен возвращаться.
         // Если выполнение вернулось - это серьёзный bug в context-switch.
         unreachable!("terminated thread resumed after scheduler switch")
+    }
+}
+
+impl<A, T> KernelRuntime for SchedulerHandle<A, T>
+where
+    A: ArchContext,
+    T: TimerSource,
+{
+    fn current_thread_id(&self) -> ThreadId {
+        self.inner.with_lock(|inner| inner.current())
+    }
+
+    fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
+        self.inner.with_lock(|inner| inner.current_handle_table())
+    }
+
+    fn block_current_until(&self, ready_flag: &AtomicU32, timeout_ns: Option<u64>) {
+        let action = with_preemption_disabled::<A::Cpu, _>(|| {
+            self.inner.with_lock(|inner| {
+                // Если waker успел отработать до того, как мы взяли
+                // scheduler-lock, не уходим в блокировку - иначе никто
+                // не разбудит нас обратно.
+                if ready_flag.load(Ordering::Acquire) != ParkState::REGISTERED {
+                    return ScheduleAction::None;
+                }
+                let now_ns = inner.now_ns();
+                inner.block_current(now_ns, timeout_ns)
+            })
+        });
+        perform_schedule_action::<A>(action);
+    }
+
+    fn unblock(&self, thread_id: ThreadId) {
+        self.inner
+            .with_lock(|inner| inner.unblock_thread(thread_id));
     }
 }

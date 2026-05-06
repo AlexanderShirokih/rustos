@@ -15,6 +15,7 @@ use super::{
     thread_table::ThreadTable,
     wait_queue::{SleepEntry, SleepQueue},
 };
+use crate::kobject::HandleTable;
 
 const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
 const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
@@ -424,6 +425,66 @@ where
         self.switch_to_next(now_ns)
     }
 
+    /// Парк current thread в KO-wait: при отсутствии `timeout_ns` -
+    /// бессрочно (`Blocked`), при наличии - до заданного абсолютного
+    /// дедлайна через тот же `SleepQueue`, что и `sleep_current`. После
+    /// возврата `ScheduleAction` выполняется context switch; thread
+    /// возобновится в [`Self::unblock_thread`] либо в `wake_sleepers`.
+    pub(super) fn block_current(
+        &mut self,
+        now_ns: u64,
+        timeout_ns: Option<u64>,
+    ) -> ScheduleAction<A> {
+        let current_id = self.current();
+        if let Some(thread) = self.threads.get_mut(current_id) {
+            thread.set_time_slice_left(self.time_slice_ticks);
+            if let Some(timeout) = timeout_ns {
+                let wakeup_at_ns = now_ns.saturating_add(timeout);
+                thread.set_state(ThreadState::Sleeping { wakeup_at_ns });
+                self.sleepers.push(SleepEntry {
+                    wakeup_at_ns,
+                    thread_id: current_id,
+                });
+            } else {
+                thread.set_state(ThreadState::Blocked);
+            }
+        }
+
+        self.switch_to_next(now_ns)
+    }
+
+    /// Будит ранее заблокированный (через [`Self::block_current`])
+    /// поток, переводя его в `Ready` и помещая в очередь готовых.
+    /// Idempotent относительно других состояний - повторный вызов
+    /// или race с timeout-стороной (где waker'у уже не выпала
+    /// возможность поймать `Blocked`/`Sleeping`) не имеет эффекта.
+    pub(super) fn unblock_thread(&mut self, id: ThreadId) {
+        let Some(thread) = self.threads.get_mut(id) else {
+            return;
+        };
+        match thread.state() {
+            ThreadState::Blocked | ThreadState::Sleeping { .. } => {
+                let priority = thread.priority();
+                let affinity = thread.cpu_affinity();
+                thread.set_state(ThreadState::Ready);
+                thread.set_time_slice_left(self.time_slice_ticks);
+                if let Some(cpu) = self.cpu_by_id_mut(affinity) {
+                    cpu.ready_queue_mut().push(id, priority);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Клонирует `Arc` per-process таблицы handle'ов текущего потока.
+    /// Возвращает `None`, если scheduler ещё не bootstrapped или текущий
+    /// поток/процесс не зарегистрирован.
+    pub(super) fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
+        let current_id = self.current_cpu()?.current();
+        let pid = self.threads.get(current_id)?.process();
+        self.processes.get(pid).map(|p| p.handle_table().clone())
+    }
+
     pub(super) fn current(&self) -> ThreadId {
         self.current_cpu()
             .expect("scheduler must be bootstrapped before current()")
@@ -453,7 +514,13 @@ where
             let Some(thread) = self.threads.get_mut(entry.thread_id) else {
                 continue;
             };
-            if !matches!(thread.state(), ThreadState::Sleeping { .. }) {
+            // Сравниваем deadline'ы: если поток уже разбужен по signal-стороне
+            // и снова ушёл в Sleeping с другим wakeup_at_ns - старая stale-entry
+            // не должна тригернуть преждевременное пробуждение.
+            if !matches!(
+                thread.state(),
+                ThreadState::Sleeping { wakeup_at_ns } if wakeup_at_ns == entry.wakeup_at_ns
+            ) {
                 continue;
             }
             let priority = thread.priority();

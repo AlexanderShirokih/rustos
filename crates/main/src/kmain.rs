@@ -167,7 +167,39 @@ fn spawn_init_process<A>(
 
 #[cfg(not(feature = "qemu-tests"))]
 fn spawn_demo_processes(scheduler_service: Arc<dyn SchedulerService>) {
-    for (idx, period_ms) in [(1_u32, 100_u64), (2, 300), (3, 700)] {
+    use crate::timer_server::{pilot_client_subscribe, pilot_tick, spawn_timer_server};
+
+    // TODO(kobject-migration): после миграции остальных сервисов на Timer KO
+    // удалить ветку `legacy` и `dyn TimerService`.
+    let client_end =
+        spawn_timer_server(scheduler_service.clone()).expect("timer-server spawn must succeed");
+
+    scheduler_service
+        .spawn(
+            SpawnConfig::new("test-process").priority(Priority::normal()),
+            move || {
+                let handles = match pilot_client_subscribe(client_end) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        klog::warn!("pilot subscribe failed: {:?}", e);
+                        return;
+                    }
+                };
+                let period_ms = 200_u64;
+                let mut tick = 0_u64;
+                loop {
+                    info!("Pilot tick #{tick} via channel-based Timer");
+                    if let Err(e) = pilot_tick(&handles, period_ms) {
+                        klog::warn!("pilot tick failed: {:?}", e);
+                        return;
+                    }
+                    tick = tick.wrapping_add(1);
+                }
+            },
+        )
+        .expect("test-process spawn must succeed");
+
+    for (idx, period_ms) in [(1_u32, 300_u64), (2, 700)] {
         let thread_service = scheduler_service.clone();
         scheduler_service
             .spawn(

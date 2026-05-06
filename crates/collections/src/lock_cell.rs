@@ -37,14 +37,19 @@ impl CriticalSection for NoCriticalSection {
 }
 
 /// Критическая секция через маскировку IRQ в DAIF (AArch64).
-#[cfg(target_arch = "aarch64")]
+///
+/// Доступна только на bare-metal aarch64 (`target_os = "none"`). На
+/// hosted-OS под aarch64 (macOS, Linux) `msr daifset` запрещён в
+/// user-space и вызывает SIGILL - поэтому host-сборки используют
+/// [`NoCriticalSection`] (см. ниже).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub struct DaifCriticalSection;
 
 /// RAII-guard для восстановления DAIF при выходе из критической секции.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub struct DaifGuard(u64);
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 impl CriticalSection for DaifCriticalSection {
     type Guard = DaifGuard;
 
@@ -62,7 +67,7 @@ impl CriticalSection for DaifCriticalSection {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 impl Drop for DaifGuard {
     fn drop(&mut self) {
         if self.0 & (1 << 7) == 0 {
@@ -76,11 +81,10 @@ impl Drop for DaifGuard {
 }
 
 /// Платформенная критическая секция по умолчанию.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub type DefaultCriticalSection = DaifCriticalSection;
 
-/// Платформенная критическая секция по умолчанию.
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub type DefaultCriticalSection = NoCriticalSection;
 
 /// Ячейка без синхронизации для однопоточного кода.

@@ -12,6 +12,8 @@ pub mod kernel_context;
 pub mod kmain;
 pub mod kobject;
 pub mod sched;
+#[cfg(not(feature = "qemu-tests"))]
+pub mod timer_server;
 
 #[cfg(feature = "qemu-tests")]
 pub mod qemu_tests;

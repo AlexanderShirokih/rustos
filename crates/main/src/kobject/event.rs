@@ -5,13 +5,12 @@
 
 use alloc::sync::Arc;
 
-use super::{kernel_object::KernelObject, koid::Koid, object_type::ObjectType, wait::SignalState};
+use super::{kernel_object::KernelObject, object_type::ObjectType, wait::SignalState};
 
 /// Главный битовый сигнал "событие наступило".
 pub const EVENT_SIGNALED: u32 = 1 << 0;
 
 pub struct Event {
-    koid: Koid,
     signals: SignalState,
 }
 
@@ -19,7 +18,6 @@ impl Event {
     /// Создаёт новый `Event` с очищенными сигналами.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            koid: Koid::allocate(),
             signals: SignalState::new(0),
         })
     }
@@ -41,10 +39,6 @@ impl Event {
 }
 
 impl KernelObject for Event {
-    fn koid(&self) -> Koid {
-        self.koid
-    }
-
     fn object_type(&self) -> ObjectType {
         ObjectType::Event
     }

@@ -13,6 +13,7 @@
 //! быть помечено грепабельным якорем `// TODO(kobject-migration)` -
 //! по мере миграции эти точки удаляются.
 
+mod api;
 mod channel;
 mod errors;
 mod event;
@@ -22,8 +23,11 @@ mod kernel_object;
 mod koid;
 mod object_type;
 mod rights;
+mod runtime;
+mod timer;
 mod wait;
 
+pub use api::{install_handle, object_signal, object_wait_one};
 pub use channel::{
     CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, DEFAULT_CHANNEL_CAPACITY,
     MESSAGE_INLINE_MAX, MESSAGE_MAX_HANDLES, Message,
@@ -36,6 +40,8 @@ pub use kernel_object::KernelObject;
 pub use koid::Koid;
 pub use object_type::ObjectType;
 pub use rights::Rights;
+pub use runtime::{KernelRuntime, ParkState, install_runtime};
+pub use timer::{TIMER_SIGNALED, Timer};
 pub use wait::{SignalState, Waker};
 
 #[cfg(test)]

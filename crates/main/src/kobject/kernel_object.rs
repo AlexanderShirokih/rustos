@@ -1,5 +1,10 @@
 use super::{
-    channel::ChannelEndpoint, event::Event, koid::Koid, object_type::ObjectType, wait::SignalState,
+    channel::ChannelEndpoint,
+    event::Event,
+    koid::{Erased, Koid},
+    object_type::ObjectType,
+    timer::Timer,
+    wait::SignalState,
 };
 
 /// Kernel-объект (KO) - единица, к которой ядро выдаёт права.
@@ -8,11 +13,13 @@ use super::{
 /// это KO: канал, событие, таймер, в перспективе поток, MMIO-регион, IRQ. Один KO может быть
 /// доступен нескольким процессам через разные handle'ы с разными правами.
 pub trait KernelObject: Send + Sync {
-    fn koid(&self) -> Koid;
+    fn koid(&self) -> Koid<Erased> {
+        Koid::<Self>::of(self).erase()
+    }
     fn object_type(&self) -> ObjectType;
 
     /// Сигнальное состояние объекта, если он сигнализуем (Event/Channel/Timer/...).
-    /// Объекты без сигналов (Process, Thread в Phase 2) возвращают `None`.
+    /// Объекты без сигналов возвращают `None`.
     fn signal_state(&self) -> Option<&SignalState> {
         None
     }
@@ -25,6 +32,11 @@ pub trait KernelObject: Send + Sync {
 
     /// Аналогично [`Self::as_channel`], но для `Event`.
     fn as_event(&self) -> Option<&Event> {
+        None
+    }
+
+    /// Аналогично [`Self::as_channel`], но для `Timer` KO.
+    fn as_timer(&self) -> Option<&Timer> {
         None
     }
 }

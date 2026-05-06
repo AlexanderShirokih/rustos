@@ -125,6 +125,22 @@ impl HandleTable {
         Ok(handle)
     }
 
+    /// Доступ к KO без проверки конкретного типа - для wait-пути,
+    /// который применим к любому signalable (Channel/Event/Timer/...).
+    /// Клонирует `Arc`, чтобы caller мог работать с объектом вне
+    /// HandleTable-lock'а.
+    pub fn clone_object(
+        &self,
+        id: HandleId,
+        need: Rights,
+    ) -> Result<alloc::sync::Arc<dyn super::KernelObject>, IpcError> {
+        let handle = self.lookup(id)?;
+        if !handle.rights().contains(need) {
+            return Err(IpcError::AccessDenied);
+        }
+        Ok(handle.object().clone())
+    }
+
     /// Создаёт новый handle на тот же KO с подмножеством прав.
     pub fn duplicate(&mut self, id: HandleId, new_rights: Rights) -> Result<HandleId, IpcError> {
         let dup = {
@@ -181,28 +197,21 @@ mod tests {
     use alloc::sync::Arc;
 
     use super::{
-        super::{kernel_object::KernelObject, koid::Koid, object_type::ObjectType, rights::Rights},
+        super::{kernel_object::KernelObject, object_type::ObjectType, rights::Rights},
         *,
     };
 
     struct DummyObject {
-        koid: Koid,
         ty: ObjectType,
     }
 
     impl DummyObject {
         fn new(ty: ObjectType) -> Arc<Self> {
-            Arc::new(Self {
-                koid: Koid::allocate(),
-                ty,
-            })
+            Arc::new(Self { ty })
         }
     }
 
     impl KernelObject for DummyObject {
-        fn koid(&self) -> Koid {
-            self.koid
-        }
         fn object_type(&self) -> ObjectType {
             self.ty
         }

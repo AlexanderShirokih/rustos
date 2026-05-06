@@ -15,7 +15,10 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use drivers_common::{CapabilityStoreExt, services::console::ConsoleService};
+use drivers_common::{
+    CapabilityStoreExt,
+    services::{console::ConsoleService, scheduler::SchedulerService},
+};
 use io::writer::Writer;
 use spin::Once;
 
@@ -26,6 +29,7 @@ mod channel;
 mod event;
 mod handle_table;
 mod smoke;
+mod timer;
 
 struct ConsoleAdapter(Arc<dyn ConsoleService>);
 
@@ -40,6 +44,17 @@ impl Writer for ConsoleAdapter {
 
 static ADAPTER: Once<ConsoleAdapter> = Once::new();
 
+/// Сервис scheduler-а, кэшируемый для тестов, которые спавнят
+/// дополнительные потоки (например, [`timer::timer_signal_after_deadline`]).
+static SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
+
+/// Доступ к scheduler-сервису из test-кейсов.
+pub(super) fn scheduler() -> &'static Arc<dyn SchedulerService> {
+    SCHEDULER
+        .get()
+        .expect("SchedulerService должен быть закэширован в qemu_tests::run")
+}
+
 /// Подключает harness к ядру и запускает все зарегистрированные кейсы.
 /// Не возвращается: завершает QEMU через ARM semihosting.
 pub fn run(kernel: &mut KernelContext) -> ! {
@@ -48,6 +63,11 @@ pub fn run(kernel: &mut KernelContext) -> ! {
             .require_service::<dyn ConsoleService>()
             .expect("ConsoleService must be available for qemu-tests");
         ADAPTER.call_once(|| ConsoleAdapter(console));
+
+        let scheduler = caps
+            .require_service::<dyn SchedulerService>()
+            .expect("SchedulerService must be available for qemu-tests");
+        SCHEDULER.call_once(|| scheduler);
     });
 
     let writer: &'static (dyn Writer + Send + Sync) =

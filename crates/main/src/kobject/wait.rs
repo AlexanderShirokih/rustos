@@ -1,8 +1,7 @@
 //! Сигнальное состояние kernel-объекта и список ожидающих.
 //!
-//! Phase 2: каркас без интеграции с планировщиком. Любой waiter
-//! представлен `Arc<dyn Waker>`; в production-сборке конкретная
-//! реализация припаркует поток в `WaitQueue` (Phase 3), в тестах
+//! Любой waiter представлен `Arc<dyn Waker>`; в production-сборке
+//! конкретная реализация припаркует поток в `WaitQueue`, в тестах
 //! используется `MockWaker`, фиксирующий факт пробуждения и
 //! последнее наблюдённое состояние сигналов.
 
@@ -10,6 +9,9 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use collections::{LockCell, MutexCell};
+use drivers_common::services::scheduler::ThreadId;
+
+use super::runtime::{KernelRuntime, ParkState};
 
 /// Объект, который хочет быть разбуженным при изменении сигналов KO.
 pub trait Waker: Send + Sync {
@@ -92,6 +94,20 @@ impl SignalState {
             waker.wake(observed);
         }
     }
+
+    /// Снимает waiter из списка по identity (`Arc::ptr_eq`). Используется
+    /// timeout/cancel-путём `object_wait_one`, чтобы завершившийся waiter
+    /// не висел в списке дольше необходимого.
+    ///
+    /// Возвращает `true`, если запись действительно была удалена.
+    pub fn remove_waiter(&self, target: &Arc<dyn Waker>) -> bool {
+        self.waiters.with_lock(|wl| {
+            let initial = wl.entries.len();
+            wl.entries
+                .retain(|entry| !Arc::ptr_eq(&entry.waker, target));
+            wl.entries.len() != initial
+        })
+    }
 }
 
 impl core::fmt::Debug for SignalState {
@@ -118,6 +134,69 @@ impl WaiterList {
 struct WaiterEntry {
     mask: u32,
     waker: Arc<dyn Waker>,
+}
+
+/// Waker, представляющий запаркованный поток. Парный к
+/// [`object_wait_one`]: signal-сторона зовёт `wake`, который через
+/// runtime переводит поток в `Ready`. Гонка с timeout-стороной
+/// разрешается атомарным CAS на `state`.
+pub(super) struct ParkWaker {
+    state: AtomicU32,
+    observed: AtomicU32,
+    runtime: Arc<dyn KernelRuntime>,
+    thread_id: ThreadId,
+}
+
+impl ParkWaker {
+    pub(super) fn new(runtime: Arc<dyn KernelRuntime>, thread_id: ThreadId) -> Self {
+        Self {
+            state: AtomicU32::new(ParkState::REGISTERED),
+            observed: AtomicU32::new(0),
+            runtime,
+            thread_id,
+        }
+    }
+
+    pub(super) fn state(&self) -> &AtomicU32 {
+        &self.state
+    }
+
+    pub(super) fn observed(&self) -> u32 {
+        self.observed.load(Ordering::Acquire)
+    }
+
+    /// Пытается "закрыть" waiter сo стороны timeout - если signal
+    /// раньше не выиграл CAS. `true` означает "timeout победил".
+    pub(super) fn claim_timeout(&self) -> bool {
+        self.state
+            .compare_exchange(
+                ParkState::REGISTERED,
+                ParkState::TIMEOUT,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+impl Waker for ParkWaker {
+    fn wake(&self, observed: u32) {
+        // SIGNALED в state, увидел и корректное `observed`.
+        self.observed.store(observed, Ordering::Release);
+        if self
+            .state
+            .compare_exchange(
+                ParkState::REGISTERED,
+                ParkState::SIGNALED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.runtime.unblock(self.thread_id);
+        }
+        // Иначе timeout-сторона нас опередила: waker - no-op.
+    }
 }
 
 /// Тестовый waker: фиксирует факт пробуждения и последний наблюдённый набор сигналов.

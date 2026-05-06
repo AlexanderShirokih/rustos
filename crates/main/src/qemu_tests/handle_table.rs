@@ -8,16 +8,12 @@ use alloc::sync::Arc;
 use qemu_test_harness::register_test;
 
 fn handle_table_basic() {
-    use crate::kobject::{Handle, HandleTable, IpcError, KernelObject, Koid, ObjectType, Rights};
+    use crate::kobject::{Handle, HandleTable, IpcError, KernelObject, ObjectType, Rights};
 
     struct Dummy {
-        koid: Koid,
         ty: ObjectType,
     }
     impl KernelObject for Dummy {
-        fn koid(&self) -> Koid {
-            self.koid
-        }
         fn object_type(&self) -> ObjectType {
             self.ty
         }
@@ -25,7 +21,6 @@ fn handle_table_basic() {
 
     let mut table = HandleTable::with_capacity(4);
     let obj = Arc::new(Dummy {
-        koid: Koid::allocate(),
         ty: ObjectType::Channel,
     });
     let handle = Handle::new(obj, Rights::DUPLICATE | Rights::READ | Rights::WRITE);

@@ -17,7 +17,10 @@ use super::{
     arch::{ArchContext, TimerSource},
     scheduler::{Bootstrapped, Scheduler, SchedulerConfig, Uninit},
 };
-use crate::kernel_context::KernelContext;
+use crate::{
+    kernel_context::KernelContext,
+    kobject::{KernelRuntime, install_runtime},
+};
 
 /// Адаптер `TimerService` (capability) -> `TimerSource` (требование scheduler).
 pub struct KernelTimerSource(Arc<dyn TimerService>);
@@ -64,13 +67,15 @@ where
 
     let handle = Arc::new(scheduler.handle());
     let service: Arc<dyn SchedulerService> = handle.clone();
-    let tick_handler: Arc<dyn TickHandler> = handle;
+    let tick_handler: Arc<dyn TickHandler> = handle.clone();
+    let runtime: Arc<dyn KernelRuntime> = handle;
 
     kernel.with_runtime_state(|caps, _| {
         caps.provide_service::<dyn SchedulerService>(service)
             .expect("SchedulerService registration must succeed");
     });
     timer.set_handler(tick_handler);
+    install_runtime(runtime);
 
     scheduler
 }

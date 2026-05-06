@@ -1,7 +1,10 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 
+use collections::MutexCell;
+
 use super::address_space::AddressSpace;
+use crate::kobject::HandleTable;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -17,11 +20,11 @@ impl ProcessId {
     }
 }
 
-#[derive(Debug)]
 pub struct Process {
     id: ProcessId,
     name: &'static str,
     address_space: Arc<AddressSpace>,
+    handle_table: Arc<MutexCell<HandleTable>>,
 }
 
 impl Process {
@@ -30,6 +33,7 @@ impl Process {
             id,
             name,
             address_space,
+            handle_table: Arc::new(MutexCell::new(HandleTable::new())),
         }
     }
 
@@ -43,6 +47,21 @@ impl Process {
 
     pub fn address_space(&self) -> &Arc<AddressSpace> {
         &self.address_space
+    }
+
+    /// Per-process таблица capability-handle'ов. Клонируется как `Arc`,
+    /// чтобы IPC-функции могли работать с таблицей вне scheduler-lock.
+    pub fn handle_table(&self) -> &Arc<MutexCell<HandleTable>> {
+        &self.handle_table
+    }
+}
+
+impl core::fmt::Debug for Process {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Process")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .finish_non_exhaustive()
     }
 }
 
