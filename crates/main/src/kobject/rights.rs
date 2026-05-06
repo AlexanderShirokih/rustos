@@ -1,7 +1,5 @@
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
-use super::object_type::ObjectType;
-
 /// Набор прав, ассоциированных с конкретным [`Handle`](super::Handle).
 ///
 /// Хранится отдельно от объекта: один и тот же KO может быть доступен
@@ -64,17 +62,17 @@ impl Rights {
     }
 
     /// Стартовый набор прав для свежесозданного KO данного типа.
-    pub const fn defaults_for(ty: ObjectType) -> Self {
+    pub fn defaults_for(obj: &super::object::KObject) -> Self {
+        use super::object::KObject;
+
         const SIGNALABLE: u32 = Rights::SIGNAL.0
             | Rights::WAIT.0
             | Rights::DUPLICATE.0
             | Rights::TRANSFER.0
             | Rights::INSPECT.0;
 
-        match ty {
-            ObjectType::Process => Self(Self::INSPECT.0 | Self::MANAGE_PROCESS.0),
-            ObjectType::Thread => Self(Self::INSPECT.0 | Self::MANAGE_THREAD.0),
-            ObjectType::Channel => Self(
+        match obj {
+            KObject::Channel(_) => Self(
                 Self::READ.0
                     | Self::WRITE.0
                     | Self::WAIT.0
@@ -82,7 +80,7 @@ impl Rights {
                     | Self::DUPLICATE.0
                     | Self::INSPECT.0,
             ),
-            ObjectType::Event | ObjectType::Timer => Self(SIGNALABLE),
+            KObject::Event(_) | KObject::Timer(_) => Self(SIGNALABLE),
         }
     }
 }

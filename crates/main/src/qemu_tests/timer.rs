@@ -10,14 +10,14 @@ use drivers_common::services::scheduler::{Priority, SchedulerServiceExt, SpawnCo
 use qemu_test_harness::register_test;
 
 use crate::kobject::{
-    Handle, KernelObject, Rights, TIMER_SIGNALED, Timer, install_handle, object_wait_one,
+    Handle, KObject, Rights, TIMER_SIGNALED, Timer, install_handle, object_wait_one,
 };
 
 fn timer_signal_after_deadline() {
     let timer = Timer::new();
 
     let timer_handle = Handle::new(
-        timer.clone() as Arc<dyn KernelObject>,
+        KObject::Timer(timer.clone()),
         Rights::WAIT | Rights::INSPECT,
     );
     let timer_id = install_handle(timer_handle).expect("install_handle must succeed");

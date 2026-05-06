@@ -7,8 +7,8 @@
 use alloc::sync::Arc;
 
 use super::{
-    CHANNEL_READABLE, ChannelEndpoint, EVENT_SIGNALED, Event, Handle, HandleTable, Message,
-    ObjectType, Rights, wait::MockWaker,
+    CHANNEL_READABLE, ChannelEndpoint, EVENT_SIGNALED, Event, Handle, HandleTable, KObject,
+    Message, Rights, wait::MockWaker,
 };
 
 /// "Сервер" получает запрос с переданным handle на ответ-Event,
@@ -23,14 +23,14 @@ fn pilot_rpc_full_cycle() {
     let (server_end, client_end) = ChannelEndpoint::create_pair(8);
     let server_chan_id = server_table
         .insert(Handle::new(
-            server_end.clone(),
-            Rights::defaults_for(ObjectType::Channel),
+            KObject::Channel(server_end.clone()),
+            Rights::defaults_for(&KObject::Channel(server_end.clone())),
         ))
         .unwrap();
     let client_chan_id = client_table
         .insert(Handle::new(
-            client_end.clone(),
-            Rights::defaults_for(ObjectType::Channel),
+            KObject::Channel(client_end.clone()),
+            Rights::defaults_for(&KObject::Channel(client_end.clone())),
         ))
         .unwrap();
 
@@ -38,8 +38,8 @@ fn pilot_rpc_full_cycle() {
     let reply_event = Event::new();
     let reply_id = client_table
         .insert(Handle::new(
-            reply_event.clone(),
-            Rights::defaults_for(ObjectType::Event),
+            KObject::Event(reply_event.clone()),
+            Rights::defaults_for(&KObject::Event(reply_event.clone())),
         ))
         .unwrap();
 
@@ -50,18 +50,18 @@ fn pilot_rpc_full_cycle() {
 
     // Резолвим канал клиента и пишем.
     {
-        let h = client_table
-            .get(client_chan_id, Rights::WRITE, ObjectType::Channel)
+        let chan = client_table
+            .get_channel(client_chan_id, Rights::WRITE)
             .unwrap();
-        h.object().as_channel().unwrap().write(req).unwrap();
+        chan.write(req).unwrap();
     }
 
     // Сервер читает.
     let mut received = {
-        let h = server_table
-            .get(server_chan_id, Rights::READ, ObjectType::Channel)
+        let chan = server_table
+            .get_channel(server_chan_id, Rights::READ)
             .unwrap();
-        h.object().as_channel().unwrap().read().unwrap()
+        chan.read().unwrap()
     };
     assert_eq!(received.bytes(), b"ping");
 
@@ -73,22 +73,18 @@ fn pilot_rpc_full_cycle() {
 
     let server_reply_id = server_table.insert(reply_handle).unwrap();
     {
-        let h = server_table
-            .get(server_reply_id, Rights::SIGNAL, ObjectType::Event)
+        let event = server_table
+            .get_event(server_reply_id, Rights::SIGNAL)
             .unwrap();
-        h.object().as_event().unwrap().signal(EVENT_SIGNALED, 0);
+        event.signal(EVENT_SIGNALED, 0);
     }
 
     // Сервер пишет ответный payload в канал.
     {
-        let h = server_table
-            .get(server_chan_id, Rights::WRITE, ObjectType::Channel)
+        let chan = server_table
+            .get_channel(server_chan_id, Rights::WRITE)
             .unwrap();
-        h.object()
-            .as_channel()
-            .unwrap()
-            .write(Message::from_bytes(b"pong").unwrap())
-            .unwrap();
+        chan.write(Message::from_bytes(b"pong").unwrap()).unwrap();
     }
 
     // Клиент видит сигнал на своём Arc<Event>.
@@ -96,10 +92,10 @@ fn pilot_rpc_full_cycle() {
 
     // Клиент читает ответ из канала.
     let resp = {
-        let h = client_table
-            .get(client_chan_id, Rights::READ, ObjectType::Channel)
+        let chan = client_table
+            .get_channel(client_chan_id, Rights::READ)
             .unwrap();
-        h.object().as_channel().unwrap().read().unwrap()
+        chan.read().unwrap()
     };
     assert_eq!(resp.bytes(), b"pong");
 }
@@ -113,7 +109,7 @@ fn waiter_woken_through_channel_write() {
 
     let waker = MockWaker::new();
     client_end
-        .signal_state()
+        .signals()
         .register_waiter(CHANNEL_READABLE, waker.clone());
     assert!(!waker.was_woken());
 
@@ -132,16 +128,15 @@ fn closing_endpoint_via_table_signals_peer() {
     let mut owner = HandleTable::new();
 
     let (server_end, client_end) = ChannelEndpoint::create_pair(4);
-    let id = owner
-        .insert(Handle::new(
-            server_end,
-            Rights::defaults_for(ObjectType::Channel),
-        ))
-        .unwrap();
+    let id = {
+        let ko = KObject::Channel(server_end);
+        let rights = Rights::defaults_for(&ko);
+        owner.insert(Handle::new(ko, rights)).unwrap()
+    };
 
     let waker = MockWaker::new();
     client_end
-        .signal_state()
+        .signals()
         .register_waiter(super::CHANNEL_PEER_CLOSED, waker.clone());
 
     // Изымаем единственный Arc<ChannelEndpoint> из таблицы и дропаем.

@@ -21,9 +21,8 @@ use drivers_common::services::scheduler::{
 use klog::{info, warn};
 
 use crate::kobject::{
-    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, Handle, IpcError, KernelObject,
-    Message, ObjectType, Rights, TIMER_SIGNALED, Timer, install_handle, object_signal,
-    object_wait_one,
+    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, Handle, IpcError, KObject, Message,
+    Rights, TIMER_SIGNALED, Timer, install_handle, object_signal, object_wait_one,
 };
 
 /// Заголовочный байт сообщения "установить дедлайн".
@@ -67,10 +66,8 @@ fn run_server(scheduler: &Arc<dyn SchedulerService>, server_end: &Arc<ChannelEnd
     // Клиент получает право `SIGNAL`, чтобы уметь явно очистить
     // `TIMER_SIGNALED` между итерациями (избегая "залипания" бита от
     // предыдущего fire'а).
-    let timer_handle = Handle::new(
-        timer.clone() as Arc<dyn KernelObject>,
-        Rights::WAIT | Rights::SIGNAL | Rights::INSPECT,
-    );
+    let timer_ko = KObject::Timer(timer.clone());
+    let timer_handle = Handle::new(timer_ko, Rights::WAIT | Rights::SIGNAL | Rights::INSPECT);
     if welcome.push_handle(timer_handle).is_err() {
         warn!("timer-server: welcome build failed");
         return;
@@ -82,10 +79,8 @@ fn run_server(scheduler: &Arc<dyn SchedulerService>, server_end: &Arc<ChannelEnd
 
     // Регистрируем server-end в собственной handle-table, чтобы ходить
     // через handle-based wait API.
-    let chan_handle = Handle::new(
-        server_end.clone() as Arc<dyn KernelObject>,
-        Rights::READ | Rights::WAIT | Rights::INSPECT,
-    );
+    let chan_ko = KObject::Channel(server_end.clone());
+    let chan_handle = Handle::new(chan_ko, Rights::READ | Rights::WAIT | Rights::INSPECT);
     let chan_id = match install_handle(chan_handle) {
         Ok(id) => id,
         Err(e) => {
@@ -149,8 +144,9 @@ fn handle_command(scheduler: &Arc<dyn SchedulerService>, timer: &Arc<Timer>, msg
 /// в свою handle-table и возвращает их идентификаторы. Используется
 /// демо-процессом из [`crate::kmain`].
 pub fn pilot_client_subscribe(client_end: Arc<ChannelEndpoint>) -> Result<PilotHandles, IpcError> {
+    let chan_ko = KObject::Channel(client_end.clone());
     let chan_id = install_handle(Handle::new(
-        client_end.clone() as Arc<dyn KernelObject>,
+        chan_ko,
         Rights::READ | Rights::WRITE | Rights::WAIT | Rights::INSPECT,
     ))?;
 
@@ -165,8 +161,9 @@ pub fn pilot_client_subscribe(client_end: Arc<ChannelEndpoint>) -> Result<PilotH
     }
     drop(drained);
 
-    if timer_handle.object_type() != ObjectType::Timer {
-        return Err(IpcError::WrongType);
+    match timer_handle.object() {
+        KObject::Timer(_) => {}
+        _ => return Err(IpcError::WrongType),
     }
 
     let timer_id = install_handle(timer_handle)?;

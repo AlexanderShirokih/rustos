@@ -27,7 +27,7 @@ fn event_signal() {
         fired: AtomicBool::new(false),
     });
     event
-        .signal_state()
+        .signals()
         .register_waiter(EVENT_SIGNALED, flag.clone());
     qemu_test_harness::kassert!(!flag.fired.load(Ordering::Acquire));
 

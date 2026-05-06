@@ -1,10 +1,6 @@
-use alloc::sync::Arc;
 use core::num::NonZeroU32;
 
-use super::{
-    errors::IpcError, kernel_object::KernelObject, koid::Koid, object_type::ObjectType,
-    rights::Rights,
-};
+use super::{errors::IpcError, object::KObject, koid::Koid, rights::Rights};
 
 /// Публичный идентификатор записи в `HandleTable`, используемый процессами для IPC.
 ///
@@ -45,10 +41,10 @@ impl HandleId {
     }
 }
 
-/// Запись в [`HandleTable`](super::HandleTable): `Arc` на kernel-объект и
+/// Запись в [`HandleTable`](super::HandleTable): kernel-объект и
 /// права, с которыми этот handle может быть использован.
 pub struct Handle {
-    object: Arc<dyn KernelObject>,
+    pub(super) object: KObject,
     rights: Rights,
 }
 
@@ -56,14 +52,14 @@ impl core::fmt::Debug for Handle {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Handle")
             .field("koid", &self.object.koid())
-            .field("type", &self.object.object_type())
+            .field("type_tag", &self.object.type_tag())
             .field("rights", &self.rights)
             .finish()
     }
 }
 
 impl Handle {
-    pub fn new(object: Arc<dyn KernelObject>, rights: Rights) -> Self {
+    pub fn new(object: KObject, rights: Rights) -> Self {
         Self { object, rights }
     }
 
@@ -71,17 +67,11 @@ impl Handle {
         self.rights
     }
 
-    pub fn object_type(&self) -> ObjectType {
-        self.object.object_type()
-    }
-
     pub fn koid(&self) -> Koid {
         self.object.koid()
     }
 
-    /// Возвращает ссылку, а не клон `Arc`: продлевать жизнь KO вправе
-    /// только сама `HandleTable`, дополнительно - это оптимизация в hot path.
-    pub fn object(&self) -> &Arc<dyn KernelObject> {
+    pub fn object(&self) -> &KObject {
         &self.object
     }
 

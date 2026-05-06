@@ -1,10 +1,13 @@
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 use super::{
+    channel::ChannelEndpoint,
     errors::IpcError,
+    event::Event,
     handle::{Handle, HandleId},
-    object_type::ObjectType,
+    object::KObject,
     rights::Rights,
+    timer::Timer,
 };
 
 /// Стандартная ёмкость таблицы handle'ов одного процесса.
@@ -113,27 +116,61 @@ impl HandleTable {
         }
     }
 
-    /// Единственная точка проверки прав и типа.
-    pub fn get(&self, id: HandleId, need: Rights, ty: ObjectType) -> Result<&Handle, IpcError> {
+    /// Проверка прав без проверки типа. Type-check делается callers
+    /// через match на `handle.object()` или через type-specific accessor.
+    pub fn get(&self, id: HandleId, need: Rights) -> Result<&Handle, IpcError> {
         let handle = self.lookup(id)?;
-        if handle.object_type() != ty {
-            return Err(IpcError::WrongType);
-        }
         if !handle.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
         Ok(handle)
     }
 
-    /// Доступ к KO без проверки конкретного типа - для wait-пути,
-    /// который применим к любому signalable (Channel/Event/Timer/...).
-    /// Клонирует `Arc`, чтобы caller мог работать с объектом вне
-    /// HandleTable-lock'а.
-    pub fn clone_object(
+    /// Извлекает `Arc<ChannelEndpoint>` с проверкой прав и типа.
+    pub fn get_channel(
         &self,
         id: HandleId,
         need: Rights,
-    ) -> Result<alloc::sync::Arc<dyn super::KernelObject>, IpcError> {
+    ) -> Result<Arc<ChannelEndpoint>, IpcError> {
+        let h = self.lookup(id)?;
+        if !h.rights().contains(need) {
+            return Err(IpcError::AccessDenied);
+        }
+        match &h.object {
+            KObject::Channel(c) => Ok(c.clone()),
+            _ => Err(IpcError::WrongType),
+        }
+    }
+
+    /// Извлекает `Arc<Event>` с проверкой прав и типа.
+    pub fn get_event(&self, id: HandleId, need: Rights) -> Result<Arc<Event>, IpcError> {
+        let h = self.lookup(id)?;
+        if !h.rights().contains(need) {
+            return Err(IpcError::AccessDenied);
+        }
+        match &h.object {
+            KObject::Event(e) => Ok(e.clone()),
+            _ => Err(IpcError::WrongType),
+        }
+    }
+
+    /// Извлекает `Arc<Timer>` с проверкой прав и типа.
+    pub fn get_timer(&self, id: HandleId, need: Rights) -> Result<Arc<Timer>, IpcError> {
+        let h = self.lookup(id)?;
+        if !h.rights().contains(need) {
+            return Err(IpcError::AccessDenied);
+        }
+        match &h.object {
+            KObject::Timer(t) => Ok(t.clone()),
+            _ => Err(IpcError::WrongType),
+        }
+    }
+
+    /// Доступ к KO без проверки конкретного типа - для wait-пути,
+    /// который применим к любому signalable (Channel/Event/Timer/...).
+    /// Клонирует `KObject`, чтобы caller мог работать с объектом вне
+    /// HandleTable-lock'а.
+    pub fn clone_object(&self, id: HandleId, need: Rights) -> Result<KObject, IpcError> {
         let handle = self.lookup(id)?;
         if !handle.rights().contains(need) {
             return Err(IpcError::AccessDenied);
@@ -194,43 +231,32 @@ impl Default for HandleTable {
 
 #[cfg(test)]
 mod tests {
-    use alloc::sync::Arc;
-
     use super::{
-        super::{kernel_object::KernelObject, object_type::ObjectType, rights::Rights},
+        super::{event::Event, object::KObject, rights::Rights},
         *,
     };
 
-    struct DummyObject {
-        ty: ObjectType,
+    fn make_handle(obj: KObject, rights: Rights) -> Handle {
+        Handle::new(obj, rights)
     }
 
-    impl DummyObject {
-        fn new(ty: ObjectType) -> Arc<Self> {
-            Arc::new(Self { ty })
-        }
+    fn event_handle(rights: Rights) -> Handle {
+        make_handle(KObject::Event(Event::new()), rights)
     }
 
-    impl KernelObject for DummyObject {
-        fn object_type(&self) -> ObjectType {
-            self.ty
-        }
-    }
-
-    fn make_handle(ty: ObjectType, rights: Rights) -> Handle {
-        Handle::new(DummyObject::new(ty), rights)
+    fn channel_handle(rights: Rights) -> Handle {
+        let (ep, _) = ChannelEndpoint::create_pair(4);
+        make_handle(KObject::Channel(ep), rights)
     }
 
     #[test]
     fn insert_and_get_round_trip() {
         let mut table = HandleTable::new();
-        let h = make_handle(ObjectType::Channel, Rights::READ | Rights::WRITE);
+        let h = channel_handle(Rights::READ | Rights::WRITE);
         let koid = h.koid();
 
         let id = table.insert(h).unwrap();
-        let got = table
-            .get(id, Rights::READ, ObjectType::Channel)
-            .expect("get must succeed");
+        let got = table.get(id, Rights::READ).expect("get must succeed");
         assert_eq!(got.koid(), koid);
         assert_eq!(table.live_count(), 1);
     }
@@ -238,45 +264,45 @@ mod tests {
     #[test]
     fn get_with_missing_right_returns_access_denied() {
         let mut table = HandleTable::new();
-        let id = table
-            .insert(make_handle(ObjectType::Event, Rights::WAIT))
-            .unwrap();
+        let id = table.insert(event_handle(Rights::WAIT)).unwrap();
 
         assert_eq!(
-            table
-                .get(id, Rights::SIGNAL, ObjectType::Event)
-                .unwrap_err(),
+            table.get(id, Rights::SIGNAL).unwrap_err(),
             IpcError::AccessDenied
         );
         // Право, которое реально есть, проходит.
-        assert!(table.get(id, Rights::WAIT, ObjectType::Event).is_ok());
+        assert!(table.get(id, Rights::WAIT).is_ok());
     }
 
     #[test]
-    fn get_with_wrong_type_returns_wrong_type() {
+    fn get_channel_type_checks() {
         let mut table = HandleTable::new();
-        let id = table
-            .insert(make_handle(ObjectType::Channel, Rights::READ))
-            .unwrap();
+        let event_id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let chan_id = table.insert(channel_handle(Rights::READ)).unwrap();
 
-        assert_eq!(
-            table.get(id, Rights::READ, ObjectType::Event).unwrap_err(),
-            IpcError::WrongType
-        );
+        // Верный тип проходит.
+        assert!(table.get_event(event_id, Rights::WAIT).is_ok());
+        assert!(table.get_channel(chan_id, Rights::READ).is_ok());
+
+        // Неверный тип возвращает WrongType.
+        assert!(matches!(
+            table.get_channel(event_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_event(chan_id, Rights::READ),
+            Err(IpcError::WrongType)
+        ));
     }
 
     #[test]
     fn remove_then_get_returns_bad_handle() {
         let mut table = HandleTable::new();
-        let id = table
-            .insert(make_handle(ObjectType::Channel, Rights::READ))
-            .unwrap();
+        let id = table.insert(channel_handle(Rights::READ)).unwrap();
 
         let _ = table.remove(id).unwrap();
         assert_eq!(
-            table
-                .get(id, Rights::READ, ObjectType::Channel)
-                .unwrap_err(),
+            table.get(id, Rights::READ).unwrap_err(),
             IpcError::BadHandle
         );
     }
@@ -284,9 +310,7 @@ mod tests {
     #[test]
     fn double_close_returns_bad_handle() {
         let mut table = HandleTable::new();
-        let id = table
-            .insert(make_handle(ObjectType::Event, Rights::WAIT))
-            .unwrap();
+        let id = table.insert(event_handle(Rights::WAIT)).unwrap();
 
         table.remove(id).unwrap();
         assert_eq!(table.remove(id).unwrap_err(), IpcError::BadHandle);
@@ -297,9 +321,7 @@ mod tests {
         let table = HandleTable::with_capacity(4);
         let bogus = HandleId::pack(1, 999);
         assert_eq!(
-            table
-                .get(bogus, Rights::empty(), ObjectType::Event)
-                .unwrap_err(),
+            table.get(bogus, Rights::empty()).unwrap_err(),
             IpcError::BadHandle
         );
     }
@@ -308,32 +330,25 @@ mod tests {
     fn duplicate_subsets_rights() {
         let mut table = HandleTable::new();
         let rights = Rights::DUPLICATE | Rights::READ | Rights::WRITE;
-        let id = table
-            .insert(make_handle(ObjectType::Channel, rights))
-            .unwrap();
+        let id = table.insert(channel_handle(rights)).unwrap();
 
         let dup = table.duplicate(id, Rights::READ).unwrap();
-        let got = table.get(dup, Rights::READ, ObjectType::Channel).unwrap();
+        let got = table.get(dup, Rights::READ).unwrap();
         assert_eq!(got.rights(), Rights::READ);
         // У копии нет WRITE, хотя у оригинала был.
         assert_eq!(
-            table
-                .get(dup, Rights::WRITE, ObjectType::Channel)
-                .unwrap_err(),
+            table.get(dup, Rights::WRITE).unwrap_err(),
             IpcError::AccessDenied
         );
         // Оригинал нетронут.
-        assert!(table.get(id, Rights::WRITE, ObjectType::Channel).is_ok());
+        assert!(table.get(id, Rights::WRITE).is_ok());
     }
 
     #[test]
     fn duplicate_rejects_extra_rights() {
         let mut table = HandleTable::new();
         let id = table
-            .insert(make_handle(
-                ObjectType::Channel,
-                Rights::DUPLICATE | Rights::READ,
-            ))
+            .insert(channel_handle(Rights::DUPLICATE | Rights::READ))
             .unwrap();
 
         assert_eq!(
@@ -347,9 +362,7 @@ mod tests {
     #[test]
     fn duplicate_requires_duplicate_right() {
         let mut table = HandleTable::new();
-        let id = table
-            .insert(make_handle(ObjectType::Channel, Rights::READ))
-            .unwrap();
+        let id = table.insert(channel_handle(Rights::READ)).unwrap();
 
         assert_eq!(
             table.duplicate(id, Rights::READ).unwrap_err(),
@@ -360,37 +373,27 @@ mod tests {
     #[test]
     fn slot_reuse_invalidates_old_id() {
         let mut table = HandleTable::with_capacity(2);
-        let id1 = table
-            .insert(make_handle(ObjectType::Event, Rights::WAIT))
-            .unwrap();
+        let id1 = table.insert(event_handle(Rights::WAIT)).unwrap();
         table.remove(id1).unwrap();
 
         // Тот же слот переиспользуется, но с новой generation.
-        let id2 = table
-            .insert(make_handle(ObjectType::Event, Rights::WAIT))
-            .unwrap();
+        let id2 = table.insert(event_handle(Rights::WAIT)).unwrap();
         assert_eq!(id1.slot(), id2.slot());
         assert_ne!(id1.generation(), id2.generation());
         assert_eq!(
-            table.get(id1, Rights::WAIT, ObjectType::Event).unwrap_err(),
+            table.get(id1, Rights::WAIT).unwrap_err(),
             IpcError::BadHandle
         );
-        assert!(table.get(id2, Rights::WAIT, ObjectType::Event).is_ok());
+        assert!(table.get(id2, Rights::WAIT).is_ok());
     }
 
     #[test]
     fn out_of_handles_when_capacity_reached() {
         let mut table = HandleTable::with_capacity(2);
-        let _ = table
-            .insert(make_handle(ObjectType::Event, Rights::WAIT))
-            .unwrap();
-        let _ = table
-            .insert(make_handle(ObjectType::Event, Rights::WAIT))
-            .unwrap();
+        let _ = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let _ = table.insert(event_handle(Rights::WAIT)).unwrap();
 
-        let err = table
-            .insert(make_handle(ObjectType::Event, Rights::WAIT))
-            .unwrap_err();
+        let err = table.insert(event_handle(Rights::WAIT)).unwrap_err();
         assert_eq!(err, IpcError::OutOfHandles);
     }
 
@@ -404,16 +407,12 @@ mod tests {
         let max_gen = u32::from(HandleId::MAX_GENERATION);
 
         // первый insert - generation=1, остальные циклы - increment'ы
-        let mut id = table
-            .insert(make_handle(ObjectType::Event, Rights::WAIT))
-            .unwrap();
+        let mut id = table.insert(event_handle(Rights::WAIT)).unwrap();
         assert_eq!(u32::from(id.generation()), 1);
 
         for expected_gen in 2..=max_gen {
             table.remove(id).unwrap();
-            id = table
-                .insert(make_handle(ObjectType::Event, Rights::WAIT))
-                .unwrap();
+            id = table.insert(event_handle(Rights::WAIT)).unwrap();
             assert_eq!(u32::from(id.generation()), expected_gen);
         }
 
@@ -421,9 +420,7 @@ mod tests {
         // следующий insert упирается в потолок ёмкости.
         table.remove(id).unwrap();
         assert_eq!(
-            table
-                .insert(make_handle(ObjectType::Event, Rights::WAIT))
-                .unwrap_err(),
+            table.insert(event_handle(Rights::WAIT)).unwrap_err(),
             IpcError::OutOfHandles
         );
     }
@@ -436,24 +433,15 @@ mod tests {
         let mut a = HandleTable::new();
         let mut b = HandleTable::new();
 
-        let id_a = a
-            .insert(make_handle(ObjectType::Channel, Rights::READ))
-            .unwrap();
+        let id_a = a.insert(channel_handle(Rights::READ)).unwrap();
         // Расходим слот в B так, чтобы его generation отличалась от A.
-        let throwaway = b
-            .insert(make_handle(ObjectType::Channel, Rights::WRITE))
-            .unwrap();
+        let throwaway = b.insert(channel_handle(Rights::WRITE)).unwrap();
         b.remove(throwaway).unwrap();
-        let id_b = b
-            .insert(make_handle(ObjectType::Channel, Rights::WRITE))
-            .unwrap();
+        let id_b = b.insert(channel_handle(Rights::WRITE)).unwrap();
 
-        assert!(a.get(id_a, Rights::READ, ObjectType::Channel).is_ok());
-        assert!(b.get(id_b, Rights::WRITE, ObjectType::Channel).is_ok());
+        assert!(a.get(id_a, Rights::READ).is_ok());
+        assert!(b.get(id_b, Rights::WRITE).is_ok());
         assert_ne!(id_a.generation(), id_b.generation());
-        assert_eq!(
-            a.get(id_b, Rights::READ, ObjectType::Channel).unwrap_err(),
-            IpcError::BadHandle
-        );
+        assert_eq!(a.get(id_b, Rights::READ).unwrap_err(), IpcError::BadHandle);
     }
 }

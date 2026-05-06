@@ -12,7 +12,7 @@
 
 use alloc::sync::Arc;
 
-use super::{kernel_object::KernelObject, object_type::ObjectType, wait::SignalState};
+use super::wait::SignalState;
 
 /// Главный сигнал "timer expired".
 pub const TIMER_SIGNALED: u32 = 1 << 0;
@@ -49,22 +49,8 @@ impl Timer {
         self.signals.peek()
     }
 
-    pub fn signal_state(&self) -> &SignalState {
+    pub fn signals(&self) -> &SignalState {
         &self.signals
-    }
-}
-
-impl KernelObject for Timer {
-    fn object_type(&self) -> ObjectType {
-        ObjectType::Timer
-    }
-
-    fn signal_state(&self) -> Option<&SignalState> {
-        Some(&self.signals)
-    }
-
-    fn as_timer(&self) -> Option<&Timer> {
-        Some(self)
     }
 }
 
@@ -76,7 +62,7 @@ mod tests {
     fn fire_sets_signaled_and_wakes() {
         let t = Timer::new();
         let w = MockWaker::new();
-        t.signal_state().register_waiter(TIMER_SIGNALED, w.clone());
+        t.signals().register_waiter(TIMER_SIGNALED, w.clone());
         assert!(!w.was_woken());
 
         t.fire();
@@ -94,10 +80,10 @@ mod tests {
     }
 
     #[test]
-    fn metadata_matches() {
-        let t = Timer::new();
-        assert_eq!(t.object_type(), ObjectType::Timer);
-        let other = Timer::new();
-        assert_ne!(t.koid(), other.koid());
+    fn koid_unique_per_instance() {
+        use crate::kobject::object::KObject;
+        let a = Timer::new();
+        let b = Timer::new();
+        assert_ne!(KObject::Timer(a).koid(), KObject::Timer(b).koid());
     }
 }

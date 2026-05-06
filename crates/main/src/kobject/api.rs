@@ -1,7 +1,7 @@
 //! Имитирует будущий syscall-слой: на вход - `HandleId`, на выход -
 //! `Result<_, IpcError>`. Внутри идёт через [`runtime()`](super::runtime)
-//! к per-process `HandleTable` и scheduler-у. Никаких `Arc<dyn
-//! KernelObject>` наружу не утекает.
+//! к per-process `HandleTable` и scheduler-у. Никакой `KObject` наружу
+//! не утекает.
 //!
 //! Сейчас реализована только операция [`object_wait_one`] - её хватит
 //! для pilot-демо timer-сервиса. Остальные функции (`channel_*`,
@@ -22,7 +22,7 @@ use super::{
 
 /// Устанавливает [`Handle`] в handle-table текущего процесса и
 /// возвращает свежий [`HandleId`]. Удобный сахар для перехода между
-/// "у меня есть `Arc<KO>`" и handle-based API.
+/// "у меня есть `KObject`" и handle-based API.
 pub fn install_handle(handle: Handle) -> Result<HandleId, IpcError> {
     let table = runtime()
         .current_handle_table()
@@ -32,12 +32,12 @@ pub fn install_handle(handle: Handle) -> Result<HandleId, IpcError> {
 
 /// Атомарно меняет биты сигнального состояния KO (поднимает `set`,
 /// снимает `clear`). Требует [`Rights::SIGNAL`] на handle. Без
-/// signal_state у KO - `WrongType`.
+/// signals у KO - `WrongType`.
 pub fn object_signal(handle_id: HandleId, set: u32, clear: u32) -> Result<(), IpcError> {
     let runtime = runtime();
     let table = runtime.current_handle_table().ok_or(IpcError::BadHandle)?;
     let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::SIGNAL))?;
-    let signal_state = object.signal_state().ok_or(IpcError::WrongType)?;
+    let signal_state = object.signals().ok_or(IpcError::WrongType)?;
     signal_state.signal(set, clear);
     Ok(())
 }
@@ -57,10 +57,10 @@ pub fn object_wait_one(
     let runtime = runtime();
     let table = runtime.current_handle_table().ok_or(IpcError::BadHandle)?;
 
-    // Берём Arc на KO под локом таблицы и сразу отпускаем лок.
+    // Берём KObject под локом таблицы и сразу отпускаем лок.
     let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::WAIT))?;
 
-    let signal_state = object.signal_state().ok_or(IpcError::WrongType)?;
+    let signal_state = object.signals().ok_or(IpcError::WrongType)?;
 
     // Fast-path: уже сигналит.
     let already = signal_state.peek() & signals;

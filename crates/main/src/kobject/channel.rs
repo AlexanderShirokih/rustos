@@ -13,10 +13,7 @@ use alloc::{
 
 use collections::{LockCell, MutexCell};
 
-use super::{
-    errors::IpcError, handle::Handle, kernel_object::KernelObject, object_type::ObjectType,
-    wait::SignalState,
-};
+use super::{errors::IpcError, handle::Handle, wait::SignalState};
 
 /// Сигнал "в inbound-очереди есть хотя бы одно сообщение".
 pub const CHANNEL_READABLE: u32 = 1 << 0;
@@ -225,22 +222,8 @@ impl ChannelEndpoint {
     }
 
     /// Возвращает сигнальное состояние (для интеграции с `object_wait_one`).
-    pub fn signal_state(&self) -> &SignalState {
+    pub fn signals(&self) -> &SignalState {
         &self.signals
-    }
-}
-
-impl KernelObject for ChannelEndpoint {
-    fn object_type(&self) -> ObjectType {
-        ObjectType::Channel
-    }
-
-    fn signal_state(&self) -> Option<&SignalState> {
-        Some(&self.signals)
-    }
-
-    fn as_channel(&self) -> Option<&ChannelEndpoint> {
-        Some(self)
     }
 }
 
@@ -260,8 +243,8 @@ mod tests {
 
     use super::{
         super::{
-            handle::Handle, handle_table::HandleTable, kernel_object::KernelObject,
-            object_type::ObjectType, rights::Rights, wait::MockWaker,
+            event::Event, handle::Handle, handle_table::HandleTable, object::KObject,
+            rights::Rights, wait::MockWaker,
         },
         *,
     };
@@ -494,7 +477,7 @@ mod tests {
         assert_eq!(reader_end.peek_signals() & CHANNEL_READABLE, 0);
         let waker = MockWaker::new();
         reader_end
-            .signal_state()
+            .signals()
             .register_waiter(CHANNEL_READABLE, waker.clone());
         assert!(
             !waker.was_woken(),
@@ -518,18 +501,18 @@ mod tests {
     fn handles_overflow_rejected() {
         let mut msg = Message::new();
         for _ in 0..MESSAGE_MAX_HANDLES {
-            msg.push_handle(make_dummy_handle()).unwrap();
+            msg.push_handle(make_event_handle()).unwrap();
         }
-        let res = msg.push_handle(make_dummy_handle());
+        let res = msg.push_handle(make_event_handle());
         assert_eq!(res.unwrap_err(), IpcError::MessageTooBig);
     }
 
     #[test]
     fn dropping_message_with_handles_releases_arcs() {
         // Message - strong_count объекта должен упасть до 0.
-        let obj = Arc::new(DummyEvent::new());
+        let obj = Event::new();
         let weak = Arc::downgrade(&obj);
-        let handle = Handle::new(obj, Rights::WAIT);
+        let handle = Handle::new(KObject::Event(obj), Rights::WAIT);
 
         let mut msg = Message::new();
         msg.push_handle(handle).unwrap();
@@ -548,10 +531,13 @@ mod tests {
         let mut receiver_table = HandleTable::new();
 
         // Источник: помещаем в свою таблицу handle на Event.
-        let dummy: Arc<DummyEvent> = Arc::new(DummyEvent::new());
-        let koid_before = dummy.koid();
+        let event = Event::new();
+        let koid_before = KObject::Event(event.clone()).koid();
         let event_id = sender_table
-            .insert(Handle::new(dummy, Rights::WAIT | Rights::TRANSFER))
+            .insert(Handle::new(
+                KObject::Event(event),
+                Rights::WAIT | Rights::TRANSFER,
+            ))
             .unwrap();
 
         // "Системный" write_with_handles: take ownership под локом source
@@ -576,29 +562,12 @@ mod tests {
         let new_id = new_id.unwrap();
 
         // KO жив, его представляет новый handle с теми же правами.
-        let h = receiver_table
-            .get(new_id, Rights::WAIT, ObjectType::Event)
-            .unwrap();
+        let h = receiver_table.get(new_id, Rights::WAIT).unwrap();
         assert_eq!(h.koid(), koid_before);
         assert_eq!(receiver_table.live_count(), 1);
     }
 
-    /// Простейший KO для тестов трансфера.
-    struct DummyEvent;
-
-    impl DummyEvent {
-        fn new() -> Self {
-            Self
-        }
-    }
-
-    impl KernelObject for DummyEvent {
-        fn object_type(&self) -> ObjectType {
-            ObjectType::Event
-        }
-    }
-
-    fn make_dummy_handle() -> Handle {
-        Handle::new(Arc::new(DummyEvent::new()), Rights::WAIT)
+    fn make_event_handle() -> Handle {
+        Handle::new(KObject::Event(Event::new()), Rights::WAIT)
     }
 }

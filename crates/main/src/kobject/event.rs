@@ -5,7 +5,7 @@
 
 use alloc::sync::Arc;
 
-use super::{kernel_object::KernelObject, object_type::ObjectType, wait::SignalState};
+use super::wait::SignalState;
 
 /// Главный битовый сигнал "событие наступило".
 pub const EVENT_SIGNALED: u32 = 1 << 0;
@@ -33,22 +33,8 @@ impl Event {
     }
 
     /// Прямой доступ к [`SignalState`] для интеграции с `object_wait_one`.
-    pub fn signal_state(&self) -> &SignalState {
+    pub fn signals(&self) -> &SignalState {
         &self.signals
-    }
-}
-
-impl KernelObject for Event {
-    fn object_type(&self) -> ObjectType {
-        ObjectType::Event
-    }
-
-    fn signal_state(&self) -> Option<&SignalState> {
-        Some(&self.signals)
-    }
-
-    fn as_event(&self) -> Option<&Event> {
-        Some(self)
     }
 }
 
@@ -79,18 +65,10 @@ mod tests {
     }
 
     #[test]
-    fn metadata_matches() {
-        let event = Event::new();
-        assert_eq!(event.object_type(), ObjectType::Event);
-        // По кollocation Koid у разных Event разные.
-        let other = Event::new();
-        assert_ne!(event.koid(), other.koid());
-    }
-
-    #[test]
-    fn as_event_downcast_works() {
-        let event: Arc<dyn KernelObject> = Event::new();
-        assert!(event.as_event().is_some());
-        assert!(event.as_channel().is_none());
+    fn koid_unique_per_instance() {
+        use crate::kobject::object::KObject;
+        let a = Event::new();
+        let b = Event::new();
+        assert_ne!(KObject::Event(a).koid(), KObject::Event(b).koid());
     }
 }
