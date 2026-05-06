@@ -74,3 +74,14 @@ register_driver!(
 - Ранний возврат для guard-проверок: `if ... { return None; }`
 - Цепочки итераторов предпочтительнее императивных циклов.
 - `unwrap()` / `expect()` только в тестах и одноразовой инициализации; в остальных случаях `?`, `Option::map`, `if let`.
+
+## Boot protocol
+
+Граница между загрузчиком и ядром — `BootInfo` из `hal-common::boot` (`hw_description: HwDescription { Fdt | Acpi }`). `boot_main` принимает `&BootInfo` и не зависит от конкретного протокола.
+
+Реализации протокола живут в `hal-aarch64::boot::protocol` под взаимоисключающими фичами:
+
+- `boot-linux-arm64` (default) — Linux ARM64 Image: `.head` с magic `ARM\x64`, `_start` читает DTB-указатель из `x0`. Покрывает форматы `linux_arm64`, `android_boot_v1`, `android_boot_v2` (различаются только упаковкой).
+- `boot-uefi` — зарезервирована, не реализована.
+
+Конфликт фич ловится `compile_error!` в `protocol/mod.rs`. xtask и `build.rs` выбирают protocol-фичу и линкер-скрипт по `boot.format` из device spec.

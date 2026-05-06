@@ -14,7 +14,6 @@ extern crate alloc;
 extern crate std;
 
 mod boot;
-mod boot_header;
 mod exception;
 mod memory;
 mod sched;

@@ -3,7 +3,7 @@ device:
   arch: aarch64
 
 boot:
-  format: binary
+  format: linux_arm64
   offset: 0x40200000
 
 run: [

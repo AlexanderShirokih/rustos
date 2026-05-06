@@ -47,7 +47,7 @@ device:
   arch: aarch64
 
 boot:
-  format: binary | android_boot_v1 | android_boot_v2
+  format: linux_arm64 | android_boot_v1 | android_boot_v2 | uefi
   offset: 0x40200000
   dtb: /devices/dtb/device.dtb
 
@@ -60,7 +60,7 @@ debug:
 
 | Поле | Описание |
 |---|---|
-| `format` | `binary` (QEMU, RPi), `android_boot_v1`, `android_boot_v2` |
+| `format` | `linux_arm64` (QEMU, RPi), `android_boot_v1`, `android_boot_v2`, `uefi` (WIP) |
 | `offset` | Адрес загрузки ядра (`KERNEL_OFFSET`) |
 | `dtb` | Путь к Device Tree Blob (для Android) |
 | `run` | Команды для `--run` |

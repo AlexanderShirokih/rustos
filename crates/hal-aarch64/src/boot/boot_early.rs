@@ -1,4 +1,4 @@
-//! Pre-MMU фаза загрузки: от точки входа до включения MMU.
+//! Pre-MMU фаза загрузки: protocol-agnostic часть.
 //!
 //! Ограничения этой фазы (higher-half VMA, MMU выключен):
 //! - Абсолютные указатели в данных (vtable, fat ptr data) хранят VMA -> недоступны.
@@ -7,6 +7,7 @@
 use core::{arch::naked_asm, hint::spin_loop};
 
 use fdt::devicetree::DeviceTree;
+use hal_common::boot::{BootInfo, HwDescription};
 use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 
 use super::boot_primary::primary_main;
@@ -19,101 +20,18 @@ use crate::{
 };
 
 unsafe extern "C" {
-    static _stack_top: u8;
-    static _bss_start: u8;
-    static _bss_end: u8;
+    pub(super) static _stack_top: u8;
+    pub(super) static _bss_start: u8;
+    pub(super) static _bss_end: u8;
 }
 
-/// Точка входа ядра. Передаёт управление от загрузчика к `boot_main`.
-#[unsafe(no_mangle)]
-#[unsafe(naked)]
-pub extern "C" fn _start() {
-    naked_asm!(
-        // Сохранение DTB (x0) в callee-saved регистре
-        "mov    x19, x0",
+/// Pre-MMU фаза: BootInfo -> память -> bump allocator -> page tables -> MMU -> jump.
+pub(super) fn boot_main(boot_info: &BootInfo) -> Result<(), ()> {
+    let dtb_phys = match boot_info.hw_description {
+        HwDescription::Fdt(ref blob) => blob.phys.as_usize(),
+        HwDescription::Acpi(_) | _ => return Err(()),
+    };
 
-        // Проверяем EL
-        "mrs    x0, CurrentEL",
-        "cmp    x0, #0x8",          // EL2?
-        "b.ne   1f",                // если не EL2, идём сразу в EL1
-
-        // Обработчик EL2
-
-        // HCR_EL2: EL1 в AArch64
-        "mov    x0, #(1 << 31)",
-        "msr    hcr_el2, x0",
-
-        // Отключение ловушек SIMD/FP
-        "mov    x0, #0x33ff",
-        "msr    cptr_el2, x0",
-
-        // Разрешаем EL1 доступ к физическому таймеру/счётчику
-        "mrs    x0, cnthctl_el2",
-        "orr    x0, x0, #0b11",     // EL1PCTEN | EL1PCEN
-        "msr    cnthctl_el2, x0",
-
-        // SPSR_EL2: возврат в EL1h, DAIF masked
-        "mov    x0, #0x3c5",
-        "msr    spsr_el2, x0",
-        "adr    x0, 1f",
-        "msr    elr_el2, x0",
-        "eret",
-
-        // EL1
-        "1:",
-
-        // Инициализация SP_EL1 (физический адрес через adrp)
-        "msr    spsel, #1",
-        "adrp   x1, {stack_top}",
-        "add    x1, x1, #:lo12:{stack_top}",
-        "mov    sp, x1",
-
-        // Включение FP/SIMD
-        "mrs    x0, cpacr_el1",
-        "orr    x0, x0, #(0x3 << 20)",
-        "msr    cpacr_el1, x0",
-        "isb",
-
-        // Очистка BSS (физические адреса через adrp)
-        "adrp   x0, {bss_start}",
-        "add    x0, x0, #:lo12:{bss_start}",
-        "adrp   x1, {bss_end}",
-        "add    x1, x1, #:lo12:{bss_end}",
-        "cmp    x0, x1",
-        "b.ge   11f",
-        "10:",
-        "str    xzr, [x0], #8",
-        "cmp    x0, x1",
-        "b.lt   10b",
-        "11:",
-
-        // Восстанавливаем DTB в x0 и переходим в boot_main
-        "mov    x0, x19",
-        "b      {boot_main}",
-
-        // Если вернулись - уходим в WaitForEvent
-        "msr    daifset, #0b0010",
-        "20:",
-        "wfe",
-        "b      20b",
-
-        bss_start = sym _bss_start,
-        bss_end   = sym _bss_end,
-        stack_top = sym _stack_top,
-        boot_main = sym boot_main_entry,
-    )
-}
-
-/// Обёртка для вызова из asm (не возвращает управление).
-fn boot_main_entry(dtb_phys: usize) -> ! {
-    let _ = boot_main(dtb_phys);
-    loop {
-        spin_loop();
-    }
-}
-
-/// Pre-MMU фаза: DTB -> память -> bump allocator -> page tables -> MMU -> jump.
-fn boot_main(dtb_phys: usize) -> Result<(), ()> {
     let device_tree = DeviceTree::from_ptr(dtb_phys).map_err(|_| ())?;
 
     // Строим раскладку памяти из DTB + символов линкера (физические адреса через adrp)

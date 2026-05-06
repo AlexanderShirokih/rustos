@@ -66,19 +66,20 @@ fn main() {
     );
 
     let boot_format = spec.boot.format.as_str();
-    match boot_format {
-        "binary" | "android_boot_v1" | "android_boot_v2" => {}
+    let linker_script_name = match boot_format {
+        "linux_arm64" | "android_boot_v1" | "android_boot_v2" => "linker/aarch64-linux.ld",
+        "uefi" => panic!("UEFI boot is declared but not implemented yet"),
         _ => panic!(
-            "Unknown boot.format '{boot_format}'. Expected: binary, android_boot_v1, android_boot_v2"
+            "Unknown boot.format '{boot_format}'. Expected: linux_arm64, android_boot_v1, android_boot_v2, uefi"
         ),
-    }
+    };
 
     // Передаём смещение ядра в линкер (-T должен идти перед --defsym)
     println!(
         "cargo:rustc-link-arg=--defsym=KERNEL_OFFSET={:#x}",
         spec.boot.offset
     );
-    let linker_script = Path::new(&manifest_dir).join("linker/aarch64.ld");
+    let linker_script = Path::new(&manifest_dir).join(linker_script_name);
     println!("cargo:rustc-link-arg=-T{}", linker_script.display());
 
     // Экспорт параметров в env для использования в коде и Makefile

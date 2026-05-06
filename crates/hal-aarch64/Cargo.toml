@@ -10,7 +10,9 @@ path = "src/start.rs"
 test = false
 
 [features]
-default = []
+default = ["boot-linux-arm64"]
+boot-linux-arm64 = []
+boot-uefi = []
 qemu-tests = [
     "main/qemu-tests",
     "dep:qemu-test-harness",

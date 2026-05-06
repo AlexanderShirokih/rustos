@@ -144,11 +144,31 @@ fn load_spec(path: &Path) -> Result<DeviceSpec> {
     let spec: DeviceSpec = serde_yaml::from_reader(file).context("Failed to parse YAML")?;
 
     match spec.boot.format.as_str() {
-        "binary" | "android_boot_v1" | "android_boot_v2" => {}
-        other => bail!("Unknown boot.format '{other}'"),
+        "linux_arm64" | "android_boot_v1" | "android_boot_v2" | "uefi" => {}
+        other => bail!(
+            "Unknown boot.format '{other}'. Expected: linux_arm64, android_boot_v1, android_boot_v2, uefi"
+        ),
     }
 
     Ok(spec)
+}
+
+fn protocol_feature(boot_format: &str) -> &'static str {
+    match boot_format {
+        "linux_arm64" | "android_boot_v1" | "android_boot_v2" => "boot-linux-arm64",
+        "uefi" => "boot-uefi",
+        other => {
+            unreachable!("invalid boot.format '{other}' should have been rejected by load_spec")
+        }
+    }
+}
+
+fn build_features(ctx: &BuildContext) -> String {
+    let protocol = protocol_feature(ctx.spec.boot.format.as_str());
+    match ctx.features.as_deref() {
+        Some(extra) if !extra.is_empty() => format!("{protocol},{extra}"),
+        _ => protocol.to_string(),
+    }
 }
 
 fn run_cmd(cmd: &mut Command) -> Result<ExitStatus> {
@@ -178,6 +198,7 @@ fn run_shell(command: &str, cwd: &Path) -> Result<()> {
 }
 
 fn cargo_build(ctx: &BuildContext) -> Result<()> {
+    let features = build_features(ctx);
     let mut cmd = Command::new("cargo");
     cmd.args([
         "build",
@@ -186,10 +207,10 @@ fn cargo_build(ctx: &BuildContext) -> Result<()> {
         "--target",
         "aarch64-unknown-none",
         "--release",
+        "--no-default-features",
+        "--features",
+        &features,
     ]);
-    if let Some(features) = ctx.features.as_deref() {
-        cmd.args(["--features", features]);
-    }
     cmd.current_dir(&ctx.project_root)
         .env("DEVICE_SPEC", &ctx.spec_path)
         .stdout(Stdio::inherit())
@@ -199,6 +220,7 @@ fn cargo_build(ctx: &BuildContext) -> Result<()> {
 }
 
 fn make_kernel_bin(ctx: &BuildContext) -> Result<()> {
+    let features = build_features(ctx);
     let mut cmd = Command::new("cargo");
     cmd.args([
         "objcopy",
@@ -207,10 +229,10 @@ fn make_kernel_bin(ctx: &BuildContext) -> Result<()> {
         "hal-aarch64",
         "--target",
         "aarch64-unknown-none",
+        "--no-default-features",
+        "--features",
+        &features,
     ]);
-    if let Some(features) = ctx.features.as_deref() {
-        cmd.args(["--features", features]);
-    }
     cmd.args([
         "--",
         "--set-section-flags",
@@ -390,8 +412,9 @@ fn main() -> Result<()> {
             let ctx = BuildContext::new(spec, features)?;
 
             let output = match ctx.spec.boot.format.as_str() {
-                "binary" => build_binary(&ctx)?,
+                "linux_arm64" => build_binary(&ctx)?,
                 "android_boot_v1" | "android_boot_v2" => build_android(&ctx)?,
+                "uefi" => bail!("UEFI boot not implemented yet"),
                 _ => unreachable!(),
             };
 
