@@ -8,7 +8,11 @@ publish.workspace = true
 default = []
 # Под этим флагом kmain после bootstrap'а зовёт `qemu_test_harness::run_all_tests()`
 # из init-таска и завершает QEMU через ARM semihosting.
-qemu-tests = ["dep:qemu-test-harness", "dep:qemu-test-harness-aarch64"]
+qemu-tests = [
+    "dep:qemu-test-harness",
+    "dep:qemu-test-harness-aarch64",
+    "memory/qemu-tests",
+]
 
 [dependencies]
 spin = { workspace = true }

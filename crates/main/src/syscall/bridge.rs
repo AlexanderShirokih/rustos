@@ -73,6 +73,11 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = sys_object_wait_one(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
         }
+        #[cfg(feature = "qemu-tests")]
+        SyscallOp::TestEl0Probe => {
+            crate::qemu_tests::el0_probe::record(frame.arg(0), frame.origin());
+            sys_thread_exit(0);
+        }
     }
 }
 
@@ -101,12 +106,16 @@ fn sys_object_signal(handle: u64, set: u64, clear: u64) -> Result<u64, SyscallEr
 /// маску.
 fn sys_object_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
+    let mask = signals_from_arg(signals);
+    if mask == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
     let timeout = if timeout_ns == 0 {
         None
     } else {
         Some(timeout_ns)
     };
-    let observed = kobject::object_wait_one(id, signals_from_arg(signals), timeout)?;
+    let observed = kobject::object_wait_one(id, mask, timeout)?;
     Ok(u64::from(observed))
 }
 
@@ -180,6 +189,34 @@ mod tests {
     #[test]
     fn object_wait_one_with_zero_handle_is_invalid_argument() {
         let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [0; 6]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    /// `signals == 0` с бессрочным `timeout_ns == 0` припарковал бы
+    /// поток навсегда - отвергаем до того, как wait дойдёт до kobject.
+    #[test]
+    fn object_wait_one_with_empty_mask_and_no_timeout_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, 0, 0, 0, 0, 0]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    /// Пустую маску отвергаем и при ненулевом таймауте: wait всё равно
+    /// никогда не пересечётся с сигналом, поэтому бессмысленен.
+    #[test]
+    fn object_wait_one_with_empty_mask_and_finite_timeout_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, 0, 1_000, 0, 0, 0]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    /// Только верхние 32 бита задают маску -> после `signals_from_arg`
+    /// получим 0, что эквивалентно пустой маске.
+    #[test]
+    fn object_wait_one_with_only_upper_bits_is_invalid_argument() {
+        let upper_only = u64::from(u32::MAX) + 1;
+        let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, upper_only, 0, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }

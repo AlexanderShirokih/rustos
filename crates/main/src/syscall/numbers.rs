@@ -16,6 +16,11 @@ pub enum SyscallOp {
     ThreadExit = 0,
     ObjectSignal = 1,
     ObjectWaitOne = 2,
+    /// Тестовый syscall: фиксирует факт входа в EL0 и завершает thread.
+    /// Доступен только при `feature = "qemu-tests"`. Номер выбран в
+    /// зарезервированной зоне `0xFF00..0xFFFF` для тестов.
+    #[cfg(feature = "qemu-tests")]
+    TestEl0Probe = 0xFF00,
 }
 
 impl SyscallOp {
@@ -24,6 +29,8 @@ impl SyscallOp {
             0 => Ok(Self::ThreadExit),
             1 => Ok(Self::ObjectSignal),
             2 => Ok(Self::ObjectWaitOne),
+            #[cfg(feature = "qemu-tests")]
+            0xFF00 => Ok(Self::TestEl0Probe),
             _ => Err(SyscallError::BadSyscall),
         }
     }

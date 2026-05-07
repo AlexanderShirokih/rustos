@@ -117,11 +117,19 @@ pub struct PageMapper<A: TableAlloc> {
 
 impl<A: TableAlloc> PageMapper<A> {
     /// Создаёт маппер с заданной корневой таблицей и аллокатором.
+    ///
+    /// Table-флаги (PXNTable/UXNTable/APTable) оставляем нулевыми: эти биты
+    /// - иерархическое **ужесточение** (могут только запрещать), и если
+    /// поставить, например, UXNTable=1, то любая leaf-страница ниже становится
+    /// non-executable для EL0 даже при UXN=0 в leaf-дескрипторе. Это ломает
+    /// userspace-маппинги, у которых leaf явно UXN=0 (UserRX). Защита kernel-only
+    /// страниц обеспечивается leaf-флагами (`Heap::flags`/`KernelData::flags`/
+    /// `KernelRoData::flags` и пр. уже выставляют `uxn(true)`/`pxn(true)`).
     pub fn new(root: *mut PageTable<L0>, alloc: A) -> Self {
         Self {
             root,
             alloc,
-            table_flags: TableFlags::new().pxn_table(false).uxn_table(true),
+            table_flags: TableFlags::new(),
         }
     }
 
@@ -206,4 +214,133 @@ pub enum MapError {
     AlreadyMapped,
     /// Ошибка декодирования записи.
     Decode(DecodeError),
+}
+
+/// Ошибка walk/update leaf-записи.
+#[derive(Debug, Eq, PartialEq)]
+pub enum WalkError {
+    /// На каком-то уровне найден Invalid-дескриптор.
+    NotMapped,
+    /// На пути встретился block-mapping (L1=1G или L2=2M).
+    HitBlock,
+    /// Ошибка декодирования записи.
+    Decode(DecodeError),
+}
+
+impl<A: TableAlloc> PageMapper<A> {
+    /// Проходит таблицы L0->L1->L2->L3 и возвращает указатель на L3-таблицу
+    /// и индекс внутри неё для leaf-записи (Page) `virt`.
+    ///
+    /// На L0/L1/L2 ожидается Table-дескриптор; Block (L1=1G, L2=2M) -> `HitBlock`.
+    /// На L3 ожидается Page; иначе -> `NotMapped`.
+    pub fn walk_to_l3_leaf(
+        &self,
+        virt: PageAlignedVirtualAddress,
+    ) -> Result<(*mut PageTable<L3>, usize), WalkError> {
+        let target_va = virt.as_usize();
+
+        let l0 = self.root;
+        // SAFETY: root инициализирован в `Self::new`.
+        let raw_l0 = unsafe { (*l0).get_raw(virt.index::<L0>()) };
+        let l1 = match decode::<L0>(raw_l0).map_err(WalkError::Decode)? {
+            AnyEntry::Invalid(_) => return Err(WalkError::NotMapped),
+            AnyEntry::Table(te) => {
+                let pa = extract_table_pa(te.raw());
+                // SAFETY: `te` извлечён из валидного Table-дескриптора уровня L0,
+                // `alloc.table_ptr` транслирует PA->VA согласно своему контракту.
+                unsafe { self.alloc.table_ptr::<L1>(pa, target_va) }
+            }
+            // L0 не поддерживает Block; Page тут возможен только при сломанном
+            // дескрипторе. В любом случае - это не Table, идти ниже некуда.
+            AnyEntry::Block(_) | AnyEntry::Page(_) => return Err(WalkError::HitBlock),
+        };
+
+        // SAFETY: l1 получен через alloc.table_ptr из валидного Table-дескриптора.
+        let raw_l1 = unsafe { (*l1).get_raw(virt.index::<L1>()) };
+        let l2 = match decode::<L1>(raw_l1).map_err(WalkError::Decode)? {
+            // Invalid - pte отсутствует; Page (на L1 не должен встречаться, но
+            // если встретился - корявый дескриптор) - нечего ремаппить.
+            AnyEntry::Invalid(_) | AnyEntry::Page(_) => return Err(WalkError::NotMapped),
+            AnyEntry::Table(te) => {
+                let pa = extract_table_pa(te.raw());
+                // SAFETY: см. выше.
+                unsafe { self.alloc.table_ptr::<L2>(pa, target_va) }
+            }
+            AnyEntry::Block(_) => return Err(WalkError::HitBlock),
+        };
+
+        // SAFETY: l2 получен через alloc.table_ptr из валидного Table-дескриптора.
+        let raw_l2 = unsafe { (*l2).get_raw(virt.index::<L2>()) };
+        let l3 = match decode::<L2>(raw_l2).map_err(WalkError::Decode)? {
+            // См. комментарий выше для L1.
+            AnyEntry::Invalid(_) | AnyEntry::Page(_) => return Err(WalkError::NotMapped),
+            AnyEntry::Table(te) => {
+                let pa = extract_table_pa(te.raw());
+                // SAFETY: см. выше.
+                unsafe { self.alloc.table_ptr::<L3>(pa, target_va) }
+            }
+            AnyEntry::Block(_) => return Err(WalkError::HitBlock),
+        };
+
+        let idx = virt.index::<L3>();
+        // SAFETY: l3 получен через alloc.table_ptr из валидного Table-дескриптора.
+        let raw_l3 = unsafe { (*l3).get_raw(idx) };
+        // L3 содержит только Page (desc-type 0b11) либо Invalid (0b00).
+        if raw_l3 & 0b11 == 0b11 {
+            Ok((l3, idx))
+        } else {
+            Err(WalkError::NotMapped)
+        }
+    }
+}
+
+/// Маска битов, которые сохраняются при обновлении флагов leaf-записи `Entry<L3, Page>`:
+/// PA (биты `[47:12]`) и desc-type (биты `[1:0]`, для Page всегда `0b11`).
+///
+/// Битовая раскладка page-дескриптора (ARMv8-A, 4К granule):
+/// - `[1:0]`   - desc-type;
+/// - `[4:2]`   - `AttrIndx` (индекс MAIR);
+/// - `[5]`     - `NS` (non-secure);
+/// - `[7:6]`   - `AP` (права доступа EL0/EL1);
+/// - `[9:8]`   - `SH` (shareability);
+/// - `[10]`    - `AF` (access flag);
+/// - `[11]`    - `nG` (not-global);
+/// - `[47:12]` - physical-address биты;
+/// - `[53]`    - `PXN`;
+/// - `[54]`    - `UXN`.
+///
+/// `update_l3_flags` сохраняет PA и desc-type, всё остальное (`AttrIndx`, `AP`,
+/// `SH`, `AF`, `PXN`, `UXN`, …) перезаписывается из `new_flags`. `0xF003` ниже
+/// - это `0b1111_0000_0011`: биты `[1:0]` (desc-type) и `[12:15]`, последние
+/// нужны как часть PA-mask `0x0000_FFFF_FFFF_F000`.
+const LEAF_PA_AND_DESC_MASK: u64 = 0x0000_FFFF_FFFF_F003;
+
+/// Меняет только биты атрибутов в L3-leaf-записи (`table[idx]`), сохраняя PA и desc-type.
+///
+/// Запись 8-байтового выровненного значения single-copy atomic; race с MMU-walker
+/// безопасен. Метод корректен только для **расширения** прав (RX->RW, RO->RW); сужение
+/// требует break-before-make и здесь не реализовано.
+///
+/// # Safety
+///
+/// - `table` валиден и эксклюзивно доступен (вызывающий держит lock на mapper);
+/// - `idx < 512`;
+/// - запись по `idx` имеет desc-type Page (0b11); иначе вернётся `WalkError::NotMapped`
+///   и таблица не изменяется.
+pub unsafe fn update_l3_flags(
+    table: *mut PageTable<L3>,
+    idx: usize,
+    new_flags: Aarch64MemFlags,
+) -> Result<(), WalkError> {
+    // SAFETY: см. контракт.
+    let raw = unsafe { (*table).get_raw(idx) };
+    if raw & 0b11 != 0b11 {
+        return Err(WalkError::NotMapped);
+    }
+    let preserved = raw & LEAF_PA_AND_DESC_MASK;
+    let new_raw = preserved | (new_flags.bits() & !LEAF_PA_AND_DESC_MASK);
+    let entry = Entry::<L3, Page>::from_raw_unchecked(new_raw);
+    // SAFETY: см. контракт.
+    unsafe { (*table).set(idx, entry) };
+    Ok(())
 }

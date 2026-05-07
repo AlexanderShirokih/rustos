@@ -3,7 +3,7 @@
 use collections::LockCell;
 use hal_aarch64_paging::{
     level::{L0, L1, L2, L3, Level},
-    mapper::{MapError, MapLeaf, PageMapper},
+    mapper::{self, MapError, MapLeaf, PageMapper, WalkError},
     mem_flags::Aarch64MemFlags,
     page_table::PageTable,
     table_alloc::TableAlloc,
@@ -12,10 +12,12 @@ use memory::{
     MemFlags,
     aligned::Aligned,
     frame_allocator::FrameAllocator,
-    memory_mapper::{MemoryMapper, MemoryMappingError, MemoryUnmappingError},
+    memory_mapper::{MemoryMapper, MemoryMappingError, MemoryRemappingError, MemoryUnmappingError},
     physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress},
     virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress},
 };
+
+use crate::memory::regs::{common::EL1, tlb::TranslationLookasideBuffer};
 
 /// Адаптер FrameAllocator для выделения таблиц страниц.
 ///
@@ -262,5 +264,69 @@ where
     ) -> Result<(), MemoryUnmappingError> {
         // TODO: решить вопрос с unmapping
         Err(MemoryUnmappingError::Unsupported)
+    }
+
+    #[cfg(feature = "qemu-tests")]
+    fn query_l3_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64> {
+        self.mapper.with_lock(|mapper| {
+            let (l3, idx) = mapper.walk_to_l3_leaf(address).ok()?;
+            // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page.
+            Some(unsafe { (*l3).get_raw(idx) })
+        })
+    }
+
+    fn remap(
+        &self,
+        start_address: PageAlignedVirtualAddress,
+        size: usize,
+        new_flags: MemFlags,
+    ) -> Result<(), MemoryRemappingError> {
+        if size == 0 {
+            return Ok(());
+        }
+        let page_size = PageAlignedVirtualAddress::ALIGNMENT;
+        if !size.is_multiple_of(page_size) {
+            return Err(MemoryRemappingError::MisalignedRange);
+        }
+        let aarch64_flags = Aarch64MemFlags::from_memflags(new_flags);
+
+        let mut any_updated = false;
+        let outcome = self.mapper.with_lock(|mapper| {
+            let mut va = start_address.as_virtual();
+            let mut left = size;
+            while left != 0 {
+                let page = PageAlignedVirtualAddress::new_unchecked(va);
+                let (l3, idx) = mapper
+                    .walk_to_l3_leaf(page)
+                    .map_err(|e| walk_to_remap_err(&e))?;
+                // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page;
+                // mapper-lock держится этим with_lock - эксклюзивный доступ к таблицам.
+                unsafe { mapper::update_l3_flags(l3, idx, aarch64_flags) }
+                    .map_err(|e| walk_to_remap_err(&e))?;
+                any_updated = true;
+                va = va.offset(page_size);
+                left -= page_size;
+            }
+            Ok::<(), MemoryRemappingError>(())
+        });
+
+        // Partial-update semantics: уже изменённые L3 не откатываются, поэтому
+        // TLB надо смыть и на error-пути - иначе CPU может держать stale
+        // permissions для страниц, которые мы успели перезаписать.
+        if any_updated {
+            // TODO: точечная инвалидация (`tlbi vaae1is, addr`) при появлении multi-CPU
+            // или ASID-изоляции; сейчас глобальный sweep на текущем CPU.
+            TranslationLookasideBuffer::<EL1>::invalidate();
+        }
+        outcome
+    }
+}
+
+fn walk_to_remap_err(err: &WalkError) -> MemoryRemappingError {
+    match err {
+        WalkError::HitBlock => MemoryRemappingError::UnsupportedBlockMapping,
+        // Decode error в leaf-walk означает мусор в дескрипторе - для caller'а
+        // практически неотличимо от Invalid: семантически "страница не замаплена".
+        WalkError::NotMapped | WalkError::Decode(_) => MemoryRemappingError::NotMapped,
     }
 }

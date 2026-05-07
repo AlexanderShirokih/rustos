@@ -50,16 +50,22 @@ pub enum Shareability {
     Inner = 0b11,
 }
 
-/// Права доступа (AP).
+/// Права доступа (AP[2:1]).
+///
+/// Кодировка соответствует ARMv8-A Architecture Reference Manual (D5.5.3,
+/// stage-1 attributes table). Раньше у проекта значения `KernelRO`/`UserRW`
+/// были перепутаны местами относительно стандарта - это приводило к тому,
+/// что `UserRW`-маппинг на практике становился `KernelRO`, и user-mode
+/// получал permission fault при первой же инструкции.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Access {
-    /// EL1 чтение/запись.
+    /// EL1 RW, EL0 нет доступа.
     KernelRW = 0b00,
-    /// EL1 только чтение.
-    KernelRO = 0b01,
-    /// EL0/EL1 чтение/запись.
-    UserRW = 0b10,
-    /// EL0/EL1 только чтение.
+    /// EL1 RW, EL0 RW.
+    UserRW = 0b01,
+    /// EL1 RO, EL0 нет доступа.
+    KernelRO = 0b10,
+    /// EL1 RO, EL0 RO.
     UserRO = 0b11,
 }
 
@@ -78,8 +84,8 @@ impl Access {
     const fn from_bits(bits: u64) -> Self {
         match bits & AP_MASK {
             0b00 => Self::KernelRW,
-            0b01 => Self::KernelRO,
-            0b10 => Self::UserRW,
+            0b01 => Self::UserRW,
+            0b10 => Self::KernelRO,
             _ => Self::UserRO,
         }
     }

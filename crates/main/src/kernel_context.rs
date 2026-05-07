@@ -6,7 +6,7 @@ use drivers_common::{
 use memory::{memory_mapper::MemoryMapper, virtual_address::PageAlignedVirtualAddress};
 use spin::Mutex;
 
-use crate::services::mmio::MmioServiceImpl;
+use crate::{services::mmio::MmioServiceImpl, syscall_bridge};
 
 pub struct KernelContext {
     capabilities: Capabilities,
@@ -18,6 +18,8 @@ impl KernelContext {
         memory_mapper: &'static dyn MemoryMapper,
         base_offset: PageAlignedVirtualAddress,
     ) -> KernelContext {
+        syscall_bridge::install_memory_mapper(memory_mapper);
+
         let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl {
             memory_mapper,
             linear_offset: base_offset,

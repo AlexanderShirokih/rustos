@@ -40,6 +40,29 @@ impl Display for MemoryUnmappingError {
     }
 }
 
+/// Ошибки при перемаппинге уже замапленных страниц.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum MemoryRemappingError {
+    /// В диапазоне есть незамапленная страница.
+    NotMapped,
+    /// На пути встретился block-mapping (1G/2M); split не поддерживается.
+    UnsupportedBlockMapping,
+    /// Размер диапазона не кратен 4 КБ.
+    MisalignedRange,
+}
+
+impl Display for MemoryRemappingError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            MemoryRemappingError::NotMapped => f.write_str("Range contains an unmapped page"),
+            MemoryRemappingError::UnsupportedBlockMapping => {
+                f.write_str("Block mapping (1G/2M) cannot be remapped without split")
+            }
+            MemoryRemappingError::MisalignedRange => f.write_str("Range size is not 4K aligned"),
+        }
+    }
+}
+
 /// Трейт маппера памяти для операций виртуальной памяти.
 pub trait MemoryMapper {
     /// Отображает физические фреймы в виртуальную память.
@@ -63,4 +86,24 @@ pub trait MemoryMapper {
         address: PageAlignedVirtualAddress,
         size: usize,
     ) -> Result<(), MemoryUnmappingError>;
+
+    /// Меняет флаги уже замапленного 4К-диапазона на `new_flags` без перевыделения фреймов.
+    ///
+    /// `size` должен быть кратен размеру страницы (4 КБ); диапазон должен быть полностью
+    /// замаплен 4К-страницами. На L1/L2 block-mappings возвращается
+    /// [`MemoryRemappingError::UnsupportedBlockMapping`].
+    ///
+    /// При ошибке посередине диапазона уже применённые обновления НЕ откатываются -
+    /// вызывающий должен передавать диапазоны, в корректности которых уверен.
+    fn remap(
+        &self,
+        start_address: PageAlignedVirtualAddress,
+        size: usize,
+        new_flags: MemFlags,
+    ) -> Result<(), MemoryRemappingError>;
+
+    /// Диагностика для qemu-тестов: возвращает сырое значение L3 leaf-дескриптора
+    /// для `address`. `None` - если страница не замаплена либо лежит в block-mapping.
+    #[cfg(feature = "qemu-tests")]
+    fn query_l3_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64>;
 }
