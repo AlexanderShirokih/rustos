@@ -20,8 +20,8 @@ use main::sched::{
 use memory::{
     MemFlags,
     memory_mapper::{
-        AddressSpaceFactory, AsCreateError, MemoryMapper, MemoryMappingError, MemoryRemappingError,
-        MemoryUnmappingError,
+        AddressSpaceFactory, AddressSpaceHandle, AddressSpaceTag, AsCreateError, MemoryMapper,
+        MemoryMappingError, MemoryRemappingError, MemoryUnmappingError,
     },
     physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::PageAlignedVirtualAddress,
@@ -32,7 +32,8 @@ thread_local! {
     static IRQ_DEPTH: Cell<usize> = const { Cell::new(0) };
     static MAX_IRQ_DEPTH: Cell<usize> = const { Cell::new(0) };
     static CPU_LOCAL_PTR: Cell<usize> = const { Cell::new(0) };
-    static ADDRESS_SPACE_SWITCHES: RefCell<Vec<Option<usize>>> = const { RefCell::new(Vec::new()) };
+    static ADDRESS_SPACE_SWITCHES: RefCell<Vec<Option<AddressSpaceHandle>>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Default)]
@@ -100,9 +101,8 @@ impl ArchContext for MockContext {
         SWITCH_COUNT.with(|c| c.set(c.get() + 1));
     }
 
-    fn switch_address_space(next_root: Option<PhysicalAddress>) {
-        let raw = next_root.map(|pa| pa.as_usize());
-        ADDRESS_SPACE_SWITCHES.with(|c| c.borrow_mut().push(raw));
+    fn switch_address_space(next: Option<AddressSpaceHandle>) {
+        ADDRESS_SPACE_SWITCHES.with(|c| c.borrow_mut().push(next));
     }
 }
 
@@ -165,12 +165,12 @@ pub fn reset_switches() {
 
 /// Извлекает накопленную последовательность вызовов
 /// `MockContext::switch_address_space` и очищает буфер.
-pub fn take_address_space_switches() -> Vec<Option<usize>> {
+pub fn take_address_space_switches() -> Vec<Option<AddressSpaceHandle>> {
     ADDRESS_SPACE_SWITCHES.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
-/// Последний root, переданный в `MockContext::switch_address_space`.
-pub fn last_address_space_root() -> Option<Option<usize>> {
+/// Последний handle, переданный в `MockContext::switch_address_space`.
+pub fn last_address_space_root() -> Option<Option<AddressSpaceHandle>> {
     ADDRESS_SPACE_SWITCHES.with(|c| c.borrow().last().copied())
 }
 
@@ -240,8 +240,8 @@ impl MemoryMapper for MockUserMapper {
         Err(MemoryRemappingError::NotMapped)
     }
 
-    fn root_pa(&self) -> PhysicalAddress {
-        self.root_pa
+    fn activate_handle(&self) -> AddressSpaceHandle {
+        AddressSpaceHandle::new(self.root_pa, AddressSpaceTag::NONE)
     }
 
     #[cfg(feature = "qemu-tests")]

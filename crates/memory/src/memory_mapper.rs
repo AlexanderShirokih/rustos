@@ -7,6 +7,41 @@ use crate::{
     virtual_address::PageAlignedVirtualAddress,
 };
 
+/// Непрозрачный per-AS тег, выдаваемый платформой.
+///
+/// Сама платформа решает, что хранить внутри: monotonic generation + ASID/PCID
+/// или единственное `0` для арх, где тегов нет. Архитектурно-независимый код
+/// никогда не интерпретирует значение, только переносит его между mapper-ом и
+/// `ArchContext::switch_address_space`.
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct AddressSpaceTag(pub u64);
+
+impl AddressSpaceTag {
+    /// Тег, гарантированно соответствующий "пустому" / kernel-only AS.
+    pub const NONE: Self = Self(0);
+
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// Снимок состояния AS, потребный планировщику для активации AS:
+/// корень таблиц трансляции + платформенный тег.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AddressSpaceHandle {
+    pub root: PhysicalAddress,
+    pub tag: AddressSpaceTag,
+}
+
+impl AddressSpaceHandle {
+    #[must_use]
+    pub const fn new(root: PhysicalAddress, tag: AddressSpaceTag) -> Self {
+        Self { root, tag }
+    }
+}
+
 /// Ошибки при маппинге памяти.
 #[derive(Debug, Clone)]
 pub enum MemoryMappingError {
@@ -105,10 +140,9 @@ pub trait MemoryMapper {
         new_flags: MemFlags,
     ) -> Result<(), MemoryRemappingError>;
 
-    /// Физический адрес корня таблиц трансляции, которым владеет mapper.
-    /// Scheduler читает это значение, чтобы записать `TTBR0_EL1` при
-    /// переключении user-AS.
-    fn root_pa(&self) -> PhysicalAddress;
+    /// Возвращает handle на AS, лениво аллоцируя
+    /// платформенный тег. Вызывается на пути активации AS планировщиком.
+    fn activate_handle(&self) -> AddressSpaceHandle;
 
     /// Диагностика для qemu-тестов: возвращает сырое значение leaf-дескриптора
     /// для `address`. `None` - если страница не замаплена либо лежит в block-mapping.

@@ -19,7 +19,7 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 
-use crate::memory::memory_mapper::{Aarch64MemoryMapper, FrameTableAlloc};
+use crate::memory::memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc};
 
 type FrameAllocatorImpl = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
@@ -71,6 +71,7 @@ impl AddressSpaceFactory for Aarch64AddressSpaceFactory {
                 root_ptr,
                 Aarch64MemFlags::new(),
                 offset,
+                AddressSpaceKind::User,
             );
 
         Ok(Box::new(mapper))

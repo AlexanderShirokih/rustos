@@ -3,16 +3,20 @@
 use memory::physical_address::PhysicalAddress;
 
 use crate::{
-    memory::regs::{
-        common::EL1,
-        mair,
-        mair::MemoryAttributeIndirectionRegister,
-        sctrl,
-        sctrl::SystemControlRegister,
-        tcr,
-        tcr::{TranslationControlRegister, TtbrSel},
-        tlb::TranslationLookasideBuffer,
-        ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister},
+    memory::{
+        asid,
+        regs::{
+            common::EL1,
+            id_aa64mmfr0::{AsidWidth, IdAa64Mmfr0},
+            mair,
+            mair::MemoryAttributeIndirectionRegister,
+            sctrl,
+            sctrl::SystemControlRegister,
+            tcr,
+            tcr::{TranslationControlRegister, TtbrSel},
+            tlb::TranslationLookasideBuffer,
+            ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister},
+        },
     },
     system,
 };
@@ -27,10 +31,10 @@ pub struct AddressSpaceConfig<T: TtbrSel> {
 
 /// Конфигурация для включения MMU.
 pub trait MmuConfig {
-    fn lower_half_config(&self) -> AddressSpaceConfig<LowerHalf>;
+    fn lower_half_config(&self, asid_width: AsidWidth) -> AddressSpaceConfig<LowerHalf>;
 
     /// Физический адрес корня таблиц страниц для верхней половины адресного пространства.
-    fn higher_half_config(&self) -> AddressSpaceConfig<HigherHalf>;
+    fn higher_half_config(&self, asid_width: AsidWidth) -> AddressSpaceConfig<HigherHalf>;
 
     /// Свойства памяти для обычной памяти (RAM)
     fn normal_memory_config(&self) -> mair::NormalAttr {
@@ -70,17 +74,17 @@ impl NormalDualSpaceConfig {
 }
 
 impl MmuConfig for NormalDualSpaceConfig {
-    fn lower_half_config(&self) -> AddressSpaceConfig<LowerHalf> {
+    fn lower_half_config(&self, asid_width: AsidWidth) -> AddressSpaceConfig<LowerHalf> {
         AddressSpaceConfig {
             base: self.lower_root,
-            config: tcr::AddressTranslationConfig::create(true),
+            config: tcr::AddressTranslationConfig::create(true, asid_width),
         }
     }
 
-    fn higher_half_config(&self) -> AddressSpaceConfig<HigherHalf> {
+    fn higher_half_config(&self, asid_width: AsidWidth) -> AddressSpaceConfig<HigherHalf> {
         AddressSpaceConfig {
             base: self.higher_root,
-            config: tcr::AddressTranslationConfig::create(true),
+            config: tcr::AddressTranslationConfig::create(true, asid_width),
         }
     }
 }
@@ -127,21 +131,26 @@ impl Mmu<EL1> {
             mair::MairEntry::Device(config.device_memory_config()), // слот #1
         ]));
 
-        // 3) Запись корня таблицы и конфигурации адресации
-        let lower_config = config.lower_half_config();
-        let higher_config = config.higher_half_config();
+        // 3) Runtime-detect ширины ASID - она прокидывается в TCR.AS и в
+        // глобальный аллокатор тегов, чтобы оба видели одинаковый предел.
+        let asid_width = IdAa64Mmfr0::asid_width();
+        asid::init(asid_width);
+
+        // 4) Запись корня таблицы и конфигурации адресации
+        let lower_config = config.lower_half_config(asid_width);
+        let higher_config = config.higher_half_config(asid_width);
 
         Tcr::set(lower_config.config, higher_config.config);
         Ttbr0::set(lower_config.base);
         Ttbr1::set(higher_config.base);
 
-        // 4) Сброс TLB
+        // 5) Сброс TLB
         Tlb::invalidate();
 
-        // 5) Включение MMU + кэшей
+        // 6) Включение MMU + кэшей
         Sctlr::set(config.mmu_config());
 
-        // 6) Барьер после изменения всех регистров
+        // 7) Барьер после изменения всех регистров
         system::barrier::full_system_barrier();
     }
 }

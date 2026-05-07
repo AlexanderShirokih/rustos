@@ -24,7 +24,7 @@ use memory::{
 use crate::memory::{
     global_allocator::{GLOBAL_ALLOCATOR, KernelHeapAllocator},
     layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},
-    memory_mapper::{Aarch64MemoryMapper, FrameTableAlloc},
+    memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
     mmu::{Mmu, NormalDualSpaceConfig},
     regs::common::EL1,
 };
@@ -258,10 +258,20 @@ impl MemorySetup<Prepared> {
     ) -> Result<(), MemorySetupError> {
         let heap_flags = Heap::flags();
 
-        let lower_half_mapper =
-            NoLockAarch64MemoryMapper::new(frame_allocator, roots.lower_ptr, heap_flags);
-        let higher_half_mapper =
-            NoLockAarch64MemoryMapper::new(frame_allocator, roots.higher_ptr, heap_flags);
+        let lower_half_mapper = NoLockAarch64MemoryMapper::new_with_offset(
+            frame_allocator,
+            roots.lower_ptr,
+            heap_flags,
+            0,
+            AddressSpaceKind::Kernel,
+        );
+        let higher_half_mapper = NoLockAarch64MemoryMapper::new_with_offset(
+            frame_allocator,
+            roots.higher_ptr,
+            heap_flags,
+            0,
+            AddressSpaceKind::Kernel,
+        );
 
         Self::map_higher_half_impl(&higher_half_mapper, all_regions, higher_half_base)?;
 
@@ -345,6 +355,7 @@ impl MemorySetup<Enabled> {
                 higher_ptr_rel,
                 Aarch64MemFlags::new(),
                 higher_half_base.as_usize(),
+                AddressSpaceKind::Kernel,
             );
 
         let memory_mapper = Box::new(memory_mapper);

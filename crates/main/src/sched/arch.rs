@@ -3,7 +3,7 @@
 use alloc::boxed::Box;
 use core::{marker::PhantomData, mem::size_of, ptr::NonNull};
 
-use memory::physical_address::PhysicalAddress;
+use memory::memory_mapper::AddressSpaceHandle;
 
 /// Идентификатор CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -175,12 +175,13 @@ pub trait ArchContext: Sized + Send + 'static {
     /// `ThreadStack`-владеемые контексты.
     unsafe fn switch(prev: &mut Self, next: &Self);
 
-    /// Активирует user-AS с корнем `next_root` для текущего CPU; `None` -
+    /// Активирует user-AS, описанный `next` для текущего CPU; `None` -
     /// kernel-only режим (user-mapping недоступен). Реализация обязана
-    /// сбросить кэши трансляций, способные содержать stale-записи прошлого AS.
+    /// гарантировать, что после возврата трансляции прошлого AS не будут
+    /// видимы для текущего CPU.
     ///
     /// Дефолтная реализация пуста: host-тесты с mock-арх не затрагивают MMU.
-    fn switch_address_space(_next_root: Option<PhysicalAddress>) {}
+    fn switch_address_space(_next: Option<AddressSpaceHandle>) {}
 }
 
 /// Операции CPU, требуемые scheduler.

@@ -1,0 +1,11 @@
+[package]
+name = "hal-aarch64-asid"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+collections = { workspace = true }
+
+[lints]
+workspace = true

@@ -7,7 +7,7 @@ use collections::{LockCell, MutexCell};
 use drivers_common::services::scheduler::{
     Priority, SpawnAddressSpace, SpawnConfig, SpawnError, ThreadId,
 };
-use memory::memory_mapper::AddressSpaceFactory;
+use memory::memory_mapper::{AddressSpaceFactory, AddressSpaceHandle};
 
 use super::{
     address_space::AddressSpace,
@@ -24,12 +24,12 @@ const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
 const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
 
 /// Решение scheduler-а о судьбе AS на context switch'е.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum AddressSpaceTransition {
     /// Process не сменился, AS активен - переключение не требуется.
     Keep,
-    /// Process сменился; перед `A::switch` вызвать `switch_address_space(root)`.
-    Switch(Option<memory::physical_address::PhysicalAddress>),
+    /// Process сменился; перед `A::switch` вызвать `switch_address_space(handle)`.
+    Switch(Option<AddressSpaceHandle>),
 }
 
 /// Действие, которое scheduler-инициатор должен выполнить ПОСЛЕ
@@ -227,12 +227,11 @@ where
     /// прыжок через `A::start` и не возвращается.
     pub fn start(self) -> ! {
         <A::Cpu as ArchCpu>::disable_preemption();
-        let (next_ptr, address_space_root) = self
+        let (next_ptr, address_space) = self
             .inner
             .with_lock(SchedulerInner::prepare_first_thread_start);
-        // Перед `eret` в новый thread прописываем TTBR0 для его процесса
-        // (или обнуляем для kernel-thread'а - idle).
-        A::switch_address_space(address_space_root);
+        // Перед `eret` в новый thread активируем его AS (или kernel-only - idle).
+        A::switch_address_space(address_space);
         // SAFETY: `prepare_first_thread_start` под scheduler-lock выбирает первый
         // runnable поток и возвращает указатель на его уже инициализированный
         // архитектурный контекст, который хранится в таблице потоков scheduler-а.
@@ -691,14 +690,12 @@ where
             return AddressSpaceTransition::Keep;
         }
         match self.processes.get(target) {
-            Some(proc) => AddressSpaceTransition::Switch(proc.address_space().root_pa()),
+            Some(proc) => AddressSpaceTransition::Switch(proc.address_space().handle()),
             None => AddressSpaceTransition::Keep,
         }
     }
 
-    fn prepare_first_thread_start(
-        &mut self,
-    ) -> (*const A, Option<memory::physical_address::PhysicalAddress>) {
+    fn prepare_first_thread_start(&mut self) -> (*const A, Option<AddressSpaceHandle>) {
         let now_ns = self.timer.now_ns();
         let cpu = self
             .current_cpu_mut()
@@ -711,12 +708,12 @@ where
 
         cpu.set_current(next_id);
 
-        let address_space_root = self
+        let address_space = self
             .threads
             .get(next_id)
             .map(Thread::process)
             .and_then(|pid| self.processes.get(pid))
-            .and_then(|p| p.address_space().root_pa());
+            .and_then(|p| p.address_space().handle());
 
         let next_ptr = {
             let next = self
@@ -728,7 +725,7 @@ where
             core::ptr::from_ref(next.arch())
         };
         self.schedule_next_deadline(now_ns);
-        (next_ptr, address_space_root)
+        (next_ptr, address_space)
     }
 
     fn schedule_next_deadline(&self, now_ns: u64) {
@@ -795,10 +792,10 @@ pub(super) fn perform_schedule_action<A: ArchContext>(action: ScheduleAction<A>)
     else {
         return;
     };
-    // Process-switch: меняем TTBR0 ДО context_switch, чтобы возобновляемый
+    // Process-switch: активируем AS ДО context_switch, чтобы возобновляемый
     // user-thread проснулся уже в своём адресном пространстве.
-    if let AddressSpaceTransition::Switch(root) = address_space {
-        A::switch_address_space(root);
+    if let AddressSpaceTransition::Switch(handle) = address_space {
+        A::switch_address_space(handle);
     }
     // SAFETY: raw pointers подготовлены под scheduler-lock-ом и валидны до завершения switch.
     unsafe { A::switch(&mut *prev, &*next) };

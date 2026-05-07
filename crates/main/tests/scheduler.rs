@@ -333,9 +333,10 @@ fn switch_between_threads_of_different_processes_changes_address_space() {
     let after_start = take_address_space_switches();
     // Первый switch -> user-a - switch_address_space с Some(root_a).
     assert!(
-        after_start
-            .iter()
-            .any(|sw| matches!(sw, Some(root) if *root == MockAddressSpaceFactory::BASE_ROOT_PA)),
+        after_start.iter().any(|sw| matches!(
+            sw,
+            Some(handle) if handle.root.as_usize() == MockAddressSpaceFactory::BASE_ROOT_PA
+        )),
         "expected switch to user-a root"
     );
 
@@ -344,9 +345,10 @@ fn switch_between_threads_of_different_processes_changes_address_space() {
     // Yield с user-a на user-b - должен быть один switch на root_b.
     let user_b_root = MockAddressSpaceFactory::BASE_ROOT_PA + 4096;
     assert!(
-        after_yield
-            .iter()
-            .any(|sw| matches!(sw, Some(root) if *root == user_b_root)),
+        after_yield.iter().any(|sw| matches!(
+            sw,
+            Some(handle) if handle.root.as_usize() == user_b_root
+        )),
         "expected switch to user-b root, got {:?}",
         after_yield
     );

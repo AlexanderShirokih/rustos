@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/hal-aarch64",
+    "crates/hal-aarch64-asid",
     "crates/hal-aarch64-paging",
     "crates/hal-common",
     "crates/collections",
@@ -41,6 +42,7 @@ fdt = { path = "crates/fdt" }
 memory = { path = "crates/memory" }
 util = { path = "crates/util" }
 hal-common = { path = "crates/hal-common" }
+hal-aarch64-asid = { path = "crates/hal-aarch64-asid" }
 hal-aarch64-paging = { path = "crates/hal-aarch64-paging" }
 drivers-common = { path = "crates/drivers-common" }
 drivers-common-aarch64 = { path = "crates/drivers-common-aarch64" }

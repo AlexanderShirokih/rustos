@@ -309,11 +309,13 @@ impl<A: TableAlloc> PageMapper<A> {
 /// - `[53]`    - `PXN`;
 /// - `[54]`    - `UXN`.
 ///
-/// `update_l3_flags` сохраняет PA и desc-type, всё остальное (`AttrIndx`, `AP`,
-/// `SH`, `AF`, `PXN`, `UXN`, …) перезаписывается из `new_flags`. `0xF003` ниже
-/// - это `0b1111_0000_0011`: биты `[1:0]` (desc-type) и `[12:15]`, последние
-/// нужны как часть PA-mask `0x0000_FFFF_FFFF_F000`.
-const LEAF_PA_AND_DESC_MASK: u64 = 0x0000_FFFF_FFFF_F003;
+/// `update_l3_flags` сохраняет PA, desc-type и бит `nG` (свойство владельца
+/// AS, а не permission'ов - не должно меняться при `remap`); остальное
+/// (`AttrIndx`, `AP`, `SH`, `AF`, `PXN`, `UXN`, …) перезаписывается из
+/// `new_flags`. `0xF803` - это `0b1111_1000_0000_0011`: биты `[1:0]`
+/// (desc-type), `[11]` (nG) и `[12:15]` как часть PA-mask
+/// `0x0000_FFFF_FFFF_F000`.
+const LEAF_PA_AND_DESC_MASK: u64 = 0x0000_FFFF_FFFF_F803;
 
 /// Меняет только биты атрибутов в L3-leaf-записи (`table[idx]`), сохраняя PA и desc-type.
 ///

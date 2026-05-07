@@ -29,6 +29,8 @@ const SH_MASK: u64 = 0b11;
 
 /// Бит Access Flag.
 const AF_BIT: u64 = 1 << 10;
+/// Бит not-Global: страница изолирована тегом адресного пространства.
+const NG_BIT: u64 = 1 << 11;
 /// Бит Privileged Execute-Never.
 const PXN_BIT: u64 = 1 << 53;
 /// Бит Unprivileged Execute-Never.
@@ -162,6 +164,10 @@ impl Aarch64MemFlags {
         self.bit(AF_BIT, on)
     }
 
+    pub const fn ng(self, on: bool) -> Self {
+        self.bit(NG_BIT, on)
+    }
+
     pub const fn pxn(self, on: bool) -> Self {
         self.bit(PXN_BIT, on)
     }
@@ -185,6 +191,10 @@ impl Aarch64MemFlags {
 
     pub const fn get_af(self) -> bool {
         self.get_bit(AF_BIT)
+    }
+
+    pub const fn get_ng(self) -> bool {
+        self.get_bit(NG_BIT)
     }
 
     pub const fn get_pxn(self) -> bool {
@@ -221,6 +231,7 @@ impl Debug for Aarch64MemFlags {
             .field("ap", &self.get_ap())
             .field("attr_idx", &self.get_attr_index())
             .field("af", &self.get_af())
+            .field("ng", &self.get_ng())
             .field("pxn", &self.get_pxn())
             .field("uxn", &self.get_uxn())
             .finish_non_exhaustive()

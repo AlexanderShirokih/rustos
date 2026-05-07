@@ -1,14 +1,14 @@
 use core::{mem, ptr::NonNull};
 
 use main::sched::ArchContext;
-use memory::physical_address::PhysicalAddress;
+use memory::memory_mapper::AddressSpaceHandle;
 
 use super::{
     cpu_local::Aarch64Cpu,
     stack::Aarch64Stack,
     switch::{context_start, context_switch},
 };
-use crate::exception::gpreg::GpReg;
+use crate::{exception::gpreg::GpReg, memory::asid::unpack_asid};
 
 /// Callee-saved состояние потока согласно AAPCS64:
 /// - x19..x28 (10 GPR)
@@ -88,18 +88,22 @@ impl ArchContext for Aarch64Context {
         }
     }
 
-    fn switch_address_space(next_root: Option<PhysicalAddress>) {
-        let raw: u64 = next_root.map_or(0, |pa| pa.as_usize() as u64);
-        // SAFETY: TTBR0_EL1 пишется на EL1; `raw` - 0 либо PA живого L0-root.
-        // Стандартный sequence смены root'а трансляции с TLB-flush.
+    fn switch_address_space(next: Option<AddressSpaceHandle>) {
+        let raw_ttbr: u64 = match next {
+            None => 0,
+            Some(handle) => {
+                let asid = unpack_asid(handle.tag.raw());
+                (u64::from(asid) << 48) | (handle.root.as_usize() as u64)
+            }
+        };
+        // SAFETY: TTBR0_EL1 пишется на EL1; `raw_ttbr` - 0 либо PA живого
+        // L0-root, объединённый с ASID валидного AS. Запись + isb достаточна:
+        // ASID-теги изолируют записи прошлого AS, full-flush не требуется.
         unsafe {
             core::arch::asm!(
                 "msr ttbr0_el1, {root}",
-                "dsb ish",
-                "tlbi vmalle1",
-                "dsb ish",
                 "isb",
-                root = in(reg) raw,
+                root = in(reg) raw_ttbr,
                 options(nostack, preserves_flags),
             );
         }

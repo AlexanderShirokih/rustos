@@ -161,7 +161,7 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
     let user_mapper = user_as.mapper().expect("user variant has mapper");
 
     USER_AS_ROOT.store(
-        user_as.root_pa().expect("user root").as_u64(),
+        user_as.handle().expect("user handle").root.as_u64(),
         Ordering::Release,
     );
     USER_AS_HOLDER.call_once(|| user_as.clone());
@@ -229,11 +229,13 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
             move || {
                 let kstack_top = KSTACK_TOP.load(Ordering::Relaxed) as *mut u8;
                 let kstack_nn = NonNull::new(kstack_top).expect("kstack non-null");
-                // Перед `eret` активируем user-AS (TTBR0). Scheduler сам этого
-                // не сделал бы - worker запущен как kernel-thread (Kernel-AS).
-                let root_raw = USER_AS_ROOT.load(Ordering::Acquire);
-                let root_pa = memory::physical_address::PhysicalAddress::new(root_raw as usize);
-                Aarch64Context::switch_address_space(Some(root_pa));
+                // Перед `eret` активируем user-AS. Scheduler сам этого не
+                // сделал бы - worker запущен как kernel-thread (Kernel-AS),
+                // поэтому берём handle напрямую у владеемого AS.
+                let user_as_arc = USER_AS_HOLDER
+                    .get()
+                    .expect("user AS holder must be set before worker runs");
+                Aarch64Context::switch_address_space(user_as_arc.handle());
                 let ctx =
                     Aarch64Context::init_user(kstack_nn, user_pc, user_stack_top, bootstrap_x0);
                 // SAFETY: ctx инициализирован init_user; start() безусловно

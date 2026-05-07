@@ -7,6 +7,7 @@ use crate::{
     combine_bits,
     memory::regs::{
         common::EL1,
+        id_aa64mmfr0::AsidWidth,
         ttbr::{HigherHalf, LowerHalf},
     },
     write_sysreg,
@@ -104,6 +105,14 @@ impl TCRBit {
         Self(0b010 << 32)
     }
 
+    /// Бит `TCR_EL1.AS` (bit 36): `0` - 8-bit ASID, `1` - 16-bit.
+    pub const fn asid_size(width: AsidWidth) -> Self {
+        match width {
+            AsidWidth::Bits8 => Self(0),
+            AsidWidth::Bits16 => Self(1 << 36),
+        }
+    }
+
     const fn encode(self) -> u64 {
         self.0
     }
@@ -149,7 +158,11 @@ impl<T: TtbrSel> AddressTranslationConfig<T> {
     }
 
     /// Создаёт стандартную конфигурацию.
-    pub const fn create(enable: bool) -> Self {
+    ///
+    /// `asid_width` определяет глобальный бит `AS` (bit 36); итоговое значение
+    /// побитово OR'ится с конфигом второй половины - поэтому достаточно
+    /// передать ширину один раз (в любом из двух вызовов).
+    pub const fn create(enable: bool, asid_width: AsidWidth) -> Self {
         Self::combine(&[
             TCRBit::size_48bit::<T>(),
             TCRBit::irgn_wb_wa::<T>(),
@@ -158,6 +171,7 @@ impl<T: TtbrSel> AddressTranslationConfig<T> {
             TCRBit::tg_4k::<T>(),
             TCRBit::epd::<T>(enable),
             TCRBit::ips_40bit(),
+            TCRBit::asid_size(asid_width),
         ])
     }
 }

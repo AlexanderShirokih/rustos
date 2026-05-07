@@ -196,6 +196,7 @@ dependencies = [
  "drivers-common",
  "drivers-common-aarch64",
  "fdt",
+ "hal-aarch64-asid",
  "hal-aarch64-paging",
  "hal-common",
  "io",
@@ -207,6 +208,13 @@ dependencies = [
  "serde",
  "serde_yaml",
  "spin",
+]
+
+[[package]]
+name = "hal-aarch64-asid"
+version = "0.1.0"
+dependencies = [
+ "collections",
 ]
 
 [[package]]

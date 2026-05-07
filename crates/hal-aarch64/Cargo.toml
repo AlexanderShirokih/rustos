@@ -20,6 +20,7 @@ qemu-tests = [
 ]
 
 [dependencies]
+hal-aarch64-asid = { workspace = true }
 hal-aarch64-paging = { workspace = true }
 hal-common = { workspace = true }
 drivers-common-aarch64 = { workspace = true }

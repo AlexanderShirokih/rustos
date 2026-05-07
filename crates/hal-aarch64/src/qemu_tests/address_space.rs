@@ -113,7 +113,7 @@ fn make_user_as_with_probe_page(sentinel: u64) -> (Arc<AddressSpace>, *mut u8) {
 /// Активирует user-AS и читает первое 8-байтное значение по `PROBE_VA`.
 /// через TTBR0_EL1, поэтому видит содержимое user-страницы.
 fn read_probe_via_user_as(user_as: &AddressSpace) -> u64 {
-    Aarch64Context::switch_address_space(user_as.root_pa());
+    Aarch64Context::switch_address_space(user_as.handle());
     // SAFETY: PROBE_VA валиден в активном user-AS, страница UserRW (kernel
     // тоже имеет RW по флагам), 8-байтное чтение выровнено.
     unsafe {
@@ -140,12 +140,13 @@ fn process_a_and_b_see_distinct_memory_at_same_va() {
 
 fn ttbr0_is_switched_on_process_change() {
     let (as_a, _) = make_user_as_with_probe_page(0xDEAD_BEEF);
-    let root_a_pa = as_a.root_pa().expect("user AS has root").as_u64();
+    let handle_a = as_a.handle().expect("user AS has handle");
+    let root_a_pa = handle_a.root.as_u64();
 
-    Aarch64Context::switch_address_space(as_a.root_pa());
+    Aarch64Context::switch_address_space(Some(handle_a));
     let ttbr0_after = read_ttbr0();
-    // На AArch64 TTBR0_EL1 биты [47:1] хранят адрес таблицы; младший бит CnP
-    // и старшие - ASID. Сравниваем по PA-mask 4К-страницы.
+    // TTBR0_EL1[47:12] хранит адрес таблицы; [63:48] - ASID. Сравниваем по
+    // PA-mask 4К-страницы.
     qemu_test_harness::kassert_eq!(ttbr0_after & 0x0000_FFFF_FFFF_F000, root_a_pa);
 
     // Возврат в kernel-AS.
@@ -159,7 +160,7 @@ fn ttbr0_is_switched_on_process_change() {
 
 fn kernel_thread_after_user_has_ttbr0_zero() {
     let (as_a, _) = make_user_as_with_probe_page(0x1234_5678);
-    Aarch64Context::switch_address_space(as_a.root_pa());
+    Aarch64Context::switch_address_space(as_a.handle());
     qemu_test_harness::kassert!(read_ttbr0() != 0);
     Aarch64Context::switch_address_space(None);
     qemu_test_harness::kassert_eq!(read_ttbr0(), 0);
@@ -176,9 +177,10 @@ fn user_thread_exit_releases_address_space_frames() {
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
     let user_as = AddressSpace::new_user(factory).expect("create user AS");
-    let root_before = user_as.root_pa().expect("root").as_u64();
+    let handle = user_as.handle().expect("root");
+    let root_before = handle.root.as_u64();
 
-    Aarch64Context::switch_address_space(user_as.root_pa());
+    Aarch64Context::switch_address_space(Some(handle));
     qemu_test_harness::kassert_eq!(read_ttbr0() & 0x0000_FFFF_FFFF_F000, root_before);
 
     // Возвращаемся в kernel-AS, потом drop - иначе TLB удержит трансляции

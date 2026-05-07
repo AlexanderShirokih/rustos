@@ -1,9 +1,6 @@
 use alloc::{boxed::Box, sync::Arc};
 
-use memory::{
-    memory_mapper::{AddressSpaceFactory, AsCreateError, MemoryMapper},
-    physical_address::PhysicalAddress,
-};
+use memory::memory_mapper::{AddressSpaceFactory, AddressSpaceHandle, AsCreateError, MemoryMapper};
 
 /// Адресное пространство процесса.
 ///
@@ -31,12 +28,14 @@ impl AddressSpace {
         Ok(Arc::new(Self::User(mapper)))
     }
 
-    /// Корень таблиц трансляции, передаваемый
+    /// Handle, передаваемый
     /// [`super::ArchContext::switch_address_space`]. `None` - kernel-AS.
-    pub fn root_pa(&self) -> Option<PhysicalAddress> {
+    /// Может лениво аллоцировать платформенный тег, поэтому вызывать только
+    /// на пути активации.
+    pub fn handle(&self) -> Option<AddressSpaceHandle> {
         match self {
             Self::Kernel => None,
-            Self::User(mapper) => Some(mapper.root_pa()),
+            Self::User(mapper) => Some(mapper.activate_handle()),
         }
     }
 

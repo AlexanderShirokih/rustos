@@ -1,5 +1,7 @@
 //! Маппинг виртуальных адресов на физические для AArch64.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use collections::LockCell;
 use hal_aarch64_paging::{
     level::{L0, L1, L2, L3, Level},
@@ -12,12 +14,18 @@ use memory::{
     MemFlags,
     aligned::Aligned,
     frame_allocator::FrameAllocator,
-    memory_mapper::{MemoryMapper, MemoryMappingError, MemoryRemappingError, MemoryUnmappingError},
+    memory_mapper::{
+        AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
+        MemoryRemappingError, MemoryUnmappingError,
+    },
     physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress},
     virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress},
 };
 
-use crate::memory::regs::{common::EL1, tlb::TranslationLookasideBuffer};
+use crate::memory::{
+    asid::{self, unpack_asid},
+    regs::{common::EL1, tlb::TranslationLookasideBuffer},
+};
 
 /// Адаптер FrameAllocator для выделения таблиц страниц.
 ///
@@ -55,6 +63,16 @@ impl<FA: FrameAllocator> TableAlloc for FrameTableAlloc<'_, FA> {
     }
 }
 
+/// Какому адресному пространству принадлежит маппер.
+///
+/// Различение влияет на `nG` leaf-страниц (kernel - global, user - per-ASID)
+/// и на стратегию TLB-инвалидации в `remap`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AddressSpaceKind {
+    Kernel,
+    User,
+}
+
 /// Маппер памяти для AArch64.
 pub struct Aarch64MemoryMapper<'a, FA, L>
 where
@@ -69,6 +87,11 @@ where
     root_pa: PhysicalAddress,
     /// Внутренний маппер таблиц страниц.
     mapper: L,
+    /// Текущий тег AS (`0` - никогда не активирован). Lazy-allocated на пути
+    /// `activate_handle`.
+    asid_tag: AtomicU64,
+    /// Kernel или user - определяет `nG` leaf-страниц и стратегию TLB-flush.
+    kind: AddressSpaceKind,
 }
 
 // SAFETY: доступ к page-tables сериализован `LockCell`, frame-аллокатор синхронизирует
@@ -92,20 +115,17 @@ where
     FA: FrameAllocator,
     L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 {
-    /// Создаёт маппер с identity mapping.
-    pub fn new(
-        frame_allocator: &'a FA,
-        root_ptr: *mut PageTable<L0>,
-        mem_flags: Aarch64MemFlags,
-    ) -> Self {
-        Self::new_with_offset(frame_allocator, root_ptr, mem_flags, 0)
-    }
-
+    /// Создаёт маппер с заданным offset для трансляции PA->VA таблиц
+    /// (`0` - identity mapping для boot до включения MMU).
+    ///
+    /// `kind` определяет роль AS: kernel-маппинги global, user-маппинги
+    /// получают `nG=1` и per-AS ASID-тег на пути `activate_handle`.
     pub fn new_with_offset(
         frame_allocator: &'a FA,
         root_ptr: *mut PageTable<L0>,
         mem_flags: Aarch64MemFlags,
         vaddr_offset: usize,
+        kind: AddressSpaceKind,
     ) -> Self {
         // PA = VA - vaddr_offset. До MMU vaddr_offset=0 (identity), после MMU
         // - higher_half_base. Для свежевыделенных user-root таблиц передаётся
@@ -119,7 +139,13 @@ where
                 root_ptr,
                 FrameTableAlloc::new(frame_allocator, vaddr_offset),
             )),
+            asid_tag: AtomicU64::new(0),
+            kind,
         }
+    }
+
+    fn leaf_flags(&self, base: Aarch64MemFlags) -> Aarch64MemFlags {
+        base.ng(matches!(self.kind, AddressSpaceKind::User))
     }
 
     pub fn map_exact_impl(
@@ -135,6 +161,7 @@ where
 
         let page_size = PageAlignedAddress::ALIGNMENT;
         let total_size = size.div_ceil(page_size) * page_size;
+        let mem_flags = self.leaf_flags(mem_flags);
 
         self.mapper.with_lock(|mapper| {
             let mut remaining = total_size;
@@ -243,7 +270,7 @@ where
 
         let page_size = PageAlignedVirtualAddress::ALIGNMENT;
         let page_count = size.div_ceil(page_size);
-        let mem_flags = self.mem_flags;
+        let mem_flags = self.leaf_flags(self.mem_flags);
         let frame_allocator = self.frame_allocator;
 
         self.mapper.with_lock(|mapper| {
@@ -289,8 +316,16 @@ where
         Err(MemoryUnmappingError::Unsupported)
     }
 
-    fn root_pa(&self) -> PhysicalAddress {
-        self.root_pa
+    fn activate_handle(&self) -> AddressSpaceHandle {
+        match self.kind {
+            AddressSpaceKind::Kernel => {
+                AddressSpaceHandle::new(self.root_pa, AddressSpaceTag::NONE)
+            }
+            AddressSpaceKind::User => {
+                let (_, raw) = asid::acquire(&self.asid_tag);
+                AddressSpaceHandle::new(self.root_pa, AddressSpaceTag(raw))
+            }
+        }
     }
 
     #[cfg(feature = "qemu-tests")]
@@ -315,10 +350,10 @@ where
         if !size.is_multiple_of(page_size) {
             return Err(MemoryRemappingError::MisalignedRange);
         }
-        let aarch64_flags = Aarch64MemFlags::from_memflags(new_flags);
+        let aarch64_flags = self.leaf_flags(Aarch64MemFlags::from_memflags(new_flags));
+        let asid = unpack_asid(self.asid_tag.load(Ordering::Acquire));
 
-        let mut any_updated = false;
-        let outcome = self.mapper.with_lock(|mapper| {
+        self.mapper.with_lock(|mapper| {
             let mut va = start_address.as_virtual();
             let mut left = size;
             while left != 0 {
@@ -330,22 +365,29 @@ where
                 // mapper-lock держится этим with_lock - эксклюзивный доступ к таблицам.
                 unsafe { mapper::update_l3_flags(l3, idx, aarch64_flags) }
                     .map_err(|e| walk_to_remap_err(&e))?;
-                any_updated = true;
+
+                match self.kind {
+                    AddressSpaceKind::User => {
+                        // Если AS ещё ни разу не активировался (asid == 0),
+                        // TLB для него заведомо пуст - `tlbi` не нужен.
+                        if asid != 0 {
+                            TranslationLookasideBuffer::<EL1>::invalidate_va_asid(
+                                page.as_usize(),
+                                asid,
+                            );
+                        }
+                    }
+                    AddressSpaceKind::Kernel => {
+                        // Kernel-маппинги global - инвалидируем VA во всех ASID.
+                        TranslationLookasideBuffer::<EL1>::invalidate_va_global(page.as_usize());
+                    }
+                }
+
                 va = va.offset(page_size);
                 left -= page_size;
             }
             Ok::<(), MemoryRemappingError>(())
-        });
-
-        // Partial-update semantics: уже изменённые L3 не откатываются, поэтому
-        // TLB надо смыть и на error-пути - иначе CPU может держать stale
-        // permissions для страниц, которые мы успели перезаписать.
-        if any_updated {
-            // TODO: точечная инвалидация (`tlbi vaae1is, addr`) при появлении multi-CPU
-            // или ASID-изоляции; сейчас глобальный sweep на текущем CPU.
-            TranslationLookasideBuffer::<EL1>::invalidate();
-        }
-        outcome
+        })
     }
 }
 
