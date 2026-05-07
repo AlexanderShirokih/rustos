@@ -1,6 +1,7 @@
 use core::{mem, ptr::NonNull};
 
 use main::sched::ArchContext;
+use memory::physical_address::PhysicalAddress;
 
 use super::{
     cpu_local::Aarch64Cpu,
@@ -83,6 +84,23 @@ impl ArchContext for Aarch64Context {
             context_switch(
                 core::ptr::from_mut::<Self>(prev),
                 core::ptr::from_ref::<Self>(next),
+            );
+        }
+    }
+
+    fn switch_address_space(next_root: Option<PhysicalAddress>) {
+        let raw: u64 = next_root.map_or(0, |pa| pa.as_usize() as u64);
+        // SAFETY: TTBR0_EL1 пишется на EL1; `raw` - 0 либо PA живого L0-root.
+        // Стандартный sequence смены root'а трансляции с TLB-flush.
+        unsafe {
+            core::arch::asm!(
+                "msr ttbr0_el1, {root}",
+                "dsb ish",
+                "tlbi vmalle1",
+                "dsb ish",
+                "isb",
+                root = in(reg) raw,
+                options(nostack, preserves_flags),
             );
         }
     }

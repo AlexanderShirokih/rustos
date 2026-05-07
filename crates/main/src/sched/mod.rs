@@ -10,6 +10,7 @@ pub mod thread;
 pub mod thread_table;
 pub mod wait_queue;
 
+pub use address_space::AddressSpace;
 pub use arch::{
     ArchContext, ArchCpu, CpuId, StackError, ThreadStack, ThreadStackAllocator, TimerSource,
     with_preemption_disabled,

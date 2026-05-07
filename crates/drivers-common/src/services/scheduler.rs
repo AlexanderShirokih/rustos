@@ -54,12 +54,25 @@ impl Priority {
     }
 }
 
+/// Выбор адресного пространства для нового потока.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnAddressSpace {
+    /// Унаследовать AS текущего процесса. Используется при `Scheduler::spawn`
+    /// из user-thread'а: новый thread живёт в том же AS.
+    Inherit,
+    /// Kernel-thread: общий kernel-AS.
+    Kernel,
+    /// Новый user-AS: scheduler создаёт через `AddressSpaceFactory`.
+    User,
+}
+
 /// Конфигурация нового потока.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpawnConfig {
     pub name: &'static str,
     pub priority: Priority,
     pub stack_pages: usize,
+    pub address_space: SpawnAddressSpace,
 }
 
 impl SpawnConfig {
@@ -70,6 +83,7 @@ impl SpawnConfig {
             name,
             priority: Priority::NORMAL,
             stack_pages: Self::DEFAULT_STACK_PAGES,
+            address_space: SpawnAddressSpace::Kernel,
         }
     }
 
@@ -82,15 +96,26 @@ impl SpawnConfig {
         self.stack_pages = stack_pages;
         self
     }
+
+    pub const fn address_space(mut self, address_space: SpawnAddressSpace) -> Self {
+        self.address_space = address_space;
+        self
+    }
 }
 
 /// Ошибки запуска и управления потоком.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnError {
+    /// Все слоты в `ThreadTable` заняты.
     NoFreeThreadSlots,
+    /// `cfg.priority.raw() >= priority_levels` конфигурации scheduler-а.
     InvalidPriority,
+    /// `cfg.stack_pages == 0`.
     InvalidStackPages,
+    /// `ThreadStackAllocator::allocate` вернул ошибку.
     StackAllocationFailed,
+    /// Не удалось создать новое адресное пространство для `User`.
+    AddressSpaceCreationFailed,
 }
 
 /// Контракт сервиса планировщика.

@@ -15,7 +15,7 @@
 use alloc::sync::Arc;
 
 use drivers_common::services::scheduler::SchedulerService;
-use memory::memory_mapper::MemoryMapper;
+use memory::memory_mapper::{AddressSpaceFactory, MemoryMapper};
 use spin::Once;
 
 static SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
@@ -37,6 +37,18 @@ unsafe impl Sync for MemoryMapperPtr {}
 unsafe impl Send for MemoryMapperPtr {}
 
 static MEMORY_MAPPER: Once<MemoryMapperPtr> = Once::new();
+
+/// Глобальная фабрика user-AS. Регистрируется один раз при инициализации
+/// памяти; используется scheduler-ом для создания нового адресного
+/// пространства при spawn user-thread.
+struct AddressSpaceFactoryPtr(&'static dyn AddressSpaceFactory);
+// SAFETY: трейт уже требует `Send + Sync`; маркер нужен только чтобы
+// поместить `&'static dyn`-указатель в Once.
+unsafe impl Sync for AddressSpaceFactoryPtr {}
+// SAFETY: см. Sync.
+unsafe impl Send for AddressSpaceFactoryPtr {}
+
+static ADDRESS_SPACE_FACTORY: Once<AddressSpaceFactoryPtr> = Once::new();
 
 /// Регистрирует `SchedulerService`. Должна вызываться ровно один раз;
 /// повторный вызов - bug в порядке инициализации.
@@ -72,4 +84,20 @@ pub fn memory_mapper() -> &'static dyn MemoryMapper {
         .get()
         .expect("MemoryMapper должен быть установлен в syscall_bridge::install_memory_mapper")
         .0
+}
+
+/// Регистрирует глобальную `AddressSpaceFactory`. Должна вызываться ровно один
+/// раз (из [`KernelContext::new`]).
+pub fn install_address_space_factory(factory: &'static dyn AddressSpaceFactory) {
+    assert!(
+        ADDRESS_SPACE_FACTORY.get().is_none(),
+        "AddressSpaceFactory is already installed in syscall bridge"
+    );
+    let _ = ADDRESS_SPACE_FACTORY.call_once(|| AddressSpaceFactoryPtr(factory));
+}
+
+/// Доступ к глобальной `AddressSpaceFactory`. Возвращает `None`, если фабрика
+/// не зарегистрирована (тесты с MockContext).
+pub fn address_space_factory() -> Option<&'static dyn AddressSpaceFactory> {
+    ADDRESS_SPACE_FACTORY.get().map(|p| p.0)
 }

@@ -15,7 +15,7 @@ use memory::{
     FrameBitmap,
     bump_allocator::BumpAllocator,
     frame_allocator::{FrameAllocator, PhysicalFrameAllocator},
-    memory_mapper::MemoryMapper,
+    memory_mapper::{AddressSpaceFactory, MemoryMapper},
     memory_range::MemoryRange,
     physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::PageAlignedVirtualAddress,
@@ -49,6 +49,7 @@ pub struct Installed {
 
 pub struct MemoryManagerResult {
     pub memory_mapper: Box<dyn MemoryMapper>,
+    pub address_space_factory: Box<dyn AddressSpaceFactory>,
     pub base_offset: PageAlignedVirtualAddress,
 }
 
@@ -348,10 +349,18 @@ impl MemorySetup<Enabled> {
 
         let memory_mapper = Box::new(memory_mapper);
 
+        let address_space_factory = Box::new(
+            crate::memory::address_space_factory::Aarch64AddressSpaceFactory::new(
+                fa_virt,
+                higher_half_base,
+            ),
+        );
+
         Mmu::<EL1>::disable_lower_half();
 
         MemoryManagerResult {
             memory_mapper,
+            address_space_factory,
             base_offset: higher_half_base,
         }
     }

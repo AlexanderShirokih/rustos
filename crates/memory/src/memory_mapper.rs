@@ -1,7 +1,10 @@
+use alloc::boxed::Box;
 use core::fmt::{Display, Formatter};
 
 use crate::{
-    MemFlags, physical_address::PageAlignedAddress, virtual_address::PageAlignedVirtualAddress,
+    MemFlags,
+    physical_address::{PageAlignedAddress, PhysicalAddress},
+    virtual_address::PageAlignedVirtualAddress,
 };
 
 /// Ошибки при маппинге памяти.
@@ -102,8 +105,36 @@ pub trait MemoryMapper {
         new_flags: MemFlags,
     ) -> Result<(), MemoryRemappingError>;
 
-    /// Диагностика для qemu-тестов: возвращает сырое значение L3 leaf-дескриптора
+    /// Физический адрес корня таблиц трансляции, которым владеет mapper.
+    /// Scheduler читает это значение, чтобы записать `TTBR0_EL1` при
+    /// переключении user-AS.
+    fn root_pa(&self) -> PhysicalAddress;
+
+    /// Диагностика для qemu-тестов: возвращает сырое значение leaf-дескриптора
     /// для `address`. `None` - если страница не замаплена либо лежит в block-mapping.
     #[cfg(feature = "qemu-tests")]
-    fn query_l3_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64>;
+    fn query_leaf_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64>;
+}
+
+/// Ошибки создания нового user-AS через [`AddressSpaceFactory`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsCreateError {
+    /// Не удалось выделить фрейм под корень таблиц.
+    OutOfMemory,
+}
+
+impl Display for AsCreateError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AsCreateError::OutOfMemory => f.write_str("Out of memory"),
+        }
+    }
+}
+
+/// Фабрика user-адресных пространств.
+///
+/// Создаёт пустой `MemoryMapper` с собственным L0-root, выделенным из
+/// physical frame allocator. Используется scheduler-ом при spawn user-thread.
+pub trait AddressSpaceFactory: Send + Sync {
+    fn create_user(&self) -> Result<Box<dyn MemoryMapper + Send + Sync>, AsCreateError>;
 }

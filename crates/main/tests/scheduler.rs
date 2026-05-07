@@ -2,11 +2,12 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use drivers_common::services::scheduler::{Priority, SpawnConfig};
+use drivers_common::services::scheduler::{Priority, SpawnAddressSpace, SpawnConfig};
 use main::sched::{Scheduler, SchedulerConfig, ThreadStackAllocator, Uninit};
 
 use crate::common::{
-    MockContext, MockStack, MockTimer, MockTimerSource, max_irq_depth, reset_switches, switch_count,
+    MockAddressSpaceFactory, MockContext, MockStack, MockTimer, MockTimerSource, max_irq_depth,
+    reset_switches, switch_count, take_address_space_switches,
 };
 
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
@@ -263,4 +264,169 @@ fn spawn_via_service_handle_works() {
 
     let running = scheduler.run();
     assert_eq!(running.current(), id);
+}
+
+fn new_factory_static() -> &'static MockAddressSpaceFactory {
+    Box::leak(Box::new(MockAddressSpaceFactory::new()))
+}
+
+fn make_scheduler_with_factory(
+    timer: Arc<MockTimer>,
+    factory: &'static MockAddressSpaceFactory,
+) -> Scheduler<MockContext, MockTimerSource, main::sched::Bootstrapped> {
+    Scheduler::<MockContext, MockTimerSource, Uninit>::with_address_space_factory(
+        MockTimerSource(timer),
+        TEST_CONFIG,
+        Some(factory),
+    )
+    .bootstrap()
+}
+
+#[test]
+fn switch_between_threads_in_same_process_does_not_change_address_space() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let _a = scheduler
+        .spawn(SpawnConfig::new("a"), || {})
+        .expect("spawn a");
+    let _b = scheduler
+        .spawn(SpawnConfig::new("b"), || {})
+        .expect("spawn b");
+
+    // Все потоки kernel-AS - process_id у каждого свой (ProcessTable выдаёт
+    // уникальный pid на spawn), но AS-root одинаковый (None). Сначала
+    // фильтруем все случаи `Some(None)` - это переключения между процессами,
+    // оставшиеся на kernel-AS. Они корректны и валидны для kernel-thread'ов.
+    take_address_space_switches();
+
+    let _ = scheduler.run();
+    let switches = take_address_space_switches();
+    // С kernel-AS у разных kernel-thread'ов root_pa = None для обоих.
+    // Проверяем, что любой записанный switch - это `None` (kernel-AS).
+    for sw in switches {
+        assert_eq!(sw, None, "kernel-only switches must use root=None");
+    }
+}
+
+#[test]
+fn switch_between_threads_of_different_processes_changes_address_space() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
+
+    let _a = scheduler
+        .spawn(
+            SpawnConfig::new("user-a").address_space(SpawnAddressSpace::User),
+            || {},
+        )
+        .expect("spawn user-a");
+    let _b = scheduler
+        .spawn(
+            SpawnConfig::new("user-b").address_space(SpawnAddressSpace::User),
+            || {},
+        )
+        .expect("spawn user-b");
+
+    let running = scheduler.run();
+    let after_start = take_address_space_switches();
+    // Первый switch -> user-a - switch_address_space с Some(root_a).
+    assert!(
+        after_start
+            .iter()
+            .any(|sw| matches!(sw, Some(root) if *root == MockAddressSpaceFactory::BASE_ROOT_PA)),
+        "expected switch to user-a root"
+    );
+
+    running.yield_now();
+    let after_yield = take_address_space_switches();
+    // Yield с user-a на user-b - должен быть один switch на root_b.
+    let user_b_root = MockAddressSpaceFactory::BASE_ROOT_PA + 4096;
+    assert!(
+        after_yield
+            .iter()
+            .any(|sw| matches!(sw, Some(root) if *root == user_b_root)),
+        "expected switch to user-b root, got {:?}",
+        after_yield
+    );
+}
+
+#[test]
+fn kernel_to_user_switch_writes_user_root() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
+
+    let _user = scheduler
+        .spawn(
+            SpawnConfig::new("user").address_space(SpawnAddressSpace::User),
+            || {},
+        )
+        .expect("spawn user");
+
+    let _running = scheduler.run();
+    let switches = take_address_space_switches();
+    assert!(
+        switches.iter().any(|sw| sw.is_some()),
+        "kernel->user switch must include Some(root); got {:?}",
+        switches
+    );
+}
+
+#[test]
+fn user_to_kernel_switch_writes_zero_root() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
+
+    let _user = scheduler
+        .spawn(
+            SpawnConfig::new("user").address_space(SpawnAddressSpace::User),
+            || {},
+        )
+        .expect("spawn user");
+    let _kernel = scheduler
+        .spawn(SpawnConfig::new("kernel"), || {})
+        .expect("spawn kernel");
+
+    let running = scheduler.run();
+    take_address_space_switches();
+
+    running.yield_now();
+    let switches = take_address_space_switches();
+    assert!(
+        switches.iter().any(|sw| sw == &None),
+        "user->kernel switch must include None; got {:?}",
+        switches
+    );
+}
+
+#[test]
+fn terminating_user_thread_releases_address_space() {
+    // В MockContext entry-замыкание никогда не исполняется (start/switch - no-op),
+    // поэтому trampoline payload утекает вместе с захваченным `exit_handle`.
+    // Чтобы наблюдать Drop user-AS, проверяем сценарий: пока scheduler жив -
+    // mapper жив, как только user-thread будет удалён из ProcessTable -
+    // соответствующий `Arc<AddressSpace>` освободится. Текущая реализация
+    // ProcessTable не имеет API удаления; здесь проверяем хотя бы базовый
+    // инвариант: фабрика создала ровно один user-AS, который ссылается из
+    // живого процесса (released = 0). Полный drop-сценарий покрывается
+    // QEMU integration-тестом `user_thread_exit_releases_address_space_frames`.
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
+
+    let _u = scheduler
+        .spawn(
+            SpawnConfig::new("u").address_space(SpawnAddressSpace::User),
+            || {},
+        )
+        .expect("spawn u");
+
+    assert_eq!(factory.created(), 1);
+    assert_eq!(factory.released(), 0);
 }

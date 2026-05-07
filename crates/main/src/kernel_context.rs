@@ -3,7 +3,10 @@ use alloc::sync::Arc;
 use drivers_common::{
     Capabilities, CapabilityStoreMutExt, RuntimeDriverRegistry, services::mmio::MmioService,
 };
-use memory::{memory_mapper::MemoryMapper, virtual_address::PageAlignedVirtualAddress};
+use memory::{
+    memory_mapper::{AddressSpaceFactory, MemoryMapper},
+    virtual_address::PageAlignedVirtualAddress,
+};
 use spin::Mutex;
 
 use crate::{services::mmio::MmioServiceImpl, syscall_bridge};
@@ -16,9 +19,11 @@ pub struct KernelContext {
 impl KernelContext {
     pub fn new(
         memory_mapper: &'static dyn MemoryMapper,
+        address_space_factory: &'static dyn AddressSpaceFactory,
         base_offset: PageAlignedVirtualAddress,
     ) -> KernelContext {
         syscall_bridge::install_memory_mapper(memory_mapper);
+        syscall_bridge::install_address_space_factory(address_space_factory);
 
         let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl {
             memory_mapper,

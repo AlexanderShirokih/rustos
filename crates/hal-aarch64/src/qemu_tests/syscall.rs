@@ -1,10 +1,9 @@
 //! End-to-end проверка syscall-слоя через kernel-side `SVC`.
 //!
-//! EL0-режим в текущей реализации не активирован (per-process
-//! AddressSpace и TTBR0/ASID-isolation отложены), поэтому диспатчер
-//! обрабатывает SVC одинаково независимо от уровня. Это позволяет
-//! покрыть весь путь "vector -> exception_entry -> syscall::dispatch ->
-//! handler -> kobject" из обычного kernel-thread'а.
+//! Диспатчер обрабатывает SVC одинаково независимо от уровня, поэтому
+//! kernel-thread может покрыть весь путь "vector -> exception_entry ->
+//! syscall::dispatch -> handler -> kobject" простым `svc #imm`. EL0-вход
+//! отдельно проверяется в [`super::userspace_entry`].
 
 use core::arch::asm;
 

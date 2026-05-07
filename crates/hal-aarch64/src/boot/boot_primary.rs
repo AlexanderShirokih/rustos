@@ -63,8 +63,11 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
 
     let memory_mapper: &'static dyn memory::memory_mapper::MemoryMapper =
         Box::leak(result.memory_mapper);
+    let address_space_factory: &'static dyn memory::memory_mapper::AddressSpaceFactory =
+        Box::leak(result.address_space_factory);
     let kernel = Box::leak(Box::new(KernelContext::new(
         memory_mapper,
+        address_space_factory,
         result.base_offset,
     )));
 

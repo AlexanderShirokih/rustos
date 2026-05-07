@@ -206,6 +206,7 @@ dependencies = [
  "qemu-test-harness-aarch64",
  "serde",
  "serde_yaml",
+ "spin",
 ]
 
 [[package]]

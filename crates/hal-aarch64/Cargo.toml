@@ -31,6 +31,7 @@ collections = { workspace = true }
 fdt = { workspace = true }
 io = { workspace = true }
 klog = { workspace = true }
+spin = { workspace = true }
 qemu-test-harness = { workspace = true, optional = true }
 qemu-test-harness-aarch64 = { workspace = true, optional = true }
 

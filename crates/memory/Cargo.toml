@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 default = []
-# Включает диагностические API (например, `MemoryMapper::query_l3_raw`),
+# Включает диагностические API (например, `MemoryMapper::query_leaf_raw`),
 # нужные интеграционным QEMU-тестам ядра.
 qemu-tests = []
 

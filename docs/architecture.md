@@ -75,6 +75,28 @@ register_driver!(
 - Цепочки итераторов предпочтительнее императивных циклов.
 - `unwrap()` / `expect()` только в тестах и одноразовой инициализации; в остальных случаях `?`, `Option::map`, `if let`.
 
+## Per-process AddressSpace
+
+Каждому пользовательскому процессу принадлежит собственная нижняя половина
+виртуального адресного пространства (`TTBR0_EL1` на AArch64); kernel-side
+TTBR1 общий для всего ядра.
+
+Ключевые точки:
+
+- `main::sched::AddressSpace` — платформо-независимый wrapper:
+  - `Kernel` — TTBR0=0, kernel-only;
+  - `User(Box<dyn MemoryMapper + Send + Sync>)` — собственный L0-root.
+- `memory::memory_mapper::AddressSpaceFactory` — фабрика user-AS;
+  реализуется в `hal-aarch64::memory::address_space_factory` поверх
+  глобального `FrameAllocator`.
+- `ArchContext::switch_address_space(Option<PhysicalAddress>)` — кросс-арх
+  точка переключения root'а трансляции; на AArch64 пишет TTBR0_EL1 +
+  делает `tlbi vmalle1`. В host-моке — счётчик-наблюдатель.
+- `SchedulerInner::switch_to_next` сравнивает `process_id` prev/next;
+  при изменении вызывает `switch_address_space` ДО `A::switch`.
+- `SpawnConfig::address_space(SpawnAddressSpace)` управляет выбором AS
+  для нового потока: `Kernel` (по умолчанию), `Inherit`, `NewUser`.
+
 ## Boot protocol
 
 Граница между загрузчиком и ядром — `BootInfo` из `hal-common::boot` (`hw_description: HwDescription { Fdt | Acpi }`). `boot_main` принимает `&BootInfo` и не зависит от конкретного протокола.

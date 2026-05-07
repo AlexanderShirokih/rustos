@@ -65,8 +65,26 @@ where
     frame_allocator: &'a FA,
     /// Флаги памяти по умолчанию.
     mem_flags: Aarch64MemFlags,
+    /// Физический адрес корня таблиц.
+    root_pa: PhysicalAddress,
     /// Внутренний маппер таблиц страниц.
     mapper: L,
+}
+
+// SAFETY: доступ к page-tables сериализован `LockCell`, frame-аллокатор синхронизирует
+// `&self`-методы внутри.
+unsafe impl<'a, FA, L> Send for Aarch64MemoryMapper<'a, FA, L>
+where
+    FA: FrameAllocator,
+    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
+{
+}
+// SAFETY: см. комментарий к `Send`.
+unsafe impl<'a, FA, L> Sync for Aarch64MemoryMapper<'a, FA, L>
+where
+    FA: FrameAllocator,
+    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
+{
 }
 
 impl<'a, FA, L> Aarch64MemoryMapper<'a, FA, L>
@@ -89,9 +107,14 @@ where
         mem_flags: Aarch64MemFlags,
         vaddr_offset: usize,
     ) -> Self {
+        // PA = VA - vaddr_offset. До MMU vaddr_offset=0 (identity), после MMU
+        // - higher_half_base. Для свежевыделенных user-root таблиц передаётся
+        // PA напрямую (см. конструктор фабрики).
+        let root_pa = PhysicalAddress::new((root_ptr as usize).wrapping_sub(vaddr_offset));
         Self {
             frame_allocator,
             mem_flags,
+            root_pa,
             mapper: L::new(PageMapper::new(
                 root_ptr,
                 FrameTableAlloc::new(frame_allocator, vaddr_offset),
@@ -266,8 +289,12 @@ where
         Err(MemoryUnmappingError::Unsupported)
     }
 
+    fn root_pa(&self) -> PhysicalAddress {
+        self.root_pa
+    }
+
     #[cfg(feature = "qemu-tests")]
-    fn query_l3_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64> {
+    fn query_leaf_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64> {
         self.mapper.with_lock(|mapper| {
             let (l3, idx) = mapper.walk_to_l3_leaf(address).ok()?;
             // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page.
