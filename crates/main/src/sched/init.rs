@@ -20,6 +20,7 @@ use super::{
 use crate::{
     kernel_context::KernelContext,
     kobject::{KernelRuntime, install_runtime},
+    syscall_bridge,
 };
 
 /// Адаптер `TimerService` (capability) -> `TimerSource` (требование scheduler).
@@ -71,11 +72,12 @@ where
     let runtime: Arc<dyn KernelRuntime> = handle;
 
     kernel.with_runtime_state(|caps, _| {
-        caps.provide_service::<dyn SchedulerService>(service)
+        caps.provide_service::<dyn SchedulerService>(service.clone())
             .expect("SchedulerService registration must succeed");
     });
     timer.set_handler(tick_handler);
     install_runtime(runtime);
+    syscall_bridge::install_scheduler(service);
 
     scheduler
 }

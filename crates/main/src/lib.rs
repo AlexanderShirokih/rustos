@@ -12,6 +12,8 @@ pub mod kernel_context;
 pub mod kmain;
 pub mod kobject;
 pub mod sched;
+pub mod syscall;
+pub mod syscall_bridge;
 #[cfg(not(feature = "qemu-tests"))]
 pub mod timer_server;
 

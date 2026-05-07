@@ -19,6 +19,9 @@ mod memory;
 mod sched;
 mod system;
 
+#[cfg(feature = "qemu-tests")]
+mod qemu_tests;
+
 extern crate drivers_common_aarch64;
 
 /// База higher-half (верхняя половина адресного пространства).

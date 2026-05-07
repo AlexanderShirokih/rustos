@@ -32,6 +32,15 @@ impl HandleId {
         self.0
     }
 
+    /// Восстанавливает [`HandleId`] из сырого 32-битного значения.
+    ///
+    /// Корректность пары `(generation, slot)` валидируется при первом
+    /// обращении к `HandleTable` - ошибочные id отвергаются как
+    /// `IpcError::BadHandle`.
+    pub fn from_raw(raw: NonZeroU32) -> Self {
+        Self(raw)
+    }
+
     pub(super) fn generation(self) -> u16 {
         (self.0.get() >> Self::SLOT_BITS) as u16
     }

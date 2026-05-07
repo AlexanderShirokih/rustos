@@ -5,7 +5,10 @@ use core::{
 
 use collections::StaticString;
 
-use super::{esr::Esr, gpreg::GpReg};
+use super::{
+    esr::{Esr, ExceptionClass},
+    gpreg::GpReg,
+};
 use crate::write_sysreg;
 
 /// Ёмкость stack-буфера для диагностики исключений (байт).
@@ -152,7 +155,12 @@ extern "C" fn exception_handler(frame: &mut ExceptionFrame, kind: ExceptionKind)
 }
 
 /// Обработчик синхронных исключений
-fn sync_handler(frame: &ExceptionFrame) {
+fn sync_handler(frame: &mut ExceptionFrame) {
+    if frame.esr.exception_class() == ExceptionClass::Svc {
+        main::syscall::dispatch(frame);
+        return;
+    }
+
     let ec = frame.esr.exception_class();
     let iss = frame.esr.iss();
 
