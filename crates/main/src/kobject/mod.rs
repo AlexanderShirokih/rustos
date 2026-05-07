@@ -25,7 +25,10 @@ mod rights;
 mod runtime;
 mod wait;
 
-pub use api::{install_handle, object_signal, object_wait_one};
+pub use api::{
+    channel_create, channel_read, channel_write, handle_close, handle_duplicate, install_handle,
+    object_signal, object_wait_one,
+};
 pub use channel::{
     CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, DEFAULT_CHANNEL_CAPACITY,
     MESSAGE_INLINE_MAX, MESSAGE_MAX_HANDLES, Message,

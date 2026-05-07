@@ -21,7 +21,10 @@ use super::{
     error::{SyscallError, encode_return},
     numbers::SyscallOp,
 };
-use crate::{kobject, syscall_bridge::scheduler};
+use crate::{
+    kobject::{self, Rights},
+    syscall_bridge::scheduler,
+};
 
 /// Источник syscall-вызова.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +47,11 @@ pub trait SyscallFrame {
     /// Записать возвращаемое значение в регистр-возврата фрейма.
     /// Не вызывается для not-returning syscall'ов (`thread_exit`).
     fn set_return(&mut self, value: i64);
+
+    /// Записать дополнительное возвращаемое значение во второй
+    /// регистр-возврата фрейма. Используется syscall'ами с парным
+    /// результатом - сейчас [`SyscallOp::ChannelCreate`].
+    fn set_secondary_return(&mut self, value: u64);
 
     /// Контекст, из которого был сделан вызов.
     fn origin(&self) -> Origin;
@@ -71,6 +79,17 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         }
         SyscallOp::ObjectWaitOne => {
             let r = sys_object_wait_one(frame.arg(0), frame.arg(1), frame.arg(2));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ChannelCreate => {
+            sys_channel_create(frame);
+        }
+        SyscallOp::HandleClose => {
+            let r = sys_handle_close(frame.arg(0));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::HandleDuplicate => {
+            let r = sys_handle_duplicate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
         #[cfg(feature = "qemu-tests")]
@@ -119,6 +138,43 @@ fn sys_object_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64
     Ok(u64::from(observed))
 }
 
+/// `channel_create()` - создаёт пару endpoint'ов и регистрирует оба
+/// handle'а в текущей handle-table. На успехе записывает `left_id`
+/// в основной регистр возврата, `right_id` - во вторичный.
+/// Это позволяет вернуть пару `NonZeroU32` без ABI-конфликта с
+/// отрицательным кодированием ошибок. Endpoint'ы симметричны -
+/// любая сторона годится как "локальная".
+fn sys_channel_create(frame: &mut dyn SyscallFrame) {
+    match kobject::channel_create() {
+        Ok((left_id, right_id)) => {
+            frame.set_secondary_return(u64::from(right_id.raw().get()));
+            frame.set_return(i64::from(left_id.raw().get()));
+        }
+        Err(e) => frame.set_return(SyscallError::from(e).into()),
+    }
+}
+
+/// `handle_close(handle)` - изымает handle из таблицы и закрывает.
+/// Возвращает `0` на успехе.
+fn sys_handle_close(handle: u64) -> Result<u64, SyscallError> {
+    let id = parse_handle_id(handle)?;
+    kobject::handle_close(id)?;
+    Ok(0)
+}
+
+/// `handle_duplicate(handle, new_rights)` - создаёт копию handle'а с
+/// подмножеством прав. Возвращает сырой `HandleId` нового handle'а.
+/// `new_rights` берётся из нижних 32 бит аргумента; неизвестные биты
+/// отбрасываются [`Rights::from_bits_truncate`].
+fn sys_handle_duplicate(handle: u64, new_rights: u64) -> Result<u64, SyscallError> {
+    let id = parse_handle_id(handle)?;
+    let rights_bits = u32::try_from(new_rights & u64::from(u32::MAX))
+        .expect("masking guarantees value fits into u32");
+    let rights = Rights::from_bits_truncate(rights_bits);
+    let new_id = kobject::handle_duplicate(id, rights)?;
+    Ok(u64::from(new_id.raw().get()))
+}
+
 /// 32-битная сигнальная маска из аргумента syscall'а. Верхние биты
 /// игнорируются - ABI фиксирует, что биты сигналов живут в нижних 32-х.
 fn signals_from_arg(raw: u64) -> u32 {
@@ -144,6 +200,7 @@ mod tests {
         pub args: [u64; 6],
         pub origin: Origin,
         pub returned: Option<i64>,
+        pub secondary: Option<u64>,
     }
 
     impl MockFrame {
@@ -153,6 +210,7 @@ mod tests {
                 args,
                 origin: Origin::User,
                 returned: None,
+                secondary: None,
             }
         }
     }
@@ -166,6 +224,9 @@ mod tests {
         }
         fn set_return(&mut self, value: i64) {
             self.returned = Some(value);
+        }
+        fn set_secondary_return(&mut self, value: u64) {
+            self.secondary = Some(value);
         }
         fn origin(&self) -> Origin {
             self.origin
@@ -237,5 +298,19 @@ mod tests {
         // `HandleId::from_raw` принимает любой `NonZeroU32`.
         let h = parse_handle_id(0x0001_0001).expect("non-zero handle id");
         assert_eq!(h.raw().get(), 0x0001_0001);
+    }
+
+    #[test]
+    fn handle_close_with_zero_handle_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::HandleClose as u16, [0; 6]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    #[test]
+    fn handle_duplicate_with_zero_handle_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::HandleDuplicate as u16, [0, 0, 0, 0, 0, 0]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 }

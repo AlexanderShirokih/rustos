@@ -2,19 +2,16 @@
 //! `Result<_, IpcError>`. Внутри идёт через [`runtime()`](super::runtime)
 //! к per-process `HandleTable` и scheduler-у. Никакой `KObject` наружу
 //! не утекает.
-//!
-//! Сейчас реализована только операция [`object_wait_one`] - её хватит
-//! для pilot-демо timer-сервиса. Остальные функции (`channel_*`,
-//! `handle_close`, ...) добавятся по мере миграции конкретных сервисов
-//! и помечены `// TODO(kobject-migration)`.
 
 use alloc::sync::Arc;
 
 use collections::LockCell;
 
 use super::{
+    channel::{ChannelEndpoint, Message},
     errors::IpcError,
     handle::{Handle, HandleId},
+    object::KObject,
     rights::Rights,
     runtime::{ParkState, runtime},
     wait::ParkWaker,
@@ -106,4 +103,84 @@ pub fn object_wait_one(
             }
         }
     }
+}
+
+/// Создаёт пару связанных `ChannelEndpoint` и регистрирует оба handle'а
+/// в handle-table текущего процесса. Возвращает пару идентификаторов
+/// `(left, right)` - endpoint'ы симметричны, любую сторону можно
+/// использовать как "свою" и передавать парную через
+/// [`Message::push_handle`]. Стартовые права берутся из
+/// [`Rights::defaults_for`].
+///
+/// При неудаче регистрации второго handle'а первый автоматически
+/// снимается из таблицы (без утечки слота).
+pub fn channel_create() -> Result<(HandleId, HandleId), IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+
+    let (left_endpoint, right_endpoint) = ChannelEndpoint::create_pair(0);
+
+    let left_ko = KObject::Channel(left_endpoint);
+    let right_ko = KObject::Channel(right_endpoint);
+    let left_handle = Handle::new(left_ko.clone(), Rights::defaults_for(&left_ko));
+    let right_handle = Handle::new(right_ko.clone(), Rights::defaults_for(&right_ko));
+
+    table.with_lock(|tbl| {
+        let left_id = tbl.insert(left_handle)?;
+        match tbl.insert(right_handle) {
+            Ok(right_id) => Ok((left_id, right_id)),
+            Err(e) => {
+                // Снимаем уже зарегистрированный левый endpoint, чтобы
+                // не оставлять в таблице "висящий" handle.
+                let _ = tbl.remove(left_id);
+                Err(e)
+            }
+        }
+    })
+}
+
+/// Помещает сообщение в парный endpoint канала, на который указывает
+/// `handle_id`. Требует [`Rights::WRITE`]; на не-channel handle -
+/// `WrongType`.
+pub fn channel_write(handle_id: HandleId, msg: Message) -> Result<(), IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let endpoint = table.with_lock(|tbl| tbl.get_channel(handle_id, Rights::WRITE))?;
+    endpoint.write(msg)
+}
+
+/// Достаёт сообщение из inbound-очереди endpoint'а, на который
+/// указывает `handle_id`. Требует [`Rights::READ`]; на не-channel
+/// handle - `WrongType`. Если очередь пуста - `ShouldWait` (или
+/// `PeerClosed`, если парный endpoint закрыт).
+pub fn channel_read(handle_id: HandleId) -> Result<Message, IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let endpoint = table.with_lock(|tbl| tbl.get_channel(handle_id, Rights::READ))?;
+    endpoint.read()
+}
+
+/// Закрывает handle: изымает его из таблицы и дропает (последний `Arc`
+/// на KO - закрывает объект). На несуществующем id - `BadHandle`.
+/// Прав на handle не требует.
+pub fn handle_close(handle_id: HandleId) -> Result<(), IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let removed = table.with_lock(|tbl| tbl.remove(handle_id))?;
+    drop(removed);
+    Ok(())
+}
+
+/// Создаёт новый handle на тот же KO с подмножеством прав. Требует
+/// [`Rights::DUPLICATE`] на исходном handle и `new_rights ⊆ rights`
+/// (иначе - `AccessDenied`).
+pub fn handle_duplicate(handle_id: HandleId, new_rights: Rights) -> Result<HandleId, IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    table.with_lock(|tbl| tbl.duplicate(handle_id, new_rights))
 }

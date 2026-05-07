@@ -32,6 +32,10 @@ impl SyscallFrame for ExceptionFrame {
         self.regs[0] = value.cast_unsigned().into();
     }
 
+    fn set_secondary_return(&mut self, value: u64) {
+        self.regs[1] = value.into();
+    }
+
     fn origin(&self) -> Origin {
         if (self.spsr & SPSR_M_MASK) == 0 {
             Origin::User

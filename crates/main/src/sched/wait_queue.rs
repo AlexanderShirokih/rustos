@@ -1,5 +1,5 @@
 use alloc::collections::{BinaryHeap, VecDeque};
-use core::cmp::Ordering;
+use core::cmp::Reverse;
 
 use drivers_common::services::scheduler::ThreadId;
 
@@ -26,30 +26,15 @@ impl WaitQueue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SleepEntry {
     pub wakeup_at_ns: u64,
     pub thread_id: ThreadId,
 }
 
-impl Ord for SleepEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .wakeup_at_ns
-            .cmp(&self.wakeup_at_ns)
-            .then_with(|| other.thread_id.cmp(&self.thread_id))
-    }
-}
-
-impl PartialOrd for SleepEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 #[derive(Default)]
 pub struct SleepQueue {
-    entries: BinaryHeap<SleepEntry>,
+    entries: BinaryHeap<Reverse<SleepEntry>>,
 }
 
 impl SleepQueue {
@@ -58,14 +43,14 @@ impl SleepQueue {
     }
 
     pub fn push(&mut self, entry: SleepEntry) {
-        self.entries.push(entry);
+        self.entries.push(Reverse(entry));
     }
 
     pub fn peek(&self) -> Option<&SleepEntry> {
-        self.entries.peek()
+        self.entries.peek().map(|Reverse(e)| e)
     }
 
     pub fn pop(&mut self) -> Option<SleepEntry> {
-        self.entries.pop()
+        self.entries.pop().map(|Reverse(e)| e)
     }
 }

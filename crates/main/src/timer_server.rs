@@ -21,8 +21,9 @@ use drivers_common::services::scheduler::{
 use klog::{info, warn};
 
 use crate::kobject::{
-    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, Event, Handle, IpcError, KObject,
-    Message, Rights, install_handle, object_signal, object_wait_one,
+    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, Event, Handle, HandleId, IpcError,
+    KObject, Message, Rights, channel_read, channel_write, install_handle, object_signal,
+    object_wait_one,
 };
 
 /// Бит сигнала "timer expired". Convention протокола timer-server'а:
@@ -113,7 +114,7 @@ fn run_server(scheduler: &Arc<dyn SchedulerService>, server_end: &Arc<ChannelEnd
             }
         }
 
-        let msg = match server_end.read() {
+        let msg = match channel_read(chan_id) {
             Ok(msg) => msg,
             Err(IpcError::ShouldWait) => continue,
             Err(IpcError::PeerClosed) => {
@@ -149,7 +150,7 @@ fn handle_command(scheduler: &Arc<dyn SchedulerService>, event: &Arc<Event>, msg
 /// Клиентская сторона pilot: устанавливает channel- и timer-handle'ы
 /// в свою handle-table и возвращает их идентификаторы. Используется
 /// демо-процессом из [`crate::kmain`].
-pub fn pilot_client_subscribe(client_end: Arc<ChannelEndpoint>) -> Result<PilotHandles, IpcError> {
+pub fn pilot_client_subscribe(client_end: &Arc<ChannelEndpoint>) -> Result<PilotHandles, IpcError> {
     let chan_ko = KObject::Channel(client_end.clone());
     let chan_id = install_handle(Handle::new(
         chan_ko,
@@ -158,7 +159,7 @@ pub fn pilot_client_subscribe(client_end: Arc<ChannelEndpoint>) -> Result<PilotH
 
     // Первое сообщение от сервера: handle на Event-сигнал таймера.
     object_wait_one(chan_id, CHANNEL_READABLE, None)?;
-    let mut welcome = client_end.read()?;
+    let mut welcome = channel_read(chan_id)?;
 
     let mut drained = welcome.drain_handles();
     let timer_handle = drained.next().ok_or(IpcError::BadHandle)?;
@@ -174,27 +175,21 @@ pub fn pilot_client_subscribe(client_end: Arc<ChannelEndpoint>) -> Result<PilotH
 
     let timer_id = install_handle(timer_handle)?;
 
-    Ok(PilotHandles {
-        chan_id,
-        timer_id,
-        client_end,
-    })
+    Ok(PilotHandles { chan_id, timer_id })
 }
 
-/// Кортеж handle-id'ов плюс владеющий `Arc` на client-end канала
-/// (нужен для прямого `write`; в полноценной IPC API будет
-/// `channel_write(handle_id, msg)`).
+/// Пара handle-id'ов клиента pilot-сервиса: канал к серверу и Event,
+/// сигналимый при наступлении дедлайна.
 pub struct PilotHandles {
-    pub chan_id: crate::kobject::HandleId,
-    pub timer_id: crate::kobject::HandleId,
-    pub client_end: Arc<ChannelEndpoint>,
+    pub chan_id: HandleId,
+    pub timer_id: HandleId,
 }
 
 /// Один шаг pilot-loop'а: послать SET_DEADLINE, дождаться сигнала и
 /// "потребить" его (очистить бит), чтобы следующий wait снова блокировал.
 pub fn pilot_tick(handles: &PilotHandles, period_ms: u64) -> Result<(), IpcError> {
     object_signal(handles.timer_id, 0, TIMER_SIGNALED)?;
-    handles.client_end.write(encode_set_deadline(period_ms))?;
+    channel_write(handles.chan_id, encode_set_deadline(period_ms))?;
     let observed = object_wait_one(handles.timer_id, TIMER_SIGNALED, None)?;
     debug_assert_eq!(observed & TIMER_SIGNALED, TIMER_SIGNALED);
     Ok(())

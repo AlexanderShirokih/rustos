@@ -169,8 +169,6 @@ fn spawn_init_process<A>(
 fn spawn_demo_processes(scheduler_service: &Arc<dyn SchedulerService>) {
     use crate::timer_server::{pilot_client_subscribe, pilot_tick, spawn_timer_server};
 
-    // TODO(kobject-migration): после миграции остальных сервисов на kobject-IPC
-    // удалить ветку `legacy` и `dyn TimerService`.
     let client_end =
         spawn_timer_server(scheduler_service).expect("timer-server spawn must succeed");
 
@@ -178,7 +176,7 @@ fn spawn_demo_processes(scheduler_service: &Arc<dyn SchedulerService>) {
         .spawn(
             SpawnConfig::new("test-process").priority(Priority::normal()),
             move || {
-                let handles = match pilot_client_subscribe(client_end) {
+                let handles = match pilot_client_subscribe(&client_end) {
                     Ok(h) => h,
                     Err(e) => {
                         klog::warn!("pilot subscribe failed: {:?}", e);

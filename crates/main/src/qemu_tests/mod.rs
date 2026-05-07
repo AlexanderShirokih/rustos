@@ -25,6 +25,7 @@ use crate::kernel_context::KernelContext;
 
 mod allocator;
 mod channel;
+mod channel_full_api;
 pub mod el0_probe;
 mod event;
 mod event_via_scheduler;
