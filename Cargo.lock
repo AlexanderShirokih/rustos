@@ -291,7 +291,6 @@ dependencies = [
  "klog",
  "memory",
  "qemu-test-harness",
- "qemu-test-harness-aarch64",
  "spin",
 ]
 

@@ -68,5 +68,8 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
         result.base_offset,
     )));
 
+    #[cfg(feature = "qemu-tests")]
+    qemu_test_harness::runner::install_backend(&qemu_test_harness_aarch64::BACKEND);
+
     kmain::<Aarch64Context>(driver_scanner, kernel, buffered, SCHED_CONFIG)
 }

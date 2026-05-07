@@ -179,7 +179,7 @@ pub trait ArchCpu: Send + Sync + 'static {
     fn current_id() -> CpuId;
 
     /// Сохраняет указатель на per-CPU состояние (`Cpu`) в архитектурно-определённом
-    /// CPU-local регистре (например, `TPIDR_EL1` на AArch64).
+    /// CPU-local регистре.
     ///
     /// # Safety
     /// Указатель должен жить всё время жизни CPU. После вызова scheduler начинает

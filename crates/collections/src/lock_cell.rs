@@ -36,11 +36,11 @@ impl CriticalSection for NoCriticalSection {
     fn enter() -> Self::Guard {}
 }
 
-/// Критическая секция через маскировку IRQ в DAIF (AArch64).
+/// Критическая секция через маскировку IRQ в регистре DAIF.
 ///
-/// Доступна только на bare-metal aarch64 (`target_os = "none"`). На
-/// hosted-OS под aarch64 (macOS, Linux) `msr daifset` запрещён в
-/// user-space и вызывает SIGILL - поэтому host-сборки используют
+/// Доступна только в bare-metal окружении (`target_os = "none"`). В
+/// hosted-окружении на aarch64 (macOS, Linux) инструкция `msr daifset`
+/// запрещена в EL0 и вызывает SIGILL - поэтому host-сборки используют
 /// [`NoCriticalSection`] (см. ниже).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub struct DaifCriticalSection;
