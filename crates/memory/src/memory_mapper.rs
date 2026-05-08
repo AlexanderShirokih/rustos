@@ -43,7 +43,7 @@ impl AddressSpaceHandle {
 }
 
 /// Ошибки при маппинге памяти.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryMappingError {
     /// Ошибка при создании виртуального маппинга.
     VirtualMappingError,
@@ -103,11 +103,23 @@ impl Display for MemoryRemappingError {
 
 /// Трейт маппера памяти для операций виртуальной памяти.
 pub trait MemoryMapper {
-    /// Отображает физические фреймы в виртуальную память.
+    /// Маппит `page_count` свежевыделенных 4К-фреймов на VA-диапазон
+    /// `[va, va + page_count * 4K)` со флагами `flags`.
+    ///
+    /// Mapper аллоцирует фреймы из своего frame-аллокатора и владеет ими: при
+    /// дропе AS все выделенные здесь фреймы возвращаются обратно. Перевыделение
+    /// (повторный `map` на ту же VA) запрещено - возвращается
+    /// [`MemoryMappingError::AlreadyMapped`].
+    ///
+    /// `init` копируется в начало региона - байт `i` оказывается в `va + i`.
+    /// Хвост `[init.len(), page_count * 4K)` остаётся занулённым (страницы
+    /// свежие). Длина `init` должна быть `<= page_count * 4K`.
     fn map(
         &self,
-        start_address: &PageAlignedVirtualAddress,
-        size: usize,
+        va: PageAlignedVirtualAddress,
+        page_count: usize,
+        init: &[u8],
+        flags: MemFlags,
     ) -> Result<(), MemoryMappingError>;
 
     ///Создает связь между исходным виртуальным адресом и физическим адресом.

@@ -104,6 +104,10 @@ impl ArchContext for MockContext {
     fn switch_address_space(next: Option<AddressSpaceHandle>) {
         ADDRESS_SPACE_SWITCHES.with(|c| c.borrow_mut().push(next));
     }
+
+    fn init_user(_entry: main::sched::UserEntry) -> Self {
+        Self
+    }
 }
 
 impl ArchCpu for MockCpu {
@@ -194,23 +198,42 @@ pub fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext
     Thread::new(id, process, CpuId::new(0), priority, arch, stack, name)
 }
 
+/// Запись о вызове `MemoryMapper::map` для проверок в тестах.
+#[derive(Clone, Debug)]
+pub struct MapCall {
+    pub va: usize,
+    pub page_count: usize,
+    pub init_hash: u64,
+    pub init_len: usize,
+}
+
 /// Mock-mapper: stub-реализация, нужен только для уникального `root_pa`.
-/// Все mapping-операции возвращают `Unsupported`/`OutOfMemory` -
-/// host-тесты scheduler-а их не используют.
+/// Все mapping-операции, кроме `map`, возвращают `Unsupported`/`OutOfMemory`
+/// - host-тесты scheduler-а их не используют. `map` логируется для проверок.
 struct MockUserMapper {
     root_pa: PhysicalAddress,
     /// Счётчик `released`, увеличиваемый в Drop. `Arc<AtomicUsize>` шарится
     /// с фабрикой.
     released: Arc<AtomicUsize>,
+    /// Лог вызовов `map`: шарится с фабрикой через `Arc<Mutex<...>>`.
+    map_calls: Arc<Mutex<Vec<MapCall>>>,
 }
 
 impl MemoryMapper for MockUserMapper {
     fn map(
         &self,
-        _start_address: &PageAlignedVirtualAddress,
-        _size: usize,
+        va: PageAlignedVirtualAddress,
+        page_count: usize,
+        init: &[u8],
+        _flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
-        Err(MemoryMappingError::OutOfMemory)
+        self.map_calls.lock().unwrap().push(MapCall {
+            va: va.as_usize(),
+            page_count,
+            init_hash: fnv1a_hash(init),
+            init_len: init.len(),
+        });
+        Ok(())
     }
 
     fn map_exact(
@@ -250,6 +273,15 @@ impl MemoryMapper for MockUserMapper {
     }
 }
 
+pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 impl Drop for MockUserMapper {
     fn drop(&mut self) {
         self.released.fetch_add(1, Ordering::SeqCst);
@@ -261,6 +293,7 @@ impl Drop for MockUserMapper {
 pub struct MockAddressSpaceFactory {
     inner: Mutex<MockFactoryInner>,
     released: Arc<AtomicUsize>,
+    map_calls: Arc<Mutex<Vec<MapCall>>>,
 }
 
 struct MockFactoryInner {
@@ -280,6 +313,7 @@ impl MockAddressSpaceFactory {
                 created: 0,
             }),
             released: Arc::new(AtomicUsize::new(0)),
+            map_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -289,6 +323,12 @@ impl MockAddressSpaceFactory {
 
     pub fn released(&self) -> usize {
         self.released.load(Ordering::SeqCst)
+    }
+
+    /// Снимок всех вызовов `MemoryMapper::map` на маппер-ах, выданных
+    /// этой фабрикой.
+    pub fn map_calls(&self) -> Vec<MapCall> {
+        self.map_calls.lock().unwrap().clone()
     }
 }
 
@@ -307,6 +347,7 @@ impl AddressSpaceFactory for MockAddressSpaceFactory {
         Ok(Box::new(MockUserMapper {
             root_pa,
             released: self.released.clone(),
+            map_calls: self.map_calls.clone(),
         }))
     }
 }

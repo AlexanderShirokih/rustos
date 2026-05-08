@@ -5,7 +5,8 @@ use super::{arch::CpuId, ready_queue::ReadyQueue};
 /// Per-CPU состояние scheduler-а.
 ///
 /// Хранится по стабильному адресу (`Box<Cpu>`), указатель на который
-/// ARCH-слой записывает в CPU-local регистр (например, `TPIDR_EL1`).
+/// ARCH-слой записывает в архитектурный CPU-local регистр (см.
+/// `ArchCpu::install_cpu_local`).
 pub struct Cpu {
     id: CpuId,
     ready_queue: ReadyQueue,

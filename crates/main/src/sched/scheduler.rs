@@ -4,16 +4,22 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::marker::PhantomData;
 
 use collections::{LockCell, MutexCell};
-use drivers_common::services::scheduler::{
-    Priority, SpawnAddressSpace, SpawnConfig, SpawnError, ThreadId,
+use drivers_common::services::{
+    scheduler::{
+        Priority, ProcessId, SpawnAddressSpace, SpawnConfig, SpawnError, SpawnUserError, ThreadId,
+    },
+    user_image::UserImage,
 };
 use memory::memory_mapper::{AddressSpaceFactory, AddressSpaceHandle};
 
 use super::{
     address_space::AddressSpace,
-    arch::{ArchContext, ArchCpu, CpuId, TimerSource, with_preemption_disabled},
+    arch::{
+        ArchContext, ArchCpu, CpuId, TimerSource, UserBootstrapArg, UserEntry,
+        with_preemption_disabled,
+    },
     cpu::Cpu,
-    process::{ProcessId, ProcessTable},
+    process::ProcessTable,
     thread::{Thread, ThreadState},
     thread_table::ThreadTable,
     wait_queue::{SleepEntry, SleepQueue},
@@ -117,7 +123,10 @@ where
     cpus: Vec<Option<Box<Cpu>>>,
     sleepers: SleepQueue,
     kernel_address_space: Arc<AddressSpace>,
-    address_space_factory: Option<&'static dyn AddressSpaceFactory>,
+    address_space_factory: Option<&'static (dyn AddressSpaceFactory + Send + Sync)>,
+    /// Процессы, у которых счётчик thread'ов достиг 0. Удаляются на следующем
+    /// `switch_to_next`, когда dying thread уже не current ни на одном CPU.
+    pending_process_removals: Vec<ProcessId>,
     quantum_ns: u64,
     time_slice_ticks: u32,
 }
@@ -145,7 +154,7 @@ where
     pub fn with_address_space_factory(
         timer: T,
         config: SchedulerConfig,
-        address_space_factory: Option<&'static dyn AddressSpaceFactory>,
+        address_space_factory: Option<&'static (dyn AddressSpaceFactory + Send + Sync)>,
     ) -> Self {
         Self {
             inner: Arc::new(MutexCell::new(SchedulerInner {
@@ -157,6 +166,7 @@ where
                 sleepers: SleepQueue::new(),
                 kernel_address_space: AddressSpace::kernel(),
                 address_space_factory,
+                pending_process_removals: Vec::new(),
                 quantum_ns: DEFAULT_QUANTUM_NS,
                 time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
             })),
@@ -164,7 +174,7 @@ where
         }
     }
 
-    /// Создаёт per-CPU state, idle-поток и устанавливает `TPIDR_EL1`.
+    /// Создаёт per-CPU state, idle-поток и устанавливает CPU-local указатель.
     /// Должен вызываться при замаскированных IRQ.
     pub fn bootstrap(self) -> Scheduler<A, T, Bootstrapped> {
         let bootstrapped = Scheduler {
@@ -203,6 +213,24 @@ where
             .with_lock(|inner| inner.spawn(cfg, entry, exit_handle))
     }
 
+    /// Создаёт user-process из in-memory `UserImage`: выделяет user-AS,
+    /// маппит сегменты + user-stack через `load_user_image`, инициализирует
+    /// контекст thread'а через `ArchContext::init_user` и регистрирует
+    /// процесс+thread в scheduler-е.
+    ///
+    /// На любой ошибке выделенный AS дропается, его фреймы возвращаются
+    /// аллокатору через mapper Drop - без ручного отката.
+    pub fn spawn_user_process(
+        &self,
+        name: &'static str,
+        image: &UserImage<'_>,
+        priority: Priority,
+        kernel_stack_pages: usize,
+    ) -> Result<(ProcessId, ThreadId), SpawnUserError> {
+        self.inner
+            .with_lock(|inner| inner.spawn_user_process(name, image, priority, kernel_stack_pages))
+    }
+
     /// Тестовый путь старта. Выполняет первый switch через `A::switch`,
     /// возвращая управление вызывающему. Используется для unit-тестов с
     /// `MockContext`. В реальном boot-сценарии используйте [`Scheduler::start`].
@@ -230,7 +258,7 @@ where
         let (next_ptr, address_space) = self
             .inner
             .with_lock(SchedulerInner::prepare_first_thread_start);
-        // Перед `eret` в новый thread активируем его AS (или kernel-only - idle).
+        // Перед первым входом в thread активируем его AS (или kernel-only - idle).
         A::switch_address_space(address_space);
         // SAFETY: `prepare_first_thread_start` под scheduler-lock выбирает первый
         // runnable поток и возвращает указатель на его уже инициализированный
@@ -275,8 +303,51 @@ where
         perform_schedule_action::<A>(action);
     }
 
+    /// Завершает текущий thread и переключается на следующий. Test-only вариант
+    /// без `-> !`-стока: используется integration-тестами в `tests/userspace.rs`
+    /// для прогона lifecycle. Production-путь - `SchedulerHandle::exit() -> !`.
+    #[doc(hidden)]
+    pub fn exit_current_for_test(&self) {
+        let action = with_preemption_disabled::<A::Cpu, _>(|| {
+            self.inner.with_lock(|inner| {
+                let now_ns = inner.timer.now_ns();
+                inner.exit_current(now_ns)
+            })
+        });
+        perform_schedule_action::<A>(action);
+    }
+
     pub fn handle(&self) -> super::service::SchedulerHandle<A, T> {
         super::service::SchedulerHandle::new(self.inner.clone())
+    }
+
+    /// `Running`-вариант [`Scheduler::spawn_user_process`]. Тот же контракт,
+    /// но вызывается из IRQ-context-а (timer-handler/syscall) после перехода
+    /// в `Running`-состояние.
+    pub fn spawn_user_process(
+        &self,
+        name: &'static str,
+        image: &UserImage<'_>,
+        priority: Priority,
+        kernel_stack_pages: usize,
+    ) -> Result<(ProcessId, ThreadId), SpawnUserError> {
+        self.inner
+            .with_lock(|inner| inner.spawn_user_process(name, image, priority, kernel_stack_pages))
+    }
+}
+
+impl<A, T, S> Scheduler<A, T, S>
+where
+    A: ArchContext,
+    T: TimerSource,
+    S: SchedulerStage,
+{
+    /// Количество живых процессов в `ProcessTable`. Используется integration-тестами
+    /// в `tests/userspace.rs` для проверки lifecycle (что процесс удалён после exit).
+    /// Не вызывать из production-кода.
+    #[doc(hidden)]
+    pub fn process_count_for_test(&self) -> usize {
+        self.inner.with_lock(|inner| inner.processes.live_count())
     }
 }
 
@@ -362,10 +433,8 @@ where
         let arch = A::init(stack_top, thread_trampoline::<A>, arg);
 
         let address_space = self.resolve_spawn_address_space(cfg.address_space)?;
-        let process_id = self
-            .processes
-            .insert(cfg.name, address_space)
-            .map_err(|_| SpawnError::NoFreeThreadSlots)?;
+        let process_id =
+            self.intern_process_for_spawn(cfg.name, address_space, cfg.address_space)?;
 
         let cpu_affinity = self
             .current_cpu()
@@ -392,6 +461,83 @@ where
         Ok(id)
     }
 
+    pub(crate) fn spawn_user_process(
+        &mut self,
+        name: &'static str,
+        image: &UserImage<'_>,
+        priority: Priority,
+        kernel_stack_pages: usize,
+    ) -> Result<(ProcessId, ThreadId), SpawnUserError> {
+        if kernel_stack_pages == 0 {
+            return Err(SpawnUserError::Spawn(SpawnError::InvalidStackPages));
+        }
+        if (priority.raw() as usize) >= self.config.priority_levels() {
+            return Err(SpawnUserError::Spawn(SpawnError::InvalidPriority));
+        }
+
+        // Валидируем image до выделения AS - на провале не создаём ни одного
+        // фрейма у фабрики (root-страница user-AS аллоцируется в `new_user`).
+        image.validate()?;
+
+        let factory = self
+            .address_space_factory
+            .ok_or(SpawnUserError::MissingFactory)?;
+
+        // Создаём AS после успешной валидации. Если `load_user_image` fail
+        // на маппинге (OOM фреймов) - `Arc<AddressSpace>` дропается здесь же;
+        // mapper в Drop возвращает уже выделенные фреймы аллокатору.
+        let address_space = AddressSpace::new_user(factory)
+            .map_err(|_| SpawnUserError::Spawn(SpawnError::AddressSpaceCreationFailed))?;
+        let mapper = address_space
+            .mapper()
+            .expect("AddressSpace::User must expose mapper");
+
+        super::user_image::load_user_image(mapper, image)?;
+
+        let stack = <A::Stack as super::arch::ThreadStackAllocator>::allocate(kernel_stack_pages)
+            .map_err(|_| SpawnUserError::Spawn(SpawnError::StackAllocationFailed))?;
+        let stack_top = stack.top();
+
+        let arch = A::init_user(UserEntry {
+            kernel_stack_top: stack_top,
+            user_pc: image.entry,
+            user_sp: image.user_stack_top,
+            arg: UserBootstrapArg::ZERO,
+        });
+
+        let process_id = self
+            .processes
+            .insert(name, address_space)
+            .map_err(|_| SpawnUserError::Spawn(SpawnError::NoFreeThreadSlots))?;
+
+        let cpu_affinity = self
+            .current_cpu()
+            .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
+
+        let thread_id = match self.threads.insert_with(|id| {
+            Thread::new(id, process_id, cpu_affinity, priority, arch, stack, name)
+        }) {
+            Ok(id) => id,
+            Err(e) => {
+                // Откатываем процесс: иначе `thread_count=1` остаётся без
+                // живого thread'а, decrement никогда не вызовется и Drop
+                // AS не освободит фреймы. `remove` дропает `Arc<AddressSpace>` -
+                // если это была единственная ссылка (а это так на этапе
+                // создания), mapper в Drop возвращает все фреймы.
+                self.processes.remove(process_id);
+                return Err(SpawnUserError::Spawn(e));
+            }
+        };
+
+        if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
+            && cpu.idle() != thread_id
+        {
+            cpu.ready_queue_mut().push(thread_id, priority);
+        }
+
+        Ok((process_id, thread_id))
+    }
+
     /// Создаёт `Arc<AddressSpace>` для нового потока согласно `SpawnAddressSpace`.
     /// `Inherit` использует AS текущего процесса (кroме bootstrap-фазы - там
     /// fallback на kernel-AS, как у kernel-thread).
@@ -411,6 +557,39 @@ where
                 AddressSpace::new_user(factory).map_err(|_| SpawnError::AddressSpaceCreationFailed)
             }
         }
+    }
+
+    /// Регистрирует новый thread в правильном `Process`:
+    /// - `Inherit` - наследует от текущего процесса (инкремент thread_count).
+    ///   Если current отсутствует (bootstrap), fallback на новый Process,
+    ///   привязанный к kernel-AS - поведение как у `Kernel`.
+    /// - `Kernel` / `User` - создаёт новый Process в `ProcessTable`
+    ///   (счётчик потоков = 1 от `Process::new`).
+    fn intern_process_for_spawn(
+        &mut self,
+        name: &'static str,
+        address_space: Arc<AddressSpace>,
+        spec: SpawnAddressSpace,
+    ) -> Result<ProcessId, SpawnError> {
+        if let SpawnAddressSpace::Inherit = spec
+            && let Some(current_pid) = self.current_process_id()
+            && let Some(existing) = self.processes.get(current_pid)
+        {
+            debug_assert!(
+                Arc::ptr_eq(existing.address_space(), &address_space),
+                "Inherit AS must match current_address_space (race under scheduler-lock is impossible)"
+            );
+            existing.increment_thread_count();
+            return Ok(current_pid);
+        }
+        self.processes
+            .insert(name, address_space)
+            .map_err(|_| SpawnError::NoFreeThreadSlots)
+    }
+
+    fn current_process_id(&self) -> Option<ProcessId> {
+        let cpu = self.current_cpu()?;
+        self.threads.get(cpu.current()).map(Thread::process)
     }
 
     fn current_address_space(&self) -> Option<Arc<AddressSpace>> {
@@ -557,8 +736,21 @@ where
 
     pub(super) fn exit_current(&mut self, now_ns: u64) -> ScheduleAction<A> {
         let current_id = self.current();
-        if let Some(thread) = self.threads.get_mut(current_id) {
+        let exiting_pid = if let Some(thread) = self.threads.get_mut(current_id) {
             thread.set_state(ThreadState::Terminated);
+            Some(thread.process())
+        } else {
+            None
+        };
+
+        // Декремент thread_count процесса. На нуле помечаем процесс к удалению -
+        // фактическое удаление произойдёт в `switch_to_next`, когда dying thread
+        // уже не current ни на одном CPU.
+        if let Some(pid) = exiting_pid
+            && let Some(process) = self.processes.get(pid)
+            && process.decrement_thread_count()
+        {
+            self.pending_process_removals.push(pid);
         }
 
         self.switch_to_next(now_ns)
@@ -639,6 +831,11 @@ where
             next.set_state(ThreadState::Running);
             next.set_time_slice_left(self.time_slice_ticks);
         }
+
+        // Dying thread больше не current - безопасно удалить процессы,
+        // у которых thread_count достиг 0. Drop `Arc<AddressSpace>`
+        // освободит mapper и его фреймы.
+        self.cleanup_pending_process_removals(next_id);
 
         if prev_id == next_id {
             self.schedule_next_deadline(now_ns);
@@ -769,6 +966,30 @@ where
             .and_then(|slot| slot.as_deref_mut())
     }
 
+    /// Удаляет процессы, чей `thread_count` достиг 0, при условии что новый
+    /// `current` thread не ссылается на удаляемый процесс. Если pid соответствует
+    /// `next_id.process` - оставляем pending в очереди (другой thread того же
+    /// процесса сейчас активен; реально невозможный случай, т.к. thread_count=0,
+    /// но safety-net).
+    fn cleanup_pending_process_removals(&mut self, next_id: ThreadId) {
+        if self.pending_process_removals.is_empty() {
+            return;
+        }
+        let active_process = self.threads.get(next_id).map(Thread::process);
+        let mut idx = 0;
+        while idx < self.pending_process_removals.len() {
+            let pid = self.pending_process_removals[idx];
+            if Some(pid) == active_process {
+                idx += 1;
+                continue;
+            }
+            self.pending_process_removals.swap_remove(idx);
+            // Drop возвращает `Arc<AddressSpace>` - если последняя ссылка,
+            // mapper Drop'ит свои фреймы.
+            let _removed = self.processes.remove(pid);
+        }
+    }
+
     fn ensure_cpu_slot(&mut self, id: CpuId) {
         let required_len = id.as_index() + 1;
         if self.cpus.len() < required_len {
@@ -838,5 +1059,15 @@ impl drivers_common::services::scheduler::SchedulerService for IdleExitStub {
 
     fn exit(&self) -> ! {
         unreachable!("idle thread must never call exit")
+    }
+
+    fn spawn_user_process(
+        &self,
+        _name: &'static str,
+        _image: &UserImage<'_>,
+        _priority: Priority,
+        _kernel_stack_pages: usize,
+    ) -> Result<(ProcessId, ThreadId), SpawnUserError> {
+        unreachable!("idle thread must never call spawn_user_process")
     }
 }

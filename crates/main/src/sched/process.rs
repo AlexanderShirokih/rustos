@@ -1,30 +1,23 @@
 use alloc::{sync::Arc, vec::Vec};
-use core::num::NonZeroU32;
+use core::{
+    num::NonZeroU32,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use collections::MutexCell;
+use drivers_common::services::scheduler::ProcessId;
 
 use super::address_space::AddressSpace;
 use crate::kobject::HandleTable;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct ProcessId(NonZeroU32);
-
-impl ProcessId {
-    pub const fn new(raw: NonZeroU32) -> Self {
-        Self(raw)
-    }
-
-    pub const fn raw(self) -> NonZeroU32 {
-        self.0
-    }
-}
 
 pub struct Process {
     id: ProcessId,
     name: &'static str,
     address_space: Arc<AddressSpace>,
     handle_table: Arc<MutexCell<HandleTable>>,
+    /// Количество живых thread'ов, привязанных к этому процессу. Декремент
+    /// при `thread_exit`; ноль - сигнал scheduler-у удалить процесс.
+    thread_count: AtomicUsize,
 }
 
 impl Process {
@@ -34,6 +27,7 @@ impl Process {
             name,
             address_space,
             handle_table: Arc::new(MutexCell::new(HandleTable::new())),
+            thread_count: AtomicUsize::new(1),
         }
     }
 
@@ -53,6 +47,24 @@ impl Process {
     /// чтобы IPC-функции могли работать с таблицей вне scheduler-lock.
     pub fn handle_table(&self) -> &Arc<MutexCell<HandleTable>> {
         &self.handle_table
+    }
+
+    /// Регистрирует ещё один thread, принадлежащий процессу.
+    pub fn increment_thread_count(&self) {
+        self.thread_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Снимает с учёта thread; возвращает `true`, если это был последний и
+    /// процесс готов к удалению.
+    pub fn decrement_thread_count(&self) -> bool {
+        // AcqRel: prior thread-state writes happen-before наблюдения нуля.
+        let prev = self.thread_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(prev > 0, "thread_count underflow on Process {:?}", self.id);
+        prev == 1
+    }
+
+    pub fn thread_count(&self) -> usize {
+        self.thread_count.load(Ordering::Acquire)
     }
 }
 
@@ -123,6 +135,24 @@ impl ProcessTable {
             .iter()
             .filter_map(|s| s.as_ref())
             .find(|p| p.id() == id)
+    }
+
+    /// Удаляет процесс из таблицы. Возвращает `Some(Process)` если найден.
+    /// `Drop` владеемого `Process` дропает `Arc<AddressSpace>` -
+    /// если это была последняя ссылка, AddressSpace разрушается, mapper
+    /// возвращает все свои фреймы аллокатору.
+    pub fn remove(&mut self, id: ProcessId) -> Option<Process> {
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|p| p.id() == id) {
+                return slot.take();
+            }
+        }
+        None
+    }
+
+    /// Количество активных процессов.
+    pub fn live_count(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_some()).count()
     }
 }
 

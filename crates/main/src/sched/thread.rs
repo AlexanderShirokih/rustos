@@ -1,9 +1,6 @@
-use drivers_common::services::scheduler::{Priority, ThreadId};
+use drivers_common::services::scheduler::{Priority, ProcessId, ThreadId};
 
-use super::{
-    arch::{ArchContext, CpuId, ThreadStack},
-    process::ProcessId,
-};
+use super::arch::{ArchContext, CpuId, ThreadStack};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadState {

@@ -34,14 +34,13 @@ use core::{
 use drivers_common::services::scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
 use main::{
     qemu_tests::el0_probe,
-    sched::{AddressSpace, ArchContext},
+    sched::{AddressSpace, ArchContext, UserBootstrapArg, UserEntry},
     syscall_bridge,
 };
 use memory::{
     MemFlags,
-    mem_flags::{AccessMode, Executable, Owners, PrivateMemoryPermission},
     physical_address::PageAlignedAddress,
-    virtual_address::PageAlignedVirtualAddress,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use qemu_test_harness::register_test;
 use spin::Once;
@@ -65,32 +64,6 @@ const B_LOOP: u32 = 0x1400_0000;
 struct SyscallTestEl0Probe;
 impl SyscallTestEl0Probe {
     const IMM16: u16 = 0xFF00;
-}
-
-fn user_rx_flags() -> MemFlags {
-    MemFlags::Private(Owners {
-        kernel: PrivateMemoryPermission {
-            access: AccessMode::None,
-            executable: Executable::NotAllowed,
-        },
-        user: PrivateMemoryPermission {
-            access: AccessMode::Readonly,
-            executable: Executable::Allowed,
-        },
-    })
-}
-
-fn user_rw_flags() -> MemFlags {
-    MemFlags::Private(Owners {
-        kernel: PrivateMemoryPermission {
-            access: AccessMode::Writable,
-            executable: Executable::NotAllowed,
-        },
-        user: PrivateMemoryPermission {
-            access: AccessMode::Writable,
-            executable: Executable::NotAllowed,
-        },
-    })
 }
 
 /// Аллоцирует выровненную 4К-страницу из kernel-heap и зануляет её. Утечка
@@ -179,10 +152,10 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
     // Шаг 1: маппинг 4К с user-RW, чтобы сначала kernel смог записать payload
     // через kernel-VA (higher-half), а затем remap'нуть в user-RX.
     user_mapper
-        .map_exact(payload_va, payload_pa, PAGE_SIZE, user_rw_flags())
+        .map_exact(payload_va, payload_pa, PAGE_SIZE, MemFlags::user_rw())
         .expect("map_exact payload as UserRW");
     user_mapper
-        .map_exact(stack_va, stack_pa, PAGE_SIZE, user_rw_flags())
+        .map_exact(stack_va, stack_pa, PAGE_SIZE, MemFlags::user_rw())
         .expect("map_exact stack as UserRW");
 
     // Шаг 2: пишем payload через kernel-VA (та же физ.страница). Lower-half
@@ -193,7 +166,7 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
 
     // Шаг 3: смена флагов payload-страницы на UserRX, stack остаётся UserRW.
     user_mapper
-        .remap(payload_va, PAGE_SIZE, user_rx_flags())
+        .remap(payload_va, PAGE_SIZE, MemFlags::user_rx())
         .expect("remap payload to UserRX");
 
     // Sanity-check leaf-битов через user-AS mapper.
@@ -236,8 +209,12 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
                     .get()
                     .expect("user AS holder must be set before worker runs");
                 Aarch64Context::switch_address_space(user_as_arc.handle());
-                let ctx =
-                    Aarch64Context::init_user(kstack_nn, user_pc, user_stack_top, bootstrap_x0);
+                let ctx = Aarch64Context::init_user(UserEntry {
+                    kernel_stack_top: kstack_nn,
+                    user_pc: VirtualAddress::new(user_pc),
+                    user_sp: VirtualAddress::new(user_stack_top),
+                    arg: UserBootstrapArg(bootstrap_x0),
+                });
                 // SAFETY: ctx инициализирован init_user; start() безусловно
                 // прыгает в наш el0_entry_shim -> eret в EL0.
                 unsafe { Aarch64Context::start(&ctx) }

@@ -199,7 +199,7 @@ impl<A: TableAlloc> PageMapper<A> {
 }
 
 /// Извлекает физический адрес таблицы из дескриптора.
-fn extract_table_pa(raw: u64) -> PageAlignedAddress {
+pub fn extract_table_pa(raw: u64) -> PageAlignedAddress {
     PageAlignedAddress::new_unchecked(PhysicalAddress::new((raw & 0x0000_FFFF_FFFF_F000) as usize))
 }
 

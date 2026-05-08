@@ -1,6 +1,6 @@
 use core::{mem, ptr::NonNull};
 
-use main::sched::ArchContext;
+use main::sched::{ArchContext, UserEntry};
 use memory::memory_mapper::AddressSpaceHandle;
 
 use super::{
@@ -108,32 +108,14 @@ impl ArchContext for Aarch64Context {
             );
         }
     }
-}
 
-impl Aarch64Context {
-    /// Инициализирует контекст для первого входа в EL0.
-    ///
-    /// `kernel_stack_top` - вершина EL1-стека потока (для будущих SVC из EL0).
-    /// `user_pc` - пользовательский entry point (попадает в `ELR_EL1`).
-    /// `user_sp` - пользовательский SP (попадает в `SP_EL0`); должен быть выровнен на 16.
-    /// `bootstrap_x0` - значение, передаваемое в user-x0 при первом исполнении.
-    ///
-    /// При первом `start`/`switch` управление через [`context_start`] попадает на
-    /// [`el0_entry_shim`], который устанавливает SP_EL0/ELR_EL1/SPSR_EL1 и делает `eret`.
-    /// SP_EL1 после `eret` остаётся равным `kernel_stack_top` - последующие исключения
-    /// (включая SVC из EL0) попадают на kernel-стек и идут через текущий диспатчер
-    /// `sync_lower_el_a64`.
-    // Без `qemu-tests`-фичи метод сейчас не вызывается (scheduler-API для user-thread'ов
-    // ещё не подключён). После интеграции `Scheduler::spawn_user` атрибут можно убрать.
-    #[cfg_attr(not(feature = "qemu-tests"), allow(dead_code))]
-    pub fn init_user(
-        kernel_stack_top: NonNull<u8>,
-        user_pc: usize,
-        user_sp: usize,
-        bootstrap_x0: u64,
-    ) -> Self {
-        let kernel_sp = (kernel_stack_top.as_ptr() as usize & !0xF) as u64;
-        debug_assert_eq!(user_sp & 0xF, 0, "user_sp must be 16-byte aligned");
+    fn init_user(entry: UserEntry) -> Self {
+        let kernel_sp = (entry.kernel_stack_top.as_ptr() as usize & !0xF) as u64;
+        debug_assert_eq!(
+            entry.user_sp.as_usize() & 0xF,
+            0,
+            "user_sp must be 16-byte aligned"
+        );
 
         let mut ctx = Self {
             x19_x28: [GpReg::from_u64(0); 10],
@@ -143,9 +125,9 @@ impl Aarch64Context {
             pstate: 0,
             d8_d15: [0; 8],
         };
-        ctx.x19_x28[0] = GpReg::from_u64(bootstrap_x0);
-        ctx.x19_x28[1] = GpReg::from_u64(user_pc as u64);
-        ctx.x19_x28[2] = GpReg::from_u64(user_sp as u64);
+        ctx.x19_x28[0] = GpReg::from_u64(entry.arg.0);
+        ctx.x19_x28[1] = GpReg::from_u64(entry.user_pc.as_usize() as u64);
+        ctx.x19_x28[2] = GpReg::from_u64(entry.user_sp.as_usize() as u64);
         ctx
     }
 }
@@ -169,10 +151,6 @@ unsafe extern "C" fn thread_entry_shim() -> ! {
 ///
 /// Перед `eret` обнуляем все остальные GPR и `tpidr_el0`, чтобы kernel-значения
 /// не утекали в EL0 через регистры.
-// Адрес шима берётся только через `init_user` - пока `init_user` сам не вызывается
-// без `qemu-tests`-фичи, шим тоже считается dead_code. Атрибут уйдёт вместе с
-// интеграцией `Scheduler::spawn_user`.
-#[cfg_attr(not(feature = "qemu-tests"), allow(dead_code))]
 #[unsafe(naked)]
 unsafe extern "C" fn el0_entry_shim() -> ! {
     core::arch::naked_asm!(

@@ -31,6 +31,8 @@ mod event;
 mod event_via_scheduler;
 mod handle_table;
 mod smoke;
+// E2E-тест полного пути `SchedulerService::spawn_user_process`.
+mod userspace_via_scheduler;
 
 struct ConsoleAdapter(Arc<dyn ConsoleService>);
 
@@ -53,7 +55,7 @@ static SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
 pub(super) fn scheduler() -> &'static Arc<dyn SchedulerService> {
     SCHEDULER
         .get()
-        .expect("SchedulerService должен быть закэширован в qemu_tests::run")
+        .expect("SchedulerService must be cached in qemu_tests::run")
 }
 
 /// Подключает harness к ядру и запускает все зарегистрированные кейсы.

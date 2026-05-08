@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 use alloc::{boxed::Box, format};
 
 use drivers_common::services::mmio::{
@@ -14,16 +12,9 @@ use memory::{
 };
 
 pub struct MmioServiceImpl {
-    pub(crate) memory_mapper: &'static dyn MemoryMapper,
+    pub(crate) memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
     pub(crate) linear_offset: PageAlignedVirtualAddress,
 }
-
-// SAFETY: Runtime memory mapper используется как глобальный сервис и должен быть
-// безопасен для конкурентного доступа в рамках ядра.
-unsafe impl Send for MmioServiceImpl {}
-// SAFETY: см. impl Send - глобальный mapper защищён внутренней синхронизацией,
-// `linear_offset` неизменяемое значение, `&self`-API не имеет интероп. состояния.
-unsafe impl Sync for MmioServiceImpl {}
 
 impl MmioService for MmioServiceImpl {
     fn map_mmio(

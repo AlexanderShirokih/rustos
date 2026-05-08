@@ -8,9 +8,7 @@ use collections::{
     MutexCell, NoLockCell, Vec as StaticVec,
     interval_set::{Interval, StaticIntervalSet},
 };
-use hal_aarch64_paging::{
-    level::L0, mapper::PageMapper, mem_flags::Aarch64MemFlags, page_table::PageTable, preset::Heap,
-};
+use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable, preset::Heap};
 use memory::{
     FrameBitmap,
     bump_allocator::BumpAllocator,
@@ -48,8 +46,8 @@ pub struct Installed {
 }
 
 pub struct MemoryManagerResult {
-    pub memory_mapper: Box<dyn MemoryMapper>,
-    pub address_space_factory: Box<dyn AddressSpaceFactory>,
+    pub memory_mapper: Box<dyn MemoryMapper + Send + Sync>,
+    pub address_space_factory: Box<dyn AddressSpaceFactory + Send + Sync>,
     pub base_offset: PageAlignedVirtualAddress,
 }
 
@@ -256,19 +254,15 @@ impl MemorySetup<Prepared> {
         all_regions: &StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
         higher_half_base: PageAlignedVirtualAddress,
     ) -> Result<(), MemorySetupError> {
-        let heap_flags = Heap::flags();
-
         let lower_half_mapper = NoLockAarch64MemoryMapper::new_with_offset(
             frame_allocator,
             roots.lower_ptr,
-            heap_flags,
             0,
             AddressSpaceKind::Kernel,
         );
         let higher_half_mapper = NoLockAarch64MemoryMapper::new_with_offset(
             frame_allocator,
             roots.higher_ptr,
-            heap_flags,
             0,
             AddressSpaceKind::Kernel,
         );
@@ -353,7 +347,6 @@ impl MemorySetup<Enabled> {
             Aarch64MemoryMapper::new_with_offset(
                 fa_virt,
                 higher_ptr_rel,
-                Aarch64MemFlags::new(),
                 higher_half_base.as_usize(),
                 AddressSpaceKind::Kernel,
             );

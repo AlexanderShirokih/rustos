@@ -3,8 +3,11 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use collections::{LockCell, MutexCell};
 use drivers_common::services::{
-    scheduler::{SchedulerService, SpawnConfig, SpawnError, ThreadId},
+    scheduler::{
+        Priority, ProcessId, SchedulerService, SpawnConfig, SpawnError, SpawnUserError, ThreadId,
+    },
     timer::TickHandler,
+    user_image::UserImage,
 };
 
 use super::{
@@ -100,6 +103,17 @@ where
         // После switch_to_next текущий поток не должен возвращаться.
         // Если выполнение вернулось - это серьёзный bug в context-switch.
         unreachable!("terminated thread resumed after scheduler switch")
+    }
+
+    fn spawn_user_process(
+        &self,
+        name: &'static str,
+        image: &UserImage<'_>,
+        priority: Priority,
+        kernel_stack_pages: usize,
+    ) -> Result<(ProcessId, ThreadId), SpawnUserError> {
+        self.inner
+            .with_lock(|inner| inner.spawn_user_process(name, image, priority, kernel_stack_pages))
     }
 }
 

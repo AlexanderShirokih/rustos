@@ -8,3 +8,4 @@ pub mod interrupts;
 pub mod mmio;
 pub mod scheduler;
 pub mod timer;
+pub mod user_image;

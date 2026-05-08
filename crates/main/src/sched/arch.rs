@@ -3,7 +3,7 @@
 use alloc::boxed::Box;
 use core::{marker::PhantomData, mem::size_of, ptr::NonNull};
 
-use memory::memory_mapper::AddressSpaceHandle;
+use memory::{memory_mapper::AddressSpaceHandle, virtual_address::VirtualAddress};
 
 /// Идентификатор CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -153,12 +153,48 @@ impl Drop for ThreadStack {
     }
 }
 
+/// Значение, передаваемое в первый user-thread'у через стартовый GPR (`x0` /
+/// `a0` в зависимости от ABI).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct UserBootstrapArg(pub u64);
+
+impl UserBootstrapArg {
+    pub const ZERO: Self = Self(0);
+}
+
+/// Параметры первого входа в user-thread.
+///
+/// Архитектурно-нейтральная zero-cost структура: компилируется в тот же набор
+/// регистров, что и позиционные аргументы, но защищает от перепутывания
+/// `user_pc` / `user_sp` (типизированы) и группирует связанные параметры.
+pub struct UserEntry {
+    /// Вершина kernel-стека потока - на ней syscall-обработчик будет
+    /// выполняться, когда user-thread сделает syscall.
+    pub kernel_stack_top: NonNull<u8>,
+    /// User entry point - куда передастся управление при первом входе в
+    /// user-режим.
+    pub user_pc: VirtualAddress,
+    /// User stack top, выровнен на 16 байт.
+    pub user_sp: VirtualAddress,
+    /// Значение, видимое user-коду в первом GPR при входе.
+    pub arg: UserBootstrapArg,
+}
+
 /// Архитектурно-зависимый контекст потока.
 pub trait ArchContext: Sized + Send + 'static {
     type Cpu: ArchCpu;
     type Stack: ThreadStackAllocator;
 
     fn init(stack_top: NonNull<u8>, entry: TrampolineFn, arg: *mut ()) -> Self;
+
+    /// Инициализирует контекст для первого входа в user-режим.
+    ///
+    /// При первом `start`/`switch` поток восстановит callee-saved и через
+    /// архитектурный механизм передаст управление `entry.user_pc` со стеком
+    /// `entry.user_sp` и `entry.arg` в первом GPR. Syscall-обработчик будет
+    /// работать на `entry.kernel_stack_top`.
+    fn init_user(entry: UserEntry) -> Self;
 
     /// Не возвращается: первый прыжок в стек выбранного потока.
     ///

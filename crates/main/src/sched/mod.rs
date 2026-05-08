@@ -8,15 +8,20 @@ pub mod scheduler;
 pub mod service;
 pub mod thread;
 pub mod thread_table;
+pub mod user_image;
 pub mod wait_queue;
 
 pub use address_space::AddressSpace;
 pub use arch::{
     ArchContext, ArchCpu, CpuId, StackError, ThreadStack, ThreadStackAllocator, TimerSource,
-    with_preemption_disabled,
+    UserBootstrapArg, UserEntry, with_preemption_disabled,
+};
+pub use drivers_common::services::{
+    scheduler::{ProcessId, SpawnUserError},
+    user_image::{UserImage, UserImageError, UserSegment},
 };
 pub use init::{KernelTimerSource, bootstrap_scheduler};
-pub use process::{Process, ProcessId};
+pub use process::Process;
 pub use scheduler::{Bootstrapped, Running, Scheduler, SchedulerConfig, Uninit, lowest_priority};
 pub use service::SchedulerHandle;
 pub use thread::{Thread, ThreadState};

@@ -48,7 +48,7 @@ mod tests {
         let phys = PhysicalAddress::new(0x4000_0000);
         let info = BootInfo::new_fdt(phys);
         let HwDescription::Fdt(blob) = info.hw_description else {
-            panic!("ожидался вариант Fdt");
+            panic!("expected Fdt variant");
         };
         assert_eq!(blob.phys.as_usize(), 0x4000_0000);
     }

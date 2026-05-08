@@ -14,15 +14,19 @@ use crate::{services::mmio::MmioServiceImpl, syscall_bridge};
 pub struct KernelContext {
     capabilities: Capabilities,
     driver_registry: Mutex<RuntimeDriverRegistry>,
+    address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
 }
 
 impl KernelContext {
     pub fn new(
-        memory_mapper: &'static dyn MemoryMapper,
-        address_space_factory: &'static dyn AddressSpaceFactory,
+        memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
+        address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
         base_offset: PageAlignedVirtualAddress,
     ) -> KernelContext {
-        syscall_bridge::install_memory_mapper(memory_mapper);
+        // Регистрируем фабрику в syscall_bridge для qemu-тестов в hal-aarch64,
+        // которые не имеют прямого доступа к KernelContext. Production-путь
+        // (bootstrap_scheduler) читает фабрику напрямую через
+        // KernelContext::address_space_factory().
         syscall_bridge::install_address_space_factory(address_space_factory);
 
         let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl {
@@ -37,9 +41,16 @@ impl KernelContext {
             .expect("Failed to register MmioService service");
 
         Self {
-            driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             capabilities,
+            driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
+            address_space_factory,
         }
+    }
+
+    /// Фабрика user-AS, переданная в `new`. Используется scheduler-ом для
+    /// создания нового адресного пространства при `spawn_user_process`.
+    pub fn address_space_factory(&self) -> &'static (dyn AddressSpaceFactory + Send + Sync) {
+        self.address_space_factory
     }
 
     pub fn with_runtime_state<R>(

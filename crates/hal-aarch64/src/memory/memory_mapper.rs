@@ -4,8 +4,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use collections::LockCell;
 use hal_aarch64_paging::{
+    entry::{AnyEntry, decode},
     level::{L0, L1, L2, L3, Level},
-    mapper::{self, MapError, MapLeaf, PageMapper, WalkError},
+    mapper::{self, MapError, MapLeaf, PageMapper, WalkError, extract_table_pa},
     mem_flags::Aarch64MemFlags,
     page_table::PageTable,
     table_alloc::TableAlloc,
@@ -13,13 +14,14 @@ use hal_aarch64_paging::{
 use memory::{
     MemFlags,
     aligned::Aligned,
+    frame::Frame,
     frame_allocator::FrameAllocator,
     memory_mapper::{
         AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
         MemoryRemappingError, MemoryUnmappingError,
     },
     physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress},
-    virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress},
+    virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress},
 };
 
 use crate::memory::{
@@ -81,10 +83,12 @@ where
 {
     /// Аллокатор физических фреймов.
     frame_allocator: &'a FA,
-    /// Флаги памяти по умолчанию.
-    mem_flags: Aarch64MemFlags,
     /// Физический адрес корня таблиц.
     root_pa: PhysicalAddress,
+    /// Сдвиг линейного отображения PA->VA (`higher_half_base` в production,
+    /// 0 для identity-mapping). Используется в `map` для kernel-side доступа
+    /// к свежевыделенным фреймам при копировании `init`-байтов.
+    vaddr_offset: usize,
     /// Внутренний маппер таблиц страниц.
     mapper: L,
     /// Текущий тег AS (`0` - никогда не активирован). Lazy-allocated на пути
@@ -123,7 +127,6 @@ where
     pub fn new_with_offset(
         frame_allocator: &'a FA,
         root_ptr: *mut PageTable<L0>,
-        mem_flags: Aarch64MemFlags,
         vaddr_offset: usize,
         kind: AddressSpaceKind,
     ) -> Self {
@@ -133,8 +136,8 @@ where
         let root_pa = PhysicalAddress::new((root_ptr as usize).wrapping_sub(vaddr_offset));
         Self {
             frame_allocator,
-            mem_flags,
             root_pa,
+            vaddr_offset,
             mapper: L::new(PageMapper::new(
                 root_ptr,
                 FrameTableAlloc::new(frame_allocator, vaddr_offset),
@@ -210,6 +213,169 @@ where
             Ok(())
         })
     }
+
+    /// VA-указатель на таблицу уровня `Lvl` через линейное PA->VA отображение
+    /// (`pa + self.vaddr_offset`).
+    ///
+    /// # Safety
+    /// `pa` должен быть валидным PA таблицы уровня `Lvl`, маппинг
+    /// `pa -> pa + self.vaddr_offset` действителен в текущем CPU,
+    /// и таблица не используется параллельно.
+    unsafe fn table_ref<Lvl: Level>(&self, pa: PageAlignedAddress) -> &PageTable<Lvl> {
+        let va = pa.as_usize() + self.vaddr_offset;
+        // SAFETY: caller гарантирует валидность PA + линейную карту.
+        unsafe { &*(va as *const PageTable<Lvl>) }
+    }
+
+    /// Обходит дерево таблиц от L0-root user-AS и возвращает в аллокатор:
+    /// все user-data страницы (leaf-entries L3), все промежуточные таблицы
+    /// (L1/L2/L3) и root.
+    ///
+    /// # Safety
+    /// Вызывающий гарантирует, что:
+    /// - PA таблиц валидны и доступны через линейную карту kernel-AS
+    ///   (`pa + self.vaddr_offset`);
+    /// - таблицы не используются параллельно (Drop AS = эксклюзивное владение);
+    /// - block-mappings (L1 1G / L2 2M) в user-AS не встречаются (этот ядерный
+    ///   путь маппит только L3 страницы).
+    unsafe fn free_user_page_tables(&self) {
+        // SAFETY: L0-root доступен через линейную карту; root_pa валиден на всё
+        // время жизни AS (фрейм выделен фабрикой и не освобождается до Drop).
+        let l0 = unsafe { self.table_ref::<L0>(PageAlignedAddress::new_unchecked(self.root_pa)) };
+        let mut had_mappings = false;
+        for idx in 0..512 {
+            let raw = l0.get_raw(idx);
+            if let Ok(AnyEntry::Table(te)) = decode::<L0>(raw) {
+                had_mappings = true;
+                let l1_pa = extract_table_pa(te.raw());
+                // SAFETY: te - валидный Table-дескриптор уровня L0; l1_pa указывает на L1.
+                unsafe { self.free_l1(l1_pa) };
+                let _ = self
+                    .frame_allocator
+                    .deallocate_frame(Frame::containing_address(l1_pa.as_physical_address()));
+            }
+            // Invalid -> пропускаем; Block на L0 невозможен (CanBlock не реализован).
+        }
+        // Root освобождаем только если AS реально использовался (имел маппинги).
+        // Пустой user-AS (в production не возникает - он создаётся фабрикой
+        // только под `spawn_user_process`, который всегда маппит payload+стек)
+        // встречается лишь в kernel-side юнит-кейсах вида `AddressSpace::new_user`
+        // без последующего `map`. Возвращать его одинокий root в bitmap создаёт
+        // изолированный "дырявый" бит - текущий heap-аллокатор после такого
+        // expand'а не может найти большой aligned-блок и валится в OOM. Всё
+        // равно root для реального user-process очищается в основной ветке.
+        if had_mappings {
+            let _ = self
+                .frame_allocator
+                .deallocate_frame(Frame::containing_address(self.root_pa));
+        }
+    }
+
+    /// Освобождает все L2-таблицы под `l1_pa` и leaf L3-таблицы под ними.
+    ///
+    /// # Safety
+    /// `l1_pa` должен быть PA валидной L1-таблицы; см. `free_user_page_tables`.
+    unsafe fn free_l1(&self, l1_pa: PageAlignedAddress) {
+        // SAFETY: l1_pa получен из валидного Table-дескриптора уровня L0.
+        let l1 = unsafe { self.table_ref::<L1>(l1_pa) };
+        for idx in 0..512 {
+            let raw = l1.get_raw(idx);
+            // Block (1G) на этом уровне в user-AS не создаётся (`map` маппит только L3),
+            // фрейм под ним не наш. Invalid/Decode/Page - игнорируем.
+            if let Ok(AnyEntry::Table(te)) = decode::<L1>(raw) {
+                let l2_pa = extract_table_pa(te.raw());
+                // SAFETY: l2_pa получен из валидного Table-дескриптора уровня L1.
+                unsafe { self.free_l2(l2_pa) };
+                let _ = self
+                    .frame_allocator
+                    .deallocate_frame(Frame::containing_address(l2_pa.as_physical_address()));
+            }
+        }
+    }
+
+    /// Освобождает все leaf-страницы под L3-таблицами этого L2 и сами L3-таблицы.
+    ///
+    /// # Safety
+    /// `l2_pa` должен быть PA валидной L2-таблицы; см. `free_user_page_tables`.
+    unsafe fn free_l2(&self, l2_pa: PageAlignedAddress) {
+        // SAFETY: l2_pa получен из валидного Table-дескриптора уровня L1.
+        let l2 = unsafe { self.table_ref::<L2>(l2_pa) };
+        for idx in 0..512 {
+            let raw = l2.get_raw(idx);
+            // Block (2M) на этом уровне в user-AS не создаётся; Invalid/Decode - пропускаем.
+            if let Ok(AnyEntry::Table(te)) = decode::<L2>(raw) {
+                let l3_pa = extract_table_pa(te.raw());
+                // Сначала освобождаем все leaf-страницы в этой L3-таблице.
+                // SAFETY: l3_pa получен из валидного L2 Table-дескриптора.
+                unsafe { self.free_l3_leaves(l3_pa) };
+                // Потом саму L3-таблицу.
+                let _ = self
+                    .frame_allocator
+                    .deallocate_frame(Frame::containing_address(l3_pa.as_physical_address()));
+            }
+        }
+    }
+
+    /// Освобождает все user-data страницы, на которые указывают entries L3-таблицы.
+    ///
+    /// # Safety
+    /// `l3_pa` должен быть PA валидной L3-таблицы; см. `free_user_page_tables`.
+    unsafe fn free_l3_leaves(&self, l3_pa: PageAlignedAddress) {
+        // SAFETY: l3_pa валиден.
+        let l3 = unsafe { self.table_ref::<L3>(l3_pa) };
+        for idx in 0..512 {
+            let raw = l3.get_raw(idx);
+            // L3 page descriptor: биты [1:0] == 0b11 (Page), биты [47:12] = output PA.
+            // `extract_table_pa` использует ту же маску - переиспользуем.
+            if (raw & 0b11) == 0b11 {
+                let page_pa = extract_table_pa(raw);
+                let _ = self
+                    .frame_allocator
+                    .deallocate_frame(Frame::containing_address(page_pa.as_physical_address()));
+            }
+            // Invalid (0b00) - пропускаем. Block на L3 невозможен.
+        }
+    }
+
+    /// Заполняет страницу через kernel-VA: зануляет её, затем копирует
+    /// срез `init[seg_offset..]` максимум в FRAME_SIZE байт.
+    ///
+    /// # Safety
+    /// `kernel_ptr` указывает на эксклюзивно-владеемую 4К-выровненную
+    /// kernel-side mapping страницы.
+    unsafe fn fill_frame_init(kernel_ptr: *mut u8, init: &[u8], seg_offset: usize) {
+        let page_size = PageAlignedAddress::ALIGNMENT;
+        // SAFETY: kernel_ptr валиден на FRAME_SIZE байт по контракту caller-а.
+        unsafe {
+            core::ptr::write_bytes(kernel_ptr, 0, page_size);
+            if seg_offset < init.len() {
+                let take = (init.len() - seg_offset).min(page_size);
+                core::ptr::copy_nonoverlapping(init[seg_offset..].as_ptr(), kernel_ptr, take);
+            }
+        }
+    }
+
+    /// Per-line `ic ivau` по kernel-VA для свежезаписанной exec-страницы.
+    /// Шаг 64 байта - минимальный гарантированный размер I-cache line на aarch64.
+    ///
+    /// # Safety
+    /// `kernel_ptr` - валидный VA в линейной higher-half-карте.
+    unsafe fn flush_icache_page(kernel_ptr: *mut u8) {
+        let page_size = PageAlignedAddress::ALIGNMENT;
+        // SAFETY: см. контракт caller-а.
+        unsafe {
+            let mut p = kernel_ptr;
+            let end = kernel_ptr.add(page_size);
+            while p < end {
+                core::arch::asm!(
+                    "ic ivau, {}",
+                    in(reg) p,
+                    options(nostack, preserves_flags),
+                );
+                p = p.add(64);
+            }
+        }
+    }
 }
 
 fn map_contiguous_inner<FA: FrameAllocator, const SHIFT: u8, P>(
@@ -261,33 +427,68 @@ where
 {
     fn map(
         &self,
-        start_address: &PageAlignedVirtualAddress,
-        size: usize,
+        va: PageAlignedVirtualAddress,
+        page_count: usize,
+        init: &[u8],
+        flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
-        if size == 0 {
+        if page_count == 0 {
             return Ok(());
         }
+        let page_size = PageAlignedAddress::ALIGNMENT;
+        assert!(
+            init.len() <= page_count * page_size,
+            "init exceeds mapped size"
+        );
 
-        let page_size = PageAlignedVirtualAddress::ALIGNMENT;
-        let page_count = size.div_ceil(page_size);
-        let mem_flags = self.leaf_flags(self.mem_flags);
-        let frame_allocator = self.frame_allocator;
+        let user_exec = matches!(
+            &flags,
+            MemFlags::Private(p) if matches!(
+                p.user.executable,
+                memory::mem_flags::Executable::Allowed
+            )
+        );
+        let aarch64_flags = self.leaf_flags(Aarch64MemFlags::from_memflags(flags));
 
         self.mapper.with_lock(|mapper| {
             for i in 0..page_count {
-                let virt = VirtualAddress::new(start_address.as_usize() + i * page_size);
-                let phys = frame_allocator
+                let frame = self
+                    .frame_allocator
                     .allocate_frame()
-                    .map(|frame| frame.page_address())
                     .ok_or(MemoryMappingError::OutOfMemory)?;
+                let pa = frame.page_address();
+                let kernel_ptr = (pa.as_usize() + self.vaddr_offset) as *mut u8;
 
-                map_contiguous_inner::<FA, { L3::SHIFT }, _>(
-                    mapper,
-                    PageAlignedVirtualAddress::new_unchecked(virt),
-                    phys,
-                    mem_flags,
-                )?;
+                // SAFETY: фрейм свежевыделен и эксклюзивно наш; kernel_ptr через
+                // линейную карту kernel-AS, выровнен на 4К.
+                unsafe { Self::fill_frame_init(kernel_ptr, init, i * page_size) };
+
+                let page_va = PageAlignedVirtualAddress::from_usize(va.as_usize() + i * page_size)
+                    .expect("4K * i + aligned base remains 4K-aligned");
+
+                if let Err(e) =
+                    map_contiguous_inner::<FA, { L3::SHIFT }, _>(mapper, page_va, pa, aarch64_flags)
+                {
+                    // Фрейм не попал в page-tables - возвращаем явно.
+                    let _ = self
+                        .frame_allocator
+                        .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
+                    return Err(e);
+                }
+
+                if user_exec {
+                    // SAFETY: kernel_ptr - валидный VA в higher-half-карте.
+                    unsafe { Self::flush_icache_page(kernel_ptr) };
+                }
             }
+
+            if user_exec {
+                // SAFETY: barrier-only.
+                unsafe {
+                    core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
+                }
+            }
+
             Ok(())
         })
     }
@@ -388,6 +589,27 @@ where
             }
             Ok::<(), MemoryRemappingError>(())
         })
+    }
+}
+
+impl<'a, FA, L> Drop for Aarch64MemoryMapper<'a, FA, L>
+where
+    FA: FrameAllocator,
+    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
+{
+    fn drop(&mut self) {
+        // Page-table walk для user-AS: рекурсивно обходим L0..L3 и возвращаем
+        // в frame-аллокатор все user-data страницы (leaf-entries L3) +
+        // intermediate tables (L1/L2/L3) + root.
+        // Kernel-AS использует общий root и таблицы, выделенные глобально, -
+        // освобождать их при Drop kernel-mapper-а нельзя.
+        if matches!(self.kind, AddressSpaceKind::User) {
+            // SAFETY: Drop вызывается, когда последний владелец AS сброшен -
+            // ни один поток не использует эти таблицы. TTBR0 на этот root
+            // больше не указывает (scheduler переключил CPU до cleanup-а),
+            // `vaddr_offset` валиден на всё время жизни ядра.
+            unsafe { self.free_user_page_tables() };
+        }
     }
 }
 

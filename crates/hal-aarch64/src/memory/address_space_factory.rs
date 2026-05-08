@@ -9,9 +9,7 @@
 use alloc::boxed::Box;
 
 use collections::{MutexCell, NoLockCell};
-use hal_aarch64_paging::{
-    level::L0, mapper::PageMapper, mem_flags::Aarch64MemFlags, page_table::PageTable,
-};
+use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable};
 use memory::{
     FrameBitmap,
     frame_allocator::{FrameAllocator, PhysicalFrameAllocator},
@@ -69,7 +67,6 @@ impl AddressSpaceFactory for Aarch64AddressSpaceFactory {
             Aarch64MemoryMapper::new_with_offset(
                 self.frame_allocator,
                 root_ptr,
-                Aarch64MemFlags::new(),
                 offset,
                 AddressSpaceKind::User,
             );

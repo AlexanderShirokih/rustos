@@ -60,9 +60,14 @@ where
             .expect("TimerService must be available before scheduler startup")
     });
 
-    let scheduler = Scheduler::<A, KernelTimerSource, Uninit>::new(
+    // Фабрика user-AS живёт в `KernelContext` как поле и доступна напрямую,
+    // без обратного чтения из `syscall_bridge`-глобала.
+    let factory = Some(kernel.address_space_factory());
+
+    let scheduler = Scheduler::<A, KernelTimerSource, Uninit>::with_address_space_factory(
         KernelTimerSource::new(timer.clone()),
         config,
+        factory,
     )
     .bootstrap();
 
