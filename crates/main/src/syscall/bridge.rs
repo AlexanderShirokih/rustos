@@ -92,6 +92,14 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = sys_handle_duplicate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
+        SyscallOp::MemoryAllocate => {
+            let r = super::memory::sys_memory_allocate(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::MemoryRemap => {
+            let r = super::memory::sys_memory_remap(frame.arg(0), frame.arg(1), frame.arg(2));
+            frame.set_return(encode_return(r));
+        }
         #[cfg(feature = "qemu-tests")]
         SyscallOp::TestEl0Probe => {
             crate::qemu_tests::el0_probe::record(frame.arg(0), frame.origin());

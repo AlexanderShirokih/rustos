@@ -424,6 +424,36 @@ fn last_thread_exit_releases_address_space() {
 }
 
 #[test]
+fn spawn_user_process_initializes_user_vm_allocator_between_image_and_stack() {
+    reset_switches();
+    let factory = fresh_factory();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler(timer, factory);
+
+    let init = [0xAAu8; 8];
+    let segments = [UserSegment {
+        va_base: aligned(USER_SEGMENT_VA),
+        mapped_size: PAGE,
+        init_bytes: &init,
+        perms: MemFlags::user_rx(),
+    }];
+    let image = UserImage {
+        segments: &segments,
+        entry: VirtualAddress::new(USER_SEGMENT_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP_VA),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let (pid, _tid) = scheduler
+        .spawn_user_process("vm-bench", &image, Priority::new(2), 4)
+        .expect("spawn user process");
+
+    // У свежесозданного процесса аллокатор пуст: ни одного региона ещё не
+    // выделено через vm_allocate.
+    assert_eq!(scheduler.user_vm_live_count_for_test(pid), Some(0));
+}
+
+#[test]
 fn spawning_two_user_processes_creates_two_distinct_address_spaces() {
     reset_switches();
     let factory = fresh_factory();

@@ -50,6 +50,15 @@ pub enum SyscallOp {
     HandleClose = 0x30,
     HandleDuplicate = 0x31,
 
+    // Memory: per-process user-VM management.
+    /// Выделяет user-память: маппит свежие фреймы в свободный VA процесса
+    /// и возвращает базовый адрес. Аргументы: `arg0=size_bytes`,
+    /// `arg1=flags_raw` (см. [`UserMemFlags`](super::UserMemFlags)).
+    MemoryAllocate = 0x60,
+    /// Меняет флаги уже выделенного региона (аналог `MemoryMapper::remap`).
+    /// Аргументы: `arg0=va`, `arg1=size_bytes`, `arg2=flags_raw`.
+    MemoryRemap = 0x61,
+
     /// Тестовый syscall: фиксирует факт входа в EL0 и завершает thread.
     /// Доступен только при `feature = "qemu-tests"`. Номер выбран в
     /// зарезервированной зоне `0xFF00..0xFFFF` для тестов.
@@ -66,6 +75,8 @@ impl SyscallOp {
             0x20 => Ok(Self::ChannelCreate),
             0x30 => Ok(Self::HandleClose),
             0x31 => Ok(Self::HandleDuplicate),
+            0x60 => Ok(Self::MemoryAllocate),
+            0x61 => Ok(Self::MemoryRemap),
             #[cfg(feature = "qemu-tests")]
             0xFF00 => Ok(Self::TestEl0Probe),
             _ => Err(SyscallError::BadSyscall),
@@ -85,6 +96,8 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x20), Ok(SyscallOp::ChannelCreate));
         assert_eq!(SyscallOp::from_raw(0x30), Ok(SyscallOp::HandleClose));
         assert_eq!(SyscallOp::from_raw(0x31), Ok(SyscallOp::HandleDuplicate));
+        assert_eq!(SyscallOp::from_raw(0x60), Ok(SyscallOp::MemoryAllocate));
+        assert_eq!(SyscallOp::from_raw(0x61), Ok(SyscallOp::MemoryRemap));
     }
 
     #[test]

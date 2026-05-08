@@ -10,7 +10,11 @@ use drivers_common::services::{
     },
     user_image::UserImage,
 };
-use memory::memory_mapper::{AddressSpaceFactory, AddressSpaceHandle};
+use memory::{
+    memory_mapper::{AddressSpaceFactory, AddressSpaceHandle},
+    user_vm_allocator::UserVmAllocator,
+    virtual_address::PageAlignedVirtualAddress,
+};
 
 use super::{
     address_space::AddressSpace,
@@ -19,7 +23,7 @@ use super::{
         with_preemption_disabled,
     },
     cpu::Cpu,
-    process::ProcessTable,
+    process::{Process, ProcessTable},
     thread::{Thread, ThreadState},
     thread_table::ThreadTable,
     wait_queue::{SleepEntry, SleepQueue},
@@ -349,6 +353,19 @@ where
     pub fn process_count_for_test(&self) -> usize {
         self.inner.with_lock(|inner| inner.processes.live_count())
     }
+
+    /// Сколько user-VM-регионов уже выделено у процесса `pid`. Используется
+    /// integration-тестами для проверки реакций на vm_allocate/vm_protect.
+    /// `None`, если процесс не найден или у него нет user_vm-аллокатора.
+    #[doc(hidden)]
+    pub fn user_vm_live_count_for_test(&self, pid: ProcessId) -> Option<usize> {
+        use collections::LockCell;
+        self.inner.with_lock(|inner| {
+            let process = inner.processes.get(pid)?;
+            let vm = process.user_vm()?.clone();
+            Some(vm.with_lock(|alloc| alloc.live_count()))
+        })
+    }
 }
 
 impl<A, T> SchedulerInner<A, T>
@@ -505,9 +522,17 @@ where
             arg: UserBootstrapArg::ZERO,
         });
 
+        let user_vm = build_user_vm_allocator(image);
+        let address_space_for_process = address_space.clone();
         let process_id = self
             .processes
-            .insert(name, address_space)
+            .insert_with(|id| {
+                let mut process = Process::new(id, name, address_space_for_process);
+                if let Some(vm) = user_vm {
+                    process = process.with_user_vm(vm);
+                }
+                process
+            })
             .map_err(|_| SpawnUserError::Spawn(SpawnError::NoFreeThreadSlots))?;
 
         let cpu_affinity = self
@@ -722,6 +747,22 @@ where
         let current_id = self.current_cpu()?.current();
         let pid = self.threads.get(current_id)?.process();
         self.processes.get(pid).map(|p| p.handle_table().clone())
+    }
+
+    /// Снимок (Arc<AddressSpace>, Arc<MutexCell<UserVmAllocator>>) текущего
+    /// процесса для syscall-handler-ов user-памяти. `None`, если процесс -
+    /// kernel-only либо у него нет user_vm-аллокатора.
+    pub(super) fn current_user_vm_pair(
+        &self,
+    ) -> Option<(
+        Arc<AddressSpace>,
+        Arc<MutexCell<memory::user_vm_allocator::UserVmAllocator>>,
+    )> {
+        let current_id = self.current_cpu()?.current();
+        let pid = self.threads.get(current_id)?.process();
+        let process = self.processes.get(pid)?;
+        let vm = process.user_vm()?.clone();
+        Some((process.address_space().clone(), vm))
     }
 
     pub(super) fn current(&self) -> ThreadId {
@@ -1020,6 +1061,26 @@ pub(super) fn perform_schedule_action<A: ArchContext>(action: ScheduleAction<A>)
     }
     // SAFETY: raw pointers подготовлены под scheduler-lock-ом и валидны до завершения switch.
     unsafe { A::switch(&mut *prev, &*next) };
+}
+
+/// Готовит per-process [`UserVmAllocator`] для user-процесса.
+///
+/// Аллокатор обслуживает "дыру" между концом самого высокого сегмента образа и
+/// базой user-стека: всё, что можно получить через будущие `vm_allocate` syscall'ы,
+/// лежит именно здесь. Возвращает `None`, если такой дыры нет (например, образ
+/// без сегментов или сегменты вплотную примыкают к стеку) - для таких процессов
+/// `vm_*` syscall'ы будут всегда возвращать `OutOfMemory`.
+fn build_user_vm_allocator(image: &UserImage<'_>) -> Option<UserVmAllocator> {
+    let highest_end = image.highest_segment_end()?;
+    let stack_base = image.user_stack_base().ok()?;
+    let highest_aligned = PageAlignedVirtualAddress::from_usize(highest_end.as_usize())?;
+    if highest_aligned.as_usize() >= stack_base.as_usize() {
+        return None;
+    }
+    Some(UserVmAllocator::new(
+        highest_aligned,
+        stack_base.as_virtual(),
+    ))
 }
 
 unsafe extern "C" fn thread_trampoline<A: ArchContext>(arg: *mut ()) -> ! {

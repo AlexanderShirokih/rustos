@@ -72,6 +72,17 @@ impl UserImage<'_> {
         PageAlignedVirtualAddress::from_usize(base).ok_or(UserImageError::MisalignedStack)
     }
 
+    /// Конец самого высокого сегмента (exclusive). `None`, если сегментов нет.
+    /// Используется для определения границы между статическими сегментами образа
+    /// и областью динамической user-памяти.
+    pub fn highest_segment_end(&self) -> Option<VirtualAddress> {
+        self.segments
+            .iter()
+            .map(|seg| seg.va_base.as_usize() + seg.mapped_size)
+            .max()
+            .map(VirtualAddress::new)
+    }
+
     /// Проверяет инварианты образа без выполнения каких-либо аллокаций.
     pub fn validate(&self) -> Result<(), UserImageError> {
         const FRAME_SIZE: usize = 4096;

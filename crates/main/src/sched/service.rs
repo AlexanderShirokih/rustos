@@ -14,7 +14,7 @@ use super::{
     arch::{ArchContext, ArchCpu, TimerSource, with_preemption_disabled},
     scheduler::{ScheduleAction, SchedulerInner, perform_schedule_action},
 };
-use crate::kobject::{HandleTable, KernelRuntime, ParkState};
+use crate::kobject::{HandleTable, KernelRuntime, ParkState, UserVmContext};
 
 /// Капабилити-handle на scheduler. Регистрируется в `Capabilities` как
 /// `Arc<dyn SchedulerService>` и одновременно используется как `TickHandler`
@@ -128,6 +128,13 @@ where
 
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
         self.inner.with_lock(|inner| inner.current_handle_table())
+    }
+
+    fn current_user_vm(&self) -> Option<UserVmContext> {
+        let (address_space, allocator) =
+            self.inner.with_lock(|inner| inner.current_user_vm_pair())?;
+        let mapper = address_space.mapper_arc()?;
+        Some(UserVmContext::new(mapper, allocator))
     }
 
     fn block_current_until(&self, ready_flag: &AtomicU32, timeout_ns: Option<u64>) {

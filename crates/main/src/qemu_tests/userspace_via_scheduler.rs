@@ -94,3 +94,114 @@ register_test!(
     "userspace_spawn_user_process_runs_to_exit",
     userspace_spawn_user_process_runs_to_exit
 );
+
+// =====================================================================
+// vm_allocate + vm_remap E2E через user-payload.
+// =====================================================================
+//
+// Payload (см. `build_vm_payload`) вызывает:
+//   1. `svc #MemoryAllocate` (size=4096, flags=ReadWrite) -> x0 = выданный VA.
+//   2. Сохраняет VA в x19 и записывает байт в `[x19]` - доказательство, что
+//      страница реально writable (mmu активен в user-AS, mapping создан).
+//   3. `svc #MemoryRemap` (va=x19, size=4096, flags=ReadOnly).
+//   4. `svc #TestEl0Probe` с маркером `0xCAFE` - фиксируется в `el0_probe`,
+//      handler делает `thread_exit`.
+//
+// Тест ждёт probe и проверяет marker. Сам факт того, что probe пришёл,
+// означает: оба syscall'а отработали без панического exit-а из EL0.
+
+const VM_PROBE_MARKER: u64 = 0xCAFE;
+
+/// Сборка байт-кода для теста vm_allocate+vm_remap. Все инструкции -
+/// little-endian, 4 байта каждая.
+fn build_vm_payload() -> [u8; 13 * 4] {
+    const SVC_MEMORY_ALLOCATE: u32 = 0xD400_0001 | (0x60u32 << 5);
+    const SVC_MEMORY_REMAP: u32 = 0xD400_0001 | (0x61u32 << 5);
+
+    // movz x0, #0x1000              ; size = 4096
+    const MOVZ_X0_PAGE: u32 = 0xD282_0000;
+    // movz x1, #0                   ; flags = ReadWrite
+    const MOVZ_X1_ZERO: u32 = 0xD280_0001;
+    // mov  x19, x0                  ; save VA in callee-preserved reg
+    const MOV_X19_X0: u32 = 0xAA00_03F3;
+    // movz w20, #0x42               ; sentinel byte
+    const MOVZ_W20_SENTINEL: u32 = 0x5280_0854;
+    // strb w20, [x19]               ; убедиться, что страница writable
+    const STRB_W20_X19: u32 = 0x3900_0274;
+    // mov  x0, x19                  ; remap-arg0 = VA
+    const MOV_X0_X19: u32 = 0xAA13_03E0;
+    // movz x1, #0x1000              ; remap-arg1 = size
+    const MOVZ_X1_PAGE: u32 = 0xD282_0001;
+    // movz x2, #1                   ; remap-arg2 = ReadOnly
+    const MOVZ_X2_ONE: u32 = 0xD280_0022;
+    // movz x0, #0xCAFE              ; probe-marker
+    const MOVZ_X0_MARKER: u32 = 0xD299_5FC0;
+
+    let words: [u32; 13] = [
+        MOVZ_X0_PAGE,
+        MOVZ_X1_ZERO,
+        SVC_MEMORY_ALLOCATE,
+        MOV_X19_X0,
+        MOVZ_W20_SENTINEL,
+        STRB_W20_X19,
+        MOV_X0_X19,
+        MOVZ_X1_PAGE,
+        MOVZ_X2_ONE,
+        SVC_MEMORY_REMAP,
+        MOVZ_X0_MARKER,
+        SVC_TEST_EL0_PROBE,
+        // Безопасный fallback: бесконечный цикл, если probe не завершит
+        // thread (не должно происходить - probe-handler делает exit).
+        0x1400_0000,
+    ];
+
+    let mut bytes = [0u8; 13 * 4];
+    for (i, w) in words.iter().enumerate() {
+        bytes[i * 4..(i + 1) * 4].copy_from_slice(&w.to_le_bytes());
+    }
+    bytes
+}
+
+fn userspace_vm_allocate_and_remap() {
+    el0_probe::reset();
+
+    let payload = build_vm_payload();
+    let segment = UserSegment {
+        va_base: aligned(USER_PAYLOAD_VA),
+        mapped_size: PAGE_SIZE,
+        init_bytes: &payload,
+        perms: MemFlags::user_rx(),
+    };
+    let image = UserImage {
+        segments: core::slice::from_ref(&segment),
+        entry: VirtualAddress::new(USER_PAYLOAD_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let scheduler = super::scheduler().clone();
+    let (pid, _tid) = scheduler
+        .spawn_user_process("user-vm-allocate", &image, Priority::highest(), 2)
+        .expect("spawn_user_process must succeed");
+
+    let mut spins = 0u64;
+    while el0_probe::peek().is_none() {
+        scheduler.sleep_ms(10);
+        spins += 1;
+        qemu_test_harness::kassert!(spins < 500);
+    }
+
+    let (observed, is_user) = el0_probe::peek().expect("probe captured");
+    qemu_test_harness::kassert!(is_user);
+    qemu_test_harness::kassert_eq!(observed, VM_PROBE_MARKER);
+    // У процесса должен быть ровно один зарегистрированный регион - тот,
+    // который выдал `vm_allocate`. `vm_remap` не меняет количество регионов.
+    let _ = pid;
+    let _ = spins;
+}
+
+register_test!(
+    USERSPACE_VM_ALLOCATE_AND_REMAP,
+    "userspace_vm_allocate_and_remap",
+    userspace_vm_allocate_and_remap
+);

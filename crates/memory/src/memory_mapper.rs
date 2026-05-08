@@ -1,4 +1,4 @@
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::fmt::{Display, Formatter};
 
 use crate::{
@@ -182,5 +182,5 @@ impl Display for AsCreateError {
 /// Создаёт пустой `MemoryMapper` с собственным L0-root, выделенным из
 /// physical frame allocator. Используется scheduler-ом при spawn user-thread.
 pub trait AddressSpaceFactory: Send + Sync {
-    fn create_user(&self) -> Result<Box<dyn MemoryMapper + Send + Sync>, AsCreateError>;
+    fn create_user(&self) -> Result<Arc<dyn MemoryMapper + Send + Sync>, AsCreateError>;
 }

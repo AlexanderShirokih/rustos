@@ -339,12 +339,12 @@ impl Default for MockAddressSpaceFactory {
 }
 
 impl AddressSpaceFactory for MockAddressSpaceFactory {
-    fn create_user(&self) -> Result<Box<dyn MemoryMapper + Send + Sync>, AsCreateError> {
+    fn create_user(&self) -> Result<Arc<dyn MemoryMapper + Send + Sync>, AsCreateError> {
         let mut inner = self.inner.lock().unwrap();
         let root_pa = PhysicalAddress::new(inner.next_root_pa);
         inner.next_root_pa += 4096;
         inner.created += 1;
-        Ok(Box::new(MockUserMapper {
+        Ok(Arc::new(MockUserMapper {
             root_pa,
             released: self.released.clone(),
             map_calls: self.map_calls.clone(),

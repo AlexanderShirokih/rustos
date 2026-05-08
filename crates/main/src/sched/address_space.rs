@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 
 use memory::memory_mapper::{AddressSpaceFactory, AddressSpaceHandle, AsCreateError, MemoryMapper};
 
@@ -10,7 +10,7 @@ use memory::memory_mapper::{AddressSpaceFactory, AddressSpaceHandle, AsCreateErr
 /// на thread этого процесса.
 pub enum AddressSpace {
     Kernel,
-    User(Box<dyn MemoryMapper + Send + Sync>),
+    User(Arc<dyn MemoryMapper + Send + Sync>),
 }
 
 impl AddressSpace {
@@ -45,6 +45,15 @@ impl AddressSpace {
         match self {
             Self::Kernel => None,
             Self::User(mapper) => Some(&**mapper),
+        }
+    }
+
+    /// `Arc` user-mapper'а для долгоживущих snapshot'ов (например,
+    /// `UserVmContext` в syscall-handler-ах). Для kernel-AS - `None`.
+    pub fn mapper_arc(&self) -> Option<Arc<dyn MemoryMapper + Send + Sync>> {
+        match self {
+            Self::Kernel => None,
+            Self::User(mapper) => Some(mapper.clone()),
         }
     }
 }

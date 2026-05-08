@@ -6,7 +6,7 @@
 //! последующие `map_exact` смогут аллоцировать промежуточные таблицы и
 //! обращаться к ним через линейное higher-half-отображение.
 
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use collections::{MutexCell, NoLockCell};
 use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable};
@@ -49,7 +49,7 @@ impl Aarch64AddressSpaceFactory {
 }
 
 impl AddressSpaceFactory for Aarch64AddressSpaceFactory {
-    fn create_user(&self) -> Result<Box<dyn MemoryMapper + Send + Sync>, AsCreateError> {
+    fn create_user(&self) -> Result<Arc<dyn MemoryMapper + Send + Sync>, AsCreateError> {
         let frame = self
             .frame_allocator
             .allocate_frame()
@@ -71,6 +71,6 @@ impl AddressSpaceFactory for Aarch64AddressSpaceFactory {
                 AddressSpaceKind::User,
             );
 
-        Ok(Box::new(mapper))
+        Ok(Arc::new(mapper))
     }
 }

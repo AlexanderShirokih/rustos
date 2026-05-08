@@ -6,6 +6,7 @@ use core::{
 
 use collections::MutexCell;
 use drivers_common::services::scheduler::ProcessId;
+use memory::user_vm_allocator::UserVmAllocator;
 
 use super::address_space::AddressSpace;
 use crate::kobject::HandleTable;
@@ -15,6 +16,10 @@ pub struct Process {
     name: &'static str,
     address_space: Arc<AddressSpace>,
     handle_table: Arc<MutexCell<HandleTable>>,
+    /// Per-process аллокатор user-VA. `None` для kernel-процессов (idle,
+    /// kernel-thread'ы) - у них пользовательской памяти нет, syscall'ы
+    /// `vm_*` для них вернут `WrongType`.
+    user_vm: Option<Arc<MutexCell<UserVmAllocator>>>,
     /// Количество живых thread'ов, привязанных к этому процессу. Декремент
     /// при `thread_exit`; ноль - сигнал scheduler-у удалить процесс.
     thread_count: AtomicUsize,
@@ -27,8 +32,24 @@ impl Process {
             name,
             address_space,
             handle_table: Arc::new(MutexCell::new(HandleTable::new())),
+            user_vm: None,
             thread_count: AtomicUsize::new(1),
         }
+    }
+
+    /// Прикрепляет per-process аллокатор user-VA. Используется при создании
+    /// user-процесса: scheduler инициализирует аллокатор от верхней границы
+    /// загруженного образа до начала user-стека.
+    pub fn with_user_vm(mut self, vm: UserVmAllocator) -> Self {
+        self.user_vm = Some(Arc::new(MutexCell::new(vm)));
+        self
+    }
+
+    /// `Arc` per-process аллокатора user-VA. Клонируется как `Arc`,
+    /// чтобы syscall-handler-ы могли работать с аллокатором вне scheduler-lock.
+    /// `None` - у процесса нет user-AS (kernel-процесс).
+    pub fn user_vm(&self) -> Option<&Arc<MutexCell<UserVmAllocator>>> {
+        self.user_vm.as_ref()
     }
 
     pub fn id(&self) -> ProcessId {
@@ -110,6 +131,17 @@ impl ProcessTable {
         name: &'static str,
         address_space: Arc<AddressSpace>,
     ) -> Result<ProcessId, ProcessTableError> {
+        self.insert_with(|id| Process::new(id, name, address_space))
+    }
+
+    /// Вариант [`Self::insert`] с фабрикой, получающей сгенерированный
+    /// `ProcessId`. Используется, когда вызывающий хочет навесить на свежий
+    /// `Process` дополнительное состояние (например, `with_user_vm`)
+    /// перед регистрацией.
+    pub fn insert_with<F>(&mut self, factory: F) -> Result<ProcessId, ProcessTableError>
+    where
+        F: FnOnce(ProcessId) -> Process,
+    {
         let raw = NonZeroU32::new(self.next_id).ok_or(ProcessTableError::OutOfIds)?;
         let id = ProcessId::new(raw);
         self.next_id = self
@@ -117,8 +149,11 @@ impl ProcessTable {
             .checked_add(1)
             .ok_or(ProcessTableError::OutOfIds)?;
 
+        let process = factory(id);
+        debug_assert_eq!(process.id(), id, "factory must use the supplied id");
+
         if let Some(index) = self.slots.iter().position(Option::is_none) {
-            self.slots[index] = Some(Process::new(id, name, address_space));
+            self.slots[index] = Some(process);
             return Ok(id);
         }
 
@@ -126,7 +161,7 @@ impl ProcessTable {
             return Err(ProcessTableError::Full);
         }
 
-        self.slots.push(Some(Process::new(id, name, address_space)));
+        self.slots.push(Some(process));
         Ok(id)
     }
 

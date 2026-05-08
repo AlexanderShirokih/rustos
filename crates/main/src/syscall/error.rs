@@ -43,6 +43,12 @@ pub enum SyscallError {
     MessageTooBig = 11,
     /// Handle-таблица процесса исчерпана.
     OutOfHandles = 12,
+    /// Не хватает физической или виртуальной памяти, либо реестр регионов
+    /// процесса исчерпан.
+    OutOfMemory = 13,
+    /// Регион не найден в реестре user-VM текущего процесса (например,
+    /// `vm_remap` на не-выделенный VA-диапазон).
+    NotFound = 14,
 }
 
 impl SyscallError {
@@ -140,6 +146,8 @@ mod tests {
             SyscallError::BufferTooSmall,
             SyscallError::MessageTooBig,
             SyscallError::OutOfHandles,
+            SyscallError::OutOfMemory,
+            SyscallError::NotFound,
         ];
         for &e in &codes {
             let v: i64 = e.into();
@@ -147,7 +155,7 @@ mod tests {
             assert!(v >= -i64::from(u32::MAX), "{e:?} out of range");
         }
         // Все коды разные.
-        let mut seen = [0_i64; 12];
+        let mut seen = [0_i64; 14];
         for (i, &e) in codes.iter().enumerate() {
             seen[i] = e.into();
         }
@@ -178,6 +186,8 @@ mod tests {
             SyscallError::BufferTooSmall,
             SyscallError::MessageTooBig,
             SyscallError::OutOfHandles,
+            SyscallError::OutOfMemory,
+            SyscallError::NotFound,
         ];
         for &e in &codes {
             assert_ne!(i64::from(e), 0);

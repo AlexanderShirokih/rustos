@@ -85,7 +85,7 @@ TTBR1 общий для всего ядра.
 
 - `main::sched::AddressSpace` — платформо-независимый wrapper:
   - `Kernel` — TTBR0=0, kernel-only;
-  - `User(Box<dyn MemoryMapper + Send + Sync>)` — собственный L0-root.
+  - `User(Arc<dyn MemoryMapper + Send + Sync>)` — собственный L0-root.
 - `memory::memory_mapper::AddressSpaceFactory` — фабрика user-AS;
   реализуется в `hal-aarch64::memory::address_space_factory` поверх
   глобального `FrameAllocator`.

@@ -12,9 +12,35 @@ use core::sync::atomic::AtomicU32;
 
 use collections::MutexCell;
 use drivers_common::services::scheduler::ThreadId;
+use memory::{memory_mapper::MemoryMapper, user_vm_allocator::UserVmAllocator};
 use spin::Once;
 
 use super::HandleTable;
+
+/// Снимок per-process user-памяти, передаваемый syscall-handler-ам.
+///
+/// Оба поля - `Arc`-ы из `Process`, копирование пары - два clone'а Arc.
+pub struct UserVmContext {
+    mapper: Arc<dyn MemoryMapper + Send + Sync>,
+    allocator: Arc<MutexCell<UserVmAllocator>>,
+}
+
+impl UserVmContext {
+    pub fn new(
+        mapper: Arc<dyn MemoryMapper + Send + Sync>,
+        allocator: Arc<MutexCell<UserVmAllocator>>,
+    ) -> Self {
+        Self { mapper, allocator }
+    }
+
+    pub fn mapper(&self) -> &dyn MemoryMapper {
+        &*self.mapper
+    }
+
+    pub fn allocator(&self) -> &Arc<MutexCell<UserVmAllocator>> {
+        &self.allocator
+    }
+}
 
 /// Состояния парковки потока, ожидающего сигнала на KO.
 ///
@@ -35,9 +61,9 @@ impl ParkState {
 
 /// Контракт "scheduler глазами kobject".
 ///
-/// Только эти четыре операции нужны для wait/wake-пути; намеренно не
-/// расширяем интерфейс scheduler-стороной spawn/exit - те ходят через
-/// `SchedulerService` без участия kobject.
+/// Только эти операции нужны для wait/wake-пути и user-VM syscall'ов;
+/// намеренно не расширяем интерфейс scheduler-стороной spawn/exit - те
+/// ходят через `SchedulerService` без участия kobject.
 pub trait KernelRuntime: Send + Sync {
     /// Идентификатор текущего потока.
     fn current_thread_id(&self) -> ThreadId;
@@ -46,6 +72,11 @@ pub trait KernelRuntime: Send + Sync {
     /// scheduler ещё не bootstrapped (например, во время самой ранней
     /// инициализации) - каллер должен возвращать `IpcError::BadHandle`.
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>>;
+
+    /// Снимок (mapper, allocator) для user-syscall'ов памяти.
+    /// `None`, если у текущего процесса нет user-AS (kernel-thread или
+    /// процесс был зарегистрирован без `with_user_vm`).
+    fn current_user_vm(&self) -> Option<UserVmContext>;
 
     /// Парк current thread. Под scheduler-lock-ом проверяется
     /// `ready_flag`: если он уже не [`ParkState::REGISTERED`], значит

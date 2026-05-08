@@ -40,7 +40,7 @@ pub use handle_table::HandleTable;
 pub use koid::Koid;
 pub use object::KObject;
 pub use rights::Rights;
-pub use runtime::{KernelRuntime, ParkState, install_runtime};
+pub use runtime::{KernelRuntime, ParkState, UserVmContext, install_runtime, runtime};
 pub use wait::{SignalState, Waker};
 
 #[cfg(test)]

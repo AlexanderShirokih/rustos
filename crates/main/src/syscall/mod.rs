@@ -20,8 +20,10 @@
 
 mod bridge;
 mod error;
+mod memory;
 mod numbers;
 
 pub use bridge::{Origin, SyscallFrame, dispatch};
 pub use error::SyscallError;
+pub use memory::UserMemFlags;
 pub use numbers::SyscallOp;
