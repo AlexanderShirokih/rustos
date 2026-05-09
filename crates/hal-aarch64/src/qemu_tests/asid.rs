@@ -17,10 +17,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use main::{
-    sched::{AddressSpace, ArchContext},
-    syscall_bridge,
-};
+use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
     mem_flags::{AccessMode, Executable, Owners, PrivateMemoryPermission},
@@ -29,6 +26,7 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 use qemu_test_harness::register_test;
+use scheduler::{AddressSpace, ArchContext};
 
 use crate::{
     HIGHER_HALF_BASE,

@@ -157,7 +157,7 @@ extern "C" fn exception_handler(frame: &mut ExceptionFrame, kind: ExceptionKind)
 /// Обработчик синхронных исключений
 fn sync_handler(frame: &mut ExceptionFrame) {
     if frame.esr.exception_class() == ExceptionClass::Svc {
-        main::syscall::dispatch(frame);
+        syscall::dispatch(frame);
         return;
     }
 
@@ -180,7 +180,7 @@ fn sync_handler(frame: &mut ExceptionFrame) {
 
 /// Обработчик IRQ делегирует диспетчеризацию bridge-слою ядра.
 fn irq_handler(_frame: &ExceptionFrame) {
-    main::irq_bridge::dispatch_interrupt();
+    kernelspace::irq_bridge::dispatch_interrupt();
 }
 
 /// Обработчик FIQ - паника с диагностикой.

@@ -1,7 +1,7 @@
 use core::{mem, ptr::NonNull};
 
-use main::sched::{ArchContext, UserEntry};
 use memory::memory_mapper::AddressSpaceHandle;
+use scheduler::{ArchContext, UserEntry};
 
 use super::{
     cpu_local::Aarch64Cpu,
@@ -58,7 +58,7 @@ impl ArchContext for Aarch64Context {
     type Cpu = Aarch64Cpu;
     type Stack = Aarch64Stack;
 
-    fn init(stack_top: NonNull<u8>, entry: main::sched::arch::TrampolineFn, arg: *mut ()) -> Self {
+    fn init(stack_top: NonNull<u8>, entry: scheduler::arch::TrampolineFn, arg: *mut ()) -> Self {
         let sp = (stack_top.as_ptr() as usize & !0xF) as u64;
         let mut context = Self {
             x19_x28: [GpReg::from_u64(0); 10],

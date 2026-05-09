@@ -1,4 +1,4 @@
-use main::sched::{ArchCpu, CpuId};
+use scheduler::{ArchCpu, CpuId};
 
 use crate::{read_sysreg, write_sysreg};
 

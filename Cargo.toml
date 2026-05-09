@@ -9,13 +9,17 @@ members = [
     "crates/drivers-common-aarch64",
     "crates/drivers-common",
     "crates/drivers-aarch64",
-    "crates/main",
+    "crates/kernelspace",
+    "crates/kobject",
+    "crates/scheduler",
+    "crates/syscall",
     "crates/fdt",
     "crates/io",
     "crates/log",
     "crates/memory",
     "crates/qemu-test-harness",
     "crates/qemu-test-harness-aarch64",
+    "crates/userspace",
     "crates/util",
     "xtask",
 ]
@@ -47,15 +51,19 @@ hal-aarch64-paging = { path = "crates/hal-aarch64-paging" }
 drivers-common = { path = "crates/drivers-common" }
 drivers-common-aarch64 = { path = "crates/drivers-common-aarch64" }
 drivers-aarch64 = { path = "crates/drivers-aarch64" }
-main = { path = "crates/main" }
+kernelspace = { path = "crates/kernelspace" }
+kobject = { path = "crates/kobject" }
+scheduler = { path = "crates/scheduler" }
+syscall = { path = "crates/syscall" }
 qemu-test-harness = { path = "crates/qemu-test-harness" }
 qemu-test-harness-aarch64 = { path = "crates/qemu-test-harness-aarch64" }
+userspace = { path = "crates/userspace" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # Архитектурно-независимый код не должен использовать `unsafe`. Платформенные
 # крейты (arch-*, drivers-*-aarch64, qemu-test-harness-aarch64) и низкоуровневые
-# ядерные примитивы (memory, main, io, collections, fdt, ...) явно опциируются
+# ядерные примитивы (memory, kernelspace, io, collections, fdt, ...) явно опциируются
 # через `#![allow(unsafe_code)]` в корне крейта - это видно в diff.
 unsafe_code = "deny"
 

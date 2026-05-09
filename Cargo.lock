@@ -200,14 +200,18 @@ dependencies = [
  "hal-aarch64-paging",
  "hal-common",
  "io",
+ "kernelspace",
  "klog",
- "main",
+ "kobject",
  "memory",
  "qemu-test-harness",
  "qemu-test-harness-aarch64",
+ "scheduler",
  "serde",
  "serde_yaml",
  "spin",
+ "syscall",
+ "userspace",
 ]
 
 [[package]]
@@ -274,11 +278,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "kernelspace"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "drivers-common",
+ "io",
+ "klog",
+ "kobject",
+ "memory",
+ "qemu-test-harness",
+ "scheduler",
+ "spin",
+ "syscall",
+ "userspace",
+]
+
+[[package]]
 name = "klog"
 version = "0.1.0"
 dependencies = [
  "collections",
  "io",
+]
+
+[[package]]
+name = "kobject"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "spin",
 ]
 
 [[package]]
@@ -288,19 +317,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 dependencies = [
  "scopeguard",
-]
-
-[[package]]
-name = "main"
-version = "0.1.0"
-dependencies = [
- "collections",
- "drivers-common",
- "io",
- "klog",
- "memory",
- "qemu-test-harness",
- "spin",
 ]
 
 [[package]]
@@ -367,6 +383,16 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "scheduler"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "kobject",
+ "memory",
+ "spin",
+]
 
 [[package]]
 name = "scopeguard"
@@ -450,6 +476,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "syscall"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "kobject",
+ "memory",
+ "spin",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -460,6 +496,13 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "userspace"
+version = "0.1.0"
+dependencies = [
+ "memory",
+]
 
 [[package]]
 name = "utf8parse"

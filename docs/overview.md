@@ -13,19 +13,23 @@ RustOS Mobile — bare-metal ядро для aarch64, написанное на 
 Зависимости образуют DAG. Стрелки — направление зависимости:
 
 ```
-crates/hal-aarch64     <- точка входа, платформенный код
-  ├── kernel            <- основная логика ядра
+crates/hal-aarch64 <- точка входа, платформенный код
+  ├── kernelspace       <- orchestration ядра
+  ├── scheduler         <- процессы, потоки, планирование
+  ├── kobject           <- kernel objects / IPC
+  ├── syscall           <- syscall ABI и dispatch
+  ├── userspace         <- user image loader и user-VM planning
   ├── drivers-aarch64   <- платформенные драйверы
   ├── memory            <- управление физической памятью
   ├── aarch64-paging    <- таблицы страниц aarch64
-  └── hal-common       <- общие типы архитектуры
+  └── hal-common        <- общие типы архитектуры
         └── drivers-common         <- интерфейс драйверов
         └── drivers-common-aarch64 <- aarch64-специфичные типы драйверов
               ├── io              <- ввод/вывод, ByteSink, Writer
-              ├── collections    <- Vec, IntervalSet (no_std)
-              ├── util           <- утилиты
-              ├── fdt            <- парсер Device Tree
-              └── log            <- логирование (klog)
+              ├── collections     <- Vec, IntervalSet (no_std)
+              ├── util            <- утилиты
+              ├── fdt             <- парсер Device Tree
+              └── log             <- логирование (klog)
 ```
 
 ## Workspace
@@ -41,7 +45,7 @@ crates/hal-aarch64     <- точка входа, платформенный ко
 | `drivers-common` | `crates/drivers-common` | Трейты и типы драйверов |
 | `drivers-common-aarch64` | `crates/drivers-common-aarch64` | aarch64-специфичные типы драйверов |
 | `drivers-aarch64` | `crates/drivers-aarch64` | Реализации драйверов (PL011, GIC) |
-| `main` | `crates/main` | Основная логика ядра |
+| `kernelspace` | `crates/kernelspace` | Основная логика ядра |
 | `fdt` | `crates/fdt` | Парсер Flattened Device Tree |
 | `io` | `crates/io` | `ByteSink`, `Writer`, форматирование |
 | `log` | `crates/log` | Макросы логирования (`klog`) |

@@ -29,15 +29,8 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use drivers_common::services::scheduler::{
-    Priority, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig,
-};
-use main::{
-    kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, install_handle},
-    sched::{AddressSpace, ArchContext, UserBootstrapArg, UserEntry},
-    syscall::SyscallOp,
-    syscall_bridge,
-};
+use kernelspace::syscall_bridge;
+use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, install_handle};
 use memory::{
     MemFlags,
     memory_mapper::MemoryMapper,
@@ -45,7 +38,12 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use qemu_test_harness::register_test;
+use scheduler::{
+    AddressSpace, ArchContext, Priority, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig,
+    UserBootstrapArg, UserEntry,
+};
 use spin::Once;
+use syscall::SyscallOp;
 
 use crate::{
     HIGHER_HALF_BASE, memory::address_space_factory::UserAarch64MemoryMapper, sched::Aarch64Context,

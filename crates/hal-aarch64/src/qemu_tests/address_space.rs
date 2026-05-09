@@ -21,10 +21,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 static HOLD_A: AtomicU64 = AtomicU64::new(0);
 static HOLD_B: AtomicU64 = AtomicU64::new(0);
 
-use main::{
-    sched::{AddressSpace, ArchContext},
-    syscall_bridge,
-};
+use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
     mem_flags::{AccessMode, Executable, Owners, PrivateMemoryPermission},
@@ -32,6 +29,7 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 use qemu_test_harness::register_test;
+use scheduler::{AddressSpace, ArchContext};
 
 use crate::{HIGHER_HALF_BASE, sched::Aarch64Context};
 

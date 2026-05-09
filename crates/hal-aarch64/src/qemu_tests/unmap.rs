@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicIsize, Ordering};
 
 use collections::MutexCell;
 use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable};
-use main::{sched::AddressSpace, syscall_bridge};
+use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
     frame::Frame,
@@ -26,6 +26,7 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 use qemu_test_harness::register_test;
+use scheduler::AddressSpace;
 
 use crate::{
     HIGHER_HALF_BASE,
@@ -82,7 +83,7 @@ fn mapper_unmap_roundtrip() {
 
     for i in 0..pages {
         let p = va(PROBE_BASE + i * PAGE_SIZE);
-        qemu_test_harness::kassert!(downcast_user_mapper(&*mapper).query_leaf_raw(p).is_some());
+        qemu_test_harness::kassert!(downcast_user_mapper(mapper).query_leaf_raw(p).is_some());
     }
 
     mapper
@@ -91,7 +92,7 @@ fn mapper_unmap_roundtrip() {
 
     for i in 0..pages {
         let p = va(PROBE_BASE + i * PAGE_SIZE);
-        qemu_test_harness::kassert!(downcast_user_mapper(&*mapper).query_leaf_raw(p).is_none());
+        qemu_test_harness::kassert!(downcast_user_mapper(mapper).query_leaf_raw(p).is_none());
     }
 }
 
@@ -115,7 +116,7 @@ fn mapper_unmap_then_remap() {
 
     for i in 0..pages {
         qemu_test_harness::kassert!(
-            downcast_user_mapper(&*mapper)
+            downcast_user_mapper(mapper)
                 .query_leaf_raw(va(base.as_usize() + i * PAGE_SIZE))
                 .is_some()
         );
@@ -187,11 +188,7 @@ fn mapper_unmap_misaligned_size_rejected() {
         .expect_err("unmap must reject misaligned size");
     qemu_test_harness::kassert!(matches!(err, MemoryUnmappingError::MisalignedRange));
 
-    qemu_test_harness::kassert!(
-        downcast_user_mapper(&*mapper)
-            .query_leaf_raw(base)
-            .is_some()
-    );
+    qemu_test_harness::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_some());
 
     mapper.unmap(base, PAGE_SIZE).expect("cleanup unmap");
 }

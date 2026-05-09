@@ -7,13 +7,11 @@
 
 use core::arch::asm;
 
-use drivers_common::services::scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
-use main::{
-    kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, handle_close, install_handle},
-    syscall::{SyscallError, SyscallOp},
-    syscall_bridge::scheduler,
-};
+use kernelspace::syscall_bridge::scheduler;
+use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, handle_close, install_handle};
 use qemu_test_harness::register_test;
+use scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
+use syscall::{SyscallError, SyscallOp};
 
 /// SVC с неизвестным immediate должен возвращать `-BadSyscall`,
 /// kernel - продолжить выполнение без panic.

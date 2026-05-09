@@ -6,16 +6,15 @@ use drivers_aarch64::drivers;
 use drivers_common::scanner::EmbeddedDriversScanner;
 use drivers_common_aarch64::adapt_to_fdt_tree;
 use io::buffered_writer::BufferedWriter;
-use klog::info;
-use main::{
-    kernel_context::KernelContext,
-    kmain::kmain,
-    sched::{Bootstrapped, KernelTimerSource, Scheduler, SchedulerConfig},
+use kernelspace::{
+    kernel_context::KernelContext, kmain::kmain, scheduler_bootstrap::KernelTimerSource,
 };
+use klog::info;
 use memory::{
     physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
+use scheduler::{Bootstrapped, Scheduler, SchedulerConfig};
 
 use crate::{
     HIGHER_HALF_BASE,
@@ -95,10 +94,10 @@ fn pick_init_task()
 -> fn(&Scheduler<Aarch64Context, KernelTimerSource, Bootstrapped>, &mut KernelContext) {
     #[cfg(feature = "qemu-tests")]
     {
-        main::qemu_tests::spawn_qemu_tests_process::<Aarch64Context>
+        kernelspace::qemu_tests::spawn_qemu_tests_process::<Aarch64Context>
     }
     #[cfg(not(feature = "qemu-tests"))]
     {
-        main::init::spawn_init_process::<Aarch64Context>
+        kernelspace::init::spawn_init_process::<Aarch64Context>
     }
 }

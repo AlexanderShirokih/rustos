@@ -8,7 +8,7 @@
 use core::sync::atomic::AtomicU64;
 
 pub use hal_aarch64_asid::{GlobalAsidAllocator, unpack_asid};
-use main::sched::ArchCpu;
+use scheduler::ArchCpu;
 
 use crate::{
     memory::regs::{common::EL1, tlb::TranslationLookasideBuffer},

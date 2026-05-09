@@ -23,10 +23,10 @@ sudo apt-get install -y qemu-system-arm
 
 ### `cargo test` без `--exclude` падает
 
-Крейты `drivers-aarch64`, `hal-aarch64` и `main` содержат aarch64 inline assembly, который не компилируется на x86_64. Всегда используйте:
+Крейты `drivers-aarch64` и `hal-aarch64` содержат aarch64 inline assembly, который не компилируется на x86_64. Всегда используйте:
 
 ```bash
-cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
+cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64
 ```
 
 ### QEMU работает бесконечно

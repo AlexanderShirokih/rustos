@@ -14,7 +14,7 @@ default = ["boot-linux-arm64"]
 boot-linux-arm64 = []
 boot-uefi = []
 qemu-tests = [
-    "main/qemu-tests",
+    "kernelspace/qemu-tests",
     "dep:qemu-test-harness",
     "dep:qemu-test-harness-aarch64",
 ]
@@ -26,8 +26,12 @@ hal-common = { workspace = true }
 drivers-common-aarch64 = { workspace = true }
 drivers-common = { workspace = true }
 drivers-aarch64 = { workspace = true }
-main = { workspace = true }
+kernelspace = { workspace = true }
+kobject = { workspace = true }
+scheduler = { workspace = true }
+syscall = { workspace = true }
 memory = { workspace = true }
+userspace = { workspace = true }
 collections = { workspace = true }
 fdt = { workspace = true }
 io = { workspace = true }

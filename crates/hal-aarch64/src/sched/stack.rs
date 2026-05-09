@@ -1,6 +1,6 @@
 use alloc::vec;
 
-use main::sched::{StackError, ThreadStack, ThreadStackAllocator};
+use scheduler::{StackError, ThreadStack, ThreadStackAllocator};
 
 const PAGE_SIZE: usize = 4096;
 

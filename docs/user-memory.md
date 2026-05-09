@@ -7,7 +7,7 @@
 
 > Инициализация статической части user-AS — сегменты загруженного образа
 > и user-стек — описана в [`docs/architecture.md`](architecture.md)
-> (`Per-process AddressSpace`) и в `crates/main/src/sched/user_image.rs`.
+> (`Per-process AddressSpace`) и в `crates/userspace/src/image.rs`.
 > Здесь идёт речь только про **динамические** регионы, которые процесс
 > запрашивает у ядра уже после старта.
 
@@ -129,7 +129,7 @@ syscall'ы для них некорректны.
 
 ## Доступ из syscall-handler-ов
 
-Глобальный `KernelRuntime` (`install_runtime` -> `Arc<dyn KernelRuntime>`)
+Глобальный `SyscallRuntime` (`install_runtime` -> `Arc<dyn SyscallRuntime>`)
 получает новую точку:
 
 ```rust
@@ -206,13 +206,13 @@ ABI-юниты в `error.rs` ловили нарушение совместим�
 | Уровень | Расположение |
 |---|---|
 | Юнит-тесты `UserVmAllocator` | `crates/memory/src/user_vm_allocator.rs` (13 тестов) |
-| Юнит-тесты преобразования ошибок | `crates/main/src/syscall/memory.rs` |
-| Юнит-тесты ABI кодов | `crates/main/src/syscall/error.rs`, `numbers.rs` |
-| Интеграция со scheduler | `crates/main/tests/userspace.rs` |
+| Юнит-тесты преобразования ошибок | `crates/syscall/src/memory.rs` |
+| Юнит-тесты ABI кодов | `crates/syscall/src/error.rs`, `numbers.rs` |
+| Интеграция со scheduler | `crates/kernelspace/tests/userspace.rs` |
 
 ## Связанные документы
 
 - [`docs/architecture.md`](architecture.md) — Per-process AddressSpace, MemoryMapper.
-- `crates/main/src/sched/scheduler.rs` — `spawn_user_process`,
+- `crates/kernelspace/src/user_process.rs` — `spawn_user_process`,
   `build_user_vm_allocator`.
-- `crates/main/src/syscall/numbers.rs` — полный реестр syscall'ов.
+- `crates/syscall/src/numbers.rs` — полный реестр syscall'ов.

@@ -6,9 +6,10 @@
 
 ```
 crates/hal-aarch64 (точка входа)
-  -> kernel, drivers-aarch64, memory, aarch64-paging
-    -> drivers-common
-        -> io, collections (утилиты, без бизнес-логики)
+    -> kernelspace, scheduler, kobject, syscall, userspace
+    -> drivers-aarch64, memory, aarch64-paging
+        -> drivers-common
+            -> io, collections (утилиты, без бизнес-логики)
 ```
 
 - Нижние слои не зависят от верхних.
@@ -61,8 +62,8 @@ crates/hal-aarch64 (точка входа)
 
 ```rust
 register_driver!(
-    UART_PL011_EARLY,
-    probe = uart_pl011_probe
+ UART_PL011_EARLY,
+ probe = uart_pl011_probe
 );
 ```
 
@@ -83,7 +84,7 @@ TTBR1 общий для всего ядра.
 
 Ключевые точки:
 
-- `main::sched::AddressSpace` — платформо-независимый wrapper:
+- `scheduler::AddressSpace` — платформо-независимый wrapper:
   - `Kernel` — TTBR0=0, kernel-only;
   - `User(Arc<dyn MemoryMapper + Send + Sync>)` — собственный L0-root.
 - `memory::memory_mapper::AddressSpaceFactory` — фабрика user-AS;

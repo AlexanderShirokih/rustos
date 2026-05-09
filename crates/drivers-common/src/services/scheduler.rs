@@ -3,7 +3,6 @@
 use alloc::boxed::Box;
 use core::num::NonZeroU32;
 
-use super::user_image::{UserImage, UserImageError};
 use crate::services::Service;
 
 /// Идентификатор потока.
@@ -134,33 +133,6 @@ impl ProcessId {
     }
 }
 
-/// Ошибки `SchedulerService::spawn_user_process`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpawnUserError {
-    /// Scheduler создан без `address_space_factory` - user-AS создать нельзя.
-    MissingFactory,
-    /// Описание образа не прошло валидацию.
-    Image(UserImageError),
-    /// Bootstrap-аргумент ссылается на несуществующий initial handle.
-    InvalidBootstrapHandle,
-    /// Начальных handle'ов больше, чем может вместить таблица процесса.
-    TooManyInitialHandles,
-    /// Не удалось выделить ресурс через общий `SpawnError`.
-    Spawn(SpawnError),
-}
-
-impl From<UserImageError> for SpawnUserError {
-    fn from(value: UserImageError) -> Self {
-        SpawnUserError::Image(value)
-    }
-}
-
-impl From<SpawnError> for SpawnUserError {
-    fn from(value: SpawnError) -> Self {
-        SpawnUserError::Spawn(value)
-    }
-}
-
 /// Контракт сервиса планировщика.
 pub trait SchedulerService: Service {
     fn spawn_boxed(
@@ -176,17 +148,6 @@ pub trait SchedulerService: Service {
     fn current(&self) -> ThreadId;
 
     fn exit(&self) -> !;
-
-    /// Создаёт user-process из in-memory `UserImage`: выделяет user-AS,
-    /// маппит сегменты + user-stack, инициализирует контекст thread'а и
-    /// регистрирует процесс+thread в scheduler-е.
-    fn spawn_user_process(
-        &self,
-        name: &'static str,
-        image: &UserImage<'_>,
-        priority: Priority,
-        kernel_stack_pages: usize,
-    ) -> Result<(ProcessId, ThreadId), SpawnUserError>;
 }
 
 /// Generic-обёртки над boxed service API.

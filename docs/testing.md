@@ -36,10 +36,10 @@
 
 ```bash
 # Все host-совместимые крейты
-cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
+cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64
 ```
 
-> Крейты `drivers-aarch64`, `hal-aarch64` и `main` содержат aarch64 inline assembly и не компилируются на x86_64. Всегда исключайте их при запуске на host.
+> Крейты `drivers-aarch64` и `hal-aarch64` содержат aarch64 inline assembly и не компилируются на x86_64. Всегда исключайте их при запуске на host.
 
 ## QEMU integration tests
 
@@ -48,7 +48,7 @@ cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude
 кейсы и завершает QEMU через semihosting. Подходит для тестов
 аллокатора, многозадачности, driver-init, kobject-сценариев.
 
-Кейсы распределены по подмодулям `crates/main/src/qemu_tests/`
+Кейсы распределены по подмодулям `crates/kernelspace/src/qemu_tests/`
 (`smoke.rs`, `allocator.rs`, `channel.rs`, `event.rs`,
 `handle_table.rs`, …) и регистрируются `register_test!`. Линкер-секция
 `.tests.kernel` (`KEEP` в `crates/hal-aarch64/linker/aarch64.ld`)
@@ -59,7 +59,7 @@ cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude
 
 ```bash
 cargo xtask build devices/spec/qemu-aarch64-test.yaml \
-    --features qemu-tests --run
+ --features qemu-tests --run
 ```
 
 Контракт маркеров: `[TEST-RUN: N]`, `[TEST-START: name]`,

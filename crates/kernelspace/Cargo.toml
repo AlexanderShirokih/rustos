@@ -1,0 +1,29 @@
+[package]
+name = "kernelspace"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Под этим флагом kmain после bootstrap'а зовёт `qemu_test_harness::run_all_tests()`
+# из init-таска и завершает QEMU через ARM semihosting.
+qemu-tests = [
+    "dep:qemu-test-harness",
+]
+
+[dependencies]
+spin = { workspace = true }
+collections = { workspace = true }
+drivers-common = { workspace = true }
+io = { workspace = true }
+kobject = { workspace = true }
+memory = { workspace = true }
+klog = { workspace = true }
+scheduler = { workspace = true }
+syscall = { workspace = true }
+userspace = { workspace = true }
+qemu-test-harness = { workspace = true, optional = true }
+
+[lints]
+workspace = true
