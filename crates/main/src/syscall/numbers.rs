@@ -21,7 +21,6 @@
 //! | `0x50..=0x5F` | резерв под Thread KObject                   |
 //! | `0x60..=0x6F` | резерв под Memory KObject                   |
 //! | `0x70..=0x7F` | резерв под Port KObject                     |
-//! | `0xFF00..`    | тестовые syscall'ы (только под `qemu-tests`)|
 //!
 //! `ChannelWrite`/`ChannelRead` (передача [`Message`](crate::kobject::Message)
 //! через регистры невозможна - нужен user-pointer protocol) приедут в
@@ -58,12 +57,6 @@ pub enum SyscallOp {
     /// Меняет флаги уже выделенного региона (аналог `MemoryMapper::remap`).
     /// Аргументы: `arg0=va`, `arg1=size_bytes`, `arg2=flags_raw`.
     MemoryRemap = 0x61,
-
-    /// Тестовый syscall: фиксирует факт входа в EL0 и завершает thread.
-    /// Доступен только при `feature = "qemu-tests"`. Номер выбран в
-    /// зарезервированной зоне `0xFF00..0xFFFF` для тестов.
-    #[cfg(feature = "qemu-tests")]
-    TestEl0Probe = 0xFF00,
 }
 
 impl SyscallOp {
@@ -77,8 +70,6 @@ impl SyscallOp {
             0x31 => Ok(Self::HandleDuplicate),
             0x60 => Ok(Self::MemoryAllocate),
             0x61 => Ok(Self::MemoryRemap),
-            #[cfg(feature = "qemu-tests")]
-            0xFF00 => Ok(Self::TestEl0Probe),
             _ => Err(SyscallError::BadSyscall),
         }
     }

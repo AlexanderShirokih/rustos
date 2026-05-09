@@ -267,9 +267,8 @@ impl MemoryMapper for MockUserMapper {
         AddressSpaceHandle::new(self.root_pa, AddressSpaceTag::NONE)
     }
 
-    #[cfg(feature = "qemu-tests")]
-    fn query_leaf_raw(&self, _address: PageAlignedVirtualAddress) -> Option<u64> {
-        None
+    fn as_any(&self) -> &(dyn core::any::Any + 'static) {
+        self
     }
 }
 

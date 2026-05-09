@@ -10,7 +10,6 @@ default = []
 # из init-таска и завершает QEMU через ARM semihosting.
 qemu-tests = [
     "dep:qemu-test-harness",
-    "memory/qemu-tests",
 ]
 
 [dependencies]

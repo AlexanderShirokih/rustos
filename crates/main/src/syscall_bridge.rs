@@ -1,12 +1,12 @@
-//! Регистрация kernel-сервисов, нужных syscall-handler'ам и qemu-тестам.
+//! Глобальная регистрация ядерных сервисов, нужных в местах, где
+//! `KernelContext` недоступен напрямую (syscall trap-handlers,
+//! дополнительные точки входа).
 //!
 //! Хранит:
 //! - `Arc<dyn SchedulerService>` - нужен trap-handler-ам (`thread_exit`),
 //!   у них нет доступа к `KernelContext`.
-//! - `&'static dyn AddressSpaceFactory` - нужен hal-aarch64 qemu-тестам,
-//!   которые создают user-AS, не имея доступа к `KernelContext`.
-//!   Production-путь (`bootstrap_scheduler`) читает фабрику напрямую
-//!   через `KernelContext::address_space_factory()`.
+//! - `&'static dyn AddressSpaceFactory` - back-channel для модулей,
+//!   создающих user-AS без `KernelContext` на руках.
 
 use alloc::sync::Arc;
 
@@ -39,8 +39,8 @@ pub fn scheduler() -> &'static Arc<dyn SchedulerService> {
         .expect("SchedulerService must be installed via syscall_bridge::install_scheduler")
 }
 
-/// Регистрирует глобальную `AddressSpaceFactory`. Должна вызываться ровно один
-/// раз (из [`KernelContext::new`]).
+/// Регистрирует глобальную `AddressSpaceFactory`. Используется как back-channel
+/// для модулей, не получающих фабрику через `KernelContext` напрямую.
 pub fn install_address_space_factory(factory: &'static (dyn AddressSpaceFactory + Send + Sync)) {
     assert!(
         ADDRESS_SPACE_FACTORY.get().is_none(),
@@ -50,7 +50,7 @@ pub fn install_address_space_factory(factory: &'static (dyn AddressSpaceFactory 
 }
 
 /// Доступ к глобальной `AddressSpaceFactory`. Возвращает `None`, если фабрика
-/// не зарегистрирована (тесты с MockContext).
+/// не зарегистрирована.
 pub fn address_space_factory() -> Option<&'static (dyn AddressSpaceFactory + Send + Sync)> {
     ADDRESS_SPACE_FACTORY.get().copied()
 }

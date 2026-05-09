@@ -151,6 +151,20 @@ where
         base.ng(matches!(self.kind, AddressSpaceKind::User))
     }
 
+    /// Возвращает сырое значение leaf-дескриптора для `address`.
+    ///
+    /// `None` - если страница не замаплена либо лежит в block-mapping.
+    /// Платформенный API для диагностики и инспекции таблиц трансляции
+    /// (например, проверки состояния `nG`/`AP`/`AF` битов).
+    #[allow(dead_code)]
+    pub fn query_leaf_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64> {
+        self.mapper.with_lock(|mapper| {
+            let (l3, idx) = mapper.walk_to_l3_leaf(address).ok()?;
+            // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page.
+            Some(unsafe { (*l3).get_raw(idx) })
+        })
+    }
+
     pub fn map_exact_impl(
         &self,
         source_address: PageAlignedVirtualAddress,
@@ -517,8 +531,9 @@ where
 
 impl<'a, FA, L> MemoryMapper for Aarch64MemoryMapper<'a, FA, L>
 where
-    FA: FrameAllocator,
-    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
+    'a: 'static,
+    FA: FrameAllocator + 'static,
+    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>> + 'static,
 {
     fn map(
         &self,
@@ -677,13 +692,8 @@ where
         }
     }
 
-    #[cfg(feature = "qemu-tests")]
-    fn query_leaf_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64> {
-        self.mapper.with_lock(|mapper| {
-            let (l3, idx) = mapper.walk_to_l3_leaf(address).ok()?;
-            // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page.
-            Some(unsafe { (*l3).get_raw(idx) })
-        })
+    fn as_any(&self) -> &(dyn core::any::Any + 'static) {
+        self
     }
 
     fn remap(

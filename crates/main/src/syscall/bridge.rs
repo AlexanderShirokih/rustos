@@ -63,6 +63,10 @@ pub trait SyscallFrame {
 pub fn dispatch(frame: &mut dyn SyscallFrame) {
     let op = match SyscallOp::from_raw(frame.op_raw()) {
         Ok(op) => op,
+        Err(SyscallError::BadSyscall) => {
+            frame.set_return(SyscallError::BadSyscall.into());
+            return;
+        }
         Err(e) => {
             frame.set_return(e.into());
             return;
@@ -99,11 +103,6 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         SyscallOp::MemoryRemap => {
             let r = super::memory::sys_memory_remap(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
-        }
-        #[cfg(feature = "qemu-tests")]
-        SyscallOp::TestEl0Probe => {
-            crate::qemu_tests::el0_probe::record(frame.arg(0), frame.origin());
-            sys_thread_exit(0);
         }
     }
 }

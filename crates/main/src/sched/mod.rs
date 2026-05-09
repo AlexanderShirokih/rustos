@@ -22,6 +22,9 @@ pub use drivers_common::services::{
 };
 pub use init::{KernelTimerSource, bootstrap_scheduler};
 pub use process::Process;
-pub use scheduler::{Bootstrapped, Running, Scheduler, SchedulerConfig, Uninit, lowest_priority};
-pub use service::SchedulerHandle;
+pub use scheduler::{
+    Bootstrapped, Running, Scheduler, SchedulerConfig, Uninit, UserProcessLaunch,
+    UserProcessLaunchInfo, lowest_priority,
+};
+pub use service::{SchedulerHandle, UserProcessLauncher};
 pub use thread::{Thread, ThreadState};

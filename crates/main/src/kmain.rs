@@ -4,10 +4,6 @@ extern crate alloc;
 
 use alloc::{sync::Arc, vec::Vec};
 
-#[cfg(not(feature = "qemu-tests"))]
-use drivers_common::services::scheduler::{
-    Priority, SchedulerService, SchedulerServiceExt, SpawnConfig,
-};
 use drivers_common::{
     CapabilityStoreExt,
     scanner::EmbeddedDriversScanner,
@@ -25,15 +21,22 @@ use crate::{
     },
 };
 
-/// Платформо-независимая точка входа ядра
-pub fn kmain<A>(
+/// Платформо-независимая точка входа ядра. После полного bootstrap-а
+/// (драйверы, console, interrupts, scheduler) вызывает `init_task` под
+/// замаскированными IRQ - задача обязана зарегистрировать первый
+/// спавн-thread (например, через [`Scheduler::spawn`]) и вернуть
+/// управление; дальше kmain отдаёт CPU scheduler-у через
+/// [`Scheduler::start`].
+pub fn kmain<A, F>(
     driver_scanner: EmbeddedDriversScanner,
     context: &mut KernelContext,
     kout: &BufferedWriter,
     scheduler_config: SchedulerConfig,
+    init_task: F,
 ) -> !
 where
     A: ArchContext,
+    F: FnOnce(&Scheduler<A, KernelTimerSource, Bootstrapped>, &mut KernelContext),
 {
     info!("Starting kmain");
 
@@ -54,45 +57,9 @@ where
 
     let scheduler = sched::bootstrap_scheduler::<A>(context, scheduler_config);
 
-    #[cfg(feature = "qemu-tests")]
-    spawn_qemu_tests_process(&scheduler, context);
-    #[cfg(not(feature = "qemu-tests"))]
-    spawn_init_process(&scheduler, context);
+    init_task(&scheduler, context);
 
     scheduler.start()
-}
-
-#[cfg(feature = "qemu-tests")]
-fn spawn_qemu_tests_process<A>(
-    scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
-    kernel: &mut KernelContext,
-) where
-    A: ArchContext,
-{
-    /// `*mut KernelContext` не Send автоматически; обёртка делает его
-    /// перемещаемым в spawn-closure. Безопасность гарантируется тем, что
-    /// `kmain` после spawn-а уходит в `scheduler.start()` и не
-    /// обращается к контексту, а тестовый таск завершает QEMU через
-    /// semihosting и тоже не возвращается.
-    struct KernelCtxPtr(*mut KernelContext);
-
-    // SAFETY: см. комментарий выше - единственный читатель указателя.
-    unsafe impl Send for KernelCtxPtr {}
-
-    let kernel_ptr = KernelCtxPtr(core::ptr::from_mut(kernel));
-
-    scheduler
-        .spawn(
-            drivers_common::services::scheduler::SpawnConfig::new("qemu-tests")
-                .priority(drivers_common::services::scheduler::Priority::highest()),
-            move || {
-                let captured = kernel_ptr;
-                // SAFETY: см. комментарий выше.
-                let kernel = unsafe { &mut *captured.0 };
-                crate::qemu_tests::run(kernel)
-            },
-        )
-        .expect("qemu-tests process spawn must succeed");
 }
 
 fn collect_into_pending_drivers(driver_scanner: EmbeddedDriversScanner) -> Vec<PendingDriver> {
@@ -143,70 +110,4 @@ fn install_interrupts_hook(kernel: &mut KernelContext) {
         interrupts.enable();
         irq_bridge::install_interrupts_service(interrupts.clone());
     });
-}
-
-#[cfg(not(feature = "qemu-tests"))]
-fn spawn_init_process<A>(
-    scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
-    kernel: &mut KernelContext,
-) where
-    A: ArchContext,
-{
-    let scheduler_service = kernel.with_runtime_state(|caps, _| {
-        caps.require_service::<dyn SchedulerService>()
-            .expect("SchedulerService must be registered before init task spawn")
-    });
-
-    scheduler
-        .spawn(
-            SpawnConfig::new("init").priority(Priority::highest()),
-            move || spawn_demo_processes(&scheduler_service),
-        )
-        .expect("init process spawn must succeed");
-}
-
-#[cfg(not(feature = "qemu-tests"))]
-fn spawn_demo_processes(scheduler_service: &Arc<dyn SchedulerService>) {
-    use crate::timer_server::{pilot_client_subscribe, pilot_tick, spawn_timer_server};
-
-    let client_end =
-        spawn_timer_server(scheduler_service).expect("timer-server spawn must succeed");
-
-    scheduler_service
-        .spawn(
-            SpawnConfig::new("test-process").priority(Priority::normal()),
-            move || {
-                let handles = match pilot_client_subscribe(&client_end) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        klog::warn!("pilot subscribe failed: {:?}", e);
-                        return;
-                    }
-                };
-                let period_ms = 200_u64;
-                let mut tick = 0_u64;
-                loop {
-                    info!("Pilot tick #{tick} via channel-based Timer");
-                    if let Err(e) = pilot_tick(&handles, period_ms) {
-                        klog::warn!("pilot tick failed: {:?}", e);
-                        return;
-                    }
-                    tick = tick.wrapping_add(1);
-                }
-            },
-        )
-        .expect("test-process spawn must succeed");
-
-    for (idx, period_ms) in [(1_u32, 300_u64), (2, 700)] {
-        let thread_service = scheduler_service.clone();
-        scheduler_service
-            .spawn(
-                SpawnConfig::new("demo").priority(Priority::normal()),
-                move || loop {
-                    info!("Process {idx} tick");
-                    thread_service.sleep_ms(period_ms);
-                },
-            )
-            .expect("demo process spawn must succeed");
-    }
 }

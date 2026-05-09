@@ -22,9 +22,17 @@ use crate::memory::memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameT
 pub(crate) type FrameAllocatorImpl = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 
-/// Тестовая точка доступа к глобальному `FrameAllocator` (только под
-/// `feature = "qemu-tests"`). Регистрируется первым `Aarch64AddressSpaceFactory::new`.
-/// Production-код не должен ходить сюда - фабрика держит свой `&'static`.
+/// Конкретный тип user-mapper-а, выдаваемый `Aarch64AddressSpaceFactory`
+/// в виде `Arc<dyn MemoryMapper + Send + Sync>`. Платформенный код может
+/// downcast'ить через `MemoryMapper::as_any` для доступа к API,
+/// специфичным для AArch64 (например, `query_leaf_raw`).
+pub type UserAarch64MemoryMapper =
+    Aarch64MemoryMapper<'static, FrameAllocatorImpl, MutexPageMapper<'static, FrameAllocatorImpl>>;
+
+/// Точка доступа к глобальному `FrameAllocator` для интеграционных тестов
+/// (`feature = "qemu-tests"`). Регистрируется первым
+/// `Aarch64AddressSpaceFactory::new`. Production-код не должен ходить сюда -
+/// фабрика держит свой `&'static`.
 ///
 /// `AtomicPtr` нужен потому, что `FrameAllocatorImpl` (через `NoLockCell<FrameBitmap>`)
 /// не реализует `Sync`, поэтому `static spin::Once<&'static FrameAllocatorImpl>`
@@ -34,7 +42,7 @@ type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 static QEMU_FA_PTR: core::sync::atomic::AtomicPtr<FrameAllocatorImpl> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// Test-only геттер `&'static FrameAllocator` для построения mapper'ов с
+/// Геттер `&'static FrameAllocator` для построения mapper'ов с
 /// инжектированными обёртками поверх настоящего FA (см. partial-OOM rollback).
 ///
 /// # Panics
@@ -97,13 +105,12 @@ impl AddressSpaceFactory for Aarch64AddressSpaceFactory {
         // запись пустой PageTable инициализирует все entries в Invalid.
         unsafe { root_ptr.write(PageTable::<L0>::new()) };
 
-        let mapper: Aarch64MemoryMapper<'static, _, MutexPageMapper<'static, _>> =
-            Aarch64MemoryMapper::new_with_offset(
-                self.frame_allocator,
-                root_ptr,
-                offset,
-                AddressSpaceKind::User,
-            );
+        let mapper: UserAarch64MemoryMapper = Aarch64MemoryMapper::new_with_offset(
+            self.frame_allocator,
+            root_ptr,
+            offset,
+            AddressSpaceKind::User,
+        );
 
         Ok(Arc::new(mapper))
     }

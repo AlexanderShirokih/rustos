@@ -7,16 +7,14 @@
 //! 2. Аллоцируем 4К-страницу в kernel-heap (получаем kernel-VA + PA через
 //!    higher-half линейное отображение).
 //! 3. `map_exact` через user-mapper создаёт lower-half-маппинг 4К на VA
-//!    `USER_TEST_PAYLOAD_VA = 0x4000_0000`. Через kernel-VA пишем 2 инструкции
-//!    `svc #TestEl0Probe; b .` и инвалидируем I-cache.
+//!    `USER_TEST_PAYLOAD_VA = 0x4000_0000`. Через kernel-VA пишем payload
+//!    `ObjectSignal; ThreadExit` и инвалидируем I-cache.
 //! 4. Аналогично - для user-stack на `USER_TEST_PAYLOAD_VA + PAGE_SIZE`.
 //! 5. `MemoryMapper::remap` меняет флаги на UserRX (payload) и UserRW (stack).
 //! 6. Spawn worker-thread; в его trampoline'е переключаем TTBR0 на user-AS,
 //!    далее `init_user` + `start` - управление уходит в EL0, payload делает SVC.
-//!    Handler `TestEl0Probe` фиксирует `(arg0, origin)` в [`el0_probe`] и
-//!    завершает thread.
-//! 7. Главный test-thread ждёт записи и проверяет: `Origin::User` + `arg0`
-//!    равен переданному в `init_user` `bootstrap_x0`.
+//! 7. Главный test-thread ждёт сигнал на Event, handle которого был передан
+//!    в `init_user` через `bootstrap_x0`.
 //!
 //! По сравнению с прежней версией убран alias-маппинг через higher-half:
 //! payload и stack живут в нижней половине user-AS, как и положено user-страницам.
@@ -28,24 +26,39 @@ use alloc::{boxed::Box, sync::Arc, vec};
 use core::{
     alloc::Layout,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
-use drivers_common::services::scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
+use drivers_common::services::scheduler::{
+    Priority, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig,
+};
 use main::{
-    qemu_tests::el0_probe,
+    kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, install_handle},
     sched::{AddressSpace, ArchContext, UserBootstrapArg, UserEntry},
+    syscall::SyscallOp,
     syscall_bridge,
 };
 use memory::{
     MemFlags,
+    memory_mapper::MemoryMapper,
     physical_address::PageAlignedAddress,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use qemu_test_harness::register_test;
 use spin::Once;
 
-use crate::{HIGHER_HALF_BASE, sched::Aarch64Context};
+use crate::{
+    HIGHER_HALF_BASE, memory::address_space_factory::UserAarch64MemoryMapper, sched::Aarch64Context,
+};
+
+/// Downcast'ит `&dyn MemoryMapper`, выданный `Aarch64AddressSpaceFactory`,
+/// до конкретного типа для доступа к платформенному API диагностики.
+fn downcast_user_mapper(mapper: &(dyn MemoryMapper + Send + Sync)) -> &UserAarch64MemoryMapper {
+    mapper
+        .as_any()
+        .downcast_ref::<UserAarch64MemoryMapper>()
+        .expect("user-AS mapper must be Aarch64MemoryMapper")
+}
 
 const PAGE_SIZE: usize = 4096;
 const KERNEL_STACK_SIZE: usize = 8 * 1024;
@@ -55,15 +68,16 @@ const KERNEL_STACK_SIZE: usize = 8 * 1024;
 const USER_TEST_PAYLOAD_VA: usize = 0x4000_0000;
 const USER_TEST_STACK_VA: usize = USER_TEST_PAYLOAD_VA + PAGE_SIZE;
 
-/// `svc #0xFF00` (`TestEl0Probe`) - encoded `0xD400_0001 | (imm16 << 5)`.
-const SVC_TEST_EL0_PROBE: u32 = 0xD400_0001 | ((SyscallTestEl0Probe::IMM16 as u32) << 5);
+const SVC_OBJECT_SIGNAL: u32 = svc(SyscallOp::ObjectSignal);
+const SVC_THREAD_EXIT: u32 = svc(SyscallOp::ThreadExit);
+const MOVZ_X0_ZERO: u32 = 0xD280_0000;
+const MOVZ_X1_EVENT_SIGNALED: u32 = 0xD280_0021;
+const MOVZ_X2_ZERO: u32 = 0xD280_0002;
 /// `b .` - безусловный jump на текущий PC (offset 0).
 const B_LOOP: u32 = 0x1400_0000;
 
-/// Зеркало `SyscallOp::TestEl0Probe` для сборки SVC instruction-encoding.
-struct SyscallTestEl0Probe;
-impl SyscallTestEl0Probe {
-    const IMM16: u16 = 0xFF00;
+const fn svc(op: SyscallOp) -> u32 {
+    0xD400_0001 | ((op as u32) << 5)
 }
 
 /// Аллоцирует выровненную 4К-страницу из kernel-heap и зануляет её. Утечка
@@ -90,8 +104,12 @@ unsafe fn write_payload(kernel_va: *mut u8) {
     let words = kernel_va.cast::<u32>();
     // SAFETY: caller гарантирует эксклюзивный, валидный, выровненный буфер.
     unsafe {
-        words.add(0).write_volatile(SVC_TEST_EL0_PROBE);
-        words.add(1).write_volatile(B_LOOP);
+        words.add(0).write_volatile(MOVZ_X1_EVENT_SIGNALED);
+        words.add(1).write_volatile(MOVZ_X2_ZERO);
+        words.add(2).write_volatile(SVC_OBJECT_SIGNAL);
+        words.add(3).write_volatile(MOVZ_X0_ZERO);
+        words.add(4).write_volatile(SVC_THREAD_EXIT);
+        words.add(5).write_volatile(B_LOOP);
 
         core::arch::asm!(
             "dc cvau, {addr}",
@@ -107,7 +125,6 @@ unsafe fn write_payload(kernel_va: *mut u8) {
 
 static KSTACK_TOP: AtomicU64 = AtomicU64::new(0);
 static USER_AS_ROOT: AtomicU64 = AtomicU64::new(0);
-static TEST_DONE: AtomicBool = AtomicBool::new(false);
 
 /// Удерживает Arc на user-AS до конца теста: иначе при завершении spawn-замыкания
 /// AS освободится и мы потеряем root-фрейм.
@@ -125,9 +142,9 @@ fn kheap_va_to_pa(kva: *mut u8) -> PageAlignedAddress {
 
 #[allow(clippy::similar_names)]
 fn userspace_eret_to_el0_invokes_dispatcher() {
-    el0_probe::reset();
-    TEST_DONE.store(false, Ordering::Release);
-
+    let event = Event::new();
+    let handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
+    let event_handle = install_handle(handle).expect("install bootstrap Event handle");
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
     let user_as = AddressSpace::new_user(factory).expect("create user AS");
@@ -170,7 +187,8 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
         .expect("remap payload to UserRX");
 
     // Sanity-check leaf-битов через user-AS mapper.
-    let payload_raw = user_mapper
+    let aarch64_mapper = downcast_user_mapper(user_mapper);
+    let payload_raw = aarch64_mapper
         .query_leaf_raw(payload_va)
         .expect("payload leaf must exist after remap");
     qemu_test_harness::kassert_eq!(payload_raw & 0b11, 0b11);
@@ -179,7 +197,7 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
     qemu_test_harness::kassert_eq!((payload_raw >> 53) & 1, 1); // PXN=1
     qemu_test_harness::kassert_eq!((payload_raw >> 54) & 1, 0); // UXN=0
 
-    let stack_raw = user_mapper
+    let stack_raw = aarch64_mapper
         .query_leaf_raw(stack_va)
         .expect("stack leaf must exist");
     qemu_test_harness::kassert_eq!((stack_raw >> 6) & 0b11, 0b01); // AP=UserRW
@@ -194,11 +212,13 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
 
     let _ = (payload_kheap, stack_kheap);
     let user_pc = USER_TEST_PAYLOAD_VA;
-    let bootstrap_x0: u64 = 0xCAFE_BABE_DEAD_BEEF;
+    let bootstrap_x0: u64 = u64::from(event_handle.raw().get());
 
     syscall_bridge::scheduler()
         .spawn(
-            SpawnConfig::new("el0-worker").priority(Priority::highest()),
+            SpawnConfig::new("el0-worker")
+                .priority(Priority::highest())
+                .address_space(SpawnAddressSpace::Inherit),
             move || {
                 let kstack_top = KSTACK_TOP.load(Ordering::Relaxed) as *mut u8;
                 let kstack_nn = NonNull::new(kstack_top).expect("kstack non-null");
@@ -223,16 +243,11 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
         .expect("spawn el0-worker");
 
     let mut spins = 0;
-    while el0_probe::peek().is_none() {
+    while event.peek() & EVENT_SIGNALED == 0 {
         syscall_bridge::scheduler().sleep_ms(20);
         spins += 1;
-        assert!(spins <= 250, "EL0 probe didn't fire after 5s");
+        assert!(spins <= 250, "EL0 payload didn't signal after 5s");
     }
-
-    let (observed_x0, is_user) = el0_probe::peek().expect("peek must be Some after spin");
-    qemu_test_harness::kassert!(is_user);
-    qemu_test_harness::kassert_eq!(observed_x0, bootstrap_x0);
-    TEST_DONE.store(true, Ordering::Release);
 }
 
 register_test!(

@@ -184,10 +184,12 @@ pub trait MemoryMapper {
     /// платформенный тег. Вызывается на пути активации AS планировщиком.
     fn activate_handle(&self) -> AddressSpaceHandle;
 
-    /// Диагностика для qemu-тестов: возвращает сырое значение leaf-дескриптора
-    /// для `address`. `None` - если страница не замаплена либо лежит в block-mapping.
-    #[cfg(feature = "qemu-tests")]
-    fn query_leaf_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64>;
+    /// Доступ к конкретной реализации через `Any`-downcast.
+    ///
+    /// Используется кодом, которому нужны платформенные API сверх общего
+    /// контракта `MemoryMapper` (например, инспекция leaf-дескрипторов на
+    /// конкретной архитектуре). Все реализации обязаны вернуть `self`.
+    fn as_any(&self) -> &(dyn core::any::Any + 'static);
 }
 
 /// Ошибки создания нового user-AS через [`AddressSpaceFactory`].

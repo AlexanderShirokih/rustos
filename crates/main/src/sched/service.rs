@@ -12,7 +12,10 @@ use drivers_common::services::{
 
 use super::{
     arch::{ArchContext, ArchCpu, TimerSource, with_preemption_disabled},
-    scheduler::{ScheduleAction, SchedulerInner, perform_schedule_action},
+    scheduler::{
+        ScheduleAction, SchedulerInner, UserProcessLaunch, UserProcessLaunchInfo,
+        perform_schedule_action,
+    },
 };
 use crate::kobject::{HandleTable, KernelRuntime, ParkState, UserVmContext};
 
@@ -39,6 +42,36 @@ where
     fn self_arc(&self) -> Arc<dyn SchedulerService> {
         Arc::new(Self {
             inner: self.inner.clone(),
+        })
+    }
+}
+
+pub trait UserProcessLauncher: Send + Sync {
+    fn spawn_user_process_with_launch(
+        &self,
+        name: &'static str,
+        image: &UserImage<'_>,
+        priority: Priority,
+        kernel_stack_pages: usize,
+        launch: UserProcessLaunch,
+    ) -> Result<UserProcessLaunchInfo, SpawnUserError>;
+}
+
+impl<A, T> UserProcessLauncher for SchedulerHandle<A, T>
+where
+    A: ArchContext,
+    T: TimerSource,
+{
+    fn spawn_user_process_with_launch(
+        &self,
+        name: &'static str,
+        image: &UserImage<'_>,
+        priority: Priority,
+        kernel_stack_pages: usize,
+        launch: UserProcessLaunch,
+    ) -> Result<UserProcessLaunchInfo, SpawnUserError> {
+        self.inner.with_lock(|inner| {
+            inner.spawn_user_process_with_launch(name, image, priority, kernel_stack_pages, launch)
         })
     }
 }

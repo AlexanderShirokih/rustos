@@ -141,6 +141,10 @@ pub enum SpawnUserError {
     MissingFactory,
     /// Описание образа не прошло валидацию.
     Image(UserImageError),
+    /// Bootstrap-аргумент ссылается на несуществующий initial handle.
+    InvalidBootstrapHandle,
+    /// Начальных handle'ов больше, чем может вместить таблица процесса.
+    TooManyInitialHandles,
     /// Не удалось выделить ресурс через общий `SpawnError`.
     Spawn(SpawnError),
 }

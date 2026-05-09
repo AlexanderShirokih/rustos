@@ -10,8 +10,12 @@ mod common;
 use std::boxed::Box;
 
 use drivers_common::services::scheduler::{Priority, SpawnAddressSpace, SpawnConfig};
-use main::sched::{
-    Scheduler, SchedulerConfig, SpawnUserError, Uninit, UserImage, UserImageError, UserSegment,
+use main::{
+    kobject::{Event, Handle, KObject, Rights},
+    sched::{
+        Scheduler, SchedulerConfig, SpawnUserError, Uninit, UserImage, UserImageError,
+        UserProcessLaunch, UserSegment,
+    },
 };
 use memory::{
     MemFlags,
@@ -75,12 +79,82 @@ fn spawn_user_process_creates_address_space_and_thread() {
 
     assert_eq!(factory.created(), 1);
     // process_count: idle + user = 2.
-    assert_eq!(scheduler.process_count_for_test(), 2);
+    assert_eq!(scheduler.process_count(), 2);
     // 1 map() для сегмента + 1 map() для user-stack = 2 вызова.
     let calls = factory.map_calls();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].page_count, 1);
     assert_eq!(calls[1].page_count, USER_STACK_SIZE / PAGE);
+}
+
+#[test]
+fn spawn_user_process_with_launch_installs_initial_handles() {
+    reset_switches();
+    let factory = fresh_factory();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler(timer, factory);
+
+    let init = [0xAAu8; 8];
+    let segments = [UserSegment {
+        va_base: aligned(USER_SEGMENT_VA),
+        mapped_size: PAGE,
+        init_bytes: &init,
+        perms: MemFlags::user_rx(),
+    }];
+    let image = UserImage {
+        segments: &segments,
+        entry: VirtualAddress::new(USER_SEGMENT_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP_VA),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let handle = Handle::new(KObject::Event(Event::new()), Rights::SIGNAL);
+    let launch = UserProcessLaunch::new()
+        .initial_handles(vec![handle])
+        .bootstrap_handle(0);
+    let info = scheduler
+        .spawn_user_process_with_launch("user-launch", &image, Priority::new(2), 4, launch)
+        .expect("spawn user process with launch options");
+
+    assert_eq!(info.initial_handle_ids.len(), 1);
+    assert_eq!(info.initial_handle_ids[0].raw().get(), 1 << 16);
+    assert_eq!(scheduler.process_count(), 2);
+}
+
+#[test]
+fn spawn_user_process_with_launch_rejects_bad_bootstrap_handle_index() {
+    reset_switches();
+    let factory = fresh_factory();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler(timer, factory);
+
+    let init = [0xAAu8; 8];
+    let segments = [UserSegment {
+        va_base: aligned(USER_SEGMENT_VA),
+        mapped_size: PAGE,
+        init_bytes: &init,
+        perms: MemFlags::user_rx(),
+    }];
+    let image = UserImage {
+        segments: &segments,
+        entry: VirtualAddress::new(USER_SEGMENT_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP_VA),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let err = scheduler
+        .spawn_user_process_with_launch(
+            "bad-launch",
+            &image,
+            Priority::new(2),
+            4,
+            UserProcessLaunch::new().bootstrap_handle(0),
+        )
+        .unwrap_err();
+
+    assert_eq!(err, SpawnUserError::InvalidBootstrapHandle);
+    assert_eq!(factory.created(), 0);
+    assert_eq!(scheduler.process_count(), 1);
 }
 
 #[test]
@@ -171,7 +245,7 @@ fn spawn_user_process_validation_rejects_overlapping_segments() {
     assert_eq!(factory.created(), 0);
     assert_eq!(factory.released(), 0);
     // Только idle процесс - user не вставился.
-    assert_eq!(scheduler.process_count_for_test(), 1);
+    assert_eq!(scheduler.process_count(), 1);
 }
 
 #[test]
@@ -202,7 +276,7 @@ fn spawn_user_process_validation_rejects_misaligned() {
         SpawnUserError::Image(UserImageError::MisalignedSegment)
     );
     // Только idle процесс - user не вставился.
-    assert_eq!(scheduler.process_count_for_test(), 1);
+    assert_eq!(scheduler.process_count(), 1);
     // validate отрабатывает раньше первого `mapper.map()` - лог пуст.
     assert!(factory.map_calls().is_empty());
 }
@@ -410,17 +484,17 @@ fn last_thread_exit_releases_address_space() {
         .unwrap();
     assert_eq!(factory.released(), 0);
     // process_count: idle + user = 2.
-    assert_eq!(scheduler.process_count_for_test(), 2);
+    assert_eq!(scheduler.process_count(), 2);
 
     let running = scheduler.run();
     // dying user-thread -> exit_current -> switch на idle.
-    running.exit_current_for_test();
+    running.exit_current();
 
     // После switch_to_next dying thread больше не current, cleanup_pending
     // удалил user-Process, Drop Arc<AddressSpace> вернул mapper'а.
     assert_eq!(factory.released(), 1, "user-AS must be released after exit");
     // Только idle остался.
-    assert_eq!(running.process_count_for_test(), 1);
+    assert_eq!(running.process_count(), 1);
 }
 
 #[test]
@@ -450,7 +524,7 @@ fn spawn_user_process_initializes_user_vm_allocator_between_image_and_stack() {
 
     // У свежесозданного процесса аллокатор пуст: ни одного региона ещё не
     // выделено через vm_allocate.
-    assert_eq!(scheduler.user_vm_live_count_for_test(pid), Some(0));
+    assert_eq!(scheduler.process_user_vm_region_count(pid), Some(0));
 }
 
 #[test]
@@ -483,7 +557,7 @@ fn spawning_two_user_processes_creates_two_distinct_address_spaces() {
 
     assert_eq!(factory.created(), 2);
     // process_count: idle + 2 user = 3.
-    assert_eq!(scheduler.process_count_for_test(), 3);
+    assert_eq!(scheduler.process_count(), 3);
     // Каждый процесс - segment + stack = 2 вызова map(); итого 4.
     assert_eq!(factory.map_calls().len(), 4);
 }

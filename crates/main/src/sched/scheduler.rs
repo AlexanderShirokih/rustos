@@ -28,7 +28,7 @@ use super::{
     thread_table::ThreadTable,
     wait_queue::{SleepEntry, SleepQueue},
 };
-use crate::kobject::HandleTable;
+use crate::kobject::{Handle, HandleId, HandleTable};
 
 const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
 const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
@@ -78,6 +78,51 @@ pub struct Running;
 impl SchedulerStage for Uninit {}
 impl SchedulerStage for Bootstrapped {}
 impl SchedulerStage for Running {}
+
+/// Параметры первого user-thread'а при создании нового процесса.
+pub struct UserProcessLaunch {
+    pub bootstrap_arg: UserBootstrapArg,
+    pub initial_handles: Vec<Handle>,
+    pub bootstrap_handle_index: Option<usize>,
+}
+
+impl UserProcessLaunch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bootstrap_arg(mut self, arg: UserBootstrapArg) -> Self {
+        self.bootstrap_arg = arg;
+        self
+    }
+
+    pub fn initial_handles(mut self, handles: Vec<Handle>) -> Self {
+        self.initial_handles = handles;
+        self
+    }
+
+    pub fn bootstrap_handle(mut self, index: usize) -> Self {
+        self.bootstrap_handle_index = Some(index);
+        self
+    }
+}
+
+impl Default for UserProcessLaunch {
+    fn default() -> Self {
+        Self {
+            bootstrap_arg: UserBootstrapArg::ZERO,
+            initial_handles: Vec::new(),
+            bootstrap_handle_index: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct UserProcessLaunchInfo {
+    pub process_id: ProcessId,
+    pub thread_id: ThreadId,
+    pub initial_handle_ids: Vec<HandleId>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerConfig {
@@ -153,8 +198,8 @@ where
 
     /// Создаёт scheduler с привязанной фабрикой user-AS. Если фабрика
     /// `None`, scheduler не сможет обработать `SpawnAddressSpace::User`
-    /// и вернёт `SpawnError::AddressSpaceCreationFailed` - это режим
-    /// host-тестов с MockContext.
+    /// и вернёт `SpawnError::AddressSpaceCreationFailed` - этот режим
+    /// подходит для встраивания scheduler-а без поддержки user-AS.
     pub fn with_address_space_factory(
         timer: T,
         config: SchedulerConfig,
@@ -235,9 +280,22 @@ where
             .with_lock(|inner| inner.spawn_user_process(name, image, priority, kernel_stack_pages))
     }
 
-    /// Тестовый путь старта. Выполняет первый switch через `A::switch`,
-    /// возвращая управление вызывающему. Используется для unit-тестов с
-    /// `MockContext`. В реальном boot-сценарии используйте [`Scheduler::start`].
+    pub fn spawn_user_process_with_launch(
+        &self,
+        name: &'static str,
+        image: &UserImage<'_>,
+        priority: Priority,
+        kernel_stack_pages: usize,
+        launch: UserProcessLaunch,
+    ) -> Result<UserProcessLaunchInfo, SpawnUserError> {
+        self.inner.with_lock(|inner| {
+            inner.spawn_user_process_with_launch(name, image, priority, kernel_stack_pages, launch)
+        })
+    }
+
+    /// Альтернативный путь старта: выполняет первый switch через `A::switch`,
+    /// возвращая управление вызывающему. В реальном boot-сценарии используйте
+    /// [`Scheduler::start`].
     pub fn run(self) -> Scheduler<A, T, Running> {
         let running = Scheduler {
             inner: self.inner,
@@ -307,11 +365,10 @@ where
         perform_schedule_action::<A>(action);
     }
 
-    /// Завершает текущий thread и переключается на следующий. Test-only вариант
-    /// без `-> !`-стока: используется integration-тестами в `tests/userspace.rs`
-    /// для прогона lifecycle. Production-путь - `SchedulerHandle::exit() -> !`.
-    #[doc(hidden)]
-    pub fn exit_current_for_test(&self) {
+    /// Завершает текущий thread и переключается на следующий, возвращая
+    /// управление вызывающему. Production-handler `SchedulerHandle::exit -> !`
+    /// оборачивает этот метод, добавляя контракт `noreturn`.
+    pub fn exit_current(&self) {
         let action = with_preemption_disabled::<A::Cpu, _>(|| {
             self.inner.with_lock(|inner| {
                 let now_ns = inner.timer.now_ns();
@@ -338,6 +395,19 @@ where
         self.inner
             .with_lock(|inner| inner.spawn_user_process(name, image, priority, kernel_stack_pages))
     }
+
+    pub fn spawn_user_process_with_launch(
+        &self,
+        name: &'static str,
+        image: &UserImage<'_>,
+        priority: Priority,
+        kernel_stack_pages: usize,
+        launch: UserProcessLaunch,
+    ) -> Result<UserProcessLaunchInfo, SpawnUserError> {
+        self.inner.with_lock(|inner| {
+            inner.spawn_user_process_with_launch(name, image, priority, kernel_stack_pages, launch)
+        })
+    }
 }
 
 impl<A, T, S> Scheduler<A, T, S>
@@ -346,19 +416,15 @@ where
     T: TimerSource,
     S: SchedulerStage,
 {
-    /// Количество живых процессов в `ProcessTable`. Используется integration-тестами
-    /// в `tests/userspace.rs` для проверки lifecycle (что процесс удалён после exit).
-    /// Не вызывать из production-кода.
-    #[doc(hidden)]
-    pub fn process_count_for_test(&self) -> usize {
+    /// Количество живых процессов в `ProcessTable`. Используется для
+    /// диагностики и проверок lifecycle.
+    pub fn process_count(&self) -> usize {
         self.inner.with_lock(|inner| inner.processes.live_count())
     }
 
-    /// Сколько user-VM-регионов уже выделено у процесса `pid`. Используется
-    /// integration-тестами для проверки реакций на vm_allocate/vm_protect.
-    /// `None`, если процесс не найден или у него нет user_vm-аллокатора.
-    #[doc(hidden)]
-    pub fn user_vm_live_count_for_test(&self, pid: ProcessId) -> Option<usize> {
+    /// Количество user-VM-регионов, выделенных у процесса `pid`. `None`,
+    /// если процесс не найден или у него нет user_vm-аллокатора.
+    pub fn process_user_vm_region_count(&self, pid: ProcessId) -> Option<usize> {
         use collections::LockCell;
         self.inner.with_lock(|inner| {
             let process = inner.processes.get(pid)?;
@@ -485,11 +551,37 @@ where
         priority: Priority,
         kernel_stack_pages: usize,
     ) -> Result<(ProcessId, ThreadId), SpawnUserError> {
+        let info = self.spawn_user_process_with_launch(
+            name,
+            image,
+            priority,
+            kernel_stack_pages,
+            UserProcessLaunch::default(),
+        )?;
+        Ok((info.process_id, info.thread_id))
+    }
+
+    pub(crate) fn spawn_user_process_with_launch(
+        &mut self,
+        name: &'static str,
+        image: &UserImage<'_>,
+        priority: Priority,
+        kernel_stack_pages: usize,
+        launch: UserProcessLaunch,
+    ) -> Result<UserProcessLaunchInfo, SpawnUserError> {
         if kernel_stack_pages == 0 {
             return Err(SpawnUserError::Spawn(SpawnError::InvalidStackPages));
         }
         if (priority.raw() as usize) >= self.config.priority_levels() {
             return Err(SpawnUserError::Spawn(SpawnError::InvalidPriority));
+        }
+        if let Some(index) = launch.bootstrap_handle_index
+            && index >= launch.initial_handles.len()
+        {
+            return Err(SpawnUserError::InvalidBootstrapHandle);
+        }
+        if launch.initial_handles.len() > HandleTable::new().capacity() as usize {
+            return Err(SpawnUserError::TooManyInitialHandles);
         }
 
         // Валидируем image до выделения AS - на провале не создаём ни одного
@@ -515,12 +607,11 @@ where
             .map_err(|_| SpawnUserError::Spawn(SpawnError::StackAllocationFailed))?;
         let stack_top = stack.top();
 
-        let arch = A::init_user(UserEntry {
-            kernel_stack_top: stack_top,
-            user_pc: image.entry,
-            user_sp: image.user_stack_top,
-            arg: UserBootstrapArg::ZERO,
-        });
+        let mut initial_handle_ids = Vec::new();
+        let bootstrap_handle_index = launch.bootstrap_handle_index;
+        let bootstrap_arg = launch.bootstrap_arg;
+        let initial_handles = launch.initial_handles;
+        let mut initial_handle_insert_failed = false;
 
         let user_vm = build_user_vm_allocator(image);
         let address_space_for_process = address_space.clone();
@@ -531,9 +622,39 @@ where
                 if let Some(vm) = user_vm {
                     process = process.with_user_vm(vm);
                 }
+                process.handle_table().with_lock(|tbl| {
+                    for handle in initial_handles {
+                        if let Ok(handle_id) = tbl.insert(handle) {
+                            initial_handle_ids.push(handle_id);
+                        } else {
+                            initial_handle_insert_failed = true;
+                            break;
+                        }
+                    }
+                });
                 process
             })
             .map_err(|_| SpawnUserError::Spawn(SpawnError::NoFreeThreadSlots))?;
+
+        if initial_handle_insert_failed {
+            self.processes.remove(process_id);
+            return Err(SpawnUserError::TooManyInitialHandles);
+        }
+
+        let bootstrap_arg = match bootstrap_handle_index {
+            Some(index) => {
+                let raw = initial_handle_ids[index].raw().get();
+                UserBootstrapArg(u64::from(raw))
+            }
+            None => bootstrap_arg,
+        };
+
+        let arch = A::init_user(UserEntry {
+            kernel_stack_top: stack_top,
+            user_pc: image.entry,
+            user_sp: image.user_stack_top,
+            arg: bootstrap_arg,
+        });
 
         let cpu_affinity = self
             .current_cpu()
@@ -560,7 +681,11 @@ where
             cpu.ready_queue_mut().push(thread_id, priority);
         }
 
-        Ok((process_id, thread_id))
+        Ok(UserProcessLaunchInfo {
+            process_id,
+            thread_id,
+            initial_handle_ids,
+        })
     }
 
     /// Создаёт `Arc<AddressSpace>` для нового потока согласно `SpawnAddressSpace`.

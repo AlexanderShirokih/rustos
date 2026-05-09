@@ -23,10 +23,8 @@ impl KernelContext {
         address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
         base_offset: PageAlignedVirtualAddress,
     ) -> KernelContext {
-        // Регистрируем фабрику в syscall_bridge для qemu-тестов в hal-aarch64,
-        // которые не имеют прямого доступа к KernelContext. Production-путь
-        // (bootstrap_scheduler) читает фабрику напрямую через
-        // KernelContext::address_space_factory().
+        // Дублируем фабрику в syscall_bridge для модулей, у которых нет
+        // прямого доступа к KernelContext.
         syscall_bridge::install_address_space_factory(address_space_factory);
 
         let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl {

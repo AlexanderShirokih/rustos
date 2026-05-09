@@ -7,7 +7,11 @@ use drivers_common::scanner::EmbeddedDriversScanner;
 use drivers_common_aarch64::adapt_to_fdt_tree;
 use io::buffered_writer::BufferedWriter;
 use klog::info;
-use main::{kernel_context::KernelContext, kmain::kmain, sched::SchedulerConfig};
+use main::{
+    kernel_context::KernelContext,
+    kmain::kmain,
+    sched::{Bootstrapped, KernelTimerSource, Scheduler, SchedulerConfig},
+};
 use memory::{
     physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
@@ -75,5 +79,26 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
     #[cfg(feature = "qemu-tests")]
     qemu_test_harness::runner::install_backend(&qemu_test_harness_aarch64::BACKEND);
 
-    kmain::<Aarch64Context>(driver_scanner, kernel, buffered, SCHED_CONFIG)
+    kmain::<Aarch64Context, _>(
+        driver_scanner,
+        kernel,
+        buffered,
+        SCHED_CONFIG,
+        pick_init_task(),
+    )
+}
+
+/// Возвращает init-таск для текущей сборочной фичи: production-init
+/// или qemu-tests harness. Вынесено в отдельную функцию, чтобы держать
+/// fea-выбор в одном месте.
+fn pick_init_task()
+-> fn(&Scheduler<Aarch64Context, KernelTimerSource, Bootstrapped>, &mut KernelContext) {
+    #[cfg(feature = "qemu-tests")]
+    {
+        main::qemu_tests::spawn_qemu_tests_process::<Aarch64Context>
+    }
+    #[cfg(not(feature = "qemu-tests"))]
+    {
+        main::init::spawn_init_process::<Aarch64Context>
+    }
 }

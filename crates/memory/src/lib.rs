@@ -22,7 +22,6 @@ pub mod memory_mapper;
 pub mod memory_range;
 pub mod physical_address;
 pub mod relocatable_ptr;
-pub mod test_utils;
 pub mod user_vm_allocator;
 pub mod virtual_address;
 

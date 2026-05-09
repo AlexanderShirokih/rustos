@@ -10,8 +10,10 @@
 //!   3) инициализирует `Aarch64Context::init_user(UserEntry)`,
 //!   4) ставит в ready-queue.
 //!
-//! Тест ждёт, пока user-payload вернёт через `TestEl0Probe` ожидаемый
-//! `bootstrap_x0` (`UserBootstrapArg::ZERO`), затем процесс делает `ThreadExit`.
+//! Тест передаёт payload'у bootstrap-handle на `Event`, ждёт сигнал от
+//! `ObjectSignal`, затем payload делает `ThreadExit`.
+
+use alloc::vec;
 
 use drivers_common::services::scheduler::{Priority, SchedulerServiceExt};
 use memory::{
@@ -21,8 +23,9 @@ use memory::{
 use qemu_test_harness::register_test;
 
 use crate::{
-    qemu_tests::el0_probe,
-    sched::{UserImage, UserSegment},
+    kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights},
+    sched::{UserImage, UserProcessLaunch, UserSegment},
+    syscall::SyscallOp,
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -32,18 +35,33 @@ const USER_STACK_TOP: usize = USER_PAYLOAD_VA + 16 * PAGE_SIZE;
 /// Минимальный footprint: 1 страница стека достаточна, payload не пишет в стек.
 const USER_STACK_SIZE: usize = PAGE_SIZE;
 
-/// `svc #0xFF00` (`TestEl0Probe`) - encoded `0xD400_0001 | (imm16 << 5)`.
-const SVC_TEST_EL0_PROBE: u32 = 0xD400_0001 | ((0xFF00u32) << 5);
-/// `svc #0` (`ThreadExit`).
-const SVC_THREAD_EXIT: u32 = 0xD400_0001;
+const SVC_OBJECT_SIGNAL: u32 = svc(SyscallOp::ObjectSignal);
+const SVC_THREAD_EXIT: u32 = svc(SyscallOp::ThreadExit);
 
-/// Сборка байт-кода: `svc #TestEl0Probe; svc #ThreadExit; b .`.
+const MOVZ_X0_ZERO: u32 = 0xD280_0000;
+const MOVZ_X1_EVENT_SIGNALED: u32 = 0xD280_0021;
+const MOVZ_X2_ZERO: u32 = 0xD280_0002;
+const B_LOOP: u32 = 0x1400_0000;
+
+const fn svc(op: SyscallOp) -> u32 {
+    0xD400_0001 | ((op as u32) << 5)
+}
+
+/// Сборка байт-кода: `ObjectSignal(x0, EVENT_SIGNALED, 0); ThreadExit(0); b .`.
 /// `b .` - fallback на случай возврата (не должен исполниться).
-fn build_payload() -> [u8; 12] {
-    let mut bytes = [0u8; 12];
-    bytes[0..4].copy_from_slice(&SVC_TEST_EL0_PROBE.to_le_bytes());
-    bytes[4..8].copy_from_slice(&SVC_THREAD_EXIT.to_le_bytes());
-    bytes[8..12].copy_from_slice(&0x1400_0000u32.to_le_bytes());
+fn build_payload() -> [u8; 6 * 4] {
+    let words = [
+        MOVZ_X1_EVENT_SIGNALED,
+        MOVZ_X2_ZERO,
+        SVC_OBJECT_SIGNAL,
+        MOVZ_X0_ZERO,
+        SVC_THREAD_EXIT,
+        B_LOOP,
+    ];
+    let mut bytes = [0u8; 6 * 4];
+    for (i, w) in words.iter().enumerate() {
+        bytes[i * 4..(i + 1) * 4].copy_from_slice(&w.to_le_bytes());
+    }
     bytes
 }
 
@@ -52,8 +70,7 @@ fn aligned(va: usize) -> PageAlignedVirtualAddress {
 }
 
 fn userspace_spawn_user_process_runs_to_exit() {
-    el0_probe::reset();
-
+    let event = Event::new();
     let payload = build_payload();
     let segment = UserSegment {
         va_base: aligned(USER_PAYLOAD_VA),
@@ -68,24 +85,29 @@ fn userspace_spawn_user_process_runs_to_exit() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let scheduler = super::scheduler().clone();
-    let (_pid, _tid) = scheduler
-        .spawn_user_process("user-via-scheduler", &image, Priority::highest(), 2)
+    let handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
+    let launch = UserProcessLaunch::new()
+        .initial_handles(vec![handle])
+        .bootstrap_handle(0);
+    let info = super::user_process_launcher()
+        .spawn_user_process_with_launch(
+            "user-via-scheduler",
+            &image,
+            Priority::highest(),
+            2,
+            launch,
+        )
         .expect("spawn_user_process must succeed");
+    qemu_test_harness::kassert_eq!(info.initial_handle_ids.len(), 1);
 
-    // Главный test-thread спит, пока scheduler гонит user-payload через EL0;
-    // payload фиксирует TestEl0Probe и завершается ThreadExit.
+    let scheduler = super::scheduler().clone();
     let mut spins = 0u64;
-    while el0_probe::peek().is_none() {
+    while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
         qemu_test_harness::kassert!(spins < 500);
     }
 
-    let (observed_x0, is_user) = el0_probe::peek().expect("probe captured");
-    qemu_test_harness::kassert!(is_user);
-    // UserBootstrapArg::ZERO передан scheduler-ом по умолчанию.
-    qemu_test_harness::kassert_eq!(observed_x0, 0);
     let _ = spins;
 }
 
@@ -95,29 +117,27 @@ register_test!(
     userspace_spawn_user_process_runs_to_exit
 );
 
-// =====================================================================
 // vm_allocate + vm_remap E2E через user-payload.
-// =====================================================================
 //
 // Payload (см. `build_vm_payload`) вызывает:
 //   1. `svc #MemoryAllocate` (size=4096, flags=ReadWrite) -> x0 = выданный VA.
 //   2. Сохраняет VA в x19 и записывает байт в `[x19]` - доказательство, что
 //      страница реально writable (mmu активен в user-AS, mapping создан).
 //   3. `svc #MemoryRemap` (va=x19, size=4096, flags=ReadOnly).
-//   4. `svc #TestEl0Probe` с маркером `0xCAFE` - фиксируется в `el0_probe`,
-//      handler делает `thread_exit`.
+//   4. `svc #ObjectSignal` на bootstrap Event.
+//   5. `svc #ThreadExit`.
 //
-// Тест ждёт probe и проверяет marker. Сам факт того, что probe пришёл,
+// Тест ждёт сигнал. Сам факт того, что сигнал пришёл,
 // означает: оба syscall'а отработали без панического exit-а из EL0.
-
-const VM_PROBE_MARKER: u64 = 0xCAFE;
 
 /// Сборка байт-кода для теста vm_allocate+vm_remap. Все инструкции -
 /// little-endian, 4 байта каждая.
-fn build_vm_payload() -> [u8; 13 * 4] {
-    const SVC_MEMORY_ALLOCATE: u32 = 0xD400_0001 | (0x60u32 << 5);
-    const SVC_MEMORY_REMAP: u32 = 0xD400_0001 | (0x61u32 << 5);
+fn build_vm_payload() -> [u8; 18 * 4] {
+    const SVC_MEMORY_ALLOCATE: u32 = svc(SyscallOp::MemoryAllocate);
+    const SVC_MEMORY_REMAP: u32 = svc(SyscallOp::MemoryRemap);
 
+    // mov  x21, x0                  ; save bootstrap Event handle
+    const MOV_X21_X0: u32 = 0xAA00_03F5;
     // movz x0, #0x1000              ; size = 4096
     const MOVZ_X0_PAGE: u32 = 0xD282_0000;
     // movz x1, #0                   ; flags = ReadWrite
@@ -134,10 +154,11 @@ fn build_vm_payload() -> [u8; 13 * 4] {
     const MOVZ_X1_PAGE: u32 = 0xD282_0001;
     // movz x2, #1                   ; remap-arg2 = ReadOnly
     const MOVZ_X2_ONE: u32 = 0xD280_0022;
-    // movz x0, #0xCAFE              ; probe-marker
-    const MOVZ_X0_MARKER: u32 = 0xD299_5FC0;
+    // mov  x0, x21                  ; signal-arg0 = Event handle
+    const MOV_X0_X21: u32 = 0xAA15_03E0;
 
-    let words: [u32; 13] = [
+    let words: [u32; 18] = [
+        MOV_X21_X0,
         MOVZ_X0_PAGE,
         MOVZ_X1_ZERO,
         SVC_MEMORY_ALLOCATE,
@@ -148,14 +169,16 @@ fn build_vm_payload() -> [u8; 13 * 4] {
         MOVZ_X1_PAGE,
         MOVZ_X2_ONE,
         SVC_MEMORY_REMAP,
-        MOVZ_X0_MARKER,
-        SVC_TEST_EL0_PROBE,
-        // Безопасный fallback: бесконечный цикл, если probe не завершит
-        // thread (не должно происходить - probe-handler делает exit).
-        0x1400_0000,
+        MOV_X0_X21,
+        MOVZ_X1_EVENT_SIGNALED,
+        MOVZ_X2_ZERO,
+        SVC_OBJECT_SIGNAL,
+        MOVZ_X0_ZERO,
+        SVC_THREAD_EXIT,
+        B_LOOP,
     ];
 
-    let mut bytes = [0u8; 13 * 4];
+    let mut bytes = [0u8; 18 * 4];
     for (i, w) in words.iter().enumerate() {
         bytes[i * 4..(i + 1) * 4].copy_from_slice(&w.to_le_bytes());
     }
@@ -163,8 +186,7 @@ fn build_vm_payload() -> [u8; 13 * 4] {
 }
 
 fn userspace_vm_allocate_and_remap() {
-    el0_probe::reset();
-
+    let event = Event::new();
     let payload = build_vm_payload();
     let segment = UserSegment {
         va_base: aligned(USER_PAYLOAD_VA),
@@ -179,24 +201,23 @@ fn userspace_vm_allocate_and_remap() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let scheduler = super::scheduler().clone();
-    let (pid, _tid) = scheduler
-        .spawn_user_process("user-vm-allocate", &image, Priority::highest(), 2)
+    let handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
+    let launch = UserProcessLaunch::new()
+        .initial_handles(vec![handle])
+        .bootstrap_handle(0);
+    let info = super::user_process_launcher()
+        .spawn_user_process_with_launch("user-vm-allocate", &image, Priority::highest(), 2, launch)
         .expect("spawn_user_process must succeed");
+    qemu_test_harness::kassert_eq!(info.initial_handle_ids.len(), 1);
 
+    let scheduler = super::scheduler().clone();
     let mut spins = 0u64;
-    while el0_probe::peek().is_none() {
+    while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
         qemu_test_harness::kassert!(spins < 500);
     }
 
-    let (observed, is_user) = el0_probe::peek().expect("probe captured");
-    qemu_test_harness::kassert!(is_user);
-    qemu_test_harness::kassert_eq!(observed, VM_PROBE_MARKER);
-    // У процесса должен быть ровно один зарегистрированный регион - тот,
-    // который выдал `vm_allocate`. `vm_remap` не меняет количество регионов.
-    let _ = pid;
     let _ = spins;
 }
 

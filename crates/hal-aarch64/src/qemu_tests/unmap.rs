@@ -30,10 +30,21 @@ use qemu_test_harness::register_test;
 use crate::{
     HIGHER_HALF_BASE,
     memory::{
-        address_space_factory::{FrameAllocatorImpl, qemu_test_frame_allocator},
+        address_space_factory::{
+            FrameAllocatorImpl, UserAarch64MemoryMapper, qemu_test_frame_allocator,
+        },
         memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
     },
 };
+
+/// Downcast'ит `&dyn MemoryMapper`, выданный `Aarch64AddressSpaceFactory`,
+/// до конкретного типа для доступа к платформенному API диагностики.
+fn downcast_user_mapper(mapper: &(dyn MemoryMapper + Send + Sync)) -> &UserAarch64MemoryMapper {
+    mapper
+        .as_any()
+        .downcast_ref::<UserAarch64MemoryMapper>()
+        .expect("user-AS mapper must be Aarch64MemoryMapper")
+}
 
 /// Mapper-тип под `CappedAllocator` с `MutexCell`-стратегией -
 /// та же, что и у production-фабрики user-AS.
@@ -71,7 +82,7 @@ fn mapper_unmap_roundtrip() {
 
     for i in 0..pages {
         let p = va(PROBE_BASE + i * PAGE_SIZE);
-        qemu_test_harness::kassert!(mapper.query_leaf_raw(p).is_some());
+        qemu_test_harness::kassert!(downcast_user_mapper(&*mapper).query_leaf_raw(p).is_some());
     }
 
     mapper
@@ -80,7 +91,7 @@ fn mapper_unmap_roundtrip() {
 
     for i in 0..pages {
         let p = va(PROBE_BASE + i * PAGE_SIZE);
-        qemu_test_harness::kassert!(mapper.query_leaf_raw(p).is_none());
+        qemu_test_harness::kassert!(downcast_user_mapper(&*mapper).query_leaf_raw(p).is_none());
     }
 }
 
@@ -104,7 +115,7 @@ fn mapper_unmap_then_remap() {
 
     for i in 0..pages {
         qemu_test_harness::kassert!(
-            mapper
+            downcast_user_mapper(&*mapper)
                 .query_leaf_raw(va(base.as_usize() + i * PAGE_SIZE))
                 .is_some()
         );
@@ -176,7 +187,11 @@ fn mapper_unmap_misaligned_size_rejected() {
         .expect_err("unmap must reject misaligned size");
     qemu_test_harness::kassert!(matches!(err, MemoryUnmappingError::MisalignedRange));
 
-    qemu_test_harness::kassert!(mapper.query_leaf_raw(base).is_some());
+    qemu_test_harness::kassert!(
+        downcast_user_mapper(&*mapper)
+            .query_leaf_raw(base)
+            .is_some()
+    );
 
     mapper.unmap(base, PAGE_SIZE).expect("cleanup unmap");
 }
@@ -239,10 +254,17 @@ fn mapper_map_partial_oom_rollback() {
     // 3 intermediate-таблицы + 1 leaf-фрейм; страницы 2-4 - по 1 leaf-фрейму
     // (intermediate уже есть). Итого 7 запросов. Лимит 5 -> fail на 6-м
     // (3-я leaf-страница), rollback откатит leaf-страницы 0..2.
-    let capped = CappedAllocator::new(real_fa, 5);
+    //
+    // `Box::leak` нужен, чтобы поднять lifetime обёртки до `'static` -
+    // `MemoryMapper::as_any` требует `Self: 'static`, иначе trait-impl на
+    // `Aarch64MemoryMapper<'a, ...>` не подходит для `dyn Any`. В QEMU-runner-е
+    // утечка приемлема: тест-сюита не возвращается, а аллокатор переживёт
+    // выход через semihosting.
+    let capped: &'static CappedAllocator<'static, FrameAllocatorImpl> =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(CappedAllocator::new(real_fa, 5)));
 
-    let mapper: CappedMapper<'_> = Aarch64MemoryMapper::new_with_offset(
-        &capped,
+    let mapper: CappedMapper<'static> = Aarch64MemoryMapper::new_with_offset(
+        capped,
         root_ptr,
         HIGHER_HALF_BASE,
         AddressSpaceKind::User,

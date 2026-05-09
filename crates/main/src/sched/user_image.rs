@@ -161,6 +161,9 @@ mod tests {
                 AddressSpaceTag::NONE,
             )
         }
+        fn as_any(&self) -> &(dyn core::any::Any + 'static) {
+            self
+        }
     }
 
     fn fnv1a(bytes: &[u8]) -> u64 {

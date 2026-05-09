@@ -24,6 +24,7 @@ use main::{
 use memory::{
     MemFlags,
     mem_flags::{AccessMode, Executable, Owners, PrivateMemoryPermission},
+    memory_mapper::MemoryMapper,
     physical_address::PageAlignedAddress,
     virtual_address::PageAlignedVirtualAddress,
 };
@@ -31,9 +32,21 @@ use qemu_test_harness::register_test;
 
 use crate::{
     HIGHER_HALF_BASE,
-    memory::regs::{common::EL1, id_aa64mmfr0::IdAa64Mmfr0},
+    memory::{
+        address_space_factory::UserAarch64MemoryMapper,
+        regs::{common::EL1, id_aa64mmfr0::IdAa64Mmfr0},
+    },
     sched::Aarch64Context,
 };
+
+/// Downcast'ит `&dyn MemoryMapper`, выданный `Aarch64AddressSpaceFactory`,
+/// до конкретного типа для доступа к платформенному API диагностики.
+fn downcast_user_mapper(mapper: &(dyn MemoryMapper + Send + Sync)) -> &UserAarch64MemoryMapper {
+    mapper
+        .as_any()
+        .downcast_ref::<UserAarch64MemoryMapper>()
+        .expect("user-AS mapper must be Aarch64MemoryMapper")
+}
 
 const PAGE_SIZE: usize = 4096;
 const PROBE_VA: usize = 0x6000_0000;
@@ -173,7 +186,9 @@ fn user_pages_have_ng_bit_set() {
     let (user_as, _) = make_user_as_with_probe_page(PROBE_VA, 0xCC);
     let mapper = user_as.mapper().expect("user mapper");
     let va = PageAlignedVirtualAddress::from_usize(PROBE_VA).expect("aligned");
-    let raw = mapper.query_leaf_raw(va).expect("leaf must exist");
+    let raw = downcast_user_mapper(mapper)
+        .query_leaf_raw(va)
+        .expect("leaf must exist");
     // nG бит - `[11]`.
     qemu_test_harness::kassert_eq!((raw >> 11) & 1, 1);
     core::mem::forget(user_as);

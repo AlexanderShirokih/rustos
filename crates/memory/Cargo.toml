@@ -4,12 +4,6 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
-[features]
-default = []
-# Включает диагностические API (например, `MemoryMapper::query_leaf_raw`),
-# нужные интеграционным QEMU-тестам ядра.
-qemu-tests = []
-
 [dependencies]
 collections = { workspace = true }
 klog = { workspace = true }
