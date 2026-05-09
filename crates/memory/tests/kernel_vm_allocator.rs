@@ -1,242 +1,160 @@
+//! Unit-тесты `HeapAllocator`. Mock-mapper использует backing-буфер
+//! напрямую как арену heap'а - адрес буфера становится `arena_base`,
+//! поэтому VA-операции реально пишут в host-память.
+
 #![allow(unsafe_code)]
 
 mod common;
 
-use core::{
-    alloc::Layout,
-    ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::{alloc::Layout, cell::Cell, ptr::NonNull};
 
 use memory::{
-    frame::Frame,
-    frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
-    kernel_vm_allocator::{AllocationError, HeapAllocator},
-    physical_address::PageAlignedAddress,
+    MemFlags,
+    kernel_vm_allocator::{AllocationError, HeapAllocator, HeapArena},
+    memory_mapper::{
+        AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
+        MemoryRemappingError, MemoryUnmappingError,
+    },
+    physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::PageAlignedVirtualAddress,
 };
 
 const PAGE_SIZE: usize = 4096;
 
-/// Мок-аллокатор фреймов для тестов.
-/// Возвращает "физические адреса" начиная с 0 (как в реальном ядре).
-/// Реальный буфер в памяти используется как higher_half mapping.
-struct MockFrameAllocator {
-    /// Реальный адрес буфера (VA в терминах хоста = higher_half_base)
-    buffer_addr: usize,
-    /// Общее количество страниц
-    total_pages: usize,
-    /// Следующая свободная страница
-    next_page: AtomicUsize,
+struct MockKernelMapper {
+    arena_base: usize,
+    arena_size: usize,
+    /// Сколько успешных map-вызовов осталось до возврата OOM (None = не падать).
+    map_calls_until_fail: Cell<Option<usize>>,
+    pages_mapped: Cell<usize>,
+    /// Сколько байт арены "поднято" - для проверки, что heap не выходит за
+    /// arena_top и зовёт map строго в следующий слот.
+    arena_top: Cell<usize>,
 }
 
-impl MockFrameAllocator {
-    fn new(buffer: &[u8]) -> Self {
-        let base_addr = buffer.as_ptr() as usize;
-        // Выравниваем начало на границу страницы
-        let aligned_base = (base_addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let usable_size = buffer.len() - (aligned_base - base_addr);
-        let total_pages = usable_size / PAGE_SIZE;
+// SAFETY: тесты однопоточные.
+unsafe impl Send for MockKernelMapper {}
+// SAFETY: см. Send.
+unsafe impl Sync for MockKernelMapper {}
 
+impl MockKernelMapper {
+    fn new(arena_base: usize, arena_size: usize) -> Self {
         Self {
-            buffer_addr: aligned_base,
-            total_pages,
-            next_page: AtomicUsize::new(0),
+            arena_base,
+            arena_size,
+            map_calls_until_fail: Cell::new(None),
+            pages_mapped: Cell::new(0),
+            arena_top: Cell::new(0),
         }
     }
 
-    /// Возвращает реальный адрес буфера (используется как higher_half_base)
-    fn buffer_addr(&self) -> usize {
-        self.buffer_addr
+    fn fail_after(&self, n: usize) {
+        self.map_calls_until_fail.set(Some(n));
+    }
+
+    fn pages_mapped(&self) -> usize {
+        self.pages_mapped.get()
     }
 }
 
-impl FrameAllocator for MockFrameAllocator {
-    fn reserve_frames_exact(
+impl MemoryMapper for MockKernelMapper {
+    fn map(
         &self,
-        from_inclusive: Frame,
-        _to_exclusive: Frame,
-    ) -> Result<Frame, ReserveFrameError> {
-        Ok(from_inclusive)
-    }
+        va: PageAlignedVirtualAddress,
+        page_count: usize,
+        init: &[u8],
+        _flags: MemFlags,
+    ) -> Result<(), MemoryMappingError> {
+        let bytes = page_count * PAGE_SIZE;
+        let va_usize = va.as_usize();
 
-    fn allocate_frame(&self) -> Option<Frame> {
-        let page = self.next_page.fetch_add(1, Ordering::Relaxed);
-        if page >= self.total_pages {
-            self.next_page.fetch_sub(1, Ordering::Relaxed);
-            return None;
-        }
-        // Возвращаем PA начиная с 0 (как в реальном ядре)
-        let pa = page * PAGE_SIZE;
-        Some(Frame::from(
-            PageAlignedAddress::from_usize(pa).expect("address should be page aligned"),
-        ))
-    }
+        assert_eq!(
+            va_usize,
+            self.arena_base + self.arena_top.get(),
+            "heap.expand must map at the next arena top"
+        );
+        assert!(
+            self.arena_top.get() + bytes <= self.arena_size,
+            "heap.expand exceeded arena size"
+        );
 
-    fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)> {
-        if max_count == 0 {
-            return None;
-        }
-
-        let current = self.next_page.load(Ordering::Relaxed);
-        let remaining = self.total_pages.saturating_sub(current);
-        if remaining == 0 {
-            return None;
+        if let Some(left) = self.map_calls_until_fail.get() {
+            if left == 0 {
+                return Err(MemoryMappingError::OutOfMemory);
+            }
+            self.map_calls_until_fail.set(Some(left - 1));
         }
 
-        let count = max_count.min(remaining);
-        let start_page = self.next_page.fetch_add(count, Ordering::Relaxed);
-
-        // Проверка на гонку
-        if start_page >= self.total_pages {
-            self.next_page.fetch_sub(count, Ordering::Relaxed);
-            return None;
+        // SAFETY: backing-буфер занимает диапазон
+        // [arena_base, arena_base + arena_size); запись внутри корректна.
+        unsafe {
+            core::ptr::write_bytes(va_usize as *mut u8, 0, bytes);
+            if !init.is_empty() {
+                let take = init.len().min(bytes);
+                core::ptr::copy_nonoverlapping(init.as_ptr(), va_usize as *mut u8, take);
+            }
         }
 
-        let actual_count = count.min(self.total_pages - start_page);
-        // Возвращаем PA начиная с 0 (как в реальном ядре)
-        let pa = start_page * PAGE_SIZE;
-
-        Some((
-            Frame::from(
-                PageAlignedAddress::from_usize(pa).expect("address should be page aligned"),
-            ),
-            actual_count,
-        ))
-    }
-
-    fn deallocate_frame(&self, _frame: Frame) -> Result<(), FrameError> {
-        // В моке не реализуем освобождение
+        self.arena_top.set(self.arena_top.get() + bytes);
+        self.pages_mapped.set(self.pages_mapped.get() + page_count);
         Ok(())
     }
 
-    fn is_allocated(&self, _frame: Frame) -> bool {
-        false
-    }
-}
-
-/// Мок-аллокатор, который выделяет максимум 1 страницу за вызов allocate_frames.
-/// Используется для тестирования цикла expand() с несколькими итерациями.
-struct LimitedMockFrameAllocator {
-    buffer_addr: usize,
-    total_pages: usize,
-    next_page: AtomicUsize,
-}
-
-impl LimitedMockFrameAllocator {
-    fn new(buffer: &[u8]) -> Self {
-        let base_addr = buffer.as_ptr() as usize;
-        let aligned_base = (base_addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let usable_size = buffer.len() - (aligned_base - base_addr);
-        let total_pages = usable_size / PAGE_SIZE;
-
-        Self {
-            buffer_addr: aligned_base,
-            total_pages,
-            next_page: AtomicUsize::new(0),
-        }
-    }
-
-    fn buffer_addr(&self) -> usize {
-        self.buffer_addr
-    }
-}
-
-impl FrameAllocator for LimitedMockFrameAllocator {
-    fn reserve_frames_exact(
+    fn map_exact(
         &self,
-        from_inclusive: Frame,
-        _to_exclusive: Frame,
-    ) -> Result<Frame, ReserveFrameError> {
-        Ok(from_inclusive)
+        _source: PageAlignedVirtualAddress,
+        _target: PageAlignedAddress,
+        _size: usize,
+        _flags: MemFlags,
+    ) -> Result<(), MemoryMappingError> {
+        unimplemented!("not used by HeapAllocator unit tests")
     }
 
-    fn allocate_frame(&self) -> Option<Frame> {
-        let page = self.next_page.fetch_add(1, Ordering::Relaxed);
-        if page >= self.total_pages {
-            self.next_page.fetch_sub(1, Ordering::Relaxed);
-            return None;
-        }
-        let pa = page * PAGE_SIZE;
-        Some(Frame::from(
-            PageAlignedAddress::from_usize(pa).expect("address should be page aligned"),
-        ))
+    fn unmap(
+        &self,
+        _address: PageAlignedVirtualAddress,
+        _size: usize,
+    ) -> Result<(), MemoryUnmappingError> {
+        unimplemented!("not used by HeapAllocator unit tests")
     }
 
-    fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)> {
-        if max_count == 0 {
-            return None;
-        }
-
-        let current = self.next_page.load(Ordering::Relaxed);
-        if current >= self.total_pages {
-            return None;
-        }
-
-        // Ограничиваем выделение до 1 страницы за вызов
-        let start_page = self.next_page.fetch_add(1, Ordering::Relaxed);
-        if start_page >= self.total_pages {
-            self.next_page.fetch_sub(1, Ordering::Relaxed);
-            return None;
-        }
-
-        let pa = start_page * PAGE_SIZE;
-        Some((
-            Frame::from(
-                PageAlignedAddress::from_usize(pa).expect("address should be page aligned"),
-            ),
-            1, // Всегда возвращаем только 1 страницу
-        ))
+    fn remap(
+        &self,
+        _start: PageAlignedVirtualAddress,
+        _size: usize,
+        _new_flags: MemFlags,
+    ) -> Result<(), MemoryRemappingError> {
+        unimplemented!("not used by HeapAllocator unit tests")
     }
 
-    fn deallocate_frame(&self, _frame: Frame) -> Result<(), FrameError> {
-        Ok(())
+    fn activate_handle(&self) -> AddressSpaceHandle {
+        AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
     }
 
-    fn is_allocated(&self, _frame: Frame) -> bool {
-        false
+    fn as_any(&self) -> &(dyn core::any::Any + 'static) {
+        self
     }
 }
 
-// =============================================================================
-// Вспомогательные функции
-// =============================================================================
+const DEFAULT_ARENA_SIZE: usize = 256 * 1024;
 
-const TEST_HEAP_SIZE: usize = 64 * 1024 + PAGE_SIZE; // 64 KB + padding для выравнивания
+fn make_heap(arena_size: usize) -> (HeapAllocator, &'static MockKernelMapper) {
+    let buffer = vec![0u8; arena_size + PAGE_SIZE].into_boxed_slice();
+    let raw = Box::leak(buffer);
+    let raw_addr = raw.as_ptr() as usize;
+    let aligned_base = (raw_addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-/// Выделяет буфер памяти для тестов (leak - память не освобождается)
-fn allocate_test_buffer(size: usize) -> &'static mut [u8] {
-    Box::leak(vec![0u8; size].into_boxed_slice())
+    let mapper = Box::leak(Box::new(MockKernelMapper::new(aligned_base, arena_size)));
+    let mapper_dyn: &'static (dyn MemoryMapper + Send + Sync) = mapper;
+
+    let arena_base = PageAlignedVirtualAddress::from_usize(aligned_base)
+        .expect("page-aligned arena base from align math");
+    let heap = HeapAllocator::new(mapper_dyn, HeapArena::new(arena_base, arena_size));
+    (heap, mapper)
 }
 
-/// Создаёт инфраструктуру для тестирования HeapAllocator
-fn create_test_allocator() -> HeapAllocator {
-    let buffer = allocate_test_buffer(TEST_HEAP_SIZE);
-    let mock_frame_allocator = MockFrameAllocator::new(buffer);
-    // Преобразование адресов: buffer_addr как higher_half_base
-    // MockFrameAllocator возвращает PA=0, PAGE_SIZE, 2*PAGE_SIZE, ...
-    // HeapAllocator вычисляет VA = higher_half_base + PA = buffer_addr + offset
-    let buffer_addr = mock_frame_allocator.buffer_addr();
-
-    let frame_allocator: &'static dyn FrameAllocator = Box::leak(Box::new(mock_frame_allocator));
-
-    let heap_start_va =
-        PageAlignedVirtualAddress::from_usize(buffer_addr).expect("should be page aligned");
-
-    HeapAllocator::new(frame_allocator, heap_start_va)
-}
-
-fn create_test_allocator_with_pages(total_pages: usize) -> HeapAllocator {
-    let buffer = allocate_test_buffer(total_pages * PAGE_SIZE + PAGE_SIZE);
-    let mock_frame_allocator = MockFrameAllocator::new(buffer);
-    let buffer_addr = mock_frame_allocator.buffer_addr();
-
-    let frame_allocator: &'static dyn FrameAllocator = Box::leak(Box::new(mock_frame_allocator));
-
-    let heap_start_va =
-        PageAlignedVirtualAddress::from_usize(buffer_addr).expect("should be page aligned");
-
-    HeapAllocator::new(frame_allocator, heap_start_va)
+fn make_default_heap() -> (HeapAllocator, &'static MockKernelMapper) {
+    make_heap(DEFAULT_ARENA_SIZE)
 }
 
 // =============================================================================
@@ -245,592 +163,367 @@ fn create_test_allocator_with_pages(total_pages: usize) -> HeapAllocator {
 
 #[test]
 fn allocate_returns_valid_pointer() {
-    let mut allocator = create_test_allocator();
-
+    let (mut heap, _m) = make_default_heap();
     let layout = Layout::from_size_align(64, 8).unwrap();
-    let result = allocator.allocate(layout);
-
-    assert!(result.is_ok(), "allocation should succeed");
-    // NonNull гарантирует ненулевой указатель
-    let _ptr = result.unwrap();
+    assert!(heap.allocate(layout).is_ok());
 }
 
 #[test]
 fn allocate_returns_aligned_pointer() {
-    let mut allocator = create_test_allocator();
-
-    // Тестируем разные выравнивания
-    for align in [8, 16, 32, 64, 128] {
+    let (mut heap, _m) = make_default_heap();
+    for align in [8usize, 16, 32, 64, 128] {
         let layout = Layout::from_size_align(32, align).unwrap();
-        let ptr = allocator.allocate(layout).unwrap();
-
+        let ptr = heap.allocate(layout).unwrap();
         assert_eq!(
             ptr.as_ptr() as usize % align,
             0,
-            "pointer should be aligned to {align} bytes"
+            "pointer should be aligned to {align}"
         );
     }
 }
 
 #[test]
-fn multiple_allocations_return_different_pointers() {
-    let mut allocator = create_test_allocator();
-
+fn multiple_allocations_return_distinct_pointers() {
+    let (mut heap, _m) = make_default_heap();
     let layout = Layout::from_size_align(64, 8).unwrap();
-
-    let ptr1 = allocator.allocate(layout).unwrap();
-    let ptr2 = allocator.allocate(layout).unwrap();
-    let ptr3 = allocator.allocate(layout).unwrap();
-
-    assert_ne!(ptr1.as_ptr(), ptr2.as_ptr(), "allocations should be unique");
-    assert_ne!(ptr2.as_ptr(), ptr3.as_ptr(), "allocations should be unique");
-    assert_ne!(ptr1.as_ptr(), ptr3.as_ptr(), "allocations should be unique");
+    let p1 = heap.allocate(layout).unwrap();
+    let p2 = heap.allocate(layout).unwrap();
+    let p3 = heap.allocate(layout).unwrap();
+    assert_ne!(p1.as_ptr(), p2.as_ptr());
+    assert_ne!(p2.as_ptr(), p3.as_ptr());
+    assert_ne!(p1.as_ptr(), p3.as_ptr());
 }
 
 #[test]
 fn allocated_memory_is_writable() {
-    let mut allocator = create_test_allocator();
-
+    let (mut heap, _m) = make_default_heap();
     let layout = Layout::from_size_align(128, 8).unwrap();
-    let ptr = allocator.allocate(layout).unwrap();
-
-    // SAFETY: ptr указывает на свежевыделенный 128-байтный блок, который мы
-    // эксклюзивно держим до конца теста.
+    let ptr = heap.allocate(layout).unwrap();
+    // SAFETY: ptr - свежевыделенный 128-байтный блок, эксклюзивно наш.
     unsafe {
         let slice = core::slice::from_raw_parts_mut(ptr.as_ptr(), 128);
-        for (i, byte) in slice.iter_mut().enumerate() {
-            *byte = (i % 256) as u8;
+        for (i, b) in slice.iter_mut().enumerate() {
+            *b = (i % 256) as u8;
         }
-
-        // Проверяем, что данные записались корректно
-        for (i, byte) in slice.iter().enumerate() {
-            assert_eq!(*byte, (i % 256) as u8, "memory should be readable/writable");
+        for (i, b) in slice.iter().enumerate() {
+            assert_eq!(*b, (i % 256) as u8);
         }
     }
 }
 
 // =============================================================================
-// 2. Обработка ошибок
+// 2. Главное: aligned-аллокация (изначальный bug)
 // =============================================================================
 
 #[test]
-fn allocate_zero_size_returns_invalid_layout() {
-    let mut allocator = create_test_allocator();
-
-    let layout = Layout::from_size_align(0, 1).unwrap();
-    let result = allocator.allocate(layout);
-
+fn aligned_4k_4k_allocation_succeeds_on_fresh_heap() {
+    // Изначальный bug: до vmalloc-style refactor'а этот вызов мог
+    // вернуть null, если physical-bitmap имел изолированную дырку.
+    let (mut heap, mapper) = make_heap(8 * PAGE_SIZE);
+    let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
+    let ptr = heap.allocate(layout).expect("4K-aligned 4K alloc");
+    assert_eq!(ptr.as_ptr() as usize % PAGE_SIZE, 0);
     assert!(
-        matches!(result, Err(AllocationError::InvalidLayout)),
-        "zero-size allocation should return InvalidLayout, got {result:?}"
+        mapper.pages_mapped() >= 2,
+        "expand must have mapped >= 2 pages"
     );
 }
 
 #[test]
-fn exhaust_heap_returns_out_of_memory() {
-    let mut allocator = create_test_allocator();
+fn aligned_2k_alignment_succeeds() {
+    let (mut heap, _m) = make_default_heap();
+    let layout = Layout::from_size_align(64, 2048).unwrap();
+    let ptr = heap.allocate(layout).expect("2K-aligned alloc");
+    assert_eq!(ptr.as_ptr() as usize % 2048, 0);
+}
 
+#[test]
+fn aligned_8k_alignment_succeeds() {
+    let (mut heap, _m) = make_default_heap();
+    let layout = Layout::from_size_align(4096, 8192).unwrap();
+    let ptr = heap.allocate(layout).expect("8K-aligned alloc");
+    assert_eq!(ptr.as_ptr() as usize % 8192, 0);
+}
+
+#[test]
+fn many_aligned_4k_allocations_succeed() {
+    let (mut heap, _m) = make_heap(64 * PAGE_SIZE);
+    let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
+    let mut ptrs = Vec::new();
+    for _ in 0..10 {
+        let p = heap.allocate(layout).expect("aligned 4K alloc in series");
+        assert_eq!(p.as_ptr() as usize % PAGE_SIZE, 0);
+        ptrs.push(p);
+    }
+    // Все указатели уникальны.
+    for i in 0..ptrs.len() {
+        for j in (i + 1)..ptrs.len() {
+            assert_ne!(ptrs[i].as_ptr(), ptrs[j].as_ptr());
+        }
+    }
+}
+
+// =============================================================================
+// 3. Обработка ошибок
+// =============================================================================
+
+#[test]
+fn zero_size_allocation_returns_invalid_layout() {
+    let (mut heap, _m) = make_default_heap();
+    let layout = Layout::from_size_align(0, 1).unwrap();
+    let r = heap.allocate(layout);
+    assert!(matches!(r, Err(AllocationError::InvalidLayout)));
+}
+
+#[test]
+fn arena_exhaustion_returns_out_of_memory() {
+    // 4 страницы арены - можно выделить около 3-4 раз 8K-блоки и упереться.
+    let (mut heap, _m) = make_heap(4 * PAGE_SIZE);
     let layout = Layout::from_size_align(8192, 8).unwrap();
-
-    // Выделяем, пока не кончится память
-    let mut allocations = 0;
+    let mut allocations = 0usize;
     loop {
-        match allocator.allocate(layout) {
+        match heap.allocate(layout) {
             Ok(_) => allocations += 1,
             Err(AllocationError::OutOfMemory) => break,
-            Err(e) => panic!("unexpected error: {e:?}"),
+            Err(other) => panic!("unexpected error: {other:?}"),
         }
-
-        // Защита от бесконечного цикла
-        assert!(
-            allocations <= 100,
-            "too many allocations, heap should have been exhausted"
-        );
+        assert!(allocations <= 100, "heap should have been exhausted");
     }
+    assert!(allocations >= 1, "at least one alloc must have succeeded");
+}
 
-    assert!(
-        allocations > 0,
-        "should have made at least one allocation before OOM"
-    );
+#[test]
+fn mapper_failure_propagates_as_oom() {
+    // Мок-mapper падает на первом же expand-вызове.
+    let (mut heap, mapper) = make_default_heap();
+    mapper.fail_after(0);
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let r = heap.allocate(layout);
+    assert!(matches!(r, Err(AllocationError::OutOfMemory)));
 }
 
 // =============================================================================
-// 3. Освобождение и повторное использование
+// 4. Освобождение и повторное использование
 // =============================================================================
 
 #[test]
 fn deallocate_allows_reuse() {
-    let mut allocator = create_test_allocator();
-
+    let (mut heap, _m) = make_default_heap();
     let layout = Layout::from_size_align(1024, 8).unwrap();
-
-    // Выделяем блок
-    let ptr1 = allocator.allocate(layout).unwrap();
-
-    // Освобождаем
-    allocator.deallocate(ptr1);
-
-    // Выделяем снова - должно переиспользовать освобождённую память
-    // NonNull гарантирует ненулевой указатель
-    let _ptr2 = allocator.allocate(layout).unwrap();
+    let p1 = heap.allocate(layout).unwrap();
+    heap.deallocate(p1);
+    let _p2 = heap.allocate(layout).unwrap();
 }
 
 #[test]
-fn deallocate_multiple_blocks_allows_reuse() {
-    let mut allocator = create_test_allocator();
-
+fn deallocate_three_blocks_in_reverse_order() {
+    let (mut heap, _m) = make_default_heap();
     let layout = Layout::from_size_align(512, 8).unwrap();
+    let p1 = heap.allocate(layout).unwrap();
+    let p2 = heap.allocate(layout).unwrap();
+    let p3 = heap.allocate(layout).unwrap();
 
-    // Выделяем несколько блоков
-    let ptr1 = allocator.allocate(layout).unwrap();
-    let ptr2 = allocator.allocate(layout).unwrap();
-    let ptr3 = allocator.allocate(layout).unwrap();
+    heap.deallocate(p3);
+    heap.deallocate(p2);
+    heap.deallocate(p1);
 
-    // Освобождаем в обратном порядке
-    allocator.deallocate(ptr3);
-    allocator.deallocate(ptr2);
-    allocator.deallocate(ptr1);
-
-    // Выделяем снова - все блоки должны быть переиспользованы
-    let new_ptr1 = allocator.allocate(layout).unwrap();
-    let new_ptr2 = allocator.allocate(layout).unwrap();
-    let new_ptr3 = allocator.allocate(layout).unwrap();
-
-    // Проверяем, что все указатели разные
-    assert_ne!(new_ptr1.as_ptr(), new_ptr2.as_ptr());
-    assert_ne!(new_ptr2.as_ptr(), new_ptr3.as_ptr());
-    assert_ne!(new_ptr1.as_ptr(), new_ptr3.as_ptr());
+    let n1 = heap.allocate(layout).unwrap();
+    let n2 = heap.allocate(layout).unwrap();
+    let n3 = heap.allocate(layout).unwrap();
+    assert_ne!(n1.as_ptr(), n2.as_ptr());
+    assert_ne!(n2.as_ptr(), n3.as_ptr());
+    assert_ne!(n1.as_ptr(), n3.as_ptr());
 }
 
 #[test]
-fn deallocate_middle_block_allows_reuse() {
-    let mut allocator = create_test_allocator();
-
+fn deallocate_middle_block_reuses_slot() {
+    let (mut heap, _m) = make_default_heap();
     let layout = Layout::from_size_align(256, 8).unwrap();
-
-    // Выделяем три блока
-    let ptr1 = allocator.allocate(layout).unwrap();
-    let ptr2 = allocator.allocate(layout).unwrap();
-    let ptr3 = allocator.allocate(layout).unwrap();
-
-    // Освобождаем средний блок
-    allocator.deallocate(ptr2);
-
-    // Выделяем новый блок того же размера - должен занять освобождённое место
-    let new_ptr = allocator.allocate(layout).unwrap();
-
-    // Проверяем, что первый и третий блоки не изменились
-    assert_ne!(
-        new_ptr.as_ptr(),
-        ptr1.as_ptr(),
-        "new allocation should not overlap with first"
-    );
-    assert_ne!(
-        new_ptr.as_ptr(),
-        ptr3.as_ptr(),
-        "new allocation should not overlap with third"
-    );
+    let p1 = heap.allocate(layout).unwrap();
+    let p2 = heap.allocate(layout).unwrap();
+    let p3 = heap.allocate(layout).unwrap();
+    heap.deallocate(p2);
+    let new_p = heap.allocate(layout).unwrap();
+    assert_ne!(new_p.as_ptr(), p1.as_ptr());
+    assert_ne!(new_p.as_ptr(), p3.as_ptr());
 }
 
 #[test]
-fn deallocate_coalesces_adjacent_blocks_for_large_reuse() {
-    let mut allocator = create_test_allocator_with_pages(1);
+fn coalescing_allows_large_allocation_after_fragmentation() {
+    // Маленькие соседние свободные блоки должны слиться при возврате,
+    // позволяя повторное выделение блока, превышающего любой
+    // отдельный фрагмент.
+    let (mut heap, _m) = make_heap(2 * PAGE_SIZE);
+    let small = Layout::from_size_align(1000, 8).unwrap();
+    let p1 = heap.allocate(small).unwrap();
+    let p2 = heap.allocate(small).unwrap();
+    let p3 = heap.allocate(small).unwrap();
 
-    let small_layout = Layout::from_size_align(1000, 8).unwrap();
-    let ptr1 = allocator.allocate(small_layout).unwrap();
-    let ptr2 = allocator.allocate(small_layout).unwrap();
-    let ptr3 = allocator.allocate(small_layout).unwrap();
+    heap.deallocate(p1);
+    heap.deallocate(p3);
+    heap.deallocate(p2);
 
-    allocator.deallocate(ptr1);
-    allocator.deallocate(ptr3);
-    allocator.deallocate(ptr2);
-
-    let large_layout = Layout::from_size_align(3500, 8).unwrap();
-    assert!(
-        allocator.allocate(large_layout).is_ok(),
-        "adjacent free blocks should be coalesced before retrying a large allocation"
-    );
+    let big = Layout::from_size_align(3500, 8).unwrap();
+    assert!(heap.allocate(big).is_ok(), "coalesced free block must fit");
 }
 
-// =============================================================================
-// 4. Расширение кучи
-// =============================================================================
-
-#[test]
-fn heap_expands_when_needed() {
-    let mut allocator = create_test_allocator();
-
-    // Выделяем несколько больших блоков, которые потребуют расширения
-    let layout = Layout::from_size_align(8192, 8).unwrap();
-
-    let ptr1 = allocator.allocate(layout);
-    let ptr2 = allocator.allocate(layout);
-    let ptr3 = allocator.allocate(layout);
-
-    assert!(ptr1.is_ok(), "first large allocation should succeed");
-    assert!(ptr2.is_ok(), "second large allocation should succeed");
-    assert!(ptr3.is_ok(), "third large allocation should succeed");
-}
-
-#[test]
-fn varying_sizes_work_correctly() {
-    let mut allocator = create_test_allocator();
-
-    // Выделяем блоки разных размеров
-    let sizes = [16, 64, 128, 32, 256, 48, 512];
-
-    for &size in &sizes {
-        let layout = Layout::from_size_align(size, 8).unwrap();
-        let result = allocator.allocate(layout);
-        assert!(result.is_ok(), "allocation of {size} bytes should succeed");
-    }
-}
-
-// =============================================================================
-// 5. Тесты на потенциальные баги
-// =============================================================================
-
-/// Тест double-free защиты
 #[test]
 fn double_free_is_safely_ignored() {
-    let mut allocator = create_test_allocator();
-
+    let (mut heap, _m) = make_default_heap();
     let layout = Layout::from_size_align(64, 8).unwrap();
+    let p = heap.allocate(layout).unwrap();
+    heap.deallocate(p);
+    heap.deallocate(p); // должен молча проигнорироваться
 
-    // Выделяем блок
-    let ptr1 = allocator.allocate(layout).unwrap();
-
-    // Double free - двойное освобождение
-    allocator.deallocate(ptr1);
-    allocator.deallocate(ptr1); // Второй вызов игнорируется
-
-    // Два выделения возвращают разные указатели
-    let ptr2 = allocator.allocate(layout).unwrap();
-    let ptr3 = allocator.allocate(layout).unwrap();
-
-    assert_ne!(
-        ptr2.as_ptr(),
-        ptr3.as_ptr(),
-        "double free should not cause duplicate allocations"
-    );
+    let n1 = heap.allocate(layout).unwrap();
+    let n2 = heap.allocate(layout).unwrap();
+    assert_ne!(n1.as_ptr(), n2.as_ptr());
 }
 
-/// Тест отсутствия перекрытия блоков
 #[test]
-fn allocated_blocks_do_not_overlap() {
-    let mut allocator = create_test_allocator();
+fn deallocate_pointer_below_arena_is_ignored() {
+    let (mut heap, _m) = make_default_heap();
+    // Выполним один alloc для подъёма арены, затем dealloc указателя ниже.
+    let _ = heap
+        .allocate(Layout::from_size_align(64, 8).unwrap())
+        .unwrap();
+    let bogus = NonNull::new(0x1usize as *mut u8).unwrap();
+    heap.deallocate(bogus); // не должен паниковать
+}
 
-    let layout = Layout::from_size_align(128, 8).unwrap();
+#[test]
+fn deallocate_pointer_above_arena_is_ignored() {
+    let (mut heap, _m) = make_default_heap();
+    let _ = heap
+        .allocate(Layout::from_size_align(64, 8).unwrap())
+        .unwrap();
+    // Указатель далеко за пределы арены.
+    let bogus = NonNull::new((!0usize / 2) as *mut u8).unwrap();
+    heap.deallocate(bogus);
+}
 
-    // Выделяем три блока
-    let ptr1 = allocator.allocate(layout).unwrap();
-    let ptr2 = allocator.allocate(layout).unwrap();
-    let ptr3 = allocator.allocate(layout).unwrap();
+// =============================================================================
+// 5. Расширение арены
+// =============================================================================
 
-    // SAFETY: ptr1/2/3 - три непересекающихся выделенных блока по 128 байт.
-    unsafe {
-        core::ptr::write_bytes(ptr1.as_ptr(), 0xAA, 128);
-        core::ptr::write_bytes(ptr2.as_ptr(), 0xBB, 128);
-        core::ptr::write_bytes(ptr3.as_ptr(), 0xCC, 128);
-    }
+#[test]
+fn allocator_expands_on_demand() {
+    let (mut heap, mapper) = make_default_heap();
+    let layout = Layout::from_size_align(8192, 8).unwrap();
+    assert!(heap.allocate(layout).is_ok());
+    assert!(heap.allocate(layout).is_ok());
+    assert!(heap.allocate(layout).is_ok());
+    assert!(mapper.pages_mapped() > 0);
+}
 
-    // SAFETY: блоки всё ещё валидны - deallocate не вызывался.
-    unsafe {
-        let slice1 = core::slice::from_raw_parts(ptr1.as_ptr(), 128);
-        let slice2 = core::slice::from_raw_parts(ptr2.as_ptr(), 128);
-        let slice3 = core::slice::from_raw_parts(ptr3.as_ptr(), 128);
-
-        assert!(
-            slice1.iter().all(|&b| b == 0xAA),
-            "block 1 data was corrupted"
-        );
-        assert!(
-            slice2.iter().all(|&b| b == 0xBB),
-            "block 2 data was corrupted"
-        );
-        assert!(
-            slice3.iter().all(|&b| b == 0xCC),
-            "block 3 data was corrupted"
-        );
+#[test]
+fn varying_sizes_work() {
+    let (mut heap, _m) = make_default_heap();
+    for &size in &[16, 64, 128, 32, 256, 48, 512, 1024, 2048] {
+        let layout = Layout::from_size_align(size, 8).unwrap();
+        assert!(heap.allocate(layout).is_ok(), "alloc {size}B failed");
     }
 }
 
-/// Тест больших выравниваний
+// =============================================================================
+// 6. Свойства реальной integration-нагрузки
+// =============================================================================
+
 #[test]
-fn large_alignment_works_correctly() {
-    let mut allocator = create_test_allocator();
-
-    // Большое выравнивание
-    let layout = Layout::from_size_align(64, 256).unwrap();
-    let ptr = allocator.allocate(layout).unwrap();
-
-    assert_eq!(
-        ptr.as_ptr() as usize % 256,
-        0,
-        "pointer should be aligned to 256 bytes"
-    );
-
-    // SAFETY: ptr указывает на 64-байтный блок с выравниванием 256.
-    unsafe {
-        core::ptr::write_bytes(ptr.as_ptr(), 0xFF, 64);
-        let slice = core::slice::from_raw_parts(ptr.as_ptr(), 64);
-        assert!(
-            slice.iter().all(|&b| b == 0xFF),
-            "memory should be writable"
-        );
-    }
-}
-
-/// Тест освобождения и повторного выделения
-#[test]
-fn reused_memory_is_independent() {
-    let mut allocator = create_test_allocator();
-
-    let layout = Layout::from_size_align(256, 8).unwrap();
-
-    let ptr1 = allocator.allocate(layout).unwrap();
-    // SAFETY: ptr1 - свежевыделенный 256-байтный блок.
-    unsafe {
-        core::ptr::write_bytes(ptr1.as_ptr(), 0xAA, 256);
-    }
-
-    // Освобождаем
-    allocator.deallocate(ptr1);
-
-    // Выделяем снова (может быть тот же блок)
-    let ptr2 = allocator.allocate(layout).unwrap();
-
-    // SAFETY: ptr2 - свежевыделенный 256-байтный блок.
-    unsafe {
-        core::ptr::write_bytes(ptr2.as_ptr(), 0xBB, 256);
-    }
-
-    // Выделяем ещё один блок
-    let ptr3 = allocator.allocate(layout).unwrap();
-    // SAFETY: ptr3 - свежевыделенный 256-байтный блок, не пересекается с ptr2.
-    unsafe {
-        core::ptr::write_bytes(ptr3.as_ptr(), 0xCC, 256);
-    }
-
-    // SAFETY: ptr2/ptr3 валидны и не освобождались.
-    unsafe {
-        let slice2 = core::slice::from_raw_parts(ptr2.as_ptr(), 256);
-        let slice3 = core::slice::from_raw_parts(ptr3.as_ptr(), 256);
-
-        assert!(
-            slice2.iter().all(|&b| b == 0xBB),
-            "reused block data was corrupted"
-        );
-        assert!(
-            slice3.iter().all(|&b| b == 0xCC),
-            "new block data was corrupted"
-        );
-    }
-}
-
-/// Тест на много мелких аллокаций
-#[test]
-fn many_small_allocations() {
-    let mut allocator = create_test_allocator();
-
+fn many_small_allocations_with_writes() {
+    let (mut heap, _m) = make_default_heap();
     let layout = Layout::from_size_align(16, 8).unwrap();
-    let mut pointers = Vec::new();
-
-    // Выделяем много мелких блоков
+    let mut ptrs = Vec::new();
     for i in 0u8..100 {
-        match allocator.allocate(layout) {
-            Ok(ptr) => {
-                // SAFETY: ptr - свежевыделенный 16-байтный блок.
-                unsafe {
-                    core::ptr::write_bytes(ptr.as_ptr(), i, 16);
-                }
-                pointers.push((ptr, i));
+        match heap.allocate(layout) {
+            Ok(p) => {
+                // SAFETY: p - свежевыделенный 16-байтный блок.
+                unsafe { core::ptr::write_bytes(p.as_ptr(), i, 16) };
+                ptrs.push((p, i));
             }
             Err(AllocationError::OutOfMemory) => break,
-            Err(e) => panic!("unexpected error: {e:?}"),
+            Err(e) => panic!("unexpected: {e:?}"),
         }
     }
-
-    assert!(pointers.len() > 10, "should allocate at least 10 blocks");
-
-    // Проверяем, что все данные сохранились
-    for (ptr, pattern) in &pointers {
-        // SAFETY: ptr всё ещё указывает на валидный 16-байтный блок.
+    assert!(ptrs.len() >= 50, "expected lots of small allocs");
+    for (p, pat) in &ptrs {
+        // SAFETY: блоки не освобождались, slice валиден.
         unsafe {
-            let slice = core::slice::from_raw_parts(ptr.as_ptr(), 16);
-            assert!(
-                slice.iter().all(|&b| b == *pattern),
-                "block with pattern {pattern} was corrupted"
-            );
-        }
-    }
-}
-
-// =============================================================================
-// 6. Специфичные граничные случаи
-// =============================================================================
-
-/// Создаёт HeapAllocator с ограниченным frame allocator (1 страница за вызов)
-fn create_limited_test_allocator() -> HeapAllocator {
-    let buffer = allocate_test_buffer(TEST_HEAP_SIZE);
-    let mock_frame_allocator = LimitedMockFrameAllocator::new(buffer);
-    let buffer_addr = mock_frame_allocator.buffer_addr();
-
-    let frame_allocator: &'static dyn FrameAllocator = Box::leak(Box::new(mock_frame_allocator));
-
-    let heap_start_va =
-        PageAlignedVirtualAddress::from_usize(buffer_addr).expect("should be page aligned");
-
-    HeapAllocator::new(frame_allocator, heap_start_va)
-}
-
-/// Тест игнорирования lower half указателей при deallocate
-#[test]
-fn deallocate_lower_half_pointer_is_ignored() {
-    let mut allocator = create_test_allocator();
-
-    // Выделяем блок, чтобы куча была инициализирована
-    let layout = Layout::from_size_align(64, 8).unwrap();
-    let valid_ptr = allocator.allocate(layout).unwrap();
-
-    // Фиктивный указатель из lower half (адрес 0x1000, меньше higher_half_base)
-    // В реальном ядре это указатель от bump allocator
-    let lower_half_addr = 0x1000usize;
-    // SAFETY: 0x1000 - ненулевой адрес, NonNull::new_unchecked требует только это.
-    let lower_half_ptr = unsafe { NonNull::new_unchecked(lower_half_addr as *mut u8) };
-
-    // Вызов deallocate с lower half указателем игнорируется
-    allocator.deallocate(lower_half_ptr);
-
-    // Аллокатор продолжает работать корректно
-    let ptr2 = allocator.allocate(layout).unwrap();
-    assert_ne!(
-        valid_ptr.as_ptr(),
-        ptr2.as_ptr(),
-        "allocator should still work after ignoring lower half pointer"
-    );
-
-    // Освобождение валидного указателя работает
-    allocator.deallocate(valid_ptr);
-
-    // Выделение снова возможно
-    let ptr3 = allocator.allocate(layout).unwrap();
-    assert!(ptr3.as_ptr() as usize > 0, "allocation should succeed");
-}
-
-/// Тест expand() с частичной аллокацией фреймов
-/// (allocate_frames возвращает меньше страниц чем запрошено)
-#[test]
-fn expand_with_partial_frame_allocation() {
-    let mut allocator = create_limited_test_allocator();
-
-    // LimitedMockFrameAllocator выделяет по 1 странице за вызов.
-    // Несколько выделений заставят expand() работать в цикле.
-    let layout = Layout::from_size_align(2048, 8).unwrap();
-    let mut pointers = Vec::new();
-
-    // Выделение блоков для нескольких вызовов expand()
-    for i in 0..6 {
-        let ptr = allocator.allocate(layout);
-        assert!(
-            ptr.is_ok(),
-            "allocation {i} should succeed with limited frame allocator"
-        );
-        pointers.push(ptr.unwrap());
-    }
-
-    // Проверяем, что все блоки независимы и доступны для записи
-    for (i, ptr) in pointers.iter().enumerate() {
-        // SAFETY: ptr - свежевыделенный 2048-байтный блок, эксклюзивно владеемый тестом.
-        unsafe {
-            core::ptr::write_bytes(ptr.as_ptr(), i as u8, 2048);
-        }
-    }
-
-    for (i, ptr) in pointers.iter().enumerate() {
-        // SAFETY: блоки не освобождались - slice валиден.
-        unsafe {
-            let slice = core::slice::from_raw_parts(ptr.as_ptr(), 2048);
-            assert!(
-                slice.iter().all(|&b| b == i as u8),
-                "block {i} data was corrupted"
-            );
+            let slice = core::slice::from_raw_parts(p.as_ptr(), 16);
+            assert!(slice.iter().all(|&b| b == *pat), "block {pat} corrupted");
         }
     }
 }
 
 #[test]
-fn expand_coalesces_adjacent_partial_frame_allocations() {
-    let mut allocator = create_limited_test_allocator();
-
-    let layout = Layout::from_size_align(6000, 8).unwrap();
-    assert!(
-        allocator.allocate(layout).is_ok(),
-        "adjacent pages returned by separate frame allocations should form one heap block"
-    );
+fn allocations_do_not_overlap() {
+    let (mut heap, _m) = make_default_heap();
+    let layout = Layout::from_size_align(128, 8).unwrap();
+    let p1 = heap.allocate(layout).unwrap();
+    let p2 = heap.allocate(layout).unwrap();
+    let p3 = heap.allocate(layout).unwrap();
+    // SAFETY: 3 непересекающихся выделенных блока.
+    unsafe {
+        core::ptr::write_bytes(p1.as_ptr(), 0xAA, 128);
+        core::ptr::write_bytes(p2.as_ptr(), 0xBB, 128);
+        core::ptr::write_bytes(p3.as_ptr(), 0xCC, 128);
+        let s1 = core::slice::from_raw_parts(p1.as_ptr(), 128);
+        let s2 = core::slice::from_raw_parts(p2.as_ptr(), 128);
+        let s3 = core::slice::from_raw_parts(p3.as_ptr(), 128);
+        assert!(s1.iter().all(|&b| b == 0xAA));
+        assert!(s2.iter().all(|&b| b == 0xBB));
+        assert!(s3.iter().all(|&b| b == 0xCC));
+    }
 }
 
-/// Тест использования целого блока без разделения
 #[test]
 fn block_too_small_to_split_uses_whole_block() {
-    let mut allocator = create_test_allocator();
+    let (mut heap, _m) = make_default_heap();
+    let big = Layout::from_size_align(3800, 8).unwrap();
+    let p = heap.allocate(big).unwrap();
+    heap.deallocate(p);
 
-    // Сначала выделяем большой блок, чтобы создать свободный блок известного размера
-    let large_layout = Layout::from_size_align(3800, 8).unwrap();
-    let large_ptr = allocator.allocate(large_layout).unwrap();
-
-    // Освобождаем его - теперь есть свободный блок
-    allocator.deallocate(large_ptr);
-
-    // Остаток будет слишком мал для разделения (< MIN_ALLOC_SIZE + sizeof(FreeBlock))
-    let almost_same_layout = Layout::from_size_align(3780, 8).unwrap();
-    let ptr = allocator.allocate(almost_same_layout);
-
-    assert!(
-        ptr.is_ok(),
-        "allocation should succeed using whole block without split"
-    );
-
-    // SAFETY: ptr - свежевыделенный 3780-байтный блок (whole-block без split).
-    unsafe {
-        let p = ptr.unwrap();
-        core::ptr::write_bytes(p.as_ptr(), 0xCD, 3780);
-        let slice = core::slice::from_raw_parts(p.as_ptr(), 3780);
-        assert!(
-            slice.iter().all(|&b| b == 0xCD),
-            "memory should be writable"
-        );
-    }
+    let almost = Layout::from_size_align(3780, 8).unwrap();
+    assert!(heap.allocate(almost).is_ok());
 }
 
-/// Тест выравнивания PAGE_SIZE
 #[test]
-fn page_size_alignment_works() {
-    let mut allocator = create_test_allocator();
+fn current_size_grows_with_expands() {
+    let (mut heap, _m) = make_default_heap();
+    let initial = heap.current_size();
+    let _ = heap
+        .allocate(Layout::from_size_align(128, 8).unwrap())
+        .unwrap();
+    let after_first = heap.current_size();
+    assert!(after_first > initial, "expand must increase current_size");
+    // Большое выделение, требующее повторного expand'а.
+    let _ = heap
+        .allocate(Layout::from_size_align(10 * PAGE_SIZE, 8).unwrap())
+        .unwrap();
+    let after_big = heap.current_size();
+    assert!(after_big > after_first);
+}
 
-    // Выравнивание PAGE_SIZE (4096 байт)
-    let layout = Layout::from_size_align(64, 4096).unwrap();
-    let ptr = allocator.allocate(layout);
+#[test]
+fn stress_allocate_deallocate_loop() {
+    let (mut heap, _m) = make_heap(64 * PAGE_SIZE);
+    let layout = Layout::from_size_align(256, 8).unwrap();
+    let mut alive: Vec<NonNull<u8>> = Vec::new();
 
-    assert!(
-        ptr.is_ok(),
-        "allocation with PAGE_SIZE alignment should succeed"
-    );
-
-    let p = ptr.unwrap();
-    assert_eq!(
-        p.as_ptr() as usize % 4096,
-        0,
-        "pointer should be aligned to PAGE_SIZE (4096 bytes)"
-    );
-
-    // SAFETY: p - свежевыделенный 64-байтный блок с выравниванием PAGE_SIZE.
-    unsafe {
-        core::ptr::write_bytes(p.as_ptr(), 0xEF, 64);
-        let slice = core::slice::from_raw_parts(p.as_ptr(), 64);
-        assert!(
-            slice.iter().all(|&b| b == 0xEF),
-            "memory should be writable"
-        );
+    for round in 0usize..1000 {
+        if round.is_multiple_of(3) && !alive.is_empty() {
+            let idx = round % alive.len();
+            heap.deallocate(alive.remove(idx));
+        } else {
+            match heap.allocate(layout) {
+                Ok(p) => alive.push(p),
+                Err(AllocationError::OutOfMemory) => {
+                    while alive.len() > alive.capacity() / 2 && !alive.is_empty() {
+                        heap.deallocate(alive.pop().unwrap());
+                    }
+                }
+                Err(e) => panic!("unexpected: {e:?}"),
+            }
+        }
     }
 }

@@ -24,7 +24,6 @@ extern crate alloc;
 
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::{
-    alloc::Layout,
     ptr::NonNull,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -78,14 +77,19 @@ const fn svc(op: SyscallOp) -> u32 {
     0xD400_0001 | ((op as u32) << 5)
 }
 
-/// Аллоцирует выровненную 4К-страницу из kernel-heap и зануляет её. Утечка
-/// сделана намеренно: после `remap` память выходит из-под контроля Rust-аллокатора.
-fn leak_aligned_page() -> *mut u8 {
-    let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).expect("PAGE_SIZE valid layout");
-    // SAFETY: layout валиден; ptr - свежевыделенный, занулённый, не shared.
-    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
-    assert!(!ptr.is_null(), "alloc_zeroed must succeed");
-    ptr
+/// Свежий 4К-фрейм + его kernel-VA через линейную PA->VA-карту. Намеренная
+/// утечка: после `remap` страница выходит из-под контроля Rust-аллокатора.
+fn allocate_probe_page() -> (*mut u8, PageAlignedAddress) {
+    let fa = syscall_bridge::frame_allocator().expect("FrameAllocator must be installed");
+    let frame = fa.allocate_frame().expect("RAM frame available");
+    let pa = frame.page_address();
+    let ptr = (HIGHER_HALF_BASE + pa.as_usize()) as *mut u8;
+    // SAFETY: linear higher-half-маппинг покрывает все RAM-фреймы;
+    // фрейм только что выдан и эксклюзивно наш.
+    unsafe {
+        core::ptr::write_bytes(ptr, 0, PAGE_SIZE);
+    }
+    (ptr, pa)
 }
 
 /// Записывает payload-инструкции через kernel-VA (higher-half линейное
@@ -128,16 +132,6 @@ static USER_AS_ROOT: AtomicU64 = AtomicU64::new(0);
 /// AS освободится и мы потеряем root-фрейм.
 static USER_AS_HOLDER: Once<Arc<AddressSpace>> = Once::new();
 
-/// Линейный physical address kernel-heap-страницы: heap замаплен через
-/// `higher-half = PA + HIGHER_HALF_BASE`, поэтому `PA = VA - HIGHER_HALF_BASE`.
-fn kheap_va_to_pa(kva: *mut u8) -> PageAlignedAddress {
-    let pa = (kva as usize)
-        .checked_sub(HIGHER_HALF_BASE)
-        .expect("kheap pointer must be in higher-half range");
-    PageAlignedAddress::from_usize(pa)
-        .expect("4K-aligned heap allocation translates to 4K-aligned PA")
-}
-
 #[allow(clippy::similar_names)]
 fn userspace_eret_to_el0_invokes_dispatcher() {
     let event = Event::new();
@@ -154,10 +148,8 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
     );
     USER_AS_HOLDER.call_once(|| user_as.clone());
 
-    let payload_kheap = leak_aligned_page();
-    let stack_kheap = leak_aligned_page();
-    let payload_pa = kheap_va_to_pa(payload_kheap);
-    let stack_pa = kheap_va_to_pa(stack_kheap);
+    let (payload_kheap, payload_pa) = allocate_probe_page();
+    let (stack_kheap, stack_pa) = allocate_probe_page();
 
     let payload_va = PageAlignedVirtualAddress::from_usize(USER_TEST_PAYLOAD_VA)
         .expect("USER_TEST_PAYLOAD_VA must be 4K-aligned");

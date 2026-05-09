@@ -62,20 +62,19 @@ fn user_rw_flags() -> MemFlags {
     })
 }
 
-fn leak_aligned_page() -> *mut u8 {
-    let layout =
-        core::alloc::Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).expect("PAGE_SIZE valid layout");
-    // SAFETY: layout валиден, ptr - свежевыделенный, эксклюзивно принадлежит вызывающему.
-    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
-    assert!(!ptr.is_null(), "alloc_zeroed must succeed");
-    ptr
-}
-
-fn kheap_va_to_pa(kva: *mut u8) -> PageAlignedAddress {
-    let pa = (kva as usize)
-        .checked_sub(HIGHER_HALF_BASE)
-        .expect("kheap pointer must be in higher-half range");
-    PageAlignedAddress::from_usize(pa).expect("4K-aligned PA")
+/// Свежий 4К-фрейм + его kernel-VA через линейную PA->VA-карту. Намеренная
+/// утечка: после маппинга в user-AS вернуть фрейм нельзя.
+fn allocate_probe_page() -> (*mut u8, PageAlignedAddress) {
+    let fa = syscall_bridge::frame_allocator().expect("FrameAllocator must be installed");
+    let frame = fa.allocate_frame().expect("RAM frame available");
+    let pa = frame.page_address();
+    let ptr = (HIGHER_HALF_BASE + pa.as_usize()) as *mut u8;
+    // SAFETY: linear higher-half-маппинг покрывает все RAM-фреймы;
+    // фрейм только что выдан и эксклюзивно наш.
+    unsafe {
+        core::ptr::write_bytes(ptr, 0, PAGE_SIZE);
+    }
+    (ptr, pa)
 }
 
 fn read_ttbr0() -> u64 {
@@ -110,8 +109,7 @@ fn make_user_as_with_probe_page(va: usize, sentinel: u64) -> (Arc<AddressSpace>,
     let user_as = AddressSpace::new_user(factory).expect("create user AS");
     let mapper = user_as.mapper().expect("user variant has mapper");
 
-    let kheap = leak_aligned_page();
-    let pa = kheap_va_to_pa(kheap);
+    let (kheap, pa) = allocate_probe_page();
     let aligned_va = PageAlignedVirtualAddress::from_usize(va).expect("4K-aligned VA");
     mapper
         .map_exact(aligned_va, pa, PAGE_SIZE, user_rw_flags())
@@ -218,17 +216,16 @@ fn rollover_smoke() {
     test_harness_qemu::kassert_eq!(observed, 0x1234);
     Aarch64Context::switch_address_space(None);
 
-    // Одна kheap-страница переиспользуется во всех AS - чтобы не съедать
-    // kernel-heap пропорционально числу итераций (`forget` ниже всё ещё
-    // оставляет каждый AS живым ради per-AS-факторов аллокатора, но это
-    // уже только page-table-фреймы).
-    let shared_kheap = leak_aligned_page();
+    // Одна страница переиспользуется во всех AS - чтобы не съедать RAM
+    // пропорционально числу итераций (`forget` ниже всё ещё оставляет
+    // каждый AS живым ради per-AS-факторов аллокатора, но это уже только
+    // page-table-фреймы).
+    let (shared_kheap, shared_pa) = allocate_probe_page();
     // SAFETY: shared_kheap - свежевыделенная страница, эксклюзивно владеемая.
     #[allow(clippy::cast_ptr_alignment)]
     unsafe {
         shared_kheap.cast::<u64>().write_volatile(0x5555);
     }
-    let shared_pa = kheap_va_to_pa(shared_kheap);
 
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");

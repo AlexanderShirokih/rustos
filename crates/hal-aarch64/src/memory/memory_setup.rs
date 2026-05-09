@@ -13,25 +13,36 @@ use memory::{
     FrameBitmap,
     bump_allocator::BumpAllocator,
     frame_allocator::{FrameAllocator, PhysicalFrameAllocator},
-    kernel_vm_allocator::HeapAllocator,
+    kernel_vm_allocator::{HeapAllocator, HeapArena},
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
     memory_range::MemoryRange,
     physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::PageAlignedVirtualAddress,
 };
+use spin::Once;
 
-use crate::memory::{
-    global_allocator::GLOBAL_ALLOCATOR,
-    layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},
-    memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
-    mmu::{Mmu, NormalDualSpaceConfig},
-    regs::common::EL1,
+use crate::{
+    KHEAP_BASE, KHEAP_MAX_SIZE,
+    memory::{
+        global_allocator::GLOBAL_ALLOCATOR,
+        layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},
+        memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
+        mmu::{Mmu, NormalDualSpaceConfig},
+        regs::common::EL1,
+    },
 };
 
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 type NoLockPageMapper<'a, FA> = NoLockCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 type FrameAllocatorImpl = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
 type NoLockAarch64MemoryMapper<'a, FA> = Aarch64MemoryMapper<'a, FA, NoLockPageMapper<'a, FA>>;
+type KernelMemoryMapper =
+    Aarch64MemoryMapper<'static, FrameAllocatorImpl, MutexPageMapper<'static, FrameAllocatorImpl>>;
+
+/// Статический слот kernel-mapper'а: heap зовёт его в expand'е, а сам
+/// `set_heap` происходит когда global allocator в PHASE_FROZEN, поэтому
+/// mapper нельзя положить в Box - он должен быть `&'static` без heap.
+static KERNEL_MEMORY_MAPPER: Once<KernelMemoryMapper> = Once::new();
 
 /// Ранняя фаза: bump-аллокатор создан, но не установлен.
 pub struct Early {
@@ -47,8 +58,9 @@ pub struct Installed {
 }
 
 pub struct MemoryManagerResult {
-    pub memory_mapper: Box<dyn MemoryMapper + Send + Sync>,
+    pub memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
     pub address_space_factory: Box<dyn AddressSpaceFactory + Send + Sync>,
+    pub frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
     pub base_offset: PageAlignedVirtualAddress,
 }
 
@@ -336,23 +348,28 @@ impl MemorySetup<Enabled> {
             fa_virt.relocate_inner_pointers_by_offset(higher_half_base.as_usize());
         }
 
-        let allocator = HeapAllocator::new(fa_virt, higher_half_base);
-        GLOBAL_ALLOCATOR.set_heap(allocator);
-
         let higher_ptr_phys =
             PageAlignedVirtualAddress::identity(higher_root_pa).as_ptr::<PageTable<L0>>();
         // SAFETY: `higher_ptr_phys` - валидный указатель на PageTable<L0> в higher-half identity-region;
         // сдвиг на `higher_half_base` корректен (страница принадлежит замапленному региону).
         let higher_ptr_rel = unsafe { higher_ptr_phys.byte_add(higher_half_base.as_usize()) };
-        let memory_mapper: Aarch64MemoryMapper<'_, _, MutexPageMapper<'_, _>> =
+
+        let kernel_mapper: &'static KernelMemoryMapper = KERNEL_MEMORY_MAPPER.call_once(|| {
             Aarch64MemoryMapper::new_with_offset(
                 fa_virt,
                 higher_ptr_rel,
                 higher_half_base.as_usize(),
                 AddressSpaceKind::Kernel,
-            );
+            )
+        });
 
-        let memory_mapper = Box::new(memory_mapper);
+        let kheap_base_va = PageAlignedVirtualAddress::from_usize(KHEAP_BASE)
+            .expect("KHEAP_BASE must be 4K-aligned");
+        let allocator = HeapAllocator::new(
+            kernel_mapper as &'static (dyn MemoryMapper + Send + Sync),
+            HeapArena::new(kheap_base_va, KHEAP_MAX_SIZE),
+        );
+        GLOBAL_ALLOCATOR.set_heap(allocator);
 
         let address_space_factory = Box::new(
             crate::memory::address_space_factory::Aarch64AddressSpaceFactory::new(
@@ -364,8 +381,9 @@ impl MemorySetup<Enabled> {
         Mmu::<EL1>::disable_lower_half();
 
         MemoryManagerResult {
-            memory_mapper,
+            memory_mapper: kernel_mapper,
             address_space_factory,
+            frame_allocator: fa_virt,
             base_offset: higher_half_base,
         }
     }

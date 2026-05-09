@@ -409,6 +409,52 @@ fn allocate_frames_searches_multiple_regions() {
     );
 }
 
+#[test]
+fn allocate_frames_returns_short_run_when_first_free_segment_is_small() {
+    // Документирует opportunistic-семантику alloc_contiguous: первая
+    // же дырка возвращается целиком, длинный run дальше игнорируется.
+    let allocator = single_region_allocator(0, 64);
+
+    // Свободно: только фрейм 5 и хвост [10..20).
+    allocator
+        .reserve_frames_exact(Frame::new(1), Frame::new(5))
+        .expect("reserve [1,5)");
+    allocator
+        .reserve_frames_exact(Frame::new(6), Frame::new(10))
+        .expect("reserve [6,10)");
+    allocator
+        .reserve_frames_exact(Frame::new(20), Frame::new(64))
+        .expect("reserve [20,64)");
+
+    let (first_frame, count) = allocator
+        .allocate_frames(5)
+        .expect("opportunistic: returns at least 1");
+    assert_eq!(first_frame.number(), 5);
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn allocate_frames_spans_word_boundary() {
+    // 128 фреймов = 2 u64-word'а; проверяем счёт через границу.
+    let allocator = single_region_allocator(0, 128);
+    let (first_frame, count) = allocator
+        .allocate_frames(80)
+        .expect("80 contiguous within 128-frame region");
+    assert_eq!(count, 80);
+    assert!(first_frame.number() + 80 > 64);
+}
+
+#[test]
+fn allocate_frames_full_region_excluding_reserved_zero() {
+    let allocator = single_region_allocator(0, 16);
+    let (first_frame, count) = allocator
+        .allocate_frames(15)
+        .expect("15 free frames available");
+    assert_eq!(first_frame.number(), 1);
+    assert_eq!(count, 15);
+    assert!(allocator.allocate_frames(1).is_none());
+}
+
 // =============================================================================
 // 7. Граничные случаи deallocate и is_allocated
 // =============================================================================

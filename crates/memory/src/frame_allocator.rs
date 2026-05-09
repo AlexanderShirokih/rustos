@@ -71,6 +71,15 @@ pub struct PhysicalFrameAllocator<L: LockCell<FrameBitmap>> {
     next_frame_hint: AtomicUsize,
 }
 
+// SAFETY: alloc/dealloc-методы берут `&self` и сериализуют доступ к битмапу
+// через `LockCell::with_lock`. Для `NoLockCell` инвариант однопоточности
+// поддерживается на уровне ядра (всё хождение в FA - с одного CPU
+// в kernel-mode либо под более крупным kernel-локом). Для SMP-сценариев
+// аллокатор должен инстанцироваться с `MutexCell`.
+unsafe impl<L: LockCell<FrameBitmap>> Send for PhysicalFrameAllocator<L> {}
+// SAFETY: см. комментарий к `Send`.
+unsafe impl<L: LockCell<FrameBitmap>> Sync for PhysicalFrameAllocator<L> {}
+
 impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
     pub fn new<T>(memory: T) -> Self
     where

@@ -52,22 +52,19 @@ fn user_rw_flags() -> MemFlags {
     })
 }
 
-/// Аллоцирует выровненную 4К-страницу из kernel-heap и зануляет её.
-/// Память намеренно утекает: после маппинга в user-AS высвобождать её нельзя.
-fn leak_aligned_page() -> *mut u8 {
-    let layout =
-        core::alloc::Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).expect("PAGE_SIZE valid layout");
-    // SAFETY: layout валиден, ptr - свежевыделенный, эксклюзивно принадлежит вызывающему.
-    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
-    assert!(!ptr.is_null(), "alloc_zeroed must succeed");
-    ptr
-}
-
-fn kheap_va_to_pa(kva: *mut u8) -> PageAlignedAddress {
-    let pa = (kva as usize)
-        .checked_sub(HIGHER_HALF_BASE)
-        .expect("kheap pointer must be in higher-half range");
-    PageAlignedAddress::from_usize(pa).expect("4K-aligned PA")
+/// Свежий 4К-фрейм + его kernel-VA через линейную PA->VA-карту. Намеренная
+/// утечка: после маппинга в user-AS вернуть фрейм нельзя.
+fn allocate_probe_page() -> (*mut u8, PageAlignedAddress) {
+    let fa = syscall_bridge::frame_allocator().expect("FrameAllocator must be installed");
+    let frame = fa.allocate_frame().expect("RAM frame available");
+    let pa = frame.page_address();
+    let ptr = (HIGHER_HALF_BASE + pa.as_usize()) as *mut u8;
+    // SAFETY: linear higher-half-маппинг покрывает все RAM-фреймы;
+    // фрейм только что выдан и эксклюзивно наш.
+    unsafe {
+        core::ptr::write_bytes(ptr, 0, PAGE_SIZE);
+    }
+    (ptr, pa)
 }
 
 /// Читает TTBR0_EL1.
@@ -90,8 +87,7 @@ fn make_user_as_with_probe_page(sentinel: u64) -> (Arc<AddressSpace>, *mut u8) {
     let user_as = AddressSpace::new_user(factory).expect("create user AS");
     let mapper = user_as.mapper().expect("user variant has mapper");
 
-    let kheap = leak_aligned_page();
-    let pa = kheap_va_to_pa(kheap);
+    let (kheap, pa) = allocate_probe_page();
     let va = PageAlignedVirtualAddress::from_usize(PROBE_VA).expect("PROBE_VA aligned");
     mapper
         .map_exact(va, pa, PAGE_SIZE, user_rw_flags())

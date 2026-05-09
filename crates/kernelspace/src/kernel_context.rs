@@ -4,6 +4,7 @@ use drivers_common::{
     Capabilities, CapabilityStoreMutExt, RuntimeDriverRegistry, services::mmio::MmioService,
 };
 use memory::{
+    frame_allocator::FrameAllocator,
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
     virtual_address::PageAlignedVirtualAddress,
 };
@@ -21,11 +22,12 @@ impl KernelContext {
     pub fn new(
         memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
         address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
+        frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
         base_offset: PageAlignedVirtualAddress,
     ) -> KernelContext {
-        // Дублируем фабрику в syscall_bridge для модулей, у которых нет
-        // прямого доступа к KernelContext.
+        // Публикуем глобальные слоты для модулей без KernelContext.
         syscall_bridge::install_address_space_factory(address_space_factory);
+        syscall_bridge::install_frame_allocator(frame_allocator);
 
         let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl {
             memory_mapper,

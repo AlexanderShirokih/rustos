@@ -150,6 +150,21 @@ impl MemFlags {
             },
         })
     }
+
+    /// Kernel read/write, без исполнения, без user-доступа. Использует
+    /// kernel-heap для собственной арены и любые kernel-only данные.
+    pub const fn kernel_rw() -> Self {
+        MemFlags::Private(Owners {
+            kernel: PrivateMemoryPermission {
+                access: AccessMode::Writable,
+                executable: Executable::NotAllowed,
+            },
+            user: PrivateMemoryPermission {
+                access: AccessMode::None,
+                executable: Executable::NotAllowed,
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +217,15 @@ mod tests {
             assert!(matches!(p.kernel.access, AccessMode::None));
             assert!(matches!(p.kernel.executable, Executable::NotAllowed));
         }
+    }
+
+    #[test]
+    fn kernel_rw_grants_only_kernel_write_no_exec() {
+        let flags = MemFlags::kernel_rw();
+        let p = private_perms(&flags);
+        assert!(matches!(p.kernel.access, AccessMode::Writable));
+        assert!(matches!(p.kernel.executable, Executable::NotAllowed));
+        assert!(matches!(p.user.access, AccessMode::None));
+        assert!(matches!(p.user.executable, Executable::NotAllowed));
     }
 }

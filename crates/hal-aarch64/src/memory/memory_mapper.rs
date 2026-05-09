@@ -453,15 +453,12 @@ where
 }
 
 /// Visitor для `Drop`: возвращает owned-leaf'ы и все таблицы, без TLB.
-/// `had_mappings` решает, отдавать ли root-фрейм.
 struct DropPath<'a, FA: FrameAllocator> {
     frame_allocator: &'a FA,
-    had_mappings: bool,
 }
 
 impl<FA: FrameAllocator> UnmapVisitor for DropPath<'_, FA> {
     fn on_leaf(&mut self, _va: PageAlignedVirtualAddress, _leaf_shift: u8, raw: u64) {
-        self.had_mappings = true;
         if raw & OWNED_BY_FA_BIT == 0 {
             return;
         }
@@ -471,7 +468,6 @@ impl<FA: FrameAllocator> UnmapVisitor for DropPath<'_, FA> {
             .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
     }
     fn on_free_table(&mut self, pa: PageAlignedAddress) {
-        self.had_mappings = true;
         let _ = self
             .frame_allocator
             .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
@@ -698,7 +694,6 @@ where
         }
         let mut visitor = DropPath {
             frame_allocator: self.frame_allocator,
-            had_mappings: false,
         };
         self.mapper.with_lock(|mapper_inner| {
             // SAFETY: AS больше не используется (scheduler переключил CPU до
@@ -712,16 +707,9 @@ where
                 );
             }
         });
-        // Root возвращаем только если AS реально использовался. Пустой user-AS
-        // встречается в юнит-кейсах `AddressSpace::new_user` без последующего
-        // `map`; одинокий root в bitmap'е создаёт дырку, на которой текущий
-        // heap-аллокатор валится в OOM при aligned-expand. Для реального
-        // user-process этот путь всегда видит маппинги.
-        if visitor.had_mappings {
-            let _ = self
-                .frame_allocator
-                .deallocate_frame(Frame::containing_address(self.root_pa));
-        }
+        let _ = self
+            .frame_allocator
+            .deallocate_frame(Frame::containing_address(self.root_pa));
     }
 }
 
