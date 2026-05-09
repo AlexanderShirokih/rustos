@@ -69,7 +69,7 @@ pub enum MemoryUnmappingError {
     /// В диапазоне есть незамапленная страница. Уже снятые с маппинга страницы
     /// **не** возвращаются - частичный unmap валиден от вызывающего.
     NotMapped,
-    /// На пути встретился block-mapping (1G/2M); split не поддерживается.
+    /// Запрошен частичный unmap внутри block-mapping; split не поддерживается.
     UnsupportedBlockMapping,
     /// Размер диапазона не кратен 4 КБ.
     MisalignedRange,
@@ -80,7 +80,7 @@ impl Display for MemoryUnmappingError {
         match self {
             MemoryUnmappingError::NotMapped => f.write_str("Range contains an unmapped page"),
             MemoryUnmappingError::UnsupportedBlockMapping => {
-                f.write_str("Block mapping (1G/2M) cannot be unmapped without split")
+                f.write_str("Partial block mapping cannot be unmapped without split")
             }
             MemoryUnmappingError::MisalignedRange => f.write_str("Range size is not 4K aligned"),
         }
@@ -148,17 +148,18 @@ pub trait MemoryMapper {
         mem_flags: MemFlags,
     ) -> Result<(), MemoryMappingError>;
 
-    /// Снимает маппинг 4К-страниц в диапазоне `[address, address + size)`.
+    /// Снимает маппинг в диапазоне `[address, address + size)`.
     /// Страницы, замапленные через [`Self::map`] (фрейм аллоцирован
     /// `FrameAllocator`-ом mapper'а), возвращаются обратно. Страницы,
     /// замапленные через [`Self::map_exact`] (PA приходит от вызывающего -
     /// MMIO, image, identity), **не** возвращаются: их PA не принадлежит
     /// аллокатору фреймов.
     ///
-    /// `size` должен быть кратен размеру страницы (4 КБ). Все страницы
-    /// диапазона должны быть замаплены 4К-страницами; при первой
-    /// незамапленной - [`MemoryUnmappingError::NotMapped`]. Уже снятые с
-    /// маппинга страницы при этом **не** возвращаются.
+    /// `size` должен быть кратен размеру страницы. Диапазон может покрывать
+    /// 4К leaf-страницы и whole block leaf-маппинги; частичный unmap внутри
+    /// block leaf возвращает [`MemoryUnmappingError::UnsupportedBlockMapping`].
+    /// При первой незамапленной странице - [`MemoryUnmappingError::NotMapped`].
+    /// Уже снятые с маппинга страницы при этом **не** возвращаются.
     fn unmap(
         &self,
         address: PageAlignedVirtualAddress,

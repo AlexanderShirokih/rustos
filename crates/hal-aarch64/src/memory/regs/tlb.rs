@@ -60,6 +60,25 @@ impl TranslationLookasideBuffer<EL1> {
         }
     }
 
+    /// Инвалидация всех записей конкретного ASID, inner-shareable.
+    /// Используется для unmap'а L1 block (1 ГБ) в user-AS.
+    pub fn invalidate_asid_inner_shareable(asid: u16) {
+        // tlbi aside1is, Xt: Xt[63:48] = ASID.
+        let xt: u64 = u64::from(asid) << 48;
+        // SAFETY: `tlbi aside1is` принимает один регистровый операнд `Xt`;
+        // не модифицирует память и регистры (preserves_flags).
+        unsafe {
+            asm!(
+                "dsb ishst",
+                "tlbi aside1is, {xt}",
+                "dsb ish",
+                "isb",
+                xt = in(reg) xt,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+
     /// Точечная инвалидация одной 4К-страницы во всех ASID, inner-shareable.
     /// Используется для global (kernel) страниц, не привязанных к ASID.
     pub fn invalidate_va_global(va: usize) {

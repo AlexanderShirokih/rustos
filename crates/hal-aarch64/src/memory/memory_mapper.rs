@@ -4,9 +4,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use collections::LockCell;
 use hal_aarch64_paging::{
-    entry::{AnyEntry, Entry, decode},
+    entry::{Entry, Invalid as InvalidEntry},
     level::{L0, L1, L2, L3, Level},
-    mapper::{self, MapError, MapLeaf, PageMapper, WalkError, extract_table_pa},
+    mapper::{
+        self, MapError, MapLeaf, PageMapper, UnmapError, UnmapVisitor, WalkError, extract_table_pa,
+        free_all, unmap_range,
+    },
     mem_flags::Aarch64MemFlags,
     page_table::PageTable,
     table_alloc::TableAlloc,
@@ -28,6 +31,14 @@ use crate::memory::{
     asid::{self, unpack_asid},
     regs::{common::EL1, tlb::TranslationLookasideBuffer},
 };
+
+/// Software-bit в leaf-PTE (бит 55 - software-available по AArch64 ARM):
+/// установлен -> фрейм был аллоцирован `frame_allocator` mapper'а (путь
+/// [`MemoryMapper::map`]); сброшен -> PA пришёл от вызывающего (путь
+/// [`MemoryMapper::map_exact`] - MMIO, image, identity). `unmap`/Drop
+/// возвращают в FA только страницы с битом - MMIO/устройственные PA не
+/// попадают в bitmap RAM.
+const OWNED_BY_FA_BIT: u64 = 1 << 55;
 
 /// Адаптер FrameAllocator для выделения таблиц страниц.
 ///
@@ -228,127 +239,6 @@ where
         })
     }
 
-    /// VA-указатель на таблицу уровня `Lvl` через линейное PA->VA отображение
-    /// (`pa + self.vaddr_offset`).
-    ///
-    /// # Safety
-    /// `pa` должен быть валидным PA таблицы уровня `Lvl`, маппинг
-    /// `pa -> pa + self.vaddr_offset` действителен в текущем CPU,
-    /// и таблица не используется параллельно.
-    unsafe fn table_ref<Lvl: Level>(&self, pa: PageAlignedAddress) -> &PageTable<Lvl> {
-        let va = pa.as_usize() + self.vaddr_offset;
-        // SAFETY: caller гарантирует валидность PA + линейную карту.
-        unsafe { &*(va as *const PageTable<Lvl>) }
-    }
-
-    /// Обходит дерево таблиц от L0-root user-AS и возвращает в аллокатор:
-    /// все user-data страницы (leaf-entries L3), все промежуточные таблицы
-    /// (L1/L2/L3) и root.
-    ///
-    /// # Safety
-    /// Вызывающий гарантирует, что:
-    /// - PA таблиц валидны и доступны через линейную карту kernel-AS
-    ///   (`pa + self.vaddr_offset`);
-    /// - таблицы не используются параллельно (Drop AS = эксклюзивное владение);
-    /// - block-mappings (L1 1G / L2 2M) в user-AS не встречаются (этот ядерный
-    ///   путь маппит только L3 страницы).
-    unsafe fn free_user_page_tables(&self) {
-        // SAFETY: L0-root доступен через линейную карту; root_pa валиден на всё
-        // время жизни AS (фрейм выделен фабрикой и не освобождается до Drop).
-        let l0 = unsafe { self.table_ref::<L0>(PageAlignedAddress::new_unchecked(self.root_pa)) };
-        let mut had_mappings = false;
-        for idx in 0..512 {
-            let raw = l0.get_raw(idx);
-            if let Ok(AnyEntry::Table(te)) = decode::<L0>(raw) {
-                had_mappings = true;
-                let l1_pa = extract_table_pa(te.raw());
-                // SAFETY: te - валидный Table-дескриптор уровня L0; l1_pa указывает на L1.
-                unsafe { self.free_l1(l1_pa) };
-                let _ = self
-                    .frame_allocator
-                    .deallocate_frame(Frame::containing_address(l1_pa.as_physical_address()));
-            }
-            // Invalid -> пропускаем; Block на L0 невозможен (CanBlock не реализован).
-        }
-        // Root освобождаем только если AS реально использовался (имел маппинги).
-        // Пустой user-AS (в production не возникает - он создаётся фабрикой
-        // только под `spawn_user_process`, который всегда маппит payload+стек)
-        // встречается лишь в kernel-side юнит-кейсах вида `AddressSpace::new_user`
-        // без последующего `map`. Возвращать его одинокий root в bitmap создаёт
-        // изолированный "дырявый" бит - текущий heap-аллокатор после такого
-        // expand'а не может найти большой aligned-блок и валится в OOM. Всё
-        // равно root для реального user-process очищается в основной ветке.
-        if had_mappings {
-            let _ = self
-                .frame_allocator
-                .deallocate_frame(Frame::containing_address(self.root_pa));
-        }
-    }
-
-    /// Освобождает все L2-таблицы под `l1_pa` и leaf L3-таблицы под ними.
-    ///
-    /// # Safety
-    /// `l1_pa` должен быть PA валидной L1-таблицы; см. `free_user_page_tables`.
-    unsafe fn free_l1(&self, l1_pa: PageAlignedAddress) {
-        // SAFETY: l1_pa получен из валидного Table-дескриптора уровня L0.
-        let l1 = unsafe { self.table_ref::<L1>(l1_pa) };
-        for idx in 0..512 {
-            let raw = l1.get_raw(idx);
-            // Block (1G) на этом уровне в user-AS не создаётся (`map` маппит только L3),
-            // фрейм под ним не наш. Invalid/Decode/Page - игнорируем.
-            if let Ok(AnyEntry::Table(te)) = decode::<L1>(raw) {
-                let l2_pa = extract_table_pa(te.raw());
-                // SAFETY: l2_pa получен из валидного Table-дескриптора уровня L1.
-                unsafe { self.free_l2(l2_pa) };
-                let _ = self
-                    .frame_allocator
-                    .deallocate_frame(Frame::containing_address(l2_pa.as_physical_address()));
-            }
-        }
-    }
-
-    /// Освобождает все leaf-страницы под L3-таблицами этого L2 и сами L3-таблицы.
-    ///
-    /// # Safety
-    /// `l2_pa` должен быть PA валидной L2-таблицы; см. `free_user_page_tables`.
-    unsafe fn free_l2(&self, l2_pa: PageAlignedAddress) {
-        // SAFETY: l2_pa получен из валидного Table-дескриптора уровня L1.
-        let l2 = unsafe { self.table_ref::<L2>(l2_pa) };
-        for idx in 0..512 {
-            let raw = l2.get_raw(idx);
-            // Block (2M) на этом уровне в user-AS не создаётся; Invalid/Decode - пропускаем.
-            if let Ok(AnyEntry::Table(te)) = decode::<L2>(raw) {
-                let l3_pa = extract_table_pa(te.raw());
-                // SAFETY: l3_pa получен из валидного L2 Table-дескриптора.
-                unsafe { self.free_l3_leaves(l3_pa) };
-                let _ = self
-                    .frame_allocator
-                    .deallocate_frame(Frame::containing_address(l3_pa.as_physical_address()));
-            }
-        }
-    }
-
-    /// Освобождает все user-data страницы, на которые указывают entries L3-таблицы.
-    ///
-    /// # Safety
-    /// `l3_pa` должен быть PA валидной L3-таблицы; см. `free_user_page_tables`.
-    unsafe fn free_l3_leaves(&self, l3_pa: PageAlignedAddress) {
-        // SAFETY: l3_pa валиден.
-        let l3 = unsafe { self.table_ref::<L3>(l3_pa) };
-        for idx in 0..512 {
-            let raw = l3.get_raw(idx);
-            // L3 page descriptor: биты [1:0] == 0b11 (Page), биты [47:12] = output PA.
-            // `extract_table_pa` использует ту же маску - переиспользуем.
-            if (raw & 0b11) == 0b11 {
-                let page_pa = extract_table_pa(raw);
-                let _ = self
-                    .frame_allocator
-                    .deallocate_frame(Frame::containing_address(page_pa.as_physical_address()));
-            }
-            // Invalid (0b00) - пропускаем. Block на L3 невозможен.
-        }
-    }
-
     /// Заполняет страницу через kernel-VA: зануляет её, затем копирует
     /// срез `init[seg_offset..]` максимум в FRAME_SIZE байт.
     ///
@@ -366,14 +256,6 @@ where
             }
         }
     }
-
-    /// Software-bit в leaf-PTE (бит 55 - software-available по AArch64 ARM):
-    /// установлен -> фрейм был аллоцирован `frame_allocator` этого mapper'а
-    /// (путь [`MemoryMapper::map`]); сброшен -> PA пришёл от вызывающего
-    /// (путь [`MemoryMapper::map_exact`] - MMIO, image, identity).
-    /// `unmap`/`rollback_map` возвращают в FA только страницы с битом -
-    /// MMIO/устройственные PA не попадают в bitmap RAM.
-    const OWNED_BY_FA_BIT: u64 = 1 << 55;
 
     /// Откатывает первые `mapped_pages` страниц диапазона начиная с `va`:
     /// обнуляет PTE, возвращает фрейм аллокатору, инвалидирует TLB.
@@ -406,8 +288,11 @@ where
             };
             // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page;
             // mapper-lock держится этим with_lock - эксклюзивный доступ.
-            let (pa, owned) = unsafe { Self::take_l3_leaf(l3, idx) };
-            if owned {
+            let raw = unsafe { (*l3).get_raw(idx) };
+            // SAFETY: см. выше.
+            unsafe { (*l3).set(idx, Entry::<L3, InvalidEntry>::invalid()) };
+            if raw & OWNED_BY_FA_BIT != 0 {
+                let pa = extract_table_pa(raw);
                 let _ = self
                     .frame_allocator
                     .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
@@ -435,31 +320,48 @@ where
         }
     }
 
-    /// Чистит leaf-PTE по `(l3, idx)`, возвращает `(PA, owned)`: PA - адрес
-    /// фрейма из старой записи; `owned` - был ли установлен `OWNED_BY_FA_BIT`
-    /// (т.е. фрейм когда-то аллоцирован через `frame_allocator`).
-    ///
-    /// Запись обнуляется. Фрейм **не** возвращается аллокатору - решение
-    /// принимает вызывающий, ориентируясь на `owned`. TLB здесь тоже не
-    /// трогается; вызывающий выполняет инвалидацию после изменения PTE.
-    ///
-    /// # Safety
-    /// - `l3` валиден и эксклюзивно доступен (caller держит mapper-lock);
-    /// - `idx < 512`;
-    /// - запись по `idx` имеет desc-type Page (`0b11`).
-    unsafe fn take_l3_leaf(table: *mut PageTable<L3>, idx: usize) -> (PageAlignedAddress, bool) {
-        // SAFETY: см. контракт.
-        let raw = unsafe { (*table).get_raw(idx) };
-        let pa = extract_table_pa(raw);
-        let owned = (raw & Self::OWNED_BY_FA_BIT) != 0;
-        // SAFETY: см. контракт; запись Invalid инвалидирует leaf-дескриптор.
-        unsafe {
-            (*table).set(
-                idx,
-                Entry::<L3, hal_aarch64_paging::entry::Invalid>::invalid(),
-            );
+    /// Инвалидирует TLB для leaf-маппинга уровня `leaf_shift` по `va`.
+    /// 4К/2М идут per-page; 1G - ASID-wide для user, broadcast для kernel.
+    fn invalidate_tlb_leaf(&self, va: usize, leaf_shift: u8) {
+        if leaf_shift == L1::SHIFT {
+            match self.kind {
+                AddressSpaceKind::User => {
+                    let asid = unpack_asid(self.asid_tag.load(Ordering::Acquire));
+                    if asid != 0 {
+                        TranslationLookasideBuffer::<EL1>::invalidate_asid_inner_shareable(asid);
+                    }
+                }
+                AddressSpaceKind::Kernel => {
+                    TranslationLookasideBuffer::<EL1>::invalidate_global_inner_shareable();
+                }
+            }
+            return;
         }
-        (pa, owned)
+        let leaf_size = 1usize << leaf_shift;
+        let mut offset = 0;
+        while offset < leaf_size {
+            self.invalidate_tlb_page(va + offset);
+            offset += PageAlignedAddress::ALIGNMENT;
+        }
+    }
+
+    /// Возвращает фрейм во `frame_allocator`, если PA принадлежит RAM-bitmap'у
+    /// (бит `OWNED_BY_FA_BIT` в leaf-PTE). Map_exact-leaves пропускаются: PA
+    /// пришёл от caller'а (MMIO, image, identity).
+    fn dealloc_owned_leaf(&self, raw: u64) {
+        if raw & OWNED_BY_FA_BIT == 0 {
+            return;
+        }
+        let pa = extract_table_pa(raw);
+        let _ = self
+            .frame_allocator
+            .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
+    }
+
+    fn dealloc_table_pa(&self, pa: PageAlignedAddress) {
+        let _ = self
+            .frame_allocator
+            .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
     }
 
     /// Per-line `ic ivau` по kernel-VA для свежезаписанной exec-страницы.
@@ -524,6 +426,55 @@ where
         Err(MapError::AlreadyMapped) => Err(MemoryMappingError::AlreadyMapped),
         Err(MapError::OutOfMemory) => Err(MemoryMappingError::OutOfMemory),
         Err(_) => Err(MemoryMappingError::VirtualMappingError),
+    }
+}
+
+/// Visitor для `unmap`: TLB-инвалидация + возврат owned-leaf'ов и пустых таблиц.
+struct UnmapPath<'m, 'a, FA, L>
+where
+    FA: FrameAllocator,
+    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
+{
+    mapper: &'m Aarch64MemoryMapper<'a, FA, L>,
+}
+
+impl<'a, FA, L> UnmapVisitor for UnmapPath<'_, 'a, FA, L>
+where
+    FA: FrameAllocator,
+    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
+{
+    fn on_leaf(&mut self, va: PageAlignedVirtualAddress, leaf_shift: u8, raw: u64) {
+        self.mapper.invalidate_tlb_leaf(va.as_usize(), leaf_shift);
+        self.mapper.dealloc_owned_leaf(raw);
+    }
+    fn on_free_table(&mut self, pa: PageAlignedAddress) {
+        self.mapper.dealloc_table_pa(pa);
+    }
+}
+
+/// Visitor для `Drop`: возвращает owned-leaf'ы и все таблицы, без TLB.
+/// `had_mappings` решает, отдавать ли root-фрейм.
+struct DropPath<'a, FA: FrameAllocator> {
+    frame_allocator: &'a FA,
+    had_mappings: bool,
+}
+
+impl<FA: FrameAllocator> UnmapVisitor for DropPath<'_, FA> {
+    fn on_leaf(&mut self, _va: PageAlignedVirtualAddress, _leaf_shift: u8, raw: u64) {
+        self.had_mappings = true;
+        if raw & OWNED_BY_FA_BIT == 0 {
+            return;
+        }
+        let pa = extract_table_pa(raw);
+        let _ = self
+            .frame_allocator
+            .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
+    }
+    fn on_free_table(&mut self, pa: PageAlignedAddress) {
+        self.had_mappings = true;
+        let _ = self
+            .frame_allocator
+            .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
     }
 }
 
@@ -600,7 +551,7 @@ where
                 // mapper-lock держится этим with_lock - эксклюзивный доступ.
                 unsafe {
                     let raw = (*l3).get_raw(idx);
-                    (*l3).set_raw(idx, raw | Self::OWNED_BY_FA_BIT);
+                    (*l3).set_raw(idx, raw | OWNED_BY_FA_BIT);
                 }
 
                 if user_exec {
@@ -648,33 +599,19 @@ where
             return Err(MemoryUnmappingError::MisalignedRange);
         }
 
-        // TODO: освобождать пустые промежуточные L1/L2/L3-таблицы, когда
-        // последняя их leaf-запись уходит. Пока они утекают до Drop AS - это
-        // безопасно, но даёт неоптимальный peak-footprint.
-        self.mapper.with_lock(|mapper| {
-            let mut va = address.as_virtual();
-            let mut left = size;
-            while left != 0 {
-                let page = PageAlignedVirtualAddress::new_unchecked(va);
-                let (l3, idx) = mapper
-                    .walk_to_l3_leaf(page)
-                    .map_err(|e| walk_to_unmap_err(&e))?;
-                // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page;
-                // mapper-lock держится этим with_lock - эксклюзивный доступ.
-                let (pa, owned) = unsafe { Self::take_l3_leaf(l3, idx) };
-                // map_exact-страницы (caller-supplied PA - MMIO, image, identity)
-                // не возвращаем во FrameAllocator: PA не принадлежит RAM-bitmap'у,
-                // deallocate либо корруптит bitmap, либо тихо ошибётся.
-                if owned {
-                    let _ = self
-                        .frame_allocator
-                        .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
-                }
-                self.invalidate_tlb_page(page.as_usize());
-                va = va.offset(page_size);
-                left -= page_size;
+        self.mapper.with_lock(|mapper_inner| {
+            let mut visitor = UnmapPath { mapper: self };
+            // SAFETY: mapper-lock держится этим with_lock.
+            unsafe {
+                unmap_range(
+                    mapper_inner.root_ptr(),
+                    mapper_inner.alloc(),
+                    address.as_usize(),
+                    size,
+                    &mut visitor,
+                )
             }
-            Ok::<(), MemoryUnmappingError>(())
+            .map_err(|e| unmap_to_unmap_err(&e))
         })
     }
 
@@ -754,17 +691,36 @@ where
     L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 {
     fn drop(&mut self) {
-        // Page-table walk для user-AS: рекурсивно обходим L0..L3 и возвращаем
-        // в frame-аллокатор все user-data страницы (leaf-entries L3) +
-        // intermediate tables (L1/L2/L3) + root.
-        // Kernel-AS использует общий root и таблицы, выделенные глобально, -
-        // освобождать их при Drop kernel-mapper-а нельзя.
-        if matches!(self.kind, AddressSpaceKind::User) {
-            // SAFETY: Drop вызывается, когда последний владелец AS сброшен -
-            // ни один поток не использует эти таблицы. TTBR0 на этот root
-            // больше не указывает (scheduler переключил CPU до cleanup-а),
-            // `vaddr_offset` валиден на всё время жизни ядра.
-            unsafe { self.free_user_page_tables() };
+        // Kernel-AS использует общий root и глобальные таблицы; их при Drop
+        // не освобождаем.
+        if !matches!(self.kind, AddressSpaceKind::User) {
+            return;
+        }
+        let mut visitor = DropPath {
+            frame_allocator: self.frame_allocator,
+            had_mappings: false,
+        };
+        self.mapper.with_lock(|mapper_inner| {
+            // SAFETY: AS больше не используется (scheduler переключил CPU до
+            // cleanup'а), TTBR0 на root не указывает.
+            unsafe {
+                free_all(
+                    mapper_inner.root_ptr(),
+                    mapper_inner.alloc(),
+                    /* high_half = */ false,
+                    &mut visitor,
+                );
+            }
+        });
+        // Root возвращаем только если AS реально использовался. Пустой user-AS
+        // встречается в юнит-кейсах `AddressSpace::new_user` без последующего
+        // `map`; одинокий root в bitmap'е создаёт дырку, на которой текущий
+        // heap-аллокатор валится в OOM при aligned-expand. Для реального
+        // user-process этот путь всегда видит маппинги.
+        if visitor.had_mappings {
+            let _ = self
+                .frame_allocator
+                .deallocate_frame(Frame::containing_address(self.root_pa));
         }
     }
 }
@@ -778,9 +734,10 @@ fn walk_to_remap_err(err: &WalkError) -> MemoryRemappingError {
     }
 }
 
-fn walk_to_unmap_err(err: &WalkError) -> MemoryUnmappingError {
+fn unmap_to_unmap_err(err: &UnmapError) -> MemoryUnmappingError {
     match err {
-        WalkError::HitBlock => MemoryUnmappingError::UnsupportedBlockMapping,
-        WalkError::NotMapped | WalkError::Decode(_) => MemoryUnmappingError::NotMapped,
+        // Corrupt дескриптор для caller'а семантически = "не замаплено".
+        UnmapError::NotMapped | UnmapError::Decode(_) => MemoryUnmappingError::NotMapped,
+        UnmapError::UnsupportedPartialBlock => MemoryUnmappingError::UnsupportedBlockMapping,
     }
 }

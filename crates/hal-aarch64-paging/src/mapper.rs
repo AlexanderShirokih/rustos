@@ -6,7 +6,9 @@ use memory::{
 };
 
 use crate::{
-    entry::{AnyEntry, Block, CanTable, DecodeBlock, DecodeError, Entry, Page, Table, decode},
+    entry::{
+        AnyEntry, Block, CanTable, DecodeBlock, DecodeError, Entry, Invalid, Page, Table, decode,
+    },
     level::{L0, L1, L1BlockPa, L2, L2BlockPa, L3, Level, PagePa},
     mem_flags::Aarch64MemFlags,
     page_table::PageTable,
@@ -136,6 +138,16 @@ impl<A: TableAlloc> PageMapper<A> {
     #[inline]
     fn l0_ptr(&self) -> *mut PageTable<L0> {
         self.root
+    }
+
+    #[inline]
+    pub fn root_ptr(&self) -> *mut PageTable<L0> {
+        self.root
+    }
+
+    #[inline]
+    pub fn alloc(&self) -> &A {
+        &self.alloc
     }
 
     /// Создаёт маппинг виртуального адреса на физический.
@@ -345,4 +357,410 @@ pub unsafe fn update_l3_flags(
     // SAFETY: см. контракт.
     unsafe { (*table).set(idx, entry) };
     Ok(())
+}
+
+/// Колбэки для путей `unmap_range` и `free_all`.
+pub trait UnmapVisitor {
+    /// Снятая leaf-запись по `va` уровня `leaf_shift`
+    /// (`L3::SHIFT`/`L2::SHIFT`/`L1::SHIFT`); `raw` - старое значение PTE.
+    fn on_leaf(&mut self, va: PageAlignedVirtualAddress, leaf_shift: u8, raw: u64);
+    /// Опустевшая дочерняя таблица.
+    fn on_free_table(&mut self, pa: PageAlignedAddress);
+}
+
+/// Ошибки `unmap_range`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UnmapError {
+    /// Invalid-запись внутри запрошенного диапазона.
+    NotMapped,
+    /// Диапазон частично пересекает block-leaf; split не поддерживается.
+    UnsupportedPartialBlock,
+    /// Невалидный дескриптор.
+    Decode(DecodeError),
+}
+
+/// Sign-extension bits 48..63 канонической AArch64 VA.
+const HIGH_HALF_MASK: usize = 0xFFFF_0000_0000_0000;
+
+/// Снимает leaf-записи в `[va, va + size)`. Опустевшие L1/L2/L3
+/// возвращаются через `visitor.on_free_table`. Block-leaf снимается
+/// только целиком; partial -> [`UnmapError::UnsupportedPartialBlock`].
+///
+/// # Safety
+/// `root` валиден, `alloc.table_ptr` транслирует PA->VA для всех subtree,
+/// caller держит эксклюзивный доступ к таблицам.
+pub unsafe fn unmap_range<A, V>(
+    root: *mut PageTable<L0>,
+    alloc: &A,
+    va: usize,
+    size: usize,
+    visitor: &mut V,
+) -> Result<(), UnmapError>
+where
+    A: TableAlloc,
+    V: UnmapVisitor + ?Sized,
+{
+    if size == 0 {
+        return Ok(());
+    }
+    let canonical_top = va & HIGH_HALF_MASK;
+    let range_last = va + (size - 1);
+    // SAFETY: см. контракт.
+    let _ = unsafe { L0::unmap_subtree(root, alloc, canonical_top, va, range_last, visitor)? };
+    Ok(())
+}
+
+/// Полный обход дерева для Drop AS: `on_leaf` на каждый leaf, `on_free_table`
+/// на каждую L1/L2/L3. Root в callback не идёт - решение про него за caller'ом.
+/// Invalid и corrupt-дескрипторы пропускаются.
+///
+/// # Safety
+/// см. [`unmap_range`]; AS не активен ни на одном CPU.
+pub unsafe fn free_all<A, V>(root: *mut PageTable<L0>, alloc: &A, high_half: bool, visitor: &mut V)
+where
+    A: TableAlloc,
+    V: UnmapVisitor + ?Sized,
+{
+    let canonical_top = if high_half { HIGH_HALF_MASK } else { 0 };
+    // SAFETY: см. контракт.
+    unsafe { L0::free_subtree(root, alloc, canonical_top, visitor) };
+}
+
+/// Per-level dispatch для `unmap_range`/`free_all`. L0/L1/L2 делегируют в
+/// `descend_unmap`/`descend_free`; L3 - терминал.
+trait UnmapWalk: Level + Sized {
+    /// Снимает leaf-записи в `[range_start, range_end)` внутри subtree
+    /// `[table_va_base, table_va_base + 512 << SHIFT)`. Возвращает `true`,
+    /// если таблица стала пустой.
+    ///
+    /// # Safety
+    /// см. [`unmap_range`].
+    unsafe fn unmap_subtree<A, V>(
+        table: *mut PageTable<Self>,
+        alloc: &A,
+        table_va_base: usize,
+        range_start: usize,
+        range_last: usize,
+        visitor: &mut V,
+    ) -> Result<bool, UnmapError>
+    where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized;
+
+    /// Полный обход subtree без проверок диапазона.
+    ///
+    /// # Safety
+    /// см. [`free_all`].
+    unsafe fn free_subtree<A, V>(
+        table: *mut PageTable<Self>,
+        alloc: &A,
+        table_va_base: usize,
+        visitor: &mut V,
+    ) where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized;
+}
+
+impl UnmapWalk for L0 {
+    unsafe fn unmap_subtree<A, V>(
+        table: *mut PageTable<L0>,
+        alloc: &A,
+        table_va_base: usize,
+        range_start: usize,
+        range_last: usize,
+        visitor: &mut V,
+    ) -> Result<bool, UnmapError>
+    where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized,
+    {
+        // SAFETY: контракт прокидывается из caller'а.
+        unsafe {
+            descend_unmap::<L0, L1, A, V>(
+                table,
+                alloc,
+                table_va_base,
+                range_start,
+                range_last,
+                visitor,
+            )
+        }
+    }
+    unsafe fn free_subtree<A, V>(
+        table: *mut PageTable<L0>,
+        alloc: &A,
+        table_va_base: usize,
+        visitor: &mut V,
+    ) where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized,
+    {
+        // SAFETY: см. caller.
+        unsafe { descend_free::<L0, L1, A, V>(table, alloc, table_va_base, visitor) }
+    }
+}
+
+impl UnmapWalk for L1 {
+    unsafe fn unmap_subtree<A, V>(
+        table: *mut PageTable<L1>,
+        alloc: &A,
+        table_va_base: usize,
+        range_start: usize,
+        range_last: usize,
+        visitor: &mut V,
+    ) -> Result<bool, UnmapError>
+    where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized,
+    {
+        // SAFETY: см. caller.
+        unsafe {
+            descend_unmap::<L1, L2, A, V>(
+                table,
+                alloc,
+                table_va_base,
+                range_start,
+                range_last,
+                visitor,
+            )
+        }
+    }
+    unsafe fn free_subtree<A, V>(
+        table: *mut PageTable<L1>,
+        alloc: &A,
+        table_va_base: usize,
+        visitor: &mut V,
+    ) where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized,
+    {
+        // SAFETY: см. caller.
+        unsafe { descend_free::<L1, L2, A, V>(table, alloc, table_va_base, visitor) }
+    }
+}
+
+impl UnmapWalk for L2 {
+    unsafe fn unmap_subtree<A, V>(
+        table: *mut PageTable<L2>,
+        alloc: &A,
+        table_va_base: usize,
+        range_start: usize,
+        range_last: usize,
+        visitor: &mut V,
+    ) -> Result<bool, UnmapError>
+    where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized,
+    {
+        // SAFETY: см. caller.
+        unsafe {
+            descend_unmap::<L2, L3, A, V>(
+                table,
+                alloc,
+                table_va_base,
+                range_start,
+                range_last,
+                visitor,
+            )
+        }
+    }
+    unsafe fn free_subtree<A, V>(
+        table: *mut PageTable<L2>,
+        alloc: &A,
+        table_va_base: usize,
+        visitor: &mut V,
+    ) where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized,
+    {
+        // SAFETY: см. caller.
+        unsafe { descend_free::<L2, L3, A, V>(table, alloc, table_va_base, visitor) }
+    }
+}
+
+impl UnmapWalk for L3 {
+    unsafe fn unmap_subtree<A, V>(
+        table: *mut PageTable<L3>,
+        _alloc: &A,
+        table_va_base: usize,
+        range_start: usize,
+        range_last: usize,
+        visitor: &mut V,
+    ) -> Result<bool, UnmapError>
+    where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized,
+    {
+        let (first, last) = idx_range::<L3>(range_start, range_last);
+        for idx in first..last {
+            let entry_va = leaf_va(entry_va_at::<L3>(table_va_base, idx));
+            // SAFETY: idx in [0, 512), table валиден (caller-lock).
+            let raw = unsafe { (*table).get_raw(idx) };
+            // L3: только Page (0b11) или Invalid (0b00); Block невозможен.
+            match raw & 0b11 {
+                0b00 => return Err(UnmapError::NotMapped),
+                0b11 => {
+                    visitor.on_leaf(entry_va, L3::SHIFT, raw);
+                    // SAFETY: caller-lock; idx валиден.
+                    unsafe { (*table).set(idx, Entry::<L3, Invalid>::invalid()) };
+                }
+                _ => return Err(UnmapError::Decode(DecodeError::Reserved)),
+            }
+        }
+        // SAFETY: caller-lock.
+        Ok(unsafe { table_is_empty::<L3>(table) })
+    }
+
+    unsafe fn free_subtree<A, V>(
+        table: *mut PageTable<L3>,
+        _alloc: &A,
+        table_va_base: usize,
+        visitor: &mut V,
+    ) where
+        A: TableAlloc,
+        V: UnmapVisitor + ?Sized,
+    {
+        for idx in 0..512 {
+            // SAFETY: caller-lock.
+            let raw = unsafe { (*table).get_raw(idx) };
+            if raw & 0b11 == 0b11 {
+                visitor.on_leaf(
+                    leaf_va(entry_va_at::<L3>(table_va_base, idx)),
+                    L3::SHIFT,
+                    raw,
+                );
+            }
+        }
+    }
+}
+
+/// Нисходящий обход для L0/L1/L2.
+///
+/// # Safety
+/// см. [`unmap_range`].
+unsafe fn descend_unmap<Parent, Child, A, V>(
+    table: *mut PageTable<Parent>,
+    alloc: &A,
+    table_va_base: usize,
+    range_start: usize,
+    range_last: usize,
+    visitor: &mut V,
+) -> Result<bool, UnmapError>
+where
+    Parent: Level + CanTable + DecodeBlock,
+    Child: UnmapWalk,
+    A: TableAlloc,
+    V: UnmapVisitor + ?Sized,
+{
+    let entry_size = 1usize << Parent::SHIFT;
+    let (first, last) = idx_range::<Parent>(range_start, range_last);
+    for idx in first..last {
+        let entry_va = entry_va_at::<Parent>(table_va_base, idx);
+        let entry_last = entry_va + (entry_size - 1);
+        // SAFETY: idx in [0, 512), table валиден (caller-lock).
+        let raw = unsafe { (*table).get_raw(idx) };
+        match decode::<Parent>(raw).map_err(UnmapError::Decode)? {
+            AnyEntry::Invalid(_) => return Err(UnmapError::NotMapped),
+            AnyEntry::Block(_) => {
+                if entry_va < range_start || entry_last > range_last {
+                    return Err(UnmapError::UnsupportedPartialBlock);
+                }
+                visitor.on_leaf(leaf_va(entry_va), Parent::SHIFT, raw);
+                // SAFETY: caller-lock.
+                unsafe { (*table).set(idx, Entry::<Parent, Invalid>::invalid()) };
+            }
+            AnyEntry::Table(te) => {
+                let child_pa = extract_table_pa(te.raw());
+                // SAFETY: child_pa из валидного Table-дескриптора Parent.
+                let child = unsafe { alloc.table_ptr::<Child>(child_pa, entry_va) };
+                let sub_start = range_start.max(entry_va);
+                let sub_last = range_last.min(entry_last);
+                // SAFETY: child получен через alloc.table_ptr; caller-lock.
+                let now_empty = unsafe {
+                    Child::unmap_subtree(child, alloc, entry_va, sub_start, sub_last, visitor)?
+                };
+                if now_empty {
+                    // SAFETY: caller-lock.
+                    unsafe { (*table).set(idx, Entry::<Parent, Invalid>::invalid()) };
+                    visitor.on_free_table(child_pa);
+                }
+            }
+            // L0/L1/L2 не имеют Page; corrupt дескриптор - сообщаем Decode.
+            AnyEntry::Page(_) => return Err(UnmapError::Decode(DecodeError::WrongKind)),
+        }
+    }
+    // SAFETY: caller-lock.
+    Ok(unsafe { table_is_empty::<Parent>(table) })
+}
+
+/// Полный обход subtree уровня-родителя (L0/L1/L2). Decode-ошибки и
+/// неожиданные Page пропускаются.
+///
+/// # Safety
+/// см. [`free_all`].
+unsafe fn descend_free<Parent, Child, A, V>(
+    table: *mut PageTable<Parent>,
+    alloc: &A,
+    table_va_base: usize,
+    visitor: &mut V,
+) where
+    Parent: Level + CanTable + DecodeBlock,
+    Child: UnmapWalk,
+    A: TableAlloc,
+    V: UnmapVisitor + ?Sized,
+{
+    for idx in 0..512 {
+        let entry_va = entry_va_at::<Parent>(table_va_base, idx);
+        // SAFETY: caller-lock.
+        let raw = unsafe { (*table).get_raw(idx) };
+        let Ok(entry) = decode::<Parent>(raw) else {
+            continue;
+        };
+        match entry {
+            AnyEntry::Invalid(_) | AnyEntry::Page(_) => (),
+            AnyEntry::Block(_) => visitor.on_leaf(leaf_va(entry_va), Parent::SHIFT, raw),
+            AnyEntry::Table(te) => {
+                let child_pa = extract_table_pa(te.raw());
+                // SAFETY: child_pa из валидного Table-дескриптора Parent.
+                let child = unsafe { alloc.table_ptr::<Child>(child_pa, entry_va) };
+                // SAFETY: см. caller.
+                unsafe { Child::free_subtree(child, alloc, entry_va, visitor) };
+                visitor.on_free_table(child_pa);
+            }
+        }
+    }
+}
+
+#[inline]
+fn leaf_va(va: usize) -> PageAlignedVirtualAddress {
+    PageAlignedVirtualAddress::from_usize(va).expect("leaf VA must be 4K-aligned")
+}
+
+#[inline]
+fn idx_at<L: Level>(va: usize) -> usize {
+    (va >> L::SHIFT) & 0x1FF
+}
+
+#[inline]
+fn idx_range<L: Level>(range_start: usize, range_last: usize) -> (usize, usize) {
+    let first = idx_at::<L>(range_start);
+    let last_inc = idx_at::<L>(range_last);
+    (first, last_inc + 1)
+}
+
+#[inline]
+fn entry_va_at<L: Level>(table_va_base: usize, idx: usize) -> usize {
+    table_va_base | (idx << L::SHIFT)
+}
+
+/// Все 512 entries имеют desc-type 0b00 (Invalid).
+///
+/// # Safety
+/// `table` валиден; caller владеет эксклюзивным доступом.
+#[allow(clippy::verbose_bit_mask)]
+unsafe fn table_is_empty<L: Level>(table: *mut PageTable<L>) -> bool {
+    (0..512).all(|idx| {
+        // SAFETY: см. контракт.
+        unsafe { (*table).get_raw(idx) & 0b11 == 0 }
+    })
 }

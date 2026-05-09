@@ -13,16 +13,21 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicIsize, Ordering};
+use core::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
 use collections::MutexCell;
-use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable};
+use hal_aarch64_paging::{
+    level::{L0, L1, L2, L3, Level},
+    mapper::PageMapper,
+    page_table::PageTable,
+};
 use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
     frame::Frame,
     frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
     memory_mapper::{MemoryMapper, MemoryMappingError, MemoryUnmappingError},
+    physical_address::PageAlignedAddress,
     virtual_address::PageAlignedVirtualAddress,
 };
 use scheduler::AddressSpace;
@@ -55,7 +60,9 @@ type CappedMapper<'a> = Aarch64MemoryMapper<
     MutexCell<PageMapper<FrameTableAlloc<'a, CappedAllocator<'a, FrameAllocatorImpl>>>>,
 >;
 
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = 1usize << L3::SHIFT;
+const L2_BLOCK_SIZE: usize = 1usize << L2::SHIFT;
+const L1_BLOCK_SIZE: usize = 1usize << L1::SHIFT;
 
 /// Lower-half VA, не пересекающаяся с другими user-AS-тестами.
 const PROBE_BASE: usize = 0x6000_0000;
@@ -68,6 +75,10 @@ fn make_user_as() -> Arc<AddressSpace> {
 
 fn va(addr: usize) -> PageAlignedVirtualAddress {
     PageAlignedVirtualAddress::from_usize(addr).expect("aligned VA")
+}
+
+fn pa(addr: usize) -> PageAlignedAddress {
+    PageAlignedAddress::from_usize(addr).expect("aligned PA")
 }
 
 /// `map -> unmap -> query_leaf_raw` должен показать, что leaf-PTE обнулены.
@@ -172,6 +183,133 @@ fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
     let _ = real_fa.deallocate_frame(sentinel);
 }
 
+/// Создаёт mapper над `CappedAllocator` для тестов, замеряющих outstanding-счётчик.
+/// Возвращает `(mapper, capped, root_frame)` - root-фрейм должен быть вручную
+/// возвращён в FA после теста, чтобы не фрагментировать bitmap (Box::leak'нутый
+/// mapper никогда не дропается, а его DropPath срабатывает только если
+/// `had_mappings == true`).
+fn build_capped_mapper() -> (
+    &'static CappedMapper<'static>,
+    &'static CappedAllocator<'static, FrameAllocatorImpl>,
+    Frame,
+) {
+    let real_fa: &'static FrameAllocatorImpl = qemu_test_frame_allocator();
+    let root_frame = real_fa.allocate_frame().expect("root frame");
+    let root_ptr = (root_frame.page_address().as_usize() + HIGHER_HALF_BASE) as *mut PageTable<L0>;
+    // SAFETY: свежевыделенный фрейм через higher-half-карту.
+    unsafe { root_ptr.write(PageTable::<L0>::new()) };
+
+    let capped: &'static CappedAllocator<'static, FrameAllocatorImpl> = alloc::boxed::Box::leak(
+        alloc::boxed::Box::new(CappedAllocator::new(real_fa, isize::MAX)),
+    );
+    let mapper: &'static CappedMapper<'static> = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+        Aarch64MemoryMapper::new_with_offset(
+            capped,
+            root_ptr,
+            HIGHER_HALF_BASE,
+            AddressSpaceKind::User,
+        ),
+    ));
+    (mapper, capped, root_frame)
+}
+
+/// `unmap` последней 4K leaf-записи возвращает leaf и все промежуточные L1/L2/L3.
+fn mapper_unmap_releases_empty_tables() {
+    let (mapper, capped, root_frame) = build_capped_mapper();
+    let baseline = capped.outstanding();
+
+    let base = va(PROBE_BASE + 0x60_0000);
+    mapper
+        .map(base, 1, &[], MemFlags::user_rw())
+        .expect("initial map");
+    // leaf + L1 + L2 + L3 = 4.
+    test_harness_qemu::kassert!(capped.outstanding() == baseline + 4);
+
+    mapper.unmap(base, PAGE_SIZE).expect("unmap last page");
+    test_harness_qemu::kassert!(capped.outstanding() == baseline);
+
+    let _ = qemu_test_frame_allocator().deallocate_frame(root_frame);
+}
+
+/// Partial unmap внутри L2 block-leaf отбивается без модификации таблиц.
+fn mapper_unmap_partial_block_rejected() {
+    let (mapper, capped, root_frame) = build_capped_mapper();
+
+    let base = va(0x9000_0000);
+    let phys = pa(0x6000_0000);
+    mapper
+        .map_exact(base, phys, L2_BLOCK_SIZE, MemFlags::user_rw())
+        .expect("map_exact 2M block");
+    let after_map = capped.outstanding();
+
+    // 4К внутри 2М-блока.
+    let inside = va(base.as_usize() + PAGE_SIZE);
+    let err = mapper
+        .unmap(inside, PAGE_SIZE)
+        .expect_err("partial unmap inside block must reject");
+    test_harness_qemu::kassert!(matches!(err, MemoryUnmappingError::UnsupportedBlockMapping));
+    test_harness_qemu::kassert!(capped.outstanding() == after_map);
+
+    // Aligned start, но size < block.
+    let err = mapper
+        .unmap(base, PAGE_SIZE)
+        .expect_err("aligned-start short unmap inside block must reject");
+    test_harness_qemu::kassert!(matches!(err, MemoryUnmappingError::UnsupportedBlockMapping));
+    test_harness_qemu::kassert!(capped.outstanding() == after_map);
+
+    mapper
+        .unmap(base, L2_BLOCK_SIZE)
+        .expect("whole-block unmap must succeed after partial reject");
+
+    let _ = qemu_test_frame_allocator().deallocate_frame(root_frame);
+}
+
+/// `map_exact` может поставить L2 block descriptor; exact unmap всего блока
+/// должен снять его без split и разрешить повторный map_exact.
+fn mapper_unmap_l2_block_then_remap() {
+    let user_as = make_user_as();
+    let mapper = user_as.mapper().expect("user variant has mapper");
+    let base = va(0x7000_0000);
+    let phys = pa(0x2000_0000);
+
+    mapper
+        .map_exact(base, phys, L2_BLOCK_SIZE, MemFlags::user_rw())
+        .expect("map_exact 2M block");
+
+    mapper
+        .unmap(base, L2_BLOCK_SIZE)
+        .expect("unmap exact 2M block");
+
+    mapper
+        .map_exact(base, phys, L2_BLOCK_SIZE, MemFlags::user_ro())
+        .expect("re-map after 2M block unmap");
+
+    mapper.unmap(base, L2_BLOCK_SIZE).expect("cleanup 2M block");
+}
+
+/// Аналогично для L1 block descriptor: exact 1G block unmap снимает leaf без
+/// выделения/split-а нижних таблиц.
+fn mapper_unmap_l1_block_then_remap() {
+    let user_as = make_user_as();
+    let mapper = user_as.mapper().expect("user variant has mapper");
+    let base = va(0x8000_0000);
+    let phys = pa(0x4000_0000);
+
+    mapper
+        .map_exact(base, phys, L1_BLOCK_SIZE, MemFlags::user_rw())
+        .expect("map_exact 1G block");
+
+    mapper
+        .unmap(base, L1_BLOCK_SIZE)
+        .expect("unmap exact 1G block");
+
+    mapper
+        .map_exact(base, phys, L1_BLOCK_SIZE, MemFlags::user_ro())
+        .expect("re-map after 1G block unmap");
+
+    mapper.unmap(base, L1_BLOCK_SIZE).expect("cleanup 1G block");
+}
+
 /// `unmap` с size, не кратным странице, отбивается типом ошибки до любых
 /// модификаций таблиц.
 fn mapper_unmap_misaligned_size_rejected() {
@@ -193,12 +331,13 @@ fn mapper_unmap_misaligned_size_rejected() {
     mapper.unmap(base, PAGE_SIZE).expect("cleanup unmap");
 }
 
-/// Обёртка над настоящим `FrameAllocator` с лимитом на количество allocate'ов.
-/// остальные методы делегируются - в частности, `deallocate_frame` пропускает
-/// освобождение в реальный bitmap, чтобы фреймы корректно вернулись после Drop.
+/// Обёртка над настоящим `FrameAllocator` с лимитом на allocate'ы и
+/// счётчиком outstanding (allocated - deallocated). `outstanding == 0`
+/// после `map`/`unmap` означает, что mapper честно вернул все фреймы.
 struct CappedAllocator<'a, FA: FrameAllocator> {
     inner: &'a FA,
     remaining: AtomicIsize,
+    outstanding: AtomicUsize,
 }
 
 impl<'a, FA: FrameAllocator> CappedAllocator<'a, FA> {
@@ -206,7 +345,11 @@ impl<'a, FA: FrameAllocator> CappedAllocator<'a, FA> {
         Self {
             inner,
             remaining: AtomicIsize::new(limit),
+            outstanding: AtomicUsize::new(0),
         }
+    }
+    fn outstanding(&self) -> usize {
+        self.outstanding.load(Ordering::SeqCst)
     }
 }
 
@@ -218,14 +361,20 @@ impl<FA: FrameAllocator> FrameAllocator for CappedAllocator<'_, FA> {
         if self.remaining.fetch_sub(1, Ordering::SeqCst) <= 0 {
             return None;
         }
-        self.inner.allocate_frame()
+        let frame = self.inner.allocate_frame()?;
+        self.outstanding.fetch_add(1, Ordering::SeqCst);
+        Some(frame)
     }
     fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)> {
         // На пути `Aarch64MemoryMapper::map` не вызывается, делегируем без декремента.
         self.inner.allocate_frames(max_count)
     }
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {
-        self.inner.deallocate_frame(frame)
+        let r = self.inner.deallocate_frame(frame);
+        if r.is_ok() {
+            self.outstanding.fetch_sub(1, Ordering::SeqCst);
+        }
+        r
     }
     fn is_allocated(&self, frame: Frame) -> bool {
         self.inner.is_allocated(frame)
@@ -308,6 +457,26 @@ register_test!(
     MAPPER_UNMAP_AFTER_MAP_EXACT_KEEPS_FRAME,
     "mapper_unmap_after_map_exact_keeps_frame_allocated",
     mapper_unmap_after_map_exact_keeps_frame_allocated
+);
+register_test!(
+    MAPPER_UNMAP_RELEASES_EMPTY_TABLES,
+    "mapper_unmap_releases_empty_tables",
+    mapper_unmap_releases_empty_tables
+);
+register_test!(
+    MAPPER_UNMAP_PARTIAL_BLOCK_REJECTED,
+    "mapper_unmap_partial_block_rejected",
+    mapper_unmap_partial_block_rejected
+);
+register_test!(
+    MAPPER_UNMAP_L2_BLOCK_THEN_REMAP,
+    "mapper_unmap_l2_block_then_remap",
+    mapper_unmap_l2_block_then_remap
+);
+register_test!(
+    MAPPER_UNMAP_L1_BLOCK_THEN_REMAP,
+    "mapper_unmap_l1_block_then_remap",
+    mapper_unmap_l1_block_then_remap
 );
 register_test!(
     MAPPER_MAP_PARTIAL_OOM_ROLLBACK,
