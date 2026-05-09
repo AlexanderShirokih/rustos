@@ -152,8 +152,7 @@ fn deallocate_same_frame_twice_returns_not_allocated() {
     let err = allocator.deallocate_frame(frame).unwrap_err();
     assert!(
         matches!(err, FrameError::NotAllocated),
-        "expected NotAllocated, got {:?}",
-        err
+        "expected NotAllocated, got {err:?}"
     );
 }
 
@@ -167,8 +166,7 @@ fn deallocate_never_allocated_frame_returns_not_allocated() {
 
     assert!(
         matches!(err, FrameError::NotAllocated),
-        "expected NotAllocated for never-allocated frame, got {:?}",
-        err
+        "expected NotAllocated for never-allocated frame, got {err:?}"
     );
 }
 
@@ -298,8 +296,7 @@ fn reserve_in_second_region_works() {
     for i in 104..108 {
         assert!(
             !allocated.contains(&i),
-            "reserved frame {} should not be allocated",
-            i
+            "reserved frame {i} should not be allocated"
         );
     }
 
@@ -353,8 +350,7 @@ fn allocate_frames_returns_less_when_not_enough() {
     // Должно вернуть максимум 9 (10 - зарезервированный фрейм 0)
     assert!(
         count <= 9,
-        "should return at most 9 frames (10 - reserved frame 0), got {}",
-        count
+        "should return at most 9 frames (10 - reserved frame 0), got {count}"
     );
     assert!(count > 0, "should return at least some frames");
 
@@ -429,7 +425,7 @@ fn deallocate_frame_outside_regions_returns_out_of_range() {
     assert!(result.is_err(), "deallocate outside regions should fail");
     match result.unwrap_err() {
         FrameError::OutOfRange => {}
-        err => panic!("expected OutOfRange, got {:?}", err),
+        err @ FrameError::NotAllocated => panic!("expected OutOfRange, got {err:?}"),
     }
 }
 

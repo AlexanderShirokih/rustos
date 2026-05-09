@@ -13,6 +13,7 @@ use crate::common::{
 };
 
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
+type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
 
 const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 16);
 const SMALL_CONFIG: SchedulerConfig = SchedulerConfig::new(4, 8);
@@ -136,7 +137,6 @@ fn time_slice_decrement_triggers_preemption() {
 #[test]
 fn invalid_priority_returns_error() {
     let timer = MockTimer::new();
-    type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
     let scheduler = SmallScheduler::new(MockTimerSource(timer), SMALL_CONFIG).bootstrap();
     let err = scheduler
         .spawn(SpawnConfig::new("bad").priority(Priority::new(10)), || {})
@@ -148,7 +148,6 @@ fn invalid_priority_returns_error() {
 fn small_prio_scheduler_works_with_low_idle_priority() {
     reset_switches();
     let timer = MockTimer::new();
-    type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
     let scheduler = SmallScheduler::new(MockTimerSource(timer.clone()), SMALL_CONFIG).bootstrap();
     let task = scheduler
         .spawn(SpawnConfig::new("task").priority(Priority::new(1)), || {})
@@ -202,8 +201,7 @@ fn sleep_queue_orders_multiple_sleepers_by_deadline() {
     let after_second_tick = running.current();
     assert!(
         after_second_tick == runner || after_second_tick == early || after_second_tick == late,
-        "after wake of `early` scheduler must run a real (non-idle) thread, got {:?}",
-        after_second_tick
+        "after wake of `early` scheduler must run a real (non-idle) thread, got {after_second_tick:?}"
     );
 }
 
@@ -212,7 +210,6 @@ fn exit_current_releases_thread_slot_for_next_spawn() {
     use scheduler::SchedulerService;
     reset_switches();
     let timer = MockTimer::new();
-    type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
     // 1 idle + 3 spawned заполнят все 4 слота.
     let scheduler =
         SmallScheduler::new(MockTimerSource(timer.clone()), SchedulerConfig::new(32, 4))
@@ -345,8 +342,7 @@ fn switch_between_threads_of_different_processes_changes_address_space() {
             sw,
             Some(handle) if handle.root.as_usize() == user_b_root
         )),
-        "expected switch to user-b root, got {:?}",
-        after_yield
+        "expected switch to user-b root, got {after_yield:?}"
     );
 }
 
@@ -367,9 +363,8 @@ fn kernel_to_user_switch_writes_user_root() {
     let _running = scheduler.run();
     let switches = take_address_space_switches();
     assert!(
-        switches.iter().any(|sw| sw.is_some()),
-        "kernel->user switch must include Some(root); got {:?}",
-        switches
+        switches.iter().any(Option::is_some),
+        "kernel->user switch must include Some(root); got {switches:?}"
     );
 }
 
@@ -396,9 +391,8 @@ fn user_to_kernel_switch_writes_zero_root() {
     running.yield_now();
     let switches = take_address_space_switches();
     assert!(
-        switches.iter().any(|sw| sw == &None),
-        "user->kernel switch must include None; got {:?}",
-        switches
+        switches.iter().any(Option::is_none),
+        "user->kernel switch must include None; got {switches:?}"
     );
 }
 

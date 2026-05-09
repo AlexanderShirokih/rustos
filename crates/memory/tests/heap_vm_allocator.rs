@@ -254,8 +254,7 @@ fn allocate_returns_aligned_pointer() {
         assert_eq!(
             ptr.as_ptr() as usize % align,
             0,
-            "pointer should be aligned to {} bytes",
-            align
+            "pointer should be aligned to {align} bytes"
         );
     }
 }
@@ -282,7 +281,8 @@ fn allocated_memory_is_writable() {
     let layout = Layout::from_size_align(128, 8).unwrap();
     let ptr = allocator.allocate(layout).unwrap();
 
-    // Записываем и читаем данные
+    // SAFETY: ptr указывает на свежевыделенный 128-байтный блок, который мы
+    // эксклюзивно держим до конца теста.
     unsafe {
         let slice = core::slice::from_raw_parts_mut(ptr.as_ptr(), 128);
         for (i, byte) in slice.iter_mut().enumerate() {
@@ -309,8 +309,7 @@ fn allocate_zero_size_returns_invalid_layout() {
 
     assert!(
         matches!(result, Err(AllocationError::InvalidLayout)),
-        "zero-size allocation should return InvalidLayout, got {:?}",
-        result
+        "zero-size allocation should return InvalidLayout, got {result:?}"
     );
 }
 
@@ -326,13 +325,14 @@ fn exhaust_heap_returns_out_of_memory() {
         match allocator.allocate(layout) {
             Ok(_) => allocations += 1,
             Err(AllocationError::OutOfMemory) => break,
-            Err(e) => panic!("unexpected error: {:?}", e),
+            Err(e) => panic!("unexpected error: {e:?}"),
         }
 
         // Защита от бесконечного цикла
-        if allocations > 100 {
-            panic!("too many allocations, heap should have been exhausted");
-        }
+        assert!(
+            allocations <= 100,
+            "too many allocations, heap should have been exhausted"
+        );
     }
 
     assert!(
@@ -449,11 +449,7 @@ fn varying_sizes_work_correctly() {
     for &size in &sizes {
         let layout = Layout::from_size_align(size, 8).unwrap();
         let result = allocator.allocate(layout);
-        assert!(
-            result.is_ok(),
-            "allocation of {} bytes should succeed",
-            size
-        );
+        assert!(result.is_ok(), "allocation of {size} bytes should succeed");
     }
 }
 
@@ -498,14 +494,14 @@ fn allocated_blocks_do_not_overlap() {
     let ptr2 = allocator.allocate(layout).unwrap();
     let ptr3 = allocator.allocate(layout).unwrap();
 
-    // Записываем разные паттерны в каждый блок
+    // SAFETY: ptr1/2/3 - три непересекающихся выделенных блока по 128 байт.
     unsafe {
         core::ptr::write_bytes(ptr1.as_ptr(), 0xAA, 128);
         core::ptr::write_bytes(ptr2.as_ptr(), 0xBB, 128);
         core::ptr::write_bytes(ptr3.as_ptr(), 0xCC, 128);
     }
 
-    // Проверяем, что данные не перезаписались
+    // SAFETY: блоки всё ещё валидны - deallocate не вызывался.
     unsafe {
         let slice1 = core::slice::from_raw_parts(ptr1.as_ptr(), 128);
         let slice2 = core::slice::from_raw_parts(ptr2.as_ptr(), 128);
@@ -541,7 +537,7 @@ fn large_alignment_works_correctly() {
         "pointer should be aligned to 256 bytes"
     );
 
-    // Проверяем, что можно записать данные
+    // SAFETY: ptr указывает на 64-байтный блок с выравниванием 256.
     unsafe {
         core::ptr::write_bytes(ptr.as_ptr(), 0xFF, 64);
         let slice = core::slice::from_raw_parts(ptr.as_ptr(), 64);
@@ -559,8 +555,8 @@ fn reused_memory_is_independent() {
 
     let layout = Layout::from_size_align(256, 8).unwrap();
 
-    // Выделяем и заполняем данными
     let ptr1 = allocator.allocate(layout).unwrap();
+    // SAFETY: ptr1 - свежевыделенный 256-байтный блок.
     unsafe {
         core::ptr::write_bytes(ptr1.as_ptr(), 0xAA, 256);
     }
@@ -571,18 +567,19 @@ fn reused_memory_is_independent() {
     // Выделяем снова (может быть тот же блок)
     let ptr2 = allocator.allocate(layout).unwrap();
 
-    // Записываем другой паттерн
+    // SAFETY: ptr2 - свежевыделенный 256-байтный блок.
     unsafe {
         core::ptr::write_bytes(ptr2.as_ptr(), 0xBB, 256);
     }
 
     // Выделяем ещё один блок
     let ptr3 = allocator.allocate(layout).unwrap();
+    // SAFETY: ptr3 - свежевыделенный 256-байтный блок, не пересекается с ptr2.
     unsafe {
         core::ptr::write_bytes(ptr3.as_ptr(), 0xCC, 256);
     }
 
-    // Проверяем, что данные не перезаписались
+    // SAFETY: ptr2/ptr3 валидны и не освобождались.
     unsafe {
         let slice2 = core::slice::from_raw_parts(ptr2.as_ptr(), 256);
         let slice3 = core::slice::from_raw_parts(ptr3.as_ptr(), 256);
@@ -607,17 +604,17 @@ fn many_small_allocations() {
     let mut pointers = Vec::new();
 
     // Выделяем много мелких блоков
-    for i in 0..100 {
+    for i in 0u8..100 {
         match allocator.allocate(layout) {
             Ok(ptr) => {
-                // Записываем уникальный паттерн
+                // SAFETY: ptr - свежевыделенный 16-байтный блок.
                 unsafe {
-                    core::ptr::write_bytes(ptr.as_ptr(), i as u8, 16);
+                    core::ptr::write_bytes(ptr.as_ptr(), i, 16);
                 }
-                pointers.push((ptr, i as u8));
+                pointers.push((ptr, i));
             }
             Err(AllocationError::OutOfMemory) => break,
-            Err(e) => panic!("unexpected error: {:?}", e),
+            Err(e) => panic!("unexpected error: {e:?}"),
         }
     }
 
@@ -625,12 +622,12 @@ fn many_small_allocations() {
 
     // Проверяем, что все данные сохранились
     for (ptr, pattern) in &pointers {
+        // SAFETY: ptr всё ещё указывает на валидный 16-байтный блок.
         unsafe {
             let slice = core::slice::from_raw_parts(ptr.as_ptr(), 16);
             assert!(
                 slice.iter().all(|&b| b == *pattern),
-                "block with pattern {} was corrupted",
-                pattern
+                "block with pattern {pattern} was corrupted"
             );
         }
     }
@@ -666,6 +663,7 @@ fn deallocate_lower_half_pointer_is_ignored() {
     // Фиктивный указатель из lower half (адрес 0x1000, меньше higher_half_base)
     // В реальном ядре это указатель от bump allocator
     let lower_half_addr = 0x1000usize;
+    // SAFETY: 0x1000 - ненулевой адрес, NonNull::new_unchecked требует только это.
     let lower_half_ptr = unsafe { NonNull::new_unchecked(lower_half_addr as *mut u8) };
 
     // Вызов deallocate с lower half указателем игнорируется
@@ -703,26 +701,26 @@ fn expand_with_partial_frame_allocation() {
         let ptr = allocator.allocate(layout);
         assert!(
             ptr.is_ok(),
-            "allocation {} should succeed with limited frame allocator",
-            i
+            "allocation {i} should succeed with limited frame allocator"
         );
         pointers.push(ptr.unwrap());
     }
 
     // Проверяем, что все блоки независимы и доступны для записи
     for (i, ptr) in pointers.iter().enumerate() {
+        // SAFETY: ptr - свежевыделенный 2048-байтный блок, эксклюзивно владеемый тестом.
         unsafe {
             core::ptr::write_bytes(ptr.as_ptr(), i as u8, 2048);
         }
     }
 
     for (i, ptr) in pointers.iter().enumerate() {
+        // SAFETY: блоки не освобождались - slice валиден.
         unsafe {
             let slice = core::slice::from_raw_parts(ptr.as_ptr(), 2048);
             assert!(
                 slice.iter().all(|&b| b == i as u8),
-                "block {} data was corrupted",
-                i
+                "block {i} data was corrupted"
             );
         }
     }
@@ -749,7 +747,7 @@ fn block_too_small_to_split_uses_whole_block() {
         "allocation should succeed using whole block without split"
     );
 
-    // Проверяем, что память доступна
+    // SAFETY: ptr - свежевыделенный 3780-байтный блок (whole-block без split).
     unsafe {
         let p = ptr.unwrap();
         core::ptr::write_bytes(p.as_ptr(), 0xCD, 3780);
@@ -782,7 +780,7 @@ fn page_size_alignment_works() {
         "pointer should be aligned to PAGE_SIZE (4096 bytes)"
     );
 
-    // Проверяем, что можно записать данные
+    // SAFETY: p - свежевыделенный 64-байтный блок с выравниванием PAGE_SIZE.
     unsafe {
         core::ptr::write_bytes(p.as_ptr(), 0xEF, 64);
         let slice = core::slice::from_raw_parts(p.as_ptr(), 64);

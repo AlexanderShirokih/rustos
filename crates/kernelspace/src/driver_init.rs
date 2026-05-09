@@ -495,7 +495,7 @@ mod tests {
                 assert_eq!(driver, "publisher-b");
                 assert!(reason.contains("already registered"));
             }
-            _ => panic!("unexpected scheduler error"),
+            InitSchedulerError::Unresolved { .. } => panic!("unexpected scheduler error"),
         }
     }
 

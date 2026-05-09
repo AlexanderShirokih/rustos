@@ -165,7 +165,7 @@ mod tests {
         write!(s, "test").unwrap();
 
         let mut out = StaticString::<32>::new();
-        write!(out, "{}", s).unwrap();
+        write!(out, "{s}").unwrap();
         assert_eq!(out.as_str(), "test");
     }
 }

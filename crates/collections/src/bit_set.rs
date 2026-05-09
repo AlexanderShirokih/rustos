@@ -126,7 +126,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "BitSet index out of range")]
     fn out_of_range_set_panics_in_debug() {
         let mut bs: BitSet<1> = BitSet::new();
         bs.set(64);

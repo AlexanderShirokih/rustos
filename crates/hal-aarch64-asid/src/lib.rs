@@ -396,9 +396,9 @@ mod tests {
 
     #[test]
     fn concurrent_acquire_no_duplicates() {
-        let alloc = Arc::new(make(AsidWidth::Bits16, noop));
         const THREADS: usize = 4;
         const PER_THREAD: usize = 64;
+        let alloc = Arc::new(make(AsidWidth::Bits16, noop));
         let mut handles = Vec::new();
         for thread_idx in 0..THREADS {
             let a = alloc.clone();

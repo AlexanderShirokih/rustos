@@ -38,8 +38,7 @@ fn new_bitmap_has_no_allocated_frames() {
         let frame = Frame::new(i);
         assert!(
             !bitmap.is_allocated(frame),
-            "frame {} should not be allocated in new bitmap",
-            i
+            "frame {i} should not be allocated in new bitmap"
         );
     }
 }
@@ -216,8 +215,7 @@ fn set_range_marks_frames_as_allocated() {
     for i in 8..16 {
         assert!(
             bitmap.is_allocated(Frame::new(i)),
-            "frame {} should be allocated after set_range",
-            i
+            "frame {i} should be allocated after set_range"
         );
     }
 
@@ -247,8 +245,7 @@ fn set_range_spanning_multiple_words() {
     for i in 60..130 {
         assert!(
             bitmap.is_allocated(Frame::new(i)),
-            "frame {} should be allocated",
-            i
+            "frame {i} should be allocated"
         );
     }
 

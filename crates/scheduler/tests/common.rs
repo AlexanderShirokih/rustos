@@ -119,7 +119,7 @@ impl ArchCpu for MockCpu {
     }
 
     fn cpu_local_ptr() -> *mut () {
-        CPU_LOCAL_PTR.with(|c| c.get()) as *mut ()
+        CPU_LOCAL_PTR.with(Cell::get) as *mut ()
     }
 
     fn idle() -> ! {
@@ -173,20 +173,24 @@ pub fn take_address_space_switches() -> Vec<Option<AddressSpaceHandle>> {
 }
 
 /// Последний handle, переданный в `MockContext::switch_address_space`.
+///
+/// Внешний `Option` - был ли вообще вызов; внутренний - значение `next`,
+/// которое могло быть `None` для перехода на kernel-thread.
+#[allow(clippy::option_option)]
 pub fn last_address_space_root() -> Option<Option<AddressSpaceHandle>> {
     ADDRESS_SPACE_SWITCHES.with(|c| c.borrow().last().copied())
 }
 
 pub fn switch_count() -> usize {
-    SWITCH_COUNT.with(|c| c.get())
+    SWITCH_COUNT.with(Cell::get)
 }
 
 pub fn current_irq_depth() -> usize {
-    IRQ_DEPTH.with(|c| c.get())
+    IRQ_DEPTH.with(Cell::get)
 }
 
 pub fn max_irq_depth() -> usize {
-    MAX_IRQ_DEPTH.with(|c| c.get())
+    MAX_IRQ_DEPTH.with(Cell::get)
 }
 
 pub fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext> {
@@ -272,10 +276,10 @@ impl MemoryMapper for MockUserMapper {
 }
 
 pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash
 }

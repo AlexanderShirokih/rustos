@@ -44,14 +44,14 @@ fn build_dtb_two_banks() -> Vec<u8> {
     let mut reg = Vec::new();
     // Bank 1: 0x00_80000000, size 0x00_80000000
     push_u32(&mut reg, 0x00);
-    push_u32(&mut reg, 0x80000000);
+    push_u32(&mut reg, 0x8000_0000);
     push_u32(&mut reg, 0x00);
-    push_u32(&mut reg, 0x80000000);
+    push_u32(&mut reg, 0x8000_0000);
     // Bank 2: 0x01_00000000, size 0x00_80000000
     push_u32(&mut reg, 0x01);
-    push_u32(&mut reg, 0x00000000);
+    push_u32(&mut reg, 0x0000_0000);
     push_u32(&mut reg, 0x00);
-    push_u32(&mut reg, 0x80000000);
+    push_u32(&mut reg, 0x8000_0000);
     push_prop_bytes(&mut st, str_reg, &reg);
 
     push_u32(&mut st, 0x2); // end memory
@@ -110,8 +110,8 @@ fn build_dtb_with_children() -> Vec<u8> {
 
     let mut reg = Vec::new();
     push_u32(&mut reg, 0x00);
-    push_u32(&mut reg, 0x00000000);
-    push_u32(&mut reg, 0x40000000);
+    push_u32(&mut reg, 0x0000_0000);
+    push_u32(&mut reg, 0x4000_0000);
     push_prop_bytes(&mut st, str_reg, &reg);
 
     push_u32(&mut st, 0x2); // end memory@0
@@ -135,7 +135,7 @@ fn build_dtb_with_children() -> Vec<u8> {
 
     let mut rsv_reg = Vec::new();
     push_u32(&mut rsv_reg, 0x00);
-    push_u32(&mut rsv_reg, 0x10000000);
+    push_u32(&mut rsv_reg, 0x1000_0000);
     push_u32(&mut rsv_reg, 0x1000);
     push_prop_bytes(&mut st, str_reg, &rsv_reg);
 
@@ -163,7 +163,7 @@ fn write_header(buf: &mut Vec<u8>, structure: &[u8], strings: &[u8]) {
     let off_strings = off_struct + structure.len() as u32;
     let total = off_strings + strings.len() as u32;
 
-    push_u32(buf, 0xD00DFEED);
+    push_u32(buf, 0xD00D_FEED);
     push_u32(buf, total);
     push_u32(buf, off_struct);
     push_u32(buf, off_strings);
@@ -258,7 +258,7 @@ fn reg_single_entry() {
 
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].offset, 0x00);
-    assert_eq!(list[0].size, 0x40000000);
+    assert_eq!(list[0].size, 0x4000_0000);
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn nested_children() {
     let reg = children[0].prop("reg").unwrap();
     let list = reg.try_as_reg_list::<4>(cells).unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].offset, 0x10000000);
+    assert_eq!(list[0].offset, 0x1000_0000);
     assert_eq!(list[0].size, 0x1000);
 }
 
@@ -322,11 +322,11 @@ fn reg_two_banks_stride4() {
     let list = reg.try_as_reg_list::<8>(cells).unwrap();
     assert_eq!(list.len(), 2);
 
-    assert_eq!(list[0].offset, 0x80000000);
-    assert_eq!(list[0].size, 0x80000000);
+    assert_eq!(list[0].offset, 0x8000_0000);
+    assert_eq!(list[0].size, 0x8000_0000);
 
-    assert_eq!(list[1].offset, 0x1_00000000);
-    assert_eq!(list[1].size, 0x80000000);
+    assert_eq!(list[1].offset, 0x1_0000_0000);
+    assert_eq!(list[1].size, 0x8000_0000);
 }
 
 #[test]

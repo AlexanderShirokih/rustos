@@ -16,7 +16,8 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use scheduler::{
-    Priority, Scheduler, SchedulerConfig, SpawnAddressSpace, SpawnConfig, Uninit, UserProcessLaunch,
+    Priority, Scheduler, SchedulerConfig, SchedulerService, SchedulerServiceExt, SpawnAddressSpace,
+    SpawnConfig, Uninit, UserProcessLaunch,
 };
 use userspace::{UserImage, UserImageError, UserSegment};
 
@@ -434,7 +435,6 @@ fn context_switch_between_threads_of_same_user_process_does_not_change_address_s
 
     // Через handle добавляем второй thread в тот же процесс - Inherit
     // снимает AS из current (user) и инкрементирует thread_count.
-    use scheduler::{SchedulerService, SchedulerServiceExt};
     let handle = std::sync::Arc::new(running.handle());
     let service: std::sync::Arc<dyn SchedulerService> = handle;
     service
