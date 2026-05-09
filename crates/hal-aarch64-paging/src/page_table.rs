@@ -33,6 +33,13 @@ impl<L: Level> PageTable<L> {
     pub fn get_raw(&self, idx: usize) -> u64 {
         self.entries[idx]
     }
+
+    /// Записывает сырое 64-битное значение в entry по индексу. Используется
+    /// для модификации software-битов (биты 55-58) на уже валидной PTE без
+    /// пересоздания через типизированный `Entry`-конструктор.
+    pub fn set_raw(&mut self, idx: usize, raw: u64) {
+        self.entries[idx] = raw;
+    }
 }
 
 impl<L: Level> Default for PageTable<L> {

@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use collections::LockCell;
 use hal_aarch64_paging::{
-    entry::{AnyEntry, decode},
+    entry::{AnyEntry, Entry, decode},
     level::{L0, L1, L2, L3, Level},
     mapper::{self, MapError, MapLeaf, PageMapper, WalkError, extract_table_pa},
     mem_flags::Aarch64MemFlags,
@@ -355,6 +355,101 @@ where
         }
     }
 
+    /// Software-bit в leaf-PTE (бит 55 - software-available по AArch64 ARM):
+    /// установлен -> фрейм был аллоцирован `frame_allocator` этого mapper'а
+    /// (путь [`MemoryMapper::map`]); сброшен -> PA пришёл от вызывающего
+    /// (путь [`MemoryMapper::map_exact`] - MMIO, image, identity).
+    /// `unmap`/`rollback_map` возвращают в FA только страницы с битом -
+    /// MMIO/устройственные PA не попадают в bitmap RAM.
+    const OWNED_BY_FA_BIT: u64 = 1 << 55;
+
+    /// Откатывает первые `mapped_pages` страниц диапазона начиная с `va`:
+    /// обнуляет PTE, возвращает фрейм аллокатору, инвалидирует TLB.
+    ///
+    /// Используется на пути транзакционного `map` при partial-OOM. Все
+    /// страницы только что замаплены этим же циклом и помечены
+    /// `OWNED_BY_FA_BIT`, поэтому walk_to_l3_leaf не может вернуть
+    /// `HitBlock`/`NotMapped`, а deallocate безопасен.
+    ///
+    /// Промежуточные L1/L2/L3-таблицы, которые `map_contiguous_inner` мог
+    /// создать в этом же цикле, **не** освобождаются - они освободятся при
+    /// Drop AS. Это безопасно: пустые таблицы не нарушают семантику и не
+    /// мешают повторному `map` по тем же VA.
+    fn rollback_map(
+        &self,
+        mapper: &mut PageMapper<FrameTableAlloc<'a, FA>>,
+        va: PageAlignedVirtualAddress,
+        mapped_pages: usize,
+    ) {
+        let page_size = PageAlignedAddress::ALIGNMENT;
+        for i in 0..mapped_pages {
+            let page_va = PageAlignedVirtualAddress::from_usize(va.as_usize() + i * page_size)
+                .expect("rollback page va remains 4K-aligned");
+            // Должно быть невозможно: страница только что замаплена этим же
+            // циклом. Если walker всё-таки вернул ошибку - дальнейший откат
+            // невозможен; останавливаемся, чтобы не trail'ить ещё один
+            // источник несогласованности.
+            let Ok((l3, idx)) = mapper.walk_to_l3_leaf(page_va) else {
+                break;
+            };
+            // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page;
+            // mapper-lock держится этим with_lock - эксклюзивный доступ.
+            let (pa, owned) = unsafe { Self::take_l3_leaf(l3, idx) };
+            if owned {
+                let _ = self
+                    .frame_allocator
+                    .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
+            }
+            self.invalidate_tlb_page(page_va.as_usize());
+        }
+    }
+
+    /// Точечно инвалидирует TLB для одной 4К-страницы по `va`.
+    ///
+    /// Для user-AS использует `tlbi vae1is, (va | asid)`; если AS ни разу не
+    /// активировался (`asid == 0`), TLB заведомо пуст и tlbi пропускается.
+    /// Для kernel-AS - broadcast по всем ASID (`tlbi vaae1is`).
+    fn invalidate_tlb_page(&self, va: usize) {
+        match self.kind {
+            AddressSpaceKind::User => {
+                let asid = unpack_asid(self.asid_tag.load(Ordering::Acquire));
+                if asid != 0 {
+                    TranslationLookasideBuffer::<EL1>::invalidate_va_asid(va, asid);
+                }
+            }
+            AddressSpaceKind::Kernel => {
+                TranslationLookasideBuffer::<EL1>::invalidate_va_global(va);
+            }
+        }
+    }
+
+    /// Чистит leaf-PTE по `(l3, idx)`, возвращает `(PA, owned)`: PA - адрес
+    /// фрейма из старой записи; `owned` - был ли установлен `OWNED_BY_FA_BIT`
+    /// (т.е. фрейм когда-то аллоцирован через `frame_allocator`).
+    ///
+    /// Запись обнуляется. Фрейм **не** возвращается аллокатору - решение
+    /// принимает вызывающий, ориентируясь на `owned`. TLB здесь тоже не
+    /// трогается; вызывающий выполняет инвалидацию после изменения PTE.
+    ///
+    /// # Safety
+    /// - `l3` валиден и эксклюзивно доступен (caller держит mapper-lock);
+    /// - `idx < 512`;
+    /// - запись по `idx` имеет desc-type Page (`0b11`).
+    unsafe fn take_l3_leaf(table: *mut PageTable<L3>, idx: usize) -> (PageAlignedAddress, bool) {
+        // SAFETY: см. контракт.
+        let raw = unsafe { (*table).get_raw(idx) };
+        let pa = extract_table_pa(raw);
+        let owned = (raw & Self::OWNED_BY_FA_BIT) != 0;
+        // SAFETY: см. контракт; запись Invalid инвалидирует leaf-дескриптор.
+        unsafe {
+            (*table).set(
+                idx,
+                Entry::<L3, hal_aarch64_paging::entry::Invalid>::invalid(),
+            );
+        }
+        (pa, owned)
+    }
+
     /// Per-line `ic ivau` по kernel-VA для свежезаписанной exec-страницы.
     /// Шаг 64 байта - минимальный гарантированный размер I-cache line на aarch64.
     ///
@@ -451,11 +546,15 @@ where
         let aarch64_flags = self.leaf_flags(Aarch64MemFlags::from_memflags(flags));
 
         self.mapper.with_lock(|mapper| {
+            // Транзакционность: при partial-OOM (или любом другом фейле в
+            // середине цикла) уже замапленные страницы 0..i откатываются -
+            // PTE обнуляются, фреймы возвращаются аллокатору, TLB
+            // инвалидируется. AS остаётся в исходном состоянии.
             for i in 0..page_count {
-                let frame = self
-                    .frame_allocator
-                    .allocate_frame()
-                    .ok_or(MemoryMappingError::OutOfMemory)?;
+                let Some(frame) = self.frame_allocator.allocate_frame() else {
+                    self.rollback_map(mapper, va, i);
+                    return Err(MemoryMappingError::OutOfMemory);
+                };
                 let pa = frame.page_address();
                 let kernel_ptr = (pa.as_usize() + self.vaddr_offset) as *mut u8;
 
@@ -469,11 +568,26 @@ where
                 if let Err(e) =
                     map_contiguous_inner::<FA, { L3::SHIFT }, _>(mapper, page_va, pa, aarch64_flags)
                 {
-                    // Фрейм не попал в page-tables - возвращаем явно.
+                    // Фрейм не попал в page-tables - возвращаем явно, затем
+                    // откатываем предшествующие i маппингов.
                     let _ = self
                         .frame_allocator
                         .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
+                    self.rollback_map(mapper, va, i);
                     return Err(e);
+                }
+
+                // Помечаем leaf SW-битом OWNED_BY_FA_BIT: фрейм аллоцирован
+                // нашим frame_allocator-ом - его можно вернуть в FA при unmap.
+                // map_exact-leaves остаются без бита и не освобождаются.
+                let (l3, idx) = mapper
+                    .walk_to_l3_leaf(page_va)
+                    .expect("just-mapped leaf must walk to L3");
+                // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) leaf-Page;
+                // mapper-lock держится этим with_lock - эксклюзивный доступ.
+                unsafe {
+                    let raw = (*l3).get_raw(idx);
+                    (*l3).set_raw(idx, raw | Self::OWNED_BY_FA_BIT);
                 }
 
                 if user_exec {
@@ -510,11 +624,45 @@ where
 
     fn unmap(
         &self,
-        _address: PageAlignedVirtualAddress,
-        _size: usize,
+        address: PageAlignedVirtualAddress,
+        size: usize,
     ) -> Result<(), MemoryUnmappingError> {
-        // TODO: решить вопрос с unmapping
-        Err(MemoryUnmappingError::Unsupported)
+        if size == 0 {
+            return Ok(());
+        }
+        let page_size = PageAlignedVirtualAddress::ALIGNMENT;
+        if !size.is_multiple_of(page_size) {
+            return Err(MemoryUnmappingError::MisalignedRange);
+        }
+
+        // TODO: освобождать пустые промежуточные L1/L2/L3-таблицы, когда
+        // последняя их leaf-запись уходит. Пока они утекают до Drop AS - это
+        // безопасно, но даёт неоптимальный peak-footprint.
+        self.mapper.with_lock(|mapper| {
+            let mut va = address.as_virtual();
+            let mut left = size;
+            while left != 0 {
+                let page = PageAlignedVirtualAddress::new_unchecked(va);
+                let (l3, idx) = mapper
+                    .walk_to_l3_leaf(page)
+                    .map_err(|e| walk_to_unmap_err(&e))?;
+                // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page;
+                // mapper-lock держится этим with_lock - эксклюзивный доступ.
+                let (pa, owned) = unsafe { Self::take_l3_leaf(l3, idx) };
+                // map_exact-страницы (caller-supplied PA - MMIO, image, identity)
+                // не возвращаем во FrameAllocator: PA не принадлежит RAM-bitmap'у,
+                // deallocate либо корруптит bitmap, либо тихо ошибётся.
+                if owned {
+                    let _ = self
+                        .frame_allocator
+                        .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
+                }
+                self.invalidate_tlb_page(page.as_usize());
+                va = va.offset(page_size);
+                left -= page_size;
+            }
+            Ok::<(), MemoryUnmappingError>(())
+        })
     }
 
     fn activate_handle(&self) -> AddressSpaceHandle {
@@ -619,5 +767,12 @@ fn walk_to_remap_err(err: &WalkError) -> MemoryRemappingError {
         // Decode error в leaf-walk означает мусор в дескрипторе - для caller'а
         // практически неотличимо от Invalid: семантически "страница не замаплена".
         WalkError::NotMapped | WalkError::Decode(_) => MemoryRemappingError::NotMapped,
+    }
+}
+
+fn walk_to_unmap_err(err: &WalkError) -> MemoryUnmappingError {
+    match err {
+        WalkError::HitBlock => MemoryUnmappingError::UnsupportedBlockMapping,
+        WalkError::NotMapped | WalkError::Decode(_) => MemoryUnmappingError::NotMapped,
     }
 }

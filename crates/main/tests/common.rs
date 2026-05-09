@@ -251,7 +251,7 @@ impl MemoryMapper for MockUserMapper {
         _address: PageAlignedVirtualAddress,
         _size: usize,
     ) -> Result<(), MemoryUnmappingError> {
-        Err(MemoryUnmappingError::Unsupported)
+        Err(MemoryUnmappingError::NotMapped)
     }
 
     fn remap(

@@ -80,8 +80,10 @@ pub fn sys_memory_allocate(size_bytes: u64, flags_raw: u64) -> Result<u64, Sysca
         .mapper()
         .map(region.base(), region.pages(), &[], flags)
     {
-        // Снимаем регион с учёта. bump не откатывается - mapper.map не
-        // транзакционен, и реюз сломанного VA дал бы AlreadyMapped + frame leak.
+        // mapper.map транзакционен: при ошибке ни одной leaf-страницы в
+        // page-tables не остаётся, фреймы возвращены аллокатору. Снимаем
+        // регион с учёта, чтобы и bump-указатель аллокатора откатился -
+        // VA пойдёт под повторный allocate.
         let pages = NonZeroUsize::new(region.pages()).expect("allocate region has > 0 pages");
         user_vm.allocator().with_lock(|alloc| {
             let released = alloc.release_pending(region.base(), pages);

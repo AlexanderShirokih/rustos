@@ -13,11 +13,10 @@
 //! # Стратегия
 //!
 //! - **Bump-pointer** - выделяет VA от `region_start` вверх, не пытаясь
-//!   повторно использовать освобождённые слоты. Это адекватно для текущего
-//!   состояния ядра, в котором [`MemoryMapper::unmap`] возвращает
-//!   `Unsupported`: освобождение невозможно, реюз не нужен. Когда unmap
-//!   будет реализован, стратегию можно эволюционировать в interval-set
-//!   без изменения публичного API.
+//!   повторно использовать освобождённые слоты. Адекватно текущему набору
+//!   операций (`vm_allocate` + `vm_remap`); полноценный `vm_free` потребует
+//!   стратегии с реюзом - её можно завести без изменения публичного API,
+//!   когда появится syscall.
 
 use alloc::vec::Vec;
 use core::{
@@ -202,7 +201,7 @@ impl UserVmAllocator {
     ///
     /// Аллокатор не освобождает слот в случае ошибки маппинга - вызывающий
     /// должен явно [`Self::release_pending`], чтобы регион не торчал в
-    /// реестре. VA при этом всё равно "сгорит" - см. `release_pending`.
+    /// реестре и VA вернулся под последующие выделения.
     pub fn allocate(
         &mut self,
         size_bytes: NonZeroUsize,
@@ -240,22 +239,27 @@ impl UserVmAllocator {
     /// Снимает с учёта только что выделенный регион - на пути отката, если
     /// последующий маппинг провалился. `true`, если такой регион был.
     ///
-    /// `next_va` намеренно НЕ откатывается: `MemoryMapper::map` не транзакционен
-    /// и при partial failure часть страниц региона может остаться в page-tables.
-    /// Реюз того же VA на следующем `allocate` приведёт к `AlreadyMapped` и
-    /// оставит "приколоченные" фреймы до полного exit процесса. VA сгорает.
+    /// Если откатываемый регион стоит на самой вершине bump'а
+    /// (т.е. это **последнее** выделение), то `next_va` тоже откатывается
+    /// и VA освобождается под повторный `allocate`. Это безопасно благодаря
+    /// атомарности [`MemoryMapper::map`]: при `Err` ни одной leaf-страницы в
+    /// page-tables не остаётся. Если регион не последний (между ним и
+    /// текущей вершиной были другие `allocate`), bump не двигается - slot
+    /// остаётся "дырой" до появления полноценного `vm_free`.
     pub fn release_pending(
         &mut self,
         base: PageAlignedVirtualAddress,
         pages: NonZeroUsize,
     ) -> bool {
         let pages = pages.get();
-        if let Some(idx) = self.regions.iter().position(|r| r.matches(base, pages)) {
-            self.regions.swap_remove(idx);
-            true
-        } else {
-            false
+        let Some(idx) = self.regions.iter().position(|r| r.matches(base, pages)) else {
+            return false;
+        };
+        let region = self.regions.swap_remove(idx);
+        if region.end_va().as_usize() == self.next_va {
+            self.next_va = region.base().as_usize();
         }
+        true
     }
 
     /// Проверяет, что в реестре зарегистрирован регион `(base, size_bytes)`.
@@ -383,35 +387,51 @@ mod tests {
     }
 
     #[test]
-    fn release_pending_does_not_reuse_va() {
+    fn release_pending_rolls_back_last_allocation() {
         let mut a = allocator();
         let r1 = a.allocate(nz(PAGE_SIZE), MemFlags::user_rw()).unwrap();
         let r2 = a.allocate(nz(PAGE_SIZE), MemFlags::user_rw()).unwrap();
         assert!(a.release_pending(r2.base(), nz(r2.pages())));
-        // VA сгорает: mapper.map не транзакционен, реюз сломанного VA дал бы
-        // AlreadyMapped. Следующий allocate выдаёт VA *после* сгоревшего.
+        // mapper.map транзакционен -> освобождённый VA реюзится.
         let r3 = a.allocate(nz(PAGE_SIZE), MemFlags::user_rw()).unwrap();
-        assert_ne!(r3.base(), r2.base());
-        assert_eq!(r3.base().as_usize(), r2.end_va().as_usize());
+        assert_eq!(r3.base(), r2.base());
         assert_eq!(a.live_count(), 2);
         let _ = r1;
     }
 
     /// Эмулирует точную последовательность `sys_memory_allocate` на пути OOM:
-    /// `allocate` -> mapper.map -> Err -> `release_pending`. Следующий allocate
-    /// обязан выдать VA вне сгоревшего диапазона - иначе mapper мгновенно
-    /// получит `AlreadyMapped` от частичного маппинга.
+    /// `allocate` -> mapper.map -> Err -> `release_pending`. Поскольку
+    /// `mapper.map` транзакционен, аллокатор обязан вернуться ровно в
+    /// исходное состояние - следующее выделение приходит на тот же VA.
     #[test]
-    fn syscall_oom_path_burns_va_and_advances_bump() {
+    fn syscall_oom_path_returns_allocator_to_initial_state() {
         let mut a = allocator();
-        let burned = a.allocate(nz(4 * PAGE_SIZE), MemFlags::user_rw()).unwrap();
-        // Имитируем фейл mapper.map после успешного маппинга нескольких страниц.
-        assert!(a.release_pending(burned.base(), nz(burned.pages())));
+        let initial_next = a.next_va;
 
+        let attempted = a.allocate(nz(4 * PAGE_SIZE), MemFlags::user_rw()).unwrap();
+        // Имитируем фейл транзакционного `mapper.map` (страницы не остались в page-tables).
+        assert!(a.release_pending(attempted.base(), nz(attempted.pages())));
+
+        assert_eq!(a.live_count(), 0);
+        assert_eq!(a.next_va, initial_next);
         let next = a.allocate(nz(PAGE_SIZE), MemFlags::user_rw()).unwrap();
-        // Никакого пересечения со сгоревшим диапазоном.
-        assert!(next.base().as_usize() >= burned.end_va().as_usize());
-        assert_eq!(a.live_count(), 1);
+        assert_eq!(next.base(), attempted.base());
+    }
+
+    /// Откат "не последнего" региона не двигает bump: между ним и вершиной
+    /// успели появиться другие `allocate`. Полноценное освобождение требует
+    /// `vm_free` (отдельная задача).
+    #[test]
+    fn release_pending_non_top_region_keeps_bump() {
+        let mut a = allocator();
+        let r1 = a.allocate(nz(PAGE_SIZE), MemFlags::user_rw()).unwrap();
+        let r2 = a.allocate(nz(PAGE_SIZE), MemFlags::user_rw()).unwrap();
+        let bump_before = a.next_va;
+        // r1 не на вершине - bump остаётся.
+        assert!(a.release_pending(r1.base(), nz(r1.pages())));
+        assert_eq!(a.next_va, bump_before);
+        let r3 = a.allocate(nz(PAGE_SIZE), MemFlags::user_rw()).unwrap();
+        assert_eq!(r3.base().as_usize(), r2.end_va().as_usize());
     }
 
     #[test]
