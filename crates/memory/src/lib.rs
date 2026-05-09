@@ -21,6 +21,7 @@ pub mod memory;
 pub mod memory_mapper;
 pub mod memory_range;
 pub mod physical_address;
+pub mod range_allocator;
 pub mod relocatable_ptr;
 pub mod user_vm_allocator;
 pub mod user_vm_context;
