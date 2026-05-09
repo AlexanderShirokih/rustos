@@ -223,3 +223,117 @@ register_test!(
     "userspace_vm_allocate_and_remap",
     userspace_vm_allocate_and_remap
 );
+
+// vm_allocate + vm_free + vm_allocate E2E (доказательство реюза VA).
+//
+// Сам факт прихода сигнала доказывает: vm_free вернул регион в free-list
+// и следующий vm_allocate выдал тот же самый VA (coalesce + first-fit).
+
+fn build_vm_free_payload() -> [u8; 22 * 4] {
+    const SVC_MEMORY_ALLOCATE: u32 = svc(SyscallOp::MemoryAllocate);
+    const SVC_MEMORY_FREE: u32 = svc(SyscallOp::MemoryFree);
+
+    // mov  x21, x0                  ; save bootstrap Event handle
+    const MOV_X21_X0: u32 = 0xAA00_03F5;
+    // movz x0, #0x1000              ; size = 4096
+    const MOVZ_X0_PAGE: u32 = 0xD282_0000;
+    // movz x1, #0                   ; flags = ReadWrite
+    const MOVZ_X1_ZERO: u32 = 0xD280_0001;
+    // mov  x19, x0                  ; save VA1 in callee-preserved reg
+    const MOV_X19_X0: u32 = 0xAA00_03F3;
+    // movz w20, #0x42               ; sentinel byte
+    const MOVZ_W20_SENTINEL: u32 = 0x5280_0854;
+    // strb w20, [x19]               ; убедиться, что страница writable
+    const STRB_W20_X19: u32 = 0x3900_0274;
+    // mov  x0, x19                  ; free-arg0 = VA1
+    const MOV_X0_X19: u32 = 0xAA13_03E0;
+    // movz x1, #0x1000              ; free-arg1 = size
+    const MOVZ_X1_PAGE: u32 = 0xD282_0001;
+    // cmp  x0, x19                  ; subs xzr, x0, x19, lsl #0
+    const CMP_X0_X19: u32 = 0xEB13_001F;
+    // b.ne +28                      ; imm19 = 7 -> пропустить 6 инстр.
+    //                               ; (signal + thread_exit) и попасть
+    //                               ; на финальный `b .` -> timeout.
+    const B_NE_SKIP: u32 = 0x5400_00E1;
+    // mov  x0, x21                  ; signal-arg0 = Event handle
+    const MOV_X0_X21: u32 = 0xAA15_03E0;
+
+    let words: [u32; 22] = [
+        MOV_X21_X0,
+        MOVZ_X0_PAGE,
+        MOVZ_X1_ZERO,
+        SVC_MEMORY_ALLOCATE,
+        MOV_X19_X0,
+        MOVZ_W20_SENTINEL,
+        STRB_W20_X19,
+        MOV_X0_X19,
+        MOVZ_X1_PAGE,
+        SVC_MEMORY_FREE,
+        MOVZ_X0_PAGE,
+        MOVZ_X1_ZERO,
+        SVC_MEMORY_ALLOCATE,
+        CMP_X0_X19,
+        B_NE_SKIP,
+        MOV_X0_X21,
+        MOVZ_X1_EVENT_SIGNALED,
+        MOVZ_X2_ZERO,
+        SVC_OBJECT_SIGNAL,
+        MOVZ_X0_ZERO,
+        SVC_THREAD_EXIT,
+        B_LOOP,
+    ];
+
+    let mut bytes = [0u8; 22 * 4];
+    for (i, w) in words.iter().enumerate() {
+        bytes[i * 4..(i + 1) * 4].copy_from_slice(&w.to_le_bytes());
+    }
+    bytes
+}
+
+fn userspace_vm_allocate_free_reuse_va() {
+    let event = Event::new();
+    let payload = build_vm_free_payload();
+    let segment = UserSegment {
+        va_base: aligned(USER_PAYLOAD_VA),
+        mapped_size: PAGE_SIZE,
+        init_bytes: &payload,
+        perms: MemFlags::user_rx(),
+    };
+    let image = UserImage {
+        segments: core::slice::from_ref(&segment),
+        entry: VirtualAddress::new(USER_PAYLOAD_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
+    let launch = UserProcessLaunch::new()
+        .initial_handles(vec![handle])
+        .bootstrap_handle(0);
+    let info = super::user_process_launcher()
+        .spawn_user_process_with_launch(
+            "user-vm-free-reuse",
+            &image,
+            Priority::highest(),
+            2,
+            launch,
+        )
+        .expect("spawn_user_process must succeed");
+    qemu_test_harness::kassert_eq!(info.initial_handle_ids.len(), 1);
+
+    let scheduler = super::scheduler().clone();
+    let mut spins = 0u64;
+    while event.peek() & EVENT_SIGNALED == 0 {
+        scheduler.sleep_ms(10);
+        spins += 1;
+        qemu_test_harness::kassert!(spins < 500);
+    }
+
+    let _ = spins;
+}
+
+register_test!(
+    USERSPACE_VM_ALLOCATE_FREE_REUSE_VA,
+    "userspace_vm_allocate_free_reuse_va",
+    userspace_vm_allocate_free_reuse_va
+);

@@ -60,6 +60,11 @@ pub enum SyscallOp {
     /// Меняет флаги уже выделенного региона (аналог `MemoryMapper::remap`).
     /// Аргументы: `arg0=va`, `arg1=size_bytes`, `arg2=flags_raw`.
     MemoryRemap = 0x61,
+    /// Освобождает регион, ранее выданный [`Self::MemoryAllocate`]: снимает
+    /// leaf-маппинги и возвращает диапазон в free-list. Аргументы:
+    /// `arg0=va`, `arg1=size_bytes`. `(va, size)` обязаны точно совпадать с
+    /// зарегистрированным регионом.
+    MemoryFree = 0x62,
 }
 
 impl SyscallOp {
@@ -73,6 +78,7 @@ impl SyscallOp {
             0x31 => Ok(Self::HandleDuplicate),
             0x60 => Ok(Self::MemoryAllocate),
             0x61 => Ok(Self::MemoryRemap),
+            0x62 => Ok(Self::MemoryFree),
             _ => Err(SyscallError::BadSyscall),
         }
     }
@@ -92,6 +98,7 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x31), Ok(SyscallOp::HandleDuplicate));
         assert_eq!(SyscallOp::from_raw(0x60), Ok(SyscallOp::MemoryAllocate));
         assert_eq!(SyscallOp::from_raw(0x61), Ok(SyscallOp::MemoryRemap));
+        assert_eq!(SyscallOp::from_raw(0x62), Ok(SyscallOp::MemoryFree));
     }
 
     #[test]

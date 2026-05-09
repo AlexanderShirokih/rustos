@@ -7,7 +7,7 @@
 //!
 //! ABI флагов памяти упрощён до 3 вариантов: 0 = RW, 1 = RO, 2 = RX.
 //!
-//! [`UserVmAllocator`]: memory::user_vm_allocator::UserVmAllocator
+//! [`UserVmAllocator`]: memory::UserVmAllocator
 //! [`MemoryMapper`]: memory::memory_mapper::MemoryMapper
 //! [`SyscallRuntime::current_user_vm`]: crate::SyscallRuntime::current_user_vm
 
@@ -15,8 +15,8 @@ use core::num::NonZeroUsize;
 
 use collections::LockCell;
 use memory::{
-    memory_mapper::{MemoryMappingError, MemoryRemappingError},
-    user_vm_allocator::{UserVmAllocateError, UserVmRegionError},
+    memory_mapper::{MemoryMappingError, MemoryRemappingError, MemoryUnmappingError},
+    range_allocator::{AllocateError, RangeError},
     virtual_address::PageAlignedVirtualAddress,
 };
 
@@ -53,16 +53,17 @@ pub fn sys_memory_allocate(size_bytes: u64, flags_raw: u64) -> Result<u64, Sysca
 
     if let Err(e) = user_vm
         .mapper()
-        .map(region.base(), region.pages(), &[], flags)
+        .map(region.base(), region.pages().get(), &[], flags)
     {
         // mapper.map транзакционен: при ошибке ни одной leaf-страницы в
-        // page-tables не остаётся, фреймы возвращены аллокатору. Снимаем
-        // регион с учёта, чтобы и bump-указатель аллокатора откатился -
-        // VA пойдёт под повторный allocate.
-        let pages = NonZeroUsize::new(region.pages()).expect("allocate region has > 0 pages");
+        // page-tables не остаётся, фреймы возвращены аллокатору. Возвращаем
+        // регион в free-list, чтобы VA реюзнулся при следующем allocate.
         user_vm.allocator().with_lock(|alloc| {
-            let released = alloc.release_pending(region.base(), pages);
-            debug_assert!(released, "rollback of just-allocated region must succeed");
+            let released = alloc.free(region.base(), size);
+            debug_assert!(
+                released.is_ok(),
+                "rollback of just-allocated region must succeed"
+            );
         });
         return Err(map_err_to_syscall(&e));
     }
@@ -89,7 +90,7 @@ pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<
     // так при провале mapper.remap состояния остаются согласованными.
     user_vm
         .allocator()
-        .with_lock(|alloc| alloc.lookup(base, size))
+        .with_lock(|alloc| alloc.lookup(base, size).map(|_| ()))
         .map_err(region_err_to_syscall)?;
 
     user_vm
@@ -98,8 +99,43 @@ pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<
         .map_err(|e| remap_err_to_syscall(&e))?;
 
     user_vm.allocator().with_lock(|alloc| {
-        let result = alloc.set_flags(base, size, flags);
+        let result = alloc.set_tag(base, size, flags);
         debug_assert!(result.is_ok(), "region must remain after successful remap");
+    });
+
+    Ok(0)
+}
+
+/// `vm_free(va, size_bytes) -> ()`
+///
+/// Освобождает регион, ранее выданный [`sys_memory_allocate`]: снимает
+/// leaf-маппинги в page-tables и возвращает диапазон в free-list
+/// аллокатора (с автоматическим coalesce'ингом соседних свободных).
+/// Размер должен полностью совпадать с зарегистрированным регионом -
+/// частичное освобождение не поддерживается.
+pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError> {
+    let size = parse_size(size_bytes)?;
+    let va_usize = usize::try_from(va_raw).map_err(|_| SyscallError::InvalidArgument)?;
+    let base =
+        PageAlignedVirtualAddress::from_usize(va_usize).ok_or(SyscallError::InvalidArgument)?;
+
+    let user_vm = runtime().current_user_vm().ok_or(SyscallError::WrongType)?;
+
+    // Пред-валидация: убеждаемся, что регион зарегистрирован, не трогая
+    // page-tables. Иначе mapper.unmap мог бы снять чужой маппинг.
+    user_vm
+        .allocator()
+        .with_lock(|alloc| alloc.lookup(base, size).map(|_| ()))
+        .map_err(region_err_to_syscall)?;
+
+    user_vm
+        .mapper()
+        .unmap(base, size.get())
+        .map_err(|e| unmap_err_to_syscall(&e))?;
+
+    user_vm.allocator().with_lock(|alloc| {
+        let result = alloc.free(base, size);
+        debug_assert!(result.is_ok(), "region must remain after successful unmap");
     });
 
     Ok(0)
@@ -110,12 +146,10 @@ fn parse_size(size_bytes: u64) -> Result<NonZeroUsize, SyscallError> {
     NonZeroUsize::new(size).ok_or(SyscallError::InvalidArgument)
 }
 
-fn allocate_err_to_syscall(err: UserVmAllocateError) -> SyscallError {
+fn allocate_err_to_syscall(err: AllocateError) -> SyscallError {
     match err {
-        UserVmAllocateError::UnalignedSize => SyscallError::InvalidArgument,
-        UserVmAllocateError::NotEnoughSpace | UserVmAllocateError::OutOfSlots => {
-            SyscallError::OutOfMemory
-        }
+        AllocateError::UnalignedSize => SyscallError::InvalidArgument,
+        AllocateError::NotEnoughSpace | AllocateError::OutOfSlots => SyscallError::OutOfMemory,
     }
 }
 
@@ -128,10 +162,10 @@ fn map_err_to_syscall(err: &MemoryMappingError) -> SyscallError {
     }
 }
 
-fn region_err_to_syscall(err: UserVmRegionError) -> SyscallError {
+fn region_err_to_syscall(err: RangeError) -> SyscallError {
     match err {
-        UserVmRegionError::NotFound => SyscallError::NotFound,
-        UserVmRegionError::UnalignedSize => SyscallError::InvalidArgument,
+        RangeError::NotFound => SyscallError::NotFound,
+        RangeError::UnalignedSize => SyscallError::InvalidArgument,
     }
 }
 
@@ -139,6 +173,15 @@ fn remap_err_to_syscall(err: &MemoryRemappingError) -> SyscallError {
     match err {
         MemoryRemappingError::NotMapped => SyscallError::NotFound,
         MemoryRemappingError::MisalignedRange | MemoryRemappingError::UnsupportedBlockMapping => {
+            SyscallError::InvalidArgument
+        }
+    }
+}
+
+fn unmap_err_to_syscall(err: &MemoryUnmappingError) -> SyscallError {
+    match err {
+        MemoryUnmappingError::NotMapped => SyscallError::NotFound,
+        MemoryUnmappingError::MisalignedRange | MemoryUnmappingError::UnsupportedBlockMapping => {
             SyscallError::InvalidArgument
         }
     }
@@ -157,15 +200,15 @@ mod tests {
     #[test]
     fn allocate_err_mapping() {
         assert_eq!(
-            allocate_err_to_syscall(UserVmAllocateError::UnalignedSize),
+            allocate_err_to_syscall(AllocateError::UnalignedSize),
             SyscallError::InvalidArgument
         );
         assert_eq!(
-            allocate_err_to_syscall(UserVmAllocateError::NotEnoughSpace),
+            allocate_err_to_syscall(AllocateError::NotEnoughSpace),
             SyscallError::OutOfMemory
         );
         assert_eq!(
-            allocate_err_to_syscall(UserVmAllocateError::OutOfSlots),
+            allocate_err_to_syscall(AllocateError::OutOfSlots),
             SyscallError::OutOfMemory
         );
     }
@@ -173,11 +216,11 @@ mod tests {
     #[test]
     fn region_err_mapping() {
         assert_eq!(
-            region_err_to_syscall(UserVmRegionError::NotFound),
+            region_err_to_syscall(RangeError::NotFound),
             SyscallError::NotFound
         );
         assert_eq!(
-            region_err_to_syscall(UserVmRegionError::UnalignedSize),
+            region_err_to_syscall(RangeError::UnalignedSize),
             SyscallError::InvalidArgument
         );
     }
@@ -220,6 +263,22 @@ mod tests {
         );
         assert_eq!(
             remap_err_to_syscall(&MemoryRemappingError::UnsupportedBlockMapping),
+            SyscallError::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn unmap_err_mapping() {
+        assert_eq!(
+            unmap_err_to_syscall(&MemoryUnmappingError::NotMapped),
+            SyscallError::NotFound
+        );
+        assert_eq!(
+            unmap_err_to_syscall(&MemoryUnmappingError::MisalignedRange),
+            SyscallError::InvalidArgument
+        );
+        assert_eq!(
+            unmap_err_to_syscall(&MemoryUnmappingError::UnsupportedBlockMapping),
             SyscallError::InvalidArgument
         );
     }

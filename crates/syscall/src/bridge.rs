@@ -103,6 +103,10 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::memory::sys_memory_remap(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
         }
+        SyscallOp::MemoryFree => {
+            let r = super::memory::sys_memory_free(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
     }
 }
 

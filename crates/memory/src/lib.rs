@@ -31,4 +31,5 @@ pub mod virtual_address;
 pub use frame_bitmap::FrameBitmap;
 pub use mem_flags::MemFlags;
 pub use relocatable_ptr::RelocatablePtr;
+pub use user_vm_allocator::UserVmAllocator;
 pub use user_vm_context::UserVmContext;

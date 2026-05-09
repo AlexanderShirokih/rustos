@@ -64,42 +64,38 @@ trap-handler собирает SyscallFrame, вызывает dispatch     |
 
 - `UserVmAllocator::allocate` падает -> ничего не маппится, аллокатор
   остался в исходном состоянии.
-- `MemoryMapper::map` падает (например, OOM фреймов) ->
-  `release_pending` снимает регион с учёта. `MemoryMapper::map`
+- `MemoryMapper::map` падает (например, OOM фреймов) -> выделенный
+  диапазон возвращается в free-list через `free`. `MemoryMapper::map`
   **транзакционен**: при ошибке посередине цикла уже замапленные
   страницы откатываются (PTE обнуляются, фреймы возвращаются
-  аллокатору, TLB инвалидируется). Поэтому если откатываемый регион
-  стоит на вершине bump'а, `release_pending` сдвигает `next_va` назад —
-  VA реюзится при следующем `allocate`. "Не верхний" регион (между ним
-  и текущей вершиной успели появиться другие `allocate`) оставляет
-  дыру в bump-пространстве до появления полноценного `vm_free`.
+  аллокатору, TLB инвалидируется). После `free` диапазон сразу
+  доступен для последующих `allocate` и сливается с соседними
+  свободными областями.
 
 ## Архитектурно-независимый аллокатор
 
-`memory::user_vm_allocator::UserVmAllocator`:
+`UserVmAllocator` — type alias над [`RangeAllocator<MemFlags>`]
+(`memory::range_allocator`): first-fit free-list с автоматическим
+coalesce'ингом соседних свободных диапазонов. Tag хранит текущие флаги
+доступа региона.
 
 | Метод | Назначение |
 |---|---|
 | `new(start, end)` | Обслуживать диапазон `[start, end)` с дефолтной ёмкостью реестра. |
-| `with_capacity(start, end, max_regions)` | То же, но ограниченным числом регионов. |
-| `allocate(size: NonZeroUsize, flags)` | Bump-выделение нового региона. |
-| `release_pending(base, pages: NonZeroUsize)` | Снять с учёта только что выданный регион (rollback после неудачного `map`). |
+| `with_capacity(start, end, capacity)` | То же, но c ограниченным числом одновременно живых регионов. |
+| `allocate(size: NonZeroUsize, flags)` | Выделить first-fit диапазон. |
+| `free(base, size: NonZeroUsize)` | Вернуть диапазон в free-list (с coalesce'ингом). |
 | `lookup(base, size: NonZeroUsize)` | Не-мутирующая проверка регистрации региона (пред-валидация перед `mapper.remap`). |
-| `set_flags(base, size: NonZeroUsize, flags)` | Обновить флаги уже зарегистрированного региона. |
-| `regions()` | Снимок всех регионов (для тестов). |
+| `set_tag(base, size: NonZeroUsize, flags)` | Обновить флаги уже зарегистрированного региона. |
+| `allocated()` | Снимок всех живых регионов (для тестов). |
 
 Параметры размеров принимают `NonZeroUsize`: нулевой размер исключён на
 уровне типа, отдельный вариант ошибки `ZeroSize` не нужен.
 
-Стратегия — bump-pointer: `release_pending` откатывает только
-вершину bump'а (rollback неудачного `allocate`+`map`). Полноценное
-освобождение "не верхних" регионов потребует stateful-структуру с
-реюзом слотов — это запланировано вместе с `vm_free` syscall'ом.
-
 Image-сегменты и user-стек маппятся `scheduler`-ом напрямую через
 `MemoryMapper::map`, в обход аллокатора; в реестре аллокатора живут
-только регионы, выданные `vm_allocate`. Bump обслуживает "дыру" между
-концом самого высокого сегмента образа и базой стека.
+только регионы, выданные `vm_allocate`. Free-list обслуживает "дыру"
+между концом самого высокого сегмента образа и базой стека.
 
 ## Per-process регистрация
 
@@ -154,6 +150,7 @@ fn current_user_vm(&self) -> Option<UserVmContext>;
 |------|-----|-----------|---------|
 | `0x60` | `MemoryAllocate` | `arg0=size_bytes`, `arg1=flags` | `va` (адрес базы) |
 | `0x61` | `MemoryRemap` | `arg0=va`, `arg1=size_bytes`, `arg2=flags` | `0` |
+| `0x62` | `MemoryFree` | `arg0=va`, `arg1=size_bytes` | `0` |
 
 `MemoryRemap` назван по операции `MemoryMapper::remap` — он перемаппит
 уже выделенный регион с новыми флагами доступа. Имя сохраняет связь с
@@ -180,23 +177,16 @@ fn current_user_vm(&self) -> Option<UserVmContext>;
 | `InvalidArgument` (3) | Размер 0 / не кратен 4К; неизвестный код флагов; VA не page-aligned. |
 | `WrongType` (5) | У текущего процесса нет user-AS / `UserVmAllocator`. |
 | `OutOfMemory` (13) | Кончился свободный user-VA, реестр регионов или физические фреймы. |
-| `NotFound` (14) | `vm_remap` на не-выделенный регион. |
+| `NotFound` (14) | `vm_remap`/`vm_free` на не-выделенный регион. |
 
 Численные коды стабильны и являются частью ABI — их сохраняем, чтобы
 ABI-юниты в `error.rs` ловили нарушение совместимости.
 
 ## Ограничения текущей реализации
 
-1. **Нет `vm_free`/`vm_unmap` syscall.** Платформенный
-   `MemoryMapper::unmap` уже реализован (4К-страницы) и используется
-   на пути отката `mapper.map` и при Drop AS.
-2. **Bump-стратегия.** `release_pending` откатывает вершину bump'а; в
-   long-running процессе с многими `vm_allocate` (без последующего
-   `vm_free`-syscall'а) диапазон постепенно расходуется. Эволюция
-   стратегии запланирована вместе с `vm_free`.
-3. **Защита целиком на регион.** `vm_remap` требует точного совпадения
-   `(base, size)` с выделенным регионом.
-4. **AArch64 `remap`/`unmap`.** Платформенная реализация инвалидирует
+1. **Защита целиком на регион.** `vm_remap`/`vm_free` требуют точного
+   совпадения `(base, size)` с выделенным регионом.
+2. **AArch64 `remap`/`unmap`.** Платформенная реализация инвалидирует
    TLB точечно (по странице, в правильной ASID-области для user-AS).
    Для kernel-AS — broadcast по всем ASID. Промежуточные L1/L2/L3
    таблицы при `unmap` пока не освобождаются (TODO).
@@ -205,7 +195,7 @@ ABI-юниты в `error.rs` ловили нарушение совместим�
 
 | Уровень | Расположение |
 |---|---|
-| Юнит-тесты `UserVmAllocator` | `crates/memory/src/user_vm_allocator.rs` (13 тестов) |
+| Юнит-тесты `RangeAllocator` | `crates/memory/src/range_allocator.rs` |
 | Юнит-тесты преобразования ошибок | `crates/syscall/src/memory.rs` |
 | Юнит-тесты ABI кодов | `crates/syscall/src/error.rs`, `numbers.rs` |
 | Интеграция со scheduler | `crates/kernelspace/tests/userspace.rs` |

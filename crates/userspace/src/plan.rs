@@ -1,6 +1,6 @@
 //! Подготовка per-process [`UserVmAllocator`] для свежесозданного user-процесса.
 
-use memory::{user_vm_allocator::UserVmAllocator, virtual_address::PageAlignedVirtualAddress};
+use memory::{UserVmAllocator, virtual_address::PageAlignedVirtualAddress};
 
 use crate::image::UserImage;
 
@@ -90,8 +90,8 @@ mod tests {
         // Свежий аллокатор пуст: нет ни одного выделенного региона.
         assert_eq!(alloc.live_count(), 0);
         // Границы: нижняя - конец самого высокого сегмента, верхняя - base стека.
-        assert_eq!(alloc.region_start().as_usize(), seg_va + PAGE);
-        assert_eq!(alloc.region_end().as_usize(), STACK_BASE);
+        assert_eq!(alloc.arena_start().as_usize(), seg_va + PAGE);
+        assert_eq!(alloc.arena_end().as_usize(), STACK_BASE);
     }
 
     #[test]
