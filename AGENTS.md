@@ -10,7 +10,7 @@
 
 ### Обзор проекта
 
-RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2024). 14 крейтов в workspace, `xtask` — хост-инструмент сборки.
+RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2024). Workspace состоит из крейтов ядра, платформенных крейтов и `xtask` — хост-инструмента сборки.
 
 -> Подробнее: [`docs/overview.md`](docs/overview.md)
 

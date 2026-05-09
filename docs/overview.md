@@ -39,18 +39,23 @@ crates/hal-aarch64 <- точка входа, платформенный код
 | Крейт | Путь | Описание |
 |---|---|---|
 | `hal-aarch64` | `crates/hal-aarch64` | Точка входа, boot, платформа |
-| `aarch64-paging` | `crates/hal-aarch64-paging` | Таблицы страниц ARM64 |
+| `hal-aarch64-asid` | `crates/hal-aarch64-asid` | Управление ASID для aarch64 |
+| `hal-aarch64-paging` | `crates/hal-aarch64-paging` | Таблицы страниц aarch64 |
 | `hal-common` | `crates/hal-common` | Общие типы архитектуры |
 | `collections` | `crates/collections` | `Vec`, `IntervalSet` (`no_std`) |
-| `drivers-common` | `crates/drivers-common` | Трейты и типы драйверов |
 | `drivers-common-aarch64` | `crates/drivers-common-aarch64` | aarch64-специфичные типы драйверов |
+| `drivers-common` | `crates/drivers-common` | Трейты и типы драйверов |
 | `drivers-aarch64` | `crates/drivers-aarch64` | Реализации драйверов (PL011, GIC) |
 | `kernelspace` | `crates/kernelspace` | Основная логика ядра |
+| `kobject` | `crates/kobject` | Kernel objects, handles и IPC |
+| `scheduler` | `crates/scheduler` | Процессы, потоки и планирование |
+| `syscall` | `crates/syscall` | Syscall ABI и dispatch |
 | `fdt` | `crates/fdt` | Парсер Flattened Device Tree |
 | `io` | `crates/io` | `ByteSink`, `Writer`, форматирование |
 | `log` | `crates/log` | Макросы логирования (`klog`) |
-| `memory` | `crates/memory` | Frame allocator, bitmap |
-| `util` | `crates/util` | Утилиты |
+| `memory` | `crates/memory` | Frame allocator, bitmap, VA-аллокаторы |
 | `test-harness-qemu` | `crates/test-harness-qemu` | Хост-часть QEMU тест-харнесса |
 | `test-harness-qemu-aarch64` | `crates/test-harness-qemu-aarch64` | Гостевая часть QEMU тест-харнесса |
+| `userspace` | `crates/userspace` | User image loader и user-VM planning |
+| `util` | `crates/util` | Утилиты |
 | `xtask` | `xtask` | Хост-инструмент сборки (CLI) |

@@ -3,7 +3,7 @@
 pub mod common;
 pub mod id_aa64mmfr0;
 pub mod mair;
-pub mod sctrl;
+pub mod sctlr;
 pub mod tcr;
 pub mod tlb;
 pub mod ttbr;

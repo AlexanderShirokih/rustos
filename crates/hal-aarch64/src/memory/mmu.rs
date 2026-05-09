@@ -10,8 +10,8 @@ use crate::{
             id_aa64mmfr0::{AsidWidth, IdAa64Mmfr0},
             mair,
             mair::MemoryAttributeIndirectionRegister,
-            sctrl,
-            sctrl::SystemControlRegister,
+            sctlr,
+            sctlr::SystemControlRegister,
             tcr,
             tcr::{TranslationControlRegister, TtbrSel},
             tlb::TranslationLookasideBuffer,
@@ -47,11 +47,11 @@ pub trait MmuConfig {
     }
 
     /// Конфигурация блока MMU
-    fn mmu_config(&self) -> sctrl::SctlrBits {
-        sctrl::SctlrBits::combine(&[
-            sctrl::SctlrBit::Mmu,
-            sctrl::SctlrBit::DCache,
-            sctrl::SctlrBit::ICache,
+    fn mmu_config(&self) -> sctlr::SctlrBits {
+        sctlr::SctlrBits::combine(&[
+            sctlr::SctlrBit::Mmu,
+            sctlr::SctlrBit::DCache,
+            sctlr::SctlrBit::ICache,
         ])
     }
 }
