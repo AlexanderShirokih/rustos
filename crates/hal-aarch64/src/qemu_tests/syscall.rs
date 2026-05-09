@@ -9,7 +9,7 @@ use core::arch::asm;
 
 use drivers_common::services::scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
 use main::{
-    kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, install_handle},
+    kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, handle_close, install_handle},
     syscall::{SyscallError, SyscallOp},
     syscall_bridge::scheduler,
 };
@@ -87,6 +87,34 @@ fn syscall_object_wait_one_fast_path() {
     qemu_test_harness::kassert_eq!(observed, i64::from(EVENT_SIGNALED));
 }
 
+/// `object_wait_one` через SVC, poll-path: Event не сигналит,
+/// `timeout_ns = 0` должен вернуть `Timeout`, не блокируя поток.
+fn syscall_object_wait_one_poll_returns_timeout() {
+    let event = Event::new();
+    let handle = Handle::new(
+        KObject::Event(event.clone()),
+        Rights::WAIT | Rights::INSPECT,
+    );
+    let id = install_handle(handle).expect("install_handle must succeed");
+    let raw = u64::from(id.raw().get());
+
+    let observed: i64;
+    // SAFETY: см. syscall_object_signal_round_trip.
+    unsafe {
+        asm!(
+            "svc #{op}",
+            in("x0") raw,
+            in("x1") u64::from(EVENT_SIGNALED),
+            in("x2") 0_u64,
+            lateout("x0") observed,
+            op = const SyscallOp::ObjectWaitOne as u16,
+            options(nostack, preserves_flags),
+        );
+    }
+    qemu_test_harness::kassert_eq!(observed, i64::from(SyscallError::Timeout));
+    handle_close(id).expect("close poll-test handle");
+}
+
 /// `object_wait_one` через SVC, slow-path: сигнал поднимается отдельным
 /// thread'ом после `sleep_ms`. Диспатчер должен корректно проводить
 /// блокировку через scheduler и вернуть маску после wake-up.
@@ -112,13 +140,14 @@ fn syscall_object_wait_one_blocks_until_signaled() {
         .expect("signaler spawn must succeed");
 
     let observed: i64;
-    // SAFETY: см. syscall_object_signal_round_trip. timeout_ns = 0 -> infinite.
+    // SAFETY: см. syscall_object_signal_round_trip. Таймаут заведомо
+    // больше задержки signaler-потока.
     unsafe {
         asm!(
             "svc #{op}",
             in("x0") raw,
             in("x1") u64::from(EVENT_SIGNALED),
-            in("x2") 0_u64,
+            in("x2") 1_000_000_000_u64,
             lateout("x0") observed,
             op = const SyscallOp::ObjectWaitOne as u16,
             options(nostack, preserves_flags),
@@ -159,6 +188,11 @@ register_test!(
     SYSCALL_OBJECT_WAIT_ONE_FAST_PATH,
     "syscall_object_wait_one_fast_path",
     syscall_object_wait_one_fast_path
+);
+register_test!(
+    SYSCALL_OBJECT_WAIT_ONE_POLL_TIMEOUT,
+    "syscall_object_wait_one_poll_returns_timeout",
+    syscall_object_wait_one_poll_returns_timeout
 );
 register_test!(
     SYSCALL_OBJECT_WAIT_ONE_BLOCKS,

@@ -127,7 +127,7 @@ fn sys_object_signal(handle: u64, set: u64, clear: u64) -> Result<u64, SyscallEr
 
 /// `object_wait_one(handle, signals, timeout_ns)` - ждёт хотя бы один
 /// бит из `signals` на kernel-объекте. `timeout_ns == 0` означает
-/// бессрочный wait; ненулевое значение - длительность дедлайна в
+/// non-blocking poll; ненулевое значение - длительность дедлайна в
 /// наносекундах (относительно текущего момента). Возвращает наблюдённую
 /// маску.
 fn sys_object_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
@@ -136,12 +136,7 @@ fn sys_object_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64
     if mask == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let timeout = if timeout_ns == 0 {
-        None
-    } else {
-        Some(timeout_ns)
-    };
-    let observed = kobject::object_wait_one(id, mask, timeout)?;
+    let observed = kobject::object_wait_one(id, mask, Some(timeout_ns))?;
     Ok(u64::from(observed))
 }
 
@@ -261,10 +256,10 @@ mod tests {
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
-    /// `signals == 0` с бессрочным `timeout_ns == 0` припарковал бы
-    /// поток навсегда - отвергаем до того, как wait дойдёт до kobject.
+    /// `signals == 0` бессмысленен даже для poll: ни один сигнал не
+    /// сможет пересечься с пустой маской.
     #[test]
-    fn object_wait_one_with_empty_mask_and_no_timeout_is_invalid_argument() {
+    fn object_wait_one_with_empty_mask_and_poll_timeout_is_invalid_argument() {
         let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, 0, 0, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));

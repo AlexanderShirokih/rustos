@@ -40,6 +40,9 @@ pub enum SyscallOp {
 
     // 0x10..=0x1F - object base.
     ObjectSignal = 0x10,
+    /// Ждёт сигналы KO. Аргументы: `arg0=handle`, `arg1=signals`
+    /// (нижние 32 бита), `arg2=timeout_ns`; `timeout_ns == 0` -
+    /// non-blocking poll, ненулевое значение - относительный timeout.
     ObjectWaitOne = 0x11,
 
     // 0x20..=0x2F - channel.
