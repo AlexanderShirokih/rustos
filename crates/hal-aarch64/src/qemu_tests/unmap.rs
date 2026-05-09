@@ -25,8 +25,8 @@ use memory::{
     memory_mapper::{MemoryMapper, MemoryMappingError, MemoryUnmappingError},
     virtual_address::PageAlignedVirtualAddress,
 };
-use qemu_test_harness::register_test;
 use scheduler::AddressSpace;
+use test_harness_qemu::register_test;
 
 use crate::{
     HIGHER_HALF_BASE,
@@ -83,7 +83,7 @@ fn mapper_unmap_roundtrip() {
 
     for i in 0..pages {
         let p = va(PROBE_BASE + i * PAGE_SIZE);
-        qemu_test_harness::kassert!(downcast_user_mapper(mapper).query_leaf_raw(p).is_some());
+        test_harness_qemu::kassert!(downcast_user_mapper(mapper).query_leaf_raw(p).is_some());
     }
 
     mapper
@@ -92,7 +92,7 @@ fn mapper_unmap_roundtrip() {
 
     for i in 0..pages {
         let p = va(PROBE_BASE + i * PAGE_SIZE);
-        qemu_test_harness::kassert!(downcast_user_mapper(mapper).query_leaf_raw(p).is_none());
+        test_harness_qemu::kassert!(downcast_user_mapper(mapper).query_leaf_raw(p).is_none());
     }
 }
 
@@ -115,7 +115,7 @@ fn mapper_unmap_then_remap() {
         .expect("re-map after unmap must succeed");
 
     for i in 0..pages {
-        qemu_test_harness::kassert!(
+        test_harness_qemu::kassert!(
             downcast_user_mapper(mapper)
                 .query_leaf_raw(va(base.as_usize() + i * PAGE_SIZE))
                 .is_some()
@@ -138,7 +138,7 @@ fn mapper_unmap_unmapped_returns_not_mapped() {
     let err = mapper
         .unmap(base, PAGE_SIZE)
         .expect_err("unmap of unmapped VA must fail");
-    qemu_test_harness::kassert!(matches!(err, MemoryUnmappingError::NotMapped));
+    test_harness_qemu::kassert!(matches!(err, MemoryUnmappingError::NotMapped));
 }
 
 /// `unmap` после `map_exact` НЕ возвращает PA в `FrameAllocator` - для
@@ -156,7 +156,7 @@ fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
     // должен возвращать в FA.
     let sentinel = real_fa.allocate_frame().expect("sentinel frame");
     let sentinel_pa = sentinel.page_address();
-    qemu_test_harness::kassert!(real_fa.is_allocated(sentinel));
+    test_harness_qemu::kassert!(real_fa.is_allocated(sentinel));
 
     let target_va = va(PROBE_BASE + 0x50_0000);
     mapper
@@ -166,7 +166,7 @@ fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
     mapper.unmap(target_va, PAGE_SIZE).expect("unmap sentinel");
 
     // Главный assert: после unmap sentinel-фрейм всё ещё считается занятым.
-    qemu_test_harness::kassert!(real_fa.is_allocated(sentinel));
+    test_harness_qemu::kassert!(real_fa.is_allocated(sentinel));
 
     // Sentinel освобождаем сами - фрейм был наш, не mapper'а.
     let _ = real_fa.deallocate_frame(sentinel);
@@ -186,9 +186,9 @@ fn mapper_unmap_misaligned_size_rejected() {
     let err = mapper
         .unmap(base, PAGE_SIZE + 1)
         .expect_err("unmap must reject misaligned size");
-    qemu_test_harness::kassert!(matches!(err, MemoryUnmappingError::MisalignedRange));
+    test_harness_qemu::kassert!(matches!(err, MemoryUnmappingError::MisalignedRange));
 
-    qemu_test_harness::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_some());
+    test_harness_qemu::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_some());
 
     mapper.unmap(base, PAGE_SIZE).expect("cleanup unmap");
 }
@@ -272,11 +272,11 @@ fn mapper_map_partial_oom_rollback() {
     let err = mapper
         .map(base, pages, &[], MemFlags::user_rw())
         .expect_err("map must OOM after capped allocate count");
-    qemu_test_harness::kassert!(matches!(err, MemoryMappingError::OutOfMemory));
+    test_harness_qemu::kassert!(matches!(err, MemoryMappingError::OutOfMemory));
 
     for i in 0..pages {
         let p = va(base.as_usize() + i * PAGE_SIZE);
-        qemu_test_harness::kassert!(mapper.query_leaf_raw(p).is_none());
+        test_harness_qemu::kassert!(mapper.query_leaf_raw(p).is_none());
     }
 
     // Drop mapper'а вернёт root + intermediate L1/L2/L3 в реальный FA через

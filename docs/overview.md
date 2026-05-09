@@ -51,6 +51,6 @@ crates/hal-aarch64 <- точка входа, платформенный код
 | `log` | `crates/log` | Макросы логирования (`klog`) |
 | `memory` | `crates/memory` | Frame allocator, bitmap |
 | `util` | `crates/util` | Утилиты |
-| `qemu-test-harness` | `crates/qemu-test-harness` | Хост-часть QEMU тест-харнесса |
-| `qemu-test-harness-aarch64` | `crates/qemu-test-harness-aarch64` | Гостевая часть QEMU тест-харнесса |
+| `test-harness-qemu` | `crates/test-harness-qemu` | Хост-часть QEMU тест-харнесса |
+| `test-harness-qemu-aarch64` | `crates/test-harness-qemu-aarch64` | Гостевая часть QEMU тест-харнесса |
 | `xtask` | `xtask` | Хост-инструмент сборки (CLI) |

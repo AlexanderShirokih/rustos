@@ -9,9 +9,9 @@ use core::arch::asm;
 
 use kernelspace::syscall_bridge::scheduler;
 use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, handle_close, install_handle};
-use qemu_test_harness::register_test;
 use scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
 use syscall::{SyscallError, SyscallOp};
+use test_harness_qemu::register_test;
 
 /// SVC с неизвестным immediate должен возвращать `-BadSyscall`,
 /// kernel - продолжить выполнение без panic.
@@ -25,7 +25,7 @@ fn syscall_unknown_op_returns_bad_syscall() {
             options(nostack, preserves_flags),
         );
     }
-    qemu_test_harness::kassert_eq!(result, i64::from(SyscallError::BadSyscall));
+    test_harness_qemu::kassert_eq!(result, i64::from(SyscallError::BadSyscall));
 }
 
 /// `object_signal` через SVC: kernel создаёт Event, инсталлит handle,
@@ -53,8 +53,8 @@ fn syscall_object_signal_round_trip() {
             options(nostack, preserves_flags),
         );
     }
-    qemu_test_harness::kassert_eq!(result, 0);
-    qemu_test_harness::kassert!(event.peek() & EVENT_SIGNALED == EVENT_SIGNALED);
+    test_harness_qemu::kassert_eq!(result, 0);
+    test_harness_qemu::kassert!(event.peek() & EVENT_SIGNALED == EVENT_SIGNALED);
 }
 
 /// `object_wait_one` через SVC, fast-path: сигналим Event до wait;
@@ -82,7 +82,7 @@ fn syscall_object_wait_one_fast_path() {
             options(nostack, preserves_flags),
         );
     }
-    qemu_test_harness::kassert_eq!(observed, i64::from(EVENT_SIGNALED));
+    test_harness_qemu::kassert_eq!(observed, i64::from(EVENT_SIGNALED));
 }
 
 /// `object_wait_one` через SVC, poll-path: Event не сигналит,
@@ -109,7 +109,7 @@ fn syscall_object_wait_one_poll_returns_timeout() {
             options(nostack, preserves_flags),
         );
     }
-    qemu_test_harness::kassert_eq!(observed, i64::from(SyscallError::Timeout));
+    test_harness_qemu::kassert_eq!(observed, i64::from(SyscallError::Timeout));
     handle_close(id).expect("close poll-test handle");
 }
 
@@ -151,7 +151,7 @@ fn syscall_object_wait_one_blocks_until_signaled() {
             options(nostack, preserves_flags),
         );
     }
-    qemu_test_harness::kassert_eq!(observed, i64::from(EVENT_SIGNALED));
+    test_harness_qemu::kassert_eq!(observed, i64::from(EVENT_SIGNALED));
 }
 
 /// SVC с нулевым `HandleId` должен возвращать `-InvalidArgument`.
@@ -169,7 +169,7 @@ fn syscall_object_signal_zero_handle_returns_invalid_argument() {
             options(nostack, preserves_flags),
         );
     }
-    qemu_test_harness::kassert_eq!(result, i64::from(SyscallError::InvalidArgument));
+    test_harness_qemu::kassert_eq!(result, i64::from(SyscallError::InvalidArgument));
 }
 
 register_test!(

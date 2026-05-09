@@ -44,8 +44,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[cfg(all(not(test), feature = "qemu-tests"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    use qemu_test_harness::backend::Backend;
+    use test_harness_qemu::backend::Backend;
 
     klog::fatal!("[TEST-FAIL: panic] {}", info);
-    qemu_test_harness_aarch64::BACKEND.exit(1)
+    test_harness_qemu_aarch64::BACKEND.exit(1)
 }

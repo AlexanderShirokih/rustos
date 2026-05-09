@@ -12,7 +12,7 @@ pub struct TestCase {
 ///
 /// ```ignore
 /// fn meta_test() { /* ... */ }
-/// qemu_test_harness::register_test!(META_TEST, "meta", meta_test);
+/// test_harness_qemu::register_test!(META_TEST, "meta", meta_test);
 /// ```
 #[macro_export]
 macro_rules! register_test {

@@ -20,9 +20,9 @@ use memory::{
     MemFlags,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
-use qemu_test_harness::register_test;
 use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
 use syscall::SyscallOp;
+use test_harness_qemu::register_test;
 use userspace::{UserImage, UserSegment};
 
 const PAGE_SIZE: usize = 4096;
@@ -95,14 +95,14 @@ fn userspace_spawn_user_process_runs_to_exit() {
             launch,
         )
         .expect("spawn_user_process must succeed");
-    qemu_test_harness::kassert_eq!(info.initial_handle_ids.len(), 1);
+    test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
 
     let scheduler = super::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        qemu_test_harness::kassert!(spins < 500);
+        test_harness_qemu::kassert!(spins < 500);
     }
 
     let _ = spins;
@@ -205,14 +205,14 @@ fn userspace_vm_allocate_and_remap() {
     let info = super::user_process_launcher()
         .spawn_user_process_with_launch("user-vm-allocate", &image, Priority::highest(), 2, launch)
         .expect("spawn_user_process must succeed");
-    qemu_test_harness::kassert_eq!(info.initial_handle_ids.len(), 1);
+    test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
 
     let scheduler = super::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        qemu_test_harness::kassert!(spins < 500);
+        test_harness_qemu::kassert!(spins < 500);
     }
 
     let _ = spins;
@@ -319,14 +319,14 @@ fn userspace_vm_allocate_free_reuse_va() {
             launch,
         )
         .expect("spawn_user_process must succeed");
-    qemu_test_harness::kassert_eq!(info.initial_handle_ids.len(), 1);
+    test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
 
     let scheduler = super::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        qemu_test_harness::kassert!(spins < 500);
+        test_harness_qemu::kassert!(spins < 500);
     }
 
     let _ = spins;

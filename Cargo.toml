@@ -17,8 +17,8 @@ members = [
     "crates/io",
     "crates/log",
     "crates/memory",
-    "crates/qemu-test-harness",
-    "crates/qemu-test-harness-aarch64",
+    "crates/test-harness-qemu",
+    "crates/test-harness-qemu-aarch64",
     "crates/userspace",
     "crates/util",
     "xtask",
@@ -55,14 +55,14 @@ kernelspace = { path = "crates/kernelspace" }
 kobject = { path = "crates/kobject" }
 scheduler = { path = "crates/scheduler" }
 syscall = { path = "crates/syscall" }
-qemu-test-harness = { path = "crates/qemu-test-harness" }
-qemu-test-harness-aarch64 = { path = "crates/qemu-test-harness-aarch64" }
+test-harness-qemu = { path = "crates/test-harness-qemu" }
+test-harness-qemu-aarch64 = { path = "crates/test-harness-qemu-aarch64" }
 userspace = { path = "crates/userspace" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # Архитектурно-независимый код не должен использовать `unsafe`. Платформенные
-# крейты (arch-*, drivers-*-aarch64, qemu-test-harness-aarch64) и низкоуровневые
+# крейты (arch-*, drivers-*-aarch64, test-harness-qemu-aarch64) и низкоуровневые
 # ядерные примитивы (memory, kernelspace, io, collections, fdt, ...) явно опциируются
 # через `#![allow(unsafe_code)]` в корне крейта - это видно в diff.
 unsafe_code = "deny"

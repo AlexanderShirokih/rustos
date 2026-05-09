@@ -1,4 +1,4 @@
-//! Aarch64 backend для [`qemu_test_harness`]: QEMU `virt` semihosting + PL011.
+//! Aarch64 backend для [`test_harness_qemu`]: QEMU `virt` semihosting + PL011.
 
 #![no_std]
 #![allow(unsafe_code)]
@@ -6,7 +6,7 @@
 mod exit;
 mod uart;
 
-use qemu_test_harness::Backend;
+use test_harness_qemu::Backend;
 pub use uart::Pl011Writer;
 
 pub struct Aarch64Backend;

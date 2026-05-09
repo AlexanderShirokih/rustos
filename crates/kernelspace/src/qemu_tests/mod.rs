@@ -2,7 +2,7 @@
 //!
 //! `kmain` после bootstrap'а создаёт init-таск и под этой фичей вызывает
 //! [`run`] - он подключает console writer и запускает все
-//! зарегистрированные тест-кейсы через `qemu_test_harness::run_all_tests()`.
+//! зарегистрированные тест-кейсы через `test_harness_qemu::run_all_tests()`.
 //!
 //! Кейсы распределены по подмодулям и регистрируются через
 //! `register_test!`. Линкер-секция `.tests.kernel` собирает их со всех
@@ -126,6 +126,6 @@ pub fn run(kernel: &mut KernelContext) -> ! {
 
     let writer: &'static (dyn Writer + Send + Sync) =
         ADAPTER.get().expect("ADAPTER initialised above");
-    qemu_test_harness::runner::install_writer(writer);
-    qemu_test_harness::run_all_tests()
+    test_harness_qemu::runner::install_writer(writer);
+    test_harness_qemu::run_all_tests()
 }

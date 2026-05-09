@@ -37,13 +37,13 @@ use memory::{
     physical_address::PageAlignedAddress,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
-use qemu_test_harness::register_test;
 use scheduler::{
     AddressSpace, ArchContext, Priority, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig,
     UserBootstrapArg, UserEntry,
 };
 use spin::Once;
 use syscall::SyscallOp;
+use test_harness_qemu::register_test;
 
 use crate::{
     HIGHER_HALF_BASE, memory::address_space_factory::UserAarch64MemoryMapper, sched::Aarch64Context,
@@ -189,17 +189,17 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
     let payload_raw = aarch64_mapper
         .query_leaf_raw(payload_va)
         .expect("payload leaf must exist after remap");
-    qemu_test_harness::kassert_eq!(payload_raw & 0b11, 0b11);
-    qemu_test_harness::kassert_eq!((payload_raw >> 6) & 0b11, 0b11); // AP=UserRO
-    qemu_test_harness::kassert_eq!((payload_raw >> 10) & 1, 1); // AF=1
-    qemu_test_harness::kassert_eq!((payload_raw >> 53) & 1, 1); // PXN=1
-    qemu_test_harness::kassert_eq!((payload_raw >> 54) & 1, 0); // UXN=0
+    test_harness_qemu::kassert_eq!(payload_raw & 0b11, 0b11);
+    test_harness_qemu::kassert_eq!((payload_raw >> 6) & 0b11, 0b11); // AP=UserRO
+    test_harness_qemu::kassert_eq!((payload_raw >> 10) & 1, 1); // AF=1
+    test_harness_qemu::kassert_eq!((payload_raw >> 53) & 1, 1); // PXN=1
+    test_harness_qemu::kassert_eq!((payload_raw >> 54) & 1, 0); // UXN=0
 
     let stack_raw = aarch64_mapper
         .query_leaf_raw(stack_va)
         .expect("stack leaf must exist");
-    qemu_test_harness::kassert_eq!((stack_raw >> 6) & 0b11, 0b01); // AP=UserRW
-    qemu_test_harness::kassert_eq!((stack_raw >> 54) & 1, 1); // UXN=1
+    test_harness_qemu::kassert_eq!((stack_raw >> 6) & 0b11, 0b01); // AP=UserRW
+    test_harness_qemu::kassert_eq!((stack_raw >> 54) & 1, 1); // UXN=1
 
     let user_stack_top = (USER_TEST_STACK_VA + PAGE_SIZE) & !0xF;
 

@@ -28,8 +28,8 @@ use memory::{
     physical_address::PageAlignedAddress,
     virtual_address::PageAlignedVirtualAddress,
 };
-use qemu_test_harness::register_test;
 use scheduler::{AddressSpace, ArchContext};
+use test_harness_qemu::register_test;
 
 use crate::{HIGHER_HALF_BASE, sched::Aarch64Context};
 
@@ -127,8 +127,8 @@ fn process_a_and_b_see_distinct_memory_at_same_va() {
     let (as_a, _kva_a) = make_user_as_with_probe_page(sentinel_a);
     let (as_b, _kva_b) = make_user_as_with_probe_page(sentinel_b);
 
-    qemu_test_harness::kassert_eq!(read_probe_via_user_as(&as_a), sentinel_a);
-    qemu_test_harness::kassert_eq!(read_probe_via_user_as(&as_b), sentinel_b);
+    test_harness_qemu::kassert_eq!(read_probe_via_user_as(&as_a), sentinel_a);
+    test_harness_qemu::kassert_eq!(read_probe_via_user_as(&as_b), sentinel_b);
     // Возвращаемся в kernel-AS.
     Aarch64Context::switch_address_space(None);
 
@@ -145,11 +145,11 @@ fn ttbr0_is_switched_on_process_change() {
     let ttbr0_after = read_ttbr0();
     // TTBR0_EL1[47:12] хранит адрес таблицы; [63:48] - ASID. Сравниваем по
     // PA-mask 4К-страницы.
-    qemu_test_harness::kassert_eq!(ttbr0_after & 0x0000_FFFF_FFFF_F000, root_a_pa);
+    test_harness_qemu::kassert_eq!(ttbr0_after & 0x0000_FFFF_FFFF_F000, root_a_pa);
 
     // Возврат в kernel-AS.
     Aarch64Context::switch_address_space(None);
-    qemu_test_harness::kassert_eq!(read_ttbr0(), 0);
+    test_harness_qemu::kassert_eq!(read_ttbr0(), 0);
 
     // Утечка as_a, чтобы фрейм root'а не вернулся в аллокатор и не сломал
     // следующий тест.
@@ -159,9 +159,9 @@ fn ttbr0_is_switched_on_process_change() {
 fn kernel_thread_after_user_has_ttbr0_zero() {
     let (as_a, _) = make_user_as_with_probe_page(0x1234_5678);
     Aarch64Context::switch_address_space(as_a.handle());
-    qemu_test_harness::kassert!(read_ttbr0() != 0);
+    test_harness_qemu::kassert!(read_ttbr0() != 0);
     Aarch64Context::switch_address_space(None);
-    qemu_test_harness::kassert_eq!(read_ttbr0(), 0);
+    test_harness_qemu::kassert_eq!(read_ttbr0(), 0);
     core::mem::forget(as_a);
 }
 
@@ -179,14 +179,14 @@ fn user_thread_exit_releases_address_space_frames() {
     let root_before = handle.root.as_u64();
 
     Aarch64Context::switch_address_space(Some(handle));
-    qemu_test_harness::kassert_eq!(read_ttbr0() & 0x0000_FFFF_FFFF_F000, root_before);
+    test_harness_qemu::kassert_eq!(read_ttbr0() & 0x0000_FFFF_FFFF_F000, root_before);
 
     // Возвращаемся в kernel-AS, потом drop - иначе TLB удержит трансляции
     // из old user-AS до следующего switch'а.
     Aarch64Context::switch_address_space(None);
     drop(user_as);
 
-    qemu_test_harness::kassert_eq!(read_ttbr0(), 0);
+    test_harness_qemu::kassert_eq!(read_ttbr0(), 0);
 }
 
 register_test!(

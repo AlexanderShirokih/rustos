@@ -204,13 +204,13 @@ dependencies = [
  "klog",
  "kobject",
  "memory",
- "qemu-test-harness",
- "qemu-test-harness-aarch64",
  "scheduler",
  "serde",
  "serde_yaml",
  "spin",
  "syscall",
+ "test-harness-qemu",
+ "test-harness-qemu-aarch64",
  "userspace",
 ]
 
@@ -287,10 +287,10 @@ dependencies = [
  "klog",
  "kobject",
  "memory",
- "qemu-test-harness",
  "scheduler",
  "spin",
  "syscall",
+ "test-harness-qemu",
  "userspace",
 ]
 
@@ -351,22 +351,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "qemu-test-harness"
-version = "0.1.0"
-dependencies = [
- "io",
- "spin",
-]
-
-[[package]]
-name = "qemu-test-harness-aarch64"
-version = "0.1.0"
-dependencies = [
- "io",
- "qemu-test-harness",
 ]
 
 [[package]]
@@ -483,6 +467,22 @@ dependencies = [
  "kobject",
  "memory",
  "spin",
+]
+
+[[package]]
+name = "test-harness-qemu"
+version = "0.1.0"
+dependencies = [
+ "io",
+ "spin",
+]
+
+[[package]]
+name = "test-harness-qemu-aarch64"
+version = "0.1.0"
+dependencies = [
+ "io",
+ "test-harness-qemu",
 ]
 
 [[package]]

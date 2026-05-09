@@ -3,8 +3,8 @@
 //! будит ожидающего на signal-бите.
 
 use kobject::{Event, Handle, KObject, Rights, install_handle, object_wait_one};
-use qemu_test_harness::register_test;
 use scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
+use test_harness_qemu::register_test;
 
 const SIGNAL_BIT: u32 = 1 << 0;
 
@@ -33,8 +33,8 @@ fn event_signal_after_deadline() {
     let observed =
         object_wait_one(event_id, SIGNAL_BIT, None).expect("wait must complete via SIGNAL_BIT");
 
-    qemu_test_harness::kassert!(observed & SIGNAL_BIT == SIGNAL_BIT);
-    qemu_test_harness::kassert!(event.peek() & SIGNAL_BIT == SIGNAL_BIT);
+    test_harness_qemu::kassert!(observed & SIGNAL_BIT == SIGNAL_BIT);
+    test_harness_qemu::kassert!(event.peek() & SIGNAL_BIT == SIGNAL_BIT);
 }
 
 register_test!(

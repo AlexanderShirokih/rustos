@@ -1,5 +1,5 @@
 [package]
-name = "qemu-test-harness"
+name = "test-harness-qemu"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
