@@ -166,12 +166,8 @@ fn kernel_thread_after_user_has_ttbr0_zero() {
 }
 
 fn user_thread_exit_releases_address_space_frames() {
-    // Создаём user-AS, маппим страницу - это заставит mapper выделить L1/L2/L3
-    // фреймы. После drop(user_as) корневой root-фрейм возвращается в
-    // FrameAllocator (промежуточные L1/L2/L3 - позднее, по мере раскрутки
-    // walker'ом; см. план). Здесь проверяем, что после drop'а активный
-    // TTBR0 не указывает на освобождённый root: переключаемся на user_as,
-    // запоминаем root, дропаем, переключаемся обратно в kernel-AS.
+    // Oracle: dropping user_as must release its root without leaving TTBR0
+    // pointing at freed memory.
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
     let user_as = AddressSpace::new_user(factory).expect("create user AS");

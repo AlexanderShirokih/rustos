@@ -85,9 +85,7 @@ pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<
 
     let user_vm = runtime().current_user_vm().ok_or(SyscallError::WrongType)?;
 
-    // Сначала валидируем регистрацию региона без мутаций. Затем правим
-    // page-tables. И только в случае успеха обновляем флаги в реестре -
-    // так при провале mapper.remap состояния остаются согласованными.
+    // Keep registry state unchanged until mapper.remap succeeds.
     user_vm
         .allocator()
         .with_lock(|alloc| alloc.lookup(base, size).map(|_| ()))

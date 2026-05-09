@@ -15,7 +15,7 @@ pub mod bump_allocator;
 pub mod frame;
 pub mod frame_allocator;
 mod frame_bitmap;
-pub mod heap_vm_allocator;
+pub mod kernel_vm_allocator;
 pub mod mem_flags;
 pub mod memory;
 pub mod memory_mapper;

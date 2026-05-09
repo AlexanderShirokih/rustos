@@ -296,7 +296,6 @@ fn switch_between_threads_in_same_process_does_not_change_address_space() {
     let _ = scheduler.run();
     let switches = take_address_space_switches();
     // С kernel-AS у разных kernel-thread'ов root_pa = None для обоих.
-    // Проверяем, что любой записанный switch - это `None` (kernel-AS).
     for sw in switches {
         assert_eq!(sw, None, "kernel-only switches must use root=None");
     }

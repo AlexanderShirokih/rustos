@@ -10,7 +10,7 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use memory::{bump_allocator::BumpAllocator, heap_vm_allocator::HeapAllocator};
+use memory::{bump_allocator::BumpAllocator, kernel_vm_allocator::HeapAllocator};
 
 #[global_allocator]
 pub(crate) static GLOBAL_ALLOCATOR: GlobalKernelAllocator = GlobalKernelAllocator::new();
@@ -24,8 +24,6 @@ const PHASE_HEAP: u8 = 2;
 /// Заморожен (аллокации запрещены).
 const PHASE_FROZEN: u8 = 3;
 
-pub type KernelHeapAllocator = HeapAllocator;
-
 /// Двухфазный глобальный аллокатор ядра.
 pub struct GlobalKernelAllocator {
     /// Текущая фаза работы.
@@ -33,7 +31,7 @@ pub struct GlobalKernelAllocator {
     /// Bump-аллокатор для ранней инициализации.
     bump: UnsafeCell<MaybeUninit<BumpAllocator>>,
     /// Heap-аллокатор для основной работы.
-    heap: UnsafeCell<MaybeUninit<KernelHeapAllocator>>,
+    heap: UnsafeCell<MaybeUninit<HeapAllocator>>,
 }
 
 // SAFETY: GlobalKernelAllocator использует атомарные операции для синхронизации
@@ -61,7 +59,7 @@ impl GlobalKernelAllocator {
     }
 
     /// Переключает на heap-фазу.
-    pub fn set_heap(&self, heap_allocator: KernelHeapAllocator) {
+    pub fn set_heap(&self, heap_allocator: HeapAllocator) {
         let heap_ptr = self.heap.get();
         // SAFETY: caller вызывает `set_heap` ровно один раз перед переходом в PHASE_HEAP,
         // в этот момент конкурентного доступа к `heap` нет; затем фаза публикуется через Release.
@@ -90,7 +88,7 @@ impl GlobalKernelAllocator {
     /// Вызывающий должен гарантировать, что heap-аллокатор инициализирован
     /// и не происходит конкурентного доступа.
     #[allow(clippy::mut_from_ref)]
-    unsafe fn get_heap(&self) -> &mut KernelHeapAllocator {
+    unsafe fn get_heap(&self) -> &mut HeapAllocator {
         // SAFETY: caller гарантирует инициализацию `heap` (фаза == PHASE_HEAP) и отсутствие гонок;
         // `assume_init_mut` корректен.
         unsafe { (*self.heap.get()).assume_init_mut() }

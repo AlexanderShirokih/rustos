@@ -319,10 +319,8 @@ where
             // Block (2M) на этом уровне в user-AS не создаётся; Invalid/Decode - пропускаем.
             if let Ok(AnyEntry::Table(te)) = decode::<L2>(raw) {
                 let l3_pa = extract_table_pa(te.raw());
-                // Сначала освобождаем все leaf-страницы в этой L3-таблице.
                 // SAFETY: l3_pa получен из валидного L2 Table-дескриптора.
                 unsafe { self.free_l3_leaves(l3_pa) };
-                // Потом саму L3-таблицу.
                 let _ = self
                     .frame_allocator
                     .deallocate_frame(Frame::containing_address(l3_pa.as_physical_address()));

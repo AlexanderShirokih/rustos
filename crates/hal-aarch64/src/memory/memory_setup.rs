@@ -13,6 +13,7 @@ use memory::{
     FrameBitmap,
     bump_allocator::BumpAllocator,
     frame_allocator::{FrameAllocator, PhysicalFrameAllocator},
+    kernel_vm_allocator::HeapAllocator,
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
     memory_range::MemoryRange,
     physical_address::{PageAlignedAddress, PhysicalAddress},
@@ -20,7 +21,7 @@ use memory::{
 };
 
 use crate::memory::{
-    global_allocator::{GLOBAL_ALLOCATOR, KernelHeapAllocator},
+    global_allocator::GLOBAL_ALLOCATOR,
     layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},
     memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
     mmu::{Mmu, NormalDualSpaceConfig},
@@ -335,7 +336,7 @@ impl MemorySetup<Enabled> {
             fa_virt.relocate_inner_pointers_by_offset(higher_half_base.as_usize());
         }
 
-        let allocator = KernelHeapAllocator::new(fa_virt, higher_half_base);
+        let allocator = HeapAllocator::new(fa_virt, higher_half_base);
         GLOBAL_ALLOCATOR.set_heap(allocator);
 
         let higher_ptr_phys =

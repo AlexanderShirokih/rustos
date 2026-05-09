@@ -11,7 +11,7 @@ use core::{
 use memory::{
     frame::Frame,
     frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
-    heap_vm_allocator::{AllocationError, HeapAllocator},
+    kernel_vm_allocator::{AllocationError, HeapAllocator},
     physical_address::PageAlignedAddress,
     virtual_address::PageAlignedVirtualAddress,
 };
@@ -226,6 +226,19 @@ fn create_test_allocator() -> HeapAllocator {
     HeapAllocator::new(frame_allocator, heap_start_va)
 }
 
+fn create_test_allocator_with_pages(total_pages: usize) -> HeapAllocator {
+    let buffer = allocate_test_buffer(total_pages * PAGE_SIZE + PAGE_SIZE);
+    let mock_frame_allocator = MockFrameAllocator::new(buffer);
+    let buffer_addr = mock_frame_allocator.buffer_addr();
+
+    let frame_allocator: &'static dyn FrameAllocator = Box::leak(Box::new(mock_frame_allocator));
+
+    let heap_start_va =
+        PageAlignedVirtualAddress::from_usize(buffer_addr).expect("should be page aligned");
+
+    HeapAllocator::new(frame_allocator, heap_start_va)
+}
+
 // =============================================================================
 // 1. Базовое выделение
 // =============================================================================
@@ -416,6 +429,26 @@ fn deallocate_middle_block_allows_reuse() {
         new_ptr.as_ptr(),
         ptr3.as_ptr(),
         "new allocation should not overlap with third"
+    );
+}
+
+#[test]
+fn deallocate_coalesces_adjacent_blocks_for_large_reuse() {
+    let mut allocator = create_test_allocator_with_pages(1);
+
+    let small_layout = Layout::from_size_align(1000, 8).unwrap();
+    let ptr1 = allocator.allocate(small_layout).unwrap();
+    let ptr2 = allocator.allocate(small_layout).unwrap();
+    let ptr3 = allocator.allocate(small_layout).unwrap();
+
+    allocator.deallocate(ptr1);
+    allocator.deallocate(ptr3);
+    allocator.deallocate(ptr2);
+
+    let large_layout = Layout::from_size_align(3500, 8).unwrap();
+    assert!(
+        allocator.allocate(large_layout).is_ok(),
+        "adjacent free blocks should be coalesced before retrying a large allocation"
     );
 }
 
@@ -724,6 +757,17 @@ fn expand_with_partial_frame_allocation() {
             );
         }
     }
+}
+
+#[test]
+fn expand_coalesces_adjacent_partial_frame_allocations() {
+    let mut allocator = create_limited_test_allocator();
+
+    let layout = Layout::from_size_align(6000, 8).unwrap();
+    assert!(
+        allocator.allocate(layout).is_ok(),
+        "adjacent pages returned by separate frame allocations should form one heap block"
+    );
 }
 
 /// Тест использования целого блока без разделения

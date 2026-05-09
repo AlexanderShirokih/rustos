@@ -491,8 +491,7 @@ fn last_thread_exit_releases_address_space() {
     // dying user-thread -> exit_current -> switch на idle.
     running.exit_current();
 
-    // После switch_to_next dying thread больше не current, cleanup_pending
-    // удалил user-Process, Drop Arc<AddressSpace> вернул mapper'а.
+    // Oracle: cleanup_pending removed the user Process and released its mapper.
     assert_eq!(factory.released(), 1, "user-AS must be released after exit");
     // Только idle остался.
     assert_eq!(running.process_count(), 1);

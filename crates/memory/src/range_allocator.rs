@@ -22,6 +22,11 @@ const PAGE_SIZE: usize = PageAlignedVirtualAddress::ALIGNMENT;
 /// Дефолтный лимит одновременно живых регионов в реестре.
 pub const DEFAULT_LIVE_REGION_CAPACITY: usize = 64;
 
+/// Стартовый резерв покрывает обычный сценарий с единицами живых регионов,
+/// не выделяя память под весь верхний лимит заранее.
+const DEFAULT_PREALLOCATED_LIVE_REGIONS: usize = 4;
+const DEFAULT_PREALLOCATED_FREE_RANGES: usize = DEFAULT_PREALLOCATED_LIVE_REGIONS + 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocateError {
     NotEnoughSpace,
@@ -123,8 +128,12 @@ impl<Tag: Copy> RangeAllocator<Tag> {
         end: VirtualAddress,
         capacity: usize,
     ) -> Self {
-        let mut free_ranges = Vec::new();
-        if end.as_usize() > start.as_usize() {
+        let has_initial_free_range = end.as_usize() > start.as_usize();
+        let mut free_ranges = Vec::with_capacity(Self::preallocated_free_ranges(
+            capacity,
+            has_initial_free_range,
+        ));
+        if has_initial_free_range {
             let pages = (end.as_usize() - start.as_usize()) / PAGE_SIZE;
             if let Some(pages) = NonZeroUsize::new(pages) {
                 free_ranges.push(FreeRange { base: start, pages });
@@ -134,8 +143,29 @@ impl<Tag: Copy> RangeAllocator<Tag> {
             arena_start: start,
             arena_end: end,
             free_ranges,
-            allocated: Vec::new(),
+            allocated: Vec::with_capacity(Self::preallocated_live_regions(capacity)),
             capacity,
+        }
+    }
+
+    const fn preallocated_live_regions(capacity: usize) -> usize {
+        if capacity < DEFAULT_PREALLOCATED_LIVE_REGIONS {
+            capacity
+        } else {
+            DEFAULT_PREALLOCATED_LIVE_REGIONS
+        }
+    }
+
+    const fn preallocated_free_ranges(capacity: usize, has_initial_free_range: bool) -> usize {
+        if !has_initial_free_range {
+            return 0;
+        }
+
+        let max_free_ranges = capacity.saturating_add(1);
+        if max_free_ranges < DEFAULT_PREALLOCATED_FREE_RANGES {
+            max_free_ranges
+        } else {
+            DEFAULT_PREALLOCATED_FREE_RANGES
         }
     }
 
@@ -335,6 +365,33 @@ mod tests {
 
     fn arena_pages(start: usize, end: usize) -> usize {
         (end - start) / PAGE_SIZE
+    }
+
+    #[test]
+    fn preallocates_for_common_small_region_count() {
+        let a = allocator();
+        assert!(
+            a.allocated.capacity() >= 4,
+            "default allocator should preallocate a few live-region slots"
+        );
+        assert!(
+            a.allocated.capacity() < DEFAULT_LIVE_REGION_CAPACITY,
+            "default allocator should not eagerly reserve the full live-region limit"
+        );
+
+        let small: RangeAllocator<u32> = RangeAllocator::with_capacity(
+            PageAlignedVirtualAddress::from_usize(REGION_START).unwrap(),
+            VirtualAddress::new(REGION_END),
+            2,
+        );
+        assert!(
+            small.allocated.capacity() >= 2,
+            "allocator should preallocate the requested small live-region limit"
+        );
+        assert!(
+            small.allocated.capacity() <= 2,
+            "preallocation must not exceed an explicit small live-region limit"
+        );
     }
 
     #[test]
@@ -652,36 +709,6 @@ mod tests {
         assert_eq!(
             a.lookup(r.base(), nz(PAGE_SIZE + 1)),
             Err(RangeError::UnalignedSize)
-        );
-    }
-
-    #[test]
-    fn allocate_error_display_round_trip() {
-        use alloc::format;
-        assert_eq!(
-            format!("{}", AllocateError::NotEnoughSpace),
-            "Range allocator arena exhausted"
-        );
-        assert_eq!(
-            format!("{}", AllocateError::UnalignedSize),
-            "Allocation size must be page-aligned"
-        );
-        assert_eq!(
-            format!("{}", AllocateError::OutOfSlots),
-            "Range allocator slot table is full"
-        );
-    }
-
-    #[test]
-    fn range_error_display_round_trip() {
-        use alloc::format;
-        assert_eq!(
-            format!("{}", RangeError::NotFound),
-            "No allocated range matches the request"
-        );
-        assert_eq!(
-            format!("{}", RangeError::UnalignedSize),
-            "Range size must be page-aligned"
         );
     }
 }

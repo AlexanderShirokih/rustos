@@ -203,10 +203,72 @@ impl HeapAllocator {
         // (либо только что выделенный `expand`-ом, либо только что вытащенный из free-list-а),
         // память замаплена и эксклюзивно доступна - read/write по нему корректны.
         unsafe {
-            let mut block = block_ptr.read();
-            block.next = self.free_list_head;
-            block_ptr.write(block);
-            self.free_list_head = Some(block_ptr);
+            (*block_ptr.as_ptr()).next = None;
+
+            let block_addr = block_ptr.as_ptr() as usize;
+            let mut prev: Option<NonNull<FreeBlock>> = None;
+            let mut current = self.free_list_head;
+
+            while let Some(current_ptr) = current {
+                if current_ptr.as_ptr() as usize >= block_addr {
+                    break;
+                }
+                prev = current;
+                current = (*current_ptr.as_ptr()).next;
+            }
+
+            (*block_ptr.as_ptr()).next = current;
+            if let Some(prev_ptr) = prev {
+                (*prev_ptr.as_ptr()).next = Some(block_ptr);
+            } else {
+                self.free_list_head = Some(block_ptr);
+            }
+
+            let coalesce_from = if let Some(prev_ptr) = prev {
+                if Self::blocks_are_adjacent(prev_ptr, block_ptr) {
+                    Self::merge_adjacent_blocks(prev_ptr, block_ptr);
+                    prev_ptr
+                } else {
+                    block_ptr
+                }
+            } else {
+                block_ptr
+            };
+
+            Self::coalesce_next_blocks(coalesce_from);
+        }
+    }
+
+    fn blocks_are_adjacent(left_ptr: NonNull<FreeBlock>, right_ptr: NonNull<FreeBlock>) -> bool {
+        // SAFETY: оба указателя являются узлами free-list-а. Чтение `left.size`
+        // корректно, а сравнение адресов не разыменовывает `right_ptr`.
+        unsafe {
+            let left_end =
+                left_ptr.as_ptr() as usize + size_of::<FreeBlock>() + (*left_ptr.as_ptr()).size;
+            left_end == right_ptr.as_ptr() as usize
+        }
+    }
+
+    fn merge_adjacent_blocks(left_ptr: NonNull<FreeBlock>, right_ptr: NonNull<FreeBlock>) {
+        // SAFETY: caller уже проверил, что `right_ptr` непосредственно следует
+        // за `left_ptr`. Оба блока свободны и принадлежат аллокатору, поэтому
+        // заголовок правого блока можно поглотить в полезный размер левого.
+        unsafe {
+            (*left_ptr.as_ptr()).size += size_of::<FreeBlock>() + (*right_ptr.as_ptr()).size;
+            (*left_ptr.as_ptr()).next = (*right_ptr.as_ptr()).next;
+        }
+    }
+
+    fn coalesce_next_blocks(block_ptr: NonNull<FreeBlock>) {
+        // SAFETY: `block_ptr` - узел free-list-а. Цикл читает только следующий
+        // узел списка и сливает его, когда адреса доказывают непосредственное соседство.
+        unsafe {
+            while let Some(next_ptr) = (*block_ptr.as_ptr()).next {
+                if !Self::blocks_are_adjacent(block_ptr, next_ptr) {
+                    break;
+                }
+                Self::merge_adjacent_blocks(block_ptr, next_ptr);
+            }
         }
     }
 
@@ -318,7 +380,5 @@ impl HeapAllocator {
             }
             // Если block_ptr уже null (повторный deallocate), ничего не делаем
         }
-
-        // TODO: Реализовать слияние смежных свободных блоков
     }
 }
