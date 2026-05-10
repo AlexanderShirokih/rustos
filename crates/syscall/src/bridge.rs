@@ -7,13 +7,10 @@
 //! ## Источник вызова
 //!
 //! [`Origin`] различает syscall'ы, инициированные из user-контекста и
-//! из самого ядра. По дизайну kernel-side IPC должен ходить напрямую
-//! через `kobject`, а не через trap, и в финальной
-//! системе [`SyscallError::KernelOriginated`] будет возвращаться
-//! ровно для [`Origin::Kernel`]. Сейчас, до активации user-режима,
-//! диспатчер обрабатывает оба источника одинаково - это позволяет
-//! покрывать syscall-слой end-to-end-тестами из kernel-thread'а;
-//! [`SyscallFrame::origin`] уже доступен для будущей проверки.
+//! из самого ядра. Kernel-side IPC ходит напрямую через `kobject`, а
+//! trap из [`Origin::Kernel`] отвергается с
+//! [`SyscallError::KernelOriginated`] до диспатча - syscall-trap
+//! зарезервирован исключительно для user->kernel-перехода.
 
 use core::num::NonZeroU32;
 
@@ -60,6 +57,11 @@ pub trait SyscallFrame {
 /// результат и записывает его в фрейм. Для not-returning syscall'ов
 /// (`thread_exit`) функция не возвращается.
 pub fn dispatch(frame: &mut dyn SyscallFrame) {
+    if frame.origin() == Origin::Kernel {
+        frame.set_return(SyscallError::KernelOriginated.into());
+        return;
+    }
+
     let op = match SyscallOp::from_raw(frame.op_raw()) {
         Ok(op) => op,
         Err(SyscallError::BadSyscall) => {
@@ -238,6 +240,16 @@ mod tests {
                 secondary: None,
             }
         }
+
+        pub fn kernel(op_raw: u16, args: [u64; 6]) -> Self {
+            Self {
+                op_raw,
+                args,
+                origin: Origin::Kernel,
+                returned: None,
+                secondary: None,
+            }
+        }
     }
 
     impl SyscallFrame for MockFrame {
@@ -263,6 +275,13 @@ mod tests {
         let mut f = MockFrame::user(99, [0; 6]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::BadSyscall)));
+    }
+
+    #[test]
+    fn kernel_origin_is_rejected_before_dispatch() {
+        let mut f = MockFrame::kernel(SyscallOp::ObjectSignal as u16, [1, 1, 0, 0, 0, 0]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::KernelOriginated)));
     }
 
     #[test]
