@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use collections::LockCell;
 
 use super::{
-    channel::{ChannelEndpoint, Message},
+    channel::{Channel, Message},
     errors::IpcError,
     handle::{Handle, HandleId},
     object::KObject,
@@ -105,7 +105,7 @@ pub fn object_wait_one(
     }
 }
 
-/// Создаёт пару связанных `ChannelEndpoint` и регистрирует оба handle'а
+/// Создаёт пару связанных `Channel` и регистрирует оба handle'а
 /// в handle-table текущего процесса. Возвращает пару идентификаторов
 /// `(left, right)` - endpoint'ы симметричны, любую сторону можно
 /// использовать как "свою" и передавать парную через
@@ -119,7 +119,7 @@ pub fn channel_create() -> Result<(HandleId, HandleId), IpcError> {
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
 
-    let (left_endpoint, right_endpoint) = ChannelEndpoint::create_pair(0);
+    let (left_endpoint, right_endpoint) = Channel::create_pair(0);
 
     let left_ko = KObject::Channel(left_endpoint);
     let right_ko = KObject::Channel(right_endpoint);

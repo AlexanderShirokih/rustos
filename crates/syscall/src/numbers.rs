@@ -22,10 +22,10 @@
 //! | `0x60..=0x6F` | резерв под Memory KObject                   |
 //! | `0x70..=0x7F` | резерв под Port KObject                     |
 //!
-//! `ChannelWrite`/`ChannelRead` (передача [`Message`](kobject::Message)
-//! через регистры невозможна - нужен user-pointer protocol) приедут в
-//! диапазон `0x20..=0x2F` после введения соответствующего ABI; здесь
-//! их пока нет.
+//! `ChannelWrite` (`0x21`) и `ChannelRead` (`0x22`) - register-flat,
+//! 5 аргументов; `ChannelRead` упаковывает в возврат
+//! `bytes_len | (handles_count << 32)`. Конкретные сигнатуры - на
+//! [`SyscallOp`].
 //!
 //! Стабильность: набор и нумерация - часть ABI и не меняются произвольно.
 
@@ -47,6 +47,15 @@ pub enum SyscallOp {
 
     // 0x20..=0x2F - channel.
     ChannelCreate = 0x20,
+    /// Помещает сообщение в парный endpoint. Аргументы:
+    /// `arg0=handle`, `arg1=bytes_va`, `arg2=bytes_len`, `arg3=handles_va`,
+    /// `arg4=handles_count`. Возвращает `0` на успехе.
+    ChannelWrite = 0x21,
+    /// Достаёт сообщение из inbound-очереди. Аргументы:
+    /// `arg0=handle`, `arg1=bytes_va`, `arg2=bytes_cap`, `arg3=handles_va`,
+    /// `arg4=handles_cap`. Возвращает упакованное `(bytes_len) |
+    /// (handles_count << 32)` в основном регистре.
+    ChannelRead = 0x22,
 
     // 0x30..=0x3F - handle lifecycle.
     HandleClose = 0x30,
@@ -74,6 +83,8 @@ impl SyscallOp {
             0x10 => Ok(Self::ObjectSignal),
             0x11 => Ok(Self::ObjectWaitOne),
             0x20 => Ok(Self::ChannelCreate),
+            0x21 => Ok(Self::ChannelWrite),
+            0x22 => Ok(Self::ChannelRead),
             0x30 => Ok(Self::HandleClose),
             0x31 => Ok(Self::HandleDuplicate),
             0x60 => Ok(Self::MemoryAllocate),
@@ -94,6 +105,8 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x10), Ok(SyscallOp::ObjectSignal));
         assert_eq!(SyscallOp::from_raw(0x11), Ok(SyscallOp::ObjectWaitOne));
         assert_eq!(SyscallOp::from_raw(0x20), Ok(SyscallOp::ChannelCreate));
+        assert_eq!(SyscallOp::from_raw(0x21), Ok(SyscallOp::ChannelWrite));
+        assert_eq!(SyscallOp::from_raw(0x22), Ok(SyscallOp::ChannelRead));
         assert_eq!(SyscallOp::from_raw(0x30), Ok(SyscallOp::HandleClose));
         assert_eq!(SyscallOp::from_raw(0x31), Ok(SyscallOp::HandleDuplicate));
         assert_eq!(SyscallOp::from_raw(0x60), Ok(SyscallOp::MemoryAllocate));

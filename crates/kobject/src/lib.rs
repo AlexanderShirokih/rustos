@@ -28,7 +28,7 @@ pub use api::{
     object_signal, object_wait_one,
 };
 pub use channel::{
-    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, DEFAULT_CHANNEL_CAPACITY,
+    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, CHANNEL_WRITABLE, Channel, DEFAULT_CHANNEL_CAPACITY,
     MESSAGE_INLINE_MAX, MESSAGE_MAX_HANDLES, Message,
 };
 pub use errors::IpcError;

@@ -21,10 +21,10 @@ use memory::{
     frame_allocator::FrameAllocator,
     memory_mapper::{
         AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
-        MemoryRemappingError, MemoryUnmappingError,
+        MemoryRemappingError, MemoryUnmappingError, UserCopyError,
     },
     physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress},
-    virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress},
+    virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress},
 };
 
 use crate::memory::{
@@ -39,6 +39,26 @@ use crate::memory::{
 /// возвращают в FA только страницы с битом - MMIO/устройственные PA не
 /// попадают в bitmap RAM.
 const OWNED_BY_FA_BIT: u64 = 1 << 55;
+
+/// Бит AP[0] (биты [7:6] leaf-PTE - поле AP[2:1]). Установлен -> EL0
+/// имеет доступ к странице; сброшен -> только EL1.
+const AP_USER_BIT: u64 = 1 << 6;
+/// Бит AP[1]. Установлен -> страница read-only; сброшен -> read-write.
+const AP_RO_BIT: u64 = 1 << 7;
+
+/// Направление user-копии: kernel читает из user-AS либо пишет в него.
+enum CopyDirection<'a> {
+    In(&'a mut [u8]),
+    Out(&'a [u8]),
+}
+
+fn leaf_user_accessible(raw: u64) -> bool {
+    raw & AP_USER_BIT != 0
+}
+
+fn leaf_user_writable(raw: u64) -> bool {
+    raw & AP_USER_BIT != 0 && raw & AP_RO_BIT == 0
+}
 
 /// Адаптер FrameAllocator для выделения таблиц страниц.
 ///
@@ -364,6 +384,78 @@ where
             .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
     }
 
+    /// Побайтовое копирование между user-AS и kernel-буфером.
+    ///
+    /// Семантика - по странице: walk leaf, проверка user-access (R/W),
+    /// `memcpy` через kernel-physmap. Под `mapper.with_lock` -
+    /// конкурентный unmap не может race'нуть (все мутации таблиц
+    /// держат тот же lock).
+    fn copy_user_bytes(
+        &self,
+        start: VirtualAddress,
+        len: usize,
+        mut dir: CopyDirection<'_>,
+    ) -> Result<(), UserCopyError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let page_size = PageAlignedAddress::ALIGNMENT;
+        let need_writable = matches!(dir, CopyDirection::Out(_));
+
+        self.mapper.with_lock(|mapper| {
+            let mut copied = 0usize;
+            while copied < len {
+                let va = start.as_usize() + copied;
+                let page_base = va & !(page_size - 1);
+                let in_page_off = va - page_base;
+                let take = (page_size - in_page_off).min(len - copied);
+
+                let page_va = PageAlignedVirtualAddress::from_usize(page_base)
+                    .ok_or(UserCopyError::NotMapped)?;
+
+                let (l3, idx) = mapper
+                    .walk_to_l3_leaf(page_va)
+                    .map_err(|_| UserCopyError::NotMapped)?;
+                // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) leaf-Page;
+                // mapper-lock держится этим with_lock - таблицы стабильны.
+                let raw = unsafe { (*l3).get_raw(idx) };
+
+                if !leaf_user_accessible(raw) {
+                    return Err(UserCopyError::AccessDenied);
+                }
+                if need_writable && !leaf_user_writable(raw) {
+                    return Err(UserCopyError::AccessDenied);
+                }
+
+                let pa = extract_table_pa(raw);
+                let kernel_ptr = (pa.as_usize() + self.vaddr_offset) as *mut u8;
+                // SAFETY: kernel_ptr валиден на page_size байт по линейной
+                // higher-half-карте; (in_page_off + take) <= page_size.
+                unsafe {
+                    let frame_byte = kernel_ptr.add(in_page_off);
+                    match &mut dir {
+                        CopyDirection::In(dst) => {
+                            core::ptr::copy_nonoverlapping(
+                                frame_byte,
+                                dst.as_mut_ptr().add(copied),
+                                take,
+                            );
+                        }
+                        CopyDirection::Out(src) => {
+                            core::ptr::copy_nonoverlapping(
+                                src.as_ptr().add(copied),
+                                frame_byte,
+                                take,
+                            );
+                        }
+                    }
+                }
+                copied += take;
+            }
+            Ok(())
+        })
+    }
+
     /// Per-line `ic ivau` по kernel-VA для свежезаписанной exec-страницы.
     /// Шаг 64 байта - минимальный гарантированный размер I-cache line на aarch64.
     ///
@@ -621,6 +713,14 @@ where
                 AddressSpaceHandle::new(self.root_pa, AddressSpaceTag(raw))
             }
         }
+    }
+
+    fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
+        self.copy_user_bytes(va, dst.len(), CopyDirection::In(dst))
+    }
+
+    fn copy_user_out(&self, va: VirtualAddress, src: &[u8]) -> Result<(), UserCopyError> {
+        self.copy_user_bytes(va, src.len(), CopyDirection::Out(src))
     }
 
     fn as_any(&self) -> &(dyn core::any::Any + 'static) {

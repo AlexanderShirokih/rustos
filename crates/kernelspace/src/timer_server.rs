@@ -17,9 +17,8 @@ use alloc::sync::Arc;
 
 use klog::{info, warn};
 use kobject::{
-    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, Event, Handle, HandleId, IpcError,
-    KObject, Message, Rights, channel_read, channel_write, install_handle, object_signal,
-    object_wait_one,
+    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, Channel, Event, Handle, HandleId, IpcError, KObject,
+    Message, Rights, channel_read, channel_write, install_handle, object_signal, object_wait_one,
 };
 use scheduler::{Priority, SchedulerService, SchedulerServiceExt, SpawnConfig};
 
@@ -46,8 +45,8 @@ pub fn encode_set_deadline(period_ms: u64) -> Message {
 /// который сервер сигналит при наступлении дедлайна.
 pub fn spawn_timer_server(
     scheduler: &Arc<dyn SchedulerService>,
-) -> Result<Arc<ChannelEndpoint>, &'static str> {
-    let (server_end, client_end) = ChannelEndpoint::create_pair(8);
+) -> Result<Arc<Channel>, &'static str> {
+    let (server_end, client_end) = Channel::create_pair(8);
 
     let scheduler_for_server = scheduler.clone();
     let server_end_for_thread = server_end.clone();
@@ -62,7 +61,7 @@ pub fn spawn_timer_server(
     Ok(client_end)
 }
 
-fn run_server(scheduler: &Arc<dyn SchedulerService>, server_end: &Arc<ChannelEndpoint>) {
+fn run_server(scheduler: &Arc<dyn SchedulerService>, server_end: &Arc<Channel>) {
     let event = Event::new();
 
     // Welcome-сообщение: handle на Event KO передаётся клиенту.
@@ -147,7 +146,7 @@ fn handle_command(scheduler: &Arc<dyn SchedulerService>, event: &Arc<Event>, msg
 /// Клиентская сторона pilot: устанавливает channel- и timer-handle'ы
 /// в свою handle-table и возвращает их идентификаторы. Используется
 /// демо-процессом из [`crate::kmain`].
-pub fn pilot_client_subscribe(client_end: &Arc<ChannelEndpoint>) -> Result<PilotHandles, IpcError> {
+pub fn pilot_client_subscribe(client_end: &Arc<Channel>) -> Result<PilotHandles, IpcError> {
     let chan_ko = KObject::Channel(client_end.clone());
     let chan_id = install_handle(Handle::new(
         chan_ko,

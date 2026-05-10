@@ -25,6 +25,7 @@ extern crate alloc;
 extern crate std;
 
 mod bridge;
+mod channel;
 mod error;
 mod flags;
 mod memory;

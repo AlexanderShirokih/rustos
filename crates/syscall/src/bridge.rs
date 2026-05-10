@@ -87,6 +87,26 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         SyscallOp::ChannelCreate => {
             sys_channel_create(frame);
         }
+        SyscallOp::ChannelWrite => {
+            let r = super::channel::sys_channel_write(
+                frame.arg(0),
+                frame.arg(1),
+                frame.arg(2),
+                frame.arg(3),
+                frame.arg(4),
+            );
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ChannelRead => {
+            let r = super::channel::sys_channel_read(
+                frame.arg(0),
+                frame.arg(1),
+                frame.arg(2),
+                frame.arg(3),
+                frame.arg(4),
+            );
+            frame.set_return(encode_return(r));
+        }
         SyscallOp::HandleClose => {
             let r = sys_handle_close(frame.arg(0));
             frame.set_return(encode_return(r));
@@ -189,7 +209,7 @@ fn signals_from_arg(raw: u64) -> u32 {
 /// Парсит ненулевой `HandleId` из аргумента syscall'а. `0`, а также
 /// значения, не помещающиеся в `u32`, отвергаются как
 /// [`SyscallError::InvalidArgument`].
-fn parse_handle_id(raw: u64) -> Result<kobject::HandleId, SyscallError> {
+pub(super) fn parse_handle_id(raw: u64) -> Result<kobject::HandleId, SyscallError> {
     let raw32 = u32::try_from(raw).map_err(|_| SyscallError::InvalidArgument)?;
     let nz = NonZeroU32::new(raw32).ok_or(SyscallError::InvalidArgument)?;
     Ok(kobject::HandleId::from_raw(nz))

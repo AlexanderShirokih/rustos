@@ -3,7 +3,7 @@
 //! `handle_close` -> ожидание `PEER_CLOSED` через `object_wait_one`.
 //!
 //! Прогоняется целиком через `kobject::api`-фасад, без прямых обращений
-//! к `Arc<ChannelEndpoint>` - это закрепляет, что новый syscall-уровень
+//! к `Arc<Channel>` - это закрепляет, что новый syscall-уровень
 //! API самодостаточен для типовых сценариев IPC.
 
 use kobject::{

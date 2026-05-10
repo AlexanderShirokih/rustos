@@ -1,11 +1,11 @@
-//! Round-trip через `ChannelEndpoint`: сигналы READABLE/PEER_CLOSED.
+//! Round-trip через `Channel`: сигналы READABLE/PEER_CLOSED.
 
 use test_harness_qemu::register_test;
 
 fn channel_echo() {
-    use kobject::{CHANNEL_PEER_CLOSED, CHANNEL_READABLE, ChannelEndpoint, IpcError, Message};
+    use kobject::{CHANNEL_PEER_CLOSED, CHANNEL_READABLE, Channel, IpcError, Message};
 
-    let (a, b) = ChannelEndpoint::create_pair(4);
+    let (a, b) = Channel::create_pair(4);
 
     // Пустая очередь -> ShouldWait.
     test_harness_qemu::kassert!(matches!(b.read(), Err(IpcError::ShouldWait)));

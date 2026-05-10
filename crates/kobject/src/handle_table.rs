@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use super::{
-    channel::ChannelEndpoint,
+    channel::Channel,
     errors::IpcError,
     event::Event,
     handle::{Handle, HandleId},
@@ -62,7 +62,17 @@ impl HandleTable {
     }
 
     /// Регистрирует handle, возвращая стабильный идентификатор.
+    /// На `OutOfHandles` объект **закрывается** (Handle уходит в drop).
+    /// Если caller'у важно сохранить объект на ошибке, используется
+    /// [`Self::try_insert`].
     pub fn insert(&mut self, handle: Handle) -> Result<HandleId, IpcError> {
+        self.try_insert(handle).map_err(|(e, _)| e)
+    }
+
+    /// То же, что [`Self::insert`], но при `OutOfHandles` возвращает
+    /// `Handle` обратно вместо его закрытия. Нужен для путей с
+    /// rollback'ом - например, atomic-`ChannelRead`.
+    pub fn try_insert(&mut self, handle: Handle) -> Result<HandleId, (IpcError, Handle)> {
         if let Some(idx) = self.pop_free_slot() {
             let slot = &mut self.slots[idx as usize];
             // pop_free_slot гарантирует, что generation ещё не исчерпана.
@@ -72,7 +82,7 @@ impl HandleTable {
         }
 
         if (self.slots.len() as u32) >= self.capacity {
-            return Err(IpcError::OutOfHandles);
+            return Err((IpcError::OutOfHandles, handle));
         }
 
         let idx = self.slots.len() as u32;
@@ -125,12 +135,8 @@ impl HandleTable {
         Ok(handle)
     }
 
-    /// Извлекает `Arc<ChannelEndpoint>` с проверкой прав и типа.
-    pub fn get_channel(
-        &self,
-        id: HandleId,
-        need: Rights,
-    ) -> Result<Arc<ChannelEndpoint>, IpcError> {
+    /// Извлекает `Arc<Channel>` с проверкой прав и типа.
+    pub fn get_channel(&self, id: HandleId, need: Rights) -> Result<Arc<Channel>, IpcError> {
         let h = self.lookup(id)?;
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
@@ -163,6 +169,39 @@ impl HandleTable {
             return Err(IpcError::AccessDenied);
         }
         Ok(handle.object().clone())
+    }
+
+    /// Атомарно проверяет, что все `ids` существуют, имеют `min_rights`
+    /// и нет дубликатов; затем удаляет их и возвращает `Vec<Handle>`.
+    ///
+    /// Атомарность важна для syscall handle-transfer: пользователь
+    /// должен либо потерять все handle'ы (msg уехал), либо ни одного
+    /// (build упал). Любая ошибка валидации - таблица не модифицируется.
+    pub fn try_drain_for_transfer(
+        &mut self,
+        ids: &[HandleId],
+        min_rights: Rights,
+    ) -> Result<Vec<Handle>, IpcError> {
+        // Дубликаты в `ids` отвергаем явно: после `remove(first)`
+        // повторный поиск второго вернул бы BadHandle "по факту", но
+        // ошибка относится не к закрытому handle'у, а к малформированному
+        // запросу - проверяем заранее, чтобы корректно атомарно отказать.
+        for (i, id) in ids.iter().enumerate() {
+            if ids[..i].iter().any(|prev| prev == id) {
+                return Err(IpcError::BadHandle);
+            }
+        }
+        for id in ids {
+            self.get(*id, min_rights)?;
+        }
+        let mut drained = Vec::with_capacity(ids.len());
+        for id in ids {
+            // Валидация выше гарантирует, что remove не упадёт: id найден,
+            // generation совпадает, rights включают min_rights.
+            let h = self.remove(*id).expect("validated above");
+            drained.push(h);
+        }
+        Ok(drained)
     }
 
     /// Создаёт новый handle на тот же KO с подмножеством прав.
@@ -232,7 +271,7 @@ mod tests {
     }
 
     fn channel_handle(rights: Rights) -> Handle {
-        let (ep, _) = ChannelEndpoint::create_pair(4);
+        let (ep, _) = Channel::create_pair(4);
         make_handle(KObject::Channel(ep), rights)
     }
 
@@ -384,6 +423,35 @@ mod tests {
         assert_eq!(err, IpcError::OutOfHandles);
     }
 
+    /// `try_insert` возвращает Handle на ошибке (а не закрывает его).
+    /// Это нужно atomic-rollback'у в `sys_channel_read`.
+    #[test]
+    fn try_insert_returns_handle_on_out_of_handles() {
+        use alloc::sync::Arc;
+
+        let mut table = HandleTable::with_capacity(1);
+        table.insert(event_handle(Rights::WAIT)).unwrap();
+
+        let event = Event::new();
+        let weak = Arc::downgrade(&event);
+        let handle = Handle::new(KObject::Event(event), Rights::WAIT);
+        let (err, returned) = table.try_insert(handle).unwrap_err();
+        assert_eq!(err, IpcError::OutOfHandles);
+        // KO жив - handle вернулся caller'у, а не дропнут таблицей.
+        assert!(weak.upgrade().is_some());
+        // Можно положить его обратно в новую таблицу.
+        let mut other = HandleTable::with_capacity(1);
+        other.insert(returned).unwrap();
+        assert_eq!(other.live_count(), 1);
+    }
+
+    #[test]
+    fn try_insert_success_matches_insert() {
+        let mut table = HandleTable::with_capacity(2);
+        let id = table.try_insert(event_handle(Rights::WAIT)).unwrap();
+        assert!(table.get(id, Rights::WAIT).is_ok());
+    }
+
     #[test]
     fn generation_rollover_retires_slot() {
         // capacity=1: один слот, который мы будем переиспользовать
@@ -410,6 +478,94 @@ mod tests {
             table.insert(event_handle(Rights::WAIT)).unwrap_err(),
             IpcError::OutOfHandles
         );
+    }
+
+    #[test]
+    fn try_drain_for_transfer_success() {
+        let mut table = HandleTable::new();
+        let id1 = table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .unwrap();
+        let id2 = table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .unwrap();
+        assert_eq!(table.live_count(), 2);
+
+        let drained = table
+            .try_drain_for_transfer(&[id1, id2], Rights::TRANSFER)
+            .unwrap();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(table.live_count(), 0);
+    }
+
+    #[test]
+    fn try_drain_for_transfer_empty_ok() {
+        let mut table = HandleTable::new();
+        let drained = table.try_drain_for_transfer(&[], Rights::TRANSFER).unwrap();
+        assert!(drained.is_empty());
+        assert_eq!(table.live_count(), 0);
+    }
+
+    #[test]
+    fn try_drain_for_transfer_missing_id_no_removal() {
+        let mut table = HandleTable::new();
+        let id = table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .unwrap();
+        let bogus = HandleId::pack(1, 999);
+
+        let err = table
+            .try_drain_for_transfer(&[id, bogus], Rights::TRANSFER)
+            .unwrap_err();
+        assert_eq!(err, IpcError::BadHandle);
+        // Никаких изменений в таблице.
+        assert_eq!(table.live_count(), 1);
+        assert!(table.get(id, Rights::TRANSFER).is_ok());
+    }
+
+    #[test]
+    fn try_drain_for_transfer_insufficient_rights_no_removal() {
+        let mut table = HandleTable::new();
+        let id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let err = table
+            .try_drain_for_transfer(&[id], Rights::TRANSFER)
+            .unwrap_err();
+        assert_eq!(err, IpcError::AccessDenied);
+        assert_eq!(table.live_count(), 1);
+        assert!(table.get(id, Rights::WAIT).is_ok());
+    }
+
+    #[test]
+    fn try_drain_for_transfer_duplicate_no_removal() {
+        let mut table = HandleTable::new();
+        let id = table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .unwrap();
+        let err = table
+            .try_drain_for_transfer(&[id, id], Rights::TRANSFER)
+            .unwrap_err();
+        assert_eq!(err, IpcError::BadHandle);
+        assert_eq!(table.live_count(), 1);
+        assert!(table.get(id, Rights::TRANSFER).is_ok());
+    }
+
+    #[test]
+    fn try_drain_for_transfer_partial_validation_atomic() {
+        // Если третий id невалиден, первые два не должны быть изъяты.
+        let mut table = HandleTable::new();
+        let id1 = table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .unwrap();
+        let id2 = table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .unwrap();
+        let bogus = HandleId::pack(1, 999);
+
+        let err = table
+            .try_drain_for_transfer(&[id1, id2, bogus], Rights::TRANSFER)
+            .unwrap_err();
+        assert_eq!(err, IpcError::BadHandle);
+        assert_eq!(table.live_count(), 2);
     }
 
     #[test]

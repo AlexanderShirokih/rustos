@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use super::{channel::ChannelEndpoint, event::Event, koid::Koid, wait::SignalState};
+use super::{channel::Channel, event::Event, koid::Koid, wait::SignalState};
 
 /// Kernel-объект (KO) - единица, к которой ядро выдаёт права.
 ///
@@ -13,7 +13,7 @@ use super::{channel::ChannelEndpoint, event::Event, koid::Koid, wait::SignalStat
 /// добавление нового KO заставит компилятор показать все match'и,
 /// требующие обновления.
 pub enum KObject {
-    Channel(Arc<ChannelEndpoint>),
+    Channel(Arc<Channel>),
     Event(Arc<Event>),
 }
 

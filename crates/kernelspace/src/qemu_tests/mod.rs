@@ -30,6 +30,7 @@ use crate::{
 mod allocator;
 mod channel;
 mod channel_full_api;
+mod channel_via_syscall;
 mod event;
 mod event_via_scheduler;
 mod handle_table;

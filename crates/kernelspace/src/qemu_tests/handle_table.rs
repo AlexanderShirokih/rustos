@@ -6,12 +6,12 @@ extern crate alloc;
 use test_harness_qemu::register_test;
 
 fn handle_table_basic() {
-    use kobject::{ChannelEndpoint, Event, Handle, HandleTable, IpcError, KObject, Rights};
+    use kobject::{Channel, Event, Handle, HandleTable, IpcError, KObject, Rights};
 
     let mut table = HandleTable::with_capacity(4);
 
     // Тестируем с реальным Channel KO.
-    let (ep, _) = ChannelEndpoint::create_pair(4);
+    let (ep, _) = Channel::create_pair(4);
     let handle = Handle::new(
         KObject::Channel(ep),
         Rights::DUPLICATE | Rights::READ | Rights::WRITE,

@@ -1,6 +1,6 @@
-//! `ChannelEndpoint` KO: bounded message passing с трансфером handle'ов.
+//! `Channel` KO: bounded message passing с трансфером handle'ов.
 //!
-//! Канал - пара `Arc<ChannelEndpoint>`, каждый со своей inbound-очередью.
+//! Канал - пара `Arc<Channel>`, каждый со своей inbound-очередью.
 //! `write` помещает сообщение в очередь *парного* эндпоинта (адресата);
 //! `read` достаёт из *своей*. Каждый эндпоинт - самостоятельный KO с
 //! сигналами `READABLE` / `PEER_CLOSED`.
@@ -19,6 +19,11 @@ use super::{errors::IpcError, handle::Handle, wait::SignalState};
 pub const CHANNEL_READABLE: u32 = 1 << 0;
 /// Сигнал "парный эндпоинт закрыт". Поднимается ровно один раз.
 pub const CHANNEL_PEER_CLOSED: u32 = 1 << 1;
+/// Сигнал "в очереди peer'а есть место хотя бы под одно сообщение".
+/// Снимается при заполнении очереди peer'а до края, поднимается обратно
+/// при освобождении слота (read со стороны peer'а). Дропается peer'ом
+/// в момент закрытия (`PEER_CLOSED` делает write бессмысленным).
+pub const CHANNEL_WRITABLE: u32 = 1 << 2;
 
 /// Максимальный размер inline-данных в одном сообщении.
 pub const MESSAGE_INLINE_MAX: usize = 256;
@@ -126,13 +131,13 @@ impl EndpointInner {
 }
 
 /// Один из двух эндпоинтов канала. KO; ходит между процессами через `Handle::TRANSFER`.
-pub struct ChannelEndpoint {
+pub struct Channel {
     inner: MutexCell<EndpointInner>,
     signals: SignalState,
-    peer: MutexCell<Weak<ChannelEndpoint>>,
+    peer: MutexCell<Weak<Channel>>,
 }
 
-impl ChannelEndpoint {
+impl Channel {
     /// Создаёт пару связанных эндпоинтов с общей `capacity` для каждой
     /// inbound-очереди. `capacity == 0` интерпретируется как
     /// [`DEFAULT_CHANNEL_CAPACITY`].
@@ -145,12 +150,12 @@ impl ChannelEndpoint {
 
         let a = Arc::new(Self {
             inner: MutexCell::new(EndpointInner::with_capacity(cap)),
-            signals: SignalState::new(0),
+            signals: SignalState::new(CHANNEL_WRITABLE),
             peer: MutexCell::new(Weak::new()),
         });
         let b = Arc::new(Self {
             inner: MutexCell::new(EndpointInner::with_capacity(cap)),
-            signals: SignalState::new(0),
+            signals: SignalState::new(CHANNEL_WRITABLE),
             peer: MutexCell::new(Weak::new()),
         });
 
@@ -170,6 +175,36 @@ impl ChannelEndpoint {
     /// - `PeerClosed`: парный эндпоинт уже дропнут.
     /// - `ShouldWait`: очередь адресата заполнена.
     pub fn write(&self, msg: Message) -> Result<(), IpcError> {
+        // Тонкий wrapper над `try_write` с infallible build: внутренний
+        // `Result<_, Infallible>` всегда `Ok`, поэтому inner-Err
+        // невозможна.
+        let mut slot = Some(msg);
+        match self.try_write::<core::convert::Infallible>(|| {
+            Ok(slot.take().expect("build closure invoked exactly once"))
+        }) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => unreachable!("Infallible cannot be constructed"),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Атомарная ветка write для callers, которым нужно отложить
+    /// материализацию `Message` до момента, когда peer.queue точно
+    /// имеет место.
+    ///
+    /// `build` вызывается ровно один раз - и **только** при наличии
+    /// слота в очереди peer'а; на full-queue / closed-peer пути closure
+    /// не выполняется (важно для syscall-handler'а: при ShouldWait
+    /// user-handle'ы не должны быть изъяты из source-table).
+    ///
+    /// Возврат:
+    /// - внешний `Err` - канал-уровневая ошибка (peer закрыт, нет места);
+    /// - внутренний `Err` - ошибка построения сообщения; очередь и
+    ///   сигналы не модифицируются.
+    pub fn try_write<E>(
+        &self,
+        build: impl FnOnce() -> Result<Message, E>,
+    ) -> Result<Result<(), E>, IpcError> {
         let peer = self
             .peer
             .with_lock(|p| p.upgrade())
@@ -179,15 +214,21 @@ impl ChannelEndpoint {
             if inner.queue.len() >= inner.capacity {
                 return Err(IpcError::ShouldWait);
             }
+            let msg = match build() {
+                Ok(m) => m,
+                Err(e) => return Ok(Err(e)),
+            };
             inner.queue.push_back(msg);
-            // Поднимаем READABLE под тем же локом, что и push: иначе
-            // reader, успевший между push и signal вычитать всё в ноль,
-            // мог бы очистить бит уже после нашего set'а - и оставить
-            // непустую очередь без сигнала.
-            //
+            // Сигналы поднимаем под тем же локом, что и push: иначе
+            // конкурентный reader/writer мог бы оставить бит и очередь в
+            // несогласованном состоянии (см. соответствующий
+            // тест-регрессию `split_pop_and_clear_loses_readable_bit`).
             // PEER_CLOSED здесь не трогаем - им владеет только Drop.
             peer.signals.signal(CHANNEL_READABLE, 0);
-            Ok(())
+            if inner.queue.len() == inner.capacity {
+                self.signals.signal(0, CHANNEL_WRITABLE);
+            }
+            Ok(Ok(()))
         })
     }
 
@@ -196,29 +237,80 @@ impl ChannelEndpoint {
     /// - `ShouldWait`: очередь пуста, peer ещё жив.
     /// - `PeerClosed`: очередь пуста и peer закрыт.
     pub fn read(&self) -> Result<Message, IpcError> {
-        let msg = self.inner.with_lock(|inner| {
-            let msg = inner.queue.pop_front();
-            // Очищаем READABLE атомарно с наблюдением `is_empty`: если
-            // отпустить лок до signal'а, конкурентный writer может
-            // успеть запушить новое сообщение и поднять бит, а наш
-            // последующий clear перетёр бы его при непустой очереди -
-            // и waiter'ы остались бы спать над уже доступным payload'ом.
-            if msg.is_some() && inner.queue.is_empty() {
+        match self.try_read::<core::convert::Infallible>(|_| Ok(())) {
+            Ok(Ok(msg)) => Ok(msg),
+            Ok(Err(_)) => unreachable!("Infallible cannot be constructed"),
+            Err(e) => Err(self.map_should_wait_to_peer_closed(e)),
+        }
+    }
+
+    /// Cap-aware вариант [`Self::read`]: peek первой записи под локом,
+    /// при превышении любого из лимитов - `BufferTooSmall` без pop'а
+    /// (сообщение остаётся в очереди, READABLE сохраняется).
+    pub fn read_with_caps(
+        &self,
+        bytes_cap: usize,
+        handles_cap: usize,
+    ) -> Result<Message, IpcError> {
+        match self.try_read::<IpcError>(|msg| {
+            if msg.bytes().len() > bytes_cap || msg.handles_count() > handles_cap {
+                Err(IpcError::BufferTooSmall)
+            } else {
+                Ok(())
+            }
+        }) {
+            Ok(Ok(msg)) => Ok(msg),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(self.map_should_wait_to_peer_closed(e)),
+        }
+    }
+
+    /// `ShouldWait` при закрытом peer'е семантически равен `PeerClosed`.
+    fn map_should_wait_to_peer_closed(&self, e: IpcError) -> IpcError {
+        if matches!(e, IpcError::ShouldWait) && self.signals.peek() & CHANNEL_PEER_CLOSED != 0 {
+            IpcError::PeerClosed
+        } else {
+            e
+        }
+    }
+
+    /// Атомарный read: внутри `self.inner`-лока вызывает `finalize` с
+    /// `&mut Message` головы очереди. На `Err` из `finalize` сообщение
+    /// остаётся в очереди и сигналы не трогаются (вызывающий получает
+    /// `Ok(Err(_))`). На `Ok` - сообщение pop'ится, READABLE/WRITABLE
+    /// атомарно обновляются.
+    ///
+    /// Внешний `Err` - канал-уровневые состояния (`ShouldWait` /
+    /// `PeerClosed`).
+    ///
+    /// `finalize` может изъять handle'ы (`drain_handles`), вернуть их
+    /// обратно (`push_handle`) и т.п. - ровно одна точка коммита, без
+    /// race-окон между peek и pop.
+    pub fn try_read<E>(
+        &self,
+        finalize: impl FnOnce(&mut Message) -> Result<(), E>,
+    ) -> Result<Result<Message, E>, IpcError> {
+        self.inner.with_lock(|inner| {
+            let Some(front) = inner.queue.front_mut() else {
+                return Err(IpcError::ShouldWait);
+            };
+            if let Err(e) = finalize(front) {
+                return Ok(Err(e));
+            }
+            let was_full = inner.queue.len() == inner.capacity;
+            let msg = inner.queue.pop_front().expect("front observed above");
+            // READABLE/WRITABLE - под self.inner-локом: иначе concurrent
+            // writer успел бы заполнить очередь обратно и оставить
+            // WRITABLE при полной queue, либо clear READABLE поверх
+            // непустой очереди.
+            if inner.queue.is_empty() {
                 self.signals.signal(0, CHANNEL_READABLE);
             }
-            msg
-        });
-
-        match msg {
-            Some(m) => Ok(m),
-            None => {
-                if self.signals.peek() & CHANNEL_PEER_CLOSED != 0 {
-                    Err(IpcError::PeerClosed)
-                } else {
-                    Err(IpcError::ShouldWait)
-                }
+            if was_full && let Some(peer) = self.peer.with_lock(|p| p.upgrade()) {
+                peer.signals.signal(CHANNEL_WRITABLE, 0);
             }
-        }
+            Ok(Ok(msg))
+        })
     }
 
     /// Возвращает сигнальное состояние (для интеграции с `object_wait_one`).
@@ -227,10 +319,13 @@ impl ChannelEndpoint {
     }
 }
 
-impl Drop for ChannelEndpoint {
+impl Drop for Channel {
     fn drop(&mut self) {
         if let Some(peer) = self.peer.with_lock(|p| p.upgrade()) {
-            peer.signals.signal(CHANNEL_PEER_CLOSED, 0);
+            // Сбрасываем WRITABLE у peer'а вместе с поднятием
+            // PEER_CLOSED: write со стороны peer'а теперь обречён
+            // вернуть PeerClosed, и WRITABLE-сигнал бессмыслен.
+            peer.signals.signal(CHANNEL_PEER_CLOSED, CHANNEL_WRITABLE);
         }
         // Висячие сообщения в self.inner.queue дропаются вместе с self;
         // их handle'ы автоматически закрываются (Arc -> 0).
@@ -256,7 +351,7 @@ mod tests {
 
     #[test]
     fn write_then_read_round_trip() {
-        let (a, b) = ChannelEndpoint::create_pair(4);
+        let (a, b) = Channel::create_pair(4);
         a.write(payload(b"hello")).unwrap();
         let got = b.read().unwrap();
         assert_eq!(got.bytes(), b"hello");
@@ -265,13 +360,13 @@ mod tests {
 
     #[test]
     fn read_empty_returns_should_wait() {
-        let (_a, b) = ChannelEndpoint::create_pair(4);
+        let (_a, b) = Channel::create_pair(4);
         assert_eq!(b.read().unwrap_err(), IpcError::ShouldWait);
     }
 
     #[test]
     fn write_into_full_queue_returns_should_wait() {
-        let (a, b) = ChannelEndpoint::create_pair(2);
+        let (a, b) = Channel::create_pair(2);
         a.write(payload(b"1")).unwrap();
         a.write(payload(b"2")).unwrap();
         assert_eq!(a.write(payload(b"3")).unwrap_err(), IpcError::ShouldWait);
@@ -282,7 +377,7 @@ mod tests {
 
     #[test]
     fn drop_peer_signals_peer_closed_and_returns_peer_closed() {
-        let (a, b) = ChannelEndpoint::create_pair(4);
+        let (a, b) = Channel::create_pair(4);
 
         // Зарегистрируем waiter на сигнал PEER_CLOSED у b.
         let waker = MockWaker::new();
@@ -299,7 +394,7 @@ mod tests {
 
     #[test]
     fn write_after_peer_closed_returns_peer_closed() {
-        let (a, b) = ChannelEndpoint::create_pair(4);
+        let (a, b) = Channel::create_pair(4);
         drop(b);
         assert_eq!(a.write(payload(b"x")).unwrap_err(), IpcError::PeerClosed);
     }
@@ -309,7 +404,7 @@ mod tests {
         // Если peer закрылся, но в нашей очереди остались сообщения -
         // мы должны иметь возможность их вычитать; PeerClosed - только
         // когда очередь окончательно опустеет.
-        let (a, b) = ChannelEndpoint::create_pair(4);
+        let (a, b) = Channel::create_pair(4);
         a.write(payload(b"first")).unwrap();
         a.write(payload(b"second")).unwrap();
         drop(a);
@@ -321,7 +416,7 @@ mod tests {
 
     #[test]
     fn read_signals_become_consistent_after_drain() {
-        let (a, b) = ChannelEndpoint::create_pair(4);
+        let (a, b) = Channel::create_pair(4);
         a.write(payload(b"x")).unwrap();
         assert_eq!(b.peek_signals() & CHANNEL_READABLE, CHANNEL_READABLE);
         b.read().unwrap();
@@ -330,7 +425,7 @@ mod tests {
 
     #[test]
     fn waiter_woken_on_first_write() {
-        let (a, b) = ChannelEndpoint::create_pair(4);
+        let (a, b) = Channel::create_pair(4);
         let waker = MockWaker::new();
         b.signals.register_waiter(CHANNEL_READABLE, waker.clone());
         assert!(!waker.was_woken());
@@ -347,7 +442,7 @@ mod tests {
     /// доступного payload'а.
     #[test]
     fn read_keeps_readable_when_queue_non_empty() {
-        let (a, b) = ChannelEndpoint::create_pair(4);
+        let (a, b) = Channel::create_pair(4);
         a.write(payload(b"1")).unwrap();
         a.write(payload(b"2")).unwrap();
         a.write(payload(b"3")).unwrap();
@@ -383,7 +478,7 @@ mod tests {
         const ITERATIONS: u32 = 50_000;
 
         for iteration in 0..ITERATIONS {
-            let (writer_end, reader_end) = ChannelEndpoint::create_pair(4);
+            let (writer_end, reader_end) = Channel::create_pair(4);
             // Pre-fill ровно одним сообщением: bit=1, queue=[first].
             // Reader должен вычитать его и наблюдать queue.is_empty()==true,
             // пока writer добавляет следующее сообщение.
@@ -434,7 +529,7 @@ mod tests {
         extern crate std;
         use std::{sync::Barrier, thread};
 
-        let (writer_end, reader_end) = ChannelEndpoint::create_pair(2);
+        let (writer_end, reader_end) = Channel::create_pair(2);
         writer_end
             .write(Message::from_bytes(b"first").unwrap())
             .unwrap();
@@ -525,7 +620,7 @@ mod tests {
         // Имитация атомарного transfer-протокола: source-таблица под
         // локом отдаёт handle в Message -> write в канал; получатель
         // читает Message и регистрирует handle в своей таблице.
-        let (sender_end, receiver_end) = ChannelEndpoint::create_pair(4);
+        let (sender_end, receiver_end) = Channel::create_pair(4);
 
         let mut sender_table = HandleTable::new();
         let mut receiver_table = HandleTable::new();
@@ -569,5 +664,229 @@ mod tests {
 
     fn make_event_handle() -> Handle {
         Handle::new(KObject::Event(Event::new()), Rights::WAIT)
+    }
+
+    #[test]
+    fn writable_initial_state_set_for_both_endpoints() {
+        let (a, b) = Channel::create_pair(2);
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, CHANNEL_WRITABLE);
+        assert_eq!(b.peek_signals() & CHANNEL_WRITABLE, CHANNEL_WRITABLE);
+    }
+
+    #[test]
+    fn writable_cleared_when_peer_queue_full() {
+        let (a, b) = Channel::create_pair(2);
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, CHANNEL_WRITABLE);
+
+        a.write(payload(b"1")).unwrap();
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, CHANNEL_WRITABLE);
+
+        a.write(payload(b"2")).unwrap();
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, 0);
+
+        // Drain peer и проверяем восстановление WRITABLE.
+        b.read().unwrap();
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, CHANNEL_WRITABLE);
+    }
+
+    #[test]
+    fn writable_raised_for_peer_when_queue_drains() {
+        let (a, b) = Channel::create_pair(1);
+        a.write(payload(b"x")).unwrap();
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, 0);
+        b.read().unwrap();
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, CHANNEL_WRITABLE);
+    }
+
+    #[test]
+    fn writable_cleared_on_peer_drop() {
+        let (a, b) = Channel::create_pair(4);
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, CHANNEL_WRITABLE);
+        drop(b);
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, 0);
+        assert_eq!(a.peek_signals() & CHANNEL_PEER_CLOSED, CHANNEL_PEER_CLOSED);
+    }
+
+    #[test]
+    fn writable_waiter_woken_when_queue_drains() {
+        let (a, b) = Channel::create_pair(1);
+        a.write(payload(b"x")).unwrap();
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, 0);
+
+        let waker = MockWaker::new();
+        a.signals.register_waiter(CHANNEL_WRITABLE, waker.clone());
+        assert!(!waker.was_woken());
+
+        b.read().unwrap();
+        assert!(waker.was_woken());
+        assert_eq!(waker.observed() & CHANNEL_WRITABLE, CHANNEL_WRITABLE);
+    }
+
+    #[test]
+    fn try_write_skips_build_when_queue_full() {
+        use core::cell::Cell;
+
+        let (a, b) = Channel::create_pair(1);
+        a.write(payload(b"first")).unwrap();
+
+        let invoked = Cell::new(false);
+        let res = a.try_write::<core::convert::Infallible>(|| {
+            invoked.set(true);
+            Ok(payload(b"second"))
+        });
+        assert!(matches!(res, Err(IpcError::ShouldWait)));
+        assert!(
+            !invoked.get(),
+            "build closure must be skipped on full queue"
+        );
+
+        // Очередь не модифицирована.
+        let got = b.read().unwrap();
+        assert_eq!(got.bytes(), b"first");
+        assert!(b.read().is_err());
+    }
+
+    #[test]
+    fn try_write_build_err_leaves_state_untouched() {
+        let (a, b) = Channel::create_pair(2);
+        let initial_signals = b.peek_signals();
+
+        #[derive(Debug, PartialEq)]
+        struct BuildFailed;
+        let res = a.try_write::<BuildFailed>(|| Err(BuildFailed));
+        assert!(matches!(res, Ok(Err(BuildFailed))));
+
+        // Очередь у b пуста, READABLE не поднят, sender WRITABLE не сброшен.
+        assert_eq!(b.peek_signals(), initial_signals);
+        assert_eq!(a.peek_signals() & CHANNEL_WRITABLE, CHANNEL_WRITABLE);
+        assert!(b.read().is_err());
+    }
+
+    #[test]
+    fn read_with_caps_buffer_too_small_keeps_message() {
+        let (a, b) = Channel::create_pair(4);
+        a.write(payload(b"hello-world")).unwrap();
+        assert_eq!(b.peek_signals() & CHANNEL_READABLE, CHANNEL_READABLE);
+
+        let err = b.read_with_caps(4, 0).unwrap_err();
+        assert_eq!(err, IpcError::BufferTooSmall);
+        // READABLE сохранён: сообщение по-прежнему в очереди.
+        assert_eq!(b.peek_signals() & CHANNEL_READABLE, CHANNEL_READABLE);
+
+        // Полноценный read получает то же самое сообщение.
+        let got = b.read().unwrap();
+        assert_eq!(got.bytes(), b"hello-world");
+    }
+
+    #[test]
+    fn read_with_caps_handles_too_few_keeps_message() {
+        let (a, b) = Channel::create_pair(4);
+        let mut msg = Message::from_bytes(b"x").unwrap();
+        msg.push_handle(make_event_handle()).unwrap();
+        a.write(msg).unwrap();
+
+        let err = b.read_with_caps(64, 0).unwrap_err();
+        assert_eq!(err, IpcError::BufferTooSmall);
+        // Можно вычитать с правильным cap'ом.
+        let got = b.read_with_caps(64, MESSAGE_MAX_HANDLES).unwrap();
+        assert_eq!(got.handles_count(), 1);
+    }
+
+    /// Регрессия P1 (PR#32 codex review): finalize-Err в `try_read`
+    /// должен оставлять сообщение в очереди со всеми handle'ами,
+    /// которые closure успел изъять и вернуть через `push_handle`.
+    /// Эмулирует "receiver-table is full"-сценарий: closure делает
+    /// `drain_handles` -> "install fails" -> кладёт всё обратно
+    /// через `push_handle` -> возвращает Err. После этого следующий
+    /// успешный read обязан получить то же сообщение целиком.
+    #[test]
+    fn try_read_err_after_drain_restores_message() {
+        let (a, b) = Channel::create_pair(2);
+        let event = Event::new();
+        let weak = Arc::downgrade(&event);
+        let mut msg = Message::from_bytes(b"payload").unwrap();
+        msg.push_handle(Handle::new(KObject::Event(event), Rights::WAIT))
+            .unwrap();
+        a.write(msg).unwrap();
+        assert_eq!(b.peek_signals() & CHANNEL_READABLE, CHANNEL_READABLE);
+
+        #[derive(Debug, PartialEq)]
+        struct InstallFailed;
+        let res = b.try_read::<InstallFailed>(|m| {
+            let drained: alloc::vec::Vec<_> = m.drain_handles().collect();
+            assert_eq!(drained.len(), 1);
+            // Эмулируем неудачный install: возвращаем handle обратно в msg.
+            for h in drained {
+                m.push_handle(h).unwrap();
+            }
+            Err(InstallFailed)
+        });
+        assert!(matches!(res, Ok(Err(InstallFailed))));
+
+        // Сообщение и его handle на месте: очередь не пуста, KO не закрыт.
+        assert!(weak.upgrade().is_some());
+        assert_eq!(b.peek_signals() & CHANNEL_READABLE, CHANNEL_READABLE);
+
+        let got = b.read().unwrap();
+        assert_eq!(got.bytes(), b"payload");
+        assert_eq!(got.handles_count(), 1);
+    }
+
+    /// Регрессия P2 (PR#32 codex review): после `read` из полной
+    /// очереди WRITABLE поднимается у peer'а атомарно с pop'ом, под
+    /// тем же self.inner-локом. Race-сценарий: writer успевает
+    /// заполнить очередь обратно между нашим pop'ом и signal'ом - и
+    /// перетирает наш WRITABLE поверх полной queue.
+    #[test]
+    fn writable_not_set_after_concurrent_refill() {
+        extern crate std;
+        use std::{sync::Barrier, thread};
+
+        const ITERATIONS: u32 = 50_000;
+        for iteration in 0..ITERATIONS {
+            // capacity=1: после первого write очередь полная и WRITABLE=0
+            // у writer'а.
+            let (writer_end, reader_end) = Channel::create_pair(1);
+            writer_end.write(payload(b"first")).unwrap();
+            assert_eq!(writer_end.peek_signals() & CHANNEL_WRITABLE, 0);
+
+            let barrier = Arc::new(Barrier::new(2));
+
+            let barrier_w = barrier.clone();
+            let writer_for_thread = writer_end.clone();
+            let writer = thread::spawn(move || {
+                barrier_w.wait();
+                // Сразу после reader.read() заполняем заново.
+                while writer_for_thread.write(payload(b"second")).is_err() {
+                    core::hint::spin_loop();
+                }
+            });
+
+            barrier.wait();
+            reader_end.read().unwrap();
+            writer.join().unwrap();
+
+            // На этом моменте: либо writer уже залил queue (тогда
+            // WRITABLE=0 - корректно), либо reader выкатил signal до
+            // refill'а (тогда WRITABLE могло быть 1 кратко, но к
+            // моменту наблюдения writer уже залил - WRITABLE=0).
+            // Если фикс не работает, WRITABLE может остаться поднятым
+            // при полной queue: ошибка.
+            let signals = writer_end.peek_signals();
+            // Очередь точно полная (1 элемент, capacity=1) - WRITABLE=0.
+            assert_eq!(
+                signals & CHANNEL_WRITABLE,
+                0,
+                "iteration {iteration}: WRITABLE поднят при полной \
+                 очереди (race между pop и peer.signal)"
+            );
+
+            // Дочитываем "second" - WRITABLE должен подняться.
+            reader_end.read().unwrap();
+            assert_eq!(
+                writer_end.peek_signals() & CHANNEL_WRITABLE,
+                CHANNEL_WRITABLE
+            );
+        }
     }
 }

@@ -182,14 +182,36 @@ fn current_user_vm(&self) -> Option<UserVmContext>;
 Численные коды стабильны и являются частью ABI — их сохраняем, чтобы
 ABI-юниты в `error.rs` ловили нарушение совместимости.
 
+## Cross-AS user copy
+
+Помимо аллокации/free, `MemoryMapper` предоставляет два байтовых
+копировальщика для нужд syscall-handler-ов, которые принимают/отдают
+данные через user-указатели (например, `ChannelWrite`/`ChannelRead`):
+
+```rust
+fn copy_user_in (&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError>;
+fn copy_user_out(&self, va: VirtualAddress, src: &[u8])     -> Result<(), UserCopyError>;
+```
+
+Семантика:
+
+- адрес `va` не обязан быть выровнен; диапазон `[va, va + dst.len())`
+  может пересекать страницы, копирование идёт по 4К-leaf'ам;
+- для каждой leaf-страницы проверяется наличие маппинга и
+  user-readable (для `_in`) либо user-writable (для `_out`) доступ;
+  ошибки - [`UserCopyError::NotMapped`] / `AccessDenied`;
+- AS не обязан быть активным root'ом трансляции - копирование идёт
+  через kernel-side линейную карту физических фреймов, под тем же
+  локом mapper'а, что и `map`/`unmap`/`remap`.
+
+Используется в `crates/syscall/src/channel.rs` (`ChannelWrite`/
+`ChannelRead`) для материализации payload-байт и `HandleId`-ов в
+kernel-buffer без захвата на user-стек.
+
 ## Ограничения текущей реализации
 
 1. **Защита целиком на регион.** `vm_remap`/`vm_free` требуют точного
    совпадения `(base, size)` с выделенным регионом.
-2. **AArch64 `remap`/`unmap`.** Платформенная реализация инвалидирует
-   TLB точечно (по странице, в правильной ASID-области для user-AS).
-   Для kernel-AS — broadcast по всем ASID. Промежуточные L1/L2/L3
-   таблицы при `unmap` пока не освобождаются (TODO).
 
 ## Тестовые точки
 

@@ -1,14 +1,14 @@
 //! Хост-интеграционные тесты kobject.
 //!
 //! Эмулируют RPC-обмен между двумя "процессами" (двумя `HandleTable`)
-//! через одну пару `ChannelEndpoint` + переданный handle на `Event`,
+//! через одну пару `Channel` + переданный handle на `Event`,
 //! без интеграции со scheduler.
 
 use alloc::sync::Arc;
 
 use super::{
-    CHANNEL_READABLE, ChannelEndpoint, EVENT_SIGNALED, Event, Handle, HandleTable, KObject,
-    Message, Rights, wait::MockWaker,
+    CHANNEL_READABLE, Channel, EVENT_SIGNALED, Event, Handle, HandleTable, KObject, Message,
+    Rights, wait::MockWaker,
 };
 
 /// "Сервер" получает запрос с переданным handle на ответ-Event,
@@ -20,7 +20,7 @@ fn pilot_rpc_full_cycle() {
     let mut server_table = HandleTable::new();
     let mut client_table = HandleTable::new();
 
-    let (server_end, client_end) = ChannelEndpoint::create_pair(8);
+    let (server_end, client_end) = Channel::create_pair(8);
     let server_chan_id = server_table
         .insert(Handle::new(
             KObject::Channel(server_end.clone()),
@@ -105,7 +105,7 @@ fn pilot_rpc_full_cycle() {
 /// разбужен ровно одним вызовом `signal` через write-путь канала.
 #[test]
 fn waiter_woken_through_channel_write() {
-    let (server_end, client_end) = ChannelEndpoint::create_pair(4);
+    let (server_end, client_end) = Channel::create_pair(4);
 
     let waker = MockWaker::new();
     client_end
@@ -127,7 +127,7 @@ fn waiter_woken_through_channel_write() {
 fn closing_endpoint_via_table_signals_peer() {
     let mut owner = HandleTable::new();
 
-    let (server_end, client_end) = ChannelEndpoint::create_pair(4);
+    let (server_end, client_end) = Channel::create_pair(4);
     let id = {
         let ko = KObject::Channel(server_end);
         let rights = Rights::defaults_for(&ko);
@@ -139,7 +139,7 @@ fn closing_endpoint_via_table_signals_peer() {
         .signals()
         .register_waiter(super::CHANNEL_PEER_CLOSED, waker.clone());
 
-    // Изымаем единственный Arc<ChannelEndpoint> из таблицы и дропаем.
+    // Изымаем единственный Arc<Channel> из таблицы и дропаем.
     drop(owner.remove(id).unwrap());
 
     assert!(waker.was_woken());

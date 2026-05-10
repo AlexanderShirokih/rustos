@@ -4,7 +4,7 @@ use core::fmt::{Display, Formatter};
 use crate::{
     MemFlags,
     physical_address::{PageAlignedAddress, PhysicalAddress},
-    virtual_address::PageAlignedVirtualAddress,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 
 /// Непрозрачный per-AS тег, выдаваемый платформой.
@@ -83,6 +83,25 @@ impl Display for MemoryUnmappingError {
                 f.write_str("Partial block mapping cannot be unmapped without split")
             }
             MemoryUnmappingError::MisalignedRange => f.write_str("Range size is not 4K aligned"),
+        }
+    }
+}
+
+/// Ошибки `copy_user_in`/`copy_user_out` через [`MemoryMapper`].
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum UserCopyError {
+    /// В диапазоне есть VA, для которой leaf-страница отсутствует или
+    /// доступ к 4К-странице через mapper невозможен (block-mapping).
+    NotMapped,
+    /// User-флаги leaf-страницы не дают требуемый access (R для in, W для out).
+    AccessDenied,
+}
+
+impl Display for UserCopyError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            UserCopyError::NotMapped => f.write_str("Range contains an unmapped page"),
+            UserCopyError::AccessDenied => f.write_str("User access denied for the requested op"),
         }
     }
 }
@@ -184,6 +203,22 @@ pub trait MemoryMapper {
     /// Возвращает handle на AS, лениво аллоцируя
     /// платформенный тег. Вызывается на пути активации AS планировщиком.
     fn activate_handle(&self) -> AddressSpaceHandle;
+
+    /// Копирует `[va, va + dst.len())` из user-AS в `dst`. `va`
+    /// произволен, диапазон может пересекать страницы; каждая leaf-page
+    /// проверяется на user-readable. AS не обязан быть активным root'ом:
+    /// доступ идёт через линейную карту физических фреймов.
+    fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
+        let _ = (va, dst);
+        Err(UserCopyError::NotMapped)
+    }
+
+    /// Симметрично [`Self::copy_user_in`] для записи `src` в user-AS;
+    /// требует user-writable на каждой leaf-page.
+    fn copy_user_out(&self, va: VirtualAddress, src: &[u8]) -> Result<(), UserCopyError> {
+        let _ = (va, src);
+        Err(UserCopyError::NotMapped)
+    }
 
     /// Доступ к конкретной реализации через `Any`-downcast.
     ///
