@@ -24,7 +24,7 @@ pub trait Waker: Send + Sync {
 ///
 /// Существует, чтобы хранить ссылку на target подписки (`Weak<dyn
 /// SignalSource>`) без знания конкретного KO-варианта. Реализуется
-/// каждым signalable-KO; на несигналуемых KO (Memory/MemoryAuthority)
+/// каждым signalable-KO; на несигналуемых KO (Memory/PhysicalResource)
 /// не реализуется намеренно.
 pub trait SignalSource: Send + Sync {
     fn signals(&self) -> &SignalState;

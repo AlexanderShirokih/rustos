@@ -156,8 +156,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             frame.set_return(encode_return(r));
         }
         SyscallOp::MemoryCreateVirtual => {
-            let r =
-                super::memory::sys_memory_create_virtual(frame.arg(0), frame.arg(1), frame.arg(2));
+            let r = super::memory::sys_memory_create_virtual(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
         SyscallOp::MemoryCreatePhysical => {

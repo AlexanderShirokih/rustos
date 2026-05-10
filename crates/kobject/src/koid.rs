@@ -67,7 +67,7 @@ impl<T: ?Sized> core::fmt::Debug for Koid<T> {
             3 => "Process",
             4 => "Thread",
             5 => "Memory",
-            6 => "MemoryAuthority",
+            6 => "PhysicalResource",
             7 => "Mailbox",
             _ => "?",
         };

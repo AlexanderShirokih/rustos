@@ -26,8 +26,8 @@
 //!
 //! | op    | Имя                       | Аргументы / возврат                                                                                |
 //! |-------|---------------------------|----------------------------------------------------------------------------------------------------|
-//! | 0x60  | `MemoryCreateVirtual`     | `auth_h`, `size_bytes`, `access_mask` -> `region_h`                                                |
-//! | 0x61  | `MemoryCreatePhysical`    | `auth_h`, `pa`, `size_bytes`, `access_mask` -> `region_h`                                          |
+//! | 0x60  | `MemoryCreateVirtual`     | `size_bytes`, `access_mask` -> `region_h`                                                          |
+//! | 0x61  | `MemoryCreatePhysical`    | `resource_h`, `pa`, `size_bytes`, `access_mask` -> `region_h`                                      |
 //! | 0x63  | `MemoryMap`               | `region_h`, `size`, `flags` -> `va`                                                                |
 //! | 0x64  | `MemoryRemap`             | `va`, `size`, `flags` -> `0`                                                                       |
 //! | 0x65  | `MemoryAllocate`          | `size`, `flags` -> `va`                                                                            |
@@ -137,16 +137,15 @@ pub enum SyscallOp {
 
     // 0x60..=0x6F - Memory KObject.
     /// Создаёт `KObject::Memory` с Virtual backing. Аргументы:
-    /// `arg0=auth_handle` (требует [`Rights::CREATE_VIRTUAL`]),
-    /// `arg1=size_bytes`, `arg2=access_mask`. Возвращает `region_handle`.
-    ///
-    /// [`Rights::CREATE_VIRTUAL`]: kobject::Rights::CREATE_VIRTUAL
+    /// `arg0=size_bytes`, `arg1=access_mask`. Возвращает `region_handle`.
     MemoryCreateVirtual = 0x60,
     /// Создаёт `KObject::Memory` с Physical backing. Аргументы:
-    /// `arg0=auth_handle` (требует [`Rights::CREATE_PHYSICAL`]),
-    /// `arg1=pa`, `arg2=size_bytes`, `arg3=access_mask`. Возвращает `region_handle`.
+    /// `arg0=resource_handle` на [`PhysicalResource`] (требует
+    /// [`Rights::MINT`]), `arg1=pa`, `arg2=size_bytes`, `arg3=access_mask`.
+    /// Возвращает `region_handle`.
     ///
-    /// [`Rights::CREATE_PHYSICAL`]: kobject::Rights::CREATE_PHYSICAL
+    /// [`PhysicalResource`]: kobject::PhysicalResource
+    /// [`Rights::MINT`]: kobject::Rights::MINT
     MemoryCreatePhysical = 0x61,
     /// Маппит регион в текущий user-AS на свободный VA. Аргументы:
     /// `arg0=region_handle`, `arg1=size_bytes`, `arg2=flags_raw`

@@ -1,18 +1,17 @@
 //! Cross-process sharing `KObject::Memory` через Channel.
 //!
-//! Producer (process A) получает `MemoryAuthority` + producer-end канала,
-//! минтит Virtual-регион через `MemoryCreateVirtual`, маппит, пишет
-//! магический паттерн и пересылает handle региона по каналу. Consumer
-//! (process B) получает consumer-end + Event, ждёт `CHANNEL_READABLE`,
-//! читает handle из канала, маппит регион в свой AS, проверяет паттерн
-//! и сигналит Event при совпадении.
+//! Producer (process A) минтит Virtual-регион через `MemoryCreateVirtual`,
+//! маппит, пишет магический паттерн и пересылает handle региона по каналу.
+//! Consumer (process B) получает consumer-end + Event, ждёт
+//! `CHANNEL_READABLE`, читает handle из канала, маппит регион в свой AS,
+//! проверяет паттерн и сигналит Event при совпадении.
 //!
 //! Сигнал на Event-е == доказательство, что один backing виден из двух
 //! разных user-AS как одна и та же страница.
 
 use alloc::vec;
 
-use kobject::{Channel, EVENT_SIGNALED, Event, Handle, KObject, MemoryAuthority, Rights};
+use kobject::{Channel, EVENT_SIGNALED, Event, Handle, KObject, Rights};
 use memory::{
     MemFlags,
     aligned::Aligned,
@@ -55,31 +54,27 @@ const PRODUCER_PAYLOAD_WORDS: usize = 32;
 
 /// Producer payload:
 /// * x21 = producer_end_handle (raw=0x0001_0000)
-/// * x22 = authority_handle (raw=0x0001_0001)
-/// * x23 = scratch VA для handle-массива
+/// * x22 = scratch VA для handle-массива
 ///
 /// Шаги:
-///   MemoryCreateVirtual(x22, 0x1000, 3=RW) -> x0 = region_h
+///   MemoryCreateVirtual(0x1000, 3=RW) -> x0 = region_h
 ///   x19 = region_h
 ///   MemoryMap(x19, 0x1000, 0=RW) -> x0 = va
 ///   *va = pattern (8 байт)
 ///   *scratch = region_h (4 байта u32)
-///   ChannelWrite(x21, 0, 0, x23, 1) -> 0
+///   ChannelWrite(x21, 0, 0, x22, 1) -> 0
 ///   ThreadExit(0)
 fn build_producer_payload() -> [u8; PRODUCER_PAYLOAD_WORDS * 4] {
     let mut payload = Builder::<PRODUCER_PAYLOAD_WORDS>::new(B_LOOP);
 
     // x21 = producer_end_handle
     payload.mov_u32_fixed(Reg::X21, HANDLE_RAW_FIRST);
-    // x22 = authority_handle
-    payload.mov_u32_fixed(Reg::X22, HANDLE_RAW_SECOND);
-    // x23 = SCRATCH_VA
-    payload.mov_u32_fixed(Reg::X23, SCRATCH_VA as u32);
+    // x22 = SCRATCH_VA
+    payload.mov_u32_fixed(Reg::X22, SCRATCH_VA as u32);
 
-    // MemoryCreateVirtual(x22, 0x1000, RW=3)
-    payload.push(mov_x(Reg::X0, Reg::X22));
-    payload.mov_u16(Reg::X1, 0x1000);
-    payload.mov_u16(Reg::X2, 0x3);
+    // MemoryCreateVirtual(0x1000, RW=3)
+    payload.mov_u16(Reg::X0, 0x1000);
+    payload.mov_u16(Reg::X1, 0x3);
     payload.push(svc_op(SyscallOp::MemoryCreateVirtual));
     // x19 = region_h
     payload.push(mov_x(Reg::X19, Reg::X0));
@@ -98,13 +93,13 @@ fn build_producer_payload() -> [u8; PRODUCER_PAYLOAD_WORDS * 4] {
     payload.push(str_x(Reg::X24, Reg::X20));
 
     // *scratch = region_h (u32)
-    payload.push(str_w(Reg::X19, Reg::X23));
+    payload.push(str_w(Reg::X19, Reg::X22));
 
-    // ChannelWrite(x21, 0, 0, x23, 1)
+    // ChannelWrite(x21, 0, 0, x22, 1)
     payload.push(mov_x(Reg::X0, Reg::X21));
     payload.mov_u16(Reg::X1, 0);
     payload.mov_u16(Reg::X2, 0);
-    payload.push(mov_x(Reg::X3, Reg::X23));
+    payload.push(mov_x(Reg::X3, Reg::X22));
     payload.mov_u16(Reg::X4, 1);
     payload.push(svc_op(SyscallOp::ChannelWrite));
 
@@ -204,9 +199,8 @@ fn aligned(va: usize) -> PageAlignedVirtualAddress {
     PageAlignedVirtualAddress::from_usize(va).expect("user VA must be 4K aligned")
 }
 
-fn userspace_memory_authority_share_region() {
+fn userspace_memory_share_region() {
     let event = Event::new();
-    let authority = MemoryAuthority::new();
     let (producer_end, consumer_end) = Channel::create_pair(0);
 
     let producer_payload = build_producer_payload();
@@ -243,8 +237,6 @@ fn userspace_memory_authority_share_region() {
         producer_chan_ko.clone(),
         Rights::defaults_for(&producer_chan_ko),
     );
-    let authority_ko = KObject::MemoryAuthority(authority);
-    let authority_handle = Handle::new(authority_ko.clone(), Rights::defaults_for(&authority_ko));
 
     let consumer_chan_ko = KObject::Channel(consumer_end);
     let consumer_chan_handle = Handle::new(
@@ -269,8 +261,7 @@ fn userspace_memory_authority_share_region() {
         )
         .expect("consumer spawn must succeed");
 
-    let producer_launch =
-        UserProcessLaunch::new().initial_handles(vec![producer_chan_handle, authority_handle]);
+    let producer_launch = UserProcessLaunch::new().initial_handles(vec![producer_chan_handle]);
     kernelspace::qemu_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "memory-share-producer",
@@ -293,7 +284,7 @@ fn userspace_memory_authority_share_region() {
 }
 
 register_test!(
-    USERSPACE_MEMORY_AUTHORITY_SHARE_REGION,
-    "userspace_memory_authority_share_region",
-    userspace_memory_authority_share_region
+    USERSPACE_MEMORY_SHARE_REGION,
+    "userspace_memory_share_region",
+    userspace_memory_share_region
 );

@@ -100,17 +100,11 @@ fn access_mask_for(flags: UserMemFlags) -> AccessMask {
     }
 }
 
-/// `memory_create_virtual(auth_handle, size_bytes, access_mask) -> region_handle`
+/// `memory_create_virtual(size_bytes, access_mask) -> region_handle`
 ///
-/// Минтит новый Virtual `MemoryRegion` под защитой `MemoryAuthority` с
-/// правом [`Rights::CREATE_VIRTUAL`]. Регистрирует регион в HandleTable
-/// текущего процесса, возвращает свежий handle.
-pub fn sys_memory_create_virtual(
-    auth_h: u64,
-    size_bytes: u64,
-    access_raw: u64,
-) -> Result<u64, SyscallError> {
-    let auth_id = parse_handle_id(auth_h)?;
+/// Минтит новый Virtual `MemoryRegion` и регистрирует его в HandleTable
+/// текущего процесса. Возвращает свежий handle.
+pub fn sys_memory_create_virtual(size_bytes: u64, access_raw: u64) -> Result<u64, SyscallError> {
     let size = parse_size(size_bytes)?;
     let access = parse_access_mask(access_raw)?;
     let pages = NonZeroUsize::new(size.get() / PAGE_SIZE).ok_or(SyscallError::InvalidArgument)?;
@@ -121,7 +115,6 @@ pub fn sys_memory_create_virtual(
     let table = kobject::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let _authority = table.with_lock(|tbl| tbl.get_authority(auth_id, Rights::CREATE_VIRTUAL))?;
 
     let fa = runtime()
         .frame_allocator()
@@ -135,19 +128,19 @@ pub fn sys_memory_create_virtual(
     Ok(u64::from(id.raw().get()))
 }
 
-/// `memory_create_physical(auth_handle, pa, size_bytes, access_mask) -> region_handle`
+/// `memory_create_physical(resource_handle, pa, size_bytes, access_mask) -> region_handle`
 ///
-/// Минтит регион поверх фиксированного PA-диапазона под защитой
-/// `MemoryAuthority` с правом [`Rights::CREATE_PHYSICAL`]. Регион не
-/// владеет физикой и на drop ничего не возвращает; PA должен быть
-/// page-aligned.
+/// Минтит регион поверх фиксированного PA-диапазона. Требует handle на
+/// [`PhysicalResource`](kobject::PhysicalResource) с правом
+/// [`Rights::MINT`]. Регион не владеет физикой и на drop ничего не
+/// возвращает; PA должен быть page-aligned.
 pub fn sys_memory_create_physical(
-    auth_h: u64,
+    resource_h: u64,
     pa_raw: u64,
     size_bytes: u64,
     access_raw: u64,
 ) -> Result<u64, SyscallError> {
-    let auth_id = parse_handle_id(auth_h)?;
+    let resource_id = parse_handle_id(resource_h)?;
     let size = parse_size(size_bytes)?;
     let access = parse_access_mask(access_raw)?;
     let pa_usize = usize::try_from(pa_raw).map_err(|_| SyscallError::InvalidArgument)?;
@@ -156,7 +149,7 @@ pub fn sys_memory_create_physical(
     let table = kobject::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let _authority = table.with_lock(|tbl| tbl.get_authority(auth_id, Rights::CREATE_PHYSICAL))?;
+    let _resource = table.with_lock(|tbl| tbl.get_physical_resource(resource_id, Rights::MINT))?;
 
     let region = MemoryRegion::create_physical(pa, size, access);
     let region_arc = Arc::new(region);

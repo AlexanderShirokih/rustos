@@ -266,7 +266,7 @@ pub fn mailbox_queue(handle_id: HandleId, packet: MailboxPacket) -> Result<(), I
 }
 
 /// Извлекает `Arc<dyn SignalSource>` и `Koid` для KO, на который указывает
-/// `handle_id`, проверив `Rights::WAIT`. Memory/MemoryAuthority и
+/// `handle_id`, проверив `Rights::WAIT`. Memory/PhysicalResource и
 /// Mailbox - `WrongType`.
 ///
 /// Mailbox в качестве target отвергается на api-границе: `Mailbox::queue`
@@ -286,7 +286,7 @@ fn target_signal_source(handle_id: HandleId) -> Result<(Arc<dyn SignalSource>, K
         KObject::Event(e) => e,
         KObject::Process(p) => p,
         KObject::Thread(t) => t,
-        KObject::Mailbox(_) | KObject::Memory(_) | KObject::MemoryAuthority(_) => {
+        KObject::Mailbox(_) | KObject::Memory(_) | KObject::PhysicalResource(_) => {
             return Err(IpcError::WrongType);
         }
     };

@@ -12,7 +12,6 @@ extern crate alloc;
 extern crate std;
 
 mod api;
-mod authority;
 mod channel;
 mod errors;
 mod event;
@@ -21,6 +20,7 @@ mod handle_table;
 mod koid;
 mod mailbox;
 mod object;
+mod physical_resource;
 mod process;
 mod rights;
 mod runtime;
@@ -33,7 +33,6 @@ pub use api::{
     mailbox_wait, mailbox_wait_async, object_signal, object_wait_one, terminate_process,
     terminate_thread, thread_exit,
 };
-pub use authority::MemoryAuthority;
 pub use channel::{
     CHANNEL_PEER_CLOSED, CHANNEL_READABLE, CHANNEL_WRITABLE, Channel, DEFAULT_CHANNEL_CAPACITY,
     MESSAGE_INLINE_MAX, MESSAGE_MAX_HANDLES, Message,
@@ -48,6 +47,7 @@ pub use mailbox::{
     Mailbox, MailboxPacket, MailboxPacketKind,
 };
 pub use object::KObject;
+pub use physical_resource::PhysicalResource;
 pub use process::{PROCESS_TERMINATED, ProcessObject};
 pub use rights::Rights;
 pub use runtime::{KernelRuntime, ParkState, UserThreadEntry, WaitToken, install_runtime, runtime};

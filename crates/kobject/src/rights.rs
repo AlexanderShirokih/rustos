@@ -21,8 +21,7 @@ impl Rights {
     pub const MANAGE_PROCESS: Self = Self(1 << 8);
     pub const MAP: Self = Self(1 << 9);
     pub const EXECUTE: Self = Self(1 << 10);
-    pub const CREATE_VIRTUAL: Self = Self(1 << 11);
-    pub const CREATE_PHYSICAL: Self = Self(1 << 12);
+    pub const MINT: Self = Self(1 << 11);
 
     const ALL_BITS: u32 = Self::DUPLICATE.0
         | Self::TRANSFER.0
@@ -35,8 +34,7 @@ impl Rights {
         | Self::MANAGE_PROCESS.0
         | Self::MAP.0
         | Self::EXECUTE.0
-        | Self::CREATE_VIRTUAL.0
-        | Self::CREATE_PHYSICAL.0;
+        | Self::MINT.0;
 
     pub const fn empty() -> Self {
         Self(0)
@@ -123,13 +121,9 @@ impl Rights {
                 }
                 Self(bits)
             }
-            KObject::MemoryAuthority(_) => Self(
-                Self::DUPLICATE.0
-                    | Self::TRANSFER.0
-                    | Self::INSPECT.0
-                    | Self::CREATE_VIRTUAL.0
-                    | Self::CREATE_PHYSICAL.0,
-            ),
+            KObject::PhysicalResource(_) => {
+                Self(Self::DUPLICATE.0 | Self::TRANSFER.0 | Self::INSPECT.0 | Self::MINT.0)
+            }
         }
     }
 }

@@ -30,8 +30,7 @@ Handle — это capability: он указывает на kernel-object и не
 | `MANAGE_PROCESS` | `1 << 8` | управление process object и создание потоков в процессе |
 | `MAP` | `1 << 9` | mapping memory-региона в адресное пространство процесса |
 | `EXECUTE` | `1 << 10` | mapping памяти с правом исполнения |
-| `CREATE_VIRTUAL` | `1 << 11` | создание anonymous memory-региона через `MemoryAuthority` |
-| `CREATE_PHYSICAL` | `1 << 12` | создание physical memory-региона через `MemoryAuthority` |
+| `MINT` | `1 << 11` | минтинг memory-региона из `PhysicalResource` |
 
 ## Сигналы
 
@@ -265,8 +264,8 @@ Memory-вызовы дают процессу страницы памяти и c
 
 | Op | Имя | Аргументы | Возврат | Права |
 |---:|---|---|---|---|
-| `0x60` | `MemoryCreateVirtual` | `auth_h`, `size_bytes`, `access_mask` | `region_h` | `CREATE_VIRTUAL` |
-| `0x61` | `MemoryCreatePhysical` | `auth_h`, `pa`, `size_bytes`, `access_mask` | `region_h` | `CREATE_PHYSICAL` |
+| `0x60` | `MemoryCreateVirtual` | `size_bytes`, `access_mask` | `region_h` | — |
+| `0x61` | `MemoryCreatePhysical` | `resource_h`, `pa`, `size_bytes`, `access_mask` | `region_h` | `MINT` на `PhysicalResource` |
 | `0x63` | `MemoryMap` | `region_h`, `size_bytes`, `flags` | `va` | `MAP` и нужный доступ |
 | `0x64` | `MemoryRemap` | `va`, `size_bytes`, `flags` | `0` | grant исходного mapping'а |
 | `0x65` | `MemoryAllocate` | `size_bytes`, `flags` | `va` | — |
@@ -292,7 +291,6 @@ memory_free(buf_va, /* size_bytes */ 4096)?;
 
 ```rust
 let region_h = memory_create_virtual(
-    memory_auth_h,
     /* size_bytes */ 4096,
     AccessMask::R | AccessMask::W,
 )?;

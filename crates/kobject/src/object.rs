@@ -3,8 +3,9 @@ use alloc::sync::Arc;
 use memory::MemoryRegion;
 
 use super::{
-    authority::MemoryAuthority, channel::Channel, event::Event, koid::Koid, mailbox::Mailbox,
-    process::ProcessObject, thread::ThreadObject, wait::SignalState,
+    channel::Channel, event::Event, koid::Koid, mailbox::Mailbox,
+    physical_resource::PhysicalResource, process::ProcessObject, thread::ThreadObject,
+    wait::SignalState,
 };
 
 /// Kernel-объект (KO) - единица, к которой ядро выдаёт права.
@@ -23,7 +24,7 @@ pub enum KObject {
     Process(Arc<ProcessObject>),
     Thread(Arc<ThreadObject>),
     Memory(Arc<MemoryRegion>),
-    MemoryAuthority(Arc<MemoryAuthority>),
+    PhysicalResource(Arc<PhysicalResource>),
     Mailbox(Arc<Mailbox>),
 }
 
@@ -38,7 +39,7 @@ impl KObject {
             Self::Process(_) => 3,
             Self::Thread(_) => 4,
             Self::Memory(_) => 5,
-            Self::MemoryAuthority(_) => 6,
+            Self::PhysicalResource(_) => 6,
             Self::Mailbox(_) => 7,
         }
     }
@@ -51,13 +52,13 @@ impl KObject {
             Self::Process(p) => Koid::from_parts(self.type_tag(), Arc::as_ptr(p) as u64),
             Self::Thread(t) => Koid::from_parts(self.type_tag(), Arc::as_ptr(t) as u64),
             Self::Memory(m) => Koid::from_parts(self.type_tag(), Arc::as_ptr(m) as u64),
-            Self::MemoryAuthority(a) => Koid::from_parts(self.type_tag(), Arc::as_ptr(a) as u64),
+            Self::PhysicalResource(r) => Koid::from_parts(self.type_tag(), Arc::as_ptr(r) as u64),
             Self::Mailbox(m) => Koid::from_parts(self.type_tag(), Arc::as_ptr(m) as u64),
         }
     }
 
     /// Сигнальное состояние, если KO сигнализуем. Memory-регион и
-    /// MemoryAuthority не сигнализуемы - `None`.
+    /// PhysicalResource не сигнализуемы - `None`.
     pub fn signals(&self) -> Option<&SignalState> {
         match self {
             Self::Channel(c) => Some(c.signals()),
@@ -65,7 +66,7 @@ impl KObject {
             Self::Process(p) => Some(p.signals()),
             Self::Thread(t) => Some(t.signals()),
             Self::Mailbox(m) => Some(m.signals()),
-            Self::Memory(_) | Self::MemoryAuthority(_) => None,
+            Self::Memory(_) | Self::PhysicalResource(_) => None,
         }
     }
 }
@@ -78,7 +79,7 @@ impl Clone for KObject {
             Self::Process(p) => Self::Process(p.clone()),
             Self::Thread(t) => Self::Thread(t.clone()),
             Self::Memory(m) => Self::Memory(m.clone()),
-            Self::MemoryAuthority(a) => Self::MemoryAuthority(a.clone()),
+            Self::PhysicalResource(r) => Self::PhysicalResource(r.clone()),
             Self::Mailbox(m) => Self::Mailbox(m.clone()),
         }
     }
@@ -92,7 +93,7 @@ impl core::fmt::Debug for KObject {
             Self::Process(_) => "Process",
             Self::Thread(_) => "Thread",
             Self::Memory(_) => "Memory",
-            Self::MemoryAuthority(_) => "MemoryAuthority",
+            Self::PhysicalResource(_) => "PhysicalResource",
             Self::Mailbox(_) => "Mailbox",
         };
         f.debug_struct(name).field("koid", &self.koid()).finish()

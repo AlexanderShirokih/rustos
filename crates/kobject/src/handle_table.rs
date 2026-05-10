@@ -3,13 +3,13 @@ use alloc::{sync::Arc, vec::Vec};
 use memory::MemoryRegion;
 
 use super::{
-    authority::MemoryAuthority,
     channel::Channel,
     errors::IpcError,
     event::Event,
     handle::{Handle, HandleId},
     mailbox::Mailbox,
     object::KObject,
+    physical_resource::PhysicalResource,
     process::ProcessObject,
     rights::Rights,
     thread::ThreadObject,
@@ -153,7 +153,7 @@ impl HandleTable {
             | KObject::Process(_)
             | KObject::Thread(_)
             | KObject::Memory(_)
-            | KObject::MemoryAuthority(_)
+            | KObject::PhysicalResource(_)
             | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
@@ -170,7 +170,7 @@ impl HandleTable {
             | KObject::Process(_)
             | KObject::Thread(_)
             | KObject::Memory(_)
-            | KObject::MemoryAuthority(_)
+            | KObject::PhysicalResource(_)
             | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
@@ -187,7 +187,7 @@ impl HandleTable {
             | KObject::Event(_)
             | KObject::Thread(_)
             | KObject::Memory(_)
-            | KObject::MemoryAuthority(_)
+            | KObject::PhysicalResource(_)
             | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
@@ -204,7 +204,7 @@ impl HandleTable {
             | KObject::Event(_)
             | KObject::Process(_)
             | KObject::Memory(_)
-            | KObject::MemoryAuthority(_)
+            | KObject::PhysicalResource(_)
             | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
@@ -232,23 +232,23 @@ impl HandleTable {
             | KObject::Event(_)
             | KObject::Process(_)
             | KObject::Thread(_)
-            | KObject::MemoryAuthority(_)
+            | KObject::PhysicalResource(_)
             | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
 
-    /// Извлекает `Arc<MemoryAuthority>` с проверкой прав и типа.
-    pub fn get_authority(
+    /// Извлекает `Arc<PhysicalResource>` с проверкой прав и типа.
+    pub fn get_physical_resource(
         &self,
         id: HandleId,
         need: Rights,
-    ) -> Result<Arc<MemoryAuthority>, IpcError> {
+    ) -> Result<Arc<PhysicalResource>, IpcError> {
         let h = self.lookup(id)?;
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
         match &h.object {
-            KObject::MemoryAuthority(a) => Ok(a.clone()),
+            KObject::PhysicalResource(r) => Ok(r.clone()),
             KObject::Channel(_)
             | KObject::Event(_)
             | KObject::Process(_)
@@ -271,7 +271,7 @@ impl HandleTable {
             | KObject::Process(_)
             | KObject::Thread(_)
             | KObject::Memory(_)
-            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
+            | KObject::PhysicalResource(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -579,42 +579,39 @@ mod tests {
     }
 
     #[test]
-    fn get_authority_type_checks() {
-        use super::super::authority::MemoryAuthority;
+    fn get_physical_resource_type_checks() {
+        use super::super::physical_resource::PhysicalResource;
 
-        let authority = MemoryAuthority::new();
+        let resource = PhysicalResource::new();
         let mut table = HandleTable::new();
-        let auth_rights = Rights::CREATE_VIRTUAL | Rights::CREATE_PHYSICAL | Rights::WAIT;
-        let auth_id = table
-            .insert(make_handle(
-                KObject::MemoryAuthority(authority),
-                auth_rights,
-            ))
+        let res_rights = Rights::MINT | Rights::WAIT;
+        let res_id = table
+            .insert(make_handle(KObject::PhysicalResource(resource), res_rights))
             .unwrap();
         let event_id = table.insert(event_handle(Rights::WAIT)).unwrap();
         let chan_id = table.insert(channel_handle(Rights::READ)).unwrap();
 
-        assert!(table.get_authority(auth_id, Rights::CREATE_VIRTUAL).is_ok());
+        assert!(table.get_physical_resource(res_id, Rights::MINT).is_ok());
         assert_eq!(
             table
-                .get_authority(auth_id, Rights::CREATE_VIRTUAL | Rights::READ)
+                .get_physical_resource(res_id, Rights::MINT | Rights::READ)
                 .unwrap_err(),
             IpcError::AccessDenied
         );
         assert!(matches!(
-            table.get_authority(event_id, Rights::WAIT),
+            table.get_physical_resource(event_id, Rights::WAIT),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_authority(chan_id, Rights::READ),
+            table.get_physical_resource(chan_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_channel(auth_id, Rights::WAIT),
+            table.get_channel(res_id, Rights::WAIT),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_event(auth_id, Rights::WAIT),
+            table.get_event(res_id, Rights::WAIT),
             Err(IpcError::WrongType)
         ));
     }

@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn signalable_kos_implement_signal_source() {
-        // Несигнализуемые Memory/MemoryAuthority намеренно не реализуют
+        // Несигнализуемые Memory/PhysicalResource намеренно не реализуют
         // SignalSource: подписка на них отказывается на api-слое
         // (`WrongType`); здесь - compile-time проверка, что
         // сигнализуемые KO trait действительно имплементируют.

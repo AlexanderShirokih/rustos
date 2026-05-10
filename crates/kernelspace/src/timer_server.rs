@@ -170,7 +170,7 @@ pub fn pilot_client_subscribe(client_end: &Arc<Channel>) -> Result<PilotHandles,
         | KObject::Process(_)
         | KObject::Thread(_)
         | KObject::Memory(_)
-        | KObject::MemoryAuthority(_)
+        | KObject::PhysicalResource(_)
         | KObject::Mailbox(_) => return Err(IpcError::WrongType),
     }
 
