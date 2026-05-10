@@ -80,7 +80,11 @@ impl Rights {
             | Rights::INSPECT.0;
 
         match obj {
-            KObject::Channel(_) => Self(
+            // Channel: SIGNAL не выдаётся - сигнальные биты управляются
+            // самим каналом (READABLE/WRITABLE/PEER_CLOSED).
+            // Mailbox: SIGNAL не выдаётся - MAILBOX_READABLE есть функция
+            // содержимого очереди, user не должен мочь его дёргать.
+            KObject::Channel(_) | KObject::Mailbox(_) => Self(
                 Self::READ.0
                     | Self::WRITE.0
                     | Self::WAIT.0

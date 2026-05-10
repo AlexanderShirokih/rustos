@@ -3,16 +3,16 @@ use alloc::sync::Arc;
 use memory::MemoryRegion;
 
 use super::{
-    authority::MemoryAuthority, channel::Channel, event::Event, koid::Koid, process::ProcessObject,
-    thread::ThreadObject, wait::SignalState,
+    authority::MemoryAuthority, channel::Channel, event::Event, koid::Koid, mailbox::Mailbox,
+    process::ProcessObject, thread::ThreadObject, wait::SignalState,
 };
 
 /// Kernel-объект (KO) - единица, к которой ядро выдаёт права.
 ///
 /// Любой ресурс, доступ к которому процесс получает через capability -
-/// канал, событие, регион памяти, lifecycle процесса/потока; в перспективе
-/// MMIO-регион, IRQ. Один KO может быть доступен нескольким процессам
-/// через разные handle'ы с разными правами.
+/// канал, событие, mailbox, регион памяти, lifecycle процесса/потока;
+/// в перспективе MMIO-регион, IRQ. Один KO может быть доступен
+/// нескольким процессам через разные handle'ы с разными правами.
 ///
 /// Закрытый список вариантов даёт compile-time exhaustiveness:
 /// добавление нового KO заставит компилятор показать все match'и,
@@ -24,6 +24,7 @@ pub enum KObject {
     Thread(Arc<ThreadObject>),
     Memory(Arc<MemoryRegion>),
     MemoryAuthority(Arc<MemoryAuthority>),
+    Mailbox(Arc<Mailbox>),
 }
 
 impl KObject {
@@ -38,6 +39,7 @@ impl KObject {
             Self::Thread(_) => 4,
             Self::Memory(_) => 5,
             Self::MemoryAuthority(_) => 6,
+            Self::Mailbox(_) => 7,
         }
     }
 
@@ -50,6 +52,7 @@ impl KObject {
             Self::Thread(t) => Koid::from_parts(self.type_tag(), Arc::as_ptr(t) as u64),
             Self::Memory(m) => Koid::from_parts(self.type_tag(), Arc::as_ptr(m) as u64),
             Self::MemoryAuthority(a) => Koid::from_parts(self.type_tag(), Arc::as_ptr(a) as u64),
+            Self::Mailbox(m) => Koid::from_parts(self.type_tag(), Arc::as_ptr(m) as u64),
         }
     }
 
@@ -61,6 +64,7 @@ impl KObject {
             Self::Event(e) => Some(e.signals()),
             Self::Process(p) => Some(p.signals()),
             Self::Thread(t) => Some(t.signals()),
+            Self::Mailbox(m) => Some(m.signals()),
             Self::Memory(_) | Self::MemoryAuthority(_) => None,
         }
     }
@@ -75,6 +79,7 @@ impl Clone for KObject {
             Self::Thread(t) => Self::Thread(t.clone()),
             Self::Memory(m) => Self::Memory(m.clone()),
             Self::MemoryAuthority(a) => Self::MemoryAuthority(a.clone()),
+            Self::Mailbox(m) => Self::Mailbox(m.clone()),
         }
     }
 }
@@ -88,6 +93,7 @@ impl core::fmt::Debug for KObject {
             Self::Thread(_) => "Thread",
             Self::Memory(_) => "Memory",
             Self::MemoryAuthority(_) => "MemoryAuthority",
+            Self::Mailbox(_) => "Mailbox",
         };
         f.debug_struct(name).field("koid", &self.koid()).finish()
     }

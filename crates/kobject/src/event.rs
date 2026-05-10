@@ -5,7 +5,7 @@
 
 use alloc::sync::Arc;
 
-use super::wait::SignalState;
+use super::wait::{SignalSource, SignalState};
 
 /// Главный битовый сигнал "событие наступило".
 pub const EVENT_SIGNALED: u32 = 1 << 0;
@@ -34,6 +34,12 @@ impl Event {
 
     /// Прямой доступ к [`SignalState`] для интеграции с `object_wait_one`.
     pub fn signals(&self) -> &SignalState {
+        &self.signals
+    }
+}
+
+impl SignalSource for Event {
+    fn signals(&self) -> &SignalState {
         &self.signals
     }
 }

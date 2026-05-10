@@ -170,7 +170,8 @@ pub fn pilot_client_subscribe(client_end: &Arc<Channel>) -> Result<PilotHandles,
         | KObject::Process(_)
         | KObject::Thread(_)
         | KObject::Memory(_)
-        | KObject::MemoryAuthority(_) => return Err(IpcError::WrongType),
+        | KObject::MemoryAuthority(_)
+        | KObject::Mailbox(_) => return Err(IpcError::WrongType),
     }
 
     let timer_id = install_handle(timer_handle)?;

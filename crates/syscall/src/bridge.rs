@@ -188,6 +188,36 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         SyscallOp::MemoryRegionInspect => {
             super::memory::sys_memory_region_inspect(frame);
         }
+        SyscallOp::MailboxCreate => {
+            let r = super::mailbox::sys_mailbox_create();
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::MailboxQueue => {
+            let r = super::mailbox::sys_mailbox_queue(frame.arg(0), frame.arg(1), frame.arg(2));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::MailboxWait => {
+            let r = super::mailbox::sys_mailbox_wait(
+                frame.arg(0),
+                frame.arg(1),
+                frame.arg(2),
+                frame.arg(3),
+            );
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::MailboxWaitAsync => {
+            let r = super::mailbox::sys_mailbox_wait_async(
+                frame.arg(0),
+                frame.arg(1),
+                frame.arg(2),
+                frame.arg(3),
+            );
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::MailboxCancel => {
+            let r = super::mailbox::sys_mailbox_cancel(frame.arg(0), frame.arg(1), frame.arg(2));
+            frame.set_return(encode_return(r));
+        }
     }
 }
 
@@ -413,5 +443,33 @@ mod tests {
         let mut f = MockFrame::user(SyscallOp::HandleDuplicate as u16, [0, 0, 0, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    #[test]
+    fn mailbox_queue_with_zero_handle_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::MailboxQueue as u16, [0, 0x1000, 32, 0, 0, 0]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    #[test]
+    fn mailbox_wait_with_zero_handle_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::MailboxWait as u16, [0, 0, 0x1000, 32, 0, 0]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    #[test]
+    fn mailbox_cancel_with_zero_handle_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::MailboxCancel as u16, [0, 1, 0, 0, 0, 0]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    #[test]
+    fn mailbox_create_kernel_origin_rejected() {
+        let mut f = MockFrame::kernel(SyscallOp::MailboxCreate as u16, [0; 6]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::KernelOriginated)));
     }
 }

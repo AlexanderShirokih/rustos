@@ -8,7 +8,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicI32, Ordering};
 
-use super::wait::SignalState;
+use super::wait::{SignalSource, SignalState};
 
 /// Сигнал "процесс завершён". Поднимается ровно один раз.
 pub const PROCESS_TERMINATED: u32 = 1 << 0;
@@ -53,6 +53,12 @@ impl ProcessObject {
     /// Текущий снимок сигналов (без блокировок).
     pub fn peek(&self) -> u32 {
         self.signals.peek()
+    }
+}
+
+impl SignalSource for ProcessObject {
+    fn signals(&self) -> &SignalState {
+        &self.signals
     }
 }
 

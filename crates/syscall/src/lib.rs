@@ -28,11 +28,13 @@ mod bridge;
 mod channel;
 mod error;
 mod flags;
+mod mailbox;
 mod memory;
 mod numbers;
 mod process;
 mod runtime;
 mod thread;
+mod user_io;
 
 pub use bridge::{Origin, SyscallFrame, dispatch};
 pub use error::SyscallError;

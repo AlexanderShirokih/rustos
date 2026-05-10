@@ -8,6 +8,7 @@ use super::{
     errors::IpcError,
     event::Event,
     handle::{Handle, HandleId},
+    mailbox::Mailbox,
     object::KObject,
     process::ProcessObject,
     rights::Rights,
@@ -152,7 +153,8 @@ impl HandleTable {
             | KObject::Process(_)
             | KObject::Thread(_)
             | KObject::Memory(_)
-            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
+            | KObject::MemoryAuthority(_)
+            | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -168,7 +170,8 @@ impl HandleTable {
             | KObject::Process(_)
             | KObject::Thread(_)
             | KObject::Memory(_)
-            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
+            | KObject::MemoryAuthority(_)
+            | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -184,7 +187,8 @@ impl HandleTable {
             | KObject::Event(_)
             | KObject::Thread(_)
             | KObject::Memory(_)
-            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
+            | KObject::MemoryAuthority(_)
+            | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -200,7 +204,8 @@ impl HandleTable {
             | KObject::Event(_)
             | KObject::Process(_)
             | KObject::Memory(_)
-            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
+            | KObject::MemoryAuthority(_)
+            | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -227,7 +232,8 @@ impl HandleTable {
             | KObject::Event(_)
             | KObject::Process(_)
             | KObject::Thread(_)
-            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
+            | KObject::MemoryAuthority(_)
+            | KObject::Mailbox(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -247,7 +253,25 @@ impl HandleTable {
             | KObject::Event(_)
             | KObject::Process(_)
             | KObject::Thread(_)
-            | KObject::Memory(_) => Err(IpcError::WrongType),
+            | KObject::Memory(_)
+            | KObject::Mailbox(_) => Err(IpcError::WrongType),
+        }
+    }
+
+    /// Извлекает `Arc<Mailbox>` с проверкой прав и типа.
+    pub fn get_mailbox(&self, id: HandleId, need: Rights) -> Result<Arc<Mailbox>, IpcError> {
+        let h = self.lookup(id)?;
+        if !h.rights().contains(need) {
+            return Err(IpcError::AccessDenied);
+        }
+        match &h.object {
+            KObject::Mailbox(m) => Ok(m.clone()),
+            KObject::Channel(_)
+            | KObject::Event(_)
+            | KObject::Process(_)
+            | KObject::Thread(_)
+            | KObject::Memory(_)
+            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -350,7 +374,10 @@ impl Default for HandleTable {
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{event::Event, object::KObject, rights::Rights},
+        super::{
+            event::Event, mailbox::Mailbox, object::KObject, process::ProcessObject,
+            rights::Rights, thread::ThreadObject,
+        },
         *,
     };
 
@@ -373,6 +400,10 @@ mod tests {
 
     fn thread_handle(rights: Rights) -> Handle {
         make_handle(KObject::Thread(ThreadObject::new()), rights)
+    }
+
+    fn mailbox_handle(rights: Rights) -> Handle {
+        make_handle(KObject::Mailbox(Mailbox::new()), rights)
     }
 
     #[test]
@@ -407,10 +438,12 @@ mod tests {
         let chan_id = table.insert(channel_handle(Rights::READ)).unwrap();
         let proc_id = table.insert(process_handle(Rights::WAIT)).unwrap();
         let thread_id = table.insert(thread_handle(Rights::WAIT)).unwrap();
+        let mbox_id = table.insert(mailbox_handle(Rights::READ)).unwrap();
 
         // Верный тип проходит.
         assert!(table.get_event(event_id, Rights::WAIT).is_ok());
         assert!(table.get_channel(chan_id, Rights::READ).is_ok());
+        assert!(table.get_mailbox(mbox_id, Rights::READ).is_ok());
 
         // Неверный тип возвращает WrongType.
         assert!(matches!(
@@ -427,6 +460,14 @@ mod tests {
         ));
         assert!(matches!(
             table.get_event(thread_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_mailbox(chan_id, Rights::READ),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_channel(mbox_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
     }

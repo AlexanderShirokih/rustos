@@ -46,6 +46,7 @@ Handle — это capability: он указывает на kernel-object и не
 | `Channel` | `CHANNEL_WRITABLE` | `1 << 2` | в очереди peer'а есть место для записи |
 | `Process` | `PROCESS_TERMINATED` | `1 << 0` | процесс завершён |
 | `Thread` | `THREAD_TERMINATED` | `1 << 0` | поток завершён |
+| `Mailbox` | `MAILBOX_READABLE` | `1 << 0` | в очереди есть хотя бы один пакет |
 
 ## Ошибки
 
@@ -312,3 +313,100 @@ channel_write(
     /* handles */ &[readonly_region_h],
 )?;
 ```
+
+## Mailbox
+
+Mailbox — many-to-one сборщик пакетов фиксированного размера. Источники
+двух видов: user-код (явный `MailboxQueue`) и сигналы других KO
+(подписка через `MailboxWaitAsync`). Получатель блокируется на
+`MailboxWait` и достаёт один пакет за вызов; маршрутизация — по
+пользовательскому `key`, выданному при подписке.
+
+| Op | Имя | Аргументы | Возврат | Права |
+|---:|---|---|---|---|
+| `0x70` | `MailboxCreate` | — | `mailbox_h` | — |
+| `0x71` | `MailboxQueue` | `mailbox_h`, `packet_va`, `packet_len` | `0` | `WRITE` на mailbox |
+| `0x72` | `MailboxWait` | `mailbox_h`, `timeout_ns`, `packet_va`, `packet_cap` | `packet_len` | `READ` на mailbox |
+| `0x73` | `MailboxWaitAsync` | `mailbox_h`, `target_h`, `key`, `mask_and_mode` | `0` | `WRITE` на mailbox, `WAIT` на target |
+| `0x74` | `MailboxCancel` | `mailbox_h`, `target_h`, `key` | `0` | `WRITE` на mailbox |
+
+Пакет — 32 байта, layout `repr(C)`:
+
+| Offset | Поле | Тип | Описание |
+|---:|---|---|---|
+| 0 | `key` | `u64` | произвольное значение, выданное user-ом |
+| 8 | `kind` | `u8` | `0=User`, `1=SignalOnce`, `2=SignalRepeating` |
+| 12 | `status` | `i32` | резерв, сейчас всегда `0` |
+| 16 | `payload` | `[u8; 16]` | данные пакета |
+
+`MailboxQueue` принимает только `kind=0` (User-пакет): signal-пакеты
+ставит ядро при срабатывании подписки, попытка проставить `kind=1`/`2`
+от user отвергается с `InvalidArgument`. Для signal-пакетов
+`payload[0..4]` — маска подписки в little-endian, `payload[4..8]` —
+наблюдённый набор сигналов на момент wake.
+
+`MailboxWaitAsync.mask_and_mode` упаковывает маску сигналов в нижние
+32 бита, режим — в верхние: `0=Once` (одноразовая доставка, observer
+автоматически снимается после wake), `1=Repeating` (доставка на каждое
+срабатывание сигнала, до явного `MailboxCancel` или дропа
+mailbox/target). `MailboxCancel` идемпотентен: «нет такой подписки»
+тоже возвращает `0`.
+
+`Mailbox` в качестве `target_h` отвергается с `WrongType` — иначе
+циклические подписки (`A→B→A` или один mailbox через два handle от
+`HandleDuplicate`) приводят к рекурсивному захвату внутреннего лока на
+пути доставки.
+
+Очередь пакетов ограничена. На полной очереди:
+
+- `MailboxQueue` от user возвращает `ShouldWait` без побочных эффектов;
+- signal-пакет от подписки тихо дропается, наращивая внутренний счётчик
+  переполнений (доступ к нему придёт отдельным inspect-вызовом).
+
+Пример: event-loop сервиса, реагирующего на несколько источников.
+Сервис обслуживает запросы из канала клиента, периодический watchdog
+через `Event` и завершение worker-потока. Без Mailbox каждый источник
+требовал бы отдельного `ObjectWaitOne` (последовательный poll или
+дополнительные потоки). С Mailbox — одна точка ожидания и маршрутизация
+по `key`.
+
+```rust
+const KEY_REQUEST: u64 = 1;
+const KEY_WATCHDOG: u64 = 2;
+const KEY_WORKER_DONE: u64 = 3;
+
+let mailbox_h = mailbox_create()?;
+
+mailbox_wait_async(
+    mailbox_h, client_channel_h, KEY_REQUEST,
+    CHANNEL_READABLE, AsyncMode::Repeating,
+)?;
+mailbox_wait_async(
+    mailbox_h, watchdog_event_h, KEY_WATCHDOG,
+    EVENT_SIGNALED, AsyncMode::Repeating,
+)?;
+mailbox_wait_async(
+    mailbox_h, worker_thread_h, KEY_WORKER_DONE,
+    THREAD_TERMINATED, AsyncMode::Once,
+)?;
+
+loop {
+    let packet = mailbox_wait(mailbox_h, /* timeout_ns */ 0)?;
+    match packet.key {
+        KEY_REQUEST => handle_client_request(client_channel_h)?,
+        KEY_WATCHDOG => reset_watchdog(watchdog_event_h)?,
+        KEY_WORKER_DONE => {
+            let code = thread_exit_code(worker_thread_h)?;
+            return finalize(code);
+        }
+        _ => {}
+    }
+}
+```
+
+Один поток обслуживает все источники, без busy-poll'а и
+дополнительных потоков-наблюдателей. `Repeating` подходит для
+постоянных событийных потоков (запросы, периодические сигналы),
+`Once` — для one-shot уведомлений (завершение потока, ответ на конкретный
+запрос). Добавление нового источника — одна строка `mailbox_wait_async`,
+без правки структуры цикла.

@@ -20,7 +20,7 @@
 //! | `0x40..=0x4F` | Process KObject                             |
 //! | `0x50..=0x5F` | Thread KObject                              |
 //! | `0x60..=0x6F` | Memory KObject                              |
-//! | `0x70..=0x7F` | резерв под Port KObject                     |
+//! | `0x70..=0x7F` | Mailbox KObject                             |
 //!
 //! # Memory KObject (`0x60..=0x6F`)
 //!
@@ -45,6 +45,27 @@
 //! 5 аргументов; `ChannelRead` упаковывает в возврат
 //! `bytes_len | (handles_count << 32)`. Конкретные сигнатуры - на
 //! [`SyscallOp`].
+//!
+//! # Mailbox KObject (`0x70..=0x7F`)
+//!
+//! | op    | Имя                  | Аргументы / возврат                                                                  |
+//! |-------|----------------------|--------------------------------------------------------------------------------------|
+//! | 0x70  | `MailboxCreate`      | -> `mbox_h`                                                                          |
+//! | 0x71  | `MailboxQueue`       | `mbox_h`, `packet_va`, `packet_len` (=32) -> `0`                                     |
+//! | 0x72  | `MailboxWait`        | `mbox_h`, `timeout_ns`, `packet_va`, `packet_cap` (>=32) -> `packet_len` (=32)       |
+//! | 0x73  | `MailboxWaitAsync`   | `mbox_h`, `target_h`, `key`, `mask | (mode << 32)` -> `0`                            |
+//! | 0x74  | `MailboxCancel`      | `mbox_h`, `target_h`, `key` -> `0`                                                   |
+//!
+//! Зарезервированы, возвращают `BadSyscall`:
+//!
+//! | op          | Назначение |
+//! |-------------|------------|
+//! | 0x75..=0x7F | резерв     |
+//!
+//! `MailboxQueue`/`MailboxWait` копируют 32-байтный пакет (см.
+//! [`MAILBOX_PACKET_SIZE`](kobject::MAILBOX_PACKET_SIZE)) через user-VM;
+//! user'у разрешено ставить только `User`-пакеты, signal-пакеты
+//! резервированы для kernel-side observer'ов.
 //!
 //! Стабильность: набор и нумерация - часть ABI и не меняются произвольно.
 
@@ -145,6 +166,38 @@ pub enum SyscallOp {
     /// Инспектирует Memory-регион. Аргумент: `arg0=region_handle`. Primary
     /// возврат - `size_bytes`, secondary - `(kind_tag << 16) | access_bits`.
     MemoryRegionInspect = 0x67,
+
+    // 0x70..=0x7F - Mailbox KObject.
+    /// Создаёт пустой [`Mailbox`](kobject::Mailbox), регистрирует handle
+    /// в текущей таблице и возвращает его сырой `HandleId`.
+    MailboxCreate = 0x70,
+    /// Кладёт пакет в очередь mailbox'а. Аргументы: `arg0=mbox_handle`,
+    /// `arg1=packet_va` (user-указатель на 32-байтный пакет),
+    /// `arg2=packet_len` (обязан быть равен
+    /// [`MAILBOX_PACKET_SIZE`](kobject::MAILBOX_PACKET_SIZE)). На полной
+    /// очереди - [`SyscallError::ShouldWait`](super::error::SyscallError::ShouldWait).
+    /// User-у разрешён только `User`-пакет; `kind != 0` отвергается как
+    /// [`InvalidArgument`](super::error::SyscallError::InvalidArgument).
+    /// Требует [`Rights::WRITE`](kobject::Rights::WRITE).
+    MailboxQueue = 0x71,
+    /// Атомарно ждёт пакет и достаёт первый. Аргументы: `arg0=mbox_handle`,
+    /// `arg1=timeout_ns` (`0` - non-blocking poll), `arg2=packet_va`
+    /// (user-указатель на буфер ≥32 B), `arg3=packet_cap` (≥32). Записывает
+    /// 32 B пакета по `packet_va` и возвращает их количество. Требует
+    /// [`Rights::READ`](kobject::Rights::READ).
+    MailboxWait = 0x72,
+    /// Подписывает mailbox на сигналы target'а. Аргументы:
+    /// `arg0=mbox_handle`, `arg1=target_handle`, `arg2=key`,
+    /// `arg3 = mask | (mode << 32)` (`mode == 0` - Once, `1` - Repeating).
+    /// `target == mbox` отвергается как
+    /// [`InvalidArgument`](super::error::SyscallError::InvalidArgument).
+    /// Требует [`Rights::WRITE`](kobject::Rights::WRITE) на mbox и
+    /// [`Rights::WAIT`](kobject::Rights::WAIT) на target.
+    MailboxWaitAsync = 0x73,
+    /// Снимает подписку с парой `(target, key)`. Аргументы:
+    /// `arg0=mbox_handle`, `arg1=target_handle`, `arg2=key`.
+    /// Идемпотентен: отсутствующая подписка - `0`.
+    MailboxCancel = 0x74,
 }
 
 impl SyscallOp {
@@ -173,6 +226,11 @@ impl SyscallOp {
             0x65 => Ok(Self::MemoryAllocate),
             0x66 => Ok(Self::MemoryFree),
             0x67 => Ok(Self::MemoryRegionInspect),
+            0x70 => Ok(Self::MailboxCreate),
+            0x71 => Ok(Self::MailboxQueue),
+            0x72 => Ok(Self::MailboxWait),
+            0x73 => Ok(Self::MailboxWaitAsync),
+            0x74 => Ok(Self::MailboxCancel),
             _ => Err(SyscallError::BadSyscall),
         }
     }
@@ -216,6 +274,11 @@ mod tests {
             SyscallOp::from_raw(0x67),
             Ok(SyscallOp::MemoryRegionInspect)
         );
+        assert_eq!(SyscallOp::from_raw(0x70), Ok(SyscallOp::MailboxCreate));
+        assert_eq!(SyscallOp::from_raw(0x71), Ok(SyscallOp::MailboxQueue));
+        assert_eq!(SyscallOp::from_raw(0x72), Ok(SyscallOp::MailboxWait));
+        assert_eq!(SyscallOp::from_raw(0x73), Ok(SyscallOp::MailboxWaitAsync));
+        assert_eq!(SyscallOp::from_raw(0x74), Ok(SyscallOp::MailboxCancel));
     }
 
     #[test]
@@ -242,6 +305,9 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x62), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x68), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x6F), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x75), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x76), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x7F), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(u16::MAX), Err(SyscallError::BadSyscall));
     }
 }

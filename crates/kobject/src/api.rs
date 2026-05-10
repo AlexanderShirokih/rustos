@@ -11,12 +11,14 @@ use super::{
     channel::{Channel, Message},
     errors::{IpcError, SpawnError},
     handle::{Handle, HandleId},
+    koid::Koid,
+    mailbox::{AsyncMode, MAILBOX_READABLE, Mailbox, MailboxPacket},
     object::KObject,
     process::ProcessObject,
     rights::Rights,
     runtime::{ParkState, UserThreadEntry, runtime},
     thread::ThreadObject,
-    wait::ParkWaker,
+    wait::{ParkWaker, SignalSource, SignalState, Waker},
 };
 
 /// Устанавливает [`Handle`] в handle-table текущего процесса и
@@ -41,6 +43,69 @@ pub fn object_signal(handle_id: HandleId, set: u32, clear: u32) -> Result<(), Ip
     Ok(())
 }
 
+/// Блокирует current thread до тех пор, пока в `signal_state` не
+/// поднимется хотя бы один бит из `mask`. Возвращает наблюдённую
+/// маску сигналов (пересечение `observed & mask`).
+///
+/// Совместно используется [`object_wait_one`] и [`mailbox_wait`]:
+/// первый - для KO-универсального wait, второй - в цикле перед
+/// [`Mailbox::try_pop`]. Регистрирует [`ParkWaker`], паркует поток,
+/// разрешает гонку signal/timeout через CAS на [`ParkState`].
+///
+/// `timeout_ns = Some(0)` - non-blocking poll: возвращает уже
+/// набранную маску, иначе [`IpcError::Timeout`].
+fn wait_until(
+    signal_state: &SignalState,
+    mask: u32,
+    timeout_ns: Option<u64>,
+) -> Result<u32, IpcError> {
+    // Fast-path: уже сигналит.
+    let already = signal_state.peek() & mask;
+    if already != 0 {
+        return Ok(already);
+    }
+
+    // Non-blocking poll: не регистрируем waiter и не паркуем поток -
+    // иначе block_current_until уйдёт в context switch на дедлайне now+0.
+    if timeout_ns == Some(0) {
+        return Err(IpcError::Timeout);
+    }
+
+    let runtime = runtime();
+    let token = runtime.current_wait_token();
+    let waker_arc = Arc::new(ParkWaker::new(runtime.clone(), token));
+    let waker_dyn: Arc<dyn Waker> = waker_arc.clone();
+
+    signal_state.register_waiter(mask, waker_dyn.clone());
+
+    // register_waiter под своим локом мог уже вызвать wake() (если
+    // signal-биты были выставлены): тогда state == SIGNALED - и
+    // block_current_until сразу вернётся, не паркуя поток.
+    runtime.block_current_until(waker_arc.state(), timeout_ns);
+
+    // Поток возобновился: либо по signal-стороне (state SIGNALED), либо
+    // по timeout-стороне (state ещё REGISTERED - сонник снял с
+    // SleepQueue). Закрываем гонку через CAS.
+    match waker_arc
+        .state()
+        .load(core::sync::atomic::Ordering::Acquire)
+    {
+        ParkState::SIGNALED => Ok(waker_arc.observed() & mask),
+        _ => {
+            if waker_arc.claim_timeout() {
+                // Снимаем waker'а из списка, чтобы поздний signal не
+                // зацепил уже отпущенный поток.
+                signal_state.remove_waiter(&waker_dyn);
+                Err(IpcError::Timeout)
+            } else {
+                // Signal победил между нашей загрузкой state и CAS -
+                // используем его наблюдение.
+                Ok(waker_arc.observed() & mask)
+            }
+        }
+    }
+}
+
 /// Ждёт пока на KO, к которому относится `handle_id`, не поднимется
 /// хотя бы один бит из `signals`. Возвращает наблюдённую маску
 /// сигналов. На `timeout_ns = Some(0)` - полу-non-blocking poll.
@@ -58,53 +123,9 @@ pub fn object_wait_one(
 
     // Берём KObject под локом таблицы и сразу отпускаем лок.
     let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::WAIT))?;
-
     let signal_state = object.signals().ok_or(IpcError::WrongType)?;
 
-    // Fast-path: уже сигналит.
-    let already = signal_state.peek() & signals;
-    if already != 0 {
-        return Ok(already);
-    }
-
-    // Non-blocking poll: не регистрируем waiter и не паркуем поток -
-    // иначе block_current_until уйдёт в context switch на дедлайне now+0.
-    if timeout_ns == Some(0) {
-        return Err(IpcError::Timeout);
-    }
-
-    let token = runtime.current_wait_token();
-    let waker_arc = Arc::new(ParkWaker::new(runtime.clone(), token));
-    let waker_dyn: Arc<dyn super::wait::Waker> = waker_arc.clone();
-
-    signal_state.register_waiter(signals, waker_dyn.clone());
-
-    // register_waiter под своим локом мог уже вызвать wake() (если
-    // signal-биты были выставлены): тогда state == SIGNALED - и
-    // block_current_until сразу вернётся, не паркуя поток.
-    runtime.block_current_until(waker_arc.state(), timeout_ns);
-
-    // Поток возобновился: либо по signal-стороне (state SIGNALED), либо
-    // по timeout-стороне (state ещё REGISTERED - сонник снял с
-    // SleepQueue). Закрываем гонку через CAS.
-    match waker_arc
-        .state()
-        .load(core::sync::atomic::Ordering::Acquire)
-    {
-        ParkState::SIGNALED => Ok(waker_arc.observed() & signals),
-        _ => {
-            if waker_arc.claim_timeout() {
-                // Снимаем waker'а из списка, чтобы поздний signal не
-                // зацепил уже отпущенный поток.
-                signal_state.remove_waiter(&waker_dyn);
-                Err(IpcError::Timeout)
-            } else {
-                // Signal победил между нашей загрузкой state и CAS -
-                // используем его наблюдение.
-                Ok(waker_arc.observed() & signals)
-            }
-        }
-    }
+    wait_until(signal_state, signals, timeout_ns)
 }
 
 /// Создаёт пару связанных `Channel` и регистрирует оба handle'а
@@ -220,6 +241,124 @@ pub fn terminate_thread(thread: &Arc<ThreadObject>, exit_code: i32) -> Result<()
 /// `THREAD_TERMINATED`, после декремента до нуля - `PROCESS_TERMINATED`.
 pub fn terminate_process(process: &Arc<ProcessObject>, exit_code: i32) -> Result<(), IpcError> {
     runtime().terminate_process(process, exit_code)
+}
+
+/// Создаёт пустой [`Mailbox`] и регистрирует handle в таблице
+/// текущего процесса. Стартовые права - [`Rights::defaults_for`].
+pub fn mailbox_create() -> Result<HandleId, IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let mb = Mailbox::new();
+    let ko = KObject::Mailbox(mb);
+    let handle = Handle::new(ko.clone(), Rights::defaults_for(&ko));
+    table.with_lock(|tbl| tbl.insert(handle))
+}
+
+/// Кладёт пакет в mailbox. Требует [`Rights::WRITE`]; на полной
+/// очереди - [`IpcError::ShouldWait`] без побочных эффектов.
+pub fn mailbox_queue(handle_id: HandleId, packet: MailboxPacket) -> Result<(), IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let mb = table.with_lock(|tbl| tbl.get_mailbox(handle_id, Rights::WRITE))?;
+    mb.queue(packet)
+}
+
+/// Извлекает `Arc<dyn SignalSource>` и `Koid` для KO, на который указывает
+/// `handle_id`, проверив `Rights::WAIT`. Memory/MemoryAuthority и
+/// Mailbox - `WrongType`.
+///
+/// Mailbox в качестве target отвергается на api-границе: `Mailbox::queue`
+/// зовёт `signal()` под mailbox.inner-локом, observer-wake берёт
+/// target-mailbox.inner. Цепочка `A -> B -> A` (или `A -> A` через
+/// два handle одного KO) при `queue` возвращается на уже удерживаемый
+/// `inner` - recursive spinlock. Запрет здесь делает все mailbox-цепочки
+/// невозможными независимо от того, как у пользователя выглядит handle.
+fn target_signal_source(handle_id: HandleId) -> Result<(Arc<dyn SignalSource>, Koid), IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::WAIT))?;
+    let koid = object.koid();
+    let source: Arc<dyn SignalSource> = match object {
+        KObject::Channel(c) => c,
+        KObject::Event(e) => e,
+        KObject::Process(p) => p,
+        KObject::Thread(t) => t,
+        KObject::Mailbox(_) | KObject::Memory(_) | KObject::MemoryAuthority(_) => {
+            return Err(IpcError::WrongType);
+        }
+    };
+    Ok((source, koid))
+}
+
+/// Подписывает mailbox на сигналы target'а: при поднятии хотя бы
+/// одного бита из `mask` ядро положит в очередь mailbox'а signal-
+/// пакет с заданным `key`.
+///
+/// Требует [`Rights::WRITE`] на mailbox-handle и [`Rights::WAIT`] на
+/// target-handle. Backpressure - drop_newest: на полной очереди
+/// signal-пакет дропается, [`Mailbox::overflow_count`] инкрементится.
+pub fn mailbox_wait_async(
+    mailbox: HandleId,
+    target: HandleId,
+    key: u64,
+    mask: u32,
+    mode: AsyncMode,
+) -> Result<(), IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let mb = table.with_lock(|tbl| tbl.get_mailbox(mailbox, Rights::WRITE))?;
+    let (source, koid) = target_signal_source(target)?;
+    mb.subscribe(&source, koid, key, mask, mode);
+    Ok(())
+}
+
+/// Отзывает подписку, ранее зарегистрированную через
+/// [`mailbox_wait_async`]. Идемпотентна: если подписка с таким
+/// `(target_koid, key)` отсутствует - `Ok(())`. Требует
+/// [`Rights::WRITE`] на mailbox-handle.
+pub fn mailbox_cancel(mailbox: HandleId, target: HandleId, key: u64) -> Result<(), IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let mb = table.with_lock(|tbl| tbl.get_mailbox(mailbox, Rights::WRITE))?;
+    // Источник нам нужен только для извлечения koid'а: cancel хранит
+    // Weak<target> внутри Observer, поэтому повторный target не нужен.
+    let (_source, koid) = target_signal_source(target)?;
+    mb.cancel_subscription(koid, key);
+    Ok(())
+}
+
+/// Атомарный wait+pop: блокируется до появления пакета или истечения
+/// `timeout_ns`, затем атомарно достаёт первый. Требует
+/// [`Rights::READ`].
+///
+/// На multi-consumer пути возможен ложный возврат из `wait_until`
+/// (другой consumer успел опустошить очередь между wake и нашим
+/// `try_pop`); в этом случае цикл уходит в следующий wait. С
+/// `timeout_ns = Some(0)` лишний цикл невозможен: poll либо
+/// возвращает пакет, либо `Timeout`.
+pub fn mailbox_wait(
+    handle_id: HandleId,
+    timeout_ns: Option<u64>,
+) -> Result<MailboxPacket, IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let mb = table.with_lock(|tbl| tbl.get_mailbox(handle_id, Rights::READ))?;
+
+    loop {
+        match mb.try_pop() {
+            Ok(packet) => return Ok(packet),
+            Err(IpcError::ShouldWait) => {
+                wait_until(mb.signals(), MAILBOX_READABLE, timeout_ns)?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 #[cfg(test)]

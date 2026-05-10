@@ -19,6 +19,17 @@ pub trait Waker: Send + Sync {
     fn wake(&self, observed: u32);
 }
 
+/// Источник сигналов: KO, на чьи биты можно подписаться через
+/// [`SignalState::register_waiter`].
+///
+/// Существует, чтобы хранить ссылку на target подписки (`Weak<dyn
+/// SignalSource>`) без знания конкретного KO-варианта. Реализуется
+/// каждым signalable-KO; на несигналуемых KO (Memory/MemoryAuthority)
+/// не реализуется намеренно.
+pub trait SignalSource: Send + Sync {
+    fn signals(&self) -> &SignalState;
+}
+
 /// Сигнальное состояние KO: атомарные битовые флаги + список ожидающих.
 ///
 /// `peek` лочно-свободен; `signal`/`register_waiter` берут короткий
@@ -94,11 +105,17 @@ impl SignalState {
         }
     }
 
-    /// Снимает waiter из списка по identity (`Arc::ptr_eq`). Используется
-    /// timeout/cancel-путём `object_wait_one`, чтобы завершившийся waiter
-    /// не висел в списке дольше необходимого.
-    ///
-    /// Возвращает `true`, если запись действительно была удалена.
+    /// Регистрирует waiter без fast-path-wake: даже если требуемые
+    /// биты уже выставлены, `wake` синхронно не вызывается; waker
+    /// ждёт следующего `signal()`.
+    pub fn register_waiter_silent(&self, mask: u32, waker: Arc<dyn Waker>) {
+        self.waiters.with_lock(|wl| {
+            wl.entries.push(WaiterEntry { mask, waker });
+        });
+    }
+
+    /// Снимает waiter из списка по identity (`Arc::ptr_eq`). Возвращает
+    /// `true`, если запись действительно была удалена.
     pub fn remove_waiter(&self, target: &Arc<dyn Waker>) -> bool {
         self.waiters.with_lock(|wl| {
             let initial = wl.entries.len();

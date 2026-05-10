@@ -19,6 +19,7 @@ mod event;
 mod handle;
 mod handle_table;
 mod koid;
+mod mailbox;
 mod object;
 mod process;
 mod rights;
@@ -28,8 +29,9 @@ mod wait;
 
 pub use api::{
     channel_create, channel_read, channel_write, create_empty_process, create_user_thread,
-    handle_close, handle_duplicate, install_handle, object_signal, object_wait_one,
-    terminate_process, terminate_thread, thread_exit,
+    handle_close, handle_duplicate, install_handle, mailbox_cancel, mailbox_create, mailbox_queue,
+    mailbox_wait, mailbox_wait_async, object_signal, object_wait_one, terminate_process,
+    terminate_thread, thread_exit,
 };
 pub use authority::MemoryAuthority;
 pub use channel::{
@@ -41,12 +43,16 @@ pub use event::{EVENT_SIGNALED, Event};
 pub use handle::{Handle, HandleId};
 pub use handle_table::HandleTable;
 pub use koid::Koid;
+pub use mailbox::{
+    AsyncMode, MAILBOX_PACKET_SIZE, MAILBOX_PAYLOAD_SIZE, MAILBOX_QUEUE_CAPACITY, MAILBOX_READABLE,
+    Mailbox, MailboxPacket, MailboxPacketKind,
+};
 pub use object::KObject;
 pub use process::{PROCESS_TERMINATED, ProcessObject};
 pub use rights::Rights;
 pub use runtime::{KernelRuntime, ParkState, UserThreadEntry, WaitToken, install_runtime, runtime};
 pub use thread::{THREAD_TERMINATED, ThreadObject};
-pub use wait::{SignalState, Waker};
+pub use wait::{SignalSource, SignalState, Waker};
 
 #[cfg(test)]
 mod integration_tests;

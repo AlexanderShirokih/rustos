@@ -64,6 +64,11 @@ impl<T: ?Sized> core::fmt::Debug for Koid<T> {
         let name = match self.type_tag() {
             1 => "Channel",
             2 => "Event",
+            3 => "Process",
+            4 => "Thread",
+            5 => "Memory",
+            6 => "MemoryAuthority",
+            7 => "Mailbox",
             _ => "?",
         };
         write!(f, "Koid({name}#{:#x})", self.0.get() & ADDR_MASK)

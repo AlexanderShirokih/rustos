@@ -13,7 +13,11 @@ use alloc::{
 
 use collections::{LockCell, MutexCell};
 
-use super::{errors::IpcError, handle::Handle, wait::SignalState};
+use super::{
+    errors::IpcError,
+    handle::Handle,
+    wait::{SignalSource, SignalState},
+};
 
 /// Сигнал "в inbound-очереди есть хотя бы одно сообщение".
 pub const CHANNEL_READABLE: u32 = 1 << 0;
@@ -315,6 +319,12 @@ impl Channel {
 
     /// Возвращает сигнальное состояние (для интеграции с `object_wait_one`).
     pub fn signals(&self) -> &SignalState {
+        &self.signals
+    }
+}
+
+impl SignalSource for Channel {
+    fn signals(&self) -> &SignalState {
         &self.signals
     }
 }

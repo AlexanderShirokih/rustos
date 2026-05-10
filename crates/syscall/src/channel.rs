@@ -10,9 +10,13 @@ use collections::LockCell;
 use kobject::{
     HandleId, IpcError, MESSAGE_INLINE_MAX, MESSAGE_MAX_HANDLES, Message, Rights, runtime,
 };
-use memory::{UserVmContext, memory_mapper::UserCopyError, virtual_address::VirtualAddress};
 
-use super::{bridge::parse_handle_id, error::SyscallError, runtime::runtime as syscall_runtime};
+use super::{
+    bridge::parse_handle_id,
+    error::SyscallError,
+    runtime::runtime as syscall_runtime,
+    user_io::{copy_in, copy_out, validate_user_ptr},
+};
 
 /// Размер записи `HandleId` в user-памяти - именно `u32`, ABI-стабильно.
 const HANDLE_ID_SIZE: usize = core::mem::size_of::<u32>();
@@ -216,36 +220,6 @@ fn parse_len(raw: u64, max: usize, overflow_err: SyscallError) -> Result<usize, 
     Ok(n)
 }
 
-fn validate_user_ptr(va: u64, len: usize) -> Result<(), SyscallError> {
-    if len == 0 {
-        return Ok(());
-    }
-    if va == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    Ok(())
-}
-
-fn copy_in(user_vm: &UserVmContext, va: u64, dst: &mut [u8]) -> Result<(), SyscallError> {
-    let va_usize = usize::try_from(va).map_err(|_| SyscallError::InvalidArgument)?;
-    user_vm
-        .mapper()
-        .copy_user_in(VirtualAddress::new(va_usize), dst)
-        .map_err(user_copy_err)
-}
-
-fn copy_out(user_vm: &UserVmContext, va: u64, src: &[u8]) -> Result<(), SyscallError> {
-    let va_usize = usize::try_from(va).map_err(|_| SyscallError::InvalidArgument)?;
-    user_vm
-        .mapper()
-        .copy_user_out(VirtualAddress::new(va_usize), src)
-        .map_err(user_copy_err)
-}
-
-fn user_copy_err(_e: UserCopyError) -> SyscallError {
-    SyscallError::InvalidArgument
-}
-
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -279,38 +253,6 @@ mod tests {
         assert_eq!(
             parse_len(u64::MAX, 256, SyscallError::MessageTooBig),
             Err(SyscallError::MessageTooBig)
-        );
-    }
-
-    #[test]
-    fn validate_user_ptr_zero_va_zero_len_ok() {
-        assert!(validate_user_ptr(0, 0).is_ok());
-    }
-
-    #[test]
-    fn validate_user_ptr_zero_va_nonzero_len_invalid() {
-        assert_eq!(validate_user_ptr(0, 8), Err(SyscallError::InvalidArgument));
-    }
-
-    #[test]
-    fn validate_user_ptr_nonzero_va_with_zero_len_ok() {
-        assert!(validate_user_ptr(0x1000, 0).is_ok());
-    }
-
-    #[test]
-    fn validate_user_ptr_nonzero_va_nonzero_len_ok() {
-        assert!(validate_user_ptr(0x1000, 8).is_ok());
-    }
-
-    #[test]
-    fn user_copy_err_maps_to_invalid_argument() {
-        assert_eq!(
-            user_copy_err(UserCopyError::NotMapped),
-            SyscallError::InvalidArgument
-        );
-        assert_eq!(
-            user_copy_err(UserCopyError::AccessDenied),
-            SyscallError::InvalidArgument
         );
     }
 }

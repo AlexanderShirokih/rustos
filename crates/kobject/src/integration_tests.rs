@@ -7,8 +7,9 @@
 use alloc::sync::Arc;
 
 use super::{
-    CHANNEL_READABLE, Channel, EVENT_SIGNALED, Event, Handle, HandleTable, KObject, Message,
-    Rights, wait::MockWaker,
+    AsyncMode, CHANNEL_READABLE, Channel, EVENT_SIGNALED, Event, Handle, HandleTable, KObject,
+    MAILBOX_PAYLOAD_SIZE, Mailbox, MailboxPacket, MailboxPacketKind, Message, Rights,
+    wait::{MockWaker, SignalSource},
 };
 
 /// "Сервер" получает запрос с переданным handle на ответ-Event,
@@ -144,4 +145,106 @@ fn closing_endpoint_via_table_signals_peer() {
 
     assert!(waker.was_woken());
     let _ = Arc::clone(&client_end);
+}
+
+/// Mailbox подписан через handle-table на сигналы Event'а: signal у
+/// event'а доставляет один пакет; повторный signal после отзыва
+/// подписки пакета не приносит.
+#[test]
+fn mailbox_async_subscribe_deliver_and_cancel() {
+    let mut table = HandleTable::new();
+
+    let mailbox = Mailbox::new();
+    let mb_id = {
+        let ko = KObject::Mailbox(mailbox.clone());
+        let rights = Rights::defaults_for(&ko);
+        table.insert(Handle::new(ko, rights)).unwrap()
+    };
+
+    let event = Event::new();
+    let ev_id = {
+        let ko = KObject::Event(event.clone());
+        let rights = Rights::defaults_for(&ko);
+        table.insert(Handle::new(ko, rights)).unwrap()
+    };
+
+    // Pre-fill один user-пакет, чтобы убедиться, что signal-пакет
+    // приземляется в FIFO после него.
+    mailbox
+        .queue(MailboxPacket::user(0, [0u8; MAILBOX_PAYLOAD_SIZE]))
+        .unwrap();
+
+    // Эмулируем mailbox_wait_async без runtime: получаем target напрямую.
+    let event_arc = table.get_event(ev_id, Rights::WAIT).unwrap();
+    let mb_arc = table.get_mailbox(mb_id, Rights::WRITE).unwrap();
+    let target: Arc<dyn SignalSource> = event_arc.clone();
+    let target_koid = KObject::Event(event_arc.clone()).koid();
+    mb_arc.subscribe(&target, target_koid, 1234, EVENT_SIGNALED, AsyncMode::Once);
+
+    event.signal(EVENT_SIGNALED, 0);
+
+    // user(0), потом signal(1234).
+    let p1 = mailbox.try_pop().unwrap();
+    assert_eq!(p1.kind, MailboxPacketKind::User);
+    let p2 = mailbox.try_pop().unwrap();
+    assert_eq!(p2.kind, MailboxPacketKind::SignalOnce);
+    assert_eq!(p2.key, 1234);
+    assert!(mailbox.try_pop().is_err());
+
+    // Cancel идемпотентен.
+    mb_arc.cancel_subscription(target_koid, 1234);
+    mb_arc.cancel_subscription(target_koid, 1234);
+
+    // Повторный signal - пакета не будет (Once уже отработал).
+    event.signal(0, EVENT_SIGNALED);
+    event.signal(EVENT_SIGNALED, 0);
+    assert!(mailbox.try_pop().is_err());
+}
+
+/// Repeating-подписка через handle-table: каждый signal target'а кладёт
+/// в mailbox по пакету; cancel останавливает доставку.
+#[test]
+fn mailbox_async_repeating_subscribe_and_cancel() {
+    let mut table = HandleTable::new();
+
+    let mailbox = Mailbox::new();
+    let mb_id = {
+        let ko = KObject::Mailbox(mailbox.clone());
+        let rights = Rights::defaults_for(&ko);
+        table.insert(Handle::new(ko, rights)).unwrap()
+    };
+
+    let event = Event::new();
+    let ev_id = {
+        let ko = KObject::Event(event.clone());
+        let rights = Rights::defaults_for(&ko);
+        table.insert(Handle::new(ko, rights)).unwrap()
+    };
+
+    let event_arc = table.get_event(ev_id, Rights::WAIT).unwrap();
+    let mb_arc = table.get_mailbox(mb_id, Rights::WRITE).unwrap();
+    let target: Arc<dyn SignalSource> = event_arc.clone();
+    let target_koid = KObject::Event(event_arc.clone()).koid();
+    mb_arc.subscribe(
+        &target,
+        target_koid,
+        4242,
+        EVENT_SIGNALED,
+        AsyncMode::Repeating,
+    );
+
+    event.signal(EVENT_SIGNALED, EVENT_SIGNALED);
+    event.signal(EVENT_SIGNALED, EVENT_SIGNALED);
+
+    let p1 = mailbox.try_pop().unwrap();
+    assert_eq!(p1.kind, MailboxPacketKind::SignalRepeating);
+    assert_eq!(p1.key, 4242);
+    let p2 = mailbox.try_pop().unwrap();
+    assert_eq!(p2.kind, MailboxPacketKind::SignalRepeating);
+    assert!(mailbox.try_pop().is_err());
+
+    mb_arc.cancel_subscription(target_koid, 4242);
+
+    event.signal(EVENT_SIGNALED, EVENT_SIGNALED);
+    assert!(mailbox.try_pop().is_err());
 }

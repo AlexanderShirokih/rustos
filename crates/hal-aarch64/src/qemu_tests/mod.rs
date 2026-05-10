@@ -4,6 +4,7 @@ mod address_space;
 mod asid;
 mod channel_via_syscall;
 mod kheap;
+mod mailbox_via_syscall;
 mod memory_authority_share;
 mod memory_kobject;
 mod process_lifecycle;
