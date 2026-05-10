@@ -196,8 +196,8 @@ where
     A: ArchContext,
     T: TimerSource,
 {
-    /// Возвращает thread-safe handle на scheduler для регистрации в `Capabilities`
-    /// и использования в trampoline-замыканиях.
+    /// Возвращает thread-safe handle на scheduler для регистрации в bootstrap
+    /// services и использования в trampoline-замыканиях.
     pub fn handle(&self) -> super::service::SchedulerHandle<A, T> {
         super::service::SchedulerHandle::new(self.inner.clone())
     }

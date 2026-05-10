@@ -7,13 +7,9 @@ use alloc::{
 };
 
 use drivers_common::{
-    CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DeviceMemoryPermission, Driver,
-    DriverFactory, DriverRunError, Owners,
+    BootServices, DeviceMemoryPermission, Driver, DriverFactory, DriverRunError, Owners,
     probe::{ProbeError, ProbeResult},
-    services::{
-        interrupts::InterruptsService,
-        mmio::{MmioAddress, MmioService},
-    },
+    services::mmio::{MmioAddress, MmioService},
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatible};
 use spin::Mutex;
@@ -60,10 +56,10 @@ impl Gicv3 {
 }
 
 impl Driver for Gicv3 {
-    fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
-        let mmio = caps
-            .require_service::<dyn MmioService>()
-            .map_err(DriverRunError::from_capability_error)?;
+    fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
+        let mmio = services
+            .require_mmio()
+            .map_err(DriverRunError::from_boot_services_error)?;
 
         let controller = Arc::new(Mutex::new(
             self.create_controller(mmio.as_ref())
@@ -76,8 +72,9 @@ impl Driver for Gicv3 {
 
         let handle = GicV3InterruptsService::new(controller);
 
-        caps.provide_service::<dyn InterruptsService>(Arc::new(handle))
-            .map_err(|err| DriverRunError::Fatal(err.to_string()))
+        services
+            .set_interrupts(Arc::new(handle))
+            .map_err(DriverRunError::from_boot_services_error)
     }
 }
 

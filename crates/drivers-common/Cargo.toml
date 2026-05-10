@@ -8,6 +8,7 @@ publish.workspace = true
 io = { workspace = true }
 memory = { workspace = true }
 klog = { workspace = true }
+scheduler = { workspace = true }
 spin = { workspace = true }
 
 [lints]

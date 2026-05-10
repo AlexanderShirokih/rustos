@@ -3,13 +3,9 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use drivers_common::{
-    CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DeviceMemoryPermission, Driver,
-    DriverFactory, DriverRunError, Owners,
+    BootServices, DeviceMemoryPermission, Driver, DriverFactory, DriverRunError, Owners,
     probe::{ProbeError, ProbeResult},
-    services::{
-        console::ConsoleService,
-        mmio::{MmioAddress, MmioBound, MmioService},
-    },
+    services::mmio::{MmioAddress, MmioBound},
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt};
 use io::{
@@ -122,10 +118,10 @@ struct UartDmDriver {
 }
 
 impl Driver for UartDmDriver {
-    fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
-        let mmio = caps
-            .require_service::<dyn MmioService>()
-            .map_err(DriverRunError::from_capability_error)?;
+    fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
+        let mmio = services
+            .require_mmio()
+            .map_err(DriverRunError::from_boot_services_error)?;
 
         let bound = mmio
             .map_mmio(
@@ -138,8 +134,9 @@ impl Driver for UartDmDriver {
 
         let uart = UartDm::new(bound);
 
-        caps.provide_service::<dyn ConsoleService>(Arc::new(uart))
-            .map_err(|e| DriverRunError::Fatal(alloc::format!("{e}")))
+        services
+            .set_console(Arc::new(uart))
+            .map_err(DriverRunError::from_boot_services_error)
     }
 }
 

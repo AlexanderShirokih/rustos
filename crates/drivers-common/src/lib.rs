@@ -5,16 +5,16 @@
 #![no_std]
 extern crate alloc;
 
-pub mod capabilities;
 pub mod driver;
 pub mod probe;
 pub mod scanner;
 pub mod services;
 pub mod tree;
 
+mod boot_services;
 mod registry;
 
-pub use capabilities::*;
+pub use boot_services::*;
 pub use driver::*;
 pub use memory::mem_flags::*;
 pub use registry::*;

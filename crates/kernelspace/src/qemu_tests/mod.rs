@@ -16,7 +16,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use drivers_common::{CapabilityStoreExt, services::console::ConsoleService};
+use drivers_common::services::console::ConsoleService;
 use io::writer::Writer;
 use scheduler::{ArchContext, Bootstrapped, Scheduler, SchedulerService};
 use spin::Once;
@@ -110,14 +110,14 @@ pub fn spawn_qemu_tests_process<A>(
 /// Подключает harness к ядру и запускает все зарегистрированные кейсы.
 /// Не возвращается: завершает QEMU через ARM semihosting.
 pub fn run(kernel: &mut KernelContext) -> ! {
-    kernel.with_runtime_state(|caps, _| {
-        let console = caps
-            .require_service::<dyn ConsoleService>()
+    kernel.with_runtime_state(|services, _| {
+        let console = services
+            .require_console()
             .expect("ConsoleService must be available for qemu-tests");
         ADAPTER.call_once(|| ConsoleAdapter(console));
 
-        let scheduler = caps
-            .require_service::<dyn SchedulerService>()
+        let scheduler = services
+            .require_scheduler()
             .expect("SchedulerService must be available for qemu-tests");
         SCHEDULER.call_once(|| scheduler);
     });

@@ -2,7 +2,7 @@ extern crate alloc;
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 
-use drivers_common::{CapabilityStoreMut, Driver, DriverRunError, RuntimeDriverRegistry};
+use drivers_common::{BootServices, Driver, DriverRunError, RuntimeDriverRegistry, ServiceKind};
 use klog::info;
 
 pub struct PendingDriver {
@@ -13,7 +13,7 @@ pub struct PendingDriver {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedEntry {
     pub driver: &'static str,
-    pub capability: &'static str,
+    pub service: ServiceKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +36,7 @@ pub struct InitSummary {
 
 pub fn run_retry_passes(
     mut pending: Vec<PendingDriver>,
-    caps: &mut dyn CapabilityStoreMut,
+    services: &mut BootServices,
     registry: &mut RuntimeDriverRegistry,
 ) -> Result<InitSummary, InitSchedulerError> {
     let mut passes = 0usize;
@@ -50,7 +50,7 @@ pub fn run_retry_passes(
         let mut unresolved_entries = Vec::new();
 
         for mut pending_driver in pending {
-            match pending_driver.driver.run(caps) {
+            match pending_driver.driver.run(services) {
                 Ok(()) => {
                     progress = true;
                     initialized += 1;
@@ -60,10 +60,10 @@ pub fn run_retry_passes(
                     registry.insert(pending_driver.name, pending_driver.driver);
                 }
 
-                Err(DriverRunError::MissingCapability { capability }) => {
+                Err(DriverRunError::MissingService { service }) => {
                     unresolved_entries.push(UnresolvedEntry {
                         driver: pending_driver.name,
-                        capability,
+                        service,
                     });
                     pending_next.push(pending_driver);
                 }
@@ -98,24 +98,28 @@ pub fn run_retry_passes(
 #[cfg(test)]
 mod tests {
     use alloc::{string::ToString, sync::Arc, vec};
-    use core::{
-        marker::PhantomData,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use drivers_common::{
-        Capabilities, CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt,
-        DriverRunError,
+        BootServices, DriverRunError, ServiceKind,
         services::{
-            Service,
+            console::ConsoleService,
             interrupts::{InterruptsService, IrqBinding, IrqBound, IrqRegistrationError},
+            timer::{TickHandler, TimerService},
         },
     };
+    use io::writer::Writer;
     use spin::Mutex;
 
     use super::*;
 
-    struct FooCap;
+    struct TestConsole;
+
+    impl Writer for TestConsole {
+        fn write_all(&self, _buf: &[u8]) {}
+
+        fn flush(&self) {}
+    }
 
     struct TestInterruptHandle;
 
@@ -131,70 +135,99 @@ mod tests {
         fn dispatch_interrupt(&self) {}
     }
 
-    struct PublishCapDriver<T: 'static + Send + Sync> {
-        name: &'static str,
-        logs: Arc<Mutex<Vec<&'static str>>>,
-        value: Arc<T>,
+    struct TestTimerHandle;
+
+    impl TimerService for TestTimerHandle {
+        fn now_ns(&self) -> u64 {
+            0
+        }
+
+        fn schedule_next(&self, _deadline_ns: u64) {}
+
+        fn set_handler(&self, _handler: Arc<dyn TickHandler>) {}
     }
 
-    impl<T: 'static + Send + Sync> Driver for PublishCapDriver<T> {
-        fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+    struct PublishConsoleDriver {
+        name: &'static str,
+        logs: Arc<Mutex<Vec<&'static str>>>,
+        value: Arc<dyn ConsoleService>,
+    }
+
+    impl Driver for PublishConsoleDriver {
+        fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
             self.logs.lock().push(self.name);
-            caps.provide(self.value.clone())
-                .map_err(|err| DriverRunError::Fatal(err.to_string()))
+            services
+                .set_console(self.value.clone())
+                .map_err(DriverRunError::from_boot_services_error)
         }
     }
 
-    struct RequireCapDriver<T: 'static + Send + Sync> {
+    struct PublishInterruptsDriver {
         name: &'static str,
         logs: Arc<Mutex<Vec<&'static str>>>,
-        _marker: PhantomData<T>,
+        value: Arc<dyn InterruptsService>,
     }
 
-    impl<T: 'static + Send + Sync> Driver for RequireCapDriver<T> {
-        fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+    impl Driver for PublishInterruptsDriver {
+        fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
             self.logs.lock().push(self.name);
-            caps.require::<T>()
+            services
+                .set_interrupts(self.value.clone())
+                .map_err(DriverRunError::from_boot_services_error)
+        }
+    }
+
+    struct RequireInterruptsDriver {
+        name: &'static str,
+        logs: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Driver for RequireInterruptsDriver {
+        fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
+            self.logs.lock().push(self.name);
+            services
+                .require_interrupts()
                 .map(|_| ())
-                .map_err(DriverRunError::from_capability_error)
+                .map_err(DriverRunError::from_boot_services_error)
         }
     }
 
-    struct PublishServiceDriver<T: ?Sized + Service + 'static> {
+    struct PublishTimerDriver {
         name: &'static str,
         logs: Arc<Mutex<Vec<&'static str>>>,
-        value: Arc<T>,
+        value: Arc<dyn TimerService>,
     }
 
-    impl<T: ?Sized + Service + 'static> Driver for PublishServiceDriver<T> {
-        fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+    impl Driver for PublishTimerDriver {
+        fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
             self.logs.lock().push(self.name);
-            caps.provide_service::<T>(self.value.clone())
-                .map_err(|err| DriverRunError::Fatal(err.to_string()))
+            services
+                .set_timer(self.value.clone())
+                .map_err(DriverRunError::from_boot_services_error)
         }
     }
 
-    struct RequireServiceDriver<T: ?Sized + Service + 'static> {
+    struct RequireTimerDriver {
         name: &'static str,
         logs: Arc<Mutex<Vec<&'static str>>>,
-        _marker: PhantomData<T>,
     }
 
-    impl<T: ?Sized + Service + 'static> Driver for RequireServiceDriver<T> {
-        fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+    impl Driver for RequireTimerDriver {
+        fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
             self.logs.lock().push(self.name);
-            caps.require_service::<T>()
+            services
+                .require_timer()
                 .map(|_| ())
-                .map_err(DriverRunError::from_capability_error)
+                .map_err(DriverRunError::from_boot_services_error)
         }
     }
 
     struct AlwaysMissingDriver;
 
     impl Driver for AlwaysMissingDriver {
-        fn run(&mut self, _caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
-            Err(DriverRunError::MissingCapability {
-                capability: "FooCap",
+        fn run(&mut self, _services: &mut BootServices) -> Result<(), DriverRunError> {
+            Err(DriverRunError::MissingService {
+                service: ServiceKind::Timer,
             })
         }
     }
@@ -202,7 +235,7 @@ mod tests {
     struct FatalDriver;
 
     impl Driver for FatalDriver {
-        fn run(&mut self, _caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+        fn run(&mut self, _services: &mut BootServices) -> Result<(), DriverRunError> {
             Err(DriverRunError::Fatal("boom".to_string()))
         }
     }
@@ -212,7 +245,7 @@ mod tests {
     }
 
     impl Driver for CountingDriver {
-        fn run(&mut self, _caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+        fn run(&mut self, _services: &mut BootServices) -> Result<(), DriverRunError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -233,7 +266,7 @@ mod tests {
     }
 
     impl Driver for DropProbeDriver {
-        fn run(&mut self, _caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+        fn run(&mut self, _services: &mut BootServices) -> Result<(), DriverRunError> {
             Ok(())
         }
     }
@@ -245,62 +278,63 @@ mod tests {
     #[test]
     fn initializes_all_without_retry() {
         let logs = Arc::new(Mutex::new(Vec::new()));
-        let mut caps = Capabilities::new();
+        let mut services = BootServices::new();
         let mut registry = RuntimeDriverRegistry::new();
 
         let pending = vec![
             pending(
-                "publisher-1",
-                Box::new(PublishCapDriver::<u64> {
-                    name: "publisher-1",
+                "console-provider",
+                Box::new(PublishConsoleDriver {
+                    name: "console-provider",
                     logs: logs.clone(),
-                    value: Arc::new(11),
+                    value: Arc::new(TestConsole),
                 }),
             ),
             pending(
-                "publisher-2",
-                Box::new(PublishCapDriver::<u32> {
-                    name: "publisher-2",
+                "irq-provider",
+                Box::new(PublishInterruptsDriver {
+                    name: "irq-provider",
                     logs: logs.clone(),
-                    value: Arc::new(22),
+                    value: Arc::new(TestInterruptHandle),
                 }),
             ),
         ];
 
-        let summary = run_retry_passes(pending, &mut caps, &mut registry).expect("must initialize");
+        let summary =
+            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
 
         assert_eq!(summary.passes, 1);
         assert_eq!(summary.initialized, 2);
         assert_eq!(registry.len(), 2);
-        assert_eq!(*logs.lock(), vec!["publisher-1", "publisher-2"]);
+        assert_eq!(*logs.lock(), vec!["console-provider", "irq-provider"]);
     }
 
     #[test]
     fn same_pass_visibility_when_capability_published_earlier() {
         let logs = Arc::new(Mutex::new(Vec::new()));
-        let mut caps = Capabilities::new();
+        let mut services = BootServices::new();
         let mut registry = RuntimeDriverRegistry::new();
 
         let pending = vec![
             pending(
                 "publisher",
-                Box::new(PublishCapDriver::<FooCap> {
+                Box::new(PublishTimerDriver {
                     name: "publisher",
                     logs: logs.clone(),
-                    value: Arc::new(FooCap),
+                    value: Arc::new(TestTimerHandle),
                 }),
             ),
             pending(
                 "consumer",
-                Box::new(RequireCapDriver::<FooCap> {
+                Box::new(RequireTimerDriver {
                     name: "consumer",
                     logs: logs.clone(),
-                    _marker: PhantomData,
                 }),
             ),
         ];
 
-        let summary = run_retry_passes(pending, &mut caps, &mut registry).expect("must initialize");
+        let summary =
+            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
 
         assert_eq!(summary.passes, 1);
         assert_eq!(summary.initialized, 2);
@@ -310,29 +344,29 @@ mod tests {
     #[test]
     fn retry_pass_resolves_dependency_when_provider_is_later() {
         let logs = Arc::new(Mutex::new(Vec::new()));
-        let mut caps = Capabilities::new();
+        let mut services = BootServices::new();
         let mut registry = RuntimeDriverRegistry::new();
 
         let pending = vec![
             pending(
                 "consumer",
-                Box::new(RequireCapDriver::<FooCap> {
+                Box::new(RequireTimerDriver {
                     name: "consumer",
                     logs: logs.clone(),
-                    _marker: PhantomData,
                 }),
             ),
             pending(
                 "publisher",
-                Box::new(PublishCapDriver::<FooCap> {
+                Box::new(PublishTimerDriver {
                     name: "publisher",
                     logs: logs.clone(),
-                    value: Arc::new(FooCap),
+                    value: Arc::new(TestTimerHandle),
                 }),
             ),
         ];
 
-        let summary = run_retry_passes(pending, &mut caps, &mut registry).expect("must initialize");
+        let summary =
+            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
 
         assert_eq!(summary.passes, 2);
         assert_eq!(summary.initialized, 2);
@@ -342,7 +376,7 @@ mod tests {
     #[test]
     fn successful_driver_is_not_retried_on_next_passes() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut caps = Capabilities::new();
+        let mut services = BootServices::new();
         let mut registry = RuntimeDriverRegistry::new();
 
         let pending = vec![
@@ -354,23 +388,23 @@ mod tests {
             ),
             pending(
                 "consumer",
-                Box::new(RequireCapDriver::<FooCap> {
+                Box::new(RequireTimerDriver {
                     name: "consumer",
                     logs: Arc::new(Mutex::new(Vec::new())),
-                    _marker: PhantomData,
                 }),
             ),
             pending(
                 "publisher",
-                Box::new(PublishCapDriver::<FooCap> {
+                Box::new(PublishTimerDriver {
                     name: "publisher",
                     logs: Arc::new(Mutex::new(Vec::new())),
-                    value: Arc::new(FooCap),
+                    value: Arc::new(TestTimerHandle),
                 }),
             ),
         ];
 
-        let summary = run_retry_passes(pending, &mut caps, &mut registry).expect("must initialize");
+        let summary =
+            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
 
         assert_eq!(summary.passes, 2);
         assert_eq!(summary.initialized, 3);
@@ -384,7 +418,7 @@ mod tests {
     #[test]
     fn retry_pass_resolves_interrupt_controller_dependency() {
         let logs = Arc::new(Mutex::new(Vec::new()));
-        let mut caps = Capabilities::new();
+        let mut services = BootServices::new();
         let mut registry = RuntimeDriverRegistry::new();
 
         let controller: Arc<dyn InterruptsService> = Arc::new(TestInterruptHandle);
@@ -392,15 +426,14 @@ mod tests {
         let pending = vec![
             pending(
                 "irq-consumer",
-                Box::new(RequireServiceDriver::<dyn InterruptsService> {
+                Box::new(RequireInterruptsDriver {
                     name: "irq-consumer",
                     logs: logs.clone(),
-                    _marker: PhantomData,
                 }),
             ),
             pending(
                 "gic-provider",
-                Box::new(PublishServiceDriver::<dyn InterruptsService> {
+                Box::new(PublishInterruptsDriver {
                     name: "gic-provider",
                     logs: logs.clone(),
                     value: controller,
@@ -408,7 +441,8 @@ mod tests {
             ),
         ];
 
-        let summary = run_retry_passes(pending, &mut caps, &mut registry).expect("must initialize");
+        let summary =
+            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
 
         assert_eq!(summary.passes, 2);
         assert_eq!(summary.initialized, 2);
@@ -420,17 +454,17 @@ mod tests {
 
     #[test]
     fn fails_when_no_progress_with_unresolved_dependencies() {
-        let mut caps = Capabilities::new();
+        let mut services = BootServices::new();
         let mut registry = RuntimeDriverRegistry::new();
         let pending = vec![pending("missing-driver", Box::new(AlwaysMissingDriver))];
 
-        let err = run_retry_passes(pending, &mut caps, &mut registry).expect_err("must fail");
+        let err = run_retry_passes(pending, &mut services, &mut registry).expect_err("must fail");
         assert_eq!(
             err,
             InitSchedulerError::Unresolved {
                 entries: vec![UnresolvedEntry {
                     driver: "missing-driver",
-                    capability: "FooCap",
+                    service: ServiceKind::Timer,
                 }],
             }
         );
@@ -439,7 +473,7 @@ mod tests {
     #[test]
     fn stops_immediately_on_fatal_error() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut caps = Capabilities::new();
+        let mut services = BootServices::new();
         let mut registry = RuntimeDriverRegistry::new();
 
         let pending = vec![
@@ -452,7 +486,7 @@ mod tests {
             ),
         ];
 
-        let err = run_retry_passes(pending, &mut caps, &mut registry).expect_err("must fail");
+        let err = run_retry_passes(pending, &mut services, &mut registry).expect_err("must fail");
         assert_eq!(
             err,
             InitSchedulerError::Fatal {
@@ -466,34 +500,34 @@ mod tests {
     #[test]
     fn duplicate_publish_is_reported_as_fatal() {
         let logs = Arc::new(Mutex::new(Vec::new()));
-        let mut caps = Capabilities::new();
+        let mut services = BootServices::new();
         let mut registry = RuntimeDriverRegistry::new();
 
         let pending = vec![
             pending(
                 "publisher-a",
-                Box::new(PublishCapDriver::<FooCap> {
+                Box::new(PublishConsoleDriver {
                     name: "publisher-a",
                     logs: logs.clone(),
-                    value: Arc::new(FooCap),
+                    value: Arc::new(TestConsole),
                 }),
             ),
             pending(
                 "publisher-b",
-                Box::new(PublishCapDriver::<FooCap> {
+                Box::new(PublishConsoleDriver {
                     name: "publisher-b",
                     logs: logs.clone(),
-                    value: Arc::new(FooCap),
+                    value: Arc::new(TestConsole),
                 }),
             ),
         ];
 
-        let err = run_retry_passes(pending, &mut caps, &mut registry).expect_err("must fail");
+        let err = run_retry_passes(pending, &mut services, &mut registry).expect_err("must fail");
 
         match err {
             InitSchedulerError::Fatal { driver, reason } => {
                 assert_eq!(driver, "publisher-b");
-                assert!(reason.contains("already registered"));
+                assert!(reason.contains("ConsoleService"));
             }
             InitSchedulerError::Unresolved { .. } => panic!("unexpected scheduler error"),
         }
@@ -502,7 +536,7 @@ mod tests {
     #[test]
     fn registry_keeps_drivers_alive_for_raii() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mut caps = Capabilities::new();
+        let mut services = BootServices::new();
         let mut registry = RuntimeDriverRegistry::new();
 
         let pending = vec![pending(
@@ -514,7 +548,8 @@ mod tests {
             }),
         )];
 
-        let summary = run_retry_passes(pending, &mut caps, &mut registry).expect("must initialize");
+        let summary =
+            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
         assert_eq!(summary.initialized, 1);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
 

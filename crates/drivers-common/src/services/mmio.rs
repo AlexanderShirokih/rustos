@@ -9,8 +9,6 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 
-use crate::services::Service;
-
 // Адрес MMIO-региона.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MmioAddress {
@@ -117,7 +115,7 @@ impl Display for MmioMapError {
     }
 }
 
-pub trait MmioService: Service {
+pub trait MmioService: Send + Sync {
     fn map_mmio(
         &self,
         address: MmioAddress,

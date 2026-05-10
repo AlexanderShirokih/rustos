@@ -1,14 +1,11 @@
 //! Helpers для инициализации scheduler-а из platform-independent кода.
 //!
 //! Изолирует логику создания scheduler, регистрации `SchedulerService` в
-//! `Capabilities` и привязки к `TimerService`.
+//! bootstrap services и привязки к `TimerService`.
 
 use alloc::sync::Arc;
 
-use drivers_common::{
-    CapabilityStoreExt, CapabilityStoreMutExt,
-    services::timer::{TickHandler, TimerService},
-};
+use drivers_common::services::timer::{TickHandler, TimerService};
 use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use scheduler::{
     ArchContext, Bootstrapped, Scheduler, SchedulerConfig, SchedulerHandle, SchedulerService,
@@ -77,7 +74,7 @@ where
 }
 
 /// Создаёт scheduler, делает bootstrap, регистрирует `SchedulerService` в
-/// `Capabilities` и привязывает `TickHandler` к `TimerService`.
+/// bootstrap services и привязывает `TickHandler` к `TimerService`.
 ///
 /// Возвращает scheduler в состоянии [`Bootstrapped`] - вызывающий должен
 /// зарегистрировать начальные потоки и перевести scheduler в [`super::Running`]
@@ -89,8 +86,9 @@ pub fn bootstrap_scheduler<A>(
 where
     A: ArchContext,
 {
-    let timer = kernel.with_runtime_state(|caps, _| {
-        caps.require_service::<dyn TimerService>()
+    let timer = kernel.with_runtime_state(|services, _| {
+        services
+            .require_timer()
             .expect("TimerService must be available before scheduler startup")
     });
 
@@ -114,8 +112,9 @@ where
     let syscall_runtime: Arc<dyn syscall::SyscallRuntime> =
         Arc::new(SchedulerSyscallRuntime { handle });
 
-    kernel.with_runtime_state(|caps, _| {
-        caps.provide_service::<dyn SchedulerService>(service.clone())
+    kernel.with_runtime_state(|services, _| {
+        services
+            .set_scheduler(service.clone())
             .expect("SchedulerService registration must succeed");
     });
     timer.set_handler(tick_handler);

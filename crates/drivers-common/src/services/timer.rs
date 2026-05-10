@@ -2,8 +2,6 @@
 
 use alloc::sync::Arc;
 
-use crate::services::Service;
-
 /// Получатель timer tick событий.
 pub trait TickHandler: Send + Sync {
     /// Вызывается из обработчика таймера с уже прочитанным монотонным временем.
@@ -11,7 +9,7 @@ pub trait TickHandler: Send + Sync {
 }
 
 /// Контракт сервиса системного таймера.
-pub trait TimerService: Service {
+pub trait TimerService: Send + Sync {
     /// Возвращает текущее монотонное время в наносекундах.
     fn now_ns(&self) -> u64;
 

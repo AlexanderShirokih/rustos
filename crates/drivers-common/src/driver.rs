@@ -5,7 +5,7 @@ use alloc::{
     string::{String, ToString},
 };
 
-use crate::{CapabilityError, CapabilityStoreMut};
+use crate::{BootServices, BootServicesError, ServiceKind};
 
 /// Дескриптор драйвера, связывающий имя и probe-функцию.
 #[repr(C)]
@@ -22,24 +22,22 @@ pub trait DriverFactory {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverRunError {
-    MissingCapability { capability: &'static str },
+    MissingService { service: ServiceKind },
     Fatal(String),
 }
 
 impl DriverRunError {
-    pub fn from_capability_error(err: CapabilityError) -> Self {
+    pub fn from_boot_services_error(err: BootServicesError) -> Self {
         match err {
-            CapabilityError::Missing { type_name } => Self::MissingCapability {
-                capability: type_name,
-            },
-            _ => Self::Fatal(err.to_string()),
+            BootServicesError::Missing(service) => Self::MissingService { service },
+            BootServicesError::Duplicate(_) => Self::Fatal(err.to_string()),
         }
     }
 }
 
 /// Трейт драйвера устройства
 pub trait Driver {
-    fn run(&mut self, _caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
+    fn run(&mut self, _services: &mut BootServices) -> Result<(), DriverRunError> {
         Ok(())
     }
 }

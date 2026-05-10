@@ -7,7 +7,6 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use drivers_common::CapabilityStoreExt;
 use klog::info;
 use scheduler::{
     ArchContext, Bootstrapped, Priority, Scheduler, SchedulerService, SchedulerServiceExt,
@@ -24,8 +23,9 @@ pub fn spawn_init_process<A>(
 ) where
     A: ArchContext,
 {
-    let scheduler_service = kernel.with_runtime_state(|caps, _| {
-        caps.require_service::<dyn SchedulerService>()
+    let scheduler_service = kernel.with_runtime_state(|services, _| {
+        services
+            .require_scheduler()
             .expect("SchedulerService must be registered before init task spawn")
     });
 

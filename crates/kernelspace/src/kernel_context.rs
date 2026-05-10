@@ -1,8 +1,6 @@
 use alloc::sync::Arc;
 
-use drivers_common::{
-    Capabilities, CapabilityStoreMutExt, RuntimeDriverRegistry, services::mmio::MmioService,
-};
+use drivers_common::{BootServices, RuntimeDriverRegistry, services::mmio::MmioService};
 use memory::{
     frame_allocator::FrameAllocator,
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
@@ -13,7 +11,7 @@ use spin::Mutex;
 use crate::{services::mmio::MmioServiceImpl, syscall_bridge};
 
 pub struct KernelContext {
-    capabilities: Capabilities,
+    services: BootServices,
     driver_registry: Mutex<RuntimeDriverRegistry>,
     address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
 }
@@ -34,14 +32,13 @@ impl KernelContext {
             linear_offset: base_offset,
         });
 
-        let mut capabilities = Capabilities::new();
-
-        capabilities
-            .provide_service::<dyn MmioService>(mmio_service)
+        let mut services = BootServices::new();
+        services
+            .set_mmio(mmio_service)
             .expect("Failed to register MmioService service");
 
         Self {
-            capabilities,
+            services,
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             address_space_factory,
         }
@@ -55,8 +52,8 @@ impl KernelContext {
 
     pub fn with_runtime_state<R>(
         &mut self,
-        map: impl FnOnce(&mut Capabilities, &mut RuntimeDriverRegistry) -> R,
+        map: impl FnOnce(&mut BootServices, &mut RuntimeDriverRegistry) -> R,
     ) -> R {
-        map(&mut self.capabilities, self.driver_registry.get_mut())
+        map(&mut self.services, self.driver_registry.get_mut())
     }
 }

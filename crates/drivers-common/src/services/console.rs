@@ -2,11 +2,9 @@
 
 use io::writer::Writer;
 
-use crate::services::Service;
-
 /// Сервис консольного вывода.
 ///
 /// Предоставляет доступ к Writer для записи логов и отладочной информации.
-pub trait ConsoleService: Service + Writer {}
+pub trait ConsoleService: Writer + Send + Sync {}
 
-impl<T: ?Sized + Service + Writer> ConsoleService for T {}
+impl<T: ?Sized + Writer + Send + Sync> ConsoleService for T {}

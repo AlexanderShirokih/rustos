@@ -1,6 +1,6 @@
 //! Ошибки сервиса создания user-процессов.
 
-use drivers_common::services::scheduler::SpawnError;
+use scheduler::SpawnError;
 
 use crate::image::UserImageError;
 

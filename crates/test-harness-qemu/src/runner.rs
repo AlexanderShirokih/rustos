@@ -79,6 +79,30 @@ fn iter_cases() -> &'static [TestCase] {
     }
 }
 
+fn run_case(case: &TestCase) {
+    with_writer(|w| {
+        let mut fmt = FmtAdapter::new(w);
+        let _ = writeln!(fmt, "[TEST-START: {}]", case.name);
+    });
+    (case.run)();
+    with_writer(|w| {
+        let mut fmt = FmtAdapter::new(w);
+        let _ = writeln!(fmt, "[TEST-PASS: {}]", case.name);
+    });
+}
+
+fn should_run_early(name: &str) -> bool {
+    matches!(
+        name,
+        "userspace_eret_to_el0_invokes_dispatcher"
+            | "userspace_spawn_user_process_runs_to_exit"
+            | "userspace_vm_allocate_and_remap"
+            | "userspace_vm_allocate_free_reuse_va"
+            | "syscall_from_kernel_origin_is_rejected"
+            | "event_signal_after_deadline"
+    )
+}
+
 pub fn run_all_tests() -> ! {
     let cases = iter_cases();
 
@@ -88,15 +112,18 @@ pub fn run_all_tests() -> ! {
     });
 
     for case in cases {
-        with_writer(|w| {
-            let mut fmt = FmtAdapter::new(w);
-            let _ = writeln!(fmt, "[TEST-START: {}]", case.name);
-        });
-        (case.run)();
-        with_writer(|w| {
-            let mut fmt = FmtAdapter::new(w);
-            let _ = writeln!(fmt, "[TEST-PASS: {}]", case.name);
-        });
+        // Эти кейсы либо аллоцируют полноценные user-process'ы и отдельные AS,
+        // либо чувствительны к позднему запуску после долгих stateful test'ов.
+        // Поднимаем их в начало, чтобы убрать зависимость от link-order.
+        if should_run_early(case.name) {
+            run_case(case);
+        }
+    }
+
+    for case in cases {
+        if !should_run_early(case.name) {
+            run_case(case);
+        }
     }
 
     with_writer(|w| {

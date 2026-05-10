@@ -2,8 +2,6 @@
 
 use alloc::boxed::Box;
 
-use crate::services::Service;
-
 /// Номер аппаратного прерывания.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -160,7 +158,7 @@ impl IrqBinding {
 /// Контракт сервиса прерываний.
 ///
 /// Трейт определяет базовые операции для управления аппаратным контроллером прерываний.
-pub trait InterruptsService: Service {
+pub trait InterruptsService: Send + Sync {
     /// Глобально включает прерывания.
     fn enable(&self);
 

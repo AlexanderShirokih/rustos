@@ -151,6 +151,7 @@ dependencies = [
  "io",
  "klog",
  "memory",
+ "scheduler",
  "spin",
 ]
 
@@ -503,6 +504,7 @@ name = "userspace"
 version = "0.1.0"
 dependencies = [
  "memory",
+ "scheduler",
 ]
 
 [[package]]

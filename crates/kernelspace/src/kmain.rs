@@ -4,11 +4,7 @@ extern crate alloc;
 
 use alloc::{sync::Arc, vec::Vec};
 
-use drivers_common::{
-    CapabilityStoreExt,
-    scanner::EmbeddedDriversScanner,
-    services::{console::ConsoleService, interrupts::InterruptsService},
-};
+use drivers_common::scanner::EmbeddedDriversScanner;
 use io::buffered_writer::BufferedWriter;
 use klog::info;
 use scheduler::{ArchContext, ArchCpu, Bootstrapped, Scheduler, SchedulerConfig};
@@ -93,17 +89,17 @@ fn run_all_drivers(kernel: &mut KernelContext, pending: Vec<PendingDriver>) {
 }
 
 fn bind_console(kernel: &mut KernelContext, buffered: &BufferedWriter) {
-    kernel.with_runtime_state(|caps, _| {
-        if let Ok(console) = caps.require_service::<dyn ConsoleService>() {
+    kernel.with_runtime_state(|services, _| {
+        if let Some(console) = services.console() {
             buffered.attach(&(console as Arc<dyn io::writer::Writer + Send + Sync>));
         }
     });
 }
 
 fn install_interrupts_hook(kernel: &mut KernelContext) {
-    kernel.with_runtime_state(|caps, _| {
-        let interrupts = caps
-            .require_service::<dyn InterruptsService>()
+    kernel.with_runtime_state(|services, _| {
+        let interrupts = services
+            .require_interrupts()
             .expect("InterruptsService must be available after driver initialization");
 
         interrupts.enable();

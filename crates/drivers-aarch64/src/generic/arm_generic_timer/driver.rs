@@ -1,19 +1,13 @@
 //! Драйвер ARM Generic Timer: точка входа, фабрика и probe-функция.
 
-use alloc::{
-    boxed::Box,
-    format,
-    string::{String, ToString},
-    sync::Arc,
-};
+use alloc::{boxed::Box, format, string::String, sync::Arc};
 use core::mem::size_of;
 
 use drivers_common::{
-    CapabilityStoreExt, CapabilityStoreMut, CapabilityStoreMutExt, DeviceNode, Driver,
-    DriverFactory, DriverRunError, NodeProperty,
+    BootServices, DeviceNode, Driver, DriverFactory, DriverRunError, NodeProperty,
     probe::{ProbeError, ProbeResult},
     services::{
-        interrupts::{CpuMask, InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqPriority},
+        interrupts::{CpuMask, IrqBinding, IrqBound, IrqNumber, IrqPriority},
         timer::TimerService,
     },
 };
@@ -54,10 +48,10 @@ impl ArmGenericTimerDriver {
 }
 
 impl Driver for ArmGenericTimerDriver {
-    fn run(&mut self, caps: &mut dyn CapabilityStoreMut) -> Result<(), DriverRunError> {
-        let interrupts = caps
-            .require_service::<dyn InterruptsService>()
-            .map_err(DriverRunError::from_capability_error)?;
+    fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
+        let interrupts = services
+            .require_interrupts()
+            .map_err(DriverRunError::from_boot_services_error)?;
 
         let state = ArmGenericTimerState::new().map_err(DriverRunError::Fatal)?;
         let state = Arc::new(state);
@@ -75,8 +69,9 @@ impl Driver for ArmGenericTimerDriver {
 
         let timer_service: Arc<dyn TimerService> = Arc::new(ArmGenericTimerHandle::new(state));
 
-        caps.provide_service::<dyn TimerService>(timer_service)
-            .map_err(|err| DriverRunError::Fatal(err.to_string()))?;
+        services
+            .set_timer(timer_service)
+            .map_err(DriverRunError::from_boot_services_error)?;
 
         self.irq_bound = Some(irq_bound);
 
