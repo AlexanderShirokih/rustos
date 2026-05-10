@@ -2,8 +2,9 @@
 
 ## Требования
 
-- Rust (stable)
+- Rust toolchain из `rust-toolchain.toml` (nightly)
 - `cargo-binutils` — для `cargo objcopy`
+- `qemu-system-aarch64` — для запуска QEMU
 - `mkbootimg` — для создания Android boot image
 
 ```bash
@@ -37,4 +38,7 @@ cargo xtask build devices/spec/qemu-aarch64.yaml --run
 
 # Сборка + отладка (выполняет команды из 'debug' в YAML)
 cargo xtask build devices/spec/qemu-aarch64.yaml --debug
+
+# QEMU integration tests
+cargo xtask qemu-test --timeout 60
 ```

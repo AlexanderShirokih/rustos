@@ -4,63 +4,49 @@
 
 | Действие | Команда |
 |---|---|
-| Юнит/интеграционные тесты (host) | `cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64` |
-| Линтинг (host-крейты) | `cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64` |
-| Линтинг (aarch64-крейты) | `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` |
+| Host-тесты | `cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64` |
+| Host-clippy | `cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64` |
+| AArch64 clippy | `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` |
 | Форматирование | `cargo fmt --all --check` |
 | Аудит зависимостей | `cargo deny check` |
-| Сборка ядра (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
-| Запуск в QEMU | `cargo xtask build devices/spec/qemu-aarch64.yaml --run` |
-| Отладка в QEMU | `cargo xtask build devices/spec/qemu-aarch64.yaml --debug` |
-| Сборка для устройства | `cargo xtask build devices/spec/<device>.yaml` |
+| Сборка QEMU | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
+| QEMU integration tests | `cargo xtask qemu-test --timeout 60` |
+| Сборка устройства | `cargo xtask build devices/spec/<device>.yaml` |
 
 ## Сборка
 
-Сборка выполняется через `cargo xtask`:
+`xtask build` читает YAML-спеку устройства, выбирает boot feature для
+`hal-aarch64`, собирает kernel crate под `aarch64-unknown-none` и
+упаковывает результат.
 
 ```bash
-# QEMU (формат binary)
 cargo xtask build devices/spec/qemu-aarch64.yaml
-
-# Xiaomi Redmi Note 7 (формат android_boot_v1)
 cargo xtask build devices/spec/xiaomi-lavender.yaml
 ```
 
-### Результат
+Результаты:
 
-- `binary` -> `target/build/kernel.bin`
-- `android_boot_v1`, `android_boot_v2` -> `target/build/boot.img`
+| `boot.format` | Артефакт |
+|---|---|
+| `linux_arm64` | `target/build/kernel.bin` |
+| `android_boot_v1` | `target/build/boot.img` |
+| `android_boot_v2` | `target/build/boot.img` |
+| `uefi` | не реализован |
 
-## Тестирование
+## Тесты
 
 ```bash
-# Все host-совместимые крейты
 cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64
 ```
 
-> **Важно:** без `--exclude` сборка упадёт — крейты с inline assembly aarch64 не компилируются на x86_64.
+Без `--exclude` host-тесты падают на платформах, где не компилируется
+aarch64 inline assembly из `drivers-aarch64` и `hal-aarch64`.
 
-## Линтинг
-
-```bash
-# Host-крейты
-cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64
-
-# aarch64-крейты (требуется target aarch64-unknown-none)
-cargo clippy --workspace --exclude xtask --target aarch64-unknown-none
-```
-
-## Форматирование
+QEMU integration tests:
 
 ```bash
-# Проверка (CI-режим)
-cargo fmt --all --check
-
-# Автоформатирование
-cargo fmt --all
+cargo xtask qemu-test --timeout 60
 ```
-
-Конфигурация в `rustfmt.toml` (корень проекта).
 
 ## Аудит зависимостей
 
@@ -68,20 +54,4 @@ cargo fmt --all
 cargo deny check
 ```
 
-Конфигурация в `deny.toml`. Проверяет лицензии, уязвимости, дубликаты зависимостей.
-
-## Запуск и отладка
-
-```bash
-# Сборка + запуск (выполняет команды из секции 'run' в YAML)
-cargo xtask build devices/spec/qemu-aarch64.yaml --run
-
-# Сборка + отладка (выполняет команды из секции 'debug' в YAML)
-cargo xtask build devices/spec/qemu-aarch64.yaml --debug
-```
-
-QEMU работает бесконечно (ядро входит в цикл таймера). В CI/автоматизации оборачивайте в `timeout`:
-
-```bash
-timeout 10 cargo xtask build devices/spec/qemu-aarch64.yaml --run
-```
+Команда требует установленный `cargo-deny`; конфигурация — `deny.toml`.

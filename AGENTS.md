@@ -25,7 +25,7 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 | Аудит зависимостей | `cargo deny check` |
 | Сборка (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
 | Запуск (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml --run` |
-| QEMU integration tests | `cargo xtask build devices/spec/qemu-aarch64-test.yaml --features qemu-tests --run` |
+| QEMU integration tests | `cargo xtask qemu-test --timeout 60` |
 
 -> Подробнее: [`docs/commands.md`](docs/commands.md)
 
@@ -45,7 +45,7 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 - **Архитектурная независимость по умолчанию.** Механизмы ядра, алгоритмы и структуры данных проектируются так, чтобы максимально не зависеть от платформы. Архитектурно-зависимая часть выносится за интерфейс и сводится к минимуму.
 - **Никаких архитектурных деталей в коде и комментариях архитектурно-независимых модулей.** В `memory`/`kernelspace`/`scheduler`/`kobject`/`syscall`/`io`/`collections`/`fdt`/`drivers-common` не должно быть упоминаний `TTBR0`, `EL1`, `MAIR`, `SCTLR`, `vmalle1`, `aarch64`, `x86`, `cr3` и аналогичных архитектурных терминов — ни в идентификаторах, ни в doc-комментариях. Конкретика должна жить только в реализациях за интерфейсом.
 - **Тестирование.** Архитектурно-независимый код должен покрываться meaningful юнит-тестами (не тесты-заглушки). Архитектурно-зависимый остаток по возможности покрывается интеграционными тестами (QEMU).
-- **Прогон тестов после крупной задачи — обязателен.** По завершении логически законченной работы (новый функционал, рефакторинг, фикс) агент обязан прогнать host-тесты (`cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64`) и QEMU integration tests (`cargo xtask build devices/spec/qemu-aarch64-test.yaml --features qemu-tests --run`). Сдача без прогона = незавершённая работа.
+- **Прогон тестов после крупной задачи — обязателен.** По завершении логически законченной работы (новый функционал, рефакторинг, фикс) агент обязан прогнать host-тесты (`cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64`) и QEMU integration tests (`cargo xtask qemu-test --timeout 60`). Сдача без прогона = незавершённая работа.
 - **Комментарии — по необходимости.** Не писать пространных объяснений того, что и так видно из кода. Комментарий уместен только когда объясняет неочевидное "почему" (инвариант, ограничение, обход бага).
 - **Не плодить сущности.** Не вводить новые механизмы, абстракции, трейты и слои без явной необходимости. Три похожих строки лучше преждевременной абстракции.
 
@@ -54,11 +54,9 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 | Документ | Описание |
 |---|---|
 | [`BUILD.md`](BUILD.md) | Сборка: требования, `cargo xtask`, артефакты, запуск и отладка |
-| [`docs/overview.md`](docs/overview.md) | Обзор проекта, граф крейтов, workspace |
-| [`docs/commands.md`](docs/commands.md) | Сборка, тестирование, линтинг, запуск |
-| [`docs/environment.md`](docs/environment.md) | Настройка окружения, зависимости, подводные камни |
-| [`docs/architecture.md`](docs/architecture.md) | Принципы архитектуры: слои, трейты, newtype, compile-time гарантии |
+| [`docs/overview.md`](docs/overview.md) | Обзор проекта и основные слои |
+| [`docs/commands.md`](docs/commands.md) | Сборка, тестирование, линтинг |
+| [`docs/environment.md`](docs/environment.md) | Настройка окружения и зависимости |
+| [`docs/architecture.md`](docs/architecture.md) | Принципы архитектуры: слои, newtype, compile-time гарантии |
 | [`docs/code-style.md`](docs/code-style.md) | Стиль кода: структура файлов, комментарии, `no_std` |
-| [`docs/testing.md`](docs/testing.md) | Тестирование: интеграционные/юнит-тесты, именование, паттерны |
-| [`docs/user-memory.md`](docs/user-memory.md) | User-VM аллокатор и syscall'ы выделения памяти процессам |
-| [`docs/process-lifecycle.md`](docs/process-lifecycle.md) | Lifecycle Process/Thread KO: сигналы, syscall ABI, паттерны wait |
+| [`docs/syscalls.md`](docs/syscalls.md) | ABI и полный реестр системных вызовов |

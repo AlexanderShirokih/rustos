@@ -1,67 +1,62 @@
 # Окружение и зависимости
 
-## Требования
+## Rust toolchain
 
-### Rust toolchain
+Toolchain зафиксирован в `rust-toolchain.toml`:
 
-- Rust nightly (Edition 2024), зафиксирован в `rust-toolchain.toml`
-- `rustup` автоматически подберёт нужную версию при первой сборке
+- channel: `nightly`
+- target: `aarch64-unknown-none`
+- components: `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt`
 
-Компоненты, установленные через `rust-toolchain.toml`:
-- target `aarch64-unknown-none`
-- `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt`
+`rustup` подхватывает toolchain автоматически при запуске `cargo`.
 
-### Системные зависимости
+## Host-зависимости
 
-- `qemu-system-arm` (предоставляет `qemu-system-aarch64`) — для end-to-end тестирования ядра
+| Инструмент | Когда нужен |
+|---|---|
+| `cargo-binutils` | `cargo objcopy` внутри `xtask build` |
+| `qemu-system-aarch64` | запуск QEMU и QEMU integration tests |
+| `mkbootimg` | сборка `android_boot_v1` / `android_boot_v2` |
+| `cargo-deny` | `cargo deny check` |
+
+Минимальная установка для QEMU-разработки:
 
 ```bash
+rustup component add llvm-tools-preview
+cargo install cargo-binutils
 sudo apt-get install -y qemu-system-arm
 ```
 
-## Подводные камни
+Для Android boot image дополнительно нужен `mkbootimg`.
 
-### `cargo test` без `--exclude` падает
+## Device specs
 
-Крейты `drivers-aarch64` и `hal-aarch64` содержат aarch64 inline assembly, который не компилируется на x86_64. Всегда используйте:
-
-```bash
-cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64
-```
-
-### QEMU работает бесконечно
-
-Ядро входит в цикл обработки таймерных тиков после загрузки. В CI/автоматизации оборачивайте запуск в `timeout`:
-
-```bash
-timeout 10 qemu-system-aarch64 ...
-```
-
-## Спецификации устройств
-
-Конфигурации хранятся в `devices/spec/*.yaml`:
+Спеки лежат в `devices/spec/*.yaml`.
 
 ```yaml
 device:
-  name: Device Name
+  name: QEMU AArch64
   arch: aarch64
 
 boot:
-  format: linux_arm64 | android_boot_v1 | android_boot_v2 | uefi
+  format: linux_arm64
   offset: 0x40200000
   dtb: /devices/dtb/device.dtb
+  base: 0x40000000
 
 run:
-  - "qemu-system-aarch64 -machine virt -cpu cortex-a53 -m 512M -nographic -kernel target/build/kernel.bin"
+  - "qemu-system-aarch64 ..."
 
 debug:
-  - "qemu-system-aarch64 -machine virt ... -S -gdb tcp::1234"
+  - "qemu-system-aarch64 ... -S -gdb tcp::1234"
 ```
 
 | Поле | Описание |
 |---|---|
-| `format` | `linux_arm64` (QEMU, RPi), `android_boot_v1`, `android_boot_v2`, `uefi` (WIP) |
-| `offset` | Адрес загрузки ядра (`KERNEL_OFFSET`) |
-| `dtb` | Путь к Device Tree Blob (для Android) |
-| `run` | Команды для `--run` |
-| `debug` | Команды для `--debug` |
+| `device.arch` | сейчас поддерживается `aarch64` |
+| `boot.format` | `linux_arm64`, `android_boot_v1`, `android_boot_v2`; `uefi` зарезервирован |
+| `boot.offset` | link/load offset ядра (`KERNEL_OFFSET`) |
+| `boot.dtb` | DTB для Android boot image |
+| `boot.base` | база для расчёта Android `kernel_offset` |
+| `run` | команды для `xtask build --run` |
+| `debug` | команды для `xtask build --debug` |
