@@ -1,16 +1,18 @@
 use alloc::sync::Arc;
 
+use memory::MemoryRegion;
+
 use super::{
-    channel::Channel, event::Event, koid::Koid, process::ProcessObject, thread::ThreadObject,
-    wait::SignalState,
+    authority::MemoryAuthority, channel::Channel, event::Event, koid::Koid, process::ProcessObject,
+    thread::ThreadObject, wait::SignalState,
 };
 
 /// Kernel-объект (KO) - единица, к которой ядро выдаёт права.
 ///
 /// Любой ресурс, доступ к которому процесс получает через capability -
-/// канал, событие, lifecycle процесса/потока; в перспективе MMIO-регион,
-/// IRQ. Один KO может быть доступен нескольким процессам через разные
-/// handle'ы с разными правами.
+/// канал, событие, регион памяти, lifecycle процесса/потока; в перспективе
+/// MMIO-регион, IRQ. Один KO может быть доступен нескольким процессам
+/// через разные handle'ы с разными правами.
 ///
 /// Закрытый список вариантов даёт compile-time exhaustiveness:
 /// добавление нового KO заставит компилятор показать все match'и,
@@ -20,6 +22,8 @@ pub enum KObject {
     Event(Arc<Event>),
     Process(Arc<ProcessObject>),
     Thread(Arc<ThreadObject>),
+    Memory(Arc<MemoryRegion>),
+    MemoryAuthority(Arc<MemoryAuthority>),
 }
 
 impl KObject {
@@ -32,6 +36,8 @@ impl KObject {
             Self::Event(_) => 2,
             Self::Process(_) => 3,
             Self::Thread(_) => 4,
+            Self::Memory(_) => 5,
+            Self::MemoryAuthority(_) => 6,
         }
     }
 
@@ -42,18 +48,20 @@ impl KObject {
             Self::Event(e) => Koid::from_parts(self.type_tag(), Arc::as_ptr(e) as u64),
             Self::Process(p) => Koid::from_parts(self.type_tag(), Arc::as_ptr(p) as u64),
             Self::Thread(t) => Koid::from_parts(self.type_tag(), Arc::as_ptr(t) as u64),
+            Self::Memory(m) => Koid::from_parts(self.type_tag(), Arc::as_ptr(m) as u64),
+            Self::MemoryAuthority(a) => Koid::from_parts(self.type_tag(), Arc::as_ptr(a) as u64),
         }
     }
 
-    /// Сигнальное состояние, если KO сигнализуем.
-    /// Сейчас все варианты сигнализуемы; при добавлении несигналуемых KO
-    /// match станет частичным и компилятор подсветит все callsites.
+    /// Сигнальное состояние, если KO сигнализуем. Memory-регион и
+    /// MemoryAuthority не сигнализуемы - `None`.
     pub fn signals(&self) -> Option<&SignalState> {
         match self {
             Self::Channel(c) => Some(c.signals()),
             Self::Event(e) => Some(e.signals()),
             Self::Process(p) => Some(p.signals()),
             Self::Thread(t) => Some(t.signals()),
+            Self::Memory(_) | Self::MemoryAuthority(_) => None,
         }
     }
 }
@@ -65,6 +73,8 @@ impl Clone for KObject {
             Self::Event(e) => Self::Event(e.clone()),
             Self::Process(p) => Self::Process(p.clone()),
             Self::Thread(t) => Self::Thread(t.clone()),
+            Self::Memory(m) => Self::Memory(m.clone()),
+            Self::MemoryAuthority(a) => Self::MemoryAuthority(a.clone()),
         }
     }
 }
@@ -76,6 +86,8 @@ impl core::fmt::Debug for KObject {
             Self::Event(_) => "Event",
             Self::Process(_) => "Process",
             Self::Thread(_) => "Thread",
+            Self::Memory(_) => "Memory",
+            Self::MemoryAuthority(_) => "MemoryAuthority",
         };
         f.debug_struct(name).field("koid", &self.koid()).finish()
     }

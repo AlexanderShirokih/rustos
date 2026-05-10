@@ -1,10 +1,16 @@
 use alloc::sync::Arc;
 
-use memory::UserVmContext;
+use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use spin::Once;
 
 pub trait SyscallRuntime: Send + Sync {
     fn current_user_vm(&self) -> Option<UserVmContext>;
+
+    /// Глобальный аллокатор физических фреймов для anonymous-регионов
+    /// (Memory KObject Virtual). `None`, если ядро ещё не зарегистрировало
+    /// его - в этом случае соответствующие syscall'ы возвращают
+    /// `OutOfMemory`.
+    fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)>;
 }
 
 static RUNTIME: Once<Arc<dyn SyscallRuntime>> = Once::new();

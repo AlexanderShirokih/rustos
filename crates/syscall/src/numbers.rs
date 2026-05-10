@@ -19,8 +19,27 @@
 //! | `0x30..=0x3F` | handle lifecycle                            |
 //! | `0x40..=0x4F` | Process KObject                             |
 //! | `0x50..=0x5F` | Thread KObject                              |
-//! | `0x60..=0x6F` | резерв под Memory KObject                   |
+//! | `0x60..=0x6F` | Memory KObject                              |
 //! | `0x70..=0x7F` | резерв под Port KObject                     |
+//!
+//! # Memory KObject (`0x60..=0x6F`)
+//!
+//! | op    | Имя                       | Аргументы / возврат                                                                                |
+//! |-------|---------------------------|----------------------------------------------------------------------------------------------------|
+//! | 0x60  | `MemoryCreateVirtual`     | `auth_h`, `size_bytes`, `access_mask` -> `region_h`                                                |
+//! | 0x61  | `MemoryCreatePhysical`    | `auth_h`, `pa`, `size_bytes`, `access_mask` -> `region_h`                                          |
+//! | 0x63  | `MemoryMap`               | `region_h`, `size`, `flags` -> `va`                                                                |
+//! | 0x64  | `MemoryRemap`             | `va`, `size`, `flags` -> `0`                                                                       |
+//! | 0x65  | `MemoryAllocate`          | `size`, `flags` -> `va`                                                                            |
+//! | 0x66  | `MemoryFree`              | `va`, `size` -> `0`                                                                                |
+//! | 0x67  | `MemoryRegionInspect`     | `region_h` -> primary=`size_bytes`, secondary=`(kind_tag << 16) \| access_bits`                    |
+//!
+//! Зарезервированы, возвращают `BadSyscall`:
+//!
+//! | op    | Назначение |
+//! |-------|------------|
+//! | 0x62        | резерв |
+//! | 0x68..=0x6F | резерв |
 //!
 //! `ChannelWrite` (`0x21`) и `ChannelRead` (`0x22`) - register-flat,
 //! 5 аргументов; `ChannelRead` упаковывает в возврат
@@ -95,19 +114,37 @@ pub enum SyscallOp {
     /// для self-exit предусмотрен [`Self::ThreadExit`].
     ThreadTerminate = 0x54,
 
-    // Memory: per-process user-VM management.
-    /// Выделяет user-память: маппит свежие фреймы в свободный VA процесса
-    /// и возвращает базовый адрес. Аргументы: `arg0=size_bytes`,
-    /// `arg1=flags_raw` (см. [`UserMemFlags`](crate::UserMemFlags)).
-    MemoryAllocate = 0x60,
-    /// Меняет флаги уже выделенного региона (аналог `MemoryMapper::remap`).
-    /// Аргументы: `arg0=va`, `arg1=size_bytes`, `arg2=flags_raw`.
-    MemoryRemap = 0x61,
-    /// Освобождает регион, ранее выданный [`Self::MemoryAllocate`]: снимает
-    /// leaf-маппинги и возвращает диапазон в free-list. Аргументы:
-    /// `arg0=va`, `arg1=size_bytes`. `(va, size)` обязаны точно совпадать с
-    /// зарегистрированным регионом.
-    MemoryFree = 0x62,
+    // 0x60..=0x6F - Memory KObject.
+    /// Создаёт `KObject::Memory` с Virtual backing. Аргументы:
+    /// `arg0=auth_handle` (требует [`Rights::CREATE_VIRTUAL`]),
+    /// `arg1=size_bytes`, `arg2=access_mask`. Возвращает `region_handle`.
+    ///
+    /// [`Rights::CREATE_VIRTUAL`]: kobject::Rights::CREATE_VIRTUAL
+    MemoryCreateVirtual = 0x60,
+    /// Создаёт `KObject::Memory` с Physical backing. Аргументы:
+    /// `arg0=auth_handle` (требует [`Rights::CREATE_PHYSICAL`]),
+    /// `arg1=pa`, `arg2=size_bytes`, `arg3=access_mask`. Возвращает `region_handle`.
+    ///
+    /// [`Rights::CREATE_PHYSICAL`]: kobject::Rights::CREATE_PHYSICAL
+    MemoryCreatePhysical = 0x61,
+    /// Маппит регион в текущий user-AS на свободный VA. Аргументы:
+    /// `arg0=region_handle`, `arg1=size_bytes`, `arg2=flags_raw`
+    /// (см. [`UserMemFlags`](crate::UserMemFlags)). Возвращает базовый VA.
+    MemoryMap = 0x63,
+    /// Меняет флаги уже выделенного маппинга (аналог `MemoryMapper::remap`).
+    /// Аргументы: `arg0=va`, `arg1=size_bytes`, `arg2=flags_raw`. Возврат `0`.
+    MemoryRemap = 0x64,
+    /// Fastpath: создаёт анонимный `Virtual` регион и сразу маппит его
+    /// в свободный VA. `region_handle` не выкладывается. Аргументы:
+    /// `arg0=size_bytes`, `arg1=flags_raw`. Возвращает базовый VA.
+    MemoryAllocate = 0x65,
+    /// Снимает маппинг и возвращает регион в free-list (Arc дропается; если
+    /// последний - фреймы возвращаются в FA через `Drop` региона).
+    /// Аргументы: `arg0=va`, `arg1=size_bytes`. Возврат `0`.
+    MemoryFree = 0x66,
+    /// Инспектирует Memory-регион. Аргумент: `arg0=region_handle`. Primary
+    /// возврат - `size_bytes`, secondary - `(kind_tag << 16) | access_bits`.
+    MemoryRegionInspect = 0x67,
 }
 
 impl SyscallOp {
@@ -129,9 +166,13 @@ impl SyscallOp {
             0x52 => Ok(Self::ThreadExit),
             0x53 => Ok(Self::ThreadExitCode),
             0x54 => Ok(Self::ThreadTerminate),
-            0x60 => Ok(Self::MemoryAllocate),
-            0x61 => Ok(Self::MemoryRemap),
-            0x62 => Ok(Self::MemoryFree),
+            0x60 => Ok(Self::MemoryCreateVirtual),
+            0x61 => Ok(Self::MemoryCreatePhysical),
+            0x63 => Ok(Self::MemoryMap),
+            0x64 => Ok(Self::MemoryRemap),
+            0x65 => Ok(Self::MemoryAllocate),
+            0x66 => Ok(Self::MemoryFree),
+            0x67 => Ok(Self::MemoryRegionInspect),
             _ => Err(SyscallError::BadSyscall),
         }
     }
@@ -159,9 +200,22 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x52), Ok(SyscallOp::ThreadExit));
         assert_eq!(SyscallOp::from_raw(0x53), Ok(SyscallOp::ThreadExitCode));
         assert_eq!(SyscallOp::from_raw(0x54), Ok(SyscallOp::ThreadTerminate));
-        assert_eq!(SyscallOp::from_raw(0x60), Ok(SyscallOp::MemoryAllocate));
-        assert_eq!(SyscallOp::from_raw(0x61), Ok(SyscallOp::MemoryRemap));
-        assert_eq!(SyscallOp::from_raw(0x62), Ok(SyscallOp::MemoryFree));
+        assert_eq!(
+            SyscallOp::from_raw(0x60),
+            Ok(SyscallOp::MemoryCreateVirtual)
+        );
+        assert_eq!(
+            SyscallOp::from_raw(0x61),
+            Ok(SyscallOp::MemoryCreatePhysical)
+        );
+        assert_eq!(SyscallOp::from_raw(0x63), Ok(SyscallOp::MemoryMap));
+        assert_eq!(SyscallOp::from_raw(0x64), Ok(SyscallOp::MemoryRemap));
+        assert_eq!(SyscallOp::from_raw(0x65), Ok(SyscallOp::MemoryAllocate));
+        assert_eq!(SyscallOp::from_raw(0x66), Ok(SyscallOp::MemoryFree));
+        assert_eq!(
+            SyscallOp::from_raw(0x67),
+            Ok(SyscallOp::MemoryRegionInspect)
+        );
     }
 
     #[test]
@@ -184,7 +238,10 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x12), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x32), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x42), Err(SyscallError::BadSyscall));
-        assert_eq!(SyscallOp::from_raw(99), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x55), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x62), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x68), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x6F), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(u16::MAX), Err(SyscallError::BadSyscall));
     }
 }

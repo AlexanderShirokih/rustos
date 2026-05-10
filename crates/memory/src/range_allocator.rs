@@ -59,14 +59,14 @@ impl Display for RangeError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AllocatedRange<Tag: Copy> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllocatedRange<Tag: Clone> {
     base: PageAlignedVirtualAddress,
     pages: NonZeroUsize,
     tag: Tag,
 }
 
-impl<Tag: Copy> AllocatedRange<Tag> {
+impl<Tag: Clone> AllocatedRange<Tag> {
     pub const fn base(&self) -> PageAlignedVirtualAddress {
         self.base
     }
@@ -83,8 +83,8 @@ impl<Tag: Copy> AllocatedRange<Tag> {
         VirtualAddress::new(self.base.as_usize() + self.pages.get() * PAGE_SIZE)
     }
 
-    pub const fn tag(&self) -> Tag {
-        self.tag
+    pub fn tag(&self) -> &Tag {
+        &self.tag
     }
 }
 
@@ -110,7 +110,7 @@ impl FreeRange {
 
 /// First-fit аллокатор VA-диапазонов с честным `free` и автоматическим
 /// слиянием соседних свободных областей.
-pub struct RangeAllocator<Tag: Copy> {
+pub struct RangeAllocator<Tag: Clone> {
     arena_start: PageAlignedVirtualAddress,
     arena_end: VirtualAddress,
     free_ranges: Vec<FreeRange>,
@@ -118,7 +118,7 @@ pub struct RangeAllocator<Tag: Copy> {
     capacity: usize,
 }
 
-impl<Tag: Copy> RangeAllocator<Tag> {
+impl<Tag: Clone> RangeAllocator<Tag> {
     pub fn new(start: PageAlignedVirtualAddress, end: VirtualAddress) -> Self {
         Self::with_capacity(start, end, DEFAULT_LIVE_REGION_CAPACITY)
     }
@@ -227,12 +227,13 @@ impl<Tag: Copy> RangeAllocator<Tag> {
             pages: requested_pages,
             tag,
         };
+        let returned = allocated.clone();
         let pos = self
             .allocated
             .binary_search_by_key(&picked_base.as_usize(), |r| r.base.as_usize())
             .expect_err("free range was disjoint from any allocated range");
         self.allocated.insert(pos, allocated);
-        Ok(allocated)
+        Ok(returned)
     }
 
     pub fn free(
@@ -299,7 +300,7 @@ impl<Tag: Copy> RangeAllocator<Tag> {
             return Err(RangeError::NotFound);
         }
         region.tag = new_tag;
-        Ok(*region)
+        Ok(region.clone())
     }
 
     fn insert_free(&mut self, base: PageAlignedVirtualAddress, pages: NonZeroUsize) {
@@ -357,7 +358,7 @@ mod tests {
         NonZeroUsize::new(value).expect("test value must be non-zero")
     }
 
-    fn total_pages<Tag: Copy>(a: &RangeAllocator<Tag>) -> usize {
+    fn total_pages<Tag: Clone>(a: &RangeAllocator<Tag>) -> usize {
         let f: usize = a.free_ranges().iter().map(|r| r.pages().get()).sum();
         let l: usize = a.allocated().iter().map(|r| r.pages().get()).sum();
         f + l
@@ -413,7 +414,7 @@ mod tests {
         let r = a.allocate(nz(2 * PAGE_SIZE), 7).unwrap();
         assert_eq!(r.base().as_usize(), REGION_START);
         assert_eq!(r.pages().get(), 2);
-        assert_eq!(r.tag(), 7);
+        assert_eq!(*r.tag(), 7);
         assert_eq!(a.allocated().len(), 1);
         assert_eq!(a.free_ranges().len(), 1);
         assert_eq!(
@@ -429,7 +430,7 @@ mod tests {
         let found = a.lookup(r.base(), nz(r.size_bytes())).unwrap();
         assert_eq!(found.base(), r.base());
         assert_eq!(found.pages(), r.pages());
-        assert_eq!(found.tag(), 42);
+        assert_eq!(*found.tag(), 42);
     }
 
     #[test]
@@ -541,7 +542,7 @@ mod tests {
         let mut a = allocator();
         let r = a.allocate(nz(PAGE_SIZE), 123).unwrap();
         let removed = a.free(r.base(), nz(r.size_bytes())).unwrap();
-        assert_eq!(removed.tag(), 123);
+        assert_eq!(*removed.tag(), 123);
     }
 
     #[test]
@@ -678,8 +679,8 @@ mod tests {
         let mut a = allocator();
         let r = a.allocate(nz(PAGE_SIZE), 1).unwrap();
         let updated = a.set_tag(r.base(), nz(r.size_bytes()), 99).unwrap();
-        assert_eq!(updated.tag(), 99);
-        assert_eq!(a.lookup(r.base(), nz(r.size_bytes())).unwrap().tag(), 99);
+        assert_eq!(*updated.tag(), 99);
+        assert_eq!(*a.lookup(r.base(), nz(r.size_bytes())).unwrap().tag(), 99);
     }
 
     #[test]

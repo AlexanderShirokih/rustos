@@ -9,7 +9,7 @@ use drivers_common::{
     CapabilityStoreExt, CapabilityStoreMutExt,
     services::timer::{TickHandler, TimerService},
 };
-use memory::UserVmContext;
+use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use scheduler::{
     ArchContext, Bootstrapped, Scheduler, SchedulerConfig, SchedulerHandle, SchedulerService,
     TimerSource, Uninit,
@@ -69,6 +69,10 @@ where
 {
     fn current_user_vm(&self) -> Option<UserVmContext> {
         self.handle.current_user_vm()
+    }
+
+    fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
+        syscall_bridge::frame_allocator()
     }
 }
 

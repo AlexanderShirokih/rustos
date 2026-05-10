@@ -1,15 +1,5 @@
 //! E2E проверка `SchedulerService::spawn_user_process`.
 //!
-//! В отличие от низкоуровневого теста ручного входа в user-mode,
-//! этот тест не делает ручной setup'а user-AS, payload-маппинга и `init_user`
-//! - он использует публичный API `UserImage` + `spawn_user_process`. После
-//! успеха scheduler сам:
-//!   1) создаёт user-AS через factory,
-//!   2) `load_user_image` маппит сегменты + стек через `MemoryMapper::map_owned`
-//!      (платформенная реализация выполняет нужную синхронизацию exec-страниц),
-//!   3) инициализирует user entry через `ArchContext::init_user(UserEntry)`,
-//!   4) ставит в ready-queue.
-//!
 //! Тест передаёт payload'у bootstrap-handle на `Event`, ждёт сигнал от
 //! `ObjectSignal`, затем payload делает `ThreadExit`.
 

@@ -270,6 +270,8 @@ impl MemoryMapper for MockUserMapper {
         AddressSpaceHandle::new(self.root_pa, AddressSpaceTag::NONE)
     }
 
+    fn zero_owned_frame(&self, _pa: memory::physical_address::PageAlignedAddress) {}
+
     fn as_any(&self) -> &(dyn core::any::Any + 'static) {
         self
     }

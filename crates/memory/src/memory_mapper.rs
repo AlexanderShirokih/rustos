@@ -168,11 +168,14 @@ pub trait MemoryMapper {
     ) -> Result<(), MemoryMappingError>;
 
     /// Снимает маппинг в диапазоне `[address, address + size)`.
-    /// Страницы, замапленные через [`Self::map`] (фрейм аллоцирован
-    /// `FrameAllocator`-ом mapper'а), возвращаются обратно. Страницы,
-    /// замапленные через [`Self::map_exact`] (PA приходит от вызывающего -
-    /// MMIO, image, identity), **не** возвращаются: их PA не принадлежит
-    /// аллокатору фреймов.
+    ///
+    /// **Lifecycle PA**: фрейм возвращается в `FrameAllocator` mapper'а
+    /// тогда и только тогда, когда он был выделен этим mapper'ом через
+    /// [`Self::map`]. Все остальные lifecycle'ы PA контролирует caller -
+    /// в частности, для PA, поданного через [`Self::map_exact`] (MMIO,
+    /// identity, фреймы из внешнего владельца), `unmap` PA не освобождает.
+    /// Регионы, владеющие фреймами на стороне caller'а (`MemoryRegion::Virtual`),
+    /// возвращают свои фреймы при `Drop` региона, а не при `unmap`.
     ///
     /// `size` должен быть кратен размеру страницы. Диапазон может покрывать
     /// 4К leaf-страницы и whole block leaf-маппинги; частичный unmap внутри
@@ -203,6 +206,15 @@ pub trait MemoryMapper {
     /// Возвращает handle на AS, лениво аллоцируя
     /// платформенный тег. Вызывается на пути активации AS планировщиком.
     fn activate_handle(&self) -> AddressSpaceHandle;
+
+    /// Зануляет содержимое 4К-фрейма по PA через kernel-side доступ.
+    ///
+    /// Используется владельцами фреймов (например, `MemoryRegion::Virtual`)
+    /// перед первым `map_exact`-маппингом в user-AS - иначе утечёт содержимое
+    /// предыдущего владельца фрейма после reuse через `FrameAllocator`.
+    /// Не пересекается с user-AS root'ом: запись идёт через линейную карту
+    /// физических фреймов (kernel-side), общую для всех mapper'ов.
+    fn zero_owned_frame(&self, pa: PageAlignedAddress);
 
     /// Копирует `[va, va + dst.len())` из user-AS в `dst`. `va`
     /// произволен, диапазон может пересекать страницы; каждая leaf-page

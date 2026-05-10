@@ -12,6 +12,7 @@ extern crate alloc;
 extern crate std;
 
 mod api;
+mod authority;
 mod channel;
 mod errors;
 mod event;
@@ -30,6 +31,7 @@ pub use api::{
     handle_close, handle_duplicate, install_handle, object_signal, object_wait_one,
     terminate_process, terminate_thread, thread_exit,
 };
+pub use authority::MemoryAuthority;
 pub use channel::{
     CHANNEL_PEER_CLOSED, CHANNEL_READABLE, CHANNEL_WRITABLE, Channel, DEFAULT_CHANNEL_CAPACITY,
     MESSAGE_INLINE_MAX, MESSAGE_MAX_HANDLES, Message,

@@ -1,6 +1,9 @@
 use alloc::{sync::Arc, vec::Vec};
 
+use memory::MemoryRegion;
+
 use super::{
+    authority::MemoryAuthority,
     channel::Channel,
     errors::IpcError,
     event::Event,
@@ -145,9 +148,11 @@ impl HandleTable {
         }
         match &h.object {
             KObject::Channel(c) => Ok(c.clone()),
-            KObject::Event(_) | KObject::Process(_) | KObject::Thread(_) => {
-                Err(IpcError::WrongType)
-            }
+            KObject::Event(_)
+            | KObject::Process(_)
+            | KObject::Thread(_)
+            | KObject::Memory(_)
+            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -159,9 +164,11 @@ impl HandleTable {
         }
         match &h.object {
             KObject::Event(e) => Ok(e.clone()),
-            KObject::Channel(_) | KObject::Process(_) | KObject::Thread(_) => {
-                Err(IpcError::WrongType)
-            }
+            KObject::Channel(_)
+            | KObject::Process(_)
+            | KObject::Thread(_)
+            | KObject::Memory(_)
+            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -173,9 +180,11 @@ impl HandleTable {
         }
         match &h.object {
             KObject::Process(p) => Ok(p.clone()),
-            KObject::Channel(_) | KObject::Event(_) | KObject::Thread(_) => {
-                Err(IpcError::WrongType)
-            }
+            KObject::Channel(_)
+            | KObject::Event(_)
+            | KObject::Thread(_)
+            | KObject::Memory(_)
+            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -187,9 +196,58 @@ impl HandleTable {
         }
         match &h.object {
             KObject::Thread(t) => Ok(t.clone()),
-            KObject::Channel(_) | KObject::Event(_) | KObject::Process(_) => {
-                Err(IpcError::WrongType)
-            }
+            KObject::Channel(_)
+            | KObject::Event(_)
+            | KObject::Process(_)
+            | KObject::Memory(_)
+            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
+        }
+    }
+
+    /// Извлекает `Arc<MemoryRegion>` с проверкой прав и типа.
+    pub fn get_memory(&self, id: HandleId, need: Rights) -> Result<Arc<MemoryRegion>, IpcError> {
+        self.get_memory_with_rights(id, need).map(|(m, _)| m)
+    }
+
+    /// Извлекает `Arc<MemoryRegion>` вместе с полным набором `Rights` handle'а.
+    /// Полный набор нужен `MemoryMap` для вычисления `grant` - потолка
+    /// access-битов, разрешённых caller'у на этом mapping'е.
+    pub fn get_memory_with_rights(
+        &self,
+        id: HandleId,
+        need: Rights,
+    ) -> Result<(Arc<MemoryRegion>, Rights), IpcError> {
+        let h = self.lookup(id)?;
+        if !h.rights().contains(need) {
+            return Err(IpcError::AccessDenied);
+        }
+        match &h.object {
+            KObject::Memory(m) => Ok((m.clone(), h.rights())),
+            KObject::Channel(_)
+            | KObject::Event(_)
+            | KObject::Process(_)
+            | KObject::Thread(_)
+            | KObject::MemoryAuthority(_) => Err(IpcError::WrongType),
+        }
+    }
+
+    /// Извлекает `Arc<MemoryAuthority>` с проверкой прав и типа.
+    pub fn get_authority(
+        &self,
+        id: HandleId,
+        need: Rights,
+    ) -> Result<Arc<MemoryAuthority>, IpcError> {
+        let h = self.lookup(id)?;
+        if !h.rights().contains(need) {
+            return Err(IpcError::AccessDenied);
+        }
+        match &h.object {
+            KObject::MemoryAuthority(a) => Ok(a.clone()),
+            KObject::Channel(_)
+            | KObject::Event(_)
+            | KObject::Process(_)
+            | KObject::Thread(_)
+            | KObject::Memory(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -439,6 +497,85 @@ mod tests {
             Err(IpcError::AccessDenied)
         ));
         assert!(table.get_thread(id, Rights::WAIT).is_ok());
+    }
+
+    #[test]
+    fn get_memory_type_checks() {
+        use core::num::NonZeroUsize;
+
+        use memory::{AccessMask, MemoryRegion};
+
+        let region = Arc::new(MemoryRegion::create_physical(
+            memory::physical_address::PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
+            NonZeroUsize::new(4096).unwrap(),
+            AccessMask::R,
+        ));
+        let mut table = HandleTable::new();
+        let mem_rights = Rights::MAP | Rights::READ | Rights::WAIT;
+        let mem_id = table
+            .insert(make_handle(KObject::Memory(region), mem_rights))
+            .unwrap();
+        let event_id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let chan_id = table.insert(channel_handle(Rights::READ)).unwrap();
+
+        assert!(table.get_memory(mem_id, Rights::MAP).is_ok());
+        assert!(matches!(
+            table.get_memory(event_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_memory(chan_id, Rights::READ),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_channel(mem_id, Rights::READ),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_event(mem_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+    }
+
+    #[test]
+    fn get_authority_type_checks() {
+        use super::super::authority::MemoryAuthority;
+
+        let authority = MemoryAuthority::new();
+        let mut table = HandleTable::new();
+        let auth_rights = Rights::CREATE_VIRTUAL | Rights::CREATE_PHYSICAL | Rights::WAIT;
+        let auth_id = table
+            .insert(make_handle(
+                KObject::MemoryAuthority(authority),
+                auth_rights,
+            ))
+            .unwrap();
+        let event_id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let chan_id = table.insert(channel_handle(Rights::READ)).unwrap();
+
+        assert!(table.get_authority(auth_id, Rights::CREATE_VIRTUAL).is_ok());
+        assert_eq!(
+            table
+                .get_authority(auth_id, Rights::CREATE_VIRTUAL | Rights::READ)
+                .unwrap_err(),
+            IpcError::AccessDenied
+        );
+        assert!(matches!(
+            table.get_authority(event_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_authority(chan_id, Rights::READ),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_channel(auth_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_event(auth_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
     }
 
     #[test]

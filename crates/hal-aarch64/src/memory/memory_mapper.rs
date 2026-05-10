@@ -715,6 +715,14 @@ where
         }
     }
 
+    fn zero_owned_frame(&self, pa: PageAlignedAddress) {
+        let kernel_ptr = (pa.as_usize() + self.vaddr_offset) as *mut u8;
+        // SAFETY: kernel-side линейная карта покрывает всю физическую память,
+        // фрейм по `pa` существует и принадлежит caller'у (контракт
+        // `MemoryRegion::Virtual`); 4К-выравнивание гарантировано типом `pa`.
+        unsafe { core::ptr::write_bytes(kernel_ptr, 0, PageAlignedAddress::ALIGNMENT) };
+    }
+
     fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
         self.copy_user_bytes(va, dst.len(), CopyDirection::In(dst))
     }

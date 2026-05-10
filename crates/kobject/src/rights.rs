@@ -19,6 +19,10 @@ impl Rights {
     pub const INSPECT: Self = Self(1 << 6);
     pub const MANAGE_THREAD: Self = Self(1 << 7);
     pub const MANAGE_PROCESS: Self = Self(1 << 8);
+    pub const MAP: Self = Self(1 << 9);
+    pub const EXECUTE: Self = Self(1 << 10);
+    pub const CREATE_VIRTUAL: Self = Self(1 << 11);
+    pub const CREATE_PHYSICAL: Self = Self(1 << 12);
 
     const ALL_BITS: u32 = Self::DUPLICATE.0
         | Self::TRANSFER.0
@@ -28,7 +32,11 @@ impl Rights {
         | Self::WAIT.0
         | Self::INSPECT.0
         | Self::MANAGE_THREAD.0
-        | Self::MANAGE_PROCESS.0;
+        | Self::MANAGE_PROCESS.0
+        | Self::MAP.0
+        | Self::EXECUTE.0
+        | Self::CREATE_VIRTUAL.0
+        | Self::CREATE_PHYSICAL.0;
 
     pub const fn empty() -> Self {
         Self(0)
@@ -96,6 +104,27 @@ impl Rights {
                     | Self::MANAGE_THREAD.0
                     | Self::DUPLICATE.0
                     | Self::TRANSFER.0,
+            ),
+            KObject::Memory(region) => {
+                let mut bits = Self::MAP.0 | Self::DUPLICATE.0 | Self::TRANSFER.0 | Self::INSPECT.0;
+                let access = region.access_mask();
+                if access.allows(memory::AccessMask::R) {
+                    bits |= Self::READ.0;
+                }
+                if access.allows(memory::AccessMask::W) {
+                    bits |= Self::WRITE.0;
+                }
+                if access.allows(memory::AccessMask::X) {
+                    bits |= Self::EXECUTE.0;
+                }
+                Self(bits)
+            }
+            KObject::MemoryAuthority(_) => Self(
+                Self::DUPLICATE.0
+                    | Self::TRANSFER.0
+                    | Self::INSPECT.0
+                    | Self::CREATE_VIRTUAL.0
+                    | Self::CREATE_PHYSICAL.0,
             ),
         }
     }

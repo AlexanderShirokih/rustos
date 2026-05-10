@@ -155,17 +155,38 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::thread::sys_thread_terminate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
-        SyscallOp::MemoryAllocate => {
-            let r = super::memory::sys_memory_allocate(frame.arg(0), frame.arg(1));
+        SyscallOp::MemoryCreateVirtual => {
+            let r =
+                super::memory::sys_memory_create_virtual(frame.arg(0), frame.arg(1), frame.arg(2));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::MemoryCreatePhysical => {
+            let r = super::memory::sys_memory_create_physical(
+                frame.arg(0),
+                frame.arg(1),
+                frame.arg(2),
+                frame.arg(3),
+            );
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::MemoryMap => {
+            let r = super::memory::sys_memory_map(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
         }
         SyscallOp::MemoryRemap => {
             let r = super::memory::sys_memory_remap(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
         }
+        SyscallOp::MemoryAllocate => {
+            let r = super::memory::sys_memory_allocate(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
         SyscallOp::MemoryFree => {
             let r = super::memory::sys_memory_free(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
+        }
+        SyscallOp::MemoryRegionInspect => {
+            super::memory::sys_memory_region_inspect(frame);
         }
     }
 }
@@ -308,7 +329,7 @@ mod tests {
 
     #[test]
     fn unknown_op_returns_bad_syscall() {
-        let mut f = MockFrame::user(99, [0; 6]);
+        let mut f = MockFrame::user(0x55, [0; 6]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::BadSyscall)));
     }
