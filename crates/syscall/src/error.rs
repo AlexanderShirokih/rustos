@@ -9,7 +9,7 @@
 //! `[-MAX_ERR .. -1]`. Нулевой код для ошибок не используется намеренно,
 //! чтобы 0 однозначно означал успех.
 
-use kobject::IpcError;
+use kobject::{IpcError, SpawnError};
 
 /// Ошибки, возвращаемые syscall-слоем.
 ///
@@ -70,6 +70,18 @@ impl From<IpcError> for SyscallError {
             IpcError::BufferTooSmall => Self::BufferTooSmall,
             IpcError::MessageTooBig => Self::MessageTooBig,
             IpcError::OutOfHandles => Self::OutOfHandles,
+        }
+    }
+}
+
+impl From<SpawnError> for SyscallError {
+    fn from(e: SpawnError) -> Self {
+        match e {
+            SpawnError::NoFreeProcessSlots
+            | SpawnError::NoFreeThreadSlots
+            | SpawnError::StackAllocationFailed
+            | SpawnError::AddressSpaceCreationFailed => Self::OutOfMemory,
+            SpawnError::InvalidPriority | SpawnError::InvalidStackPages => Self::InvalidArgument,
         }
     }
 }

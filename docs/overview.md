@@ -47,7 +47,7 @@ crates/hal-aarch64 <- точка входа, платформенный код
 | `drivers-common` | `crates/drivers-common` | Трейты и типы драйверов |
 | `drivers-aarch64` | `crates/drivers-aarch64` | Реализации драйверов (PL011, GIC) |
 | `kernelspace` | `crates/kernelspace` | Основная логика ядра |
-| `kobject` | `crates/kobject` | Kernel objects, handles и IPC |
+| `kobject` | `crates/kobject` | Kernel objects (Channel/Event/Process/Thread), handles и IPC |
 | `scheduler` | `crates/scheduler` | Процессы, потоки и планирование |
 | `syscall` | `crates/syscall` | Syscall ABI и dispatch |
 | `fdt` | `crates/fdt` | Парсер Flattened Device Tree |

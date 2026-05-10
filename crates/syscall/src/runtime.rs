@@ -4,8 +4,6 @@ use memory::UserVmContext;
 use spin::Once;
 
 pub trait SyscallRuntime: Send + Sync {
-    fn exit_current(&self) -> !;
-
     fn current_user_vm(&self) -> Option<UserVmContext>;
 }
 

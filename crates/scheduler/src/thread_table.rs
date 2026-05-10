@@ -57,6 +57,12 @@ impl<A: ArchContext> ThreadTable<A> {
         self.slots.get_mut(Self::slot_index(id))?.take()
     }
 
+    /// Линейный обход живых потоков. Используется лукапами
+    /// `Arc<ThreadObject>` по обратной ссылке.
+    pub fn iter(&self) -> impl Iterator<Item = &Thread<A>> {
+        self.slots.iter().filter_map(|s| s.as_ref())
+    }
+
     pub fn split_pair_mut(
         &mut self,
         first: ThreadId,

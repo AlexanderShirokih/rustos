@@ -166,7 +166,9 @@ pub fn pilot_client_subscribe(client_end: &Arc<Channel>) -> Result<PilotHandles,
 
     match timer_handle.object() {
         KObject::Event(_) => {}
-        KObject::Channel(_) => return Err(IpcError::WrongType),
+        KObject::Channel(_) | KObject::Process(_) | KObject::Thread(_) => {
+            return Err(IpcError::WrongType);
+        }
     }
 
     let timer_id = install_handle(timer_handle)?;

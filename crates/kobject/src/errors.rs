@@ -20,3 +20,20 @@ pub enum IpcError {
     /// Handle-таблица процесса исчерпана.
     OutOfHandles,
 }
+
+/// Ошибки создания процесса/потока через [`KernelRuntime`](super::KernelRuntime).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnError {
+    /// Слоты процессов исчерпаны.
+    NoFreeProcessSlots,
+    /// Слоты потоков исчерпаны.
+    NoFreeThreadSlots,
+    /// Приоритет вне допустимого диапазона.
+    InvalidPriority,
+    /// Размер стека (в страницах) равен нулю.
+    InvalidStackPages,
+    /// Не удалось аллоцировать стек потока.
+    StackAllocationFailed,
+    /// Не удалось создать адресное пространство процесса.
+    AddressSpaceCreationFailed,
+}

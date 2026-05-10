@@ -6,7 +6,9 @@ use super::{
     event::Event,
     handle::{Handle, HandleId},
     object::KObject,
+    process::ProcessObject,
     rights::Rights,
+    thread::ThreadObject,
 };
 
 /// Стандартная ёмкость таблицы handle'ов одного процесса.
@@ -143,7 +145,9 @@ impl HandleTable {
         }
         match &h.object {
             KObject::Channel(c) => Ok(c.clone()),
-            KObject::Event(_) => Err(IpcError::WrongType),
+            KObject::Event(_) | KObject::Process(_) | KObject::Thread(_) => {
+                Err(IpcError::WrongType)
+            }
         }
     }
 
@@ -155,7 +159,37 @@ impl HandleTable {
         }
         match &h.object {
             KObject::Event(e) => Ok(e.clone()),
-            KObject::Channel(_) => Err(IpcError::WrongType),
+            KObject::Channel(_) | KObject::Process(_) | KObject::Thread(_) => {
+                Err(IpcError::WrongType)
+            }
+        }
+    }
+
+    /// Извлекает `Arc<ProcessObject>` с проверкой прав и типа.
+    pub fn get_process(&self, id: HandleId, need: Rights) -> Result<Arc<ProcessObject>, IpcError> {
+        let h = self.lookup(id)?;
+        if !h.rights().contains(need) {
+            return Err(IpcError::AccessDenied);
+        }
+        match &h.object {
+            KObject::Process(p) => Ok(p.clone()),
+            KObject::Channel(_) | KObject::Event(_) | KObject::Thread(_) => {
+                Err(IpcError::WrongType)
+            }
+        }
+    }
+
+    /// Извлекает `Arc<ThreadObject>` с проверкой прав и типа.
+    pub fn get_thread(&self, id: HandleId, need: Rights) -> Result<Arc<ThreadObject>, IpcError> {
+        let h = self.lookup(id)?;
+        if !h.rights().contains(need) {
+            return Err(IpcError::AccessDenied);
+        }
+        match &h.object {
+            KObject::Thread(t) => Ok(t.clone()),
+            KObject::Channel(_) | KObject::Event(_) | KObject::Process(_) => {
+                Err(IpcError::WrongType)
+            }
         }
     }
 
@@ -275,6 +309,14 @@ mod tests {
         make_handle(KObject::Channel(ep), rights)
     }
 
+    fn process_handle(rights: Rights) -> Handle {
+        make_handle(KObject::Process(ProcessObject::new()), rights)
+    }
+
+    fn thread_handle(rights: Rights) -> Handle {
+        make_handle(KObject::Thread(ThreadObject::new()), rights)
+    }
+
     #[test]
     fn insert_and_get_round_trip() {
         let mut table = HandleTable::new();
@@ -305,6 +347,8 @@ mod tests {
         let mut table = HandleTable::new();
         let event_id = table.insert(event_handle(Rights::WAIT)).unwrap();
         let chan_id = table.insert(channel_handle(Rights::READ)).unwrap();
+        let proc_id = table.insert(process_handle(Rights::WAIT)).unwrap();
+        let thread_id = table.insert(thread_handle(Rights::WAIT)).unwrap();
 
         // Верный тип проходит.
         assert!(table.get_event(event_id, Rights::WAIT).is_ok());
@@ -319,6 +363,82 @@ mod tests {
             table.get_event(chan_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
+        assert!(matches!(
+            table.get_channel(proc_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_event(thread_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+    }
+
+    #[test]
+    fn get_process_type_checks() {
+        let mut table = HandleTable::new();
+        let proc_id = table.insert(process_handle(Rights::WAIT)).unwrap();
+        let event_id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let chan_id = table.insert(channel_handle(Rights::READ)).unwrap();
+        let thread_id = table.insert(thread_handle(Rights::WAIT)).unwrap();
+
+        assert!(table.get_process(proc_id, Rights::WAIT).is_ok());
+        assert!(matches!(
+            table.get_process(event_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_process(chan_id, Rights::READ),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_process(thread_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+    }
+
+    #[test]
+    fn get_thread_type_checks() {
+        let mut table = HandleTable::new();
+        let thread_id = table.insert(thread_handle(Rights::WAIT)).unwrap();
+        let event_id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let chan_id = table.insert(channel_handle(Rights::READ)).unwrap();
+        let proc_id = table.insert(process_handle(Rights::WAIT)).unwrap();
+
+        assert!(table.get_thread(thread_id, Rights::WAIT).is_ok());
+        assert!(matches!(
+            table.get_thread(event_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_thread(chan_id, Rights::READ),
+            Err(IpcError::WrongType)
+        ));
+        assert!(matches!(
+            table.get_thread(proc_id, Rights::WAIT),
+            Err(IpcError::WrongType)
+        ));
+    }
+
+    #[test]
+    fn get_process_checks_rights() {
+        let mut table = HandleTable::new();
+        let id = table.insert(process_handle(Rights::WAIT)).unwrap();
+        assert!(matches!(
+            table.get_process(id, Rights::MANAGE_PROCESS),
+            Err(IpcError::AccessDenied)
+        ));
+        assert!(table.get_process(id, Rights::WAIT).is_ok());
+    }
+
+    #[test]
+    fn get_thread_checks_rights() {
+        let mut table = HandleTable::new();
+        let id = table.insert(thread_handle(Rights::WAIT)).unwrap();
+        assert!(matches!(
+            table.get_thread(id, Rights::MANAGE_THREAD),
+            Err(IpcError::AccessDenied)
+        ));
+        assert!(table.get_thread(id, Rights::WAIT).is_ok());
     }
 
     #[test]

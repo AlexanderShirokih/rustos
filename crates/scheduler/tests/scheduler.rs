@@ -398,7 +398,7 @@ fn user_to_kernel_switch_writes_zero_root() {
 #[test]
 fn terminating_user_thread_releases_address_space() {
     // В MockContext entry-замыкание никогда не исполняется (start/switch - no-op),
-    // поэтому trampoline payload утекает вместе с захваченным `exit_handle`.
+    // поэтому trampoline payload утекает вместе с захваченным entry-замыканием.
     // Чтобы наблюдать Drop user-AS, проверяем сценарий: пока scheduler жив -
     // mapper жив, как только user-thread будет удалён из ProcessTable -
     // соответствующий `Arc<AddressSpace>` освободится. Текущая реализация
@@ -420,4 +420,476 @@ fn terminating_user_thread_releases_address_space() {
 
     assert_eq!(factory.created(), 1);
     assert_eq!(factory.released(), 0);
+}
+
+#[test]
+fn exit_current_signals_thread_terminated() {
+    use kobject::THREAD_TERMINATED;
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let id = scheduler
+        .spawn(SpawnConfig::new("t"), || {})
+        .expect("spawn t");
+    let ko = scheduler.thread_object_for(id).expect("thread_object");
+
+    let running = scheduler.run();
+    assert_eq!(ko.peek() & THREAD_TERMINATED, 0);
+
+    running.exit_current();
+
+    assert_eq!(ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert_eq!(ko.exit_code(), 0);
+}
+
+#[test]
+fn exit_current_with_nonzero_code_publishes_code() {
+    use kobject::THREAD_TERMINATED;
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let id = scheduler
+        .spawn(SpawnConfig::new("t"), || {})
+        .expect("spawn t");
+    let ko = scheduler.thread_object_for(id).expect("thread_object");
+
+    let running = scheduler.run();
+    running.exit_current_with_code(42);
+
+    assert_eq!(ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert_eq!(ko.exit_code(), 42);
+}
+
+#[test]
+fn last_thread_exit_signals_process_terminated() {
+    use kobject::PROCESS_TERMINATED;
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let id = scheduler
+        .spawn(SpawnConfig::new("solo"), || {})
+        .expect("spawn solo");
+    let pid = scheduler.thread_process_id(id).expect("process id");
+    let process_ko = scheduler.process_object_for(pid).expect("process_object");
+
+    let running = scheduler.run();
+    assert_eq!(process_ko.peek() & PROCESS_TERMINATED, 0);
+
+    running.exit_current();
+
+    assert_eq!(process_ko.peek() & PROCESS_TERMINATED, PROCESS_TERMINATED);
+    assert_eq!(process_ko.exit_code(), 0);
+}
+
+#[test]
+fn non_last_thread_exit_does_not_signal_process() {
+    use kobject::{PROCESS_TERMINATED, THREAD_TERMINATED};
+    use scheduler::SchedulerService;
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let first = scheduler
+        .spawn(SpawnConfig::new("first"), || {})
+        .expect("spawn first");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), first);
+    let pid = running.thread_process_id(first).expect("process id");
+
+    let second = running
+        .handle()
+        .spawn_boxed(
+            SpawnConfig::new("second").address_space(SpawnAddressSpace::Inherit),
+            Box::new(|| {}),
+        )
+        .expect("spawn second");
+    assert_eq!(running.thread_process_id(second), Some(pid));
+
+    let process_ko = running.process_object_for(pid).expect("process_object");
+    let first_ko = running.thread_object_for(first).expect("first ko");
+
+    running.exit_current();
+
+    assert_eq!(first_ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert_eq!(process_ko.peek() & PROCESS_TERMINATED, 0);
+    assert!(running.process_object_for(pid).is_some());
+}
+
+#[test]
+fn process_object_outlives_process_table_entry() {
+    use kobject::PROCESS_TERMINATED;
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let id = scheduler
+        .spawn(SpawnConfig::new("zombie"), || {})
+        .expect("spawn");
+    let pid = scheduler.thread_process_id(id).expect("process id");
+    let process_ko = scheduler.process_object_for(pid).expect("process_object");
+
+    let count_before = scheduler.process_count();
+    let running = scheduler.run();
+    running.exit_current();
+
+    assert!(running.process_object_for(pid).is_none());
+    assert!(running.process_count() < count_before);
+    assert!(Arc::strong_count(&process_ko) >= 1);
+    assert_eq!(process_ko.peek() & PROCESS_TERMINATED, PROCESS_TERMINATED);
+}
+
+#[test]
+fn current_thread_object_returns_running_thread_ko() {
+    use kobject::KernelRuntime;
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let id = scheduler
+        .spawn(SpawnConfig::new("t"), || {})
+        .expect("spawn t");
+    let expected = scheduler.thread_object_for(id).expect("thread_object");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), id);
+
+    let observed = running
+        .handle()
+        .current_thread_object()
+        .expect("current_thread_object");
+    assert!(Arc::ptr_eq(&observed, &expected));
+}
+
+#[test]
+fn current_process_object_returns_running_process_ko() {
+    use kobject::KernelRuntime;
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let id = scheduler
+        .spawn(SpawnConfig::new("t"), || {})
+        .expect("spawn t");
+    let pid = scheduler.thread_process_id(id).expect("process id");
+    let expected = scheduler.process_object_for(pid).expect("process_object");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), id);
+
+    let observed = running
+        .handle()
+        .current_process_object()
+        .expect("current_process_object");
+    assert!(Arc::ptr_eq(&observed, &expected));
+}
+
+#[test]
+fn kernel_thread_completion_signals_terminated() {
+    use std::{
+        panic,
+        sync::{Once, OnceLock, RwLock},
+    };
+
+    use kobject::{
+        IpcError, KernelRuntime, ParkState, ProcessObject, SpawnError, THREAD_TERMINATED,
+        ThreadObject, UserThreadEntry, WaitToken,
+    };
+
+    struct ForwardingRuntime {
+        inner: RwLock<Option<Arc<dyn KernelRuntime>>>,
+    }
+
+    impl ForwardingRuntime {
+        fn set(&self, rt: Arc<dyn KernelRuntime>) {
+            *self.inner.write().unwrap() = Some(rt);
+        }
+
+        fn clear(&self) {
+            *self.inner.write().unwrap() = None;
+        }
+
+        fn with<R>(&self, f: impl FnOnce(&dyn KernelRuntime) -> R) -> R {
+            let guard = self.inner.read().unwrap();
+            let rt = guard
+                .as_ref()
+                .expect("ForwardingRuntime: inner runtime not set");
+            f(rt.as_ref())
+        }
+    }
+
+    impl KernelRuntime for ForwardingRuntime {
+        fn current_wait_token(&self) -> WaitToken {
+            self.with(|rt| rt.current_wait_token())
+        }
+
+        fn current_handle_table(
+            &self,
+        ) -> Option<Arc<collections::MutexCell<kobject::HandleTable>>> {
+            self.with(|rt| rt.current_handle_table())
+        }
+
+        fn current_thread_object(&self) -> Option<Arc<kobject::ThreadObject>> {
+            self.with(|rt| rt.current_thread_object())
+        }
+
+        fn current_process_object(&self) -> Option<Arc<kobject::ProcessObject>> {
+            self.with(|rt| rt.current_process_object())
+        }
+
+        fn exit_current_thread(&self, exit_code: i32) -> ! {
+            self.with(|rt| rt.exit_current_thread(exit_code))
+        }
+
+        fn block_current_until(
+            &self,
+            ready_flag: &core::sync::atomic::AtomicU32,
+            timeout_ns: Option<u64>,
+        ) {
+            self.with(|rt| rt.block_current_until(ready_flag, timeout_ns));
+        }
+
+        fn unblock(&self, token: WaitToken) {
+            self.with(|rt| rt.unblock(token));
+        }
+
+        fn create_empty_process(
+            &self,
+            name: &'static str,
+        ) -> Result<Arc<ProcessObject>, SpawnError> {
+            self.with(|rt| rt.create_empty_process(name))
+        }
+
+        fn create_user_thread(
+            &self,
+            process: &Arc<ProcessObject>,
+            entry: UserThreadEntry,
+        ) -> Result<Arc<ThreadObject>, SpawnError> {
+            self.with(|rt| rt.create_user_thread(process, entry))
+        }
+
+        fn terminate_thread(
+            &self,
+            thread: &Arc<ThreadObject>,
+            exit_code: i32,
+        ) -> Result<(), IpcError> {
+            self.with(|rt| rt.terminate_thread(thread, exit_code))
+        }
+
+        fn terminate_process(
+            &self,
+            process: &Arc<ProcessObject>,
+            exit_code: i32,
+        ) -> Result<(), IpcError> {
+            self.with(|rt| rt.terminate_process(process, exit_code))
+        }
+    }
+
+    static FORWARDER: OnceLock<Arc<ForwardingRuntime>> = OnceLock::new();
+    static INSTALLED: Once = Once::new();
+    let _ = ParkState::REGISTERED;
+
+    let forwarder = FORWARDER
+        .get_or_init(|| {
+            Arc::new(ForwardingRuntime {
+                inner: RwLock::new(None),
+            })
+        })
+        .clone();
+    INSTALLED.call_once(|| {
+        let dyn_rt: Arc<dyn KernelRuntime> = forwarder.clone();
+        kobject::install_runtime(dyn_rt);
+    });
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let id = scheduler
+        .spawn(SpawnConfig::new("t"), || {})
+        .expect("spawn t");
+    let ko = scheduler.thread_object_for(id).expect("thread_object");
+    let handle = scheduler.handle();
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), id);
+    assert_eq!(ko.peek() & THREAD_TERMINATED, 0);
+
+    forwarder.set(Arc::new(handle));
+
+    let prev_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| kobject::thread_exit(0)));
+    panic::set_hook(prev_hook);
+    assert!(
+        result.is_err(),
+        "thread_exit must not return when scheduler::switch is a no-op"
+    );
+
+    forwarder.clear();
+
+    assert_eq!(ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert_eq!(ko.exit_code(), 0);
+}
+
+#[test]
+fn process_create_returns_handle_to_empty_process() {
+    use kobject::{KernelRuntime, PROCESS_TERMINATED};
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let processes_before = scheduler.process_count();
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process must succeed");
+
+    assert_eq!(process.peek() & PROCESS_TERMINATED, 0);
+    assert!(Arc::strong_count(&process) >= 1);
+    assert_eq!(scheduler.process_count(), processes_before + 1);
+}
+
+#[test]
+fn thread_terminate_via_handle_signals_terminated() {
+    use kobject::{KernelRuntime, THREAD_TERMINATED, UserThreadEntry};
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+    let thread = handle
+        .create_user_thread(
+            &process,
+            UserThreadEntry {
+                entry_pc: 0x4000_0000,
+                user_sp: 0x4001_0000,
+                arg: 0,
+                priority: 1,
+            },
+        )
+        .expect("create_user_thread");
+
+    assert_eq!(thread.peek() & THREAD_TERMINATED, 0);
+    handle
+        .terminate_thread(&thread, 7)
+        .expect("terminate_thread");
+    assert_eq!(thread.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert_eq!(thread.exit_code(), 7);
+}
+
+#[test]
+fn process_terminate_via_handle_terminates_all_threads() {
+    use kobject::{KernelRuntime, PROCESS_TERMINATED, THREAD_TERMINATED, UserThreadEntry};
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+    let t1 = handle
+        .create_user_thread(
+            &process,
+            UserThreadEntry {
+                entry_pc: 0x4000_0000,
+                user_sp: 0x4001_0000,
+                arg: 0,
+                priority: 1,
+            },
+        )
+        .expect("create_user_thread t1");
+    let t2 = handle
+        .create_user_thread(
+            &process,
+            UserThreadEntry {
+                entry_pc: 0x4000_0000,
+                user_sp: 0x4001_2000,
+                arg: 1,
+                priority: 1,
+            },
+        )
+        .expect("create_user_thread t2");
+
+    handle
+        .terminate_process(&process, -1)
+        .expect("terminate_process");
+
+    assert_eq!(t1.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert_eq!(t2.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert_eq!(process.peek() & PROCESS_TERMINATED, PROCESS_TERMINATED);
+    assert_eq!(process.exit_code(), -1);
+}
+
+#[test]
+fn switch_to_next_skips_terminated_thread_in_ready_queue() {
+    use kobject::{KernelRuntime, THREAD_TERMINATED};
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let t1 = scheduler
+        .spawn(SpawnConfig::new("t1"), || {})
+        .expect("spawn t1");
+    let t2 = scheduler
+        .spawn(SpawnConfig::new("t2"), || {})
+        .expect("spawn t2");
+    let t3 = scheduler
+        .spawn(SpawnConfig::new("t3"), || {})
+        .expect("spawn t3");
+    let t2_ko = scheduler.thread_object_for(t2).expect("t2 ko");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), t1);
+
+    let handle = running.handle();
+    handle.terminate_thread(&t2_ko, 9).expect("terminate t2");
+    assert_eq!(t2_ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+
+    running.yield_now();
+    assert_eq!(running.current(), t3);
+}
+
+#[test]
+fn spawn_rollback_undoes_inherit_increment_on_thread_table_full() {
+    use scheduler::SchedulerService;
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let t1 = scheduler
+        .spawn(SpawnConfig::new("t1"), || {})
+        .expect("spawn t1");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), t1);
+    let pid = running.thread_process_id(t1).expect("pid");
+    let handle = running.handle();
+
+    let inherit_cfg = SpawnConfig::new("inh").address_space(SpawnAddressSpace::Inherit);
+    let already_used = 2;
+    let to_fill = TEST_CONFIG.max_threads() - already_used;
+    for _ in 0..to_fill {
+        handle
+            .spawn_boxed(inherit_cfg, Box::new(|| {}))
+            .expect("inherit spawn must succeed under capacity");
+    }
+
+    let count_before = running.process_thread_count(pid).expect("pid alive");
+    let res = handle.spawn_boxed(inherit_cfg, Box::new(|| {}));
+    assert_eq!(res, Err(SpawnError::NoFreeThreadSlots));
+    let count_after = running.process_thread_count(pid).expect("pid alive");
+    assert_eq!(count_before, count_after);
 }

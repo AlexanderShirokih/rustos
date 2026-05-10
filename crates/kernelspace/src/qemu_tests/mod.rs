@@ -34,6 +34,7 @@ mod channel_via_syscall;
 mod event;
 mod event_via_scheduler;
 mod handle_table;
+mod process_lifecycle;
 mod smoke;
 // E2E-тест полного пути `SchedulerService::spawn_user_process`.
 mod userspace_via_scheduler;

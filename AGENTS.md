@@ -61,3 +61,4 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 | [`docs/code-style.md`](docs/code-style.md) | Стиль кода: структура файлов, комментарии, `no_std` |
 | [`docs/testing.md`](docs/testing.md) | Тестирование: интеграционные/юнит-тесты, именование, паттерны |
 | [`docs/user-memory.md`](docs/user-memory.md) | User-VM аллокатор и syscall'ы выделения памяти процессам |
+| [`docs/process-lifecycle.md`](docs/process-lifecycle.md) | Lifecycle Process/Thread KO: сигналы, syscall ABI, паттерны wait |

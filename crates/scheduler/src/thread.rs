@@ -1,3 +1,7 @@
+use alloc::sync::Arc;
+
+use kobject::ThreadObject;
+
 use super::arch::{ArchContext, CpuId, ThreadStack};
 use crate::{Priority, ProcessId, ThreadId};
 
@@ -20,6 +24,7 @@ pub struct Thread<A: ArchContext> {
     arch: A,
     stack: ThreadStack,
     name: &'static str,
+    ko: Arc<ThreadObject>,
 }
 
 impl<A: ArchContext> Thread<A> {
@@ -42,6 +47,7 @@ impl<A: ArchContext> Thread<A> {
             arch,
             stack,
             name,
+            ko: ThreadObject::new(),
         }
     }
 
@@ -91,5 +97,11 @@ impl<A: ArchContext> Thread<A> {
 
     pub fn name(&self) -> &'static str {
         self.name
+    }
+
+    /// Lifecycle-KO потока. Клонируется наружу - наблюдатель переживает
+    /// удаление `Thread` из `ThreadTable`.
+    pub fn thread_object(&self) -> &Arc<ThreadObject> {
+        &self.ko
     }
 }

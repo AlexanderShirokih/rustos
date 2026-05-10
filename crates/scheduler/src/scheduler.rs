@@ -4,7 +4,7 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::marker::PhantomData;
 
 use collections::{LockCell, MutexCell};
-use kobject::HandleTable;
+use kobject::{HandleTable, ProcessObject, ThreadObject};
 use memory::{
     memory_mapper::{AddressSpaceFactory, AddressSpaceHandle},
     user_vm_allocator::UserVmAllocator,
@@ -47,6 +47,9 @@ pub(super) enum ScheduleAction<A: ArchContext> {
     },
 }
 
+// Ручные impls вместо `#[derive]`: derive подкинул бы `A: Copy`-bound,
+// которого `ArchContext` не требует. Поля - сырые указатели и `Copy`-enum,
+// `A: Copy` не нужен.
 impl<A: ArchContext> Clone for ScheduleAction<A> {
     fn clone(&self) -> Self {
         *self
@@ -205,9 +208,7 @@ where
     where
         F: FnOnce() + Send + 'static,
     {
-        let exit_handle: Arc<dyn crate::SchedulerService> = Arc::new(self.handle());
-        self.inner
-            .with_lock(|inner| inner.spawn(cfg, entry, exit_handle))
+        self.inner.with_lock(|inner| inner.spawn(cfg, entry))
     }
 
     /// Регистрирует уже подготовленный user-процесс.
@@ -295,10 +296,16 @@ where
     /// управление вызывающему. Production-handler `SchedulerHandle::exit -> !`
     /// оборачивает этот метод, добавляя контракт `noreturn`.
     pub fn exit_current(&self) {
+        self.exit_current_with_code(0);
+    }
+
+    /// Тестовый помощник: вариант [`Self::exit_current`] с явным `exit_code`.
+    #[doc(hidden)]
+    pub fn exit_current_with_code(&self, exit_code: i32) {
         let action = with_preemption_disabled::<A::Cpu, _>(|| {
             self.inner.with_lock(|inner| {
                 let now_ns = inner.timer.now_ns();
-                inner.exit_current(now_ns)
+                inner.exit_current(exit_code, now_ns)
             })
         });
         perform_schedule_action::<A>(action);
@@ -335,6 +342,13 @@ where
         self.inner.with_lock(|inner| inner.processes.live_count())
     }
 
+    /// Количество живых thread'ов процесса `pid`. `None`, если процесс
+    /// отсутствует.
+    pub fn process_thread_count(&self, pid: ProcessId) -> Option<usize> {
+        self.inner
+            .with_lock(|inner| inner.processes.get(pid).map(Process::thread_count))
+    }
+
     /// Количество user-VM-регионов, выделенных у процесса `pid`. `None`,
     /// если процесс не найден или у него нет user_vm-аллокатора.
     pub fn process_user_vm_region_count(&self, pid: ProcessId) -> Option<usize> {
@@ -344,6 +358,25 @@ where
             let vm = process.user_vm()?.clone();
             Some(vm.with_lock(|alloc| alloc.live_count()))
         })
+    }
+
+    /// `Arc<ThreadObject>` потока `id`. `None`, если поток отсутствует.
+    pub fn thread_object_for(&self, id: ThreadId) -> Option<Arc<ThreadObject>> {
+        self.inner
+            .with_lock(|inner| inner.threads.get(id).map(|t| t.thread_object().clone()))
+    }
+
+    /// `Arc<ProcessObject>` процесса `pid`. `None`, если процесс отсутствует.
+    pub fn process_object_for(&self, pid: ProcessId) -> Option<Arc<ProcessObject>> {
+        self.inner
+            .with_lock(|inner| inner.processes.get(pid).map(|p| p.process_object().clone()))
+    }
+
+    /// `ProcessId` процесса, к которому привязан thread `id`. `None`, если
+    /// поток отсутствует.
+    pub fn thread_process_id(&self, id: ThreadId) -> Option<ProcessId> {
+        self.inner
+            .with_lock(|inner| inner.threads.get(id).map(Thread::process))
     }
 }
 
@@ -356,21 +389,64 @@ where
         &mut self,
         cfg: SpawnConfig,
         entry: Box<dyn FnOnce() + Send + 'static>,
-        exit_handle: Arc<dyn crate::SchedulerService>,
     ) -> Result<ThreadId, SpawnError> {
-        // Box<dyn FnOnce()> уже реализует FnOnce(), поэтому передаём напрямую.
-        self.spawn(cfg, entry, exit_handle)
+        if cfg.stack_pages == 0 {
+            return Err(SpawnError::InvalidStackPages);
+        }
+        if (cfg.priority.raw() as usize) >= self.config.priority_levels() {
+            return Err(SpawnError::InvalidPriority);
+        }
+
+        let stack = <A::Stack as super::arch::ThreadStackAllocator>::allocate(cfg.stack_pages)
+            .map_err(|_| SpawnError::StackAllocationFailed)?;
+        let stack_top = stack.top();
+
+        let payload = TrampolinePayload { entry };
+        let arg = Box::into_raw(Box::new(payload)).cast::<()>();
+        let arch = A::init(stack_top, thread_trampoline::<A>, arg);
+
+        let address_space = self.resolve_spawn_address_space(cfg.address_space)?;
+        let (process_id, is_new_process) =
+            self.intern_process_for_spawn(cfg.name, address_space, cfg.address_space)?;
+
+        let cpu_affinity = self
+            .current_cpu()
+            .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
+
+        let id = match self.threads.insert_with(|id| {
+            Thread::new(
+                id,
+                process_id,
+                cpu_affinity,
+                cfg.priority,
+                arch,
+                stack,
+                cfg.name,
+            )
+        }) {
+            Ok(id) => id,
+            Err(e) => {
+                self.rollback_intern(process_id, is_new_process);
+                return Err(e);
+            }
+        };
+
+        if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
+            && cpu.idle() != id
+        {
+            cpu.ready_queue_mut().push(id, cfg.priority);
+        }
+
+        Ok(id)
     }
 
     fn bootstrap_current_cpu(&mut self) {
         let cpu_id = <A::Cpu as ArchCpu>::current_id();
         let idle_priority = lowest_priority(self.config.priority_levels());
         let idle_id = self
-            .spawn(
-                SpawnConfig::new("idle").priority(idle_priority),
-                || <A::Cpu as ArchCpu>::idle(),
-                Self::idle_exit_handle(),
-            )
+            .spawn(SpawnConfig::new("idle").priority(idle_priority), || {
+                <A::Cpu as ArchCpu>::idle()
+            })
             .expect("idle thread bootstrap must succeed");
 
         let idle = self
@@ -394,73 +470,17 @@ where
         unsafe { <A::Cpu as ArchCpu>::install_cpu_local(cpu_ptr) };
     }
 
-    /// Заглушка для idle-потока, который никогда не возвращается из FnOnce.
-    /// `exit_handle` нужен только из-за общего `spawn`-API.
-    fn idle_exit_handle() -> Arc<dyn crate::SchedulerService> {
-        Arc::new(IdleExitStub)
-    }
-
-    fn spawn<F>(
-        &mut self,
-        cfg: SpawnConfig,
-        entry: F,
-        exit_handle: Arc<dyn crate::SchedulerService>,
-    ) -> Result<ThreadId, SpawnError>
+    fn spawn<F>(&mut self, cfg: SpawnConfig, entry: F) -> Result<ThreadId, SpawnError>
     where
         F: FnOnce() + Send + 'static,
     {
-        if cfg.stack_pages == 0 {
-            return Err(SpawnError::InvalidStackPages);
-        }
-        if (cfg.priority.raw() as usize) >= self.config.priority_levels() {
-            return Err(SpawnError::InvalidPriority);
-        }
-
-        let stack = <A::Stack as super::arch::ThreadStackAllocator>::allocate(cfg.stack_pages)
-            .map_err(|_| SpawnError::StackAllocationFailed)?;
-        let stack_top = stack.top();
-
-        let entry_box: Box<dyn FnOnce() + Send + 'static> = Box::new(entry);
-        let payload = TrampolinePayload {
-            entry: entry_box,
-            exit_handle,
-        };
-        let arg = Box::into_raw(Box::new(payload)).cast::<()>();
-        let arch = A::init(stack_top, thread_trampoline::<A>, arg);
-
-        let address_space = self.resolve_spawn_address_space(cfg.address_space)?;
-        let process_id =
-            self.intern_process_for_spawn(cfg.name, address_space, cfg.address_space)?;
-
-        let cpu_affinity = self
-            .current_cpu()
-            .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
-
-        let id = self.threads.insert_with(|id| {
-            Thread::new(
-                id,
-                process_id,
-                cpu_affinity,
-                cfg.priority,
-                arch,
-                stack,
-                cfg.name,
-            )
-        })?;
-
-        if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
-            && cpu.idle() != id
-        {
-            cpu.ready_queue_mut().push(id, cfg.priority);
-        }
-
-        Ok(id)
+        self.spawn_boxed(cfg, Box::new(entry))
     }
 
-    pub(crate) fn spawn_prepared_user_process(
-        &mut self,
-        prepared: PreparedUserProcess,
-    ) -> Result<UserProcessLaunchInfo, PreparedUserProcessError> {
+    fn validate_prepared_user_process(
+        &self,
+        prepared: &PreparedUserProcess,
+    ) -> Result<(), PreparedUserProcessError> {
         if prepared.kernel_stack_pages == 0 {
             return Err(PreparedUserProcessError::Spawn(
                 SpawnError::InvalidStackPages,
@@ -469,15 +489,23 @@ where
         if (prepared.priority.raw() as usize) >= self.config.priority_levels() {
             return Err(PreparedUserProcessError::Spawn(SpawnError::InvalidPriority));
         }
-        let launch = prepared.launch;
-        if let Some(index) = launch.bootstrap_handle_index
-            && index >= launch.initial_handles.len()
+        if let Some(index) = prepared.launch.bootstrap_handle_index
+            && index >= prepared.launch.initial_handles.len()
         {
             return Err(PreparedUserProcessError::InvalidBootstrapHandle);
         }
-        if launch.initial_handles.len() > HandleTable::new().capacity() as usize {
+        if prepared.launch.initial_handles.len() > HandleTable::new().capacity() as usize {
             return Err(PreparedUserProcessError::TooManyInitialHandles);
         }
+        Ok(())
+    }
+
+    pub(crate) fn spawn_prepared_user_process(
+        &mut self,
+        prepared: PreparedUserProcess,
+    ) -> Result<UserProcessLaunchInfo, PreparedUserProcessError> {
+        self.validate_prepared_user_process(&prepared)?;
+        let launch = prepared.launch;
 
         let stack =
             <A::Stack as super::arch::ThreadStackAllocator>::allocate(prepared.kernel_stack_pages)
@@ -566,10 +594,25 @@ where
             cpu.ready_queue_mut().push(thread_id, prepared.priority);
         }
 
+        let process_object = self
+            .processes
+            .get(process_id)
+            .expect("process must exist after insert")
+            .process_object()
+            .clone();
+        let thread_object = self
+            .threads
+            .get(thread_id)
+            .expect("thread must exist after insert")
+            .thread_object()
+            .clone();
+
         Ok(UserProcessLaunchInfo {
             process_id,
             thread_id,
             initial_handle_ids,
+            process_object,
+            thread_object,
         })
     }
 
@@ -600,12 +643,17 @@ where
     ///   привязанный к kernel-AS - поведение как у `Kernel`.
     /// - `Kernel` / `User` - создаёт новый Process в `ProcessTable`
     ///   (счётчик потоков = 1 от `Process::new`).
+    ///
+    /// Возвращает пару `(pid, is_new)`: `is_new == true`, если был создан
+    /// новый `Process`; `false` - если инкрементирован существующий.
+    /// Используется вызывающим для отката на ошибке последующей регистрации
+    /// потока.
     fn intern_process_for_spawn(
         &mut self,
         name: &'static str,
         address_space: Arc<AddressSpace>,
         spec: SpawnAddressSpace,
-    ) -> Result<ProcessId, SpawnError> {
+    ) -> Result<(ProcessId, bool), SpawnError> {
         if let SpawnAddressSpace::Inherit = spec
             && let Some(current_pid) = self.current_process_id()
             && let Some(existing) = self.processes.get(current_pid)
@@ -615,11 +663,29 @@ where
                 "Inherit AS must match current_address_space (race under scheduler-lock is impossible)"
             );
             existing.increment_thread_count();
-            return Ok(current_pid);
+            return Ok((current_pid, false));
         }
-        self.processes
+        let pid = self
+            .processes
             .insert(name, address_space)
-            .map_err(|_| SpawnError::NoFreeThreadSlots)
+            .map_err(|_| SpawnError::NoFreeThreadSlots)?;
+        Ok((pid, true))
+    }
+
+    /// Откатывает `intern_process_for_spawn`, когда последующая регистрация
+    /// потока в `ThreadTable` провалилась. Для нового процесса - удаляет
+    /// его из таблицы (Drop `Arc<AddressSpace>` освободит фреймы); для
+    /// унаследованного - снимает паразитный инкремент `thread_count`.
+    fn rollback_intern(&mut self, pid: ProcessId, is_new: bool) {
+        if is_new {
+            self.processes.remove(pid);
+        } else if let Some(process) = self.processes.get(pid) {
+            let was_last = process.decrement_thread_count();
+            debug_assert!(
+                !was_last,
+                "rollback decrement reached zero on Inherit path; parent thread should still hold a count"
+            );
+        }
     }
 
     fn current_process_id(&self) -> Option<ProcessId> {
@@ -759,6 +825,24 @@ where
         self.processes.get(pid).map(|p| p.handle_table().clone())
     }
 
+    /// Клонирует `Arc<ThreadObject>` текущего потока. `None`, если
+    /// scheduler ещё не bootstrapped и current-thread не определён.
+    pub(super) fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
+        let current_id = self.current_cpu()?.current();
+        self.threads
+            .get(current_id)
+            .map(|t| t.thread_object().clone())
+    }
+
+    /// Клонирует `Arc<ProcessObject>` процесса, к которому привязан
+    /// текущий поток. `None`, если scheduler ещё не bootstrapped или
+    /// процесс не зарегистрирован.
+    pub(super) fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
+        let current_id = self.current_cpu()?.current();
+        let pid = self.threads.get(current_id)?.process();
+        self.processes.get(pid).map(|p| p.process_object().clone())
+    }
+
     /// Снимок (Arc<AddressSpace>, Arc<MutexCell<UserVmAllocator>>) текущего
     /// процесса для syscall-handler-ов user-памяти. `None`, если процесс -
     /// kernel-only либо у него нет user_vm-аллокатора.
@@ -782,26 +866,198 @@ where
         self.timer.now_ns()
     }
 
-    pub(super) fn exit_current(&mut self, now_ns: u64) -> ScheduleAction<A> {
+    /// Завершает текущий thread с заданным `exit_code` и переключается на
+    /// следующий runnable.
+    ///
+    /// Контракт ровно одного вызова на дочерний `ThreadObject`/`ProcessObject`
+    /// держится scheduler-локом и инвариантом `thread_count > 0`: метод
+    /// вызывается под `MutexCell<SchedulerInner>` и до `switch_to_next`,
+    /// поэтому конкурирующий exit того же thread/process невозможен.
+    pub(super) fn exit_current(&mut self, exit_code: i32, now_ns: u64) -> ScheduleAction<A> {
         let current_id = self.current();
-        let exiting_pid = if let Some(thread) = self.threads.get_mut(current_id) {
+        let (exiting_pid, thread_ko) = if let Some(thread) = self.threads.get_mut(current_id) {
             thread.set_state(ThreadState::Terminated);
-            Some(thread.process())
+            (Some(thread.process()), Some(thread.thread_object().clone()))
         } else {
-            None
+            (None, None)
         };
 
-        // Декремент thread_count процесса. На нуле помечаем процесс к удалению -
-        // фактическое удаление произойдёт в `switch_to_next`, когда dying thread
-        // уже не current ни на одном CPU.
+        if let Some(ko) = thread_ko {
+            ko.signal_terminated(exit_code);
+        }
+
+        // Декремент thread_count процесса. На нуле поднимаем
+        // PROCESS_TERMINATED ДО `cleanup_pending_process_removals` (вызов из
+        // `switch_to_next`) и помечаем процесс к удалению - `Arc<ProcessObject>`
+        // переживёт запись в `ProcessTable` через держателей handle'ов.
         if let Some(pid) = exiting_pid
             && let Some(process) = self.processes.get(pid)
             && process.decrement_thread_count()
         {
+            process.process_object().signal_terminated(exit_code);
             self.pending_process_removals.push(pid);
         }
 
         self.switch_to_next(now_ns)
+    }
+
+    /// Создаёт пустой user-процесс с собственным AS, без потоков и без
+    /// user_vm-аллокатора. Возвращает `Arc<ProcessObject>` нового процесса.
+    pub(crate) fn create_empty_process(
+        &mut self,
+        name: &'static str,
+    ) -> Result<Arc<ProcessObject>, SpawnError> {
+        let factory = self
+            .address_space_factory
+            .ok_or(SpawnError::AddressSpaceCreationFailed)?;
+        let address_space =
+            AddressSpace::new_user(factory).map_err(|_| SpawnError::AddressSpaceCreationFailed)?;
+        let pid = self
+            .processes
+            .insert_with(|id| Process::empty(id, name, address_space))
+            .map_err(|_| SpawnError::NoFreeThreadSlots)?;
+        let process = self
+            .processes
+            .get(pid)
+            .expect("process must exist after insert");
+        Ok(process.process_object().clone())
+    }
+
+    /// Создаёт user-поток в указанном процессе и помещает его в ready-queue.
+    pub(crate) fn create_user_thread(
+        &mut self,
+        process_ko: &Arc<ProcessObject>,
+        entry: kobject::UserThreadEntry,
+    ) -> Result<Arc<ThreadObject>, SpawnError> {
+        if (entry.priority as usize) >= self.config.priority_levels() {
+            return Err(SpawnError::InvalidPriority);
+        }
+
+        let priority = Priority::new(entry.priority);
+        let process_id = self
+            .processes
+            .iter()
+            .find(|p| Arc::ptr_eq(p.process_object(), process_ko))
+            .map(Process::id)
+            .ok_or(SpawnError::NoFreeThreadSlots)?;
+
+        let stack = <A::Stack as super::arch::ThreadStackAllocator>::allocate(
+            crate::SpawnConfig::DEFAULT_STACK_PAGES,
+        )
+        .map_err(|_| SpawnError::StackAllocationFailed)?;
+        let stack_top = stack.top();
+
+        let arch = A::init_user(crate::UserEntry {
+            kernel_stack_top: stack_top,
+            user_pc: memory::virtual_address::VirtualAddress::new(entry.entry_pc as usize),
+            user_sp: memory::virtual_address::VirtualAddress::new(entry.user_sp as usize),
+            arg: UserBootstrapArg(entry.arg),
+        });
+
+        let cpu_affinity = self
+            .current_cpu()
+            .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
+
+        // Инкрементируем счётчик ДО регистрации потока: на ошибке
+        // регистрации делаем компенсирующий decrement (без подъёма
+        // PROCESS_TERMINATED, т.к. поток так и не был добавлен).
+        let process = self
+            .processes
+            .get(process_id)
+            .expect("process must exist after lookup");
+        process.increment_thread_count();
+
+        let thread_id = match self.threads.insert_with(|id| {
+            Thread::new(
+                id,
+                process_id,
+                cpu_affinity,
+                priority,
+                arch,
+                stack,
+                "<user>",
+            )
+        }) {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = self
+                    .processes
+                    .get(process_id)
+                    .expect("process still present")
+                    .decrement_thread_count();
+                return Err(e);
+            }
+        };
+
+        let thread_ko = self
+            .threads
+            .get(thread_id)
+            .expect("thread must exist after insert")
+            .thread_object()
+            .clone();
+
+        if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
+            && cpu.idle() != thread_id
+        {
+            cpu.ready_queue_mut().push(thread_id, priority);
+        }
+
+        Ok(thread_ko)
+    }
+
+    /// Идемпотентно завершает поток через handle: поднимает
+    /// `THREAD_TERMINATED`, декрементирует thread_count, на нуле -
+    /// `PROCESS_TERMINATED`. Context switch не делает; для завершения
+    /// собственного потока должен использоваться [`Self::exit_current`].
+    pub(crate) fn terminate_thread_ko(&mut self, thread_ko: &Arc<ThreadObject>, exit_code: i32) {
+        let lookup = self
+            .threads
+            .iter()
+            .find(|t| Arc::ptr_eq(t.thread_object(), thread_ko))
+            .map(|t| (t.id(), t.process(), t.state()));
+        let Some((thread_id, pid, state)) = lookup else {
+            return;
+        };
+        if matches!(state, ThreadState::Terminated) {
+            return;
+        }
+
+        if let Some(thread) = self.threads.get_mut(thread_id) {
+            thread.set_state(ThreadState::Terminated);
+        }
+        thread_ko.signal_terminated(exit_code);
+
+        if let Some(process) = self.processes.get(pid)
+            && process.decrement_thread_count()
+        {
+            process.process_object().signal_terminated(exit_code);
+            self.pending_process_removals.push(pid);
+        }
+    }
+
+    /// Идемпотентно завершает все потоки процесса: каждый живой поток
+    /// получает `THREAD_TERMINATED`, по достижении нуля - процесс
+    /// получает `PROCESS_TERMINATED`.
+    pub(crate) fn terminate_process_ko(&mut self, process_ko: &Arc<ProcessObject>, exit_code: i32) {
+        let pid_lookup = self
+            .processes
+            .iter()
+            .find(|p| Arc::ptr_eq(p.process_object(), process_ko))
+            .map(Process::id);
+        let Some(pid) = pid_lookup else {
+            return;
+        };
+        // Собираем снимок KO живых потоков под scheduler-lock'ом, чтобы
+        // не держать одновременно &self и &mut self при итерации.
+        let live: Vec<Arc<ThreadObject>> = self
+            .threads
+            .iter()
+            .filter(|t| t.process() == pid && !matches!(t.state(), ThreadState::Terminated))
+            .map(|t| t.thread_object().clone())
+            .collect();
+        for ko in &live {
+            self.terminate_thread_ko(ko, exit_code);
+        }
     }
 
     fn wake_sleepers(&mut self, now_ns: u64) {
@@ -862,17 +1118,35 @@ where
     }
 
     fn switch_to_next(&mut self, now_ns: u64) -> ScheduleAction<A> {
-        let Some(cpu) = self.current_cpu_mut() else {
-            return ScheduleAction::None;
+        let (prev_id, idle_id) = match self.current_cpu() {
+            Some(cpu) => (cpu.current(), cpu.idle()),
+            None => return ScheduleAction::None,
         };
 
-        let prev_id = cpu.current();
-        let idle_id = cpu.idle();
-        let next_id = cpu
-            .ready_queue_mut()
-            .pop_highest()
-            .map_or(idle_id, |(id, _)| id);
+        // Поток мог быть переведён в `Terminated` через `terminate_thread_ko`
+        // пока стоял в ready_queue: пропускаем такие записи и берём следующую.
+        let next_id = loop {
+            let popped = self
+                .current_cpu_mut()
+                .and_then(|cpu| cpu.ready_queue_mut().pop_highest())
+                .map(|(id, _)| id);
+            match popped {
+                Some(id) => {
+                    let alive = self
+                        .threads
+                        .get(id)
+                        .is_some_and(|t| !matches!(t.state(), ThreadState::Terminated));
+                    if alive {
+                        break id;
+                    }
+                }
+                None => break idle_id,
+            }
+        };
 
+        let cpu = self
+            .current_cpu_mut()
+            .expect("cpu still present after ready-queue drain");
         cpu.set_current(next_id);
 
         if let Some(next) = self.threads.get_mut(next_id) {
@@ -1049,7 +1323,6 @@ where
 /// Аргумент trampoline, передаваемый в первый запуск потока.
 struct TrampolinePayload {
     entry: Box<dyn FnOnce() + Send + 'static>,
-    exit_handle: Arc<dyn crate::SchedulerService>,
 }
 
 pub(super) fn perform_schedule_action<A: ArchContext>(action: ScheduleAction<A>) {
@@ -1074,38 +1347,8 @@ unsafe extern "C" fn thread_trampoline<A: ArchContext>(arg: *mut ()) -> ! {
     // SAFETY: `arg` создан из `Box::into_raw(Box::new(TrampolinePayload { .. }))` в `spawn`.
     // Реверс: `Box::from_raw` возвращает владение `Box`, после чего `*payload` распаковывает поля.
     let payload: Box<TrampolinePayload> = unsafe { Box::from_raw(arg.cast()) };
-    let TrampolinePayload { entry, exit_handle } = *payload;
+    let TrampolinePayload { entry } = *payload;
     <A::Cpu as ArchCpu>::enable_preemption();
     entry();
-    exit_handle.exit();
-}
-
-/// Stub-сервис, передаваемый идле-потоку. Все методы паникуют - вызов невозможен,
-/// так как `idle()` никогда не возвращается, а `spawn` от idle-потока недопустим.
-struct IdleExitStub;
-
-impl crate::SchedulerService for IdleExitStub {
-    fn spawn_boxed(
-        &self,
-        _cfg: SpawnConfig,
-        _entry: Box<dyn FnOnce() + Send + 'static>,
-    ) -> Result<ThreadId, SpawnError> {
-        unreachable!("idle thread must never call spawn_boxed")
-    }
-
-    fn yield_now(&self) {
-        unreachable!("idle thread must never call yield_now")
-    }
-
-    fn sleep_ns(&self, _ns: u64) {
-        unreachable!("idle thread must never call sleep_ns")
-    }
-
-    fn current(&self) -> ThreadId {
-        unreachable!("idle thread must never call current")
-    }
-
-    fn exit(&self) -> ! {
-        unreachable!("idle thread must never call exit")
-    }
+    kobject::thread_exit(0)
 }

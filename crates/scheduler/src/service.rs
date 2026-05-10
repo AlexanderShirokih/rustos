@@ -2,7 +2,10 @@ use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use collections::{LockCell, MutexCell};
-use kobject::{HandleTable, KernelRuntime, ParkState, WaitToken};
+use kobject::{
+    HandleTable, IpcError, KernelRuntime, ParkState, ProcessObject, ThreadObject, UserThreadEntry,
+    WaitToken,
+};
 use memory::UserVmContext;
 
 use super::{
@@ -44,12 +47,6 @@ where
         Self { inner }
     }
 
-    fn self_arc(&self) -> Arc<dyn SchedulerService> {
-        Arc::new(Self {
-            inner: self.inner.clone(),
-        })
-    }
-
     pub fn on_timer_tick(&self, now_ns: u64) {
         let action = self.inner.with_lock(|inner| inner.on_tick(now_ns));
         perform_schedule_action::<A>(action);
@@ -88,9 +85,7 @@ where
         cfg: SpawnConfig,
         entry: Box<dyn FnOnce() + Send + 'static>,
     ) -> Result<ThreadId, SpawnError> {
-        let exit_handle = self.self_arc();
-        self.inner
-            .with_lock(|inner| inner.spawn_boxed(cfg, entry, exit_handle))
+        self.inner.with_lock(|inner| inner.spawn_boxed(cfg, entry))
     }
 
     fn yield_now(&self) {
@@ -118,15 +113,7 @@ where
     }
 
     fn exit(&self) -> ! {
-        <A::Cpu as ArchCpu>::disable_preemption();
-        let action = self.inner.with_lock(|inner| {
-            let now_ns = inner.now_ns();
-            inner.exit_current(now_ns)
-        });
-        perform_schedule_action::<A>(action);
-        // После switch_to_next текущий поток не должен возвращаться.
-        // Если выполнение вернулось - это серьёзный bug в context-switch.
-        unreachable!("terminated thread resumed after scheduler switch")
+        self.exit_current_thread(0)
     }
 }
 
@@ -141,6 +128,27 @@ where
 
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
         self.inner.with_lock(|inner| inner.current_handle_table())
+    }
+
+    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
+        self.inner.with_lock(|inner| inner.current_thread_object())
+    }
+
+    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
+        self.inner.with_lock(|inner| inner.current_process_object())
+    }
+
+    fn exit_current_thread(&self, exit_code: i32) -> ! {
+        // Bare disable без RAII-обёртки: путь не возвращается, парный
+        // enable отсутствует намеренно. Возобновление управления здесь -
+        // bug в context-switch и ловится `unreachable!` ниже.
+        <A::Cpu as ArchCpu>::disable_preemption();
+        let action = self.inner.with_lock(|inner| {
+            let now_ns = inner.now_ns();
+            inner.exit_current(exit_code, now_ns)
+        });
+        perform_schedule_action::<A>(action);
+        unreachable!("terminated thread resumed after scheduler switch")
     }
 
     fn block_current_until(&self, ready_flag: &AtomicU32, timeout_ns: Option<u64>) {
@@ -165,6 +173,41 @@ where
         };
         self.inner
             .with_lock(|inner| inner.unblock_thread(thread_id));
+    }
+
+    fn create_empty_process(
+        &self,
+        name: &'static str,
+    ) -> Result<Arc<ProcessObject>, kobject::SpawnError> {
+        self.inner
+            .with_lock(|inner| inner.create_empty_process(name))
+            .map_err(Into::into)
+    }
+
+    fn create_user_thread(
+        &self,
+        process: &Arc<ProcessObject>,
+        entry: UserThreadEntry,
+    ) -> Result<Arc<ThreadObject>, kobject::SpawnError> {
+        self.inner
+            .with_lock(|inner| inner.create_user_thread(process, entry))
+            .map_err(Into::into)
+    }
+
+    fn terminate_thread(&self, thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError> {
+        self.inner
+            .with_lock(|inner| inner.terminate_thread_ko(thread, exit_code));
+        Ok(())
+    }
+
+    fn terminate_process(
+        &self,
+        process: &Arc<ProcessObject>,
+        exit_code: i32,
+    ) -> Result<(), IpcError> {
+        self.inner
+            .with_lock(|inner| inner.terminate_process_ko(process, exit_code));
+        Ok(())
     }
 }
 

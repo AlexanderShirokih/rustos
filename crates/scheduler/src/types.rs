@@ -130,6 +130,18 @@ pub enum SpawnError {
     AddressSpaceCreationFailed,
 }
 
+impl From<SpawnError> for kobject::SpawnError {
+    fn from(value: SpawnError) -> Self {
+        match value {
+            SpawnError::NoFreeThreadSlots => Self::NoFreeThreadSlots,
+            SpawnError::InvalidPriority => Self::InvalidPriority,
+            SpawnError::InvalidStackPages => Self::InvalidStackPages,
+            SpawnError::StackAllocationFailed => Self::StackAllocationFailed,
+            SpawnError::AddressSpaceCreationFailed => Self::AddressSpaceCreationFailed,
+        }
+    }
+}
+
 /// Контракт сервиса планировщика.
 pub trait SchedulerService: Send + Sync {
     fn spawn_boxed(

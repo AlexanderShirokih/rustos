@@ -5,7 +5,7 @@ use core::{
 };
 
 use collections::MutexCell;
-use kobject::HandleTable;
+use kobject::{HandleTable, ProcessObject};
 use memory::user_vm_allocator::UserVmAllocator;
 
 use super::address_space::AddressSpace;
@@ -23,6 +23,10 @@ pub struct Process {
     /// Количество живых thread'ов, привязанных к этому процессу. Декремент
     /// при `thread_exit`; ноль - сигнал scheduler-у удалить процесс.
     thread_count: AtomicUsize,
+    /// Lifecycle-KO процесса: переживает запись в `ProcessTable`, чтобы
+    /// держатели `Handle` могли наблюдать `PROCESS_TERMINATED` и читать
+    /// `exit_code` после удаления процесса (zombie-семантика).
+    ko: Arc<ProcessObject>,
 }
 
 impl Process {
@@ -34,6 +38,21 @@ impl Process {
             handle_table: Arc::new(MutexCell::new(HandleTable::new())),
             user_vm: None,
             thread_count: AtomicUsize::new(1),
+            ko: ProcessObject::new(),
+        }
+    }
+
+    /// Конструктор пустого процесса: счётчик потоков нулевой, потоки
+    /// добавляются через [`Self::increment_thread_count`].
+    pub fn empty(id: ProcessId, name: &'static str, address_space: Arc<AddressSpace>) -> Self {
+        Self {
+            id,
+            name,
+            address_space,
+            handle_table: Arc::new(MutexCell::new(HandleTable::new())),
+            user_vm: None,
+            thread_count: AtomicUsize::new(0),
+            ko: ProcessObject::new(),
         }
     }
 
@@ -68,6 +87,13 @@ impl Process {
     /// чтобы IPC-функции могли работать с таблицей вне scheduler-lock.
     pub fn handle_table(&self) -> &Arc<MutexCell<HandleTable>> {
         &self.handle_table
+    }
+
+    /// Lifecycle-KO процесса. `Arc` клонируется наружу, чтобы наблюдатель
+    /// мог пережить запись `Process` в `ProcessTable` и дочитать `exit_code`
+    /// после `PROCESS_TERMINATED`.
+    pub fn process_object(&self) -> &Arc<ProcessObject> {
+        &self.ko
     }
 
     /// Регистрирует ещё один thread, принадлежащий процессу.
@@ -170,6 +196,12 @@ impl ProcessTable {
             .iter()
             .filter_map(|s| s.as_ref())
             .find(|p| p.id() == id)
+    }
+
+    /// Линейный обход процессов: используется лукапами `Arc<ProcessObject>`
+    /// по обратной ссылке. Стоимость O(N) приемлема при N в десятки.
+    pub fn iter(&self) -> impl Iterator<Item = &Process> {
+        self.slots.iter().filter_map(|s| s.as_ref())
     }
 
     /// Удаляет процесс из таблицы. Возвращает `Some(Process)` если найден.

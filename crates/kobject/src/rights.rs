@@ -81,6 +81,22 @@ impl Rights {
                     | Self::INSPECT.0,
             ),
             KObject::Event(_) => Self(SIGNALABLE),
+            // SIGNAL не выдаём: PROCESS_TERMINATED поднимает только ядро.
+            KObject::Process(_) => Self(
+                Self::WAIT.0
+                    | Self::INSPECT.0
+                    | Self::MANAGE_PROCESS.0
+                    | Self::DUPLICATE.0
+                    | Self::TRANSFER.0,
+            ),
+            // SIGNAL не выдаём: THREAD_TERMINATED поднимает только ядро.
+            KObject::Thread(_) => Self(
+                Self::WAIT.0
+                    | Self::INSPECT.0
+                    | Self::MANAGE_THREAD.0
+                    | Self::DUPLICATE.0
+                    | Self::TRANSFER.0,
+            ),
         }
     }
 }
@@ -115,5 +131,55 @@ impl Not for Rights {
     type Output = Self;
     fn not(self) -> Self {
         Self(!self.0 & Self::ALL_BITS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::{object::KObject, process::ProcessObject, thread::ThreadObject},
+        *,
+    };
+
+    #[test]
+    fn defaults_for_process_grants_manage_and_wait() {
+        let ko = KObject::Process(ProcessObject::new());
+        let r = Rights::defaults_for(&ko);
+        assert!(r.contains(Rights::MANAGE_PROCESS));
+        assert!(r.contains(Rights::WAIT));
+        assert!(r.contains(Rights::INSPECT));
+        assert!(r.contains(Rights::DUPLICATE));
+        assert!(r.contains(Rights::TRANSFER));
+    }
+
+    #[test]
+    fn defaults_for_process_omits_signal_and_io() {
+        let ko = KObject::Process(ProcessObject::new());
+        let r = Rights::defaults_for(&ko);
+        assert!(!r.contains(Rights::SIGNAL));
+        assert!(!r.contains(Rights::READ));
+        assert!(!r.contains(Rights::WRITE));
+        assert!(!r.contains(Rights::MANAGE_THREAD));
+    }
+
+    #[test]
+    fn defaults_for_thread_grants_manage_and_wait() {
+        let ko = KObject::Thread(ThreadObject::new());
+        let r = Rights::defaults_for(&ko);
+        assert!(r.contains(Rights::MANAGE_THREAD));
+        assert!(r.contains(Rights::WAIT));
+        assert!(r.contains(Rights::INSPECT));
+        assert!(r.contains(Rights::DUPLICATE));
+        assert!(r.contains(Rights::TRANSFER));
+    }
+
+    #[test]
+    fn defaults_for_thread_omits_signal_and_io() {
+        let ko = KObject::Thread(ThreadObject::new());
+        let r = Rights::defaults_for(&ko);
+        assert!(!r.contains(Rights::SIGNAL));
+        assert!(!r.contains(Rights::READ));
+        assert!(!r.contains(Rights::WRITE));
+        assert!(!r.contains(Rights::MANAGE_PROCESS));
     }
 }

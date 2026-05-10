@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::ptr::NonNull;
 
-use kobject::{Handle, HandleId};
+use kobject::{Handle, HandleId, ProcessObject, ThreadObject};
 use memory::{user_vm_allocator::UserVmAllocator, virtual_address::VirtualAddress};
 
 use crate::{AddressSpace, Priority, ProcessId, SpawnError, ThreadId};
@@ -73,11 +73,28 @@ pub struct PreparedUserProcess {
     pub launch: UserProcessLaunch,
 }
 
-#[derive(Debug)]
 pub struct UserProcessLaunchInfo {
     pub process_id: ProcessId,
     pub thread_id: ThreadId,
     pub initial_handle_ids: Vec<HandleId>,
+    /// `Arc<ProcessObject>` свежесозданного процесса. Позволяет вызывающему
+    /// (kernelspace bootstrap) держать сильную ссылку на KO независимо от
+    /// `ProcessTable` и наблюдать `PROCESS_TERMINATED`.
+    pub process_object: Arc<ProcessObject>,
+    /// `Arc<ThreadObject>` стартового потока. Симметричен `process_object`:
+    /// можно дождаться `THREAD_TERMINATED` или прочитать `exit_code` без
+    /// прохода по handle-table.
+    pub thread_object: Arc<ThreadObject>,
+}
+
+impl core::fmt::Debug for UserProcessLaunchInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("UserProcessLaunchInfo")
+            .field("process_id", &self.process_id)
+            .field("thread_id", &self.thread_id)
+            .field("initial_handle_ids", &self.initial_handle_ids)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

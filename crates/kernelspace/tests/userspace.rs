@@ -121,6 +121,58 @@ fn spawn_user_process_with_launch_installs_initial_handles() {
 }
 
 #[test]
+fn spawn_user_process_with_launch_returns_process_and_thread_objects() {
+    reset_switches();
+    let factory = fresh_factory();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler(timer, factory);
+
+    let init = [0xAAu8; 8];
+    let segments = [UserSegment {
+        va_base: aligned(USER_SEGMENT_VA),
+        mapped_size: PAGE,
+        init_bytes: &init,
+        perms: MemFlags::user_rx(),
+    }];
+    let image = UserImage {
+        segments: &segments,
+        entry: VirtualAddress::new(USER_SEGMENT_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP_VA),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let info = scheduler
+        .spawn_user_process_with_launch(
+            "user-objects",
+            &image,
+            Priority::new(2),
+            4,
+            UserProcessLaunch::new(),
+        )
+        .expect("spawn user process");
+
+    assert_eq!(info.process_object.peek(), 0);
+    assert_eq!(info.thread_object.peek(), 0);
+    assert!(std::sync::Arc::strong_count(&info.process_object) >= 2);
+    assert!(std::sync::Arc::strong_count(&info.thread_object) >= 2);
+
+    let scheduler_process_object = scheduler
+        .process_object_for(info.process_id)
+        .expect("process registered");
+    assert!(std::sync::Arc::ptr_eq(
+        &info.process_object,
+        &scheduler_process_object
+    ));
+    let scheduler_thread_object = scheduler
+        .thread_object_for(info.thread_id)
+        .expect("thread registered");
+    assert!(std::sync::Arc::ptr_eq(
+        &info.thread_object,
+        &scheduler_thread_object
+    ));
+}
+
+#[test]
 fn spawn_user_process_with_launch_rejects_bad_bootstrap_handle_index() {
     reset_switches();
     let factory = fresh_factory();

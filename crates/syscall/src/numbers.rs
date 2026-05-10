@@ -13,12 +13,12 @@
 //! | Диапазон      | Класс операций                              |
 //! |---------------|---------------------------------------------|
 //! | `0x00`        | резерв (`raw == 0` -> `BadSyscall`)          |
-//! | `0x01..=0x0F` | thread/process control                      |
+//! | `0x01..=0x0F` | резерв (deprecated thread/process control)  |
 //! | `0x10..=0x1F` | object base - общие операции на любом KO    |
 //! | `0x20..=0x2F` | channel-специфичные                         |
 //! | `0x30..=0x3F` | handle lifecycle                            |
-//! | `0x40..=0x4F` | резерв под Process KObject                  |
-//! | `0x50..=0x5F` | резерв под Thread KObject                   |
+//! | `0x40..=0x4F` | Process KObject                             |
+//! | `0x50..=0x5F` | Thread KObject                              |
 //! | `0x60..=0x6F` | резерв под Memory KObject                   |
 //! | `0x70..=0x7F` | резерв под Port KObject                     |
 //!
@@ -35,9 +35,6 @@ use super::error::SyscallError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum SyscallOp {
-    // 0x01..=0x0F - thread/process control.
-    ThreadExit = 0x01,
-
     // 0x10..=0x1F - object base.
     ObjectSignal = 0x10,
     /// Ждёт сигналы KO. Аргументы: `arg0=handle`, `arg1=signals`
@@ -61,6 +58,43 @@ pub enum SyscallOp {
     HandleClose = 0x30,
     HandleDuplicate = 0x31,
 
+    // 0x40..=0x4F - Process KObject.
+    /// Создаёт пустой user-процесс. Аргументы: `arg0=name_va`,
+    /// `arg1=name_len`. Возвращает handle на свежий
+    /// [`ProcessObject`](kobject::ProcessObject).
+    ProcessCreate = 0x40,
+    /// Возвращает handle на собственный [`ProcessObject`](kobject::ProcessObject).
+    ProcessSelf = 0x41,
+    /// Финальный exit-код процесса. Аргументы: `arg0=handle`. Требует
+    /// [`Rights::INSPECT`](kobject::Rights::INSPECT).
+    ProcessExitCode = 0x43,
+    /// Завершает процесс: всем его потокам поднимает `THREAD_TERMINATED`,
+    /// после декремента до нуля - `PROCESS_TERMINATED`. Аргументы:
+    /// `arg0=handle`, `arg1=exit_code`. Требует
+    /// [`Rights::MANAGE_PROCESS`](kobject::Rights::MANAGE_PROCESS).
+    ProcessTerminate = 0x44,
+
+    // 0x50..=0x5F - Thread KObject.
+    /// Создаёт user-поток в указанном процессе. Аргументы:
+    /// `arg0=process_handle`, `arg1=entry_pc`, `arg2=user_sp`, `arg3=arg`,
+    /// `arg4=priority`. Требует
+    /// [`Rights::MANAGE_PROCESS`](kobject::Rights::MANAGE_PROCESS) на
+    /// `process_handle`.
+    ThreadCreate = 0x50,
+    /// Возвращает handle на собственный [`ThreadObject`](kobject::ThreadObject).
+    ThreadSelf = 0x51,
+    /// Завершает текущий поток. Аргумент: `arg0=exit_code`. Не возвращается.
+    ThreadExit = 0x52,
+    /// Финальный exit-код потока. Аргументы: `arg0=handle`. Требует
+    /// [`Rights::INSPECT`](kobject::Rights::INSPECT).
+    ThreadExitCode = 0x53,
+    /// Завершает указанный поток. Аргументы: `arg0=handle`,
+    /// `arg1=exit_code`. Требует
+    /// [`Rights::MANAGE_THREAD`](kobject::Rights::MANAGE_THREAD).
+    /// Терминирование собственного потока через handle отвергается:
+    /// для self-exit предусмотрен [`Self::ThreadExit`].
+    ThreadTerminate = 0x54,
+
     // Memory: per-process user-VM management.
     /// Выделяет user-память: маппит свежие фреймы в свободный VA процесса
     /// и возвращает базовый адрес. Аргументы: `arg0=size_bytes`,
@@ -79,7 +113,6 @@ pub enum SyscallOp {
 impl SyscallOp {
     pub const fn from_raw(raw: u16) -> Result<Self, SyscallError> {
         match raw {
-            0x01 => Ok(Self::ThreadExit),
             0x10 => Ok(Self::ObjectSignal),
             0x11 => Ok(Self::ObjectWaitOne),
             0x20 => Ok(Self::ChannelCreate),
@@ -87,6 +120,15 @@ impl SyscallOp {
             0x22 => Ok(Self::ChannelRead),
             0x30 => Ok(Self::HandleClose),
             0x31 => Ok(Self::HandleDuplicate),
+            0x40 => Ok(Self::ProcessCreate),
+            0x41 => Ok(Self::ProcessSelf),
+            0x43 => Ok(Self::ProcessExitCode),
+            0x44 => Ok(Self::ProcessTerminate),
+            0x50 => Ok(Self::ThreadCreate),
+            0x51 => Ok(Self::ThreadSelf),
+            0x52 => Ok(Self::ThreadExit),
+            0x53 => Ok(Self::ThreadExitCode),
+            0x54 => Ok(Self::ThreadTerminate),
             0x60 => Ok(Self::MemoryAllocate),
             0x61 => Ok(Self::MemoryRemap),
             0x62 => Ok(Self::MemoryFree),
@@ -101,7 +143,6 @@ mod tests {
 
     #[test]
     fn from_raw_known_ops() {
-        assert_eq!(SyscallOp::from_raw(0x01), Ok(SyscallOp::ThreadExit));
         assert_eq!(SyscallOp::from_raw(0x10), Ok(SyscallOp::ObjectSignal));
         assert_eq!(SyscallOp::from_raw(0x11), Ok(SyscallOp::ObjectWaitOne));
         assert_eq!(SyscallOp::from_raw(0x20), Ok(SyscallOp::ChannelCreate));
@@ -109,6 +150,15 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x22), Ok(SyscallOp::ChannelRead));
         assert_eq!(SyscallOp::from_raw(0x30), Ok(SyscallOp::HandleClose));
         assert_eq!(SyscallOp::from_raw(0x31), Ok(SyscallOp::HandleDuplicate));
+        assert_eq!(SyscallOp::from_raw(0x40), Ok(SyscallOp::ProcessCreate));
+        assert_eq!(SyscallOp::from_raw(0x41), Ok(SyscallOp::ProcessSelf));
+        assert_eq!(SyscallOp::from_raw(0x43), Ok(SyscallOp::ProcessExitCode));
+        assert_eq!(SyscallOp::from_raw(0x44), Ok(SyscallOp::ProcessTerminate));
+        assert_eq!(SyscallOp::from_raw(0x50), Ok(SyscallOp::ThreadCreate));
+        assert_eq!(SyscallOp::from_raw(0x51), Ok(SyscallOp::ThreadSelf));
+        assert_eq!(SyscallOp::from_raw(0x52), Ok(SyscallOp::ThreadExit));
+        assert_eq!(SyscallOp::from_raw(0x53), Ok(SyscallOp::ThreadExitCode));
+        assert_eq!(SyscallOp::from_raw(0x54), Ok(SyscallOp::ThreadTerminate));
         assert_eq!(SyscallOp::from_raw(0x60), Ok(SyscallOp::MemoryAllocate));
         assert_eq!(SyscallOp::from_raw(0x61), Ok(SyscallOp::MemoryRemap));
         assert_eq!(SyscallOp::from_raw(0x62), Ok(SyscallOp::MemoryFree));
@@ -122,11 +172,18 @@ mod tests {
     }
 
     #[test]
+    fn from_raw_old_thread_exit_slot_is_bad_syscall() {
+        // ABI поломан: 0x01 более не означает thread_exit, а
+        // зарезервирован.
+        assert_eq!(SyscallOp::from_raw(0x01), Err(SyscallError::BadSyscall));
+    }
+
+    #[test]
     fn from_raw_unknown_op() {
         assert_eq!(SyscallOp::from_raw(3), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x12), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x32), Err(SyscallError::BadSyscall));
-        assert_eq!(SyscallOp::from_raw(0x40), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x42), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(99), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(u16::MAX), Err(SyscallError::BadSyscall));
     }

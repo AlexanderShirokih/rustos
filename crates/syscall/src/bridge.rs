@@ -19,7 +19,6 @@ use kobject::{self, Rights};
 use super::{
     error::{SyscallError, encode_return},
     numbers::SyscallOp,
-    runtime::runtime,
 };
 
 /// Источник syscall-вызова.
@@ -56,6 +55,7 @@ pub trait SyscallFrame {
 /// Главная точка входа: декодирует op, диспатчит на handler, кодирует
 /// результат и записывает его в фрейм. Для not-returning syscall'ов
 /// (`thread_exit`) функция не возвращается.
+#[allow(clippy::too_many_lines)]
 pub fn dispatch(frame: &mut dyn SyscallFrame) {
     if frame.origin() == Origin::Kernel {
         frame.set_return(SyscallError::KernelOriginated.into());
@@ -75,9 +75,6 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
     };
 
     match op {
-        // Не возвращается: текущий поток помечается Terminated и
-        // scheduler делает context switch на следующий.
-        SyscallOp::ThreadExit => sys_thread_exit(frame.arg(0)),
         SyscallOp::ObjectSignal => {
             let r = sys_object_signal(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
@@ -117,6 +114,47 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = sys_handle_duplicate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
+        SyscallOp::ProcessCreate => {
+            let r = super::process::sys_process_create(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ProcessSelf => {
+            let r = super::process::sys_process_self();
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ProcessExitCode => {
+            let r = super::process::sys_process_exit_code(frame.arg(0));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ProcessTerminate => {
+            let r = super::process::sys_process_terminate(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ThreadCreate => {
+            let r = super::thread::sys_thread_create(
+                frame.arg(0),
+                frame.arg(1),
+                frame.arg(2),
+                frame.arg(3),
+                frame.arg(4),
+            );
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ThreadSelf => {
+            let r = super::thread::sys_thread_self();
+            frame.set_return(encode_return(r));
+        }
+        // Не возвращается: текущий поток помечается Terminated и
+        // scheduler делает context switch на следующий.
+        SyscallOp::ThreadExit => sys_thread_exit(frame.arg(0)),
+        SyscallOp::ThreadExitCode => {
+            let r = super::thread::sys_thread_exit_code(frame.arg(0));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ThreadTerminate => {
+            let r = super::thread::sys_thread_terminate(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
         SyscallOp::MemoryAllocate => {
             let r = super::memory::sys_memory_allocate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
@@ -133,13 +171,11 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
 }
 
 /// `thread_exit(code)` - помечает текущий поток `Terminated` и
-/// переключает на следующий ready-поток. Не возвращается.
-///
-/// Код выхода в текущей реализации игнорируется (нет места для его
-/// хранения и потребителей), но включён в ABI для совместимости с
-/// будущими `wait_for_thread`-семантиками.
-fn sys_thread_exit(_code: u64) -> ! {
-    runtime().exit_current()
+/// переключает на следующий ready-поток. Унифицирован с kernel-side
+/// путём через `kobject::thread_exit`. Не возвращается.
+fn sys_thread_exit(code: u64) -> ! {
+    let exit_code = super::process::exit_code_from_arg(code);
+    kobject::thread_exit(exit_code)
 }
 
 /// `object_signal(handle, set, clear)` - атомарно меняет биты сигналов

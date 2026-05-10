@@ -30,7 +30,9 @@ mod error;
 mod flags;
 mod memory;
 mod numbers;
+mod process;
 mod runtime;
+mod thread;
 
 pub use bridge::{Origin, SyscallFrame, dispatch};
 pub use error::SyscallError;

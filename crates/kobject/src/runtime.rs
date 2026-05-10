@@ -1,10 +1,10 @@
 //! Мост между kobject и runtime-ом ядра.
 //!
-//! Чтобы IPC-функции (`object_wait_one`, future `channel_*`) не тащили
-//! на каждый вызов scheduler-генерики, фиксируется единый
+//! Чтобы IPC-функции (`object_wait_one`, `channel_*`) не тащили на
+//! каждый вызов scheduler-генерики, фиксируется единый
 //! [`KernelRuntime`]-trait и `Arc<dyn KernelRuntime>` хранится в
-//! глобальной [`spin::Once`] ячейке. Реализация -
-//! Реализация регистрируется один раз после bootstrap-а scheduler-а.
+//! глобальной [`spin::Once`] ячейке. Реализация регистрируется один раз
+//! после bootstrap-а scheduler-а.
 
 use alloc::sync::Arc;
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
@@ -12,7 +12,22 @@ use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 use collections::MutexCell;
 use spin::Once;
 
-use super::HandleTable;
+use super::{HandleTable, IpcError, ProcessObject, SpawnError, ThreadObject};
+
+/// Параметры первого входа в user-поток, передаваемые в
+/// [`KernelRuntime::create_user_thread`]. Платформенно-нейтральное описание;
+/// реализация преобразует поля в формат архитектурного контекста.
+#[derive(Debug, Clone, Copy)]
+pub struct UserThreadEntry {
+    /// Стартовый адрес user-кода.
+    pub entry_pc: u64,
+    /// Стартовый user-стек.
+    pub user_sp: u64,
+    /// Аргумент, передаваемый user-коду через ABI.
+    pub arg: u64,
+    /// Приоритет нового потока (0 - высший).
+    pub priority: u8,
+}
 
 /// Состояния парковки потока, ожидающего сигнала на KO.
 ///
@@ -62,6 +77,21 @@ pub trait KernelRuntime: Send + Sync {
     /// инициализации) - каллер должен возвращать `IpcError::BadHandle`.
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>>;
 
+    /// `Arc<ThreadObject>` текущего потока. `None`, если scheduler ещё
+    /// не bootstrapped и current-thread не определён.
+    fn current_thread_object(&self) -> Option<Arc<ThreadObject>>;
+
+    /// `Arc<ProcessObject>` процесса, к которому привязан текущий поток.
+    /// `None`, если scheduler ещё не bootstrapped и current-process не
+    /// определён.
+    fn current_process_object(&self) -> Option<Arc<ProcessObject>>;
+
+    /// Завершает текущий поток с заданным `exit_code`: поднимает
+    /// `THREAD_TERMINATED` на `Arc<ThreadObject>`, при последнем
+    /// потоке процесса - `PROCESS_TERMINATED`, и переключает контекст
+    /// на следующий runnable. Не возвращается.
+    fn exit_current_thread(&self, exit_code: i32) -> !;
+
     /// Парк current thread. Под scheduler-lock-ом проверяется
     /// `ready_flag`: если он уже не [`ParkState::REGISTERED`], значит
     /// waker успел отработать между `register_waiter` и взятием
@@ -74,6 +104,35 @@ pub trait KernelRuntime: Send + Sync {
     /// Будит ранее заблокированный поток: переводит в `Ready` и пихает
     /// в ready_queue. Idempotent на любых других состояниях потока.
     fn unblock(&self, token: WaitToken);
+
+    /// Создаёт пустой user-процесс: новое адресное пространство, пустая
+    /// handle-table, ноль потоков. Имя пользователя в текущей реализации
+    /// не сохраняется; пройденная валидация сохраняет ABI-форму.
+    fn create_empty_process(&self, name: &'static str) -> Result<Arc<ProcessObject>, SpawnError>;
+
+    /// Создаёт user-поток в указанном процессе и помещает его в ready-queue.
+    /// На успехе процесс получает инкрементированный thread_count.
+    fn create_user_thread(
+        &self,
+        process: &Arc<ProcessObject>,
+        entry: UserThreadEntry,
+    ) -> Result<Arc<ThreadObject>, SpawnError>;
+
+    /// Идемпотентно завершает поток: поднимает `THREAD_TERMINATED`,
+    /// декрементирует thread_count процесса; на нуле - поднимает
+    /// `PROCESS_TERMINATED` владеющего процесса. Не выполняет context
+    /// switch: завершение собственного потока должно идти через
+    /// [`Self::exit_current_thread`].
+    fn terminate_thread(&self, thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError>;
+
+    /// Идемпотентно завершает все потоки процесса: для каждого живого
+    /// потока поднимает `THREAD_TERMINATED`, по достижении нуля -
+    /// `PROCESS_TERMINATED`. Не выполняет context switch.
+    fn terminate_process(
+        &self,
+        process: &Arc<ProcessObject>,
+        exit_code: i32,
+    ) -> Result<(), IpcError>;
 }
 
 static RUNTIME: Once<Arc<dyn KernelRuntime>> = Once::new();

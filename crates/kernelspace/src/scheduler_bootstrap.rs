@@ -67,10 +67,6 @@ where
     A: ArchContext,
     T: TimerSource,
 {
-    fn exit_current(&self) -> ! {
-        self.handle.exit()
-    }
-
     fn current_user_vm(&self) -> Option<UserVmContext> {
         self.handle.current_user_vm()
     }

@@ -9,11 +9,13 @@ use collections::LockCell;
 
 use super::{
     channel::{Channel, Message},
-    errors::IpcError,
+    errors::{IpcError, SpawnError},
     handle::{Handle, HandleId},
     object::KObject,
+    process::ProcessObject,
     rights::Rights,
-    runtime::{ParkState, runtime},
+    runtime::{ParkState, UserThreadEntry, runtime},
+    thread::ThreadObject,
     wait::ParkWaker,
 };
 
@@ -183,4 +185,130 @@ pub fn handle_duplicate(handle_id: HandleId, new_rights: Rights) -> Result<Handl
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
     table.with_lock(|tbl| tbl.duplicate(handle_id, new_rights))
+}
+
+/// Завершает текущий поток с заданным `exit_code`. Поднимает
+/// `THREAD_TERMINATED` на `Arc<ThreadObject>` уходящего потока (а на
+/// последнем потоке процесса - `PROCESS_TERMINATED`) и переключает
+/// контекст на следующий runnable. Не возвращается.
+pub fn thread_exit(exit_code: i32) -> ! {
+    runtime().exit_current_thread(exit_code)
+}
+
+/// Создаёт пустой user-процесс через [`KernelRuntime::create_empty_process`].
+/// Имя пользователя в текущей реализации не сохраняется.
+pub fn create_empty_process(name: &'static str) -> Result<Arc<ProcessObject>, SpawnError> {
+    runtime().create_empty_process(name)
+}
+
+/// Создаёт user-поток в указанном процессе и помещает его в ready-queue.
+pub fn create_user_thread(
+    process: &Arc<ProcessObject>,
+    entry: UserThreadEntry,
+) -> Result<Arc<ThreadObject>, SpawnError> {
+    runtime().create_user_thread(process, entry)
+}
+
+/// Идемпотентно завершает поток: поднимает `THREAD_TERMINATED`,
+/// декрементирует thread_count процесса; на нуле - поднимает
+/// `PROCESS_TERMINATED`.
+pub fn terminate_thread(thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError> {
+    runtime().terminate_thread(thread, exit_code)
+}
+
+/// Идемпотентно завершает процесс: всем его живым потокам поднимает
+/// `THREAD_TERMINATED`, после декремента до нуля - `PROCESS_TERMINATED`.
+pub fn terminate_process(process: &Arc<ProcessObject>, exit_code: i32) -> Result<(), IpcError> {
+    runtime().terminate_process(process, exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use core::{
+        num::NonZeroU64,
+        sync::atomic::{AtomicI32, AtomicU32, Ordering},
+    };
+    use std::panic;
+
+    use super::*;
+    use crate::{
+        ProcessObject, ThreadObject,
+        runtime::{KernelRuntime, UserThreadEntry, WaitToken, install_runtime},
+    };
+
+    const PANIC_SENTINEL: &str = "thread_exit-mock-noreturn";
+    static CAPTURED_EXIT_CODE: AtomicI32 = AtomicI32::new(i32::MIN);
+
+    struct MockRuntime;
+
+    impl KernelRuntime for MockRuntime {
+        fn current_wait_token(&self) -> WaitToken {
+            WaitToken::new(NonZeroU64::new(1).unwrap())
+        }
+
+        fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<crate::HandleTable>>> {
+            None
+        }
+
+        fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
+            None
+        }
+
+        fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
+            None
+        }
+
+        fn exit_current_thread(&self, exit_code: i32) -> ! {
+            CAPTURED_EXIT_CODE.store(exit_code, Ordering::SeqCst);
+            panic!("{PANIC_SENTINEL}");
+        }
+
+        fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
+
+        fn unblock(&self, _token: WaitToken) {}
+
+        fn create_empty_process(
+            &self,
+            _name: &'static str,
+        ) -> Result<Arc<ProcessObject>, SpawnError> {
+            Err(SpawnError::NoFreeProcessSlots)
+        }
+
+        fn create_user_thread(
+            &self,
+            _process: &Arc<ProcessObject>,
+            _entry: UserThreadEntry,
+        ) -> Result<Arc<ThreadObject>, SpawnError> {
+            Err(SpawnError::NoFreeThreadSlots)
+        }
+
+        fn terminate_thread(
+            &self,
+            _thread: &Arc<ThreadObject>,
+            _exit_code: i32,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+
+        fn terminate_process(
+            &self,
+            _process: &Arc<ProcessObject>,
+            _exit_code: i32,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn thread_exit_forwards_code_to_runtime() {
+        install_runtime(Arc::new(MockRuntime));
+
+        let prev_hook = panic::take_hook();
+        panic::set_hook(Box::new(|_| {}));
+        let result = panic::catch_unwind(|| thread_exit(7));
+        panic::set_hook(prev_hook);
+
+        assert!(result.is_err());
+        assert_eq!(CAPTURED_EXIT_CODE.load(Ordering::SeqCst), 7);
+    }
 }
