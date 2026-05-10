@@ -758,11 +758,12 @@ mod tests {
 
     #[test]
     fn try_write_build_err_leaves_state_untouched() {
+        #[derive(Debug, PartialEq)]
+        struct BuildFailed;
+
         let (a, b) = Channel::create_pair(2);
         let initial_signals = b.peek_signals();
 
-        #[derive(Debug, PartialEq)]
-        struct BuildFailed;
         let res = a.try_write::<BuildFailed>(|| Err(BuildFailed));
         assert!(matches!(res, Ok(Err(BuildFailed))));
 
@@ -811,6 +812,9 @@ mod tests {
     /// успешный read обязан получить то же сообщение целиком.
     #[test]
     fn try_read_err_after_drain_restores_message() {
+        #[derive(Debug, PartialEq)]
+        struct InstallFailed;
+
         let (a, b) = Channel::create_pair(2);
         let event = Event::new();
         let weak = Arc::downgrade(&event);
@@ -820,8 +824,6 @@ mod tests {
         a.write(msg).unwrap();
         assert_eq!(b.peek_signals() & CHANNEL_READABLE, CHANNEL_READABLE);
 
-        #[derive(Debug, PartialEq)]
-        struct InstallFailed;
         let res = b.try_read::<InstallFailed>(|m| {
             let drained: alloc::vec::Vec<_> = m.drain_handles().collect();
             assert_eq!(drained.len(), 1);

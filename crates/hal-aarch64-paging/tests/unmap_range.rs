@@ -155,27 +155,27 @@ fn free_all_walks_mixed_leaf_kinds() {
     let buf = allocate_buffer(16);
     let (mut mapper, _) = make_mapper(buf);
 
-    let virt_4k = PageAlignedVirtualAddress::from_usize(0x4000_0000).unwrap();
-    let phys_4k = AlignedPhysicalAddress::<{ L3::SHIFT }>::from_usize(0x10_0000).unwrap();
+    let page_virt = PageAlignedVirtualAddress::from_usize(0x4000_0000).unwrap();
+    let page_phys = AlignedPhysicalAddress::<{ L3::SHIFT }>::from_usize(0x10_0000).unwrap();
     mapper
-        .map_page(virt_4k, phys_4k, user_rw())
+        .map_page(page_virt, page_phys, user_rw())
         .expect("4K map");
 
-    let virt_2m =
+    let block_virt =
         memory::virtual_address::AlignedVirtualAddress::<{ L2::SHIFT }>::from_usize(0x8000_0000)
             .unwrap();
-    let phys_2m =
+    let block_phys =
         AlignedPhysicalAddress::<{ L2::SHIFT }>::from_usize(0x8000_0000).expect("2M aligned");
     mapper
-        .map_page(virt_2m, phys_2m, user_rw())
+        .map_page(block_virt, block_phys, user_rw())
         .expect("2M map");
 
-    let virt_1g =
+    let region_virt =
         memory::virtual_address::AlignedVirtualAddress::<{ L1::SHIFT }>::from_usize(0xC000_0000)
             .unwrap();
-    let phys_1g = AlignedPhysicalAddress::<{ L1::SHIFT }>::from_usize(0xC000_0000).expect("1G");
+    let region_phys = AlignedPhysicalAddress::<{ L1::SHIFT }>::from_usize(0xC000_0000).expect("1G");
     mapper
-        .map_page(virt_1g, phys_1g, user_rw())
+        .map_page(region_virt, region_phys, user_rw())
         .expect("1G map");
 
     let mut visitor = Counter::default();

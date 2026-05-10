@@ -278,7 +278,7 @@ Memory-вызовы дают процессу страницы памяти и c
 | Op | Имя | Аргументы | Возврат | Права |
 |---:|---|---|---|---|
 | `0x60` | `MemoryCreateVirtual` | `size_bytes`, `access_mask` | `region_h` | — |
-| `0x61` | `MemoryCreatePhysical` | `resource_h`, `pa`, `size_bytes`, `access_mask` | `region_h` | `MINT` на `PhysicalResource` |
+| `0x61` | `MemoryCreatePhysical` | `resource_h`, `pa`, `size_bytes`, `access_mask` | `region_h` | `MINT` на `PhysicalResource`; диапазон и доступ должны укладываться в ресурс |
 | `0x63` | `MemoryMap` | `region_h`, `size_bytes`, `flags` | `va` | `MAP` и нужный доступ |
 | `0x64` | `MemoryRemap` | `va`, `size_bytes`, `flags` | `0` | grant исходного mapping'а |
 | `0x65` | `MemoryAllocate` | `size_bytes`, `flags` | `va` | — |

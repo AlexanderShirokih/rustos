@@ -389,7 +389,7 @@ fn deallocate_pointer_below_arena_is_ignored() {
     let _ = heap
         .allocate(Layout::from_size_align(64, 8).unwrap())
         .unwrap();
-    let bogus = NonNull::new(0x1usize as *mut u8).unwrap();
+    let bogus = NonNull::<u8>::dangling();
     heap.deallocate(bogus); // не должен паниковать
 }
 

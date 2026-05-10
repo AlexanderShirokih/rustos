@@ -179,7 +179,9 @@ fn mailbox_async_subscribe_deliver_and_cancel() {
     let mb_arc = table.get_mailbox(mb_id, Rights::WRITE).unwrap();
     let target: Arc<dyn SignalSource> = event_arc.clone();
     let target_koid = KObject::Event(event_arc.clone()).koid();
-    mb_arc.subscribe(&target, target_koid, 1234, EVENT_SIGNALED, AsyncMode::Once);
+    mb_arc
+        .subscribe(&target, target_koid, 1234, EVENT_SIGNALED, AsyncMode::Once)
+        .unwrap();
 
     event.signal(EVENT_SIGNALED, 0);
 
@@ -225,13 +227,15 @@ fn mailbox_async_repeating_subscribe_and_cancel() {
     let mb_arc = table.get_mailbox(mb_id, Rights::WRITE).unwrap();
     let target: Arc<dyn SignalSource> = event_arc.clone();
     let target_koid = KObject::Event(event_arc.clone()).koid();
-    mb_arc.subscribe(
-        &target,
-        target_koid,
-        4242,
-        EVENT_SIGNALED,
-        AsyncMode::Repeating,
-    );
+    mb_arc
+        .subscribe(
+            &target,
+            target_koid,
+            4242,
+            EVENT_SIGNALED,
+            AsyncMode::Repeating,
+        )
+        .unwrap();
 
     event.signal(EVENT_SIGNALED, EVENT_SIGNALED);
     event.signal(EVENT_SIGNALED, EVENT_SIGNALED);

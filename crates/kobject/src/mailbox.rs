@@ -36,6 +36,9 @@ pub const MAILBOX_READABLE: u32 = 1 << 0;
 /// [`Mailbox::queue`] возвращает [`IpcError::ShouldWait`].
 pub const MAILBOX_QUEUE_CAPACITY: usize = 64;
 
+/// Максимальное число активных signal-подписок на один mailbox.
+pub const MAILBOX_OBSERVER_CAPACITY: usize = 64;
+
 /// Размер inline-payload в пакете (байт). Часть wire-формата: signal-
 /// пакет занимает первые 8 байт под `(trigger, observed)`, оставшиеся
 /// 8 - паддинг.
@@ -154,6 +157,8 @@ impl ObserverWaker {
         {
             return;
         }
+        #[cfg(test)]
+        test_hooks::run_wake_once_before_cleanup();
         let Some(mailbox) = self.mailbox.upgrade() else {
             return;
         };
@@ -251,7 +256,7 @@ impl MailboxInner {
             // Префиксная аллокация - push_back в hot path не делает realloc.
             queue: VecDeque::with_capacity(capacity),
             capacity,
-            observers: Vec::new(),
+            observers: Vec::with_capacity(MAILBOX_OBSERVER_CAPACITY),
         }
     }
 }
@@ -334,7 +339,24 @@ impl Mailbox {
         key: u64,
         mask: u32,
         mode: AsyncMode,
-    ) {
+    ) -> Result<(), IpcError> {
+        self.inner.with_lock(|inner| {
+            inner
+                .observers
+                .retain(|o| !o.waker.inactive.load(Ordering::Acquire));
+            if inner
+                .observers
+                .iter()
+                .any(|o| o.target_koid == target_koid && o.waker.key == key)
+            {
+                return Ok(());
+            }
+            if inner.observers.len() >= MAILBOX_OBSERVER_CAPACITY {
+                return Err(IpcError::OutOfHandles);
+            }
+            Ok(())
+        })?;
+
         let waker = Arc::new(ObserverWaker {
             key,
             mask,
@@ -344,15 +366,33 @@ impl Mailbox {
             inactive: AtomicBool::new(false),
         });
 
-        self.inner.with_lock(|inner| {
+        let inserted = self.inner.with_lock(|inner| {
+            inner
+                .observers
+                .retain(|o| !o.waker.inactive.load(Ordering::Acquire));
+            if inner
+                .observers
+                .iter()
+                .any(|o| o.target_koid == target_koid && o.waker.key == key)
+            {
+                return Ok(false);
+            }
+            if inner.observers.len() >= MAILBOX_OBSERVER_CAPACITY {
+                return Err(IpcError::OutOfHandles);
+            }
             inner.observers.push(Observer {
                 target_koid,
                 waker: waker.clone(),
             });
-        });
+            Ok(true)
+        })?;
 
-        let waker_dyn: Arc<dyn Waker> = waker;
-        target.signals().register_waiter(mask, waker_dyn);
+        if inserted {
+            let waker_dyn: Arc<dyn Waker> = waker;
+            target.signals().register_waiter(mask, waker_dyn);
+        }
+
+        Ok(())
     }
 
     /// Снимает подписку по `(target_koid, key)`. Идемпотентна: если
@@ -410,6 +450,47 @@ impl Drop for Mailbox {
                 let waker_dyn: Arc<dyn Waker> = obs.waker;
                 target.signals().remove_waiter(&waker_dyn);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_hooks {
+    use alloc::sync::Arc;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    type Hook = Arc<dyn Fn() + Send + Sync>;
+
+    fn test_lock() -> &'static Mutex<()> {
+        static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        TEST_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn wake_once_hook() -> &'static Mutex<Option<Hook>> {
+        static WAKE_ONCE_HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+        WAKE_ONCE_HOOK.get_or_init(|| Mutex::new(None))
+    }
+
+    pub(super) struct HookGuard {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            *wake_once_hook().lock().unwrap() = None;
+        }
+    }
+
+    pub(super) fn install_wake_once_before_cleanup(hook: Hook) -> HookGuard {
+        let lock = test_lock().lock().unwrap();
+        *wake_once_hook().lock().unwrap() = Some(hook);
+        HookGuard { _lock: lock }
+    }
+
+    pub(super) fn run_wake_once_before_cleanup() {
+        let hook = wake_once_hook().lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 }
@@ -601,7 +682,8 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 0xDEAD_BEEF, EVENT_SIGNALED, AsyncMode::Once);
+        mb.subscribe(&target, koid, 0xDEAD_BEEF, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
 
         assert!(mb.try_pop().is_err());
         ev.signal(EVENT_SIGNALED, 0);
@@ -620,7 +702,8 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once);
+        mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
 
         ev.signal(EVENT_SIGNALED, 0);
         mb.try_pop().expect("first delivery");
@@ -638,7 +721,8 @@ mod tests {
         let mb = Mailbox::new();
         let (a, b) = Channel::create_pair(4);
         let (target, koid) = target_channel(&b);
-        mb.subscribe(&target, koid, 7, CHANNEL_READABLE, AsyncMode::Once);
+        mb.subscribe(&target, koid, 7, CHANNEL_READABLE, AsyncMode::Once)
+            .unwrap();
 
         a.write(payload(b"hi")).unwrap();
         let pkt = mb.try_pop().expect("packet delivered");
@@ -651,7 +735,8 @@ mod tests {
         let mb = Mailbox::new();
         let (a, b) = Channel::create_pair(4);
         let (target, koid) = target_channel(&b);
-        mb.subscribe(&target, koid, 9, CHANNEL_PEER_CLOSED, AsyncMode::Once);
+        mb.subscribe(&target, koid, 9, CHANNEL_PEER_CLOSED, AsyncMode::Once)
+            .unwrap();
 
         drop(a);
         let pkt = mb.try_pop().expect("packet delivered");
@@ -663,7 +748,8 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once);
+        mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
         mb.cancel_subscription(koid, 1);
 
         ev.signal(EVENT_SIGNALED, 0);
@@ -684,7 +770,8 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once);
+        mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
         drop(target);
         drop(ev);
 
@@ -699,7 +786,8 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once);
+        mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
         drop(target);
         drop(ev);
 
@@ -716,9 +804,12 @@ mod tests {
         let (t1, k1) = target_event(&ev1);
         let (t2, k2) = target_event(&ev2);
         let (t3, k3) = target_event(&ev3);
-        mb.subscribe(&t1, k1, 100, EVENT_SIGNALED, AsyncMode::Once);
-        mb.subscribe(&t2, k2, 200, EVENT_SIGNALED, AsyncMode::Once);
-        mb.subscribe(&t3, k3, 300, EVENT_SIGNALED, AsyncMode::Once);
+        mb.subscribe(&t1, k1, 100, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
+        mb.subscribe(&t2, k2, 200, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
+        mb.subscribe(&t3, k3, 300, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
 
         ev2.signal(EVENT_SIGNALED, 0);
         ev1.signal(EVENT_SIGNALED, 0);
@@ -733,6 +824,103 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_subscription_is_idempotent() {
+        let mb = Mailbox::new();
+        let ev = Event::new();
+        let (target, koid) = target_event(&ev);
+
+        mb.subscribe(&target, koid, 7, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
+        mb.subscribe(&target, koid, 7, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
+
+        let observer_len = mb.inner.with_lock(|inner| inner.observers.len());
+        assert_eq!(observer_len, 1);
+
+        ev.signal(EVENT_SIGNALED, 0);
+        let packet = mb.try_pop().unwrap();
+        assert_eq!(packet.key, 7);
+        assert_eq!(packet.kind, MailboxPacketKind::SignalOnce);
+        assert_eq!(mb.try_pop().unwrap_err(), IpcError::ShouldWait);
+    }
+
+    #[test]
+    fn resubscribe_during_once_delivery_gets_its_own_packet() {
+        use std::{
+            sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+            sync::{Arc, Barrier},
+            thread,
+        };
+
+        let mb = Mailbox::new();
+        let ev = Event::new();
+        let (target, koid) = target_event(&ev);
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let first_delivery = Arc::new(AtomicBool::new(true));
+        let entered_hook = entered.clone();
+        let release_hook = release.clone();
+        let first_delivery_hook = first_delivery.clone();
+        let _hook_guard = super::test_hooks::install_wake_once_before_cleanup(Arc::new(
+            move || {
+                if first_delivery_hook.swap(false, AtomicOrdering::AcqRel) {
+                    entered_hook.wait();
+                    release_hook.wait();
+                }
+            },
+        ));
+
+        mb.subscribe(&target, koid, 7, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
+
+        let ev_for_signal = ev.clone();
+        let signaller = thread::spawn(move || {
+            ev_for_signal.signal(EVENT_SIGNALED, 0);
+        });
+
+        entered.wait();
+
+        mb.subscribe(&target, koid, 7, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
+
+        release.wait();
+        signaller.join().unwrap();
+
+        let packet_a = mb.try_pop().unwrap();
+        let packet_b = mb.try_pop().unwrap();
+        let packets = [(packet_a.key, packet_a.kind), (packet_b.key, packet_b.kind)];
+        assert!(packets.contains(&(7, MailboxPacketKind::SignalOnce)));
+        assert!(packets.iter().all(|&(key, kind)| key == 7 && kind == MailboxPacketKind::SignalOnce));
+        assert_eq!(mb.try_pop().unwrap_err(), IpcError::ShouldWait);
+    }
+
+    #[test]
+    fn subscription_limit_returns_out_of_handles() {
+        let mb = Mailbox::new();
+        let ev = Event::new();
+        let (target, koid) = target_event(&ev);
+
+        for key in 0..MAILBOX_OBSERVER_CAPACITY as u64 {
+            mb.subscribe(&target, koid, key, EVENT_SIGNALED, AsyncMode::Once)
+                .unwrap();
+        }
+
+        assert_eq!(
+            mb.subscribe(
+                &target,
+                koid,
+                MAILBOX_OBSERVER_CAPACITY as u64,
+                EVENT_SIGNALED,
+                AsyncMode::Once,
+            )
+            .unwrap_err(),
+            IpcError::OutOfHandles
+        );
+        let observer_len = mb.inner.with_lock(|inner| inner.observers.len());
+        assert_eq!(observer_len, MAILBOX_OBSERVER_CAPACITY);
+    }
+
+    #[test]
     fn overflow_drops_signal_packet_and_increments_counter() {
         let mb = Mailbox::new();
         for i in 0..MAILBOX_QUEUE_CAPACITY as u64 {
@@ -743,7 +931,8 @@ mod tests {
 
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 555, EVENT_SIGNALED, AsyncMode::Once);
+        mb.subscribe(&target, koid, 555, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
         ev.signal(EVENT_SIGNALED, 0);
 
         // Очередь не выросла, overflow счётчик +1.
@@ -762,7 +951,8 @@ mod tests {
             let mb = Mailbox::new();
             let ev = Event::new();
             let (target, koid) = target_event(&ev);
-            mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once);
+            mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once)
+                .unwrap();
 
             let barrier = Arc::new(Barrier::new(2));
 
@@ -819,7 +1009,8 @@ mod tests {
         // пакет (тот же лок, что внешний subscribe отпускает на
         // момент register_waiter).
         let (target, koid) = target_mailbox(&mb);
-        mb.subscribe(&target, koid, 42, MAILBOX_READABLE, AsyncMode::Once);
+        mb.subscribe(&target, koid, 42, MAILBOX_READABLE, AsyncMode::Once)
+            .unwrap();
 
         // В очереди: user(1), signal(42).
         let p1 = mb.try_pop().unwrap();
@@ -839,7 +1030,8 @@ mod tests {
         {
             let mb = Mailbox::new();
             let (target, koid) = target_event(&ev);
-            mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once);
+            mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Once)
+                .unwrap();
             // mb уходит в drop здесь.
         }
         ev.signal(EVENT_SIGNALED, 0);
@@ -850,7 +1042,8 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 7, EVENT_SIGNALED, AsyncMode::Repeating);
+        mb.subscribe(&target, koid, 7, EVENT_SIGNALED, AsyncMode::Repeating)
+            .unwrap();
 
         ev.signal(EVENT_SIGNALED, EVENT_SIGNALED);
         ev.signal(EVENT_SIGNALED, EVENT_SIGNALED);
@@ -869,7 +1062,8 @@ mod tests {
         let mb = Mailbox::new();
         let (a, b) = Channel::create_pair(8);
         let (target, koid) = target_channel(&b);
-        mb.subscribe(&target, koid, 11, CHANNEL_READABLE, AsyncMode::Repeating);
+        mb.subscribe(&target, koid, 11, CHANNEL_READABLE, AsyncMode::Repeating)
+            .unwrap();
 
         for i in 0u8..3 {
             a.write(payload(&[i])).unwrap();
@@ -890,7 +1084,8 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 5, EVENT_SIGNALED, AsyncMode::Repeating);
+        mb.subscribe(&target, koid, 5, EVENT_SIGNALED, AsyncMode::Repeating)
+            .unwrap();
 
         ev.signal(EVENT_SIGNALED, EVENT_SIGNALED);
         let p1 = mb.try_pop().expect("first packet");
@@ -907,7 +1102,8 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 3, EVENT_SIGNALED, AsyncMode::Repeating);
+        mb.subscribe(&target, koid, 3, EVENT_SIGNALED, AsyncMode::Repeating)
+            .unwrap();
 
         ev.signal(EVENT_SIGNALED, EVENT_SIGNALED);
         mb.try_pop().expect("first delivery");
@@ -923,7 +1119,8 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 4, EVENT_SIGNALED, AsyncMode::Repeating);
+        mb.subscribe(&target, koid, 4, EVENT_SIGNALED, AsyncMode::Repeating)
+            .unwrap();
 
         ev.signal(EVENT_SIGNALED, EVENT_SIGNALED);
         let p1 = mb.try_pop().expect("first packet");
@@ -950,7 +1147,8 @@ mod tests {
 
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 777, EVENT_SIGNALED, AsyncMode::Repeating);
+        mb.subscribe(&target, koid, 777, EVENT_SIGNALED, AsyncMode::Repeating)
+            .unwrap();
 
         ev.signal(EVENT_SIGNALED, EVENT_SIGNALED);
         assert_eq!(mb.overflow_count(), 1);
@@ -985,8 +1183,10 @@ mod tests {
         let mb = Mailbox::new();
         let ev = Event::new();
         let (target, koid) = target_event(&ev);
-        mb.subscribe(&target, koid, 100, EVENT_SIGNALED, AsyncMode::Once);
-        mb.subscribe(&target, koid, 200, EVENT_SIGNALED, AsyncMode::Repeating);
+        mb.subscribe(&target, koid, 100, EVENT_SIGNALED, AsyncMode::Once)
+            .unwrap();
+        mb.subscribe(&target, koid, 200, EVENT_SIGNALED, AsyncMode::Repeating)
+            .unwrap();
 
         ev.signal(EVENT_SIGNALED, EVENT_SIGNALED);
 
@@ -1014,7 +1214,8 @@ mod tests {
             let mb = Mailbox::new();
             let ev = Event::new();
             let (target, koid) = target_event(&ev);
-            mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Repeating);
+            mb.subscribe(&target, koid, 1, EVENT_SIGNALED, AsyncMode::Repeating)
+                .unwrap();
 
             let barrier = Arc::new(Barrier::new(2));
 

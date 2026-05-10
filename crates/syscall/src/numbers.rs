@@ -147,6 +147,7 @@ pub enum SyscallOp {
     /// Создаёт `KObject::Memory` с Physical backing. Аргументы:
     /// `arg0=resource_handle` на [`PhysicalResource`] (требует
     /// [`Rights::MINT`]), `arg1=pa`, `arg2=size_bytes`, `arg3=access_mask`.
+    /// Диапазон и доступ должны укладываться в границы ресурса.
     /// Возвращает `region_handle`.
     ///
     /// [`PhysicalResource`]: kobject::PhysicalResource

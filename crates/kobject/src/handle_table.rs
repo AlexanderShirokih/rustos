@@ -651,9 +651,17 @@ mod tests {
 
     #[test]
     fn get_physical_resource_type_checks() {
+        use core::num::NonZeroUsize;
+
+        use memory::{AccessMask, physical_address::PageAlignedAddress};
+
         use super::super::physical_resource::PhysicalResource;
 
-        let resource = PhysicalResource::new();
+        let resource = PhysicalResource::new(
+            PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
+            NonZeroUsize::new(4096).unwrap(),
+            AccessMask::RW,
+        );
         let mut table = HandleTable::new();
         let res_rights = Rights::MINT | Rights::WAIT;
         let res_id = table

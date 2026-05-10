@@ -130,10 +130,10 @@ pub fn sys_memory_create_virtual(size_bytes: u64, access_raw: u64) -> Result<u64
 
 /// `memory_create_physical(resource_handle, pa, size_bytes, access_mask) -> region_handle`
 ///
-/// Минтит регион поверх фиксированного PA-диапазона. Требует handle на
-/// [`PhysicalResource`](kobject::PhysicalResource) с правом
-/// [`Rights::MINT`]. Регион не владеет физикой и на drop ничего не
-/// возвращает; PA должен быть page-aligned.
+/// Минтит регион поверх поддиапазона [`PhysicalResource`](kobject::PhysicalResource).
+/// Требует [`Rights::MINT`] и не позволяет выйти за границы ресурса или
+/// превысить его маску доступа. Регион не владеет физикой и на drop ничего
+/// не возвращает; PA должен быть page-aligned.
 pub fn sys_memory_create_physical(
     resource_h: u64,
     pa_raw: u64,
@@ -149,7 +149,10 @@ pub fn sys_memory_create_physical(
     let table = kobject::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let _resource = table.with_lock(|tbl| tbl.get_physical_resource(resource_id, Rights::MINT))?;
+    let resource = table.with_lock(|tbl| tbl.get_physical_resource(resource_id, Rights::MINT))?;
+    if !resource.permits(pa, size, access) {
+        return Err(SyscallError::AccessDenied);
+    }
 
     let region = MemoryRegion::create_physical(pa, size, access);
     let region_arc = Arc::new(region);
@@ -571,15 +574,15 @@ mod tests {
     #[test]
     fn parse_access_mask_recognizes_canonical_combinations() {
         assert_eq!(
-            parse_access_mask(AccessMask::R.bits() as u64).map(|m| m.bits()),
+            parse_access_mask(u64::from(AccessMask::R.bits())).map(AccessMask::bits),
             Ok(AccessMask::R.bits())
         );
         assert_eq!(
-            parse_access_mask(AccessMask::RW.bits() as u64).map(|m| m.bits()),
+            parse_access_mask(u64::from(AccessMask::RW.bits())).map(AccessMask::bits),
             Ok(AccessMask::RW.bits())
         );
         assert_eq!(
-            parse_access_mask(AccessMask::RX.bits() as u64).map(|m| m.bits()),
+            parse_access_mask(u64::from(AccessMask::RX.bits())).map(AccessMask::bits),
             Ok(AccessMask::RX.bits())
         );
     }

@@ -419,8 +419,7 @@ pub fn mailbox_wait_async(
         .ok_or(IpcError::BadHandle)?;
     let mb = table.with_lock(|tbl| tbl.get_mailbox(mailbox, Rights::WRITE))?;
     let (source, koid) = target_signal_source(target)?;
-    mb.subscribe(&source, koid, key, mask, mode);
-    Ok(())
+    mb.subscribe(&source, koid, key, mask, mode)
 }
 
 /// Отзывает подписку, ранее зарегистрированную через
@@ -600,7 +599,8 @@ mod tests {
 
     fn test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn install_event_handle(rights: Rights) -> (Arc<MutexCell<HandleTable>>, HandleId, Arc<Event>) {

@@ -319,10 +319,10 @@ mod tests {
             size: usize,
             _mem_flags: MemFlags,
         ) -> Result<(), MemoryMappingError> {
-            if let Some(limit) = *self.fail_after.lock().unwrap() {
-                if self.mapped.lock().unwrap().len() >= limit {
-                    return Err(MemoryMappingError::OutOfMemory);
-                }
+            if let Some(limit) = *self.fail_after.lock().unwrap()
+                && self.mapped.lock().unwrap().len() >= limit
+            {
+                return Err(MemoryMappingError::OutOfMemory);
             }
             self.mapped.lock().unwrap().push((
                 source_address.as_usize(),
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(region.kind_tag(), 1);
         let allocated_frames: StdVec<Frame> = match &region.backing {
             MemoryBacking::Virtual { frames, .. } => frames.clone(),
-            _ => panic!("expected Virtual"),
+            MemoryBacking::Physical { .. } => panic!("expected Virtual"),
         };
         assert_eq!(fa.deallocated().len(), 0);
         drop(region);

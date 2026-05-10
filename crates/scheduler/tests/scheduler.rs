@@ -1,6 +1,9 @@
 mod common;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    panic,
+    sync::{Arc, Mutex, Once, OnceLock, RwLock},
+};
 
 use scheduler::{
     Priority, Scheduler, SchedulerConfig, SpawnAddressSpace, SpawnConfig, SpawnError,
@@ -17,6 +20,112 @@ type SmallScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
 
 const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 16);
 const SMALL_CONFIG: SchedulerConfig = SchedulerConfig::new(4, 8);
+
+struct ForwardingRuntime {
+    inner: RwLock<Option<Arc<dyn kobject::KernelRuntime>>>,
+}
+
+impl ForwardingRuntime {
+    fn set(&self, rt: Arc<dyn kobject::KernelRuntime>) {
+        *self.inner.write().unwrap() = Some(rt);
+    }
+
+    fn clear(&self) {
+        *self.inner.write().unwrap() = None;
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&dyn kobject::KernelRuntime) -> R) -> R {
+        let guard = self.inner.read().unwrap();
+        let rt = guard
+            .as_ref()
+            .expect("ForwardingRuntime: inner runtime not set");
+        f(rt.as_ref())
+    }
+}
+
+impl kobject::KernelRuntime for ForwardingRuntime {
+    fn current_wait_token(&self) -> kobject::WaitToken {
+        self.with(|rt| rt.current_wait_token())
+    }
+
+    fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<kobject::HandleTable>>> {
+        self.with(|rt| rt.current_handle_table())
+    }
+
+    fn current_thread_object(&self) -> Option<Arc<kobject::ThreadObject>> {
+        self.with(|rt| rt.current_thread_object())
+    }
+
+    fn current_process_object(&self) -> Option<Arc<kobject::ProcessObject>> {
+        self.with(|rt| rt.current_process_object())
+    }
+
+    fn exit_current_thread(&self, exit_code: i32) -> ! {
+        self.with(|rt| rt.exit_current_thread(exit_code))
+    }
+
+    fn block_current_until(
+        &self,
+        ready_flag: &core::sync::atomic::AtomicU32,
+        timeout_ns: Option<u64>,
+    ) {
+        self.with(|rt| rt.block_current_until(ready_flag, timeout_ns));
+    }
+
+    fn unblock(&self, token: kobject::WaitToken) {
+        self.with(|rt| rt.unblock(token));
+    }
+
+    fn create_empty_process(
+        &self,
+        name: &'static str,
+    ) -> Result<Arc<kobject::ProcessObject>, kobject::SpawnError> {
+        self.with(|rt| rt.create_empty_process(name))
+    }
+
+    fn create_user_thread(
+        &self,
+        process: &Arc<kobject::ProcessObject>,
+        entry: kobject::UserThreadEntry,
+    ) -> Result<Arc<kobject::ThreadObject>, kobject::SpawnError> {
+        self.with(|rt| rt.create_user_thread(process, entry))
+    }
+
+    fn terminate_thread(
+        &self,
+        thread: &Arc<kobject::ThreadObject>,
+        exit_code: i32,
+    ) -> Result<(), kobject::IpcError> {
+        self.with(|rt| rt.terminate_thread(thread, exit_code))
+    }
+
+    fn terminate_process(
+        &self,
+        process: &Arc<kobject::ProcessObject>,
+        exit_code: i32,
+    ) -> Result<(), kobject::IpcError> {
+        self.with(|rt| rt.terminate_process(process, exit_code))
+    }
+}
+
+fn install_forwarding_runtime() -> Arc<ForwardingRuntime> {
+    static FORWARDER: OnceLock<Arc<ForwardingRuntime>> = OnceLock::new();
+    static INSTALLED: Once = Once::new();
+
+    let _ = kobject::ParkState::REGISTERED;
+    let forwarder = FORWARDER
+        .get_or_init(|| {
+            Arc::new(ForwardingRuntime {
+                inner: RwLock::new(None),
+            })
+        })
+        .clone();
+    INSTALLED.call_once(|| {
+        let dyn_rt: Arc<dyn kobject::KernelRuntime> = forwarder.clone();
+        kobject::install_runtime(dyn_rt);
+    });
+    forwarder
+}
 
 #[test]
 fn run_starts_highest_priority_thread() {
@@ -589,120 +698,9 @@ fn current_process_object_returns_running_process_ko() {
 
 #[test]
 fn kernel_thread_completion_signals_terminated() {
-    use std::{
-        panic,
-        sync::{Once, OnceLock, RwLock},
-    };
+    use kobject::THREAD_TERMINATED;
 
-    use kobject::{
-        IpcError, KernelRuntime, ParkState, ProcessObject, SpawnError, THREAD_TERMINATED,
-        ThreadObject, UserThreadEntry, WaitToken,
-    };
-
-    struct ForwardingRuntime {
-        inner: RwLock<Option<Arc<dyn KernelRuntime>>>,
-    }
-
-    impl ForwardingRuntime {
-        fn set(&self, rt: Arc<dyn KernelRuntime>) {
-            *self.inner.write().unwrap() = Some(rt);
-        }
-
-        fn clear(&self) {
-            *self.inner.write().unwrap() = None;
-        }
-
-        fn with<R>(&self, f: impl FnOnce(&dyn KernelRuntime) -> R) -> R {
-            let guard = self.inner.read().unwrap();
-            let rt = guard
-                .as_ref()
-                .expect("ForwardingRuntime: inner runtime not set");
-            f(rt.as_ref())
-        }
-    }
-
-    impl KernelRuntime for ForwardingRuntime {
-        fn current_wait_token(&self) -> WaitToken {
-            self.with(|rt| rt.current_wait_token())
-        }
-
-        fn current_handle_table(
-            &self,
-        ) -> Option<Arc<collections::MutexCell<kobject::HandleTable>>> {
-            self.with(|rt| rt.current_handle_table())
-        }
-
-        fn current_thread_object(&self) -> Option<Arc<kobject::ThreadObject>> {
-            self.with(|rt| rt.current_thread_object())
-        }
-
-        fn current_process_object(&self) -> Option<Arc<kobject::ProcessObject>> {
-            self.with(|rt| rt.current_process_object())
-        }
-
-        fn exit_current_thread(&self, exit_code: i32) -> ! {
-            self.with(|rt| rt.exit_current_thread(exit_code))
-        }
-
-        fn block_current_until(
-            &self,
-            ready_flag: &core::sync::atomic::AtomicU32,
-            timeout_ns: Option<u64>,
-        ) {
-            self.with(|rt| rt.block_current_until(ready_flag, timeout_ns));
-        }
-
-        fn unblock(&self, token: WaitToken) {
-            self.with(|rt| rt.unblock(token));
-        }
-
-        fn create_empty_process(
-            &self,
-            name: &'static str,
-        ) -> Result<Arc<ProcessObject>, SpawnError> {
-            self.with(|rt| rt.create_empty_process(name))
-        }
-
-        fn create_user_thread(
-            &self,
-            process: &Arc<ProcessObject>,
-            entry: UserThreadEntry,
-        ) -> Result<Arc<ThreadObject>, SpawnError> {
-            self.with(|rt| rt.create_user_thread(process, entry))
-        }
-
-        fn terminate_thread(
-            &self,
-            thread: &Arc<ThreadObject>,
-            exit_code: i32,
-        ) -> Result<(), IpcError> {
-            self.with(|rt| rt.terminate_thread(thread, exit_code))
-        }
-
-        fn terminate_process(
-            &self,
-            process: &Arc<ProcessObject>,
-            exit_code: i32,
-        ) -> Result<(), IpcError> {
-            self.with(|rt| rt.terminate_process(process, exit_code))
-        }
-    }
-
-    static FORWARDER: OnceLock<Arc<ForwardingRuntime>> = OnceLock::new();
-    static INSTALLED: Once = Once::new();
-    let _ = ParkState::REGISTERED;
-
-    let forwarder = FORWARDER
-        .get_or_init(|| {
-            Arc::new(ForwardingRuntime {
-                inner: RwLock::new(None),
-            })
-        })
-        .clone();
-    INSTALLED.call_once(|| {
-        let dyn_rt: Arc<dyn KernelRuntime> = forwarder.clone();
-        kobject::install_runtime(dyn_rt);
-    });
+    let forwarder = install_forwarding_runtime();
 
     reset_switches();
     let timer = MockTimer::new();
