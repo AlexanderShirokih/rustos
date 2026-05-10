@@ -29,21 +29,16 @@ pub struct UserThreadEntry {
     pub priority: u8,
 }
 
-/// Состояния парковки потока, ожидающего сигнала на KO.
-///
-/// `AtomicU32` атомарно сериализует исход гонки между signal-стороной
-/// (поднимает [`Self::SIGNALED`]) и timeout/cancel-стороной (поднимает
-/// [`Self::TIMEOUT`]). Только победитель CAS реально что-то делает -
-/// проигравший заметит `state != REGISTERED` и тихо возвращается.
+/// Состояния парковки потока, ожидающего сигнала на KO. CAS на
+/// `AtomicU32` сериализует гонку signal/timeout/cancel - публикует
+/// исход ровно один победитель.
 pub struct ParkState;
 
 impl ParkState {
-    /// Waker зарегистрирован, ни сигнал, ни timeout ещё не сработали.
     pub const REGISTERED: u32 = 0;
-    /// Waker отработал по сигналу: ожидающий поток получит маску.
     pub const SIGNALED: u32 = 1;
-    /// Истёк timeout либо waiter отозван - следующий wake() - no-op.
     pub const TIMEOUT: u32 = 2;
+    pub const CANCELED: u32 = 3;
 }
 
 /// Opaque token текущего execution context для wait/wake-пути.

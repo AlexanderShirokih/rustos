@@ -49,6 +49,9 @@ pub enum SyscallError {
     /// Регион не найден в реестре user-VM текущего процесса (например,
     /// `vm_remap` на не-выделенный VA-диапазон).
     NotFound = 14,
+    /// Wait отменён: handle, на котором было зарегистрировано ожидание,
+    /// был закрыт или передан другому процессу до прихода сигнала.
+    Canceled = 15,
 }
 
 impl SyscallError {
@@ -70,6 +73,7 @@ impl From<IpcError> for SyscallError {
             IpcError::BufferTooSmall => Self::BufferTooSmall,
             IpcError::MessageTooBig => Self::MessageTooBig,
             IpcError::OutOfHandles => Self::OutOfHandles,
+            IpcError::Canceled => Self::Canceled,
         }
     }
 }
@@ -108,6 +112,10 @@ mod tests {
 
     #[test]
     fn ipc_error_maps_to_syscall_error() {
+        assert_eq!(
+            SyscallError::from(IpcError::Canceled),
+            SyscallError::Canceled
+        );
         assert_eq!(
             SyscallError::from(IpcError::BadHandle),
             SyscallError::BadHandle
@@ -160,6 +168,7 @@ mod tests {
             SyscallError::OutOfHandles,
             SyscallError::OutOfMemory,
             SyscallError::NotFound,
+            SyscallError::Canceled,
         ];
         for &e in &codes {
             let v: i64 = e.into();
@@ -167,7 +176,7 @@ mod tests {
             assert!(v >= -i64::from(u32::MAX), "{e:?} out of range");
         }
         // Все коды разные.
-        let mut seen = [0_i64; 14];
+        let mut seen = [0_i64; 15];
         for (i, &e) in codes.iter().enumerate() {
             seen[i] = e.into();
         }
@@ -200,6 +209,7 @@ mod tests {
             SyscallError::OutOfHandles,
             SyscallError::OutOfMemory,
             SyscallError::NotFound,
+            SyscallError::Canceled,
         ];
         for &e in &codes {
             assert_ne!(i64::from(e), 0);

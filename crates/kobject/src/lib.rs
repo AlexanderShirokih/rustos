@@ -28,10 +28,10 @@ mod thread;
 mod wait;
 
 pub use api::{
-    channel_create, channel_read, channel_write, create_empty_process, create_user_thread,
-    handle_close, handle_duplicate, install_handle, mailbox_cancel, mailbox_create, mailbox_queue,
-    mailbox_wait, mailbox_wait_async, object_signal, object_wait_one, terminate_process,
-    terminate_thread, thread_exit,
+    WaitManyOutcome, channel_create, channel_read, channel_write, create_empty_process,
+    create_user_thread, handle_close, handle_duplicate, install_handle, mailbox_cancel,
+    mailbox_create, mailbox_queue, mailbox_wait, mailbox_wait_async, object_signal,
+    object_wait_many, object_wait_one, terminate_process, terminate_thread, thread_exit,
 };
 pub use channel::{
     CHANNEL_PEER_CLOSED, CHANNEL_READABLE, CHANNEL_WRITABLE, Channel, DEFAULT_CHANNEL_CAPACITY,
@@ -52,7 +52,7 @@ pub use process::{PROCESS_TERMINATED, ProcessObject};
 pub use rights::Rights;
 pub use runtime::{KernelRuntime, ParkState, UserThreadEntry, WaitToken, install_runtime, runtime};
 pub use thread::{THREAD_TERMINATED, ThreadObject};
-pub use wait::{SignalSource, SignalState, Waker};
+pub use wait::{CancelTarget, SignalSource, SignalState, Waker};
 
 #[cfg(test)]
 mod integration_tests;

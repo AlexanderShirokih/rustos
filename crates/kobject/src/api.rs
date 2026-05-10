@@ -3,7 +3,7 @@
 //! к per-process `HandleTable` и scheduler-у. Никакой `KObject` наружу
 //! не утекает.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use collections::LockCell;
 
@@ -18,7 +18,7 @@ use super::{
     rights::Rights,
     runtime::{ParkState, UserThreadEntry, runtime},
     thread::ThreadObject,
-    wait::{ParkWaker, SignalSource, SignalState, Waker},
+    wait::{CancelTarget, IndexedWaker, ParkWaker, SignalSource, SignalState, Waker},
 };
 
 /// Устанавливает [`Handle`] в handle-table текущего процесса и
@@ -43,89 +43,196 @@ pub fn object_signal(handle_id: HandleId, set: u32, clear: u32) -> Result<(), Ip
     Ok(())
 }
 
-/// Блокирует current thread до тех пор, пока в `signal_state` не
-/// поднимется хотя бы один бит из `mask`. Возвращает наблюдённую
-/// маску сигналов (пересечение `observed & mask`).
-///
-/// Совместно используется [`object_wait_one`] и [`mailbox_wait`]:
-/// первый - для KO-универсального wait, второй - в цикле перед
-/// [`Mailbox::try_pop`]. Регистрирует [`ParkWaker`], паркует поток,
-/// разрешает гонку signal/timeout через CAS на [`ParkState`].
-///
-/// `timeout_ns = Some(0)` - non-blocking poll: возвращает уже
-/// набранную маску, иначе [`IpcError::Timeout`].
+/// Блокирует поток до появления хотя бы одного бита из `mask`.
+/// Возвращает observed-маску. `timeout_ns = Some(0)` - non-blocking
+/// poll. Без cancel-target'а: используется только `mailbox_wait`,
+/// чьё ожидание привязано к жизни Mailbox-а.
 fn wait_until(
     signal_state: &SignalState,
     mask: u32,
     timeout_ns: Option<u64>,
 ) -> Result<u32, IpcError> {
-    // Fast-path: уже сигналит.
     let already = signal_state.peek() & mask;
     if already != 0 {
         return Ok(already);
     }
-
-    // Non-blocking poll: не регистрируем waiter и не паркуем поток -
-    // иначе block_current_until уйдёт в context switch на дедлайне now+0.
     if timeout_ns == Some(0) {
         return Err(IpcError::Timeout);
     }
 
     let runtime = runtime();
     let token = runtime.current_wait_token();
-    let waker_arc = Arc::new(ParkWaker::new(runtime.clone(), token));
-    let waker_dyn: Arc<dyn Waker> = waker_arc.clone();
+    let waker = Arc::new(ParkWaker::new(runtime.clone(), token));
+    let waker_dyn: Arc<dyn Waker> = waker.clone();
 
     signal_state.register_waiter(mask, waker_dyn.clone());
+    runtime.block_current_until(waker.state(), timeout_ns);
 
-    // register_waiter под своим локом мог уже вызвать wake() (если
-    // signal-биты были выставлены): тогда state == SIGNALED - и
-    // block_current_until сразу вернётся, не паркуя поток.
-    runtime.block_current_until(waker_arc.state(), timeout_ns);
-
-    // Поток возобновился: либо по signal-стороне (state SIGNALED), либо
-    // по timeout-стороне (state ещё REGISTERED - сонник снял с
-    // SleepQueue). Закрываем гонку через CAS.
-    match waker_arc
-        .state()
-        .load(core::sync::atomic::Ordering::Acquire)
-    {
-        ParkState::SIGNALED => Ok(waker_arc.observed() & mask),
-        _ => {
-            if waker_arc.claim_timeout() {
-                // Снимаем waker'а из списка, чтобы поздний signal не
-                // зацепил уже отпущенный поток.
-                signal_state.remove_waiter(&waker_dyn);
-                Err(IpcError::Timeout)
-            } else {
-                // Signal победил между нашей загрузкой state и CAS -
-                // используем его наблюдение.
-                Ok(waker_arc.observed() & mask)
-            }
-        }
-    }
+    let result = match resolve_wait(&waker) {
+        WaitResolution::Signaled => Ok(waker.observed() & mask),
+        WaitResolution::Timeout => Err(IpcError::Timeout),
+        WaitResolution::Canceled => unreachable!("wait_until does not register cancel target"),
+    };
+    signal_state.remove_waiter(&waker_dyn);
+    result
 }
 
 /// Ждёт пока на KO, к которому относится `handle_id`, не поднимется
-/// хотя бы один бит из `signals`. Возвращает наблюдённую маску
-/// сигналов. На `timeout_ns = Some(0)` - полу-non-blocking poll.
-///
-/// - `BadHandle` / `AccessDenied`: проблемы с handle (право `WAIT`).
-/// - `WrongType`: KO не сигнализуем (например, Process в текущей фазе).
-/// - `Timeout`: истёк дедлайн до сигнала.
+/// хотя бы один бит из `signals`. На `timeout_ns = Some(0)` - poll.
+/// `Canceled` - handle закрыт или передан до сигнала.
 pub fn object_wait_one(
     handle_id: HandleId,
     signals: u32,
     timeout_ns: Option<u64>,
 ) -> Result<u32, IpcError> {
+    let outcome = object_wait_many(&[(handle_id, signals)], timeout_ns)?;
+    Ok(outcome.observed)
+}
+
+/// Исход [`object_wait_many`]: индекс сработавшего item'а в `items`
+/// и observed-маска на нём (пересечение с переданной маской).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitManyOutcome {
+    pub index: usize,
+    pub observed: u32,
+}
+
+enum WaitSetup {
+    Observed(WaitManyOutcome),
+    Wait {
+        objects: Vec<KObject>,
+        waker: Arc<ParkWaker>,
+        indexed_wakers: Vec<Arc<IndexedWaker>>,
+    },
+}
+
+enum WaitResolution {
+    Signaled,
+    Timeout,
+    Canceled,
+}
+
+/// Ждёт пока хотя бы на одном из `items` не поднимется бит из его
+/// маски. Дубликаты `HandleId` допустимы. На `timeout_ns = Some(0)` -
+/// poll. `Canceled` - один из handle'ов закрыт или передан до сигнала.
+pub fn object_wait_many(
+    items: &[(HandleId, u32)],
+    timeout_ns: Option<u64>,
+) -> Result<WaitManyOutcome, IpcError> {
+    if items.is_empty() {
+        return Err(IpcError::BadHandle);
+    }
+
     let runtime = runtime();
     let table = runtime.current_handle_table().ok_or(IpcError::BadHandle)?;
 
-    // Берём KObject под локом таблицы и сразу отпускаем лок.
-    let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::WAIT))?;
-    let signal_state = object.signals().ok_or(IpcError::WrongType)?;
+    // Setup под табличным локом: handle_close, racing с регистрацией,
+    // либо отработает до нас (и мы вернём BadHandle), либо после
+    // (и сработает cancel).
+    let (objects, waker, indexed_wakers) =
+        match table.with_lock(|tbl| wait_many_setup(tbl, runtime, items, timeout_ns))? {
+            WaitSetup::Observed(out) => return Ok(out),
+            WaitSetup::Wait {
+                objects,
+                waker,
+                indexed_wakers,
+            } => (objects, waker, indexed_wakers),
+        };
 
-    wait_until(signal_state, signals, timeout_ns)
+    runtime.block_current_until(waker.state(), timeout_ns);
+
+    let result = match resolve_wait(&waker) {
+        WaitResolution::Signaled => Ok(WaitManyOutcome {
+            index: waker.winner_index() as usize,
+            observed: waker.observed(),
+        }),
+        WaitResolution::Timeout => Err(IpcError::Timeout),
+        WaitResolution::Canceled => Err(IpcError::Canceled),
+    };
+
+    // Cleanup идемпотентен: запись могла быть уже удалена signal/cancel-стороной.
+    for (obj, indexed) in objects.iter().zip(indexed_wakers.iter()) {
+        if let Some(ss) = obj.signals() {
+            let dyn_waker: Arc<dyn Waker> = indexed.clone();
+            ss.remove_waiter(&dyn_waker);
+        }
+    }
+    let cancel: Arc<dyn CancelTarget> = waker;
+    table.with_lock(|tbl| {
+        for &(h, _) in items {
+            tbl.unregister_cancel(h, &cancel);
+        }
+    });
+
+    result
+}
+
+fn wait_many_setup(
+    tbl: &mut crate::HandleTable,
+    runtime: &Arc<dyn crate::KernelRuntime>,
+    items: &[(HandleId, u32)],
+    timeout_ns: Option<u64>,
+) -> Result<WaitSetup, IpcError> {
+    let mut objects: Vec<KObject> = Vec::with_capacity(items.len());
+    for &(h, _mask) in items {
+        let obj = tbl.clone_object(h, Rights::WAIT)?;
+        obj.signals().ok_or(IpcError::WrongType)?;
+        objects.push(obj);
+    }
+
+    for (i, (obj, &(_h, mask))) in objects.iter().zip(items.iter()).enumerate() {
+        let already = obj.signals().expect("validated above").peek() & mask;
+        if already != 0 {
+            return Ok(WaitSetup::Observed(WaitManyOutcome {
+                index: i,
+                observed: already,
+            }));
+        }
+    }
+
+    if timeout_ns == Some(0) {
+        return Err(IpcError::Timeout);
+    }
+
+    let token = runtime.current_wait_token();
+    let waker = Arc::new(ParkWaker::new(runtime.clone(), token));
+    let mut indexed_wakers: Vec<Arc<IndexedWaker>> = Vec::with_capacity(items.len());
+
+    for (i, (obj, &(h, mask))) in objects.iter().zip(items.iter()).enumerate() {
+        let index = u32::try_from(i).expect("count ≤ u32::MAX by ABI");
+        let indexed = Arc::new(IndexedWaker::new(waker.clone(), index));
+        let dyn_waker: Arc<dyn Waker> = indexed.clone();
+        obj.signals()
+            .expect("validated above")
+            .register_waiter(mask, dyn_waker);
+        indexed_wakers.push(indexed);
+        let cancel: Arc<dyn CancelTarget> = waker.clone();
+        tbl.register_cancel(h, cancel)
+            .expect("slot validated above");
+    }
+
+    Ok(WaitSetup::Wait {
+        objects,
+        waker,
+        indexed_wakers,
+    })
+}
+
+fn resolve_wait(waker: &Arc<ParkWaker>) -> WaitResolution {
+    match waker.state().load(core::sync::atomic::Ordering::Acquire) {
+        ParkState::SIGNALED => WaitResolution::Signaled,
+        ParkState::CANCELED => WaitResolution::Canceled,
+        _ => {
+            if waker.claim_timeout() {
+                WaitResolution::Timeout
+            } else {
+                match waker.state().load(core::sync::atomic::Ordering::Acquire) {
+                    ParkState::CANCELED => WaitResolution::Canceled,
+                    _ => WaitResolution::Signaled,
+                }
+            }
+        }
+    }
 }
 
 /// Создаёт пару связанных `Channel` и регистрирует оба handle'а
@@ -367,26 +474,63 @@ mod tests {
         num::NonZeroU64,
         sync::atomic::{AtomicI32, AtomicU32, Ordering},
     };
-    use std::panic;
+    use std::{
+        panic,
+        sync::{Mutex, OnceLock},
+    };
+
+    use collections::MutexCell;
 
     use super::*;
     use crate::{
-        ProcessObject, ThreadObject,
+        Event, HandleTable, ProcessObject, Rights, ThreadObject,
+        event::EVENT_SIGNALED,
+        handle::Handle,
+        object::KObject,
         runtime::{KernelRuntime, UserThreadEntry, WaitToken, install_runtime},
     };
 
     const PANIC_SENTINEL: &str = "thread_exit-mock-noreturn";
     static CAPTURED_EXIT_CODE: AtomicI32 = AtomicI32::new(i32::MIN);
 
-    struct MockRuntime;
+    /// Hook, вызываемый из `block_current_until` - позволяет тесту
+    /// детерминированно signal/cancel'нуть «пока поток припаркован».
+    type BlockHook = Box<dyn FnMut() + Send>;
+
+    struct MockRuntime {
+        handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
+        block_hook: Mutex<Option<BlockHook>>,
+    }
+
+    impl MockRuntime {
+        fn new() -> Self {
+            Self {
+                handle_table: Mutex::new(None),
+                block_hook: Mutex::new(None),
+            }
+        }
+
+        fn configure(
+            &self,
+            handle_table: Option<Arc<MutexCell<HandleTable>>>,
+            block_hook: Option<BlockHook>,
+        ) {
+            *self.handle_table.lock().unwrap() = handle_table;
+            *self.block_hook.lock().unwrap() = block_hook;
+        }
+
+        fn reset(&self) {
+            self.configure(None, None);
+        }
+    }
 
     impl KernelRuntime for MockRuntime {
         fn current_wait_token(&self) -> WaitToken {
             WaitToken::new(NonZeroU64::new(1).unwrap())
         }
 
-        fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<crate::HandleTable>>> {
-            None
+        fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
+            self.handle_table.lock().unwrap().clone()
         }
 
         fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
@@ -402,7 +546,11 @@ mod tests {
             panic!("{PANIC_SENTINEL}");
         }
 
-        fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
+        fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {
+            if let Some(hook) = self.block_hook.lock().unwrap().as_mut() {
+                hook();
+            }
+        }
 
         fn unblock(&self, _token: WaitToken) {}
 
@@ -438,9 +586,36 @@ mod tests {
         }
     }
 
+    /// install_runtime - once per process, поэтому singleton
+    /// с переключаемой конфигурацией. test_lock сериализует тесты,
+    /// чтобы block_hook не перетирался между ними.
+    fn mock() -> &'static MockRuntime {
+        static MOCK: OnceLock<Arc<MockRuntime>> = OnceLock::new();
+        MOCK.get_or_init(|| {
+            let rt = Arc::new(MockRuntime::new());
+            install_runtime(rt.clone() as Arc<dyn KernelRuntime>);
+            rt
+        })
+    }
+
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn install_event_handle(rights: Rights) -> (Arc<MutexCell<HandleTable>>, HandleId, Arc<Event>) {
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        let event = Event::new();
+        let id = table
+            .with_lock(|tbl| tbl.insert(Handle::new(KObject::Event(event.clone()), rights)))
+            .unwrap();
+        (table, id, event)
+    }
+
     #[test]
     fn thread_exit_forwards_code_to_runtime() {
-        install_runtime(Arc::new(MockRuntime));
+        let _guard = test_lock();
+        mock().reset();
 
         let prev_hook = panic::take_hook();
         panic::set_hook(Box::new(|_| {}));
@@ -449,5 +624,89 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(CAPTURED_EXIT_CODE.load(Ordering::SeqCst), 7);
+    }
+
+    /// Regression guard: signal внутри парковки + clear до resolve ->
+    /// `Ok(observed)`, а не Timeout. Любая попытка вернуть re-peek
+    /// `SignalState` сломает тест.
+    #[test]
+    fn object_wait_one_returns_latched_observed_after_signal_state_cleared() {
+        let _guard = test_lock();
+        let (table, id, event) = install_event_handle(Rights::WAIT | Rights::SIGNAL);
+        let event_for_hook = event.clone();
+        let hook: BlockHook = Box::new(move || {
+            event_for_hook.signal(EVENT_SIGNALED, 0);
+            event_for_hook.signal(0, EVENT_SIGNALED);
+        });
+        mock().configure(Some(table), Some(hook));
+
+        let observed = object_wait_one(id, EVENT_SIGNALED, None).expect("Ok");
+        assert_eq!(observed & EVENT_SIGNALED, EVENT_SIGNALED);
+        assert_eq!(event.peek() & EVENT_SIGNALED, 0);
+
+        mock().reset();
+    }
+
+    #[test]
+    fn object_wait_many_returns_latched_outcome_for_winning_item() {
+        let _guard = test_lock();
+        let (table, id_a, _ev_a) = install_event_handle(Rights::WAIT | Rights::SIGNAL);
+        let event_b = Event::new();
+        let id_b = table
+            .with_lock(|tbl| {
+                tbl.insert(Handle::new(
+                    KObject::Event(event_b.clone()),
+                    Rights::WAIT | Rights::SIGNAL,
+                ))
+            })
+            .unwrap();
+
+        let event_b_for_hook = event_b.clone();
+        let hook: BlockHook = Box::new(move || {
+            event_b_for_hook.signal(EVENT_SIGNALED, 0);
+            event_b_for_hook.signal(0, EVENT_SIGNALED);
+        });
+        mock().configure(Some(table), Some(hook));
+
+        let outcome =
+            object_wait_many(&[(id_a, EVENT_SIGNALED), (id_b, EVENT_SIGNALED)], None).expect("Ok");
+        assert_eq!(outcome.index, 1);
+        assert_eq!(outcome.observed & EVENT_SIGNALED, EVENT_SIGNALED);
+        assert_eq!(event_b.peek() & EVENT_SIGNALED, 0);
+
+        mock().reset();
+    }
+
+    #[test]
+    fn object_wait_one_returns_canceled_when_handle_closed_during_wait() {
+        let _guard = test_lock();
+        let (table, id, _event) = install_event_handle(Rights::WAIT);
+        let table_for_hook = table.clone();
+        let hook: BlockHook = Box::new(move || {
+            table_for_hook.with_lock(|tbl| tbl.remove(id).unwrap());
+        });
+        mock().configure(Some(table), Some(hook));
+
+        let err = object_wait_one(id, EVENT_SIGNALED, None).unwrap_err();
+        assert_eq!(err, IpcError::Canceled);
+
+        mock().reset();
+    }
+
+    #[test]
+    fn object_wait_many_canceled_when_any_handle_closed_during_wait() {
+        let _guard = test_lock();
+        let (table, id, _event) = install_event_handle(Rights::WAIT);
+        let table_for_hook = table.clone();
+        let hook: BlockHook = Box::new(move || {
+            table_for_hook.with_lock(|tbl| tbl.remove(id).unwrap());
+        });
+        mock().configure(Some(table), Some(hook));
+
+        let err =
+            object_wait_many(&[(id, EVENT_SIGNALED), (id, EVENT_SIGNALED)], None).unwrap_err();
+        assert_eq!(err, IpcError::Canceled);
+
+        mock().reset();
     }
 }

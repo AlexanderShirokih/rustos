@@ -19,6 +19,12 @@ pub trait Waker: Send + Sync {
     fn wake(&self, observed: u32);
 }
 
+/// Цель для cancel-on-handle-close. Идемпотентна; в гонке с signal/
+/// timeout побеждает один из них.
+pub trait CancelTarget: Send + Sync {
+    fn cancel(&self);
+}
+
 /// Источник сигналов: KO, на чьи биты можно подписаться через
 /// [`SignalState::register_waiter`].
 ///
@@ -152,22 +158,26 @@ struct WaiterEntry {
     waker: Arc<dyn Waker>,
 }
 
-/// Waker, представляющий запаркованный поток. Парный к
-/// [`object_wait_one`]: signal-сторона зовёт `wake`, который через
-/// runtime переводит поток в `Ready`. Гонка с timeout-стороной
-/// разрешается атомарным CAS на `state`.
+/// Waker запаркованного потока. Latch'инг `observed`/`winner_index`
+/// до CAS на `state` + Release/Acquire-пара на `state` гарантируют:
+/// reader, увидев `SIGNALED`, читает именно те значения, что были
+/// записаны signal-стороной.
 pub(super) struct ParkWaker {
     state: AtomicU32,
     observed: AtomicU32,
+    winner_index: AtomicU32,
     runtime: Arc<dyn KernelRuntime>,
     token: WaitToken,
 }
 
 impl ParkWaker {
+    pub(super) const NO_WINNER: u32 = u32::MAX;
+
     pub(super) fn new(runtime: Arc<dyn KernelRuntime>, token: WaitToken) -> Self {
         Self {
             state: AtomicU32::new(ParkState::REGISTERED),
             observed: AtomicU32::new(0),
+            winner_index: AtomicU32::new(Self::NO_WINNER),
             runtime,
             token,
         }
@@ -181,24 +191,13 @@ impl ParkWaker {
         self.observed.load(Ordering::Acquire)
     }
 
-    /// Пытается "закрыть" waiter сo стороны timeout - если signal
-    /// раньше не выиграл CAS. `true` означает "timeout победил".
-    pub(super) fn claim_timeout(&self) -> bool {
-        self.state
-            .compare_exchange(
-                ParkState::REGISTERED,
-                ParkState::TIMEOUT,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+    pub(super) fn winner_index(&self) -> u32 {
+        self.winner_index.load(Ordering::Acquire)
     }
-}
 
-impl Waker for ParkWaker {
-    fn wake(&self, observed: u32) {
-        // SIGNALED в state, увидел и корректное `observed`.
+    fn signal(&self, index: u32, observed: u32) {
         self.observed.store(observed, Ordering::Release);
+        self.winner_index.store(index, Ordering::Release);
         if self
             .state
             .compare_exchange(
@@ -211,7 +210,61 @@ impl Waker for ParkWaker {
         {
             self.runtime.unblock(self.token);
         }
-        // Иначе timeout-сторона нас опередила: waker - no-op.
+    }
+
+    pub(super) fn claim_timeout(&self) -> bool {
+        self.state
+            .compare_exchange(
+                ParkState::REGISTERED,
+                ParkState::TIMEOUT,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(super) fn claim_cancel(&self) -> bool {
+        self.state
+            .compare_exchange(
+                ParkState::REGISTERED,
+                ParkState::CANCELED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+impl CancelTarget for ParkWaker {
+    fn cancel(&self) {
+        if self.claim_cancel() {
+            self.runtime.unblock(self.token);
+        }
+    }
+}
+
+impl Waker for ParkWaker {
+    fn wake(&self, observed: u32) {
+        self.signal(0, observed);
+    }
+}
+
+/// Адаптер `Waker` поверх [`ParkWaker`] для `object_wait_many`:
+/// латчит свой `index` в shared waker'е при срабатывании сигнала.
+pub(super) struct IndexedWaker {
+    inner: Arc<ParkWaker>,
+    index: u32,
+}
+
+impl IndexedWaker {
+    pub(super) fn new(inner: Arc<ParkWaker>, index: u32) -> Self {
+        Self { inner, index }
+    }
+}
+
+impl Waker for IndexedWaker {
+    fn wake(&self, observed: u32) {
+        self.inner.signal(self.index, observed);
     }
 }
 
@@ -250,10 +303,258 @@ impl Waker for MockWaker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use core::num::NonZeroU64;
+
+    use super::{
+        super::{
+            errors::{IpcError, SpawnError},
+            handle_table::HandleTable,
+            process::ProcessObject,
+            runtime::{KernelRuntime, UserThreadEntry, WaitToken},
+            thread::ThreadObject,
+        },
+        *,
+    };
 
     const BIT0: u32 = 1 << 0;
     const BIT1: u32 = 1 << 1;
+
+    struct StubRuntime {
+        unblocks: core::sync::atomic::AtomicU64,
+    }
+
+    impl StubRuntime {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                unblocks: core::sync::atomic::AtomicU64::new(0),
+            })
+        }
+
+        fn unblock_count(&self) -> u64 {
+            self.unblocks.load(Ordering::Acquire)
+        }
+    }
+
+    impl KernelRuntime for StubRuntime {
+        fn current_wait_token(&self) -> WaitToken {
+            WaitToken::new(NonZeroU64::new(1).unwrap())
+        }
+        fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<HandleTable>>> {
+            None
+        }
+        fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
+            None
+        }
+        fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
+            None
+        }
+        fn exit_current_thread(&self, _exit_code: i32) -> ! {
+            unreachable!("not used in wait.rs tests")
+        }
+        fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
+        fn unblock(&self, _token: WaitToken) {
+            self.unblocks.fetch_add(1, Ordering::AcqRel);
+        }
+        fn create_empty_process(
+            &self,
+            _name: &'static str,
+        ) -> Result<Arc<ProcessObject>, SpawnError> {
+            Err(SpawnError::NoFreeProcessSlots)
+        }
+        fn create_user_thread(
+            &self,
+            _process: &Arc<ProcessObject>,
+            _entry: UserThreadEntry,
+        ) -> Result<Arc<ThreadObject>, SpawnError> {
+            Err(SpawnError::NoFreeThreadSlots)
+        }
+        fn terminate_thread(
+            &self,
+            _thread: &Arc<ThreadObject>,
+            _exit_code: i32,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+        fn terminate_process(
+            &self,
+            _process: &Arc<ProcessObject>,
+            _exit_code: i32,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+    }
+
+    fn make_waker(runtime: Arc<dyn KernelRuntime>) -> Arc<ParkWaker> {
+        Arc::new(ParkWaker::new(
+            runtime,
+            WaitToken::new(NonZeroU64::new(1).unwrap()),
+        ))
+    }
+
+    #[test]
+    fn park_waker_cancel_transitions_to_canceled_and_unblocks() {
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::REGISTERED);
+
+        CancelTarget::cancel(waker.as_ref());
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::CANCELED);
+        assert_eq!(rt.unblock_count(), 1);
+
+        CancelTarget::cancel(waker.as_ref());
+        assert_eq!(rt.unblock_count(), 1);
+    }
+
+    #[test]
+    fn park_waker_signal_wins_over_cancel() {
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+
+        Waker::wake(waker.as_ref(), BIT0);
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::SIGNALED);
+        assert_eq!(rt.unblock_count(), 1);
+
+        CancelTarget::cancel(waker.as_ref());
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::SIGNALED);
+        assert_eq!(rt.unblock_count(), 1);
+    }
+
+    #[test]
+    fn park_waker_timeout_blocks_cancel_and_signal() {
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+
+        assert!(waker.claim_timeout());
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::TIMEOUT);
+
+        CancelTarget::cancel(waker.as_ref());
+        Waker::wake(waker.as_ref(), BIT0);
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::TIMEOUT);
+        assert_eq!(rt.unblock_count(), 0);
+    }
+
+    #[test]
+    fn park_waker_cancel_blocks_subsequent_timeout() {
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+
+        CancelTarget::cancel(waker.as_ref());
+        assert!(!waker.claim_timeout());
+        Waker::wake(waker.as_ref(), BIT0);
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::CANCELED);
+        assert_eq!(rt.unblock_count(), 1);
+    }
+
+    #[test]
+    fn indexed_waker_latches_index_and_observed() {
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+        assert_eq!(waker.winner_index(), ParkWaker::NO_WINNER);
+
+        let indexed = IndexedWaker::new(waker.clone(), 7);
+        Waker::wake(&indexed, BIT0 | BIT1);
+
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::SIGNALED);
+        assert_eq!(waker.winner_index(), 7);
+        assert_eq!(waker.observed(), BIT0 | BIT1);
+        assert_eq!(rt.unblock_count(), 1);
+    }
+
+    #[test]
+    fn indexed_waker_first_signal_wins_subsequent_no_op_unblock() {
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+
+        let a = IndexedWaker::new(waker.clone(), 0);
+        let b = IndexedWaker::new(waker.clone(), 1);
+
+        Waker::wake(&a, BIT0);
+        Waker::wake(&b, BIT1);
+
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::SIGNALED);
+        assert_eq!(rt.unblock_count(), 1);
+        let idx = waker.winner_index();
+        assert!(idx == 0 || idx == 1, "unexpected winner_index {idx}");
+        let observed = waker.observed();
+        assert!(
+            observed == BIT0 || observed == BIT1,
+            "unexpected observed {observed:#x}",
+        );
+    }
+
+    #[test]
+    fn indexed_waker_no_op_after_cancel() {
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+
+        CancelTarget::cancel(waker.as_ref());
+        let indexed = IndexedWaker::new(waker.clone(), 3);
+        Waker::wake(&indexed, BIT0);
+
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::CANCELED);
+        assert_eq!(rt.unblock_count(), 1);
+    }
+
+    /// Regression guard: `observed` после wake не сбивается тем,
+    /// что SignalState успел снять биты. Без этого `object_wait_one`
+    /// возвращал бы Timeout на успешно отработавший signal.
+    #[test]
+    fn park_waker_observed_survives_signal_state_clear() {
+        let s = SignalState::new(0);
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+        let waker_dyn: Arc<dyn Waker> = waker.clone();
+
+        s.register_waiter(BIT0, waker_dyn);
+        s.signal(BIT0, 0);
+        s.signal(0, BIT0);
+        assert_eq!(s.peek() & BIT0, 0);
+
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::SIGNALED);
+        assert_eq!(waker.observed() & BIT0, BIT0);
+    }
+
+    #[test]
+    fn indexed_waker_observed_and_index_survive_signal_state_clear() {
+        let s = SignalState::new(0);
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+        let indexed: Arc<dyn Waker> = Arc::new(IndexedWaker::new(waker.clone(), 5));
+
+        s.register_waiter(BIT0, indexed);
+        s.signal(BIT0, 0);
+        s.signal(0, BIT0);
+        assert_eq!(s.peek() & BIT0, 0);
+
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::SIGNALED);
+        assert_eq!(waker.observed() & BIT0, BIT0);
+        assert_eq!(waker.winner_index(), 5);
+    }
+
+    #[test]
+    fn indexed_waker_resolves_correct_index_across_signal_states() {
+        let s0 = SignalState::new(0);
+        let s1 = SignalState::new(0);
+        let s2 = SignalState::new(0);
+
+        let rt = StubRuntime::new();
+        let waker = make_waker(rt.clone() as Arc<dyn KernelRuntime>);
+        let i0: Arc<dyn Waker> = Arc::new(IndexedWaker::new(waker.clone(), 0));
+        let i1: Arc<dyn Waker> = Arc::new(IndexedWaker::new(waker.clone(), 1));
+        let i2: Arc<dyn Waker> = Arc::new(IndexedWaker::new(waker.clone(), 2));
+
+        s0.register_waiter(BIT0, i0);
+        s1.register_waiter(BIT0, i1);
+        s2.register_waiter(BIT0, i2);
+
+        // Сигнал прилетает только в SignalState с индексом 1.
+        s1.signal(BIT0, 0);
+        s1.signal(0, BIT0);
+
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::SIGNALED);
+        assert_eq!(waker.winner_index(), 1);
+        assert_eq!(waker.observed() & BIT0, BIT0);
+    }
 
     #[test]
     fn signal_then_register_wakes_immediately() {

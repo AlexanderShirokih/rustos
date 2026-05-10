@@ -79,8 +79,13 @@ pub enum SyscallOp {
     ObjectSignal = 0x10,
     /// Ждёт сигналы KO. Аргументы: `arg0=handle`, `arg1=signals`
     /// (нижние 32 бита), `arg2=timeout_ns`; `timeout_ns == 0` -
-    /// non-blocking poll, ненулевое значение - относительный timeout.
+    /// non-blocking poll. Возврат: observed-маска.
     ObjectWaitOne = 0x11,
+    /// Ждёт сигналы на нескольких KO. Аргументы: `arg0=items_va`
+    /// (массив 8-байтных записей `[handle: u32, mask: u32]` LE),
+    /// `arg1=count`, `arg2=timeout_ns`. Primary возврат - observed-
+    /// маска сработавшего KO, secondary - его индекс в `items`.
+    ObjectWaitMany = 0x12,
 
     // 0x20..=0x2F - channel.
     ChannelCreate = 0x20,
@@ -204,6 +209,7 @@ impl SyscallOp {
         match raw {
             0x10 => Ok(Self::ObjectSignal),
             0x11 => Ok(Self::ObjectWaitOne),
+            0x12 => Ok(Self::ObjectWaitMany),
             0x20 => Ok(Self::ChannelCreate),
             0x21 => Ok(Self::ChannelWrite),
             0x22 => Ok(Self::ChannelRead),
@@ -243,6 +249,7 @@ mod tests {
     fn from_raw_known_ops() {
         assert_eq!(SyscallOp::from_raw(0x10), Ok(SyscallOp::ObjectSignal));
         assert_eq!(SyscallOp::from_raw(0x11), Ok(SyscallOp::ObjectWaitOne));
+        assert_eq!(SyscallOp::from_raw(0x12), Ok(SyscallOp::ObjectWaitMany));
         assert_eq!(SyscallOp::from_raw(0x20), Ok(SyscallOp::ChannelCreate));
         assert_eq!(SyscallOp::from_raw(0x21), Ok(SyscallOp::ChannelWrite));
         assert_eq!(SyscallOp::from_raw(0x22), Ok(SyscallOp::ChannelRead));
@@ -297,7 +304,7 @@ mod tests {
     #[test]
     fn from_raw_unknown_op() {
         assert_eq!(SyscallOp::from_raw(3), Err(SyscallError::BadSyscall));
-        assert_eq!(SyscallOp::from_raw(0x12), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x13), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x32), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x42), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x55), Err(SyscallError::BadSyscall));

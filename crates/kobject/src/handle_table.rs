@@ -13,6 +13,7 @@ use super::{
     process::ProcessObject,
     rights::Rights,
     thread::ThreadObject,
+    wait::CancelTarget,
 };
 
 /// Per-process слот-таблица handle'ов.
@@ -26,6 +27,8 @@ struct Slot {
     /// Текущая generation слота, 1..=`MAX_GENERATION`.
     generation: u16,
     state: SlotState,
+    /// Cancel-target'ы активных wait'ов; дренируются при `Occupied -> Free`.
+    waiters: Vec<Arc<dyn CancelTarget>>,
 }
 
 enum SlotState {
@@ -84,6 +87,7 @@ impl HandleTable {
             // pop_free_slot гарантирует, что generation ещё не исчерпана.
             slot.generation += 1;
             slot.state = SlotState::Occupied(handle);
+            slot.waiters.clear();
             return Ok(HandleId::pack(slot.generation, idx));
         }
 
@@ -95,12 +99,14 @@ impl HandleTable {
         self.slots.push(Slot {
             generation: 1,
             state: SlotState::Occupied(handle),
+            waiters: Vec::new(),
         });
         Ok(HandleId::pack(1, idx))
     }
 
-    /// Удаляет handle из таблицы, возвращая его (вызывающий решает, что
-    /// делать с `Arc` - обычно дроп закрывает KO).
+    /// Удаляет handle из таблицы. Дренирует per-slot cancel-target'ы
+    /// и будит каждого с исходом
+    /// [`IpcError::Canceled`](super::IpcError::Canceled).
     pub fn remove(&mut self, id: HandleId) -> Result<Handle, IpcError> {
         let idx = id.slot();
         let slot = self
@@ -122,12 +128,57 @@ impl HandleTable {
                 next_free: prev_head,
             },
         );
+        let waiters = core::mem::take(&mut slot.waiters);
         self.free_head = Some(idx);
+
+        // cancel() -> runtime.unblock(); runtime не входит обратно в
+        // HandleTable, лок безопасно держать.
+        for w in waiters {
+            w.cancel();
+        }
 
         match taken {
             SlotState::Occupied(handle) => Ok(handle),
             // Невозможно по проверке выше, но обходимся без unreachable!.
             _ => Err(IpcError::BadHandle),
+        }
+    }
+
+    /// Регистрирует cancel-target на слот `id`. При закрытии/передаче
+    /// handle target получит `cancel()`.
+    pub fn register_cancel(
+        &mut self,
+        id: HandleId,
+        target: Arc<dyn CancelTarget>,
+    ) -> Result<(), IpcError> {
+        let slot = self
+            .slots
+            .get_mut(id.slot() as usize)
+            .ok_or(IpcError::BadHandle)?;
+        if slot.generation != id.generation() {
+            return Err(IpcError::BadHandle);
+        }
+        if !matches!(slot.state, SlotState::Occupied(_)) {
+            return Err(IpcError::BadHandle);
+        }
+        slot.waiters.push(target);
+        Ok(())
+    }
+
+    /// Снимает cancel-target по identity. Идемпотентен; generation
+    /// не проверяется - переиспользованный слот заведомо не содержит
+    /// чужой Arc.
+    pub fn unregister_cancel(&mut self, id: HandleId, target: &Arc<dyn CancelTarget>) {
+        let Some(slot) = self.slots.get_mut(id.slot() as usize) else {
+            return;
+        };
+        let target_ptr = Arc::as_ptr(target).cast::<()>();
+        if let Some(pos) = slot
+            .waiters
+            .iter()
+            .position(|w| Arc::as_ptr(w).cast::<()>() == target_ptr)
+        {
+            slot.waiters.swap_remove(pos);
         }
     }
 
@@ -373,13 +424,33 @@ impl Default for HandleTable {
 
 #[cfg(test)]
 mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
     use super::{
         super::{
             event::Event, mailbox::Mailbox, object::KObject, process::ProcessObject,
-            rights::Rights, thread::ThreadObject,
+            rights::Rights, thread::ThreadObject, wait::CancelTarget,
         },
         *,
     };
+
+    struct CountingCancel(AtomicUsize);
+
+    impl CountingCancel {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(AtomicUsize::new(0)))
+        }
+
+        fn count(&self) -> usize {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    impl CancelTarget for CountingCancel {
+        fn cancel(&self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 
     fn make_handle(obj: KObject, rights: Rights) -> Handle {
         Handle::new(obj, rights)
@@ -881,5 +952,129 @@ mod tests {
         assert!(b.get(id_b, Rights::WRITE).is_ok());
         assert_ne!(id_a.generation(), id_b.generation());
         assert_eq!(a.get(id_b, Rights::READ).unwrap_err(), IpcError::BadHandle);
+    }
+
+    #[test]
+    fn register_cancel_then_remove_fires_cancel() {
+        let mut table = HandleTable::new();
+        let id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let target = CountingCancel::new();
+        let dyn_target: Arc<dyn CancelTarget> = target.clone();
+
+        table.register_cancel(id, dyn_target).unwrap();
+        assert_eq!(target.count(), 0);
+
+        let _h = table.remove(id).unwrap();
+        assert_eq!(target.count(), 1);
+    }
+
+    #[test]
+    fn register_cancel_supports_multiple_targets_per_slot() {
+        let mut table = HandleTable::new();
+        let id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let a = CountingCancel::new();
+        let b = CountingCancel::new();
+        table
+            .register_cancel(id, a.clone() as Arc<dyn CancelTarget>)
+            .unwrap();
+        table
+            .register_cancel(id, b.clone() as Arc<dyn CancelTarget>)
+            .unwrap();
+
+        let _h = table.remove(id).unwrap();
+        assert_eq!(a.count(), 1);
+        assert_eq!(b.count(), 1);
+    }
+
+    #[test]
+    fn register_cancel_on_bad_handle_returns_err() {
+        let mut table = HandleTable::new();
+        let bogus = HandleId::pack(1, 999);
+        let target: Arc<dyn CancelTarget> = CountingCancel::new();
+        assert_eq!(
+            table.register_cancel(bogus, target).unwrap_err(),
+            IpcError::BadHandle
+        );
+    }
+
+    #[test]
+    fn register_cancel_after_close_returns_err() {
+        let mut table = HandleTable::new();
+        let id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        table.remove(id).unwrap();
+        let target: Arc<dyn CancelTarget> = CountingCancel::new();
+        assert_eq!(
+            table.register_cancel(id, target).unwrap_err(),
+            IpcError::BadHandle
+        );
+    }
+
+    #[test]
+    fn unregister_cancel_after_normal_wakeup_drops_target() {
+        let mut table = HandleTable::new();
+        let id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let target = CountingCancel::new();
+        let dyn_target: Arc<dyn CancelTarget> = target.clone();
+        table.register_cancel(id, dyn_target.clone()).unwrap();
+        table.unregister_cancel(id, &dyn_target);
+
+        let _h = table.remove(id).unwrap();
+        assert_eq!(target.count(), 0);
+    }
+
+    #[test]
+    fn unregister_cancel_idempotent_and_tolerates_missing() {
+        let mut table = HandleTable::new();
+        let id = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let target = CountingCancel::new();
+        let dyn_target: Arc<dyn CancelTarget> = target.clone();
+        table.register_cancel(id, dyn_target.clone()).unwrap();
+        table.unregister_cancel(id, &dyn_target);
+        table.unregister_cancel(id, &dyn_target);
+        let bogus = HandleId::pack(99, 999);
+        table.unregister_cancel(bogus, &dyn_target);
+    }
+
+    #[test]
+    fn try_drain_for_transfer_fires_cancel_for_each_handle() {
+        let mut table = HandleTable::new();
+        let id1 = table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .unwrap();
+        let id2 = table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .unwrap();
+        let a = CountingCancel::new();
+        let b = CountingCancel::new();
+        table
+            .register_cancel(id1, a.clone() as Arc<dyn CancelTarget>)
+            .unwrap();
+        table
+            .register_cancel(id2, b.clone() as Arc<dyn CancelTarget>)
+            .unwrap();
+
+        let drained = table
+            .try_drain_for_transfer(&[id1, id2], Rights::TRANSFER)
+            .unwrap();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(a.count(), 1);
+        assert_eq!(b.count(), 1);
+    }
+
+    #[test]
+    fn slot_reuse_does_not_carry_over_old_waiters() {
+        let mut table = HandleTable::with_capacity(1);
+        let id1 = table.insert(event_handle(Rights::WAIT)).unwrap();
+        let target = CountingCancel::new();
+        table
+            .register_cancel(id1, target.clone() as Arc<dyn CancelTarget>)
+            .unwrap();
+        table.remove(id1).unwrap();
+        assert_eq!(target.count(), 1);
+
+        let id2 = table.insert(event_handle(Rights::WAIT)).unwrap();
+        assert_eq!(id1.slot(), id2.slot());
+        table.remove(id2).unwrap();
+        assert_eq!(target.count(), 1);
     }
 }

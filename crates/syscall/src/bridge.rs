@@ -14,11 +14,13 @@
 
 use core::num::NonZeroU32;
 
-use kobject::{self, Rights};
+use kobject::{self, HandleId, Rights};
 
 use super::{
     error::{SyscallError, encode_return},
     numbers::SyscallOp,
+    runtime::runtime as syscall_runtime,
+    user_io::{copy_in, validate_user_ptr},
 };
 
 /// Источник syscall-вызова.
@@ -82,6 +84,9 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         SyscallOp::ObjectWaitOne => {
             let r = sys_object_wait_one(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
+        }
+        SyscallOp::ObjectWaitMany => {
+            sys_object_wait_many(frame);
         }
         SyscallOp::ChannelCreate => {
             sys_channel_create(frame);
@@ -236,11 +241,8 @@ fn sys_object_signal(handle: u64, set: u64, clear: u64) -> Result<u64, SyscallEr
     Ok(0)
 }
 
-/// `object_wait_one(handle, signals, timeout_ns)` - ждёт хотя бы один
-/// бит из `signals` на kernel-объекте. `timeout_ns == 0` означает
-/// non-blocking poll; ненулевое значение - длительность дедлайна в
-/// наносекундах (относительно текущего момента). Возвращает наблюдённую
-/// маску.
+/// `object_wait_one(handle, signals, timeout_ns)`. `timeout_ns == 0`
+/// - poll. Возвращает observed-маску.
 fn sys_object_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let mask = signals_from_arg(signals);
@@ -249,6 +251,64 @@ fn sys_object_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64
     }
     let observed = kobject::object_wait_one(id, mask, Some(timeout_ns))?;
     Ok(u64::from(observed))
+}
+
+const WAIT_MANY_ENTRY_SIZE: usize = 8;
+const WAIT_MANY_MAX_COUNT: usize = 256;
+
+/// `object_wait_many(items_va, count, timeout_ns)`. Primary возврат -
+/// observed-маска, secondary - индекс сработавшей записи.
+fn sys_object_wait_many(frame: &mut dyn SyscallFrame) {
+    match sys_object_wait_many_impl(frame.arg(0), frame.arg(1), frame.arg(2)) {
+        Ok((index, observed)) => {
+            frame.set_secondary_return(u64::from(index));
+            frame.set_return(i64::from(observed));
+        }
+        Err(e) => frame.set_return(e.into()),
+    }
+}
+
+fn sys_object_wait_many_impl(
+    items_va: u64,
+    count: u64,
+    timeout_ns: u64,
+) -> Result<(u32, u32), SyscallError> {
+    let count = usize::try_from(count).map_err(|_| SyscallError::InvalidArgument)?;
+    if count == 0 || count > WAIT_MANY_MAX_COUNT {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let bytes_total = count
+        .checked_mul(WAIT_MANY_ENTRY_SIZE)
+        .ok_or(SyscallError::InvalidArgument)?;
+    validate_user_ptr(items_va, bytes_total)?;
+
+    let user_vm = syscall_runtime()
+        .current_user_vm()
+        .ok_or(SyscallError::WrongType)?;
+
+    let mut buf = [0u8; WAIT_MANY_MAX_COUNT * WAIT_MANY_ENTRY_SIZE];
+    copy_in(&user_vm, items_va, &mut buf[..bytes_total])?;
+
+    let mut items: [(HandleId, u32); WAIT_MANY_MAX_COUNT] = [(
+        HandleId::from_raw(NonZeroU32::new(1).expect("non-zero literal")),
+        0,
+    ); WAIT_MANY_MAX_COUNT];
+    for (i, chunk) in buf[..bytes_total]
+        .chunks_exact(WAIT_MANY_ENTRY_SIZE)
+        .enumerate()
+    {
+        let handle_raw = u32::from_le_bytes(chunk[0..4].try_into().expect("4 bytes per handle"));
+        let mask = u32::from_le_bytes(chunk[4..8].try_into().expect("4 bytes per mask"));
+        if mask == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let nz = NonZeroU32::new(handle_raw).ok_or(SyscallError::InvalidArgument)?;
+        items[i] = (HandleId::from_raw(nz), mask);
+    }
+
+    let outcome = kobject::object_wait_many(&items[..count], Some(timeout_ns))?;
+    let index = u32::try_from(outcome.index).expect("count <= WAIT_MANY_MAX_COUNT fits in u32");
+    Ok((index, outcome.observed))
 }
 
 /// `channel_create()` - создаёт пару endpoint'ов и регистрирует оба
@@ -408,6 +468,43 @@ mod tests {
     fn object_wait_one_with_only_upper_bits_is_invalid_argument() {
         let upper_only = u64::from(u32::MAX) + 1;
         let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, upper_only, 0, 0, 0, 0]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    #[test]
+    fn object_wait_many_with_zero_count_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::ObjectWaitMany as u16, [0x1000, 0, 0, 0, 0, 0]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    #[test]
+    fn object_wait_many_with_overflow_count_is_invalid_argument() {
+        let mut f = MockFrame::user(
+            SyscallOp::ObjectWaitMany as u16,
+            [0x1000, u64::MAX, 0, 0, 0, 0],
+        );
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    #[test]
+    fn object_wait_many_above_max_count_is_invalid_argument() {
+        // Чуть выше потолка - ABI ограничивает массив.
+        let above_max = (WAIT_MANY_MAX_COUNT + 1) as u64;
+        let mut f = MockFrame::user(
+            SyscallOp::ObjectWaitMany as u16,
+            [0x1000, above_max, 0, 0, 0, 0],
+        );
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    }
+
+    #[test]
+    fn object_wait_many_with_zero_va_invalid_argument() {
+        // count > 0, но va = 0 - validate_user_ptr отвергает.
+        let mut f = MockFrame::user(SyscallOp::ObjectWaitMany as u16, [0, 1, 0, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }

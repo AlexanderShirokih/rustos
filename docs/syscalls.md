@@ -65,6 +65,7 @@ Handle — это capability: он указывает на kernel-object и не
 | 12 | `OutOfHandles` | таблица handle'ов процесса заполнена |
 | 13 | `OutOfMemory` | не хватает памяти |
 | 14 | `NotFound` | запрошенный VA-регион не найден |
+| 15 | `Canceled` | ожидаемый handle закрыт или передан до прихода сигнала |
 
 ## Object
 
@@ -76,9 +77,21 @@ process и thread. Они нужны для wait/poll-сценариев без 
 |---:|---|---|---|---|
 | `0x10` | `ObjectSignal` | `handle`, `set`, `clear` | `0` | `SIGNAL` |
 | `0x11` | `ObjectWaitOne` | `handle`, `signals`, `timeout_ns` | observed mask | `WAIT` |
+| `0x12` | `ObjectWaitMany` | `items_va`, `count`, `timeout_ns` | primary=observed mask, secondary=index | `WAIT` на каждом |
 
 `timeout_ns == 0` — poll без парковки. Ненулевой `timeout_ns` —
 относительный таймаут в наносекундах.
+
+`ObjectWaitMany.items_va` указывает на массив 8-байтных записей
+`[handle: u32, mask: u32]` (little-endian); `count` ограничен 256.
+Возвращает primary-маску сработавшего KO и индекс записи в `items` в
+secondary-регистре. Дубликаты `handle` в `items` допустимы.
+
+Закрытие или передача handle'а, на котором висит активный
+`ObjectWaitOne`/`ObjectWaitMany`, разбудит ожидающий поток с кодом
+`Canceled`. Ожидание привязано к конкретному slot+generation: после
+переиспользования слота под новый handle старая регистрация cancel
+не срабатывает повторно.
 
 Пример: дождаться сообщения в канале.
 
