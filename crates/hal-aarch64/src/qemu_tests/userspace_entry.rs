@@ -43,6 +43,7 @@ use scheduler::{
 use spin::Once;
 use syscall::SyscallOp;
 use test_harness_qemu::register_test;
+use test_harness_qemu_aarch64::payload::{B_LOOP, Instruction, Reg, movz_x, svc};
 
 use crate::{
     HIGHER_HALF_BASE, memory::address_space_factory::UserAarch64MemoryMapper, sched::Aarch64Context,
@@ -65,16 +66,19 @@ const KERNEL_STACK_SIZE: usize = 8 * 1024;
 const USER_TEST_PAYLOAD_VA: usize = 0x4000_0000;
 const USER_TEST_STACK_VA: usize = USER_TEST_PAYLOAD_VA + PAGE_SIZE;
 
-const SVC_OBJECT_SIGNAL: u32 = svc(SyscallOp::ObjectSignal);
-const SVC_THREAD_EXIT: u32 = svc(SyscallOp::ThreadExit);
-const MOVZ_X0_ZERO: u32 = 0xD280_0000;
-const MOVZ_X1_EVENT_SIGNALED: u32 = 0xD280_0021;
-const MOVZ_X2_ZERO: u32 = 0xD280_0002;
-/// `b .` - безусловный jump на текущий PC (offset 0).
-const B_LOOP: u32 = 0x1400_0000;
+const fn svc_op(op: SyscallOp) -> Instruction {
+    svc(op as u16)
+}
 
-const fn svc(op: SyscallOp) -> u32 {
-    0xD400_0001 | ((op as u32) << 5)
+fn build_payload() -> [Instruction; 6] {
+    [
+        movz_x(Reg::X1, EVENT_SIGNALED as u16, 0),
+        movz_x(Reg::X2, 0, 0),
+        svc_op(SyscallOp::ObjectSignal),
+        movz_x(Reg::X0, 0, 0),
+        svc_op(SyscallOp::ThreadExit),
+        B_LOOP,
+    ]
 }
 
 /// Свежий 4К-фрейм + его kernel-VA через линейную PA->VA-карту. Намеренная
@@ -104,14 +108,12 @@ fn allocate_probe_page() -> (*mut u8, PageAlignedAddress) {
 unsafe fn write_payload(kernel_va: *mut u8) {
     #[allow(clippy::cast_ptr_alignment)]
     let words = kernel_va.cast::<u32>();
+    let payload = build_payload();
     // SAFETY: caller гарантирует эксклюзивный, валидный, выровненный буфер.
     unsafe {
-        words.add(0).write_volatile(MOVZ_X1_EVENT_SIGNALED);
-        words.add(1).write_volatile(MOVZ_X2_ZERO);
-        words.add(2).write_volatile(SVC_OBJECT_SIGNAL);
-        words.add(3).write_volatile(MOVZ_X0_ZERO);
-        words.add(4).write_volatile(SVC_THREAD_EXIT);
-        words.add(5).write_volatile(B_LOOP);
+        for (idx, instruction) in payload.iter().enumerate() {
+            words.add(idx).write_volatile(instruction.word());
+        }
 
         core::arch::asm!(
             "dc cvau, {addr}",

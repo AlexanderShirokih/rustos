@@ -3,6 +3,7 @@
 use alloc::{sync::Arc, vec};
 use core::num::NonZeroUsize;
 
+use kernelspace::syscall_bridge;
 use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights};
 use memory::{
     AccessMask, MemFlags, MemoryRegion,
@@ -14,70 +15,26 @@ use syscall::SyscallOp;
 use test_harness_qemu::register_test;
 use userspace::{UserImage, UserSegment};
 
-use crate::syscall_bridge;
+use super::user_payload::{B_LOOP, Builder, Reg, b_ne, cmp_x, mov_x, str_x, svc_op};
 
 const PAGE_SIZE: usize = PageAlignedVirtualAddress::ALIGNMENT;
 const USER_PAYLOAD_VA: usize = 0x4000_0000;
 const USER_STACK_TOP: usize = USER_PAYLOAD_VA + 16 * PAGE_SIZE;
 const USER_STACK_SIZE: usize = PAGE_SIZE;
 
-const fn svc(op: SyscallOp) -> u32 {
-    0xD400_0001 | ((op as u32) << 5)
-}
-
-const SVC_MEMORY_MAP: u32 = svc(SyscallOp::MemoryMap);
-const SVC_MEMORY_INSPECT: u32 = svc(SyscallOp::MemoryRegionInspect);
-const SVC_OBJECT_SIGNAL: u32 = svc(SyscallOp::ObjectSignal);
-const SVC_THREAD_EXIT: u32 = svc(SyscallOp::ThreadExit);
-
-// Регистровые помощники: все movz собираются вручную, чтобы payload был
-// детерминирован и независим от какого-либо ассемблера.
-
-/// `movz x{rd}, #{imm}, lsl #{shift*16}` где shift∈{0,1,2,3}.
-const fn movz(rd: u32, imm: u16, shift: u32) -> u32 {
-    0xD280_0000 | (shift << 21) | ((imm as u32) << 5) | rd
-}
-
-/// `movk x{rd}, #{imm}, lsl #{shift*16}`.
-const fn movk(rd: u32, imm: u16, shift: u32) -> u32 {
-    0xF280_0000 | (shift << 21) | ((imm as u32) << 5) | rd
-}
-
-/// `mov x{rd}, x{rm}` (псевдо-инструкция через ORR Xrd, XZR, Xrm).
-const fn mov_xrd_xrm(rd: u32, rm: u32) -> u32 {
-    0xAA00_03E0 | (rm << 16) | rd
-}
-
-/// `str x{rt}, [x{rn}]`.
-const fn str_xrt_xrn(rt: u32, rn: u32) -> u32 {
-    0xF900_0000 | (rn << 5) | rt
-}
-
-/// `cmp x{rn}, x{rm}` = `subs xzr, x{rn}, x{rm}`.
-const fn cmp_xn_xm(rn: u32, rm: u32) -> u32 {
-    0xEB00_001F | (rm << 16) | (rn << 5)
-}
-
-/// `b.ne #+disp_words` (relative, in 4-byte instructions). Положительное
-/// смещение — вперёд от текущей инструкции.
-const fn b_ne(disp_words: u32) -> u32 {
-    let imm19 = disp_words & 0x7FFFF;
-    0x5400_0001 | (imm19 << 5)
-}
-
-/// `b .` (бесконечный цикл, fallback при возврате).
-const B_LOOP: u32 = 0x1400_0000;
-
 const PATTERN_LO: u16 = 0xBABE;
 const PATTERN_MID_LO: u16 = 0xCAFE;
 const PATTERN_MID_HI: u16 = 0xBEEF;
 const PATTERN_HI: u16 = 0xDEAD;
+const PATTERN: u64 = ((PATTERN_HI as u64) << 48)
+    | ((PATTERN_MID_HI as u64) << 32)
+    | ((PATTERN_MID_LO as u64) << 16)
+    | (PATTERN_LO as u64);
 
 /// HandleId-ы для свежевышедшей таблицы детерминированы:
 /// первый insert — slot=0 generation=1 → raw = 0x0001_0000.
 /// Второй — slot=1 generation=1 → raw = 0x0001_0001.
-const HANDLE_EVENT_RAW_LO: u16 = 0x0001;
-const HANDLE_EVENT_RAW_HI: u16 = 0x0001;
+const HANDLE_EVENT_RAW: u32 = 0x0001_0001;
 
 const EXPECTED_SIZE: u64 = PAGE_SIZE as u64;
 const EXPECTED_KIND_TAG: u8 = 1; // Virtual
@@ -120,96 +77,55 @@ const EXPECTED_INSPECT_SECONDARY: u64 =
 ///   b .                            ; fallback
 /// ```
 fn build_payload() -> [u8; 28 * 4] {
-    let mut words: [u32; 28] = [B_LOOP; 28];
-    let mut i = 0usize;
+    let mut payload = Builder::<28>::new(B_LOOP);
 
     // mov x21, x0
-    words[i] = mov_xrd_xrm(21, 0);
-    i += 1;
+    payload.push(mov_x(Reg::X21, Reg::X0));
 
     // MemoryMap(handle=x21, size=4096, flags=0)
-    words[i] = mov_xrd_xrm(0, 21);
-    i += 1;
-    words[i] = movz(1, 0x1000, 0);
-    i += 1;
-    words[i] = movz(2, 0, 0);
-    i += 1;
-    words[i] = SVC_MEMORY_MAP;
-    i += 1;
+    payload.push(mov_x(Reg::X0, Reg::X21));
+    payload.mov_u16(Reg::X1, 0x1000);
+    payload.mov_u16(Reg::X2, 0);
+    payload.push(svc_op(SyscallOp::MemoryMap));
 
     // mov x19, x0  ; va
-    words[i] = mov_xrd_xrm(19, 0);
-    i += 1;
+    payload.push(mov_x(Reg::X19, Reg::X0));
 
     // load pattern in x20
-    words[i] = movz(20, PATTERN_LO, 0);
-    i += 1;
-    words[i] = movk(20, PATTERN_MID_LO, 1);
-    i += 1;
-    words[i] = movk(20, PATTERN_MID_HI, 2);
-    i += 1;
-    words[i] = movk(20, PATTERN_HI, 3);
-    i += 1;
+    payload.mov_u64_fixed(Reg::X20, PATTERN);
 
     // str x20, [x19]
-    words[i] = str_xrt_xrn(20, 19);
-    i += 1;
+    payload.push(str_x(Reg::X20, Reg::X19));
 
     // MemoryRegionInspect(handle=x21)
-    words[i] = mov_xrd_xrm(0, 21);
-    i += 1;
-    words[i] = SVC_MEMORY_INSPECT;
-    i += 1;
+    payload.push(mov_x(Reg::X0, Reg::X21));
+    payload.push(svc_op(SyscallOp::MemoryRegionInspect));
 
     // x22 = EXPECTED_SIZE; cmp x0, x22; b.ne to thread_exit (fail path skips signal)
-    words[i] = movz(22, EXPECTED_SIZE as u16, 0);
-    i += 1;
-    words[i] = cmp_xn_xm(0, 22);
-    i += 1;
+    payload.mov_u16(Reg::X22, EXPECTED_SIZE as u16);
+    payload.push(cmp_x(Reg::X0, Reg::X22));
     // skip 7 words (через signal) и попасть на ThreadExit
-    words[i] = b_ne(8);
-    i += 1;
+    payload.push(b_ne(8));
 
     // x23 = EXPECTED_INSPECT_SECONDARY; cmp x1, x23; b.ne to thread_exit
-    let secondary_lo = EXPECTED_INSPECT_SECONDARY as u16;
-    let secondary_hi = (EXPECTED_INSPECT_SECONDARY >> 16) as u16;
-    words[i] = movz(23, secondary_lo, 0);
-    i += 1;
-    words[i] = movk(23, secondary_hi, 1);
-    i += 1;
-    words[i] = cmp_xn_xm(1, 23);
-    i += 1;
+    payload.mov_u32_fixed(Reg::X23, EXPECTED_INSPECT_SECONDARY as u32);
+    payload.push(cmp_x(Reg::X1, Reg::X23));
     // skip 5 words до ThreadExit
-    words[i] = b_ne(5);
-    i += 1;
+    payload.push(b_ne(5));
 
     // ObjectSignal(event_handle, EVENT_SIGNALED, 0)
-    words[i] = movz(0, HANDLE_EVENT_RAW_LO, 0);
-    i += 1;
-    words[i] = movk(0, HANDLE_EVENT_RAW_HI, 1);
-    i += 1;
-    words[i] = movz(1, 0x0001, 0);
-    i += 1;
-    words[i] = movz(2, 0, 0);
-    i += 1;
-    words[i] = SVC_OBJECT_SIGNAL;
-    i += 1;
+    payload.mov_u32_fixed(Reg::X0, HANDLE_EVENT_RAW);
+    payload.mov_u16(Reg::X1, EVENT_SIGNALED as u16);
+    payload.mov_u16(Reg::X2, 0);
+    payload.push(svc_op(SyscallOp::ObjectSignal));
 
     // ThreadExit(0)
-    words[i] = movz(0, 0, 0);
-    i += 1;
-    words[i] = SVC_THREAD_EXIT;
-    i += 1;
-    words[i] = B_LOOP;
-    i += 1;
+    payload.mov_u16(Reg::X0, 0);
+    payload.push(svc_op(SyscallOp::ThreadExit));
+    payload.push(B_LOOP);
 
-    debug_assert_eq!(i, 28);
-
-    let mut bytes = [0u8; 28 * 4];
-    for (idx, w) in words.iter().enumerate() {
-        bytes[idx * 4..(idx + 1) * 4].copy_from_slice(&w.to_le_bytes());
-    }
-    bytes
+    payload.assert_full();
+    payload.into_bytes()
 }
 
 fn aligned(va: usize) -> PageAlignedVirtualAddress {
@@ -246,7 +162,7 @@ fn userspace_memory_kobject_map_and_inspect() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![region_handle, event_handle])
         .bootstrap_handle(0);
-    let info = super::user_process_launcher()
+    let info = kernelspace::qemu_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "user-memory-kobject",
             &image,
@@ -260,7 +176,7 @@ fn userspace_memory_kobject_map_and_inspect() {
     test_harness_qemu::kassert_eq!(info.initial_handle_ids[0].raw().get(), 0x0001_0000);
     test_harness_qemu::kassert_eq!(info.initial_handle_ids[1].raw().get(), 0x0001_0001);
 
-    let scheduler = super::scheduler().clone();
+    let scheduler = kernelspace::qemu_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);

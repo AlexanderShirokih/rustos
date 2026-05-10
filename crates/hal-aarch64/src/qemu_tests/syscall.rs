@@ -3,7 +3,7 @@
 //!
 //! Полный путь "vector → exception_entry → syscall::dispatch → handler →
 //! kobject" из user-контекста покрыт тестами EL0-входа в
-//! [`super::userspace_entry`] и `kernelspace::qemu_tests::userspace_via_scheduler`;
+//! [`super::userspace_entry`] и `super::userspace_via_scheduler`;
 //! тонкие случаи диспатчера (`BadSyscall`, `InvalidArgument`, маски сигналов)
 //! — host-юнит-тестами в `syscall::bridge`. Здесь нужен только один
 //! интеграционный тест на реальном trap-vector'е, доказывающий, что

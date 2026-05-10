@@ -19,117 +19,67 @@ use syscall::SyscallOp;
 use test_harness_qemu::register_test;
 use userspace::{UserImage, UserSegment};
 
+use super::user_payload::{
+    B_LOOP, Reg, b_ne, cbnz_x, cmp_x_imm12, mov_x, movz_w, movz_x, strb_w, svc_op, words_to_bytes,
+};
+
 const PAGE_SIZE: usize = 4096;
 const USER_PAYLOAD_VA: usize = 0x4000_0000;
 const USER_STACK_TOP: usize = USER_PAYLOAD_VA + 16 * PAGE_SIZE;
 const USER_STACK_SIZE: usize = PAGE_SIZE;
 
-const fn svc(op: SyscallOp) -> u32 {
-    0xD400_0001 | ((op as u32) << 5)
-}
-
-const SVC_CHANNEL_CREATE: u32 = svc(SyscallOp::ChannelCreate);
-const SVC_CHANNEL_WRITE: u32 = svc(SyscallOp::ChannelWrite);
-const SVC_CHANNEL_READ: u32 = svc(SyscallOp::ChannelRead);
-const SVC_MEMORY_ALLOCATE: u32 = svc(SyscallOp::MemoryAllocate);
-const SVC_OBJECT_SIGNAL: u32 = svc(SyscallOp::ObjectSignal);
-const SVC_THREAD_EXIT: u32 = svc(SyscallOp::ThreadExit);
-
-// `mov xN, xM` = `orr xN, xzr, xM` -> `aa<m>03e<n>` где младшие 5 бит -
-// rd, биты [20:16] - rm.
-const MOV_X21_X0: u32 = 0xAA00_03F5;
-const MOV_X22_X0: u32 = 0xAA00_03F6;
-const MOV_X23_X1: u32 = 0xAA01_03F7;
-const MOV_X19_X0: u32 = 0xAA00_03F3;
-const MOV_X0_X22: u32 = 0xAA16_03E0;
-const MOV_X1_X19: u32 = 0xAA13_03E1;
-const MOV_X0_X23: u32 = 0xAA17_03E0;
-const MOV_X0_X21: u32 = 0xAA15_03E0;
-
-// `movz xN, #imm`: `D2_80_<imm16<<5|N>`.
-const MOVZ_X0_PAGE: u32 = 0xD282_0000; // x0 = 0x1000
-const MOVZ_X1_ZERO: u32 = 0xD280_0001; // x1 = 0
-const MOVZ_X2_ONE: u32 = 0xD280_0022; // x2 = 1
-const MOVZ_X2_256: u32 = 0xD280_2002; // x2 = 256
-const MOVZ_X3_ZERO: u32 = 0xD280_0003;
-const MOVZ_X4_ZERO: u32 = 0xD280_0004;
-const MOVZ_X1_EVENT_SIGNALED: u32 = 0xD280_0021; // x1 = EVENT_SIGNALED (=1)
-const MOVZ_X2_ZERO: u32 = 0xD280_0002;
-const MOVZ_X0_ZERO: u32 = 0xD280_0000;
-
-// `movz w20, #0x42`: `52_80_<0x42<<5|20>` = `52_80_08_54`.
-const MOVZ_W20_SENTINEL: u32 = 0x5280_0854;
-// `strb w20, [x19]`: store-byte unsigned offset 0.
-const STRB_W20_X19: u32 = 0x3900_0274;
-// `cmp x0, #1`: `subs xzr, x0, #1, lsl #0` -> `F100_041F`.
-const CMP_X0_ONE: u32 = 0xF100_041F;
-// `b .`: infinite loop.
-const B_LOOP: u32 = 0x1400_0000;
-
 const NUM_INSTRUCTIONS: usize = 32;
 
 /// Сборка байт-кода: payload занимает 32 инструкции в одной 4К-странице.
 fn build_payload() -> [u8; NUM_INSTRUCTIONS * 4] {
-    // CBNZ x0, +15: индекс 16, target 31 -> offset 15 (в инструкциях).
-    // Encoding `B5_00_<imm19<<5|rt>` = `B500_0000 | (15 << 5) | 0` = `B500_01E0`.
-    const CBNZ_X0_FAIL: u32 = 0xB500_01E0;
-    // B.NE +7: индекс 24, target 31, offset 7. `54_00_<imm19<<5|cond=0001>` =
-    // `54_00_<7<<5|1>` = `5400_00E1`.
-    const B_NE_FAIL: u32 = 0x5400_00E1;
-
-    let words: [u32; NUM_INSTRUCTIONS] = [
+    let words = [
         // [0] save bootstrap event handle.
-        MOV_X21_X0,
+        mov_x(Reg::X21, Reg::X0),
         // [1] ChannelCreate -> x0=left, x1=right.
-        SVC_CHANNEL_CREATE,
+        svc_op(SyscallOp::ChannelCreate),
         // [2] x22 = left, [3] x23 = right.
-        MOV_X22_X0,
-        MOV_X23_X1,
+        mov_x(Reg::X22, Reg::X0),
+        mov_x(Reg::X23, Reg::X1),
         // [4..7] vm_allocate(0x1000, 0).
-        MOVZ_X0_PAGE,
-        MOVZ_X1_ZERO,
-        SVC_MEMORY_ALLOCATE,
-        MOV_X19_X0,
+        movz_x(Reg::X0, 0x1000, 0),
+        movz_x(Reg::X1, 0, 0),
+        svc_op(SyscallOp::MemoryAllocate),
+        mov_x(Reg::X19, Reg::X0),
         // [8..9] sentinel byte to buffer.
-        MOVZ_W20_SENTINEL,
-        STRB_W20_X19,
+        movz_w(Reg::X20, 0x42),
+        strb_w(Reg::X20, Reg::X19),
         // [10..15] ChannelWrite(left, buf, 1, 0, 0).
-        MOV_X0_X22,
-        MOV_X1_X19,
-        MOVZ_X2_ONE,
-        MOVZ_X3_ZERO,
-        MOVZ_X4_ZERO,
-        SVC_CHANNEL_WRITE,
+        mov_x(Reg::X0, Reg::X22),
+        mov_x(Reg::X1, Reg::X19),
+        movz_x(Reg::X2, 1, 0),
+        movz_x(Reg::X3, 0, 0),
+        movz_x(Reg::X4, 0, 0),
+        svc_op(SyscallOp::ChannelWrite),
         // [16] write != 0 -> fail.
-        CBNZ_X0_FAIL,
+        cbnz_x(Reg::X0, 15),
         // [17..22] ChannelRead(right, buf, 256, 0, 0).
-        MOV_X0_X23,
-        MOV_X1_X19,
-        MOVZ_X2_256,
-        MOVZ_X3_ZERO,
-        MOVZ_X4_ZERO,
-        SVC_CHANNEL_READ,
+        mov_x(Reg::X0, Reg::X23),
+        mov_x(Reg::X1, Reg::X19),
+        movz_x(Reg::X2, 256, 0),
+        movz_x(Reg::X3, 0, 0),
+        movz_x(Reg::X4, 0, 0),
+        svc_op(SyscallOp::ChannelRead),
         // [23] x0 == 1 ? (1 байт payload, 0 handle'ов).
-        CMP_X0_ONE,
+        cmp_x_imm12(Reg::X0, 1),
         // [24] not equal -> fail.
-        B_NE_FAIL,
+        b_ne(7),
         // [25..28] signal bootstrap event.
-        MOV_X0_X21,
-        MOVZ_X1_EVENT_SIGNALED,
-        MOVZ_X2_ZERO,
-        SVC_OBJECT_SIGNAL,
+        mov_x(Reg::X0, Reg::X21),
+        movz_x(Reg::X1, EVENT_SIGNALED as u16, 0),
+        movz_x(Reg::X2, 0, 0),
+        svc_op(SyscallOp::ObjectSignal),
         // [29..30] thread_exit(0).
-        MOVZ_X0_ZERO,
-        SVC_THREAD_EXIT,
+        movz_x(Reg::X0, 0, 0),
+        svc_op(SyscallOp::ThreadExit),
         // [31] fail / fallback - infinite loop, тест валится по timeout-у.
         B_LOOP,
     ];
-
-    let mut bytes = [0u8; NUM_INSTRUCTIONS * 4];
-    for (i, w) in words.iter().enumerate() {
-        bytes[i * 4..(i + 1) * 4].copy_from_slice(&w.to_le_bytes());
-    }
-    bytes
+    words_to_bytes(words)
 }
 
 fn aligned(va: usize) -> PageAlignedVirtualAddress {
@@ -156,7 +106,7 @@ fn channel_via_syscall_round_trip() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = super::user_process_launcher()
+    let info = kernelspace::qemu_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "channel-via-syscall",
             &image,
@@ -167,7 +117,7 @@ fn channel_via_syscall_round_trip() {
         .expect("spawn_user_process must succeed");
     test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
 
-    let scheduler = super::scheduler().clone();
+    let scheduler = kernelspace::qemu_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);

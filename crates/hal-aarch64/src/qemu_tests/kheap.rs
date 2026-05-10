@@ -48,7 +48,7 @@ fn many_aligned_kheap_allocs_after_drop_cycle_succeed() {
 
     let layout =
         core::alloc::Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).expect("PAGE_SIZE valid layout");
-    for i in 0..8 {
+    for i in 0u64..8 {
         // SAFETY: layout валиден.
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
         test_harness_qemu::kassert!(!ptr.is_null());
@@ -56,7 +56,7 @@ fn many_aligned_kheap_allocs_after_drop_cycle_succeed() {
         // SAFETY: 4K-страница, выровнена на 4K.
         #[allow(clippy::cast_ptr_alignment)]
         unsafe {
-            ptr.cast::<u64>().write_volatile(0xA000_0000 + i as u64);
+            ptr.cast::<u64>().write_volatile(0xA000_0000 + i);
         }
     }
 }

@@ -494,7 +494,7 @@ where
         {
             return Err(PreparedUserProcessError::InvalidBootstrapHandle);
         }
-        if prepared.launch.initial_handles.len() > HandleTable::new().capacity() as usize {
+        if prepared.launch.initial_handles.len() > HandleTable::DEFAULT_CAPACITY as usize {
             return Err(PreparedUserProcessError::TooManyInitialHandles);
         }
         Ok(())

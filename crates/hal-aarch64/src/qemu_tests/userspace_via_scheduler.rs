@@ -15,6 +15,10 @@ use syscall::SyscallOp;
 use test_harness_qemu::register_test;
 use userspace::{UserImage, UserSegment};
 
+use super::user_payload::{
+    B_LOOP, Reg, b_ne, cmp_x, mov_x, movz_w, movz_x, strb_w, svc_op, words_to_bytes,
+};
+
 const PAGE_SIZE: usize = 4096;
 /// Lower-half VA для payload - чистый user-AS, никаких пересечений.
 const USER_PAYLOAD_VA: usize = 0x4000_0000;
@@ -22,34 +26,18 @@ const USER_STACK_TOP: usize = USER_PAYLOAD_VA + 16 * PAGE_SIZE;
 /// Минимальный footprint: 1 страница стека достаточна, payload не пишет в стек.
 const USER_STACK_SIZE: usize = PAGE_SIZE;
 
-const SVC_OBJECT_SIGNAL: u32 = svc(SyscallOp::ObjectSignal);
-const SVC_THREAD_EXIT: u32 = svc(SyscallOp::ThreadExit);
-
-const MOVZ_X0_ZERO: u32 = 0xD280_0000;
-const MOVZ_X1_EVENT_SIGNALED: u32 = 0xD280_0021;
-const MOVZ_X2_ZERO: u32 = 0xD280_0002;
-const B_LOOP: u32 = 0x1400_0000;
-
-const fn svc(op: SyscallOp) -> u32 {
-    0xD400_0001 | ((op as u32) << 5)
-}
-
 /// Сборка байт-кода: `ObjectSignal(x0, EVENT_SIGNALED, 0); ThreadExit(0); b .`.
 /// `b .` - fallback на случай возврата (не должен исполниться).
 fn build_payload() -> [u8; 6 * 4] {
     let words = [
-        MOVZ_X1_EVENT_SIGNALED,
-        MOVZ_X2_ZERO,
-        SVC_OBJECT_SIGNAL,
-        MOVZ_X0_ZERO,
-        SVC_THREAD_EXIT,
+        movz_x(Reg::X1, EVENT_SIGNALED as u16, 0),
+        movz_x(Reg::X2, 0, 0),
+        svc_op(SyscallOp::ObjectSignal),
+        movz_x(Reg::X0, 0, 0),
+        svc_op(SyscallOp::ThreadExit),
         B_LOOP,
     ];
-    let mut bytes = [0u8; 6 * 4];
-    for (i, w) in words.iter().enumerate() {
-        bytes[i * 4..(i + 1) * 4].copy_from_slice(&w.to_le_bytes());
-    }
-    bytes
+    words_to_bytes(words)
 }
 
 fn aligned(va: usize) -> PageAlignedVirtualAddress {
@@ -76,7 +64,7 @@ fn userspace_spawn_user_process_runs_to_exit() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = super::user_process_launcher()
+    let info = kernelspace::qemu_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "user-via-scheduler",
             &image,
@@ -87,7 +75,7 @@ fn userspace_spawn_user_process_runs_to_exit() {
         .expect("spawn_user_process must succeed");
     test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
 
-    let scheduler = super::scheduler().clone();
+    let scheduler = kernelspace::qemu_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
@@ -120,56 +108,27 @@ register_test!(
 /// Сборка байт-кода для теста vm_allocate+vm_remap. Все инструкции -
 /// little-endian, 4 байта каждая.
 fn build_vm_payload() -> [u8; 18 * 4] {
-    const SVC_MEMORY_ALLOCATE: u32 = svc(SyscallOp::MemoryAllocate);
-    const SVC_MEMORY_REMAP: u32 = svc(SyscallOp::MemoryRemap);
-
-    // mov  x21, x0                  ; save bootstrap Event handle
-    const MOV_X21_X0: u32 = 0xAA00_03F5;
-    // movz x0, #0x1000              ; size = 4096
-    const MOVZ_X0_PAGE: u32 = 0xD282_0000;
-    // movz x1, #0                   ; flags = ReadWrite
-    const MOVZ_X1_ZERO: u32 = 0xD280_0001;
-    // mov  x19, x0                  ; save VA in callee-preserved reg
-    const MOV_X19_X0: u32 = 0xAA00_03F3;
-    // movz w20, #0x42               ; sentinel byte
-    const MOVZ_W20_SENTINEL: u32 = 0x5280_0854;
-    // strb w20, [x19]               ; убедиться, что страница writable
-    const STRB_W20_X19: u32 = 0x3900_0274;
-    // mov  x0, x19                  ; remap-arg0 = VA
-    const MOV_X0_X19: u32 = 0xAA13_03E0;
-    // movz x1, #0x1000              ; remap-arg1 = size
-    const MOVZ_X1_PAGE: u32 = 0xD282_0001;
-    // movz x2, #1                   ; remap-arg2 = ReadOnly
-    const MOVZ_X2_ONE: u32 = 0xD280_0022;
-    // mov  x0, x21                  ; signal-arg0 = Event handle
-    const MOV_X0_X21: u32 = 0xAA15_03E0;
-
-    let words: [u32; 18] = [
-        MOV_X21_X0,
-        MOVZ_X0_PAGE,
-        MOVZ_X1_ZERO,
-        SVC_MEMORY_ALLOCATE,
-        MOV_X19_X0,
-        MOVZ_W20_SENTINEL,
-        STRB_W20_X19,
-        MOV_X0_X19,
-        MOVZ_X1_PAGE,
-        MOVZ_X2_ONE,
-        SVC_MEMORY_REMAP,
-        MOV_X0_X21,
-        MOVZ_X1_EVENT_SIGNALED,
-        MOVZ_X2_ZERO,
-        SVC_OBJECT_SIGNAL,
-        MOVZ_X0_ZERO,
-        SVC_THREAD_EXIT,
+    let words = [
+        mov_x(Reg::X21, Reg::X0),
+        movz_x(Reg::X0, 0x1000, 0),
+        movz_x(Reg::X1, 0, 0),
+        svc_op(SyscallOp::MemoryAllocate),
+        mov_x(Reg::X19, Reg::X0),
+        movz_w(Reg::X20, 0x42),
+        strb_w(Reg::X20, Reg::X19),
+        mov_x(Reg::X0, Reg::X19),
+        movz_x(Reg::X1, 0x1000, 0),
+        movz_x(Reg::X2, 1, 0),
+        svc_op(SyscallOp::MemoryRemap),
+        mov_x(Reg::X0, Reg::X21),
+        movz_x(Reg::X1, EVENT_SIGNALED as u16, 0),
+        movz_x(Reg::X2, 0, 0),
+        svc_op(SyscallOp::ObjectSignal),
+        movz_x(Reg::X0, 0, 0),
+        svc_op(SyscallOp::ThreadExit),
         B_LOOP,
     ];
-
-    let mut bytes = [0u8; 18 * 4];
-    for (i, w) in words.iter().enumerate() {
-        bytes[i * 4..(i + 1) * 4].copy_from_slice(&w.to_le_bytes());
-    }
-    bytes
+    words_to_bytes(words)
 }
 
 fn userspace_vm_allocate_and_remap() {
@@ -192,12 +151,12 @@ fn userspace_vm_allocate_and_remap() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = super::user_process_launcher()
+    let info = kernelspace::qemu_tests::user_process_launcher()
         .spawn_user_process_with_launch("user-vm-allocate", &image, Priority::highest(), 2, launch)
         .expect("spawn_user_process must succeed");
     test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
 
-    let scheduler = super::scheduler().clone();
+    let scheduler = kernelspace::qemu_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
@@ -220,64 +179,31 @@ register_test!(
 // и следующий vm_allocate выдал тот же самый VA (coalesce + first-fit).
 
 fn build_vm_free_payload() -> [u8; 22 * 4] {
-    const SVC_MEMORY_ALLOCATE: u32 = svc(SyscallOp::MemoryAllocate);
-    const SVC_MEMORY_FREE: u32 = svc(SyscallOp::MemoryFree);
-
-    // mov  x21, x0                  ; save bootstrap Event handle
-    const MOV_X21_X0: u32 = 0xAA00_03F5;
-    // movz x0, #0x1000              ; size = 4096
-    const MOVZ_X0_PAGE: u32 = 0xD282_0000;
-    // movz x1, #0                   ; flags = ReadWrite
-    const MOVZ_X1_ZERO: u32 = 0xD280_0001;
-    // mov  x19, x0                  ; save VA1 in callee-preserved reg
-    const MOV_X19_X0: u32 = 0xAA00_03F3;
-    // movz w20, #0x42               ; sentinel byte
-    const MOVZ_W20_SENTINEL: u32 = 0x5280_0854;
-    // strb w20, [x19]               ; убедиться, что страница writable
-    const STRB_W20_X19: u32 = 0x3900_0274;
-    // mov  x0, x19                  ; free-arg0 = VA1
-    const MOV_X0_X19: u32 = 0xAA13_03E0;
-    // movz x1, #0x1000              ; free-arg1 = size
-    const MOVZ_X1_PAGE: u32 = 0xD282_0001;
-    // cmp  x0, x19                  ; subs xzr, x0, x19, lsl #0
-    const CMP_X0_X19: u32 = 0xEB13_001F;
-    // b.ne +28                      ; imm19 = 7 -> пропустить 6 инстр.
-    //                               ; (signal + thread_exit) и попасть
-    //                               ; на финальный `b .` -> timeout.
-    const B_NE_SKIP: u32 = 0x5400_00E1;
-    // mov  x0, x21                  ; signal-arg0 = Event handle
-    const MOV_X0_X21: u32 = 0xAA15_03E0;
-
-    let words: [u32; 22] = [
-        MOV_X21_X0,
-        MOVZ_X0_PAGE,
-        MOVZ_X1_ZERO,
-        SVC_MEMORY_ALLOCATE,
-        MOV_X19_X0,
-        MOVZ_W20_SENTINEL,
-        STRB_W20_X19,
-        MOV_X0_X19,
-        MOVZ_X1_PAGE,
-        SVC_MEMORY_FREE,
-        MOVZ_X0_PAGE,
-        MOVZ_X1_ZERO,
-        SVC_MEMORY_ALLOCATE,
-        CMP_X0_X19,
-        B_NE_SKIP,
-        MOV_X0_X21,
-        MOVZ_X1_EVENT_SIGNALED,
-        MOVZ_X2_ZERO,
-        SVC_OBJECT_SIGNAL,
-        MOVZ_X0_ZERO,
-        SVC_THREAD_EXIT,
+    let words = [
+        mov_x(Reg::X21, Reg::X0),
+        movz_x(Reg::X0, 0x1000, 0),
+        movz_x(Reg::X1, 0, 0),
+        svc_op(SyscallOp::MemoryAllocate),
+        mov_x(Reg::X19, Reg::X0),
+        movz_w(Reg::X20, 0x42),
+        strb_w(Reg::X20, Reg::X19),
+        mov_x(Reg::X0, Reg::X19),
+        movz_x(Reg::X1, 0x1000, 0),
+        svc_op(SyscallOp::MemoryFree),
+        movz_x(Reg::X0, 0x1000, 0),
+        movz_x(Reg::X1, 0, 0),
+        svc_op(SyscallOp::MemoryAllocate),
+        cmp_x(Reg::X0, Reg::X19),
+        b_ne(7),
+        mov_x(Reg::X0, Reg::X21),
+        movz_x(Reg::X1, EVENT_SIGNALED as u16, 0),
+        movz_x(Reg::X2, 0, 0),
+        svc_op(SyscallOp::ObjectSignal),
+        movz_x(Reg::X0, 0, 0),
+        svc_op(SyscallOp::ThreadExit),
         B_LOOP,
     ];
-
-    let mut bytes = [0u8; 22 * 4];
-    for (i, w) in words.iter().enumerate() {
-        bytes[i * 4..(i + 1) * 4].copy_from_slice(&w.to_le_bytes());
-    }
-    bytes
+    words_to_bytes(words)
 }
 
 fn userspace_vm_allocate_free_reuse_va() {
@@ -300,7 +226,7 @@ fn userspace_vm_allocate_free_reuse_va() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = super::user_process_launcher()
+    let info = kernelspace::qemu_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "user-vm-free-reuse",
             &image,
@@ -311,7 +237,7 @@ fn userspace_vm_allocate_free_reuse_va() {
         .expect("spawn_user_process must succeed");
     test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
 
-    let scheduler = super::scheduler().clone();
+    let scheduler = kernelspace::qemu_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);

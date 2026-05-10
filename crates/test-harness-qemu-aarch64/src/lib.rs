@@ -4,6 +4,7 @@
 #![allow(unsafe_code)]
 
 mod exit;
+pub mod payload;
 mod uart;
 
 use test_harness_qemu::Backend;

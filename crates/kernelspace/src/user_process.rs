@@ -201,7 +201,7 @@ fn prepare_user_process(
     {
         return Err(PreparedUserProcessError::InvalidBootstrapHandle.into());
     }
-    if launch.initial_handles.len() > kobject::HandleTable::new().capacity() as usize {
+    if launch.initial_handles.len() > kobject::HandleTable::DEFAULT_CAPACITY as usize {
         return Err(PreparedUserProcessError::TooManyInitialHandles.into());
     }
 

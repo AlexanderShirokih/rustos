@@ -14,9 +14,6 @@ use super::{
     thread::ThreadObject,
 };
 
-/// Стандартная ёмкость таблицы handle'ов одного процесса.
-const DEFAULT_CAPACITY: u32 = 1024;
-
 /// Per-process слот-таблица handle'ов.
 pub struct HandleTable {
     slots: Vec<Slot>,
@@ -40,8 +37,11 @@ enum SlotState {
 }
 
 impl HandleTable {
+    /// Стандартная ёмкость таблицы handle'ов одного процесса.
+    pub const DEFAULT_CAPACITY: u32 = 1024;
+
     pub fn new() -> Self {
-        Self::with_capacity(DEFAULT_CAPACITY)
+        Self::with_capacity(Self::DEFAULT_CAPACITY)
     }
 
     pub fn with_capacity(capacity: u32) -> Self {

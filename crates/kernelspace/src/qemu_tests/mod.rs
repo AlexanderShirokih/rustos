@@ -30,16 +30,10 @@ use crate::{
 mod allocator;
 mod channel;
 mod channel_full_api;
-mod channel_via_syscall;
 mod event;
 mod event_via_scheduler;
 mod handle_table;
-mod memory_authority_share;
-mod memory_kobject;
-mod process_lifecycle;
 mod smoke;
-// E2E-тест полного пути `SchedulerService::spawn_user_process`.
-mod userspace_via_scheduler;
 
 struct ConsoleAdapter(Arc<dyn ConsoleService>);
 
@@ -60,13 +54,13 @@ static SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
 static USER_PROCESS_LAUNCHER: Once<Arc<dyn UserProcessLauncher>> = Once::new();
 
 /// Доступ к scheduler-сервису из test-кейсов.
-pub(super) fn scheduler() -> &'static Arc<dyn SchedulerService> {
+pub fn scheduler() -> &'static Arc<dyn SchedulerService> {
     SCHEDULER
         .get()
         .expect("SchedulerService must be cached in qemu_tests::run")
 }
 
-pub(super) fn user_process_launcher() -> &'static Arc<dyn UserProcessLauncher> {
+pub fn user_process_launcher() -> &'static Arc<dyn UserProcessLauncher> {
     USER_PROCESS_LAUNCHER
         .get()
         .expect("UserProcessLauncher must be cached in qemu_tests::spawn_qemu_tests_process")
