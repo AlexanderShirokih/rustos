@@ -13,3 +13,4 @@ pub mod runner;
 pub use backend::Backend;
 pub use case::TestCase;
 pub use runner::run_all_tests;
+pub use test_harness_macros::kernel_test;

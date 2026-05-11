@@ -9,6 +9,7 @@
 
 use alloc::vec;
 
+use kernel_tests::kernel_test;
 use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights};
 use memory::{
     MemFlags,
@@ -16,7 +17,6 @@ use memory::{
 };
 use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
 use syscall::SyscallOp;
-use test_harness_qemu::register_test;
 use userspace::{UserImage, UserSegment};
 
 use super::user_payload::{
@@ -94,6 +94,7 @@ fn aligned(va: usize) -> PageAlignedVirtualAddress {
     PageAlignedVirtualAddress::from_usize(va).expect("user VA must be 4K aligned")
 }
 
+#[kernel_test]
 fn mailbox_via_syscall_round_trip() {
     let event = Event::new();
     let payload = build_payload();
@@ -114,7 +115,7 @@ fn mailbox_via_syscall_round_trip() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = kernelspace::qemu_tests::user_process_launcher()
+    let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "mailbox-via-syscall",
             &image,
@@ -123,21 +124,15 @@ fn mailbox_via_syscall_round_trip() {
             launch,
         )
         .expect("spawn_user_process must succeed");
-    test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
+    kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
 
-    let scheduler = kernelspace::qemu_tests::scheduler().clone();
+    let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 500);
+        kernel_tests::kassert!(spins < 500);
     }
 
     let _ = spins;
 }
-
-register_test!(
-    MAILBOX_VIA_SYSCALL_ROUND_TRIP,
-    "mailbox_via_syscall_round_trip",
-    mailbox_via_syscall_round_trip
-);

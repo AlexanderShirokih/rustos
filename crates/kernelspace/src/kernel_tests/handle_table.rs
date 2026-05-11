@@ -3,8 +3,9 @@
 
 extern crate alloc;
 
-use test_harness_qemu::register_test;
+use kernel_tests::kernel_test;
 
+#[kernel_test]
 fn handle_table_basic() {
     use kobject::{Channel, Event, Handle, HandleTable, IpcError, KObject, Rights};
 
@@ -18,34 +19,32 @@ fn handle_table_basic() {
     );
 
     let id = table.insert(handle).expect("insert must succeed");
-    test_harness_qemu::kassert!(table.get_channel(id, Rights::READ).is_ok());
+    kernel_tests::kassert!(table.get_channel(id, Rights::READ).is_ok());
 
     let dup = table
         .duplicate(id, Rights::READ)
         .expect("duplicate must succeed");
-    test_harness_qemu::kassert!(matches!(
+    kernel_tests::kassert!(matches!(
         table.get(dup, Rights::WRITE),
         Err(IpcError::AccessDenied)
     ));
     // Тип Event не совпадает с Channel.
-    test_harness_qemu::kassert!(matches!(
+    kernel_tests::kassert!(matches!(
         table.get_event(id, Rights::READ),
         Err(IpcError::WrongType)
     ));
 
     table.remove(id).expect("remove must succeed");
-    test_harness_qemu::kassert!(matches!(table.remove(id), Err(IpcError::BadHandle)));
+    kernel_tests::kassert!(matches!(table.remove(id), Err(IpcError::BadHandle)));
 
     // Дополнительно: Event handle работает через get_event.
     let event_handle = Handle::new(KObject::Event(Event::new()), Rights::WAIT);
     let eid = table
         .insert(event_handle)
         .expect("event insert must succeed");
-    test_harness_qemu::kassert!(table.get_event(eid, Rights::WAIT).is_ok());
-    test_harness_qemu::kassert!(matches!(
+    kernel_tests::kassert!(table.get_event(eid, Rights::WAIT).is_ok());
+    kernel_tests::kassert!(matches!(
         table.get_channel(eid, Rights::WAIT),
         Err(IpcError::WrongType)
     ));
 }
-
-register_test!(HANDLE_TABLE_BASIC, "handle_table_basic", handle_table_basic);

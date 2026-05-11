@@ -17,6 +17,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
+use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
@@ -26,7 +27,6 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 use scheduler::{AddressSpace, ArchContext};
-use test_harness_qemu::register_test;
 
 use crate::{
     HIGHER_HALF_BASE,
@@ -124,6 +124,7 @@ fn make_user_as_with_probe_page(va: usize, sentinel: u64) -> (Arc<AddressSpace>,
     (user_as, kheap)
 }
 
+#[kernel_test]
 fn ttbr0_carries_asid_after_first_switch() {
     let (user_as, _kva) = make_user_as_with_probe_page(PROBE_VA, 0xDEAD_BEEF);
     let handle = user_as.handle().expect("user handle");
@@ -131,12 +132,13 @@ fn ttbr0_carries_asid_after_first_switch() {
     Aarch64Context::switch_address_space(Some(handle));
     let ttbr0 = read_ttbr0();
     let asid = (ttbr0 >> 48) & 0xFFFF;
-    test_harness_qemu::kassert!(asid != 0);
+    kernel_tests::kassert!(asid != 0);
 
     Aarch64Context::switch_address_space(None);
     core::mem::forget(user_as);
 }
 
+#[kernel_test]
 fn two_user_as_have_distinct_asids() {
     let (as_a, _) = make_user_as_with_probe_page(PROBE_VA, 0x1);
     let (as_b, _) = make_user_as_with_probe_page(PROBE_VA, 0x2);
@@ -152,19 +154,20 @@ fn two_user_as_have_distinct_asids() {
 
     let asid_a = (ttbr_a >> 48) & 0xFFFF;
     let asid_b = (ttbr_b >> 48) & 0xFFFF;
-    test_harness_qemu::kassert!(asid_a != 0);
-    test_harness_qemu::kassert!(asid_b != 0);
-    test_harness_qemu::kassert!(asid_a != asid_b);
+    kernel_tests::kassert!(asid_a != 0);
+    kernel_tests::kassert!(asid_b != 0);
+    kernel_tests::kassert!(asid_a != asid_b);
 
     core::mem::forget(as_a);
     core::mem::forget(as_b);
 }
 
+#[kernel_test]
 fn same_as_keeps_asid_across_switch() {
     let (as_a, _) = make_user_as_with_probe_page(PROBE_VA, 0xAA);
     let h_first = as_a.handle().expect("handle first");
     let h_second = as_a.handle().expect("handle second");
-    test_harness_qemu::kassert_eq!(h_first.tag, h_second.tag);
+    kernel_tests::kassert_eq!(h_first.tag, h_second.tag);
 
     Aarch64Context::switch_address_space(Some(h_first));
     let ttbr_first = read_ttbr0();
@@ -173,11 +176,12 @@ fn same_as_keeps_asid_across_switch() {
     let ttbr_second = read_ttbr0();
     Aarch64Context::switch_address_space(None);
 
-    test_harness_qemu::kassert_eq!(ttbr_first, ttbr_second);
+    kernel_tests::kassert_eq!(ttbr_first, ttbr_second);
 
     core::mem::forget(as_a);
 }
 
+#[kernel_test]
 fn user_pages_have_ng_bit_set() {
     let (user_as, _) = make_user_as_with_probe_page(PROBE_VA, 0xCC);
     let mapper = user_as.mapper().expect("user mapper");
@@ -186,10 +190,11 @@ fn user_pages_have_ng_bit_set() {
         .query_leaf_raw(va)
         .expect("leaf must exist");
     // nG бит - `[11]`.
-    test_harness_qemu::kassert_eq!((raw >> 11) & 1, 1);
+    kernel_tests::kassert_eq!((raw >> 11) & 1, 1);
     core::mem::forget(user_as);
 }
 
+#[kernel_test]
 fn tcr_as_matches_runtime_asid_width() {
     let width = IdAa64Mmfr0::<EL1>::asid_width();
     let tcr = read_tcr();
@@ -198,7 +203,7 @@ fn tcr_as_matches_runtime_asid_width() {
         crate::memory::regs::id_aa64mmfr0::AsidWidth::Bits16 => 1,
         crate::memory::regs::id_aa64mmfr0::AsidWidth::Bits8 => 0,
     };
-    test_harness_qemu::kassert_eq!(as_bit, expected);
+    kernel_tests::kassert_eq!(as_bit, expected);
 }
 
 /// Активирует много AS подряд, чтобы спровоцировать rollover. На QEMU
@@ -207,13 +212,14 @@ fn tcr_as_matches_runtime_asid_width() {
 /// окончательно: выделяем чуть выше предела по числу одновременно живых AS,
 /// но drop'аем сразу после проверки, и аллокатор лениво переиспользует слоты
 /// на следующем rollover'е.
+#[kernel_test]
 fn rollover_smoke() {
     let (probe_as, kva_a) = make_user_as_with_probe_page(PROBE_VA, 0x1234);
     let h_probe = probe_as.handle().expect("handle");
     Aarch64Context::switch_address_space(Some(h_probe));
     // SAFETY: PROBE_VA замаплен с UserRW, чтение валидно.
     let observed = unsafe { (PROBE_VA as *const u64).read_volatile() };
-    test_harness_qemu::kassert_eq!(observed, 0x1234);
+    kernel_tests::kassert_eq!(observed, 0x1234);
     Aarch64Context::switch_address_space(None);
 
     // Одна страница переиспользуется во всех AS - чтобы не съедать RAM
@@ -243,7 +249,7 @@ fn rollover_smoke() {
         Aarch64Context::switch_address_space(Some(h));
         // SAFETY: PROBE_VA+4K замаплен с UserRW.
         let v = unsafe { ((PROBE_VA + 0x1000) as *const u64).read_volatile() };
-        test_harness_qemu::kassert_eq!(v, 0x5555);
+        kernel_tests::kassert_eq!(v, 0x5555);
         Aarch64Context::switch_address_space(None);
         core::mem::forget(a);
     }
@@ -253,37 +259,10 @@ fn rollover_smoke() {
     Aarch64Context::switch_address_space(Some(h_probe2));
     // SAFETY: см. выше.
     let observed2 = unsafe { (PROBE_VA as *const u64).read_volatile() };
-    test_harness_qemu::kassert_eq!(observed2, 0x1234);
+    kernel_tests::kassert_eq!(observed2, 0x1234);
     Aarch64Context::switch_address_space(None);
 
     let _ = kva_a;
     let _ = shared_kheap;
     core::mem::forget(probe_as);
 }
-
-register_test!(
-    ASID_TTBR0_CARRIES_ASID,
-    "ttbr0_carries_asid_after_first_switch",
-    ttbr0_carries_asid_after_first_switch
-);
-register_test!(
-    ASID_TWO_AS_DISTINCT,
-    "two_user_as_have_distinct_asids",
-    two_user_as_have_distinct_asids
-);
-register_test!(
-    ASID_SAME_AS_KEEPS,
-    "same_as_keeps_asid_across_switch",
-    same_as_keeps_asid_across_switch
-);
-register_test!(
-    ASID_USER_PAGES_NG,
-    "user_pages_have_ng_bit_set",
-    user_pages_have_ng_bit_set
-);
-register_test!(
-    ASID_TCR_AS_RUNTIME,
-    "tcr_as_matches_runtime_asid_width",
-    tcr_as_matches_runtime_asid_width
-);
-register_test!(ASID_ROLLOVER_SMOKE, "rollover_smoke", rollover_smoke);

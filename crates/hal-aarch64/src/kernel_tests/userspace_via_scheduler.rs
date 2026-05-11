@@ -5,6 +5,7 @@
 
 use alloc::vec;
 
+use kernel_tests::kernel_test;
 use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights};
 use memory::{
     MemFlags,
@@ -12,7 +13,6 @@ use memory::{
 };
 use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
 use syscall::SyscallOp;
-use test_harness_qemu::register_test;
 use userspace::{UserImage, UserSegment};
 
 use super::user_payload::{
@@ -44,6 +44,7 @@ fn aligned(va: usize) -> PageAlignedVirtualAddress {
     PageAlignedVirtualAddress::from_usize(va).expect("user VA must be 4K aligned")
 }
 
+#[kernel_test]
 fn userspace_spawn_user_process_runs_to_exit() {
     let event = Event::new();
     let payload = build_payload();
@@ -64,7 +65,7 @@ fn userspace_spawn_user_process_runs_to_exit() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = kernelspace::qemu_tests::user_process_launcher()
+    let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "user-via-scheduler",
             &image,
@@ -73,24 +74,18 @@ fn userspace_spawn_user_process_runs_to_exit() {
             launch,
         )
         .expect("spawn_user_process must succeed");
-    test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
+    kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
 
-    let scheduler = kernelspace::qemu_tests::scheduler().clone();
+    let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 500);
+        kernel_tests::kassert!(spins < 500);
     }
 
     let _ = spins;
 }
-
-register_test!(
-    USERSPACE_SPAWN_USER_PROCESS_RUNS_TO_EXIT,
-    "userspace_spawn_user_process_runs_to_exit",
-    userspace_spawn_user_process_runs_to_exit
-);
 
 // vm_allocate + vm_remap E2E через user-payload.
 //
@@ -131,6 +126,7 @@ fn build_vm_payload() -> [u8; 18 * 4] {
     words_to_bytes(words)
 }
 
+#[kernel_test]
 fn userspace_vm_allocate_and_remap() {
     let event = Event::new();
     let payload = build_vm_payload();
@@ -151,27 +147,21 @@ fn userspace_vm_allocate_and_remap() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = kernelspace::qemu_tests::user_process_launcher()
+    let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch("user-vm-allocate", &image, Priority::highest(), 2, launch)
         .expect("spawn_user_process must succeed");
-    test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
+    kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
 
-    let scheduler = kernelspace::qemu_tests::scheduler().clone();
+    let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 500);
+        kernel_tests::kassert!(spins < 500);
     }
 
     let _ = spins;
 }
-
-register_test!(
-    USERSPACE_VM_ALLOCATE_AND_REMAP,
-    "userspace_vm_allocate_and_remap",
-    userspace_vm_allocate_and_remap
-);
 
 // vm_allocate + vm_free + vm_allocate E2E (доказательство реюза VA).
 //
@@ -206,6 +196,7 @@ fn build_vm_free_payload() -> [u8; 22 * 4] {
     words_to_bytes(words)
 }
 
+#[kernel_test]
 fn userspace_vm_allocate_free_reuse_va() {
     let event = Event::new();
     let payload = build_vm_free_payload();
@@ -226,7 +217,7 @@ fn userspace_vm_allocate_free_reuse_va() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = kernelspace::qemu_tests::user_process_launcher()
+    let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "user-vm-free-reuse",
             &image,
@@ -235,21 +226,15 @@ fn userspace_vm_allocate_free_reuse_va() {
             launch,
         )
         .expect("spawn_user_process must succeed");
-    test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
+    kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
 
-    let scheduler = kernelspace::qemu_tests::scheduler().clone();
+    let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 500);
+        kernel_tests::kassert!(spins < 500);
     }
 
     let _ = spins;
 }
-
-register_test!(
-    USERSPACE_VM_ALLOCATE_FREE_REUSE_VA,
-    "userspace_vm_allocate_free_reuse_va",
-    userspace_vm_allocate_free_reuse_va
-);

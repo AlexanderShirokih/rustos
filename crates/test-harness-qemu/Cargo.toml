@@ -4,9 +4,13 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[lib]
+name = "kernel_tests"
+
 [dependencies]
 io = { workspace = true }
 spin = { workspace = true }
+test-harness-macros = { workspace = true }
 
 [lints]
 workspace = true

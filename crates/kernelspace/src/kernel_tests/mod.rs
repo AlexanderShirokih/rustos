@@ -2,13 +2,14 @@
 //!
 //! `kmain` после bootstrap'а создаёт init-таск и под этой фичей вызывает
 //! [`run`] - он подключает console writer и запускает все
-//! зарегистрированные тест-кейсы через `test_harness_qemu::run_all_tests()`.
+//! зарегистрированные тест-кейсы через `kernel_tests::run_all_tests()`.
 //!
-//! Кейсы распределены по подмодулям и регистрируются через
-//! `register_test!`. Линкер-секция `.tests.kernel` собирает их со всех
-//! модулей, поэтому новый файл достаточно объявить ниже через `mod`,
-//! без дополнительных правок раннера. Тесты работают в полноценном
-//! окружении ядра: живой scheduler, драйверы, прерывания, аллокатор.
+//! Кейсы распределены по подмодулям и обычно помечаются атрибутом
+//! `#[kernel_test]`. Линкер-секция `.tests.kernel` собирает их со всех
+//! модулей, поэтому новый файл достаточно объявить ниже через `mod`:
+//! раннер подхватит новый тест автоматически. Тесты работают в
+//! полноценном окружении ядра: живой scheduler, драйверы, прерывания,
+//! аллокатор.
 
 #![allow(unsafe_code)]
 
@@ -57,19 +58,19 @@ static USER_PROCESS_LAUNCHER: Once<Arc<dyn UserProcessLauncher>> = Once::new();
 pub fn scheduler() -> &'static Arc<dyn SchedulerService> {
     SCHEDULER
         .get()
-        .expect("SchedulerService must be cached in qemu_tests::run")
+        .expect("SchedulerService must be cached in kernel_tests::run")
 }
 
 pub fn user_process_launcher() -> &'static Arc<dyn UserProcessLauncher> {
     USER_PROCESS_LAUNCHER
         .get()
-        .expect("UserProcessLauncher must be cached in qemu_tests::spawn_qemu_tests_process")
+        .expect("UserProcessLauncher must be cached in kernel_tests::spawn_kernel_tests_process")
 }
 
 /// Init-таск под `feature = "qemu-tests"`: спавнит worker-процесс
-/// с приоритетом `highest`, который вызывает [`run`] и завершает QEMU
+/// с приоритетом `highest`, который вызывает [`run`] и завершает эмулятор
 /// через ARM semihosting.
-pub fn spawn_qemu_tests_process<A>(
+pub fn spawn_kernel_tests_process<A>(
     scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
     kernel: &mut KernelContext,
 ) where
@@ -96,7 +97,7 @@ pub fn spawn_qemu_tests_process<A>(
 
     scheduler
         .spawn(
-            scheduler::SpawnConfig::new("qemu-tests").priority(scheduler::Priority::highest()),
+            scheduler::SpawnConfig::new("kernel-tests").priority(scheduler::Priority::highest()),
             move || {
                 let captured = kernel_ptr;
                 // SAFETY: см. комментарий выше.
@@ -104,7 +105,7 @@ pub fn spawn_qemu_tests_process<A>(
                 run(kernel)
             },
         )
-        .expect("qemu-tests process spawn must succeed");
+        .expect("kernel-tests process spawn must succeed");
 }
 
 /// Подключает harness к ядру и запускает все зарегистрированные кейсы.
@@ -113,17 +114,17 @@ pub fn run(kernel: &mut KernelContext) -> ! {
     kernel.with_runtime_state(|services, _| {
         let console = services
             .require_console()
-            .expect("ConsoleService must be available for qemu-tests");
+            .expect("ConsoleService must be available for kernel-tests");
         ADAPTER.call_once(|| ConsoleAdapter(console));
 
         let scheduler = services
             .require_scheduler()
-            .expect("SchedulerService must be available for qemu-tests");
+            .expect("SchedulerService must be available for kernel-tests");
         SCHEDULER.call_once(|| scheduler);
     });
 
     let writer: &'static (dyn Writer + Send + Sync) =
         ADAPTER.get().expect("ADAPTER initialised above");
-    test_harness_qemu::runner::install_writer(writer);
-    test_harness_qemu::run_all_tests()
+    kernel_tests::runner::install_writer(writer);
+    kernel_tests::run_all_tests()
 }

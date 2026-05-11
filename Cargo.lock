@@ -472,11 +472,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-harness-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "test-harness-qemu"
 version = "0.1.0"
 dependencies = [
  "io",
  "spin",
+ "test-harness-macros",
 ]
 
 [[package]]

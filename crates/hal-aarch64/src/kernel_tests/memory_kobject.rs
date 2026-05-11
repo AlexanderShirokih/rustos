@@ -3,6 +3,7 @@
 use alloc::{sync::Arc, vec};
 use core::num::NonZeroUsize;
 
+use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights};
 use memory::{
@@ -12,7 +13,6 @@ use memory::{
 };
 use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
 use syscall::SyscallOp;
-use test_harness_qemu::register_test;
 use userspace::{UserImage, UserSegment};
 
 use super::user_payload::{B_LOOP, Builder, Reg, b_ne, cmp_x, mov_x, str_x, svc_op};
@@ -32,8 +32,8 @@ const PATTERN: u64 = ((PATTERN_HI as u64) << 48)
     | (PATTERN_LO as u64);
 
 /// HandleId-ы для свежевышедшей таблицы детерминированы:
-/// первый insert — slot=0 generation=1 → raw = 0x0001_0000.
-/// Второй — slot=1 generation=1 → raw = 0x0001_0001.
+/// первый insert - slot=0 generation=1 -> raw = 0x0001_0000.
+/// Второй - slot=1 generation=1 -> raw = 0x0001_0001.
 const HANDLE_EVENT_RAW: u32 = 0x0001_0001;
 
 const EXPECTED_SIZE: u64 = PAGE_SIZE as u64;
@@ -132,6 +132,7 @@ fn aligned(va: usize) -> PageAlignedVirtualAddress {
     PageAlignedVirtualAddress::from_usize(va).expect("user VA must be 4K aligned")
 }
 
+#[kernel_test]
 fn userspace_memory_kobject_map_and_inspect() {
     let fa = syscall_bridge::frame_allocator().expect("FrameAllocator must be installed");
     let region = MemoryRegion::create_virtual(fa, NonZeroUsize::new(1).unwrap(), AccessMask::RW)
@@ -162,7 +163,7 @@ fn userspace_memory_kobject_map_and_inspect() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![region_handle, event_handle])
         .bootstrap_handle(0);
-    let info = kernelspace::qemu_tests::user_process_launcher()
+    let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "user-memory-kobject",
             &image,
@@ -171,24 +172,18 @@ fn userspace_memory_kobject_map_and_inspect() {
             launch,
         )
         .expect("spawn_user_process must succeed");
-    test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 2);
+    kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 2);
     // Подтверждаем детерминированные raw-значения, на которых построен payload.
-    test_harness_qemu::kassert_eq!(info.initial_handle_ids[0].raw().get(), 0x0001_0000);
-    test_harness_qemu::kassert_eq!(info.initial_handle_ids[1].raw().get(), 0x0001_0001);
+    kernel_tests::kassert_eq!(info.initial_handle_ids[0].raw().get(), 0x0001_0000);
+    kernel_tests::kassert_eq!(info.initial_handle_ids[1].raw().get(), 0x0001_0001);
 
-    let scheduler = kernelspace::qemu_tests::scheduler().clone();
+    let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 500);
+        kernel_tests::kassert!(spins < 500);
     }
 
     let _ = spins;
 }
-
-register_test!(
-    USERSPACE_MEMORY_KOBJECT_MAP_AND_INSPECT,
-    "userspace_memory_kobject_map_and_inspect",
-    userspace_memory_kobject_map_and_inspect
-);

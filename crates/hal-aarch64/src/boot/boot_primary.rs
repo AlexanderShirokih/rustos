@@ -77,7 +77,7 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
     )));
 
     #[cfg(feature = "qemu-tests")]
-    test_harness_qemu::runner::install_backend(&test_harness_qemu_aarch64::BACKEND);
+    kernel_tests::runner::install_backend(&test_harness_qemu_aarch64::BACKEND);
 
     kmain::<Aarch64Context, _>(
         driver_scanner,
@@ -89,13 +89,13 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
 }
 
 /// Возвращает init-таск для текущей сборочной фичи: production-init
-/// или qemu-tests harness. Вынесено в отдельную функцию, чтобы держать
-/// fea-выбор в одном месте.
+/// или kernel-tests harness. Вынесено в отдельную функцию, чтобы держать
+/// feature-выбор в одном месте.
 fn pick_init_task()
 -> fn(&Scheduler<Aarch64Context, KernelTimerSource, Bootstrapped>, &mut KernelContext) {
     #[cfg(feature = "qemu-tests")]
     {
-        kernelspace::qemu_tests::spawn_qemu_tests_process::<Aarch64Context>
+        kernelspace::kernel_tests::spawn_kernel_tests_process::<Aarch64Context>
     }
     #[cfg(not(feature = "qemu-tests"))]
     {

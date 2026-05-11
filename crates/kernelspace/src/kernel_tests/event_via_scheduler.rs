@@ -2,12 +2,13 @@
 //! что сигнал, поднятый отдельным потоком после `sleep_ms`, корректно
 //! будит ожидающего на signal-бите.
 
+use kernel_tests::kernel_test;
 use kobject::{Event, Handle, KObject, Rights, install_handle, object_wait_one};
 use scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
-use test_harness_qemu::register_test;
 
 const SIGNAL_BIT: u32 = 1 << 0;
 
+#[kernel_test]
 fn event_signal_after_deadline() {
     let event = Event::new();
 
@@ -33,12 +34,6 @@ fn event_signal_after_deadline() {
     let observed =
         object_wait_one(event_id, SIGNAL_BIT, None).expect("wait must complete via SIGNAL_BIT");
 
-    test_harness_qemu::kassert!(observed & SIGNAL_BIT == SIGNAL_BIT);
-    test_harness_qemu::kassert!(event.peek() & SIGNAL_BIT == SIGNAL_BIT);
+    kernel_tests::kassert!(observed & SIGNAL_BIT == SIGNAL_BIT);
+    kernel_tests::kassert!(event.peek() & SIGNAL_BIT == SIGNAL_BIT);
 }
-
-register_test!(
-    EVENT_SIGNAL_AFTER_DEADLINE,
-    "event_signal_after_deadline",
-    event_signal_after_deadline
-);

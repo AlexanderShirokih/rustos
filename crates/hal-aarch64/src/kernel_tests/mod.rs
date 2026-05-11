@@ -1,4 +1,4 @@
-//! AArch64-специфичные QEMU-тесты.
+//! AArch64-специфичные kernel-тесты.
 
 mod address_space;
 mod asid;

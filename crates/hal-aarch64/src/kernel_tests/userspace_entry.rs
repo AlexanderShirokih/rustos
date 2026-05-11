@@ -28,6 +28,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, install_handle};
 use memory::{
@@ -42,7 +43,6 @@ use scheduler::{
 };
 use spin::Once;
 use syscall::SyscallOp;
-use test_harness_qemu::register_test;
 use test_harness_qemu_aarch64::payload::{B_LOOP, Instruction, Reg, movz_x, svc};
 
 use crate::{
@@ -135,6 +135,7 @@ static USER_AS_ROOT: AtomicU64 = AtomicU64::new(0);
 static USER_AS_HOLDER: Once<Arc<AddressSpace>> = Once::new();
 
 #[allow(clippy::similar_names)]
+#[kernel_test]
 fn userspace_eret_to_el0_invokes_dispatcher() {
     let event = Event::new();
     let handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
@@ -183,17 +184,17 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
     let payload_raw = aarch64_mapper
         .query_leaf_raw(payload_va)
         .expect("payload leaf must exist after remap");
-    test_harness_qemu::kassert_eq!(payload_raw & 0b11, 0b11);
-    test_harness_qemu::kassert_eq!((payload_raw >> 6) & 0b11, 0b11); // AP=UserRO
-    test_harness_qemu::kassert_eq!((payload_raw >> 10) & 1, 1); // AF=1
-    test_harness_qemu::kassert_eq!((payload_raw >> 53) & 1, 1); // PXN=1
-    test_harness_qemu::kassert_eq!((payload_raw >> 54) & 1, 0); // UXN=0
+    kernel_tests::kassert_eq!(payload_raw & 0b11, 0b11);
+    kernel_tests::kassert_eq!((payload_raw >> 6) & 0b11, 0b11); // AP=UserRO
+    kernel_tests::kassert_eq!((payload_raw >> 10) & 1, 1); // AF=1
+    kernel_tests::kassert_eq!((payload_raw >> 53) & 1, 1); // PXN=1
+    kernel_tests::kassert_eq!((payload_raw >> 54) & 1, 0); // UXN=0
 
     let stack_raw = aarch64_mapper
         .query_leaf_raw(stack_va)
         .expect("stack leaf must exist");
-    test_harness_qemu::kassert_eq!((stack_raw >> 6) & 0b11, 0b01); // AP=UserRW
-    test_harness_qemu::kassert_eq!((stack_raw >> 54) & 1, 1); // UXN=1
+    kernel_tests::kassert_eq!((stack_raw >> 6) & 0b11, 0b01); // AP=UserRW
+    kernel_tests::kassert_eq!((stack_raw >> 54) & 1, 1); // UXN=1
 
     let user_stack_top = (USER_TEST_STACK_VA + PAGE_SIZE) & !0xF;
 
@@ -241,9 +242,3 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
         assert!(spins <= 250, "EL0 payload didn't signal after 5s");
     }
 }
-
-register_test!(
-    USERSPACE_ERET_TO_EL0_INVOKES_DISPATCHER,
-    "userspace_eret_to_el0_invokes_dispatcher",
-    userspace_eret_to_el0_invokes_dispatcher
-);

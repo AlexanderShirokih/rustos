@@ -1,10 +1,9 @@
 //! Минимальная проверка работоспособности харнесса.
 
-use test_harness_qemu::register_test;
+use kernel_tests::kernel_test;
 
+#[kernel_test]
 fn smoke() {
     let x = core::hint::black_box(2);
-    test_harness_qemu::kassert_eq!(x + x, 4);
+    kernel_tests::kassert_eq!(x + x, 4);
 }
-
-register_test!(SMOKE_TEST, "smoke", smoke);

@@ -11,6 +11,7 @@
 
 use alloc::vec;
 
+use kernel_tests::kernel_test;
 use kobject::{Channel, EVENT_SIGNALED, Event, Handle, KObject, Rights};
 use memory::{
     MemFlags,
@@ -19,7 +20,6 @@ use memory::{
 };
 use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
 use syscall::SyscallOp;
-use test_harness_qemu::register_test;
 use userspace::{UserImage, UserSegment};
 
 use super::user_payload::{
@@ -199,6 +199,7 @@ fn aligned(va: usize) -> PageAlignedVirtualAddress {
     PageAlignedVirtualAddress::from_usize(va).expect("user VA must be 4K aligned")
 }
 
+#[kernel_test]
 fn userspace_memory_share_region() {
     let event = Event::new();
     let (producer_end, consumer_end) = Channel::create_pair(0);
@@ -251,7 +252,7 @@ fn userspace_memory_share_region() {
     // но так путь короче.
     let consumer_launch =
         UserProcessLaunch::new().initial_handles(vec![consumer_chan_handle, event_handle]);
-    kernelspace::qemu_tests::user_process_launcher()
+    kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "memory-share-consumer",
             &consumer_image,
@@ -262,7 +263,7 @@ fn userspace_memory_share_region() {
         .expect("consumer spawn must succeed");
 
     let producer_launch = UserProcessLaunch::new().initial_handles(vec![producer_chan_handle]);
-    kernelspace::qemu_tests::user_process_launcher()
+    kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "memory-share-producer",
             &producer_image,
@@ -272,19 +273,13 @@ fn userspace_memory_share_region() {
         )
         .expect("producer spawn must succeed");
 
-    let scheduler = kernelspace::qemu_tests::scheduler().clone();
+    let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 500);
+        kernel_tests::kassert!(spins < 500);
     }
 
     let _ = spins;
 }
-
-register_test!(
-    USERSPACE_MEMORY_SHARE_REGION,
-    "userspace_memory_share_region",
-    userspace_memory_share_region
-);

@@ -20,6 +20,7 @@ mod sched;
 mod system;
 
 #[cfg(feature = "qemu-tests")]
+#[path = "kernel_tests/mod.rs"]
 mod qemu_tests;
 
 extern crate drivers_common_aarch64;
@@ -52,7 +53,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[cfg(all(not(test), feature = "qemu-tests"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    use test_harness_qemu::backend::Backend;
+    use kernel_tests::Backend;
 
     klog::fatal!("[TEST-FAIL: panic] {}", info);
     test_harness_qemu_aarch64::BACKEND.exit(1)

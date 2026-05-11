@@ -4,8 +4,9 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use test_harness_qemu::register_test;
+use kernel_tests::kernel_test;
 
+#[kernel_test]
 fn event_signal() {
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -21,7 +22,7 @@ fn event_signal() {
     }
 
     let event = Event::new();
-    test_harness_qemu::kassert_eq!(event.peek(), 0);
+    kernel_tests::kassert_eq!(event.peek(), 0);
 
     let flag = Arc::new(Flag {
         fired: AtomicBool::new(false),
@@ -29,11 +30,9 @@ fn event_signal() {
     event
         .signals()
         .register_waiter(EVENT_SIGNALED, flag.clone());
-    test_harness_qemu::kassert!(!flag.fired.load(Ordering::Acquire));
+    kernel_tests::kassert!(!flag.fired.load(Ordering::Acquire));
 
     event.signal(EVENT_SIGNALED, 0);
-    test_harness_qemu::kassert!(flag.fired.load(Ordering::Acquire));
-    test_harness_qemu::kassert!(event.peek() & EVENT_SIGNALED != 0);
+    kernel_tests::kassert!(flag.fired.load(Ordering::Acquire));
+    kernel_tests::kassert!(event.peek() & EVENT_SIGNALED != 0);
 }
-
-register_test!(EVENT_SIGNAL, "event_signal", event_signal);

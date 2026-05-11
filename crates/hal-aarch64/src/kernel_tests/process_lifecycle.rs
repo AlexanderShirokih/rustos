@@ -9,6 +9,7 @@
 
 use alloc::vec;
 
+use kernel_tests::kernel_test;
 use kobject::{
     EVENT_SIGNALED, Event, Handle, KObject, PROCESS_TERMINATED, Rights, THREAD_TERMINATED,
 };
@@ -18,7 +19,6 @@ use memory::{
 };
 use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
 use syscall::SyscallOp;
-use test_harness_qemu::register_test;
 use userspace::{UserImage, UserSegment};
 
 use super::user_payload::{B_LOOP, Reg, cbz_x, mov_x, movz_x, svc_op, tbnz_x, words_to_bytes};
@@ -77,6 +77,7 @@ fn aligned(va: usize) -> PageAlignedVirtualAddress {
     PageAlignedVirtualAddress::from_usize(va).expect("user VA must be 4K aligned")
 }
 
+#[kernel_test]
 fn process_lifecycle_self_handles_and_exit_code() {
     let event = Event::new();
     let payload = build_payload();
@@ -97,40 +98,34 @@ fn process_lifecycle_self_handles_and_exit_code() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = kernelspace::qemu_tests::user_process_launcher()
+    let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch("process-lifecycle", &image, Priority::highest(), 2, launch)
         .expect("spawn_user_process must succeed");
 
     let process_object = info.process_object.clone();
     let thread_object = info.thread_object.clone();
 
-    let scheduler = kernelspace::qemu_tests::scheduler().clone();
+    let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & EVENT_SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 500);
+        kernel_tests::kassert!(spins < 500);
     }
 
     spins = 0;
     while thread_object.peek() & THREAD_TERMINATED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 500);
+        kernel_tests::kassert!(spins < 500);
     }
-    test_harness_qemu::kassert_eq!(thread_object.exit_code(), PAYLOAD_EXIT_CODE);
+    kernel_tests::kassert_eq!(thread_object.exit_code(), PAYLOAD_EXIT_CODE);
 
     spins = 0;
     while process_object.peek() & PROCESS_TERMINATED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 500);
+        kernel_tests::kassert!(spins < 500);
     }
-    test_harness_qemu::kassert_eq!(process_object.exit_code(), PAYLOAD_EXIT_CODE);
+    kernel_tests::kassert_eq!(process_object.exit_code(), PAYLOAD_EXIT_CODE);
 }
-
-register_test!(
-    PROCESS_LIFECYCLE_SELF_HANDLES_AND_EXIT_CODE,
-    "process_lifecycle_self_handles_and_exit_code",
-    process_lifecycle_self_handles_and_exit_code
-);

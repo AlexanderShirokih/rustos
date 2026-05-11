@@ -4,6 +4,7 @@
 
 use alloc::vec;
 
+use kernel_tests::kernel_test;
 use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, THREAD_TERMINATED};
 use memory::{
     MemFlags,
@@ -11,7 +12,6 @@ use memory::{
 };
 use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
 use syscall::{SyscallOp, USER_IMAGE_DESC_SIZE, USER_SEGMENT_SIZE, UserMemFlags};
-use test_harness_qemu::register_test;
 use test_harness_qemu_aarch64::payload::Instruction;
 use userspace::{UserImage, UserSegment};
 
@@ -340,6 +340,7 @@ fn build_parent_payload() -> alloc::vec::Vec<u8> {
     bytes
 }
 
+#[kernel_test]
 fn userspace_self_spawn_via_syscalls() {
     let event = Event::new();
     let payload = build_parent_payload();
@@ -369,20 +370,20 @@ fn userspace_self_spawn_via_syscalls() {
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
-    let info = kernelspace::qemu_tests::user_process_launcher()
+    let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch("user-self-spawn", &image, Priority::highest(), 2, launch)
         .expect("spawn parent must succeed");
-    test_harness_qemu::kassert_eq!(info.initial_handle_ids.len(), 1);
+    kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
     let parent_thread = info.thread_object.clone();
 
-    let scheduler = kernelspace::qemu_tests::scheduler().clone();
+    let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
     while event.peek() & (SUCCESS_SIGNAL | FAILURE_SIGNAL) == 0
         && parent_thread.peek() & THREAD_TERMINATED == 0
     {
         scheduler.sleep_ms(10);
         spins += 1;
-        test_harness_qemu::kassert!(spins < 300, "self-spawn parent did not report status");
+        kernel_tests::kassert!(spins < 300, "self-spawn parent did not report status");
     }
 
     let observed = event.peek();
@@ -391,10 +392,10 @@ fn userspace_self_spawn_via_syscalls() {
         while parent_thread.peek() & THREAD_TERMINATED == 0 {
             scheduler.sleep_ms(10);
             exit_spins += 1;
-            test_harness_qemu::kassert!(exit_spins < 50, "self-spawn failure path did not exit");
+            kernel_tests::kassert!(exit_spins < 50, "self-spawn failure path did not exit");
         }
         let code = parent_thread.exit_code();
-        test_harness_qemu::kassert!(
+        kernel_tests::kassert!(
             false,
             "userspace self-spawn payload failed at stage {} ({})",
             code,
@@ -402,7 +403,7 @@ fn userspace_self_spawn_via_syscalls() {
         );
     }
 
-    test_harness_qemu::kassert!(
+    kernel_tests::kassert!(
         observed & SUCCESS_SIGNAL != 0,
         "self-spawn parent exited without success signal (signals={:#x}, terminated={})",
         observed,
@@ -428,9 +429,3 @@ fn fail_stage_name(code: i32) -> &'static str {
         _ => "unknown",
     }
 }
-
-register_test!(
-    USERSPACE_SELF_SPAWN_VIA_SYSCALLS,
-    "userspace_self_spawn_via_syscalls",
-    userspace_self_spawn_via_syscalls
-);

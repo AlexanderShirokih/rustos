@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 default = []
-# Под этим флагом kmain после bootstrap'а зовёт `test_harness_qemu::run_all_tests()`
+# Под этим флагом kmain после bootstrap'а зовёт `kernel_tests::run_all_tests()`
 # из init-таска и завершает QEMU через ARM semihosting.
 qemu-tests = [
     "dep:test-harness-qemu",

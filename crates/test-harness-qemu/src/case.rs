@@ -1,4 +1,4 @@
-//! Дескриптор тест-кейса и макрос регистрации в линкер-секции.
+//! Дескриптор тест-кейса и низкоуровневая регистрация в линкер-секции.
 
 #![allow(unsafe_code)]
 
@@ -10,9 +10,13 @@ pub struct TestCase {
 
 /// Регистрирует тест-кейс в секции `.tests.kernel`.
 ///
+/// Обычно вызывается не напрямую, а через атрибут [`kernel_test`].
+///
 /// ```ignore
-/// fn meta_test() { /* ... */ }
-/// test_harness_qemu::register_test!(META_TEST, "meta", meta_test);
+/// use kernel_tests::kernel_test;
+///
+/// #[kernel_test]
+/// fn meta_test() {}
 /// ```
 #[macro_export]
 macro_rules! register_test {

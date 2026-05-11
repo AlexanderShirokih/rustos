@@ -21,6 +21,6 @@ pub use user_process::{
 };
 
 #[cfg(feature = "qemu-tests")]
-pub mod qemu_tests;
+pub mod kernel_tests;
 
 mod services;

@@ -21,6 +21,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 static HOLD_A: AtomicU64 = AtomicU64::new(0);
 static HOLD_B: AtomicU64 = AtomicU64::new(0);
 
+use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
@@ -29,7 +30,6 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 use scheduler::{AddressSpace, ArchContext};
-use test_harness_qemu::register_test;
 
 use crate::{HIGHER_HALF_BASE, sched::Aarch64Context};
 
@@ -116,6 +116,7 @@ fn read_probe_via_user_as(user_as: &AddressSpace) -> u64 {
     }
 }
 
+#[kernel_test]
 fn process_a_and_b_see_distinct_memory_at_same_va() {
     let sentinel_a: u64 = 0xA1A1_A1A1_A1A1_A1A1;
     let sentinel_b: u64 = 0xB2B2_B2B2_B2B2_B2B2;
@@ -123,8 +124,8 @@ fn process_a_and_b_see_distinct_memory_at_same_va() {
     let (as_a, _kva_a) = make_user_as_with_probe_page(sentinel_a);
     let (as_b, _kva_b) = make_user_as_with_probe_page(sentinel_b);
 
-    test_harness_qemu::kassert_eq!(read_probe_via_user_as(&as_a), sentinel_a);
-    test_harness_qemu::kassert_eq!(read_probe_via_user_as(&as_b), sentinel_b);
+    kernel_tests::kassert_eq!(read_probe_via_user_as(&as_a), sentinel_a);
+    kernel_tests::kassert_eq!(read_probe_via_user_as(&as_b), sentinel_b);
     // Возвращаемся в kernel-AS.
     Aarch64Context::switch_address_space(None);
 
@@ -132,6 +133,7 @@ fn process_a_and_b_see_distinct_memory_at_same_va() {
     HOLD_B.store(Arc::into_raw(as_b) as usize as u64, Ordering::Release);
 }
 
+#[kernel_test]
 fn ttbr0_is_switched_on_process_change() {
     let (as_a, _) = make_user_as_with_probe_page(0xDEAD_BEEF);
     let handle_a = as_a.handle().expect("user AS has handle");
@@ -141,26 +143,28 @@ fn ttbr0_is_switched_on_process_change() {
     let ttbr0_after = read_ttbr0();
     // TTBR0_EL1[47:12] хранит адрес таблицы; [63:48] - ASID. Сравниваем по
     // PA-mask 4К-страницы.
-    test_harness_qemu::kassert_eq!(ttbr0_after & 0x0000_FFFF_FFFF_F000, root_a_pa);
+    kernel_tests::kassert_eq!(ttbr0_after & 0x0000_FFFF_FFFF_F000, root_a_pa);
 
     // Возврат в kernel-AS.
     Aarch64Context::switch_address_space(None);
-    test_harness_qemu::kassert_eq!(read_ttbr0(), 0);
+    kernel_tests::kassert_eq!(read_ttbr0(), 0);
 
     // Утечка as_a, чтобы фрейм root'а не вернулся в аллокатор и не сломал
     // следующий тест.
     core::mem::forget(as_a);
 }
 
+#[kernel_test]
 fn kernel_thread_after_user_has_ttbr0_zero() {
     let (as_a, _) = make_user_as_with_probe_page(0x1234_5678);
     Aarch64Context::switch_address_space(as_a.handle());
-    test_harness_qemu::kassert!(read_ttbr0() != 0);
+    kernel_tests::kassert!(read_ttbr0() != 0);
     Aarch64Context::switch_address_space(None);
-    test_harness_qemu::kassert_eq!(read_ttbr0(), 0);
+    kernel_tests::kassert_eq!(read_ttbr0(), 0);
     core::mem::forget(as_a);
 }
 
+#[kernel_test]
 fn user_thread_exit_releases_address_space_frames() {
     // Oracle: dropping user_as must release its root without leaving TTBR0
     // pointing at freed memory.
@@ -171,33 +175,12 @@ fn user_thread_exit_releases_address_space_frames() {
     let root_before = handle.root.as_u64();
 
     Aarch64Context::switch_address_space(Some(handle));
-    test_harness_qemu::kassert_eq!(read_ttbr0() & 0x0000_FFFF_FFFF_F000, root_before);
+    kernel_tests::kassert_eq!(read_ttbr0() & 0x0000_FFFF_FFFF_F000, root_before);
 
     // Возвращаемся в kernel-AS, потом drop - иначе TLB удержит трансляции
     // из old user-AS до следующего switch'а.
     Aarch64Context::switch_address_space(None);
     drop(user_as);
 
-    test_harness_qemu::kassert_eq!(read_ttbr0(), 0);
+    kernel_tests::kassert_eq!(read_ttbr0(), 0);
 }
-
-register_test!(
-    ADDRESS_SPACE_DISTINCT_MEMORY,
-    "process_a_and_b_see_distinct_memory_at_same_va",
-    process_a_and_b_see_distinct_memory_at_same_va
-);
-register_test!(
-    ADDRESS_SPACE_TTBR0_SWITCHED,
-    "ttbr0_is_switched_on_process_change",
-    ttbr0_is_switched_on_process_change
-);
-register_test!(
-    ADDRESS_SPACE_KERNEL_AFTER_USER,
-    "kernel_thread_after_user_has_ttbr0_zero",
-    kernel_thread_after_user_has_ttbr0_zero
-);
-register_test!(
-    ADDRESS_SPACE_EXIT_RELEASES,
-    "user_thread_exit_releases_address_space_frames",
-    user_thread_exit_releases_address_space_frames
-);
