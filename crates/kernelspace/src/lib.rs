@@ -20,7 +20,7 @@ pub use user_process::{
     SchedulerUserProcessLauncher, SpawnUserError, UserProcessLauncher, UserProcessSpawner,
 };
 
-#[cfg(feature = "qemu-tests")]
+#[cfg(feature = "kernel-tests")]
 pub mod kernel_tests;
 
 mod services;

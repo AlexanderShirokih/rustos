@@ -3,7 +3,7 @@
 //!
 //! Каждый тест создаёт свежий user-AS, выполняет map/unmap и проверяет
 //! состояние page-tables через `query_leaf_raw` (доступен только под
-//! `feature = "qemu-tests"`). По завершении функции `Arc<AddressSpace>`
+//! `feature = "kernel-tests"`). По завершении функции `Arc<AddressSpace>`
 //! дропается - Drop возвращает все фреймы (root + intermediate L1/L2/L3
 //! таблицы) во `FrameAllocator`. AS никогда не активируется в текущем CPU,
 //! поэтому в TLB его entries нет и инвалидация перед drop'ом не нужна.
@@ -36,9 +36,7 @@ use scheduler::AddressSpace;
 use crate::{
     HIGHER_HALF_BASE,
     memory::{
-        address_space_factory::{
-            FrameAllocatorImpl, UserAarch64MemoryMapper, qemu_test_frame_allocator,
-        },
+        address_space_factory::UserAarch64MemoryMapper,
         memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
     },
 };
@@ -52,12 +50,14 @@ fn downcast_user_mapper(mapper: &(dyn MemoryMapper + Send + Sync)) -> &UserAarch
         .expect("user-AS mapper must be Aarch64MemoryMapper")
 }
 
+type RuntimeFrameAllocator = dyn FrameAllocator + Send + Sync;
+
 /// Mapper-тип под `CappedAllocator` с `MutexCell`-стратегией -
 /// та же, что и у production-фабрики user-AS.
 type CappedMapper<'a> = Aarch64MemoryMapper<
     'a,
-    CappedAllocator<'a, FrameAllocatorImpl>,
-    MutexCell<PageMapper<FrameTableAlloc<'a, CappedAllocator<'a, FrameAllocatorImpl>>>>,
+    CappedAllocator<'a>,
+    MutexCell<PageMapper<FrameTableAlloc<'a, CappedAllocator<'a>>>>,
 >;
 
 const PAGE_SIZE: usize = 1usize << L3::SHIFT;
@@ -79,6 +79,10 @@ fn va(addr: usize) -> PageAlignedVirtualAddress {
 
 fn pa(addr: usize) -> PageAlignedAddress {
     PageAlignedAddress::from_usize(addr).expect("aligned PA")
+}
+
+fn runtime_frame_allocator() -> &'static RuntimeFrameAllocator {
+    syscall_bridge::frame_allocator().expect("frame allocator must be installed")
 }
 
 /// `map -> unmap -> query_leaf_raw` должен показать, что leaf-PTE обнулены.
@@ -162,7 +166,7 @@ fn mapper_unmap_unmapped_returns_not_mapped() {
 /// корруптил bitmap при cleanup MMIO-маппинга.
 #[kernel_test]
 fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
-    let real_fa = qemu_test_frame_allocator();
+    let real_fa = runtime_frame_allocator();
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
 
@@ -194,16 +198,16 @@ fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
 /// `had_mappings == true`).
 fn build_capped_mapper() -> (
     &'static CappedMapper<'static>,
-    &'static CappedAllocator<'static, FrameAllocatorImpl>,
+    &'static CappedAllocator<'static>,
     Frame,
 ) {
-    let real_fa: &'static FrameAllocatorImpl = qemu_test_frame_allocator();
+    let real_fa = runtime_frame_allocator();
     let root_frame = real_fa.allocate_frame().expect("root frame");
     let root_ptr = (root_frame.page_address().as_usize() + HIGHER_HALF_BASE) as *mut PageTable<L0>;
     // SAFETY: свежевыделенный фрейм через higher-half-карту.
     unsafe { root_ptr.write(PageTable::<L0>::new()) };
 
-    let capped: &'static CappedAllocator<'static, FrameAllocatorImpl> = alloc::boxed::Box::leak(
+    let capped: &'static CappedAllocator<'static> = alloc::boxed::Box::leak(
         alloc::boxed::Box::new(CappedAllocator::new(real_fa, isize::MAX)),
     );
     let mapper: &'static CappedMapper<'static> = alloc::boxed::Box::leak(alloc::boxed::Box::new(
@@ -233,7 +237,7 @@ fn mapper_unmap_releases_empty_tables() {
     mapper.unmap(base, PAGE_SIZE).expect("unmap last page");
     kernel_tests::kassert!(capped.outstanding() == baseline);
 
-    let _ = qemu_test_frame_allocator().deallocate_frame(root_frame);
+    let _ = runtime_frame_allocator().deallocate_frame(root_frame);
 }
 
 /// Partial unmap внутри L2 block-leaf отбивается без модификации таблиц.
@@ -267,7 +271,7 @@ fn mapper_unmap_partial_block_rejected() {
         .unmap(base, L2_BLOCK_SIZE)
         .expect("whole-block unmap must succeed after partial reject");
 
-    let _ = qemu_test_frame_allocator().deallocate_frame(root_frame);
+    let _ = runtime_frame_allocator().deallocate_frame(root_frame);
 }
 
 /// `map_exact` может поставить L2 block descriptor; exact unmap всего блока
@@ -343,14 +347,14 @@ fn mapper_unmap_misaligned_size_rejected() {
 /// Обёртка над настоящим `FrameAllocator` с лимитом на allocate'ы и
 /// счётчиком outstanding (allocated - deallocated). `outstanding == 0`
 /// после `map`/`unmap` означает, что mapper честно вернул все фреймы.
-struct CappedAllocator<'a, FA: FrameAllocator> {
-    inner: &'a FA,
+struct CappedAllocator<'a> {
+    inner: &'a RuntimeFrameAllocator,
     remaining: AtomicIsize,
     outstanding: AtomicUsize,
 }
 
-impl<'a, FA: FrameAllocator> CappedAllocator<'a, FA> {
-    fn new(inner: &'a FA, limit: isize) -> Self {
+impl<'a> CappedAllocator<'a> {
+    fn new(inner: &'a RuntimeFrameAllocator, limit: isize) -> Self {
         Self {
             inner,
             remaining: AtomicIsize::new(limit),
@@ -362,7 +366,7 @@ impl<'a, FA: FrameAllocator> CappedAllocator<'a, FA> {
     }
 }
 
-impl<FA: FrameAllocator> FrameAllocator for CappedAllocator<'_, FA> {
+impl FrameAllocator for CappedAllocator<'_> {
     fn reserve_frames_exact(&self, from: Frame, to: Frame) -> Result<Frame, ReserveFrameError> {
         self.inner.reserve_frames_exact(from, to)
     }
@@ -395,7 +399,7 @@ impl<FA: FrameAllocator> FrameAllocator for CappedAllocator<'_, FA> {
 /// диапазона возвращает `None`.
 #[kernel_test]
 fn mapper_map_partial_oom_rollback() {
-    let real_fa: &'static FrameAllocatorImpl = qemu_test_frame_allocator();
+    let real_fa = runtime_frame_allocator();
 
     // Root-фрейм идём через настоящий FA - обёртка ниже считает только то,
     // что аллоцирует сам mapper в `map`.
@@ -416,7 +420,7 @@ fn mapper_map_partial_oom_rollback() {
     // `Aarch64MemoryMapper<'a, ...>` не подходит для `dyn Any`. В QEMU-runner-е
     // утечка приемлема: тест-сюита не возвращается, а аллокатор переживёт
     // выход через semihosting.
-    let capped: &'static CappedAllocator<'static, FrameAllocatorImpl> =
+    let capped: &'static CappedAllocator<'static> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(CappedAllocator::new(real_fa, 5)));
 
     let mapper: CappedMapper<'static> = Aarch64MemoryMapper::new_with_offset(

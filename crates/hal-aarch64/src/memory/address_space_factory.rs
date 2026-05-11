@@ -29,36 +29,6 @@ type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 pub type UserAarch64MemoryMapper =
     Aarch64MemoryMapper<'static, FrameAllocatorImpl, MutexPageMapper<'static, FrameAllocatorImpl>>;
 
-/// Точка доступа к глобальному `FrameAllocator` для интеграционных тестов
-/// (`feature = "qemu-tests"`). Регистрируется первым
-/// `Aarch64AddressSpaceFactory::new`. Production-код не должен ходить сюда -
-/// фабрика держит свой `&'static`.
-///
-/// `AtomicPtr` нужен потому, что `FrameAllocatorImpl` (через `NoLockCell<FrameBitmap>`)
-/// не реализует `Sync`, поэтому `static spin::Once<&'static FrameAllocatorImpl>`
-/// не компилируется. Указатель безопасно делится - синхронизация
-/// внутри `PhysicalFrameAllocator` идёт через `&self`-методы.
-#[cfg(feature = "qemu-tests")]
-static QEMU_FA_PTR: core::sync::atomic::AtomicPtr<FrameAllocatorImpl> =
-    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-
-/// Геттер `&'static FrameAllocator` для построения mapper'ов с
-/// инжектированными обёртками поверх настоящего FA (см. partial-OOM rollback).
-///
-/// # Panics
-/// Если `Aarch64AddressSpaceFactory` ещё не сконструирован.
-#[cfg(feature = "qemu-tests")]
-pub fn qemu_test_frame_allocator() -> &'static FrameAllocatorImpl {
-    let ptr = QEMU_FA_PTR.load(core::sync::atomic::Ordering::Acquire);
-    assert!(
-        !ptr.is_null(),
-        "Aarch64AddressSpaceFactory must be constructed first"
-    );
-    // SAFETY: ptr получен из &'static FrameAllocatorImpl в Aarch64AddressSpaceFactory::new
-    // и живёт всё время работы ядра.
-    unsafe { &*ptr }
-}
-
 /// Фабрика user-AS, привязанная к глобальному `FrameAllocator` и
 /// higher-half offset для трансляции PA таблиц в VA.
 pub struct Aarch64AddressSpaceFactory {
@@ -78,11 +48,6 @@ impl Aarch64AddressSpaceFactory {
         frame_allocator: &'static FrameAllocatorImpl,
         higher_half_base: PageAlignedVirtualAddress,
     ) -> Self {
-        #[cfg(feature = "qemu-tests")]
-        QEMU_FA_PTR.store(
-            core::ptr::from_ref::<FrameAllocatorImpl>(frame_allocator).cast_mut(),
-            core::sync::atomic::Ordering::Release,
-        );
         Self {
             frame_allocator,
             higher_half_base,

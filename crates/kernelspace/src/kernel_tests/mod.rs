@@ -1,4 +1,4 @@
-//! Test-mode ядра под `cfg(feature = "qemu-tests")`.
+//! Test-mode ядра под `cfg(feature = "kernel-tests")`.
 //!
 //! `kmain` после bootstrap'а создаёт init-таск и под этой фичей вызывает
 //! [`run`] - он подключает console writer и запускает все
@@ -67,7 +67,7 @@ pub fn user_process_launcher() -> &'static Arc<dyn UserProcessLauncher> {
         .expect("UserProcessLauncher must be cached in kernel_tests::spawn_kernel_tests_process")
 }
 
-/// Init-таск под `feature = "qemu-tests"`: спавнит worker-процесс
+/// Init-таск под `feature = "kernel-tests"`: спавнит worker-процесс
 /// с приоритетом `highest`, который вызывает [`run`] и завершает эмулятор
 /// через ARM semihosting.
 pub fn spawn_kernel_tests_process<A>(

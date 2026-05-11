@@ -13,8 +13,8 @@ test = false
 default = ["boot-linux-arm64"]
 boot-linux-arm64 = []
 boot-uefi = []
-qemu-tests = [
-    "kernelspace/qemu-tests",
+kernel-tests = [
+    "kernelspace/kernel-tests",
     "dep:test-harness-qemu",
     "dep:test-harness-qemu-aarch64",
 ]

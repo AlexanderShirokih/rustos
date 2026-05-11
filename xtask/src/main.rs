@@ -368,7 +368,7 @@ fn execute_commands(commands: &[String], cwd: &Path) -> Result<()> {
 
 fn qemu_test(timeout: u64) -> Result<()> {
     let spec_path = PathBuf::from("devices/spec/qemu-aarch64-test.yaml");
-    let ctx = BuildContext::new(spec_path, Some("qemu-tests".to_string()))?;
+    let ctx = BuildContext::new(spec_path, Some("kernel-tests".to_string()))?;
 
     build_binary(&ctx)?;
 

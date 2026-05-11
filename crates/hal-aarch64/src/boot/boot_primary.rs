@@ -78,7 +78,7 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
         result.base_offset,
     )));
 
-    #[cfg(feature = "qemu-tests")]
+    #[cfg(feature = "kernel-tests")]
     kernel_tests::runner::install_backend(&test_harness_qemu_aarch64::BACKEND);
 
     kmain::<Aarch64Context, _>(
@@ -95,11 +95,11 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
 /// feature-выбор в одном месте.
 fn pick_init_task()
 -> fn(&Scheduler<Aarch64Context, KernelTimerSource, Bootstrapped>, &mut KernelContext) {
-    #[cfg(feature = "qemu-tests")]
+    #[cfg(feature = "kernel-tests")]
     {
         kernelspace::kernel_tests::spawn_kernel_tests_process::<Aarch64Context>
     }
-    #[cfg(not(feature = "qemu-tests"))]
+    #[cfg(not(feature = "kernel-tests"))]
     {
         kernelspace::init::spawn_init_process::<Aarch64Context>
     }

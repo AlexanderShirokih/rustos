@@ -19,7 +19,7 @@ mod memory;
 mod sched;
 mod system;
 
-#[cfg(feature = "qemu-tests")]
+#[cfg(feature = "kernel-tests")]
 #[path = "kernel_tests/mod.rs"]
 mod qemu_tests;
 
@@ -36,7 +36,7 @@ pub const KHEAP_BASE: usize = 0xFFFF_FFF8_0000_0000;
 /// VA-cap heap-арены. Физическая RAM приходит лениво при expand'е.
 pub const KHEAP_MAX_SIZE: usize = 16 * 1024 * 1024 * 1024;
 
-#[cfg(all(not(test), not(feature = "qemu-tests")))]
+#[cfg(all(not(test), not(feature = "kernel-tests")))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     // SAFETY: `wfi` без операндов; вызов помещён в panic-handler - однопоточный
@@ -50,7 +50,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
 }
 
-#[cfg(all(not(test), feature = "qemu-tests"))]
+#[cfg(all(not(test), feature = "kernel-tests"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use kernel_tests::Backend;
