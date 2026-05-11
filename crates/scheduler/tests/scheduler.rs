@@ -800,6 +800,25 @@ fn process_create_returns_handle_to_empty_process() {
 }
 
 #[test]
+fn process_create_rejects_empty_name() {
+    use kobject::KernelRuntime;
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let processes_before = scheduler.process_count();
+    let handle = scheduler.handle();
+
+    let err = match handle.create_empty_process("") {
+        Ok(_) => panic!("empty process name must be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(err, kobject::SpawnError::InvalidName);
+    assert_eq!(scheduler.process_count(), processes_before);
+}
+
+#[test]
 fn thread_terminate_via_handle_signals_terminated() {
     use kobject::{KernelRuntime, THREAD_TERMINATED, UserThreadEntry};
 

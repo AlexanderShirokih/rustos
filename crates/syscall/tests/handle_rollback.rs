@@ -80,9 +80,12 @@ impl KernelRuntime for CountingRuntime {
 
     fn unblock(&self, _token: WaitToken) {}
 
-    fn create_empty_process(&self, _name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
+    fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
         self.create_empty_process_calls
             .fetch_add(1, Ordering::SeqCst);
+        if name.is_empty() {
+            return Err(SpawnError::InvalidName);
+        }
         Ok(ProcessObject::new())
     }
 
@@ -376,6 +379,25 @@ fn process_create_does_not_create_process_on_out_of_handles() {
         rt.create_empty_process_calls.load(Ordering::SeqCst),
         0,
         "create_empty_process must NOT be called on OutOfHandles",
+    );
+}
+
+#[test]
+fn process_create_with_empty_name_returns_invalid_argument() {
+    let _guard = test_lock();
+    let (rt, stub) = shared_runtime();
+    rt.reset_counters();
+    stub.clear_user_vm();
+
+    rt.set_handle_table(Arc::new(MutexCell::new(HandleTable::with_capacity(2))));
+
+    let err = dispatch(SyscallOp::ProcessCreate, [0, 0, 0, 0, 0, 0])
+        .expect_err("InvalidArgument expected");
+    assert_eq!(err, SyscallError::InvalidArgument);
+    assert_eq!(
+        rt.create_empty_process_calls.load(Ordering::SeqCst),
+        1,
+        "create_empty_process must validate the empty name",
     );
 }
 

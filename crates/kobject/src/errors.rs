@@ -32,6 +32,8 @@ pub enum SpawnError {
     NoFreeProcessSlots,
     /// Слоты потоков исчерпаны.
     NoFreeThreadSlots,
+    /// Имя процесса пустое.
+    InvalidName,
     /// Приоритет вне допустимого диапазона.
     InvalidPriority,
     /// Размер стека (в страницах) равен нулю.

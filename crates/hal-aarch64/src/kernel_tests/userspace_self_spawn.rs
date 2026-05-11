@@ -32,6 +32,8 @@ const CHILD_STACK_SIZE: u64 = PAGE_SIZE as u64;
 const CHILD_USER_VM_BASE: u64 = 0x2002_0000;
 const CHILD_USER_VM_SIZE: u64 = 0x10_0000;
 const CHILD_EXIT_CODE: u16 = 0x0055;
+const CHILD_NAME_OFFSET: u16 = 96;
+const CHILD_NAME_LEN: u16 = 1;
 // Локальная диагностика этого теста: parent payload кодирует стадию
 // отказа в exit_code и подаёт отдельный failure-сигнал, чтобы вместо
 // немого QEMU-timeout получить точную причину падения.
@@ -185,11 +187,15 @@ fn build_parent_payload() -> alloc::vec::Vec<u8> {
     words.push(str_x_imm(Reg::X1, Reg::X21, 80));
     words.push(movz_x(Reg::X1, 0, 0));
     words.push(str_x_imm(Reg::X1, Reg::X21, 88));
+    words.push(movz_w(Reg::X1, b'c' as u16));
+    words.push(str_w_imm(Reg::X1, Reg::X21, CHILD_NAME_OFFSET));
     let _ = qword_1;
 
-    // ProcessCreate без имени.
-    words.push(movz_x(Reg::X0, 0, 0));
-    words.push(movz_x(Reg::X1, 0, 0));
+    // ProcessCreate("c", 1).
+    words.push(Instruction::raw(
+        0x9100_0000 | (u32::from(CHILD_NAME_OFFSET) << 10) | (21u32 << 5),
+    ));
+    words.push(movz_x(Reg::X1, CHILD_NAME_LEN, 0));
     words.push(svc_op(SyscallOp::ProcessCreate));
     let fail_process_create_neg = words.len();
     words.push(tbnz_x(Reg::X0, 63, 0));

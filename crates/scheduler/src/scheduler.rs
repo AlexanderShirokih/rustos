@@ -947,6 +947,9 @@ where
         &mut self,
         name: &str,
     ) -> Result<Arc<ProcessObject>, SpawnError> {
+        if name.is_empty() {
+            return Err(SpawnError::InvalidName);
+        }
         let factory = self
             .address_space_factory
             .ok_or(SpawnError::AddressSpaceCreationFailed)?;

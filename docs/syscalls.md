@@ -204,7 +204,7 @@ Process-вызовы создают процесс, возвращают handle 
 | `0x45` | `ProcessStart`     | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h`            | `MANAGE_PROCESS`; `TRANSFER` на bootstrap-handle'ах                            |
 
 `ProcessCreate` копирует имя процесса из user-памяти, требует
-корректный UTF-8 и ограничение `name_len <= 64` байт.
+непустой корректный UTF-8 и ограничение `1 <= name_len <= 64` байт.
 
 `ProcessLoadImage` загружает user-образ в уже созданный, но ещё не
 запущенный процесс. `desc_len` обязан быть ровно `56`
@@ -290,7 +290,7 @@ let code_region_h = memory_create_virtual(
     PAGE_SIZE,
     AccessMask::R | AccessMask::W | AccessMask::X,
 )?;
-let child_h = process_create("", 0)?;
+let child_h = process_create("child", 5)?;
 
 let image = UserImageDesc {
     version: 1,

@@ -124,6 +124,7 @@ impl SpawnConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnError {
     NoFreeThreadSlots,
+    InvalidName,
     InvalidPriority,
     InvalidStackPages,
     StackAllocationFailed,
@@ -135,6 +136,7 @@ impl From<SpawnError> for kobject::SpawnError {
     fn from(value: SpawnError) -> Self {
         match value {
             SpawnError::NoFreeThreadSlots => Self::NoFreeThreadSlots,
+            SpawnError::InvalidName => Self::InvalidName,
             SpawnError::InvalidPriority => Self::InvalidPriority,
             SpawnError::InvalidStackPages => Self::InvalidStackPages,
             SpawnError::StackAllocationFailed => Self::StackAllocationFailed,
