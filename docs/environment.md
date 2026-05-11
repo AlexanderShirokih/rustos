@@ -12,12 +12,11 @@ Toolchain зафиксирован в `rust-toolchain.toml`:
 
 ## Host-зависимости
 
-| Инструмент | Когда нужен |
-|---|---|
-| `cargo-binutils` | `cargo objcopy` внутри `xtask build` |
-| `qemu-system-aarch64` | запуск QEMU и QEMU integration tests |
-| `mkbootimg` | сборка `android_boot_v1` / `android_boot_v2` |
-| `cargo-deny` | `cargo deny check` |
+| Инструмент            | Когда нужен                                  |
+|-----------------------|----------------------------------------------|
+| `cargo-binutils`      | `cargo objcopy` внутри `xtask build`         |
+| `qemu-system-aarch64` | запуск QEMU и QEMU integration tests         |
+| `mkbootimg`           | сборка `android_boot_v1` / `android_boot_v2` |
 
 Минимальная установка для QEMU-разработки:
 
@@ -60,3 +59,7 @@ debug:
 | `boot.base` | база для расчёта Android `kernel_offset` |
 | `run` | команды для `xtask build --run` |
 | `debug` | команды для `xtask build --debug` |
+
+Для `linux_arm64` итоговая поставка состоит из двух артефактов: `target/build/kernel.bin`
+и sidecar `target/build/userland.img`. Bootloader или run-команда должны передать
+`userland.img` как initrd.

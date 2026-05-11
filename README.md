@@ -113,13 +113,13 @@ test-harness-qemu    — integration-тесты поверх QEMU exit device
 16-битный номер операции, до шести `u64`-аргументов, `i64` возврат
 (отрицательный — `-(SyscallError as u32)`). `HandleId` — ненулевой `u32`.
 
-| Диапазон | Подсистема |
-|---|---|
-| `0x10–0x11` | Object — сигналы, ожидание |
-| `0x20–0x22` | Channel — создание, запись, чтение |
-| `0x30–0x31` | Handle — закрытие, дублирование |
-| `0x40–0x44` | Process — создание, self, exit code, terminate |
-| `0x50–0x54` | Thread — создание, self, exit, exit code, terminate |
+| Диапазон    | Подсистема                                              |
+|-------------|---------------------------------------------------------|
+| `0x10–0x11` | Object — сигналы, ожидание                              |
+| `0x20–0x22` | Channel — создание, запись, чтение                      |
+| `0x30–0x31` | Handle — закрытие, дублирование                         |
+| `0x40–0x44` | Process — создание, self, exit code, terminate          |
+| `0x50–0x54` | Thread — создание, self, exit, exit code, terminate     |
 | `0x60–0x67` | Memory — VMO, MMIO, map, remap, allocate, free, inspect |
 
 ---
@@ -151,7 +151,7 @@ device:
   arch: aarch64
 
 boot:
-  format: android_boot_v1   # binary | android_boot_v1 | android_boot_v2
+  format: android_boot_v1   # linux_arm64 | android_boot_v1 | android_boot_v2
   offset: 0x40080000        # адрес загрузки ядра (KERNEL_OFFSET)
   base: 0x40000000          # база boot image (только android_boot_*)
   dtb: /devices/dtb/my-device.dtb  # DTB (только android_boot_*)
@@ -165,11 +165,11 @@ debug:
 
 **Форматы образов:**
 
-| `format` | Артефакт | Применение |
-|---|---|---|
-| `binary` | `target/build/kernel.bin` | QEMU, Raspberry Pi, bare-metal |
-| `android_boot_v1` | `target/build/boot.img` | Android-устройства, header v1, appended DTB |
-| `android_boot_v2` | `target/build/boot.img` | Android-устройства, header v2, отдельный DTB |
+| `format`          | Артефакт                                                        | Применение                                                                      |
+|-------------------|-----------------------------------------------------------------|---------------------------------------------------------------------------------|
+| `linux_arm64`     | `target/build/kernel.bin` + sidecar `target/build/userland.img` | QEMU, Raspberry Pi, bare-metal; sidecar должен быть передан как initrd          |
+| `android_boot_v1` | `target/build/boot.img`                                         | Android-устройства, header v1, appended DTB, `userland.img` упакован в ramdisk  |
+| `android_boot_v2` | `target/build/boot.img`                                         | Android-устройства, header v2, отдельный DTB, `userland.img` упакован в ramdisk |
 
 **Для Android-устройства потребуется:**
 
@@ -184,7 +184,7 @@ debug:
 cargo xtask build devices/spec/my-device.yaml --run
 ```
 
-Работающие конфиги: Xiaomi Redmi Note 7 (`android_boot_v1`), Raspberry Pi 5 (`binary`).
+Работающие конфиги: Xiaomi Redmi Note 7 (`android_boot_v1`), Raspberry Pi 5 (`linux_arm64`).
 PR с новыми устройствами приветствуются.
 
 ---

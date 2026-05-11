@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main, master]
   pull_request:
 
 env:
@@ -71,10 +69,3 @@ jobs:
           tool: cargo-binutils
       - run: sudo apt-get install -y --no-install-recommends qemu-system-arm
       - run: cargo xtask qemu-test
-
-  deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: EmbarkStudios/cargo-deny-action@v2

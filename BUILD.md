@@ -30,8 +30,8 @@ cargo xtask build devices/spec/xiaomi-lavender.yaml
 ### Результат сборки
 
 - всегда — `target/build/userland.img`
-- `linux_arm64` — `target/build/kernel.bin`
-- `android_boot_v1`, `android_boot_v2` — `target/build/boot.img`
+- `linux_arm64` — `target/build/kernel.bin` + sidecar `target/build/userland.img` (загрузчик должен передать sidecar как initrd)
+- `android_boot_v1`, `android_boot_v2` — `target/build/boot.img` с `userland.img` внутри ramdisk
 - `uefi` — WIP, пока не реализовано
 
 ## Запуск

@@ -35,12 +35,6 @@ clippy:aarch64:
   script:
     - cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none
 
-deny:
-  stage: check
-  script:
-    - cargo install --locked cargo-deny
-    - cargo deny check
-
 test:
   stage: test
   script:

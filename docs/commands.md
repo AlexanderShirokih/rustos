@@ -2,17 +2,16 @@
 
 ## Быстрая справка
 
-| Действие | Команда |
-|---|---|
-| Host-тесты | `cargo test --workspace` |
-| Host-clippy | `cargo clippy --workspace` |
-| AArch64 clippy | `cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none` |
-| Форматирование | `cargo fmt --all --check` |
-| Аудит зависимостей | `cargo deny check` |
-| Сборка userland | `cargo xtask build-userland` |
-| Сборка QEMU | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
-| QEMU integration tests | `cargo xtask qemu-test --timeout 20` |
-| Сборка устройства | `cargo xtask build devices/spec/<device>.yaml` |
+| Действие               | Команда                                                                                           |
+|------------------------|---------------------------------------------------------------------------------------------------|
+| Host-тесты             | `cargo test --workspace`                                                                          |
+| Host-clippy            | `cargo clippy --workspace`                                                                        |
+| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none` |
+| Форматирование         | `cargo fmt --all --check`                                                                         |
+| Сборка userland        | `cargo xtask build-userland`                                                                      |
+| Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                |
+| QEMU integration tests | `cargo xtask qemu-test --timeout 20`                                                              |
+| Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                    |
 
 ## Сборка
 
@@ -28,13 +27,13 @@ cargo xtask build devices/spec/xiaomi-lavender.yaml
 
 Результаты:
 
-| `boot.format` | Артефакт |
-|---|---|
-| всегда | `target/build/userland.img` |
-| `linux_arm64` | `target/build/kernel.bin` |
-| `android_boot_v1` | `target/build/boot.img` |
-| `android_boot_v2` | `target/build/boot.img` |
-| `uefi` | не реализован |
+| `boot.format`     | Артефакт                                                                                           |
+|-------------------|----------------------------------------------------------------------------------------------------|
+| всегда            | `target/build/userland.img`                                                                        |
+| `linux_arm64`     | `target/build/kernel.bin` + sidecar `target/build/userland.img`, который нужно передать как initrd |
+| `android_boot_v1` | `target/build/boot.img` с `userland.img` в ramdisk                                                 |
+| `android_boot_v2` | `target/build/boot.img` с `userland.img` в ramdisk                                                 |
+| `uefi`            | не реализован                                                                                      |
 
 ## Тесты
 
@@ -48,10 +47,4 @@ QEMU integration tests:
 cargo xtask qemu-test --timeout 20
 ```
 
-## Аудит зависимостей
-
-```bash
-cargo deny check
-```
-
-Команда требует установленный `cargo-deny`; конфигурация — `deny.toml`.
+`qemu-test` собирает `target/build/userland.img` и запускает QEMU с `-initrd target/build/userland.img`.

@@ -16,16 +16,15 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 
 ### Команды
 
-| Действие | Команда |
-|---|---|
-| Тесты (host) | `cargo test --workspace` |
-| Линтинг (host) | `cargo clippy --workspace` |
-| Линтинг (aarch64) | `cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none` |
-| Форматирование | `cargo fmt --all --check` |
-| Аудит зависимостей | `cargo deny check` |
-| Сборка (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
-| Запуск (QEMU) | `cargo xtask build devices/spec/qemu-aarch64.yaml --run` |
-| QEMU integration tests | `cargo xtask qemu-test --timeout 20` |
+| Действие               | Команда                                                                                           |
+|------------------------|---------------------------------------------------------------------------------------------------|
+| Тесты (host)           | `cargo test --workspace`                                                                          |
+| Линтинг (host)         | `cargo clippy --workspace`                                                                        |
+| Линтинг (aarch64)      | `cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none` |
+| Форматирование         | `cargo fmt --all --check`                                                                         |
+| Сборка (QEMU)          | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                |
+| Запуск (QEMU)          | `cargo xtask build devices/spec/qemu-aarch64.yaml --run`                                          |
+| QEMU integration tests | `cargo xtask qemu-test --timeout 20`                                                              |
 
 -> Подробнее: [`docs/commands.md`](docs/commands.md)
 

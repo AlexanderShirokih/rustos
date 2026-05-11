@@ -377,6 +377,7 @@ fn qemu_test(timeout: u64) -> Result<()> {
     let spec_path = PathBuf::from("devices/spec/qemu-aarch64-test.yaml");
     let ctx = BuildContext::new(spec_path, Some("kernel-tests".to_string()))?;
 
+    build_userland(&ctx.project_root, &ctx.build_dir)?;
     build_binary(&ctx)?;
 
     let qemu_cmd = ctx

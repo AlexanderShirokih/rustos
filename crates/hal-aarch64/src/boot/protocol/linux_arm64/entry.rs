@@ -3,7 +3,6 @@
 use core::{arch::naked_asm, hint::spin_loop};
 
 use hal_common::boot::BootInfo;
-use memory::physical_address::PhysicalAddress;
 
 use crate::boot::boot_early::{_bss_end, _bss_start, _stack_top, boot_main};
 
@@ -88,7 +87,7 @@ pub extern "C" fn _start() {
 
 /// Обёртка для вызова из asm (не возвращает управление).
 pub fn boot_main_entry(dtb_phys: usize) -> ! {
-    let info = BootInfo::new_fdt(PhysicalAddress::new(dtb_phys));
+    let info = BootInfo::from_fdt(dtb_phys.into());
     let _ = boot_main(&info);
     loop {
         spin_loop();

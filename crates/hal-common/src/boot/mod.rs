@@ -1,3 +1,3 @@
 pub mod info;
 
-pub use info::{AcpiTables, BootInfo, FdtBlob, HwDescription};
+pub use info::{AcpiTables, BootInfo, BootPayloadRange, FdtBlob, HwDescription};
