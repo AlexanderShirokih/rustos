@@ -135,7 +135,7 @@ fn ttbr0_carries_asid_after_first_switch() {
     kernel_tests::kassert!(asid != 0);
 
     Aarch64Context::switch_address_space(None);
-    core::mem::forget(user_as);
+    drop(user_as);
 }
 
 #[kernel_test]
@@ -158,8 +158,8 @@ fn two_user_as_have_distinct_asids() {
     kernel_tests::kassert!(asid_b != 0);
     kernel_tests::kassert!(asid_a != asid_b);
 
-    core::mem::forget(as_a);
-    core::mem::forget(as_b);
+    drop(as_a);
+    drop(as_b);
 }
 
 #[kernel_test]
@@ -178,7 +178,7 @@ fn same_as_keeps_asid_across_switch() {
 
     kernel_tests::kassert_eq!(ttbr_first, ttbr_second);
 
-    core::mem::forget(as_a);
+    drop(as_a);
 }
 
 #[kernel_test]
@@ -191,7 +191,7 @@ fn user_pages_have_ng_bit_set() {
         .expect("leaf must exist");
     // nG бит - `[11]`.
     kernel_tests::kassert_eq!((raw >> 11) & 1, 1);
-    core::mem::forget(user_as);
+    drop(user_as);
 }
 
 #[kernel_test]
@@ -206,12 +206,7 @@ fn tcr_as_matches_runtime_asid_width() {
     kernel_tests::kassert_eq!(as_bit, expected);
 }
 
-/// Активирует много AS подряд, чтобы спровоцировать rollover. На QEMU
-/// (cortex-a72) ASID-ширина - 16 бит, поэтому генерим в широком диапазоне.
-/// Сразу же выдаём release при пересоздании, чтобы не потратить ASID-слоты
-/// окончательно: выделяем чуть выше предела по числу одновременно живых AS,
-/// но drop'аем сразу после проверки, и аллокатор лениво переиспользует слоты
-/// на следующем rollover'е.
+/// Активирует много AS подряд, чтобы спровоцировать ASID rollover.
 #[kernel_test]
 fn rollover_smoke() {
     let (probe_as, kva_a) = make_user_as_with_probe_page(PROBE_VA, 0x1234);
@@ -222,10 +217,6 @@ fn rollover_smoke() {
     kernel_tests::kassert_eq!(observed, 0x1234);
     Aarch64Context::switch_address_space(None);
 
-    // Одна страница переиспользуется во всех AS - чтобы не съедать RAM
-    // пропорционально числу итераций (`forget` ниже всё ещё оставляет
-    // каждый AS живым ради per-AS-факторов аллокатора, но это уже только
-    // page-table-фреймы).
     let (shared_kheap, shared_pa) = allocate_probe_page();
     // SAFETY: shared_kheap - свежевыделенная страница, эксклюзивно владеемая.
     #[allow(clippy::cast_ptr_alignment)]
@@ -251,7 +242,7 @@ fn rollover_smoke() {
         let v = unsafe { ((PROBE_VA + 0x1000) as *const u64).read_volatile() };
         kernel_tests::kassert_eq!(v, 0x5555);
         Aarch64Context::switch_address_space(None);
-        core::mem::forget(a);
+        drop(a);
     }
 
     // ещё видна (т.е. trace переключений ASID не повредил трансляции).
@@ -264,5 +255,5 @@ fn rollover_smoke() {
 
     let _ = kva_a;
     let _ = shared_kheap;
-    core::mem::forget(probe_as);
+    drop(probe_as);
 }
