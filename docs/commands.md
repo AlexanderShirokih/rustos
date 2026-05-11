@@ -6,17 +6,19 @@
 |---|---|
 | Host-тесты | `cargo test --workspace` |
 | Host-clippy | `cargo clippy --workspace` |
-| AArch64 clippy | `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` |
+| AArch64 clippy | `cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none` |
 | Форматирование | `cargo fmt --all --check` |
 | Аудит зависимостей | `cargo deny check` |
+| Сборка userland | `cargo xtask build-userland` |
 | Сборка QEMU | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
 | QEMU integration tests | `cargo xtask qemu-test --timeout 20` |
 | Сборка устройства | `cargo xtask build devices/spec/<device>.yaml` |
 
 ## Сборка
 
-`xtask build` читает YAML-спеку устройства, выбирает boot feature для
-`hal-aarch64`, собирает kernel crate под `aarch64-unknown-none` и
+`xtask build` читает YAML-спеку устройства, сначала собирает
+`target/build/userland.img` из `/userland/manifest.toml`, затем выбирает boot
+feature для `hal-aarch64`, собирает kernel crate под `aarch64-unknown-none` и
 упаковывает результат.
 
 ```bash
@@ -28,6 +30,7 @@ cargo xtask build devices/spec/xiaomi-lavender.yaml
 
 | `boot.format` | Артефакт |
 |---|---|
+| всегда | `target/build/userland.img` |
 | `linux_arm64` | `target/build/kernel.bin` |
 | `android_boot_v1` | `target/build/boot.img` |
 | `android_boot_v2` | `target/build/boot.img` |

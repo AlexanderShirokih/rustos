@@ -1,0 +1,8 @@
+version = 1
+
+[[entries]]
+name = "rootkeeper"
+package = "rootkeeper"
+bin = "rootkeeper"
+bootstrap = true
+stack_size = 65536

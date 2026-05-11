@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
 use serde::Deserialize;
+use tools_userland::build_userland;
 
 #[derive(Parser)]
 #[command(name = "xtask")]
@@ -40,6 +41,8 @@ enum Commands {
         #[arg(long, default_value_t = 60)]
         timeout: u64,
     },
+    /// Собрать userland.img из /userland/manifest.toml
+    BuildUserland,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +101,10 @@ impl BuildContext {
 
     fn kernel_bin(&self) -> PathBuf {
         self.build_dir.join("kernel.bin")
+    }
+
+    fn userland_img(&self) -> PathBuf {
+        self.build_dir.join("userland.img")
     }
 
     fn kernel_gz(&self) -> PathBuf {
@@ -283,7 +290,7 @@ fn make_boot_img_v1(ctx: &BuildContext) -> Result<()> {
                 "--kernel",
                 ctx.kernel_gz_dtb().to_str().unwrap(),
                 "--ramdisk",
-                "/dev/null",
+                ctx.userland_img().to_str().unwrap(),
                 "--base",
                 "0x0",
                 "--kernel_offset",
@@ -317,7 +324,7 @@ fn make_boot_img_v2(ctx: &BuildContext) -> Result<()> {
                 "--kernel",
                 ctx.kernel_gz().to_str().unwrap(),
                 "--ramdisk",
-                "/dev/null",
+                ctx.userland_img().to_str().unwrap(),
                 "--dtb",
                 dtb_path.to_str().unwrap(),
                 "--base",
@@ -410,6 +417,7 @@ fn main() -> Result<()> {
             features,
         } => {
             let ctx = BuildContext::new(spec, features)?;
+            build_userland(&ctx.project_root, &ctx.build_dir)?;
 
             let output = match ctx.spec.boot.format.as_str() {
                 "linux_arm64" => build_binary(&ctx)?,
@@ -437,6 +445,13 @@ fn main() -> Result<()> {
             }
         }
         Commands::QemuTest { timeout } => qemu_test(timeout)?,
+        Commands::BuildUserland => {
+            let project_root = project_root();
+            let build_dir = project_root.join("target/build");
+            fs::create_dir_all(&build_dir)?;
+            let output = build_userland(&project_root, &build_dir)?;
+            println!("Done: {}", output.display());
+        }
     }
 
     Ok(())

@@ -43,7 +43,7 @@ jobs:
           components: clippy
           target: aarch64-unknown-none
           cache-shared-key: aarch64
-      - run: cargo clippy --workspace --exclude xtask --target aarch64-unknown-none
+      - run: cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none
 
   test:
     name: tests (host)

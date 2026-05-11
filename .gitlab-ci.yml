@@ -33,7 +33,7 @@ clippy:host:
 clippy:aarch64:
   stage: check
   script:
-    - cargo clippy --workspace --exclude xtask --target aarch64-unknown-none
+    - cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none
 
 deny:
   stage: check

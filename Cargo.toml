@@ -20,8 +20,11 @@ members = [
     "crates/test-harness-qemu",
     "crates/test-harness-macros",
     "crates/test-harness-qemu-aarch64",
+    "crates/userland-abi",
     "crates/userspace",
     "crates/util",
+    "tools/userland",
+    "userland/rootkeeper",
     "xtask",
 ]
 
@@ -38,6 +41,9 @@ serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
 flate2 = "1.0"
+crc32fast = "1.5"
+object = "0.37"
+toml = "0.9"
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
@@ -62,7 +68,9 @@ syscall = { path = "crates/syscall" }
 test-harness-qemu = { path = "crates/test-harness-qemu" }
 test-harness-macros = { path = "crates/test-harness-macros" }
 test-harness-qemu-aarch64 = { path = "crates/test-harness-qemu-aarch64" }
+userland-abi = { path = "crates/userland-abi" }
 userspace = { path = "crates/userspace" }
+tools-userland = { path = "tools/userland" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
