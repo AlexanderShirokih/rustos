@@ -62,7 +62,9 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
     let root = adapt_to_fdt_tree(device_tree)
         .root()
         .expect("DTB root node missing");
-    driver_scanner.scan_and_probe(root, drivers());
+    driver_scanner
+        .scan_and_probe(root, drivers())
+        .expect("DTB nesting depth exceeds the supported limit");
 
     let memory_mapper: &'static (dyn memory::memory_mapper::MemoryMapper + Send + Sync) =
         result.memory_mapper;
