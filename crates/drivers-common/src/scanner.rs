@@ -3,10 +3,20 @@ extern crate alloc;
 use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 
 use crate::{
-    DeviceNode,
+    DeviceNode, NodeProperty,
     driver::{DriverDescriptor, DriverFactory},
     probe::{ProbeContext, ProbeError, ProbeResult},
 };
+
+/// Узел считается рабочим, если у него либо нет `status`-свойства, либо
+/// значение `"okay"`/`"ok"` (DT spec). Любой другой статус (`"disabled"`,
+/// `"fail*"`, `"reserved"`) исключает узел и его поддерево из пробинга.
+fn is_node_enabled<N: DeviceNode>(node: &N) -> bool {
+    let Some(prop) = node.prop("status") else {
+        return true;
+    };
+    matches!(prop.as_cstr(), Some("okay" | "ok"))
+}
 
 /// Функция пробирования runtime-драйвера.
 pub type ProbeFn<N> = fn(&mut ProbeContext<N>) -> ProbeResult;
@@ -69,6 +79,10 @@ impl EmbeddedDriversScanner {
                 limit: MAX_DEVICE_TREE_DEPTH,
                 attempted_depth: paths.len() + 1,
             });
+        }
+
+        if !is_node_enabled(&node) {
+            return Ok(());
         }
 
         paths.push(node);

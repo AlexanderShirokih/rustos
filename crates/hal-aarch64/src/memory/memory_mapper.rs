@@ -255,6 +255,11 @@ where
                 remaining -= l3_page;
             }
 
+            // SAFETY: barrier-only.
+            unsafe {
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            }
+
             Ok(())
         })
     }

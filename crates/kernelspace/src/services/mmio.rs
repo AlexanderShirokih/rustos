@@ -1,20 +1,44 @@
-use alloc::{boxed::Box, format};
+use alloc::{boxed::Box, format, sync::Arc};
 use core::num::NonZeroUsize;
 
+use collections::{LockCell, MutexCell};
 use drivers_common::services::mmio::{
     CleanupCallback, MmioAddress, MmioBound, MmioMapError, MmioService,
 };
 use memory::{
     AccessMask, MemFlags, MemoryRegion,
+    aligned::Aligned,
     mem_flags::{AccessMode, DeviceMemoryPermission, Owners},
     memory_mapper::MemoryMapper,
     physical_address::PageAlignedAddress,
-    virtual_address::PageAlignedVirtualAddress,
+    range_allocator::RangeAllocator,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 
+const PAGE_SIZE: usize = PageAlignedVirtualAddress::ALIGNMENT;
+
+pub type KernelMmioVaAllocator = MutexCell<RangeAllocator<()>>;
+
 pub struct MmioServiceImpl {
-    pub(crate) memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
-    pub(crate) linear_offset: PageAlignedVirtualAddress,
+    memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
+    va_allocator: Arc<KernelMmioVaAllocator>,
+}
+
+impl MmioServiceImpl {
+    /// Создаёт сервис над диапазоном `[arena_base, arena_base + arena_size)`
+    /// kernel-VA. Диапазон должен быть зарезервирован под MMIO-маппинги и
+    /// не пересекаться ни с линейной картой PA->VA, ни с heap-ареной.
+    pub fn new(
+        memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
+        arena_base: PageAlignedVirtualAddress,
+        arena_size: NonZeroUsize,
+    ) -> Self {
+        let arena_end = VirtualAddress::new(arena_base.as_usize() + arena_size.get());
+        Self {
+            memory_mapper,
+            va_allocator: Arc::new(MutexCell::new(RangeAllocator::new(arena_base, arena_end))),
+        }
+    }
 }
 
 impl MmioService for MmioServiceImpl {
@@ -25,31 +49,43 @@ impl MmioService for MmioServiceImpl {
     ) -> Result<MmioBound, MmioMapError> {
         let target_address = PageAlignedAddress::from_usize(address.base())
             .ok_or_else(|| MmioMapError("Mmio address is not aligned to 4K boundary".into()))?;
-        let size = NonZeroUsize::new(address.size())
+        let raw_size = NonZeroUsize::new(address.size())
             .ok_or_else(|| MmioMapError("Mmio region size must be non-zero".into()))?;
 
-        let source_address =
-            PageAlignedVirtualAddress::from_aligned_offset(target_address, self.linear_offset);
-        let region = alloc::sync::Arc::new(MemoryRegion::create_physical(
+        let pages = raw_size.get().div_ceil(PAGE_SIZE);
+        let size =
+            NonZeroUsize::new(pages * PAGE_SIZE).expect("pages >= 1 since raw_size is non-zero");
+
+        let source_address = self
+            .va_allocator
+            .with_lock(|alloc| alloc.allocate(size, ()))
+            .map_err(|err| MmioMapError(format!("VA arena: {err}")))?
+            .base();
+
+        let region = Arc::new(MemoryRegion::create_physical(
             target_address,
             size,
             access_mask_for_device(permissions),
         ));
 
-        region
-            .install(
-                self.memory_mapper,
-                source_address,
-                MemFlags::Device(permissions),
-            )
-            .map_err(|err| MmioMapError(format!("Mapping error: {err}")))?;
+        if let Err(err) = region.install(
+            self.memory_mapper,
+            source_address,
+            MemFlags::Device(permissions),
+        ) {
+            let _ = self
+                .va_allocator
+                .with_lock(|alloc| alloc.free(source_address, size));
+            return Err(MmioMapError(format!("Mapping error: {err}")));
+        }
 
         let mapper = self.memory_mapper;
         let region_for_cleanup = region.clone();
+        let va_allocator = self.va_allocator.clone();
         let cleanup: Box<CleanupCallback> = Box::new(
-            move |virtual_address: PageAlignedVirtualAddress, size: usize| {
-                debug_assert_eq!(size, region_for_cleanup.size_bytes());
+            move |virtual_address: PageAlignedVirtualAddress, _size: usize| {
                 let _ = region_for_cleanup.uninstall(mapper, virtual_address);
+                let _ = va_allocator.with_lock(|alloc| alloc.free(virtual_address, size));
             },
         );
 
@@ -159,16 +195,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn map_mmio_installs_physical_region_and_cleanup_uninstalls_it() {
-        let mapper = Box::leak(Box::new(SpyMapper::new()));
-        let linear_offset = PageAlignedVirtualAddress::from_usize(0xffff_0000_0000_0000).unwrap();
-        let service = MmioServiceImpl {
-            memory_mapper: mapper,
-            linear_offset,
-        };
-        let address = MmioAddress::new(0x4000_0000, 0x2000).unwrap();
+    const ARENA_BASE: usize = 0xffff_fffc_0000_0000;
+    const ARENA_SIZE: usize = 0x1_0000_0000;
 
+    fn make_service(mapper: &'static SpyMapper) -> MmioServiceImpl {
+        MmioServiceImpl::new(
+            mapper,
+            PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
+            NonZeroUsize::new(ARENA_SIZE).unwrap(),
+        )
+    }
+
+    #[test]
+    fn map_mmio_allocates_va_from_arena_independent_of_pa() {
+        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let service = make_service(mapper);
+
+        let address = MmioAddress::new(0x0c17_0000, 0x1000).unwrap();
         let bound = service
             .map_mmio(
                 address,
@@ -176,17 +219,19 @@ mod tests {
             )
             .expect("mmio mapping must succeed");
 
-        let source_address =
-            PageAlignedVirtualAddress::from_usize(linear_offset.as_usize() + 0x4000_0000).unwrap();
         let maps = mapper.maps.lock().unwrap();
         assert_eq!(maps.len(), 1);
         let first = maps[0];
-        assert_eq!(first.va, source_address);
+        assert_eq!(
+            first.va.as_usize(),
+            ARENA_BASE,
+            "first MMIO binding must start at arena base, not PA+offset"
+        );
         assert_eq!(
             first.pa,
-            PageAlignedAddress::from_usize(0x4000_0000).unwrap()
+            PageAlignedAddress::from_usize(0x0c17_0000).unwrap()
         );
-        assert_eq!(first.size, 0x2000);
+        assert_eq!(first.size, 0x1000);
         match first.flags {
             MemFlags::Device(owners) => match owners.kernel.access {
                 AccessMode::Writable => {}
@@ -200,7 +245,68 @@ mod tests {
 
         assert_eq!(
             *mapper.unmaps.lock().unwrap(),
-            Vec::from([(source_address, 0x2000)])
+            Vec::from([(
+                PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
+                0x1000
+            )])
         );
+    }
+
+    #[test]
+    fn map_mmio_rounds_sub_page_size_up_to_page() {
+        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let service = make_service(mapper);
+
+        let address = MmioAddress::new(0x0c16_f000, 0x200).unwrap();
+        let bound = service
+            .map_mmio(
+                address,
+                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+            )
+            .expect("mmio mapping must succeed");
+
+        let maps = mapper.maps.lock().unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].size, PAGE_SIZE, "sub-page MMIO must round up to 4K");
+        drop(maps);
+
+        drop(bound);
+
+        // unmap должен быть симметричен размеру install.
+        let unmaps = mapper.unmaps.lock().unwrap();
+        assert_eq!(unmaps.len(), 1);
+        assert_eq!(unmaps[0].1, PAGE_SIZE);
+    }
+
+    #[test]
+    fn map_mmio_returns_va_to_arena_after_unbind() {
+        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let service = make_service(mapper);
+
+        let address = MmioAddress::new(0x0c17_0000, 0x1000).unwrap();
+        let first = service
+            .map_mmio(
+                address,
+                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+            )
+            .expect("first mmio mapping must succeed");
+        let first_va = PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap();
+        drop(first);
+
+        let second = service
+            .map_mmio(
+                address,
+                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+            )
+            .expect("second mmio mapping must reuse freed VA");
+
+        let maps = mapper.maps.lock().unwrap();
+        assert_eq!(maps.len(), 2);
+        assert_eq!(
+            maps[1].va, first_va,
+            "freed VA must be reused for the next allocation"
+        );
+        drop(maps);
+        drop(second);
     }
 }

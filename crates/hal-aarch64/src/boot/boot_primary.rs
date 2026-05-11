@@ -1,6 +1,7 @@
 //! Post-MMU фаза загрузки: инициализация драйверов, подсистем и передача управления kmain.
 
 use alloc::boxed::Box;
+use core::num::NonZeroUsize;
 
 use drivers_aarch64::drivers;
 use drivers_common::scanner::EmbeddedDriversScanner;
@@ -17,7 +18,7 @@ use memory::{
 use scheduler::{Bootstrapped, Scheduler, SchedulerConfig};
 
 use crate::{
-    HIGHER_HALF_BASE,
+    HIGHER_HALF_BASE, KMMIO_BASE, KMMIO_MAX_SIZE,
     exception::ExceptionVectors,
     memory::memory_setup::{Enabled, MemorySetup},
     sched::Aarch64Context,
@@ -71,11 +72,15 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
     let address_space_factory: &'static (
                  dyn memory::memory_mapper::AddressSpaceFactory + Send + Sync
              ) = Box::leak(result.address_space_factory);
+    let mmio_arena_base = PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(KMMIO_BASE));
+    let mmio_arena_size =
+        NonZeroUsize::new(KMMIO_MAX_SIZE).expect("KMMIO_MAX_SIZE must be non-zero");
     let kernel = Box::leak(Box::new(KernelContext::new(
         memory_mapper,
         address_space_factory,
         result.frame_allocator,
-        result.base_offset,
+        mmio_arena_base,
+        mmio_arena_size,
     )));
 
     #[cfg(feature = "kernel-tests")]

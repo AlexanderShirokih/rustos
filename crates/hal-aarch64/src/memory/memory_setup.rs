@@ -61,7 +61,6 @@ pub struct MemoryManagerResult {
     pub memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
     pub address_space_factory: Box<dyn AddressSpaceFactory + Send + Sync>,
     pub frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
-    pub base_offset: PageAlignedVirtualAddress,
 }
 
 /// Корневые таблицы страниц.
@@ -384,7 +383,6 @@ impl MemorySetup<Enabled> {
             memory_mapper: kernel_mapper,
             address_space_factory,
             frame_allocator: fa_virt,
-            base_offset: higher_half_base,
         }
     }
 }

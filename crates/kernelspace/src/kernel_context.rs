@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use core::num::NonZeroUsize;
 
 use drivers_common::{BootServices, RuntimeDriverRegistry, services::mmio::MmioService};
 use memory::{
@@ -21,16 +22,18 @@ impl KernelContext {
         memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
         address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
         frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
-        base_offset: PageAlignedVirtualAddress,
+        mmio_arena_base: PageAlignedVirtualAddress,
+        mmio_arena_size: NonZeroUsize,
     ) -> KernelContext {
         // Публикуем глобальные слоты для модулей без KernelContext.
         syscall_bridge::install_address_space_factory(address_space_factory);
         syscall_bridge::install_frame_allocator(frame_allocator);
 
-        let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl {
+        let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl::new(
             memory_mapper,
-            linear_offset: base_offset,
-        });
+            mmio_arena_base,
+            mmio_arena_size,
+        ));
 
         let mut services = BootServices::new();
         services
