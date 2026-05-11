@@ -86,6 +86,7 @@ impl From<SpawnError> for SyscallError {
             | SpawnError::StackAllocationFailed
             | SpawnError::AddressSpaceCreationFailed => Self::OutOfMemory,
             SpawnError::InvalidPriority | SpawnError::InvalidStackPages => Self::InvalidArgument,
+            SpawnError::ImageNotLoaded => Self::WrongType,
         }
     }
 }

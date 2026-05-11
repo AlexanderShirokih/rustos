@@ -17,6 +17,7 @@ use super::{
     process::ProcessObject,
     rights::Rights,
     runtime::{ParkState, UserThreadEntry, runtime},
+    spawn::{LoadImageError, StartProcessError, UserImageInstall, UserStartSpec},
     thread::ThreadObject,
     wait::{CancelTarget, IndexedWaker, ParkWaker, SignalSource, SignalState, Waker},
 };
@@ -324,8 +325,7 @@ pub fn thread_exit(exit_code: i32) -> ! {
 }
 
 /// Создаёт пустой user-процесс через [`KernelRuntime::create_empty_process`].
-/// Имя пользователя в текущей реализации не сохраняется.
-pub fn create_empty_process(name: &'static str) -> Result<Arc<ProcessObject>, SpawnError> {
+pub fn create_empty_process(name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
     runtime().create_empty_process(name)
 }
 
@@ -335,6 +335,23 @@ pub fn create_user_thread(
     entry: UserThreadEntry,
 ) -> Result<Arc<ThreadObject>, SpawnError> {
     runtime().create_user_thread(process, entry)
+}
+
+/// Устанавливает регионы образа в child AS и прикрепляет user_vm-аллокатор.
+pub fn load_user_image_into(
+    process: &Arc<ProcessObject>,
+    install: &UserImageInstall,
+) -> Result<(), LoadImageError> {
+    runtime().load_user_image_into(process, install)
+}
+
+/// Вставляет bootstrap-handles в child handle-table и стартует первый
+/// user-поток.
+pub fn start_user_process(
+    process: &Arc<ProcessObject>,
+    spec: UserStartSpec,
+) -> Result<Arc<ThreadObject>, StartProcessError> {
+    runtime().start_user_process(process, spec)
 }
 
 /// Идемпотентно завершает поток: поднимает `THREAD_TERMINATED`,
@@ -553,10 +570,7 @@ mod tests {
 
         fn unblock(&self, _token: WaitToken) {}
 
-        fn create_empty_process(
-            &self,
-            _name: &'static str,
-        ) -> Result<Arc<ProcessObject>, SpawnError> {
+        fn create_empty_process(&self, _name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
             Err(SpawnError::NoFreeProcessSlots)
         }
 
@@ -582,6 +596,22 @@ mod tests {
             _exit_code: i32,
         ) -> Result<(), IpcError> {
             Ok(())
+        }
+
+        fn load_user_image_into(
+            &self,
+            _process: &Arc<ProcessObject>,
+            _install: &super::UserImageInstall,
+        ) -> Result<(), super::LoadImageError> {
+            Err(super::LoadImageError::ProcessNotFound)
+        }
+
+        fn start_user_process(
+            &self,
+            _process: &Arc<ProcessObject>,
+            _spec: super::UserStartSpec,
+        ) -> Result<Arc<ThreadObject>, super::StartProcessError> {
+            Err(super::StartProcessError::ProcessNotFound)
         }
     }
 

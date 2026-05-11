@@ -127,12 +127,28 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::process::sys_process_self();
             frame.set_return(encode_return(r));
         }
+        SyscallOp::ProcessLoadImage => {
+            let r =
+                super::process::sys_process_load_image(frame.arg(0), frame.arg(1), frame.arg(2));
+            frame.set_return(encode_return(r));
+        }
         SyscallOp::ProcessExitCode => {
             let r = super::process::sys_process_exit_code(frame.arg(0));
             frame.set_return(encode_return(r));
         }
         SyscallOp::ProcessTerminate => {
             let r = super::process::sys_process_terminate(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ProcessStart => {
+            let r = super::process::sys_process_start(
+                frame.arg(0),
+                frame.arg(1),
+                frame.arg(2),
+                frame.arg(3),
+                frame.arg(4),
+                frame.arg(5),
+            );
             frame.set_return(encode_return(r));
         }
         SyscallOp::ThreadCreate => {

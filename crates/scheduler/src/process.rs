@@ -4,22 +4,32 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use collections::MutexCell;
+use collections::{LockCell, MutexCell};
 use kobject::{HandleTable, ProcessObject};
-use memory::user_vm_allocator::UserVmAllocator;
+use memory::{MemoryRegion, user_vm_allocator::UserVmAllocator};
 
 use super::address_space::AddressSpace;
 use crate::ProcessId;
 
+const MAX_PROCESS_NAME_LEN: usize = 64;
+
+/// Возвращается из [`Process::set_user_vm`], если образ уже загружен.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessAlreadyLoaded;
+
 pub struct Process {
     id: ProcessId,
-    name: &'static str,
+    name: [u8; MAX_PROCESS_NAME_LEN],
+    name_len: u8,
     address_space: Arc<AddressSpace>,
     handle_table: Arc<MutexCell<HandleTable>>,
     /// Per-process аллокатор user-VA. `None` для kernel-процессов (idle,
     /// kernel-thread'ы) - у них пользовательской памяти нет, syscall'ы
     /// `vm_*` для них вернут `WrongType`.
     user_vm: Option<Arc<MutexCell<UserVmAllocator>>>,
+    /// Регионы загруженного образа. Объявлены после `address_space`/`user_vm`,
+    /// чтобы PTE снимались до возврата фреймов в `FrameAllocator`.
+    image_segments: Vec<Arc<MemoryRegion>>,
     /// Количество живых thread'ов, привязанных к этому процессу. Декремент
     /// при `thread_exit`; ноль - сигнал scheduler-у удалить процесс.
     thread_count: AtomicUsize,
@@ -30,13 +40,18 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn new(id: ProcessId, name: &'static str, address_space: Arc<AddressSpace>) -> Self {
+    pub fn new(id: ProcessId, name: &str, address_space: Arc<AddressSpace>) -> Self {
         Self {
             id,
-            name,
+            name: encode_name(name),
+            name_len: name
+                .len()
+                .try_into()
+                .expect("process name length is bounded by MAX_PROCESS_NAME_LEN"),
             address_space,
             handle_table: Arc::new(MutexCell::new(HandleTable::new())),
             user_vm: None,
+            image_segments: Vec::new(),
             thread_count: AtomicUsize::new(1),
             ko: ProcessObject::new(),
         }
@@ -44,13 +59,18 @@ impl Process {
 
     /// Конструктор пустого процесса: счётчик потоков нулевой, потоки
     /// добавляются через [`Self::increment_thread_count`].
-    pub fn empty(id: ProcessId, name: &'static str, address_space: Arc<AddressSpace>) -> Self {
+    pub fn empty(id: ProcessId, name: &str, address_space: Arc<AddressSpace>) -> Self {
         Self {
             id,
-            name,
+            name: encode_name(name),
+            name_len: name
+                .len()
+                .try_into()
+                .expect("process name length is bounded by MAX_PROCESS_NAME_LEN"),
             address_space,
             handle_table: Arc::new(MutexCell::new(HandleTable::new())),
             user_vm: None,
+            image_segments: Vec::new(),
             thread_count: AtomicUsize::new(0),
             ko: ProcessObject::new(),
         }
@@ -64,6 +84,30 @@ impl Process {
         self
     }
 
+    /// In-place аналог [`Self::with_user_vm`]: отказывается перезаписать
+    /// уже прикреплённый аллокатор.
+    pub fn set_user_vm(&mut self, vm: UserVmAllocator) -> Result<(), ProcessAlreadyLoaded> {
+        if self.user_vm.is_some() {
+            return Err(ProcessAlreadyLoaded);
+        }
+        self.user_vm = Some(Arc::new(MutexCell::new(vm)));
+        Ok(())
+    }
+
+    pub fn set_image_segments(&mut self, segments: Vec<Arc<MemoryRegion>>) {
+        self.image_segments = segments;
+    }
+
+    /// `true`, если образ загружен (user-vm прикреплена).
+    pub fn is_image_loaded(&self) -> bool {
+        self.user_vm.is_some()
+    }
+
+    /// `true`, если в handle-table процесса нет живых handle'ов.
+    pub fn handle_table_is_empty(&self) -> bool {
+        self.handle_table.with_lock(|t| t.live_count() == 0)
+    }
+
     /// `Arc` per-process аллокатора user-VA. Клонируется как `Arc`,
     /// чтобы syscall-handler-ы могли работать с аллокатором вне scheduler-lock.
     /// `None` - у процесса нет user-AS (kernel-процесс).
@@ -75,8 +119,9 @@ impl Process {
         self.id
     }
 
-    pub fn name(&self) -> &'static str {
-        self.name
+    pub fn name(&self) -> &str {
+        let len = usize::from(self.name_len);
+        core::str::from_utf8(&self.name[..len]).expect("process names are copied from valid UTF-8")
     }
 
     pub fn address_space(&self) -> &Arc<AddressSpace> {
@@ -154,7 +199,7 @@ impl ProcessTable {
 
     pub fn insert(
         &mut self,
-        name: &'static str,
+        name: &str,
         address_space: Arc<AddressSpace>,
     ) -> Result<ProcessId, ProcessTableError> {
         self.insert_with(|id| Process::new(id, name, address_space))
@@ -198,10 +243,23 @@ impl ProcessTable {
             .find(|p| p.id() == id)
     }
 
+    pub fn get_mut(&mut self, id: ProcessId) -> Option<&mut Process> {
+        self.slots
+            .iter_mut()
+            .filter_map(|s| s.as_mut())
+            .find(|p| p.id() == id)
+    }
+
     /// Линейный обход процессов: используется лукапами `Arc<ProcessObject>`
     /// по обратной ссылке. Стоимость O(N) приемлема при N в десятки.
     pub fn iter(&self) -> impl Iterator<Item = &Process> {
         self.slots.iter().filter_map(|s| s.as_ref())
+    }
+
+    /// `&mut`-вариант [`Self::iter`]. Используется scheduler-side путями
+    /// для in-place изменения `Process` (например, `set_user_vm`).
+    pub fn iter_mut_internal(&mut self) -> impl Iterator<Item = &mut Process> {
+        self.slots.iter_mut().filter_map(|s| s.as_mut())
     }
 
     /// Удаляет процесс из таблицы. Возвращает `Some(Process)` если найден.
@@ -226,5 +284,80 @@ impl ProcessTable {
 impl Default for ProcessTable {
     fn default() -> Self {
         Self::new(64)
+    }
+}
+
+fn encode_name(name: &str) -> [u8; MAX_PROCESS_NAME_LEN] {
+    assert!(
+        name.len() <= MAX_PROCESS_NAME_LEN,
+        "process name is longer than MAX_PROCESS_NAME_LEN"
+    );
+    let mut buf = [0u8; MAX_PROCESS_NAME_LEN];
+    buf[..name.len()].copy_from_slice(name.as_bytes());
+    buf
+}
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroU32;
+
+    use memory::{
+        UserVmAllocator,
+        virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+    };
+
+    use super::*;
+
+    fn pid(raw: u32) -> ProcessId {
+        ProcessId::new(NonZeroU32::new(raw).expect("non-zero pid"))
+    }
+
+    fn fresh_process() -> Process {
+        Process::empty(pid(1), "p", AddressSpace::kernel())
+    }
+
+    fn make_vm() -> UserVmAllocator {
+        UserVmAllocator::new(
+            PageAlignedVirtualAddress::from_usize(0x4000_0000).expect("aligned"),
+            VirtualAddress::new(0x4001_0000),
+        )
+    }
+
+    #[test]
+    fn is_image_loaded_false_for_fresh_process() {
+        let p = fresh_process();
+        assert!(!p.is_image_loaded());
+    }
+
+    #[test]
+    fn is_image_loaded_true_after_set_user_vm() {
+        let mut p = fresh_process();
+        p.set_user_vm(make_vm()).expect("fresh process accepts vm");
+        assert!(p.is_image_loaded());
+    }
+
+    #[test]
+    fn set_user_vm_succeeds_on_fresh_process() {
+        let mut p = fresh_process();
+        assert_eq!(p.set_user_vm(make_vm()), Ok(()));
+    }
+
+    #[test]
+    fn set_user_vm_rejects_when_already_loaded() {
+        let mut p = fresh_process();
+        p.set_user_vm(make_vm()).expect("first call ok");
+        assert_eq!(p.set_user_vm(make_vm()), Err(ProcessAlreadyLoaded));
+    }
+
+    #[test]
+    fn handle_table_is_empty_for_fresh_process() {
+        let p = fresh_process();
+        assert!(p.handle_table_is_empty());
+    }
+
+    #[test]
+    fn process_keeps_owned_name() {
+        let p = Process::empty(pid(1), "user-proc", AddressSpace::kernel());
+        assert_eq!(p.name(), "user-proc");
     }
 }

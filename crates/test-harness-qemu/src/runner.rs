@@ -100,6 +100,10 @@ fn should_run_early(name: &str) -> bool {
             | "userspace_vm_allocate_free_reuse_va"
             | "syscall_from_kernel_origin_is_rejected"
             | "event_signal_after_deadline"
+            | "process_lifecycle_self_handles_and_exit_code"
+            | "channel_via_syscall_round_trip"
+            | "mailbox_via_syscall_round_trip"
+            | "userspace_self_spawn_via_syscalls"
     )
 }
 

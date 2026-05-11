@@ -33,6 +33,7 @@ mod memory;
 mod numbers;
 mod process;
 mod runtime;
+mod spawn_abi;
 mod thread;
 mod user_io;
 
@@ -41,3 +42,7 @@ pub use error::SyscallError;
 pub use flags::UserMemFlags;
 pub use numbers::SyscallOp;
 pub use runtime::{SyscallRuntime, install_runtime};
+pub use spawn_abi::{
+    MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, USER_IMAGE_DESC_SIZE,
+    USER_SEGMENT_SIZE, UserImageDescAbi, UserSegmentAbi, decode_image_desc, decode_segment,
+};

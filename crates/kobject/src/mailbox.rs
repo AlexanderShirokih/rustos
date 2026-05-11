@@ -847,8 +847,10 @@ mod tests {
     #[test]
     fn resubscribe_during_once_delivery_gets_its_own_packet() {
         use std::{
-            sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
-            sync::{Arc, Barrier},
+            sync::{
+                Arc, Barrier,
+                atomic::{AtomicBool, Ordering as AtomicOrdering},
+            },
             thread,
         };
 
@@ -861,14 +863,13 @@ mod tests {
         let entered_hook = entered.clone();
         let release_hook = release.clone();
         let first_delivery_hook = first_delivery.clone();
-        let _hook_guard = super::test_hooks::install_wake_once_before_cleanup(Arc::new(
-            move || {
+        let _hook_guard =
+            super::test_hooks::install_wake_once_before_cleanup(Arc::new(move || {
                 if first_delivery_hook.swap(false, AtomicOrdering::AcqRel) {
                     entered_hook.wait();
                     release_hook.wait();
                 }
-            },
-        ));
+            }));
 
         mb.subscribe(&target, koid, 7, EVENT_SIGNALED, AsyncMode::Once)
             .unwrap();
@@ -890,7 +891,11 @@ mod tests {
         let packet_b = mb.try_pop().unwrap();
         let packets = [(packet_a.key, packet_a.kind), (packet_b.key, packet_b.kind)];
         assert!(packets.contains(&(7, MailboxPacketKind::SignalOnce)));
-        assert!(packets.iter().all(|&(key, kind)| key == 7 && kind == MailboxPacketKind::SignalOnce));
+        assert!(
+            packets
+                .iter()
+                .all(|&(key, kind)| key == 7 && kind == MailboxPacketKind::SignalOnce)
+        );
         assert_eq!(mb.try_pop().unwrap_err(), IpcError::ShouldWait);
     }
 

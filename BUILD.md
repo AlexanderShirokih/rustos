@@ -40,5 +40,5 @@ cargo xtask build devices/spec/qemu-aarch64.yaml --run
 cargo xtask build devices/spec/qemu-aarch64.yaml --debug
 
 # QEMU integration tests
-cargo xtask qemu-test --timeout 60
+cargo xtask qemu-test --timeout 20
 ```

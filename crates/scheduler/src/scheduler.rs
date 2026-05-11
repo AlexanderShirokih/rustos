@@ -8,6 +8,7 @@ use kobject::{HandleTable, ProcessObject, ThreadObject};
 use memory::{
     memory_mapper::{AddressSpaceFactory, AddressSpaceHandle},
     user_vm_allocator::UserVmAllocator,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 
 use super::{
@@ -23,6 +24,8 @@ use crate::{
     PreparedUserProcess, PreparedUserProcessError, Priority, ProcessId, SpawnAddressSpace,
     SpawnConfig, SpawnError, ThreadId, UserBootstrapArg, UserProcessLaunchInfo,
 };
+
+const FRAME_SIZE: usize = 4096;
 
 const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
 const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
@@ -45,6 +48,32 @@ pub(super) enum ScheduleAction<A: ArchContext> {
         next: *const A,
         address_space: AddressSpaceTransition,
     },
+}
+
+#[derive(Default)]
+#[must_use = "DeferredSignals содержит отложенные signal_terminated; вызови .emit() вне scheduler-lock'а"]
+pub(super) struct DeferredSignals {
+    threads: Vec<(Arc<ThreadObject>, i32)>,
+    processes: Vec<(Arc<ProcessObject>, i32)>,
+}
+
+impl DeferredSignals {
+    fn push_thread(&mut self, thread: Arc<ThreadObject>, exit_code: i32) {
+        self.threads.push((thread, exit_code));
+    }
+
+    fn push_process(&mut self, process: Arc<ProcessObject>, exit_code: i32) {
+        self.processes.push((process, exit_code));
+    }
+
+    pub(super) fn emit(self) {
+        for (thread, exit_code) in self.threads {
+            thread.signal_terminated(exit_code);
+        }
+        for (process, exit_code) in self.processes {
+            process.signal_terminated(exit_code);
+        }
+    }
 }
 
 // Ручные impls вместо `#[derive]`: derive подкинул бы `A: Copy`-bound,
@@ -302,11 +331,17 @@ where
     /// Тестовый помощник: вариант [`Self::exit_current`] с явным `exit_code`.
     #[doc(hidden)]
     pub fn exit_current_with_code(&self, exit_code: i32) {
-        let action = with_preemption_disabled::<A::Cpu, _>(|| {
-            self.inner.with_lock(|inner| {
-                let now_ns = inner.timer.now_ns();
-                inner.exit_current(exit_code, now_ns)
-            })
+        // Bare disable: preempt должен оставаться выключенным до
+        // `perform_schedule_action`, иначе tick может уйти с Terminated
+        // потока до `finish_exit_current`. Парный enable не нужен.
+        <A::Cpu as ArchCpu>::disable_preemption();
+        let signals = self
+            .inner
+            .with_lock(|inner| inner.begin_exit_current(exit_code));
+        signals.emit();
+        let action = self.inner.with_lock(|inner| {
+            let now_ns = inner.timer.now_ns();
+            inner.finish_exit_current(now_ns)
         });
         perform_schedule_action::<A>(action);
     }
@@ -873,7 +908,8 @@ where
     /// держится scheduler-локом и инвариантом `thread_count > 0`: метод
     /// вызывается под `MutexCell<SchedulerInner>` и до `switch_to_next`,
     /// поэтому конкурирующий exit того же thread/process невозможен.
-    pub(super) fn exit_current(&mut self, exit_code: i32, now_ns: u64) -> ScheduleAction<A> {
+    pub(super) fn begin_exit_current(&mut self, exit_code: i32) -> DeferredSignals {
+        let mut signals = DeferredSignals::default();
         let current_id = self.current();
         let (exiting_pid, thread_ko) = if let Some(thread) = self.threads.get_mut(current_id) {
             thread.set_state(ThreadState::Terminated);
@@ -883,7 +919,7 @@ where
         };
 
         if let Some(ko) = thread_ko {
-            ko.signal_terminated(exit_code);
+            signals.push_thread(ko, exit_code);
         }
 
         // Декремент thread_count процесса. На нуле поднимаем
@@ -894,10 +930,14 @@ where
             && let Some(process) = self.processes.get(pid)
             && process.decrement_thread_count()
         {
-            process.process_object().signal_terminated(exit_code);
+            signals.push_process(process.process_object().clone(), exit_code);
             self.pending_process_removals.push(pid);
         }
 
+        signals
+    }
+
+    pub(super) fn finish_exit_current(&mut self, now_ns: u64) -> ScheduleAction<A> {
         self.switch_to_next(now_ns)
     }
 
@@ -905,7 +945,7 @@ where
     /// user_vm-аллокатора. Возвращает `Arc<ProcessObject>` нового процесса.
     pub(crate) fn create_empty_process(
         &mut self,
-        name: &'static str,
+        name: &str,
     ) -> Result<Arc<ProcessObject>, SpawnError> {
         let factory = self
             .address_space_factory
@@ -929,6 +969,18 @@ where
         process_ko: &Arc<ProcessObject>,
         entry: kobject::UserThreadEntry,
     ) -> Result<Arc<ThreadObject>, SpawnError> {
+        let (thread_id, thread_ko) = self.prepare_user_thread(process_ko, entry)?;
+        self.enqueue_user_thread_ready(thread_id);
+        Ok(thread_ko)
+    }
+
+    /// Создаёт user-поток без enqueue в ready-queue; `enqueue` или
+    /// cleanup через [`Self::drop_prepared_thread`] -- забота caller'а.
+    pub(crate) fn prepare_user_thread(
+        &mut self,
+        process_ko: &Arc<ProcessObject>,
+        entry: kobject::UserThreadEntry,
+    ) -> Result<(ThreadId, Arc<ThreadObject>), SpawnError> {
         if (entry.priority as usize) >= self.config.priority_levels() {
             return Err(SpawnError::InvalidPriority);
         }
@@ -940,6 +992,15 @@ where
             .find(|p| Arc::ptr_eq(p.process_object(), process_ko))
             .map(Process::id)
             .ok_or(SpawnError::NoFreeThreadSlots)?;
+        // Защита от обхода ProcessStart через прямой syscall ThreadCreate:
+        // без user_vm первый же fetch улетел бы в page fault.
+        if !self
+            .processes
+            .get(process_id)
+            .is_some_and(Process::is_image_loaded)
+        {
+            return Err(SpawnError::ImageNotLoaded);
+        }
 
         let stack = <A::Stack as super::arch::ThreadStackAllocator>::allocate(
             crate::SpawnConfig::DEFAULT_STACK_PAGES,
@@ -949,8 +1010,8 @@ where
 
         let arch = A::init_user(crate::UserEntry {
             kernel_stack_top: stack_top,
-            user_pc: memory::virtual_address::VirtualAddress::new(entry.entry_pc as usize),
-            user_sp: memory::virtual_address::VirtualAddress::new(entry.user_sp as usize),
+            user_pc: VirtualAddress::new(entry.entry_pc as usize),
+            user_sp: VirtualAddress::new(entry.user_sp as usize),
             arg: UserBootstrapArg(entry.arg),
         });
 
@@ -996,20 +1057,210 @@ where
             .thread_object()
             .clone();
 
+        Ok((thread_id, thread_ko))
+    }
+
+    /// Пушит ранее prepared user-thread в ready-queue его cpu-affinity.
+    pub(crate) fn enqueue_user_thread_ready(&mut self, thread_id: ThreadId) {
+        let Some(thread) = self.threads.get(thread_id) else {
+            return;
+        };
+        let priority = thread.priority();
+        let cpu_affinity = thread.cpu_affinity();
+
         if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
             && cpu.idle() != thread_id
         {
             cpu.ready_queue_mut().push(thread_id, priority);
         }
+    }
+
+    /// Откатывает prepared user-thread, не доехавший до enqueue: удаляет
+    /// из `ThreadTable` и декрементирует thread_count процесса.
+    pub(crate) fn drop_prepared_thread(&mut self, thread_id: ThreadId) {
+        let pid = self.threads.get(thread_id).map(Thread::process);
+        if self.threads.remove(thread_id).is_none() {
+            return;
+        }
+        if let Some(pid) = pid
+            && let Some(process) = self.processes.get(pid)
+        {
+            let _ = process.decrement_thread_count();
+        }
+    }
+
+    /// Устанавливает регионы образа в child AS, маппит user-стек и
+    /// прикрепляет per-process `UserVmAllocator`.
+    pub(crate) fn load_user_image_into(
+        &mut self,
+        process_ko: &Arc<ProcessObject>,
+        install: &kobject::UserImageInstall,
+    ) -> Result<(), kobject::LoadImageError> {
+        use kobject::LoadImageError;
+
+        let process = self
+            .process_by_object_mut(process_ko)
+            .ok_or(LoadImageError::ProcessNotFound)?;
+        if process.is_image_loaded()
+            || process.thread_count() != 0
+            || !process.handle_table_is_empty()
+        {
+            return Err(LoadImageError::WrongState);
+        }
+
+        let mapper_arc = process
+            .address_space()
+            .mapper_arc()
+            .ok_or(LoadImageError::NoUserAddressSpace)?;
+        let mapper: &(dyn memory::memory_mapper::MemoryMapper + Send + Sync) = &*mapper_arc;
+
+        // Overflow проверяем до маппинга: set_user_vm идёт последним,
+        // и оставлять процесс в полузагруженном состоянии нельзя.
+        let user_vm_end_usize = install
+            .user_vm_base
+            .as_usize()
+            .checked_add(install.user_vm_size)
+            .ok_or(LoadImageError::UserVmRangeOverflow)?;
+
+        // Сегменты устанавливаются последовательно; при ошибке откатываем
+        // уже установленные через `unmap` (фреймы регионов остаются за
+        // `MemoryRegion`, освобождаются их `Drop`).
+        let mut installed: Vec<(PageAlignedVirtualAddress, usize)> =
+            Vec::with_capacity(install.segments.len());
+        for seg in &install.segments {
+            if let Err(e) = seg.region.install(mapper, seg.va_base, seg.flags) {
+                for (va, size) in installed.iter().rev() {
+                    let _ = mapper.unmap(*va, *size);
+                }
+                return Err(LoadImageError::MappingFailed(e));
+            }
+            installed.push((seg.va_base, seg.mapped_size));
+        }
+
+        let stack_base_usize = install
+            .user_stack_top
+            .as_usize()
+            .checked_sub(install.user_stack_size)
+            .ok_or(LoadImageError::MappingFailed(
+                memory::memory_mapper::MemoryMappingError::VirtualMappingError,
+            ))?;
+        let stack_base = PageAlignedVirtualAddress::from_usize(stack_base_usize).ok_or(
+            LoadImageError::MappingFailed(
+                memory::memory_mapper::MemoryMappingError::VirtualMappingError,
+            ),
+        )?;
+        let stack_pages = install.user_stack_size / FRAME_SIZE;
+        if let Err(e) = mapper.map(stack_base, stack_pages, &[], memory::MemFlags::user_rw()) {
+            for (va, size) in installed.iter().rev() {
+                let _ = mapper.unmap(*va, *size);
+            }
+            return Err(LoadImageError::MappingFailed(e));
+        }
+
+        let vm = UserVmAllocator::new(install.user_vm_base, VirtualAddress::new(user_vm_end_usize));
+        process
+            .set_user_vm(vm)
+            .expect("precondition is_image_loaded()==false guarantees fresh user_vm");
+        let segments: Vec<Arc<memory::MemoryRegion>> =
+            install.segments.iter().map(|s| s.region.clone()).collect();
+        process.set_image_segments(segments);
+        Ok(())
+    }
+
+    /// Стартует первый user-поток. Drain handles делается ПОСЛЕ успешного
+    /// `prepare_user_thread`, поэтому любая ошибка до drain оставляет
+    /// loader-table с исходными `HandleId`'ами.
+    pub(crate) fn start_user_process(
+        &mut self,
+        process_ko: &Arc<ProcessObject>,
+        spec: kobject::UserStartSpec,
+    ) -> Result<Arc<ThreadObject>, kobject::StartProcessError> {
+        use kobject::StartProcessError;
+
+        let kobject::UserStartSpec {
+            entry,
+            loader_handle_table,
+            handle_ids,
+        } = spec;
+
+        {
+            let Some(process) = self.process_by_object_mut(process_ko) else {
+                return Err(StartProcessError::ProcessNotFound);
+            };
+            if !process.is_image_loaded()
+                || process.thread_count() != 0
+                || !process.handle_table_is_empty()
+            {
+                return Err(StartProcessError::WrongState);
+            }
+        }
+
+        // Validate handle_ids под loader-lock'ом до drain: existence +
+        // TRANSFER + no dupes.
+        if let Err(e) = loader_handle_table.with_lock(|tbl| {
+            for (i, id) in handle_ids.iter().enumerate() {
+                if handle_ids[..i].iter().any(|prev| prev == id) {
+                    return Err(kobject::IpcError::BadHandle);
+                }
+                tbl.get(*id, kobject::Rights::TRANSFER)?;
+            }
+            Ok(())
+        }) {
+            return Err(StartProcessError::HandleValidationFailed(e));
+        }
+
+        let (thread_id, thread_ko) = match self.prepare_user_thread(process_ko, entry) {
+            Ok(t) => t,
+            Err(source) => return Err(StartProcessError::SpawnFailed(source.into())),
+        };
+
+        // Validate и drain в разных with_lock-окнах; на гонке (другой
+        // syscall закрыл handle между шагами) откатываем prepared thread.
+        let drained = match loader_handle_table
+            .with_lock(|tbl| tbl.try_drain_for_transfer(&handle_ids, kobject::Rights::TRANSFER))
+        {
+            Ok(d) => d,
+            Err(e) => {
+                self.drop_prepared_thread(thread_id);
+                return Err(StartProcessError::HandleValidationFailed(e));
+            }
+        };
+
+        // Insert не фейлит: child-table пуста и MAX_BOOTSTRAP_HANDLES
+        // много меньше DEFAULT_CAPACITY.
+        let child_table = self
+            .process_by_object_mut(process_ko)
+            .expect("process still present")
+            .handle_table()
+            .clone();
+        child_table.with_lock(|tbl| {
+            for h in drained {
+                tbl.insert(h)
+                    .expect("child handle-table has DEFAULT_CAPACITY slots free");
+            }
+        });
+
+        self.enqueue_user_thread_ready(thread_id);
 
         Ok(thread_ko)
+    }
+
+    fn process_by_object_mut(&mut self, ko: &Arc<ProcessObject>) -> Option<&mut Process> {
+        self.processes
+            .iter_mut_internal()
+            .find(|p| Arc::ptr_eq(p.process_object(), ko))
     }
 
     /// Идемпотентно завершает поток через handle: поднимает
     /// `THREAD_TERMINATED`, декрементирует thread_count, на нуле -
     /// `PROCESS_TERMINATED`. Context switch не делает; для завершения
     /// собственного потока должен использоваться [`Self::exit_current`].
-    pub(crate) fn terminate_thread_ko(&mut self, thread_ko: &Arc<ThreadObject>, exit_code: i32) {
+    fn collect_thread_termination(
+        &mut self,
+        thread_ko: &Arc<ThreadObject>,
+        exit_code: i32,
+        signals: &mut DeferredSignals,
+    ) {
         let lookup = self
             .threads
             .iter()
@@ -1025,27 +1276,43 @@ where
         if let Some(thread) = self.threads.get_mut(thread_id) {
             thread.set_state(ThreadState::Terminated);
         }
-        thread_ko.signal_terminated(exit_code);
+        signals.push_thread(thread_ko.clone(), exit_code);
 
         if let Some(process) = self.processes.get(pid)
             && process.decrement_thread_count()
         {
-            process.process_object().signal_terminated(exit_code);
+            signals.push_process(process.process_object().clone(), exit_code);
             self.pending_process_removals.push(pid);
         }
     }
 
+    pub(crate) fn terminate_thread_ko(
+        &mut self,
+        thread_ko: &Arc<ThreadObject>,
+        exit_code: i32,
+    ) -> DeferredSignals {
+        let mut signals = DeferredSignals::default();
+        self.collect_thread_termination(thread_ko, exit_code, &mut signals);
+        signals
+    }
+
     /// Идемпотентно завершает все потоки процесса: каждый живой поток
     /// получает `THREAD_TERMINATED`, по достижении нуля - процесс
-    /// получает `PROCESS_TERMINATED`.
-    pub(crate) fn terminate_process_ko(&mut self, process_ko: &Arc<ProcessObject>, exit_code: i32) {
+    /// получает `PROCESS_TERMINATED`. На процессе без живых потоков
+    /// сразу поднимает `PROCESS_TERMINATED` и ставит в очередь на удаление.
+    pub(crate) fn terminate_process_ko(
+        &mut self,
+        process_ko: &Arc<ProcessObject>,
+        exit_code: i32,
+    ) -> DeferredSignals {
+        let mut signals = DeferredSignals::default();
         let pid_lookup = self
             .processes
             .iter()
             .find(|p| Arc::ptr_eq(p.process_object(), process_ko))
             .map(Process::id);
         let Some(pid) = pid_lookup else {
-            return;
+            return signals;
         };
         // Собираем снимок KO живых потоков под scheduler-lock'ом, чтобы
         // не держать одновременно &self и &mut self при итерации.
@@ -1055,9 +1322,17 @@ where
             .filter(|t| t.process() == pid && !matches!(t.state(), ThreadState::Terminated))
             .map(|t| t.thread_object().clone())
             .collect();
-        for ko in &live {
-            self.terminate_thread_ko(ko, exit_code);
+        if live.is_empty() {
+            signals.push_process(process_ko.clone(), exit_code);
+            if !self.pending_process_removals.contains(&pid) {
+                self.pending_process_removals.push(pid);
+            }
+            return signals;
         }
+        for ko in &live {
+            self.collect_thread_termination(ko, exit_code, &mut signals);
+        }
+        signals
     }
 
     fn wake_sleepers(&mut self, now_ns: u64) {

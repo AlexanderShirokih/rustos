@@ -110,6 +110,14 @@ pub enum SyscallOp {
     ProcessCreate = 0x40,
     /// Возвращает handle на собственный [`ProcessObject`](kobject::ProcessObject).
     ProcessSelf = 0x41,
+    /// Устанавливает регионы образа в child AS и прикрепляет per-process
+    /// user_vm-аллокатор. Аргументы: `arg0=process_handle`,
+    /// `arg1=desc_va` (user-указатель на [`UserImageDescAbi`]),
+    /// `arg2=desc_len` (== `USER_IMAGE_DESC_SIZE = 56`). Требует
+    /// [`Rights::MANAGE_PROCESS`](kobject::Rights::MANAGE_PROCESS) на
+    /// `process_handle`; для каждого региона - `MAP | (R/W/X по flags)`.
+    /// Возврат `0`.
+    ProcessLoadImage = 0x42,
     /// Финальный exit-код процесса. Аргументы: `arg0=handle`. Требует
     /// [`Rights::INSPECT`](kobject::Rights::INSPECT).
     ProcessExitCode = 0x43,
@@ -118,6 +126,17 @@ pub enum SyscallOp {
     /// `arg0=handle`, `arg1=exit_code`. Требует
     /// [`Rights::MANAGE_PROCESS`](kobject::Rights::MANAGE_PROCESS).
     ProcessTerminate = 0x44,
+    /// Стартует первый поток уже загруженного образа и атомарно
+    /// передаёт ему bootstrap-handles. Аргументы: `arg0=process_handle`,
+    /// `arg1=entry_pc`, `arg2=user_sp`, `arg3=arg` (X0 первой
+    /// инструкции), `arg4 = priority | (handles_count << 32)`,
+    /// `arg5=handles_va` (массив `[u32; handles_count]` HandleId
+    /// raw-значений). Требует
+    /// [`Rights::MANAGE_PROCESS`](kobject::Rights::MANAGE_PROCESS) на
+    /// `process_handle` и [`Rights::TRANSFER`](kobject::Rights::TRANSFER)
+    /// на каждом handle в `handles_va`. Возвращает handle на свежий
+    /// [`ThreadObject`](kobject::ThreadObject).
+    ProcessStart = 0x45,
 
     // 0x50..=0x5F - Thread KObject.
     /// Создаёт user-поток в указанном процессе. Аргументы:
@@ -218,8 +237,10 @@ impl SyscallOp {
             0x31 => Ok(Self::HandleDuplicate),
             0x40 => Ok(Self::ProcessCreate),
             0x41 => Ok(Self::ProcessSelf),
+            0x42 => Ok(Self::ProcessLoadImage),
             0x43 => Ok(Self::ProcessExitCode),
             0x44 => Ok(Self::ProcessTerminate),
+            0x45 => Ok(Self::ProcessStart),
             0x50 => Ok(Self::ThreadCreate),
             0x51 => Ok(Self::ThreadSelf),
             0x52 => Ok(Self::ThreadExit),
@@ -258,8 +279,10 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x31), Ok(SyscallOp::HandleDuplicate));
         assert_eq!(SyscallOp::from_raw(0x40), Ok(SyscallOp::ProcessCreate));
         assert_eq!(SyscallOp::from_raw(0x41), Ok(SyscallOp::ProcessSelf));
+        assert_eq!(SyscallOp::from_raw(0x42), Ok(SyscallOp::ProcessLoadImage));
         assert_eq!(SyscallOp::from_raw(0x43), Ok(SyscallOp::ProcessExitCode));
         assert_eq!(SyscallOp::from_raw(0x44), Ok(SyscallOp::ProcessTerminate));
+        assert_eq!(SyscallOp::from_raw(0x45), Ok(SyscallOp::ProcessStart));
         assert_eq!(SyscallOp::from_raw(0x50), Ok(SyscallOp::ThreadCreate));
         assert_eq!(SyscallOp::from_raw(0x51), Ok(SyscallOp::ThreadSelf));
         assert_eq!(SyscallOp::from_raw(0x52), Ok(SyscallOp::ThreadExit));
@@ -307,7 +330,7 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(3), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x13), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x32), Err(SyscallError::BadSyscall));
-        assert_eq!(SyscallOp::from_raw(0x42), Err(SyscallError::BadSyscall));
+        assert_eq!(SyscallOp::from_raw(0x46), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x55), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x62), Err(SyscallError::BadSyscall));
         assert_eq!(SyscallOp::from_raw(0x68), Err(SyscallError::BadSyscall));

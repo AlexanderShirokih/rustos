@@ -355,10 +355,7 @@ mod tests {
         fn unblock(&self, _token: WaitToken) {
             self.unblocks.fetch_add(1, Ordering::AcqRel);
         }
-        fn create_empty_process(
-            &self,
-            _name: &'static str,
-        ) -> Result<Arc<ProcessObject>, SpawnError> {
+        fn create_empty_process(&self, _name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
             Err(SpawnError::NoFreeProcessSlots)
         }
         fn create_user_thread(
@@ -381,6 +378,20 @@ mod tests {
             _exit_code: i32,
         ) -> Result<(), IpcError> {
             Ok(())
+        }
+        fn load_user_image_into(
+            &self,
+            _process: &Arc<ProcessObject>,
+            _install: &crate::UserImageInstall,
+        ) -> Result<(), crate::LoadImageError> {
+            Err(crate::LoadImageError::ProcessNotFound)
+        }
+        fn start_user_process(
+            &self,
+            _process: &Arc<ProcessObject>,
+            _spec: crate::UserStartSpec,
+        ) -> Result<Arc<ThreadObject>, crate::StartProcessError> {
+            Err(crate::StartProcessError::ProcessNotFound)
         }
     }
 

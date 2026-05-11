@@ -3,8 +3,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use collections::{LockCell, MutexCell};
 use kobject::{
-    HandleTable, IpcError, KernelRuntime, ParkState, ProcessObject, ThreadObject, UserThreadEntry,
-    WaitToken,
+    HandleTable, IpcError, KernelRuntime, LoadImageError, ParkState, ProcessObject,
+    StartProcessError, ThreadObject, UserImageInstall, UserStartSpec, UserThreadEntry, WaitToken,
 };
 use memory::UserVmContext;
 
@@ -139,13 +139,15 @@ where
     }
 
     fn exit_current_thread(&self, exit_code: i32) -> ! {
-        // Bare disable без RAII-обёртки: путь не возвращается, парный
-        // enable отсутствует намеренно. Возобновление управления здесь -
-        // bug в context-switch и ловится `unreachable!` ниже.
+        // Bare disable: путь не возвращается, парный enable не нужен.
         <A::Cpu as ArchCpu>::disable_preemption();
+        let signals = self
+            .inner
+            .with_lock(|inner| inner.begin_exit_current(exit_code));
+        signals.emit();
         let action = self.inner.with_lock(|inner| {
             let now_ns = inner.now_ns();
-            inner.exit_current(exit_code, now_ns)
+            inner.finish_exit_current(now_ns)
         });
         perform_schedule_action::<A>(action);
         unreachable!("terminated thread resumed after scheduler switch")
@@ -175,10 +177,7 @@ where
             .with_lock(|inner| inner.unblock_thread(thread_id));
     }
 
-    fn create_empty_process(
-        &self,
-        name: &'static str,
-    ) -> Result<Arc<ProcessObject>, kobject::SpawnError> {
+    fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, kobject::SpawnError> {
         self.inner
             .with_lock(|inner| inner.create_empty_process(name))
             .map_err(Into::into)
@@ -195,8 +194,10 @@ where
     }
 
     fn terminate_thread(&self, thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError> {
-        self.inner
+        let signals = self
+            .inner
             .with_lock(|inner| inner.terminate_thread_ko(thread, exit_code));
+        signals.emit();
         Ok(())
     }
 
@@ -205,9 +206,29 @@ where
         process: &Arc<ProcessObject>,
         exit_code: i32,
     ) -> Result<(), IpcError> {
-        self.inner
+        let signals = self
+            .inner
             .with_lock(|inner| inner.terminate_process_ko(process, exit_code));
+        signals.emit();
         Ok(())
+    }
+
+    fn load_user_image_into(
+        &self,
+        process: &Arc<ProcessObject>,
+        install: &UserImageInstall,
+    ) -> Result<(), LoadImageError> {
+        self.inner
+            .with_lock(|inner| inner.load_user_image_into(process, install))
+    }
+
+    fn start_user_process(
+        &self,
+        process: &Arc<ProcessObject>,
+        spec: UserStartSpec,
+    ) -> Result<Arc<ThreadObject>, StartProcessError> {
+        self.inner
+            .with_lock(|inner| inner.start_user_process(process, spec))
     }
 }
 

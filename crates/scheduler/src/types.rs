@@ -128,6 +128,7 @@ pub enum SpawnError {
     InvalidStackPages,
     StackAllocationFailed,
     AddressSpaceCreationFailed,
+    ImageNotLoaded,
 }
 
 impl From<SpawnError> for kobject::SpawnError {
@@ -138,6 +139,7 @@ impl From<SpawnError> for kobject::SpawnError {
             SpawnError::InvalidStackPages => Self::InvalidStackPages,
             SpawnError::StackAllocationFailed => Self::StackAllocationFailed,
             SpawnError::AddressSpaceCreationFailed => Self::AddressSpaceCreationFailed,
+            SpawnError::ImageNotLoaded => Self::ImageNotLoaded,
         }
     }
 }

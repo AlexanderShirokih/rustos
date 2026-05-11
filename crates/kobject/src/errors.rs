@@ -40,4 +40,5 @@ pub enum SpawnError {
     StackAllocationFailed,
     /// Не удалось создать адресное пространство процесса.
     AddressSpaceCreationFailed,
+    ImageNotLoaded,
 }

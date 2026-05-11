@@ -132,8 +132,8 @@ cargo install cargo-binutils
 # qemu-system-aarch64 — через пакетный менеджер
 
 cargo xtask build devices/spec/qemu-aarch64.yaml --run
-cargo xtask qemu-test --timeout 60
-cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64
+cargo xtask qemu-test --timeout 20
+cargo test --workspace
 ```
 
 Зависимости и сборка под реальные устройства: [BUILD.md](BUILD.md).

@@ -5,9 +5,14 @@
 /// Возвращает значение регистра как `u64`. Должен использоваться внутри `unsafe` блока.
 ///
 /// # Пример
-/// ```rust
-/// // SAFETY: Чтение CNTFRQ_EL0 допустимо на EL1 при корректной конфигурации платформы.
-/// let freq = unsafe { read_sysreg!(cntfrq_el0) };
+/// ```no_run
+/// #[cfg(target_arch = "aarch64")]
+/// {
+///     use drivers_aarch64::read_sysreg;
+///     // SAFETY: Чтение CNTFRQ_EL0 допустимо на EL1 при корректной конфигурации платформы.
+///     let freq = unsafe { read_sysreg!(cntfrq_el0) };
+///     let _ = freq;
+/// }
 /// ```
 #[macro_export]
 macro_rules! read_sysreg {
@@ -27,9 +32,14 @@ macro_rules! read_sysreg {
 /// Значение приводится к `u64` перед записью. Должен использоваться внутри `unsafe` блока.
 ///
 /// # Пример
-/// ```rust
-/// // SAFETY: Запись в CNTP_CTL_EL0 меняет только биты управления физического таймера.
-/// unsafe { write_sysreg!(cntp_ctl_el0, CNTP_CTL_ENABLE as u64) };
+/// ```no_run
+/// #[cfg(target_arch = "aarch64")]
+/// {
+///     use drivers_aarch64::write_sysreg;
+///     const CNTP_CTL_ENABLE: u32 = 1 << 0;
+///     // SAFETY: Запись в CNTP_CTL_EL0 меняет только биты управления физического таймера.
+///     unsafe { write_sysreg!(cntp_ctl_el0, CNTP_CTL_ENABLE as u64) };
+/// }
 /// ```
 #[macro_export]
 macro_rules! write_sysreg {

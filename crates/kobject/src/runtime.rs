@@ -12,7 +12,10 @@ use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 use collections::MutexCell;
 use spin::Once;
 
-use super::{HandleTable, IpcError, ProcessObject, SpawnError, ThreadObject};
+use super::{
+    HandleTable, IpcError, ProcessObject, SpawnError, ThreadObject,
+    spawn::{LoadImageError, StartProcessError, UserImageInstall, UserStartSpec},
+};
 
 /// Параметры первого входа в user-поток, передаваемые в
 /// [`KernelRuntime::create_user_thread`]. Платформенно-нейтральное описание;
@@ -101,9 +104,8 @@ pub trait KernelRuntime: Send + Sync {
     fn unblock(&self, token: WaitToken);
 
     /// Создаёт пустой user-процесс: новое адресное пространство, пустая
-    /// handle-table, ноль потоков. Имя пользователя в текущей реализации
-    /// не сохраняется; пройденная валидация сохраняет ABI-форму.
-    fn create_empty_process(&self, name: &'static str) -> Result<Arc<ProcessObject>, SpawnError>;
+    /// handle-table, ноль потоков и сохранённое имя процесса.
+    fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError>;
 
     /// Создаёт user-поток в указанном процессе и помещает его в ready-queue.
     /// На успехе процесс получает инкрементированный thread_count.
@@ -128,6 +130,22 @@ pub trait KernelRuntime: Send + Sync {
         process: &Arc<ProcessObject>,
         exit_code: i32,
     ) -> Result<(), IpcError>;
+
+    /// Устанавливает регионы образа в child AS, маппит user-стек и
+    /// прикрепляет per-process `UserVmAllocator`.
+    fn load_user_image_into(
+        &self,
+        process: &Arc<ProcessObject>,
+        install: &UserImageInstall,
+    ) -> Result<(), LoadImageError>;
+
+    /// Вставляет bootstrap-handles в child-table и создаёт первый
+    /// user-поток.
+    fn start_user_process(
+        &self,
+        process: &Arc<ProcessObject>,
+        spec: UserStartSpec,
+    ) -> Result<Arc<ThreadObject>, StartProcessError>;
 }
 
 static RUNTIME: Once<Arc<dyn KernelRuntime>> = Once::new();

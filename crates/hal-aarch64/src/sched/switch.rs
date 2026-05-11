@@ -3,7 +3,7 @@ use super::context::Aarch64Context;
 /// Сохраняет полное callee-saved состояние `prev` и восстанавливает `next`.
 ///
 /// Layout структуры зафиксирован в [`Aarch64Context`]: GPR x19..x28, fp, lr,
-/// sp, pstate (NZCV), d8..d15. Любые изменения должны синхронизироваться с
+/// sp, NZCV, DAIF, d8..d15. Любые изменения должны синхронизироваться с
 /// константами `CTX_OFFSET_*`.
 #[unsafe(naked)]
 pub unsafe extern "C" fn context_switch(_prev: *mut Aarch64Context, _next: *const Aarch64Context) {
@@ -19,11 +19,13 @@ pub unsafe extern "C" fn context_switch(_prev: *mut Aarch64Context, _next: *cons
         "str x9, [x0, #96]",
         "mrs x9, nzcv",
         "str x9, [x0, #104]",
+        "mrs x9, daif",
+        "str x9, [x0, #112]",
         // Save FP/SIMD callee-saved (low 64 bits only per AAPCS64)
-        "stp d8,  d9,  [x0, #112]",
-        "stp d10, d11, [x0, #128]",
-        "stp d12, d13, [x0, #144]",
-        "stp d14, d15, [x0, #160]",
+        "stp d8,  d9,  [x0, #120]",
+        "stp d10, d11, [x0, #136]",
+        "stp d12, d13, [x0, #152]",
+        "stp d14, d15, [x0, #168]",
         // Restore next
         "ldp x19, x20, [x1, #0]",
         "ldp x21, x22, [x1, #16]",
@@ -35,10 +37,12 @@ pub unsafe extern "C" fn context_switch(_prev: *mut Aarch64Context, _next: *cons
         "mov sp, x9",
         "ldr x9, [x1, #104]",
         "msr nzcv, x9",
-        "ldp d8,  d9,  [x1, #112]",
-        "ldp d10, d11, [x1, #128]",
-        "ldp d12, d13, [x1, #144]",
-        "ldp d14, d15, [x1, #160]",
+        "ldr x9, [x1, #112]",
+        "msr daif, x9",
+        "ldp d8,  d9,  [x1, #120]",
+        "ldp d10, d11, [x1, #136]",
+        "ldp d12, d13, [x1, #152]",
+        "ldp d14, d15, [x1, #168]",
         "ret",
     )
 }
@@ -58,10 +62,12 @@ pub unsafe extern "C" fn context_start(_next: *const Aarch64Context) -> ! {
         "mov sp, x9",
         "ldr x9, [x0, #104]",
         "msr nzcv, x9",
-        "ldp d8,  d9,  [x0, #112]",
-        "ldp d10, d11, [x0, #128]",
-        "ldp d12, d13, [x0, #144]",
-        "ldp d14, d15, [x0, #160]",
+        "ldr x9, [x0, #112]",
+        "msr daif, x9",
+        "ldp d8,  d9,  [x0, #120]",
+        "ldp d10, d11, [x0, #136]",
+        "ldp d12, d13, [x0, #152]",
+        "ldp d14, d15, [x0, #168]",
         "ret",
     )
 }

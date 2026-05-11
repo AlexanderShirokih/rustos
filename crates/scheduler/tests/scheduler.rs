@@ -1,10 +1,21 @@
 mod common;
 
+use core::num::NonZeroUsize;
 use std::{
     panic,
-    sync::{Arc, Mutex, Once, OnceLock, RwLock},
+    sync::{
+        Arc, Mutex, Once, OnceLock, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    vec::Vec as StdVec,
 };
 
+use memory::{
+    AccessMask, MemFlags, MemoryRegion,
+    frame::Frame,
+    frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+};
 use scheduler::{
     Priority, Scheduler, SchedulerConfig, SpawnAddressSpace, SpawnConfig, SpawnError,
     ThreadStackAllocator, Uninit,
@@ -78,7 +89,7 @@ impl kobject::KernelRuntime for ForwardingRuntime {
 
     fn create_empty_process(
         &self,
-        name: &'static str,
+        name: &str,
     ) -> Result<Arc<kobject::ProcessObject>, kobject::SpawnError> {
         self.with(|rt| rt.create_empty_process(name))
     }
@@ -105,6 +116,22 @@ impl kobject::KernelRuntime for ForwardingRuntime {
         exit_code: i32,
     ) -> Result<(), kobject::IpcError> {
         self.with(|rt| rt.terminate_process(process, exit_code))
+    }
+
+    fn load_user_image_into(
+        &self,
+        process: &Arc<kobject::ProcessObject>,
+        install: &kobject::UserImageInstall,
+    ) -> Result<(), kobject::LoadImageError> {
+        self.with(|rt| rt.load_user_image_into(process, install))
+    }
+
+    fn start_user_process(
+        &self,
+        process: &Arc<kobject::ProcessObject>,
+        spec: kobject::UserStartSpec,
+    ) -> Result<Arc<kobject::ThreadObject>, kobject::StartProcessError> {
+        self.with(|rt| rt.start_user_process(process, spec))
     }
 }
 
@@ -370,6 +397,26 @@ fn spawn_via_service_handle_works() {
 
 fn new_factory_static() -> &'static MockAddressSpaceFactory {
     Box::leak(Box::new(MockAddressSpaceFactory::new()))
+}
+
+/// Загружает stub-образ без сегментов: достаточно, чтобы пометить процесс
+/// как loaded для тестов, которые проверяют lifecycle/handle-table, но не
+/// сам код.
+fn mark_process_loaded(
+    handle: &impl kobject::KernelRuntime,
+    process: &Arc<kobject::ProcessObject>,
+) {
+    let install = kobject::UserImageInstall {
+        segments: std::vec::Vec::new(),
+        entry: VirtualAddress::new(0x4000_0000),
+        user_stack_top: VirtualAddress::new(0x5000_1000),
+        user_stack_size: 0x1000,
+        user_vm_base: PageAlignedVirtualAddress::from_usize(0x4000_0000).expect("aligned"),
+        user_vm_size: 0x100_0000,
+    };
+    handle
+        .load_user_image_into(process, &install)
+        .expect("load stub image");
 }
 
 fn make_scheduler_with_factory(
@@ -765,6 +812,7 @@ fn thread_terminate_via_handle_signals_terminated() {
     let process = handle
         .create_empty_process("p")
         .expect("create_empty_process");
+    mark_process_loaded(&handle, &process);
     let thread = handle
         .create_user_thread(
             &process,
@@ -798,6 +846,7 @@ fn process_terminate_via_handle_terminates_all_threads() {
     let process = handle
         .create_empty_process("p")
         .expect("create_empty_process");
+    mark_process_loaded(&handle, &process);
     let t1 = handle
         .create_user_thread(
             &process,
@@ -890,4 +939,369 @@ fn spawn_rollback_undoes_inherit_increment_on_thread_table_full() {
     assert_eq!(res, Err(SpawnError::NoFreeThreadSlots));
     let count_after = running.process_thread_count(pid).expect("pid alive");
     assert_eq!(count_before, count_after);
+}
+
+#[test]
+fn create_user_thread_rejects_unloaded_process() {
+    use kobject::{KernelRuntime, UserThreadEntry};
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+
+    let err = handle.create_user_thread(
+        &process,
+        UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+    );
+    match err {
+        Err(kobject::SpawnError::ImageNotLoaded) => {}
+        other => panic!("expected ImageNotLoaded, got {:?}", other.err()),
+    }
+}
+
+#[test]
+fn load_user_image_into_attaches_user_vm() {
+    use kobject::KernelRuntime;
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+
+    mark_process_loaded(&handle, &process);
+    // После load create_user_thread не отвергается с ImageNotLoaded.
+    let r = handle.create_user_thread(
+        &process,
+        kobject::UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+    );
+    assert!(r.is_ok(), "create_user_thread must succeed after load");
+}
+
+#[test]
+fn load_user_image_into_rejects_double_load() {
+    use kobject::{KernelRuntime, LoadImageError};
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+    mark_process_loaded(&handle, &process);
+
+    // Второй load на уже загруженном процессе должен вернуть WrongState.
+    let install = kobject::UserImageInstall {
+        segments: std::vec::Vec::new(),
+        entry: VirtualAddress::new(0x4000_0000),
+        user_stack_top: VirtualAddress::new(0x5000_1000),
+        user_stack_size: 0x1000,
+        user_vm_base: PageAlignedVirtualAddress::from_usize(0x4000_0000).expect("aligned"),
+        user_vm_size: 0x100_0000,
+    };
+    match handle.load_user_image_into(&process, &install) {
+        Err(LoadImageError::WrongState) => {}
+        other => panic!("expected WrongState, got {other:?}"),
+    }
+}
+
+fn empty_loader_table() -> Arc<collections::MutexCell<kobject::HandleTable>> {
+    Arc::new(collections::MutexCell::new(kobject::HandleTable::new()))
+}
+
+#[test]
+fn start_user_process_creates_thread_and_marks_loader_state() {
+    use kobject::{KernelRuntime, UserStartSpec, UserThreadEntry};
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+    mark_process_loaded(&handle, &process);
+
+    let spec = UserStartSpec {
+        entry: UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+        loader_handle_table: empty_loader_table(),
+        handle_ids: std::vec::Vec::new(),
+    };
+    let thread = handle.start_user_process(&process, spec).expect("start ok");
+    // KO стартовал; thread жив, terminated-флаг не поднят.
+    assert_eq!(thread.peek() & kobject::THREAD_TERMINATED, 0);
+}
+
+#[test]
+fn start_user_process_rejects_unloaded() {
+    use kobject::{KernelRuntime, StartProcessError, UserStartSpec, UserThreadEntry};
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+
+    let spec = UserStartSpec {
+        entry: UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+        loader_handle_table: empty_loader_table(),
+        handle_ids: std::vec::Vec::new(),
+    };
+    match handle.start_user_process(&process, spec) {
+        Err(StartProcessError::WrongState) => {}
+        Err(other) => panic!("expected WrongState, got {other:?}"),
+        Ok(_) => panic!("expected WrongState, got Ok"),
+    }
+}
+
+#[test]
+fn start_user_process_preserves_handles_on_spawn_failure() {
+    // Сначала создаём loaded process + bootstrap handle в loader-table.
+    // Затем спавним достаточно kernel-потоков, чтобы заполнить
+    // thread-table. start_user_process должен упасть с SpawnFailed и
+    // ОСТАВИТЬ handle нетронутым в loader-table с исходным HandleId.
+    use collections::LockCell;
+    use kobject::{
+        Event, Handle, HandleTable, KObject, KernelRuntime, Rights, StartProcessError,
+        UserStartSpec, UserThreadEntry,
+    };
+    use scheduler::SchedulerService;
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+
+    // Регистрируем host-поток и запускаем scheduler: он станет current,
+    // и Inherit-spawn приклеятся к его процессу, не съедая новые
+    // ProcessTable-слоты.
+    let _host = scheduler
+        .spawn(SpawnConfig::new("host"), || {})
+        .expect("host spawn");
+    let running = scheduler.run();
+    let handle = running.handle();
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+    mark_process_loaded(&handle, &process);
+
+    let inherit_cfg = SpawnConfig::new("inh").address_space(SpawnAddressSpace::Inherit);
+    // idle + host + create_empty_process (нет потоков, но слот в
+    // ProcessTable занят). Threads-table при этом содержит idle + host.
+    let to_fill = TEST_CONFIG.max_threads() - 2;
+    for _ in 0..to_fill {
+        handle
+            .spawn_boxed(inherit_cfg, std::boxed::Box::new(|| {}))
+            .expect("inherit filler spawn");
+    }
+
+    // Сильная ссылка на Event, чтобы убедиться, что handle жив.
+    let event = Event::new();
+    let weak = std::sync::Arc::downgrade(&event);
+    let loader_table = Arc::new(collections::MutexCell::new(HandleTable::new()));
+    let h = Handle::new(KObject::Event(event), Rights::TRANSFER | Rights::WAIT);
+    let handle_id = loader_table
+        .with_lock(|tbl| tbl.insert(h))
+        .expect("insert into loader table");
+
+    let spec = UserStartSpec {
+        entry: UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+        loader_handle_table: loader_table.clone(),
+        handle_ids: std::vec![handle_id],
+    };
+
+    match handle.start_user_process(&process, spec) {
+        Err(StartProcessError::SpawnFailed(_)) => {
+            assert!(weak.upgrade().is_some(), "KO must stay alive after error");
+            // Главная гарантия нового порядка: handle остался в
+            // loader-table с прежним HandleId.
+            loader_table.with_lock(|tbl| {
+                let h = tbl
+                    .get(handle_id, Rights::TRANSFER)
+                    .expect("handle still present in loader-table with original id");
+                assert!(h.rights().contains(Rights::TRANSFER));
+            });
+        }
+        Err(other) => panic!("expected SpawnFailed, got {other:?}"),
+        Ok(_) => panic!("expected SpawnFailed, got Ok"),
+    }
+}
+
+/// Тестовый `FrameAllocator`, считающий deallocations.
+struct CountingFrameAllocator {
+    next: AtomicUsize,
+    deallocated: Mutex<StdVec<Frame>>,
+}
+
+impl CountingFrameAllocator {
+    fn new() -> Self {
+        Self {
+            next: AtomicUsize::new(1000),
+            deallocated: Mutex::new(StdVec::new()),
+        }
+    }
+
+    fn deallocated_count(&self) -> usize {
+        self.deallocated.lock().unwrap().len()
+    }
+}
+
+impl FrameAllocator for CountingFrameAllocator {
+    fn reserve_frames_exact(
+        &self,
+        from_inclusive: Frame,
+        _to_exclusive: Frame,
+    ) -> Result<Frame, ReserveFrameError> {
+        Ok(from_inclusive)
+    }
+
+    fn allocate_frame(&self) -> Option<Frame> {
+        Some(Frame::new(self.next.fetch_add(1, Ordering::SeqCst)))
+    }
+
+    fn allocate_frames(&self, _max_count: usize) -> Option<(Frame, usize)> {
+        None
+    }
+
+    fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {
+        self.deallocated.lock().unwrap().push(frame);
+        Ok(())
+    }
+
+    fn is_allocated(&self, _frame: Frame) -> bool {
+        false
+    }
+}
+
+#[test]
+fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
+    use kobject::KernelRuntime;
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+
+    let fa: &'static CountingFrameAllocator = Box::leak(Box::new(CountingFrameAllocator::new()));
+    let region = Arc::new(
+        MemoryRegion::create_virtual(fa, NonZeroUsize::new(2).unwrap(), AccessMask::RW)
+            .expect("region alloc"),
+    );
+
+    let install = kobject::UserImageInstall {
+        segments: std::vec![kobject::UserSegmentInstall {
+            va_base: PageAlignedVirtualAddress::from_usize(0x4000_0000).unwrap(),
+            mapped_size: 2 * 4096,
+            region: region.clone(),
+            flags: MemFlags::user_rw(),
+        }],
+        entry: VirtualAddress::new(0x4000_0000),
+        user_stack_top: VirtualAddress::new(0x5000_1000),
+        user_stack_size: 0x1000,
+        user_vm_base: PageAlignedVirtualAddress::from_usize(0x6000_0000).unwrap(),
+        user_vm_size: 0x100_0000,
+    };
+    handle
+        .load_user_image_into(&process, &install)
+        .expect("load image");
+
+    // Роняем все Arc'и вызывающей стороны: и `region`, и `install` с его
+    // клоном внутри `segments`. Если бы scheduler не удержал регионы у
+    // процесса, ref-count ушёл бы в ноль и `MemoryRegion::Drop` вернул бы
+    // фреймы в FA при ещё живых PTE.
+    drop(region);
+    drop(install);
+    assert_eq!(
+        fa.deallocated_count(),
+        0,
+        "image-segment frames must stay alive while process is live",
+    );
+}
+
+#[test]
+fn process_terminate_on_empty_process_signals_terminated_and_releases_slot() {
+    use kobject::{KernelRuntime, PROCESS_TERMINATED};
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("empty")
+        .expect("create_empty_process");
+    let before = scheduler.process_count();
+    assert_eq!(process.peek() & PROCESS_TERMINATED, 0);
+
+    handle
+        .terminate_process(&process, 7)
+        .expect("terminate_process");
+    assert_eq!(process.peek() & PROCESS_TERMINATED, PROCESS_TERMINATED);
+    assert_eq!(process.exit_code(), 7);
+
+    // Повторный terminate на уже завершённом процессе - no-op:
+    // первый код фиксируется, дублирующего pending-pid быть не должно.
+    handle
+        .terminate_process(&process, 99)
+        .expect("terminate_process again");
+    assert_eq!(process.exit_code(), 7);
+
+    // `cleanup_pending_process_removals` отрабатывает на `switch_to_next`:
+    // тик scheduler-а освобождает слот в `ProcessTable`.
+    let running = scheduler.run();
+    running.yield_now();
+    assert!(
+        running.process_count() < before,
+        "empty process slot must be reclaimed after scheduler tick",
+    );
 }

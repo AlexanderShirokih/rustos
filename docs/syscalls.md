@@ -203,13 +203,72 @@ Process-вызовы создают процесс, возвращают handle 
 |---:|---|---|---|---|
 | `0x40` | `ProcessCreate` | `name_va`, `name_len` | `process_h` | — |
 | `0x41` | `ProcessSelf` | — | `process_h` | — |
+| `0x42` | `ProcessLoadImage` | `process_h`, `desc_va`, `desc_len` | `0` | `MANAGE_PROCESS`, `MAP`/`READ`/`WRITE`/`EXECUTE` на memory-handle'ах сегментов |
 | `0x43` | `ProcessExitCode` | `process_h` | `exit_code` как `u32` | `INSPECT` |
 | `0x44` | `ProcessTerminate` | `process_h`, `exit_code` | `0` | `MANAGE_PROCESS` |
+| `0x45` | `ProcessStart` | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h` | `MANAGE_PROCESS`; `TRANSFER` на bootstrap-handle'ах |
+
+`ProcessCreate` копирует имя процесса из user-памяти, требует
+корректный UTF-8 и ограничение `name_len <= 64` байт. Пустое имя
+допустимо.
+
+`ProcessLoadImage` загружает user-образ в уже созданный, но ещё не
+запущенный процесс. `desc_len` обязан быть ровно `56`
+([`USER_IMAGE_DESC_SIZE`](../crates/syscall/src/spawn_abi.rs)), а
+`desc_va` — указывать на little-endian структуру:
+
+| Offset | Поле | Тип | Описание |
+|---:|---|---|---|
+| `0` | `version` | `u32` | версия ABI, сейчас только `1` |
+| `4` | `segment_count` | `u32` | число сегментов, `1..=16` |
+| `8` | `segments_va` | `u64` | указатель на массив сегментов |
+| `16` | `entry_va` | `u64` | PC первой user-инструкции |
+| `24` | `user_stack_top` | `u64` | вершина user-стека |
+| `32` | `user_stack_size` | `u64` | размер user-стека |
+| `40` | `user_vm_base` | `u64` | база диапазона user-vm-аллокатора |
+| `48` | `user_vm_size` | `u64` | размер диапазона user-vm-аллокатора |
+
+`segments_va` указывает на массив `segment_count` записей по `32` байта
+([`USER_SEGMENT_SIZE`](../crates/syscall/src/spawn_abi.rs)):
+
+| Offset | Поле | Тип | Описание |
+|---:|---|---|---|
+| `0` | `region_handle` | `u32` | handle memory-региона в таблице loader-процесса |
+| `4` | `flags` | `u32` | `0 = RW`, `1 = RO`, `2 = RX` |
+| `8` | `va_base` | `u64` | база mapping'а в child AS |
+| `16` | `mapped_size` | `u64` | размер mapping'а; должен совпасть с размером региона |
+| `24` | `reserved` | `u64` | обязано быть `0` |
+
+Для каждого сегмента loader обязан передать `region_handle` с правом
+`MAP` и правами доступа, совместимыми с `flags`: `READ|WRITE` для `RW`,
+`READ` для `RO`, `READ|EXECUTE` для `RX`. Некорректная версия ABI,
+нулевой/слишком большой `segment_count`, невыровненные адреса, несовпадающий
+размер региона или ненулевой `reserved` возвращают `InvalidArgument`.
+Кроме того, `ProcessLoadImage` принимает только fresh child-процесс:
+образ ещё не загружен, потоков ещё нет и child handle-таблица ещё пуста.
+Нарушение этих precondition'ов возвращает `WrongType`.
+
+`ProcessStart` создаёт первый поток процесса и возвращает handle на него.
+Нижние 8 бит аргумента `priority | (handles_count << 32)` задают
+приоритет потока; биты `8..31` зарезервированы и обязаны быть нулевыми;
+в старших 32 битах лежит `handles_count` (`0..=32`). Если
+`handles_count > 0`, `handles_va` указывает на массив `u32` little-endian
+с bootstrap-handle'ами из таблицы loader-процесса. Эти handle'ы
+переносятся в новый процесс и становятся его начальным handle-набором.
+`entry_pc`, `user_sp` и `arg` записываются в стартовый user-контекст
+первого потока как entry point, stack pointer и bootstrap-аргумент
+соответственно. Как и `ProcessLoadImage`, `ProcessStart` работает только
+на fresh child-процессе с уже загруженным образом, нулевым числом
+потоков и пустой child handle-table; иначе возвращает `WrongType`.
 
 `ProcessTerminate` не используется для self-exit: handle на текущий
 процесс возвращает `AccessDenied` даже при `MANAGE_PROCESS`. Собственное
 завершение идёт через `ThreadExit`; последний поток процесса поднимает
 `PROCESS_TERMINATED`.
+
+Типичный сценарий user-spawn состоит из трёх шагов: `ProcessCreate`,
+затем `ProcessLoadImage`, затем `ProcessStart`. Между `LoadImage` и
+`Start` никакой поток в child-процессе ещё не исполняется.
 
 Пример: передать supervisor'у право дождаться завершения текущего процесса.
 
@@ -231,6 +290,41 @@ let observed = object_wait_one(received_process_h, PROCESS_TERMINATED, timeout_n
 if observed & PROCESS_TERMINATED != 0 {
     let code = process_exit_code(received_process_h)?;
 }
+```
+
+Пример: создать дочерний процесс, загрузить образ и запустить первый поток.
+
+```rust
+let code_region_h = memory_create_virtual(
+    PAGE_SIZE,
+    AccessMask::R | AccessMask::W | AccessMask::X,
+)?;
+let child_h = process_create("", 0)?;
+
+let image = UserImageDesc {
+    version: 1,
+    segments: &[UserSegmentDesc {
+        region_handle: code_region_h,
+        flags: UserMemFlags::ReadExecute,
+        va_base: CHILD_CODE_VA,
+        mapped_size: PAGE_SIZE,
+    }],
+    entry: CHILD_CODE_VA,
+    user_stack_top: CHILD_STACK_TOP,
+    user_stack_size: PAGE_SIZE,
+    user_vm_base: CHILD_USER_VM_BASE,
+    user_vm_size: CHILD_USER_VM_SIZE,
+};
+
+process_load_image(child_h, &image)?;
+let first_thread_h = process_start(
+    child_h,
+    CHILD_CODE_VA,
+    CHILD_STACK_TOP,
+    /* arg */ 0,
+    /* priority */ 1,
+    /* bootstrap handles */ &[],
+)?;
 ```
 
 ## Thread
@@ -288,6 +382,9 @@ Memory-вызовы дают процессу страницы памяти и c
 `access_mask`: `R=1`, `W=2`, `X=4`. `flags`: `0=ReadWrite`,
 `1=ReadOnly`, `2=ReadExecute`.
 
+`MemoryMap` требует, чтобы `size_bytes` совпадал с полным размером
+региона; частичный mapping поддиапазона сейчас не поддерживается.
+
 Пример: временный рабочий буфер.
 
 ```rust
@@ -324,6 +421,77 @@ channel_write(
     /* handles */ &[readonly_region_h],
 )?;
 ```
+
+## Process Spawning
+
+`ProcessLoadImage` и `ProcessStart` дают userspace полноценную роль
+process-manager-а: loader сам пишет байты образа в фреймы регионов через
+двойной маппинг и одной syscall просит ядро установить эти регионы в
+child AS; вторая syscall атомарно стартует первый поток вместе с
+bootstrap-handles.
+
+| Op | Имя | Аргументы | Возврат | Права |
+|---:|---|---|---|---|
+| `0x42` | `ProcessLoadImage` | `process_h`, `desc_va`, `desc_len` (== `56`) | `0` | `MANAGE_PROCESS` на `process_h`; для каждого региона — `MAP \| (R/W/X по flags)` |
+| `0x45` | `ProcessStart` | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h` | `MANAGE_PROCESS` на `process_h`; `TRANSFER` на каждом bootstrap-handle |
+
+### Layout `UserImageDescAbi` (56 B)
+
+| Offset | Поле | Тип | Описание |
+|---:|---|---|---|
+| 0  | `version`         | `u32` | ABI-версия (`= 1`) |
+| 4  | `segment_count`   | `u32` | `1..=16` |
+| 8  | `segments_va`     | `u64` | user-указатель на массив `[UserSegmentAbi; segment_count]` |
+| 16 | `entry_va`        | `u64` | PC первой инструкции в child AS |
+| 24 | `user_stack_top`  | `u64` | вершина стека (4K-выровнена) |
+| 32 | `user_stack_size` | `u64` | размер стека (4K-кратен, ≠ 0) |
+| 40 | `user_vm_base`    | `u64` | база `user_vm`-аллокатора (4K-выровнена) |
+| 48 | `user_vm_size`    | `u64` | размер `user_vm`-диапазона |
+
+### Layout `UserSegmentAbi` (32 B)
+
+| Offset | Поле | Тип | Описание |
+|---:|---|---|---|
+| 0  | `region_handle` | `u32` | `HandleId` региона в loader-таблице |
+| 4  | `flags`         | `u32` | `0=RW`, `1=RO`, `2=RX` (см. `UserMemFlags`) |
+| 8  | `va_base`       | `u64` | база сегмента в child AS (4K-выровнена) |
+| 16 | `mapped_size`   | `u64` | `== region.size_bytes()` |
+| 24 | `reserved`      | `u64` | `0` |
+
+`ProcessLoadImage` и `ProcessStart` не являются общими операциями
+редактирования/рестарта процесса: обе syscall рассчитаны на одноразовый
+bootstrap fresh child-процесса. После загрузки образа child уже не
+считается "пустым", а после старта первого потока повторный `Start`
+также отвергается.
+
+### Pipeline (loader-side):
+
+```text
+ChannelCreate                                    -> (parent_h, child_h)
+MemoryCreateVirtual(size, R|W|X access_mask)     -> region_h
+MemoryMap(region_h, size, RW)                    -> seg_va  // в loader-AS
+copy image bytes -> seg_va                                 // CPU stores
+MemoryRemap(seg_va, size, RX)                              // если нужен RX
+ProcessCreate("child")                           -> proc_h
+build UserImageDescAbi + [UserSegmentAbi; N] на стеке loader-а
+ProcessLoadImage(proc_h, desc_va, 56)            -> 0
+MemoryFree(seg_va, size)                                   // фреймы остаются за child через Arc<MemoryRegion>
+ProcessStart(proc_h, entry_pc, user_sp, arg, prio | (1<<32), &[child_h])
+                                                 -> thread_h
+ObjectWaitOne(proc_h, PROCESS_TERMINATED, ...)
+ProcessExitCode(proc_h)                          -> exit_code
+```
+
+### Стоимость
+
+| Syscall | `copy_user_in` объём | Копий образа |
+|---|---|---|
+| `ProcessLoadImage` | `≤ 56 + 16*32 = 568 B` (desc + сегменты) | 0 |
+| `ProcessStart`     | `≤ 32*4 = 128 B` (HandleId-массив)        | 0 |
+
+Двойной маппинг: тот же `Arc<MemoryRegion>` хранится в loader's и child's
+`UserVmAllocator`, ядро лишь записывает PTE в child mapper — данные
+сегмента копируются ровно один раз (CPU stores loader'а).
 
 ## Mailbox
 

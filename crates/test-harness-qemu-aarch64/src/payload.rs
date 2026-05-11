@@ -68,6 +68,30 @@ pub const fn str_x(rt: Reg, rn: Reg) -> Instruction {
     Instruction::raw(0xF900_0000 | (rn.bits() << 5) | rt.bits())
 }
 
+/// `str x{rt}, [x{rn}, #imm]`. `imm` обязан быть кратен 8 и помещаться в
+/// 12-битное немасштабированное поле (`0..=0x7FF8`).
+pub const fn str_x_imm(rt: Reg, rn: Reg, imm: u16) -> Instruction {
+    assert!(
+        imm.is_multiple_of(8),
+        "str_x_imm: imm must be multiple of 8"
+    );
+    let scaled = (imm / 8) as u32;
+    assert!(scaled < 0x1000, "str_x_imm: imm out of range");
+    Instruction::raw(0xF900_0000 | (scaled << 10) | (rn.bits() << 5) | rt.bits())
+}
+
+/// `str w{rt}, [x{rn}, #imm]`. `imm` обязан быть кратен 4 и помещаться в
+/// 12-битное немасштабированное поле (`0..=0x3FFC`).
+pub const fn str_w_imm(rt: Reg, rn: Reg, imm: u16) -> Instruction {
+    assert!(
+        imm.is_multiple_of(4),
+        "str_w_imm: imm must be multiple of 4"
+    );
+    let scaled = (imm / 4) as u32;
+    assert!(scaled < 0x1000, "str_w_imm: imm out of range");
+    Instruction::raw(0xB900_0000 | (scaled << 10) | (rn.bits() << 5) | rt.bits())
+}
+
 pub const fn str_w(rt: Reg, rn: Reg) -> Instruction {
     Instruction::raw(0xB900_0000 | (rn.bits() << 5) | rt.bits())
 }

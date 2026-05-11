@@ -24,14 +24,16 @@ mod physical_resource;
 mod process;
 mod rights;
 mod runtime;
+mod spawn;
 mod thread;
 mod wait;
 
 pub use api::{
     WaitManyOutcome, channel_create, channel_read, channel_write, create_empty_process,
-    create_user_thread, handle_close, handle_duplicate, install_handle, mailbox_cancel,
-    mailbox_create, mailbox_queue, mailbox_wait, mailbox_wait_async, object_signal,
-    object_wait_many, object_wait_one, terminate_process, terminate_thread, thread_exit,
+    create_user_thread, handle_close, handle_duplicate, install_handle, load_user_image_into,
+    mailbox_cancel, mailbox_create, mailbox_queue, mailbox_wait, mailbox_wait_async, object_signal,
+    object_wait_many, object_wait_one, start_user_process, terminate_process, terminate_thread,
+    thread_exit,
 };
 pub use channel::{
     CHANNEL_PEER_CLOSED, CHANNEL_READABLE, CHANNEL_WRITABLE, Channel, DEFAULT_CHANNEL_CAPACITY,
@@ -40,7 +42,7 @@ pub use channel::{
 pub use errors::{IpcError, SpawnError};
 pub use event::{EVENT_SIGNALED, Event};
 pub use handle::{Handle, HandleId};
-pub use handle_table::HandleTable;
+pub use handle_table::{HandleReservation, HandleTable};
 pub use koid::Koid;
 pub use mailbox::{
     AsyncMode, MAILBOX_PACKET_SIZE, MAILBOX_PAYLOAD_SIZE, MAILBOX_QUEUE_CAPACITY, MAILBOX_READABLE,
@@ -51,6 +53,9 @@ pub use physical_resource::PhysicalResource;
 pub use process::{PROCESS_TERMINATED, ProcessObject};
 pub use rights::Rights;
 pub use runtime::{KernelRuntime, ParkState, UserThreadEntry, WaitToken, install_runtime, runtime};
+pub use spawn::{
+    LoadImageError, StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec,
+};
 pub use thread::{THREAD_TERMINATED, ThreadObject};
 pub use wait::{CancelTarget, SignalSource, SignalState, Waker};
 

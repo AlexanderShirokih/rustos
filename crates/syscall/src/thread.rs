@@ -31,10 +31,21 @@ pub fn sys_thread_create(
         arg,
         priority,
     };
-    let thread = kobject::create_user_thread(&process, entry)?;
+
+    let reservation = table
+        .with_lock(kobject::HandleTable::reserve_slot)
+        .map_err(SyscallError::from)?;
+    let thread = match kobject::create_user_thread(&process, entry) {
+        Ok(t) => t,
+        Err(e) => {
+            table.with_lock(|tbl| tbl.release_reservation(reservation));
+            return Err(SyscallError::from(e));
+        }
+    };
     let ko = KObject::Thread(thread);
     let rights = Rights::defaults_for(&ko);
-    let handle_id = install_handle(Handle::new(ko, rights))?;
+    let handle_id =
+        table.with_lock(|tbl| tbl.commit_reserved(reservation, Handle::new(ko, rights)));
     Ok(u64::from(handle_id.raw().get()))
 }
 

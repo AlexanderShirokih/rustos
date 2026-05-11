@@ -246,7 +246,7 @@ impl MemoryMapper for MockUserMapper {
         _size: usize,
         _mem_flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
-        Err(MemoryMappingError::OutOfMemory)
+        Ok(())
     }
 
     fn unmap(
@@ -254,7 +254,7 @@ impl MemoryMapper for MockUserMapper {
         _address: PageAlignedVirtualAddress,
         _size: usize,
     ) -> Result<(), MemoryUnmappingError> {
-        Err(MemoryUnmappingError::NotMapped)
+        Ok(())
     }
 
     fn remap(

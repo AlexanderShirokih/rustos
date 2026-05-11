@@ -12,4 +12,5 @@ mod syscall;
 mod unmap;
 mod user_payload;
 mod userspace_entry;
+mod userspace_self_spawn;
 mod userspace_via_scheduler;

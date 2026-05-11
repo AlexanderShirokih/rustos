@@ -4,13 +4,13 @@
 
 | Действие | Команда |
 |---|---|
-| Host-тесты | `cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64` |
-| Host-clippy | `cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64` |
+| Host-тесты | `cargo test --workspace` |
+| Host-clippy | `cargo clippy --workspace` |
 | AArch64 clippy | `cargo clippy --workspace --exclude xtask --target aarch64-unknown-none` |
 | Форматирование | `cargo fmt --all --check` |
 | Аудит зависимостей | `cargo deny check` |
 | Сборка QEMU | `cargo xtask build devices/spec/qemu-aarch64.yaml` |
-| QEMU integration tests | `cargo xtask qemu-test --timeout 60` |
+| QEMU integration tests | `cargo xtask qemu-test --timeout 20` |
 | Сборка устройства | `cargo xtask build devices/spec/<device>.yaml` |
 
 ## Сборка
@@ -36,16 +36,13 @@ cargo xtask build devices/spec/xiaomi-lavender.yaml
 ## Тесты
 
 ```bash
-cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64
+cargo test --workspace
 ```
-
-Без `--exclude` host-тесты падают на платформах, где не компилируется
-aarch64 inline assembly из `drivers-aarch64` и `hal-aarch64`.
 
 QEMU integration tests:
 
 ```bash
-cargo xtask qemu-test --timeout 60
+cargo xtask qemu-test --timeout 20
 ```
 
 ## Аудит зависимостей

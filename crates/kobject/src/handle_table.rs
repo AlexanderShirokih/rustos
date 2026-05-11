@@ -34,10 +34,26 @@ struct Slot {
 enum SlotState {
     /// Слот свободен, ссылка на следующий элемент free-list'а.
     Free { next_free: Option<u32> },
+    /// Слот удерживается под `commit_reserved`/`release_reservation`.
+    Reserved,
     /// Слот занят живым handle'ом.
     Occupied(Handle),
     /// Generation исчерпана; слот выведен из оборота навсегда.
     Retired,
+}
+
+/// Зарезервированный слот: закрывается `commit_reserved` или `release_reservation`.
+/// Забытая резервация навсегда удерживает слот.
+#[derive(Debug, Clone, Copy)]
+pub struct HandleReservation {
+    slot: u32,
+    generation: u16,
+}
+
+impl HandleReservation {
+    pub fn handle_id(self) -> HandleId {
+        HandleId::pack(self.generation, self.slot)
+    }
 }
 
 impl HandleTable {
@@ -102,6 +118,69 @@ impl HandleTable {
             waiters: Vec::new(),
         });
         Ok(HandleId::pack(1, idx))
+    }
+
+    /// Резервирует слот; на исчерпании ёмкости - `OutOfHandles` без эффектов.
+    pub fn reserve_slot(&mut self) -> Result<HandleReservation, IpcError> {
+        if let Some(idx) = self.pop_free_slot() {
+            let slot = &mut self.slots[idx as usize];
+            slot.generation += 1;
+            slot.state = SlotState::Reserved;
+            slot.waiters.clear();
+            return Ok(HandleReservation {
+                slot: idx,
+                generation: slot.generation,
+            });
+        }
+
+        if (self.slots.len() as u32) >= self.capacity {
+            return Err(IpcError::OutOfHandles);
+        }
+
+        let idx = self.slots.len() as u32;
+        self.slots.push(Slot {
+            generation: 1,
+            state: SlotState::Reserved,
+            waiters: Vec::new(),
+        });
+        Ok(HandleReservation {
+            slot: idx,
+            generation: 1,
+        })
+    }
+
+    /// Вставляет `handle` в зарезервированный слот. Паника на use-after-release.
+    pub fn commit_reserved(&mut self, reservation: HandleReservation, handle: Handle) -> HandleId {
+        let slot = self
+            .slots
+            .get_mut(reservation.slot as usize)
+            .expect("reservation slot must exist");
+        assert!(
+            matches!(slot.state, SlotState::Reserved) && slot.generation == reservation.generation,
+            "reservation mismatch: slot not in Reserved state with expected generation",
+        );
+        slot.state = SlotState::Occupied(handle);
+        HandleId::pack(slot.generation, reservation.slot)
+    }
+
+    /// Возвращает зарезервированный слот в free-list. Паника на use-after-release.
+    /// Generation, использованная резервацией, не жжётся: слот не публиковал
+    /// `HandleId`, поэтому пред-резервационное значение можно переиспользовать.
+    pub fn release_reservation(&mut self, reservation: HandleReservation) {
+        let slot = self
+            .slots
+            .get_mut(reservation.slot as usize)
+            .expect("reservation slot must exist");
+        assert!(
+            matches!(slot.state, SlotState::Reserved) && slot.generation == reservation.generation,
+            "release_reservation mismatch: slot not in Reserved state with expected generation",
+        );
+        slot.generation -= 1;
+        let prev_head = self.free_head;
+        slot.state = SlotState::Free {
+            next_free: prev_head,
+        };
+        self.free_head = Some(reservation.slot);
     }
 
     /// Удаляет handle из таблицы. Дренирует per-slot cancel-target'ы
@@ -388,7 +467,9 @@ impl HandleTable {
         }
         match &slot.state {
             SlotState::Occupied(handle) => Ok(handle),
-            SlotState::Free { .. } | SlotState::Retired => Err(IpcError::BadHandle),
+            SlotState::Free { .. } | SlotState::Reserved | SlotState::Retired => {
+                Err(IpcError::BadHandle)
+            }
         }
     }
 
@@ -1084,5 +1165,96 @@ mod tests {
         assert_eq!(id1.slot(), id2.slot());
         table.remove(id2).unwrap();
         assert_eq!(target.count(), 1);
+    }
+
+    #[test]
+    fn reserve_slot_returns_out_of_handles_when_full() {
+        let mut table = HandleTable::with_capacity(1);
+        table.insert(event_handle(Rights::WAIT)).unwrap();
+        assert_eq!(table.reserve_slot().unwrap_err(), IpcError::OutOfHandles);
+    }
+
+    #[test]
+    fn commit_reserved_inserts_handle_and_returns_predicted_id() {
+        let mut table = HandleTable::with_capacity(1);
+        let reservation = table.reserve_slot().expect("reserve must succeed");
+        let predicted = reservation.handle_id();
+        let id = table.commit_reserved(reservation, event_handle(Rights::WAIT));
+        assert_eq!(id, predicted);
+        assert!(table.get(id, Rights::WAIT).is_ok());
+        assert_eq!(table.live_count(), 1);
+    }
+
+    #[test]
+    fn release_reservation_returns_slot_to_free_list() {
+        let mut table = HandleTable::with_capacity(1);
+        let reservation = table.reserve_slot().expect("reserve must succeed");
+        table.release_reservation(reservation);
+        // После release слот доступен снова.
+        let id = table
+            .insert(event_handle(Rights::WAIT))
+            .expect("insert after release must succeed");
+        assert!(table.get(id, Rights::WAIT).is_ok());
+    }
+
+    #[test]
+    fn reserved_slot_is_not_visible_via_lookup() {
+        let mut table = HandleTable::with_capacity(1);
+        let reservation = table.reserve_slot().expect("reserve");
+        let predicted = reservation.handle_id();
+        assert_eq!(
+            table.get(predicted, Rights::empty()).unwrap_err(),
+            IpcError::BadHandle,
+        );
+        assert_eq!(table.live_count(), 0);
+        table.release_reservation(reservation);
+    }
+
+    #[test]
+    fn reserve_slot_succeeds_after_drain_on_full_table() {
+        // Инвариант, на котором держится отложенный пост-drain reserve_slot
+        // в `sys_process_start`: drain хоть одного handle'а гарантированно
+        // освобождает слот, и последующий reserve_slot не отвергает запрос.
+        let mut table = HandleTable::with_capacity(2);
+        let id1 = table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .expect("insert 1");
+        table
+            .insert(event_handle(Rights::WAIT | Rights::TRANSFER))
+            .expect("insert 2");
+        assert_eq!(table.reserve_slot().unwrap_err(), IpcError::OutOfHandles);
+
+        let _drained = table
+            .try_drain_for_transfer(&[id1], Rights::TRANSFER)
+            .expect("drain");
+
+        let reservation = table
+            .reserve_slot()
+            .expect("post-drain reserve_slot must succeed");
+        table.commit_reserved(reservation, event_handle(Rights::WAIT));
+    }
+
+    #[test]
+    fn release_reservation_does_not_burn_generation() {
+        let mut table = HandleTable::with_capacity(1);
+        // Засеваем слот вставкой+remove, чтобы он лежал в free-list с
+        // конкретной generation.
+        let seed_id = table.insert(event_handle(Rights::WAIT)).expect("insert");
+        let seed_gen = seed_id.generation();
+        table.remove(seed_id).expect("remove");
+
+        // Многократный неуспешный reserve+release не должен жечь generation:
+        // ни один HandleId не публиковался, поэтому слот не нужно ретайрить.
+        for _ in 0..32 {
+            let r = table.reserve_slot().expect("reserve");
+            table.release_reservation(r);
+        }
+
+        let final_id = table.insert(event_handle(Rights::WAIT)).expect("insert");
+        assert_eq!(
+            final_id.generation(),
+            seed_gen + 1,
+            "лишь один реальный commit должен сдвинуть generation",
+        );
     }
 }

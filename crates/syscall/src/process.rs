@@ -1,43 +1,73 @@
-//! Handler-ы Process-syscall'ов: create/self/exit_code/terminate.
+//! Handler-ы Process-syscall'ов: create/self/load_image/exit_code/terminate/start.
 //!
 //! Парсят аргументы, пробрасывают в `kobject` API и регистрируют новые
 //! handle'ы в текущей handle-table вызывающего процесса.
 
-use collections::LockCell;
-use kobject::{Handle, KObject, Rights, install_handle, runtime};
-use memory::{UserVmContext, memory_mapper::UserCopyError, virtual_address::VirtualAddress};
+use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
-use super::{bridge::parse_handle_id, error::SyscallError, runtime::runtime as syscall_runtime};
+use collections::LockCell;
+use kobject::{
+    Handle, HandleId, KObject, LoadImageError, Rights, StartProcessError, UserImageInstall,
+    UserSegmentInstall, UserStartSpec, UserThreadEntry, install_handle, runtime,
+};
+use memory::{
+    UserVmContext,
+    memory_mapper::{MemoryMappingError, UserCopyError},
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+};
+
+use super::{
+    bridge::parse_handle_id,
+    error::SyscallError,
+    flags::UserMemFlags,
+    runtime::runtime as syscall_runtime,
+    spawn_abi::{
+        MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, USER_IMAGE_DESC_SIZE,
+        USER_SEGMENT_SIZE, decode_image_desc, decode_segment,
+    },
+};
 
 /// Максимальная длина имени процесса, передаваемая через user-память.
-/// Содержимое в текущей реализации не сохраняется, валидация только
-/// проверяет, что аргументы укладываются в разумные границы.
+/// В ABI считается в байтах; строка обязана быть UTF-8.
 const MAX_PROCESS_NAME_LEN: usize = 64;
-
-/// Sentinel-имя для процессов, созданных через syscall: пользовательское
-/// имя в текущей реализации не сохраняется.
-const USER_PROCESS_NAME: &str = "<user>";
 
 pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallError> {
     let len = usize::try_from(name_len).map_err(|_| SyscallError::InvalidArgument)?;
     if len > MAX_PROCESS_NAME_LEN {
         return Err(SyscallError::InvalidArgument);
     }
-    if len > 0 {
+    let mut buf = [0u8; MAX_PROCESS_NAME_LEN];
+    let name = if len == 0 {
+        ""
+    } else {
         if name_va == 0 {
             return Err(SyscallError::InvalidArgument);
         }
         let user_vm = syscall_runtime()
             .current_user_vm()
             .ok_or(SyscallError::WrongType)?;
-        let mut buf = [0u8; MAX_PROCESS_NAME_LEN];
         copy_in(&user_vm, name_va, &mut buf[..len])?;
-    }
+        core::str::from_utf8(&buf[..len]).map_err(|_| SyscallError::InvalidArgument)?
+    };
 
-    let process = kobject::create_empty_process(USER_PROCESS_NAME)?;
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(SyscallError::BadHandle)?;
+    let reservation = table
+        .with_lock(kobject::HandleTable::reserve_slot)
+        .map_err(SyscallError::from)?;
+    let process = match kobject::create_empty_process(name) {
+        Ok(p) => p,
+        Err(e) => {
+            table.with_lock(|tbl| tbl.release_reservation(reservation));
+            return Err(SyscallError::from(e));
+        }
+    };
     let ko = KObject::Process(process);
     let rights = Rights::defaults_for(&ko);
-    let handle_id = install_handle(Handle::new(ko, rights))?;
+    let handle_id =
+        table.with_lock(|tbl| tbl.commit_reserved(reservation, Handle::new(ko, rights)));
     Ok(u64::from(handle_id.raw().get()))
 }
 
@@ -87,6 +117,237 @@ pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, Syscall
     Ok(0)
 }
 
+/// `ProcessLoadImage(process_handle, desc_va, desc_len)`. Загружает образ
+/// в child AS и прикрепляет user_vm-аллокатор. См.
+/// [`SyscallOp::ProcessLoadImage`](crate::SyscallOp::ProcessLoadImage).
+pub fn sys_process_load_image(
+    process_h: u64,
+    desc_va: u64,
+    desc_len: u64,
+) -> Result<u64, SyscallError> {
+    let process_id = parse_handle_id(process_h)?;
+    if desc_len as usize != USER_IMAGE_DESC_SIZE {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let user_vm = syscall_runtime()
+        .current_user_vm()
+        .ok_or(SyscallError::WrongType)?;
+
+    let mut desc_buf = [0u8; USER_IMAGE_DESC_SIZE];
+    copy_in(&user_vm, desc_va, &mut desc_buf)?;
+    let desc = decode_image_desc(&desc_buf).ok_or(SyscallError::InvalidArgument)?;
+    if desc.version != SEGMENT_ABI_VERSION {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let segment_count = desc.segment_count as usize;
+    if segment_count == 0 || segment_count > MAX_SEGMENTS_PER_IMG {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Лукапим target ProcessObject в loader-таблице (с MANAGE_PROCESS).
+    let loader_table = runtime()
+        .current_handle_table()
+        .ok_or(SyscallError::BadHandle)?;
+    let process_ko = loader_table
+        .with_lock(|tbl| tbl.get_process(process_id, Rights::MANAGE_PROCESS))
+        .map_err(SyscallError::from)?;
+
+    // Копируем массив сегментов одним блоком.
+    let mut segments_buf = [0u8; MAX_SEGMENTS_PER_IMG * USER_SEGMENT_SIZE];
+    let total = segment_count * USER_SEGMENT_SIZE;
+    copy_in(&user_vm, desc.segments_va, &mut segments_buf[..total])?;
+
+    let mut segments: Vec<UserSegmentInstall> = Vec::with_capacity(segment_count);
+    for i in 0..segment_count {
+        let chunk = &segments_buf[i * USER_SEGMENT_SIZE..(i + 1) * USER_SEGMENT_SIZE];
+        let seg = decode_segment(chunk).ok_or(SyscallError::InvalidArgument)?;
+        if seg.reserved != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let flags = UserMemFlags::from_raw(u64::from(seg.flags))
+            .map_err(|_| SyscallError::InvalidArgument)?;
+        let needed_rights = Rights::MAP | rights_for_access(flags);
+        let region_handle_id = handle_id_from_raw(seg.region_handle)?;
+        let (region, _handle_rights) = loader_table
+            .with_lock(|tbl| tbl.get_memory_with_rights(region_handle_id, needed_rights))
+            .map_err(SyscallError::from)?;
+        if region.size_bytes() != seg.mapped_size as usize {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if !region.access_mask().allows(access_mask_for(flags)) {
+            return Err(SyscallError::AccessDenied);
+        }
+        let va_base = PageAlignedVirtualAddress::from_usize(seg.va_base as usize)
+            .ok_or(SyscallError::InvalidArgument)?;
+        segments.push(UserSegmentInstall {
+            va_base,
+            mapped_size: seg.mapped_size as usize,
+            region,
+            flags: flags.to_mem_flags(),
+        });
+    }
+
+    let user_vm_base = PageAlignedVirtualAddress::from_usize(desc.user_vm_base as usize)
+        .ok_or(SyscallError::InvalidArgument)?;
+    let install = UserImageInstall {
+        segments,
+        entry: VirtualAddress::new(desc.entry_va as usize),
+        user_stack_top: VirtualAddress::new(desc.user_stack_top as usize),
+        user_stack_size: desc.user_stack_size as usize,
+        user_vm_base,
+        user_vm_size: desc.user_vm_size as usize,
+    };
+    kobject::load_user_image_into(&process_ko, &install).map_err(load_image_err_to_syscall)?;
+    Ok(0)
+}
+
+/// `ProcessStart(process_handle, entry_pc, user_sp, arg,
+/// priority | (handles_count << 32), handles_va)`. Стартует первый поток.
+/// См. [`SyscallOp::ProcessStart`](crate::SyscallOp::ProcessStart).
+pub fn sys_process_start(
+    process_h: u64,
+    entry_pc: u64,
+    user_sp: u64,
+    arg: u64,
+    prio_and_count: u64,
+    handles_va: u64,
+) -> Result<u64, SyscallError> {
+    let process_id = parse_handle_id(process_h)?;
+    // Нижние 8 бит -- priority; биты [32..64) -- handles_count; биты [8..32)
+    // зарезервированы и обязаны быть нулевыми.
+    let priority = (prio_and_count & 0xFF) as u8;
+    if (prio_and_count >> 8) & 0xFF_FFFF != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let handles_count = ((prio_and_count >> 32) & 0xFFFF_FFFF) as usize;
+    if handles_count > MAX_BOOTSTRAP_HANDLES {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let loader_table = runtime()
+        .current_handle_table()
+        .ok_or(SyscallError::BadHandle)?;
+    let process_ko = loader_table
+        .with_lock(|tbl| tbl.get_process(process_id, Rights::MANAGE_PROCESS))
+        .map_err(SyscallError::from)?;
+
+    let mut ids: Vec<HandleId> = Vec::with_capacity(handles_count);
+    if handles_count > 0 {
+        let user_vm = syscall_runtime()
+            .current_user_vm()
+            .ok_or(SyscallError::WrongType)?;
+        let mut buf = [0u8; MAX_BOOTSTRAP_HANDLES * 4];
+        copy_in(&user_vm, handles_va, &mut buf[..handles_count * 4])?;
+        for i in 0..handles_count {
+            let raw = u32::from_le_bytes(
+                buf[i * 4..(i + 1) * 4]
+                    .try_into()
+                    .expect("4 bytes per handle id"),
+            );
+            let nz = NonZeroU32::new(raw).ok_or(SyscallError::InvalidArgument)?;
+            ids.push(HandleId::from_raw(nz));
+        }
+    }
+
+    let spec = UserStartSpec {
+        entry: UserThreadEntry {
+            entry_pc,
+            user_sp,
+            arg,
+            priority,
+        },
+        loader_handle_table: loader_table.clone(),
+        handle_ids: ids,
+    };
+
+    // Пре-резерв нужен только когда drain не освободит слот в caller-table.
+    // При `handles_count > 0` drain гарантированно отдаст ≥ 1 слот, и
+    // пост-drain `reserve_slot` не упадёт. Это спасает легитимные старты с
+    // ровно заполненной caller-table, где пере-передача bootstrap-handle-а
+    // фактически освобождает слот под возвращаемый thread-handle.
+    let pre_reservation = if handles_count == 0 {
+        Some(
+            loader_table
+                .with_lock(kobject::HandleTable::reserve_slot)
+                .map_err(SyscallError::from)?,
+        )
+    } else {
+        None
+    };
+
+    let thread = match kobject::start_user_process(&process_ko, spec) {
+        Ok(t) => t,
+        Err(e) => {
+            if let Some(r) = pre_reservation {
+                loader_table.with_lock(|tbl| tbl.release_reservation(r));
+            }
+            return Err(start_err_to_syscall(&e));
+        }
+    };
+
+    let reservation = match pre_reservation {
+        Some(r) => r,
+        None => loader_table
+            .with_lock(kobject::HandleTable::reserve_slot)
+            .expect("drain freed handles_count >= 1 slots; reserve_slot cannot fail"),
+    };
+
+    let ko = KObject::Thread(thread);
+    let rights = Rights::defaults_for(&ko);
+    let handle_id =
+        loader_table.with_lock(|tbl| tbl.commit_reserved(reservation, Handle::new(ko, rights)));
+    Ok(u64::from(handle_id.raw().get()))
+}
+
+fn handle_id_from_raw(raw: u32) -> Result<HandleId, SyscallError> {
+    let nz = NonZeroU32::new(raw).ok_or(SyscallError::InvalidArgument)?;
+    Ok(HandleId::from_raw(nz))
+}
+
+fn rights_for_access(flags: UserMemFlags) -> Rights {
+    match flags {
+        UserMemFlags::ReadOnly => Rights::READ,
+        UserMemFlags::ReadWrite => Rights::READ | Rights::WRITE,
+        UserMemFlags::ReadExecute => Rights::READ | Rights::EXECUTE,
+    }
+}
+
+fn access_mask_for(flags: UserMemFlags) -> memory::AccessMask {
+    match flags {
+        UserMemFlags::ReadOnly => memory::AccessMask::R,
+        UserMemFlags::ReadWrite => memory::AccessMask::RW,
+        UserMemFlags::ReadExecute => memory::AccessMask::RX,
+    }
+}
+
+fn load_image_err_to_syscall(e: LoadImageError) -> SyscallError {
+    match e {
+        LoadImageError::ProcessNotFound => SyscallError::BadHandle,
+        LoadImageError::WrongState | LoadImageError::NoUserAddressSpace => SyscallError::WrongType,
+        LoadImageError::UserVmRangeOverflow => SyscallError::InvalidArgument,
+        LoadImageError::MappingFailed(m) => mapping_err_to_syscall(&m),
+    }
+}
+
+fn mapping_err_to_syscall(e: &MemoryMappingError) -> SyscallError {
+    match e {
+        MemoryMappingError::OutOfMemory => SyscallError::OutOfMemory,
+        MemoryMappingError::AlreadyMapped | MemoryMappingError::VirtualMappingError => {
+            SyscallError::InvalidArgument
+        }
+    }
+}
+
+fn start_err_to_syscall(err: &StartProcessError) -> SyscallError {
+    match err {
+        StartProcessError::ProcessNotFound => SyscallError::BadHandle,
+        StartProcessError::WrongState => SyscallError::WrongType,
+        StartProcessError::HandleValidationFailed(ipc) => SyscallError::from(*ipc),
+        StartProcessError::SpawnFailed(source) => SyscallError::from(*source),
+    }
+}
+
 /// Декодирует младшие 32 бита аргумента в `i32` exit-код. Верхние биты
 /// игнорируются - ABI фиксирует exit_code в нижних 32-х.
 pub(super) fn exit_code_from_arg(raw: u64) -> i32 {
@@ -110,6 +371,67 @@ fn user_copy_err(_e: UserCopyError) -> SyscallError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spawn_abi::{MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, USER_IMAGE_DESC_SIZE};
+
+    #[test]
+    fn sys_process_load_image_rejects_bad_desc_len() {
+        assert_eq!(
+            sys_process_load_image(1, 0x1000, 0),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            sys_process_load_image(1, 0x1000, (USER_IMAGE_DESC_SIZE - 1) as u64),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            sys_process_load_image(1, 0x1000, (USER_IMAGE_DESC_SIZE + 1) as u64),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn sys_process_load_image_rejects_zero_process_handle() {
+        assert_eq!(
+            sys_process_load_image(0, 0x1000, USER_IMAGE_DESC_SIZE as u64),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn sys_process_start_rejects_zero_handle() {
+        assert_eq!(
+            sys_process_start(0, 0x4000_0000, 0x4001_0000, 0, 0, 0),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn sys_process_start_rejects_too_many_handles() {
+        // handles_count в верхних 32 битах превышает MAX_BOOTSTRAP_HANDLES.
+        let too_many = ((MAX_BOOTSTRAP_HANDLES as u64) + 1) << 32;
+        assert_eq!(
+            sys_process_start(1, 0x4000_0000, 0x4001_0000, 0, too_many, 0x2000),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn sys_process_start_rejects_reserved_bits_in_prio_word() {
+        // Биты [8..32) зарезервированы и обязаны быть нулевыми.
+        let bad = 1u64 << 8;
+        assert_eq!(
+            sys_process_start(1, 0x4000_0000, 0x4001_0000, 0, bad, 0),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    /// ABI-границы MAX_SEGMENTS_PER_IMG и MAX_BOOTSTRAP_HANDLES часть
+    /// стабильного контракта.
+    #[test]
+    fn abi_limits_are_stable() {
+        assert_eq!(MAX_SEGMENTS_PER_IMG, 16);
+        assert_eq!(MAX_BOOTSTRAP_HANDLES, 32);
+    }
 
     #[test]
     fn process_create_with_oversized_name_returns_invalid_argument() {
