@@ -91,7 +91,7 @@ pub extern "C" fn _start() {
 
 /// Обёртка для вызова из asm (не возвращает управление).
 pub fn boot_main_entry(dtb_phys: usize) -> ! {
-    let info = BootInfo::new_fdt(PhysicalAddress::new(dtb_phys));
+    let info = BootInfo::from_fdt(PhysicalAddress::new(dtb_phys));
     let _ = boot_main(&info);
     loop {
         spin_loop();
