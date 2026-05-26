@@ -1,0 +1,443 @@
+//! Мост из распарсенного [`UserlandImageEntry`] в [`UserImage`].
+//!
+//! Бридж самодостаточно валидирует входные данные (выравнивание, флаги,
+//! границы payload-среза) и не паникует на кривом образе. Итоговую проверку
+//! инвариантов (пересечения, entry в исполняемом сегменте) выполняет
+//! [`UserImage::validate`].
+
+use alloc::vec::Vec;
+
+use memory::{
+    MemFlags,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+};
+use userland_abi::UserlandImageEntry;
+
+use crate::image::{UserImage, UserSegment};
+
+const FRAME_SIZE: usize = 4096;
+
+/// Вершина user-стека для всех образов: фиксированный высокий VA, не зависящий
+/// от содержимого образа. Лежит заведомо выше типового образа (rootkeeper
+/// линкуется около 4 MiB) и внутри user-диапазона; коллизии со старшими
+/// сегментами ловит [`UserImage::validate`]. Выровнен на 4К.
+pub const USER_STACK_TOP: VirtualAddress = VirtualAddress::new(0x8000_0000);
+
+/// Ошибки конвертации [`UserlandImageEntry`] в [`UserImage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserImageFromAbiError {
+    /// Базовый VA сегмента не выровнен на 4К.
+    MisalignedSegmentBase(u64),
+    /// Значение флагов сегмента не соответствует ни одной известной комбинации
+    /// прав (ожидается 0/1/2).
+    UnknownSegmentFlags(u32),
+    /// Срез init-байт сегмента выходит за границы payload или вычисление его
+    /// смещения/длины переполняется.
+    InitBytesOutOfBounds,
+    /// `mapped_size` сегмента, округлённый вверх до 4К, переполняет `usize`.
+    SegmentSizeOverflow,
+    /// Поле `stack_size` или `entry_va` не помещается в `usize`.
+    FieldOverflow,
+}
+
+/// Сегменты user-образа, собранные из [`UserlandImageEntry`]. Владеет `Vec`,
+/// чтобы [`UserImage`] мог заимствовать срез; init-байты по-прежнему ссылаются
+/// на payload исходного blob-а (lifetime `'a`).
+pub struct UserImageParts<'a> {
+    segments: Vec<UserSegment<'a>>,
+    entry: VirtualAddress,
+    user_stack_top: VirtualAddress,
+    user_stack_size: usize,
+}
+
+impl UserImageParts<'_> {
+    /// Собирает заимствующий [`UserImage`]. Полученный образ ещё не
+    /// провалидирован - вызови [`UserImage::validate`] перед загрузкой.
+    pub fn image(&self) -> UserImage<'_> {
+        UserImage {
+            segments: &self.segments,
+            entry: self.entry,
+            user_stack_top: self.user_stack_top,
+            user_stack_size: self.user_stack_size,
+        }
+    }
+}
+
+/// Конвертирует один [`UserlandImageEntry`] в [`UserImageParts`].
+///
+/// Стек размещается по политике "фиксированный высокий VA": вершина -
+/// [`USER_STACK_TOP`], размер - `stack_size` из заголовка (ABI гарантирует
+/// != 0 и кратность 4К).
+pub fn user_image_parts_from_entry<'a>(
+    entry: &UserlandImageEntry<'a>,
+) -> Result<UserImageParts<'a>, UserImageFromAbiError> {
+    let header = entry.header();
+    let payload = entry.payload();
+
+    let mut segments = Vec::with_capacity(entry.segment_count());
+    for segment in entry.segments() {
+        let perms = perms_from_flags(segment.flags)?;
+
+        let va_base_usize =
+            usize::try_from(segment.va_base).map_err(|_| UserImageFromAbiError::FieldOverflow)?;
+        let va_base = PageAlignedVirtualAddress::from_usize(va_base_usize).ok_or(
+            UserImageFromAbiError::MisalignedSegmentBase(segment.va_base),
+        )?;
+
+        let mem_size = usize::try_from(segment.mem_size)
+            .map_err(|_| UserImageFromAbiError::SegmentSizeOverflow)?;
+        let mapped_size =
+            round_up_to_frame(mem_size).ok_or(UserImageFromAbiError::SegmentSizeOverflow)?;
+
+        // payload берётся относительно entry: file_offset отсчитывается от
+        // начала blob-а, а payload-срез - от payload_offset.
+        let relative = (segment.file_offset)
+            .checked_sub(header.payload_offset)
+            .and_then(|rel| usize::try_from(rel).ok())
+            .ok_or(UserImageFromAbiError::InitBytesOutOfBounds)?;
+        let file_size = usize::try_from(segment.file_size)
+            .map_err(|_| UserImageFromAbiError::InitBytesOutOfBounds)?;
+        let end = relative
+            .checked_add(file_size)
+            .ok_or(UserImageFromAbiError::InitBytesOutOfBounds)?;
+        let init_bytes = payload
+            .get(relative..end)
+            .ok_or(UserImageFromAbiError::InitBytesOutOfBounds)?;
+
+        segments.push(UserSegment {
+            va_base,
+            mapped_size,
+            init_bytes,
+            perms,
+        });
+    }
+
+    let entry_va =
+        usize::try_from(header.entry_va).map_err(|_| UserImageFromAbiError::FieldOverflow)?;
+    let user_stack_size =
+        usize::try_from(header.stack_size).map_err(|_| UserImageFromAbiError::FieldOverflow)?;
+
+    Ok(UserImageParts {
+        segments,
+        entry: VirtualAddress::new(entry_va),
+        user_stack_top: USER_STACK_TOP,
+        user_stack_size,
+    })
+}
+
+fn perms_from_flags(flags: u32) -> Result<MemFlags, UserImageFromAbiError> {
+    match flags {
+        0 => Ok(MemFlags::user_rw()),
+        1 => Ok(MemFlags::user_ro()),
+        2 => Ok(MemFlags::user_rx()),
+        other => Err(UserImageFromAbiError::UnknownSegmentFlags(other)),
+    }
+}
+
+/// Округляет `value` вверх до кратного 4К. `None` при переполнении `usize`.
+fn round_up_to_frame(value: usize) -> Option<usize> {
+    let rem = value % FRAME_SIZE;
+    if rem == 0 {
+        return Some(value);
+    }
+    value.checked_add(FRAME_SIZE - rem)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::vec::Vec;
+
+    use memory::mem_flags::{AccessMode, Executable};
+    use userland_abi::{
+        USERLAND_IMAGE_ENTRY_HEADER_SIZE, USERLAND_IMAGE_HEADER_SIZE, USERLAND_IMAGE_MAGIC,
+        USERLAND_IMAGE_PAGE_SIZE, USERLAND_IMAGE_SEGMENT_SIZE, USERLAND_IMAGE_VERSION,
+        UserlandImage,
+    };
+
+    use super::*;
+
+    const PAGE: usize = FRAME_SIZE;
+
+    // MemFlags не реализует PartialEq, поэтому сводим права к наблюдаемой
+    // тройке (read, write, exec) user-владельца для сравнения в тестах.
+    fn user_perms(flags: MemFlags) -> (bool, bool, bool) {
+        match flags {
+            MemFlags::Private(owners) => (
+                matches!(
+                    owners.user.access,
+                    AccessMode::Readonly | AccessMode::Writable
+                ),
+                matches!(owners.user.access, AccessMode::Writable),
+                matches!(owners.user.executable, Executable::Allowed),
+            ),
+            MemFlags::Device(_) => (false, false, false),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestSegment<'a> {
+        va_base: u64,
+        mem_size: u64,
+        flags: u32,
+        bytes: &'a [u8],
+    }
+
+    struct TestEntry<'a> {
+        name: &'a str,
+        entry_va: u64,
+        stack_size: u64,
+        segments: &'a [TestSegment<'a>],
+    }
+
+    // Компактный аналог build_image из тестов userland-abi: собирает один
+    // валидный blob с заданными entry для прогона через UserlandImage::parse.
+    fn build_image(entries: &[TestEntry<'_>]) -> Vec<u8> {
+        let metadata_size = USERLAND_IMAGE_HEADER_SIZE
+            + entries
+                .iter()
+                .map(|entry| {
+                    USERLAND_IMAGE_ENTRY_HEADER_SIZE
+                        + entry.segments.len() * USERLAND_IMAGE_SEGMENT_SIZE
+                        + entry.name.len()
+                })
+                .sum::<usize>();
+
+        let mut payload_cursor = metadata_size as u64;
+        let mut encoded_entries = Vec::new();
+        let mut payloads = Vec::new();
+
+        for entry in entries {
+            let payload_offset = payload_cursor;
+            let mut payload = Vec::new();
+            let mut encoded_segments = Vec::new();
+
+            for segment in entry.segments {
+                let file_offset =
+                    align_file_offset(payload_offset + payload.len() as u64, segment.va_base);
+                let pad = usize::try_from(file_offset - (payload_offset + payload.len() as u64))
+                    .expect("padding fits in usize");
+                payload.resize(payload.len() + pad, 0);
+                payload.extend_from_slice(segment.bytes);
+
+                let mut bytes = Vec::with_capacity(USERLAND_IMAGE_SEGMENT_SIZE);
+                bytes.extend_from_slice(&file_offset.to_le_bytes());
+                bytes.extend_from_slice(&(segment.bytes.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(&segment.va_base.to_le_bytes());
+                bytes.extend_from_slice(&segment.mem_size.to_le_bytes());
+                bytes.extend_from_slice(&segment.flags.to_le_bytes());
+                encoded_segments.extend_from_slice(&bytes);
+            }
+
+            let payload_size = payload.len() as u64;
+            payload_cursor += payload_size;
+
+            let mut encoded_entry = Vec::new();
+            encoded_entry.extend_from_slice(&payload_offset.to_le_bytes());
+            encoded_entry.extend_from_slice(&payload_size.to_le_bytes());
+            encoded_entry.extend_from_slice(&entry.entry_va.to_le_bytes());
+            encoded_entry.extend_from_slice(&entry.stack_size.to_le_bytes());
+            encoded_entry.extend_from_slice(&(entry.segments.len() as u16).to_le_bytes());
+            encoded_entry.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
+            encoded_entry.extend_from_slice(&encoded_segments);
+            encoded_entry.extend_from_slice(entry.name.as_bytes());
+
+            encoded_entries.push(encoded_entry);
+            payloads.push(payload);
+        }
+
+        let total_size = usize::try_from(payload_cursor).expect("image fits in usize");
+        let mut image = Vec::with_capacity(total_size);
+        image.extend_from_slice(&USERLAND_IMAGE_MAGIC);
+        image.extend_from_slice(&USERLAND_IMAGE_VERSION.to_le_bytes());
+        image.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        image.extend_from_slice(&(total_size as u64).to_le_bytes());
+
+        for entry in encoded_entries {
+            image.extend_from_slice(&entry);
+        }
+        for payload in payloads {
+            image.extend_from_slice(&payload);
+        }
+
+        image
+    }
+
+    fn align_file_offset(offset: u64, va_base: u64) -> u64 {
+        let target = va_base % USERLAND_IMAGE_PAGE_SIZE;
+        let current = offset % USERLAND_IMAGE_PAGE_SIZE;
+        if current <= target {
+            offset + (target - current)
+        } else {
+            offset + (USERLAND_IMAGE_PAGE_SIZE - (current - target))
+        }
+    }
+
+    #[test]
+    fn maps_all_three_flag_kinds() {
+        let image_bytes = build_image(&[TestEntry {
+            name: "rootkeeper",
+            entry_va: 0x40_0000,
+            stack_size: 0x4000,
+            segments: &[
+                TestSegment {
+                    va_base: 0x40_0000,
+                    mem_size: PAGE as u64,
+                    flags: 2,
+                    bytes: b"CODE",
+                },
+                TestSegment {
+                    va_base: 0x40_1000,
+                    mem_size: PAGE as u64,
+                    flags: 1,
+                    bytes: b"RO",
+                },
+                TestSegment {
+                    va_base: 0x40_2000,
+                    mem_size: PAGE as u64,
+                    flags: 0,
+                    bytes: b"RW",
+                },
+            ],
+        }]);
+
+        let image = UserlandImage::parse(&image_bytes).expect("parse");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let built = parts.image();
+
+        // (read, write, exec) для user-владельца.
+        assert_eq!(user_perms(built.segments[0].perms), (true, false, true));
+        assert_eq!(user_perms(built.segments[1].perms), (true, false, false));
+        assert_eq!(user_perms(built.segments[2].perms), (true, true, false));
+    }
+
+    #[test]
+    fn rounds_unaligned_mem_size_up_to_frame() {
+        // mem_size = 0x500 (не кратен 4К, но >= file_size) -> mapped_size = PAGE.
+        let image_bytes = build_image(&[TestEntry {
+            name: "rk",
+            entry_va: 0x40_0000,
+            stack_size: 0x4000,
+            segments: &[TestSegment {
+                va_base: 0x40_0000,
+                mem_size: 0x500,
+                flags: 2,
+                bytes: b"X",
+            }],
+        }]);
+
+        let image = UserlandImage::parse(&image_bytes).expect("parse");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let built = parts.image();
+
+        assert_eq!(built.segments[0].mapped_size, PAGE);
+    }
+
+    #[test]
+    fn keeps_already_aligned_mem_size() {
+        let image_bytes = build_image(&[TestEntry {
+            name: "rk",
+            entry_va: 0x40_0000,
+            stack_size: 0x4000,
+            segments: &[TestSegment {
+                va_base: 0x40_0000,
+                mem_size: 2 * PAGE as u64,
+                flags: 2,
+                bytes: b"X",
+            }],
+        }]);
+
+        let image = UserlandImage::parse(&image_bytes).expect("parse");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        assert_eq!(parts.image().segments[0].mapped_size, 2 * PAGE);
+    }
+
+    #[test]
+    fn init_bytes_slice_uses_payload_relative_offset() {
+        // Два сегмента в одном payload: проверяем, что init_bytes второго
+        // взяты по payload-относительному offset, а не абсолютному.
+        let image_bytes = build_image(&[TestEntry {
+            name: "rk",
+            entry_va: 0x40_0000,
+            stack_size: 0x4000,
+            segments: &[
+                TestSegment {
+                    va_base: 0x40_0000,
+                    mem_size: PAGE as u64,
+                    flags: 2,
+                    bytes: b"FIRST",
+                },
+                TestSegment {
+                    va_base: 0x40_1000,
+                    mem_size: PAGE as u64,
+                    flags: 0,
+                    bytes: b"SECOND",
+                },
+            ],
+        }]);
+
+        let image = UserlandImage::parse(&image_bytes).expect("parse");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let built = parts.image();
+
+        assert_eq!(built.segments[0].init_bytes, b"FIRST");
+        assert_eq!(built.segments[1].init_bytes, b"SECOND");
+    }
+
+    #[test]
+    fn applies_fixed_stack_policy() {
+        let image_bytes = build_image(&[TestEntry {
+            name: "rk",
+            entry_va: 0x40_0000,
+            stack_size: 0x8000,
+            segments: &[TestSegment {
+                va_base: 0x40_0000,
+                mem_size: PAGE as u64,
+                flags: 2,
+                bytes: b"X",
+            }],
+        }]);
+
+        let image = UserlandImage::parse(&image_bytes).expect("parse");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let built = parts.image();
+
+        assert_eq!(built.user_stack_top, USER_STACK_TOP);
+        assert_eq!(built.user_stack_size, 0x8000);
+    }
+
+    #[test]
+    fn converted_image_passes_validate() {
+        let image_bytes = build_image(&[TestEntry {
+            name: "rootkeeper",
+            entry_va: 0x40_0000,
+            stack_size: 0x4000,
+            segments: &[
+                TestSegment {
+                    va_base: 0x40_0000,
+                    mem_size: PAGE as u64,
+                    flags: 2,
+                    bytes: b"CODE",
+                },
+                TestSegment {
+                    va_base: 0x40_1000,
+                    mem_size: 0x500,
+                    flags: 0,
+                    bytes: b"DATA",
+                },
+            ],
+        }]);
+
+        let image = UserlandImage::parse(&image_bytes).expect("parse");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        assert_eq!(parts.image().validate(), Ok(()));
+    }
+
+    #[test]
+    fn round_up_to_frame_detects_overflow() {
+        assert_eq!(round_up_to_frame(usize::MAX), None);
+        assert_eq!(round_up_to_frame(0), Some(0));
+        assert_eq!(round_up_to_frame(1), Some(PAGE));
+        assert_eq!(round_up_to_frame(PAGE), Some(PAGE));
+        assert_eq!(round_up_to_frame(PAGE + 1), Some(2 * PAGE));
+    }
+}

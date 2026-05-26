@@ -212,6 +212,7 @@ dependencies = [
  "syscall",
  "test-harness-qemu",
  "test-harness-qemu-aarch64",
+ "userland-abi",
  "userspace",
 ]
 
@@ -385,6 +386,9 @@ dependencies = [
 [[package]]
 name = "rootkeeper"
 version = "0.1.0"
+dependencies = [
+ "userland-abi",
+]
 
 [[package]]
 name = "ruzstd"
@@ -615,6 +619,7 @@ version = "0.1.0"
 dependencies = [
  "memory",
  "scheduler",
+ "userland-abi",
 ]
 
 [[package]]

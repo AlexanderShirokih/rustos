@@ -32,6 +32,7 @@ scheduler = { workspace = true }
 syscall = { workspace = true }
 memory = { workspace = true }
 userspace = { workspace = true }
+userland-abi = { workspace = true }
 collections = { workspace = true }
 fdt = { workspace = true }
 io = { workspace = true }

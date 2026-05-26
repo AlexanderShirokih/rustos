@@ -11,5 +11,8 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[dependencies]
+userland-abi = { workspace = true }
+
 [lints]
 workspace = true

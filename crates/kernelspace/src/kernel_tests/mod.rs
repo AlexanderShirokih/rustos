@@ -53,6 +53,7 @@ static ADAPTER: Once<ConsoleAdapter> = Once::new();
 /// дополнительные потоки (например, [`event_via_scheduler::event_signal_after_deadline`]).
 static SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
 static USER_PROCESS_LAUNCHER: Once<Arc<dyn UserProcessLauncher>> = Once::new();
+static USERLAND_BLOB: Once<&'static [u8]> = Once::new();
 
 /// Доступ к scheduler-сервису из test-кейсов.
 pub fn scheduler() -> &'static Arc<dyn SchedulerService> {
@@ -65,6 +66,12 @@ pub fn user_process_launcher() -> &'static Arc<dyn UserProcessLauncher> {
     USER_PROCESS_LAUNCHER
         .get()
         .expect("UserProcessLauncher must be cached in kernel_tests::spawn_kernel_tests_process")
+}
+
+/// Байты userland blob (initrd), если загрузчик их передал. `None` -
+/// blob отсутствует (тест должен явно провалиться, а не молча пропуститься).
+pub fn userland_blob() -> Option<&'static [u8]> {
+    USERLAND_BLOB.get().copied()
 }
 
 /// Init-таск под `feature = "kernel-tests"`: спавнит worker-процесс
@@ -122,6 +129,13 @@ pub fn run(kernel: &mut KernelContext) -> ! {
             .expect("SchedulerService must be available for kernel-tests");
         SCHEDULER.call_once(|| scheduler);
     });
+
+    // Кэшируем в worker-треде (а не в init-таске до scheduler.start()):
+    // удержание `&'static`-среза blob-а до старта планировщика приводило к
+    // зависанию неродственного user-process теста.
+    if let Some(blob) = kernel.userland_blob() {
+        USERLAND_BLOB.call_once(|| blob);
+    }
 
     let writer: &'static (dyn Writer + Send + Sync) =
         ADAPTER.get().expect("ADAPTER initialised above");
