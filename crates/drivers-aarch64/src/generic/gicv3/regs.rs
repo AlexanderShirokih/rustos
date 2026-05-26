@@ -29,8 +29,8 @@ pub(super) const GICD_IROUTER: Reg<u64> = Reg::new(0x6100);
 /// Биты GICD_CTLR
 /// Разрешить группу 1 Non-Secure.
 pub(super) const GICD_CTLR_ENABLE_GRP1NS: u32 = 1 << 1;
-/// Affinity Routing Enable для Non-Secure (ARE_NS) - бит 5 по спецификации GICv3.
-pub(super) const GICD_CTLR_ARE_NS: u32 = 1 << 5;
+/// Affinity Routing Enable, Non-Secure (ARE_NS) - бит 4 в Non-secure view (в Secure - 5).
+pub(super) const GICD_CTLR_ARE_NS: u32 = 1 << 4;
 /// Register Write Pending - бит 31, сигнализирует о незавершённой записи GICD_CTLR.
 pub(super) const GICD_CTLR_RWP: u32 = 1 << 31;
 

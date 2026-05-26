@@ -172,6 +172,10 @@ impl Gicv3Controller {
         self.distributor.write_reg(GICD_CTLR, 0u32);
         self.wait_gicd_rwp();
 
+        // ARE_NS до конфигурации групп: записи групп эффективны только при ARE_NS=1.
+        self.distributor.write_reg(GICD_CTLR, GICD_CTLR_ARE_NS);
+        self.wait_gicd_rwp();
+
         // Сбросить все SPI (банки 1+, банк 0 относится к SGI/PPI и управляется через GICR)
         let spi_banks = self.interrupt_lines.saturating_sub(1);
 

@@ -1,4 +1,4 @@
-//! Аппаратное состояние ARM Generic Timer.
+//! Аппаратное состояние ARM Generic Timer (virtual timer, `CNTV_*`).
 
 use alloc::{string::String, sync::Arc};
 use core::cmp;
@@ -8,7 +8,7 @@ use spin::Once;
 
 use crate::{read_sysreg, write_sysreg};
 
-pub(super) const CNTP_CTL_ENABLE: u32 = 1 << 0;
+pub(super) const CNTV_CTL_ENABLE: u32 = 1 << 0;
 
 /// Runtime-состояние ARM Generic Timer.
 pub(super) struct ArmGenericTimerState {
@@ -43,12 +43,12 @@ impl ArmGenericTimerState {
         let delta_ns = deadline_ns.saturating_sub(now_ns);
         let reload_value = Self::compute_counter_value(self.frequency, delta_ns).unwrap_or(1);
 
-        Self::write_cntp_tval_el0(reload_value);
-        Self::write_cntp_ctl_el0(CNTP_CTL_ENABLE);
+        Self::write_cntv_tval_el0(reload_value);
+        Self::write_cntv_ctl_el0(CNTV_CTL_ENABLE);
     }
 
     pub(super) fn get_elapsed_ns(&self) -> u64 {
-        Self::ticks_to_ns(Self::read_cntpct_el0(), self.frequency)
+        Self::ticks_to_ns(Self::read_cntvct_el0(), self.frequency)
     }
 
     fn ticks_to_ns(ticks: u64, frequency: u64) -> u64 {
@@ -77,28 +77,28 @@ impl ArmGenericTimerState {
         unsafe { read_sysreg!(cntfrq_el0) }
     }
 
-    fn read_cntpct_el0() -> u64 {
-        // SAFETY: Чтение CNTPCT_EL0 является побочным только по времени и не модифицирует
+    fn read_cntvct_el0() -> u64 {
+        // SAFETY: Чтение CNTVCT_EL0 является побочным только по времени и не модифицирует
         // память/состояние, влияющее на безопасность Rust-кода.
-        unsafe { read_sysreg!(cntpct_el0) }
+        unsafe { read_sysreg!(cntvct_el0) }
     }
 
-    fn write_cntp_tval_el0(value: u32) {
-        // SAFETY: Запись в CNTP_TVAL_EL0 программирует относительный дедлайн физического таймера.
-        // Аппаратно устанавливает CNTP_CVAL_EL0 = CNTPCT_EL0 + TVAL. ISB гарантирует
+    fn write_cntv_tval_el0(value: u32) {
+        // SAFETY: Запись в CNTV_TVAL_EL0 программирует относительный дедлайн virtual timer.
+        // Аппаратно устанавливает CNTV_CVAL_EL0 = CNTVCT_EL0 + TVAL. ISB гарантирует
         // что следующая инструкция видит актуальное значение таймера.
         unsafe {
-            write_sysreg!(cntp_tval_el0, u64::from(value));
+            write_sysreg!(cntv_tval_el0, u64::from(value));
             core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
         }
     }
 
-    fn write_cntp_ctl_el0(value: u32) {
-        // SAFETY: Запись в CNTP_CTL_EL0 меняет только биты управления физического таймера.
+    fn write_cntv_ctl_el0(value: u32) {
+        // SAFETY: Запись в CNTV_CTL_EL0 меняет только биты управления virtual timer.
         // Используются только документированные значения (enable/unmask). ISB гарантирует
         // немедленное применение изменений управляющего регистра.
         unsafe {
-            write_sysreg!(cntp_ctl_el0, u64::from(value));
+            write_sysreg!(cntv_ctl_el0, u64::from(value));
             core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
         }
     }

@@ -24,7 +24,10 @@ const GIC_TYPE_SPI: u32 = 0;
 const GIC_TYPE_PPI: u32 = 1;
 const INTERRUPT_SPECIFIER_CELLS: usize = 3;
 const INTERRUPT_CELL_SIZE: usize = size_of::<u32>();
-const NONSECURE_PHYSICAL_TIMER_SPEC_INDEX: usize = 1;
+
+/// Индекс specifier-а virtual timer в `interrupts` ноды `arm,armv8-timer`.
+/// Порядок specifier-ов: secure-physical, non-secure-physical, virtual, hypervisor.
+const VIRTUAL_TIMER_SPEC_INDEX: usize = 2;
 
 /// Runtime-драйвер ARM Generic Timer.
 pub struct ArmGenericTimerDriver {
@@ -97,12 +100,12 @@ pub fn arm_generic_timer_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult
         .prop("interrupts")
         .ok_or(ProbeError::MissingProperty("interrupts"))?;
 
-    let irq = parse_nonsecure_physical_timer_irq(interrupts.raw())?;
+    let irq = parse_virtual_timer_irq(interrupts.raw())?;
 
     Ok(Box::new(ArmGenericTimerFactory { irq }))
 }
 
-fn parse_nonsecure_physical_timer_irq(raw: &[u8]) -> Result<IrqNumber, ProbeError> {
+fn parse_virtual_timer_irq(raw: &[u8]) -> Result<IrqNumber, ProbeError> {
     let spec_size = INTERRUPT_SPECIFIER_CELLS * INTERRUPT_CELL_SIZE;
     if !raw.len().is_multiple_of(spec_size) {
         return Err(ProbeError::Unsupported(
@@ -111,22 +114,22 @@ fn parse_nonsecure_physical_timer_irq(raw: &[u8]) -> Result<IrqNumber, ProbeErro
     }
 
     let spec_count = raw.len() / spec_size;
-    if spec_count <= NONSECURE_PHYSICAL_TIMER_SPEC_INDEX {
+    if spec_count <= VIRTUAL_TIMER_SPEC_INDEX {
         return Err(ProbeError::Unsupported(
-            "non-secure physical timer interrupt specifier is missing",
+            "virtual timer interrupt specifier is missing",
         ));
     }
 
-    let base = NONSECURE_PHYSICAL_TIMER_SPEC_INDEX * spec_size;
+    let base = VIRTUAL_TIMER_SPEC_INDEX * spec_size;
     let interrupt_type = read_be_u32(raw, base).ok_or(ProbeError::Unsupported(
-        "failed to parse non-secure physical timer interrupt type",
+        "failed to parse virtual timer interrupt type",
     ))?;
     let interrupt_number = read_be_u32(raw, base + INTERRUPT_CELL_SIZE).ok_or(
-        ProbeError::Unsupported("failed to parse non-secure physical timer interrupt number"),
+        ProbeError::Unsupported("failed to parse virtual timer interrupt number"),
     )?;
 
     gic_specifier_to_irq(interrupt_type, interrupt_number).ok_or(ProbeError::Unsupported(
-        "unsupported non-secure physical timer interrupt specifier",
+        "unsupported virtual timer interrupt specifier",
     ))
 }
 
