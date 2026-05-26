@@ -292,6 +292,7 @@ dependencies = [
  "spin",
  "syscall",
  "test-harness-qemu",
+ "userland-abi",
  "userspace",
 ]
 

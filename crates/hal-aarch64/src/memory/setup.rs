@@ -5,6 +5,7 @@ use fdt::{
     devicetreeext::{AddressSpace, NodeExt, PropExt},
 };
 use hal_aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
+use hal_common::boot::BootPayloadRange;
 
 use crate::memory::layout::{MemoryLayout, MemoryRegion, RegionTag};
 
@@ -26,7 +27,10 @@ unsafe extern "C" {
 pub(crate) struct MemoryLayoutBuildError;
 
 /// Строит раскладку памяти из DeviceTree.
-pub(crate) fn build_memory_layout(dt: &DeviceTree) -> Result<MemoryLayout, MemoryLayoutBuildError> {
+pub(crate) fn build_memory_layout(
+    dt: &DeviceTree,
+    userland_blob: Option<BootPayloadRange>,
+) -> Result<MemoryLayout, MemoryLayoutBuildError> {
     let mut layout = MemoryLayout::new();
 
     let ram_regions = find_ram_regions(dt).ok_or(MemoryLayoutBuildError)?;
@@ -47,6 +51,16 @@ pub(crate) fn build_memory_layout(dt: &DeviceTree) -> Result<MemoryLayout, Memor
         dt.base_address() + dt.size(),
         KernelRoData::flags(),
     ));
+
+    // Userland blob (initrd): резервируем по аналогии с DTB
+    if let Some(range) = userland_blob {
+        layout.add(MemoryRegion::new(
+            RegionTag::Other,
+            range.start().as_usize(),
+            range.end_exclusive().as_usize(),
+            KernelRoData::flags(),
+        ));
+    }
 
     // SAFETY: символы `_text_start`/`_text_end`/`_rodata_*`/`_rw_*` определены линкером и
     // указывают на границы соответствующих секций ядра - взятие `&` от них корректно.

@@ -35,7 +35,8 @@ pub(super) fn boot_main(boot_info: &BootInfo) -> Result<(), ()> {
     let device_tree = DeviceTree::from_ptr(dtb_phys).map_err(|_| ())?;
 
     // Строим раскладку памяти из DTB + символов линкера (физические адреса через adrp)
-    let memory_layout = build_memory_layout(&device_tree).map_err(|_| ())?;
+    let memory_layout =
+        build_memory_layout(&device_tree, boot_info.userland_blob).map_err(|_| ())?;
 
     // Создаём MemorySetup и устанавливаем bump-аллокатор
     let early_setup = MemorySetup::<Early>::create(memory_layout).map_err(|_| ())?;
@@ -56,10 +57,20 @@ pub(super) fn boot_main(boot_info: &BootInfo) -> Result<(), ()> {
     } = enabled.state;
     let higher_root_pa = roots.higher_pa.as_usize();
     let frame_allocator_phys = core::ptr::from_ref(frame_allocator) as usize;
+    let initrd_start = boot_info.userland_blob.map_or(0, |r| r.start().as_usize());
+    let initrd_size = boot_info.userland_blob.map_or(0, |r| r.size_bytes());
 
     // Прыжок в higher half - управление передаётся в primary_main и не возвращается
     // SAFETY: MMU включён, TTBR1 содержит корректный маппинг higher-half.
-    unsafe { jump_to_higher_half(dtb_phys, higher_root_pa, frame_allocator_phys) };
+    unsafe {
+        jump_to_higher_half(
+            dtb_phys,
+            higher_root_pa,
+            frame_allocator_phys,
+            initrd_start,
+            initrd_size,
+        )
+    };
 
     loop {
         spin_loop();
@@ -78,18 +89,24 @@ unsafe extern "C" fn jump_to_higher_half(
     _dtb_phys: usize,
     _higher_root_pa: usize,
     _frame_allocator_phys: usize,
+    _initrd_start: usize,
+    _initrd_size: usize,
 ) {
     const HALF_47_32: u64 = ((HIGHER_HALF_BASE as u64) >> 32) & 0xFFFF;
     const HALF_63_48: u64 = ((HIGHER_HALF_BASE as u64) >> 48) & 0xFFFF;
 
     naked_asm!(
-        // extern "C" ABI (AArch64): аргументы в x0-x2:
+        // extern "C" ABI (AArch64): аргументы в x0-x4:
         //   x0 = dtb_phys
         //   x1 = higher_root_pa
         //   x2 = frame_allocator_phys
+        //   x3 = initrd_start
+        //   x4 = initrd_size
         "mov x19, x0",
         "mov x20, x1",
         "mov x21, x2",
+        "mov x22, x3",
+        "mov x23, x4",
 
         // Вычисляем виртуальный адрес метки 1f и прыгаем на него
         "adr x0, 1f",
@@ -105,10 +122,12 @@ unsafe extern "C" fn jump_to_higher_half(
         "mov sp, x1",
 
         // Передаём параметры в primary_main:
-        // x0=dtb_phys, x1=higher_root_pa, x2=frame_allocator_phys
+        // x0=dtb_phys, x1=higher_root_pa, x2=frame_allocator_phys, x3=initrd_start, x4=initrd_size
         "mov x0, x19",
         "mov x1, x20",
         "mov x2, x21",
+        "mov x3, x22",
+        "mov x4, x23",
         "b {primary_main}",
 
         // Сюда не должны добраться

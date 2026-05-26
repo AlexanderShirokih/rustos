@@ -26,11 +26,44 @@ use crate::{
 
 const SCHED_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 64);
 
+/// Физические адреса, пробрасываемые из pre-MMU фазы в post-MMU.
+pub(super) struct BootHandoff {
+    pub dtb_phys: usize,
+    pub higher_root_pa: usize,
+    pub frame_allocator_phys: usize,
+    pub initrd_start: usize,
+    pub initrd_size: usize,
+}
+
 /// К этому моменту:
 /// - PC и SP - виртуальные адреса (TTBR1)
 /// - TTBR0 ещё активен (identity mapping)
 /// - GLOBAL_ALLOCATOR в PHASE_FROZEN
-pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys: usize) -> ! {
+pub fn primary_main(
+    dtb_phys: usize,
+    higher_root_pa: usize,
+    frame_allocator_phys: usize,
+    initrd_start: usize,
+    initrd_size: usize,
+) -> ! {
+    let handoff = BootHandoff {
+        dtb_phys,
+        higher_root_pa,
+        frame_allocator_phys,
+        initrd_start,
+        initrd_size,
+    };
+    primary_main_impl(handoff)
+}
+
+fn primary_main_impl(handoff: BootHandoff) -> ! {
+    let BootHandoff {
+        dtb_phys,
+        higher_root_pa,
+        frame_allocator_phys,
+        initrd_start,
+        initrd_size,
+    } = handoff;
     let higher_half_base =
         PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(HIGHER_HALF_BASE));
     let higher_root =
@@ -72,6 +105,15 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
     let address_space_factory: &'static (
                  dyn memory::memory_mapper::AddressSpaceFactory + Send + Sync
              ) = Box::leak(result.address_space_factory);
+    // SAFETY: initrd зарезервирован в MemoryLayout (RegionTag::Other), фреймы не переиспользуются.
+    // VA = PA + HIGHER_HALF_BASE - валидный маппинг higher-half, живёт на всём сроке ядра.
+    let userland_blob: Option<&'static [u8]> = if initrd_size > 0 {
+        let va = initrd_start + HIGHER_HALF_BASE;
+        Some(unsafe { core::slice::from_raw_parts(va as *const u8, initrd_size) })
+    } else {
+        None
+    };
+
     let mmio_arena_base = PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(KMMIO_BASE));
     let mmio_arena_size =
         NonZeroUsize::new(KMMIO_MAX_SIZE).expect("KMMIO_MAX_SIZE must be non-zero");
@@ -81,6 +123,7 @@ pub fn primary_main(dtb_phys: usize, higher_root_pa: usize, frame_allocator_phys
         result.frame_allocator,
         mmio_arena_base,
         mmio_arena_size,
+        userland_blob,
     )));
 
     #[cfg(feature = "kernel-tests")]

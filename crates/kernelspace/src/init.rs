@@ -12,6 +12,7 @@ use scheduler::{
     ArchContext, Bootstrapped, Priority, Scheduler, SchedulerService, SchedulerServiceExt,
     SpawnConfig,
 };
+use userland_abi::UserlandImage;
 
 use crate::{kernel_context::KernelContext, scheduler_bootstrap::KernelTimerSource};
 
@@ -23,6 +24,13 @@ pub fn spawn_init_process<A>(
 ) where
     A: ArchContext,
 {
+    if let Some(blob) = kernel.userland_blob() {
+        match UserlandImage::parse(blob) {
+            Ok(image) => info!("userland image: {} entries", image.entry_count()),
+            Err(e) => klog::warn!("userland image parse failed: {:?}", e),
+        }
+    }
+
     let scheduler_service = kernel.with_runtime_state(|services, _| {
         services
             .require_scheduler()

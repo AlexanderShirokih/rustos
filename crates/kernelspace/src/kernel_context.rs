@@ -15,6 +15,7 @@ pub struct KernelContext {
     services: BootServices,
     driver_registry: Mutex<RuntimeDriverRegistry>,
     address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
+    userland_blob: Option<&'static [u8]>,
 }
 
 impl KernelContext {
@@ -24,6 +25,7 @@ impl KernelContext {
         frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
         mmio_arena_base: PageAlignedVirtualAddress,
         mmio_arena_size: NonZeroUsize,
+        userland_blob: Option<&'static [u8]>,
     ) -> KernelContext {
         // Публикуем глобальные слоты для модулей без KernelContext.
         syscall_bridge::install_address_space_factory(address_space_factory);
@@ -44,6 +46,7 @@ impl KernelContext {
             services,
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             address_space_factory,
+            userland_blob,
         }
     }
 
@@ -51,6 +54,11 @@ impl KernelContext {
     /// создания нового адресного пространства при `spawn_user_process`.
     pub fn address_space_factory(&self) -> &'static (dyn AddressSpaceFactory + Send + Sync) {
         self.address_space_factory
+    }
+
+    /// Байты userland blob из initrd, если загрузчик передал initrd.
+    pub fn userland_blob(&self) -> Option<&'static [u8]> {
+        self.userland_blob
     }
 
     pub fn with_runtime_state<R>(

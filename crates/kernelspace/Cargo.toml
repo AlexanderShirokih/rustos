@@ -22,6 +22,7 @@ memory = { workspace = true }
 klog = { workspace = true }
 scheduler = { workspace = true }
 syscall = { workspace = true }
+userland-abi = { workspace = true }
 userspace = { workspace = true }
 test-harness-qemu = { workspace = true, optional = true }
 
