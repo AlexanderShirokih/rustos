@@ -18,7 +18,7 @@ use kobject::{self, HandleId, Rights};
 
 use super::{
     error::{SyscallError, encode_return},
-    numbers::SyscallOp,
+    numbers::{SyscallOp, op_from_raw},
     runtime::runtime as syscall_runtime,
     user_io::{copy_in, validate_user_ptr},
 };
@@ -64,7 +64,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         return;
     }
 
-    let op = match SyscallOp::from_raw(frame.op_raw()) {
+    let op = match op_from_raw(frame.op_raw()) {
         Ok(op) => op,
         Err(SyscallError::BadSyscall) => {
             frame.set_return(SyscallError::BadSyscall.into());

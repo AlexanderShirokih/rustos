@@ -10,16 +10,18 @@ extern crate std;
 
 mod bootstrap;
 mod image;
+mod syscall;
 
 pub use bootstrap::{
     BOOTSTRAP_ABI_VERSION, BOOTSTRAP_HELLO_MAGIC, BOOTSTRAP_HELLO_SIZE, BootstrapHello,
     BootstrapHelloError, parse_bootstrap_hello,
 };
 pub use image::{
-    USERLAND_IMAGE_ENTRY_HEADER_SIZE, USERLAND_IMAGE_ENTRY_NAME_CAPACITY,
+    SegmentPermissions, USERLAND_IMAGE_ENTRY_HEADER_SIZE, USERLAND_IMAGE_ENTRY_NAME_CAPACITY,
     USERLAND_IMAGE_HEADER_SIZE, USERLAND_IMAGE_MAGIC, USERLAND_IMAGE_PAGE_SIZE,
     USERLAND_IMAGE_SEGMENT_SIZE, USERLAND_IMAGE_VERSION, UserlandImage, UserlandImageEntries,
     UserlandImageEntry, UserlandImageEntryHeader, UserlandImageError, UserlandImageHeader,
     UserlandImageSegment, UserlandImageSegments, decode_entry_header, decode_image_header,
     decode_segment,
 };
+pub use syscall::SyscallOp;

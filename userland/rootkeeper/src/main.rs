@@ -8,7 +8,13 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 
 #[cfg(target_os = "none")]
-use userland_abi::{BOOTSTRAP_ABI_VERSION, BOOTSTRAP_HELLO_MAGIC, BOOTSTRAP_HELLO_SIZE};
+use userland_abi::{BOOTSTRAP_ABI_VERSION, BOOTSTRAP_HELLO_MAGIC, BOOTSTRAP_HELLO_SIZE, SyscallOp};
+
+// svc-immediate обязан быть литералом; привязываем его к каноничному ABI-enum.
+#[cfg(target_os = "none")]
+const _: () = assert!(SyscallOp::ChannelWrite as u16 == 0x21);
+#[cfg(target_os = "none")]
+const _: () = assert!(SyscallOp::ThreadExit as u16 == 0x52);
 
 /// `bootstrap_handle` приходит в x0 как сырой HandleId WRITE-конца канала,
 /// переданного ядром при спавне.

@@ -33,6 +33,29 @@ pub struct UserlandImageSegment {
     pub flags: u32,
 }
 
+/// Права доступа сегмента, закодированные в [`UserlandImageSegment::flags`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentPermissions {
+    ReadWrite = 0,
+    ReadOnly = 1,
+    ReadExecute = 2,
+}
+
+impl SegmentPermissions {
+    pub fn from_flags(flags: u32) -> Option<Self> {
+        match flags {
+            0 => Some(Self::ReadWrite),
+            1 => Some(Self::ReadOnly),
+            2 => Some(Self::ReadExecute),
+            _ => None,
+        }
+    }
+
+    pub fn is_executable(self) -> bool {
+        matches!(self, Self::ReadExecute)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserlandImageError {
     BufferTooShort {
@@ -437,7 +460,8 @@ fn validate_entry_segments(
 
         validate_segment(segment, header, payload, entry_index, prev_end)?;
         prev_end = segment.file_offset.saturating_add(segment.file_size);
-        entry_in_executable |= segment.flags == 2
+        entry_in_executable |= SegmentPermissions::from_flags(segment.flags)
+            .is_some_and(SegmentPermissions::is_executable)
             && header.entry_va >= segment.va_base
             && header.entry_va < segment.va_base.saturating_add(segment.mem_size);
     }
@@ -476,7 +500,7 @@ fn validate_segment(
             detail: "segment_mem_size",
         });
     }
-    if !matches!(segment.flags, 0..=2) {
+    if SegmentPermissions::from_flags(segment.flags).is_none() {
         return Err(UserlandImageError::InvalidLayout {
             entry_index: Some(entry_index),
             detail: "segment_flags",

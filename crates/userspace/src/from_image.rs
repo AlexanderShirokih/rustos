@@ -11,17 +11,11 @@ use memory::{
     MemFlags,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
-use userland_abi::UserlandImageEntry;
+use userland_abi::{SegmentPermissions, UserlandImageEntry};
 
 use crate::image::{UserImage, UserSegment};
 
 const FRAME_SIZE: usize = 4096;
-
-/// Вершина user-стека для всех образов: фиксированный высокий VA, не зависящий
-/// от содержимого образа. Лежит заведомо выше типового образа (rootkeeper
-/// линкуется около 4 MiB) и внутри user-диапазона; коллизии со старшими
-/// сегментами ловит [`UserImage::validate`]. Выровнен на 4К.
-pub const USER_STACK_TOP: VirtualAddress = VirtualAddress::new(0x8000_0000);
 
 /// Ошибки конвертации [`UserlandImageEntry`] в [`UserImage`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,11 +59,12 @@ impl UserImageParts<'_> {
 
 /// Конвертирует один [`UserlandImageEntry`] в [`UserImageParts`].
 ///
-/// Стек размещается по политике "фиксированный высокий VA": вершина -
-/// [`USER_STACK_TOP`], размер - `stack_size` из заголовка (ABI гарантирует
-/// != 0 и кратность 4К).
+/// Стек размещается по политике "верх user-диапазона": вершина - `user_va_end`
+/// (потолок user-VA арха), размер - `stack_size` из заголовка (ABI гарантирует
+/// != 0). Образ обязан лежать ниже `user_va_end - stack_size`.
 pub fn user_image_parts_from_entry<'a>(
     entry: &UserlandImageEntry<'a>,
+    user_va_end: usize,
 ) -> Result<UserImageParts<'a>, UserImageFromAbiError> {
     let header = entry.header();
     let payload = entry.payload();
@@ -120,17 +115,18 @@ pub fn user_image_parts_from_entry<'a>(
     Ok(UserImageParts {
         segments,
         entry: VirtualAddress::new(entry_va),
-        user_stack_top: USER_STACK_TOP,
+        user_stack_top: VirtualAddress::new(user_va_end),
         user_stack_size,
     })
 }
 
 fn perms_from_flags(flags: u32) -> Result<MemFlags, UserImageFromAbiError> {
-    match flags {
-        0 => Ok(MemFlags::user_rw()),
-        1 => Ok(MemFlags::user_ro()),
-        2 => Ok(MemFlags::user_rx()),
-        other => Err(UserImageFromAbiError::UnknownSegmentFlags(other)),
+    match SegmentPermissions::from_flags(flags)
+        .ok_or(UserImageFromAbiError::UnknownSegmentFlags(flags))?
+    {
+        SegmentPermissions::ReadWrite => Ok(MemFlags::user_rw()),
+        SegmentPermissions::ReadOnly => Ok(MemFlags::user_ro()),
+        SegmentPermissions::ReadExecute => Ok(MemFlags::user_rx()),
     }
 }
 
@@ -157,6 +153,7 @@ mod tests {
     use super::*;
 
     const PAGE: usize = FRAME_SIZE;
+    const TEST_USER_VA_END: usize = 0x1_0000_0000;
 
     // MemFlags не реализует PartialEq, поэтому сводим права к наблюдаемой
     // тройке (read, write, exec) user-владельца для сравнения в тестах.
@@ -301,7 +298,8 @@ mod tests {
         }]);
 
         let image = UserlandImage::parse(&image_bytes).expect("parse");
-        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry(), TEST_USER_VA_END)
+            .expect("convert");
         let built = parts.image();
 
         // (read, write, exec) для user-владельца.
@@ -326,7 +324,8 @@ mod tests {
         }]);
 
         let image = UserlandImage::parse(&image_bytes).expect("parse");
-        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry(), TEST_USER_VA_END)
+            .expect("convert");
         let built = parts.image();
 
         assert_eq!(built.segments[0].mapped_size, PAGE);
@@ -347,7 +346,8 @@ mod tests {
         }]);
 
         let image = UserlandImage::parse(&image_bytes).expect("parse");
-        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry(), TEST_USER_VA_END)
+            .expect("convert");
         assert_eq!(parts.image().segments[0].mapped_size, 2 * PAGE);
     }
 
@@ -376,7 +376,8 @@ mod tests {
         }]);
 
         let image = UserlandImage::parse(&image_bytes).expect("parse");
-        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry(), TEST_USER_VA_END)
+            .expect("convert");
         let built = parts.image();
 
         assert_eq!(built.segments[0].init_bytes, b"FIRST");
@@ -398,10 +399,11 @@ mod tests {
         }]);
 
         let image = UserlandImage::parse(&image_bytes).expect("parse");
-        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry(), TEST_USER_VA_END)
+            .expect("convert");
         let built = parts.image();
 
-        assert_eq!(built.user_stack_top, USER_STACK_TOP);
+        assert_eq!(built.user_stack_top, VirtualAddress::new(TEST_USER_VA_END));
         assert_eq!(built.user_stack_size, 0x8000);
     }
 
@@ -428,7 +430,8 @@ mod tests {
         }]);
 
         let image = UserlandImage::parse(&image_bytes).expect("parse");
-        let parts = user_image_parts_from_entry(&image.bootstrap_entry()).expect("convert");
+        let parts = user_image_parts_from_entry(&image.bootstrap_entry(), TEST_USER_VA_END)
+            .expect("convert");
         assert_eq!(parts.image().validate(), Ok(()));
     }
 

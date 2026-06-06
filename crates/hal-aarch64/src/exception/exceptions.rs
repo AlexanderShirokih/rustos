@@ -48,8 +48,11 @@ pub enum ExceptionKind {
     SError = 3,
 }
 
-// Таблица векторов исключений
+// Таблица векторов исключений. Явная .text: без неё блок наследует секцию
+// предыдущего global_asm и вектора могут уехать из .text. Директива .text
+// (а не .section .text) совместима и с ELF, и с Mach-O host-ассемблером.
 global_asm!(
+    ".text",
     ".balign 2048",
     ".global exception_vectors",
     "exception_vectors:",

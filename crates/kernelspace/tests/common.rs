@@ -84,6 +84,8 @@ impl ArchContext for MockContext {
     type Cpu = MockCpu;
     type Stack = MockStack;
 
+    const USER_VA_END: usize = 0x0001_0000_0000_0000;
+
     fn init(
         _stack_top: core::ptr::NonNull<u8>,
         _entry: scheduler::arch::TrampolineFn,

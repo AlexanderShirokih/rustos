@@ -2,9 +2,10 @@
 
 use core::arch::global_asm;
 
+// .pushsection/.popsection: секция .head не утекает в последующие global_asm-блоки.
 global_asm!(
     r#"
-        .section .head, "ax"
+        .pushsection .head, "ax"
         .balign 8
         .global __start
     __start:
@@ -18,5 +19,6 @@ global_asm!(
         .quad 0                             // res4
         .word 0x644D5241                    // magic "ARM\x64"
         .word 0                             // res5
+        .popsection
     "#
 );

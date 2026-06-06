@@ -63,6 +63,9 @@ impl ArchContext for Aarch64Context {
     type Cpu = Aarch64Cpu;
     type Stack = Aarch64Stack;
 
+    // Полный нижний 48-бит TTBR0; старший валидный user-байт 0x0000_FFFF_FFFF_FFFF.
+    const USER_VA_END: usize = 0x0001_0000_0000_0000;
+
     fn init(stack_top: NonNull<u8>, entry: scheduler::arch::TrampolineFn, arg: *mut ()) -> Self {
         let sp = (stack_top.as_ptr() as usize & !0xF) as u64;
         let mut context = Self {

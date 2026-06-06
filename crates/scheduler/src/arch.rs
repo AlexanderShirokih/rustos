@@ -160,6 +160,10 @@ pub trait ArchContext: Sized + Send + 'static {
     type Cpu: ArchCpu;
     type Stack: ThreadStackAllocator;
 
+    /// Верхняя (exclusive) граница user-адресного пространства этого арха.
+    /// Старший валидный user-байт - `USER_VA_END - 1`.
+    const USER_VA_END: usize;
+
     fn init(stack_top: NonNull<u8>, entry: TrampolineFn, arg: *mut ()) -> Self;
 
     /// Инициализирует контекст для первого входа в user-режим.

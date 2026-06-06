@@ -7,20 +7,17 @@
 //! конца, поэтому ядро отдаёт rootkeeper'у `peer`, а читает со `local`-конца,
 //! на котором появляется `CHANNEL_READABLE`.
 
-// ВНИМАНИЕ: модуль временно не подключён в kernel_tests/mod.rs. Тест корректен
-// (под инструментацией читает валидный RKHELLO), но без неё детерминированно
-// виснет на первом sleep_ms после спавна rootkeeper - timer/scheduler Heisenbug.
-// Подключить обратно после фикса бага.
-
 use alloc::vec;
 
 use kernel_tests::kernel_test;
 use kobject::{CHANNEL_READABLE, Channel, Handle, KObject, Rights};
-use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
+use scheduler::{ArchContext, Priority, SchedulerServiceExt, UserProcessLaunch};
 use userland_abi::{
     BOOTSTRAP_ABI_VERSION, BOOTSTRAP_HELLO_MAGIC, UserlandImage, parse_bootstrap_hello,
 };
 use userspace::user_image_parts_from_entry;
+
+use crate::sched::Aarch64Context;
 
 #[kernel_test]
 fn userland_rootkeeper_bootstrap_handshake() {
@@ -29,7 +26,8 @@ fn userland_rootkeeper_bootstrap_handshake() {
 
     let image = UserlandImage::parse(blob).expect("userland image must parse");
     let entry = image.bootstrap_entry();
-    let parts = user_image_parts_from_entry(&entry).expect("bridge to UserImage must succeed");
+    let parts = user_image_parts_from_entry(&entry, Aarch64Context::USER_VA_END)
+        .expect("bridge to UserImage must succeed");
     let user_image = parts.image();
 
     // local остаётся у ядра для чтения; peer уходит rootkeeper'у. Запись в peer

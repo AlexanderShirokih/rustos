@@ -513,6 +513,7 @@ dependencies = [
  "kobject",
  "memory",
  "spin",
+ "userland-abi",
 ]
 
 [[package]]
