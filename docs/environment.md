@@ -50,15 +50,15 @@ debug:
   - "qemu-system-aarch64 ... -S -gdb tcp::1234"
 ```
 
-| Поле | Описание |
-|---|---|
-| `device.arch` | сейчас поддерживается `aarch64` |
+| Поле          | Описание                                                                   |
+|---------------|----------------------------------------------------------------------------|
+| `device.arch` | сейчас поддерживается `aarch64`                                            |
 | `boot.format` | `linux_arm64`, `android_boot_v1`, `android_boot_v2`; `uefi` зарезервирован |
-| `boot.offset` | link/load offset ядра (`KERNEL_OFFSET`) |
-| `boot.dtb` | DTB для Android boot image |
-| `boot.base` | база для расчёта Android `kernel_offset` |
-| `run` | команды для `xtask build --run` |
-| `debug` | команды для `xtask build --debug` |
+| `boot.offset` | link/load offset ядра (`KERNEL_OFFSET`)                                    |
+| `boot.dtb`    | DTB для Android boot image                                                 |
+| `boot.base`   | база для расчёта Android `kernel_offset`                                   |
+| `run`         | команды для `xtask build --run`                                            |
+| `debug`       | команды для `xtask build --debug`                                          |
 
 Для `linux_arm64` итоговая поставка состоит из двух артефактов: `target/build/kernel.bin`
 и sidecar `target/build/userland.img`. Bootloader или run-команда должны передать

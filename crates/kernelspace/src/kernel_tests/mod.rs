@@ -29,6 +29,7 @@ use crate::{
 };
 
 mod allocator;
+mod bootstrap_log;
 mod channel;
 mod channel_full_api;
 mod event;

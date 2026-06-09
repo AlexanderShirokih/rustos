@@ -1,4 +1,4 @@
-//! Production-init: спавнит первичный init-процесс и демо-задачи.
+//! Production-init: запускает rootkeeper-цепочку userland.
 //!
 //! Передаётся в [`kmain`](crate::kmain::kmain) как init-таск; вызывается
 //! после bootstrap'а scheduler-а и до перехода в `Scheduler::start`.
@@ -7,29 +7,33 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use klog::info;
-use scheduler::{
-    ArchContext, Bootstrapped, Priority, Scheduler, SchedulerService, SchedulerServiceExt,
-    SpawnConfig,
+use klog::{info, warn};
+use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerService, SpawnConfig};
+
+use crate::{
+    bootstrap::{spawn_bootstrap_log, spawn_rootkeeper},
+    kernel_context::KernelContext,
+    scheduler_bootstrap::KernelTimerSource,
+    user_process::{SchedulerUserProcessLauncher, UserProcessLauncher},
 };
-use userland_abi::UserlandImage;
 
-use crate::{kernel_context::KernelContext, scheduler_bootstrap::KernelTimerSource};
-
-/// Спавнит init-процесс с приоритетом `highest`. Init-процесс
-/// разворачивает timer-server и демо-таски.
+/// Спавнит init-процесс с приоритетом `highest`. Init-процесс запускает
+/// rootkeeper-цепочку userland.
 pub fn spawn_init_process<A>(
     scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
     kernel: &mut KernelContext,
 ) where
     A: ArchContext,
 {
-    if let Some(blob) = kernel.userland_blob() {
-        match UserlandImage::parse(blob) {
-            Ok(image) => info!("userland image: {} entries", image.entry_count()),
-            Err(e) => klog::warn!("userland image parse failed: {:?}", e),
-        }
-    }
+    // До спавна init-таска собираются только Copy/Send-значения; вся работа
+    // с blob выполняется внутри уже работающего init-таска.
+    let launcher: Arc<dyn UserProcessLauncher> = Arc::new(SchedulerUserProcessLauncher::new(
+        scheduler.handle(),
+        kernel.address_space_factory(),
+    ));
+
+    let blob = kernel.userland_blob();
+    let user_va_end = A::USER_VA_END;
 
     let scheduler_service = kernel.with_runtime_state(|services, _| {
         services
@@ -40,52 +44,36 @@ pub fn spawn_init_process<A>(
     scheduler
         .spawn(
             SpawnConfig::new("init").priority(Priority::highest()),
-            move || spawn_demo_processes(&scheduler_service),
+            move || {
+                start_rootkeeper_chain(launcher.as_ref(), blob, user_va_end, &scheduler_service);
+            },
         )
         .expect("init process spawn must succeed");
 }
 
-fn spawn_demo_processes(scheduler_service: &Arc<dyn SchedulerService>) {
-    use crate::timer_server::{pilot_client_subscribe, pilot_tick, spawn_timer_server};
+/// Запускает rootkeeper и логгер его bootstrap-канала. Любая ошибка
+/// userland-пути логируется warn'ом, ядро продолжает работу.
+fn start_rootkeeper_chain(
+    launcher: &dyn UserProcessLauncher,
+    blob: Option<&'static [u8]>,
+    user_va_end: usize,
+    scheduler_service: &Arc<dyn SchedulerService>,
+) {
+    let Some(blob) = blob else {
+        warn!("userland blob missing; rootkeeper not started");
+        return;
+    };
 
-    let client_end =
-        spawn_timer_server(scheduler_service).expect("timer-server spawn must succeed");
+    let launch = match spawn_rootkeeper(launcher, blob, user_va_end) {
+        Ok(launch) => launch,
+        Err(e) => {
+            warn!("rootkeeper spawn failed: {:?}", e);
+            return;
+        }
+    };
+    info!("rootkeeper spawned: {:?}", launch.info);
 
-    scheduler_service
-        .spawn(
-            SpawnConfig::new("test-process").priority(Priority::normal()),
-            move || {
-                let handles = match pilot_client_subscribe(&client_end) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        klog::warn!("pilot subscribe failed: {:?}", e);
-                        return;
-                    }
-                };
-                let period_ms = 200_u64;
-                let mut tick = 0_u64;
-                loop {
-                    info!("Pilot tick #{tick} via channel-based Timer");
-                    if let Err(e) = pilot_tick(&handles, period_ms) {
-                        klog::warn!("pilot tick failed: {:?}", e);
-                        return;
-                    }
-                    tick = tick.wrapping_add(1);
-                }
-            },
-        )
-        .expect("test-process spawn must succeed");
-
-    for (idx, period_ms) in [(1_u32, 300_u64), (2, 700)] {
-        let thread_service = scheduler_service.clone();
-        scheduler_service
-            .spawn(
-                SpawnConfig::new("demo").priority(Priority::normal()),
-                move || loop {
-                    info!("Process {idx} tick");
-                    thread_service.sleep_ms(period_ms);
-                },
-            )
-            .expect("demo process spawn must succeed");
+    if let Err(e) = spawn_bootstrap_log(scheduler_service, launch.channel) {
+        warn!("bootstrap-log spawn failed: {}", e);
     }
 }

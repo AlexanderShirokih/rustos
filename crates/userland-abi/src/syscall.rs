@@ -259,6 +259,14 @@ impl SyscallOp {
     }
 }
 
+/// Зеркало стабильного ABI-кода для userland-клиентов: бит сигнала канала
+/// "парный endpoint закрыт".
+pub const CHANNEL_SIGNAL_PEER_CLOSED: u32 = 1 << 1;
+
+/// Зеркало стабильного ABI-кода для userland-клиентов: возврат syscall'а
+/// при истёкшем deadline.
+pub const SYSCALL_RETURN_TIMEOUT: i64 = -9;
+
 #[cfg(test)]
 mod tests {
     use super::*;

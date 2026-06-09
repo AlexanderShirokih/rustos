@@ -2,23 +2,20 @@
 
 use memory::physical_address::PhysicalAddress;
 
-use crate::{
-    memory::{
-        asid,
-        regs::{
-            common::EL1,
-            id_aa64mmfr0::{AsidWidth, IdAa64Mmfr0},
-            mair,
-            mair::MemoryAttributeIndirectionRegister,
-            sctlr,
-            sctlr::SystemControlRegister,
-            tcr,
-            tcr::{TranslationControlRegister, TtbrSel},
-            tlb::TranslationLookasideBuffer,
-            ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister},
-        },
+use crate::memory::{
+    asid,
+    regs::{
+        common::EL1,
+        id_aa64mmfr0::{AsidWidth, IdAa64Mmfr0},
+        mair,
+        mair::MemoryAttributeIndirectionRegister,
+        sctlr,
+        sctlr::SystemControlRegister,
+        tcr,
+        tcr::{TranslationControlRegister, TtbrSel},
+        tlb::TranslationLookasideBuffer,
+        ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister},
     },
-    system,
 };
 
 /// Конфигурация адресного пространства.
@@ -106,7 +103,7 @@ impl Mmu<EL1> {
     ///
     /// Вызывать только после перехода в higher half (виртуальный SP и PC).
     pub fn disable_lower_half() {
-        system::barrier::full_system_barrier();
+        Self::full_system_barrier();
         // SAFETY: Вызывается post-MMU, после переключения SP и PC на виртуальные адреса.
         // После этого вызова любое обращение к lower half вызовет Translation Fault.
         unsafe {
@@ -117,13 +114,13 @@ impl Mmu<EL1> {
             );
         }
         Tlb::invalidate();
-        system::barrier::full_system_barrier();
+        Self::full_system_barrier();
     }
 
     /// Включает MMU и кэши.
     pub fn enable<C: MmuConfig>(config: &C) {
         // 1) Барьер перед изменениями регистров + маскирование прерываний
-        system::barrier::full_system_barrier();
+        Self::full_system_barrier();
 
         // 2) Запись слотов атрибутов памяти
         Mair::set(mair::MairBits::combine(&[
@@ -151,6 +148,12 @@ impl Mmu<EL1> {
         Sctlr::set(config.mmu_config());
 
         // 7) Барьер после изменения всех регистров
-        system::barrier::full_system_barrier();
+        Self::full_system_barrier();
+    }
+
+    fn full_system_barrier() {
+        // SAFETY: `dsb sy`/`isb` - общесистемный барьер на ARMv8, не имеет операндов и
+        // не модифицирует регистры/память (preserves_flags, nostack).
+        unsafe { core::arch::asm!("dsb sy", "isb", options(nostack, preserves_flags)) };
     }
 }

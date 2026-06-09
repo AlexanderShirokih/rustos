@@ -18,7 +18,7 @@ use memory::{
 use scheduler::{Bootstrapped, Scheduler, SchedulerConfig};
 
 use crate::{
-    HIGHER_HALF_BASE, KMMIO_BASE, KMMIO_MAX_SIZE,
+    consts::HIGHER_HALF_BASE, consts::KMMIO_BASE, consts::KMMIO_MAX_SIZE,
     exception::ExceptionVectors,
     memory::memory_setup::{Enabled, MemorySetup},
     sched::Aarch64Context,
@@ -64,6 +64,7 @@ fn primary_main_impl(handoff: BootHandoff) -> ! {
         initrd_start,
         initrd_size,
     } = handoff;
+    
     let higher_half_base =
         PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(HIGHER_HALF_BASE));
     let higher_root =
@@ -102,9 +103,11 @@ fn primary_main_impl(handoff: BootHandoff) -> ! {
 
     let memory_mapper: &'static (dyn memory::memory_mapper::MemoryMapper + Send + Sync) =
         result.memory_mapper;
+    
     let address_space_factory: &'static (
                  dyn memory::memory_mapper::AddressSpaceFactory + Send + Sync
              ) = Box::leak(result.address_space_factory);
+    
     // SAFETY: initrd зарезервирован в MemoryLayout (RegionTag::Other), фреймы не переиспользуются.
     // VA = PA + HIGHER_HALF_BASE - валидный маппинг higher-half, живёт на всём сроке ядра.
     let userland_blob: Option<&'static [u8]> = if initrd_size > 0 {
@@ -117,6 +120,7 @@ fn primary_main_impl(handoff: BootHandoff) -> ! {
     let mmio_arena_base = PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(KMMIO_BASE));
     let mmio_arena_size =
         NonZeroUsize::new(KMMIO_MAX_SIZE).expect("KMMIO_MAX_SIZE must be non-zero");
+    
     let kernel = Box::leak(Box::new(KernelContext::new(
         memory_mapper,
         address_space_factory,

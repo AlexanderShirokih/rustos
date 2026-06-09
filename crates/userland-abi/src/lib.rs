@@ -1,4 +1,4 @@
-//! ABI `userland.img` и bootstrap hello.
+//! ABI `userland.img` и bootstrap-кадры (hello, heartbeat).
 //!
 //! `userland.img` состоит из фиксированного header, затем variable-length
 //! entry records, затем payload bytes.
@@ -13,8 +13,10 @@ mod image;
 mod syscall;
 
 pub use bootstrap::{
-    BOOTSTRAP_ABI_VERSION, BOOTSTRAP_HELLO_MAGIC, BOOTSTRAP_HELLO_SIZE, BootstrapHello,
-    BootstrapHelloError, parse_bootstrap_hello,
+    BOOTSTRAP_ABI_VERSION, BOOTSTRAP_HEARTBEAT_MAGIC, BOOTSTRAP_HEARTBEAT_PERIOD_NS,
+    BOOTSTRAP_HEARTBEAT_SIZE, BOOTSTRAP_HELLO_MAGIC, BOOTSTRAP_HELLO_SIZE, BootstrapHeartbeat,
+    BootstrapHeartbeatError, BootstrapHello, BootstrapHelloError, encode_bootstrap_heartbeat,
+    parse_bootstrap_heartbeat, parse_bootstrap_hello,
 };
 pub use image::{
     SegmentPermissions, USERLAND_IMAGE_ENTRY_HEADER_SIZE, USERLAND_IMAGE_ENTRY_NAME_CAPACITY,
@@ -24,4 +26,4 @@ pub use image::{
     UserlandImageSegment, UserlandImageSegments, decode_entry_header, decode_image_header,
     decode_segment,
 };
-pub use syscall::SyscallOp;
+pub use syscall::{CHANNEL_SIGNAL_PEER_CLOSED, SYSCALL_RETURN_TIMEOUT, SyscallOp};

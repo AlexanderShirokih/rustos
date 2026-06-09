@@ -52,7 +52,7 @@ pub(crate) fn build_memory_layout(
         KernelRoData::flags(),
     ));
 
-    // Userland blob (initrd): резервируем по аналогии с DTB
+    // Userland blob (initrd)
     if let Some(range) = userland_blob {
         layout.add(MemoryRegion::new(
             RegionTag::Other,

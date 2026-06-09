@@ -158,7 +158,7 @@ impl ObserverWaker {
             return;
         }
         #[cfg(test)]
-        test_hooks::run_wake_once_before_cleanup();
+        test_hooks::run_wake_once_before_cleanup(self);
         let Some(mailbox) = self.mailbox.upgrade() else {
             return;
         };
@@ -459,7 +459,11 @@ mod test_hooks {
     use alloc::sync::Arc;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    type Hook = Arc<dyn Fn() + Send + Sync>;
+    use super::ObserverWaker;
+
+    /// Хук получает waker текущей доставки; хук глобален на процесс,
+    /// поэтому фильтрация "свой/чужой mailbox" - обязанность хука.
+    type Hook = Arc<dyn Fn(&ObserverWaker) + Send + Sync>;
 
     fn test_lock() -> &'static Mutex<()> {
         static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -487,10 +491,10 @@ mod test_hooks {
         HookGuard { _lock: lock }
     }
 
-    pub(super) fn run_wake_once_before_cleanup() {
+    pub(super) fn run_wake_once_before_cleanup(waker: &ObserverWaker) {
         let hook = wake_once_hook().lock().unwrap().clone();
         if let Some(hook) = hook {
-            hook();
+            hook(waker);
         }
     }
 }
@@ -863,13 +867,20 @@ mod tests {
         let entered_hook = entered.clone();
         let release_hook = release.clone();
         let first_delivery_hook = first_delivery.clone();
-        let _hook_guard =
-            super::test_hooks::install_wake_once_before_cleanup(Arc::new(move || {
+        let mb_addr = Arc::as_ptr(&mb) as usize;
+        let _hook_guard = super::test_hooks::install_wake_once_before_cleanup(Arc::new(
+            move |waker: &ObserverWaker| {
+                // Хук видит wake_once всего процесса: гейтим только
+                // первую доставку своего mailbox'а, чужие пропускаем.
+                if waker.mailbox.as_ptr() as usize != mb_addr {
+                    return;
+                }
                 if first_delivery_hook.swap(false, AtomicOrdering::AcqRel) {
                     entered_hook.wait();
                     release_hook.wait();
                 }
-            }));
+            },
+        ));
 
         mb.subscribe(&target, koid, 7, EVENT_SIGNALED, AsyncMode::Once)
             .unwrap();

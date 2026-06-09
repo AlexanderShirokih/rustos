@@ -22,7 +22,7 @@ use memory::{
 use spin::Once;
 
 use crate::{
-    KHEAP_BASE, KHEAP_MAX_SIZE,
+    consts::{KHEAP_BASE, KHEAP_MAX_SIZE},
     memory::{
         global_allocator::GLOBAL_ALLOCATOR,
         layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},

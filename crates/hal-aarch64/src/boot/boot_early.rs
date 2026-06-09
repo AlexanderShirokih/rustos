@@ -12,7 +12,7 @@ use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 
 use super::boot_primary::primary_main;
 use crate::{
-    HIGHER_HALF_BASE,
+    consts::HIGHER_HALF_BASE,
     memory::{
         memory_setup::{Early, Enabled, MemorySetup},
         setup::build_memory_layout,

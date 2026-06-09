@@ -6,6 +6,7 @@
 #![no_std]
 extern crate alloc;
 
+pub mod bootstrap;
 pub mod driver_init;
 pub mod init;
 pub mod irq_bridge;

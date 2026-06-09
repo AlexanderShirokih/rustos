@@ -104,6 +104,8 @@ fn should_run_early(name: &str) -> bool {
             | "channel_via_syscall_round_trip"
             | "mailbox_via_syscall_round_trip"
             | "userspace_self_spawn_via_syscalls"
+            | "userland_rootkeeper_bootstrap_handshake"
+            | "userland_rootkeeper_heartbeat"
     )
 }
 

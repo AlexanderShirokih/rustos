@@ -12,8 +12,7 @@ const FRAME_SIZE: usize = 4096;
 /// начало региона; user-стек получает `MemFlags::user_rw` без init.
 ///
 /// На ошибке любого шага все ранее замапленные страницы остаются в `mapper`-е
-/// (он сам освободит их при дропе AS) - вызывающему достаточно сбросить
-/// `Arc<AddressSpace>`.
+/// (он сам освободит их при дропе AS).
 pub fn load_user_image(
     mapper: &(dyn MemoryMapper + Send + Sync),
     image: &UserImage<'_>,

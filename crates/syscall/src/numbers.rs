@@ -25,4 +25,20 @@ mod tests {
         assert_eq!(op_from_raw(0), Err(SyscallError::BadSyscall));
         assert_eq!(op_from_raw(0x7F), Err(SyscallError::BadSyscall));
     }
+
+    #[test]
+    fn abi_mirror_channel_signal_peer_closed_matches_kobject() {
+        assert_eq!(
+            userland_abi::CHANNEL_SIGNAL_PEER_CLOSED,
+            kobject::CHANNEL_PEER_CLOSED
+        );
+    }
+
+    #[test]
+    fn abi_mirror_syscall_return_timeout_matches_error_encoding() {
+        assert_eq!(
+            userland_abi::SYSCALL_RETURN_TIMEOUT,
+            SyscallError::Timeout.as_return_value()
+        );
+    }
 }

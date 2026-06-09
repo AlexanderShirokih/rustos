@@ -102,6 +102,7 @@ where
             launch,
             self.factory,
         )?;
+        
         self.handle
             .spawn_prepared_user_process(prepared)
             .map_err(Into::into)
@@ -206,12 +207,15 @@ fn prepare_user_process(
     }
 
     image.validate()?;
+    
     let address_space = AddressSpace::new_user(factory).map_err(|_| {
         PreparedUserProcessError::Spawn(scheduler::SpawnError::AddressSpaceCreationFailed)
     })?;
+    
     let mapper = address_space
         .mapper()
         .expect("AddressSpace::User must expose mapper");
+    
     load_user_image(mapper, image)?;
 
     Ok(PreparedUserProcess {
