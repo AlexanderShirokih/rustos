@@ -16,10 +16,10 @@ Edition 2024). Workspace состоит из платформенного сло
 |----------------------|-----------------------------------------------------------------------|
 | Boot/platform        | `hal-aarch64`, `hal-common`, `hal-aarch64-asid`, `hal-aarch64-paging` |
 | Kernel orchestration | `kernelspace`                                                         |
-| Runtime ядра         | `scheduler`, `kobject`, `syscall`, `userspace`, `memory`              |
+| Runtime ядра         | `scheduler`, `kobject`, `syscall`, `process`, `memory`              |
 | Драйверы             | `drivers-aarch64`, `drivers-common`, `drivers-common-aarch64`         |
 | Базовые библиотеки   | `collections`, `fdt`, `io`, `klog`, `util`                            |
-| Тестовый harness     | `test-harness-qemu`, `test-harness-qemu-aarch64`                      |
+| Тестовый harness     | `test-harness-qemu`, `test-harness-macros`                            |
 | Host tooling         | `xtask`                                                               |
 
 Зависимости идут от платформенного и orchestration-кода к нижним

@@ -1,4 +1,7 @@
+mod layers;
+
 use std::{
+    collections::BTreeSet,
     env,
     fs::{self, File},
     io::{Read, Write},
@@ -10,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
 use serde::Deserialize;
-use tools_userland::build_userland;
+use userland_img::build_userland;
 
 #[derive(Parser)]
 #[command(name = "xtask")]
@@ -41,13 +44,21 @@ enum Commands {
         #[arg(long, default_value_t = 60)]
         timeout: u64,
     },
-    /// Собрать userland.img из /userland/manifest.toml
-    BuildUserland,
+    /// Собрать userland.img из композиции user/images/<имя>.toml
+    BuildUserland {
+        /// Имя образа; резолвится в user/images/<имя>.toml
+        #[arg(long, default_value = "default")]
+        image: String,
+    },
+    /// Проверить правила слоев между workspace-крейтами
+    CheckLayers,
 }
 
 #[derive(Debug, Deserialize)]
 struct DeviceSpec {
     boot: BootSection,
+    #[serde(default)]
+    features: Vec<String>,
     #[serde(default)]
     run: Vec<String>,
     #[serde(default)]
@@ -146,6 +157,16 @@ fn project_root() -> PathBuf {
     }
 }
 
+fn image_manifest_path(project_root: &Path, image: &str) -> Result<PathBuf> {
+    let path = project_root
+        .join("user/images")
+        .join(format!("{image}.toml"));
+    if !path.exists() {
+        bail!("Userland image '{image}' not found at {}", path.display());
+    }
+    Ok(path)
+}
+
 fn load_spec(path: &Path) -> Result<DeviceSpec> {
     let file = File::open(path).context("Failed to open spec file")?;
     let spec: DeviceSpec = serde_yaml::from_reader(file).context("Failed to parse YAML")?;
@@ -171,13 +192,17 @@ fn protocol_feature(boot_format: &str) -> &'static str {
 }
 
 fn build_features(ctx: &BuildContext) -> String {
+    let mut features = vec![protocol_feature(ctx.spec.boot.format.as_str()).to_string()];
+    features.extend(ctx.spec.features.iter().cloned());
+    if let Some(extra) = ctx.features.as_deref()
+        && !extra.is_empty()
+    {
+        features.push(extra.to_string());
+    }
     // `kernel-bin` обязателен: bin гейтирован этой фичей (required-features),
     // чтобы не ломать host-сборку workspace.
-    let protocol = protocol_feature(ctx.spec.boot.format.as_str());
-    match ctx.features.as_deref() {
-        Some(extra) if !extra.is_empty() => format!("{protocol},{extra},kernel-bin"),
-        _ => format!("{protocol},kernel-bin"),
-    }
+    features.push("kernel-bin".to_string());
+    features.join(",")
 }
 
 fn run_cmd(cmd: &mut Command) -> Result<ExitStatus> {
@@ -375,11 +400,107 @@ fn execute_commands(commands: &[String], cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-fn qemu_test(timeout: u64) -> Result<()> {
-    let spec_path = PathBuf::from("devices/spec/qemu-aarch64-test.yaml");
-    let ctx = BuildContext::new(spec_path, Some("kernel-tests".to_string()))?;
+#[derive(Deserialize)]
+struct CargoMetadata {
+    packages: Vec<MetaPackage>,
+    workspace_root: PathBuf,
+}
 
-    build_userland(&ctx.project_root, &ctx.build_dir)?;
+#[derive(Deserialize)]
+struct MetaPackage {
+    name: String,
+    manifest_path: PathBuf,
+    dependencies: Vec<MetaDependency>,
+}
+
+#[derive(Deserialize)]
+struct MetaDependency {
+    name: String,
+    path: Option<PathBuf>,
+}
+
+fn check_layers() -> Result<()> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(project_root())
+        .output()
+        .context("Failed to run cargo metadata")?;
+    if !output.status.success() {
+        bail!("cargo metadata failed with {}", output.status);
+    }
+    let meta: CargoMetadata =
+        serde_json::from_slice(&output.stdout).context("Failed to parse cargo metadata")?;
+
+    let crates = meta
+        .packages
+        .iter()
+        .map(|pkg| {
+            let rel = pkg
+                .manifest_path
+                .strip_prefix(&meta.workspace_root)
+                .with_context(|| format!("крейт {} вне корня workspace", pkg.name))?;
+            let dir = rel
+                .components()
+                .next()
+                .and_then(|c| c.as_os_str().to_str())
+                .with_context(|| format!("крейт {}: пустой относительный путь", pkg.name))?;
+            Ok((pkg.name.clone(), dir.to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let members: BTreeSet<&str> = crates.iter().map(|(name, _)| name.as_str()).collect();
+    // dependencies включает normal-, dev- и build-зависимости; path = Some
+    // отбирает локальные, дубликаты (normal + dev) схлопываются через BTreeSet.
+    let edges: Vec<(String, String)> = meta
+        .packages
+        .iter()
+        .flat_map(|pkg| {
+            pkg.dependencies
+                .iter()
+                .filter(|dep| dep.path.is_some() && members.contains(dep.name.as_str()))
+                .map(|dep| (pkg.name.clone(), dep.name.clone()))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let violations = layers::check_layers(&crates, &edges)?;
+    if !violations.is_empty() {
+        for violation in &violations {
+            eprintln!("{violation}");
+        }
+        bail!("check-layers: нарушений правил слоев: {}", violations.len());
+    }
+    println!(
+        "check-layers: OK ({} крейтов, {} рёбер)",
+        crates.len(),
+        edges.len()
+    );
+    Ok(())
+}
+
+fn qemu_test(timeout: u64) -> Result<()> {
+    // Pass 1: тесты внутри ядра (feature kernel-tests). Pass 2: тесты в
+    // userland-образе testrunner против production-ядра; kernel.bin
+    // пересобирается между прогонами из-за различия фич.
+    qemu_test_pass(
+        "kernel",
+        Some("kernel-tests".to_string()),
+        "default",
+        timeout,
+    )?;
+    qemu_test_pass("userland", None, "test", timeout)?;
+    Ok(())
+}
+
+fn qemu_test_pass(label: &str, features: Option<String>, image: &str, timeout: u64) -> Result<()> {
+    println!("=== qemu-test pass: {label} ===");
+
+    let spec_path = PathBuf::from("devices/spec/qemu-aarch64-test.yaml");
+    let ctx = BuildContext::new(spec_path, features)?;
+
+    let manifest_path = image_manifest_path(&ctx.project_root, image)?;
+    build_userland(&ctx.project_root, &manifest_path, &ctx.build_dir)?;
     build_binary(&ctx)?;
 
     let qemu_cmd = ctx
@@ -401,9 +522,9 @@ fn qemu_test(timeout: u64) -> Result<()> {
     if !status.success() {
         let code = status.code().unwrap_or(1);
         if code == 124 {
-            bail!("QEMU timed out after {timeout}s");
+            bail!("QEMU pass '{label}' timed out after {timeout}s");
         }
-        bail!("QEMU exited with code {code}");
+        bail!("QEMU pass '{label}' exited with code {code}");
     }
 
     Ok(())
@@ -420,7 +541,8 @@ fn main() -> Result<()> {
             features,
         } => {
             let ctx = BuildContext::new(spec, features)?;
-            build_userland(&ctx.project_root, &ctx.build_dir)?;
+            let manifest_path = image_manifest_path(&ctx.project_root, "default")?;
+            build_userland(&ctx.project_root, &manifest_path, &ctx.build_dir)?;
 
             let output = match ctx.spec.boot.format.as_str() {
                 "linux_arm64" => build_binary(&ctx)?,
@@ -448,13 +570,15 @@ fn main() -> Result<()> {
             }
         }
         Commands::QemuTest { timeout } => qemu_test(timeout)?,
-        Commands::BuildUserland => {
+        Commands::BuildUserland { image } => {
             let project_root = project_root();
             let build_dir = project_root.join("target/build");
             fs::create_dir_all(&build_dir)?;
-            let output = build_userland(&project_root, &build_dir)?;
+            let manifest_path = image_manifest_path(&project_root, &image)?;
+            let output = build_userland(&project_root, &manifest_path, &build_dir)?;
             println!("Done: {}", output.display());
         }
+        Commands::CheckLayers => check_layers()?,
     }
 
     Ok(())

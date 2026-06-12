@@ -25,6 +25,11 @@ fmt:
   script:
     - cargo fmt --all --check
 
+check-layers:
+  stage: check
+  script:
+    - cargo xtask check-layers
+
 clippy:host:
   stage: check
   script:
@@ -33,7 +38,7 @@ clippy:host:
 clippy:aarch64:
   stage: check
   script:
-    - cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none
+    - cargo clippy --workspace --exclude xtask --exclude userland-img --target aarch64-unknown-none
 
 test:
   stage: test

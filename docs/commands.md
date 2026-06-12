@@ -6,17 +6,18 @@
 |------------------------|---------------------------------------------------------------------------------------------------|
 | Host-тесты             | `cargo test --workspace`                                                                          |
 | Host-clippy            | `cargo clippy --workspace`                                                                        |
-| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude tools-userland --features kernel-bin --target aarch64-unknown-none` |
+| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-img --features kernel-bin --target aarch64-unknown-none` |
 | Форматирование         | `cargo fmt --all --check`                                                                         |
-| Сборка userland        | `cargo xtask build-userland`                                                                      |
+| Сборка userland        | `cargo xtask build-userland [--image <имя>]`                                                      |
 | Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                |
 | QEMU integration tests | `cargo xtask qemu-test --timeout 20`                                                              |
 | Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                    |
+| Проверка слоёв         | `cargo xtask check-layers`                                                                        |
 
 ## Сборка
 
 `xtask build` читает YAML-спеку устройства, сначала собирает
-`target/build/userland.img` из `/userland/manifest.toml`, затем выбирает boot
+`target/build/userland.img` из `/user/images/default.toml`, затем выбирает boot
 feature для `hal-aarch64`, собирает kernel crate под `aarch64-unknown-none` и
 упаковывает результат.
 
@@ -28,6 +29,15 @@ feature для `hal-aarch64`, собирает kernel crate под `aarch64-unkn
 ```bash
 cargo xtask build devices/spec/qemu-aarch64.yaml
 cargo xtask build devices/spec/xiaomi-lavender.yaml
+```
+
+`xtask build-userland` собирает только `target/build/userland.img`. Флаг
+`--image <имя>` выбирает композицию `user/images/<имя>.toml`; по умолчанию —
+`default`.
+
+```bash
+cargo xtask build-userland
+cargo xtask build-userland --image test
 ```
 
 Результаты:
@@ -53,3 +63,13 @@ cargo xtask qemu-test --timeout 20
 ```
 
 `qemu-test` собирает `target/build/userland.img` и запускает QEMU с `-initrd target/build/userland.img`.
+
+## Проверка слоёв
+
+```bash
+cargo xtask check-layers
+```
+
+Сверяет рёбра зависимостей между workspace-крейтами (по `cargo metadata`)
+с правилами слоёв из [`architecture.md`](architecture.md#слои-и-зависимости).
+При нарушениях печатает запрещённые рёбра и завершается с ошибкой; выполняется в CI.

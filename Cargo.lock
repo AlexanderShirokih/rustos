@@ -205,15 +205,14 @@ dependencies = [
  "klog",
  "kobject",
  "memory",
+ "process",
  "scheduler",
  "serde",
  "serde_yaml",
  "spin",
  "syscall",
  "test-harness-qemu",
- "test-harness-qemu-aarch64",
  "userland-abi",
- "userspace",
 ]
 
 [[package]]
@@ -289,12 +288,12 @@ dependencies = [
  "klog",
  "kobject",
  "memory",
+ "process",
  "scheduler",
  "spin",
  "syscall",
  "test-harness-qemu",
  "userland-abi",
- "userspace",
 ]
 
 [[package]]
@@ -375,6 +374,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "process"
+version = "0.1.0"
+dependencies = [
+ "memory",
+ "scheduler",
+ "userland-abi",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -388,6 +396,7 @@ name = "rootkeeper"
 version = "0.1.0"
 dependencies = [
  "userland-abi",
+ "userland-rt",
 ]
 
 [[package]]
@@ -449,6 +458,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.150"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -535,11 +557,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "test-harness-qemu-aarch64"
+name = "testrunner"
 version = "0.1.0"
 dependencies = [
  "io",
+ "spin",
  "test-harness-qemu",
+ "userland-abi",
+ "userland-rt",
 ]
 
 [[package]]
@@ -582,17 +607,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
-name = "tools-userland"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "object",
- "serde",
- "toml",
- "userland-abi",
-]
-
-[[package]]
 name = "twox-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -615,11 +629,21 @@ name = "userland-abi"
 version = "0.1.0"
 
 [[package]]
-name = "userspace"
+name = "userland-img"
 version = "0.1.0"
 dependencies = [
- "memory",
- "scheduler",
+ "anyhow",
+ "object",
+ "serde",
+ "serde_json",
+ "toml",
+ "userland-abi",
+]
+
+[[package]]
+name = "userland-rt"
+version = "0.1.0"
+dependencies = [
  "userland-abi",
 ]
 
@@ -668,6 +692,13 @@ dependencies = [
  "clap",
  "flate2",
  "serde",
+ "serde_json",
  "serde_yaml",
- "tools-userland",
+ "userland-img",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"

@@ -17,8 +17,9 @@ cargo install cargo-binutils
 Сборка выполняется через `cargo xtask` с указанием спецификации устройства:
 
 ```bash
-# Userland image
+# Userland image (--image <имя> выбирает user/images/<имя>.toml, default — default)
 cargo xtask build-userland
+cargo xtask build-userland --image test
 
 # QEMU (формат linux_arm64)
 cargo xtask build devices/spec/qemu-aarch64.yaml
@@ -45,4 +46,7 @@ cargo xtask build devices/spec/qemu-aarch64.yaml --debug
 
 # QEMU integration tests
 cargo xtask qemu-test --timeout 20
+
+# Проверка правил слоёв между workspace-крейтами
+cargo xtask check-layers
 ```

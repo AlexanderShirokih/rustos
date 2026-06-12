@@ -1,0 +1,121 @@
+//! Хелперы для инициализации scheduler-а из platform-independent кода.
+
+use alloc::sync::Arc;
+
+use drivers_common::services::timer::{TickHandler, TimerService};
+use memory::{UserVmContext, frame_allocator::FrameAllocator};
+use scheduler::{
+    ArchContext, Bootstrapped, Scheduler, SchedulerConfig, SchedulerHandle, SchedulerService,
+    TimerSource, Uninit,
+};
+
+use crate::{kernel_context::KernelContext, syscall_bridge};
+
+/// Адаптер `TimerService` (capability) -> `TimerSource`.
+pub struct KernelTimerSource(Arc<dyn TimerService>);
+
+impl KernelTimerSource {
+    pub fn new(timer: Arc<dyn TimerService>) -> Self {
+        Self(timer)
+    }
+}
+
+impl TimerSource for KernelTimerSource {
+    fn now_ns(&self) -> u64 {
+        self.0.now_ns()
+    }
+
+    fn schedule_next(&self, deadline_ns: u64) {
+        self.0.schedule_next(deadline_ns);
+    }
+}
+
+struct SchedulerTickHandler<A, T>
+where
+    A: ArchContext,
+    T: TimerSource,
+{
+    handle: SchedulerHandle<A, T>,
+}
+
+impl<A, T> TickHandler for SchedulerTickHandler<A, T>
+where
+    A: ArchContext,
+    T: TimerSource,
+{
+    fn on_tick(&self, now_ns: u64) {
+        self.handle.on_timer_tick(now_ns);
+    }
+}
+
+struct SchedulerSyscallRuntime<A, T>
+where
+    A: ArchContext,
+    T: TimerSource,
+{
+    handle: SchedulerHandle<A, T>,
+}
+
+impl<A, T> syscall::SyscallRuntime for SchedulerSyscallRuntime<A, T>
+where
+    A: ArchContext,
+    T: TimerSource,
+{
+    fn current_user_vm(&self) -> Option<UserVmContext> {
+        self.handle.current_user_vm()
+    }
+
+    fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
+        syscall_bridge::frame_allocator()
+    }
+}
+
+/// Создаёт scheduler, делает bootstrap, регистрирует `SchedulerService` в
+/// bootstrap services и привязывает `TickHandler` к `TimerService`.
+///
+/// Возвращает scheduler в состоянии [`Bootstrapped`] - вызывающий должен
+/// зарегистрировать начальные потоки и перевести scheduler в [`super::Running`]
+/// через [`Scheduler::start`].
+pub fn bootstrap_scheduler<A>(
+    kernel: &mut KernelContext,
+    config: SchedulerConfig,
+) -> Scheduler<A, KernelTimerSource, Bootstrapped>
+where
+    A: ArchContext,
+{
+    let timer = kernel.with_runtime_state(|services, _| {
+        services
+            .require_timer()
+            .expect("TimerService must be available before scheduler startup")
+    });
+
+    let factory = Some(kernel.address_space_factory());
+
+    let scheduler = Scheduler::<A, KernelTimerSource, Uninit>::with_address_space_factory(
+        KernelTimerSource::new(timer.clone()),
+        config,
+        factory,
+    )
+    .bootstrap();
+
+    let handle = scheduler.handle();
+    let service: Arc<dyn SchedulerService> = Arc::new(handle.clone());
+    let tick_handler: Arc<dyn TickHandler> = Arc::new(SchedulerTickHandler {
+        handle: handle.clone(),
+    });
+    let kobject_runtime: Arc<dyn kobject::KernelRuntime> = Arc::new(handle.clone());
+    let syscall_runtime: Arc<dyn syscall::SyscallRuntime> =
+        Arc::new(SchedulerSyscallRuntime { handle });
+
+    kernel.with_runtime_state(|services, _| {
+        services
+            .set_scheduler(service.clone())
+            .expect("SchedulerService registration must succeed");
+    });
+    timer.set_handler(tick_handler);
+    kobject::install_runtime(kobject_runtime);
+    syscall::install_runtime(syscall_runtime);
+    syscall_bridge::install_scheduler(service);
+
+    scheduler
+}

@@ -1,0 +1,54 @@
+[package]
+name = "hal-aarch64"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kernel-aarch64"
+path = "src/start.rs"
+test = false
+# Боевой kernel-бинарь собирается только под bare-metal-таргет: boot-asm
+# содержит ELF-релокации (adrp/#:lo12:), которые host-ассемблер (Mach-O) не
+# принимает. Фича-гейт исключает bin из `cargo build --workspace` на хосте;
+# сборка под `aarch64-unknown-none` (xtask, clippy) включает фичу явно.
+required-features = ["kernel-bin"]
+
+[features]
+default = ["boot-linux-arm64"]
+boot-linux-arm64 = []
+boot-uefi = []
+kernel-bin = []
+power-semihosting = []
+kernel-tests = [
+    "kernelspace/kernel-tests",
+    "dep:test-harness-qemu",
+]
+
+[dependencies]
+hal-aarch64-asid = { workspace = true }
+hal-aarch64-paging = { workspace = true }
+hal-common = { workspace = true }
+drivers-common-aarch64 = { workspace = true }
+drivers-common = { workspace = true }
+drivers-aarch64 = { workspace = true }
+kernelspace = { workspace = true }
+kobject = { workspace = true }
+scheduler = { workspace = true }
+syscall = { workspace = true }
+memory = { workspace = true }
+process = { workspace = true }
+userland-abi = { workspace = true }
+collections = { workspace = true }
+fdt = { workspace = true }
+io = { workspace = true, features = ["alloc"] }
+klog = { workspace = true }
+spin = { workspace = true }
+test-harness-qemu = { workspace = true, optional = true }
+
+[build-dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+
+[lints]
+workspace = true

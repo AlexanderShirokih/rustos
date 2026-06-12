@@ -1,0 +1,19 @@
+//! E2E проверка self-handle части Process/Thread ABI из EL0:
+//! `ProcessSelf`/`ThreadSelf` возвращают ненулевые handle'ы,
+//! `HandleClose` закрывает их без ошибок.
+
+use kernel_tests::kernel_test;
+use userland_rt::{handle_close, process_self, thread_self};
+
+#[kernel_test]
+fn process_and_thread_self_handles() {
+    let process = process_self();
+    kernel_tests::kassert!(process > 0);
+    let process = usize::try_from(process).expect("positive handle fits usize");
+    kernel_tests::kassert_eq!(handle_close(process), 0);
+
+    let thread = thread_self();
+    kernel_tests::kassert!(thread > 0);
+    let thread = usize::try_from(thread).expect("positive handle fits usize");
+    kernel_tests::kassert_eq!(handle_close(thread), 0);
+}

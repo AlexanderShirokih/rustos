@@ -1,0 +1,28 @@
+[package]
+name = "kernelspace"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+kernel-tests = [
+    "dep:test-harness-qemu",
+]
+
+[dependencies]
+spin = { workspace = true }
+collections = { workspace = true }
+drivers-common = { workspace = true }
+io = { workspace = true, features = ["alloc"] }
+kobject = { workspace = true }
+memory = { workspace = true }
+klog = { workspace = true }
+scheduler = { workspace = true }
+syscall = { workspace = true }
+userland-abi = { workspace = true }
+process = { workspace = true }
+test-harness-qemu = { workspace = true, optional = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "testrunner"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+bootstrap = true
+stack_size = 65536
+
+[[bin]]
+name = "testrunner"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+io = { workspace = true }
+spin = { workspace = true }
+test-harness-qemu = { workspace = true }
+userland-abi = { workspace = true }
+userland-rt = { workspace = true }
+
+[lints]
+workspace = true

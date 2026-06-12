@@ -7,13 +7,19 @@
 
 - `hal-aarch64` — boot, исключения, MMU setup, platform context switch.
 - `kernelspace` — сборка ядра из сервисов: драйверы, scheduler, syscall bridge, user init.
-- `scheduler`, `kobject`, `syscall`, `userspace`, `memory` — архитектурно-независимые механизмы ядра.
+- `scheduler`, `kobject`, `syscall`, `process`, `memory` — архитектурно-независимые механизмы ядра.
 - `drivers-aarch64` — реализации устройств; общие интерфейсы живут в `drivers-common`.
 - `collections`, `io`, `fdt`, `klog`, `util` — базовые no_std-библиотеки.
 
 Платформенная конкретика выносится за trait-интерфейсы. Общий код не
 должен импортировать `hal-aarch64` и не должен знать детали конкретного
 MMU, interrupt controller или boot-протокола.
+
+Домен крейта задаётся его верхней директорией. Разрешённые зависимости:
+`lib/` — только от `lib/`; `abi/` — от `lib/`; `kernel/` — от
+`lib/`, `abi/`, `kernel/`; `user/` — от `lib/`, `abi/`, `user/`;
+`tools/` — от `lib/`, `abi/`, `tools/`; `xtask/` без ограничений.
+Правила проверяются командой `cargo xtask check-layers`.
 
 ## Типы вместо примитивов
 
@@ -46,7 +52,7 @@ MMU, interrupt controller или boot-протокола.
 process id текущего и следующего потока; при смене процесса активирует
 целевой AS до `ArchContext::switch`.
 
-Статические сегменты user-образа и стек загружает `userspace::load_user_image`.
+Статические сегменты user-образа и стек загружает `process::load_user_image`.
 Динамические user-VM mapping'и обслуживаются `UserVmAllocator` текущего
 процесса и описаны в [`syscalls.md`](syscalls.md#memory).
 

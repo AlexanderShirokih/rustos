@@ -94,7 +94,7 @@ kernelspace          — оркестрация: драйверы, scheduler bri
   ├── kobject        — handle-таблица, refcount, сигнальные маски
   ├── syscall        — диспетчер и ABI
   ├── memory         — kernel heap, UserVmAllocator, трейт MemoryMapper
-  └── userspace      — загрузка user-образа
+  └── process        — загрузка user-образа
 
 hal-aarch64          — boot, MMU (4-уровневые таблицы, ASID), GIC, ArchContext
 hal-common           — boot-протокол, BootInfo, HwDescription

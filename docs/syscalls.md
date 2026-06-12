@@ -208,7 +208,7 @@ Process-вызовы создают процесс, возвращают handle 
 
 `ProcessLoadImage` загружает user-образ в уже созданный, но ещё не
 запущенный процесс. `desc_len` обязан быть ровно `56`
-([`USER_IMAGE_DESC_SIZE`](../crates/syscall/src/spawn_abi.rs)), а
+([`USER_IMAGE_DESC_SIZE`](../kernel/syscall/src/spawn_abi.rs)), а
 `desc_va` — указывать на little-endian структуру:
 
 | Offset | Поле              | Тип   | Описание                            |
@@ -223,7 +223,7 @@ Process-вызовы создают процесс, возвращают handle 
 |   `48` | `user_vm_size`    | `u64` | размер диапазона user-vm-аллокатора |
 
 `segments_va` указывает на массив `segment_count` записей по `32` байта
-([`USER_SEGMENT_SIZE`](../crates/syscall/src/spawn_abi.rs)):
+([`USER_SEGMENT_SIZE`](../kernel/syscall/src/spawn_abi.rs)):
 
 | Offset | Поле            | Тип   | Описание                                             |
 |-------:|-----------------|-------|------------------------------------------------------|

@@ -1,0 +1,16 @@
+[package]
+name = "process"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+memory = { workspace = true }
+scheduler = { workspace = true }
+userland-abi = { workspace = true }
+
+[dev-dependencies]
+userland-abi = { workspace = true, features = ["alloc"] }
+
+[lints]
+workspace = true

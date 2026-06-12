@@ -1,0 +1,38 @@
+//! Тонкие svc-обёртки syscall-ABI для userland-бинарей.
+//!
+//! Аргументы уходят в x0..x5, возврат - знаковый x0: неотрицательное
+//! значение - успех, отрицательное - `-(SyscallError)`.
+
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", allow(unsafe_code))]
+
+#[cfg(target_os = "none")]
+mod svc;
+
+#[cfg(target_os = "none")]
+pub use svc::{
+    channel_create, channel_read, channel_write, handle_close, mailbox_create, mailbox_queue,
+    mailbox_wait, memory_allocate, memory_create_virtual, memory_map, memory_region_inspect,
+    memory_remap, object_wait_one, process_create, process_exit_code, process_load_image,
+    process_self, process_start, thread_exit, thread_self,
+};
+
+/// Null-аллокатор рантайма: кучи у userland-бинарей нет, любая
+/// аллокация возвращает null.
+#[cfg(target_os = "none")]
+struct NoHeap;
+
+// SAFETY: alloc всегда возвращает null (отказ аллокации), поэтому dealloc
+// недостижим; контракт GlobalAlloc на null-возврате соблюдён.
+#[cfg(target_os = "none")]
+unsafe impl core::alloc::GlobalAlloc for NoHeap {
+    unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
+        core::ptr::null_mut()
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
+}
+
+#[cfg(target_os = "none")]
+#[global_allocator]
+static NO_HEAP: NoHeap = NoHeap;

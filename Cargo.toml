@@ -1,30 +1,31 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/hal-aarch64",
-    "crates/hal-aarch64-asid",
-    "crates/hal-aarch64-paging",
-    "crates/hal-common",
-    "crates/collections",
-    "crates/drivers-common-aarch64",
-    "crates/drivers-common",
-    "crates/drivers-aarch64",
-    "crates/kernelspace",
-    "crates/kobject",
-    "crates/scheduler",
-    "crates/syscall",
-    "crates/fdt",
-    "crates/io",
-    "crates/log",
-    "crates/memory",
-    "crates/test-harness-qemu",
-    "crates/test-harness-macros",
-    "crates/test-harness-qemu-aarch64",
-    "crates/userland-abi",
-    "crates/userspace",
-    "crates/util",
-    "tools/userland",
-    "userland/rootkeeper",
+    "abi/userland-abi",
+    "kernel/drivers-aarch64",
+    "kernel/drivers-common",
+    "kernel/drivers-common-aarch64",
+    "kernel/fdt",
+    "kernel/hal-aarch64",
+    "kernel/hal-aarch64-asid",
+    "kernel/hal-aarch64-paging",
+    "kernel/hal-common",
+    "lib/io",
+    "kernel/kernelspace",
+    "kernel/kobject",
+    "kernel/log",
+    "kernel/memory",
+    "kernel/process",
+    "kernel/scheduler",
+    "kernel/syscall",
+    "lib/test-harness-macros",
+    "lib/test-harness-qemu",
+    "lib/collections",
+    "lib/util",
+    "tools/userland-img",
+    "user/rootkeeper",
+    "user/rt",
+    "user/testrunner",
     "xtask",
 ]
 
@@ -37,6 +38,7 @@ publish = false
 # Внешние зависимости
 spin = "0.10.0"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
@@ -49,33 +51,33 @@ quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 
 # Внутренние крейты workspace
-collections = { path = "crates/collections" }
-io = { path = "crates/io" }
-klog = { path = "crates/log" }
-fdt = { path = "crates/fdt" }
-memory = { path = "crates/memory" }
-util = { path = "crates/util" }
-hal-common = { path = "crates/hal-common" }
-hal-aarch64-asid = { path = "crates/hal-aarch64-asid" }
-hal-aarch64-paging = { path = "crates/hal-aarch64-paging" }
-drivers-common = { path = "crates/drivers-common" }
-drivers-common-aarch64 = { path = "crates/drivers-common-aarch64" }
-drivers-aarch64 = { path = "crates/drivers-aarch64" }
-kernelspace = { path = "crates/kernelspace" }
-kobject = { path = "crates/kobject" }
-scheduler = { path = "crates/scheduler" }
-syscall = { path = "crates/syscall" }
-test-harness-qemu = { path = "crates/test-harness-qemu" }
-test-harness-macros = { path = "crates/test-harness-macros" }
-test-harness-qemu-aarch64 = { path = "crates/test-harness-qemu-aarch64" }
-userland-abi = { path = "crates/userland-abi" }
-userspace = { path = "crates/userspace" }
-tools-userland = { path = "tools/userland" }
+collections = { path = "lib/collections" }
+io = { path = "lib/io" }
+klog = { path = "kernel/log" }
+fdt = { path = "kernel/fdt" }
+memory = { path = "kernel/memory" }
+util = { path = "lib/util" }
+hal-common = { path = "kernel/hal-common" }
+hal-aarch64-asid = { path = "kernel/hal-aarch64-asid" }
+hal-aarch64-paging = { path = "kernel/hal-aarch64-paging" }
+drivers-common = { path = "kernel/drivers-common" }
+drivers-common-aarch64 = { path = "kernel/drivers-common-aarch64" }
+drivers-aarch64 = { path = "kernel/drivers-aarch64" }
+kernelspace = { path = "kernel/kernelspace" }
+kobject = { path = "kernel/kobject" }
+scheduler = { path = "kernel/scheduler" }
+syscall = { path = "kernel/syscall" }
+test-harness-qemu = { path = "lib/test-harness-qemu" }
+test-harness-macros = { path = "lib/test-harness-macros" }
+userland-abi = { path = "abi/userland-abi" }
+userland-rt = { path = "user/rt" }
+process = { path = "kernel/process" }
+userland-img = { path = "tools/userland-img" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # Архитектурно-независимый код не должен использовать `unsafe`. Платформенные
-# крейты (arch-*, drivers-*-aarch64, test-harness-qemu-aarch64) и низкоуровневые
+# крейты (arch-*, drivers-*-aarch64) и низкоуровневые
 # ядерные примитивы (memory, kernelspace, io, collections, fdt, ...) явно опциируются
 # через `#![allow(unsafe_code)]` в корне крейта - это видно в diff.
 unsafe_code = "deny"
