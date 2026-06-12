@@ -220,7 +220,7 @@ impl FrameBitmap {
 
     /// Выделяет в памяти свободный фрейм, начиная поиск с offset
     pub fn alloc_from(&mut self, offset: Frame) -> Option<Frame> {
-        let region_end_exclusive = Frame::from(self.target_region.end()).add(1);
+        let region_end_exclusive = Frame::from(self.target_region.end());
         let start = self.entry_pos(offset);
         let region_end = self.entry_pos(region_end_exclusive);
 

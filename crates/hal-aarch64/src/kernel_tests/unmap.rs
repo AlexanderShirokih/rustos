@@ -34,7 +34,7 @@ use memory::{
 use scheduler::AddressSpace;
 
 use crate::{
-    HIGHER_HALF_BASE,
+    consts::HIGHER_HALF_BASE,
     memory::{
         address_space_factory::UserAarch64MemoryMapper,
         memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},

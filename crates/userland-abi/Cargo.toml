@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+# Сериализатор образа (`build_userland_image`); требует `alloc`. По
+# умолчанию выключен, чтобы no_std-парсер не тянул аллокатор.
+alloc = []
+
 [dependencies]
 
 [lints]

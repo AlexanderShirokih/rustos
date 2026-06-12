@@ -145,9 +145,8 @@ mod tests {
 
     use memory::mem_flags::{AccessMode, Executable};
     use userland_abi::{
-        USERLAND_IMAGE_ENTRY_HEADER_SIZE, USERLAND_IMAGE_HEADER_SIZE, USERLAND_IMAGE_MAGIC,
-        USERLAND_IMAGE_PAGE_SIZE, USERLAND_IMAGE_SEGMENT_SIZE, USERLAND_IMAGE_VERSION,
-        UserlandImage,
+        ImageEntryInput as TestEntry, ImageSegmentInput as TestSegment, UserlandImage,
+        build_userland_image,
     };
 
     use super::*;
@@ -171,102 +170,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
-    struct TestSegment<'a> {
-        va_base: u64,
-        mem_size: u64,
-        flags: u32,
-        bytes: &'a [u8],
-    }
-
-    struct TestEntry<'a> {
-        name: &'a str,
-        entry_va: u64,
-        stack_size: u64,
-        segments: &'a [TestSegment<'a>],
-    }
-
-    // Компактный аналог build_image из тестов userland-abi: собирает один
-    // валидный blob с заданными entry для прогона через UserlandImage::parse.
     fn build_image(entries: &[TestEntry<'_>]) -> Vec<u8> {
-        let metadata_size = USERLAND_IMAGE_HEADER_SIZE
-            + entries
-                .iter()
-                .map(|entry| {
-                    USERLAND_IMAGE_ENTRY_HEADER_SIZE
-                        + entry.segments.len() * USERLAND_IMAGE_SEGMENT_SIZE
-                        + entry.name.len()
-                })
-                .sum::<usize>();
-
-        let mut payload_cursor = metadata_size as u64;
-        let mut encoded_entries = Vec::new();
-        let mut payloads = Vec::new();
-
-        for entry in entries {
-            let payload_offset = payload_cursor;
-            let mut payload = Vec::new();
-            let mut encoded_segments = Vec::new();
-
-            for segment in entry.segments {
-                let file_offset =
-                    align_file_offset(payload_offset + payload.len() as u64, segment.va_base);
-                let pad = usize::try_from(file_offset - (payload_offset + payload.len() as u64))
-                    .expect("padding fits in usize");
-                payload.resize(payload.len() + pad, 0);
-                payload.extend_from_slice(segment.bytes);
-
-                let mut bytes = Vec::with_capacity(USERLAND_IMAGE_SEGMENT_SIZE);
-                bytes.extend_from_slice(&file_offset.to_le_bytes());
-                bytes.extend_from_slice(&(segment.bytes.len() as u64).to_le_bytes());
-                bytes.extend_from_slice(&segment.va_base.to_le_bytes());
-                bytes.extend_from_slice(&segment.mem_size.to_le_bytes());
-                bytes.extend_from_slice(&segment.flags.to_le_bytes());
-                encoded_segments.extend_from_slice(&bytes);
-            }
-
-            let payload_size = payload.len() as u64;
-            payload_cursor += payload_size;
-
-            let mut encoded_entry = Vec::new();
-            encoded_entry.extend_from_slice(&payload_offset.to_le_bytes());
-            encoded_entry.extend_from_slice(&payload_size.to_le_bytes());
-            encoded_entry.extend_from_slice(&entry.entry_va.to_le_bytes());
-            encoded_entry.extend_from_slice(&entry.stack_size.to_le_bytes());
-            encoded_entry.extend_from_slice(&(entry.segments.len() as u16).to_le_bytes());
-            encoded_entry.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
-            encoded_entry.extend_from_slice(&encoded_segments);
-            encoded_entry.extend_from_slice(entry.name.as_bytes());
-
-            encoded_entries.push(encoded_entry);
-            payloads.push(payload);
-        }
-
-        let total_size = usize::try_from(payload_cursor).expect("image fits in usize");
-        let mut image = Vec::with_capacity(total_size);
-        image.extend_from_slice(&USERLAND_IMAGE_MAGIC);
-        image.extend_from_slice(&USERLAND_IMAGE_VERSION.to_le_bytes());
-        image.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-        image.extend_from_slice(&(total_size as u64).to_le_bytes());
-
-        for entry in encoded_entries {
-            image.extend_from_slice(&entry);
-        }
-        for payload in payloads {
-            image.extend_from_slice(&payload);
-        }
-
-        image
-    }
-
-    fn align_file_offset(offset: u64, va_base: u64) -> u64 {
-        let target = va_base % USERLAND_IMAGE_PAGE_SIZE;
-        let current = offset % USERLAND_IMAGE_PAGE_SIZE;
-        if current <= target {
-            offset + (target - current)
-        } else {
-            offset + (USERLAND_IMAGE_PAGE_SIZE - (current - target))
-        }
+        build_userland_image(entries).expect("test image must serialize")
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Аппаратный контроллер GICv3: Distributor, Redistributor и CPU Interface.
 
-use alloc::{boxed::Box, collections::BTreeMap};
+use alloc::{collections::BTreeMap, sync::Arc};
 use core::hint::spin_loop;
 
 use drivers_common::services::{
@@ -24,7 +24,7 @@ pub(super) struct Gicv3Controller {
     /// GICR-регион текущего CPU (RD_base + SGI_base в одном маппинге).
     pub(super) redistributor: MmioBound,
     pub(super) interrupt_lines: ITLinesNumber,
-    pub(super) handlers: BTreeMap<IrqNumber, Box<dyn IrqHandler>>,
+    pub(super) handlers: BTreeMap<IrqNumber, Arc<dyn IrqHandler>>,
 }
 
 // SAFETY: Gicv3Controller содержит только MmioBound (volatile-доступ) и BTreeMap.
@@ -142,16 +142,14 @@ impl Gicv3Controller {
             .write_reg(GICD_IROUTER.with_offset(router_offset), route);
     }
 
-    pub(super) fn dispatch_interrupt(&mut self) {
-        let Some(irq) = Self::acknowledge() else {
-            return;
-        };
-
-        if let Some(handler) = self.handlers.get(&irq) {
-            handler.handle();
-        }
+    /// Подтверждает и деактивирует (EOI) один pending IRQ, возвращая его хендлер.
+    pub(super) fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>> {
+        let irq = Self::acknowledge()?;
+        let handler = self.handlers.get(&irq).cloned();
 
         Self::end_of_interrupt(irq);
+
+        handler
     }
 
     // --- Приватные методы инициализации ---

@@ -14,7 +14,6 @@ pub mod kernel_context;
 pub mod kmain;
 pub mod scheduler_bootstrap;
 pub mod syscall_bridge;
-pub mod timer_server;
 pub mod user_process;
 
 pub use user_process::{

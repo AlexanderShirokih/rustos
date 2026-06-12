@@ -5,10 +5,14 @@
 
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(any(test, feature = "alloc"))]
+extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
 mod bootstrap;
+#[cfg(any(test, feature = "alloc"))]
+mod builder;
 mod image;
 mod syscall;
 
@@ -17,6 +21,10 @@ pub use bootstrap::{
     BOOTSTRAP_HEARTBEAT_SIZE, BOOTSTRAP_HELLO_MAGIC, BOOTSTRAP_HELLO_SIZE, BootstrapHeartbeat,
     BootstrapHeartbeatError, BootstrapHello, BootstrapHelloError, encode_bootstrap_heartbeat,
     parse_bootstrap_heartbeat, parse_bootstrap_hello,
+};
+#[cfg(any(test, feature = "alloc"))]
+pub use builder::{
+    ImageBuildError, ImageEntryInput, ImageSegmentInput, align_file_offset, build_userland_image,
 };
 pub use image::{
     SegmentPermissions, USERLAND_IMAGE_ENTRY_HEADER_SIZE, USERLAND_IMAGE_ENTRY_NAME_CAPACITY,

@@ -19,7 +19,7 @@ pub fn frame_to_address(frame: usize) -> PageAlignedAddress {
 pub fn make_range(start_frame: usize, frame_count: usize) -> MemoryRange<PageAlignedAddress> {
     assert!(frame_count > 0, "frame_count must be > 0");
     let start = frame_to_address(start_frame);
-    let end = frame_to_address(start_frame + frame_count - 1);
+    let end = frame_to_address(start_frame + frame_count);
     MemoryRange::new(start, end)
 }
 

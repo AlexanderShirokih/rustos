@@ -29,7 +29,7 @@ use memory::{
 use scheduler::{AddressSpace, ArchContext};
 
 use crate::{
-    HIGHER_HALF_BASE,
+    consts::HIGHER_HALF_BASE,
     memory::{
         address_space_factory::UserAarch64MemoryMapper,
         regs::{common::EL1, id_aa64mmfr0::IdAa64Mmfr0},

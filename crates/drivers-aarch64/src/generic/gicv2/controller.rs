@@ -1,6 +1,6 @@
 //! Аппаратный контроллер GICv2: Distributor и CPU Interface.
 
-use alloc::{boxed::Box, collections::BTreeMap};
+use alloc::{collections::BTreeMap, sync::Arc};
 
 use drivers_common::services::{
     interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority},
@@ -19,7 +19,7 @@ pub(super) struct Gicv2Controller {
     pub(super) distributor: MmioBound,
     pub(super) cpu_interface: MmioBound,
     pub(super) interrupt_lines: ITLinesNumber,
-    pub(super) handlers: BTreeMap<IrqNumber, Box<dyn IrqHandler>>,
+    pub(super) handlers: BTreeMap<IrqNumber, Arc<dyn IrqHandler>>,
 }
 
 // SAFETY: Gicv2Controller содержит только Mmio (который Sync).
@@ -167,16 +167,14 @@ impl Gicv2Controller {
         self.distributor.write_reg(target_cpu_reg, val);
     }
 
-    pub(super) fn dispatch_interrupt(&mut self) {
-        let Some(irq) = self.acknowledge() else {
-            return;
-        };
-
-        if let Some(handler) = self.handlers.get(&irq) {
-            handler.handle();
-        }
+    /// Подтверждает и деактивирует (EOI) один pending IRQ, возвращая его хендлер.
+    pub(super) fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>> {
+        let irq = self.acknowledge()?;
+        let handler = self.handlers.get(&irq).cloned();
 
         self.end_of_interrupt(irq);
+
+        handler
     }
 
     fn acknowledge(&mut self) -> Option<IrqNumber> {

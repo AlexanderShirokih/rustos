@@ -46,7 +46,8 @@ use syscall::SyscallOp;
 use test_harness_qemu_aarch64::payload::{B_LOOP, Instruction, Reg, movz_x, svc};
 
 use crate::{
-    HIGHER_HALF_BASE, memory::address_space_factory::UserAarch64MemoryMapper, sched::Aarch64Context,
+    consts::HIGHER_HALF_BASE, memory::address_space_factory::UserAarch64MemoryMapper,
+    sched::Aarch64Context,
 };
 
 /// Downcast'ит `&dyn MemoryMapper`, выданный `Aarch64AddressSpaceFactory`,

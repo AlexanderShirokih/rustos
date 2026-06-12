@@ -6,59 +6,52 @@
 //! `THREAD_TERMINATED`, гарантированно прочитал финальное значение.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicI32, Ordering};
 
-use super::wait::{SignalSource, SignalState};
+use super::{
+    termination::TerminationState,
+    wait::{SignalSource, SignalState},
+};
 
 /// Сигнал "поток завершён". Поднимается ровно один раз.
 pub const THREAD_TERMINATED: u32 = 1 << 0;
 
 pub struct ThreadObject {
-    signals: SignalState,
-    exit_code: AtomicI32,
+    inner: TerminationState,
 }
 
 impl ThreadObject {
     /// Создаёт новый `ThreadObject` без поднятых сигналов и с нулевым кодом.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            signals: SignalState::new(0),
-            exit_code: AtomicI32::new(0),
+            inner: TerminationState::new(),
         })
     }
 
     /// Идемпотентно публикует `code` и поднимает [`THREAD_TERMINATED`].
     /// Повторный вызов - no-op: первый победитель фиксирует exit_code.
     pub fn signal_terminated(&self, code: i32) {
-        // Release на exit_code публикует значение до подъёма сигнала;
-        // парный Acquire в `exit_code()` гарантирует видимость кода
-        // тому, кто увидел сигнал.
-        if self.signals.peek() & THREAD_TERMINATED != 0 {
-            return;
-        }
-        self.exit_code.store(code, Ordering::Release);
-        self.signals.signal(THREAD_TERMINATED, 0);
+        self.inner.signal_terminated(THREAD_TERMINATED, code);
     }
 
     /// Финальный exit-код. До подъёма [`THREAD_TERMINATED`] возвращает 0.
     pub fn exit_code(&self) -> i32 {
-        self.exit_code.load(Ordering::Acquire)
+        self.inner.exit_code()
     }
 
     /// Прямой доступ к [`SignalState`] для интеграции с `object_wait_one`.
     pub fn signals(&self) -> &SignalState {
-        &self.signals
+        self.inner.signals()
     }
 
     /// Текущий снимок сигналов (без блокировок).
     pub fn peek(&self) -> u32 {
-        self.signals.peek()
+        self.inner.peek()
     }
 }
 
 impl SignalSource for ThreadObject {
     fn signals(&self) -> &SignalState {
-        &self.signals
+        self.inner.signals()
     }
 }
 

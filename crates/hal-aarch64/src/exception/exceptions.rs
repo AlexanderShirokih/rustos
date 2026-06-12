@@ -130,16 +130,16 @@ impl ExceptionVectors {
         unsafe extern "C" {
             static exception_vectors: ExceptionVectors;
         }
-        // SAFETY: `exception_vectors` определён в ассемблерном `vectors.S` и линкер размещает
-        // его в .text вместе с ядром; символ существует в течение всей жизни ядра, так что
-        // ссылка `&'static` корректна.
+        // SAFETY: `exception_vectors` определён global_asm-блоком выше в этом модуле и линкер
+        // размещает его в .text вместе с ядром; символ существует в течение всей жизни ядра,
+        // так что ссылка `&'static` корректна.
         unsafe { &exception_vectors }
     }
 
     /// Записывает адрес таблицы в `VBAR_EL1`.
     pub fn install(&self) {
         // SAFETY: Прерывания замаскированы (DAIF). Адрес таблицы векторов
-        // выровнен на 2KB (требование ARMv8) - обеспечивается repr(align(2048)).
+        // выровнен на 2KB (требование ARMv8) - обеспечивается `.balign 2048` в global_asm-блоке.
         unsafe {
             write_sysreg!(vbar_el1, core::ptr::from_ref::<Self>(self) as usize);
             asm!("isb", options(nomem, nostack, preserves_flags));

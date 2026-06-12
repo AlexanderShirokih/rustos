@@ -127,7 +127,9 @@ pub enum IrqRegistrationError {
 }
 
 /// Контракт обработчика IRQ.
-pub trait IrqHandler: Send {
+///
+/// Реализация должна выдерживать реентрантный вызов с другого стека.
+pub trait IrqHandler: Send + Sync {
     /// Вызывается при срабатывании соответствующего IRQ.
     fn handle(&self);
 }

@@ -26,7 +26,7 @@ fn new_bitmap_reports_correct_range() {
 
     let range = bitmap.range();
     assert_eq!(range.start(), frame_to_address(5));
-    assert_eq!(range.end(), frame_to_address(5 + 32 - 1));
+    assert_eq!(range.end(), frame_to_address(5 + 32));
 }
 
 #[test]

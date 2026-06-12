@@ -31,7 +31,7 @@ use memory::{
 };
 use scheduler::{AddressSpace, ArchContext};
 
-use crate::{HIGHER_HALF_BASE, sched::Aarch64Context};
+use crate::{consts::HIGHER_HALF_BASE, sched::Aarch64Context};
 
 const PAGE_SIZE: usize = 4096;
 

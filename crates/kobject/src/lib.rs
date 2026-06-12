@@ -25,6 +25,7 @@ mod process;
 mod rights;
 mod runtime;
 mod spawn;
+mod termination;
 mod thread;
 mod wait;
 

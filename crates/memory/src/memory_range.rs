@@ -1,19 +1,19 @@
 use crate::{aligned::Address, frame::Frame, physical_address::PageAlignedAddress};
 
-/// Диапазон адресов с включёнными границами.
+/// Полуоткрытый диапазон адресов [start, end).
 #[derive(Copy, Clone, Debug)]
 pub struct MemoryRange<A: Address> {
     /// Начальный адрес (включительно).
     from_inclusive: A,
-    /// Конечный адрес (включительно).
-    to_inclusive: A,
+    /// Конечный адрес (исключительно).
+    to_exclusive: A,
 }
 
 impl<A: Address> MemoryRange<A> {
     pub const fn new(start: A, end: A) -> Self {
         Self {
             from_inclusive: start,
-            to_inclusive: end,
+            to_exclusive: end,
         }
     }
 
@@ -22,17 +22,17 @@ impl<A: Address> MemoryRange<A> {
     }
 
     pub const fn end(&self) -> A {
-        self.to_inclusive
+        self.to_exclusive
     }
 
     pub fn contains(&self, addr: A) -> bool {
-        self.from_inclusive <= addr && addr <= self.to_inclusive
+        self.from_inclusive <= addr && addr < self.to_exclusive
     }
 
     pub fn size(&self) -> usize {
         let start = self.start().as_usize();
         let end = self.end().as_usize();
-        end.saturating_sub(start).saturating_add(1)
+        end.saturating_sub(start)
     }
 }
 
@@ -41,7 +41,7 @@ impl MemoryRange<PageAlignedAddress> {
         let start_frame = Frame::from(self.start()).number();
         let end_frame = Frame::from(self.end()).number();
 
-        end_frame - start_frame + 1
+        end_frame - start_frame
     }
 
     pub fn iter(&self) -> MemoryRangeIter {
@@ -62,7 +62,7 @@ impl IntoIterator for &MemoryRange<PageAlignedAddress> {
 pub struct MemoryRangeIter {
     /// Текущий адрес итерации.
     current: PageAlignedAddress,
-    /// Конечный адрес (включительно).
+    /// Конечный адрес (исключительно).
     end: PageAlignedAddress,
 }
 
@@ -79,7 +79,7 @@ impl Iterator for MemoryRangeIter {
     type Item = PageAlignedAddress;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current > self.end {
+        if self.current >= self.end {
             return None;
         }
 

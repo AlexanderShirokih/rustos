@@ -4,9 +4,13 @@
 //! т.к. имеет not-returning контракт.
 
 use collections::LockCell;
-use kobject::{Handle, KObject, Rights, UserThreadEntry, install_handle, runtime};
+use kobject::{KObject, Rights, UserThreadEntry, runtime};
 
-use super::{bridge::parse_handle_id, error::SyscallError, process::exit_code_from_arg};
+use super::{
+    bridge::parse_handle_id,
+    error::SyscallError,
+    process::{commit_object_handle, exit_code_from_arg, install_object_handle},
+};
 
 pub fn sys_thread_create(
     process_handle: u64,
@@ -42,21 +46,18 @@ pub fn sys_thread_create(
             return Err(SyscallError::from(e));
         }
     };
-    let ko = KObject::Thread(thread);
-    let rights = Rights::defaults_for(&ko);
-    let handle_id =
-        table.with_lock(|tbl| tbl.commit_reserved(reservation, Handle::new(ko, rights)));
-    Ok(u64::from(handle_id.raw().get()))
+    Ok(commit_object_handle(
+        &table,
+        reservation,
+        KObject::Thread(thread),
+    ))
 }
 
 pub fn sys_thread_self() -> Result<u64, SyscallError> {
     let thread = runtime()
         .current_thread_object()
         .ok_or(SyscallError::WrongType)?;
-    let ko = KObject::Thread(thread);
-    let rights = Rights::defaults_for(&ko);
-    let handle_id = install_handle(Handle::new(ko, rights))?;
-    Ok(u64::from(handle_id.raw().get()))
+    install_object_handle(KObject::Thread(thread))
 }
 
 pub fn sys_thread_exit_code(handle: u64) -> Result<u64, SyscallError> {

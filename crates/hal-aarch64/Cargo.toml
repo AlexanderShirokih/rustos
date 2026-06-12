@@ -8,11 +8,17 @@ publish.workspace = true
 name = "kernel-aarch64"
 path = "src/start.rs"
 test = false
+# Боевой kernel-бинарь собирается только под bare-metal-таргет: boot-asm
+# содержит ELF-релокации (adrp/#:lo12:), которые host-ассемблер (Mach-O) не
+# принимает. Фича-гейт исключает bin из `cargo build --workspace` на хосте;
+# сборка под `aarch64-unknown-none` (xtask, clippy) включает фичу явно.
+required-features = ["kernel-bin"]
 
 [features]
 default = ["boot-linux-arm64"]
 boot-linux-arm64 = []
 boot-uefi = []
+kernel-bin = []
 kernel-tests = [
     "kernelspace/kernel-tests",
     "dep:test-harness-qemu",

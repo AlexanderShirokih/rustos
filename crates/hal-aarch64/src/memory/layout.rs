@@ -132,8 +132,9 @@ impl MemoryRegion<PageAlignedAddress> {
     }
 }
 
-impl<A: Address + Aligned> From<MemoryRegion<A>> for MemoryRange<A> {
-    fn from(region: MemoryRegion<A>) -> Self {
+impl From<MemoryRegion<PageAlignedAddress>> for MemoryRange<PageAlignedAddress> {
+    fn from(region: MemoryRegion<PageAlignedAddress>) -> Self {
+        // `MemoryRegion` и `MemoryRange` оба полуоткрытые [start, end).
         MemoryRange::new(region.start, region.end)
     }
 }

@@ -150,15 +150,9 @@ impl MemorySetup<Installed> {
             free_regions,
         } = self.state;
 
-        // Interval полуоткрытый [start, end), MemoryRange закрытый [start, end]:
-        // конец конвертируется на страницу назад, иначе каждый регион получает
-        // лишний фрейм за границей (первый из них - страница ядра с exception vectors).
-        let free_heap_regions_iter = free_regions.iter().map(|interval| {
-            MemoryRange::new(
-                interval.start,
-                PageAlignedAddress::aligned_down(interval.end.as_physical_address().sub(1)),
-            )
-        });
+        let free_heap_regions_iter = free_regions
+            .iter()
+            .map(|interval| MemoryRange::new(interval.start, interval.end));
 
         let frame_allocator = Box::leak(Box::new(PhysicalFrameAllocator::new(
             free_heap_regions_iter,

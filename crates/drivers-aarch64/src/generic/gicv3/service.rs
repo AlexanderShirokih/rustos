@@ -51,7 +51,7 @@ impl InterruptsService for GicV3InterruptsService {
 
         guard.set_priority(irq, priority);
         guard.set_affinity(irq, target);
-        guard.handlers.insert(irq, handler);
+        guard.handlers.insert(irq, Arc::from(handler));
         guard.enable(irq);
 
         let controller = self.controller.clone();
@@ -67,6 +67,10 @@ impl InterruptsService for GicV3InterruptsService {
     }
 
     fn dispatch_interrupt(&self) {
-        self.controller.lock().dispatch_interrupt();
+        let handler = self.controller.lock().dispatch_interrupt();
+
+        if let Some(handler) = handler {
+            handler.handle();
+        }
     }
 }

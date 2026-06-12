@@ -171,10 +171,12 @@ fn protocol_feature(boot_format: &str) -> &'static str {
 }
 
 fn build_features(ctx: &BuildContext) -> String {
+    // `kernel-bin` обязателен: bin гейтирован этой фичей (required-features),
+    // чтобы не ломать host-сборку workspace.
     let protocol = protocol_feature(ctx.spec.boot.format.as_str());
     match ctx.features.as_deref() {
-        Some(extra) if !extra.is_empty() => format!("{protocol},{extra}"),
-        _ => protocol.to_string(),
+        Some(extra) if !extra.is_empty() => format!("{protocol},{extra},kernel-bin"),
+        _ => format!("{protocol},kernel-bin"),
     }
 }
 

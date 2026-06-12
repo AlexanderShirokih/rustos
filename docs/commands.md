@@ -6,7 +6,7 @@
 |------------------------|---------------------------------------------------------------------------------------------------|
 | Host-тесты             | `cargo test --workspace`                                                                          |
 | Host-clippy            | `cargo clippy --workspace`                                                                        |
-| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude tools-userland --target aarch64-unknown-none` |
+| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude tools-userland --features kernel-bin --target aarch64-unknown-none` |
 | Форматирование         | `cargo fmt --all --check`                                                                         |
 | Сборка userland        | `cargo xtask build-userland`                                                                      |
 | Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                |
@@ -19,6 +19,11 @@
 `target/build/userland.img` из `/userland/manifest.toml`, затем выбирает boot
 feature для `hal-aarch64`, собирает kernel crate под `aarch64-unknown-none` и
 упаковывает результат.
+
+Боевой kernel-бинарь `kernel-aarch64` гейтирован фичей `kernel-bin`
+(`required-features`): его boot-asm содержит ELF-релокации, которые host-ассемблер
+не принимает. Поэтому `cargo build --workspace` на хосте пропускает bin (сборка
+зелёная), а xtask и AArch64-clippy включают `kernel-bin` явно.
 
 ```bash
 cargo xtask build devices/spec/qemu-aarch64.yaml

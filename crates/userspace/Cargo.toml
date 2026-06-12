@@ -9,5 +9,8 @@ memory = { workspace = true }
 scheduler = { workspace = true }
 userland-abi = { workspace = true }
 
+[dev-dependencies]
+userland-abi = { workspace = true, features = ["alloc"] }
+
 [lints]
 workspace = true

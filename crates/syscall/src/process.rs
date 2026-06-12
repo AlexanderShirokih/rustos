@@ -3,13 +3,14 @@
 //! Парсят аргументы, пробрасывают в `kobject` API и регистрируют новые
 //! handle'ы в текущей handle-table вызывающего процесса.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 
-use collections::LockCell;
+use collections::{LockCell, MutexCell};
 use kobject::{
-    Handle, HandleId, KObject, LoadImageError, Rights, StartProcessError, UserImageInstall,
-    UserSegmentInstall, UserStartSpec, UserThreadEntry, install_handle, runtime,
+    Handle, HandleId, HandleReservation, HandleTable, KObject, LoadImageError, Rights,
+    StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec, UserThreadEntry,
+    install_handle, runtime,
 };
 use memory::{
     UserVmContext,
@@ -64,21 +65,18 @@ pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallErr
             return Err(SyscallError::from(e));
         }
     };
-    let ko = KObject::Process(process);
-    let rights = Rights::defaults_for(&ko);
-    let handle_id =
-        table.with_lock(|tbl| tbl.commit_reserved(reservation, Handle::new(ko, rights)));
-    Ok(u64::from(handle_id.raw().get()))
+    Ok(commit_object_handle(
+        &table,
+        reservation,
+        KObject::Process(process),
+    ))
 }
 
 pub fn sys_process_self() -> Result<u64, SyscallError> {
     let process = runtime()
         .current_process_object()
         .ok_or(SyscallError::WrongType)?;
-    let ko = KObject::Process(process);
-    let rights = Rights::defaults_for(&ko);
-    let handle_id = install_handle(Handle::new(ko, rights))?;
-    Ok(u64::from(handle_id.raw().get()))
+    install_object_handle(KObject::Process(process))
 }
 
 pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
@@ -293,11 +291,30 @@ pub fn sys_process_start(
             .expect("drain freed handles_count >= 1 slots; reserve_slot cannot fail"),
     };
 
-    let ko = KObject::Thread(thread);
+    Ok(commit_object_handle(
+        &loader_table,
+        reservation,
+        KObject::Thread(thread),
+    ))
+}
+
+/// Регистрирует `ko` с дефолтными правами; возвращает сырой `HandleId`.
+pub(super) fn install_object_handle(ko: KObject) -> Result<u64, SyscallError> {
+    let rights = Rights::defaults_for(&ko);
+    let handle_id = install_handle(Handle::new(ko, rights))?;
+    Ok(u64::from(handle_id.raw().get()))
+}
+
+/// Коммитит `ko` в зарезервированный слот `table`; возвращает `HandleId`.
+pub(super) fn commit_object_handle(
+    table: &Arc<MutexCell<HandleTable>>,
+    reservation: HandleReservation,
+    ko: KObject,
+) -> u64 {
     let rights = Rights::defaults_for(&ko);
     let handle_id =
-        loader_table.with_lock(|tbl| tbl.commit_reserved(reservation, Handle::new(ko, rights)));
-    Ok(u64::from(handle_id.raw().get()))
+        table.with_lock(|tbl| tbl.commit_reserved(reservation, Handle::new(ko, rights)));
+    u64::from(handle_id.raw().get())
 }
 
 fn handle_id_from_raw(raw: u32) -> Result<HandleId, SyscallError> {

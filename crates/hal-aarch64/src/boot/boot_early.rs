@@ -7,7 +7,7 @@
 use core::{arch::naked_asm, hint::spin_loop};
 
 use fdt::devicetree::DeviceTree;
-use hal_common::boot::{BootInfo, HwDescription};
+use hal_common::boot::{BootInfo, BootPayloadRange, HwDescription};
 use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 
 use super::boot_primary::primary_main;
@@ -58,7 +58,9 @@ pub(super) fn boot_main(boot_info: &BootInfo) -> Result<(), ()> {
     let higher_root_pa = roots.higher_pa.as_usize();
     let frame_allocator_phys = core::ptr::from_ref(frame_allocator) as usize;
     let initrd_start = boot_info.userland_blob.map_or(0, |r| r.start().as_usize());
-    let initrd_size = boot_info.userland_blob.map_or(0, |r| r.size_bytes());
+    let initrd_size = boot_info
+        .userland_blob
+        .map_or(0, BootPayloadRange::size_bytes);
 
     // Прыжок в higher half - управление передаётся в primary_main и не возвращается
     // SAFETY: MMU включён, TTBR1 содержит корректный маппинг higher-half.
@@ -69,7 +71,7 @@ pub(super) fn boot_main(boot_info: &BootInfo) -> Result<(), ()> {
             frame_allocator_phys,
             initrd_start,
             initrd_size,
-        )
+        );
     };
 
     loop {
