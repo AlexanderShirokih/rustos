@@ -61,9 +61,9 @@ impl CpuMask {
     /// CPU 3.
     pub const CPU3: Self = Self(0b1000);
 
-    /// Создаёт маску из сырого значения.
+    /// Создаёт маску с единственным CPU по его индексу.
     pub fn cpu(cpu_index: u8) -> Option<Self> {
-        cpu_index.checked_add(1).map(Self)
+        1u8.checked_shl(u32::from(cpu_index)).map(Self)
     }
 
     /// Возвращает сырое значение маски.

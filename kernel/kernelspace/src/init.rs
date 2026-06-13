@@ -1,7 +1,7 @@
-//! Production-init: запускает rootkeeper-цепочку userland.
+//! Production-init: запускает bootstrap-цепочку userland.
 //!
 //! Передаётся в [`kmain`](crate::kmain::kmain) как init-таск; завершение
-//! rootkeeper-процесса выключает машину с его exit code.
+//! bootstrap-процесса выключает машину с его exit code.
 
 extern crate alloc;
 
@@ -12,7 +12,7 @@ use kobject::{Handle, KObject, PROCESS_TERMINATED, Rights, install_handle, objec
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SpawnConfig};
 
 use crate::{
-    bootstrap::{run_bootstrap_log, spawn_rootkeeper},
+    bootstrap::{run_bootstrap_log, spawn_process},
     kernel_context::KernelContext,
     power,
     scheduler_bootstrap::KernelTimerSource,
@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Спавнит init-процесс с приоритетом `highest`. Init-процесс ведёт
-/// rootkeeper-цепочку userland и выключает машину по её завершении.
+/// bootstrap-цепочку userland и выключает машину по её завершении.
 pub fn spawn_init_process<A>(
     scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
     kernel: &mut KernelContext,
@@ -38,31 +38,29 @@ pub fn spawn_init_process<A>(
     scheduler
         .spawn(
             SpawnConfig::new("init").priority(Priority::highest()),
-            move || start_rootkeeper_chain(launcher.as_ref(), blob, user_va_end),
+            move || start_bootstrap_chain(launcher.as_ref(), blob, user_va_end),
         )
         .expect("init process spawn must succeed");
 }
 
-/// Запускает rootkeeper, дренирует его bootstrap-канал и по завершении
-/// процесса выключает машину с его exit code; ошибка пути = выключение с кодом 1.
-fn start_rootkeeper_chain(
+fn start_bootstrap_chain(
     launcher: &dyn UserProcessLauncher,
     blob: Option<&'static [u8]>,
     user_va_end: usize,
 ) -> ! {
     let Some(blob) = blob else {
-        warn!("userland blob missing; rootkeeper not started");
+        warn!("userland blob missing; bootstrap process not started");
         power::system_off(1)
     };
 
-    let launch = match spawn_rootkeeper(launcher, blob, user_va_end) {
+    let launch = match spawn_process(launcher, blob, user_va_end) {
         Ok(launch) => launch,
         Err(e) => {
-            warn!("rootkeeper spawn failed: {:?}", e);
+            warn!("bootstrap process spawn failed: {:?}", e);
             power::system_off(1)
         }
     };
-    info!("rootkeeper spawned: {:?}", launch.info);
+    info!("bootstrap process spawned: {:?}", launch.info);
 
     run_bootstrap_log(&launch.channel);
 
@@ -78,11 +76,11 @@ fn start_rootkeeper_chain(
         }
     };
     if let Err(e) = object_wait_one(process_handle, PROCESS_TERMINATED, None) {
-        warn!("init: wait for rootkeeper exit failed: {:?}", e);
+        warn!("init: wait for bootstrap process exit failed: {:?}", e);
         power::system_off(1)
     }
 
     let exit_code = process_object.exit_code();
-    info!("rootkeeper exited with code {}", exit_code);
+    info!("bootstrap process exited with code {}", exit_code);
     power::system_off(exit_code)
 }

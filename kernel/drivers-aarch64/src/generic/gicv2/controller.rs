@@ -149,6 +149,9 @@ impl Gicv2Controller {
         self.distributor.write_reg(priority_reg, val);
     }
 
+    /// Назначает целевые CPU для SPI через GICD_ITARGETSR.
+    ///
+    /// Поле прерывания - 8-битная маска, бит N = CPU interface N.
     pub(super) fn set_target_cpu(&self, irq: IrqNumber, target: CpuMask) {
         if !matches!(IrqType::from_irq_number(irq), IrqType::Spi) {
             return;

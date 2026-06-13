@@ -65,6 +65,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "block-buffer"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
+name = "bootstrap"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "ipc-test",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -124,12 +141,47 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "cpufeatures"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "crypto-common"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
+name = "digest"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
+dependencies = [
+ "block-buffer",
+ "const-oid",
+ "crypto-common",
 ]
 
 [[package]]
@@ -192,6 +244,7 @@ dependencies = [
 name = "hal-aarch64"
 version = "0.1.0"
 dependencies = [
+ "bootstrap",
  "collections",
  "drivers-aarch64",
  "drivers-common",
@@ -201,6 +254,7 @@ dependencies = [
  "hal-aarch64-paging",
  "hal-common",
  "io",
+ "ipc",
  "kernelspace",
  "klog",
  "kobject",
@@ -211,8 +265,8 @@ dependencies = [
  "serde_yaml",
  "spin",
  "syscall",
+ "syscall-kernel",
  "test-harness-qemu",
- "userland-abi",
 ]
 
 [[package]]
@@ -250,6 +304,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hybrid-array"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9155a582abd142abc056962c29e3ce5ff2ad5469f4246b537ed42c5deba857da"
+dependencies = [
+ "typenum",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -264,6 +327,37 @@ name = "io"
 version = "0.1.0"
 dependencies = [
  "spin",
+]
+
+[[package]]
+name = "ipc"
+version = "0.1.0"
+dependencies = [
+ "ipc-macros",
+ "ipc-schema",
+ "ipc-test",
+]
+
+[[package]]
+name = "ipc-macros"
+version = "0.1.0"
+dependencies = [
+ "ipc-schema",
+ "proc-macro2",
+ "quote",
+ "sha2",
+ "syn",
+]
+
+[[package]]
+name = "ipc-schema"
+version = "0.1.0"
+
+[[package]]
+name = "ipc-test"
+version = "0.1.0"
+dependencies = [
+ "ipc",
 ]
 
 [[package]]
@@ -285,15 +379,17 @@ dependencies = [
  "collections",
  "drivers-common",
  "io",
+ "ipc",
  "klog",
  "kobject",
  "memory",
  "process",
  "scheduler",
  "spin",
- "syscall",
+ "syscall-kernel",
  "test-harness-qemu",
- "userland-abi",
+ "userland",
+ "userland-image",
 ]
 
 [[package]]
@@ -311,7 +407,14 @@ dependencies = [
  "collections",
  "memory",
  "spin",
+ "syscall",
 ]
+
+[[package]]
+name = "libc"
+version = "0.2.186"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "lock_api"
@@ -349,9 +452,9 @@ dependencies = [
 
 [[package]]
 name = "object"
-version = "0.37.3"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
+checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
 dependencies = [
  "flate2",
  "memchr",
@@ -378,8 +481,7 @@ name = "process"
 version = "0.1.0"
 dependencies = [
  "memory",
- "scheduler",
- "userland-abi",
+ "userland",
 ]
 
 [[package]]
@@ -395,8 +497,18 @@ dependencies = [
 name = "rootkeeper"
 version = "0.1.0"
 dependencies = [
- "userland-abi",
- "userland-rt",
+ "bootstrap",
+ "ipc",
+ "runtime",
+ "syscall",
+]
+
+[[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
 ]
 
 [[package]]
@@ -496,6 +608,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -503,9 +626,9 @@ checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
 name = "spin"
-version = "0.10.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
+checksum = "1527984ca054dfca79333baec451042863f485fbee01b7bf6d911de915cac865"
 dependencies = [
  "lock_api",
 ]
@@ -530,12 +653,16 @@ dependencies = [
 [[package]]
 name = "syscall"
 version = "0.1.0"
+
+[[package]]
+name = "syscall-kernel"
+version = "0.1.0"
 dependencies = [
  "collections",
  "kobject",
  "memory",
  "spin",
- "userland-abi",
+ "syscall",
 ]
 
 [[package]]
@@ -560,18 +687,20 @@ dependencies = [
 name = "testrunner"
 version = "0.1.0"
 dependencies = [
+ "bootstrap",
  "io",
+ "ipc",
+ "runtime",
  "spin",
+ "syscall",
  "test-harness-qemu",
- "userland-abi",
- "userland-rt",
 ]
 
 [[package]]
 name = "toml"
-version = "0.9.12+spec-1.1.0"
+version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
+checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -579,14 +708,14 @@ dependencies = [
  "toml_datetime",
  "toml_parser",
  "toml_writer",
- "winnow 0.7.15",
+ "winnow",
 ]
 
 [[package]]
 name = "toml_datetime"
-version = "0.7.5+spec-1.1.0"
+version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
+checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
 dependencies = [
  "serde_core",
 ]
@@ -597,7 +726,7 @@ version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
 dependencies = [
- "winnow 1.0.2",
+ "winnow",
 ]
 
 [[package]]
@@ -613,6 +742,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
+name = "typenum"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -625,11 +760,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
-name = "userland-abi"
+name = "userland"
 version = "0.1.0"
 
 [[package]]
-name = "userland-img"
+name = "userland-image"
+version = "0.1.0"
+dependencies = [
+ "userland",
+]
+
+[[package]]
+name = "userland-image-tool"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -637,14 +779,8 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
- "userland-abi",
-]
-
-[[package]]
-name = "userland-rt"
-version = "0.1.0"
-dependencies = [
- "userland-abi",
+ "userland",
+ "userland-image",
 ]
 
 [[package]]
@@ -674,12 +810,6 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "0.7.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
-
-[[package]]
-name = "winnow"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
@@ -694,7 +824,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "userland-img",
+ "userland-image-tool",
 ]
 
 [[package]]

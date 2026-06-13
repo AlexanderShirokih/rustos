@@ -3,7 +3,7 @@
 //! `HandleClose` закрывает их без ошибок.
 
 use kernel_tests::kernel_test;
-use userland_rt::{handle_close, process_self, thread_self};
+use runtime::{handle_close, process_self, thread_self};
 
 #[kernel_test]
 fn process_and_thread_self_handles() {

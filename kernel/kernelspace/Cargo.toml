@@ -12,15 +12,18 @@ kernel-tests = [
 
 [dependencies]
 spin = { workspace = true }
+bootstrap = { workspace = true }
 collections = { workspace = true }
 drivers-common = { workspace = true }
 io = { workspace = true, features = ["alloc"] }
+ipc = { workspace = true }
 kobject = { workspace = true }
 memory = { workspace = true }
 klog = { workspace = true }
 scheduler = { workspace = true }
-syscall = { workspace = true }
-userland-abi = { workspace = true }
+syscall-kernel = { workspace = true }
+userland = { workspace = true }
+userland-image = { workspace = true }
 process = { workspace = true }
 test-harness-qemu = { workspace = true, optional = true }
 

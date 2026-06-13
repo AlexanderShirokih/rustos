@@ -16,8 +16,10 @@ test = false
 bench = false
 
 [dependencies]
-userland-abi = { workspace = true }
-userland-rt = { workspace = true }
+bootstrap = { workspace = true }
+ipc = { workspace = true }
+syscall = { workspace = true }
+runtime = { workspace = true }
 
 [lints]
 workspace = true

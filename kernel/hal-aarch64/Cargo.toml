@@ -32,13 +32,15 @@ hal-common = { workspace = true }
 drivers-common-aarch64 = { workspace = true }
 drivers-common = { workspace = true }
 drivers-aarch64 = { workspace = true }
+bootstrap = { workspace = true }
+ipc = { workspace = true }
 kernelspace = { workspace = true }
 kobject = { workspace = true }
 scheduler = { workspace = true }
 syscall = { workspace = true }
+syscall-kernel = { workspace = true }
 memory = { workspace = true }
 process = { workspace = true }
-userland-abi = { workspace = true }
 collections = { workspace = true }
 fdt = { workspace = true }
 io = { workspace = true, features = ["alloc"] }

@@ -1,18 +1,19 @@
 //! Платформенная проверка политики Origin: kernel-side `SVC` отвергается
 //! диспатчером с `KernelOriginated`.
 //!
-//! Полный путь "vector -> exception_entry -> syscall::dispatch -> handler ->
+//! Полный путь "vector -> exception_entry -> syscall_kernel::dispatch -> handler ->
 //! kobject" из user-контекста покрыт тестами EL0-входа в
 //! [`super::userspace_entry`] и `super::userspace_via_scheduler`;
 //! тонкие случаи диспатчера (`BadSyscall`, `InvalidArgument`, маски сигналов)
-//! - host-юнит-тестами в `syscall::bridge`. Здесь нужен только один
+//! - host-юнит-тестами в `syscall_kernel::bridge`. Здесь нужен только один
 //! интеграционный тест на реальном trap-vector'е, доказывающий, что
 //! Origin-фильтр действительно стоит раньше парсинга op.
 
 use core::arch::asm;
 
 use kernel_tests::kernel_test;
-use syscall::{SyscallError, SyscallOp};
+use syscall::SyscallOp;
+use syscall_kernel::SyscallError;
 
 /// `svc` из EL1 возвращает `-KernelOriginated` независимо от номера
 /// операции и аргументов: trap зарезервирован за user->kernel-переходом.

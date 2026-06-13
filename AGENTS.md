@@ -2,7 +2,7 @@
 
 Машиночитаемый индекс документации проекта RustOS Mobile.
 
-> Детальная документация расположена в [`docs/`](docs/). Этот файл служит точкой входа и кратким справочником для автоматизированных агентов и сопровождающих проекта.
+> Детальная документация расположена в [`docs/`](docs). Этот файл служит точкой входа и кратким справочником для автоматизированных агентов и сопровождающих проекта.
 
 **Сборка проекта:** перед сборкой ядра, настройкой toolchain и запуском через `cargo xtask` необходимо прочитать **[`BUILD.md`](BUILD.md)** — там полные инструкции по требованиям, сборке и запуску.
 
@@ -16,15 +16,15 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 
 ### Команды
 
-| Действие               | Команда                                                                                           |
-|------------------------|---------------------------------------------------------------------------------------------------|
-| Тесты (host)           | `cargo test --workspace`                                                                          |
-| Линтинг (host)         | `cargo clippy --workspace`                                                                        |
-| Линтинг (aarch64)      | `cargo clippy --workspace --exclude xtask --exclude userland-img --target aarch64-unknown-none` |
-| Форматирование         | `cargo fmt --all --check`                                                                         |
-| Сборка (QEMU)          | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                |
-| Запуск (QEMU)          | `cargo xtask build devices/spec/qemu-aarch64.yaml --run`                                          |
-| QEMU integration tests | `cargo xtask qemu-test --timeout 20`                                                              |
+| Действие               | Команда                                                                                                |
+|------------------------|--------------------------------------------------------------------------------------------------------|
+| Тесты (host)           | `cargo test --workspace`                                                                               |
+| Линтинг (host)         | `cargo clippy --workspace`                                                                             |
+| Линтинг (aarch64)      | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --target aarch64-unknown-none` |
+| Форматирование         | `cargo fmt --all --check`                                                                              |
+| Сборка (QEMU)          | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                     |
+| Запуск (QEMU)          | `cargo xtask build devices/spec/qemu-aarch64.yaml --run`                                               |
+| QEMU integration tests | `cargo xtask qemu-test --timeout 20`                                                                   |
 
 -> Подробнее: [`docs/commands.md`](docs/commands.md)
 
@@ -49,12 +49,12 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 
 ## Документация
 
-| Документ | Описание |
-|---|---|
-| [`BUILD.md`](BUILD.md) | Сборка: требования, `cargo xtask`, артефакты, запуск и отладка |
-| [`docs/overview.md`](docs/overview.md) | Обзор проекта и основные слои |
-| [`docs/commands.md`](docs/commands.md) | Сборка, тестирование, линтинг |
-| [`docs/environment.md`](docs/environment.md) | Настройка окружения и зависимости |
-| [`docs/architecture.md`](docs/architecture.md) | Принципы архитектуры: слои, newtype, compile-time гарантии |
-| [`docs/code-style.md`](docs/code-style.md) | Стиль кода: структура файлов, комментарии, `no_std` |
-| [`docs/syscalls.md`](docs/syscalls.md) | ABI и полный реестр системных вызовов |
+| Документ                                       | Описание                                                       |
+|------------------------------------------------|----------------------------------------------------------------|
+| [`BUILD.md`](BUILD.md)                         | Сборка: требования, `cargo xtask`, артефакты, запуск и отладка |
+| [`docs/overview.md`](docs/overview.md)         | Обзор проекта и основные слои                                  |
+| [`docs/commands.md`](docs/commands.md)         | Сборка, тестирование, линтинг                                  |
+| [`docs/environment.md`](docs/environment.md)   | Настройка окружения и зависимости                              |
+| [`docs/architecture.md`](docs/architecture.md) | Принципы архитектуры: слои, newtype, compile-time гарантии     |
+| [`docs/code-style.md`](docs/code-style.md)     | Стиль кода: структура файлов, комментарии, `no_std`            |
+| [`docs/syscalls.md`](docs/syscalls.md)         | ABI и полный реестр системных вызовов                          |

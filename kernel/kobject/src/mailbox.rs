@@ -46,7 +46,7 @@ pub const MAILBOX_PAYLOAD_SIZE: usize = 16;
 
 /// Размер сериализованного пакета (байт). Часть syscall ABI;
 /// используется при копировании в/из user-памяти.
-pub const MAILBOX_PACKET_SIZE: usize = 32;
+pub use syscall::MAILBOX_PACKET_SIZE;
 
 /// Тип пакета, маршрутизируется получателем.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

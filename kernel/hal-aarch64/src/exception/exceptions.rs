@@ -167,7 +167,7 @@ extern "C" fn exception_handler(frame: &mut ExceptionFrame, kind: ExceptionKind)
 /// Обработчик синхронных исключений
 fn sync_handler(frame: &mut ExceptionFrame) {
     if frame.esr.exception_class() == ExceptionClass::Svc {
-        syscall::dispatch(frame);
+        syscall_kernel::dispatch(frame);
         return;
     }
 

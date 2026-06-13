@@ -10,13 +10,15 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSegment, SegmentFlags, elf};
 use serde::Deserialize;
-use userland_abi::{
-    ImageEntryInput, ImageSegmentInput, USERLAND_IMAGE_ENTRY_NAME_CAPACITY,
-    USERLAND_IMAGE_PAGE_SIZE, USERLAND_IMAGE_VERSION, UserlandImage, build_userland_image,
+#[cfg(test)]
+use userland::EntryView;
+use userland::{
+    Entry, Segment, SegmentPermissions, USERLAND_ENTRY_NAME_CAPACITY, USERLAND_PAGE_SIZE,
 };
+use userland_image::{USERLAND_IMAGE_VERSION, decode, encode};
 
 const USERLAND_MANIFEST_VERSION: u16 = USERLAND_IMAGE_VERSION;
-const USERLAND_STACK_ALIGN: u64 = USERLAND_IMAGE_PAGE_SIZE;
+const USERLAND_STACK_ALIGN: u64 = USERLAND_PAGE_SIZE;
 
 /// Композиция образа: версия и список включаемых пакетов workspace.
 #[derive(Debug, Deserialize)]
@@ -83,7 +85,7 @@ struct BuiltSegment {
     bytes: Vec<u8>,
     va_base: u64,
     mem_size: u64,
-    flags: u32,
+    permissions: SegmentPermissions,
 }
 
 fn default_manifest_version() -> u16 {
@@ -254,10 +256,10 @@ fn resolve_program(program: &ImageProgram, meta: &UserlandMetadata) -> Result<Re
 
 fn validate_program(program: &ResolvedProgram) -> Result<()> {
     ensure!(
-        !program.name.is_empty() && program.name.len() <= USERLAND_IMAGE_ENTRY_NAME_CAPACITY,
+        !program.name.is_empty() && program.name.len() <= USERLAND_ENTRY_NAME_CAPACITY,
         "userland entry '{}' name must be 1..={} bytes",
         program.name,
-        USERLAND_IMAGE_ENTRY_NAME_CAPACITY
+        USERLAND_ENTRY_NAME_CAPACITY
     );
     ensure!(
         program.name.is_ascii(),
@@ -352,15 +354,6 @@ fn read_and_extract_entry(
     validate_file(&file, program)?;
     let entry_va = file.entry();
     let segments = extract_segments(&file, program)?;
-    ensure!(
-        segments.iter().any(|segment| {
-            segment.flags == 2
-                && entry_va >= segment.va_base
-                && entry_va < segment.va_base.saturating_add(segment.mem_size)
-        }),
-        "userland entry '{}' entry point is outside executable PT_LOAD",
-        program.name
-    );
 
     Ok(BuiltEntry {
         image_order,
@@ -409,12 +402,12 @@ fn extract_segments(
         let bytes = segment
             .data()
             .with_context(|| format!("Failed to read PT_LOAD bytes for '{}'", program.name))?;
-        let flags = map_segment_flags(segment.flags(), program)?;
+        let permissions = map_segment_permissions(segment.flags(), program)?;
         segments.push(BuiltSegment {
             bytes: bytes.to_vec(),
             va_base: segment.address(),
             mem_size: segment.size(),
-            flags,
+            permissions,
         });
     }
 
@@ -427,7 +420,10 @@ fn extract_segments(
     Ok(segments)
 }
 
-fn map_segment_flags(flags: SegmentFlags, program: &ResolvedProgram) -> Result<u32> {
+fn map_segment_permissions(
+    flags: SegmentFlags,
+    program: &ResolvedProgram,
+) -> Result<SegmentPermissions> {
     let SegmentFlags::Elf { p_flags } = flags else {
         bail!(
             "userland entry '{}' must expose ELF PT_LOAD segment flags",
@@ -440,9 +436,9 @@ fn map_segment_flags(flags: SegmentFlags, program: &ResolvedProgram) -> Result<u
     let executable = (p_flags & elf::PF_X) != 0;
 
     match (readable, writable, executable) {
-        (true, true, false) => Ok(0),
-        (true, false, false) => Ok(1),
-        (true, false, true) => Ok(2),
+        (true, true, false) => Ok(SegmentPermissions::ReadWrite),
+        (true, false, false) => Ok(SegmentPermissions::ReadOnly),
+        (true, false, true) => Ok(SegmentPermissions::ReadExecute),
         _ => bail!(
             "userland entry '{}' has unsupported PT_LOAD flags {p_flags:#x}",
             program.name
@@ -455,26 +451,25 @@ fn assemble_userland_image(entries: &[BuiltEntry]) -> Result<Vec<u8>> {
 
     let ordered = order_entries(entries);
 
-    // Сериализацию делает writer userland-abi; здесь - только сборка входа.
-    let segments: Vec<Vec<ImageSegmentInput<'_>>> = ordered
+    let segments: Vec<Vec<Segment<'_>>> = ordered
         .iter()
         .map(|entry| {
             entry
                 .segments
                 .iter()
-                .map(|segment| ImageSegmentInput {
+                .map(|segment| Segment {
                     va_base: segment.va_base,
                     mem_size: segment.mem_size,
-                    flags: segment.flags,
+                    permissions: segment.permissions,
                     bytes: &segment.bytes,
                 })
                 .collect()
         })
         .collect();
-    let inputs: Vec<ImageEntryInput<'_>> = ordered
+    let inputs: Vec<Entry<'_>> = ordered
         .iter()
         .zip(&segments)
-        .map(|(entry, segments)| ImageEntryInput {
+        .map(|(entry, segments)| Entry {
             name: &entry.program.name,
             entry_va: entry.entry_va,
             stack_size: entry.program.stack_size,
@@ -482,11 +477,10 @@ fn assemble_userland_image(entries: &[BuiltEntry]) -> Result<Vec<u8>> {
         })
         .collect();
 
-    let image = build_userland_image(&inputs)
-        .map_err(|err| anyhow!("failed to serialize userland image: {err:?}"))?;
+    let image =
+        encode(&inputs).map_err(|err| anyhow!("failed to serialize userland image: {err:?}"))?;
 
-    UserlandImage::parse(&image)
-        .map_err(|err| anyhow!("assembled userland image is invalid: {err:?}"))?;
+    decode(&image).map_err(|err| anyhow!("assembled userland image is invalid: {err:?}"))?;
     Ok(image)
 }
 
@@ -589,12 +583,17 @@ mod tests {
         }
     }
 
-    fn built_segment(bytes: &[u8], va_base: u64, mem_size: u64, flags: u32) -> BuiltSegment {
+    fn built_segment(
+        bytes: &[u8],
+        va_base: u64,
+        mem_size: u64,
+        permissions: SegmentPermissions,
+    ) -> BuiltSegment {
         BuiltSegment {
             bytes: bytes.to_vec(),
             va_base,
             mem_size,
-            flags,
+            permissions,
         }
     }
 
@@ -817,7 +816,12 @@ mod tests {
             "rootkeeper",
             true,
             0x4000_0000,
-            &[built_segment(&[], 0x4000_0000, 0x1000, 2)],
+            &[built_segment(
+                &[],
+                0x4000_0000,
+                0x1000,
+                SegmentPermissions::ReadExecute,
+            )],
         )];
         let err = assemble_userland_image(&entries).expect_err("empty bootstrap must fail");
         assert_eq!(
@@ -834,29 +838,44 @@ mod tests {
                 "shell",
                 false,
                 0x5000_0000,
-                &[built_segment(b"ELF", 0x5000_0000, 0x1000, 2)],
+                &[built_segment(
+                    b"ELF",
+                    0x5000_0000,
+                    0x1000,
+                    SegmentPermissions::ReadExecute,
+                )],
             ),
             built_entry(
                 0,
                 "rootkeeper",
                 true,
                 0x4000_0000,
-                &[built_segment(b"BOOT", 0x4000_0000, 0x1000, 2)],
+                &[built_segment(
+                    b"BOOT",
+                    0x4000_0000,
+                    0x1000,
+                    SegmentPermissions::ReadExecute,
+                )],
             ),
             built_entry(
                 1,
                 "logger",
                 false,
                 0x4800_0000,
-                &[built_segment(b"LOG", 0x4800_0000, 0x1000, 2)],
+                &[built_segment(
+                    b"LOG",
+                    0x4800_0000,
+                    0x1000,
+                    SegmentPermissions::ReadExecute,
+                )],
             ),
         ];
 
         let image_bytes = assemble_userland_image(&entries).expect("assemble image");
-        let image = UserlandImage::parse(&image_bytes).expect("assembled image must parse");
-        assert_eq!(image.bootstrap_entry().name_bytes(), b"rootkeeper");
-        assert_eq!(image.entry(1).expect("entry 1").name_bytes(), b"logger");
-        assert_eq!(image.entry(2).expect("entry 2").name_bytes(), b"shell");
+        let image = decode(&image_bytes).expect("assembled image must parse");
+        assert_eq!(image.bootstrap_entry().name(), "rootkeeper");
+        assert_eq!(image.entry(1).expect("entry 1").name(), "logger");
+        assert_eq!(image.entry(2).expect("entry 2").name(), "shell");
     }
 
     #[test]
@@ -867,7 +886,12 @@ mod tests {
                 "shell",
                 false,
                 0x5000_0000,
-                &[built_segment(b"ELF", 0x5000_0000, 0x1000, 2)],
+                &[built_segment(
+                    b"ELF",
+                    0x5000_0000,
+                    0x1000,
+                    SegmentPermissions::ReadExecute,
+                )],
             ),
             built_entry(
                 0,
@@ -875,8 +899,13 @@ mod tests {
                 true,
                 0x4000_0000,
                 &[
-                    built_segment(b"CODE", 0x4000_0000, 0x1000, 2),
-                    built_segment(b"RW", 0x4000_1000, 0x1000, 0),
+                    built_segment(
+                        b"CODE",
+                        0x4000_0000,
+                        0x1000,
+                        SegmentPermissions::ReadExecute,
+                    ),
+                    built_segment(b"RW", 0x4000_1000, 0x1000, SegmentPermissions::ReadWrite),
                 ],
             ),
         ];
@@ -895,8 +924,13 @@ mod tests {
                 true,
                 0x4000_0000,
                 &[
-                    built_segment(b"CODE", 0x4000_0000, 0x1000, 2),
-                    built_segment(b"RW", 0x4000_1000, 0x1000, 0),
+                    built_segment(
+                        b"CODE",
+                        0x4000_0000,
+                        0x1000,
+                        SegmentPermissions::ReadExecute,
+                    ),
+                    built_segment(b"RW", 0x4000_1000, 0x1000, SegmentPermissions::ReadWrite),
                 ],
             ),
             built_entry(
@@ -904,39 +938,20 @@ mod tests {
                 "shell",
                 false,
                 0x5000_0000,
-                &[built_segment(b"ELF", 0x5000_0000, 0x1000, 2)],
+                &[built_segment(
+                    b"ELF",
+                    0x5000_0000,
+                    0x1000,
+                    SegmentPermissions::ReadExecute,
+                )],
             ),
         ])
         .expect("assemble image");
 
-        let image = UserlandImage::parse(&image_bytes).expect("assembled image must parse");
+        let image = decode(&image_bytes).expect("assembled image must parse");
         let bootstrap = image.bootstrap_entry();
-        let header = bootstrap.header();
-        let payload_offset = usize::try_from(header.payload_offset).expect("payload offset fits");
-        let payload_size = usize::try_from(header.payload_size).expect("payload size fits");
-        assert_eq!(
-            bootstrap.payload(),
-            &image_bytes[payload_offset..payload_offset + payload_size]
-        );
-
-        let first_segment = bootstrap.segment(0).expect("segment 0");
-        let first_offset = usize::try_from(first_segment.file_offset).expect("offset fits");
-        let first_size = usize::try_from(first_segment.file_size).expect("size fits");
-        assert_eq!(
-            &image_bytes[first_offset..first_offset + first_size],
-            b"CODE"
-        );
-        assert!(first_offset >= payload_offset);
-        assert!(first_offset + first_size <= payload_offset + payload_size);
-
-        let second_segment = bootstrap.segment(1).expect("segment 1");
-        let second_offset = usize::try_from(second_segment.file_offset).expect("offset fits");
-        let second_size = usize::try_from(second_segment.file_size).expect("size fits");
-        assert_eq!(
-            &image_bytes[second_offset..second_offset + second_size],
-            b"RW"
-        );
-        assert!(second_offset >= payload_offset);
-        assert!(second_offset + second_size <= payload_offset + payload_size);
+        let segments: Vec<_> = bootstrap.segments().collect();
+        assert_eq!(segments[0].bytes, b"CODE");
+        assert_eq!(segments[1].bytes, b"RW");
     }
 }

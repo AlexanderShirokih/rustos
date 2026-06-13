@@ -7,13 +7,13 @@
 
 use alloc::sync::Arc;
 
+/// Сигнал "процесс завершён". Поднимается ровно один раз.
+pub use syscall::PROCESS_TERMINATED;
+
 use super::{
     termination::TerminationState,
     wait::{SignalSource, SignalState},
 };
-
-/// Сигнал "процесс завершён". Поднимается ровно один раз.
-pub const PROCESS_TERMINATED: u32 = 1 << 0;
 
 pub struct ProcessObject {
     inner: TerminationState,

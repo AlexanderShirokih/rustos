@@ -16,11 +16,13 @@ test = false
 bench = false
 
 [dependencies]
+bootstrap = { workspace = true }
 io = { workspace = true }
+ipc = { workspace = true }
 spin = { workspace = true }
 test-harness-qemu = { workspace = true }
-userland-abi = { workspace = true }
-userland-rt = { workspace = true }
+syscall = { workspace = true }
+runtime = { workspace = true }
 
 [lints]
 workspace = true

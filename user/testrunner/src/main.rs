@@ -10,18 +10,17 @@ use core::{
 };
 
 #[cfg(target_os = "none")]
+use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
+#[cfg(target_os = "none")]
 use io::writer::Writer;
+#[cfg(target_os = "none")]
+use ipc::wire::{IpcError, Str};
 #[cfg(target_os = "none")]
 use kernel_tests::kernel_test;
 #[cfg(target_os = "none")]
 use spin::Mutex;
 #[cfg(target_os = "none")]
-use userland_abi::{
-    BOOTSTRAP_LOG_FRAME_MAX, BOOTSTRAP_LOG_PAYLOAD_MAX, SYSCALL_RETURN_SHOULD_WAIT,
-    encode_bootstrap_log,
-};
-#[cfg(target_os = "none")]
-use userland_rt::{channel_write, thread_exit};
+use runtime::{ChannelTransport, thread_exit};
 
 #[cfg(target_os = "none")]
 mod channel;
@@ -43,13 +42,13 @@ static BOOTSTRAP_HANDLE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_os = "none")]
 struct LogBuffer {
     len: usize,
-    bytes: [u8; BOOTSTRAP_LOG_PAYLOAD_MAX],
+    bytes: [u8; LOG_MESSAGE_MAX],
 }
 
 #[cfg(target_os = "none")]
 static LOG_BUFFER: Mutex<LogBuffer> = Mutex::new(LogBuffer {
     len: 0,
-    bytes: [0; BOOTSTRAP_LOG_PAYLOAD_MAX],
+    bytes: [0; LOG_MESSAGE_MAX],
 });
 
 /// Writer harness'а: шлёт построчные RKLOG-кадры в bootstrap-канал.
@@ -71,7 +70,7 @@ impl Writer for ChannelLogWriter {
             let len = state.len;
             state.bytes[len] = byte;
             state.len += 1;
-            if state.len == BOOTSTRAP_LOG_PAYLOAD_MAX {
+            if state.len == LOG_MESSAGE_MAX {
                 flush_line(&mut state);
             }
         }
@@ -93,23 +92,27 @@ fn flush_line(state: &mut LogBuffer) {
     state.len = 0;
 }
 
-/// Best-effort отправка RKLOG-кадра: на ShouldWait - ограниченный
-/// спин-retry, любая иная ошибка молча дропает кадр.
+/// Best-effort отправка строки лога контрактом `Bootstrap`: на WouldBlock -
+/// ограниченный спин-retry, иная ошибка либо не-UTF8 молча дропает кадр.
 #[cfg(target_os = "none")]
 fn send_log_frame(payload: &[u8]) {
     const SEND_RETRY_LIMIT: usize = 1024;
 
-    let handle = BOOTSTRAP_HANDLE.load(Ordering::Relaxed);
-    let mut frame = [0u8; BOOTSTRAP_LOG_FRAME_MAX];
-    let Ok(len) = encode_bootstrap_log(payload, &mut frame) else {
+    let Ok(text) = core::str::from_utf8(payload) else {
+        return;
+    };
+    let Ok(message) = Str::<LOG_MESSAGE_MAX>::new(text) else {
         return;
     };
 
+    let handle = BOOTSTRAP_HANDLE.load(Ordering::Relaxed);
+    let client = BootstrapClient::new(ChannelTransport::new(handle));
+
     for _ in 0..SEND_RETRY_LIMIT {
-        if channel_write(handle, &frame[..len]) != SYSCALL_RETURN_SHOULD_WAIT {
-            return;
+        match client.log(message) {
+            Err(IpcError::WouldBlock) => core::hint::spin_loop(),
+            _ => return,
         }
-        core::hint::spin_loop();
     }
 }
 
@@ -144,13 +147,13 @@ fn userland_smoke() {
 #[cfg(target_os = "none")]
 struct PanicBuffer {
     len: usize,
-    bytes: [u8; BOOTSTRAP_LOG_PAYLOAD_MAX],
+    bytes: [u8; LOG_MESSAGE_MAX],
 }
 
 #[cfg(target_os = "none")]
 impl core::fmt::Write for PanicBuffer {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let take = s.len().min(BOOTSTRAP_LOG_PAYLOAD_MAX - self.len);
+        let take = s.len().min(LOG_MESSAGE_MAX - self.len);
         self.bytes[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
         self.len += take;
         Ok(())
@@ -162,7 +165,7 @@ impl core::fmt::Write for PanicBuffer {
 fn panic(info: &PanicInfo<'_>) -> ! {
     let mut buf = PanicBuffer {
         len: 0,
-        bytes: [0; BOOTSTRAP_LOG_PAYLOAD_MAX],
+        bytes: [0; LOG_MESSAGE_MAX],
     };
     let _ = write!(buf, "[TEST-PANIC] {info}");
     send_log_frame(&buf.bytes[..buf.len]);

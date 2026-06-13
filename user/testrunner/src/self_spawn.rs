@@ -3,8 +3,8 @@
 //! его и дожидается `PROCESS_TERMINATED`.
 
 use kernel_tests::kernel_test;
-use userland_abi::{PROCESS_SIGNAL_TERMINATED, SyscallOp};
-use userland_rt::{
+use syscall::{PROCESS_TERMINATED, SyscallOp};
+use runtime::{
     memory_create_virtual, memory_map, memory_remap, object_wait_one, process_create,
     process_exit_code, process_load_image, process_start,
 };
@@ -95,7 +95,7 @@ fn self_spawn_via_syscalls() {
     let thread = process_start(child, CHILD_CODE_VA, CHILD_STACK_TOP, 0, 1, 0);
     kernel_tests::kassert!(thread > 0);
 
-    let observed = object_wait_one(child, PROCESS_SIGNAL_TERMINATED, CHILD_WAIT_TIMEOUT_NS);
-    kernel_tests::kassert_eq!(observed, i64::from(PROCESS_SIGNAL_TERMINATED));
+    let observed = object_wait_one(child, PROCESS_TERMINATED, CHILD_WAIT_TIMEOUT_NS);
+    kernel_tests::kassert_eq!(observed, i64::from(PROCESS_TERMINATED));
     kernel_tests::kassert_eq!(process_exit_code(child), i64::from(CHILD_EXIT_CODE));
 }

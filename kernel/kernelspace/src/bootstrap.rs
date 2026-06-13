@@ -1,53 +1,55 @@
-//! Production-цепочка userland: запуск rootkeeper-процесса с bootstrap-каналом
-//! и логгер кадров local-конца в klog.
+//! Production-цепочка userland: запуск первого (bootstrap) userland-процесса с bootstrap-каналом.
 
 extern crate alloc;
 
 use alloc::{sync::Arc, vec};
 
+use bootstrap::{BootstrapService, dispatch_bootstrap};
+use ipc::{
+    MessageLen, Transport,
+    wire::{IpcError as WireError, Str},
+};
 use klog::{info, warn};
 use kobject::{
-    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, Channel, Handle, IpcError, KObject, Rights,
-    channel_read, install_handle, object_wait_one,
+    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, Channel, Handle, HandleId, IpcError as KernelIpcError,
+    KObject, Message, Rights, channel_read, channel_write, install_handle, object_wait_one,
 };
-use process::{UserImageFromAbiError, user_image_parts_from_entry};
+use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
-use userland_abi::{
-    BootstrapHello, UserlandImage, UserlandImageError, parse_bootstrap_hello, parse_bootstrap_log,
-};
+use userland::EntryView;
+use userland_image::{ImageDecodeError, decode};
 
 use crate::user_process::{SpawnUserError, UserProcessLauncher};
 
-/// Запущенный rootkeeper: local-конец bootstrap-канала остаётся у ядра,
+/// Запущенный bootstrap-процесс: local-конец bootstrap-канала остаётся у ядра,
 /// `info` держит process/thread KO для наблюдения за завершением.
-pub struct RootkeeperLaunch {
+pub struct BootstrapLaunch {
     pub channel: Arc<Channel>,
     pub info: UserProcessLaunchInfo,
 }
 
-/// Ошибки запуска rootkeeper: разбор образа, мост в `UserImage`, спавн процесса.
+/// Ошибки запуска bootstrap-процесса.
 #[derive(Debug)]
-pub enum RootkeeperSpawnError {
-    Image(UserlandImageError),
-    Bridge(UserImageFromAbiError),
+pub enum BootstrapSpawnError {
+    Image(ImageDecodeError),
+    Model(UserImageFromModelError),
     Spawn(SpawnUserError),
 }
 
-/// Разбирает `blob`, мостит bootstrap-entry в `UserImage` и спавнит процесс
-/// с именем bootstrap-entry и peer-концом bootstrap-канала как initial handle 0.
-pub fn spawn_rootkeeper(
+/// Разбирает `blob` и спавнит процесс с именем bootstrap-entry как initial handle 0.
+pub fn spawn_process(
     launcher: &dyn UserProcessLauncher,
     blob: &'static [u8],
     user_va_end: usize,
-) -> Result<RootkeeperLaunch, RootkeeperSpawnError> {
-    let image = UserlandImage::parse(blob).map_err(RootkeeperSpawnError::Image)?;
+) -> Result<BootstrapLaunch, BootstrapSpawnError> {
+    let image = decode(blob).map_err(BootstrapSpawnError::Image)?;
     let entry = image.bootstrap_entry();
-    let name = core::str::from_utf8(entry.name_bytes()).unwrap_or("rootkeeper");
+    let name = entry.name();
     let parts =
-        user_image_parts_from_entry(&entry, user_va_end).map_err(RootkeeperSpawnError::Bridge)?;
+        user_image_parts_from_entry(&entry, user_va_end).map_err(BootstrapSpawnError::Model)?;
     let user_image = parts.image();
 
-    // local остаётся у ядра для чтения; peer уходит rootkeeper'у. Запись в peer
+    // local остаётся у ядра для чтения; peer уходит bootstrap-процессу. Запись в peer
     // кладёт сообщение в очередь local, где и поднимется CHANNEL_READABLE.
     let (local, peer) = Channel::create_pair(0);
     let peer_ko = KObject::Channel(peer);
@@ -58,19 +60,23 @@ pub fn spawn_rootkeeper(
 
     let info = launcher
         .spawn_user_process_with_launch(name, &user_image, Priority::normal(), 2, launch)
-        .map_err(RootkeeperSpawnError::Spawn)?;
+        .map_err(BootstrapSpawnError::Spawn)?;
 
-    Ok(RootkeeperLaunch {
+    Ok(BootstrapLaunch {
         channel: local,
         info,
     })
 }
 
 /// Цикл логгера bootstrap-канала: сигнальное ожидание READABLE|PEER_CLOSED,
-/// дренаж очереди до `ShouldWait`, выход по PEER_CLOSED при дочитанной очереди.
+/// дренаж очереди контрактом `Bootstrap`, выход по PEER_CLOSED при дочитанной
+/// очереди.
 pub fn run_bootstrap_log(local: &Arc<Channel>) {
     let chan_ko = KObject::Channel(local.clone());
-    let chan_handle = Handle::new(chan_ko, Rights::READ | Rights::WAIT | Rights::INSPECT);
+    let chan_handle = Handle::new(
+        chan_ko,
+        Rights::READ | Rights::WRITE | Rights::WAIT | Rights::INSPECT,
+    );
     let chan_id = match install_handle(chan_handle) {
         Ok(id) => id,
         Err(e) => {
@@ -79,16 +85,16 @@ pub fn run_bootstrap_log(local: &Arc<Channel>) {
         }
     };
 
+    let transport = ChannelTransport::new(chan_id);
+    let mut sink = BootstrapLog;
+
     loop {
-        match object_wait_one(chan_id, CHANNEL_READABLE | CHANNEL_PEER_CLOSED, None) {
-            Ok(observed)
-                if observed & CHANNEL_PEER_CLOSED != 0
-                    && local.peek_signals() & CHANNEL_READABLE == 0 =>
-            {
+        match transport.wait_readable(u64::MAX) {
+            Ok(()) => {}
+            Err(WireError::PeerClosed) => {
                 info!("bootstrap-log: peer closed, exiting");
                 return;
             }
-            Ok(_) => {}
             Err(e) => {
                 warn!("bootstrap-log: wait failed: {:?}", e);
                 return;
@@ -96,128 +102,94 @@ pub fn run_bootstrap_log(local: &Arc<Channel>) {
         }
 
         loop {
-            let message = match channel_read(chan_id) {
-                Ok(message) => message,
-                Err(IpcError::ShouldWait) => break,
-                Err(IpcError::PeerClosed) => {
+            match dispatch_bootstrap(&mut sink, &transport) {
+                Ok(()) => {}
+                Err(WireError::WouldBlock) => break,
+                Err(WireError::PeerClosed) => {
                     info!("bootstrap-log: peer closed, exiting");
                     return;
                 }
                 Err(e) => {
-                    warn!("bootstrap-log: read failed: {:?}", e);
+                    warn!("bootstrap-log: dispatch failed: {:?}", e);
                     break;
-                }
-            };
-
-            match classify_frame(message.bytes()) {
-                BootstrapFrame::Hello(hello) => info!("rootkeeper: hello v{}", hello.version),
-                BootstrapFrame::Log(text) => info!("{}", text),
-                BootstrapFrame::Unknown { len } => {
-                    warn!("bootstrap-log: unknown frame, len={}", len);
                 }
             }
         }
     }
 }
 
-/// Кадр bootstrap-канала, распознанный по магии.
-#[derive(Debug, PartialEq, Eq)]
-enum BootstrapFrame<'a> {
-    Hello(BootstrapHello),
-    Log(&'a str),
-    Unknown { len: usize },
+/// Серверная сторона контракта `Bootstrap`: зеркалит строки лога в klog.
+struct BootstrapLog;
+
+impl BootstrapService for BootstrapLog {
+    fn log(&mut self, message: Str<{ bootstrap::LOG_MESSAGE_MAX }>) {
+        info!("{}", message.as_str());
+    }
 }
 
-/// Классифицирует кадр по магии: hello, log (только валидный utf8)
-/// либо unknown с длиной кадра.
-fn classify_frame(bytes: &[u8]) -> BootstrapFrame<'_> {
-    if let Ok(hello) = parse_bootstrap_hello(bytes) {
-        return BootstrapFrame::Hello(hello);
-    }
-    if let Ok(payload) = parse_bootstrap_log(bytes)
-        && let Ok(text) = core::str::from_utf8(payload)
-    {
-        return BootstrapFrame::Log(text);
-    }
-    BootstrapFrame::Unknown { len: bytes.len() }
+/// Порт ipc-контракта поверх kernel-канала: оборачивает HandleId эндпоинта.
+pub struct ChannelTransport {
+    handle: HandleId,
 }
 
-#[cfg(test)]
-mod tests {
-    use userland_abi::{
-        BOOTSTRAP_ABI_VERSION, BOOTSTRAP_HELLO_MAGIC, BOOTSTRAP_HELLO_SIZE, BOOTSTRAP_LOG_FRAME_MAX,
-        BOOTSTRAP_LOG_HEADER_SIZE, encode_bootstrap_log,
-    };
+impl ChannelTransport {
+    /// Связывает транспорт с HandleId канального эндпоинта.
+    pub fn new(handle: HandleId) -> Self {
+        Self { handle }
+    }
+}
 
-    use super::*;
+/// Сводит kernel-ошибку канала к ошибке wire-транспорта.
+fn map_kernel_error(error: KernelIpcError) -> WireError {
+    match error {
+        KernelIpcError::ShouldWait => WireError::WouldBlock,
+        KernelIpcError::Timeout => WireError::Timeout,
+        KernelIpcError::BufferTooSmall => WireError::Truncated,
+        KernelIpcError::MessageTooBig => WireError::FrameOverflow,
+        KernelIpcError::PeerClosed
+        | KernelIpcError::BadHandle
+        | KernelIpcError::WrongType
+        | KernelIpcError::AccessDenied
+        | KernelIpcError::Canceled
+        | KernelIpcError::OutOfHandles => WireError::PeerClosed,
+    }
+}
 
-    fn hello_bytes() -> [u8; BOOTSTRAP_HELLO_SIZE] {
-        let mut bytes = [0u8; BOOTSTRAP_HELLO_SIZE];
-        bytes[0..8].copy_from_slice(&BOOTSTRAP_HELLO_MAGIC);
-        bytes[8..10].copy_from_slice(&BOOTSTRAP_ABI_VERSION.to_le_bytes());
-        bytes
+impl Transport for ChannelTransport {
+    fn write_message(&self, bytes: &[u8], _handles: &[u32]) -> Result<(), WireError> {
+        let message = Message::from_bytes(bytes).map_err(map_kernel_error)?;
+        channel_write(self.handle, message).map_err(map_kernel_error)
     }
 
-    #[test]
-    fn classifies_hello() {
-        let bytes = hello_bytes();
-        let frame = classify_frame(&bytes);
-        assert!(
-            matches!(frame, BootstrapFrame::Hello(hello) if hello.version == BOOTSTRAP_ABI_VERSION)
-        );
+    fn read_message(
+        &self,
+        bytes: &mut [u8],
+        _handles: &mut [u32],
+    ) -> Result<MessageLen, WireError> {
+        let message = channel_read(self.handle).map_err(map_kernel_error)?;
+        let payload = message.bytes();
+        if payload.len() > bytes.len() {
+            return Err(WireError::Truncated);
+        }
+        bytes[..payload.len()].copy_from_slice(payload);
+        Ok(MessageLen::new(payload.len(), 0))
     }
 
-    #[test]
-    fn classifies_hello_sized_garbage_as_unknown() {
-        let bytes = [0xA5u8; BOOTSTRAP_HELLO_SIZE];
-        assert_eq!(
-            classify_frame(&bytes),
-            BootstrapFrame::Unknown {
-                len: BOOTSTRAP_HELLO_SIZE
-            }
-        );
-    }
-
-    #[test]
-    fn classifies_log() {
-        let mut frame = [0u8; BOOTSTRAP_LOG_FRAME_MAX];
-        let len = encode_bootstrap_log(b"[TEST-PASS: smoke]", &mut frame).expect("log encodes");
-
-        assert_eq!(
-            classify_frame(&frame[..len]),
-            BootstrapFrame::Log("[TEST-PASS: smoke]")
-        );
-    }
-
-    #[test]
-    fn classifies_empty_log() {
-        let mut frame = [0u8; BOOTSTRAP_LOG_FRAME_MAX];
-        let len = encode_bootstrap_log(b"", &mut frame).expect("log encodes");
-
-        assert_eq!(classify_frame(&frame[..len]), BootstrapFrame::Log(""));
-    }
-
-    #[test]
-    fn classifies_invalid_utf8_log_as_unknown() {
-        let mut frame = [0u8; BOOTSTRAP_LOG_FRAME_MAX];
-        let len = encode_bootstrap_log(&[0xFF, 0xFE], &mut frame).expect("log encodes");
-
-        assert_eq!(
-            classify_frame(&frame[..len]),
-            BootstrapFrame::Unknown {
-                len: BOOTSTRAP_LOG_HEADER_SIZE + 2
-            }
-        );
-    }
-
-    #[test]
-    fn classifies_hello_prefix_as_unknown() {
-        let bytes = hello_bytes();
-        assert_eq!(
-            classify_frame(&bytes[..BOOTSTRAP_HELLO_SIZE - 1]),
-            BootstrapFrame::Unknown {
-                len: BOOTSTRAP_HELLO_SIZE - 1
-            }
-        );
+    fn wait_readable(&self, timeout_ns: u64) -> Result<(), WireError> {
+        let timeout = if timeout_ns == u64::MAX {
+            None
+        } else {
+            Some(timeout_ns)
+        };
+        let observed =
+            object_wait_one(self.handle, CHANNEL_READABLE | CHANNEL_PEER_CLOSED, timeout)
+                .map_err(map_kernel_error)?;
+        if observed & CHANNEL_READABLE != 0 {
+            Ok(())
+        } else if observed & CHANNEL_PEER_CLOSED != 0 {
+            Err(WireError::PeerClosed)
+        } else {
+            Err(WireError::Timeout)
+        }
     }
 }

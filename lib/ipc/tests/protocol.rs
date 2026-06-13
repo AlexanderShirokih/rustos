@@ -1,0 +1,293 @@
+//! Интеграция кодогена `#[protocol]`: round-trip client -> dispatch -> service
+//! через блокирующий host-mock транспорта на двух потоках. Покрывает успех,
+//! доменную ошибку (DOMAIN_ERR), неизвестный ordinal (EPITAPH), cast, event
+//! и txid-корреляцию (R2).
+
+use std::thread;
+
+use ipc::{
+    Transport,
+    wire::{Bytes, Header, Str},
+};
+use ipc_test::MockEnd;
+
+/// Доменная ошибка тестового калькулятора (закодирована как u32).
+const ERR_DIVIDE_BY_ZERO: u32 = 1;
+
+/// Тестовый протокол: two-way с Result и без, bounded-Str-параметр, cast, event.
+#[ipc::protocol(name = "Calc")]
+trait Calc {
+    #[call]
+    fn add(&self, a: u32, b: u32) -> u32;
+
+    #[call]
+    fn div(&self, a: u32, b: u32) -> Result<u32, u32>;
+
+    #[call]
+    fn echo_len(&self, text: Str<16>) -> u32;
+
+    #[cast]
+    fn reset(&self, seed: u64);
+
+    #[event]
+    fn tick(seq: u64);
+}
+
+/// Сервис: суммирует, делит с доменной ошибкой, считает длину, хранит seed.
+#[derive(Default)]
+struct CalcServer {
+    seed: u64,
+}
+
+impl CalcService for CalcServer {
+    fn add(&mut self, a: u32, b: u32) -> u32 {
+        a + b
+    }
+
+    fn div(&mut self, a: u32, b: u32) -> Result<u32, u32> {
+        a.checked_div(b).ok_or(ERR_DIVIDE_BY_ZERO)
+    }
+
+    fn echo_len(&mut self, text: Str<16>) -> u32 {
+        text.as_str().len() as u32
+    }
+
+    fn reset(&mut self, seed: u64) {
+        self.seed = seed;
+    }
+}
+
+/// Прогоняет `client_body` на потоке клиента, обслуживая `rounds` кадров
+/// сервером на встречном конце; возвращает результат тела клиента.
+fn round_trip<R: Send>(
+    rounds: usize,
+    client_body: impl FnOnce(&CalcClient<MockEnd>) -> R + Send,
+) -> (R, CalcServer) {
+    let (client_end, server_end) = MockEnd::pair();
+    let client = CalcClient::new(client_end);
+    thread::scope(|scope| {
+        let server_handle = scope.spawn(move || {
+            let mut server = CalcServer::default();
+            for _ in 0..rounds {
+                server_end.wait_readable(u64::MAX).expect("server wait");
+                dispatch_calc(&mut server, &server_end).expect("dispatch ok");
+            }
+            server
+        });
+        let result = client_body(&client);
+        let server = server_handle.join().expect("server thread");
+        (result, server)
+    })
+}
+
+#[test]
+fn two_way_without_error_round_trip() {
+    let (result, _server) = round_trip(1, |client| client.add(7, 35));
+    assert_eq!(result, Ok(42));
+}
+
+#[test]
+fn two_way_domain_success() {
+    let (result, _server) = round_trip(1, |client| client.div(84, 2));
+    assert_eq!(result, Ok(Ok(42)));
+}
+
+#[test]
+fn two_way_domain_error_keeps_channel() {
+    // Деление на ноль -> доменная ошибка (DOMAIN_ERR), затем канал ещё работает.
+    let (result, _server) = round_trip(2, |client| {
+        let err = client.div(1, 0);
+        let ok = client.add(20, 22);
+        (err, ok)
+    });
+    assert_eq!(result.0, Ok(Err(ERR_DIVIDE_BY_ZERO)));
+    assert_eq!(result.1, Ok(42));
+}
+
+#[test]
+fn two_way_bounded_str_param() {
+    let (result, _server) = round_trip(1, |client| {
+        client.echo_len(Str::<16>::new("hello").expect("within bound"))
+    });
+    assert_eq!(result, Ok(5));
+}
+
+#[test]
+fn cast_delivers_without_response() {
+    let (_unit, server) = round_trip(1, |client| {
+        client.reset(0xDEAD_BEEF).expect("cast write ok");
+    });
+    assert_eq!(server.seed, 0xDEAD_BEEF);
+}
+
+#[test]
+fn unknown_ordinal_yields_epitaph() {
+    let (client_end, server_end) = MockEnd::pair();
+    let mut server = CalcServer::default();
+
+    // Кадр с чужим ordinal: dispatch отвечает EPITAPH, не паникует (R3).
+    let mut frame = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
+    frame
+        .write_header(&Header::new(0xDEAD_DEAD_DEAD_DEAD, 9, 0))
+        .expect("header ok");
+    frame.finish().expect("finish ok");
+    client_end
+        .write_message(frame.as_bytes(), &[])
+        .expect("write ok");
+
+    dispatch_calc(&mut server, &server_end).expect("dispatch returns ok");
+
+    let mut bytes = [0u8; 64];
+    let mut handles = [0u32; 4];
+    let len = client_end
+        .read_message(&mut bytes, &mut handles)
+        .expect("epitaph frame present");
+    let header = Header::decode(&bytes[..len.bytes]).expect("decode");
+    assert!(header.has_flag(ipc::wire::FLAG_EPITAPH));
+    assert_eq!(header.txid, 9);
+}
+
+#[test]
+fn mismatched_txid_is_skipped() {
+    let (client_end, server_end) = MockEnd::pair();
+    let client = CalcClient::new(client_end);
+
+    // Кадр-ответ с чужим txid вброшен в очередь до настоящего ответа.
+    let mut stray = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
+    stray
+        .write_header(&Header::new(
+            calc_ordinal::ADD,
+            0xFFFF,
+            ipc::wire::FLAG_RESPONSE,
+        ))
+        .expect("header ok");
+    stray
+        .write_field(1, &ipc::wire::value::encode_u32(999))
+        .expect("field ok");
+    stray.finish().expect("finish ok");
+    server_end
+        .write_message(stray.as_bytes(), &[])
+        .expect("write stray ok");
+
+    // Затем корректный ответ на txid=1 (первый txid клиента).
+    let mut good = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
+    good.write_header(&Header::new(calc_ordinal::ADD, 1, ipc::wire::FLAG_RESPONSE))
+        .expect("header ok");
+    good.write_field(1, &ipc::wire::value::encode_u32(42))
+        .expect("field ok");
+    good.finish().expect("finish ok");
+    server_end
+        .write_message(good.as_bytes(), &[])
+        .expect("write good ok");
+
+    // Клиент шлёт add (его запрос осядет в очереди сервера, тут не читается) и
+    // читает ответ: кадр с чужим txid отброшен, принят кадр с txid=1 (R2).
+    let result = client.add(0, 0);
+    assert_eq!(result, Ok(42));
+}
+
+#[test]
+fn event_round_trip() {
+    let (server_end, client_end) = MockEnd::pair();
+
+    // Сервер эмитит событие в клиентский конец.
+    CalcEventSender::emit_tick(&server_end, 0xABCD).expect("emit ok");
+
+    let mut handler = TickHandler::default();
+    dispatch_calc_event(&mut handler, &client_end).expect("dispatch event ok");
+    assert_eq!(handler.last_seq, Some(0xABCD));
+}
+
+#[test]
+fn descriptor_exposes_operations() {
+    let desc = calc_ordinal::DESC;
+    assert_eq!(desc.operations.len(), 5);
+
+    let add = desc
+        .operations
+        .iter()
+        .find(|op| op.name == "add")
+        .expect("add present");
+    assert_eq!(add.ordinal, calc_ordinal::ADD);
+    assert_eq!(add.ordinal, 0xb744_87cd_9b28_41ba);
+    assert_eq!(add.canonical, "Calc.add");
+    assert_eq!(add.kind, ipc::schema::Kind::Call);
+    assert_eq!(add.fields.len(), 2);
+    assert_eq!(add.fields[0].field_id, 1);
+    assert_eq!(add.fields[0].field_type, ipc::schema::WireType::Uint(4));
+    assert_eq!(add.fields[1].field_id, 2);
+
+    let echo = desc
+        .operations
+        .iter()
+        .find(|op| op.name == "echo_len")
+        .expect("echo present");
+    assert_eq!(
+        echo.fields[0].field_type,
+        ipc::schema::WireType::BoundedStr(16)
+    );
+
+    let reset = desc
+        .operations
+        .iter()
+        .find(|op| op.name == "reset")
+        .expect("reset present");
+    assert_eq!(reset.kind, ipc::schema::Kind::Cast);
+
+    let tick = desc
+        .operations
+        .iter()
+        .find(|op| op.name == "tick")
+        .expect("tick present");
+    assert_eq!(tick.kind, ipc::schema::Kind::Event);
+}
+
+#[test]
+fn ordinal_constants_match_golden() {
+    assert_eq!(calc_ordinal::ADD, 0xb744_87cd_9b28_41ba);
+    assert_eq!(calc_ordinal::DIV, 0x2420_7b95_a0d9_84fc);
+    assert_eq!(calc_ordinal::RESET, 0x1cb8_08a6_5161_cd40);
+}
+
+#[test]
+fn bounded_bytes_param_round_trips() {
+    let (blob_client_end, blob_server_end) = MockEnd::pair();
+    let client = BlobClient::new(blob_client_end);
+    let mut server = BlobServer::default();
+
+    client
+        .store(Bytes::<8>::new(&[1, 2, 3, 4]).expect("within bound"))
+        .expect("cast write ok");
+    dispatch_blob(&mut server, &blob_server_end).expect("dispatch ok");
+    assert_eq!(server.last_len, 4);
+}
+
+/// Второй протокол: проверяет Bytes-параметр и независимый namespace ordinal.
+#[ipc::protocol(name = "Blob")]
+trait Blob {
+    #[cast]
+    fn store(&self, data: Bytes<8>);
+}
+
+#[derive(Default)]
+struct BlobServer {
+    last_len: usize,
+}
+
+impl BlobService for BlobServer {
+    fn store(&mut self, data: Bytes<8>) {
+        self.last_len = data.as_bytes().len();
+    }
+}
+
+/// Клиентский обработчик события `tick`.
+#[derive(Default)]
+struct TickHandler {
+    last_seq: Option<u64>,
+}
+
+impl CalcEvents for TickHandler {
+    fn tick(&mut self, seq: u64) {
+        self.last_seq = Some(seq);
+    }
+}

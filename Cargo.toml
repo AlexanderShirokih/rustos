@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "abi/userland-abi",
     "kernel/drivers-aarch64",
     "kernel/drivers-common",
     "kernel/drivers-common-aarch64",
@@ -10,7 +9,13 @@ members = [
     "kernel/hal-aarch64-asid",
     "kernel/hal-aarch64-paging",
     "kernel/hal-common",
+    "lib/bootstrap-abi",
     "lib/io",
+    "lib/ipc",
+    "lib/ipc-macros",
+    "lib/ipc-schema",
+    "lib/ipc-test",
+    "lib/syscall",
     "kernel/kernelspace",
     "kernel/kobject",
     "kernel/log",
@@ -21,10 +26,12 @@ members = [
     "lib/test-harness-macros",
     "lib/test-harness-qemu",
     "lib/collections",
+    "lib/userland",
+    "lib/userland-image",
+    "lib/runtime",
     "lib/util",
-    "tools/userland-img",
+    "tools/userland-image",
     "user/rootkeeper",
-    "user/rt",
     "user/testrunner",
     "xtask",
 ]
@@ -36,7 +43,7 @@ publish = false
 
 [workspace.dependencies]
 # Внешние зависимости
-spin = "0.10.0"
+spin = "0.12.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -44,13 +51,19 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
 flate2 = "1.0"
 crc32fast = "1.5"
-object = "0.37"
-toml = "0.9"
+object = "0.39.1"
+toml = "1.1.2"
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
+sha2 = "0.11.0"
 
 # Внутренние крейты workspace
+ipc = { path = "lib/ipc" }
+ipc-macros = { path = "lib/ipc-macros" }
+ipc-schema = { path = "lib/ipc-schema" }
+ipc-test = { path = "lib/ipc-test" }
+bootstrap = { path = "lib/bootstrap-abi" }
 collections = { path = "lib/collections" }
 io = { path = "lib/io" }
 klog = { path = "kernel/log" }
@@ -66,20 +79,19 @@ drivers-aarch64 = { path = "kernel/drivers-aarch64" }
 kernelspace = { path = "kernel/kernelspace" }
 kobject = { path = "kernel/kobject" }
 scheduler = { path = "kernel/scheduler" }
-syscall = { path = "kernel/syscall" }
+syscall = { path = "lib/syscall" }
+syscall-kernel = { path = "kernel/syscall" }
 test-harness-qemu = { path = "lib/test-harness-qemu" }
 test-harness-macros = { path = "lib/test-harness-macros" }
-userland-abi = { path = "abi/userland-abi" }
-userland-rt = { path = "user/rt" }
+userland = { path = "lib/userland" }
+userland-image = { path = "lib/userland-image" }
+runtime = { path = "lib/runtime" }
 process = { path = "kernel/process" }
-userland-img = { path = "tools/userland-img" }
+userland-image-tool = { path = "tools/userland-image" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
-# Архитектурно-независимый код не должен использовать `unsafe`. Платформенные
-# крейты (arch-*, drivers-*-aarch64) и низкоуровневые
-# ядерные примитивы (memory, kernelspace, io, collections, fdt, ...) явно опциируются
-# через `#![allow(unsafe_code)]` в корне крейта - это видно в diff.
+# Архитектурно-независимый код не должен использовать `unsafe`.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

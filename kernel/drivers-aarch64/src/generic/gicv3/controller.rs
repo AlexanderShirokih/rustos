@@ -119,10 +119,10 @@ impl Gicv3Controller {
         }
     }
 
-    /// Устанавливает affinity routing для SPI.
+    /// Маршрутизирует SPI через GICD_IROUTER.
     ///
-    /// Если маска содержит несколько CPU - используется IRM=1 (любой доступный).
-    /// Если один CPU - используется специфический Aff0.
+    /// Один CPU в маске: Aff0 = индекс PE в affinity-кластере 0 (Aff1..Aff3 = 0).
+    /// Несколько CPU: IRM=1 (бит 31), любой участвующий PE.
     pub(super) fn set_affinity(&self, irq: IrqNumber, target: CpuMask) {
         if !matches!(IrqType::from_irq_number(irq), IrqType::Spi) {
             return;

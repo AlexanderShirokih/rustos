@@ -1,4 +1,4 @@
-//! Реализация [`syscall::SyscallFrame`] для aarch64-фрейма
+//! Реализация [`syscall_kernel::SyscallFrame`] для aarch64-фрейма
 //! исключения.
 //!
 //! Связь регистров с syscall ABI:
@@ -9,7 +9,7 @@
 //! - источник трапа (EL0 vs EL1) определяется по `SPSR_EL1.M[3:0]`:
 //!   `0` - EL0t, иное - EL1.
 
-use syscall::{Origin, SyscallFrame};
+use syscall_kernel::{Origin, SyscallFrame};
 
 use super::exceptions::ExceptionFrame;
 

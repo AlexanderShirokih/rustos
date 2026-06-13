@@ -1,15 +1,16 @@
-//! bootstrap-log: дренаж кадров (hello, unknown) и выход по
+//! bootstrap-log: дренаж кадров (log, unknown) и выход по
 //! PEER_CLOSED - чисто сигнально, без user-процесса и таймера.
 
+use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
+use ipc::wire::Str;
 use kernel_tests::kernel_test;
 use kobject::{
-    Channel, EVENT_SIGNALED, Event, Handle, KObject, Message, Rights, install_handle,
+    Channel, EVENT_SIGNALED, Event, Handle, KObject, Message, Rights, handle_close, install_handle,
     object_wait_one,
 };
 use scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
-use userland_abi::{BOOTSTRAP_ABI_VERSION, BOOTSTRAP_HELLO_MAGIC, BOOTSTRAP_HELLO_SIZE};
 
-use crate::bootstrap::run_bootstrap_log;
+use crate::bootstrap::{ChannelTransport, run_bootstrap_log};
 
 #[kernel_test]
 fn bootstrap_log_exits_on_peer_close() {
@@ -34,15 +35,17 @@ fn bootstrap_log_exits_on_peer_close() {
         )
         .expect("bootstrap-log task spawn must succeed");
 
-    let mut hello = [0u8; BOOTSTRAP_HELLO_SIZE];
-    hello[0..8].copy_from_slice(&BOOTSTRAP_HELLO_MAGIC);
-    hello[8..10].copy_from_slice(&BOOTSTRAP_ABI_VERSION.to_le_bytes());
-    peer.write(Message::from_bytes(&hello).expect("hello fits inline"))
-        .expect("hello write must succeed");
+    let peer_id = install_handle(Handle::new(KObject::Channel(peer.clone()), Rights::WRITE))
+        .expect("install peer channel handle");
+    let client = BootstrapClient::new(ChannelTransport::new(peer_id));
+    client
+        .log(Str::<LOG_MESSAGE_MAX>::new("boot ok").expect("log message must fit"))
+        .expect("log write must succeed");
 
     peer.write(Message::from_bytes(b"garbage").expect("garbage fits inline"))
         .expect("garbage write must succeed");
 
+    handle_close(peer_id).expect("close peer channel handle");
     drop(peer);
 
     let observed = object_wait_one(event_id, EVENT_SIGNALED, Some(5_000_000_000))

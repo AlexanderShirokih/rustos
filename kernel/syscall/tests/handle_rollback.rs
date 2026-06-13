@@ -25,7 +25,7 @@ use memory::{
     user_vm_allocator::UserVmAllocator,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
-use syscall::{Origin, SyscallError, SyscallFrame, SyscallOp};
+use syscall_kernel::{Origin, SyscallError, SyscallFrame, SyscallOp};
 
 struct CountingRuntime {
     handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
@@ -241,7 +241,7 @@ impl StubSyscallRuntime {
     }
 }
 
-impl syscall::SyscallRuntime for StubSyscallRuntime {
+impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
     fn current_user_vm(&self) -> Option<UserVmContext> {
         let guard = self.user_vm.lock().unwrap();
         let (mapper, allocator) = guard.as_ref()?;
@@ -260,7 +260,7 @@ fn shared_runtime() -> &'static (Arc<CountingRuntime>, Arc<StubSyscallRuntime>) 
         let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
         install_runtime(dyn_rt);
         let stub = Arc::new(StubSyscallRuntime::new());
-        syscall::install_runtime(stub.clone());
+        syscall_kernel::install_runtime(stub.clone());
         (rt, stub)
     })
 }
@@ -330,7 +330,7 @@ impl SyscallFrame for TestFrame {
 
 fn dispatch(op: SyscallOp, args: [u64; 6]) -> Result<u64, SyscallError> {
     let mut frame = TestFrame::new(op, args);
-    syscall::dispatch(&mut frame);
+    syscall_kernel::dispatch(&mut frame);
     if frame.ret >= 0 {
         Ok(u64::try_from(frame.ret).expect("non-negative return fits in u64"))
     } else {

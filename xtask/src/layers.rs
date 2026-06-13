@@ -9,7 +9,6 @@ use anyhow::{Context, Result, bail};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Domain {
     Lib,
-    Abi,
     Kernel,
     User,
     Tools,
@@ -21,7 +20,6 @@ impl Domain {
     pub fn from_dir(dir: &str) -> Result<Self> {
         Ok(match dir {
             "lib" => Self::Lib,
-            "abi" => Self::Abi,
             "kernel" => Self::Kernel,
             "user" => Self::User,
             "tools" => Self::Tools,
@@ -33,7 +31,6 @@ impl Domain {
     fn name(self) -> &'static str {
         match self {
             Self::Lib => "lib",
-            Self::Abi => "abi",
             Self::Kernel => "kernel",
             Self::User => "user",
             Self::Tools => "tools",
@@ -44,10 +41,10 @@ impl Domain {
     /// Разрешено ли крейту этого домена зависеть от крейта домена `dep`.
     fn allows(self, dep: Self) -> bool {
         match self {
-            Self::Lib | Self::Abi => matches!(dep, Self::Lib),
-            Self::Kernel => matches!(dep, Self::Lib | Self::Abi | Self::Kernel),
-            Self::User => matches!(dep, Self::Lib | Self::Abi | Self::User),
-            Self::Tools => matches!(dep, Self::Lib | Self::Abi | Self::Tools),
+            Self::Lib => matches!(dep, Self::Lib),
+            Self::Kernel => matches!(dep, Self::Lib | Self::Kernel),
+            Self::User => matches!(dep, Self::Lib | Self::User),
+            Self::Tools => matches!(dep, Self::Lib | Self::Tools),
             Self::Xtask => true,
         }
     }
@@ -118,8 +115,6 @@ mod tests {
         [
             ("a-lib", "lib"),
             ("b-lib", "lib"),
-            ("a-abi", "abi"),
-            ("b-abi", "abi"),
             ("a-kernel", "kernel"),
             ("b-kernel", "kernel"),
             ("a-user", "user"),
@@ -143,18 +138,13 @@ mod tests {
     fn allowed_edges_produce_no_violations() {
         let edges = edges(&[
             ("a-lib", "b-lib"),
-            ("a-abi", "a-lib"),
             ("a-kernel", "a-lib"),
-            ("a-kernel", "a-abi"),
             ("a-kernel", "b-kernel"),
             ("a-user", "a-lib"),
-            ("a-user", "a-abi"),
             ("a-user", "b-user"),
             ("a-tools", "a-lib"),
-            ("a-tools", "a-abi"),
             ("a-tools", "b-tools"),
             ("xtask", "a-lib"),
-            ("xtask", "a-abi"),
             ("xtask", "a-kernel"),
             ("xtask", "a-user"),
             ("xtask", "a-tools"),
@@ -165,25 +155,12 @@ mod tests {
     #[test]
     fn lib_depends_only_on_lib() {
         let edges = edges(&[
-            ("a-lib", "a-abi"),
             ("a-lib", "a-kernel"),
             ("a-lib", "a-user"),
             ("a-lib", "a-tools"),
             ("a-lib", "xtask"),
         ]);
-        assert_eq!(check_layers(&crates(), &edges).unwrap().len(), 5);
-    }
-
-    #[test]
-    fn abi_depends_only_on_lib() {
-        let edges = edges(&[
-            ("a-abi", "b-abi"),
-            ("a-abi", "a-kernel"),
-            ("a-abi", "a-user"),
-            ("a-abi", "a-tools"),
-            ("a-abi", "xtask"),
-        ]);
-        assert_eq!(check_layers(&crates(), &edges).unwrap().len(), 5);
+        assert_eq!(check_layers(&crates(), &edges).unwrap().len(), 4);
     }
 
     #[test]

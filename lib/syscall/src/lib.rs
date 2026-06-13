@@ -69,6 +69,8 @@
 //!
 //! Стабильность: набор и нумерация - часть ABI и не меняются произвольно.
 
+#![cfg_attr(not(test), no_std)]
+
 /// Закрытый набор поддерживаемых syscall-операций.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -259,20 +261,16 @@ impl SyscallOp {
     }
 }
 
-/// Зеркало стабильного ABI-кода для userland-клиентов: бит сигнала канала
-/// "парный endpoint закрыт".
-pub const CHANNEL_SIGNAL_PEER_CLOSED: u32 = 1 << 1;
+/// Бит сигнала канала "парный endpoint закрыт".
+pub const CHANNEL_PEER_CLOSED: u32 = 1 << 1;
 
-/// Зеркало стабильного ABI-кода для userland-клиентов: бит сигнала
-/// "процесс завершён".
-pub const PROCESS_SIGNAL_TERMINATED: u32 = 1 << 0;
+/// Бит сигнала "процесс завершён".
+pub const PROCESS_TERMINATED: u32 = 1 << 0;
 
-/// Зеркало стабильного ABI-размера для userland-клиентов: длина пакета
-/// `MailboxQueue`/`MailboxWait` в байтах.
+/// Длина пакета `MailboxQueue`/`MailboxWait` в байтах.
 pub const MAILBOX_PACKET_SIZE: usize = 32;
 
-/// Зеркало стабильного ABI-кода для userland-клиентов: возврат syscall'а
-/// "операция должна быть повторена позже" (например, очередь канала полна).
+/// Возврат syscall'а "операция должна быть повторена позже" (очередь полна и т.п.).
 pub const SYSCALL_RETURN_SHOULD_WAIT: i64 = -7;
 
 #[cfg(test)]

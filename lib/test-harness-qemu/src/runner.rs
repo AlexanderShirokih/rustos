@@ -103,7 +103,7 @@ fn should_run_early(name: &str) -> bool {
             | "syscall_from_kernel_origin_is_rejected"
             | "event_signal_after_deadline"
             | "process_lifecycle_exit_code_and_termination_signals"
-            | "userland_rootkeeper_bootstrap_handshake"
+            | "userland_bootstrap_handshake"
     )
 }
 

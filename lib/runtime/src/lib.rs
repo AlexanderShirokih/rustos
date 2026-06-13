@@ -8,6 +8,8 @@
 
 #[cfg(target_os = "none")]
 mod svc;
+#[cfg(target_os = "none")]
+mod transport;
 
 #[cfg(target_os = "none")]
 pub use svc::{
@@ -16,6 +18,8 @@ pub use svc::{
     memory_remap, object_wait_one, process_create, process_exit_code, process_load_image,
     process_self, process_start, thread_exit, thread_self,
 };
+#[cfg(target_os = "none")]
+pub use transport::ChannelTransport;
 
 /// Null-аллокатор рантайма: кучи у userland-бинарей нет, любая
 /// аллокация возвращает null.

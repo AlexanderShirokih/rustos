@@ -2,17 +2,17 @@
 
 ## Быстрая справка
 
-| Действие               | Команда                                                                                           |
-|------------------------|---------------------------------------------------------------------------------------------------|
-| Host-тесты             | `cargo test --workspace`                                                                          |
-| Host-clippy            | `cargo clippy --workspace`                                                                        |
-| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-img --features kernel-bin --target aarch64-unknown-none` |
-| Форматирование         | `cargo fmt --all --check`                                                                         |
-| Сборка userland        | `cargo xtask build-userland [--image <имя>]`                                                      |
-| Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                |
-| QEMU integration tests | `cargo xtask qemu-test --timeout 20`                                                              |
-| Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                    |
-| Проверка слоёв         | `cargo xtask check-layers`                                                                        |
+| Действие               | Команда                                                                                                                      |
+|------------------------|------------------------------------------------------------------------------------------------------------------------------|
+| Host-тесты             | `cargo test --workspace`                                                                                                     |
+| Host-clippy            | `cargo clippy --workspace`                                                                                                   |
+| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --features kernel-bin --target aarch64-unknown-none` |
+| Форматирование         | `cargo fmt --all --check`                                                                                                    |
+| Сборка userland        | `cargo xtask build-userland [--image <имя>]`                                                                                 |
+| Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                           |
+| QEMU integration tests | `cargo xtask qemu-test --timeout 20`                                                                                         |
+| Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                                               |
+| Проверка слоёв         | `cargo xtask check-layers`                                                                                                   |
 
 ## Сборка
 
@@ -71,5 +71,5 @@ cargo xtask check-layers
 ```
 
 Сверяет рёбра зависимостей между workspace-крейтами (по `cargo metadata`)
-с правилами слоёв из [`architecture.md`](architecture.md#слои-и-зависимости).
+с правилами слоёв из [`architecture.md`](architecture.md).
 При нарушениях печатает запрещённые рёбра и завершается с ошибкой; выполняется в CI.

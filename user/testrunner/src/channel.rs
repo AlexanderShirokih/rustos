@@ -1,7 +1,7 @@
 //! E2E проверка `ChannelCreate`/`ChannelWrite`/`ChannelRead` из EL0.
 
 use kernel_tests::kernel_test;
-use userland_rt::{channel_create, channel_read, channel_write, memory_allocate};
+use runtime::{channel_create, channel_read, channel_write, memory_allocate};
 
 /// Round-trip байта `0x42` через свежую пару endpoint'ов; буфер выдан
 /// `MemoryAllocate`. Возврат `ChannelRead` = 1: 1 байт payload, 0 handle'ов.

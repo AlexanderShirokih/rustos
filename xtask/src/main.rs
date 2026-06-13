@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use flate2::{Compression, write::GzEncoder};
 use serde::Deserialize;
-use userland_img::build_userland;
+use userland_image_tool::build_userland;
 
 #[derive(Parser)]
 #[command(name = "xtask")]

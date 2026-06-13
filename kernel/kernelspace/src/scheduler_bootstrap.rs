@@ -56,7 +56,7 @@ where
     handle: SchedulerHandle<A, T>,
 }
 
-impl<A, T> syscall::SyscallRuntime for SchedulerSyscallRuntime<A, T>
+impl<A, T> syscall_kernel::SyscallRuntime for SchedulerSyscallRuntime<A, T>
 where
     A: ArchContext,
     T: TimerSource,
@@ -104,7 +104,7 @@ where
         handle: handle.clone(),
     });
     let kobject_runtime: Arc<dyn kobject::KernelRuntime> = Arc::new(handle.clone());
-    let syscall_runtime: Arc<dyn syscall::SyscallRuntime> =
+    let syscall_runtime: Arc<dyn syscall_kernel::SyscallRuntime> =
         Arc::new(SchedulerSyscallRuntime { handle });
 
     kernel.with_runtime_state(|services, _| {
@@ -114,7 +114,7 @@ where
     });
     timer.set_handler(tick_handler);
     kobject::install_runtime(kobject_runtime);
-    syscall::install_runtime(syscall_runtime);
+    syscall_kernel::install_runtime(syscall_runtime);
     syscall_bridge::install_scheduler(service);
 
     scheduler

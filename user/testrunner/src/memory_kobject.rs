@@ -2,7 +2,7 @@
 //! `MemoryMap` + `MemoryRegionInspect` из EL0.
 
 use kernel_tests::kernel_test;
-use userland_rt::{memory_create_virtual, memory_map, memory_region_inspect};
+use runtime::{memory_create_virtual, memory_map, memory_region_inspect};
 
 const PAGE_SIZE: u64 = 4096;
 const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABE;

@@ -1,11 +1,8 @@
 [package]
-name = "userland-rt"
+name = "syscall"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-
-[dependencies]
-userland-abi = { workspace = true }
 
 [lints]
 workspace = true
