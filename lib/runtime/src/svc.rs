@@ -2,11 +2,11 @@
 
 use core::arch::asm;
 
-use syscall::SyscallOp;
+use syscall::{Handle, SyscallOp};
 
 /// Ждёт сигналы `signals` на KO `handle`; `timeout_ns == 0` - non-blocking
 /// poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
-pub fn object_wait_one(handle: usize, signals: u32, timeout_ns: u64) -> i64 {
+pub fn object_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
     // в x0..x2: handle, маска сигналов, timeout_ns; память ядру не
@@ -15,7 +15,7 @@ pub fn object_wait_one(handle: usize, signals: u32, timeout_ns: u64) -> i64 {
         asm!(
             "svc #{op}",
             op = const SyscallOp::ObjectWaitOne as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             in("x1") u64::from(signals),
             in("x2") timeout_ns,
             lateout("x0") ret,
@@ -27,7 +27,7 @@ pub fn object_wait_one(handle: usize, signals: u32, timeout_ns: u64) -> i64 {
 
 /// Пишет `bytes` одним сообщением (без handle'ов) в парный endpoint канала
 /// `handle`. Возврат: 0 либо `-(SyscallError)`.
-pub fn channel_write(handle: usize, bytes: &[u8]) -> i64 {
+pub fn channel_write(handle: Handle, bytes: &[u8]) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
     // в x0..x4: handle, bytes_va, bytes_len, handles_va, handles_count.
@@ -37,7 +37,7 @@ pub fn channel_write(handle: usize, bytes: &[u8]) -> i64 {
         asm!(
             "svc #{op}",
             op = const SyscallOp::ChannelWrite as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             in("x1") bytes.as_ptr() as u64,
             in("x2") bytes.len() as u64,
             in("x3") 0_u64,
@@ -50,9 +50,8 @@ pub fn channel_write(handle: usize, bytes: &[u8]) -> i64 {
 }
 
 /// Создаёт пару endpoint'ов канала в текущей handle-table. Возврат:
-/// `(left, right)`; `left` знаковый (`-(SyscallError)` при ошибке),
-/// `right` валиден только при `left >= 0`.
-pub fn channel_create() -> (i64, u64) {
+/// `(left, right)` либо `-(SyscallError)` из x0.
+pub fn channel_create() -> Result<(Handle, Handle), i64> {
     let left: i64;
     let right: u64;
     // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументов нет;
@@ -66,13 +65,15 @@ pub fn channel_create() -> (i64, u64) {
             options(nostack),
         );
     }
-    (left, right)
+    let left = Handle::from_syscall_return(left)?;
+    let right = Handle::new(right as u32).ok_or(0_i64)?;
+    Ok((left, right))
 }
 
 /// Достаёт одно сообщение (без handle'ов) из inbound-очереди канала `handle`
 /// в `bytes`. Возврат: `bytes_len | (handles_count << 32)` либо
 /// `-(SyscallError)`.
-pub fn channel_read(handle: usize, bytes: &mut [u8]) -> i64 {
+pub fn channel_read(handle: Handle, bytes: &mut [u8]) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы лежат в x0..x4:
     // handle, bytes_va, bytes_cap, handles_va, handles_cap. Ядро пишет payload
@@ -81,7 +82,7 @@ pub fn channel_read(handle: usize, bytes: &mut [u8]) -> i64 {
         asm!(
             "svc #{op}",
             op = const SyscallOp::ChannelRead as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             in("x1") bytes.as_mut_ptr() as u64,
             in("x2") bytes.len() as u64,
             in("x3") 0_u64,
@@ -95,7 +96,7 @@ pub fn channel_read(handle: usize, bytes: &mut [u8]) -> i64 {
 
 /// Изымает `handle` из текущей таблицы и закрывает его. Возврат: 0 либо
 /// `-(SyscallError)`.
-pub fn handle_close(handle: usize) -> i64 {
+pub fn handle_close(handle: Handle) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
     // не передаётся.
@@ -103,7 +104,7 @@ pub fn handle_close(handle: usize) -> i64 {
         asm!(
             "svc #{op}",
             op = const SyscallOp::HandleClose as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             lateout("x0") ret,
             options(nostack),
         );
@@ -113,7 +114,7 @@ pub fn handle_close(handle: usize) -> i64 {
 
 /// Создаёт пустой user-процесс с именем `name` (UTF-8). Возврат: handle
 /// на `ProcessObject` либо `-(SyscallError)`.
-pub fn process_create(name: &[u8]) -> i64 {
+pub fn process_create(name: &[u8]) -> Result<Handle, i64> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
     // name_va, name_len; ядро читает имя по x0 до возврата из svc.
@@ -127,11 +128,11 @@ pub fn process_create(name: &[u8]) -> i64 {
             options(nostack),
         );
     }
-    ret
+    Handle::from_syscall_return(ret)
 }
 
 /// Возвращает handle на собственный `ProcessObject` либо `-(SyscallError)`.
-pub fn process_self() -> i64 {
+pub fn process_self() -> Result<Handle, i64> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
@@ -143,12 +144,12 @@ pub fn process_self() -> i64 {
             options(nostack),
         );
     }
-    ret
+    Handle::from_syscall_return(ret)
 }
 
 /// Загружает образ в процесс `handle` из сериализованного
 /// `UserImageDescAbi` в `desc`. Возврат: 0 либо `-(SyscallError)`.
-pub fn process_load_image(handle: usize, desc: &[u8]) -> i64 {
+pub fn process_load_image(handle: Handle, desc: &[u8]) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
     // process_handle, desc_va, desc_len; ядро копирует дескриптор и массив
@@ -157,7 +158,7 @@ pub fn process_load_image(handle: usize, desc: &[u8]) -> i64 {
         asm!(
             "svc #{op}",
             op = const SyscallOp::ProcessLoadImage as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             in("x1") desc.as_ptr() as u64,
             in("x2") desc.len() as u64,
             lateout("x0") ret,
@@ -169,7 +170,7 @@ pub fn process_load_image(handle: usize, desc: &[u8]) -> i64 {
 
 /// Финальный exit-код процесса `handle`. Возврат: exit code
 /// (нижние 32 бита, zero-extended) либо `-(SyscallError)`.
-pub fn process_exit_code(handle: usize) -> i64 {
+pub fn process_exit_code(handle: Handle) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
     // не передаётся.
@@ -177,7 +178,7 @@ pub fn process_exit_code(handle: usize) -> i64 {
         asm!(
             "svc #{op}",
             op = const SyscallOp::ProcessExitCode as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             lateout("x0") ret,
             options(nostack),
         );
@@ -190,13 +191,13 @@ pub fn process_exit_code(handle: usize) -> i64 {
 /// массив `[u32]` HandleId. Возврат: handle на `ThreadObject` либо
 /// `-(SyscallError)`.
 pub fn process_start(
-    handle: usize,
+    handle: Handle,
     entry_pc: u64,
     user_sp: u64,
     arg: u64,
     priority_and_count: u64,
     handles_va: u64,
-) -> i64 {
+) -> Result<Handle, i64> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x5; при
     // handles_count > 0 ядро читает массив handle'ов по x5 до возврата из svc.
@@ -204,7 +205,7 @@ pub fn process_start(
         asm!(
             "svc #{op}",
             op = const SyscallOp::ProcessStart as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             in("x1") entry_pc,
             in("x2") user_sp,
             in("x3") arg,
@@ -214,11 +215,11 @@ pub fn process_start(
             options(nostack),
         );
     }
-    ret
+    Handle::from_syscall_return(ret)
 }
 
 /// Возвращает handle на собственный `ThreadObject` либо `-(SyscallError)`.
-pub fn thread_self() -> i64 {
+pub fn thread_self() -> Result<Handle, i64> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
@@ -230,12 +231,12 @@ pub fn thread_self() -> i64 {
             options(nostack),
         );
     }
-    ret
+    Handle::from_syscall_return(ret)
 }
 
 /// Создаёт Memory-регион с Virtual backing: `size_bytes`, `access_mask`
 /// (биты R/W/X). Возврат: region handle либо `-(SyscallError)`.
-pub fn memory_create_virtual(size_bytes: u64, access_mask: u64) -> i64 {
+pub fn memory_create_virtual(size_bytes: u64, access_mask: u64) -> Result<Handle, i64> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1;
     // память ядру не передаётся.
@@ -249,12 +250,12 @@ pub fn memory_create_virtual(size_bytes: u64, access_mask: u64) -> i64 {
             options(nostack),
         );
     }
-    ret
+    Handle::from_syscall_return(ret)
 }
 
 /// Маппит регион `handle` в текущий user-AS: `flags_raw` - `UserMemFlags`.
 /// Возврат: базовый VA либо `-(SyscallError)`.
-pub fn memory_map(handle: usize, size_bytes: u64, flags_raw: u64) -> i64 {
+pub fn memory_map(handle: Handle, size_bytes: u64, flags_raw: u64) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
     // память ядру не передаётся.
@@ -262,7 +263,7 @@ pub fn memory_map(handle: usize, size_bytes: u64, flags_raw: u64) -> i64 {
         asm!(
             "svc #{op}",
             op = const SyscallOp::MemoryMap as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             in("x1") size_bytes,
             in("x2") flags_raw,
             lateout("x0") ret,
@@ -314,7 +315,7 @@ pub fn memory_allocate(size_bytes: u64, flags_raw: u64) -> i64 {
 /// Инспектирует Memory-регион `handle`. Возврат: `(size_bytes,
 /// (kind_tag << 16) | access_bits)`; первый элемент знаковый
 /// (`-(SyscallError)` при ошибке), второй валиден только при успехе.
-pub fn memory_region_inspect(handle: usize) -> (i64, u64) {
+pub fn memory_region_inspect(handle: Handle) -> (i64, u64) {
     let primary: i64;
     let secondary: u64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; ядро пишет
@@ -323,7 +324,7 @@ pub fn memory_region_inspect(handle: usize) -> (i64, u64) {
         asm!(
             "svc #{op}",
             op = const SyscallOp::MemoryRegionInspect as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             lateout("x0") primary,
             lateout("x1") secondary,
             options(nostack),
@@ -334,7 +335,7 @@ pub fn memory_region_inspect(handle: usize) -> (i64, u64) {
 
 /// Создаёт пустой Mailbox в текущей handle-table. Возврат: handle либо
 /// `-(SyscallError)`.
-pub fn mailbox_create() -> i64 {
+pub fn mailbox_create() -> Result<Handle, i64> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
@@ -346,12 +347,12 @@ pub fn mailbox_create() -> i64 {
             options(nostack),
         );
     }
-    ret
+    Handle::from_syscall_return(ret)
 }
 
 /// Кладёт `packet` (ровно `MAILBOX_PACKET_SIZE` байт) в очередь mailbox'а
 /// `handle`. Возврат: 0 либо `-(SyscallError)`.
-pub fn mailbox_queue(handle: usize, packet: &[u8]) -> i64 {
+pub fn mailbox_queue(handle: Handle, packet: &[u8]) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
     // handle, packet_va, packet_len; ядро читает пакет по x1 до возврата
@@ -360,7 +361,7 @@ pub fn mailbox_queue(handle: usize, packet: &[u8]) -> i64 {
         asm!(
             "svc #{op}",
             op = const SyscallOp::MailboxQueue as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             in("x1") packet.as_ptr() as u64,
             in("x2") packet.len() as u64,
             lateout("x0") ret,
@@ -372,7 +373,7 @@ pub fn mailbox_queue(handle: usize, packet: &[u8]) -> i64 {
 
 /// Ждёт пакет в mailbox'е `handle` (`timeout_ns == 0` - non-blocking poll)
 /// и пишет его в `packet`. Возврат: длина пакета либо `-(SyscallError)`.
-pub fn mailbox_wait(handle: usize, timeout_ns: u64, packet: &mut [u8]) -> i64 {
+pub fn mailbox_wait(handle: Handle, timeout_ns: u64, packet: &mut [u8]) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x3:
     // handle, timeout_ns, packet_va, packet_cap; ядро пишет пакет по x2 до
@@ -381,7 +382,7 @@ pub fn mailbox_wait(handle: usize, timeout_ns: u64, packet: &mut [u8]) -> i64 {
         asm!(
             "svc #{op}",
             op = const SyscallOp::MailboxWait as u16,
-            in("x0") handle as u64,
+            in("x0") u64::from(handle.raw()),
             in("x1") timeout_ns,
             in("x2") packet.as_mut_ptr() as u64,
             in("x3") packet.len() as u64,

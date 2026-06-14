@@ -67,9 +67,7 @@ fn encode_image_desc(segments_va: u64) -> [u8; IMAGE_DESC_SIZE] {
 #[kernel_test]
 fn self_spawn_via_syscalls() {
     // Регион child-кода: маппим RW, пишем инструкции, поднимаем в RX.
-    let region_ret = memory_create_virtual(PAGE_SIZE, ACCESS_RWX);
-    kernel_tests::kassert!(region_ret > 0);
-    let region = usize::try_from(region_ret).expect("positive handle fits usize");
+    let region = memory_create_virtual(PAGE_SIZE, ACCESS_RWX).expect("region handle");
     let va = memory_map(region, PAGE_SIZE, MEM_FLAGS_READ_WRITE);
     kernel_tests::kassert!(va > 0);
     let code_va = u64::try_from(va).expect("positive va fits u64");
@@ -83,17 +81,14 @@ fn self_spawn_via_syscalls() {
     }
     kernel_tests::kassert_eq!(memory_remap(code_va, PAGE_SIZE, MEM_FLAGS_READ_EXECUTE), 0);
 
-    let segment = encode_segment(u32::try_from(region_ret).expect("handle fits u32"));
+    let segment = encode_segment(region.raw());
     let desc = encode_image_desc(segment.as_ptr() as u64);
 
-    let child = process_create(b"child");
-    kernel_tests::kassert!(child > 0);
-    let child = usize::try_from(child).expect("positive handle fits usize");
+    let child = process_create(b"child").expect("child process handle");
     kernel_tests::kassert_eq!(process_load_image(child, &desc), 0);
 
     // priority = 1, bootstrap-handle'ов нет.
-    let thread = process_start(child, CHILD_CODE_VA, CHILD_STACK_TOP, 0, 1, 0);
-    kernel_tests::kassert!(thread > 0);
+    process_start(child, CHILD_CODE_VA, CHILD_STACK_TOP, 0, 1, 0).expect("child thread handle");
 
     let observed = object_wait_one(child, PROCESS_TERMINATED, CHILD_WAIT_TIMEOUT_NS);
     kernel_tests::kassert_eq!(observed, i64::from(PROCESS_TERMINATED));

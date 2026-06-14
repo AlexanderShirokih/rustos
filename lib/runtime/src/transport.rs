@@ -1,22 +1,22 @@
 //! Транспорт ipc-контрактов поверх канальных svc-обёрток.
 
 use ipc::{MessageLen, Transport, wire::IpcError};
-use syscall::SYSCALL_RETURN_SHOULD_WAIT;
+use syscall::{Handle, SYSCALL_RETURN_SHOULD_WAIT};
 
 use crate::{channel_read, channel_write};
 
-/// Порт ipc-канала: оборачивает сырой HandleId эндпоинта.
+/// Порт ipc-канала: оборачивает handle эндпоинта.
 ///
 /// Bootstrap-клиенты - отправители (контракт `Bootstrap` несёт только
 /// `#[cast]`), поэтому блокирующего приёма транспорт не предоставляет.
 #[derive(Clone, Copy)]
 pub struct ChannelTransport {
-    handle: usize,
+    handle: Handle,
 }
 
 impl ChannelTransport {
-    /// Связывает транспорт с HandleId канального эндпоинта.
-    pub fn new(handle: usize) -> Self {
+    /// Связывает транспорт с handle канального эндпоинта.
+    pub fn new(handle: Handle) -> Self {
         Self { handle }
     }
 }

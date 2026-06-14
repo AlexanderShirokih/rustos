@@ -11,9 +11,7 @@ const KEY: u64 = 0xCAFE_BABE;
 /// kind=User=0, status=0 и payload проходят валидацию).
 #[kernel_test]
 fn mailbox_round_trip() {
-    let mbox_ret = mailbox_create();
-    kernel_tests::kassert!(mbox_ret > 0);
-    let mbox = usize::try_from(mbox_ret).expect("positive handle fits usize");
+    let mbox = mailbox_create().expect("mailbox handle");
 
     let va = memory_allocate(0x1000, 0);
     kernel_tests::kassert!(va > 0);

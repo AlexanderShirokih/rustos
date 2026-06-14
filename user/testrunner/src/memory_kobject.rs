@@ -14,9 +14,7 @@ const EXPECTED_INSPECT_SECONDARY: u64 = (1 << 16) | ACCESS_RW;
 
 #[kernel_test]
 fn memory_kobject_map_and_inspect() {
-    let region_ret = memory_create_virtual(PAGE_SIZE, ACCESS_RW);
-    kernel_tests::kassert!(region_ret > 0);
-    let region = usize::try_from(region_ret).expect("positive handle fits usize");
+    let region = memory_create_virtual(PAGE_SIZE, ACCESS_RW).expect("region handle");
 
     let va = memory_map(region, PAGE_SIZE, 0);
     kernel_tests::kassert!(va > 0);

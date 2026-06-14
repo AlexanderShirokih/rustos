@@ -71,6 +71,44 @@
 
 #![cfg_attr(not(test), no_std)]
 
+use core::num::NonZeroU32;
+
+/// Capability процесса: непрозрачный идентификатор записи в его handle-table.
+///
+/// На syscall-ABI это ненулевой 32-битный HandleId; `0` зарезервирован под
+/// невалидный handle и конструктором не принимается. Структуру значения
+/// (generation/slot) интерпретирует только ядро.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Handle(NonZeroU32);
+
+impl Handle {
+    /// Оборачивает сырой HandleId; `None` при нулевом значении.
+    pub const fn new(raw: u32) -> Option<Self> {
+        match NonZeroU32::new(raw) {
+            Some(nz) => Some(Self(nz)),
+            None => None,
+        }
+    }
+
+    /// Сырое 32-битное значение для укладки в регистр или буфер syscall-ABI.
+    pub const fn raw(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Разбирает знаковый возврат svc-обёртки, отдающей handle: значение в
+    /// `1..=u32::MAX` - валидный handle, иначе `Err(ret)` (отрицательный
+    /// `ret` несёт `-(SyscallError)`).
+    pub const fn from_syscall_return(ret: i64) -> Result<Self, i64> {
+        if ret < 1 || ret > u32::MAX as i64 {
+            return Err(ret);
+        }
+        match NonZeroU32::new(ret as u32) {
+            Some(nz) => Ok(Self(nz)),
+            None => Err(ret),
+        }
+    }
+}
+
 /// Закрытый набор поддерживаемых syscall-операций.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -276,6 +314,23 @@ pub const SYSCALL_RETURN_SHOULD_WAIT: i64 = -7;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handle_new_rejects_zero() {
+        assert!(Handle::new(0).is_none());
+        assert_eq!(Handle::new(7).map(Handle::raw), Some(7));
+    }
+
+    #[test]
+    fn handle_from_syscall_return_splits_sign() {
+        assert_eq!(Handle::from_syscall_return(5).map(Handle::raw), Ok(5));
+        assert_eq!(Handle::from_syscall_return(-7), Err(-7));
+        assert_eq!(Handle::from_syscall_return(0), Err(0));
+        assert_eq!(
+            Handle::from_syscall_return(i64::from(u32::MAX) + 1),
+            Err(i64::from(u32::MAX) + 1)
+        );
+    }
 
     #[test]
     fn from_raw_known_ops() {

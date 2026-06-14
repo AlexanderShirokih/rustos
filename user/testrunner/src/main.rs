@@ -14,6 +14,7 @@ use ipc::wire::{IpcError, Str};
 use kernel_tests::kernel_test;
 use runtime::{ChannelTransport, thread_exit};
 use spin::Mutex;
+use syscall::Handle;
 
 mod channel;
 mod mailbox;
@@ -85,7 +86,10 @@ fn send_log_frame(payload: &[u8]) {
         return;
     };
 
-    let handle = BOOTSTRAP_HANDLE.load(Ordering::Relaxed);
+    let raw = BOOTSTRAP_HANDLE.load(Ordering::Relaxed);
+    let Some(handle) = Handle::new(raw as u32) else {
+        return;
+    };
     let client = BootstrapClient::new(ChannelTransport::new(handle));
 
     for _ in 0..SEND_RETRY_LIMIT {

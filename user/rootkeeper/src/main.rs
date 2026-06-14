@@ -7,17 +7,18 @@ use core::panic::PanicInfo;
 use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
 use ipc::wire::Str;
 use runtime::{ChannelTransport, object_wait_one, thread_exit};
-use syscall::CHANNEL_PEER_CLOSED;
+use syscall::{CHANNEL_PEER_CLOSED, Handle};
 
 /// `bootstrap_handle` приходит в x0 как сырой HandleId WRITE-конца канала,
 /// переданного ядром при спавне.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(bootstrap_handle: usize) -> ! {
-    let client = BootstrapClient::new(ChannelTransport::new(bootstrap_handle));
+    let bootstrap = Handle::new(bootstrap_handle as u32).expect("bootstrap handle is non-zero");
+    let client = BootstrapClient::new(ChannelTransport::new(bootstrap));
     let _ = client
         .log(Str::<LOG_MESSAGE_MAX>::new("rootkeeper started").expect("startup log must fit"));
 
-    let wait_ret = object_wait_one(bootstrap_handle, CHANNEL_PEER_CLOSED, u64::MAX);
+    let wait_ret = object_wait_one(bootstrap, CHANNEL_PEER_CLOSED, u64::MAX);
     thread_exit(u64::from(wait_ret < 0))
 }
 

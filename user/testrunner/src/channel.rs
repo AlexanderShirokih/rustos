@@ -7,11 +7,7 @@ use runtime::{channel_create, channel_read, channel_write, memory_allocate};
 /// `MemoryAllocate`. Возврат `ChannelRead` = 1: 1 байт payload, 0 handle'ов.
 #[kernel_test]
 fn channel_round_trip() {
-    let (left_ret, right) = channel_create();
-    kernel_tests::kassert!(left_ret > 0);
-    kernel_tests::kassert!(right > 0);
-    let left = usize::try_from(left_ret).expect("positive handle fits usize");
-    let right = usize::try_from(right).expect("handle fits usize");
+    let (left, right) = channel_create().expect("channel_create must succeed");
 
     let va = memory_allocate(0x1000, 0);
     kernel_tests::kassert!(va > 0);

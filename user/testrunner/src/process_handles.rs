@@ -7,13 +7,9 @@ use runtime::{handle_close, process_self, thread_self};
 
 #[kernel_test]
 fn process_and_thread_self_handles() {
-    let process = process_self();
-    kernel_tests::kassert!(process > 0);
-    let process = usize::try_from(process).expect("positive handle fits usize");
+    let process = process_self().expect("process_self handle");
     kernel_tests::kassert_eq!(handle_close(process), 0);
 
-    let thread = thread_self();
-    kernel_tests::kassert!(thread > 0);
-    let thread = usize::try_from(thread).expect("positive handle fits usize");
+    let thread = thread_self().expect("thread_self handle");
     kernel_tests::kassert_eq!(handle_close(thread), 0);
 }
