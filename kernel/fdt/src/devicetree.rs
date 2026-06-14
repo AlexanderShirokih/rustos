@@ -139,8 +139,8 @@ impl<'a> DeviceTree<'a> {
         let ptr_u8 = address as *const u8;
 
         // SAFETY: вызывающий гарантирует, что address указывает на валидный FDT-blob
-        // размером не менее 16 байт (4 × u32 заголовка).
-        let hdr_buf = unsafe { from_raw_parts(ptr_u8, size_of::<u32>() * 4) };
+        // размером не менее 24 байт (6 x u32 заголовка).
+        let hdr_buf = unsafe { from_raw_parts(ptr_u8, size_of::<u32>() * 6) };
 
         let mut cursor = Cursor::new(hdr_buf);
         let header = FdtHeader::read_checked(&mut cursor)?;
@@ -165,6 +165,13 @@ impl<'a> DeviceTree<'a> {
 
     pub fn size(&self) -> usize {
         self.header.total_size
+    }
+
+    pub fn memory_reservations(&self) -> MemoryReservationIter<'a> {
+        MemoryReservationIter {
+            buffer: self.buffer,
+            position: self.header.mem_rsvmap_off as usize,
+        }
     }
 
     pub fn nodes(&'a self) -> NodeIter<'a> {
@@ -226,6 +233,42 @@ impl<'a> DeviceTree<'a> {
     }
 }
 
+/// Запись блока резервирования памяти FDT
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReservedRange {
+    pub address: usize,
+    pub size: usize,
+}
+
+/// Итератор по 16-байтовым записям блока резервирования (u64 BE address, u64 BE size).
+pub struct MemoryReservationIter<'a> {
+    buffer: &'a [u8],
+    position: usize,
+}
+
+impl Iterator for MemoryReservationIter<'_> {
+    type Item = ReservedRange;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let address = read_u64_be(self.buffer, self.position)?;
+        let size = read_u64_be(self.buffer, self.position + size_of::<u64>())?;
+        if address == 0 && size == 0 {
+            return None;
+        }
+
+        self.position += 2 * size_of::<u64>();
+        Some(ReservedRange {
+            address: address as usize,
+            size: size as usize,
+        })
+    }
+}
+
+fn read_u64_be(buffer: &[u8], offset: usize) -> Option<u64> {
+    let slice = buffer.get(offset..offset + size_of::<u64>())?;
+    Some(u64::from_be_bytes(slice.try_into().unwrap()))
+}
+
 /// Заголовок Flattened Device Tree.
 #[derive(Clone, Copy)]
 struct FdtHeader {
@@ -237,6 +280,9 @@ struct FdtHeader {
 
     /// Смещение пула строк от начала буфера.
     strings_off: u32,
+
+    /// Смещение блока резервирования памяти от начала буфера.
+    mem_rsvmap_off: u32,
 }
 
 impl FdtHeader {
@@ -255,11 +301,13 @@ impl FdtHeader {
 
         let struct_off = cur.read_u32();
         let strings_off = cur.read_u32();
+        let mem_rsvmap_off = cur.read_u32();
 
         Ok(FdtHeader {
             total_size,
             struct_off,
             strings_off,
+            mem_rsvmap_off,
         })
     }
 }

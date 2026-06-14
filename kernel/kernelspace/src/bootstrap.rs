@@ -10,9 +10,13 @@ use ipc::{
     wire::{IpcError as WireError, Str},
 };
 use klog::{info, warn};
+use core::num::NonZeroU32;
+
+use collections::LockCell;
 use kobject::{
     CHANNEL_PEER_CLOSED, CHANNEL_READABLE, Channel, Handle, HandleId, IpcError as KernelIpcError,
-    KObject, Message, Rights, channel_read, channel_write, install_handle, object_wait_one,
+    KObject, MESSAGE_MAX_HANDLES, Message, Rights, channel_read, channel_write, install_handle,
+    object_wait_one, runtime,
 };
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
@@ -156,23 +160,71 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
 }
 
 impl Transport for ChannelTransport {
-    fn write_message(&self, bytes: &[u8], _handles: &[u32]) -> Result<(), WireError> {
-        let message = Message::from_bytes(bytes).map_err(map_kernel_error)?;
-        channel_write(self.handle, message).map_err(map_kernel_error)
+    fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), WireError> {
+        if handles.is_empty() {
+            let message = Message::from_bytes(bytes).map_err(map_kernel_error)?;
+            return channel_write(self.handle, message).map_err(map_kernel_error);
+        }
+
+        let table = runtime()
+            .current_handle_table()
+            .ok_or(WireError::PeerClosed)?;
+        let mut ids = [self.handle; MESSAGE_MAX_HANDLES];
+        for (slot, &raw) in ids.iter_mut().zip(handles) {
+            let nz = NonZeroU32::new(raw).ok_or(WireError::FrameOverflow)?;
+            *slot = HandleId::from_raw(nz);
+        }
+        let ids = &ids[..handles.len()];
+
+        let endpoint = table
+            .with_lock(|tbl| tbl.get_channel(self.handle, Rights::WRITE))
+            .map_err(map_kernel_error)?;
+        // Изъятие handle'ов из таблицы и enqueue атомарны: на ShouldWait/closed
+        // build не выполняется, handle'ы остаются у отправителя.
+        let outer = endpoint.try_write::<KernelIpcError>(|| {
+            let mut message = Message::from_bytes(bytes)?;
+            let drained = table.with_lock(|tbl| tbl.try_drain_for_transfer(ids, Rights::TRANSFER))?;
+            for handle in drained {
+                message.push_handle(handle)?;
+            }
+            Ok(message)
+        });
+        match outer {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) | Err(e) => Err(map_kernel_error(e)),
+        }
     }
 
-    fn read_message(
-        &self,
-        bytes: &mut [u8],
-        _handles: &mut [u32],
-    ) -> Result<MessageLen, WireError> {
-        let message = channel_read(self.handle).map_err(map_kernel_error)?;
-        let payload = message.bytes();
-        if payload.len() > bytes.len() {
+    fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, WireError> {
+        let mut message = channel_read(self.handle).map_err(map_kernel_error)?;
+        let payload_len = {
+            let payload = message.bytes();
+            if payload.len() > bytes.len() {
+                return Err(WireError::Truncated);
+            }
+            bytes[..payload.len()].copy_from_slice(payload);
+            payload.len()
+        };
+
+        let handle_count = message.handles_count();
+        if handle_count > handles.len() {
             return Err(WireError::Truncated);
         }
-        bytes[..payload.len()].copy_from_slice(payload);
-        Ok(MessageLen::new(payload.len(), 0))
+        if handle_count > 0 {
+            let table = runtime()
+                .current_handle_table()
+                .ok_or(WireError::PeerClosed)?;
+            let drained: alloc::vec::Vec<Handle> = message.drain_handles().collect();
+            table.with_lock(|tbl| -> Result<(), WireError> {
+                for (slot, handle) in handles.iter_mut().zip(drained) {
+                    let id = tbl.insert(handle).map_err(map_kernel_error)?;
+                    *slot = id.raw().get();
+                }
+                Ok(())
+            })?;
+        }
+
+        Ok(MessageLen::new(payload_len, handle_count))
     }
 
     fn wait_readable(&self, timeout_ns: u64) -> Result<(), WireError> {

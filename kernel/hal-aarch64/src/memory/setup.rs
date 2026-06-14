@@ -2,7 +2,7 @@
 
 use fdt::{
     devicetree::DeviceTree,
-    devicetreeext::{AddressSpace, NodeExt, PropExt},
+    devicetreeext::{AddressSpace, NodeExt, PropExt, reserved_memory_ranges},
 };
 use hal_aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
 use hal_common::boot::BootPayloadRange;
@@ -60,6 +60,34 @@ pub(crate) fn build_memory_layout(
             range.end_exclusive().as_usize(),
             KernelRoData::flags(),
         ));
+    }
+
+    // Блок резервирования памяти из FDT.
+    for reservation in dt.memory_reservations() {
+        let Some(end) = reservation.address.checked_add(reservation.size) else {
+            continue;
+        };
+        if reservation.size == 0 {
+            continue;
+        }
+        layout.add(MemoryRegion::new(
+            RegionTag::Other,
+            reservation.address,
+            end,
+            KernelRoData::flags(),
+        ));
+    }
+
+    // Статические reg-диапазоны под /reserved-memory.
+    if let Some(reserved_regions) = reserved_memory_ranges(dt) {
+        for region in reserved_regions {
+            layout.add(MemoryRegion::new(
+                RegionTag::Other,
+                region.start(),
+                region.end(),
+                KernelRoData::flags(),
+            ));
+        }
     }
 
     // SAFETY: символы `_text_start`/`_text_end`/`_rodata_*`/`_rw_*` определены линкером и

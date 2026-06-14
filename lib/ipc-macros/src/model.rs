@@ -36,6 +36,7 @@ pub enum WireTy {
     Bool,
     Str(Box<Bound>),
     Bytes(Box<Bound>),
+    Cap,
 }
 
 /// Верхняя оценка длины `data` поля при максимальном значении; `None` для
@@ -45,12 +46,16 @@ fn max_data_len(ty: &WireTy) -> Option<usize> {
         WireTy::Uint(width) | WireTy::Int(width) => Some(*width as usize),
         WireTy::Bool => Some(1),
         WireTy::Str(bound) | WireTy::Bytes(bound) => bound.lit,
+        WireTy::Cap => Some(1),
     }
 }
 
 /// Owned-тип допустим в возврате two-way.
 fn is_owned(ty: &WireTy) -> bool {
-    matches!(ty, WireTy::Uint(_) | WireTy::Int(_) | WireTy::Bool)
+    matches!(
+        ty,
+        WireTy::Uint(_) | WireTy::Int(_) | WireTy::Bool | WireTy::Cap
+    )
 }
 
 /// Параметр операции: имя, позиционный `field_id`, тип.
@@ -428,6 +433,7 @@ fn resolve_wire_ty(ty: &Type) -> syn::Result<WireTy> {
         "bool" => Ok(WireTy::Bool),
         "Str" => Ok(WireTy::Str(Box::new(bound_arg(segment, ty)?))),
         "Bytes" => Ok(WireTy::Bytes(Box::new(bound_arg(segment, ty)?))),
+        "Cap" => Ok(WireTy::Cap),
         _ => Err(unsupported_type(ty)),
     }
 }

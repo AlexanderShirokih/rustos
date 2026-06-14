@@ -2,7 +2,7 @@ use core::cmp::min;
 
 use collections::Vec;
 
-use crate::devicetree::{Node, Property};
+use crate::devicetree::{DeviceTree, Node, Property};
 
 /// Содержит пару адрес (сдвиг) и размер
 #[derive(Debug, Copy, Clone)]
@@ -134,6 +134,27 @@ impl NodeExt for Node<'_> {
             size_cells,
         })
     }
+}
+
+/// Статические reg-диапазоны дочерних узлов `/reserved-memory`.
+/// Узлы с динамическим `size` (без `reg`) пропускаются.
+pub fn reserved_memory_ranges<'a>(
+    dt: &'a DeviceTree<'a>,
+) -> Option<impl Iterator<Item = AddressSpace> + 'a> {
+    let reserved = dt.find("/reserved-memory")?;
+    let cells_size = reserved.cells_size().unwrap_or_default();
+
+    Some(
+        reserved
+            .children()
+            .filter_map(|node| node.prop("reg"))
+            .flat_map(move |prop| {
+                prop.try_as_reg_list::<8>(cells_size)
+                    .unwrap_or_default()
+                    .into_iter()
+            })
+            .filter(|offset_size| offset_size.size > 0),
+    )
 }
 
 /// Дополнительные методы для работы со свойством.

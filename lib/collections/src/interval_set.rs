@@ -403,6 +403,29 @@ mod tests {
     }
 
     #[test]
+    fn reservations_subtract_overlapping_and_out_of_set() {
+        let mut s = StaticIntervalSet::<usize, 16>::new();
+        s.add(0x1000, 0x9000).unwrap();
+        s.remove(0x2000, 0x4000).unwrap();
+        s.remove(0x9000, 0xA000).unwrap();
+        s.remove(0x2_0000, 0x2_1000).unwrap();
+
+        let expected = [
+            Interval {
+                start: 0x1000,
+                end: 0x2000,
+            },
+            Interval {
+                start: 0x4000,
+                end: 0x9000,
+            },
+        ];
+        assert_eq!(s.len(), 2);
+        assert_eq!(*s.get(0).unwrap(), expected[0]);
+        assert_eq!(*s.get(1).unwrap(), expected[1]);
+    }
+
+    #[test]
     fn capacity_overflow() {
         let mut s = StaticIntervalSet::<i32, 2>::new();
         assert!(s.add(0, 10).is_some());

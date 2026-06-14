@@ -79,6 +79,7 @@ fn data_len_expr(ty: &WireTy) -> TokenStream {
             let n = &bound.value;
             quote!(#n)
         }
+        WireTy::Cap => quote!(1usize),
     }
 }
 
@@ -103,6 +104,7 @@ fn wire_ty_tokens(ty: &WireTy, lifetime: &TokenStream) -> TokenStream {
             let n = &bound.expr;
             quote!(::ipc::wire::Bytes<#lifetime, #n>)
         }
+        WireTy::Cap => quote!(::ipc::wire::Cap),
     }
 }
 
@@ -119,6 +121,7 @@ fn wire_ty_desc(ty: &WireTy) -> TokenStream {
             let n = &bound.value;
             quote!(::ipc::schema::WireType::BoundedBytes(#n))
         }
+        WireTy::Cap => quote!(::ipc::schema::WireType::Capability),
     }
 }
 
@@ -135,14 +138,13 @@ fn suffixed(trait_ident: &Ident, suffix: &str) -> Ident {
 
 fn decode_single_value(ty: &WireTy, body: &TokenStream) -> TokenStream {
     let ty_tokens = wire_ty_tokens(ty, &quote!('_));
+    let decode = decode_field_value(ty);
     quote! {{
         let mut __cursor = ::ipc::wire::FieldCursor::new(#body);
         let mut __value: ::core::option::Option<#ty_tokens> = ::core::option::Option::None;
         while let ::core::option::Option::Some(__field) = __cursor.next_field()? {
             if __field.id == 1u8 {
-                __value = ::core::option::Option::Some(
-                    <#ty_tokens as ::ipc::WireValue>::from_field(__field.data)?,
-                );
+                __value = ::core::option::Option::Some(#decode);
             }
         }
         match __value {
@@ -154,16 +156,81 @@ fn decode_single_value(ty: &WireTy, body: &TokenStream) -> TokenStream {
     }}
 }
 
-fn encode_params(params: &[Param]) -> TokenStream {
+/// Декод одного значения поля; для Cap читает индекс и достаёт id из `__in_handles`,
+/// иначе - обычный `WireValue::from_field`. Опирается на `__field`/`__in_handles` в области.
+fn decode_field_value(ty: &WireTy) -> TokenStream {
+    match ty {
+        WireTy::Cap => quote! {{
+            let __idx = ::ipc::wire::value::decode_endpoint_index(__field.data)?;
+            let __raw = *__in_handles
+                .get(__idx as usize)
+                .ok_or(::ipc::wire::IpcError::BadLength)?;
+            let __nz = ::core::num::NonZeroU32::new(__raw)
+                .ok_or(::ipc::wire::IpcError::BadLength)?;
+            ::ipc::wire::Cap::from_raw(__nz)
+        }},
+        _ => {
+            let ty_tokens = wire_ty_tokens(ty, &quote!('_));
+            quote!(<#ty_tokens as ::ipc::WireValue>::from_field(__field.data)?)
+        }
+    }
+}
+
+/// Запись одного значения в `buf`; для Cap пишет индекс и кладёт id в `__out_handles`,
+/// иначе - обычный `WireValue::write_as_field`. Опирается на `__out_handles`/`__out_handle_count`.
+fn encode_field(value: &TokenStream, field_id: u8, ty: &WireTy, buf: &TokenStream) -> TokenStream {
+    match ty {
+        WireTy::Cap => quote! {
+            #buf.write_field(
+                #field_id,
+                &::ipc::wire::value::encode_endpoint_index(__out_handle_count as u8),
+            )?;
+            __out_handles[__out_handle_count] = #value.raw().get();
+            __out_handle_count += 1;
+        },
+        _ => quote! {
+            ::ipc::WireValue::write_as_field(&#value, &mut #buf, #field_id)?;
+        },
+    }
+}
+
+/// Эмитит запись параметров запроса в `__buf` и аргумент handle-среза для `write_message`.
+/// Массив `__out_handles` объявляется только при наличии Cap-поля.
+fn encode_params(params: &[Param]) -> (TokenStream, TokenStream) {
+    let has_cap = params.iter().any(|param| matches!(param.ty, WireTy::Cap));
     let writes = params.iter().map(|param| {
         let ident = &param.ident;
-        let field_id = param.field_id;
-        quote! {
-            ::ipc::WireValue::write_as_field(&#ident, &mut __buf, #field_id)?;
-        }
+        encode_field(&quote!(#ident), param.field_id, &param.ty, &quote!(__buf))
     });
-    quote! {
-        #(#writes)*
+    let decl = handles_out_decl(has_cap);
+    let handles_arg = handles_out_arg(has_cap);
+    (quote! { #decl #(#writes)* }, handles_arg)
+}
+
+/// Эмитит запись возвращаемого значения `value` в `buf` и аргумент handle-среза.
+fn encode_return(value: &TokenStream, ty: &WireTy, buf: &TokenStream) -> (TokenStream, TokenStream) {
+    let has_cap = matches!(ty, WireTy::Cap);
+    let decl = handles_out_decl(has_cap);
+    let write = encode_field(value, 1u8, ty, buf);
+    (quote! { #decl #write }, handles_out_arg(has_cap))
+}
+
+fn handles_out_decl(has_cap: bool) -> TokenStream {
+    if has_cap {
+        quote! {
+            let mut __out_handles = [0u32; ::ipc::wire::MESSAGE_MAX_HANDLES];
+            let mut __out_handle_count = 0usize;
+        }
+    } else {
+        TokenStream::new()
+    }
+}
+
+fn handles_out_arg(has_cap: bool) -> TokenStream {
+    if has_cap {
+        quote!(&__out_handles[..__out_handle_count])
+    } else {
+        quote!(&[])
     }
 }
 
@@ -228,7 +295,7 @@ fn expand_client_method(protocol: &Protocol, op: &Operation) -> TokenStream {
     let vis = &protocol.vis;
     let method_ident = &op.ident;
     let ordinal = op.ordinal;
-    let encode = encode_params(&op.params);
+    let (encode, encode_handles) = encode_params(&op.params);
     let params_sig = param_signature(&op.params);
 
     match op.kind {
@@ -241,12 +308,19 @@ fn expand_client_method(protocol: &Protocol, op: &Operation) -> TokenStream {
                     __buf.write_header(&::ipc::wire::Header::new(#ordinal, 0u32, 0u16))?;
                     #encode
                     __buf.finish()?;
-                    self.transport.write_message(__buf.as_bytes(), &[])
+                    self.transport.write_message(__buf.as_bytes(), #encode_handles)
                 }
             }
         }
         Kind::Call => {
             let ret = op.ret.as_ref().expect("two-way carries a return type");
+            let ret_has_cap = matches!(ret.ok(), WireTy::Cap)
+                || ret.err().is_some_and(|err| matches!(err, WireTy::Cap));
+            let in_handles_decl = if ret_has_cap {
+                quote!(let __in_handles = &__handles[..__len.handles];)
+            } else {
+                TokenStream::new()
+            };
             let ok_ty = wire_ty_tokens(ret.ok(), &quote!('_));
             let (ret_ty, decode_response) = if let Some(err) = ret.err() {
                 let err_ty = wire_ty_tokens(err, &quote!('_));
@@ -287,7 +361,7 @@ fn expand_client_method(protocol: &Protocol, op: &Operation) -> TokenStream {
                     __buf.write_header(&::ipc::wire::Header::new(#ordinal, __txid, 0u16))?;
                     #encode
                     __buf.finish()?;
-                    self.transport.write_message(__buf.as_bytes(), &[])?;
+                    self.transport.write_message(__buf.as_bytes(), #encode_handles)?;
 
                     let mut __bytes = [0u8; ::ipc::wire::MESSAGE_INLINE_MAX];
                     let mut __handles = [0u32; ::ipc::wire::MESSAGE_MAX_HANDLES];
@@ -304,6 +378,7 @@ fn expand_client_method(protocol: &Protocol, op: &Operation) -> TokenStream {
                             continue;
                         }
                         let __body = &__frame[::ipc::wire::HEADER_SIZE..];
+                        #in_handles_decl
                         return { #decode_response };
                     }
                 }
@@ -370,12 +445,10 @@ fn decode_params(params: &[Param]) -> (TokenStream, TokenStream) {
     let arms = params.iter().map(|param| {
         let ident = format_ident!("__arg_{}", param.ident);
         let field_id = param.field_id;
-        let ty = wire_ty_tokens(&param.ty, &quote!('_));
+        let decode = decode_field_value(&param.ty);
         quote! {
             #field_id => {
-                #ident = ::core::option::Option::Some(
-                    <#ty as ::ipc::WireValue>::from_field(__field.data)?,
-                );
+                #ident = ::core::option::Option::Some(#decode);
             }
         }
     });
@@ -392,7 +465,14 @@ fn decode_params(params: &[Param]) -> (TokenStream, TokenStream) {
         }
     });
 
+    let has_cap = params.iter().any(|param| matches!(param.ty, WireTy::Cap));
+    let in_handles_decl = if has_cap {
+        quote!(let __in_handles = &__handles[..__len.handles];)
+    } else {
+        TokenStream::new()
+    };
     let decode = quote! {
+        #in_handles_decl
         #(#decls)*
         let mut __cursor = ::ipc::wire::FieldCursor::new(__body);
         while let ::core::option::Option::Some(__field) = __cursor.next_field()? {
@@ -469,9 +549,9 @@ fn expand_dispatch_arm(op: &Operation) -> TokenStream {
         },
         Kind::Call => {
             let ret = op.ret.as_ref().expect("two-way carries a return type");
-            let success = encode_success_value(ret.ok());
+            let (success, success_handles) = encode_return(&quote!(__ok), ret.ok(), &quote!(__reply));
             let body = if let Some(err) = ret.err() {
-                let encode_err = encode_error_value(err);
+                let (encode_err, err_handles) = encode_return(&quote!(__err), err, &quote!(__reply));
                 quote! {
                     match srv.#method_ident(#call_args) {
                         ::core::result::Result::Ok(__ok) => {
@@ -483,7 +563,7 @@ fn expand_dispatch_arm(op: &Operation) -> TokenStream {
                             ))?;
                             #success
                             __reply.finish()?;
-                            transport.write_message(__reply.as_bytes(), &[])?;
+                            transport.write_message(__reply.as_bytes(), #success_handles)?;
                         }
                         ::core::result::Result::Err(__err) => {
                             let mut __reply = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
@@ -494,7 +574,7 @@ fn expand_dispatch_arm(op: &Operation) -> TokenStream {
                             ))?;
                             #encode_err
                             __reply.finish()?;
-                            transport.write_message(__reply.as_bytes(), &[])?;
+                            transport.write_message(__reply.as_bytes(), #err_handles)?;
                         }
                     }
                 }
@@ -509,7 +589,7 @@ fn expand_dispatch_arm(op: &Operation) -> TokenStream {
                     ))?;
                     #success
                     __reply.finish()?;
-                    transport.write_message(__reply.as_bytes(), &[])?;
+                    transport.write_message(__reply.as_bytes(), #success_handles)?;
                 }
             };
             quote! {
@@ -521,18 +601,6 @@ fn expand_dispatch_arm(op: &Operation) -> TokenStream {
             }
         }
         Kind::Event => TokenStream::new(),
-    }
-}
-
-fn encode_success_value(_ty: &WireTy) -> TokenStream {
-    quote! {
-        ::ipc::WireValue::write_as_field(&__ok, &mut __reply, 1u8)?;
-    }
-}
-
-fn encode_error_value(_ty: &WireTy) -> TokenStream {
-    quote! {
-        ::ipc::WireValue::write_as_field(&__err, &mut __reply, 1u8)?;
     }
 }
 
@@ -575,7 +643,7 @@ fn expand_events(protocol: &Protocol) -> TokenStream {
     let sender_methods = events.iter().map(|op| {
         let method_ident = format_ident!("emit_{}", op.ident);
         let ordinal = op.ordinal;
-        let encode = encode_params(&op.params);
+        let (encode, encode_handles) = encode_params(&op.params);
         let params_sig = param_signature(&op.params);
         let docs = op_docs(op);
         quote! {
@@ -588,7 +656,7 @@ fn expand_events(protocol: &Protocol) -> TokenStream {
                 __buf.write_header(&::ipc::wire::Header::new(#ordinal, 0u32, 0u16))?;
                 #encode
                 __buf.finish()?;
-                transport.write_message(__buf.as_bytes(), &[])
+                transport.write_message(__buf.as_bytes(), #encode_handles)
             }
         }
     });

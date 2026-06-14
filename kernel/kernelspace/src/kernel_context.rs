@@ -16,6 +16,7 @@ pub struct KernelContext {
     driver_registry: Mutex<RuntimeDriverRegistry>,
     address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
     userland_blob: Option<&'static [u8]>,
+    dtb_virt: usize,
 }
 
 impl KernelContext {
@@ -26,6 +27,7 @@ impl KernelContext {
         mmio_arena_base: PageAlignedVirtualAddress,
         mmio_arena_size: NonZeroUsize,
         userland_blob: Option<&'static [u8]>,
+        dtb_virt: usize,
     ) -> KernelContext {
         // Публикуем глобальные слоты для модулей без KernelContext.
         syscall_bridge::install_address_space_factory(address_space_factory);
@@ -47,6 +49,7 @@ impl KernelContext {
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             address_space_factory,
             userland_blob,
+            dtb_virt,
         }
     }
 
@@ -58,6 +61,11 @@ impl KernelContext {
     /// Байты userland blob из initrd, если загрузчик передал initrd.
     pub fn userland_blob(&self) -> Option<&'static [u8]> {
         self.userland_blob
+    }
+
+    /// Виртуальный адрес DTB в higher-half (живёт весь срок ядра).
+    pub fn dtb_virt(&self) -> usize {
+        self.dtb_virt
     }
 
     pub fn with_runtime_state<R>(

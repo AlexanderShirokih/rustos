@@ -355,6 +355,28 @@ impl<P> ServerEnd<P> {
     }
 }
 
+/// Нетипизированный capability: сырой `u32`-идентификатор хэндла в сообщении.
+/// В теле едет индекс в handle-массиве; сам id - вне тела.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cap {
+    raw: NonZeroU32,
+}
+
+impl Cap {
+    /// Оборачивает сырой handle-id в capability.
+    #[must_use]
+    pub const fn from_raw(raw: NonZeroU32) -> Self {
+        Self { raw }
+    }
+
+    /// Сырой handle-id capability.
+    #[must_use]
+    pub const fn raw(self) -> NonZeroU32 {
+        self.raw
+    }
+}
+
 /// Bounded UTF-8 строка: фактическая длина <= `N`.
 /// `data` записи - UTF-8 байты без длины-префикса.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -291,3 +291,75 @@ impl CalcEvents for TickHandler {
         self.last_seq = Some(seq);
     }
 }
+
+/// Протокол с capability: проверяет, что handle едет вне тела (out-of-band).
+#[ipc::protocol(name = "CapProto")]
+trait CapProto {
+    #[call]
+    fn echo_cap(&self, c: ipc::wire::Cap) -> ipc::wire::Cap;
+
+    #[call]
+    fn acquire(&self, ok: bool) -> Result<ipc::wire::Cap, u32>;
+}
+
+/// Сервис: возвращает присланный handle и минтит фиксированный по запросу.
+struct CapServer;
+
+impl CapProtoService for CapServer {
+    fn echo_cap(&mut self, c: ipc::wire::Cap) -> ipc::wire::Cap {
+        c
+    }
+
+    fn acquire(&mut self, ok: bool) -> Result<ipc::wire::Cap, u32> {
+        if ok {
+            Ok(ipc::wire::Cap::from_raw(
+                std::num::NonZeroU32::new(0x55).expect("non-zero"),
+            ))
+        } else {
+            Err(7)
+        }
+    }
+}
+
+#[test]
+fn cap_param_and_return_round_trip() {
+    let (client_end, server_end) = MockEnd::pair();
+    let client = CapProtoClient::new(client_end);
+    thread::scope(|scope| {
+        let server = scope.spawn(move || {
+            let mut srv = CapServer;
+            for _ in 0..2 {
+                server_end.wait_readable(u64::MAX).expect("server wait");
+                dispatch_cap_proto(&mut srv, &server_end).expect("dispatch ok");
+            }
+        });
+        let sent = ipc::wire::Cap::from_raw(std::num::NonZeroU32::new(0x1234).expect("non-zero"));
+        let echoed = client.echo_cap(sent).expect("echo ok");
+        assert_eq!(echoed.raw().get(), 0x1234);
+
+        let acquired = client.acquire(true).expect("acquire ok");
+        assert_eq!(
+            acquired,
+            Ok(ipc::wire::Cap::from_raw(
+                std::num::NonZeroU32::new(0x55).expect("non-zero")
+            ))
+        );
+        server.join().expect("server thread");
+    });
+}
+
+#[test]
+fn cap_domain_error_carries_no_handle() {
+    let (client_end, server_end) = MockEnd::pair();
+    let client = CapProtoClient::new(client_end);
+    thread::scope(|scope| {
+        let server = scope.spawn(move || {
+            let mut srv = CapServer;
+            server_end.wait_readable(u64::MAX).expect("server wait");
+            dispatch_cap_proto(&mut srv, &server_end).expect("dispatch ok");
+        });
+        let acquired = client.acquire(false).expect("acquire ok");
+        assert_eq!(acquired, Err(7));
+        server.join().expect("server thread");
+    });
+}

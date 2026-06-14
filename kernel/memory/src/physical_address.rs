@@ -178,3 +178,36 @@ impl<const SHIFT: u8> From<AlignedPhysicalAddress<SHIFT>> for PhysicalAddress {
 
 // Псевдоним для частного случая
 pub type PageAlignedAddress = AlignedPhysicalAddress<12>; // 4KB страницы
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aligned_down_rounds_toward_zero() {
+        let addr = PageAlignedAddress::aligned_down(PhysicalAddress::new(0x1234));
+        assert_eq!(addr.as_usize(), 0x1000);
+    }
+
+    #[test]
+    fn aligned_up_rounds_away_from_zero() {
+        let addr = PageAlignedAddress::aligned_up(PhysicalAddress::new(0x1234));
+        assert_eq!(addr.as_usize(), 0x2000);
+    }
+
+    #[test]
+    fn exact_boundary_stays_put() {
+        let down = PageAlignedAddress::aligned_down(PhysicalAddress::new(0x2000));
+        let up = PageAlignedAddress::aligned_up(PhysicalAddress::new(0x2000));
+        assert_eq!(down.as_usize(), 0x2000);
+        assert_eq!(up.as_usize(), 0x2000);
+    }
+
+    #[test]
+    fn reservation_over_reserve_direction() {
+        let start = PageAlignedAddress::aligned_down(PhysicalAddress::new(0x1234));
+        let end = PageAlignedAddress::aligned_up(PhysicalAddress::new(0x3001));
+        assert_eq!(start.as_usize(), 0x1000);
+        assert_eq!(end.as_usize(), 0x4000);
+    }
+}

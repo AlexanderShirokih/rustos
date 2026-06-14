@@ -30,6 +30,8 @@ pub enum WireType {
     BoundedStr(usize),
     /// Bounded байтовая строка с границей длины `N`.
     BoundedBytes(usize),
+    /// Capability: handle едет вне тела, в поле - индекс в handle-массиве.
+    Capability,
 }
 
 /// Описание одного поля операции: позиционный `field_id` и тип значения.

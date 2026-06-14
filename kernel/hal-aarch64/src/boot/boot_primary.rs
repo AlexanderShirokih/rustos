@@ -127,6 +127,7 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
         mmio_arena_base,
         mmio_arena_size,
         userland_blob,
+        dtb_virt,
     )));
 
     #[cfg(feature = "power-semihosting")]

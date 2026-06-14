@@ -1,6 +1,6 @@
 use fdt::{
     devicetree::DeviceTree,
-    devicetreeext::{NodeExt, PropExt},
+    devicetreeext::{NodeExt, PropExt, reserved_memory_ranges},
 };
 
 // ─── Построение DTB ─────────────────────────────────────────────────────────
@@ -156,8 +156,13 @@ fn build_dtb_with_children() -> Vec<u8> {
 }
 
 fn write_header(buf: &mut Vec<u8>, structure: &[u8], strings: &[u8]) {
+    write_header_rsv(buf, structure, strings, &[]);
+}
+
+fn write_header_rsv(buf: &mut Vec<u8>, structure: &[u8], strings: &[u8], reservations: &[(u64, u64)]) {
     let hdr: u32 = 40;
-    let rsvmap: u32 = 16;
+    // Каждая запись 16 байт + завершающая нулевая запись.
+    let rsvmap = ((reservations.len() + 1) * 16) as u32;
     let off_rsvmap = hdr;
     let off_struct = off_rsvmap + rsvmap;
     let off_strings = off_struct + structure.len() as u32;
@@ -174,12 +179,21 @@ fn write_header(buf: &mut Vec<u8>, structure: &[u8], strings: &[u8]) {
     push_u32(buf, strings.len() as u32);
     push_u32(buf, structure.len() as u32);
 
+    for &(address, size) in reservations {
+        push_u64(buf, address);
+        push_u64(buf, size);
+    }
+    
     buf.extend_from_slice(&[0u8; 16]);
     buf.extend_from_slice(structure);
     buf.extend_from_slice(strings);
 }
 
 fn push_u32(buf: &mut Vec<u8>, val: u32) {
+    buf.extend_from_slice(&val.to_be_bytes());
+}
+
+fn push_u64(buf: &mut Vec<u8>, val: u64) {
     buf.extend_from_slice(&val.to_be_bytes());
 }
 
@@ -346,4 +360,153 @@ fn reg_list_n_limits_result() {
     assert_eq!(limited.len(), 1);
     assert_eq!(limited[0].offset, full[0].offset);
     assert_eq!(limited[0].size, full[0].size);
+}
+
+fn build_dtb_with_reservations(reservations: &[(u64, u64)]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let strings = b"\0";
+
+    let mut st = Vec::new();
+    push_u32(&mut st, 0x1); // begin root
+    push_u32(&mut st, 0x0); // empty name
+    push_u32(&mut st, 0x2); // end root
+    push_u32(&mut st, 0x9); // end
+
+    write_header_rsv(&mut buf, &st, strings, reservations);
+    buf
+}
+
+/// ```text
+/// reserved-memory {
+///     #address-cells = <2>; #size-cells = <1>;
+///     static@20000000 { reg = <0x00 0x20000000 0x1000>; };
+///     dynamic        { size = <0x4000>; };
+/// };
+/// ```
+fn build_dtb_reserved_mixed() -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    let strings = b"#address-cells\0#size-cells\0reg\0size\0";
+    let str_addr_cells: u32 = 0;
+    let str_size_cells: u32 = 15;
+    let str_reg: u32 = 27;
+    let str_size: u32 = 31;
+
+    let mut st = Vec::new();
+
+    // root
+    push_u32(&mut st, 0x1);
+    push_u32(&mut st, 0x0);
+    push_prop_u32(&mut st, str_addr_cells, 2);
+    push_prop_u32(&mut st, str_size_cells, 1);
+
+    // reserved-memory
+    push_u32(&mut st, 0x1);
+    st.extend_from_slice(b"reserved-memory\0");
+    align4(&mut st);
+    push_prop_u32(&mut st, str_addr_cells, 2);
+    push_prop_u32(&mut st, str_size_cells, 1);
+
+    // static@20000000 { reg = <0x00 0x20000000 0x1000>; }
+    push_u32(&mut st, 0x1);
+    st.extend_from_slice(b"static@20000000\0");
+    align4(&mut st);
+    let mut reg = Vec::new();
+    push_u32(&mut reg, 0x00);
+    push_u32(&mut reg, 0x2000_0000);
+    push_u32(&mut reg, 0x1000);
+    push_prop_bytes(&mut st, str_reg, &reg);
+    push_u32(&mut st, 0x2); // end static
+
+    // dynamic { size = <0x4000>; }
+    push_u32(&mut st, 0x1);
+    st.extend_from_slice(b"dynamic\0");
+    align4(&mut st);
+    push_prop_u32(&mut st, str_size, 0x4000);
+    push_u32(&mut st, 0x2); // end dynamic
+
+    push_u32(&mut st, 0x2); // end reserved-memory
+    push_u32(&mut st, 0x2); // end root
+    push_u32(&mut st, 0x9); // end
+
+    write_header(&mut buf, &st, strings);
+    buf
+}
+
+#[test]
+fn mem_reservations_yields_entries_until_terminator() {
+    let dtb = build_dtb_with_reservations(&[(0x1000_0000, 0x2000), (0xA000_0000, 0x4000)]);
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    let list: Vec<_> = dt.memory_reservations().collect();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].address, 0x1000_0000);
+    assert_eq!(list[0].size, 0x2000);
+    assert_eq!(list[1].address, 0xA000_0000);
+    assert_eq!(list[1].size, 0x4000);
+}
+
+#[test]
+fn mem_reservations_empty_when_block_has_only_terminator() {
+    let dtb = build_dtb_with_reservations(&[]);
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert_eq!(dt.memory_reservations().count(), 0);
+}
+
+#[test]
+fn mem_reservations_stops_at_buffer_end() {
+    let dtb = build_dtb_with_reservations(&[(0x1000_0000, 0x2000)]);
+    // Заголовок 40 байт + одна запись 16 байт; терминатор обрезан.
+    let truncated = &dtb[..56];
+    let dt = DeviceTree::from_bytes(truncated).unwrap();
+
+    let list: Vec<_> = dt.memory_reservations().collect();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].address, 0x1000_0000);
+    assert_eq!(list[0].size, 0x2000);
+}
+
+#[test]
+fn reserved_memory_skips_size_only_children() {
+    let dtb = build_dtb_reserved_mixed();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let reserved = dt.find("/reserved-memory").unwrap();
+    let cells = reserved.cells_size().unwrap();
+
+    let ranges: Vec<_> = reserved
+        .children()
+        .filter_map(|node| node.prop("reg"))
+        .flat_map(|prop| prop.try_as_reg_list::<8>(cells).unwrap().into_iter())
+        .collect();
+
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].offset, 0x2000_0000);
+    assert_eq!(ranges[0].size, 0x1000);
+
+    let dynamic = reserved
+        .children()
+        .find(|node| node.name() == "dynamic")
+        .unwrap();
+    assert!(dynamic.prop("reg").is_none());
+    assert!(dynamic.prop("size").is_some());
+}
+
+#[test]
+fn reserved_memory_ranges_yields_static_only() {
+    let dtb = build_dtb_reserved_mixed();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    let ranges: Vec<_> = reserved_memory_ranges(&dt).unwrap().collect();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].offset, 0x2000_0000);
+    assert_eq!(ranges[0].size, 0x1000);
+}
+
+#[test]
+fn reserved_memory_ranges_none_without_node() {
+    let dtb = build_dtb_two_banks();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert!(reserved_memory_ranges(&dt).is_none());
 }
