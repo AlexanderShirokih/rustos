@@ -25,6 +25,7 @@ mod bootstrap_log;
 mod channel;
 mod channel_full_api;
 mod event;
+mod event_syscall;
 mod event_via_scheduler;
 mod handle_table;
 mod smoke;

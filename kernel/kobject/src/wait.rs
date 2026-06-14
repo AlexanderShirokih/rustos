@@ -62,6 +62,14 @@ impl SignalState {
     /// зарегистрированных waiter'ов, чьи маски пересекаются
     /// с новым набором сигналов.
     pub fn signal(&self, set: u32, clear: u32) {
+        self.signal_n(set, clear, usize::MAX);
+    }
+
+    /// Как [`signal`](Self::signal), но будит не более `max_wake`
+    /// пересекающихся waiter'ов в порядке их регистрации (FIFO).
+    /// Биты выставляются всегда, независимо от `max_wake` и числа
+    /// разбуженных; разбуженные снимаются из списка, остальные остаются.
+    pub fn signal_n(&self, set: u32, clear: u32, max_wake: usize) {
         let mut to_wake: Vec<(Arc<dyn Waker>, u32)> = Vec::new();
 
         self.waiters.with_lock(|wl| {
@@ -70,10 +78,8 @@ impl SignalState {
             self.bits.store(new, Ordering::Release);
 
             // Будим waiter'ов, чья маска пересекается с новым состоянием.
-            // Делаем drain: проснулся - забываем про waiter; не проснулся -
-            // оставляем в списке.
             wl.entries.retain(|entry| {
-                if entry.mask & new != 0 {
+                if to_wake.len() < max_wake && entry.mask & new != 0 {
                     to_wake.push((entry.waker.clone(), new));
                     false
                 } else {
@@ -635,5 +641,48 @@ mod tests {
         assert_eq!(s.peek(), BIT0 | BIT1);
         s.signal(0, BIT0);
         assert_eq!(s.peek(), BIT1);
+    }
+
+    #[test]
+    fn signal_n_wakes_at_most_n_in_registration_order() {
+        let s = SignalState::new(0);
+        let w1 = MockWaker::new();
+        let w2 = MockWaker::new();
+        let w3 = MockWaker::new();
+        s.register_waiter(BIT0, w1.clone());
+        s.register_waiter(BIT0, w2.clone());
+        s.register_waiter(BIT0, w3.clone());
+
+        s.signal_n(BIT0, 0, 1);
+        assert!(w1.was_woken());
+        assert!(!w2.was_woken());
+        assert!(!w3.was_woken());
+    }
+
+    #[test]
+    fn signal_n_zero_wakes_none_but_sets_bits() {
+        let s = SignalState::new(0);
+        let w = MockWaker::new();
+        s.register_waiter(BIT0, w.clone());
+
+        s.signal_n(BIT0, 0, 0);
+        assert!(!w.was_woken());
+        assert_eq!(s.peek() & BIT0, BIT0);
+    }
+
+    #[test]
+    fn signal_wakes_all_intersecting() {
+        let s = SignalState::new(0);
+        let w1 = MockWaker::new();
+        let w2 = MockWaker::new();
+        let w3 = MockWaker::new();
+        s.register_waiter(BIT0, w1.clone());
+        s.register_waiter(BIT0, w2.clone());
+        s.register_waiter(BIT0, w3.clone());
+
+        s.signal(BIT0, 0);
+        assert!(w1.was_woken());
+        assert!(w2.was_woken());
+        assert!(w3.was_woken());
     }
 }

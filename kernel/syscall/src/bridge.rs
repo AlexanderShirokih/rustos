@@ -61,7 +61,11 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
 
     match op {
         SyscallOp::ObjectSignal => {
-            let r = sys_object_signal(frame.arg(0), frame.arg(1), frame.arg(2));
+            let r = sys_object_signal(frame.arg(0), frame.arg(1), frame.arg(2), frame.arg(3));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::EventCreate => {
+            let r = sys_event_create();
             frame.set_return(encode_return(r));
         }
         SyscallOp::ObjectWaitOne => {
@@ -230,12 +234,24 @@ fn sys_thread_exit(code: u64) -> ! {
     kobject::thread_exit(exit_code)
 }
 
-/// `object_signal(handle, set, clear)` - атомарно меняет биты сигналов
-/// kernel-объекта. Возвращает `0` на успехе.
-fn sys_object_signal(handle: u64, set: u64, clear: u64) -> Result<u64, SyscallError> {
+/// `object_signal(handle, set, clear, count)` - атомарно меняет биты
+/// сигналов kernel-объекта и будит waiter'ов.
+/// При `count == 0` будит всех пересекающихся.
+/// При `count == N` - не более N в FIFO-порядке.
+/// Возвращает `0` в случае успеха.
+fn sys_object_signal(handle: u64, set: u64, clear: u64, count: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
-    kobject::object_signal(id, signals_from_arg(set), signals_from_arg(clear))?;
+    let count =
+        u32::try_from(count & u64::from(u32::MAX)).expect("masking guarantees value fits into u32");
+    kobject::object_signal(id, signals_from_arg(set), signals_from_arg(clear), count)?;
     Ok(0)
+}
+
+/// `event_create()` - создаёт `Event`, регистрирует handle в текущей таблице и
+/// возвращает его сырой `HandleId`.
+fn sys_event_create() -> Result<u64, SyscallError> {
+    let id = kobject::event_create()?;
+    Ok(u64::from(id.raw().get()))
 }
 
 /// `object_wait_one(handle, signals, timeout_ns)`. `timeout_ns == 0`
@@ -361,7 +377,6 @@ pub(super) fn parse_handle_id(raw: u64) -> Result<kobject::HandleId, SyscallErro
 mod tests {
     use super::*;
 
-    /// Тестовая реализация [`SyscallFrame`] с настраиваемыми входами.
     pub(crate) struct MockFrame {
         pub op_raw: u16,
         pub args: [u64; 6],
@@ -438,8 +453,6 @@ mod tests {
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
-    /// `signals == 0` бессмысленен даже для poll: ни один сигнал не
-    /// сможет пересечься с пустой маской.
     #[test]
     fn object_wait_one_with_empty_mask_and_poll_timeout_is_invalid_argument() {
         let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, 0, 0, 0, 0, 0]);
@@ -447,8 +460,6 @@ mod tests {
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
-    /// Пустую маску отвергаем и при ненулевом таймауте: wait всё равно
-    /// никогда не пересечётся с сигналом, поэтому бессмысленен.
     #[test]
     fn object_wait_one_with_empty_mask_and_finite_timeout_is_invalid_argument() {
         let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, 0, 1_000, 0, 0, 0]);
@@ -456,8 +467,6 @@ mod tests {
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
-    /// Только верхние 32 бита задают маску -> после `signals_from_arg`
-    /// получим 0, что эквивалентно пустой маске.
     #[test]
     fn object_wait_one_with_only_upper_bits_is_invalid_argument() {
         let upper_only = u64::from(u32::MAX) + 1;
@@ -558,6 +567,18 @@ mod tests {
     #[test]
     fn mailbox_create_kernel_origin_rejected() {
         let mut f = MockFrame::kernel(SyscallOp::MailboxCreate as u16, [0; 6]);
+        dispatch(&mut f);
+        assert_eq!(f.returned, Some(i64::from(SyscallError::KernelOriginated)));
+    }
+
+    #[test]
+    fn raw_op_0x13_routes_to_event_create() {
+        assert_eq!(op_from_raw(0x13), Ok(SyscallOp::EventCreate));
+    }
+
+    #[test]
+    fn event_create_kernel_origin_rejected() {
+        let mut f = MockFrame::kernel(SyscallOp::EventCreate as u16, [0; 6]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::KernelOriginated)));
     }

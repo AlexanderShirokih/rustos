@@ -3,11 +3,11 @@
 //! его и дожидается `PROCESS_TERMINATED`.
 
 use kernel_tests::kernel_test;
-use syscall::{PROCESS_TERMINATED, SyscallOp};
 use runtime::{
     memory_create_virtual, memory_map, memory_remap, object_wait_one, process_create,
     process_exit_code, process_load_image, process_start,
 };
+use syscall::{PROCESS_TERMINATED, SyscallOp};
 
 const PAGE_SIZE: u64 = 4096;
 

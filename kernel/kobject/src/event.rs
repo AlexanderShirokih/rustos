@@ -5,10 +5,9 @@
 
 use alloc::sync::Arc;
 
-use super::wait::{SignalSource, SignalState};
+pub use syscall::EVENT_SIGNALED;
 
-/// Главный битовый сигнал "событие наступило".
-pub const EVENT_SIGNALED: u32 = 1 << 0;
+use super::wait::{SignalSource, SignalState};
 
 pub struct Event {
     signals: SignalState,

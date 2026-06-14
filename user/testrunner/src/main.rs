@@ -17,10 +17,12 @@ use spin::Mutex;
 use syscall::Handle;
 
 mod channel;
+mod event;
 mod mailbox;
 mod memory_kobject;
 mod process_handles;
 mod self_spawn;
+mod sync;
 
 /// Сырой HandleId WRITE-конца bootstrap-канала, полученный в `_start`.
 static BOOTSTRAP_HANDLE: AtomicUsize = AtomicUsize::new(0);

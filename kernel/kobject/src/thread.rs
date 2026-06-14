@@ -7,13 +7,12 @@
 
 use alloc::sync::Arc;
 
+pub use syscall::THREAD_TERMINATED;
+
 use super::{
     termination::TerminationState,
     wait::{SignalSource, SignalState},
 };
-
-/// Сигнал "поток завершён". Поднимается ровно один раз.
-pub const THREAD_TERMINATED: u32 = 1 << 0;
 
 pub struct ThreadObject {
     inner: TerminationState,

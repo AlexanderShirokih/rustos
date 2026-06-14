@@ -1,8 +1,8 @@
 //! E2E проверка `MailboxCreate`/`MailboxQueue`/`MailboxWait` из EL0.
 
 use kernel_tests::kernel_test;
-use syscall::MAILBOX_PACKET_SIZE;
 use runtime::{mailbox_create, mailbox_queue, mailbox_wait, memory_allocate};
+use syscall::MAILBOX_PACKET_SIZE;
 
 const KEY: u64 = 0xCAFE_BABE;
 

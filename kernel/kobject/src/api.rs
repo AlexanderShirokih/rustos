@@ -5,6 +5,7 @@ use collections::LockCell;
 use super::{
     channel::{Channel, Message},
     errors::{IpcError, SpawnError},
+    event::Event,
     handle::{Handle, HandleId},
     koid::Koid,
     mailbox::{AsyncMode, MAILBOX_READABLE, Mailbox, MailboxPacket},
@@ -27,14 +28,29 @@ pub fn install_handle(handle: Handle) -> Result<HandleId, IpcError> {
 }
 
 /// Атомарно меняет биты сигнального состояния KO (поднимает `set`,
-/// снимает `clear`). Требует [`Rights::SIGNAL`] на handle. Без
-/// signals у KO - `WrongType`.
-pub fn object_signal(handle_id: HandleId, set: u32, clear: u32) -> Result<(), IpcError> {
+/// снимает `clear`) и будит waiter'ов.
+/// При `count == 0` будит всех пересекающихся;
+/// При `count == N` - не более N в FIFO-порядке регистрации.
+/// Требует [`Rights::SIGNAL`] на handle. Без signals у KO - `WrongType`.
+pub fn object_signal(
+    handle_id: HandleId,
+    set: u32,
+    clear: u32,
+    count: u32,
+) -> Result<(), IpcError> {
     let runtime = runtime();
     let table = runtime.current_handle_table().ok_or(IpcError::BadHandle)?;
     let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::SIGNAL))?;
     let signal_state = object.signals().ok_or(IpcError::WrongType)?;
-    signal_state.signal(set, clear);
+
+    let limit = if count == 0 {
+        usize::MAX
+    } else {
+        count as usize
+    };
+
+    signal_state.signal_n(set, clear, limit);
+
     Ok(())
 }
 
@@ -358,6 +374,18 @@ pub fn terminate_thread(thread: &Arc<ThreadObject>, exit_code: i32) -> Result<()
 /// `THREAD_TERMINATED`, после декремента до нуля - `PROCESS_TERMINATED`.
 pub fn terminate_process(process: &Arc<ProcessObject>, exit_code: i32) -> Result<(), IpcError> {
     runtime().terminate_process(process, exit_code)
+}
+
+/// Создаёт новый [`Event`] и регистрирует handle в таблице текущего процесса.
+/// Стартовые права - [`Rights::defaults_for`].
+pub fn event_create() -> Result<HandleId, IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let event = Event::new();
+    let ko = KObject::Event(event);
+    let handle = Handle::new(ko.clone(), Rights::defaults_for(&ko));
+    table.with_lock(|tbl| tbl.insert(handle))
 }
 
 /// Создаёт пустой [`Mailbox`] и регистрирует handle в таблице
@@ -727,6 +755,83 @@ mod tests {
         let err =
             object_wait_many(&[(id, EVENT_SIGNALED), (id, EVENT_SIGNALED)], None).unwrap_err();
         assert_eq!(err, IpcError::Canceled);
+
+        mock().reset();
+    }
+
+    struct CountingWaker {
+        woken: AtomicU32,
+    }
+
+    impl Waker for CountingWaker {
+        fn wake(&self, _observed: u32) {
+            self.woken.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    impl CountingWaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                woken: AtomicU32::new(0),
+            })
+        }
+
+        fn was_woken(&self) -> bool {
+            self.woken.load(Ordering::Acquire) != 0
+        }
+    }
+
+    #[test]
+    fn object_signal_with_count_limits_wakeups() {
+        let _guard = test_lock();
+        let (table, id, event) = install_event_handle(Rights::SIGNAL);
+        mock().configure(Some(table), None);
+
+        let w1 = CountingWaker::new();
+        let w2 = CountingWaker::new();
+        event.signals().register_waiter(EVENT_SIGNALED, w1.clone());
+        event.signals().register_waiter(EVENT_SIGNALED, w2.clone());
+
+        object_signal(id, EVENT_SIGNALED, 0, 1).expect("signal ok");
+        assert!(w1.was_woken());
+        assert!(!w2.was_woken());
+
+        mock().reset();
+    }
+
+    #[test]
+    fn object_signal_with_zero_count_wakes_all() {
+        let _guard = test_lock();
+        let (table, id, event) = install_event_handle(Rights::SIGNAL);
+        mock().configure(Some(table), None);
+
+        let w1 = CountingWaker::new();
+        let w2 = CountingWaker::new();
+        event.signals().register_waiter(EVENT_SIGNALED, w1.clone());
+        event.signals().register_waiter(EVENT_SIGNALED, w2.clone());
+
+        object_signal(id, EVENT_SIGNALED, 0, 0).expect("signal ok");
+        assert!(w1.was_woken());
+        assert!(w2.was_woken());
+
+        mock().reset();
+    }
+
+    #[test]
+    fn event_create_inserts_handle_with_signal_and_wait_rights() {
+        let _guard = test_lock();
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        mock().configure(Some(table.clone()), None);
+
+        let id = event_create().expect("event_create ok");
+        let rights = table
+            .with_lock(|tbl| {
+                tbl.get(id, Rights::SIGNAL | Rights::WAIT)
+                    .map(Handle::rights)
+            })
+            .expect("handle present with SIGNAL|WAIT");
+        assert!(rights.contains(Rights::SIGNAL));
+        assert!(rights.contains(Rights::WAIT));
 
         mock().reset();
     }

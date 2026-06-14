@@ -17,9 +17,9 @@ fn channel_round_trip() {
     let buf = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, 256) };
 
     buf[0] = 0x42;
-    kernel_tests::kassert_eq!(channel_write(left, &buf[..1]), 0);
+    kernel_tests::kassert_eq!(channel_write(left, &buf[..1], &[]), 0);
 
     buf[0] = 0;
-    kernel_tests::kassert_eq!(channel_read(right, buf), 1);
+    kernel_tests::kassert_eq!(channel_read(right, buf, &mut []), 1);
     kernel_tests::kassert_eq!(buf[0], 0x42);
 }

@@ -7,14 +7,18 @@
 #![allow(unsafe_code)]
 
 mod svc;
+mod sync;
 mod transport;
 
 pub use svc::{
-    channel_create, channel_read, channel_write, handle_close, mailbox_create, mailbox_queue,
-    mailbox_wait, memory_allocate, memory_create_virtual, memory_map, memory_region_inspect,
-    memory_remap, object_wait_one, process_create, process_exit_code, process_load_image,
-    process_self, process_start, thread_exit, thread_self,
+    channel_create, channel_read, channel_write, event_create, handle_close, handle_duplicate,
+    mailbox_cancel, mailbox_create, mailbox_queue, mailbox_wait, mailbox_wait_async,
+    memory_allocate, memory_create_physical, memory_create_virtual, memory_free, memory_map,
+    memory_region_inspect, memory_remap, object_signal, object_wait_many, object_wait_one,
+    process_create, process_exit_code, process_load_image, process_self, process_start,
+    process_terminate, thread_create, thread_exit, thread_exit_code, thread_self, thread_terminate,
 };
+pub use sync::{Condvar, Mutex, MutexGuard};
 pub use transport::ChannelTransport;
 
 /// Null-аллокатор рантайма: любая аллокация возвращает null.

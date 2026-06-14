@@ -78,7 +78,12 @@ use core::num::NonZeroU32;
 /// На syscall-ABI это ненулевой 32-битный HandleId; `0` зарезервирован под
 /// невалидный handle и конструктором не принимается. Структуру значения
 /// (generation/slot) интерпретирует только ядро.
+///
+/// `repr(transparent)` фиксирует layout как у `u32`: `&[Handle]` и
+/// `&[Option<Handle>]` (niche `0 == None`) совпадают с массивом `HandleId`,
+/// который channel-ABI читает и пишет по указателю.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 pub struct Handle(NonZeroU32);
 
 impl Handle {
@@ -112,11 +117,34 @@ impl Handle {
     }
 }
 
+/// Запись массива `ObjectWaitMany`: KO `handle` и маска ожидаемых сигналов
+/// `mask`. `#[repr(C)]` фиксирует wire-layout - 8 байт LE, `handle` в
+/// `[0..4)`, `mask` в `[4..8)`, как читает ядро.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct WaitItem {
+    handle: Handle,
+    mask: u32,
+}
+
+impl WaitItem {
+    /// Собирает запись из `handle` и ненулевой маски сигналов `mask`;
+    /// нулевую маску ядро отвергает как `InvalidArgument`.
+    pub const fn new(handle: Handle, mask: u32) -> Self {
+        Self { handle, mask }
+    }
+}
+
 /// Закрытый набор поддерживаемых syscall-операций.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum SyscallOp {
     // 0x10..=0x1F - object base.
+    /// Меняет биты сигналов KO. Аргументы: `arg0=handle`, `arg1=set`
+    /// (нижние 32 бита), `arg2=clear` (нижние 32 бита), `arg3=count`.
+    /// `count == 0` будит всех пересекающихся waiter'ов; `count == N>0`
+    /// будит не более N в FIFO-порядке регистрации. Биты выставляются
+    /// всегда. Возврат `0`.
     ObjectSignal = 0x10,
     /// Ждёт сигналы KO. Аргументы: `arg0=handle`, `arg1=signals`
     /// (нижние 32 бита), `arg2=timeout_ns`; `timeout_ns == 0` -
@@ -127,6 +155,9 @@ pub enum SyscallOp {
     /// `arg1=count`, `arg2=timeout_ns`. Primary возврат - observed-
     /// маска сработавшего KO, secondary - его индекс в `items`.
     ObjectWaitMany = 0x12,
+    /// Создаёт пустой `Event`, регистрирует handle в текущей таблице
+    /// и возвращает его сырой `HandleId`. Аргументов нет.
+    EventCreate = 0x13,
 
     // 0x20..=0x2F - channel.
     ChannelCreate = 0x20,
@@ -269,6 +300,7 @@ impl SyscallOp {
             0x10 => Some(Self::ObjectSignal),
             0x11 => Some(Self::ObjectWaitOne),
             0x12 => Some(Self::ObjectWaitMany),
+            0x13 => Some(Self::EventCreate),
             0x20 => Some(Self::ChannelCreate),
             0x21 => Some(Self::ChannelWrite),
             0x22 => Some(Self::ChannelRead),
@@ -305,8 +337,14 @@ impl SyscallOp {
 /// Бит сигнала канала "парный endpoint закрыт".
 pub const CHANNEL_PEER_CLOSED: u32 = 1 << 1;
 
+/// Бит сигнала Event "событие наступило".
+pub const EVENT_SIGNALED: u32 = 1 << 0;
+
 /// Бит сигнала "процесс завершён".
 pub const PROCESS_TERMINATED: u32 = 1 << 0;
+
+/// Бит сигнала "поток завершён".
+pub const THREAD_TERMINATED: u32 = 1 << 0;
 
 /// Длина пакета `MailboxQueue`/`MailboxWait` в байтах.
 pub const MAILBOX_PACKET_SIZE: usize = 32;
@@ -336,10 +374,19 @@ mod tests {
     }
 
     #[test]
+    fn wait_item_wire_layout() {
+        assert_eq!(core::mem::size_of::<WaitItem>(), 8);
+        assert_eq!(core::mem::align_of::<WaitItem>(), 4);
+        assert_eq!(core::mem::offset_of!(WaitItem, handle), 0);
+        assert_eq!(core::mem::offset_of!(WaitItem, mask), 4);
+    }
+
+    #[test]
     fn from_raw_known_ops() {
         assert_eq!(SyscallOp::from_raw(0x10), Some(SyscallOp::ObjectSignal));
         assert_eq!(SyscallOp::from_raw(0x11), Some(SyscallOp::ObjectWaitOne));
         assert_eq!(SyscallOp::from_raw(0x12), Some(SyscallOp::ObjectWaitMany));
+        assert_eq!(SyscallOp::from_raw(0x13), Some(SyscallOp::EventCreate));
         assert_eq!(SyscallOp::from_raw(0x20), Some(SyscallOp::ChannelCreate));
         assert_eq!(SyscallOp::from_raw(0x21), Some(SyscallOp::ChannelWrite));
         assert_eq!(SyscallOp::from_raw(0x22), Some(SyscallOp::ChannelRead));
@@ -396,7 +443,6 @@ mod tests {
     #[test]
     fn from_raw_unknown_op() {
         assert_eq!(SyscallOp::from_raw(3), None);
-        assert_eq!(SyscallOp::from_raw(0x13), None);
         assert_eq!(SyscallOp::from_raw(0x32), None);
         assert_eq!(SyscallOp::from_raw(0x46), None);
         assert_eq!(SyscallOp::from_raw(0x55), None);

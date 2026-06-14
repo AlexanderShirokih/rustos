@@ -31,10 +31,10 @@ mod wait;
 
 pub use api::{
     WaitManyOutcome, channel_create, channel_read, channel_write, create_empty_process,
-    create_user_thread, handle_close, handle_duplicate, install_handle, load_user_image_into,
-    mailbox_cancel, mailbox_create, mailbox_queue, mailbox_wait, mailbox_wait_async, object_signal,
-    object_wait_many, object_wait_one, start_user_process, terminate_process, terminate_thread,
-    thread_exit,
+    create_user_thread, event_create, handle_close, handle_duplicate, install_handle,
+    load_user_image_into, mailbox_cancel, mailbox_create, mailbox_queue, mailbox_wait,
+    mailbox_wait_async, object_signal, object_wait_many, object_wait_one, start_user_process,
+    terminate_process, terminate_thread, thread_exit,
 };
 pub use channel::{
     CHANNEL_PEER_CLOSED, CHANNEL_READABLE, CHANNEL_WRITABLE, Channel, DEFAULT_CHANNEL_CAPACITY,

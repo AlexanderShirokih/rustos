@@ -80,11 +80,18 @@ Object-вызовы — универсальный wait/signal API: один и 
 объекта. Используйте их, когда нужно ждать сигнала от произвольного
 handle или программно поднять/снять сигнал на объекте.
 
-|     Op | Имя              | Аргументы                         | Возврат                                | Права            |
-|-------:|------------------|-----------------------------------|----------------------------------------|------------------|
-| `0x10` | `ObjectSignal`   | `handle`, `set`, `clear`          | `0`                                    | `SIGNAL`         |
-| `0x11` | `ObjectWaitOne`  | `handle`, `signals`, `timeout_ns` | observed mask                          | `WAIT`           |
-| `0x12` | `ObjectWaitMany` | `items_va`, `count`, `timeout_ns` | primary=observed mask, secondary=index | `WAIT` на каждом |
+|     Op | Имя              | Аргументы                              | Возврат                                | Права            |
+|-------:|------------------|----------------------------------------|----------------------------------------|------------------|
+| `0x10` | `ObjectSignal`   | `handle`, `set`, `clear`, `count`      | `0`                                    | `SIGNAL`         |
+| `0x11` | `ObjectWaitOne`  | `handle`, `signals`, `timeout_ns`      | observed mask                          | `WAIT`           |
+| `0x12` | `ObjectWaitMany` | `items_va`, `count`, `timeout_ns`      | primary=observed mask, secondary=index | `WAIT` на каждом |
+| `0x13` | `EventCreate`    | —                                      | `event_h`                              | —                |
+
+`ObjectSignal.count == 0` — будит всех waiter'ов, у которых маска пересекается
+с `set`. `count == N` (N > 0) — будит не более N в FIFO-порядке.
+
+`EventCreate` создаёт объект `Event` и регистрирует handle с полным набором
+прав в таблице текущего процесса.
 
 `timeout_ns == 0` — poll без парковки. Ненулевой `timeout_ns` —
 относительный тайм-аут в наносекундах.
@@ -114,10 +121,10 @@ if observed & CHANNEL_PEER_CLOSED != 0 {
 }
 
 let mut bytes = [0u8; MESSAGE_CAP];
-let mut handles = [0; 4];
-let (bytes_len, handles_count) = channel_read(channel_h, &mut bytes, &mut handles)?;
+let mut handles = [None; MESSAGE_MAX_HANDLES];
+let packed = channel_read(channel_h, &mut bytes, &mut handles)?;
+let bytes_len = (packed & 0xFFFF_FFFF) as usize;
 let message = &bytes[..bytes_len];
-let attached_handles = &handles[..handles_count];
 ```
 
 ## Channel
@@ -142,9 +149,6 @@ handle'а он удаляется из таблицы отправителя и 
 ```rust
 let (client_h, service_h) = channel_create()?;
 
-// передаём один конец сервису через bootstrap-channel
-channel_write(bootstrap_h, &[], &[service_h])?;
-
 // отправляем запрос
 channel_write(client_h, request, &[])?;
 
@@ -159,7 +163,9 @@ if observed & CHANNEL_PEER_CLOSED != 0 {
 }
 
 let mut response = [0u8; RESPONSE_CAP];
-let (bytes_len, _) = channel_read(client_h, &mut response, &mut [])?;
+let mut handles = [None; MESSAGE_MAX_HANDLES];
+let packed = channel_read(client_h, &mut response, &mut handles)?;
+let bytes_len = (packed & 0xFFFF_FFFF) as usize;
 let response = &response[..bytes_len];
 ```
 
@@ -181,12 +187,7 @@ let wait_only = handle_duplicate(
     process_h,
     Rights::WAIT | Rights::INSPECT | Rights::TRANSFER,
 )?;
-
-channel_write(
-    control_h,
-    /* bytes */ &[],
-    /* handles */ &[wait_only],
-)?;
+handle_close(process_h)?;
 ```
 
 ## Process
@@ -267,19 +268,24 @@ Process-вызовы создают процесс, возвращают handle 
 Пример: передать supervisor'у право дождаться завершения текущего процесса.
 
 ```rust
-// --- сторона процесса ---
+// --- сторона процесса (report_h - конец канала к supervisor'у) ---
 let process_h = process_self()?;
 let wait_h = handle_duplicate(
     process_h,
     Rights::WAIT | Rights::INSPECT | Rights::TRANSFER,
 )?;
-channel_write(supervisor_h, &[], &[wait_h])?;
 handle_close(process_h)?;
+channel_write(report_h, &[], &[wait_h])?;
 
-// --- сторона supervisor'а ---
-let observed = object_wait_one(received_process_h, PROCESS_TERMINATED, timeout_ns)?;
+// --- сторона supervisor'а (monitor_h - парный конец того же канала) ---
+object_wait_one(monitor_h, CHANNEL_READABLE, timeout_ns)?;
+let mut handles = [None; MESSAGE_MAX_HANDLES];
+channel_read(monitor_h, &mut [], &mut handles)?;
+let monitored_h = handles[0].expect("peer transferred wait_h");
+
+let observed = object_wait_one(monitored_h, PROCESS_TERMINATED, timeout_ns)?;
 if observed & PROCESS_TERMINATED != 0 {
-    let code = process_exit_code(received_process_h)?;
+    let code = process_exit_code(monitored_h)?;
 }
 ```
 
@@ -290,22 +296,11 @@ let code_region_h = memory_create_virtual(
     PAGE_SIZE,
     AccessMask::R | AccessMask::W | AccessMask::X,
 )?;
-let child_h = process_create("child", 5)?;
+let child_h = process_create(b"child")?;
 
-let image = UserImageDesc {
-    version: 1,
-    segments: &[UserSegmentDesc {
-        region_handle: code_region_h,
-        flags: UserMemFlags::ReadExecute,
-        va_base: CHILD_CODE_VA,
-        mapped_size: PAGE_SIZE,
-    }],
-    entry: CHILD_CODE_VA,
-    user_stack_top: CHILD_STACK_TOP,
-    user_stack_size: PAGE_SIZE,
-    user_vm_base: CHILD_USER_VM_BASE,
-    user_vm_size: CHILD_USER_VM_SIZE,
-};
+// собирает UserImageDesc: сегмент code_region_h на CHILD_CODE_VA,
+// entry/стек/окно user-VM
+let image = create_user_image(code_region_h)?;
 
 process_load_image(child_h, &image)?;
 let first_thread_h = process_start(
@@ -313,8 +308,8 @@ let first_thread_h = process_start(
     CHILD_CODE_VA,
     CHILD_STACK_TOP,
     /* arg */ 0,
-    /* priority */ 1,
-    /* bootstrap handles */ &[],
+    /* priority | (handles_count << 32) */ 1,
+    /* handles_va */ 0,
 )?;
 ```
 
@@ -345,7 +340,7 @@ fn worker_entry() -> ! {
 }
 
 let process_h = process_self()?;
-let thread_h = thread_create(process_h, worker_entry as usize, worker_sp, 0, priority)?;
+let thread_h = thread_create(process_h, worker_entry as u64, worker_sp, 0, priority)?;
 
 let observed = object_wait_one(thread_h, THREAD_TERMINATED, timeout_ns)?;
 if observed & THREAD_TERMINATED != 0 {
@@ -546,19 +541,21 @@ let mailbox_h = mailbox_create()?;
 
 mailbox_wait_async(
     mailbox_h, client_channel_h, KEY_REQUEST,
-    CHANNEL_READABLE, AsyncMode::Repeating,
+    CHANNEL_READABLE | (AsyncMode::Repeating << 32),
 )?;
 mailbox_wait_async(
     mailbox_h, watchdog_event_h, KEY_WATCHDOG,
-    EVENT_SIGNALED, AsyncMode::Repeating,
+    EVENT_SIGNALED | (AsyncMode::Repeating << 32),
 )?;
 mailbox_wait_async(
     mailbox_h, worker_thread_h, KEY_WORKER_DONE,
-    THREAD_TERMINATED, AsyncMode::Once,
+    THREAD_TERMINATED | (AsyncMode::Once << 32),
 )?;
 
 loop {
-    let packet = mailbox_wait(mailbox_h, /* timeout_ns */ 0)?;
+    let mut buf = [0u8; MAILBOX_PACKET_SIZE];
+    mailbox_wait(mailbox_h, /* timeout_ns */ 0, &mut buf)?;
+    let packet = MailboxPacket::from_buf(&buf);
     match packet.key {
         KEY_REQUEST => handle_client_request(client_channel_h)?,
         KEY_WATCHDOG => reset_watchdog(watchdog_event_h)?,
