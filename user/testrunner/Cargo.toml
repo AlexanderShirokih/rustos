@@ -1,9 +1,12 @@
+cargo-features = ["per-package-target"]
+
 [package]
 name = "testrunner"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 build = "build.rs"
+forced-target = "aarch64-unknown-none"
 
 [package.metadata.userland]
 bootstrap = true

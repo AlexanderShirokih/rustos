@@ -199,9 +199,6 @@ fn build_features(ctx: &BuildContext) -> String {
     {
         features.push(extra.to_string());
     }
-    // `kernel-bin` обязателен: bin гейтирован этой фичей (required-features),
-    // чтобы не ломать host-сборку workspace.
-    features.push("kernel-bin".to_string());
     features.join(",")
 }
 

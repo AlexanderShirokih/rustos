@@ -40,7 +40,7 @@ pub fn drivers() -> &'static [DriverInfo<FdtProbeFn>] {
 #[macro_export]
 macro_rules! register_driver {
     ($symbol:ident, probe = $probe:expr) => {
-        #[cfg_attr(target_os = "none", unsafe(link_section = ".drivers.kernel"))]
+        #[unsafe(link_section = ".drivers.kernel")]
         #[used]
         static $symbol: drivers_common::DriverInfo<$crate::FdtProbeFn> =
             drivers_common::DriverInfo {

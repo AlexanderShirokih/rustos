@@ -131,8 +131,11 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 - линкер-скрипт `link.ld`: точка входа `_start`, базовый адрес образа и
   выравнивание секций `.text/.rodata/.data/.bss` на страницу (4 КиБ). Скрипт
   подключается из `build.rs` через `rustc-link-arg=-T`;
-- `Cargo.toml` с разделом `[package.metadata.userland]`, если процесс — кандидат
-  в bootstrap (`bootstrap = true`, `stack_size`);
+- `Cargo.toml` с `forced-target = "aarch64-unknown-none"` (через
+  `cargo-features = ["per-package-target"]`): бинарь всегда собирается под
+  bare-metal без `--target`, поэтому код не гейтится под host-сборку. Раздел
+  `[package.metadata.userland]` нужен, если процесс — кандидат в bootstrap
+  (`bootstrap = true`, `stack_size`);
 - зависимости `runtime`, `syscall`, `ipc` и нужные контракты;
 - включение пакета в TOML-композицию образа (`user/images/<имя>.toml`).
 

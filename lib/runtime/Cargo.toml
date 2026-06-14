@@ -1,8 +1,16 @@
+cargo-features = ["per-package-target"]
+
 [package]
 name = "runtime"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+forced-target = "aarch64-unknown-none"
+
+[lib]
+test = false
+bench = false
+doctest = false
 
 [dependencies]
 ipc = { workspace = true }

@@ -1,22 +1,16 @@
-#![cfg_attr(target_os = "none", no_std)]
-#![cfg_attr(target_os = "none", no_main)]
-#![cfg_attr(target_os = "none", allow(unsafe_code))]
+#![no_std]
+#![no_main]
+#![allow(unsafe_code)]
 
-#[cfg(target_os = "none")]
 use core::panic::PanicInfo;
 
-#[cfg(target_os = "none")]
 use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
-#[cfg(target_os = "none")]
 use ipc::wire::Str;
-#[cfg(target_os = "none")]
-use syscall::CHANNEL_PEER_CLOSED;
-#[cfg(target_os = "none")]
 use runtime::{ChannelTransport, object_wait_one, thread_exit};
+use syscall::CHANNEL_PEER_CLOSED;
 
 /// `bootstrap_handle` приходит в x0 как сырой HandleId WRITE-конца канала,
 /// переданного ядром при спавне.
-#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(bootstrap_handle: usize) -> ! {
     let client = BootstrapClient::new(ChannelTransport::new(bootstrap_handle));
@@ -27,13 +21,9 @@ pub extern "C" fn _start(bootstrap_handle: usize) -> ! {
     thread_exit(u64::from(wait_ret < 0))
 }
 
-#[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(_info: &PanicInfo<'_>) -> ! {
     loop {
         core::hint::spin_loop();
     }
 }
-
-#[cfg(not(target_os = "none"))]
-fn main() {}

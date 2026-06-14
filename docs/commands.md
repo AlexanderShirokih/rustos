@@ -6,7 +6,7 @@
 |------------------------|------------------------------------------------------------------------------------------------------------------------------|
 | Host-тесты             | `cargo test --workspace`                                                                                                     |
 | Host-clippy            | `cargo clippy --workspace`                                                                                                   |
-| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --features kernel-bin --target aarch64-unknown-none` |
+| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --exclude ipc-test --target aarch64-unknown-none` |
 | Форматирование         | `cargo fmt --all --check`                                                                                                    |
 | Сборка userland        | `cargo xtask build-userland [--image <имя>]`                                                                                 |
 | Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                           |
@@ -21,10 +21,11 @@
 feature для `hal-aarch64`, собирает kernel crate под `aarch64-unknown-none` и
 упаковывает результат.
 
-Боевой kernel-бинарь `kernel-aarch64` гейтирован фичей `kernel-bin`
-(`required-features`): его boot-asm содержит ELF-релокации, которые host-ассемблер
-не принимает. Поэтому `cargo build --workspace` на хосте пропускает bin (сборка
-зелёная), а xtask и AArch64-clippy включают `kernel-bin` явно.
+Боевой kernel-бинарь `kernel-aarch64` (как и userland-бинари) задаёт
+`forced-target = "aarch64-unknown-none"`: крейт всегда собирается под bare-metal,
+независимо от наличия `--target`. Это нужно из-за boot-asm с ELF-релокациями,
+которые host-ассемблер не принимает; `forced-target` снимает необходимость
+гейтить код или bin под host-сборку.
 
 ```bash
 cargo xtask build devices/spec/qemu-aarch64.yaml
