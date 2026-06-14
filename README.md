@@ -19,11 +19,6 @@ kernel-объект с набором прав. Дублировать хенд�
 что у него есть. Хендлы передаются через channel: capability переходит из таблицы
 отправителя в таблицу получателя.
 
-**Типизация на уровне компилятора.** `#![no_std]`, Edition 2024, nightly. Публичные
-API принимают `HandleId`, `PhysicalAddress`, `ProcessId`, `Frame` вместо голых
-`usize`. Выравнивания и ёмкости — const generics. Закрытые enum'ы обеспечивают
-исчерпывающий `match` по типам объектов и кодам ошибок на этапе компиляции.
-
 **Arch-слой.** Загрузка, MMU, прерывания, context switch изолированы в `hal-aarch64`
 за trait-интерфейсами. Планировщик, kobject, syscall и memory не зависят от
 платформенного кода — DAG крейтов это гарантирует на этапе компиляции.
@@ -34,11 +29,12 @@ API принимают `HandleId`, `PhysicalAddress`, `ProcessId`, `Frame` вм�
 
 Channel несёт байты и хендлы одним сообщением. Передача хендла перемещает
 capability: у отправителя запись исчезает из handle-таблицы, у получателя
-появляется. Права сужаются через `handle_duplicate` перед отправкой.
+появляется. Права сужаются через `handle_duplicate` перед отправкой. Поверх
+канала строятся типизированные IPC-контракты.
 
 ```rust
 // Передать другому процессу регион памяти с правом только читать
-let region_h = memory_create_virtual(auth_h, 4096, AccessMask::R | AccessMask::W)?;
+let region_h = memory_create_virtual(4096, AccessMask::R | AccessMask::W)?;
 let _va = memory_map(region_h, 4096, UserMemFlags::ReadWrite)?;
 
 let readonly_h = handle_duplicate(
@@ -82,29 +78,59 @@ if observed & PROCESS_TERMINATED != 0 {
 }
 ```
 
-Полный ABI с таблицей прав, сигналов и примерами: [docs/syscalls.md](docs/syscalls.md).
+Полный ABI с таблицей прав, сигналов и примерами — [docs/syscalls.md](docs/syscalls.md);
+формат типизированных IPC-контрактов — [docs/ipc.md](docs/ipc.md).
+
+---
+
+## Userland
+
+Программы userland — freestanding `no_std`-бинари, упакованные в один образ
+`userland.img`. Ядро поднимает из образа первый процесс и передаёт ему
+bootstrap-хендл; дальше процессы общаются с ядром и между собой через каналы и
+типизированные контракты. Состав userland, рантайм syscall-обёрток, формат
+образа и жизненный цикл — [docs/userland.md](docs/userland.md).
 
 ---
 
 ## Архитектура крейтов
 
+Крейты сгруппированы по доменам каталогов. Зависимости направлены вниз: платформа
+и оркестрация -> механизмы ядра -> общие библиотеки.
+
 ```
-kernelspace          — оркестрация: драйверы, scheduler bridge, user init
-  ├── scheduler      — потоки, приоритеты, адресные пространства, context switch
-  ├── kobject        — handle-таблица, refcount, сигнальные маски
-  ├── syscall        — диспетчер и ABI
-  ├── memory         — kernel heap, UserVmAllocator, трейт MemoryMapper
-  └── process        — загрузка user-образа
+lib/   — общие библиотеки и ABI
+  syscall                       — syscall ABI: номера операций, ошибки, сигналы
+  ipc, ipc-macros, ipc-schema   — типизированные IPC-контракты поверх канала
+  bootstrap-abi                 — контракт Bootstrap: канал процесса к ядру
+  runtime                       — userland-обёртки syscall и транспорт IPC
+  userland, userland-image      — модель и бинарный формат образа userland.img
+  collections, io, util         — no_std-библиотеки общего назначения
+  test-harness-macros / -qemu   — integration-тесты поверх QEMU exit device
 
-hal-aarch64          — boot, MMU (4-уровневые таблицы, ASID), GIC, ArchContext
-hal-common           — boot-протокол, BootInfo, HwDescription
+kernel/ — механизмы, драйверы, оркестрация, платформа
+  memory                        — физическая и виртуальная память, адресные пространства
+  kobject                       — handle-таблица, сигналы, каналы, объекты процессов/потоков
+  scheduler                     — потоки, приоритеты, очереди готовности, context switch
+  process                       — загрузка user-образа в адресное пространство
+  syscall-kernel                — диспетчер syscall и граница user/kernel
+  fdt, klog                     — разбор FDT, kernel-лог
+  drivers-common (+ -aarch64)   — контракты драйверов и обнаружение устройств
+  drivers-aarch64               — UART, таймер, контроллер прерываний (GIC)
+  kernelspace                   — порядок инициализации, runtime-мосты, запуск userland
+  hal-common                    — boot-протокол, BootInfo, аппаратное описание
+  hal-aarch64 (+ -asid, -paging)— boot, MMU, CPU-контекст; итоговый kernel-бинарь
 
-drivers-aarch64      — UART, таймер
-drivers-common       — платформо-независимые интерфейсы
+user/  — userland-программы
+  rootkeeper                    — bootstrap-процесс
+  testrunner                    — прогон тестов в userspace
 
-collections, fdt, io, klog, util   — no_std-библиотеки
-test-harness-qemu    — integration-тесты поверх QEMU exit device
+tools/ — host-инструменты
+  userland-image                — сборка userland.img из ELF
 ```
+
+Полный инвентарь крейтов и правила слоёв — [docs/overview.md](docs/overview.md) и
+[docs/architecture.md](docs/architecture.md).
 
 ---
 
@@ -113,14 +139,15 @@ test-harness-qemu    — integration-тесты поверх QEMU exit device
 16-битный номер операции, до шести `u64`-аргументов, `i64` возврат
 (отрицательный — `-(SyscallError as u32)`). `HandleId` — ненулевой `u32`.
 
-| Диапазон    | Подсистема                                              |
-|-------------|---------------------------------------------------------|
-| `0x10–0x11` | Object — сигналы, ожидание                              |
-| `0x20–0x22` | Channel — создание, запись, чтение                      |
-| `0x30–0x31` | Handle — закрытие, дублирование                         |
-| `0x40–0x44` | Process — создание, self, exit code, terminate          |
-| `0x50–0x54` | Thread — создание, self, exit, exit code, terminate     |
-| `0x60–0x67` | Memory — VMO, MMIO, map, remap, allocate, free, inspect |
+| Диапазон    | Подсистема                                                  |
+|-------------|-------------------------------------------------------------|
+| `0x10–0x12` | Object — сигналы, ожидание одного и нескольких объектов     |
+| `0x20–0x22` | Channel — создание, запись, чтение                          |
+| `0x30–0x31` | Handle — закрытие, дублирование                             |
+| `0x40–0x45` | Process — создание, self, load image, exit code, terminate, start |
+| `0x50–0x54` | Thread — создание, self, exit, exit code, terminate         |
+| `0x60–0x67` | Memory — VMO, MMIO, map, remap, allocate, free, inspect     |
+| `0x70–0x74` | Mailbox — создание, queue, синхронное и async-ожидание, cancel |
 
 ---
 
@@ -193,26 +220,33 @@ PR с новыми устройствами приветствуются.
 
 - Capability-based handle-таблица с передачей и сужением прав
 - Двусторонний channel IPC с передачей capability
+- Типизированные IPC-контракты поверх канала
+- Mailbox с синхронным и async-ожиданием
+- Userland: образ программ `userland.img`, рантайм syscall-обёрток, bootstrap-протокол
 - Разделяемая память: VMO и MMIO как kernel-объекты (создание, map, remap, инспекция, передача)
 - Process и thread lifecycle: создание, завершение, terminate, ожидание сигналов
-- `object_wait_one` с сигналами и таймаутом
-- QEMU integration tests
+- `object_wait_one`/`object_wait_many` с сигналами и таймаутом
+- QEMU integration tests (kernel- и userland-проход)
 - Загрузка на Xiaomi Redmi Note 7 и Raspberry Pi 5
 
 Не реализовано:
 
 - UEFI boot
 - Драйверы периферии (GPIO, I2C, SPI)
-- Userspace-сервисный слой
+- Userspace-сервисный слой (драйверы, ФС, сеть)
 
 ---
 
 ## Документация
 
-- [docs/architecture.md](docs/architecture.md) — DAG крейтов, адресные пространства, boot-протокол
-- [docs/syscalls.md](docs/syscalls.md) — полный ABI: права, сигналы, ошибки, примеры
-- [docs/overview.md](docs/overview.md) — инвентарь крейтов
+- [docs/overview.md](docs/overview.md) — обзор проекта и инвентарь крейтов
+- [docs/architecture.md](docs/architecture.md) — структура ядра, границы подсистем, boot-протокол
+- [docs/syscalls.md](docs/syscalls.md) — полный syscall-ABI: права, сигналы, ошибки, примеры
+- [docs/ipc.md](docs/ipc.md) — формат типизированных IPC-контрактов
+- [docs/userland.md](docs/userland.md) — устройство userland
+- [docs/environment.md](docs/environment.md) — toolchain, зависимости, device specs
 - [docs/commands.md](docs/commands.md) — команды сборки и тестирования
+- [docs/code-style.md](docs/code-style.md) — соглашения по стилю кода и комментариям
 - [Статья на Хабре](https://habr.com/ru/articles/962680/) — обзор проекта
 
 ---

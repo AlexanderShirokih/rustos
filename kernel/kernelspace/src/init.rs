@@ -60,7 +60,7 @@ fn start_bootstrap_chain(
             power::system_off(1)
         }
     };
-    info!("bootstrap process spawned: {:?}", launch.info);
+    info!("bootstrap process spawned:");
 
     run_bootstrap_log(&launch.channel);
 
