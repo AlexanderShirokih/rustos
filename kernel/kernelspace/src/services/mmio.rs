@@ -237,7 +237,7 @@ mod tests {
                 AccessMode::Writable => {}
                 _ => panic!("kernel MMIO mapping must remain writable"),
             },
-            _ => panic!("mmio mapping must use device flags"),
+            MemFlags::Private(_) => panic!("mmio mapping must use device flags"),
         }
         drop(maps);
 

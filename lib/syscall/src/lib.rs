@@ -102,7 +102,10 @@ impl Handle {
         if ret < 1 || ret > u32::MAX as i64 {
             return Err(ret);
         }
-        match NonZeroU32::new(ret as u32) {
+
+        #[allow(clippy::cast_sign_loss)]
+        let handle = ret as u32;
+        match NonZeroU32::new(handle) {
             Some(nz) => Ok(Self(nz)),
             None => Err(ret),
         }

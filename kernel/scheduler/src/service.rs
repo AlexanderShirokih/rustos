@@ -89,23 +89,23 @@ where
     }
 
     fn yield_now(&self) {
-        let action = with_preemption_disabled::<A::Cpu, _>(|| {
-            self.inner.with_lock(|inner| {
+        with_preemption_disabled::<A::Cpu, _>(|| {
+            let action = self.inner.with_lock(|inner| {
                 let now_ns = inner.now_ns();
                 inner.yield_now(now_ns)
-            })
+            });
+            perform_schedule_action::<A>(action);
         });
-        perform_schedule_action::<A>(action);
     }
 
     fn sleep_ns(&self, ns: u64) {
-        let action = with_preemption_disabled::<A::Cpu, _>(|| {
-            self.inner.with_lock(|inner| {
+        with_preemption_disabled::<A::Cpu, _>(|| {
+            let action = self.inner.with_lock(|inner| {
                 let now_ns = inner.now_ns();
                 inner.sleep_current(ns, now_ns)
-            })
+            });
+            perform_schedule_action::<A>(action);
         });
-        perform_schedule_action::<A>(action);
     }
 
     fn current(&self) -> ThreadId {
@@ -154,8 +154,8 @@ where
     }
 
     fn block_current_until(&self, ready_flag: &AtomicU32, timeout_ns: Option<u64>) {
-        let action = with_preemption_disabled::<A::Cpu, _>(|| {
-            self.inner.with_lock(|inner| {
+        with_preemption_disabled::<A::Cpu, _>(|| {
+            let action = self.inner.with_lock(|inner| {
                 // Если waker успел отработать до того, как мы взяли
                 // scheduler-lock, не уходим в блокировку - иначе никто
                 // не разбудит нас обратно.
@@ -164,9 +164,9 @@ where
                 }
                 let now_ns = inner.now_ns();
                 inner.block_current(now_ns, timeout_ns)
-            })
+            });
+            perform_schedule_action::<A>(action);
         });
-        perform_schedule_action::<A>(action);
     }
 
     fn unblock(&self, token: WaitToken) {

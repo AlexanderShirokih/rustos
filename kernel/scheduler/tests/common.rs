@@ -99,6 +99,10 @@ impl ArchContext for MockContext {
     }
 
     unsafe fn switch(_prev: &mut Self, _next: &Self) {
+        assert!(
+            current_irq_depth() > 0,
+            "context switch must run with preemption disabled"
+        );
         SWITCH_COUNT.with(|c| c.set(c.get() + 1));
     }
 
@@ -189,6 +193,15 @@ pub fn switch_count() -> usize {
 
 pub fn current_irq_depth() -> usize {
     IRQ_DEPTH.with(Cell::get)
+}
+
+/// Моделирует контекст аппаратного IRQ-обработчика: вход маскирует
+/// preemption, выход (`eret`) восстанавливает.
+pub fn with_simulated_irq<R>(f: impl FnOnce() -> R) -> R {
+    MockCpu::disable_preemption();
+    let result = f();
+    MockCpu::enable_preemption();
+    result
 }
 
 pub fn max_irq_depth() -> usize {

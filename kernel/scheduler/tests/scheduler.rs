@@ -23,7 +23,7 @@ use scheduler::{
 
 use crate::common::{
     MockAddressSpaceFactory, MockContext, MockStack, MockTimer, MockTimerSource, max_irq_depth,
-    reset_switches, switch_count, take_address_space_switches,
+    reset_switches, switch_count, take_address_space_switches, with_simulated_irq,
 };
 
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
@@ -190,10 +190,10 @@ fn on_tick_round_robins_equal_priority_threads() {
     let running = scheduler.run();
     assert_eq!(running.current(), first);
 
-    running.on_tick(0);
+    with_simulated_irq(|| running.on_tick(0));
     assert_eq!(running.current(), second);
 
-    running.on_tick(1);
+    with_simulated_irq(|| running.on_tick(1));
     assert_eq!(running.current(), first);
 }
 
@@ -217,7 +217,7 @@ fn sleep_ns_blocks_and_wakes_thread_on_deadline() {
     assert_eq!(timer.scheduled_deadline(), 50);
 
     timer.advance_to(50);
-    running.on_tick(50);
+    with_simulated_irq(|| running.on_tick(50));
     assert_eq!(running.current(), sleeper);
 }
 
@@ -264,7 +264,7 @@ fn time_slice_decrement_triggers_preemption() {
     let running = scheduler.run();
 
     let switches_before = switch_count();
-    running.on_tick(0);
+    with_simulated_irq(|| running.on_tick(0));
     assert_eq!(switch_count(), switches_before + 1);
     assert_eq!(running.current(), b);
 }
@@ -326,11 +326,11 @@ fn sleep_queue_orders_multiple_sleepers_by_deadline() {
     // Дедлайн `late` (50) меньше дедлайна `early` (100), поэтому первой
     // должна проснуться именно `late`.
     timer.advance_to(50);
-    running.on_tick(50);
+    with_simulated_irq(|| running.on_tick(50));
     assert_eq!(running.current(), late);
 
     timer.advance_to(100);
-    running.on_tick(100);
+    with_simulated_irq(|| running.on_tick(100));
     let after_second_tick = running.current();
     assert!(
         after_second_tick == runner || after_second_tick == early || after_second_tick == late,
@@ -798,9 +798,8 @@ fn process_create_rejects_empty_name() {
     let processes_before = scheduler.process_count();
     let handle = scheduler.handle();
 
-    let err = match handle.create_empty_process("") {
-        Ok(_) => panic!("empty process name must be rejected"),
-        Err(err) => err,
+    let Err(err) = handle.create_empty_process("") else {
+        panic!("empty process name must be rejected");
     };
     assert_eq!(err, kobject::SpawnError::InvalidName);
     assert_eq!(scheduler.process_count(), processes_before);

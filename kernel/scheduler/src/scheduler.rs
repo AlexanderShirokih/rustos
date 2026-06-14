@@ -238,13 +238,13 @@ where
             _stage: PhantomData::<Running>,
         };
 
-        let action = with_preemption_disabled::<A::Cpu, _>(|| {
-            running.inner.with_lock(|inner| {
+        with_preemption_disabled::<A::Cpu, _>(|| {
+            let action = running.inner.with_lock(|inner| {
                 let now_ns = inner.timer.now_ns();
                 inner.switch_to_next(now_ns)
-            })
+            });
+            perform_schedule_action::<A>(action);
         });
-        perform_schedule_action::<A>(action);
 
         running
     }
@@ -275,23 +275,23 @@ where
     }
 
     pub fn yield_now(&self) {
-        let action = with_preemption_disabled::<A::Cpu, _>(|| {
-            self.inner.with_lock(|inner| {
+        with_preemption_disabled::<A::Cpu, _>(|| {
+            let action = self.inner.with_lock(|inner| {
                 let now_ns = inner.timer.now_ns();
                 inner.yield_now(now_ns)
-            })
+            });
+            perform_schedule_action::<A>(action);
         });
-        perform_schedule_action::<A>(action);
     }
 
     pub fn sleep_ns(&self, ns: u64) {
-        let action = with_preemption_disabled::<A::Cpu, _>(|| {
-            self.inner.with_lock(|inner| {
+        with_preemption_disabled::<A::Cpu, _>(|| {
+            let action = self.inner.with_lock(|inner| {
                 let now_ns = inner.timer.now_ns();
                 inner.sleep_current(ns, now_ns)
-            })
+            });
+            perform_schedule_action::<A>(action);
         });
-        perform_schedule_action::<A>(action);
     }
 
     pub fn on_tick(&self, now_ns: u64) {

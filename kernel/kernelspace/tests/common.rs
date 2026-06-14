@@ -99,6 +99,10 @@ impl ArchContext for MockContext {
     }
 
     unsafe fn switch(_prev: &mut Self, _next: &Self) {
+        assert!(
+            current_irq_depth() > 0,
+            "context switch must run with preemption disabled"
+        );
         SWITCH_COUNT.with(|c| c.set(c.get() + 1));
     }
 
