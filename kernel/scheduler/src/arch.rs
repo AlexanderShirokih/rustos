@@ -46,19 +46,27 @@ pub const STACK_CANARY_SIZE: usize = size_of::<u128>();
 /// Байтовое представление canary в little-endian.
 pub const STACK_CANARY: [u8; STACK_CANARY_SIZE] = STACK_CANARY_VALUE.to_le_bytes();
 
-struct PreemptionGuard<C: ArchCpu>(PhantomData<C>);
+struct PreemptionGuard<C: ArchCpu> {
+    was_enabled: bool,
+    _marker: PhantomData<C>,
+}
 
 impl<C: ArchCpu> Drop for PreemptionGuard<C> {
     fn drop(&mut self) {
-        C::enable_preemption();
+        if self.was_enabled {
+            C::enable_preemption();
+        }
     }
 }
 
-/// Выполняет `f` при замаскированном preemption/IRQ и гарантированно
-/// восстанавливает предыдущее состояние при выходе из scope.
+/// Выполняет `f` с выключенным preemption и восстанавливает исходное состояние.
 pub fn with_preemption_disabled<C: ArchCpu, R>(f: impl FnOnce() -> R) -> R {
+    let was_enabled = C::preemption_enabled();
     C::disable_preemption();
-    let _guard = PreemptionGuard::<C>(PhantomData);
+    let _guard = PreemptionGuard::<C> {
+        was_enabled,
+        _marker: PhantomData,
+    };
     f()
 }
 
@@ -199,6 +207,10 @@ pub trait ArchCpu: Send + Sync + 'static {
     fn enable_preemption() {}
 
     fn disable_preemption() {}
+
+    fn preemption_enabled() -> bool {
+        true
+    }
 }
 
 /// Аллокатор стека потока.

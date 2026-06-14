@@ -46,4 +46,11 @@ impl ArchCpu for Aarch64Cpu {
             core::arch::asm!("msr daifset, #0b0010", options(nostack, preserves_flags));
         }
     }
+
+    fn preemption_enabled() -> bool {
+        // SAFETY: DAIF читается на EL1 без побочных эффектов.
+        let daif = unsafe { read_sysreg!(daif) };
+        // Бит I (IRQ mask) - позиция 7 в DAIF; 0 означает, что IRQ разрешены.
+        daif & (1 << 7) == 0
+    }
 }

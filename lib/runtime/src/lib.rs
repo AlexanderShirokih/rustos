@@ -5,7 +5,9 @@
 
 #![no_std]
 #![allow(unsafe_code)]
+#![feature(alloc_error_handler)]
 
+mod heap;
 mod svc;
 mod sync;
 mod transport;
@@ -21,18 +23,12 @@ pub use svc::{
 pub use sync::{Condvar, Mutex, MutexGuard};
 pub use transport::ChannelTransport;
 
-/// Null-аллокатор рантайма: любая аллокация возвращает null.
-struct NoHeap;
-
-// SAFETY: alloc всегда возвращает null (отказ аллокации), поэтому dealloc
-// недостижим; контракт GlobalAlloc на null-возврате соблюдён.
-unsafe impl core::alloc::GlobalAlloc for NoHeap {
-    unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
-        core::ptr::null_mut()
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
-
+/// Глобальный heap процесса поверх memory_allocate/memory_free.
 #[global_allocator]
-static NO_HEAP: NoHeap = NoHeap;
+static PROCESS_HEAP: heap::ProcessHeap = heap::ProcessHeap::new();
+
+/// Отказ аллокации переходит в panic-handler процесса.
+#[alloc_error_handler]
+fn on_alloc_error(_layout: core::alloc::Layout) -> ! {
+    panic!("userspace heap: allocation failed");
+}

@@ -22,7 +22,7 @@ use scheduler::{
 };
 
 use crate::common::{
-    MockAddressSpaceFactory, MockContext, MockStack, MockTimer, MockTimerSource, max_irq_depth,
+    MockAddressSpaceFactory, MockContext, MockStack, MockTimer, MockTimerSource, preemption_enabled,
     reset_switches, switch_count, take_address_space_switches, with_simulated_irq,
 };
 
@@ -292,7 +292,7 @@ fn small_prio_scheduler_works_with_low_idle_priority() {
 }
 
 #[test]
-fn enable_preemption_balanced_during_yield() {
+fn yield_restores_preemption_when_enabled() {
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
@@ -300,11 +300,29 @@ fn enable_preemption_balanced_during_yield() {
     let _ = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
 
     let running = scheduler.run();
-    let max = max_irq_depth();
+    assert!(preemption_enabled(), "preemption enabled before yield");
     running.yield_now();
     running.yield_now();
-    assert_eq!(common::current_irq_depth(), 0, "IRQ-depth must return to 0");
-    assert!(max <= 1, "max IRQ depth should not exceed 1, got {max}");
+    assert!(preemption_enabled(), "yield must restore preemption to enabled");
+}
+
+#[test]
+fn yield_from_masked_context_keeps_preemption_masked() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let _ = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
+    let _ = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
+
+    let running = scheduler.run();
+    with_simulated_irq(|| {
+        running.yield_now();
+        assert!(
+            !preemption_enabled(),
+            "вложенный yield не должен разрешать preemption"
+        );
+    });
+    assert!(preemption_enabled(), "preemption восстановлен после masked-scope");
 }
 
 #[test]

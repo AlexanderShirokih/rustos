@@ -28,8 +28,7 @@ use scheduler::{
 
 thread_local! {
     static SWITCH_COUNT: Cell<usize> = const { Cell::new(0) };
-    static IRQ_DEPTH: Cell<usize> = const { Cell::new(0) };
-    static MAX_IRQ_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static PREEMPTION_ENABLED: Cell<bool> = const { Cell::new(true) };
     static CPU_LOCAL_PTR: Cell<usize> = const { Cell::new(0) };
     static ADDRESS_SPACE_SWITCHES: RefCell<Vec<Option<AddressSpaceHandle>>> =
         const { RefCell::new(Vec::new()) };
@@ -100,7 +99,7 @@ impl ArchContext for MockContext {
 
     unsafe fn switch(_prev: &mut Self, _next: &Self) {
         assert!(
-            current_irq_depth() > 0,
+            !preemption_enabled(),
             "context switch must run with preemption disabled"
         );
         SWITCH_COUNT.with(|c| c.set(c.get() + 1));
@@ -133,23 +132,15 @@ impl ArchCpu for MockCpu {
     }
 
     fn enable_preemption() {
-        IRQ_DEPTH.with(|c| {
-            let depth = c.get();
-            assert!(depth > 0, "enable_preemption without prior disable");
-            c.set(depth - 1);
-        });
+        PREEMPTION_ENABLED.with(|c| c.set(true));
     }
 
     fn disable_preemption() {
-        IRQ_DEPTH.with(|c| {
-            let depth = c.get() + 1;
-            c.set(depth);
-            MAX_IRQ_DEPTH.with(|m| {
-                if m.get() < depth {
-                    m.set(depth);
-                }
-            });
-        });
+        PREEMPTION_ENABLED.with(|c| c.set(false));
+    }
+
+    fn preemption_enabled() -> bool {
+        PREEMPTION_ENABLED.with(Cell::get)
     }
 }
 
@@ -166,8 +157,7 @@ impl ThreadStackAllocator for MockStack {
 
 pub fn reset_switches() {
     SWITCH_COUNT.with(|c| c.set(0));
-    IRQ_DEPTH.with(|c| c.set(0));
-    MAX_IRQ_DEPTH.with(|c| c.set(0));
+    PREEMPTION_ENABLED.with(|c| c.set(true));
     CPU_LOCAL_PTR.with(|c| c.set(0));
     ADDRESS_SPACE_SWITCHES.with(|c| c.borrow_mut().clear());
 }
@@ -188,12 +178,8 @@ pub fn switch_count() -> usize {
     SWITCH_COUNT.with(Cell::get)
 }
 
-pub fn current_irq_depth() -> usize {
-    IRQ_DEPTH.with(Cell::get)
-}
-
-pub fn max_irq_depth() -> usize {
-    MAX_IRQ_DEPTH.with(Cell::get)
+pub fn preemption_enabled() -> bool {
+    PREEMPTION_ENABLED.with(Cell::get)
 }
 
 pub fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext> {

@@ -352,6 +352,9 @@ pub const MAILBOX_PACKET_SIZE: usize = 32;
 /// Возврат syscall'а "операция должна быть повторена позже" (очередь полна и т.п.).
 pub const SYSCALL_RETURN_SHOULD_WAIT: i64 = -7;
 
+/// `UserMemFlags::ReadWrite` в кодировке `flags_raw` для memory_map/allocate.
+pub const MEM_FLAGS_READ_WRITE: u64 = 0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

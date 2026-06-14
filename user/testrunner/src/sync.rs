@@ -5,14 +5,11 @@ use kernel_tests::kernel_test;
 use runtime::{
     Condvar, Mutex, memory_allocate, object_wait_one, process_self, thread_create, thread_exit,
 };
-use syscall::{Handle, THREAD_TERMINATED};
+use syscall::{Handle, MEM_FLAGS_READ_WRITE, THREAD_TERMINATED};
 
 /// Размер стека рабочего потока (page-aligned выдача memory_allocate -> вершина
 /// 16-байт-выровнена).
 const STACK_SIZE: u64 = 0x4000;
-
-/// `UserMemFlags::READ_WRITE` raw-код syscall-ABI.
-const MEM_FLAGS_READ_WRITE: u64 = 0;
 
 /// Таймаут join'а: конечный, чтобы зависший worker падал по timeout.
 const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;

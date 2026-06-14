@@ -56,7 +56,7 @@ fn lazy_event(event_handle: &AtomicU32) -> Handle {
     }
 
     // event_create отказывает лишь при исчерпании ресурсов ядра; без Event
-    // парк невозможен, восстановиться нельзя (no-heap рантайм: паника = abort).
+    // парк невозможен, восстановиться нельзя (panic = abort по профилю).
     let new = event_create().expect("event_create");
 
     match event_handle.compare_exchange(0, new.raw(), AcqRel, Acquire) {

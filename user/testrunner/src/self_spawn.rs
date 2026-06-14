@@ -7,7 +7,7 @@ use runtime::{
     memory_create_virtual, memory_map, memory_remap, object_wait_one, process_create,
     process_exit_code, process_load_image, process_start,
 };
-use syscall::{PROCESS_TERMINATED, SyscallOp};
+use syscall::{MEM_FLAGS_READ_WRITE, PROCESS_TERMINATED, SyscallOp};
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -20,8 +20,7 @@ const CHILD_USER_VM_SIZE: u64 = 0x10_0000;
 const CHILD_EXIT_CODE: u32 = 0x55;
 const CHILD_WAIT_TIMEOUT_NS: u64 = 500_000_000;
 
-/// `UserMemFlags` raw-коды syscall-ABI.
-const MEM_FLAGS_READ_WRITE: u64 = 0;
+/// `UserMemFlags::ReadExecute` raw-код syscall-ABI.
 const MEM_FLAGS_READ_EXECUTE: u64 = 2;
 /// `access_mask` региона: R|W|X - после записи кода регион remap'ится в RX.
 const ACCESS_RWX: u64 = 0b111;

@@ -2,6 +2,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+extern crate alloc;
+
 use core::{
     fmt::Write as _,
     panic::PanicInfo,
@@ -18,6 +20,7 @@ use syscall::Handle;
 
 mod channel;
 mod event;
+mod heap;
 mod mailbox;
 mod memory_kobject;
 mod process_handles;

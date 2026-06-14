@@ -15,6 +15,7 @@ doctest = false
 [dependencies]
 ipc = { workspace = true }
 syscall = { workspace = true }
+talc = { workspace = true }
 
 [lints]
 workspace = true
