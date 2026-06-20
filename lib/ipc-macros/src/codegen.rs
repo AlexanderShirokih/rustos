@@ -74,12 +74,11 @@ fn data_len_expr(ty: &WireTy) -> TokenStream {
             let width = *width as usize;
             quote!(#width)
         }
-        WireTy::Bool => quote!(1usize),
+        WireTy::Bool | WireTy::Cap => quote!(1usize),
         WireTy::Str(bound) | WireTy::Bytes(bound) => {
             let n = &bound.value;
             quote!(#n)
         }
-        WireTy::Cap => quote!(1usize),
     }
 }
 
@@ -159,38 +158,38 @@ fn decode_single_value(ty: &WireTy, body: &TokenStream) -> TokenStream {
 /// Декод одного значения поля; для Cap читает индекс и достаёт id из `__in_handles`,
 /// иначе - обычный `WireValue::from_field`. Опирается на `__field`/`__in_handles` в области.
 fn decode_field_value(ty: &WireTy) -> TokenStream {
-    match ty {
-        WireTy::Cap => quote! {{
-            let __idx = ::ipc::wire::value::decode_endpoint_index(__field.data)?;
+    if let WireTy::Cap = ty {
+        quote! {{
+            let __idx = ::ipc::wire::value::decode_port_index(__field.data)?;
             let __raw = *__in_handles
                 .get(__idx as usize)
                 .ok_or(::ipc::wire::IpcError::BadLength)?;
             let __nz = ::core::num::NonZeroU32::new(__raw)
                 .ok_or(::ipc::wire::IpcError::BadLength)?;
             ::ipc::wire::Cap::from_raw(__nz)
-        }},
-        _ => {
-            let ty_tokens = wire_ty_tokens(ty, &quote!('_));
-            quote!(<#ty_tokens as ::ipc::WireValue>::from_field(__field.data)?)
-        }
+        }}
+    } else {
+        let ty_tokens = wire_ty_tokens(ty, &quote!('_));
+        quote!(<#ty_tokens as ::ipc::WireValue>::from_field(__field.data)?)
     }
 }
 
 /// Запись одного значения в `buf`; для Cap пишет индекс и кладёт id в `__out_handles`,
 /// иначе - обычный `WireValue::write_as_field`. Опирается на `__out_handles`/`__out_handle_count`.
 fn encode_field(value: &TokenStream, field_id: u8, ty: &WireTy, buf: &TokenStream) -> TokenStream {
-    match ty {
-        WireTy::Cap => quote! {
+    if let WireTy::Cap = ty {
+        quote! {
             #buf.write_field(
                 #field_id,
-                &::ipc::wire::value::encode_endpoint_index(__out_handle_count as u8),
+                &::ipc::wire::value::encode_port_index(__out_handle_count as u8),
             )?;
             __out_handles[__out_handle_count] = #value.raw().get();
             __out_handle_count += 1;
-        },
-        _ => quote! {
+        }
+    } else {
+        quote! {
             ::ipc::WireValue::write_as_field(&#value, &mut #buf, #field_id)?;
-        },
+        }
     }
 }
 
@@ -208,7 +207,11 @@ fn encode_params(params: &[Param]) -> (TokenStream, TokenStream) {
 }
 
 /// Эмитит запись возвращаемого значения `value` в `buf` и аргумент handle-среза.
-fn encode_return(value: &TokenStream, ty: &WireTy, buf: &TokenStream) -> (TokenStream, TokenStream) {
+fn encode_return(
+    value: &TokenStream,
+    ty: &WireTy,
+    buf: &TokenStream,
+) -> (TokenStream, TokenStream) {
     let has_cap = matches!(ty, WireTy::Cap);
     let decl = handles_out_decl(has_cap);
     let write = encode_field(value, 1u8, ty, buf);
@@ -256,6 +259,11 @@ fn expand_client(protocol: &Protocol) -> TokenStream {
         .filter(|op| matches!(op.kind, Kind::Call | Kind::Cast))
         .map(|op| expand_client_method(protocol, op));
 
+    // Дефолт `wait_ns` из `#[protocol(timeout_ns = N)]`; иначе бессрочно.
+    let default_wait_ns = protocol
+        .default_timeout_ns
+        .map_or_else(|| quote!(u64::MAX), |ns| quote!(#ns));
+
     quote! {
         #vis struct #client_ident<T: ::ipc::Transport> {
             transport: T,
@@ -268,8 +276,22 @@ fn expand_client(protocol: &Protocol) -> TokenStream {
                 Self {
                     transport,
                     next_txid: ::core::cell::Cell::new(1u32),
-                    wait_ns: u64::MAX,
+                    wait_ns: #default_wait_ns,
                 }
+            }
+
+            /// Переопределяет дефолтный тайм-аут ожидания ответа two-way
+            /// `#[call]` (в нс), применяемый к операциям без собственного
+            /// `#[call(timeout_ns = N)]`.
+            #[must_use]
+            #vis fn with_wait_ns(mut self, wait_ns: u64) -> Self {
+                self.wait_ns = wait_ns;
+                self
+            }
+
+            /// Текущий дефолтный тайм-аут ожидания ответа (нс).
+            #vis fn wait_ns(&self) -> u64 {
+                self.wait_ns
             }
 
             #vis fn into_transport(self) -> T {
@@ -352,6 +374,11 @@ fn expand_client_method(protocol: &Protocol, op: &Operation) -> TokenStream {
                 (ret_ty, decode)
             };
 
+            // Per-call `#[call(timeout_ns = N)]` перекрывает дефолт клиента.
+            let wait_ns = op
+                .timeout_ns
+                .map_or_else(|| quote!(self.wait_ns), |ns| quote!(#ns));
+
             let docs = op_docs(op);
             quote! {
                 #docs
@@ -366,7 +393,7 @@ fn expand_client_method(protocol: &Protocol, op: &Operation) -> TokenStream {
                     let mut __bytes = [0u8; ::ipc::wire::MESSAGE_INLINE_MAX];
                     let mut __handles = [0u32; ::ipc::wire::MESSAGE_MAX_HANDLES];
                     loop {
-                        self.transport.wait_readable(self.wait_ns)?;
+                        self.transport.wait_readable(#wait_ns)?;
                         let __len = self.transport.read_message(&mut __bytes, &mut __handles)?;
                         let __frame = &__bytes[..__len.bytes];
                         let __header = ::ipc::wire::Header::decode(__frame)?;
@@ -549,9 +576,11 @@ fn expand_dispatch_arm(op: &Operation) -> TokenStream {
         },
         Kind::Call => {
             let ret = op.ret.as_ref().expect("two-way carries a return type");
-            let (success, success_handles) = encode_return(&quote!(__ok), ret.ok(), &quote!(__reply));
+            let (success, success_handles) =
+                encode_return(&quote!(__ok), ret.ok(), &quote!(__reply));
             let body = if let Some(err) = ret.err() {
-                let (encode_err, err_handles) = encode_return(&quote!(__err), err, &quote!(__reply));
+                let (encode_err, err_handles) =
+                    encode_return(&quote!(__err), err, &quote!(__reply));
                 quote! {
                     match srv.#method_ident(#call_args) {
                         ::core::result::Result::Ok(__ok) => {

@@ -6,10 +6,12 @@ use spin::Once;
 pub trait SyscallRuntime: Send + Sync {
     fn current_user_vm(&self) -> Option<UserVmContext>;
 
-    /// Глобальный аллокатор физических фреймов для anonymous-регионов
-    /// (Memory KObject Virtual). `None`, если ядро ещё не зарегистрировало
-    /// его - в этом случае соответствующие syscall'ы возвращают
-    /// `OutOfMemory`.
+    /// User-VA per-thread IPC-буфера текущего потока, либо `None`, если у
+    /// потока нет буфера (kernel-поток).
+    fn current_ipc_buffer_va(&self) -> Option<u64>;
+
+    /// Аллокатор фреймов для anonymous Memory KObject. `None` до регистрации
+    /// - соответствующие syscall'ы вернут `OutOfMemory`.
     fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)>;
 }
 

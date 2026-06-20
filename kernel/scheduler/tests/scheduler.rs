@@ -22,8 +22,9 @@ use scheduler::{
 };
 
 use crate::common::{
-    MockAddressSpaceFactory, MockContext, MockStack, MockTimer, MockTimerSource, preemption_enabled,
-    reset_switches, switch_count, take_address_space_switches, with_simulated_irq,
+    MockAddressSpaceFactory, MockContext, MockStack, MockTimer, MockTimerSource,
+    preemption_enabled, reset_switches, switch_count, take_address_space_switches,
+    with_simulated_irq,
 };
 
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
@@ -303,7 +304,10 @@ fn yield_restores_preemption_when_enabled() {
     assert!(preemption_enabled(), "preemption enabled before yield");
     running.yield_now();
     running.yield_now();
-    assert!(preemption_enabled(), "yield must restore preemption to enabled");
+    assert!(
+        preemption_enabled(),
+        "yield must restore preemption to enabled"
+    );
 }
 
 #[test]
@@ -322,7 +326,10 @@ fn yield_from_masked_context_keeps_preemption_masked() {
             "вложенный yield не должен разрешать preemption"
         );
     });
-    assert!(preemption_enabled(), "preemption восстановлен после masked-scope");
+    assert!(
+        preemption_enabled(),
+        "preemption восстановлен после masked-scope"
+    );
 }
 
 #[test]
@@ -586,8 +593,6 @@ fn terminating_user_thread_releases_address_space() {
 
 #[test]
 fn exit_current_signals_thread_terminated() {
-    use kobject::THREAD_TERMINATED;
-
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
@@ -597,18 +602,16 @@ fn exit_current_signals_thread_terminated() {
     let ko = scheduler.thread_object_for(id).expect("thread_object");
 
     let running = scheduler.run();
-    assert_eq!(ko.peek() & THREAD_TERMINATED, 0);
+    assert!(!ko.terminated());
 
     running.exit_current();
 
-    assert_eq!(ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert!(ko.terminated());
     assert_eq!(ko.exit_code(), 0);
 }
 
 #[test]
 fn exit_current_with_nonzero_code_publishes_code() {
-    use kobject::THREAD_TERMINATED;
-
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
@@ -620,14 +623,12 @@ fn exit_current_with_nonzero_code_publishes_code() {
     let running = scheduler.run();
     running.exit_current_with_code(42);
 
-    assert_eq!(ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert!(ko.terminated());
     assert_eq!(ko.exit_code(), 42);
 }
 
 #[test]
 fn last_thread_exit_signals_process_terminated() {
-    use kobject::PROCESS_TERMINATED;
-
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
@@ -638,17 +639,16 @@ fn last_thread_exit_signals_process_terminated() {
     let process_ko = scheduler.process_object_for(pid).expect("process_object");
 
     let running = scheduler.run();
-    assert_eq!(process_ko.peek() & PROCESS_TERMINATED, 0);
+    assert!(!process_ko.terminated());
 
     running.exit_current();
 
-    assert_eq!(process_ko.peek() & PROCESS_TERMINATED, PROCESS_TERMINATED);
+    assert!(process_ko.terminated());
     assert_eq!(process_ko.exit_code(), 0);
 }
 
 #[test]
 fn non_last_thread_exit_does_not_signal_process() {
-    use kobject::{PROCESS_TERMINATED, THREAD_TERMINATED};
     use scheduler::SchedulerService;
 
     reset_switches();
@@ -676,15 +676,13 @@ fn non_last_thread_exit_does_not_signal_process() {
 
     running.exit_current();
 
-    assert_eq!(first_ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
-    assert_eq!(process_ko.peek() & PROCESS_TERMINATED, 0);
+    assert!(first_ko.terminated());
+    assert!(!process_ko.terminated());
     assert!(running.process_object_for(pid).is_some());
 }
 
 #[test]
 fn process_object_outlives_process_table_entry() {
-    use kobject::PROCESS_TERMINATED;
-
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
@@ -701,7 +699,7 @@ fn process_object_outlives_process_table_entry() {
     assert!(running.process_object_for(pid).is_none());
     assert!(running.process_count() < count_before);
     assert!(Arc::strong_count(&process_ko) >= 1);
-    assert_eq!(process_ko.peek() & PROCESS_TERMINATED, PROCESS_TERMINATED);
+    assert!(process_ko.terminated());
 }
 
 #[test]
@@ -751,8 +749,6 @@ fn current_process_object_returns_running_process_ko() {
 
 #[test]
 fn kernel_thread_completion_signals_terminated() {
-    use kobject::THREAD_TERMINATED;
-
     let forwarder = install_forwarding_runtime();
 
     reset_switches();
@@ -766,7 +762,7 @@ fn kernel_thread_completion_signals_terminated() {
 
     let running = scheduler.run();
     assert_eq!(running.current(), id);
-    assert_eq!(ko.peek() & THREAD_TERMINATED, 0);
+    assert!(!ko.terminated());
 
     forwarder.set(Arc::new(handle));
 
@@ -781,13 +777,13 @@ fn kernel_thread_completion_signals_terminated() {
 
     forwarder.clear();
 
-    assert_eq!(ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert!(ko.terminated());
     assert_eq!(ko.exit_code(), 0);
 }
 
 #[test]
 fn process_create_returns_handle_to_empty_process() {
-    use kobject::{KernelRuntime, PROCESS_TERMINATED};
+    use kobject::KernelRuntime;
 
     reset_switches();
     let factory = new_factory_static();
@@ -800,7 +796,7 @@ fn process_create_returns_handle_to_empty_process() {
         .create_empty_process("p")
         .expect("create_empty_process must succeed");
 
-    assert_eq!(process.peek() & PROCESS_TERMINATED, 0);
+    assert!(!process.terminated());
     assert!(Arc::strong_count(&process) >= 1);
     assert_eq!(scheduler.process_count(), processes_before + 1);
 }
@@ -825,7 +821,7 @@ fn process_create_rejects_empty_name() {
 
 #[test]
 fn thread_terminate_via_handle_signals_terminated() {
-    use kobject::{KernelRuntime, THREAD_TERMINATED, UserThreadEntry};
+    use kobject::{KernelRuntime, UserThreadEntry};
 
     reset_switches();
     let factory = new_factory_static();
@@ -849,17 +845,17 @@ fn thread_terminate_via_handle_signals_terminated() {
         )
         .expect("create_user_thread");
 
-    assert_eq!(thread.peek() & THREAD_TERMINATED, 0);
+    assert!(!thread.terminated());
     handle
         .terminate_thread(&thread, 7)
         .expect("terminate_thread");
-    assert_eq!(thread.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert!(thread.terminated());
     assert_eq!(thread.exit_code(), 7);
 }
 
 #[test]
 fn process_terminate_via_handle_terminates_all_threads() {
-    use kobject::{KernelRuntime, PROCESS_TERMINATED, THREAD_TERMINATED, UserThreadEntry};
+    use kobject::{KernelRuntime, UserThreadEntry};
 
     reset_switches();
     let factory = new_factory_static();
@@ -898,15 +894,15 @@ fn process_terminate_via_handle_terminates_all_threads() {
         .terminate_process(&process, -1)
         .expect("terminate_process");
 
-    assert_eq!(t1.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
-    assert_eq!(t2.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
-    assert_eq!(process.peek() & PROCESS_TERMINATED, PROCESS_TERMINATED);
+    assert!(t1.terminated());
+    assert!(t2.terminated());
+    assert!(process.terminated());
     assert_eq!(process.exit_code(), -1);
 }
 
 #[test]
 fn switch_to_next_skips_terminated_thread_in_ready_queue() {
-    use kobject::{KernelRuntime, THREAD_TERMINATED};
+    use kobject::KernelRuntime;
 
     reset_switches();
     let timer = MockTimer::new();
@@ -927,7 +923,7 @@ fn switch_to_next_skips_terminated_thread_in_ready_queue() {
 
     let handle = running.handle();
     handle.terminate_thread(&t2_ko, 9).expect("terminate t2");
-    assert_eq!(t2_ko.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+    assert!(t2_ko.terminated());
 
     running.yield_now();
     assert_eq!(running.current(), t3);
@@ -1080,8 +1076,7 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
         handle_ids: std::vec::Vec::new(),
     };
     let thread = handle.start_user_process(&process, spec).expect("start ok");
-    // KO стартовал; thread жив, terminated-флаг не поднят.
-    assert_eq!(thread.peek() & kobject::THREAD_TERMINATED, 0);
+    assert!(!thread.terminated());
 }
 
 #[test]
@@ -1121,7 +1116,7 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
     // в loader-table с исходным HandleId (не дропать и не менять id).
     use collections::LockCell;
     use kobject::{
-        Event, Handle, HandleTable, KObject, KernelRuntime, Rights, StartProcessError,
+        Handle, HandleTable, KObject, KernelRuntime, Rights, Signal, StartProcessError,
         UserStartSpec, UserThreadEntry,
     };
     use scheduler::SchedulerService;
@@ -1151,10 +1146,10 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
             .expect("inherit filler spawn");
     }
 
-    let event = Event::new();
-    let weak = std::sync::Arc::downgrade(&event);
+    let signal = Signal::new();
+    let weak = std::sync::Arc::downgrade(&signal);
     let loader_table = Arc::new(collections::MutexCell::new(HandleTable::new()));
-    let h = Handle::new(KObject::Event(event), Rights::TRANSFER | Rights::WAIT);
+    let h = Handle::new(KObject::Signal(signal), Rights::TRANSFER | Rights::READ);
     let handle_id = loader_table
         .with_lock(|tbl| tbl.insert(h))
         .expect("insert into loader table");
@@ -1281,7 +1276,7 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
 
 #[test]
 fn process_terminate_on_empty_process_signals_terminated_and_releases_slot() {
-    use kobject::{KernelRuntime, PROCESS_TERMINATED};
+    use kobject::KernelRuntime;
 
     reset_switches();
     let factory = new_factory_static();
@@ -1293,12 +1288,12 @@ fn process_terminate_on_empty_process_signals_terminated_and_releases_slot() {
         .create_empty_process("empty")
         .expect("create_empty_process");
     let before = scheduler.process_count();
-    assert_eq!(process.peek() & PROCESS_TERMINATED, 0);
+    assert!(!process.terminated());
 
     handle
         .terminate_process(&process, 7)
         .expect("terminate_process");
-    assert_eq!(process.peek() & PROCESS_TERMINATED, PROCESS_TERMINATED);
+    assert!(process.terminated());
     assert_eq!(process.exit_code(), 7);
 
     // Повторный terminate - no-op: первый код фиксируется, дублирующего

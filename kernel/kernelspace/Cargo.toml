@@ -21,6 +21,7 @@ kobject = { workspace = true }
 memory = { workspace = true }
 klog = { workspace = true }
 scheduler = { workspace = true }
+syscall = { workspace = true }
 syscall-kernel = { workspace = true }
 userland = { workspace = true }
 userland-image = { workspace = true }

@@ -9,12 +9,11 @@ extern crate alloc;
 extern crate std;
 
 mod bridge;
-mod channel;
 mod error;
 mod flags;
-mod mailbox;
 mod memory;
 mod numbers;
+mod port;
 mod process;
 mod runtime;
 mod spawn_abi;

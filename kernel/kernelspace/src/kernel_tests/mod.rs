@@ -22,12 +22,10 @@ use crate::{
 
 mod allocator;
 mod bootstrap_log;
-mod channel;
-mod channel_full_api;
-mod event;
-mod event_syscall;
-mod event_via_scheduler;
 mod handle_table;
+mod signal;
+mod signal_syscall;
+mod signal_via_scheduler;
 mod smoke;
 
 struct ConsoleAdapter(Arc<dyn ConsoleService>);
@@ -42,10 +40,7 @@ impl Writer for ConsoleAdapter {
 }
 
 static ADAPTER: Once<ConsoleAdapter> = Once::new();
-
-/// Сервис scheduler-а, кэшируемый для тестов, которые спавнят
-/// дополнительные потоки (например, [`event_via_scheduler::event_signal_after_deadline`]).
-static SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
+static TEST_SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
 static USER_PROCESS_LAUNCHER: Once<Arc<dyn UserProcessLauncher>> = Once::new();
 static USERLAND_BLOB: Once<&'static [u8]> = Once::new();
 

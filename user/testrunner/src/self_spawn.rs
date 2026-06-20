@@ -1,13 +1,13 @@
 //! E2E проверка `ProcessCreate`/`ProcessLoadImage`/`ProcessStart` из EL0:
 //! testrunner готовит образ child-процесса через memory-syscall'ы, стартует
-//! его и дожидается `PROCESS_TERMINATED`.
+//! его и дожидается завершения через bound-`Signal` процесса.
 
 use kernel_tests::kernel_test;
 use runtime::{
-    memory_create_virtual, memory_map, memory_remap, object_wait_one, process_create,
-    process_exit_code, process_load_image, process_start,
+    memory_create_virtual, memory_map, memory_remap, process_create, process_exit_code,
+    process_load_image, process_start, process_termination_signal, signal_wait_one,
 };
-use syscall::{MEM_FLAGS_READ_WRITE, PROCESS_TERMINATED, SyscallOp};
+use syscall::{MEM_FLAGS_READ_WRITE, SIGNALED, SyscallOp};
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -89,7 +89,8 @@ fn self_spawn_via_syscalls() {
     // priority = 1, bootstrap-handle'ов нет.
     process_start(child, CHILD_CODE_VA, CHILD_STACK_TOP, 0, 1, 0).expect("child thread handle");
 
-    let observed = object_wait_one(child, PROCESS_TERMINATED, CHILD_WAIT_TIMEOUT_NS);
-    kernel_tests::kassert_eq!(observed, i64::from(PROCESS_TERMINATED));
+    let term_signal = process_termination_signal(child).expect("process_termination_signal");
+    let observed = signal_wait_one(term_signal, SIGNALED, CHILD_WAIT_TIMEOUT_NS);
+    kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
     kernel_tests::kassert_eq!(process_exit_code(child), i64::from(CHILD_EXIT_CODE));
 }

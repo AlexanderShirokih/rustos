@@ -29,7 +29,7 @@ fn syscall_from_kernel_origin_is_rejected() {
             in("x1") 0_u64,
             in("x2") 0_u64,
             lateout("x0") result,
-            op = const SyscallOp::ObjectSignal as u16,
+            op = const SyscallOp::SignalSet as u16,
             options(nostack, preserves_flags),
         );
     }

@@ -1,12 +1,12 @@
 //! E2E проверка `SchedulerService::spawn_user_process`.
 //!
-//! Тест передаёт payload'у bootstrap-handle на `Event`, ждёт сигнал от
-//! `ObjectSignal`, затем payload делает `ThreadExit`.
+//! Тест передаёт payload'у bootstrap-handle на `Signal`, ждёт сигнал от
+//! `SignalSet`, затем payload делает `ThreadExit`.
 
 use alloc::vec;
 
 use kernel_tests::kernel_test;
-use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights};
+use kobject::{Handle, KObject, Rights, SIGNALED, Signal};
 use memory::{
     MemFlags,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
@@ -26,13 +26,13 @@ const USER_STACK_TOP: usize = USER_PAYLOAD_VA + 16 * PAGE_SIZE;
 /// Минимальный footprint: 1 страница стека достаточна, payload не пишет в стек.
 const USER_STACK_SIZE: usize = PAGE_SIZE;
 
-/// Сборка байт-кода: `ObjectSignal(x0, EVENT_SIGNALED, 0); ThreadExit(0); b .`.
+/// Сборка байт-кода: `SignalSet(x0, SIGNALED, 0); ThreadExit(0); b .`.
 /// `b .` - fallback на случай возврата (не должен исполниться).
 fn build_payload() -> [u8; 6 * 4] {
     let words = [
-        movz_x(Reg::X1, EVENT_SIGNALED as u16, 0),
+        movz_x(Reg::X1, SIGNALED as u16, 0),
         movz_x(Reg::X2, 0, 0),
-        svc_op(SyscallOp::ObjectSignal),
+        svc_op(SyscallOp::SignalSet),
         movz_x(Reg::X0, 0, 0),
         svc_op(SyscallOp::ThreadExit),
         B_LOOP,
@@ -46,7 +46,7 @@ fn aligned(va: usize) -> PageAlignedVirtualAddress {
 
 #[kernel_test]
 fn userspace_spawn_user_process_runs_to_exit() {
-    let event = Event::new();
+    let signal = Signal::new();
     let payload = build_payload();
     let segment = UserSegment {
         va_base: aligned(USER_PAYLOAD_VA),
@@ -61,7 +61,7 @@ fn userspace_spawn_user_process_runs_to_exit() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
+    let handle = Handle::new(KObject::Signal(signal.clone()), Rights::WRITE);
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
@@ -78,7 +78,7 @@ fn userspace_spawn_user_process_runs_to_exit() {
 
     let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
-    while event.peek() & EVENT_SIGNALED == 0 {
+    while signal.peek() & SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
         kernel_tests::kassert!(spins < 500);
@@ -94,7 +94,7 @@ fn userspace_spawn_user_process_runs_to_exit() {
 //   2. Сохраняет VA в x19 и записывает байт в `[x19]` - доказательство, что
 //      страница реально writable (mmu активен в user-AS, mapping создан).
 //   3. `svc #MemoryRemap` (va=x19, size=4096, flags=ReadOnly).
-//   4. `svc #ObjectSignal` на bootstrap Event.
+//   4. `svc #SignalSet` на bootstrap Signal.
 //   5. `svc #ThreadExit`.
 //
 // Тест ждёт сигнал. Сам факт того, что сигнал пришёл,
@@ -116,9 +116,9 @@ fn build_vm_payload() -> [u8; 18 * 4] {
         movz_x(Reg::X2, 1, 0),
         svc_op(SyscallOp::MemoryRemap),
         mov_x(Reg::X0, Reg::X21),
-        movz_x(Reg::X1, EVENT_SIGNALED as u16, 0),
+        movz_x(Reg::X1, SIGNALED as u16, 0),
         movz_x(Reg::X2, 0, 0),
-        svc_op(SyscallOp::ObjectSignal),
+        svc_op(SyscallOp::SignalSet),
         movz_x(Reg::X0, 0, 0),
         svc_op(SyscallOp::ThreadExit),
         B_LOOP,
@@ -128,7 +128,7 @@ fn build_vm_payload() -> [u8; 18 * 4] {
 
 #[kernel_test]
 fn userspace_vm_allocate_and_remap() {
-    let event = Event::new();
+    let signal = Signal::new();
     let payload = build_vm_payload();
     let segment = UserSegment {
         va_base: aligned(USER_PAYLOAD_VA),
@@ -143,7 +143,7 @@ fn userspace_vm_allocate_and_remap() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
+    let handle = Handle::new(KObject::Signal(signal.clone()), Rights::WRITE);
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
@@ -154,7 +154,7 @@ fn userspace_vm_allocate_and_remap() {
 
     let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
-    while event.peek() & EVENT_SIGNALED == 0 {
+    while signal.peek() & SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
         kernel_tests::kassert!(spins < 500);
@@ -186,9 +186,9 @@ fn build_vm_free_payload() -> [u8; 22 * 4] {
         cmp_x(Reg::X0, Reg::X19),
         b_ne(7),
         mov_x(Reg::X0, Reg::X21),
-        movz_x(Reg::X1, EVENT_SIGNALED as u16, 0),
+        movz_x(Reg::X1, SIGNALED as u16, 0),
         movz_x(Reg::X2, 0, 0),
-        svc_op(SyscallOp::ObjectSignal),
+        svc_op(SyscallOp::SignalSet),
         movz_x(Reg::X0, 0, 0),
         svc_op(SyscallOp::ThreadExit),
         B_LOOP,
@@ -198,7 +198,7 @@ fn build_vm_free_payload() -> [u8; 22 * 4] {
 
 #[kernel_test]
 fn userspace_vm_allocate_free_reuse_va() {
-    let event = Event::new();
+    let signal = Signal::new();
     let payload = build_vm_free_payload();
     let segment = UserSegment {
         va_base: aligned(USER_PAYLOAD_VA),
@@ -213,7 +213,7 @@ fn userspace_vm_allocate_free_reuse_va() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
+    let handle = Handle::new(KObject::Signal(signal.clone()), Rights::WRITE);
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
@@ -230,7 +230,7 @@ fn userspace_vm_allocate_free_reuse_va() {
 
     let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
-    while event.peek() & EVENT_SIGNALED == 0 {
+    while signal.peek() & SIGNALED == 0 {
         scheduler.sleep_ms(10);
         spins += 1;
         kernel_tests::kassert!(spins < 500);

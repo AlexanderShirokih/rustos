@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use collections::{LockCell, MutexCell};
 use kobject::{
-    Event, Handle, HandleTable, IpcError, KObject, KernelRuntime, LoadImageError, ProcessObject,
-    Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
+    Handle, HandleTable, IpcError, KObject, KernelRuntime, LoadImageError, ProcessObject, Rights,
+    Signal, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
     UserThreadEntry, WaitToken, install_runtime,
 };
 use memory::{
@@ -248,6 +248,10 @@ impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
         Some(UserVmContext::new(mapper.clone(), allocator.clone()))
     }
 
+    fn current_ipc_buffer_va(&self) -> Option<u64> {
+        None
+    }
+
     fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
         None
     }
@@ -273,7 +277,7 @@ fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 fn full_table_with_capacity_one() -> Arc<MutexCell<HandleTable>> {
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(1)));
-    let dummy = Handle::new(KObject::Event(Event::new()), Rights::WAIT);
+    let dummy = Handle::new(KObject::Signal(Signal::new()), Rights::READ);
     table
         .with_lock(|tbl| tbl.insert(dummy))
         .expect("dummy fills the slot");
@@ -282,7 +286,7 @@ fn full_table_with_capacity_one() -> Arc<MutexCell<HandleTable>> {
 
 fn install_process_handle(table: &Arc<MutexCell<HandleTable>>) -> kobject::HandleId {
     let process = ProcessObject::new();
-    let handle = Handle::new(KObject::Process(process), Rights::MANAGE_PROCESS);
+    let handle = Handle::new(KObject::Process(process), Rights::WRITE);
     table
         .with_lock(|tbl| tbl.insert(handle))
         .expect("insert process handle")
@@ -409,7 +413,7 @@ fn thread_create_does_not_create_thread_on_out_of_handles() {
     let process_id = install_process_handle(&table);
     table
         .with_lock(|tbl| {
-            tbl.insert(Handle::new(KObject::Event(Event::new()), Rights::WAIT))
+            tbl.insert(Handle::new(KObject::Signal(Signal::new()), Rights::READ))
                 .map(|_| ())
         })
         .expect("dummy fills second slot");
@@ -446,7 +450,7 @@ fn process_start_does_not_start_process_on_out_of_handles() {
     let process_id = install_process_handle(&table);
     table
         .with_lock(|tbl| {
-            tbl.insert(Handle::new(KObject::Event(Event::new()), Rights::WAIT))
+            tbl.insert(Handle::new(KObject::Signal(Signal::new()), Rights::READ))
                 .map(|_| ())
         })
         .expect("dummy fills second slot");
@@ -488,8 +492,8 @@ fn process_start_succeeds_when_drain_frees_caller_slot() {
     let bootstrap_id = table
         .with_lock(|tbl| {
             tbl.insert(Handle::new(
-                KObject::Event(Event::new()),
-                Rights::WAIT | Rights::TRANSFER,
+                KObject::Signal(Signal::new()),
+                Rights::READ | Rights::TRANSFER,
             ))
         })
         .expect("insert bootstrap handle");

@@ -1,10 +1,9 @@
 //! Kernel-side проверка завершения user-процесса: `ThreadExit(N)` из EL0
-//! поднимает `THREAD_TERMINATED` на `Arc<ThreadObject>` стартового потока и
-//! `PROCESS_TERMINATED` на `Arc<ProcessObject>` из `UserProcessLaunchInfo`;
-//! exit_code публикуется до сигнала и читается обоими `*_object`.
+//! помечает завершённым `Arc<ThreadObject>` стартового потока и
+//! `Arc<ProcessObject>` из `UserProcessLaunchInfo`; exit_code публикуется
+//! до пометки и читается обоими `*_object`.
 
 use kernel_tests::kernel_test;
-use kobject::{PROCESS_TERMINATED, THREAD_TERMINATED};
 use memory::{
     MemFlags,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
@@ -67,7 +66,7 @@ fn process_lifecycle_exit_code_and_termination_signals() {
 
     let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
-    while thread_object.peek() & THREAD_TERMINATED == 0 {
+    while !thread_object.terminated() {
         scheduler.sleep_ms(10);
         spins += 1;
         kernel_tests::kassert!(spins < 500);
@@ -75,7 +74,7 @@ fn process_lifecycle_exit_code_and_termination_signals() {
     kernel_tests::kassert_eq!(thread_object.exit_code(), PAYLOAD_EXIT_CODE);
 
     spins = 0;
-    while process_object.peek() & PROCESS_TERMINATED == 0 {
+    while !process_object.terminated() {
         scheduler.sleep_ms(10);
         spins += 1;
         kernel_tests::kassert!(spins < 500);

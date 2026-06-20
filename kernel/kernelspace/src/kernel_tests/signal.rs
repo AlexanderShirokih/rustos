@@ -1,4 +1,4 @@
-//! Сигнал `Event` будит зарегистрированный `Waker`.
+//! Сигнал `Signal` будит зарегистрированный `Waker`.
 
 extern crate alloc;
 
@@ -7,10 +7,10 @@ use alloc::sync::Arc;
 use kernel_tests::kernel_test;
 
 #[kernel_test]
-fn event_signal() {
+fn signal_wakes_waker() {
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use kobject::{EVENT_SIGNALED, Event, Waker};
+    use kobject::{SIGNALED, Signal, Waker};
 
     struct Flag {
         fired: AtomicBool,
@@ -21,18 +21,16 @@ fn event_signal() {
         }
     }
 
-    let event = Event::new();
-    kernel_tests::kassert_eq!(event.peek(), 0);
+    let signal = Signal::new();
+    kernel_tests::kassert_eq!(signal.peek(), 0);
 
     let flag = Arc::new(Flag {
         fired: AtomicBool::new(false),
     });
-    event
-        .signals()
-        .register_waiter(EVENT_SIGNALED, flag.clone());
+    signal.register_waiter(SIGNALED, flag.clone());
     kernel_tests::kassert!(!flag.fired.load(Ordering::Acquire));
 
-    event.signal(EVENT_SIGNALED, 0);
+    signal.signal(SIGNALED, 0);
     kernel_tests::kassert!(flag.fired.load(Ordering::Acquire));
-    kernel_tests::kassert!(event.peek() & EVENT_SIGNALED != 0);
+    kernel_tests::kassert!(signal.peek() & SIGNALED != 0);
 }

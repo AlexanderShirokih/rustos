@@ -26,7 +26,7 @@ pub enum SyscallError {
     AccessDenied = 6,
     /// Операция должна быть повторена позже.
     ShouldWait = 7,
-    /// Парный endpoint закрыт.
+    /// Парный port закрыт.
     PeerClosed = 8,
     /// Истёк deadline.
     Timeout = 9,
@@ -45,6 +45,9 @@ pub enum SyscallError {
     /// Wait отменён: handle, на котором было зарегистрировано ожидание,
     /// был закрыт или передан другому процессу до прихода сигнала.
     Canceled = 15,
+    /// Бюджет ресурса исчерпан: метерящая операция запросила больше
+    /// страниц, чем осталось в `Resource`.
+    ResourceExhausted = 16,
 }
 
 impl SyscallError {
@@ -66,6 +69,7 @@ impl From<IpcError> for SyscallError {
             IpcError::MessageTooBig => Self::MessageTooBig,
             IpcError::OutOfHandles => Self::OutOfHandles,
             IpcError::Canceled => Self::Canceled,
+            IpcError::ResourceExhausted => Self::ResourceExhausted,
         }
     }
 }
@@ -102,6 +106,18 @@ pub(super) fn encode_return(r: Result<u64, SyscallError>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn return_constants_match_abi() {
+        assert_eq!(
+            SyscallError::ShouldWait.as_return_value(),
+            syscall::SYSCALL_RETURN_SHOULD_WAIT
+        );
+        assert_eq!(
+            SyscallError::Timeout.as_return_value(),
+            syscall::SYSCALL_RETURN_TIMEOUT
+        );
+    }
 
     #[test]
     fn ipc_error_maps_to_syscall_error() {
@@ -162,6 +178,7 @@ mod tests {
             SyscallError::OutOfMemory,
             SyscallError::NotFound,
             SyscallError::Canceled,
+            SyscallError::ResourceExhausted,
         ];
         for &e in &codes {
             let v: i64 = e.into();
@@ -169,7 +186,7 @@ mod tests {
             assert!(v >= -i64::from(u32::MAX), "{e:?} out of range");
         }
         // Все коды разные.
-        let mut seen = [0_i64; 15];
+        let mut seen = [0_i64; 16];
         for (i, &e) in codes.iter().enumerate() {
             seen[i] = e.into();
         }
@@ -203,6 +220,7 @@ mod tests {
             SyscallError::OutOfMemory,
             SyscallError::NotFound,
             SyscallError::Canceled,
+            SyscallError::ResourceExhausted,
         ];
         for &e in &codes {
             assert_ne!(i64::from(e), 0);

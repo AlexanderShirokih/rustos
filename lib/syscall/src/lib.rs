@@ -13,14 +13,13 @@
 //! | Диапазон      | Класс операций                              |
 //! |---------------|---------------------------------------------|
 //! | `0x00`        | резерв (`raw == 0` -> `BadSyscall`)          |
-//! | `0x01..=0x0F` | резерв (deprecated thread/process control)  |
-//! | `0x10..=0x1F` | object base - общие операции на любом KO    |
-//! | `0x20..=0x2F` | channel-специфичные                         |
+//! | `0x01..=0x0F` | резерв                                       |
+//! | `0x10..=0x1F` | object base - Signal                                  |
+//! | `0x20..=0x2F` | port-специфичные (rendezvous-IPC)       |
 //! | `0x30..=0x3F` | handle lifecycle                            |
 //! | `0x40..=0x4F` | Process KObject                             |
 //! | `0x50..=0x5F` | Thread KObject                              |
 //! | `0x60..=0x6F` | Memory KObject                              |
-//! | `0x70..=0x7F` | Mailbox KObject                             |
 //!
 //! # Memory KObject (`0x60..=0x6F`)
 //!
@@ -41,39 +40,17 @@
 //! | 0x62        | резерв |
 //! | 0x68..=0x6F | резерв |
 //!
-//! `ChannelWrite` (`0x21`) и `ChannelRead` (`0x22`) - register-flat,
-//! 5 аргументов; `ChannelRead` упаковывает в возврат
-//! `bytes_len | (handles_count << 32)`. Конкретные сигнатуры - на
-//! `SyscallOp`.
-//!
-//! # Mailbox KObject (`0x70..=0x7F`)
-//!
-//! | op    | Имя                  | Аргументы / возврат                                                                  |
-//! |-------|----------------------|--------------------------------------------------------------------------------------|
-//! | 0x70  | `MailboxCreate`      | -> `mbox_h`                                                                          |
-//! | 0x71  | `MailboxQueue`       | `mbox_h`, `packet_va`, `packet_len` (=32) -> `0`                                     |
-//! | 0x72  | `MailboxWait`        | `mbox_h`, `timeout_ns`, `packet_va`, `packet_cap` (>=32) -> `packet_len` (=32)       |
-//! | 0x73  | `MailboxWaitAsync`   | `mbox_h`, `target_h`, `key`, `mask | (mode << 32)` -> `0`                            |
-//! | 0x74  | `MailboxCancel`      | `mbox_h`, `target_h`, `key` -> `0`                                                   |
-//!
-//! Зарезервированы, возвращают `BadSyscall`:
-//!
-//! | op          | Назначение |
-//! |-------------|------------|
-//! | 0x75..=0x7F | резерв     |
-//!
-//! `MailboxQueue`/`MailboxWait` копируют 32-байтный пакет (см.
-//! `MAILBOX_PACKET_SIZE`) через user-VM;
-//! user'у разрешено ставить только `User`-пакеты, signal-пакеты
-//! резервированы для kernel-side observer'ов.
-//!
 //! Стабильность: набор и нумерация - часть ABI и не меняются произвольно.
 
 #![cfg_attr(not(test), no_std)]
 
 use core::num::NonZeroU32;
 
-/// Capability процесса: непрозрачный идентификатор записи в его handle-table.
+mod ipc_buffer;
+
+pub use ipc_buffer::{IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, IpcBuffer, decode_tag, encode_tag};
+
+/// Capability процесса: непрозрачный идентификатор записи в его handle-таблице.
 ///
 /// На syscall-ABI это ненулевой 32-битный HandleId; `0` зарезервирован под
 /// невалидный handle и конструктором не принимается. Структуру значения
@@ -81,7 +58,7 @@ use core::num::NonZeroU32;
 ///
 /// `repr(transparent)` фиксирует layout как у `u32`: `&[Handle]` и
 /// `&[Option<Handle>]` (niche `0 == None`) совпадают с массивом `HandleId`,
-/// который channel-ABI читает и пишет по указателю.
+/// который syscall-ABI читает и пишет по указателю.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Handle(NonZeroU32);
@@ -117,7 +94,7 @@ impl Handle {
     }
 }
 
-/// Запись массива `ObjectWaitMany`: KO `handle` и маска ожидаемых сигналов
+/// Запись массива `SignalWaitMany`: KO `handle` и маска ожидаемых сигналов
 /// `mask`. `#[repr(C)]` фиксирует wire-layout - 8 байт LE, `handle` в
 /// `[0..4)`, `mask` в `[4..8)`, как читает ядро.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,34 +122,55 @@ pub enum SyscallOp {
     /// `count == 0` будит всех пересекающихся waiter'ов; `count == N>0`
     /// будит не более N в FIFO-порядке регистрации. Биты выставляются
     /// всегда. Возврат `0`.
-    ObjectSignal = 0x10,
+    SignalSet = 0x10,
     /// Ждёт сигналы KO. Аргументы: `arg0=handle`, `arg1=signals`
     /// (нижние 32 бита), `arg2=timeout_ns`; `timeout_ns == 0` -
     /// non-blocking poll. Возврат: observed-маска.
-    ObjectWaitOne = 0x11,
+    SignalWaitOne = 0x11,
     /// Ждёт сигналы на нескольких KO. Аргументы: `arg0=items_va`
     /// (массив 8-байтных записей `[handle: u32, mask: u32]` LE),
     /// `arg1=count`, `arg2=timeout_ns`. Primary возврат - observed-
     /// маска сработавшего KO, secondary - его индекс в `items`.
-    ObjectWaitMany = 0x12,
-    /// Создаёт пустой `Event`, регистрирует handle в текущей таблице
-    /// и возвращает его сырой `HandleId`. Аргументов нет.
-    EventCreate = 0x13,
-
-    // 0x20..=0x2F - channel.
-    ChannelCreate = 0x20,
-    /// Помещает сообщение в парный endpoint. Аргументы:
-    /// `arg0=handle`, `arg1=bytes_va`, `arg2=bytes_len`, `arg3=handles_va`,
-    /// `arg4=handles_count`. Возвращает `0` на успехе.
-    ChannelWrite = 0x21,
-    /// Достаёт сообщение из inbound-очереди. Аргументы:
-    /// `arg0=handle`, `arg1=bytes_va`, `arg2=bytes_cap`, `arg3=handles_va`,
-    /// `arg4=handles_cap`. Возвращает упакованное `(bytes_len) |
-    /// (handles_count << 32)` в основном регистре.
-    ChannelRead = 0x22,
+    SignalWaitMany = 0x12,
+    /// Создаёт пустой `Signal`, регистрирует handle в текущей
+    /// таблице и возвращает его сырой `HandleId`. Аргументов нет.
+    SignalCreate = 0x13,
+    // 0x20..=0x2F - port (rendezvous-IPC).
+    /// Создаёт `Port` (synchronous rendezvous-IPC) и регистрирует ОДИН
+    /// handle в текущей таблице. Аргументов нет. Возврат: port handle id.
+    PortCreate = 0x23,
+    /// `send` на port: блокирующая отправка сообщения из IPC-буфера
+    /// текущего потока. Аргументы: `arg0=handle`, `arg1=timeout_ns`
+    /// ([`PORT_TIMEOUT_INFINITE`] - бессрочно, `0` - poll, иначе дедлайн в
+    /// нс). Требует `Rights::WRITE`. Возврат: `0`, [`SYSCALL_RETURN_TIMEOUT`]
+    /// при истечении тайм-аута, либо `-(SyscallError)`.
+    PortSend = 0x24,
+    /// `recv` на port: блокирующий приём в IPC-буфер текущего потока.
+    /// Аргументы: `arg0=handle`, `arg1=timeout_ns` (см. `PortSend`). Требует
+    /// `Rights::READ`. Возврат: reply handle id, если встречный был `call`
+    /// (иначе `0`), [`SYSCALL_RETURN_TIMEOUT`] при истечении тайм-аута,
+    /// либо `-(SyscallError)`.
+    PortRecv = 0x25,
+    /// `call` на port: блокирующий запрос-ответ. Сообщение из
+    /// IPC-буфера текущего потока; ответ оказывается там же. Аргументы:
+    /// `arg0=handle`, `arg1=timeout_ns` (ограничивает всю операцию: ожидание
+    /// получателя + ожидание reply; см. `PortSend`). Требует `Rights::WRITE`.
+    /// Возврат: `0`, [`SYSCALL_RETURN_TIMEOUT`] при истечении тайм-аута,
+    /// либо `-(SyscallError)`.
+    PortCall = 0x26,
+    /// `reply` на одноразовый Reply-handle: доставляет ответ из IPC-буфера
+    /// сервера вызывателю. Аргумент: `arg0=reply_handle`. Требует
+    /// `Rights::WRITE`. Возврат: `0` либо `-(SyscallError)`.
+    PortReply = 0x27,
 
     // 0x30..=0x3F - handle lifecycle.
     HandleClose = 0x30,
+    /// Дублирует handle с подмножеством прав и (опционально) значком (badge).
+    /// Аргументы: `arg0=handle`, `arg1=new_rights` (нижние 32 бита),
+    /// `arg2=badge` (полные 64 бита). Значок set-once: заклеймить можно только
+    /// незаклеймённый источник; заклеймённый наследует свой значок при
+    /// `badge == 0`, переклеймить (`badge != 0` на заклеймённом) - `BadHandle`.
+    /// Возврат: новый handle id либо `-(SyscallError)`.
     HandleDuplicate = 0x31,
 
     // 0x40..=0x4F - Process KObject.
@@ -186,25 +184,29 @@ pub enum SyscallOp {
     /// user_vm-аллокатор. Аргументы: `arg0=process_handle`,
     /// `arg1=desc_va` (user-указатель на `UserImageDescAbi`),
     /// `arg2=desc_len` (== `USER_IMAGE_DESC_SIZE = 56`). Требует
-    /// `Rights::MANAGE_PROCESS` на
-    /// `process_handle`; для каждого региона - `MAP | (R/W/X по flags)`.
+    /// `Rights::WRITE` на
+    /// `process_handle`; для каждого региона - `WRITE | (R/W/X по flags)`.
     /// Возврат `0`.
     ProcessLoadImage = 0x42,
     /// Финальный exit-код процесса. Аргументы: `arg0=handle`. Требует
-    /// `Rights::INSPECT`.
+    /// `Rights::READ`.
     ProcessExitCode = 0x43,
-    /// Завершает процесс: всем его потокам поднимает `THREAD_TERMINATED`,
-    /// после декремента до нуля - `PROCESS_TERMINATED`. Аргументы:
-    /// `arg0=handle`, `arg1=exit_code`. Требует
-    /// `Rights::MANAGE_PROCESS`.
+    /// Завершает процесс: помечает завершёнными все его потоки, после
+    /// декремента до нуля - и сам процесс (bound-`Signal`'ы получают
+    /// `SIGNALED`). Аргументы: `arg0=handle`, `arg1=exit_code`. Требует
+    /// `Rights::WRITE`.
     ProcessTerminate = 0x44,
+    /// Возвращает handle на bound-`Signal` термнинации процесса (бит
+    /// `SIGNALED`), материализуя его лениво. Аргумент: `arg0=handle`. Требует
+    /// `Rights::READ`. Выданный handle - read-only (READ/DUPLICATE/TRANSFER).
+    ProcessTerminationSignal = 0x46,
     /// Стартует первый поток уже загруженного образа и атомарно
     /// передаёт ему bootstrap-handles. Аргументы: `arg0=process_handle`,
     /// `arg1=entry_pc`, `arg2=user_sp`, `arg3=arg` (X0 первой
     /// инструкции), `arg4 = priority | (handles_count << 32)`,
     /// `arg5=handles_va` (массив `[u32; handles_count]` HandleId
     /// raw-значений). Требует
-    /// `Rights::MANAGE_PROCESS` на
+    /// `Rights::WRITE` на
     /// `process_handle` и `Rights::TRANSFER`
     /// на каждом handle в `handles_va`. Возвращает handle на свежий
     /// `ThreadObject`.
@@ -214,7 +216,7 @@ pub enum SyscallOp {
     /// Создаёт user-поток в указанном процессе. Аргументы:
     /// `arg0=process_handle`, `arg1=entry_pc`, `arg2=user_sp`, `arg3=arg`,
     /// `arg4=priority`. Требует
-    /// `Rights::MANAGE_PROCESS` на
+    /// `Rights::WRITE` на
     /// `process_handle`.
     ThreadCreate = 0x50,
     /// Возвращает handle на собственный `ThreadObject`.
@@ -222,22 +224,30 @@ pub enum SyscallOp {
     /// Завершает текущий поток. Аргумент: `arg0=exit_code`. Не возвращается.
     ThreadExit = 0x52,
     /// Финальный exit-код потока. Аргументы: `arg0=handle`. Требует
-    /// `Rights::INSPECT`.
+    /// `Rights::READ`.
     ThreadExitCode = 0x53,
     /// Завершает указанный поток. Аргументы: `arg0=handle`,
     /// `arg1=exit_code`. Требует
-    /// `Rights::MANAGE_THREAD`.
+    /// `Rights::WRITE`.
     /// Терминирование собственного потока через handle отвергается:
     /// для self-exit предусмотрен `Self::ThreadExit`.
     ThreadTerminate = 0x54,
+    /// Возвращает handle на bound-`Signal` термнинации потока (бит
+    /// `SIGNALED`), материализуя его лениво. Аргумент: `arg0=handle`. Требует
+    /// `Rights::READ`. Выданный handle - read-only (READ/DUPLICATE/TRANSFER).
+    ThreadTerminationSignal = 0x55,
+    /// Возвращает user-VA per-thread IPC-буфер ([`IpcBuffer`]) текущего
+    /// потока. Аргументов нет. Возврат: VA (>0) либо `-(SyscallError)`,
+    /// если у потока нет буфера (kernel-поток).
+    IpcBufferAddr = 0x56,
 
     // 0x60..=0x6F - Memory KObject.
     /// Создаёт `KObject::Memory` с Virtual backing. Аргументы:
     /// `arg0=size_bytes`, `arg1=access_mask`. Возвращает `region_handle`.
     MemoryCreateVirtual = 0x60,
     /// Создаёт `KObject::Memory` с Physical backing. Аргументы:
-    /// `arg0=resource_handle` на `PhysicalResource` (требует
-    /// `Rights::MINT`), `arg1=pa`, `arg2=size_bytes`, `arg3=access_mask`.
+    /// `arg0=resource_handle` на `Resource` (требует
+    /// `Rights::WRITE`), `arg1=pa`, `arg2=size_bytes`, `arg3=access_mask`.
     /// Диапазон и доступ должны укладываться в границы ресурса.
     /// Возвращает `region_handle`.
     ///
@@ -260,50 +270,20 @@ pub enum SyscallOp {
     /// Инспектирует Memory-регион. Аргумент: `arg0=region_handle`. Primary
     /// возврат - `size_bytes`, secondary - `(kind_tag << 16) | access_bits`.
     MemoryRegionInspect = 0x67,
-
-    // 0x70..=0x7F - Mailbox KObject.
-    /// Создаёт пустой `Mailbox`, регистрирует handle
-    /// в текущей таблице и возвращает его сырой `HandleId`.
-    MailboxCreate = 0x70,
-    /// Кладёт пакет в очередь mailbox'а. Аргументы: `arg0=mbox_handle`,
-    /// `arg1=packet_va` (user-указатель на 32-байтный пакет),
-    /// `arg2=packet_len` (обязан быть равен
-    /// `MAILBOX_PACKET_SIZE`). На полной
-    /// очереди - `SyscallError::ShouldWait`.
-    /// User-у разрешён только `User`-пакет; `kind != 0` отвергается как
-    /// `InvalidArgument`.
-    /// Требует `Rights::WRITE`.
-    MailboxQueue = 0x71,
-    /// Атомарно ждёт пакет и достаёт первый. Аргументы: `arg0=mbox_handle`,
-    /// `arg1=timeout_ns` (`0` - non-blocking poll), `arg2=packet_va`
-    /// (user-указатель на буфер >=32 B), `arg3=packet_cap` (>=32). Записывает
-    /// 32 B пакета по `packet_va` и возвращает их количество. Требует
-    /// `Rights::READ`.
-    MailboxWait = 0x72,
-    /// Подписывает mailbox на сигналы target'а. Аргументы:
-    /// `arg0=mbox_handle`, `arg1=target_handle`, `arg2=key`,
-    /// `arg3 = mask | (mode << 32)` (`mode == 0` - Once, `1` - Repeating).
-    /// `target == mbox` отвергается как
-    /// `InvalidArgument`.
-    /// Требует `Rights::WRITE` на mbox и
-    /// `Rights::WAIT` на target.
-    MailboxWaitAsync = 0x73,
-    /// Снимает подписку с парой `(target, key)`. Аргументы:
-    /// `arg0=mbox_handle`, `arg1=target_handle`, `arg2=key`.
-    /// Идемпотентен: отсутствующая подписка - `0`.
-    MailboxCancel = 0x74,
 }
 
 impl SyscallOp {
     pub const fn from_raw(raw: u16) -> Option<Self> {
         match raw {
-            0x10 => Some(Self::ObjectSignal),
-            0x11 => Some(Self::ObjectWaitOne),
-            0x12 => Some(Self::ObjectWaitMany),
-            0x13 => Some(Self::EventCreate),
-            0x20 => Some(Self::ChannelCreate),
-            0x21 => Some(Self::ChannelWrite),
-            0x22 => Some(Self::ChannelRead),
+            0x10 => Some(Self::SignalSet),
+            0x11 => Some(Self::SignalWaitOne),
+            0x12 => Some(Self::SignalWaitMany),
+            0x13 => Some(Self::SignalCreate),
+            0x23 => Some(Self::PortCreate),
+            0x24 => Some(Self::PortSend),
+            0x25 => Some(Self::PortRecv),
+            0x26 => Some(Self::PortCall),
+            0x27 => Some(Self::PortReply),
             0x30 => Some(Self::HandleClose),
             0x31 => Some(Self::HandleDuplicate),
             0x40 => Some(Self::ProcessCreate),
@@ -312,11 +292,14 @@ impl SyscallOp {
             0x43 => Some(Self::ProcessExitCode),
             0x44 => Some(Self::ProcessTerminate),
             0x45 => Some(Self::ProcessStart),
+            0x46 => Some(Self::ProcessTerminationSignal),
             0x50 => Some(Self::ThreadCreate),
             0x51 => Some(Self::ThreadSelf),
             0x52 => Some(Self::ThreadExit),
             0x53 => Some(Self::ThreadExitCode),
             0x54 => Some(Self::ThreadTerminate),
+            0x55 => Some(Self::ThreadTerminationSignal),
+            0x56 => Some(Self::IpcBufferAddr),
             0x60 => Some(Self::MemoryCreateVirtual),
             0x61 => Some(Self::MemoryCreatePhysical),
             0x63 => Some(Self::MemoryMap),
@@ -324,33 +307,33 @@ impl SyscallOp {
             0x65 => Some(Self::MemoryAllocate),
             0x66 => Some(Self::MemoryFree),
             0x67 => Some(Self::MemoryRegionInspect),
-            0x70 => Some(Self::MailboxCreate),
-            0x71 => Some(Self::MailboxQueue),
-            0x72 => Some(Self::MailboxWait),
-            0x73 => Some(Self::MailboxWaitAsync),
-            0x74 => Some(Self::MailboxCancel),
             _ => None,
         }
     }
 }
 
-/// Бит сигнала канала "парный endpoint закрыт".
-pub const CHANNEL_PEER_CLOSED: u32 = 1 << 1;
+/// Бит сигнала `Signal` "событие наступило". Единственный сигнальный бит,
+/// используемый ядром; для bound-`Signal` термнинации означает «завершён».
+pub const SIGNALED: u32 = 1 << 0;
 
-/// Бит сигнала Event "событие наступило".
-pub const EVENT_SIGNALED: u32 = 1 << 0;
-
-/// Бит сигнала "процесс завершён".
-pub const PROCESS_TERMINATED: u32 = 1 << 0;
-
-/// Бит сигнала "поток завершён".
-pub const THREAD_TERMINATED: u32 = 1 << 0;
-
-/// Длина пакета `MailboxQueue`/`MailboxWait` в байтах.
-pub const MAILBOX_PACKET_SIZE: usize = 32;
-
-/// Возврат syscall'а "операция должна быть повторена позже" (очередь полна и т.п.).
+/// Возврат syscall'а "операция должна быть повторена позже" (очередь полна,
+/// нет встречной стороны и т.п.).
 pub const SYSCALL_RETURN_SHOULD_WAIT: i64 = -7;
+
+/// Возврат блокирующего Port-syscall'а "истёк тайм-аут ожидания"
+/// (`-(SyscallError::Timeout)`). Возвращается при истечении `timeout_ns`, в
+/// т.ч. в режиме poll (`timeout_ns == 0`), когда встречной стороны нет.
+pub const SYSCALL_RETURN_TIMEOUT: i64 = -9;
+
+/// ABI-значение `timeout_ns` блокирующих Port-syscall'ов "ждать бессрочно".
+/// Sentinel `u64::MAX` отображается ядром в бессрочную блокировку (поведение
+/// по умолчанию до введения тайм-аутов) и не занимает слот в sleeper-heap.
+pub const PORT_TIMEOUT_INFINITE: u64 = u64::MAX;
+
+/// ABI-значение `timeout_ns` блокирующих Port-syscall'ов "не блокироваться"
+/// (poll): операция завершается немедленно, иначе возвращается
+/// [`SYSCALL_RETURN_TIMEOUT`].
+pub const PORT_TIMEOUT_POLL: u64 = 0;
 
 /// `UserMemFlags::ReadWrite` в кодировке `flags_raw` для memory_map/allocate.
 pub const MEM_FLAGS_READ_WRITE: u64 = 0;
@@ -386,13 +369,16 @@ mod tests {
 
     #[test]
     fn from_raw_known_ops() {
-        assert_eq!(SyscallOp::from_raw(0x10), Some(SyscallOp::ObjectSignal));
-        assert_eq!(SyscallOp::from_raw(0x11), Some(SyscallOp::ObjectWaitOne));
-        assert_eq!(SyscallOp::from_raw(0x12), Some(SyscallOp::ObjectWaitMany));
-        assert_eq!(SyscallOp::from_raw(0x13), Some(SyscallOp::EventCreate));
-        assert_eq!(SyscallOp::from_raw(0x20), Some(SyscallOp::ChannelCreate));
-        assert_eq!(SyscallOp::from_raw(0x21), Some(SyscallOp::ChannelWrite));
-        assert_eq!(SyscallOp::from_raw(0x22), Some(SyscallOp::ChannelRead));
+        assert_eq!(SyscallOp::from_raw(0x10), Some(SyscallOp::SignalSet));
+        assert_eq!(SyscallOp::from_raw(0x11), Some(SyscallOp::SignalWaitOne));
+        assert_eq!(SyscallOp::from_raw(0x12), Some(SyscallOp::SignalWaitMany));
+        assert_eq!(SyscallOp::from_raw(0x13), Some(SyscallOp::SignalCreate));
+        assert_eq!(SyscallOp::from_raw(0x56), Some(SyscallOp::IpcBufferAddr));
+        assert_eq!(SyscallOp::from_raw(0x23), Some(SyscallOp::PortCreate));
+        assert_eq!(SyscallOp::from_raw(0x24), Some(SyscallOp::PortSend));
+        assert_eq!(SyscallOp::from_raw(0x25), Some(SyscallOp::PortRecv));
+        assert_eq!(SyscallOp::from_raw(0x26), Some(SyscallOp::PortCall));
+        assert_eq!(SyscallOp::from_raw(0x27), Some(SyscallOp::PortReply));
         assert_eq!(SyscallOp::from_raw(0x30), Some(SyscallOp::HandleClose));
         assert_eq!(SyscallOp::from_raw(0x31), Some(SyscallOp::HandleDuplicate));
         assert_eq!(SyscallOp::from_raw(0x40), Some(SyscallOp::ProcessCreate));
@@ -401,11 +387,19 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x43), Some(SyscallOp::ProcessExitCode));
         assert_eq!(SyscallOp::from_raw(0x44), Some(SyscallOp::ProcessTerminate));
         assert_eq!(SyscallOp::from_raw(0x45), Some(SyscallOp::ProcessStart));
+        assert_eq!(
+            SyscallOp::from_raw(0x46),
+            Some(SyscallOp::ProcessTerminationSignal)
+        );
         assert_eq!(SyscallOp::from_raw(0x50), Some(SyscallOp::ThreadCreate));
         assert_eq!(SyscallOp::from_raw(0x51), Some(SyscallOp::ThreadSelf));
         assert_eq!(SyscallOp::from_raw(0x52), Some(SyscallOp::ThreadExit));
         assert_eq!(SyscallOp::from_raw(0x53), Some(SyscallOp::ThreadExitCode));
         assert_eq!(SyscallOp::from_raw(0x54), Some(SyscallOp::ThreadTerminate));
+        assert_eq!(
+            SyscallOp::from_raw(0x55),
+            Some(SyscallOp::ThreadTerminationSignal)
+        );
         assert_eq!(
             SyscallOp::from_raw(0x60),
             Some(SyscallOp::MemoryCreateVirtual)
@@ -422,17 +416,10 @@ mod tests {
             SyscallOp::from_raw(0x67),
             Some(SyscallOp::MemoryRegionInspect)
         );
-        assert_eq!(SyscallOp::from_raw(0x70), Some(SyscallOp::MailboxCreate));
-        assert_eq!(SyscallOp::from_raw(0x71), Some(SyscallOp::MailboxQueue));
-        assert_eq!(SyscallOp::from_raw(0x72), Some(SyscallOp::MailboxWait));
-        assert_eq!(SyscallOp::from_raw(0x73), Some(SyscallOp::MailboxWaitAsync));
-        assert_eq!(SyscallOp::from_raw(0x74), Some(SyscallOp::MailboxCancel));
     }
 
     #[test]
     fn from_raw_zero_is_none() {
-        // 0x00 зарезервирован: трапы с обнулённым op-регистром не должны
-        // случайно попадать в реальную операцию.
         assert_eq!(SyscallOp::from_raw(0), None);
     }
 
@@ -447,11 +434,13 @@ mod tests {
     fn from_raw_unknown_op() {
         assert_eq!(SyscallOp::from_raw(3), None);
         assert_eq!(SyscallOp::from_raw(0x32), None);
-        assert_eq!(SyscallOp::from_raw(0x46), None);
-        assert_eq!(SyscallOp::from_raw(0x55), None);
+        assert_eq!(SyscallOp::from_raw(0x47), None);
+        assert_eq!(SyscallOp::from_raw(0x57), None);
         assert_eq!(SyscallOp::from_raw(0x62), None);
         assert_eq!(SyscallOp::from_raw(0x68), None);
         assert_eq!(SyscallOp::from_raw(0x6F), None);
+        assert_eq!(SyscallOp::from_raw(0x70), None);
+        assert_eq!(SyscallOp::from_raw(0x74), None);
         assert_eq!(SyscallOp::from_raw(0x75), None);
         assert_eq!(SyscallOp::from_raw(0x76), None);
         assert_eq!(SyscallOp::from_raw(0x7F), None);

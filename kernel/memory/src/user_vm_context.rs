@@ -22,6 +22,12 @@ impl UserVmContext {
         &*self.mapper
     }
 
+    /// Клонирует `Arc` на mapper - нужен слою port-IPC, чтобы хранить
+    /// транспорт заблокированного потока (кросс-AS rendezvous).
+    pub fn mapper_arc(&self) -> Arc<dyn MemoryMapper + Send + Sync> {
+        self.mapper.clone()
+    }
+
     pub fn allocator(&self) -> &Arc<MutexCell<UserVmAllocator>> {
         &self.allocator
     }

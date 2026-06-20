@@ -8,12 +8,12 @@
 //!    higher-half линейное отображение).
 //! 3. `map_exact` через user-mapper создаёт lower-half-маппинг 4К на VA
 //!    `USER_TEST_PAYLOAD_VA = 0x4000_0000`. Через kernel-VA пишем payload
-//!    `ObjectSignal; ThreadExit` и инвалидируем I-cache.
+//!    `SignalSet; ThreadExit` и инвалидируем I-cache.
 //! 4. Аналогично - для user-stack на `USER_TEST_PAYLOAD_VA + PAGE_SIZE`.
 //! 5. `MemoryMapper::remap` меняет флаги на UserRX (payload) и UserRW (stack).
 //! 6. Spawn worker-thread; в его trampoline'е переключаем TTBR0 на user-AS,
 //!    далее `init_user` + `start` - управление уходит в EL0, payload делает SVC.
-//! 7. Главный test-thread ждёт сигнал на Event, handle которого был передан
+//! 7. Главный test-thread ждёт сигнал на Signal, handle которого был передан
 //!    в `init_user` через `bootstrap_x0`.
 //!
 //! По сравнению с прежней версией убран alias-маппинг через higher-half:
@@ -30,7 +30,7 @@ use core::{
 
 use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
-use kobject::{EVENT_SIGNALED, Event, Handle, KObject, Rights, install_handle};
+use kobject::{Handle, KObject, Rights, SIGNALED, Signal, install_handle};
 use memory::{
     MemFlags,
     memory_mapper::MemoryMapper,
@@ -73,9 +73,9 @@ const fn svc_op(op: SyscallOp) -> Instruction {
 
 fn build_payload() -> [Instruction; 6] {
     [
-        movz_x(Reg::X1, EVENT_SIGNALED as u16, 0),
+        movz_x(Reg::X1, SIGNALED as u16, 0),
         movz_x(Reg::X2, 0, 0),
-        svc_op(SyscallOp::ObjectSignal),
+        svc_op(SyscallOp::SignalSet),
         movz_x(Reg::X0, 0, 0),
         svc_op(SyscallOp::ThreadExit),
         B_LOOP,
@@ -138,9 +138,9 @@ static USER_AS_HOLDER: Once<Arc<AddressSpace>> = Once::new();
 #[allow(clippy::similar_names)]
 #[kernel_test]
 fn userspace_eret_to_el0_invokes_dispatcher() {
-    let event = Event::new();
-    let handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
-    let event_handle = install_handle(handle).expect("install bootstrap Event handle");
+    let signal = Signal::new();
+    let handle = Handle::new(KObject::Signal(signal.clone()), Rights::WRITE);
+    let signal_handle = install_handle(handle).expect("install bootstrap Signal handle");
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
     let user_as = AddressSpace::new_user(factory).expect("create user AS");
@@ -206,7 +206,7 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
 
     let _ = (payload_kheap, stack_kheap);
     let user_pc = USER_TEST_PAYLOAD_VA;
-    let bootstrap_x0: u64 = u64::from(event_handle.raw().get());
+    let bootstrap_x0: u64 = u64::from(signal_handle.raw().get());
 
     syscall_bridge::scheduler()
         .spawn(
@@ -237,7 +237,7 @@ fn userspace_eret_to_el0_invokes_dispatcher() {
         .expect("spawn el0-worker");
 
     let mut spins = 0;
-    while event.peek() & EVENT_SIGNALED == 0 {
+    while signal.peek() & SIGNALED == 0 {
         syscall_bridge::scheduler().sleep_ms(20);
         spins += 1;
         assert!(spins <= 250, "EL0 payload didn't signal after 5s");

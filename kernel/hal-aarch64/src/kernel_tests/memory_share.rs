@@ -1,285 +1,135 @@
-//! Cross-process sharing `KObject::Memory` через Channel.
-//!
-//! Producer (process A) минтит Virtual-регион через `MemoryCreateVirtual`,
-//! маппит, пишет магический паттерн и пересылает handle региона по каналу.
-//! Consumer (process B) получает consumer-end + Event, ждёт
-//! `CHANNEL_READABLE`, читает handle из канала, маппит регион в свой AS,
-//! проверяет паттерн и сигналит Event при совпадении.
-//!
-//! Сигнал на Event-е == доказательство, что один backing виден из двух
-//! разных user-AS как одна и та же страница.
+//! Разделяемая память между двумя адресными пространствами через перенос memory-handle по IPC.
 
-use alloc::vec;
+extern crate alloc;
 
+use alloc::sync::Arc;
+use core::{
+    num::NonZeroUsize,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use collections::{LockCell, MutexCell};
 use kernel_tests::kernel_test;
-use kobject::{Channel, EVENT_SIGNALED, Event, Handle, KObject, Rights};
-use memory::{
-    MemFlags,
-    aligned::Aligned,
-    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+use kernelspace::syscall_bridge;
+use kobject::{
+    Handle, HandleId, HandleTable, KObject, KernelIpcBuffer, Rights, ThreadTransport,
+    transfer_rendezvous,
 };
-use process::{UserImage, UserSegment};
-use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
-use syscall::SyscallOp;
+use memory::{AccessMask, MemFlags, MemoryRegion, virtual_address::PageAlignedVirtualAddress};
+use scheduler::AddressSpace;
+use syscall::{IpcBuffer, encode_tag};
 
-use super::user_payload::{
-    B_LOOP, Builder, Reg, b_ne, cmp_x, ldr_w, ldr_x, mov_x, str_w, str_x, svc_op,
-};
+/// Lower-half VA в AS A, не пересекающаяся с другими user-AS-тестами.
+const VA_A: usize = 0x5100_0000;
+/// Намеренно ДРУГАЯ VA в AS B: общий не VA, а физический фрейм.
+const VA_B: usize = 0x6100_0000;
 
-const PAGE_SIZE: usize = PageAlignedVirtualAddress::ALIGNMENT;
-const USER_PAYLOAD_VA: usize = 0x4000_0000;
-const USER_STACK_TOP: usize = USER_PAYLOAD_VA + 16 * PAGE_SIZE;
-const USER_STACK_SIZE: usize = PAGE_SIZE;
-/// Скретч-адрес внутри user-стека: туда producer кладёт handle перед
-/// `ChannelWrite`, consumer читает handle после `ChannelRead`. Стек
-/// замаплен RW, лежит в `[USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP)`.
-const SCRATCH_VA: usize = USER_STACK_TOP - 0x100;
+/// 8-байтный паттерн, который producer пишет через mapper A, а consumer
+/// читает через mapper B.
+const PATTERN: u64 = 0x5EED_F00D_C0DE_AB1E;
 
-const PATTERN_LO: u16 = 0xAB1E;
-const PATTERN_MID_LO: u16 = 0xC0DE;
-const PATTERN_MID_HI: u16 = 0xF00D;
-const PATTERN_HI: u16 = 0x5EED;
-const PATTERN: u64 = ((PATTERN_HI as u64) << 48)
-    | ((PATTERN_MID_HI as u64) << 32)
-    | ((PATTERN_MID_LO as u64) << 16)
-    | (PATTERN_LO as u64);
+/// Удерживает Arc на user-AS и регион живыми до конца QEMU-runner'а:
+/// освобождение фреймов между тестами привело бы к их повторной выдаче и
+/// рассинхронизации с TLB/бэкингом.
+static HOLD_AS_A: AtomicU64 = AtomicU64::new(0);
+static HOLD_AS_B: AtomicU64 = AtomicU64::new(0);
+static HOLD_REGION: AtomicU64 = AtomicU64::new(0);
 
-/// HandleId-ы для свежей таблицы детерминированы: первый insert -
-/// slot=0 generation=1 -> raw = 0x0001_0000. Каждое последующее
-/// инкрементирует slot.
-const HANDLE_RAW_FIRST: u32 = 0x0001_0000;
-const HANDLE_RAW_SECOND: u32 = 0x0001_0001;
-
-const PRODUCER_PAYLOAD_WORDS: usize = 32;
-
-/// Producer payload:
-/// * x21 = producer_end_handle (raw=0x0001_0000)
-/// * x22 = scratch VA для handle-массива
-///
-/// Шаги:
-///   MemoryCreateVirtual(0x1000, 3=RW) -> x0 = region_h
-///   x19 = region_h
-///   MemoryMap(x19, 0x1000, 0=RW) -> x0 = va
-///   *va = pattern (8 байт)
-///   *scratch = region_h (4 байта u32)
-///   ChannelWrite(x21, 0, 0, x22, 1) -> 0
-///   ThreadExit(0)
-fn build_producer_payload() -> [u8; PRODUCER_PAYLOAD_WORDS * 4] {
-    let mut payload = Builder::<PRODUCER_PAYLOAD_WORDS>::new(B_LOOP);
-
-    // x21 = producer_end_handle
-    payload.mov_u32_fixed(Reg::X21, HANDLE_RAW_FIRST);
-    // x22 = SCRATCH_VA
-    payload.mov_u32_fixed(Reg::X22, SCRATCH_VA as u32);
-
-    // MemoryCreateVirtual(0x1000, RW=3)
-    payload.mov_u16(Reg::X0, 0x1000);
-    payload.mov_u16(Reg::X1, 0x3);
-    payload.push(svc_op(SyscallOp::MemoryCreateVirtual));
-    // x19 = region_h
-    payload.push(mov_x(Reg::X19, Reg::X0));
-
-    // MemoryMap(x19, 0x1000, 0)
-    payload.push(mov_x(Reg::X0, Reg::X19));
-    payload.mov_u16(Reg::X1, 0x1000);
-    payload.mov_u16(Reg::X2, 0);
-    payload.push(svc_op(SyscallOp::MemoryMap));
-    // x20 = va
-    payload.push(mov_x(Reg::X20, Reg::X0));
-
-    // x24 = pattern
-    payload.mov_u64_fixed(Reg::X24, PATTERN);
-    // *va = pattern
-    payload.push(str_x(Reg::X24, Reg::X20));
-
-    // *scratch = region_h (u32)
-    payload.push(str_w(Reg::X19, Reg::X22));
-
-    // ChannelWrite(x21, 0, 0, x22, 1)
-    payload.push(mov_x(Reg::X0, Reg::X21));
-    payload.mov_u16(Reg::X1, 0);
-    payload.mov_u16(Reg::X2, 0);
-    payload.push(mov_x(Reg::X3, Reg::X22));
-    payload.mov_u16(Reg::X4, 1);
-    payload.push(svc_op(SyscallOp::ChannelWrite));
-
-    // ThreadExit(0)
-    payload.mov_u16(Reg::X0, 0);
-    payload.push(svc_op(SyscallOp::ThreadExit));
-    payload.push(B_LOOP);
-
-    payload.into_bytes()
-}
-
-const CONSUMER_PAYLOAD_WORDS: usize = 48;
-
-/// Consumer payload:
-/// * x21 = consumer_end_handle (raw=0x0001_0000)
-/// * x22 = event_handle (raw=0x0001_0001)
-/// * x23 = scratch VA
-///
-/// Шаги:
-///   ObjectWaitOne(x21, CHANNEL_READABLE=1, max_timeout)
-///   ChannelRead(x21, 0, 0, x23, 1) -> bytes_len|handles_count
-///   region_h = *scratch (u32 zero-ext)
-///   MemoryMap(region_h, 0x1000, 0=RW) -> x0 = va
-///   x24 = *va  (8 байт)
-///   x25 = expected pattern
-///   if x24 != x25 -> в b_loop -> timeout-fail
-///   ObjectSignal(x22, EVENT_SIGNALED=1, 0)
-///   ThreadExit(0)
-fn build_consumer_payload() -> [u8; CONSUMER_PAYLOAD_WORDS * 4] {
-    let mut payload = Builder::<CONSUMER_PAYLOAD_WORDS>::new(B_LOOP);
-
-    // x21 = consumer_end_handle
-    payload.mov_u32_fixed(Reg::X21, HANDLE_RAW_FIRST);
-    // x22 = event_handle
-    payload.mov_u32_fixed(Reg::X22, HANDLE_RAW_SECOND);
-    // x23 = SCRATCH_VA
-    payload.mov_u32_fixed(Reg::X23, SCRATCH_VA as u32);
-
-    // ObjectWaitOne(x21, 1, big_timeout=10s).
-    // 10s = 10_000_000_000 ns ~= 0x2_540B_E400 - не лезет в 16 бит,
-    // используем movz+movk с шагами 16. Положим 0xFFFF_FFFF (~4.29s)
-    // как достаточный лимит: тесты должны сработать гораздо раньше.
-    payload.push(mov_x(Reg::X0, Reg::X21));
-    payload.mov_u16(Reg::X1, 1);
-    payload.mov_u32_fixed(Reg::X2, 0xFFFF_FFFF);
-    payload.push(svc_op(SyscallOp::ObjectWaitOne));
-
-    // ChannelRead(x21, 0, 0, x23, 1)
-    payload.push(mov_x(Reg::X0, Reg::X21));
-    payload.mov_u16(Reg::X1, 0);
-    payload.mov_u16(Reg::X2, 0);
-    payload.push(mov_x(Reg::X3, Reg::X23));
-    payload.mov_u16(Reg::X4, 1);
-    payload.push(svc_op(SyscallOp::ChannelRead));
-
-    // x19 = *scratch (u32 region_h)
-    payload.push(ldr_w(Reg::X19, Reg::X23));
-
-    // MemoryMap(x19, 0x1000, 0)
-    payload.push(mov_x(Reg::X0, Reg::X19));
-    payload.mov_u16(Reg::X1, 0x1000);
-    payload.mov_u16(Reg::X2, 0);
-    payload.push(svc_op(SyscallOp::MemoryMap));
-    // x20 = va
-    payload.push(mov_x(Reg::X20, Reg::X0));
-
-    // x24 = *va
-    payload.push(ldr_x(Reg::X24, Reg::X20));
-    // x25 = expected pattern
-    payload.mov_u64_fixed(Reg::X25, PATTERN);
-    // cmp x24, x25
-    payload.push(cmp_x(Reg::X24, Reg::X25));
-    // b.ne -> прыгаем за пределы payload'а в B_LOOP-хвост: смещение
-    // считается до индекса последнего слова с B_LOOP. Подсчитаем
-    // вручную ниже.
-    let bne_index = payload.reserve(B_LOOP);
-
-    // ObjectSignal(x22, EVENT_SIGNALED=1, 0)
-    payload.push(mov_x(Reg::X0, Reg::X22));
-    payload.mov_u16(Reg::X1, EVENT_SIGNALED as u16);
-    payload.mov_u16(Reg::X2, 0);
-    payload.push(svc_op(SyscallOp::ObjectSignal));
-
-    // ThreadExit(0)
-    payload.mov_u16(Reg::X0, 0);
-    payload.push(svc_op(SyscallOp::ThreadExit));
-    let fail_index = payload.len();
-    payload.push(B_LOOP);
-
-    let disp = (fail_index - bne_index) as u32;
-    payload.set(bne_index, b_ne(disp));
-
-    payload.into_bytes()
+fn make_user_as() -> Arc<AddressSpace> {
+    let factory =
+        syscall_bridge::address_space_factory().expect("address space factory must be installed");
+    AddressSpace::new_user(factory).expect("create user AS")
 }
 
 fn aligned(va: usize) -> PageAlignedVirtualAddress {
     PageAlignedVirtualAddress::from_usize(va).expect("user VA must be 4K aligned")
 }
 
+/// Kernel-транспорт поверх свежего kernel-резидентного IPC-буфера и
+/// переданной handle-таблицы - тот же `new_kernel`, что у bootstrap-логгера.
+fn kernel_transport(table: Arc<MutexCell<HandleTable>>) -> (ThreadTransport, KernelIpcBuffer) {
+    let buffer: KernelIpcBuffer = Arc::new(MutexCell::new(IpcBuffer::zeroed()));
+    let transport = ThreadTransport::new_kernel(buffer.clone(), table);
+    (transport, buffer)
+}
+
 #[kernel_test]
-fn userspace_memory_share_region() {
-    let event = Event::new();
-    let (producer_end, consumer_end) = Channel::create_pair(0);
+fn memory_region_shared_across_two_address_spaces() {
+    // 1. Два независимых user-AS со своими mapper'ами.
+    let as_a = make_user_as();
+    let as_b = make_user_as();
+    let mapper_a = as_a.mapper().expect("user AS A has mapper");
+    let mapper_b = as_b.mapper().expect("user AS B has mapper");
 
-    let producer_payload = build_producer_payload();
-    let consumer_payload = build_consumer_payload();
+    // 2. Анонимный RW-регион + handle на него в table A с TRANSFER.
+    let fa = syscall_bridge::frame_allocator().expect("FrameAllocator must be installed");
+    let region = MemoryRegion::create_virtual(fa, NonZeroUsize::new(1).unwrap(), AccessMask::RW)
+        .expect("create_virtual one page");
+    let region = Arc::new(region);
+    let ko = KObject::Memory(region.clone());
+    let rights = Rights::defaults_for(&ko);
+    kernel_tests::kassert!(rights.contains(Rights::TRANSFER));
 
-    let producer_segment = UserSegment {
-        va_base: aligned(USER_PAYLOAD_VA),
-        mapped_size: PAGE_SIZE,
-        init_bytes: &producer_payload,
-        perms: MemFlags::user_rx(),
-    };
-    let producer_image = UserImage {
-        segments: core::slice::from_ref(&producer_segment),
-        entry: VirtualAddress::new(USER_PAYLOAD_VA),
-        user_stack_top: VirtualAddress::new(USER_STACK_TOP),
-        user_stack_size: USER_STACK_SIZE,
-    };
+    let table_a = Arc::new(MutexCell::new(HandleTable::new()));
+    let table_b = Arc::new(MutexCell::new(HandleTable::new()));
 
-    let consumer_segment = UserSegment {
-        va_base: aligned(USER_PAYLOAD_VA),
-        mapped_size: PAGE_SIZE,
-        init_bytes: &consumer_payload,
-        perms: MemFlags::user_rx(),
-    };
-    let consumer_image = UserImage {
-        segments: core::slice::from_ref(&consumer_segment),
-        entry: VirtualAddress::new(USER_PAYLOAD_VA),
-        user_stack_top: VirtualAddress::new(USER_STACK_TOP),
-        user_stack_size: USER_STACK_SIZE,
-    };
+    let handle_a = table_a
+        .with_lock(|tbl| tbl.insert(Handle::new(ko, rights)))
+        .expect("insert memory handle into table A");
 
-    let producer_chan_ko = KObject::Channel(producer_end);
-    let producer_chan_handle = Handle::new(
-        producer_chan_ko.clone(),
-        Rights::defaults_for(&producer_chan_ko),
-    );
-
-    let consumer_chan_ko = KObject::Channel(consumer_end);
-    let consumer_chan_handle = Handle::new(
-        consumer_chan_ko.clone(),
-        Rights::defaults_for(&consumer_chan_ko),
-    );
-    let event_handle = Handle::new(KObject::Event(event.clone()), Rights::SIGNAL);
-
-    // Сначала consumer (чтобы он успел запарковаться на ObjectWaitOne к
-    // моменту, когда producer выполнит ChannelWrite). Порядок не критичен -
-    // канал буферизует, и любая последовательность приведёт к успеху, -
-    // но так путь короче.
-    let consumer_launch =
-        UserProcessLaunch::new().initial_handles(vec![consumer_chan_handle, event_handle]);
-    kernelspace::kernel_tests::user_process_launcher()
-        .spawn_user_process_with_launch(
-            "memory-share-consumer",
-            &consumer_image,
-            Priority::highest(),
-            2,
-            consumer_launch,
+    // 3. Маппим регион в AS A и пишем паттерн через mapper A.
+    region
+        .install(mapper_a, aligned(VA_A), MemFlags::user_rw())
+        .expect("install region into AS A");
+    mapper_a
+        .copy_user_out(
+            memory::virtual_address::VirtualAddress::new(VA_A),
+            &PATTERN.to_le_bytes(),
         )
-        .expect("consumer spawn must succeed");
+        .expect("write pattern via mapper A");
 
-    let producer_launch = UserProcessLaunch::new().initial_handles(vec![producer_chan_handle]);
-    kernelspace::kernel_tests::user_process_launcher()
-        .spawn_user_process_with_launch(
-            "memory-share-producer",
-            &producer_image,
-            Priority::highest(),
-            2,
-            producer_launch,
+    // 4. Перенос memory-handle table A -> table B по port-пути.
+    //    Sender пишет caps[0]=handle_a, tag=(len=0, ncaps=1) в свой kernel-буфер.
+    let (sender, sender_buf) = kernel_transport(table_a.clone());
+    let (receiver, receiver_buf) = kernel_transport(table_b.clone());
+    sender_buf.with_lock(|buf| {
+        buf.caps[0] = handle_a.raw().get();
+        buf.tag = encode_tag(0, 1);
+    });
+
+    transfer_rendezvous(&sender, &receiver).expect("memory handle transfer A->B");
+
+    // 5. Достаём перенесённый handle из caps[0] receiver-буфера, мапим ТОТ ЖЕ
+    //    регион в AS B на другой VA и читаем через mapper B.
+    let raw_b = receiver_buf.with_lock(|buf| buf.caps[0]);
+    let id_b = HandleId::from_raw(core::num::NonZeroU32::new(raw_b).expect("non-zero handle id"));
+    let region_b = table_b
+        .with_lock(|tbl| tbl.get_memory(id_b, Rights::READ | Rights::WRITE))
+        .expect("table B holds transferred memory handle");
+
+    region_b
+        .install(mapper_b, aligned(VA_B), MemFlags::user_rw())
+        .expect("install region into AS B");
+
+    let mut read_back = [0u8; 8];
+    mapper_b
+        .copy_user_in(
+            memory::virtual_address::VirtualAddress::new(VA_B),
+            &mut read_back,
         )
-        .expect("producer spawn must succeed");
+        .expect("read pattern via mapper B");
 
-    let scheduler = kernelspace::kernel_tests::scheduler().clone();
-    let mut spins = 0u64;
-    while event.peek() & EVENT_SIGNALED == 0 {
-        scheduler.sleep_ms(10);
-        spins += 1;
-        kernel_tests::kassert!(spins < 500);
-    }
+    // Главный assert: байты, записанные через mapper A на VA_A, видны через
+    // mapper B на VA_B - общий физический фрейм.
+    kernel_tests::kassert_eq!(u64::from_le_bytes(read_back), PATTERN);
 
-    let _ = spins;
+    // 6. Move-семантика: в table A handle'а больше нет.
+    kernel_tests::kassert!(table_a.with_lock(|tbl| tbl.live_count()) == 0);
+    kernel_tests::kassert!(table_b.with_lock(|tbl| tbl.live_count()) == 1);
+
+    // Утечка AS и региона: фреймы не должны вернуться в аллокатор до конца
+    // суиты (см. address_space.rs).
+    HOLD_AS_A.store(Arc::into_raw(as_a) as usize as u64, Ordering::Release);
+    HOLD_AS_B.store(Arc::into_raw(as_b) as usize as u64, Ordering::Release);
+    HOLD_REGION.store(Arc::into_raw(region) as usize as u64, Ordering::Release);
 }

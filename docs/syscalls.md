@@ -24,34 +24,35 @@ Handle — числовой идентификатор (`u32`) в таблице
 | Право            |       Бит | Описание                                                             |
 |------------------|----------:|----------------------------------------------------------------------|
 | `DUPLICATE`      |  `1 << 0` | разрешает создать новый handle на тот же объект с подмножеством прав |
-| `TRANSFER`       |  `1 << 1` | разрешает передать handle через channel                              |
-| `READ`           |  `1 << 2` | чтение из объекта: чтение channel, mapping памяти на чтение          |
-| `WRITE`          |  `1 << 3` | запись в объект: запись channel, mapping памяти на запись            |
-| `SIGNAL`         |  `1 << 4` | изменение сигналов объекта через `ObjectSignal`                      |
-| `WAIT`           |  `1 << 5` | ожидание сигналов через `ObjectWaitOne`                              |
-| `INSPECT`        |  `1 << 6` | чтение метаданных: exit code, memory region info                     |
-| `MANAGE_THREAD`  |  `1 << 7` | управление thread object                                             |
-| `MANAGE_PROCESS` |  `1 << 8` | управление process object и создание потоков в процессе              |
-| `MAP`            |  `1 << 9` | mapping memory-региона в адресное пространство процесса              |
-| `EXECUTE`        | `1 << 10` | mapping памяти с правом исполнения                                   |
-| `MINT`           | `1 << 11` | минтинг memory-региона из `PhysicalResource`                         |
+| `TRANSFER`       |  `1 << 1` | разрешает передать handle через port                            |
+| `READ`           |  `1 << 2` | чтение из объекта: `recv` на port, mapping памяти на чтение, ожидание сигналов, чтение метаданных |
+| `WRITE`          |  `1 << 3` | запись в объект: `send`/`call` на port, mapping памяти на запись, изменение сигналов, управление process/thread, минтинг |
+| `EXECUTE`        |  `1 << 4` | mapping памяти с правом исполнения                                   |
 
 ## Сигналы
 
 Сигналы — это 32-битная маска состояния объекта: каждый бит означает
 наступление определённого события (появилось сообщение, объект завершился
 и т. п.). Чтобы дождаться события, передайте маску интересующих битов в
-`ObjectWaitOne` — вызов заблокируется, пока хотя бы один из них не поднимется.
+`SignalWaitOne` — вызов заблокируется, пока хотя бы один из них не поднимется.
 
-| KO        | Сигнал                |      Бит | Описание                               |
-|-----------|-----------------------|---------:|----------------------------------------|
-| `Event`   | `EVENT_SIGNALED`      | `1 << 0` | пользовательское событие произошло     |
-| `Channel` | `CHANNEL_READABLE`    | `1 << 0` | во входящей очереди есть сообщение     |
-| `Channel` | `CHANNEL_PEER_CLOSED` | `1 << 1` | парный endpoint закрыт                 |
-| `Channel` | `CHANNEL_WRITABLE`    | `1 << 2` | в очереди peer'а есть место для записи |
-| `Process` | `PROCESS_TERMINATED`  | `1 << 0` | процесс завершён                       |
-| `Thread`  | `THREAD_TERMINATED`   | `1 << 0` | поток завершён                         |
-| `Mailbox` | `MAILBOX_READABLE`    | `1 << 0` | в очереди есть хотя бы один пакет      |
+Единственный сигнализуемый KO — **`Signal`**. Все ждущиеся события выражаются
+как `Signal`; `SignalWait*`/`SignalSet` работают только по нему (на любом
+другом типе — `WrongType`).
+
+| KO       | Сигнал     |      Бит | Описание                |
+|----------|------------|---------:|-------------------------|
+| `Signal` | `SIGNALED` | `1 << 0` | событие наступило       |
+
+**Lifecycle Process/Thread** наблюдается через привязанный (bound) `Signal`,
+а не через зашитые в объект сигналы. `ProcessTerminationSignal` /
+`ThreadTerminationSignal` возвращают handle на ленивый `Signal`, бит `SIGNALED`
+которого означает «завершён»; exit-код читается отдельно
+(`ProcessExitCode`/`ThreadExitCode`). Объект, термнинацию которого никто не
+наблюдает, не аллоцирует `Signal` вовсе.
+
+`Port` и `Reply` не сигнализуемы и в `SignalWait*` не участвуют: они
+используют синхронную rendezvous-парковку, а не сигнальную маску.
 
 ## Ошибки
 
@@ -64,8 +65,8 @@ Handle — числовой идентификатор (`u32`) в таблице
 |   5 | `WrongType`        | handle указывает на объект другого типа                |
 |   6 | `AccessDenied`     | у handle недостаточно прав                             |
 |   7 | `ShouldWait`       | операция сейчас не может завершиться                   |
-|   8 | `PeerClosed`       | парный endpoint канала закрыт                          |
-|   9 | `Timeout`          | ожидание не дождалось сигнала                          |
+|   8 | `PeerClosed`       | парный port канала закрыт                          |
+|   9 | `Timeout`          | истёк тайм-аут ожидания (Signal poll, блокирующий Port)|
 |  10 | `BufferTooSmall`   | буфер получателя меньше сообщения                      |
 |  11 | `MessageTooBig`    | сообщение превышает лимит                              |
 |  12 | `OutOfHandles`     | таблица handle'ов процесса заполнена                   |
@@ -73,100 +74,121 @@ Handle — числовой идентификатор (`u32`) в таблице
 |  14 | `NotFound`         | запрошенный VA-регион не найден                        |
 |  15 | `Canceled`         | ожидаемый handle закрыт или передан до прихода сигнала |
 
-## Object
+## Signal
 
-Object-вызовы — универсальный wait/signal API: один и тот же код умеет
-ждать на channel, event, process или thread, не зная конкретный тип
-объекта. Используйте их, когда нужно ждать сигнала от произвольного
-handle или программно поднять/снять сигнал на объекте.
+Signal-вызовы — wait/signal API над `Signal`. Так как все ждущиеся события —
+это `Signal`, `SignalWaitMany` по-прежнему ждёт «A ИЛИ B» как набор `Signal`'ов
+(термнинация и сообщение — просто два разных `Signal`'а).
 
 |     Op | Имя              | Аргументы                              | Возврат                                | Права            |
 |-------:|------------------|----------------------------------------|----------------------------------------|------------------|
-| `0x10` | `ObjectSignal`   | `handle`, `set`, `clear`, `count`      | `0`                                    | `SIGNAL`         |
-| `0x11` | `ObjectWaitOne`  | `handle`, `signals`, `timeout_ns`      | observed mask                          | `WAIT`           |
-| `0x12` | `ObjectWaitMany` | `items_va`, `count`, `timeout_ns`      | primary=observed mask, secondary=index | `WAIT` на каждом |
-| `0x13` | `EventCreate`    | —                                      | `event_h`                              | —                |
+| `0x10` | `SignalSet`   | `handle`, `set`, `clear`, `count`      | `0`                                    | `WRITE`          |
+| `0x11` | `SignalWaitOne`  | `handle`, `signals`, `timeout_ns`      | observed mask                          | `READ`           |
+| `0x12` | `SignalWaitMany` | `items_va`, `count`, `timeout_ns`      | primary=observed mask, secondary=index | `READ` на каждом |
+| `0x13` | `SignalCreate`   | —                                      | `signal_h`                             | —                |
 
-`ObjectSignal.count == 0` — будит всех waiter'ов, у которых маска пересекается
+`SignalSet.count == 0` — будит всех waiter'ов, у которых маска пересекается
 с `set`. `count == N` (N > 0) — будит не более N в FIFO-порядке.
 
-`EventCreate` создаёт объект `Event` и регистрирует handle с полным набором
+`SignalCreate` создаёт объект `Signal` и регистрирует handle с полным набором
 прав в таблице текущего процесса.
 
 `timeout_ns == 0` — poll без парковки. Ненулевой `timeout_ns` —
 относительный тайм-аут в наносекундах.
 
-`ObjectWaitMany.items_va` указывает на массив 8-байтных записей
+`SignalWaitMany.items_va` указывает на массив 8-байтных записей
 `[handle: u32, mask: u32]` (little-endian); `count` ограничен 256.
 Возвращает primary-маску сработавшего KO и индекс записи в `items` в
 secondary-регистре. Дубликаты `handle` в `items` допустимы.
 
 Закрытие или передача handle'а, на котором висит активный
-`ObjectWaitOne`/`ObjectWaitMany`, разбудит ожидающий поток с кодом
+`SignalWaitOne`/`SignalWaitMany`, разбудит ожидающий поток с кодом
 `Canceled`. Ожидание привязано к конкретному slot+generation: после
 переиспользования слота под новый handle старая регистрация cancel
 не срабатывает повторно.
 
-Пример: дождаться сообщения в канале.
+Пример: дождаться завершения дочернего процесса.
 
 ```rust
-let observed = object_wait_one(
-    channel_h,
-    CHANNEL_READABLE | CHANNEL_PEER_CLOSED,
-    timeout_ns,
-)?;
-
-if observed & CHANNEL_PEER_CLOSED != 0 {
-    return Err(Error::PeerClosed);
+let term_h = process_termination_signal(process_h)?;
+let observed = signal_wait_one(term_h, SIGNALED, timeout_ns)?;
+if observed & SIGNALED != 0 {
+    let code = process_exit_code(process_h)?;
 }
-
-let mut bytes = [0u8; MESSAGE_CAP];
-let mut handles = [None; MESSAGE_MAX_HANDLES];
-let packed = channel_read(channel_h, &mut bytes, &mut handles)?;
-let bytes_len = (packed & 0xFFFF_FFFF) as usize;
-let message = &bytes[..bytes_len];
 ```
 
-## Channel
+## Port
 
-Channel — двусторонний канал для передачи сообщений между процессами.
-Одно сообщение несёт до 256 байт данных и до 4 handle'ов. При передаче
-handle'а он удаляется из таблицы отправителя и появляется в таблице
+`Port` — синхронный rendezvous-IPC примитив: отправитель и получатель
+встречаются на одном объекте, а сам кадр сообщения лежит в per-thread
+IPC-буфере вызывающего потока (буферизованный канал удалён). Один кадр несёт
+до `IPC_BUFFER_DATA_MAX` байт данных и до `IPC_BUFFER_MAX_CAPS` хэндлов. При
+передаче handle'а он удаляется из таблицы отправителя и появляется в таблице
 получателя: отправитель теряет доступ к нему.
 
-|     Op | Имя             | Аргументы                                                        | Возврат                               | Права                            |
-|-------:|-----------------|------------------------------------------------------------------|---------------------------------------|----------------------------------|
-| `0x20` | `ChannelCreate` | —                                                                | primary=`left_h`, secondary=`right_h` | —                                |
-| `0x21` | `ChannelWrite`  | `handle`, `bytes_va`, `bytes_len`, `handles_va`, `handles_count` | `0`                                   | `WRITE`, `TRANSFER` на handle'ах |
-| `0x22` | `ChannelRead`   | `handle`, `bytes_va`, `bytes_cap`, `handles_va`, `handles_cap`   | `bytes_len \| (handles_count << 32)`  | `READ`                           |
+|     Op | Имя              | Аргументы                  | Возврат                                | Права    |
+|-------:|------------------|----------------------------|----------------------------------------|----------|
+| `0x23` | `PortCreate` | —                          | `port_h`                           | —        |
+| `0x24` | `PortSend`   | `handle`, `timeout_ns`     | `0`                                    | `WRITE`  |
+| `0x25` | `PortRecv`   | `handle`, `timeout_ns`     | `reply_h` (либо `0`)                   | `READ`   |
+| `0x26` | `PortCall`   | `handle`, `timeout_ns`     | `0`                                    | `WRITE`  |
+| `0x27` | `PortReply`  | `reply_handle`             | `0`                                    | `WRITE`  |
 
-Массив handle'ов в user-памяти — последовательность `u32` little-endian.
-Если receive-буферы малы, `ChannelRead` возвращает `BufferTooSmall`, а
-сообщение остаётся в очереди.
+`PortCreate` создаёт ОДИН port-объект (стороны симметричны: любой handle
+на него можно использовать как локальный и передавать копии другим процессам).
 
-Пример: клиент отправляет запрос сервису и ждёт ответа.
+`PortSend` блокирующе отправляет кадр из IPC-буфера текущего потока: ждёт,
+пока встречный `recv`/`call` его примет. `PortRecv` блокирующе принимает кадр
+в IPC-буфер текущего потока; если встречный был `call`, в возврат кладётся handle
+одноразового `Reply`-объекта (иначе `0`). `PortCall` — блокирующий
+запрос-ответ: кадр уходит из IPC-буфера, а ответ оказывается в нём же. На
+`Reply`-handle сервер вызывает `PortReply`, доставляя кадр из своего
+IPC-буфера вызывателю; `Reply` одноразов.
+
+**Тайм-аут (`timeout_ns`).** Блокирующие `PortSend`/`PortRecv`/`PortCall`
+ограничивают ожидание встречной стороны параметром `timeout_ns` — чтобы
+real-time поток не зависал на IPC неограниченно. Кодировка совпадает по духу
+с `SignalWaitOne`, но с sentinel'ом бесконечности:
+
+- `PORT_TIMEOUT_INFINITE` (`u64::MAX`) — ждать бессрочно (поведение по
+  умолчанию до введения тайм-аутов; настоящая блокировка без записи в
+  sleeper-heap);
+- `0` (`PORT_TIMEOUT_POLL`) — не блокироваться: операция либо завершается
+  немедленно (встречная сторона уже ждёт), либо возвращает `ShouldWait`;
+- иначе — относительный дедлайн в наносекундах.
+
+При истечении тайм-аута (в т.ч. в режиме poll, когда встречной стороны нет)
+syscall возвращает `Timeout` (`SYSCALL_RETURN_TIMEOUT = -9`), отличая «истёк
+дедлайн» от `ShouldWait`. Для `PortCall` тайм-аут покрывает ВСЮ
+операцию (ожидание получателя + ожидание `reply`); если вызывающая сторона уходит по
+тайм-ауту, не дождавшись ответа, сервер при попытке `PortReply` получит
+`PeerClosed`, а IPC-буфер вызывателя не будет затронут.
+
+**Доставка badge.** На `PortRecv`/`PortCall` ядро дополнительно
+записывает в поле `IpcBuffer.badge` получателя значок (badge) port-хендла
+ОТПРАВИТЕЛЯ (`0`, если хендл незаклеймён). Так сервер различает клиентов и
+соединения, не создавая отдельных port'ов и не опираясь на koid: сервер
+минтит несколько badged-копий своего port-хендла через `HandleDuplicate`
+(каждой — свой badge) и раздаёт их клиентам; клиент шлёт через свою копию, а
+сервер на приёме читает её badge. Значок пишется получателю всегда (даже при
+пустом теле/без caps); на стороне отправителя поле `badge` не читается. Для
+`call` значок вызывателя доставляется серверу на recv; ответ (`PortReply`)
+badge не несёт.
+
+Содержимое кадра (байты и хэндлы) кодируется в IPC-буфере по адресу, который
+возвращает `IpcBufferAddr` (op `0x56`). Wire-формат типизированного IPC поверх
+этого транспорта описан в [ipc.md](ipc.md); он не зависит от того, что underlying
+доставка теперь синхронна.
+
+Пример: клиент шлёт запрос сервису и ждёт ответ.
 
 ```rust
-let (client_h, service_h) = channel_create()?;
-
-// отправляем запрос
-channel_write(client_h, request, &[])?;
-
-// ждём ответа
-let observed = object_wait_one(
-    client_h,
-    CHANNEL_READABLE | CHANNEL_PEER_CLOSED,
-    timeout_ns,
-)?;
-if observed & CHANNEL_PEER_CLOSED != 0 {
-    return Err(Error::PeerClosed);
-}
-
-let mut response = [0u8; RESPONSE_CAP];
-let mut handles = [None; MESSAGE_MAX_HANDLES];
-let packed = channel_read(client_h, &mut response, &mut handles)?;
-let bytes_len = (packed & 0xFFFF_FFFF) as usize;
-let response = &response[..bytes_len];
+let ipc = ipc_buffer_addr()? as *mut IpcBuffer;
+// уложить кадр запроса в IPC-буфер
+write_request_frame(ipc, request);
+// блокирующий запрос-ответ: ответ окажется в том же IPC-буфере
+port_call(service_h, PORT_TIMEOUT_INFINITE)?;
+let response = read_response_frame(ipc);
 ```
 
 ## Handle
@@ -175,19 +197,38 @@ Handle-вызовы управляют временем жизни handle'ов �
 процесса. Закрытие удаляет запись из таблицы; если это была последняя
 ссылка на объект, объект освобождается.
 
-|     Op | Имя               | Аргументы              | Возврат      | Права       |
-|-------:|-------------------|------------------------|--------------|-------------|
-| `0x30` | `HandleClose`     | `handle`               | `0`          | —           |
-| `0x31` | `HandleDuplicate` | `handle`, `new_rights` | `new_handle` | `DUPLICATE` |
+|     Op | Имя               | Аргументы                       | Возврат      | Права       |
+|-------:|-------------------|---------------------------------|--------------|-------------|
+| `0x30` | `HandleClose`     | `handle`                        | `0`          | —           |
+| `0x31` | `HandleDuplicate` | `handle`, `new_rights`, `badge` | `new_handle` | `DUPLICATE` |
 
-Пример: передать в дочерний процесс только право ожидания.
+`new_rights` берётся из нижних 32 бит `arg1` (неизвестные биты отбрасываются) и
+обязан быть подмножеством прав исходного хендла. `badge` (полные 64 бита `arg2`,
+`0` = без значка) применяется по семантике **set-once** (монотонность, как
+badges в seL4):
+
+- источник НЕ заклеймён (`badge == 0`) и `arg2 != 0` → новый хендл заклеймён
+  значком `arg2`;
+- источник НЕ заклеймён и `arg2 == 0` → новый хендл без значка;
+- источник заклеймён и `arg2 == 0` → новый хендл НАСЛЕДУЕТ значок источника;
+- источник заклеймён и `arg2 != 0` → попытка переклеймить, ошибка `BadHandle`.
+
+Badge — свойство ХЕНДЛА, а не объекта: разные копии одного и того же port'а
+несут разные значки. На приёме сообщения ядро доставляет badge отправителя
+получателю (см. [Port](#port)).
+
+Пример: передать в дочерний процесс только право ожидания (без значка).
 
 ```rust
 let wait_only = handle_duplicate(
     process_h,
-    Rights::WAIT | Rights::INSPECT | Rights::TRANSFER,
+    Rights::READ | Rights::TRANSFER,
+    0, // без значка
 )?;
 handle_close(process_h)?;
+
+// Сервер минтит badged-копию port'а под конкретного клиента:
+let client_ep = handle_duplicate(port_h, Rights::WRITE, CLIENT_BADGE)?;
 ```
 
 ## Process
@@ -199,10 +240,11 @@ Process-вызовы создают процесс, возвращают handle 
 |-------:|--------------------|----------------------------------------------------------------------------------------------|-----------------------|--------------------------------------------------------------------------------|
 | `0x40` | `ProcessCreate`    | `name_va`, `name_len`                                                                        | `process_h`           | —                                                                              |
 | `0x41` | `ProcessSelf`      | —                                                                                            | `process_h`           | —                                                                              |
-| `0x42` | `ProcessLoadImage` | `process_h`, `desc_va`, `desc_len`                                                           | `0`                   | `MANAGE_PROCESS`, `MAP`/`READ`/`WRITE`/`EXECUTE` на memory-handle'ах сегментов |
-| `0x43` | `ProcessExitCode`  | `process_h`                                                                                  | `exit_code` как `u32` | `INSPECT`                                                                      |
-| `0x44` | `ProcessTerminate` | `process_h`, `exit_code`                                                                     | `0`                   | `MANAGE_PROCESS`                                                               |
-| `0x45` | `ProcessStart`     | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h`            | `MANAGE_PROCESS`; `TRANSFER` на bootstrap-handle'ах                            |
+| `0x42` | `ProcessLoadImage` | `process_h`, `desc_va`, `desc_len`                                                           | `0`                   | `WRITE`, `WRITE`/`READ`/`EXECUTE` на memory-handle'ах сегментов |
+| `0x43` | `ProcessExitCode`  | `process_h`                                                                                  | `exit_code` как `u32` | `READ`                                                                      |
+| `0x44` | `ProcessTerminate` | `process_h`, `exit_code`                                                                     | `0`                   | `WRITE`                                                               |
+| `0x45` | `ProcessStart`     | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h`            | `WRITE`; `TRANSFER` на bootstrap-handle'ах                            |
+| `0x46` | `ProcessTerminationSignal` | `process_h`                                                                          | `signal_h` (read-only)| `READ`                                                               |
 
 `ProcessCreate` копирует имя процесса из user-памяти, требует
 непустой корректный UTF-8 и ограничение `1 <= name_len <= 64` байт.
@@ -235,7 +277,7 @@ Process-вызовы создают процесс, возвращают handle 
 |   `24` | `reserved`      | `u64` | обязано быть `0`                                     |
 
 Для каждого сегмента loader обязан передать `region_handle` с правом
-`MAP` и правами доступа, совместимыми с `flags`: `READ|WRITE` для `RW`,
+`WRITE` и правами доступа, совместимыми с `flags`: `READ|WRITE` для `RW`,
 `READ` для `RO`, `READ|EXECUTE` для `RX`. Некорректная версия ABI,
 нулевой/слишком большой `segment_count`, невыровненные адреса, несовпадающий
 размер региона или ненулевой `reserved` возвращают `InvalidArgument`.
@@ -257,9 +299,15 @@ Process-вызовы создают процесс, возвращают handle 
 потоков и пустой child handle-table; иначе возвращает `WrongType`.
 
 `ProcessTerminate` не используется для self-exit: handle на текущий
-процесс возвращает `AccessDenied` даже при `MANAGE_PROCESS`. Собственное
-завершение идёт через `ThreadExit`; последний поток процесса поднимает
-`PROCESS_TERMINATED`.
+процесс возвращает `AccessDenied` даже при `WRITE`. Собственное
+завершение идёт через `ThreadExit`; последний поток процесса помечает
+процесс завершённым.
+
+`ProcessTerminationSignal` возвращает handle на ленивый bound-`Signal`
+процесса (бит `SIGNALED` = «завершён»), материализуя его при первом вызове;
+если процесс уже завершён, `Signal` сразу несёт `SIGNALED`. Выданный handle
+read-only (`READ`/`DUPLICATE`/`TRANSFER`, без `WRITE`): наблюдатель не может
+подделать термнинацию.
 
 Типичный сценарий user-spawn состоит из трёх шагов: `ProcessCreate`,
 затем `ProcessLoadImage`, затем `ProcessStart`. Между `LoadImage` и
@@ -268,23 +316,26 @@ Process-вызовы создают процесс, возвращают handle 
 Пример: передать supervisor'у право дождаться завершения текущего процесса.
 
 ```rust
-// --- сторона процесса (report_h - конец канала к supervisor'у) ---
+// --- сторона процесса (report_h - port к supervisor'у) ---
 let process_h = process_self()?;
 let wait_h = handle_duplicate(
     process_h,
-    Rights::WAIT | Rights::INSPECT | Rights::TRANSFER,
+    Rights::READ | Rights::TRANSFER,
+    0, // без значка
 )?;
 handle_close(process_h)?;
-channel_write(report_h, &[], &[wait_h])?;
+// уложить wait_h как cap в IPC-буфер и доставить его supervisor'у
+let ipc = ipc_buffer_addr()? as *mut IpcBuffer;
+write_cap_frame(ipc, wait_h);
+port_send(report_h, PORT_TIMEOUT_INFINITE)?;
 
-// --- сторона supervisor'а (monitor_h - парный конец того же канала) ---
-object_wait_one(monitor_h, CHANNEL_READABLE, timeout_ns)?;
-let mut handles = [None; MESSAGE_MAX_HANDLES];
-channel_read(monitor_h, &mut [], &mut handles)?;
-let monitored_h = handles[0].expect("peer transferred wait_h");
+// --- сторона supervisor'а (monitor_h - тот же port) ---
+port_recv(monitor_h, PORT_TIMEOUT_INFINITE)?;
+let monitored_h = read_cap_frame(ipc).expect("peer transferred wait_h");
 
-let observed = object_wait_one(monitored_h, PROCESS_TERMINATED, timeout_ns)?;
-if observed & PROCESS_TERMINATED != 0 {
+let term_h = process_termination_signal(monitored_h)?;
+let observed = signal_wait_one(term_h, SIGNALED, timeout_ns)?;
+if observed & SIGNALED != 0 {
     let code = process_exit_code(monitored_h)?;
 }
 ```
@@ -320,15 +371,24 @@ Thread-вызовы создают поток в процессе, возвра�
 
 |     Op | Имя               | Аргументы                                             | Возврат               | Права            |
 |-------:|-------------------|-------------------------------------------------------|-----------------------|------------------|
-| `0x50` | `ThreadCreate`    | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority` | `thread_h`            | `MANAGE_PROCESS` |
+| `0x50` | `ThreadCreate`    | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority` | `thread_h`            | `WRITE` |
 | `0x51` | `ThreadSelf`      | —                                                     | `thread_h`            | —                |
 | `0x52` | `ThreadExit`      | `exit_code`                                           | не возвращается       | —                |
-| `0x53` | `ThreadExitCode`  | `thread_h`                                            | `exit_code` как `u32` | `INSPECT`        |
-| `0x54` | `ThreadTerminate` | `thread_h`, `exit_code`                               | `0`                   | `MANAGE_THREAD`  |
+| `0x53` | `ThreadExitCode`  | `thread_h`                                            | `exit_code` как `u32` | `READ`        |
+| `0x54` | `ThreadTerminate` | `thread_h`, `exit_code`                               | `0`                   | `WRITE`  |
+| `0x55` | `ThreadTerminationSignal` | `thread_h`                                    | `signal_h` (read-only)| `READ`        |
+| `0x56` | `IpcBufferAddr`           | —                                             | `ipc_buffer_va`       | —             |
 
 `ThreadTerminate` также не используется для self-exit: handle на текущий
-поток возвращает `AccessDenied` даже при `MANAGE_THREAD`. Для завершения
+поток возвращает `AccessDenied` даже при `WRITE`. Для завершения
 текущего потока вызывается `ThreadExit`.
+
+`ThreadTerminationSignal` симметричен `ProcessTerminationSignal`: возвращает
+handle на ленивый bound-`Signal` потока (бит `SIGNALED` = «завершён»).
+
+`IpcBufferAddr` возвращает user-VA per-thread IPC-буфера текущего потока; для
+kernel-потока без буфера — `-(SyscallError)`. Адрес используется как указатель
+на [`IpcBuffer`] перед каждым port-вызовом (см. секцию «Port»).
 
 `exit_code` берётся из младших 32 бит аргумента и читается как `i32`.
 
@@ -342,8 +402,9 @@ fn worker_entry() -> ! {
 let process_h = process_self()?;
 let thread_h = thread_create(process_h, worker_entry as u64, worker_sp, 0, priority)?;
 
-let observed = object_wait_one(thread_h, THREAD_TERMINATED, timeout_ns)?;
-if observed & THREAD_TERMINATED != 0 {
+let term_h = thread_termination_signal(thread_h)?;
+let observed = signal_wait_one(term_h, SIGNALED, timeout_ns)?;
+if observed & SIGNALED != 0 {
     let code = thread_exit_code(thread_h)?;
 }
 ```
@@ -358,20 +419,30 @@ Memory-вызовы выделяют память и управляют её м�
   задублировать с другими правами;
 - **region handle** (`MemoryCreateVirtual` / `MemoryCreatePhysical`) —
   возвращает handle на регион, который можно замапить, передать через
-  channel или задублировать с уменьшенными правами.
+  port или задублировать с уменьшенными правами.
 
 |     Op | Имя                    | Аргументы                                       | Возврат                                                       | Права                                                                        |
 |-------:|------------------------|-------------------------------------------------|---------------------------------------------------------------|------------------------------------------------------------------------------|
 | `0x60` | `MemoryCreateVirtual`  | `size_bytes`, `access_mask`                     | `region_h`                                                    | —                                                                            |
-| `0x61` | `MemoryCreatePhysical` | `resource_h`, `pa`, `size_bytes`, `access_mask` | `region_h`                                                    | `MINT` на `PhysicalResource`; диапазон и доступ должны укладываться в ресурс |
-| `0x63` | `MemoryMap`            | `region_h`, `size_bytes`, `flags`               | `va`                                                          | `MAP` и нужный доступ                                                        |
+| `0x61` | `MemoryCreatePhysical` | `resource_h`, `pa`, `size_bytes`, `access_mask` | `region_h`                                                    | `WRITE` на `Resource`; диапазон и доступ должны укладываться в ресурс; расходует бюджет ресурса (`ResourceExhausted` при нехватке) |
+| `0x63` | `MemoryMap`            | `region_h`, `size_bytes`, `flags`               | `va`                                                          | `WRITE` и нужный доступ                                                        |
 | `0x64` | `MemoryRemap`          | `va`, `size_bytes`, `flags`                     | `0`                                                           | grant исходного mapping'а                                                    |
 | `0x65` | `MemoryAllocate`       | `size_bytes`, `flags`                           | `va`                                                          | —                                                                            |
 | `0x66` | `MemoryFree`           | `va`, `size_bytes`                              | `0`                                                           | —                                                                            |
-| `0x67` | `MemoryRegionInspect`  | `region_h`                                      | primary=`size_bytes`, secondary=`(kind << 16) \| access_bits` | `INSPECT`                                                                    |
+| `0x67` | `MemoryRegionInspect`  | `region_h`                                      | primary=`size_bytes`, secondary=`(kind << 16) \| access_bits` | `READ`                                                                    |
 
 `access_mask`: `R=1`, `W=2`, `X=4`. `flags`: `0=ReadWrite`,
 `1=ReadOnly`, `2=ReadExecute`.
+
+`Resource` (KObject, type-tag 5) — это полномочие на минтинг физпамяти
+(`MemoryCreatePhysical`), которое дополнительно несёт **бюджет** (счётчик
+страниц по 4 KiB). Каждый успешный `MemoryCreatePhysical` атомарно
+списывает с бюджета ресурса число затрагиваемых страниц (`size_bytes /
+4096`, округление вверх); при нехватке бюджета операция возвращает
+`ResourceExhausted` и регион не создаётся. Корневой `Resource` (крупный
+PA-диапазон, бюджет `1<<20` страниц) создаётся ядром при старте и выдаётся
+bootstrap-процессу как дополнительный initial handle (индекс 1; индекс 0 —
+bootstrap-port).
 
 `MemoryMap` требует, чтобы `size_bytes` совпадал с полным размером
 региона; частичный mapping поддиапазона сейчас не поддерживается.
@@ -398,9 +469,13 @@ write_payload(shared_va, payload);
 
 let readonly_region_h = handle_duplicate(
     region_h,
-    Rights::MAP | Rights::READ | Rights::INSPECT | Rights::TRANSFER,
+    Rights::WRITE | Rights::READ | Rights::TRANSFER,
+    0, // без значка
 )?;
-channel_write(peer_h, &[], &[readonly_region_h])?;
+// уложить readonly_region_h как cap в IPC-буфер и отправить peer'у
+let ipc = ipc_buffer_addr()? as *mut IpcBuffer;
+write_cap_frame(ipc, readonly_region_h);
+port_send(peer_h, PORT_TIMEOUT_INFINITE)?;
 ```
 
 ## Process Spawning
@@ -413,8 +488,8 @@ bootstrap-handles.
 
 |     Op | Имя                | Аргументы                                                                                    | Возврат    | Права                                                                            |
 |-------:|--------------------|----------------------------------------------------------------------------------------------|------------|----------------------------------------------------------------------------------|
-| `0x42` | `ProcessLoadImage` | `process_h`, `desc_va`, `desc_len` (== `56`)                                                 | `0`        | `MANAGE_PROCESS` на `process_h`; для каждого региона — `MAP \| (R/W/X по flags)` |
-| `0x45` | `ProcessStart`     | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h` | `MANAGE_PROCESS` на `process_h`; `TRANSFER` на каждом bootstrap-handle           |
+| `0x42` | `ProcessLoadImage` | `process_h`, `desc_va`, `desc_len` (== `56`)                                                 | `0`        | `WRITE` на `process_h`; для каждого региона — `WRITE \| (R/W/X по flags)` |
+| `0x45` | `ProcessStart`     | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h` | `WRITE` на `process_h`; `TRANSFER` на каждом bootstrap-handle           |
 
 ### Layout `UserImageDescAbi` (56 B)
 
@@ -448,7 +523,7 @@ bootstrap fresh child-процесса. После загрузки образа
 ### Pipeline (loader-side):
 
 ```text
-ChannelCreate                                    -> (parent_h, child_h)
+PortCreate                                   -> bootstrap_h  // делегируется child'у
 MemoryCreateVirtual(size, R|W|X access_mask)     -> region_h
 MemoryMap(region_h, size, RW)                    -> seg_va  // в loader-AS
 copy image bytes -> seg_va                                 // CPU stores
@@ -457,9 +532,10 @@ ProcessCreate("child")                           -> proc_h
 build UserImageDescAbi + [UserSegmentAbi; N] на стеке loader-а
 ProcessLoadImage(proc_h, desc_va, 56)            -> 0
 MemoryFree(seg_va, size)                                   // фреймы остаются за child через Arc<MemoryRegion>
-ProcessStart(proc_h, entry_pc, user_sp, arg, prio | (1<<32), &[child_h])
+ProcessStart(proc_h, entry_pc, user_sp, arg, prio | (1<<32), &[bootstrap_h])
                                                  -> thread_h
-ObjectWaitOne(proc_h, PROCESS_TERMINATED, ...)
+ProcessTerminationSignal(proc_h)                 -> term_h
+SignalWaitOne(term_h, SIGNALED, ...)
 ProcessExitCode(proc_h)                          -> exit_code
 ```
 
@@ -473,104 +549,3 @@ ProcessExitCode(proc_h)                          -> exit_code
 Двойной маппинг: тот же `Arc<MemoryRegion>` хранится в loader's и child's
 `UserVmAllocator`, ядро лишь записывает PTE в child mapper — данные
 сегмента копируются ровно один раз (CPU stores loader'а).
-
-## Mailbox
-
-Mailbox решает задачу event-loop'а: один поток ждёт сразу на нескольких
-объектах. Вместо отдельного `ObjectWaitOne` на каждый объект вы
-подписываете их через `MailboxWaitAsync`, а затем крутите один
-`MailboxWait`. Когда любой из объектов поднимает ожидаемый сигнал, ядро
-кладёт пакет в mailbox; `MailboxWait` возвращает его вместе с `key`,
-по которому вы определяете источник. Положить пакет вручную, без сигнала,
-можно через `MailboxQueue`.
-
-|     Op | Имя                | Аргументы                                            | Возврат      | Права                                |
-|-------:|--------------------|------------------------------------------------------|--------------|--------------------------------------|
-| `0x70` | `MailboxCreate`    | —                                                    | `mailbox_h`  | —                                    |
-| `0x71` | `MailboxQueue`     | `mailbox_h`, `packet_va`, `packet_len`               | `0`          | `WRITE` на mailbox                   |
-| `0x72` | `MailboxWait`      | `mailbox_h`, `timeout_ns`, `packet_va`, `packet_cap` | `packet_len` | `READ` на mailbox                    |
-| `0x73` | `MailboxWaitAsync` | `mailbox_h`, `target_h`, `key`, `mask_and_mode`      | `0`          | `WRITE` на mailbox, `WAIT` на target |
-| `0x74` | `MailboxCancel`    | `mailbox_h`, `target_h`, `key`                       | `0`          | `WRITE` на mailbox                   |
-
-Пакет — 32 байта, layout `repr(C)`:
-
-| Offset | Поле      | Тип        | Описание                                      |
-|-------:|-----------|------------|-----------------------------------------------|
-|      0 | `key`     | `u64`      | произвольное значение, выданное user-ом       |
-|      8 | `kind`    | `u8`       | `0=User`, `1=SignalOnce`, `2=SignalRepeating` |
-|     12 | `status`  | `i32`      | резерв, сейчас всегда `0`                     |
-|     16 | `payload` | `[u8; 16]` | данные пакета                                 |
-
-`MailboxQueue` принимает только `kind=0` (User-пакет): signal-пакеты
-ставит ядро при срабатывании подписки, попытка проставить `kind=1`/`2`
-от user отвергается с `InvalidArgument`. Для signal-пакетов
-`payload[0..4]` — маска подписки в little-endian, `payload[4..8]` —
-наблюдённый набор сигналов на момент wake.
-
-`MailboxWaitAsync.mask_and_mode` упаковывает маску сигналов в нижние
-32 бита, режим — в верхние: `0=Once` (одноразовая доставка, observer
-автоматически снимается после wake), `1=Repeating` (доставка на каждое
-срабатывание сигнала, до явного `MailboxCancel` или дропа
-mailbox/target). `MailboxCancel` идемпотентен: «нет такой подписки»
-тоже возвращает `0`.
-
-`Mailbox` в качестве `target_h` отвергается с `WrongType` — иначе
-циклические подписки (`A→B→A` или один mailbox через два handle от
-`HandleDuplicate`) приводят к рекурсивному захвату внутреннего лока на
-пути доставки.
-
-Очередь пакетов ограничена. На полной очереди:
-
-- `MailboxQueue` от user возвращает `ShouldWait` без побочных эффектов;
-- signal-пакет от подписки тихо дропается, наращивая внутренний счётчик
-  переполнений (доступ к нему придёт отдельным inspect-вызовом).
-
-Пример: event-loop сервиса, реагирующего на несколько источников.
-Сервис обслуживает запросы из канала клиента, периодический watchdog
-через `Event` и завершение worker-потока. Без Mailbox каждый источник
-требовал бы отдельного `ObjectWaitOne` (последовательный poll или
-дополнительные потоки). С Mailbox — одна точка ожидания и маршрутизация
-по `key`.
-
-```rust
-const KEY_REQUEST: u64 = 1;
-const KEY_WATCHDOG: u64 = 2;
-const KEY_WORKER_DONE: u64 = 3;
-
-let mailbox_h = mailbox_create()?;
-
-mailbox_wait_async(
-    mailbox_h, client_channel_h, KEY_REQUEST,
-    CHANNEL_READABLE | (AsyncMode::Repeating << 32),
-)?;
-mailbox_wait_async(
-    mailbox_h, watchdog_event_h, KEY_WATCHDOG,
-    EVENT_SIGNALED | (AsyncMode::Repeating << 32),
-)?;
-mailbox_wait_async(
-    mailbox_h, worker_thread_h, KEY_WORKER_DONE,
-    THREAD_TERMINATED | (AsyncMode::Once << 32),
-)?;
-
-loop {
-    let mut buf = [0u8; MAILBOX_PACKET_SIZE];
-    mailbox_wait(mailbox_h, /* timeout_ns */ 0, &mut buf)?;
-    let packet = MailboxPacket::from_buf(&buf);
-    match packet.key {
-        KEY_REQUEST => handle_client_request(client_channel_h)?,
-        KEY_WATCHDOG => reset_watchdog(watchdog_event_h)?,
-        KEY_WORKER_DONE => {
-            let code = thread_exit_code(worker_thread_h)?;
-            return finalize(code);
-        }
-        _ => {}
-    }
-}
-```
-
-Один поток обслуживает все источники, без busy-poll'а и
-дополнительных потоков-наблюдателей. `Repeating` подходит для
-постоянных событийных потоков (запросы, периодические сигналы),
-`Once` — для one-shot уведомлений (завершение потока, ответ на конкретный
-запрос). Добавление нового источника — одна строка `mailbox_wait_async`,
-без правки структуры цикла.

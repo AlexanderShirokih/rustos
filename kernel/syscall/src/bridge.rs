@@ -32,7 +32,7 @@ pub trait SyscallFrame {
 
     /// Записать дополнительное возвращаемое значение во второй
     /// регистр-возврата фрейма. Используется syscall'ами с парным
-    /// результатом - сейчас [`SyscallOp::ChannelCreate`].
+    /// результатом - сейчас [`SyscallOp::SignalWaitMany`].
     fn set_secondary_return(&mut self, value: u64);
 
     fn origin(&self) -> Origin;
@@ -60,42 +60,43 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
     };
 
     match op {
-        SyscallOp::ObjectSignal => {
-            let r = sys_object_signal(frame.arg(0), frame.arg(1), frame.arg(2), frame.arg(3));
+        SyscallOp::SignalSet => {
+            let r = sys_signal_set(frame.arg(0), frame.arg(1), frame.arg(2), frame.arg(3));
             frame.set_return(encode_return(r));
         }
-        SyscallOp::EventCreate => {
-            let r = sys_event_create();
+        SyscallOp::SignalCreate => {
+            let r = sys_signal_create();
             frame.set_return(encode_return(r));
         }
-        SyscallOp::ObjectWaitOne => {
-            let r = sys_object_wait_one(frame.arg(0), frame.arg(1), frame.arg(2));
+        SyscallOp::IpcBufferAddr => {
+            let r = super::thread::sys_ipc_buffer_addr();
             frame.set_return(encode_return(r));
         }
-        SyscallOp::ObjectWaitMany => {
-            sys_object_wait_many(frame);
-        }
-        SyscallOp::ChannelCreate => {
-            sys_channel_create(frame);
-        }
-        SyscallOp::ChannelWrite => {
-            let r = super::channel::sys_channel_write(
-                frame.arg(0),
-                frame.arg(1),
-                frame.arg(2),
-                frame.arg(3),
-                frame.arg(4),
-            );
+        SyscallOp::SignalWaitOne => {
+            let r = sys_signal_wait_one(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
         }
-        SyscallOp::ChannelRead => {
-            let r = super::channel::sys_channel_read(
-                frame.arg(0),
-                frame.arg(1),
-                frame.arg(2),
-                frame.arg(3),
-                frame.arg(4),
-            );
+        SyscallOp::SignalWaitMany => {
+            sys_signal_wait_many(frame);
+        }
+        SyscallOp::PortCreate => {
+            let r = super::port::sys_port_create();
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::PortSend => {
+            let r = super::port::sys_port_send(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::PortRecv => {
+            let r = super::port::sys_port_recv(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::PortCall => {
+            let r = super::port::sys_port_call(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::PortReply => {
+            let r = super::port::sys_port_reply(frame.arg(0));
             frame.set_return(encode_return(r));
         }
         SyscallOp::HandleClose => {
@@ -103,7 +104,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             frame.set_return(encode_return(r));
         }
         SyscallOp::HandleDuplicate => {
-            let r = sys_handle_duplicate(frame.arg(0), frame.arg(1));
+            let r = sys_handle_duplicate(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
         }
         SyscallOp::ProcessCreate => {
@@ -125,6 +126,10 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         }
         SyscallOp::ProcessTerminate => {
             let r = super::process::sys_process_terminate(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ProcessTerminationSignal => {
+            let r = super::process::sys_process_termination_signal(frame.arg(0));
             frame.set_return(encode_return(r));
         }
         SyscallOp::ProcessStart => {
@@ -163,6 +168,10 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::thread::sys_thread_terminate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
+        SyscallOp::ThreadTerminationSignal => {
+            let r = super::thread::sys_thread_termination_signal(frame.arg(0));
+            frame.set_return(encode_return(r));
+        }
         SyscallOp::MemoryCreateVirtual => {
             let r = super::memory::sys_memory_create_virtual(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
@@ -195,36 +204,6 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         SyscallOp::MemoryRegionInspect => {
             super::memory::sys_memory_region_inspect(frame);
         }
-        SyscallOp::MailboxCreate => {
-            let r = super::mailbox::sys_mailbox_create();
-            frame.set_return(encode_return(r));
-        }
-        SyscallOp::MailboxQueue => {
-            let r = super::mailbox::sys_mailbox_queue(frame.arg(0), frame.arg(1), frame.arg(2));
-            frame.set_return(encode_return(r));
-        }
-        SyscallOp::MailboxWait => {
-            let r = super::mailbox::sys_mailbox_wait(
-                frame.arg(0),
-                frame.arg(1),
-                frame.arg(2),
-                frame.arg(3),
-            );
-            frame.set_return(encode_return(r));
-        }
-        SyscallOp::MailboxWaitAsync => {
-            let r = super::mailbox::sys_mailbox_wait_async(
-                frame.arg(0),
-                frame.arg(1),
-                frame.arg(2),
-                frame.arg(3),
-            );
-            frame.set_return(encode_return(r));
-        }
-        SyscallOp::MailboxCancel => {
-            let r = super::mailbox::sys_mailbox_cancel(frame.arg(0), frame.arg(1), frame.arg(2));
-            frame.set_return(encode_return(r));
-        }
     }
 }
 
@@ -234,45 +213,42 @@ fn sys_thread_exit(code: u64) -> ! {
     kobject::thread_exit(exit_code)
 }
 
-/// `object_signal(handle, set, clear, count)` - атомарно меняет биты
+/// `signal_set(handle, set, clear, count)` - атомарно меняет биты
 /// сигналов kernel-объекта и будит waiter'ов.
 /// При `count == 0` будит всех пересекающихся.
 /// При `count == N` - не более N в FIFO-порядке.
 /// Возвращает `0` в случае успеха.
-fn sys_object_signal(handle: u64, set: u64, clear: u64, count: u64) -> Result<u64, SyscallError> {
+fn sys_signal_set(handle: u64, set: u64, clear: u64, count: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let count =
         u32::try_from(count & u64::from(u32::MAX)).expect("masking guarantees value fits into u32");
-    kobject::object_signal(id, signals_from_arg(set), signals_from_arg(clear), count)?;
+    kobject::signal_set(id, signals_from_arg(set), signals_from_arg(clear), count)?;
     Ok(0)
 }
 
-/// `event_create()` - создаёт `Event`, регистрирует handle в текущей таблице и
-/// возвращает его сырой `HandleId`.
-fn sys_event_create() -> Result<u64, SyscallError> {
-    let id = kobject::event_create()?;
+/// Создаёт `Signal` и возвращает его сырой `HandleId`.
+fn sys_signal_create() -> Result<u64, SyscallError> {
+    let id = kobject::signal_create()?;
     Ok(u64::from(id.raw().get()))
 }
 
-/// `object_wait_one(handle, signals, timeout_ns)`. `timeout_ns == 0`
-/// - poll. Возвращает observed-маску.
-fn sys_object_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+/// `timeout_ns == 0` - poll. Возвращает observed-маску.
+fn sys_signal_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let mask = signals_from_arg(signals);
     if mask == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let observed = kobject::object_wait_one(id, mask, Some(timeout_ns))?;
+    let observed = kobject::signal_wait_one(id, mask, Some(timeout_ns))?;
     Ok(u64::from(observed))
 }
 
 const WAIT_MANY_ENTRY_SIZE: usize = 8;
 const WAIT_MANY_MAX_COUNT: usize = 256;
 
-/// `object_wait_many(items_va, count, timeout_ns)`. Primary возврат -
-/// observed-маска, secondary - индекс сработавшей записи.
-fn sys_object_wait_many(frame: &mut dyn SyscallFrame) {
-    match sys_object_wait_many_impl(frame.arg(0), frame.arg(1), frame.arg(2)) {
+/// Primary возврат - observed-маска, secondary - индекс сработавшей записи.
+fn sys_signal_wait_many(frame: &mut dyn SyscallFrame) {
+    match sys_signal_wait_many_impl(frame.arg(0), frame.arg(1), frame.arg(2)) {
         Ok((index, observed)) => {
             frame.set_secondary_return(u64::from(index));
             frame.set_return(i64::from(observed));
@@ -281,7 +257,7 @@ fn sys_object_wait_many(frame: &mut dyn SyscallFrame) {
     }
 }
 
-fn sys_object_wait_many_impl(
+fn sys_signal_wait_many_impl(
     items_va: u64,
     count: u64,
     timeout_ns: u64,
@@ -319,7 +295,7 @@ fn sys_object_wait_many_impl(
         items[i] = (HandleId::from_raw(nz), mask);
     }
 
-    let outcome = kobject::object_wait_many(&items[..count], Some(timeout_ns))?;
+    let outcome = kobject::signal_wait_many(&items[..count], Some(timeout_ns))?;
     let index = u32::try_from(outcome.index).expect("count <= WAIT_MANY_MAX_COUNT fits in u32");
     Ok((index, outcome.observed))
 }
@@ -347,21 +323,19 @@ fn sys_handle_close(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-/// `handle_duplicate(handle, new_rights)` - создаёт копию handle'а с
-/// подмножеством прав. Возвращает сырой `HandleId` нового handle'а.
-/// `new_rights` берётся из нижних 32 бит аргумента; неизвестные биты
-/// отбрасываются [`Rights::from_bits_truncate`].
-fn sys_handle_duplicate(handle: u64, new_rights: u64) -> Result<u64, SyscallError> {
+/// Создаёт копию handle'а с подмножеством прав. `new_rights` - нижние 32 бита arg1,
+/// неизвестные биты отбрасываются. `badge` - set-once: переклеймить уже
+/// заклеймённый -> `BadHandle`.
+fn sys_handle_duplicate(handle: u64, new_rights: u64, badge: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let rights_bits = u32::try_from(new_rights & u64::from(u32::MAX))
         .expect("masking guarantees value fits into u32");
     let rights = Rights::from_bits_truncate(rights_bits);
-    let new_id = kobject::handle_duplicate(id, rights)?;
+    let new_id = kobject::handle_duplicate(id, rights, badge)?;
     Ok(u64::from(new_id.raw().get()))
 }
 
-/// 32-битная сигнальная маска из аргумента syscall'а. Верхние биты
-/// игнорируются - ABI фиксирует, что биты сигналов живут в нижних 32-х.
+/// Верхние биты игнорируются: ABI фиксирует биты сигналов в нижних 32.
 fn signals_from_arg(raw: u64) -> u32 {
     u32::try_from(raw & u64::from(u32::MAX)).expect("masking guarantees value fits into u32")
 }
@@ -427,65 +401,65 @@ mod tests {
 
     #[test]
     fn unknown_op_returns_bad_syscall() {
-        let mut f = MockFrame::user(0x55, [0; 6]);
+        let mut f = MockFrame::user(0x57, [0; 6]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::BadSyscall)));
     }
 
     #[test]
     fn kernel_origin_is_rejected_before_dispatch() {
-        let mut f = MockFrame::kernel(SyscallOp::ObjectSignal as u16, [1, 1, 0, 0, 0, 0]);
+        let mut f = MockFrame::kernel(SyscallOp::SignalSet as u16, [1, 1, 0, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::KernelOriginated)));
     }
 
     #[test]
-    fn object_signal_with_zero_handle_is_invalid_argument() {
-        let mut f = MockFrame::user(SyscallOp::ObjectSignal as u16, [0; 6]);
+    fn signal_set_with_zero_handle_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::SignalSet as u16, [0; 6]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
     #[test]
-    fn object_wait_one_with_zero_handle_is_invalid_argument() {
-        let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [0; 6]);
+    fn signal_wait_one_with_zero_handle_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::SignalWaitOne as u16, [0; 6]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
     #[test]
-    fn object_wait_one_with_empty_mask_and_poll_timeout_is_invalid_argument() {
-        let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, 0, 0, 0, 0, 0]);
+    fn signal_wait_one_with_empty_mask_and_poll_timeout_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::SignalWaitOne as u16, [1, 0, 0, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
     #[test]
-    fn object_wait_one_with_empty_mask_and_finite_timeout_is_invalid_argument() {
-        let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, 0, 1_000, 0, 0, 0]);
+    fn signal_wait_one_with_empty_mask_and_finite_timeout_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::SignalWaitOne as u16, [1, 0, 1_000, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
     #[test]
-    fn object_wait_one_with_only_upper_bits_is_invalid_argument() {
+    fn signal_wait_one_with_only_upper_bits_is_invalid_argument() {
         let upper_only = u64::from(u32::MAX) + 1;
-        let mut f = MockFrame::user(SyscallOp::ObjectWaitOne as u16, [1, upper_only, 0, 0, 0, 0]);
+        let mut f = MockFrame::user(SyscallOp::SignalWaitOne as u16, [1, upper_only, 0, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
     #[test]
-    fn object_wait_many_with_zero_count_is_invalid_argument() {
-        let mut f = MockFrame::user(SyscallOp::ObjectWaitMany as u16, [0x1000, 0, 0, 0, 0, 0]);
+    fn signal_wait_many_with_zero_count_is_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::SignalWaitMany as u16, [0x1000, 0, 0, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
 
     #[test]
-    fn object_wait_many_with_overflow_count_is_invalid_argument() {
+    fn signal_wait_many_with_overflow_count_is_invalid_argument() {
         let mut f = MockFrame::user(
-            SyscallOp::ObjectWaitMany as u16,
+            SyscallOp::SignalWaitMany as u16,
             [0x1000, u64::MAX, 0, 0, 0, 0],
         );
         dispatch(&mut f);
@@ -493,11 +467,10 @@ mod tests {
     }
 
     #[test]
-    fn object_wait_many_above_max_count_is_invalid_argument() {
-        // Чуть выше потолка - ABI ограничивает массив.
+    fn signal_wait_many_above_max_count_is_invalid_argument() {
         let above_max = (WAIT_MANY_MAX_COUNT + 1) as u64;
         let mut f = MockFrame::user(
-            SyscallOp::ObjectWaitMany as u16,
+            SyscallOp::SignalWaitMany as u16,
             [0x1000, above_max, 0, 0, 0, 0],
         );
         dispatch(&mut f);
@@ -505,9 +478,8 @@ mod tests {
     }
 
     #[test]
-    fn object_wait_many_with_zero_va_invalid_argument() {
-        // count > 0, но va = 0 - validate_user_ptr отвергает.
-        let mut f = MockFrame::user(SyscallOp::ObjectWaitMany as u16, [0, 1, 0, 0, 0, 0]);
+    fn signal_wait_many_with_zero_va_invalid_argument() {
+        let mut f = MockFrame::user(SyscallOp::SignalWaitMany as u16, [0, 1, 0, 0, 0, 0]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
     }
@@ -544,41 +516,13 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_queue_with_zero_handle_is_invalid_argument() {
-        let mut f = MockFrame::user(SyscallOp::MailboxQueue as u16, [0, 0x1000, 32, 0, 0, 0]);
-        dispatch(&mut f);
-        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
+    fn raw_op_0x13_routes_to_signal_create() {
+        assert_eq!(op_from_raw(0x13), Ok(SyscallOp::SignalCreate));
     }
 
     #[test]
-    fn mailbox_wait_with_zero_handle_is_invalid_argument() {
-        let mut f = MockFrame::user(SyscallOp::MailboxWait as u16, [0, 0, 0x1000, 32, 0, 0]);
-        dispatch(&mut f);
-        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
-    }
-
-    #[test]
-    fn mailbox_cancel_with_zero_handle_is_invalid_argument() {
-        let mut f = MockFrame::user(SyscallOp::MailboxCancel as u16, [0, 1, 0, 0, 0, 0]);
-        dispatch(&mut f);
-        assert_eq!(f.returned, Some(i64::from(SyscallError::InvalidArgument)));
-    }
-
-    #[test]
-    fn mailbox_create_kernel_origin_rejected() {
-        let mut f = MockFrame::kernel(SyscallOp::MailboxCreate as u16, [0; 6]);
-        dispatch(&mut f);
-        assert_eq!(f.returned, Some(i64::from(SyscallError::KernelOriginated)));
-    }
-
-    #[test]
-    fn raw_op_0x13_routes_to_event_create() {
-        assert_eq!(op_from_raw(0x13), Ok(SyscallOp::EventCreate));
-    }
-
-    #[test]
-    fn event_create_kernel_origin_rejected() {
-        let mut f = MockFrame::kernel(SyscallOp::EventCreate as u16, [0; 6]);
+    fn signal_create_kernel_origin_rejected() {
+        let mut f = MockFrame::kernel(SyscallOp::SignalCreate as u16, [0; 6]);
         dispatch(&mut f);
         assert_eq!(f.returned, Some(i64::from(SyscallError::KernelOriginated)));
     }

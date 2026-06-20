@@ -85,10 +85,18 @@ pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let process = table
-        .with_lock(|tbl| tbl.get_process(id, Rights::INSPECT))
+        .with_lock(|tbl| tbl.get_process(id, Rights::READ))
         .map_err(SyscallError::from)?;
     let code = process.exit_code();
     Ok(u64::from(code.cast_unsigned()))
+}
+
+/// `ProcessTerminationSignal(handle)` - возвращает handle на ленивый
+/// bound-`Signal` термнинации процесса. Требует `Rights::READ`.
+pub fn sys_process_termination_signal(handle: u64) -> Result<u64, SyscallError> {
+    let id = parse_handle_id(handle)?;
+    let sig_id = kobject::process_termination_signal(id)?;
+    Ok(u64::from(sig_id.raw().get()))
 }
 
 pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallError> {
@@ -98,13 +106,11 @@ pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, Syscall
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let process = table
-        .with_lock(|tbl| tbl.get_process(id, Rights::MANAGE_PROCESS))
+        .with_lock(|tbl| tbl.get_process(id, Rights::WRITE))
         .map_err(SyscallError::from)?;
 
-    // Терминирование собственного процесса через handle отвергается:
-    // путь не выполнил бы context switch и dispatcher вернул бы код возврата
-    // в уже завершённый поток. Self-exit идёт через `ThreadExit (0x52)` -
-    // последний поток процесса автоматически поднимет `PROCESS_TERMINATED`.
+    // Self-terminate отвергается: dispatcher вернул бы в уже завершённый поток.
+    // Self-exit - через ThreadExit (0x52).
     if let Some(current) = runtime().current_process_object()
         && alloc::sync::Arc::ptr_eq(&current, &process)
     {
@@ -147,7 +153,7 @@ pub fn sys_process_load_image(
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let process_ko = loader_table
-        .with_lock(|tbl| tbl.get_process(process_id, Rights::MANAGE_PROCESS))
+        .with_lock(|tbl| tbl.get_process(process_id, Rights::WRITE))
         .map_err(SyscallError::from)?;
 
     let mut segments_buf = [0u8; MAX_SEGMENTS_PER_IMG * USER_SEGMENT_SIZE];
@@ -163,7 +169,7 @@ pub fn sys_process_load_image(
         }
         let flags = UserMemFlags::from_raw(u64::from(seg.flags))
             .map_err(|_| SyscallError::InvalidArgument)?;
-        let needed_rights = Rights::MAP | rights_for_access(flags);
+        let needed_rights = Rights::WRITE | rights_for_access(flags);
         let region_handle_id = handle_id_from_raw(seg.region_handle)?;
         let (region, _handle_rights) = loader_table
             .with_lock(|tbl| tbl.get_memory_with_rights(region_handle_id, needed_rights))
@@ -222,7 +228,7 @@ pub fn sys_process_start(
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let process_ko = loader_table
-        .with_lock(|tbl| tbl.get_process(process_id, Rights::MANAGE_PROCESS))
+        .with_lock(|tbl| tbl.get_process(process_id, Rights::WRITE))
         .map_err(SyscallError::from)?;
 
     let mut ids: Vec<HandleId> = Vec::with_capacity(handles_count);

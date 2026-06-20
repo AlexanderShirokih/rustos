@@ -34,7 +34,10 @@ pub(super) fn copy_in(
         .map_err(user_copy_err)
 }
 
-/// Копирует `src` в user-память по адресу `va`.
+/// Копирует `src` в user-память по адресу `va`. Сейчас прямых
+/// потребителей нет (буферизованный канал удалён), но парный к `copy_in`
+/// помощник сохраняется для будущих syscall'ов с out-параметрами.
+#[allow(dead_code)]
 pub(super) fn copy_out(user_vm: &UserVmContext, va: u64, src: &[u8]) -> Result<(), SyscallError> {
     let va_usize = usize::try_from(va).map_err(|_| SyscallError::InvalidArgument)?;
     user_vm

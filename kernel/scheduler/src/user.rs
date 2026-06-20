@@ -77,13 +77,7 @@ pub struct UserProcessLaunchInfo {
     pub process_id: ProcessId,
     pub thread_id: ThreadId,
     pub initial_handle_ids: Vec<HandleId>,
-    /// `Arc<ProcessObject>` свежесозданного процесса. Позволяет вызывающему
-    /// (kernelspace bootstrap) держать сильную ссылку на KO независимо от
-    /// `ProcessTable` и наблюдать `PROCESS_TERMINATED`.
     pub process_object: Arc<ProcessObject>,
-    /// `Arc<ThreadObject>` стартового потока. Симметричен `process_object`:
-    /// можно дождаться `THREAD_TERMINATED` или прочитать `exit_code` без
-    /// прохода по handle-table.
     pub thread_object: Arc<ThreadObject>,
 }
 

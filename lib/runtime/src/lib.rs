@@ -8,20 +8,22 @@
 #![feature(alloc_error_handler)]
 
 mod heap;
+mod ipc_buffer;
+mod port_transport;
 mod svc;
 mod sync;
-mod transport;
 
+pub use ipc_buffer::ipc_buffer_ptr;
+pub use port_transport::PortTransport;
 pub use svc::{
-    channel_create, channel_read, channel_write, event_create, handle_close, handle_duplicate,
-    mailbox_cancel, mailbox_create, mailbox_queue, mailbox_wait, mailbox_wait_async,
-    memory_allocate, memory_create_physical, memory_create_virtual, memory_free, memory_map,
-    memory_region_inspect, memory_remap, object_signal, object_wait_many, object_wait_one,
-    process_create, process_exit_code, process_load_image, process_self, process_start,
-    process_terminate, thread_create, thread_exit, thread_exit_code, thread_self, thread_terminate,
+    handle_close, handle_duplicate, ipc_buffer_addr, memory_allocate, memory_create_physical,
+    memory_create_virtual, memory_free, memory_map, memory_region_inspect, memory_remap, port_call,
+    port_create, port_recv, port_reply, port_send, process_create, process_exit_code,
+    process_load_image, process_self, process_start, process_terminate, process_termination_signal,
+    signal_create, signal_set, signal_wait_many, signal_wait_one, thread_create, thread_exit,
+    thread_exit_code, thread_self, thread_terminate, thread_termination_signal,
 };
 pub use sync::{Condvar, Mutex, MutexGuard};
-pub use transport::ChannelTransport;
 
 /// Глобальный heap процесса поверх memory_allocate/memory_free.
 #[global_allocator]

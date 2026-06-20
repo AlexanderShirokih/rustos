@@ -1,74 +1,66 @@
-//! `Thread` KO: lifecycle-объект потока с битом `THREAD_TERMINATED`.
+//! `Thread` kernel object: lifecycle-объект потока.
 //!
-//! Симметричен [`ProcessObject`](super::process::ProcessObject): сигнал
-//! поднимает только ядро, пользователь `Rights::SIGNAL` не получает.
-//! Exit-код публикуется до подъёма сигнала, чтобы наблюдатель, увидевший
-//! `THREAD_TERMINATED`, гарантированно прочитал финальное значение.
+//! Симметричен [`ProcessObject`](super::process::ProcessObject): завершение
+//! наблюдается через bound-[`Signal`] (`termination_signal`).
 
 use alloc::sync::Arc;
 
-pub use syscall::THREAD_TERMINATED;
-
-use super::{
-    termination::TerminationState,
-    wait::{SignalSource, SignalState},
-};
+use super::{signal::Signal, termination::TerminationState};
 
 pub struct ThreadObject {
     inner: TerminationState,
 }
 
 impl ThreadObject {
-    /// Создаёт новый `ThreadObject` без поднятых сигналов и с нулевым кодом.
+    /// Создаёт новый `ThreadObject`.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: TerminationState::new(),
         })
     }
 
-    /// Идемпотентно публикует `code` и поднимает [`THREAD_TERMINATED`].
-    /// Повторный вызов - no-op: первый победитель фиксирует exit_code.
+    /// Идемпотентно публикует `code` и помечает поток завершённым.
     pub fn signal_terminated(&self, code: i32) {
-        self.inner.signal_terminated(THREAD_TERMINATED, code);
+        self.inner.signal_terminated(code);
     }
 
-    /// Финальный exit-код. До подъёма [`THREAD_TERMINATED`] возвращает 0.
+    /// Финальный exit-код. До завершения возвращает 0.
     pub fn exit_code(&self) -> i32 {
         self.inner.exit_code()
     }
 
-    /// Прямой доступ к [`SignalState`] для интеграции с `object_wait_one`.
-    pub fn signals(&self) -> &SignalState {
-        self.inner.signals()
+    /// Завершён ли поток.
+    pub fn terminated(&self) -> bool {
+        self.inner.terminated()
     }
 
-    /// Текущий снимок сигналов (без блокировок).
-    pub fn peek(&self) -> u32 {
-        self.inner.peek()
-    }
-}
-
-impl SignalSource for ThreadObject {
-    fn signals(&self) -> &SignalState {
-        self.inner.signals()
+    /// Ленивый bound-[`Signal`] термнинации (бит `SIGNALED`). Материализуется
+    /// при первом вызове и пре-сигналится, если поток уже завершён.
+    pub fn termination_signal(&self) -> Arc<Signal> {
+        self.inner.termination_signal()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{super::wait::MockWaker, *};
+    use super::{
+        super::{signal::SIGNALED, wait::MockWaker},
+        *,
+    };
 
     #[test]
     fn signal_terminated_wakes_observer() {
         let th = ThreadObject::new();
+        let sig = th.termination_signal();
         let w = MockWaker::new();
-        th.signals().register_waiter(THREAD_TERMINATED, w.clone());
+        sig.register_waiter(SIGNALED, w.clone());
 
         assert!(!w.was_woken());
         th.signal_terminated(-1);
         assert!(w.was_woken());
-        assert_eq!(w.observed() & THREAD_TERMINATED, THREAD_TERMINATED);
+        assert_eq!(w.observed() & SIGNALED, SIGNALED);
         assert_eq!(th.exit_code(), -1);
+        assert!(th.terminated());
     }
 
     #[test]
@@ -77,14 +69,22 @@ mod tests {
         th.signal_terminated(7);
         th.signal_terminated(99);
         assert_eq!(th.exit_code(), 7);
-        assert_eq!(th.peek() & THREAD_TERMINATED, THREAD_TERMINATED);
+        assert!(th.terminated());
     }
 
     #[test]
     fn exit_code_zero_before_termination() {
         let th = ThreadObject::new();
         assert_eq!(th.exit_code(), 0);
-        assert_eq!(th.peek(), 0);
+        assert!(!th.terminated());
+    }
+
+    #[test]
+    fn late_termination_signal_is_presignaled() {
+        let th = ThreadObject::new();
+        th.signal_terminated(3);
+        let sig = th.termination_signal();
+        assert_eq!(sig.peek() & SIGNALED, SIGNALED);
     }
 
     #[test]

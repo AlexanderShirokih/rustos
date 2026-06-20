@@ -8,14 +8,17 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use klog::{info, warn};
-use kobject::{Handle, KObject, PROCESS_TERMINATED, Rights, install_handle, object_wait_one};
-use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SpawnConfig};
+use kobject::{
+    Handle, KObject, Rights, SIGNALED, install_handle, process_termination_signal, signal_wait_one,
+};
+use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
 use crate::{
     bootstrap::{run_bootstrap_log, spawn_process},
     kernel_context::KernelContext,
     power,
     scheduler_bootstrap::KernelTimerSource,
+    syscall_bridge,
     user_process::{SchedulerUserProcessLauncher, UserProcessLauncher},
 };
 
@@ -62,12 +65,21 @@ fn start_bootstrap_chain(
     };
     info!("bootstrap process spawned:");
 
-    run_bootstrap_log(&launch.channel);
+    // Логгер - фоновый kernel-таск, блокирующийся в port_recv. Init ждёт завершения процесса через его
+    // bound-Signal и гасит машину, что снимает запаркованный логгер.
+    let port = launch.port;
+    if let Err(e) = syscall_bridge::scheduler().spawn(
+        SpawnConfig::new("bootstrap-log").priority(Priority::normal()),
+        move || run_bootstrap_log(&port),
+    ) {
+        warn!("bootstrap-log task spawn failed: {:?}", e);
+        power::system_off(1)
+    }
 
     let process_object = launch.info.process_object;
     let process_handle = match install_handle(Handle::new(
         KObject::Process(process_object.clone()),
-        Rights::WAIT | Rights::INSPECT,
+        Rights::READ,
     )) {
         Ok(id) => id,
         Err(e) => {
@@ -75,7 +87,14 @@ fn start_bootstrap_chain(
             power::system_off(1)
         }
     };
-    if let Err(e) = object_wait_one(process_handle, PROCESS_TERMINATED, None) {
+    let term_signal = match process_termination_signal(process_handle) {
+        Ok(id) => id,
+        Err(e) => {
+            warn!("init: process_termination_signal failed: {:?}", e);
+            power::system_off(1)
+        }
+    };
+    if let Err(e) = signal_wait_one(term_signal, SIGNALED, None) {
         warn!("init: wait for bootstrap process exit failed: {:?}", e);
         power::system_off(1)
     }

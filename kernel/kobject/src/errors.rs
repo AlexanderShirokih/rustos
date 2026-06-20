@@ -9,7 +9,7 @@ pub enum IpcError {
     AccessDenied,
     /// Операция должна быть повторена позже (queue full / no message).
     ShouldWait,
-    /// Парный endpoint закрыт.
+    /// Парный port закрыт.
     PeerClosed,
     /// Истёк deadline.
     Timeout,
@@ -23,6 +23,9 @@ pub enum IpcError {
     MessageTooBig,
     /// Handle-таблица процесса исчерпана.
     OutOfHandles,
+    /// Бюджет ресурса исчерпан: метерящая операция запросила больше
+    /// страниц, чем осталось в [`Resource`](super::Resource).
+    ResourceExhausted,
 }
 
 /// Ошибки создания процесса/потока через [`KernelRuntime`](super::KernelRuntime).

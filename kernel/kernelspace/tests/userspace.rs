@@ -5,7 +5,7 @@ mod common;
 use std::boxed::Box;
 
 use kernelspace::{SpawnUserError, UserProcessSpawner};
-use kobject::{Event, Handle, KObject, Rights};
+use kobject::{Handle, KObject, Rights, Signal};
 use memory::{
     MemFlags,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
@@ -102,7 +102,7 @@ fn spawn_user_process_with_launch_installs_initial_handles() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let handle = Handle::new(KObject::Event(Event::new()), Rights::SIGNAL);
+    let handle = Handle::new(KObject::Signal(Signal::new()), Rights::WRITE);
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
@@ -146,8 +146,8 @@ fn spawn_user_process_with_launch_returns_process_and_thread_objects() {
         )
         .expect("spawn user process");
 
-    assert_eq!(info.process_object.peek(), 0);
-    assert_eq!(info.thread_object.peek(), 0);
+    assert!(!info.process_object.terminated());
+    assert!(!info.thread_object.terminated());
     assert!(std::sync::Arc::strong_count(&info.process_object) >= 2);
     assert!(std::sync::Arc::strong_count(&info.thread_object) >= 2);
 

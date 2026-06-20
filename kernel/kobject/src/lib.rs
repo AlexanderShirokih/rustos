@@ -12,53 +12,48 @@ extern crate alloc;
 extern crate std;
 
 mod api;
-mod channel;
 mod errors;
-mod event;
 mod handle;
 mod handle_table;
+mod ipc_buffer_xfer;
 mod koid;
-mod mailbox;
 mod object;
-mod physical_resource;
+mod port;
 mod process;
+mod reply;
+mod resource;
 mod rights;
 mod runtime;
+mod signal;
 mod spawn;
 mod termination;
 mod thread;
 mod wait;
 
 pub use api::{
-    WaitManyOutcome, channel_create, channel_read, channel_write, create_empty_process,
-    create_user_thread, event_create, handle_close, handle_duplicate, install_handle,
-    load_user_image_into, mailbox_cancel, mailbox_create, mailbox_queue, mailbox_wait,
-    mailbox_wait_async, object_signal, object_wait_many, object_wait_one, start_user_process,
-    terminate_process, terminate_thread, thread_exit,
-};
-pub use channel::{
-    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, CHANNEL_WRITABLE, Channel, DEFAULT_CHANNEL_CAPACITY,
-    MESSAGE_INLINE_MAX, MESSAGE_MAX_HANDLES, Message,
+    WaitManyOutcome, create_empty_process, create_user_thread, handle_close, handle_duplicate,
+    install_handle, load_user_image_into, process_termination_signal, signal_create, signal_set,
+    signal_wait_many, signal_wait_one, start_user_process, terminate_process, terminate_thread,
+    thread_exit, thread_termination_signal,
 };
 pub use errors::{IpcError, SpawnError};
-pub use event::{EVENT_SIGNALED, Event};
 pub use handle::{Handle, HandleId};
 pub use handle_table::{HandleReservation, HandleTable};
+pub use ipc_buffer_xfer::transfer_rendezvous;
 pub use koid::Koid;
-pub use mailbox::{
-    AsyncMode, MAILBOX_PACKET_SIZE, MAILBOX_PAYLOAD_SIZE, MAILBOX_QUEUE_CAPACITY, MAILBOX_READABLE,
-    Mailbox, MailboxPacket, MailboxPacketKind,
-};
 pub use object::KObject;
-pub use physical_resource::PhysicalResource;
-pub use process::{PROCESS_TERMINATED, ProcessObject};
+pub use port::{
+    BufferAccess, KernelIpcBuffer, OutcomeSlot, Port, RendezvousOutcome, ThreadTransport,
+    WaiterKind, port_call, port_recv, port_send,
+};
+pub use process::ProcessObject;
+pub use reply::{Reply, ReplySlot};
+pub use resource::Resource;
 pub use rights::Rights;
 pub use runtime::{KernelRuntime, ParkState, UserThreadEntry, WaitToken, install_runtime, runtime};
+pub use signal::{SIGNALED, Signal};
 pub use spawn::{
     LoadImageError, StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec,
 };
-pub use thread::{THREAD_TERMINATED, ThreadObject};
-pub use wait::{CancelTarget, SignalSource, SignalState, Waker};
-
-#[cfg(test)]
-mod integration_tests;
+pub use thread::ThreadObject;
+pub use wait::{CancelTarget, Waker};

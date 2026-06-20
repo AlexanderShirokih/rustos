@@ -20,10 +20,10 @@ Userspace опирается на несколько крейтов из `lib/`:
 |----------------------|---------------------------------------------------------------|
 | `lib/runtime`        | тонкие svc-обёртки syscall-ABI; глобальная куча; транспорт IPC |
 | `lib/syscall`        | номера операций, коды ошибок, маски сигналов KObject          |
-| `lib/ipc`            | кодек кадров и типы контрактов поверх канала                  |
+| `lib/ipc`            | кодек кадров и типы контрактов поверх port-транспорта     |
 | `lib/userland`       | модель образа: сегменты, права, точка входа, валидация        |
 | `lib/userland-image` | бинарный формат `userland.img` (encode/decode)                |
-| `lib/bootstrap-abi`  | контракт `Bootstrap` — канал процесса к ядру                  |
+| `lib/bootstrap-abi`  | контракт `Bootstrap` — port процесса к ядру              |
 
 Прикладной код процесса зависит от `runtime`, `syscall`, `ipc` и нужных
 контрактов; форматом образа и его сборкой занимается host-инструментарий.
@@ -31,18 +31,19 @@ Userspace опирается на несколько крейтов из `lib/`:
 ## Lib/Runtime
 
 `runtime` — поверхность syscall для userland: по одной функции на каждую операцию
-ядра. Процессу доступны вызовы для каналов (`channel_create/read/write`), хэндлов
-(`handle_close`), процессов и потоков (`process_*`, `thread_*`), памяти
-(`memory_*`) и mailbox (`mailbox_*`). Возврат знаковый: отрицательное значение —
-код ошибки. Полный перечень операций и их семантика — в [syscalls.md](syscalls.md).
+ядра. Процессу доступны вызовы для синхронного IPC (`port_create/send/recv/
+call/reply`, `ipc_buffer_addr`), хэндлов (`handle_close`), процессов и потоков
+(`process_*`, `thread_*`) и памяти (`memory_*`). Возврат знаковый: отрицательное
+значение — код ошибки. Полный перечень операций и их семантика — в
+[syscalls.md](syscalls.md).
 
 Глобальный аллокатор процесса — куча поверх `memory_allocate`/`memory_free`:
 `alloc` (`Box`, `Vec`, `String`) доступен всегда. Куча безопасна для
 многопоточного процесса; крупные аллокации обслуживаются ядром напрямую и
 возвращаются ему на освобождении.
 
-Контракты IPC процесс держит поверх канала через `ChannelTransport`; их
-устройство описано в [ipc.md](ipc.md).
+Контракты IPC процесс держит поверх port-транспорта через `PortTransport`;
+их устройство описано в [ipc.md](ipc.md).
 
 ## Образ
 
@@ -75,22 +76,22 @@ package = "rootkeeper"
 ## Жизненный цикл
 
 Ядро после инициализации запускает высокоприоритетный init-таск. Init читает
-blob `userland.img`, создаёт пару концов канала, отдаёт один конец будущему
+blob `userland.img`, создаёт bootstrap-port, отдаёт handle на него будущему
 процессу как стартовый хэндл, декодирует первую запись образа, раскладывает её
 сегменты в новое адресное пространство и стартует первый поток на `entry_va`.
 
 Точка входа процесса — `_start`, которой в `x0` приходит сырой `HandleId`
-bootstrap-канала:
+bootstrap-port'а:
 
 ```rust
 pub extern "C" fn _start(bootstrap_handle: usize) -> ! { /* ... */ }
 ```
 
-Второй конец канала остаётся у ядра: init дренирует его в цикле, принимая кадры
-контракта `Bootstrap` (например `log`) и подмешивая их в kernel-лог. Цикл
-крутится, пока процесс жив. Когда процесс завершается, его конец канала
-закрывается — ядро видит сигнал `CHANNEL_PEER_CLOSED`, читает exit-код процесса
-и выключает машину этим кодом (`system_off(exit_code)`).
+Второй конец остаётся у ядра: init выполняет `recv` на bootstrap-port'е в
+цикле, принимая кадры контракта `Bootstrap` (например `log`) и подмешивая их в
+kernel-лог. Цикл крутится, пока процесс жив. Когда процесс завершается, ядро
+наблюдает его bound-`Signal` (через `process_termination_signal`), читает
+exit-код процесса и выключает машину этим кодом (`system_off(exit_code)`).
 
 Так смерть bootstrap-процесса — это штатное завершение всей системы, а его
 exit-код становится кодом выхода машины. Это используют тесты: процесс
@@ -101,7 +102,7 @@ exit-код становится кодом выхода машины. Это и
 
 Программа userland — `no_std`/`no_main` бинарь с собственным `_start` и
 `panic_handler`. `rootkeeper` — минимальный полный пример: залогировать строку
-через bootstrap-канал и подождать его закрытия.
+через bootstrap-port и выйти.
 
 ```rust
 #![no_std]
@@ -109,16 +110,17 @@ exit-код становится кодом выхода машины. Это и
 
 use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
 use ipc::wire::Str;
-use runtime::{ChannelTransport, object_wait_one, thread_exit};
-use syscall::CHANNEL_PEER_CLOSED;
+use runtime::{PortTransport, thread_exit};
+use syscall::Handle;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(bootstrap_handle: usize) -> ! {
-    let client = BootstrapClient::new(ChannelTransport::new(bootstrap_handle));
-    let _ = client.log(Str::<LOG_MESSAGE_MAX>::new("rootkeeper started").unwrap());
+    let bootstrap = Handle::new(bootstrap_handle as u32).expect("bootstrap handle is non-zero");
+    let client = BootstrapClient::new(PortTransport::client(bootstrap));
+    let result = client.log(Str::<LOG_MESSAGE_MAX>::new("rootkeeper started").unwrap());
 
-    let wait_ret = object_wait_one(bootstrap_handle, CHANNEL_PEER_CLOSED, u64::MAX);
-    thread_exit(u64::from(wait_ret < 0))
+    // log - синхронный #[cast]: port_send блокирует до доставки кадра ядру.
+    thread_exit(u64::from(result.is_err()))
 }
 
 #[panic_handler]
@@ -140,10 +142,10 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 - зависимости `runtime`, `syscall`, `ipc` и нужные контракты;
 - включение пакета в TOML-композицию образа (`user/images/<имя>.toml`).
 
-Вывод и обмен с другими процессами идут через каналы и контракты: процесс держит
-`*Client`/`*Service` контракта поверх `ChannelTransport`. Стартовый
-bootstrap-канал — частный случай: на нём объявлен контракт `Bootstrap`, и его
-конец процесс получает в `x0`.
+Вывод и обмен с другими процессами идут через port'ы и контракты: процесс
+держит `*Client`/`*Service` контракта поверх `PortTransport`. Стартовый
+bootstrap-port — частный случай: на нём объявлен контракт `Bootstrap`, и его
+handle процесс получает в `x0`.
 
 ## Сборка и запуск
 

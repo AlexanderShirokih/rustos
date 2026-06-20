@@ -3,9 +3,10 @@
 
 use kernel_tests::kernel_test;
 use runtime::{
-    Condvar, Mutex, memory_allocate, object_wait_one, process_self, thread_create, thread_exit,
+    Condvar, Mutex, memory_allocate, process_self, signal_wait_one, thread_create, thread_exit,
+    thread_termination_signal,
 };
-use syscall::{Handle, MEM_FLAGS_READ_WRITE, THREAD_TERMINATED};
+use syscall::{Handle, MEM_FLAGS_READ_WRITE, SIGNALED};
 
 /// Размер стека рабочего потока (page-aligned выдача memory_allocate -> вершина
 /// 16-байт-выровнена).
@@ -50,10 +51,11 @@ fn spawn(worker: extern "C" fn(usize) -> !, arg: usize) -> Handle {
         .expect("thread_create handle")
 }
 
-/// Ждёт `THREAD_TERMINATED` на `thread` с конечным таймаутом.
+/// Ждёт завершения `thread` с конечным таймаутом.
 fn join(thread: Handle) {
-    let observed = object_wait_one(thread, THREAD_TERMINATED, JOIN_TIMEOUT_NS);
-    kernel_tests::kassert_eq!(observed, i64::from(THREAD_TERMINATED));
+    let sig = thread_termination_signal(thread).expect("thread_termination_signal");
+    let observed = signal_wait_one(sig, SIGNALED, JOIN_TIMEOUT_NS);
+    kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
 }
 
 extern "C" fn contention_worker(arg: usize) -> ! {

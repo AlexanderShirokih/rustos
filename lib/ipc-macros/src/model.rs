@@ -44,9 +44,8 @@ pub enum WireTy {
 fn max_data_len(ty: &WireTy) -> Option<usize> {
     match ty {
         WireTy::Uint(width) | WireTy::Int(width) => Some(*width as usize),
-        WireTy::Bool => Some(1),
+        WireTy::Bool | WireTy::Cap => Some(1),
         WireTy::Str(bound) | WireTy::Bytes(bound) => bound.lit,
-        WireTy::Cap => Some(1),
     }
 }
 
@@ -101,6 +100,10 @@ pub struct Operation {
     pub ret: Option<RetType>,
     /// doc-атрибуты операции, пробрасываемые в сгенерированные методы.
     pub docs: Vec<Attribute>,
+    /// Per-call тайм-аут ожидания ответа в нс из `#[call(timeout_ns = N)]`.
+    /// `None` - использовать дефолт клиента (`wait_ns`). Только для
+    /// [`Kind::Call`].
+    pub timeout_ns: Option<u64>,
 }
 
 /// Контракт после валидации: операции с вычисленными ordinal.
@@ -108,27 +111,34 @@ pub struct Protocol {
     pub vis: syn::Visibility,
     pub trait_ident: Ident,
     pub operations: Vec<Operation>,
+    /// Дефолтный тайм-аут клиента (`wait_ns`) из
+    /// `#[protocol(timeout_ns = N)]`. `None` - `u64::MAX` (бессрочно).
+    pub default_timeout_ns: Option<u64>,
 }
 
 struct ProtocolArgs {
     name: Option<String>,
+    timeout_ns: Option<u64>,
 }
 
 fn parse_protocol_args(
     meta: &syn::punctuated::Punctuated<Meta, syn::Token![,]>,
 ) -> syn::Result<ProtocolArgs> {
     let mut name: Option<String> = None;
+    let mut timeout_ns: Option<u64> = None;
     for item in meta {
         let Meta::NameValue(nv) = item else {
             return Err(Error::new(item.span(), "expected name = \"...\""));
         };
         if nv.path.is_ident("name") {
             name = Some(parse_str_lit(&nv.value)?);
+        } else if nv.path.is_ident("timeout_ns") {
+            timeout_ns = Some(parse_u64_lit(&nv.value)?);
         } else {
             return Err(Error::new(nv.path.span(), "unknown protocol argument"));
         }
     }
-    Ok(ProtocolArgs { name })
+    Ok(ProtocolArgs { name, timeout_ns })
 }
 
 fn parse_str_lit(expr: &Expr) -> syn::Result<String> {
@@ -139,6 +149,17 @@ fn parse_str_lit(expr: &Expr) -> syn::Result<String> {
         Ok(s.value())
     } else {
         Err(Error::new(expr.span(), "expected string literal"))
+    }
+}
+
+fn parse_u64_lit(expr: &Expr) -> syn::Result<u64> {
+    if let Expr::Lit(ExprLit {
+        lit: Lit::Int(int), ..
+    }) = expr
+    {
+        int.base10_parse::<u64>()
+    } else {
+        Err(Error::new(expr.span(), "expected integer literal (ns)"))
     }
 }
 
@@ -185,11 +206,12 @@ pub fn build(
         vis: item.vis.clone(),
         trait_ident,
         operations,
+        default_timeout_ns: parsed.timeout_ns,
     })
 }
 
 fn build_operation(protocol: &str, method: &TraitItemFn) -> syn::Result<Operation> {
-    let kind = classify_kind(method)?;
+    let (kind, timeout_ns) = classify_kind(method)?;
     let ident = method.sig.ident.clone();
     let canonical = canonical_name(protocol, &ident.to_string());
     let ordinal = ordinal_of(&canonical);
@@ -224,11 +246,15 @@ fn build_operation(protocol: &str, method: &TraitItemFn) -> syn::Result<Operatio
         params,
         ret,
         docs,
+        timeout_ns,
     })
 }
 
-fn classify_kind(method: &TraitItemFn) -> syn::Result<Kind> {
+/// Определяет вид операции и (для `#[call(timeout_ns = N)]`) её per-call
+/// тайм-аут. `#[cast]`/`#[event]` аргументов не несут.
+fn classify_kind(method: &TraitItemFn) -> syn::Result<(Kind, Option<u64>)> {
     let mut found: Option<Kind> = None;
+    let mut timeout_ns: Option<u64> = None;
     for attr in &method.attrs {
         let kind = if attr.path().is_ident("call") {
             Kind::Call
@@ -245,20 +271,43 @@ fn classify_kind(method: &TraitItemFn) -> syn::Result<Kind> {
                 "operation is marked only with #[call], #[cast] or #[event]",
             ));
         };
-        if !matches!(attr.meta, Meta::Path(_)) {
-            return Err(Error::new(
-                attr.span(),
-                "operation marker takes no arguments",
-            ));
+        match (kind, &attr.meta) {
+            // `#[call(timeout_ns = N)]` несёт per-call тайм-аут.
+            (Kind::Call, Meta::List(_)) => timeout_ns = Some(parse_call_timeout(attr)?),
+            // `#[call]`/`#[cast]`/`#[event]` без аргументов.
+            (_, Meta::Path(_)) => {}
+            _ => {
+                return Err(Error::new(
+                    attr.span(),
+                    "only #[call] takes arguments: #[call(timeout_ns = N)]",
+                ));
+            }
         }
         set_kind(&mut found, kind, attr.span())?;
     }
-    found.ok_or_else(|| {
+    let kind = found.ok_or_else(|| {
         Error::new(
             method.span(),
             "operation requires #[call], #[cast] or #[event]",
         )
-    })
+    })?;
+    Ok((kind, timeout_ns))
+}
+
+/// Разбирает `#[call(timeout_ns = N)]`: единственный аргумент - целочисленный
+/// `timeout_ns` (нс).
+fn parse_call_timeout(attr: &Attribute) -> syn::Result<u64> {
+    let mut timeout_ns: Option<u64> = None;
+    attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("timeout_ns") {
+            let lit: syn::LitInt = meta.value()?.parse()?;
+            timeout_ns = Some(lit.base10_parse::<u64>()?);
+            Ok(())
+        } else {
+            Err(meta.error("unknown #[call] argument; expected timeout_ns = N"))
+        }
+    })?;
+    timeout_ns.ok_or_else(|| Error::new(attr.span(), "#[call(...)] requires timeout_ns = N"))
 }
 
 fn set_kind(slot: &mut Option<Kind>, kind: Kind, span: Span) -> syn::Result<()> {

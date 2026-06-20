@@ -14,17 +14,17 @@ use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
 use io::writer::Writer;
 use ipc::wire::{IpcError, Str};
 use kernel_tests::kernel_test;
-use runtime::{ChannelTransport, thread_exit};
+use runtime::{PortTransport, thread_exit};
 use spin::Mutex;
 use syscall::Handle;
 
-mod channel;
-mod event;
 mod heap;
-mod mailbox;
+mod ipc_buffer;
 mod memory_kobject;
+mod port;
 mod process_handles;
 mod self_spawn;
+mod signal;
 mod sync;
 
 /// Сырой HandleId WRITE-конца bootstrap-канала, полученный в `_start`.
@@ -95,7 +95,7 @@ fn send_log_frame(payload: &[u8]) {
     let Some(handle) = Handle::new(raw as u32) else {
         return;
     };
-    let client = BootstrapClient::new(ChannelTransport::new(handle));
+    let client = BootstrapClient::new(PortTransport::client(handle));
 
     for _ in 0..SEND_RETRY_LIMIT {
         match client.log(message) {

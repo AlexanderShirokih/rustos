@@ -1,5 +1,5 @@
 //! Wire-формат сообщения: заголовок, тело (table-of-fields), кодек значений,
-//! стековый буфер и типизированные эндпоинты.
+//! стековый буфер и типизированные порты.
 //!
 //! Все целые - little-endian. Кадр (заголовок + тело) укладывается в
 //! [`MESSAGE_INLINE_MAX`]. Кодирование без heap.
@@ -322,7 +322,7 @@ impl<P> ClientEnd<P> {
         }
     }
 
-    /// Сырой handle-id эндпоинта.
+    /// Сырой handle-id порта.
     #[must_use]
     pub const fn raw(self) -> NonZeroU32 {
         self.raw
@@ -348,7 +348,7 @@ impl<P> ServerEnd<P> {
         }
     }
 
-    /// Сырой handle-id эндпоинта.
+    /// Сырой handle-id порта.
     #[must_use]
     pub const fn raw(self) -> NonZeroU32 {
         self.raw
@@ -486,17 +486,17 @@ pub mod value {
         core::str::from_utf8(data).map_err(|_| IpcError::NotUtf8)
     }
 
-    /// Декодирует индекс эндпоинта из одного байта (`u8`).
-    pub fn decode_endpoint_index(data: &[u8]) -> Result<u8, IpcError> {
+    /// Декодирует индекс порта из одного байта (`u8`).
+    pub fn decode_port_index(data: &[u8]) -> Result<u8, IpcError> {
         match data {
             [index] => Ok(*index),
             _ => Err(IpcError::BadLength),
         }
     }
 
-    /// Кодирует индекс эндпоинта одним байтом (`u8`).
+    /// Кодирует индекс порта одним байтом (`u8`).
     #[must_use]
-    pub fn encode_endpoint_index(index: u8) -> [u8; 1] {
+    pub fn encode_port_index(index: u8) -> [u8; 1] {
         [index]
     }
 }
@@ -628,10 +628,10 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_index_codec_round_trip() {
-        assert_eq!(encode_endpoint_index(3), [3]);
-        assert_eq!(decode_endpoint_index(&encode_endpoint_index(3)), Ok(3));
-        assert_eq!(decode_endpoint_index(&[1, 2]), Err(IpcError::BadLength));
+    fn port_index_codec_round_trip() {
+        assert_eq!(encode_port_index(3), [3]);
+        assert_eq!(decode_port_index(&encode_port_index(3)), Ok(3));
+        assert_eq!(decode_port_index(&[1, 2]), Err(IpcError::BadLength));
     }
 
     #[test]
@@ -814,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_repr_transparent_size() {
+    fn port_repr_transparent_size() {
         // repr(transparent) над NonZeroU32: размер 4, niche-оптимизация Option.
         assert_eq!(core::mem::size_of::<ClientEnd<()>>(), 4);
         assert_eq!(core::mem::size_of::<ServerEnd<()>>(), 4);
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_from_raw_round_trip() {
+    fn port_from_raw_round_trip() {
         let raw = NonZeroU32::new(7).expect("nonzero");
         let client = ClientEnd::<()>::from_raw(raw);
         let server = ServerEnd::<()>::from_raw(raw);

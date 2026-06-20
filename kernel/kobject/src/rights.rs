@@ -11,27 +11,10 @@ impl Rights {
     pub const TRANSFER: Self = Self(1 << 1);
     pub const READ: Self = Self(1 << 2);
     pub const WRITE: Self = Self(1 << 3);
-    pub const SIGNAL: Self = Self(1 << 4);
-    pub const WAIT: Self = Self(1 << 5);
-    pub const INSPECT: Self = Self(1 << 6);
-    pub const MANAGE_THREAD: Self = Self(1 << 7);
-    pub const MANAGE_PROCESS: Self = Self(1 << 8);
-    pub const MAP: Self = Self(1 << 9);
-    pub const EXECUTE: Self = Self(1 << 10);
-    pub const MINT: Self = Self(1 << 11);
+    pub const EXECUTE: Self = Self(1 << 4);
 
-    const ALL_BITS: u32 = Self::DUPLICATE.0
-        | Self::TRANSFER.0
-        | Self::READ.0
-        | Self::WRITE.0
-        | Self::SIGNAL.0
-        | Self::WAIT.0
-        | Self::INSPECT.0
-        | Self::MANAGE_THREAD.0
-        | Self::MANAGE_PROCESS.0
-        | Self::MAP.0
-        | Self::EXECUTE.0
-        | Self::MINT.0;
+    const ALL_BITS: u32 =
+        Self::DUPLICATE.0 | Self::TRANSFER.0 | Self::READ.0 | Self::WRITE.0 | Self::EXECUTE.0;
 
     pub const fn empty() -> Self {
         Self(0)
@@ -68,44 +51,19 @@ impl Rights {
     pub fn defaults_for(obj: &super::object::KObject) -> Self {
         use super::object::KObject;
 
-        const SIGNALABLE: u32 = Rights::SIGNAL.0
-            | Rights::WAIT.0
-            | Rights::DUPLICATE.0
-            | Rights::TRANSFER.0
-            | Rights::INSPECT.0;
-
         match obj {
-            // Channel: SIGNAL не выдаётся - сигнальные биты управляются
-            // самим каналом (READABLE/WRITABLE/PEER_CLOSED).
-            // Mailbox: SIGNAL не выдаётся - MAILBOX_READABLE есть функция
-            // содержимого очереди, user не должен мочь его дёргать.
-            KObject::Channel(_) | KObject::Mailbox(_) => Self(
-                Self::READ.0
-                    | Self::WRITE.0
-                    | Self::WAIT.0
-                    | Self::TRANSFER.0
-                    | Self::DUPLICATE.0
-                    | Self::INSPECT.0,
-            ),
-            KObject::Event(_) => Self(SIGNALABLE),
-            // SIGNAL не выдаём: PROCESS_TERMINATED поднимает только ядро.
-            KObject::Process(_) => Self(
-                Self::WAIT.0
-                    | Self::INSPECT.0
-                    | Self::MANAGE_PROCESS.0
-                    | Self::DUPLICATE.0
-                    | Self::TRANSFER.0,
-            ),
-            // SIGNAL не выдаём: THREAD_TERMINATED поднимает только ядро.
-            KObject::Thread(_) => Self(
-                Self::WAIT.0
-                    | Self::INSPECT.0
-                    | Self::MANAGE_THREAD.0
-                    | Self::DUPLICATE.0
-                    | Self::TRANSFER.0,
-            ),
+            // Signal сигналуем пользователем; Process/Thread термнинацию
+            // поднимает только ядро (через bound-Signal), но WRITE на самом
+            // объекте оставлен под terminate-op - наборы прав совпадают.
+            KObject::Signal(_) | KObject::Process(_) | KObject::Thread(_) => {
+                Self(Self::READ.0 | Self::WRITE.0 | Self::DUPLICATE.0 | Self::TRANSFER.0)
+            }
+            
             KObject::Memory(region) => {
-                let mut bits = Self::MAP.0 | Self::DUPLICATE.0 | Self::TRANSFER.0 | Self::INSPECT.0;
+                // База — только передаваемость/дублируемость; конкретный доступ
+                // (READ/WRITE/EXECUTE) определяется access-маской региона, чтобы
+                // read-only регион не получал WRITE по умолчанию.
+                let mut bits = Self::DUPLICATE.0 | Self::TRANSFER.0;
                 let access = region.access_mask();
                 if access.allows(memory::AccessMask::R) {
                     bits |= Self::READ.0;
@@ -118,9 +76,20 @@ impl Rights {
                 }
                 Self(bits)
             }
-            KObject::PhysicalResource(_) => {
-                Self(Self::DUPLICATE.0 | Self::TRANSFER.0 | Self::INSPECT.0 | Self::MINT.0)
+            
+            KObject::Resource(_) => {
+                Self(Self::DUPLICATE.0 | Self::TRANSFER.0 | Self::READ.0 | Self::WRITE.0)
             }
+            
+            // Port: send гейтится WRITE, recv - READ (как channel
+            // write/read); делегируется и дублируется.
+            KObject::Port(_) => {
+                Self(Self::READ.0 | Self::WRITE.0 | Self::TRANSFER.0 | Self::DUPLICATE.0)
+            }
+            
+            // Reply: WRITE гейтит сам reply; TRANSFER даёт делегировать
+            // ответ другому серверу. Не дублируется.
+            KObject::Reply(_) => Self(Self::WRITE.0 | Self::TRANSFER.0),
         }
     }
 }
@@ -166,44 +135,36 @@ mod tests {
     };
 
     #[test]
-    fn defaults_for_process_grants_manage_and_wait() {
+    fn defaults_for_process_grants_write_and_read() {
         let ko = KObject::Process(ProcessObject::new());
         let r = Rights::defaults_for(&ko);
-        assert!(r.contains(Rights::MANAGE_PROCESS));
-        assert!(r.contains(Rights::WAIT));
-        assert!(r.contains(Rights::INSPECT));
+        assert!(r.contains(Rights::WRITE));
+        assert!(r.contains(Rights::READ));
         assert!(r.contains(Rights::DUPLICATE));
         assert!(r.contains(Rights::TRANSFER));
     }
 
     #[test]
-    fn defaults_for_process_omits_signal_and_io() {
+    fn defaults_for_process_omits_execute() {
         let ko = KObject::Process(ProcessObject::new());
         let r = Rights::defaults_for(&ko);
-        assert!(!r.contains(Rights::SIGNAL));
-        assert!(!r.contains(Rights::READ));
-        assert!(!r.contains(Rights::WRITE));
-        assert!(!r.contains(Rights::MANAGE_THREAD));
+        assert!(!r.contains(Rights::EXECUTE));
     }
 
     #[test]
-    fn defaults_for_thread_grants_manage_and_wait() {
+    fn defaults_for_thread_grants_write_and_read() {
         let ko = KObject::Thread(ThreadObject::new());
         let r = Rights::defaults_for(&ko);
-        assert!(r.contains(Rights::MANAGE_THREAD));
-        assert!(r.contains(Rights::WAIT));
-        assert!(r.contains(Rights::INSPECT));
+        assert!(r.contains(Rights::WRITE));
+        assert!(r.contains(Rights::READ));
         assert!(r.contains(Rights::DUPLICATE));
         assert!(r.contains(Rights::TRANSFER));
     }
 
     #[test]
-    fn defaults_for_thread_omits_signal_and_io() {
+    fn defaults_for_thread_omits_execute() {
         let ko = KObject::Thread(ThreadObject::new());
         let r = Rights::defaults_for(&ko);
-        assert!(!r.contains(Rights::SIGNAL));
-        assert!(!r.contains(Rights::READ));
-        assert!(!r.contains(Rights::WRITE));
-        assert!(!r.contains(Rights::MANAGE_PROCESS));
+        assert!(!r.contains(Rights::EXECUTE));
     }
 }

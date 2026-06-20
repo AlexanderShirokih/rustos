@@ -363,3 +363,51 @@ fn cap_domain_error_carries_no_handle() {
         server.join().expect("server thread");
     });
 }
+
+// --- timeout-плумбинг: #[protocol(timeout_ns)], #[call(timeout_ns)], with_wait_ns
+
+use ipc::wire::IpcError;
+
+/// Дефолтный тайм-аут клиента из атрибута протокола.
+#[ipc::protocol(name = "Timed", timeout_ns = 0)]
+trait Timed {
+    #[call]
+    fn ping(&self) -> u32;
+}
+
+/// Per-call тайм-аут перекрывает (бессрочный) дефолт клиента.
+#[ipc::protocol(name = "Mixed")]
+trait Mixed {
+    #[call(timeout_ns = 0)]
+    fn quick(&self) -> u32;
+
+    #[call]
+    fn patient(&self) -> u32;
+}
+
+#[test]
+fn protocol_level_default_timeout_times_out() {
+    // server_end жив (sender_open), но не отвечает -> wait_readable(0) -> Timeout.
+    let (client_end, _server_end) = MockEnd::pair();
+    let client = TimedClient::new(client_end);
+    assert_eq!(client.wait_ns(), 0);
+    assert_eq!(client.ping(), Err(IpcError::Timeout));
+}
+
+#[test]
+fn per_call_timeout_override_times_out() {
+    let (client_end, _server_end) = MockEnd::pair();
+    let client = MixedClient::new(client_end);
+    // Дефолт клиента бессрочный, но `quick` несёт собственный timeout_ns = 0.
+    assert_eq!(client.wait_ns(), u64::MAX);
+    assert_eq!(client.quick(), Err(IpcError::Timeout));
+}
+
+#[test]
+fn with_wait_ns_builder_overrides_default() {
+    let (client_end, _server_end) = MockEnd::pair();
+    let client = CalcClient::new(client_end).with_wait_ns(0);
+    assert_eq!(client.wait_ns(), 0);
+    // Сервера нет -> two-way call истекает по тайм-ауту.
+    assert_eq!(client.add(1, 2), Err(IpcError::Timeout));
+}

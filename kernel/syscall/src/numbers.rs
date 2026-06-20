@@ -21,8 +21,9 @@ mod tests {
 
     #[test]
     fn op_from_raw_maps_known_and_unknown() {
-        assert_eq!(op_from_raw(0x21), Ok(SyscallOp::ChannelWrite));
+        assert_eq!(op_from_raw(0x23), Ok(SyscallOp::PortCreate));
         assert_eq!(op_from_raw(0), Err(SyscallError::BadSyscall));
+        assert_eq!(op_from_raw(0x21), Err(SyscallError::BadSyscall));
         assert_eq!(op_from_raw(0x7F), Err(SyscallError::BadSyscall));
     }
 }

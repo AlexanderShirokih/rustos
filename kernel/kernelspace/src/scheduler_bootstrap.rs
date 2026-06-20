@@ -65,6 +65,12 @@ where
         self.handle.current_user_vm()
     }
 
+    fn current_ipc_buffer_va(&self) -> Option<u64> {
+        self.handle
+            .current_ipc_buffer_va()
+            .map(|va| va.as_usize() as u64)
+    }
+
     fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
         syscall_bridge::frame_allocator()
     }
@@ -97,6 +103,10 @@ where
         factory,
     )
     .bootstrap();
+
+    if let Some(fa) = syscall_bridge::frame_allocator() {
+        scheduler.set_frame_allocator(fa);
+    }
 
     let handle = scheduler.handle();
     let service: Arc<dyn SchedulerService> = Arc::new(handle.clone());

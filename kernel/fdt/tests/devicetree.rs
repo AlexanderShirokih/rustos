@@ -159,7 +159,12 @@ fn write_header(buf: &mut Vec<u8>, structure: &[u8], strings: &[u8]) {
     write_header_rsv(buf, structure, strings, &[]);
 }
 
-fn write_header_rsv(buf: &mut Vec<u8>, structure: &[u8], strings: &[u8], reservations: &[(u64, u64)]) {
+fn write_header_rsv(
+    buf: &mut Vec<u8>,
+    structure: &[u8],
+    strings: &[u8],
+    reservations: &[(u64, u64)],
+) {
     let hdr: u32 = 40;
     // Каждая запись 16 байт + завершающая нулевая запись.
     let rsvmap = ((reservations.len() + 1) * 16) as u32;
@@ -183,7 +188,7 @@ fn write_header_rsv(buf: &mut Vec<u8>, structure: &[u8], strings: &[u8], reserva
         push_u64(buf, address);
         push_u64(buf, size);
     }
-    
+
     buf.extend_from_slice(&[0u8; 16]);
     buf.extend_from_slice(structure);
     buf.extend_from_slice(strings);

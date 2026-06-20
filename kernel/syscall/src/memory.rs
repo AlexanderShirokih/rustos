@@ -119,10 +119,13 @@ pub fn sys_memory_create_virtual(size_bytes: u64, access_raw: u64) -> Result<u64
 
 /// `memory_create_physical(resource_handle, pa, size_bytes, access_mask) -> region_handle`
 ///
-/// Минтит регион поверх поддиапазона [`PhysicalResource`](kobject::PhysicalResource).
-/// Требует [`Rights::MINT`] и не позволяет выйти за границы ресурса или
-/// превысить его маску доступа. Регион не владеет физикой и на drop ничего
-/// не возвращает; PA должен быть page-aligned.
+/// Минтит регион поверх поддиапазона [`Resource`](kobject::Resource).
+/// Требует [`Rights::WRITE`] и не позволяет выйти за границы ресурса или
+/// превысить его маску доступа. Дополнительно расходует бюджет ресурса:
+/// `size_bytes / PAGE_SIZE` страниц (с округлением вверх) списываются через
+/// [`Resource::try_consume`](kobject::Resource::try_consume); при нехватке
+/// бюджета возвращает [`SyscallError::ResourceExhausted`]. Регион не владеет
+/// физикой и на drop ничего не возвращает; PA должен быть page-aligned.
 pub fn sys_memory_create_physical(
     resource_h: u64,
     pa_raw: u64,
@@ -138,10 +141,16 @@ pub fn sys_memory_create_physical(
     let table = kobject::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let resource = table.with_lock(|tbl| tbl.get_physical_resource(resource_id, Rights::MINT))?;
+    let resource = table.with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))?;
     if !resource.permits(pa, size, access) {
         return Err(SyscallError::AccessDenied);
     }
+
+    // Метеринг: списываем с бюджета ресурса число затрагиваемых страниц
+    // (округление вверх). Это единственная принудительная точка метеринга
+    // на этом этапе; прочие create-syscall'ы пока не метерятся (TODO RFC-0001).
+    let pages = size.get().div_ceil(PAGE_SIZE) as u64;
+    resource.try_consume(pages)?;
 
     let region = MemoryRegion::create_physical(pa, size, access);
     let region_arc = Arc::new(region);
@@ -220,7 +229,7 @@ pub fn sys_memory_map(
     let size = parse_size(size_bytes)?;
     let flags = parse_flags(flags_raw)?;
     let mem_flags = flags.to_mem_flags();
-    let need = Rights::MAP | rights_for_access(flags);
+    let need = Rights::WRITE | rights_for_access(flags);
 
     let (region, grant) = lookup_memory_grant(id, need)?;
 
@@ -348,7 +357,7 @@ pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError
 pub fn sys_memory_region_inspect(frame: &mut dyn SyscallFrame) {
     let result = (|| -> Result<(u64, u64), SyscallError> {
         let id = parse_handle_id(frame.arg(0))?;
-        let region = lookup_memory(id, Rights::INSPECT)?;
+        let region = lookup_memory(id, Rights::READ)?;
         let size = region.size_bytes() as u64;
         let secondary =
             (u64::from(region.kind_tag()) << 16) | u64::from(region.access_mask().bits());

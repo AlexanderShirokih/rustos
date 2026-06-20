@@ -1,11 +1,13 @@
 #![allow(unsafe_code)]
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::marker::PhantomData;
+use core::{marker::PhantomData, num::NonZeroUsize};
 
 use collections::{LockCell, MutexCell};
 use kobject::{HandleTable, ProcessObject, ThreadObject};
 use memory::{
+    AccessMask, MappingTag, MemFlags, MemoryRegion,
+    frame_allocator::FrameAllocator,
     memory_mapper::{AddressSpaceFactory, AddressSpaceHandle},
     user_vm_allocator::UserVmAllocator,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
@@ -16,7 +18,7 @@ use super::{
     arch::{ArchContext, ArchCpu, CpuId, TimerSource, with_preemption_disabled},
     cpu::Cpu,
     process::{Process, ProcessTable},
-    thread::{Thread, ThreadState},
+    thread::{IpcBufferSlot, Thread, ThreadState},
     thread_table::ThreadTable,
     wait_queue::{SleepEntry, SleepQueue},
 };
@@ -143,8 +145,9 @@ where
     sleepers: SleepQueue,
     kernel_address_space: Arc<AddressSpace>,
     address_space_factory: Option<&'static (dyn AddressSpaceFactory + Send + Sync)>,
-    /// Процессы, у которых счётчик thread'ов достиг 0. Удаляются на следующем
-    /// `switch_to_next`, когда dying thread уже не current ни на одном CPU.
+    /// Глобальный аллокатор фреймов для backing per-thread IPC-буферов.
+    frame_allocator: Option<&'static (dyn FrameAllocator + Send + Sync)>,
+    /// Процессы, у которых счётчик thread'ов достиг 0.
     pending_process_removals: Vec<ProcessId>,
     quantum_ns: u64,
     time_slice_ticks: u32,
@@ -182,6 +185,7 @@ where
                 sleepers: SleepQueue::new(),
                 kernel_address_space: AddressSpace::kernel(),
                 address_space_factory,
+                frame_allocator: None,
                 pending_process_removals: Vec::new(),
                 quantum_ns: DEFAULT_QUANTUM_NS,
                 time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
@@ -347,8 +351,17 @@ where
         self.inner.with_lock(|inner| inner.address_space_factory)
     }
 
-    /// Количество живых процессов в `ProcessTable`. Используется для
-    /// диагностики и проверок lifecycle.
+    /// Регистрирует глобальный аллокатор фреймов для backing per-thread IPC-буферов.
+    pub fn set_frame_allocator(
+        &self,
+        frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
+    ) {
+        self.inner.with_lock(|inner| {
+            inner.frame_allocator = Some(frame_allocator);
+        });
+    }
+
+    /// Количество живых процессов в `ProcessTable`.
     pub fn process_count(&self) -> usize {
         self.inner.with_lock(|inner| inner.processes.live_count())
     }
@@ -591,6 +604,12 @@ where
                 return Err(PreparedUserProcessError::Spawn(e));
             }
         };
+
+        if let Err(e) = self.attach_ipc_buffer(process_id, thread_id) {
+            self.threads.remove(thread_id);
+            self.processes.remove(process_id);
+            return Err(PreparedUserProcessError::Spawn(e));
+        }
 
         if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
             && cpu.idle() != thread_id
@@ -845,10 +864,8 @@ where
             signals.push_thread(ko, exit_code);
         }
 
-        // Декремент thread_count процесса. На нуле поднимаем
-        // PROCESS_TERMINATED ДО `cleanup_pending_process_removals` (вызов из
-        // `switch_to_next`) и помечаем процесс к удалению - `Arc<ProcessObject>`
-        // переживёт запись в `ProcessTable` через держателей handle'ов.
+        // На нуле поднимаем terminated процесса ДО `cleanup_pending_process_removals`
+        // (вызов из `switch_to_next`); `Arc<ProcessObject>` переживёт удаление из таблицы.
         if let Some(pid) = exiting_pid
             && let Some(process) = self.processes.get(pid)
             && process.decrement_thread_count()
@@ -940,9 +957,7 @@ where
             .current_cpu()
             .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
 
-        // Инкрементируем счётчик ДО регистрации потока: на ошибке
-        // регистрации делаем компенсирующий decrement (без подъёма
-        // PROCESS_TERMINATED, т.к. поток так и не был добавлен).
+        // Инкремент ДО insert: на ошибке компенсируем decrement без сигнала terminated.
         let process = self
             .processes
             .get(process_id)
@@ -971,6 +986,16 @@ where
             }
         };
 
+        if let Err(e) = self.attach_ipc_buffer(process_id, thread_id) {
+            self.threads.remove(thread_id);
+            let _ = self
+                .processes
+                .get(process_id)
+                .expect("process still present")
+                .decrement_thread_count();
+            return Err(e);
+        }
+
         let thread_ko = self
             .threads
             .get(thread_id)
@@ -981,7 +1006,73 @@ where
         Ok((thread_id, thread_ko))
     }
 
-    /// Пушит ранее prepared user-thread в ready-queue его cpu-affinity.
+    fn attach_ipc_buffer(
+        &mut self,
+        process_id: ProcessId,
+        thread_id: ThreadId,
+    ) -> Result<(), SpawnError> {
+        let Some(fa) = self.frame_allocator else {
+            return Ok(());
+        };
+
+        let process = self
+            .processes
+            .get(process_id)
+            .expect("process must exist after lookup");
+        let Some(user_vm) = process.user_vm() else {
+            return Ok(());
+        };
+        let user_vm = user_vm.clone();
+        let mapper_arc = process
+            .address_space()
+            .mapper_arc()
+            .ok_or(SpawnError::AddressSpaceCreationFailed)?;
+
+        let pages = NonZeroUsize::new(1).expect("1 is non-zero");
+        let region = MemoryRegion::create_virtual(fa, pages, AccessMask::RW)
+            .map_err(|_| SpawnError::StackAllocationFailed)?;
+        let region = Arc::new(region);
+        let flags = MemFlags::user_rw();
+        let grant = region.access_mask();
+
+        let size = NonZeroUsize::new(FRAME_SIZE).expect("FRAME_SIZE is non-zero");
+        let allocated = user_vm
+            .with_lock(|alloc| {
+                alloc.allocate(
+                    size,
+                    MappingTag {
+                        flags,
+                        region: region.clone(),
+                        grant,
+                    },
+                )
+            })
+            .map_err(|_| SpawnError::StackAllocationFailed)?;
+        let base = allocated.base();
+
+        if region.install(&*mapper_arc, base, flags).is_err() {
+            user_vm.with_lock(|alloc| {
+                let _ = alloc.free(base, size);
+            });
+            return Err(SpawnError::StackAllocationFailed);
+        }
+
+        let slot = IpcBufferSlot::new(base.into(), region);
+        self.threads
+            .get_mut(thread_id)
+            .expect("thread must exist after insert")
+            .set_ipc_buffer(slot);
+        Ok(())
+    }
+
+    /// User-VA per-thread IPC-buffer'а текущего потока. `None`, если
+    /// scheduler не bootstrapped, поток - kernel-only либо буфер не
+    /// прикреплён.
+    pub(super) fn current_ipc_buffer_va(&self) -> Option<VirtualAddress> {
+        let current_id = self.current_cpu()?.current();
+        self.threads.get(current_id)?.ipc_buffer_va()
+    }
+
     pub(crate) fn enqueue_user_thread_ready(&mut self, thread_id: ThreadId) {
         let Some(thread) = self.threads.get(thread_id) else {
             return;
@@ -1161,10 +1252,6 @@ where
             .find(|p| Arc::ptr_eq(p.process_object(), ko))
     }
 
-    /// Идемпотентно завершает поток через handle: поднимает
-    /// `THREAD_TERMINATED`, декрементирует thread_count, на нуле -
-    /// `PROCESS_TERMINATED`. Context switch не делает; для завершения
-    /// собственного потока должен использоваться [`Self::exit_current`].
     fn collect_thread_termination(
         &mut self,
         thread_ko: &Arc<ThreadObject>,
@@ -1206,10 +1293,6 @@ where
         signals
     }
 
-    /// Идемпотентно завершает все потоки процесса: каждый живой поток
-    /// получает `THREAD_TERMINATED`, по достижении нуля - процесс
-    /// получает `PROCESS_TERMINATED`. На процессе без живых потоков
-    /// сразу поднимает `PROCESS_TERMINATED` и ставит в очередь на удаление.
     pub(crate) fn terminate_process_ko(
         &mut self,
         process_ko: &Arc<ProcessObject>,

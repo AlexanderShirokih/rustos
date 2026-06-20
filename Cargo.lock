@@ -386,6 +386,7 @@ dependencies = [
  "process",
  "scheduler",
  "spin",
+ "syscall",
  "syscall-kernel",
  "test-harness-qemu",
  "userland",

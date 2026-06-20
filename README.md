@@ -39,7 +39,8 @@ let _va = memory_map(region_h, 4096, UserMemFlags::ReadWrite)?;
 
 let readonly_h = handle_duplicate(
     region_h,
-    Rights::MAP | Rights::READ | Rights::INSPECT | Rights::TRANSFER,
+    Rights::WRITE | Rights::READ | Rights::TRANSFER,
+    0, // без значка (badge)
 )?;
 
 channel_write(peer_h, &[], &[readonly_h])?;
@@ -51,7 +52,7 @@ channel_write(peer_h, &[], &[readonly_h])?;
 let (left_h, right_h) = channel_create()?;
 channel_write(right_h, request, &[reply_event_h])?;
 
-let observed = object_wait_one(
+let observed = signal_wait_one(
     left_h,
     CHANNEL_READABLE | CHANNEL_PEER_CLOSED,
     timeout_ns,
@@ -66,13 +67,14 @@ if observed & CHANNEL_READABLE != 0 {
 let process_h = process_self()?;
 let wait_h = handle_duplicate(
     process_h,
-    Rights::WAIT | Rights::INSPECT | Rights::TRANSFER,
+    Rights::READ | Rights::TRANSFER,
+    0, // без значка (badge)
 )?;
 channel_write(supervisor_h, &[], &[wait_h])?;
 handle_close(process_h)?;
 
 // На стороне supervisor'а:
-let observed = object_wait_one(received_process_h, PROCESS_TERMINATED, timeout_ns)?;
+let observed = signal_wait_one(received_process_h, PROCESS_TERMINATED, timeout_ns)?;
 if observed & PROCESS_TERMINATED != 0 {
     let exit_code = process_exit_code(received_process_h)?;
 }
@@ -225,7 +227,7 @@ PR с новыми устройствами приветствуются.
 - Userland: образ программ `userland.img`, рантайм syscall-обёрток, bootstrap-протокол
 - Разделяемая память: VMO и MMIO как kernel-объекты (создание, map, remap, инспекция, передача)
 - Process и thread lifecycle: создание, завершение, terminate, ожидание сигналов
-- `object_wait_one`/`object_wait_many` с сигналами и таймаутом
+- `signal_wait_one`/`signal_wait_many` с сигналами и таймаутом
 - QEMU integration tests (kernel- и userland-проход)
 - Загрузка на Xiaomi Redmi Note 7 и Raspberry Pi 5
 

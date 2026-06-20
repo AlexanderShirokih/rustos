@@ -1,34 +1,33 @@
-//! Production-цепочка userland: запуск первого (bootstrap) userland-процесса с bootstrap-каналом.
+//! Production-цепочка userland: запуск первого userland-процесса с bootstrap-port'ом.
 
 extern crate alloc;
 
 use alloc::{sync::Arc, vec};
+use core::num::NonZeroUsize;
 
 use bootstrap::{BootstrapService, dispatch_bootstrap};
+use collections::{LockCell, MutexCell};
 use ipc::{
     MessageLen, Transport,
     wire::{IpcError as WireError, Str},
 };
 use klog::{info, warn};
-use core::num::NonZeroU32;
-
-use collections::LockCell;
 use kobject::{
-    CHANNEL_PEER_CLOSED, CHANNEL_READABLE, Channel, Handle, HandleId, IpcError as KernelIpcError,
-    KObject, MESSAGE_MAX_HANDLES, Message, Rights, channel_read, channel_write, install_handle,
-    object_wait_one, runtime,
+    Handle, IpcError as KernelIpcError, KObject, KernelIpcBuffer, Port, Reply, Resource, Rights,
+    ThreadTransport, port_recv, runtime,
 };
+use memory::{AccessMask, physical_address::PageAlignedAddress};
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
+use syscall::{IpcBuffer, decode_tag};
 use userland::EntryView;
 use userland_image::{ImageDecodeError, decode};
 
 use crate::user_process::{SpawnUserError, UserProcessLauncher};
 
-/// Запущенный bootstrap-процесс: local-конец bootstrap-канала остаётся у ядра,
-/// `info` держит process/thread KO для наблюдения за завершением.
+/// Запущенный bootstrap-процесс.
 pub struct BootstrapLaunch {
-    pub channel: Arc<Channel>,
+    pub port: Arc<Port>,
     pub info: UserProcessLaunchInfo,
 }
 
@@ -40,7 +39,7 @@ pub enum BootstrapSpawnError {
     Spawn(SpawnUserError),
 }
 
-/// Разбирает `blob` и спавнит процесс с именем bootstrap-entry как initial handle 0.
+/// Разбирает `blob` и спавнит процесс с именем bootstrap-entry.
 pub fn spawn_process(
     launcher: &dyn UserProcessLauncher,
     blob: &'static [u8],
@@ -53,70 +52,71 @@ pub fn spawn_process(
         user_image_parts_from_entry(&entry, user_va_end).map_err(BootstrapSpawnError::Model)?;
     let user_image = parts.image();
 
-    // local остаётся у ядра для чтения; peer уходит bootstrap-процессу. Запись в peer
-    // кладёт сообщение в очередь local, где и поднимется CHANNEL_READABLE.
-    let (local, peer) = Channel::create_pair(0);
-    let peer_ko = KObject::Channel(peer);
+    // Один Port: ядро держит Arc как получатель; ОДИН handle на тот же
+    // объект уходит bootstrap-процессу как initial handle[0] - он клиент.
+    let port = Port::new();
+    let peer_ko = KObject::Port(port.clone());
     let peer_handle = Handle::new(peer_ko.clone(), Rights::defaults_for(&peer_ko));
+
+    // Корневой Resource: полномочие на минтинг физпамяти + носитель
+    // ресурсного бюджета. Выдаётся bootstrap-процессу как initial handle[1]
+    // (с правами по умолчанию: DUPLICATE|TRANSFER|READ|WRITE), чтобы
+    // полномочие перестало быть «спящим» — bootstrap может его делегировать.
+    //
+    // TODO(RFC-0001): PA-диапазон/бюджет здесь заданы консервативно (вся
+    // 64-бит PA-плоскость, кроме одной хвостовой страницы во избежание
+    // переполнения в `permits`, и 1<<20 страниц = 4 GiB бюджета). На будущих
+    // этапах диапазон должен происходить из реальной карты физпамяти
+    // (RAM/MMIO), а бюджет — из учёта доступных фреймов.
+    let root_resource = Resource::new(
+        PageAlignedAddress::from_usize(0).expect("zero PA is page-aligned"),
+        NonZeroUsize::new(usize::MAX & !0xFFF).expect("non-zero resource span"),
+        AccessMask::RW,
+        1 << 20,
+    );
+    let resource_ko = KObject::Resource(root_resource);
+    let resource_handle = Handle::new(resource_ko.clone(), Rights::defaults_for(&resource_ko));
+
     let launch = UserProcessLaunch::new()
-        .initial_handles(vec![peer_handle])
+        .initial_handles(vec![peer_handle, resource_handle])
         .bootstrap_handle(0);
 
     let info = launcher
         .spawn_user_process_with_launch(name, &user_image, Priority::normal(), 2, launch)
         .map_err(BootstrapSpawnError::Spawn)?;
 
-    Ok(BootstrapLaunch {
-        channel: local,
-        info,
-    })
+    Ok(BootstrapLaunch { port, info })
 }
 
-/// Цикл логгера bootstrap-канала: сигнальное ожидание READABLE|PEER_CLOSED,
-/// дренаж очереди контрактом `Bootstrap`, выход по PEER_CLOSED при дочитанной
-/// очереди.
-pub fn run_bootstrap_log(local: &Arc<Channel>) {
-    let chan_ko = KObject::Channel(local.clone());
-    let chan_handle = Handle::new(
-        chan_ko,
-        Rights::READ | Rights::WRITE | Rights::WAIT | Rights::INSPECT,
-    );
-    let chan_id = match install_handle(chan_handle) {
-        Ok(id) => id,
-        Err(e) => {
-            warn!("bootstrap-log: install_handle failed: {:?}", e);
-            return;
-        }
+/// Цикл логгера bootstrap-port'а: kernel-поток-логгер аллоцирует
+/// kernel-резидентный IPC-буфер, строит kernel-транспорт и в бесконечном цикле декодирует кадры контрактом
+/// `Bootstrap`, зеркаля их в klog.
+///
+/// Поскольку Port - синхронный rendezvous без peer-closed-сигнала, цикл
+/// не завершается по закрытию клиентского handle: он живёт как фоновый
+/// kernel-таск, а машину гасит init по завершению bootstrap-процесса
+/// (см. [`crate::init`]). На `PeerClosed` (последний Arc на Port ушёл)
+/// или ошибке цикл всё же выходит, чтобы не крутиться вхолостую.
+pub fn run_bootstrap_log(port: &Arc<Port>) {
+    let Some(table) = runtime().current_handle_table() else {
+        warn!("bootstrap-log: no kernel handle-table; logger not started");
+        return;
     };
 
-    let transport = ChannelTransport::new(chan_id);
+    let buffer: KernelIpcBuffer = Arc::new(MutexCell::new(IpcBuffer::zeroed()));
+    let transport = KernelPortTransport::new(port.clone(), buffer, table);
     let mut sink = BootstrapLog;
 
     loop {
-        match transport.wait_readable(u64::MAX) {
+        match dispatch_bootstrap(&mut sink, &transport) {
             Ok(()) => {}
             Err(WireError::PeerClosed) => {
-                info!("bootstrap-log: peer closed, exiting");
+                info!("bootstrap-log: port closed, exiting");
                 return;
             }
             Err(e) => {
-                warn!("bootstrap-log: wait failed: {:?}", e);
+                warn!("bootstrap-log: dispatch failed: {:?}", e);
                 return;
-            }
-        }
-
-        loop {
-            match dispatch_bootstrap(&mut sink, &transport) {
-                Ok(()) => {}
-                Err(WireError::WouldBlock) => break,
-                Err(WireError::PeerClosed) => {
-                    info!("bootstrap-log: peer closed, exiting");
-                    return;
-                }
-                Err(e) => {
-                    warn!("bootstrap-log: dispatch failed: {:?}", e);
-                    break;
-                }
             }
         }
     }
@@ -131,19 +131,7 @@ impl BootstrapService for BootstrapLog {
     }
 }
 
-/// Порт ipc-контракта поверх kernel-канала: оборачивает HandleId эндпоинта.
-pub struct ChannelTransport {
-    handle: HandleId,
-}
-
-impl ChannelTransport {
-    /// Связывает транспорт с HandleId канального эндпоинта.
-    pub fn new(handle: HandleId) -> Self {
-        Self { handle }
-    }
-}
-
-/// Сводит kernel-ошибку канала к ошибке wire-транспорта.
+/// Сводит kernel-ошибку IPC к ошибке wire-транспорта.
 fn map_kernel_error(error: KernelIpcError) -> WireError {
     match error {
         KernelIpcError::ShouldWait => WireError::WouldBlock,
@@ -155,93 +143,96 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
         | KernelIpcError::WrongType
         | KernelIpcError::AccessDenied
         | KernelIpcError::Canceled
-        | KernelIpcError::OutOfHandles => WireError::PeerClosed,
+        | KernelIpcError::OutOfHandles
+        | KernelIpcError::ResourceExhausted => WireError::PeerClosed,
     }
 }
 
-impl Transport for ChannelTransport {
-    fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), WireError> {
-        if handles.is_empty() {
-            let message = Message::from_bytes(bytes).map_err(map_kernel_error)?;
-            return channel_write(self.handle, message).map_err(map_kernel_error);
-        }
+/// Kernel-side port-транспорт серверной роли поверх kernel-резидентного
+/// IPC-буфера и kernel port API.
+///
+/// Реализует только то, что нужно `dispatch_bootstrap`: `read_message`
+/// (блокирующий `port_recv` + декод из kernel-буфера) и `write_message`
+/// (ответ через `reply` для `#[call]`; `Bootstrap` несёт только `#[cast]`,
+/// поэтому путь ответа в логгере не используется, но реализован для общности).
+struct KernelPortTransport {
+    port: Arc<Port>,
+    buffer: KernelIpcBuffer,
+    table: Arc<MutexCell<kobject::HandleTable>>,
+    /// Reply-объект, сохранённый последним `read_message` (если встречный был
+    /// `call`); `write_message`(RESPONSE) доставляет через него ответ.
+    pending_reply: MutexCell<Option<Arc<Reply>>>,
+}
 
-        let table = runtime()
-            .current_handle_table()
+impl KernelPortTransport {
+    fn new(
+        port: Arc<Port>,
+        buffer: KernelIpcBuffer,
+        table: Arc<MutexCell<kobject::HandleTable>>,
+    ) -> Self {
+        Self {
+            port,
+            buffer,
+            table,
+            pending_reply: MutexCell::new(None),
+        }
+    }
+
+    fn thread_transport(&self) -> ThreadTransport {
+        ThreadTransport::new_kernel(self.buffer.clone(), self.table.clone())
+    }
+}
+
+impl Transport for KernelPortTransport {
+    fn write_message(&self, bytes: &[u8], _handles: &[u32]) -> Result<(), WireError> {
+        // Записываем ответ в kernel-буфер и доставляем вызывателю через Reply.
+        self.buffer.with_lock(|buf| store_kernel_buffer(buf, bytes));
+        let reply = self
+            .pending_reply
+            .with_lock(Option::take)
             .ok_or(WireError::PeerClosed)?;
-        let mut ids = [self.handle; MESSAGE_MAX_HANDLES];
-        for (slot, &raw) in ids.iter_mut().zip(handles) {
-            let nz = NonZeroU32::new(raw).ok_or(WireError::FrameOverflow)?;
-            *slot = HandleId::from_raw(nz);
-        }
-        let ids = &ids[..handles.len()];
-
-        let endpoint = table
-            .with_lock(|tbl| tbl.get_channel(self.handle, Rights::WRITE))
-            .map_err(map_kernel_error)?;
-        // Изъятие handle'ов из таблицы и enqueue атомарны: на ShouldWait/closed
-        // build не выполняется, handle'ы остаются у отправителя.
-        let outer = endpoint.try_write::<KernelIpcError>(|| {
-            let mut message = Message::from_bytes(bytes)?;
-            let drained = table.with_lock(|tbl| tbl.try_drain_for_transfer(ids, Rights::TRANSFER))?;
-            for handle in drained {
-                message.push_handle(handle)?;
-            }
-            Ok(message)
-        });
-        match outer {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) | Err(e) => Err(map_kernel_error(e)),
-        }
+        let server = self.thread_transport();
+        reply.reply(&server).map_err(map_kernel_error)
     }
 
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, WireError> {
-        let mut message = channel_read(self.handle).map_err(map_kernel_error)?;
-        let payload_len = {
-            let payload = message.bytes();
-            if payload.len() > bytes.len() {
-                return Err(WireError::Truncated);
-            }
-            bytes[..payload.len()].copy_from_slice(payload);
-            payload.len()
-        };
-
-        let handle_count = message.handles_count();
-        if handle_count > handles.len() {
-            return Err(WireError::Truncated);
-        }
-        if handle_count > 0 {
-            let table = runtime()
-                .current_handle_table()
-                .ok_or(WireError::PeerClosed)?;
-            let drained: alloc::vec::Vec<Handle> = message.drain_handles().collect();
-            table.with_lock(|tbl| -> Result<(), WireError> {
-                for (slot, handle) in handles.iter_mut().zip(drained) {
-                    let id = tbl.insert(handle).map_err(map_kernel_error)?;
-                    *slot = id.raw().get();
-                }
-                Ok(())
-            })?;
-        }
-
-        Ok(MessageLen::new(payload_len, handle_count))
+        let receiver = self.thread_transport();
+        // Блокирующий приём; сообщение ложится в kernel-буфер.
+        let reply = port_recv(&self.port, receiver, runtime(), None).map_err(map_kernel_error)?;
+        self.pending_reply.with_lock(|slot| *slot = reply);
+        self.buffer
+            .with_lock(|buf| load_kernel_buffer(buf, bytes, handles))
     }
 
-    fn wait_readable(&self, timeout_ns: u64) -> Result<(), WireError> {
-        let timeout = if timeout_ns == u64::MAX {
-            None
-        } else {
-            Some(timeout_ns)
-        };
-        let observed =
-            object_wait_one(self.handle, CHANNEL_READABLE | CHANNEL_PEER_CLOSED, timeout)
-                .map_err(map_kernel_error)?;
-        if observed & CHANNEL_READABLE != 0 {
-            Ok(())
-        } else if observed & CHANNEL_PEER_CLOSED != 0 {
-            Err(WireError::PeerClosed)
-        } else {
-            Err(WireError::Timeout)
-        }
+    fn wait_readable(&self, _timeout_ns: u64) -> Result<(), WireError> {
+        // recv сам блокирует в read_message.
+        Ok(())
     }
+}
+
+/// Пишет кадр `bytes` в data-область kernel-буфера и выставляет tag
+/// (`len`, `ncaps=0`). Ответ логгера caps не несёт.
+fn store_kernel_buffer(buf: &mut IpcBuffer, bytes: &[u8]) {
+    let len = bytes.len().min(buf.data.len());
+    buf.data[..len].copy_from_slice(&bytes[..len]);
+    buf.tag = syscall::encode_tag(len, 0);
+}
+
+/// Декодирует сообщение из kernel-буфера в `bytes`/`handles` по tag.
+fn load_kernel_buffer(
+    buf: &IpcBuffer,
+    bytes: &mut [u8],
+    handles: &mut [u32],
+) -> Result<MessageLen, WireError> {
+    let (len, ncaps) = decode_tag(buf.tag);
+    let len = len.min(buf.data.len());
+    let ncaps = ncaps.min(buf.caps.len());
+    if len > bytes.len() || ncaps > handles.len() {
+        return Err(WireError::Truncated);
+    }
+    bytes[..len].copy_from_slice(&buf.data[..len]);
+    for (dst, &raw) in handles.iter_mut().zip(&buf.caps[..ncaps]) {
+        *dst = raw;
+    }
+    Ok(MessageLen::new(len, ncaps))
 }

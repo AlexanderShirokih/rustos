@@ -50,11 +50,17 @@ impl HandleId {
     }
 }
 
-/// Запись в [`HandleTable`](super::HandleTable): kernel-объект и
-/// права, с которыми этот handle может быть использован.
+/// Запись в [`HandleTable`](super::HandleTable): kernel-объект,
+/// права, с которыми этот handle может быть использован, и значок (badge).
+///
+/// `badge` - свойство ХЕНДЛА, не объекта: разные хендлы на один и тот же
+/// `Port` несут разные значки. `0` означает «без значка». На приёме
+/// сообщения ядро доставляет значок port-хендла отправителя получателю
+/// (см. RFC-0001, badge как идентификация клиента, аналог seL4-badges).
 pub struct Handle {
     pub(super) object: KObject,
     rights: Rights,
+    badge: u64,
 }
 
 impl core::fmt::Debug for Handle {
@@ -62,17 +68,37 @@ impl core::fmt::Debug for Handle {
         f.debug_struct("Handle")
             .field("koid", &self.object.koid())
             .field("rights", &self.rights)
+            .field("badge", &self.badge)
             .finish()
     }
 }
 
 impl Handle {
+    /// Создаёт незаклеймённый handle (`badge == 0`).
     pub fn new(object: KObject, rights: Rights) -> Self {
-        Self { object, rights }
+        Self {
+            object,
+            rights,
+            badge: 0,
+        }
+    }
+
+    /// Создаёт handle с заданным значком `badge`.
+    pub fn new_with_badge(object: KObject, rights: Rights, badge: u64) -> Self {
+        Self {
+            object,
+            rights,
+            badge,
+        }
     }
 
     pub fn rights(&self) -> Rights {
         self.rights
+    }
+
+    /// Значок (badge) этого хендла; `0` означает «без значка».
+    pub fn badge(&self) -> u64 {
+        self.badge
     }
 
     pub fn koid(&self) -> Koid {
@@ -83,21 +109,30 @@ impl Handle {
         &self.object
     }
 
-    /// Создаёт копию handle'а с подмножеством прав.
+    /// Создаёт копию handle'а с подмножеством прав и (опционально) значком.
     ///
     /// Возвращает [`IpcError::AccessDenied`], если у исходного handle'а нет
     /// права [`Rights::DUPLICATE`] либо запрошенный набор прав не является
     /// подмножеством существующего.
-    pub fn duplicate(&self, new_rights: Rights) -> Result<Self, IpcError> {
+    pub fn duplicate(&self, new_rights: Rights, new_badge: u64) -> Result<Self, IpcError> {
         if !self.rights.contains(Rights::DUPLICATE) {
             return Err(IpcError::AccessDenied);
         }
         if !new_rights.is_subset_of(self.rights) {
             return Err(IpcError::AccessDenied);
         }
+        let badge = if self.badge != 0 {
+            if new_badge != 0 {
+                return Err(IpcError::BadHandle);
+            }
+            self.badge
+        } else {
+            new_badge
+        };
         Ok(Self {
             object: self.object.clone(),
             rights: new_rights,
+            badge,
         })
     }
 }

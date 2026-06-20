@@ -6,7 +6,7 @@ use syscall::{Handle, SyscallOp, WaitItem};
 
 /// Ждёт сигналы `signals` на KO `handle`; `timeout_ns == 0` - non-blocking
 /// poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
-pub fn object_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
+pub fn signal_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
     // в x0..x2: handle, маска сигналов, timeout_ns; память ядру не
@@ -14,7 +14,7 @@ pub fn object_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::ObjectWaitOne as u16,
+            op = const SyscallOp::SignalWaitOne as u16,
             in("x0") u64::from(handle.raw()),
             in("x1") u64::from(signals),
             in("x2") timeout_ns,
@@ -28,14 +28,14 @@ pub fn object_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
 /// Меняет биты сигналов KO `handle`: `set`/`clear` - нижние 32 бита,
 /// `count == 0` будит всех пересекающихся waiter'ов, `count == N>0` -
 /// не более N в FIFO-порядке. Возврат: 0 либо `-(SyscallError)`.
-pub fn object_signal(handle: Handle, set: u32, clear: u32, count: u32) -> i64 {
+pub fn signal_set(handle: Handle, set: u32, clear: u32, count: u32) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
     // в x0..x3: handle, set, clear, count; память ядру не передаётся.
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::ObjectSignal as u16,
+            op = const SyscallOp::SignalSet as u16,
             in("x0") u64::from(handle.raw()),
             in("x1") u64::from(set),
             in("x2") u64::from(clear),
@@ -51,7 +51,7 @@ pub fn object_signal(handle: Handle, set: u32, clear: u32, count: u32) -> i64 {
 /// `timeout_ns == 0` - non-blocking poll. Возврат: `(observed, index)` -
 /// observed-маска сработавшего KO (>=0 либо `-(SyscallError)`) и его индекс
 /// в `items`.
-pub fn object_wait_many(items: &[WaitItem], timeout_ns: u64) -> (i64, u64) {
+pub fn signal_wait_many(items: &[WaitItem], timeout_ns: u64) -> (i64, u64) {
     let observed: i64;
     let index: u64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
@@ -61,7 +61,7 @@ pub fn object_wait_many(items: &[WaitItem], timeout_ns: u64) -> (i64, u64) {
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::ObjectWaitMany as u16,
+            op = const SyscallOp::SignalWaitMany as u16,
             in("x0") items.as_ptr() as u64,
             in("x1") items.len() as u64,
             in("x2") timeout_ns,
@@ -73,16 +73,16 @@ pub fn object_wait_many(items: &[WaitItem], timeout_ns: u64) -> (i64, u64) {
     (observed, index)
 }
 
-/// Создаёт пустой Event в текущей handle-table. Возврат: handle либо
-/// `-(SyscallError)`.
-pub fn event_create() -> Result<Handle, i64> {
+/// Создаёт пустой `Signal` в текущей handle-таблице. Возврат: handle
+/// либо `-(SyscallError)`.
+pub fn signal_create() -> Result<Handle, i64> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::EventCreate as u16,
+            op = const SyscallOp::SignalCreate as u16,
             lateout("x0") ret,
             options(nostack),
         );
@@ -90,26 +90,40 @@ pub fn event_create() -> Result<Handle, i64> {
     Handle::from_syscall_return(ret)
 }
 
-/// Пишет `bytes` и `handles` (передаются с потерей у отправителя) одним
-/// сообщением в парный endpoint канала `handle`. Возврат: 0 либо
-/// `-(SyscallError)`.
-pub fn channel_write(handle: Handle, bytes: &[u8], handles: &[Handle]) -> i64 {
+/// Создаёт `Port` (synchronous rendezvous-IPC) в текущей таблице.
+/// Возврат: ОДИН port-handle либо `-(SyscallError)`.
+pub fn port_create() -> Result<Handle, i64> {
     let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
-    // в x0..x4: handle, bytes_va, bytes_len, handles_va, handles_count.
-    // `handles` - repr(transparent) над `u32`, поэтому срез по x3 - это
-    // массив HandleId, который ждёт ядро. Буферы `bytes`/`handles` живут у
-    // caller'а (замаплены user_rw), ядро читает их по x1/x3; отсутствие
-    // `nomem` не даёт переупорядочить запись буферов за svc.
+    // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
+    // выходе - handle либо -(SyscallError).
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::ChannelWrite as u16,
+            op = const SyscallOp::PortCreate as u16,
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    Handle::from_syscall_return(ret)
+}
+
+/// `send` на port `handle`: блокирующая отправка сообщения из
+/// IPC-буфера текущего потока. `timeout_ns`:
+/// [`PORT_TIMEOUT_INFINITE`](syscall::PORT_TIMEOUT_INFINITE) - бессрочно,
+/// `0` - poll, иначе дедлайн в нс. Возврат: 0,
+/// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
+/// истечении тайм-аута, либо `-(SyscallError)`.
+pub fn port_send(handle: Handle, timeout_ns: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
+    // timeout_ns; сообщение лежит в per-thread IPC-буфере (ядро читает
+    // его само), память по указателю не передаётся.
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::PortSend as u16,
             in("x0") u64::from(handle.raw()),
-            in("x1") bytes.as_ptr() as u64,
-            in("x2") bytes.len() as u64,
-            in("x3") handles.as_ptr() as u64,
-            in("x4") handles.len() as u64,
+            in("x1") timeout_ns,
             lateout("x0") ret,
             options(nostack),
         );
@@ -117,46 +131,63 @@ pub fn channel_write(handle: Handle, bytes: &[u8], handles: &[Handle]) -> i64 {
     ret
 }
 
-/// Создаёт пару endpoint'ов канала в текущей handle-table. Возврат:
-/// `(left, right)` либо `-(SyscallError)` из x0.
-pub fn channel_create() -> Result<(Handle, Handle), i64> {
-    let left: i64;
-    let right: u64;
-    // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументов нет;
-    // ядро пишет left-handle в x0 (знаковый), right-handle - в x1.
+/// `recv` на port `handle`: блокирующий приём в IPC-буфер текущего
+/// потока. `timeout_ns` - как у [`port_send`]. Возврат: reply handle id
+/// (если встречный был `call`, иначе 0),
+/// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
+/// истечении тайм-аута, либо `-(SyscallError)`.
+pub fn port_recv(handle: Handle, timeout_ns: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
+    // timeout_ns; принятое сообщение ядро пишет в per-thread IPC-буфер
+    // текущего потока.
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::ChannelCreate as u16,
-            lateout("x0") left,
-            lateout("x1") right,
+            op = const SyscallOp::PortRecv as u16,
+            in("x0") u64::from(handle.raw()),
+            in("x1") timeout_ns,
+            lateout("x0") ret,
             options(nostack),
         );
     }
-    let left = Handle::from_syscall_return(left)?;
-    let right = Handle::new(right as u32).ok_or(0_i64)?;
-    Ok((left, right))
+    ret
 }
 
-/// Достаёт одно сообщение из inbound-очереди канала `handle` в `bytes` и
-/// `handles` (принятые handle, по одному на слот). Возврат: `bytes_len |
-/// (handles_count << 32)` либо `-(SyscallError)`.
-pub fn channel_read(handle: Handle, bytes: &mut [u8], handles: &mut [Option<Handle>]) -> i64 {
+/// `call` на port `handle`: блокирующий запрос-ответ. Сообщение из
+/// IPC-буфера текущего потока; ответ оказывается там же. `timeout_ns`
+/// ограничивает всю операцию (см. [`port_send`]). Возврат: 0,
+/// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
+/// истечении тайм-аута, либо `-(SyscallError)`.
+pub fn port_call(handle: Handle, timeout_ns: u64) -> i64 {
     let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы лежат в x0..x4:
-    // handle, bytes_va, bytes_cap, handles_va, handles_cap. `Option<Handle>`
-    // имеет layout `u32` (niche `0 == None`), поэтому ядро пишет ненулевые
-    // HandleId по x3 в первые handles_count слотов (валидный `Some`),
-    // остальные остаются `None`. Payload идёт по x1; буферы живут у caller'а.
+    // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
+    // timeout_ns; запрос и ответ ходят через per-thread IPC-буфер текущего
+    // потока.
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::ChannelRead as u16,
+            op = const SyscallOp::PortCall as u16,
             in("x0") u64::from(handle.raw()),
-            in("x1") bytes.as_mut_ptr() as u64,
-            in("x2") bytes.len() as u64,
-            in("x3") handles.as_mut_ptr() as u64,
-            in("x4") handles.len() as u64,
+            in("x1") timeout_ns,
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// `reply` на одноразовый `reply_handle`: доставляет ответ из IPC-буфера
+/// сервера вызывателю. Возврат: 0 либо `-(SyscallError)`.
+pub fn port_reply(reply_handle: Handle) -> i64 {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, x0 - reply handle; ответ
+    // лежит в per-thread IPC-буфере сервера.
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::PortReply as u16,
+            in("x0") u64::from(reply_handle.raw()),
             lateout("x0") ret,
             options(nostack),
         );
@@ -183,18 +214,24 @@ pub fn handle_close(handle: Handle) -> i64 {
 }
 
 /// Дублирует `handle` с правами `new_rights` (подмножество исходных,
-/// неизвестные биты отбрасываются). Возврат: новый handle либо
-/// `-(SyscallError)`.
-pub fn handle_duplicate(handle: Handle, new_rights: u32) -> Result<Handle, i64> {
+/// неизвестные биты отбрасываются) и значком `badge` (set-once: `0` - без
+/// значка / наследовать). Возврат: новый handle либо `-(SyscallError)`.
+///
+/// Семантика `badge`: заклеймить можно только незаклеймённый источник;
+/// заклеймённый наследует свой значок при `badge == 0`, а попытка
+/// переклеймить (`badge != 0` на уже заклеймённом) даёт `BadHandle`.
+pub fn handle_duplicate(handle: Handle, new_rights: u32, badge: u64) -> Result<Handle, i64> {
     let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
-    // handle, new_rights (нижние 32 бита); память ядру не передаётся.
+    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
+    // handle, new_rights (нижние 32 бита), badge (полные 64 бита); память
+    // ядру не передаётся.
     unsafe {
         asm!(
             "svc #{op}",
             op = const SyscallOp::HandleDuplicate as u16,
             in("x0") u64::from(handle.raw()),
             in("x1") u64::from(new_rights),
+            in("x2") badge,
             lateout("x0") ret,
             options(nostack),
         );
@@ -276,9 +313,27 @@ pub fn process_exit_code(handle: Handle) -> i64 {
     ret
 }
 
-/// Завершает процесс `handle` с кодом `exit_code` (нижние 32 бита):
-/// всем потокам поднимает `THREAD_TERMINATED`, после декремента до нуля -
-/// `PROCESS_TERMINATED`. Возврат: 0 либо `-(SyscallError)`.
+/// Возвращает handle на ленивый bound-`Signal` термнинации процесса `handle`
+/// (бит `SIGNALED`). Возврат: signal-handle либо `-(SyscallError)`.
+pub fn process_termination_signal(handle: Handle) -> Result<Handle, i64> {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
+    // не передаётся. x0 на выходе - handle либо -(SyscallError).
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::ProcessTerminationSignal as u16,
+            in("x0") u64::from(handle.raw()),
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    Handle::from_syscall_return(ret)
+}
+
+/// Завершает процесс `handle` с кодом `exit_code` (нижние 32 бита): помечает
+/// завершёнными все его потоки, после декремента до нуля - и сам процесс
+/// (bound-`Signal`'ы получают `SIGNALED`). Возврат: 0 либо `-(SyscallError)`.
 pub fn process_terminate(handle: Handle, exit_code: u64) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
@@ -392,6 +447,24 @@ pub fn thread_exit_code(handle: Handle) -> i64 {
     ret
 }
 
+/// Возвращает handle на ленивый bound-`Signal` термнинации потока `handle`
+/// (бит `SIGNALED`). Возврат: signal-handle либо `-(SyscallError)`.
+pub fn thread_termination_signal(handle: Handle) -> Result<Handle, i64> {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
+    // не передаётся. x0 на выходе - handle либо -(SyscallError).
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::ThreadTerminationSignal as u16,
+            in("x0") u64::from(handle.raw()),
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    Handle::from_syscall_return(ret)
+}
+
 /// Завершает поток `handle` с кодом `exit_code` (нижние 32 бита). Возврат:
 /// 0 либо `-(SyscallError)`. Терминирование собственного потока через
 /// handle отвергается - для self-exit есть `thread_exit`.
@@ -432,7 +505,7 @@ pub fn memory_create_virtual(size_bytes: u64, access_mask: u64) -> Result<Handle
 }
 
 /// Создаёт Memory-регион с Physical backing: `resource` - handle на
-/// `PhysicalResource`, `pa` - физический адрес (page-aligned), `size_bytes`,
+/// `Resource`, `pa` - физический адрес (page-aligned), `size_bytes`,
 /// `access_mask` (биты R/W/X). Возврат: region handle либо `-(SyscallError)`.
 pub fn memory_create_physical(
     resource: Handle,
@@ -557,102 +630,17 @@ pub fn memory_region_inspect(handle: Handle) -> (i64, u64) {
     (primary, secondary)
 }
 
-/// Создаёт пустой Mailbox в текущей handle-table. Возврат: handle либо
-/// `-(SyscallError)`.
-pub fn mailbox_create() -> Result<Handle, i64> {
+/// Возвращает user-VA per-thread IPC-буфера текущего потока. Возврат:
+/// VA (>0) либо `-(SyscallError)`, если у потока нет буфера.
+pub fn ipc_buffer_addr() -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
-    // выходе - handle либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MailboxCreate as u16,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    Handle::from_syscall_return(ret)
-}
-
-/// Кладёт `packet` (ровно `MAILBOX_PACKET_SIZE` байт) в очередь mailbox'а
-/// `handle`. Возврат: 0 либо `-(SyscallError)`.
-pub fn mailbox_queue(handle: Handle, packet: &[u8]) -> i64 {
-    let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
-    // handle, packet_va, packet_len; ядро читает пакет по x1 до возврата
-    // из svc.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MailboxQueue as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") packet.as_ptr() as u64,
-            in("x2") packet.len() as u64,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Ждёт пакет в mailbox'е `handle` (`timeout_ns == 0` - non-blocking poll)
-/// и пишет его в `packet`. Возврат: длина пакета либо `-(SyscallError)`.
-pub fn mailbox_wait(handle: Handle, timeout_ns: u64, packet: &mut [u8]) -> i64 {
-    let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x3:
-    // handle, timeout_ns, packet_va, packet_cap; ядро пишет пакет по x2 до
-    // возврата из svc.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MailboxWait as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") timeout_ns,
-            in("x2") packet.as_mut_ptr() as u64,
-            in("x3") packet.len() as u64,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Подписывает mailbox `mbox` на сигналы `target`: `key` - идентификатор
-/// подписки для последующей отмены, `mask_and_mode = mask | (mode << 32)`
-/// (`mode == 0` - Once, `1` - Repeating). Возврат: 0 либо `-(SyscallError)`.
-pub fn mailbox_wait_async(mbox: Handle, target: Handle, key: u64, mask_and_mode: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x3:
-    // mbox_handle, target_handle, key, mask|(mode<<32); память ядру не
+    // выходе - user-VA буфера (>0) либо -(SyscallError). Память ядру не
     // передаётся.
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::MailboxWaitAsync as u16,
-            in("x0") u64::from(mbox.raw()),
-            in("x1") u64::from(target.raw()),
-            in("x2") key,
-            in("x3") mask_and_mode,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Снимает подписку `mbox` на сигналы `target` с ключом `key`. Идемпотентен:
-/// отсутствующая подписка - 0. Возврат: 0 либо `-(SyscallError)`.
-pub fn mailbox_cancel(mbox: Handle, target: Handle, key: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
-    // mbox_handle, target_handle, key; память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MailboxCancel as u16,
-            in("x0") u64::from(mbox.raw()),
-            in("x1") u64::from(target.raw()),
-            in("x2") key,
+            op = const SyscallOp::IpcBufferAddr as u16,
             lateout("x0") ret,
             options(nostack),
         );

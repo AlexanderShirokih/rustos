@@ -34,7 +34,7 @@ pub struct Process {
     /// при `thread_exit`; ноль - сигнал планировщику удалить процесс.
     thread_count: AtomicUsize,
     /// Lifecycle-KO процесса: переживает запись в `ProcessTable`, чтобы
-    /// держатели `Handle` могли наблюдать `PROCESS_TERMINATED` и читать
+    /// держатели `Handle` могли наблюдать завершение процесса и читать
     /// `exit_code` после удаления процесса (zombie-семантика).
     ko: Arc<ProcessObject>,
 }
@@ -127,9 +127,7 @@ impl Process {
         &self.handle_table
     }
 
-    /// Lifecycle-KO процесса. `Arc` клонируется наружу, чтобы наблюдатель
-    /// мог пережить запись `Process` в `ProcessTable` и дочитать `exit_code`
-    /// после `PROCESS_TERMINATED`.
+    /// Lifecycle-KO процесса; переживает удаление из `ProcessTable` (zombie-семантика).
     pub fn process_object(&self) -> &Arc<ProcessObject> {
         &self.ko
     }

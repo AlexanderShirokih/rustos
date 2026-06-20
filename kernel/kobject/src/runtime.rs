@@ -1,10 +1,4 @@
-//! Мост между kobject и runtime-ом ядра.
-//!
-//! Чтобы IPC-функции (`object_wait_one`, `channel_*`) не тащили на
-//! каждый вызов scheduler-генерики, фиксируется единый
-//! [`KernelRuntime`]-trait и `Arc<dyn KernelRuntime>` хранится в
-//! глобальной [`spin::Once`] ячейке. Реализация регистрируется один раз
-//! после bootstrap-а scheduler-а.
+//! Мост между kobject и рантаймом ядра.
 
 use alloc::sync::Arc;
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
@@ -74,8 +68,8 @@ pub trait KernelRuntime: Send + Sync {
     fn current_process_object(&self) -> Option<Arc<ProcessObject>>;
 
     /// Завершает текущий поток с заданным `exit_code`: поднимает
-    /// `THREAD_TERMINATED` на `Arc<ThreadObject>`, при последнем
-    /// потоке процесса - `PROCESS_TERMINATED`, и переключает контекст
+    /// terminated-флаг потока на `Arc<ThreadObject>`, при последнем
+    /// потоке процесса - terminated-флаг процесса, и переключает контекст
     /// на следующий runnable. Не возвращается.
     fn exit_current_thread(&self, exit_code: i32) -> !;
 
@@ -99,16 +93,12 @@ pub trait KernelRuntime: Send + Sync {
         entry: UserThreadEntry,
     ) -> Result<Arc<ThreadObject>, SpawnError>;
 
-    /// Идемпотентно завершает поток: поднимает `THREAD_TERMINATED`,
-    /// декрементирует thread_count процесса; на нуле - поднимает
-    /// `PROCESS_TERMINATED` владеющего процесса. Не выполняет context
-    /// switch: завершение собственного потока должно идти через
-    /// [`Self::exit_current_thread`].
+    /// Завершает поток. Поднимает terminated-флаг потока. На нуле - поднимает
+    /// terminated-флаг процесса владеющего процесса.
     fn terminate_thread(&self, thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError>;
 
-    /// Идемпотентно завершает все потоки процесса: для каждого живого
-    /// потока поднимает `THREAD_TERMINATED`, по достижении нуля -
-    /// `PROCESS_TERMINATED`. Не выполняет context switch.
+    /// Завершает все потоки процесса. Для каждого потока поднимает terminated-флаг, 
+    /// при достижении нуля - terminated-флаг процесса.
     fn terminate_process(
         &self,
         process: &Arc<ProcessObject>,

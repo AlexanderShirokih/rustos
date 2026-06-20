@@ -6,7 +6,7 @@ use kobject::{
     HandleTable, IpcError, KernelRuntime, LoadImageError, ParkState, ProcessObject,
     StartProcessError, ThreadObject, UserImageInstall, UserStartSpec, UserThreadEntry, WaitToken,
 };
-use memory::UserVmContext;
+use memory::{UserVmContext, virtual_address::VirtualAddress};
 
 use super::{
     arch::{ArchContext, ArchCpu, TimerSource, with_preemption_disabled},
@@ -57,6 +57,11 @@ where
             self.inner.with_lock(|inner| inner.current_user_vm_pair())?;
         let mapper = address_space.mapper_arc()?;
         Some(UserVmContext::new(mapper, allocator))
+    }
+
+    /// User-VA IPC-буфера текущего потока; `None` для kernel-потоков или до bootstrap.
+    pub fn current_ipc_buffer_va(&self) -> Option<VirtualAddress> {
+        self.inner.with_lock(|inner| inner.current_ipc_buffer_va())
     }
 
     pub fn spawn_prepared_user_process(

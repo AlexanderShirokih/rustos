@@ -7,6 +7,15 @@ pub enum Erased {}
 ///
 /// Стабильна, пока объект жив. После drop'а адрес может переиспользоваться,
 /// поэтому Koid не глобально-уникален во времени.
+///
+/// # Назначение: только диагностика
+///
+/// Koid — ДИАГНОСТИЧЕСКИЙ идентификатор (логи, инспекция, отладочный вывод).
+/// Ни авторизация, ни маршрутизация IPC на него НЕ опираются: доступ
+/// определяется наличием хендла и его правами ([`Rights`](super::rights::Rights)),
+/// а идентификация клиента/соединения на port'е — значком (badge) хендла
+/// (см. RFC-0001, доставка badge на recv/call). Не использовать Koid как
+/// механизм идентичности или контроля доступа в IPC-пути.
 pub struct Koid<T: ?Sized = Erased>(NonZeroU64, PhantomData<fn() -> T>);
 
 const TYPE_SHIFT: u32 = 56;
@@ -61,13 +70,13 @@ impl<T: ?Sized> core::hash::Hash for Koid<T> {
 impl<T: ?Sized> core::fmt::Debug for Koid<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let name = match self.type_tag() {
-            1 => "Channel",
-            2 => "Event",
-            3 => "Process",
-            4 => "Thread",
-            5 => "Memory",
-            6 => "PhysicalResource",
-            7 => "Mailbox",
+            1 => "Signal",
+            2 => "Process",
+            3 => "Thread",
+            4 => "Memory",
+            5 => "Resource",
+            6 => "Port",
+            7 => "Reply",
             _ => "?",
         };
         write!(f, "Koid({name}#{:#x})", self.0.get() & ADDR_MASK)
