@@ -737,9 +737,11 @@ mod tests {
     }
 
     fn transport(base: usize) -> ThreadTransport {
+        use memory::memory_mapper::MemoryMapper;
+
         let mapper = PageMapper::new(base);
         let table = Arc::new(MutexCell::new(HandleTable::new()));
-        use memory::memory_mapper::MemoryMapper;
+
         mapper
             .copy_user_out(VirtualAddress::new(base), &encode_tag(3, 0).to_le_bytes())
             .unwrap();
@@ -765,13 +767,13 @@ mod tests {
 
         // Получатель паркуется.
         let recv_action = ep.recv(transport(BASE_B), &rt);
-        let (recv_outcome, recv_reply_slot) = match recv_action {
-            PortAction::Park {
-                outcome,
-                reply_slot,
-                ..
-            } => (outcome, reply_slot),
-            _ => panic!("recv must park"),
+        let PortAction::Park {
+            outcome: recv_outcome,
+            reply_slot: recv_reply_slot,
+            ..
+        } = recv_action
+        else {
+            panic!("recv must park");
         };
         assert!(recv_outcome.get().is_none());
 
@@ -798,9 +800,12 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let send_action = ep.send_or_call(WaiterKind::Send, transport(BASE_A), &rt, None);
-        let send_outcome = match send_action {
-            PortAction::Park { outcome, .. } => outcome,
-            _ => panic!("send must park"),
+        let PortAction::Park {
+            outcome: send_outcome,
+            ..
+        } = send_action
+        else {
+            panic!("send must park");
         };
 
         let recv_action = ep.recv(transport(BASE_B), &rt);
@@ -827,9 +832,8 @@ mod tests {
         // Получатель смэтчил call -> получает Reply, вызывающая сторона остаётся
         // заблокированным (outcome ещё pending).
         let recv_action = ep.recv(transport(BASE_B), &rt);
-        let reply = match recv_action {
-            PortAction::Done { reply: Some(r) } => r,
-            _ => panic!("recv must return a reply for call"),
+        let PortAction::Done { reply: Some(reply) } = recv_action else {
+            panic!("recv must return a reply for call");
         };
         assert!(outcome.get().is_none(), "caller stays blocked until reply");
 
@@ -846,9 +850,8 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let action = ep.recv(transport(BASE_B), &rt);
-        let outcome = match action {
-            PortAction::Park { outcome, .. } => outcome,
-            _ => panic!("recv must park"),
+        let PortAction::Park { outcome, .. } = action else {
+            panic!("recv must park");
         };
         ep.cancel_all();
         assert_eq!(outcome.get(), Some(RendezvousOutcome::PeerGone));
@@ -860,9 +863,8 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let action = ep.recv(transport(BASE_B), &rt);
-        let outcome = match action {
-            PortAction::Park { outcome, .. } => outcome,
-            _ => panic!("recv must park"),
+        let PortAction::Park { outcome, .. } = action else {
+            panic!("recv must park");
         };
         drop(ep);
         assert_eq!(outcome.get(), Some(RendezvousOutcome::PeerGone));
@@ -872,9 +874,8 @@ mod tests {
     fn remove_waiter_is_arbiter_and_idempotent() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let waker = match ep.recv(transport(BASE_B), &rt) {
-            PortAction::Park { waker, .. } => waker,
-            _ => panic!("recv must park"),
+        let PortAction::Park { waker, .. } = ep.recv(transport(BASE_B), &rt) else {
+            panic!("recv must park");
         };
         assert!(!ep.queue_is_empty());
         // Снятие найденного waiter'а -> true, очередь пустеет.
@@ -913,9 +914,12 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         // Получатель уже припаркован - poll-send встречает его немедленно.
-        let recv_outcome = match ep.recv(transport(BASE_B), &rt) {
-            PortAction::Park { outcome, .. } => outcome,
-            _ => panic!("recv must park"),
+        let PortAction::Park {
+            outcome: recv_outcome,
+            ..
+        } = ep.recv(transport(BASE_B), &rt)
+        else {
+            panic!("recv must park");
         };
         assert_eq!(port_send(&ep, transport(BASE_A), &rt, Some(0)), Ok(()));
         assert_eq!(recv_outcome.get(), Some(RendezvousOutcome::Delivered));
@@ -950,11 +954,8 @@ mod tests {
         );
         assert!(matches!(call_action, PortAction::Park { .. }));
 
-        // Получатель забирает запрос -> отдаёт Reply; вызыватель переходит в
-        // ожидание reply.
-        let reply = match ep.recv(transport(BASE_B), &rt) {
-            PortAction::Done { reply: Some(r) } => r,
-            _ => panic!("recv must return a reply for call"),
+        let PortAction::Done { reply: Some(reply) } = ep.recv(transport(BASE_B), &rt) else {
+            panic!("recv must return a reply for call");
         };
         assert_eq!(outcome.raw(), OutcomeSlot::AWAITING_REPLY);
 

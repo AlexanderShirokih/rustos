@@ -1,12 +1,4 @@
-//! Кросс-AS перенос rendezvous-сообщения между IPC-buffer'ами двух потоков.
-//!
-//! Используется [`Port`](super::port) и [`Reply`](super::reply).
-//! Тело копируется через линейное физ-отображение (`copy_user_in`/
-//! `copy_user_out`) без переключения TTBR0 - mapper любого AS читает/пишет
-//! user-страницы по своему дереву трансляции. Хендлы переносятся атомарно
-//! (drain из таблицы отправителя с `Rights::TRANSFER`, install в таблицу
-//! получателя с откатом - паттерн `try_drain_for_transfer` + install_or_restore
-//! из channel-пути, но кросс-процессно).
+//! Кросс-AS перенос рандеву-сообщения между IPC-буферами двух потоков.
 
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
@@ -17,8 +9,8 @@ use syscall::{IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, decode_tag, encode_tag};
 
 use super::{
     errors::IpcError,
-    handle::{Handle, HandleId},
-    handle_table::HandleTable,
+    handle::HandleId,
+    handle_table::{HandleReservation, HandleTable},
     port::{BufferAccess, ThreadTransport},
     rights::Rights,
 };
@@ -191,14 +183,8 @@ fn offset_va(base: VirtualAddress, off: usize) -> VirtualAddress {
 /// Переносит рандеву-сообщение из IPC-буфера `sender` в IPC-буфер
 /// `receiver`: тело (по `len` из tag), хендлы (по `ncaps`), и tag.
 ///
-/// Атомарность caps: drain из таблицы отправителя (требуя
-/// [`Rights::TRANSFER`]) и install в таблицу получателя выполняются с
-/// откатом - на любой ошибке install уже вставленные хендлы возвращаются
-/// отправителю, а у получателя ничего не остаётся. tag пишется ПОСЛЕДНИМ -
-/// после тела, caps и badge. На ошибке (включая ошибку записи badge) тело
-/// может быть уже скопировано в data-область получателя, но tag НЕ выставлен,
-/// поэтому получатель увидит исходный (нулевой) tag и не примет ни мусорное
-/// тело, ни мусорный badge.
+/// Атомарность передачи: ни один cap не снимается с таблицы отправителя, пока
+/// все способные упасть записи в буфер получателя не прошли успешно.
 pub fn transfer_rendezvous(
     sender: &ThreadTransport,
     receiver: &ThreadTransport,
@@ -214,8 +200,8 @@ pub fn transfer_rendezvous(
         write_bytes(receiver, DATA_OFFSET, &body[..len])?;
     }
 
-    // 2. Caps: читаем HandleId'ы отправителя, drain из его таблицы (требуя
-    //    TRANSFER), install в таблицу получателя с откатом.
+    write_badge(receiver, sender.badge)?;
+
     if ncaps > 0 {
         let raw_ids = read_caps(sender, ncaps)?;
         let mut ids: Vec<HandleId> = Vec::with_capacity(ncaps);
@@ -224,70 +210,65 @@ pub fn transfer_rendezvous(
             ids.push(HandleId::from_raw(nz));
         }
 
-        // Атомарный drain из source-таблицы (всё или ничего).
-        let drained = sender
+        // Резервируем ncaps слотов получателя (всё или ничего).
+        let reservations = receiver
             .handle_table
-            .with_lock(|tbl| tbl.try_drain_for_transfer(&ids, Rights::TRANSFER))?;
+            .with_lock(|tbl| reserve_slots(tbl, ncaps))?;
+        let predicted: Vec<HandleId> = reservations.iter().map(|r| r.handle_id()).collect();
 
-        // Install в receiver-таблицу с откатом; на ошибке вернуть всё в
-        // source-таблицу.
-        let new_ids: Vec<HandleId> = match receiver
+        // Пишем предсказанные ID в caps получателя. На ошибке освобождаем
+        // резервации - отправитель ещё не тронут.
+        if let Err(e) = write_caps(receiver, &predicted) {
+            receiver
+                .handle_table
+                .with_lock(|tbl| release_all(tbl, &reservations));
+            return Err(e);
+        }
+
+        let drained = match sender
             .handle_table
-            .with_lock(|tbl| install_all(tbl, drained))
+            .with_lock(|tbl| tbl.try_drain_for_transfer(&ids, Rights::TRANSFER))
         {
-            Ok(ids) => ids,
-            Err((e, returned)) => {
-                // Возвращаем хендлы обратно отправителю, чтобы перенос был
-                // полностью откатан (caller получит ошибку, его хендлы целы).
-                sender.handle_table.with_lock(|tbl| {
-                    for h in returned {
-                        // Слоты заведомо свободны (мы их только что
-                        // дренировали), insert не должен упасть; если упал -
-                        // хендл закрывается (Arc -> 0), что безопасно.
-                        let _ = tbl.insert(h);
-                    }
-                });
+            Ok(d) => d,
+            Err(e) => {
+                receiver
+                    .handle_table
+                    .with_lock(|tbl| release_all(tbl, &reservations));
                 return Err(e);
             }
         };
 
-        // Пишем новые HandleId'ы в caps получателя.
-        if let Err(e) = write_caps(receiver, &new_ids) {
-            // Копирование caps в user-буфер получателя провалилось - откат:
-            // вынимаем из receiver-таблицы и возвращаем отправителю.
-            let restored: Vec<Handle> = receiver.handle_table.with_lock(|tbl| {
-                let mut v = Vec::with_capacity(new_ids.len());
-                for id in &new_ids {
-                    if let Ok(h) = tbl.remove(*id) {
-                        v.push(h);
-                    }
-                }
-                v
-            });
-            sender.handle_table.with_lock(|tbl| {
-                for h in restored {
-                    let _ = tbl.insert(h);
-                }
-            });
-            return Err(e);
-        }
+        receiver.handle_table.with_lock(|tbl| {
+            for (res, handle) in reservations.into_iter().zip(drained) {
+                let _ = tbl.commit_reserved(res, handle);
+            }
+        });
     }
 
-    // 3. Значок отправителя - получателю. Пишется независимо от тела/caps
-    //    (даже при len==0/ncaps==0): сервер различает клиентов по badge.
-    //    До tag, чтобы при ошибке записи badge получатель не увидел валидный
-    //    tag с мусорным badge.
-    write_badge(receiver, sender.badge)?;
-
-    // 4. Финально - tag получателю (len + ncaps). Только после успешного
-    //    тела, caps и badge: tag - "коммит" сообщения, его валидность
-    //    означает, что все остальные поля уже на месте.
     write_tag(receiver, encode_tag(len, ncaps))?;
     Ok(())
 }
 
-/// Тестовый in-memory mapper: одна страница user-памяти под IPC-buffer.
-/// `copy_user_in/out` режут по `[base_va, base_va + len)`.
+fn reserve_slots(tbl: &mut HandleTable, n: usize) -> Result<Vec<HandleReservation>, IpcError> {
+    let mut reservations: Vec<HandleReservation> = Vec::with_capacity(n);
+    for _ in 0..n {
+        match tbl.reserve_slot() {
+            Ok(r) => reservations.push(r),
+            Err(e) => {
+                release_all(tbl, &reservations);
+                return Err(e);
+            }
+        }
+    }
+    Ok(reservations)
+}
+
+fn release_all(tbl: &mut HandleTable, reservations: &[HandleReservation]) {
+    for r in reservations {
+        tbl.release_reservation(*r);
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_mapper {
     use alloc::{sync::Arc, vec, vec::Vec};
@@ -499,7 +480,7 @@ mod tests {
         let new_raw = u32::from_le_bytes(idb);
         let new_id = kobject_handle_id(new_raw);
         let got = rt
-            .with_lock(|tbl| tbl.get(new_id, Rights::READ).map(|h| h.koid()))
+            .with_lock(|tbl| tbl.get(new_id, Rights::READ).map(Handle::koid))
             .unwrap();
         assert_eq!(got, koid);
     }
@@ -674,8 +655,6 @@ mod tests {
 
     #[test]
     fn install_fail_rolls_caps_back_to_sender() {
-        // Получатель: таблица ёмкости 1, переносим 2 cap'а -> install_all
-        // падает на втором (OutOfHandles), всё откатывается отправителю.
         let (sender, sm, st) = transport(BASE_A);
         let (receiver, _rm, rt) = transport_custom(BASE_B, 4096, 1);
         let id_a = signal_with_transfer(&st);
@@ -690,15 +669,14 @@ mod tests {
 
         let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
         assert_eq!(err, IpcError::OutOfHandles);
-        // Оба handle вернулись отправителю; у получателя пусто.
+        assert!(st.with_lock(|t| t.get(id_a, Rights::READ).is_ok()));
+        assert!(st.with_lock(|t| t.get(id_b, Rights::READ).is_ok()));
         assert_eq!(st.with_lock(|t| t.live_count()), 2);
         assert_eq!(rt.with_lock(|t| t.live_count()), 0);
     }
 
     #[test]
     fn write_caps_fail_rolls_caps_back_to_sender() {
-        // Receiver-mapper усечён так, что caps[0] (@CAPS_OFFSET) не помещается:
-        // install прошёл, но write_caps падает -> откат отправителю.
         let (sender, sm, st) = transport(BASE_A);
         let (receiver, _rm, rt) = transport_custom(BASE_B, CAPS_OFFSET, 16);
         let id = signal_with_transfer(&st);
@@ -706,6 +684,7 @@ mod tests {
 
         let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
         assert_eq!(err, IpcError::BufferTooSmall);
+        assert!(st.with_lock(|t| t.get(id, Rights::READ).is_ok()));
         assert_eq!(st.with_lock(|t| t.live_count()), 1);
         assert_eq!(rt.with_lock(|t| t.live_count()), 0);
     }
@@ -723,36 +702,21 @@ mod tests {
         assert_eq!(read_data(&rm, BASE_B, 4), b"DATA");
     }
 
-    type KernelBuf = Arc<MutexCell<syscall::IpcBuffer>>;
-}
+    #[test]
+    fn write_badge_fail_rolls_transferred_caps_back_to_sender() {
+        let (mut sender, sm, st) = transport(BASE_A);
+        sender.badge = 0xABCD;
+        let (receiver, rm, rt) = transport_custom(BASE_B, BADGE_OFFSET, 16);
+        let id = signal_with_transfer(&st);
+        write_buf(&sm, BASE_A, encode_tag(0, 1), &[id.raw().get()], b"");
 
-/// Вставляет все `handles` в `tbl`. На ошибке install'а возвращает уже
-/// вставленные обратно как `Handle`-ы вместе с тем, что не вставился и
-/// остатком - вызывающий вернёт их источнику.
-fn install_all(
-    tbl: &mut HandleTable,
-    handles: Vec<Handle>,
-) -> Result<Vec<HandleId>, (IpcError, Vec<Handle>)> {
-    let mut inserted: Vec<HandleId> = Vec::with_capacity(handles.len());
-    let mut iter = handles.into_iter();
-    while let Some(handle) = iter.next() {
-        match tbl.try_insert(handle) {
-            Ok(id) => inserted.push(id),
-            Err((e, returned)) => {
-                // Откат: вынимаем уже вставленные обратно как Handle.
-                let mut back: Vec<Handle> = Vec::with_capacity(inserted.len() + 1);
-                for id in &inserted {
-                    if let Ok(h) = tbl.remove(*id) {
-                        back.push(h);
-                    }
-                }
-                back.push(returned);
-                for h in iter {
-                    back.push(h);
-                }
-                return Err((e, back));
-            }
-        }
+        let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
+        assert_eq!(err, IpcError::BufferTooSmall);
+        assert!(st.with_lock(|t| t.get(id, Rights::READ).is_ok()));
+        assert_eq!(st.with_lock(|t| t.live_count()), 1);
+        assert_eq!(rt.with_lock(|t| t.live_count()), 0);
+        assert_eq!(read_tag(&rm, BASE_B), 0);
     }
-    Ok(inserted)
+
+    type KernelBuf = Arc<MutexCell<syscall::IpcBuffer>>;
 }

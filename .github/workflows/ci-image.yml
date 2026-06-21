@@ -1,0 +1,52 @@
+name: CI image
+
+# Собирает и публикует CI/dev-образ в GHCR.
+# Триггерится только при изменении окружения, плюс вручную (для первичной
+# инициализации образа перед тем, как на него переедет основной CI).
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - Dockerfile
+      - rust-toolchain.toml
+      - .github/workflows/ci-image.yml
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}-ci
+
+jobs:
+  build:
+    name: build & push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
