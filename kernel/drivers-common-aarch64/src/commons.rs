@@ -47,8 +47,15 @@ where
             .nth(reg_index)
             .unwrap_or(AddressSpace { offset: 0, size: 0 });
 
+        // Трансляция child -> parent: parent + (offset - child).
+        // FDT недоверенный: при offset < child saturating_sub даёт 0 вместо
+        // underflow, а saturating_add защищает от переполнения адреса.
+        let translated = bus_range
+            .parent
+            .saturating_add(address_space.offset.saturating_sub(bus_range.child));
+
         AddressSpace {
-            offset: bus_range.parent + address_space.offset - bus_range.child,
+            offset: translated,
             size: address_space.size,
         }
     }

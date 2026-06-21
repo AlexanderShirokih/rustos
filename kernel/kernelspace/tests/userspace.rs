@@ -46,6 +46,98 @@ fn fresh_factory() -> &'static MockAddressSpaceFactory {
     Box::leak(Box::new(MockAddressSpaceFactory::new()))
 }
 
+struct FailingAddressSpaceFactory;
+
+impl memory::memory_mapper::AddressSpaceFactory for FailingAddressSpaceFactory {
+    fn create_user(
+        &self,
+    ) -> Result<
+        std::sync::Arc<dyn memory::memory_mapper::MemoryMapper + Send + Sync>,
+        memory::memory_mapper::AsCreateError,
+    > {
+        Err(memory::memory_mapper::AsCreateError::OutOfMemory)
+    }
+}
+
+#[test]
+fn spawn_user_process_with_too_many_initial_handles_is_rejected() {
+    reset_switches();
+    let factory = fresh_factory();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler(timer, factory);
+
+    let init = [0xAAu8; 8];
+    let segments = [UserSegment {
+        va_base: aligned(USER_SEGMENT_VA),
+        mapped_size: PAGE,
+        init_bytes: &init,
+        perms: MemFlags::user_rx(),
+    }];
+    let image = UserImage {
+        segments: &segments,
+        entry: VirtualAddress::new(USER_SEGMENT_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP_VA),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let too_many = (kobject::HandleTable::DEFAULT_CAPACITY as usize) + 1;
+    let handles: Vec<Handle> = (0..too_many)
+        .map(|_| Handle::new(KObject::Signal(Signal::new()), Rights::WRITE))
+        .collect();
+    let launch = UserProcessLaunch::new().initial_handles(handles);
+
+    let err = scheduler
+        .spawn_user_process_with_launch("too-many", &image, Priority::new(2), 4, launch)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        SpawnUserError::Prepared(scheduler::PreparedUserProcessError::TooManyInitialHandles)
+    );
+
+    assert_eq!(factory.created(), 0);
+    assert_eq!(scheduler.process_count(), 1);
+}
+
+#[test]
+fn spawn_user_process_propagates_address_space_creation_failure() {
+    reset_switches();
+    let failing: &'static FailingAddressSpaceFactory =
+        Box::leak(Box::new(FailingAddressSpaceFactory));
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::with_address_space_factory(
+        MockTimerSource(timer),
+        TEST_CONFIG,
+        Some(failing),
+    )
+    .bootstrap();
+
+    let init = [0xAAu8; 8];
+    let segments = [UserSegment {
+        va_base: aligned(USER_SEGMENT_VA),
+        mapped_size: PAGE,
+        init_bytes: &init,
+        perms: MemFlags::user_rx(),
+    }];
+    let image = UserImage {
+        segments: &segments,
+        entry: VirtualAddress::new(USER_SEGMENT_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP_VA),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let err = scheduler
+        .spawn_user_process("as-fail", &image, Priority::new(2), 4)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        SpawnUserError::Prepared(scheduler::PreparedUserProcessError::Spawn(
+            scheduler::SpawnError::AddressSpaceCreationFailed
+        ))
+    );
+    // AS не создан - user-процесс не зарегистрирован.
+    assert_eq!(scheduler.process_count(), 1);
+}
+
 #[test]
 fn spawn_user_process_creates_address_space_and_thread() {
     reset_switches();
@@ -436,15 +528,17 @@ fn context_switch_between_two_user_processes_writes_distinct_roots() {
     running.yield_now();
     let after_yield = take_address_space_switches();
 
+    // Контракт: yield с user-a на user-b переключает AS на КАКОЙ-ТО root,
+    // отличный от root'а user-a. Конкретное значение root_b (раскладка mock-
+    // фабрики) не фиксируем - проверяем наблюдаемое: переключение на иной AS.
     let root_a = MockAddressSpaceFactory::BASE_ROOT_PA;
-    let root_b = root_a + 4096;
     assert!(
-        after_yield
-            .iter()
-            .any(|sw| matches!(sw, Some(handle) if handle.root.as_usize() == root_b)),
-        "yield user-a->user-b must switch to root_b={root_b:#x}, got {after_yield:?}"
+        after_yield.iter().any(|sw| matches!(
+            sw,
+            Some(handle) if handle.root.as_usize() != root_a
+        )),
+        "yield user-a->user-b must switch to a distinct user root (!= root_a); got {after_yield:?}"
     );
-    let _ = root_a;
 }
 
 #[test]

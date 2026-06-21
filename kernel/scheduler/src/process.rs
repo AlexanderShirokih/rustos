@@ -312,16 +312,10 @@ mod tests {
     }
 
     #[test]
-    fn is_image_loaded_true_after_set_user_vm() {
-        let mut p = fresh_process();
-        p.set_user_vm(make_vm()).expect("fresh process accepts vm");
-        assert!(p.is_image_loaded());
-    }
-
-    #[test]
-    fn set_user_vm_succeeds_on_fresh_process() {
+    fn set_user_vm_succeeds_on_fresh_process_and_marks_loaded() {
         let mut p = fresh_process();
         assert_eq!(p.set_user_vm(make_vm()), Ok(()));
+        assert!(p.is_image_loaded());
     }
 
     #[test]
@@ -341,5 +335,46 @@ mod tests {
     fn process_keeps_owned_name() {
         let p = Process::empty(pid(1), "user-proc", AddressSpace::kernel());
         assert_eq!(p.name(), "user-proc");
+    }
+
+    #[test]
+    fn process_table_full_when_all_slots_occupied() {
+        let mut table = ProcessTable::new(2);
+        assert!(table.insert("a", AddressSpace::kernel()).is_ok());
+        assert!(table.insert("b", AddressSpace::kernel()).is_ok());
+        assert_eq!(
+            table.insert("c", AddressSpace::kernel()),
+            Err(ProcessTableError::Full)
+        );
+        assert_eq!(table.live_count(), 2);
+    }
+
+    #[test]
+    fn process_table_reuses_slot_after_remove() {
+        let mut table = ProcessTable::new(1);
+        let first = table.insert("a", AddressSpace::kernel()).expect("first");
+        assert_eq!(
+            table.insert("b", AddressSpace::kernel()),
+            Err(ProcessTableError::Full)
+        );
+
+        let removed = table.remove(first).expect("first present");
+        assert_eq!(removed.id(), first);
+        assert!(table.get(first).is_none());
+
+        let second = table.insert("b", AddressSpace::kernel()).expect("reuse");
+        assert_ne!(first, second, "reused slot must still yield a fresh id");
+        assert_eq!(table.live_count(), 1);
+    }
+
+    #[test]
+    fn process_table_out_of_ids_when_id_space_exhausted() {
+        let mut table = ProcessTable::new(4);
+        table.next_id = u32::MAX;
+        assert_eq!(
+            table.insert("overflow", AddressSpace::kernel()),
+            Err(ProcessTableError::OutOfIds)
+        );
+        assert_eq!(table.live_count(), 0);
     }
 }

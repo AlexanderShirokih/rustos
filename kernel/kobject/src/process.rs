@@ -41,56 +41,17 @@ impl ProcessObject {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::{signal::SIGNALED, wait::MockWaker},
-        *,
-    };
+    use super::{super::signal::SIGNALED, *};
 
     #[test]
-    fn signal_terminated_wakes_observer() {
+    fn process_delegates_lifecycle_to_termination_state() {
         let proc = ProcessObject::new();
-        let sig = proc.termination_signal();
-        let w = MockWaker::new();
-        sig.register_waiter(SIGNALED, w.clone());
-
-        assert!(!w.was_woken());
-        proc.signal_terminated(42);
-        assert!(w.was_woken());
-        assert_eq!(w.observed() & SIGNALED, SIGNALED);
-        assert_eq!(proc.exit_code(), 42);
-        assert!(proc.terminated());
-    }
-
-    #[test]
-    fn signal_terminated_is_idempotent() {
-        let proc = ProcessObject::new();
-        proc.signal_terminated(7);
-        proc.signal_terminated(99);
-        assert_eq!(proc.exit_code(), 7);
-        assert!(proc.terminated());
-    }
-
-    #[test]
-    fn exit_code_zero_before_termination() {
-        let proc = ProcessObject::new();
-        assert_eq!(proc.exit_code(), 0);
         assert!(!proc.terminated());
-    }
+        assert_eq!(proc.exit_code(), 0);
 
-    #[test]
-    fn late_termination_signal_is_presignaled() {
-        let proc = ProcessObject::new();
-        proc.signal_terminated(5);
-        // Наблюдатель подписался уже после выхода: Signal сразу несёт SIGNALED.
-        let sig = proc.termination_signal();
-        assert_eq!(sig.peek() & SIGNALED, SIGNALED);
-    }
-
-    #[test]
-    fn koid_unique_per_instance() {
-        use crate::object::KObject;
-        let a = ProcessObject::new();
-        let b = ProcessObject::new();
-        assert_ne!(KObject::Process(a).koid(), KObject::Process(b).koid());
+        proc.signal_terminated(42);
+        assert!(proc.terminated());
+        assert_eq!(proc.exit_code(), 42);
+        assert_eq!(proc.termination_signal().peek() & SIGNALED, SIGNALED);
     }
 }

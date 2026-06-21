@@ -27,18 +27,40 @@ fn stdout_node<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
 }
 
 fn first_serial<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
-    device_tree.nodes().find(|node| {
-        let by_device_type = node
-            .prop("device_type")
-            .and_then(|prop| prop.as_cstr())
-            .is_some_and(|value| value == "serial");
+    // `DeviceTree::nodes()` отдаёт только прямых детей корня, поэтому serial
+    // внутри шины (`/soc/serial@...`) ею не находится. Обходим всё дерево
+    // рекурсивно начиная с корня (depth-first).
+    let root = device_tree.root()?;
+    find_serial_in_subtree(&root)
+}
 
-        let by_name = node.name().starts_with("serial");
-        let by_compat = compatible_strings(node)
-            .any(|value| value.contains("serial") || value.contains("uart"));
+/// Рекурсивный depth-first поиск serial-узла в поддереве `node`.
+fn find_serial_in_subtree<'dt>(node: &Node<'dt>) -> Option<Node<'dt>> {
+    if is_serial(node) {
+        return Some(*node);
+    }
 
-        by_device_type || by_name || by_compat
-    })
+    for child in node.children() {
+        if let Some(found) = find_serial_in_subtree(&child) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+/// Признаёт узел serial-консолью по `device_type`, имени или `compatible`.
+fn is_serial(node: &Node<'_>) -> bool {
+    let by_device_type = node
+        .prop("device_type")
+        .and_then(|prop| prop.as_cstr())
+        .is_some_and(|value| value == "serial");
+
+    let by_name = node.name().starts_with("serial");
+    let by_compat =
+        compatible_strings(node).any(|value| value.contains("serial") || value.contains("uart"));
+
+    by_device_type || by_name || by_compat
 }
 
 /// Итерирует по null-terminated строкам из свойства `compatible`.
@@ -54,7 +76,11 @@ fn compatible_strings<'a>(node: &'a Node<'a>) -> impl Iterator<Item = &'a str> {
 mod tests {
     use fdt::devicetree::DeviceTree;
 
-    use super::find_initrd_payload;
+    use super::{find_console, find_initrd_payload};
+    use crate::test_util::{
+        StringPool, begin_node, build_chosen_dtb, build_chosen_dtb_32,
+        build_chosen_dtb_with_payload, build_fdt, end_node, end_tree, push_prop_bytes,
+    };
 
     #[test]
     fn finds_initrd_payload_in_chosen() {
@@ -113,86 +139,88 @@ mod tests {
         assert!(find_initrd_payload(&DeviceTree::from_bytes(&reversed).unwrap()).is_none());
     }
 
-    fn build_chosen_dtb(initrd: Option<(u64, u64)>) -> Vec<u8> {
-        build_chosen_dtb_with_payload(
-            initrd.map(|(start, end)| (start.to_be_bytes().to_vec(), end.to_be_bytes().to_vec())),
-        )
-    }
+    // ─── Поиск консоли / serial ───────────────────────────────────────────────
 
-    fn build_chosen_dtb_32(initrd: Option<(u32, u32)>) -> Vec<u8> {
-        build_chosen_dtb_with_payload(
-            initrd.map(|(start, end)| (start.to_be_bytes().to_vec(), end.to_be_bytes().to_vec())),
-        )
-    }
+    /// DTB с serial внутри шины soc, опциональным `aliases` и опциональным
+    /// `/chosen { stdout-path = ... }`.
+    fn build_console_dtb(stdout_path: Option<&str>) -> Vec<u8> {
+        let mut pool = StringPool::new();
+        let s_addr = pool.intern("#address-cells");
+        let s_size = pool.intern("#size-cells");
+        let s_compat = pool.intern("compatible");
+        let s_devtype = pool.intern("device_type");
+        let s_serial0 = pool.intern("serial0");
+        let s_stdout = pool.intern("stdout-path");
 
-    fn build_chosen_dtb_with_payload(initrd: Option<(Vec<u8>, Vec<u8>)>) -> Vec<u8> {
-        let strings = b"linux,initrd-start\0linux,initrd-end\0";
-        let start_off = 0u32;
-        let end_off = 19u32;
+        let mut st = Vec::new();
+        begin_node(&mut st, "");
+        push_prop_bytes(&mut st, s_addr, &2u32.to_be_bytes());
+        push_prop_bytes(&mut st, s_size, &1u32.to_be_bytes());
 
-        let mut structure = Vec::new();
-        push_u32(&mut structure, 0x1);
-        push_u32(&mut structure, 0x0);
+        // aliases { serial0 = "/soc/serial@2000"; }
+        begin_node(&mut st, "aliases");
+        push_prop_bytes(&mut st, s_serial0, b"/soc/serial@2000\0");
+        end_node(&mut st);
 
-        push_u32(&mut structure, 0x1);
-        structure.extend_from_slice(b"chosen\0");
-        align4(&mut structure);
-
-        if let Some((start, end)) = initrd {
-            if !start.is_empty() {
-                push_prop_bytes(&mut structure, start_off, &start);
-            }
-            if !end.is_empty() {
-                push_prop_bytes(&mut structure, end_off, &end);
-            }
+        // chosen { stdout-path = ... } (опционально)
+        if let Some(path) = stdout_path {
+            begin_node(&mut st, "chosen");
+            let mut val = path.as_bytes().to_vec();
+            val.push(0);
+            push_prop_bytes(&mut st, s_stdout, &val);
+            end_node(&mut st);
         }
 
-        push_u32(&mut structure, 0x2);
-        push_u32(&mut structure, 0x2);
-        push_u32(&mut structure, 0x9);
+        // soc { serial@2000 { device_type="serial"; compatible="arm,pl011"; } }
+        begin_node(&mut st, "soc");
+        begin_node(&mut st, "serial@2000");
+        push_prop_bytes(&mut st, s_devtype, b"serial\0");
+        push_prop_bytes(&mut st, s_compat, b"arm,pl011\0");
+        end_node(&mut st); // serial
+        end_node(&mut st); // soc
 
-        build_fdt(structure, strings)
+        end_node(&mut st); // root
+        end_tree(&mut st);
+
+        build_fdt(&st, pool.bytes())
     }
 
-    fn build_fdt(structure: Vec<u8>, strings: &[u8]) -> Vec<u8> {
-        let off_mem_rsvmap = 40u32;
-        let off_struct = off_mem_rsvmap + 16;
-        let off_strings = off_struct + structure.len() as u32;
-        let total = off_strings + strings.len() as u32;
+    #[test]
+    fn first_serial_finds_serial_inside_soc_bus() {
+        // Регресс: serial лежит в /soc/serial@2000 (не прямой ребёнок корня).
+        // Прежняя реализация через nodes() (только дети корня) его не находила.
+        let dtb = build_console_dtb(None);
+        let tree = DeviceTree::from_bytes(&dtb).unwrap();
 
-        let mut buf = Vec::new();
-        push_u32(&mut buf, 0xD00D_FEED);
-        push_u32(&mut buf, total);
-        push_u32(&mut buf, off_struct);
-        push_u32(&mut buf, off_strings);
-        push_u32(&mut buf, off_mem_rsvmap);
-        push_u32(&mut buf, 17);
-        push_u32(&mut buf, 16);
-        push_u32(&mut buf, 0);
-        push_u32(&mut buf, strings.len() as u32);
-        push_u32(&mut buf, structure.len() as u32);
-
-        buf.extend_from_slice(&[0; 16]);
-        buf.extend_from_slice(&structure);
-        buf.extend_from_slice(strings);
-        buf
+        let console = find_console(&tree).expect("serial внутри soc должен находиться");
+        assert_eq!(console.name(), "serial@2000");
     }
 
-    fn push_u32(buf: &mut Vec<u8>, value: u32) {
-        buf.extend_from_slice(&value.to_be_bytes());
+    #[test]
+    fn find_console_prefers_stdout_path() {
+        let dtb = build_console_dtb(Some("/soc/serial@2000:115200n8"));
+        let tree = DeviceTree::from_bytes(&dtb).unwrap();
+
+        // stdout-path с :-суффиксом должен резолвиться в узел.
+        let console = find_console(&tree).expect("stdout-path");
+        assert_eq!(console.name(), "serial@2000");
     }
 
-    fn push_prop_bytes(buf: &mut Vec<u8>, name_off: u32, value: &[u8]) {
-        push_u32(buf, 0x3);
-        push_u32(buf, value.len() as u32);
-        push_u32(buf, name_off);
-        buf.extend_from_slice(value);
-        align4(buf);
+    #[test]
+    fn find_console_falls_back_to_first_serial_when_stdout_missing() {
+        // Нет /chosen -> stdout_node None -> fallback на first_serial.
+        let dtb = build_console_dtb(None);
+        let tree = DeviceTree::from_bytes(&dtb).unwrap();
+
+        let console = find_console(&tree).expect("fallback на serial");
+        assert_eq!(console.name(), "serial@2000");
     }
 
-    fn align4(buf: &mut Vec<u8>) {
-        while !buf.len().is_multiple_of(4) {
-            buf.push(0);
-        }
+    #[test]
+    fn find_console_none_when_no_serial_present() {
+        // DTB без serial-узлов: /chosen без stdout-path, нет serial.
+        let dtb = build_chosen_dtb(None);
+        let tree = DeviceTree::from_bytes(&dtb).unwrap();
+        assert!(find_console(&tree).is_none());
     }
 }

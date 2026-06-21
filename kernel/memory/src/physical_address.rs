@@ -210,4 +210,54 @@ mod tests {
         assert_eq!(start.as_usize(), 0x1000);
         assert_eq!(end.as_usize(), 0x4000);
     }
+
+    #[test]
+    fn from_usize_accepts_aligned_and_rejects_misaligned() {
+        assert!(PageAlignedAddress::from_usize(0x2000).is_some());
+        assert_eq!(
+            PageAlignedAddress::from_usize(0x2000).unwrap().as_usize(),
+            0x2000
+        );
+        // Не кратно размеру страницы.
+        assert!(PageAlignedAddress::from_usize(0x2001).is_none());
+        assert!(PageAlignedAddress::from_usize(0x0FFF).is_none());
+        // Ноль выровнен.
+        assert!(PageAlignedAddress::from_usize(0).is_some());
+    }
+
+    #[test]
+    fn new_validates_alignment_like_from_usize() {
+        assert!(PageAlignedAddress::new(PhysicalAddress::new(0x3000)).is_some());
+        assert!(PageAlignedAddress::new(PhysicalAddress::new(0x3001)).is_none());
+    }
+
+    #[test]
+    fn checked_add_and_sub_report_overflow() {
+        let addr = PhysicalAddress::new(0x1000);
+
+        assert_eq!(addr.checked_add(0x1000).unwrap().as_usize(), 0x2000);
+        assert_eq!(addr.checked_sub(0x1000).unwrap().as_usize(), 0);
+
+        // Переполнение вверх.
+        assert!(PhysicalAddress::new(usize::MAX).checked_add(1).is_none());
+        // Переполнение вниз.
+        assert!(PhysicalAddress::new(0).checked_sub(1).is_none());
+    }
+
+    #[test]
+    fn next_aligned_advances_by_one_page() {
+        let addr = PageAlignedAddress::from_usize(0x1000).unwrap();
+        assert_eq!(addr.next_aligned().as_usize(), 0x2000);
+        // Остаётся выровненным.
+        assert_eq!(
+            addr.next_aligned().as_usize() % PageAlignedAddress::ALIGNMENT,
+            0
+        );
+    }
+
+    #[test]
+    fn is_zero_distinguishes_zero_from_nonzero() {
+        assert!(PageAlignedAddress::from_usize(0).unwrap().is_zero());
+        assert!(!PageAlignedAddress::from_usize(0x1000).unwrap().is_zero());
+    }
 }

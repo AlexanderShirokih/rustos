@@ -24,7 +24,8 @@ pub use arch::{
 };
 pub use process::Process;
 pub use scheduler::{
-    Bootstrapped, Running, Scheduler, SchedulerConfig, SchedulerStage, Uninit, lowest_priority,
+    Bootstrapped, DEFAULT_QUANTUM_NS, Running, Scheduler, SchedulerConfig, SchedulerStage, Uninit,
+    lowest_priority,
 };
 pub use service::{SchedulerHandle, UserProcessLauncher};
 pub use thread::{Thread, ThreadState};

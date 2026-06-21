@@ -82,51 +82,6 @@ impl NodeAddressExt for TestNode<'_> {
 }
 
 #[test]
-fn node_address_ext_works_for_mmio_translation() {
-    let uart = TestNode {
-        id: 3,
-        name: "serial@2000",
-        props: &[],
-        children: &[],
-        cells: None,
-        range: None,
-        regs: &[AddressSpace {
-            offset: 0x2000,
-            size: 0x1000,
-        }],
-    };
-    let soc = TestNode {
-        id: 2,
-        name: "soc",
-        props: &[],
-        children: &[uart],
-        cells: Some(CellsSize {
-            address_cells: 1,
-            size_cells: 1,
-        }),
-        range: Some(BusRange {
-            child: 0,
-            parent: 0x1000_0000,
-            size: 0x0010_0000,
-        }),
-        regs: &[],
-    };
-
-    let first_reg = uart.reg_iter(soc.cells_size().unwrap()).next().unwrap();
-
-    let range = soc
-        .range_to_parent(CellsSize {
-            address_cells: 2,
-            size_cells: 1,
-        })
-        .unwrap();
-
-    let translated = range.parent + first_reg.offset - range.child;
-
-    assert_eq!(translated, 0x1000_2000);
-}
-
-#[test]
 fn probe_context_ext_translates_reg_address_space() {
     let uart = TestNode {
         id: 3,
@@ -175,5 +130,60 @@ fn probe_context_ext_translates_reg_address_space() {
     let reg = context.get_address(0);
 
     assert_eq!(reg.offset, 0x1000_2000);
+    assert_eq!(reg.size, 0x1000);
+}
+
+/// Регресс: недоверенный FDT может задать `child > offset`, что без защиты
+/// приводило к underflow в `parent + offset - child`. Должно насыщаться, а не
+/// паниковать.
+#[test]
+fn get_address_does_not_underflow_when_child_exceeds_offset() {
+    let uart = TestNode {
+        id: 3,
+        name: "serial@10",
+        props: &[],
+        children: &[],
+        cells: None,
+        range: None,
+        regs: &[AddressSpace {
+            offset: 0x10, // меньше bus_range.child ниже
+            size: 0x1000,
+        }],
+    };
+    let soc_children = [uart];
+    let soc = TestNode {
+        id: 2,
+        name: "soc",
+        props: &[],
+        children: &soc_children,
+        cells: Some(CellsSize {
+            address_cells: 1,
+            size_cells: 1,
+        }),
+        range: Some(BusRange {
+            child: 0x1_0000, // child > offset устройства
+            parent: 0x2000_0000,
+            size: 0x0010_0000,
+        }),
+        regs: &[],
+    };
+    let root_children = [soc];
+    let root = TestNode {
+        id: 1,
+        name: "",
+        props: &[],
+        children: &root_children,
+        cells: Some(CellsSize {
+            address_cells: 2,
+            size_cells: 1,
+        }),
+        range: None,
+        regs: &[],
+    };
+
+    let context = ProbeContext::new(uart, vec![root, soc, uart]);
+    // Не должно паниковать; offset - child насыщается до 0 -> результат == parent.
+    let reg = context.get_address(0);
+    assert_eq!(reg.offset, 0x2000_0000);
     assert_eq!(reg.size, 0x1000);
 }

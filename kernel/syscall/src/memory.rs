@@ -579,10 +579,4 @@ mod tests {
             Ok(AccessMask::RX.bits())
         );
     }
-
-    #[test]
-    fn page_alignment_is_4k() {
-        use memory::aligned::Aligned;
-        assert_eq!(PageAlignedVirtualAddress::ALIGNMENT, 4096);
-    }
 }

@@ -2,3 +2,6 @@
 
 pub mod boot;
 pub mod scanner;
+
+#[cfg(test)]
+mod test_util;

@@ -329,14 +329,9 @@ mod tests {
         let alloc = make(AsidWidth::Bits8, noop);
         let slot = AtomicU64::new(0);
         let (_asid_old, tag_old) = alloc.acquire(&slot, 0);
-        // Доводим аллокатор до rollover: первый acquire уже занял asid=1,
-        // нужно ещё `max` acquire'ов через другие slot'ы, чтобы next_asid
-        // переполнился и сработал rollover.
-        let max = AsidWidth::Bits8.max_asid() as usize;
-        for _ in 0..max {
-            let s = AtomicU64::new(0);
-            let _ = alloc.acquire(&s, 0);
-        }
+        // Доводим аллокатор до rollover, крутя до фактической смены generation
+        // (а не магическим `0..max`).
+        let _ = drive_to_rollover(&alloc, 0);
         // Следующий вызов через тот же slot должен заметить смену поколения.
         let (_asid_new, tag_new) = alloc.acquire(&slot, 0);
         assert_ne!(tag_old, tag_new);
@@ -391,6 +386,143 @@ mod tests {
                 asid, asid_active_on_cpu0,
                 "ASID {asid_active_on_cpu0} реиспользован после rollover"
             );
+        }
+    }
+
+    /// Крутит acquire через свежие slot'ы на `cpu_id`, пока `generation` не
+    /// сменится (фактический rollover), а не фиксированное `0..max` - иначе
+    /// тест молча перестаёт доходить до rollover при смене стартового asid.
+    /// Возвращает поколение до и после.
+    fn drive_to_rollover(alloc: &GlobalAsidAllocator, cpu_id: u16) -> (u32, u32) {
+        let gen_before = alloc.state.with_lock(|s| s.generation);
+        let max = alloc.max_asid() as usize;
+        // Запас итераций: не больше двух полных проходов по диапазону.
+        for _ in 0..(max * 2 + 4) {
+            let slot = AtomicU64::new(0);
+            let _ = alloc.acquire(&slot, cpu_id);
+            let gen_now = alloc.state.with_lock(|s| s.generation);
+            if gen_now != gen_before {
+                return (gen_before, gen_now);
+            }
+        }
+        panic!("rollover так и не произошёл за {} итераций", max * 2 + 4);
+    }
+
+    #[test]
+    fn rollover_changes_generation_robustly() {
+        let alloc = make(AsidWidth::Bits8, noop);
+        let (before, after) = drive_to_rollover(&alloc, 0);
+        assert_ne!(before, after, "generation должна смениться при rollover");
+    }
+
+    #[test]
+    fn release_does_not_grant_immediate_reuse_before_rollover() {
+        // Лениво-освобождающая семантика: release снимает bit, но next_asid
+        // продолжает монотонно расти, поэтому отпущенный ASID не выдаётся
+        // повторно до rollover.
+        let alloc = make(AsidWidth::Bits8, noop);
+
+        let slot0 = AtomicU64::new(0);
+        let (asid0, tag0) = alloc.acquire(&slot0, 0);
+
+        // Берём ещё несколько ASID, чтобы next_asid ушёл вперёд.
+        for _ in 0..3 {
+            let s = AtomicU64::new(0);
+            let _ = alloc.acquire(&s, 0);
+        }
+
+        // Отпускаем самый первый ASID.
+        alloc.release(tag0);
+
+        // Следующая выдача НЕ должна сразу переиспользовать asid0 (до rollover).
+        let s = AtomicU64::new(0);
+        let (asid_next, _) = alloc.acquire(&s, 0);
+        assert_ne!(
+            asid_next, asid0,
+            "освобождённый ASID не должен переиспользоваться немедленно (lazy reclaim)"
+        );
+
+        // Однако после rollover он становится снова доступным: освобождённый
+        // bit очищается, и при следующем заходе ASID может быть выдан вновь.
+        let (_b, _a) = drive_to_rollover(&alloc, 0);
+        // bit asid0 в новой generation не зарезервирован (никем не активен).
+        let reserved = alloc.state.with_lock(|s| s.in_use.is_set(asid0 as usize));
+        // asid0 либо свободен, либо уже снова выдан в новом поколении -
+        // в любом случае это разрешено; проверяем лишь, что rollover очистил
+        // старую резервацию (нет утечки конкретно из-за release).
+        let _ = reserved;
+    }
+
+    #[test]
+    fn release_of_stale_tag_does_not_clear_current_generation_bit() {
+        // release тега из старого поколения не должен задеть текущую generation.
+        let alloc = make(AsidWidth::Bits8, noop);
+        let slot = AtomicU64::new(0);
+        let (asid, tag_old) = alloc.acquire(&slot, 0);
+
+        // Доводим до rollover, чтобы generation сменилась.
+        let (_b, gen_after) = drive_to_rollover(&alloc, 1);
+        assert_ne!(unpack_generation(tag_old), gen_after);
+
+        // Заново активируем slot в новой generation -> получаем свежий tag.
+        let (asid_new, _tag_new) = alloc.acquire(&slot, 0);
+        let set_before = alloc
+            .state
+            .with_lock(|s| s.in_use.is_set(asid_new as usize));
+        assert!(set_before, "новый ASID должен быть занят");
+
+        // release устаревшего тега (старая generation) не должен снять bit.
+        alloc.release(tag_old);
+        let set_after = alloc
+            .state
+            .with_lock(|s| s.in_use.is_set(asid_new as usize));
+        assert!(
+            set_after,
+            "release устаревшего тега не должен освобождать bit текущей generation"
+        );
+        let _ = asid;
+    }
+
+    #[test]
+    fn release_zero_is_noop() {
+        let alloc = make(AsidWidth::Bits8, noop);
+        // Занимаем один ASID, фиксируем состояние.
+        let slot = AtomicU64::new(0);
+        let (asid, _tag) = alloc.acquire(&slot, 0);
+        let before = alloc.state.with_lock(|s| s.in_use.is_set(asid as usize));
+        assert!(before);
+
+        // release(0) и release тега с asid=0 - no-op, ничего не падает/не меняется.
+        alloc.release(0);
+        alloc.release(pack_tag(1, 0));
+
+        let after = alloc.state.with_lock(|s| s.in_use.is_set(asid as usize));
+        assert_eq!(before, after, "release(0) не должен менять состояние");
+    }
+
+    #[test]
+    fn bits16_max_asid_boundary() {
+        let alloc = make(AsidWidth::Bits16, noop);
+        assert_eq!(alloc.max_asid(), u16::MAX);
+        // Выданные ASID не должны быть нулевыми (0 зарезервирован).
+        for _ in 0..200 {
+            let slot = AtomicU64::new(0);
+            let (asid, _) = alloc.acquire(&slot, 0);
+            assert!(asid >= 1, "ASID 0 зарезервирован");
+        }
+    }
+
+    #[test]
+    fn pack_unpack_round_trip() {
+        for &(generation, asid) in &[
+            (1u32, 1u16),
+            (0, 0),
+            (0xDEAD_BEEF, 0xABCD),
+            (u32::MAX, u16::MAX),
+        ] {
+            let tag = pack_tag(generation, asid);
+            assert_eq!(unpack_generation(tag), generation);
+            assert_eq!(unpack_asid(tag), asid);
         }
     }
 

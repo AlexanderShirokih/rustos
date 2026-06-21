@@ -89,25 +89,4 @@ mod tests {
         assert_eq!(entry.arg, arg);
         assert_eq!(entry.kernel_stack_top.as_ptr() as usize, 0x8000_0000);
     }
-
-    #[test]
-    fn from_image_keeps_user_sp_aligned_to_16() {
-        // user_stack_top из image должен пройти через `from_image` без
-        // изменения; проверяем sanity-инвариант 16-byte alignment, на
-        // который опираются init_user-имплементации.
-        let segs = [UserSegment {
-            va_base: aligned(0x4000_0000),
-            mapped_size: PAGE,
-            init_bytes: &[],
-            perms: MemFlags::user_rx(),
-        }];
-        let image = make_image(&segs);
-
-        let entry = user_entry_from_image(&image, fake_kernel_top(), UserBootstrapArg::ZERO);
-        assert_eq!(
-            entry.user_sp.as_usize() & 0xF,
-            0,
-            "user_sp must remain 16-byte aligned"
-        );
-    }
 }

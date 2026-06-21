@@ -31,12 +31,15 @@ impl<'a> Cursor<'a> {
         self.set_position(p);
     }
 
-    pub(crate) fn read_u32(&mut self) -> u32 {
-        let b = self.buffer;
+    /// Читает big-endian `u32` из текущей позиции.
+    ///
+    /// Возвращает `None`, если в буфере недостаточно байт (обрезанный или
+    /// недоверенный blob), чтобы не паниковать на OOB-доступе.
+    pub(crate) fn read_u32(&mut self) -> Option<u32> {
         let p = self.position;
-
-        self.position += 4;
-        u32::from_be_bytes([b[p], b[p + 1], b[p + 2], b[p + 3]])
+        let slice = self.buffer.get(p..p + 4)?;
+        self.position = p + 4;
+        Some(u32::from_be_bytes(slice.try_into().unwrap()))
     }
 
     pub fn read_cstr_at(&self, offset: usize) -> &'a str {

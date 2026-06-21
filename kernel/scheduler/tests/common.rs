@@ -14,6 +14,8 @@ use std::{
 
 use memory::{
     MemFlags,
+    frame::Frame,
+    frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
     memory_mapper::{
         AddressSpaceFactory, AddressSpaceHandle, AddressSpaceTag, AsCreateError, MemoryMapper,
         MemoryMappingError, MemoryRemappingError, MemoryUnmappingError,
@@ -220,6 +222,9 @@ struct MockUserMapper {
     root_pa: PhysicalAddress,
     released: Arc<AtomicUsize>,
     map_calls: Arc<Mutex<Vec<MapCall>>>,
+    /// Если `true`, `map_exact` возвращает ошибку - для проверки
+    /// rollback-путей (`attach_ipc_buffer`, `MemoryRegion::install`).
+    fail_map_exact: bool,
 }
 
 impl MemoryMapper for MockUserMapper {
@@ -246,6 +251,9 @@ impl MemoryMapper for MockUserMapper {
         _size: usize,
         _mem_flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
+        if self.fail_map_exact {
+            return Err(MemoryMappingError::VirtualMappingError);
+        }
         Ok(())
     }
 
@@ -298,6 +306,8 @@ pub struct MockAddressSpaceFactory {
     inner: Mutex<MockFactoryInner>,
     released: Arc<AtomicUsize>,
     map_calls: Arc<Mutex<Vec<MapCall>>>,
+    /// Если `true`, маппер-ы, выданные фабрикой, будут проваливать `map_exact`.
+    fail_map_exact: bool,
 }
 
 struct MockFactoryInner {
@@ -311,6 +321,16 @@ impl MockAddressSpaceFactory {
     pub const BASE_ROOT_PA: usize = 0x10_0000;
 
     pub fn new() -> Self {
+        Self::with_map_exact_failure(false)
+    }
+
+    /// Фабрика, чьи маппер-ы проваливают `map_exact` - для проверки
+    /// rollback-путей установки регионов.
+    pub fn with_failing_map_exact() -> Self {
+        Self::with_map_exact_failure(true)
+    }
+
+    fn with_map_exact_failure(fail_map_exact: bool) -> Self {
         Self {
             inner: Mutex::new(MockFactoryInner {
                 next_root_pa: Self::BASE_ROOT_PA,
@@ -318,6 +338,7 @@ impl MockAddressSpaceFactory {
             }),
             released: Arc::new(AtomicUsize::new(0)),
             map_calls: Arc::new(Mutex::new(Vec::new())),
+            fail_map_exact,
         }
     }
 
@@ -342,6 +363,58 @@ impl Default for MockAddressSpaceFactory {
     }
 }
 
+/// `FrameAllocator`, считающий deallocations; выдаёт фреймы с 1000.
+pub struct CountingFrameAllocator {
+    next: AtomicUsize,
+    deallocated: Mutex<Vec<Frame>>,
+}
+
+impl CountingFrameAllocator {
+    pub fn new() -> Self {
+        Self {
+            next: AtomicUsize::new(1000),
+            deallocated: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn deallocated_count(&self) -> usize {
+        self.deallocated.lock().unwrap().len()
+    }
+}
+
+impl Default for CountingFrameAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FrameAllocator for CountingFrameAllocator {
+    fn reserve_frames_exact(
+        &self,
+        from_inclusive: Frame,
+        _to_exclusive: Frame,
+    ) -> Result<Frame, ReserveFrameError> {
+        Ok(from_inclusive)
+    }
+
+    fn allocate_frame(&self) -> Option<Frame> {
+        Some(Frame::new(self.next.fetch_add(1, Ordering::SeqCst)))
+    }
+
+    fn allocate_frames(&self, _max_count: usize) -> Option<(Frame, usize)> {
+        None
+    }
+
+    fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {
+        self.deallocated.lock().unwrap().push(frame);
+        Ok(())
+    }
+
+    fn is_allocated(&self, _frame: Frame) -> bool {
+        false
+    }
+}
+
 impl AddressSpaceFactory for MockAddressSpaceFactory {
     fn create_user(&self) -> Result<Arc<dyn MemoryMapper + Send + Sync>, AsCreateError> {
         let mut inner = self.inner.lock().unwrap();
@@ -352,6 +425,7 @@ impl AddressSpaceFactory for MockAddressSpaceFactory {
             root_pa,
             released: self.released.clone(),
             map_calls: self.map_calls.clone(),
+            fail_map_exact: self.fail_map_exact,
         }))
     }
 }

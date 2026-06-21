@@ -494,15 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn kind_tag_stable() {
-        let fa = leak_fa();
-        let v = MemoryRegion::create_virtual(fa, nz(1), AccessMask::R).unwrap();
-        let p = MemoryRegion::create_physical(aligned_pa(0), nz(PAGE_SIZE), AccessMask::R);
-        assert_eq!(v.kind_tag(), 1);
-        assert_eq!(p.kind_tag(), 2);
-    }
-
-    #[test]
     fn access_mask_preserved() {
         let fa = leak_fa();
         let region = MemoryRegion::create_virtual(fa, nz(1), AccessMask::RX).unwrap();

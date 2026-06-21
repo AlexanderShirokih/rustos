@@ -64,9 +64,6 @@ pub struct PhysicalFrameAllocator<L: LockCell<FrameBitmap>> {
     /// Управляемые регионы оперативной памяти.
     regions: Vec<L, MAX_REGIONS>,
 
-    /// Индекс текущего региона для поиска свободных фреймов.
-    current_region_index: usize,
-
     /// Номер следующего фрейма для выделения.
     next_frame_hint: AtomicUsize,
 }
@@ -114,7 +111,6 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
 
         Self {
             regions,
-            current_region_index: 0,
             next_frame_hint: AtomicUsize::new(Frame::from(next_frame_hint).number()),
         }
     }
@@ -196,26 +192,16 @@ impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
     fn allocate_frame(&self) -> Option<Frame> {
         let next_frame_hint = Frame::new(self.next_frame_hint.load(Ordering::Relaxed));
 
-        // Начало поиска с подсказки next_frame_hint в текущем регионе
-        let current_region_frame = self.regions[self.current_region_index]
-            .with_lock(|current| Self::try_alloc_in(current, next_frame_hint));
-
-        if let Some(frame) = current_region_frame {
-            self.next_frame_hint
-                .store(frame.add(1).number(), Ordering::Relaxed);
-
-            return Some(frame);
-        }
-
-        // Ищем в других регионах, пропуская уже проверенный
+        // Первый регион пробуем с подсказки next_frame_hint, остальные - с их
+        // начала. `alloc_from` сам клампит подсказку к границам региона.
         for (index, region) in self.regions.iter().enumerate() {
-            if index == self.current_region_index {
-                continue; // Пропускаем уже проверенный регион
-            }
-
-            let region_frame = region.with_lock(|region_bitmap| {
-                let range = region_bitmap.range();
-                Self::try_alloc_in(region_bitmap, Frame::from(range.start()))
+            let region_frame = region.with_lock(|bitmap| {
+                let start = if index == 0 {
+                    next_frame_hint
+                } else {
+                    Frame::from(bitmap.range().start())
+                };
+                Self::try_alloc_in(bitmap, start)
             });
 
             if let Some(frame) = region_frame {

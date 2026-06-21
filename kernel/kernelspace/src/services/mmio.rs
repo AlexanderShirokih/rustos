@@ -33,7 +33,7 @@ impl MmioServiceImpl {
         arena_base: PageAlignedVirtualAddress,
         arena_size: NonZeroUsize,
     ) -> Self {
-        let arena_end = VirtualAddress::new(arena_base.as_usize() + arena_size.get());
+        let arena_end = VirtualAddress::new(arena_base.as_usize().saturating_add(arena_size.get()));
         Self {
             memory_mapper,
             va_allocator: Arc::new(MutexCell::new(RangeAllocator::new(arena_base, arena_end))),
@@ -53,8 +53,12 @@ impl MmioService for MmioServiceImpl {
             .ok_or_else(|| MmioMapError("Mmio region size must be non-zero".into()))?;
 
         let pages = raw_size.get().div_ceil(PAGE_SIZE);
-        let size =
-            NonZeroUsize::new(pages * PAGE_SIZE).expect("pages >= 1 since raw_size is non-zero");
+        // `pages * PAGE_SIZE` может переполниться при близком к usize::MAX
+        // размере региона - тогда округление вверх некорректно; отвергаем.
+        let size_bytes = pages
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| MmioMapError("Mmio region size overflows when rounded up".into()))?;
+        let size = NonZeroUsize::new(size_bytes).expect("pages >= 1 since raw_size is non-zero");
 
         let source_address = self
             .va_allocator
@@ -222,10 +226,18 @@ mod tests {
         let maps = mapper.maps.lock().unwrap();
         assert_eq!(maps.len(), 1);
         let first = maps[0];
-        assert_eq!(
+        // Контракт: VA берётся из MMIO-арены и не зависит от PA. Конкретное
+        // значение (раскладка RangeAllocator) не фиксируем - проверяем, что
+        // VA лежит внутри арены и не совпадает с PA устройства.
+        assert!(
+            (ARENA_BASE..ARENA_BASE + ARENA_SIZE).contains(&first.va.as_usize()),
+            "MMIO VA must come from the arena, got {:#x}",
+            first.va.as_usize()
+        );
+        assert_ne!(
             first.va.as_usize(),
-            ARENA_BASE,
-            "first MMIO binding must start at arena base, not PA+offset"
+            0x0c17_0000,
+            "MMIO VA must be independent of device PA"
         );
         assert_eq!(
             first.pa,
@@ -308,5 +320,159 @@ mod tests {
         );
         drop(maps);
         drop(second);
+    }
+
+    /// Mapper, чей `map_exact` всегда падает - для проверки отката VA.
+    struct FailingMapper;
+
+    impl MemoryMapper for FailingMapper {
+        fn map(
+            &self,
+            _va: PageAlignedVirtualAddress,
+            _pc: usize,
+            _init: &[u8],
+            _f: MemFlags,
+        ) -> Result<(), MemoryMappingError> {
+            unreachable!()
+        }
+        fn map_exact(
+            &self,
+            _va: PageAlignedVirtualAddress,
+            _pa: PageAlignedAddress,
+            _s: usize,
+            _f: MemFlags,
+        ) -> Result<(), MemoryMappingError> {
+            Err(MemoryMappingError::OutOfMemory)
+        }
+        fn unmap(
+            &self,
+            _va: PageAlignedVirtualAddress,
+            _s: usize,
+        ) -> Result<(), MemoryUnmappingError> {
+            Ok(())
+        }
+        fn remap(
+            &self,
+            _va: PageAlignedVirtualAddress,
+            _s: usize,
+            _f: MemFlags,
+        ) -> Result<(), MemoryRemappingError> {
+            Ok(())
+        }
+        fn activate_handle(&self) -> AddressSpaceHandle {
+            AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
+        }
+        fn zero_owned_frame(&self, _pa: PageAlignedAddress) {}
+        fn as_any(&self) -> &(dyn Any + 'static) {
+            self
+        }
+    }
+
+    fn user_owners(access: AccessMode) -> Owners<DeviceMemoryPermission> {
+        Owners {
+            kernel: DeviceMemoryPermission::default(),
+            user: DeviceMemoryPermission { access },
+        }
+    }
+
+    #[test]
+    fn map_mmio_rolls_back_va_when_install_fails() {
+        let mapper = Box::leak(Box::new(FailingMapper));
+        let service = MmioServiceImpl::new(
+            mapper,
+            PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
+            NonZeroUsize::new(ARENA_SIZE).unwrap(),
+        );
+
+        let address = MmioAddress::new(0x0c17_0000, 0x1000).unwrap();
+        let perms = Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable());
+
+        let Err(err) = service.map_mmio(address, perms) else {
+            panic!("install must fail");
+        };
+        assert!(format!("{err}").contains("Mapping error"));
+
+        // Откат вернул VA в арену: следующая попытка снова выделяет тот же стартовый VA.
+        assert!(
+            service.map_mmio(address, perms).is_err(),
+            "install must fail again"
+        );
+        let remaining = service.va_allocator.with_lock(|alloc| {
+            alloc
+                .lookup(
+                    PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
+                    NonZeroUsize::new(PAGE_SIZE).unwrap(),
+                )
+                .map(|_| ())
+        });
+        assert_eq!(
+            remaining,
+            Err(memory::range_allocator::RangeError::NotFound),
+            "no VA must remain reserved after rolled-back installs"
+        );
+    }
+
+    #[test]
+    fn map_mmio_rejects_unaligned_address() {
+        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let service = make_service(mapper);
+        // 0x0c17_0001 не выровнен на 4К.
+        let address = MmioAddress::new(0x0c17_0001, 0x1000).unwrap();
+        let Err(err) = service.map_mmio(
+            address,
+            Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+        ) else {
+            panic!("unaligned MMIO base must be rejected");
+        };
+        assert!(format!("{err}").contains("not aligned"));
+        assert!(mapper.maps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn map_mmio_rejects_zero_size() {
+        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let service = make_service(mapper);
+        let address = MmioAddress::new(0x0c17_0000, 0).unwrap();
+        let Err(err) = service.map_mmio(
+            address,
+            Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+        ) else {
+            panic!("zero-size MMIO must be rejected");
+        };
+        assert!(format!("{err}").contains("non-zero"));
+        assert!(mapper.maps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn access_mask_for_device_covers_kernel_user_readonly_and_none() {
+        // Любой Writable (kernel или user) -> RW.
+        assert_eq!(
+            access_mask_for_device(Owners::<DeviceMemoryPermission>::kernel(
+                DeviceMemoryPermission::writable()
+            ))
+            .bits(),
+            AccessMask::RW.bits()
+        );
+        assert_eq!(
+            access_mask_for_device(user_owners(AccessMode::Writable)).bits(),
+            AccessMask::RW.bits()
+        );
+        // Readonly без Writable -> R.
+        assert_eq!(
+            access_mask_for_device(Owners::<DeviceMemoryPermission>::kernel(
+                DeviceMemoryPermission::readonly()
+            ))
+            .bits(),
+            AccessMask::R.bits()
+        );
+        assert_eq!(
+            access_mask_for_device(user_owners(AccessMode::Readonly)).bits(),
+            AccessMask::R.bits()
+        );
+        // Ни Writable, ни Readonly (оба None) -> NONE.
+        assert_eq!(
+            access_mask_for_device(user_owners(AccessMode::None)).bits(),
+            AccessMask::NONE.bits()
+        );
     }
 }

@@ -96,6 +96,7 @@ mod tests {
     use memory::physical_address::PhysicalAddress;
 
     use super::{BootInfo, BootPayloadRange, HwDescription};
+    use crate::test_util::build_chosen_dtb;
 
     #[test]
     fn new_fdt_builds_expected_variant() {
@@ -111,11 +112,11 @@ mod tests {
     #[test]
     fn new_fdt_with_payload_preserves_userland_blob() {
         let phys = PhysicalAddress::new(0x4000_0000);
-        let payload = BootPayloadRange::new(PhysicalAddress::new(0x4800_0000), 0x200000).unwrap();
+        let payload = BootPayloadRange::new(PhysicalAddress::new(0x4800_0000), 0x20_0000).unwrap();
         let info = BootInfo::new_fdt_with_payload(phys, Some(payload));
 
         assert_eq!(info.userland_blob.unwrap().start().as_usize(), 0x4800_0000);
-        assert_eq!(info.userland_blob.unwrap().size_bytes(), 0x200000);
+        assert_eq!(info.userland_blob.unwrap().size_bytes(), 0x20_0000);
     }
 
     #[test]
@@ -144,72 +145,5 @@ mod tests {
         let payload = BootPayloadRange::new(PhysicalAddress::new(0x8000), 0x3000).unwrap();
 
         assert_eq!(payload.end_exclusive().as_usize(), 0xb000);
-    }
-
-    fn build_chosen_dtb(initrd: Option<(u64, u64)>) -> Vec<u8> {
-        let strings = b"linux,initrd-start\0linux,initrd-end\0";
-        let start_off = 0u32;
-        let end_off = 19u32;
-
-        let mut structure = Vec::new();
-        push_u32(&mut structure, 0x1);
-        push_u32(&mut structure, 0x0);
-
-        push_u32(&mut structure, 0x1);
-        structure.extend_from_slice(b"chosen\0");
-        align4(&mut structure);
-
-        if let Some((start, end)) = initrd {
-            push_prop_bytes(&mut structure, start_off, &start.to_be_bytes());
-            push_prop_bytes(&mut structure, end_off, &end.to_be_bytes());
-        }
-
-        push_u32(&mut structure, 0x2);
-        push_u32(&mut structure, 0x2);
-        push_u32(&mut structure, 0x9);
-
-        build_fdt(structure, strings)
-    }
-
-    fn build_fdt(structure: Vec<u8>, strings: &[u8]) -> Vec<u8> {
-        let off_mem_rsvmap = 40u32;
-        let off_struct = off_mem_rsvmap + 16;
-        let off_strings = off_struct + structure.len() as u32;
-        let total = off_strings + strings.len() as u32;
-
-        let mut buf = Vec::new();
-        push_u32(&mut buf, 0xD00D_FEED);
-        push_u32(&mut buf, total);
-        push_u32(&mut buf, off_struct);
-        push_u32(&mut buf, off_strings);
-        push_u32(&mut buf, off_mem_rsvmap);
-        push_u32(&mut buf, 17);
-        push_u32(&mut buf, 16);
-        push_u32(&mut buf, 0);
-        push_u32(&mut buf, strings.len() as u32);
-        push_u32(&mut buf, structure.len() as u32);
-
-        buf.extend_from_slice(&[0; 16]);
-        buf.extend_from_slice(&structure);
-        buf.extend_from_slice(strings);
-        buf
-    }
-
-    fn push_u32(buf: &mut Vec<u8>, value: u32) {
-        buf.extend_from_slice(&value.to_be_bytes());
-    }
-
-    fn push_prop_bytes(buf: &mut Vec<u8>, name_off: u32, value: &[u8]) {
-        push_u32(buf, 0x3);
-        push_u32(buf, value.len() as u32);
-        push_u32(buf, name_off);
-        buf.extend_from_slice(value);
-        align4(buf);
-    }
-
-    fn align4(buf: &mut Vec<u8>) {
-        while !buf.len().is_multiple_of(4) {
-            buf.push(0);
-        }
     }
 }

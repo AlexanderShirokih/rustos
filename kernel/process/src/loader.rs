@@ -89,18 +89,25 @@ mod tests {
     struct MapCall {
         va: usize,
         page_count: usize,
-        init_hash: u64,
-        init_len: usize,
+        init: std::vec::Vec<u8>,
     }
 
     struct MockMapper {
         calls: Mutex<std::vec::Vec<MapCall>>,
+        fail_on_call: Option<usize>,
     }
 
     impl MockMapper {
         fn new() -> Self {
             Self {
                 calls: Mutex::new(std::vec::Vec::new()),
+                fail_on_call: None,
+            }
+        }
+        fn failing_on(call_index: usize) -> Self {
+            Self {
+                calls: Mutex::new(std::vec::Vec::new()),
+                fail_on_call: Some(call_index),
             }
         }
         fn calls(&self) -> std::vec::Vec<MapCall> {
@@ -116,11 +123,14 @@ mod tests {
             init: &[u8],
             _: MemFlags,
         ) -> Result<(), MemoryMappingError> {
-            self.calls.lock().unwrap().push(MapCall {
+            let mut calls = self.calls.lock().unwrap();
+            if self.fail_on_call == Some(calls.len()) {
+                return Err(MemoryMappingError::OutOfMemory);
+            }
+            calls.push(MapCall {
                 va: va.as_usize(),
                 page_count,
-                init_hash: fnv1a(init),
-                init_len: init.len(),
+                init: init.to_vec(),
             });
             Ok(())
         }
@@ -160,15 +170,6 @@ mod tests {
         }
     }
 
-    fn fnv1a(bytes: &[u8]) -> u64 {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for &b in bytes {
-            hash ^= u64::from(b);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        hash
-    }
-
     #[test]
     fn load_user_image_maps_segments_and_stack_in_order() {
         let init = vec![0xCDu8; 100];
@@ -183,12 +184,12 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].va, 0x4000_0000);
         assert_eq!(calls[0].page_count, 1);
-        assert_eq!(calls[0].init_len, 100);
+        assert_eq!(calls[0].init.len(), 100);
 
         let stack_base = 0x1_0000_0000 - 4 * PAGE;
         assert_eq!(calls[1].va, stack_base);
         assert_eq!(calls[1].page_count, 4);
-        assert_eq!(calls[1].init_len, 0);
+        assert_eq!(calls[1].init.len(), 0);
     }
 
     #[test]
@@ -201,7 +202,25 @@ mod tests {
         load_user_image(&mapper, &image).unwrap();
 
         let calls = mapper.calls();
-        assert_eq!(calls[0].init_hash, fnv1a(&init));
+        assert_eq!(calls[0].init, init);
+    }
+
+    #[test]
+    fn load_user_image_propagates_mapper_error_on_partial_map() {
+        let segs = [
+            rx_segment(0x4000_0000, PAGE, &[]),
+            rw_segment(0x4000_0000 + PAGE, PAGE, &[]),
+        ];
+        let image = make_image(&segs, 0x4000_0000);
+        let mapper = MockMapper::failing_on(1);
+
+        assert_eq!(
+            load_user_image(&mapper, &image),
+            Err(UserImageError::Mapping(MemoryMappingError::OutOfMemory))
+        );
+        let calls = mapper.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].va, 0x4000_0000);
     }
 
     #[test]

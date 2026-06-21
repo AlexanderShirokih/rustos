@@ -50,6 +50,8 @@ pub enum UserImageError {
     EntryNotInExecSegment,
     /// User-стек пересекается с одним из сегментов.
     StackOverlapsSegment,
+    /// `va_base + mapped_size` сегмента переполняет адресное пространство.
+    SegmentAddressOverflow,
     /// Ошибка маппинга / выделения фреймов.
     Mapping(MemoryMappingError),
 }
@@ -75,7 +77,8 @@ impl UserImage<'_> {
     pub fn highest_segment_end(&self) -> Option<VirtualAddress> {
         self.segments
             .iter()
-            .map(|seg| seg.va_base.as_usize() + seg.mapped_size)
+            // Переполняющий сегмент невалиден и не может быть границей: отбрасываем.
+            .filter_map(|seg| seg.va_base.as_usize().checked_add(seg.mapped_size))
             .max()
             .map(VirtualAddress::new)
     }
@@ -105,7 +108,9 @@ impl UserImage<'_> {
             }
 
             let seg_start = seg.va_base.as_usize();
-            let seg_end = seg_start + seg.mapped_size;
+            let seg_end = seg_start
+                .checked_add(seg.mapped_size)
+                .ok_or(UserImageError::SegmentAddressOverflow)?;
 
             if seg_end > stack_base.as_usize() && stack_end > seg_start {
                 return Err(UserImageError::StackOverlapsSegment);
@@ -113,7 +118,11 @@ impl UserImage<'_> {
 
             for other in &self.segments[..i] {
                 let other_start = other.va_base.as_usize();
-                let other_end = other_start + other.mapped_size;
+                // `other` уже прошёл проверку overflow на своей итерации, поэтому
+                // checked_add тут не вернёт None; на всякий случай - overflow-ошибка.
+                let other_end = other_start
+                    .checked_add(other.mapped_size)
+                    .ok_or(UserImageError::SegmentAddressOverflow)?;
                 if seg_end > other_start && other_end > seg_start {
                     return Err(UserImageError::OverlappingSegments);
                 }
@@ -250,6 +259,65 @@ mod tests {
         let segs = [rx_segment(0x4000_0000, PAGE, &[])];
         let image = make_image(&segs, 0x5000_0000);
         assert_eq!(image.validate(), Err(UserImageError::EntryNotInExecSegment));
+    }
+
+    #[test]
+    fn validate_rejects_zero_stack_size() {
+        let segs = [rx_segment(0x4000_0000, PAGE, &[])];
+        let image = UserImage {
+            segments: &segs,
+            entry: VirtualAddress::new(0x4000_0000),
+            user_stack_top: VirtualAddress::new(0x1_0000_0000),
+            user_stack_size: 0,
+        };
+        assert_eq!(image.validate(), Err(UserImageError::MisalignedStack));
+    }
+
+    #[test]
+    fn validate_rejects_zero_mapped_size() {
+        let segs = [UserSegment {
+            va_base: aligned(0x4000_0000),
+            mapped_size: 0,
+            init_bytes: &[],
+            perms: MemFlags::user_rx(),
+        }];
+        let image = make_image(&segs, 0x4000_0000);
+        assert_eq!(image.validate(), Err(UserImageError::MisalignedSegment));
+    }
+
+    #[test]
+    fn validate_rejects_entry_on_exclusive_segment_end() {
+        // entry == seg_end (exclusive граница) не должен считаться "внутри"
+        // сегмента: проверка `entry < seg_end`, поэтому образ отвергается.
+        let segs = [rx_segment(0x4000_0000, PAGE, &[])];
+        let image = make_image(&segs, 0x4000_0000 + PAGE);
+        assert_eq!(image.validate(), Err(UserImageError::EntryNotInExecSegment));
+    }
+
+    #[test]
+    fn validate_rejects_segment_address_overflow() {
+        // va_base + mapped_size переполняет usize: должен быть отклонён без паники.
+        let huge = usize::MAX - PAGE + 1; // выровнен на 4К, +PAGE даёт overflow
+        let segs = [rx_segment(huge, PAGE, &[])];
+        let image = make_image(&segs, huge);
+        assert_eq!(
+            image.validate(),
+            Err(UserImageError::SegmentAddressOverflow)
+        );
+    }
+
+    #[test]
+    fn highest_segment_end_skips_overflowing_segment() {
+        let huge = usize::MAX - PAGE + 1;
+        let segs = [
+            rx_segment(0x4000_0000, PAGE, &[]),
+            rx_segment(huge, PAGE, &[]),
+        ];
+        let image = make_image(&segs, 0x4000_0000);
+        assert_eq!(
+            image.highest_segment_end(),
+            Some(VirtualAddress::new(0x4000_0000 + PAGE))
+        );
     }
 
     #[test]

@@ -156,6 +156,17 @@ impl<'a> DeviceTree<'a> {
     pub fn from_bytes(buffer: &'a [u8]) -> Result<Self, DtError> {
         let mut cur = Cursor::new(buffer);
         let header = FdtHeader::read_checked(&mut cur)?;
+
+        // Защита от недоверенного blob: total_size из заголовка не должен
+        // превышать фактический размер буфера, иначе обходчик дерева сможет
+        // прочитать за его пределами.
+        if header.total_size > buffer.len() {
+            return Err(DtError::Incomplete {
+                total_size: header.total_size,
+                actual: buffer.len(),
+            });
+        }
+
         Ok(DeviceTree { buffer, header })
     }
 
@@ -292,16 +303,25 @@ impl FdtHeader {
     fn read_checked(cur: &mut Cursor<'_>) -> Result<Self, DtError> {
         cur.set_position(0);
 
-        let magic = cur.read_u32();
+        // Заголовок состоит из 6 x u32. Если буфер обрезан, read_u32 вернёт None.
+        let actual = cur.buffer.len();
+        let mut read = || {
+            cur.read_u32().ok_or(DtError::Incomplete {
+                total_size: 0,
+                actual,
+            })
+        };
+
+        let magic = read()?;
         if magic != FdtHeader::MAGIC {
             return Err(DtError::InvalidMagic(magic));
         }
 
-        let total_size = cur.read_u32() as usize;
+        let total_size = read()? as usize;
 
-        let struct_off = cur.read_u32();
-        let strings_off = cur.read_u32();
-        let mem_rsvmap_off = cur.read_u32();
+        let struct_off = read()?;
+        let strings_off = read()?;
+        let mem_rsvmap_off = read()?;
 
         Ok(FdtHeader {
             total_size,
@@ -418,7 +438,7 @@ impl<'a> DeviceTreeWalker<'a> {
         self.cursor.set_position(offset);
 
         loop {
-            let tok_u32 = self.cursor.read_u32();
+            let tok_u32 = self.cursor.read_u32()?;
             let token = NodeToken::from_u32(tok_u32)?;
 
             match token {
@@ -440,8 +460,8 @@ impl<'a> DeviceTreeWalker<'a> {
                 }
 
                 NodeToken::Property => {
-                    let length = self.cursor.read_u32() as usize;
-                    let name_off = self.cursor.read_u32() as usize;
+                    let length = self.cursor.read_u32()? as usize;
+                    let name_off = self.cursor.read_u32()? as usize;
                     let value_offset = self.cursor.position();
                     let name = self
                         .cursor
@@ -473,9 +493,12 @@ impl<'a> DeviceTreeWalker<'a> {
     }
 
     fn map_property(&self, name: &'a str, offset: usize, length: usize) -> ValueNode<'a> {
-        let start = offset;
-        let end = start + length;
-        let value = &self.cursor.buffer[start..end];
+        let buf = self.cursor.buffer;
+        // Защита от завышенного `length` в недоверенном blob: ограничиваем срез
+        // фактическими границами буфера вместо паники на OOB.
+        let start = offset.min(buf.len());
+        let end = start.saturating_add(length).min(buf.len());
+        let value = &buf[start..end];
         ValueNode::Property(Property { name, value })
     }
 }

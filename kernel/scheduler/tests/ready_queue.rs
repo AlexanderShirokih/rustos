@@ -46,3 +46,34 @@ fn arbitrary_priority_levels_supported() {
     assert_eq!(id, lowest);
     assert_eq!(prio, Priority::new(7));
 }
+
+#[test]
+fn bitmap_stays_in_sync_with_per_level_queues() {
+    // Регресс на согласованность bitmap/queues: `peek_highest_priority`,
+    // `is_empty` и порядок `pop_highest` должны соответствовать фактическому
+    // содержимому очередей при перемешанных push/pop разных приоритетов.
+    let mut queue = ReadyQueue::new(32);
+    let high_a = thread_id(1);
+    let high_b = thread_id(2);
+    let low = thread_id(3);
+
+    queue.push(low, Priority::new(20));
+    queue.push(high_a, Priority::new(5));
+    queue.push(high_b, Priority::new(5));
+
+    assert_eq!(queue.peek_highest_priority(), Some(Priority::new(5)));
+    assert!(!queue.is_empty());
+
+    // Уровень 5 опустошается за два pop (FIFO), и только потом bitmap
+    // переключает peek на уровень 20.
+    assert_eq!(queue.pop_highest(), Some((high_a, Priority::new(5))));
+    assert_eq!(queue.peek_highest_priority(), Some(Priority::new(5)));
+    assert_eq!(queue.pop_highest(), Some((high_b, Priority::new(5))));
+
+    assert_eq!(queue.peek_highest_priority(), Some(Priority::new(20)));
+    assert_eq!(queue.pop_highest(), Some((low, Priority::new(20))));
+
+    assert!(queue.is_empty());
+    assert_eq!(queue.peek_highest_priority(), None);
+    assert_eq!(queue.pop_highest(), None);
+}

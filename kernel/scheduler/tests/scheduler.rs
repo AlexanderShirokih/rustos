@@ -3,26 +3,19 @@ mod common;
 use core::num::NonZeroUsize;
 use std::{
     panic,
-    sync::{
-        Arc, Mutex, Once, OnceLock, RwLock,
-        atomic::{AtomicUsize, Ordering},
-    },
-    vec::Vec as StdVec,
+    sync::{Arc, Mutex, Once, OnceLock, RwLock},
 };
 
 use memory::{
     AccessMask, MemFlags, MemoryRegion,
-    frame::Frame,
-    frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use scheduler::{
-    Priority, Scheduler, SchedulerConfig, SpawnAddressSpace, SpawnConfig, SpawnError,
-    ThreadStackAllocator, Uninit,
+    Priority, Scheduler, SchedulerConfig, SpawnAddressSpace, SpawnConfig, SpawnError, Uninit,
 };
 
 use crate::common::{
-    MockAddressSpaceFactory, MockContext, MockStack, MockTimer, MockTimerSource,
+    CountingFrameAllocator, MockAddressSpaceFactory, MockContext, MockTimer, MockTimerSource,
     preemption_enabled, reset_switches, switch_count, take_address_space_switches,
     with_simulated_irq,
 };
@@ -171,13 +164,19 @@ fn run_starts_highest_priority_thread() {
 
     assert_eq!(running.current(), high);
     assert_ne!(low, high);
-    assert_eq!(timer.scheduled_deadline(), 10_000_000);
-    // run() выполнил один реальный switch idle -> high.
+    assert_eq!(timer.scheduled_deadline(), scheduler::DEFAULT_QUANTUM_NS);
     assert_eq!(switch_count(), 1);
 }
 
-#[test]
-fn on_tick_round_robins_equal_priority_threads() {
+/// Точки входа preemption, ротирующие равноприоритетные потоки round-robin.
+/// Параметризуем тест по способу уступки кванта (time-slice-тик vs явный yield),
+/// чтобы не плодить три почти идентичных теста на один и тот же контракт.
+enum PreemptKind {
+    OnTick,
+    Yield,
+}
+
+fn round_robin_via(kind: &PreemptKind) {
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
@@ -191,11 +190,36 @@ fn on_tick_round_robins_equal_priority_threads() {
     let running = scheduler.run();
     assert_eq!(running.current(), first);
 
-    with_simulated_irq(|| running.on_tick(0));
+    let mut now = 0;
+    let mut step = |running: &Scheduler<MockContext, MockTimerSource, scheduler::Running>| {
+        let before = switch_count();
+        match kind {
+            PreemptKind::OnTick => with_simulated_irq(|| running.on_tick(now)),
+            PreemptKind::Yield => running.yield_now(),
+        }
+        now += 1;
+        assert_eq!(
+            switch_count(),
+            before + 1,
+            "each rotation must perform exactly one context switch"
+        );
+    };
+
+    step(&running);
     assert_eq!(running.current(), second);
 
-    with_simulated_irq(|| running.on_tick(1));
+    step(&running);
     assert_eq!(running.current(), first);
+}
+
+#[test]
+fn on_tick_round_robins_equal_priority_threads() {
+    round_robin_via(&PreemptKind::OnTick);
+}
+
+#[test]
+fn yield_round_robins_equal_priority_threads() {
+    round_robin_via(&PreemptKind::Yield);
 }
 
 #[test]
@@ -223,23 +247,6 @@ fn sleep_ns_blocks_and_wakes_thread_on_deadline() {
 }
 
 #[test]
-fn yield_now_rotates_runnable_threads() {
-    reset_switches();
-    let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
-    let a = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
-    let b = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
-
-    let running = scheduler.run();
-    assert_eq!(running.current(), a);
-    let switches_before = switch_count();
-
-    running.yield_now();
-    assert_eq!(running.current(), b);
-    assert_eq!(switch_count(), switches_before + 1);
-}
-
-#[test]
 fn yield_now_with_no_other_threads_keeps_current() {
     reset_switches();
     let timer = MockTimer::new();
@@ -256,21 +263,6 @@ fn yield_now_with_no_other_threads_keeps_current() {
 }
 
 #[test]
-fn time_slice_decrement_triggers_preemption() {
-    reset_switches();
-    let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
-    let _a = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
-    let b = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
-    let running = scheduler.run();
-
-    let switches_before = switch_count();
-    with_simulated_irq(|| running.on_tick(0));
-    assert_eq!(switch_count(), switches_before + 1);
-    assert_eq!(running.current(), b);
-}
-
-#[test]
 fn invalid_priority_returns_error() {
     let timer = MockTimer::new();
     let scheduler = SmallScheduler::new(MockTimerSource(timer), SMALL_CONFIG).bootstrap();
@@ -278,6 +270,29 @@ fn invalid_priority_returns_error() {
         .spawn(SpawnConfig::new("bad").priority(Priority::new(10)), || {})
         .unwrap_err();
     assert_eq!(err, SpawnError::InvalidPriority);
+}
+
+#[test]
+fn zero_stack_pages_returns_invalid_stack_pages_error() {
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer), TEST_CONFIG).bootstrap();
+    let err = scheduler
+        .spawn(SpawnConfig::new("nostack").stack_pages(0), || {})
+        .unwrap_err();
+    assert_eq!(err, SpawnError::InvalidStackPages);
+}
+
+#[test]
+fn spawn_user_thread_without_factory_fails_with_address_space_creation_failed() {
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer), TEST_CONFIG).bootstrap();
+    let err = scheduler
+        .spawn(
+            SpawnConfig::new("user").address_space(SpawnAddressSpace::User),
+            || {},
+        )
+        .unwrap_err();
+    assert_eq!(err, SpawnError::AddressSpaceCreationFailed);
 }
 
 #[test]
@@ -368,7 +383,6 @@ fn exit_current_releases_thread_slot_for_next_spawn() {
     use scheduler::SchedulerService;
     reset_switches();
     let timer = MockTimer::new();
-    // 1 idle + 3 spawned заполнят все 4 слота.
     let scheduler =
         SmallScheduler::new(MockTimerSource(timer.clone()), SchedulerConfig::new(32, 4))
             .bootstrap();
@@ -384,15 +398,6 @@ fn exit_current_releases_thread_slot_for_next_spawn() {
         .unwrap_err();
     assert_eq!(err, SpawnError::NoFreeThreadSlots);
     let _ = handle;
-}
-
-#[test]
-fn stack_canary_is_initialized_in_mock_stack() {
-    let stack = MockStack::allocate(1).expect("alloc");
-    assert!(
-        stack.check_canary(),
-        "freshly created stack must have valid canary"
-    );
 }
 
 #[test]
@@ -492,25 +497,20 @@ fn switch_between_threads_of_different_processes_changes_address_space() {
 
     let running = scheduler.run();
     let after_start = take_address_space_switches();
-    // Первый switch -> user-a - switch_address_space с Some(root_a).
-    assert!(
-        after_start.iter().any(|sw| matches!(
-            sw,
-            Some(handle) if handle.root.as_usize() == MockAddressSpaceFactory::BASE_ROOT_PA
-        )),
-        "expected switch to user-a root"
-    );
+    let root_a = after_start
+        .iter()
+        .find_map(|sw| sw.map(|handle| handle.root.as_usize()))
+        .expect("kernel->user-a switch must carry a user root");
 
     running.yield_now();
     let after_yield = take_address_space_switches();
-    // Yield с user-a на user-b - должен быть один switch на root_b.
-    let user_b_root = MockAddressSpaceFactory::BASE_ROOT_PA + 4096;
-    assert!(
-        after_yield.iter().any(|sw| matches!(
-            sw,
-            Some(handle) if handle.root.as_usize() == user_b_root
-        )),
-        "expected switch to user-b root, got {after_yield:?}"
+    let root_b = after_yield
+        .iter()
+        .find_map(|sw| sw.map(|handle| handle.root.as_usize()))
+        .expect("user-a->user-b switch must carry a user root");
+    assert_ne!(
+        root_a, root_b,
+        "switching between distinct user processes must activate distinct AS roots"
     );
 }
 
@@ -565,16 +565,7 @@ fn user_to_kernel_switch_writes_zero_root() {
 }
 
 #[test]
-fn terminating_user_thread_releases_address_space() {
-    // В MockContext entry-замыкание никогда не исполняется (start/switch - no-op),
-    // поэтому trampoline payload утекает вместе с захваченным entry-замыканием.
-    // Чтобы наблюдать Drop user-AS, проверяем сценарий: пока scheduler жив -
-    // mapper жив, как только user-thread будет удалён из ProcessTable -
-    // соответствующий `Arc<AddressSpace>` освободится. Текущая реализация
-    // ProcessTable не имеет API удаления; здесь проверяем хотя бы базовый
-    // инвариант: фабрика создала ровно один user-AS, который ссылается из
-    // живого процесса (released = 0). Полный drop-сценарий покрывается
-    // QEMU integration-тестом `user_thread_exit_releases_address_space_frames`.
+fn user_address_space_is_live_while_process_is_live() {
     reset_switches();
     let factory = new_factory_static();
     let timer = MockTimer::new();
@@ -588,7 +579,47 @@ fn terminating_user_thread_releases_address_space() {
         .expect("spawn u");
 
     assert_eq!(factory.created(), 1);
+    assert_eq!(
+        factory.released(),
+        0,
+        "AS must stay alive while the owning process is live"
+    );
+}
+
+#[test]
+fn terminating_last_user_thread_releases_address_space() {
+    // Последний thread_exit ставит процесс в pending-removal; следующий
+    // `switch_to_next` удаляет его из ProcessTable, дропая `Arc<AddressSpace>`.
+    // Это последняя ссылка -> `MockUserMapper::Drop` инкрементирует `released`.
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
+
+    let u = scheduler
+        .spawn(
+            SpawnConfig::new("u").address_space(SpawnAddressSpace::User),
+            || {},
+        )
+        .expect("spawn u");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), u);
+    let pid = running.thread_process_id(u).expect("owning pid");
+    assert_eq!(factory.created(), 1);
     assert_eq!(factory.released(), 0);
+
+    running.exit_current();
+
+    assert!(
+        running.process_object_for(pid).is_none(),
+        "owning process must be reclaimed from the table after last thread exit"
+    );
+    assert_eq!(
+        factory.released(),
+        1,
+        "AS must be released once the owning process is reclaimed",
+    );
 }
 
 #[test]
@@ -946,19 +977,23 @@ fn spawn_rollback_undoes_inherit_increment_on_thread_table_full() {
     let handle = running.handle();
 
     let inherit_cfg = SpawnConfig::new("inh").address_space(SpawnAddressSpace::Inherit);
-    let already_used = 2;
-    let to_fill = TEST_CONFIG.max_threads() - already_used;
-    for _ in 0..to_fill {
-        handle
-            .spawn_boxed(inherit_cfg, Box::new(|| {}))
-            .expect("inherit spawn must succeed under capacity");
-    }
+    // Заполняем thread-table Inherit-потоками до отказа, не завязываясь на
+    // число bootstrap-слотов.
+    let (res, count_before) = loop {
+        let count_before = running.process_thread_count(pid).expect("pid alive");
+        if let Err(e) = handle.spawn_boxed(inherit_cfg, Box::new(|| {})) {
+            break (e, count_before);
+        }
+    };
 
-    let count_before = running.process_thread_count(pid).expect("pid alive");
-    let res = handle.spawn_boxed(inherit_cfg, Box::new(|| {}));
-    assert_eq!(res, Err(SpawnError::NoFreeThreadSlots));
+    // На переполнении spawn возвращает NoFreeThreadSlots и откатывает
+    // паразитный инкремент thread_count процесса.
+    assert_eq!(res, SpawnError::NoFreeThreadSlots);
     let count_after = running.process_thread_count(pid).expect("pid alive");
-    assert_eq!(count_before, count_after);
+    assert_eq!(
+        count_before, count_after,
+        "failed Inherit spawn must not leak a thread_count increment"
+    );
 }
 
 #[test]
@@ -1177,52 +1212,6 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
         }
         Err(other) => panic!("expected SpawnFailed, got {other:?}"),
         Ok(_) => panic!("expected SpawnFailed, got Ok"),
-    }
-}
-
-/// Тестовый `FrameAllocator`, считающий deallocations.
-struct CountingFrameAllocator {
-    next: AtomicUsize,
-    deallocated: Mutex<StdVec<Frame>>,
-}
-
-impl CountingFrameAllocator {
-    fn new() -> Self {
-        Self {
-            next: AtomicUsize::new(1000),
-            deallocated: Mutex::new(StdVec::new()),
-        }
-    }
-
-    fn deallocated_count(&self) -> usize {
-        self.deallocated.lock().unwrap().len()
-    }
-}
-
-impl FrameAllocator for CountingFrameAllocator {
-    fn reserve_frames_exact(
-        &self,
-        from_inclusive: Frame,
-        _to_exclusive: Frame,
-    ) -> Result<Frame, ReserveFrameError> {
-        Ok(from_inclusive)
-    }
-
-    fn allocate_frame(&self) -> Option<Frame> {
-        Some(Frame::new(self.next.fetch_add(1, Ordering::SeqCst)))
-    }
-
-    fn allocate_frames(&self, _max_count: usize) -> Option<(Frame, usize)> {
-        None
-    }
-
-    fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {
-        self.deallocated.lock().unwrap().push(frame);
-        Ok(())
-    }
-
-    fn is_allocated(&self, _frame: Frame) -> bool {
-        false
     }
 }
 

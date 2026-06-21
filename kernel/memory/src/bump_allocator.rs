@@ -1,6 +1,7 @@
 use core::{alloc::Layout, fmt::Formatter, ptr::NonNull};
 
 use crate::{
+    align::align_up_checked,
     memory_range::MemoryRange,
     physical_address::{PageAlignedAddress, PhysicalAddress},
 };
@@ -20,15 +21,22 @@ pub struct BumpAllocator {
 
 impl BumpAllocator {
     pub const fn new(from: PageAlignedAddress, to: PageAlignedAddress) -> Self {
+        let start = from.as_usize();
+        let to = to.as_usize();
+        // Поддерживаем инвариант `end >= start`: вырожденный диапазон `to < from`
+        // схлопывается в пустой, иначе `remaining()` ушёл бы в underflow.
+        let end = if to < start { start } else { to };
         Self {
-            start: from.as_usize(),
-            end: to.as_usize(),
+            start,
+            end,
             offset: 0,
         }
     }
 
-    const fn remaining(&self) -> usize {
-        self.end - self.start - self.offset
+    pub const fn remaining(&self) -> usize {
+        // Инвариант `end >= start` гарантируется в `new`; offset не превосходит
+        // `end - start` по построению. saturating_sub - страховка от регрессий.
+        (self.end - self.start).saturating_sub(self.offset)
     }
 
     /// Возвращает диапазон фактически использованной памяти [start, start + offset)
@@ -43,8 +51,10 @@ impl BumpAllocator {
         let align = layout.align();
         let size = layout.size();
         let base = self.start;
-        let current = base + self.offset;
-        let aligned = current.div_ceil(align) * align;
+        let current = base
+            .checked_add(self.offset)
+            .ok_or(BumpAllocError::AddressOverflow)?;
+        let aligned = align_up_checked(current, align).ok_or(BumpAllocError::AddressOverflow)?;
 
         let new_offset = (aligned - base)
             .checked_add(size)
@@ -67,6 +77,7 @@ impl BumpAllocator {
 }
 
 /// Ошибки при выделении памяти через bump-аллокатор.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BumpAllocError {
     /// Переполнение адреса при вычислении нового смещения.
     AddressOverflow,

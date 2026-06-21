@@ -142,3 +142,38 @@ pub(super) fn sys_port_reply(handle: u64) -> Result<u64, SyscallError> {
     res?;
     Ok(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_from_abi_sentinel_means_infinite() {
+        assert_eq!(timeout_from_abi(syscall::PORT_TIMEOUT_INFINITE), None);
+        assert_eq!(timeout_from_abi(u64::MAX), None);
+    }
+
+    #[test]
+    fn timeout_from_abi_zero_is_poll() {
+        // 0 - неблокирующий poll, но это всё ещё Some(0), а не None.
+        assert_eq!(timeout_from_abi(syscall::PORT_TIMEOUT_POLL), Some(0));
+        assert_eq!(timeout_from_abi(0), Some(0));
+    }
+
+    #[test]
+    fn timeout_from_abi_finite_passes_through() {
+        assert_eq!(timeout_from_abi(1), Some(1));
+        assert_eq!(timeout_from_abi(1_000_000), Some(1_000_000));
+        assert_eq!(timeout_from_abi(u64::MAX - 1), Some(u64::MAX - 1));
+    }
+
+    #[test]
+    fn port_handlers_reject_zero_handle_before_touching_runtime() {
+        // parse_handle_id отвергает 0 раньше любого обращения к runtime,
+        // поэтому хендлеры безопасно тестировать без установленного runtime.
+        assert_eq!(sys_port_send(0, 0), Err(SyscallError::InvalidArgument));
+        assert_eq!(sys_port_recv(0, 0), Err(SyscallError::InvalidArgument));
+        assert_eq!(sys_port_call(0, 0), Err(SyscallError::InvalidArgument));
+        assert_eq!(sys_port_reply(0), Err(SyscallError::InvalidArgument));
+    }
+}

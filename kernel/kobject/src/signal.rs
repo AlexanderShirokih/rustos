@@ -165,14 +165,6 @@ mod tests {
     }
 
     #[test]
-    fn koid_unique_per_instance() {
-        use crate::object::KObject;
-        let a = Signal::new();
-        let b = Signal::new();
-        assert_ne!(KObject::Signal(a).koid(), KObject::Signal(b).koid());
-    }
-
-    #[test]
     fn signal_then_register_wakes_immediately() {
         let s = Signal::new();
         s.signal(BIT0, 0);

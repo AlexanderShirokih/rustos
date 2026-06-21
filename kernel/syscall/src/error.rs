@@ -158,6 +158,10 @@ mod tests {
             SyscallError::from(IpcError::OutOfHandles),
             SyscallError::OutOfHandles
         );
+        assert_eq!(
+            SyscallError::from(IpcError::ResourceExhausted),
+            SyscallError::ResourceExhausted
+        );
     }
 
     #[test]
@@ -185,10 +189,9 @@ mod tests {
             assert!(v < 0, "{e:?} must encode to a negative value, got {v}");
             assert!(v >= -i64::from(u32::MAX), "{e:?} out of range");
         }
-        // Все коды разные.
-        let mut seen = [0_i64; 16];
-        for (i, &e) in codes.iter().enumerate() {
-            seen[i] = e.into();
+        let seen: alloc::vec::Vec<i64> = codes.iter().map(|&e| e.into()).collect();
+        for (i, &v) in seen.iter().enumerate() {
+            assert_ne!(v, 0, "{:?} must not encode to success (0)", codes[i]);
         }
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -202,28 +205,52 @@ mod tests {
     }
 
     #[test]
-    fn return_value_zero_means_success_only() {
-        // Никакой код ошибки не должен мапиться в 0.
-        let codes = [
-            SyscallError::BadSyscall,
-            SyscallError::KernelOriginated,
-            SyscallError::InvalidArgument,
-            SyscallError::BadHandle,
-            SyscallError::WrongType,
-            SyscallError::AccessDenied,
-            SyscallError::ShouldWait,
-            SyscallError::PeerClosed,
-            SyscallError::Timeout,
-            SyscallError::BufferTooSmall,
-            SyscallError::MessageTooBig,
-            SyscallError::OutOfHandles,
-            SyscallError::OutOfMemory,
-            SyscallError::NotFound,
-            SyscallError::Canceled,
-            SyscallError::ResourceExhausted,
-        ];
-        for &e in &codes {
-            assert_ne!(i64::from(e), 0);
+    fn spawn_error_maps_to_syscall_error() {
+        // OOM-семейство.
+        for e in [
+            SpawnError::NoFreeProcessSlots,
+            SpawnError::NoFreeThreadSlots,
+            SpawnError::StackAllocationFailed,
+            SpawnError::AddressSpaceCreationFailed,
+        ] {
+            assert_eq!(SyscallError::from(e), SyscallError::OutOfMemory, "{e:?}");
         }
+        // Невалидные аргументы.
+        for e in [
+            SpawnError::InvalidName,
+            SpawnError::InvalidPriority,
+            SpawnError::InvalidStackPages,
+        ] {
+            assert_eq!(
+                SyscallError::from(e),
+                SyscallError::InvalidArgument,
+                "{e:?}"
+            );
+        }
+        // Состояние объекта.
+        assert_eq!(
+            SyscallError::from(SpawnError::ImageNotLoaded),
+            SyscallError::WrongType
+        );
+    }
+
+    #[test]
+    fn encode_return_passes_through_success_value() {
+        assert_eq!(encode_return(Ok(0)), 0);
+        assert_eq!(encode_return(Ok(42)), 42);
+    }
+
+    #[test]
+    fn encode_return_clamps_oversized_success_to_i64_max() {
+        assert_eq!(encode_return(Ok(u64::MAX)), i64::MAX);
+        assert_eq!(encode_return(Ok(i64::MAX as u64 + 1)), i64::MAX);
+    }
+
+    #[test]
+    fn encode_return_encodes_error_as_negative() {
+        assert_eq!(
+            encode_return(Err(SyscallError::BadHandle)),
+            SyscallError::BadHandle.as_return_value()
+        );
     }
 }

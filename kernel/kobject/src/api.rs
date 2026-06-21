@@ -642,6 +642,147 @@ mod tests {
     }
 
     #[test]
+    fn signal_set_on_non_signal_object_is_wrong_type() {
+        let _guard = test_lock();
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        let id = table
+            .with_lock(|tbl| {
+                tbl.insert(Handle::new(
+                    KObject::Process(ProcessObject::new()),
+                    Rights::WRITE,
+                ))
+            })
+            .unwrap();
+        mock().configure(Some(table), None);
+
+        assert_eq!(signal_set(id, SIGNALED, 0, 0), Err(IpcError::WrongType));
+
+        mock().reset();
+    }
+
+    #[test]
+    fn signal_set_without_write_right_is_access_denied() {
+        let _guard = test_lock();
+        // Signal-handle только с READ: clone_object(WRITE) -> AccessDenied.
+        let (table, id, _signal) = install_signal_handle(Rights::READ);
+        mock().configure(Some(table), None);
+
+        assert_eq!(signal_set(id, SIGNALED, 0, 0), Err(IpcError::AccessDenied));
+
+        mock().reset();
+    }
+
+    #[test]
+    fn signal_wait_many_empty_slice_is_bad_handle() {
+        let _guard = test_lock();
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        mock().configure(Some(table), None);
+
+        assert_eq!(
+            signal_wait_many(&[], None).map(|_| ()),
+            Err(IpcError::BadHandle)
+        );
+
+        mock().reset();
+    }
+
+    #[test]
+    fn signal_wait_poll_times_out_when_no_signal_pending() {
+        let _guard = test_lock();
+        // timeout_ns == Some(0): poll-путь. Сигнал не поднят -> Timeout,
+        // block_current_until не вызывается (hook отсутствует).
+        let (table, id, _signal) = install_signal_handle(Rights::READ);
+        mock().configure(Some(table), None);
+
+        assert_eq!(
+            signal_wait_one(id, SIGNALED, Some(0)),
+            Err(IpcError::Timeout)
+        );
+
+        mock().reset();
+    }
+
+    #[test]
+    fn signal_wait_poll_returns_already_pending_signal() {
+        let _guard = test_lock();
+        // timeout_ns == Some(0), но бит уже поднят -> наблюдаем сразу, без блока.
+        let (table, id, signal) = install_signal_handle(Rights::READ);
+        signal.signal(SIGNALED, 0);
+        mock().configure(Some(table), None);
+
+        let observed = signal_wait_one(id, SIGNALED, Some(0)).expect("observed pending");
+        assert_eq!(observed & SIGNALED, SIGNALED);
+
+        mock().reset();
+    }
+
+    #[test]
+    fn process_termination_signal_grants_read_only_without_write() {
+        let _guard = test_lock();
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        let proc_id = table
+            .with_lock(|tbl| {
+                tbl.insert(Handle::new(
+                    KObject::Process(ProcessObject::new()),
+                    Rights::READ,
+                ))
+            })
+            .unwrap();
+        mock().configure(Some(table.clone()), None);
+
+        let sig_id = process_termination_signal(proc_id).expect("termination signal handle");
+        let rights = table
+            .with_lock(|tbl| tbl.get(sig_id, Rights::READ).map(Handle::rights))
+            .expect("signal handle present");
+        // Security-инвариант: наблюдатель не может подделать термнинацию.
+        assert!(rights.contains(Rights::READ));
+        assert!(rights.contains(Rights::DUPLICATE));
+        assert!(rights.contains(Rights::TRANSFER));
+        assert!(!rights.contains(Rights::WRITE));
+
+        mock().reset();
+    }
+
+    #[test]
+    fn thread_termination_signal_grants_read_only_without_write() {
+        let _guard = test_lock();
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        let thread_id = table
+            .with_lock(|tbl| {
+                tbl.insert(Handle::new(
+                    KObject::Thread(ThreadObject::new()),
+                    Rights::READ,
+                ))
+            })
+            .unwrap();
+        mock().configure(Some(table.clone()), None);
+
+        let sig_id = thread_termination_signal(thread_id).expect("termination signal handle");
+        let rights = table
+            .with_lock(|tbl| tbl.get(sig_id, Rights::READ).map(Handle::rights))
+            .expect("signal handle present");
+        assert!(rights.contains(Rights::READ));
+        assert!(!rights.contains(Rights::WRITE));
+
+        mock().reset();
+    }
+
+    #[test]
+    fn termination_signal_on_wrong_object_is_wrong_type() {
+        let _guard = test_lock();
+        // Signal-handle отдан в process_termination_signal -> WrongType.
+        let (table, id, _signal) = install_signal_handle(Rights::READ);
+        mock().configure(Some(table), None);
+
+        assert_eq!(
+            process_termination_signal(id).map(|_| ()),
+            Err(IpcError::WrongType)
+        );
+
+        mock().reset();
+    }
+
+    #[test]
     fn signal_create_inserts_handle_with_signal_and_wait_rights() {
         let _guard = test_lock();
         let table = Arc::new(MutexCell::new(HandleTable::new()));

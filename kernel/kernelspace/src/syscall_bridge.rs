@@ -47,3 +47,113 @@ pub fn install_frame_allocator(allocator: &'static (dyn FrameAllocator + Send + 
 pub fn frame_allocator() -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
     FRAME_ALLOCATOR.get().copied()
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use std::{
+        boxed::Box,
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
+
+    use memory::{
+        frame::Frame,
+        frame_allocator::{FrameError, ReserveFrameError},
+        memory_mapper::{AddressSpaceFactory, AsCreateError, MemoryMapper},
+    };
+    use scheduler::{SpawnConfig, SpawnError, ThreadId};
+
+    use super::*;
+
+    struct DummyScheduler;
+
+    impl SchedulerService for DummyScheduler {
+        fn spawn_boxed(
+            &self,
+            _cfg: SpawnConfig,
+            _entry: Box<dyn FnOnce() + Send + 'static>,
+        ) -> Result<ThreadId, SpawnError> {
+            unimplemented!()
+        }
+        fn yield_now(&self) {}
+        fn sleep_ns(&self, _ns: u64) {}
+        fn current(&self) -> ThreadId {
+            ThreadId::new(core::num::NonZeroU32::new(1).unwrap())
+        }
+        fn exit(&self) -> ! {
+            panic!("exit")
+        }
+    }
+
+    struct DummyFactory;
+
+    impl AddressSpaceFactory for DummyFactory {
+        fn create_user(&self) -> Result<Arc<dyn MemoryMapper + Send + Sync>, AsCreateError> {
+            Err(AsCreateError::OutOfMemory)
+        }
+    }
+
+    struct DummyFrameAllocator;
+
+    impl FrameAllocator for DummyFrameAllocator {
+        fn reserve_frames_exact(
+            &self,
+            _from: Frame,
+            _to: Frame,
+        ) -> Result<Frame, ReserveFrameError> {
+            unimplemented!()
+        }
+        fn allocate_frame(&self) -> Option<Frame> {
+            None
+        }
+        fn allocate_frames(&self, _max: usize) -> Option<(Frame, usize)> {
+            None
+        }
+        fn deallocate_frame(&self, _frame: Frame) -> Result<(), FrameError> {
+            Ok(())
+        }
+        fn is_allocated(&self, _frame: Frame) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn scheduler_install_getter_and_double_install_panic() {
+        assert!(catch_unwind(scheduler).is_err());
+
+        let service: Arc<dyn SchedulerService> = Arc::new(DummyScheduler);
+        install_scheduler(service);
+
+        assert_eq!(scheduler().current().raw().get(), 1);
+
+        let again: Arc<dyn SchedulerService> = Arc::new(DummyScheduler);
+        assert!(catch_unwind(AssertUnwindSafe(|| install_scheduler(again))).is_err());
+    }
+
+    #[test]
+    fn address_space_factory_install_getter_and_double_install_panic() {
+        assert!(address_space_factory().is_none());
+
+        let factory: &'static DummyFactory = Box::leak(Box::new(DummyFactory));
+        install_address_space_factory(factory);
+
+        assert!(address_space_factory().is_some());
+
+        let again: &'static DummyFactory = Box::leak(Box::new(DummyFactory));
+        assert!(catch_unwind(AssertUnwindSafe(|| install_address_space_factory(again))).is_err());
+    }
+
+    #[test]
+    fn frame_allocator_install_getter_and_double_install_panic() {
+        assert!(frame_allocator().is_none());
+
+        let fa: &'static DummyFrameAllocator = Box::leak(Box::new(DummyFrameAllocator));
+        install_frame_allocator(fa);
+
+        assert!(frame_allocator().is_some());
+
+        let again: &'static DummyFrameAllocator = Box::leak(Box::new(DummyFrameAllocator));
+        assert!(catch_unwind(AssertUnwindSafe(|| install_frame_allocator(again))).is_err());
+    }
+}

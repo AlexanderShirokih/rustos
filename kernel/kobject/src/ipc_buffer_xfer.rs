@@ -194,9 +194,11 @@ fn offset_va(base: VirtualAddress, off: usize) -> VirtualAddress {
 /// Атомарность caps: drain из таблицы отправителя (требуя
 /// [`Rights::TRANSFER`]) и install в таблицу получателя выполняются с
 /// откатом - на любой ошибке install уже вставленные хендлы возвращаются
-/// отправителю, а у получателя ничего не остаётся. На ошибке тело может
-/// быть уже скопировано в data-область получателя, но tag НЕ выставлен,
-/// поэтому получатель увидит исходный (нулевой) tag и не примет мусор.
+/// отправителю, а у получателя ничего не остаётся. tag пишется ПОСЛЕДНИМ -
+/// после тела, caps и badge. На ошибке (включая ошибку записи badge) тело
+/// может быть уже скопировано в data-область получателя, но tag НЕ выставлен,
+/// поэтому получатель увидит исходный (нулевой) tag и не примет ни мусорное
+/// тело, ни мусорный badge.
 pub fn transfer_rendezvous(
     sender: &ThreadTransport,
     receiver: &ThreadTransport,
@@ -271,13 +273,16 @@ pub fn transfer_rendezvous(
         }
     }
 
-    // 3. Финально - tag получателю (len + ncaps). Только после успешного
-    //    тела и caps.
-    write_tag(receiver, encode_tag(len, ncaps))?;
-
-    // 4. Значок отправителя - получателю. Пишется независимо от тела/caps
+    // 3. Значок отправителя - получателю. Пишется независимо от тела/caps
     //    (даже при len==0/ncaps==0): сервер различает клиентов по badge.
+    //    До tag, чтобы при ошибке записи badge получатель не увидел валидный
+    //    tag с мусорным badge.
     write_badge(receiver, sender.badge)?;
+
+    // 4. Финально - tag получателю (len + ncaps). Только после успешного
+    //    тела, caps и badge: tag - "коммит" сообщения, его валидность
+    //    означает, что все остальные поля уже на месте.
+    write_tag(receiver, encode_tag(len, ncaps))?;
     Ok(())
 }
 
@@ -305,9 +310,13 @@ pub(crate) mod test_mapper {
 
     impl PageMapper {
         pub(crate) fn new(base: usize) -> Arc<Self> {
+            Self::with_size(base, 4096)
+        }
+
+        pub(crate) fn with_size(base: usize, size: usize) -> Arc<Self> {
             Arc::new(Self {
                 base,
-                bytes: MutexCell::new(vec![0u8; 4096]),
+                bytes: MutexCell::new(vec![0u8; size]),
             })
         }
     }
@@ -417,24 +426,26 @@ mod tests {
     }
 
     fn write_buf(mapper: &Arc<PageMapper>, base: usize, tag: u64, caps: &[u32], data: &[u8]) {
-        // tag @0, caps @8, data @24.
         mapper
-            .copy_user_out(VirtualAddress::new(base), &tag.to_le_bytes())
+            .copy_user_out(VirtualAddress::new(base + TAG_OFFSET), &tag.to_le_bytes())
             .unwrap();
         for (i, c) in caps.iter().enumerate() {
             mapper
-                .copy_user_out(VirtualAddress::new(base + 8 + i * 4), &c.to_le_bytes())
+                .copy_user_out(
+                    VirtualAddress::new(base + CAPS_OFFSET + i * CAP_SIZE),
+                    &c.to_le_bytes(),
+                )
                 .unwrap();
         }
         mapper
-            .copy_user_out(VirtualAddress::new(base + 24), data)
+            .copy_user_out(VirtualAddress::new(base + DATA_OFFSET), data)
             .unwrap();
     }
 
     fn read_tag(mapper: &Arc<PageMapper>, base: usize) -> u64 {
         let mut b = [0u8; 8];
         mapper
-            .copy_user_in(VirtualAddress::new(base), &mut b)
+            .copy_user_in(VirtualAddress::new(base + TAG_OFFSET), &mut b)
             .unwrap();
         u64::from_le_bytes(b)
     }
@@ -442,7 +453,7 @@ mod tests {
     fn read_data(mapper: &Arc<PageMapper>, base: usize, len: usize) -> alloc::vec::Vec<u8> {
         let mut v = alloc::vec![0u8; len];
         mapper
-            .copy_user_in(VirtualAddress::new(base + 24), &mut v)
+            .copy_user_in(VirtualAddress::new(base + DATA_OFFSET), &mut v)
             .unwrap();
         v
     }
@@ -482,9 +493,8 @@ mod tests {
         assert_eq!(rt.with_lock(|t| t.live_count()), 1);
         assert_eq!(read_tag(&rm, BASE_B), encode_tag(2, 1));
 
-        // Новый HandleId записан в caps[0] получателя.
         let mut idb = [0u8; 4];
-        rm.copy_user_in(VirtualAddress::new(BASE_B + 8), &mut idb)
+        rm.copy_user_in(VirtualAddress::new(BASE_B + CAPS_OFFSET), &mut idb)
             .unwrap();
         let new_raw = u32::from_le_bytes(idb);
         let new_id = kobject_handle_id(new_raw);
@@ -495,10 +505,9 @@ mod tests {
     }
 
     fn read_badge(mapper: &Arc<PageMapper>, base: usize) -> u64 {
-        // badge @ 280 (tag@0 + caps 16 + data 256).
         let mut b = [0u8; 8];
         mapper
-            .copy_user_in(VirtualAddress::new(base + 280), &mut b)
+            .copy_user_in(VirtualAddress::new(base + BADGE_OFFSET), &mut b)
             .unwrap();
         u64::from_le_bytes(b)
     }
@@ -547,6 +556,174 @@ mod tests {
     fn kobject_handle_id(raw: u32) -> HandleId {
         HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap())
     }
+
+    fn transport_custom(
+        base: usize,
+        size: usize,
+        cap: u32,
+    ) -> (
+        ThreadTransport,
+        Arc<PageMapper>,
+        Arc<MutexCell<HandleTable>>,
+    ) {
+        let mapper = PageMapper::with_size(base, size);
+        let table = Arc::new(MutexCell::new(HandleTable::with_capacity(cap)));
+        let t = ThreadTransport::new(mapper.clone(), VirtualAddress::new(base), table.clone());
+        (t, mapper, table)
+    }
+
+    fn signal_with_transfer(table: &Arc<MutexCell<HandleTable>>) -> HandleId {
+        table
+            .with_lock(|tbl| {
+                tbl.insert(Handle::new(
+                    KObject::Signal(Signal::new()),
+                    Rights::READ | Rights::TRANSFER,
+                ))
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn body_exactly_at_data_max_round_trips() {
+        let (sender, sm, _st) = transport(BASE_A);
+        let (receiver, rm, _rt) = transport(BASE_B);
+        let body = alloc::vec![0x5Au8; IPC_BUFFER_DATA_MAX];
+        write_buf(&sm, BASE_A, encode_tag(IPC_BUFFER_DATA_MAX, 0), &[], &body);
+
+        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+
+        assert_eq!(read_tag(&rm, BASE_B), encode_tag(IPC_BUFFER_DATA_MAX, 0));
+        assert_eq!(read_data(&rm, BASE_B, IPC_BUFFER_DATA_MAX), body);
+    }
+
+    #[test]
+    fn oversized_len_is_clamped_to_data_max() {
+        let (sender, sm, _st) = transport(BASE_A);
+        let (receiver, rm, _rt) = transport(BASE_B);
+        let body = alloc::vec![0xABu8; IPC_BUFFER_DATA_MAX];
+        write_buf(
+            &sm,
+            BASE_A,
+            encode_tag(IPC_BUFFER_DATA_MAX + 100, 0),
+            &[],
+            &body,
+        );
+
+        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+
+        assert_eq!(read_tag(&rm, BASE_B), encode_tag(IPC_BUFFER_DATA_MAX, 0));
+        assert_eq!(read_data(&rm, BASE_B, IPC_BUFFER_DATA_MAX), body);
+    }
+
+    #[test]
+    fn oversized_ncaps_is_clamped_to_max_caps() {
+        let (sender, sm, st) = transport(BASE_A);
+        let (receiver, rm, rt) = transport(BASE_B);
+        let mut raw_ids = alloc::vec::Vec::new();
+        for _ in 0..IPC_BUFFER_MAX_CAPS {
+            raw_ids.push(signal_with_transfer(&st).raw().get());
+        }
+        write_buf(
+            &sm,
+            BASE_A,
+            encode_tag(0, IPC_BUFFER_MAX_CAPS + 5),
+            &raw_ids,
+            b"",
+        );
+
+        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+
+        assert_eq!(read_tag(&rm, BASE_B), encode_tag(0, IPC_BUFFER_MAX_CAPS));
+        assert_eq!(st.with_lock(|t| t.live_count()), 0);
+        assert_eq!(rt.with_lock(|t| t.live_count()), IPC_BUFFER_MAX_CAPS);
+    }
+
+    #[test]
+    fn kernel_buffer_round_trips_body_and_badge() {
+        let (mut sender, sm, _st) = transport(BASE_A);
+        sender.badge = 0xCAFE_F00D;
+        let kbuf: KernelBuf = Arc::new(MutexCell::new(syscall::IpcBuffer::zeroed()));
+        let rtable = Arc::new(MutexCell::new(HandleTable::new()));
+        let receiver = ThreadTransport::new_kernel(kbuf.clone(), rtable);
+        write_buf(&sm, BASE_A, encode_tag(4, 0), &[], b"PING");
+
+        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+
+        let (tag, data, badge) = kbuf.with_lock(|b| (b.tag, b.data, b.badge));
+        assert_eq!(tag, encode_tag(4, 0));
+        assert_eq!(&data[..4], b"PING");
+        assert_eq!(badge, 0xCAFE_F00D);
+    }
+
+    #[test]
+    fn kernel_sender_body_read_through_kernel_access() {
+        let kbuf: KernelBuf = Arc::new(MutexCell::new(syscall::IpcBuffer::zeroed()));
+        kbuf.with_lock(|b| {
+            b.tag = encode_tag(3, 0);
+            b.data[..3].copy_from_slice(b"abc");
+        });
+        let stable = Arc::new(MutexCell::new(HandleTable::new()));
+        let sender = ThreadTransport::new_kernel(kbuf, stable);
+        let (receiver, rm, _rt) = transport(BASE_B);
+
+        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+
+        assert_eq!(read_tag(&rm, BASE_B), encode_tag(3, 0));
+        assert_eq!(read_data(&rm, BASE_B, 3), b"abc");
+    }
+
+    #[test]
+    fn install_fail_rolls_caps_back_to_sender() {
+        // Получатель: таблица ёмкости 1, переносим 2 cap'а -> install_all
+        // падает на втором (OutOfHandles), всё откатывается отправителю.
+        let (sender, sm, st) = transport(BASE_A);
+        let (receiver, _rm, rt) = transport_custom(BASE_B, 4096, 1);
+        let id_a = signal_with_transfer(&st);
+        let id_b = signal_with_transfer(&st);
+        write_buf(
+            &sm,
+            BASE_A,
+            encode_tag(0, 2),
+            &[id_a.raw().get(), id_b.raw().get()],
+            b"",
+        );
+
+        let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
+        assert_eq!(err, IpcError::OutOfHandles);
+        // Оба handle вернулись отправителю; у получателя пусто.
+        assert_eq!(st.with_lock(|t| t.live_count()), 2);
+        assert_eq!(rt.with_lock(|t| t.live_count()), 0);
+    }
+
+    #[test]
+    fn write_caps_fail_rolls_caps_back_to_sender() {
+        // Receiver-mapper усечён так, что caps[0] (@CAPS_OFFSET) не помещается:
+        // install прошёл, но write_caps падает -> откат отправителю.
+        let (sender, sm, st) = transport(BASE_A);
+        let (receiver, _rm, rt) = transport_custom(BASE_B, CAPS_OFFSET, 16);
+        let id = signal_with_transfer(&st);
+        write_buf(&sm, BASE_A, encode_tag(0, 1), &[id.raw().get()], b"");
+
+        let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
+        assert_eq!(err, IpcError::BufferTooSmall);
+        assert_eq!(st.with_lock(|t| t.live_count()), 1);
+        assert_eq!(rt.with_lock(|t| t.live_count()), 0);
+    }
+
+    #[test]
+    fn write_badge_fail_leaves_receiver_tag_unset() {
+        let (mut sender, sm, _st) = transport(BASE_A);
+        sender.badge = 0x1234_5678;
+        let (receiver, rm, _rt) = transport_custom(BASE_B, BADGE_OFFSET, 16);
+        write_buf(&sm, BASE_A, encode_tag(4, 0), &[], b"DATA");
+
+        let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
+        assert_eq!(err, IpcError::BufferTooSmall);
+        assert_eq!(read_tag(&rm, BASE_B), 0);
+        assert_eq!(read_data(&rm, BASE_B, 4), b"DATA");
+    }
+
+    type KernelBuf = Arc<MutexCell<syscall::IpcBuffer>>;
 }
 
 /// Вставляет все `handles` в `tbl`. На ошибке install'а возвращает уже

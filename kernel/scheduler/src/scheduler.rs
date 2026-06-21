@@ -30,7 +30,8 @@ use crate::{
 const FRAME_SIZE: usize = 4096;
 
 const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
-const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
+/// Длина кванта по умолчанию (нс). Экспонируется для тестов.
+pub const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum AddressSpaceTransition {
@@ -398,6 +399,17 @@ where
     pub fn thread_process_id(&self, id: ThreadId) -> Option<ProcessId> {
         self.inner
             .with_lock(|inner| inner.threads.get(id).map(Thread::process))
+    }
+
+    /// `ProcessId` процесса по lifecycle-KO; `None` если процесс не найден.
+    pub fn process_id_for(&self, ko: &Arc<ProcessObject>) -> Option<ProcessId> {
+        self.inner.with_lock(|inner| {
+            inner
+                .processes
+                .iter()
+                .find(|p| Arc::ptr_eq(p.process_object(), ko))
+                .map(Process::id)
+        })
     }
 }
 

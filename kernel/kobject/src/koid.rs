@@ -82,3 +82,36 @@ impl<T: ?Sized> core::fmt::Debug for Koid<T> {
         write!(f, "Koid({name}#{:#x})", self.0.get() & ADDR_MASK)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_parts_preserves_tag_and_low_address_bits() {
+        let k = Koid::<Erased>::from_parts(3, 0xDEAD_BEEF);
+        assert_eq!(k.type_tag(), 3);
+        assert_eq!(k.raw() & ADDR_MASK, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn distinct_addresses_yield_distinct_koids() {
+        let a = Koid::<Erased>::from_parts(1, 0x1000);
+        let b = Koid::<Erased>::from_parts(1, 0x2000);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn same_address_distinct_tags_yield_distinct_koids() {
+        let proc = Koid::<Erased>::from_parts(2, 0x4000);
+        let thread = Koid::<Erased>::from_parts(3, 0x4000);
+        assert_ne!(proc, thread);
+    }
+
+    #[test]
+    fn address_is_truncated_to_56_bits() {
+        let k = Koid::<Erased>::from_parts(7, u64::MAX);
+        assert_eq!(k.type_tag(), 7);
+        assert_eq!(k.raw() & ADDR_MASK, ADDR_MASK);
+    }
+}

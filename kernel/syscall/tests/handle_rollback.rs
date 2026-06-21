@@ -216,8 +216,10 @@ impl MemoryMapper for CannedMapper {
     }
 }
 
+type CannedUserVm = (Arc<CannedMapper>, Arc<MutexCell<UserVmAllocator>>);
+
 struct StubSyscallRuntime {
-    user_vm: Mutex<Option<(Arc<CannedMapper>, Arc<MutexCell<UserVmAllocator>>)>>,
+    user_vm: Mutex<Option<CannedUserVm>>,
 }
 
 impl StubSyscallRuntime {
@@ -343,25 +345,41 @@ fn dispatch(op: SyscallOp, args: [u64; 6]) -> Result<u64, SyscallError> {
     }
 }
 
+/// Декодирует через `as_return_value`, не через хардкод, чтобы новые коды не давали панику.
+const ALL_ERRORS: &[SyscallError] = &[
+    SyscallError::BadSyscall,
+    SyscallError::KernelOriginated,
+    SyscallError::InvalidArgument,
+    SyscallError::BadHandle,
+    SyscallError::WrongType,
+    SyscallError::AccessDenied,
+    SyscallError::ShouldWait,
+    SyscallError::PeerClosed,
+    SyscallError::Timeout,
+    SyscallError::BufferTooSmall,
+    SyscallError::MessageTooBig,
+    SyscallError::OutOfHandles,
+    SyscallError::OutOfMemory,
+    SyscallError::NotFound,
+    SyscallError::Canceled,
+    SyscallError::ResourceExhausted,
+];
+
 fn decode_error(code: u32) -> SyscallError {
-    match code {
-        1 => SyscallError::BadSyscall,
-        2 => SyscallError::KernelOriginated,
-        3 => SyscallError::InvalidArgument,
-        4 => SyscallError::BadHandle,
-        5 => SyscallError::WrongType,
-        6 => SyscallError::AccessDenied,
-        7 => SyscallError::ShouldWait,
-        8 => SyscallError::PeerClosed,
-        9 => SyscallError::Timeout,
-        10 => SyscallError::BufferTooSmall,
-        11 => SyscallError::MessageTooBig,
-        12 => SyscallError::OutOfHandles,
-        13 => SyscallError::OutOfMemory,
-        14 => SyscallError::NotFound,
-        15 => SyscallError::Canceled,
-        other => panic!("unknown SyscallError code: {other}"),
+    let want = -i64::from(code);
+    *ALL_ERRORS
+        .iter()
+        .find(|e| e.as_return_value() == want)
+        .unwrap_or_else(|| panic!("unknown SyscallError code: {code}"))
+}
+
+#[test]
+fn decode_error_handles_all_abi_codes_including_resource_exhausted() {
+    for &e in ALL_ERRORS {
+        let code = u32::try_from(-e.as_return_value()).expect("error code fits u32");
+        assert_eq!(decode_error(code), e);
     }
+    assert_eq!(decode_error(16), SyscallError::ResourceExhausted);
 }
 
 #[test]

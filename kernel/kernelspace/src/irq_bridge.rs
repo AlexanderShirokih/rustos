@@ -96,6 +96,16 @@ mod tests {
     fn dispatch_without_install_is_noop() {
         let bridge = IrqBridge::new();
         bridge.dispatch();
+
+        let service = Arc::new(SpyInterruptsService::new());
+        bridge.install(service.clone());
+        assert_eq!(
+            service.dispatch_calls(),
+            0,
+            "no-op dispatch must not have invoked any service"
+        );
+        bridge.dispatch();
+        assert_eq!(service.dispatch_calls(), 1);
     }
 
     #[test]

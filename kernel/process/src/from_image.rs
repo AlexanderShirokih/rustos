@@ -179,6 +179,29 @@ mod tests {
     }
 
     #[test]
+    fn reports_segment_size_overflow() {
+        // u64::MAX проходит validate_entry (u64-арифметика), но переполняет
+        // usize в round_up_to_frame -> SegmentSizeOverflow без паники.
+        let segments = [Segment {
+            va_base: 0,
+            mem_size: u64::MAX,
+            permissions: SegmentPermissions::ReadExecute,
+            bytes: b"CODE",
+        }];
+        let entry = Entry {
+            name: "test",
+            entry_va: 0,
+            stack_size: 0x4000,
+            segments: &segments,
+        };
+
+        assert_eq!(
+            user_image_parts_from_entry(&entry, TEST_USER_VA_END).map(|_| ()),
+            Err(UserImageFromModelError::SegmentSizeOverflow)
+        );
+    }
+
+    #[test]
     fn round_up_to_frame_detects_overflow() {
         assert_eq!(round_up_to_frame(usize::MAX), None);
         assert_eq!(round_up_to_frame(0), Some(0));

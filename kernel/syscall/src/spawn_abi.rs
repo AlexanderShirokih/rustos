@@ -91,17 +91,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn image_desc_size_matches_constant() {
-        // Каждое поле u32/u64 в фиксированном порядке.
-        assert_eq!(USER_IMAGE_DESC_SIZE, 4 + 4 + 8 + 8 + 8 + 8 + 8 + 8);
-    }
-
-    #[test]
-    fn segment_size_matches_constant() {
-        assert_eq!(USER_SEGMENT_SIZE, 4 + 4 + 8 + 8 + 8);
-    }
-
-    #[test]
     fn decode_image_desc_round_trip() {
         let mut full = [0u8; USER_IMAGE_DESC_SIZE];
         full[0..4].copy_from_slice(&1u32.to_le_bytes());

@@ -46,8 +46,10 @@ fn new_with_multiple_regions_succeeds() {
         allocated.insert(frame.number());
     }
 
-    // Фрейм 0 зарезервирован, поэтому доступно 112 - 1 = 111 фреймов
-    assert_eq!(allocated.len(), 111);
+    // Фрейм 0 зарезервирован (один регион начинается с 0), остальное доступно.
+    let total_frames = 32 + 64 + 16;
+    let reserved_zero = 1;
+    assert_eq!(allocated.len(), total_frames - reserved_zero);
 }
 
 #[test]
@@ -300,8 +302,14 @@ fn reserve_in_second_region_works() {
         );
     }
 
-    // 16 + 16 - 4 - 1(фрейм 0) = 27 фреймов
-    assert_eq!(allocated.len(), 27);
+    // Всего фреймов минус зарезервированный диапазон [104,108) и фрейм 0.
+    let total_frames = 16 + 16;
+    let reserved_range = 108 - 104;
+    let reserved_zero = 1;
+    assert_eq!(
+        allocated.len(),
+        total_frames - reserved_range - reserved_zero
+    );
 }
 
 // =============================================================================
@@ -431,6 +439,53 @@ fn allocate_frames_returns_short_run_when_first_free_segment_is_small() {
         .expect("opportunistic: returns at least 1");
     assert_eq!(first_frame.number(), 5);
     assert_eq!(count, 1);
+}
+
+#[test]
+fn allocate_frames_skips_exhausted_first_region_for_longer_run() {
+    // Opportunistic-семантика между регионами: `allocate_frames` берёт run из
+    // первого региона, где он есть. Если первый регион занят целиком, переходит
+    // ко второму и возвращает его (потенциально более длинный) run.
+    let allocator = multi_region_allocator(&[(0, 4), (100, 32)]);
+
+    // Полностью занимаем первый регион (фрейм 0 уже зарезервирован).
+    allocator
+        .reserve_frames_exact(Frame::new(1), Frame::new(4))
+        .expect("reserve [1,4)");
+
+    let (first_frame, count) = allocator
+        .allocate_frames(16)
+        .expect("second region provides the run");
+
+    assert!(
+        first_frame.number() >= 100,
+        "run must come from the second region, got frame {}",
+        first_frame.number()
+    );
+    assert_eq!(count, 16, "second region has room for the full request");
+}
+
+#[test]
+fn allocate_frames_prefers_first_region_even_with_short_run() {
+    // Зеркало предыдущего теста: пока в первом регионе есть хоть один свободный
+    // фрейм, run берётся оттуда, даже если второй регион предложил бы больше.
+    let allocator = multi_region_allocator(&[(0, 4), (100, 32)]);
+
+    // Оставляем в первом регионе единственную дырку - фрейм 3.
+    allocator
+        .reserve_frames_exact(Frame::new(1), Frame::new(3))
+        .expect("reserve [1,3)");
+
+    let (first_frame, count) = allocator
+        .allocate_frames(16)
+        .expect("first region still has a frame");
+
+    assert!(
+        first_frame.number() < 100,
+        "run must come from the first region, got frame {}",
+        first_frame.number()
+    );
+    assert_eq!(count, 1, "only one frame free in the first region");
 }
 
 #[test]
