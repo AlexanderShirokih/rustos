@@ -83,9 +83,7 @@ fn kernel_read(buf: &syscall::IpcBuffer, off: usize, dst: &mut [u8]) -> Result<(
             .ok_or(IpcError::BufferTooSmall)?;
         dst.copy_from_slice(src);
     } else if off >= CAPS_OFFSET {
-        // Чтение из области caps: только выровненное по слоту 4-байтовое поле.
-        let (i, src) = caps_slot(buf, off, dst.len())?;
-        let _ = i;
+        let src = caps_slot(buf, off, dst.len())?;
         dst.copy_from_slice(&src);
     } else {
         if off != TAG_OFFSET || dst.len() != TAG_SIZE {
@@ -129,19 +127,13 @@ fn kernel_write(buf: &mut syscall::IpcBuffer, off: usize, src: &[u8]) -> Result<
     Ok(())
 }
 
-/// Возвращает индекс caps-слота и его 4 байта LE для чтения; проверяет
-/// выравнивание и размер.
-fn caps_slot(
-    buf: &syscall::IpcBuffer,
-    off: usize,
-    len: usize,
-) -> Result<(usize, [u8; CAP_SIZE]), IpcError> {
+fn caps_slot(buf: &syscall::IpcBuffer, off: usize, len: usize) -> Result<[u8; CAP_SIZE], IpcError> {
     if !(off - CAPS_OFFSET).is_multiple_of(CAP_SIZE) || len != CAP_SIZE {
         return Err(IpcError::BufferTooSmall);
     }
     let i = (off - CAPS_OFFSET) / CAP_SIZE;
     let v = buf.caps.get(i).ok_or(IpcError::BufferTooSmall)?;
-    Ok((i, v.to_le_bytes()))
+    Ok(v.to_le_bytes())
 }
 
 fn read_tag(t: &ThreadTransport) -> Result<u64, IpcError> {

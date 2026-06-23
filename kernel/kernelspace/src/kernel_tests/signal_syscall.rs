@@ -9,15 +9,15 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use kernel_tests::kernel_test;
 use kobject::{
-    Handle, KObject, Rights, SIGNALED, Signal, Waker, install_handle, signal_create, signal_set,
-    signal_wait_one,
+    Handle, KObject, Rights, SIGNALED, Signal, WakeCount, Waker, install_handle, signal_create,
+    signal_set, signal_wait_one,
 };
 
 #[kernel_test]
 fn signal_create_signal_wait_round_trip() {
     let signal = signal_create().expect("signal_create must succeed");
 
-    signal_set(signal, SIGNALED, 0, 0).expect("signal must succeed");
+    signal_set(signal, SIGNALED, 0, WakeCount::All).expect("signal must succeed");
 
     let observed = signal_wait_one(signal, SIGNALED, Some(0)).expect("poll must see SIGNALED");
     kernel_tests::kassert!(observed & SIGNALED == SIGNALED);
@@ -50,7 +50,7 @@ fn signal_set_count_wakes_at_most_n() {
     signal.register_waiter(SIGNALED, w1.clone());
     signal.register_waiter(SIGNALED, w2.clone());
 
-    signal_set(id, SIGNALED, 0, 1).expect("signal must succeed");
+    signal_set(id, SIGNALED, 0, WakeCount::One).expect("signal must succeed");
 
     kernel_tests::kassert!(w1.fired.load(Ordering::Acquire));
     kernel_tests::kassert!(!w2.fired.load(Ordering::Acquire));

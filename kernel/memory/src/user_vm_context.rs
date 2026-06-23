@@ -10,7 +10,6 @@ use crate::{
 };
 
 /// Снимок per-process user-памяти, передаваемый syscall-handler-ам.
-#[derive(Clone)]
 pub struct UserVmContext {
     mapper: Arc<dyn MemoryMapper + Send + Sync>,
     allocator: Arc<MutexCell<UserVmAllocator>>,
@@ -46,8 +45,10 @@ impl UserVmContext {
             Ok(()) | Err(MemoryUnmappingError::NotMapped) => {}
             Err(e) => {
                 // Выровненный range из аллокатора не бывает misaligned/block-mapped.
-                debug_assert!(false, "unmap_range: неожиданная ошибка unmap: {e:?}");
-                return;
+                // В release это no-op: range всё равно возвращаем в аллокатор -
+                // удерживать его занятым (а с ним и `Arc` региона) смысла нет,
+                // PTE в желаемое состояние уже не вернуть.
+                debug_assert!(false, "unmap_range: unexpected unmap error: {e:?}");
             }
         }
         self.allocator.with_lock(|alloc| {

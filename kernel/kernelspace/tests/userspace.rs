@@ -527,17 +527,14 @@ fn context_switch_between_two_user_processes_writes_distinct_roots() {
 
     running.yield_now();
     let after_yield = take_address_space_switches();
+    let root_b = MockAddressSpaceFactory::BASE_ROOT_PA + PAGE;
 
-    // Контракт: yield с user-a на user-b переключает AS на КАКОЙ-ТО root,
-    // отличный от root'а user-a. Конкретное значение root_b (раскладка mock-
-    // фабрики) не фиксируем - проверяем наблюдаемое: переключение на иной AS.
-    let root_a = MockAddressSpaceFactory::BASE_ROOT_PA;
     assert!(
         after_yield.iter().any(|sw| matches!(
             sw,
-            Some(handle) if handle.root.as_usize() != root_a
+            Some(handle) if handle.root.as_usize() == root_b
         )),
-        "yield user-a->user-b must switch to a distinct user root (!= root_a); got {after_yield:?}"
+        "yield user-a->user-b must switch to root_b ({root_b:#x}); got {after_yield:?}"
     );
 }
 

@@ -12,7 +12,7 @@
 
 use collections::{PopOutcome, PushOutcome, RingError, SpscRing};
 use ipc::{MessageLen, Transport, wire::IpcError};
-use syscall::{Handle, SIGNALED, SYSCALL_RETURN_TIMEOUT};
+use syscall::{Handle, SIGNALED, SYSCALL_RETURN_TIMEOUT, WakeCount};
 
 use crate::svc::{signal_set, signal_wait_one};
 
@@ -65,7 +65,7 @@ impl Transport for RingTransport {
                     // Будим consumer'а только на переходе empty->non-empty: под
                     // нагрузкой кольцо непусто и syscall'ов нет.
                     if was_empty {
-                        signal_set(self.data, SIGNALED, 0, 0);
+                        signal_set(self.data, SIGNALED, 0, WakeCount::One);
                     }
                     Ok(())
                 }
@@ -101,7 +101,7 @@ impl Transport for RingTransport {
                 // сном: producer публикует кадр ДО set, поэтому recheck-after-clear
                 // не даёт проспать кадр, запушенный между check и clear. Провал
                 // clear пробрасываем, иначе оставшийся SIGNALED крутил бы busy-spin.
-                if signal_set(self.data, 0, SIGNALED, 0) < 0 {
+                if signal_set(self.data, 0, SIGNALED, WakeCount::None) < 0 {
                     return Err(IpcError::PeerClosed);
                 }
                 if !self.ring.is_empty() {

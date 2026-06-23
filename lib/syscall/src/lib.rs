@@ -118,10 +118,9 @@ impl WaitItem {
 pub enum SyscallOp {
     // 0x10..=0x1F - object base.
     /// Меняет биты сигналов KO. Аргументы: `arg0=handle`, `arg1=set`
-    /// (нижние 32 бита), `arg2=clear` (нижние 32 бита), `arg3=count`.
-    /// `count == 0` будит всех пересекающихся waiter'ов; `count == N>0`
-    /// будит не более N в FIFO-порядке регистрации. Биты выставляются
-    /// всегда. Возврат `0`.
+    /// (нижние 32 бита), `arg2=clear` (нижние 32 бита), `arg3=wake_count`
+    /// (`WakeCount::to_raw`: 0=None, 1=One, 2=All; неизвестное -
+    /// `InvalidArgument`). Биты выставляются всегда. Возврат `0`.
     SignalSet = 0x10,
     /// Ждёт сигналы KO. Аргументы: `arg0=handle`, `arg1=signals`
     /// (нижние 32 бита), `arg2=timeout_ns`; `timeout_ns == 0` -
@@ -196,7 +195,7 @@ pub enum SyscallOp {
     /// `SIGNALED`). Аргументы: `arg0=handle`, `arg1=exit_code`. Требует
     /// `Rights::WRITE`.
     ProcessTerminate = 0x44,
-    /// Возвращает handle на bound-`Signal` термнинации процесса (бит
+    /// Возвращает handle на bound-`Signal` терминации процесса (бит
     /// `SIGNALED`), материализуя его лениво. Аргумент: `arg0=handle`. Требует
     /// `Rights::READ`. Выданный handle - read-only (READ/DUPLICATE/TRANSFER).
     ProcessTerminationSignal = 0x46,
@@ -235,7 +234,7 @@ pub enum SyscallOp {
     /// Терминирование собственного потока через handle отвергается:
     /// для self-exit предусмотрен `Self::ThreadExit`.
     ThreadTerminate = 0x54,
-    /// Возвращает handle на bound-`Signal` термнинации потока (бит
+    /// Возвращает handle на bound-`Signal` терминации потока (бит
     /// `SIGNALED`), материализуя его лениво. Аргумент: `arg0=handle`. Требует
     /// `Rights::READ`. Выданный handle - read-only (READ/DUPLICATE/TRANSFER).
     ThreadTerminationSignal = 0x55,
@@ -321,8 +320,43 @@ impl SyscallOp {
 }
 
 /// Бит сигнала `Signal` "событие наступило". Единственный сигнальный бит,
-/// используемый ядром; для bound-`Signal` термнинации означает «завершён».
+/// используемый ядром; для bound-`Signal` терминации означает "завершён".
 pub const SIGNALED: u32 = 1 << 0;
+
+/// Политика пробуждения `SignalSet`: сколько ждущих будит смена битов.
+/// Закрытый набор - произвольное N не выражается: будить часть ждущих при
+/// уже выставленном бите оставило бы остальных спать с истинным условием
+/// (lost-wakeup). Поддерживаются только края диапазона.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeCount {
+    /// Только сменить биты, никого не будить (clear бита, взвод sticky-бита).
+    None,
+    /// Разбудить ровно одного ждущего в FIFO-порядке (unlock, notify_one).
+    One,
+    /// Разбудить всех пересекающихся ждущих (broadcast, notify_all).
+    All,
+}
+
+impl WakeCount {
+    /// Wire-кодировка для `arg3` `SignalSet`.
+    pub const fn to_raw(self) -> u64 {
+        match self {
+            Self::None => 0,
+            Self::One => 1,
+            Self::All => 2,
+        }
+    }
+
+    /// Декодирует `arg3`; `None` на неизвестном значении (нарушение ABI).
+    pub const fn from_raw(raw: u64) -> Option<Self> {
+        match raw {
+            0 => Some(Self::None),
+            1 => Some(Self::One),
+            2 => Some(Self::All),
+            _ => None,
+        }
+    }
+}
 
 /// Возврат syscall'а "операция должна быть повторена позже" (очередь полна,
 /// нет встречной стороны и т.п.).

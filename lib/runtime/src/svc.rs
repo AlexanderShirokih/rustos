@@ -2,7 +2,7 @@
 
 use core::arch::asm;
 
-use syscall::{Handle, SyscallOp, WaitItem};
+use syscall::{Handle, SyscallOp, WaitItem, WakeCount};
 
 /// Ждёт сигналы `signals` на KO `handle`; `timeout_ns == 0` - non-blocking
 /// poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
@@ -26,9 +26,9 @@ pub fn signal_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
 }
 
 /// Меняет биты сигналов KO `handle`: `set`/`clear` - нижние 32 бита,
-/// `count == 0` будит всех пересекающихся waiter'ов, `count == N>0` -
-/// не более N в FIFO-порядке. Возврат: 0 либо `-(SyscallError)`.
-pub fn signal_set(handle: Handle, set: u32, clear: u32, count: u32) -> i64 {
+/// `count` - политика пробуждения ([`WakeCount`]). Возврат: 0 либо
+/// `-(SyscallError)`.
+pub fn signal_set(handle: Handle, set: u32, clear: u32, count: WakeCount) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
     // в x0..x3: handle, set, clear, count; память ядру не передаётся.
@@ -39,7 +39,7 @@ pub fn signal_set(handle: Handle, set: u32, clear: u32, count: u32) -> i64 {
             in("x0") u64::from(handle.raw()),
             in("x1") u64::from(set),
             in("x2") u64::from(clear),
-            in("x3") u64::from(count),
+            in("x3") count.to_raw(),
             lateout("x0") ret,
             options(nostack),
         );
@@ -331,7 +331,7 @@ pub fn process_exit_code(handle: Handle) -> i64 {
     ret
 }
 
-/// Возвращает handle на ленивый bound-`Signal` термнинации процесса `handle`
+/// Возвращает handle на ленивый bound-`Signal` терминации процесса `handle`
 /// (бит `SIGNALED`). Возврат: signal-handle либо `-(SyscallError)`.
 pub fn process_termination_signal(handle: Handle) -> Result<Handle, i64> {
     let ret: i64;
@@ -465,7 +465,7 @@ pub fn thread_exit_code(handle: Handle) -> i64 {
     ret
 }
 
-/// Возвращает handle на ленивый bound-`Signal` термнинации потока `handle`
+/// Возвращает handle на ленивый bound-`Signal` терминации потока `handle`
 /// (бит `SIGNALED`). Возврат: signal-handle либо `-(SyscallError)`.
 pub fn thread_termination_signal(handle: Handle) -> Result<Handle, i64> {
     let ret: i64;

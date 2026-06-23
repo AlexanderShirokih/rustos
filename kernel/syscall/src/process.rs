@@ -102,7 +102,7 @@ pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
 }
 
 /// `ProcessTerminationSignal(handle)` - возвращает handle на ленивый
-/// bound-`Signal` термнинации процесса. Требует `Rights::READ`.
+/// bound-`Signal` терминации процесса. Требует `Rights::READ`.
 pub fn sys_process_termination_signal(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let sig_id = kobject::process_termination_signal(id)?;
@@ -158,7 +158,6 @@ pub fn sys_process_load_image(
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Лукапим target ProcessObject в loader-таблице (с MANAGE_PROCESS).
     let loader_table = runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
@@ -356,7 +355,9 @@ fn load_image_err_to_syscall(e: LoadImageError) -> SyscallError {
     match e {
         LoadImageError::ProcessNotFound => SyscallError::BadHandle,
         LoadImageError::WrongState | LoadImageError::NoUserAddressSpace => SyscallError::WrongType,
-        LoadImageError::UserVmRangeOverflow => SyscallError::InvalidArgument,
+        LoadImageError::UserVmRangeOverflow | LoadImageError::InvalidGeometry => {
+            SyscallError::InvalidArgument
+        }
         LoadImageError::MappingFailed(m) => mapping_err_to_syscall(&m),
     }
 }

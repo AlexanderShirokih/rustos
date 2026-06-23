@@ -1,19 +1,11 @@
 //! `Signal` kernel object: сигнальный примитив ядра.
 //!
-//! Слово атомарных бит 0..=31 + список ожидающих. Сам по себе сигнальный
-//! примитив; также служит ответным каналом в RPC-паттерне
-//! «request -> handle на Signal -> ждать `SIGNALED`» и ленивым bound-сигналом
-//! термнинации Process/Thread (см. [`termination`](super::termination)).
-//!
-//! `peek` лочно-свободен; `signal`/`register_waiter` берут короткий мьютекс
-//! waiters'ов, что одновременно сериализует обновление битов и гарантирует,
-//! что регистрация waiter'а не «проскочит» мимо одновременной публикации сигнала.
-
+//! Слово атомарных бит 0..=31 + список ожидающих.
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use collections::{LockCell, MutexCell};
-pub use syscall::SIGNALED;
+pub use syscall::{SIGNALED, WakeCount};
 
 use super::wait::Waker;
 
@@ -29,8 +21,7 @@ impl Signal {
         Arc::new(Self::with_bits(0))
     }
 
-    /// Создаёт `Signal` с заранее выставленными битами (для пре-сигнала
-    /// уже-наступившего события, напр. термнинации, см. [`super::termination`]).
+    /// Создаёт `Signal` с заранее выставленными битами.
     pub(crate) fn with_bits(initial: u32) -> Self {
         Self {
             bits: AtomicU32::new(initial),

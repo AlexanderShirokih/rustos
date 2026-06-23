@@ -182,6 +182,16 @@ where
             .with_lock(|inner| inner.unblock_thread(thread_id));
     }
 
+    fn set_blocked_cancel(&self, cancel: Arc<dyn kobject::CancelTarget>) {
+        self.inner
+            .with_lock(|inner| inner.set_current_blocked_cancel(cancel));
+    }
+
+    fn clear_blocked_cancel(&self) {
+        self.inner
+            .with_lock(SchedulerInner::clear_current_blocked_cancel);
+    }
+
     fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, kobject::SpawnError> {
         self.inner
             .with_lock(|inner| inner.create_empty_process(name))

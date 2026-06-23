@@ -5,6 +5,7 @@
 use core::num::NonZeroU32;
 
 use kobject::{self, HandleId, Rights};
+use syscall::WakeCount;
 
 use super::{
     error::{SyscallError, encode_return},
@@ -30,9 +31,7 @@ pub trait SyscallFrame {
 
     fn set_return(&mut self, value: i64);
 
-    /// Записать дополнительное возвращаемое значение во второй
-    /// регистр-возврата фрейма. Используется syscall'ами с парным
-    /// результатом - сейчас [`SyscallOp::SignalWaitMany`].
+    /// Записать второй возвращаемый регистр (парный результат).
     fn set_secondary_return(&mut self, value: u64);
 
     fn origin(&self) -> Origin;
@@ -218,15 +217,11 @@ fn sys_thread_exit(code: u64) -> ! {
     kobject::thread_exit(exit_code)
 }
 
-/// `signal_set(handle, set, clear, count)` - атомарно меняет биты
-/// сигналов kernel-объекта и будит waiter'ов.
-/// При `count == 0` будит всех пересекающихся.
-/// При `count == N` - не более N в FIFO-порядке.
-/// Возвращает `0` в случае успеха.
+/// Атомарно меняет биты сигналов объекта и будит waiter'ов по [`WakeCount`] (arg3).
+/// Неизвестное значение `count` - `InvalidArgument`.
 fn sys_signal_set(handle: u64, set: u64, clear: u64, count: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
-    let count =
-        u32::try_from(count & u64::from(u32::MAX)).expect("masking guarantees value fits into u32");
+    let count = WakeCount::from_raw(count).ok_or(SyscallError::InvalidArgument)?;
     kobject::signal_set(id, signals_from_arg(set), signals_from_arg(clear), count)?;
     Ok(0)
 }

@@ -26,7 +26,7 @@ use super::{
 
 /// Роль заблокированной стороны - определяет, как её будят при встрече.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WaiterKind {
+pub(crate) enum WaiterKind {
     /// `send`: после доставки отправитель разблокируется немедленно.
     Send,
     /// `call`: вызывающая сторона остаётся блокированной до `reply`.
@@ -37,7 +37,7 @@ pub enum WaiterKind {
 
 /// Исход операции, прочитанный разбуженной стороной из [`OutcomeSlot`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RendezvousOutcome {
+pub(crate) enum RendezvousOutcome {
     /// Встреча состоялась, сообщение доставлено.
     Delivered,
     /// Port/Reply уничтожен или последний хендл закрыт.
@@ -52,7 +52,7 @@ pub type KernelIpcBuffer = Arc<MutexCell<syscall::IpcBuffer>>;
 
 /// Способ доступа к телу IPC-буфера транспорта.
 #[derive(Clone)]
-pub enum BufferAccess {
+pub(crate) enum BufferAccess {
     /// User-буфер: mapper его AS и VA буфера.
     User {
         mapper: Arc<dyn MemoryMapper + Send + Sync>,
@@ -70,10 +70,9 @@ pub enum BufferAccess {
 /// После успешного рандеву значок отправителя записывается в `IpcBuffer.badge` получателя.
 #[derive(Clone)]
 pub struct ThreadTransport {
-    pub access: BufferAccess,
-    pub handle_table: Arc<MutexCell<HandleTable>>,
-    /// Значок port-хендла отправителя (`0` - без значка / не отправитель).
-    pub badge: u64,
+    pub(crate) access: BufferAccess,
+    pub(crate) handle_table: Arc<MutexCell<HandleTable>>,
+    pub(crate) badge: u64,
 }
 
 impl ThreadTransport {
@@ -107,27 +106,8 @@ impl ThreadTransport {
     }
 }
 
-/// Атомарный слот исхода rendezvous. Несёт и терминальный исход доставки, и
-/// (для `call`) арбитраж гонки "вызыватель-тайм-аут против сервер-reply".
-///
-/// Машина состояний:
-///
-/// ```text
-///                    set()              (send/recv-матчер, cancel)
-///   PENDING ───────────────────────────► DELIVERED / PEER_GONE / TRANSFER_FAILED
-///      │
-///      │ set_awaiting_reply()  (call-матчер: запрос доставлен)
-///      ▼
-///   AWAITING_REPLY ──try_timeout()──► TIMEDOUT       (вызыватель ушёл по тайм-ауту)
-///      │
-///      │ try_begin_reply()   (сервер закоммитил reply)
-///      ▼
-///   DELIVERING ──set()──► DELIVERED / PEER_GONE / TRANSFER_FAILED
-/// ```
-///
-/// Для `send`/`recv` слот живёт только в ветке `PENDING -> терминал`; промежу-
-/// точные состояния использует исключительно reply-фаза `call`.
-pub struct OutcomeSlot {
+/// Атомарный слот исхода рандеву.
+pub(crate) struct OutcomeSlot {
     state: AtomicU32,
 }
 
@@ -372,8 +352,7 @@ impl Port {
         }
     }
 
-    /// Будит всех ждущих с исходом `PeerGone`. Вызывается при закрытии
-    /// последнего хендла (через cancel-target) и на Drop.
+    /// Будит всех ждущих с исходом `PeerGone`.
     pub fn cancel_all(&self) {
         let drained = self
             .inner
@@ -513,8 +492,11 @@ pub fn port_send(
         PortAction::Done { .. } => Ok(()),
         PortAction::Failed(e) => Err(e),
         PortAction::Park { waker, outcome, .. } => {
+            arm_port_cancel(port, runtime, &waker, &outcome);
             park_with_timeout(runtime, &waker, timeout_ns);
-            resolve_send_recv(port, runtime, &waker, &outcome)
+            let result = resolve_send_recv(port, runtime, &waker, &outcome);
+            runtime.clear_blocked_cancel();
+            result
         }
     }
 }
@@ -547,8 +529,11 @@ pub fn port_call(
             unreachable!("call always parks until reply");
         }
         PortAction::Park { waker, outcome, .. } => {
+            arm_port_cancel(port, runtime, &waker, &outcome);
             park_with_timeout(runtime, &waker, timeout_ns);
-            resolve_call(port, runtime, &waker, &outcome, timeout_ns)
+            let result = resolve_call(port, runtime, &waker, &outcome, timeout_ns);
+            runtime.clear_blocked_cancel();
+            result
         }
     }
 }
@@ -608,9 +593,12 @@ pub fn port_recv(
             outcome,
             reply_slot,
         } => {
+            arm_port_cancel(port, runtime, &waker, &outcome);
             park_with_timeout(runtime, &waker, timeout_ns);
-            resolve_send_recv(port, runtime, &waker, &outcome)?;
-            // Доставка состоялась; если матчер положил Reply - забираем.
+            let resolved = resolve_send_recv(port, runtime, &waker, &outcome);
+            runtime.clear_blocked_cancel();
+            resolved?;
+
             Ok(reply_slot.and_then(|slot| slot.take()))
         }
     }
@@ -646,6 +634,33 @@ impl Drop for Port {
     }
 }
 
+struct PortCancel {
+    port: Arc<Port>,
+    waker: Arc<ParkWaker>,
+    outcome: Arc<OutcomeSlot>,
+}
+
+impl CancelTarget for PortCancel {
+    fn cancel(&self) {
+        self.port.remove_waiter(&self.waker);
+        self.outcome.try_timeout();
+    }
+}
+
+fn arm_port_cancel(
+    port: &Arc<Port>,
+    runtime: &Arc<dyn KernelRuntime>,
+    waker: &Arc<ParkWaker>,
+    outcome: &Arc<OutcomeSlot>,
+) {
+    let cancel: Arc<dyn CancelTarget> = Arc::new(PortCancel {
+        port: port.clone(),
+        waker: waker.clone(),
+        outcome: outcome.clone(),
+    });
+    runtime.set_blocked_cancel(cancel);
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::sync::Arc;
@@ -660,7 +675,7 @@ mod tests {
 
     use super::{
         super::{
-            HandleTable, ProcessObject, ThreadObject,
+            CancelTarget, HandleTable, ProcessObject, ThreadObject,
             errors::SpawnError,
             ipc_buffer_xfer::test_mapper::PageMapper,
             runtime::{KernelRuntime, UserThreadEntry, WaitToken},
@@ -868,6 +883,71 @@ mod tests {
         };
         drop(ep);
         assert_eq!(outcome.get(), Some(RendezvousOutcome::PeerGone));
+    }
+
+    #[test]
+    fn port_cancel_removes_waiter_on_termination() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let PortAction::Park { waker, outcome, .. } = ep.recv(transport(BASE_B), &rt) else {
+            panic!("recv must park");
+        };
+        assert!(!ep.queue_is_empty());
+
+        // Терминация заблокированного потока: scheduler зовёт PortCancel,
+        // снимающий Waiter с очереди - матчер позже не доставит в мёртвый поток.
+        let cancel = PortCancel {
+            port: ep.clone(),
+            waker: waker.clone(),
+            outcome: outcome.clone(),
+        };
+        CancelTarget::cancel(&cancel);
+        assert!(ep.queue_is_empty());
+
+        // Идемпотентность: повторный cancel - no-op.
+        CancelTarget::cancel(&cancel);
+        assert!(ep.queue_is_empty());
+    }
+
+    #[test]
+    fn port_cancel_phase2_timeouts_caller_and_rejects_late_reply() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        // вызывающая сторона паркуется (call всегда паркуется до reply).
+        let waker = Arc::new(ParkWaker::new(rt.clone(), rt.current_wait_token()));
+        let outcome = OutcomeSlot::new();
+        let call_action = ep.send_or_call(
+            WaiterKind::Call,
+            transport(BASE_A),
+            &rt,
+            Some((waker.clone(), outcome.clone())),
+        );
+        assert!(matches!(call_action, PortAction::Park { .. }));
+
+        // Получатель забрал запрос -> вызывающая сторона в фазе 2 (AWAITING_REPLY); его
+        // Waiter уже не в очереди, поэтому remove_waiter в cancel - no-op.
+        let PortAction::Done { reply: Some(reply) } = ep.recv(transport(BASE_B), &rt) else {
+            panic!("recv must return a reply for call");
+        };
+        assert_eq!(outcome.raw(), OutcomeSlot::AWAITING_REPLY);
+
+        // Терминация: PortCancel переводит слот в TIMEDOUT (фаза 2) - так
+        // поздний reply сервера не пишет в освобождаемый IPC-буфер.
+        let cancel = PortCancel {
+            port: ep.clone(),
+            waker: waker.clone(),
+            outcome: outcome.clone(),
+        };
+        CancelTarget::cancel(&cancel);
+        assert_eq!(outcome.raw(), OutcomeSlot::TIMEDOUT);
+
+        // Поздний reply отвергнут - сервер получает PeerClosed.
+        let server = transport(BASE_B);
+        assert_eq!(reply.reply(&server).unwrap_err(), IpcError::PeerClosed);
+
+        // Идемпотентность: повторный cancel - no-op.
+        CancelTarget::cancel(&cancel);
+        assert_eq!(outcome.raw(), OutcomeSlot::TIMEDOUT);
     }
 
     #[test]

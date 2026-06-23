@@ -121,7 +121,15 @@ pub enum DtError {
     /// Неверная сигнатура (magic) в заголовке.
     InvalidMagic(u32),
 
-    /// Буфер меньше заявленного размера дерева.
+    /// Буфер короче минимального заголовка (24 байта); поле total_size ещё не
+    /// прочитано.
+    TruncatedHeader {
+        /// Фактический размер переданного буфера.
+        actual: usize,
+    },
+
+    /// total_size в заголовке выходит за пределы MAX_DTB_SIZE или превышает
+    /// длину переданного буфера.
     Incomplete {
         /// Ожидаемый размер из заголовка.
         total_size: usize,
@@ -131,6 +139,9 @@ pub enum DtError {
 }
 
 impl<'a> DeviceTree<'a> {
+    /// Верхний предел total_size из недоверенного FDT-blob.
+    const MAX_DTB_SIZE: usize = 2 * 1024 * 1024;
+
     pub fn from_ptr(address: usize) -> Result<Self, DtError> {
         if address == 0 {
             return Err(DtError::InvalidMagic(0));
@@ -146,8 +157,20 @@ impl<'a> DeviceTree<'a> {
         let header = FdtHeader::read_checked(&mut cursor)?;
         let total_size = header.total_size;
 
-        // SAFETY: total_size прочитан из заголовка FDT; вызывающий гарантирует,
-        // что буфер по address содержит как минимум total_size валидных байт.
+        // Проверяем total_size до формирования среза: значение из недоверенного
+        // blob не может служить обоснованием безопасности from_raw_parts.
+        // Ограничиваем MAX_DTB_SIZE, чтобы OOB-доступ к физической памяти был
+        // невозможен независимо от содержимого заголовка.
+        if total_size > Self::MAX_DTB_SIZE {
+            return Err(DtError::Incomplete {
+                total_size,
+                actual: Self::MAX_DTB_SIZE,
+            });
+        }
+
+        // SAFETY: total_size прошёл проверку (<= MAX_DTB_SIZE). Вызывающий
+        // гарантирует, что буфер по address содержит как минимум total_size
+        // подряд идущих читаемых байт.
         let buffer = unsafe { from_raw_parts(ptr_u8, total_size) };
 
         Ok(DeviceTree { buffer, header })
@@ -300,16 +323,18 @@ impl FdtHeader {
     /// Магическое число FDT (0xD00DFEED).
     const MAGIC: u32 = 0xD00D_FEED;
 
+    /// Минимальный размер заголовка: 6 x u32 = 24 байта.
+    const HEADER_MIN_SIZE: usize = size_of::<u32>() * 6;
+
     fn read_checked(cur: &mut Cursor<'_>) -> Result<Self, DtError> {
         cur.set_position(0);
 
-        // Заголовок состоит из 6 x u32. Если буфер обрезан, read_u32 вернёт None.
+        // Заголовок состоит из 6 x u32 = 24 байта. Если буфер обрезан,
+        // read_u32 вернёт None.
         let actual = cur.buffer.len();
         let mut read = || {
-            cur.read_u32().ok_or(DtError::Incomplete {
-                total_size: 0,
-                actual,
-            })
+            cur.read_u32()
+                .ok_or(DtError::TruncatedHeader { actual })
         };
 
         let magic = read()?;
@@ -317,7 +342,15 @@ impl FdtHeader {
             return Err(DtError::InvalidMagic(magic));
         }
 
+        // total_size из недоверенного blob ограничиваем диапазоном
+        // [HEADER_MIN_SIZE, MAX_DTB_SIZE].
         let total_size = read()? as usize;
+        if !(Self::HEADER_MIN_SIZE..=DeviceTree::MAX_DTB_SIZE).contains(&total_size) {
+            return Err(DtError::Incomplete {
+                total_size,
+                actual,
+            });
+        }
 
         let struct_off = read()?;
         let strings_off = read()?;

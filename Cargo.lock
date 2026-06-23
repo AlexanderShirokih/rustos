@@ -287,6 +287,7 @@ dependencies = [
 name = "hal-common"
 version = "0.1.0"
 dependencies = [
+ "collections",
  "fdt",
  "memory",
 ]

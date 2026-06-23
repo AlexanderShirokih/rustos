@@ -43,17 +43,14 @@ pub use handle_table::{HandleReservation, HandleTable};
 pub use ipc_buffer_xfer::transfer_rendezvous;
 pub use koid::Koid;
 pub use object::KObject;
-pub use port::{
-    BufferAccess, KernelIpcBuffer, OutcomeSlot, Port, RendezvousOutcome, ThreadTransport,
-    WaiterKind, port_call, port_recv, port_send,
-};
+pub use port::{KernelIpcBuffer, Port, ThreadTransport, port_call, port_recv, port_send};
 pub use process::ProcessObject;
-pub use reply::{Reply, ReplySlot};
+pub use reply::Reply;
 pub use resource::{Resource, ResourceBudgetRefund};
 pub use rev_node::RevocationHook;
 pub use rights::Rights;
 pub use runtime::{KernelRuntime, ParkState, UserThreadEntry, WaitToken, install_runtime, runtime};
-pub use signal::{SIGNALED, Signal};
+pub use signal::{SIGNALED, Signal, WakeCount};
 pub use spawn::{
     LoadImageError, StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec,
 };

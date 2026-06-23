@@ -150,6 +150,8 @@ where
     frame_allocator: Option<&'static (dyn FrameAllocator + Send + Sync)>,
     /// Процессы, у которых счётчик thread'ов достиг 0.
     pending_process_removals: Vec<ProcessId>,
+    /// Завершённые потоки, ждущие реапа из `ThreadTable`.
+    pending_thread_removals: Vec<ThreadId>,
     quantum_ns: u64,
     time_slice_ticks: u32,
 }
@@ -188,6 +190,7 @@ where
                 address_space_factory,
                 frame_allocator: None,
                 pending_process_removals: Vec::new(),
+                pending_thread_removals: Vec::new(),
                 quantum_ns: DEFAULT_QUANTUM_NS,
                 time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
             })),
@@ -886,6 +889,10 @@ where
             self.pending_process_removals.push(pid);
         }
 
+        // Kernel-стек освободится в `reap_pending_threads`, когда поток перестанет быть prev.
+        self.release_ipc_buffer(current_id);
+        self.pending_thread_removals.push(current_id);
+
         signals
     }
 
@@ -1079,9 +1086,81 @@ where
         Ok(())
     }
 
-    /// User-VA per-thread IPC-buffer'а текущего потока. `None`, если
-    /// scheduler не bootstrapped, поток - kernel-only либо буфер не
-    /// прикреплён.
+    /// БЕЗОПАСНОСТЬ: для потока, заблокированного на Port, caller обязан снять
+    /// `Waiter` с очереди Port до вызова - иначе матчер пишет в уже снятый VA.
+    fn release_ipc_buffer(&mut self, thread_id: ThreadId) {
+        let Some(thread) = self.threads.get(thread_id) else {
+            return;
+        };
+        let Some(va) = thread.ipc_buffer_va() else {
+            return;
+        };
+        let pid = thread.process();
+
+        let resources = self.processes.get(pid).map(|process| {
+            (
+                process.address_space().mapper_arc(),
+                process.user_vm().cloned(),
+            )
+        });
+        if let Some((mapper, user_vm)) = resources {
+            let base = PageAlignedVirtualAddress::from_usize(va.as_usize())
+                .expect("ipc-buffer VA выровнен по построению");
+            let size = NonZeroUsize::new(FRAME_SIZE).expect("FRAME_SIZE is non-zero");
+            // Фрейм возвращается аллокатору только если PTE снят: живой PTE
+            // после "освобождения" фрейма = UAF-поверхность. NotMapped штатен
+            // (идемпотентный повторный вызов / уже снятый AS); любая другая
+            // ошибка unmap (block-split, misalign) - баг построения.
+            let unmapped = match mapper {
+                Some(mapper) => match mapper.unmap(base, FRAME_SIZE) {
+                    Ok(()) | Err(memory::memory_mapper::MemoryUnmappingError::NotMapped) => true,
+                    Err(_e) => {
+                        debug_assert!(false, "unexpected unmap error for ipc-buffer");
+                        false
+                    }
+                },
+                None => true,
+            };
+            if unmapped && let Some(user_vm) = user_vm {
+                user_vm.with_lock(|alloc| {
+                    let _ = alloc.free(base, size);
+                });
+            }
+        }
+
+        if let Some(thread) = self.threads.get_mut(thread_id) {
+            let _ = thread.take_ipc_buffer();
+        }
+    }
+
+    /// Реап отложен: `perform_schedule_action` ещё сохраняет контекст в `prev.arch`.
+    fn reap_pending_threads(&mut self, prev_id: ThreadId, next_id: ThreadId) {
+        let mut idx = 0;
+        while idx < self.pending_thread_removals.len() {
+            let tid = self.pending_thread_removals[idx];
+            if tid == prev_id || tid == next_id {
+                idx += 1;
+                continue;
+            }
+            self.pending_thread_removals.swap_remove(idx);
+            let _ = self.threads.remove(tid);
+        }
+    }
+
+    pub(crate) fn set_current_blocked_cancel(&mut self, cancel: Arc<dyn kobject::CancelTarget>) {
+        let current_id = self.current();
+        if let Some(thread) = self.threads.get_mut(current_id) {
+            thread.set_blocked_cancel(cancel);
+        }
+    }
+
+    pub(crate) fn clear_current_blocked_cancel(&mut self) {
+        let current_id = self.current();
+        if let Some(thread) = self.threads.get_mut(current_id) {
+            let _ = thread.take_blocked_cancel();
+        }
+    }
+
     pub(super) fn current_ipc_buffer_va(&self) -> Option<VirtualAddress> {
         let current_id = self.current_cpu()?.current();
         self.threads.get(current_id)?.ipc_buffer_va()
@@ -1129,6 +1208,9 @@ where
         {
             return Err(LoadImageError::WrongState);
         }
+
+        // До маппинга: невалидный образ не должен оставлять процесс полузагруженным.
+        install.validate_geometry()?;
 
         let mapper_arc = process
             .address_space()
@@ -1290,10 +1372,18 @@ where
             return;
         }
 
-        if let Some(thread) = self.threads.get_mut(thread_id) {
+        let blocked_cancel = self.threads.get_mut(thread_id).and_then(|thread| {
             thread.set_state(ThreadState::Terminated);
-        }
+            thread.take_blocked_cancel()
+        });
         signals.push_thread(thread_ko.clone(), exit_code);
+
+        // Cancel снимает Waiter с очереди и переводит OutcomeSlot в TIMEDOUT,
+        // отклоняя поздний reply. Thread не реапим: стек заморожен в syscall и держит Arc'и.
+        if let Some(cancel) = blocked_cancel {
+            cancel.cancel();
+        }
+        self.release_ipc_buffer(thread_id);
 
         if let Some(process) = self.processes.get(pid)
             && process.decrement_thread_count()
@@ -1444,6 +1534,7 @@ where
 
         // Dying thread больше не current - удаление процессов с thread_count=0 теперь безопасно.
         self.cleanup_pending_process_removals(next_id);
+        self.reap_pending_threads(prev_id, next_id);
 
         if prev_id == next_id {
             self.schedule_next_deadline(now_ns);

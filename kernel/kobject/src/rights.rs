@@ -52,7 +52,7 @@ impl Rights {
         use super::object::KObject;
 
         match obj {
-            // Signal сигналуем пользователем; Process/Thread термнинацию
+            // Signal сигналуем пользователем; Process/Thread терминацию
             // поднимает только ядро (через bound-Signal), но WRITE на самом
             // объекте оставлен под terminate-op - наборы прав совпадают.
             KObject::Signal(_) | KObject::Process(_) | KObject::Thread(_) => {
@@ -60,7 +60,7 @@ impl Rights {
             }
             
             KObject::Memory(region) => {
-                // База — только передаваемость/дублируемость; конкретный доступ
+                // База - только передаваемость/дублируемость; конкретный доступ
                 // (READ/WRITE/EXECUTE) определяется access-маской региона, чтобы
                 // read-only регион не получал WRITE по умолчанию.
                 let mut bits = Self::DUPLICATE.0 | Self::TRANSFER.0;

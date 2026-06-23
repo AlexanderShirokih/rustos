@@ -1,10 +1,5 @@
-//! Общие хелперы для копирования между kernel- и user-памятью в
-//! syscall-handler'ах. Под капотом - [`MemoryMapper::copy_user_in`] /
-//! [`copy_user_out`]; здесь - валидация user-указателя и единое
-//! отображение ошибок копирования в [`SyscallError`].
-//!
-//! [`MemoryMapper::copy_user_in`]: memory::memory_mapper::MemoryMapper::copy_user_in
-//! [`copy_user_out`]: memory::memory_mapper::MemoryMapper::copy_user_out
+//! Хелперы копирования user -> kernel в syscall-handler'ах:
+//! валидация указателей и отображение [`UserCopyError`] в [`SyscallError`].
 
 use memory::{UserVmContext, memory_mapper::UserCopyError, virtual_address::VirtualAddress};
 
@@ -40,21 +35,8 @@ pub(super) fn copy_in(
         .map_err(user_copy_err)
 }
 
-/// Копирует `src` в user-память по адресу `va`. Сейчас прямых
-/// потребителей нет (буферизованный канал удалён), но парный к `copy_in`
-/// помощник сохраняется для будущих syscall'ов с out-параметрами.
-#[allow(dead_code)]
-pub(super) fn copy_out(user_vm: &UserVmContext, va: u64, src: &[u8]) -> Result<(), SyscallError> {
-    let va_usize = usize::try_from(va).map_err(|_| SyscallError::InvalidArgument)?;
-    user_vm
-        .mapper()
-        .copy_user_out(VirtualAddress::new(va_usize), src)
-        .map_err(user_copy_err)
-}
-
-/// Все варианты [`UserCopyError`] (адрес не маппирован, нет нужных прав)
-/// сворачиваем в единый [`SyscallError::InvalidArgument`]: с точки зрения
-/// caller'а user-указатель в любом случае непригоден.
+/// Все варианты [`UserCopyError`] -> [`SyscallError::InvalidArgument`]:
+/// с точки зрения caller'а user-указатель непригоден в любом случае.
 pub(super) fn user_copy_err(_e: UserCopyError) -> SyscallError {
     SyscallError::InvalidArgument
 }
@@ -77,10 +59,7 @@ mod tests {
 
     use super::*;
 
-    /// Минимальный mapper для тестов copy_in/copy_out: обслуживает
-    /// `copy_user_in`/`copy_user_out` поверх линейного Vec<u8>, начинающегося
-    /// с `base_va`. Чтение/запись за пределами буфера -> `NotMapped`; если
-    /// буфер помечен read-only, `copy_user_out` отдаёт `AccessDenied`.
+    // Чтение за пределами буфера -> NotMapped.
     struct CannedMapper {
         base_va: usize,
         writable: bool,
@@ -196,41 +175,11 @@ mod tests {
     }
 
     #[test]
-    fn copy_in_va_overflowing_usize_is_invalid_argument() {
+    fn copy_in_unmapped_va_is_invalid_argument() {
         let ctx = make_ctx(0x4000, std::vec![1, 2, 3, 4], true);
         let mut dst = [0u8; 4];
-        // На 64-битной платформе usize вмещает u64; используем mapper-овый
-        // NotMapped для VA вне буфера как эквивалент.
         assert_eq!(
             copy_in(&ctx, u64::MAX, &mut dst),
-            Err(SyscallError::InvalidArgument)
-        );
-    }
-
-    #[test]
-    fn copy_out_writes_user_bytes() {
-        let ctx = make_ctx(0x4000, std::vec![0; 4], true);
-        copy_out(&ctx, 0x4000, &[9, 8, 7, 6]).expect("copy out ok");
-        let mut back = [0u8; 4];
-        copy_in(&ctx, 0x4000, &mut back).expect("read back");
-        assert_eq!(back, [9, 8, 7, 6]);
-    }
-
-    #[test]
-    fn copy_out_to_readonly_is_invalid_argument() {
-        let ctx = make_ctx(0x4000, std::vec![0; 4], false);
-        // AccessDenied из mapper-а сворачивается в InvalidArgument.
-        assert_eq!(
-            copy_out(&ctx, 0x4000, &[1, 2, 3, 4]),
-            Err(SyscallError::InvalidArgument)
-        );
-    }
-
-    #[test]
-    fn copy_out_out_of_bounds_is_invalid_argument() {
-        let ctx = make_ctx(0x4000, std::vec![0; 4], true);
-        assert_eq!(
-            copy_out(&ctx, 0x4000, &[0u8; 8]),
             Err(SyscallError::InvalidArgument)
         );
     }

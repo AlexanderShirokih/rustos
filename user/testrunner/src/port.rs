@@ -22,7 +22,7 @@ use runtime::{
 };
 use syscall::{
     Handle, MEM_FLAGS_READ_WRITE, PORT_TIMEOUT_INFINITE, PORT_TIMEOUT_POLL, SIGNALED,
-    SYSCALL_RETURN_TIMEOUT, decode_tag, encode_tag,
+    SYSCALL_RETURN_TIMEOUT, WakeCount, decode_tag, encode_tag,
 };
 
 const STACK_SIZE: u64 = 0x4000;
@@ -286,7 +286,7 @@ extern "C" fn cap_sender_worker(_arg: usize) -> ! {
     // идентичность KO (свежий объект бита бы не имел).
     let notif = signal_create().expect("signal_create");
     NOTIF_RAW.store(u64::from(notif.raw()), SeqCst);
-    if signal_set(notif, SIGNALED, 0, 0) != 0 {
+    if signal_set(notif, SIGNALED, 0, WakeCount::None) != 0 {
         WORKER_RESULT.store(-100, SeqCst);
         thread_exit(0);
     }

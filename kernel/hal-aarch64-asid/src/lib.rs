@@ -375,7 +375,7 @@ mod tests {
             .with_lock(|s| s.in_use.is_set(asid_active_on_cpu0 as usize));
         assert!(
             active_reserved,
-            "ASID {asid_active_on_cpu0} активен на CPU0, но не зарезервирован после rollover"
+            "ASID {asid_active_on_cpu0} active on CPU0 must be reserved after rollover"
         );
 
         // Свежие acquire'ы на CPU1 не должны выдать тот же ASID.
@@ -384,7 +384,7 @@ mod tests {
             let (asid, _) = alloc.acquire(&s, 1);
             assert_ne!(
                 asid, asid_active_on_cpu0,
-                "ASID {asid_active_on_cpu0} реиспользован после rollover"
+                "ASID {asid_active_on_cpu0} must not be reused after rollover"
             );
         }
     }
@@ -405,14 +405,14 @@ mod tests {
                 return (gen_before, gen_now);
             }
         }
-        panic!("rollover так и не произошёл за {} итераций", max * 2 + 4);
+        panic!("rollover did not occur within {} iterations", max * 2 + 4);
     }
 
     #[test]
     fn rollover_changes_generation_robustly() {
         let alloc = make(AsidWidth::Bits8, noop);
         let (before, after) = drive_to_rollover(&alloc, 0);
-        assert_ne!(before, after, "generation должна смениться при rollover");
+        assert_ne!(before, after, "generation must change on rollover");
     }
 
     #[test]
@@ -439,18 +439,13 @@ mod tests {
         let (asid_next, _) = alloc.acquire(&s, 0);
         assert_ne!(
             asid_next, asid0,
-            "освобождённый ASID не должен переиспользоваться немедленно (lazy reclaim)"
+            "released ASID must not be reused immediately before rollover (lazy reclaim)"
         );
 
-        // Однако после rollover он становится снова доступным: освобождённый
-        // bit очищается, и при следующем заходе ASID может быть выдан вновь.
-        let (_b, _a) = drive_to_rollover(&alloc, 0);
-        // bit asid0 в новой generation не зарезервирован (никем не активен).
-        let reserved = alloc.state.with_lock(|s| s.in_use.is_set(asid0 as usize));
-        // asid0 либо свободен, либо уже снова выдан в новом поколении -
-        // в любом случае это разрешено; проверяем лишь, что rollover очистил
-        // старую резервацию (нет утечки конкретно из-за release).
-        let _ = reserved;
+        // After rollover the bitmap is cleared; asid0 is available for
+        // reuse. The lazy-reclaim invariant (no immediate reuse before
+        // rollover) is verified by assert_ne above.
+        drive_to_rollover(&alloc, 0);
     }
 
     #[test]
@@ -508,7 +503,7 @@ mod tests {
         for _ in 0..200 {
             let slot = AtomicU64::new(0);
             let (asid, _) = alloc.acquire(&slot, 0);
-            assert!(asid >= 1, "ASID 0 зарезервирован");
+            assert!(asid >= 1, "ASID 0 is reserved");
         }
     }
 

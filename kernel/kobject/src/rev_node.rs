@@ -1,5 +1,7 @@
 //! Граф деривации capability и каскадный отзыв.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
@@ -17,6 +19,7 @@ pub struct RevNode {
     parent: Option<Weak<RevNode>>,
     children: MutexCell<Vec<Weak<RevNode>>>,
     hooks: MutexCell<Vec<Weak<dyn RevocationHook>>>,
+    revoked: AtomicBool,
 }
 
 impl RevNode {
@@ -26,25 +29,43 @@ impl RevNode {
             parent: None,
             children: MutexCell::new(Vec::new()),
             hooks: MutexCell::new(Vec::new()),
+            revoked: AtomicBool::new(false),
         })
     }
 
-    /// Дочерний узел, производный от `parent`; регистрирует обратное ребро.
-    pub fn new_child(parent: &Arc<RevNode>) -> Arc<Self> {
+    /// Дочерний узел, производный от `parent`.
+    /// Если `parent` уже отозван (`revoked` установлен), возвращает `None`.
+    pub fn new_child(parent: &Arc<RevNode>) -> Option<Arc<Self>> {
         let child = Arc::new(Self {
             parent: Some(Arc::downgrade(parent)),
             children: MutexCell::new(Vec::new()),
             hooks: MutexCell::new(Vec::new()),
+            revoked: AtomicBool::new(false),
         });
-        parent
-            .children
-            .with_lock(|c| c.push(Arc::downgrade(&child)));
-        child
+        let inserted = parent.children.with_lock(|c| {
+            if parent.revoked.load(Ordering::SeqCst) {
+                return false;
+            }
+            c.retain(|w| w.strong_count() > 0);
+            c.push(Arc::downgrade(&child));
+            true
+        });
+        if inserted { Some(child) } else { None }
     }
 
-    /// Регистрирует `Weak` хука срыва (сильную ссылку держит сторона эффекта).
+    /// Регистрирует `Weak` хука отзыва побочного эффекта.
+    /// Если узел уже отозван, хук вызывается немедленно.
     pub fn register_hook(&self, hook: Weak<dyn RevocationHook>) {
-        self.hooks.with_lock(|h| h.push(hook));
+        self.hooks.with_lock(|h| {
+            if self.revoked.load(Ordering::SeqCst) {
+                if let Some(live) = hook.upgrade() {
+                    live.revoke();
+                }
+                return;
+            }
+            h.retain(|w| w.strong_count() > 0);
+            h.push(hook);
+        });
     }
 
     /// Валидна, если жив каждый предок по цепочке.
@@ -64,17 +85,13 @@ impl RevNode {
     }
 }
 
-/// Каскадный отзыв поддерева: срывает hook'и узла, затем детей обходом вниз.
-/// Зовётся из `HandleTable::remove`/`Drop` до дропа `Handle`. Идемпотентен:
-/// повисшие `Weak` пропускаются.
+/// Каскадный отзыв поддерева: вызывает хуки снятия побочных эффектов по всему поддереву.
 pub fn revoke_subtree(node: &Arc<RevNode>) {
-    // Итеративный обход worklist'ом, а не рекурсией: глубина дерева деривации
-    // задаётся userland (цепочка duplicate), поэтому рекурсивный спуск грозил
-    // бы переполнением стека ядра. Снимок hook'ов и детей берётся под локом, а
-    // revoke() и спуск к детям выполняются вне лока.
     let mut stack: Vec<Arc<RevNode>> = Vec::new();
     stack.push(node.clone());
     while let Some(current) = stack.pop() {
+        current.revoked.store(true, Ordering::SeqCst);
+
         let hooks: Vec<Weak<dyn RevocationHook>> = current.hooks.with_lock(|h| h.clone());
         for weak in hooks {
             if let Some(hook) = weak.upgrade() {
@@ -124,14 +141,14 @@ mod tests {
     #[test]
     fn child_alive_while_parent_alive() {
         let root = RevNode::new_root();
-        let child = RevNode::new_child(&root);
+        let child = RevNode::new_child(&root).unwrap();
         assert!(child.is_alive());
     }
 
     #[test]
     fn child_dies_when_parent_dropped() {
         let root = RevNode::new_root();
-        let child = RevNode::new_child(&root);
+        let child = RevNode::new_child(&root).unwrap();
         drop(root);
         assert!(!child.is_alive());
     }
@@ -139,8 +156,8 @@ mod tests {
     #[test]
     fn grandchild_dies_through_dead_ancestor() {
         let root = RevNode::new_root();
-        let mid = RevNode::new_child(&root);
-        let leaf = RevNode::new_child(&mid);
+        let mid = RevNode::new_child(&root).unwrap();
+        let leaf = RevNode::new_child(&mid).unwrap();
         assert!(leaf.is_alive());
         drop(root);
         assert!(!leaf.is_alive());
@@ -150,8 +167,8 @@ mod tests {
     #[test]
     fn siblings_are_independent() {
         let root = RevNode::new_root();
-        let a = RevNode::new_child(&root);
-        let b = RevNode::new_child(&root);
+        let a = RevNode::new_child(&root).unwrap();
+        let b = RevNode::new_child(&root).unwrap();
         drop(a);
 
         assert!(b.is_alive());
@@ -160,9 +177,9 @@ mod tests {
     #[test]
     fn revoke_subtree_fires_node_and_descendant_hooks_only() {
         let root = RevNode::new_root();
-        let child = RevNode::new_child(&root);
-        let grandchild = RevNode::new_child(&child);
-        let sibling = RevNode::new_child(&root);
+        let child = RevNode::new_child(&root).unwrap();
+        let grandchild = RevNode::new_child(&child).unwrap();
+        let sibling = RevNode::new_child(&root).unwrap();
 
         let h_child = CountingHook::new();
         let h_grandchild = CountingHook::new();
@@ -191,7 +208,7 @@ mod tests {
     #[test]
     fn revoke_subtree_refires_live_hooks_on_repeat() {
         let root = RevNode::new_root();
-        let child = RevNode::new_child(&root);
+        let child = RevNode::new_child(&root).unwrap();
         let hook = CountingHook::new();
         child.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>);
 
@@ -200,5 +217,51 @@ mod tests {
 
         revoke_subtree(&root);
         assert_eq!(hook.count(), 2);
+    }
+
+    #[test]
+    fn new_child_dead_weaks_do_not_accumulate() {
+        let root = RevNode::new_root();
+        for _ in 0..10 {
+            let _dropped = RevNode::new_child(&root);
+        }
+
+        let live = RevNode::new_child(&root).unwrap();
+        let hook = CountingHook::new();
+        live.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>);
+
+        revoke_subtree(&root);
+        assert_eq!(hook.count(), 1);
+    }
+
+    #[test]
+    fn register_hook_dead_weaks_do_not_accumulate() {
+        let root = RevNode::new_root();
+
+        for _ in 0..10 {
+            let h = CountingHook::new();
+            root.register_hook(Arc::downgrade(&h) as Weak<dyn RevocationHook>);
+        }
+        
+        let live = CountingHook::new();
+        root.register_hook(Arc::downgrade(&live) as Weak<dyn RevocationHook>);
+        revoke_subtree(&root);
+        assert_eq!(live.count(), 1);
+    }
+
+    #[test]
+    fn new_child_after_revoke_is_rejected() {
+        let root = RevNode::new_root();
+        revoke_subtree(&root);
+        assert!(RevNode::new_child(&root).is_none());
+    }
+
+    #[test]
+    fn register_hook_after_revoke_fires_immediately() {
+        let root = RevNode::new_root();
+        revoke_subtree(&root);
+        let hook = CountingHook::new();
+        root.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>);
+        assert_eq!(hook.count(), 1);
     }
 }

@@ -137,13 +137,12 @@ impl Handle {
         } else {
             new_badge
         };
+        let node = RevNode::new_child(&self.node).ok_or(IpcError::Revoked)?;
         Ok(Self {
             object: self.object.clone(),
             rights: new_rights,
             badge,
-            // Производная капа - дочерний узел деривации: закрытие источника
-            // (предка) лениво отзовёт эту копию.
-            node: RevNode::new_child(&self.node),
+            node,
         })
     }
 }

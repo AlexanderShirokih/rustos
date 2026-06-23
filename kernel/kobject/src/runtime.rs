@@ -9,6 +9,7 @@ use spin::Once;
 use super::{
     HandleTable, IpcError, ProcessObject, SpawnError, ThreadObject,
     spawn::{LoadImageError, StartProcessError, UserImageInstall, UserStartSpec},
+    wait::CancelTarget,
 };
 
 /// Параметры первого входа в user-поток.
@@ -82,8 +83,15 @@ pub trait KernelRuntime: Send + Sync {
     /// в ready_queue.
     fn unblock(&self, token: WaitToken);
 
-    /// Создаёт пустой user-процесс: новое адресное пространство, пустая
-    /// handle-table, ноль потоков и сохранённое имя процесса.
+    /// Привязывает к текущему потоку cancel-хук.
+    fn set_blocked_cancel(&self, cancel: Arc<dyn CancelTarget>) {
+        let _ = cancel;
+    }
+
+    /// Снимает cancel-хук блокировки с текущего потока.
+    fn clear_blocked_cancel(&self) {}
+
+    /// Создаёт user-процесс с пустым адресным пространством и handle-таблицей.
     fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError>;
 
     /// Создаёт user-поток в указанном процессе и помещает его в ready-queue.

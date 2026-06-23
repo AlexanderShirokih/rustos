@@ -226,18 +226,11 @@ mod tests {
         let maps = mapper.maps.lock().unwrap();
         assert_eq!(maps.len(), 1);
         let first = maps[0];
-        // Контракт: VA берётся из MMIO-арены и не зависит от PA. Конкретное
-        // значение (раскладка RangeAllocator) не фиксируем - проверяем, что
-        // VA лежит внутри арены и не совпадает с PA устройства.
-        assert!(
-            (ARENA_BASE..ARENA_BASE + ARENA_SIZE).contains(&first.va.as_usize()),
-            "MMIO VA must come from the arena, got {:#x}",
-            first.va.as_usize()
-        );
-        assert_ne!(
-            first.va.as_usize(),
-            0x0c17_0000,
-            "MMIO VA must be independent of device PA"
+
+        assert_eq!(
+            first.va,
+            PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
+            "first MMIO VA must equal arena base"
         );
         assert_eq!(
             first.pa,

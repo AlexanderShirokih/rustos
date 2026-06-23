@@ -12,10 +12,10 @@ use core::{
 use syscall::{Handle, MEM_FLAGS_READ_WRITE};
 use talc::{OomHandler, Span, Talc};
 
-use crate::{Mutex, memory_allocate, memory_free, process_resource_self};
+use crate::{Mutex, handle_close, memory_allocate, memory_free, process_resource_self};
 
 /// Кэш метеринг-handle: `process_resource_self` ставит свежий handle на каждый вызов,
-/// поэтому кэшируем первый (на старт-гонке лишний handle безвреден).
+/// поэтому кэшируем первый; проигравшая CAS-ветка закрывает свой дубль.
 static METERING_HANDLE: AtomicU32 = AtomicU32::new(0);
 
 fn metering_handle() -> Option<Handle> {
@@ -26,7 +26,11 @@ fn metering_handle() -> Option<Handle> {
     let raw = process_resource_self().ok()?.raw();
     match METERING_HANDLE.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => Handle::new(raw),
-        Err(existing) => Handle::new(existing),
+        Err(existing) => {
+            // Проиграли гонку: закрываем свежевыданный дубль, возвращаем победителя.
+            let _ = handle_close(Handle::new(raw)?);
+            Handle::new(existing)
+        }
     }
 }
 

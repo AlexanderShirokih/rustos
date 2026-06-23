@@ -17,7 +17,7 @@ use core::{
     },
 };
 
-use syscall::{Handle, SIGNALED};
+use syscall::{Handle, SIGNALED, WakeCount};
 
 use crate::{handle_close, signal_create, signal_set, signal_wait_one};
 
@@ -100,7 +100,7 @@ impl<T> Mutex<T> {
                 return;
             }
             let _ = signal_wait_one(self.signal(), SIGNALED, FOREVER);
-            let _ = signal_set(self.signal(), 0, SIGNALED, 0);
+            let _ = signal_set(self.signal(), 0, SIGNALED, WakeCount::None);
         }
     }
 }
@@ -141,7 +141,7 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 impl<T> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
         if self.mutex.state.swap(0, Release) == 2 {
-            let _ = signal_set(self.mutex.signal(), SIGNALED, 0, 1);
+            let _ = signal_set(self.mutex.signal(), SIGNALED, 0, WakeCount::One);
         }
     }
 }
@@ -166,18 +166,18 @@ impl Condvar {
         let mutex: &Mutex<T> = guard.mutex;
         drop(guard);
         let _ = signal_wait_one(self.signal(), SIGNALED, FOREVER);
-        let _ = signal_set(self.signal(), 0, SIGNALED, 0);
+        let _ = signal_set(self.signal(), 0, SIGNALED, WakeCount::None);
         mutex.lock()
     }
 
     /// Будит одного из waiter'ов, припаркованных на момент вызова.
     pub fn notify_one(&self) {
-        let _ = signal_set(self.signal(), SIGNALED, 0, 1);
+        let _ = signal_set(self.signal(), SIGNALED, 0, WakeCount::One);
     }
 
     /// Будит всех waiter'ов, припаркованных на момент вызова (см. контракт wait).
     pub fn notify_all(&self) {
-        let _ = signal_set(self.signal(), SIGNALED, 0, 0);
+        let _ = signal_set(self.signal(), SIGNALED, 0, WakeCount::All);
     }
 }
 

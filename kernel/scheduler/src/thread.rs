@@ -1,18 +1,15 @@
 use alloc::sync::Arc;
 
-use kobject::ThreadObject;
+use kobject::{CancelTarget, ThreadObject};
 use memory::{MemoryRegion, virtual_address::VirtualAddress};
 
 use super::arch::{ArchContext, CpuId, ThreadStack};
 use crate::{Priority, ProcessId, ThreadId};
 
-/// Backing per-thread IPC-buffer'а (как в seL4): user-VA замапленной страницы
-/// и владение `MemoryRegion`, чтобы фрейм жил ровно столько же, сколько поток.
+/// Backing per-thread IPC-буфера: user-VA замапленной страницы и владение `MemoryRegion`.
 ///
-/// `region` держит сильную ссылку: при удалении `Thread` из `ThreadTable`
-/// `Arc` дропается, и - если ссылок больше нет - фреймы возвращаются в
-/// `FrameAllocator` через `Drop` региона. PTE снимаются вместе с
-/// AddressSpace процесса.
+/// `region` - одна из двух ссылок на регион; фрейм освобождается только когда дропнуты
+/// обе (вторая - `MappingTag` в `UserVmAllocator`). Изымать через [`Thread::take_ipc_buffer`].
 pub struct IpcBufferSlot {
     user_va: VirtualAddress,
     #[allow(dead_code)]
@@ -53,6 +50,10 @@ pub struct Thread<A: ArchContext> {
     /// Per-thread IPC-буфер. `None` у kernel-потоков (нет user-памяти);
     /// у user-потоков заполняется при `prepare_user_thread`.
     ipc_buffer: Option<IpcBufferSlot>,
+    /// Cancel-хук активной блокировки на Port: при терминации потока его
+    /// `Waiter` снимается с очереди Port. `None`, когда поток не запаркован на
+    /// Port (выставляется на время парковки, снимается после resolve).
+    blocked_cancel: Option<Arc<dyn CancelTarget>>,
 }
 
 impl<A: ArchContext> Thread<A> {
@@ -77,6 +78,7 @@ impl<A: ArchContext> Thread<A> {
             name,
             ko: ThreadObject::new(),
             ipc_buffer: None,
+            blocked_cancel: None,
         }
     }
 
@@ -141,5 +143,20 @@ impl<A: ArchContext> Thread<A> {
     /// Прикрепляет backing IPC-буфера к потоку; вызывается один раз при создании user-потока.
     pub fn set_ipc_buffer(&mut self, slot: IpcBufferSlot) {
         self.ipc_buffer = Some(slot);
+    }
+
+    /// Изымает backing IPC-буфера при терминации.
+    pub fn take_ipc_buffer(&mut self) -> Option<IpcBufferSlot> {
+        self.ipc_buffer.take()
+    }
+
+    /// Привязывает cancel-хук блокировки на Port (на время парковки).
+    pub fn set_blocked_cancel(&mut self, cancel: Arc<dyn CancelTarget>) {
+        self.blocked_cancel = Some(cancel);
+    }
+
+    /// Изымает cancel-хук блокировки (после resolve либо при терминации).
+    pub fn take_blocked_cancel(&mut self) -> Option<Arc<dyn CancelTarget>> {
+        self.blocked_cancel.take()
     }
 }

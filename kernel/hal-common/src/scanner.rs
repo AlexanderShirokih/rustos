@@ -1,7 +1,11 @@
+use collections::Vec;
 use fdt::devicetree::{DeviceTree, Node};
 use memory::physical_address::PhysicalAddress;
 
 use crate::boot::BootPayloadRange;
+
+/// Stack depth limit for iterative serial-node search.
+const MAX_SERIAL_SCAN_DEPTH: usize = 128;
 
 /// Находит узел консоли из stdout-path или первый serial.
 pub fn find_console<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
@@ -27,22 +31,30 @@ fn stdout_node<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
 }
 
 fn first_serial<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
-    // `DeviceTree::nodes()` отдаёт только прямых детей корня, поэтому serial
-    // внутри шины (`/soc/serial@...`) ею не находится. Обходим всё дерево
-    // рекурсивно начиная с корня (depth-first).
+    // `DeviceTree::nodes()` returns only direct children of root, so a serial
+    // inside a bus (`/soc/serial@...`) is not found that way. Walk the whole
+    // tree iteratively to stay stack-safe against untrusted FDT blobs.
     let root = device_tree.root()?;
-    find_serial_in_subtree(&root)
+    find_serial_iterative(root)
 }
 
-/// Рекурсивный depth-first поиск serial-узла в поддереве `node`.
-fn find_serial_in_subtree<'dt>(node: &Node<'dt>) -> Option<Node<'dt>> {
-    if is_serial(node) {
-        return Some(*node);
-    }
+/// Iterative DFS for a serial node. Bounded by `MAX_SERIAL_SCAN_DEPTH`
+/// so an untrusted FDT blob cannot exhaust the call stack.
+fn find_serial_iterative<'dt>(root: Node<'dt>) -> Option<Node<'dt>> {
+    let mut stack: Vec<Node<'dt>, MAX_SERIAL_SCAN_DEPTH> = Vec::new();
+    stack.push(root)?;
 
-    for child in node.children() {
-        if let Some(found) = find_serial_in_subtree(&child) {
-            return Some(found);
+    while !stack.is_empty() {
+        let node = stack.pop()?;
+
+        if is_serial(&node) {
+            return Some(node);
+        }
+
+        for child in node.children() {
+            if stack.push(child).is_none() {
+                break;
+            }
         }
     }
 
@@ -139,7 +151,7 @@ mod tests {
         assert!(find_initrd_payload(&DeviceTree::from_bytes(&reversed).unwrap()).is_none());
     }
 
-    // ─── Поиск консоли / serial ───────────────────────────────────────────────
+    // --- Console / serial search ---
 
     /// DTB с serial внутри шины soc, опциональным `aliases` и опциональным
     /// `/chosen { stdout-path = ... }`.
@@ -192,7 +204,7 @@ mod tests {
         let dtb = build_console_dtb(None);
         let tree = DeviceTree::from_bytes(&dtb).unwrap();
 
-        let console = find_console(&tree).expect("serial внутри soc должен находиться");
+        let console = find_console(&tree).expect("serial inside soc must be found");
         assert_eq!(console.name(), "serial@2000");
     }
 
@@ -212,7 +224,7 @@ mod tests {
         let dtb = build_console_dtb(None);
         let tree = DeviceTree::from_bytes(&dtb).unwrap();
 
-        let console = find_console(&tree).expect("fallback на serial");
+        let console = find_console(&tree).expect("fallback to serial");
         assert_eq!(console.name(), "serial@2000");
     }
 

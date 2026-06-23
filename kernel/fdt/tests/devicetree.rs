@@ -3,7 +3,7 @@ use fdt::{
     devicetreeext::{NodeExt, PropExt, reserved_memory_ranges},
 };
 
-// ─── Построение DTB ─────────────────────────────────────────────────────────
+// --- Построение DTB ---
 
 /// ```text
 /// / {
@@ -223,7 +223,7 @@ fn align4(buf: &mut Vec<u8>) {
     }
 }
 
-// ─── Тесты ──────────────────────────────────────────────────────────────────
+// --- Тесты ---
 
 #[test]
 fn root_and_children() {
@@ -359,6 +359,7 @@ fn reg_list_n_limits_result() {
     let reg = mem.prop("reg").unwrap();
 
     let full = reg.try_as_reg_list::<8>(cells).unwrap();
+    assert_eq!(full.len(), 2);
 
     let limited = reg.try_as_reg_list::<1>(cells).unwrap();
     assert_eq!(limited.len(), 1);
@@ -510,7 +511,7 @@ fn reserved_memory_ranges_none_without_node() {
     assert!(reserved_memory_ranges(&dt).is_none());
 }
 
-// ─── Негативные тесты парсера ─────────────────────────────────────────────────
+// --- Негативные тесты парсера ---
 
 #[test]
 fn from_bytes_rejects_invalid_magic() {
@@ -527,12 +528,12 @@ fn from_bytes_rejects_invalid_magic() {
 #[test]
 fn from_bytes_rejects_truncated_header() {
     let dtb = build_dtb_with_children();
-    // Заголовок 24 байта (6 x u32) ещё не прочитан до конца -> Incomplete.
+    // Заголовок 24 байта (6 x u32) ещё не прочитан до конца -> TruncatedHeader.
     let short = &dtb[..10];
     match DeviceTree::from_bytes(short) {
-        Err(fdt::devicetree::DtError::Incomplete { .. }) => {}
-        Ok(_) => panic!("ожидался Incomplete на обрезанном заголовке"),
-        Err(other) => panic!("ожидался Incomplete, получено {other:?}"),
+        Err(fdt::devicetree::DtError::TruncatedHeader { .. }) => {}
+        Ok(_) => panic!("ожидался TruncatedHeader на обрезанном заголовке"),
+        Err(other) => panic!("ожидался TruncatedHeader, получено {other:?}"),
     }
 }
 
@@ -577,7 +578,7 @@ fn walker_does_not_panic_on_inflated_property_length() {
     let _ = root.properties().count();
 }
 
-// ─── aliases / find_by_alias ──────────────────────────────────────────────────
+// --- aliases / find_by_alias ---
 
 /// ```text
 /// / {
@@ -691,7 +692,7 @@ fn try_get_range_none_without_ranges_prop() {
     assert!(mem.try_get_range(CellsSize::default()).is_none());
 }
 
-// ─── as_usize / try_as_u64 ────────────────────────────────────────────────────
+// --- as_usize / try_as_u64 ---
 
 /// Корень с тремя свойствами: val4 (4 байта), val8 (8 байт), val3 (3 байта).
 fn build_dtb_with_scalar_props() -> Vec<u8> {
@@ -743,7 +744,7 @@ fn property_scalar_conversions() {
     assert_eq!(v3.try_as_u64(0), None);
 }
 
-// ─── Вложенность > 2 уровней ──────────────────────────────────────────────────
+// --- Вложенность > 2 уровней ---
 
 /// `/ a { b { c { leaf {} } } }` - глубина 4 уровня под корнем.
 fn build_dtb_deeply_nested() -> Vec<u8> {

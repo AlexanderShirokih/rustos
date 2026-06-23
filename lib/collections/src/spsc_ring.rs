@@ -68,10 +68,11 @@ pub struct SpscRing {
     capacity: usize,
 }
 
-// SAFETY: `SpscRing` хранит сырые указатели на регион разделяемой памяти, все
-// доступы к которому идут через атомики. Producer и consumer держат отдельные
-// значения и обращаются к непересекающимся индексам (`head`/`tail`), поэтому
-// передача значения в другой поток безопасна.
+// SAFETY: `SpscRing` хранит сырые указатели на регион разделяемой памяти; все
+// доступы к нему идут через атомики с явным порядком памяти (Acquire/Release/
+// Relaxed). `head` пишет только producer, `tail` - только consumer, payload -
+// через атомарные операции слотов, поэтому передача значения в другой поток
+// безопасна при соблюдении SPSC-инварианта.
 unsafe impl Send for SpscRing {}
 // SAFETY: все операции по `&self` синхронизированы атомиками с корректным
 // порядком памяти (Release на публикации индекса, Acquire на наблюдении), что
@@ -246,8 +247,9 @@ impl SpscRing {
         for (cell, &byte) in payload.iter().zip(frame.iter()) {
             cell.store(byte, Ordering::Relaxed);
         }
-        // saturating: frame.len() <= slot_payload <= u32::MAX на разумных
-        // регионах; приведение безопасно по диапазону.
+        // frame.len() <= slot_payload, а slot_payload вычисляется из region_len /
+        // slot_stride, что не превышает u32::MAX на практике; приведение as u32
+        // усекает, но значение заведомо в диапазоне по инварианту выше.
         len_field.store(frame.len() as u32, Ordering::Relaxed);
 
         // Release-публикация индекса: создаёт happens-before между записями выше
@@ -279,8 +281,10 @@ impl SpscRing {
         let len_field = self.slot_len_ref(slot);
         let payload = self.slot_payload_ref(slot);
 
-        // len <= slot_payload (инвариант записи), поэтому приведение безопасно.
-        let len = len_field.load(Ordering::Relaxed) as usize;
+        // `len` пишет производитель (возможно, в другом процессе) - не доверяем
+        // ему и клампим к фактическому размеру payload-слота, чтобы возвращаемая
+        // длина не превышала число реально скопированных байт.
+        let len = (len_field.load(Ordering::Relaxed) as usize).min(payload.len());
         if len > out.len() {
             return Err(RingError::TooLarge);
         }

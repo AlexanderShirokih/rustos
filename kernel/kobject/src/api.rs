@@ -1,6 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use collections::LockCell;
+use syscall::WakeCount;
 
 use super::{
     errors::{IpcError, SpawnError},
@@ -25,11 +26,14 @@ pub fn install_handle(handle: Handle) -> Result<HandleId, IpcError> {
 }
 
 /// Атомарно меняет биты сигнального состояния `Signal` (поднимает `set`,
-/// снимает `clear`) и будит waiter'ов.
-/// При `count == 0` будит всех пересекающихся;
-/// При `count == N` - не более N в FIFO-порядке регистрации.
-/// Требует [`Rights::WRITE`] на handle. На не-`Signal` KO - `WrongType`.
-pub fn signal_set(handle_id: HandleId, set: u32, clear: u32, count: u32) -> Result<(), IpcError> {
+/// снимает `clear`) и будит waiter'ов согласно [`WakeCount`].
+/// Требует [`Rights::WRITE`] на handle.
+pub fn signal_set(
+    handle_id: HandleId,
+    set: u32,
+    clear: u32,
+    count: WakeCount,
+) -> Result<(), IpcError> {
     let runtime = runtime();
     let table = runtime.current_handle_table().ok_or(IpcError::BadHandle)?;
     let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::WRITE))?;
@@ -37,10 +41,10 @@ pub fn signal_set(handle_id: HandleId, set: u32, clear: u32, count: u32) -> Resu
         return Err(IpcError::WrongType);
     };
 
-    let limit = if count == 0 {
-        usize::MAX
-    } else {
-        count as usize
+    let limit = match count {
+        WakeCount::None => 0,
+        WakeCount::One => 1,
+        WakeCount::All => usize::MAX,
     };
 
     signal.signal_n(set, clear, limit);
@@ -289,11 +293,11 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
     table.with_lock(|tbl| tbl.insert(handle))
 }
 
-/// Возвращает handle на bound-[`Signal`] термнинации процесса, материализуя
+/// Возвращает handle на bound-[`Signal`] терминации процесса, материализуя
 /// его лениво (см. [`ProcessObject::termination_signal`]). Если процесс уже
 /// завершён, `Signal` сразу несёт `SIGNALED`. Требует [`Rights::READ`] на
 /// process-handle. Выданный handle получает только READ/DUPLICATE/TRANSFER -
-/// без WRITE: наблюдатель не может подделать термнинацию (Signal общий).
+/// без WRITE: наблюдатель не может подделать терминацию (Signal общий).
 pub fn process_termination_signal(handle_id: HandleId) -> Result<HandleId, IpcError> {
     let table = runtime()
         .current_handle_table()
@@ -306,7 +310,7 @@ pub fn process_termination_signal(handle_id: HandleId) -> Result<HandleId, IpcEr
     install_termination_signal(&table, process.termination_signal())
 }
 
-/// Возвращает handle на bound-[`Signal`] термнинации потока (см.
+/// Возвращает handle на bound-[`Signal`] терминации потока (см.
 /// [`process_termination_signal`]). Требует [`Rights::READ`] на thread-handle.
 pub fn thread_termination_signal(handle_id: HandleId) -> Result<HandleId, IpcError> {
     let table = runtime()
@@ -320,7 +324,7 @@ pub fn thread_termination_signal(handle_id: HandleId) -> Result<HandleId, IpcErr
     install_termination_signal(&table, thread.termination_signal())
 }
 
-/// Регистрирует bound-Signal термнинации как read-only handle (READ для
+/// Регистрирует bound-Signal терминации как read-only handle (READ для
 /// ожидания + DUPLICATE/TRANSFER; без WRITE - см. вызывающих).
 fn install_termination_signal(
     table: &Arc<collections::MutexCell<crate::HandleTable>>,
@@ -616,7 +620,7 @@ mod tests {
         signal.register_waiter(SIGNALED, w1.clone());
         signal.register_waiter(SIGNALED, w2.clone());
 
-        signal_set(id, SIGNALED, 0, 1).expect("signal ok");
+        signal_set(id, SIGNALED, 0, WakeCount::One).expect("signal ok");
         assert!(w1.was_woken());
         assert!(!w2.was_woken());
 
@@ -624,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_set_with_zero_count_wakes_all() {
+    fn signal_set_with_all_wakes_all() {
         let _guard = test_lock();
         let (table, id, signal) = install_signal_handle(Rights::WRITE);
         mock().configure(Some(table), None);
@@ -634,9 +638,25 @@ mod tests {
         signal.register_waiter(SIGNALED, w1.clone());
         signal.register_waiter(SIGNALED, w2.clone());
 
-        signal_set(id, SIGNALED, 0, 0).expect("signal ok");
+        signal_set(id, SIGNALED, 0, WakeCount::All).expect("signal ok");
         assert!(w1.was_woken());
         assert!(w2.was_woken());
+
+        mock().reset();
+    }
+
+    #[test]
+    fn signal_set_with_none_wakes_nobody_but_sets_bits() {
+        let _guard = test_lock();
+        let (table, id, signal) = install_signal_handle(Rights::WRITE);
+        mock().configure(Some(table), None);
+
+        let w1 = CountingWaker::new();
+        signal.register_waiter(SIGNALED, w1.clone());
+
+        signal_set(id, SIGNALED, 0, WakeCount::None).expect("signal ok");
+        assert!(!w1.was_woken());
+        assert_eq!(signal.peek() & SIGNALED, SIGNALED);
 
         mock().reset();
     }
@@ -655,7 +675,10 @@ mod tests {
             .unwrap();
         mock().configure(Some(table), None);
 
-        assert_eq!(signal_set(id, SIGNALED, 0, 0), Err(IpcError::WrongType));
+        assert_eq!(
+            signal_set(id, SIGNALED, 0, WakeCount::All),
+            Err(IpcError::WrongType)
+        );
 
         mock().reset();
     }
@@ -667,7 +690,10 @@ mod tests {
         let (table, id, _signal) = install_signal_handle(Rights::READ);
         mock().configure(Some(table), None);
 
-        assert_eq!(signal_set(id, SIGNALED, 0, 0), Err(IpcError::AccessDenied));
+        assert_eq!(
+            signal_set(id, SIGNALED, 0, WakeCount::All),
+            Err(IpcError::AccessDenied)
+        );
 
         mock().reset();
     }
@@ -734,7 +760,7 @@ mod tests {
         let rights = table
             .with_lock(|tbl| tbl.get(sig_id, Rights::READ).map(Handle::rights))
             .expect("signal handle present");
-        // Security-инвариант: наблюдатель не может подделать термнинацию.
+        // Security-инвариант: наблюдатель не может подделать терминацию.
         assert!(rights.contains(Rights::READ));
         assert!(rights.contains(Rights::DUPLICATE));
         assert!(rights.contains(Rights::TRANSFER));

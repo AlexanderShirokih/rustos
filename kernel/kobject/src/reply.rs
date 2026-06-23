@@ -12,7 +12,7 @@ use super::{
     errors::IpcError,
     ipc_buffer_xfer::transfer_rendezvous,
     port::{OutcomeSlot, RendezvousOutcome, ThreadTransport},
-    wait::ParkWaker,
+    wait::{CancelTarget, ParkWaker},
 };
 
 /// Одноразовый ответный объект на заблокированного вызывателя `call`.
@@ -78,7 +78,6 @@ impl Reply {
     /// Инвалидирует Reply без ответа: будит вызывателя с `PeerGone`.
     /// No-op, если Reply уже использован.
     pub fn cancel(&self) {
-        use super::wait::CancelTarget;
         if self
             .used
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -94,27 +93,12 @@ impl Reply {
 
 impl Drop for Reply {
     fn drop(&mut self) {
-        // Закрытие последнего хендла на Reply без ответа не должно оставлять
-        // вызывателя висеть: будим его с PeerGone.
-        let used = self.used.load(Ordering::Acquire);
-        if !used {
-            use super::wait::CancelTarget;
-            if self
-                .used
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-                && self.outcome.try_begin_reply()
-            {
-                self.outcome.set(RendezvousOutcome::PeerGone);
-                self.waker.cancel();
-            }
-        }
+        self.cancel();
     }
 }
 
-/// Одноразовый ящик для Reply, передаваемого матчером проснувшемуся
-/// recv-получателю. Матчер `install`'ит, получатель `take`'ает.
-pub struct ReplySlot {
+/// Одноразовый ящик для Reply.
+pub(crate) struct ReplySlot {
     inner: MutexCell<Option<Arc<Reply>>>,
 }
 

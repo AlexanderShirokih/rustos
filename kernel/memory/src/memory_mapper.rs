@@ -276,7 +276,7 @@ mod tests {
     // быть не должны. Отдельные Eq/Clone-проверки derive-ов опущены как
     // неинформативные.
     #[test]
-    fn mapping_error_display_is_nonempty() {
+    fn mapping_error_display_messages() {
         assert_eq!(MemoryMappingError::OutOfMemory.to_string(), "Out of memory");
         assert_eq!(
             MemoryMappingError::AlreadyMapped.to_string(),

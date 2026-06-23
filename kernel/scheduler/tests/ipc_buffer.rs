@@ -103,6 +103,35 @@ fn with_frame_allocator_user_thread_attaches_one_ipc_buffer_region() {
 }
 
 #[test]
+fn terminate_thread_releases_its_ipc_buffer_region() {
+    reset_switches();
+    let factory = factory_static(MockAddressSpaceFactory::new());
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::with_address_space_factory(
+        MockTimerSource(timer),
+        TEST_CONFIG,
+        Some(factory),
+    )
+    .bootstrap();
+    scheduler.set_frame_allocator(frame_allocator_static());
+    let handle = scheduler.handle();
+
+    let process = handle.create_empty_process("p").expect("create process");
+    mark_loaded(&handle, &process);
+    let pid = scheduler.process_id_for(&process).expect("pid lookup");
+
+    let thread_ko = handle
+        .create_user_thread(&process, user_entry())
+        .expect("create_user_thread");
+    assert_eq!(scheduler.process_user_vm_region_count(pid), Some(1));
+
+    // Терминация должна снять PTE и вернуть range IPC-буфера в user_vm -
+    // иначе регион висел бы до сноса AS (регрессия на утечку фрейма).
+    handle.terminate_thread(&thread_ko, 0).expect("terminate");
+    assert_eq!(scheduler.process_user_vm_region_count(pid), Some(0));
+}
+
+#[test]
 fn ipc_buffer_install_failure_rolls_back_allocation_and_thread() {
     reset_switches();
     let factory = factory_static(MockAddressSpaceFactory::with_failing_map_exact());

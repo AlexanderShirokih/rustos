@@ -91,6 +91,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn user_image_desc_size_matches_field_layout() {
+        assert_eq!(USER_IMAGE_DESC_SIZE, 4 + 4 + 8 * 6);
+    }
+
+    #[test]
+    fn user_segment_size_matches_field_layout() {
+        assert_eq!(USER_SEGMENT_SIZE, 4 + 4 + 8 * 3);
+    }
+
+    #[test]
     fn decode_image_desc_round_trip() {
         let mut full = [0u8; USER_IMAGE_DESC_SIZE];
         full[0..4].copy_from_slice(&1u32.to_le_bytes());

@@ -43,20 +43,24 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn read_cstr_at(&self, offset: usize) -> &'a str {
-        let mut end = offset;
         let buffer = self.buffer;
-
+        if offset >= buffer.len() {
+            return "";
+        }
+        let mut end = offset;
         while end < buffer.len() && buffer[end] != 0 {
             end += 1;
         }
-
         core::str::from_utf8(&buffer[offset..end]).unwrap_or("")
     }
 
     pub fn read_cstr_here(&mut self) -> &'a str {
         let start = self.position;
-        let mut end = start;
         let buf = self.buffer;
+        if start >= buf.len() {
+            return "";
+        }
+        let mut end = start;
         while end < buf.len() && buf[end] != 0 {
             end += 1;
         }

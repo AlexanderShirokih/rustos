@@ -270,7 +270,7 @@ pub fn sys_memory_map(
     let size = parse_size(size_bytes)?;
     let flags = parse_flags(flags_raw)?;
     let mem_flags = flags.to_mem_flags();
-    let need = Rights::WRITE | rights_for_access(flags);
+    let need = rights_for_access(flags);
 
     let (region, grant) = lookup_memory_grant(id, need)?;
 
@@ -315,7 +315,18 @@ pub fn sys_memory_map(
     // его капа. Если капа отозвана в гонке после lookup, регистрация падает -
     // тогда маппинг снимается и syscall возвращает ошибку (а не живой VA на
     // отозванную капу).
-    register_mapping_revocation(&user_vm, base, size, id, region, grant, mem_flags)?;
+    register_mapping_revocation(
+        &user_vm,
+        base,
+        size,
+        id,
+        MappingTag {
+            flags: mem_flags,
+            region,
+            grant,
+            revocation: None,
+        },
+    )?;
 
     Ok(base.as_usize() as u64)
 }
@@ -329,9 +340,7 @@ fn register_mapping_revocation(
     base: PageAlignedVirtualAddress,
     size: NonZeroUsize,
     cap_id: kobject::HandleId,
-    region: Arc<MemoryRegion>,
-    grant: AccessMask,
-    mem_flags: memory::MemFlags,
+    mut tag: MappingTag,
 ) -> Result<(), SyscallError> {
     let mapping = Arc::new(MemoryMapping {
         user_vm: user_vm.downgrade(),
@@ -340,18 +349,10 @@ fn register_mapping_revocation(
     });
     let hook: Arc<dyn RevocationHook> = mapping.clone();
     let weak = Arc::downgrade(&hook);
+    tag.revocation = Some(mapping as Arc<dyn core::any::Any + Send + Sync>);
 
     user_vm.allocator().with_lock(|alloc| {
-        let result = alloc.set_tag(
-            base,
-            size,
-            MappingTag {
-                flags: mem_flags,
-                region,
-                grant,
-                revocation: Some(mapping as Arc<dyn core::any::Any + Send + Sync>),
-            },
-        );
+        let result = alloc.set_tag(base, size, tag);
         debug_assert!(result.is_ok(), "range must exist right after install");
     });
 
@@ -842,7 +843,7 @@ mod tests {
             drop(recipient_vm);
             assert!(
                 alloc_weak.upgrade().is_none(),
-                "AS не должно течь через keep-alive маппинга"
+                "AS must not leak through mapping keep-alive"
             );
 
             let hook: Arc<dyn RevocationHook> = mapping;

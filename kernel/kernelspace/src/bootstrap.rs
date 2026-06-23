@@ -13,7 +13,7 @@ use ipc::{
 };
 use klog::{info, warn};
 use kobject::{
-    Handle, IpcError as KernelIpcError, KObject, KernelIpcBuffer, Port, Reply, Resource, Rights,
+    Handle, IpcError as KernelIpcError, KObject, KernelIpcBuffer, Port, Resource, Rights,
     ThreadTransport, port_recv, runtime,
 };
 use memory::{AccessMask, physical_address::PageAlignedAddress};
@@ -94,11 +94,9 @@ pub fn spawn_process(
 /// kernel-резидентный IPC-буфер, строит kernel-транспорт и в бесконечном цикле декодирует кадры контрактом
 /// `Bootstrap`, зеркаля их в klog.
 ///
-/// Поскольку Port - синхронный rendezvous без peer-closed-сигнала, цикл
-/// не завершается по закрытию клиентского handle: он живёт как фоновый
-/// kernel-таск, а машину гасит init по завершению bootstrap-процесса
-/// (см. [`crate::init`]). На `PeerClosed` (последний Arc на Port ушёл)
-/// или ошибке цикл всё же выходит, чтобы не крутиться вхолостую.
+/// Поскольку логгер держит `Arc<Port>`, ветка `PeerClosed` недостижима.
+/// Цикл завершается только по ошибке `dispatch_bootstrap`; машину гасит
+/// init по завершению bootstrap-процесса (см. [`crate::init`]).
 pub fn run_bootstrap_log(port: &Arc<Port>) {
     let Some(table) = runtime().current_handle_table() else {
         warn!("bootstrap-log: no kernel handle-table; logger not started");
@@ -154,17 +152,11 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
 /// Kernel-side port-транспорт серверной роли поверх kernel-резидентного
 /// IPC-буфера и kernel port API.
 ///
-/// Реализует только то, что нужно `dispatch_bootstrap`: `read_message`
-/// (блокирующий `port_recv` + декод из kernel-буфера) и `write_message`
-/// (ответ через `reply` для `#[call]`; `Bootstrap` несёт только `#[cast]`,
-/// поэтому путь ответа в логгере не используется, но реализован для общности).
+/// Реализует только то, что нужно `dispatch_bootstrap`.
 struct KernelPortTransport {
     port: Arc<Port>,
     buffer: KernelIpcBuffer,
     table: Arc<MutexCell<kobject::HandleTable>>,
-    /// Reply-объект, сохранённый последним `read_message` (если встречный был
-    /// `call`); `write_message`(RESPONSE) доставляет через него ответ.
-    pending_reply: MutexCell<Option<Arc<Reply>>>,
 }
 
 impl KernelPortTransport {
@@ -173,12 +165,7 @@ impl KernelPortTransport {
         buffer: KernelIpcBuffer,
         table: Arc<MutexCell<kobject::HandleTable>>,
     ) -> Self {
-        Self {
-            port,
-            buffer,
-            table,
-            pending_reply: MutexCell::new(None),
-        }
+        Self { port, buffer, table }
     }
 
     fn thread_transport(&self) -> ThreadTransport {
@@ -187,22 +174,15 @@ impl KernelPortTransport {
 }
 
 impl Transport for KernelPortTransport {
-    fn write_message(&self, bytes: &[u8], _handles: &[u32]) -> Result<(), WireError> {
-        // Записываем ответ в kernel-буфер и доставляем вызывателю через Reply.
-        self.buffer.with_lock(|buf| store_kernel_buffer(buf, bytes));
-        let reply = self
-            .pending_reply
-            .with_lock(Option::take)
-            .ok_or(WireError::PeerClosed)?;
-        let server = self.thread_transport();
-        reply.reply(&server).map_err(map_kernel_error)
+    fn write_message(&self, _bytes: &[u8], _handles: &[u32]) -> Result<(), WireError> {
+        // Bootstrap - только #[cast]: reply-путь недостижим.
+        Err(WireError::PeerClosed)
     }
 
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, WireError> {
         let receiver = self.thread_transport();
         // Блокирующий приём; сообщение ложится в kernel-буфер.
-        let reply = port_recv(&self.port, receiver, runtime(), None).map_err(map_kernel_error)?;
-        self.pending_reply.with_lock(|slot| *slot = reply);
+        port_recv(&self.port, receiver, runtime(), None).map_err(map_kernel_error)?;
         self.buffer
             .with_lock(|buf| load_kernel_buffer(buf, bytes, handles))
     }
@@ -213,14 +193,6 @@ impl Transport for KernelPortTransport {
     }
 }
 
-/// Пишет кадр `bytes` в data-область kernel-буфера и выставляет tag
-/// (`len`, `ncaps=0`). Ответ логгера caps не несёт.
-fn store_kernel_buffer(buf: &mut IpcBuffer, bytes: &[u8]) {
-    let len = bytes.len().min(buf.data.len());
-    buf.data[..len].copy_from_slice(&bytes[..len]);
-    buf.tag = syscall::encode_tag(len, 0);
-}
-
 /// Декодирует сообщение из kernel-буфера в `bytes`/`handles` по tag.
 fn load_kernel_buffer(
     buf: &IpcBuffer,
@@ -228,14 +200,14 @@ fn load_kernel_buffer(
     handles: &mut [u32],
 ) -> Result<MessageLen, WireError> {
     let (len, ncaps) = decode_tag(buf.tag);
+    if ncaps > 0 {
+        return Err(WireError::FrameOverflow);
+    }
     let len = len.min(buf.data.len());
-    let ncaps = ncaps.min(buf.caps.len());
-    if len > bytes.len() || ncaps > handles.len() {
+    if len > bytes.len() {
         return Err(WireError::Truncated);
     }
+    let _ = handles;
     bytes[..len].copy_from_slice(&buf.data[..len]);
-    for (dst, &raw) in handles.iter_mut().zip(&buf.caps[..ncaps]) {
-        *dst = raw;
-    }
-    Ok(MessageLen::new(len, ncaps))
+    Ok(MessageLen::new(len, 0))
 }

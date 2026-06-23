@@ -16,8 +16,11 @@ const PAGE_SIZE: u64 = 4096;
 const CHILD_CODE_VA: u64 = 0x2000_0000;
 const CHILD_STACK_TOP: u64 = 0x2010_0000;
 const CHILD_STACK_SIZE: u64 = PAGE_SIZE;
+// Окно user_vm-аллокатора - "дыра" между концом сегмента кода и базой стека
+// (stack_base = CHILD_STACK_TOP - CHILD_STACK_SIZE = 0x200F_F000); не должно
+// пересекать ни сегмент, ни стек, как и production-план build_user_vm_allocator.
 const CHILD_USER_VM_BASE: u64 = 0x2002_0000;
-const CHILD_USER_VM_SIZE: u64 = 0x10_0000;
+const CHILD_USER_VM_SIZE: u64 = 0xC_0000;
 const CHILD_EXIT_CODE: u32 = 0x55;
 const CHILD_WAIT_TIMEOUT_NS: u64 = 500_000_000;
 
