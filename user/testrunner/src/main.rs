@@ -23,6 +23,7 @@ mod ipc_buffer;
 mod memory_kobject;
 mod port;
 mod process_handles;
+mod ring_transport;
 mod self_spawn;
 mod signal;
 mod sync;

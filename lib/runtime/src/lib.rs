@@ -10,11 +10,13 @@
 mod heap;
 mod ipc_buffer;
 mod port_transport;
+mod ring_transport;
 mod svc;
 mod sync;
 
 pub use ipc_buffer::ipc_buffer_ptr;
 pub use port_transport::PortTransport;
+pub use ring_transport::RingTransport;
 pub use svc::{
     handle_close, handle_duplicate, ipc_buffer_addr, memory_allocate, memory_create_physical,
     memory_create_virtual, memory_free, memory_map, memory_region_inspect, memory_remap, port_call,

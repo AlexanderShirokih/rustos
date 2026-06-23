@@ -165,6 +165,35 @@ IPC опирается на underlying-транспорт, не определя
 он сообщает `PeerClosed` после закрытия дальнего конца и `WouldBlock`, когда
 встречи нет. Подробнее про сами syscalls и IPC-буфер — в [syscalls.md](syscalls.md).
 
+## Транспортная плоскость
+
+Транспорт под IPC бывает двух плоскостей:
+
+- `port` — синхронный rendezvous-RPC поверх `Port`: запрос-ответ, низкая
+  латентность;
+- `ring` — поток поверх разделяемой памяти (кольцо в `MemoryRegion` + `Signal`):
+  высокий throughput, ноль переходов в ядро на горячем пути.
+
+Плоскость объявляется на весь протокол: `#[protocol(transport = "port" | "ring")]`,
+дефолт — `"port"`. Транспорт инъектируется в `Client::new(transport)`; атрибут
+включает валидацию операций под плоскость:
+
+| Плоскость | `#[call]` | `#[cast]` | `#[event]` |
+|-----------|-----------|-----------|------------|
+| `port`    | да        | да        | да         |
+| `ring`    | нет       | да        | да         |
+
+```rust
+#[protocol(name = "Counter", transport = "ring")]
+pub trait Counter {
+    #[cast]  fn sample(&self, channel: u8, value: u32);
+    #[event] fn overflow(dropped: u32);
+}
+```
+
+`ring`-протоколы ходят поверх `RingTransport` (SPSC-кольцо + `Signal`),
+`port` — поверх `PortTransport`.
+
 ## Стабильность
 
 Имя операции и раскладка полей — часть ABI:

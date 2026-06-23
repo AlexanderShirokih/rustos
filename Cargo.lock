@@ -508,6 +508,7 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "collections",
  "ipc",
  "syscall",
  "talc",
@@ -696,6 +697,7 @@ name = "testrunner"
 version = "0.1.0"
 dependencies = [
  "bootstrap",
+ "collections",
  "io",
  "ipc",
  "runtime",

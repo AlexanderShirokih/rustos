@@ -15,10 +15,13 @@ mod codegen;
 mod model;
 mod ordinal;
 
-/// Объявляет IPC-протокол: `#[protocol(name = "...", timeout_ns = N)]` на trait.
+/// Объявляет IPC-протокол:
+/// `#[protocol(name = "...", timeout_ns = N, transport = "...")]` на trait.
 /// `name` - неймспейс ordinal (по умолчанию имя trait). `timeout_ns` - дефолтный
 /// срок ожидания ответа two-way `#[call]` (нс; по умолчанию `u64::MAX` -
 /// бессрочно), перекрываемый на операции через `#[call(timeout_ns = N)]`.
+/// `transport` - плоскость: `"port"` (по умолчанию) или `"ring"` (SPSC-кольцо,
+/// допускает только `#[cast]`/`#[event]`).
 /// Операции размечаются `#[call]` (two-way), `#[cast]`, `#[event]`.
 #[proc_macro_attribute]
 pub fn protocol(attr: TokenStream, item: TokenStream) -> TokenStream {

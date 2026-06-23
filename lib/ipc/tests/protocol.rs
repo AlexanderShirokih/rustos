@@ -269,6 +269,71 @@ trait Blob {
     fn store(&self, data: Bytes<8>);
 }
 
+// --- транспортная плоскость: ring допускает только cast/event
+
+/// Ring-плоскостной протокол. Транспорт тот же `Transport`, round-trip через
+/// `MockEnd` идентичен port-протоколу.
+#[ipc::protocol(name = "Counter", transport = "ring")]
+trait Counter {
+    #[cast]
+    fn sample(&self, value: u64);
+
+    #[event]
+    fn overflow(count: u32);
+}
+
+#[derive(Default)]
+struct CounterServer {
+    last_sample: u64,
+}
+
+impl CounterService for CounterServer {
+    fn sample(&mut self, value: u64) {
+        self.last_sample = value;
+    }
+}
+
+/// Клиентский обработчик события `overflow`.
+#[derive(Default)]
+struct OverflowHandler {
+    last_count: Option<u32>,
+}
+
+impl CounterEvents for OverflowHandler {
+    fn overflow(&mut self, count: u32) {
+        self.last_count = Some(count);
+    }
+}
+
+#[test]
+fn ring_plane_cast_round_trips() {
+    let (client_end, server_end) = MockEnd::pair();
+    let client = CounterClient::new(client_end);
+    let mut server = CounterServer::default();
+
+    client.sample(0xCAFE).expect("cast write ok");
+    dispatch_counter(&mut server, &server_end).expect("dispatch ok");
+    assert_eq!(server.last_sample, 0xCAFE);
+}
+
+#[test]
+fn ring_plane_event_round_trips() {
+    let (server_end, client_end) = MockEnd::pair();
+
+    CounterEventSender::emit_overflow(&server_end, 17).expect("emit ok");
+
+    let mut handler = OverflowHandler::default();
+    dispatch_counter_event(&mut handler, &client_end).expect("dispatch event ok");
+    assert_eq!(handler.last_count, Some(17));
+}
+
+#[test]
+fn transport_plane_const_reflects_attribute() {
+    assert_eq!(counter_ordinal::TRANSPORT_PLANE, "ring");
+    // Дефолт (без transport) - port.
+    assert_eq!(calc_ordinal::TRANSPORT_PLANE, "port");
+}
+
 #[derive(Default)]
 struct BlobServer {
     last_len: usize,

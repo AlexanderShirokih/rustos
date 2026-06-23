@@ -106,6 +106,14 @@ pub struct Operation {
     pub timeout_ns: Option<u64>,
 }
 
+/// Транспортная плоскость протокола: `Port` (двунаправленный канал) допускает
+/// все операции, `Ring` (однонаправленное SPSC-кольцо) - только `#[cast]`/`#[event]`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TransportPlane {
+    Port,
+    Ring,
+}
+
 /// Контракт после валидации: операции с вычисленными ordinal.
 pub struct Protocol {
     pub vis: syn::Visibility,
@@ -114,11 +122,15 @@ pub struct Protocol {
     /// Дефолтный тайм-аут клиента (`wait_ns`) из
     /// `#[protocol(timeout_ns = N)]`. `None` - `u64::MAX` (бессрочно).
     pub default_timeout_ns: Option<u64>,
+    /// Транспортная плоскость из `#[protocol(transport = "...")]`.
+    /// По умолчанию [`TransportPlane::Port`].
+    pub plane: TransportPlane,
 }
 
 struct ProtocolArgs {
     name: Option<String>,
     timeout_ns: Option<u64>,
+    plane: TransportPlane,
 }
 
 fn parse_protocol_args(
@@ -126,6 +138,7 @@ fn parse_protocol_args(
 ) -> syn::Result<ProtocolArgs> {
     let mut name: Option<String> = None;
     let mut timeout_ns: Option<u64> = None;
+    let mut plane = TransportPlane::Port;
     for item in meta {
         let Meta::NameValue(nv) = item else {
             return Err(Error::new(item.span(), "expected name = \"...\""));
@@ -134,11 +147,30 @@ fn parse_protocol_args(
             name = Some(parse_str_lit(&nv.value)?);
         } else if nv.path.is_ident("timeout_ns") {
             timeout_ns = Some(parse_u64_lit(&nv.value)?);
+        } else if nv.path.is_ident("transport") {
+            plane = parse_transport_plane(&nv.value)?;
         } else {
             return Err(Error::new(nv.path.span(), "unknown protocol argument"));
         }
     }
-    Ok(ProtocolArgs { name, timeout_ns })
+    Ok(ProtocolArgs {
+        name,
+        timeout_ns,
+        plane,
+    })
+}
+
+/// Разбирает `transport = "port" | "ring"` в [`TransportPlane`]; любое иное
+/// значение - ошибка со span литерала.
+fn parse_transport_plane(expr: &Expr) -> syn::Result<TransportPlane> {
+    match parse_str_lit(expr)?.as_str() {
+        "port" => Ok(TransportPlane::Port),
+        "ring" => Ok(TransportPlane::Ring),
+        _ => Err(Error::new(
+            expr.span(),
+            "transport must be \"port\" or \"ring\"",
+        )),
+    }
 }
 
 fn parse_str_lit(expr: &Expr) -> syn::Result<String> {
@@ -202,11 +234,21 @@ pub fn build(
 
     check_ordinal_collisions(&operations)?;
 
+    if parsed.plane == TransportPlane::Ring
+        && let Some(call) = operations.iter().find(|op| op.kind == Kind::Call)
+    {
+        return Err(Error::new(
+            call.ident.span(),
+            "ring transport plane does not allow #[call] (a ring has no reply channel); use #[cast]",
+        ));
+    }
+
     Ok(Protocol {
         vis: item.vis.clone(),
         trait_ident,
         operations,
         default_timeout_ns: parsed.timeout_ns,
+        plane: parsed.plane,
     })
 }
 

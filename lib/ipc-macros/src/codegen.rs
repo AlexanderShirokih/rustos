@@ -10,7 +10,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::Ident;
 
-use crate::model::{Operation, Param, Protocol, WireTy};
+use crate::model::{Operation, Param, Protocol, TransportPlane, WireTy};
 
 fn op_docs(op: &Operation) -> TokenStream {
     let docs = &op.docs;
@@ -733,9 +733,18 @@ fn expand_ordinal_module(protocol: &Protocol) -> TokenStream {
 
     let op_descs = protocol.operations.iter().map(operation_desc);
 
+    // Транспортная плоскость доступна интроспекции как const.
+    let plane = match protocol.plane {
+        TransportPlane::Port => "port",
+        TransportPlane::Ring => "ring",
+    };
+
     quote! {
         #vis mod #mod_ident {
             #(#consts)*
+
+            /// Транспортная плоскость протокола: `"port"` или `"ring"`.
+            pub const TRANSPORT_PLANE: &::core::primitive::str = #plane;
 
             pub const DESC: ::ipc::schema::ProtocolDesc = ::ipc::schema::ProtocolDesc {
                 operations: &[

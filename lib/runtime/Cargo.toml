@@ -13,6 +13,7 @@ bench = false
 doctest = false
 
 [dependencies]
+collections = { workspace = true }
 ipc = { workspace = true }
 syscall = { workspace = true }
 talc = { workspace = true }

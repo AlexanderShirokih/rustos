@@ -20,6 +20,7 @@ bench = false
 
 [dependencies]
 bootstrap = { workspace = true }
+collections = { workspace = true }
 io = { workspace = true }
 ipc = { workspace = true }
 spin = { workspace = true }
