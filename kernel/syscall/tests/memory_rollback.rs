@@ -4,14 +4,14 @@
 
 use core::{
     num::NonZeroUsize,
-    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 };
 use std::sync::{Arc, Mutex, OnceLock};
 
 use collections::{LockCell, MutexCell};
 use kobject::{
     Handle, HandleId, HandleTable, IpcError, KObject, KernelRuntime, LoadImageError, ProcessObject,
-    Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
+    Resource, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
     UserThreadEntry, WaitToken, install_runtime,
 };
 use memory::{
@@ -37,6 +37,7 @@ struct SpyFrameAllocator {
     next: AtomicUsize,
     allocated: AtomicUsize,
     deallocated: AtomicUsize,
+    blocked: AtomicBool,
 }
 
 impl SpyFrameAllocator {
@@ -45,12 +46,17 @@ impl SpyFrameAllocator {
             next: AtomicUsize::new(100),
             allocated: AtomicUsize::new(0),
             deallocated: AtomicUsize::new(0),
+            blocked: AtomicBool::new(false),
         }
     }
     fn outstanding(&self) -> i64 {
         let allocated = i64::try_from(self.allocated.load(Ordering::SeqCst)).unwrap();
         let deallocated = i64::try_from(self.deallocated.load(Ordering::SeqCst)).unwrap();
         allocated - deallocated
+    }
+    /// Симулирует исчерпание фреймов: `allocate_frame` отдаёт `None`.
+    fn set_blocked(&self, blocked: bool) {
+        self.blocked.store(blocked, Ordering::SeqCst);
     }
 }
 
@@ -59,6 +65,9 @@ impl FrameAllocator for SpyFrameAllocator {
         unimplemented!()
     }
     fn allocate_frame(&self) -> Option<Frame> {
+        if self.blocked.load(Ordering::SeqCst) {
+            return None;
+        }
         self.allocated.fetch_add(1, Ordering::SeqCst);
         Some(Frame::new(self.next.fetch_add(1, Ordering::SeqCst)))
     }
@@ -229,6 +238,23 @@ fn setup() -> TestEnv {
     (rt, table, allocator.clone(), fa)
 }
 
+/// Кладёт в таблицу метеринг-`Resource` с достаточным бюджетом и возвращает
+/// raw `HandleId` для передачи как `resource_h` в memory-syscall'ы.
+fn insert_metering_resource(table: &Arc<MutexCell<HandleTable>>) -> (u64, Arc<Resource>) {
+    let resource = Resource::new(
+        PageAlignedAddress::ZERO,
+        NonZeroUsize::new(usize::MAX & !0xFFF).unwrap(),
+        AccessMask::RW,
+        1024,
+    );
+    let ko = KObject::Resource(resource.clone());
+    let rights = Rights::defaults_for(&ko);
+    let id = table
+        .with_lock(|tbl| tbl.insert(Handle::new(ko, rights)))
+        .expect("insert resource");
+    (u64::from(id.raw().get()), resource)
+}
+
 fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock()
@@ -273,11 +299,15 @@ fn dispatch(op: SyscallOp, args: [u64; 6]) -> Result<u64, i64> {
 #[test]
 fn memory_allocate_rolls_back_va_and_frees_frames_on_install_failure() {
     let _g = test_lock();
-    let (_rt, _table, allocator, fa) = setup();
+    let (_rt, table, allocator, fa) = setup();
+    let (resource_h, resource) = insert_metering_resource(&table);
     let before = fa.outstanding();
+    let budget_before = resource.remaining_budget();
 
-    // flags=0 (RW), size = 1 page. install (map_exact) упадёт -> откат.
-    let res = dispatch(SyscallOp::MemoryAllocate, [PAGE as u64, 0, 0, 0, 0, 0]);
+    let res = dispatch(
+        SyscallOp::MemoryAllocate,
+        [resource_h, PAGE as u64, 0, 0, 0, 0],
+    );
     assert_eq!(res, Err(SyscallError::OutOfMemory.as_return_value()));
 
     // rollback дропает Arc<MemoryRegion>, возвращая все фреймы.
@@ -285,6 +315,11 @@ fn memory_allocate_rolls_back_va_and_frees_frames_on_install_failure() {
         fa.outstanding(),
         before,
         "rollback must free every frame allocated for the region"
+    );
+    assert_eq!(
+        resource.remaining_budget(),
+        budget_before,
+        "rollback must refund the metered budget"
     );
 
     let base = PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap();
@@ -294,6 +329,42 @@ fn memory_allocate_rolls_back_va_and_frees_frames_on_install_failure() {
         err,
         Err(RangeError::NotFound),
         "VA must be freed on rollback"
+    );
+}
+
+// Бюджет не должен утечь при frame-OOM до создания региона: refund висит на
+// регионе, а регион при этом ещё не создан - спишутся страницы без возврата.
+#[test]
+fn metered_alloc_does_not_leak_budget_on_frame_oom() {
+    let _g = test_lock();
+    let (_rt, table, _allocator, fa) = setup();
+    let (resource_h, resource) = insert_metering_resource(&table);
+    let budget_before = resource.remaining_budget();
+
+    fa.set_blocked(true);
+    let alloc = dispatch(
+        SyscallOp::MemoryAllocate,
+        [resource_h, PAGE as u64, 0, 0, 0, 0],
+    );
+    let create = dispatch(
+        SyscallOp::MemoryCreateVirtual,
+        [
+            resource_h,
+            PAGE as u64,
+            AccessMask::RW.bits() as u64,
+            0,
+            0,
+            0,
+        ],
+    );
+    fa.set_blocked(false);
+
+    assert_eq!(alloc, Err(SyscallError::OutOfMemory.as_return_value()));
+    assert_eq!(create, Err(SyscallError::OutOfMemory.as_return_value()));
+    assert_eq!(
+        resource.remaining_budget(),
+        budget_before,
+        "frame-OOM before region creation must not consume budget"
     );
 }
 

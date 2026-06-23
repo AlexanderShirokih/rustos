@@ -3,12 +3,14 @@
 //! Тест передаёт payload'у bootstrap-handle на `Signal`, ждёт сигнал от
 //! `SignalSet`, затем payload делает `ThreadExit`.
 
-use alloc::vec;
+use alloc::{sync::Arc, vec};
+use core::num::NonZeroUsize;
 
 use kernel_tests::kernel_test;
-use kobject::{Handle, KObject, Rights, SIGNALED, Signal};
+use kobject::{Handle, KObject, ProcessObject, Resource, Rights, SIGNALED, Signal};
 use memory::{
-    MemFlags,
+    AccessMask, MemFlags,
+    physical_address::PageAlignedAddress,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use process::{UserImage, UserSegment};
@@ -18,6 +20,17 @@ use syscall::SyscallOp;
 use super::user_payload::{
     B_LOOP, Reg, b_ne, cmp_x, mov_x, movz_w, movz_x, strb_w, svc_op, words_to_bytes,
 };
+
+// Засеивает метеринг-ресурс, чтобы `MemoryAllocate` payload'а проходил.
+// Безопасно сразу после spawn: поток ещё не выполнялся.
+fn seed_metering(process: &Arc<ProcessObject>) {
+    process.set_metering_resource(Resource::new(
+        PageAlignedAddress::ZERO,
+        NonZeroUsize::new(usize::MAX & !0xFFF).unwrap(),
+        AccessMask::RW,
+        1 << 20,
+    ));
+}
 
 const PAGE_SIZE: usize = 4096;
 /// Lower-half VA для payload - чистый user-AS, никаких пересечений.
@@ -102,11 +115,13 @@ fn userspace_spawn_user_process_runs_to_exit() {
 
 /// Сборка байт-кода для теста vm_allocate+vm_remap. Все инструкции -
 /// little-endian, 4 байта каждая.
-fn build_vm_payload() -> [u8; 18 * 4] {
+fn build_vm_payload() -> [u8; 19 * 4] {
     let words = [
         mov_x(Reg::X21, Reg::X0),
-        movz_x(Reg::X0, 0x1000, 0),
-        movz_x(Reg::X1, 0, 0),
+        // x0 = метеринг-handle, он же arg0 у MemoryAllocate.
+        svc_op(SyscallOp::ProcessResourceSelf),
+        movz_x(Reg::X1, 0x1000, 0),
+        movz_x(Reg::X2, 0, 0),
         svc_op(SyscallOp::MemoryAllocate),
         mov_x(Reg::X19, Reg::X0),
         movz_w(Reg::X20, 0x42),
@@ -151,6 +166,7 @@ fn userspace_vm_allocate_and_remap() {
         .spawn_user_process_with_launch("user-vm-allocate", &image, Priority::highest(), 2, launch)
         .expect("spawn_user_process must succeed");
     kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
+    seed_metering(&info.process_object);
 
     let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
@@ -168,11 +184,15 @@ fn userspace_vm_allocate_and_remap() {
 // Сам факт прихода сигнала доказывает: vm_free вернул регион в free-list
 // и следующий vm_allocate выдал тот же самый VA (coalesce + first-fit).
 
-fn build_vm_free_payload() -> [u8; 22 * 4] {
+fn build_vm_free_payload() -> [u8; 26 * 4] {
     let words = [
         mov_x(Reg::X21, Reg::X0),
-        movz_x(Reg::X0, 0x1000, 0),
-        movz_x(Reg::X1, 0, 0),
+        // X22 = метеринг-handle (arg0 для обоих MemoryAllocate).
+        svc_op(SyscallOp::ProcessResourceSelf),
+        mov_x(Reg::X22, Reg::X0),
+        mov_x(Reg::X0, Reg::X22),
+        movz_x(Reg::X1, 0x1000, 0),
+        movz_x(Reg::X2, 0, 0),
         svc_op(SyscallOp::MemoryAllocate),
         mov_x(Reg::X19, Reg::X0),
         movz_w(Reg::X20, 0x42),
@@ -180,8 +200,9 @@ fn build_vm_free_payload() -> [u8; 22 * 4] {
         mov_x(Reg::X0, Reg::X19),
         movz_x(Reg::X1, 0x1000, 0),
         svc_op(SyscallOp::MemoryFree),
-        movz_x(Reg::X0, 0x1000, 0),
-        movz_x(Reg::X1, 0, 0),
+        mov_x(Reg::X0, Reg::X22),
+        movz_x(Reg::X1, 0x1000, 0),
+        movz_x(Reg::X2, 0, 0),
         svc_op(SyscallOp::MemoryAllocate),
         cmp_x(Reg::X0, Reg::X19),
         b_ne(7),
@@ -227,6 +248,7 @@ fn userspace_vm_allocate_free_reuse_va() {
         )
         .expect("spawn_user_process must succeed");
     kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
+    seed_metering(&info.process_object);
 
     let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;

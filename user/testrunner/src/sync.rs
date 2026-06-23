@@ -3,8 +3,8 @@
 
 use kernel_tests::kernel_test;
 use runtime::{
-    Condvar, Mutex, memory_allocate, process_self, signal_wait_one, thread_create, thread_exit,
-    thread_termination_signal,
+    Condvar, Mutex, memory_allocate, process_resource_self, process_self, signal_wait_one,
+    thread_create, thread_exit, thread_termination_signal,
 };
 use syscall::{Handle, MEM_FLAGS_READ_WRITE, SIGNALED};
 
@@ -43,7 +43,8 @@ const TURN_WORKER: u32 = 1;
 /// Спавнит worker в текущем процессе: выделяет стек и стартует поток с
 /// `arg` через `thread_create`. Возвращает handle потока для join'а.
 fn spawn(worker: extern "C" fn(usize) -> !, arg: usize) -> Handle {
-    let va = memory_allocate(STACK_SIZE, MEM_FLAGS_READ_WRITE);
+    let resource = process_resource_self().expect("metering resource handle");
+    let va = memory_allocate(resource, STACK_SIZE, MEM_FLAGS_READ_WRITE);
     kernel_tests::kassert!(va > 0);
     let user_sp = u64::try_from(va).expect("positive va fits u64") + STACK_SIZE;
     let process = process_self().expect("process_self handle");

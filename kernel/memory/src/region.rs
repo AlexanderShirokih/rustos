@@ -3,9 +3,10 @@
 //! Регион - это владелец PA-бэкинга (анонимные фреймы или фиксированный
 //! PA-диапазон) плюс декларация максимально допустимых прав. На `Drop`
 //! `Virtual`-регион возвращает фреймы в `FrameAllocator`; `Physical`-регион
-//! не владеет памятью и ничего не делает.
+//! не владеет памятью, но может нести обязательство вернуть метеринг-бюджет
+//! ресурса, под который был сминчен (см. [`BudgetRefund`]).
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     num::NonZeroUsize,
     sync::atomic::{AtomicBool, Ordering},
@@ -55,6 +56,12 @@ impl AccessMask {
     }
 }
 
+/// Возврат метеринг-бюджета на `Drop` региона. Реализация - в kobject, чтобы
+/// метеринг-типы не текли в `memory`.
+pub trait BudgetRefund: Send + Sync {
+    fn refund(&self);
+}
+
 /// PA-бэкинг региона.
 pub enum MemoryBacking {
     /// Анонимные фреймы, выделенные эагерно из `FrameAllocator`.
@@ -69,8 +76,7 @@ pub enum MemoryBacking {
         fa: &'static (dyn FrameAllocator + Send + Sync),
         zeroed: AtomicBool,
     },
-    /// Фиксированный PA-диапазон: PA не принадлежит региону, на `Drop` ничего
-    /// не возвращается.
+    /// Фиксированный PA-диапазон: PA не принадлежит региону.
     Physical { pa_base: PageAlignedAddress },
 }
 
@@ -83,6 +89,8 @@ pub struct MemoryRegion {
     backing: MemoryBacking,
     size_bytes: usize,
     access_mask: AccessMask,
+    /// Если задано - на `Drop` возвращает списанный бюджет (см. [`BudgetRefund`]).
+    refund: Option<Arc<dyn BudgetRefund>>,
 }
 
 impl MemoryRegion {
@@ -112,6 +120,7 @@ impl MemoryRegion {
             },
             size_bytes: pages.get() * PAGE_SIZE,
             access_mask: access,
+            refund: None,
         })
     }
 
@@ -127,7 +136,14 @@ impl MemoryRegion {
             backing: MemoryBacking::Physical { pa_base },
             size_bytes: size.get(),
             access_mask: access,
+            refund: None,
         }
+    }
+
+    /// Навешивает метеринг-обязательство (см. [`BudgetRefund`]).
+    pub fn with_refund(mut self, refund: Arc<dyn BudgetRefund>) -> Self {
+        self.refund = Some(refund);
+        self
     }
 
     pub fn size_bytes(&self) -> usize {
@@ -204,10 +220,15 @@ impl MemoryRegion {
 
 impl Drop for MemoryRegion {
     fn drop(&mut self) {
+        // Virtual владеет фреймами - возвращает их в FA; Physical нет.
         if let MemoryBacking::Virtual { frames, fa, .. } = &mut self.backing {
             for frame in frames.drain(..) {
                 let _ = fa.deallocate_frame(frame);
             }
+        }
+        // `take` - ровно один refund на регион.
+        if let Some(refund) = self.refund.take() {
+            refund.refund();
         }
     }
 }
@@ -435,6 +456,44 @@ mod tests {
         assert_eq!(region.kind_tag(), 2);
         assert_eq!(region.size_bytes(), PAGE_SIZE);
         drop(region);
+    }
+
+    struct CountingRefund(std::sync::atomic::AtomicUsize);
+
+    impl BudgetRefund for CountingRefund {
+        fn refund(&self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn metered_physical_drop_refunds_exactly_once() {
+        let refund = Arc::new(CountingRefund(std::sync::atomic::AtomicUsize::new(0)));
+        let region =
+            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(PAGE_SIZE), AccessMask::R)
+                .with_refund(refund.clone());
+        // Пока регион жив - refund ещё не сработал.
+        assert_eq!(refund.0.load(Ordering::Acquire), 0);
+        drop(region);
+        // Закрытие региона возвращает бюджет ровно один раз.
+        assert_eq!(refund.0.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn metered_virtual_drop_refunds_and_returns_frames() {
+        let fa = leak_fa();
+        let refund = Arc::new(CountingRefund(std::sync::atomic::AtomicUsize::new(0)));
+        let region = MemoryRegion::create_virtual(fa, nz(2), AccessMask::RW)
+            .expect("alloc must succeed")
+            .with_refund(refund.clone());
+        assert_eq!(refund.0.load(Ordering::Acquire), 0);
+        assert_eq!(fa.deallocated().len(), 0);
+
+        drop(region);
+        // Virtual-регион под бюджет: на Drop И возвращает фреймы в FA, И
+        // возвращает метеринг-бюджет ровно один раз.
+        assert_eq!(refund.0.load(Ordering::Acquire), 1);
+        assert_eq!(fa.deallocated().len(), 2);
     }
 
     #[test]

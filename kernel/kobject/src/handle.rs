@@ -1,6 +1,7 @@
+use alloc::sync::Arc;
 use core::num::NonZeroU32;
 
-use super::{errors::IpcError, koid::Koid, object::KObject, rights::Rights};
+use super::{errors::IpcError, koid::Koid, object::KObject, rev_node::RevNode, rights::Rights};
 
 /// Публичный идентификатор записи в `HandleTable`, используемый процессами для IPC.
 ///
@@ -61,6 +62,7 @@ pub struct Handle {
     pub(super) object: KObject,
     rights: Rights,
     badge: u64,
+    node: Arc<RevNode>,
 }
 
 impl core::fmt::Debug for Handle {
@@ -69,7 +71,7 @@ impl core::fmt::Debug for Handle {
             .field("koid", &self.object.koid())
             .field("rights", &self.rights)
             .field("badge", &self.badge)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -80,6 +82,7 @@ impl Handle {
             object,
             rights,
             badge: 0,
+            node: RevNode::new_root(),
         }
     }
 
@@ -89,7 +92,13 @@ impl Handle {
             object,
             rights,
             badge,
+            node: RevNode::new_root(),
         }
+    }
+
+    /// Узел графа деривации этой капы.
+    pub(super) fn node(&self) -> &Arc<RevNode> {
+        &self.node
     }
 
     pub fn rights(&self) -> Rights {
@@ -133,6 +142,9 @@ impl Handle {
             object: self.object.clone(),
             rights: new_rights,
             badge,
+            // Производная капа - дочерний узел деривации: закрытие источника
+            // (предка) лениво отзовёт эту копию.
+            node: RevNode::new_child(&self.node),
         })
     }
 }

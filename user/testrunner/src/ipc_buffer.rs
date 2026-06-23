@@ -8,8 +8,8 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use kernel_tests::kernel_test;
 use runtime::{
-    ipc_buffer_addr, ipc_buffer_ptr, memory_allocate, process_self, signal_wait_one, thread_create,
-    thread_exit, thread_termination_signal,
+    ipc_buffer_addr, ipc_buffer_ptr, memory_allocate, process_resource_self, process_self,
+    signal_wait_one, thread_create, thread_exit, thread_termination_signal,
 };
 use syscall::{IPC_BUFFER_DATA_MAX, MEM_FLAGS_READ_WRITE, SIGNALED, encode_tag};
 
@@ -73,7 +73,8 @@ fn ipc_buffer_per_thread_distinct() {
     kernel_tests::kassert!(main_ret > 0);
     let main_va = u64::try_from(main_ret).expect("positive va fits u64");
 
-    let stack = memory_allocate(STACK_SIZE, MEM_FLAGS_READ_WRITE);
+    let resource = process_resource_self().expect("metering resource handle");
+    let stack = memory_allocate(resource, STACK_SIZE, MEM_FLAGS_READ_WRITE);
     kernel_tests::kassert!(stack > 0);
     let user_sp = u64::try_from(stack).expect("positive va fits u64") + STACK_SIZE;
     let process = process_self().expect("process_self handle");

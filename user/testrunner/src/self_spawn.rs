@@ -5,7 +5,8 @@
 use kernel_tests::kernel_test;
 use runtime::{
     memory_create_virtual, memory_map, memory_remap, process_create, process_exit_code,
-    process_load_image, process_start, process_termination_signal, signal_wait_one,
+    process_load_image, process_resource_self, process_start, process_termination_signal,
+    signal_wait_one,
 };
 use syscall::{MEM_FLAGS_READ_WRITE, SIGNALED, SyscallOp};
 
@@ -66,7 +67,8 @@ fn encode_image_desc(segments_va: u64) -> [u8; IMAGE_DESC_SIZE] {
 #[kernel_test]
 fn self_spawn_via_syscalls() {
     // Регион child-кода: маппим RW, пишем инструкции, поднимаем в RX.
-    let region = memory_create_virtual(PAGE_SIZE, ACCESS_RWX).expect("region handle");
+    let resource = process_resource_self().expect("metering resource handle");
+    let region = memory_create_virtual(resource, PAGE_SIZE, ACCESS_RWX).expect("region handle");
     let va = memory_map(region, PAGE_SIZE, MEM_FLAGS_READ_WRITE);
     kernel_tests::kassert!(va > 0);
     let code_va = u64::try_from(va).expect("positive va fits u64");

@@ -28,6 +28,7 @@ impl Reg {
     pub const X19: Self = Self(19);
     pub const X20: Self = Self(20);
     pub const X21: Self = Self(21);
+    pub const X22: Self = Self(22);
 
     const fn bits(self) -> u32 {
         self.0 as u32

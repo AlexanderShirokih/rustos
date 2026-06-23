@@ -11,6 +11,7 @@
 //! аллокатору.
 
 use alloc::sync::Arc;
+use core::any::Any;
 
 use crate::{
     MemFlags,
@@ -23,6 +24,13 @@ pub struct MappingTag {
     pub flags: MemFlags,
     pub region: Arc<MemoryRegion>,
     pub grant: AccessMask,
+    /// Сильная ссылка на объект отзыва маппинга (`RevocationHook`,
+    /// определённый выше по слою - в syscall). `memory` не знает его типа,
+    /// поэтому держит как `Any`: единственная роль здесь - keep-alive.
+    /// Дроп тега при `memory_free`/смерти AS роняет эту ссылку, и `Weak`
+    /// в узле деривации повисает - повторный (ленивый) отзыв его пропускает.
+    /// `None` для маппингов без публичной капы (анонимный `memory_allocate`).
+    pub revocation: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 pub type UserVmAllocator = RangeAllocator<MappingTag>;

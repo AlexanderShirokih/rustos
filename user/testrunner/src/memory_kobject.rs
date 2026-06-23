@@ -2,7 +2,7 @@
 //! `MemoryMap` + `MemoryRegionInspect` из EL0.
 
 use kernel_tests::kernel_test;
-use runtime::{memory_create_virtual, memory_map, memory_region_inspect};
+use runtime::{memory_create_virtual, memory_map, memory_region_inspect, process_resource_self};
 
 const PAGE_SIZE: u64 = 4096;
 const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABE;
@@ -14,7 +14,8 @@ const EXPECTED_INSPECT_SECONDARY: u64 = (1 << 16) | ACCESS_RW;
 
 #[kernel_test]
 fn memory_kobject_map_and_inspect() {
-    let region = memory_create_virtual(PAGE_SIZE, ACCESS_RW).expect("region handle");
+    let resource = process_resource_self().expect("metering resource handle");
+    let region = memory_create_virtual(resource, PAGE_SIZE, ACCESS_RW).expect("region handle");
 
     let va = memory_map(region, PAGE_SIZE, 0);
     kernel_tests::kassert!(va > 0);

@@ -69,12 +69,12 @@ pub fn spawn_process(
     // этапах диапазон должен происходить из реальной карты физпамяти
     // (RAM/MMIO), а бюджет — из учёта доступных фреймов.
     let root_resource = Resource::new(
-        PageAlignedAddress::from_usize(0).expect("zero PA is page-aligned"),
+        PageAlignedAddress::ZERO,
         NonZeroUsize::new(usize::MAX & !0xFFF).expect("non-zero resource span"),
         AccessMask::RW,
         1 << 20,
     );
-    let resource_ko = KObject::Resource(root_resource);
+    let resource_ko = KObject::Resource(root_resource.clone());
     let resource_handle = Handle::new(resource_ko.clone(), Rights::defaults_for(&resource_ko));
 
     let launch = UserProcessLaunch::new()
@@ -84,6 +84,10 @@ pub fn spawn_process(
     let info = launcher
         .spawn_user_process_with_launch(name, &user_image, Priority::normal(), 2, launch)
         .map_err(BootstrapSpawnError::Spawn)?;
+
+    // Метеринг-ресурс bootstrap-процесса = корневой Resource. Засев до старта
+    // scheduler-а, поэтому процесс не успевает аллоцировать раньше.
+    info.process_object.set_metering_resource(root_resource);
 
     Ok(BootstrapLaunch { port, info })
 }
@@ -144,7 +148,8 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
         | KernelIpcError::AccessDenied
         | KernelIpcError::Canceled
         | KernelIpcError::OutOfHandles
-        | KernelIpcError::ResourceExhausted => WireError::PeerClosed,
+        | KernelIpcError::ResourceExhausted
+        | KernelIpcError::Revoked => WireError::PeerClosed,
     }
 }
 

@@ -10,6 +10,7 @@ use super::{
     process::ProcessObject,
     reply::Reply,
     resource::Resource,
+    rev_node::{RevocationHook, revoke_subtree},
     rights::Rights,
     signal::Signal,
     thread::ThreadObject,
@@ -180,6 +181,12 @@ impl HandleTable {
     /// Удаляет handle из таблицы. Будит каждый cancel-target с исходом
     /// [`IpcError::Canceled`](IpcError::Canceled).
     pub fn remove(&mut self, id: HandleId) -> Result<Handle, IpcError> {
+        let handle = self.take_slot(id)?;
+        revoke_subtree(handle.node());
+        Ok(handle)
+    }
+
+    fn take_slot(&mut self, id: HandleId) -> Result<Handle, IpcError> {
         let idx = id.slot();
         let slot = self
             .slots
@@ -235,9 +242,19 @@ impl HandleTable {
         Ok(())
     }
 
-    /// Снимает cancel-target по identity. Идемпотентен; generation
-    /// не проверяется - переиспользованный слот заведомо не содержит
-    /// чужой Arc.
+    /// Регистрирует [`RevocationHook`] на узле деривации капы `id`. При
+    /// отзыве капы (close/Drop любого её предка) hook получит `revoke()`.
+    pub fn register_revocation_hook(
+        &self,
+        id: HandleId,
+        hook: alloc::sync::Weak<dyn RevocationHook>,
+    ) -> Result<(), IpcError> {
+        let handle = self.lookup(id)?;
+        handle.node().register_hook(hook);
+        Ok(())
+    }
+
+    /// Снимает cancel-target по identity.
     pub fn unregister_cancel(&mut self, id: HandleId, target: &Arc<dyn CancelTarget>) {
         let Some(slot) = self.slots.get_mut(id.slot() as usize) else {
             return;
@@ -437,9 +454,9 @@ impl HandleTable {
         }
         let mut drained = Vec::with_capacity(ids.len());
         for id in ids {
-            // Валидация выше гарантирует, что remove не упадёт: id найден,
+            // Валидация выше гарантирует, что take_slot не упадёт: id найден,
             // generation совпадает, rights включают min_rights.
-            let h = self.remove(*id).expect("validated above");
+            let h = self.take_slot(*id).expect("validated above");
             drained.push(h);
         }
         Ok(drained)
@@ -467,7 +484,13 @@ impl HandleTable {
             return Err(IpcError::BadHandle);
         }
         match &slot.state {
-            SlotState::Occupied(handle) => Ok(handle),
+            SlotState::Occupied(handle) => {
+                if handle.node().is_alive() {
+                    Ok(handle)
+                } else {
+                    Err(IpcError::Revoked)
+                }
+            }
             SlotState::Free { .. } | SlotState::Reserved | SlotState::Retired => {
                 Err(IpcError::BadHandle)
             }
@@ -496,6 +519,20 @@ impl HandleTable {
 impl Default for HandleTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for HandleTable {
+    /// Смерть таблицы (process exit) отзывает все её гранты.
+    fn drop(&mut self) {
+        for slot in &mut self.slots {
+            for w in core::mem::take(&mut slot.waiters) {
+                w.cancel();
+            }
+            if let SlotState::Occupied(handle) = &slot.state {
+                revoke_subtree(handle.node());
+            }
+        }
     }
 }
 
@@ -1246,6 +1283,217 @@ mod tests {
             final_id.generation(),
             seed_gen + 1,
             "лишь один реальный commit должен сдвинуть generation",
+        );
+    }
+
+    fn transfer(src: &mut HandleTable, dst: &mut HandleTable, ids: &[HandleId]) -> Vec<HandleId> {
+        let reservations: Vec<HandleReservation> = ids
+            .iter()
+            .map(|_| dst.reserve_slot().expect("reserve"))
+            .collect();
+        let drained = src
+            .try_drain_for_transfer(ids, Rights::TRANSFER)
+            .expect("drain");
+        reservations
+            .into_iter()
+            .zip(drained)
+            .map(|(res, h)| dst.commit_reserved(res, h))
+            .collect()
+    }
+
+    fn dup_rights() -> Rights {
+        Rights::DUPLICATE | Rights::READ | Rights::TRANSFER
+    }
+
+    #[test]
+    fn lookup_revoked_after_grantor_closed_across_transfer() {
+        let mut grantor = HandleTable::new();
+        let mut recipient = HandleTable::new();
+
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
+
+        assert!(recipient.get(recv_id, Rights::READ).is_ok());
+
+        grantor.remove(root).unwrap();
+        assert_eq!(
+            recipient.get(recv_id, Rights::READ).unwrap_err(),
+            IpcError::Revoked
+        );
+    }
+
+    #[test]
+    fn transfer_of_root_is_not_revocable() {
+        let mut grantor = HandleTable::new();
+        let mut recipient = HandleTable::new();
+
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let recv_id = transfer(&mut grantor, &mut recipient, &[root])[0];
+
+        assert!(recipient.get(recv_id, Rights::READ).is_ok());
+    }
+
+    #[test]
+    fn granularity_via_intermediate_nodes() {
+        let mut grantor = HandleTable::new();
+        let mut client_p = HandleTable::new();
+        let mut client_q = HandleTable::new();
+
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let node_p = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let node_q = grantor.duplicate(root, dup_rights(), 0).unwrap();
+
+        let give_p = grantor.duplicate(node_p, dup_rights(), 0).unwrap();
+        let give_q = grantor.duplicate(node_q, dup_rights(), 0).unwrap();
+        let p_id = transfer(&mut grantor, &mut client_p, &[give_p])[0];
+        let q_id = transfer(&mut grantor, &mut client_q, &[give_q])[0];
+
+        grantor.remove(node_q).unwrap();
+
+        assert_eq!(
+            client_q.get(q_id, Rights::READ).unwrap_err(),
+            IpcError::Revoked
+        );
+        assert!(client_p.get(p_id, Rights::READ).is_ok());
+    }
+
+    #[test]
+    fn closing_root_revokes_whole_subtree() {
+        let mut grantor = HandleTable::new();
+        let mut client_p = HandleTable::new();
+        let mut client_q = HandleTable::new();
+
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let give_p = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let give_q = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let p_id = transfer(&mut grantor, &mut client_p, &[give_p])[0];
+        let q_id = transfer(&mut grantor, &mut client_q, &[give_q])[0];
+
+        grantor.remove(root).unwrap();
+
+        assert_eq!(
+            client_p.get(p_id, Rights::READ).unwrap_err(),
+            IpcError::Revoked
+        );
+        assert_eq!(
+            client_q.get(q_id, Rights::READ).unwrap_err(),
+            IpcError::Revoked
+        );
+    }
+
+    #[test]
+    fn duplicate_of_revoked_handle_fails() {
+        let mut grantor = HandleTable::new();
+        let mut recipient = HandleTable::new();
+
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
+        grantor.remove(root).unwrap();
+
+        assert_eq!(
+            recipient.duplicate(recv_id, Rights::READ, 0).unwrap_err(),
+            IpcError::Revoked
+        );
+    }
+
+    #[test]
+    fn revoked_slot_can_still_be_closed() {
+        let mut grantor = HandleTable::new();
+        let mut recipient = HandleTable::new();
+
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
+        grantor.remove(root).unwrap();
+
+        assert!(recipient.remove(recv_id).is_ok());
+        assert_eq!(recipient.live_count(), 0);
+    }
+
+    #[test]
+    fn ancestors_and_siblings_keep_access_after_descendant_close() {
+        let mut table = HandleTable::new();
+        let root = table.insert(signal_handle(dup_rights())).unwrap();
+        let child_a = table.duplicate(root, dup_rights(), 0).unwrap();
+        let child_b = table.duplicate(root, dup_rights(), 0).unwrap();
+
+        table.remove(child_a).unwrap();
+
+        assert!(table.get(root, Rights::READ).is_ok());
+        assert!(table.get(child_b, Rights::READ).is_ok());
+    }
+
+    #[test]
+    fn registered_hook_fires_on_close() {
+        use alloc::sync::Weak;
+
+        use super::super::rev_node::RevocationHook;
+
+        struct CountingHook(AtomicUsize);
+        impl RevocationHook for CountingHook {
+            fn revoke(&self) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        let mut table = HandleTable::new();
+        let id = table.insert(signal_handle(dup_rights())).unwrap();
+        let hook = Arc::new(CountingHook(AtomicUsize::new(0)));
+        table
+            .register_revocation_hook(id, Arc::downgrade(&hook) as Weak<dyn RevocationHook>)
+            .unwrap();
+        assert_eq!(hook.0.load(Ordering::Acquire), 0);
+
+        table.remove(id).unwrap();
+        assert_eq!(hook.0.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn registered_hook_fires_for_descendant_on_ancestor_close() {
+        use alloc::sync::Weak;
+
+        use super::super::rev_node::RevocationHook;
+
+        struct CountingHook(AtomicUsize);
+        impl RevocationHook for CountingHook {
+            fn revoke(&self) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        let mut grantor = HandleTable::new();
+        let mut recipient = HandleTable::new();
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
+
+        let hook = Arc::new(CountingHook(AtomicUsize::new(0)));
+        recipient
+            .register_revocation_hook(recv_id, Arc::downgrade(&hook) as Weak<dyn RevocationHook>)
+            .unwrap();
+
+        grantor.remove(root).unwrap();
+        assert_eq!(hook.0.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn table_drop_revokes_derived_in_other_table() {
+        let mut recipient = HandleTable::new();
+        let recv_id;
+
+        {
+            let mut grantor = HandleTable::new();
+            let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+            let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
+            recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
+            assert!(recipient.get(recv_id, Rights::READ).is_ok());
+        }
+
+        assert_eq!(
+            recipient.get(recv_id, Rights::READ).unwrap_err(),
+            IpcError::Revoked
         );
     }
 }

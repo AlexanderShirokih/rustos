@@ -115,6 +115,10 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::process::sys_process_self();
             frame.set_return(encode_return(r));
         }
+        SyscallOp::ProcessResourceSelf => {
+            let r = super::process::sys_process_resource_self();
+            frame.set_return(encode_return(r));
+        }
         SyscallOp::ProcessLoadImage => {
             let r =
                 super::process::sys_process_load_image(frame.arg(0), frame.arg(1), frame.arg(2));
@@ -173,7 +177,8 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             frame.set_return(encode_return(r));
         }
         SyscallOp::MemoryCreateVirtual => {
-            let r = super::memory::sys_memory_create_virtual(frame.arg(0), frame.arg(1));
+            let r =
+                super::memory::sys_memory_create_virtual(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
         }
         SyscallOp::MemoryCreatePhysical => {
@@ -194,7 +199,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             frame.set_return(encode_return(r));
         }
         SyscallOp::MemoryAllocate => {
-            let r = super::memory::sys_memory_allocate(frame.arg(0), frame.arg(1));
+            let r = super::memory::sys_memory_allocate(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
         }
         SyscallOp::MemoryFree => {

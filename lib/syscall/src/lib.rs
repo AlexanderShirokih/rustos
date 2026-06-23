@@ -25,11 +25,11 @@
 //!
 //! | op    | Имя                       | Аргументы / возврат                                                                                |
 //! |-------|---------------------------|----------------------------------------------------------------------------------------------------|
-//! | 0x60  | `MemoryCreateVirtual`     | `size_bytes`, `access_mask` -> `region_h`                                                          |
+//! | 0x60  | `MemoryCreateVirtual`     | `resource_h`, `size_bytes`, `access_mask` -> `region_h`                                            |
 //! | 0x61  | `MemoryCreatePhysical`    | `resource_h`, `pa`, `size_bytes`, `access_mask` -> `region_h`                                      |
 //! | 0x63  | `MemoryMap`               | `region_h`, `size`, `flags` -> `va`                                                                |
 //! | 0x64  | `MemoryRemap`             | `va`, `size`, `flags` -> `0`                                                                       |
-//! | 0x65  | `MemoryAllocate`          | `size`, `flags` -> `va`                                                                            |
+//! | 0x65  | `MemoryAllocate`          | `resource_h`, `size`, `flags` -> `va`                                                              |
 //! | 0x66  | `MemoryFree`              | `va`, `size` -> `0`                                                                                |
 //! | 0x67  | `MemoryRegionInspect`     | `region_h` -> primary=`size_bytes`, secondary=`(kind_tag << 16) \| access_bits`                    |
 //!
@@ -200,16 +200,19 @@ pub enum SyscallOp {
     /// `SIGNALED`), материализуя его лениво. Аргумент: `arg0=handle`. Требует
     /// `Rights::READ`. Выданный handle - read-only (READ/DUPLICATE/TRANSFER).
     ProcessTerminationSignal = 0x46,
+    /// Ставит свежий handle на метеринг-`Resource` текущего процесса
+    /// (дефолтные права, включая `WRITE`). Аргументов нет. `WrongType`, если
+    /// процесс стартовал без метеринг-ресурса. Возвращает `resource_handle`.
+    ProcessResourceSelf = 0x47,
     /// Стартует первый поток уже загруженного образа и атомарно
     /// передаёт ему bootstrap-handles. Аргументы: `arg0=process_handle`,
     /// `arg1=entry_pc`, `arg2=user_sp`, `arg3=arg` (X0 первой
     /// инструкции), `arg4 = priority | (handles_count << 32)`,
     /// `arg5=handles_va` (массив `[u32; handles_count]` HandleId
-    /// raw-значений). Требует
-    /// `Rights::WRITE` на
-    /// `process_handle` и `Rights::TRANSFER`
-    /// на каждом handle в `handles_va`. Возвращает handle на свежий
-    /// `ThreadObject`.
+    /// raw-значений). Требует `Rights::WRITE` на `process_handle` и
+    /// `Rights::TRANSFER` на каждом handle в `handles_va`. Стартуемый
+    /// процесс наследует метеринг-ресурс вызывающего. Возвращает handle на
+    /// свежий `ThreadObject`.
     ProcessStart = 0x45,
 
     // 0x50..=0x5F - Thread KObject.
@@ -243,7 +246,9 @@ pub enum SyscallOp {
 
     // 0x60..=0x6F - Memory KObject.
     /// Создаёт `KObject::Memory` с Virtual backing. Аргументы:
-    /// `arg0=size_bytes`, `arg1=access_mask`. Возвращает `region_handle`.
+    /// `arg0=resource_handle` (требует `Rights::WRITE`; метерится
+    /// `size_bytes / PAGE` страниц), `arg1=size_bytes`, `arg2=access_mask`.
+    /// Возвращает `region_handle`.
     MemoryCreateVirtual = 0x60,
     /// Создаёт `KObject::Memory` с Physical backing. Аргументы:
     /// `arg0=resource_handle` на `Resource` (требует
@@ -261,7 +266,9 @@ pub enum SyscallOp {
     MemoryRemap = 0x64,
     /// Fastpath: создаёт анонимный `Virtual` регион и сразу маппит его
     /// в свободный VA. `region_handle` не выкладывается. Аргументы:
-    /// `arg0=size_bytes`, `arg1=flags_raw`. Возвращает базовый VA.
+    /// `arg0=resource_handle` (требует `Rights::WRITE`; метерится
+    /// `size / PAGE` страниц), `arg1=size_bytes`, `arg2=flags_raw`.
+    /// Возвращает базовый VA.
     MemoryAllocate = 0x65,
     /// Снимает маппинг и возвращает регион в free-list (Arc дропается; если
     /// последний - фреймы возвращаются в FA через `Drop` региона).
@@ -293,6 +300,7 @@ impl SyscallOp {
             0x44 => Some(Self::ProcessTerminate),
             0x45 => Some(Self::ProcessStart),
             0x46 => Some(Self::ProcessTerminationSignal),
+            0x47 => Some(Self::ProcessResourceSelf),
             0x50 => Some(Self::ThreadCreate),
             0x51 => Some(Self::ThreadSelf),
             0x52 => Some(Self::ThreadExit),
@@ -391,6 +399,10 @@ mod tests {
             SyscallOp::from_raw(0x46),
             Some(SyscallOp::ProcessTerminationSignal)
         );
+        assert_eq!(
+            SyscallOp::from_raw(0x47),
+            Some(SyscallOp::ProcessResourceSelf)
+        );
         assert_eq!(SyscallOp::from_raw(0x50), Some(SyscallOp::ThreadCreate));
         assert_eq!(SyscallOp::from_raw(0x51), Some(SyscallOp::ThreadSelf));
         assert_eq!(SyscallOp::from_raw(0x52), Some(SyscallOp::ThreadExit));
@@ -424,17 +436,9 @@ mod tests {
     }
 
     #[test]
-    fn from_raw_old_thread_exit_slot_is_none() {
-        // ABI поломан: 0x01 более не означает thread_exit, а
-        // зарезервирован.
-        assert_eq!(SyscallOp::from_raw(0x01), None);
-    }
-
-    #[test]
     fn from_raw_unknown_op() {
         assert_eq!(SyscallOp::from_raw(3), None);
         assert_eq!(SyscallOp::from_raw(0x32), None);
-        assert_eq!(SyscallOp::from_raw(0x47), None);
         assert_eq!(SyscallOp::from_raw(0x57), None);
         assert_eq!(SyscallOp::from_raw(0x62), None);
         assert_eq!(SyscallOp::from_raw(0x68), None);

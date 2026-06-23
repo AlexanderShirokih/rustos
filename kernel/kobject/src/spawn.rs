@@ -11,6 +11,7 @@ use super::{
     HandleTable,
     errors::{IpcError, SpawnError},
     handle::HandleId,
+    resource::Resource,
     runtime::UserThreadEntry,
 };
 
@@ -46,6 +47,7 @@ pub struct UserStartSpec {
     pub entry: UserThreadEntry,
     pub loader_handle_table: Arc<MutexCell<HandleTable>>,
     pub handle_ids: Vec<HandleId>,
+    pub metering_resource: Option<Arc<Resource>>,
 }
 
 /// Ошибки [`KernelRuntime::load_user_image_into`].

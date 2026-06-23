@@ -58,3 +58,5 @@ RustOS Mobile — bare-metal aarch64 ядро на Rust (`#![no_std]`, Edition 2
 | [`docs/architecture.md`](docs/architecture.md) | Принципы архитектуры: слои, newtype, compile-time гарантии     |
 | [`docs/code-style.md`](docs/code-style.md)     | Стиль кода: структура файлов, комментарии, `no_std`            |
 | [`docs/syscalls.md`](docs/syscalls.md)         | ABI и полный реестр системных вызовов                          |
+| [`docs/ipc.md`](docs/ipc.md)                   | Формат типизированных IPC-контрактов поверх канала            |
+| [`docs/userland.md`](docs/userland.md)         | Устройство userland: образ, рантайм, bootstrap                |

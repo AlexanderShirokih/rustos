@@ -22,6 +22,7 @@ mod port;
 mod process;
 mod reply;
 mod resource;
+mod rev_node;
 mod rights;
 mod runtime;
 mod signal;
@@ -48,7 +49,8 @@ pub use port::{
 };
 pub use process::ProcessObject;
 pub use reply::{Reply, ReplySlot};
-pub use resource::Resource;
+pub use resource::{Resource, ResourceBudgetRefund};
+pub use rev_node::RevocationHook;
 pub use rights::Rights;
 pub use runtime::{KernelRuntime, ParkState, UserThreadEntry, WaitToken, install_runtime, runtime};
 pub use signal::{SIGNALED, Signal};

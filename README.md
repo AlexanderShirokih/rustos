@@ -45,6 +45,9 @@ let readonly_h = handle_duplicate(
 
 channel_write(peer_h, &[], &[readonly_h])?;
 // readonly_h больше нет в handle-таблице текущего процесса
+
+// Закрытие region_h отзывает производный readonly_h у получателя
+handle_close(region_h)?;
 ```
 
 ```rust
@@ -221,6 +224,7 @@ PR с новыми устройствами приветствуются.
 ## Что реализовано
 
 - Capability-based handle-таблица с передачей и сужением прав
+- Отзыв полномочий: каскадное закрытие хендла отзывает поддерево производных
 - Двусторонний channel IPC с передачей capability
 - Типизированные IPC-контракты поверх канала
 - Mailbox с синхронным и async-ожиданием

@@ -1109,6 +1109,7 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
         },
         loader_handle_table: empty_loader_table(),
         handle_ids: std::vec::Vec::new(),
+        metering_resource: None,
     };
     let thread = handle.start_user_process(&process, spec).expect("start ok");
     assert!(!thread.terminated());
@@ -1137,6 +1138,7 @@ fn start_user_process_rejects_unloaded() {
         },
         loader_handle_table: empty_loader_table(),
         handle_ids: std::vec::Vec::new(),
+        metering_resource: None,
     };
     match handle.start_user_process(&process, spec) {
         Err(StartProcessError::WrongState) => {}
@@ -1198,6 +1200,7 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
         },
         loader_handle_table: loader_table.clone(),
         handle_ids: std::vec![handle_id],
+        metering_resource: None,
     };
 
     match handle.start_user_process(&process, spec) {

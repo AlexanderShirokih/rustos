@@ -19,9 +19,10 @@ pub use svc::{
     handle_close, handle_duplicate, ipc_buffer_addr, memory_allocate, memory_create_physical,
     memory_create_virtual, memory_free, memory_map, memory_region_inspect, memory_remap, port_call,
     port_create, port_recv, port_reply, port_send, process_create, process_exit_code,
-    process_load_image, process_self, process_start, process_terminate, process_termination_signal,
-    signal_create, signal_set, signal_wait_many, signal_wait_one, thread_create, thread_exit,
-    thread_exit_code, thread_self, thread_terminate, thread_termination_signal,
+    process_load_image, process_resource_self, process_self, process_start, process_terminate,
+    process_termination_signal, signal_create, signal_set, signal_wait_many, signal_wait_one,
+    thread_create, thread_exit, thread_exit_code, thread_self, thread_terminate,
+    thread_termination_signal,
 };
 pub use sync::{Condvar, Mutex, MutexGuard};
 

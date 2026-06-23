@@ -87,6 +87,9 @@ impl From<usize> for PhysicalAddress {
 pub struct AlignedPhysicalAddress<const SHIFT: u8>(usize);
 
 impl<const SHIFT: u8> AlignedPhysicalAddress<SHIFT> {
+    /// Нулевой адрес - выровнен на любую границу.
+    pub const ZERO: Self = Self(0);
+
     pub const fn new(address: PhysicalAddress) -> Option<Self> {
         if address.0.is_multiple_of(Self::ALIGNMENT) {
             Some(Self(address.0))

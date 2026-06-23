@@ -1056,6 +1056,8 @@ where
                         flags,
                         region: region.clone(),
                         grant,
+                        // Стек потока не имеет публичной капы - отзывать нечего.
+                        revocation: None,
                     },
                 )
             })
@@ -1194,6 +1196,7 @@ where
             entry,
             loader_handle_table,
             handle_ids,
+            metering_resource,
         } = spec;
 
         {
@@ -1252,6 +1255,11 @@ where
                     .expect("child handle-table has DEFAULT_CAPACITY slots free");
             }
         });
+
+        // До enqueue: стартовый поток не должен аллоцировать раньше засева.
+        if let Some(resource) = metering_resource {
+            process_ko.set_metering_resource(resource);
+        }
 
         self.enqueue_user_thread_ready(thread_id);
 

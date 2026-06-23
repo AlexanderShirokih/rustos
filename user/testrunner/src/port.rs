@@ -17,8 +17,8 @@ use core::sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst};
 use kernel_tests::kernel_test;
 use runtime::{
     handle_duplicate, ipc_buffer_addr, memory_allocate, port_call, port_create, port_recv,
-    port_reply, port_send, process_self, signal_create, signal_set, signal_wait_one, thread_create,
-    thread_exit, thread_termination_signal,
+    port_reply, port_send, process_resource_self, process_self, signal_create, signal_set,
+    signal_wait_one, thread_create, thread_exit, thread_termination_signal,
 };
 use syscall::{
     Handle, MEM_FLAGS_READ_WRITE, PORT_TIMEOUT_INFINITE, PORT_TIMEOUT_POLL, SIGNALED,
@@ -112,7 +112,8 @@ unsafe fn read_badge(va: usize) -> u64 {
 }
 
 fn alloc_stack() -> u64 {
-    let stack = memory_allocate(STACK_SIZE, MEM_FLAGS_READ_WRITE);
+    let resource = process_resource_self().expect("metering resource handle");
+    let stack = memory_allocate(resource, STACK_SIZE, MEM_FLAGS_READ_WRITE);
     assert_positive(stack);
     u64::try_from(stack).expect("positive va fits u64") + STACK_SIZE
 }

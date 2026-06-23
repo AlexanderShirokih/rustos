@@ -6,12 +6,29 @@
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr::{self, NonNull},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
-use syscall::MEM_FLAGS_READ_WRITE;
+use syscall::{Handle, MEM_FLAGS_READ_WRITE};
 use talc::{OomHandler, Span, Talc};
 
-use crate::{Mutex, memory_allocate, memory_free};
+use crate::{Mutex, memory_allocate, memory_free, process_resource_self};
+
+/// Кэш метеринг-handle: `process_resource_self` ставит свежий handle на каждый вызов,
+/// поэтому кэшируем первый (на старт-гонке лишний handle безвреден).
+static METERING_HANDLE: AtomicU32 = AtomicU32::new(0);
+
+fn metering_handle() -> Option<Handle> {
+    let cached = METERING_HANDLE.load(Ordering::Acquire);
+    if cached != 0 {
+        return Handle::new(cached);
+    }
+    let raw = process_resource_self().ok()?.raw();
+    match METERING_HANDLE.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Handle::new(raw),
+        Err(existing) => Handle::new(existing),
+    }
+}
 
 /// Гранулярность маппинга ядра.
 const PAGE_SIZE: usize = 4096;
@@ -47,7 +64,8 @@ impl OomHandler for SyscallOom {
             .saturating_add(PAGE_SIZE);
         let bytes = align_up(required.max(talc.oom_handler.next_chunk), PAGE_SIZE);
 
-        let va = memory_allocate(bytes as u64, MEM_FLAGS_READ_WRITE);
+        let resource = metering_handle().ok_or(())?;
+        let va = memory_allocate(resource, bytes as u64, MEM_FLAGS_READ_WRITE);
         let base = match usize::try_from(va) {
             Ok(addr) if addr != 0 => addr as *mut u8,
             _ => return Err(()),
@@ -120,7 +138,10 @@ fn passthrough_alloc(layout: Layout) -> *mut u8 {
         return ptr::null_mut();
     }
     let bytes = align_up(layout.size(), PAGE_SIZE);
-    let va = memory_allocate(bytes as u64, MEM_FLAGS_READ_WRITE);
+    let Some(resource) = metering_handle() else {
+        return ptr::null_mut();
+    };
+    let va = memory_allocate(resource, bytes as u64, MEM_FLAGS_READ_WRITE);
     match usize::try_from(va) {
         Ok(addr) if addr != 0 => addr as *mut u8,
         _ => ptr::null_mut(),

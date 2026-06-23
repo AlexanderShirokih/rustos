@@ -274,6 +274,24 @@ pub fn process_self() -> Result<Handle, i64> {
     Handle::from_syscall_return(ret)
 }
 
+/// Возвращает свежий handle на метеринг-`Resource` текущего процесса (права
+/// включают `WRITE` для минтинга). Возврат: resource-handle либо
+/// `-(SyscallError)` (`WrongType`, если процесс без метеринг-ресурса).
+pub fn process_resource_self() -> Result<Handle, i64> {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
+    // выходе - handle либо -(SyscallError).
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::ProcessResourceSelf as u16,
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    Handle::from_syscall_return(ret)
+}
+
 /// Загружает образ в процесс `handle` из сериализованного
 /// `UserImageDescAbi` в `desc`. Возврат: 0 либо `-(SyscallError)`.
 pub fn process_load_image(handle: Handle, desc: &[u8]) -> i64 {
@@ -485,18 +503,24 @@ pub fn thread_terminate(handle: Handle, exit_code: u64) -> i64 {
     ret
 }
 
-/// Создаёт Memory-регион с Virtual backing: `size_bytes`, `access_mask`
+/// Создаёт Memory-регион с Virtual backing: `resource` - handle на
+/// метеринг-`Resource` (требует `WRITE`), `size_bytes`, `access_mask`
 /// (биты R/W/X). Возврат: region handle либо `-(SyscallError)`.
-pub fn memory_create_virtual(size_bytes: u64, access_mask: u64) -> Result<Handle, i64> {
+pub fn memory_create_virtual(
+    resource: Handle,
+    size_bytes: u64,
+    access_mask: u64,
+) -> Result<Handle, i64> {
     let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1;
+    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
     // память ядру не передаётся.
     unsafe {
         asm!(
             "svc #{op}",
             op = const SyscallOp::MemoryCreateVirtual as u16,
-            in("x0") size_bytes,
-            in("x1") access_mask,
+            in("x0") u64::from(resource.raw()),
+            in("x1") size_bytes,
+            in("x2") access_mask,
             lateout("x0") ret,
             options(nostack),
         );
@@ -571,18 +595,20 @@ pub fn memory_remap(va: u64, size_bytes: u64, flags_raw: u64) -> i64 {
     ret
 }
 
-/// Выделяет анонимный регион и маппит его в свободный VA: `flags_raw` -
+/// Выделяет анонимный регион и маппит его в свободный VA: `resource` - handle
+/// на метеринг-`Resource` (требует `WRITE`), `size_bytes`, `flags_raw` -
 /// `UserMemFlags`. Возврат: базовый VA либо `-(SyscallError)`.
-pub fn memory_allocate(size_bytes: u64, flags_raw: u64) -> i64 {
+pub fn memory_allocate(resource: Handle, size_bytes: u64, flags_raw: u64) -> i64 {
     let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1;
+    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
     // память ядру не передаётся.
     unsafe {
         asm!(
             "svc #{op}",
             op = const SyscallOp::MemoryAllocate as u16,
-            in("x0") size_bytes,
-            in("x1") flags_raw,
+            in("x0") u64::from(resource.raw()),
+            in("x1") size_bytes,
+            in("x2") flags_raw,
             lateout("x0") ret,
             options(nostack),
         );

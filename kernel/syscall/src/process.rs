@@ -79,6 +79,16 @@ pub fn sys_process_self() -> Result<u64, SyscallError> {
     install_object_handle(KObject::Process(process))
 }
 
+/// Handle на метеринг-`Resource` текущего процесса (права включают `WRITE`).
+/// `WrongType`, если процесс стартовал без метеринг-ресурса.
+pub fn sys_process_resource_self() -> Result<u64, SyscallError> {
+    let process = runtime()
+        .current_process_object()
+        .ok_or(SyscallError::WrongType)?;
+    let resource = process.metering_resource().ok_or(SyscallError::WrongType)?;
+    install_object_handle(KObject::Resource(resource))
+}
+
 pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let table = runtime()
@@ -224,6 +234,10 @@ pub fn sys_process_start(
         return Err(SyscallError::InvalidArgument);
     }
 
+    let metering_resource = runtime()
+        .current_process_object()
+        .and_then(|caller| caller.metering_resource());
+
     let loader_table = runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
@@ -258,6 +272,7 @@ pub fn sys_process_start(
         },
         loader_handle_table: loader_table.clone(),
         handle_ids: ids,
+        metering_resource,
     };
 
     // Пре-резерв нужен только когда drain не освободит слот в caller-table.

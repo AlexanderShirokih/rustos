@@ -48,6 +48,9 @@ pub enum SyscallError {
     /// Бюджет ресурса исчерпан: метерящая операция запросила больше
     /// страниц, чем осталось в `Resource`.
     ResourceExhausted = 16,
+    /// Капа отозвана: предок по цепочке деривации закрыт (или умерла его
+    /// таблица). Слот может ещё существовать, но полномочие невалидно.
+    Revoked = 17,
 }
 
 impl SyscallError {
@@ -70,6 +73,7 @@ impl From<IpcError> for SyscallError {
             IpcError::OutOfHandles => Self::OutOfHandles,
             IpcError::Canceled => Self::Canceled,
             IpcError::ResourceExhausted => Self::ResourceExhausted,
+            IpcError::Revoked => Self::Revoked,
         }
     }
 }
@@ -162,6 +166,7 @@ mod tests {
             SyscallError::from(IpcError::ResourceExhausted),
             SyscallError::ResourceExhausted
         );
+        assert_eq!(SyscallError::from(IpcError::Revoked), SyscallError::Revoked);
     }
 
     #[test]
@@ -183,6 +188,7 @@ mod tests {
             SyscallError::NotFound,
             SyscallError::Canceled,
             SyscallError::ResourceExhausted,
+            SyscallError::Revoked,
         ];
         for &e in &codes {
             let v: i64 = e.into();
