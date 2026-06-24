@@ -66,7 +66,7 @@ pub(crate) enum BufferAccess {
 /// IPC-буфера ([`BufferAccess`]) и его handle-таблице. Снимок берётся до
 /// того, как поток уйдёт спать.
 ///
-/// `badge` - значок port-хендла, через который отправитель инициировал send/call. 
+/// `badge` - значок port-хендла, через который отправитель инициировал send/call.
 /// После успешного рандеву значок отправителя записывается в `IpcBuffer.badge` получателя.
 #[derive(Clone)]
 pub struct ThreadTransport {
@@ -216,10 +216,8 @@ pub(crate) enum PortAction {
         outcome: Arc<OutcomeSlot>,
         reply_slot: Option<Arc<ReplySlot>>,
     },
-    
     /// Операция завершилась немедленно, без блокировки текущего потока.
     Done { reply: Option<Arc<Reply>> },
-    
     /// Ошибка (перенос caps/копирование тела провалились).
     Failed(IpcError),
 }
@@ -231,7 +229,7 @@ impl Port {
         })
     }
 
-    /// Транспорт отправки текущего потока. 
+    /// Транспорт отправки текущего потока.
     /// Для `call` caller обязан передать предсозданные `(waker, outcome)`, на которые
     /// будет ссылаться Reply.
     pub(crate) fn send_or_call(
@@ -262,7 +260,7 @@ impl Port {
                             let (waker, outcome) =
                                 call_ctx.expect("call requires preallocated park ctx");
                             outcome.set_awaiting_reply();
-                            
+
                             let reply = Reply::new(sender.clone(), waker.clone(), outcome.clone());
                             receiver.reply_slot.install(reply);
                             receiver.outcome.set(RendezvousOutcome::Delivered);
@@ -293,7 +291,13 @@ impl Port {
                     OutcomeSlot::new(),
                 )
             };
-            self.enqueue_sender(kind, sender, &waker, &outcome);
+            self.enqueue(Waiter {
+                kind,
+                transport: sender,
+                waker: waker.clone(),
+                outcome: outcome.clone(),
+                reply_slot: ReplySlot::new(),
+            });
             PortAction::Park {
                 waker,
                 outcome,
@@ -343,7 +347,13 @@ impl Port {
             let waker = Arc::new(ParkWaker::new(runtime.clone(), token));
             let outcome = OutcomeSlot::new();
             let reply_slot = ReplySlot::new();
-            self.enqueue_receiver(receiver, &waker, &outcome, &reply_slot);
+            self.enqueue(Waiter {
+                kind: WaiterKind::Recv,
+                transport: receiver,
+                waker: waker.clone(),
+                outcome: outcome.clone(),
+                reply_slot: reply_slot.clone(),
+            });
             PortAction::Park {
                 waker,
                 outcome,
@@ -367,72 +377,42 @@ impl Port {
         }
     }
 
-    /// Снимает с очереди waiter по идентичности `waker`. 
+    /// Снимает с очереди waiter по идентичности `waker`.
     /// Возвращает `true`, если он был найден и удалён.
     pub(crate) fn remove_waiter(&self, waker: &Arc<ParkWaker>) -> bool {
         self.inner.with_lock(|q| {
-            let dq = match q {
-                Queue::Empty => return false,
-                Queue::Senders(dq) | Queue::Receivers(dq) => dq,
+            let removed = match q {
+                Queue::Empty => false,
+                Queue::Senders(dq) | Queue::Receivers(dq) => {
+                    match dq.iter().position(|w| Arc::ptr_eq(&w.waker, waker)) {
+                        Some(pos) => {
+                            dq.remove(pos);
+                            true
+                        }
+                        None => false,
+                    }
+                }
             };
-            let Some(pos) = dq.iter().position(|w| Arc::ptr_eq(&w.waker, waker)) else {
-                return false;
-            };
-            dq.remove(pos);
-            if dq.is_empty() {
-                *q = Queue::Empty;
-            }
-            true
+            collapse_if_empty(q);
+            removed
         })
     }
 
-    fn enqueue_sender(
-        &self,
-        kind: WaiterKind,
-        transport: ThreadTransport,
-        waker: &Arc<ParkWaker>,
-        outcome: &Arc<OutcomeSlot>,
-    ) {
-        let waiter = Waiter {
-            kind,
-            transport,
-            waker: waker.clone(),
-            outcome: outcome.clone(),
-            reply_slot: ReplySlot::new(),
-        };
+    fn enqueue(&self, waiter: Waiter) {
+        let is_receiver = waiter.kind == WaiterKind::Recv;
         self.inner.with_lock(|q| match q {
             Queue::Empty => {
                 let mut dq = VecDeque::new();
                 dq.push_back(waiter);
-                *q = Queue::Senders(dq);
+                *q = if is_receiver {
+                    Queue::Receivers(dq)
+                } else {
+                    Queue::Senders(dq)
+                };
             }
-            Queue::Senders(ss) => ss.push_back(waiter),
-            Queue::Receivers(_) => unreachable!("queue switched under single lock"),
-        });
-    }
-
-    fn enqueue_receiver(
-        &self,
-        transport: ThreadTransport,
-        waker: &Arc<ParkWaker>,
-        outcome: &Arc<OutcomeSlot>,
-        reply_slot: &Arc<ReplySlot>,
-    ) {
-        let waiter = Waiter {
-            kind: WaiterKind::Recv,
-            transport,
-            waker: waker.clone(),
-            outcome: outcome.clone(),
-            reply_slot: reply_slot.clone(),
-        };
-        self.inner.with_lock(|q| match q {
-            Queue::Empty => {
-                let mut dq = VecDeque::new();
-                dq.push_back(waiter);
-                *q = Queue::Receivers(dq);
-            }
-            Queue::Receivers(rs) => rs.push_back(waiter),
-            Queue::Senders(_) => unreachable!("queue switched under single lock"),
+            Queue::Senders(ss) if !is_receiver => ss.push_back(waiter),
+            Queue::Receivers(rs) if is_receiver => rs.push_back(waiter),
+            _ => unreachable!("queue switched under single lock"),
         });
     }
 
@@ -503,8 +483,8 @@ pub fn port_send(
 
 /// Реализует call, блокирующий поток до reply. Ответ оказывается в IPC-буфере вызывателя.
 /// `timeout_ns` ограничивает всю операцию (ожидание получателя + ожидание
-/// reply); 
-/// семантика значений - как у [`port_send`]. 
+/// reply);
+/// семантика значений - как у [`port_send`].
 /// На истечении - [`IpcError::Timeout`].
 pub fn port_call(
     port: &Arc<Port>,
@@ -541,7 +521,7 @@ pub fn port_call(
 /// Resolve для `call`.
 ///
 /// Фаза 1 (вызывающая сторона ещё в очереди отправителей): снятие себя с очереди под queue-локом.
-/// Фаза 2 (запрос уже забран получателем, ждём reply): арбитраж тайм-аута идёт по [`OutcomeSlot`]. 
+/// Фаза 2 (запрос уже забран получателем, ждём reply): арбитраж тайм-аута идёт по [`OutcomeSlot`].
 /// Пока получатель/сервер переносит данные (`PENDING`/`DELIVERING`), мы дожидаемся завершения переноса -
 /// так наш IPC-буфер не будет переиспользован под активным чтением/записью переноса.
 fn resolve_call(
@@ -576,8 +556,8 @@ fn resolve_call(
     }
 }
 
-/// `recv`: блокирующая. 
-/// Возвращает `Some(reply)`, если встречным был `call`. 
+/// `recv`: блокирующая.
+/// Возвращает `Some(reply)`, если встречным был `call`.
 /// `timeout_ns` - как у [`port_send`]; на истечении - [`IpcError::Timeout`].
 pub fn port_recv(
     port: &Arc<Port>,
@@ -604,28 +584,30 @@ pub fn port_recv(
     }
 }
 
-fn pop_receiver(q: &mut Queue) -> Option<Waiter> {
-    if let Queue::Receivers(rs) = q {
-        let w = rs.pop_front();
-        if rs.is_empty() {
-            *q = Queue::Empty;
-        }
-        w
-    } else {
-        None
+/// Схлопывает очередь в `Empty`, когда её дек опустел: единственный источник
+/// инварианта "пустой дек -> состояние `Empty`".
+fn collapse_if_empty(q: &mut Queue) {
+    if matches!(q, Queue::Senders(dq) | Queue::Receivers(dq) if dq.is_empty()) {
+        *q = Queue::Empty;
     }
 }
 
+fn pop_receiver(q: &mut Queue) -> Option<Waiter> {
+    let waiter = match q {
+        Queue::Receivers(rs) => rs.pop_front(),
+        _ => None,
+    };
+    collapse_if_empty(q);
+    waiter
+}
+
 fn pop_sender(q: &mut Queue) -> Option<Waiter> {
-    if let Queue::Senders(ss) = q {
-        let w = ss.pop_front();
-        if ss.is_empty() {
-            *q = Queue::Empty;
-        }
-        w
-    } else {
-        None
-    }
+    let waiter = match q {
+        Queue::Senders(ss) => ss.pop_front(),
+        _ => None,
+    };
+    collapse_if_empty(q);
+    waiter
 }
 
 impl Drop for Port {

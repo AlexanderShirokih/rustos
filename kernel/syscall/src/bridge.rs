@@ -300,22 +300,6 @@ fn sys_signal_wait_many_impl(
     Ok((index, outcome.observed))
 }
 
-/// `channel_create()` - создаёт пару endpoint'ов и регистрирует оба
-/// handle'а в текущей handle-table. На успехе записывает `left_id`
-/// в основной регистр возврата, `right_id` - во вторичный.
-/// Это позволяет вернуть пару `NonZeroU32` без ABI-конфликта с
-/// отрицательным кодированием ошибок. Endpoint'ы симметричны -
-/// любая сторона годится как "локальная".
-fn sys_channel_create(frame: &mut dyn SyscallFrame) {
-    match kobject::channel_create() {
-        Ok((left_id, right_id)) => {
-            frame.set_secondary_return(u64::from(right_id.raw().get()));
-            frame.set_return(i64::from(left_id.raw().get()));
-        }
-        Err(e) => frame.set_return(SyscallError::from(e).into()),
-    }
-}
-
 /// Изымает handle из таблицы и закрывает.
 fn sys_handle_close(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;

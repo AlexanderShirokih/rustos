@@ -18,9 +18,6 @@ pub extern "C" fn _start(bootstrap_handle: usize) -> ! {
     let result = client
         .log(Str::<LOG_MESSAGE_MAX>::new("rootkeeper started").expect("startup log must fit"));
 
-    // log - синхронный #[cast] (port_send блокирует до доставки); по его
-    // завершении лог принят ядром. Port не сигналит peer-close, поэтому
-    // просто выходим. Завершение процесса гасит машину (см. ядро init).
     thread_exit(u64::from(result.is_err()))
 }
 

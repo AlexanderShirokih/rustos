@@ -449,11 +449,10 @@ mod tests {
         let (receiver, rm, rt) = transport(BASE_B);
 
         let notif = Signal::new();
-        let koid = KObject::Signal(notif.clone()).koid();
         let id = st
             .with_lock(|tbl| {
                 tbl.insert(Handle::new(
-                    KObject::Signal(notif),
+                    KObject::Signal(notif.clone()),
                     Rights::READ | Rights::TRANSFER,
                 ))
             })
@@ -471,10 +470,13 @@ mod tests {
             .unwrap();
         let new_raw = u32::from_le_bytes(idb);
         let new_id = kobject_handle_id(new_raw);
-        let got = rt
-            .with_lock(|tbl| tbl.get(new_id, Rights::READ).map(Handle::koid))
-            .unwrap();
-        assert_eq!(got, koid);
+        rt.with_lock(|tbl| {
+            let got = tbl.get(new_id, Rights::READ).unwrap();
+            let KObject::Signal(got_signal) = got.object() else {
+                panic!("transferred handle must keep object type");
+            };
+            assert!(Arc::ptr_eq(got_signal, &notif));
+        });
     }
 
     fn read_badge(mapper: &Arc<PageMapper>, base: usize) -> u64 {

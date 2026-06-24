@@ -528,12 +528,15 @@ fn from_bytes_rejects_invalid_magic() {
 #[test]
 fn from_bytes_rejects_truncated_header() {
     let dtb = build_dtb_with_children();
-    // Заголовок 24 байта (6 x u32) ещё не прочитан до конца -> TruncatedHeader.
+    // Заголовок 24 байта (6 x u32) ещё не прочитан до конца -> Incomplete.
     let short = &dtb[..10];
     match DeviceTree::from_bytes(short) {
-        Err(fdt::devicetree::DtError::TruncatedHeader { .. }) => {}
-        Ok(_) => panic!("ожидался TruncatedHeader на обрезанном заголовке"),
-        Err(other) => panic!("ожидался TruncatedHeader, получено {other:?}"),
+        Err(fdt::devicetree::DtError::Incomplete { total_size, actual }) => {
+            assert_eq!(total_size, 24);
+            assert_eq!(actual, short.len());
+        }
+        Ok(_) => panic!("ожидался Incomplete на обрезанном заголовке"),
+        Err(other) => panic!("ожидался Incomplete, получено {other:?}"),
     }
 }
 

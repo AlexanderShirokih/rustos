@@ -3,8 +3,8 @@ use alloc::sync::Arc;
 use memory::MemoryRegion;
 
 use super::{
-    koid::Koid, port::Port, process::ProcessObject, reply::Reply, resource::Resource,
-    signal::Signal, thread::ThreadObject,
+    port::Port, process::ProcessObject, reply::Reply, resource::Resource, signal::Signal,
+    thread::ThreadObject,
 };
 
 /// Kernel-объект (KO) - единица, к которой ядро выдаёт права.
@@ -16,33 +16,6 @@ pub enum KObject {
     Resource(Arc<Resource>),
     Port(Arc<Port>),
     Reply(Arc<Reply>),
-}
-
-impl KObject {
-    /// Уникальный идентификатор объекта.
-    pub fn koid(&self) -> Koid {
-        match self {
-            Self::Signal(s) => Koid::from_parts(self.type_tag(), Arc::as_ptr(s) as u64),
-            Self::Process(p) => Koid::from_parts(self.type_tag(), Arc::as_ptr(p) as u64),
-            Self::Thread(t) => Koid::from_parts(self.type_tag(), Arc::as_ptr(t) as u64),
-            Self::Memory(m) => Koid::from_parts(self.type_tag(), Arc::as_ptr(m) as u64),
-            Self::Resource(r) => Koid::from_parts(self.type_tag(), Arc::as_ptr(r) as u64),
-            Self::Port(e) => Koid::from_parts(self.type_tag(), Arc::as_ptr(e) as u64),
-            Self::Reply(r) => Koid::from_parts(self.type_tag(), Arc::as_ptr(r) as u64),
-        }
-    }
-
-    fn type_tag(&self) -> u8 {
-        match self {
-            Self::Signal(_) => 1,
-            Self::Process(_) => 2,
-            Self::Thread(_) => 3,
-            Self::Memory(_) => 4,
-            Self::Resource(_) => 5,
-            Self::Port(_) => 6,
-            Self::Reply(_) => 7,
-        }
-    }
 }
 
 impl Clone for KObject {
@@ -70,6 +43,6 @@ impl core::fmt::Debug for KObject {
             Self::Port(_) => "Port",
             Self::Reply(_) => "Reply",
         };
-        f.debug_struct(name).field("koid", &self.koid()).finish()
+        f.debug_struct(name).finish_non_exhaustive()
     }
 }

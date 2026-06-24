@@ -165,7 +165,11 @@ impl KernelPortTransport {
         buffer: KernelIpcBuffer,
         table: Arc<MutexCell<kobject::HandleTable>>,
     ) -> Self {
-        Self { port, buffer, table }
+        Self {
+            port,
+            buffer,
+            table,
+        }
     }
 
     fn thread_transport(&self) -> ThreadTransport {

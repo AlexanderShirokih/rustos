@@ -589,12 +589,15 @@ mod tests {
     #[test]
     fn insert_and_get_round_trip() {
         let mut table = HandleTable::new();
-        let h = port_handle(Rights::READ | Rights::WRITE);
-        let koid = h.koid();
+        let port = Port::new();
+        let h = make_handle(KObject::Port(port.clone()), Rights::READ | Rights::WRITE);
 
         let id = table.insert(h).unwrap();
         let got = table.get(id, Rights::READ).expect("get must succeed");
-        assert_eq!(got.koid(), koid);
+        let KObject::Port(got_port) = got.object() else {
+            panic!("inserted handle must keep object type");
+        };
+        assert!(Arc::ptr_eq(got_port, &port));
         assert_eq!(table.live_count(), 1);
     }
 

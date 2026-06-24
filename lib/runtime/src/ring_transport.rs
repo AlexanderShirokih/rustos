@@ -56,7 +56,7 @@ impl RingTransport {
 impl Transport for RingTransport {
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
         if !handles.is_empty() {
-            return Err(IpcError::BoundExceeded);
+            return Err(IpcError::FrameOverflow);
         }
 
         match self.role {

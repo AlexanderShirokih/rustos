@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::num::NonZeroU32;
 
-use super::{errors::IpcError, koid::Koid, object::KObject, rev_node::RevNode, rights::Rights};
+use super::{errors::IpcError, object::KObject, rev_node::RevNode, rights::Rights};
 
 /// Публичный идентификатор записи в `HandleTable`, используемый процессами для IPC.
 ///
@@ -67,7 +67,6 @@ pub struct Handle {
 impl core::fmt::Debug for Handle {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Handle")
-            .field("koid", &self.object.koid())
             .field("rights", &self.rights)
             .field("badge", &self.badge)
             .finish_non_exhaustive()
@@ -107,10 +106,6 @@ impl Handle {
     /// Значок (badge) этого хендла; `0` означает «без значка».
     pub fn badge(&self) -> u64 {
         self.badge
-    }
-
-    pub fn koid(&self) -> Koid {
-        self.object.koid()
     }
 
     pub fn object(&self) -> &KObject {

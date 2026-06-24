@@ -334,7 +334,6 @@ pub fn sys_memory_map(
 // Привязывает срыв к установленному маппингу. Если капа отозвана в гонке до
 // регистрации - маппинг срывается здесь и syscall валится (иначе живой VA на
 // отозванную капу).
-#[allow(clippy::too_many_arguments)]
 fn register_mapping_revocation(
     user_vm: &UserVmContext,
     base: PageAlignedVirtualAddress,
@@ -446,7 +445,6 @@ pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError
         .with_lock(|alloc| alloc.lookup(base, size).map(|_| ()))
         .map_err(region_err_to_syscall)?;
 
-    // Тот же единый teardown, что и при отзыве капы.
     user_vm.unmap_range(base, size);
 
     Ok(0)

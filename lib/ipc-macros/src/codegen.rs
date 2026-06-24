@@ -163,9 +163,9 @@ fn decode_field_value(ty: &WireTy) -> TokenStream {
             let __idx = ::ipc::wire::value::decode_port_index(__field.data)?;
             let __raw = *__in_handles
                 .get(__idx as usize)
-                .ok_or(::ipc::wire::IpcError::BadLength)?;
+                .ok_or(::ipc::wire::IpcError::InvalidValue)?;
             let __nz = ::core::num::NonZeroU32::new(__raw)
-                .ok_or(::ipc::wire::IpcError::BadLength)?;
+                .ok_or(::ipc::wire::IpcError::InvalidValue)?;
             ::ipc::wire::Cap::from_raw(__nz)
         }}
     } else {
@@ -397,7 +397,7 @@ fn expand_client_method(protocol: &Protocol, op: &Operation) -> TokenStream {
                         let __len = self.transport.read_message(&mut __bytes, &mut __handles)?;
                         let __frame = &__bytes[..__len.bytes];
                         let __header = ::ipc::wire::Header::decode(__frame)?;
-                        if __header.has_flag(::ipc::wire::FLAG_EPITAPH) {
+                        if __header.has_flag(::ipc::wire::FLAG_PEER_CLOSE) {
                             return ::core::result::Result::Err(::ipc::wire::IpcError::PeerClosed);
                         }
                         // ответ обязан нести RESPONSE и тот же txid, иначе кадр отброшен.
@@ -545,12 +545,12 @@ fn expand_dispatch(protocol: &Protocol) -> TokenStream {
             match __header.ordinal {
                 #(#arms)*
                 _ => {
-                    // неизвестный strict-ordinal закрывает канал epitaph-кадром.
+                    // неизвестный strict-ordinal закрывает канал peer-close кадром.
                     let mut __reply = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
                     __reply.write_header(&::ipc::wire::Header::new(
                         __header.ordinal,
                         __txid,
-                        ::ipc::wire::FLAG_EPITAPH,
+                        ::ipc::wire::FLAG_PEER_CLOSE,
                     ))?;
                     __reply.finish()?;
                     transport.write_message(__reply.as_bytes(), &[])?;

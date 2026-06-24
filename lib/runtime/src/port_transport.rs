@@ -116,7 +116,7 @@ impl PortTransport {
             return Err(IpcError::FrameOverflow);
         }
         if handles.len() > IPC_BUFFER_MAX_CAPS {
-            return Err(IpcError::BoundExceeded);
+            return Err(IpcError::FrameOverflow);
         }
         let ptr = ipc_buffer_ptr().ok_or(IpcError::PeerClosed)?;
         // SAFETY: ядро замаппило per-thread IPC-буфер user-RW по одной
@@ -168,7 +168,7 @@ fn map_send_result(ret: i64) -> Result<(), IpcError> {
 impl Transport for PortTransport {
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
         if handles.len() > MESSAGE_MAX_HANDLES {
-            return Err(IpcError::BoundExceeded);
+            return Err(IpcError::FrameOverflow);
         }
         let header = Header::decode(bytes)?;
 

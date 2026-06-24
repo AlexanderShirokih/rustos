@@ -37,8 +37,8 @@ pub const FIELD_ID_MAX: u8 = 254;
 /// Флаг: кадр - ответ на two-way вызов.
 pub const FLAG_RESPONSE: u16 = 1 << 0;
 
-/// Флаг: кадр - терминальная ошибка протокола (последний на канале).
-pub const FLAG_EPITAPH: u16 = 1 << 1;
+/// Флаг: peer завершает соединение этим последним кадром.
+pub const FLAG_PEER_CLOSE: u16 = 1 << 1;
 
 /// Флаг: операция допускает игнор неизвестного `ordinal`.
 pub const FLAG_FLEXIBLE: u16 = 1 << 2;
@@ -60,14 +60,8 @@ pub enum IpcError {
     FieldOrder,
     /// Обязательное поле отсутствует в теле.
     MissingField,
-    /// Длина записи не равна ожидаемому размеру фиксированного типа.
-    BadLength,
-    /// Значение `bool` не равно `0` или `1`.
-    BadBool,
-    /// Длина bounded `Str`/`Bytes` превысила границу `N`.
-    BoundExceeded,
-    /// Байты `Str` не образуют корректный UTF-8.
-    NotUtf8,
+    /// Значение поля не декодируется как ожидаемый wire-тип.
+    InvalidValue,
     /// Дальний конец канала закрыт.
     PeerClosed,
     /// Операция не может завершиться без блокировки.
@@ -204,7 +198,7 @@ impl<const N: usize> MessageBuf<N> {
             return Err(IpcError::FieldOrder);
         }
         if data.len() > u8::MAX as usize {
-            return Err(IpcError::BadLength);
+            return Err(IpcError::InvalidValue);
         }
         // Запись + место под терминатор обязаны уместиться в буфер.
         let needed = FIELD_OVERHEAD + data.len();
@@ -386,10 +380,10 @@ pub struct Str<'a, const N: usize> {
 
 impl<'a, const N: usize> Str<'a, N> {
     /// Оборачивает строку, проверяя границу `N`.
-    /// `BoundExceeded`, если байтовая длина превышает `N`.
+    /// `InvalidValue`, если байтовая длина превышает `N`.
     pub fn new(value: &'a str) -> Result<Self, IpcError> {
         if value.len() > N {
-            return Err(IpcError::BoundExceeded);
+            return Err(IpcError::InvalidValue);
         }
         Ok(Self { value })
     }
@@ -409,10 +403,10 @@ pub struct Bytes<'a, const N: usize> {
 
 impl<'a, const N: usize> Bytes<'a, N> {
     /// Оборачивает срез, проверяя границу `N`.
-    /// `BoundExceeded`, если длина превышает `N`.
+    /// `InvalidValue`, если длина превышает `N`.
     pub fn new(value: &'a [u8]) -> Result<Self, IpcError> {
         if value.len() > N {
-            return Err(IpcError::BoundExceeded);
+            return Err(IpcError::InvalidValue);
         }
         Ok(Self { value })
     }
@@ -436,9 +430,9 @@ pub mod value {
                 value.to_le_bytes()
             }
 
-            /// Декодирует целое LE из `data`; `BadLength` при неверном размере.
+            /// Декодирует целое LE из `data`; `InvalidValue` при неверном размере.
             pub fn $decode(data: &[u8]) -> Result<$ty, IpcError> {
-                let bytes = data.try_into().map_err(|_| IpcError::BadLength)?;
+                let bytes = data.try_into().map_err(|_| IpcError::InvalidValue)?;
                 Ok(<$ty>::from_le_bytes(bytes))
             }
         };
@@ -459,13 +453,13 @@ pub mod value {
         [u8::from(value)]
     }
 
-    /// Декодирует `bool` из одного байта; `BadBool` если не `0`/`1`.
+    /// Декодирует `bool` из одного байта; `InvalidValue` при неверном байте или размере.
     pub fn decode_bool(data: &[u8]) -> Result<bool, IpcError> {
         match data {
             [0] => Ok(false),
             [1] => Ok(true),
-            [_] => Err(IpcError::BadBool),
-            _ => Err(IpcError::BadLength),
+            [_] => Err(IpcError::InvalidValue),
+            _ => Err(IpcError::InvalidValue),
         }
     }
 
@@ -475,22 +469,22 @@ pub mod value {
         value.to_le_bytes()
     }
 
-    /// Декодирует дискриминант `u16` LE; `BadLength` при неверном размере.
+    /// Декодирует дискриминант `u16` LE; `InvalidValue` при неверном размере.
     pub fn decode_discriminant(data: &[u8]) -> Result<u16, IpcError> {
-        let bytes = data.try_into().map_err(|_| IpcError::BadLength)?;
+        let bytes = data.try_into().map_err(|_| IpcError::InvalidValue)?;
         Ok(u16::from_le_bytes(bytes))
     }
 
-    /// Декодирует `data` как UTF-8; `NotUtf8` при некорректной кодировке.
+    /// Декодирует `data` как UTF-8; `InvalidValue` при некорректной кодировке.
     pub fn decode_str(data: &[u8]) -> Result<&str, IpcError> {
-        core::str::from_utf8(data).map_err(|_| IpcError::NotUtf8)
+        core::str::from_utf8(data).map_err(|_| IpcError::InvalidValue)
     }
 
     /// Декодирует индекс порта из одного байта (`u8`).
     pub fn decode_port_index(data: &[u8]) -> Result<u8, IpcError> {
         match data {
             [index] => Ok(*index),
-            _ => Err(IpcError::BadLength),
+            _ => Err(IpcError::InvalidValue),
         }
     }
 
@@ -603,8 +597,8 @@ mod tests {
 
     #[test]
     fn int_codec_rejects_wrong_length() {
-        assert_eq!(decode_u32(&[0, 0, 0]), Err(IpcError::BadLength));
-        assert_eq!(decode_u32(&[0, 0, 0, 0, 0]), Err(IpcError::BadLength));
+        assert_eq!(decode_u32(&[0, 0, 0]), Err(IpcError::InvalidValue));
+        assert_eq!(decode_u32(&[0, 0, 0, 0, 0]), Err(IpcError::InvalidValue));
     }
 
     #[test]
@@ -613,8 +607,8 @@ mod tests {
         assert_eq!(encode_bool(false), [0]);
         assert_eq!(decode_bool(&[1]), Ok(true));
         assert_eq!(decode_bool(&[0]), Ok(false));
-        assert_eq!(decode_bool(&[2]), Err(IpcError::BadBool));
-        assert_eq!(decode_bool(&[]), Err(IpcError::BadLength));
+        assert_eq!(decode_bool(&[2]), Err(IpcError::InvalidValue));
+        assert_eq!(decode_bool(&[]), Err(IpcError::InvalidValue));
     }
 
     #[test]
@@ -624,14 +618,14 @@ mod tests {
             decode_discriminant(&encode_discriminant(0xBEEF)),
             Ok(0xBEEF)
         );
-        assert_eq!(decode_discriminant(&[1]), Err(IpcError::BadLength));
+        assert_eq!(decode_discriminant(&[1]), Err(IpcError::InvalidValue));
     }
 
     #[test]
     fn port_index_codec_round_trip() {
         assert_eq!(encode_port_index(3), [3]);
         assert_eq!(decode_port_index(&encode_port_index(3)), Ok(3));
-        assert_eq!(decode_port_index(&[1, 2]), Err(IpcError::BadLength));
+        assert_eq!(decode_port_index(&[1, 2]), Err(IpcError::InvalidValue));
     }
 
     #[test]
@@ -648,7 +642,7 @@ mod tests {
 
     #[test]
     fn str_rejects_over_bound() {
-        assert_eq!(Str::<3>::new("abcd"), Err(IpcError::BoundExceeded));
+        assert_eq!(Str::<3>::new("abcd"), Err(IpcError::InvalidValue));
     }
 
     #[test]
@@ -664,12 +658,12 @@ mod tests {
 
     #[test]
     fn bytes_rejects_over_bound() {
-        assert_eq!(Bytes::<2>::new(&[1, 2, 3]), Err(IpcError::BoundExceeded));
+        assert_eq!(Bytes::<2>::new(&[1, 2, 3]), Err(IpcError::InvalidValue));
     }
 
     #[test]
     fn decode_str_rejects_non_utf8() {
-        assert_eq!(decode_str(&[0xFF, 0xFE]), Err(IpcError::NotUtf8));
+        assert_eq!(decode_str(&[0xFF, 0xFE]), Err(IpcError::InvalidValue));
     }
 
     #[test]

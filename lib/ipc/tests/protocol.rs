@@ -1,6 +1,6 @@
 //! Интеграция кодогена `#[protocol]`: round-trip client -> dispatch -> service
 //! через блокирующий host-mock транспорта на двух потоках. Покрывает успех,
-//! доменную ошибку (DOMAIN_ERR), неизвестный ordinal (EPITAPH), cast, event
+//! доменную ошибку (DOMAIN_ERR), неизвестный ordinal (PEER_CLOSE), cast, event
 //! и txid-корреляцию (R2).
 
 use std::thread;
@@ -121,11 +121,11 @@ fn cast_delivers_without_response() {
 }
 
 #[test]
-fn unknown_ordinal_yields_epitaph() {
+fn unknown_ordinal_yields_peer_close() {
     let (client_end, server_end) = MockEnd::pair();
     let mut server = CalcServer::default();
 
-    // Кадр с чужим ordinal: dispatch отвечает EPITAPH, не паникует (R3).
+    // Кадр с чужим ordinal: dispatch отвечает PEER_CLOSE, не паникует (R3).
     let mut frame = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
     frame
         .write_header(&Header::new(0xDEAD_DEAD_DEAD_DEAD, 9, 0))
@@ -141,9 +141,9 @@ fn unknown_ordinal_yields_epitaph() {
     let mut handles = [0u32; 4];
     let len = client_end
         .read_message(&mut bytes, &mut handles)
-        .expect("epitaph frame present");
+        .expect("peer-close frame present");
     let header = Header::decode(&bytes[..len.bytes]).expect("decode");
-    assert!(header.has_flag(ipc::wire::FLAG_EPITAPH));
+    assert!(header.has_flag(ipc::wire::FLAG_PEER_CLOSE));
     assert_eq!(header.txid, 9);
 }
 

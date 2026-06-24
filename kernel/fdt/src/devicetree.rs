@@ -72,7 +72,7 @@ impl<'a> Property<'a> {
         self.value
     }
 
-    /// Возвращает значение как строку (без завершающего нуля).
+    /// Возвращает значение как строку (без терминального нуля).
     pub fn as_cstr(&self) -> Option<&'a str> {
         let bytes = self.value;
         let len = bytes.len().saturating_sub(1);
@@ -106,7 +106,7 @@ impl<'a> Property<'a> {
     }
 }
 
-/// Flattened Device Tree (FDT) - структура описания оборудования.
+/// Flattened Device Tree (FDT).
 pub struct DeviceTree<'a> {
     /// Буфер с бинарными данными дерева.
     buffer: &'a [u8],
@@ -120,13 +120,6 @@ pub struct DeviceTree<'a> {
 pub enum DtError {
     /// Неверная сигнатура (magic) в заголовке.
     InvalidMagic(u32),
-
-    /// Буфер короче минимального заголовка (24 байта); поле total_size ещё не
-    /// прочитано.
-    TruncatedHeader {
-        /// Фактический размер переданного буфера.
-        actual: usize,
-    },
 
     /// total_size в заголовке выходит за пределы MAX_DTB_SIZE или превышает
     /// длину переданного буфера.
@@ -157,8 +150,6 @@ impl<'a> DeviceTree<'a> {
         let header = FdtHeader::read_checked(&mut cursor)?;
         let total_size = header.total_size;
 
-        // Проверяем total_size до формирования среза: значение из недоверенного
-        // blob не может служить обоснованием безопасности from_raw_parts.
         // Ограничиваем MAX_DTB_SIZE, чтобы OOB-доступ к физической памяти был
         // невозможен независимо от содержимого заголовка.
         if total_size > Self::MAX_DTB_SIZE {
@@ -181,8 +172,7 @@ impl<'a> DeviceTree<'a> {
         let header = FdtHeader::read_checked(&mut cur)?;
 
         // Защита от недоверенного blob: total_size из заголовка не должен
-        // превышать фактический размер буфера, иначе обходчик дерева сможет
-        // прочитать за его пределами.
+        // превышать фактический размер буфера.
         if header.total_size > buffer.len() {
             return Err(DtError::Incomplete {
                 total_size: header.total_size,
@@ -320,7 +310,7 @@ struct FdtHeader {
 }
 
 impl FdtHeader {
-    /// Магическое число FDT (0xD00DFEED).
+    /// Магическое число FDT.
     const MAGIC: u32 = 0xD00D_FEED;
 
     /// Минимальный размер заголовка: 6 x u32 = 24 байта.
@@ -329,12 +319,12 @@ impl FdtHeader {
     fn read_checked(cur: &mut Cursor<'_>) -> Result<Self, DtError> {
         cur.set_position(0);
 
-        // Заголовок состоит из 6 x u32 = 24 байта. Если буфер обрезан,
-        // read_u32 вернёт None.
         let actual = cur.buffer.len();
         let mut read = || {
-            cur.read_u32()
-                .ok_or(DtError::TruncatedHeader { actual })
+            cur.read_u32().ok_or(DtError::Incomplete {
+                total_size: Self::HEADER_MIN_SIZE,
+                actual,
+            })
         };
 
         let magic = read()?;
@@ -346,10 +336,7 @@ impl FdtHeader {
         // [HEADER_MIN_SIZE, MAX_DTB_SIZE].
         let total_size = read()? as usize;
         if !(Self::HEADER_MIN_SIZE..=DeviceTree::MAX_DTB_SIZE).contains(&total_size) {
-            return Err(DtError::Incomplete {
-                total_size,
-                actual,
-            });
+            return Err(DtError::Incomplete { total_size, actual });
         }
 
         let struct_off = read()?;
@@ -527,7 +514,7 @@ impl<'a> DeviceTreeWalker<'a> {
 
     fn map_property(&self, name: &'a str, offset: usize, length: usize) -> ValueNode<'a> {
         let buf = self.cursor.buffer;
-        // Защита от завышенного `length` в недоверенном blob: ограничиваем срез
+        // Защита от завышенного `length`: ограничиваем срез
         // фактическими границами буфера вместо паники на OOB.
         let start = offset.min(buf.len());
         let end = start.saturating_add(length).min(buf.len());
@@ -554,7 +541,6 @@ impl<'a> Iterator for NodeIter<'a> {
     }
 }
 
-/// Итератор по свойствам узла.
 pub struct PropertyIter<'a> {
     walker: DeviceTreeWalker<'a>,
 }

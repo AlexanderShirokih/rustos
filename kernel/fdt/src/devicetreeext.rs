@@ -73,7 +73,6 @@ impl Default for CellsSize {
     }
 }
 
-/// Дополнительные методы для работы с узлом.
 pub trait NodeExt {
     /// Проверяет совместимость узла с указанным драйвером.
     fn is_compatible(&self, name: &str) -> bool;
@@ -137,7 +136,6 @@ impl NodeExt for Node<'_> {
 }
 
 /// Статические reg-диапазоны дочерних узлов `/reserved-memory`.
-/// Узлы с динамическим `size` (без `reg`) пропускаются.
 pub fn reserved_memory_ranges<'a>(
     dt: &'a DeviceTree<'a>,
 ) -> Option<impl Iterator<Item = AddressSpace> + 'a> {
@@ -157,7 +155,6 @@ pub fn reserved_memory_ranges<'a>(
     )
 }
 
-/// Дополнительные методы для работы со свойством.
 pub trait PropExt<'a> {
     /// Извлекает список регистров (адрес + размер) из свойства `reg`.
     fn try_as_reg_list<const N: usize>(

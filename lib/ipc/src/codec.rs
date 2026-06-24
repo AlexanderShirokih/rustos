@@ -159,7 +159,7 @@ mod tests {
         let field = cursor.next_field().expect("ok").expect("present");
         assert_eq!(
             <Str<3> as WireValue>::from_field(field.data),
-            Err(IpcError::BoundExceeded)
+            Err(IpcError::InvalidValue)
         );
     }
 
@@ -172,7 +172,7 @@ mod tests {
         let field = cursor.next_field().expect("ok").expect("present");
         assert_eq!(
             <Bytes<2> as WireValue>::from_field(field.data),
-            Err(IpcError::BoundExceeded)
+            Err(IpcError::InvalidValue)
         );
     }
 }

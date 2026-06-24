@@ -1,11 +1,10 @@
 //! Граф деривации capability и каскадный отзыв.
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use collections::{LockCell, MutexCell};
 
