@@ -40,7 +40,7 @@ pub fn sys_thread_create(
     let reservation = table
         .with_lock(kobject::HandleTable::reserve_slot)
         .map_err(SyscallError::from)?;
-    let thread = match kobject::create_user_thread(&process, entry) {
+    let thread = match syscall_runtime().create_user_thread(&process, entry) {
         Ok(t) => t,
         Err(e) => {
             table.with_lock(|tbl| tbl.release_reservation(reservation));
@@ -55,7 +55,7 @@ pub fn sys_thread_create(
 }
 
 pub fn sys_thread_self() -> Result<u64, SyscallError> {
-    let thread = runtime()
+    let thread = syscall_runtime()
         .current_thread_object()
         .ok_or(SyscallError::WrongType)?;
     install_object_handle(KObject::Thread(thread))
@@ -102,13 +102,13 @@ pub fn sys_thread_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallE
     // Терминирование собственного потока через handle отвергается:
     // self-exit предусмотрен через `ThreadExit` (0x52), который
     // выполняет context switch.
-    if let Some(current) = runtime().current_thread_object()
+    if let Some(current) = syscall_runtime().current_thread_object()
         && alloc::sync::Arc::ptr_eq(&current, &thread)
     {
         return Err(SyscallError::AccessDenied);
     }
 
-    kobject::terminate_thread(&thread, code)?;
+    syscall_runtime().terminate_thread(&thread, code)?;
     Ok(0)
 }
 

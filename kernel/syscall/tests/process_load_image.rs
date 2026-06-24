@@ -52,47 +52,13 @@ impl KernelRuntime for TableRuntime {
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
         self.handle_table.lock().unwrap().clone()
     }
-    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
-        None
-    }
-    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
-        None
-    }
     fn exit_current_thread(&self, _exit_code: i32) -> ! {
         panic!("must not exit");
     }
     fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
     fn unblock(&self, _token: WaitToken) {}
-    fn create_empty_process(&self, _name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
-        Ok(ProcessObject::new())
-    }
-    fn create_user_thread(
-        &self,
-        _p: &Arc<ProcessObject>,
-        _e: UserThreadEntry,
-    ) -> Result<Arc<ThreadObject>, SpawnError> {
-        Ok(ThreadObject::new())
-    }
-    fn terminate_thread(&self, _t: &Arc<ThreadObject>, _c: i32) -> Result<(), IpcError> {
-        Ok(())
-    }
-    fn terminate_process(&self, _p: &Arc<ProcessObject>, _c: i32) -> Result<(), IpcError> {
-        Ok(())
-    }
-    fn load_user_image_into(
-        &self,
-        _p: &Arc<ProcessObject>,
-        _i: &UserImageInstall,
-    ) -> Result<(), LoadImageError> {
-        Ok(())
-    }
-    fn start_user_process(
-        &self,
-        _p: &Arc<ProcessObject>,
-        _s: UserStartSpec,
-    ) -> Result<Arc<ThreadObject>, StartProcessError> {
-        Ok(ThreadObject::new())
-    }
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
+    fn clear_blocked_cancel(&self) {}
 }
 
 struct CannedMapper {
@@ -183,6 +149,42 @@ impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
     }
     fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
         None
+    }
+    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
+        None
+    }
+    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
+        None
+    }
+    fn create_empty_process(&self, _name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
+        Ok(ProcessObject::new())
+    }
+    fn create_user_thread(
+        &self,
+        _p: &Arc<ProcessObject>,
+        _e: UserThreadEntry,
+    ) -> Result<Arc<ThreadObject>, SpawnError> {
+        Ok(ThreadObject::new())
+    }
+    fn terminate_thread(&self, _t: &Arc<ThreadObject>, _c: i32) -> Result<(), IpcError> {
+        Ok(())
+    }
+    fn terminate_process(&self, _p: &Arc<ProcessObject>, _c: i32) -> Result<(), IpcError> {
+        Ok(())
+    }
+    fn load_user_image_into(
+        &self,
+        _p: &Arc<ProcessObject>,
+        _i: &UserImageInstall,
+    ) -> Result<(), LoadImageError> {
+        Ok(())
+    }
+    fn start_user_process(
+        &self,
+        _p: &Arc<ProcessObject>,
+        _s: UserStartSpec,
+    ) -> Result<Arc<ThreadObject>, StartProcessError> {
+        Ok(ThreadObject::new())
     }
 }
 

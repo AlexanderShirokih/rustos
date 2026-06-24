@@ -9,9 +9,9 @@ mod common;
 
 use std::sync::Arc;
 
-use kobject::{KernelRuntime, UserThreadEntry};
+use kobject::UserThreadEntry;
 use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
-use scheduler::{Scheduler, SchedulerConfig, Uninit};
+use scheduler::{Scheduler, SchedulerConfig, SchedulerHandle, Uninit};
 
 use crate::common::{
     CountingFrameAllocator, MockAddressSpaceFactory, MockContext, MockTimer, MockTimerSource,
@@ -29,7 +29,11 @@ fn frame_allocator_static() -> &'static CountingFrameAllocator {
     Box::leak(Box::new(CountingFrameAllocator::new()))
 }
 
-fn mark_loaded(handle: &impl KernelRuntime, process: &Arc<kobject::ProcessObject>) {
+/// Помечает процесс загруженным (user_vm прикреплён) без сегментов.
+fn mark_loaded(
+    handle: &SchedulerHandle<MockContext, MockTimerSource>,
+    process: &Arc<kobject::ProcessObject>,
+) {
     let install = kobject::UserImageInstall {
         segments: std::vec::Vec::new(),
         entry: VirtualAddress::new(0x4000_0000),

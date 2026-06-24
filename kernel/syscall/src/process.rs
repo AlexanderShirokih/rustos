@@ -58,7 +58,7 @@ pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallErr
     let reservation = table
         .with_lock(kobject::HandleTable::reserve_slot)
         .map_err(SyscallError::from)?;
-    let process = match kobject::create_empty_process(name) {
+    let process = match syscall_runtime().create_empty_process(name) {
         Ok(p) => p,
         Err(e) => {
             table.with_lock(|tbl| tbl.release_reservation(reservation));
@@ -73,7 +73,7 @@ pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallErr
 }
 
 pub fn sys_process_self() -> Result<u64, SyscallError> {
-    let process = runtime()
+    let process = syscall_runtime()
         .current_process_object()
         .ok_or(SyscallError::WrongType)?;
     install_object_handle(KObject::Process(process))
@@ -82,7 +82,7 @@ pub fn sys_process_self() -> Result<u64, SyscallError> {
 /// Handle на метеринг-`Resource` текущего процесса (права включают `WRITE`).
 /// `WrongType`, если процесс стартовал без метеринг-ресурса.
 pub fn sys_process_resource_self() -> Result<u64, SyscallError> {
-    let process = runtime()
+    let process = syscall_runtime()
         .current_process_object()
         .ok_or(SyscallError::WrongType)?;
     let resource = process.metering_resource().ok_or(SyscallError::WrongType)?;
@@ -121,13 +121,13 @@ pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, Syscall
 
     // Self-terminate отвергается: dispatcher вернул бы в уже завершённый поток.
     // Self-exit - через ThreadExit (0x52).
-    if let Some(current) = runtime().current_process_object()
+    if let Some(current) = syscall_runtime().current_process_object()
         && alloc::sync::Arc::ptr_eq(&current, &process)
     {
         return Err(SyscallError::AccessDenied);
     }
 
-    kobject::terminate_process(&process, code)?;
+    syscall_runtime().terminate_process(&process, code)?;
     Ok(0)
 }
 
@@ -209,7 +209,9 @@ pub fn sys_process_load_image(
         user_vm_base,
         user_vm_size: desc.user_vm_size as usize,
     };
-    kobject::load_user_image_into(&process_ko, &install).map_err(load_image_err_to_syscall)?;
+    syscall_runtime()
+        .load_user_image_into(&process_ko, &install)
+        .map_err(load_image_err_to_syscall)?;
     Ok(0)
 }
 
@@ -233,7 +235,7 @@ pub fn sys_process_start(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let metering_resource = runtime()
+    let metering_resource = syscall_runtime()
         .current_process_object()
         .and_then(|caller| caller.metering_resource());
 
@@ -289,7 +291,7 @@ pub fn sys_process_start(
         None
     };
 
-    let thread = match kobject::start_user_process(&process_ko, spec) {
+    let thread = match syscall_runtime().start_user_process(&process_ko, spec) {
         Ok(t) => t,
         Err(e) => {
             if let Some(r) = pre_reservation {

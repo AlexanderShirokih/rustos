@@ -29,29 +29,17 @@ use syscall_kernel::{Origin, SyscallError, SyscallFrame, SyscallOp};
 
 struct CountingRuntime {
     handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
-    create_empty_process_calls: AtomicUsize,
-    create_user_thread_calls: AtomicUsize,
-    start_user_process_calls: AtomicUsize,
 }
 
 impl CountingRuntime {
     fn new() -> Self {
         Self {
             handle_table: Mutex::new(None),
-            create_empty_process_calls: AtomicUsize::new(0),
-            create_user_thread_calls: AtomicUsize::new(0),
-            start_user_process_calls: AtomicUsize::new(0),
         }
     }
 
     fn set_handle_table(&self, table: Arc<MutexCell<HandleTable>>) {
         *self.handle_table.lock().unwrap() = Some(table);
-    }
-
-    fn reset_counters(&self) {
-        self.create_empty_process_calls.store(0, Ordering::SeqCst);
-        self.create_user_thread_calls.store(0, Ordering::SeqCst);
-        self.start_user_process_calls.store(0, Ordering::SeqCst);
     }
 }
 
@@ -64,14 +52,6 @@ impl KernelRuntime for CountingRuntime {
         self.handle_table.lock().unwrap().clone()
     }
 
-    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
-        None
-    }
-
-    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
-        None
-    }
-
     fn exit_current_thread(&self, _exit_code: i32) -> ! {
         panic!("exit_current_thread must not be called in this test");
     }
@@ -80,60 +60,9 @@ impl KernelRuntime for CountingRuntime {
 
     fn unblock(&self, _token: WaitToken) {}
 
-    fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
-        self.create_empty_process_calls
-            .fetch_add(1, Ordering::SeqCst);
-        if name.is_empty() {
-            return Err(SpawnError::InvalidName);
-        }
-        Ok(ProcessObject::new())
-    }
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
 
-    fn create_user_thread(
-        &self,
-        _process: &Arc<ProcessObject>,
-        _entry: UserThreadEntry,
-    ) -> Result<Arc<ThreadObject>, SpawnError> {
-        self.create_user_thread_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ThreadObject::new())
-    }
-
-    fn terminate_thread(
-        &self,
-        _thread: &Arc<ThreadObject>,
-        _exit_code: i32,
-    ) -> Result<(), IpcError> {
-        Ok(())
-    }
-
-    fn terminate_process(
-        &self,
-        _process: &Arc<ProcessObject>,
-        _exit_code: i32,
-    ) -> Result<(), IpcError> {
-        Ok(())
-    }
-
-    fn load_user_image_into(
-        &self,
-        _process: &Arc<ProcessObject>,
-        _install: &UserImageInstall,
-    ) -> Result<(), LoadImageError> {
-        Ok(())
-    }
-
-    fn start_user_process(
-        &self,
-        _process: &Arc<ProcessObject>,
-        spec: UserStartSpec,
-    ) -> Result<Arc<ThreadObject>, StartProcessError> {
-        self.start_user_process_calls.fetch_add(1, Ordering::SeqCst);
-        // drain освобождает слоты в caller-table до пост-резервации thread-handle'а.
-        spec.loader_handle_table
-            .with_lock(|tbl| tbl.try_drain_for_transfer(&spec.handle_ids, Rights::TRANSFER))
-            .map_err(StartProcessError::HandleValidationFailed)?;
-        Ok(ThreadObject::new())
-    }
+    fn clear_blocked_cancel(&self) {}
 }
 
 /// Минимальный mapper, обслуживающий только `copy_user_in` поверх Vec<u8>;
@@ -220,12 +149,18 @@ type CannedUserVm = (Arc<CannedMapper>, Arc<MutexCell<UserVmAllocator>>);
 
 struct StubSyscallRuntime {
     user_vm: Mutex<Option<CannedUserVm>>,
+    create_empty_process_calls: AtomicUsize,
+    create_user_thread_calls: AtomicUsize,
+    start_user_process_calls: AtomicUsize,
 }
 
 impl StubSyscallRuntime {
     fn new() -> Self {
         Self {
             user_vm: Mutex::new(None),
+            create_empty_process_calls: AtomicUsize::new(0),
+            create_user_thread_calls: AtomicUsize::new(0),
+            start_user_process_calls: AtomicUsize::new(0),
         }
     }
 
@@ -240,6 +175,12 @@ impl StubSyscallRuntime {
 
     fn clear_user_vm(&self) {
         *self.user_vm.lock().unwrap() = None;
+    }
+
+    fn reset_counters(&self) {
+        self.create_empty_process_calls.store(0, Ordering::SeqCst);
+        self.create_user_thread_calls.store(0, Ordering::SeqCst);
+        self.start_user_process_calls.store(0, Ordering::SeqCst);
     }
 }
 
@@ -256,6 +197,71 @@ impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
 
     fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
         None
+    }
+
+    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
+        None
+    }
+
+    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
+        None
+    }
+
+    fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
+        self.create_empty_process_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if name.is_empty() {
+            return Err(SpawnError::InvalidName);
+        }
+        Ok(ProcessObject::new())
+    }
+
+    fn create_user_thread(
+        &self,
+        _process: &Arc<ProcessObject>,
+        _entry: UserThreadEntry,
+    ) -> Result<Arc<ThreadObject>, SpawnError> {
+        self.create_user_thread_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ThreadObject::new())
+    }
+
+    fn terminate_thread(
+        &self,
+        _thread: &Arc<ThreadObject>,
+        _exit_code: i32,
+    ) -> Result<(), IpcError> {
+        Ok(())
+    }
+
+    fn terminate_process(
+        &self,
+        _process: &Arc<ProcessObject>,
+        _exit_code: i32,
+    ) -> Result<(), IpcError> {
+        Ok(())
+    }
+
+    fn load_user_image_into(
+        &self,
+        _process: &Arc<ProcessObject>,
+        _install: &UserImageInstall,
+    ) -> Result<(), LoadImageError> {
+        Ok(())
+    }
+
+    fn start_user_process(
+        &self,
+        _process: &Arc<ProcessObject>,
+        spec: UserStartSpec,
+    ) -> Result<Arc<ThreadObject>, StartProcessError> {
+        self.start_user_process_calls.fetch_add(1, Ordering::SeqCst);
+        // Моделируем реальный drain bootstrap-handle'ов: фиксу важна именно
+        // та инвариантa, что drain освобождает слоты в caller-table до
+        // пост-резервации возвращаемого thread-handle'а.
+        spec.loader_handle_table
+            .with_lock(|tbl| tbl.try_drain_for_transfer(&spec.handle_ids, Rights::TRANSFER))
+            .map_err(StartProcessError::HandleValidationFailed)?;
+        Ok(ThreadObject::new())
     }
 }
 
@@ -386,7 +392,7 @@ fn decode_error_handles_all_abi_codes_including_resource_exhausted() {
 fn process_create_does_not_create_process_on_out_of_handles() {
     let _guard = test_lock();
     let (rt, stub) = shared_runtime();
-    rt.reset_counters();
+    stub.reset_counters();
     stub.clear_user_vm();
 
     rt.set_handle_table(full_table_with_capacity_one());
@@ -395,7 +401,7 @@ fn process_create_does_not_create_process_on_out_of_handles() {
         dispatch(SyscallOp::ProcessCreate, [0, 0, 0, 0, 0, 0]).expect_err("OutOfHandles expected");
     assert_eq!(err, SyscallError::OutOfHandles);
     assert_eq!(
-        rt.create_empty_process_calls.load(Ordering::SeqCst),
+        stub.create_empty_process_calls.load(Ordering::SeqCst),
         0,
         "create_empty_process must NOT be called on OutOfHandles",
     );
@@ -405,7 +411,7 @@ fn process_create_does_not_create_process_on_out_of_handles() {
 fn process_create_with_empty_name_returns_invalid_argument() {
     let _guard = test_lock();
     let (rt, stub) = shared_runtime();
-    rt.reset_counters();
+    stub.reset_counters();
     stub.clear_user_vm();
 
     rt.set_handle_table(Arc::new(MutexCell::new(HandleTable::with_capacity(2))));
@@ -414,7 +420,7 @@ fn process_create_with_empty_name_returns_invalid_argument() {
         .expect_err("InvalidArgument expected");
     assert_eq!(err, SyscallError::InvalidArgument);
     assert_eq!(
-        rt.create_empty_process_calls.load(Ordering::SeqCst),
+        stub.create_empty_process_calls.load(Ordering::SeqCst),
         1,
         "create_empty_process must validate the empty name",
     );
@@ -424,7 +430,7 @@ fn process_create_with_empty_name_returns_invalid_argument() {
 fn thread_create_does_not_create_thread_on_out_of_handles() {
     let _guard = test_lock();
     let (rt, stub) = shared_runtime();
-    rt.reset_counters();
+    stub.reset_counters();
     stub.clear_user_vm();
 
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(2)));
@@ -451,7 +457,7 @@ fn thread_create_does_not_create_thread_on_out_of_handles() {
     .expect_err("OutOfHandles expected");
     assert_eq!(err, SyscallError::OutOfHandles);
     assert_eq!(
-        rt.create_user_thread_calls.load(Ordering::SeqCst),
+        stub.create_user_thread_calls.load(Ordering::SeqCst),
         0,
         "create_user_thread must NOT be called on OutOfHandles",
     );
@@ -461,7 +467,7 @@ fn thread_create_does_not_create_thread_on_out_of_handles() {
 fn process_start_does_not_start_process_on_out_of_handles() {
     let _guard = test_lock();
     let (rt, stub) = shared_runtime();
-    rt.reset_counters();
+    stub.reset_counters();
     stub.clear_user_vm();
 
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(2)));
@@ -489,7 +495,7 @@ fn process_start_does_not_start_process_on_out_of_handles() {
     .expect_err("OutOfHandles expected");
     assert_eq!(err, SyscallError::OutOfHandles);
     assert_eq!(
-        rt.start_user_process_calls.load(Ordering::SeqCst),
+        stub.start_user_process_calls.load(Ordering::SeqCst),
         0,
         "start_user_process must NOT be called on OutOfHandles",
     );
@@ -502,7 +508,7 @@ fn process_start_succeeds_when_drain_frees_caller_slot() {
     // syscall не должен отказывать пре-резервацией.
     let _guard = test_lock();
     let (rt, stub) = shared_runtime();
-    rt.reset_counters();
+    stub.reset_counters();
 
     // capacity=2: свободных слотов нет; drain bootstrap-handle-а освободит ровно один.
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(2)));
@@ -537,7 +543,7 @@ fn process_start_succeeds_when_drain_frees_caller_slot() {
     )
     .expect("ProcessStart must succeed once drain frees the bootstrap slot");
     assert_ne!(ret, 0, "returned thread-handle must be non-zero");
-    assert_eq!(rt.start_user_process_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(stub.start_user_process_calls.load(Ordering::SeqCst), 1);
     table.with_lock(|tbl| {
         assert!(tbl.get(bootstrap_id, Rights::empty()).is_err());
         assert_eq!(tbl.live_count(), 2);

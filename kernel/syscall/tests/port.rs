@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use collections::{LockCell, MutexCell};
 use kobject::{
-    Handle, HandleTable, IpcError, KObject, KernelRuntime, LoadImageError, ProcessObject, Rights,
-    Signal, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
-    UserThreadEntry, WaitToken, install_runtime,
+    Handle, HandleTable, KObject, KernelRuntime, Rights, Signal, WaitToken, install_runtime,
 };
 use syscall_kernel::SyscallError;
 
@@ -40,14 +38,6 @@ impl KernelRuntime for TableRuntime {
         self.handle_table.lock().unwrap().clone()
     }
 
-    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
-        None
-    }
-
-    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
-        None
-    }
-
     fn exit_current_thread(&self, _exit_code: i32) -> ! {
         panic!("exit_current_thread must not be called");
     }
@@ -56,49 +46,9 @@ impl KernelRuntime for TableRuntime {
 
     fn unblock(&self, _token: WaitToken) {}
 
-    fn create_empty_process(&self, _name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
-        Ok(ProcessObject::new())
-    }
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
 
-    fn create_user_thread(
-        &self,
-        _process: &Arc<ProcessObject>,
-        _entry: UserThreadEntry,
-    ) -> Result<Arc<ThreadObject>, SpawnError> {
-        Ok(ThreadObject::new())
-    }
-
-    fn terminate_thread(
-        &self,
-        _thread: &Arc<ThreadObject>,
-        _exit_code: i32,
-    ) -> Result<(), IpcError> {
-        Ok(())
-    }
-
-    fn terminate_process(
-        &self,
-        _process: &Arc<ProcessObject>,
-        _exit_code: i32,
-    ) -> Result<(), IpcError> {
-        Ok(())
-    }
-
-    fn load_user_image_into(
-        &self,
-        _process: &Arc<ProcessObject>,
-        _install: &UserImageInstall,
-    ) -> Result<(), LoadImageError> {
-        Ok(())
-    }
-
-    fn start_user_process(
-        &self,
-        _process: &Arc<ProcessObject>,
-        _spec: UserStartSpec,
-    ) -> Result<Arc<ThreadObject>, StartProcessError> {
-        Ok(ThreadObject::new())
-    }
+    fn clear_blocked_cancel(&self) {}
 }
 
 fn runtime() -> &'static Arc<TableRuntime> {

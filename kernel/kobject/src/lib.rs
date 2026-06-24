@@ -31,10 +31,9 @@ mod thread;
 mod wait;
 
 pub use api::{
-    WaitManyOutcome, create_empty_process, create_user_thread, handle_close, handle_duplicate,
-    install_handle, load_user_image_into, process_termination_signal, signal_create, signal_set,
-    signal_wait_many, signal_wait_one, start_user_process, terminate_process, terminate_thread,
-    thread_exit, thread_termination_signal,
+    WaitManyOutcome, handle_close, handle_duplicate, install_handle, process_termination_signal,
+    signal_create, signal_set, signal_wait_many, signal_wait_one, thread_exit,
+    thread_termination_signal,
 };
 pub use errors::{IpcError, SpawnError};
 pub use handle::{Handle, HandleId};

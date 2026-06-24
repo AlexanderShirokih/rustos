@@ -6,11 +6,7 @@ use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 use collections::MutexCell;
 use spin::Once;
 
-use super::{
-    HandleTable, IpcError, ProcessObject, SpawnError, ThreadObject,
-    spawn::{LoadImageError, StartProcessError, UserImageInstall, UserStartSpec},
-    wait::CancelTarget,
-};
+use super::{HandleTable, wait::CancelTarget};
 
 /// Параметры первого входа в user-поток.
 #[derive(Debug, Clone, Copy)]
@@ -50,7 +46,8 @@ impl WaitToken {
     }
 }
 
-/// Операции, которые нужны kobject wait/wake-пути.
+/// Операции планировщика, нужные механизму kobject: чтение текущего
+/// контекста (wait-token, handle-таблица) и парковка/пробуждение потока.
 pub trait KernelRuntime: Send + Sync {
     /// Opaque token текущего потока/контекста.
     fn current_wait_token(&self) -> WaitToken;
@@ -58,15 +55,6 @@ pub trait KernelRuntime: Send + Sync {
     /// `Arc` per-process handle-таблицы текущего потока. `None`, если
     /// планировщик ещё не инициализирован.
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>>;
-
-    /// `Arc<ThreadObject>` текущего потока. `None`, если планировщик ещё
-    /// не инициализирован и текущий поток не определён.
-    fn current_thread_object(&self) -> Option<Arc<ThreadObject>>;
-
-    /// `Arc<ProcessObject>` процесса, к которому привязан текущий поток.
-    /// `None`, если планировщик ещё не инициализирован и текущий процесс не
-    /// определён.
-    fn current_process_object(&self) -> Option<Arc<ProcessObject>>;
 
     /// Завершает текущий поток с заданным `exit_code`: поднимает
     /// terminated-флаг потока на `Arc<ThreadObject>`, при последнем
@@ -84,50 +72,10 @@ pub trait KernelRuntime: Send + Sync {
     fn unblock(&self, token: WaitToken);
 
     /// Привязывает к текущему потоку cancel-хук.
-    fn set_blocked_cancel(&self, cancel: Arc<dyn CancelTarget>) {
-        let _ = cancel;
-    }
+    fn set_blocked_cancel(&self, cancel: Arc<dyn CancelTarget>);
 
     /// Снимает cancel-хук блокировки с текущего потока.
-    fn clear_blocked_cancel(&self) {}
-
-    /// Создаёт user-процесс с пустым адресным пространством и handle-таблицей.
-    fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError>;
-
-    /// Создаёт user-поток в указанном процессе и помещает его в ready-queue.
-    fn create_user_thread(
-        &self,
-        process: &Arc<ProcessObject>,
-        entry: UserThreadEntry,
-    ) -> Result<Arc<ThreadObject>, SpawnError>;
-
-    /// Завершает поток. Поднимает terminated-флаг потока. На нуле - поднимает
-    /// terminated-флаг процесса владеющего процесса.
-    fn terminate_thread(&self, thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError>;
-
-    /// Завершает все потоки процесса. Для каждого потока поднимает terminated-флаг, 
-    /// при достижении нуля - terminated-флаг процесса.
-    fn terminate_process(
-        &self,
-        process: &Arc<ProcessObject>,
-        exit_code: i32,
-    ) -> Result<(), IpcError>;
-
-    /// Устанавливает регионы образа в child AS, маппит user-стек и
-    /// прикрепляет per-process `UserVmAllocator`.
-    fn load_user_image_into(
-        &self,
-        process: &Arc<ProcessObject>,
-        install: &UserImageInstall,
-    ) -> Result<(), LoadImageError>;
-
-    /// Вставляет bootstrap-handles в child-table и создаёт первый
-    /// user-поток.
-    fn start_user_process(
-        &self,
-        process: &Arc<ProcessObject>,
-        spec: UserStartSpec,
-    ) -> Result<Arc<ThreadObject>, StartProcessError>;
+    fn clear_blocked_cancel(&self);
 }
 
 static RUNTIME: Once<Arc<dyn KernelRuntime>> = Once::new();

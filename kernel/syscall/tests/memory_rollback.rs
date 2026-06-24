@@ -135,17 +135,39 @@ impl KernelRuntime for TableRuntime {
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
         self.handle_table.lock().unwrap().clone()
     }
+    fn exit_current_thread(&self, _c: i32) -> ! {
+        panic!()
+    }
+    fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
+    fn unblock(&self, _t: WaitToken) {}
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
+    fn clear_blocked_cancel(&self) {}
+}
+
+struct StubSyscallRuntime {
+    allocator: Arc<MutexCell<UserVmAllocator>>,
+    fa: &'static SpyFrameAllocator,
+}
+
+impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
+    fn current_user_vm(&self) -> Option<UserVmContext> {
+        Some(UserVmContext::new(
+            Arc::new(FailingMapper),
+            self.allocator.clone(),
+        ))
+    }
+    fn current_ipc_buffer_va(&self) -> Option<u64> {
+        None
+    }
+    fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
+        Some(self.fa)
+    }
     fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
         None
     }
     fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
         None
     }
-    fn exit_current_thread(&self, _c: i32) -> ! {
-        panic!()
-    }
-    fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
-    fn unblock(&self, _t: WaitToken) {}
     fn create_empty_process(&self, _n: &str) -> Result<Arc<ProcessObject>, SpawnError> {
         Ok(ProcessObject::new())
     }
@@ -175,26 +197,6 @@ impl KernelRuntime for TableRuntime {
         _s: UserStartSpec,
     ) -> Result<Arc<ThreadObject>, StartProcessError> {
         Ok(ThreadObject::new())
-    }
-}
-
-struct StubSyscallRuntime {
-    allocator: Arc<MutexCell<UserVmAllocator>>,
-    fa: &'static SpyFrameAllocator,
-}
-
-impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
-    fn current_user_vm(&self) -> Option<UserVmContext> {
-        Some(UserVmContext::new(
-            Arc::new(FailingMapper),
-            self.allocator.clone(),
-        ))
-    }
-    fn current_ipc_buffer_va(&self) -> Option<u64> {
-        None
-    }
-    fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
-        Some(self.fa)
     }
 }
 

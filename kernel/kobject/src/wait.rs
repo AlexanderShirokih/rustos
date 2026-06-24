@@ -166,12 +166,9 @@ mod tests {
 
     use super::{
         super::{
-            errors::{IpcError, SpawnError},
             handle_table::HandleTable,
-            process::ProcessObject,
-            runtime::{KernelRuntime, UserThreadEntry, WaitToken},
+            runtime::{KernelRuntime, WaitToken},
             signal::Signal,
-            thread::ThreadObject,
         },
         *,
     };
@@ -202,12 +199,6 @@ mod tests {
         fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<HandleTable>>> {
             None
         }
-        fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
-            None
-        }
-        fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
-            None
-        }
         fn exit_current_thread(&self, _exit_code: i32) -> ! {
             unreachable!("not used in wait.rs tests")
         }
@@ -215,44 +206,8 @@ mod tests {
         fn unblock(&self, _token: WaitToken) {
             self.unblocks.fetch_add(1, Ordering::AcqRel);
         }
-        fn create_empty_process(&self, _name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
-            Err(SpawnError::NoFreeProcessSlots)
-        }
-        fn create_user_thread(
-            &self,
-            _process: &Arc<ProcessObject>,
-            _entry: UserThreadEntry,
-        ) -> Result<Arc<ThreadObject>, SpawnError> {
-            Err(SpawnError::NoFreeThreadSlots)
-        }
-        fn terminate_thread(
-            &self,
-            _thread: &Arc<ThreadObject>,
-            _exit_code: i32,
-        ) -> Result<(), IpcError> {
-            Ok(())
-        }
-        fn terminate_process(
-            &self,
-            _process: &Arc<ProcessObject>,
-            _exit_code: i32,
-        ) -> Result<(), IpcError> {
-            Ok(())
-        }
-        fn load_user_image_into(
-            &self,
-            _process: &Arc<ProcessObject>,
-            _install: &crate::UserImageInstall,
-        ) -> Result<(), crate::LoadImageError> {
-            Err(crate::LoadImageError::ProcessNotFound)
-        }
-        fn start_user_process(
-            &self,
-            _process: &Arc<ProcessObject>,
-            _spec: crate::UserStartSpec,
-        ) -> Result<Arc<ThreadObject>, crate::StartProcessError> {
-            Err(crate::StartProcessError::ProcessNotFound)
-        }
+        fn set_blocked_cancel(&self, _cancel: Arc<dyn CancelTarget>) {}
+        fn clear_blocked_cancel(&self) {}
     }
 
     fn make_waker(runtime: Arc<dyn KernelRuntime>) -> Arc<ParkWaker> {

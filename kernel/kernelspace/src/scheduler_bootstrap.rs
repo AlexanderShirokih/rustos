@@ -3,6 +3,10 @@
 use alloc::sync::Arc;
 
 use drivers_common::services::timer::{TickHandler, TimerService};
+use kobject::{
+    IpcError, LoadImageError, ProcessObject, SpawnError, StartProcessError, ThreadObject,
+    UserImageInstall, UserStartSpec, UserThreadEntry,
+};
 use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use scheduler::{
     ArchContext, Bootstrapped, Scheduler, SchedulerConfig, SchedulerHandle, SchedulerService,
@@ -73,6 +77,54 @@ where
 
     fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
         syscall_bridge::frame_allocator()
+    }
+
+    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
+        self.handle.current_thread_object()
+    }
+
+    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
+        self.handle.current_process_object()
+    }
+
+    fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
+        self.handle.create_empty_process(name)
+    }
+
+    fn create_user_thread(
+        &self,
+        process: &Arc<ProcessObject>,
+        entry: UserThreadEntry,
+    ) -> Result<Arc<ThreadObject>, SpawnError> {
+        self.handle.create_user_thread(process, entry)
+    }
+
+    fn terminate_thread(&self, thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError> {
+        self.handle.terminate_thread(thread, exit_code)
+    }
+
+    fn terminate_process(
+        &self,
+        process: &Arc<ProcessObject>,
+        exit_code: i32,
+    ) -> Result<(), IpcError> {
+        self.handle.terminate_process(process, exit_code)
+    }
+
+    fn load_user_image_into(
+        &self,
+        process: &Arc<ProcessObject>,
+        install: &UserImageInstall,
+    ) -> Result<(), LoadImageError> {
+        self.handle.load_user_image_into(process, install)
+    }
+
+    fn start_user_process(
+        &self,
+        process: &Arc<ProcessObject>,
+        spec: UserStartSpec,
+    ) -> Result<Arc<ThreadObject>, StartProcessError> {
+        self.handle.start_user_process(process, spec)
     }
 }
 

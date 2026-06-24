@@ -4,15 +4,12 @@ use collections::LockCell;
 use syscall::WakeCount;
 
 use super::{
-    errors::{IpcError, SpawnError},
+    errors::IpcError,
     handle::{Handle, HandleId},
     object::KObject,
-    process::ProcessObject,
     rights::Rights,
-    runtime::{ParkState, UserThreadEntry, runtime},
+    runtime::{ParkState, runtime},
     signal::Signal,
-    spawn::{LoadImageError, StartProcessError, UserImageInstall, UserStartSpec},
-    thread::ThreadObject,
     wait::{CancelTarget, IndexedWaker, ParkWaker, Waker},
 };
 
@@ -238,49 +235,6 @@ pub fn thread_exit(exit_code: i32) -> ! {
     runtime().exit_current_thread(exit_code)
 }
 
-/// Создаёт пустой user-процесс через [`KernelRuntime::create_empty_process`].
-pub fn create_empty_process(name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
-    runtime().create_empty_process(name)
-}
-
-/// Создаёт user-поток в указанном процессе и помещает его в ready-queue.
-pub fn create_user_thread(
-    process: &Arc<ProcessObject>,
-    entry: UserThreadEntry,
-) -> Result<Arc<ThreadObject>, SpawnError> {
-    runtime().create_user_thread(process, entry)
-}
-
-/// Устанавливает регионы образа в child AS и прикрепляет user_vm-аллокатор.
-pub fn load_user_image_into(
-    process: &Arc<ProcessObject>,
-    install: &UserImageInstall,
-) -> Result<(), LoadImageError> {
-    runtime().load_user_image_into(process, install)
-}
-
-/// Вставляет bootstrap-handles в child handle-таблицу и стартует первый
-/// user-поток.
-pub fn start_user_process(
-    process: &Arc<ProcessObject>,
-    spec: UserStartSpec,
-) -> Result<Arc<ThreadObject>, StartProcessError> {
-    runtime().start_user_process(process, spec)
-}
-
-/// Идемпотентно завершает поток: помечает его завершённым,
-/// декрементирует thread_count процесса; на нуле - помечает завершённым
-/// и процесс. Bound-`Signal`'ы (если материализованы) получают `SIGNALED`.
-pub fn terminate_thread(thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError> {
-    runtime().terminate_thread(thread, exit_code)
-}
-
-/// Идемпотентно завершает процесс: помечает завершёнными все его живые потоки,
-/// после декремента до нуля - и сам процесс (bound-`Signal`'ы получают `SIGNALED`).
-pub fn terminate_process(process: &Arc<ProcessObject>, exit_code: i32) -> Result<(), IpcError> {
-    runtime().terminate_process(process, exit_code)
-}
-
 /// Создаёт новый [`Signal`] и регистрирует handle в таблице текущего
 /// процесса. Стартовые права - [`Rights::defaults_for`].
 pub fn signal_create() -> Result<HandleId, IpcError> {
@@ -354,7 +308,7 @@ mod tests {
         HandleTable, ProcessObject, Rights, Signal, ThreadObject,
         handle::Handle,
         object::KObject,
-        runtime::{KernelRuntime, UserThreadEntry, WaitToken, install_runtime},
+        runtime::{KernelRuntime, WaitToken, install_runtime},
         signal::SIGNALED,
     };
 
@@ -399,14 +353,6 @@ mod tests {
             self.handle_table.lock().unwrap().clone()
         }
 
-        fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
-            None
-        }
-
-        fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
-            None
-        }
-
         fn exit_current_thread(&self, exit_code: i32) -> ! {
             CAPTURED_EXIT_CODE.store(exit_code, Ordering::SeqCst);
             panic!("{PANIC_SENTINEL}");
@@ -420,49 +366,9 @@ mod tests {
 
         fn unblock(&self, _token: WaitToken) {}
 
-        fn create_empty_process(&self, _name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
-            Err(SpawnError::NoFreeProcessSlots)
-        }
+        fn set_blocked_cancel(&self, _cancel: Arc<dyn crate::CancelTarget>) {}
 
-        fn create_user_thread(
-            &self,
-            _process: &Arc<ProcessObject>,
-            _entry: UserThreadEntry,
-        ) -> Result<Arc<ThreadObject>, SpawnError> {
-            Err(SpawnError::NoFreeThreadSlots)
-        }
-
-        fn terminate_thread(
-            &self,
-            _thread: &Arc<ThreadObject>,
-            _exit_code: i32,
-        ) -> Result<(), IpcError> {
-            Ok(())
-        }
-
-        fn terminate_process(
-            &self,
-            _process: &Arc<ProcessObject>,
-            _exit_code: i32,
-        ) -> Result<(), IpcError> {
-            Ok(())
-        }
-
-        fn load_user_image_into(
-            &self,
-            _process: &Arc<ProcessObject>,
-            _install: &super::UserImageInstall,
-        ) -> Result<(), super::LoadImageError> {
-            Err(super::LoadImageError::ProcessNotFound)
-        }
-
-        fn start_user_process(
-            &self,
-            _process: &Arc<ProcessObject>,
-            _spec: super::UserStartSpec,
-        ) -> Result<Arc<ThreadObject>, super::StartProcessError> {
-            Err(super::StartProcessError::ProcessNotFound)
-        }
+        fn clear_blocked_cancel(&self) {}
     }
 
     /// install_runtime - once per process, поэтому singleton

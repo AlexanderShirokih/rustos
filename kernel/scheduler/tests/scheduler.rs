@@ -11,7 +11,8 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use scheduler::{
-    Priority, Scheduler, SchedulerConfig, SpawnAddressSpace, SpawnConfig, SpawnError, Uninit,
+    Priority, Scheduler, SchedulerConfig, SchedulerHandle, SpawnAddressSpace, SpawnConfig,
+    SpawnError, Uninit,
 };
 
 use crate::common::{
@@ -57,14 +58,6 @@ impl kobject::KernelRuntime for ForwardingRuntime {
         self.with(|rt| rt.current_handle_table())
     }
 
-    fn current_thread_object(&self) -> Option<Arc<kobject::ThreadObject>> {
-        self.with(|rt| rt.current_thread_object())
-    }
-
-    fn current_process_object(&self) -> Option<Arc<kobject::ProcessObject>> {
-        self.with(|rt| rt.current_process_object())
-    }
-
     fn exit_current_thread(&self, exit_code: i32) -> ! {
         self.with(|rt| rt.exit_current_thread(exit_code))
     }
@@ -81,51 +74,12 @@ impl kobject::KernelRuntime for ForwardingRuntime {
         self.with(|rt| rt.unblock(token));
     }
 
-    fn create_empty_process(
-        &self,
-        name: &str,
-    ) -> Result<Arc<kobject::ProcessObject>, kobject::SpawnError> {
-        self.with(|rt| rt.create_empty_process(name))
+    fn set_blocked_cancel(&self, cancel: Arc<dyn kobject::CancelTarget>) {
+        self.with(|rt| rt.set_blocked_cancel(cancel));
     }
 
-    fn create_user_thread(
-        &self,
-        process: &Arc<kobject::ProcessObject>,
-        entry: kobject::UserThreadEntry,
-    ) -> Result<Arc<kobject::ThreadObject>, kobject::SpawnError> {
-        self.with(|rt| rt.create_user_thread(process, entry))
-    }
-
-    fn terminate_thread(
-        &self,
-        thread: &Arc<kobject::ThreadObject>,
-        exit_code: i32,
-    ) -> Result<(), kobject::IpcError> {
-        self.with(|rt| rt.terminate_thread(thread, exit_code))
-    }
-
-    fn terminate_process(
-        &self,
-        process: &Arc<kobject::ProcessObject>,
-        exit_code: i32,
-    ) -> Result<(), kobject::IpcError> {
-        self.with(|rt| rt.terminate_process(process, exit_code))
-    }
-
-    fn load_user_image_into(
-        &self,
-        process: &Arc<kobject::ProcessObject>,
-        install: &kobject::UserImageInstall,
-    ) -> Result<(), kobject::LoadImageError> {
-        self.with(|rt| rt.load_user_image_into(process, install))
-    }
-
-    fn start_user_process(
-        &self,
-        process: &Arc<kobject::ProcessObject>,
-        spec: kobject::UserStartSpec,
-    ) -> Result<Arc<kobject::ThreadObject>, kobject::StartProcessError> {
-        self.with(|rt| rt.start_user_process(process, spec))
+    fn clear_blocked_cancel(&self) {
+        self.with(|rt| rt.clear_blocked_cancel());
     }
 }
 
@@ -426,7 +380,7 @@ fn new_factory_static() -> &'static MockAddressSpaceFactory {
 }
 
 fn mark_process_loaded(
-    handle: &impl kobject::KernelRuntime,
+    handle: &SchedulerHandle<MockContext, MockTimerSource>,
     process: &Arc<kobject::ProcessObject>,
 ) {
     let install = kobject::UserImageInstall {
@@ -735,7 +689,6 @@ fn process_object_outlives_process_table_entry() {
 
 #[test]
 fn current_thread_object_returns_running_thread_ko() {
-    use kobject::KernelRuntime;
 
     reset_switches();
     let timer = MockTimer::new();
@@ -757,7 +710,6 @@ fn current_thread_object_returns_running_thread_ko() {
 
 #[test]
 fn current_process_object_returns_running_process_ko() {
-    use kobject::KernelRuntime;
 
     reset_switches();
     let timer = MockTimer::new();
@@ -814,7 +766,6 @@ fn kernel_thread_completion_signals_terminated() {
 
 #[test]
 fn process_create_returns_handle_to_empty_process() {
-    use kobject::KernelRuntime;
 
     reset_switches();
     let factory = new_factory_static();
@@ -834,7 +785,6 @@ fn process_create_returns_handle_to_empty_process() {
 
 #[test]
 fn process_create_rejects_empty_name() {
-    use kobject::KernelRuntime;
 
     reset_switches();
     let factory = new_factory_static();
@@ -852,7 +802,7 @@ fn process_create_rejects_empty_name() {
 
 #[test]
 fn thread_terminate_via_handle_signals_terminated() {
-    use kobject::{KernelRuntime, UserThreadEntry};
+    use kobject::UserThreadEntry;
 
     reset_switches();
     let factory = new_factory_static();
@@ -886,7 +836,7 @@ fn thread_terminate_via_handle_signals_terminated() {
 
 #[test]
 fn process_terminate_via_handle_terminates_all_threads() {
-    use kobject::{KernelRuntime, UserThreadEntry};
+    use kobject::UserThreadEntry;
 
     reset_switches();
     let factory = new_factory_static();
@@ -933,7 +883,6 @@ fn process_terminate_via_handle_terminates_all_threads() {
 
 #[test]
 fn switch_to_next_skips_terminated_thread_in_ready_queue() {
-    use kobject::KernelRuntime;
 
     reset_switches();
     let timer = MockTimer::new();
@@ -998,7 +947,7 @@ fn spawn_rollback_undoes_inherit_increment_on_thread_table_full() {
 
 #[test]
 fn create_user_thread_rejects_unloaded_process() {
-    use kobject::{KernelRuntime, UserThreadEntry};
+    use kobject::UserThreadEntry;
 
     reset_switches();
     let factory = new_factory_static();
@@ -1027,7 +976,6 @@ fn create_user_thread_rejects_unloaded_process() {
 
 #[test]
 fn load_user_image_into_attaches_user_vm() {
-    use kobject::KernelRuntime;
 
     reset_switches();
     let factory = new_factory_static();
@@ -1054,7 +1002,7 @@ fn load_user_image_into_attaches_user_vm() {
 
 #[test]
 fn load_user_image_into_rejects_double_load() {
-    use kobject::{KernelRuntime, LoadImageError};
+    use kobject::LoadImageError;
 
     reset_switches();
     let factory = new_factory_static();
@@ -1087,7 +1035,7 @@ fn empty_loader_table() -> Arc<collections::MutexCell<kobject::HandleTable>> {
 
 #[test]
 fn start_user_process_creates_thread_and_marks_loader_state() {
-    use kobject::{KernelRuntime, UserStartSpec, UserThreadEntry};
+    use kobject::{UserStartSpec, UserThreadEntry};
 
     reset_switches();
     let factory = new_factory_static();
@@ -1117,7 +1065,7 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
 
 #[test]
 fn start_user_process_rejects_unloaded() {
-    use kobject::{KernelRuntime, StartProcessError, UserStartSpec, UserThreadEntry};
+    use kobject::{StartProcessError, UserStartSpec, UserThreadEntry};
 
     reset_switches();
     let factory = new_factory_static();
@@ -1153,8 +1101,8 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
     // в loader-table с исходным HandleId (не дропать и не менять id).
     use collections::LockCell;
     use kobject::{
-        Handle, HandleTable, KObject, KernelRuntime, Rights, Signal, StartProcessError,
-        UserStartSpec, UserThreadEntry,
+        Handle, HandleTable, KObject, Rights, Signal, StartProcessError, UserStartSpec,
+        UserThreadEntry,
     };
     use scheduler::SchedulerService;
 
@@ -1220,7 +1168,6 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
 
 #[test]
 fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
-    use kobject::KernelRuntime;
 
     reset_switches();
     let factory = new_factory_static();
@@ -1268,7 +1215,6 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
 
 #[test]
 fn process_terminate_on_empty_process_signals_terminated_and_releases_slot() {
-    use kobject::KernelRuntime;
 
     reset_switches();
     let factory = new_factory_static();

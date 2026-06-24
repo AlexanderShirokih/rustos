@@ -657,10 +657,9 @@ mod tests {
 
     use super::{
         super::{
-            CancelTarget, HandleTable, ProcessObject, ThreadObject,
-            errors::SpawnError,
+            CancelTarget, HandleTable,
             ipc_buffer_xfer::test_mapper::PageMapper,
-            runtime::{KernelRuntime, UserThreadEntry, WaitToken},
+            runtime::{KernelRuntime, WaitToken},
         },
         *,
     };
@@ -688,12 +687,6 @@ mod tests {
         fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
             None
         }
-        fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
-            None
-        }
-        fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
-            None
-        }
         fn exit_current_thread(&self, _c: i32) -> ! {
             unreachable!()
         }
@@ -701,36 +694,8 @@ mod tests {
         fn unblock(&self, _t: WaitToken) {
             self.unblocks.fetch_add(1, Ordering::AcqRel);
         }
-        fn create_empty_process(&self, _n: &str) -> Result<Arc<ProcessObject>, SpawnError> {
-            Err(SpawnError::NoFreeProcessSlots)
-        }
-        fn create_user_thread(
-            &self,
-            _p: &Arc<ProcessObject>,
-            _e: UserThreadEntry,
-        ) -> Result<Arc<ThreadObject>, SpawnError> {
-            Err(SpawnError::NoFreeThreadSlots)
-        }
-        fn terminate_thread(&self, _t: &Arc<ThreadObject>, _c: i32) -> Result<(), IpcError> {
-            Ok(())
-        }
-        fn terminate_process(&self, _p: &Arc<ProcessObject>, _c: i32) -> Result<(), IpcError> {
-            Ok(())
-        }
-        fn load_user_image_into(
-            &self,
-            _p: &Arc<ProcessObject>,
-            _i: &crate::UserImageInstall,
-        ) -> Result<(), crate::LoadImageError> {
-            Err(crate::LoadImageError::ProcessNotFound)
-        }
-        fn start_user_process(
-            &self,
-            _p: &Arc<ProcessObject>,
-            _s: crate::UserStartSpec,
-        ) -> Result<Arc<ThreadObject>, crate::StartProcessError> {
-            Err(crate::StartProcessError::ProcessNotFound)
-        }
+        fn set_blocked_cancel(&self, _cancel: Arc<dyn CancelTarget>) {}
+        fn clear_blocked_cancel(&self) {}
     }
 
     fn transport(base: usize) -> ThreadTransport {

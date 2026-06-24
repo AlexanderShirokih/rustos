@@ -11,7 +11,8 @@ use kobject::{
     Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
     UserThreadEntry, WaitToken, install_runtime,
 };
-use syscall_kernel::{Origin, SyscallError, SyscallFrame, SyscallOp};
+use memory::{UserVmContext, frame_allocator::FrameAllocator};
+use syscall_kernel::{Origin, SyscallError, SyscallFrame, SyscallOp, SyscallRuntime};
 
 struct SelfRuntime {
     handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
@@ -36,17 +37,31 @@ impl KernelRuntime for SelfRuntime {
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
         self.handle_table.lock().unwrap().clone()
     }
+    fn exit_current_thread(&self, _c: i32) -> ! {
+        panic!("must not exit");
+    }
+    fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
+    fn unblock(&self, _t: WaitToken) {}
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
+    fn clear_blocked_cancel(&self) {}
+}
+
+impl SyscallRuntime for SelfRuntime {
+    fn current_user_vm(&self) -> Option<UserVmContext> {
+        None
+    }
+    fn current_ipc_buffer_va(&self) -> Option<u64> {
+        None
+    }
+    fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
+        None
+    }
     fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
         self.current_thread.lock().unwrap().clone()
     }
     fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
         self.current_process.lock().unwrap().clone()
     }
-    fn exit_current_thread(&self, _c: i32) -> ! {
-        panic!("must not exit");
-    }
-    fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
-    fn unblock(&self, _t: WaitToken) {}
     fn create_empty_process(&self, _n: &str) -> Result<Arc<ProcessObject>, SpawnError> {
         Ok(ProcessObject::new())
     }
@@ -85,6 +100,7 @@ fn runtime() -> &'static Arc<SelfRuntime> {
         let rt = Arc::new(SelfRuntime::new());
         let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
         install_runtime(dyn_rt);
+        syscall_kernel::install_runtime(rt.clone());
         rt
     })
 }

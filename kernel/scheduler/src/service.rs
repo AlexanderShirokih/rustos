@@ -71,6 +71,75 @@ where
         self.inner
             .with_lock(|inner| inner.spawn_prepared_user_process(prepared))
     }
+
+    pub fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
+        self.inner.with_lock(|inner| inner.current_thread_object())
+    }
+
+    pub fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
+        self.inner.with_lock(|inner| inner.current_process_object())
+    }
+
+    pub fn create_empty_process(
+        &self,
+        name: &str,
+    ) -> Result<Arc<ProcessObject>, kobject::SpawnError> {
+        self.inner
+            .with_lock(|inner| inner.create_empty_process(name))
+            .map_err(Into::into)
+    }
+
+    pub fn create_user_thread(
+        &self,
+        process: &Arc<ProcessObject>,
+        entry: UserThreadEntry,
+    ) -> Result<Arc<ThreadObject>, kobject::SpawnError> {
+        self.inner
+            .with_lock(|inner| inner.create_user_thread(process, entry))
+            .map_err(Into::into)
+    }
+
+    pub fn terminate_thread(
+        &self,
+        thread: &Arc<ThreadObject>,
+        exit_code: i32,
+    ) -> Result<(), IpcError> {
+        let signals = self
+            .inner
+            .with_lock(|inner| inner.terminate_thread_ko(thread, exit_code));
+        signals.emit();
+        Ok(())
+    }
+
+    pub fn terminate_process(
+        &self,
+        process: &Arc<ProcessObject>,
+        exit_code: i32,
+    ) -> Result<(), IpcError> {
+        let signals = self
+            .inner
+            .with_lock(|inner| inner.terminate_process_ko(process, exit_code));
+        signals.emit();
+        Ok(())
+    }
+
+    pub fn load_user_image_into(
+        &self,
+        process: &Arc<ProcessObject>,
+        install: &UserImageInstall,
+    ) -> Result<(), LoadImageError> {
+        self.inner
+            .with_lock(|inner| inner.load_user_image_into(process, install))
+    }
+
+    pub fn start_user_process(
+        &self,
+        process: &Arc<ProcessObject>,
+        spec: UserStartSpec,
+    ) -> Result<Arc<ThreadObject>, StartProcessError> {
+        self.inner
+            .with_lock(|inner| inner.start_user_process(process, spec))
+    }
 }
 
 pub trait UserProcessLauncher: Send + Sync {
@@ -135,14 +204,6 @@ where
         self.inner.with_lock(|inner| inner.current_handle_table())
     }
 
-    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
-        self.inner.with_lock(|inner| inner.current_thread_object())
-    }
-
-    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
-        self.inner.with_lock(|inner| inner.current_process_object())
-    }
-
     fn exit_current_thread(&self, exit_code: i32) -> ! {
         // Bare disable: путь не возвращается, парный enable не нужен.
         <A::Cpu as ArchCpu>::disable_preemption();
@@ -190,60 +251,6 @@ where
     fn clear_blocked_cancel(&self) {
         self.inner
             .with_lock(SchedulerInner::clear_current_blocked_cancel);
-    }
-
-    fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, kobject::SpawnError> {
-        self.inner
-            .with_lock(|inner| inner.create_empty_process(name))
-            .map_err(Into::into)
-    }
-
-    fn create_user_thread(
-        &self,
-        process: &Arc<ProcessObject>,
-        entry: UserThreadEntry,
-    ) -> Result<Arc<ThreadObject>, kobject::SpawnError> {
-        self.inner
-            .with_lock(|inner| inner.create_user_thread(process, entry))
-            .map_err(Into::into)
-    }
-
-    fn terminate_thread(&self, thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError> {
-        let signals = self
-            .inner
-            .with_lock(|inner| inner.terminate_thread_ko(thread, exit_code));
-        signals.emit();
-        Ok(())
-    }
-
-    fn terminate_process(
-        &self,
-        process: &Arc<ProcessObject>,
-        exit_code: i32,
-    ) -> Result<(), IpcError> {
-        let signals = self
-            .inner
-            .with_lock(|inner| inner.terminate_process_ko(process, exit_code));
-        signals.emit();
-        Ok(())
-    }
-
-    fn load_user_image_into(
-        &self,
-        process: &Arc<ProcessObject>,
-        install: &UserImageInstall,
-    ) -> Result<(), LoadImageError> {
-        self.inner
-            .with_lock(|inner| inner.load_user_image_into(process, install))
-    }
-
-    fn start_user_process(
-        &self,
-        process: &Arc<ProcessObject>,
-        spec: UserStartSpec,
-    ) -> Result<Arc<ThreadObject>, StartProcessError> {
-        self.inner
-            .with_lock(|inner| inner.start_user_process(process, spec))
     }
 }
 
