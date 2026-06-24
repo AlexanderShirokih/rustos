@@ -40,9 +40,6 @@ pub const FLAG_RESPONSE: u16 = 1 << 0;
 /// Флаг: peer завершает соединение этим последним кадром.
 pub const FLAG_PEER_CLOSE: u16 = 1 << 1;
 
-/// Флаг: операция допускает игнор неизвестного `ordinal`.
-pub const FLAG_FLEXIBLE: u16 = 1 << 2;
-
 /// Флаг: ответ несёт доменную ошибку `E`, а не успех `T`.
 pub const FLAG_DOMAIN_ERR: u16 = 1 << 3;
 
@@ -458,7 +455,6 @@ pub mod value {
         match data {
             [0] => Ok(false),
             [1] => Ok(true),
-            [_] => Err(IpcError::InvalidValue),
             _ => Err(IpcError::InvalidValue),
         }
     }
@@ -520,12 +516,12 @@ mod tests {
 
     #[test]
     fn header_round_trip() {
-        let header = Header::new(ORDINAL, TXID, FLAG_FLEXIBLE);
+        let header = Header::new(ORDINAL, TXID, FLAG_PEER_CLOSE);
         let mut buf = [0u8; HEADER_SIZE];
         header.encode(&mut buf).expect("encode ok");
         let decoded = Header::decode(&buf).expect("decode ok");
         assert_eq!(decoded, header);
-        assert!(decoded.has_flag(FLAG_FLEXIBLE));
+        assert!(decoded.has_flag(FLAG_PEER_CLOSE));
         assert!(!decoded.has_flag(FLAG_RESPONSE));
     }
 

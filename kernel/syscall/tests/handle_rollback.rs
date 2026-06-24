@@ -509,9 +509,9 @@ fn process_start_does_not_start_process_on_out_of_handles() {
 
 #[test]
 fn process_start_succeeds_when_drain_frees_caller_slot() {
-    // Регрессия: при handles_count >= 1 пере-передача bootstrap-handle-а
-    // освобождает слот в caller-table под возвращаемый thread-handle, и
-    // syscall не должен отказывать пре-резервацией.
+    // При handles_count >= 1 пере-передача bootstrap-handle-а освобождает слот
+    // в caller-table под возвращаемый thread-handle: syscall не должен отказывать
+    // пре-резервацией.
     let _guard = test_lock();
     let (rt, stub) = shared_runtime();
     stub.reset_counters();

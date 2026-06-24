@@ -82,11 +82,10 @@ impl Reply {
             .used
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+            && self.outcome.try_begin_reply()
         {
-            if self.outcome.try_begin_reply() {
-                self.outcome.set(RendezvousOutcome::PeerGone);
-                self.waker.cancel();
-            }
+            self.outcome.set(RendezvousOutcome::PeerGone);
+            self.waker.cancel();
         }
     }
 }

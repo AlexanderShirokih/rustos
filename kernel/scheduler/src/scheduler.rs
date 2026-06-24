@@ -1532,7 +1532,7 @@ where
             next.set_time_slice_left(self.time_slice_ticks);
         }
 
-        // Dying thread больше не current - удаление процессов с thread_count=0 теперь безопасно.
+        // Dying-поток не является current: удаление процессов с thread_count=0 безопасно.
         self.cleanup_pending_process_removals(next_id);
         self.reap_pending_threads(prev_id, next_id);
 

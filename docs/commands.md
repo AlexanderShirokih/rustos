@@ -6,52 +6,68 @@
 |------------------------|------------------------------------------------------------------------------------------------------------------------------|
 | Host-тесты             | `cargo test --workspace`                                                                                                     |
 | Host-clippy            | `cargo clippy --workspace`                                                                                                   |
-| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --exclude ipc-test --target aarch64-unknown-none` |
+| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --exclude ipc-test --target aarch64-unknown-none`    |
 | Форматирование         | `cargo fmt --all --check`                                                                                                    |
-| Сборка userland        | `cargo xtask build-userland [--image <имя>]`                                                                                 |
-| Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                           |
-| QEMU integration tests | `cargo xtask qemu-test --timeout 20`                                                                                         |
-| Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                                               |
 | Проверка слоёв         | `cargo xtask check-layers`                                                                                                   |
+| Сборка userland        | `cargo xtask build-userland [--image <имя>]`                                                                                 |
+| Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                                               |
+| Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                           |
+| Запуск после сборки    | `cargo xtask build devices/spec/qemu-aarch64.yaml --run`                                                                     |
+| QEMU integration tests | `cargo xtask qemu-test [--timeout <сек>]`                                                                                    |
 
 ## Сборка
 
-`xtask build` читает YAML-спеку устройства, сначала собирает
-`target/build/userland.img` из `/user/images/default.toml`, затем выбирает boot
-feature для `hal-aarch64`, собирает kernel crate под `aarch64-unknown-none` и
-упаковывает результат.
-
-Боевой kernel-бинарь `kernel-aarch64` (как и userland-бинари) задаёт
-`forced-target = "aarch64-unknown-none"`: крейт всегда собирается под bare-metal,
-независимо от наличия `--target`. Это нужно из-за boot-asm с ELF-релокациями,
-которые host-ассемблер не принимает; `forced-target` снимает необходимость
-гейтить код или bin под host-сборку.
-
-```bash
-cargo xtask build devices/spec/qemu-aarch64.yaml
-cargo xtask build devices/spec/xiaomi-lavender.yaml
+```
+cargo xtask build <spec> [--run] [--debug] [--features <features>]
 ```
 
-`xtask build-userland` собирает только `target/build/userland.img`. Флаг
-`--image <имя>` выбирает композицию `user/images/<имя>.toml`; по умолчанию —
-`default`.
+Читает YAML-спеку устройства, собирает `target/build/userland.img` из
+`user/images/default.toml`, затем собирает `hal-aarch64` под
+`aarch64-unknown-none --release` и упаковывает результат по правилам
+`boot.format`.
+
+Флаги:
+
+| Флаг                  | Назначение                                                  |
+|-----------------------|-------------------------------------------------------------|
+| `--run`               | После сборки выполнить команды из секции `run` YAML-спеки   |
+| `--debug`             | После сборки выполнить команды из секции `debug` YAML-спеки |
+| `--features <список>` | Дополнительные features (через запятую)                     |
+
+Артефакты по формату загрузчика:
+
+| `boot.format`     | Артефакт                                                                                      |
+|-------------------|-----------------------------------------------------------------------------------------------|
+| всегда            | `target/build/userland.img`                                                                   |
+| `linux_arm64`     | `target/build/kernel.bin` + `target/build/userland.img` (initrd)                              |
+| `android_boot_v1` | `target/build/boot.img` с `userland.img` в ramdisk (DTB конкатенирован с kernel.gz)           |
+| `android_boot_v2` | `target/build/boot.img` с `userland.img` в ramdisk (DTB передаётся отдельным полем заголовка) |
+| `uefi`            | не реализован                                                                                 |
+
+## Userland
+
+```
+cargo xtask build-userland [--image <имя>]
+```
+
+Собирает только `target/build/userland.img`. Флаг `--image` выбирает
+композицию `user/images/<имя>.toml`; по умолчанию — `default`.
+
+Доступные образы:
+
+| Имя       | Файл                        | Состав              |
+|-----------|-----------------------------|---------------------|
+| `default` | `user/images/default.toml`  | rootkeeper          |
+| `test`    | `user/images/test.toml`     | testrunner          |
 
 ```bash
 cargo xtask build-userland
 cargo xtask build-userland --image test
 ```
 
-Результаты:
-
-| `boot.format`     | Артефакт                                                                                           |
-|-------------------|----------------------------------------------------------------------------------------------------|
-| всегда            | `target/build/userland.img`                                                                        |
-| `linux_arm64`     | `target/build/kernel.bin` + sidecar `target/build/userland.img`, который нужно передать как initrd |
-| `android_boot_v1` | `target/build/boot.img` с `userland.img` в ramdisk                                                 |
-| `android_boot_v2` | `target/build/boot.img` с `userland.img` в ramdisk                                                 |
-| `uefi`            | не реализован                                                                                      |
-
 ## Тесты
+
+Host-тесты:
 
 ```bash
 cargo test --workspace
@@ -60,10 +76,18 @@ cargo test --workspace
 QEMU integration tests:
 
 ```bash
-cargo xtask qemu-test --timeout 20
+cargo xtask qemu-test [--timeout <сек>]
 ```
 
-`qemu-test` собирает `target/build/userland.img` и запускает QEMU с `-initrd target/build/userland.img`.
+По умолчанию таймаут — 60 секунд. `qemu-test` выполняет два прохода
+по спецификации `devices/spec/qemu-aarch64-test.yaml`:
+
+| Проход     | Feature ядра    | Userland-образ | Что тестирует           |
+|------------|-----------------|----------------|-------------------------|
+| `kernel`   | `kernel-tests`  | `default`      | тесты внутри ядра       |
+| `userland` | —               | `test`         | тесты в userspace       |
+
+Ядро пересобирается между прогонами из-за различия feature-флагов.
 
 ## Проверка слоёв
 
@@ -73,4 +97,4 @@ cargo xtask check-layers
 
 Сверяет рёбра зависимостей между workspace-крейтами (по `cargo metadata`)
 с правилами слоёв из [`architecture.md`](architecture.md).
-При нарушениях печатает запрещённые рёбра и завершается с ошибкой; выполняется в CI.
+При нарушениях печатает запрещённые рёбра и завершается с ошибкой.

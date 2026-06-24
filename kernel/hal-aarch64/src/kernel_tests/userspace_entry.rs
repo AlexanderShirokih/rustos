@@ -16,8 +16,7 @@
 //! 7. Главный test-thread ждёт сигнал на Signal, handle которого был передан
 //!    в `init_user` через `bootstrap_x0`.
 //!
-//! По сравнению с прежней версией убран alias-маппинг через higher-half:
-//! payload и stack живут в нижней половине user-AS, как и положено user-страницам.
+//! Payload и stack живут в нижней половине user-AS, как и положено user-страницам.
 #![allow(unsafe_code)]
 
 extern crate alloc;

@@ -214,13 +214,11 @@ fn allocated_memory_is_writable() {
 }
 
 // =============================================================================
-// 2. Главное: aligned-аллокация (изначальный bug)
+// 2. Главное: aligned-аллокация
 // =============================================================================
 
 #[test]
 fn aligned_4k_4k_allocation_succeeds_on_fresh_heap() {
-    // Изначальный bug: до vmalloc-style refactor'а этот вызов мог
-    // вернуть null, если physical-bitmap имел изолированную дырку.
     let (mut heap, mapper) = make_heap(8 * PAGE_SIZE);
     let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
     let ptr = heap.allocate(layout).expect("4K-aligned 4K alloc");

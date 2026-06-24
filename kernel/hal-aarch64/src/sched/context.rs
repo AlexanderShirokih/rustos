@@ -157,7 +157,7 @@ unsafe extern "C" fn thread_entry_shim() -> ! {
 /// - текущий `sp` = kernel stack top -> останется в `SP_EL1` после `eret`.
 ///
 /// `SPSR_EL1` ставим в 0: `M[3:0]=0000` (EL0t), `M[4]=0` (AArch64), `DAIF=0`,
-/// `NZCV=0`. Если в будущем kernel включит PAN - добавить `msr pan, #1` сюда.
+/// `NZCV=0`.
 ///
 /// Перед `eret` обнуляем все остальные GPR и `tpidr_el0`, чтобы kernel-значения
 /// не утекали в EL0 через регистры.

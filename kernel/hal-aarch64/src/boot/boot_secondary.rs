@@ -2,8 +2,8 @@
 //!
 //! Заглушка: вторичные ядра находятся в режиме ожидания.
 //!
-//! Функция помечена `#[unsafe(no_mangle)]` + `extern "C"` для использования из ASM в будущем
-//! SMP-bringup сценарии - поэтому она не "dead code" с точки зрения линкера.
+//! `secondary_main` помечена `#[unsafe(no_mangle)]` + `extern "C"` как точка
+//! входа для secondary-ядер из ASM, поэтому не "dead code" для линкера.
 
 use core::hint::spin_loop;
 

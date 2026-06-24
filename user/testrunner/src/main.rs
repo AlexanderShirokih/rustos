@@ -32,7 +32,7 @@ mod sync;
 static BOOTSTRAP_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
 /// Накопитель строки лога: байты копятся до `\n` либо заполнения, затем
-/// уходят одним RKLOG-кадром.
+/// уходят одним cast `log` контракта `Bootstrap`.
 struct LogBuffer {
     len: usize,
     bytes: [u8; LOG_MESSAGE_MAX],
@@ -43,7 +43,7 @@ static LOG_BUFFER: Mutex<LogBuffer> = Mutex::new(LogBuffer {
     bytes: [0; LOG_MESSAGE_MAX],
 });
 
-/// Writer harness'а: шлёт построчные RKLOG-кадры в bootstrap-канал.
+/// Writer harness'а: шлёт построчные cast'ы `log` в bootstrap-канал.
 struct ChannelLogWriter;
 
 static LOG_WRITER: ChannelLogWriter = ChannelLogWriter;
@@ -70,7 +70,7 @@ impl Writer for ChannelLogWriter {
     }
 }
 
-/// Отправляет накопленную строку RKLOG-кадром и очищает буфер; пустой
+/// Отправляет накопленную строку cast'ом `log` и очищает буфер; пустой
 /// буфер кадра не порождает.
 fn flush_line(state: &mut LogBuffer) {
     if state.len == 0 {
