@@ -20,7 +20,7 @@ use syscall::Handle;
 
 mod heap;
 mod ipc_buffer;
-mod memory_kobject;
+mod memory_capability_target;
 mod port;
 mod process_handles;
 mod ring_transport;

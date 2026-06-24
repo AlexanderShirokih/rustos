@@ -1,4 +1,4 @@
-//! Мост между kobject и рантаймом ядра.
+//! Мост между capability и рантаймом ядра.
 
 use alloc::sync::Arc;
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
@@ -21,7 +21,7 @@ pub struct UserThreadEntry {
     pub priority: u8,
 }
 
-/// Состояния парковки потока, ожидающего сигнала на KO.
+/// Состояния парковки потока, ожидающего сигнала на capability target.
 pub struct ParkState;
 
 impl ParkState {
@@ -46,7 +46,7 @@ impl WaitToken {
     }
 }
 
-/// Операции планировщика, нужные механизму kobject: чтение текущего
+/// Операции планировщика, нужные механизму capability: чтение текущего
 /// контекста (wait-token, handle-таблица) и парковка/пробуждение потока.
 pub trait KernelRuntime: Send + Sync {
     /// Opaque token текущего потока/контекста.

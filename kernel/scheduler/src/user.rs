@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::ptr::NonNull;
 
-use kobject::{Handle, HandleId, ProcessObject, ThreadObject};
+use capability::{Capability, HandleId, ProcessObject, ThreadObject};
 use memory::{user_vm_allocator::UserVmAllocator, virtual_address::VirtualAddress};
 
 use crate::{AddressSpace, Priority, ProcessId, SpawnError, ThreadId};
@@ -26,7 +26,7 @@ pub struct UserEntry {
 /// Параметры initial handle'ов для нового user-процесса.
 pub struct UserProcessLaunch {
     pub bootstrap_arg: UserBootstrapArg,
-    pub initial_handles: Vec<Handle>,
+    pub initial_handles: Vec<Capability>,
     pub bootstrap_handle_index: Option<usize>,
 }
 
@@ -40,7 +40,7 @@ impl UserProcessLaunch {
         self
     }
 
-    pub fn initial_handles(mut self, handles: Vec<Handle>) -> Self {
+    pub fn initial_handles(mut self, handles: Vec<Capability>) -> Self {
         self.initial_handles = handles;
         self
     }

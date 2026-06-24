@@ -7,8 +7,8 @@ use super::{
     thread::ThreadObject,
 };
 
-/// Kernel-объект (KO) - единица, к которой ядро выдаёт права.
-pub enum KObject {
+/// capability target (capability target) - единица, к которой ядро выдаёт права.
+pub enum CapabilityTarget {
     Signal(Arc<Signal>),
     Process(Arc<ProcessObject>),
     Thread(Arc<ThreadObject>),
@@ -18,7 +18,7 @@ pub enum KObject {
     Reply(Arc<Reply>),
 }
 
-impl Clone for KObject {
+impl Clone for CapabilityTarget {
     fn clone(&self) -> Self {
         match self {
             Self::Signal(s) => Self::Signal(s.clone()),
@@ -32,7 +32,7 @@ impl Clone for KObject {
     }
 }
 
-impl core::fmt::Debug for KObject {
+impl core::fmt::Debug for CapabilityTarget {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let name = match self {
             Self::Signal(_) => "Signal",

@@ -7,10 +7,11 @@
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use collections::{LockCell, MutexCell};
-use kobject::{
-    Handle, HandleTable, KObject, KernelRuntime, Rights, Signal, WaitToken, install_runtime,
+use capability::{
+    Capability, CapabilityTarget, HandleTable, KernelRuntime, Rights, Signal, WaitToken,
+    install_runtime,
 };
+use collections::{LockCell, MutexCell};
 use syscall_kernel::SyscallError;
 
 struct TableRuntime {
@@ -46,7 +47,7 @@ impl KernelRuntime for TableRuntime {
 
     fn unblock(&self, _token: WaitToken) {}
 
-    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
 
     fn clear_blocked_cancel(&self) {}
 }
@@ -126,7 +127,7 @@ fn port_create_registers_usable_port_handle() {
     assert!(id != 0, "fresh port handle id must be non-zero");
 
     let raw = u32::try_from(id).unwrap();
-    let handle_id = kobject::HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap());
+    let handle_id = capability::HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap());
     table.with_lock(|tbl| {
         tbl.get_port(handle_id, Rights::READ)
             .expect("port readable");
@@ -142,8 +143,8 @@ fn port_send_on_non_port_handle_is_wrong_type() {
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
     let sig_id = table
         .with_lock(|tbl| {
-            tbl.insert(Handle::new(
-                KObject::Signal(Signal::new()),
+            tbl.insert(Capability::new(
+                CapabilityTarget::Signal(Signal::new()),
                 Rights::READ | Rights::WRITE,
             ))
         })
@@ -172,7 +173,12 @@ fn port_reply_on_non_reply_handle_is_wrong_type() {
     let rt = runtime();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
     let sig_id = table
-        .with_lock(|tbl| tbl.insert(Handle::new(KObject::Signal(Signal::new()), Rights::WRITE)))
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Signal(Signal::new()),
+                Rights::WRITE,
+            ))
+        })
         .expect("insert signal");
     rt.set_handle_table(table);
 

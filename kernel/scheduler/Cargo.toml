@@ -7,7 +7,7 @@ publish.workspace = true
 [dependencies]
 spin = { workspace = true }
 collections = { workspace = true }
-kobject = { workspace = true }
+capability = { workspace = true }
 memory = { workspace = true }
 
 [lints]

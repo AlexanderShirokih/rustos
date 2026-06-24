@@ -62,8 +62,17 @@ mod tests {
 
     #[test]
     fn map_to_matching_mem_flags() {
-        assert_eq!(user_rwx(UserMemFlags::ReadWrite.to_mem_flags()), (true, true, false));
-        assert_eq!(user_rwx(UserMemFlags::ReadOnly.to_mem_flags()), (true, false, false));
-        assert_eq!(user_rwx(UserMemFlags::ReadExecute.to_mem_flags()), (true, false, true));
+        assert_eq!(
+            user_rwx(UserMemFlags::ReadWrite.to_mem_flags()),
+            (true, true, false)
+        );
+        assert_eq!(
+            user_rwx(UserMemFlags::ReadOnly.to_mem_flags()),
+            (true, false, false)
+        );
+        assert_eq!(
+            user_rwx(UserMemFlags::ReadExecute.to_mem_flags()),
+            (true, false, true)
+        );
     }
 }

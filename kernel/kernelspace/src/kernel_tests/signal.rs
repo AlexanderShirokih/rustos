@@ -10,7 +10,7 @@ use kernel_tests::kernel_test;
 fn signal_wakes_waker() {
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use kobject::{SIGNALED, Signal, Waker};
+    use capability::{SIGNALED, Signal, Waker};
 
     struct Flag {
         fired: AtomicBool,

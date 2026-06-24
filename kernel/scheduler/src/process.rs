@@ -4,8 +4,8 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use capability::{HandleTable, ProcessObject};
 use collections::{LockCell, MutexCell};
-use kobject::{HandleTable, ProcessObject};
 use memory::{MemoryRegion, user_vm_allocator::UserVmAllocator};
 
 use super::address_space::AddressSpace;
@@ -33,10 +33,10 @@ pub struct Process {
     /// Количество живых thread'ов, привязанных к этому процессу. Декремент
     /// при `thread_exit`; ноль - сигнал планировщику удалить процесс.
     thread_count: AtomicUsize,
-    /// Lifecycle-KO процесса: переживает запись в `ProcessTable`, чтобы
-    /// держатели `Handle` могли наблюдать завершение процесса и читать
+    /// Lifecycle-capability target процесса: переживает запись в `ProcessTable`, чтобы
+    /// держатели `Capability` могли наблюдать завершение процесса и читать
     /// `exit_code` после удаления процесса (zombie-семантика).
-    ko: Arc<ProcessObject>,
+    target: Arc<ProcessObject>,
 }
 
 impl Process {
@@ -53,7 +53,7 @@ impl Process {
             user_vm: None,
             image_segments: Vec::new(),
             thread_count: AtomicUsize::new(1),
-            ko: ProcessObject::new(),
+            target: ProcessObject::new(),
         }
     }
 
@@ -71,7 +71,7 @@ impl Process {
             user_vm: None,
             image_segments: Vec::new(),
             thread_count: AtomicUsize::new(0),
-            ko: ProcessObject::new(),
+            target: ProcessObject::new(),
         }
     }
 
@@ -127,9 +127,9 @@ impl Process {
         &self.handle_table
     }
 
-    /// Lifecycle-KO процесса; переживает удаление из `ProcessTable` (zombie-семантика).
+    /// Lifecycle-capability target процесса; переживает удаление из `ProcessTable` (zombie-семантика).
     pub fn process_object(&self) -> &Arc<ProcessObject> {
-        &self.ko
+        &self.target
     }
 
     /// Регистрирует ещё один поток, принадлежащий процессу.

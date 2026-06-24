@@ -21,7 +21,7 @@ pub enum IpcError {
     BufferTooSmall,
     /// Сообщение превышает лимит размера.
     MessageTooBig,
-    /// Handle-таблица процесса исчерпана.
+    /// Capability-таблица процесса исчерпана.
     OutOfHandles,
     /// Бюджет ресурса исчерпан: метерящая операция запросила больше
     /// страниц, чем осталось в [`Resource`](super::Resource).

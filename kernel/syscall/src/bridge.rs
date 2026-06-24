@@ -4,7 +4,7 @@
 
 use core::num::NonZeroU32;
 
-use kobject::{self, HandleId, Rights};
+use capability::{self, HandleId, Rights};
 use syscall::WakeCount;
 
 use super::{
@@ -214,7 +214,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
 /// Помечает текущий поток `Terminated` и делает context switch. Не возвращается.
 fn sys_thread_exit(code: u64) -> ! {
     let exit_code = super::process::exit_code_from_arg(code);
-    kobject::thread_exit(exit_code)
+    capability::thread_exit(exit_code)
 }
 
 /// Атомарно меняет биты сигналов объекта и будит waiter'ов по [`WakeCount`] (arg3).
@@ -222,13 +222,13 @@ fn sys_thread_exit(code: u64) -> ! {
 fn sys_signal_set(handle: u64, set: u64, clear: u64, count: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let count = WakeCount::from_raw(count).ok_or(SyscallError::InvalidArgument)?;
-    kobject::signal_set(id, signals_from_arg(set), signals_from_arg(clear), count)?;
+    capability::signal_set(id, signals_from_arg(set), signals_from_arg(clear), count)?;
     Ok(0)
 }
 
 /// Создаёт `Signal` и возвращает его сырой `HandleId`.
 fn sys_signal_create() -> Result<u64, SyscallError> {
-    let id = kobject::signal_create()?;
+    let id = capability::signal_create()?;
     Ok(u64::from(id.raw().get()))
 }
 
@@ -239,7 +239,7 @@ fn sys_signal_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64
     if mask == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let observed = kobject::signal_wait_one(id, mask, Some(timeout_ns))?;
+    let observed = capability::signal_wait_one(id, mask, Some(timeout_ns))?;
     Ok(u64::from(observed))
 }
 
@@ -295,7 +295,7 @@ fn sys_signal_wait_many_impl(
         items[i] = (HandleId::from_raw(nz), mask);
     }
 
-    let outcome = kobject::signal_wait_many(&items[..count], Some(timeout_ns))?;
+    let outcome = capability::signal_wait_many(&items[..count], Some(timeout_ns))?;
     let index = u32::try_from(outcome.index).expect("count <= WAIT_MANY_MAX_COUNT fits in u32");
     Ok((index, outcome.observed))
 }
@@ -303,7 +303,7 @@ fn sys_signal_wait_many_impl(
 /// Изымает handle из таблицы и закрывает.
 fn sys_handle_close(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
-    kobject::handle_close(id)?;
+    capability::handle_close(id)?;
     Ok(0)
 }
 
@@ -315,7 +315,7 @@ fn sys_handle_duplicate(handle: u64, new_rights: u64, badge: u64) -> Result<u64,
     let rights_bits = u32::try_from(new_rights & u64::from(u32::MAX))
         .expect("masking guarantees value fits into u32");
     let rights = Rights::from_bits_truncate(rights_bits);
-    let new_id = kobject::handle_duplicate(id, rights, badge)?;
+    let new_id = capability::handle_duplicate(id, rights, badge)?;
     Ok(u64::from(new_id.raw().get()))
 }
 
@@ -325,10 +325,10 @@ fn signals_from_arg(raw: u64) -> u32 {
 }
 
 /// `0` и значения > `u32::MAX` - `InvalidArgument`.
-pub(super) fn parse_handle_id(raw: u64) -> Result<kobject::HandleId, SyscallError> {
+pub(super) fn parse_handle_id(raw: u64) -> Result<capability::HandleId, SyscallError> {
     let raw32 = u32::try_from(raw).map_err(|_| SyscallError::InvalidArgument)?;
     let nz = NonZeroU32::new(raw32).ok_or(SyscallError::InvalidArgument)?;
-    Ok(kobject::HandleId::from_raw(nz))
+    Ok(capability::HandleId::from_raw(nz))
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use core::num::{NonZeroU32, NonZeroU64};
 
-use kobject::WaitToken;
+use capability::WaitToken;
 
 /// Идентификатор потока.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -132,7 +132,7 @@ pub enum SpawnError {
     ImageNotLoaded,
 }
 
-impl From<SpawnError> for kobject::SpawnError {
+impl From<SpawnError> for capability::SpawnError {
     fn from(value: SpawnError) -> Self {
         match value {
             SpawnError::NoFreeThreadSlots => Self::NoFreeThreadSlots,

@@ -6,16 +6,16 @@ use alloc::{sync::Arc, vec};
 use core::num::NonZeroUsize;
 
 use bootstrap::{BootstrapService, dispatch_bootstrap};
+use capability::{
+    Capability, CapabilityTarget, IpcError as KernelIpcError, KernelIpcBuffer, Port, Resource,
+    Rights, ThreadTransport, port_recv, runtime,
+};
 use collections::{LockCell, MutexCell};
 use ipc::{
     MessageLen, Transport,
     wire::{IpcError as WireError, Str},
 };
 use klog::{info, warn};
-use kobject::{
-    Handle, IpcError as KernelIpcError, KObject, KernelIpcBuffer, Port, Resource, Rights,
-    ThreadTransport, port_recv, runtime,
-};
 use memory::{AccessMask, physical_address::PageAlignedAddress};
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
@@ -55,8 +55,8 @@ pub fn spawn_process(
     // Один Port: ядро держит Arc как получатель; ОДИН handle на тот же
     // объект уходит bootstrap-процессу как initial handle[0] - он клиент.
     let port = Port::new();
-    let peer_ko = KObject::Port(port.clone());
-    let peer_handle = Handle::new(peer_ko.clone(), Rights::defaults_for(&peer_ko));
+    let peer_target = CapabilityTarget::Port(port.clone());
+    let peer_handle = Capability::new(peer_target.clone(), Rights::defaults_for(&peer_target));
 
     // Корневой Resource: полномочие на минтинг физпамяти + носитель
     // ресурсного бюджета. Выдаётся bootstrap-процессу как initial handle[1]
@@ -72,8 +72,11 @@ pub fn spawn_process(
         AccessMask::RW,
         1 << 20,
     );
-    let resource_ko = KObject::Resource(root_resource.clone());
-    let resource_handle = Handle::new(resource_ko.clone(), Rights::defaults_for(&resource_ko));
+    let resource_target = CapabilityTarget::Resource(root_resource.clone());
+    let resource_handle = Capability::new(
+        resource_target.clone(),
+        Rights::defaults_for(&resource_target),
+    );
 
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![peer_handle, resource_handle])
@@ -156,14 +159,14 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
 struct KernelPortTransport {
     port: Arc<Port>,
     buffer: KernelIpcBuffer,
-    table: Arc<MutexCell<kobject::HandleTable>>,
+    table: Arc<MutexCell<capability::HandleTable>>,
 }
 
 impl KernelPortTransport {
     fn new(
         port: Arc<Port>,
         buffer: KernelIpcBuffer,
-        table: Arc<MutexCell<kobject::HandleTable>>,
+        table: Arc<MutexCell<capability::HandleTable>>,
     ) -> Self {
         Self {
             port,

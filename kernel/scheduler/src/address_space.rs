@@ -20,7 +20,7 @@ impl AddressSpace {
         Ok(Arc::new(Self::User(mapper)))
     }
 
-    /// Handle для передачи в [`super::ArchContext::switch_address_space`]; `None` для kernel-AS.
+    /// Capability для передачи в [`super::ArchContext::switch_address_space`]; `None` для kernel-AS.
     pub fn handle(&self) -> Option<AddressSpaceHandle> {
         match self {
             Self::Kernel => None,

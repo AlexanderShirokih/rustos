@@ -5,8 +5,10 @@
 use alloc::sync::Arc;
 use core::num::NonZeroUsize;
 
+use capability::{
+    Capability, CapabilityTarget, IpcError, ResourceBudgetRefund, RevocationHook, Rights,
+};
 use collections::LockCell;
-use kobject::{Handle, IpcError, KObject, ResourceBudgetRefund, RevocationHook, Rights};
 use memory::{
     AccessMask, MappingTag, MemoryRegion, RegionCreateError, UserVmContext, WeakUserVmContext,
     memory_mapper::{MemoryMappingError, MemoryRemappingError},
@@ -22,8 +24,11 @@ use super::{
 };
 use crate::UserMemFlags;
 
-fn lookup_memory(id: kobject::HandleId, need: Rights) -> Result<Arc<MemoryRegion>, SyscallError> {
-    let table = kobject::runtime()
+fn lookup_memory(
+    id: capability::HandleId,
+    need: Rights,
+) -> Result<Arc<MemoryRegion>, SyscallError> {
+    let table = capability::runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
     let region = table.with_lock(|tbl| tbl.get_memory(id, need))?;
@@ -31,10 +36,10 @@ fn lookup_memory(id: kobject::HandleId, need: Rights) -> Result<Arc<MemoryRegion
 }
 
 fn lookup_memory_grant(
-    id: kobject::HandleId,
+    id: capability::HandleId,
     need: Rights,
 ) -> Result<(Arc<MemoryRegion>, AccessMask), SyscallError> {
-    let table = kobject::runtime()
+    let table = capability::runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
     let (region, rights) = table.with_lock(|tbl| tbl.get_memory_with_rights(id, need))?;
@@ -125,7 +130,7 @@ pub fn sys_memory_create_virtual(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let table = kobject::runtime()
+    let table = capability::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let resource = table.with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))?;
@@ -141,8 +146,8 @@ pub fn sys_memory_create_virtual(
     resource.try_consume(pages.get() as u64)?;
     let region = region.with_refund(ResourceBudgetRefund::new(&resource, pages.get() as u64));
     let region_arc = Arc::new(region);
-    let ko = KObject::Memory(region_arc);
-    let handle = Handle::new(ko.clone(), Rights::defaults_for(&ko));
+    let target = CapabilityTarget::Memory(region_arc);
+    let handle = Capability::new(target.clone(), Rights::defaults_for(&target));
     let id = table.with_lock(|tbl| tbl.insert(handle))?;
     Ok(u64::from(id.raw().get()))
 }
@@ -163,7 +168,7 @@ pub fn sys_memory_create_physical(
     let pa_usize = usize::try_from(pa_raw).map_err(|_| SyscallError::InvalidArgument)?;
     let pa = PageAlignedAddress::from_usize(pa_usize).ok_or(SyscallError::InvalidArgument)?;
 
-    let table = kobject::runtime()
+    let table = capability::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let resource = table.with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))?;
@@ -179,8 +184,8 @@ pub fn sys_memory_create_physical(
     let refund = ResourceBudgetRefund::new(&resource, pages);
     let region = MemoryRegion::create_physical(pa, size, access).with_refund(refund);
     let region_arc = Arc::new(region);
-    let ko = KObject::Memory(region_arc);
-    let handle = Handle::new(ko.clone(), Rights::defaults_for(&ko));
+    let target = CapabilityTarget::Memory(region_arc);
+    let handle = Capability::new(target.clone(), Rights::defaults_for(&target));
     let id = table.with_lock(|tbl| tbl.insert(handle))?;
     Ok(u64::from(id.raw().get()))
 }
@@ -199,7 +204,7 @@ pub fn sys_memory_allocate(
     let mem_flags = flags.to_mem_flags();
     let access = access_mask_for(flags);
 
-    let table = kobject::runtime()
+    let table = capability::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let resource = table.with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))?;
@@ -338,7 +343,7 @@ fn register_mapping_revocation(
     user_vm: &UserVmContext,
     base: PageAlignedVirtualAddress,
     size: NonZeroUsize,
-    cap_id: kobject::HandleId,
+    cap_id: capability::HandleId,
     mut tag: MappingTag,
 ) -> Result<(), SyscallError> {
     let mapping = Arc::new(MemoryMapping {
@@ -356,7 +361,7 @@ fn register_mapping_revocation(
     });
 
     // Порядок локов: чужой UserVmContext (выше) уже отпущен, теперь HandleTable.
-    let registered = kobject::runtime()
+    let registered = capability::runtime()
         .current_handle_table()
         .map_or(Err(IpcError::BadHandle), |table| {
             table.with_lock(|tbl| tbl.register_revocation_hook(cap_id, weak))
@@ -657,8 +662,8 @@ mod tests {
     mod revoke {
         use alloc::{sync::Weak, vec::Vec};
 
+        use capability::{Capability, CapabilityTarget, HandleTable, RevocationHook};
         use collections::MutexCell;
-        use kobject::{Handle, HandleTable, KObject, RevocationHook};
         use memory::{
             MemFlags, MemoryRegion,
             memory_mapper::{
@@ -784,7 +789,7 @@ mod tests {
             let mut recipient_tbl = HandleTable::new();
             let rights = Rights::DUPLICATE | Rights::READ | Rights::TRANSFER;
             let root = grantor
-                .insert(Handle::new(KObject::Memory(region()), rights))
+                .insert(Capability::new(CapabilityTarget::Memory(region()), rights))
                 .unwrap();
             let derived = grantor.duplicate(root, rights, 0).unwrap();
             let res = recipient_tbl.reserve_slot().unwrap();
@@ -817,7 +822,7 @@ mod tests {
             let mut table = HandleTable::new();
             let rights = Rights::DUPLICATE | Rights::READ;
             let id = table
-                .insert(Handle::new(KObject::Memory(region()), rights))
+                .insert(Capability::new(CapabilityTarget::Memory(region()), rights))
                 .unwrap();
             table.register_revocation_hook(id, weak).unwrap();
 

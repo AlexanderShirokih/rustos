@@ -8,12 +8,12 @@ use core::{
 };
 use std::sync::{Arc, Mutex, OnceLock};
 
-use collections::{LockCell, MutexCell};
-use kobject::{
-    Handle, HandleTable, IpcError, KObject, KernelRuntime, LoadImageError, ProcessObject, Rights,
-    Signal, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
-    UserThreadEntry, WaitToken, install_runtime,
+use capability::{
+    Capability, CapabilityTarget, HandleTable, IpcError, KernelRuntime, LoadImageError,
+    ProcessObject, Rights, Signal, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
+    UserStartSpec, UserThreadEntry, WaitToken, install_runtime,
 };
+use collections::{LockCell, MutexCell};
 use memory::{
     MemFlags, UserVmContext,
     frame_allocator::FrameAllocator,
@@ -60,7 +60,7 @@ impl KernelRuntime for CountingRuntime {
 
     fn unblock(&self, _token: WaitToken) {}
 
-    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
 
     fn clear_blocked_cancel(&self) {}
 }
@@ -285,16 +285,16 @@ fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 fn full_table_with_capacity_one() -> Arc<MutexCell<HandleTable>> {
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(1)));
-    let dummy = Handle::new(KObject::Signal(Signal::new()), Rights::READ);
+    let dummy = Capability::new(CapabilityTarget::Signal(Signal::new()), Rights::READ);
     table
         .with_lock(|tbl| tbl.insert(dummy))
         .expect("dummy fills the slot");
     table
 }
 
-fn install_process_handle(table: &Arc<MutexCell<HandleTable>>) -> kobject::HandleId {
+fn install_process_handle(table: &Arc<MutexCell<HandleTable>>) -> capability::HandleId {
     let process = ProcessObject::new();
-    let handle = Handle::new(KObject::Process(process), Rights::WRITE);
+    let handle = Capability::new(CapabilityTarget::Process(process), Rights::WRITE);
     table
         .with_lock(|tbl| tbl.insert(handle))
         .expect("insert process handle")
@@ -437,8 +437,11 @@ fn thread_create_does_not_create_thread_on_out_of_handles() {
     let process_id = install_process_handle(&table);
     table
         .with_lock(|tbl| {
-            tbl.insert(Handle::new(KObject::Signal(Signal::new()), Rights::READ))
-                .map(|_| ())
+            tbl.insert(Capability::new(
+                CapabilityTarget::Signal(Signal::new()),
+                Rights::READ,
+            ))
+            .map(|_| ())
         })
         .expect("dummy fills second slot");
     rt.set_handle_table(table);
@@ -474,8 +477,11 @@ fn process_start_does_not_start_process_on_out_of_handles() {
     let process_id = install_process_handle(&table);
     table
         .with_lock(|tbl| {
-            tbl.insert(Handle::new(KObject::Signal(Signal::new()), Rights::READ))
-                .map(|_| ())
+            tbl.insert(Capability::new(
+                CapabilityTarget::Signal(Signal::new()),
+                Rights::READ,
+            ))
+            .map(|_| ())
         })
         .expect("dummy fills second slot");
     rt.set_handle_table(table);
@@ -515,8 +521,8 @@ fn process_start_succeeds_when_drain_frees_caller_slot() {
     let process_id = install_process_handle(&table);
     let bootstrap_id = table
         .with_lock(|tbl| {
-            tbl.insert(Handle::new(
-                KObject::Signal(Signal::new()),
+            tbl.insert(Capability::new(
+                CapabilityTarget::Signal(Signal::new()),
                 Rights::READ | Rights::TRANSFER,
             ))
         })

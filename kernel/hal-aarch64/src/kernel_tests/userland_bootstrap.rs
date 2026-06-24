@@ -10,6 +10,11 @@
 use alloc::sync::Arc;
 
 use bootstrap::{BootstrapService, dispatch_bootstrap};
+use capability::{
+    Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, KernelIpcBuffer, Port,
+    Rights, SIGNALED, ThreadTransport, install_handle, port_recv, runtime, signal_wait_one,
+    thread_termination_signal,
+};
 use collections::{LockCell, MutexCell};
 use ipc::{
     MessageLen, Transport,
@@ -17,11 +22,6 @@ use ipc::{
 };
 use kernel_tests::kernel_test;
 use kernelspace::bootstrap::BootstrapLaunch;
-use kobject::{
-    Handle, HandleTable, IpcError as KernelIpcError, KObject, KernelIpcBuffer, Port, Rights,
-    SIGNALED, ThreadTransport, install_handle, port_recv, runtime, signal_wait_one,
-    thread_termination_signal,
-};
 use scheduler::ArchContext;
 use syscall::{IpcBuffer, decode_tag};
 
@@ -122,8 +122,8 @@ fn spawn_bootstrap_with_log() -> BootstrapLaunch {
 /// Bootstrap-поток уже отправил лог (send вернулся после нашего recv) и
 /// выходит сам; ждём завершения через его bound-`Signal`.
 fn teardown_bootstrap(launch: BootstrapLaunch) {
-    let thread_id = install_handle(Handle::new(
-        KObject::Thread(launch.info.thread_object),
+    let thread_id = install_handle(Capability::new(
+        CapabilityTarget::Thread(launch.info.thread_object),
         Rights::READ,
     ))
     .expect("install bootstrap thread handle");

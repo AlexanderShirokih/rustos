@@ -8,12 +8,12 @@ use core::{
 };
 use std::sync::{Arc, Mutex, OnceLock};
 
-use collections::{LockCell, MutexCell};
-use kobject::{
-    Handle, HandleId, HandleTable, IpcError, KObject, KernelRuntime, LoadImageError, ProcessObject,
-    Resource, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
-    UserThreadEntry, WaitToken, install_runtime,
+use capability::{
+    Capability, CapabilityTarget, HandleId, HandleTable, IpcError, KernelRuntime, LoadImageError,
+    ProcessObject, Resource, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
+    UserStartSpec, UserThreadEntry, WaitToken, install_runtime,
 };
+use collections::{LockCell, MutexCell};
 use memory::{
     AccessMask, MemFlags, MemoryRegion, UserVmContext,
     frame::Frame,
@@ -140,7 +140,7 @@ impl KernelRuntime for TableRuntime {
     }
     fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
     fn unblock(&self, _t: WaitToken) {}
-    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
     fn clear_blocked_cancel(&self) {}
 }
 
@@ -249,10 +249,10 @@ fn insert_metering_resource(table: &Arc<MutexCell<HandleTable>>) -> (u64, Arc<Re
         AccessMask::RW,
         1024,
     );
-    let ko = KObject::Resource(resource.clone());
-    let rights = Rights::defaults_for(&ko);
+    let target = CapabilityTarget::Resource(resource.clone());
+    let rights = Rights::defaults_for(&target);
     let id = table
-        .with_lock(|tbl| tbl.insert(Handle::new(ko, rights)))
+        .with_lock(|tbl| tbl.insert(Capability::new(target, rights)))
         .expect("insert resource");
     (u64::from(id.raw().get()), resource)
 }
@@ -384,10 +384,10 @@ fn memory_map_rolls_back_va_and_keeps_region_frames_on_install_failure() {
         .expect("region create"),
     );
     let frames_after_create = fa.outstanding();
-    let ko = KObject::Memory(region);
-    let rights = Rights::defaults_for(&ko);
+    let target = CapabilityTarget::Memory(region);
+    let rights = Rights::defaults_for(&target);
     let region_id: HandleId = table
-        .with_lock(|tbl| tbl.insert(Handle::new(ko, rights)))
+        .with_lock(|tbl| tbl.insert(Capability::new(target, rights)))
         .expect("insert region");
 
     let res = dispatch(

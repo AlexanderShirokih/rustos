@@ -17,11 +17,11 @@
 //! | `0x10..=0x1F` | object base - Signal                                  |
 //! | `0x20..=0x2F` | port-специфичные (rendezvous-IPC)       |
 //! | `0x30..=0x3F` | handle lifecycle                            |
-//! | `0x40..=0x4F` | Process KObject                             |
-//! | `0x50..=0x5F` | Thread KObject                              |
-//! | `0x60..=0x6F` | Memory KObject                              |
+//! | `0x40..=0x4F` | Process CapabilityTarget                             |
+//! | `0x50..=0x5F` | Thread CapabilityTarget                              |
+//! | `0x60..=0x6F` | Memory CapabilityTarget                              |
 //!
-//! # Memory KObject (`0x60..=0x6F`)
+//! # Memory CapabilityTarget (`0x60..=0x6F`)
 //!
 //! | op    | Имя                       | Аргументы / возврат                                                                                |
 //! |-------|---------------------------|----------------------------------------------------------------------------------------------------|
@@ -94,7 +94,7 @@ impl Handle {
     }
 }
 
-/// Запись массива `SignalWaitMany`: KO `handle` и маска ожидаемых сигналов
+/// Запись массива `SignalWaitMany`: capability target `handle` и маска ожидаемых сигналов
 /// `mask`. `#[repr(C)]` фиксирует wire-layout - 8 байт LE, `handle` в
 /// `[0..4)`, `mask` в `[4..8)`, как читает ядро.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,19 +117,19 @@ impl WaitItem {
 #[repr(u16)]
 pub enum SyscallOp {
     // 0x10..=0x1F - object base.
-    /// Меняет биты сигналов KO. Аргументы: `arg0=handle`, `arg1=set`
+    /// Меняет биты сигналов capability target. Аргументы: `arg0=handle`, `arg1=set`
     /// (нижние 32 бита), `arg2=clear` (нижние 32 бита), `arg3=wake_count`
     /// (`WakeCount::to_raw`: 0=None, 1=One, 2=All; неизвестное -
     /// `InvalidArgument`). Биты выставляются всегда. Возврат `0`.
     SignalSet = 0x10,
-    /// Ждёт сигналы KO. Аргументы: `arg0=handle`, `arg1=signals`
+    /// Ждёт сигналы capability target. Аргументы: `arg0=handle`, `arg1=signals`
     /// (нижние 32 бита), `arg2=timeout_ns`; `timeout_ns == 0` -
     /// non-blocking poll. Возврат: observed-маска.
     SignalWaitOne = 0x11,
-    /// Ждёт сигналы на нескольких KO. Аргументы: `arg0=items_va`
+    /// Ждёт сигналы на нескольких capability target. Аргументы: `arg0=items_va`
     /// (массив 8-байтных записей `[handle: u32, mask: u32]` LE),
     /// `arg1=count`, `arg2=timeout_ns`. Primary возврат - observed-
-    /// маска сработавшего KO, secondary - его индекс в `items`.
+    /// маска сработавшего capability target, secondary - его индекс в `items`.
     SignalWaitMany = 0x12,
     /// Создаёт пустой `Signal`, регистрирует handle в текущей
     /// таблице и возвращает его сырой `HandleId`. Аргументов нет.
@@ -172,7 +172,7 @@ pub enum SyscallOp {
     /// Возврат: новый handle id либо `-(SyscallError)`.
     HandleDuplicate = 0x31,
 
-    // 0x40..=0x4F - Process KObject.
+    // 0x40..=0x4F - Process CapabilityTarget.
     /// Создаёт пустой user-процесс. Аргументы: `arg0=name_va`,
     /// `arg1=name_len`. Возвращает handle на свежий
     /// `ProcessObject`.
@@ -214,7 +214,7 @@ pub enum SyscallOp {
     /// свежий `ThreadObject`.
     ProcessStart = 0x45,
 
-    // 0x50..=0x5F - Thread KObject.
+    // 0x50..=0x5F - Thread CapabilityTarget.
     /// Создаёт user-поток в указанном процессе. Аргументы:
     /// `arg0=process_handle`, `arg1=entry_pc`, `arg2=user_sp`, `arg3=arg`,
     /// `arg4=priority`. Требует
@@ -243,13 +243,13 @@ pub enum SyscallOp {
     /// если у потока нет буфера (kernel-поток).
     IpcBufferAddr = 0x56,
 
-    // 0x60..=0x6F - Memory KObject.
-    /// Создаёт `KObject::Memory` с Virtual backing. Аргументы:
+    // 0x60..=0x6F - Memory CapabilityTarget.
+    /// Создаёт `CapabilityTarget::Memory` с Virtual backing. Аргументы:
     /// `arg0=resource_handle` (требует `Rights::WRITE`; метерится
     /// `size_bytes / PAGE` страниц), `arg1=size_bytes`, `arg2=access_mask`.
     /// Возвращает `region_handle`.
     MemoryCreateVirtual = 0x60,
-    /// Создаёт `KObject::Memory` с Physical backing. Аргументы:
+    /// Создаёт `CapabilityTarget::Memory` с Physical backing. Аргументы:
     /// `arg0=resource_handle` на `Resource` (требует
     /// `Rights::WRITE`), `arg1=pa`, `arg2=size_bytes`, `arg3=access_mask`.
     /// Диапазон и доступ должны укладываться в границы ресурса.

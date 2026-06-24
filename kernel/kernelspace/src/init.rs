@@ -7,10 +7,11 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use klog::{info, warn};
-use kobject::{
-    Handle, KObject, Rights, SIGNALED, install_handle, process_termination_signal, signal_wait_one,
+use capability::{
+    Capability, CapabilityTarget, Rights, SIGNALED, install_handle, process_termination_signal,
+    signal_wait_one,
 };
+use klog::{info, warn};
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
 use crate::{
@@ -77,8 +78,8 @@ fn start_bootstrap_chain(
     }
 
     let process_object = launch.info.process_object;
-    let process_handle = match install_handle(Handle::new(
-        KObject::Process(process_object.clone()),
+    let process_handle = match install_handle(Capability::new(
+        CapabilityTarget::Process(process_object.clone()),
         Rights::READ,
     )) {
         Ok(id) => id,

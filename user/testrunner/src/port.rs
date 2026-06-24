@@ -283,7 +283,7 @@ extern "C" fn cap_sender_worker(_arg: usize) -> ! {
     let va = ipc_va();
     // Создаём Signal и поднимаем сигнал ДО переноса: бит должен
     // «уехать» вместе с объектом и быть видим получателю - это доказывает
-    // идентичность KO (свежий объект бита бы не имел).
+    // идентичность capability target (свежий объект бита бы не имел).
     let notif = signal_create().expect("signal_create");
     NOTIF_RAW.store(u64::from(notif.raw()), SeqCst);
     if signal_set(notif, SIGNALED, 0, WakeCount::None) != 0 {

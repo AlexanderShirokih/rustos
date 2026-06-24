@@ -2,7 +2,7 @@
 //! диспатчером с `KernelOriginated`.
 //!
 //! Полный путь "vector -> exception_entry -> syscall_kernel::dispatch -> handler ->
-//! kobject" из user-контекста покрыт тестами EL0-входа в
+//! capability" из user-контекста покрыт тестами EL0-входа в
 //! [`super::userspace_entry`] и `super::userspace_via_scheduler`;
 //! тонкие случаи диспатчера (`BadSyscall`, `InvalidArgument`, маски сигналов)
 //! - host-юнит-тестами в `syscall_kernel::bridge`. Здесь нужен только один

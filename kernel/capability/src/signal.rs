@@ -1,4 +1,4 @@
-//! `Signal` kernel object: сигнальный примитив ядра.
+//! `Signal` capability target: сигнальный примитив ядра.
 //!
 //! Слово атомарных бит 0..=31 + список ожидающих.
 use alloc::{sync::Arc, vec::Vec};

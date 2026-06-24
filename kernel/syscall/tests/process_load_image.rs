@@ -5,12 +5,12 @@
 use core::{num::NonZeroUsize, sync::atomic::AtomicU32};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use collections::{LockCell, MutexCell};
-use kobject::{
-    Handle, HandleId, HandleTable, IpcError, KObject, KernelRuntime, LoadImageError, ProcessObject,
-    Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
-    UserThreadEntry, WaitToken, install_runtime,
+use capability::{
+    Capability, CapabilityTarget, HandleId, HandleTable, IpcError, KernelRuntime, LoadImageError,
+    ProcessObject, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
+    UserStartSpec, UserThreadEntry, WaitToken, install_runtime,
 };
+use collections::{LockCell, MutexCell};
 use memory::{
     AccessMask, MemFlags, MemoryRegion, UserVmContext,
     frame_allocator::FrameAllocator,
@@ -57,7 +57,7 @@ impl KernelRuntime for TableRuntime {
     }
     fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
     fn unblock(&self, _token: WaitToken) {}
-    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
     fn clear_blocked_cancel(&self) {}
 }
 
@@ -248,8 +248,8 @@ fn canned_buffer(
 fn insert_process(table: &Arc<MutexCell<HandleTable>>) -> HandleId {
     table
         .with_lock(|tbl| {
-            tbl.insert(Handle::new(
-                KObject::Process(ProcessObject::new()),
+            tbl.insert(Capability::new(
+                CapabilityTarget::Process(ProcessObject::new()),
                 Rights::WRITE,
             ))
         })
@@ -274,10 +274,10 @@ fn insert_region_with_rights(
         NonZeroUsize::new(size).unwrap(),
         access,
     ));
-    let ko = KObject::Memory(region);
-    let rights = rights.unwrap_or_else(|| Rights::defaults_for(&ko));
+    let target = CapabilityTarget::Memory(region);
+    let rights = rights.unwrap_or_else(|| Rights::defaults_for(&target));
     table
-        .with_lock(|tbl| tbl.insert(Handle::new(ko, rights)))
+        .with_lock(|tbl| tbl.insert(Capability::new(target, rights)))
         .expect("insert region")
 }
 

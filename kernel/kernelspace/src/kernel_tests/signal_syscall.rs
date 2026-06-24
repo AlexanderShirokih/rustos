@@ -7,11 +7,11 @@ extern crate alloc;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use kernel_tests::kernel_test;
-use kobject::{
-    Handle, KObject, Rights, SIGNALED, Signal, WakeCount, Waker, install_handle, signal_create,
-    signal_set, signal_wait_one,
+use capability::{
+    Capability, CapabilityTarget, Rights, SIGNALED, Signal, WakeCount, Waker, install_handle,
+    signal_create, signal_set, signal_wait_one,
 };
+use kernel_tests::kernel_test;
 
 #[kernel_test]
 fn signal_create_signal_wait_round_trip() {
@@ -35,8 +35,8 @@ fn signal_set_count_wakes_at_most_n() {
     }
 
     let signal = Signal::new();
-    let id = install_handle(Handle::new(
-        KObject::Signal(signal.clone()),
+    let id = install_handle(Capability::new(
+        CapabilityTarget::Signal(signal.clone()),
         Rights::WRITE | Rights::READ,
     ))
     .expect("install_handle must succeed");

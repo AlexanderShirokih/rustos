@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::num::NonZeroU32;
 
-use super::{errors::IpcError, object::KObject, rev_node::RevNode, rights::Rights};
+use super::{errors::IpcError, rev_node::RevNode, rights::Rights, target::CapabilityTarget};
 
 /// Публичный идентификатор записи в `HandleTable`, используемый процессами для IPC.
 ///
@@ -51,43 +51,43 @@ impl HandleId {
     }
 }
 
-/// Запись в [`HandleTable`](super::HandleTable): kernel-объект,
-/// права, с которыми этот handle может быть использован, и значок (badge).
+/// Запись в [`HandleTable`](super::HandleTable): capability target,
+/// права, с которыми эта capability может быть использована, и значок (badge).
 ///
-/// `badge` - свойство хэндла: разные хендлы на один и тот же
+/// `badge` - свойство capability: разные capability на один и тот же
 /// `Port` несут разные значки. `0` означает "без значка". На приёме
-/// сообщения ядро доставляет значок port-хендла отправителя получателю.
-pub struct Handle {
-    pub(super) object: KObject,
+/// сообщения ядро доставляет значок port-capability отправителя получателю.
+pub struct Capability {
+    pub(super) target: CapabilityTarget,
     rights: Rights,
     badge: u64,
     node: Arc<RevNode>,
 }
 
-impl core::fmt::Debug for Handle {
+impl core::fmt::Debug for Capability {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Handle")
+        f.debug_struct("Capability")
             .field("rights", &self.rights)
             .field("badge", &self.badge)
             .finish_non_exhaustive()
     }
 }
 
-impl Handle {
-    /// Создаёт незаклеймённый handle (`badge == 0`).
-    pub fn new(object: KObject, rights: Rights) -> Self {
+impl Capability {
+    /// Создаёт незаклеймённую capability (`badge == 0`).
+    pub fn new(target: CapabilityTarget, rights: Rights) -> Self {
         Self {
-            object,
+            target,
             rights,
             badge: 0,
             node: RevNode::new_root(),
         }
     }
 
-    /// Создаёт handle с заданным значком `badge`.
-    pub fn new_with_badge(object: KObject, rights: Rights, badge: u64) -> Self {
+    /// Создаёт capability с заданным значком `badge`.
+    pub fn new_with_badge(target: CapabilityTarget, rights: Rights, badge: u64) -> Self {
         Self {
-            object,
+            target,
             rights,
             badge,
             node: RevNode::new_root(),
@@ -103,18 +103,18 @@ impl Handle {
         self.rights
     }
 
-    /// Значок (badge) этого хендла; `0` означает «без значка».
+    /// Значок (badge) этой capability; `0` означает «без значка».
     pub fn badge(&self) -> u64 {
         self.badge
     }
 
-    pub fn object(&self) -> &KObject {
-        &self.object
+    pub fn target(&self) -> &CapabilityTarget {
+        &self.target
     }
 
-    /// Создаёт копию handle'а с подмножеством прав и (опционально) значком.
+    /// Создаёт копию capability с подмножеством прав и (опционально) значком.
     ///
-    /// Возвращает [`IpcError::AccessDenied`], если у исходного handle'а нет
+    /// Возвращает [`IpcError::AccessDenied`], если у исходной capability нет
     /// права [`Rights::DUPLICATE`] либо запрошенный набор прав не является
     /// подмножеством существующего.
     pub fn duplicate(&self, new_rights: Rights, new_badge: u64) -> Result<Self, IpcError> {
@@ -134,7 +134,7 @@ impl Handle {
         };
         let node = RevNode::new_child(&self.node).ok_or(IpcError::Revoked)?;
         Ok(Self {
-            object: self.object.clone(),
+            target: self.target.clone(),
             rights: new_rights,
             badge,
             node,

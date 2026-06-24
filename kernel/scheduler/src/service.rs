@@ -1,11 +1,11 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use collections::{LockCell, MutexCell};
-use kobject::{
+use capability::{
     HandleTable, IpcError, KernelRuntime, LoadImageError, ParkState, ProcessObject,
     StartProcessError, ThreadObject, UserImageInstall, UserStartSpec, UserThreadEntry, WaitToken,
 };
+use collections::{LockCell, MutexCell};
 use memory::{UserVmContext, virtual_address::VirtualAddress};
 
 use super::{
@@ -83,7 +83,7 @@ where
     pub fn create_empty_process(
         &self,
         name: &str,
-    ) -> Result<Arc<ProcessObject>, kobject::SpawnError> {
+    ) -> Result<Arc<ProcessObject>, capability::SpawnError> {
         self.inner
             .with_lock(|inner| inner.create_empty_process(name))
             .map_err(Into::into)
@@ -93,7 +93,7 @@ where
         &self,
         process: &Arc<ProcessObject>,
         entry: UserThreadEntry,
-    ) -> Result<Arc<ThreadObject>, kobject::SpawnError> {
+    ) -> Result<Arc<ThreadObject>, capability::SpawnError> {
         self.inner
             .with_lock(|inner| inner.create_user_thread(process, entry))
             .map_err(Into::into)
@@ -106,7 +106,7 @@ where
     ) -> Result<(), IpcError> {
         let signals = self
             .inner
-            .with_lock(|inner| inner.terminate_thread_ko(thread, exit_code));
+            .with_lock(|inner| inner.terminate_thread_object(thread, exit_code));
         signals.emit();
         Ok(())
     }
@@ -118,7 +118,7 @@ where
     ) -> Result<(), IpcError> {
         let signals = self
             .inner
-            .with_lock(|inner| inner.terminate_process_ko(process, exit_code));
+            .with_lock(|inner| inner.terminate_process_object(process, exit_code));
         signals.emit();
         Ok(())
     }
@@ -243,7 +243,7 @@ where
             .with_lock(|inner| inner.unblock_thread(thread_id));
     }
 
-    fn set_blocked_cancel(&self, cancel: Arc<dyn kobject::CancelTarget>) {
+    fn set_blocked_cancel(&self, cancel: Arc<dyn capability::CancelTarget>) {
         self.inner
             .with_lock(|inner| inner.set_current_blocked_cancel(cancel));
     }

@@ -1,9 +1,9 @@
-//! Kernel-объекты и таблица handle'ов.
+//! capability targets и таблица handle'ов.
 //!
 //! Модуль реализует базис capability-based IPC: всё, к чему один процесс
 //! может обращаться у другого (канал, событие, в перспективе -
-//! поток, MMIO-регион, IRQ), представлено `KObject` и доступно строго
-//! через `Handle` в [`HandleTable`] вызывающего процесса.
+//! поток, MMIO-регион, IRQ), представлено `CapabilityTarget` и доступно строго
+//! через `Capability` в [`HandleTable`] вызывающего процесса.
 //!
 #![cfg_attr(not(test), no_std)]
 
@@ -16,7 +16,6 @@ mod errors;
 mod handle;
 mod handle_table;
 mod ipc_buffer_xfer;
-mod object;
 mod port;
 mod process;
 mod reply;
@@ -26,6 +25,7 @@ mod rights;
 mod runtime;
 mod signal;
 mod spawn;
+mod target;
 mod termination;
 mod thread;
 mod wait;
@@ -36,10 +36,9 @@ pub use api::{
     thread_termination_signal,
 };
 pub use errors::{IpcError, SpawnError};
-pub use handle::{Handle, HandleId};
+pub use handle::{Capability, HandleId};
 pub use handle_table::{HandleReservation, HandleTable};
 pub use ipc_buffer_xfer::transfer_rendezvous;
-pub use object::KObject;
 pub use port::{KernelIpcBuffer, Port, ThreadTransport, port_call, port_recv, port_send};
 pub use process::ProcessObject;
 pub use reply::Reply;
@@ -51,5 +50,6 @@ pub use signal::{SIGNALED, Signal, WakeCount};
 pub use spawn::{
     LoadImageError, StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec,
 };
+pub use target::CapabilityTarget;
 pub use thread::ThreadObject;
 pub use wait::{CancelTarget, Waker};

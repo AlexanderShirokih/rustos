@@ -7,13 +7,13 @@ use kernel_tests::kernel_test;
 
 #[kernel_test]
 fn handle_table_basic() {
-    use kobject::{Handle, HandleTable, IpcError, KObject, Port, Rights, Signal};
+    use capability::{Capability, CapabilityTarget, HandleTable, IpcError, Port, Rights, Signal};
 
     let mut table = HandleTable::with_capacity(4);
 
-    // Тестируем с реальным Port KO.
-    let handle = Handle::new(
-        KObject::Port(Port::new()),
+    // Тестируем с реальным Port capability target.
+    let handle = Capability::new(
+        CapabilityTarget::Port(Port::new()),
         Rights::DUPLICATE | Rights::READ | Rights::WRITE,
     );
 
@@ -37,7 +37,7 @@ fn handle_table_basic() {
     table.remove(id).expect("remove must succeed");
     kernel_tests::kassert!(matches!(table.remove(id), Err(IpcError::BadHandle)));
 
-    let signal_handle = Handle::new(KObject::Signal(Signal::new()), Rights::READ);
+    let signal_handle = Capability::new(CapabilityTarget::Signal(Signal::new()), Rights::READ);
     let nid = table
         .insert(signal_handle)
         .expect("signal insert must succeed");

@@ -3,8 +3,8 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{marker::PhantomData, num::NonZeroUsize};
 
+use capability::{HandleTable, ProcessObject, ThreadObject};
 use collections::{LockCell, MutexCell};
-use kobject::{HandleTable, ProcessObject, ThreadObject};
 use memory::{
     AccessMask, MappingTag, MemFlags, MemoryRegion,
     frame_allocator::FrameAllocator,
@@ -404,13 +404,13 @@ where
             .with_lock(|inner| inner.threads.get(id).map(Thread::process))
     }
 
-    /// `ProcessId` процесса по lifecycle-KO; `None` если процесс не найден.
-    pub fn process_id_for(&self, ko: &Arc<ProcessObject>) -> Option<ProcessId> {
+    /// `ProcessId` процесса по lifecycle-capability target; `None` если процесс не найден.
+    pub fn process_id_for(&self, target: &Arc<ProcessObject>) -> Option<ProcessId> {
         self.inner.with_lock(|inner| {
             inner
                 .processes
                 .iter()
-                .find(|p| Arc::ptr_eq(p.process_object(), ko))
+                .find(|p| Arc::ptr_eq(p.process_object(), target))
                 .map(Process::id)
         })
     }
@@ -868,15 +868,15 @@ where
     pub(super) fn begin_exit_current(&mut self, exit_code: i32) -> DeferredSignals {
         let mut signals = DeferredSignals::default();
         let current_id = self.current();
-        let (exiting_pid, thread_ko) = if let Some(thread) = self.threads.get_mut(current_id) {
+        let (exiting_pid, thread_object) = if let Some(thread) = self.threads.get_mut(current_id) {
             thread.set_state(ThreadState::Terminated);
             (Some(thread.process()), Some(thread.thread_object().clone()))
         } else {
             (None, None)
         };
 
-        if let Some(ko) = thread_ko {
-            signals.push_thread(ko, exit_code);
+        if let Some(target) = thread_object {
+            signals.push_thread(target, exit_code);
         }
 
         // На нуле поднимаем terminated процесса ДО `cleanup_pending_process_removals`
@@ -925,18 +925,18 @@ where
 
     pub(crate) fn create_user_thread(
         &mut self,
-        process_ko: &Arc<ProcessObject>,
-        entry: kobject::UserThreadEntry,
+        process_object: &Arc<ProcessObject>,
+        entry: capability::UserThreadEntry,
     ) -> Result<Arc<ThreadObject>, SpawnError> {
-        let (thread_id, thread_ko) = self.prepare_user_thread(process_ko, entry)?;
+        let (thread_id, thread_object) = self.prepare_user_thread(process_object, entry)?;
         self.enqueue_user_thread_ready(thread_id);
-        Ok(thread_ko)
+        Ok(thread_object)
     }
 
     pub(crate) fn prepare_user_thread(
         &mut self,
-        process_ko: &Arc<ProcessObject>,
-        entry: kobject::UserThreadEntry,
+        process_object: &Arc<ProcessObject>,
+        entry: capability::UserThreadEntry,
     ) -> Result<(ThreadId, Arc<ThreadObject>), SpawnError> {
         if (entry.priority as usize) >= self.config.priority_levels() {
             return Err(SpawnError::InvalidPriority);
@@ -946,7 +946,7 @@ where
         let process_id = self
             .processes
             .iter()
-            .find(|p| Arc::ptr_eq(p.process_object(), process_ko))
+            .find(|p| Arc::ptr_eq(p.process_object(), process_object))
             .map(Process::id)
             .ok_or(SpawnError::NoFreeThreadSlots)?;
         // Защита от обхода ProcessStart через прямой syscall ThreadCreate:
@@ -1015,14 +1015,14 @@ where
             return Err(e);
         }
 
-        let thread_ko = self
+        let thread_object = self
             .threads
             .get(thread_id)
             .expect("thread must exist after insert")
             .thread_object()
             .clone();
 
-        Ok((thread_id, thread_ko))
+        Ok((thread_id, thread_object))
     }
 
     fn attach_ipc_buffer(
@@ -1147,7 +1147,7 @@ where
         }
     }
 
-    pub(crate) fn set_current_blocked_cancel(&mut self, cancel: Arc<dyn kobject::CancelTarget>) {
+    pub(crate) fn set_current_blocked_cancel(&mut self, cancel: Arc<dyn capability::CancelTarget>) {
         let current_id = self.current();
         if let Some(thread) = self.threads.get_mut(current_id) {
             thread.set_blocked_cancel(cancel);
@@ -1194,13 +1194,13 @@ where
 
     pub(crate) fn load_user_image_into(
         &mut self,
-        process_ko: &Arc<ProcessObject>,
-        install: &kobject::UserImageInstall,
-    ) -> Result<(), kobject::LoadImageError> {
-        use kobject::LoadImageError;
+        process_object: &Arc<ProcessObject>,
+        install: &capability::UserImageInstall,
+    ) -> Result<(), capability::LoadImageError> {
+        use capability::LoadImageError;
 
         let process = self
-            .process_by_object_mut(process_ko)
+            .process_by_object_mut(process_object)
             .ok_or(LoadImageError::ProcessNotFound)?;
         if process.is_image_loaded()
             || process.thread_count() != 0
@@ -1269,12 +1269,12 @@ where
 
     pub(crate) fn start_user_process(
         &mut self,
-        process_ko: &Arc<ProcessObject>,
-        spec: kobject::UserStartSpec,
-    ) -> Result<Arc<ThreadObject>, kobject::StartProcessError> {
-        use kobject::StartProcessError;
+        process_object: &Arc<ProcessObject>,
+        spec: capability::UserStartSpec,
+    ) -> Result<Arc<ThreadObject>, capability::StartProcessError> {
+        use capability::StartProcessError;
 
-        let kobject::UserStartSpec {
+        let capability::UserStartSpec {
             entry,
             loader_handle_table,
             handle_ids,
@@ -1282,7 +1282,7 @@ where
         } = spec;
 
         {
-            let Some(process) = self.process_by_object_mut(process_ko) else {
+            let Some(process) = self.process_by_object_mut(process_object) else {
                 return Err(StartProcessError::ProcessNotFound);
             };
             if !process.is_image_loaded()
@@ -1298,16 +1298,16 @@ where
         if let Err(e) = loader_handle_table.with_lock(|tbl| {
             for (i, id) in handle_ids.iter().enumerate() {
                 if handle_ids[..i].iter().any(|prev| prev == id) {
-                    return Err(kobject::IpcError::BadHandle);
+                    return Err(capability::IpcError::BadHandle);
                 }
-                tbl.get(*id, kobject::Rights::TRANSFER)?;
+                tbl.get(*id, capability::Rights::TRANSFER)?;
             }
             Ok(())
         }) {
             return Err(StartProcessError::HandleValidationFailed(e));
         }
 
-        let (thread_id, thread_ko) = match self.prepare_user_thread(process_ko, entry) {
+        let (thread_id, thread_object) = match self.prepare_user_thread(process_object, entry) {
             Ok(t) => t,
             Err(source) => return Err(StartProcessError::SpawnFailed(source.into())),
         };
@@ -1315,7 +1315,7 @@ where
         // Validate и drain в разных with_lock-окнах; на гонке (другой
         // syscall закрыл handle между шагами) откатываем prepared thread.
         let drained = match loader_handle_table
-            .with_lock(|tbl| tbl.try_drain_for_transfer(&handle_ids, kobject::Rights::TRANSFER))
+            .with_lock(|tbl| tbl.try_drain_for_transfer(&handle_ids, capability::Rights::TRANSFER))
         {
             Ok(d) => d,
             Err(e) => {
@@ -1327,7 +1327,7 @@ where
         // Insert не фейлит: child-table пуста и MAX_BOOTSTRAP_HANDLES
         // много меньше DEFAULT_CAPACITY.
         let child_table = self
-            .process_by_object_mut(process_ko)
+            .process_by_object_mut(process_object)
             .expect("process still present")
             .handle_table()
             .clone();
@@ -1340,30 +1340,30 @@ where
 
         // До enqueue: стартовый поток не должен аллоцировать раньше засева.
         if let Some(resource) = metering_resource {
-            process_ko.set_metering_resource(resource);
+            process_object.set_metering_resource(resource);
         }
 
         self.enqueue_user_thread_ready(thread_id);
 
-        Ok(thread_ko)
+        Ok(thread_object)
     }
 
-    fn process_by_object_mut(&mut self, ko: &Arc<ProcessObject>) -> Option<&mut Process> {
+    fn process_by_object_mut(&mut self, target: &Arc<ProcessObject>) -> Option<&mut Process> {
         self.processes
             .iter_mut_internal()
-            .find(|p| Arc::ptr_eq(p.process_object(), ko))
+            .find(|p| Arc::ptr_eq(p.process_object(), target))
     }
 
     fn collect_thread_termination(
         &mut self,
-        thread_ko: &Arc<ThreadObject>,
+        thread_object: &Arc<ThreadObject>,
         exit_code: i32,
         signals: &mut DeferredSignals,
     ) {
         let lookup = self
             .threads
             .iter()
-            .find(|t| Arc::ptr_eq(t.thread_object(), thread_ko))
+            .find(|t| Arc::ptr_eq(t.thread_object(), thread_object))
             .map(|t| (t.id(), t.process(), t.state()));
         let Some((thread_id, pid, state)) = lookup else {
             return;
@@ -1376,7 +1376,7 @@ where
             thread.set_state(ThreadState::Terminated);
             thread.take_blocked_cancel()
         });
-        signals.push_thread(thread_ko.clone(), exit_code);
+        signals.push_thread(thread_object.clone(), exit_code);
 
         // Cancel снимает Waiter с очереди и переводит OutcomeSlot в TIMEDOUT,
         // отклоняя поздний reply. Thread не реапим: стек заморожен в syscall и держит Arc'и.
@@ -1393,31 +1393,31 @@ where
         }
     }
 
-    pub(crate) fn terminate_thread_ko(
+    pub(crate) fn terminate_thread_object(
         &mut self,
-        thread_ko: &Arc<ThreadObject>,
+        thread_object: &Arc<ThreadObject>,
         exit_code: i32,
     ) -> DeferredSignals {
         let mut signals = DeferredSignals::default();
-        self.collect_thread_termination(thread_ko, exit_code, &mut signals);
+        self.collect_thread_termination(thread_object, exit_code, &mut signals);
         signals
     }
 
-    pub(crate) fn terminate_process_ko(
+    pub(crate) fn terminate_process_object(
         &mut self,
-        process_ko: &Arc<ProcessObject>,
+        process_object: &Arc<ProcessObject>,
         exit_code: i32,
     ) -> DeferredSignals {
         let mut signals = DeferredSignals::default();
         let pid_lookup = self
             .processes
             .iter()
-            .find(|p| Arc::ptr_eq(p.process_object(), process_ko))
+            .find(|p| Arc::ptr_eq(p.process_object(), process_object))
             .map(Process::id);
         let Some(pid) = pid_lookup else {
             return signals;
         };
-        // Собираем снимок KO живых потоков под scheduler-lock'ом, чтобы
+        // Собираем снимок capability target живых потоков под scheduler-lock'ом, чтобы
         // не держать одновременно &self и &mut self при итерации.
         let live: Vec<Arc<ThreadObject>> = self
             .threads
@@ -1426,14 +1426,14 @@ where
             .map(|t| t.thread_object().clone())
             .collect();
         if live.is_empty() {
-            signals.push_process(process_ko.clone(), exit_code);
+            signals.push_process(process_object.clone(), exit_code);
             if !self.pending_process_removals.contains(&pid) {
                 self.pending_process_removals.push(pid);
             }
             return signals;
         }
-        for ko in &live {
-            self.collect_thread_termination(ko, exit_code, &mut signals);
+        for target in &live {
+            self.collect_thread_termination(target, exit_code, &mut signals);
         }
         signals
     }
@@ -1501,7 +1501,7 @@ where
             None => return ScheduleAction::None,
         };
 
-        // Поток мог быть переведён в `Terminated` через `terminate_thread_ko`
+        // Поток мог быть переведён в `Terminated` через `terminate_thread_object`
         // пока стоял в ready_queue: пропускаем такие записи и берём следующую.
         let next_id = loop {
             let popped = self
@@ -1717,5 +1717,5 @@ unsafe extern "C" fn thread_trampoline<A: ArchContext>(arg: *mut ()) -> ! {
     let TrampolinePayload { entry } = *payload;
     <A::Cpu as ArchCpu>::enable_preemption();
     entry();
-    kobject::thread_exit(0)
+    capability::thread_exit(0)
 }

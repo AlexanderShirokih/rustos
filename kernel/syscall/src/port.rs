@@ -3,10 +3,11 @@
 //! Сообщение в per-thread IPC-буфере: tag задаёт `(len, ncaps)`, тело в `data[..len]`,
 //! хендлы в `caps[..ncaps]`.
 
-use collections::LockCell;
-use kobject::{
-    Handle, KObject, Port, Rights, ThreadTransport, port_call, port_recv, port_send, runtime,
+use capability::{
+    Capability, CapabilityTarget, Port, Rights, ThreadTransport, port_call, port_recv, port_send,
+    runtime,
 };
+use collections::LockCell;
 use memory::virtual_address::VirtualAddress;
 
 use super::{bridge::parse_handle_id, error::SyscallError, runtime::runtime as syscall_runtime};
@@ -36,8 +37,8 @@ pub(super) fn sys_port_create() -> Result<u64, SyscallError> {
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let port = Port::new();
-    let ko = KObject::Port(port);
-    let handle = Handle::new(ko.clone(), Rights::defaults_for(&ko));
+    let target = CapabilityTarget::Port(port);
+    let handle = Capability::new(target.clone(), Rights::defaults_for(&target));
 
     let id = table
         .with_lock(|tbl| tbl.insert(handle))
@@ -93,8 +94,8 @@ pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
     match reply {
         None => Ok(0),
         Some(reply) => {
-            let ko = KObject::Reply(reply);
-            let h = Handle::new(ko.clone(), Rights::defaults_for(&ko));
+            let target = CapabilityTarget::Reply(reply);
+            let h = Capability::new(target.clone(), Rights::defaults_for(&target));
             let reply_id = table
                 .with_lock(|tbl| tbl.insert(h))
                 .map_err(SyscallError::from)?;

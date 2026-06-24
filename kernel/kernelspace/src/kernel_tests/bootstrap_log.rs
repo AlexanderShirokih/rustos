@@ -3,16 +3,16 @@
 use alloc::sync::Arc;
 
 use bootstrap::{BootstrapClient, BootstrapService, LOG_MESSAGE_MAX, dispatch_bootstrap};
+use capability::{
+    Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, KernelIpcBuffer, Port,
+    Rights, SIGNALED, Signal, ThreadTransport, install_handle, port_send, runtime, signal_wait_one,
+};
 use collections::{LockCell, MutexCell};
 use ipc::{
     MessageLen, Transport,
     wire::{IpcError as WireError, Str},
 };
 use kernel_tests::kernel_test;
-use kobject::{
-    Handle, HandleTable, IpcError as KernelIpcError, KObject, KernelIpcBuffer, Port, Rights,
-    SIGNALED, Signal, ThreadTransport, install_handle, port_send, runtime, signal_wait_one,
-};
 use scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
 use syscall::{IpcBuffer, decode_tag, encode_tag};
 
@@ -69,7 +69,7 @@ impl Transport for KernelServerTransport {
 
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, WireError> {
         let receiver = ThreadTransport::new_kernel(self.buffer.clone(), self.table.clone());
-        let _ = kobject::port_recv(&self.port, receiver, runtime(), None).map_err(map_err)?;
+        let _ = capability::port_recv(&self.port, receiver, runtime(), None).map_err(map_err)?;
         self.buffer.with_lock(|buf| load(buf, bytes, handles))
     }
 
@@ -107,8 +107,11 @@ fn bootstrap_log_round_trip_over_port() {
     let port = Port::new();
 
     let signal = Signal::new();
-    let signal_id = install_handle(Handle::new(KObject::Signal(signal.clone()), Rights::READ))
-        .expect("install signal handle");
+    let signal_id = install_handle(Capability::new(
+        CapabilityTarget::Signal(signal.clone()),
+        Rights::READ,
+    ))
+    .expect("install signal handle");
 
     // Серверный логгер-таск: один recv+dispatch, sink сигналит доставку.
     let scheduler = super::scheduler().clone();

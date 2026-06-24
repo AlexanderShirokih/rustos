@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use kobject::{CancelTarget, ThreadObject};
+use capability::{CancelTarget, ThreadObject};
 use memory::{MemoryRegion, virtual_address::VirtualAddress};
 
 use super::arch::{ArchContext, CpuId, ThreadStack};
@@ -46,7 +46,7 @@ pub struct Thread<A: ArchContext> {
     arch: A,
     stack: ThreadStack,
     name: &'static str,
-    ko: Arc<ThreadObject>,
+    target: Arc<ThreadObject>,
     /// Per-thread IPC-буфер. `None` у kernel-потоков (нет user-памяти);
     /// у user-потоков заполняется при `prepare_user_thread`.
     ipc_buffer: Option<IpcBufferSlot>,
@@ -76,7 +76,7 @@ impl<A: ArchContext> Thread<A> {
             arch,
             stack,
             name,
-            ko: ThreadObject::new(),
+            target: ThreadObject::new(),
             ipc_buffer: None,
             blocked_cancel: None,
         }
@@ -130,9 +130,9 @@ impl<A: ArchContext> Thread<A> {
         self.name
     }
 
-    /// Lifecycle-KO потока; переживает удаление из `ThreadTable`.
+    /// Lifecycle-capability target потока; переживает удаление из `ThreadTable`.
     pub fn thread_object(&self) -> &Arc<ThreadObject> {
-        &self.ko
+        &self.target
     }
 
     /// User-VA per-thread IPC-буфера; `None` у kernel-потоков.

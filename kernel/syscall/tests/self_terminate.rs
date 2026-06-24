@@ -5,12 +5,12 @@
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use collections::{LockCell, MutexCell};
-use kobject::{
-    Handle, HandleId, HandleTable, IpcError, KObject, KernelRuntime, LoadImageError, ProcessObject,
-    Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
-    UserThreadEntry, WaitToken, install_runtime,
+use capability::{
+    Capability, CapabilityTarget, HandleId, HandleTable, IpcError, KernelRuntime, LoadImageError,
+    ProcessObject, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
+    UserStartSpec, UserThreadEntry, WaitToken, install_runtime,
 };
+use collections::{LockCell, MutexCell};
 use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use syscall_kernel::{Origin, SyscallError, SyscallFrame, SyscallOp, SyscallRuntime};
 
@@ -42,7 +42,7 @@ impl KernelRuntime for SelfRuntime {
     }
     fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
     fn unblock(&self, _t: WaitToken) {}
-    fn set_blocked_cancel(&self, _cancel: Arc<dyn kobject::CancelTarget>) {}
+    fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
     fn clear_blocked_cancel(&self) {}
 }
 
@@ -156,7 +156,12 @@ fn process_terminate_on_self_handle_is_access_denied() {
 
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
     let pid = table
-        .with_lock(|tbl| tbl.insert(Handle::new(KObject::Process(process), Rights::WRITE)))
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Process(process),
+                Rights::WRITE,
+            ))
+        })
         .expect("insert self process handle");
     *rt.handle_table.lock().unwrap() = Some(table);
 
@@ -176,7 +181,12 @@ fn thread_terminate_on_self_handle_is_access_denied() {
 
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
     let tid = table
-        .with_lock(|tbl| tbl.insert(Handle::new(KObject::Thread(thread), Rights::WRITE)))
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Thread(thread),
+                Rights::WRITE,
+            ))
+        })
         .expect("insert self thread handle");
     *rt.handle_table.lock().unwrap() = Some(table);
 
@@ -197,7 +207,12 @@ fn process_terminate_on_other_handle_succeeds() {
     let other = ProcessObject::new();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
     let pid = table
-        .with_lock(|tbl| tbl.insert(Handle::new(KObject::Process(other), Rights::WRITE)))
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Process(other),
+                Rights::WRITE,
+            ))
+        })
         .expect("insert other process handle");
     *rt.handle_table.lock().unwrap() = Some(table);
 

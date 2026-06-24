@@ -1,4 +1,4 @@
-//! KO-wait механизм: `block_current`/`unblock_thread` и состояние `Blocked`,
+//! capability target-wait механизм: `block_current`/`unblock_thread` и состояние `Blocked`,
 //! доступные через `KernelRuntime::block_current_until`/`unblock`. Проверяем
 //! наблюдаемое поведение: уход current-потока в парк, корректное возобновление
 //! и idempotency, timeout-парк через `SleepQueue`, а также stale-entry skip в
@@ -8,7 +8,7 @@ mod common;
 
 use std::sync::atomic::AtomicU32;
 
-use kobject::{KernelRuntime, ParkState, WaitToken};
+use capability::{KernelRuntime, ParkState, WaitToken};
 use scheduler::{Scheduler, SchedulerConfig, SpawnConfig, Uninit};
 
 use crate::common::{MockContext, MockTimer, MockTimerSource, reset_switches, with_simulated_irq};

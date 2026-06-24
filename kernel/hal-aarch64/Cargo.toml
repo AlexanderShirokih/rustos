@@ -32,7 +32,7 @@ drivers-aarch64 = { workspace = true }
 bootstrap = { workspace = true }
 ipc = { workspace = true }
 kernelspace = { workspace = true }
-kobject = { workspace = true }
+capability = { workspace = true }
 scheduler = { workspace = true }
 syscall = { workspace = true }
 syscall-kernel = { workspace = true }

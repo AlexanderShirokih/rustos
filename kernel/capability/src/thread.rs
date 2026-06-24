@@ -1,4 +1,4 @@
-//! `Thread` kernel object: lifecycle-объект потока.
+//! `Thread` capability target: lifecycle-объект потока.
 //!
 //! Симметричен [`ProcessObject`](super::process::ProcessObject): завершение
 //! наблюдается через bound-[`Signal`] (`termination_signal`).

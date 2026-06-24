@@ -2,11 +2,11 @@
 
 use alloc::sync::Arc;
 
-use drivers_common::services::timer::{TickHandler, TimerService};
-use kobject::{
+use capability::{
     IpcError, LoadImageError, ProcessObject, SpawnError, StartProcessError, ThreadObject,
     UserImageInstall, UserStartSpec, UserThreadEntry,
 };
+use drivers_common::services::timer::{TickHandler, TimerService};
 use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use scheduler::{
     ArchContext, Bootstrapped, Scheduler, SchedulerConfig, SchedulerHandle, SchedulerService,
@@ -165,7 +165,7 @@ where
     let tick_handler: Arc<dyn TickHandler> = Arc::new(SchedulerTickHandler {
         handle: handle.clone(),
     });
-    let kobject_runtime: Arc<dyn kobject::KernelRuntime> = Arc::new(handle.clone());
+    let kobject_runtime: Arc<dyn capability::KernelRuntime> = Arc::new(handle.clone());
     let syscall_runtime: Arc<dyn syscall_kernel::SyscallRuntime> =
         Arc::new(SchedulerSyscallRuntime { handle });
 
@@ -175,7 +175,7 @@ where
             .expect("SchedulerService registration must succeed");
     });
     timer.set_handler(tick_handler);
-    kobject::install_runtime(kobject_runtime);
+    capability::install_runtime(kobject_runtime);
     syscall_kernel::install_runtime(syscall_runtime);
     syscall_bridge::install_scheduler(service);
 

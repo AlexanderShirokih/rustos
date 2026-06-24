@@ -4,7 +4,7 @@ use core::arch::asm;
 
 use syscall::{Handle, SyscallOp, WaitItem, WakeCount};
 
-/// Ждёт сигналы `signals` на KO `handle`; `timeout_ns == 0` - non-blocking
+/// Ждёт сигналы `signals` на capability target `handle`; `timeout_ns == 0` - non-blocking
 /// poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
 pub fn signal_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
     let ret: i64;
@@ -25,7 +25,7 @@ pub fn signal_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
     ret
 }
 
-/// Меняет биты сигналов KO `handle`: `set`/`clear` - нижние 32 бита,
+/// Меняет биты сигналов capability target `handle`: `set`/`clear` - нижние 32 бита,
 /// `count` - политика пробуждения ([`WakeCount`]). Возврат: 0 либо
 /// `-(SyscallError)`.
 pub fn signal_set(handle: Handle, set: u32, clear: u32, count: WakeCount) -> i64 {
@@ -47,9 +47,9 @@ pub fn signal_set(handle: Handle, set: u32, clear: u32, count: WakeCount) -> i64
     ret
 }
 
-/// Ждёт сигналы на нескольких KO: `items` - записи `[handle, mask]`,
+/// Ждёт сигналы на нескольких capability target: `items` - записи `[handle, mask]`,
 /// `timeout_ns == 0` - non-blocking poll. Возврат: `(observed, index)` -
-/// observed-маска сработавшего KO (>=0 либо `-(SyscallError)`) и его индекс
+/// observed-маска сработавшего capability target (>=0 либо `-(SyscallError)`) и его индекс
 /// в `items`.
 pub fn signal_wait_many(items: &[WaitItem], timeout_ns: u64) -> (i64, u64) {
     let observed: i64;

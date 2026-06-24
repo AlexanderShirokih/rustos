@@ -241,7 +241,7 @@ mod tests {
             let h = CountingHook::new();
             root.register_hook(Arc::downgrade(&h) as Weak<dyn RevocationHook>);
         }
-        
+
         let live = CountingHook::new();
         root.register_hook(Arc::downgrade(&live) as Weak<dyn RevocationHook>);
         revoke_subtree(&root);

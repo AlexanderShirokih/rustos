@@ -2,7 +2,7 @@
 //!
 //! Возврат: `i64`, успех `[0, i64::MAX]`, ошибка `-(code as i64)` в `[-MAX_ERR..-1]`.
 
-use kobject::{IpcError, SpawnError};
+use capability::{IpcError, SpawnError};
 
 /// Ошибки, возвращаемые syscall-слоем.
 ///
@@ -14,7 +14,7 @@ pub enum SyscallError {
     /// Неизвестный номер операции.
     BadSyscall = 1,
     /// Syscall вызван из kernel-контекста; kernel-side IPC должен ходить
-    /// через прямой вызов `kobject`, а не через trap.
+    /// через прямой вызов `capability`, а не через trap.
     KernelOriginated = 2,
     /// Аргумент syscall'а не прошёл валидацию (например, `HandleId == 0`).
     InvalidArgument = 3,
@@ -34,7 +34,7 @@ pub enum SyscallError {
     BufferTooSmall = 10,
     /// Сообщение превышает лимит размера.
     MessageTooBig = 11,
-    /// Handle-таблица процесса исчерпана.
+    /// Capability-таблица процесса исчерпана.
     OutOfHandles = 12,
     /// Не хватает физической или виртуальной памяти, либо реестр регионов
     /// процесса исчерпан.

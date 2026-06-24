@@ -4,8 +4,8 @@ mod common;
 
 use std::boxed::Box;
 
+use capability::{Capability, CapabilityTarget, Rights, Signal};
 use kernelspace::{SpawnUserError, UserProcessSpawner};
-use kobject::{Handle, KObject, Rights, Signal};
 use memory::{
     MemFlags,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
@@ -80,9 +80,9 @@ fn spawn_user_process_with_too_many_initial_handles_is_rejected() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let too_many = (kobject::HandleTable::DEFAULT_CAPACITY as usize) + 1;
-    let handles: Vec<Handle> = (0..too_many)
-        .map(|_| Handle::new(KObject::Signal(Signal::new()), Rights::WRITE))
+    let too_many = (capability::HandleTable::DEFAULT_CAPACITY as usize) + 1;
+    let handles: Vec<Capability> = (0..too_many)
+        .map(|_| Capability::new(CapabilityTarget::Signal(Signal::new()), Rights::WRITE))
         .collect();
     let launch = UserProcessLaunch::new().initial_handles(handles);
 
@@ -194,7 +194,7 @@ fn spawn_user_process_with_launch_installs_initial_handles() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let handle = Handle::new(KObject::Signal(Signal::new()), Rights::WRITE);
+    let handle = Capability::new(CapabilityTarget::Signal(Signal::new()), Rights::WRITE);
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);

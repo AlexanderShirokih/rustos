@@ -1,4 +1,4 @@
-//! `Resource` kernel object: capability-токен на минтинг `Memory`-регионов поверх
+//! `Resource` capability target: capability-токен на минтинг `Memory`-регионов поверх
 //! фиксированного физического диапазона (MMIO, DMA-буферы) и носитель
 //! ресурсного бюджета (метеринг).
 //!

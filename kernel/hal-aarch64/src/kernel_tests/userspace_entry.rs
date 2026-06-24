@@ -28,9 +28,9 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use capability::{Capability, CapabilityTarget, Rights, SIGNALED, Signal, install_handle};
 use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
-use kobject::{Handle, KObject, Rights, SIGNALED, Signal, install_handle};
 use memory::{
     MemFlags,
     memory_mapper::MemoryMapper,
@@ -139,7 +139,7 @@ static USER_AS_HOLDER: Once<Arc<AddressSpace>> = Once::new();
 #[kernel_test]
 fn userspace_eret_to_el0_invokes_dispatcher() {
     let signal = Signal::new();
-    let handle = Handle::new(KObject::Signal(signal.clone()), Rights::WRITE);
+    let handle = Capability::new(CapabilityTarget::Signal(signal.clone()), Rights::WRITE);
     let signal_handle = install_handle(handle).expect("install bootstrap Signal handle");
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");

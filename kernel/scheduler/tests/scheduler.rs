@@ -28,11 +28,11 @@ const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 16);
 const SMALL_CONFIG: SchedulerConfig = SchedulerConfig::new(4, 8);
 
 struct ForwardingRuntime {
-    inner: RwLock<Option<Arc<dyn kobject::KernelRuntime>>>,
+    inner: RwLock<Option<Arc<dyn capability::KernelRuntime>>>,
 }
 
 impl ForwardingRuntime {
-    fn set(&self, rt: Arc<dyn kobject::KernelRuntime>) {
+    fn set(&self, rt: Arc<dyn capability::KernelRuntime>) {
         *self.inner.write().unwrap() = Some(rt);
     }
 
@@ -40,7 +40,7 @@ impl ForwardingRuntime {
         *self.inner.write().unwrap() = None;
     }
 
-    fn with<R>(&self, f: impl FnOnce(&dyn kobject::KernelRuntime) -> R) -> R {
+    fn with<R>(&self, f: impl FnOnce(&dyn capability::KernelRuntime) -> R) -> R {
         let guard = self.inner.read().unwrap();
         let rt = guard
             .as_ref()
@@ -49,12 +49,12 @@ impl ForwardingRuntime {
     }
 }
 
-impl kobject::KernelRuntime for ForwardingRuntime {
-    fn current_wait_token(&self) -> kobject::WaitToken {
+impl capability::KernelRuntime for ForwardingRuntime {
+    fn current_wait_token(&self) -> capability::WaitToken {
         self.with(|rt| rt.current_wait_token())
     }
 
-    fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<kobject::HandleTable>>> {
+    fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<capability::HandleTable>>> {
         self.with(|rt| rt.current_handle_table())
     }
 
@@ -70,11 +70,11 @@ impl kobject::KernelRuntime for ForwardingRuntime {
         self.with(|rt| rt.block_current_until(ready_flag, timeout_ns));
     }
 
-    fn unblock(&self, token: kobject::WaitToken) {
+    fn unblock(&self, token: capability::WaitToken) {
         self.with(|rt| rt.unblock(token));
     }
 
-    fn set_blocked_cancel(&self, cancel: Arc<dyn kobject::CancelTarget>) {
+    fn set_blocked_cancel(&self, cancel: Arc<dyn capability::CancelTarget>) {
         self.with(|rt| rt.set_blocked_cancel(cancel));
     }
 
@@ -87,7 +87,7 @@ fn install_forwarding_runtime() -> Arc<ForwardingRuntime> {
     static FORWARDER: OnceLock<Arc<ForwardingRuntime>> = OnceLock::new();
     static INSTALLED: Once = Once::new();
 
-    let _ = kobject::ParkState::REGISTERED;
+    let _ = capability::ParkState::REGISTERED;
     let forwarder = FORWARDER
         .get_or_init(|| {
             Arc::new(ForwardingRuntime {
@@ -96,8 +96,8 @@ fn install_forwarding_runtime() -> Arc<ForwardingRuntime> {
         })
         .clone();
     INSTALLED.call_once(|| {
-        let dyn_rt: Arc<dyn kobject::KernelRuntime> = forwarder.clone();
-        kobject::install_runtime(dyn_rt);
+        let dyn_rt: Arc<dyn capability::KernelRuntime> = forwarder.clone();
+        capability::install_runtime(dyn_rt);
     });
     forwarder
 }
@@ -381,9 +381,9 @@ fn new_factory_static() -> &'static MockAddressSpaceFactory {
 
 fn mark_process_loaded(
     handle: &SchedulerHandle<MockContext, MockTimerSource>,
-    process: &Arc<kobject::ProcessObject>,
+    process: &Arc<capability::ProcessObject>,
 ) {
-    let install = kobject::UserImageInstall {
+    let install = capability::UserImageInstall {
         segments: std::vec::Vec::new(),
         entry: VirtualAddress::new(0x4000_0000),
         user_stack_top: VirtualAddress::new(0x5000_1000),
@@ -584,15 +584,15 @@ fn exit_current_signals_thread_terminated() {
     let id = scheduler
         .spawn(SpawnConfig::new("t"), || {})
         .expect("spawn t");
-    let ko = scheduler.thread_object_for(id).expect("thread_object");
+    let target = scheduler.thread_object_for(id).expect("thread_object");
 
     let running = scheduler.run();
-    assert!(!ko.terminated());
+    assert!(!target.terminated());
 
     running.exit_current();
 
-    assert!(ko.terminated());
-    assert_eq!(ko.exit_code(), 0);
+    assert!(target.terminated());
+    assert_eq!(target.exit_code(), 0);
 }
 
 #[test]
@@ -603,13 +603,13 @@ fn exit_current_with_nonzero_code_publishes_code() {
     let id = scheduler
         .spawn(SpawnConfig::new("t"), || {})
         .expect("spawn t");
-    let ko = scheduler.thread_object_for(id).expect("thread_object");
+    let target = scheduler.thread_object_for(id).expect("thread_object");
 
     let running = scheduler.run();
     running.exit_current_with_code(42);
 
-    assert!(ko.terminated());
-    assert_eq!(ko.exit_code(), 42);
+    assert!(target.terminated());
+    assert_eq!(target.exit_code(), 42);
 }
 
 #[test]
@@ -621,15 +621,15 @@ fn last_thread_exit_signals_process_terminated() {
         .spawn(SpawnConfig::new("solo"), || {})
         .expect("spawn solo");
     let pid = scheduler.thread_process_id(id).expect("process id");
-    let process_ko = scheduler.process_object_for(pid).expect("process_object");
+    let process_object = scheduler.process_object_for(pid).expect("process_object");
 
     let running = scheduler.run();
-    assert!(!process_ko.terminated());
+    assert!(!process_object.terminated());
 
     running.exit_current();
 
-    assert!(process_ko.terminated());
-    assert_eq!(process_ko.exit_code(), 0);
+    assert!(process_object.terminated());
+    assert_eq!(process_object.exit_code(), 0);
 }
 
 #[test]
@@ -656,13 +656,13 @@ fn non_last_thread_exit_does_not_signal_process() {
         .expect("spawn second");
     assert_eq!(running.thread_process_id(second), Some(pid));
 
-    let process_ko = running.process_object_for(pid).expect("process_object");
-    let first_ko = running.thread_object_for(first).expect("first ko");
+    let process_object = running.process_object_for(pid).expect("process_object");
+    let first_thread_object = running.thread_object_for(first).expect("first target");
 
     running.exit_current();
 
-    assert!(first_ko.terminated());
-    assert!(!process_ko.terminated());
+    assert!(first_thread_object.terminated());
+    assert!(!process_object.terminated());
     assert!(running.process_object_for(pid).is_some());
 }
 
@@ -675,7 +675,7 @@ fn process_object_outlives_process_table_entry() {
         .spawn(SpawnConfig::new("zombie"), || {})
         .expect("spawn");
     let pid = scheduler.thread_process_id(id).expect("process id");
-    let process_ko = scheduler.process_object_for(pid).expect("process_object");
+    let process_object = scheduler.process_object_for(pid).expect("process_object");
 
     let count_before = scheduler.process_count();
     let running = scheduler.run();
@@ -683,13 +683,12 @@ fn process_object_outlives_process_table_entry() {
 
     assert!(running.process_object_for(pid).is_none());
     assert!(running.process_count() < count_before);
-    assert!(Arc::strong_count(&process_ko) >= 1);
-    assert!(process_ko.terminated());
+    assert!(Arc::strong_count(&process_object) >= 1);
+    assert!(process_object.terminated());
 }
 
 #[test]
-fn current_thread_object_returns_running_thread_ko() {
-
+fn current_thread_object_returns_running_thread_object() {
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
@@ -709,8 +708,7 @@ fn current_thread_object_returns_running_thread_ko() {
 }
 
 #[test]
-fn current_process_object_returns_running_process_ko() {
-
+fn current_process_object_returns_running_process_object() {
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
@@ -740,18 +738,18 @@ fn kernel_thread_completion_signals_terminated() {
     let id = scheduler
         .spawn(SpawnConfig::new("t"), || {})
         .expect("spawn t");
-    let ko = scheduler.thread_object_for(id).expect("thread_object");
+    let target = scheduler.thread_object_for(id).expect("thread_object");
     let handle = scheduler.handle();
 
     let running = scheduler.run();
     assert_eq!(running.current(), id);
-    assert!(!ko.terminated());
+    assert!(!target.terminated());
 
     forwarder.set(Arc::new(handle));
 
     let prev_hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| kobject::thread_exit(0)));
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| capability::thread_exit(0)));
     panic::set_hook(prev_hook);
     assert!(
         result.is_err(),
@@ -760,13 +758,12 @@ fn kernel_thread_completion_signals_terminated() {
 
     forwarder.clear();
 
-    assert!(ko.terminated());
-    assert_eq!(ko.exit_code(), 0);
+    assert!(target.terminated());
+    assert_eq!(target.exit_code(), 0);
 }
 
 #[test]
 fn process_create_returns_handle_to_empty_process() {
-
     reset_switches();
     let factory = new_factory_static();
     let timer = MockTimer::new();
@@ -785,7 +782,6 @@ fn process_create_returns_handle_to_empty_process() {
 
 #[test]
 fn process_create_rejects_empty_name() {
-
     reset_switches();
     let factory = new_factory_static();
     let timer = MockTimer::new();
@@ -796,13 +792,13 @@ fn process_create_rejects_empty_name() {
     let Err(err) = handle.create_empty_process("") else {
         panic!("empty process name must be rejected");
     };
-    assert_eq!(err, kobject::SpawnError::InvalidName);
+    assert_eq!(err, capability::SpawnError::InvalidName);
     assert_eq!(scheduler.process_count(), processes_before);
 }
 
 #[test]
 fn thread_terminate_via_handle_signals_terminated() {
-    use kobject::UserThreadEntry;
+    use capability::UserThreadEntry;
 
     reset_switches();
     let factory = new_factory_static();
@@ -836,7 +832,7 @@ fn thread_terminate_via_handle_signals_terminated() {
 
 #[test]
 fn process_terminate_via_handle_terminates_all_threads() {
-    use kobject::UserThreadEntry;
+    use capability::UserThreadEntry;
 
     reset_switches();
     let factory = new_factory_static();
@@ -883,7 +879,6 @@ fn process_terminate_via_handle_terminates_all_threads() {
 
 #[test]
 fn switch_to_next_skips_terminated_thread_in_ready_queue() {
-
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
@@ -896,14 +891,16 @@ fn switch_to_next_skips_terminated_thread_in_ready_queue() {
     let t3 = scheduler
         .spawn(SpawnConfig::new("t3"), || {})
         .expect("spawn t3");
-    let t2_ko = scheduler.thread_object_for(t2).expect("t2 ko");
+    let t2_thread_object = scheduler.thread_object_for(t2).expect("t2 target");
 
     let running = scheduler.run();
     assert_eq!(running.current(), t1);
 
     let handle = running.handle();
-    handle.terminate_thread(&t2_ko, 9).expect("terminate t2");
-    assert!(t2_ko.terminated());
+    handle
+        .terminate_thread(&t2_thread_object, 9)
+        .expect("terminate t2");
+    assert!(t2_thread_object.terminated());
 
     running.yield_now();
     assert_eq!(running.current(), t3);
@@ -947,7 +944,7 @@ fn spawn_rollback_undoes_inherit_increment_on_thread_table_full() {
 
 #[test]
 fn create_user_thread_rejects_unloaded_process() {
-    use kobject::UserThreadEntry;
+    use capability::UserThreadEntry;
 
     reset_switches();
     let factory = new_factory_static();
@@ -969,14 +966,13 @@ fn create_user_thread_rejects_unloaded_process() {
         },
     );
     match err {
-        Err(kobject::SpawnError::ImageNotLoaded) => {}
+        Err(capability::SpawnError::ImageNotLoaded) => {}
         other => panic!("expected ImageNotLoaded, got {:?}", other.err()),
     }
 }
 
 #[test]
 fn load_user_image_into_attaches_user_vm() {
-
     reset_switches();
     let factory = new_factory_static();
     let timer = MockTimer::new();
@@ -990,7 +986,7 @@ fn load_user_image_into_attaches_user_vm() {
     mark_process_loaded(&handle, &process);
     let r = handle.create_user_thread(
         &process,
-        kobject::UserThreadEntry {
+        capability::UserThreadEntry {
             entry_pc: 0x4000_0000,
             user_sp: 0x4001_0000,
             arg: 0,
@@ -1002,7 +998,7 @@ fn load_user_image_into_attaches_user_vm() {
 
 #[test]
 fn load_user_image_into_rejects_double_load() {
-    use kobject::LoadImageError;
+    use capability::LoadImageError;
 
     reset_switches();
     let factory = new_factory_static();
@@ -1015,7 +1011,7 @@ fn load_user_image_into_rejects_double_load() {
         .expect("create_empty_process");
     mark_process_loaded(&handle, &process);
 
-    let install = kobject::UserImageInstall {
+    let install = capability::UserImageInstall {
         segments: std::vec::Vec::new(),
         entry: VirtualAddress::new(0x4000_0000),
         user_stack_top: VirtualAddress::new(0x5000_1000),
@@ -1029,13 +1025,13 @@ fn load_user_image_into_rejects_double_load() {
     }
 }
 
-fn empty_loader_table() -> Arc<collections::MutexCell<kobject::HandleTable>> {
-    Arc::new(collections::MutexCell::new(kobject::HandleTable::new()))
+fn empty_loader_table() -> Arc<collections::MutexCell<capability::HandleTable>> {
+    Arc::new(collections::MutexCell::new(capability::HandleTable::new()))
 }
 
 #[test]
 fn start_user_process_creates_thread_and_marks_loader_state() {
-    use kobject::{UserStartSpec, UserThreadEntry};
+    use capability::{UserStartSpec, UserThreadEntry};
 
     reset_switches();
     let factory = new_factory_static();
@@ -1065,7 +1061,7 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
 
 #[test]
 fn start_user_process_rejects_unloaded() {
-    use kobject::{StartProcessError, UserStartSpec, UserThreadEntry};
+    use capability::{StartProcessError, UserStartSpec, UserThreadEntry};
 
     reset_switches();
     let factory = new_factory_static();
@@ -1099,11 +1095,11 @@ fn start_user_process_rejects_unloaded() {
 fn start_user_process_preserves_handles_on_spawn_failure() {
     // start_user_process при SpawnFailed обязан оставить handle нетронутым
     // в loader-table с исходным HandleId (не дропать и не менять id).
-    use collections::LockCell;
-    use kobject::{
-        Handle, HandleTable, KObject, Rights, Signal, StartProcessError, UserStartSpec,
-        UserThreadEntry,
+    use capability::{
+        Capability, CapabilityTarget, HandleTable, Rights, Signal, StartProcessError,
+        UserStartSpec, UserThreadEntry,
     };
+    use collections::LockCell;
     use scheduler::SchedulerService;
 
     reset_switches();
@@ -1134,7 +1130,10 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
     let signal = Signal::new();
     let weak = std::sync::Arc::downgrade(&signal);
     let loader_table = Arc::new(collections::MutexCell::new(HandleTable::new()));
-    let h = Handle::new(KObject::Signal(signal), Rights::TRANSFER | Rights::READ);
+    let h = Capability::new(
+        CapabilityTarget::Signal(signal),
+        Rights::TRANSFER | Rights::READ,
+    );
     let handle_id = loader_table
         .with_lock(|tbl| tbl.insert(h))
         .expect("insert into loader table");
@@ -1153,7 +1152,10 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
 
     match handle.start_user_process(&process, spec) {
         Err(StartProcessError::SpawnFailed(_)) => {
-            assert!(weak.upgrade().is_some(), "KO must stay alive after error");
+            assert!(
+                weak.upgrade().is_some(),
+                "capability target must stay alive after error"
+            );
             loader_table.with_lock(|tbl| {
                 let h = tbl
                     .get(handle_id, Rights::TRANSFER)
@@ -1168,7 +1170,6 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
 
 #[test]
 fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
-
     reset_switches();
     let factory = new_factory_static();
     let timer = MockTimer::new();
@@ -1185,8 +1186,8 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
             .expect("region alloc"),
     );
 
-    let install = kobject::UserImageInstall {
-        segments: std::vec![kobject::UserSegmentInstall {
+    let install = capability::UserImageInstall {
+        segments: std::vec![capability::UserSegmentInstall {
             va_base: PageAlignedVirtualAddress::from_usize(0x4000_0000).unwrap(),
             mapped_size: 2 * 4096,
             region: region.clone(),
@@ -1215,7 +1216,6 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
 
 #[test]
 fn process_terminate_on_empty_process_signals_terminated_and_releases_slot() {
-
     reset_switches();
     let factory = new_factory_static();
     let timer = MockTimer::new();

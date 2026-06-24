@@ -8,13 +8,13 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use capability::{
+    Capability, CapabilityTarget, HandleId, HandleTable, KernelIpcBuffer, Rights, ThreadTransport,
+    transfer_rendezvous,
+};
 use collections::{LockCell, MutexCell};
 use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
-use kobject::{
-    Handle, HandleId, HandleTable, KObject, KernelIpcBuffer, Rights, ThreadTransport,
-    transfer_rendezvous,
-};
 use memory::{AccessMask, MemFlags, MemoryRegion, virtual_address::PageAlignedVirtualAddress};
 use scheduler::AddressSpace;
 use syscall::{IpcBuffer, encode_tag};
@@ -66,15 +66,15 @@ fn memory_region_shared_across_two_address_spaces() {
     let region = MemoryRegion::create_virtual(fa, NonZeroUsize::new(1).unwrap(), AccessMask::RW)
         .expect("create_virtual one page");
     let region = Arc::new(region);
-    let ko = KObject::Memory(region.clone());
-    let rights = Rights::defaults_for(&ko);
+    let target = CapabilityTarget::Memory(region.clone());
+    let rights = Rights::defaults_for(&target);
     kernel_tests::kassert!(rights.contains(Rights::TRANSFER));
 
     let table_a = Arc::new(MutexCell::new(HandleTable::new()));
     let table_b = Arc::new(MutexCell::new(HandleTable::new()));
 
     let handle_a = table_a
-        .with_lock(|tbl| tbl.insert(Handle::new(ko, rights)))
+        .with_lock(|tbl| tbl.insert(Capability::new(target, rights)))
         .expect("insert memory handle into table A");
 
     // 3. Маппим регион в AS A и пишем паттерн через mapper A.

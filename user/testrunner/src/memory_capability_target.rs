@@ -1,4 +1,4 @@
-//! E2E проверка `KObject::Memory` через `MemoryCreateVirtual` +
+//! E2E проверка `CapabilityTarget::Memory` через `MemoryCreateVirtual` +
 //! `MemoryMap` + `MemoryRegionInspect` из EL0.
 
 use kernel_tests::kernel_test;
@@ -13,7 +13,7 @@ const ACCESS_RW: u64 = 0b11;
 const EXPECTED_INSPECT_SECONDARY: u64 = (1 << 16) | ACCESS_RW;
 
 #[kernel_test]
-fn memory_kobject_map_and_inspect() {
+fn memory_capability_target_map_and_inspect() {
     let resource = process_resource_self().expect("metering resource handle");
     let region = memory_create_virtual(resource, PAGE_SIZE, ACCESS_RW).expect("region handle");
 

@@ -51,7 +51,7 @@ impl TerminationState {
         self.exit_code.load(Ordering::Acquire)
     }
 
-    /// Возвращает `Signal` терминации, создавая его при первом вызове. Если объект уже завершён, 
+    /// Возвращает `Signal` терминации, создавая его при первом вызове. Если объект уже завершён,
     /// свежесозданный `Signal` сразу несёт `SIGNALED`.
     pub(crate) fn termination_signal(&self) -> Arc<Signal> {
         self.signal.with_lock(|slot| {

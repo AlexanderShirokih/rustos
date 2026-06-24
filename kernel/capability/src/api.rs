@@ -5,17 +5,17 @@ use syscall::WakeCount;
 
 use super::{
     errors::IpcError,
-    handle::{Handle, HandleId},
-    object::KObject,
+    handle::{Capability, HandleId},
     rights::Rights,
     runtime::{ParkState, runtime},
     signal::Signal,
+    target::CapabilityTarget,
     wait::{CancelTarget, IndexedWaker, ParkWaker, Waker},
 };
 
-/// Устанавливает [`Handle`] в handle-таблицу текущего процесса и
+/// Устанавливает [`Capability`] в handle-таблицу текущего процесса и
 /// возвращает свежий [`HandleId`]
-pub fn install_handle(handle: Handle) -> Result<HandleId, IpcError> {
+pub fn install_handle(handle: Capability) -> Result<HandleId, IpcError> {
     let table = runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
@@ -33,8 +33,8 @@ pub fn signal_set(
 ) -> Result<(), IpcError> {
     let runtime = runtime();
     let table = runtime.current_handle_table().ok_or(IpcError::BadHandle)?;
-    let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::WRITE))?;
-    let KObject::Signal(signal) = &object else {
+    let object = table.with_lock(|tbl| tbl.clone_target(handle_id, Rights::WRITE))?;
+    let CapabilityTarget::Signal(signal) = &object else {
         return Err(IpcError::WrongType);
     };
 
@@ -49,7 +49,7 @@ pub fn signal_set(
     Ok(())
 }
 
-/// Ждёт пока на KO, к которому относится `handle_id`, не поднимется
+/// Ждёт пока на capability target, к которому относится `handle_id`, не поднимется
 /// хотя бы один бит из `signals`. На `timeout_ns = Some(0)` - poll.
 /// `Canceled` - handle закрыт или передан до сигнала.
 pub fn signal_wait_one(
@@ -141,9 +141,9 @@ fn wait_many_setup(
 ) -> Result<WaitSetup, IpcError> {
     let mut signals: Vec<Arc<Signal>> = Vec::with_capacity(items.len());
     for &(h, _mask) in items {
-        let obj = tbl.clone_object(h, Rights::READ)?;
+        let obj = tbl.clone_target(h, Rights::READ)?;
         match obj {
-            KObject::Signal(s) => signals.push(s),
+            CapabilityTarget::Signal(s) => signals.push(s),
             _ => return Err(IpcError::WrongType),
         }
     }
@@ -212,10 +212,10 @@ pub fn handle_close(handle_id: HandleId) -> Result<(), IpcError> {
     Ok(())
 }
 
-/// Создаёт новый handle на тот же KO с подмножеством прав и (опционально)
+/// Создаёт новый handle на тот же capability target с подмножеством прав и (опционально)
 /// значком (badge). Требует [`Rights::DUPLICATE`] на исходном handle.
 /// Семантика значка - set-once: заклеймить можно только незаклеймённый хендл; заклеймённый
-/// наследует значок, переклеймить нельзя (см. [`Handle::duplicate`]).
+/// наследует значок, переклеймить нельзя (см. [`Capability::duplicate`]).
 pub fn handle_duplicate(
     handle_id: HandleId,
     new_rights: Rights,
@@ -242,8 +242,8 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
     let signal = Signal::new();
-    let ko = KObject::Signal(signal);
-    let handle = Handle::new(ko.clone(), Rights::defaults_for(&ko));
+    let target = CapabilityTarget::Signal(signal);
+    let handle = Capability::new(target.clone(), Rights::defaults_for(&target));
     table.with_lock(|tbl| tbl.insert(handle))
 }
 
@@ -256,9 +256,9 @@ pub fn process_termination_signal(handle_id: HandleId) -> Result<HandleId, IpcEr
     let table = runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
-    let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::READ))?;
+    let object = table.with_lock(|tbl| tbl.clone_target(handle_id, Rights::READ))?;
     let process = match &object {
-        KObject::Process(p) => p.clone(),
+        CapabilityTarget::Process(p) => p.clone(),
         _ => return Err(IpcError::WrongType),
     };
     install_termination_signal(&table, process.termination_signal())
@@ -270,9 +270,9 @@ pub fn thread_termination_signal(handle_id: HandleId) -> Result<HandleId, IpcErr
     let table = runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
-    let object = table.with_lock(|tbl| tbl.clone_object(handle_id, Rights::READ))?;
+    let object = table.with_lock(|tbl| tbl.clone_target(handle_id, Rights::READ))?;
     let thread = match &object {
-        KObject::Thread(t) => t.clone(),
+        CapabilityTarget::Thread(t) => t.clone(),
         _ => return Err(IpcError::WrongType),
     };
     install_termination_signal(&table, thread.termination_signal())
@@ -284,9 +284,9 @@ fn install_termination_signal(
     table: &Arc<collections::MutexCell<crate::HandleTable>>,
     signal: Arc<Signal>,
 ) -> Result<HandleId, IpcError> {
-    let ko = KObject::Signal(signal);
+    let target = CapabilityTarget::Signal(signal);
     let rights = Rights::READ | Rights::DUPLICATE | Rights::TRANSFER;
-    let handle = Handle::new(ko, rights);
+    let handle = Capability::new(target, rights);
     table.with_lock(|tbl| tbl.insert(handle))
 }
 
@@ -306,10 +306,10 @@ mod tests {
     use super::*;
     use crate::{
         HandleTable, ProcessObject, Rights, Signal, ThreadObject,
-        handle::Handle,
-        object::KObject,
+        handle::Capability,
         runtime::{KernelRuntime, WaitToken, install_runtime},
         signal::SIGNALED,
+        target::CapabilityTarget,
     };
 
     const PANIC_SENTINEL: &str = "thread_exit-mock-noreturn";
@@ -395,7 +395,12 @@ mod tests {
         let table = Arc::new(MutexCell::new(HandleTable::new()));
         let signal = Signal::new();
         let id = table
-            .with_lock(|tbl| tbl.insert(Handle::new(KObject::Signal(signal.clone()), rights)))
+            .with_lock(|tbl| {
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Signal(signal.clone()),
+                    rights,
+                ))
+            })
             .unwrap();
         (table, id, signal)
     }
@@ -439,8 +444,8 @@ mod tests {
         let signal_b = Signal::new();
         let id_b = table
             .with_lock(|tbl| {
-                tbl.insert(Handle::new(
-                    KObject::Signal(signal_b.clone()),
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Signal(signal_b.clone()),
                     Rights::READ | Rights::WRITE,
                 ))
             })
@@ -573,8 +578,8 @@ mod tests {
         let table = Arc::new(MutexCell::new(HandleTable::new()));
         let id = table
             .with_lock(|tbl| {
-                tbl.insert(Handle::new(
-                    KObject::Process(ProcessObject::new()),
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Process(ProcessObject::new()),
                     Rights::WRITE,
                 ))
             })
@@ -592,7 +597,7 @@ mod tests {
     #[test]
     fn signal_set_without_write_right_is_access_denied() {
         let _guard = test_lock();
-        // Signal-handle только с READ: clone_object(WRITE) -> AccessDenied.
+        // Signal-handle только с READ: clone_target(WRITE) -> AccessDenied.
         let (table, id, _signal) = install_signal_handle(Rights::READ);
         mock().configure(Some(table), None);
 
@@ -654,8 +659,8 @@ mod tests {
         let table = Arc::new(MutexCell::new(HandleTable::new()));
         let proc_id = table
             .with_lock(|tbl| {
-                tbl.insert(Handle::new(
-                    KObject::Process(ProcessObject::new()),
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Process(ProcessObject::new()),
                     Rights::READ,
                 ))
             })
@@ -664,7 +669,7 @@ mod tests {
 
         let sig_id = process_termination_signal(proc_id).expect("termination signal handle");
         let rights = table
-            .with_lock(|tbl| tbl.get(sig_id, Rights::READ).map(Handle::rights))
+            .with_lock(|tbl| tbl.get(sig_id, Rights::READ).map(Capability::rights))
             .expect("signal handle present");
         // Security-инвариант: наблюдатель не может подделать терминацию.
         assert!(rights.contains(Rights::READ));
@@ -681,8 +686,8 @@ mod tests {
         let table = Arc::new(MutexCell::new(HandleTable::new()));
         let thread_id = table
             .with_lock(|tbl| {
-                tbl.insert(Handle::new(
-                    KObject::Thread(ThreadObject::new()),
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Thread(ThreadObject::new()),
                     Rights::READ,
                 ))
             })
@@ -691,7 +696,7 @@ mod tests {
 
         let sig_id = thread_termination_signal(thread_id).expect("termination signal handle");
         let rights = table
-            .with_lock(|tbl| tbl.get(sig_id, Rights::READ).map(Handle::rights))
+            .with_lock(|tbl| tbl.get(sig_id, Rights::READ).map(Capability::rights))
             .expect("signal handle present");
         assert!(rights.contains(Rights::READ));
         assert!(!rights.contains(Rights::WRITE));
@@ -724,7 +729,7 @@ mod tests {
         let rights = table
             .with_lock(|tbl| {
                 tbl.get(id, Rights::WRITE | Rights::READ)
-                    .map(Handle::rights)
+                    .map(Capability::rights)
             })
             .expect("handle present with SIGNAL|WAIT");
         assert!(rights.contains(Rights::WRITE));

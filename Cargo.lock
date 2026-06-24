@@ -82,6 +82,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "capability"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "memory",
+ "spin",
+ "syscall",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,6 +255,7 @@ name = "hal-aarch64"
 version = "0.1.0"
 dependencies = [
  "bootstrap",
+ "capability",
  "collections",
  "drivers-aarch64",
  "drivers-common",
@@ -257,7 +268,6 @@ dependencies = [
  "ipc",
  "kernelspace",
  "klog",
- "kobject",
  "memory",
  "process",
  "scheduler",
@@ -378,12 +388,12 @@ name = "kernelspace"
 version = "0.1.0"
 dependencies = [
  "bootstrap",
+ "capability",
  "collections",
  "drivers-common",
  "io",
  "ipc",
  "klog",
- "kobject",
  "memory",
  "process",
  "scheduler",
@@ -401,16 +411,6 @@ version = "0.1.0"
 dependencies = [
  "collections",
  "io",
-]
-
-[[package]]
-name = "kobject"
-version = "0.1.0"
-dependencies = [
- "collections",
- "memory",
- "spin",
- "syscall",
 ]
 
 [[package]]
@@ -535,8 +535,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 name = "scheduler"
 version = "0.1.0"
 dependencies = [
+ "capability",
  "collections",
- "kobject",
  "memory",
  "spin",
 ]
@@ -663,8 +663,8 @@ version = "0.1.0"
 name = "syscall-kernel"
 version = "0.1.0"
 dependencies = [
+ "capability",
  "collections",
- "kobject",
  "memory",
  "spin",
  "syscall",

@@ -4,8 +4,7 @@ use memory::MemoryRegion;
 
 use super::{
     errors::IpcError,
-    handle::{Handle, HandleId},
-    object::KObject,
+    handle::{Capability, HandleId},
     port::Port,
     process::ProcessObject,
     reply::Reply,
@@ -13,6 +12,7 @@ use super::{
     rev_node::{RevocationHook, revoke_subtree},
     rights::Rights,
     signal::Signal,
+    target::CapabilityTarget,
     thread::ThreadObject,
     wait::CancelTarget,
 };
@@ -36,7 +36,7 @@ enum SlotState {
     /// Слот удерживается под `commit_reserved`/`release_reservation`.
     Reserved,
     /// Слот занят живым handle'ом.
-    Occupied(Handle),
+    Occupied(Capability),
     /// Generation исчерпана; слот выведен из оборота навсегда.
     Retired,
 }
@@ -88,13 +88,13 @@ impl HandleTable {
     /// На `OutOfHandles` объект закрывается.
     /// Если caller'у важно сохранить объект на ошибке, используется
     /// [`Self::try_insert`].
-    pub fn insert(&mut self, handle: Handle) -> Result<HandleId, IpcError> {
+    pub fn insert(&mut self, handle: Capability) -> Result<HandleId, IpcError> {
         self.try_insert(handle).map_err(|(e, _)| e)
     }
 
     /// То же, что [`Self::insert`], но при `OutOfHandles` возвращает
-    /// `Handle` обратно вместо его закрытия.
-    pub fn try_insert(&mut self, handle: Handle) -> Result<HandleId, (IpcError, Handle)> {
+    /// `Capability` обратно вместо его закрытия.
+    pub fn try_insert(&mut self, handle: Capability) -> Result<HandleId, (IpcError, Capability)> {
         if let Some(idx) = self.pop_free_slot() {
             let slot = &mut self.slots[idx as usize];
             // pop_free_slot гарантирует, что generation ещё не исчерпана.
@@ -147,7 +147,11 @@ impl HandleTable {
     }
 
     /// Вставляет `handle` в зарезервированный слот. Паника на use-after-release.
-    pub fn commit_reserved(&mut self, reservation: HandleReservation, handle: Handle) -> HandleId {
+    pub fn commit_reserved(
+        &mut self,
+        reservation: HandleReservation,
+        handle: Capability,
+    ) -> HandleId {
         let slot = self
             .slots
             .get_mut(reservation.slot as usize)
@@ -180,13 +184,13 @@ impl HandleTable {
 
     /// Удаляет handle из таблицы. Будит каждый cancel-target с исходом
     /// [`IpcError::Canceled`](IpcError::Canceled).
-    pub fn remove(&mut self, id: HandleId) -> Result<Handle, IpcError> {
+    pub fn remove(&mut self, id: HandleId) -> Result<Capability, IpcError> {
         let handle = self.take_slot(id)?;
         revoke_subtree(handle.node());
         Ok(handle)
     }
 
-    fn take_slot(&mut self, id: HandleId) -> Result<Handle, IpcError> {
+    fn take_slot(&mut self, id: HandleId) -> Result<Capability, IpcError> {
         let idx = id.slot();
         let slot = self
             .slots
@@ -270,7 +274,7 @@ impl HandleTable {
     }
 
     /// Проверка прав без проверки типа.
-    pub fn get(&self, id: HandleId, need: Rights) -> Result<&Handle, IpcError> {
+    pub fn get(&self, id: HandleId, need: Rights) -> Result<&Capability, IpcError> {
         let handle = self.lookup(id)?;
         if !handle.rights().contains(need) {
             return Err(IpcError::AccessDenied);
@@ -284,14 +288,14 @@ impl HandleTable {
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
-        match &h.object {
-            KObject::Port(e) => Ok(e.clone()),
-            KObject::Signal(_)
-            | KObject::Process(_)
-            | KObject::Thread(_)
-            | KObject::Memory(_)
-            | KObject::Resource(_)
-            | KObject::Reply(_) => Err(IpcError::WrongType),
+        match &h.target {
+            CapabilityTarget::Port(e) => Ok(e.clone()),
+            CapabilityTarget::Signal(_)
+            | CapabilityTarget::Process(_)
+            | CapabilityTarget::Thread(_)
+            | CapabilityTarget::Memory(_)
+            | CapabilityTarget::Resource(_)
+            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -305,14 +309,14 @@ impl HandleTable {
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
-        match &h.object {
-            KObject::Port(e) => Ok((e.clone(), h.badge())),
-            KObject::Signal(_)
-            | KObject::Process(_)
-            | KObject::Thread(_)
-            | KObject::Memory(_)
-            | KObject::Resource(_)
-            | KObject::Reply(_) => Err(IpcError::WrongType),
+        match &h.target {
+            CapabilityTarget::Port(e) => Ok((e.clone(), h.badge())),
+            CapabilityTarget::Signal(_)
+            | CapabilityTarget::Process(_)
+            | CapabilityTarget::Thread(_)
+            | CapabilityTarget::Memory(_)
+            | CapabilityTarget::Resource(_)
+            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -322,14 +326,14 @@ impl HandleTable {
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
-        match &h.object {
-            KObject::Reply(r) => Ok(r.clone()),
-            KObject::Signal(_)
-            | KObject::Process(_)
-            | KObject::Thread(_)
-            | KObject::Memory(_)
-            | KObject::Resource(_)
-            | KObject::Port(_) => Err(IpcError::WrongType),
+        match &h.target {
+            CapabilityTarget::Reply(r) => Ok(r.clone()),
+            CapabilityTarget::Signal(_)
+            | CapabilityTarget::Process(_)
+            | CapabilityTarget::Thread(_)
+            | CapabilityTarget::Memory(_)
+            | CapabilityTarget::Resource(_)
+            | CapabilityTarget::Port(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -339,14 +343,14 @@ impl HandleTable {
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
-        match &h.object {
-            KObject::Signal(n) => Ok(n.clone()),
-            KObject::Process(_)
-            | KObject::Thread(_)
-            | KObject::Memory(_)
-            | KObject::Resource(_)
-            | KObject::Port(_)
-            | KObject::Reply(_) => Err(IpcError::WrongType),
+        match &h.target {
+            CapabilityTarget::Signal(n) => Ok(n.clone()),
+            CapabilityTarget::Process(_)
+            | CapabilityTarget::Thread(_)
+            | CapabilityTarget::Memory(_)
+            | CapabilityTarget::Resource(_)
+            | CapabilityTarget::Port(_)
+            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -356,14 +360,14 @@ impl HandleTable {
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
-        match &h.object {
-            KObject::Process(p) => Ok(p.clone()),
-            KObject::Signal(_)
-            | KObject::Thread(_)
-            | KObject::Memory(_)
-            | KObject::Resource(_)
-            | KObject::Port(_)
-            | KObject::Reply(_) => Err(IpcError::WrongType),
+        match &h.target {
+            CapabilityTarget::Process(p) => Ok(p.clone()),
+            CapabilityTarget::Signal(_)
+            | CapabilityTarget::Thread(_)
+            | CapabilityTarget::Memory(_)
+            | CapabilityTarget::Resource(_)
+            | CapabilityTarget::Port(_)
+            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -373,14 +377,14 @@ impl HandleTable {
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
-        match &h.object {
-            KObject::Thread(t) => Ok(t.clone()),
-            KObject::Signal(_)
-            | KObject::Process(_)
-            | KObject::Memory(_)
-            | KObject::Resource(_)
-            | KObject::Port(_)
-            | KObject::Reply(_) => Err(IpcError::WrongType),
+        match &h.target {
+            CapabilityTarget::Thread(t) => Ok(t.clone()),
+            CapabilityTarget::Signal(_)
+            | CapabilityTarget::Process(_)
+            | CapabilityTarget::Memory(_)
+            | CapabilityTarget::Resource(_)
+            | CapabilityTarget::Port(_)
+            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -399,14 +403,14 @@ impl HandleTable {
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
-        match &h.object {
-            KObject::Memory(m) => Ok((m.clone(), h.rights())),
-            KObject::Signal(_)
-            | KObject::Process(_)
-            | KObject::Thread(_)
-            | KObject::Resource(_)
-            | KObject::Port(_)
-            | KObject::Reply(_) => Err(IpcError::WrongType),
+        match &h.target {
+            CapabilityTarget::Memory(m) => Ok((m.clone(), h.rights())),
+            CapabilityTarget::Signal(_)
+            | CapabilityTarget::Process(_)
+            | CapabilityTarget::Thread(_)
+            | CapabilityTarget::Resource(_)
+            | CapabilityTarget::Port(_)
+            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -416,34 +420,34 @@ impl HandleTable {
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
-        match &h.object {
-            KObject::Resource(r) => Ok(r.clone()),
-            KObject::Signal(_)
-            | KObject::Process(_)
-            | KObject::Thread(_)
-            | KObject::Memory(_)
-            | KObject::Port(_)
-            | KObject::Reply(_) => Err(IpcError::WrongType),
+        match &h.target {
+            CapabilityTarget::Resource(r) => Ok(r.clone()),
+            CapabilityTarget::Signal(_)
+            | CapabilityTarget::Process(_)
+            | CapabilityTarget::Thread(_)
+            | CapabilityTarget::Memory(_)
+            | CapabilityTarget::Port(_)
+            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
         }
     }
 
-    /// Доступ к KO без проверки конкретного типа - для wait-пути,
+    /// Доступ к capability target без проверки конкретного типа - для wait-пути,
     /// который применим к любому signalable (Signal/Process/...).
-    pub fn clone_object(&self, id: HandleId, need: Rights) -> Result<KObject, IpcError> {
+    pub fn clone_target(&self, id: HandleId, need: Rights) -> Result<CapabilityTarget, IpcError> {
         let handle = self.lookup(id)?;
         if !handle.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
-        Ok(handle.object().clone())
+        Ok(handle.target().clone())
     }
 
     /// Атомарно проверяет, что все `ids` существуют, имеют `min_rights`
-    /// и нет дубликатов; затем удаляет их и возвращает `Vec<Handle>`.
+    /// и нет дубликатов; затем удаляет их и возвращает `Vec<Capability>`.
     pub fn try_drain_for_transfer(
         &mut self,
         ids: &[HandleId],
         min_rights: Rights,
-    ) -> Result<Vec<Handle>, IpcError> {
+    ) -> Result<Vec<Capability>, IpcError> {
         for (i, id) in ids.iter().enumerate() {
             if ids[..i].iter().any(|prev| prev == id) {
                 return Err(IpcError::BadHandle);
@@ -462,8 +466,8 @@ impl HandleTable {
         Ok(drained)
     }
 
-    /// Создаёт новый handle на тот же KO с подмножеством прав и (опционально) badge.
-    /// Семантика значка - set-once, см. [`Handle::duplicate`].
+    /// Создаёт новый handle на тот же capability target с подмножеством прав и (опционально) badge.
+    /// Семантика значка - set-once, см. [`Capability::duplicate`].
     pub fn duplicate(
         &mut self,
         id: HandleId,
@@ -477,7 +481,7 @@ impl HandleTable {
         self.insert(dup)
     }
 
-    fn lookup(&self, id: HandleId) -> Result<&Handle, IpcError> {
+    fn lookup(&self, id: HandleId) -> Result<&Capability, IpcError> {
         let idx = id.slot();
         let slot = self.slots.get(idx as usize).ok_or(IpcError::BadHandle)?;
         if slot.generation != id.generation() {
@@ -542,8 +546,8 @@ mod tests {
 
     use super::{
         super::{
-            object::KObject, port::Port, process::ProcessObject, rights::Rights, signal::Signal,
-            thread::ThreadObject, wait::CancelTarget,
+            port::Port, process::ProcessObject, rights::Rights, signal::Signal,
+            target::CapabilityTarget, thread::ThreadObject, wait::CancelTarget,
         },
         *,
     };
@@ -566,35 +570,38 @@ mod tests {
         }
     }
 
-    fn make_handle(obj: KObject, rights: Rights) -> Handle {
-        Handle::new(obj, rights)
+    fn make_handle(obj: CapabilityTarget, rights: Rights) -> Capability {
+        Capability::new(obj, rights)
     }
 
-    fn signal_handle(rights: Rights) -> Handle {
-        make_handle(KObject::Signal(Signal::new()), rights)
+    fn signal_handle(rights: Rights) -> Capability {
+        make_handle(CapabilityTarget::Signal(Signal::new()), rights)
     }
 
-    fn port_handle(rights: Rights) -> Handle {
-        make_handle(KObject::Port(Port::new()), rights)
+    fn port_handle(rights: Rights) -> Capability {
+        make_handle(CapabilityTarget::Port(Port::new()), rights)
     }
 
-    fn process_handle(rights: Rights) -> Handle {
-        make_handle(KObject::Process(ProcessObject::new()), rights)
+    fn process_handle(rights: Rights) -> Capability {
+        make_handle(CapabilityTarget::Process(ProcessObject::new()), rights)
     }
 
-    fn thread_handle(rights: Rights) -> Handle {
-        make_handle(KObject::Thread(ThreadObject::new()), rights)
+    fn thread_handle(rights: Rights) -> Capability {
+        make_handle(CapabilityTarget::Thread(ThreadObject::new()), rights)
     }
 
     #[test]
     fn insert_and_get_round_trip() {
         let mut table = HandleTable::new();
         let port = Port::new();
-        let h = make_handle(KObject::Port(port.clone()), Rights::READ | Rights::WRITE);
+        let h = make_handle(
+            CapabilityTarget::Port(port.clone()),
+            Rights::READ | Rights::WRITE,
+        );
 
         let id = table.insert(h).unwrap();
         let got = table.get(id, Rights::READ).expect("get must succeed");
-        let KObject::Port(got_port) = got.object() else {
+        let CapabilityTarget::Port(got_port) = got.target() else {
             panic!("inserted handle must keep object type");
         };
         assert!(Arc::ptr_eq(got_port, &port));
@@ -724,7 +731,7 @@ mod tests {
         let mut table = HandleTable::new();
         let mem_rights = Rights::WRITE | Rights::READ;
         let mem_id = table
-            .insert(make_handle(KObject::Memory(region), mem_rights))
+            .insert(make_handle(CapabilityTarget::Memory(region), mem_rights))
             .unwrap();
         let signal_id = table.insert(signal_handle(Rights::READ)).unwrap();
         let ep_id = table.insert(port_handle(Rights::READ)).unwrap();
@@ -765,7 +772,10 @@ mod tests {
         let mut table = HandleTable::new();
         let res_rights = Rights::WRITE | Rights::READ;
         let res_id = table
-            .insert(make_handle(KObject::Resource(resource), res_rights))
+            .insert(make_handle(
+                CapabilityTarget::Resource(resource),
+                res_rights,
+            ))
             .unwrap();
         let signal_id = table.insert(signal_handle(Rights::READ)).unwrap();
         let ep_id = table.insert(port_handle(Rights::READ)).unwrap();
@@ -938,7 +948,7 @@ mod tests {
 
         let signal = Signal::new();
         let weak = Arc::downgrade(&signal);
-        let handle = Handle::new(KObject::Signal(signal), Rights::READ);
+        let handle = Capability::new(CapabilityTarget::Signal(signal), Rights::READ);
         let (err, returned) = table.try_insert(handle).unwrap_err();
         assert_eq!(err, IpcError::OutOfHandles);
         assert!(weak.upgrade().is_some());

@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use kobject::{
+use capability::{
     IpcError, LoadImageError, ProcessObject, SpawnError, StartProcessError, ThreadObject,
     UserImageInstall, UserStartSpec, UserThreadEntry,
 };
@@ -14,7 +14,7 @@ pub trait SyscallRuntime: Send + Sync {
     /// потока нет буфера (kernel-поток).
     fn current_ipc_buffer_va(&self) -> Option<u64>;
 
-    /// Аллокатор фреймов для anonymous Memory KObject. `None` до регистрации
+    /// Аллокатор фреймов для anonymous Memory CapabilityTarget. `None` до регистрации
     /// - соответствующие syscall'ы вернут `OutOfMemory`.
     fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)>;
 

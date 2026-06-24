@@ -1,6 +1,6 @@
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
-/// Набор прав, ассоциированных с конкретным [`Handle`](super::Handle).
+/// Набор прав, ассоциированных с конкретным [`Capability`](super::Capability).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 #[repr(transparent)]
 pub struct Rights(u32);
@@ -47,19 +47,21 @@ impl Rights {
         (self.0 & other.0) == self.0
     }
 
-    /// Стартовый набор прав для свежесозданного KO данного типа.
-    pub fn defaults_for(obj: &super::object::KObject) -> Self {
-        use super::object::KObject;
+    /// Стартовый набор прав для свежесозданного capability target данного типа.
+    pub fn defaults_for(obj: &super::target::CapabilityTarget) -> Self {
+        use super::target::CapabilityTarget;
 
         match obj {
             // Signal сигналуем пользователем; Process/Thread терминацию
             // поднимает только ядро (через bound-Signal), но WRITE на самом
             // объекте оставлен под terminate-op - наборы прав совпадают.
-            KObject::Signal(_) | KObject::Process(_) | KObject::Thread(_) => {
+            CapabilityTarget::Signal(_)
+            | CapabilityTarget::Process(_)
+            | CapabilityTarget::Thread(_) => {
                 Self(Self::READ.0 | Self::WRITE.0 | Self::DUPLICATE.0 | Self::TRANSFER.0)
             }
-            
-            KObject::Memory(region) => {
+
+            CapabilityTarget::Memory(region) => {
                 // База - только передаваемость/дублируемость; конкретный доступ
                 // (READ/WRITE/EXECUTE) определяется access-маской региона, чтобы
                 // read-only регион не получал WRITE по умолчанию.
@@ -76,20 +78,20 @@ impl Rights {
                 }
                 Self(bits)
             }
-            
-            KObject::Resource(_) => {
+
+            CapabilityTarget::Resource(_) => {
                 Self(Self::DUPLICATE.0 | Self::TRANSFER.0 | Self::READ.0 | Self::WRITE.0)
             }
-            
+
             // Port: send гейтится WRITE, recv - READ (как channel
             // write/read); делегируется и дублируется.
-            KObject::Port(_) => {
+            CapabilityTarget::Port(_) => {
                 Self(Self::READ.0 | Self::WRITE.0 | Self::TRANSFER.0 | Self::DUPLICATE.0)
             }
-            
+
             // Reply: WRITE гейтит сам reply; TRANSFER даёт делегировать
             // ответ другому серверу. Не дублируется.
-            KObject::Reply(_) => Self(Self::WRITE.0 | Self::TRANSFER.0),
+            CapabilityTarget::Reply(_) => Self(Self::WRITE.0 | Self::TRANSFER.0),
         }
     }
 }
@@ -130,14 +132,14 @@ impl Not for Rights {
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{object::KObject, process::ProcessObject, thread::ThreadObject},
+        super::{process::ProcessObject, target::CapabilityTarget, thread::ThreadObject},
         *,
     };
 
     #[test]
     fn defaults_for_process_grants_write_and_read() {
-        let ko = KObject::Process(ProcessObject::new());
-        let r = Rights::defaults_for(&ko);
+        let target = CapabilityTarget::Process(ProcessObject::new());
+        let r = Rights::defaults_for(&target);
         assert!(r.contains(Rights::WRITE));
         assert!(r.contains(Rights::READ));
         assert!(r.contains(Rights::DUPLICATE));
@@ -146,15 +148,15 @@ mod tests {
 
     #[test]
     fn defaults_for_process_omits_execute() {
-        let ko = KObject::Process(ProcessObject::new());
-        let r = Rights::defaults_for(&ko);
+        let target = CapabilityTarget::Process(ProcessObject::new());
+        let r = Rights::defaults_for(&target);
         assert!(!r.contains(Rights::EXECUTE));
     }
 
     #[test]
     fn defaults_for_thread_grants_write_and_read() {
-        let ko = KObject::Thread(ThreadObject::new());
-        let r = Rights::defaults_for(&ko);
+        let target = CapabilityTarget::Thread(ThreadObject::new());
+        let r = Rights::defaults_for(&target);
         assert!(r.contains(Rights::WRITE));
         assert!(r.contains(Rights::READ));
         assert!(r.contains(Rights::DUPLICATE));
@@ -163,12 +165,12 @@ mod tests {
 
     #[test]
     fn defaults_for_thread_omits_execute() {
-        let ko = KObject::Thread(ThreadObject::new());
-        let r = Rights::defaults_for(&ko);
+        let target = CapabilityTarget::Thread(ThreadObject::new());
+        let r = Rights::defaults_for(&target);
         assert!(!r.contains(Rights::EXECUTE));
     }
 
-    fn memory_region(access: memory::AccessMask) -> KObject {
+    fn memory_region(access: memory::AccessMask) -> CapabilityTarget {
         use core::num::NonZeroUsize;
 
         use memory::{MemoryRegion, physical_address::PageAlignedAddress};
@@ -177,7 +179,7 @@ mod tests {
             NonZeroUsize::new(0x1000).unwrap(),
             access,
         );
-        KObject::Memory(alloc::sync::Arc::new(region))
+        CapabilityTarget::Memory(alloc::sync::Arc::new(region))
     }
 
     #[test]
@@ -212,7 +214,7 @@ mod tests {
     #[test]
     fn defaults_for_port_grants_read_write_transfer_duplicate() {
         use super::super::port::Port;
-        let r = Rights::defaults_for(&KObject::Port(Port::new()));
+        let r = Rights::defaults_for(&CapabilityTarget::Port(Port::new()));
         assert!(r.contains(Rights::READ));
         assert!(r.contains(Rights::WRITE));
         assert!(r.contains(Rights::TRANSFER));
@@ -233,7 +235,7 @@ mod tests {
             memory::AccessMask::RW,
             0,
         );
-        let r = Rights::defaults_for(&KObject::Resource(resource));
+        let r = Rights::defaults_for(&CapabilityTarget::Resource(resource));
         assert!(r.contains(Rights::READ));
         assert!(r.contains(Rights::WRITE));
         assert!(r.contains(Rights::DUPLICATE));

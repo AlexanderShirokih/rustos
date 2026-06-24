@@ -6,8 +6,8 @@
 use alloc::{sync::Arc, vec};
 use core::num::NonZeroUsize;
 
+use capability::{Capability, CapabilityTarget, ProcessObject, Resource, Rights, SIGNALED, Signal};
 use kernel_tests::kernel_test;
-use kobject::{Handle, KObject, ProcessObject, Resource, Rights, SIGNALED, Signal};
 use memory::{
     AccessMask, MemFlags,
     physical_address::PageAlignedAddress,
@@ -74,7 +74,7 @@ fn userspace_spawn_user_process_runs_to_exit() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let handle = Handle::new(KObject::Signal(signal.clone()), Rights::WRITE);
+    let handle = Capability::new(CapabilityTarget::Signal(signal.clone()), Rights::WRITE);
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
@@ -158,7 +158,7 @@ fn userspace_vm_allocate_and_remap() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let handle = Handle::new(KObject::Signal(signal.clone()), Rights::WRITE);
+    let handle = Capability::new(CapabilityTarget::Signal(signal.clone()), Rights::WRITE);
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);
@@ -234,7 +234,7 @@ fn userspace_vm_allocate_free_reuse_va() {
         user_stack_size: USER_STACK_SIZE,
     };
 
-    let handle = Handle::new(KObject::Signal(signal.clone()), Rights::WRITE);
+    let handle = Capability::new(CapabilityTarget::Signal(signal.clone()), Rights::WRITE);
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![handle])
         .bootstrap_handle(0);

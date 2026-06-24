@@ -9,7 +9,7 @@ mod common;
 
 use std::sync::Arc;
 
-use kobject::UserThreadEntry;
+use capability::UserThreadEntry;
 use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
 use scheduler::{Scheduler, SchedulerConfig, SchedulerHandle, Uninit};
 
@@ -32,9 +32,9 @@ fn frame_allocator_static() -> &'static CountingFrameAllocator {
 /// Помечает процесс загруженным (user_vm прикреплён) без сегментов.
 fn mark_loaded(
     handle: &SchedulerHandle<MockContext, MockTimerSource>,
-    process: &Arc<kobject::ProcessObject>,
+    process: &Arc<capability::ProcessObject>,
 ) {
-    let install = kobject::UserImageInstall {
+    let install = capability::UserImageInstall {
         segments: std::vec::Vec::new(),
         entry: VirtualAddress::new(0x4000_0000),
         user_stack_top: VirtualAddress::new(0x5000_1000),
@@ -124,14 +124,16 @@ fn terminate_thread_releases_its_ipc_buffer_region() {
     mark_loaded(&handle, &process);
     let pid = scheduler.process_id_for(&process).expect("pid lookup");
 
-    let thread_ko = handle
+    let thread_object = handle
         .create_user_thread(&process, user_entry())
         .expect("create_user_thread");
     assert_eq!(scheduler.process_user_vm_region_count(pid), Some(1));
 
     // Терминация должна снять PTE и вернуть range IPC-буфера в user_vm -
     // иначе регион висел бы до сноса AS (регрессия на утечку фрейма).
-    handle.terminate_thread(&thread_ko, 0).expect("terminate");
+    handle
+        .terminate_thread(&thread_object, 0)
+        .expect("terminate");
     assert_eq!(scheduler.process_user_vm_region_count(pid), Some(0));
 }
 

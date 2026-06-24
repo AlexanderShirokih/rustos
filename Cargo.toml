@@ -17,7 +17,7 @@ members = [
     "lib/ipc-test",
     "lib/syscall",
     "kernel/kernelspace",
-    "kernel/kobject",
+    "kernel/capability",
     "kernel/log",
     "kernel/memory",
     "kernel/process",
@@ -78,7 +78,7 @@ drivers-common = { path = "kernel/drivers-common" }
 drivers-common-aarch64 = { path = "kernel/drivers-common-aarch64" }
 drivers-aarch64 = { path = "kernel/drivers-aarch64" }
 kernelspace = { path = "kernel/kernelspace" }
-kobject = { path = "kernel/kobject" }
+capability = { path = "kernel/capability" }
 scheduler = { path = "kernel/scheduler" }
 syscall = { path = "lib/syscall" }
 syscall-kernel = { path = "kernel/syscall" }

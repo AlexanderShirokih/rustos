@@ -375,8 +375,8 @@ mod tests {
 
     use super::{
         super::{
-            handle::Handle, handle_table::HandleTable, object::KObject, port::ThreadTransport,
-            rights::Rights, signal::Signal,
+            handle::Capability, handle_table::HandleTable, port::ThreadTransport, rights::Rights,
+            signal::Signal, target::CapabilityTarget,
         },
         test_mapper::PageMapper,
         *,
@@ -451,8 +451,8 @@ mod tests {
         let notif = Signal::new();
         let id = st
             .with_lock(|tbl| {
-                tbl.insert(Handle::new(
-                    KObject::Signal(notif.clone()),
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Signal(notif.clone()),
                     Rights::READ | Rights::TRANSFER,
                 ))
             })
@@ -469,10 +469,10 @@ mod tests {
         rm.copy_user_in(VirtualAddress::new(BASE_B + CAPS_OFFSET), &mut idb)
             .unwrap();
         let new_raw = u32::from_le_bytes(idb);
-        let new_id = kobject_handle_id(new_raw);
+        let new_id = handle_id_from_raw(new_raw);
         rt.with_lock(|tbl| {
             let got = tbl.get(new_id, Rights::READ).unwrap();
-            let KObject::Signal(got_signal) = got.object() else {
+            let CapabilityTarget::Signal(got_signal) = got.target() else {
                 panic!("transferred handle must keep object type");
             };
             assert!(Arc::ptr_eq(got_signal, &notif));
@@ -518,7 +518,12 @@ mod tests {
 
         // Signal только с READ - перенос должен отказать.
         let id = st
-            .with_lock(|tbl| tbl.insert(Handle::new(KObject::Signal(Signal::new()), Rights::READ)))
+            .with_lock(|tbl| {
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Signal(Signal::new()),
+                    Rights::READ,
+                ))
+            })
             .unwrap();
         write_buf(&sm, BASE_A, encode_tag(0, 1), &[id.raw().get()], b"");
 
@@ -528,7 +533,7 @@ mod tests {
         assert_eq!(rt.with_lock(|t| t.live_count()), 0);
     }
 
-    fn kobject_handle_id(raw: u32) -> HandleId {
+    fn handle_id_from_raw(raw: u32) -> HandleId {
         HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap())
     }
 
@@ -550,8 +555,8 @@ mod tests {
     fn signal_with_transfer(table: &Arc<MutexCell<HandleTable>>) -> HandleId {
         table
             .with_lock(|tbl| {
-                tbl.insert(Handle::new(
-                    KObject::Signal(Signal::new()),
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Signal(Signal::new()),
                     Rights::READ | Rights::TRANSFER,
                 ))
             })

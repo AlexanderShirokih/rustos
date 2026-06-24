@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::runtime::{KernelRuntime, ParkState, WaitToken};
 
-/// Объект, который хочет быть разбуженным при изменении сигналов KO.
+/// Объект, который хочет быть разбуженным при изменении сигналов capability target.
 pub trait Waker: Send + Sync {
     /// Вызывается, когда `signals` после обновления стал содержать хотя
     /// бы один бит из маски, переданной при регистрации.

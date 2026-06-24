@@ -1,17 +1,17 @@
 //! Handler-ы Process-syscall'ов: create/self/load_image/exit_code/terminate/start.
 //!
-//! Парсят аргументы, пробрасывают в `kobject` API и регистрируют новые
+//! Парсят аргументы, пробрасывают в `capability` API и регистрируют новые
 //! handle'ы в текущей handle-таблице вызывающего процесса.
 
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 
-use collections::{LockCell, MutexCell};
-use kobject::{
-    Handle, HandleId, HandleReservation, HandleTable, KObject, LoadImageError, Rights,
+use capability::{
+    Capability, CapabilityTarget, HandleId, HandleReservation, HandleTable, LoadImageError, Rights,
     StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec, UserThreadEntry,
     install_handle, runtime,
 };
+use collections::{LockCell, MutexCell};
 use memory::{
     UserVmContext,
     memory_mapper::{MemoryMappingError, UserCopyError},
@@ -56,7 +56,7 @@ pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallErr
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let reservation = table
-        .with_lock(kobject::HandleTable::reserve_slot)
+        .with_lock(capability::HandleTable::reserve_slot)
         .map_err(SyscallError::from)?;
     let process = match syscall_runtime().create_empty_process(name) {
         Ok(p) => p,
@@ -68,7 +68,7 @@ pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallErr
     Ok(commit_object_handle(
         &table,
         reservation,
-        KObject::Process(process),
+        CapabilityTarget::Process(process),
     ))
 }
 
@@ -76,17 +76,17 @@ pub fn sys_process_self() -> Result<u64, SyscallError> {
     let process = syscall_runtime()
         .current_process_object()
         .ok_or(SyscallError::WrongType)?;
-    install_object_handle(KObject::Process(process))
+    install_object_handle(CapabilityTarget::Process(process))
 }
 
-/// Handle на метеринг-`Resource` текущего процесса (права включают `WRITE`).
+/// Capability на метеринг-`Resource` текущего процесса (права включают `WRITE`).
 /// `WrongType`, если процесс стартовал без метеринг-ресурса.
 pub fn sys_process_resource_self() -> Result<u64, SyscallError> {
     let process = syscall_runtime()
         .current_process_object()
         .ok_or(SyscallError::WrongType)?;
     let resource = process.metering_resource().ok_or(SyscallError::WrongType)?;
-    install_object_handle(KObject::Resource(resource))
+    install_object_handle(CapabilityTarget::Resource(resource))
 }
 
 pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
@@ -105,7 +105,7 @@ pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
 /// bound-`Signal` терминации процесса. Требует `Rights::READ`.
 pub fn sys_process_termination_signal(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
-    let sig_id = kobject::process_termination_signal(id)?;
+    let sig_id = capability::process_termination_signal(id)?;
     Ok(u64::from(sig_id.raw().get()))
 }
 
@@ -161,7 +161,7 @@ pub fn sys_process_load_image(
     let loader_table = runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let process_ko = loader_table
+    let process_object = loader_table
         .with_lock(|tbl| tbl.get_process(process_id, Rights::WRITE))
         .map_err(SyscallError::from)?;
 
@@ -210,7 +210,7 @@ pub fn sys_process_load_image(
         user_vm_size: desc.user_vm_size as usize,
     };
     syscall_runtime()
-        .load_user_image_into(&process_ko, &install)
+        .load_user_image_into(&process_object, &install)
         .map_err(load_image_err_to_syscall)?;
     Ok(0)
 }
@@ -242,7 +242,7 @@ pub fn sys_process_start(
     let loader_table = runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let process_ko = loader_table
+    let process_object = loader_table
         .with_lock(|tbl| tbl.get_process(process_id, Rights::WRITE))
         .map_err(SyscallError::from)?;
 
@@ -284,14 +284,14 @@ pub fn sys_process_start(
     let pre_reservation = if handles_count == 0 {
         Some(
             loader_table
-                .with_lock(kobject::HandleTable::reserve_slot)
+                .with_lock(capability::HandleTable::reserve_slot)
                 .map_err(SyscallError::from)?,
         )
     } else {
         None
     };
 
-    let thread = match syscall_runtime().start_user_process(&process_ko, spec) {
+    let thread = match syscall_runtime().start_user_process(&process_object, spec) {
         Ok(t) => t,
         Err(e) => {
             if let Some(r) = pre_reservation {
@@ -304,31 +304,31 @@ pub fn sys_process_start(
     let reservation = match pre_reservation {
         Some(r) => r,
         None => loader_table
-            .with_lock(kobject::HandleTable::reserve_slot)
+            .with_lock(capability::HandleTable::reserve_slot)
             .expect("drain freed handles_count >= 1 slots; reserve_slot cannot fail"),
     };
 
     Ok(commit_object_handle(
         &loader_table,
         reservation,
-        KObject::Thread(thread),
+        CapabilityTarget::Thread(thread),
     ))
 }
 
-pub(super) fn install_object_handle(ko: KObject) -> Result<u64, SyscallError> {
-    let rights = Rights::defaults_for(&ko);
-    let handle_id = install_handle(Handle::new(ko, rights))?;
+pub(super) fn install_object_handle(target: CapabilityTarget) -> Result<u64, SyscallError> {
+    let rights = Rights::defaults_for(&target);
+    let handle_id = install_handle(Capability::new(target, rights))?;
     Ok(u64::from(handle_id.raw().get()))
 }
 
 pub(super) fn commit_object_handle(
     table: &Arc<MutexCell<HandleTable>>,
     reservation: HandleReservation,
-    ko: KObject,
+    target: CapabilityTarget,
 ) -> u64 {
-    let rights = Rights::defaults_for(&ko);
+    let rights = Rights::defaults_for(&target);
     let handle_id =
-        table.with_lock(|tbl| tbl.commit_reserved(reservation, Handle::new(ko, rights)));
+        table.with_lock(|tbl| tbl.commit_reserved(reservation, Capability::new(target, rights)));
     u64::from(handle_id.raw().get())
 }
 

@@ -1,4 +1,4 @@
-//! `Process` kernel object: lifecycle-объект процесса.
+//! `Process` capability target: lifecycle-объект процесса.
 
 use alloc::sync::Arc;
 

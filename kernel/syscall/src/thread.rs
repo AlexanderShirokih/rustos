@@ -3,8 +3,8 @@
 //! `ThreadExit` живёт в [`bridge`](super::bridge) рядом с диспатчером,
 //! т.к. имеет not-returning контракт.
 
+use capability::{CapabilityTarget, Rights, UserThreadEntry, runtime};
 use collections::LockCell;
-use kobject::{KObject, Rights, UserThreadEntry, runtime};
 
 use super::{
     bridge::parse_handle_id,
@@ -38,7 +38,7 @@ pub fn sys_thread_create(
     };
 
     let reservation = table
-        .with_lock(kobject::HandleTable::reserve_slot)
+        .with_lock(capability::HandleTable::reserve_slot)
         .map_err(SyscallError::from)?;
     let thread = match syscall_runtime().create_user_thread(&process, entry) {
         Ok(t) => t,
@@ -50,7 +50,7 @@ pub fn sys_thread_create(
     Ok(commit_object_handle(
         &table,
         reservation,
-        KObject::Thread(thread),
+        CapabilityTarget::Thread(thread),
     ))
 }
 
@@ -58,7 +58,7 @@ pub fn sys_thread_self() -> Result<u64, SyscallError> {
     let thread = syscall_runtime()
         .current_thread_object()
         .ok_or(SyscallError::WrongType)?;
-    install_object_handle(KObject::Thread(thread))
+    install_object_handle(CapabilityTarget::Thread(thread))
 }
 
 /// Возвращает user-VA per-thread IPC-буфера. Kernel-поток или отсутствие
@@ -85,7 +85,7 @@ pub fn sys_thread_exit_code(handle: u64) -> Result<u64, SyscallError> {
 /// bound-`Signal` терминации потока. Требует `Rights::READ`.
 pub fn sys_thread_termination_signal(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
-    let sig_id = kobject::thread_termination_signal(id)?;
+    let sig_id = capability::thread_termination_signal(id)?;
     Ok(u64::from(sig_id.raw().get()))
 }
 
