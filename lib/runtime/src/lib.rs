@@ -23,8 +23,8 @@ pub use error::{Error, Result};
 pub use handle::{BorrowedHandle, OwnedHandle};
 pub use ipc_buffer::ipc_buffer_ptr;
 pub use object::{
-    AnonymousMapping, Mapping, MemoryRegion, Port, Priority, Process, RegionInfo, RegionKind,
-    Reply, Resource, Signal, Thread, ThreadEntry,
+    AnonymousMapping, JoinHandle, Mapping, MemoryRegion, Port, Priority, Process, RegionInfo,
+    RegionKind, Reply, Resource, Signal, Thread, ThreadEntry, spawn,
 };
 pub use port_transport::PortTransport;
 pub use ring_transport::RingTransport;

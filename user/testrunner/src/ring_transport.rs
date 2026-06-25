@@ -2,7 +2,7 @@
 //! регионом-кольцом (`SpscRing`) в shared memory и одним "data"-сигналом.
 //!
 //! Главный поток выступает producer'ом, рабочий поток - consumer'ом. Регион
-//! выделяется `memory_create_virtual` + `memory_map`, оборачивается двумя
+//! создаётся через `Resource`/`MemoryRegion` и маппится, оборачивается двумя
 //! значениями `SpscRing` (по одному на конец). Consumer в цикле
 //! `wait_readable` + `read_message` выгребает `FRAMES` кадров, producer шлёт
 //! те же `FRAMES` (retry на `WouldBlock` с уступкой планировщику). Проверяем,
@@ -12,10 +12,9 @@ use collections::SpscRing;
 use ipc::{Transport, wire::IpcError};
 use kernel_tests::kernel_test;
 use runtime::{
-    RingTransport, memory_allocate, memory_create_virtual, memory_map, process_resource_self,
-    process_self, signal_create, signal_wait_one, thread_create, thread_exit,
+    MemoryAccess, Priority, Resource, RingTransport, Signal, Timeout, UserMemFlags, spawn,
 };
-use syscall::{Handle, MEM_FLAGS_READ_WRITE, SIGNALED};
+use syscall::Handle;
 
 /// Полезная ёмкость одного слота кольца: вмещает 4-байтовый кадр-счётчик.
 const SLOT_PAYLOAD: usize = 4;
@@ -31,9 +30,6 @@ const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
 /// Таймаут одного `wait_readable` consumer'а.
 const WAIT_TIMEOUT_NS: u64 = 1_000_000_000;
-
-/// `access_mask` региона: биты R|W.
-const ACCESS_RW: u64 = 0b11;
 
 /// Размер страницы: регион-кольцо аллоцируется и маппится постранично.
 const PAGE_SIZE: u64 = 4096;
@@ -52,7 +48,7 @@ struct Shared {
 
 /// Consumer-поток: оборачивает регион в consumer-`SpscRing`, выгребает все
 /// `FRAMES` кадров через `RingTransport` и сверяет их порядок.
-extern "C" fn consumer_worker(arg: usize) -> ! {
+extern "C" fn consumer_worker(arg: usize) -> u32 {
     // SAFETY: arg - адрес Shared в кадре главного потока; жив до join'а,
     // который выполняется до выхода из его кадра.
     let shared = unsafe { &*(arg as *const Shared) };
@@ -71,24 +67,24 @@ extern "C" fn consumer_worker(arg: usize) -> ! {
     while next < FRAMES {
         match transport.wait_readable(WAIT_TIMEOUT_NS) {
             Ok(()) => {}
-            Err(_) => thread_exit(1),
+            Err(_) => return 1,
         }
         let mut buf = [0u8; SLOT_PAYLOAD];
         match transport.read_message(&mut buf, &mut handles) {
             Ok(len) => {
                 if len.bytes != SLOT_PAYLOAD || u32::from_le_bytes(buf) != next {
-                    thread_exit(1);
+                    return 1;
                 }
                 next += 1;
             }
             // Гонка: проснулись, но кадр ещё не виден - повторяем.
             Err(IpcError::WouldBlock) => core::hint::spin_loop(),
-            Err(_) => thread_exit(1),
+            Err(_) => return 1,
         }
     }
 
     shared.ok.store(true, core::sync::atomic::Ordering::Release);
-    thread_exit(0)
+    0
 }
 
 #[kernel_test]
@@ -98,17 +94,21 @@ fn ring_transport_round_trip() {
     let region_len = SpscRing::region_bytes(RING_CAPACITY, SLOT_PAYLOAD);
     kernel_tests::kassert!(region_len as u64 <= PAGE_SIZE);
     // Регион-носитель кольца минтится под метеринг-бюджет процесса.
-    let resource = process_resource_self().expect("metering resource handle");
-    let region = memory_create_virtual(resource, PAGE_SIZE, ACCESS_RW).expect("region handle");
-    let va = memory_map(region, PAGE_SIZE, MEM_FLAGS_READ_WRITE);
-    kernel_tests::kassert!(va > 0);
+    let resource = Resource::self_resource().expect("metering resource");
+    let region = resource
+        .create_virtual(PAGE_SIZE, MemoryAccess::RW)
+        .expect("region");
+    let mapping = region
+        .map(PAGE_SIZE, UserMemFlags::ReadWrite)
+        .expect("map region");
+    kernel_tests::kassert!(mapping.va() > 0);
 
-    let data = signal_create().expect("signal_create");
+    let data_signal = Signal::create().expect("signal create");
 
     let shared = Shared {
-        region_va: u64::try_from(va).expect("positive va fits u64"),
+        region_va: mapping.va(),
         region_len,
-        data,
+        data: data_signal.handle().as_raw(),
         ok: core::sync::atomic::AtomicBool::new(false),
     };
 
@@ -119,17 +119,12 @@ fn ring_transport_round_trip() {
     // единственный producer-конец над ней.
     let producer_ring =
         unsafe { SpscRing::from_raw(base, region_len, SLOT_PAYLOAD) }.expect("producer ring");
-    let producer = RingTransport::producer(producer_ring, data);
+    let producer = RingTransport::producer_signal(producer_ring, data_signal.handle());
 
     // Спавним consumer-поток в текущем процессе.
-    let stack = memory_allocate(resource, STACK_SIZE, MEM_FLAGS_READ_WRITE);
-    kernel_tests::kassert!(stack > 0);
-    let user_sp = u64::try_from(stack).expect("positive va fits u64") + STACK_SIZE;
-    let process = process_self().expect("process_self handle");
     let arg = (&raw const shared) as usize;
-    let entry: extern "C" fn(usize) -> ! = consumer_worker;
-    let thread = thread_create(process, entry as usize as u64, user_sp, arg as u64, 1)
-        .expect("thread_create handle");
+    let thread =
+        spawn(consumer_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn consumer worker");
 
     // Producer: шлём FRAMES кадров; на полном кольце (WouldBlock) уступаем.
     let handles: [u32; 0] = [];
@@ -143,8 +138,9 @@ fn ring_transport_round_trip() {
     }
 
     // Join consumer'а с конечным таймаутом (ожидание по thread-handle).
-    let observed = signal_wait_one(thread, SIGNALED, JOIN_TIMEOUT_NS);
-    kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
+    thread
+        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .expect("consumer joins before timeout");
 
     kernel_tests::kassert!(shared.ok.load(core::sync::atomic::Ordering::Acquire));
 }

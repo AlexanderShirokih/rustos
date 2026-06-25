@@ -7,11 +7,8 @@
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use kernel_tests::kernel_test;
-use runtime::{
-    ipc_buffer_addr, ipc_buffer_ptr, memory_allocate, process_resource_self, process_self,
-    signal_wait_one, thread_create, thread_exit,
-};
-use syscall::{IPC_BUFFER_DATA_MAX, MEM_FLAGS_READ_WRITE, SIGNALED, encode_tag};
+use runtime::{Priority, Timeout, ipc_buffer_addr, ipc_buffer_ptr, spawn};
+use syscall::{IPC_BUFFER_DATA_MAX, encode_tag};
 
 const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
@@ -45,7 +42,7 @@ fn ipc_buffer_roundtrip() {
     }
 }
 
-extern "C" fn sibling_worker(_arg: usize) -> ! {
+extern "C" fn sibling_worker(_arg: usize) -> u32 {
     // Raw-syscall, НЕ кэширующий accessor: кэш в `runtime` процесс-глобальный,
     // а буфер per-thread - для второго потока нужен свой VA напрямую.
     let ret = ipc_buffer_addr();
@@ -58,13 +55,13 @@ extern "C" fn sibling_worker(_arg: usize) -> ! {
         unsafe {
             ptr.write_volatile(0xC3);
             if ptr.read_volatile() != 0xC3 {
-                thread_exit(2);
+                return 2;
             }
         }
     }
 
     SIBLING_VA.store(va, Relaxed);
-    thread_exit(0)
+    0
 }
 
 #[kernel_test]
@@ -73,16 +70,11 @@ fn ipc_buffer_per_thread_distinct() {
     kernel_tests::kassert!(main_ret > 0);
     let main_va = u64::try_from(main_ret).expect("positive va fits u64");
 
-    let resource = process_resource_self().expect("metering resource handle");
-    let stack = memory_allocate(resource, STACK_SIZE, MEM_FLAGS_READ_WRITE);
-    kernel_tests::kassert!(stack > 0);
-    let user_sp = u64::try_from(stack).expect("positive va fits u64") + STACK_SIZE;
-    let process = process_self().expect("process_self handle");
-    let entry = sibling_worker as extern "C" fn(usize) -> ! as *const () as u64;
-    let thread = thread_create(process, entry, user_sp, 0, 1).expect("thread_create handle");
-
-    let observed = signal_wait_one(thread, SIGNALED, JOIN_TIMEOUT_NS);
-    kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
+    let thread =
+        spawn(sibling_worker, 0, STACK_SIZE, Priority::new(1)).expect("spawn sibling worker");
+    thread
+        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .expect("sibling joins before timeout");
 
     let sibling_va = SIBLING_VA.load(Relaxed);
     kernel_tests::kassert!(sibling_va > 0);

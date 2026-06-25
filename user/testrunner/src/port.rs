@@ -12,19 +12,17 @@
 //! - (b) call/reply round-trip;
 //! - (c) перенос Signal-хендла через port и проверка идентичности
 //!   объекта на стороне получателя (сигнал, поднятый ДО переноса, виден);
-//! - (d) порядок «получатель пришёл первым» и «отправитель пришёл первым».
+//! - (d) порядок "получатель пришёл первым" и "отправитель пришёл первым".
 
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst};
 
 use kernel_tests::kernel_test;
 use runtime::{
-    Error, OwnedHandle, Port, Timeout, handle_duplicate, ipc_buffer_addr, memory_allocate,
-    port_call, port_create, port_recv, port_send, process_resource_self, process_self,
-    signal_create, signal_set, signal_wait_one, thread_create, thread_exit,
+    Error, JoinHandle, OwnedHandle, Port, Priority, Timeout, handle_duplicate, ipc_buffer_addr,
+    port_call, port_create, port_recv, port_send, signal_create, signal_set, signal_wait_one,
+    spawn,
 };
-use syscall::{
-    Handle, MEM_FLAGS_READ_WRITE, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag,
-};
+use syscall::{Handle, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
 
 const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
@@ -112,34 +110,25 @@ unsafe fn read_badge(va: usize) -> u64 {
     unsafe { ((va + BADGE_OFF) as *const u64).read_volatile() }
 }
 
-fn alloc_stack() -> u64 {
-    let resource = process_resource_self().expect("metering resource handle");
-    let stack = memory_allocate(resource, STACK_SIZE, MEM_FLAGS_READ_WRITE);
-    assert_positive(stack);
-    u64::try_from(stack).expect("positive va fits u64") + STACK_SIZE
-}
-
 fn ep_handle() -> Handle {
     Handle::new(EP_RAW.load(SeqCst) as u32).expect("port handle present")
 }
 
-fn spawn_worker(entry: extern "C" fn(usize) -> !) -> Handle {
+fn spawn_worker(entry: extern "C" fn(usize) -> u32) -> JoinHandle {
     WORKER_RESULT.store(i64::MIN, SeqCst);
     WORKER_READY.store(0, SeqCst);
-    let sp = alloc_stack();
-    let process = process_self().expect("process_self");
-    let e = entry as *const () as u64;
-    thread_create(process, e, sp, 0, 1).expect("thread_create")
+    spawn(entry, 0, STACK_SIZE, Priority::new(1)).expect("spawn worker")
 }
 
-fn join(thread: Handle) {
-    let observed = signal_wait_one(thread, SIGNALED, JOIN_TIMEOUT_NS);
-    kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
+fn join(thread: JoinHandle) {
+    thread
+        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .expect("worker joins before timeout");
 }
 
 // --- (a) + (d, sender-first): worker = sender, main = receiver. --------------
 
-extern "C" fn sender_worker(_arg: usize) -> ! {
+extern "C" fn sender_worker(_arg: usize) -> u32 {
     let va = ipc_va();
     // SAFETY: собственный per-thread буфер.
     unsafe {
@@ -148,7 +137,7 @@ extern "C" fn sender_worker(_arg: usize) -> ! {
     WORKER_READY.store(1, SeqCst);
     let r = port_send(ep_handle(), Timeout::INFINITE.raw());
     WORKER_RESULT.store(r, SeqCst);
-    thread_exit(0)
+    0
 }
 
 #[kernel_test]
@@ -176,13 +165,13 @@ fn send_recv_round_trip_sender_first() {
 
 // --- (d, receiver-first): worker = receiver, main = sender. ------------------
 
-extern "C" fn receiver_worker(_arg: usize) -> ! {
+extern "C" fn receiver_worker(_arg: usize) -> u32 {
     let va = ipc_va();
     WORKER_READY.store(1, SeqCst);
     let r = port_recv(ep_handle(), Timeout::INFINITE.raw());
     if r != 0 {
         WORKER_RESULT.store(-100, SeqCst);
-        thread_exit(0);
+        return 0;
     }
     let mut buf = [0u8; 8];
     // SAFETY: собственный буфер worker-потока.
@@ -192,7 +181,7 @@ extern "C" fn receiver_worker(_arg: usize) -> ! {
     } else {
         WORKER_RESULT.store(-1, SeqCst);
     }
-    thread_exit(0)
+    0
 }
 
 #[kernel_test]
@@ -214,7 +203,7 @@ fn send_recv_round_trip_receiver_first() {
 // --- (b) call/reply round-trip: worker = server (Port::recv + Reply::reply), -
 //        main = caller (raw call на тот же id).
 
-extern "C" fn server_worker(_arg: usize) -> ! {
+extern "C" fn server_worker(_arg: usize) -> u32 {
     // Сервер - единственный владелец Port (усыновляет id, закроет на drop);
     // main оперирует тем же id сырым call и не закрывает.
     // SAFETY: единственный OwnedHandle-владелец port'а - этот worker (main
@@ -226,15 +215,15 @@ extern "C" fn server_worker(_arg: usize) -> ! {
     let mut buf = [0u8; 8];
     let Ok((len, Some(reply))) = ep.recv_bytes(&mut buf, Timeout::INFINITE) else {
         WORKER_RESULT.store(-100, SeqCst);
-        thread_exit(0);
+        return 0;
     };
     if len != 3 || &buf[..3] != b"req" {
         WORKER_RESULT.store(-1, SeqCst);
-        thread_exit(0);
+        return 0;
     }
     let rr = reply.reply_bytes(b"resp");
     WORKER_RESULT.store(if rr.is_ok() { 0 } else { -2 }, SeqCst);
-    thread_exit(0)
+    0
 }
 
 #[kernel_test]
@@ -267,16 +256,16 @@ fn call_reply_round_trip() {
 
 // --- (c) cap transfer: worker = sender (передаёт Signal), main = recv. -
 
-extern "C" fn cap_sender_worker(_arg: usize) -> ! {
+extern "C" fn cap_sender_worker(_arg: usize) -> u32 {
     let va = ipc_va();
     // Создаём Signal и поднимаем сигнал ДО переноса: бит должен
-    // «уехать» вместе с объектом и быть видим получателю - это доказывает
+    // "уехать" вместе с объектом и быть видим получателю - это доказывает
     // идентичность capability target (свежий объект бита бы не имел).
     let notif = signal_create().expect("signal_create");
     NOTIF_RAW.store(u64::from(notif.raw()), SeqCst);
     if signal_set(notif, SIGNALED, 0, WakeCount::None) != 0 {
         WORKER_RESULT.store(-100, SeqCst);
-        thread_exit(0);
+        return 0;
     }
     // SAFETY: собственный буфер; передаём 0-байтовое тело и 1 cap.
     unsafe {
@@ -285,7 +274,7 @@ extern "C" fn cap_sender_worker(_arg: usize) -> ! {
     WORKER_READY.store(1, SeqCst);
     let r = port_send(ep_handle(), Timeout::INFINITE.raw());
     WORKER_RESULT.store(r, SeqCst);
-    thread_exit(0)
+    0
 }
 
 #[kernel_test]
@@ -337,7 +326,7 @@ static CLIENTS_READY: AtomicU64 = AtomicU64::new(0);
 static CLIENT_A_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 static CLIENT_B_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
-extern "C" fn badge_client_a(_arg: usize) -> ! {
+extern "C" fn badge_client_a(_arg: usize) -> u32 {
     let va = ipc_va();
     let h = Handle::new(EP_BADGED_A.load(SeqCst) as u32).expect("badged copy A");
     // SAFETY: собственный буфер.
@@ -347,10 +336,10 @@ extern "C" fn badge_client_a(_arg: usize) -> ! {
     CLIENTS_READY.fetch_add(1, SeqCst);
     let r = port_send(h, Timeout::INFINITE.raw());
     CLIENT_A_RESULT.store(r, SeqCst);
-    thread_exit(0)
+    0
 }
 
-extern "C" fn badge_client_b(_arg: usize) -> ! {
+extern "C" fn badge_client_b(_arg: usize) -> u32 {
     let va = ipc_va();
     let h = Handle::new(EP_BADGED_B.load(SeqCst) as u32).expect("badged copy B");
     // SAFETY: собственный буфер.
@@ -360,7 +349,7 @@ extern "C" fn badge_client_b(_arg: usize) -> ! {
     CLIENTS_READY.fetch_add(1, SeqCst);
     let r = port_send(h, Timeout::INFINITE.raw());
     CLIENT_B_RESULT.store(r, SeqCst);
-    thread_exit(0)
+    0
 }
 
 #[kernel_test]
@@ -378,13 +367,8 @@ fn badge_round_trip_two_clients() {
     CLIENT_A_RESULT.store(i64::MIN, SeqCst);
     CLIENT_B_RESULT.store(i64::MIN, SeqCst);
 
-    let process = process_self().expect("process_self");
-    let sp_a = alloc_stack();
-    let sp_b = alloc_stack();
-    let client_a = thread_create(process, badge_client_a as *const () as u64, sp_a, 0, 1)
-        .expect("thread_create A");
-    let client_b = thread_create(process, badge_client_b as *const () as u64, sp_b, 0, 1)
-        .expect("thread_create B");
+    let client_a = spawn(badge_client_a, 0, STACK_SIZE, Priority::new(1)).expect("spawn client A");
+    let client_b = spawn(badge_client_b, 0, STACK_SIZE, Priority::new(1)).expect("spawn client B");
 
     while CLIENTS_READY.load(SeqCst) < 2 {
         core::hint::spin_loop();

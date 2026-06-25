@@ -5,35 +5,13 @@ use alloc::{boxed::Box, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use kernel_tests::kernel_test;
-use runtime::{
-    memory_allocate, process_resource_self, process_self, signal_wait_one, thread_create,
-    thread_exit,
-};
-use syscall::{Handle, MEM_FLAGS_READ_WRITE, SIGNALED};
+use runtime::{Priority, Timeout, spawn};
 
-/// Размер стека рабочего потока (page-aligned выдача memory_allocate -> вершина
-/// 16-байт-выровнена).
+/// Размер стека рабочего потока (page-aligned выдача -> вершина 16-байт-выровнена).
 const STACK_SIZE: u64 = 0x4000;
 
 /// Таймаут join'а: конечный, чтобы зависший worker падал по timeout.
 const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
-
-/// Спавнит worker в текущем процессе: выделяет стек и стартует поток с `arg`.
-fn spawn(worker: extern "C" fn(usize) -> !, arg: usize) -> Handle {
-    let resource = process_resource_self().expect("metering resource handle");
-    let va = memory_allocate(resource, STACK_SIZE, MEM_FLAGS_READ_WRITE);
-    kernel_tests::kassert!(va > 0);
-    let user_sp = u64::try_from(va).expect("positive va fits u64") + STACK_SIZE;
-    let process = process_self().expect("process_self handle");
-    thread_create(process, worker as usize as u64, user_sp, arg as u64, 1)
-        .expect("thread_create handle")
-}
-
-/// Ждёт завершения `thread` с конечным таймаутом (ожидание по thread-handle).
-fn join(thread: Handle) {
-    let observed = signal_wait_one(thread, SIGNALED, JOIN_TIMEOUT_NS);
-    kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
-}
 
 #[kernel_test]
 fn heap_basic() {
@@ -87,7 +65,7 @@ struct ConcurrentShared {
     total: AtomicU64,
 }
 
-extern "C" fn churn_worker(arg: usize) -> ! {
+extern "C" fn churn_worker(arg: usize) -> u32 {
     // SAFETY: arg - адрес ConcurrentShared в кадре спавнящего потока; жив до
     // join'а, который выполняется до выхода из кадра.
     let shared = unsafe { &*(arg as *const ConcurrentShared) };
@@ -99,7 +77,7 @@ extern "C" fn churn_worker(arg: usize) -> ! {
         let sum: u64 = v.iter().copied().sum();
         shared.total.fetch_add(sum, Relaxed);
     }
-    thread_exit(0)
+    0
 }
 
 #[kernel_test]
@@ -108,12 +86,14 @@ fn heap_concurrent() {
         total: AtomicU64::new(0),
     };
     let arg = (&raw const shared) as usize;
-    let mut threads = [None; WORKERS as usize];
-    for slot in &mut threads {
-        *slot = Some(spawn(churn_worker, arg));
+    let mut threads: Vec<_> = Vec::new();
+    for _ in 0..WORKERS {
+        threads.push(spawn(churn_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn worker"));
     }
-    for slot in &threads {
-        join(slot.expect("thread handle"));
+    for thread in threads {
+        thread
+            .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+            .expect("worker joins before timeout");
     }
 
     let per_iter = LEN * (LEN - 1) / 2;

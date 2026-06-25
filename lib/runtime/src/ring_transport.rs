@@ -14,7 +14,10 @@ use collections::{PopOutcome, PushOutcome, RingError, SpscRing};
 use ipc::{MessageLen, Transport, wire::IpcError};
 use syscall::{Handle, SIGNALED, SYSCALL_RETURN_TIMEOUT, WakeCount};
 
-use crate::svc::{signal_set, signal_wait_one};
+use crate::{
+    handle::BorrowedHandle,
+    svc::{signal_set, signal_wait_one},
+};
 
 /// Роль конца ring-транспорта над общим кольцом и "data"-сигналом.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +43,13 @@ impl RingTransport {
             data,
             role: Role::Producer,
         }
+    }
+
+    /// Producer-конец по заимствованному "data"-сигналу: переадресует к
+    /// [`RingTransport::producer`], беря сырой хэндл из заимствования.
+    #[must_use]
+    pub fn producer_signal(ring: SpscRing, data: BorrowedHandle<'_>) -> Self {
+        Self::producer(ring, data.as_raw())
     }
 
     /// Consumer-конец: читает кадры из кольца, спит на "data"-сигнале.

@@ -1,15 +1,10 @@
 //! E2E проверка userspace `Mutex`/`Condvar` под контенцией из EL0:
-//! рабочие потоки спавнятся через `thread_create` в текущем процессе.
+//! рабочие потоки спавнятся через `spawn` в текущем процессе.
 
 use kernel_tests::kernel_test;
-use runtime::{
-    Condvar, Mutex, memory_allocate, process_resource_self, process_self, signal_wait_one,
-    thread_create, thread_exit,
-};
-use syscall::{Handle, MEM_FLAGS_READ_WRITE, SIGNALED};
+use runtime::{Condvar, Mutex, Priority, Timeout, spawn};
 
-/// Размер стека рабочего потока (page-aligned выдача memory_allocate -> вершина
-/// 16-байт-выровнена).
+/// Размер стека рабочего потока (page-aligned выдача -> вершина 16-байт-выровнена).
 const STACK_SIZE: u64 = 0x4000;
 
 /// Таймаут join'а: конечный, чтобы зависший worker падал по timeout.
@@ -40,36 +35,17 @@ const ROUNDS: u64 = 50;
 const TURN_MAIN: u32 = 0;
 const TURN_WORKER: u32 = 1;
 
-/// Спавнит worker в текущем процессе: выделяет стек и стартует поток с
-/// `arg` через `thread_create`. Возвращает handle потока для join'а.
-fn spawn(worker: extern "C" fn(usize) -> !, arg: usize) -> Handle {
-    let resource = process_resource_self().expect("metering resource handle");
-    let va = memory_allocate(resource, STACK_SIZE, MEM_FLAGS_READ_WRITE);
-    kernel_tests::kassert!(va > 0);
-    let user_sp = u64::try_from(va).expect("positive va fits u64") + STACK_SIZE;
-    let process = process_self().expect("process_self handle");
-    thread_create(process, worker as usize as u64, user_sp, arg as u64, 1)
-        .expect("thread_create handle")
-}
-
-/// Ждёт завершения `thread` с конечным таймаутом. Ожидание идёт прямо по
-/// thread-handle (bound-Signal терминации материализуется ядром лениво).
-fn join(thread: Handle) {
-    let observed = signal_wait_one(thread, SIGNALED, JOIN_TIMEOUT_NS);
-    kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
-}
-
-extern "C" fn contention_worker(arg: usize) -> ! {
+extern "C" fn contention_worker(arg: usize) -> u32 {
     // SAFETY: arg - адрес Shared в кадре спавнящего потока; жив до join'а,
     // который выполняется до выхода из кадра.
     let s = unsafe { &*(arg as *const Shared) };
     for _ in 0..ITERS {
         *s.m.lock() += 1;
     }
-    thread_exit(0)
+    0
 }
 
-extern "C" fn pingpong_worker(arg: usize) -> ! {
+extern "C" fn pingpong_worker(arg: usize) -> u32 {
     // SAFETY: arg - адрес Shared2 в кадре спавнящего потока; жив до join'а,
     // который выполняется до выхода из кадра.
     let s = unsafe { &*(arg as *const Shared2) };
@@ -82,19 +58,20 @@ extern "C" fn pingpong_worker(arg: usize) -> ! {
         g.turn = TURN_MAIN;
         s.cv.notify_all();
     }
-    thread_exit(0)
+    0
 }
 
 #[kernel_test]
 fn mutex_contention() {
     let shared = Shared { m: Mutex::new(0) };
     let arg = (&raw const shared) as usize;
-    let mut threads = [None; WORKERS as usize];
-    for slot in &mut threads {
-        *slot = Some(spawn(contention_worker, arg));
-    }
-    for slot in &threads {
-        join(slot.expect("thread handle"));
+    let threads: [_; WORKERS as usize] = core::array::from_fn(|_| {
+        spawn(contention_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn worker")
+    });
+    for thread in threads {
+        thread
+            .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+            .expect("worker joins before timeout");
     }
     kernel_tests::kassert_eq!(*shared.m.lock(), WORKERS * ITERS);
 }
@@ -109,7 +86,7 @@ fn condvar_ping_pong() {
         cv: Condvar::new(),
     };
     let arg = (&raw const shared) as usize;
-    let thread = spawn(pingpong_worker, arg);
+    let thread = spawn(pingpong_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn worker");
 
     for _ in 0..ROUNDS {
         let mut g = shared.m.lock();
@@ -121,6 +98,8 @@ fn condvar_ping_pong() {
         shared.cv.notify_all();
     }
 
-    join(thread);
+    thread
+        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .expect("worker joins before timeout");
     kernel_tests::kassert_eq!(shared.m.lock().count, 2 * ROUNDS);
 }
