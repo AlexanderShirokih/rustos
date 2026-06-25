@@ -2,9 +2,8 @@
 //!
 //! Набор и нумерация операций - часть ABI и живут в [`syscall::SyscallOp`].
 
+use syscall::SyscallError;
 pub use syscall::SyscallOp;
-
-use super::error::SyscallError;
 
 /// Декодирует сырой 16-битный op в [`SyscallOp`]; неизвестный код -
 /// [`SyscallError::BadSyscall`].

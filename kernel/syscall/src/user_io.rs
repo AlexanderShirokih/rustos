@@ -2,8 +2,7 @@
 //! валидация указателей и отображение [`UserCopyError`] в [`SyscallError`].
 
 use memory::{UserVmContext, memory_mapper::UserCopyError, virtual_address::VirtualAddress};
-
-use super::error::SyscallError;
+use syscall::SyscallError;
 
 /// Грубая проверка user-указателя: пустой буфер пропускаем без
 /// валидации, иначе адрес не должен быть нулевым, а диапазон `[va, va+len)`

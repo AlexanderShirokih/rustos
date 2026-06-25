@@ -5,10 +5,11 @@
 
 use capability::{CapabilityTarget, Rights, UserThreadEntry, runtime};
 use collections::LockCell;
+use syscall::SyscallError;
 
 use super::{
     bridge::parse_handle_id,
-    error::SyscallError,
+    error::{map_ipc_error, map_spawn_error},
     process::{commit_object_handle, exit_code_from_arg, install_object_handle},
     runtime::runtime as syscall_runtime,
 };
@@ -28,7 +29,7 @@ pub fn sys_thread_create(
         .ok_or(SyscallError::BadHandle)?;
     let process = table
         .with_lock(|tbl| tbl.get_process(id, Rights::WRITE))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     let entry = UserThreadEntry {
         entry_pc,
@@ -39,12 +40,12 @@ pub fn sys_thread_create(
 
     let reservation = table
         .with_lock(capability::HandleTable::reserve_slot)
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
     let thread = match syscall_runtime().create_user_thread(&process, entry) {
         Ok(t) => t,
         Err(e) => {
             table.with_lock(|tbl| tbl.release_reservation(reservation));
-            return Err(SyscallError::from(e));
+            return Err(map_spawn_error(e));
         }
     };
     Ok(commit_object_handle(
@@ -76,7 +77,7 @@ pub fn sys_thread_exit_code(handle: u64) -> Result<u64, SyscallError> {
         .ok_or(SyscallError::BadHandle)?;
     let thread = table
         .with_lock(|tbl| tbl.get_thread(id, Rights::READ))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
     let code = thread.exit_code();
     Ok(u64::from(code.cast_unsigned()))
 }
@@ -85,7 +86,7 @@ pub fn sys_thread_exit_code(handle: u64) -> Result<u64, SyscallError> {
 /// bound-`Signal` терминации потока. Требует `Rights::READ`.
 pub fn sys_thread_termination_signal(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
-    let sig_id = capability::thread_termination_signal(id)?;
+    let sig_id = capability::thread_termination_signal(id).map_err(map_ipc_error)?;
     Ok(u64::from(sig_id.raw().get()))
 }
 
@@ -97,7 +98,7 @@ pub fn sys_thread_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallE
         .ok_or(SyscallError::BadHandle)?;
     let thread = table
         .with_lock(|tbl| tbl.get_thread(id, Rights::WRITE))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     // Терминирование собственного потока через handle отвергается:
     // self-exit предусмотрен через `ThreadExit` (0x52), который
@@ -108,7 +109,9 @@ pub fn sys_thread_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallE
         return Err(SyscallError::AccessDenied);
     }
 
-    syscall_runtime().terminate_thread(&thread, code)?;
+    syscall_runtime()
+        .terminate_thread(&thread, code)
+        .map_err(map_ipc_error)?;
     Ok(0)
 }
 

@@ -5,10 +5,10 @@
 use core::num::NonZeroU32;
 
 use capability::{self, HandleId, Rights};
-use syscall::WakeCount;
+use syscall::{SyscallError, WakeCount};
 
 use super::{
-    error::{SyscallError, encode_return},
+    error::{encode_return, map_ipc_error},
     numbers::{SyscallOp, op_from_raw},
     runtime::runtime as syscall_runtime,
     user_io::{copy_in, validate_user_ptr},
@@ -222,13 +222,14 @@ fn sys_thread_exit(code: u64) -> ! {
 fn sys_signal_set(handle: u64, set: u64, clear: u64, count: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let count = WakeCount::from_raw(count).ok_or(SyscallError::InvalidArgument)?;
-    capability::signal_set(id, signals_from_arg(set), signals_from_arg(clear), count)?;
+    capability::signal_set(id, signals_from_arg(set), signals_from_arg(clear), count)
+        .map_err(map_ipc_error)?;
     Ok(0)
 }
 
 /// Создаёт `Signal` и возвращает его сырой `HandleId`.
 fn sys_signal_create() -> Result<u64, SyscallError> {
-    let id = capability::signal_create()?;
+    let id = capability::signal_create().map_err(map_ipc_error)?;
     Ok(u64::from(id.raw().get()))
 }
 
@@ -239,7 +240,8 @@ fn sys_signal_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64
     if mask == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let observed = capability::signal_wait_one(id, mask, Some(timeout_ns))?;
+    let observed =
+        capability::signal_wait_one(id, mask, Some(timeout_ns)).map_err(map_ipc_error)?;
     Ok(u64::from(observed))
 }
 
@@ -295,7 +297,8 @@ fn sys_signal_wait_many_impl(
         items[i] = (HandleId::from_raw(nz), mask);
     }
 
-    let outcome = capability::signal_wait_many(&items[..count], Some(timeout_ns))?;
+    let outcome =
+        capability::signal_wait_many(&items[..count], Some(timeout_ns)).map_err(map_ipc_error)?;
     let index = u32::try_from(outcome.index).expect("count <= WAIT_MANY_MAX_COUNT fits in u32");
     Ok((index, outcome.observed))
 }
@@ -303,7 +306,7 @@ fn sys_signal_wait_many_impl(
 /// Изымает handle из таблицы и закрывает.
 fn sys_handle_close(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
-    capability::handle_close(id)?;
+    capability::handle_close(id).map_err(map_ipc_error)?;
     Ok(0)
 }
 
@@ -315,7 +318,7 @@ fn sys_handle_duplicate(handle: u64, new_rights: u64, badge: u64) -> Result<u64,
     let rights_bits = u32::try_from(new_rights & u64::from(u32::MAX))
         .expect("masking guarantees value fits into u32");
     let rights = Rights::from_bits_truncate(rights_bits);
-    let new_id = capability::handle_duplicate(id, rights, badge)?;
+    let new_id = capability::handle_duplicate(id, rights, badge).map_err(map_ipc_error)?;
     Ok(u64::from(new_id.raw().get()))
 }
 

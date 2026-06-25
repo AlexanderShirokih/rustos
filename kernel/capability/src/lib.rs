@@ -44,12 +44,13 @@ pub use process::ProcessObject;
 pub use reply::Reply;
 pub use resource::{Resource, ResourceBudgetRefund};
 pub use rev_node::RevocationHook;
-pub use rights::Rights;
+pub use rights::default_rights_for;
 pub use runtime::{KernelRuntime, ParkState, UserThreadEntry, WaitToken, install_runtime, runtime};
 pub use signal::{SIGNALED, Signal, WakeCount};
 pub use spawn::{
     LoadImageError, StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec,
 };
+pub use syscall::Rights;
 pub use target::CapabilityTarget;
 pub use thread::ThreadObject;
 pub use wait::{CancelTarget, Waker};

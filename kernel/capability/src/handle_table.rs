@@ -1,6 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use memory::MemoryRegion;
+use syscall::Rights;
 
 use super::{
     errors::IpcError,
@@ -10,7 +11,6 @@ use super::{
     reply::Reply,
     resource::Resource,
     rev_node::{RevocationHook, revoke_subtree},
-    rights::Rights,
     signal::Signal,
     target::CapabilityTarget,
     thread::ThreadObject,
@@ -546,8 +546,8 @@ mod tests {
 
     use super::{
         super::{
-            port::Port, process::ProcessObject, rights::Rights, signal::Signal,
-            target::CapabilityTarget, thread::ThreadObject, wait::CancelTarget,
+            port::Port, process::ProcessObject, signal::Signal, target::CapabilityTarget,
+            thread::ThreadObject, wait::CancelTarget,
         },
         *,
     };

@@ -4,13 +4,14 @@
 //! хендлы в `caps[..ncaps]`.
 
 use capability::{
-    Capability, CapabilityTarget, Port, Rights, ThreadTransport, port_call, port_recv, port_send,
-    runtime,
+    Capability, CapabilityTarget, Port, Rights, ThreadTransport, default_rights_for, port_call,
+    port_recv, port_send, runtime,
 };
 use collections::LockCell;
 use memory::virtual_address::VirtualAddress;
+use syscall::SyscallError;
 
-use super::{bridge::parse_handle_id, error::SyscallError, runtime::runtime as syscall_runtime};
+use super::{bridge::parse_handle_id, error::map_ipc_error, runtime::runtime as syscall_runtime};
 
 /// Собирает [`ThreadTransport`] текущего потока. `Err`, если поток
 /// не имеет user-AS или IPC-буфера (kernel-поток).
@@ -38,11 +39,11 @@ pub(super) fn sys_port_create() -> Result<u64, SyscallError> {
         .ok_or(SyscallError::BadHandle)?;
     let port = Port::new();
     let target = CapabilityTarget::Port(port);
-    let handle = Capability::new(target.clone(), Rights::defaults_for(&target));
+    let handle = Capability::new(target.clone(), default_rights_for(&target));
 
     let id = table
         .with_lock(|tbl| tbl.insert(handle))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
     Ok(u64::from(id.raw().get()))
 }
 
@@ -67,11 +68,10 @@ pub(super) fn sys_port_send(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
     // Badge отправителя доставляется получателю в транспорте.
     let (port, badge) = table
         .with_lock(|tbl| tbl.get_port_with_badge(id, Rights::WRITE))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     let transport = current_transport()?.with_badge(badge);
-    port_send(&port, transport, runtime(), timeout_from_abi(timeout_ns))
-        .map_err(SyscallError::from)?;
+    port_send(&port, transport, runtime(), timeout_from_abi(timeout_ns)).map_err(map_ipc_error)?;
     Ok(0)
 }
 
@@ -85,20 +85,20 @@ pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
         .ok_or(SyscallError::BadHandle)?;
     let port = table
         .with_lock(|tbl| tbl.get_port(id, Rights::READ))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     let transport = current_transport()?;
     let reply = port_recv(&port, transport, runtime(), timeout_from_abi(timeout_ns))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     match reply {
         None => Ok(0),
         Some(reply) => {
             let target = CapabilityTarget::Reply(reply);
-            let h = Capability::new(target.clone(), Rights::defaults_for(&target));
+            let h = Capability::new(target.clone(), default_rights_for(&target));
             let reply_id = table
                 .with_lock(|tbl| tbl.insert(h))
-                .map_err(SyscallError::from)?;
+                .map_err(map_ipc_error)?;
             Ok(u64::from(reply_id.raw().get()))
         }
     }
@@ -114,11 +114,10 @@ pub(super) fn sys_port_call(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
     // Badge вызывателя идёт на сторону сервера; reply badge не несёт.
     let (port, badge) = table
         .with_lock(|tbl| tbl.get_port_with_badge(id, Rights::WRITE))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     let transport = current_transport()?.with_badge(badge);
-    port_call(&port, transport, runtime(), timeout_from_abi(timeout_ns))
-        .map_err(SyscallError::from)?;
+    port_call(&port, transport, runtime(), timeout_from_abi(timeout_ns)).map_err(map_ipc_error)?;
     Ok(0)
 }
 
@@ -132,10 +131,10 @@ pub(super) fn sys_port_reply(handle: u64) -> Result<u64, SyscallError> {
         .ok_or(SyscallError::BadHandle)?;
     let reply = table
         .with_lock(|tbl| tbl.get_reply(id, Rights::WRITE))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     let server = current_transport()?;
-    let res = reply.reply(&server).map_err(SyscallError::from);
+    let res = reply.reply(&server).map_err(map_ipc_error);
 
     // One-shot: после reply handle исчерпан; повторный вызов даёт BadHandle.
     let _ = table.with_lock(|tbl| tbl.remove(id));

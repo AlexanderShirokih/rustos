@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use capability::{
     Capability, CapabilityTarget, HandleId, HandleTable, IpcError, KernelRuntime, LoadImageError,
     ProcessObject, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
-    UserStartSpec, UserThreadEntry, WaitToken, install_runtime,
+    UserStartSpec, UserThreadEntry, WaitToken, default_rights_for, install_runtime,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
@@ -275,7 +275,7 @@ fn insert_region_with_rights(
         access,
     ));
     let target = CapabilityTarget::Memory(region);
-    let rights = rights.unwrap_or_else(|| Rights::defaults_for(&target));
+    let rights = rights.unwrap_or_else(|| default_rights_for(&target));
     table
         .with_lock(|tbl| tbl.insert(Capability::new(target, rights)))
         .expect("insert region")

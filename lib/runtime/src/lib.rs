@@ -7,6 +7,8 @@
 #![allow(unsafe_code)]
 #![feature(alloc_error_handler)]
 
+mod error;
+mod handle;
 mod heap;
 mod ipc_buffer;
 mod port_transport;
@@ -14,6 +16,8 @@ mod ring_transport;
 mod svc;
 mod sync;
 
+pub use error::{Error, Result};
+pub use handle::{BorrowedHandle, OwnedHandle};
 pub use ipc_buffer::ipc_buffer_ptr;
 pub use port_transport::PortTransport;
 pub use ring_transport::RingTransport;

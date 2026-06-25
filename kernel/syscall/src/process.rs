@@ -9,7 +9,7 @@ use core::num::NonZeroU32;
 use capability::{
     Capability, CapabilityTarget, HandleId, HandleReservation, HandleTable, LoadImageError, Rights,
     StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec, UserThreadEntry,
-    install_handle, runtime,
+    default_rights_for, install_handle, runtime,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
@@ -17,11 +17,12 @@ use memory::{
     memory_mapper::{MemoryMappingError, UserCopyError},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
+use syscall::{SyscallError, UserMemFlags};
 
 use super::{
     bridge::parse_handle_id,
-    error::SyscallError,
-    flags::UserMemFlags,
+    error::{map_ipc_error, map_spawn_error},
+    flags::to_mem_flags,
     runtime::runtime as syscall_runtime,
     spawn_abi::{
         MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, USER_IMAGE_DESC_SIZE,
@@ -57,12 +58,12 @@ pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallErr
         .ok_or(SyscallError::BadHandle)?;
     let reservation = table
         .with_lock(capability::HandleTable::reserve_slot)
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
     let process = match syscall_runtime().create_empty_process(name) {
         Ok(p) => p,
         Err(e) => {
             table.with_lock(|tbl| tbl.release_reservation(reservation));
-            return Err(SyscallError::from(e));
+            return Err(map_spawn_error(e));
         }
     };
     Ok(commit_object_handle(
@@ -96,7 +97,7 @@ pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
         .ok_or(SyscallError::BadHandle)?;
     let process = table
         .with_lock(|tbl| tbl.get_process(id, Rights::READ))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
     let code = process.exit_code();
     Ok(u64::from(code.cast_unsigned()))
 }
@@ -105,7 +106,7 @@ pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
 /// bound-`Signal` терминации процесса. Требует `Rights::READ`.
 pub fn sys_process_termination_signal(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
-    let sig_id = capability::process_termination_signal(id)?;
+    let sig_id = capability::process_termination_signal(id).map_err(map_ipc_error)?;
     Ok(u64::from(sig_id.raw().get()))
 }
 
@@ -117,7 +118,7 @@ pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, Syscall
         .ok_or(SyscallError::BadHandle)?;
     let process = table
         .with_lock(|tbl| tbl.get_process(id, Rights::WRITE))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     // Self-terminate отвергается: dispatcher вернул бы в уже завершённый поток.
     // Self-exit - через ThreadExit (0x52).
@@ -127,7 +128,9 @@ pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, Syscall
         return Err(SyscallError::AccessDenied);
     }
 
-    syscall_runtime().terminate_process(&process, code)?;
+    syscall_runtime()
+        .terminate_process(&process, code)
+        .map_err(map_ipc_error)?;
     Ok(0)
 }
 
@@ -163,7 +166,7 @@ pub fn sys_process_load_image(
         .ok_or(SyscallError::BadHandle)?;
     let process_object = loader_table
         .with_lock(|tbl| tbl.get_process(process_id, Rights::WRITE))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     let mut segments_buf = [0u8; MAX_SEGMENTS_PER_IMG * USER_SEGMENT_SIZE];
     let total = segment_count * USER_SEGMENT_SIZE;
@@ -182,7 +185,7 @@ pub fn sys_process_load_image(
         let region_handle_id = handle_id_from_raw(seg.region_handle)?;
         let (region, _handle_rights) = loader_table
             .with_lock(|tbl| tbl.get_memory_with_rights(region_handle_id, needed_rights))
-            .map_err(SyscallError::from)?;
+            .map_err(map_ipc_error)?;
         if region.size_bytes() != seg.mapped_size as usize {
             return Err(SyscallError::InvalidArgument);
         }
@@ -195,7 +198,7 @@ pub fn sys_process_load_image(
             va_base,
             mapped_size: seg.mapped_size as usize,
             region,
-            flags: flags.to_mem_flags(),
+            flags: to_mem_flags(flags),
         });
     }
 
@@ -244,7 +247,7 @@ pub fn sys_process_start(
         .ok_or(SyscallError::BadHandle)?;
     let process_object = loader_table
         .with_lock(|tbl| tbl.get_process(process_id, Rights::WRITE))
-        .map_err(SyscallError::from)?;
+        .map_err(map_ipc_error)?;
 
     let mut ids: Vec<HandleId> = Vec::with_capacity(handles_count);
     if handles_count > 0 {
@@ -285,7 +288,7 @@ pub fn sys_process_start(
         Some(
             loader_table
                 .with_lock(capability::HandleTable::reserve_slot)
-                .map_err(SyscallError::from)?,
+                .map_err(map_ipc_error)?,
         )
     } else {
         None
@@ -316,8 +319,8 @@ pub fn sys_process_start(
 }
 
 pub(super) fn install_object_handle(target: CapabilityTarget) -> Result<u64, SyscallError> {
-    let rights = Rights::defaults_for(&target);
-    let handle_id = install_handle(Capability::new(target, rights))?;
+    let rights = default_rights_for(&target);
+    let handle_id = install_handle(Capability::new(target, rights)).map_err(map_ipc_error)?;
     Ok(u64::from(handle_id.raw().get()))
 }
 
@@ -326,7 +329,7 @@ pub(super) fn commit_object_handle(
     reservation: HandleReservation,
     target: CapabilityTarget,
 ) -> u64 {
-    let rights = Rights::defaults_for(&target);
+    let rights = default_rights_for(&target);
     let handle_id =
         table.with_lock(|tbl| tbl.commit_reserved(reservation, Capability::new(target, rights)));
     u64::from(handle_id.raw().get())
@@ -377,8 +380,8 @@ fn start_err_to_syscall(err: &StartProcessError) -> SyscallError {
     match err {
         StartProcessError::ProcessNotFound => SyscallError::BadHandle,
         StartProcessError::WrongState => SyscallError::WrongType,
-        StartProcessError::HandleValidationFailed(ipc) => SyscallError::from(*ipc),
-        StartProcessError::SpawnFailed(source) => SyscallError::from(*source),
+        StartProcessError::HandleValidationFailed(ipc) => map_ipc_error(*ipc),
+        StartProcessError::SpawnFailed(source) => map_spawn_error(*source),
     }
 }
 

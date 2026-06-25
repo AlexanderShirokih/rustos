@@ -1,12 +1,12 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use collections::LockCell;
-use syscall::WakeCount;
+use syscall::{Rights, WakeCount};
 
 use super::{
     errors::IpcError,
     handle::{Capability, HandleId},
-    rights::Rights,
+    rights::default_rights_for,
     runtime::{ParkState, runtime},
     signal::Signal,
     target::CapabilityTarget,
@@ -236,14 +236,14 @@ pub fn thread_exit(exit_code: i32) -> ! {
 }
 
 /// Создаёт новый [`Signal`] и регистрирует handle в таблице текущего
-/// процесса. Стартовые права - [`Rights::defaults_for`].
+/// процесса. Стартовые права - [`default_rights_for`].
 pub fn signal_create() -> Result<HandleId, IpcError> {
     let table = runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
     let signal = Signal::new();
     let target = CapabilityTarget::Signal(signal);
-    let handle = Capability::new(target.clone(), Rights::defaults_for(&target));
+    let handle = Capability::new(target.clone(), default_rights_for(&target));
     table.with_lock(|tbl| tbl.insert(handle))
 }
 

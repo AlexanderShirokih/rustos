@@ -5,14 +5,13 @@ use core::num::NonZeroU32;
 
 use collections::LockCell;
 use memory::{memory_mapper::UserCopyError, virtual_address::VirtualAddress};
-use syscall::{IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, decode_tag, encode_tag};
+use syscall::{IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, Rights, decode_tag, encode_tag};
 
 use super::{
     errors::IpcError,
     handle::HandleId,
     handle_table::{HandleReservation, HandleTable},
     port::{BufferAccess, ThreadTransport},
-    rights::Rights,
 };
 
 /// ABI-офсеты полей [`syscall::IpcBuffer`] (`#[repr(C)]`):
@@ -375,8 +374,8 @@ mod tests {
 
     use super::{
         super::{
-            handle::Capability, handle_table::HandleTable, port::ThreadTransport, rights::Rights,
-            signal::Signal, target::CapabilityTarget,
+            handle::Capability, handle_table::HandleTable, port::ThreadTransport, signal::Signal,
+            target::CapabilityTarget,
         },
         test_mapper::PageMapper,
         *,

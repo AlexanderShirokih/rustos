@@ -1,7 +1,9 @@
 use alloc::sync::Arc;
 use core::num::NonZeroU32;
 
-use super::{errors::IpcError, rev_node::RevNode, rights::Rights, target::CapabilityTarget};
+use syscall::Rights;
+
+use super::{errors::IpcError, rev_node::RevNode, target::CapabilityTarget};
 
 /// Публичный идентификатор записи в `HandleTable`, используемый процессами для IPC.
 ///

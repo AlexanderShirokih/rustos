@@ -21,6 +21,7 @@ use syscall::Handle;
 mod heap;
 mod ipc_buffer;
 mod memory_capability_target;
+mod owned_handle;
 mod port;
 mod process_handles;
 mod ring_transport;

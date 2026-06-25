@@ -45,9 +45,19 @@
 
 use core::num::NonZeroU32;
 
+mod error;
+mod flags;
 mod ipc_buffer;
+mod rights;
 
+pub use error::SyscallError;
+pub use flags::{InvalidUserMemFlags, UserMemFlags};
 pub use ipc_buffer::{IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, IpcBuffer, decode_tag, encode_tag};
+pub use rights::Rights;
+
+/// Сырой HandleId syscall-ABI: 32-битный индекс записи в handle-таблице, где
+/// `0` означает невалидный handle.
+pub type RawHandle = u32;
 
 /// Capability процесса: непрозрачный идентификатор записи в его handle-таблице.
 ///

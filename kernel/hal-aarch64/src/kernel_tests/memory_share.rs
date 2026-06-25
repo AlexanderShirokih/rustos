@@ -10,7 +10,7 @@ use core::{
 
 use capability::{
     Capability, CapabilityTarget, HandleId, HandleTable, KernelIpcBuffer, Rights, ThreadTransport,
-    transfer_rendezvous,
+    default_rights_for, transfer_rendezvous,
 };
 use collections::{LockCell, MutexCell};
 use kernel_tests::kernel_test;
@@ -67,7 +67,7 @@ fn memory_region_shared_across_two_address_spaces() {
         .expect("create_virtual one page");
     let region = Arc::new(region);
     let target = CapabilityTarget::Memory(region.clone());
-    let rights = Rights::defaults_for(&target);
+    let rights = default_rights_for(&target);
     kernel_tests::kassert!(rights.contains(Rights::TRANSFER));
 
     let table_a = Arc::new(MutexCell::new(HandleTable::new()));

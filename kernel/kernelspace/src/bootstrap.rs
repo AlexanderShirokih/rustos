@@ -8,7 +8,7 @@ use core::num::NonZeroUsize;
 use bootstrap::{BootstrapService, dispatch_bootstrap};
 use capability::{
     Capability, CapabilityTarget, IpcError as KernelIpcError, KernelIpcBuffer, Port, Resource,
-    Rights, ThreadTransport, port_recv, runtime,
+    ThreadTransport, default_rights_for, port_recv, runtime,
 };
 use collections::{LockCell, MutexCell};
 use ipc::{
@@ -56,7 +56,7 @@ pub fn spawn_process(
     // объект уходит bootstrap-процессу как initial handle[0] - он клиент.
     let port = Port::new();
     let peer_target = CapabilityTarget::Port(port.clone());
-    let peer_handle = Capability::new(peer_target.clone(), Rights::defaults_for(&peer_target));
+    let peer_handle = Capability::new(peer_target.clone(), default_rights_for(&peer_target));
 
     // Корневой Resource: полномочие на минтинг физпамяти + носитель
     // ресурсного бюджета. Выдаётся bootstrap-процессу как initial handle[1]
@@ -75,7 +75,7 @@ pub fn spawn_process(
     let resource_target = CapabilityTarget::Resource(root_resource.clone());
     let resource_handle = Capability::new(
         resource_target.clone(),
-        Rights::defaults_for(&resource_target),
+        default_rights_for(&resource_target),
     );
 
     let launch = UserProcessLaunch::new()

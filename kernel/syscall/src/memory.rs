@@ -7,6 +7,7 @@ use core::num::NonZeroUsize;
 
 use capability::{
     Capability, CapabilityTarget, IpcError, ResourceBudgetRefund, RevocationHook, Rights,
+    default_rights_for,
 };
 use collections::LockCell;
 use memory::{
@@ -16,13 +17,14 @@ use memory::{
     range_allocator::{AllocateError, RangeError},
     virtual_address::PageAlignedVirtualAddress,
 };
+use syscall::{SyscallError, UserMemFlags};
 
 use super::{
     bridge::{SyscallFrame, parse_handle_id},
-    error::{SyscallError, encode_return},
+    error::{encode_return, map_ipc_error},
+    flags::to_mem_flags,
     runtime::runtime,
 };
-use crate::UserMemFlags;
 
 fn lookup_memory(
     id: capability::HandleId,
@@ -30,8 +32,10 @@ fn lookup_memory(
 ) -> Result<Arc<MemoryRegion>, SyscallError> {
     let table = capability::runtime()
         .current_handle_table()
-        .ok_or(IpcError::BadHandle)?;
-    let region = table.with_lock(|tbl| tbl.get_memory(id, need))?;
+        .ok_or(SyscallError::BadHandle)?;
+    let region = table
+        .with_lock(|tbl| tbl.get_memory(id, need))
+        .map_err(map_ipc_error)?;
     Ok(region)
 }
 
@@ -41,8 +45,10 @@ fn lookup_memory_grant(
 ) -> Result<(Arc<MemoryRegion>, AccessMask), SyscallError> {
     let table = capability::runtime()
         .current_handle_table()
-        .ok_or(IpcError::BadHandle)?;
-    let (region, rights) = table.with_lock(|tbl| tbl.get_memory_with_rights(id, need))?;
+        .ok_or(SyscallError::BadHandle)?;
+    let (region, rights) = table
+        .with_lock(|tbl| tbl.get_memory_with_rights(id, need))
+        .map_err(map_ipc_error)?;
     let mut bits: u8 = 0;
     if rights.contains(Rights::READ) {
         bits |= AccessMask::R.bits();
@@ -133,7 +139,9 @@ pub fn sys_memory_create_virtual(
     let table = capability::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let resource = table.with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))?;
+    let resource = table
+        .with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))
+        .map_err(map_ipc_error)?;
 
     let fa = runtime()
         .frame_allocator()
@@ -143,12 +151,16 @@ pub fn sys_memory_create_virtual(
     // Метерим после выделения: на нехватке бюджета регион дропается (фреймы
     // возвращаются в FA), списания нет. Списать раньше нельзя - refund живёт
     // только на регионе, а до его создания утёк бы при OOM фреймов.
-    resource.try_consume(pages.get() as u64)?;
+    resource
+        .try_consume(pages.get() as u64)
+        .map_err(map_ipc_error)?;
     let region = region.with_refund(ResourceBudgetRefund::new(&resource, pages.get() as u64));
     let region_arc = Arc::new(region);
     let target = CapabilityTarget::Memory(region_arc);
-    let handle = Capability::new(target.clone(), Rights::defaults_for(&target));
-    let id = table.with_lock(|tbl| tbl.insert(handle))?;
+    let handle = Capability::new(target.clone(), default_rights_for(&target));
+    let id = table
+        .with_lock(|tbl| tbl.insert(handle))
+        .map_err(map_ipc_error)?;
     Ok(u64::from(id.raw().get()))
 }
 
@@ -171,22 +183,26 @@ pub fn sys_memory_create_physical(
     let table = capability::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let resource = table.with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))?;
+    let resource = table
+        .with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))
+        .map_err(map_ipc_error)?;
     if !resource.permits(pa, size, access) {
         return Err(SyscallError::AccessDenied);
     }
 
     // Округление вверх: physical-окно может быть не кратно странице.
     let pages = size.get().div_ceil(PAGE_SIZE) as u64;
-    resource.try_consume(pages)?;
+    resource.try_consume(pages).map_err(map_ipc_error)?;
 
     // refund на регионе вернёт бюджет на дропе - в т.ч. если insert ниже упадёт.
     let refund = ResourceBudgetRefund::new(&resource, pages);
     let region = MemoryRegion::create_physical(pa, size, access).with_refund(refund);
     let region_arc = Arc::new(region);
     let target = CapabilityTarget::Memory(region_arc);
-    let handle = Capability::new(target.clone(), Rights::defaults_for(&target));
-    let id = table.with_lock(|tbl| tbl.insert(handle))?;
+    let handle = Capability::new(target.clone(), default_rights_for(&target));
+    let id = table
+        .with_lock(|tbl| tbl.insert(handle))
+        .map_err(map_ipc_error)?;
     Ok(u64::from(id.raw().get()))
 }
 
@@ -201,13 +217,15 @@ pub fn sys_memory_allocate(
     let resource_id = parse_handle_id(resource_h)?;
     let size = parse_size(size_bytes)?;
     let flags = parse_flags(flags_raw)?;
-    let mem_flags = flags.to_mem_flags();
+    let mem_flags = to_mem_flags(flags);
     let access = access_mask_for(flags);
 
     let table = capability::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let resource = table.with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))?;
+    let resource = table
+        .with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))
+        .map_err(map_ipc_error)?;
 
     let user_vm = runtime().current_user_vm().ok_or(SyscallError::WrongType)?;
     let fa = runtime()
@@ -224,7 +242,9 @@ pub fn sys_memory_allocate(
         .map_err(|e| region_create_err_to_syscall(&e))?;
     // Метерим после выделения: на нехватке бюджета регион дропается (фреймы
     // возвращаются в FA), списания нет.
-    resource.try_consume(pages_count.get() as u64)?;
+    resource
+        .try_consume(pages_count.get() as u64)
+        .map_err(map_ipc_error)?;
     let region = Arc::new(region.with_refund(ResourceBudgetRefund::new(
         &resource,
         pages_count.get() as u64,
@@ -274,7 +294,7 @@ pub fn sys_memory_map(
     let id = parse_handle_id(handle_raw)?;
     let size = parse_size(size_bytes)?;
     let flags = parse_flags(flags_raw)?;
-    let mem_flags = flags.to_mem_flags();
+    let mem_flags = to_mem_flags(flags);
     let need = rights_for_access(flags);
 
     let (region, grant) = lookup_memory_grant(id, need)?;
@@ -384,7 +404,7 @@ pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<
     let size = parse_size(size_bytes)?;
     let va_usize = usize::try_from(va_raw).map_err(|_| SyscallError::InvalidArgument)?;
     let flags = parse_flags(flags_raw)?;
-    let mem_flags = flags.to_mem_flags();
+    let mem_flags = to_mem_flags(flags);
     let base =
         PageAlignedVirtualAddress::from_usize(va_usize).ok_or(SyscallError::InvalidArgument)?;
 
