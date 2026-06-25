@@ -5,8 +5,7 @@
 use kernel_tests::kernel_test;
 use runtime::{
     memory_create_virtual, memory_map, memory_remap, process_create, process_exit_code,
-    process_load_image, process_resource_self, process_start, process_termination_signal,
-    signal_wait_one,
+    process_load_image, process_resource_self, process_start, signal_wait_one,
 };
 use syscall::{MEM_FLAGS_READ_WRITE, SIGNALED, SyscallOp};
 
@@ -94,8 +93,8 @@ fn self_spawn_via_syscalls() {
     // priority = 1, bootstrap-handle'ов нет.
     process_start(child, CHILD_CODE_VA, CHILD_STACK_TOP, 0, 1, 0).expect("child thread handle");
 
-    let term_signal = process_termination_signal(child).expect("process_termination_signal");
-    let observed = signal_wait_one(term_signal, SIGNALED, CHILD_WAIT_TIMEOUT_NS);
+    // Ожидание завершения прямо по child-handle; затем читаем exit-code с него же.
+    let observed = signal_wait_one(child, SIGNALED, CHILD_WAIT_TIMEOUT_NS);
     kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
     kernel_tests::kassert_eq!(process_exit_code(child), i64::from(CHILD_EXIT_CODE));
 }

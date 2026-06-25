@@ -14,7 +14,6 @@ use kernel_tests::kernel_test;
 use runtime::{
     RingTransport, memory_allocate, memory_create_virtual, memory_map, process_resource_self,
     process_self, signal_create, signal_wait_one, thread_create, thread_exit,
-    thread_termination_signal,
 };
 use syscall::{Handle, MEM_FLAGS_READ_WRITE, SIGNALED};
 
@@ -143,9 +142,8 @@ fn ring_transport_round_trip() {
         }
     }
 
-    // Join consumer'а с конечным таймаутом.
-    let sig = thread_termination_signal(thread).expect("thread_termination_signal");
-    let observed = signal_wait_one(sig, SIGNALED, JOIN_TIMEOUT_NS);
+    // Join consumer'а с конечным таймаутом (ожидание по thread-handle).
+    let observed = signal_wait_one(thread, SIGNALED, JOIN_TIMEOUT_NS);
     kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
 
     kernel_tests::kassert!(shared.ok.load(core::sync::atomic::Ordering::Acquire));

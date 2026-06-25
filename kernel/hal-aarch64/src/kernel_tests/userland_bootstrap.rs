@@ -13,7 +13,6 @@ use bootstrap::{BootstrapService, dispatch_bootstrap};
 use capability::{
     Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, KernelIpcBuffer, Port,
     Rights, SIGNALED, ThreadTransport, install_handle, port_recv, runtime, signal_wait_one,
-    thread_termination_signal,
 };
 use collections::{LockCell, MutexCell};
 use ipc::{
@@ -99,9 +98,9 @@ fn spawn_bootstrap_with_log() -> BootstrapLaunch {
         Aarch64Context::USER_VA_END,
     )
     .expect("spawn_process must succeed");
-    // initial handle[0] = bootstrap-port, initial handle[1] = корневой
-    // Resource (полномочие на минтинг физпамяти + бюджет).
-    kernel_tests::kassert_eq!(launch.info.initial_handle_ids.len(), 2);
+    // initial handle[0] = bootstrap-port, [1] = корневой Resource (минтинг
+    // физпамяти + бюджет), [2] = корневой IrqControl (полномочие на IRQ-линии).
+    kernel_tests::kassert_eq!(launch.info.initial_handle_ids.len(), 3);
 
     // Kernel-получатель: recv матчит синхронный send bootstrap-процесса.
     let table = runtime()
@@ -120,16 +119,15 @@ fn spawn_bootstrap_with_log() -> BootstrapLaunch {
 }
 
 /// Bootstrap-поток уже отправил лог (send вернулся после нашего recv) и
-/// выходит сам; ждём завершения через его bound-`Signal`.
+/// выходит сам; ждём завершения прямо по его thread-handle (bound-`Signal`
+/// терминации материализуется ядром лениво).
 fn teardown_bootstrap(launch: BootstrapLaunch) {
     let thread_id = install_handle(Capability::new(
         CapabilityTarget::Thread(launch.info.thread_object),
         Rights::READ,
     ))
     .expect("install bootstrap thread handle");
-    let term_signal =
-        thread_termination_signal(thread_id).expect("bootstrap thread termination signal");
-    let observed = signal_wait_one(term_signal, SIGNALED, Some(WAIT_BUDGET_NS))
+    let observed = signal_wait_one(thread_id, SIGNALED, Some(WAIT_BUDGET_NS))
         .expect("wait for bootstrap exit");
     kernel_tests::kassert!(observed & SIGNALED != 0);
 }

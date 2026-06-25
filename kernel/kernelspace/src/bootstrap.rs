@@ -7,8 +7,8 @@ use core::num::NonZeroUsize;
 
 use bootstrap::{BootstrapService, dispatch_bootstrap};
 use capability::{
-    Capability, CapabilityTarget, IpcError as KernelIpcError, KernelIpcBuffer, Port, Resource,
-    ThreadTransport, default_rights_for, port_recv, runtime,
+    Capability, CapabilityTarget, IpcError as KernelIpcError, IrqControl, KernelIpcBuffer, Port,
+    Resource, ThreadTransport, default_rights_for, port_recv, runtime,
 };
 use collections::{LockCell, MutexCell};
 use ipc::{
@@ -78,8 +78,17 @@ pub fn spawn_process(
         default_rights_for(&resource_target),
     );
 
+    // Корневое полномочие на IRQ-линии: весь SPI-диапазон (32..=1019). Выдаётся
+    // bootstrap-процессу как initial handle[2] и делегируется вниз драйверам
+    // через TRANSFER/DUPLICATE — так же, как корневой Resource.
+    let irq_control_target = CapabilityTarget::IrqControl(IrqControl::new(32, 1019));
+    let irq_control_handle = Capability::new(
+        irq_control_target.clone(),
+        default_rights_for(&irq_control_target),
+    );
+
     let launch = UserProcessLaunch::new()
-        .initial_handles(vec![peer_handle, resource_handle])
+        .initial_handles(vec![peer_handle, resource_handle, irq_control_handle])
         .bootstrap_handle(0);
 
     let info = launcher

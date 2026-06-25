@@ -170,6 +170,15 @@ pub trait InterruptsService: Send + Sync {
     /// Регистрирует обработчик, настраивает IRQ и возвращает RAII-объект.
     fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError>;
 
+    /// Маскирует (запрещает) линию `irq` на контроллере, не снимая привязку.
+    /// Парная к [`unmask`](Self::unmask). Используется уровневым IRQ-протоколом
+    /// userspace-драйверов: линия маскируется при срабатывании и размаскируется
+    /// на `ack`.
+    fn mask(&self, irq: IrqNumber);
+
+    /// Снимает маску (разрешает) линию `irq` на контроллере.
+    fn unmask(&self, irq: IrqNumber);
+
     /// Обрабатывает не более одного IRQ за вызов.
     fn dispatch_interrupt(&self);
 }
@@ -201,12 +210,16 @@ mod tests {
 
     struct SpyInterruptsService {
         bind_calls: AtomicUsize,
+        mask_calls: AtomicUsize,
+        unmask_calls: AtomicUsize,
     }
 
     impl SpyInterruptsService {
         fn new() -> Self {
             Self {
                 bind_calls: AtomicUsize::new(0),
+                mask_calls: AtomicUsize::new(0),
+                unmask_calls: AtomicUsize::new(0),
             }
         }
     }
@@ -219,6 +232,14 @@ mod tests {
         fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
             self.bind_calls.fetch_add(1, Ordering::SeqCst);
             Ok(IrqBound::new(binding.irq, || {}))
+        }
+
+        fn mask(&self, _irq: IrqNumber) {
+            self.mask_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn unmask(&self, _irq: IrqNumber) {
+            self.unmask_calls.fetch_add(1, Ordering::SeqCst);
         }
 
         fn dispatch_interrupt(&self) {}
@@ -255,6 +276,10 @@ mod tests {
             Err(IrqRegistrationError::Unsupported)
         }
 
+        fn mask(&self, _irq: IrqNumber) {}
+
+        fn unmask(&self, _irq: IrqNumber) {}
+
         fn dispatch_interrupt(&self) {}
     }
 
@@ -272,5 +297,17 @@ mod tests {
         );
 
         assert!(matches!(result, Err(IrqRegistrationError::Unsupported)));
+    }
+
+    #[test]
+    fn spy_records_mask_and_unmask_round_trip() {
+        let service = SpyInterruptsService::new();
+        let irq = IrqNumber::new(40);
+
+        service.mask(irq);
+        service.unmask(irq);
+
+        assert_eq!(service.mask_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(service.unmask_calls.load(Ordering::SeqCst), 1);
     }
 }

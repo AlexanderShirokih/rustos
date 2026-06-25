@@ -18,7 +18,7 @@ use kernel_tests::kernel_test;
 use runtime::{
     handle_duplicate, ipc_buffer_addr, memory_allocate, port_call, port_create, port_recv,
     port_reply, port_send, process_resource_self, process_self, signal_create, signal_set,
-    signal_wait_one, thread_create, thread_exit, thread_termination_signal,
+    signal_wait_one, thread_create, thread_exit,
 };
 use syscall::{
     Handle, MEM_FLAGS_READ_WRITE, PORT_TIMEOUT_INFINITE, PORT_TIMEOUT_POLL, SIGNALED,
@@ -132,8 +132,7 @@ fn spawn_worker(entry: extern "C" fn(usize) -> !) -> Handle {
 }
 
 fn join(thread: Handle) {
-    let sig = thread_termination_signal(thread).expect("thread_termination_signal");
-    let observed = signal_wait_one(sig, SIGNALED, JOIN_TIMEOUT_NS);
+    let observed = signal_wait_one(thread, SIGNALED, JOIN_TIMEOUT_NS);
     kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
 }
 

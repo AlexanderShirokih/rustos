@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod driver_init;
 pub mod init;
 pub mod irq_bridge;
+pub mod irq_control_adapter;
 pub mod kernel_context;
 pub mod kmain;
 pub mod power;

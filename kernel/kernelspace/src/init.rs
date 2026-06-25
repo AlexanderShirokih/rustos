@@ -7,10 +7,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use capability::{
-    Capability, CapabilityTarget, Rights, SIGNALED, install_handle, process_termination_signal,
-    signal_wait_one,
-};
+use capability::{Capability, CapabilityTarget, Rights, SIGNALED, install_handle, signal_wait_one};
 use klog::{info, warn};
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
@@ -88,14 +85,9 @@ fn start_bootstrap_chain(
             power::system_off(1)
         }
     };
-    let term_signal = match process_termination_signal(process_handle) {
-        Ok(id) => id,
-        Err(e) => {
-            warn!("init: process_termination_signal failed: {:?}", e);
-            power::system_off(1)
-        }
-    };
-    if let Err(e) = signal_wait_one(term_signal, SIGNALED, None) {
+    // Завершение процесса ждём прямо по его handle: as_waitable материализует
+    // bound-Signal терминации, отдельный signal-handle не нужен.
+    if let Err(e) = signal_wait_one(process_handle, SIGNALED, None) {
         warn!("init: wait for bootstrap process exit failed: {:?}", e);
         power::system_off(1)
     }

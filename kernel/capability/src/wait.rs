@@ -12,6 +12,25 @@ pub trait Waker: Send + Sync {
     fn wake(&self, observed: u32);
 }
 
+/// Источник, на котором можно ждать сигналы: абстракция wait-пути над
+/// конкретным объектом. Реализуется [`Signal`](super::signal::Signal)
+/// напрямую; составной объект может реализовать трейт сам, маршрутизируя
+/// один `waker` на несколько внутренних `Signal` (а `mask` остаётся
+/// селектором условий) — так кардинальность сигналов прячется за трейтом, и
+/// [`signal_wait_many`](crate::signal_wait_many) не знает конкретных типов.
+pub trait Waitable: Send + Sync {
+    /// Текущий снимок поднятых сигналов.
+    fn peek(&self) -> u32;
+
+    /// Регистрирует `waker` на пересечение с `mask`. Если требуемые сигналы
+    /// уже присутствуют, `waker` вызывается немедленно.
+    fn register_waiter(&self, mask: u32, waker: Arc<dyn Waker>);
+
+    /// Снимает `waker` по identity (`Arc::ptr_eq`). Возвращает `true`, если
+    /// запись действительно была удалена.
+    fn remove_waiter(&self, waker: &Arc<dyn Waker>) -> bool;
+}
+
 /// Коллбек закрытия хэндла.
 pub trait CancelTarget: Send + Sync {
     fn cancel(&self);

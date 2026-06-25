@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 
 use drivers_common::services::interrupts::{
-    InterruptsService, IrqBinding, IrqBound, IrqRegistrationError,
+    InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqRegistrationError,
 };
 use klog::debug;
 use spin::Mutex;
@@ -66,6 +66,14 @@ impl InterruptsService for GicInterruptsService {
         debug!("IRQ {irq:?} bound!");
 
         Ok(IrqBound::new(irq, cleanup))
+    }
+
+    fn mask(&self, irq: IrqNumber) {
+        self.controller.lock().disable(irq);
+    }
+
+    fn unmask(&self, irq: IrqNumber) {
+        self.controller.lock().enable(irq);
     }
 
     fn dispatch_interrupt(&self) {

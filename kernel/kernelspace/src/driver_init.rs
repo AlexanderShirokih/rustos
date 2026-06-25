@@ -104,7 +104,9 @@ mod tests {
         BootServices, DriverRunError, ServiceKind,
         services::{
             console::ConsoleService,
-            interrupts::{InterruptsService, IrqBinding, IrqBound, IrqRegistrationError},
+            interrupts::{
+                InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqRegistrationError,
+            },
             timer::{TickHandler, TimerService},
         },
     };
@@ -131,6 +133,10 @@ mod tests {
         fn bind(&self, _binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
             Err(IrqRegistrationError::Unsupported)
         }
+
+        fn mask(&self, _irq: IrqNumber) {}
+
+        fn unmask(&self, _irq: IrqNumber) {}
 
         fn dispatch_interrupt(&self) {}
     }

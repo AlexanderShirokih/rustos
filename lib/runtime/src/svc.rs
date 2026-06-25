@@ -331,24 +331,6 @@ pub fn process_exit_code(handle: Handle) -> i64 {
     ret
 }
 
-/// Возвращает handle на ленивый bound-`Signal` терминации процесса `handle`
-/// (бит `SIGNALED`). Возврат: signal-handle либо `-(SyscallError)`.
-pub fn process_termination_signal(handle: Handle) -> Result<Handle, i64> {
-    let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
-    // не передаётся. x0 на выходе - handle либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ProcessTerminationSignal as u16,
-            in("x0") u64::from(handle.raw()),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    Handle::from_syscall_return(ret)
-}
-
 /// Завершает процесс `handle` с кодом `exit_code` (нижние 32 бита): помечает
 /// завершёнными все его потоки, после декремента до нуля - и сам процесс
 /// (bound-`Signal`'ы получают `SIGNALED`). Возврат: 0 либо `-(SyscallError)`.
@@ -463,24 +445,6 @@ pub fn thread_exit_code(handle: Handle) -> i64 {
         );
     }
     ret
-}
-
-/// Возвращает handle на ленивый bound-`Signal` терминации потока `handle`
-/// (бит `SIGNALED`). Возврат: signal-handle либо `-(SyscallError)`.
-pub fn thread_termination_signal(handle: Handle) -> Result<Handle, i64> {
-    let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
-    // не передаётся. x0 на выходе - handle либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ThreadTerminationSignal as u16,
-            in("x0") u64::from(handle.raw()),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    Handle::from_syscall_return(ret)
 }
 
 /// Завершает поток `handle` с кодом `exit_code` (нижние 32 бита). Возврат:
@@ -666,7 +630,46 @@ pub fn ipc_buffer_addr() -> i64 {
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::IpcBufferAddr as u16,
+            op = const SyscallOp::ThreadIpcBufferAddr as u16,
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Минтит `IrqLine` по полномочию `control` для линии `irq`. Требует
+/// `Rights::WRITE` на `control` и попадания `irq` в его диапазон. Возврат:
+/// irq-line handle либо `-(SyscallError)`. Срабатывание ожидается через
+/// `signal_wait_one`/`signal_wait_many` прямо по возвращённому handle.
+pub fn irq_mint(control: Handle, irq: u16) -> Result<Handle, i64> {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, x0 - control handle,
+    // x1 - номер линии; память ядру не передаётся.
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::IrqMint as u16,
+            in("x0") u64::from(control.raw()),
+            in("x1") u64::from(irq),
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    Handle::from_syscall_return(ret)
+}
+
+/// Подтверждает прерывание на `line`: снимает latch `SIGNALED` и размаскирует
+/// линию. Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
+pub fn irq_ack(line: Handle) -> i64 {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, x0 - line handle; память
+    // ядру не передаётся.
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::IrqAck as u16,
+            in("x0") u64::from(line.raw()),
             lateout("x0") ret,
             options(nostack),
         );

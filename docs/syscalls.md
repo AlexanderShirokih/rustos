@@ -32,18 +32,22 @@ Handle — числовой идентификатор (`u32`) в таблице
 и т. п.). `SignalWaitOne` принимает маску интересующих битов и блокирует
 вызывающий поток, пока хотя бы один из них не поднимется.
 
-Единственный сигнализуемый capability target — **`Signal`**. Все ждущиеся события выражаются
-как `Signal`; `SignalWait*`/`SignalSet` работают только по нему (на любом
-другом типе — `WrongType`).
+`SignalWait*` ждут не только `Signal`: ждать можно любой объект, который
+предъявляет ожидаемый источник — `Signal`, `Process`/`Thread` (бит `SIGNALED`
+= "завершён") и `IrqLine` (бит `SIGNALED` = "сработало прерывание"). Менять
+биты (`SignalSet`) можно только у `Signal`; на любом другом типе — `WrongType`,
+поэтому подделать терминацию или прерывание невозможно по построению.
 
-| capability target | Сигнал     |      Бит | Описание          |
-|-------------------|------------|---------:|-------------------|
-| `Signal`          | `SIGNALED` | `1 << 0` | событие наступило |
+| capability target  | Сигнал     |      Бит | Описание                   |
+|--------------------|------------|---------:|----------------------------|
+| `Signal`           | `SIGNALED` | `1 << 0` | событие наступило          |
+| `Process`/`Thread` | `SIGNALED` | `1 << 0` | объект завершился          |
+| `IrqLine`          | `SIGNALED` | `1 << 0` | сработало прерывание линии |
 
-**Lifecycle Process/Thread** наблюдается через привязанный `Signal`. `ProcessTerminationSignal` /
-`ThreadTerminationSignal` возвращают handle на `Signal`, бит `SIGNALED`
-которого означает "завершён". Exit-код читается отдельно (`ProcessExitCode`/`ThreadExitCode`). 
-Объект, терминацию которого никто не наблюдает, не аллоцирует `Signal` вовсе.
+**Lifecycle Process/Thread** наблюдается ожиданием прямо по их handle:
+`SignalWaitOne(process_h, SIGNALED, …)` лениво материализует bound-`Signal`
+терминации. Exit-код читается отдельно (`ProcessExitCode`/`ThreadExitCode`).
+Объект, терминацию которого никто не ждёт, не аллоцирует `Signal` вовсе.
 
 ## Ошибки
 
@@ -112,8 +116,7 @@ secondary-регистре. Дубликаты `handle` в `items` допуст�
 Пример: дождаться завершения дочернего процесса.
 
 ```rust
-let term_h = process_termination_signal(process_h)?;
-let observed = signal_wait_one(term_h, SIGNALED, timeout_ns)?;
+let observed = signal_wait_one(process_h, SIGNALED, timeout_ns)?;
 if observed & SIGNALED != 0 {
     let code = process_exit_code(process_h)?;
 }
@@ -174,7 +177,7 @@ syscall возвращает `Timeout` (`SYSCALL_RETURN_TIMEOUT = -9`). Для `
 badge не несёт.
 
 Содержимое кадра (байты и хэндлы) кодируется в IPC-буфере по адресу, который
-возвращает `IpcBufferAddr` (op `0x56`). Wire-формат типизированного IPC поверх
+возвращает `ThreadIpcBufferAddr` (op `0x55`). Wire-формат типизированного IPC поверх
 этого транспорта описан в [ipc.md](ipc.md); он не зависит от того, что underlying
 доставка синхронна.
 
@@ -270,8 +273,11 @@ Process-вызовы создают процесс, возвращают handle 
 | `0x43` | `ProcessExitCode`          | `process_h`                                                                                  | `exit_code` как `u32`  | `READ`                                                                   |
 | `0x44` | `ProcessTerminate`         | `process_h`, `exit_code`                                                                     | `0`                    | `WRITE`                                                                  |
 | `0x45` | `ProcessStart`             | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h`             | `WRITE`; `TRANSFER` на bootstrap-handle                                  |
-| `0x46` | `ProcessTerminationSignal` | `process_h`                                                                                  | `signal_h` (read-only) | `READ`                                                                   |
-| `0x47` | `ProcessResourceSelf`      | —                                                                                            | `resource_h`           | —                                                                        |
+| `0x46` | `ProcessResourceSelf`      | —                                                                                            | `resource_h`           | —                                                                        |
+
+Завершение процесса наблюдается ожиданием прямо по `process_h`
+(`SignalWaitOne`/`Many`, бит `SIGNALED`); отдельной op материализации
+`Signal`-хендла нет.
 
 `ProcessCreate` копирует имя процесса из user-памяти, требует корректный UTF-8
 и ограничение `name_len <= 64` байт. Пустое имя (`name_len == 0`) допустимо.
@@ -301,11 +307,12 @@ Process-вызовы создают процесс, возвращают handle 
 завершение идёт через `ThreadExit`; последний поток процесса помечает
 процесс завершённым.
 
-`ProcessTerminationSignal` возвращает handle на ленивый bound-`Signal`
-процесса (бит `SIGNALED` = "завершён"), материализуя его при первом вызове;
-если процесс уже завершён, `Signal` сразу несёт `SIGNALED`. Выданный handle
-read-only (`READ`/`DUPLICATE`/`TRANSFER`, без `WRITE`): наблюдатель не может
-подделать терминацию.
+Завершение процесса ожидается прямо по `process_h`:
+`SignalWaitOne(process_h, SIGNALED, …)` лениво материализует bound-`Signal`
+терминации (если процесс уже завершён, ожидание возвращается сразу). Отдельный
+`Signal`-хендл не выдаётся, поэтому подделать терминацию через `SignalSet`
+нельзя (на `Process` — `WrongType`). Чтобы делегировать наблюдение, не давая
+права завершать процесс, передают `HandleDuplicate(process_h, READ, …)`.
 
 Типичный сценарий user-spawn состоит из трёх шагов: `ProcessCreate`,
 затем `ProcessLoadImage`, затем `ProcessStart`. Между `LoadImage` и
@@ -327,8 +334,7 @@ port_send(report_h, PORT_TIMEOUT_INFINITE);
 port_recv(monitor_h, PORT_TIMEOUT_INFINITE);
 let monitored_h = read_cap_frame(ipc).expect("peer transferred wait_h");
 
-let term_h = process_termination_signal(monitored_h)?;
-let observed = signal_wait_one(term_h, SIGNALED, timeout_ns);
+let observed = signal_wait_one(monitored_h, SIGNALED, timeout_ns);
 if observed >= 0 && (observed as u32) & SIGNALED != 0 {
     let code = process_exit_code(monitored_h);
 }
@@ -346,17 +352,17 @@ Thread-вызовы создают поток в процессе, возвра�
 | `0x52` | `ThreadExit`              | `exit_code`                                           | не возвращается        | —       |
 | `0x53` | `ThreadExitCode`          | `thread_h`                                            | `exit_code` как `u32`  | `READ`  |
 | `0x54` | `ThreadTerminate`         | `thread_h`, `exit_code`                               | `0`                    | `WRITE` |
-| `0x55` | `ThreadTerminationSignal` | `thread_h`                                            | `signal_h` (read-only) | `READ`  |
-| `0x56` | `IpcBufferAddr`           | —                                                     | `ipc_buffer_va`        | —       |
+| `0x55` | `ThreadIpcBufferAddr`     | —                                                     | `ipc_buffer_va`        | —       |
 
 `ThreadTerminate` не используется для self-exit: handle на текущий
 поток возвращает `AccessDenied` даже при `WRITE`. Для завершения
 текущего потока вызывается `ThreadExit`.
 
-`ThreadTerminationSignal` симметричен `ProcessTerminationSignal`: возвращает
-handle на ленивый bound-`Signal` потока (бит `SIGNALED` = "завершён").
+Завершение потока, как и процесса, ожидается прямо по `thread_h`
+(`SignalWaitOne`/`Many`, бит `SIGNALED`); bound-`Signal` терминации
+материализуется лениво, отдельной op нет.
 
-`IpcBufferAddr` возвращает user-VA per-thread IPC-буфера текущего потока; для
+`ThreadIpcBufferAddr` возвращает user-VA per-thread IPC-буфера текущего потока; для
 kernel-потока без буфера — `-(SyscallError)`. Адрес используется как указатель
 на `IpcBuffer` перед каждым port-вызовом (см. секцию [Port](#port)).
 
@@ -372,8 +378,7 @@ fn worker_entry() -> ! {
 let process_h = process_self()?;
 let thread_h = thread_create(process_h, worker_entry as u64, worker_sp, 0, priority)?;
 
-let term_h = thread_termination_signal(thread_h)?;
-let observed = signal_wait_one(term_h, SIGNALED, timeout_ns);
+let observed = signal_wait_one(thread_h, SIGNALED, timeout_ns);
 if observed >= 0 && (observed as u32) & SIGNALED != 0 {
     let code = thread_exit_code(thread_h);
 }
@@ -410,8 +415,8 @@ Memory-вызовы выделяют память и управляют её м�
 делиться нацело); `MemoryCreatePhysical` — округление вверх до целого числа
 страниц. При нехватке бюджета операция возвращает `ResourceExhausted` и регион
 не создаётся. Корневой `Resource` (крупный PA-диапазон) создаётся ядром при
-старте и выдаётся bootstrap-процессу как дополнительный initial handle
-(индекс 1; индекс 0 - bootstrap-port).
+старте и выдаётся bootstrap-процессу одним из начальных хэндлов (полная
+раскладка начальных хэндлов — в [userland.md](userland.md)).
 
 Метеринг-`Resource` разделяется, а не партиционируется: `ProcessStart`
 передаёт ребёнку тот же `Resource`, что у caller, а `ProcessResourceSelf`
@@ -457,6 +462,53 @@ let readonly_h = handle_duplicate(region_h, Rights::READ | Rights::TRANSFER, 0)?
 let ipc = ipc_buffer_addr() as *mut IpcBuffer;
 write_cap_frame(ipc, readonly_h);
 port_send(peer_h, PORT_TIMEOUT_INFINITE);
+```
+
+## IRQ
+
+IRQ-вызовы выдают userspace-драйверу аппаратную линию прерывания как
+capability. Полномочие минтить линии несёт `IrqControl` (range-bounded, как
+`Resource` для физпамяти); минтинг возвращает `IrqLine` — привязанную линию,
+срабатывание которой userspace ждёт как обычный сигнал.
+
+|     Op | Имя       | Аргументы              | Возврат      | Права                  |
+|-------:|-----------|------------------------|--------------|------------------------|
+| `0x70` | `IrqMint` | `irq_control_h`, `irq` | `irq_line_h` | `WRITE` на `IrqControl` |
+| `0x71` | `IrqAck`  | `irq_line_h`           | `0`          | `WRITE` на `IrqLine`    |
+
+`IrqMint` минтит `IrqLine` для линии `irq` (нижние 16 бит): требует `WRITE` на
+`IrqControl`-хендле и попадания `irq` в его диапазон (иначе `AccessDenied`);
+если линия уже занята — `ResourceExhausted`. Корневой `IrqControl` (весь
+SPI-диапазон `32..=1019`) создаётся ядром при старте и выдаётся
+bootstrap-процессу одним из начальных хэндлов (см. [userland.md](userland.md));
+вниз драйверам он делегируется через `TRANSFER`/`DUPLICATE`, как корневой
+`Resource`.
+
+Ожидание и подтверждение (линии GIC уровневые):
+
+- ждать срабатывания — `SignalWaitOne(irq_line_h, SIGNALED, …)` (или в
+  `SignalWaitMany` рядом с другими событиями): `IrqLine` ожидается напрямую,
+  отдельный `Signal`-хендл не выдаётся, поэтому подделать прерывание нельзя;
+- при срабатывании ядро синхронно маскирует линию и поднимает `SIGNALED`
+  (для уровневой линии это обязательно — иначе interrupt storm);
+- обслужив устройство, драйвер вызывает `IrqAck(irq_line_h)`: снимает latch
+  `SIGNALED` и размаскирует линию. Подтверждение вне состояния "сработало" —
+  `WrongType`.
+
+Закрытие `IrqLine`-хендла (или завершение процесса) отвязывает линию и
+отключает её на контроллере: упавший драйвер не оставляет зависшую линию.
+
+Пример: драйвер обслуживает свою линию.
+
+```rust
+let irq_h = irq_mint(irq_control_h, DEVICE_IRQ)?;
+loop {
+    let observed = signal_wait_one(irq_h, SIGNALED, PORT_TIMEOUT_INFINITE);
+    if observed >= 0 && (observed as u32) & SIGNALED != 0 {
+        service_device(); // снять причину прерывания в устройстве (MMIO)
+        irq_ack(irq_h);   // снять latch + размаскировать линию
+    }
+}
 ```
 
 ## Process Spawning
@@ -529,8 +581,7 @@ ProcessLoadImage(proc_h, desc_va, 56)            -> 0
 MemoryFree(seg_va, size)                                    // фреймы остаются за child
 ProcessStart(proc_h, entry_pc, user_sp, arg, prio | (1<<32), &[bootstrap_h])
                                                  -> thread_h
-ProcessTerminationSignal(proc_h)                 -> term_h
-SignalWaitOne(term_h, SIGNALED, ...)
+SignalWaitOne(proc_h, SIGNALED, ...)             // ожидание прямо по process-handle
 ProcessExitCode(proc_h)                          -> exit_code
 ```
 

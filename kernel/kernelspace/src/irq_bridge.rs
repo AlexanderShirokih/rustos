@@ -58,7 +58,9 @@ pub fn dispatch_interrupt() {
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use drivers_common::services::interrupts::{IrqBinding, IrqBound, IrqRegistrationError};
+    use drivers_common::services::interrupts::{
+        IrqBinding, IrqBound, IrqNumber, IrqRegistrationError,
+    };
 
     use super::*;
 
@@ -86,6 +88,10 @@ mod tests {
         fn bind(&self, _binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
             Err(IrqRegistrationError::Unsupported)
         }
+
+        fn mask(&self, _irq: IrqNumber) {}
+
+        fn unmask(&self, _irq: IrqNumber) {}
 
         fn dispatch_interrupt(&self) {
             self.dispatch_calls.fetch_add(1, Ordering::SeqCst);

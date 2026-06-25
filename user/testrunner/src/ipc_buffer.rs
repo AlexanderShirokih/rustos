@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use kernel_tests::kernel_test;
 use runtime::{
     ipc_buffer_addr, ipc_buffer_ptr, memory_allocate, process_resource_self, process_self,
-    signal_wait_one, thread_create, thread_exit, thread_termination_signal,
+    signal_wait_one, thread_create, thread_exit,
 };
 use syscall::{IPC_BUFFER_DATA_MAX, MEM_FLAGS_READ_WRITE, SIGNALED, encode_tag};
 
@@ -81,8 +81,7 @@ fn ipc_buffer_per_thread_distinct() {
     let entry = sibling_worker as extern "C" fn(usize) -> ! as *const () as u64;
     let thread = thread_create(process, entry, user_sp, 0, 1).expect("thread_create handle");
 
-    let sig = thread_termination_signal(thread).expect("thread_termination_signal");
-    let observed = signal_wait_one(sig, SIGNALED, JOIN_TIMEOUT_NS);
+    let observed = signal_wait_one(thread, SIGNALED, JOIN_TIMEOUT_NS);
     kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
 
     let sibling_va = SIBLING_VA.load(Relaxed);

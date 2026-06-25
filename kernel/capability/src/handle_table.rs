@@ -295,7 +295,9 @@ impl HandleTable {
             | CapabilityTarget::Thread(_)
             | CapabilityTarget::Memory(_)
             | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
+            | CapabilityTarget::Reply(_)
+            | CapabilityTarget::IrqControl(_)
+            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -316,7 +318,9 @@ impl HandleTable {
             | CapabilityTarget::Thread(_)
             | CapabilityTarget::Memory(_)
             | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
+            | CapabilityTarget::Reply(_)
+            | CapabilityTarget::IrqControl(_)
+            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -333,7 +337,9 @@ impl HandleTable {
             | CapabilityTarget::Thread(_)
             | CapabilityTarget::Memory(_)
             | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Port(_) => Err(IpcError::WrongType),
+            | CapabilityTarget::Port(_)
+            | CapabilityTarget::IrqControl(_)
+            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -350,7 +356,9 @@ impl HandleTable {
             | CapabilityTarget::Memory(_)
             | CapabilityTarget::Resource(_)
             | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
+            | CapabilityTarget::Reply(_)
+            | CapabilityTarget::IrqControl(_)
+            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -367,7 +375,9 @@ impl HandleTable {
             | CapabilityTarget::Memory(_)
             | CapabilityTarget::Resource(_)
             | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
+            | CapabilityTarget::Reply(_)
+            | CapabilityTarget::IrqControl(_)
+            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -384,7 +394,9 @@ impl HandleTable {
             | CapabilityTarget::Memory(_)
             | CapabilityTarget::Resource(_)
             | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
+            | CapabilityTarget::Reply(_)
+            | CapabilityTarget::IrqControl(_)
+            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -410,7 +422,9 @@ impl HandleTable {
             | CapabilityTarget::Thread(_)
             | CapabilityTarget::Resource(_)
             | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
+            | CapabilityTarget::Reply(_)
+            | CapabilityTarget::IrqControl(_)
+            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
         }
     }
 
@@ -427,7 +441,9 @@ impl HandleTable {
             | CapabilityTarget::Thread(_)
             | CapabilityTarget::Memory(_)
             | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_) => Err(IpcError::WrongType),
+            | CapabilityTarget::Reply(_)
+            | CapabilityTarget::IrqControl(_)
+            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
         }
     }
 

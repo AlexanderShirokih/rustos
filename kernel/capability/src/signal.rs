@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use collections::{LockCell, MutexCell};
 pub use syscall::{SIGNALED, WakeCount};
 
-use super::wait::Waker;
+use super::wait::{Waitable, Waker};
 
 /// Синальный примитив ядра.
 pub struct Signal {
@@ -97,6 +97,20 @@ impl Signal {
                 .retain(|entry| !Arc::ptr_eq(&entry.waker, target));
             wl.entries.len() != initial
         })
+    }
+}
+
+impl Waitable for Signal {
+    fn peek(&self) -> u32 {
+        Signal::peek(self)
+    }
+
+    fn register_waiter(&self, mask: u32, waker: Arc<dyn Waker>) {
+        Signal::register_waiter(self, mask, waker);
+    }
+
+    fn remove_waiter(&self, waker: &Arc<dyn Waker>) -> bool {
+        Signal::remove_waiter(self, waker)
     }
 }
 

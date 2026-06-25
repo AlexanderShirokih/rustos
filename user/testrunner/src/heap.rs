@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use kernel_tests::kernel_test;
 use runtime::{
     memory_allocate, process_resource_self, process_self, signal_wait_one, thread_create,
-    thread_exit, thread_termination_signal,
+    thread_exit,
 };
 use syscall::{Handle, MEM_FLAGS_READ_WRITE, SIGNALED};
 
@@ -29,10 +29,9 @@ fn spawn(worker: extern "C" fn(usize) -> !, arg: usize) -> Handle {
         .expect("thread_create handle")
 }
 
-/// Ждёт завершения `thread` с конечным таймаутом.
+/// Ждёт завершения `thread` с конечным таймаутом (ожидание по thread-handle).
 fn join(thread: Handle) {
-    let sig = thread_termination_signal(thread).expect("thread_termination_signal");
-    let observed = signal_wait_one(sig, SIGNALED, JOIN_TIMEOUT_NS);
+    let observed = signal_wait_one(thread, SIGNALED, JOIN_TIMEOUT_NS);
     kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
 }
 

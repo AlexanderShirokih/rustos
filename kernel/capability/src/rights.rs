@@ -5,12 +5,18 @@ use super::target::CapabilityTarget;
 /// Стартовый набор прав для свежесозданного capability target данного типа.
 pub fn default_rights_for(obj: &CapabilityTarget) -> Rights {
     match obj {
-        // Signal сигналуем пользователем; Process/Thread терминацию
-        // поднимает только ядро (через bound-Signal), но WRITE на самом
-        // объекте оставлен под terminate-op - наборы прав совпадают.
+        // Полный набор «сигнальных» прав (READ|WRITE|DUPLICATE|TRANSFER):
+        // - Signal сигналуем пользователем; Process/Thread терминацию поднимает
+        //   только ядро (через bound-Signal), но WRITE оставлен под terminate-op;
+        // - IrqControl: WRITE гейтит минт IrqLine, READ для инспекции,
+        //   DUPLICATE/TRANSFER для делегирования вниз (как Resource);
+        // - IrqLine: READ для ожидания (через as_waitable), WRITE гейтит ack,
+        //   DUPLICATE/TRANSFER чтобы супервизор отдал линию драйверу.
         CapabilityTarget::Signal(_)
         | CapabilityTarget::Process(_)
-        | CapabilityTarget::Thread(_) => {
+        | CapabilityTarget::Thread(_)
+        | CapabilityTarget::IrqControl(_)
+        | CapabilityTarget::IrqLine(_) => {
             Rights::READ | Rights::WRITE | Rights::DUPLICATE | Rights::TRANSFER
         }
 

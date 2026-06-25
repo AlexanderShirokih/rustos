@@ -12,6 +12,7 @@ use scheduler::{ArchContext, ArchCpu, Bootstrapped, Scheduler, SchedulerConfig};
 use crate::{
     driver_init::{InitSchedulerError, PendingDriver, run_retry_passes},
     irq_bridge,
+    irq_control_adapter::InterruptsControlAdapter,
     kernel_context::KernelContext,
     scheduler_bootstrap::{KernelTimerSource, bootstrap_scheduler},
 };
@@ -100,5 +101,10 @@ fn install_interrupts_hook(kernel: &mut KernelContext) {
 
         interrupts.enable();
         irq_bridge::install_interrupts_service(interrupts.clone());
+        // Архитектурно-независимый мост к контроллеру для IRQ-capability: тот же сервис,
+        // обёрнутый адаптером. Это лишь `Once`-store, рантайм capability не нужен.
+        capability::install_interrupts_control(Arc::new(InterruptsControlAdapter::new(
+            interrupts.clone(),
+        )));
     });
 }

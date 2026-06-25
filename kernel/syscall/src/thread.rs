@@ -82,14 +82,6 @@ pub fn sys_thread_exit_code(handle: u64) -> Result<u64, SyscallError> {
     Ok(u64::from(code.cast_unsigned()))
 }
 
-/// `ThreadTerminationSignal(handle)` - возвращает handle на ленивый
-/// bound-`Signal` терминации потока. Требует `Rights::READ`.
-pub fn sys_thread_termination_signal(handle: u64) -> Result<u64, SyscallError> {
-    let id = parse_handle_id(handle)?;
-    let sig_id = capability::thread_termination_signal(id).map_err(map_ipc_error)?;
-    Ok(u64::from(sig_id.raw().get()))
-}
-
 pub fn sys_thread_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let code = exit_code_from_arg(exit_code);

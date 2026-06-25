@@ -67,7 +67,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = sys_signal_create();
             frame.set_return(encode_return(r));
         }
-        SyscallOp::IpcBufferAddr => {
+        SyscallOp::ThreadIpcBufferAddr => {
             let r = super::thread::sys_ipc_buffer_addr();
             frame.set_return(encode_return(r));
         }
@@ -131,10 +131,6 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::process::sys_process_terminate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
-        SyscallOp::ProcessTerminationSignal => {
-            let r = super::process::sys_process_termination_signal(frame.arg(0));
-            frame.set_return(encode_return(r));
-        }
         SyscallOp::ProcessStart => {
             let r = super::process::sys_process_start(
                 frame.arg(0),
@@ -171,10 +167,6 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::thread::sys_thread_terminate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
-        SyscallOp::ThreadTerminationSignal => {
-            let r = super::thread::sys_thread_termination_signal(frame.arg(0));
-            frame.set_return(encode_return(r));
-        }
         SyscallOp::MemoryCreateVirtual => {
             let r =
                 super::memory::sys_memory_create_virtual(frame.arg(0), frame.arg(1), frame.arg(2));
@@ -207,6 +199,14 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         }
         SyscallOp::MemoryRegionInspect => {
             super::memory::sys_memory_region_inspect(frame);
+        }
+        SyscallOp::IrqMint => {
+            let r = super::irq::sys_irq_mint(frame.arg(0), frame.arg(1));
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::IrqAck => {
+            let r = super::irq::sys_irq_ack(frame.arg(0));
+            frame.set_return(encode_return(r));
         }
     }
 }

@@ -19,6 +19,7 @@
 //! | `0x40..=0x4F` | Process CapabilityTarget                             |
 //! | `0x50..=0x5F` | Thread CapabilityTarget                              |
 //! | `0x60..=0x6F` | Memory CapabilityTarget                              |
+//! | `0x70..=0x7F` | IRQ CapabilityTarget                                 |
 //!
 //! # Memory CapabilityTarget (`0x60..=0x6F`)
 //!
@@ -204,14 +205,13 @@ pub enum SyscallOp {
     /// `SIGNALED`). Аргументы: `arg0=handle`, `arg1=exit_code`. Требует
     /// `Rights::WRITE`.
     ProcessTerminate = 0x44,
-    /// Возвращает handle на bound-`Signal` терминации процесса (бит
-    /// `SIGNALED`), материализуя его лениво. Аргумент: `arg0=handle`. Требует
-    /// `Rights::READ`. Выданный handle - read-only (READ/DUPLICATE/TRANSFER).
-    ProcessTerminationSignal = 0x46,
     /// Ставит свежий handle на метеринг-`Resource` текущего процесса
     /// (дефолтные права, включая `WRITE`). Аргументов нет. `WrongType`, если
     /// процесс стартовал без метеринг-ресурса. Возвращает `resource_handle`.
-    ProcessResourceSelf = 0x47,
+    ///
+    /// Завершение процесса наблюдается ожиданием прямо по process-handle
+    /// (`SignalWaitOne`/`Many`, бит `SIGNALED`) — отдельной op не требуется.
+    ProcessResourceSelf = 0x46,
     /// Стартует первый поток уже загруженного образа и атомарно
     /// передаёт ему bootstrap-handles. Аргументы: `arg0=process_handle`,
     /// `arg1=entry_pc`, `arg2=user_sp`, `arg3=arg` (X0 первой
@@ -243,14 +243,13 @@ pub enum SyscallOp {
     /// Терминирование собственного потока через handle отвергается:
     /// для self-exit предусмотрен `Self::ThreadExit`.
     ThreadTerminate = 0x54,
-    /// Возвращает handle на bound-`Signal` терминации потока (бит
-    /// `SIGNALED`), материализуя его лениво. Аргумент: `arg0=handle`. Требует
-    /// `Rights::READ`. Выданный handle - read-only (READ/DUPLICATE/TRANSFER).
-    ThreadTerminationSignal = 0x55,
     /// Возвращает user-VA per-thread IPC-буфер ([`IpcBuffer`]) текущего
     /// потока. Аргументов нет. Возврат: VA (>0) либо `-(SyscallError)`,
     /// если у потока нет буфера (kernel-поток).
-    IpcBufferAddr = 0x56,
+    ///
+    /// Завершение потока наблюдается ожиданием прямо по thread-handle
+    /// (`SignalWaitOne`/`Many`, бит `SIGNALED`) — отдельной op не требуется.
+    ThreadIpcBufferAddr = 0x55,
 
     // 0x60..=0x6F - Memory CapabilityTarget.
     /// Создаёт `CapabilityTarget::Memory` с Virtual backing. Аргументы:
@@ -285,6 +284,18 @@ pub enum SyscallOp {
     /// Инспектирует Memory-регион. Аргумент: `arg0=region_handle`. Primary
     /// возврат - `size_bytes`, secondary - `(kind_tag << 16) | access_bits`.
     MemoryRegionInspect = 0x67,
+
+    // 0x70..=0x7F - IRQ CapabilityTarget.
+    /// Минтит `IrqLine` по полномочию `IrqControl`. Аргументы:
+    /// `arg0=irq_control_handle` (требует `Rights::WRITE`), `arg1=irq` (номер
+    /// линии в нижних 16 битах; должен попадать в диапазон полномочия).
+    /// Возвращает handle на свежий `IrqLine`. Срабатывание ожидается через
+    /// `SignalWaitOne`/`SignalWaitMany` прямо по этому handle (бит `SIGNALED`).
+    IrqMint = 0x70,
+    /// Подтверждает прерывание на `IrqLine`: снимает latch `SIGNALED` и
+    /// размаскирует линию. Аргумент: `arg0=irq_line_handle`. Требует
+    /// `Rights::WRITE`. Возврат `0`.
+    IrqAck = 0x71,
 }
 
 impl SyscallOp {
@@ -307,15 +318,13 @@ impl SyscallOp {
             0x43 => Some(Self::ProcessExitCode),
             0x44 => Some(Self::ProcessTerminate),
             0x45 => Some(Self::ProcessStart),
-            0x46 => Some(Self::ProcessTerminationSignal),
-            0x47 => Some(Self::ProcessResourceSelf),
+            0x46 => Some(Self::ProcessResourceSelf),
             0x50 => Some(Self::ThreadCreate),
             0x51 => Some(Self::ThreadSelf),
             0x52 => Some(Self::ThreadExit),
             0x53 => Some(Self::ThreadExitCode),
             0x54 => Some(Self::ThreadTerminate),
-            0x55 => Some(Self::ThreadTerminationSignal),
-            0x56 => Some(Self::IpcBufferAddr),
+            0x55 => Some(Self::ThreadIpcBufferAddr),
             0x60 => Some(Self::MemoryCreateVirtual),
             0x61 => Some(Self::MemoryCreatePhysical),
             0x63 => Some(Self::MemoryMap),
@@ -323,6 +332,8 @@ impl SyscallOp {
             0x65 => Some(Self::MemoryAllocate),
             0x66 => Some(Self::MemoryFree),
             0x67 => Some(Self::MemoryRegionInspect),
+            0x70 => Some(Self::IrqMint),
+            0x71 => Some(Self::IrqAck),
             _ => None,
         }
     }
@@ -424,7 +435,10 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x11), Some(SyscallOp::SignalWaitOne));
         assert_eq!(SyscallOp::from_raw(0x12), Some(SyscallOp::SignalWaitMany));
         assert_eq!(SyscallOp::from_raw(0x13), Some(SyscallOp::SignalCreate));
-        assert_eq!(SyscallOp::from_raw(0x56), Some(SyscallOp::IpcBufferAddr));
+        assert_eq!(
+            SyscallOp::from_raw(0x55),
+            Some(SyscallOp::ThreadIpcBufferAddr)
+        );
         assert_eq!(SyscallOp::from_raw(0x23), Some(SyscallOp::PortCreate));
         assert_eq!(SyscallOp::from_raw(0x24), Some(SyscallOp::PortSend));
         assert_eq!(SyscallOp::from_raw(0x25), Some(SyscallOp::PortRecv));
@@ -440,10 +454,6 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x45), Some(SyscallOp::ProcessStart));
         assert_eq!(
             SyscallOp::from_raw(0x46),
-            Some(SyscallOp::ProcessTerminationSignal)
-        );
-        assert_eq!(
-            SyscallOp::from_raw(0x47),
             Some(SyscallOp::ProcessResourceSelf)
         );
         assert_eq!(SyscallOp::from_raw(0x50), Some(SyscallOp::ThreadCreate));
@@ -451,10 +461,6 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x52), Some(SyscallOp::ThreadExit));
         assert_eq!(SyscallOp::from_raw(0x53), Some(SyscallOp::ThreadExitCode));
         assert_eq!(SyscallOp::from_raw(0x54), Some(SyscallOp::ThreadTerminate));
-        assert_eq!(
-            SyscallOp::from_raw(0x55),
-            Some(SyscallOp::ThreadTerminationSignal)
-        );
         assert_eq!(
             SyscallOp::from_raw(0x60),
             Some(SyscallOp::MemoryCreateVirtual)
@@ -471,6 +477,8 @@ mod tests {
             SyscallOp::from_raw(0x67),
             Some(SyscallOp::MemoryRegionInspect)
         );
+        assert_eq!(SyscallOp::from_raw(0x70), Some(SyscallOp::IrqMint));
+        assert_eq!(SyscallOp::from_raw(0x71), Some(SyscallOp::IrqAck));
     }
 
     #[test]
@@ -486,7 +494,10 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x62), None);
         assert_eq!(SyscallOp::from_raw(0x68), None);
         assert_eq!(SyscallOp::from_raw(0x6F), None);
-        assert_eq!(SyscallOp::from_raw(0x70), None);
+        // Освобождённые перенумерацией слоты и свободные слоты IRQ-класса.
+        assert_eq!(SyscallOp::from_raw(0x47), None);
+        assert_eq!(SyscallOp::from_raw(0x56), None);
+        assert_eq!(SyscallOp::from_raw(0x72), None);
         assert_eq!(SyscallOp::from_raw(0x74), None);
         assert_eq!(SyscallOp::from_raw(0x75), None);
         assert_eq!(SyscallOp::from_raw(0x76), None);

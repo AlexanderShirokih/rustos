@@ -6,11 +6,13 @@ use syscall::{Rights, WakeCount};
 use super::{
     errors::IpcError,
     handle::{Capability, HandleId},
+    irq_line::IrqLine,
+    irq_runtime::interrupts_control,
     rights::default_rights_for,
     runtime::{ParkState, runtime},
     signal::Signal,
     target::CapabilityTarget,
-    wait::{CancelTarget, IndexedWaker, ParkWaker, Waker},
+    wait::{CancelTarget, IndexedWaker, ParkWaker, Waitable, Waker},
 };
 
 /// Устанавливает [`Capability`] в handle-таблицу текущего процесса и
@@ -72,7 +74,7 @@ pub struct WaitManyOutcome {
 enum WaitSetup {
     Observed(WaitManyOutcome),
     Wait {
-        signals: Vec<Arc<Signal>>,
+        signals: Vec<Arc<dyn Waitable>>,
         waker: Arc<ParkWaker>,
         indexed_wakers: Vec<Arc<IndexedWaker>>,
     },
@@ -139,13 +141,13 @@ fn wait_many_setup(
     items: &[(HandleId, u32)],
     timeout_ns: Option<u64>,
 ) -> Result<WaitSetup, IpcError> {
-    let mut signals: Vec<Arc<Signal>> = Vec::with_capacity(items.len());
+    let mut signals: Vec<Arc<dyn Waitable>> = Vec::with_capacity(items.len());
     for &(h, _mask) in items {
         let obj = tbl.clone_target(h, Rights::READ)?;
-        match obj {
-            CapabilityTarget::Signal(s) => signals.push(s),
-            _ => return Err(IpcError::WrongType),
-        }
+        // Wait-путь не матчит тип объекта: он спрашивает у capability target его
+        // ожидаемый источник. Не-ожидаемые объекты дают WrongType.
+        let waitable = obj.as_waitable().ok_or(IpcError::WrongType)?;
+        signals.push(waitable);
     }
 
     for (i, (signal, &(_h, mask))) in signals.iter().zip(items.iter()).enumerate() {
@@ -247,47 +249,45 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
     table.with_lock(|tbl| tbl.insert(handle))
 }
 
-/// Возвращает handle на bound-[`Signal`] терминации процесса, материализуя
-/// его лениво (см. [`ProcessObject::termination_signal`]). Если процесс уже
-/// завершён, `Signal` сразу несёт `SIGNALED`. Требует [`Rights::READ`] на
-/// process-handle. Выданный handle получает только READ/DUPLICATE/TRANSFER -
-/// без WRITE: наблюдатель не может подделать терминацию (Signal общий).
-pub fn process_termination_signal(handle_id: HandleId) -> Result<HandleId, IpcError> {
+// Завершение Process/Thread наблюдается ожиданием прямо по их handle через
+// `CapabilityTarget::as_waitable` (bound-Signal терминации материализуется
+// лениво) — отдельная op материализации Signal-хендла больше не нужна.
+// Подделать событие нельзя: `signal_set` строго принимает только `Signal`.
+
+/// Минтит [`IrqLine`] для линии `irq` по полномочию `control_handle`.
+/// Требует [`Rights::WRITE`] на `IrqControl`-хендле и `permits(irq)` — точный
+/// аналог `MemoryCreatePhysical` (WRITE на `Resource` + попадание в диапазон).
+/// Привязка линии идёт через установленный [`interrupts_control`]. Возвращает
+/// handle на свежий `IrqLine` со стартовыми правами [`default_rights_for`].
+pub fn irq_mint(control_handle: HandleId, irq: u16) -> Result<HandleId, IpcError> {
     let table = runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
-    let object = table.with_lock(|tbl| tbl.clone_target(handle_id, Rights::READ))?;
-    let process = match &object {
-        CapabilityTarget::Process(p) => p.clone(),
-        _ => return Err(IpcError::WrongType),
+    let object = table.with_lock(|tbl| tbl.clone_target(control_handle, Rights::WRITE))?;
+    let CapabilityTarget::IrqControl(control) = &object else {
+        return Err(IpcError::WrongType);
     };
-    install_termination_signal(&table, process.termination_signal())
-}
+    if !control.permits(irq) {
+        return Err(IpcError::AccessDenied);
+    }
 
-/// Возвращает handle на bound-[`Signal`] терминации потока (см.
-/// [`process_termination_signal`]). Требует [`Rights::READ`] на thread-handle.
-pub fn thread_termination_signal(handle_id: HandleId) -> Result<HandleId, IpcError> {
-    let table = runtime()
-        .current_handle_table()
-        .ok_or(IpcError::BadHandle)?;
-    let object = table.with_lock(|tbl| tbl.clone_target(handle_id, Rights::READ))?;
-    let thread = match &object {
-        CapabilityTarget::Thread(t) => t.clone(),
-        _ => return Err(IpcError::WrongType),
-    };
-    install_termination_signal(&table, thread.termination_signal())
-}
-
-/// Регистрирует bound-Signal терминации как read-only handle (READ для
-/// ожидания + DUPLICATE/TRANSFER; без WRITE - см. вызывающих).
-fn install_termination_signal(
-    table: &Arc<collections::MutexCell<crate::HandleTable>>,
-    signal: Arc<Signal>,
-) -> Result<HandleId, IpcError> {
-    let target = CapabilityTarget::Signal(signal);
-    let rights = Rights::READ | Rights::DUPLICATE | Rights::TRANSFER;
-    let handle = Capability::new(target, rights);
+    let line = IrqLine::bind(interrupts_control().clone(), irq)?;
+    let target = CapabilityTarget::IrqLine(line);
+    let handle = Capability::new(target.clone(), default_rights_for(&target));
     table.with_lock(|tbl| tbl.insert(handle))
+}
+
+/// Подтверждает прерывание на `line_handle`: снимает latch `SIGNALED` и
+/// размаскирует линию (см. [`IrqLine::ack`]). Требует [`Rights::WRITE`].
+pub fn irq_ack(line_handle: HandleId) -> Result<(), IpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(IpcError::BadHandle)?;
+    let object = table.with_lock(|tbl| tbl.clone_target(line_handle, Rights::WRITE))?;
+    let CapabilityTarget::IrqLine(line) = &object else {
+        return Err(IpcError::WrongType);
+    };
+    line.ack()
 }
 
 #[cfg(test)]
@@ -654,65 +654,95 @@ mod tests {
     }
 
     #[test]
-    fn process_termination_signal_grants_read_only_without_write() {
+    fn signal_wait_one_on_process_handle_wakes_on_terminate() {
+        // Прямое ожидание по Process-хендлу через as_waitable: материализует
+        // bound-Signal терминации и просыпается на signal_terminated.
         let _guard = test_lock();
         let table = Arc::new(MutexCell::new(HandleTable::new()));
-        let proc_id = table
+        let process = ProcessObject::new();
+        let id = table
             .with_lock(|tbl| {
                 tbl.insert(Capability::new(
-                    CapabilityTarget::Process(ProcessObject::new()),
+                    CapabilityTarget::Process(process.clone()),
                     Rights::READ,
                 ))
             })
             .unwrap();
-        mock().configure(Some(table.clone()), None);
+        let process_for_hook = process.clone();
+        let hook: BlockHook = Box::new(move || process_for_hook.signal_terminated(0));
+        mock().configure(Some(table), Some(hook));
 
-        let sig_id = process_termination_signal(proc_id).expect("termination signal handle");
-        let rights = table
-            .with_lock(|tbl| tbl.get(sig_id, Rights::READ).map(Capability::rights))
-            .expect("signal handle present");
-        // Security-инвариант: наблюдатель не может подделать терминацию.
-        assert!(rights.contains(Rights::READ));
-        assert!(rights.contains(Rights::DUPLICATE));
-        assert!(rights.contains(Rights::TRANSFER));
-        assert!(!rights.contains(Rights::WRITE));
+        let observed = signal_wait_one(id, SIGNALED, None).expect("Ok");
+        assert_eq!(observed & SIGNALED, SIGNALED);
 
         mock().reset();
     }
 
     #[test]
-    fn thread_termination_signal_grants_read_only_without_write() {
+    fn signal_wait_one_on_thread_handle_wakes_on_terminate() {
         let _guard = test_lock();
         let table = Arc::new(MutexCell::new(HandleTable::new()));
-        let thread_id = table
+        let thread = ThreadObject::new();
+        let id = table
             .with_lock(|tbl| {
                 tbl.insert(Capability::new(
-                    CapabilityTarget::Thread(ThreadObject::new()),
+                    CapabilityTarget::Thread(thread.clone()),
                     Rights::READ,
                 ))
             })
             .unwrap();
-        mock().configure(Some(table.clone()), None);
+        let thread_for_hook = thread.clone();
+        let hook: BlockHook = Box::new(move || thread_for_hook.signal_terminated(0));
+        mock().configure(Some(table), Some(hook));
 
-        let sig_id = thread_termination_signal(thread_id).expect("termination signal handle");
-        let rights = table
-            .with_lock(|tbl| tbl.get(sig_id, Rights::READ).map(Capability::rights))
-            .expect("signal handle present");
-        assert!(rights.contains(Rights::READ));
-        assert!(!rights.contains(Rights::WRITE));
+        let observed = signal_wait_one(id, SIGNALED, None).expect("Ok");
+        assert_eq!(observed & SIGNALED, SIGNALED);
 
         mock().reset();
     }
 
     #[test]
-    fn termination_signal_on_wrong_object_is_wrong_type() {
+    fn signal_wait_one_on_non_waitable_object_is_wrong_type() {
+        // Port не ожидаем: as_waitable -> None -> WrongType (без блокировки).
         let _guard = test_lock();
-        // Signal-handle отдан в process_termination_signal -> WrongType.
-        let (table, id, _signal) = install_signal_handle(Rights::READ);
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        let id = table
+            .with_lock(|tbl| {
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Port(crate::Port::new()),
+                    Rights::READ,
+                ))
+            })
+            .unwrap();
         mock().configure(Some(table), None);
 
         assert_eq!(
-            process_termination_signal(id).map(|_| ()),
+            signal_wait_one(id, SIGNALED, Some(0)).map(|_| ()),
+            Err(IpcError::WrongType)
+        );
+
+        mock().reset();
+    }
+
+    #[test]
+    fn signal_set_on_process_handle_cannot_forge_termination() {
+        // Security-инвариант (теперь структурный): даже с WRITE на Process-хендле
+        // нельзя поднять SIGNALED на bound-Signal терминации — signal_set строго
+        // принимает только Signal, а наружу Signal-таргет терминации не выдаётся.
+        let _guard = test_lock();
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        let id = table
+            .with_lock(|tbl| {
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Process(ProcessObject::new()),
+                    Rights::WRITE,
+                ))
+            })
+            .unwrap();
+        mock().configure(Some(table), None);
+
+        assert_eq!(
+            signal_set(id, SIGNALED, 0, WakeCount::All),
             Err(IpcError::WrongType)
         );
 
@@ -734,6 +764,115 @@ mod tests {
             .expect("handle present with SIGNAL|WAIT");
         assert!(rights.contains(Rights::WRITE));
         assert!(rights.contains(Rights::READ));
+
+        mock().reset();
+    }
+
+    /// Ставит тривиальный глобальный контроллер один раз: bind_line всегда
+    /// успешен, mask/unmask — no-op. Протокол fire/ack проверяется отдельно в
+    /// `irq_line` с записывающим моком; здесь — только гейтинг минта.
+    fn ensure_irq_control() {
+        use std::sync::OnceLock;
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            struct StubControl;
+            impl crate::InterruptsControl for StubControl {
+                fn bind_line(
+                    &self,
+                    _irq: u16,
+                    _sink: Arc<dyn crate::IrqSink>,
+                ) -> Result<crate::IrqBindToken, IpcError> {
+                    Ok(crate::IrqBindToken::new(()))
+                }
+                fn mask(&self, _irq: u16) {}
+                fn unmask(&self, _irq: u16) {}
+            }
+            crate::install_interrupts_control(Arc::new(StubControl));
+        });
+    }
+
+    fn irq_control_handle(
+        rights: Rights,
+        lo: u16,
+        hi: u16,
+    ) -> (Arc<MutexCell<HandleTable>>, HandleId) {
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        let id = table
+            .with_lock(|tbl| {
+                tbl.insert(Capability::new(
+                    CapabilityTarget::IrqControl(crate::IrqControl::new(lo, hi)),
+                    rights,
+                ))
+            })
+            .unwrap();
+        (table, id)
+    }
+
+    #[test]
+    fn irq_mint_returns_irq_line_handle() {
+        let _guard = test_lock();
+        ensure_irq_control();
+        let (table, ctl_id) = irq_control_handle(Rights::WRITE, 32, 64);
+        mock().configure(Some(table.clone()), None);
+
+        let line_id = irq_mint(ctl_id, 40).expect("mint ok");
+        let is_line = table.with_lock(|tbl| {
+            matches!(
+                tbl.clone_target(line_id, Rights::READ),
+                Ok(CapabilityTarget::IrqLine(_))
+            )
+        });
+        assert!(is_line, "minted handle must be an IrqLine");
+
+        mock().reset();
+    }
+
+    #[test]
+    fn irq_mint_out_of_band_is_access_denied() {
+        let _guard = test_lock();
+        ensure_irq_control();
+        let (table, ctl_id) = irq_control_handle(Rights::WRITE, 32, 64);
+        mock().configure(Some(table), None);
+
+        assert_eq!(irq_mint(ctl_id, 100), Err(IpcError::AccessDenied));
+
+        mock().reset();
+    }
+
+    #[test]
+    fn irq_mint_without_write_is_access_denied() {
+        let _guard = test_lock();
+        ensure_irq_control();
+        let (table, ctl_id) = irq_control_handle(Rights::READ, 32, 64);
+        mock().configure(Some(table), None);
+
+        assert_eq!(irq_mint(ctl_id, 40), Err(IpcError::AccessDenied));
+
+        mock().reset();
+    }
+
+    #[test]
+    fn irq_mint_on_non_control_is_wrong_type() {
+        let _guard = test_lock();
+        ensure_irq_control();
+        let (table, id, _sig) = install_signal_handle(Rights::WRITE);
+        mock().configure(Some(table), None);
+
+        assert_eq!(irq_mint(id, 40), Err(IpcError::WrongType));
+
+        mock().reset();
+    }
+
+    #[test]
+    fn irq_ack_on_armed_line_is_wrong_type() {
+        let _guard = test_lock();
+        ensure_irq_control();
+        let (table, ctl_id) = irq_control_handle(Rights::WRITE, 32, 64);
+        mock().configure(Some(table), None);
+
+        let line_id = irq_mint(ctl_id, 40).expect("mint ok");
+        // Свежеминченная линия в ARMED — подтверждать нечего.
+        assert_eq!(irq_ack(line_id), Err(IpcError::WrongType));
 
         mock().reset();
     }

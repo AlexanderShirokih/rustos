@@ -184,7 +184,7 @@ mod tests {
 
     use super::*;
     use crate::services::{
-        interrupts::{InterruptsService, IrqBinding, IrqBound, IrqRegistrationError},
+        interrupts::{InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqRegistrationError},
         mmio::{MmioAddress, MmioBound, MmioMapError},
         timer::TickHandler,
     };
@@ -224,6 +224,10 @@ mod tests {
         fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
             Ok(IrqBound::new(binding.irq, || {}))
         }
+
+        fn mask(&self, _irq: IrqNumber) {}
+
+        fn unmask(&self, _irq: IrqNumber) {}
 
         fn dispatch_interrupt(&self) {}
     }

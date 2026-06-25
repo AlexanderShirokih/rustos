@@ -33,7 +33,8 @@ Userspace опирается на несколько крейтов из `lib/`:
 операцию ядра. Доступны вызовы для синхронного IPC (`port_create`, `port_send`,
 `port_recv`, `port_call`, `port_reply`, `ipc_buffer_addr`), хэндлов
 (`handle_close`, `handle_duplicate`), процессов и потоков (`process_*`,
-`thread_*`) и памяти (`memory_*`). Возврат знаковый: отрицательное значение —
+`thread_*`), памяти (`memory_*`) и прерываний (`irq_mint`, `irq_ack`). Возврат
+знаковый: отрицательное значение —
 код ошибки. Полный перечень операций и их семантика — в
 [syscalls.md](syscalls.md).
 
@@ -120,8 +121,8 @@ stack_size = 65536
 
 После инициализации ядро запускает высокоприоритетный init-таск. Init читает
 blob `userland.img`, декодирует первую запись (bootstrap-entry), создаёт
-bootstrap-порт и корневой `Resource`, раскладывает сегменты в новое адресное
-пространство и стартует первый поток.
+bootstrap-порт, корневой `Resource` и корневой `IrqControl`, раскладывает
+сегменты в новое адресное пространство и стартует первый поток.
 
 Точка входа процесса — `_start`, которой в регистре `x0` приходит raw HandleId
 bootstrap-порта (handle[0]):
@@ -131,11 +132,13 @@ bootstrap-порта (handle[0]):
 pub extern "C" fn _start(bootstrap_handle: usize) -> ! { /* ... */ }
 ```
 
-Процесс получает два начальных хэндла:
+Процесс получает три начальных хэндла:
 
 - handle[0] — клиентский конец bootstrap-порта (Port), переданный в `x0`
 - handle[1] — корневой `Resource`, полномочие на выделение памяти;
   аллокатор процесса (`memory_allocate`) получает его через `process_resource_self`
+- handle[2] — корневой `IrqControl`, полномочие выдавать линии прерываний;
+  делегируется драйверам передачей/дублированием
 
 Подробности Resource-модели — в [architecture.md](architecture.md) и
 [syscalls.md](syscalls.md).

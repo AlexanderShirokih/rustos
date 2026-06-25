@@ -11,6 +11,7 @@ extern crate std;
 mod bridge;
 mod error;
 mod flags;
+mod irq;
 mod memory;
 mod numbers;
 mod port;

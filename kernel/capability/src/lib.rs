@@ -16,6 +16,9 @@ mod errors;
 mod handle;
 mod handle_table;
 mod ipc_buffer_xfer;
+mod irq_control;
+mod irq_line;
+mod irq_runtime;
 mod port;
 mod process;
 mod reply;
@@ -31,14 +34,18 @@ mod thread;
 mod wait;
 
 pub use api::{
-    WaitManyOutcome, handle_close, handle_duplicate, install_handle, process_termination_signal,
+    WaitManyOutcome, handle_close, handle_duplicate, install_handle, irq_ack, irq_mint,
     signal_create, signal_set, signal_wait_many, signal_wait_one, thread_exit,
-    thread_termination_signal,
 };
 pub use errors::{IpcError, SpawnError};
 pub use handle::{Capability, HandleId};
 pub use handle_table::{HandleReservation, HandleTable};
 pub use ipc_buffer_xfer::transfer_rendezvous;
+pub use irq_control::IrqControl;
+pub use irq_line::IrqLine;
+pub use irq_runtime::{
+    InterruptsControl, IrqBindToken, IrqSink, install_interrupts_control, interrupts_control,
+};
 pub use port::{KernelIpcBuffer, Port, ThreadTransport, port_call, port_recv, port_send};
 pub use process::ProcessObject;
 pub use reply::Reply;
@@ -53,4 +60,4 @@ pub use spawn::{
 pub use syscall::Rights;
 pub use target::CapabilityTarget;
 pub use thread::ThreadObject;
-pub use wait::{CancelTarget, Waker};
+pub use wait::{CancelTarget, Waitable, Waker};
