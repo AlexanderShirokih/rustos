@@ -1,9 +1,11 @@
 //! E2E проверка synchronous рандеву-IPC из EL0:
 //! `PortCreate`/`Send`/`Recv`/`Call`/`Reply`.
 //!
-//! Каждый тест использует два потока одного процесса. Каждый поток обращается к своему per-thread
-//! IPC-буферу через raw `ipc_buffer_addr()` (кэширующий `ipc_buffer_ptr`
-//! процесс-глобален и для второго потока вернул бы чужой VA).
+//! Каждый тест использует два потока одного процесса. Простые body-кейсы
+//! идут через сахар `Port::{send_bytes,recv_bytes,call_bytes}`/
+//! `Reply::reply_bytes`. Сырой доступ к буферу (`write_msg`/`read_msg`/
+//! `read_cap`/`read_badge`) остаётся там, где переносятся caps, читается badge
+//! или поток держит сырой `Handle` из `EP_RAW` без обёртки.
 //!
 //! Покрытие:
 //! - (a) send/recv round-trip тела;
@@ -16,13 +18,12 @@ use core::sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst};
 
 use kernel_tests::kernel_test;
 use runtime::{
-    handle_duplicate, ipc_buffer_addr, memory_allocate, port_call, port_create, port_recv,
-    port_reply, port_send, process_resource_self, process_self, signal_create, signal_set,
-    signal_wait_one, thread_create, thread_exit,
+    Error, OwnedHandle, Port, Timeout, handle_duplicate, ipc_buffer_addr, memory_allocate,
+    port_call, port_create, port_recv, port_send, process_resource_self, process_self,
+    signal_create, signal_set, signal_wait_one, thread_create, thread_exit,
 };
 use syscall::{
-    Handle, MEM_FLAGS_READ_WRITE, PORT_TIMEOUT_INFINITE, PORT_TIMEOUT_POLL, SIGNALED,
-    SYSCALL_RETURN_TIMEOUT, WakeCount, decode_tag, encode_tag,
+    Handle, MEM_FLAGS_READ_WRITE, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag,
 };
 
 const STACK_SIZE: u64 = 0x4000;
@@ -145,15 +146,15 @@ extern "C" fn sender_worker(_arg: usize) -> ! {
         write_msg(va, b"ping", &[]);
     }
     WORKER_READY.store(1, SeqCst);
-    let r = port_send(ep_handle(), PORT_TIMEOUT_INFINITE);
+    let r = port_send(ep_handle(), Timeout::INFINITE.raw());
     WORKER_RESULT.store(r, SeqCst);
     thread_exit(0)
 }
 
 #[kernel_test]
 fn send_recv_round_trip_sender_first() {
-    let ep = port_create().expect("port_create");
-    EP_RAW.store(u64::from(ep.raw()), SeqCst);
+    let ep = Port::create().expect("port create");
+    EP_RAW.store(u64::from(ep.handle().as_raw().raw()), SeqCst);
 
     let worker = spawn_worker(sender_worker);
     // Биас: ждём, пока worker объявит готовность (он блокируется в send сразу
@@ -163,14 +164,10 @@ fn send_recv_round_trip_sender_first() {
         core::hint::spin_loop();
     }
 
-    let va = ipc_va();
-    let r = port_recv(ep, PORT_TIMEOUT_INFINITE);
-    kernel_tests::kassert_eq!(r, 0); // не call -> 0
     let mut buf = [0u8; 8];
-    // SAFETY: собственный буфер главного потока.
-    let (len, ncaps) = unsafe { read_msg(va, &mut buf) };
+    let (len, reply) = ep.recv_bytes(&mut buf, Timeout::INFINITE).expect("recv");
+    kernel_tests::kassert!(reply.is_none()); // не call -> нет reply
     kernel_tests::kassert_eq!(len, 4);
-    kernel_tests::kassert_eq!(ncaps, 0);
     kernel_tests::kassert!(&buf[..4] == b"ping");
 
     join(worker);
@@ -182,7 +179,7 @@ fn send_recv_round_trip_sender_first() {
 extern "C" fn receiver_worker(_arg: usize) -> ! {
     let va = ipc_va();
     WORKER_READY.store(1, SeqCst);
-    let r = port_recv(ep_handle(), PORT_TIMEOUT_INFINITE);
+    let r = port_recv(ep_handle(), Timeout::INFINITE.raw());
     if r != 0 {
         WORKER_RESULT.store(-100, SeqCst);
         thread_exit(0);
@@ -200,51 +197,43 @@ extern "C" fn receiver_worker(_arg: usize) -> ! {
 
 #[kernel_test]
 fn send_recv_round_trip_receiver_first() {
-    let ep = port_create().expect("port_create");
-    EP_RAW.store(u64::from(ep.raw()), SeqCst);
+    let ep = Port::create().expect("port create");
+    EP_RAW.store(u64::from(ep.handle().as_raw().raw()), SeqCst);
 
     let worker = spawn_worker(receiver_worker);
     while WORKER_READY.load(SeqCst) == 0 {
         core::hint::spin_loop();
     }
 
-    let va = ipc_va();
-    // SAFETY: собственный буфер главного потока.
-    unsafe {
-        write_msg(va, b"hello", &[]);
-    }
-    kernel_tests::kassert_eq!(port_send(ep, PORT_TIMEOUT_INFINITE), 0);
+    ep.send_bytes(b"hello", Timeout::INFINITE).expect("send");
 
     join(worker);
     kernel_tests::kassert_eq!(WORKER_RESULT.load(SeqCst), 0);
 }
 
-// --- (b) call/reply round-trip: worker = server (recv+reply), main = caller. -
+// --- (b) call/reply round-trip: worker = server (Port::recv + Reply::reply), -
+//        main = caller (raw call на тот же id).
 
 extern "C" fn server_worker(_arg: usize) -> ! {
-    let va = ipc_va();
+    // Сервер - единственный владелец Port (усыновляет id, закроет на drop);
+    // main оперирует тем же id сырым call и не закрывает.
+    // SAFETY: единственный OwnedHandle-владелец port'а - этот worker (main
+    // оперирует тем же id сырым call, обёртку не создаёт).
+    let ep = Port::from_handle(
+        unsafe { OwnedHandle::from_raw(EP_RAW.load(SeqCst) as u32) }.expect("port id"),
+    );
     WORKER_READY.store(1, SeqCst);
-    let reply_raw = port_recv(ep_handle(), PORT_TIMEOUT_INFINITE);
-    if reply_raw <= 0 {
+    let mut buf = [0u8; 8];
+    let Ok((len, Some(reply))) = ep.recv_bytes(&mut buf, Timeout::INFINITE) else {
         WORKER_RESULT.store(-100, SeqCst);
         thread_exit(0);
-    }
-    let mut buf = [0u8; 8];
-    // SAFETY: собственный буфер server-потока.
-    let (len, _ncaps) = unsafe { read_msg(va, &mut buf) };
+    };
     if len != 3 || &buf[..3] != b"req" {
         WORKER_RESULT.store(-1, SeqCst);
         thread_exit(0);
     }
-    // Формируем ответ и реплаим.
-    // SAFETY: собственный буфер.
-    unsafe {
-        write_msg(va, b"resp", &[]);
-    }
-    let reply =
-        Handle::new(u32::try_from(reply_raw).expect("reply_raw fits u32")).expect("reply handle");
-    let rr = port_reply(reply);
-    WORKER_RESULT.store(rr, SeqCst);
+    let rr = reply.reply_bytes(b"resp");
+    WORKER_RESULT.store(if rr.is_ok() { 0 } else { -2 }, SeqCst);
     thread_exit(0)
 }
 
@@ -263,7 +252,7 @@ fn call_reply_round_trip() {
     unsafe {
         write_msg(va, b"req", &[]);
     }
-    kernel_tests::kassert_eq!(port_call(ep, PORT_TIMEOUT_INFINITE), 0);
+    kernel_tests::kassert_eq!(port_call(ep, Timeout::INFINITE.raw()), 0);
 
     let mut buf = [0u8; 8];
     // SAFETY: собственный буфер.
@@ -294,15 +283,15 @@ extern "C" fn cap_sender_worker(_arg: usize) -> ! {
         write_msg(va, b"", &[notif.raw()]);
     }
     WORKER_READY.store(1, SeqCst);
-    let r = port_send(ep_handle(), PORT_TIMEOUT_INFINITE);
+    let r = port_send(ep_handle(), Timeout::INFINITE.raw());
     WORKER_RESULT.store(r, SeqCst);
     thread_exit(0)
 }
 
 #[kernel_test]
 fn cap_transfer_through_port() {
-    let ep = port_create().expect("port_create");
-    EP_RAW.store(u64::from(ep.raw()), SeqCst);
+    let ep = Port::create().expect("port create");
+    EP_RAW.store(u64::from(ep.handle().as_raw().raw()), SeqCst);
 
     let worker = spawn_worker(cap_sender_worker);
     while WORKER_READY.load(SeqCst) == 0 {
@@ -310,8 +299,8 @@ fn cap_transfer_through_port() {
     }
 
     let va = ipc_va();
-    let r = port_recv(ep, PORT_TIMEOUT_INFINITE);
-    kernel_tests::kassert_eq!(r, 0);
+    let reply = ep.recv(Timeout::INFINITE).expect("recv");
+    kernel_tests::kassert!(reply.is_none());
 
     let mut buf = [0u8; 1];
     // SAFETY: собственный буфер главного потока.
@@ -356,7 +345,7 @@ extern "C" fn badge_client_a(_arg: usize) -> ! {
         write_msg(va, b"a", &[]);
     }
     CLIENTS_READY.fetch_add(1, SeqCst);
-    let r = port_send(h, PORT_TIMEOUT_INFINITE);
+    let r = port_send(h, Timeout::INFINITE.raw());
     CLIENT_A_RESULT.store(r, SeqCst);
     thread_exit(0)
 }
@@ -369,19 +358,20 @@ extern "C" fn badge_client_b(_arg: usize) -> ! {
         write_msg(va, b"b", &[]);
     }
     CLIENTS_READY.fetch_add(1, SeqCst);
-    let r = port_send(h, PORT_TIMEOUT_INFINITE);
+    let r = port_send(h, Timeout::INFINITE.raw());
     CLIENT_B_RESULT.store(r, SeqCst);
     thread_exit(0)
 }
 
 #[kernel_test]
 fn badge_round_trip_two_clients() {
-    let ep = port_create().expect("port_create");
+    let ep = Port::create().expect("port create");
+    let ep_raw = ep.handle().as_raw();
 
     // Минтим две badged-копии (set-once: оригинал незаклеймён -> копии несут
     // заданный badge). Права сужаем до WRITE - клиенту нужен только send.
-    let copy_a = handle_duplicate(ep, RIGHTS_WRITE, BADGE_A).expect("mint badged copy A");
-    let copy_b = handle_duplicate(ep, RIGHTS_WRITE, BADGE_B).expect("mint badged copy B");
+    let copy_a = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_A).expect("mint badged copy A");
+    let copy_b = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_B).expect("mint badged copy B");
     EP_BADGED_A.store(u64::from(copy_a.raw()), SeqCst);
     EP_BADGED_B.store(u64::from(copy_b.raw()), SeqCst);
     CLIENTS_READY.store(0, SeqCst);
@@ -405,8 +395,8 @@ fn badge_round_trip_two_clients() {
     let va = ipc_va();
     let mut seen = [0u64; 2];
     for slot in &mut seen {
-        let r = port_recv(ep, PORT_TIMEOUT_INFINITE);
-        kernel_tests::kassert_eq!(r, 0); // не call -> 0
+        let reply = ep.recv(Timeout::INFINITE).expect("recv");
+        kernel_tests::kassert!(reply.is_none()); // не call -> нет reply
         // SAFETY: собственный буфер сервера.
         *slot = unsafe { read_badge(va) };
     }
@@ -426,46 +416,36 @@ fn badge_round_trip_two_clients() {
 
 // --- (f) timeout/poll: блокирующие Port-syscall'ы не виснут на RT-пути. -------
 
-/// `send` без встречного получателя в режиме poll (`timeout_ns == 0`) не
-/// блокируется, а сразу возвращает `ShouldWait`.
 #[kernel_test]
 fn send_poll_no_receiver_should_wait() {
-    let ep = port_create().expect("port_create");
-    let va = ipc_va();
-    // SAFETY: собственный буфер главного потока.
-    unsafe {
-        write_msg(va, b"x", &[]);
-    }
-    kernel_tests::kassert_eq!(port_send(ep, PORT_TIMEOUT_POLL), SYSCALL_RETURN_TIMEOUT);
+    let ep = Port::create().expect("port create");
+    assert_timeout(ep.send_bytes(b"x", Timeout::POLL));
 }
 
-/// `recv` без отправителя в режиме poll сразу возвращает `ShouldWait`.
 #[kernel_test]
 fn recv_poll_no_sender_should_wait() {
-    let ep = port_create().expect("port_create");
-    kernel_tests::kassert_eq!(port_recv(ep, PORT_TIMEOUT_POLL), SYSCALL_RETURN_TIMEOUT);
+    let ep = Port::create().expect("port create");
+    assert_timeout(ep.recv(Timeout::POLL).map(|_| ()));
 }
 
-/// `recv` с конечным тайм-аутом без отправителя паркуется и просыпается по
-/// дедлайну с `ShouldWait` (а не виснет навсегда).
 #[kernel_test]
 fn recv_finite_timeout_no_sender_should_wait() {
-    let ep = port_create().expect("port_create");
+    let ep = Port::create().expect("port create");
     // 10 мс - заведомо истечёт, отправителя нет.
-    let r = port_recv(ep, 10_000_000);
-    kernel_tests::kassert_eq!(r, SYSCALL_RETURN_TIMEOUT);
+    assert_timeout(ep.recv(Timeout::from_ns(10_000_000)).map(|_| ()));
 }
 
-/// `call` с конечным тайм-аутом без сервера паркуется и просыпается по
-/// дедлайну с `ShouldWait`.
 #[kernel_test]
 fn call_finite_timeout_no_server_should_wait() {
-    let ep = port_create().expect("port_create");
-    let va = ipc_va();
-    // SAFETY: собственный буфер главного потока.
-    unsafe {
-        write_msg(va, b"req", &[]);
-    }
-    let r = port_call(ep, 10_000_000);
-    kernel_tests::kassert_eq!(r, SYSCALL_RETURN_TIMEOUT);
+    let ep = Port::create().expect("port create");
+    let mut buf = [0u8; 8];
+    assert_timeout(
+        ep.call_bytes(b"req", &mut buf, Timeout::from_ns(10_000_000))
+            .map(|_| ()),
+    );
+}
+
+/// Падает, если результат не `Err(SyscallError::Timeout)`.
+fn assert_timeout(result: runtime::Result<()>) {
+    kernel_tests::kassert!(matches!(result, Err(Error::Syscall(SyscallError::Timeout))));
 }

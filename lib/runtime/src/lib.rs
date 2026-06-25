@@ -7,10 +7,13 @@
 #![allow(unsafe_code)]
 #![feature(alloc_error_handler)]
 
+extern crate alloc;
+
 mod error;
 mod handle;
 mod heap;
 mod ipc_buffer;
+mod object;
 mod port_transport;
 mod ring_transport;
 mod svc;
@@ -19,6 +22,10 @@ mod sync;
 pub use error::{Error, Result};
 pub use handle::{BorrowedHandle, OwnedHandle};
 pub use ipc_buffer::ipc_buffer_ptr;
+pub use object::{
+    AnonymousMapping, Mapping, MemoryRegion, Port, Priority, Process, RegionInfo, RegionKind,
+    Reply, Resource, Signal, Thread, ThreadEntry,
+};
 pub use port_transport::PortTransport;
 pub use ring_transport::RingTransport;
 pub use svc::{
@@ -30,6 +37,7 @@ pub use svc::{
     thread_exit, thread_exit_code, thread_self, thread_terminate,
 };
 pub use sync::{Condvar, Mutex, MutexGuard};
+pub use syscall::{MemoryAccess, Timeout, UserMemFlags};
 
 /// Глобальный heap процесса поверх memory_allocate/memory_free.
 #[global_allocator]

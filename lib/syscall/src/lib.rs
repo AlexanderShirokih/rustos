@@ -49,11 +49,13 @@ use core::num::NonZeroU32;
 mod error;
 mod flags;
 mod ipc_buffer;
+mod memory;
 mod rights;
 
 pub use error::SyscallError;
 pub use flags::{InvalidUserMemFlags, UserMemFlags};
 pub use ipc_buffer::{IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, IpcBuffer, decode_tag, encode_tag};
+pub use memory::MemoryAccess;
 pub use rights::Rights;
 
 /// Сырой HandleId syscall-ABI: 32-битный индекс записи в handle-таблице, где
@@ -387,15 +389,40 @@ pub const SYSCALL_RETURN_SHOULD_WAIT: i64 = -7;
 /// т.ч. в режиме poll (`timeout_ns == 0`), когда встречной стороны нет.
 pub const SYSCALL_RETURN_TIMEOUT: i64 = -9;
 
+/// Типизированный фасад над `timeout_ns` блокирующих syscall'ов: `INFINITE` -
+/// ждать бессрочно, `POLL` - не блокироваться, иначе наносекундный дедлайн.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct Timeout(u64);
+
+impl Timeout {
+    /// Не блокироваться: операция завершается немедленно, иначе возвращается
+    /// [`SYSCALL_RETURN_TIMEOUT`].
+    pub const POLL: Self = Self(0);
+
+    /// Ждать бессрочно (sentinel `u64::MAX`, не занимает слот в sleeper-heap).
+    pub const INFINITE: Self = Self(u64::MAX);
+
+    /// Дедлайн в наносекундах.
+    pub const fn from_ns(ns: u64) -> Self {
+        Self(ns)
+    }
+
+    /// ABI-значение `timeout_ns` для укладки в аргумент syscall'а.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// ABI-значение `timeout_ns` блокирующих Port-syscall'ов "ждать бессрочно".
 /// Sentinel `u64::MAX` отображается ядром в бессрочную блокировку (поведение
 /// по умолчанию до введения тайм-аутов) и не занимает слот в sleeper-heap.
-pub const PORT_TIMEOUT_INFINITE: u64 = u64::MAX;
+pub const PORT_TIMEOUT_INFINITE: u64 = Timeout::INFINITE.raw();
 
 /// ABI-значение `timeout_ns` блокирующих Port-syscall'ов "не блокироваться"
 /// (poll): операция завершается немедленно, иначе возвращается
 /// [`SYSCALL_RETURN_TIMEOUT`].
-pub const PORT_TIMEOUT_POLL: u64 = 0;
+pub const PORT_TIMEOUT_POLL: u64 = Timeout::POLL.raw();
 
 /// `UserMemFlags::ReadWrite` в кодировке `flags_raw` для memory_map/allocate.
 pub const MEM_FLAGS_READ_WRITE: u64 = 0;

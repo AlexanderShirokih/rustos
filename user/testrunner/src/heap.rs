@@ -54,8 +54,6 @@ fn heap_basic() {
     kernel_tests::kassert_eq!(s.len(), 128);
 }
 
-/// На границе passthrough-порога маршрут alloc/dealloc по `>=` обязан совпасть:
-/// round-trip ровно на пороге, на единицу ниже и выше.
 #[kernel_test]
 fn heap_threshold_boundary() {
     for size in [64 * 1024 - 1, 64 * 1024, 64 * 1024 + 1] {
@@ -67,8 +65,6 @@ fn heap_threshold_boundary() {
     }
 }
 
-/// Аллокации >= passthrough-порога идут напрямую к ядру и возвращаются на drop;
-/// повтор проверяет переиспользование возвращённой памяти.
 #[kernel_test]
 fn heap_passthrough() {
     const BIG: usize = 128 * 1024;
@@ -106,8 +102,6 @@ extern "C" fn churn_worker(arg: usize) -> ! {
     thread_exit(0)
 }
 
-/// Потоки одновременно аллоцируют и освобождают на общей куче; checksum ловит
-/// потерянные итерации и порчу данных под контенцией на Mutex аллокатора.
 #[kernel_test]
 fn heap_concurrent() {
     let shared = ConcurrentShared {

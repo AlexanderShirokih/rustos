@@ -1,19 +1,19 @@
 //! E2E проверка `SignalCreate`/`SignalSet`/`SignalWaitOne` из EL0.
 
 use kernel_tests::kernel_test;
-use runtime::{signal_create, signal_set, signal_wait_one};
+use runtime::{Signal, Timeout};
 use syscall::{SIGNALED, WakeCount};
 
-/// Создаёт `Signal`, поднимает `SIGNALED` через `signal_set`
-/// (`WakeCount::All` - разбудить всех) и проверяет, что poll (timeout 0) видит бит.
 #[kernel_test]
 fn signal_wait_round_trip() {
-    let signal = signal_create().expect("signal_create must succeed");
+    let signal = Signal::create().expect("signal create must succeed");
 
-    kernel_tests::kassert_eq!(signal_set(signal, SIGNALED, 0, WakeCount::All), 0);
+    signal
+        .set(SIGNALED, 0, WakeCount::All)
+        .expect("signal set must succeed");
 
-    let observed = signal_wait_one(signal, SIGNALED, 0);
-    kernel_tests::kassert!(observed >= 0);
-    let bit = i64::from(SIGNALED);
-    kernel_tests::kassert!(observed & bit == bit);
+    let observed = signal
+        .wait(SIGNALED, Timeout::POLL)
+        .expect("signal wait must succeed");
+    kernel_tests::kassert!(observed & SIGNALED == SIGNALED);
 }

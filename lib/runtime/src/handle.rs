@@ -11,10 +11,9 @@ use crate::{
 
 /// Владеет хэндлом и закрывает его в `Drop` через `svc::handle_close`.
 ///
-/// Не `Copy` и не `Clone`: владелец один. Конструкторы безопасны - провенанс
-/// хэндла гарантирует ядро (свежий из syscall'а либо помещённый в таблицу по
-/// ABI старта/IPC); хэндл - валидируемый индекс, ошибочный двойной враппинг
-/// даёт `BadHandle`, не UB.
+/// Не `Copy` и не `Clone`: владелец один. Конструкторы из хэндла `unsafe` -
+/// вызывающий подтверждает уникальное владение, чтобы двойное оборачивание не
+/// привело к преждевременному `Drop`-close.
 #[derive(Debug)]
 pub struct OwnedHandle {
     handle: Handle,
@@ -30,14 +29,23 @@ pub struct BorrowedHandle<'a> {
 
 impl OwnedHandle {
     /// Берёт во владение свежий хэндл из syscall'а.
-    pub fn from_handle(handle: Handle) -> Self {
+    ///
+    /// # Safety
+    /// Вызывающий гарантирует уникальное владение `handle`; двойное оборачивание
+    /// ведёт к преждевременному close (другой владелец получит `BadHandle`).
+    pub unsafe fn from_handle(handle: Handle) -> Self {
         Self { handle }
     }
 
     /// Усыновляет сырой HandleId, помещённый ядром в таблицу процесса; `None`
     /// на нуле (невалидный handle).
-    pub fn from_raw(raw: RawHandle) -> Option<Self> {
-        Handle::new(raw).map(Self::from_handle)
+    ///
+    /// # Safety
+    /// Вызывающий гарантирует уникальное владение `raw`; двойное оборачивание
+    /// ведёт к преждевременному close (другой владелец получит `BadHandle`).
+    pub unsafe fn from_raw(raw: RawHandle) -> Option<Self> {
+        // SAFETY: усыновляем тот же хэндл, уникальность гарантирует вызывающий.
+        Handle::new(raw).map(|handle| unsafe { Self::from_handle(handle) })
     }
 
     /// Владеемый хэндл для укладки в аргумент syscall'а.
@@ -58,7 +66,8 @@ impl OwnedHandle {
     /// трогает оригинал. Требует право `DUPLICATE`.
     pub fn duplicate(&self, rights: Rights, badge: u64) -> Result<OwnedHandle> {
         svc::handle_duplicate(self.handle, rights.into(), badge)
-            .map(Self::from_handle)
+            // SAFETY: handle_duplicate вернул свежий хэндл, мы единственный владелец.
+            .map(|handle| unsafe { Self::from_handle(handle) })
             .map_err(Error::from_return)
     }
 

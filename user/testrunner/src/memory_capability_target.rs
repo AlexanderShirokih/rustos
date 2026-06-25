@@ -1,34 +1,36 @@
-//! E2E проверка `CapabilityTarget::Memory` через `MemoryCreateVirtual` +
-//! `MemoryMap` + `MemoryRegionInspect` из EL0.
+//! E2E проверка `CapabilityTarget::Memory` через типизированные обёртки
+//! `Resource`/`MemoryRegion`/`Mapping` из EL0.
 
 use kernel_tests::kernel_test;
-use runtime::{memory_create_virtual, memory_map, memory_region_inspect, process_resource_self};
+use runtime::{MemoryAccess, RegionInfo, RegionKind, Resource, UserMemFlags};
 
 const PAGE_SIZE: u64 = 4096;
 const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABE;
-/// `access_mask`: биты R|W.
-const ACCESS_RW: u64 = 0b11;
-/// Secondary-возврат inspect'а: `(kind_tag << 16) | access_bits`,
-/// kind_tag Virtual = 1.
-const EXPECTED_INSPECT_SECONDARY: u64 = (1 << 16) | ACCESS_RW;
 
 #[kernel_test]
 fn memory_capability_target_map_and_inspect() {
-    let resource = process_resource_self().expect("metering resource handle");
-    let region = memory_create_virtual(resource, PAGE_SIZE, ACCESS_RW).expect("region handle");
+    let resource = Resource::self_resource().expect("metering resource");
+    let region = resource
+        .create_virtual(PAGE_SIZE, MemoryAccess::RW)
+        .expect("region");
 
-    let va = memory_map(region, PAGE_SIZE, 0);
-    kernel_tests::kassert!(va > 0);
+    let mapping = region.map(PAGE_SIZE, UserMemFlags::ReadWrite).expect("map");
 
-    let slot = usize::try_from(va).expect("positive va fits usize") as *mut u64;
-    // SAFETY: MemoryMap выдал RW-маппинг размером PAGE_SIZE; запись и чтение
-    // первых 8 байт лежат в его границах.
+    let slot = usize::try_from(mapping.va()).expect("positive va fits usize") as *mut u64;
+    // SAFETY: map выдал RW-маппинг размером PAGE_SIZE; запись и чтение первых
+    // 8 байт лежат в его границах.
     unsafe {
         slot.write_volatile(PATTERN);
         kernel_tests::kassert_eq!(slot.read_volatile(), PATTERN);
     }
 
-    let (size, secondary) = memory_region_inspect(region);
-    kernel_tests::kassert_eq!(size, i64::try_from(PAGE_SIZE).expect("page size fits i64"));
-    kernel_tests::kassert_eq!(secondary, EXPECTED_INSPECT_SECONDARY);
+    let info = region.inspect().expect("inspect");
+    kernel_tests::kassert_eq!(
+        info,
+        RegionInfo {
+            size_bytes: PAGE_SIZE,
+            kind: RegionKind::Virtual,
+            access: MemoryAccess::RW,
+        }
+    );
 }

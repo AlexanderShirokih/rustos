@@ -24,6 +24,7 @@ mod memory_capability_target;
 mod owned_handle;
 mod port;
 mod process_handles;
+mod process_start;
 mod ring_transport;
 mod self_spawn;
 mod signal;

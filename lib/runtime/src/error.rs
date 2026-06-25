@@ -34,3 +34,13 @@ pub(crate) fn unit(ret: i64) -> Result<()> {
         Err(Error::from_return(ret))
     }
 }
+
+/// Разбирает возврат-значение: неотрицательное - успех, отрицательное - ошибка.
+pub(crate) fn value(ret: i64) -> Result<u64> {
+    if ret < 0 {
+        Err(Error::from_return(ret))
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        Ok(ret as u64)
+    }
+}

@@ -1,13 +1,14 @@
 //! E2E проверка `ProcessCreate`/`ProcessLoadImage`/`ProcessStart` из EL0:
-//! testrunner готовит образ child-процесса через memory-syscall'ы, стартует
-//! его и дожидается завершения через bound-`Signal` процесса.
+//! E2E проверка `ProcessCreate`/`ProcessLoadImage`/`ProcessStart` из EL0.
+
+use alloc::vec;
 
 use kernel_tests::kernel_test;
 use runtime::{
-    memory_create_virtual, memory_map, memory_remap, process_create, process_exit_code,
-    process_load_image, process_resource_self, process_start, signal_wait_one,
+    Mapping, MemoryAccess, MemoryRegion, Priority, Process, Resource, Signal, ThreadEntry, Timeout,
+    UserMemFlags, handle_close,
 };
-use syscall::{MEM_FLAGS_READ_WRITE, SIGNALED, SyscallOp};
+use syscall::{Handle, SyscallError, SyscallOp};
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -22,11 +23,6 @@ const CHILD_USER_VM_BASE: u64 = 0x2002_0000;
 const CHILD_USER_VM_SIZE: u64 = 0xC_0000;
 const CHILD_EXIT_CODE: u32 = 0x55;
 const CHILD_WAIT_TIMEOUT_NS: u64 = 500_000_000;
-
-/// `UserMemFlags::ReadExecute` raw-код syscall-ABI.
-const MEM_FLAGS_READ_EXECUTE: u64 = 2;
-/// `access_mask` региона: R|W|X - после записи кода регион remap'ится в RX.
-const ACCESS_RWX: u64 = 0b111;
 
 /// Сериализованные размеры `UserImageDescAbi`/`UserSegmentAbi`.
 const IMAGE_DESC_SIZE: usize = 56;
@@ -45,7 +41,7 @@ const CHILD_CODE: [u32; 3] = [
 fn encode_segment(region_handle: u32) -> [u8; SEGMENT_SIZE] {
     let mut bytes = [0u8; SEGMENT_SIZE];
     bytes[0..4].copy_from_slice(&region_handle.to_le_bytes());
-    bytes[4..8].copy_from_slice(&(MEM_FLAGS_READ_EXECUTE as u32).to_le_bytes());
+    bytes[4..8].copy_from_slice(&(UserMemFlags::ReadExecute.raw() as u32).to_le_bytes());
     bytes[8..16].copy_from_slice(&CHILD_CODE_VA.to_le_bytes());
     bytes[16..24].copy_from_slice(&PAGE_SIZE.to_le_bytes());
     bytes
@@ -66,35 +62,88 @@ fn encode_image_desc(segments_va: u64) -> [u8; IMAGE_DESC_SIZE] {
     bytes
 }
 
-#[kernel_test]
-fn self_spawn_via_syscalls() {
-    // Регион child-кода: маппим RW, пишем инструкции, поднимаем в RX.
-    let resource = process_resource_self().expect("metering resource handle");
-    let region = memory_create_virtual(resource, PAGE_SIZE, ACCESS_RWX).expect("region handle");
-    let va = memory_map(region, PAGE_SIZE, MEM_FLAGS_READ_WRITE);
-    kernel_tests::kassert!(va > 0);
-    let code_va = u64::try_from(va).expect("positive va fits u64");
-    let code = usize::try_from(va).expect("positive va fits usize") as *mut u32;
-    // SAFETY: MemoryMap выдал RW-маппинг размером PAGE_SIZE; три слова
-    // child-кода лежат в его границах.
+/// `ThreadEntry` первого потока child'а: вход и стек из image-дескриптора.
+fn child_entry() -> ThreadEntry {
+    ThreadEntry {
+        entry_pc: CHILD_CODE_VA,
+        user_sp: CHILD_STACK_TOP,
+        arg: 0,
+        priority: Priority::new(1),
+    }
+}
+
+/// Готовит загруженный child-процесс. Возвращает регион и маппинг кода
+/// отдельно: оба независимы и должны жить до старта child'а, иначе обёртки
+/// закроют region handle или снимут маппинг до того, как ядро прочитает их.
+fn load_child() -> (Process, MemoryRegion, Mapping) {
+    let resource = Resource::self_resource().expect("metering resource");
+    let region = resource
+        .create_virtual(PAGE_SIZE, MemoryAccess::RWX)
+        .expect("code region");
+    let mapping = region
+        .map(PAGE_SIZE, UserMemFlags::ReadWrite)
+        .expect("code mapping");
+
+    let code = usize::try_from(mapping.va()).expect("positive va fits usize") as *mut u32;
+    // SAFETY: map выдал RW-маппинг размером PAGE_SIZE; три слова child-кода
+    // лежат в его границах.
     unsafe {
         for (i, word) in CHILD_CODE.iter().enumerate() {
             code.add(i).write_volatile(*word);
         }
     }
-    kernel_tests::kassert_eq!(memory_remap(code_va, PAGE_SIZE, MEM_FLAGS_READ_EXECUTE), 0);
+    mapping
+        .remap(UserMemFlags::ReadExecute)
+        .expect("remap to RX");
 
-    let segment = encode_segment(region.raw());
+    let segment = encode_segment(region.handle().as_raw().raw());
     let desc = encode_image_desc(segment.as_ptr() as u64);
 
-    let child = process_create(b"child").expect("child process handle");
-    kernel_tests::kassert_eq!(process_load_image(child, &desc), 0);
+    let process = Process::create("child").expect("child process");
+    process.load_image(&desc).expect("load image");
 
-    // priority = 1, bootstrap-handle'ов нет.
-    process_start(child, CHILD_CODE_VA, CHILD_STACK_TOP, 0, 1, 0).expect("child thread handle");
+    (process, region, mapping)
+}
 
-    // Ожидание завершения прямо по child-handle; затем читаем exit-code с него же.
-    let observed = signal_wait_one(child, SIGNALED, CHILD_WAIT_TIMEOUT_NS);
-    kernel_tests::kassert_eq!(observed, i64::from(SIGNALED));
-    kernel_tests::kassert_eq!(process_exit_code(child), i64::from(CHILD_EXIT_CODE));
+#[kernel_test]
+fn self_spawn_via_syscalls() {
+    let (process, _region, _mapping) = load_child();
+
+    let thread = process.start(child_entry(), vec![]).expect("child thread");
+    drop(thread);
+
+    process
+        .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
+        .expect("child terminates");
+    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), CHILD_EXIT_CODE);
+}
+
+/// `true`, если non-blocking `handle_close` на `handle` отвергнут как
+/// `BadHandle` (хэндл не в таблице родителя).
+fn is_absorbed(handle: Handle) -> bool {
+    handle_close(handle) == SyscallError::BadHandle.as_return_value()
+}
+
+#[kernel_test]
+fn start_success_absorbs_handles() {
+    let (process, _region, _mapping) = load_child();
+
+    let owned = Signal::create().expect("signal create").into_handle();
+    let stale = owned.as_raw();
+
+    // child-код игнорирует bootstrap-хэндл; signal несёт TRANSFER по умолчанию.
+    let thread = process
+        .start(child_entry(), vec![owned])
+        .expect("child thread");
+
+    // Дожидаемся завершения child (успех старта), затем освобождаем все хэндлы
+    // родителя, полученные на/после изъятия stale, чтобы их слоты не могли
+    // совпасть с освободившимся слотом stale в момент проверки.
+    process
+        .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
+        .expect("child terminates");
+    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), CHILD_EXIT_CODE);
+    drop(thread);
+
+    kernel_tests::kassert!(is_absorbed(stale));
 }
