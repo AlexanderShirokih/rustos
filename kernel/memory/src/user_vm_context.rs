@@ -170,7 +170,7 @@ mod tests {
     }
 
     fn region() -> Arc<MemoryRegion> {
-        Arc::new(MemoryRegion::create_physical(
+        Arc::new(MemoryRegion::create_physical_device(
             PageAlignedAddress::from_usize(0x8000_0000).unwrap(),
             nz(PAGE),
             AccessMask::RW,

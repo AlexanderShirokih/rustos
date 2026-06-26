@@ -739,7 +739,7 @@ mod tests {
 
         use memory::{AccessMask, MemoryRegion};
 
-        let region = Arc::new(MemoryRegion::create_physical(
+        let region = Arc::new(MemoryRegion::create_physical_device(
             memory::physical_address::PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
             NonZeroUsize::new(4096).unwrap(),
             AccessMask::R,

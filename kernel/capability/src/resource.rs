@@ -250,7 +250,7 @@ mod tests {
 
         resource.try_consume(4).unwrap();
         let refund = ResourceBudgetRefund::new(&resource, 4);
-        let region = MemoryRegion::create_physical(pa(0x4000_0000), nz(0x4000), AccessMask::RW)
+        let region = MemoryRegion::create_physical_device(pa(0x4000_0000), nz(0x4000), AccessMask::RW)
             .with_refund(refund);
         // Пока регион жив - бюджет остаётся списанным.
         assert_eq!(resource.remaining_budget(), 6);
@@ -269,7 +269,7 @@ mod tests {
         for _ in 0..1000 {
             resource.try_consume(4).unwrap();
             let refund = ResourceBudgetRefund::new(&resource, 4);
-            let region = MemoryRegion::create_physical(pa(0x4000_0000), nz(0x4000), AccessMask::RW)
+            let region = MemoryRegion::create_physical_device(pa(0x4000_0000), nz(0x4000), AccessMask::RW)
                 .with_refund(refund);
             drop(region);
         }
@@ -286,7 +286,7 @@ mod tests {
             refund = ResourceBudgetRefund::new(&resource, 4);
         }
 
-        let region = MemoryRegion::create_physical(pa(0x4000_0000), nz(0x1000), AccessMask::RW)
+        let region = MemoryRegion::create_physical_device(pa(0x4000_0000), nz(0x1000), AccessMask::RW)
             .with_refund(refund);
 
         drop(region); // не должно паниковать

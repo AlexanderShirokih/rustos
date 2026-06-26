@@ -19,7 +19,7 @@ use syscall::{SyscallError, UserMemFlags};
 use super::{
     bridge::{SyscallFrame, parse_handle_id},
     error::{encode_return, map_ipc_error},
-    flags::to_mem_flags,
+    flags::{mem_flags_for, to_mem_flags},
     runtime::runtime,
 };
 
@@ -184,7 +184,7 @@ pub fn sys_memory_slice(
 
     let sub = region
         .slice(offset, size, access)
-        .map_err(slice_err_to_syscall)?;
+        .map_err(|e| slice_err_to_syscall(&e))?;
     let handle = Capability::new_with_default_rights(Arc::new(sub));
 
     let table = capability::runtime()
@@ -284,7 +284,6 @@ pub fn sys_memory_map(
     let id = parse_handle_id(handle_raw)?;
     let size = parse_size(size_bytes)?;
     let flags = parse_flags(flags_raw)?;
-    let mem_flags = to_mem_flags(flags);
     let need = rights_for_access(flags);
 
     let (region, grant) = lookup_memory_grant(id, need)?;
@@ -295,6 +294,8 @@ pub fn sys_memory_map(
     if region.size_bytes() != size.get() {
         return Err(SyscallError::InvalidArgument);
     }
+
+    let mem_flags = mem_flags_for(region.memory_type(), flags);
 
     let user_vm = runtime().current_user_vm().ok_or(SyscallError::WrongType)?;
 
@@ -394,7 +395,6 @@ pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<
     let size = parse_size(size_bytes)?;
     let va_usize = usize::try_from(va_raw).map_err(|_| SyscallError::InvalidArgument)?;
     let flags = parse_flags(flags_raw)?;
-    let mem_flags = to_mem_flags(flags);
     let base =
         PageAlignedVirtualAddress::from_usize(va_usize).ok_or(SyscallError::InvalidArgument)?;
 
@@ -418,6 +418,8 @@ pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<
     if !grant.allows(access_mask_for(flags)) {
         return Err(SyscallError::InvalidArgument);
     }
+
+    let mem_flags = mem_flags_for(region.memory_type(), flags);
 
     user_vm
         .mapper()
@@ -513,7 +515,7 @@ fn region_create_err_to_syscall(err: &RegionCreateError) -> SyscallError {
     }
 }
 
-fn slice_err_to_syscall(err: RegionSliceError) -> SyscallError {
+fn slice_err_to_syscall(err: &RegionSliceError) -> SyscallError {
     match err {
         RegionSliceError::OutOfBounds | RegionSliceError::MisalignedOffset => {
             SyscallError::InvalidArgument
@@ -659,19 +661,19 @@ mod tests {
     #[test]
     fn slice_err_mapping() {
         assert_eq!(
-            slice_err_to_syscall(RegionSliceError::OutOfBounds),
+            slice_err_to_syscall(&RegionSliceError::OutOfBounds),
             SyscallError::InvalidArgument
         );
         assert_eq!(
-            slice_err_to_syscall(RegionSliceError::MisalignedOffset),
+            slice_err_to_syscall(&RegionSliceError::MisalignedOffset),
             SyscallError::InvalidArgument
         );
         assert_eq!(
-            slice_err_to_syscall(RegionSliceError::AccessEscalation),
+            slice_err_to_syscall(&RegionSliceError::AccessEscalation),
             SyscallError::AccessDenied
         );
         assert_eq!(
-            slice_err_to_syscall(RegionSliceError::UnsupportedBacking),
+            slice_err_to_syscall(&RegionSliceError::UnsupportedBacking),
             SyscallError::WrongType
         );
     }
@@ -784,7 +786,7 @@ mod tests {
         }
 
         fn region() -> Arc<MemoryRegion> {
-            Arc::new(MemoryRegion::create_physical(
+            Arc::new(MemoryRegion::create_physical_device(
                 PageAlignedAddress::from_usize(0x8000_0000).unwrap(),
                 nz(PAGE_SIZE),
                 AccessMask::RW,

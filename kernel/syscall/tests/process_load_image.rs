@@ -269,7 +269,7 @@ fn insert_region_with_rights(
     access: AccessMask,
     rights: Option<Rights>,
 ) -> HandleId {
-    let region = Arc::new(MemoryRegion::create_physical(
+    let region = Arc::new(MemoryRegion::create_physical_device(
         PageAlignedAddress::from_usize(0x8000_0000).unwrap(),
         NonZeroUsize::new(size).unwrap(),
         access,

@@ -1,10 +1,10 @@
 //! Архитектурно-независимый регион памяти, хранимый в CapabilityTarget::Memory.
 //!
-//! Регион - это владелец PA-бэкинга (анонимные фреймы или фиксированный
-//! PA-диапазон) плюс декларация максимально допустимых прав. На `Drop`
-//! `Virtual`-регион возвращает фреймы в `FrameAllocator`; `Physical`-регион
-//! не владеет памятью, но может нести обязательство вернуть метеринг-бюджет
-//! ресурса, под который был сминчен (см. [`BudgetRefund`]).
+//! Регион - это владелец PA-бэкинга (анонимные фреймы Normal-RAM либо
+//! фиксированный PA-диапазон Device-MMIO) плюс декларация максимально допустимых
+//! прав. На `Drop` `Virtual`-регион возвращает фреймы в `FrameAllocator`;
+//! навешанный метеринг-refund возвращает списанный под регион бюджет (см.
+//! [`BudgetRefund`]). `Physical`-регион памятью не владеет.
 
 use alloc::{sync::Arc, vec::Vec};
 use core::{
@@ -62,6 +62,16 @@ pub trait BudgetRefund: Send + Sync {
     fn refund(&self);
 }
 
+/// Тип памяти региона: задаёт атрибут маппинга (cacheable Normal либо
+/// Device-nGnRE). Выводится из бэкинга: `Virtual` - Normal, `Physical` (MMIO) -
+/// Device. MMIO обязан маппиться как `Device`, иначе доступ через
+/// Normal-cacheable - UB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryType {
+    Normal,
+    Device,
+}
+
 /// PA-бэкинг региона.
 pub enum MemoryBacking {
     /// Анонимные фреймы, выделенные эагерно из `FrameAllocator`.
@@ -76,7 +86,7 @@ pub enum MemoryBacking {
         fa: &'static (dyn FrameAllocator + Send + Sync),
         zeroed: AtomicBool,
     },
-    /// Фиксированный PA-диапазон: PA не принадлежит региону.
+    /// Фиксированный PA-диапазон Device-MMIO: PA не принадлежит региону.
     Physical { pa_base: PageAlignedAddress },
 }
 
@@ -137,14 +147,19 @@ impl MemoryRegion {
         })
     }
 
-    /// Регион поверх фиксированного PA-диапазона. Caller гарантирует,
+    /// Регион поверх фиксированного PA-диапазона Device-MMIO. Caller гарантирует,
     /// что PA доступен и не пересекается с управляемой `FrameAllocator`-ом
-    /// памятью.
-    pub fn create_physical(
+    /// памятью. Маппится с Device-nGnRE-атрибутом; `access` не должен содержать
+    /// `X`.
+    pub fn create_physical_device(
         pa_base: PageAlignedAddress,
         size: NonZeroUsize,
         access: AccessMask,
     ) -> Self {
+        debug_assert!(
+            !access.allows(AccessMask::X),
+            "device memory cannot be executable"
+        );
         Self {
             backing: MemoryBacking::Physical { pa_base },
             size_bytes: size.get(),
@@ -224,6 +239,16 @@ impl MemoryRegion {
         match self.backing {
             MemoryBacking::Physical { pa_base } => Some(pa_base),
             MemoryBacking::Virtual { .. } => None,
+        }
+    }
+
+    /// Тип памяти, выведенный из бэкинга: `Virtual` (анонимная RAM) - Normal,
+    /// `Physical` (MMIO) - Device. Map-хендлер выбирает по нему Device- либо
+    /// Normal-флаги.
+    pub fn memory_type(&self) -> MemoryType {
+        match self.backing {
+            MemoryBacking::Virtual { .. } => MemoryType::Normal,
+            MemoryBacking::Physical { .. } => MemoryType::Device,
         }
     }
 
@@ -515,13 +540,15 @@ mod tests {
     #[test]
     fn slice_physical_narrows_pa_size_and_access() {
         let region =
-            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
+            MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
+        assert_eq!(region.memory_type(), MemoryType::Device);
         let sub = region
             .slice(0x1000, nz(0x1000), AccessMask::R)
             .expect("in-bounds slice with subset access");
         assert_eq!(sub.kind_tag(), 2);
         assert_eq!(sub.size_bytes(), 0x1000);
         assert_eq!(sub.access_mask().bits(), AccessMask::R.bits());
+        assert_eq!(sub.memory_type(), MemoryType::Device);
         match &sub.backing {
             MemoryBacking::Physical { pa_base } => assert_eq!(pa_base.as_usize(), 0x4000_1000),
             MemoryBacking::Virtual { .. } => panic!("physical slice must stay physical"),
@@ -529,9 +556,16 @@ mod tests {
     }
 
     #[test]
+    fn virtual_region_is_normal_type() {
+        let fa = std::boxed::Box::leak(std::boxed::Box::new(MockFrameAllocator::with_limit(1)));
+        let region = MemoryRegion::create_virtual(fa, nz(1), AccessMask::RW).expect("alloc");
+        assert_eq!(region.memory_type(), MemoryType::Normal);
+    }
+
+    #[test]
     fn slice_rejects_window_past_region_end() {
         let region =
-            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
+            MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
         assert!(matches!(
             region.slice(0x3000, nz(0x2000), AccessMask::R),
             Err(RegionSliceError::OutOfBounds)
@@ -541,7 +575,7 @@ mod tests {
     #[test]
     fn slice_rejects_access_wider_than_region() {
         let region =
-            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::R);
+            MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::R);
         assert!(matches!(
             region.slice(0, nz(0x1000), AccessMask::RW),
             Err(RegionSliceError::AccessEscalation)
@@ -551,7 +585,7 @@ mod tests {
     #[test]
     fn slice_rejects_misaligned_offset() {
         let region =
-            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
+            MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
         assert!(matches!(
             region.slice(0x800, nz(0x1000), AccessMask::R),
             Err(RegionSliceError::MisalignedOffset)
@@ -571,7 +605,7 @@ mod tests {
     #[test]
     fn slice_installs_at_offset_pa() {
         let region =
-            MemoryRegion::create_physical(aligned_pa(0x8000_0000), nz(0x2000), AccessMask::RW);
+            MemoryRegion::create_physical_device(aligned_pa(0x8000_0000), nz(0x2000), AccessMask::RW);
         let sub = region.slice(0x1000, nz(0x1000), AccessMask::R).unwrap();
         let mapper = MockMapper::default();
         let va = aligned_va(0x4000_0000);
@@ -585,8 +619,11 @@ mod tests {
     #[test]
     fn physical_base_some_for_physical_none_for_virtual() {
         let phys =
-            MemoryRegion::create_physical(aligned_pa(0x9010_0000), nz(0x1000), AccessMask::RW);
-        assert_eq!(phys.physical_base().map(|p| p.as_usize()), Some(0x9010_0000));
+            MemoryRegion::create_physical_device(aligned_pa(0x9010_0000), nz(0x1000), AccessMask::RW);
+        assert_eq!(
+            phys.physical_base().map(PageAlignedAddress::as_usize),
+            Some(0x9010_0000)
+        );
 
         let fa = leak_fa();
         let virt = MemoryRegion::create_virtual(fa, nz(1), AccessMask::RW).unwrap();
@@ -596,7 +633,7 @@ mod tests {
     #[test]
     fn physical_drop_does_nothing() {
         let region =
-            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(PAGE_SIZE), AccessMask::R);
+            MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(PAGE_SIZE), AccessMask::R);
         assert_eq!(region.kind_tag(), 2);
         assert_eq!(region.size_bytes(), PAGE_SIZE);
         drop(region);
@@ -614,7 +651,7 @@ mod tests {
     fn metered_physical_drop_refunds_exactly_once() {
         let refund = Arc::new(CountingRefund(std::sync::atomic::AtomicUsize::new(0)));
         let region =
-            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(PAGE_SIZE), AccessMask::R)
+            MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(PAGE_SIZE), AccessMask::R)
                 .with_refund(refund.clone());
         // Пока регион жив - refund ещё не сработал.
         assert_eq!(refund.0.load(Ordering::Acquire), 0);
@@ -663,7 +700,7 @@ mod tests {
     #[test]
     fn install_uninstall_round_trip_physical() {
         let region =
-            MemoryRegion::create_physical(aligned_pa(0x8000_0000), nz(PAGE_SIZE), AccessMask::R);
+            MemoryRegion::create_physical_device(aligned_pa(0x8000_0000), nz(PAGE_SIZE), AccessMask::R);
         let mapper = MockMapper::default();
         let va = aligned_va(0x4000_0000);
         region
@@ -751,7 +788,7 @@ mod tests {
     #[test]
     fn install_physical_does_not_zero() {
         let region =
-            MemoryRegion::create_physical(aligned_pa(0x8000_0000), nz(PAGE_SIZE), AccessMask::R);
+            MemoryRegion::create_physical_device(aligned_pa(0x8000_0000), nz(PAGE_SIZE), AccessMask::R);
         let mapper = MockMapper::default();
         region
             .install(&mapper, aligned_va(0x4000_0000), MemFlags::user_ro())

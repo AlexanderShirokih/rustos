@@ -96,14 +96,52 @@ mod tests {
     }
 
     fn memory_region(access: memory::AccessMask) -> CapabilityTarget {
-        use core::num::NonZeroUsize;
+        use core::{
+            num::NonZeroUsize,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
 
-        use memory::{MemoryRegion, physical_address::PageAlignedAddress};
-        let region = MemoryRegion::create_physical(
-            PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
-            NonZeroUsize::new(0x1000).unwrap(),
-            access,
+        use memory::{
+            MemoryRegion,
+            frame::Frame,
+            frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
+        };
+
+        // Заглушка FA: rights-тесту нужен лишь access_mask региона, а исполняемой
+        // (RX) бывает только Virtual-память - её и строим.
+        struct StubFrameAllocator {
+            next: AtomicUsize,
+        }
+
+        impl FrameAllocator for StubFrameAllocator {
+            fn reserve_frames_exact(
+                &self,
+                from_inclusive: Frame,
+                _to_exclusive: Frame,
+            ) -> Result<Frame, ReserveFrameError> {
+                Ok(from_inclusive)
+            }
+            fn allocate_frame(&self) -> Option<Frame> {
+                Some(Frame::new(self.next.fetch_add(1, Ordering::Relaxed)))
+            }
+            fn allocate_frames(&self, _max_count: usize) -> Option<(Frame, usize)> {
+                None
+            }
+            fn deallocate_frame(&self, _frame: Frame) -> Result<(), FrameError> {
+                Ok(())
+            }
+            fn is_allocated(&self, _frame: Frame) -> bool {
+                false
+            }
+        }
+
+        let fa: &'static (dyn FrameAllocator + Send + Sync) = alloc::boxed::Box::leak(
+            alloc::boxed::Box::new(StubFrameAllocator {
+                next: AtomicUsize::new(0x1000),
+            }),
         );
+        let region = MemoryRegion::create_virtual(fa, NonZeroUsize::new(1).unwrap(), access)
+            .expect("stub frame allocator never runs out");
         CapabilityTarget::Memory(alloc::sync::Arc::new(region))
     }
 

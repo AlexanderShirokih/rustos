@@ -66,7 +66,7 @@ impl MmioService for MmioServiceImpl {
             .map_err(|err| MmioMapError(format!("VA arena: {err}")))?
             .base();
 
-        let region = Arc::new(MemoryRegion::create_physical(
+        let region = Arc::new(MemoryRegion::create_physical_device(
             target_address,
             size,
             access_mask_for_device(permissions),

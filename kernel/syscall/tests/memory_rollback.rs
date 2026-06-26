@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use capability::{
     Capability, HandleId, HandleTable, IpcError, KernelRuntime, LoadImageError, ProcessObject,
-    Resource, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
+    Resource, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
     UserThreadEntry, WaitToken, install_runtime,
 };
 use collections::{LockCell, MutexCell};
@@ -351,7 +351,7 @@ fn metered_alloc_does_not_leak_budget_on_frame_oom() {
         [
             resource_h,
             PAGE as u64,
-            AccessMask::RW.bits() as u64,
+            u64::from(AccessMask::RW.bits()),
             0,
             0,
             0,
