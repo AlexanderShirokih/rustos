@@ -34,6 +34,7 @@ impl InterruptsService for GicInterruptsService {
     fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
         let IrqBinding {
             irq,
+            trigger,
             priority,
             target,
             handler,
@@ -51,6 +52,11 @@ impl InterruptsService for GicInterruptsService {
 
         guard.set_priority(irq, priority);
         guard.set_target_cpu(irq, target);
+
+        // Триггер - до enable: переконфиг включённой линии может быть непредсказуемым.
+        if let Some(trigger) = trigger {
+            guard.set_config(irq, trigger);
+        }
 
         guard.handlers.insert(irq, Arc::from(handler));
         guard.enable(irq);
@@ -77,10 +83,6 @@ impl InterruptsService for GicInterruptsService {
     }
 
     fn dispatch_interrupt(&self) {
-        let handler = self.controller.lock().dispatch_interrupt();
-
-        if let Some(handler) = handler {
-            handler.handle();
-        }
+        super::super::dispatch_interrupt(&self.controller);
     }
 }

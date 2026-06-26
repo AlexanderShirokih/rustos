@@ -4,9 +4,10 @@ use alloc::{collections::BTreeMap, sync::Arc};
 use core::hint::spin_loop;
 
 use drivers_common::services::{
-    interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority},
+    interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority, TriggerType},
     mmio::MmioBound,
 };
+use io::mmio::Reg;
 use klog::debug;
 
 use super::regs::{
@@ -18,7 +19,7 @@ use super::regs::{
 };
 use crate::{read_sysreg, write_sysreg};
 
-/// Runtime-объект контроллера прерываний GICv3, публикуемый через capability.
+/// Runtime-объект контроллера прерываний GICv3.
 pub(super) struct Gicv3Controller {
     pub(super) distributor: MmioBound,
     /// GICR-регион текущего CPU (RD_base + SGI_base в одном маппинге).
@@ -66,30 +67,28 @@ impl Gicv3Controller {
     }
 
     pub(super) fn enable(&self, irq: IrqNumber) {
-        match IrqType::from_irq_number(irq) {
-            IrqType::Sgi | IrqType::Ppi => {
-                self.redistributor
-                    .write_reg(GICR_ISENABLER0, 1u32 << irq.raw());
-            }
-            IrqType::Spi => {
-                let (reg, bit) = bit_offset(irq, 1);
-                self.distributor
-                    .write_reg(GICD_ISENABLER.with_offset(reg * 4), 1 << bit);
-            }
-            IrqType::Spurious => {}
-        }
+        self.write_enable_bit(irq, GICR_ISENABLER0, GICD_ISENABLER);
     }
 
     pub(super) fn disable(&self, irq: IrqNumber) {
+        self.write_enable_bit(irq, GICR_ICENABLER0, GICD_ICENABLER);
+    }
+
+    fn write_enable_bit(
+        &self,
+        irq: IrqNumber,
+        redistributor_reg: Reg<u32>,
+        distributor_reg: Reg<u32>,
+    ) {
         match IrqType::from_irq_number(irq) {
             IrqType::Sgi | IrqType::Ppi => {
                 self.redistributor
-                    .write_reg(GICR_ICENABLER0, 1u32 << irq.raw());
+                    .write_reg(redistributor_reg, 1u32 << irq.raw());
             }
             IrqType::Spi => {
                 let (reg, bit) = bit_offset(irq, 1);
                 self.distributor
-                    .write_reg(GICD_ICENABLER.with_offset(reg * 4), 1 << bit);
+                    .write_reg(distributor_reg.with_offset(reg * 4), 1 << bit);
             }
             IrqType::Spurious => {}
         }
@@ -141,18 +140,6 @@ impl Gicv3Controller {
         self.distributor
             .write_reg(GICD_IROUTER.with_offset(router_offset), route);
     }
-
-    /// Подтверждает и деактивирует (EOI) один pending IRQ, возвращая его хендлер.
-    pub(super) fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>> {
-        let irq = Self::acknowledge()?;
-        let handler = self.handlers.get(&irq).cloned();
-
-        Self::end_of_interrupt(irq);
-
-        handler
-    }
-
-    // --- Приватные методы инициализации ---
 
     fn enable_sre() {
         // SAFETY: Запись в ICC_SRE_EL1 включает доступ к системным регистрам GIC CPU Interface.
@@ -307,5 +294,36 @@ impl Gicv3Controller {
         unsafe {
             core::arch::asm!("msr daifclr, #0b0010", options(nostack, preserves_flags));
         }
+    }
+
+    /// Конфигурирует триггер PPI-линии в GICR_ICFGR1 текущего CPU (2 бита на IRQ;
+    /// старший бит поля: `1` = edge, `0` = level). Вызывать до enable: переконфиг
+    /// включённой линии по спеке GIC UNPREDICTABLE.
+    pub(super) fn set_config(&self, irq: IrqNumber, trigger: TriggerType) {
+        let raw = irq.raw() as usize;
+        debug_assert!(
+            (16..32).contains(&raw),
+            "set_config рассчитан только на PPI (16..32)"
+        );
+        let trigger_bit = (raw % 16) * 2 + 1;
+
+        let mut val = self.redistributor.read_reg(GICR_ICFGR1);
+        match trigger {
+            TriggerType::Edge => val |= 1 << trigger_bit,
+            TriggerType::Level => val &= !(1 << trigger_bit),
+        }
+        self.redistributor.write_reg(GICR_ICFGR1, val);
+    }
+}
+
+impl super::super::DispatchController for Gicv3Controller {
+    /// Подтверждает и деактивирует (EOI) один pending IRQ, возвращая его хендлер.
+    fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>> {
+        let irq = Self::acknowledge()?;
+        let handler = self.handlers.get(&irq).cloned();
+
+        Self::end_of_interrupt(irq);
+
+        handler
     }
 }

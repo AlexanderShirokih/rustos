@@ -10,7 +10,7 @@ use capability::{
 use collections::{LockCell, MutexCell};
 use ipc::{
     MessageLen, Transport,
-    wire::{IpcError as WireError, Str},
+    wire::{Cap, IpcError as WireError, Str},
 };
 use kernel_tests::kernel_test;
 use scheduler::{Priority, SchedulerServiceExt, SpawnConfig};
@@ -24,6 +24,11 @@ struct SignalingSink {
 impl BootstrapService for SignalingSink {
     fn log(&mut self, _message: Str<{ LOG_MESSAGE_MAX }>) {
         self.signal.signal(SIGNALED, 0);
+    }
+
+    // Тест round-trip проверяет только log; выдача не задействована.
+    fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
+        Err(1)
     }
 }
 

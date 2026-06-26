@@ -40,6 +40,16 @@ impl IrqPriority {
     }
 }
 
+/// Тип триггера линии прерывания.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerType {
+    /// Триггер по фронту
+    Edge,
+    
+    /// Триггер по уровню
+    Level,
+}
+
 /// Маска целевых CPU для маршрутизации прерываний.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -54,12 +64,6 @@ impl CpuMask {
 
     /// CPU 0.
     pub const CPU0: Self = Self(0b0001);
-    /// CPU 1.
-    pub const CPU1: Self = Self(0b0010);
-    /// CPU 2.
-    pub const CPU2: Self = Self(0b0100);
-    /// CPU 3.
-    pub const CPU3: Self = Self(0b1000);
 
     /// Создаёт маску с единственным CPU по его индексу.
     pub fn cpu(cpu_index: u8) -> Option<Self> {
@@ -120,9 +124,9 @@ pub enum IrqRegistrationError {
     InvalidIrq,
     /// Обработчик для данного IRQ уже существует.
     AlreadyRegistered,
-    /// Регистрация пока не поддерживается текущим окружением.
+    /// Регистрация не поддерживается текущим окружением.
     Unsupported,
-    /// Прочая ошибка с сообщением.
+    /// Прочая ошибка.
     Other(&'static str),
 }
 
@@ -136,6 +140,11 @@ pub trait IrqHandler: Send + Sync {
 
 pub struct IrqBinding {
     pub irq: IrqNumber,
+    
+    /// `Some` - сконфигурировать ICFGR линии под этот триггер (до enable);
+    /// `None` - не трогать ICFGR (линия наследует boot-конфигурацию).
+    pub trigger: Option<TriggerType>,
+    
     pub priority: IrqPriority,
     pub target: CpuMask,
     pub handler: Box<dyn IrqHandler>,
@@ -144,12 +153,14 @@ pub struct IrqBinding {
 impl IrqBinding {
     pub fn new(
         irq: IrqNumber,
+        trigger: Option<TriggerType>,
         priority: IrqPriority,
         target: CpuMask,
         handler: Box<dyn IrqHandler>,
     ) -> Self {
         Self {
             irq,
+            trigger,
             priority,
             target,
             handler,
@@ -158,8 +169,7 @@ impl IrqBinding {
 }
 
 /// Контракт сервиса прерываний.
-///
-/// Трейт определяет базовые операции для управления аппаратным контроллером прерываний.
+/// Определяет базовые операции для управления аппаратным контроллером прерываний.
 pub trait InterruptsService: Send + Sync {
     /// Глобально включает прерывания.
     fn enable(&self);
@@ -171,15 +181,14 @@ pub trait InterruptsService: Send + Sync {
     fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError>;
 
     /// Маскирует (запрещает) линию `irq` на контроллере, не снимая привязку.
-    /// Парная к [`unmask`](Self::unmask). Используется уровневым IRQ-протоколом
-    /// userspace-драйверов: линия маскируется при срабатывании и размаскируется
+    /// Используется уровневым IRQ-протоколом: линия маскируется при срабатывании и размаскируется
     /// на `ack`.
     fn mask(&self, irq: IrqNumber);
 
     /// Снимает маску (разрешает) линию `irq` на контроллере.
     fn unmask(&self, irq: IrqNumber);
 
-    /// Обрабатывает не более одного IRQ за вызов.
+    /// Обрабатывает IRQ (не более одного за раз).
     fn dispatch_interrupt(&self);
 }
 
@@ -254,6 +263,7 @@ mod tests {
             &service,
             IrqBinding::new(
                 irq,
+                None,
                 IrqPriority::LOWEST,
                 CpuMask::ALL,
                 Box::new(TestIrqHandler),
@@ -290,6 +300,7 @@ mod tests {
             &service,
             IrqBinding::new(
                 IrqNumber::new(33),
+                None,
                 IrqPriority::LOWEST,
                 CpuMask::ALL,
                 Box::new(TestIrqHandler),

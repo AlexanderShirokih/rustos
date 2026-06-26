@@ -122,7 +122,6 @@ fn status_fail_and_garbage_are_disabled() {
 #[test]
 fn cpu_mask_cpu_sets_single_bit() {
     assert_eq!(CpuMask::cpu(0), Some(CpuMask::CPU0));
-    assert_eq!(CpuMask::cpu(1), Some(CpuMask::CPU1));
     assert_eq!(CpuMask::cpu(7).map(CpuMask::raw), Some(0b1000_0000));
 }
 

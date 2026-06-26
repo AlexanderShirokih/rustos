@@ -3,7 +3,7 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 
 use drivers_common::services::{
-    interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority},
+    interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority, TriggerType},
     mmio::MmioBound,
 };
 use klog::debug;
@@ -14,7 +14,7 @@ use super::regs::{
     IrqType, PRIORITY_MASK_ALL, bit_offset,
 };
 
-/// Runtime-объект контроллера прерываний GICv2, публикуемый через capability.
+/// Runtime-объект контроллера прерываний GICv2.
 pub(super) struct Gicv2Controller {
     pub(super) distributor: MmioBound,
     pub(super) cpu_interface: MmioBound,
@@ -170,14 +170,20 @@ impl Gicv2Controller {
         self.distributor.write_reg(target_cpu_reg, val);
     }
 
-    /// Подтверждает и деактивирует (EOI) один pending IRQ, возвращая его хендлер.
-    pub(super) fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>> {
-        let irq = self.acknowledge()?;
-        let handler = self.handlers.get(&irq).cloned();
+    /// Конфигурирует триггер линии через GICD_ICFGR (2 бита на IRQ; старший бит
+    /// поля: `1` = edge, `0` = level). Вызывать до enable: переконфигурация
+    /// включённой линии по спеке GIC UNPREDICTABLE.
+    pub(super) fn set_config(&self, irq: IrqNumber, trigger: TriggerType) {
+        let (reg, entry) = bit_offset(irq, 2);
+        let trigger_bit = entry * 2 + 1;
+        let reg_addr = GICD_ICFGR.with_offset(reg * 4);
 
-        self.end_of_interrupt(irq);
-
-        handler
+        let mut val = self.distributor.read_reg(reg_addr);
+        match trigger {
+            TriggerType::Edge => val |= 1 << trigger_bit,
+            TriggerType::Level => val &= !(1 << trigger_bit),
+        }
+        self.distributor.write_reg(reg_addr, val);
     }
 
     fn acknowledge(&mut self) -> Option<IrqNumber> {
@@ -192,5 +198,17 @@ impl Gicv2Controller {
     fn end_of_interrupt(&self, irq: IrqNumber) {
         self.cpu_interface
             .write_reg(GICC_EOIR, u32::from(irq.raw()));
+    }
+}
+
+impl super::super::DispatchController for Gicv2Controller {
+    /// Подтверждает и деактивирует (EOI) один pending IRQ, возвращая его хендлер.
+    fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>> {
+        let irq = self.acknowledge()?;
+        let handler = self.handlers.get(&irq).cloned();
+
+        self.end_of_interrupt(irq);
+
+        handler
     }
 }

@@ -40,6 +40,8 @@ impl InterruptsControl for InterruptsControlAdapter {
     fn bind_line(&self, irq: u16, sink: Arc<dyn IrqSink>) -> Result<IrqBindToken, IpcError> {
         let binding = IrqBinding::new(
             IrqNumber::new(irq),
+            // Триггер из FDT недоступен на mint-пути; линия наследует boot-ICFGR.
+            None,
             IrqPriority::HIGHEST,
             CpuMask::ALL,
             Box::new(SinkHandler { sink }),

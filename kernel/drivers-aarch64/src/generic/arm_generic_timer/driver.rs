@@ -1,17 +1,20 @@
 //! Драйвер ARM Generic Timer: точка входа, фабрика и probe-функция.
 
 use alloc::{boxed::Box, format, string::String, sync::Arc};
-use core::mem::size_of;
 
 use drivers_common::{
     BootServices, DeviceNode, Driver, DriverFactory, DriverRunError, NodeProperty,
     probe::{ProbeError, ProbeResult},
     services::{
-        interrupts::{CpuMask, IrqBinding, IrqBound, IrqNumber, IrqPriority},
+        interrupts::{CpuMask, IrqBinding, IrqBound, IrqPriority},
         timer::TimerService,
     },
 };
-use drivers_common_aarch64::{FdtProbeContext, require_compatible};
+use drivers_common_aarch64::{
+    FdtProbeContext,
+    gic_interrupt::{GicInterrupt, parse_gic_interrupt},
+    require_compatible,
+};
 
 use super::{
     service::{ArmGenericTimerHandle, ArmGenericTimerIrqHandler},
@@ -20,10 +23,6 @@ use super::{
 use crate::register_driver;
 
 const TIMER_IRQ_PRIORITY: IrqPriority = IrqPriority::HIGHEST;
-const GIC_TYPE_SPI: u32 = 0;
-const GIC_TYPE_PPI: u32 = 1;
-const INTERRUPT_SPECIFIER_CELLS: usize = 3;
-const INTERRUPT_CELL_SIZE: usize = size_of::<u32>();
 
 /// Индекс specifier-а virtual timer в `interrupts` ноды `arm,armv8-timer`.
 /// Порядок specifier-ов: secure-physical, non-secure-physical, virtual, hypervisor.
@@ -31,14 +30,14 @@ const VIRTUAL_TIMER_SPEC_INDEX: usize = 2;
 
 /// Runtime-драйвер ARM Generic Timer.
 pub struct ArmGenericTimerDriver {
-    irq: IrqNumber,
+    interrupt: GicInterrupt,
     irq_bound: Option<IrqBound>,
 }
 
 impl ArmGenericTimerDriver {
-    pub const fn new(irq: IrqNumber) -> Self {
+    pub const fn new(interrupt: GicInterrupt) -> Self {
         Self {
-            irq,
+            interrupt,
             irq_bound: None,
         }
     }
@@ -60,7 +59,8 @@ impl Driver for ArmGenericTimerDriver {
         let state = Arc::new(state);
 
         let binding = IrqBinding::new(
-            self.irq,
+            self.interrupt.irq,
+            Some(self.interrupt.trigger),
             TIMER_IRQ_PRIORITY,
             CpuMask::CPU0,
             Box::new(ArmGenericTimerIrqHandler::new(state.clone())),
@@ -83,12 +83,12 @@ impl Driver for ArmGenericTimerDriver {
 }
 
 struct ArmGenericTimerFactory {
-    irq: IrqNumber,
+    interrupt: GicInterrupt,
 }
 
 impl DriverFactory for ArmGenericTimerFactory {
     fn create(&self) -> Result<Box<dyn Driver>, String> {
-        Ok(Box::new(ArmGenericTimerDriver::new(self.irq)))
+        Ok(Box::new(ArmGenericTimerDriver::new(self.interrupt)))
     }
 }
 
@@ -100,57 +100,11 @@ pub fn arm_generic_timer_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult
         .prop("interrupts")
         .ok_or(ProbeError::MissingProperty("interrupts"))?;
 
-    let irq = parse_virtual_timer_irq(interrupts.raw())?;
-
-    Ok(Box::new(ArmGenericTimerFactory { irq }))
-}
-
-fn parse_virtual_timer_irq(raw: &[u8]) -> Result<IrqNumber, ProbeError> {
-    let spec_size = INTERRUPT_SPECIFIER_CELLS * INTERRUPT_CELL_SIZE;
-    if !raw.len().is_multiple_of(spec_size) {
-        return Err(ProbeError::Unsupported(
-            "invalid interrupts property length for generic timer",
-        ));
-    }
-
-    let spec_count = raw.len() / spec_size;
-    if spec_count <= VIRTUAL_TIMER_SPEC_INDEX {
-        return Err(ProbeError::Unsupported(
-            "virtual timer interrupt specifier is missing",
-        ));
-    }
-
-    let base = VIRTUAL_TIMER_SPEC_INDEX * spec_size;
-    let interrupt_type = read_be_u32(raw, base).ok_or(ProbeError::Unsupported(
-        "failed to parse virtual timer interrupt type",
-    ))?;
-    let interrupt_number = read_be_u32(raw, base + INTERRUPT_CELL_SIZE).ok_or(
-        ProbeError::Unsupported("failed to parse virtual timer interrupt number"),
+    let interrupt = parse_gic_interrupt(interrupts.raw(), VIRTUAL_TIMER_SPEC_INDEX).ok_or(
+        ProbeError::Unsupported("unsupported virtual timer interrupt specifier"),
     )?;
 
-    gic_specifier_to_irq(interrupt_type, interrupt_number).ok_or(ProbeError::Unsupported(
-        "unsupported virtual timer interrupt specifier",
-    ))
-}
-
-fn read_be_u32(raw: &[u8], offset: usize) -> Option<u32> {
-    let bytes = raw.get(offset..offset + INTERRUPT_CELL_SIZE)?;
-    let array: [u8; INTERRUPT_CELL_SIZE] = bytes.try_into().ok()?;
-    Some(u32::from_be_bytes(array))
-}
-
-fn gic_specifier_to_irq(interrupt_type: u32, interrupt_number: u32) -> Option<IrqNumber> {
-    let irq_raw = match interrupt_type {
-        GIC_TYPE_SPI => interrupt_number.checked_add(32)?,
-        GIC_TYPE_PPI => interrupt_number.checked_add(16)?,
-        _ => return None,
-    };
-
-    if irq_raw > u32::from(u16::MAX) {
-        return None;
-    }
-
-    Some(IrqNumber::new(irq_raw as u16))
+    Ok(Box::new(ArmGenericTimerFactory { interrupt }))
 }
 
 register_driver!(ARM_GENERIC_TIMER_DRIVER, probe = arm_generic_timer_probe);

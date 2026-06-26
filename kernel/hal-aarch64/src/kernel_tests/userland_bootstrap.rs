@@ -17,7 +17,7 @@ use capability::{
 use collections::{LockCell, MutexCell};
 use ipc::{
     MessageLen, Transport,
-    wire::{IpcError as WireError, Str},
+    wire::{Cap, IpcError as WireError, Str},
 };
 use kernel_tests::kernel_test;
 use kernelspace::bootstrap::BootstrapLaunch;
@@ -85,6 +85,11 @@ struct LogProbe {
 impl BootstrapService for LogProbe {
     fn log(&mut self, message: Str<{ bootstrap::LOG_MESSAGE_MAX }>) {
         self.received = message.as_str() == "rootkeeper started";
+    }
+
+    // E2E проверяет только log-путь; выдача не задействована.
+    fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
+        Err(1)
     }
 }
 
