@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod commons;
+pub mod device_windows;
 pub mod fdt_adapter;
 pub mod gic_interrupt;
 pub mod tree_ext;

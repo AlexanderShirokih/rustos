@@ -7,6 +7,7 @@
 use drivers_common::{DeviceNode, probe::ProbeContext};
 use drivers_common_aarch64::{
     ProbeContextExt, adapt_to_fdt_tree,
+    device_windows::{DeviceWindow, enumerate_device_windows},
     fdt_adapter::FdtNode,
     is_compatible, require_compatible,
     tree_ext::{CellsSize, NodeAddressExt},
@@ -55,6 +56,13 @@ fn push_prop_bytes(buf: &mut Vec<u8>, name_off: u32, val: &[u8]) {
     push_u32(buf, name_off);
     buf.extend_from_slice(val);
     align4(buf);
+}
+
+fn push_reg64(buf: &mut Vec<u8>, base: u64, size: u64) {
+    push_u32(buf, (base >> 32) as u32);
+    push_u32(buf, base as u32);
+    push_u32(buf, (size >> 32) as u32);
+    push_u32(buf, size as u32);
 }
 
 fn write_dtb(structure: &[u8], strings: &[u8]) -> Vec<u8> {
@@ -260,4 +268,106 @@ fn real_fdt_get_address_without_parent_bus() {
     let reg = ctx.get_address(0);
     assert_eq!(reg.offset, 0);
     assert_eq!(reg.size, 0);
+}
+
+/// Плоская раскладка qemu virt: устройства - прямые дети корня,
+/// `#address-cells=2`, `#size-cells=2`. Один reg-диапазон на узел.
+/// ```text
+/// / {
+///     #address-cells = <2>; #size-cells = <2>;
+///     intc@8000000   { compatible = "arm,gic-v3"; reg = <0 0x8000000 0 0x10000>; };
+///     pl011@9000000  { compatible = "arm,pl011";  reg = <0 0x9000000 0 0x1000>; };
+///     pl031@9010000  { compatible = "arm,pl031";  reg = <0 0x9010000 0 0x1000>; };
+///     memory@40000000 { device_type = "memory";   reg = <0 0x40000000 0 0x10000000>; };
+/// };
+/// ```
+fn build_flat_dtb() -> Vec<u8> {
+    let mut s = Strings::new();
+    let s_addr = s.intern("#address-cells");
+    let s_size = s.intern("#size-cells");
+    let s_compat = s.intern("compatible");
+    let s_reg = s.intern("reg");
+    let s_devtype = s.intern("device_type");
+
+    let mut st = Vec::new();
+    push_u32(&mut st, 0x1); // begin root
+    push_u32(&mut st, 0x0);
+    push_prop_u32(&mut st, s_addr, 2);
+    push_prop_u32(&mut st, s_size, 2);
+
+    let device = |st: &mut Vec<u8>, name: &[u8], compat: &[u8], base: u64, size: u64| {
+        push_u32(st, 0x1);
+        st.extend_from_slice(name);
+        align4(st);
+        push_prop_bytes(st, s_compat, compat);
+        let mut reg = Vec::new();
+        push_reg64(&mut reg, base, size);
+        push_prop_bytes(st, s_reg, &reg);
+        push_u32(st, 0x2);
+    };
+
+    device(&mut st, b"intc@8000000\0", b"arm,gic-v3\0", 0x800_0000, 0x1_0000);
+    device(&mut st, b"pl011@9000000\0", b"arm,pl011\0", 0x900_0000, 0x1000);
+    device(&mut st, b"pl031@9010000\0", b"arm,pl031\0", 0x901_0000, 0x1000);
+
+    // memory: device_type вместо compatible -> пропускается (нет compatible).
+    push_u32(&mut st, 0x1);
+    st.extend_from_slice(b"memory@40000000\0");
+    align4(&mut st);
+    push_prop_bytes(&mut st, s_devtype, b"memory\0");
+    let mut mem_reg = Vec::new();
+    push_reg64(&mut mem_reg, 0x4000_0000, 0x1000_0000);
+    push_prop_bytes(&mut st, s_reg, &mem_reg);
+    push_u32(&mut st, 0x2);
+
+    push_u32(&mut st, 0x2); // end root
+    push_u32(&mut st, 0x9); // end
+    write_dtb(&st, &s.bytes)
+}
+
+#[test]
+fn enumerate_excludes_kernel_owned_and_keeps_devices() {
+    let dtb = build_flat_dtb();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let tree = adapt_to_fdt_tree(&dt);
+    let root = tree.root().unwrap();
+
+    let windows = enumerate_device_windows(&root, &["arm,gic-v3", "arm,pl011"]);
+
+    // GIC и PL011 - kernel-owned, memory без compatible: остаётся только PL031.
+    assert_eq!(
+        windows,
+        vec![DeviceWindow {
+            base: 0x901_0000,
+            size: 0x1000
+        }]
+    );
+}
+
+#[test]
+fn enumerate_without_exclusion_lists_all_compatible_devices() {
+    let dtb = build_flat_dtb();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let tree = adapt_to_fdt_tree(&dt);
+    let root = tree.root().unwrap();
+
+    // Пустой kernel-owned список: все три устройства с compatible, в порядке FDT.
+    let windows = enumerate_device_windows(&root, &[]);
+    assert_eq!(
+        windows,
+        vec![
+            DeviceWindow {
+                base: 0x800_0000,
+                size: 0x1_0000
+            },
+            DeviceWindow {
+                base: 0x900_0000,
+                size: 0x1000
+            },
+            DeviceWindow {
+                base: 0x901_0000,
+                size: 0x1000
+            },
+        ]
+    );
 }
