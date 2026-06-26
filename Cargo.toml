@@ -35,6 +35,7 @@ members = [
     "tools/userland-image",
     "user/rootkeeper",
     "user/testrunner",
+    "user/calculator-demo",
     "xtask",
 ]
 

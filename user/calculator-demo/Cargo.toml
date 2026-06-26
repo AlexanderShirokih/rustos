@@ -1,0 +1,43 @@
+cargo-features = ["per-package-target"]
+
+[package]
+name = "calculator-demo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+forced-target = "aarch64-unknown-none"
+
+[package.metadata.userland]
+stack_size = 65536
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "demo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "calculator"
+path = "src/calculator.rs"
+test = false
+bench = false
+
+[dependencies]
+bootstrap = { workspace = true }
+ipc = { workspace = true }
+syscall = { workspace = true }
+runtime = { workspace = true }
+userland-image = { workspace = true }
+userland-loader = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true

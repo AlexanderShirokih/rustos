@@ -1,0 +1,12 @@
+version = 1
+
+[[programs]]
+package = "calculator-demo"
+bin = "demo"
+name = "demo"
+bootstrap = true
+
+[[programs]]
+package = "calculator-demo"
+bin = "calculator"
+name = "calculator"

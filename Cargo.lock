@@ -82,6 +82,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "calculator-demo"
+version = "0.1.0"
+dependencies = [
+ "bootstrap",
+ "ipc",
+ "runtime",
+ "syscall",
+ "userland-build",
+ "userland-image",
+ "userland-loader",
+]
+
+[[package]]
 name = "capability"
 version = "0.1.0"
 dependencies = [
