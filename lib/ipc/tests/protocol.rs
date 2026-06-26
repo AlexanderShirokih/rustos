@@ -262,7 +262,7 @@ fn bounded_bytes_param_round_trips() {
     assert_eq!(server.last_len, 4);
 }
 
-/// Второй протокол: проверяет Bytes-параметр и независимый namespace ordinal.
+/// Проверяет Bytes-параметр и независимый namespace ordinal.
 #[ipc::protocol(name = "Blob")]
 trait Blob {
     #[cast]
@@ -271,8 +271,7 @@ trait Blob {
 
 // --- транспортная плоскость: ring допускает только cast/event
 
-/// Ring-плоскостной протокол. Транспорт тот же `Transport`, round-trip через
-/// `MockEnd` идентичен port-протоколу.
+/// Ring-плоскостной протокол.
 #[ipc::protocol(name = "Counter", transport = "ring")]
 trait Counter {
     #[cast]
@@ -357,7 +356,7 @@ impl CalcEvents for TickHandler {
     }
 }
 
-/// Протокол с capability: проверяет, что handle едет вне тела (out-of-band).
+/// Протокол с capability: проверяет, что handle едет вне тела.
 #[ipc::protocol(name = "CapProto")]
 trait CapProto {
     #[call]
@@ -371,7 +370,7 @@ trait CapProto {
 struct CapServer;
 
 impl CapProtoService for CapServer {
-    fn echo_cap(&mut self, c: ipc::wire::Cap) -> ipc::wire::Cap {
+    fn echo_cap(&mut self, c: ipc::wire::Cap) -> impl ipc::IntoWireHandle {
         c
     }
 

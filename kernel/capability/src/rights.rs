@@ -107,8 +107,6 @@ mod tests {
             frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
         };
 
-        // Заглушка FA: rights-тесту нужен лишь access_mask региона, а исполняемой
-        // (RX) бывает только Virtual-память - её и строим.
         struct StubFrameAllocator {
             next: AtomicUsize,
         }

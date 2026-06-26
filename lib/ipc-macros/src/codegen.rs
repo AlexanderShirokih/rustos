@@ -10,7 +10,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::Ident;
 
-use crate::model::{Operation, Param, Protocol, TransportPlane, WireTy};
+use crate::model::{Operation, Param, Protocol, RetType, TransportPlane, WireTy};
 
 fn op_docs(op: &Operation) -> TokenStream {
     let docs = &op.docs;
@@ -176,14 +176,26 @@ fn decode_field_value(ty: &WireTy) -> TokenStream {
 
 /// Запись одного значения в `buf`; для Cap пишет индекс и кладёт id в `__out_handles`,
 /// иначе - обычный `WireValue::write_as_field`. Опирается на `__out_handles`/`__out_handle_count`.
-fn encode_field(value: &TokenStream, field_id: u8, ty: &WireTy, buf: &TokenStream) -> TokenStream {
+fn encode_field(
+    value: &TokenStream,
+    field_id: u8,
+    ty: &WireTy,
+    buf: &TokenStream,
+    owned: bool,
+) -> TokenStream {
     if let WireTy::Cap = ty {
+        let id_expr = if owned {
+            quote!(::ipc::IntoWireHandle::wire_id(&#value))
+        } else {
+            quote!(#value.raw().get())
+        };
+
         quote! {
             #buf.write_field(
                 #field_id,
                 &::ipc::wire::value::encode_port_index(__out_handle_count as u8),
             )?;
-            __out_handles[__out_handle_count] = #value.raw().get();
+            __out_handles[__out_handle_count] = #id_expr;
             __out_handle_count += 1;
         }
     } else {
@@ -199,7 +211,13 @@ fn encode_params(params: &[Param]) -> (TokenStream, TokenStream) {
     let has_cap = params.iter().any(|param| matches!(param.ty, WireTy::Cap));
     let writes = params.iter().map(|param| {
         let ident = &param.ident;
-        encode_field(&quote!(#ident), param.field_id, &param.ty, &quote!(__buf))
+        encode_field(
+            &quote!(#ident),
+            param.field_id,
+            &param.ty,
+            &quote!(__buf),
+            true,
+        )
     });
     let decl = handles_out_decl(has_cap);
     let handles_arg = handles_out_arg(has_cap);
@@ -211,11 +229,16 @@ fn encode_return(
     value: &TokenStream,
     ty: &WireTy,
     buf: &TokenStream,
+    owned: bool,
 ) -> (TokenStream, TokenStream) {
     let has_cap = matches!(ty, WireTy::Cap);
     let decl = handles_out_decl(has_cap);
-    let write = encode_field(value, 1u8, ty, buf);
+    let write = encode_field(value, 1u8, ty, buf, owned);
     (quote! { #decl #write }, handles_out_arg(has_cap))
+}
+
+fn is_cap_value_return(ret: &RetType) -> bool {
+    matches!(ret.ok(), WireTy::Cap) && ret.err().is_none()
 }
 
 fn handles_out_decl(has_cap: bool) -> TokenStream {
@@ -245,6 +268,42 @@ fn param_signature(params: &[Param]) -> TokenStream {
     });
     quote! {
         #(, #parts)*
+    }
+}
+
+fn param_signature_send(params: &[Param]) -> TokenStream {
+    let parts = params.iter().map(|param| {
+        let ident = &param.ident;
+        if matches!(param.ty, WireTy::Cap) {
+            quote!(#ident: impl ::ipc::IntoWireHandle)
+        } else {
+            let ty = wire_ty_tokens(&param.ty, &quote!('_));
+            quote!(#ident: #ty)
+        }
+    });
+    quote! {
+        #(, #parts)*
+    }
+}
+
+fn has_cap_params(params: &[Param]) -> bool {
+    params.iter().any(|param| matches!(param.ty, WireTy::Cap))
+}
+
+/// Отдаёт cap-параметры при успешной передаче `transferred`; иначе они роняются
+/// и `Drop` закрывает хэндл.
+fn relinquish_send(params: &[Param], transferred: &TokenStream) -> TokenStream {
+    let calls = params
+        .iter()
+        .filter(|param| matches!(param.ty, WireTy::Cap))
+        .map(|param| {
+            let ident = &param.ident;
+            quote!(::ipc::IntoWireHandle::relinquish(#ident);)
+        });
+    quote! {
+        if #transferred {
+            #(#calls)*
+        }
     }
 }
 
@@ -314,104 +373,175 @@ fn expand_client(protocol: &Protocol) -> TokenStream {
 }
 
 fn expand_client_method(protocol: &Protocol, op: &Operation) -> TokenStream {
+    match op.kind {
+        Kind::Cast => expand_client_cast(protocol, op),
+        Kind::Call => expand_client_call(protocol, op),
+        Kind::Event => TokenStream::new(),
+    }
+}
+
+fn expand_client_cast(protocol: &Protocol, op: &Operation) -> TokenStream {
     let vis = &protocol.vis;
     let method_ident = &op.ident;
     let ordinal = op.ordinal;
     let (encode, encode_handles) = encode_params(&op.params);
-    let params_sig = param_signature(&op.params);
+    let params_sig = param_signature_send(&op.params);
+    let docs = op_docs(op);
+    let body = if has_cap_params(&op.params) {
+        let relinquish = relinquish_send(&op.params, &quote!(__send.is_ok()));
+        quote! {
+            let __send: ::core::result::Result<(), ::ipc::wire::IpcError> = (|| {
+                let mut __buf = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
+                __buf.write_header(&::ipc::wire::Header::new(#ordinal, 0u32, 0u16))?;
+                #encode
+                __buf.finish()?;
+                self.transport.write_message(__buf.as_bytes(), #encode_handles)
+            })();
+            #relinquish
+            __send
+        }
+    } else {
+        quote! {
+            let mut __buf = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
+            __buf.write_header(&::ipc::wire::Header::new(#ordinal, 0u32, 0u16))?;
+            #encode
+            __buf.finish()?;
+            self.transport.write_message(__buf.as_bytes(), #encode_handles)
+        }
+    };
+    quote! {
+        #docs
+        #vis fn #method_ident(&self #params_sig) -> ::core::result::Result<(), ::ipc::wire::IpcError> {
+            #body
+        }
+    }
+}
 
-    match op.kind {
-        Kind::Cast => {
-            let docs = op_docs(op);
-            quote! {
-                #docs
-                #vis fn #method_ident(&self #params_sig) -> ::core::result::Result<(), ::ipc::wire::IpcError> {
-                    let mut __buf = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
-                    __buf.write_header(&::ipc::wire::Header::new(#ordinal, 0u32, 0u16))?;
-                    #encode
-                    __buf.finish()?;
-                    self.transport.write_message(__buf.as_bytes(), #encode_handles)
+fn expand_call_return(ret: &RetType) -> (TokenStream, TokenStream) {
+    let ok_ty = wire_ty_tokens(ret.ok(), &quote!('_));
+    if let Some(err) = ret.err() {
+        let err_ty = wire_ty_tokens(err, &quote!('_));
+        let decode_ok = decode_single_value(ret.ok(), &quote!(__body));
+        let decode_err = decode_single_value(err, &quote!(__body));
+        let ret_ty = quote! {
+            ::core::result::Result<
+                ::core::result::Result<#ok_ty, #err_ty>,
+                ::ipc::wire::IpcError,
+            >
+        };
+        let decode = quote! {
+            if __header.has_flag(::ipc::wire::FLAG_DOMAIN_ERR) {
+                let __err = #decode_err;
+                ::core::result::Result::Ok(::core::result::Result::Err(__err))
+            } else {
+                let __ok = #decode_ok;
+                ::core::result::Result::Ok(::core::result::Result::Ok(__ok))
+            }
+        };
+        (ret_ty, decode)
+    } else {
+        let decode_ok = decode_single_value(ret.ok(), &quote!(__body));
+        let ret_ty = quote!(::core::result::Result<#ok_ty, ::ipc::wire::IpcError>);
+        let decode = quote! {
+            let __ok = #decode_ok;
+            ::core::result::Result::Ok(__ok)
+        };
+        (ret_ty, decode)
+    }
+}
+
+fn expand_client_call(protocol: &Protocol, op: &Operation) -> TokenStream {
+    let vis = &protocol.vis;
+    let method_ident = &op.ident;
+    let ordinal = op.ordinal;
+    let (encode, encode_handles) = encode_params(&op.params);
+    let params_sig = param_signature_send(&op.params);
+
+    let ret = op.ret.as_ref().expect("two-way carries a return type");
+    let ret_has_cap =
+        matches!(ret.ok(), WireTy::Cap) || ret.err().is_some_and(|err| matches!(err, WireTy::Cap));
+    let in_handles_decl = if ret_has_cap {
+        quote!(let __in_handles = &__handles[..__len.handles];)
+    } else {
+        TokenStream::new()
+    };
+    let (ret_ty, decode_response) = expand_call_return(ret);
+
+    // Per-call `#[call(timeout_ns = N)]` перекрывает дефолт клиента.
+    let wait_ns = op
+        .timeout_ns
+        .map_or_else(|| quote!(self.wait_ns), |ns| quote!(#ns));
+
+    let docs = op_docs(op);
+    let body = if has_cap_params(&op.params) {
+        let relinquish = relinquish_send(&op.params, &quote!(__req.is_ok()));
+        quote! {
+            let __txid = self.alloc_txid();
+            let mut __bytes = [0u8; ::ipc::wire::MESSAGE_INLINE_MAX];
+            let mut __handles = [0u32; ::ipc::wire::MESSAGE_MAX_HANDLES];
+            // Перенос (drain) cap-параметров происходит в первом wait_readable
+            // (port_call): Ok - ядро забрало, Err - не тронуло.
+            let __req: ::core::result::Result<(), ::ipc::wire::IpcError> = (|| {
+                let mut __buf = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
+                __buf.write_header(&::ipc::wire::Header::new(#ordinal, __txid, 0u16))?;
+                #encode
+                __buf.finish()?;
+                self.transport.write_message(__buf.as_bytes(), #encode_handles)?;
+                self.transport.wait_readable(#wait_ns)
+            })();
+            #relinquish
+            __req?;
+            loop {
+                let __len = self.transport.read_message(&mut __bytes, &mut __handles)?;
+                let __frame = &__bytes[..__len.bytes];
+                let __header = ::ipc::wire::Header::decode(__frame)?;
+                if __header.has_flag(::ipc::wire::FLAG_PEER_CLOSE) {
+                    return ::core::result::Result::Err(::ipc::wire::IpcError::PeerClosed);
                 }
+                if !__header.has_flag(::ipc::wire::FLAG_RESPONSE) || __header.txid != __txid {
+                    self.transport.wait_readable(#wait_ns)?;
+                    continue;
+                }
+                let __body = &__frame[::ipc::wire::HEADER_SIZE..];
+                #in_handles_decl
+                return { #decode_response };
             }
         }
-        Kind::Call => {
-            let ret = op.ret.as_ref().expect("two-way carries a return type");
-            let ret_has_cap = matches!(ret.ok(), WireTy::Cap)
-                || ret.err().is_some_and(|err| matches!(err, WireTy::Cap));
-            let in_handles_decl = if ret_has_cap {
-                quote!(let __in_handles = &__handles[..__len.handles];)
-            } else {
-                TokenStream::new()
-            };
-            let ok_ty = wire_ty_tokens(ret.ok(), &quote!('_));
-            let (ret_ty, decode_response) = if let Some(err) = ret.err() {
-                let err_ty = wire_ty_tokens(err, &quote!('_));
-                let decode_ok = decode_single_value(ret.ok(), &quote!(__body));
-                let decode_err = decode_single_value(err, &quote!(__body));
-                let ret_ty = quote! {
-                    ::core::result::Result<
-                        ::core::result::Result<#ok_ty, #err_ty>,
-                        ::ipc::wire::IpcError,
-                    >
-                };
-                let decode = quote! {
-                    if __header.has_flag(::ipc::wire::FLAG_DOMAIN_ERR) {
-                        let __err = #decode_err;
-                        ::core::result::Result::Ok(::core::result::Result::Err(__err))
-                    } else {
-                        let __ok = #decode_ok;
-                        ::core::result::Result::Ok(::core::result::Result::Ok(__ok))
-                    }
-                };
-                (ret_ty, decode)
-            } else {
-                let decode_ok = decode_single_value(ret.ok(), &quote!(__body));
-                let ret_ty = quote!(::core::result::Result<#ok_ty, ::ipc::wire::IpcError>);
-                let decode = quote! {
-                    let __ok = #decode_ok;
-                    ::core::result::Result::Ok(__ok)
-                };
-                (ret_ty, decode)
-            };
+    } else {
+        quote! {
+            let __txid = self.alloc_txid();
+            let mut __buf = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
+            __buf.write_header(&::ipc::wire::Header::new(#ordinal, __txid, 0u16))?;
+            #encode
+            __buf.finish()?;
+            self.transport.write_message(__buf.as_bytes(), #encode_handles)?;
 
-            // Per-call `#[call(timeout_ns = N)]` перекрывает дефолт клиента.
-            let wait_ns = op
-                .timeout_ns
-                .map_or_else(|| quote!(self.wait_ns), |ns| quote!(#ns));
-
-            let docs = op_docs(op);
-            quote! {
-                #docs
-                #vis fn #method_ident(&self #params_sig) -> #ret_ty {
-                    let __txid = self.alloc_txid();
-                    let mut __buf = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
-                    __buf.write_header(&::ipc::wire::Header::new(#ordinal, __txid, 0u16))?;
-                    #encode
-                    __buf.finish()?;
-                    self.transport.write_message(__buf.as_bytes(), #encode_handles)?;
-
-                    let mut __bytes = [0u8; ::ipc::wire::MESSAGE_INLINE_MAX];
-                    let mut __handles = [0u32; ::ipc::wire::MESSAGE_MAX_HANDLES];
-                    loop {
-                        self.transport.wait_readable(#wait_ns)?;
-                        let __len = self.transport.read_message(&mut __bytes, &mut __handles)?;
-                        let __frame = &__bytes[..__len.bytes];
-                        let __header = ::ipc::wire::Header::decode(__frame)?;
-                        if __header.has_flag(::ipc::wire::FLAG_PEER_CLOSE) {
-                            return ::core::result::Result::Err(::ipc::wire::IpcError::PeerClosed);
-                        }
-                        // ответ обязан нести RESPONSE и тот же txid, иначе кадр отброшен.
-                        if !__header.has_flag(::ipc::wire::FLAG_RESPONSE) || __header.txid != __txid {
-                            continue;
-                        }
-                        let __body = &__frame[::ipc::wire::HEADER_SIZE..];
-                        #in_handles_decl
-                        return { #decode_response };
-                    }
+            let mut __bytes = [0u8; ::ipc::wire::MESSAGE_INLINE_MAX];
+            let mut __handles = [0u32; ::ipc::wire::MESSAGE_MAX_HANDLES];
+            loop {
+                self.transport.wait_readable(#wait_ns)?;
+                let __len = self.transport.read_message(&mut __bytes, &mut __handles)?;
+                let __frame = &__bytes[..__len.bytes];
+                let __header = ::ipc::wire::Header::decode(__frame)?;
+                if __header.has_flag(::ipc::wire::FLAG_PEER_CLOSE) {
+                    return ::core::result::Result::Err(::ipc::wire::IpcError::PeerClosed);
                 }
+                // ответ обязан нести RESPONSE и тот же txid, иначе кадр отброшен.
+                if !__header.has_flag(::ipc::wire::FLAG_RESPONSE) || __header.txid != __txid {
+                    continue;
+                }
+                let __body = &__frame[::ipc::wire::HEADER_SIZE..];
+                #in_handles_decl
+                return { #decode_response };
             }
         }
-        Kind::Event => TokenStream::new(),
+    };
+
+    quote! {
+        #docs
+        #vis fn #method_ident(&self #params_sig) -> #ret_ty {
+            #body
+        }
     }
 }
 
@@ -437,12 +567,14 @@ fn expand_service(protocol: &Protocol) -> TokenStream {
                 }
                 Kind::Call => {
                     let ret = op.ret.as_ref().expect("two-way carries a return type");
-                    let ok_ty = wire_ty_tokens(ret.ok(), &quote!('_));
-                    let ret_ty = if let Some(err) = ret.err() {
+                    let ret_ty = if is_cap_value_return(ret) {
+                        quote!(impl ::ipc::IntoWireHandle)
+                    } else if let Some(err) = ret.err() {
+                        let ok_ty = wire_ty_tokens(ret.ok(), &quote!('_));
                         let err_ty = wire_ty_tokens(err, &quote!('_));
                         quote!(::core::result::Result<#ok_ty, #err_ty>)
                     } else {
-                        quote!(#ok_ty)
+                        wire_ty_tokens(ret.ok(), &quote!('_))
                     };
                     let docs = op_docs(op);
                     quote! {
@@ -574,13 +706,42 @@ fn expand_dispatch_arm(op: &Operation) -> TokenStream {
                 ::core::result::Result::Ok(())
             }
         },
+        Kind::Call if is_cap_value_return(op.ret.as_ref().expect("two-way carries a return type")) => {
+            let ret = op.ret.as_ref().expect("two-way carries a return type");
+            let (success, success_handles) =
+                encode_return(&quote!(__ok), ret.ok(), &quote!(__reply), true);
+            quote! {
+                #ordinal => {
+                    #decode
+                    let __ok = srv.#method_ident(#call_args);
+                    // Cap-reply: перенос в write_message. Ok значит ядро забрало
+                    // (relinquish), Err значит не тронуло (__ok закрывается через Drop).
+                    let __sent: ::core::result::Result<(), ::ipc::wire::IpcError> = (|| {
+                        let mut __reply = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
+                        __reply.write_header(&::ipc::wire::Header::new(
+                            #ordinal,
+                            __txid,
+                            ::ipc::wire::FLAG_RESPONSE,
+                        ))?;
+                        #success
+                        __reply.finish()?;
+                        transport.write_message(__reply.as_bytes(), #success_handles)
+                    })();
+                    if __sent.is_ok() {
+                        ::ipc::IntoWireHandle::relinquish(__ok);
+                    }
+                    __sent?;
+                    ::core::result::Result::Ok(())
+                }
+            }
+        }
         Kind::Call => {
             let ret = op.ret.as_ref().expect("two-way carries a return type");
             let (success, success_handles) =
-                encode_return(&quote!(__ok), ret.ok(), &quote!(__reply));
+                encode_return(&quote!(__ok), ret.ok(), &quote!(__reply), false);
             let body = if let Some(err) = ret.err() {
                 let (encode_err, err_handles) =
-                    encode_return(&quote!(__err), err, &quote!(__reply));
+                    encode_return(&quote!(__err), err, &quote!(__reply), false);
                 quote! {
                     match srv.#method_ident(#call_args) {
                         ::core::result::Result::Ok(__ok) => {
@@ -673,19 +834,37 @@ fn expand_events(protocol: &Protocol) -> TokenStream {
         let method_ident = format_ident!("emit_{}", op.ident);
         let ordinal = op.ordinal;
         let (encode, encode_handles) = encode_params(&op.params);
-        let params_sig = param_signature(&op.params);
+        let params_sig = param_signature_send(&op.params);
         let docs = op_docs(op);
+        let body = if has_cap_params(&op.params) {
+            let relinquish = relinquish_send(&op.params, &quote!(__send.is_ok()));
+            quote! {
+                let __send: ::core::result::Result<(), ::ipc::wire::IpcError> = (|| {
+                    let mut __buf = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
+                    __buf.write_header(&::ipc::wire::Header::new(#ordinal, 0u32, 0u16))?;
+                    #encode
+                    __buf.finish()?;
+                    transport.write_message(__buf.as_bytes(), #encode_handles)
+                })();
+                #relinquish
+                __send
+            }
+        } else {
+            quote! {
+                let mut __buf = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
+                __buf.write_header(&::ipc::wire::Header::new(#ordinal, 0u32, 0u16))?;
+                #encode
+                __buf.finish()?;
+                transport.write_message(__buf.as_bytes(), #encode_handles)
+            }
+        };
         quote! {
             #docs
             #vis fn #method_ident<T: ::ipc::Transport>(
                 transport: &T
                 #params_sig
             ) -> ::core::result::Result<(), ::ipc::wire::IpcError> {
-                let mut __buf = ::ipc::wire::MessageBuf::<{ ::ipc::wire::MESSAGE_INLINE_MAX }>::new();
-                __buf.write_header(&::ipc::wire::Header::new(#ordinal, 0u32, 0u16))?;
-                #encode
-                __buf.finish()?;
-                transport.write_message(__buf.as_bytes(), #encode_handles)
+                #body
             }
         }
     });

@@ -103,9 +103,7 @@ fn spawn_bootstrap_with_log() -> BootstrapLaunch {
         Aarch64Context::USER_VA_END,
     )
     .expect("spawn_process must succeed");
-    // initial handle[0] = bootstrap-port, [1] = корневой Resource (минтинг
-    // физпамяти + бюджет), [2] = корневой IrqControl (полномочие на IRQ-линии).
-    kernel_tests::kassert_eq!(launch.info.initial_handle_ids.len(), 3);
+    kernel_tests::kassert_eq!(launch.info.initial_handle_ids.len(), 1);
 
     // Kernel-получатель: recv матчит синхронный send bootstrap-процесса.
     let table = runtime()

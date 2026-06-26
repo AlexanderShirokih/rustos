@@ -73,3 +73,20 @@ fn duplicate_is_independent() {
 
     original.close().expect("original close must succeed");
 }
+
+#[kernel_test]
+fn borrow_duplicate_is_independent() {
+    let original = mint();
+    let duplicate = original
+        .borrow()
+        .duplicate(Rights::READ | Rights::WRITE | Rights::DUPLICATE, 0)
+        .expect("borrow duplicate must succeed");
+    let original_raw = original.as_raw();
+
+    // Дубликат поверх заимствования независим: его Drop не трогает оригинал.
+    drop(duplicate);
+
+    kernel_tests::kassert_eq!(signal_set(original_raw, SIGNALED, 0, WakeCount::None), 0);
+
+    original.close().expect("original close must succeed");
+}

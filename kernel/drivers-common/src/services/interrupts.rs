@@ -26,8 +26,6 @@ pub struct IrqPriority(u8);
 impl IrqPriority {
     /// Наивысший приоритет.
     pub const HIGHEST: Self = Self(0);
-    /// Наинизший приоритет.
-    pub const LOWEST: Self = Self(255);
 
     /// Создаёт приоритет из сырого значения.
     pub const fn new(priority: u8) -> Self {
@@ -56,9 +54,6 @@ pub enum TriggerType {
 pub struct CpuMask(u8);
 
 impl CpuMask {
-    /// Запрет на все CPU.
-    pub const NONE: Self = CpuMask(0);
-
     /// Все CPU.
     pub const ALL: Self = Self(0xFF);
 
@@ -77,33 +72,18 @@ impl CpuMask {
 }
 
 pub struct IrqBound {
-    irq: Option<IrqNumber>,
     cleanup: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl IrqBound {
-    /// Создаёт RAII-объект для уже зарегистрированного IRQ.
-    pub fn new<F>(irq: IrqNumber, cleanup: F) -> Self
+    /// RAII-развязка привязанной линии: дроп исполняет `cleanup`.
+    pub fn new<F>(cleanup: F) -> Self
     where
         F: FnOnce() + Send + 'static,
     {
-        let cleanup = Box::new(cleanup);
-
         Self {
-            irq: Some(irq),
-            cleanup: Some(cleanup),
+            cleanup: Some(Box::new(cleanup)),
         }
-    }
-
-    pub fn bind(
-        handle: &dyn InterruptsService,
-        binding: IrqBinding,
-    ) -> Result<Self, IrqRegistrationError> {
-        handle.bind(binding)
-    }
-
-    pub fn irq(&self) -> Option<IrqNumber> {
-        self.irq
     }
 }
 
@@ -112,8 +92,6 @@ impl Drop for IrqBound {
         if let Some(cleanup) = self.cleanup.take() {
             cleanup();
         }
-
-        self.irq = None;
     }
 }
 
@@ -198,27 +176,20 @@ mod tests {
 
     use super::*;
 
-    struct TestIrqHandler;
-    impl IrqHandler for TestIrqHandler {
-        fn handle(&self) {}
-    }
-
     #[test]
     fn irq_bound_runs_cleanup_once_on_drop() {
         static CLEANUP_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-        let bound = IrqBound::new(IrqNumber::new(40), || {
+        let bound = IrqBound::new(|| {
             CLEANUP_CALLS.fetch_add(1, Ordering::SeqCst);
         });
 
-        assert_eq!(bound.irq(), Some(IrqNumber::new(40)));
         drop(bound);
 
         assert_eq!(CLEANUP_CALLS.load(Ordering::SeqCst), 1);
     }
 
     struct SpyInterruptsService {
-        bind_calls: AtomicUsize,
         mask_calls: AtomicUsize,
         unmask_calls: AtomicUsize,
     }
@@ -226,7 +197,6 @@ mod tests {
     impl SpyInterruptsService {
         fn new() -> Self {
             Self {
-                bind_calls: AtomicUsize::new(0),
                 mask_calls: AtomicUsize::new(0),
                 unmask_calls: AtomicUsize::new(0),
             }
@@ -238,9 +208,8 @@ mod tests {
 
         fn disable(&self) {}
 
-        fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
-            self.bind_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(IrqBound::new(binding.irq, || {}))
+        fn bind(&self, _binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
+            Ok(IrqBound::new(|| {}))
         }
 
         fn mask(&self, _irq: IrqNumber) {
@@ -252,62 +221,6 @@ mod tests {
         }
 
         fn dispatch_interrupt(&self) {}
-    }
-
-    #[test]
-    fn irq_bound_bind_delegates_to_service_bind() {
-        let service = SpyInterruptsService::new();
-        let irq = IrqNumber::new(32);
-
-        let bound = IrqBound::bind(
-            &service,
-            IrqBinding::new(
-                irq,
-                None,
-                IrqPriority::LOWEST,
-                CpuMask::ALL,
-                Box::new(TestIrqHandler),
-            ),
-        )
-        .expect("bind must succeed");
-
-        assert_eq!(service.bind_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(bound.irq(), Some(irq));
-    }
-
-    struct FailingInterruptsService;
-
-    impl InterruptsService for FailingInterruptsService {
-        fn enable(&self) {}
-
-        fn disable(&self) {}
-
-        fn bind(&self, _binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
-            Err(IrqRegistrationError::Unsupported)
-        }
-
-        fn mask(&self, _irq: IrqNumber) {}
-
-        fn unmask(&self, _irq: IrqNumber) {}
-
-        fn dispatch_interrupt(&self) {}
-    }
-
-    #[test]
-    fn irq_bound_bind_propagates_service_error() {
-        let service = FailingInterruptsService;
-        let result = IrqBound::bind(
-            &service,
-            IrqBinding::new(
-                IrqNumber::new(33),
-                None,
-                IrqPriority::LOWEST,
-                CpuMask::ALL,
-                Box::new(TestIrqHandler),
-            ),
-        );
-
-        assert!(matches!(result, Err(IrqRegistrationError::Unsupported)));
     }
 
     #[test]

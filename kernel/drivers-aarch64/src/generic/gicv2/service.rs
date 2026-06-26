@@ -71,7 +71,7 @@ impl InterruptsService for GicInterruptsService {
 
         debug!("IRQ {irq:?} bound!");
 
-        Ok(IrqBound::new(irq, cleanup))
+        Ok(IrqBound::new(cleanup))
     }
 
     fn mask(&self, irq: IrqNumber) {

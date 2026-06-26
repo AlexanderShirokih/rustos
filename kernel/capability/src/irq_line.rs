@@ -94,11 +94,6 @@ impl IrqLine {
     pub fn event_signal(&self) -> Arc<Signal> {
         self.signal.clone()
     }
-
-    /// «Сырой» номер привязанной линии.
-    pub fn irq(&self) -> u16 {
-        self.irq
-    }
 }
 
 /// Мост IRQ-обработчик -> `IrqLine`. Держит `Weak`, поэтому срабатывание в

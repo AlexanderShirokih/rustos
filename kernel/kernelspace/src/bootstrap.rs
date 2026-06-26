@@ -65,22 +65,19 @@ pub fn spawn_process(
         AccessMask::RW,
         1 << 20,
     );
-    let resource_handle = Capability::new_with_default_rights(root_resource.clone());
 
-    // Полномочие на IRQ-линии: весь SPI-диапазон выдаётся bootstrap-процессу.
+    // Корневое полномочие на IRQ-линии: весь SPI-диапазон.
     let irq_control = IrqControl::new(32, 1019);
-    let irq_control_handle = Capability::new_with_default_rights(irq_control.clone());
 
     let launch = UserProcessLaunch::new()
-        .initial_handles(vec![peer_handle, resource_handle, irq_control_handle])
+        .initial_handles(vec![peer_handle])
         .bootstrap_handle(0);
 
     let info = launcher
         .spawn_user_process_with_launch(name, &user_image, Priority::normal(), 2, launch)
         .map_err(BootstrapSpawnError::Spawn)?;
 
-    // Метеринг-ресурс bootstrap-процесса = корневой Resource. Засев до старта
-    // scheduler-а, поэтому процесс не успевает аллоцировать раньше.
+    // Корневой Resource - метеринг-ресурс bootstrap-процесса; ставится до старта scheduler.
     info.process_object.set_metering_resource(root_resource);
 
     Ok(BootstrapLaunch {

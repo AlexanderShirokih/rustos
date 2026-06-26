@@ -7,10 +7,12 @@
 extern crate std;
 
 pub mod codec;
+pub mod handle;
 pub mod schema;
 pub mod transport;
 pub mod wire;
 
 pub use codec::WireValue;
+pub use handle::IntoWireHandle;
 pub use ipc_macros::protocol;
 pub use transport::{MessageLen, Transport};

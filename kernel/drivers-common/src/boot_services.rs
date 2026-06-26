@@ -221,8 +221,8 @@ mod tests {
 
         fn disable(&self) {}
 
-        fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
-            Ok(IrqBound::new(binding.irq, || {}))
+        fn bind(&self, _binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
+            Ok(IrqBound::new(|| {}))
         }
 
         fn mask(&self, _irq: IrqNumber) {}

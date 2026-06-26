@@ -26,14 +26,6 @@ impl IrqControl {
     pub fn permits(&self, irq: u16) -> bool {
         self.first_irq <= irq && irq <= self.last_irq
     }
-
-    pub fn first_irq(&self) -> u16 {
-        self.first_irq
-    }
-
-    pub fn last_irq(&self) -> u16 {
-        self.last_irq
-    }
 }
 
 #[cfg(test)]
