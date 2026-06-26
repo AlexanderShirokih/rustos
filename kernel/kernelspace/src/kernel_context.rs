@@ -12,12 +12,19 @@ use spin::Mutex;
 
 use crate::{services::mmio::MmioServiceImpl, syscall_bridge};
 
+/// Образ userland из initrd: байты и их физбаза (4K-выровнена). Поля
+/// согласованы - контекст либо несёт образ целиком, либо не несёт.
+#[derive(Clone, Copy)]
+pub struct UserlandImage {
+    pub bytes: &'static [u8],
+    pub phys_base: PageAlignedAddress,
+}
+
 pub struct KernelContext {
     services: BootServices,
     driver_registry: Mutex<RuntimeDriverRegistry>,
     address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
-    userland_blob: Option<&'static [u8]>,
-    userland_blob_phys: Option<PageAlignedAddress>,
+    userland_image: Option<UserlandImage>,
     dtb_virt: usize,
 }
 
@@ -28,8 +35,7 @@ impl KernelContext {
         frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
         mmio_arena_base: PageAlignedVirtualAddress,
         mmio_arena_size: NonZeroUsize,
-        userland_blob: Option<&'static [u8]>,
-        userland_blob_phys: Option<PageAlignedAddress>,
+        userland_image: Option<UserlandImage>,
         dtb_virt: usize,
     ) -> KernelContext {
         // Публикуем глобальные слоты для модулей без KernelContext.
@@ -51,8 +57,7 @@ impl KernelContext {
             services,
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             address_space_factory,
-            userland_blob,
-            userland_blob_phys,
+            userland_image,
             dtb_virt,
         }
     }
@@ -62,14 +67,9 @@ impl KernelContext {
         self.address_space_factory
     }
 
-    /// Байты userland blob из initrd, если загрузчик передал initrd.
-    pub fn userland_blob(&self) -> Option<&'static [u8]> {
-        self.userland_blob
-    }
-
-    /// Физбаза userland blob из initrd, если загрузчик передал initrd.
-    pub fn userland_blob_phys(&self) -> Option<PageAlignedAddress> {
-        self.userland_blob_phys
+    /// Образ userland из initrd, если загрузчик его передал.
+    pub fn userland_image(&self) -> Option<UserlandImage> {
+        self.userland_image
     }
 
     /// Виртуальный адрес DTB в higher-half (живёт весь срок ядра).

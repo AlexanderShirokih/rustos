@@ -8,7 +8,9 @@ use drivers_common::scanner::EmbeddedDriversScanner;
 use drivers_common_aarch64::adapt_to_fdt_tree;
 use io::buffered_writer::BufferedWriter;
 use kernelspace::{
-    kernel_context::KernelContext, kmain::kmain, scheduler_bootstrap::KernelTimerSource,
+    kernel_context::{KernelContext, UserlandImage},
+    kmain::kmain,
+    scheduler_bootstrap::KernelTimerSource,
 };
 use klog::info;
 use memory::{
@@ -107,21 +109,19 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
     let address_space_factory: &'static (
                  dyn memory::memory_mapper::AddressSpaceFactory + Send + Sync
              ) = Box::leak(result.address_space_factory);
-    let (userland_blob, userland_blob_phys): (
-        Option<&'static [u8]>,
-        Option<PageAlignedAddress>,
-    ) = if initrd_size > 0 {
+
+    let userland_image = if initrd_size > 0 {
         let va = initrd_start + HIGHER_HALF_BASE;
         // SAFETY: initrd зарезервирован в MemoryLayout (RegionTag::Other), фреймы не переиспользуются.
-        let blob = unsafe { core::slice::from_raw_parts(va as *const u8, initrd_size) };
+        let bytes = unsafe { core::slice::from_raw_parts(va as *const u8, initrd_size) };
         // База initrd обязана быть 4K-выровнена: образ маппится в userspace
         // постранично. Поддерживаемые загрузчики (QEMU virt, Android boot
         // ramdisk) это гарантируют.
-        let phys =
+        let phys_base =
             PageAlignedAddress::from_usize(initrd_start).expect("initrd base is 4K-aligned");
-        (Some(blob), Some(phys))
+        Some(UserlandImage { bytes, phys_base })
     } else {
-        (None, None)
+        None
     };
 
     let mmio_arena_base = PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(KMMIO_BASE));
@@ -134,8 +134,7 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
         result.frame_allocator,
         mmio_arena_base,
         mmio_arena_size,
-        userland_blob,
-        userland_blob_phys,
+        userland_image,
         dtb_virt,
     )));
 

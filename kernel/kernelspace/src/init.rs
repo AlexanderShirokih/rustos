@@ -9,12 +9,11 @@ use alloc::sync::Arc;
 
 use capability::{Capability, CapabilityTarget, Rights, SIGNALED, install_handle, signal_wait_one};
 use klog::{info, warn};
-use memory::physical_address::PageAlignedAddress;
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
 use crate::{
     bootstrap::{run_bootstrap, spawn_process},
-    kernel_context::KernelContext,
+    kernel_context::{KernelContext, UserlandImage},
     power,
     scheduler_bootstrap::KernelTimerSource,
     syscall_bridge,
@@ -34,30 +33,28 @@ pub fn spawn_init_process<A>(
         kernel.address_space_factory(),
     ));
 
-    let blob = kernel.userland_blob();
-    let blob_phys = kernel.userland_blob_phys();
+    let image = kernel.userland_image();
     let user_va_end = A::USER_VA_END;
 
     scheduler
         .spawn(
             SpawnConfig::new("init").priority(Priority::highest()),
-            move || start_bootstrap_chain(launcher.as_ref(), blob, blob_phys, user_va_end),
+            move || start_bootstrap_chain(launcher.as_ref(), image, user_va_end),
         )
         .expect("init process spawn must succeed");
 }
 
 fn start_bootstrap_chain(
     launcher: &dyn UserProcessLauncher,
-    blob: Option<&'static [u8]>,
-    blob_phys: Option<PageAlignedAddress>,
+    image: Option<UserlandImage>,
     user_va_end: usize,
 ) -> ! {
-    let (Some(blob), Some(blob_phys)) = (blob, blob_phys) else {
+    let Some(image) = image else {
         warn!("userland blob missing; bootstrap process not started");
         power::system_off(1)
     };
 
-    let launch = match spawn_process(launcher, blob, blob_phys, user_va_end) {
+    let launch = match spawn_process(launcher, image.bytes, image.phys_base, user_va_end) {
         Ok(launch) => launch,
         Err(e) => {
             warn!("bootstrap process spawn failed: {:?}", e);

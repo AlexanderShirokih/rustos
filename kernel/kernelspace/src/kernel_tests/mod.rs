@@ -119,8 +119,8 @@ pub fn run(kernel: &mut KernelContext) -> ! {
         TEST_SCHEDULER.call_once(|| scheduler);
     });
 
-    if let Some(blob) = kernel.userland_blob() {
-        USERLAND_BLOB.call_once(|| blob);
+    if let Some(image) = kernel.userland_image() {
+        USERLAND_BLOB.call_once(|| image.bytes);
     }
 
     let writer: &'static (dyn Writer + Send + Sync) =
