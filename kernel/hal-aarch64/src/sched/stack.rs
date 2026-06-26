@@ -1,8 +1,7 @@
 use alloc::vec;
 
+use memory::PAGE_SIZE;
 use scheduler::{StackError, ThreadStack, ThreadStackAllocator};
-
-const PAGE_SIZE: usize = 4096;
 
 /// Allocator стека потока.
 ///
@@ -17,7 +16,7 @@ impl ThreadStackAllocator for Aarch64Stack {
         }
 
         let size = pages
-            .checked_mul(PAGE_SIZE)
+            .checked_mul(PAGE_SIZE.get())
             .ok_or(StackError::OutOfMemory)?;
         let bytes = vec![0u8; size].into_boxed_slice();
         ThreadStack::from_boxed_bytes(bytes)

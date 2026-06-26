@@ -6,16 +6,13 @@ use drivers_common::services::mmio::{
     CleanupCallback, MmioAddress, MmioBound, MmioMapError, MmioService,
 };
 use memory::{
-    AccessMask, MemFlags, MemoryRegion,
-    aligned::Aligned,
+    AccessMask, MemFlags, MemoryRegion, PAGE_SIZE,
     mem_flags::{AccessMode, DeviceMemoryPermission, Owners},
     memory_mapper::MemoryMapper,
     physical_address::PageAlignedAddress,
     range_allocator::RangeAllocator,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
-
-const PAGE_SIZE: usize = PageAlignedVirtualAddress::ALIGNMENT;
 
 pub type KernelMmioVaAllocator = MutexCell<RangeAllocator<()>>;
 
@@ -52,11 +49,11 @@ impl MmioService for MmioServiceImpl {
         let raw_size = NonZeroUsize::new(address.size())
             .ok_or_else(|| MmioMapError("Mmio region size must be non-zero".into()))?;
 
-        let pages = raw_size.get().div_ceil(PAGE_SIZE);
+        let pages = raw_size.get().div_ceil(PAGE_SIZE.get());
         // `pages * PAGE_SIZE` может переполниться при близком к usize::MAX
         // размере региона - тогда округление вверх некорректно; отвергаем.
         let size_bytes = pages
-            .checked_mul(PAGE_SIZE)
+            .checked_mul(PAGE_SIZE.get())
             .ok_or_else(|| MmioMapError("Mmio region size overflows when rounded up".into()))?;
         let size = NonZeroUsize::new(size_bytes).expect("pages >= 1 since raw_size is non-zero");
 
@@ -272,7 +269,11 @@ mod tests {
 
         let maps = mapper.maps.lock().unwrap();
         assert_eq!(maps.len(), 1);
-        assert_eq!(maps[0].size, PAGE_SIZE, "sub-page MMIO must round up to 4K");
+        assert_eq!(
+            maps[0].size,
+            PAGE_SIZE.get(),
+            "sub-page MMIO must round up to 4K"
+        );
         drop(maps);
 
         drop(bound);
@@ -280,7 +281,7 @@ mod tests {
         // unmap должен быть симметричен размеру install.
         let unmaps = mapper.unmaps.lock().unwrap();
         assert_eq!(unmaps.len(), 1);
-        assert_eq!(unmaps[0].1, PAGE_SIZE);
+        assert_eq!(unmaps[0].1, PAGE_SIZE.get());
     }
 
     #[test]
@@ -394,7 +395,7 @@ mod tests {
             alloc
                 .lookup(
                     PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
-                    NonZeroUsize::new(PAGE_SIZE).unwrap(),
+                    PAGE_SIZE,
                 )
                 .map(|_| ())
         });

@@ -1189,7 +1189,7 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
     let install = capability::UserImageInstall {
         segments: std::vec![capability::UserSegmentInstall {
             va_base: PageAlignedVirtualAddress::from_usize(0x4000_0000).unwrap(),
-            mapped_size: 2 * 4096,
+            mapped_size: 2 * memory::PAGE_SIZE.get(),
             region: region.clone(),
             flags: MemFlags::user_rw(),
         }],

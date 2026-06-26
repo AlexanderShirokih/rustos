@@ -554,15 +554,21 @@ mod tests {
 
     #[test]
     fn create_physical_normal_is_normal_type() {
-        let region =
-            MemoryRegion::create_physical_normal(aligned_pa(0x4000_0000), nz(0x1000), AccessMask::R);
+        let region = MemoryRegion::create_physical_normal(
+            aligned_pa(0x4000_0000),
+            nz(0x1000),
+            AccessMask::R,
+        );
         assert_eq!(region.memory_type(), MemoryType::Normal);
     }
 
     #[test]
     fn create_physical_device_stays_device_type() {
-        let region =
-            MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x1000), AccessMask::R);
+        let region = MemoryRegion::create_physical_device(
+            aligned_pa(0x4000_0000),
+            nz(0x1000),
+            AccessMask::R,
+        );
         assert_eq!(region.memory_type(), MemoryType::Device);
     }
 

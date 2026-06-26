@@ -133,11 +133,10 @@ mod tests {
             }
         }
 
-        let fa: &'static (dyn FrameAllocator + Send + Sync) = alloc::boxed::Box::leak(
-            alloc::boxed::Box::new(StubFrameAllocator {
+        let fa: &'static (dyn FrameAllocator + Send + Sync) =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(StubFrameAllocator {
                 next: AtomicUsize::new(0x1000),
-            }),
-        );
+            }));
         let region = MemoryRegion::create_virtual(fa, NonZeroUsize::new(1).unwrap(), access)
             .expect("stub frame allocator never runs out");
         CapabilityTarget::Memory(alloc::sync::Arc::new(region))

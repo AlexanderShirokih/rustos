@@ -8,13 +8,14 @@ use memory::{
     MemFlags,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
+
+const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 use process::{UserImage, UserSegment};
 use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
 use syscall::SyscallOp;
 
 use super::user_payload::{B_LOOP, Reg, movz_x, svc_op, words_to_bytes};
 
-const PAGE_SIZE: usize = 4096;
 const USER_PAYLOAD_VA: usize = 0x4000_0000;
 const USER_STACK_TOP: usize = USER_PAYLOAD_VA + 16 * PAGE_SIZE;
 const USER_STACK_SIZE: usize = PAGE_SIZE;

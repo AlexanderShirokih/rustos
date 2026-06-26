@@ -12,8 +12,7 @@ use spin::Mutex;
 
 use crate::{services::mmio::MmioServiceImpl, syscall_bridge};
 
-/// Образ userland из initrd: байты и их физбаза (4K-выровнена). Поля
-/// согласованы - контекст либо несёт образ целиком, либо не несёт.
+/// Образ userland из initrd.
 #[derive(Clone, Copy)]
 pub struct UserlandImage {
     pub bytes: &'static [u8],

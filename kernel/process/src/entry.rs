@@ -52,7 +52,7 @@ mod tests {
     use super::*;
     use crate::image::{UserImage, UserSegment};
 
-    const PAGE: usize = 4096;
+    const PAGE: usize = memory::PAGE_SIZE.get();
 
     fn aligned(addr: usize) -> PageAlignedVirtualAddress {
         PageAlignedVirtualAddress::from_usize(addr).expect("aligned addr")

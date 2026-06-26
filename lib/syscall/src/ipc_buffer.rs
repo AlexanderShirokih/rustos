@@ -93,11 +93,20 @@ mod tests {
 
     #[test]
     fn tag_roundtrip() {
-        assert_eq!(decode_tag(encode_tag(0, 0)), DecodedTag { len: 0, ncaps: 0 });
-        assert_eq!(decode_tag(encode_tag(200, 3)), DecodedTag { len: 200, ncaps: 3 });
+        assert_eq!(
+            decode_tag(encode_tag(0, 0)),
+            DecodedTag { len: 0, ncaps: 0 }
+        );
+        assert_eq!(
+            decode_tag(encode_tag(200, 3)),
+            DecodedTag { len: 200, ncaps: 3 }
+        );
         assert_eq!(
             decode_tag(encode_tag(IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS)),
-            DecodedTag { len: IPC_BUFFER_DATA_MAX, ncaps: IPC_BUFFER_MAX_CAPS }
+            DecodedTag {
+                len: IPC_BUFFER_DATA_MAX,
+                ncaps: IPC_BUFFER_MAX_CAPS
+            }
         );
     }
 

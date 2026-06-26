@@ -13,6 +13,8 @@ use memory::{
     physical_address::PageAlignedAddress,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
+
+const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 use process::{UserImage, UserSegment};
 use scheduler::{Priority, SchedulerServiceExt, UserProcessLaunch};
 use syscall::SyscallOp;
@@ -32,7 +34,6 @@ fn seed_metering(process: &Arc<ProcessObject>) {
     ));
 }
 
-const PAGE_SIZE: usize = 4096;
 /// Lower-half VA для payload - чистый user-AS, никаких пересечений.
 const USER_PAYLOAD_VA: usize = 0x4000_0000;
 const USER_STACK_TOP: usize = USER_PAYLOAD_VA + 16 * PAGE_SIZE;

@@ -98,7 +98,7 @@ mod tests {
         virtual_address::VirtualAddress,
     };
 
-    const PAGE: usize = 4096;
+    const PAGE: usize = crate::PAGE_SIZE.get();
     const ARENA: usize = 0x4000_0000;
 
     /// Mapper, фиксирующий вызовы unmap; первый unmap каждого base успешен,

@@ -8,8 +8,8 @@ use core::num::NonZeroUsize;
 use capability::{Capability, IpcError, ResourceBudgetRefund, RevocationHook, Rights};
 use collections::LockCell;
 use memory::{
-    AccessMask, MappingTag, MemoryRegion, RegionCreateError, RegionSliceError, UserVmContext,
-    WeakUserVmContext,
+    AccessMask, MappingTag, MemoryRegion, PAGE_SIZE, RegionCreateError, RegionSliceError,
+    UserVmContext, WeakUserVmContext,
     memory_mapper::{MemoryMappingError, MemoryRemappingError},
     range_allocator::{AllocateError, RangeError},
     virtual_address::PageAlignedVirtualAddress,
@@ -60,8 +60,6 @@ fn lookup_memory_grant(
     let grant = AccessMask::from_bits_truncate(handle_mask.bits() & region.access_mask().bits());
     Ok((region, grant))
 }
-
-const PAGE_SIZE: usize = 4096;
 
 // Срыв активного маппинга при отзыве авторизовавшей его капы. Держит СЛАБЫЙ
 // снимок AS получателя: сильную ссылку на сам MemoryMapping хранит
@@ -129,7 +127,7 @@ pub fn sys_memory_create_virtual(
     let size = parse_size(size_bytes)?;
     let access = parse_access_mask(access_raw)?;
     let pages = NonZeroUsize::new(size.get() / PAGE_SIZE).ok_or(SyscallError::InvalidArgument)?;
-    if pages.get() * PAGE_SIZE != size.get() {
+    if pages.get() * PAGE_SIZE.get() != size.get() {
         return Err(SyscallError::InvalidArgument);
     }
 
@@ -224,7 +222,7 @@ pub fn sys_memory_allocate(
 
     let pages_count =
         NonZeroUsize::new(size.get() / PAGE_SIZE).ok_or(SyscallError::InvalidArgument)?;
-    if pages_count.get() * PAGE_SIZE != size.get() {
+    if pages_count.get() * PAGE_SIZE.get() != size.get() {
         return Err(SyscallError::InvalidArgument);
     }
 
@@ -781,14 +779,10 @@ mod tests {
             }
         }
 
-        fn nz(v: usize) -> NonZeroUsize {
-            NonZeroUsize::new(v).unwrap()
-        }
-
         fn region() -> Arc<MemoryRegion> {
             Arc::new(MemoryRegion::create_physical_device(
                 PageAlignedAddress::from_usize(0x8000_0000).unwrap(),
-                nz(PAGE_SIZE),
+                PAGE_SIZE,
                 AccessMask::RW,
             ))
         }
@@ -801,11 +795,11 @@ mod tests {
             let mapper = Arc::new(TrackingMapper::new());
             let mut alloc = UserVmAllocator::new(
                 PageAlignedVirtualAddress::from_usize(ARENA).unwrap(),
-                VirtualAddress::new(ARENA + 16 * PAGE_SIZE),
+                VirtualAddress::new(ARENA + 16 * PAGE_SIZE.get()),
             );
             let allocated = alloc
                 .allocate(
-                    nz(PAGE_SIZE),
+                    PAGE_SIZE,
                     MappingTag {
                         flags: MemFlags::user_rw(),
                         region: region(),
@@ -826,7 +820,7 @@ mod tests {
             let mapping = Arc::new(MemoryMapping {
                 user_vm: recipient_vm.downgrade(),
                 base,
-                size: nz(PAGE_SIZE),
+                size: PAGE_SIZE,
             });
             let hook: Arc<dyn RevocationHook> = mapping.clone();
             let weak: Weak<dyn RevocationHook> = Arc::downgrade(&hook);
@@ -860,7 +854,7 @@ mod tests {
             let mapping = Arc::new(MemoryMapping {
                 user_vm: recipient_vm.downgrade(),
                 base,
-                size: nz(PAGE_SIZE),
+                size: PAGE_SIZE,
             });
             let hook: Arc<dyn RevocationHook> = mapping.clone();
             let weak: Weak<dyn RevocationHook> = Arc::downgrade(&hook);
@@ -886,7 +880,7 @@ mod tests {
             let mapping = Arc::new(MemoryMapping {
                 user_vm: recipient_vm.downgrade(),
                 base,
-                size: nz(PAGE_SIZE),
+                size: PAGE_SIZE,
             });
 
             drop(recipient_vm);

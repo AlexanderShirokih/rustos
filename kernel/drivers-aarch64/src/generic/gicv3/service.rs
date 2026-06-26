@@ -52,12 +52,12 @@ impl InterruptsService for GicV3InterruptsService {
 
         guard.set_priority(irq, priority);
         guard.set_affinity(irq, target);
-        
+
         // Триггер - до enable: переконфиг включённой линии может быть непредсказуемым.
         if let Some(trigger) = trigger {
             guard.set_config(irq, trigger);
         }
-        
+
         guard.handlers.insert(irq, Arc::from(handler));
         guard.enable(irq);
 

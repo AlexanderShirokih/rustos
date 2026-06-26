@@ -222,7 +222,11 @@ pub fn handle_close(handle: Handle) -> i64 {
 /// Семантика `badge`: заклеймить можно только незаклеймённый источник;
 /// заклеймённый наследует свой значок при `badge == 0`, а попытка
 /// переклеймить (`badge != 0` на уже заклеймённом) даёт `BadHandle`.
-pub fn handle_duplicate(handle: Handle, new_rights: u32, badge: u64) -> Result<Handle, SyscallError> {
+pub fn handle_duplicate(
+    handle: Handle,
+    new_rights: u32,
+    badge: u64,
+) -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
     // handle, new_rights (нижние 32 бита), badge (полные 64 бита); память

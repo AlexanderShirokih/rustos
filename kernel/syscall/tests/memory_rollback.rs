@@ -29,7 +29,7 @@ use memory::{
 };
 use syscall_kernel::{Origin, SyscallError, SyscallFrame, SyscallOp};
 
-const PAGE: usize = 4096;
+const PAGE: usize = memory::PAGE_SIZE.get();
 const ARENA_BASE: usize = 0x1000_0000;
 const ARENA_END: usize = 0x1100_0000;
 

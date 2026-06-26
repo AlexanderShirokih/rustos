@@ -30,7 +30,7 @@ mod tests {
     use super::*;
     use crate::image::{UserImage, UserSegment};
 
-    const PAGE: usize = 4096;
+    const PAGE: usize = memory::PAGE_SIZE.get();
     const STACK_TOP: usize = 0x1_0000_0000;
     const STACK_SIZE: usize = 4 * PAGE;
     const STACK_BASE: usize = STACK_TOP - STACK_SIZE;

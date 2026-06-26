@@ -26,6 +26,8 @@ use scheduler::{
     ThreadStackAllocator, TimerSource,
 };
 
+const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
+
 thread_local! {
     static SWITCH_COUNT: Cell<usize> = const { Cell::new(0) };
     static PREEMPTION_ENABLED: Cell<bool> = const { Cell::new(true) };
@@ -150,7 +152,7 @@ impl ThreadStackAllocator for MockStack {
             return Err(StackError::InvalidSize);
         }
 
-        let bytes = vec![0u8; pages * 4096].into_boxed_slice();
+        let bytes = vec![0u8; pages * PAGE_SIZE].into_boxed_slice();
         ThreadStack::from_boxed_bytes(bytes)
     }
 }
@@ -322,7 +324,7 @@ impl AddressSpaceFactory for MockAddressSpaceFactory {
     fn create_user(&self) -> Result<Arc<dyn MemoryMapper + Send + Sync>, AsCreateError> {
         let mut inner = self.inner.lock().unwrap();
         let root_pa = PhysicalAddress::new(inner.next_root_pa);
-        inner.next_root_pa += 4096;
+        inner.next_root_pa += PAGE_SIZE;
         inner.created += 1;
         Ok(Arc::new(MockUserMapper {
             root_pa,

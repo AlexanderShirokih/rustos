@@ -398,8 +398,9 @@ fn user_copy_err(_e: UserCopyError) -> SyscallError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use syscall::{MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, USER_IMAGE_DESC_SIZE};
+
+    use super::*;
 
     #[test]
     fn sys_process_load_image_rejects_bad_desc_len() {

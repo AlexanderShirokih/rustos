@@ -2,7 +2,7 @@
 //! VA -> init-байты + права + параметры user-стека.
 
 use memory::{
-    MemFlags,
+    MemFlags, PAGE_SIZE,
     memory_mapper::MemoryMappingError,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
@@ -29,7 +29,7 @@ pub struct UserImage<'a> {
     pub entry: VirtualAddress,
     /// Вершина user-stack (выровнена на 4К). Под
     /// `[user_stack_top - user_stack_size, user_stack_top)` маппится
-    /// `user_stack_size / 4096` страниц с правами `user_rw`.
+    /// `user_stack_size / PAGE_SIZE` страниц с правами `user_rw`.
     pub user_stack_top: VirtualAddress,
     /// Размер user-стека (кратен 4К).
     pub user_stack_size: usize,
@@ -85,11 +85,14 @@ impl UserImage<'_> {
 
     /// Проверяет инварианты образа без выполнения каких-либо аллокаций.
     pub fn validate(&self) -> Result<(), UserImageError> {
-        const FRAME_SIZE: usize = 4096;
-        if self.user_stack_size == 0 || !self.user_stack_size.is_multiple_of(FRAME_SIZE) {
+        if self.user_stack_size == 0 || !self.user_stack_size.is_multiple_of(PAGE_SIZE.get()) {
             return Err(UserImageError::MisalignedStack);
         }
-        if !self.user_stack_top.as_usize().is_multiple_of(FRAME_SIZE) {
+        if !self
+            .user_stack_top
+            .as_usize()
+            .is_multiple_of(PAGE_SIZE.get())
+        {
             return Err(UserImageError::MisalignedStack);
         }
         let stack_base = self.user_stack_base()?;
@@ -97,10 +100,10 @@ impl UserImage<'_> {
 
         let mut found_entry_in_exec = false;
         for (i, seg) in self.segments.iter().enumerate() {
-            if seg.mapped_size == 0 || !seg.mapped_size.is_multiple_of(FRAME_SIZE) {
+            if seg.mapped_size == 0 || !seg.mapped_size.is_multiple_of(PAGE_SIZE.get()) {
                 return Err(UserImageError::MisalignedSegment);
             }
-            if !seg.va_base.as_usize().is_multiple_of(FRAME_SIZE) {
+            if !seg.va_base.as_usize().is_multiple_of(PAGE_SIZE.get()) {
                 return Err(UserImageError::MisalignedSegment);
             }
             if seg.init_bytes.len() > seg.mapped_size {
@@ -152,7 +155,7 @@ fn segment_is_executable(flags: MemFlags) -> bool {
 mod tests {
     use super::*;
 
-    const PAGE: usize = 4096;
+    const PAGE: usize = PAGE_SIZE.get();
 
     fn aligned(addr: usize) -> PageAlignedVirtualAddress {
         PageAlignedVirtualAddress::from_usize(addr).expect("aligned addr in test")

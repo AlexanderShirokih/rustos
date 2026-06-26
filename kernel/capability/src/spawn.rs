@@ -2,7 +2,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 use collections::MutexCell;
 use memory::{
-    MemFlags, MemoryRegion,
+    MemFlags, MemoryRegion, PAGE_SIZE,
     memory_mapper::MemoryMappingError,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
@@ -45,13 +45,16 @@ pub struct UserImageInstall {
 impl UserImageInstall {
     /// Проверяет структурную геометрию образа.
     pub fn validate_geometry(&self) -> Result<(), LoadImageError> {
-        const FRAME_SIZE: usize = 4096;
         use LoadImageError::{InvalidGeometry, UserVmRangeOverflow};
 
-        if self.user_stack_size == 0 || !self.user_stack_size.is_multiple_of(FRAME_SIZE) {
+        if self.user_stack_size == 0 || !self.user_stack_size.is_multiple_of(PAGE_SIZE.get()) {
             return Err(InvalidGeometry);
         }
-        if !self.user_stack_top.as_usize().is_multiple_of(FRAME_SIZE) {
+        if !self
+            .user_stack_top
+            .as_usize()
+            .is_multiple_of(PAGE_SIZE.get())
+        {
             return Err(InvalidGeometry);
         }
         let stack_base = self
@@ -67,7 +70,7 @@ impl UserImageInstall {
             .ok_or(UserVmRangeOverflow)?;
 
         for (i, seg) in self.segments.iter().enumerate() {
-            if seg.mapped_size == 0 || !seg.mapped_size.is_multiple_of(FRAME_SIZE) {
+            if seg.mapped_size == 0 || !seg.mapped_size.is_multiple_of(PAGE_SIZE.get()) {
                 return Err(InvalidGeometry);
             }
             let seg_start = seg.va_base.as_usize();

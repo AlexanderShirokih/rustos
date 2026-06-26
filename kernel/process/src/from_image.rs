@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use memory::{
-    MemFlags,
+    MemFlags, PAGE_SIZE,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use userland::{
@@ -11,8 +11,6 @@ use userland::{
 };
 
 use crate::image::{UserImage, UserSegment};
-
-const FRAME_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserImageFromModelError {
@@ -87,11 +85,11 @@ fn permissions_to_mem_flags(permissions: SegmentPermissions) -> MemFlags {
 }
 
 fn round_up_to_frame(value: usize) -> Option<usize> {
-    let rem = value % FRAME_SIZE;
+    let rem = value % PAGE_SIZE;
     if rem == 0 {
         return Some(value);
     }
-    value.checked_add(FRAME_SIZE - rem)
+    value.checked_add(PAGE_SIZE.get() - rem)
 }
 
 #[cfg(test)]
@@ -101,7 +99,7 @@ mod tests {
 
     use super::*;
 
-    const PAGE: usize = FRAME_SIZE;
+    const PAGE: usize = PAGE_SIZE.get();
     const TEST_USER_VA_END: usize = 0x1_0000_0000;
 
     fn user_perms(flags: MemFlags) -> (bool, bool, bool) {

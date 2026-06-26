@@ -43,7 +43,7 @@ impl IrqPriority {
 pub enum TriggerType {
     /// Триггер по фронту
     Edge,
-    
+
     /// Триггер по уровню
     Level,
 }
@@ -118,11 +118,11 @@ pub trait IrqHandler: Send + Sync {
 
 pub struct IrqBinding {
     pub irq: IrqNumber,
-    
+
     /// `Some` - сконфигурировать ICFGR линии под этот триггер (до enable);
     /// `None` - не трогать ICFGR (линия наследует boot-конфигурацию).
     pub trigger: Option<TriggerType>,
-    
+
     pub priority: IrqPriority,
     pub target: CpuMask,
     pub handler: Box<dyn IrqHandler>,

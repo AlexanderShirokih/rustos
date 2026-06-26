@@ -8,7 +8,7 @@ use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use scheduler::AddressSpace;
 
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 
 /// Цикл `new_user + drop ×N` (без map) рассыпает дырки в physical-bitmap'е;
 /// последующий `alloc_zeroed(4K, 4K)` не должен возвращать null.

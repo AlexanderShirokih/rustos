@@ -29,11 +29,11 @@ use memory::{
     physical_address::PageAlignedAddress,
     virtual_address::PageAlignedVirtualAddress,
 };
+
+const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 use scheduler::{AddressSpace, ArchContext};
 
 use crate::{consts::HIGHER_HALF_BASE, sched::Aarch64Context};
-
-const PAGE_SIZE: usize = 4096;
 
 /// VA в нижней половине, не пересекающаяся с возможными identity-маппингами
 /// тестов userspace_entry.

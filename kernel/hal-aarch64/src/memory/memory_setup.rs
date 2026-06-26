@@ -361,11 +361,9 @@ impl MemorySetup<Enabled> {
             )
         });
 
-        let kheap_base_va = PageAlignedVirtualAddress::from_usize(KHEAP_BASE)
-            .expect("KHEAP_BASE must be 4K-aligned");
         let allocator = HeapAllocator::new(
             kernel_mapper as &'static (dyn MemoryMapper + Send + Sync),
-            HeapArena::new(kheap_base_va, KHEAP_MAX_SIZE),
+            HeapArena::new(KHEAP_BASE, KHEAP_MAX_SIZE),
         );
         GLOBAL_ALLOCATOR.set_heap(allocator);
 

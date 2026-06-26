@@ -22,7 +22,7 @@ use crate::common::{
 };
 
 const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(8, 16);
-const PAGE: usize = 4096;
+const PAGE: usize = memory::PAGE_SIZE.get();
 const USER_SEGMENT_VA: usize = 0x4000_0000;
 const USER_STACK_TOP_VA: usize = 0x1_0000_0000;
 const USER_STACK_SIZE: usize = 4 * PAGE;

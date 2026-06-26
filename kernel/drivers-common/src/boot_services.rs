@@ -294,9 +294,8 @@ mod tests {
     #[test]
     fn missing_service_reports_concrete_kind() {
         let services = BootServices::new();
-        let err = match services.require_timer() {
-            Ok(_) => panic!("timer service must be missing"),
-            Err(err) => err,
+        let Err(err) = services.require_timer() else {
+            panic!("timer service must be missing")
         };
         assert_eq!(err, BootServicesError::Missing(ServiceKind::Timer));
     }

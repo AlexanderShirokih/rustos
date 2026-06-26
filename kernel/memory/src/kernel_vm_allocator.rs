@@ -10,14 +10,13 @@
 use core::{alloc::Layout, mem::size_of, ptr::NonNull};
 
 use crate::{
-    MemFlags, align::align_up, memory_mapper::MemoryMapper,
+    MemFlags, PAGE_SIZE, align::align_up, memory_mapper::MemoryMapper,
     virtual_address::PageAlignedVirtualAddress,
 };
 
 const MIN_ALLOC_SIZE: usize = 16;
 const ALLOC_ALIGN: usize = 8;
 const HEADER_PTR_SIZE: usize = size_of::<*mut FreeBlock>();
-const PAGE_SIZE: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub enum AllocationError {
@@ -112,8 +111,8 @@ impl HeapAllocator {
     /// VA-слот арены. Атомарность leaf-страниц при partial-OOM
     /// обеспечивает `MemoryMapper::map`.
     fn expand(&mut self, min_size: usize) -> Result<(), AllocationError> {
-        let pages_needed = align_up(min_size, PAGE_SIZE) / PAGE_SIZE;
-        let bytes = pages_needed * PAGE_SIZE;
+        let pages_needed = align_up(min_size, PAGE_SIZE.get()) / PAGE_SIZE;
+        let bytes = pages_needed * PAGE_SIZE.get();
 
         let arena_end = self
             .arena
@@ -283,7 +282,7 @@ impl HeapAllocator {
         }
 
         let needed_size = alloc_size + size_of::<FreeBlock>();
-        let expand_size = needed_size.max(PAGE_SIZE);
+        let expand_size = needed_size.max(PAGE_SIZE.get());
 
         self.expand(expand_size)?;
 

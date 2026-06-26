@@ -16,7 +16,7 @@ use ipc::{
     wire::{Cap, IpcError as WireError, Str},
 };
 use klog::{info, warn};
-use memory::{AccessMask, MemoryRegion, physical_address::PageAlignedAddress};
+use memory::{AccessMask, MemoryRegion, page_round_up, physical_address::PageAlignedAddress};
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
 use syscall::{IpcBuffer, decode_tag, encode_tag};
@@ -24,6 +24,10 @@ use userland::EntryView;
 use userland_image::{ImageDecodeError, decode};
 
 use crate::user_process::{SpawnUserError, UserProcessLauncher};
+
+/// Диапазон корневого Resource: всё адресное пространство, выровненное вниз
+/// до страницы.
+const ROOT_RESOURCE_SPAN: NonZeroUsize = NonZeroUsize::new(usize::MAX & !0xFFF).unwrap();
 
 /// Запущенный bootstrap-процесс.
 pub struct BootstrapLaunch {
@@ -40,9 +44,6 @@ pub enum BootstrapSpawnError {
     Model(UserImageFromModelError),
     Spawn(SpawnUserError),
 }
-
-/// Размер страницы для округления региона userland-образа.
-const PAGE_SIZE: usize = 4096;
 
 /// Разбирает `blob` и спавнит процесс. `image_phys` - физбаза `blob` в initrd
 /// (4K-выровнена), поверх которой выдаётся read-only регион образа.
@@ -67,7 +68,7 @@ pub fn spawn_process(
     // Корневой Resource: полномочие на минтинг физпамяти.
     let root_resource = Resource::new(
         PageAlignedAddress::ZERO,
-        NonZeroUsize::new(usize::MAX & !0xFFF).expect("non-zero resource span"),
+        ROOT_RESOURCE_SPAN,
         AccessMask::RW,
         1 << 20,
     );
@@ -77,8 +78,8 @@ pub fn spawn_process(
 
     // Read-only Normal-регион поверх байт образа; размер округлён до страницы
     // для маппинга. blob непуст (decode прошёл), поэтому размер ненулевой.
-    let image_size = NonZeroUsize::new(blob.len().next_multiple_of(PAGE_SIZE))
-        .expect("userland image is non-empty");
+    let blob_len = NonZeroUsize::new(blob.len()).expect("decoded image is non-empty");
+    let image_size = page_round_up(blob_len).expect("image size fits address space");
     let image_region = Arc::new(MemoryRegion::create_physical_normal(
         image_phys,
         image_size,

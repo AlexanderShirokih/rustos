@@ -706,7 +706,9 @@ fn expand_dispatch_arm(op: &Operation) -> TokenStream {
                 ::core::result::Result::Ok(())
             }
         },
-        Kind::Call if is_cap_value_return(op.ret.as_ref().expect("two-way carries a return type")) => {
+        Kind::Call
+            if is_cap_value_return(op.ret.as_ref().expect("two-way carries a return type")) =>
+        {
             let ret = op.ret.as_ref().expect("two-way carries a return type");
             let (success, success_handles) =
                 encode_return(&quote!(__ok), ret.ok(), &quote!(__reply), true);

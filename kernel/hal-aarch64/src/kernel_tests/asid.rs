@@ -26,6 +26,8 @@ use memory::{
     physical_address::PageAlignedAddress,
     virtual_address::PageAlignedVirtualAddress,
 };
+
+const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 use scheduler::{AddressSpace, ArchContext};
 
 use crate::{
@@ -46,7 +48,6 @@ fn downcast_user_mapper(mapper: &(dyn MemoryMapper + Send + Sync)) -> &UserAarch
         .expect("user-AS mapper must be Aarch64MemoryMapper")
 }
 
-const PAGE_SIZE: usize = 4096;
 const PROBE_VA: usize = 0x6000_0000;
 
 fn user_rw_flags() -> MemFlags {

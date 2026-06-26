@@ -19,7 +19,7 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 
 struct MockKernelMapper {
     arena_base: usize,

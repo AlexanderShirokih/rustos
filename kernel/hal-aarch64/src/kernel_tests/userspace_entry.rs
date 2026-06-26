@@ -36,6 +36,8 @@ use memory::{
     physical_address::PageAlignedAddress,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
+
+const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 use scheduler::{
     AddressSpace, ArchContext, Priority, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig,
     UserBootstrapArg, UserEntry,
@@ -58,7 +60,6 @@ fn downcast_user_mapper(mapper: &(dyn MemoryMapper + Send + Sync)) -> &UserAarch
         .expect("user-AS mapper must be Aarch64MemoryMapper")
 }
 
-const PAGE_SIZE: usize = 4096;
 const KERNEL_STACK_SIZE: usize = 8 * 1024;
 
 /// Lower-half VA для payload в user-AS. Любая страница ниже kernel image -

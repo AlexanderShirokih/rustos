@@ -167,7 +167,7 @@ impl DeviceNode for StatusNode {
 }
 
 fn record_id_probe(context: &mut ProbeContext<StatusNode>) -> ProbeResult {
-    let id = context.node().id as u32;
+    let id = context.node().id;
     PROBED_IDS.with(|set| set.set(set.get() | (1 << id)));
     Err(ProbeError::Unsupported("count only"))
 }
@@ -211,7 +211,7 @@ fn scanner_skips_disabled_nodes_and_their_subtrees() {
         .scan_and_probe(root, &drivers)
         .expect("tree well within depth limit");
 
-    let probed_mask = PROBED_IDS.with(|set| set.get());
+    let probed_mask = PROBED_IDS.with(std::cell::Cell::get);
     let expect = (1u32 << 0) | (1u32 << 1) | (1u32 << 4);
     assert_eq!(
         probed_mask, expect,

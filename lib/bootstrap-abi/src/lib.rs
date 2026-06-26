@@ -33,8 +33,10 @@ mod tests {
         thread,
     };
 
-    use ipc::Transport;
-    use ipc::wire::{Cap, Str};
+    use ipc::{
+        Transport,
+        wire::{Cap, Str},
+    };
     use ipc_test::MockEnd;
 
     use super::{BootstrapClient, BootstrapService, LOG_MESSAGE_MAX, dispatch_bootstrap};
@@ -81,7 +83,10 @@ mod tests {
                 dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
             });
             let cap = client.acquire_irq_control().expect("call ok");
-            assert_eq!(cap, Ok(Cap::from_raw(NonZeroU32::new(0x77).expect("non-zero"))));
+            assert_eq!(
+                cap,
+                Ok(Cap::from_raw(NonZeroU32::new(0x77).expect("non-zero")))
+            );
         });
     }
 
@@ -96,7 +101,10 @@ mod tests {
                 dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
             });
             let cap = client.acquire_userland_image().expect("call ok");
-            assert_eq!(cap, Ok(Cap::from_raw(NonZeroU32::new(0x88).expect("non-zero"))));
+            assert_eq!(
+                cap,
+                Ok(Cap::from_raw(NonZeroU32::new(0x88).expect("non-zero")))
+            );
         });
     }
 }

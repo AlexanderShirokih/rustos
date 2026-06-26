@@ -23,7 +23,7 @@ fn metering_handle() -> Option<Handle> {
     if cached != 0 {
         return Handle::new(cached);
     }
-    
+
     let raw = process_resource_self().ok()?.raw();
     match METERING_HANDLE.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => Handle::new(raw),

@@ -6,7 +6,7 @@ use core::{marker::PhantomData, num::NonZeroUsize};
 use capability::{HandleTable, ProcessObject, ThreadObject};
 use collections::{LockCell, MutexCell};
 use memory::{
-    AccessMask, MappingTag, MemFlags, MemoryRegion,
+    AccessMask, MappingTag, MemFlags, MemoryRegion, PAGE_SIZE,
     frame_allocator::FrameAllocator,
     memory_mapper::{AddressSpaceFactory, AddressSpaceHandle},
     user_vm_allocator::UserVmAllocator,
@@ -26,8 +26,6 @@ use crate::{
     PreparedUserProcess, PreparedUserProcessError, Priority, ProcessId, SpawnAddressSpace,
     SpawnConfig, SpawnError, ThreadId, UserBootstrapArg, UserProcessLaunchInfo,
 };
-
-const FRAME_SIZE: usize = 4096;
 
 const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
 /// Длина кванта по умолчанию (нс). Экспонируется для тестов.
@@ -1054,7 +1052,7 @@ where
         let flags = MemFlags::user_rw();
         let grant = region.access_mask();
 
-        let size = NonZeroUsize::new(FRAME_SIZE).expect("FRAME_SIZE is non-zero");
+        let size = PAGE_SIZE;
         let allocated = user_vm
             .with_lock(|alloc| {
                 alloc.allocate(
@@ -1106,13 +1104,13 @@ where
         if let Some((mapper, user_vm)) = resources {
             let base = PageAlignedVirtualAddress::from_usize(va.as_usize())
                 .expect("ipc-buffer VA выровнен по построению");
-            let size = NonZeroUsize::new(FRAME_SIZE).expect("FRAME_SIZE is non-zero");
+            let size = PAGE_SIZE;
             // Фрейм возвращается аллокатору только если PTE снят: живой PTE
             // после "освобождения" фрейма = UAF-поверхность. NotMapped штатен
             // (идемпотентный повторный вызов / уже снятый AS); любая другая
             // ошибка unmap (block-split, misalign) - баг построения.
             let unmapped = match mapper {
-                Some(mapper) => match mapper.unmap(base, FRAME_SIZE) {
+                Some(mapper) => match mapper.unmap(base, PAGE_SIZE.get()) {
                     Ok(()) | Err(memory::memory_mapper::MemoryUnmappingError::NotMapped) => true,
                     Err(_e) => {
                         debug_assert!(false, "unexpected unmap error for ipc-buffer");
@@ -1249,7 +1247,7 @@ where
                 memory::memory_mapper::MemoryMappingError::VirtualMappingError,
             ),
         )?;
-        let stack_pages = install.user_stack_size / FRAME_SIZE;
+        let stack_pages = install.user_stack_size / PAGE_SIZE;
         if let Err(e) = mapper.map(stack_base, stack_pages, &[], memory::MemFlags::user_rw()) {
             for (va, size) in installed.iter().rev() {
                 let _ = mapper.unmap(*va, *size);

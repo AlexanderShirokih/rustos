@@ -1,7 +1,6 @@
 //! Post-MMU фаза загрузки: инициализация драйверов, подсистем и передача управления kmain.
 
 use alloc::boxed::Box;
-use core::num::NonZeroUsize;
 
 use drivers_aarch64::drivers;
 use drivers_common::scanner::EmbeddedDriversScanner;
@@ -112,11 +111,8 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
 
     let userland_image = if initrd_size > 0 {
         let va = initrd_start + HIGHER_HALF_BASE;
-        // SAFETY: initrd зарезервирован в MemoryLayout (RegionTag::Other), фреймы не переиспользуются.
+        // SAFETY: initrd зарезервирован, фреймы не переиспользуются.
         let bytes = unsafe { core::slice::from_raw_parts(va as *const u8, initrd_size) };
-        // База initrd обязана быть 4K-выровнена: образ маппится в userspace
-        // постранично. Поддерживаемые загрузчики (QEMU virt, Android boot
-        // ramdisk) это гарантируют.
         let phys_base =
             PageAlignedAddress::from_usize(initrd_start).expect("initrd base is 4K-aligned");
         Some(UserlandImage { bytes, phys_base })
@@ -124,16 +120,12 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
         None
     };
 
-    let mmio_arena_base = PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(KMMIO_BASE));
-    let mmio_arena_size =
-        NonZeroUsize::new(KMMIO_MAX_SIZE).expect("KMMIO_MAX_SIZE must be non-zero");
-
     let kernel = Box::leak(Box::new(KernelContext::new(
         memory_mapper,
         address_space_factory,
         result.frame_allocator,
-        mmio_arena_base,
-        mmio_arena_size,
+        KMMIO_BASE,
+        KMMIO_MAX_SIZE,
         userland_image,
         dtb_virt,
     )));

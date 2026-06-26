@@ -14,7 +14,7 @@ mod spawn_abi;
 mod syscallop;
 mod timeout;
 
-pub use error::{SyscallError, SYSCALL_RETURN_TIMEOUT};
+pub use error::{SYSCALL_RETURN_TIMEOUT, SyscallError};
 pub use flags::{InvalidUserMemFlags, UserMemFlags};
 pub use handle::{Handle, RawHandle, WaitItem};
 pub use ipc_buffer::{
@@ -22,7 +22,7 @@ pub use ipc_buffer::{
 };
 pub use memory::MemoryAccess;
 pub use rights::Rights;
-pub use signal::{WakeCount, SIGNALED};
+pub use signal::{SIGNALED, WakeCount};
 pub use spawn_abi::{
     MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, USER_IMAGE_DESC_SIZE,
     USER_SEGMENT_SIZE, UserImageDescAbi, UserSegmentAbi, decode_image_desc, decode_segment,

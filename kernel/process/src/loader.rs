@@ -1,11 +1,9 @@
 //! Загрузка [`UserImage`] в адресное пространство user-AS через
 //! [`MemoryMapper`].
 
-use memory::{MemFlags, memory_mapper::MemoryMapper};
+use memory::{MemFlags, PAGE_SIZE, memory_mapper::MemoryMapper};
 
 use crate::image::{UserImage, UserImageError};
-
-const FRAME_SIZE: usize = 4096;
 
 /// Маппит все сегменты и user-стек `image` в `mapper` (аллокацию фреймов и
 /// копирование `init_bytes` делает сам mapper). На ошибке любого шага уже
@@ -19,7 +17,7 @@ pub fn load_user_image(
     for seg in image.segments {
         mapper.map(
             seg.va_base,
-            seg.mapped_size / FRAME_SIZE,
+            seg.mapped_size / PAGE_SIZE,
             seg.init_bytes,
             seg.perms,
         )?;
@@ -28,7 +26,7 @@ pub fn load_user_image(
     let stack_base = image.user_stack_base()?;
     mapper.map(
         stack_base,
-        image.user_stack_size / FRAME_SIZE,
+        image.user_stack_size / PAGE_SIZE,
         &[],
         MemFlags::user_rw(),
     )?;
@@ -52,7 +50,7 @@ mod tests {
     use super::*;
     use crate::image::UserSegment;
 
-    const PAGE: usize = FRAME_SIZE;
+    const PAGE: usize = PAGE_SIZE.get();
 
     fn aligned(addr: usize) -> PageAlignedVirtualAddress {
         PageAlignedVirtualAddress::from_usize(addr).expect("aligned addr in test")
