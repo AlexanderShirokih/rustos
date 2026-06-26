@@ -17,17 +17,16 @@ use memory::{
     memory_mapper::{MemoryMappingError, UserCopyError},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
-use syscall::{SyscallError, UserMemFlags};
+use syscall::{
+    MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, SyscallError,
+    USER_IMAGE_DESC_SIZE, USER_SEGMENT_SIZE, UserMemFlags, decode_image_desc, decode_segment,
+};
 
 use super::{
     bridge::parse_handle_id,
     error::{map_ipc_error, map_spawn_error},
     flags::to_mem_flags,
     runtime::runtime as syscall_runtime,
-    spawn_abi::{
-        MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, USER_IMAGE_DESC_SIZE,
-        USER_SEGMENT_SIZE, decode_image_desc, decode_segment,
-    },
 };
 
 /// Максимальная длина имени процесса, передаваемая через user-память.
@@ -400,7 +399,7 @@ fn user_copy_err(_e: UserCopyError) -> SyscallError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spawn_abi::{MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, USER_IMAGE_DESC_SIZE};
+    use syscall::{MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, USER_IMAGE_DESC_SIZE};
 
     #[test]
     fn sys_process_load_image_rejects_bad_desc_len() {

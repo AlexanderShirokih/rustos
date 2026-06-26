@@ -86,6 +86,31 @@ pub fn decode_segment(bytes: &[u8]) -> Option<UserSegmentAbi> {
     })
 }
 
+/// Кодирует `UserImageDescAbi` в ровно [`USER_IMAGE_DESC_SIZE`] байт.
+pub fn encode_image_desc(desc: &UserImageDescAbi) -> [u8; USER_IMAGE_DESC_SIZE] {
+    let mut bytes = [0u8; USER_IMAGE_DESC_SIZE];
+    bytes[0..4].copy_from_slice(&desc.version.to_le_bytes());
+    bytes[4..8].copy_from_slice(&desc.segment_count.to_le_bytes());
+    bytes[8..16].copy_from_slice(&desc.segments_va.to_le_bytes());
+    bytes[16..24].copy_from_slice(&desc.entry_va.to_le_bytes());
+    bytes[24..32].copy_from_slice(&desc.user_stack_top.to_le_bytes());
+    bytes[32..40].copy_from_slice(&desc.user_stack_size.to_le_bytes());
+    bytes[40..48].copy_from_slice(&desc.user_vm_base.to_le_bytes());
+    bytes[48..56].copy_from_slice(&desc.user_vm_size.to_le_bytes());
+    bytes
+}
+
+/// Кодирует `UserSegmentAbi` в ровно [`USER_SEGMENT_SIZE`] байт.
+pub fn encode_segment(seg: &UserSegmentAbi) -> [u8; USER_SEGMENT_SIZE] {
+    let mut bytes = [0u8; USER_SEGMENT_SIZE];
+    bytes[0..4].copy_from_slice(&seg.region_handle.to_le_bytes());
+    bytes[4..8].copy_from_slice(&seg.flags.to_le_bytes());
+    bytes[8..16].copy_from_slice(&seg.va_base.to_le_bytes());
+    bytes[16..24].copy_from_slice(&seg.mapped_size.to_le_bytes());
+    bytes[24..32].copy_from_slice(&seg.reserved.to_le_bytes());
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +172,34 @@ mod tests {
     fn decode_segment_rejects_short_buffer() {
         let bytes = [0u8; 8];
         assert!(decode_segment(&bytes).is_none());
+    }
+
+    #[test]
+    fn encode_image_desc_round_trip() {
+        let desc = UserImageDescAbi {
+            version: 1,
+            segment_count: 7,
+            segments_va: 0x1111_2222_3333_4444,
+            entry_va: 0x5555_6666_7777_8888,
+            user_stack_top: 0x9999_aaaa_bbbb_cccc,
+            user_stack_size: 0x0001_0002_0003_0004,
+            user_vm_base: 0xdddd_eeee_ffff_0000,
+            user_vm_size: 0x0a0b_0c0d_0e0f_1011,
+        };
+        let bytes = encode_image_desc(&desc);
+        assert_eq!(decode_image_desc(&bytes), Some(desc));
+    }
+
+    #[test]
+    fn encode_segment_round_trip() {
+        let seg = UserSegmentAbi {
+            region_handle: 0xdead_beef,
+            flags: 1,
+            va_base: 0x1234_5678_9abc_def0,
+            mapped_size: 0x0fed_cba9_8765_4321,
+            reserved: 0xa5a5_5a5a_c3c3_3c3c,
+        };
+        let bytes = encode_segment(&seg);
+        assert_eq!(decode_segment(&bytes), Some(seg));
     }
 }

@@ -10,6 +10,7 @@ mod ipc_buffer;
 mod memory;
 mod rights;
 mod signal;
+mod spawn_abi;
 mod syscallop;
 mod timeout;
 
@@ -22,5 +23,10 @@ pub use ipc_buffer::{
 pub use memory::MemoryAccess;
 pub use rights::Rights;
 pub use signal::{WakeCount, SIGNALED};
+pub use spawn_abi::{
+    MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, USER_IMAGE_DESC_SIZE,
+    USER_SEGMENT_SIZE, UserImageDescAbi, UserSegmentAbi, decode_image_desc, decode_segment,
+    encode_image_desc, encode_segment,
+};
 pub use syscallop::SyscallOp;
 pub use timeout::{PORT_TIMEOUT_INFINITE, PORT_TIMEOUT_POLL, Timeout};
