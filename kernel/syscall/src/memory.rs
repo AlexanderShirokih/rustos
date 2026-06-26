@@ -11,9 +11,9 @@ use capability::{
 };
 use collections::LockCell;
 use memory::{
-    AccessMask, MappingTag, MemoryRegion, RegionCreateError, UserVmContext, WeakUserVmContext,
+    AccessMask, MappingTag, MemoryRegion, RegionCreateError, RegionSliceError, UserVmContext,
+    WeakUserVmContext,
     memory_mapper::{MemoryMappingError, MemoryRemappingError},
-    physical_address::PageAlignedAddress,
     range_allocator::{AllocateError, RangeError},
     virtual_address::PageAlignedVirtualAddress,
 };
@@ -164,42 +164,37 @@ pub fn sys_memory_create_virtual(
     Ok(u64::from(id.raw().get()))
 }
 
-/// `memory_create_physical(resource_handle, pa, size_bytes, access_mask) -> region_handle`
+/// `memory_slice(region_handle, offset, size_bytes, access_mask) -> region_handle`
 ///
-/// PA должен быть page-aligned и лежать в пределах ресурса; маска доступа не
-/// превышает маску ресурса. Бюджет (div_ceil по страницам) возвращается при дропе.
-pub fn sys_memory_create_physical(
-    resource_h: u64,
-    pa_raw: u64,
+/// Деривация узкого под-региона `[offset, offset+size)`. Требует
+/// `Rights::DUPLICATE` на исходном регионе; запрошенный доступ не шире гранта
+/// (права хендла, суженные access-маской региона). Нарезка ничего не
+/// аллоцирует - бюджет не списывается, обязательства возврата под-регион не несёт.
+pub fn sys_memory_slice(
+    region_h: u64,
+    offset_raw: u64,
     size_bytes: u64,
     access_raw: u64,
 ) -> Result<u64, SyscallError> {
-    let resource_id = parse_handle_id(resource_h)?;
+    let region_id = parse_handle_id(region_h)?;
+    let offset = usize::try_from(offset_raw).map_err(|_| SyscallError::InvalidArgument)?;
     let size = parse_size(size_bytes)?;
     let access = parse_access_mask(access_raw)?;
-    let pa_usize = usize::try_from(pa_raw).map_err(|_| SyscallError::InvalidArgument)?;
-    let pa = PageAlignedAddress::from_usize(pa_usize).ok_or(SyscallError::InvalidArgument)?;
+
+    let (region, grant) = lookup_memory_grant(region_id, Rights::DUPLICATE)?;
+    if !grant.allows(access) {
+        return Err(SyscallError::AccessDenied);
+    }
+
+    let sub = region
+        .slice(offset, size, access)
+        .map_err(slice_err_to_syscall)?;
+    let target = CapabilityTarget::Memory(Arc::new(sub));
+    let handle = Capability::new(target.clone(), default_rights_for(&target));
 
     let table = capability::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let resource = table
-        .with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))
-        .map_err(map_ipc_error)?;
-    if !resource.permits(pa, size, access) {
-        return Err(SyscallError::AccessDenied);
-    }
-
-    // Округление вверх: physical-окно может быть не кратно странице.
-    let pages = size.get().div_ceil(PAGE_SIZE) as u64;
-    resource.try_consume(pages).map_err(map_ipc_error)?;
-
-    // refund на регионе вернёт бюджет на дропе - в т.ч. если insert ниже упадёт.
-    let refund = ResourceBudgetRefund::new(&resource, pages);
-    let region = MemoryRegion::create_physical(pa, size, access).with_refund(refund);
-    let region_arc = Arc::new(region);
-    let target = CapabilityTarget::Memory(region_arc);
-    let handle = Capability::new(target.clone(), default_rights_for(&target));
     let id = table
         .with_lock(|tbl| tbl.insert(handle))
         .map_err(map_ipc_error)?;
@@ -477,14 +472,18 @@ pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError
 
 /// `memory_region_inspect(region_handle)`
 ///
-/// Primary возврат - `size_bytes`, secondary - `(kind_tag << 16) | access_bits`.
+/// Primary возврат - `size_bytes`; secondary - `base_pa | (kind_tag << 3) |
+/// access_bits`. `base_pa` page-aligned, поэтому его младшие 12 бит свободны
+/// под `kind_tag` (биты 3..5) и `access_bits` (биты 0..3); для `Virtual`
+/// `base_pa = 0`.
 pub fn sys_memory_region_inspect(frame: &mut dyn SyscallFrame) {
     let result = (|| -> Result<(u64, u64), SyscallError> {
         let id = parse_handle_id(frame.arg(0))?;
         let region = lookup_memory(id, Rights::READ)?;
         let size = region.size_bytes() as u64;
+        let base_pa = region.physical_base().map_or(0, |pa| pa.as_usize() as u64);
         let secondary =
-            (u64::from(region.kind_tag()) << 16) | u64::from(region.access_mask().bits());
+            base_pa | (u64::from(region.kind_tag()) << 3) | u64::from(region.access_mask().bits());
         Ok((size, secondary))
     })();
 
@@ -516,6 +515,16 @@ fn map_err_to_syscall(err: &MemoryMappingError) -> SyscallError {
 fn region_create_err_to_syscall(err: &RegionCreateError) -> SyscallError {
     match err {
         RegionCreateError::OutOfMemory => SyscallError::OutOfMemory,
+    }
+}
+
+fn slice_err_to_syscall(err: RegionSliceError) -> SyscallError {
+    match err {
+        RegionSliceError::OutOfBounds | RegionSliceError::MisalignedOffset => {
+            SyscallError::InvalidArgument
+        }
+        RegionSliceError::AccessEscalation => SyscallError::AccessDenied,
+        RegionSliceError::UnsupportedBacking => SyscallError::WrongType,
     }
 }
 
@@ -653,6 +662,26 @@ mod tests {
     }
 
     #[test]
+    fn slice_err_mapping() {
+        assert_eq!(
+            slice_err_to_syscall(RegionSliceError::OutOfBounds),
+            SyscallError::InvalidArgument
+        );
+        assert_eq!(
+            slice_err_to_syscall(RegionSliceError::MisalignedOffset),
+            SyscallError::InvalidArgument
+        );
+        assert_eq!(
+            slice_err_to_syscall(RegionSliceError::AccessEscalation),
+            SyscallError::AccessDenied
+        );
+        assert_eq!(
+            slice_err_to_syscall(RegionSliceError::UnsupportedBacking),
+            SyscallError::WrongType
+        );
+    }
+
+    #[test]
     fn parse_access_mask_zero_is_invalid() {
         assert_eq!(parse_access_mask(0), Err(SyscallError::InvalidArgument));
     }
@@ -690,7 +719,7 @@ mod tests {
                 AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
                 MemoryRemappingError, MemoryUnmappingError,
             },
-            physical_address::PhysicalAddress,
+            physical_address::{PageAlignedAddress, PhysicalAddress},
             user_vm_allocator::UserVmAllocator,
             virtual_address::VirtualAddress,
         };

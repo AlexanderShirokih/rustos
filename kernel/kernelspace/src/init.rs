@@ -66,9 +66,10 @@ fn start_bootstrap_chain(
     // Логгер - фоновый kernel-таск, блокирующийся в port_recv. Init ждёт завершения процесса через его
     // bound-Signal и гасит машину, что снимает запаркованный логгер.
     let port = launch.port;
+    let irq_control = launch.irq_control;
     if let Err(e) = syscall_bridge::scheduler().spawn(
         SpawnConfig::new("bootstrap-log").priority(Priority::normal()),
-        move || run_bootstrap_log(&port),
+        move || run_bootstrap_log(&port, irq_control),
     ) {
         warn!("bootstrap-log task spawn failed: {:?}", e);
         power::system_off(1)

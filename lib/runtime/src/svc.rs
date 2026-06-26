@@ -91,7 +91,7 @@ pub fn signal_create() -> Result<Handle, i64> {
 }
 
 /// Создаёт `Port` (synchronous rendezvous-IPC) в текущей таблице.
-/// Возврат: ОДИН port-handle либо `-(SyscallError)`.
+/// Возврат: один port-handle либо `-(SyscallError)`.
 pub fn port_create() -> Result<Handle, i64> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
@@ -492,24 +492,25 @@ pub fn memory_create_virtual(
     Handle::from_syscall_return(ret)
 }
 
-/// Создаёт Memory-регион с Physical backing: `resource` - handle на
-/// `Resource`, `pa` - физический адрес (page-aligned), `size_bytes`,
-/// `access_mask` (биты R/W/X). Возврат: region handle либо `-(SyscallError)`.
-pub fn memory_create_physical(
-    resource: Handle,
-    pa: u64,
+/// Деривация узкого под-региона: `region` - handle на исходный регион
+/// (требует `DUPLICATE`), `offset` - page-aligned смещение, `size_bytes`,
+/// `access_mask` (биты R/W/X, не шире гранта). Возврат: region handle либо
+/// `-(SyscallError)`.
+pub fn memory_slice(
+    region: Handle,
+    offset: u64,
     size_bytes: u64,
     access_mask: u64,
 ) -> Result<Handle, i64> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x3:
-    // resource_handle, pa, size_bytes, access_mask; память ядру не передаётся.
+    // region_handle, offset, size_bytes, access_mask; память ядру не передаётся.
     unsafe {
         asm!(
             "svc #{op}",
-            op = const SyscallOp::MemoryCreatePhysical as u16,
-            in("x0") u64::from(resource.raw()),
-            in("x1") pa,
+            op = const SyscallOp::MemorySlice as u16,
+            in("x0") u64::from(region.raw()),
+            in("x1") offset,
             in("x2") size_bytes,
             in("x3") access_mask,
             lateout("x0") ret,
@@ -600,13 +601,13 @@ pub fn memory_free(va: u64, size_bytes: u64) -> i64 {
 }
 
 /// Инспектирует Memory-регион `handle`. Возврат: `(size_bytes,
-/// (kind_tag << 16) | access_bits)`; первый элемент знаковый
+/// base_pa | (kind_tag << 3) | access_bits)`; первый элемент знаковый
 /// (`-(SyscallError)` при ошибке), второй валиден только при успехе.
 pub fn memory_region_inspect(handle: Handle) -> (i64, u64) {
     let primary: i64;
     let secondary: u64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; ядро пишет
-    // size_bytes в x0, kind|access - в x1.
+    // size_bytes в x0, base|kind|access - в x1.
     unsafe {
         asm!(
             "svc #{op}",

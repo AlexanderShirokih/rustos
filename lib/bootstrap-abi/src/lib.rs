@@ -13,13 +13,23 @@ pub trait Bootstrap {
     /// Передаёт строку для логгера ядра klog.
     #[cast]
     fn log(&self, message: ipc::wire::Str<{ crate::LOG_MESSAGE_MAX }>);
+
+    /// Выдаёт копию корневого `IrqControl` в таблицу вызывателя (оригинал
+    /// остаётся у ядра). `Err` - ненулевой код ошибки выдачи.
+    #[call]
+    fn acquire_irq_control(&self) -> Result<ipc::wire::Cap, u32>;
 }
 
 #[cfg(test)]
 mod tests {
-    use std::string::{String, ToString};
+    use core::num::NonZeroU32;
+    use std::{
+        string::{String, ToString},
+        thread,
+    };
 
-    use ipc::wire::Str;
+    use ipc::Transport;
+    use ipc::wire::{Cap, Str};
     use ipc_test::MockEnd;
 
     use super::{BootstrapClient, BootstrapService, LOG_MESSAGE_MAX, dispatch_bootstrap};
@@ -33,6 +43,10 @@ mod tests {
         fn log(&mut self, message: Str<{ LOG_MESSAGE_MAX }>) {
             self.last_log = Some(message.as_str().to_string());
         }
+
+        fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
+            Ok(Cap::from_raw(NonZeroU32::new(0x77).expect("non-zero")))
+        }
     }
 
     #[test]
@@ -45,5 +59,20 @@ mod tests {
         let mut sink = Sink::default();
         dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
         assert_eq!(sink.last_log.as_deref(), Some("boot ok"));
+    }
+
+    #[test]
+    fn acquire_irq_control_round_trip() {
+        let (client_end, server_end) = MockEnd::pair();
+        let client = BootstrapClient::new(client_end);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut sink = Sink::default();
+                server_end.wait_readable(u64::MAX).expect("server wait");
+                dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
+            });
+            let cap = client.acquire_irq_control().expect("call ok");
+            assert_eq!(cap, Ok(Cap::from_raw(NonZeroU32::new(0x77).expect("non-zero"))));
+        });
     }
 }

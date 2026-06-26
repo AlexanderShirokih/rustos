@@ -26,7 +26,7 @@
 //! | op    | Имя                       | Аргументы / возврат                                                                                |
 //! |-------|---------------------------|----------------------------------------------------------------------------------------------------|
 //! | 0x60  | `MemoryCreateVirtual`     | `resource_h`, `size_bytes`, `access_mask` -> `region_h`                                            |
-//! | 0x61  | `MemoryCreatePhysical`    | `resource_h`, `pa`, `size_bytes`, `access_mask` -> `region_h`                                      |
+//! | 0x62  | `MemorySlice`             | `region_h`, `offset`, `size_bytes`, `access_mask` -> `region_h`                                    |
 //! | 0x63  | `MemoryMap`               | `region_h`, `size`, `flags` -> `va`                                                                |
 //! | 0x64  | `MemoryRemap`             | `va`, `size`, `flags` -> `0`                                                                       |
 //! | 0x65  | `MemoryAllocate`          | `resource_h`, `size`, `flags` -> `va`                                                              |
@@ -37,7 +37,7 @@
 //!
 //! | op    | Назначение |
 //! |-------|------------|
-//! | 0x62        | резерв |
+//! | 0x61        | резерв |
 //! | 0x68..=0x6F | резерв |
 //!
 //! Стабильность: набор и нумерация - часть ABI и не меняются произвольно.
@@ -147,7 +147,7 @@ pub enum SyscallOp {
     /// таблице и возвращает его сырой `HandleId`. Аргументов нет.
     SignalCreate = 0x13,
     // 0x20..=0x2F - port (rendezvous-IPC).
-    /// Создаёт `Port` (synchronous rendezvous-IPC) и регистрирует ОДИН
+    /// Создаёт `Port` (synchronous rendezvous-IPC) и регистрирует один
     /// handle в текущей таблице. Аргументов нет. Возврат: port handle id.
     PortCreate = 0x23,
     /// `send` на port: блокирующая отправка сообщения из IPC-буфера
@@ -259,13 +259,12 @@ pub enum SyscallOp {
     /// `size_bytes / PAGE` страниц), `arg1=size_bytes`, `arg2=access_mask`.
     /// Возвращает `region_handle`.
     MemoryCreateVirtual = 0x60,
-    /// Создаёт `CapabilityTarget::Memory` с Physical backing. Аргументы:
-    /// `arg0=resource_handle` на `Resource` (требует
-    /// `Rights::WRITE`), `arg1=pa`, `arg2=size_bytes`, `arg3=access_mask`.
-    /// Диапазон и доступ должны укладываться в границы ресурса.
-    /// Возвращает `region_handle`.
-    ///
-    MemoryCreatePhysical = 0x61,
+    /// Деривация узкого под-региона из Memory-региона. Аргументы:
+    /// `arg0=region_handle` (требует `Rights::DUPLICATE`), `arg1=offset`
+    /// (выровнен на страницу), `arg2=size_bytes`, `arg3=access_mask`. Окно
+    /// `[offset, offset+size)` должно укладываться в исходный регион, доступ -
+    /// не шире гранта. Возвращает `region_handle`.
+    MemorySlice = 0x62,
     /// Маппит регион в текущий user-AS на свободный VA. Аргументы:
     /// `arg0=region_handle`, `arg1=size_bytes`, `arg2=flags_raw`
     /// (см. `UserMemFlags`). Возвращает базовый VA.
@@ -284,7 +283,9 @@ pub enum SyscallOp {
     /// Аргументы: `arg0=va`, `arg1=size_bytes`. Возврат `0`.
     MemoryFree = 0x66,
     /// Инспектирует Memory-регион. Аргумент: `arg0=region_handle`. Primary
-    /// возврат - `size_bytes`, secondary - `(kind_tag << 16) | access_bits`.
+    /// возврат - `size_bytes`, secondary - `base_pa | (kind_tag << 3) |
+    /// access_bits` (base_pa page-aligned, младшие 12 бит несут kind/access;
+    /// для `Virtual` base_pa = 0).
     MemoryRegionInspect = 0x67,
 
     // 0x70..=0x7F - IRQ CapabilityTarget.
@@ -328,7 +329,7 @@ impl SyscallOp {
             0x54 => Some(Self::ThreadTerminate),
             0x55 => Some(Self::ThreadIpcBufferAddr),
             0x60 => Some(Self::MemoryCreateVirtual),
-            0x61 => Some(Self::MemoryCreatePhysical),
+            0x62 => Some(Self::MemorySlice),
             0x63 => Some(Self::MemoryMap),
             0x64 => Some(Self::MemoryRemap),
             0x65 => Some(Self::MemoryAllocate),
@@ -492,10 +493,8 @@ mod tests {
             SyscallOp::from_raw(0x60),
             Some(SyscallOp::MemoryCreateVirtual)
         );
-        assert_eq!(
-            SyscallOp::from_raw(0x61),
-            Some(SyscallOp::MemoryCreatePhysical)
-        );
+        assert_eq!(SyscallOp::from_raw(0x62), Some(SyscallOp::MemorySlice));
+        assert_eq!(SyscallOp::from_raw(0x61), None);
         assert_eq!(SyscallOp::from_raw(0x63), Some(SyscallOp::MemoryMap));
         assert_eq!(SyscallOp::from_raw(0x64), Some(SyscallOp::MemoryRemap));
         assert_eq!(SyscallOp::from_raw(0x65), Some(SyscallOp::MemoryAllocate));
@@ -518,7 +517,7 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(3), None);
         assert_eq!(SyscallOp::from_raw(0x32), None);
         assert_eq!(SyscallOp::from_raw(0x57), None);
-        assert_eq!(SyscallOp::from_raw(0x62), None);
+        assert_eq!(SyscallOp::from_raw(0x61), None);
         assert_eq!(SyscallOp::from_raw(0x68), None);
         assert_eq!(SyscallOp::from_raw(0x6F), None);
         // Освобождённые перенумерацией слоты и свободные слоты IRQ-класса.

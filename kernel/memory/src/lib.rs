@@ -31,7 +31,9 @@ pub mod virtual_address;
 #[cfg_attr(not(test), doc(hidden))]
 pub use frame_bitmap::FrameBitmap;
 pub use mem_flags::MemFlags;
-pub use region::{AccessMask, BudgetRefund, MemoryBacking, MemoryRegion, RegionCreateError};
+pub use region::{
+    AccessMask, BudgetRefund, MemoryBacking, MemoryRegion, RegionCreateError, RegionSliceError,
+};
 pub use relocatable_ptr::RelocatablePtr;
 pub use user_vm_allocator::{MappingTag, UserVmAllocator};
 pub use user_vm_context::{UserVmContext, WeakUserVmContext};

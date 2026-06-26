@@ -29,6 +29,7 @@ fn memory_capability_target_map_and_inspect() {
         info,
         RegionInfo {
             size_bytes: PAGE_SIZE,
+            base: 0,
             kind: RegionKind::Virtual,
             access: MemoryAccess::RW,
         }

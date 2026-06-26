@@ -85,6 +85,19 @@ pub enum RegionCreateError {
     OutOfMemory,
 }
 
+/// Отказ нарезки под-региона ([`MemoryRegion::slice`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionSliceError {
+    /// Окно `[offset, offset + size)` выходит за пределы исходного региона.
+    OutOfBounds,
+    /// Смещение нарезки не выровнено на страницу.
+    MisalignedOffset,
+    /// Запрошенный доступ шире исходного.
+    AccessEscalation,
+    /// Бэкинг исходного региона не поддерживает нарезку.
+    UnsupportedBacking,
+}
+
 pub struct MemoryRegion {
     backing: MemoryBacking,
     size_bytes: usize,
@@ -140,6 +153,47 @@ impl MemoryRegion {
         }
     }
 
+    /// Возвращает под-регион `[offset_bytes, offset_bytes + size)` с маской
+    /// доступа `access`. `offset_bytes` должен быть выровнен на страницу, окно
+    /// должно умещаться внутри исходного региона, `access` - не шире исходного.
+    /// Результат не несёт `refund`. Бэкинг `Virtual` не поддерживается.
+    pub fn slice(
+        &self,
+        offset_bytes: usize,
+        size: NonZeroUsize,
+        access: AccessMask,
+    ) -> Result<Self, RegionSliceError> {
+        if !self.access_mask.allows(access) {
+            return Err(RegionSliceError::AccessEscalation);
+        }
+        if !offset_bytes.is_multiple_of(PAGE_SIZE) {
+            return Err(RegionSliceError::MisalignedOffset);
+        }
+        let end = offset_bytes
+            .checked_add(size.get())
+            .ok_or(RegionSliceError::OutOfBounds)?;
+        if end > self.size_bytes {
+            return Err(RegionSliceError::OutOfBounds);
+        }
+
+        match &self.backing {
+            MemoryBacking::Physical { pa_base } => {
+                let sub_pa = pa_base
+                    .as_usize()
+                    .checked_add(offset_bytes)
+                    .and_then(PageAlignedAddress::from_usize)
+                    .ok_or(RegionSliceError::OutOfBounds)?;
+                Ok(Self {
+                    backing: MemoryBacking::Physical { pa_base: sub_pa },
+                    size_bytes: size.get(),
+                    access_mask: access,
+                    refund: None,
+                })
+            }
+            MemoryBacking::Virtual { .. } => Err(RegionSliceError::UnsupportedBacking),
+        }
+    }
+
     /// Навешивает метеринг-обязательство (см. [`BudgetRefund`]).
     pub fn with_refund(mut self, refund: Arc<dyn BudgetRefund>) -> Self {
         self.refund = Some(refund);
@@ -161,6 +215,15 @@ impl MemoryRegion {
         match self.backing {
             MemoryBacking::Virtual { .. } => 1,
             MemoryBacking::Physical { .. } => 2,
+        }
+    }
+
+    /// Базовый PA для `Physical`-региона; `None` для анонимного `Virtual`.
+    /// Userspace сопоставляет выданный device-регион с FDT-узлом по этому PA.
+    pub fn physical_base(&self) -> Option<PageAlignedAddress> {
+        match self.backing {
+            MemoryBacking::Physical { pa_base } => Some(pa_base),
+            MemoryBacking::Virtual { .. } => None,
         }
     }
 
@@ -447,6 +510,87 @@ mod tests {
         assert!(err.is_err());
         assert_eq!(err.err().unwrap(), RegionCreateError::OutOfMemory);
         assert_eq!(fa.deallocated().len(), 2);
+    }
+
+    #[test]
+    fn slice_physical_narrows_pa_size_and_access() {
+        let region =
+            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
+        let sub = region
+            .slice(0x1000, nz(0x1000), AccessMask::R)
+            .expect("in-bounds slice with subset access");
+        assert_eq!(sub.kind_tag(), 2);
+        assert_eq!(sub.size_bytes(), 0x1000);
+        assert_eq!(sub.access_mask().bits(), AccessMask::R.bits());
+        match &sub.backing {
+            MemoryBacking::Physical { pa_base } => assert_eq!(pa_base.as_usize(), 0x4000_1000),
+            MemoryBacking::Virtual { .. } => panic!("physical slice must stay physical"),
+        }
+    }
+
+    #[test]
+    fn slice_rejects_window_past_region_end() {
+        let region =
+            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
+        assert!(matches!(
+            region.slice(0x3000, nz(0x2000), AccessMask::R),
+            Err(RegionSliceError::OutOfBounds)
+        ));
+    }
+
+    #[test]
+    fn slice_rejects_access_wider_than_region() {
+        let region =
+            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::R);
+        assert!(matches!(
+            region.slice(0, nz(0x1000), AccessMask::RW),
+            Err(RegionSliceError::AccessEscalation)
+        ));
+    }
+
+    #[test]
+    fn slice_rejects_misaligned_offset() {
+        let region =
+            MemoryRegion::create_physical(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
+        assert!(matches!(
+            region.slice(0x800, nz(0x1000), AccessMask::R),
+            Err(RegionSliceError::MisalignedOffset)
+        ));
+    }
+
+    #[test]
+    fn slice_of_virtual_is_unsupported() {
+        let fa = leak_fa();
+        let region = MemoryRegion::create_virtual(fa, nz(2), AccessMask::RW).unwrap();
+        assert!(matches!(
+            region.slice(0, nz(PAGE_SIZE), AccessMask::R),
+            Err(RegionSliceError::UnsupportedBacking)
+        ));
+    }
+
+    #[test]
+    fn slice_installs_at_offset_pa() {
+        let region =
+            MemoryRegion::create_physical(aligned_pa(0x8000_0000), nz(0x2000), AccessMask::RW);
+        let sub = region.slice(0x1000, nz(0x1000), AccessMask::R).unwrap();
+        let mapper = MockMapper::default();
+        let va = aligned_va(0x4000_0000);
+        sub.install(&mapper, va, MemFlags::user_ro())
+            .expect("install must succeed");
+        let entry = mapper.mapped.lock().unwrap()[0];
+        assert_eq!(entry.1, 0x8000_1000);
+        assert_eq!(entry.2, 0x1000);
+    }
+
+    #[test]
+    fn physical_base_some_for_physical_none_for_virtual() {
+        let phys =
+            MemoryRegion::create_physical(aligned_pa(0x9010_0000), nz(0x1000), AccessMask::RW);
+        assert_eq!(phys.physical_base().map(|p| p.as_usize()), Some(0x9010_0000));
+
+        let fa = leak_fa();
+        let virt = MemoryRegion::create_virtual(fa, nz(1), AccessMask::RW).unwrap();
+        assert_eq!(virt.physical_base(), None);
     }
 
     #[test]

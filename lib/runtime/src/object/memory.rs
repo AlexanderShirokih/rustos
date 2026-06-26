@@ -37,6 +37,9 @@ impl RegionKind {
 pub struct RegionInfo {
     /// Размер региона в байтах.
     pub size_bytes: u64,
+    /// Базовый PA `Physical`-региона (для корреляции с FDT-узлом); `0` для
+    /// `Virtual`.
+    pub base: u64,
     /// Backing региона.
     pub kind: RegionKind,
     /// Маска доступа региона.
@@ -97,20 +100,6 @@ impl Resource {
             .map_err(Error::from_return)
     }
 
-    /// Создаёт регион с Physical backing по адресу `pa` размера `size_bytes`
-    /// и маской `access`.
-    pub fn create_physical(
-        &self,
-        pa: u64,
-        size_bytes: u64,
-        access: MemoryAccess,
-    ) -> Result<MemoryRegion> {
-        svc::memory_create_physical(self.handle.as_raw(), pa, size_bytes, access.raw())
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| MemoryRegion::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::from_return)
-    }
-
     /// Выделяет анонимный регион размера `size_bytes` и сразу маппит его на
     /// свободный VA с флагами `flags`.
     pub fn allocate(&self, size_bytes: u64, flags: UserMemFlags) -> Result<AnonymousMapping> {
@@ -149,15 +138,31 @@ impl MemoryRegion {
         Ok(Mapping { va, size_bytes })
     }
 
+    /// Деривация под-региона `[offset, offset+size_bytes)` с маской `access`
+    /// (не шире текущей). Требует `DUPLICATE` на хэндле региона.
+    pub fn slice(
+        &self,
+        offset: u64,
+        size_bytes: u64,
+        access: MemoryAccess,
+    ) -> Result<MemoryRegion> {
+        svc::memory_slice(self.handle.as_raw(), offset, size_bytes, access.raw())
+            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
+            .map(|handle| MemoryRegion::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+            .map_err(Error::from_return)
+    }
+
     /// Декодирует сырой возврат inspect'а `(kind_tag << 16) | access_bits`
     /// в [`RegionInfo`].
     pub fn inspect(&self) -> Result<RegionInfo> {
         let (size, secondary) = svc::memory_region_inspect(self.handle.as_raw());
         let size_bytes = value(size)?;
-        let kind = RegionKind::from_tag(secondary >> 16);
+        let base = secondary & !0xFFF;
+        let kind = RegionKind::from_tag((secondary >> 3) & 0x3);
         let access = MemoryAccess::from_bits_truncate(secondary);
         Ok(RegionInfo {
             size_bytes,
+            base,
             kind,
             access,
         })

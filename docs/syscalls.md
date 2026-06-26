@@ -299,7 +299,7 @@ Process-вызовы создают процесс, возвращают handle 
 
 `ProcessResourceSelf` ставит свежий handle на метеринг-`Resource` текущего
 процесса (с дефолтными правами, включая `WRITE`) — из его бюджета списываются
-`MemoryAllocate`/`MemoryCreateVirtual`/`MemoryCreatePhysical`. `WrongType`,
+`MemoryAllocate`/`MemoryCreateVirtual`. `WrongType`,
 если метеринг-ресурс не задан.
 
 `ProcessTerminate` не используется для self-exit: handle на текущий
@@ -392,19 +392,19 @@ Memory-вызовы выделяют память и управляют её м�
 - **anonymous** (`MemoryAllocate` / `MemoryFree`) — быстрое выделение
   без handle; такую память нельзя передать другому процессу или
   задублировать с другими правами;
-- **region handle** (`MemoryCreateVirtual` / `MemoryCreatePhysical`) —
-  возвращает handle на регион, который можно замапить, передать через
-  port или задублировать с уменьшенными правами.
+- **region handle** (`MemoryCreateVirtual`) — возвращает handle на регион,
+  который можно замапить, нарезать на под-регионы (`MemorySlice`), передать
+  через port или задублировать с уменьшенными правами.
 
 |     Op | Имя                    | Аргументы                                       | Возврат                                                           | Права                                                                                           |
 |-------:|------------------------|-------------------------------------------------|-------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
 | `0x60` | `MemoryCreateVirtual`  | `resource_h`, `size_bytes`, `access_mask`       | `region_h`                                                        | `WRITE` на `Resource`; расходует `size/PAGE` бюджета (`ResourceExhausted` при нехватке)         |
-| `0x61` | `MemoryCreatePhysical` | `resource_h`, `pa`, `size_bytes`, `access_mask` | `region_h`                                                        | `WRITE` на `Resource`; диапазон и доступ должны укладываться в ресурс; расходует бюджет ресурса |
+| `0x62` | `MemorySlice`          | `region_h`, `offset`, `size_bytes`, `access_mask` | `region_h`                                                        | `DUPLICATE` на регионе; окно `[offset, offset+size)` в границах региона, доступ не шире гранта; бюджет не расходует |
 | `0x63` | `MemoryMap`            | `region_h`, `size_bytes`, `flags`               | `va`                                                              | `WRITE` и права по `flags`                                                                      |
 | `0x64` | `MemoryRemap`          | `va`, `size_bytes`, `flags`                     | `0`                                                               | grant исходного mapping                                                                         |
 | `0x65` | `MemoryAllocate`       | `resource_h`, `size_bytes`, `flags`             | `va`                                                              | `WRITE` на `Resource`; расходует `size/PAGE` бюджета (`ResourceExhausted` при нехватке)         |
 | `0x66` | `MemoryFree`           | `va`, `size_bytes`                              | `0`                                                               | —                                                                                               |
-| `0x67` | `MemoryRegionInspect`  | `region_h`                                      | primary=`size_bytes`, secondary=`(kind_tag << 16) \| access_bits` | `READ`                                                                                          |
+| `0x67` | `MemoryRegionInspect`  | `region_h`                                      | primary=`size_bytes`, secondary=`base_pa \| (kind_tag << 3) \| access_bits` | `READ`                                                                                  |
 
 `access_mask`: `R=1`, `W=2`, `X=4`; ноль — `InvalidArgument`; высокие биты отбрасываются.
 `flags`: `0=ReadWrite`, `1=ReadOnly`, `2=ReadExecute`; другие значения — `InvalidArgument`.
@@ -412,9 +412,8 @@ Memory-вызовы выделяют память и управляют её м�
 `Resource` — полномочие на минтинг памяти, несущее **бюджет** (счётчик
 страниц по 4 KiB). Каждый успешный `MemoryCreateVirtual` / `MemoryAllocate`
 атомарно списывает с бюджета ресурса `size_bytes / 4096` страниц (обязана
-делиться нацело); `MemoryCreatePhysical` — округление вверх до целого числа
-страниц. При нехватке бюджета операция возвращает `ResourceExhausted` и регион
-не создаётся. Корневой `Resource` (крупный PA-диапазон) создаётся ядром при
+делиться нацело). При нехватке бюджета операция возвращает `ResourceExhausted`
+и регион не создаётся. Корневой `Resource` (крупный PA-диапазон) создаётся ядром при
 старте и выдаётся bootstrap-процессу одним из начальных хэндлов (полная
 раскладка начальных хэндлов — в [userland.md](userland.md)).
 

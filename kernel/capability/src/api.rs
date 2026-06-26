@@ -255,8 +255,8 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
 // Подделать событие нельзя: `signal_set` строго принимает только `Signal`.
 
 /// Минтит [`IrqLine`] для линии `irq` по полномочию `control_handle`.
-/// Требует [`Rights::WRITE`] на `IrqControl`-хендле и `permits(irq)` — точный
-/// аналог `MemoryCreatePhysical` (WRITE на `Resource` + попадание в диапазон).
+/// Требует [`Rights::WRITE`] на `IrqControl`-хендле и попадания `irq` в его
+/// диапазон (`permits`).
 /// Привязка линии идёт через установленный [`interrupts_control`]. Возвращает
 /// handle на свежий `IrqLine` со стартовыми правами [`default_rights_for`].
 pub fn irq_mint(control_handle: HandleId, irq: u16) -> Result<HandleId, IpcError> {
