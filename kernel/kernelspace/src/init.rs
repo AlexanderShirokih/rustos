@@ -12,7 +12,7 @@ use klog::{info, warn};
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
 use crate::{
-    bootstrap::{run_bootstrap_log, spawn_process},
+    bootstrap::{run_bootstrap, spawn_process},
     kernel_context::KernelContext,
     power,
     scheduler_bootstrap::KernelTimerSource,
@@ -61,15 +61,14 @@ fn start_bootstrap_chain(
             power::system_off(1)
         }
     };
+
     info!("bootstrap process spawned:");
 
-    // Логгер - фоновый kernel-таск, блокирующийся в port_recv. Init ждёт завершения процесса через его
-    // bound-Signal и гасит машину, что снимает запаркованный логгер.
     let port = launch.port;
     let irq_control = launch.irq_control;
     if let Err(e) = syscall_bridge::scheduler().spawn(
         SpawnConfig::new("bootstrap-log").priority(Priority::normal()),
-        move || run_bootstrap_log(&port, irq_control),
+        move || run_bootstrap(&port, irq_control),
     ) {
         warn!("bootstrap-log task spawn failed: {:?}", e);
         power::system_off(1)
@@ -86,8 +85,7 @@ fn start_bootstrap_chain(
             power::system_off(1)
         }
     };
-    // Завершение процесса ждём прямо по его handle: as_waitable материализует
-    // bound-Signal терминации, отдельный signal-handle не нужен.
+
     if let Err(e) = signal_wait_one(process_handle, SIGNALED, None) {
         warn!("init: wait for bootstrap process exit failed: {:?}", e);
         power::system_off(1)

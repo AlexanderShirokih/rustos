@@ -59,7 +59,7 @@ impl Thread {
         )
         // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
         .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-        .map_err(Error::from_return)
+        .map_err(Error::Syscall)
     }
 
     /// Возвращает обёртку над собственным потоком.
@@ -67,7 +67,7 @@ impl Thread {
         svc::thread_self()
             // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
             .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::from_return)
+            .map_err(Error::Syscall)
     }
 
     /// Берёт во владение хэндл `Thread`.

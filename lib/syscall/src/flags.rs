@@ -20,7 +20,6 @@ impl UserMemFlags {
         }
     }
 
-    /// Wire-кодировка `flags_raw` для memory_map/allocate/remap.
     pub const fn raw(self) -> u64 {
         self as u8 as u64
     }

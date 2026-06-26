@@ -9,7 +9,7 @@ use core::num::NonZeroU32;
 use capability::{
     Capability, CapabilityTarget, HandleId, HandleReservation, HandleTable, LoadImageError, Rights,
     StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec, UserThreadEntry,
-    default_rights_for, install_handle, runtime,
+    install_handle, runtime,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
@@ -311,8 +311,8 @@ pub fn sys_process_start(
 }
 
 pub(super) fn install_object_handle(target: CapabilityTarget) -> Result<u64, SyscallError> {
-    let rights = default_rights_for(&target);
-    let handle_id = install_handle(Capability::new(target, rights)).map_err(map_ipc_error)?;
+    let handle_id =
+        install_handle(Capability::new_with_default_rights(target)).map_err(map_ipc_error)?;
     Ok(u64::from(handle_id.raw().get()))
 }
 
@@ -321,9 +321,9 @@ pub(super) fn commit_object_handle(
     reservation: HandleReservation,
     target: CapabilityTarget,
 ) -> u64 {
-    let rights = default_rights_for(&target);
-    let handle_id =
-        table.with_lock(|tbl| tbl.commit_reserved(reservation, Capability::new(target, rights)));
+    let handle_id = table.with_lock(|tbl| {
+        tbl.commit_reserved(reservation, Capability::new_with_default_rights(target))
+    });
     u64::from(handle_id.raw().get())
 }
 

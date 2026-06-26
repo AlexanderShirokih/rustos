@@ -87,9 +87,9 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
     let dtb_virt = dtb_phys + HIGHER_HALF_BASE;
     let device_tree = fdt::devicetree::DeviceTree::from_ptr(dtb_virt)
         .expect("Failed to parse DTB at virtual address");
+
     // SAFETY: DTB замаплен в higher-half и существует в течение всей жизни ядра, поэтому
-    // продление времени жизни ссылки до `'static` корректно. `transmute` тут используется
-    // только для удлинения lifetime - layout `&DeviceTree` остаётся прежним.
+    // продление времени жизни ссылки до `'static` корректно.
     let device_tree: &'static fdt::devicetree::DeviceTree =
         unsafe { core::mem::transmute(&device_tree) };
 
@@ -142,9 +142,7 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
     )
 }
 
-/// Возвращает init-таск для текущей сборочной фичи: production-init
-/// или kernel-tests harness. Вынесено в отдельную функцию, чтобы держать
-/// feature-выбор в одном месте.
+/// Возвращает init-таск для текущей сборочной фичи.
 fn pick_init_task()
 -> fn(&Scheduler<Aarch64Context, KernelTimerSource, Bootstrapped>, &mut KernelContext) {
     #[cfg(feature = "kernel-tests")]

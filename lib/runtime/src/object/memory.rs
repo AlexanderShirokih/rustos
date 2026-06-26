@@ -79,7 +79,7 @@ impl Resource {
         svc::process_resource_self()
             // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
             .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::from_return)
+            .map_err(Error::Syscall)
     }
 
     /// Берёт во владение хэндл `Resource`.
@@ -97,7 +97,7 @@ impl Resource {
         svc::memory_create_virtual(self.handle.as_raw(), size_bytes, access.raw())
             // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
             .map(|handle| MemoryRegion::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::from_return)
+            .map_err(Error::Syscall)
     }
 
     /// Выделяет анонимный регион размера `size_bytes` и сразу маппит его на
@@ -149,7 +149,7 @@ impl MemoryRegion {
         svc::memory_slice(self.handle.as_raw(), offset, size_bytes, access.raw())
             // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
             .map(|handle| MemoryRegion::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::from_return)
+            .map_err(Error::Syscall)
     }
 
     /// Декодирует сырой возврат inspect'а `(kind_tag << 16) | access_bits`

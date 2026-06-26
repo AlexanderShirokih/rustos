@@ -108,17 +108,13 @@ mod tests {
 
     #[test]
     fn not_masks_to_known_bits_only() {
-        // !READ должен содержать все остальные известные права и НИ ОДНОГО
-        // неизвестного бита (маскирование ALL_BITS).
         let n = !Rights::READ;
         assert!(!n.contains(Rights::READ));
         assert!(n.contains(Rights::WRITE));
         assert!(n.contains(Rights::EXECUTE));
         assert!(n.contains(Rights::DUPLICATE));
         assert!(n.contains(Rights::TRANSFER));
-        // Ни одного бита за пределами ALL_BITS.
         assert_eq!(n.bits() & !Rights::all().bits(), 0);
-        // !ALL == NONE.
         assert_eq!(!Rights::all(), Rights::NONE);
         assert_eq!(!Rights::NONE, Rights::all());
     }

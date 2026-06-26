@@ -3,7 +3,9 @@ use core::num::NonZeroU32;
 
 use syscall::Rights;
 
-use super::{errors::IpcError, rev_node::RevNode, target::CapabilityTarget};
+use super::{
+    errors::IpcError, rev_node::RevNode, rights::default_rights_for, target::CapabilityTarget,
+};
 
 /// Публичный идентификатор записи в `HandleTable`, используемый процессами для IPC.
 ///
@@ -84,6 +86,14 @@ impl Capability {
             badge: 0,
             node: RevNode::new_root(),
         }
+    }
+
+    /// Создаёт незаклеймённую capability со стартовыми правами объекта
+    /// ([`default_rights_for`]).
+    pub fn new_with_default_rights(target: impl Into<CapabilityTarget>) -> Self {
+        let target = target.into();
+        let rights = default_rights_for(&target);
+        Self::new(target, rights)
     }
 
     /// Создаёт capability с заданным значком `badge`.

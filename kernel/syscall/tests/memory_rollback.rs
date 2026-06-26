@@ -9,9 +9,9 @@ use core::{
 use std::sync::{Arc, Mutex, OnceLock};
 
 use capability::{
-    Capability, CapabilityTarget, HandleId, HandleTable, IpcError, KernelRuntime, LoadImageError,
-    ProcessObject, Resource, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
-    UserStartSpec, UserThreadEntry, WaitToken, default_rights_for, install_runtime,
+    Capability, HandleId, HandleTable, IpcError, KernelRuntime, LoadImageError, ProcessObject,
+    Resource, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
+    UserThreadEntry, WaitToken, install_runtime,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
@@ -249,10 +249,8 @@ fn insert_metering_resource(table: &Arc<MutexCell<HandleTable>>) -> (u64, Arc<Re
         AccessMask::RW,
         1024,
     );
-    let target = CapabilityTarget::Resource(resource.clone());
-    let rights = default_rights_for(&target);
     let id = table
-        .with_lock(|tbl| tbl.insert(Capability::new(target, rights)))
+        .with_lock(|tbl| tbl.insert(Capability::new_with_default_rights(resource.clone())))
         .expect("insert resource");
     (u64::from(id.raw().get()), resource)
 }
@@ -384,10 +382,8 @@ fn memory_map_rolls_back_va_and_keeps_region_frames_on_install_failure() {
         .expect("region create"),
     );
     let frames_after_create = fa.outstanding();
-    let target = CapabilityTarget::Memory(region);
-    let rights = default_rights_for(&target);
     let region_id: HandleId = table
-        .with_lock(|tbl| tbl.insert(Capability::new(target, rights)))
+        .with_lock(|tbl| tbl.insert(Capability::new_with_default_rights(region)))
         .expect("insert region");
 
     let res = dispatch(

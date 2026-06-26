@@ -8,7 +8,7 @@ use core::num::NonZeroUsize;
 use bootstrap::{BootstrapService, dispatch_bootstrap};
 use capability::{
     Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, IrqControl,
-    KernelIpcBuffer, Port, Reply, Resource, ThreadTransport, default_rights_for, port_recv, runtime,
+    KernelIpcBuffer, Port, Reply, Resource, ThreadTransport, port_recv, runtime,
 };
 use collections::{LockCell, MutexCell};
 use ipc::{
@@ -56,8 +56,7 @@ pub fn spawn_process(
     // Ядро держит Arc как получатель; Handle на тот же объект уходит bootstrap-процессу
     // как initial handle.
     let port = Port::new();
-    let peer_target = CapabilityTarget::Port(port.clone());
-    let peer_handle = Capability::new(peer_target.clone(), default_rights_for(&peer_target));
+    let peer_handle = Capability::new_with_default_rights(port.clone());
 
     // Корневой Resource: полномочие на минтинг физпамяти.
     let root_resource = Resource::new(
@@ -66,19 +65,11 @@ pub fn spawn_process(
         AccessMask::RW,
         1 << 20,
     );
-    let resource_target = CapabilityTarget::Resource(root_resource.clone());
-    let resource_handle = Capability::new(
-        resource_target.clone(),
-        default_rights_for(&resource_target),
-    );
+    let resource_handle = Capability::new_with_default_rights(root_resource.clone());
 
     // Полномочие на IRQ-линии: весь SPI-диапазон выдаётся bootstrap-процессу.
     let irq_control = IrqControl::new(32, 1019);
-    let irq_control_target = CapabilityTarget::IrqControl(irq_control.clone());
-    let irq_control_handle = Capability::new(
-        irq_control_target.clone(),
-        default_rights_for(&irq_control_target),
-    );
+    let irq_control_handle = Capability::new_with_default_rights(irq_control.clone());
 
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![peer_handle, resource_handle, irq_control_handle])
@@ -101,14 +92,8 @@ pub fn spawn_process(
 
 /// Цикл сервера bootstrap-port'а: kernel-поток аллоцирует kernel-резидентный
 /// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракт
-/// `Bootstrap` (лог в klog, выдача корневых capability). Таблица потока-сервера
-/// общая у транспорта и сервера: сервер кладёт в неё дубликат, reply-путь
-/// транспорта переносит его вызывателю.
-///
-/// Поскольку поток держит `Arc<Port>`, ветка `PeerClosed` недостижима. Цикл
-/// завершается только по ошибке `dispatch_bootstrap`; машину гасит init по
-/// завершению bootstrap-процесса (см. [`crate::init`]).
-pub fn run_bootstrap_log(port: &Arc<Port>, irq_control: Arc<IrqControl>) {
+/// `Bootstrap`.
+pub fn run_bootstrap(port: &Arc<Port>, irq_control: Arc<IrqControl>) {
     let Some(table) = runtime().current_handle_table() else {
         warn!("bootstrap: no kernel handle-table; server not started");
         return;
@@ -136,8 +121,7 @@ pub fn run_bootstrap_log(port: &Arc<Port>, irq_control: Arc<IrqControl>) {
 /// Код ошибки выдачи в bootstrap-протоколе: отказ вставки дубликата в таблицу.
 const ACQUIRE_FAILED: u32 = 1;
 
-/// Серверная сторона контракта `Bootstrap`: лог в klog и выдача корневых
-/// capability vend-by-duplicate. Держит оригиналы; в таблицу кладёт дубликаты.
+/// Серверная сторона контракта `Bootstrap`.
 struct BootstrapServer {
     table: Arc<MutexCell<HandleTable>>,
     irq_control: Arc<IrqControl>,
@@ -147,11 +131,12 @@ impl BootstrapServer {
     /// Кладёт дубликат `target` в таблицу сервера, возвращает его индекс как
     /// `Cap`; перенос вызывателю делает reply-путь транспорта.
     fn vend(&self, target: CapabilityTarget) -> Result<Cap, u32> {
-        let cap = Capability::new(target.clone(), default_rights_for(&target));
+        let cap = Capability::new_with_default_rights(target);
         let id = self
             .table
             .with_lock(|tbl| tbl.insert(cap))
             .map_err(|_| ACQUIRE_FAILED)?;
+
         Ok(Cap::from_raw(id.raw()))
     }
 }
@@ -192,17 +177,11 @@ struct KernelPortTransport {
     port: Arc<Port>,
     buffer: KernelIpcBuffer,
     table: Arc<MutexCell<HandleTable>>,
-    /// Одноразовый Reply последнего принятого `#[call]`; потребляется
-    /// `write_message` для доставки ответа вызывателю.
     pending_reply: MutexCell<Option<Arc<Reply>>>,
 }
 
 impl KernelPortTransport {
-    fn new(
-        port: Arc<Port>,
-        buffer: KernelIpcBuffer,
-        table: Arc<MutexCell<HandleTable>>,
-    ) -> Self {
+    fn new(port: Arc<Port>, buffer: KernelIpcBuffer, table: Arc<MutexCell<HandleTable>>) -> Self {
         Self {
             port,
             buffer,
@@ -218,19 +197,22 @@ impl KernelPortTransport {
 
 impl Transport for KernelPortTransport {
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), WireError> {
-        // Per-call отказ доставки не валит сервер: вызыватель в любом случае
-        // будится исходом (reply.reply ставит TransferFailed, cancel - PeerGone),
-        // сервер логирует и продолжает. Фатален лишь обрыв порта в read_message.
         let Some(reply) = self.pending_reply.with_lock(Option::take) else {
-            warn!("bootstrap: write_message без ожидающего reply");
+            warn!("bootstrap: write_message without a pending reply");
             return Ok(());
         };
+
         let delivered = self
             .buffer
             .with_lock(|buf| store_kernel_buffer(buf, bytes, handles))
-            .and_then(|()| reply.reply(&self.thread_transport()).map_err(map_kernel_error));
+            .and_then(|()| {
+                reply
+                    .reply(&self.thread_transport())
+                    .map_err(map_kernel_error)
+            });
+
         if let Err(e) = delivered {
-            warn!("bootstrap: reply не доставлен: {:?}", e);
+            warn!("bootstrap: reply delivery failed: {:?}", e);
             reply.cancel();
         }
         Ok(())
@@ -238,8 +220,6 @@ impl Transport for KernelPortTransport {
 
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, WireError> {
         let receiver = self.thread_transport();
-        // Блокирующий приём; тело ложится в kernel-буфер, Reply встречного
-        // `call` сохраняется под ответ из write_message.
         let reply = port_recv(&self.port, receiver, runtime(), None).map_err(map_kernel_error)?;
         self.pending_reply.with_lock(|slot| *slot = reply);
         self.buffer
@@ -252,7 +232,6 @@ impl Transport for KernelPortTransport {
     }
 }
 
-/// Кодирует ответ `bytes`/`handles` в kernel-буфер под перенос reply-путём.
 fn store_kernel_buffer(
     buf: &mut IpcBuffer,
     bytes: &[u8],
@@ -269,20 +248,21 @@ fn store_kernel_buffer(
     Ok(())
 }
 
-/// Декодирует сообщение из kernel-буфера в `bytes`/`handles` по tag.
 fn load_kernel_buffer(
     buf: &IpcBuffer,
     bytes: &mut [u8],
     handles: &mut [u32],
 ) -> Result<MessageLen, WireError> {
-    let (len, ncaps) = decode_tag(buf.tag);
-    if ncaps > 0 {
+    let decoded = decode_tag(buf.tag);
+    if decoded.ncaps > 0 {
         return Err(WireError::FrameOverflow);
     }
-    let len = len.min(buf.data.len());
+
+    let len = decoded.len.min(buf.data.len());
     if len > bytes.len() {
         return Err(WireError::Truncated);
     }
+
     let _ = handles;
     bytes[..len].copy_from_slice(&buf.data[..len]);
     Ok(MessageLen::new(len, 0))

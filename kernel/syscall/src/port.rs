@@ -4,8 +4,7 @@
 //! хендлы в `caps[..ncaps]`.
 
 use capability::{
-    Capability, CapabilityTarget, Port, Rights, ThreadTransport, default_rights_for, port_call,
-    port_recv, port_send, runtime,
+    Capability, Port, Rights, ThreadTransport, port_call, port_recv, port_send, runtime,
 };
 use collections::LockCell;
 use memory::virtual_address::VirtualAddress;
@@ -38,8 +37,7 @@ pub(super) fn sys_port_create() -> Result<u64, SyscallError> {
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let port = Port::new();
-    let target = CapabilityTarget::Port(port);
-    let handle = Capability::new(target.clone(), default_rights_for(&target));
+    let handle = Capability::new_with_default_rights(port);
 
     let id = table
         .with_lock(|tbl| tbl.insert(handle))
@@ -94,8 +92,7 @@ pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
     match reply {
         None => Ok(0),
         Some(reply) => {
-            let target = CapabilityTarget::Reply(reply);
-            let h = Capability::new(target.clone(), default_rights_for(&target));
+            let h = Capability::new_with_default_rights(reply);
             let reply_id = table
                 .with_lock(|tbl| tbl.insert(h))
                 .map_err(map_ipc_error)?;

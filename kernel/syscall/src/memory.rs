@@ -5,10 +5,7 @@
 use alloc::sync::Arc;
 use core::num::NonZeroUsize;
 
-use capability::{
-    Capability, CapabilityTarget, IpcError, ResourceBudgetRefund, RevocationHook, Rights,
-    default_rights_for,
-};
+use capability::{Capability, IpcError, ResourceBudgetRefund, RevocationHook, Rights};
 use collections::LockCell;
 use memory::{
     AccessMask, MappingTag, MemoryRegion, RegionCreateError, RegionSliceError, UserVmContext,
@@ -156,8 +153,7 @@ pub fn sys_memory_create_virtual(
         .map_err(map_ipc_error)?;
     let region = region.with_refund(ResourceBudgetRefund::new(&resource, pages.get() as u64));
     let region_arc = Arc::new(region);
-    let target = CapabilityTarget::Memory(region_arc);
-    let handle = Capability::new(target.clone(), default_rights_for(&target));
+    let handle = Capability::new_with_default_rights(region_arc);
     let id = table
         .with_lock(|tbl| tbl.insert(handle))
         .map_err(map_ipc_error)?;
@@ -189,8 +185,7 @@ pub fn sys_memory_slice(
     let sub = region
         .slice(offset, size, access)
         .map_err(slice_err_to_syscall)?;
-    let target = CapabilityTarget::Memory(Arc::new(sub));
-    let handle = Capability::new(target.clone(), default_rights_for(&target));
+    let handle = Capability::new_with_default_rights(Arc::new(sub));
 
     let table = capability::runtime()
         .current_handle_table()

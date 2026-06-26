@@ -1,7 +1,3 @@
-//! Ошибки syscall-слоя и кодирование возврата.
-//!
-//! Возврат: `i64`, успех `[0, i64::MAX]`, ошибка `-(code as i64)` в `[-MAX_ERR..-1]`.
-
 /// Ошибки, возвращаемые syscall-слоем.
 ///
 /// Численные коды стабильны и являются частью ABI: они кодируются в
@@ -20,7 +16,7 @@ pub enum SyscallError {
     BadHandle = 4,
     /// Тип объекта не соответствует ожидаемому.
     WrongType = 5,
-    /// На handle'е недостаточно прав.
+    /// На handle недостаточно прав.
     AccessDenied = 6,
     /// Операция должна быть повторена позже.
     ShouldWait = 7,
@@ -37,8 +33,7 @@ pub enum SyscallError {
     /// Не хватает физической или виртуальной памяти, либо реестр регионов
     /// процесса исчерпан.
     OutOfMemory = 13,
-    /// Регион не найден в реестре user-VM текущего процесса (например,
-    /// `vm_remap` на не-выделенный VA-диапазон).
+    /// Регион не найден в реестре user-VM текущего процесса.
     NotFound = 14,
     /// Wait отменён: handle, на котором было зарегистрировано ожидание,
     /// был закрыт или передан другому процессу до прихода сигнала.
@@ -52,6 +47,27 @@ pub enum SyscallError {
 }
 
 impl SyscallError {
+    #[cfg(test)]
+    const ALL: [SyscallError; 17] = [
+        SyscallError::BadSyscall,
+        SyscallError::KernelOriginated,
+        SyscallError::InvalidArgument,
+        SyscallError::BadHandle,
+        SyscallError::WrongType,
+        SyscallError::AccessDenied,
+        SyscallError::ShouldWait,
+        SyscallError::PeerClosed,
+        SyscallError::Timeout,
+        SyscallError::BufferTooSmall,
+        SyscallError::MessageTooBig,
+        SyscallError::OutOfHandles,
+        SyscallError::OutOfMemory,
+        SyscallError::NotFound,
+        SyscallError::Canceled,
+        SyscallError::ResourceExhausted,
+        SyscallError::Revoked,
+    ];
+
     pub const fn as_return_value(self) -> i64 {
         -(self as u32 as i64)
     }
@@ -91,7 +107,7 @@ impl SyscallError {
         if ret >= 0 || ret < -(u32::MAX as i64) {
             return None;
         }
-        // ret в `-(u32::MAX)..0`, поэтому |ret| укладывается в u32 без потери.
+
         Self::from_code(ret.unsigned_abs() as u32)
     }
 }
@@ -102,19 +118,19 @@ impl From<SyscallError> for i64 {
     }
 }
 
+/// Возврат блокирующего Port-syscall "истёк тайм-аут ожидания"
+/// (`-(SyscallError::Timeout)`). Возвращается при истечении `timeout_ns`, в
+/// т.ч. в режиме poll (`timeout_ns == 0`), когда встречной стороны нет.
+pub const SYSCALL_RETURN_TIMEOUT: i64 = -9;
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
 
     use super::*;
-    use crate::{SYSCALL_RETURN_SHOULD_WAIT, SYSCALL_RETURN_TIMEOUT};
 
     #[test]
     fn return_constants_match_abi() {
-        assert_eq!(
-            SyscallError::ShouldWait.as_return_value(),
-            SYSCALL_RETURN_SHOULD_WAIT
-        );
         assert_eq!(
             SyscallError::Timeout.as_return_value(),
             SYSCALL_RETURN_TIMEOUT
@@ -123,25 +139,8 @@ mod tests {
 
     #[test]
     fn return_value_is_negative_and_unique() {
-        let codes = [
-            SyscallError::BadSyscall,
-            SyscallError::KernelOriginated,
-            SyscallError::InvalidArgument,
-            SyscallError::BadHandle,
-            SyscallError::WrongType,
-            SyscallError::AccessDenied,
-            SyscallError::ShouldWait,
-            SyscallError::PeerClosed,
-            SyscallError::Timeout,
-            SyscallError::BufferTooSmall,
-            SyscallError::MessageTooBig,
-            SyscallError::OutOfHandles,
-            SyscallError::OutOfMemory,
-            SyscallError::NotFound,
-            SyscallError::Canceled,
-            SyscallError::ResourceExhausted,
-            SyscallError::Revoked,
-        ];
+        let codes = SyscallError::ALL;
+
         for &e in &codes {
             let v: i64 = e.into();
             assert!(v < 0, "{e:?} must encode to a negative value, got {v}");
@@ -164,26 +163,7 @@ mod tests {
 
     #[test]
     fn code_and_from_code_round_trip() {
-        let codes = [
-            SyscallError::BadSyscall,
-            SyscallError::KernelOriginated,
-            SyscallError::InvalidArgument,
-            SyscallError::BadHandle,
-            SyscallError::WrongType,
-            SyscallError::AccessDenied,
-            SyscallError::ShouldWait,
-            SyscallError::PeerClosed,
-            SyscallError::Timeout,
-            SyscallError::BufferTooSmall,
-            SyscallError::MessageTooBig,
-            SyscallError::OutOfHandles,
-            SyscallError::OutOfMemory,
-            SyscallError::NotFound,
-            SyscallError::Canceled,
-            SyscallError::ResourceExhausted,
-            SyscallError::Revoked,
-        ];
-        for &e in &codes {
+        for &e in &SyscallError::ALL {
             assert_eq!(SyscallError::from_code(e.code()), Some(e));
             assert_eq!(SyscallError::from_return(e.as_return_value()), Some(e));
         }

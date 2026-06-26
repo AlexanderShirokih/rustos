@@ -89,9 +89,9 @@ fn map_err(e: KernelIpcError) -> WireError {
 }
 
 fn load(buf: &IpcBuffer, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, WireError> {
-    let (len, ncaps) = decode_tag(buf.tag);
-    let len = len.min(buf.data.len());
-    let ncaps = ncaps.min(buf.caps.len());
+    let decoded = decode_tag(buf.tag);
+    let len = decoded.len.min(buf.data.len());
+    let ncaps = decoded.ncaps.min(buf.caps.len());
     if len > bytes.len() || ncaps > handles.len() {
         return Err(WireError::Truncated);
     }

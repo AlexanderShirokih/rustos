@@ -1,22 +1,12 @@
 //! Транспорт ipc-контрактов поверх синхронного `Port` + per-thread
 //! IPC-буфер.
 //!
-//! `PortTransport` говорит на рандеву-примитивах ядра
-//! (`port_send`/`recv`/`call`/`reply`): сообщение всегда лежит в
-//! per-thread IPC-буфере текущего потока, а сами syscalls блокируют до
-//! встречи. Поскольку методы [`Transport`] принимают `&self`, а семантика
+//! `PortTransport` использует рандеву-примитив ядра (`port_send`/`recv`/`call`/`reply`): 
+//! сообщение всегда лежит в per-thread IPC-буфере текущего потока, а сами syscalls блокируют до
+//! встречи. 
+//! Поскольку методы [`Transport`] принимают `&self`, а семантика
 //! клиента и сервера различается, роль задаётся явно при конструировании
 //! ([`PortTransport::client`] / [`PortTransport::server`]).
-//!
-//! Round-trip по сгенерированному кодом паттерну:
-//! - `#[cast]` клиент: `write_message` (txid==0) -> `port_send`.
-//! - `#[call]` клиент: `write_message` (txid!=0, без RESPONSE) лишь
-//!   укладывает запрос в IPC-буфер; затем `wait_readable(wait_ns)` ->
-//!   `port_call` (блокирует до reply С тайм-аутом клиента; ответ ложится в
-//!   тот же буфер), и `read_message` декодирует ответ ИЗ буфера, без recv.
-//! - сервер dispatch: `read_message` -> `port_recv` (блокирует бессрочно,
-//!   отдаёт reply-handle); для `#[call]` затем `write_message` (RESPONSE) ->
-//!   `port_reply(reply_handle)`; для `#[cast]` reply нет.
 //!
 //! Тайм-аут типизированного IPC доступен через `wait_readable(timeout_ns)`:
 //! у клиента он ограничивает `port_call`, у сервера - приём (`port_recv`)
@@ -41,7 +31,7 @@ use crate::{
 };
 
 /// Фаза конца port-транспорта: кодирует и роль (клиент/сервер), и текущее
-/// транзиентное состояние round-trip'а одним значением, делая нелегальные
+/// транзиентное состояние round-trip одним значением, делая нелегальные
 /// комбинации (например, одновременно отложенный `call` и готовый ответ)
 /// непредставимыми.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +51,10 @@ enum Phase {
     ServerStaged,
 }
 
-/// Порт ipc-контракта поверх синхронного port'а.
+/// Порт ipc-контракта поверх синхронного port.
 pub struct PortTransport {
     handle: Handle,
     phase: Cell<Phase>,
-    /// Серверная роль: reply-handle, сохранённый последним `recv` (если
-    /// встречный был `call`); `write_message` с RESPONSE его забирает.
     pending_reply: Cell<Option<Handle>>,
 }
 
@@ -139,9 +127,9 @@ impl PortTransport {
         // SAFETY: см. `store_buffer`; здесь только чтение полей буфера.
         let (len, ncaps) = unsafe {
             let buf = &*ptr;
-            let (len, ncaps) = decode_tag(buf.tag);
-            let len = len.min(IPC_BUFFER_DATA_MAX);
-            let ncaps = ncaps.min(IPC_BUFFER_MAX_CAPS);
+            let tag = decode_tag(buf.tag);
+            let len = tag.len.min(IPC_BUFFER_DATA_MAX);
+            let ncaps = tag.ncaps.min(IPC_BUFFER_MAX_CAPS);
             if len > bytes.len() || ncaps > handles.len() {
                 return Err(IpcError::Truncated);
             }

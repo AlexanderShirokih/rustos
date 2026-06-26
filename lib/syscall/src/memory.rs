@@ -1,8 +1,4 @@
-//! Маска доступа региона памяти в syscall ABI.
-
-/// Маска доступа региона, кодирующая разрешённые операции теми же битами,
-/// что ждёт ядро (`access_raw & 0b111`): нулевая маска отвергается как
-/// `InvalidArgument`. Передаётся в memory_create_virtual/memory_slice.
+//! Маска доступа региона памяти в syscall ABI. Нулевая маска отвергается как `InvalidArgument`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct MemoryAccess(u64);
@@ -21,7 +17,7 @@ impl MemoryAccess {
         Self(bits & Self::ALL_BITS)
     }
 
-    /// Wire-кодировка `access_mask` для memory_create_virtual/memory_slice.
+    /// Возвращает сырое значение `access_mask`.
     pub const fn raw(self) -> u64 {
         self.0
     }

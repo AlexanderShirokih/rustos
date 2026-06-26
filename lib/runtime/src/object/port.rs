@@ -35,7 +35,7 @@ fn load_body(out: &mut [u8]) -> Result<usize> {
     // SAFETY: см. `store_body`; здесь только чтение полей буфера.
     unsafe {
         let buf: &IpcBuffer = &*ptr;
-        let (len, _ncaps) = decode_tag(buf.tag);
+        let len = decode_tag(buf.tag).len;
         let copy = len.min(out.len()).min(IPC_BUFFER_DATA_MAX);
         out[..copy].copy_from_slice(&buf.data[..copy]);
         Ok(len)
@@ -60,7 +60,7 @@ impl Port {
         svc::port_create()
             // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
             .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::from_return)
+            .map_err(Error::Syscall)
     }
 
     /// Берёт во владение хэндл `Port`.

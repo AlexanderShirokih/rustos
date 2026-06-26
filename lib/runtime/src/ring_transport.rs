@@ -29,7 +29,6 @@ enum Role {
 /// Потоковый транспорт ipc-контракта поверх SPSC-кольца в shared memory.
 pub struct RingTransport {
     ring: SpscRing,
-    /// "data"-сигнал: producer делает `set(SIGNALED)`, consumer спит на нём.
     data: Handle,
     role: Role,
 }

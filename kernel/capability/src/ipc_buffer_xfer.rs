@@ -181,9 +181,9 @@ pub fn transfer_rendezvous(
     receiver: &ThreadTransport,
 ) -> Result<(), IpcError> {
     let tag = read_tag(sender)?;
-    let (len, ncaps) = decode_tag(tag);
-    let len = len.min(IPC_BUFFER_DATA_MAX);
-    let ncaps = ncaps.min(IPC_BUFFER_MAX_CAPS);
+    let decoded = decode_tag(tag);
+    let len = decoded.len.min(IPC_BUFFER_DATA_MAX);
+    let ncaps = decoded.ncaps.min(IPC_BUFFER_MAX_CAPS);
 
     if len > 0 {
         let mut body = [0u8; IPC_BUFFER_DATA_MAX];

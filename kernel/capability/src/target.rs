@@ -61,6 +61,60 @@ impl Clone for CapabilityTarget {
     }
 }
 
+impl From<Arc<Signal>> for CapabilityTarget {
+    fn from(obj: Arc<Signal>) -> Self {
+        Self::Signal(obj)
+    }
+}
+
+impl From<Arc<ProcessObject>> for CapabilityTarget {
+    fn from(obj: Arc<ProcessObject>) -> Self {
+        Self::Process(obj)
+    }
+}
+
+impl From<Arc<ThreadObject>> for CapabilityTarget {
+    fn from(obj: Arc<ThreadObject>) -> Self {
+        Self::Thread(obj)
+    }
+}
+
+impl From<Arc<MemoryRegion>> for CapabilityTarget {
+    fn from(obj: Arc<MemoryRegion>) -> Self {
+        Self::Memory(obj)
+    }
+}
+
+impl From<Arc<Resource>> for CapabilityTarget {
+    fn from(obj: Arc<Resource>) -> Self {
+        Self::Resource(obj)
+    }
+}
+
+impl From<Arc<Port>> for CapabilityTarget {
+    fn from(obj: Arc<Port>) -> Self {
+        Self::Port(obj)
+    }
+}
+
+impl From<Arc<Reply>> for CapabilityTarget {
+    fn from(obj: Arc<Reply>) -> Self {
+        Self::Reply(obj)
+    }
+}
+
+impl From<Arc<IrqControl>> for CapabilityTarget {
+    fn from(obj: Arc<IrqControl>) -> Self {
+        Self::IrqControl(obj)
+    }
+}
+
+impl From<Arc<IrqLine>> for CapabilityTarget {
+    fn from(obj: Arc<IrqLine>) -> Self {
+        Self::IrqLine(obj)
+    }
+}
+
 impl core::fmt::Debug for CapabilityTarget {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let name = match self {

@@ -9,11 +9,9 @@ use crate::{
     svc,
 };
 
-/// Владеет хэндлом и закрывает его в `Drop` через `svc::handle_close`.
+/// Владеет хэндлом и закрывает его в `Drop`.
 ///
-/// Не `Copy` и не `Clone`: владелец один. Конструкторы из хэндла `unsafe` -
-/// вызывающий подтверждает уникальное владение, чтобы двойное оборачивание не
-/// привело к преждевременному `Drop`-close.
+/// Не `Copy` и не `Clone`: владелец один.
 #[derive(Debug)]
 pub struct OwnedHandle {
     handle: Handle,
@@ -68,7 +66,7 @@ impl OwnedHandle {
         svc::handle_duplicate(self.handle, rights.into(), badge)
             // SAFETY: handle_duplicate вернул свежий хэндл, мы единственный владелец.
             .map(|handle| unsafe { Self::from_handle(handle) })
-            .map_err(Error::from_return)
+            .map_err(Error::Syscall)
     }
 
     /// Закрывает хэндл, возвращая результат syscall'а. Извлекает хэндл через
@@ -91,7 +89,7 @@ impl Drop for OwnedHandle {
 }
 
 impl BorrowedHandle<'_> {
-    /// Заимствованный хэндл для укладки в аргумент syscall'а.
+    /// Заимствованный `Handle`.
     pub fn as_raw(self) -> Handle {
         self.handle
     }

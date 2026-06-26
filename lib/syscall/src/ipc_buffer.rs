@@ -1,11 +1,9 @@
 //! Per-thread IPC-буфер: страница user-памяти, через которую
-//! Port-syscalls обмениваются короткими сообщениями без полного
-//! channel-механизма.
+//! Port-syscalls обмениваются короткими сообщениями.
 //!
-//! Структура [`IpcBuffer`] разделяется ядром и userspace - её layout
-//! фиксирован `#[repr(C)]` и является частью ABI. Буфер маппится ядром по
+//! Структура [`IpcBuffer`] разделяется ядром и userspace. Буфер маппится ядром по
 //! одной странице на каждый user-поток; userspace получает его VA через
-//! `IpcBufferAddr`-syscall.
+//! `ThreadIpcBufferAddr`-syscall.
 //!
 //! # Tag
 //!
@@ -20,6 +18,8 @@
 //! `len` ограничен [`IPC_BUFFER_DATA_MAX`], `ncaps` - [`IPC_BUFFER_MAX_CAPS`];
 //! оба укладываются в выделенные битовые поля.
 
+use core::cmp::min;
+
 /// Максимум байт тела сообщения в [`IpcBuffer::data`].
 pub const IPC_BUFFER_DATA_MAX: usize = 256;
 
@@ -33,34 +33,22 @@ const TAG_LEN_MASK: u64 = 0xFFFF;
 /// Маска поля `ncaps` после сдвига (`[16..20)`, 4 бита).
 const TAG_NCAPS_MASK: u64 = 0xF;
 
-/// Per-thread IPC-буфер. Layout фиксирован ABI.
-///
-/// `tag` несёт длину тела и число handle'ов (см. [`encode_tag`]/[`decode_tag`]),
-/// `caps` - сырые HandleId'ы, `data` - тело сообщения, `badge` - значок
-/// отправителя, доставляемый ядром получателю на recv/call. Размер
-/// укладывается в одну страницу (4096 байт).
-///
-/// `badge` положен после `data`, чтобы офсеты `tag`/`caps`/`data` оставались
-/// стабильными при расширении буфера.
-/// `badge` - выходное поле получателя: ядро пишет туда значок хендла
-/// отправителя после успешного рандеву. На отправке не читается.
+/// Per-thread IPC-буфер.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct IpcBuffer {
     /// `len(bytes)` в `[0..16)`, `ncaps` в `[16..20)`, флаги в `[20..)`.
     pub tag: u64,
-    /// HandleId'ы для переноса/приёма (raw 32-бит значения).
+    /// HandleId'ы для переноса/приёма.
     pub caps: [u32; IPC_BUFFER_MAX_CAPS],
     /// Тело сообщения.
     pub data: [u8; IPC_BUFFER_DATA_MAX],
-    /// Значок (badge) отправителя: ядро записывает сюда badge port-хендла,
-    /// через который пришло сообщение (`0` = без значка). Идентифицирует
-    /// клиента/соединение на стороне сервера. На отправке игнорируется.
+    /// Badge отправителя, через который пришло сообщение. При отправке игнорируется.
     pub badge: u64,
 }
 
 impl IpcBuffer {
-    /// Пустой буфер: нулевой tag, обнулённые `caps`/`data`/`badge`.
+    /// Создает устой буфер.
     pub const fn zeroed() -> Self {
         Self {
             tag: 0,
@@ -72,27 +60,26 @@ impl IpcBuffer {
 }
 
 /// Упаковывает `len` (длина тела) и `ncaps` (число handle'ов) в `tag`.
-/// `len` усекается по [`IPC_BUFFER_DATA_MAX`], `ncaps` - по
-/// [`IPC_BUFFER_MAX_CAPS`].
 pub const fn encode_tag(len: usize, ncaps: usize) -> u64 {
-    let len = if len > IPC_BUFFER_DATA_MAX {
-        IPC_BUFFER_DATA_MAX
-    } else {
-        len
-    };
-    let ncaps = if ncaps > IPC_BUFFER_MAX_CAPS {
-        IPC_BUFFER_MAX_CAPS
-    } else {
-        ncaps
-    };
+    let len = min(len, IPC_BUFFER_DATA_MAX);
+    let ncaps = min(ncaps, IPC_BUFFER_MAX_CAPS);
+
     (len as u64 & TAG_LEN_MASK) | ((ncaps as u64 & TAG_NCAPS_MASK) << TAG_NCAPS_SHIFT)
 }
 
-/// Распаковывает `tag` обратно в `(len, ncaps)`.
-pub const fn decode_tag(tag: u64) -> (usize, usize) {
-    let len = (tag & TAG_LEN_MASK) as usize;
-    let ncaps = ((tag >> TAG_NCAPS_SHIFT) & TAG_NCAPS_MASK) as usize;
-    (len, ncaps)
+/// Распакованные поля [`IpcBuffer::tag`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DecodedTag {
+    pub len: usize,
+    pub ncaps: usize,
+}
+
+/// Распаковывает `tag` обратно в [`DecodedTag`].
+pub const fn decode_tag(tag: u64) -> DecodedTag {
+    DecodedTag {
+        len: (tag & TAG_LEN_MASK) as usize,
+        ncaps: ((tag >> TAG_NCAPS_SHIFT) & TAG_NCAPS_MASK) as usize,
+    }
 }
 
 #[cfg(test)]
@@ -101,24 +88,24 @@ mod tests {
 
     #[test]
     fn buffer_fits_one_page() {
-        assert!(core::mem::size_of::<IpcBuffer>() <= 4096);
+        assert!(size_of::<IpcBuffer>() <= 4096);
     }
 
     #[test]
     fn tag_roundtrip() {
-        assert_eq!(decode_tag(encode_tag(0, 0)), (0, 0));
-        assert_eq!(decode_tag(encode_tag(200, 3)), (200, 3));
+        assert_eq!(decode_tag(encode_tag(0, 0)), DecodedTag { len: 0, ncaps: 0 });
+        assert_eq!(decode_tag(encode_tag(200, 3)), DecodedTag { len: 200, ncaps: 3 });
         assert_eq!(
             decode_tag(encode_tag(IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS)),
-            (IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS)
+            DecodedTag { len: IPC_BUFFER_DATA_MAX, ncaps: IPC_BUFFER_MAX_CAPS }
         );
     }
 
     #[test]
     fn tag_clamps_oversized_fields() {
-        let (len, ncaps) = decode_tag(encode_tag(10_000, 99));
-        assert_eq!(len, IPC_BUFFER_DATA_MAX);
-        assert_eq!(ncaps, IPC_BUFFER_MAX_CAPS);
+        let decoded = decode_tag(encode_tag(10_000, 99));
+        assert_eq!(decoded.len, IPC_BUFFER_DATA_MAX);
+        assert_eq!(decoded.ncaps, IPC_BUFFER_MAX_CAPS);
     }
 
     #[test]
@@ -129,7 +116,6 @@ mod tests {
             core::mem::offset_of!(IpcBuffer, data),
             8 + IPC_BUFFER_MAX_CAPS * 4
         );
-        // badge лежит сразу за data: 8 (tag) + 16 (caps) + 256 (data) = 280.
         assert_eq!(
             core::mem::offset_of!(IpcBuffer, badge),
             8 + IPC_BUFFER_MAX_CAPS * 4 + IPC_BUFFER_DATA_MAX

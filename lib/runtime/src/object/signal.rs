@@ -20,7 +20,7 @@ impl Signal {
         svc::signal_create()
             // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
             .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::from_return)
+            .map_err(Error::Syscall)
     }
 
     /// Берёт во владение хэндл `Signal`.

@@ -113,10 +113,7 @@ impl<T: Default> Default for Mutex<T> {
 
 impl<T> Drop for Mutex<T> {
     fn drop(&mut self) {
-        let h = self.signal_handle.load(Relaxed);
-        if h != 0 {
-            handle_close(Handle::new(h).unwrap());
-        }
+        handle_load_and_close(&self.signal_handle);
     }
 }
 
@@ -189,9 +186,13 @@ impl Default for Condvar {
 
 impl Drop for Condvar {
     fn drop(&mut self) {
-        let h = self.signal_handle.load(Relaxed);
-        if h != 0 {
-            handle_close(Handle::new(h).unwrap());
-        }
+        handle_load_and_close(&self.signal_handle);
+    }
+}
+
+fn handle_load_and_close(signal_handle: &AtomicU32) {
+    let h = signal_handle.load(Relaxed);
+    if h != 0 {
+        handle_close(Handle::new(h).unwrap());
     }
 }

@@ -9,7 +9,7 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use syscall::{Handle, MEM_FLAGS_READ_WRITE};
+use syscall::{Handle, UserMemFlags};
 use talc::{OomHandler, Span, Talc};
 
 use crate::{Mutex, handle_close, memory_allocate, memory_free, process_resource_self};
@@ -23,6 +23,7 @@ fn metering_handle() -> Option<Handle> {
     if cached != 0 {
         return Handle::new(cached);
     }
+    
     let raw = process_resource_self().ok()?.raw();
     match METERING_HANDLE.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => Handle::new(raw),
@@ -69,7 +70,7 @@ impl OomHandler for SyscallOom {
         let bytes = align_up(required.max(talc.oom_handler.next_chunk), PAGE_SIZE);
 
         let resource = metering_handle().ok_or(())?;
-        let va = memory_allocate(resource, bytes as u64, MEM_FLAGS_READ_WRITE);
+        let va = memory_allocate(resource, bytes as u64, UserMemFlags::ReadWrite.raw());
         let base = match usize::try_from(va) {
             Ok(addr) if addr != 0 => addr as *mut u8,
             _ => return Err(()),
@@ -145,7 +146,7 @@ fn passthrough_alloc(layout: Layout) -> *mut u8 {
     let Some(resource) = metering_handle() else {
         return ptr::null_mut();
     };
-    let va = memory_allocate(resource, bytes as u64, MEM_FLAGS_READ_WRITE);
+    let va = memory_allocate(resource, bytes as u64, UserMemFlags::ReadWrite.raw());
     match usize::try_from(va) {
         Ok(addr) if addr != 0 => addr as *mut u8,
         _ => ptr::null_mut(),

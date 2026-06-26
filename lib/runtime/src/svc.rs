@@ -2,7 +2,7 @@
 
 use core::arch::asm;
 
-use syscall::{Handle, SyscallOp, WaitItem, WakeCount};
+use syscall::{Handle, SyscallError, SyscallOp, WaitItem, WakeCount};
 
 /// Ждёт сигналы `signals` на capability target `handle`; `timeout_ns == 0` - non-blocking
 /// poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
@@ -75,7 +75,7 @@ pub fn signal_wait_many(items: &[WaitItem], timeout_ns: u64) -> (i64, u64) {
 
 /// Создаёт пустой `Signal` в текущей handle-таблице. Возврат: handle
 /// либо `-(SyscallError)`.
-pub fn signal_create() -> Result<Handle, i64> {
+pub fn signal_create() -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
@@ -90,9 +90,9 @@ pub fn signal_create() -> Result<Handle, i64> {
     Handle::from_syscall_return(ret)
 }
 
-/// Создаёт `Port` (synchronous rendezvous-IPC) в текущей таблице.
+/// Создаёт `Port` в текущей таблице.
 /// Возврат: один port-handle либо `-(SyscallError)`.
-pub fn port_create() -> Result<Handle, i64> {
+pub fn port_create() -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
@@ -110,7 +110,8 @@ pub fn port_create() -> Result<Handle, i64> {
 /// `send` на port `handle`: блокирующая отправка сообщения из
 /// IPC-буфера текущего потока. `timeout_ns`:
 /// [`PORT_TIMEOUT_INFINITE`](syscall::PORT_TIMEOUT_INFINITE) - бессрочно,
-/// `0` - poll, иначе дедлайн в нс. Возврат: 0,
+/// `0` - poll, иначе дедлайн в нс. Требует `Rights::WRITE`.
+/// Возврат: 0,
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
 pub fn port_send(handle: Handle, timeout_ns: u64) -> i64 {
@@ -132,8 +133,8 @@ pub fn port_send(handle: Handle, timeout_ns: u64) -> i64 {
 }
 
 /// `recv` на port `handle`: блокирующий приём в IPC-буфер текущего
-/// потока. `timeout_ns` - как у [`port_send`]. Возврат: reply handle id
-/// (если встречный был `call`, иначе 0),
+/// потока. `timeout_ns` - как у [`port_send`]. Требует `Rights::READ`.
+/// Возврат: reply handle id (если встречный был `call`, иначе 0),
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
 pub fn port_recv(handle: Handle, timeout_ns: u64) -> i64 {
@@ -156,7 +157,8 @@ pub fn port_recv(handle: Handle, timeout_ns: u64) -> i64 {
 
 /// `call` на port `handle`: блокирующий запрос-ответ. Сообщение из
 /// IPC-буфера текущего потока; ответ оказывается там же. `timeout_ns`
-/// ограничивает всю операцию (см. [`port_send`]). Возврат: 0,
+/// ограничивает всю операцию (см. [`port_send`]). Требует `Rights::WRITE`.
+/// Возврат: 0,
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
 pub fn port_call(handle: Handle, timeout_ns: u64) -> i64 {
@@ -178,7 +180,7 @@ pub fn port_call(handle: Handle, timeout_ns: u64) -> i64 {
 }
 
 /// `reply` на одноразовый `reply_handle`: доставляет ответ из IPC-буфера
-/// сервера вызывателю. Возврат: 0 либо `-(SyscallError)`.
+/// сервера вызывателю. Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
 pub fn port_reply(reply_handle: Handle) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - reply handle; ответ
@@ -220,7 +222,7 @@ pub fn handle_close(handle: Handle) -> i64 {
 /// Семантика `badge`: заклеймить можно только незаклеймённый источник;
 /// заклеймённый наследует свой значок при `badge == 0`, а попытка
 /// переклеймить (`badge != 0` на уже заклеймённом) даёт `BadHandle`.
-pub fn handle_duplicate(handle: Handle, new_rights: u32, badge: u64) -> Result<Handle, i64> {
+pub fn handle_duplicate(handle: Handle, new_rights: u32, badge: u64) -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
     // handle, new_rights (нижние 32 бита), badge (полные 64 бита); память
@@ -241,7 +243,7 @@ pub fn handle_duplicate(handle: Handle, new_rights: u32, badge: u64) -> Result<H
 
 /// Создаёт пустой user-процесс с именем `name` (UTF-8). Возврат: handle
 /// на `ProcessObject` либо `-(SyscallError)`.
-pub fn process_create(name: &[u8]) -> Result<Handle, i64> {
+pub fn process_create(name: &[u8]) -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
     // name_va, name_len; ядро читает имя по x0 до возврата из svc.
@@ -259,7 +261,7 @@ pub fn process_create(name: &[u8]) -> Result<Handle, i64> {
 }
 
 /// Возвращает handle на собственный `ProcessObject` либо `-(SyscallError)`.
-pub fn process_self() -> Result<Handle, i64> {
+pub fn process_self() -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
@@ -274,10 +276,10 @@ pub fn process_self() -> Result<Handle, i64> {
     Handle::from_syscall_return(ret)
 }
 
-/// Возвращает свежий handle на метеринг-`Resource` текущего процесса (права
-/// включают `WRITE` для минтинга). Возврат: resource-handle либо
-/// `-(SyscallError)` (`WrongType`, если процесс без метеринг-ресурса).
-pub fn process_resource_self() -> Result<Handle, i64> {
+/// Возвращает свежий handle на метеринг-`Resource` текущего процесса
+/// (дефолтные права, включая `WRITE`). Возврат: resource-handle либо
+/// `-(SyscallError)` (`WrongType`, если процесс стартовал без метеринг-ресурса).
+pub fn process_resource_self() -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
@@ -293,7 +295,8 @@ pub fn process_resource_self() -> Result<Handle, i64> {
 }
 
 /// Загружает образ в процесс `handle` из сериализованного
-/// `UserImageDescAbi` в `desc`. Возврат: 0 либо `-(SyscallError)`.
+/// `UserImageDescAbi` в `desc`. Требует `Rights::WRITE` на `handle`.
+/// Возврат: 0 либо `-(SyscallError)`.
 pub fn process_load_image(handle: Handle, desc: &[u8]) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
@@ -313,8 +316,8 @@ pub fn process_load_image(handle: Handle, desc: &[u8]) -> i64 {
     ret
 }
 
-/// Финальный exit-код процесса `handle`. Возврат: exit code
-/// (нижние 32 бита, zero-extended) либо `-(SyscallError)`.
+/// Финальный exit-код процесса `handle`. Требует `Rights::READ`.
+/// Возврат: exit code (нижние 32 бита, zero-extended) либо `-(SyscallError)`.
 pub fn process_exit_code(handle: Handle) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
@@ -331,9 +334,9 @@ pub fn process_exit_code(handle: Handle) -> i64 {
     ret
 }
 
-/// Завершает процесс `handle` с кодом `exit_code` (нижние 32 бита): помечает
-/// завершёнными все его потоки, после декремента до нуля - и сам процесс
-/// (bound-`Signal`'ы получают `SIGNALED`). Возврат: 0 либо `-(SyscallError)`.
+/// Завершает процесс `handle` с кодом `exit_code`: помечает завершёнными все
+/// его потоки, после декремента до нуля - и сам процесс.
+/// Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
 pub fn process_terminate(handle: Handle, exit_code: u64) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
@@ -353,8 +356,10 @@ pub fn process_terminate(handle: Handle, exit_code: u64) -> i64 {
 
 /// Стартует первый поток процесса `handle`:
 /// `priority_and_count = priority | (handles_count << 32)`, `handles_va` -
-/// массив `[u32]` HandleId. Возврат: handle на `ThreadObject` либо
-/// `-(SyscallError)`.
+/// массив `[u32]` HandleId. Требует `Rights::WRITE` на `handle` и
+/// `Rights::TRANSFER` на каждом handle в `handles_va`. Стартуемый процесс
+/// наследует метеринг-ресурс вызывающего.
+/// Возврат: handle на `ThreadObject` либо `-(SyscallError)`.
 pub fn process_start(
     handle: Handle,
     entry_pc: u64,
@@ -362,7 +367,7 @@ pub fn process_start(
     arg: u64,
     priority_and_count: u64,
     handles_va: u64,
-) -> Result<Handle, i64> {
+) -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x5; при
     // handles_count > 0 ядро читает массив handle'ов по x5 до возврата из svc.
@@ -392,7 +397,7 @@ pub fn thread_create(
     user_sp: u64,
     arg: u64,
     priority: u64,
-) -> Result<Handle, i64> {
+) -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x4:
     // process_handle, entry_pc, user_sp, arg, priority; память ядру не
@@ -414,7 +419,7 @@ pub fn thread_create(
 }
 
 /// Возвращает handle на собственный `ThreadObject` либо `-(SyscallError)`.
-pub fn thread_self() -> Result<Handle, i64> {
+pub fn thread_self() -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
@@ -429,8 +434,8 @@ pub fn thread_self() -> Result<Handle, i64> {
     Handle::from_syscall_return(ret)
 }
 
-/// Финальный exit-код потока `handle`. Возврат: exit code (нижние 32
-/// бита, zero-extended) либо `-(SyscallError)`.
+/// Финальный exit-код потока `handle`. Требует `Rights::READ`.
+/// Возврат: exit code (нижние 32 бита, zero-extended) либо `-(SyscallError)`.
 pub fn thread_exit_code(handle: Handle) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
@@ -447,9 +452,10 @@ pub fn thread_exit_code(handle: Handle) -> i64 {
     ret
 }
 
-/// Завершает поток `handle` с кодом `exit_code` (нижние 32 бита). Возврат:
-/// 0 либо `-(SyscallError)`. Терминирование собственного потока через
-/// handle отвергается - для self-exit есть `thread_exit`.
+/// Завершает поток `handle` с кодом `exit_code` (нижние 32 бита).
+/// Требует `Rights::WRITE`. Терминирование собственного потока через handle
+/// отвергается - для self-exit есть `thread_exit`.
+/// Возврат: 0 либо `-(SyscallError)`.
 pub fn thread_terminate(handle: Handle, exit_code: u64) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
@@ -474,7 +480,7 @@ pub fn memory_create_virtual(
     resource: Handle,
     size_bytes: u64,
     access_mask: u64,
-) -> Result<Handle, i64> {
+) -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
     // память ядру не передаётся.
@@ -501,7 +507,7 @@ pub fn memory_slice(
     offset: u64,
     size_bytes: u64,
     access_mask: u64,
-) -> Result<Handle, i64> {
+) -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x3:
     // region_handle, offset, size_bytes, access_mask; память ядру не передаётся.
@@ -601,8 +607,10 @@ pub fn memory_free(va: u64, size_bytes: u64) -> i64 {
 }
 
 /// Инспектирует Memory-регион `handle`. Возврат: `(size_bytes,
-/// base_pa | (kind_tag << 3) | access_bits)`; первый элемент знаковый
-/// (`-(SyscallError)` при ошибке), второй валиден только при успехе.
+/// base_pa | (kind_tag << 3) | access_bits)` — первый элемент знаковый
+/// (`-(SyscallError)` при ошибке), второй валиден только при успехе;
+/// base_pa page-aligned, младшие 12 бит несут kind/access; для `Virtual`
+/// base_pa = 0.
 pub fn memory_region_inspect(handle: Handle) -> (i64, u64) {
     let primary: i64;
     let secondary: u64;
@@ -642,8 +650,8 @@ pub fn ipc_buffer_addr() -> i64 {
 /// Минтит `IrqLine` по полномочию `control` для линии `irq`. Требует
 /// `Rights::WRITE` на `control` и попадания `irq` в его диапазон. Возврат:
 /// irq-line handle либо `-(SyscallError)`. Срабатывание ожидается через
-/// `signal_wait_one`/`signal_wait_many` прямо по возвращённому handle.
-pub fn irq_mint(control: Handle, irq: u16) -> Result<Handle, i64> {
+/// `signal_wait_one`/`signal_wait_many` прямо по возвращённому handle (бит `SIGNALED`).
+pub fn irq_mint(control: Handle, irq: u16) -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - control handle,
     // x1 - номер линии; память ядру не передаётся.

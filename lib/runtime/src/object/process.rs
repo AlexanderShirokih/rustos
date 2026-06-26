@@ -23,7 +23,7 @@ impl Process {
         svc::process_create(name.as_bytes())
             // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
             .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::from_return)
+            .map_err(Error::Syscall)
     }
 
     /// Возвращает обёртку над собственным процессом.
@@ -31,7 +31,7 @@ impl Process {
         svc::process_self()
             // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
             .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::from_return)
+            .map_err(Error::Syscall)
     }
 
     /// Берёт во владение хэндл `Process`.
@@ -75,7 +75,7 @@ impl Process {
                     OwnedHandle::from_handle(handle)
                 }))
             }
-            Err(ret) => Err(Error::from_return(ret)),
+            Err(e) => Err(Error::Syscall(e)),
         }
     }
 

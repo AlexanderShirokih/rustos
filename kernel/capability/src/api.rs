@@ -8,7 +8,6 @@ use super::{
     handle::{Capability, HandleId},
     irq_line::IrqLine,
     irq_runtime::interrupts_control,
-    rights::default_rights_for,
     runtime::{ParkState, runtime},
     signal::Signal,
     target::CapabilityTarget,
@@ -238,14 +237,12 @@ pub fn thread_exit(exit_code: i32) -> ! {
 }
 
 /// Создаёт новый [`Signal`] и регистрирует handle в таблице текущего
-/// процесса. Стартовые права - [`default_rights_for`].
+/// процесса. Стартовые права - [`default_rights_for`](super::rights::default_rights_for).
 pub fn signal_create() -> Result<HandleId, IpcError> {
     let table = runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
-    let signal = Signal::new();
-    let target = CapabilityTarget::Signal(signal);
-    let handle = Capability::new(target.clone(), default_rights_for(&target));
+    let handle = Capability::new_with_default_rights(Signal::new());
     table.with_lock(|tbl| tbl.insert(handle))
 }
 
@@ -258,7 +255,8 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
 /// Требует [`Rights::WRITE`] на `IrqControl`-хендле и попадания `irq` в его
 /// диапазон (`permits`).
 /// Привязка линии идёт через установленный [`interrupts_control`]. Возвращает
-/// handle на свежий `IrqLine` со стартовыми правами [`default_rights_for`].
+/// handle на свежий `IrqLine` со стартовыми правами
+/// [`default_rights_for`](super::rights::default_rights_for).
 pub fn irq_mint(control_handle: HandleId, irq: u16) -> Result<HandleId, IpcError> {
     let table = runtime()
         .current_handle_table()
@@ -272,8 +270,7 @@ pub fn irq_mint(control_handle: HandleId, irq: u16) -> Result<HandleId, IpcError
     }
 
     let line = IrqLine::bind(interrupts_control().clone(), irq)?;
-    let target = CapabilityTarget::IrqLine(line);
-    let handle = Capability::new(target.clone(), default_rights_for(&target));
+    let handle = Capability::new_with_default_rights(line);
     table.with_lock(|tbl| tbl.insert(handle))
 }
 

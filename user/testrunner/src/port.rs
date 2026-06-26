@@ -83,13 +83,13 @@ unsafe fn read_msg(va: usize, out: &mut [u8]) -> (usize, usize) {
     // SAFETY: caller guarantees `va` points to the current thread's per-thread IPC-буфер.
     unsafe {
         let tag = (va as *const u64).read_volatile();
-        let (len, ncaps) = decode_tag(tag);
+        let decoded = decode_tag(tag);
         let data = (va + DATA_OFF) as *const u8;
-        let n = out.len().min(len);
+        let n = out.len().min(decoded.len);
         for (i, slot) in out.iter_mut().enumerate().take(n) {
             *slot = data.add(i).read_volatile();
         }
-        (len, ncaps)
+        (decoded.len, decoded.ncaps)
     }
 }
 
