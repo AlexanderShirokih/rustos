@@ -30,6 +30,10 @@ impl BootstrapService for SignalingSink {
     fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
         Err(1)
     }
+
+    fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
+        Err(1)
+    }
 }
 
 /// Минимальный kernel-транспорт клиента: `#[cast]` -> `port_send` поверх

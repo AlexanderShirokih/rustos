@@ -23,6 +23,7 @@ bootstrap = { workspace = true }
 ipc = { workspace = true }
 syscall = { workspace = true }
 runtime = { workspace = true }
+userland-image = { workspace = true }
 
 [lints]
 workspace = true

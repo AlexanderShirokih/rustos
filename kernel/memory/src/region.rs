@@ -68,8 +68,12 @@ pub enum MemoryBacking {
         zeroed: AtomicBool,
     },
 
-    /// Фиксированный PA-диапазон Device-MMIO: PA не принадлежит региону.
-    Physical { pa_base: PageAlignedAddress },
+    /// Фиксированный PA-диапазон: PA не принадлежит региону. `memory_type`
+    /// различает Device-MMIO и обычную cacheable RAM.
+    Physical {
+        pa_base: PageAlignedAddress,
+        memory_type: MemoryType,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,8 +142,29 @@ impl MemoryRegion {
             !access.allows(AccessMask::X),
             "device memory cannot be executable"
         );
+        Self::create_physical(pa_base, size, access, MemoryType::Device)
+    }
+
+    /// Регион поверх фиксированного PA-диапазона обычной cacheable RAM.
+    pub fn create_physical_normal(
+        pa_base: PageAlignedAddress,
+        size: NonZeroUsize,
+        access: AccessMask,
+    ) -> Self {
+        Self::create_physical(pa_base, size, access, MemoryType::Normal)
+    }
+
+    fn create_physical(
+        pa_base: PageAlignedAddress,
+        size: NonZeroUsize,
+        access: AccessMask,
+        memory_type: MemoryType,
+    ) -> Self {
         Self {
-            backing: MemoryBacking::Physical { pa_base },
+            backing: MemoryBacking::Physical {
+                pa_base,
+                memory_type,
+            },
             size_bytes: size.get(),
             access_mask: access,
             refund: None,
@@ -170,18 +195,16 @@ impl MemoryRegion {
         }
 
         match &self.backing {
-            MemoryBacking::Physical { pa_base } => {
+            MemoryBacking::Physical {
+                pa_base,
+                memory_type,
+            } => {
                 let sub_pa = pa_base
                     .as_usize()
                     .checked_add(offset_bytes)
                     .and_then(PageAlignedAddress::from_usize)
                     .ok_or(RegionSliceError::OutOfBounds)?;
-                Ok(Self {
-                    backing: MemoryBacking::Physical { pa_base: sub_pa },
-                    size_bytes: size.get(),
-                    access_mask: access,
-                    refund: None,
-                })
+                Ok(Self::create_physical(sub_pa, size, access, *memory_type))
             }
             MemoryBacking::Virtual { .. } => Err(RegionSliceError::UnsupportedBacking),
         }
@@ -213,16 +236,17 @@ impl MemoryRegion {
     /// Userspace сопоставляет выданный device-регион с FDT-узлом по этому PA.
     pub fn physical_base(&self) -> Option<PageAlignedAddress> {
         match self.backing {
-            MemoryBacking::Physical { pa_base } => Some(pa_base),
+            MemoryBacking::Physical { pa_base, .. } => Some(pa_base),
             MemoryBacking::Virtual { .. } => None,
         }
     }
 
-    /// Тип памяти, выведенный из бэкинга.
+    /// Тип памяти региона. `Virtual` всегда `Normal`; для `Physical` хранится в
+    /// бэкинге.
     pub fn memory_type(&self) -> MemoryType {
         match self.backing {
             MemoryBacking::Virtual { .. } => MemoryType::Normal,
-            MemoryBacking::Physical { .. } => MemoryType::Device,
+            MemoryBacking::Physical { memory_type, .. } => memory_type,
         }
     }
 
@@ -258,7 +282,7 @@ impl MemoryRegion {
                 }
                 Ok(())
             }
-            MemoryBacking::Physical { pa_base } => {
+            MemoryBacking::Physical { pa_base, .. } => {
                 mapper.map_exact(va, *pa_base, self.size_bytes, flags)
             }
         }
@@ -367,6 +391,7 @@ mod tests {
     #[derive(Default)]
     struct MockMapper {
         mapped: Mutex<StdVec<(usize, usize, usize)>>,
+        mapped_flags: Mutex<StdVec<MemFlags>>,
         unmapped: Mutex<StdVec<(usize, usize)>>,
         zeroed: Mutex<StdVec<usize>>,
         fail_after: Mutex<Option<usize>>,
@@ -394,7 +419,7 @@ mod tests {
             source_address: PageAlignedVirtualAddress,
             target_address: PageAlignedAddress,
             size: usize,
-            _mem_flags: MemFlags,
+            mem_flags: MemFlags,
         ) -> Result<(), MemoryMappingError> {
             if let Some(limit) = *self.fail_after.lock().unwrap()
                 && self.mapped.lock().unwrap().len() >= limit
@@ -406,6 +431,7 @@ mod tests {
                 target_address.as_usize(),
                 size,
             ));
+            self.mapped_flags.lock().unwrap().push(mem_flags);
             Ok(())
         }
 
@@ -521,9 +547,52 @@ mod tests {
         assert_eq!(sub.access_mask().bits(), AccessMask::R.bits());
         assert_eq!(sub.memory_type(), MemoryType::Device);
         match &sub.backing {
-            MemoryBacking::Physical { pa_base } => assert_eq!(pa_base.as_usize(), 0x4000_1000),
+            MemoryBacking::Physical { pa_base, .. } => assert_eq!(pa_base.as_usize(), 0x4000_1000),
             MemoryBacking::Virtual { .. } => panic!("physical slice must stay physical"),
         }
+    }
+
+    #[test]
+    fn create_physical_normal_is_normal_type() {
+        let region =
+            MemoryRegion::create_physical_normal(aligned_pa(0x4000_0000), nz(0x1000), AccessMask::R);
+        assert_eq!(region.memory_type(), MemoryType::Normal);
+    }
+
+    #[test]
+    fn create_physical_device_stays_device_type() {
+        let region =
+            MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x1000), AccessMask::R);
+        assert_eq!(region.memory_type(), MemoryType::Device);
+    }
+
+    #[test]
+    fn slice_physical_normal_preserves_normal_type() {
+        let region = MemoryRegion::create_physical_normal(
+            aligned_pa(0x4000_0000),
+            nz(0x2000),
+            AccessMask::R,
+        );
+        let sub = region
+            .slice(0x1000, nz(0x1000), AccessMask::R)
+            .expect("in-bounds slice");
+        assert_eq!(sub.memory_type(), MemoryType::Normal);
+    }
+
+    #[test]
+    fn install_physical_forwards_flags_to_map_exact() {
+        let region = MemoryRegion::create_physical_normal(
+            aligned_pa(0x8000_0000),
+            nz(PAGE_SIZE),
+            AccessMask::R,
+        );
+        let mapper = MockMapper::default();
+        region
+            .install(&mapper, aligned_va(0x4000_0000), MemFlags::user_ro())
+            .expect("install must succeed");
+        let flags = mapper.mapped_flags.lock().unwrap();
+        assert_eq!(flags.len(), 1);
+        assert!(matches!(flags[0], MemFlags::Private(_)));
     }
 
     #[test]

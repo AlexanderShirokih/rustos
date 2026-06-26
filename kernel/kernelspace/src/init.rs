@@ -9,6 +9,7 @@ use alloc::sync::Arc;
 
 use capability::{Capability, CapabilityTarget, Rights, SIGNALED, install_handle, signal_wait_one};
 use klog::{info, warn};
+use memory::physical_address::PageAlignedAddress;
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
 use crate::{
@@ -34,12 +35,13 @@ pub fn spawn_init_process<A>(
     ));
 
     let blob = kernel.userland_blob();
+    let blob_phys = kernel.userland_blob_phys();
     let user_va_end = A::USER_VA_END;
 
     scheduler
         .spawn(
             SpawnConfig::new("init").priority(Priority::highest()),
-            move || start_bootstrap_chain(launcher.as_ref(), blob, user_va_end),
+            move || start_bootstrap_chain(launcher.as_ref(), blob, blob_phys, user_va_end),
         )
         .expect("init process spawn must succeed");
 }
@@ -47,14 +49,15 @@ pub fn spawn_init_process<A>(
 fn start_bootstrap_chain(
     launcher: &dyn UserProcessLauncher,
     blob: Option<&'static [u8]>,
+    blob_phys: Option<PageAlignedAddress>,
     user_va_end: usize,
 ) -> ! {
-    let Some(blob) = blob else {
+    let (Some(blob), Some(blob_phys)) = (blob, blob_phys) else {
         warn!("userland blob missing; bootstrap process not started");
         power::system_off(1)
     };
 
-    let launch = match spawn_process(launcher, blob, user_va_end) {
+    let launch = match spawn_process(launcher, blob, blob_phys, user_va_end) {
         Ok(launch) => launch,
         Err(e) => {
             warn!("bootstrap process spawn failed: {:?}", e);
@@ -66,9 +69,10 @@ fn start_bootstrap_chain(
 
     let port = launch.port;
     let irq_control = launch.irq_control;
+    let image_region = launch.image_region;
     if let Err(e) = syscall_bridge::scheduler().spawn(
         SpawnConfig::new("bootstrap-log").priority(Priority::normal()),
-        move || run_bootstrap(&port, irq_control),
+        move || run_bootstrap(&port, irq_control, image_region),
     ) {
         warn!("bootstrap-log task spawn failed: {:?}", e);
         power::system_off(1)

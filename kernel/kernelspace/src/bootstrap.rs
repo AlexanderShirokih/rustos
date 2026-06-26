@@ -16,7 +16,7 @@ use ipc::{
     wire::{Cap, IpcError as WireError, Str},
 };
 use klog::{info, warn};
-use memory::{AccessMask, physical_address::PageAlignedAddress};
+use memory::{AccessMask, MemoryRegion, physical_address::PageAlignedAddress};
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
 use syscall::{IpcBuffer, decode_tag, encode_tag};
@@ -30,6 +30,7 @@ pub struct BootstrapLaunch {
     pub port: Arc<Port>,
     pub info: UserProcessLaunchInfo,
     pub irq_control: Arc<IrqControl>,
+    pub image_region: Arc<MemoryRegion>,
 }
 
 /// Ошибки запуска bootstrap-процесса.
@@ -40,10 +41,15 @@ pub enum BootstrapSpawnError {
     Spawn(SpawnUserError),
 }
 
-/// Разбирает `blob` и спавнит процесс.
+/// Размер страницы для округления региона userland-образа.
+const PAGE_SIZE: usize = 4096;
+
+/// Разбирает `blob` и спавнит процесс. `image_phys` - физбаза `blob` в initrd
+/// (4K-выровнена), поверх которой выдаётся read-only регион образа.
 pub fn spawn_process(
     launcher: &dyn UserProcessLauncher,
     blob: &'static [u8],
+    image_phys: PageAlignedAddress,
     user_va_end: usize,
 ) -> Result<BootstrapLaunch, BootstrapSpawnError> {
     let image = decode(blob).map_err(BootstrapSpawnError::Image)?;
@@ -69,6 +75,16 @@ pub fn spawn_process(
     // Корневое полномочие на IRQ-линии: весь SPI-диапазон.
     let irq_control = IrqControl::new(32, 1019);
 
+    // Read-only Normal-регион поверх байт образа; размер округлён до страницы
+    // для маппинга. blob непуст (decode прошёл), поэтому размер ненулевой.
+    let image_size = NonZeroUsize::new(blob.len().next_multiple_of(PAGE_SIZE))
+        .expect("userland image is non-empty");
+    let image_region = Arc::new(MemoryRegion::create_physical_normal(
+        image_phys,
+        image_size,
+        AccessMask::R,
+    ));
+
     let launch = UserProcessLaunch::new()
         .initial_handles(vec![peer_handle])
         .bootstrap_handle(0);
@@ -84,13 +100,18 @@ pub fn spawn_process(
         port,
         info,
         irq_control,
+        image_region,
     })
 }
 
 /// Цикл сервера bootstrap-port'а: kernel-поток аллоцирует kernel-резидентный
 /// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракт
 /// `Bootstrap`.
-pub fn run_bootstrap(port: &Arc<Port>, irq_control: Arc<IrqControl>) {
+pub fn run_bootstrap(
+    port: &Arc<Port>,
+    irq_control: Arc<IrqControl>,
+    image_region: Arc<MemoryRegion>,
+) {
     let Some(table) = runtime().current_handle_table() else {
         warn!("bootstrap: no kernel handle-table; server not started");
         return;
@@ -98,7 +119,11 @@ pub fn run_bootstrap(port: &Arc<Port>, irq_control: Arc<IrqControl>) {
 
     let buffer: KernelIpcBuffer = Arc::new(MutexCell::new(IpcBuffer::zeroed()));
     let transport = KernelPortTransport::new(port.clone(), buffer, table.clone());
-    let mut server = BootstrapServer { table, irq_control };
+    let mut server = BootstrapServer {
+        table,
+        irq_control,
+        image_region,
+    };
 
     loop {
         match dispatch_bootstrap(&mut server, &transport) {
@@ -122,6 +147,7 @@ const ACQUIRE_FAILED: u32 = 1;
 struct BootstrapServer {
     table: Arc<MutexCell<HandleTable>>,
     irq_control: Arc<IrqControl>,
+    image_region: Arc<MemoryRegion>,
 }
 
 impl BootstrapServer {
@@ -145,6 +171,10 @@ impl BootstrapService for BootstrapServer {
 
     fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
         self.vend(CapabilityTarget::IrqControl(self.irq_control.clone()))
+    }
+
+    fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
+        self.vend(CapabilityTarget::Memory(self.image_region.clone()))
     }
 }
 

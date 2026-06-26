@@ -504,6 +504,7 @@ dependencies = [
  "ipc",
  "runtime",
  "syscall",
+ "userland-image",
 ]
 
 [[package]]

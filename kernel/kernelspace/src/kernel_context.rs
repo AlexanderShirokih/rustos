@@ -5,6 +5,7 @@ use drivers_common::{BootServices, RuntimeDriverRegistry, services::mmio::MmioSe
 use memory::{
     frame_allocator::FrameAllocator,
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
+    physical_address::PageAlignedAddress,
     virtual_address::PageAlignedVirtualAddress,
 };
 use spin::Mutex;
@@ -16,6 +17,7 @@ pub struct KernelContext {
     driver_registry: Mutex<RuntimeDriverRegistry>,
     address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
     userland_blob: Option<&'static [u8]>,
+    userland_blob_phys: Option<PageAlignedAddress>,
     dtb_virt: usize,
 }
 
@@ -27,6 +29,7 @@ impl KernelContext {
         mmio_arena_base: PageAlignedVirtualAddress,
         mmio_arena_size: NonZeroUsize,
         userland_blob: Option<&'static [u8]>,
+        userland_blob_phys: Option<PageAlignedAddress>,
         dtb_virt: usize,
     ) -> KernelContext {
         // Публикуем глобальные слоты для модулей без KernelContext.
@@ -49,6 +52,7 @@ impl KernelContext {
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             address_space_factory,
             userland_blob,
+            userland_blob_phys,
             dtb_virt,
         }
     }
@@ -61,6 +65,11 @@ impl KernelContext {
     /// Байты userland blob из initrd, если загрузчик передал initrd.
     pub fn userland_blob(&self) -> Option<&'static [u8]> {
         self.userland_blob
+    }
+
+    /// Физбаза userland blob из initrd, если загрузчик передал initrd.
+    pub fn userland_blob_phys(&self) -> Option<PageAlignedAddress> {
+        self.userland_blob_phys
     }
 
     /// Виртуальный адрес DTB в higher-half (живёт весь срок ядра).

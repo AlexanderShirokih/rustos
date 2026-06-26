@@ -91,6 +91,10 @@ impl BootstrapService for LogProbe {
     fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
         Err(1)
     }
+
+    fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
+        Err(1)
+    }
 }
 
 fn spawn_bootstrap_with_log() -> BootstrapLaunch {
@@ -100,6 +104,8 @@ fn spawn_bootstrap_with_log() -> BootstrapLaunch {
     let launch = kernelspace::bootstrap::spawn_process(
         kernelspace::kernel_tests::user_process_launcher().as_ref(),
         blob,
+        // Log-путь не выдаёт регион образа; физбаза не используется.
+        memory::physical_address::PageAlignedAddress::ZERO,
         Aarch64Context::USER_VA_END,
     )
     .expect("spawn_process must succeed");

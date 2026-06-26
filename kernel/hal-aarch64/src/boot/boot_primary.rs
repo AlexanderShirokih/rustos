@@ -107,13 +107,21 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
     let address_space_factory: &'static (
                  dyn memory::memory_mapper::AddressSpaceFactory + Send + Sync
              ) = Box::leak(result.address_space_factory);
-    let userland_blob: Option<&'static [u8]> = if initrd_size > 0 {
+    let (userland_blob, userland_blob_phys): (
+        Option<&'static [u8]>,
+        Option<PageAlignedAddress>,
+    ) = if initrd_size > 0 {
         let va = initrd_start + HIGHER_HALF_BASE;
         // SAFETY: initrd зарезервирован в MemoryLayout (RegionTag::Other), фреймы не переиспользуются.
-        // VA = PA + HIGHER_HALF_BASE - валидный маппинг higher-half, живёт на всём сроке ядра.
-        Some(unsafe { core::slice::from_raw_parts(va as *const u8, initrd_size) })
+        let blob = unsafe { core::slice::from_raw_parts(va as *const u8, initrd_size) };
+        // База initrd обязана быть 4K-выровнена: образ маппится в userspace
+        // постранично. Поддерживаемые загрузчики (QEMU virt, Android boot
+        // ramdisk) это гарантируют.
+        let phys =
+            PageAlignedAddress::from_usize(initrd_start).expect("initrd base is 4K-aligned");
+        (Some(blob), Some(phys))
     } else {
-        None
+        (None, None)
     };
 
     let mmio_arena_base = PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(KMMIO_BASE));
@@ -127,6 +135,7 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
         mmio_arena_base,
         mmio_arena_size,
         userland_blob,
+        userland_blob_phys,
         dtb_virt,
     )));
 
@@ -138,12 +147,11 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
         kernel,
         buffered,
         SCHED_CONFIG,
-        pick_init_task(),
+        spawn_init_process_impl(),
     )
 }
 
-/// Возвращает init-таск для текущей сборочной фичи.
-fn pick_init_task()
+fn spawn_init_process_impl()
 -> fn(&Scheduler<Aarch64Context, KernelTimerSource, Bootstrapped>, &mut KernelContext) {
     #[cfg(feature = "kernel-tests")]
     {
