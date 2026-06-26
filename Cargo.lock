@@ -707,6 +707,9 @@ dependencies = [
  "spin",
  "syscall",
  "test-harness-qemu",
+ "userland",
+ "userland-image",
+ "userland-loader",
 ]
 
 [[package]]
@@ -794,6 +797,15 @@ dependencies = [
  "toml",
  "userland",
  "userland-image",
+]
+
+[[package]]
+name = "userland-loader"
+version = "0.1.0"
+dependencies = [
+ "runtime",
+ "syscall",
+ "userland",
 ]
 
 [[package]]

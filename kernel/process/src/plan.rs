@@ -1,6 +1,9 @@
 //! Подготовка per-process [`UserVmAllocator`] для свежесозданного user-процесса.
 
-use memory::{UserVmAllocator, virtual_address::PageAlignedVirtualAddress};
+use memory::{
+    UserVmAllocator,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+};
 
 use crate::image::UserImage;
 
@@ -8,16 +11,17 @@ use crate::image::UserImage;
 /// сегмента образа и базой user-стека (отсюда выдаётся `vm_allocate`). `None`,
 /// если дыры нет - у таких процессов `vm_*` всегда вернут `OutOfMemory`.
 pub fn build_user_vm_allocator(image: &UserImage<'_>) -> Option<UserVmAllocator> {
-    let highest_end = image.highest_segment_end()?;
-    let stack_base = image.user_stack_base().ok()?;
-    let highest_aligned = PageAlignedVirtualAddress::from_usize(highest_end.as_usize())?;
-    if highest_aligned.as_usize() >= stack_base.as_usize() {
-        return None;
-    }
-    Some(UserVmAllocator::new(
-        highest_aligned,
-        stack_base.as_virtual(),
-    ))
+    let window = userland::user_vm_window(
+        image
+            .segments
+            .iter()
+            .map(|seg| (seg.va_base.as_usize() as u64, seg.mapped_size as u64)),
+        image.user_stack_top.as_usize() as u64,
+        image.user_stack_size as u64,
+    )?;
+    let start = PageAlignedVirtualAddress::from_usize(usize::try_from(window.start).ok()?)?;
+    let end = VirtualAddress::new(usize::try_from(window.end).ok()?);
+    Some(UserVmAllocator::new(start, end))
 }
 
 #[cfg(test)]

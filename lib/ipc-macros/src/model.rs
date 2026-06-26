@@ -536,8 +536,15 @@ fn resolve_wire_ty(ty: &Type) -> syn::Result<WireTy> {
 fn field_data_max_bound() -> Bound {
     let n = FIELD_DATA_MAX;
     let int_lit = syn::LitInt::new(&n.to_string(), Span::call_site());
-    let expr = Expr::Lit(ExprLit { attrs: vec![], lit: Lit::Int(int_lit) });
-    Bound { expr: expr.clone(), value: expr, lit: Some(n) }
+    let expr = Expr::Lit(ExprLit {
+        attrs: vec![],
+        lit: Lit::Int(int_lit),
+    });
+    Bound {
+        expr: expr.clone(),
+        value: expr,
+        lit: Some(n),
+    }
 }
 
 /// Извлекает границу bounded-типа: любой const-аргумент `Str<N>` / `Str<{ N }>`.

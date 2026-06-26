@@ -2,3 +2,9 @@ version = 1
 
 [[programs]]
 package = "testrunner"
+
+[[programs]]
+package = "testrunner"
+bin = "spawn-fixture"
+name = "spawn-fixture"
+bootstrap = false

@@ -15,7 +15,7 @@ pub struct Signal {
 }
 
 impl Signal {
-    /// Создаёт пустой `Signal` в текущей таблице.
+    /// Создаёт пустой `Signal` в текущем процессе.
     pub fn create() -> Result<Self> {
         svc::signal_create()
             // SAFETY: handle только что создан syscall'ом, мы единственный владелец.

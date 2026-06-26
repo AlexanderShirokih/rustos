@@ -2,7 +2,7 @@
 
 extern crate alloc;
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
 
 use bootstrap::{BootstrapService, dispatch_bootstrap};
@@ -93,9 +93,7 @@ pub fn spawn_process(
         AccessMask::R,
     ));
 
-    let launch = UserProcessLaunch::new()
-        .initial_handles(vec![peer_handle])
-        .bootstrap_handle(0);
+    let launch = UserProcessLaunch::new(peer_handle);
 
     let info = launcher
         .spawn_user_process_with_launch(name, &user_image, Priority::normal(), 2, launch)

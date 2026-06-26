@@ -1,4 +1,9 @@
 //! Маска доступа региона памяти в syscall ABI. Нулевая маска отвергается как `InvalidArgument`.
+
+/// Эксклюзивный верх адресуемого userspace VA-диапазона (потолок адресного
+/// пространства процесса).
+pub const USER_VA_END: u64 = 0x0001_0000_0000_0000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct MemoryAccess(u64);

@@ -28,6 +28,7 @@ members = [
     "lib/collections",
     "lib/userland",
     "lib/userland-image",
+    "lib/userland-loader",
     "lib/runtime",
     "lib/util",
     "tools/userland-image",
@@ -86,6 +87,7 @@ test-harness-qemu = { path = "lib/test-harness-qemu" }
 test-harness-macros = { path = "lib/test-harness-macros" }
 userland = { path = "lib/userland" }
 userland-image = { path = "lib/userland-image" }
+userland-loader = { path = "lib/userland-loader" }
 runtime = { path = "lib/runtime" }
 process = { path = "kernel/process" }
 userland-image-tool = { path = "tools/userland-image" }

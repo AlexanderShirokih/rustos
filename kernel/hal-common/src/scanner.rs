@@ -199,8 +199,6 @@ mod tests {
 
     #[test]
     fn first_serial_finds_serial_inside_soc_bus() {
-        // Регресс: serial лежит в /soc/serial@2000 (не прямой ребёнок корня).
-        // Прежняя реализация через nodes() (только дети корня) его не находила.
         let dtb = build_console_dtb(None);
         let tree = DeviceTree::from_bytes(&dtb).unwrap();
 

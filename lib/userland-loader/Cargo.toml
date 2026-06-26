@@ -1,0 +1,21 @@
+cargo-features = ["per-package-target"]
+
+[package]
+name = "userland-loader"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+forced-target = "aarch64-unknown-none"
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+runtime = { workspace = true }
+userland = { workspace = true }
+syscall = { workspace = true }
+
+[lints]
+workspace = true

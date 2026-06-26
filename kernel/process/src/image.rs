@@ -73,16 +73,6 @@ impl UserImage<'_> {
         PageAlignedVirtualAddress::from_usize(base).ok_or(UserImageError::MisalignedStack)
     }
 
-    /// Конец самого высокого сегмента (exclusive). `None`, если сегментов нет.
-    pub fn highest_segment_end(&self) -> Option<VirtualAddress> {
-        self.segments
-            .iter()
-            // Переполняющий сегмент невалиден и не может быть границей: отбрасываем.
-            .filter_map(|seg| seg.va_base.as_usize().checked_add(seg.mapped_size))
-            .max()
-            .map(VirtualAddress::new)
-    }
-
     /// Проверяет инварианты образа без выполнения каких-либо аллокаций.
     pub fn validate(&self) -> Result<(), UserImageError> {
         if self.user_stack_size == 0 || !self.user_stack_size.is_multiple_of(PAGE_SIZE.get()) {
@@ -306,20 +296,6 @@ mod tests {
         assert_eq!(
             image.validate(),
             Err(UserImageError::SegmentAddressOverflow)
-        );
-    }
-
-    #[test]
-    fn highest_segment_end_skips_overflowing_segment() {
-        let huge = usize::MAX - PAGE + 1;
-        let segs = [
-            rx_segment(0x4000_0000, PAGE, &[]),
-            rx_segment(huge, PAGE, &[]),
-        ];
-        let image = make_image(&segs, 0x4000_0000);
-        assert_eq!(
-            image.highest_segment_end(),
-            Some(VirtualAddress::new(0x4000_0000 + PAGE))
         );
     }
 

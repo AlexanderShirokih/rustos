@@ -158,6 +158,39 @@ pub fn validate_entry<'a, E: EntryView<'a>>(entry: &E) -> Result<(), UserlandVal
     Ok(())
 }
 
+/// Промежуток `[start, end)` между концом старшего сегмента и низом стека -
+/// окно, куда раскладываются анонимные маппинги процесса (куча).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserVmWindow {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Выводит [`UserVmWindow`] из геометрии образа. Конец сегмента округляется
+/// вверх до страницы (переполняющий сегмент отбрасывается); низ стека -
+/// `stack_top - stack_size`. `None`, если промежутка нет либо стек переполняет.
+pub fn user_vm_window(
+    segments: impl Iterator<Item = (u64, u64)>,
+    stack_top: u64,
+    stack_size: u64,
+) -> Option<UserVmWindow> {
+    let highest_end = segments
+        .filter_map(|(va_base, mem_size)| {
+            va_base
+                .checked_add(mem_size)?
+                .checked_next_multiple_of(USERLAND_PAGE_SIZE)
+        })
+        .max()?;
+    let stack_base = stack_top.checked_sub(stack_size)?;
+    if highest_end >= stack_base {
+        return None;
+    }
+    Some(UserVmWindow {
+        start: highest_end,
+        end: stack_base,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +313,44 @@ mod tests {
             validate_entry(&entry("rootkeeper", &segments, 0x4000_0000)),
             Err(UserlandValidationError::EntryNotExecutable)
         );
+    }
+
+    #[test]
+    fn user_vm_window_spans_highest_segment_to_stack_base() {
+        // Старший сегмент кончается на 0x40_2000 (0x1800 округлён вверх до 2
+        // страниц); стек top 0x1_0000_0000 size 0x4000 -> base ниже на 0x4000.
+        let window = user_vm_window(
+            [(0x40_0000, PAGE), (0x40_1000, 0x1800)].into_iter(),
+            0x1_0000_0000,
+            0x4000,
+        )
+        .expect("gap exists");
+        assert_eq!(window.start, 0x40_3000);
+        assert_eq!(window.end, 0x1_0000_0000 - 0x4000);
+    }
+
+    #[test]
+    fn user_vm_window_none_without_gap() {
+        assert_eq!(
+            user_vm_window([(0, 0x10_0000)].into_iter(), 0x10_0000, PAGE),
+            None
+        );
+    }
+
+    #[test]
+    fn user_vm_window_skips_overflowing_segment() {
+        // Переполняющий сегмент отброшен, границу задаёт валидный.
+        let window = user_vm_window(
+            [(0x40_0000, PAGE), (u64::MAX, PAGE)].into_iter(),
+            0x1_0000_0000,
+            PAGE,
+        )
+        .expect("valid segment bounds window");
+        assert_eq!(window.start, 0x40_1000);
+    }
+
+    #[test]
+    fn user_vm_window_none_without_segments() {
+        assert_eq!(user_vm_window(core::iter::empty(), 0x1_0000_0000, PAGE), None);
     }
 }

@@ -94,7 +94,7 @@ fn ring_transport_round_trip() {
     let region_len = SpscRing::region_bytes(RING_CAPACITY, SLOT_PAYLOAD);
     kernel_tests::kassert!(region_len as u64 <= PAGE_SIZE);
     // Регион-носитель кольца минтится под метеринг-бюджет процесса.
-    let resource = Resource::self_resource().expect("metering resource");
+    let resource = Resource::self_resource();
     let region = resource
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
         .expect("region");

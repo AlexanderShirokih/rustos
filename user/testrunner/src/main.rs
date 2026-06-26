@@ -17,6 +17,7 @@ use syscall::Handle;
 mod heap;
 mod ipc_buffer;
 mod irq_provision;
+mod load_entry;
 mod memory_capability_target;
 mod owned_handle;
 mod pl031_rtc;
@@ -24,8 +25,8 @@ mod port;
 mod process_handles;
 mod process_start;
 mod ring_transport;
-mod self_spawn;
 mod signal;
+mod spawn_from_image;
 mod sync;
 
 /// HandleId WRITE-конца bootstrap-канала, полученный в `_start`; ставится один раз.

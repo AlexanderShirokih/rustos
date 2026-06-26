@@ -18,8 +18,8 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use syscall::{
-    MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, SyscallError,
-    USER_IMAGE_DESC_SIZE, USER_SEGMENT_SIZE, UserMemFlags, decode_image_desc, decode_segment,
+    MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, SyscallError, USER_IMAGE_DESC_SIZE,
+    USER_SEGMENT_SIZE, UserMemFlags, decode_image_desc, decode_segment,
 };
 
 use super::{
@@ -35,28 +35,24 @@ const MAX_PROCESS_NAME_LEN: usize = 64;
 
 pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallError> {
     let len = usize::try_from(name_len).map_err(|_| SyscallError::InvalidArgument)?;
-    if len > MAX_PROCESS_NAME_LEN {
+    if len == 0 || len > MAX_PROCESS_NAME_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if name_va == 0 {
         return Err(SyscallError::InvalidArgument);
     }
     let mut buf = [0u8; MAX_PROCESS_NAME_LEN];
-    let name = if len == 0 {
-        ""
-    } else {
-        if name_va == 0 {
-            return Err(SyscallError::InvalidArgument);
-        }
-        let user_vm = syscall_runtime()
-            .current_user_vm()
-            .ok_or(SyscallError::WrongType)?;
-        copy_in(&user_vm, name_va, &mut buf[..len])?;
-        core::str::from_utf8(&buf[..len]).map_err(|_| SyscallError::InvalidArgument)?
-    };
+    let user_vm = syscall_runtime()
+        .current_user_vm()
+        .ok_or(SyscallError::WrongType)?;
+    copy_in(&user_vm, name_va, &mut buf[..len])?;
+    let name = core::str::from_utf8(&buf[..len]).map_err(|_| SyscallError::InvalidArgument)?;
 
     let table = runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let reservation = table
-        .with_lock(capability::HandleTable::reserve_slot)
+        .with_lock(HandleTable::reserve_slot)
         .map_err(map_ipc_error)?;
     let process = match syscall_runtime().create_empty_process(name) {
         Ok(p) => p,
@@ -114,7 +110,7 @@ pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, Syscall
     // Self-terminate отвергается: dispatcher вернул бы в уже завершённый поток.
     // Self-exit - через ThreadExit (0x52).
     if let Some(current) = syscall_runtime().current_process_object()
-        && alloc::sync::Arc::ptr_eq(&current, &process)
+        && Arc::ptr_eq(&current, &process)
     {
         return Err(SyscallError::AccessDenied);
     }
@@ -210,24 +206,24 @@ pub fn sys_process_load_image(
 }
 
 /// `ProcessStart` - стартует первый поток процесса.
-/// ABI: `prio_and_count = priority[0..8] | handles_count[32..64]`; биты [8..32) = 0.
+/// ABI: `bootstrap_handle` - raw HandleId стартового хэндла-канала; `priority` в битах [0..8),
+/// биты [8..) = 0.
 pub fn sys_process_start(
     process_h: u64,
     entry_pc: u64,
     user_sp: u64,
-    arg: u64,
-    prio_and_count: u64,
-    handles_va: u64,
+    bootstrap_handle: u64,
+    priority: u64,
+    _reserved: u64,
 ) -> Result<u64, SyscallError> {
     let process_id = parse_handle_id(process_h)?;
-    let priority = (prio_and_count & 0xFF) as u8;
-    if (prio_and_count >> 8) & 0xFF_FFFF != 0 {
+    if priority & !0xFF != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let handles_count = ((prio_and_count >> 32) & 0xFFFF_FFFF) as usize;
-    if handles_count > MAX_BOOTSTRAP_HANDLES {
-        return Err(SyscallError::InvalidArgument);
-    }
+    let priority = (priority & 0xFF) as u8;
+    let handle_raw = u32::try_from(bootstrap_handle).map_err(|_| SyscallError::InvalidArgument)?;
+    let nz = NonZeroU32::new(handle_raw).ok_or(SyscallError::InvalidArgument)?;
+    let handle_id = HandleId::from_raw(nz);
 
     let metering_resource = syscall_runtime()
         .current_process_object()
@@ -240,66 +236,28 @@ pub fn sys_process_start(
         .with_lock(|tbl| tbl.get_process(process_id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
-    let mut ids: Vec<HandleId> = Vec::with_capacity(handles_count);
-    if handles_count > 0 {
-        let user_vm = syscall_runtime()
-            .current_user_vm()
-            .ok_or(SyscallError::WrongType)?;
-        let mut buf = [0u8; MAX_BOOTSTRAP_HANDLES * 4];
-        copy_in(&user_vm, handles_va, &mut buf[..handles_count * 4])?;
-        for i in 0..handles_count {
-            let raw = u32::from_le_bytes(
-                buf[i * 4..(i + 1) * 4]
-                    .try_into()
-                    .expect("4 bytes per handle id"),
-            );
-            let nz = NonZeroU32::new(raw).ok_or(SyscallError::InvalidArgument)?;
-            ids.push(HandleId::from_raw(nz));
-        }
-    }
-
     let spec = UserStartSpec {
         entry: UserThreadEntry {
             entry_pc,
             user_sp,
-            arg,
+            // X0 потомка вычисляет планировщик из child-table id хэндла-канала.
+            arg: 0,
             priority,
         },
-        handle_ids: ids,
+        loader_handle_table: loader_table.clone(),
+        handle_id,
         metering_resource,
     };
 
-    // Пре-резерв нужен только когда drain не освободит слот в caller-table.
-    // При `handles_count > 0` drain гарантированно отдаст >= 1 слот, и
-    // пост-drain `reserve_slot` не упадёт. Это спасает легитимные старты с
-    // ровно заполненной caller-table, где пере-передача bootstrap-handle-а
-    // фактически освобождает слот под возвращаемый thread-handle.
-    let pre_reservation = if handles_count == 0 {
-        Some(
-            loader_table
-                .with_lock(capability::HandleTable::reserve_slot)
-                .map_err(map_ipc_error)?,
-        )
-    } else {
-        None
-    };
+    let thread = syscall_runtime()
+        .start_user_process(&process_object, spec)
+        .map_err(|e| start_err_to_syscall(&e))?;
 
-    let thread = match syscall_runtime().start_user_process(&process_object, spec) {
-        Ok(t) => t,
-        Err(e) => {
-            if let Some(r) = pre_reservation {
-                loader_table.with_lock(|tbl| tbl.release_reservation(r));
-            }
-            return Err(start_err_to_syscall(&e));
-        }
-    };
-
-    let reservation = match pre_reservation {
-        Some(r) => r,
-        None => loader_table
-            .with_lock(capability::HandleTable::reserve_slot)
-            .expect("drain freed handles_count >= 1 slots; reserve_slot cannot fail"),
-    };
+    // Drain переданного хэндла освободил слот в caller-table, поэтому резерв
+    // под возвращаемый thread-handle не падает.
+    let reservation = loader_table
+        .with_lock(HandleTable::reserve_slot)
+        .expect("drain freed a caller slot; reserve_slot cannot fail");
 
     Ok(commit_object_handle(
         &loader_table,
@@ -397,7 +355,7 @@ fn user_copy_err(_e: UserCopyError) -> SyscallError {
 
 #[cfg(test)]
 mod tests {
-    use syscall::{MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, USER_IMAGE_DESC_SIZE};
+    use syscall::{MAX_SEGMENTS_PER_IMG, USER_IMAGE_DESC_SIZE};
 
     use super::*;
 
@@ -427,26 +385,18 @@ mod tests {
 
     #[test]
     fn sys_process_start_rejects_zero_handle() {
+        // process_h валиден (parse), bootstrap_handle (arg3) = 0 - невалиден.
         assert_eq!(
-            sys_process_start(0, 0x4000_0000, 0x4001_0000, 0, 0, 0),
+            sys_process_start(1, 0x4000_0000, 0x4001_0000, 0, 0, 0),
             Err(SyscallError::InvalidArgument)
         );
     }
 
     #[test]
-    fn sys_process_start_rejects_too_many_handles() {
-        let too_many = ((MAX_BOOTSTRAP_HANDLES as u64) + 1) << 32;
+    fn sys_process_start_rejects_reserved_bits_in_priority() {
+        let bad_priority = 1u64 << 8;
         assert_eq!(
-            sys_process_start(1, 0x4000_0000, 0x4001_0000, 0, too_many, 0x2000),
-            Err(SyscallError::InvalidArgument)
-        );
-    }
-
-    #[test]
-    fn sys_process_start_rejects_reserved_bits_in_prio_word() {
-        let bad = 1u64 << 8;
-        assert_eq!(
-            sys_process_start(1, 0x4000_0000, 0x4001_0000, 0, bad, 0),
+            sys_process_start(1, 0x4000_0000, 0x4001_0000, 1, bad_priority, 0),
             Err(SyscallError::InvalidArgument)
         );
     }
@@ -454,7 +404,6 @@ mod tests {
     #[test]
     fn abi_limits_are_stable() {
         assert_eq!(MAX_SEGMENTS_PER_IMG, 16);
-        assert_eq!(MAX_BOOTSTRAP_HANDLES, 32);
     }
 
     #[test]

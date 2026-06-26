@@ -35,7 +35,7 @@ pub struct ThreadEntry {
     pub entry_pc: u64,
     /// Вершина user-стека потока.
     pub user_sp: u64,
-    /// Значение X0 первой инструкции.
+    /// Значение первой инструкции (X0) для `Thread::create`
     pub arg: u64,
     /// Приоритет потока.
     pub priority: Priority,

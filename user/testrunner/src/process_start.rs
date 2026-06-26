@@ -2,8 +2,6 @@
 //! загруженного образа отвергает `start`, переданный по значению хэндл
 //! закрывается обёрткой (его `Drop`) ровно один раз, не утекая.
 
-use alloc::vec;
-
 use kernel_tests::kernel_test;
 use runtime::{Priority, Process, Signal, ThreadEntry, handle_close, signal_set};
 use syscall::{Handle, SIGNALED, SyscallError, WakeCount};
@@ -29,7 +27,7 @@ fn start_error_closes_passed_handles() {
     };
 
     // Процесс без load_image не стартует: start возвращает ошибку.
-    let error = process.start(entry, vec![owned]).err();
+    let error = process.start(entry, owned).err();
     kernel_tests::kassert!(error.is_some());
 
     kernel_tests::kassert!(is_closed(stale));

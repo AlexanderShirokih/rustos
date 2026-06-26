@@ -9,7 +9,7 @@ const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
 #[kernel_test]
 fn memory_capability_target_map_and_inspect() {
-    let resource = Resource::self_resource().expect("metering resource");
+    let resource = Resource::self_resource();
     let region = resource
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
         .expect("region");

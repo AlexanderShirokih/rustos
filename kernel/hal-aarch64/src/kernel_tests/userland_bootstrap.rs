@@ -32,7 +32,7 @@ fn userland_bootstrap_log() {
     )
     .expect("spawn_process must succeed");
 
-    kernel_tests::kassert_eq!(launch.info.initial_handle_ids.len(), 1);
+    kernel_tests::kassert_eq!(launch.info.initial_handle_id.raw().get(), 1 << 16);
 
     let process = launch.info.process_object.clone();
     let port = launch.port;
@@ -51,10 +51,10 @@ fn userland_bootstrap_log() {
         Rights::READ,
     ))
     .expect("install bootstrap process handle");
-    
+
     let observed = signal_wait_one(process_id, SIGNALED, Some(WAIT_BUDGET_NS))
         .expect("wait for bootstrap process exit");
-    
+
     kernel_tests::kassert!(observed & SIGNALED != 0);
     kernel_tests::kassert_eq!(process.exit_code(), 0);
 }

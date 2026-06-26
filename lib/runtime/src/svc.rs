@@ -358,23 +358,20 @@ pub fn process_terminate(handle: Handle, exit_code: u64) -> i64 {
     ret
 }
 
-/// Стартует первый поток процесса `handle`:
-/// `priority_and_count = priority | (handles_count << 32)`, `handles_va` -
-/// массив `[u32]` HandleId. Требует `Rights::WRITE` на `handle` и
-/// `Rights::TRANSFER` на каждом handle в `handles_va`. Стартуемый процесс
-/// наследует метеринг-ресурс вызывающего.
-/// Возврат: handle на `ThreadObject` либо `-(SyscallError)`.
+/// Стартует первый поток процесса `handle`: `bootstrap_handle` - HandleId
+/// стартового хэндла-канала. Требует `Rights::WRITE` на `handle` и `Rights::TRANSFER`
+/// на `bootstrap_handle`. Процесс наследует метеринг-ресурс вызывающего.
+/// Возврат: handle на `ThreadObject` либо `SyscallError`.
 pub fn process_start(
     handle: Handle,
     entry_pc: u64,
     user_sp: u64,
-    arg: u64,
-    priority_and_count: u64,
-    handles_va: u64,
+    bootstrap_handle: u64,
+    priority: u64,
 ) -> Result<Handle, SyscallError> {
     let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x5; при
-    // handles_count > 0 ядро читает массив handle'ов по x5 до возврата из svc.
+    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x4 (x5
+    // зарезервирован); ядро переносит bootstrap_handle потомку до возврата.
     unsafe {
         asm!(
             "svc #{op}",
@@ -382,9 +379,9 @@ pub fn process_start(
             in("x0") u64::from(handle.raw()),
             in("x1") entry_pc,
             in("x2") user_sp,
-            in("x3") arg,
-            in("x4") priority_and_count,
-            in("x5") handles_va,
+            in("x3") bootstrap_handle,
+            in("x4") priority,
+            in("x5") 0u64,
             lateout("x0") ret,
             options(nostack),
         );

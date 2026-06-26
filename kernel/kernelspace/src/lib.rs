@@ -18,9 +18,7 @@ pub mod scheduler_bootstrap;
 pub mod syscall_bridge;
 pub mod user_process;
 
-pub use user_process::{
-    SchedulerUserProcessLauncher, SpawnUserError, UserProcessLauncher, UserProcessSpawner,
-};
+pub use user_process::{SchedulerUserProcessLauncher, SpawnUserError, UserProcessLauncher};
 
 #[cfg(feature = "kernel-tests")]
 pub mod kernel_tests;

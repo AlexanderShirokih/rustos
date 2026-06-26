@@ -24,7 +24,7 @@ pub use bridge::{Origin, SyscallFrame, dispatch};
 pub use numbers::SyscallOp;
 pub use runtime::{SyscallRuntime, install_runtime};
 pub use syscall::{
-    MAX_BOOTSTRAP_HANDLES, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, SyscallError,
-    USER_IMAGE_DESC_SIZE, USER_SEGMENT_SIZE, UserImageDescAbi, UserMemFlags, UserSegmentAbi,
-    decode_image_desc, decode_segment, encode_image_desc, encode_segment,
+    MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, SyscallError, USER_IMAGE_DESC_SIZE,
+    USER_SEGMENT_SIZE, UserImageDescAbi, UserMemFlags, UserSegmentAbi, decode_image_desc,
+    decode_segment, encode_image_desc, encode_segment,
 };

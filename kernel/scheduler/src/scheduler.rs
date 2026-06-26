@@ -523,14 +523,6 @@ where
         if (prepared.priority.raw() as usize) >= self.config.priority_levels() {
             return Err(PreparedUserProcessError::Spawn(SpawnError::InvalidPriority));
         }
-        if let Some(index) = prepared.launch.bootstrap_handle_index
-            && index >= prepared.launch.initial_handles.len()
-        {
-            return Err(PreparedUserProcessError::InvalidBootstrapHandle);
-        }
-        if prepared.launch.initial_handles.len() > HandleTable::DEFAULT_CAPACITY as usize {
-            return Err(PreparedUserProcessError::TooManyInitialHandles);
-        }
         Ok(())
     }
 
@@ -546,11 +538,8 @@ where
                 .map_err(|_| PreparedUserProcessError::Spawn(SpawnError::StackAllocationFailed))?;
         let stack_top = stack.top();
 
-        let mut initial_handle_ids = Vec::new();
-        let bootstrap_handle_index = launch.bootstrap_handle_index;
-        let bootstrap_arg = launch.bootstrap_arg;
-        let initial_handles = launch.initial_handles;
-        let mut initial_handle_insert_failed = false;
+        let mut initial_handle_id = None;
+        let initial_handle = launch.initial_handle;
 
         let user_vm = prepared.user_vm;
         let address_space_for_process = prepared.address_space.clone();
@@ -561,32 +550,22 @@ where
                 if let Some(vm) = user_vm {
                     process = process.with_user_vm(vm);
                 }
+
+                // child-table пуста, единственный хэндл всегда влезает.
                 process.handle_table().with_lock(|tbl| {
-                    for handle in initial_handles {
-                        if let Ok(handle_id) = tbl.insert(handle) {
-                            initial_handle_ids.push(handle_id);
-                        } else {
-                            initial_handle_insert_failed = true;
-                            break;
-                        }
-                    }
+                    initial_handle_id = Some(
+                        tbl.insert(initial_handle)
+                            .expect("initial handle into empty child-table"),
+                    );
                 });
+
                 process
             })
             .map_err(|_| PreparedUserProcessError::Spawn(SpawnError::NoFreeThreadSlots))?;
 
-        if initial_handle_insert_failed {
-            self.processes.remove(process_id);
-            return Err(PreparedUserProcessError::TooManyInitialHandles);
-        }
-
-        let bootstrap_arg = match bootstrap_handle_index {
-            Some(index) => {
-                let raw = initial_handle_ids[index].raw().get();
-                UserBootstrapArg(u64::from(raw))
-            }
-            None => bootstrap_arg,
-        };
+        let initial_handle_id =
+            initial_handle_id.expect("insert_with populated the initial handle id");
+        let bootstrap_arg = UserBootstrapArg(u64::from(initial_handle_id.raw().get()));
 
         let arch = A::init_user(crate::UserEntry {
             kernel_stack_top: stack_top,
@@ -646,7 +625,7 @@ where
         Ok(UserProcessLaunchInfo {
             process_id,
             thread_id,
-            initial_handle_ids,
+            initial_handle_id,
             process_object,
             thread_object,
         })
@@ -958,7 +937,7 @@ where
         }
 
         let stack = <A::Stack as super::arch::ThreadStackAllocator>::allocate(
-            crate::SpawnConfig::DEFAULT_STACK_PAGES,
+            SpawnConfig::DEFAULT_STACK_PAGES,
         )
         .map_err(|_| SpawnError::StackAllocationFailed)?;
         let stack_top = stack.top();
@@ -1259,7 +1238,7 @@ where
         process
             .set_user_vm(vm)
             .expect("precondition is_image_loaded()==false guarantees fresh user_vm");
-        let segments: Vec<Arc<memory::MemoryRegion>> =
+        let segments: Vec<Arc<MemoryRegion>> =
             install.segments.iter().map(|s| s.region.clone()).collect();
         process.set_image_segments(segments);
         Ok(())
@@ -1273,12 +1252,13 @@ where
         use capability::StartProcessError;
 
         let capability::UserStartSpec {
-            entry,
-            handle_ids,
+            mut entry,
+            loader_handle_table,
+            handle_id,
             metering_resource,
         } = spec;
 
-        {
+        let child_table = {
             let Some(process) = self.process_by_object_mut(process_object) else {
                 return Err(StartProcessError::ProcessNotFound);
             };
@@ -1288,69 +1268,54 @@ where
             {
                 return Err(StartProcessError::WrongState);
             }
-        }
-
-        // Передаваемые handle изымаются из таблицы caller'а - текущего процесса.
-        let loader_handle_table = if handle_ids.is_empty() {
-            None
-        } else {
-            Some(
-                self.current_handle_table()
-                    .ok_or(StartProcessError::HandleValidationFailed(
-                        capability::IpcError::BadHandle,
-                    ))?,
-            )
+            process.handle_table().clone()
         };
 
-        // Validate handle_ids под loader-lock'ом до drain: existence +
-        // TRANSFER + no dupes.
-        if let Some(table) = &loader_handle_table
-            && let Err(e) = table.with_lock(|tbl| {
-                for (i, id) in handle_ids.iter().enumerate() {
-                    if handle_ids[..i].iter().any(|prev| prev == id) {
-                        return Err(capability::IpcError::BadHandle);
-                    }
-                    tbl.get(*id, capability::Rights::TRANSFER)?;
-                }
-                Ok(())
-            })
+        // Validate хэндл под loader-lock'ом до drain: existence + TRANSFER.
+        if let Err(e) = loader_handle_table
+            .with_lock(|tbl| tbl.get(handle_id, capability::Rights::TRANSFER).map(|_| ()))
         {
             return Err(StartProcessError::HandleValidationFailed(e));
         }
 
+        // Резерв child-слота до prepare фиксирует child-table id потомка, не
+        // трогая loader-handle: на ошибке prepare откат - только release.
+        let reservation = child_table.with_lock(|tbl| {
+            tbl.reserve_slot()
+                .expect("empty child-table has a free slot")
+        });
+
+        // X0 потомка - child-table id стартового хэндла-канала.
+        entry.arg = u64::from(reservation.handle_id().raw().get());
+
         let (thread_id, thread_object) = match self.prepare_user_thread(process_object, entry) {
             Ok(t) => t,
-            Err(source) => return Err(StartProcessError::SpawnFailed(source.into())),
-        };
-
-        // Validate и drain в разных with_lock-окнах; на гонке (другой
-        // syscall закрыл handle между шагами) откатываем prepared thread.
-        let drained = match &loader_handle_table {
-            Some(table) => match table.with_lock(|tbl| {
-                tbl.try_drain_for_transfer(&handle_ids, capability::Rights::TRANSFER)
-            }) {
-                Ok(d) => d,
-                Err(e) => {
-                    self.drop_prepared_thread(thread_id);
-                    return Err(StartProcessError::HandleValidationFailed(e));
-                }
-            },
-            None => Vec::new(),
-        };
-
-        // Insert не фейлит: child-table пуста и MAX_BOOTSTRAP_HANDLES
-        // много меньше DEFAULT_CAPACITY.
-        let child_table = self
-            .process_by_object_mut(process_object)
-            .expect("process still present")
-            .handle_table()
-            .clone();
-        child_table.with_lock(|tbl| {
-            for h in drained {
-                tbl.insert(h)
-                    .expect("child handle-table has DEFAULT_CAPACITY slots free");
+            Err(source) => {
+                child_table.with_lock(|tbl| tbl.release_reservation(reservation));
+                return Err(StartProcessError::SpawnFailed(source.into()));
             }
-        });
+        };
+
+        // Validate и drain в разных with_lock-окнах; на гонке (другой syscall
+        // закрыл handle между шагами) откатываем prepared thread и резервацию.
+        let drained = match loader_handle_table
+            .with_lock(|tbl| tbl.try_drain_for_transfer(&[handle_id], capability::Rights::TRANSFER))
+        {
+            Ok(d) => d,
+            Err(e) => {
+                self.drop_prepared_thread(thread_id);
+                child_table.with_lock(|tbl| tbl.release_reservation(reservation));
+                return Err(StartProcessError::HandleValidationFailed(e));
+            }
+        };
+
+        // commit_reserved кладёт хэндл в зарезервированный слот: child-table id
+        // совпадает с уже вычисленным для X0.
+        let handle = drained
+            .into_iter()
+            .next()
+            .expect("drain returned the single transferred handle");
+        child_table.with_lock(|tbl| tbl.commit_reserved(reservation, handle));
 
         // До enqueue: стартовый поток не должен аллоцировать раньше засева.
         if let Some(resource) = metering_resource {

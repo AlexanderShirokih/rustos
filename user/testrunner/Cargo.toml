@@ -18,6 +18,12 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "spawn-fixture"
+path = "src/spawn_fixture.rs"
+test = false
+bench = false
+
 [dependencies]
 bootstrap = { workspace = true }
 collections = { workspace = true }
@@ -27,6 +33,9 @@ spin = { workspace = true }
 test-harness-qemu = { workspace = true }
 syscall = { workspace = true }
 runtime = { workspace = true }
+userland = { workspace = true }
+userland-image = { workspace = true }
+userland-loader = { workspace = true }
 
 [lints]
 workspace = true

@@ -75,11 +75,10 @@ pub struct AnonymousMapping {
 
 impl Resource {
     /// Свежий handle на метеринг-`Resource` текущего процесса.
-    pub fn self_resource() -> Result<Self> {
-        svc::process_resource_self()
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
-            .map_err(Error::Syscall)
+    pub fn self_resource() -> Self {
+        let handle = svc::process_resource_self().expect("process self_resource syscall");
+        // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
+        Self::from_handle(unsafe { OwnedHandle::from_handle(handle) })
     }
 
     /// Берёт во владение хэндл `Resource`.
@@ -183,6 +182,15 @@ impl Mapping {
     /// Размер маппинга в байтах.
     pub fn size_bytes(&self) -> u64 {
         self.size_bytes
+    }
+
+    /// Содержимое маппинга как байтовый срез, заимствованный на время маппинга.
+    pub fn as_bytes(&self) -> &[u8] {
+        let base = self.va as *const u8;
+        let len = usize::try_from(self.size_bytes).expect("mapping size fits usize");
+        // SAFETY: маппинг владеет диапазоном [va, va+size_bytes) памяти, инициализированной ядром.
+        // Срез заимствует его на время `&self` и не переживёт unmap/Drop.
+        unsafe { core::slice::from_raw_parts(base, len) }
     }
 
     /// Меняет флаги маппинга на `flags`.

@@ -95,7 +95,7 @@ pub enum SyscallOp {
     // 0x40..=0x4F - Process CapabilityTarget.
     /// Создаёт пустой user-процесс. Аргументы:
     ///  - `arg0=name_va`,
-    ///  - `arg1=name_len`.
+    ///  - `arg1=name_len` (`1..=64`).
     ///
     /// Возвращает handle на свежий `ProcessObject`.
     ProcessCreate = 0x40,
@@ -133,19 +133,22 @@ pub enum SyscallOp {
     /// Возвращает `resource_handle`.
     ProcessResourceSelf = 0x46,
 
-    /// Стартует первый поток уже загруженного образа и атомарно
-    /// передаёт ему bootstrap-handles. Аргументы:
+    /// Стартует первый поток уже загруженного образа и атомарно передаёт ему
+    /// стартовый хэндл-канал. Аргументы:
     ///  - `arg0=process_handle`,
     ///  - `arg1=entry_pc`,
     ///  - `arg2=user_sp`,
-    ///  - `arg3=arg` (X0 первой инструкции),
-    ///  - `arg4 = priority | (handles_count << 32)`,
-    ///  - `arg5=handles_va` (массив `[u32; handles_count]` HandleId raw-значений).
+    ///  - `arg3=bootstrap_handle` стартовый HandleId,
+    ///  - `arg4=priority` (биты [0..8), [8..) = 0),
+    ///  - `arg5` - зарезервирован (0).
     ///
-    /// Требует `Rights::WRITE` на `process_handle` и
-    /// `Rights::TRANSFER` на каждом handle в `handles_va`.
-    /// Стартуемый процесс наследует метеринг-ресурс вызывающего.
-    /// Возвращает handle на свежий `ThreadObject`.
+    /// X0 первого потока - child-table id переданного хэндла (канал процесса),
+    /// вычисляется ядром после вставки в child-таблицу. Нулевой `bootstrap_handle`
+    /// - `InvalidArgument`.
+    ///
+    /// Требует `Rights::WRITE` на `process_handle` и `Rights::TRANSFER` на
+    /// `bootstrap_handle`. Стартуемый процесс наследует метеринг-ресурс
+    /// вызывающего. Возвращает handle на свежий `ThreadObject`.
     ProcessStart = 0x45,
 
     // 0x50..=0x5F - Thread CapabilityTarget.

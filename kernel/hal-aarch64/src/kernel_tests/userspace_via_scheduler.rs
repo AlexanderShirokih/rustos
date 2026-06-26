@@ -3,7 +3,7 @@
 //! Тест передаёт payload'у bootstrap-handle на `Signal`, ждёт сигнал от
 //! `SignalSet`, затем payload делает `ThreadExit`.
 
-use alloc::{sync::Arc, vec};
+use alloc::sync::Arc;
 use core::num::NonZeroUsize;
 
 use capability::{Capability, CapabilityTarget, ProcessObject, Resource, Rights, SIGNALED, Signal};
@@ -76,9 +76,7 @@ fn userspace_spawn_user_process_runs_to_exit() {
     };
 
     let handle = Capability::new(CapabilityTarget::Signal(signal.clone()), Rights::WRITE);
-    let launch = UserProcessLaunch::new()
-        .initial_handles(vec![handle])
-        .bootstrap_handle(0);
+    let launch = UserProcessLaunch::new(handle);
     let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "user-via-scheduler",
@@ -88,7 +86,7 @@ fn userspace_spawn_user_process_runs_to_exit() {
             launch,
         )
         .expect("spawn_user_process must succeed");
-    kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
+    kernel_tests::kassert_eq!(info.initial_handle_id.raw().get(), 1 << 16);
 
     let scheduler = kernelspace::kernel_tests::scheduler().clone();
     let mut spins = 0u64;
@@ -160,13 +158,11 @@ fn userspace_vm_allocate_and_remap() {
     };
 
     let handle = Capability::new(CapabilityTarget::Signal(signal.clone()), Rights::WRITE);
-    let launch = UserProcessLaunch::new()
-        .initial_handles(vec![handle])
-        .bootstrap_handle(0);
+    let launch = UserProcessLaunch::new(handle);
     let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch("user-vm-allocate", &image, Priority::highest(), 2, launch)
         .expect("spawn_user_process must succeed");
-    kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
+    kernel_tests::kassert_eq!(info.initial_handle_id.raw().get(), 1 << 16);
     seed_metering(&info.process_object);
 
     let scheduler = kernelspace::kernel_tests::scheduler().clone();
@@ -236,9 +232,7 @@ fn userspace_vm_allocate_free_reuse_va() {
     };
 
     let handle = Capability::new(CapabilityTarget::Signal(signal.clone()), Rights::WRITE);
-    let launch = UserProcessLaunch::new()
-        .initial_handles(vec![handle])
-        .bootstrap_handle(0);
+    let launch = UserProcessLaunch::new(handle);
     let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "user-vm-free-reuse",
@@ -248,7 +242,7 @@ fn userspace_vm_allocate_free_reuse_va() {
             launch,
         )
         .expect("spawn_user_process must succeed");
-    kernel_tests::kassert_eq!(info.initial_handle_ids.len(), 1);
+    kernel_tests::kassert_eq!(info.initial_handle_id.raw().get(), 1 << 16);
     seed_metering(&info.process_object);
 
     let scheduler = kernelspace::kernel_tests::scheduler().clone();

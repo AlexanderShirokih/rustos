@@ -1025,6 +1025,24 @@ fn load_user_image_into_rejects_double_load() {
     }
 }
 
+fn loader_table_with_handle() -> (
+    Arc<collections::MutexCell<capability::HandleTable>>,
+    capability::HandleId,
+) {
+    use capability::{Capability, CapabilityTarget, Rights, Signal};
+    use collections::LockCell;
+    let table = Arc::new(collections::MutexCell::new(capability::HandleTable::new()));
+    let id = table
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Signal(Signal::new()),
+                Rights::TRANSFER | Rights::READ,
+            ))
+        })
+        .expect("insert loader handle");
+    (table, id)
+}
+
 #[test]
 fn start_user_process_creates_thread_and_marks_loader_state() {
     use capability::{UserStartSpec, UserThreadEntry};
@@ -1040,6 +1058,7 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
         .expect("create_empty_process");
     mark_process_loaded(&handle, &process);
 
+    let (loader_table, handle_id) = loader_table_with_handle();
     let spec = UserStartSpec {
         entry: UserThreadEntry {
             entry_pc: 0x4000_0000,
@@ -1047,7 +1066,8 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
             arg: 0,
             priority: 1,
         },
-        handle_ids: Vec::new(),
+        loader_handle_table: loader_table,
+        handle_id,
         metering_resource: None,
     };
     let thread = handle.start_user_process(&process, spec).expect("start ok");
@@ -1068,6 +1088,7 @@ fn start_user_process_rejects_unloaded() {
         .create_empty_process("p")
         .expect("create_empty_process");
 
+    let (loader_table, handle_id) = loader_table_with_handle();
     let spec = UserStartSpec {
         entry: UserThreadEntry {
             entry_pc: 0x4000_0000,
@@ -1075,7 +1096,8 @@ fn start_user_process_rejects_unloaded() {
             arg: 0,
             priority: 1,
         },
-        handle_ids: Vec::new(),
+        loader_handle_table: loader_table,
+        handle_id,
         metering_resource: None,
     };
     match handle.start_user_process(&process, spec) {
@@ -1141,7 +1163,8 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
             arg: 0,
             priority: 1,
         },
-        handle_ids: vec![handle_id],
+        loader_handle_table: loader_table.clone(),
+        handle_id,
         metering_resource: None,
     };
 

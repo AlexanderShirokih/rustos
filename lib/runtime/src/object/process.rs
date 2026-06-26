@@ -1,7 +1,5 @@
 //! Типизированная обёртка над процессом ядра.
 
-use alloc::vec::Vec;
-
 use syscall::{SIGNALED, Timeout};
 
 use crate::{
@@ -49,30 +47,26 @@ impl Process {
         unit(svc::process_load_image(self.handle.as_raw(), desc))
     }
 
-    /// Стартует первый поток процесса с параметрами `entry`, передавая
-    /// bootstrap-хэндлы `handles` потомку. На `Ok` ядро забрало хэндлы (ушли
-    /// потомку), на `Err` они закрываются своим `Drop`.
-    pub fn start(&self, entry: ThreadEntry, handles: Vec<OwnedHandle>) -> Result<Thread> {
-        let ids: Vec<u32> = handles.iter().map(|handle| handle.as_raw().raw()).collect();
-        let priority_and_count = u64::from(entry.priority) | ((handles.len() as u64) << 32);
+    /// Запускает первый поток процесса с параметрами `entry`, передавая потомку
+    /// стартовый хэндл-канал `handle`. На `Ok` ядро забрало
+    /// `handle` (ушёл потомку), на `Err` он закрывается своим `Drop`.
+    pub fn start(&self, entry: ThreadEntry, handle: OwnedHandle) -> Result<Thread> {
+        let bootstrap_handle = u64::from(handle.as_raw().raw());
 
         let result = svc::process_start(
             self.handle.as_raw(),
             entry.entry_pc,
             entry.user_sp,
-            entry.arg,
-            priority_and_count,
-            ids.as_ptr() as u64,
+            bootstrap_handle,
+            u64::from(entry.priority),
         );
 
         match result {
-            Ok(handle) => {
-                for handle in handles {
-                    let _ = handle.into_raw();
-                }
+            Ok(thread) => {
+                let _ = handle.into_raw();
                 // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
                 Ok(Thread::from_handle(unsafe {
-                    OwnedHandle::from_handle(handle)
+                    OwnedHandle::from_handle(thread)
                 }))
             }
             Err(e) => Err(Error::Syscall(e)),

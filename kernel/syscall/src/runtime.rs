@@ -57,7 +57,7 @@ pub trait SyscallRuntime: Send + Sync {
         install: &UserImageInstall,
     ) -> Result<(), LoadImageError>;
 
-    /// Вставляет bootstrap-handles в child-table и создаёт первый
+    /// Вставляет bootstrap-handle в child-table и создаёт первый
     /// user-поток.
     fn start_user_process(
         &self,

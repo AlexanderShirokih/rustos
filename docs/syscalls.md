@@ -35,19 +35,13 @@ Handle — числовой идентификатор (`u32`) в таблице
 `SignalWait*` ждут не только `Signal`: ждать можно любой объект, который
 предъявляет ожидаемый источник — `Signal`, `Process`/`Thread` (бит `SIGNALED`
 = "завершён") и `IrqLine` (бит `SIGNALED` = "сработало прерывание"). Менять
-биты (`SignalSet`) можно только у `Signal`; на любом другом типе — `WrongType`,
-поэтому подделать терминацию или прерывание невозможно по построению.
+биты (`SignalSet`) можно только у `Signal`.
 
 | capability target  | Сигнал     |      Бит | Описание                   |
 |--------------------|------------|---------:|----------------------------|
 | `Signal`           | `SIGNALED` | `1 << 0` | событие наступило          |
 | `Process`/`Thread` | `SIGNALED` | `1 << 0` | объект завершился          |
 | `IrqLine`          | `SIGNALED` | `1 << 0` | сработало прерывание линии |
-
-**Lifecycle Process/Thread** наблюдается ожиданием прямо по их handle:
-`SignalWaitOne(process_h, SIGNALED, …)` лениво материализует bound-`Signal`
-терминации. Exit-код читается отдельно (`ProcessExitCode`/`ThreadExitCode`).
-Объект, терминацию которого никто не ждёт, не аллоцирует `Signal` вовсе.
 
 ## Ошибки
 
@@ -205,8 +199,7 @@ Handle-вызовы управляют временем жизни handle в т�
 
 ### Каскадный отзыв при `HandleClose`
 
-`HandleDuplicate` строит граф деривации: копия — производная (ребёнок)
-исходного handle. Перенос капы через Port двигает handle целиком, граф
+`HandleDuplicate` строит граф деривации: копия — производная исходного handle. Перенос капы через Port двигает handle целиком, граф
 деривации едет с ним и переживает межпроцессную передачу.
 
 `HandleClose` (а также смерть таблицы при завершении процесса) **отзывает всё
@@ -265,57 +258,43 @@ let client_ep = handle_duplicate(port_h, Rights::WRITE, CLIENT_BADGE)?;
 Process-вызовы создают процесс, возвращают handle на текущий процесс и
 позволяют наблюдать или принудительно завершать процесс по handle.
 
-|     Op | Имя                        | Аргументы                                                                                    | Возврат                | Права                                                                    |
-|-------:|----------------------------|----------------------------------------------------------------------------------------------|------------------------|--------------------------------------------------------------------------|
-| `0x40` | `ProcessCreate`            | `name_va`, `name_len`                                                                        | `process_h`            | —                                                                        |
-| `0x41` | `ProcessSelf`              | —                                                                                            | `process_h`            | —                                                                        |
-| `0x42` | `ProcessLoadImage`         | `process_h`, `desc_va`, `desc_len`                                                           | `0`                    | `WRITE` на `process_h`; `WRITE` + права по флагу на каждом region-handle |
-| `0x43` | `ProcessExitCode`          | `process_h`                                                                                  | `exit_code` как `u32`  | `READ`                                                                   |
-| `0x44` | `ProcessTerminate`         | `process_h`, `exit_code`                                                                     | `0`                    | `WRITE`                                                                  |
-| `0x45` | `ProcessStart`             | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h`             | `WRITE`; `TRANSFER` на bootstrap-handle                                  |
-| `0x46` | `ProcessResourceSelf`      | —                                                                                            | `resource_h`           | —                                                                        |
+|     Op | Имя                   | Аргументы                                                                         | Возврат               | Права                                                                    |
+|-------:|-----------------------|-----------------------------------------------------------------------------------|-----------------------|--------------------------------------------------------------------------|
+| `0x40` | `ProcessCreate`       | `name_va`, `name_len`                                                             | `process_h`           | —                                                                        |
+| `0x41` | `ProcessSelf`         | —                                                                                 | `process_h`           | —                                                                        |
+| `0x42` | `ProcessLoadImage`    | `process_h`, `desc_va`, `desc_len`                                                | `0`                   | `WRITE` на `process_h`; `WRITE` + права по флагу на каждом region-handle |
+| `0x43` | `ProcessExitCode`     | `process_h`                                                                       | `exit_code` как `u32` | `READ`                                                                   |
+| `0x44` | `ProcessTerminate`    | `process_h`, `exit_code`                                                          | `0`                   | `WRITE`                                                                  |
+| `0x45` | `ProcessStart`        | `process_h`, `entry_pc`, `user_sp`, `bootstrap_handle`, `priority`, `reserved(0)` | `thread_h`            | `WRITE` на `process_h`; `TRANSFER` на `bootstrap_handle`                 |
+| `0x46` | `ProcessResourceSelf` | —                                                                                 | `resource_h`          | —                                                                        |
 
-Завершение процесса наблюдается ожиданием прямо по `process_h`
-(`SignalWaitOne`/`Many`, бит `SIGNALED`); отдельной op материализации
-`Signal`-хендла нет.
+Завершение процесса наблюдается ожиданием по `process_h`
+(`SignalWaitOne`/`Many`, бит `SIGNALED`).
 
 `ProcessCreate` копирует имя процесса из user-памяти, требует корректный UTF-8
-и ограничение `name_len <= 64` байт. Пустое имя (`name_len == 0`) допустимо.
+и ограничение `1 <= name_len <= 64` байт. Пустое имя (`name_len == 0`)
+отвергается (`InvalidArgument`).
 
 `ProcessLoadImage` и `ProcessStart` описаны подробно в разделе
 [Process Spawning](#process-spawning).
 
 `ProcessStart` создаёт первый поток процесса и возвращает handle на него.
-Нижние 8 бит аргумента `priority | (handles_count << 32)` задают
-приоритет потока; биты `8..31` зарезервированы и обязаны быть нулевыми;
-в старших 32 битах лежит `handles_count` (`0..=32`). Если
-`handles_count > 0`, `handles_va` указывает на массив `u32` little-endian
-с bootstrap-handle из таблицы loader-процесса. Эти handle
-переносятся в новый процесс и становятся его начальным handle-набором.
-`entry_pc`, `user_sp` и `arg` записываются в стартовый user-контекст
-первого потока как entry point, stack pointer и bootstrap-аргумент
-соответственно. Стартуемый процесс наследует метеринг-`Resource`
-вызывающего (caller).
+`bootstrap_handle` (x3) — HandleId обязательного стартового хэндла-канала из таблицы loader-процесса. 
+Ядро изымает его из caller-таблицы (`TRANSFER`) и устанавливает в child-таблицу.
+`priority` (x4): нижние 8 бит задают приоритет потока, биты [8..) зарезервированы
+и обязаны быть нулевыми. `entry_pc` (x1) и `user_sp` (x2)
+записываются в стартовый user-контекст первого потока. x5 зарезервирован, должен
+быть нулевым. Стартуемый процесс наследует метеринг-`Resource` вызывающего (caller).
 
-`ProcessResourceSelf` ставит свежий handle на метеринг-`Resource` текущего
-процесса (с дефолтными правами, включая `WRITE`) — из его бюджета списываются
-`MemoryAllocate`/`MemoryCreateVirtual`. `WrongType`,
-если метеринг-ресурс не задан.
+`ProcessSelf` возвращает handle на текущий процесс. 
+`ProcessResourceSelf` возвращает handle на метеринг-`Resource` текущего процесса (объект, из бюджета которого 
+списываются аллокации памяти).
 
-`ProcessTerminate` не используется для self-exit: handle на текущий
-процесс возвращает `AccessDenied` даже при `WRITE`. Собственное
-завершение идёт через `ThreadExit`; последний поток процесса помечает
-процесс завершённым.
-
-Завершение процесса ожидается прямо по `process_h`:
-`SignalWaitOne(process_h, SIGNALED, …)` лениво материализует bound-`Signal`
-терминации (если процесс уже завершён, ожидание возвращается сразу). Отдельный
-`Signal`-хендл не выдаётся, поэтому подделать терминацию через `SignalSet`
-нельзя (на `Process` — `WrongType`). Чтобы делегировать наблюдение, не давая
-права завершать процесс, передают `HandleDuplicate(process_h, READ, …)`.
+`ProcessTerminate` не используется для self-exit: handle на текущий процесс возвращает `AccessDenied` даже при `WRITE`. 
+Собственное завершение идёт через `ThreadExit`; последний поток процесса помечает процесс завершённым.
 
 Типичный сценарий user-spawn состоит из трёх шагов: `ProcessCreate`,
-затем `ProcessLoadImage`, затем `ProcessStart`. Между `LoadImage` и
+ `ProcessLoadImage`, затем `ProcessStart`. Между `LoadImage` и
 `Start` никакой поток в child-процессе ещё не исполняется.
 
 Пример: передать supervisor право дождаться завершения текущего процесса.
@@ -354,16 +333,12 @@ Thread-вызовы создают поток в процессе, возвра�
 | `0x54` | `ThreadTerminate`         | `thread_h`, `exit_code`                               | `0`                    | `WRITE` |
 | `0x55` | `ThreadIpcBufferAddr`     | —                                                     | `ipc_buffer_va`        | —       |
 
-`ThreadTerminate` не используется для self-exit: handle на текущий
-поток возвращает `AccessDenied` даже при `WRITE`. Для завершения
-текущего потока вызывается `ThreadExit`.
+`ThreadSelf` возвращает handle на текущий поток.
 
-Завершение потока, как и процесса, ожидается прямо по `thread_h`
-(`SignalWaitOne`/`Many`, бит `SIGNALED`); bound-`Signal` терминации
-материализуется лениво, отдельной op нет.
+`ThreadTerminate` не используется для self-exit. Handle на текущий поток возвращает `AccessDenied` даже при `WRITE`. 
+Для завершения текущего потока вызывается `ThreadExit`.
 
-`ThreadIpcBufferAddr` возвращает user-VA per-thread IPC-буфера текущего потока; для
-kernel-потока без буфера — `-(SyscallError)`. Адрес используется как указатель
+`ThreadIpcBufferAddr` возвращает user-VA per-thread IPC-буфера текущего потока. Адрес используется как указатель
 на `IpcBuffer` перед каждым port-вызовом (см. секцию [Port](#port)).
 
 `exit_code` берётся из младших 32 бит аргумента и читается как `i32`.
@@ -396,15 +371,15 @@ Memory-вызовы выделяют память и управляют её м�
   который можно замапить, нарезать на под-регионы (`MemorySlice`), передать
   через port или задублировать с уменьшенными правами.
 
-|     Op | Имя                    | Аргументы                                       | Возврат                                                           | Права                                                                                           |
-|-------:|------------------------|-------------------------------------------------|-------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
-| `0x60` | `MemoryCreateVirtual`  | `resource_h`, `size_bytes`, `access_mask`       | `region_h`                                                        | `WRITE` на `Resource`; расходует `size/PAGE` бюджета (`ResourceExhausted` при нехватке)         |
-| `0x62` | `MemorySlice`          | `region_h`, `offset`, `size_bytes`, `access_mask` | `region_h`                                                        | `DUPLICATE` на регионе; окно `[offset, offset+size)` в границах региона, доступ не шире гранта; бюджет не расходует |
-| `0x63` | `MemoryMap`            | `region_h`, `size_bytes`, `flags`               | `va`                                                              | `WRITE` и права по `flags`                                                                      |
-| `0x64` | `MemoryRemap`          | `va`, `size_bytes`, `flags`                     | `0`                                                               | grant исходного mapping                                                                         |
-| `0x65` | `MemoryAllocate`       | `resource_h`, `size_bytes`, `flags`             | `va`                                                              | `WRITE` на `Resource`; расходует `size/PAGE` бюджета (`ResourceExhausted` при нехватке)         |
-| `0x66` | `MemoryFree`           | `va`, `size_bytes`                              | `0`                                                               | —                                                                                               |
-| `0x67` | `MemoryRegionInspect`  | `region_h`                                      | primary=`size_bytes`, secondary=`base_pa \| (kind_tag << 3) \| access_bits` | `READ`                                                                                  |
+|     Op | Имя                   | Аргументы                                         | Возврат                                                                     | Права                                                                                                               |
+|-------:|-----------------------|---------------------------------------------------|-----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| `0x60` | `MemoryCreateVirtual` | `resource_h`, `size_bytes`, `access_mask`         | `region_h`                                                                  | `WRITE` на `Resource`; расходует `size/PAGE` бюджета (`ResourceExhausted` при нехватке)                             |
+| `0x62` | `MemorySlice`         | `region_h`, `offset`, `size_bytes`, `access_mask` | `region_h`                                                                  | `DUPLICATE` на регионе; окно `[offset, offset+size)` в границах региона, доступ не шире гранта; бюджет не расходует |
+| `0x63` | `MemoryMap`           | `region_h`, `size_bytes`, `flags`                 | `va`                                                                        | `WRITE` и права по `flags`                                                                                          |
+| `0x64` | `MemoryRemap`         | `va`, `size_bytes`, `flags`                       | `0`                                                                         | grant исходного mapping                                                                                             |
+| `0x65` | `MemoryAllocate`      | `resource_h`, `size_bytes`, `flags`               | `va`                                                                        | `WRITE` на `Resource`; расходует `size/PAGE` бюджета (`ResourceExhausted` при нехватке)                             |
+| `0x66` | `MemoryFree`          | `va`, `size_bytes`                                | `0`                                                                         | —                                                                                                                   |
+| `0x67` | `MemoryRegionInspect` | `region_h`                                        | primary=`size_bytes`, secondary=`base_pa \| (kind_tag << 3) \| access_bits` | `READ`                                                                                                              |
 
 `access_mask`: `R=1`, `W=2`, `X=4`; ноль — `InvalidArgument`; высокие биты отбрасываются.
 `flags`: `0=ReadWrite`, `1=ReadOnly`, `2=ReadExecute`; другие значения — `InvalidArgument`.
@@ -413,26 +388,20 @@ Memory-вызовы выделяют память и управляют её м�
 страниц по 4 KiB). Каждый успешный `MemoryCreateVirtual` / `MemoryAllocate`
 атомарно списывает с бюджета ресурса `size_bytes / PAGE_SIZE` страниц (обязана
 делиться нацело). При нехватке бюджета операция возвращает `ResourceExhausted`
-и регион не создаётся. Корневой `Resource` (крупный PA-диапазон) создаётся ядром при
-старте и выдаётся bootstrap-процессу одним из начальных хэндлов (полная
-раскладка начальных хэндлов — в [userland.md](userland.md)).
+и регион не создаётся. Корневой `Resource` создаётся ядром при старте и доступен bootstrap-процессу
+через контракт Bootstrap-канала (см. [userland.md](userland.md)).
 
-Метеринг-`Resource` разделяется, а не партиционируется: `ProcessStart`
-передаёт ребёнку тот же `Resource`, что у caller, а `ProcessResourceSelf`
-отдаёт на него handle с `WRITE`. Поэтому всё дерево процессов списывает из
-одного общего пула; суб-бюджетов на процесс нет, и ребёнок может исчерпать
-бюджет родителя и сиблингов.
+Метеринг-`Resource` разделяется: `ProcessStart` передаёт потомку тот же `Resource`, что у caller, а `ProcessResourceSelf`
+отдаёт на него handle с `WRITE`. Поэтому всё дерево процессов списывает из одного общего пула.
 
 `MemoryMap` требует, чтобы `size_bytes` совпадал с полным размером
 региона; частичный mapping поддиапазона не поддерживается.
 
-`MemoryMap` привязывает установленный маппинг к капе, через которую он
+`MemoryMap` привязывает установленный маппинг к capability, через которую он
 сделан: маппинг живёт ровно столько, сколько эта капа. `MemoryFree` и
-[отзыв капы](#каскадный-отзыв-при-handleclose) идут через единый teardown
-(снять PTE + вернуть range аллокатору), поэтому при `HandleClose` региона —
-своего или у предка по деривации — активные маппинги поддерева срываются
-в том числе кросс-процессно. `MemoryAllocate`-fastpath публичной
-капы не имеет: его маппинг снимается только `MemoryFree` или смертью AS.
+[отзыв капы](#каскадный-отзыв-при-handleclose) идут через единый teardown, поэтому при `HandleClose` региона —
+своего или у предка по деривации — активные маппинги поддерева снимаются, в том числе кросс-процессно. 
+`MemoryAllocate` публичной капы не имеет: его маппинг снимается только `MemoryFree` или смертью AS.
 
 Пример: временный рабочий буфер.
 
@@ -465,37 +434,27 @@ port_send(peer_h, PORT_TIMEOUT_INFINITE);
 
 ## IRQ
 
-IRQ-вызовы выдают userspace-драйверу аппаратную линию прерывания как
-capability. Полномочие минтить линии несёт `IrqControl` (range-bounded, как
-`Resource` для физпамяти); минтинг возвращает `IrqLine` — привязанную линию,
-срабатывание которой userspace ждёт как обычный сигнал.
+IRQ-вызовы выдают userspace-драйверу аппаратную линию прерывания как capability. 
+Полномочие минтить линии несёт `IrqControl` (range-bounded, как `Resource` для физпамяти). 
+Минтинг возвращает `IrqLine` — привязанную линию, срабатывание которой userspace ждёт как обычный сигнал.
 
-|     Op | Имя       | Аргументы              | Возврат      | Права                  |
-|-------:|-----------|------------------------|--------------|------------------------|
+|     Op | Имя       | Аргументы              | Возврат      | Права                   |
+|-------:|-----------|------------------------|--------------|-------------------------|
 | `0x70` | `IrqMint` | `irq_control_h`, `irq` | `irq_line_h` | `WRITE` на `IrqControl` |
 | `0x71` | `IrqAck`  | `irq_line_h`           | `0`          | `WRITE` на `IrqLine`    |
 
 `IrqMint` минтит `IrqLine` для линии `irq` (нижние 16 бит): требует `WRITE` на
-`IrqControl`-хендле и попадания `irq` в его диапазон (иначе `AccessDenied`);
-если линия уже занята — `ResourceExhausted`. Корневой `IrqControl` (весь
-SPI-диапазон `32..=1019`) создаётся ядром при старте и выдаётся
-bootstrap-процессу одним из начальных хэндлов (см. [userland.md](userland.md));
-вниз драйверам он делегируется через `TRANSFER`/`DUPLICATE`, как корневой
-`Resource`.
+`IrqControl`-хендле и попадания `irq` в его диапазон (иначе `AccessDenied`). Если линия уже занята — `ResourceExhausted`.
+Корневой `IrqControl` создаётся ядром при старте и доступен bootstrap-процессу через контракт Bootstrap-канала.
+`IrqControl` делегируется через `TRANSFER`/`DUPLICATE`.
 
 Ожидание и подтверждение (линии GIC уровневые):
 
-- ждать срабатывания — `SignalWaitOne(irq_line_h, SIGNALED, …)` (или в
-  `SignalWaitMany` рядом с другими событиями): `IrqLine` ожидается напрямую,
-  отдельный `Signal`-хендл не выдаётся, поэтому подделать прерывание нельзя;
-- при срабатывании ядро синхронно маскирует линию и поднимает `SIGNALED`
-  (для уровневой линии это обязательно — иначе interrupt storm);
-- обслужив устройство, драйвер вызывает `IrqAck(irq_line_h)`: снимает latch
-  `SIGNALED` и размаскирует линию. Подтверждение вне состояния "сработало" —
-  `WrongType`.
+- ждать срабатывания — `SignalWaitOne(irq_line_h, SIGNALED, …)`;
+- при срабатывании ядро синхронно маскирует линию и поднимает `SIGNALED` (для уровневой линии это обязательно — иначе interrupt storm);
+- обслужив устройство, драйвер вызывает `IrqAck(irq_line_h)`: снимает latch `SIGNALED` и размаскирует линию. 
 
-Закрытие `IrqLine`-хендла (или завершение процесса) отвязывает линию и
-отключает её на контроллере: упавший драйвер не оставляет зависшую линию.
+Закрытие `IrqLine`-хендла (или завершение процесса) отвязывает линию и отключает её на контроллере.
 
 Пример: драйвер обслуживает свою линию.
 
@@ -512,26 +471,18 @@ loop {
 
 ## Process Spawning
 
-`ProcessLoadImage` и `ProcessStart` дают userspace полноценную роль
-process-manager-а: loader сам пишет байты образа во фреймы регионов через
-двойной маппинг и одной syscall просит ядро установить эти регионы в
-child AS; вторая syscall атомарно стартует первый поток вместе с
-bootstrap-handles.
+`ProcessLoadImage` позволяет загрузить произвольный оброаз и одним syscall просит ядро установить эти регионы в
+child AS;
+`ProcessStart` атомарно стартует первый поток вместе с bootstrap-хэндлом.
 
-|     Op | Имя                | Аргументы                                                                                    | Возврат    | Права                                                                    |
-|-------:|--------------------|----------------------------------------------------------------------------------------------|------------|--------------------------------------------------------------------------|
-| `0x42` | `ProcessLoadImage` | `process_h`, `desc_va`, `desc_len` (== `56`)                                                 | `0`        | `WRITE` на `process_h`; `WRITE` + права по флагу на каждом region-handle |
-| `0x45` | `ProcessStart`     | `process_h`, `entry_pc`, `user_sp`, `arg`, `priority \| (handles_count << 32)`, `handles_va` | `thread_h` | `WRITE` на `process_h`; `TRANSFER` на каждом bootstrap-handle            |
+|     Op | Имя                | Аргументы                                                                         | Возврат    | Права                                                                    |
+|-------:|--------------------|-----------------------------------------------------------------------------------|------------|--------------------------------------------------------------------------|
+| `0x42` | `ProcessLoadImage` | `process_h`, `desc_va`, `desc_len` (== `56`)                                      | `0`        | `WRITE` на `process_h`; `WRITE` + права по флагу на каждом region-handle |
+| `0x45` | `ProcessStart`     | `process_h`, `entry_pc`, `user_sp`, `bootstrap_handle`, `priority`, `reserved(0)` | `thread_h` | `WRITE` на `process_h`; `TRANSFER` на `bootstrap_handle`                 |
 
 Для `ProcessLoadImage` необходимые права на region-handle зависят от флага
 сегмента: `WRITE | READ` для `RW`, `WRITE | READ` для `RO`, `WRITE | READ | EXECUTE`
-для `RX`. Иными словами, `WRITE` на region-handle требуется всегда (он
-авторизует установку маппинга в чужой AS).
-
-`ProcessLoadImage` и `ProcessStart` рассчитаны на одноразовый
-bootstrap fresh child-процесса. После загрузки образа child уже не
-считается "пустым", а после старта первого потока повторный `Start`
-также отвергается (`WrongType`).
+для `RX`. Иными словами, `WRITE` на region-handle требуется всегда (он авторизует установку маппинга в чужой AS).
 
 ### Layout `UserImageDescAbi` (56 B)
 
@@ -578,19 +529,8 @@ ProcessCreate("child")                           -> proc_h
 build UserImageDescAbi + [UserSegmentAbi; N] на стеке loader-а
 ProcessLoadImage(proc_h, desc_va, 56)            -> 0
 MemoryFree(seg_va, size)                                    // фреймы остаются за child
-ProcessStart(proc_h, entry_pc, user_sp, arg, prio | (1<<32), &[bootstrap_h])
+ProcessStart(proc_h, entry_pc, user_sp, bootstrap_h, prio, 0)
                                                  -> thread_h
 SignalWaitOne(proc_h, SIGNALED, ...)             // ожидание прямо по process-handle
 ProcessExitCode(proc_h)                          -> exit_code
 ```
-
-### Стоимость
-
-| Syscall            | `copy_user_in` объём                      | Копий образа |
-|--------------------|-------------------------------------------|--------------|
-| `ProcessLoadImage` | `<= 56 + 16*32 = 568 B` (desc + сегменты) | 0            |
-| `ProcessStart`     | `<= 32*4 = 128 B` (HandleId-массив)       | 0            |
-
-Двойной маппинг: тот же регион памяти хранится в loader-AS и child-AS,
-ядро лишь записывает PTE в child mapper - данные сегмента копируются
-ровно один раз (CPU stores loader).

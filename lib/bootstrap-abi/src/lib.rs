@@ -20,12 +20,11 @@ pub trait Bootstrap {
     fn acquire_irq_control(&self) -> Result<ipc::wire::Cap, u32>;
 
     /// Выдаёт вызывателю read-only capability на регион поверх байт userland-образа.
-    /// `Err` - ненулевой код ошибки выдачи.
     #[call]
     fn acquire_userland_image(&self) -> Result<ipc::wire::Cap, u32>;
 
     /// Выдаёт capability на Device-MMIO регион `index` из FDT-набора (kernel-owned
-    /// исключены). `Err` - ненулевой код ошибки: индекс вне набора либо отказ выдачи.
+    /// исключены). `Err` - индекс вне набора либо отказ выдачи.
     #[call]
     fn acquire_device_memory(&self, index: u32) -> Result<ipc::wire::Cap, u32>;
 }

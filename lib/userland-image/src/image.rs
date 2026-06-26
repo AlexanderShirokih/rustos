@@ -83,6 +83,7 @@ pub struct DecodedSegments<'a> {
     remaining: usize,
 }
 
+/// Декодирует образ из буфера. Длина буфера должна быть не меньше размера, объявленного в заголовке.
 pub fn decode(bytes: &[u8]) -> Result<DecodedImage<'_>, ImageDecodeError> {
     DecodedImage::decode(bytes)
 }
@@ -105,9 +106,15 @@ impl<'a> DecodedImage<'a> {
 
         let total_size =
             usize::try_from(header.total_size).map_err(|_| invalid_layout(None, "total_size"))?;
-        if total_size != bytes.len() {
-            return Err(invalid_layout(None, "total_size"));
+        // Буфер не короче образа; хвост сверх объявленного заголовком размера -
+        // паддинг страницы при выдаче региона, декодируем ровно префикс.
+        if total_size > bytes.len() {
+            return Err(ImageDecodeError::BufferTooShort {
+                needed: total_size,
+                actual: bytes.len(),
+            });
         }
+        let bytes = &bytes[..total_size];
 
         let mut next_offset = IMAGE_HEADER_SIZE;
         for index in 0..usize::from(header.entry_count) {
@@ -469,6 +476,26 @@ mod tests {
         assert_eq!(entry.name(), "rootkeeper");
         assert_eq!(segments[0].bytes, b"CODE");
         assert_eq!(segments[1].permissions, SegmentPermissions::ReadWrite);
+    }
+
+    #[test]
+    fn decode_tolerates_trailing_padding() {
+        let mut bytes = image_bytes();
+        bytes.extend(core::iter::repeat(0u8).take(4096));
+
+        let image = decode(&bytes).expect("padded buffer decodes");
+        let entry = image.bootstrap_entry();
+        assert_eq!(entry.name(), "rootkeeper");
+        assert_eq!(entry.segments().next().expect("segment").bytes, b"CODE");
+    }
+
+    #[test]
+    fn decode_rejects_buffer_shorter_than_total_size() {
+        let bytes = image_bytes();
+        assert!(matches!(
+            decode(&bytes[..bytes.len() - 1]),
+            Err(ImageDecodeError::BufferTooShort { .. })
+        ));
     }
 
     #[test]

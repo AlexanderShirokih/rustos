@@ -6,7 +6,6 @@
 
 pub const SEGMENT_ABI_VERSION: u32 = 1;
 pub const MAX_SEGMENTS_PER_IMG: usize = 16;
-pub const MAX_BOOTSTRAP_HANDLES: usize = 32;
 
 /// Размер сериализованной `UserImageDescAbi` в байтах: `4 + 4 + 8*6 = 56`.
 pub const USER_IMAGE_DESC_SIZE: usize = 56;

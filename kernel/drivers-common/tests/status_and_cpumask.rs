@@ -75,7 +75,7 @@ fn record(ctx: &mut ProbeContext<Node>) -> ProbeResult {
 }
 
 /// Возвращает маску id узлов, по которым прошёл probe, для дерева
-/// root(id=0) с одним ребёнком (id=1) с заданным `status`.
+/// root(id=0) с одним потомком (id=1) с заданным `status`.
 fn probed_mask_for_status(status: Option<&'static [u8]>) -> u32 {
     PROBED.with(|p| p.set(0));
 
@@ -101,7 +101,7 @@ fn probed_mask_for_status(status: Option<&'static [u8]>) -> u32 {
 
 #[test]
 fn status_okay_and_ok_are_enabled() {
-    // root всегда probed (id=0); ребёнок (id=1) probed только если enabled.
+    // root всегда probed (id=0); потомок (id=1) probed только если enabled.
     assert_eq!(probed_mask_for_status(Some(b"okay\0")), 0b11);
     assert_eq!(probed_mask_for_status(Some(b"ok\0")), 0b11);
     // Отсутствие status -> enabled.

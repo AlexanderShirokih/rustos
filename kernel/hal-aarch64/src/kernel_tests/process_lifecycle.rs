@@ -3,6 +3,7 @@
 //! `Arc<ProcessObject>` из `UserProcessLaunchInfo`; exit_code публикуется
 //! до пометки и читается обоими `*_object`.
 
+use capability::{Capability, CapabilityTarget, Rights, Signal};
 use kernel_tests::kernel_test;
 use memory::{
     MemFlags,
@@ -52,13 +53,14 @@ fn process_lifecycle_exit_code_and_termination_signals() {
         user_stack_size: USER_STACK_SIZE,
     };
 
+    let bootstrap = Capability::new(CapabilityTarget::Signal(Signal::new()), Rights::WRITE);
     let info = kernelspace::kernel_tests::user_process_launcher()
         .spawn_user_process_with_launch(
             "process-lifecycle",
             &image,
             Priority::highest(),
             2,
-            UserProcessLaunch::new(),
+            UserProcessLaunch::new(bootstrap),
         )
         .expect("spawn_user_process must succeed");
 

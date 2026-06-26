@@ -34,7 +34,7 @@ pub fn spawn(
     stack_bytes: u64,
     priority: Priority,
 ) -> Result<JoinHandle> {
-    let stack = Resource::self_resource()?.allocate(stack_bytes, UserMemFlags::ReadWrite)?;
+    let stack = Resource::self_resource().allocate(stack_bytes, UserMemFlags::ReadWrite)?;
     let user_sp = stack.va() + stack_bytes;
     let process = Process::self_process()?;
 

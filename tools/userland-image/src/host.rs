@@ -202,9 +202,10 @@ fn resolve_programs(
     for (index, program) in resolved.iter().enumerate() {
         for earlier in &resolved[..index] {
             ensure!(
-                program.package != earlier.package,
-                "package '{}' is listed more than once in image manifest",
-                program.package
+                program.package != earlier.package || program.bin != earlier.bin,
+                "binary '{}::{}' is listed more than once in image manifest",
+                program.package,
+                program.bin
             );
             ensure!(
                 program.name != earlier.name,
@@ -773,8 +774,31 @@ mod tests {
         let err = resolve_programs(&manifest, &metadata).expect_err("duplicate package must fail");
         assert_eq!(
             err.to_string(),
-            "package 'rootkeeper' is listed more than once in image manifest"
+            "binary 'rootkeeper::rootkeeper' is listed more than once in image manifest"
         );
+    }
+
+    #[test]
+    fn resolve_allows_same_package_distinct_bins() {
+        let manifest = ImageManifest {
+            version: USERLAND_MANIFEST_VERSION,
+            programs: vec![
+                image_program("testrunner"),
+                ImageProgram {
+                    package: "testrunner".to_string(),
+                    name: Some("fixture".to_string()),
+                    bin: Some("fixture".to_string()),
+                    bootstrap: Some(false),
+                    stack_size: None,
+                },
+            ],
+        };
+        let metadata = metadata_map(&[("testrunner", true, 0x4000)]);
+
+        let resolved = resolve_programs(&manifest, &metadata).expect("distinct bins allowed");
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[1].bin, "fixture");
+        assert!(!resolved[1].bootstrap);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use alloc::{sync::Arc, vec::Vec};
 
+use collections::MutexCell;
 use memory::{
     MemFlags, MemoryRegion, PAGE_SIZE,
     memory_mapper::MemoryMappingError,
@@ -7,6 +8,7 @@ use memory::{
 };
 
 use super::{
+    HandleTable,
     errors::{IpcError, SpawnError},
     handle::HandleId,
     resource::Resource,
@@ -107,7 +109,8 @@ impl UserImageInstall {
 /// Параметры старта первого user-потока.
 pub struct UserStartSpec {
     pub entry: UserThreadEntry,
-    pub handle_ids: Vec<HandleId>,
+    pub loader_handle_table: Arc<MutexCell<HandleTable>>,
+    pub handle_id: HandleId,
     pub metering_resource: Option<Arc<Resource>>,
 }
 
@@ -201,8 +204,7 @@ pub enum StartProcessError {
     ProcessNotFound,
     /// Процесс ещё не загружен или уже стартовал.
     WrongState,
-    /// Один из `handle_ids` не найден, не имеет `Rights::TRANSFER` или
-    /// дублируется в массиве.
+    /// `handle_id` не найден или не имеет `Rights::TRANSFER`.
     HandleValidationFailed(IpcError),
     /// Не удалось создать первый user-поток.
     SpawnFailed(SpawnError),

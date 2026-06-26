@@ -1,6 +1,6 @@
 //! При `OutOfHandles` в caller-table syscall'ы `ProcessCreate`,
 //! `ThreadCreate`, `ProcessStart` НЕ должны выполнять сторонних эффектов
-//! (создавать процесс/поток, drain'ить bootstrap-handles).
+//! (создавать процесс/поток, drain'ить bootstrap-handle).
 
 use core::{
     num::NonZeroU64,
@@ -65,33 +65,24 @@ impl KernelRuntime for CountingRuntime {
     fn clear_blocked_cancel(&self) {}
 }
 
-/// Минимальный mapper, обслуживающий только `copy_user_in` поверх Vec<u8>;
-/// все остальные методы паникуют, потому что в этих тестах не вызываются.
-struct CannedMapper {
-    base_va: usize,
+/// User-VA, по которому стаб отдаёт байты имени процесса для `ProcessCreate`.
+const NAME_VA: usize = 0x2000_0000;
+
+/// Минимальный mapper: обслуживает только `copy_user_in` для имени по `NAME_VA`.
+struct NameMapper {
     bytes: Mutex<Vec<u8>>,
 }
 
-impl CannedMapper {
-    fn new(base_va: usize, bytes: Vec<u8>) -> Self {
-        Self {
-            base_va,
-            bytes: Mutex::new(bytes),
-        }
-    }
-}
-
-impl MemoryMapper for CannedMapper {
+impl MemoryMapper for NameMapper {
     fn map(
         &self,
         _va: PageAlignedVirtualAddress,
-        _page_count: usize,
+        _pages: usize,
         _init: &[u8],
         _flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
-        unimplemented!("CannedMapper supports only copy_user_in")
+        unimplemented!()
     }
-
     fn map_exact(
         &self,
         _va: PageAlignedVirtualAddress,
@@ -99,78 +90,67 @@ impl MemoryMapper for CannedMapper {
         _size: usize,
         _flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
-        unimplemented!("CannedMapper supports only copy_user_in")
+        unimplemented!()
     }
-
     fn unmap(
         &self,
         _va: PageAlignedVirtualAddress,
         _size: usize,
     ) -> Result<(), MemoryUnmappingError> {
-        unimplemented!("CannedMapper supports only copy_user_in")
+        unimplemented!()
     }
-
     fn remap(
         &self,
         _va: PageAlignedVirtualAddress,
         _size: usize,
         _flags: MemFlags,
     ) -> Result<(), MemoryRemappingError> {
-        unimplemented!("CannedMapper supports only copy_user_in")
+        unimplemented!()
     }
-
     fn activate_handle(&self) -> AddressSpaceHandle {
         AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
     }
-
     fn zero_owned_frame(&self, _pa: PageAlignedAddress) {
-        unimplemented!("CannedMapper supports only copy_user_in")
+        unimplemented!()
     }
-
     fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
         let bytes = self.bytes.lock().unwrap();
-        let offset = va.as_usize().wrapping_sub(self.base_va);
+        let offset = va.as_usize().wrapping_sub(NAME_VA);
         let end = offset
             .checked_add(dst.len())
             .ok_or(UserCopyError::NotMapped)?;
-        if end > bytes.len() {
+        if va.as_usize() < NAME_VA || end > bytes.len() {
             return Err(UserCopyError::NotMapped);
         }
         dst.copy_from_slice(&bytes[offset..end]);
         Ok(())
     }
-
     fn as_any(&self) -> &(dyn core::any::Any + 'static) {
         self
     }
 }
 
-type CannedUserVm = (Arc<CannedMapper>, Arc<MutexCell<UserVmAllocator>>);
-
 struct StubSyscallRuntime {
-    user_vm: Mutex<Option<CannedUserVm>>,
     create_empty_process_calls: AtomicUsize,
     create_user_thread_calls: AtomicUsize,
     start_user_process_calls: AtomicUsize,
+    user_vm: Mutex<Option<Arc<NameMapper>>>,
 }
 
 impl StubSyscallRuntime {
     fn new() -> Self {
         Self {
-            user_vm: Mutex::new(None),
             create_empty_process_calls: AtomicUsize::new(0),
             create_user_thread_calls: AtomicUsize::new(0),
             start_user_process_calls: AtomicUsize::new(0),
+            user_vm: Mutex::new(None),
         }
     }
 
-    fn set_canned_user_vm(&self, base_va: usize, bytes: std::vec::Vec<u8>) {
-        let mapper = Arc::new(CannedMapper::new(base_va, bytes));
-        let allocator = Arc::new(MutexCell::new(UserVmAllocator::new(
-            PageAlignedVirtualAddress::from_usize(0x1000_0000).unwrap(),
-            VirtualAddress::new(0x1100_0000),
-        )));
-        *self.user_vm.lock().unwrap() = Some((mapper, allocator));
+    fn set_user_vm_name(&self, name: &[u8]) {
+        *self.user_vm.lock().unwrap() = Some(Arc::new(NameMapper {
+            bytes: Mutex::new(name.to_vec()),
+        }));
     }
 
     fn clear_user_vm(&self) {
@@ -186,9 +166,12 @@ impl StubSyscallRuntime {
 
 impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
     fn current_user_vm(&self) -> Option<UserVmContext> {
-        let guard = self.user_vm.lock().unwrap();
-        let (mapper, allocator) = guard.as_ref()?;
-        Some(UserVmContext::new(mapper.clone(), allocator.clone()))
+        let mapper = self.user_vm.lock().unwrap().clone()?;
+        let allocator = Arc::new(MutexCell::new(UserVmAllocator::new(
+            PageAlignedVirtualAddress::from_usize(0x1000_0000).unwrap(),
+            VirtualAddress::new(0x1100_0000),
+        )));
+        Some(UserVmContext::new(mapper, allocator))
     }
 
     fn current_ipc_buffer_va(&self) -> Option<u64> {
@@ -255,15 +238,11 @@ impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
         spec: UserStartSpec,
     ) -> Result<Arc<ThreadObject>, StartProcessError> {
         self.start_user_process_calls.fetch_add(1, Ordering::SeqCst);
-        // Моделируем реальный drain bootstrap-handle из таблицы текущего процесса.
-        if !spec.handle_ids.is_empty() {
-            let table = capability::runtime()
-                .current_handle_table()
-                .ok_or(StartProcessError::HandleValidationFailed(IpcError::BadHandle))?;
-            table
-                .with_lock(|tbl| tbl.try_drain_for_transfer(&spec.handle_ids, Rights::TRANSFER))
-                .map_err(StartProcessError::HandleValidationFailed)?;
-        }
+
+        // Моделируем drain bootstrap-handle:
+        spec.loader_handle_table
+            .with_lock(|tbl| tbl.try_drain_for_transfer(&[spec.handle_id], Rights::TRANSFER))
+            .map_err(StartProcessError::HandleValidationFailed)?;
         Ok(ThreadObject::new())
     }
 }
@@ -396,12 +375,12 @@ fn process_create_does_not_create_process_on_out_of_handles() {
     let _guard = test_lock();
     let (rt, stub) = shared_runtime();
     stub.reset_counters();
-    stub.clear_user_vm();
+    stub.set_user_vm_name(b"x");
 
     rt.set_handle_table(full_table_with_capacity_one());
 
-    let err =
-        dispatch(SyscallOp::ProcessCreate, [0, 0, 0, 0, 0, 0]).expect_err("OutOfHandles expected");
+    let err = dispatch(SyscallOp::ProcessCreate, [NAME_VA as u64, 1, 0, 0, 0, 0])
+        .expect_err("OutOfHandles expected");
     assert_eq!(err, SyscallError::OutOfHandles);
     assert_eq!(
         stub.create_empty_process_calls.load(Ordering::SeqCst),
@@ -424,8 +403,8 @@ fn process_create_with_empty_name_returns_invalid_argument() {
     assert_eq!(err, SyscallError::InvalidArgument);
     assert_eq!(
         stub.create_empty_process_calls.load(Ordering::SeqCst),
-        1,
-        "create_empty_process must validate the empty name",
+        0,
+        "syscall rejects the empty name before create_empty_process",
     );
 }
 
@@ -470,7 +449,7 @@ fn thread_create_does_not_create_thread_on_out_of_handles() {
 }
 
 #[test]
-fn process_start_does_not_start_process_on_out_of_handles() {
+fn process_start_rejects_zero_handle() {
     let _guard = test_lock();
     let (rt, stub) = shared_runtime();
     stub.reset_counters();
@@ -489,7 +468,7 @@ fn process_start_does_not_start_process_on_out_of_handles() {
         .expect("dummy fills second slot");
     rt.set_handle_table(table);
 
-    let prio_and_count = 1u64;
+    // bootstrap_handle (x3) = 0 - невалидный стартовый хэндл.
     let err = dispatch(
         SyscallOp::ProcessStart,
         [
@@ -497,24 +476,23 @@ fn process_start_does_not_start_process_on_out_of_handles() {
             0x4000_0000,
             0x4001_0000,
             0,
-            prio_and_count,
+            1,
             0,
         ],
     )
-    .expect_err("OutOfHandles expected");
-    assert_eq!(err, SyscallError::OutOfHandles);
+    .expect_err("zero bootstrap handle rejected");
+    assert_eq!(err, SyscallError::InvalidArgument);
     assert_eq!(
         stub.start_user_process_calls.load(Ordering::SeqCst),
         0,
-        "start_user_process must NOT be called on OutOfHandles",
+        "start_user_process must NOT be called for a zero handle",
     );
 }
 
 #[test]
 fn process_start_succeeds_when_drain_frees_caller_slot() {
-    // При handles_count >= 1 пере-передача bootstrap-handle-а освобождает слот
-    // в caller-table под возвращаемый thread-handle: syscall не должен отказывать
-    // пре-резервацией.
+    // Пере-передача bootstrap-handle-а освобождает слот в caller-table под
+    // возвращаемый thread-handle: syscall не должен отказывать пре-резервацией.
     let _guard = test_lock();
     let (rt, stub) = shared_runtime();
     stub.reset_counters();
@@ -532,22 +510,15 @@ fn process_start_succeeds_when_drain_frees_caller_slot() {
         .expect("insert bootstrap handle");
     rt.set_handle_table(table.clone());
 
-    let handles_va = 0x1000_0000u64;
-    stub.set_canned_user_vm(
-        handles_va as usize,
-        bootstrap_id.raw().get().to_le_bytes().to_vec(),
-    );
-
-    let prio_and_count = 1u64 | (1u64 << 32);
     let ret = dispatch(
         SyscallOp::ProcessStart,
         [
             u64::from(process_id.raw().get()),
             0x4000_0000,
             0x4001_0000,
+            u64::from(bootstrap_id.raw().get()),
+            1,
             0,
-            prio_and_count,
-            handles_va,
         ],
     )
     .expect("ProcessStart must succeed once drain frees the bootstrap slot");

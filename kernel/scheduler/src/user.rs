@@ -1,4 +1,4 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use capability::{Capability, HandleId, ProcessObject, ThreadObject};
@@ -11,10 +11,6 @@ use crate::{AddressSpace, Priority, ProcessId, SpawnError, ThreadId};
 #[repr(transparent)]
 pub struct UserBootstrapArg(pub u64);
 
-impl UserBootstrapArg {
-    pub const ZERO: Self = Self(0);
-}
-
 /// Параметры первого входа в user-режим.
 pub struct UserEntry {
     pub kernel_stack_top: NonNull<u8>,
@@ -23,41 +19,14 @@ pub struct UserEntry {
     pub arg: UserBootstrapArg,
 }
 
-/// Параметры initial handle'ов для нового user-процесса.
+/// Параметры старта user-процесса.
 pub struct UserProcessLaunch {
-    pub bootstrap_arg: UserBootstrapArg,
-    pub initial_handles: Vec<Capability>,
-    pub bootstrap_handle_index: Option<usize>,
+    pub initial_handle: Capability,
 }
 
 impl UserProcessLaunch {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn bootstrap_arg(mut self, arg: UserBootstrapArg) -> Self {
-        self.bootstrap_arg = arg;
-        self
-    }
-
-    pub fn initial_handles(mut self, handles: Vec<Capability>) -> Self {
-        self.initial_handles = handles;
-        self
-    }
-
-    pub fn bootstrap_handle(mut self, index: usize) -> Self {
-        self.bootstrap_handle_index = Some(index);
-        self
-    }
-}
-
-impl Default for UserProcessLaunch {
-    fn default() -> Self {
-        Self {
-            bootstrap_arg: UserBootstrapArg::ZERO,
-            initial_handles: Vec::new(),
-            bootstrap_handle_index: None,
-        }
+    pub fn new(initial_handle: Capability) -> Self {
+        Self { initial_handle }
     }
 }
 
@@ -76,7 +45,7 @@ pub struct PreparedUserProcess {
 pub struct UserProcessLaunchInfo {
     pub process_id: ProcessId,
     pub thread_id: ThreadId,
-    pub initial_handle_ids: Vec<HandleId>,
+    pub initial_handle_id: HandleId,
     pub process_object: Arc<ProcessObject>,
     pub thread_object: Arc<ThreadObject>,
 }
@@ -86,7 +55,7 @@ impl core::fmt::Debug for UserProcessLaunchInfo {
         f.debug_struct("UserProcessLaunchInfo")
             .field("process_id", &self.process_id)
             .field("thread_id", &self.thread_id)
-            .field("initial_handle_ids", &self.initial_handle_ids)
+            .field("initial_handle_id", &self.initial_handle_id)
             .finish_non_exhaustive()
     }
 }
@@ -94,6 +63,4 @@ impl core::fmt::Debug for UserProcessLaunchInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreparedUserProcessError {
     Spawn(SpawnError),
-    InvalidBootstrapHandle,
-    TooManyInitialHandles,
 }
