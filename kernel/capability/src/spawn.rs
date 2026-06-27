@@ -1,6 +1,5 @@
 use alloc::{sync::Arc, vec::Vec};
 
-use collections::MutexCell;
 use memory::{
     MemFlags, MemoryRegion, PAGE_SIZE,
     memory_mapper::MemoryMappingError,
@@ -8,7 +7,6 @@ use memory::{
 };
 
 use super::{
-    HandleTable,
     errors::{IpcError, SpawnError},
     handle::HandleId,
     resource::Resource,
@@ -109,7 +107,6 @@ impl UserImageInstall {
 /// Параметры старта первого user-потока.
 pub struct UserStartSpec {
     pub entry: UserThreadEntry,
-    pub loader_handle_table: Arc<MutexCell<HandleTable>>,
     pub handle_ids: Vec<HandleId>,
     pub metering_resource: Option<Arc<Resource>>,
 }

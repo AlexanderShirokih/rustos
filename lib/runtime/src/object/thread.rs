@@ -82,21 +82,12 @@ impl Thread {
 
     /// Финальный exit-код завершённого потока.
     pub fn exit_code(&self) -> Result<u32> {
-        value(svc::thread_exit_code(self.handle.as_raw())).map(|code| {
-            #[allow(clippy::cast_possible_truncation)]
-            let code = code as u32;
-            code
-        })
+        value(svc::thread_exit_code(self.handle.as_raw())).map(|code| (code & 0xFFFF_FFFF) as u32)
     }
 
     /// Блокирует до терминации потока (`SIGNALED`) либо тайм-аута.
     pub fn join(&self, timeout: Timeout) -> Result<()> {
-        value(svc::signal_wait_one(
-            self.handle.as_raw(),
-            SIGNALED,
-            timeout.raw(),
-        ))
-        .map(|_| ())
+        super::wait_signals(self.handle.as_raw(), SIGNALED, timeout).map(|_| ())
     }
 
     /// Завершает поток с кодом `exit_code`.

@@ -265,7 +265,6 @@ pub fn sys_process_start(
             arg,
             priority,
         },
-        loader_handle_table: loader_table.clone(),
         handle_ids: ids,
         metering_resource,
     };

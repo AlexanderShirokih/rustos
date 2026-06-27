@@ -79,23 +79,14 @@ impl Process {
         }
     }
 
-    /// Блокирует до терминации процесса (`SIGNALED`) либо тайм-аута.
+    /// Блокирует до терминации процесса либо тайм-аута.
     pub fn join(&self, timeout: Timeout) -> Result<()> {
-        value(svc::signal_wait_one(
-            self.handle.as_raw(),
-            SIGNALED,
-            timeout.raw(),
-        ))
-        .map(|_| ())
+        super::wait_signals(self.handle.as_raw(), SIGNALED, timeout).map(|_| ())
     }
 
     /// Финальный exit-код завершённого процесса.
     pub fn exit_code(&self) -> Result<u32> {
-        value(svc::process_exit_code(self.handle.as_raw())).map(|code| {
-            #[allow(clippy::cast_possible_truncation)]
-            let code = code as u32;
-            code
-        })
+        value(svc::process_exit_code(self.handle.as_raw())).map(|code| (code & 0xFFFF_FFFF) as u32)
     }
 
     /// Завершает процесс с кодом `exit_code`.

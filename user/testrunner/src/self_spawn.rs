@@ -136,12 +136,13 @@ fn start_success_absorbs_handles() {
         .start(child_entry(), vec![owned])
         .expect("child thread");
 
-    // Дожидаемся завершения child (успех старта), затем освобождаем все хэндлы
+    // Дожидаемся завершения child, затем освобождаем все хэндлы
     // родителя, полученные на/после изъятия stale, чтобы их слоты не могли
     // совпасть с освободившимся слотом stale в момент проверки.
     process
         .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
         .expect("child terminates");
+    
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), CHILD_EXIT_CODE);
     drop(thread);
 

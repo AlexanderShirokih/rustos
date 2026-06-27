@@ -16,8 +16,10 @@ use syscall::Handle;
 
 mod heap;
 mod ipc_buffer;
+mod irq_provision;
 mod memory_capability_target;
 mod owned_handle;
+mod pl031_rtc;
 mod port;
 mod process_handles;
 mod process_start;
@@ -68,8 +70,7 @@ impl Writer for ChannelLogWriter {
     }
 }
 
-/// Отправляет накопленную строку cast'ом `log` и очищает буфер; пустой
-/// буфер кадра не порождает.
+/// Отправляет накопленную строку cast'ом `log` и очищает буфер.
 fn flush_line(state: &mut LogBuffer) {
     if state.len == 0 {
         return;
@@ -103,14 +104,19 @@ fn send_log_frame(payload: &[u8]) {
     }
 }
 
-/// Exit-делегат harness'а: дофлушивает хвост лога и завершает поток с `code`.
+/// Handle WRITE-конца bootstrap-канала для тестов, обслуживающих контракт `Bootstrap`.
+pub(crate) fn bootstrap_handle() -> Handle {
+    *BOOTSTRAP_HANDLE
+        .get()
+        .expect("bootstrap handle set in _start")
+}
+
 fn runner_exit(code: u32) -> ! {
     LOG_WRITER.flush();
     thread_exit(u64::from(code))
 }
 
-/// `bootstrap` приходит в x0 как HandleId WRITE-конца канала, переданного
-/// ядром при спавне; ненулевой по гарантии спавн-пути.
+/// `bootstrap` приходит в x0 как HandleId WRITE-конца канала, переданного ядром при спавне.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(bootstrap: Handle) -> ! {
     BOOTSTRAP_HANDLE.call_once(|| bootstrap);

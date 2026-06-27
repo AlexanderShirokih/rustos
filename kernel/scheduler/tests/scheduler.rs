@@ -384,7 +384,7 @@ fn mark_process_loaded(
     process: &Arc<capability::ProcessObject>,
 ) {
     let install = capability::UserImageInstall {
-        segments: std::vec::Vec::new(),
+        segments: Vec::new(),
         entry: VirtualAddress::new(0x4000_0000),
         user_stack_top: VirtualAddress::new(0x5000_1000),
         user_stack_size: 0x1000,
@@ -1012,7 +1012,7 @@ fn load_user_image_into_rejects_double_load() {
     mark_process_loaded(&handle, &process);
 
     let install = capability::UserImageInstall {
-        segments: std::vec::Vec::new(),
+        segments: Vec::new(),
         entry: VirtualAddress::new(0x4000_0000),
         user_stack_top: VirtualAddress::new(0x5000_1000),
         user_stack_size: 0x1000,
@@ -1023,10 +1023,6 @@ fn load_user_image_into_rejects_double_load() {
         Err(LoadImageError::WrongState) => {}
         other => panic!("expected WrongState, got {other:?}"),
     }
-}
-
-fn empty_loader_table() -> Arc<collections::MutexCell<capability::HandleTable>> {
-    Arc::new(collections::MutexCell::new(capability::HandleTable::new()))
 }
 
 #[test]
@@ -1051,8 +1047,7 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
             arg: 0,
             priority: 1,
         },
-        loader_handle_table: empty_loader_table(),
-        handle_ids: std::vec::Vec::new(),
+        handle_ids: Vec::new(),
         metering_resource: None,
     };
     let thread = handle.start_user_process(&process, spec).expect("start ok");
@@ -1080,8 +1075,7 @@ fn start_user_process_rejects_unloaded() {
             arg: 0,
             priority: 1,
         },
-        loader_handle_table: empty_loader_table(),
-        handle_ids: std::vec::Vec::new(),
+        handle_ids: Vec::new(),
         metering_resource: None,
     };
     match handle.start_user_process(&process, spec) {
@@ -1096,7 +1090,7 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
     // start_user_process при SpawnFailed обязан оставить handle нетронутым
     // в loader-table с исходным HandleId (не дропать и не менять id).
     use capability::{
-        Capability, CapabilityTarget, HandleTable, Rights, Signal, StartProcessError,
+        Capability, CapabilityTarget, KernelRuntime, Rights, Signal, StartProcessError,
         UserStartSpec, UserThreadEntry,
     };
     use collections::LockCell;
@@ -1123,13 +1117,15 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
     let to_fill = TEST_CONFIG.max_threads() - 2;
     for _ in 0..to_fill {
         handle
-            .spawn_boxed(inherit_cfg, std::boxed::Box::new(|| {}))
+            .spawn_boxed(inherit_cfg, Box::new(|| {}))
             .expect("inherit filler spawn");
     }
 
+    let loader_table = handle
+        .current_handle_table()
+        .expect("running host has a current handle table");
     let signal = Signal::new();
-    let weak = std::sync::Arc::downgrade(&signal);
-    let loader_table = Arc::new(collections::MutexCell::new(HandleTable::new()));
+    let weak = Arc::downgrade(&signal);
     let h = Capability::new(
         CapabilityTarget::Signal(signal),
         Rights::TRANSFER | Rights::READ,
@@ -1145,8 +1141,7 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
             arg: 0,
             priority: 1,
         },
-        loader_handle_table: loader_table.clone(),
-        handle_ids: std::vec![handle_id],
+        handle_ids: vec![handle_id],
         metering_resource: None,
     };
 
@@ -1187,7 +1182,7 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
     );
 
     let install = capability::UserImageInstall {
-        segments: std::vec![capability::UserSegmentInstall {
+        segments: vec![capability::UserSegmentInstall {
             va_base: PageAlignedVirtualAddress::from_usize(0x4000_0000).unwrap(),
             mapped_size: 2 * memory::PAGE_SIZE.get(),
             region: region.clone(),

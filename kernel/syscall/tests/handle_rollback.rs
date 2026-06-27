@@ -69,11 +69,11 @@ impl KernelRuntime for CountingRuntime {
 /// все остальные методы паникуют, потому что в этих тестах не вызываются.
 struct CannedMapper {
     base_va: usize,
-    bytes: Mutex<std::vec::Vec<u8>>,
+    bytes: Mutex<Vec<u8>>,
 }
 
 impl CannedMapper {
-    fn new(base_va: usize, bytes: std::vec::Vec<u8>) -> Self {
+    fn new(base_va: usize, bytes: Vec<u8>) -> Self {
         Self {
             base_va,
             bytes: Mutex::new(bytes),
@@ -255,12 +255,15 @@ impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
         spec: UserStartSpec,
     ) -> Result<Arc<ThreadObject>, StartProcessError> {
         self.start_user_process_calls.fetch_add(1, Ordering::SeqCst);
-        // Моделируем реальный drain bootstrap-handle'ов: фиксу важна именно
-        // та инвариантa, что drain освобождает слоты в caller-table до
-        // пост-резервации возвращаемого thread-handle'а.
-        spec.loader_handle_table
-            .with_lock(|tbl| tbl.try_drain_for_transfer(&spec.handle_ids, Rights::TRANSFER))
-            .map_err(StartProcessError::HandleValidationFailed)?;
+        // Моделируем реальный drain bootstrap-handle из таблицы текущего процесса.
+        if !spec.handle_ids.is_empty() {
+            let table = capability::runtime()
+                .current_handle_table()
+                .ok_or(StartProcessError::HandleValidationFailed(IpcError::BadHandle))?;
+            table
+                .with_lock(|tbl| tbl.try_drain_for_transfer(&spec.handle_ids, Rights::TRANSFER))
+                .map_err(StartProcessError::HandleValidationFailed)?;
+        }
         Ok(ThreadObject::new())
     }
 }

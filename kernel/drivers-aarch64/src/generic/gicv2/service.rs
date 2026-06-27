@@ -79,6 +79,7 @@ impl InterruptsService for GicInterruptsService {
     }
 
     fn unmask(&self, irq: IrqNumber) {
+        super::super::barrier_before_unmask();
         self.controller.lock().enable(irq);
     }
 

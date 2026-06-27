@@ -3,7 +3,7 @@
 use syscall::{SIGNALED, Timeout, WakeCount};
 
 use crate::{
-    error::{Error, Result, unit, value},
+    error::{Error, Result, unit},
     handle::{BorrowedHandle, OwnedHandle},
     svc,
 };
@@ -35,16 +35,7 @@ impl Signal {
 
     /// Ждёт пересечения с `mask` до `timeout`; возвращает наблюдаемую маску.
     pub fn wait(&self, mask: u32, timeout: Timeout) -> Result<u32> {
-        value(svc::signal_wait_one(
-            self.handle.as_raw(),
-            mask,
-            timeout.raw(),
-        ))
-        .map(|observed| {
-            #[allow(clippy::cast_possible_truncation)]
-            let mask = observed as u32;
-            mask
-        })
+        super::wait_signals(self.handle.as_raw(), mask, timeout)
     }
 
     /// Выставляет биты `set` и снимает `clear`, будя `count` ждущих.

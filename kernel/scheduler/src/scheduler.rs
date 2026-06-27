@@ -974,7 +974,7 @@ where
             .current_cpu()
             .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
 
-        // Инкремент ДО insert: на ошибке компенсируем decrement без сигнала terminated.
+        // Инкремент до insert: на ошибке компенсируем декремент без сигнала terminated.
         let process = self
             .processes
             .get(process_id)
@@ -1274,7 +1274,6 @@ where
 
         let capability::UserStartSpec {
             entry,
-            loader_handle_table,
             handle_ids,
             metering_resource,
         } = spec;
@@ -1291,17 +1290,31 @@ where
             }
         }
 
+        // Передаваемые handle изымаются из таблицы caller'а - текущего процесса.
+        let loader_handle_table = if handle_ids.is_empty() {
+            None
+        } else {
+            Some(
+                self.current_handle_table()
+                    .ok_or(StartProcessError::HandleValidationFailed(
+                        capability::IpcError::BadHandle,
+                    ))?,
+            )
+        };
+
         // Validate handle_ids под loader-lock'ом до drain: existence +
         // TRANSFER + no dupes.
-        if let Err(e) = loader_handle_table.with_lock(|tbl| {
-            for (i, id) in handle_ids.iter().enumerate() {
-                if handle_ids[..i].iter().any(|prev| prev == id) {
-                    return Err(capability::IpcError::BadHandle);
+        if let Some(table) = &loader_handle_table
+            && let Err(e) = table.with_lock(|tbl| {
+                for (i, id) in handle_ids.iter().enumerate() {
+                    if handle_ids[..i].iter().any(|prev| prev == id) {
+                        return Err(capability::IpcError::BadHandle);
+                    }
+                    tbl.get(*id, capability::Rights::TRANSFER)?;
                 }
-                tbl.get(*id, capability::Rights::TRANSFER)?;
-            }
-            Ok(())
-        }) {
+                Ok(())
+            })
+        {
             return Err(StartProcessError::HandleValidationFailed(e));
         }
 
@@ -1312,14 +1325,17 @@ where
 
         // Validate и drain в разных with_lock-окнах; на гонке (другой
         // syscall закрыл handle между шагами) откатываем prepared thread.
-        let drained = match loader_handle_table
-            .with_lock(|tbl| tbl.try_drain_for_transfer(&handle_ids, capability::Rights::TRANSFER))
-        {
-            Ok(d) => d,
-            Err(e) => {
-                self.drop_prepared_thread(thread_id);
-                return Err(StartProcessError::HandleValidationFailed(e));
-            }
+        let drained = match &loader_handle_table {
+            Some(table) => match table.with_lock(|tbl| {
+                tbl.try_drain_for_transfer(&handle_ids, capability::Rights::TRANSFER)
+            }) {
+                Ok(d) => d,
+                Err(e) => {
+                    self.drop_prepared_thread(thread_id);
+                    return Err(StartProcessError::HandleValidationFailed(e));
+                }
+            },
+            None => Vec::new(),
         };
 
         // Insert не фейлит: child-table пуста и MAX_BOOTSTRAP_HANDLES
