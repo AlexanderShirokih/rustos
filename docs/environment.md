@@ -25,4 +25,4 @@ sudo apt-get install -y gcc libc6-dev qemu-system-arm
 
 Для Android boot image дополнительно нужен `mkbootimg` из Android platform-tools.
 
-CI использует Docker-образ, описанный в `Dockerfile`; он содержит все зависимости кроме `mkbootimg`.
+CI использует Docker-образ, описанный в `Dockerfile`.

@@ -2,18 +2,18 @@
 
 ## Быстрая справка
 
-| Действие               | Команда                                                                                                                      |
-|------------------------|------------------------------------------------------------------------------------------------------------------------------|
-| Host-тесты             | `cargo test --workspace`                                                                                                     |
-| Host-clippy            | `cargo clippy --workspace`                                                                                                   |
-| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --exclude ipc-test --target aarch64-unknown-none`    |
-| Форматирование         | `cargo fmt --all --check`                                                                                                    |
-| Проверка слоёв         | `cargo xtask check-layers`                                                                                                   |
-| Сборка userland        | `cargo xtask build-userland [--image <имя>]`                                                                                 |
-| Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                                               |
-| Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                           |
-| Запуск после сборки    | `cargo xtask build devices/spec/qemu-aarch64.yaml --run`                                                                     |
-| QEMU integration tests | `cargo xtask qemu-test [--timeout <сек>]`                                                                                    |
+| Действие               | Команда                                                                                                                   |
+|------------------------|---------------------------------------------------------------------------------------------------------------------------|
+| Host-тесты             | `cargo test --workspace`                                                                                                  |
+| Host-clippy            | `cargo clippy --workspace`                                                                                                |
+| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --exclude ipc-test --target aarch64-unknown-none` |
+| Форматирование         | `cargo fmt --all --check`                                                                                                 |
+| Проверка слоёв         | `cargo xtask check-layers`                                                                                                |
+| Сборка userland        | `cargo xtask build-userland [--image <имя>]`                                                                              |
+| Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                                            |
+| Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                        |
+| Запуск после сборки    | `cargo xtask build devices/spec/<device>.yaml --run`                                                                      |
+| QEMU integration tests | `cargo xtask qemu-test [--timeout <сек>]`                                                                                 |
 
 ## Сборка
 
@@ -21,10 +21,8 @@
 cargo xtask build <spec> [--run] [--debug] [--features <features>]
 ```
 
-Читает YAML-спеку устройства, собирает `target/build/userland.img` из
-`user/images/default.toml`, затем собирает `hal-aarch64` под
-`aarch64-unknown-none --release` и упаковывает результат по правилам
-`boot.format`.
+Читает YAML-спеку устройства, собирает `target/build/userland.img`, затем собирает `hal-aarch64` под
+`aarch64-unknown-none --release` и упаковывает результат по правилам `boot.format`.
 
 Флаги:
 
@@ -79,8 +77,7 @@ QEMU integration tests:
 cargo xtask qemu-test [--timeout <сек>]
 ```
 
-По умолчанию таймаут — 60 секунд. `qemu-test` выполняет два прохода
-по спецификации `devices/spec/qemu-aarch64-test.yaml`:
+По умолчанию тайм-аут — 60 секунд. `qemu-test` выполняет проход по спецификации `devices/spec/qemu-aarch64-test.yaml`:
 
 | Проход     | Feature ядра    | Userland-образ | Что тестирует           |
 |------------|-----------------|----------------|-------------------------|

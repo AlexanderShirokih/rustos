@@ -17,6 +17,8 @@ const BODY_MAX: usize = 242;
 
 const FIELD_OVERHEAD: usize = 2;
 
+const FIELD_DATA_MAX: usize = BODY_MAX - FIELD_OVERHEAD - 1;
+
 /// Граница bounded-типа.
 pub struct Bound {
     /// Исходная форма для const-generic позиции `Str<#expr>`: литерал без
@@ -524,9 +526,18 @@ fn resolve_wire_ty(ty: &Type) -> syn::Result<WireTy> {
         "bool" => Ok(WireTy::Bool),
         "Str" => Ok(WireTy::Str(Box::new(bound_arg(segment, ty)?))),
         "Bytes" => Ok(WireTy::Bytes(Box::new(bound_arg(segment, ty)?))),
+        "FieldStr" => Ok(WireTy::Str(Box::new(field_data_max_bound()))),
+        "FieldBytes" => Ok(WireTy::Bytes(Box::new(field_data_max_bound()))),
         "Cap" => Ok(WireTy::Cap),
         _ => Err(unsupported_type(ty)),
     }
+}
+
+fn field_data_max_bound() -> Bound {
+    let n = FIELD_DATA_MAX;
+    let int_lit = syn::LitInt::new(&n.to_string(), Span::call_site());
+    let expr = Expr::Lit(ExprLit { attrs: vec![], lit: Lit::Int(int_lit) });
+    Bound { expr: expr.clone(), value: expr, lit: Some(n) }
 }
 
 /// Извлекает границу bounded-типа: любой const-аргумент `Str<N>` / `Str<{ N }>`.

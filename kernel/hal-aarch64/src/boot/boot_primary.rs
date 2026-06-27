@@ -1,18 +1,22 @@
 //! Post-MMU фаза загрузки: инициализация драйверов, подсистем и передача управления kmain.
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, collections::BTreeSet, sync::Arc, vec::Vec};
+use core::num::NonZeroUsize;
 
 use drivers_aarch64::drivers;
 use drivers_common::scanner::EmbeddedDriversScanner;
-use drivers_common_aarch64::adapt_to_fdt_tree;
+use drivers_common_aarch64::{
+    adapt_to_fdt_tree, device_windows::enumerate_device_windows, tree_ext::AddressSpace,
+};
 use io::buffered_writer::BufferedWriter;
 use kernelspace::{
-    kernel_context::{KernelContext, UserlandImage},
+    kernel_context::{KernelContext, KmmioArena, UserlandImage},
     kmain::kmain,
     scheduler_bootstrap::KernelTimerSource,
 };
-use klog::info;
+use klog::{info, warn};
 use memory::{
+    AccessMask, MemoryRegion, page_round_up,
     physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
@@ -102,6 +106,21 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
         .scan_and_probe(root, drivers())
         .expect("DTB nesting depth exceeds the supported limit");
 
+    // Device-MMIO окна для userspace-драйверов: узлы, под которые ядро
+    // подобрало драйвер (GIC, PL011), исключены. Малформленные окна
+    // пропускаются, не валя boot.
+    let claimed: BTreeSet<usize> = driver_scanner.claimed_node_ids().collect();
+    let mut device_regions = Vec::new();
+    for window in enumerate_device_windows(&root, &claimed) {
+        match device_window_to_region(&window) {
+            Some(region) => device_regions.push(region),
+            None => warn!(
+                "device window {:#x}+{:#x} skipped: misaligned base",
+                window.offset, window.size
+            ),
+        }
+    }
+
     let memory_mapper: &'static (dyn memory::memory_mapper::MemoryMapper + Send + Sync) =
         result.memory_mapper;
 
@@ -124,9 +143,12 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
         memory_mapper,
         address_space_factory,
         result.frame_allocator,
-        KMMIO_BASE,
-        KMMIO_MAX_SIZE,
+        KmmioArena {
+            base: KMMIO_BASE,
+            size: KMMIO_MAX_SIZE,
+        },
         userland_image,
+        device_regions,
         dtb_virt,
     )));
 
@@ -140,6 +162,20 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
         SCHED_CONFIG,
         spawn_init_process_impl(),
     )
+}
+
+/// Строит Device-MMIO регион поверх окна FDT. `None` - база не выровнена на
+/// страницу (окно пропускается, что сдвигает индексы последующих в наборе).
+/// Размер округляется вверх до страницы; округление предполагает постраничную
+/// изоляцию device-окон от kernel-owned MMIO (верно для плоской раскладки).
+fn device_window_to_region(window: &AddressSpace) -> Option<Arc<MemoryRegion>> {
+    let base = PageAlignedAddress::from_usize(window.offset)?;
+    let size = page_round_up(NonZeroUsize::new(window.size)?)?;
+    Some(Arc::new(MemoryRegion::create_physical_device(
+        base,
+        size,
+        AccessMask::RW,
+    )))
 }
 
 fn spawn_init_process_impl()

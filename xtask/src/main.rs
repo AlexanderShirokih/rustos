@@ -478,11 +478,10 @@ fn check_layers() -> Result<()> {
 
 fn qemu_test(timeout: u64) -> Result<()> {
     // Pass 1: тесты внутри ядра (feature kernel-tests). Pass 2: тесты в
-    // userland-образе testrunner против production-ядра; kernel.bin
-    // пересобирается между прогонами из-за различия фич.
+    // userland-образе testrunner.
     qemu_test_pass(
         "kernel",
-        Some("kernel-tests".to_string()),
+        Some(String::from("kernel-tests")),
         "default",
         timeout,
     )?;

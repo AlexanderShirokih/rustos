@@ -1,8 +1,9 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
 
 use drivers_common::{BootServices, RuntimeDriverRegistry, services::mmio::MmioService};
 use memory::{
+    MemoryRegion,
     frame_allocator::FrameAllocator,
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
     physical_address::PageAlignedAddress,
@@ -19,11 +20,19 @@ pub struct UserlandImage {
     pub phys_base: PageAlignedAddress,
 }
 
+/// Виртуальная арена под kernel-MMIO маппинги: база и размер.
+#[derive(Clone, Copy)]
+pub struct KmmioArena {
+    pub base: PageAlignedVirtualAddress,
+    pub size: NonZeroUsize,
+}
+
 pub struct KernelContext {
     services: BootServices,
     driver_registry: Mutex<RuntimeDriverRegistry>,
     address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
     userland_image: Option<UserlandImage>,
+    device_regions: Vec<Arc<MemoryRegion>>,
     dtb_virt: usize,
 }
 
@@ -32,9 +41,9 @@ impl KernelContext {
         memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
         address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
         frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
-        mmio_arena_base: PageAlignedVirtualAddress,
-        mmio_arena_size: NonZeroUsize,
+        mmio_arena: KmmioArena,
         userland_image: Option<UserlandImage>,
+        device_regions: Vec<Arc<MemoryRegion>>,
         dtb_virt: usize,
     ) -> KernelContext {
         // Публикуем глобальные слоты для модулей без KernelContext.
@@ -43,8 +52,8 @@ impl KernelContext {
 
         let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl::new(
             memory_mapper,
-            mmio_arena_base,
-            mmio_arena_size,
+            mmio_arena.base,
+            mmio_arena.size,
         ));
 
         let mut services = BootServices::new();
@@ -57,6 +66,7 @@ impl KernelContext {
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             address_space_factory,
             userland_image,
+            device_regions,
             dtb_virt,
         }
     }
@@ -69,6 +79,12 @@ impl KernelContext {
     /// Образ userland из initrd, если загрузчик его передал.
     pub fn userland_image(&self) -> Option<UserlandImage> {
         self.userland_image
+    }
+
+    /// Device-MMIO регионы из FDT (kernel-owned исключены), вендимые
+    /// userspace-драйверам по индексу через bootstrap-протокол.
+    pub fn device_regions(&self) -> Vec<Arc<MemoryRegion>> {
+        self.device_regions.clone()
     }
 
     /// Виртуальный адрес DTB в higher-half (живёт весь срок ядра).

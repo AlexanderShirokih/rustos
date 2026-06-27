@@ -2,7 +2,7 @@
 
 extern crate alloc;
 
-use alloc::{sync::Arc, vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::num::NonZeroUsize;
 
 use bootstrap::{BootstrapService, dispatch_bootstrap};
@@ -33,8 +33,14 @@ const ROOT_RESOURCE_SPAN: NonZeroUsize = NonZeroUsize::new(usize::MAX & !0xFFF).
 pub struct BootstrapLaunch {
     pub port: Arc<Port>,
     pub info: UserProcessLaunchInfo,
+    pub resources: BootstrapResources,
+}
+
+/// Capability-ресурсы, вендимые bootstrap-сервером корневому процессу.
+pub struct BootstrapResources {
     pub irq_control: Arc<IrqControl>,
     pub image_region: Arc<MemoryRegion>,
+    pub device_regions: Vec<Arc<MemoryRegion>>,
 }
 
 /// Ошибки запуска bootstrap-процесса.
@@ -51,6 +57,7 @@ pub fn spawn_process(
     launcher: &dyn UserProcessLauncher,
     blob: &'static [u8],
     image_phys: PageAlignedAddress,
+    device_regions: Vec<Arc<MemoryRegion>>,
     user_va_end: usize,
 ) -> Result<BootstrapLaunch, BootstrapSpawnError> {
     let image = decode(blob).map_err(BootstrapSpawnError::Image)?;
@@ -100,19 +107,18 @@ pub fn spawn_process(
     Ok(BootstrapLaunch {
         port,
         info,
-        irq_control,
-        image_region,
+        resources: BootstrapResources {
+            irq_control,
+            image_region,
+            device_regions,
+        },
     })
 }
 
 /// Цикл сервера bootstrap-port'а: kernel-поток аллоцирует kernel-резидентный
 /// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракт
 /// `Bootstrap`.
-pub fn run_bootstrap(
-    port: &Arc<Port>,
-    irq_control: Arc<IrqControl>,
-    image_region: Arc<MemoryRegion>,
-) {
+pub fn run_bootstrap(port: &Arc<Port>, resources: BootstrapResources) {
     let Some(table) = runtime().current_handle_table() else {
         warn!("bootstrap: no kernel handle-table; server not started");
         return;
@@ -120,11 +126,7 @@ pub fn run_bootstrap(
 
     let buffer: KernelIpcBuffer = Arc::new(MutexCell::new(IpcBuffer::zeroed()));
     let transport = KernelPortTransport::new(port.clone(), buffer, table.clone());
-    let mut server = BootstrapServer {
-        table,
-        irq_control,
-        image_region,
-    };
+    let mut server = BootstrapServer { table, resources };
 
     loop {
         match dispatch_bootstrap(&mut server, &transport) {
@@ -143,12 +145,13 @@ pub fn run_bootstrap(
 
 /// Код ошибки выдачи в bootstrap-протоколе: отказ вставки дубликата в таблицу.
 const ACQUIRE_FAILED: u32 = 1;
+/// Код ошибки выдачи: индекс device-окна вне набора.
+const NO_SUCH_WINDOW: u32 = 2;
 
 /// Серверная сторона контракта `Bootstrap`.
 struct BootstrapServer {
     table: Arc<MutexCell<HandleTable>>,
-    irq_control: Arc<IrqControl>,
-    image_region: Arc<MemoryRegion>,
+    resources: BootstrapResources,
 }
 
 impl BootstrapServer {
@@ -171,11 +174,25 @@ impl BootstrapService for BootstrapServer {
     }
 
     fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
-        self.vend(CapabilityTarget::IrqControl(self.irq_control.clone()))
+        self.vend(CapabilityTarget::IrqControl(
+            self.resources.irq_control.clone(),
+        ))
     }
 
     fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
-        self.vend(CapabilityTarget::Memory(self.image_region.clone()))
+        self.vend(CapabilityTarget::Memory(
+            self.resources.image_region.clone(),
+        ))
+    }
+
+    fn acquire_device_memory(&mut self, index: u32) -> Result<Cap, u32> {
+        let region = self
+            .resources
+            .device_regions
+            .get(index as usize)
+            .ok_or(NO_SUCH_WINDOW)?
+            .clone();
+        self.vend(CapabilityTarget::Memory(region))
     }
 }
 

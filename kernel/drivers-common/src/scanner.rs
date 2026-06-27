@@ -50,6 +50,12 @@ impl EmbeddedDriversScanner {
         }
     }
 
+    /// `Id` узлов, под которые ядро подобрало драйвер (kernel-owned). MMIO этих
+    /// узлов не выдаётся userspace.
+    pub fn claimed_node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        self.handles.keys().copied()
+    }
+
     /// Обходит дерево, подбирает и инициализирует runtime-драйверы.
     pub fn scan_and_probe<N, P>(
         &mut self,

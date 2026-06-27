@@ -4,30 +4,23 @@
 
 use core::panic::PanicInfo;
 
-use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
-use ipc::wire::Str;
+use bootstrap::BootstrapClient;
+use ipc::wire::FieldStr;
 use runtime::{MemoryRegion, OwnedHandle, PortTransport, UserMemFlags, thread_exit};
 use syscall::Handle;
 use userland_image::USERLAND_IMAGE_MAGIC;
 
-/// `bootstrap_handle` приходит в x0 как сырой HandleId bootstrap-port'а
-/// (клиент-отправитель лога), переданного ядром при спавне.
+/// `bootstrap` приходит в x0 как HandleId bootstrap Port, переданного ядром.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(bootstrap_handle: usize) -> ! {
-    let bootstrap = Handle::new(bootstrap_handle as u32).expect("bootstrap handle is non-zero");
+pub extern "C" fn _start(bootstrap: Handle) -> ! {
     let client = BootstrapClient::new(PortTransport::client(bootstrap));
-    if client
-        .log(Str::<LOG_MESSAGE_MAX>::new("rootkeeper started").expect("startup log must fit"))
-        .is_err()
-    {
-        thread_exit(1)
-    }
+    let _ = client.log(FieldStr::new("rootkeeper started").expect("within bound"));
 
     thread_exit(u64::from(!image_carries_magic(&client)))
 }
 
 /// Запрашивает по bootstrap-контракту read-only регион userland-образа, маппит
-/// его и сверяет первые байты с [`USERLAND_IMAGE_MAGIC`]. `true` - магия видна.
+/// его и сверяет первые байты с [`USERLAND_IMAGE_MAGIC`].
 fn image_carries_magic(client: &BootstrapClient<PortTransport>) -> bool {
     let Ok(Ok(cap)) = client.acquire_userland_image() else {
         return false;

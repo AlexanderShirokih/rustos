@@ -4,18 +4,14 @@
 
 extern crate alloc;
 
-use core::{
-    fmt::Write as _,
-    panic::PanicInfo,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::{fmt::Write as _, panic::PanicInfo};
 
 use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
 use io::writer::Writer;
 use ipc::wire::{IpcError, Str};
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, thread_exit};
-use spin::Mutex;
+use spin::{Mutex, Once};
 use syscall::Handle;
 
 mod heap;
@@ -30,8 +26,8 @@ mod self_spawn;
 mod signal;
 mod sync;
 
-/// Сырой HandleId WRITE-конца bootstrap-канала, полученный в `_start`.
-static BOOTSTRAP_HANDLE: AtomicUsize = AtomicUsize::new(0);
+/// HandleId WRITE-конца bootstrap-канала, полученный в `_start`; ставится один раз.
+static BOOTSTRAP_HANDLE: Once<Handle> = Once::new();
 
 /// Накопитель строки лога: байты копятся до `\n` либо заполнения, затем
 /// уходят одним cast `log` контракта `Bootstrap`.
@@ -90,12 +86,11 @@ fn send_log_frame(payload: &[u8]) {
     let Ok(text) = core::str::from_utf8(payload) else {
         return;
     };
-    let Ok(message) = Str::<LOG_MESSAGE_MAX>::new(text) else {
+    let Some(message) = Str::<LOG_MESSAGE_MAX>::new(text) else {
         return;
     };
 
-    let raw = BOOTSTRAP_HANDLE.load(Ordering::Relaxed);
-    let Some(handle) = Handle::new(raw as u32) else {
+    let Some(&handle) = BOOTSTRAP_HANDLE.get() else {
         return;
     };
     let client = BootstrapClient::new(PortTransport::client(handle));
@@ -114,11 +109,11 @@ fn runner_exit(code: u32) -> ! {
     thread_exit(u64::from(code))
 }
 
-/// `bootstrap_handle` приходит в x0 как сырой HandleId WRITE-конца канала,
-/// переданного ядром при спавне.
+/// `bootstrap` приходит в x0 как HandleId WRITE-конца канала, переданного
+/// ядром при спавне; ненулевой по гарантии спавн-пути.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(bootstrap_handle: usize) -> ! {
-    BOOTSTRAP_HANDLE.store(bootstrap_handle, Ordering::Relaxed);
+pub extern "C" fn _start(bootstrap: Handle) -> ! {
+    BOOTSTRAP_HANDLE.call_once(|| bootstrap);
     kernel_tests::runner::install_writer(&LOG_WRITER);
     kernel_tests::runner::install_exit(runner_exit);
     kernel_tests::run_all_tests()

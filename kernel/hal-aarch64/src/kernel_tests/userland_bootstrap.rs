@@ -95,6 +95,10 @@ impl BootstrapService for LogProbe {
     fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
         Err(1)
     }
+
+    fn acquire_device_memory(&mut self, _index: u32) -> Result<Cap, u32> {
+        Err(1)
+    }
 }
 
 fn spawn_bootstrap_with_log() -> BootstrapLaunch {
@@ -106,6 +110,8 @@ fn spawn_bootstrap_with_log() -> BootstrapLaunch {
         blob,
         // Log-путь не выдаёт регион образа; физбаза не используется.
         memory::physical_address::PageAlignedAddress::ZERO,
+        // Log-тест device-память не вендит.
+        alloc::vec::Vec::new(),
         Aarch64Context::USER_VA_END,
     )
     .expect("spawn_process must succeed");

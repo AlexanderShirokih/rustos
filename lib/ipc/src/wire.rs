@@ -31,7 +31,7 @@ pub const TERMINATOR: u8 = 0x00;
 /// Минимальный допустимый `field_id` записи.
 pub const FIELD_ID_MIN: u8 = 1;
 
-/// Максимальный допустимый `field_id` записи (`255` зарезервирован).
+/// Максимальный допустимый `field_id` записи.
 pub const FIELD_ID_MAX: u8 = 254;
 
 /// Флаг: кадр - ответ на two-way вызов.
@@ -377,12 +377,12 @@ pub struct Str<'a, const N: usize> {
 
 impl<'a, const N: usize> Str<'a, N> {
     /// Оборачивает строку, проверяя границу `N`.
-    /// `InvalidValue`, если байтовая длина превышает `N`.
-    pub fn new(value: &'a str) -> Result<Self, IpcError> {
+    /// `None`, если байтовая длина превышает `N`.
+    pub fn new(value: &'a str) -> Option<Self> {
         if value.len() > N {
-            return Err(IpcError::InvalidValue);
+            return None;
         }
-        Ok(Self { value })
+        Some(Self { value })
     }
 
     /// Строковое значение.
@@ -400,12 +400,12 @@ pub struct Bytes<'a, const N: usize> {
 
 impl<'a, const N: usize> Bytes<'a, N> {
     /// Оборачивает срез, проверяя границу `N`.
-    /// `InvalidValue`, если длина превышает `N`.
-    pub fn new(value: &'a [u8]) -> Result<Self, IpcError> {
+    /// `None`, если длина превышает `N`.
+    pub fn new(value: &'a [u8]) -> Option<Self> {
         if value.len() > N {
-            return Err(IpcError::InvalidValue);
+            return None;
         }
-        Ok(Self { value })
+        Some(Self { value })
     }
 
     /// Байтовое значение.
@@ -414,6 +414,12 @@ impl<'a, const N: usize> Bytes<'a, N> {
         self.value
     }
 }
+
+/// [`Str`] с границей [`FIELD_DATA_MAX`] — максимум для одного поля.
+pub type FieldStr<'a> = Str<'a, FIELD_DATA_MAX>;
+
+/// [`Bytes`] с границей [`FIELD_DATA_MAX`] — максимум для одного поля.
+pub type FieldBytes<'a> = Bytes<'a, FIELD_DATA_MAX>;
 
 /// Кодирование значений в `data` записи поля. Все целые - LE.
 pub mod value {
@@ -564,7 +570,6 @@ mod tests {
         buf.write_field(1, &encode_u16(1)).expect("field ok");
         buf.finish().expect("finish ok");
         assert_eq!(buf.len(), HEADER_SIZE + 5);
-        // Тело после заголовка совпадает с golden.
         assert_eq!(
             &buf.as_bytes()[HEADER_SIZE..],
             &[0x01, 0x02, 0x01, 0x00, 0x00]
@@ -638,12 +643,12 @@ mod tests {
 
     #[test]
     fn str_rejects_over_bound() {
-        assert_eq!(Str::<3>::new("abcd"), Err(IpcError::InvalidValue));
+        assert!(Str::<3>::new("abcd").is_none());
     }
 
     #[test]
     fn str_accepts_exact_bound() {
-        assert!(Str::<4>::new("abcd").is_ok());
+        assert!(Str::<4>::new("abcd").is_some());
     }
 
     #[test]
@@ -654,7 +659,7 @@ mod tests {
 
     #[test]
     fn bytes_rejects_over_bound() {
-        assert_eq!(Bytes::<2>::new(&[1, 2, 3]), Err(IpcError::InvalidValue));
+        assert_eq!(Bytes::<2>::new(&[1, 2, 3]), None);
     }
 
     #[test]
@@ -805,10 +810,9 @@ mod tests {
 
     #[test]
     fn port_repr_transparent_size() {
-        // repr(transparent) над NonZeroU32: размер 4, niche-оптимизация Option.
-        assert_eq!(core::mem::size_of::<ClientEnd<()>>(), 4);
-        assert_eq!(core::mem::size_of::<ServerEnd<()>>(), 4);
-        assert_eq!(core::mem::size_of::<Option<ClientEnd<()>>>(), 4);
+        assert_eq!(size_of::<ClientEnd<()>>(), 4);
+        assert_eq!(size_of::<ServerEnd<()>>(), 4);
+        assert_eq!(size_of::<Option<ClientEnd<()>>>(), 4);
     }
 
     #[test]

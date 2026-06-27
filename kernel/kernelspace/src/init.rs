@@ -5,10 +5,11 @@
 
 extern crate alloc;
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use capability::{Capability, CapabilityTarget, Rights, SIGNALED, install_handle, signal_wait_one};
 use klog::{info, warn};
+use memory::MemoryRegion;
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
 use crate::{
@@ -34,12 +35,13 @@ pub fn spawn_init_process<A>(
     ));
 
     let image = kernel.userland_image();
+    let device_regions = kernel.device_regions();
     let user_va_end = A::USER_VA_END;
 
     scheduler
         .spawn(
             SpawnConfig::new("init").priority(Priority::highest()),
-            move || start_bootstrap_chain(launcher.as_ref(), image, user_va_end),
+            move || start_bootstrap_chain(launcher.as_ref(), image, device_regions, user_va_end),
         )
         .expect("init process spawn must succeed");
 }
@@ -47,6 +49,7 @@ pub fn spawn_init_process<A>(
 fn start_bootstrap_chain(
     launcher: &dyn UserProcessLauncher,
     image: Option<UserlandImage>,
+    device_regions: Vec<Arc<MemoryRegion>>,
     user_va_end: usize,
 ) -> ! {
     let Some(image) = image else {
@@ -54,7 +57,13 @@ fn start_bootstrap_chain(
         power::system_off(1)
     };
 
-    let launch = match spawn_process(launcher, image.bytes, image.phys_base, user_va_end) {
+    let launch = match spawn_process(
+        launcher,
+        image.bytes,
+        image.phys_base,
+        device_regions,
+        user_va_end,
+    ) {
         Ok(launch) => launch,
         Err(e) => {
             warn!("bootstrap process spawn failed: {:?}", e);
@@ -65,11 +74,10 @@ fn start_bootstrap_chain(
     info!("bootstrap process spawned:");
 
     let port = launch.port;
-    let irq_control = launch.irq_control;
-    let image_region = launch.image_region;
+    let resources = launch.resources;
     if let Err(e) = syscall_bridge::scheduler().spawn(
         SpawnConfig::new("bootstrap-log").priority(Priority::normal()),
-        move || run_bootstrap(&port, irq_control, image_region),
+        move || run_bootstrap(&port, resources),
     ) {
         warn!("bootstrap-log task spawn failed: {:?}", e);
         power::system_off(1)

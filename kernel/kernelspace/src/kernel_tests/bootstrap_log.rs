@@ -34,6 +34,10 @@ impl BootstrapService for SignalingSink {
     fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
         Err(1)
     }
+
+    fn acquire_device_memory(&mut self, _index: u32) -> Result<Cap, u32> {
+        Err(1)
+    }
 }
 
 /// Минимальный kernel-транспорт клиента: `#[cast]` -> `port_send` поверх

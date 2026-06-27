@@ -233,7 +233,7 @@ pub trait Resource {
 `dispatch_<snake>` функция, `Events` trait + `EventSender`, модуль `<snake>_ordinal`
 с константами ordinal и `DESC: ProtocolDesc`.
 
-Пример реального контракта из `lib/bootstrap-abi`:
+Пример объявления операции из `lib/bootstrap-abi` (односторонняя `#[cast]`):
 
 ```rust
 #[ipc::protocol(name = "Bootstrap")]

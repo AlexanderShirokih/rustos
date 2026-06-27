@@ -68,7 +68,7 @@ impl<'a, const N: usize> WireValue<'a> for Str<'a, N> {
     }
 
     fn from_field(data: &'a [u8]) -> Result<Self, IpcError> {
-        Str::new(value::decode_str(data)?)
+        Str::new(value::decode_str(data)?).ok_or(IpcError::InvalidValue)
     }
 }
 
@@ -82,7 +82,7 @@ impl<'a, const N: usize> WireValue<'a> for Bytes<'a, N> {
     }
 
     fn from_field(data: &'a [u8]) -> Result<Self, IpcError> {
-        Bytes::new(data)
+        Bytes::new(data).ok_or(IpcError::InvalidValue)
     }
 }
 
