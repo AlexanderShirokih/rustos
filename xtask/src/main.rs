@@ -44,11 +44,11 @@ enum Commands {
         #[arg(long, default_value_t = 60)]
         timeout: u64,
     },
-    /// Собрать userland.img из композиции user/images/<имя>.toml
+    /// Собрать userland.img из TOML-композиции образа
     BuildUserland {
-        /// Имя образа; резолвится в user/images/<имя>.toml
-        #[arg(long, default_value = "default")]
-        image: String,
+        /// Относительный путь к манифесту образа
+        #[arg(long, default_value = "user/rootkeeper/image.toml")]
+        image: PathBuf,
     },
     /// Проверить правила слоев между workspace-крейтами
     CheckLayers,
@@ -157,12 +157,14 @@ fn project_root() -> PathBuf {
     }
 }
 
-fn image_manifest_path(project_root: &Path, image: &str) -> Result<PathBuf> {
-    let path = project_root
-        .join("user/images")
-        .join(format!("{image}.toml"));
+fn image_manifest_path(project_root: &Path, image: &Path) -> Result<PathBuf> {
+    let path = if image.is_absolute() {
+        image.to_path_buf()
+    } else {
+        project_root.join(image)
+    };
     if !path.exists() {
-        bail!("Userland image '{image}' not found at {}", path.display());
+        bail!("Userland image manifest not found at {}", path.display());
     }
     Ok(path)
 }
@@ -482,14 +484,19 @@ fn qemu_test(timeout: u64) -> Result<()> {
     qemu_test_pass(
         "kernel",
         Some(String::from("kernel-tests")),
-        "default",
+        Path::new("user/rootkeeper/image.toml"),
         timeout,
     )?;
-    qemu_test_pass("userland", None, "test", timeout)?;
+    qemu_test_pass(
+        "userland",
+        None,
+        Path::new("user/testrunner/image.toml"),
+        timeout,
+    )?;
     Ok(())
 }
 
-fn qemu_test_pass(label: &str, features: Option<String>, image: &str, timeout: u64) -> Result<()> {
+fn qemu_test_pass(label: &str, features: Option<String>, image: &Path, timeout: u64) -> Result<()> {
     println!("=== qemu-test pass: {label} ===");
 
     let spec_path = PathBuf::from("devices/spec/qemu-aarch64-test.yaml");
@@ -537,7 +544,8 @@ fn main() -> Result<()> {
             features,
         } => {
             let ctx = BuildContext::new(spec, features)?;
-            let manifest_path = image_manifest_path(&ctx.project_root, "default")?;
+            let manifest_path =
+                image_manifest_path(&ctx.project_root, Path::new("user/rootkeeper/image.toml"))?;
             build_userland(&ctx.project_root, &manifest_path, &ctx.build_dir)?;
 
             let output = match ctx.spec.boot.format.as_str() {

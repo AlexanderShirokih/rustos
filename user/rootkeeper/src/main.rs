@@ -10,10 +10,10 @@ use runtime::{MemoryRegion, OwnedHandle, PortTransport, UserMemFlags, thread_exi
 use syscall::Handle;
 use userland_image::USERLAND_IMAGE_MAGIC;
 
-/// `bootstrap` приходит в x0 как HandleId bootstrap Port, переданного ядром.
+/// `root` приходит в x0 как HandleId bootstrap Port, переданного ядром.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(bootstrap: Handle) -> ! {
-    let client = BootstrapClient::new(PortTransport::client(bootstrap));
+pub extern "C" fn _start(root: Handle) -> ! {
+    let client = BootstrapClient::new(PortTransport::client(root));
     let _ = client.log(FieldStr::new("rootkeeper started").expect("within bound"));
 
     thread_exit(u64::from(!image_carries_magic(&client)))

@@ -59,8 +59,8 @@ Userspace опирается на несколько крейтов из `lib/`:
 
 Первая программа в образе является bootstrap-процессом. Образ собирается на host:
 инструмент читает ELF каждой программы, раскладывает её секции по сегментам с
-правами и склеивает записи в `userland.img`. Состав образа задаёт TOML-манифест
-в `user/images/`:
+правами и склеивает записи в `userland.img`. Состав образа задаёт TOML-манифест,
+путь к которому передаётся в `--image` (по умолчанию `user/rootkeeper/image.toml`):
 
 ```toml
 version = 1
@@ -87,7 +87,7 @@ bootstrap-порта (Port):
 
 ```rust
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(bootstrap: Handle) -> ! { /* ... */ }
+pub extern "C" fn _start(root: Handle) -> ! { /* ... */ }
 ```
 
 Подробности Resource-модели — в [architecture.md](architecture.md) и
@@ -113,8 +113,8 @@ use runtime::{PortTransport, thread_exit};
 use syscall::Handle;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(bootstrap: Handle) -> ! {
-    let client = BootstrapClient::new(PortTransport::client(bootstrap));
+pub extern "C" fn _start(root: Handle) -> ! {
+    let client = BootstrapClient::new(PortTransport::client(root));
     let result = client.log(FieldStr::new("init process started").expect(""));
 
     thread_exit(u64::from(result.is_err()))
@@ -133,7 +133,7 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
   (4 KiB). Скрипт подключается из `build.rs` через `cargo:rustc-link-arg=-T`;
 - раздел `[package.metadata.userland]` нужен, если процесс — кандидат в
   bootstrap (`bootstrap = true`, `stack_size`);
-- включение пакета в TOML-манифест образа (`user/images/<имя>.toml`).
+- включение пакета в TOML-манифест образа.
 
 ## Сборка и запуск
 
@@ -145,7 +145,7 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 
 Первый проход — kernel-сторона: ядро собирается с фичей `kernel-tests`, тесты выполняются в пространстве ядра.
 
-Второй проход — userspace-сторона: собирается `testrunner` как обычный userland-контейнер (`user/images/test.toml`),
+Второй проход — userspace-сторона: собирается `testrunner` как обычный userland-контейнер (`user/testrunner/image.toml`),
 и те же `#[kernel_test]`-функции прогоняются в userspace. `testrunner` устанавливает writer, шлющий лог через
 `Bootstrap` в ядро, и exit-делегат.
 

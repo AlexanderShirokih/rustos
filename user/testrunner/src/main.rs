@@ -117,10 +117,10 @@ fn runner_exit(code: u32) -> ! {
     thread_exit(u64::from(code))
 }
 
-/// `bootstrap` приходит в x0 как HandleId WRITE-конца канала, переданного ядром при спавне.
+/// `root` приходит в x0 как HandleId WRITE-конца канала, переданного ядром при спавне.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(bootstrap: Handle) -> ! {
-    BOOTSTRAP_HANDLE.call_once(|| bootstrap);
+pub extern "C" fn _start(root: Handle) -> ! {
+    BOOTSTRAP_HANDLE.call_once(|| root);
     kernel_tests::runner::install_writer(&LOG_WRITER);
     kernel_tests::runner::install_exit(runner_exit);
     kernel_tests::run_all_tests()

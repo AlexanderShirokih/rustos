@@ -9,7 +9,7 @@
 | AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --exclude ipc-test --target aarch64-unknown-none` |
 | Форматирование         | `cargo fmt --all --check`                                                                                                 |
 | Проверка слоёв         | `cargo xtask check-layers`                                                                                                |
-| Сборка userland        | `cargo xtask build-userland [--image <имя>]`                                                                              |
+| Сборка userland        | `cargo xtask build-userland [--image <путь>]`                                                                             |
 | Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                                            |
 | Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                        |
 | Запуск после сборки    | `cargo xtask build devices/spec/<device>.yaml --run`                                                                      |
@@ -45,22 +45,15 @@ cargo xtask build <spec> [--run] [--debug] [--features <features>]
 ## Userland
 
 ```
-cargo xtask build-userland [--image <имя>]
+cargo xtask build-userland [--image <путь>]
 ```
 
-Собирает только `target/build/userland.img`. Флаг `--image` выбирает
-композицию `user/images/<имя>.toml`; по умолчанию — `default`.
-
-Доступные образы:
-
-| Имя       | Файл                        | Состав              |
-|-----------|-----------------------------|---------------------|
-| `default` | `user/images/default.toml`  | rootkeeper          |
-| `test`    | `user/images/test.toml`     | testrunner          |
+Собирает только `target/build/userland.img`. Флаг `--image` задаёт относительный путь к
+TOML-манифесту композиции. По умолчанию — `user/rootkeeper/image.toml`.
 
 ```bash
 cargo xtask build-userland
-cargo xtask build-userland --image test
+cargo xtask build-userland --image user/testrunner/image.toml
 ```
 
 ## Тесты
@@ -79,10 +72,10 @@ cargo xtask qemu-test [--timeout <сек>]
 
 По умолчанию тайм-аут — 60 секунд. `qemu-test` выполняет проход по спецификации `devices/spec/qemu-aarch64-test.yaml`:
 
-| Проход     | Feature ядра    | Userland-образ | Что тестирует           |
-|------------|-----------------|----------------|-------------------------|
-| `kernel`   | `kernel-tests`  | `default`      | тесты внутри ядра       |
-| `userland` | —               | `test`         | тесты в userspace       |
+| Проход     | Feature ядра    | Userland-образ                | Что тестирует     |
+|------------|-----------------|-------------------------------|-------------------|
+| `kernel`   | `kernel-tests`  | `user/rootkeeper/image.toml`  | тесты внутри ядра |
+| `userland` | —               | `user/testrunner/image.toml`  | тесты в userspace |
 
 Ядро пересобирается между прогонами из-за различия feature-флагов.
 
