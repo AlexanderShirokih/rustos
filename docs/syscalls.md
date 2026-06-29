@@ -110,9 +110,9 @@ secondary-регистре. Дубликаты `handle` в `items` допуст�
 Пример: дождаться завершения дочернего процесса.
 
 ```rust
-let observed = signal_wait_one(process_h, SIGNALED, timeout_ns)?;
-if observed & SIGNALED != 0 {
-    let code = process_exit_code(process_h)?;
+let observed = signal_wait_one(process_h, SIGNALED, timeout_ns);
+if observed as u32 & SIGNALED != 0 {
+    let code = process_exit_code(process_h);
 }
 ```
 
@@ -243,11 +243,10 @@ Badge — свойство хендла, а не объекта: разные к
 несут разные значки. На приёме сообщения ядро доставляет badge отправителя
 получателю (см. [Port](#port)).
 
-Пример: передать в дочерний процесс только право ожидания (без значка).
+Пример: выдать дочернему процессу только право ожидания (без значка).
 
 ```rust
 let wait_only = handle_duplicate(process_h, Rights::READ | Rights::TRANSFER, 0)?;
-handle_close(process_h);
 
 // Сервер минтит badged-копию port под конкретного клиента:
 let client_ep = handle_duplicate(port_h, Rights::WRITE, CLIENT_BADGE)?;
@@ -297,14 +296,11 @@ Process-вызовы создают процесс, возвращают handle 
  `ProcessLoadImage`, затем `ProcessStart`. Между `LoadImage` и
 `Start` никакой поток в child-процессе ещё не исполняется.
 
-Пример: передать supervisor право дождаться завершения текущего процесса.
+Пример: создатель процесса делегирует наблюдение за ним стороннему процессу через производную capability.
 
 ```rust
-// --- сторона процесса (report_h - port к supervisor) ---
-let process_h = process_self()?;
+// сторона создателя (process_h - handle на дочерний процесс; report_h - port к supervisor)
 let wait_h = handle_duplicate(process_h, Rights::READ | Rights::TRANSFER, 0)?;
-handle_close(process_h);
-// уложить wait_h как cap в IPC-буфер и доставить его supervisor
 let ipc = ipc_buffer_addr() as *mut IpcBuffer;
 write_cap_frame(ipc, wait_h);
 port_send(report_h, PORT_TIMEOUT_INFINITE);
@@ -314,7 +310,7 @@ port_recv(monitor_h, PORT_TIMEOUT_INFINITE);
 let monitored_h = read_cap_frame(ipc).expect("peer transferred wait_h");
 
 let observed = signal_wait_one(monitored_h, SIGNALED, timeout_ns);
-if observed >= 0 && (observed as u32) & SIGNALED != 0 {
+if observed as u32 & SIGNALED != 0 {
     let code = process_exit_code(monitored_h);
 }
 ```
@@ -354,7 +350,7 @@ let process_h = process_self()?;
 let thread_h = thread_create(process_h, worker_entry as u64, worker_sp, 0, priority)?;
 
 let observed = signal_wait_one(thread_h, SIGNALED, timeout_ns);
-if observed >= 0 && (observed as u32) & SIGNALED != 0 {
+if observed as u32 & SIGNALED != 0 {
     let code = thread_exit_code(thread_h);
 }
 ```
@@ -462,9 +458,44 @@ IRQ-вызовы выдают userspace-драйверу аппаратную л
 let irq_h = irq_mint(irq_control_h, DEVICE_IRQ)?;
 loop {
     let observed = signal_wait_one(irq_h, SIGNALED, PORT_TIMEOUT_INFINITE);
-    if observed >= 0 && (observed as u32) & SIGNALED != 0 {
+    if observed as u32 & SIGNALED != 0 {
         service_device(); // снять причину прерывания в устройстве (MMIO)
         irq_ack(irq_h);   // снять latch + размаскировать линию
+    }
+}
+```
+
+## MMIO
+
+Доступ к регистрам устройства — memory-капа поверх **физического** диапазона
+(`RegionKind::Physical`). Капу выдаёт ядро через Bootstrap-канал
+(`acquire_device_memory(index)`, см. [userland.md](userland.md)), супервизор
+раздаёт её драйверу.
+
+- `MemoryRegionInspect` отдаёт размер региона (primary) и его физическую базу
+  `base_pa` (secondary, для корреляции с FDT-узлом устройства);
+- `MemoryMap` маппит регистры в адресное пространство драйвера;
+- доступ к регистрам — volatile-чтения/записи по полученному VA;
+- прерывание линии устройства обслуживается через [IRQ](#irq).
+
+Закрытие memory-капы (или завершение процесса) снимает маппинг через тот же
+[каскадный teardown](#каскадный-отзыв-при-handleclose): регистры устройства
+становятся недоступны.
+
+Пример: драйвер маппит регистры устройства и обслуживает его прерывание.
+
+```rust
+let (region_size, _meta) = memory_region_inspect(device_region_h);
+let regs_va = memory_map(device_region_h, region_size as u64, 0 /* ReadWrite */);
+let regs = regs_va as *mut u32;
+
+let irq_h = irq_mint(irq_control_h, DEVICE_IRQ)?;
+loop {
+    let observed = signal_wait_one(irq_h, SIGNALED, PORT_TIMEOUT_INFINITE);
+    if observed as u32 & SIGNALED != 0 {
+        let _status = unsafe { core::ptr::read_volatile(regs) };
+        unsafe { core::ptr::write_volatile(regs, ACK_BIT) };
+        irq_ack(irq_h);
     }
 }
 ```
