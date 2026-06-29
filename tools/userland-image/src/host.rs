@@ -897,9 +897,8 @@ mod tests {
 
         let image_bytes = assemble_userland_image(&entries).expect("assemble image");
         let image = decode(&image_bytes).expect("assembled image must parse");
-        assert_eq!(image.bootstrap_entry().name(), "rootkeeper");
-        assert_eq!(image.entry(1).expect("entry 1").name(), "logger");
-        assert_eq!(image.entry(2).expect("entry 2").name(), "shell");
+        let order: Vec<_> = image.entries().map(|entry| entry.name()).collect();
+        assert_eq!(order, ["rootkeeper", "logger", "shell"]);
     }
 
     #[test]

@@ -150,14 +150,14 @@ impl<'a> DecodedImage<'a> {
     }
 
     pub fn bootstrap_entry(&self) -> DecodedEntry<'a> {
-        self.entry(0).expect("decoded image contains an entry")
+        self.entries()
+            .next()
+            .expect("decoded image contains an entry")
     }
 
-    pub fn entry(&self, index: usize) -> Option<DecodedEntry<'a>> {
-        if index >= self.entry_count() {
-            return None;
-        }
-        self.entries().nth(index)
+    /// Возвращает entry с заданным именем.
+    pub fn entry(&self, name: &str) -> Option<DecodedEntry<'a>> {
+        self.entries().find(|entry| entry.name() == name)
     }
 
     pub fn entries(&self) -> DecodedEntries<'a> {

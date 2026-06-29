@@ -24,7 +24,9 @@ fn spawn_child_from_image() {
         .expect("map image read-only");
 
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
-    let child = image.entry(1).expect("image carries a child entry");
+    let child = image
+        .entry("spawn-fixture")
+        .expect("image carries a child entry");
 
     let resource = Resource::self_resource();
     let start_handle = Signal::create().expect("signal create").into_handle();

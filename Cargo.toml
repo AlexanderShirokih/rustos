@@ -27,6 +27,7 @@ members = [
     "lib/test-harness-qemu",
     "lib/collections",
     "lib/userland",
+    "lib/userland-build",
     "lib/userland-image",
     "lib/userland-loader",
     "lib/runtime",
@@ -86,6 +87,7 @@ syscall-kernel = { path = "kernel/syscall" }
 test-harness-qemu = { path = "lib/test-harness-qemu" }
 test-harness-macros = { path = "lib/test-harness-macros" }
 userland = { path = "lib/userland" }
+userland-build = { path = "lib/userland-build" }
 userland-image = { path = "lib/userland-image" }
 userland-loader = { path = "lib/userland-loader" }
 runtime = { path = "lib/runtime" }

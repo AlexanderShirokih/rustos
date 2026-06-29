@@ -25,5 +25,8 @@ syscall = { workspace = true }
 runtime = { workspace = true }
 userland-image = { workspace = true }
 
+[build-dependencies]
+userland-build = { workspace = true }
+
 [lints]
 workspace = true
