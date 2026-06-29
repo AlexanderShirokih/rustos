@@ -6,7 +6,7 @@
 |------------------------|---------------------------------------------------------------------------------------------------------------------------|
 | Host-тесты             | `cargo test --workspace`                                                                                                  |
 | Host-clippy            | `cargo clippy --workspace`                                                                                                |
-| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-image-tool --exclude ipc-test --target aarch64-unknown-none` |
+| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --target aarch64-unknown-none` |
 | Форматирование         | `cargo fmt --all --check`                                                                                                 |
 | Проверка слоёв         | `cargo xtask check-layers`                                                                                                |
 | Сборка userland        | `cargo xtask build-userland [--image <путь>]`                                                                             |

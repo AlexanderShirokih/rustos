@@ -20,11 +20,17 @@
 
 use core::cmp::min;
 
-/// Максимум байт тела сообщения в [`IpcBuffer::data`].
-pub const IPC_BUFFER_DATA_MAX: usize = 256;
+/// Гранула страницы ABI: [`IpcBuffer`] занимает её целиком. Ядро и так маппит
+/// буфер по одной странице, поэтому расширение тела бесплатно по памяти.
+const ABI_PAGE: usize = 4096;
 
 /// Максимум переносимых/принимаемых handle'ов в [`IpcBuffer::caps`].
 pub const IPC_BUFFER_MAX_CAPS: usize = 4;
+
+/// Максимум байт тела сообщения в [`IpcBuffer::data`]: остаток страницы за
+/// фиксированными полями (`tag` 8 + `caps` 16 + `badge` 8), так что
+/// `size_of::<IpcBuffer>()` равен [`ABI_PAGE`] (закреплено статик-ассертом).
+pub const IPC_BUFFER_DATA_MAX: usize = ABI_PAGE - 32;
 
 /// Сдвиг поля `ncaps` в [`IpcBuffer::tag`].
 const TAG_NCAPS_SHIFT: u32 = 16;
@@ -46,6 +52,10 @@ pub struct IpcBuffer {
     /// Badge отправителя, через который пришло сообщение. При отправке игнорируется.
     pub badge: u64,
 }
+
+/// Буфер заполняет страницу ABI ровно: `len` поля выводятся так, чтобы сумма
+/// совпала с [`ABI_PAGE`]. Расхождение - перестановка/выравнивание полей.
+const _: () = assert!(size_of::<IpcBuffer>() == ABI_PAGE);
 
 impl IpcBuffer {
     /// Создает устой буфер.
@@ -87,8 +97,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn buffer_fits_one_page() {
-        assert!(size_of::<IpcBuffer>() <= 4096);
+    fn buffer_fills_one_page() {
+        assert_eq!(size_of::<IpcBuffer>(), ABI_PAGE);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! типами параметров (только поддержанное множество), позиционными
 //! `field_id` и вычисленными ordinal.
 
-use ipc_schema::Kind;
+use ipc_schema::{FIELD_OVERHEAD, HEADER_SIZE, Kind};
 use proc_macro2::Span;
 use syn::{
     Attribute, Error, Expr, ExprLit, FnArg, GenericArgument, Ident, ItemTrait, Lit, Meta,
@@ -13,9 +13,7 @@ use syn::{
 
 use crate::ordinal::{canonical_name, ordinal_of};
 
-const BODY_MAX: usize = 242;
-
-const FIELD_OVERHEAD: usize = 2;
+const BODY_MAX: usize = syscall::IPC_BUFFER_DATA_MAX - HEADER_SIZE;
 
 const FIELD_DATA_MAX: usize = BODY_MAX - FIELD_OVERHEAD - 1;
 
@@ -39,6 +37,7 @@ pub enum WireTy {
     Str(Box<Bound>),
     Bytes(Box<Bound>),
     Cap,
+    Opaque(Box<Type>),
 }
 
 /// Верхняя оценка длины `data` поля при максимальном значении; `None` для
@@ -48,14 +47,16 @@ fn max_data_len(ty: &WireTy) -> Option<usize> {
         WireTy::Uint(width) | WireTy::Int(width) => Some(*width as usize),
         WireTy::Bool | WireTy::Cap => Some(1),
         WireTy::Str(bound) | WireTy::Bytes(bound) => bound.lit,
+        WireTy::Opaque(_) => None,
     }
 }
 
-/// Owned-тип допустим в возврате two-way.
+/// Owned-тип допустим в возврате two-way. Opaque пропускается: фактический
+/// borrow из буфера ответа поймает компилятор по лайфтайму.
 fn is_owned(ty: &WireTy) -> bool {
     matches!(
         ty,
-        WireTy::Uint(_) | WireTy::Int(_) | WireTy::Bool | WireTy::Cap
+        WireTy::Uint(_) | WireTy::Int(_) | WireTy::Bool | WireTy::Cap | WireTy::Opaque(_)
     )
 }
 
@@ -529,7 +530,7 @@ fn resolve_wire_ty(ty: &Type) -> syn::Result<WireTy> {
         "FieldStr" => Ok(WireTy::Str(Box::new(field_data_max_bound()))),
         "FieldBytes" => Ok(WireTy::Bytes(Box::new(field_data_max_bound()))),
         "Cap" => Ok(WireTy::Cap),
-        _ => Err(unsupported_type(ty)),
+        _ => Ok(WireTy::Opaque(Box::new(ty.clone()))),
     }
 }
 
@@ -592,7 +593,7 @@ fn unwrap_const_block(expr: Expr) -> Expr {
 fn unsupported_type(ty: &Type) -> Error {
     Error::new(
         ty.span(),
-        "unsupported type: allowed u8..u64, i8..i64, bool, Str<N>, Bytes<N>",
+        "unsupported type: expected a named path type (built-in or impl WireValue)",
     )
 }
 

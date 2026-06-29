@@ -6,6 +6,12 @@
 
 #![no_std]
 
+/// Размер заголовка кадра в байтах (`ordinal` + `txid` + `flags`).
+pub const HEADER_SIZE: usize = 14;
+
+/// Накладные расходы одной записи поля: `field_id` (1 байт) + длина (`u16` LE).
+pub const FIELD_OVERHEAD: usize = 3;
+
 /// Вид операции протокола.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -32,6 +38,8 @@ pub enum WireType {
     BoundedBytes(usize),
     /// Capability: handle едет вне тела, в поле - индекс в handle-массиве.
     Capability,
+    /// Агрегат: поля в порядке объявления, каждое - вложенный `WireType`.
+    Aggregate(&'static [WireType]),
 }
 
 /// Описание одного поля операции: позиционный `field_id` и тип значения.

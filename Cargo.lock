@@ -347,6 +347,7 @@ dependencies = [
  "ipc-macros",
  "ipc-schema",
  "ipc-test",
+ "syscall",
 ]
 
 [[package]]
@@ -358,6 +359,7 @@ dependencies = [
  "quote",
  "sha2",
  "syn",
+ "syscall",
 ]
 
 [[package]]

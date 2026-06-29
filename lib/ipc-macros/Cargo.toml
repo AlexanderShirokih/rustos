@@ -13,6 +13,7 @@ quote = { workspace = true }
 syn = { workspace = true }
 sha2 = { workspace = true }
 ipc-schema = { workspace = true }
+syscall = { workspace = true }
 
 [lints]
 workspace = true

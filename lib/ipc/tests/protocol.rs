@@ -269,8 +269,6 @@ trait Blob {
     fn store(&self, data: Bytes<8>);
 }
 
-// --- транспортная плоскость: ring допускает только cast/event
-
 /// Ring-плоскостной протокол.
 #[ipc::protocol(name = "Counter", transport = "ring")]
 trait Counter {
@@ -428,7 +426,190 @@ fn cap_domain_error_carries_no_handle() {
     });
 }
 
-// --- timeout-плумбинг: #[protocol(timeout_ns)], #[call(timeout_ns)], with_wait_ns
+/// Owned-агрегат: годен и в параметре, и в возврате two-way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ipc::WireValue)]
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+/// Вложенный агрегат: поля-агрегаты дают рекурсивный суб-кадр.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ipc::WireValue)]
+struct Segment {
+    from: Point,
+    to: Point,
+}
+
+/// Агрегат с borrow-полем: проверяет derive с одним лайфтаймом (как параметр).
+#[derive(ipc::WireValue)]
+struct Tagged<'a> {
+    label: Str<'a, 8>,
+    value: u32,
+}
+
+/// Протокол с пользовательскими агрегатами в сигнатурах.
+#[ipc::protocol(name = "Geo")]
+trait Geo {
+    #[call]
+    fn translate(&self, p: Point, dx: u32, dy: u32) -> Point;
+
+    #[call]
+    fn flip(&self, s: Segment) -> Segment;
+
+    #[call]
+    fn label_len(&self, t: Tagged<'_>) -> u32;
+}
+
+struct GeoServer;
+
+impl GeoService for GeoServer {
+    fn translate(&mut self, p: Point, dx: u32, dy: u32) -> Point {
+        Point {
+            x: p.x + dx,
+            y: p.y + dy,
+        }
+    }
+
+    fn flip(&mut self, s: Segment) -> Segment {
+        Segment {
+            from: s.to,
+            to: s.from,
+        }
+    }
+
+    fn label_len(&mut self, t: Tagged<'_>) -> u32 {
+        t.label.as_str().len() as u32 + t.value
+    }
+}
+
+#[test]
+fn aggregate_param_and_return_round_trip() {
+    let (client_end, server_end) = MockEnd::pair();
+    let client = GeoClient::new(client_end);
+    thread::scope(|scope| {
+        let server = scope.spawn(move || {
+            let mut srv = GeoServer;
+            for _ in 0..3 {
+                server_end.wait_readable(u64::MAX).expect("server wait");
+                dispatch_geo(&mut srv, &server_end).expect("dispatch ok");
+            }
+        });
+        let moved = client
+            .translate(Point { x: 10, y: 20 }, 3, 4)
+            .expect("translate ok");
+        assert_eq!(moved, Point { x: 13, y: 24 });
+
+        // Вложенный агрегат: рекурсивный суб-кадр в параметре и возврате.
+        let flipped = client
+            .flip(Segment {
+                from: Point { x: 1, y: 2 },
+                to: Point { x: 3, y: 4 },
+            })
+            .expect("flip ok");
+        assert_eq!(
+            flipped,
+            Segment {
+                from: Point { x: 3, y: 4 },
+                to: Point { x: 1, y: 2 },
+            }
+        );
+
+        let tagged = Tagged {
+            label: Str::<8>::new("ab").expect("within bound"),
+            value: 40,
+        };
+        let len = client.label_len(tagged).expect("label_len ok");
+        assert_eq!(len, 42);
+
+        server.join().expect("server thread");
+    });
+}
+
+#[test]
+fn aggregate_descriptor_is_structural() {
+    // Вложенный агрегат описан рекурсивно: агрегат из агрегатов.
+    const POINT_DESC: ipc::schema::WireType = ipc::schema::WireType::Aggregate(&[
+        ipc::schema::WireType::Uint(4),
+        ipc::schema::WireType::Uint(4),
+    ]);
+    const SEGMENT_DESC: ipc::schema::WireType =
+        ipc::schema::WireType::Aggregate(&[POINT_DESC, POINT_DESC]);
+
+    let translate = geo_ordinal::DESC
+        .operations
+        .iter()
+        .find(|op| op.name == "translate")
+        .expect("translate present");
+    assert_eq!(
+        translate.fields[0].field_type,
+        ipc::schema::WireType::Aggregate(&[
+            ipc::schema::WireType::Uint(4),
+            ipc::schema::WireType::Uint(4),
+        ])
+    );
+
+    let flip = geo_ordinal::DESC
+        .operations
+        .iter()
+        .find(|op| op.name == "flip")
+        .expect("flip present");
+    assert_eq!(flip.fields[0].field_type, SEGMENT_DESC);
+
+    let label_len = geo_ordinal::DESC
+        .operations
+        .iter()
+        .find(|op| op.name == "label_len")
+        .expect("label_len present");
+    assert_eq!(
+        label_len.fields[0].field_type,
+        ipc::schema::WireType::Aggregate(&[
+            ipc::schema::WireType::BoundedStr(8),
+            ipc::schema::WireType::Uint(4),
+        ])
+    );
+}
+
+/// Агрегат, чей суб-кадр заведомо превышает `FIELD_DATA_MAX`: тело поля занимает
+/// весь потолок, а overhead записи выводит суб-кадр за границу.
+#[derive(ipc::WireValue)]
+struct Oversized<'a> {
+    blob: ipc::wire::FieldBytes<'a>,
+}
+
+#[test]
+fn aggregate_subframe_overflow_is_error() {
+    // Суб-кадр сверх FIELD_DATA_MAX -> IpcError, без паники.
+    let storage = [7u8; ipc::wire::FIELD_DATA_MAX];
+    let big = Oversized {
+        blob: ipc::wire::FieldBytes::new(&storage).expect("within bound"),
+    };
+    let mut buf = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
+    assert_eq!(
+        ipc::WireValue::write_as_field(&big, &mut buf, 1),
+        Err(IpcError::FrameOverflow)
+    );
+}
+
+/// Протокол с полем максимального размера: фиксирует, что граница `FieldStr`,
+/// запекаемая кодогеном, совпадает с рантайм-`FIELD_DATA_MAX`.
+#[ipc::protocol(name = "Wide")]
+trait Wide {
+    #[cast]
+    fn note(&self, text: ipc::wire::FieldStr<'_>);
+}
+
+#[test]
+fn field_str_bound_tracks_field_data_max() {
+    let note = wide_ordinal::DESC
+        .operations
+        .iter()
+        .find(|op| op.name == "note")
+        .expect("note present");
+    assert_eq!(
+        note.fields[0].field_type,
+        ipc::schema::WireType::BoundedStr(ipc::wire::FIELD_DATA_MAX)
+    );
+}
 
 use ipc::wire::IpcError;
 

@@ -9,11 +9,12 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Error, ItemTrait, Meta, Token, parse_macro_input, punctuated::Punctuated};
+use syn::{DeriveInput, Error, ItemTrait, Meta, Token, parse_macro_input, punctuated::Punctuated};
 
 mod codegen;
 mod model;
 mod ordinal;
+mod wire_value;
 
 /// Объявляет IPC-протокол:
 /// `#[protocol(name = "...", timeout_ns = N, transport = "...")]` на trait.
@@ -29,6 +30,18 @@ pub fn protocol(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemTrait);
 
     expand(&args, &item)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+/// Выводит `WireValue`/`WireTyped` для struct с именованными полями (каждое -
+/// `WireValue`). Значение укладывается во вложенный суб-кадр одного wire-поля;
+/// дескриптор - `WireType::Aggregate` из полей. Допускает ноль или один лайфтайм;
+/// type/const-генерики и более одного лайфтайма отвергаются.
+#[proc_macro_derive(WireValue)]
+pub fn derive_wire_value(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    wire_value::expand(&input)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }

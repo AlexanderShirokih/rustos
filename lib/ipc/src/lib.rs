@@ -12,7 +12,7 @@ pub mod schema;
 pub mod transport;
 pub mod wire;
 
-pub use codec::WireValue;
+pub use codec::{WireTyped, WireValue};
 pub use handle::IntoWireHandle;
-pub use ipc_macros::protocol;
+pub use ipc_macros::{WireValue, protocol};
 pub use transport::{MessageLen, Transport};

@@ -6,24 +6,24 @@
 
 use core::{marker::PhantomData, num::NonZeroU32};
 
-/// Максимальная длина кадра (заголовок + тело) в байтах.
-pub const MESSAGE_INLINE_MAX: usize = 256;
+pub use ipc_schema::{FIELD_OVERHEAD, HEADER_SIZE};
+
+/// Максимальная длина кадра (заголовок + тело) в байтах: кадр заполняет тело
+/// IPC-буфера, поэтому равен [`syscall::IPC_BUFFER_DATA_MAX`].
+pub const MESSAGE_INLINE_MAX: usize = syscall::IPC_BUFFER_DATA_MAX;
 
 /// Максимум хэндлов в транспортном векторе кадра.
 pub const MESSAGE_MAX_HANDLES: usize = 4;
 
-/// Размер заголовка кадра в байтах.
-pub const HEADER_SIZE: usize = 14;
-
 /// Бюджет тела (включая терминатор): `MESSAGE_INLINE_MAX - HEADER_SIZE`.
 pub const BODY_MAX: usize = MESSAGE_INLINE_MAX - HEADER_SIZE;
 
-/// Накладные расходы одной записи поля: `field_id` + `len`.
-pub const FIELD_OVERHEAD: usize = 2;
-
 /// Максимум `data` одиночного поля, занимающего кадр целиком:
-/// `BODY_MAX - FIELD_OVERHEAD - 1` (терминатор).
+/// `BODY_MAX - FIELD_OVERHEAD - 1` (терминатор). Длина поля - `u16` LE, поэтому
+/// должна укладываться в её диапазон.
 pub const FIELD_DATA_MAX: usize = BODY_MAX - FIELD_OVERHEAD - 1;
+
+const _: () = assert!(FIELD_DATA_MAX <= u16::MAX as usize);
 
 /// Байт-терминатор тела; `field_id == 0` зарезервирован под него.
 pub const TERMINATOR: u8 = 0x00;
@@ -194,7 +194,7 @@ impl<const N: usize> MessageBuf<N> {
         if field_id <= self.last_field_id {
             return Err(IpcError::FieldOrder);
         }
-        if data.len() > u8::MAX as usize {
+        if data.len() > FIELD_DATA_MAX {
             return Err(IpcError::InvalidValue);
         }
         // Запись + место под терминатор обязаны уместиться в буфер.
@@ -203,8 +203,8 @@ impl<const N: usize> MessageBuf<N> {
             return Err(IpcError::FrameOverflow);
         }
         self.bytes[self.pos] = field_id;
-        self.bytes[self.pos + 1] = data.len() as u8;
-        self.bytes[self.pos + 2..self.pos + 2 + data.len()].copy_from_slice(data);
+        self.bytes[self.pos + 1..self.pos + 3].copy_from_slice(&(data.len() as u16).to_le_bytes());
+        self.bytes[self.pos + 3..self.pos + 3 + data.len()].copy_from_slice(data);
         self.pos += needed;
         self.last_field_id = field_id;
         Ok(())
@@ -277,11 +277,12 @@ impl<'a> FieldCursor<'a> {
         if field_id <= self.last_field_id {
             return Err(IpcError::FieldOrder);
         }
-        let Some(&len) = self.body.get(self.pos + 1) else {
+        let Some(len_bytes) = self.body.get(self.pos + 1..self.pos + 3) else {
             return Err(IpcError::Truncated);
         };
+        let len = u16::from_le_bytes(len_bytes.try_into().expect("len is 2 bytes")) as usize;
         let data_start = self.pos + FIELD_OVERHEAD;
-        let data_end = data_start + len as usize;
+        let data_end = data_start + len;
         let Some(data) = self.body.get(data_start..data_end) else {
             return Err(IpcError::Truncated);
         };
@@ -547,19 +548,19 @@ mod tests {
     #[test]
     fn derived_budget_constants() {
         assert_eq!(HEADER_SIZE, 14);
-        assert_eq!(MESSAGE_INLINE_MAX, 256);
-        assert_eq!(BODY_MAX, 242);
-        assert_eq!(FIELD_DATA_MAX, 239);
+        assert_eq!(MESSAGE_INLINE_MAX, 4064);
+        assert_eq!(BODY_MAX, 4050);
+        assert_eq!(FIELD_DATA_MAX, 4046);
         assert_eq!(MESSAGE_MAX_HANDLES, 4);
     }
 
     #[test]
     fn hello_body_golden_bytes() {
-        // hello(version: u16 = 1): field_id=1, len=2, data=1u16 LE, терминатор.
+        // hello(version: u16 = 1): field_id=1, len=2u16 LE, data=1u16 LE, терминатор.
         let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
         buf.write_field(1, &encode_u16(1)).expect("field ok");
         buf.finish().expect("finish ok");
-        assert_eq!(buf.as_bytes(), &[0x01, 0x02, 0x01, 0x00, 0x00]);
+        assert_eq!(buf.as_bytes(), &[0x01, 0x02, 0x00, 0x01, 0x00, 0x00]);
     }
 
     #[test]
@@ -569,10 +570,10 @@ mod tests {
             .expect("header ok");
         buf.write_field(1, &encode_u16(1)).expect("field ok");
         buf.finish().expect("finish ok");
-        assert_eq!(buf.len(), HEADER_SIZE + 5);
+        assert_eq!(buf.len(), HEADER_SIZE + 6);
         assert_eq!(
             &buf.as_bytes()[HEADER_SIZE..],
-            &[0x01, 0x02, 0x01, 0x00, 0x00]
+            &[0x01, 0x02, 0x00, 0x01, 0x00, 0x00]
         );
     }
 
@@ -731,6 +732,29 @@ mod tests {
     }
 
     #[test]
+    fn field_over_255_bytes_round_trips() {
+        const LEN: usize = 1500;
+        let payload: [u8; LEN] = core::array::from_fn(|i| (i % 251) as u8);
+        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
+        buf.write_field(7, &payload).expect("field fits");
+        buf.finish().expect("finish ok");
+
+        let mut cursor = FieldCursor::new(buf.as_bytes());
+        let field = cursor.next_field().expect("decode ok").expect("present");
+        assert_eq!(field.id, 7);
+        assert_eq!(field.data.len(), LEN);
+        assert_eq!(field.data, &payload[..]);
+    }
+
+    #[test]
+    fn write_field_rejects_over_field_data_max() {
+        // Тело свыше FIELD_DATA_MAX отвергается, не паникует.
+        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
+        let oversized = [0u8; FIELD_DATA_MAX + 1];
+        assert_eq!(buf.write_field(1, &oversized), Err(IpcError::InvalidValue));
+    }
+
+    #[test]
     fn field_order_strictly_increasing() {
         let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
         buf.write_field(3, &encode_u8(1)).expect("ok");
@@ -759,8 +783,8 @@ mod tests {
 
     #[test]
     fn reader_rejects_non_increasing_field_id() {
-        // Тело с id=2 затем id=1 - нарушение порядка на чтении.
-        let body = [0x02u8, 0x01, 0xAA, 0x01, 0x01, 0xBB, 0x00];
+        // Тело с id=2 затем id=1 - нарушение порядка на чтении (len - u16 LE).
+        let body = [0x02u8, 0x01, 0x00, 0xAA, 0x01, 0x01, 0x00, 0xBB, 0x00];
         let mut cursor = FieldCursor::new(&body);
         assert_eq!(
             cursor.next_field().expect("first ok").map(|f| f.id),
@@ -771,7 +795,7 @@ mod tests {
 
     #[test]
     fn reader_stops_on_terminator() {
-        let body = [0x01u8, 0x01, 0xAA, 0x00];
+        let body = [0x01u8, 0x01, 0x00, 0xAA, 0x00];
         let mut cursor = FieldCursor::new(&body);
         assert_eq!(cursor.next_field().expect("ok").map(|f| f.id), Some(1));
         assert_eq!(cursor.next_field().expect("ok"), None);

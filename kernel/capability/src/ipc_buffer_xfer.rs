@@ -17,8 +17,8 @@ use super::{
 /// ABI-офсеты полей [`syscall::IpcBuffer`] (`#[repr(C)]`):
 /// `tag: u64` @ 0,
 /// `caps: [u32; 4]` @ 8,
-/// `data: [u8; 256]` @ 24,
-/// `badge: u64` @ 280 (сразу за `data`).
+/// `data: [u8; IPC_BUFFER_DATA_MAX]` @ 24,
+/// `badge: u64` сразу за `data`.
 const TAG_OFFSET: usize = 0;
 const TAG_SIZE: usize = 8;
 const CAPS_OFFSET: usize = TAG_OFFSET + TAG_SIZE;
@@ -26,6 +26,13 @@ const CAP_SIZE: usize = 4;
 const DATA_OFFSET: usize = CAPS_OFFSET + IPC_BUFFER_MAX_CAPS * CAP_SIZE;
 const BADGE_OFFSET: usize = DATA_OFFSET + IPC_BUFFER_DATA_MAX;
 const BADGE_SIZE: usize = 8;
+
+/// Буфер маппится в одну страницу, поэтому ABI-структура обязана в неё влезать.
+const _: () = assert!(size_of::<syscall::IpcBuffer>() <= memory::PAGE_SIZE.get());
+
+/// Шаг чанк-копии тела: переносится всё тело (до [`IPC_BUFFER_DATA_MAX`]), но
+/// порциями по `BODY_CHUNK`, чтобы не держать его целиком на стеке ядра.
+const BODY_CHUNK: usize = 512;
 
 fn map_copy_err(_e: UserCopyError) -> IpcError {
     // Непригодный user-указатель буфера трактуем как BufferTooSmall.
@@ -171,6 +178,26 @@ fn offset_va(base: VirtualAddress, off: usize) -> VirtualAddress {
     VirtualAddress::new(base.as_usize() + off)
 }
 
+/// Копирует `len` байт тела из буфера отправителя в буфер получателя чанками по
+/// [`BODY_CHUNK`]. Тег пишется позже, поэтому частичное тело при ошибке середины
+/// не наблюдается как принятое сообщение.
+fn copy_body(
+    sender: &ThreadTransport,
+    receiver: &ThreadTransport,
+    len: usize,
+) -> Result<(), IpcError> {
+    let mut chunk = [0u8; BODY_CHUNK];
+    let mut copied = 0;
+    while copied < len {
+        let n = (len - copied).min(BODY_CHUNK);
+        let slice = &mut chunk[..n];
+        read_bytes(sender, DATA_OFFSET + copied, slice)?;
+        write_bytes(receiver, DATA_OFFSET + copied, slice)?;
+        copied += n;
+    }
+    Ok(())
+}
+
 /// Переносит рандеву-сообщение из IPC-буфера `sender` в IPC-буфер
 /// `receiver`: тело (по `len` из tag), хендлы (по `ncaps`), и tag.
 ///
@@ -185,11 +212,7 @@ pub fn transfer_rendezvous(
     let len = decoded.len.min(IPC_BUFFER_DATA_MAX);
     let ncaps = decoded.ncaps.min(IPC_BUFFER_MAX_CAPS);
 
-    if len > 0 {
-        let mut body = [0u8; IPC_BUFFER_DATA_MAX];
-        read_bytes(sender, DATA_OFFSET, &mut body[..len])?;
-        write_bytes(receiver, DATA_OFFSET, &body[..len])?;
-    }
+    copy_body(sender, receiver, len)?;
 
     write_badge(receiver, sender.badge)?;
 

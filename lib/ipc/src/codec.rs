@@ -1,6 +1,9 @@
 //! Кодирование полей протокола.
 
-use crate::wire::{Bytes, IpcError, MessageBuf, Str, value};
+use crate::{
+    schema::WireType,
+    wire::{Bytes, IpcError, MessageBuf, Str, value},
+};
 
 /// Значение, занимающее одну запись поля.
 /// Заимствование результата декодирования из `data` несёт lifetime `'a`.
@@ -17,8 +20,16 @@ pub trait WireValue<'a>: Sized {
     fn from_field(data: &'a [u8]) -> Result<Self, IpcError>;
 }
 
+/// Структурный wire-дескриптор типа для схемы протокола.
+/// Лайфтайм-свободный: `WIRE_TYPE` нужен в const-контексте дескриптора `DESC`,
+/// где имя лайфтайма недоступно. Агрегат собирает дескриптор из полей.
+pub trait WireTyped {
+    /// Дескриптор раскладки значения в сообщении.
+    const WIRE_TYPE: WireType;
+}
+
 macro_rules! int_wire_value {
-    ($ty:ty, $encode:ident, $decode:ident) => {
+    ($ty:ty, $encode:ident, $decode:ident, $desc:expr) => {
         impl<'a> WireValue<'a> for $ty {
             fn write_as_field<const N: usize>(
                 &self,
@@ -32,17 +43,33 @@ macro_rules! int_wire_value {
                 value::$decode(data)
             }
         }
+
+        impl WireTyped for $ty {
+            const WIRE_TYPE: WireType = $desc;
+        }
     };
 }
 
-int_wire_value!(u8, encode_u8, decode_u8);
-int_wire_value!(u16, encode_u16, decode_u16);
-int_wire_value!(u32, encode_u32, decode_u32);
-int_wire_value!(u64, encode_u64, decode_u64);
-int_wire_value!(i8, encode_i8, decode_i8);
-int_wire_value!(i16, encode_i16, decode_i16);
-int_wire_value!(i32, encode_i32, decode_i32);
-int_wire_value!(i64, encode_i64, decode_i64);
+int_wire_value!(u8, encode_u8, decode_u8, WireType::Uint(1));
+int_wire_value!(u16, encode_u16, decode_u16, WireType::Uint(2));
+int_wire_value!(u32, encode_u32, decode_u32, WireType::Uint(4));
+int_wire_value!(u64, encode_u64, decode_u64, WireType::Uint(8));
+int_wire_value!(i8, encode_i8, decode_i8, WireType::Int(1));
+int_wire_value!(i16, encode_i16, decode_i16, WireType::Int(2));
+int_wire_value!(i32, encode_i32, decode_i32, WireType::Int(4));
+int_wire_value!(i64, encode_i64, decode_i64, WireType::Int(8));
+
+impl WireTyped for bool {
+    const WIRE_TYPE: WireType = WireType::Bool;
+}
+
+impl<const N: usize> WireTyped for Str<'_, N> {
+    const WIRE_TYPE: WireType = WireType::BoundedStr(N);
+}
+
+impl<const N: usize> WireTyped for Bytes<'_, N> {
+    const WIRE_TYPE: WireType = WireType::BoundedBytes(N);
+}
 
 impl<'a> WireValue<'a> for bool {
     fn write_as_field<const N: usize>(

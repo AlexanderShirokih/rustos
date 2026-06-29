@@ -45,7 +45,7 @@ fn expand_budget_asserts(protocol: &Protocol) -> TokenStream {
     let asserts = protocol
         .operations
         .iter()
-        .filter(|op| has_dynamic_bound(op))
+        .filter(|op| has_dynamic_bound(op) && !has_opaque(op))
         .map(|op| {
             let terms = op.params.iter().map(|param| {
                 let data = data_len_expr(&param.ty);
@@ -67,6 +67,12 @@ fn has_dynamic_bound(op: &Operation) -> bool {
         .any(|param| matches!(&param.ty, WireTy::Str(b) | WireTy::Bytes(b) if b.lit.is_none()))
 }
 
+fn has_opaque(op: &Operation) -> bool {
+    op.params
+        .iter()
+        .any(|param| matches!(&param.ty, WireTy::Opaque(_)))
+}
+
 /// Длина `data` поля как const-выражение для бюджет-assert'а.
 fn data_len_expr(ty: &WireTy) -> TokenStream {
     match ty {
@@ -79,6 +85,7 @@ fn data_len_expr(ty: &WireTy) -> TokenStream {
             let n = &bound.value;
             quote!(#n)
         }
+        WireTy::Opaque(_) => unreachable!("opaque operation skips the budget assert"),
     }
 }
 
@@ -104,6 +111,7 @@ fn wire_ty_tokens(ty: &WireTy, lifetime: &TokenStream) -> TokenStream {
             quote!(::ipc::wire::Bytes<#lifetime, #n>)
         }
         WireTy::Cap => quote!(::ipc::wire::Cap),
+        WireTy::Opaque(ty) => quote!(#ty),
     }
 }
 
@@ -121,6 +129,8 @@ fn wire_ty_desc(ty: &WireTy) -> TokenStream {
             quote!(::ipc::schema::WireType::BoundedBytes(#n))
         }
         WireTy::Cap => quote!(::ipc::schema::WireType::Capability),
+        // Структурный дескриптор берётся у самого типа (агрегат и т.п.).
+        WireTy::Opaque(ty) => quote!(<#ty as ::ipc::WireTyped>::WIRE_TYPE),
     }
 }
 
@@ -922,6 +932,10 @@ fn expand_ordinal_module(protocol: &Protocol) -> TokenStream {
 
     quote! {
         #vis mod #mod_ident {
+            // Opaque-типы в DESC именуются как в сигнатурах (путь родителя).
+            #[allow(unused_imports)]
+            use super::*;
+
             #(#consts)*
 
             /// Транспортная плоскость протокола: `"port"` или `"ring"`.
