@@ -19,16 +19,14 @@ impl Process {
     /// Создаёт пустой процесс с именем `name`.
     pub fn create(name: &str) -> Result<Self> {
         svc::process_create(name.as_bytes())
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
     }
 
     /// Возвращает обёртку над собственным процессом.
     pub fn self_process() -> Result<Self> {
         svc::process_self()
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
     }
 
@@ -64,10 +62,7 @@ impl Process {
         match result {
             Ok(thread) => {
                 let _ = handle.into_raw();
-                // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-                Ok(Thread::from_handle(unsafe {
-                    OwnedHandle::from_handle(thread)
-                }))
+                Ok(Thread::from_handle(OwnedHandle::from_handle(thread)))
             }
             Err(e) => Err(Error::Syscall(e)),
         }

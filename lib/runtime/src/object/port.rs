@@ -58,8 +58,7 @@ impl Port {
     /// Создаёт `Port` в текущей таблице.
     pub fn create() -> Result<Self> {
         svc::port_create()
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
     }
 
@@ -86,8 +85,7 @@ impl Port {
         #[allow(clippy::cast_possible_truncation)]
         let reply_id = reply_raw as u32;
         Ok(Handle::new(reply_id).map(|handle| Reply {
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            handle: unsafe { OwnedHandle::from_handle(handle) },
+            handle: OwnedHandle::from_handle(handle),
         }))
     }
 

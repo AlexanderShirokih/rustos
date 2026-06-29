@@ -27,34 +27,21 @@ pub struct BorrowedHandle<'a> {
 }
 
 impl OwnedHandle {
-    /// Берёт во владение свежий хэндл из syscall'а.
-    ///
-    /// # Safety
-    /// Вызывающий гарантирует уникальное владение `handle`; двойное оборачивание
-    /// ведёт к преждевременному close (другой владелец получит `BadHandle`).
-    pub unsafe fn from_handle(handle: Handle) -> Self {
+    /// Берёт хэндл во владение и закрывает его в `Drop`.
+    pub fn from_handle(handle: Handle) -> Self {
         Self { handle }
     }
 
     /// Усыновляет сырой HandleId, помещённый ядром в таблицу процесса; `None`
     /// на нуле (невалидный handle).
-    ///
-    /// # Safety
-    /// Вызывающий гарантирует уникальное владение `raw`; двойное оборачивание
-    /// ведёт к преждевременному close (другой владелец получит `BadHandle`).
-    pub unsafe fn from_raw(raw: RawHandle) -> Option<Self> {
-        // SAFETY: усыновляем тот же хэндл, уникальность гарантирует вызывающий.
-        Handle::new(raw).map(|handle| unsafe { Self::from_handle(handle) })
+    pub fn from_raw(raw: RawHandle) -> Option<Self> {
+        Handle::new(raw).map(Self::from_handle)
     }
 
     /// Усыновляет capability, доставленный по IPC, во владение.
-    ///
-    /// Ядро кладёт принятый capability в таблицу процесса свежей записью, так
-    /// что уникальность владения гарантирована провенансом, а не вызывающим.
     pub fn adopt(cap: Cap) -> Self {
         let handle = Handle::new(cap.raw().get()).expect("Cap::raw is NonZeroU32");
-        // SAFETY: ядро гарантирует уникальную запись для доставленного capability.
-        unsafe { Self::from_handle(handle) }
+        Self::from_handle(handle)
     }
 
     /// Владеемый хэндл для укладки в аргумент syscall'а.
@@ -106,6 +93,18 @@ impl IntoWireHandle for OwnedHandle {
     }
 }
 
+impl From<BorrowedHandle<'_>> for Handle {
+    fn from(borrowed: BorrowedHandle<'_>) -> Self {
+        borrowed.handle
+    }
+}
+
+impl From<&OwnedHandle> for Handle {
+    fn from(owned: &OwnedHandle) -> Self {
+        owned.handle
+    }
+}
+
 impl BorrowedHandle<'_> {
     /// Заимствованный `Handle`.
     pub fn as_raw(self) -> Handle {
@@ -117,8 +116,7 @@ impl BorrowedHandle<'_> {
     /// Возвращает независимый `OwnedHandle`.
     pub fn duplicate(self, rights: Rights, badge: u64) -> Result<OwnedHandle> {
         svc::handle_duplicate(self.handle, rights.into(), badge)
-            // SAFETY: handle_duplicate вернул свежий хэндл, мы единственный владелец.
-            .map(|handle| unsafe { OwnedHandle::from_handle(handle) })
+            .map(OwnedHandle::from_handle)
             .map_err(Error::Syscall)
     }
 }

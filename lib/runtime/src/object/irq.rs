@@ -36,8 +36,7 @@ impl IrqControl {
     /// `irq` в диапазон полномочия; уже занятая линия - `ResourceExhausted`.
     pub fn mint(&self, irq: u16) -> Result<IrqLine> {
         svc::irq_mint(self.handle.as_raw(), irq)
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| IrqLine::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+            .map(|handle| IrqLine::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
     }
 

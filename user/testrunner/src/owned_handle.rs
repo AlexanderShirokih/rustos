@@ -9,8 +9,7 @@ use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 /// Минтит свежий `Signal` и оборачивает во владеющий хэндл.
 fn mint() -> OwnedHandle {
     let handle = signal_create().expect("signal_create must succeed");
-    // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-    unsafe { OwnedHandle::from_handle(handle) }
+    OwnedHandle::from_handle(handle)
 }
 
 /// `true`, если non-blocking операция на `handle` отвергнута как `BadHandle`

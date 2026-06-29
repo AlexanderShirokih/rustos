@@ -61,14 +61,14 @@ pub struct PortTransport {
 impl PortTransport {
     /// Клиентская сторона порта: отправитель `cast`/`call`.
     #[must_use]
-    pub fn client(handle: Handle) -> Self {
-        Self::with_phase(handle, Phase::ClientIdle)
+    pub fn client(handle: impl Into<Handle>) -> Self {
+        Self::with_phase(handle.into(), Phase::ClientIdle)
     }
 
     /// Серверная сторона порта: получатель `recv`, отвечающий `reply`.
     #[must_use]
-    pub fn server(handle: Handle) -> Self {
-        Self::with_phase(handle, Phase::ServerIdle)
+    pub fn server(handle: impl Into<Handle>) -> Self {
+        Self::with_phase(handle.into(), Phase::ServerIdle)
     }
 
     fn with_phase(handle: Handle, phase: Phase) -> Self {

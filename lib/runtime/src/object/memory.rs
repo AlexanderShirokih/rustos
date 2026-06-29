@@ -77,8 +77,7 @@ impl Resource {
     /// Свежий handle на метеринг-`Resource` текущего процесса.
     pub fn self_resource() -> Self {
         let handle = svc::process_resource_self().expect("process self_resource syscall");
-        // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-        Self::from_handle(unsafe { OwnedHandle::from_handle(handle) })
+        Self::from_handle(OwnedHandle::from_handle(handle))
     }
 
     /// Берёт во владение хэндл `Resource`.
@@ -94,8 +93,7 @@ impl Resource {
     /// Создаёт регион с Virtual backing размера `size_bytes` и маской `access`.
     pub fn create_virtual(&self, size_bytes: u64, access: MemoryAccess) -> Result<MemoryRegion> {
         svc::memory_create_virtual(self.handle.as_raw(), size_bytes, access.raw())
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| MemoryRegion::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+            .map(|handle| MemoryRegion::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
     }
 
@@ -146,8 +144,7 @@ impl MemoryRegion {
         access: MemoryAccess,
     ) -> Result<MemoryRegion> {
         svc::memory_slice(self.handle.as_raw(), offset, size_bytes, access.raw())
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| MemoryRegion::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+            .map(|handle| MemoryRegion::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
     }
 

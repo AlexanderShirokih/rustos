@@ -57,16 +57,14 @@ impl Thread {
             entry.arg,
             u64::from(entry.priority),
         )
-        // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-        .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+        .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
         .map_err(Error::Syscall)
     }
 
     /// Возвращает обёртку над собственным потоком.
     pub fn self_thread() -> Result<Self> {
         svc::thread_self()
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
     }
 

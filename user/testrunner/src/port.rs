@@ -206,10 +206,8 @@ fn send_recv_round_trip_receiver_first() {
 extern "C" fn server_worker(_arg: usize) -> u32 {
     // Сервер - единственный владелец Port (усыновляет id, закроет на drop);
     // main оперирует тем же id сырым call и не закрывает.
-    // SAFETY: единственный OwnedHandle-владелец port'а - этот worker (main
-    // оперирует тем же id сырым call, обёртку не создаёт).
     let ep = Port::from_handle(
-        unsafe { OwnedHandle::from_raw(EP_RAW.load(SeqCst) as u32) }.expect("port id"),
+        OwnedHandle::from_raw(EP_RAW.load(SeqCst) as u32).expect("port id"),
     );
     WORKER_READY.store(1, SeqCst);
     let mut buf = [0u8; 8];

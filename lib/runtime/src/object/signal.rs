@@ -18,8 +18,7 @@ impl Signal {
     /// Создаёт пустой `Signal` в текущем процессе.
     pub fn create() -> Result<Self> {
         svc::signal_create()
-            // SAFETY: handle только что создан syscall'ом, мы единственный владелец.
-            .map(|handle| Self::from_handle(unsafe { OwnedHandle::from_handle(handle) }))
+            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
     }
 
