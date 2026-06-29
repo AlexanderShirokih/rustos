@@ -45,8 +45,7 @@ fn load_entry_passes_bootstrap_handle() {
         segments: &segments,
     };
     let bootstrap = Signal::create().expect("signal create").into_handle();
-    let process =
-        load_entry(&entry, &resource, bootstrap).expect("load_entry spawns child");
+    let process = load_entry(&entry, &resource, bootstrap).expect("load_entry spawns child");
 
     process
         .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))

@@ -5,6 +5,7 @@ use crate::{
     svc,
 };
 
+mod irq;
 mod memory;
 mod port;
 mod process;
@@ -12,6 +13,7 @@ mod signal;
 mod spawn;
 mod thread;
 
+pub use irq::{IrqControl, IrqLine};
 pub use memory::{AnonymousMapping, Mapping, MemoryRegion, RegionInfo, RegionKind, Resource};
 pub use port::{Port, Reply};
 pub use process::Process;

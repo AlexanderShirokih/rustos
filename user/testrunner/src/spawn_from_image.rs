@@ -28,8 +28,7 @@ fn spawn_child_from_image() {
 
     let resource = Resource::self_resource();
     let start_handle = Signal::create().expect("signal create").into_handle();
-    let process =
-        load_entry(&child, &resource, start_handle).expect("spawn child from image");
+    let process = load_entry(&child, &resource, start_handle).expect("spawn child from image");
 
     process
         .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))

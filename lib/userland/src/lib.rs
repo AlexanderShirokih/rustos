@@ -351,6 +351,9 @@ mod tests {
 
     #[test]
     fn user_vm_window_none_without_segments() {
-        assert_eq!(user_vm_window(core::iter::empty(), 0x1_0000_0000, PAGE), None);
+        assert_eq!(
+            user_vm_window(core::iter::empty(), 0x1_0000_0000, PAGE),
+            None
+        );
     }
 }

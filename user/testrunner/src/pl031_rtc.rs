@@ -1,14 +1,11 @@
 //! E2E userspace-драйвера PL031 RTC: минт IRQ-линии и device-MMIO окна по
 //! bootstrap-контракту, ожидание реального прерывания и подтверждение.
-//! Сквозной критпуть провижнинга устройства из userspace.
+//! Сквозной критпуть провижнинга устройства из userland.
 
 use bootstrap::BootstrapClient;
 use io::mmio::{Mmio, Reg};
 use kernel_tests::kernel_test;
-use runtime::{
-    MemoryRegion, OwnedHandle, PortTransport, UserMemFlags, handle_close, irq_ack, irq_mint,
-    signal_wait_one,
-};
+use runtime::{IrqControl, MemoryRegion, OwnedHandle, PortTransport, Timeout, UserMemFlags};
 use syscall::SIGNALED;
 
 /// PL031 RTC на qemu virt: физбаза MMIO и линия прерывания (GIC_SPI 2 -> INTID 34).
@@ -25,15 +22,17 @@ const RTC_IMSC: Reg<u32> = Reg::new(0x10);
 const RTC_ICR: Reg<u32> = Reg::new(0x1C);
 
 /// Бюджет ожидания.
-const WAIT_BUDGET_NS: u64 = 10_000_000_000;
+const WAIT_BUDGET: Timeout = Timeout::from_ns(10_000_000_000);
 
 #[kernel_test]
 fn pl031_rtc_interrupt() {
     let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
 
     // Полномочие на линии + минт линии PL031.
-    let control = OwnedHandle::adopt(client.acquire_irq_control().expect("call").expect("vend"));
-    let line = irq_mint(control.as_raw(), PL031_IRQ).expect("mint PL031 line");
+    let control = IrqControl::from_handle(OwnedHandle::adopt(
+        client.acquire_irq_control().expect("call").expect("vend"),
+    ));
+    let line = control.mint(PL031_IRQ).expect("mint PL031 line");
 
     // Device-окно PL031 по базовому PA + отображение. Device-атрибуты ставит
     // ядро из типа региона; userspace выбирает только доступ.
@@ -51,15 +50,12 @@ fn pl031_rtc_interrupt() {
     mmio.write_reg(RTC_MR, now.wrapping_add(2));
     mmio.write_reg(RTC_IMSC, 1);
 
-    // Ждать реальное прерывание линии. Отрицательный возврат -> 0 -> провал проверки.
-    let observed = u32::try_from(signal_wait_one(line, SIGNALED, WAIT_BUDGET_NS)).unwrap_or(0);
+    // Ждать реальное прерывание линии: Ok = маска срабатывания, Err = тайм-аут.
+    let observed = line.wait(WAIT_BUDGET).expect("interrupt fired");
     kernel_tests::kassert!(observed & SIGNALED != 0);
 
     mmio.write_reg(RTC_ICR, 1);
-    kernel_tests::kassert!(irq_ack(line) == 0);
-
-    // Освободить линию.
-    let _ = handle_close(line);
+    line.ack().expect("ack");
 }
 
 fn acquire_window_by_base(

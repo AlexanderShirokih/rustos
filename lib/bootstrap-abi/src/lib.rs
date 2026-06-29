@@ -23,7 +23,7 @@ pub trait Bootstrap {
     #[call]
     fn acquire_userland_image(&self) -> Result<ipc::wire::Cap, u32>;
 
-    /// Выдаёт capability на Device-MMIO регион `index` из FDT-набора (kernel-owned
+    /// Выдаёт capability на Device-MMIO регион `index` (kernel-owned
     /// исключены). `Err` - индекс вне набора либо отказ выдачи.
     #[call]
     fn acquire_device_memory(&self, index: u32) -> Result<ipc::wire::Cap, u32>;

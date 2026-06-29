@@ -4,7 +4,7 @@
 
 use bootstrap::BootstrapClient;
 use kernel_tests::kernel_test;
-use runtime::{OwnedHandle, PortTransport, irq_ack, irq_mint};
+use runtime::{IrqControl, OwnedHandle, PortTransport};
 
 /// PL031 RTC на qemu virt: `GIC_SPI 2` -> INTID 34.
 const PL031_IRQ: u16 = 34;
@@ -17,13 +17,12 @@ fn acquire_irq_control_and_mint_line() {
         .acquire_irq_control()
         .expect("acquire_irq_control call")
         .expect("vend ok");
-    let control = OwnedHandle::adopt(cap);
+    let control = IrqControl::from_handle(OwnedHandle::adopt(cap));
 
-    // Успешный минт доказывает: доставленный capability установлен ядром в
-    // таблицу процесса, это `IrqControl`, и линия в его диапазоне.
-    let line = irq_mint(control.as_raw(), PL031_IRQ).expect("mint IrqLine");
+    // Успешный минт доказывает, что доставленный capability установлен ядром в таблицу процесса.
+    let line = control.mint(PL031_IRQ).expect("mint IrqLine");
 
-    // Свежая линия: подтверждать нечего, ack -> ошибка (отрицательный возврат).
-    // Заодно подтверждает, что минт вернул живой `IrqLine`-handle.
-    kernel_tests::kassert!(irq_ack(line) < 0);
+    // Свежая линия: подтверждать нечего, ack -> ошибка. Заодно подтверждает,
+    // что минт вернул живой `IrqLine`. Линия освобождается дропом `line`.
+    kernel_tests::kassert!(line.ack().is_err());
 }
