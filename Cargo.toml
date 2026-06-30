@@ -36,6 +36,7 @@ members = [
     "user/rootkeeper",
     "user/testrunner",
     "user/calculator-demo",
+    "user/rtc-demo",
     "xtask",
 ]
 

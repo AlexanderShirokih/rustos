@@ -1,0 +1,17 @@
+version = 1
+
+[[programs]]
+package = "rtc-demo"
+bin = "rtc-init"
+name = "rtc-init"
+bootstrap = true
+
+[[programs]]
+package = "rtc-demo"
+bin = "rtc-driver"
+name = "rtc-driver"
+
+[[programs]]
+package = "rtc-demo"
+bin = "rtc-client"
+name = "rtc-client"

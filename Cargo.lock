@@ -524,6 +524,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtc-demo"
+version = "0.1.0"
+dependencies = [
+ "bootstrap",
+ "fdt",
+ "io",
+ "ipc",
+ "runtime",
+ "syscall",
+ "userland-build",
+ "userland-image",
+ "userland-loader",
+]
+
+[[package]]
 name = "runtime"
 version = "0.1.0"
 dependencies = [

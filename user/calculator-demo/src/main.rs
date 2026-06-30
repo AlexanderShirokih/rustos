@@ -58,9 +58,9 @@ fn run(root: Handle) -> Result<()> {
     let calculator_api = CalculatorApiClient::new(PortTransport::client(calculator_capability));
 
     // Выполняем синхронный вызов через IPC канал
-    for _ in 0..6 {
-        let result = factorial(&calculator_api, 4);
-        log(&bootstrap_client, &format!("Factorial of 4 is {}", result));
+    for n in 1..=6 {
+        let result = factorial(&calculator_api, n);
+        log(&bootstrap_client, &format!("Factorial of {n} is {result}"));
     }
 
     let _ = calculator_process.join(Timeout::from_ns(500_000));

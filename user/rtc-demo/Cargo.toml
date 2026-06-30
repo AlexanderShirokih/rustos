@@ -1,0 +1,51 @@
+cargo-features = ["per-package-target"]
+
+[package]
+name = "rtc-demo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+forced-target = "aarch64-unknown-none"
+
+[package.metadata.userland]
+stack_size = 65536
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "rtc-init"
+path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "rtc-driver"
+path = "src/driver.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "rtc-client"
+path = "src/client.rs"
+test = false
+bench = false
+
+[dependencies]
+bootstrap = { workspace = true }
+fdt = { workspace = true }
+io = { workspace = true }
+ipc = { workspace = true }
+syscall = { workspace = true }
+runtime = { workspace = true }
+userland-image = { workspace = true }
+userland-loader = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true
