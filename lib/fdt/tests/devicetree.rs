@@ -281,6 +281,24 @@ fn reg_single_entry() {
 }
 
 #[test]
+fn first_reg_base_of_direct_child() {
+    let dtb = build_dtb_with_children();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let root = dt.root().unwrap();
+
+    let mem = root.children().find(|n| n.name() == "memory@0").unwrap();
+    assert_eq!(mem.first_reg_base(&root), Some(0x00));
+
+    let rsv = dt.find("/reserved-memory").unwrap();
+    let child = rsv.children().next().unwrap();
+    assert_eq!(child.first_reg_base(&rsv), Some(0x1000_0000));
+
+    // Узел без `reg` базы не имеет.
+    let chosen = dt.find("/chosen").unwrap();
+    assert_eq!(chosen.first_reg_base(&root), None);
+}
+
+#[test]
 fn find_path() {
     let dtb = build_dtb_with_children();
     let dt = DeviceTree::from_bytes(&dtb).unwrap();

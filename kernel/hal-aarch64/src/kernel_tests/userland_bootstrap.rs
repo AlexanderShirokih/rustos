@@ -27,6 +27,7 @@ fn userland_bootstrap_log() {
         kernelspace::kernel_tests::user_process_launcher().as_ref(),
         blob,
         blob_phys,
+        kernelspace::kernel_tests::boot_dtb(),
         Vec::new(),
         Aarch64Context::USER_VA_END,
     )

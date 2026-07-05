@@ -15,7 +15,7 @@ use scheduler::{ArchContext, Bootstrapped, Scheduler, SchedulerService};
 use spin::Once;
 
 use crate::{
-    kernel_context::KernelContext,
+    kernel_context::{BootDtb, KernelContext},
     scheduler_bootstrap::KernelTimerSource,
     user_process::{SchedulerUserProcessLauncher, UserProcessLauncher},
 };
@@ -43,6 +43,7 @@ static ADAPTER: Once<ConsoleAdapter> = Once::new();
 static TEST_SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
 static USER_PROCESS_LAUNCHER: Once<Arc<dyn UserProcessLauncher>> = Once::new();
 static USERLAND_BLOB: Once<&'static [u8]> = Once::new();
+static BOOT_DTB: Once<BootDtb> = Once::new();
 
 pub fn scheduler() -> &'static Arc<dyn SchedulerService> {
     TEST_SCHEDULER
@@ -60,6 +61,13 @@ pub fn user_process_launcher() -> &'static Arc<dyn UserProcessLauncher> {
 /// blob отсутствует (тест должен явно провалиться).
 pub fn userland_blob() -> Option<&'static [u8]> {
     USERLAND_BLOB.get().copied()
+}
+
+/// DTB от загрузчика.
+pub fn boot_dtb() -> BootDtb {
+    *BOOT_DTB
+        .get()
+        .expect("BootDtb must be cached in kernel_tests::run")
 }
 
 /// Init-таск под `feature = "kernel-tests"`: спавнит worker-процесс
@@ -122,6 +130,7 @@ pub fn run(kernel: &mut KernelContext) -> ! {
     if let Some(image) = kernel.userland_image() {
         USERLAND_BLOB.call_once(|| image.bytes);
     }
+    BOOT_DTB.call_once(|| kernel.dtb());
 
     let writer: &'static (dyn Writer + Send + Sync) =
         ADAPTER.get().expect("ADAPTER initialised above");

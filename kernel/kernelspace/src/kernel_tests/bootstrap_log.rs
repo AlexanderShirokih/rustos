@@ -22,7 +22,7 @@ struct SignalingSink {
 }
 
 impl BootstrapService for SignalingSink {
-    fn log(&mut self, _message: Str<{ LOG_MESSAGE_MAX }>) {
+    fn log(&mut self, _tag: Str<{ bootstrap::LOG_TAG_MAX }>, _message: Str<{ LOG_MESSAGE_MAX }>) {
         self.signal.signal(SIGNALED, 0);
     }
 
@@ -32,6 +32,10 @@ impl BootstrapService for SignalingSink {
     }
 
     fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
+        Err(1)
+    }
+
+    fn acquire_boot_fdt(&mut self) -> Result<Cap, u32> {
         Err(1)
     }
 
@@ -166,9 +170,7 @@ fn bootstrap_log_round_trip_over_port() {
                     table,
                 };
                 let client = BootstrapClient::new(transport);
-                client
-                    .log(Str::<LOG_MESSAGE_MAX>::new("boot ok").expect("log fits"))
-                    .expect("log send");
+                client.log_str("kernel-test", "boot ok").expect("log send");
             },
         )
         .expect("client task spawn");

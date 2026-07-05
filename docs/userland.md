@@ -107,15 +107,14 @@ Bootstrap — типизированный канал между bootstrap-пр�
 #![no_std]
 #![no_main]
 
-use bootstrap::{BootstrapClient};
-use ipc::wire::FieldStr;
+use bootstrap::BootstrapClient;
 use runtime::{PortTransport, thread_exit};
 use syscall::Handle;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(root: Handle) -> ! {
     let client = BootstrapClient::new(PortTransport::client(root));
-    let result = client.log(FieldStr::new("init process started").expect(""));
+    let result = client.log_str("init", "process started");
 
     thread_exit(u64::from(result.is_err()))
 }

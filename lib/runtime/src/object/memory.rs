@@ -3,6 +3,9 @@
 
 use core::mem;
 
+use bootstrap::DeviceWindow;
+use io::mmio::Mmio;
+use ipc::wire::Cap;
 use syscall::{MemoryAccess, UserMemFlags};
 
 use crate::{
@@ -120,6 +123,11 @@ impl MemoryRegion {
         Self { handle }
     }
 
+    /// Усыновляет capability региона, доставленный по IPC.
+    pub fn adopt(cap: Cap) -> Self {
+        Self::from_handle(OwnedHandle::adopt(cap))
+    }
+
     /// Заимствование хэндла на время одного вызова.
     pub fn handle(&self) -> BorrowedHandle<'_> {
         self.handle.borrow()
@@ -133,6 +141,12 @@ impl MemoryRegion {
             flags.raw(),
         ))?;
         Ok(Mapping { va, size_bytes })
+    }
+
+    /// Маппит регион целиком (размер из `inspect`) с флагами `flags`.
+    pub fn map_full(&self, flags: UserMemFlags) -> Result<Mapping> {
+        let info = self.inspect()?;
+        self.map(info.size_bytes, flags)
     }
 
     /// Деривация под-региона `[offset, offset+size_bytes)` с маской `access`
@@ -170,10 +184,25 @@ impl MemoryRegion {
     }
 }
 
+impl DeviceWindow for MemoryRegion {
+    fn adopt(cap: Cap) -> Self {
+        Self::adopt(cap)
+    }
+
+    fn base(&self) -> Option<u64> {
+        self.inspect().ok().map(|info| info.base)
+    }
+}
+
 impl Mapping {
     /// Базовый VA маппинга.
     pub fn va(&self) -> u64 {
         self.va
+    }
+
+    /// MMIO-хэндлер по базовому VA маппинга (device-окна).
+    pub fn mmio(&self) -> Mmio {
+        Mmio::new(usize::try_from(self.va).expect("va fits usize"))
     }
 
     /// Размер маппинга в байтах.

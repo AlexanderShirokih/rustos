@@ -4,7 +4,6 @@ members = [
     "kernel/drivers-aarch64",
     "kernel/drivers-common",
     "kernel/drivers-common-aarch64",
-    "kernel/fdt",
     "kernel/hal-aarch64",
     "kernel/hal-aarch64-asid",
     "kernel/hal-aarch64-paging",
@@ -26,6 +25,7 @@ members = [
     "lib/test-harness-macros",
     "lib/test-harness-qemu",
     "lib/collections",
+    "lib/fdt",
     "lib/userland",
     "lib/userland-build",
     "lib/userland-image",
@@ -70,7 +70,7 @@ bootstrap = { path = "lib/bootstrap-abi" }
 collections = { path = "lib/collections" }
 io = { path = "lib/io" }
 klog = { path = "kernel/log" }
-fdt = { path = "kernel/fdt" }
+fdt = { path = "lib/fdt" }
 memory = { path = "kernel/memory" }
 util = { path = "lib/util" }
 hal-common = { path = "kernel/hal-common" }

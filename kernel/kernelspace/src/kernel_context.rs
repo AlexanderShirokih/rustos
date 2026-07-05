@@ -20,6 +20,23 @@ pub struct UserlandImage {
     pub phys_base: PageAlignedAddress,
 }
 
+/// DTB от загрузчика: физдиапазон блоба (зарезервирован раскладкой на весь
+/// срок ядра).
+#[derive(Clone, Copy)]
+pub struct BootDtb {
+    pub phys_base: PageAlignedAddress,
+    pub size_bytes: NonZeroUsize,
+}
+
+impl BootDtb {
+    pub fn new(phys_base: PageAlignedAddress, size_bytes: NonZeroUsize) -> Self {
+        Self {
+            phys_base,
+            size_bytes,
+        }
+    }
+}
+
 /// Виртуальная арена под kernel-MMIO маппинги: база и размер.
 #[derive(Clone, Copy)]
 pub struct KmmioArena {
@@ -33,7 +50,7 @@ pub struct KernelContext {
     address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
     userland_image: Option<UserlandImage>,
     device_regions: Vec<Arc<MemoryRegion>>,
-    dtb_virt: usize,
+    dtb: BootDtb,
 }
 
 impl KernelContext {
@@ -44,7 +61,7 @@ impl KernelContext {
         mmio_arena: KmmioArena,
         userland_image: Option<UserlandImage>,
         device_regions: Vec<Arc<MemoryRegion>>,
-        dtb_virt: usize,
+        dtb: BootDtb,
     ) -> KernelContext {
         // Публикуем глобальные слоты для модулей без KernelContext.
         syscall_bridge::install_address_space_factory(address_space_factory);
@@ -67,7 +84,7 @@ impl KernelContext {
             address_space_factory,
             userland_image,
             device_regions,
-            dtb_virt,
+            dtb,
         }
     }
 
@@ -87,9 +104,9 @@ impl KernelContext {
         self.device_regions.clone()
     }
 
-    /// Виртуальный адрес DTB в higher-half (живёт весь срок ядра).
-    pub fn dtb_virt(&self) -> usize {
-        self.dtb_virt
+    /// DTB от загрузчика: физдиапазон блоба.
+    pub fn dtb(&self) -> BootDtb {
+        self.dtb
     }
 
     pub fn with_runtime_state<R>(

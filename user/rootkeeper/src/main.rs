@@ -5,7 +5,6 @@
 use core::panic::PanicInfo;
 
 use bootstrap::BootstrapClient;
-use ipc::wire::FieldStr;
 use runtime::{MemoryRegion, OwnedHandle, PortTransport, UserMemFlags, thread_exit};
 use syscall::Handle;
 use userland_image::USERLAND_IMAGE_MAGIC;
@@ -14,7 +13,7 @@ use userland_image::USERLAND_IMAGE_MAGIC;
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(root: Handle) -> ! {
     let client = BootstrapClient::new(PortTransport::client(root));
-    let _ = client.log(FieldStr::new("rootkeeper started").expect("within bound"));
+    let _ = client.log_str("rootkeeper", "started");
 
     thread_exit(u64::from(!image_carries_magic(&client)))
 }

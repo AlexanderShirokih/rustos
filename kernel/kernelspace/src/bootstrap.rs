@@ -23,7 +23,10 @@ use syscall::{IpcBuffer, decode_tag, encode_tag};
 use userland::EntryView;
 use userland_image::{ImageDecodeError, decode};
 
-use crate::user_process::{SpawnUserError, UserProcessLauncher};
+use crate::{
+    kernel_context::BootDtb,
+    user_process::{SpawnUserError, UserProcessLauncher},
+};
 
 /// Диапазон корневого Resource: всё адресное пространство, выровненное вниз
 /// до страницы.
@@ -40,6 +43,7 @@ pub struct BootstrapLaunch {
 pub struct BootstrapResources {
     pub irq_control: Arc<IrqControl>,
     pub image_region: Arc<MemoryRegion>,
+    pub fdt_region: Arc<MemoryRegion>,
     pub device_regions: Vec<Arc<MemoryRegion>>,
 }
 
@@ -57,6 +61,7 @@ pub fn spawn_process(
     launcher: &dyn UserProcessLauncher,
     blob: &'static [u8],
     image_phys: PageAlignedAddress,
+    dtb: BootDtb,
     device_regions: Vec<Arc<MemoryRegion>>,
     user_va_end: usize,
 ) -> Result<BootstrapLaunch, BootstrapSpawnError> {
@@ -93,6 +98,14 @@ pub fn spawn_process(
         AccessMask::R,
     ));
 
+    // Read-only Normal-регион поверх байт DTB. Память DTB зарезервирована раскладкой на весь срок ядра.
+    let fdt_size = page_round_up(dtb.size_bytes).expect("dtb size fits address space");
+    let fdt_region = Arc::new(MemoryRegion::create_physical_normal(
+        dtb.phys_base,
+        fdt_size,
+        AccessMask::R,
+    ));
+
     let launch = UserProcessLaunch::new(peer_handle);
 
     let info = launcher
@@ -108,6 +121,7 @@ pub fn spawn_process(
         resources: BootstrapResources {
             irq_control,
             image_region,
+            fdt_region,
             device_regions,
         },
     })
@@ -167,8 +181,16 @@ impl BootstrapServer {
 }
 
 impl BootstrapService for BootstrapServer {
-    fn log(&mut self, message: Str<{ bootstrap::LOG_MESSAGE_MAX }>) {
-        info!("{}", message.as_str());
+    fn log(
+        &mut self,
+        tag: Str<{ bootstrap::LOG_TAG_MAX }>,
+        message: Str<{ bootstrap::LOG_MESSAGE_MAX }>,
+    ) {
+        if tag.as_str().is_empty() {
+            info!("{}", message.as_str());
+        } else {
+            info!(tag.as_str(); "{}", message.as_str());
+        }
     }
 
     fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
@@ -181,6 +203,10 @@ impl BootstrapService for BootstrapServer {
         self.vend(CapabilityTarget::Memory(
             self.resources.image_region.clone(),
         ))
+    }
+
+    fn acquire_boot_fdt(&mut self) -> Result<Cap, u32> {
+        self.vend(CapabilityTarget::Memory(self.resources.fdt_region.clone()))
     }
 
     fn acquire_device_memory(&mut self, index: u32) -> Result<Cap, u32> {

@@ -13,7 +13,9 @@ bench = false
 doctest = false
 
 [dependencies]
+bootstrap = { workspace = true }
 collections = { workspace = true }
+io = { workspace = true }
 ipc = { workspace = true }
 syscall = { workspace = true }
 talc = { workspace = true }

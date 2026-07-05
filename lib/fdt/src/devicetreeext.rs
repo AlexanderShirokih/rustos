@@ -82,6 +82,10 @@ pub trait NodeExt {
 
     /// Возвращает размерность ячеек адреса и размера для этого узла.
     fn cells_size(&self) -> Option<CellsSize>;
+
+    /// База первого `reg`-окна узла в координатах шины `bus` (узел - её прямой
+    /// потомок). Трансляция адресов промежуточных шин (`ranges`) не выполняется.
+    fn first_reg_base(&self, bus: &Node<'_>) -> Option<u64>;
 }
 
 impl NodeExt for Node<'_> {
@@ -132,6 +136,12 @@ impl NodeExt for Node<'_> {
             address_cells,
             size_cells,
         })
+    }
+
+    fn first_reg_base(&self, bus: &Node<'_>) -> Option<u64> {
+        let cells = bus.cells_size().unwrap_or_default();
+        let windows = self.prop("reg")?.try_as_reg_list::<1>(cells)?;
+        windows.get(0).map(|window| window.offset as u64)
     }
 }
 

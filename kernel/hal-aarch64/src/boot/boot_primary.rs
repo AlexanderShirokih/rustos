@@ -10,7 +10,7 @@ use drivers_common_aarch64::{
 };
 use io::buffered_writer::BufferedWriter;
 use kernelspace::{
-    kernel_context::{KernelContext, KmmioArena, UserlandImage},
+    kernel_context::{BootDtb, KernelContext, KmmioArena, UserlandImage},
     kmain::kmain,
     scheduler_bootstrap::KernelTimerSource,
 };
@@ -128,6 +128,11 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
                  dyn memory::memory_mapper::AddressSpaceFactory + Send + Sync
              ) = Box::leak(result.address_space_factory);
 
+    let boot_dtb = BootDtb::new(
+        PageAlignedAddress::from_usize(dtb_phys).expect("dtb base is 4K-aligned"),
+        NonZeroUsize::new(device_tree.size()).expect("dtb totalsize is non-zero"),
+    );
+
     let userland_image = if initrd_size > 0 {
         let va = initrd_start + HIGHER_HALF_BASE;
         // SAFETY: initrd зарезервирован, фреймы не переиспользуются.
@@ -149,7 +154,7 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
         },
         userland_image,
         device_regions,
-        dtb_virt,
+        boot_dtb,
     )));
 
     #[cfg(feature = "power-semihosting")]

@@ -514,7 +514,9 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "bootstrap",
  "collections",
+ "io",
  "ipc",
  "syscall",
  "talc",
@@ -704,6 +706,7 @@ version = "0.1.0"
 dependencies = [
  "bootstrap",
  "collections",
+ "fdt",
  "io",
  "ipc",
  "runtime",

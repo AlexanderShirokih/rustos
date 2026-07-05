@@ -8,7 +8,7 @@ use core::{fmt::Write as _, panic::PanicInfo};
 
 use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
 use io::writer::Writer;
-use ipc::wire::{IpcError, Str};
+use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, thread_exit};
 use spin::{Mutex, Once};
@@ -80,15 +80,15 @@ fn flush_line(state: &mut LogBuffer) {
     state.len = 0;
 }
 
+/// Тег строк testrunner в klog.
+const LOG_TAG: &str = "testrunner";
+
 /// Best-effort отправка строки лога контрактом `Bootstrap`: на WouldBlock -
 /// ограниченный спин-retry, иная ошибка либо не-UTF8 молча дропает кадр.
 fn send_log_frame(payload: &[u8]) {
     const SEND_RETRY_LIMIT: usize = 1024;
 
     let Ok(text) = core::str::from_utf8(payload) else {
-        return;
-    };
-    let Some(message) = Str::<LOG_MESSAGE_MAX>::new(text) else {
         return;
     };
 
@@ -98,7 +98,7 @@ fn send_log_frame(payload: &[u8]) {
     let client = BootstrapClient::new(PortTransport::client(handle));
 
     for _ in 0..SEND_RETRY_LIMIT {
-        match client.log(message) {
+        match client.log_str(LOG_TAG, text) {
             Err(IpcError::WouldBlock) => core::hint::spin_loop(),
             _ => return,
         }

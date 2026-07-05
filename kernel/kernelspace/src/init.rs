@@ -14,7 +14,7 @@ use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerService
 
 use crate::{
     bootstrap::{run_bootstrap, spawn_process},
-    kernel_context::{KernelContext, UserlandImage},
+    kernel_context::{BootDtb, KernelContext, UserlandImage},
     power,
     scheduler_bootstrap::KernelTimerSource,
     syscall_bridge,
@@ -35,13 +35,16 @@ pub fn spawn_init_process<A>(
     ));
 
     let image = kernel.userland_image();
+    let dtb = kernel.dtb();
     let device_regions = kernel.device_regions();
     let user_va_end = A::USER_VA_END;
 
     scheduler
         .spawn(
             SpawnConfig::new("init").priority(Priority::highest()),
-            move || start_bootstrap_chain(launcher.as_ref(), image, device_regions, user_va_end),
+            move || {
+                start_bootstrap_chain(launcher.as_ref(), image, dtb, device_regions, user_va_end)
+            },
         )
         .expect("init process spawn must succeed");
 }
@@ -49,6 +52,7 @@ pub fn spawn_init_process<A>(
 fn start_bootstrap_chain(
     launcher: &dyn UserProcessLauncher,
     image: Option<UserlandImage>,
+    dtb: BootDtb,
     device_regions: Vec<Arc<MemoryRegion>>,
     user_va_end: usize,
 ) -> ! {
@@ -61,6 +65,7 @@ fn start_bootstrap_chain(
         launcher,
         image.bytes,
         image.phys_base,
+        dtb,
         device_regions,
         user_va_end,
     ) {
