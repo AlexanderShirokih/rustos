@@ -148,6 +148,27 @@ fn unknown_ordinal_yields_peer_close() {
 }
 
 #[test]
+fn close_frame_yields_peer_closed_from_dispatch() {
+    let (client_end, server_end) = MockEnd::pair();
+    let mut server = CalcServer::default();
+
+    // Закрывающий кадр: dispatch возвращает PeerClosed, серверный цикл выходит.
+    let mut frame = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
+    frame
+        .write_header(&Header::new(0, 0, ipc::wire::FLAG_PEER_CLOSE))
+        .expect("header ok");
+    frame.finish().expect("finish ok");
+    client_end
+        .write_message(frame.as_bytes(), &[])
+        .expect("write ok");
+
+    assert_eq!(
+        dispatch_calc(&mut server, &server_end),
+        Err(ipc::wire::IpcError::PeerClosed)
+    );
+}
+
+#[test]
 fn mismatched_txid_is_skipped() {
     let (client_end, server_end) = MockEnd::pair();
     let client = CalcClient::new(client_end);

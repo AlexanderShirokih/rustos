@@ -8,12 +8,14 @@ use core::num::NonZeroUsize;
 use bootstrap::{BootstrapService, dispatch_bootstrap};
 use capability::{
     Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, IrqControl,
-    KernelIpcBuffer, Port, Reply, Resource, ThreadTransport, port_recv, runtime,
+    KernelIpcBuffer, Port, Reply, Resource, ThreadTransport, port_recv, port_send, runtime,
 };
 use collections::{LockCell, MutexCell};
 use ipc::{
     MessageLen, Transport,
-    wire::{Cap, IpcError as WireError, Str},
+    wire::{
+        Cap, FLAG_PEER_CLOSE, Header, IpcError as WireError, MESSAGE_INLINE_MAX, MessageBuf, Str,
+    },
 };
 use klog::{info, warn};
 use memory::{AccessMask, MemoryRegion, page_round_up, physical_address::PageAlignedAddress};
@@ -153,6 +155,28 @@ pub fn run_bootstrap(port: &Arc<Port>, resources: BootstrapResources) {
             }
         }
     }
+}
+
+/// Закрывает bootstrap-port со стороны ядра.
+/// Возврат `Ok` означает, что сервер обработал всё принятое до закрытия.
+pub fn close_bootstrap_port(port: &Arc<Port>, timeout_ns: u64) -> Result<(), KernelIpcError> {
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(KernelIpcError::BadHandle)?;
+
+    let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
+    frame
+        .write_header(&Header::new(0, 0, FLAG_PEER_CLOSE))
+        .expect("header-only frame fits");
+    frame.finish().expect("terminator fits");
+
+    let buffer: KernelIpcBuffer = Arc::new(MutexCell::new(IpcBuffer::zeroed()));
+    buffer
+        .with_lock(|buf| store_kernel_buffer(buf, frame.as_bytes(), &[]))
+        .expect("frame fits IPC buffer");
+
+    let sender = ThreadTransport::new_kernel(buffer, table);
+    port_send(port, sender, runtime(), Some(timeout_ns))
 }
 
 /// Код ошибки выдачи в bootstrap-протоколе: отказ вставки дубликата в таблицу.

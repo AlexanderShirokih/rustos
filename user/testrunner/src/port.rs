@@ -27,10 +27,10 @@ use syscall::{Handle, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag}
 const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
 
-/// Офсеты полей IpcBuffer (`#[repr(C)]`): tag@0, caps@8, data@24, badge@280.
-const CAPS_OFF: usize = 8;
-const DATA_OFF: usize = 24;
-const BADGE_OFF: usize = 280;
+/// Офсеты полей IpcBuffer для доступа из `#[repr(C)]`-layout.
+const CAPS_OFF: usize = core::mem::offset_of!(syscall::IpcBuffer, caps);
+const DATA_OFF: usize = core::mem::offset_of!(syscall::IpcBuffer, data);
+const BADGE_OFF: usize = core::mem::offset_of!(syscall::IpcBuffer, badge);
 
 /// Право `Rights::WRITE` (бит `1<<3`) для минта badged-копии port'а,
 /// через которую клиент может слать (`send` гейтится WRITE).
@@ -206,9 +206,7 @@ fn send_recv_round_trip_receiver_first() {
 extern "C" fn server_worker(_arg: usize) -> u32 {
     // Сервер - единственный владелец Port (усыновляет id, закроет на drop);
     // main оперирует тем же id сырым call и не закрывает.
-    let ep = Port::from_handle(
-        OwnedHandle::from_raw(EP_RAW.load(SeqCst) as u32).expect("port id"),
-    );
+    let ep = Port::from_handle(OwnedHandle::from_raw(EP_RAW.load(SeqCst) as u32).expect("port id"));
     WORKER_READY.store(1, SeqCst);
     let mut buf = [0u8; 8];
     let Ok((len, Some(reply))) = ep.recv_bytes(&mut buf, Timeout::INFINITE) else {

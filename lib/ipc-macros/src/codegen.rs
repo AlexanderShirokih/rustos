@@ -682,6 +682,9 @@ fn expand_dispatch(protocol: &Protocol) -> TokenStream {
             let __len = transport.read_message(&mut __bytes, &mut __handles)?;
             let __frame = &__bytes[..__len.bytes];
             let __header = ::ipc::wire::Header::decode(__frame)?;
+            if __header.has_flag(::ipc::wire::FLAG_PEER_CLOSE) {
+                return ::core::result::Result::Err(::ipc::wire::IpcError::PeerClosed);
+            }
             let __body = &__frame[::ipc::wire::HEADER_SIZE..];
             let __txid = __header.txid;
             match __header.ordinal {
