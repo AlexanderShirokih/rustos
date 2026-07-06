@@ -2,23 +2,23 @@
 
 ## Быстрая справка
 
-| Действие               | Команда                                                                                                                   |
-|------------------------|---------------------------------------------------------------------------------------------------------------------------|
-| Host-тесты             | `cargo test --workspace`                                                                                                  |
-| Host-clippy            | `cargo clippy --workspace`                                                                                                |
-| AArch64 clippy         | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --target aarch64-unknown-none` |
-| Форматирование         | `cargo fmt --all --check`                                                                                                 |
-| Проверка слоёв         | `cargo xtask check-layers`                                                                                                |
-| Сборка userland        | `cargo xtask build-userland [--image <путь>]`                                                                             |
-| Сборка устройства      | `cargo xtask build devices/spec/<device>.yaml`                                                                            |
-| Сборка QEMU            | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                        |
-| Запуск после сборки    | `cargo xtask build devices/spec/<device>.yaml --run`                                                                      |
-| QEMU integration tests | `cargo xtask qemu-test [--timeout <сек>]`                                                                                 |
+| Действие                            | Команда                                                                                                              |
+|-------------------------------------|----------------------------------------------------------------------------------------------------------------------|
+| Host-тесты                          | `cargo test --workspace`                                                                                             |
+| Host-clippy                         | `cargo clippy --workspace`                                                                                           |
+| AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --target aarch64-unknown-none` |
+| Форматирование                      | `cargo fmt --all --check`                                                                                            |
+| Проверка слоёв                      | `cargo xtask check-layers`                                                                                           |
+| Сборка userland                     | `cargo xtask build-userland [--image <путь>]`                                                                        |
+| Загрузочный образ (userland + ядро) | `cargo xtask build devices/spec/<device>.yaml [--image <путь>]`                                                      |
+| Загрузочный образ для QEMU          | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                   |
+| Запуск после сборки                 | `cargo xtask build devices/spec/<device>.yaml --run`                                                                 |
+| QEMU integration tests              | `cargo xtask qemu-test [--timeout <сек>]`                                                                            |
 
 ## Сборка
 
 ```
-cargo xtask build <spec> [--run] [--debug] [--features <features>]
+cargo xtask build <spec> [--run] [--debug] [--features <features>] [--image <путь>]
 ```
 
 Читает YAML-спеку устройства, собирает `target/build/userland.img`, затем собирает `hal-aarch64` под
@@ -26,11 +26,16 @@ cargo xtask build <spec> [--run] [--debug] [--features <features>]
 
 Флаги:
 
-| Флаг                  | Назначение                                                  |
-|-----------------------|-------------------------------------------------------------|
-| `--run`               | После сборки выполнить команды из секции `run` YAML-спеки   |
-| `--debug`             | После сборки выполнить команды из секции `debug` YAML-спеки |
-| `--features <список>` | Дополнительные features (через запятую)                     |
+| Флаг                  | Назначение                                                                                     |
+|-----------------------|------------------------------------------------------------------------------------------------|
+| `--run`               | После сборки выполнить команды из секции `run` YAML-спеки                                      |
+| `--debug`             | После сборки выполнить команды из секции `debug` YAML-спеки                                    |
+| `--features <список>` | Дополнительные features (через запятую)                                                        |
+| `--image <путь>`      | Относительный путь к TOML-манифесту userland-образа. По умолчанию `user/rootkeeper/image.toml` |
+
+```bash
+cargo xtask build devices/spec/xiaomi-lavender.yaml --image user/calculator-demo/image.toml
+```
 
 Артефакты по формату загрузчика:
 

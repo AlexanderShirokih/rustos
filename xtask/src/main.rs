@@ -8,7 +8,7 @@ mod shell;
 
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use anyhow::{Result, bail};
@@ -43,6 +43,9 @@ enum Commands {
         /// Extra `hal-aarch64` cargo features (comma-separated)
         #[arg(long)]
         features: Option<String>,
+        /// Relative path to the userland image manifest
+        #[arg(long, default_value = "user/rootkeeper/image.toml")]
+        image: PathBuf,
     },
     /// Run the QEMU integration tests
     QemuTest {
@@ -69,7 +72,8 @@ fn main() -> Result<()> {
             run,
             debug,
             features,
-        } => build(spec, run, debug, features)?,
+            image,
+        } => build(spec, run, debug, features, image)?,
         Commands::QemuTest { timeout } => qemu_test::qemu_test(timeout)?,
         Commands::BuildUserland { image } => {
             let project_root = project_root();
@@ -85,10 +89,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn build(spec: PathBuf, run: bool, debug: bool, features: Option<String>) -> Result<()> {
+fn build(
+    spec: PathBuf,
+    run: bool,
+    debug: bool,
+    features: Option<String>,
+    image: PathBuf,
+) -> Result<()> {
     let ctx = BuildContext::new(spec, features)?;
-    let manifest_path =
-        image_manifest_path(&ctx.project_root, Path::new("user/rootkeeper/image.toml"))?;
+    let manifest_path = image_manifest_path(&ctx.project_root, &image)?;
     build_userland(&ctx.project_root, &manifest_path, &ctx.build_dir)?;
 
     let output = match ctx.spec.boot.format.as_str() {
