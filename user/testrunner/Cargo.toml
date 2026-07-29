@@ -24,6 +24,12 @@ path = "src/spawn_fixture.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "port-fixture"
+path = "src/port_fixture.rs"
+test = false
+bench = false
+
 [dependencies]
 bootstrap = { workspace = true }
 collections = { workspace = true }

@@ -14,20 +14,27 @@ use runtime::{PortTransport, thread_exit};
 use spin::{Mutex, Once};
 use syscall::Handle;
 
+mod address_space_isolation;
+mod fixture;
+mod fixture_protocol;
 mod heap;
 mod ipc_buffer;
+mod ipc_raw;
 mod irq_provision;
 mod load_entry;
 mod memory_capability_target;
+mod memory_share;
 mod owned_handle;
 mod pl031_rtc;
 mod port;
 mod process_handles;
+mod process_lifecycle;
 mod process_start;
 mod ring_transport;
 mod signal;
 mod spawn_from_image;
 mod sync;
+mod vm;
 
 /// HandleId WRITE-конца bootstrap-канала, полученный в `_start`; ставится один раз.
 static BOOTSTRAP_HANDLE: Once<Handle> = Once::new();

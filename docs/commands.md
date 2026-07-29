@@ -83,6 +83,7 @@ cargo xtask qemu-test [--timeout <сек>]
 | `userland` | —               | `user/testrunner/image.toml`  | тесты в userspace |
 
 Ядро пересобирается между прогонами из-за различия feature-флагов.
+Выбор прохода для нового теста — в [`code-style.md`](code-style.md).
 
 ## Проверка слоёв
 

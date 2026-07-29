@@ -8,3 +8,9 @@ package = "testrunner"
 bin = "spawn-fixture"
 name = "spawn-fixture"
 bootstrap = false
+
+[[programs]]
+package = "testrunner"
+bin = "port-fixture"
+name = "port-fixture"
+bootstrap = false

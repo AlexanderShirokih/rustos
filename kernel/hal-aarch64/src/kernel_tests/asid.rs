@@ -1,16 +1,9 @@
-//! Проверка работы ASID-теггинга на стороне MMU и context-switch.
+//! Проводка ASID до железа: аллокатор ASID покрыт host-тестами
+//! `hal-aarch64-asid`, здесь проверяется, что выданное им значение доезжает до
+//! `TTBR0_EL1[63:48]`, что `TCR_EL1.AS` согласован с обнаруженной шириной ASID
+//! и что цепочка переключений не портит трансляции (rollover).
 //!
-//! Тесты пользуются той же инфраструктурой, что `address_space.rs`
-//! (probe-page в lower-half, чтение/запись через активный TTBR0). Дополнительно
-//! проверяются:
-//! - что после первого `switch_address_space` биты `[63:48]` TTBR0_EL1
-//!   содержат ASID, выданный аллокатором (≠ 0);
-//! - что два разных user-AS получают различные ASID;
-//! - что один и тот же AS сохраняет свой ASID между `switch`'ами;
-//! - что user-страницы маркируются `nG=1`, а kernel - `nG=0`;
-//! - что TCR_EL1.AS соответствует ширине ASID, обнаруженной runtime;
-//! - что rollover не ломает корректность для 8-bit ширины (в QEMU фактическая
-//!   ширина - 16 бит, поэтому выделять 65k AS дорого; этот тест отдельный).
+//! Маркировка user-страниц `nG=1` проверяется в [`super::page_flags`].
 #![allow(unsafe_code)]
 
 extern crate alloc;
@@ -22,7 +15,6 @@ use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
     mem_flags::{AccessMode, Executable, Owners, PrivateMemoryPermission},
-    memory_mapper::MemoryMapper,
     physical_address::PageAlignedAddress,
     virtual_address::PageAlignedVirtualAddress,
 };
@@ -32,21 +24,9 @@ use scheduler::{AddressSpace, ArchContext};
 
 use crate::{
     consts::HIGHER_HALF_BASE,
-    memory::{
-        address_space_factory::UserAarch64MemoryMapper,
-        regs::{common::EL1, id_aa64mmfr0::IdAa64Mmfr0},
-    },
+    memory::regs::{common::EL1, id_aa64mmfr0::IdAa64Mmfr0},
     sched::Aarch64Context,
 };
-
-/// Downcast'ит `&dyn MemoryMapper`, выданный `Aarch64AddressSpaceFactory`,
-/// до конкретного типа для доступа к платформенному API диагностики.
-fn downcast_user_mapper(mapper: &(dyn MemoryMapper + Send + Sync)) -> &UserAarch64MemoryMapper {
-    mapper
-        .as_any()
-        .downcast_ref::<UserAarch64MemoryMapper>()
-        .expect("user-AS mapper must be Aarch64MemoryMapper")
-}
 
 const PROBE_VA: usize = 0x6000_0000;
 
@@ -104,6 +84,11 @@ fn read_tcr() -> u64 {
     raw
 }
 
+/// ASID из `TTBR0_EL1[63:48]`.
+fn asid_of(ttbr0: u64) -> u64 {
+    (ttbr0 >> 48) & 0xFFFF
+}
+
 fn make_user_as_with_probe_page(va: usize, sentinel: u64) -> (Arc<AddressSpace>, *mut u8) {
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
@@ -125,76 +110,32 @@ fn make_user_as_with_probe_page(va: usize, sentinel: u64) -> (Arc<AddressSpace>,
     (user_as, kheap)
 }
 
+/// Каждый user-AS получает ненулевой ASID, разные AS - разные ASID, и один и
+/// тот же AS сохраняет свой между переключениями.
 #[kernel_test]
-fn ttbr0_carries_asid_after_first_switch() {
-    let (user_as, _kva) = make_user_as_with_probe_page(PROBE_VA, 0xDEAD_BEEF);
-    let handle = user_as.handle().expect("user handle");
-
-    Aarch64Context::switch_address_space(Some(handle));
-    let ttbr0 = read_ttbr0();
-    let asid = (ttbr0 >> 48) & 0xFFFF;
-    kernel_tests::kassert!(asid != 0);
-
-    Aarch64Context::switch_address_space(None);
-    drop(user_as);
-}
-
-#[kernel_test]
-fn two_user_as_have_distinct_asids() {
+fn ttbr0_carries_stable_distinct_asids() {
     let (as_a, _) = make_user_as_with_probe_page(PROBE_VA, 0x1);
     let (as_b, _) = make_user_as_with_probe_page(PROBE_VA, 0x2);
 
-    let h_a = as_a.handle().expect("handle a");
-    let h_b = as_b.handle().expect("handle b");
-
-    Aarch64Context::switch_address_space(Some(h_a));
+    Aarch64Context::switch_address_space(as_a.handle());
     let ttbr_a = read_ttbr0();
-    Aarch64Context::switch_address_space(Some(h_b));
+    Aarch64Context::switch_address_space(as_b.handle());
     let ttbr_b = read_ttbr0();
+    // Возврат к A: ASID обязан совпасть с первым наблюдением.
+    Aarch64Context::switch_address_space(as_a.handle());
+    let ttbr_a_again = read_ttbr0();
     Aarch64Context::switch_address_space(None);
 
-    let asid_a = (ttbr_a >> 48) & 0xFFFF;
-    let asid_b = (ttbr_b >> 48) & 0xFFFF;
-    kernel_tests::kassert!(asid_a != 0);
-    kernel_tests::kassert!(asid_b != 0);
-    kernel_tests::kassert!(asid_a != asid_b);
+    kernel_tests::kassert!(asid_of(ttbr_a) != 0);
+    kernel_tests::kassert!(asid_of(ttbr_b) != 0);
+    kernel_tests::kassert!(asid_of(ttbr_a) != asid_of(ttbr_b));
+    kernel_tests::kassert_eq!(ttbr_a, ttbr_a_again);
 
     drop(as_a);
     drop(as_b);
 }
 
-#[kernel_test]
-fn same_as_keeps_asid_across_switch() {
-    let (as_a, _) = make_user_as_with_probe_page(PROBE_VA, 0xAA);
-    let h_first = as_a.handle().expect("handle first");
-    let h_second = as_a.handle().expect("handle second");
-    kernel_tests::kassert_eq!(h_first.tag, h_second.tag);
-
-    Aarch64Context::switch_address_space(Some(h_first));
-    let ttbr_first = read_ttbr0();
-    Aarch64Context::switch_address_space(None);
-    Aarch64Context::switch_address_space(Some(h_second));
-    let ttbr_second = read_ttbr0();
-    Aarch64Context::switch_address_space(None);
-
-    kernel_tests::kassert_eq!(ttbr_first, ttbr_second);
-
-    drop(as_a);
-}
-
-#[kernel_test]
-fn user_pages_have_ng_bit_set() {
-    let (user_as, _) = make_user_as_with_probe_page(PROBE_VA, 0xCC);
-    let mapper = user_as.mapper().expect("user mapper");
-    let va = PageAlignedVirtualAddress::from_usize(PROBE_VA).expect("aligned");
-    let raw = downcast_user_mapper(mapper)
-        .query_leaf_raw(va)
-        .expect("leaf must exist");
-    // nG бит - `[11]`.
-    kernel_tests::kassert_eq!((raw >> 11) & 1, 1);
-    drop(user_as);
-}
-
+/// `TCR_EL1.AS` выставлен по ширине ASID, обнаруженной в `ID_AA64MMFR0_EL1`.
 #[kernel_test]
 fn tcr_as_matches_runtime_asid_width() {
     let width = IdAa64Mmfr0::<EL1>::asid_width();

@@ -6,10 +6,7 @@ mod layers;
 mod qemu_test;
 mod shell;
 
-use std::{
-    fs,
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};

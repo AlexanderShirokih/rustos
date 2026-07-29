@@ -2,6 +2,8 @@
 //!
 //! `kmain` после bootstrap'а создаёт init-таск и под этой фичей запускает все
 //! зарегистрированные тест-кейсы через `kernel_tests::run_all_tests()`.
+//!
+//! Тестам вендится только консоль для маркеров.
 
 #![allow(unsafe_code)]
 
@@ -11,21 +13,11 @@ use alloc::sync::Arc;
 
 use drivers_common::services::console::ConsoleService;
 use io::writer::Writer;
-use scheduler::{ArchContext, Bootstrapped, Scheduler, SchedulerService};
+use scheduler::{ArchContext, Bootstrapped, Scheduler};
 use spin::Once;
 
-use crate::{
-    kernel_context::{BootDtb, KernelContext},
-    scheduler_bootstrap::KernelTimerSource,
-    user_process::{SchedulerUserProcessLauncher, UserProcessLauncher},
-};
+use crate::{kernel_context::KernelContext, scheduler_bootstrap::KernelTimerSource};
 
-mod allocator;
-mod bootstrap_log;
-mod handle_table;
-mod signal;
-mod signal_syscall;
-mod signal_via_scheduler;
 mod smoke;
 
 struct ConsoleAdapter(Arc<dyn ConsoleService>);
@@ -40,35 +32,6 @@ impl Writer for ConsoleAdapter {
 }
 
 static ADAPTER: Once<ConsoleAdapter> = Once::new();
-static TEST_SCHEDULER: Once<Arc<dyn SchedulerService>> = Once::new();
-static USER_PROCESS_LAUNCHER: Once<Arc<dyn UserProcessLauncher>> = Once::new();
-static USERLAND_BLOB: Once<&'static [u8]> = Once::new();
-static BOOT_DTB: Once<BootDtb> = Once::new();
-
-pub fn scheduler() -> &'static Arc<dyn SchedulerService> {
-    TEST_SCHEDULER
-        .get()
-        .expect("SchedulerService must be cached in kernel_tests::run")
-}
-
-pub fn user_process_launcher() -> &'static Arc<dyn UserProcessLauncher> {
-    USER_PROCESS_LAUNCHER
-        .get()
-        .expect("UserProcessLauncher must be cached in kernel_tests::spawn_kernel_tests_process")
-}
-
-/// Байты userland blob (initrd), если загрузчик их передал. `None` -
-/// blob отсутствует (тест должен явно провалиться).
-pub fn userland_blob() -> Option<&'static [u8]> {
-    USERLAND_BLOB.get().copied()
-}
-
-/// DTB от загрузчика.
-pub fn boot_dtb() -> BootDtb {
-    *BOOT_DTB
-        .get()
-        .expect("BootDtb must be cached in kernel_tests::run")
-}
 
 /// Init-таск под `feature = "kernel-tests"`: спавнит worker-процесс
 /// с приоритетом `highest`, который вызывает [`run`] и выключает машину
@@ -85,13 +48,6 @@ pub fn spawn_kernel_tests_process<A>(
 
     // SAFETY: см. комментарий выше - единственный читатель указателя.
     unsafe impl Send for KernelCtxPtr {}
-
-    USER_PROCESS_LAUNCHER.call_once(|| {
-        Arc::new(SchedulerUserProcessLauncher::new(
-            scheduler.handle(),
-            kernel.address_space_factory(),
-        ))
-    });
 
     let kernel_ptr = KernelCtxPtr(core::ptr::from_mut(kernel));
 
@@ -120,17 +76,7 @@ pub fn run(kernel: &mut KernelContext) -> ! {
             .require_console()
             .expect("ConsoleService must be available for kernel-tests");
         ADAPTER.call_once(|| ConsoleAdapter(console));
-
-        let scheduler = services
-            .require_scheduler()
-            .expect("SchedulerService must be available for kernel-tests");
-        TEST_SCHEDULER.call_once(|| scheduler);
     });
-
-    if let Some(image) = kernel.userland_image() {
-        USERLAND_BLOB.call_once(|| image.bytes);
-    }
-    BOOT_DTB.call_once(|| kernel.dtb());
 
     let writer: &'static (dyn Writer + Send + Sync) =
         ADAPTER.get().expect("ADAPTER initialised above");
