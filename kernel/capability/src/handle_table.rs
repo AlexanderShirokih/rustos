@@ -1,4 +1,5 @@
 use alloc::{sync::Arc, vec::Vec};
+use core::num::NonZeroU16;
 
 use memory::MemoryRegion;
 use syscall::Rights;
@@ -25,9 +26,27 @@ pub struct HandleTable {
 }
 
 struct Slot {
+    // 0 - поколение ещё не выдавалось: свежий слот либо откаченная резервация.
     generation: u16,
     state: SlotState,
     waiters: Vec<Arc<dyn CancelTarget>>,
+}
+
+impl Slot {
+    fn fresh(state: SlotState) -> Self {
+        Self {
+            generation: 0,
+            state,
+            waiters: Vec::new(),
+        }
+    }
+
+    // Насыщение недостижимо: pop_free_slot выводит слот из оборота на MAX_GENERATION.
+    fn issue_generation(&mut self) -> NonZeroU16 {
+        let issued = NonZeroU16::MIN.saturating_add(self.generation);
+        self.generation = issued.get();
+        issued
+    }
 }
 
 enum SlotState {
@@ -41,16 +60,16 @@ enum SlotState {
     Retired,
 }
 
-/// Зарезервированный слот: закрывается `commit_reserved` или `release_reservation`.
-/// Забытая резервация навсегда удерживает слот.
-#[derive(Debug, Clone, Copy)]
+/// Линейный токен на зарезервированный слот: потребляется по значению ровно одним
+/// из `commit_reserved`/`release_reservation`. Забытая резервация удерживает слот.
+#[derive(Debug)]
 pub struct HandleReservation {
     slot: u32,
-    generation: u16,
+    generation: NonZeroU16,
 }
 
 impl HandleReservation {
-    pub fn handle_id(self) -> HandleId {
+    pub fn handle_id(&self) -> HandleId {
         HandleId::pack(self.generation, self.slot)
     }
 }
@@ -95,91 +114,86 @@ impl HandleTable {
     /// То же, что [`Self::insert`], но при `OutOfHandles` возвращает
     /// `Capability` обратно вместо его закрытия.
     pub fn try_insert(&mut self, handle: Capability) -> Result<HandleId, (IpcError, Capability)> {
-        if let Some(idx) = self.pop_free_slot() {
-            let slot = &mut self.slots[idx as usize];
-            // pop_free_slot гарантирует, что generation ещё не исчерпана.
-            slot.generation += 1;
-            slot.state = SlotState::Occupied(handle);
-            slot.waiters.clear();
-            return Ok(HandleId::pack(slot.generation, idx));
-        }
-
-        if (self.slots.len() as u32) >= self.capacity {
+        let Some((index, slot)) = self.claim_slot() else {
             return Err((IpcError::OutOfHandles, handle));
-        }
-
-        let idx = self.slots.len() as u32;
-        self.slots.push(Slot {
-            generation: 1,
-            state: SlotState::Occupied(handle),
-            waiters: Vec::new(),
-        });
-        Ok(HandleId::pack(1, idx))
+        };
+        let generation = slot.issue_generation();
+        slot.state = SlotState::Occupied(handle);
+        Ok(HandleId::pack(generation, index))
     }
 
     /// Резервирует слот; на исчерпании ёмкости - `OutOfHandles` без эффектов.
     pub fn reserve_slot(&mut self) -> Result<HandleReservation, IpcError> {
-        if let Some(idx) = self.pop_free_slot() {
-            let slot = &mut self.slots[idx as usize];
-            slot.generation += 1;
-            slot.state = SlotState::Reserved;
-            slot.waiters.clear();
-            return Ok(HandleReservation {
-                slot: idx,
-                generation: slot.generation,
-            });
-        }
-
-        if (self.slots.len() as u32) >= self.capacity {
+        let Some((index, slot)) = self.claim_slot() else {
             return Err(IpcError::OutOfHandles);
-        }
-
-        let idx = self.slots.len() as u32;
-        self.slots.push(Slot {
-            generation: 1,
-            state: SlotState::Reserved,
-            waiters: Vec::new(),
-        });
+        };
+        let generation = slot.issue_generation();
+        slot.state = SlotState::Reserved;
         Ok(HandleReservation {
-            slot: idx,
-            generation: 1,
+            slot: index,
+            generation,
         })
     }
 
-    /// Вставляет `handle` в зарезервированный слот. Паника на use-after-release.
+    // На отказе таблица не изменяется.
+    fn claim_slot(&mut self) -> Option<(u32, &mut Slot)> {
+        let index = if let Some(index) = self.pop_free_slot() {
+            index
+        } else {
+            let index = self.slots.len() as u32;
+            if index >= self.capacity {
+                return None;
+            }
+            // Состояние - заглушка: вызывающий перезаписывает его сразу.
+            self.slots.push(Slot::fresh(SlotState::Reserved));
+            index
+        };
+        let slot = self.slots.get_mut(index as usize)?;
+        slot.waiters.clear();
+        Some((index, slot))
+    }
+
+    /// Вставляет `handle` в зарезервированный слот.
+    // Токен по значению: его потребление и есть закрытие резервации.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn commit_reserved(
         &mut self,
         reservation: HandleReservation,
         handle: Capability,
     ) -> HandleId {
-        let slot = self
-            .slots
-            .get_mut(reservation.slot as usize)
-            .expect("reservation slot must exist");
-        assert!(
-            matches!(slot.state, SlotState::Reserved) && slot.generation == reservation.generation,
-            "reservation mismatch: slot not in Reserved state with expected generation",
-        );
-        slot.state = SlotState::Occupied(handle);
-        HandleId::pack(slot.generation, reservation.slot)
+        let id = reservation.handle_id();
+        if let Some(slot) = self.reserved_slot_mut(&reservation) {
+            slot.state = SlotState::Occupied(handle);
+        } else {
+            // Затирать чужой живой слот нельзя. Капа отзывается вместе с производными.
+            debug_assert!(false, "commit_reserved: slot is not the reserved one");
+            revoke_subtree(handle.node());
+        }
+        id
     }
 
-    /// Возвращает зарезервированный слот в free-list. Паника на use-after-release.
+    /// Возвращает зарезервированный слот в free-list и откатывает его поколение.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn release_reservation(&mut self, reservation: HandleReservation) {
-        let slot = self
-            .slots
-            .get_mut(reservation.slot as usize)
-            .expect("reservation slot must exist");
-        assert!(
-            matches!(slot.state, SlotState::Reserved) && slot.generation == reservation.generation,
-            "release_reservation mismatch: slot not in Reserved state with expected generation",
-        );
-        slot.generation -= 1;
         let prev_head = self.free_head;
-        slot.state = SlotState::Free {
-            next_free: prev_head,
-        };
-        self.free_head = Some(reservation.slot);
+        let index = reservation.slot;
+        match self.reserved_slot_mut(&reservation) {
+            Some(slot) => {
+                slot.generation = slot.generation.saturating_sub(1);
+                slot.state = SlotState::Free {
+                    next_free: prev_head,
+                };
+                self.free_head = Some(index);
+            }
+            None => debug_assert!(false, "release_reservation: slot is not the reserved one"),
+        }
+    }
+
+    fn reserved_slot_mut(&mut self, reservation: &HandleReservation) -> Option<&mut Slot> {
+        let slot = self.slots.get_mut(reservation.slot as usize)?;
+        let matches_reservation = matches!(slot.state, SlotState::Reserved)
+            && slot.generation == reservation.generation.get();
+        matches_reservation.then_some(slot)
     }
 
     /// Удаляет handle из таблицы. Будит каждый cancel-target с исходом
@@ -472,12 +486,15 @@ impl HandleTable {
         for id in ids {
             self.get(*id, min_rights)?;
         }
+        // Валидация выше гарантирует, что take_slot не упадёт. На недоборе снятые
+        // капы отзываются вместе с производными.
         let mut drained = Vec::with_capacity(ids.len());
-        for id in ids {
-            // Валидация выше гарантирует, что take_slot не упадёт: id найден,
-            // generation совпадает, rights включают min_rights.
-            let h = self.take_slot(*id).expect("validated above");
-            drained.push(h);
+        drained.extend(ids.iter().map_while(|id| self.take_slot(*id).ok()));
+        if drained.len() != ids.len() {
+            for handle in &drained {
+                revoke_subtree(handle.node());
+            }
+            return Err(IpcError::BadHandle);
         }
         Ok(drained)
     }
@@ -519,7 +536,10 @@ impl HandleTable {
 
     fn pop_free_slot(&mut self) -> Option<u32> {
         while let Some(idx) = self.free_head {
-            let slot = &mut self.slots[idx as usize];
+            let Some(slot) = self.slots.get_mut(idx as usize) else {
+                self.free_head = None;
+                return None;
+            };
 
             let SlotState::Free { next_free } = slot.state else {
                 self.free_head = None;
@@ -845,7 +865,7 @@ mod tests {
     #[test]
     fn out_of_range_slot_returns_bad_handle() {
         let table = HandleTable::with_capacity(4);
-        let bogus = HandleId::pack(1, 999);
+        let bogus = HandleId::pack(NonZeroU16::MIN, 999);
         assert_eq!(
             table.get(bogus, Rights::empty()).unwrap_err(),
             IpcError::BadHandle
@@ -1034,7 +1054,7 @@ mod tests {
         let id = table
             .insert(signal_handle(Rights::READ | Rights::TRANSFER))
             .unwrap();
-        let bogus = HandleId::pack(1, 999);
+        let bogus = HandleId::pack(NonZeroU16::MIN, 999);
 
         let err = table
             .try_drain_for_transfer(&[id, bogus], Rights::TRANSFER)
@@ -1080,7 +1100,7 @@ mod tests {
         let id2 = table
             .insert(signal_handle(Rights::READ | Rights::TRANSFER))
             .unwrap();
-        let bogus = HandleId::pack(1, 999);
+        let bogus = HandleId::pack(NonZeroU16::MIN, 999);
 
         let err = table
             .try_drain_for_transfer(&[id1, id2, bogus], Rights::TRANSFER)
@@ -1140,7 +1160,7 @@ mod tests {
     #[test]
     fn register_cancel_on_bad_handle_returns_err() {
         let mut table = HandleTable::new();
-        let bogus = HandleId::pack(1, 999);
+        let bogus = HandleId::pack(NonZeroU16::MIN, 999);
         let target: Arc<dyn CancelTarget> = CountingCancel::new();
         assert_eq!(
             table.register_cancel(bogus, target).unwrap_err(),
@@ -1182,7 +1202,7 @@ mod tests {
         table.register_cancel(id, dyn_target.clone()).unwrap();
         table.unregister_cancel(id, &dyn_target);
         table.unregister_cancel(id, &dyn_target);
-        let bogus = HandleId::pack(99, 999);
+        let bogus = HandleId::pack(NonZeroU16::new(99).unwrap(), 999);
         table.unregister_cancel(bogus, &dyn_target);
     }
 

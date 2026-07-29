@@ -300,10 +300,8 @@ where
         va: PageAlignedVirtualAddress,
         mapped_pages: usize,
     ) {
-        let page_size = PageAlignedAddress::ALIGNMENT;
         for i in 0..mapped_pages {
-            let page_va = PageAlignedVirtualAddress::from_usize(va.as_usize() + i * page_size)
-                .expect("rollback page va remains 4K-aligned");
+            let page_va = va.add_blocks(i);
             // Должно быть невозможно: страница только что замаплена этим же
             // циклом. Если walker всё-таки вернул ошибку - дальнейший откат
             // невозможен; останавливаемся, чтобы не trail'ить ещё один
@@ -619,8 +617,7 @@ where
                 // линейную карту kernel-AS, выровнен на 4К.
                 unsafe { Self::fill_frame_init(kernel_ptr, init, i * page_size) };
 
-                let page_va = PageAlignedVirtualAddress::from_usize(va.as_usize() + i * page_size)
-                    .expect("4K * i + aligned base remains 4K-aligned");
+                let page_va = va.add_blocks(i);
 
                 if let Err(e) =
                     map_contiguous_inner::<FA, { L3::SHIFT }, _>(mapper, page_va, pa, aarch64_flags)
@@ -637,14 +634,16 @@ where
                 // Помечаем leaf SW-битом OWNED_BY_FA_BIT: фрейм аллоцирован
                 // нашим frame_allocator-ом - его можно вернуть в FA при unmap.
                 // map_exact-leaves остаются без бита и не освобождаются.
-                let (l3, idx) = mapper
-                    .walk_to_l3_leaf(page_va)
-                    .expect("just-mapped leaf must walk to L3");
-                // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) leaf-Page;
-                // mapper-lock держится этим with_lock - эксклюзивный доступ.
-                unsafe {
-                    let raw = (*l3).get_raw(idx);
-                    (*l3).set_raw(idx, raw | OWNED_BY_FA_BIT);
+                // Без бита OWNED_BY_FA фрейм не вернётся в FA при unmap.
+                if let Ok((l3, idx)) = mapper.walk_to_l3_leaf(page_va) {
+                    // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) leaf-Page;
+                    // mapper-lock держится этим with_lock - эксклюзивный доступ.
+                    unsafe {
+                        let raw = (*l3).get_raw(idx);
+                        (*l3).set_raw(idx, raw | OWNED_BY_FA_BIT);
+                    }
+                } else {
+                    debug_assert!(false, "just-mapped leaf must walk to L3");
                 }
 
                 if user_exec {

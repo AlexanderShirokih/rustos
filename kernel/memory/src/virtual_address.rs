@@ -99,6 +99,29 @@ impl<const SHIFT: u8> AlignedVirtualAddress<SHIFT> {
     pub const fn offset(&self, bytes: usize) -> Option<Self> {
         Self::new(VirtualAddress::new(self.as_usize() + bytes))
     }
+
+    /// Создаёт выровненный адрес, выравнивая вниз.
+    pub const fn aligned_down(address: VirtualAddress) -> Self {
+        Self(VirtualAddress::new(
+            (address.as_usize() / Self::ALIGNMENT) * Self::ALIGNMENT,
+        ))
+    }
+
+    /// Сдвигает адрес на `count` блоков выравнивания. Результат выровнен по построению,
+    /// переполнение адресного пространства заворачивается.
+    pub const fn add_blocks(&self, count: usize) -> Self {
+        debug_assert!(
+            match count.checked_mul(Self::ALIGNMENT) {
+                Some(bytes) => self.as_usize().checked_add(bytes).is_some(),
+                None => false,
+            },
+            "add_blocks overflows the address space"
+        );
+        Self(VirtualAddress::new(
+            self.as_usize()
+                .wrapping_add(count.wrapping_mul(Self::ALIGNMENT)),
+        ))
+    }
 }
 
 impl<const SHIFT: u8> Aligned for AlignedVirtualAddress<SHIFT> {

@@ -28,7 +28,7 @@ fn spawn_child_from_image() {
         .entry("spawn-fixture")
         .expect("image carries a child entry");
 
-    let resource = Resource::self_resource();
+    let resource = Resource::self_resource().expect("self metering resource");
     let start_handle = Signal::create().expect("signal create").into_handle();
     let process = load_entry(&child, &resource, start_handle).expect("spawn child from image");
 

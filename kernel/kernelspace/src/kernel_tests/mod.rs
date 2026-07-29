@@ -39,7 +39,8 @@ static ADAPTER: Once<ConsoleAdapter> = Once::new();
 pub fn spawn_kernel_tests_process<A>(
     scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
     kernel: &mut KernelContext,
-) where
+) -> Result<(), scheduler::SpawnError>
+where
     A: ArchContext,
 {
     /// `*mut KernelContext` не Send автоматически; обёртка делает его
@@ -61,7 +62,7 @@ pub fn spawn_kernel_tests_process<A>(
                 run(kernel)
             },
         )
-        .expect("kernel-tests process spawn must succeed");
+        .map(|_| ())
 }
 
 /// Делегат для harness-а: выключает машину через [`crate::power::system_off`].

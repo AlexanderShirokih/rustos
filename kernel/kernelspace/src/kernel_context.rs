@@ -73,13 +73,8 @@ impl KernelContext {
             mmio_arena.size,
         ));
 
-        let mut services = BootServices::new();
-        services
-            .set_mmio(mmio_service)
-            .expect("Failed to register MmioService service");
-
         Self {
-            services,
+            services: BootServices::with_mmio(mmio_service),
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             address_space_factory,
             userland_image,

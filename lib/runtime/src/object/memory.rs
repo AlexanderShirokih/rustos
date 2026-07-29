@@ -3,6 +3,12 @@
 
 use core::mem;
 
+// Рантайм собирается только под 64-битные цели.
+const _: () = assert!(
+    usize::BITS >= u64::BITS,
+    "userland runtime targets 64-bit only"
+);
+
 use bootstrap::DeviceWindow;
 use io::mmio::Mmio;
 use ipc::wire::Cap;
@@ -78,9 +84,9 @@ pub struct AnonymousMapping {
 
 impl Resource {
     /// Свежий handle на метеринг-`Resource` текущего процесса.
-    pub fn self_resource() -> Self {
-        let handle = svc::process_resource_self().expect("process self_resource syscall");
-        Self::from_handle(OwnedHandle::from_handle(handle))
+    pub fn self_resource() -> Result<Self> {
+        let handle = svc::process_resource_self()?;
+        Ok(Self::from_handle(OwnedHandle::from_handle(handle)))
     }
 
     /// Берёт во владение хэндл `Resource`.
@@ -202,7 +208,7 @@ impl Mapping {
 
     /// MMIO-хэндлер по базовому VA маппинга (device-окна).
     pub fn mmio(&self) -> Mmio {
-        Mmio::new(usize::try_from(self.va).expect("va fits usize"))
+        Mmio::new(self.va as usize)
     }
 
     /// Размер маппинга в байтах.
@@ -213,7 +219,7 @@ impl Mapping {
     /// Содержимое маппинга как байтовый срез, заимствованный на время маппинга.
     pub fn as_bytes(&self) -> &[u8] {
         let base = self.va as *const u8;
-        let len = usize::try_from(self.size_bytes).expect("mapping size fits usize");
+        let len = self.size_bytes as usize;
         // SAFETY: маппинг владеет диапазоном [va, va+size_bytes) памяти, инициализированной ядром.
         // Срез заимствует его на время `&self` и не переживёт unmap/Drop.
         unsafe { core::slice::from_raw_parts(base, len) }

@@ -57,6 +57,13 @@ impl<const N: usize> StaticString<N> {
     pub fn clear(&mut self) {
         self.len = 0;
     }
+
+    /// Копирует `s`, обрезая по ёмкости на границе UTF-8.
+    pub fn truncating(s: &str) -> Self {
+        let mut out = Self::new();
+        let _ = out.write_str(s);
+        out
+    }
 }
 
 impl<const N: usize> Default for StaticString<N> {

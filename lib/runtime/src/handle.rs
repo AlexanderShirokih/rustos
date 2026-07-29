@@ -40,8 +40,7 @@ impl OwnedHandle {
 
     /// Усыновляет capability, доставленный по IPC, во владение.
     pub fn adopt(cap: Cap) -> Self {
-        let handle = Handle::new(cap.raw().get()).expect("Cap::raw is NonZeroU32");
-        Self::from_handle(handle)
+        Self::from_handle(Handle::from_nonzero(cap.raw()))
     }
 
     /// Владеемый хэндл для укладки в аргумент syscall'а.

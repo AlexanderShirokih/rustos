@@ -137,15 +137,13 @@ where
 pub fn bootstrap_scheduler<A>(
     kernel: &mut KernelContext,
     config: SchedulerConfig,
-) -> Scheduler<A, KernelTimerSource, Bootstrapped>
+) -> Result<Scheduler<A, KernelTimerSource, Bootstrapped>, BootstrapSchedulerError>
 where
     A: ArchContext,
 {
-    let timer = kernel.with_runtime_state(|services, _| {
-        services
-            .require_timer()
-            .expect("TimerService must be available before scheduler startup")
-    });
+    let timer = kernel
+        .with_runtime_state(|services, _| services.require_timer())
+        .map_err(BootstrapSchedulerError::TimerUnavailable)?;
 
     let factory = Some(kernel.address_space_factory());
 
@@ -154,7 +152,8 @@ where
         config,
         factory,
     )
-    .bootstrap();
+    .bootstrap()
+    .map_err(|(_, e)| BootstrapSchedulerError::IdleThread(e))?;
 
     if let Some(fa) = syscall_bridge::frame_allocator() {
         scheduler.set_frame_allocator(fa);
@@ -169,15 +168,38 @@ where
     let syscall_runtime: Arc<dyn syscall_kernel::SyscallRuntime> =
         Arc::new(SchedulerSyscallRuntime { handle });
 
-    kernel.with_runtime_state(|services, _| {
-        services
-            .set_scheduler(service.clone())
-            .expect("SchedulerService registration must succeed");
-    });
+    kernel
+        .with_runtime_state(|services, _| services.set_scheduler(service.clone()))
+        .map_err(BootstrapSchedulerError::ServiceRegistration)?;
     timer.set_handler(tick_handler);
     capability::install_runtime(capability_runtime);
     syscall_kernel::install_runtime(syscall_runtime);
     syscall_bridge::install_scheduler(service);
 
-    scheduler
+    Ok(scheduler)
+}
+
+/// Причина отказа [`bootstrap_scheduler`].
+#[derive(Debug)]
+pub enum BootstrapSchedulerError {
+    /// Таймер недоступен: планировщику не на чем считать кванты.
+    TimerUnavailable(drivers_common::BootServicesError),
+    /// Не удалось создать idle-поток текущего CPU.
+    IdleThread(scheduler::SpawnError),
+    /// `SchedulerService` уже зарегистрирован.
+    ServiceRegistration(drivers_common::BootServicesError),
+}
+
+impl core::fmt::Display for BootstrapSchedulerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            BootstrapSchedulerError::TimerUnavailable(e) => {
+                write!(f, "TimerService is unavailable: {e:?}")
+            }
+            BootstrapSchedulerError::IdleThread(e) => write!(f, "idle thread spawn failed: {e:?}"),
+            BootstrapSchedulerError::ServiceRegistration(e) => {
+                write!(f, "SchedulerService registration failed: {e:?}")
+            }
+        }
+    }
 }

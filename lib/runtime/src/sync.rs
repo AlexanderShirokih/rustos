@@ -50,21 +50,23 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 /// Лениво получает Signal по сырому handle из `ev`, создавая его при
 /// первой контенции; гонку на создание разрешает CAS, лишний закрывается.
 fn lazy_signal(signal_handle: &AtomicU32) -> Handle {
-    let h = signal_handle.load(Acquire);
-    if h != 0 {
-        return Handle::new(h).unwrap();
-    }
-
-    // signal_create отказывает лишь при исчерпании ресурсов ядра; без Signal
-    // парк невозможен, восстановиться нельзя (panic = abort по профилю).
-    let new = signal_create().expect("signal_create");
-
-    match signal_handle.compare_exchange(0, new.raw(), AcqRel, Acquire) {
-        Ok(_) => new,
-        Err(existing) => {
-            handle_close(new);
-            Handle::new(existing).unwrap()
+    loop {
+        if let Some(handle) = Handle::new(signal_handle.load(Acquire)) {
+            return handle;
         }
+
+        // signal_create отказывает лишь при исчерпании ресурсов ядра. Без Signal
+        // парк невозможен, восстановиться нельзя (panic = abort по профилю).
+        let new = signal_create().expect("signal_create");
+
+        if signal_handle
+            .compare_exchange(0, new.raw(), AcqRel, Acquire)
+            .is_ok()
+        {
+            return new;
+        }
+        // Гонку выиграл другой поток: закрываем свой и перечитываем слот.
+        handle_close(new);
     }
 }
 
@@ -191,8 +193,7 @@ impl Drop for Condvar {
 }
 
 fn handle_load_and_close(signal_handle: &AtomicU32) {
-    let h = signal_handle.load(Relaxed);
-    if h != 0 {
-        handle_close(Handle::new(h).unwrap());
+    if let Some(handle) = Handle::new(signal_handle.load(Relaxed)) {
+        handle_close(handle);
     }
 }

@@ -49,13 +49,12 @@ impl MmioService for MmioServiceImpl {
         let raw_size = NonZeroUsize::new(address.size())
             .ok_or_else(|| MmioMapError("Mmio region size must be non-zero".into()))?;
 
-        let pages = raw_size.get().div_ceil(PAGE_SIZE.get());
         // `pages * PAGE_SIZE` может переполниться при близком к usize::MAX
         // размере региона - тогда округление вверх некорректно; отвергаем.
-        let size_bytes = pages
-            .checked_mul(PAGE_SIZE.get())
+        let pages = raw_size.get().div_ceil(PAGE_SIZE.get());
+        let size = NonZeroUsize::new(pages)
+            .and_then(|pages| pages.checked_mul(PAGE_SIZE))
             .ok_or_else(|| MmioMapError("Mmio region size overflows when rounded up".into()))?;
-        let size = NonZeroUsize::new(size_bytes).expect("pages >= 1 since raw_size is non-zero");
 
         let source_address = self
             .va_allocator

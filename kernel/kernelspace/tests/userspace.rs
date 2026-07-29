@@ -47,6 +47,8 @@ fn make_scheduler(
 ) -> BootstrappedScheduler {
     TestScheduler::with_address_space_factory(MockTimerSource(timer), TEST_CONFIG, Some(factory))
         .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests")
 }
 
 fn fresh_factory() -> &'static MockAddressSpaceFactory {
@@ -86,7 +88,9 @@ fn spawn_user_process_propagates_address_space_creation_failure() {
         TEST_CONFIG,
         Some(failing),
     )
-    .bootstrap();
+    .bootstrap()
+    .ok()
+    .expect("bootstrap must succeed in tests");
 
     let init = [0xAAu8; 8];
     let segments = [UserSegment {

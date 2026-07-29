@@ -55,6 +55,12 @@ pub enum BootstrapSpawnError {
     Image(ImageDecodeError),
     Model(UserImageFromModelError),
     Spawn(SpawnUserError),
+    /// В образе нет ни одной записи.
+    EmptyImage,
+    /// Размер образа не округляется до страницы в пределах адресного пространства.
+    ImageGeometry,
+    /// Размер DTB не округляется до страницы в пределах адресного пространства.
+    FdtGeometry,
 }
 
 /// Разбирает `blob` и спавнит процесс. `image_phys` - физбаза `blob` в initrd
@@ -68,7 +74,9 @@ pub fn spawn_process(
     user_va_end: usize,
 ) -> Result<BootstrapLaunch, BootstrapSpawnError> {
     let image = decode(blob).map_err(BootstrapSpawnError::Image)?;
-    let entry = image.bootstrap_entry();
+    let entry = image
+        .bootstrap_entry()
+        .ok_or(BootstrapSpawnError::EmptyImage)?;
     let name = entry.name();
     let parts =
         user_image_parts_from_entry(&entry, user_va_end).map_err(BootstrapSpawnError::Model)?;
@@ -92,8 +100,9 @@ pub fn spawn_process(
 
     // Read-only Normal-регион поверх байт образа; размер округлён до страницы
     // для маппинга. blob непуст (decode прошёл), поэтому размер ненулевой.
-    let blob_len = NonZeroUsize::new(blob.len()).expect("decoded image is non-empty");
-    let image_size = page_round_up(blob_len).expect("image size fits address space");
+    let image_size = NonZeroUsize::new(blob.len())
+        .and_then(page_round_up)
+        .ok_or(BootstrapSpawnError::ImageGeometry)?;
     let image_region = Arc::new(MemoryRegion::create_physical_normal(
         image_phys,
         image_size,
@@ -101,7 +110,7 @@ pub fn spawn_process(
     ));
 
     // Read-only Normal-регион поверх байт DTB. Память DTB зарезервирована раскладкой на весь срок ядра.
-    let fdt_size = page_round_up(dtb.size_bytes).expect("dtb size fits address space");
+    let fdt_size = page_round_up(dtb.size_bytes).ok_or(BootstrapSpawnError::FdtGeometry)?;
     let fdt_region = Arc::new(MemoryRegion::create_physical_normal(
         dtb.phys_base,
         fdt_size,
@@ -167,13 +176,13 @@ pub fn close_bootstrap_port(port: &Arc<Port>, timeout_ns: u64) -> Result<(), Ker
     let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
     frame
         .write_header(&Header::new(0, 0, FLAG_PEER_CLOSE))
-        .expect("header-only frame fits");
-    frame.finish().expect("terminator fits");
+        .map_err(|_| KernelIpcError::MessageTooBig)?;
+    frame.finish().map_err(|_| KernelIpcError::MessageTooBig)?;
 
     let buffer: KernelIpcBuffer = Arc::new(MutexCell::new(IpcBuffer::zeroed()));
     buffer
         .with_lock(|buf| store_kernel_buffer(buf, frame.as_bytes(), &[]))
-        .expect("frame fits IPC buffer");
+        .map_err(|_| KernelIpcError::MessageTooBig)?;
 
     let sender = ThreadTransport::new_kernel(buffer, table);
     port_send(port, sender, runtime(), Some(timeout_ns))

@@ -66,7 +66,7 @@ pub fn signal_wait_one(
 /// и observed-маска на нём (пересечение с переданной маской).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaitManyOutcome {
-    pub index: usize,
+    pub index: u32,
     pub observed: u32,
 }
 
@@ -92,6 +92,10 @@ pub fn signal_wait_many(
     items: &[(HandleId, u32)],
     timeout_ns: Option<u64>,
 ) -> Result<WaitManyOutcome, IpcError> {
+    // Ширина индекса победителя в ABI - u32.
+    if u32::try_from(items.len()).is_err() {
+        return Err(IpcError::MessageTooBig);
+    }
     if items.is_empty() {
         return Err(IpcError::BadHandle);
     }
@@ -113,7 +117,7 @@ pub fn signal_wait_many(
 
     let result = match resolve_wait(&waker) {
         WaitResolution::Signaled => Ok(WaitManyOutcome {
-            index: waker.winner_index() as usize,
+            index: waker.winner_index(),
             observed: waker.observed(),
         }),
         WaitResolution::Timeout => Err(IpcError::Timeout),
@@ -149,11 +153,11 @@ fn wait_many_setup(
         signals.push(waitable);
     }
 
-    for (i, (signal, &(_h, mask))) in signals.iter().zip(items.iter()).enumerate() {
+    for (index, (signal, &(_h, mask))) in (0u32..).zip(signals.iter().zip(items.iter())) {
         let already = signal.peek() & mask;
         if already != 0 {
             return Ok(WaitSetup::Observed(WaitManyOutcome {
-                index: i,
+                index,
                 observed: already,
             }));
         }
@@ -165,17 +169,24 @@ fn wait_many_setup(
 
     let token = runtime.current_wait_token();
     let waker = Arc::new(ParkWaker::new(runtime.clone(), token));
-    let mut indexed_wakers: Vec<Arc<IndexedWaker>> = Vec::with_capacity(items.len());
+    let cancel: Arc<dyn CancelTarget> = waker.clone();
 
-    for (i, (signal, &(h, mask))) in signals.iter().zip(items.iter()).enumerate() {
-        let index = u32::try_from(i).expect("count ≤ u32::MAX by ABI");
+    // Регистрация cancel'ов идёт до waiter'ов: отказать может только она.
+    for (registered, &(h, _mask)) in items.iter().enumerate() {
+        if let Err(e) = tbl.register_cancel(h, cancel.clone()) {
+            for &(done, _) in &items[..registered] {
+                tbl.unregister_cancel(done, &cancel);
+            }
+            return Err(e);
+        }
+    }
+
+    let mut indexed_wakers: Vec<Arc<IndexedWaker>> = Vec::with_capacity(items.len());
+    for (index, (signal, &(_h, mask))) in (0u32..).zip(signals.iter().zip(items.iter())) {
         let indexed = Arc::new(IndexedWaker::new(waker.clone(), index));
         let dyn_waker: Arc<dyn Waker> = indexed.clone();
         signal.register_waiter(mask, dyn_waker);
         indexed_wakers.push(indexed);
-        let cancel: Arc<dyn CancelTarget> = waker.clone();
-        tbl.register_cancel(h, cancel)
-            .expect("slot validated above");
     }
 
     Ok(WaitSetup::Wait {

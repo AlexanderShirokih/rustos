@@ -44,7 +44,7 @@ pub fn load_entry<'a, E: EntryView<'a>>(
         let mapping = region.map(mapped, UserMemFlags::ReadWrite)?;
 
         let bytes = seg.bytes();
-        let dst = usize::try_from(mapping.va()).expect("positive va fits usize") as *mut u8;
+        let dst = mapping.va() as *mut u8;
         // SAFETY: map выдал RW-маппинг размером `mapped` >= `mem_size` >=
         // `bytes.len()` (инвариант валидного образа); пишем в его границах.
         // Хвост за `bytes` остаётся нулевым (регион зануляется при первом map).

@@ -53,4 +53,11 @@ impl SleepQueue {
     pub fn pop(&mut self) -> Option<SleepEntry> {
         self.entries.pop().map(|Reverse(e)| e)
     }
+
+    pub fn pop_if(&mut self, predicate: impl FnOnce(&SleepEntry) -> bool) -> Option<SleepEntry> {
+        if !self.peek().is_some_and(predicate) {
+            return None;
+        }
+        self.pop()
+    }
 }

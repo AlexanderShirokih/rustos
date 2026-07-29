@@ -50,6 +50,13 @@ pub enum RangeError {
     UnalignedSize,
 }
 
+fn pages_of(size_bytes: NonZeroUsize) -> Option<NonZeroUsize> {
+    if !size_bytes.get().is_multiple_of(PAGE_SIZE) {
+        return None;
+    }
+    NonZeroUsize::new(size_bytes.get() / PAGE_SIZE)
+}
+
 impl Display for RangeError {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -194,32 +201,33 @@ impl<Tag: Clone> RangeAllocator<Tag> {
         size_bytes: NonZeroUsize,
         tag: Tag,
     ) -> Result<AllocatedRange<Tag>, AllocateError> {
-        if !size_bytes.get().is_multiple_of(PAGE_SIZE) {
-            return Err(AllocateError::UnalignedSize);
-        }
+        let requested_pages = pages_of(size_bytes).ok_or(AllocateError::UnalignedSize)?;
         if self.allocated.len() >= self.capacity {
             return Err(AllocateError::OutOfSlots);
         }
-        let requested_pages = NonZeroUsize::new(size_bytes.get() / PAGE_SIZE)
-            .expect("size_bytes >= PAGE_SIZE after alignment check");
 
-        let (idx, picked_base) = self
+        // `None` в остатке означает точное совпадение с запрошенным размером.
+        let (idx, picked_base, remainder) = self
             .free_ranges
             .iter()
             .enumerate()
-            .find_map(|(i, r)| (r.pages.get() >= requested_pages.get()).then_some((i, r.base)))
+            .find_map(|(i, r)| {
+                let remainder = r.pages.get().checked_sub(requested_pages.get())?;
+                Some((i, r.base, NonZeroUsize::new(remainder)))
+            })
             .ok_or(AllocateError::NotEnoughSpace)?;
 
-        let free = &mut self.free_ranges[idx];
-        if free.pages == requested_pages {
-            self.free_ranges.remove(idx);
-        } else {
-            // Сдвигаем свободный хвост вправо - сортировка сохраняется без resort-а.
-            let new_base_usize = free.base.as_usize() + requested_pages.get() * PAGE_SIZE;
-            free.base = PageAlignedVirtualAddress::from_usize(new_base_usize)
-                .expect("base shifted by page-multiple stays page-aligned");
-            free.pages = NonZeroUsize::new(free.pages.get() - requested_pages.get())
-                .expect("free.pages > requested_pages here");
+        match remainder {
+            None => {
+                self.free_ranges.remove(idx);
+            }
+            Some(remainder) => {
+                // Сдвигаем свободный хвост вправо - сортировка сохраняется без resort-а.
+                if let Some(free) = self.free_ranges.get_mut(idx) {
+                    free.base = free.base.add_blocks(requested_pages.get());
+                    free.pages = remainder;
+                }
+            }
         }
 
         let allocated = AllocatedRange {
@@ -228,10 +236,13 @@ impl<Tag: Clone> RangeAllocator<Tag> {
             tag,
         };
         let returned = allocated.clone();
-        let pos = self
+        // Совпадение невозможно: диапазон был свободен.
+        let pos = match self
             .allocated
             .binary_search_by_key(&picked_base.as_usize(), |r| r.base.as_usize())
-            .expect_err("free range was disjoint from any allocated range");
+        {
+            Ok(pos) | Err(pos) => pos,
+        };
         self.allocated.insert(pos, allocated);
         Ok(returned)
     }
@@ -241,19 +252,7 @@ impl<Tag: Clone> RangeAllocator<Tag> {
         base: PageAlignedVirtualAddress,
         size_bytes: NonZeroUsize,
     ) -> Result<AllocatedRange<Tag>, RangeError> {
-        if !size_bytes.get().is_multiple_of(PAGE_SIZE) {
-            return Err(RangeError::UnalignedSize);
-        }
-        let requested_pages = NonZeroUsize::new(size_bytes.get() / PAGE_SIZE)
-            .expect("size_bytes >= PAGE_SIZE after alignment check");
-
-        let idx = self
-            .allocated
-            .binary_search_by_key(&base.as_usize(), |r| r.base.as_usize())
-            .map_err(|_| RangeError::NotFound)?;
-        if self.allocated[idx].pages != requested_pages {
-            return Err(RangeError::NotFound);
-        }
+        let idx = self.find_exact(base, size_bytes)?;
         let removed = self.allocated.remove(idx);
         self.insert_free(removed.base, removed.pages);
         Ok(removed)
@@ -264,20 +263,8 @@ impl<Tag: Clone> RangeAllocator<Tag> {
         base: PageAlignedVirtualAddress,
         size_bytes: NonZeroUsize,
     ) -> Result<&AllocatedRange<Tag>, RangeError> {
-        if !size_bytes.get().is_multiple_of(PAGE_SIZE) {
-            return Err(RangeError::UnalignedSize);
-        }
-        let requested_pages = NonZeroUsize::new(size_bytes.get() / PAGE_SIZE)
-            .expect("size_bytes >= PAGE_SIZE after alignment check");
-        let idx = self
-            .allocated
-            .binary_search_by_key(&base.as_usize(), |r| r.base.as_usize())
-            .map_err(|_| RangeError::NotFound)?;
-        let region = &self.allocated[idx];
-        if region.pages != requested_pages {
-            return Err(RangeError::NotFound);
-        }
-        Ok(region)
+        let idx = self.find_exact(base, size_bytes)?;
+        self.allocated.get(idx).ok_or(RangeError::NotFound)
     }
 
     pub fn set_tag(
@@ -286,21 +273,27 @@ impl<Tag: Clone> RangeAllocator<Tag> {
         size_bytes: NonZeroUsize,
         new_tag: Tag,
     ) -> Result<AllocatedRange<Tag>, RangeError> {
-        if !size_bytes.get().is_multiple_of(PAGE_SIZE) {
-            return Err(RangeError::UnalignedSize);
-        }
-        let requested_pages = NonZeroUsize::new(size_bytes.get() / PAGE_SIZE)
-            .expect("size_bytes >= PAGE_SIZE after alignment check");
+        let idx = self.find_exact(base, size_bytes)?;
+        let region = self.allocated.get_mut(idx).ok_or(RangeError::NotFound)?;
+        region.tag = new_tag;
+        Ok(region.clone())
+    }
+
+    fn find_exact(
+        &self,
+        base: PageAlignedVirtualAddress,
+        size_bytes: NonZeroUsize,
+    ) -> Result<usize, RangeError> {
+        let requested_pages = pages_of(size_bytes).ok_or(RangeError::UnalignedSize)?;
         let idx = self
             .allocated
             .binary_search_by_key(&base.as_usize(), |r| r.base.as_usize())
             .map_err(|_| RangeError::NotFound)?;
-        let region = &mut self.allocated[idx];
+        let region = self.allocated.get(idx).ok_or(RangeError::NotFound)?;
         if region.pages != requested_pages {
             return Err(RangeError::NotFound);
         }
-        region.tag = new_tag;
-        Ok(region.clone())
+        Ok(idx)
     }
 
     fn insert_free(&mut self, base: PageAlignedVirtualAddress, pages: NonZeroUsize) {
@@ -310,30 +303,41 @@ impl<Tag: Clone> RangeAllocator<Tag> {
             .free_ranges
             .partition_point(|r| r.base.as_usize() < base_usize);
 
-        let touches_left = pos > 0 && self.free_ranges[pos - 1].end_va().as_usize() == base_usize;
-        let touches_right =
-            pos < self.free_ranges.len() && self.free_ranges[pos].base.as_usize() == end_usize;
+        let left_index = pos.checked_sub(1);
+        let touches_left = left_index.is_some_and(|i| {
+            self.free_ranges
+                .get(i)
+                .is_some_and(|r| r.end_va().as_usize() == base_usize)
+        });
+        let touches_right = self
+            .free_ranges
+            .get(pos)
+            .is_some_and(|r| r.base.as_usize() == end_usize);
 
-        match (touches_left, touches_right) {
-            (true, true) => {
-                let right_pages = self.free_ranges[pos].pages.get();
-                let left = &mut self.free_ranges[pos - 1];
-                left.pages = NonZeroUsize::new(left.pages.get() + pages.get() + right_pages)
-                    .expect("sum of positive pages is positive");
+        match (left_index.filter(|_| touches_left), touches_right) {
+            (Some(left_index), true) => {
+                // touches_right истинен только когда get(pos) вернул элемент.
+                let right_pages = self.free_ranges.get(pos).map_or(0, |r| r.pages.get());
+                if let Some(left) = self.free_ranges.get_mut(left_index) {
+                    left.pages = left
+                        .pages
+                        .saturating_add(pages.get())
+                        .saturating_add(right_pages);
+                }
                 self.free_ranges.remove(pos);
             }
-            (true, false) => {
-                let left = &mut self.free_ranges[pos - 1];
-                left.pages = NonZeroUsize::new(left.pages.get() + pages.get())
-                    .expect("sum of positive pages is positive");
+            (Some(left_index), false) => {
+                if let Some(left) = self.free_ranges.get_mut(left_index) {
+                    left.pages = left.pages.saturating_add(pages.get());
+                }
             }
-            (false, true) => {
-                let right = &mut self.free_ranges[pos];
-                right.base = base;
-                right.pages = NonZeroUsize::new(right.pages.get() + pages.get())
-                    .expect("sum of positive pages is positive");
+            (None, true) => {
+                if let Some(right) = self.free_ranges.get_mut(pos) {
+                    right.base = base;
+                    right.pages = right.pages.saturating_add(pages.get());
+                }
             }
-            (false, false) => {
+            (None, false) => {
                 self.free_ranges.insert(pos, FreeRange { base, pages });
             }
         }

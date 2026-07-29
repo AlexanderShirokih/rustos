@@ -1,5 +1,5 @@
 use alloc::sync::Arc;
-use core::num::NonZeroU32;
+use core::num::{NonZeroU16, NonZeroU32};
 
 use syscall::Rights;
 
@@ -21,16 +21,16 @@ impl HandleId {
     pub(super) const MAX_SLOT_INDEX: u32 = Self::SLOT_MASK;
     pub(super) const MAX_GENERATION: u16 = ((1u32 << (32 - Self::SLOT_BITS)) - 1) as u16;
 
+    const GENERATION_SCALE: NonZeroU32 = match NonZeroU32::new(1 << Self::SLOT_BITS) {
+        Some(scale) => scale,
+        None => NonZeroU32::MIN,
+    };
+
     /// Упаковывает `(generation, slot)` в идентификатор.
-    pub(super) fn pack(generation: u16, slot: u32) -> Self {
-        debug_assert!(generation >= 1, "generation must be >= 1");
-        debug_assert!(
-            u32::from(generation) <= u32::from(Self::MAX_GENERATION),
-            "generation overflow"
-        );
+    pub(super) fn pack(generation: NonZeroU16, slot: u32) -> Self {
         debug_assert!(slot <= Self::MAX_SLOT_INDEX, "slot index overflow");
-        let raw = (u32::from(generation) << Self::SLOT_BITS) | slot;
-        Self(NonZeroU32::new(raw).expect("generation >= 1 guarantees non-zero"))
+        let scaled = NonZeroU32::from(generation).saturating_mul(Self::GENERATION_SCALE);
+        Self(scaled | (slot & Self::SLOT_MASK))
     }
 
     pub fn raw(self) -> NonZeroU32 {
@@ -42,7 +42,7 @@ impl HandleId {
     /// Корректность пары `(generation, slot)` валидируется при первом
     /// обращении к `HandleTable` - ошибочные id отвергаются как
     /// `IpcError::BadHandle`.
-    pub fn from_raw(raw: NonZeroU32) -> Self {
+    pub const fn from_raw(raw: NonZeroU32) -> Self {
         Self(raw)
     }
 
@@ -115,7 +115,7 @@ impl Capability {
         self.rights
     }
 
-    /// Значок (badge) этой capability; `0` означает «без значка».
+    /// Значок (badge) этой capability; `0` означает "без значка".
     pub fn badge(&self) -> u64 {
         self.badge
     }

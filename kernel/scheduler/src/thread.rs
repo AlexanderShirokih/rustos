@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use capability::{CancelTarget, ThreadObject};
-use memory::{MemoryRegion, virtual_address::VirtualAddress};
+use memory::{MemoryRegion, virtual_address::PageAlignedVirtualAddress};
 
 use super::arch::{ArchContext, CpuId, ThreadStack};
 use crate::{Priority, ProcessId, ThreadId};
@@ -11,18 +11,18 @@ use crate::{Priority, ProcessId, ThreadId};
 /// `region` - одна из двух ссылок на регион; фрейм освобождается только когда дропнуты
 /// обе (вторая - `MappingTag` в `UserVmAllocator`). Изымать через [`Thread::take_ipc_buffer`].
 pub struct IpcBufferSlot {
-    user_va: VirtualAddress,
+    user_va: PageAlignedVirtualAddress,
     #[allow(dead_code)]
     region: Arc<MemoryRegion>,
 }
 
 impl IpcBufferSlot {
-    pub fn new(user_va: VirtualAddress, region: Arc<MemoryRegion>) -> Self {
+    pub fn new(user_va: PageAlignedVirtualAddress, region: Arc<MemoryRegion>) -> Self {
         Self { user_va, region }
     }
 
     /// User-VA, по которому замаплен IPC-буфер текущего потока.
-    pub fn user_va(&self) -> VirtualAddress {
+    pub fn user_va(&self) -> PageAlignedVirtualAddress {
         self.user_va
     }
 }
@@ -136,7 +136,7 @@ impl<A: ArchContext> Thread<A> {
     }
 
     /// User-VA per-thread IPC-буфера; `None` у kernel-потоков.
-    pub fn ipc_buffer_va(&self) -> Option<VirtualAddress> {
+    pub fn ipc_buffer_va(&self) -> Option<PageAlignedVirtualAddress> {
         self.ipc_buffer.as_ref().map(IpcBufferSlot::user_va)
     }
 

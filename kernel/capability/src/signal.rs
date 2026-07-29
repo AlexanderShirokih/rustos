@@ -70,20 +70,17 @@ impl Signal {
     /// Регистрирует waiter. Если требуемые сигналы уже присутствуют,
     /// waiter вызывается немедленно.
     pub fn register_waiter(&self, mask: u32, waker: Arc<dyn Waker>) {
-        let mut waker_slot = Some(waker);
-        let observed = self.waiters.with_lock(|wl| {
+        // Будить waker нужно вне waiters-лока.
+        let already_signaled = self.waiters.with_lock(|wl| {
             let current = self.bits.load(Ordering::Acquire);
             if mask & current != 0 {
-                Some(current)
-            } else {
-                let waker = waker_slot.take().expect("waker still present");
-                wl.entries.push(WaiterEntry { mask, waker });
-                None
+                return Err((waker, current));
             }
+            wl.entries.push(WaiterEntry { mask, waker });
+            Ok(())
         });
 
-        if let Some(observed) = observed {
-            let waker = waker_slot.take().expect("waker not pushed");
+        if let Err((waker, observed)) = already_signaled {
             waker.wake(observed);
         }
     }

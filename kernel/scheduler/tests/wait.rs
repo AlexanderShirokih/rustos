@@ -25,7 +25,10 @@ fn registered_flag() -> AtomicU32 {
 fn block_current_parks_running_thread_and_switches_to_next() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let blocker = scheduler
         .spawn(SpawnConfig::new("blocker"), || {})
         .expect("spawn blocker");
@@ -34,20 +37,23 @@ fn block_current_parks_running_thread_and_switches_to_next() {
         .expect("spawn runner");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
     let handle = running.handle();
 
     let flag = registered_flag();
     handle.block_current_until(&flag, None);
 
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
 }
 
 #[test]
 fn blocked_thread_is_not_runnable_until_unblocked() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let blocker = scheduler
         .spawn(SpawnConfig::new("blocker"), || {})
         .expect("spawn blocker");
@@ -56,28 +62,31 @@ fn blocked_thread_is_not_runnable_until_unblocked() {
         .expect("spawn runner");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
     let handle = running.handle();
     let blocker_token: WaitToken = handle.current_wait_token();
 
     let flag = registered_flag();
     handle.block_current_until(&flag, None);
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
 
     // Пока `blocker` заблокирован, только `runner` остаётся runnable.
     running.yield_now();
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
 
     handle.unblock(blocker_token);
     running.yield_now();
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
 }
 
 #[test]
 fn unblock_is_idempotent_on_repeat_and_on_non_blocked_thread() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let blocker = scheduler
         .spawn(SpawnConfig::new("blocker"), || {})
         .expect("spawn blocker");
@@ -86,34 +95,37 @@ fn unblock_is_idempotent_on_repeat_and_on_non_blocked_thread() {
         .expect("spawn runner");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
     let handle = running.handle();
     let blocker_token = handle.current_wait_token();
 
     handle.unblock(blocker_token);
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
 
     let flag = registered_flag();
     handle.block_current_until(&flag, None);
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
 
     handle.unblock(blocker_token);
     // Повторный unblock не должен добавить второй экземпляр в ready-queue.
     handle.unblock(blocker_token);
 
     running.yield_now();
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
     // Если бы дубликат попал в очередь, blocker остался бы в ней повторно;
     // один полный round-robin должен вернуть на runner.
     running.yield_now();
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
 }
 
 #[test]
 fn block_with_timeout_wakes_via_sleep_queue_on_deadline() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let blocker = scheduler
         .spawn(SpawnConfig::new("blocker"), || {})
         .expect("spawn blocker");
@@ -122,20 +134,20 @@ fn block_with_timeout_wakes_via_sleep_queue_on_deadline() {
         .expect("spawn runner");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
     let handle = running.handle();
 
     let flag = registered_flag();
     handle.block_current_until(&flag, Some(50));
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
     assert_eq!(timer.scheduled_deadline(), 50);
 
     with_simulated_irq(|| running.on_tick(10));
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
 
     timer.advance_to(50);
     with_simulated_irq(|| running.on_tick(50));
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
 }
 
 #[test]
@@ -146,7 +158,10 @@ fn stale_sleep_entry_does_not_wake_thread_reparked_with_new_deadline() {
     // `wakeup_at_ns` отсекает stale-entry. Будит только запись на T2.
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let blocker = scheduler
         .spawn(SpawnConfig::new("blocker"), || {})
         .expect("spawn blocker");
@@ -155,7 +170,7 @@ fn stale_sleep_entry_does_not_wake_thread_reparked_with_new_deadline() {
         .expect("spawn runner");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
     let handle = running.handle();
     let blocker_token = handle.current_wait_token();
 
@@ -163,17 +178,17 @@ fn stale_sleep_entry_does_not_wake_thread_reparked_with_new_deadline() {
     // SleepQueue после ранней разблокировки.
     let flag1 = registered_flag();
     handle.block_current_until(&flag1, Some(100));
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
 
     handle.unblock(blocker_token);
     running.yield_now();
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
 
     // Парк #2: новый дедлайн T2 = 50, wakeup_at_ns = 150.
     timer.advance_to(100);
     let flag2 = registered_flag();
     handle.block_current_until(&flag2, Some(50));
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
 
     // На T1 (100) stale-entry (blocker, 100) пропускается: текущее
     // wakeup_at_ns == 150 != 100.
@@ -182,11 +197,11 @@ fn stale_sleep_entry_does_not_wake_thread_reparked_with_new_deadline() {
     running.yield_now();
     assert_eq!(
         running.current(),
-        runner,
+        Some(runner),
         "stale entry at T1 must not wake a thread parked until T2"
     );
 
     timer.advance_to(150);
     with_simulated_irq(|| running.on_tick(150));
-    assert_eq!(running.current(), blocker);
+    assert_eq!(running.current(), Some(blocker));
 }

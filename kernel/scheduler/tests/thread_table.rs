@@ -29,6 +29,7 @@ fn insert_get_and_remove_thread() {
 
     let id = table
         .insert_with(|id| build_thread(id, "worker", Priority::normal()))
+        .map(|thread| thread.id())
         .expect("insert must succeed");
     let inserted = table.get(id).expect("thread must be present");
     assert_eq!(inserted.id(), id);
@@ -44,9 +45,11 @@ fn split_pair_mut_returns_distinct_threads() {
     let mut table = ThreadTable::<MockContext>::new(4);
     let first = table
         .insert_with(|id| build_thread(id, "first", Priority::normal()))
+        .map(|thread| thread.id())
         .expect("first insert");
     let second = table
         .insert_with(|id| build_thread(id, "second", Priority::new(3)))
+        .map(|thread| thread.id())
         .expect("second insert");
 
     let (first_ref, second_ref) = table
@@ -68,9 +71,11 @@ fn full_table_returns_no_free_slots_error() {
     let mut table = ThreadTable::<MockContext>::new(1);
     let _ = table
         .insert_with(|id| build_thread(id, "a", Priority::normal()))
+        .map(|thread| thread.id())
         .expect("first insert");
     let err = table
         .insert_with(|id| build_thread(id, "b", Priority::normal()))
+        .map(|thread| thread.id())
         .unwrap_err();
     assert_eq!(err, SpawnError::NoFreeThreadSlots);
 }

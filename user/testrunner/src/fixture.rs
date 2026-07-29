@@ -54,7 +54,7 @@ impl Fixture {
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, 0)
             .expect("duplicate port for child");
 
-        let resource = Resource::self_resource();
+        let resource = Resource::self_resource().expect("self metering resource");
         let process = load_entry(&entry, &resource, child_end).expect("spawn port fixture");
 
         Self { process, port }

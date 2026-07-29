@@ -56,6 +56,15 @@ pub trait FrameAllocator {
 /// Максимальное количество регионов памяти.
 pub const MAX_REGIONS: usize = 24;
 
+/// Ошибки инициализации [`PhysicalFrameAllocator`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameAllocatorInitError {
+    /// Не передано ни одного региона - аллокатору нечем управлять.
+    NoRegions,
+    /// Регионов больше, чем вмещает [`MAX_REGIONS`].
+    TooManyRegions,
+}
+
 /// Менеджер физической памяти.
 ///
 /// Управляет выделением и освобождением фреймов физической памяти
@@ -78,28 +87,30 @@ unsafe impl<L: LockCell<FrameBitmap>> Send for PhysicalFrameAllocator<L> {}
 unsafe impl<L: LockCell<FrameBitmap>> Sync for PhysicalFrameAllocator<L> {}
 
 impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
-    pub fn new<T>(memory: T) -> Self
+    pub fn new<T>(memory: T) -> Result<Self, FrameAllocatorInitError>
     where
         T: Iterator<Item = MemoryRange<PageAlignedAddress>>,
     {
-        let regions: Vec<L, MAX_REGIONS> = memory
-            .map(|range| L::new(FrameBitmap::new(range)))
-            .inspect(|region| {
-                region.with_lock(|bitmap| {
-                    // Резервируем нулевой фрейм, чтобы адрес 0x0 оставался маркером
-                    // невалидного указателя
-                    let start = bitmap.start();
-                    if start.is_zero() {
-                        bitmap.set_unchecked(Frame::from(start));
-                    }
-                });
-            })
-            .collect();
+        let mut regions: Vec<L, MAX_REGIONS> = Vec::new();
+        for range in memory {
+            let region = L::new(FrameBitmap::new(range));
+            region.with_lock(|bitmap| {
+                // Резервируем нулевой фрейм, чтобы адрес 0x0 оставался маркером
+                // невалидного указателя
+                let start = bitmap.start();
+                if start.is_zero() {
+                    bitmap.set_unchecked(Frame::from(start));
+                }
+            });
+            regions
+                .push(region)
+                .ok_or(FrameAllocatorInitError::TooManyRegions)?;
+        }
 
         let next_frame_hint = regions
             .iter()
             .next()
-            .expect("Managed memory regions should not be empty")
+            .ok_or(FrameAllocatorInitError::NoRegions)?
             .with_lock(|bitmap| {
                 let start = bitmap.start();
                 if start.is_zero() {
@@ -109,10 +120,10 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
                 }
             });
 
-        Self {
+        Ok(Self {
             regions,
             next_frame_hint: AtomicUsize::new(Frame::from(next_frame_hint).number()),
-        }
+        })
     }
 
     /// Находит регион, содержащий диапазон фреймов [from_inclusive, to_exclusive)

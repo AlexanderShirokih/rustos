@@ -6,28 +6,13 @@ use ipc::{
     wire::{IpcError, Str},
 };
 
-use crate::{BootstrapClient, LOG_MESSAGE_MAX, LOG_TAG_MAX};
-
-/// Префикс `text` длиной не более `max` байт по границе символа.
-fn clamp(text: &str, max: usize) -> &str {
-    if text.len() <= max {
-        return text;
-    }
-    let mut len = max;
-    while !text.is_char_boundary(len) {
-        len -= 1;
-    }
-    &text[..len]
-}
+use crate::BootstrapClient;
 
 impl<T: Transport> BootstrapClient<T> {
     /// Шлёт [`Bootstrap::log`](crate::Bootstrap::log), усекая `tag` и
     /// `message` до границ кадра по границе символа.
     pub fn log_str(&self, tag: &str, message: &str) -> Result<(), IpcError> {
-        let tag = Str::new(clamp(tag, LOG_TAG_MAX)).expect("clamped to LOG_TAG_MAX");
-        let message =
-            Str::new(clamp(message, LOG_MESSAGE_MAX)).expect("clamped to LOG_MESSAGE_MAX");
-        self.log(tag, message)
+        self.log(Str::truncating(tag), Str::truncating(message))
     }
 }
 
@@ -35,9 +20,9 @@ impl<T: Transport> BootstrapClient<T> {
 mod tests {
     use std::{format, string::String};
 
+    use ipc::wire::Str;
     use ipc_test::MockEnd;
 
-    use super::clamp;
     use crate::{BootstrapClient, LOG_MESSAGE_MAX, LOG_TAG_MAX, dispatch_bootstrap};
 
     #[derive(Default)]
@@ -97,9 +82,9 @@ mod tests {
     }
 
     #[test]
-    fn clamp_respects_char_boundary() {
+    fn truncating_respects_char_boundary() {
         // "ё" - два байта; срез по середине символа запрещён.
-        assert_eq!(clamp("ааа", 4), "аа");
-        assert_eq!(clamp("abc", 4), "abc");
+        assert_eq!(Str::<4>::truncating("ааа").as_str(), "аа");
+        assert_eq!(Str::<4>::truncating("abc").as_str(), "abc");
     }
 }

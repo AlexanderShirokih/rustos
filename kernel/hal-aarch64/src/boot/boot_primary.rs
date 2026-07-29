@@ -61,7 +61,42 @@ pub fn primary_main(
     primary_main_impl(&handoff)
 }
 
+enum PrimaryBootError {
+    UnalignedHigherRoot,
+    DtbParse,
+    DtbRootMissing,
+    DtbScanDepth,
+    UnalignedDtbBase,
+    EmptyDtb,
+    UnalignedInitrdBase,
+}
+
+impl core::fmt::Display for PrimaryBootError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let text = match self {
+            PrimaryBootError::UnalignedHigherRoot => "higher-half root table PA is not 4K-aligned",
+            PrimaryBootError::DtbParse => "DTB at the handed-off address is not parseable",
+            PrimaryBootError::DtbRootMissing => "DTB has no root node",
+            PrimaryBootError::DtbScanDepth => "DTB nesting depth exceeds the supported limit",
+            PrimaryBootError::UnalignedDtbBase => "DTB base is not 4K-aligned",
+            PrimaryBootError::EmptyDtb => "DTB totalsize is zero",
+            PrimaryBootError::UnalignedInitrdBase => "initrd base is not 4K-aligned",
+        };
+        f.write_str(text)
+    }
+}
+
 fn primary_main_impl(handoff: &BootHandoff) -> ! {
+    match primary_boot(handoff) {
+        Ok(never) => match never {},
+        Err(error) => {
+            klog::fatal!("Kernel boot failed: {error}");
+            kernelspace::power::system_off(1)
+        }
+    }
+}
+
+fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, PrimaryBootError> {
     let &BootHandoff {
         dtb_phys,
         higher_root_pa,
@@ -72,8 +107,8 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
 
     let higher_half_base =
         PageAlignedVirtualAddress::new_unchecked(VirtualAddress::new(HIGHER_HALF_BASE));
-    let higher_root =
-        PageAlignedAddress::from_usize(higher_root_pa).expect("higher_root_pa must be 4K-aligned");
+    let higher_root = PageAlignedAddress::from_usize(higher_root_pa)
+        .ok_or(PrimaryBootError::UnalignedHigherRoot)?;
     let frame_allocator_phys = PhysicalAddress::new(frame_allocator_phys);
 
     let result = MemorySetup::<Enabled>::switch_to_heap_allocator(
@@ -90,8 +125,8 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
     info!("primary_main: post-MMU initialization complete");
 
     let dtb_virt = dtb_phys + HIGHER_HALF_BASE;
-    let device_tree = fdt::devicetree::DeviceTree::from_ptr(dtb_virt)
-        .expect("Failed to parse DTB at virtual address");
+    let device_tree =
+        fdt::devicetree::DeviceTree::from_ptr(dtb_virt).map_err(|_| PrimaryBootError::DtbParse)?;
 
     // SAFETY: DTB замаплен в higher-half и существует в течение всей жизни ядра, поэтому
     // продление времени жизни ссылки до `'static` корректно.
@@ -101,10 +136,10 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
     let mut driver_scanner = EmbeddedDriversScanner::new();
     let root = adapt_to_fdt_tree(device_tree)
         .root()
-        .expect("DTB root node missing");
+        .ok_or(PrimaryBootError::DtbRootMissing)?;
     driver_scanner
         .scan_and_probe(root, drivers())
-        .expect("DTB nesting depth exceeds the supported limit");
+        .map_err(|_| PrimaryBootError::DtbScanDepth)?;
 
     // Device-MMIO окна для userspace-драйверов: узлы, под которые ядро
     // подобрало драйвер (GIC, PL011), исключены. Малформленные окна
@@ -129,16 +164,16 @@ fn primary_main_impl(handoff: &BootHandoff) -> ! {
              ) = Box::leak(result.address_space_factory);
 
     let boot_dtb = BootDtb::new(
-        PageAlignedAddress::from_usize(dtb_phys).expect("dtb base is 4K-aligned"),
-        NonZeroUsize::new(device_tree.size()).expect("dtb totalsize is non-zero"),
+        PageAlignedAddress::from_usize(dtb_phys).ok_or(PrimaryBootError::UnalignedDtbBase)?,
+        NonZeroUsize::new(device_tree.size()).ok_or(PrimaryBootError::EmptyDtb)?,
     );
 
     let userland_image = if initrd_size > 0 {
         let va = initrd_start + HIGHER_HALF_BASE;
         // SAFETY: initrd зарезервирован, фреймы не переиспользуются.
         let bytes = unsafe { core::slice::from_raw_parts(va as *const u8, initrd_size) };
-        let phys_base =
-            PageAlignedAddress::from_usize(initrd_start).expect("initrd base is 4K-aligned");
+        let phys_base = PageAlignedAddress::from_usize(initrd_start)
+            .ok_or(PrimaryBootError::UnalignedInitrdBase)?;
         Some(UserlandImage { bytes, phys_base })
     } else {
         None
@@ -183,8 +218,12 @@ fn device_window_to_region(window: &AddressSpace) -> Option<Arc<MemoryRegion>> {
     )))
 }
 
-fn spawn_init_process_impl()
--> fn(&Scheduler<Aarch64Context, KernelTimerSource, Bootstrapped>, &mut KernelContext) {
+type InitTask = fn(
+    &Scheduler<Aarch64Context, KernelTimerSource, Bootstrapped>,
+    &mut KernelContext,
+) -> Result<(), scheduler::SpawnError>;
+
+fn spawn_init_process_impl() -> InitTask {
     #[cfg(feature = "kernel-tests")]
     {
         kernelspace::kernel_tests::spawn_kernel_tests_process::<Aarch64Context>

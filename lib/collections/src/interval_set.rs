@@ -1,5 +1,3 @@
-use core::cmp::Ordering;
-
 use crate::vec::Vec;
 
 extern crate alloc;
@@ -50,7 +48,6 @@ impl<T: Ord + Copy> Interval<T> {
     }
 }
 
-/// Внутренний трейт хранения интервалов.
 trait IntervalStorage<T>: Sized {
     type Iter<'a>: Iterator<Item = &'a T>
     where
@@ -58,8 +55,6 @@ trait IntervalStorage<T>: Sized {
         T: 'a;
 
     fn new() -> Self;
-    fn len(&self) -> usize;
-    fn get(&self, index: usize) -> Option<&T>;
     fn push(&mut self, value: T) -> Option<()>;
     fn iter(&self) -> Self::Iter<'_>;
 }
@@ -72,14 +67,6 @@ impl<T, const N: usize> IntervalStorage<T> for Vec<T, N> {
 
     fn new() -> Self {
         Vec::new()
-    }
-
-    fn len(&self) -> usize {
-        Vec::len(self)
-    }
-
-    fn get(&self, index: usize) -> Option<&T> {
-        Vec::get(self, index)
     }
 
     fn push(&mut self, value: T) -> Option<()> {
@@ -99,14 +86,6 @@ impl<T> IntervalStorage<T> for AllocVec<T> {
 
     fn new() -> Self {
         AllocVec::new()
-    }
-
-    fn len(&self) -> usize {
-        AllocVec::len(self)
-    }
-
-    fn get(&self, index: usize) -> Option<&T> {
-        self.as_slice().get(index)
     }
 
     fn push(&mut self, value: T) -> Option<()> {
@@ -225,27 +204,9 @@ impl<T: Ord + Copy> IntervalSet<T> {
     }
 }
 
-fn binary_search_first_ge<T, S, F>(ranges: &S, mut predicate: F) -> usize
-where
-    S: IntervalStorage<Interval<T>>,
-    F: FnMut(&Interval<T>) -> Ordering,
-{
-    let mut lo = 0;
-    let mut hi = ranges.len();
-
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let item = ranges.get(mid).expect("index in bounds");
-
-        match predicate(item) {
-            Ordering::Less => lo = mid + 1,
-            Ordering::Equal | Ordering::Greater => hi = mid,
-        }
-    }
-
-    lo
-}
-
+/// Добавляет интервал одним проходом. Хранимые интервалы упорядочены и не пересекаются:
+/// каждый строго слева от `incoming`, касается его или строго справа. `incoming` встаёт
+/// перед первым "строго справа".
 fn add_impl<T, S>(ranges: &mut S, start: T, end: T) -> Option<()>
 where
     T: Ord + Copy,
@@ -255,50 +216,26 @@ where
         return Some(());
     };
 
-    // Поиск первого диапазона, который может пересекаться или касаться: range.end >= incoming.start
-    let mut i = binary_search_first_ge(ranges, |r| {
-        if r.end < incoming.start {
-            Ordering::Less
-        } else {
-            Ordering::Greater
-        }
-    });
-
-    // Проверка необходимости смещения на шаг влево при касании слева
-    if i > 0 {
-        let prev = ranges.get(i - 1).expect("index in bounds");
-        if prev.end >= incoming.start {
-            i -= 1;
-        }
-    }
-
-    // Сборка результата в новый вектор
     let mut out = S::new();
+    let mut pending = true;
 
-    // Копирование интервалов до i
-    for idx in 0..i {
-        let item = *ranges.get(idx).expect("index in bounds");
-        out.push(item)?;
-    }
-
-    // Слияние всех пересекающихся/касающихся диапазонов в incoming
-    while i < ranges.len() {
-        let item = *ranges.get(i).expect("index in bounds");
-        if item.overlaps_or_touches(&incoming) {
-            incoming.merge_with(&item);
-            i += 1;
-        } else {
-            break;
+    for item in ranges.iter().copied() {
+        if pending {
+            if item.overlaps_or_touches(&incoming) {
+                incoming.merge_with(&item);
+                continue;
+            }
+            // Первый интервал строго правее incoming - его место здесь.
+            if incoming.end < item.start {
+                out.push(incoming)?;
+                pending = false;
+            }
         }
+        out.push(item)?;
     }
 
-    out.push(incoming)?;
-
-    // Копирование оставшихся интервалов
-    while i < ranges.len() {
-        let item = *ranges.get(i).expect("index in bounds");
-        out.push(item)?;
-        i += 1;
+    if pending {
+        out.push(incoming)?;
     }
 
     *ranges = out;

@@ -90,14 +90,14 @@ pub struct HeapAllocator {
     kernel_mapper: &'static (dyn MemoryMapper + Send + Sync),
     arena: HeapArena,
     /// VA первой ещё не замапленной страницы арены; растёт только вверх.
-    arena_top: usize,
+    arena_top: PageAlignedVirtualAddress,
     free_list_head: Option<NonNull<FreeBlock>>,
     current_size: usize,
 }
 
 impl HeapAllocator {
     pub fn new(kernel_mapper: &'static (dyn MemoryMapper + Send + Sync), arena: HeapArena) -> Self {
-        let arena_top = arena.base.as_usize();
+        let arena_top = arena.base;
         HeapAllocator {
             kernel_mapper,
             arena,
@@ -122,21 +122,22 @@ impl HeapAllocator {
             .ok_or(AllocationError::OutOfMemory)?;
         let new_top = self
             .arena_top
+            .as_usize()
             .checked_add(bytes)
             .ok_or(AllocationError::OutOfMemory)?;
         if new_top > arena_end {
             return Err(AllocationError::OutOfMemory);
         }
 
-        let block_va_start = self.arena_top;
-        let block_va = PageAlignedVirtualAddress::from_usize(block_va_start)
-            .expect("arena top remains 4K-aligned");
+        let block_va = self.arena_top;
+        let block_va_start = block_va.as_usize();
 
         self.kernel_mapper
             .map(block_va, pages_needed, &[], MemFlags::kernel_rw())
             .map_err(|_| AllocationError::OutOfMemory)?;
 
-        self.arena_top = new_top;
+        self.arena_top = block_va.add_blocks(pages_needed);
+        debug_assert_eq!(self.arena_top.as_usize(), new_top);
         self.current_size += bytes;
 
         let block_size = bytes - size_of::<FreeBlock>();
@@ -320,7 +321,7 @@ impl HeapAllocator {
     pub fn deallocate(&mut self, ptr: NonNull<u8>) {
         let addr = ptr.as_ptr() as usize;
         let arena_start = self.arena.base.as_usize();
-        if addr < arena_start || addr >= self.arena_top {
+        if addr < arena_start || addr >= self.arena_top.as_usize() {
             return;
         }
 

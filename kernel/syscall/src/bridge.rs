@@ -248,6 +248,23 @@ fn sys_signal_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64
 const WAIT_MANY_ENTRY_SIZE: usize = 8;
 const WAIT_MANY_MAX_COUNT: usize = 256;
 
+// Заполнитель хвоста массива записей wait_many. Наружу не уходит.
+const WAIT_MANY_PLACEHOLDER: (HandleId, u32) = (HandleId::from_raw(NonZeroU32::MIN), 0);
+
+// Раскладка записи закреплена сигнатурой: handle (LE u32) @0, mask (LE u32) @4.
+fn parse_wait_many_entry(
+    entry: [u8; WAIT_MANY_ENTRY_SIZE],
+) -> Result<(HandleId, u32), SyscallError> {
+    let [h0, h1, h2, h3, m0, m1, m2, m3] = entry;
+    let mask = u32::from_le_bytes([m0, m1, m2, m3]);
+    if mask == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let handle = NonZeroU32::new(u32::from_le_bytes([h0, h1, h2, h3]))
+        .ok_or(SyscallError::InvalidArgument)?;
+    Ok((HandleId::from_raw(handle), mask))
+}
+
 /// Primary возврат - observed-маска, secondary - индекс сработавшей записи.
 fn sys_signal_wait_many(frame: &mut dyn SyscallFrame) {
     match sys_signal_wait_many_impl(frame.arg(0), frame.arg(1), frame.arg(2)) {
@@ -280,27 +297,17 @@ fn sys_signal_wait_many_impl(
     let mut buf = [0u8; WAIT_MANY_MAX_COUNT * WAIT_MANY_ENTRY_SIZE];
     copy_in(&user_vm, items_va, &mut buf[..bytes_total])?;
 
-    let mut items: [(HandleId, u32); WAIT_MANY_MAX_COUNT] = [(
-        HandleId::from_raw(NonZeroU32::new(1).expect("non-zero literal")),
-        0,
-    ); WAIT_MANY_MAX_COUNT];
-    for (i, chunk) in buf[..bytes_total]
-        .chunks_exact(WAIT_MANY_ENTRY_SIZE)
-        .enumerate()
-    {
-        let handle_raw = u32::from_le_bytes(chunk[0..4].try_into().expect("4 bytes per handle"));
-        let mask = u32::from_le_bytes(chunk[4..8].try_into().expect("4 bytes per mask"));
-        if mask == 0 {
-            return Err(SyscallError::InvalidArgument);
-        }
-        let nz = NonZeroU32::new(handle_raw).ok_or(SyscallError::InvalidArgument)?;
-        items[i] = (HandleId::from_raw(nz), mask);
+    // Хвост `items` за `count` наружу не уходит (`&items[..count]`).
+    let mut items: [(HandleId, u32); WAIT_MANY_MAX_COUNT] =
+        [WAIT_MANY_PLACEHOLDER; WAIT_MANY_MAX_COUNT];
+    let (entries, _) = buf[..bytes_total].as_chunks::<WAIT_MANY_ENTRY_SIZE>();
+    for (slot, entry) in items.iter_mut().zip(entries) {
+        *slot = parse_wait_many_entry(*entry)?;
     }
 
     let outcome =
         capability::signal_wait_many(&items[..count], Some(timeout_ns)).map_err(map_ipc_error)?;
-    let index = u32::try_from(outcome.index).expect("count <= WAIT_MANY_MAX_COUNT fits in u32");
-    Ok((index, outcome.observed))
+    Ok((outcome.index, outcome.observed))
 }
 
 /// Изымает handle из таблицы и закрывает.
@@ -315,16 +322,18 @@ fn sys_handle_close(handle: u64) -> Result<u64, SyscallError> {
 /// заклеймённый -> `BadHandle`.
 fn sys_handle_duplicate(handle: u64, new_rights: u64, badge: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
-    let rights_bits = u32::try_from(new_rights & u64::from(u32::MAX))
-        .expect("masking guarantees value fits into u32");
-    let rights = Rights::from_bits_truncate(rights_bits);
+    let rights = Rights::from_bits_truncate(low_u32(new_rights));
     let new_id = capability::handle_duplicate(id, rights, badge).map_err(map_ipc_error)?;
     Ok(u64::from(new_id.raw().get()))
 }
 
+const fn low_u32(raw: u64) -> u32 {
+    raw as u32
+}
+
 /// Верхние биты игнорируются: ABI фиксирует биты сигналов в нижних 32.
 fn signals_from_arg(raw: u64) -> u32 {
-    u32::try_from(raw & u64::from(u32::MAX)).expect("masking guarantees value fits into u32")
+    low_u32(raw)
 }
 
 /// `0` и значения > `u32::MAX` - `InvalidArgument`.

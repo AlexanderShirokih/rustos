@@ -1,8 +1,9 @@
 //! Маппинг виртуальных адресов на физические.
 
 use memory::{
+    aligned::Aligned,
     physical_address::{PageAlignedAddress, PhysicalAddress},
-    virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress},
+    virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress},
 };
 
 use crate::{
@@ -731,9 +732,14 @@ unsafe fn descend_free<Parent, Child, A, V>(
     }
 }
 
+// entry_va_at собирает адрес из выровненной базы таблицы и сдвинутого индекса.
 #[inline]
 fn leaf_va(va: usize) -> PageAlignedVirtualAddress {
-    PageAlignedVirtualAddress::from_usize(va).expect("leaf VA must be 4K-aligned")
+    debug_assert!(
+        va.is_multiple_of(PageAlignedVirtualAddress::ALIGNMENT),
+        "leaf VA must be 4K-aligned"
+    );
+    PageAlignedVirtualAddress::aligned_down(VirtualAddress::new(va))
 }
 
 #[inline]

@@ -29,7 +29,8 @@ const KLOG_CLOSE_TIMEOUT_NS: u64 = 1_000_000_000;
 pub fn spawn_init_process<A>(
     scheduler: &Scheduler<A, KernelTimerSource, Bootstrapped>,
     kernel: &mut KernelContext,
-) where
+) -> Result<(), scheduler::SpawnError>
+where
     A: ArchContext,
 {
     let launcher: Arc<dyn UserProcessLauncher> = Arc::new(SchedulerUserProcessLauncher::new(
@@ -49,7 +50,7 @@ pub fn spawn_init_process<A>(
                 start_bootstrap_chain(launcher.as_ref(), image, dtb, device_regions, user_va_end)
             },
         )
-        .expect("init process spawn must succeed");
+        .map(|_| ())
 }
 
 fn start_bootstrap_chain(

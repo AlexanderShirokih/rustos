@@ -17,7 +17,7 @@ const PATTERN: u64 = 0xC0DE_F00D_DEAD_BEEF;
 /// право записи, не теряя содержимого.
 #[kernel_test]
 fn allocate_write_then_remap_readonly() {
-    let resource = Resource::self_resource();
+    let resource = Resource::self_resource().expect("self metering resource");
     let mapping = resource
         .allocate(PAGE_SIZE, UserMemFlags::ReadWrite)
         .expect("allocate one page");
@@ -44,7 +44,7 @@ fn allocate_write_then_remap_readonly() {
 /// того же размера выдаёт тот же VA (coalesce + first-fit).
 #[kernel_test]
 fn allocate_free_reuses_va() {
-    let resource = Resource::self_resource();
+    let resource = Resource::self_resource().expect("self metering resource");
 
     let first = resource
         .allocate(PAGE_SIZE, UserMemFlags::ReadWrite)

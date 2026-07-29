@@ -70,6 +70,14 @@ impl BootServices {
         }
     }
 
+    /// Набор сервисов с уже установленным MMIO-сервисом.
+    pub fn with_mmio(service: Arc<dyn MmioService>) -> Self {
+        Self {
+            mmio: Some(service),
+            ..Self::new()
+        }
+    }
+
     pub fn mmio(&self) -> Option<Arc<dyn MmioService>> {
         self.mmio.clone()
     }
@@ -282,7 +290,7 @@ mod tests {
 
         fn sleep_ns(&self, _ns: u64) {}
 
-        fn current(&self) -> scheduler::ThreadId {
+        fn current(&self) -> Option<scheduler::ThreadId> {
             panic!("not used in tests")
         }
 

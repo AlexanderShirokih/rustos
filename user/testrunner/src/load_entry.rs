@@ -30,7 +30,7 @@ fn child_code() -> [u8; 12] {
 
 #[kernel_test]
 fn load_entry_passes_bootstrap_handle() {
-    let resource = Resource::self_resource();
+    let resource = Resource::self_resource().expect("self metering resource");
     let code = child_code();
     let segments = [Segment {
         va_base: CHILD_CODE_VA,

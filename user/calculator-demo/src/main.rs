@@ -41,7 +41,7 @@ fn run(root: Handle) -> Result<()> {
 
     // Порт для связи с сервисом калькулятора
     let calculator_port = Port::create()?;
-    let resource = Resource::self_resource();
+    let resource = Resource::self_resource()?;
 
     // Парсим контейнер initrd образа и получает из него программу
     let calculator_entry = image.entry("calculator").ok_or(Error::MissingEntry)?;

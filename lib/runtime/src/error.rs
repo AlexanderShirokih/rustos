@@ -14,6 +14,12 @@ pub enum Error {
 /// Результат операции рантайма.
 pub type Result<T> = core::result::Result<T, Error>;
 
+impl From<SyscallError> for Error {
+    fn from(value: SyscallError) -> Self {
+        Self::Syscall(value)
+    }
+}
+
 impl Error {
     /// Декодирует отрицательный возврат: известный код - `Syscall`, иначе
     /// `Unknown`.

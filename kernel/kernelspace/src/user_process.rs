@@ -114,7 +114,9 @@ fn prepare_user_process(
 
     let mapper = address_space
         .mapper()
-        .expect("AddressSpace::User must expose mapper");
+        .ok_or(PreparedUserProcessError::Spawn(
+            scheduler::SpawnError::AddressSpaceCreationFailed,
+        ))?;
 
     load_user_image(mapper, image)?;
 

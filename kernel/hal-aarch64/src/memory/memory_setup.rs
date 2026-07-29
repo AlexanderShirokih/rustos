@@ -154,9 +154,10 @@ impl MemorySetup<Installed> {
             .iter()
             .map(|interval| MemoryRange::new(interval.start, interval.end));
 
-        let frame_allocator = Box::leak(Box::new(PhysicalFrameAllocator::new(
-            free_heap_regions_iter,
-        )));
+        let frame_allocator = Box::leak(Box::new(
+            PhysicalFrameAllocator::new(free_heap_regions_iter)
+                .map_err(MemorySetupError::FrameAllocatorInit)?,
+        ));
 
         // Резервирование памяти, использованной bump аллокатором.
         GLOBAL_ALLOCATOR.set_freeze();
@@ -407,4 +408,7 @@ pub enum MemorySetupError {
     /// Ошибка маппинга.
     #[allow(dead_code)]
     MappingFailed(memory::memory_mapper::MemoryMappingError),
+    /// Список регионов ОЗУ непригоден для аллокатора фреймов.
+    #[allow(dead_code)]
+    FrameAllocatorInit(memory::frame_allocator::FrameAllocatorInitError),
 }

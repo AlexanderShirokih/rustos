@@ -20,6 +20,11 @@ impl Handle {
         }
     }
 
+    /// Оборачивает заведомо ненулевой HandleId.
+    pub const fn from_nonzero(raw: NonZeroU32) -> Self {
+        Self(raw)
+    }
+
     /// Сырое 32-битное значение.
     pub const fn raw(self) -> u32 {
         self.0.get()

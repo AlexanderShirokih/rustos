@@ -8,7 +8,7 @@ use alloc::{
 
 use drivers_common::{
     BootServices, DeviceMemoryPermission, Driver, DriverFactory, DriverRunError, Owners,
-    probe::ProbeResult,
+    probe::{ProbeError, ProbeResult},
     services::mmio::{MmioAddress, MmioService},
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatible};
@@ -94,11 +94,11 @@ pub fn gicv2_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
 
     let distributor = context
         .get_mmio_address(0)
-        .expect("failed to get GICD_BASE");
+        .ok_or(ProbeError::MissingProperty("reg[0] (GICD base)"))?;
 
     let cpu_interface = context
         .get_mmio_address(1)
-        .expect("failed to get GICC_BASE");
+        .ok_or(ProbeError::MissingProperty("reg[1] (GICC base)"))?;
 
     Ok(Box::new(Gicv2Factory {
         gicd: distributor,

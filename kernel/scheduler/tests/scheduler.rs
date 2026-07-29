@@ -106,7 +106,10 @@ fn install_forwarding_runtime() -> Arc<ForwardingRuntime> {
 fn run_starts_highest_priority_thread() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let low = scheduler
         .spawn(SpawnConfig::new("low").priority(Priority::new(8)), || {})
         .expect("spawn low");
@@ -116,7 +119,7 @@ fn run_starts_highest_priority_thread() {
 
     let running = scheduler.run();
 
-    assert_eq!(running.current(), high);
+    assert_eq!(running.current(), Some(high));
     assert_ne!(low, high);
     assert_eq!(timer.scheduled_deadline(), scheduler::DEFAULT_QUANTUM_NS);
     assert_eq!(switch_count(), 1);
@@ -133,7 +136,10 @@ enum PreemptKind {
 fn round_robin_via(kind: &PreemptKind) {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let first = scheduler
         .spawn(SpawnConfig::new("first"), || {})
         .expect("spawn first");
@@ -142,7 +148,7 @@ fn round_robin_via(kind: &PreemptKind) {
         .expect("spawn second");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), first);
+    assert_eq!(running.current(), Some(first));
 
     let mut now = 0;
     let mut step = |running: &Scheduler<MockContext, MockTimerSource, scheduler::Running>| {
@@ -160,10 +166,10 @@ fn round_robin_via(kind: &PreemptKind) {
     };
 
     step(&running);
-    assert_eq!(running.current(), second);
+    assert_eq!(running.current(), Some(second));
 
     step(&running);
-    assert_eq!(running.current(), first);
+    assert_eq!(running.current(), Some(first));
 }
 
 #[test]
@@ -180,7 +186,10 @@ fn yield_round_robins_equal_priority_threads() {
 fn sleep_ns_blocks_and_wakes_thread_on_deadline() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let sleeper = scheduler
         .spawn(SpawnConfig::new("sleeper"), || {})
         .expect("spawn sleeper");
@@ -189,37 +198,43 @@ fn sleep_ns_blocks_and_wakes_thread_on_deadline() {
         .expect("spawn runner");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), sleeper);
+    assert_eq!(running.current(), Some(sleeper));
 
     running.sleep_ns(50);
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
     assert_eq!(timer.scheduled_deadline(), 50);
 
     timer.advance_to(50);
     with_simulated_irq(|| running.on_tick(50));
-    assert_eq!(running.current(), sleeper);
+    assert_eq!(running.current(), Some(sleeper));
 }
 
 #[test]
 fn yield_now_with_no_other_threads_keeps_current() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let only = scheduler.spawn(SpawnConfig::new("only"), || {}).unwrap();
 
     let running = scheduler.run();
-    assert_eq!(running.current(), only);
+    assert_eq!(running.current(), Some(only));
     let switches_before = switch_count();
 
     running.yield_now();
-    assert_eq!(running.current(), only);
+    assert_eq!(running.current(), Some(only));
     assert_eq!(switch_count(), switches_before);
 }
 
 #[test]
 fn invalid_priority_returns_error() {
     let timer = MockTimer::new();
-    let scheduler = SmallScheduler::new(MockTimerSource(timer), SMALL_CONFIG).bootstrap();
+    let scheduler = SmallScheduler::new(MockTimerSource(timer), SMALL_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let err = scheduler
         .spawn(SpawnConfig::new("bad").priority(Priority::new(10)), || {})
         .unwrap_err();
@@ -229,7 +244,10 @@ fn invalid_priority_returns_error() {
 #[test]
 fn zero_stack_pages_returns_invalid_stack_pages_error() {
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let err = scheduler
         .spawn(SpawnConfig::new("nostack").stack_pages(0), || {})
         .unwrap_err();
@@ -239,7 +257,10 @@ fn zero_stack_pages_returns_invalid_stack_pages_error() {
 #[test]
 fn spawn_user_thread_without_factory_fails_with_address_space_creation_failed() {
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let err = scheduler
         .spawn(
             SpawnConfig::new("user").address_space(SpawnAddressSpace::User),
@@ -253,19 +274,25 @@ fn spawn_user_thread_without_factory_fails_with_address_space_creation_failed() 
 fn small_prio_scheduler_works_with_low_idle_priority() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = SmallScheduler::new(MockTimerSource(timer.clone()), SMALL_CONFIG).bootstrap();
+    let scheduler = SmallScheduler::new(MockTimerSource(timer.clone()), SMALL_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let task = scheduler
         .spawn(SpawnConfig::new("task").priority(Priority::new(1)), || {})
         .unwrap();
     let running = scheduler.run();
-    assert_eq!(running.current(), task);
+    assert_eq!(running.current(), Some(task));
 }
 
 #[test]
 fn yield_restores_preemption_when_enabled() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let _ = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
     let _ = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
 
@@ -283,7 +310,10 @@ fn yield_restores_preemption_when_enabled() {
 fn yield_from_masked_context_keeps_preemption_masked() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let _ = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
     let _ = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
 
@@ -305,29 +335,34 @@ fn yield_from_masked_context_keeps_preemption_masked() {
 fn sleep_queue_orders_multiple_sleepers_by_deadline() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let early = scheduler.spawn(SpawnConfig::new("early"), || {}).unwrap();
     let late = scheduler.spawn(SpawnConfig::new("late"), || {}).unwrap();
     let runner = scheduler.spawn(SpawnConfig::new("runner"), || {}).unwrap();
     let running = scheduler.run();
 
-    assert_eq!(running.current(), early);
+    assert_eq!(running.current(), Some(early));
     running.sleep_ns(100);
-    assert_eq!(running.current(), late);
+    assert_eq!(running.current(), Some(late));
     running.sleep_ns(50);
-    assert_eq!(running.current(), runner);
+    assert_eq!(running.current(), Some(runner));
 
     // Дедлайн `late` (50) меньше дедлайна `early` (100), поэтому первой
     // должна проснуться именно `late`.
     timer.advance_to(50);
     with_simulated_irq(|| running.on_tick(50));
-    assert_eq!(running.current(), late);
+    assert_eq!(running.current(), Some(late));
 
     timer.advance_to(100);
     with_simulated_irq(|| running.on_tick(100));
     let after_second_tick = running.current();
     assert!(
-        after_second_tick == runner || after_second_tick == early || after_second_tick == late,
+        after_second_tick == Some(runner)
+            || after_second_tick == Some(early)
+            || after_second_tick == Some(late),
         "after wake of `early` scheduler must run a real (non-idle) thread, got {after_second_tick:?}"
     );
 }
@@ -339,7 +374,9 @@ fn exit_current_releases_thread_slot_for_next_spawn() {
     let timer = MockTimer::new();
     let scheduler =
         SmallScheduler::new(MockTimerSource(timer.clone()), SchedulerConfig::new(32, 4))
-            .bootstrap();
+            .bootstrap()
+            .ok()
+            .expect("bootstrap must succeed in tests");
     let _ = scheduler.spawn(SpawnConfig::new("a"), || {}).unwrap();
     let _ = scheduler.spawn(SpawnConfig::new("b"), || {}).unwrap();
     let _ = scheduler.spawn(SpawnConfig::new("c"), || {}).unwrap();
@@ -359,7 +396,10 @@ fn spawn_via_service_handle_works() {
     use scheduler::{SchedulerService, SchedulerServiceExt};
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let handle = Arc::new(scheduler.handle());
     let service: Arc<dyn SchedulerService> = handle;
     let executed = Arc::new(Mutex::new(false));
@@ -372,7 +412,7 @@ fn spawn_via_service_handle_works() {
         .expect("spawn via service");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), id);
+    assert_eq!(running.current(), Some(id));
 }
 
 fn new_factory_static() -> &'static MockAddressSpaceFactory {
@@ -406,13 +446,18 @@ fn make_scheduler_with_factory(
         Some(factory),
     )
     .bootstrap()
+    .ok()
+    .expect("bootstrap must succeed in tests")
 }
 
 #[test]
 fn switch_between_threads_in_same_process_does_not_change_address_space() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let _a = scheduler
         .spawn(SpawnConfig::new("a"), || {})
         .expect("spawn a");
@@ -558,7 +603,7 @@ fn terminating_last_user_thread_releases_address_space() {
         .expect("spawn u");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), u);
+    assert_eq!(running.current(), Some(u));
     let pid = running.thread_process_id(u).expect("owning pid");
     assert_eq!(factory.created(), 1);
     assert_eq!(factory.released(), 0);
@@ -580,7 +625,10 @@ fn terminating_last_user_thread_releases_address_space() {
 fn exit_current_signals_thread_terminated() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let id = scheduler
         .spawn(SpawnConfig::new("t"), || {})
         .expect("spawn t");
@@ -599,7 +647,10 @@ fn exit_current_signals_thread_terminated() {
 fn exit_current_with_nonzero_code_publishes_code() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let id = scheduler
         .spawn(SpawnConfig::new("t"), || {})
         .expect("spawn t");
@@ -616,7 +667,10 @@ fn exit_current_with_nonzero_code_publishes_code() {
 fn last_thread_exit_signals_process_terminated() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let id = scheduler
         .spawn(SpawnConfig::new("solo"), || {})
         .expect("spawn solo");
@@ -638,13 +692,16 @@ fn non_last_thread_exit_does_not_signal_process() {
 
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let first = scheduler
         .spawn(SpawnConfig::new("first"), || {})
         .expect("spawn first");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), first);
+    assert_eq!(running.current(), Some(first));
     let pid = running.thread_process_id(first).expect("process id");
 
     let second = running
@@ -670,7 +727,10 @@ fn non_last_thread_exit_does_not_signal_process() {
 fn process_object_outlives_process_table_entry() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let id = scheduler
         .spawn(SpawnConfig::new("zombie"), || {})
         .expect("spawn");
@@ -691,14 +751,17 @@ fn process_object_outlives_process_table_entry() {
 fn current_thread_object_returns_running_thread_object() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let id = scheduler
         .spawn(SpawnConfig::new("t"), || {})
         .expect("spawn t");
     let expected = scheduler.thread_object_for(id).expect("thread_object");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), id);
+    assert_eq!(running.current(), Some(id));
 
     let observed = running
         .handle()
@@ -711,7 +774,10 @@ fn current_thread_object_returns_running_thread_object() {
 fn current_process_object_returns_running_process_object() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let id = scheduler
         .spawn(SpawnConfig::new("t"), || {})
         .expect("spawn t");
@@ -719,7 +785,7 @@ fn current_process_object_returns_running_process_object() {
     let expected = scheduler.process_object_for(pid).expect("process_object");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), id);
+    assert_eq!(running.current(), Some(id));
 
     let observed = running
         .handle()
@@ -734,7 +800,10 @@ fn kernel_thread_completion_signals_terminated() {
 
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let id = scheduler
         .spawn(SpawnConfig::new("t"), || {})
         .expect("spawn t");
@@ -742,7 +811,7 @@ fn kernel_thread_completion_signals_terminated() {
     let handle = scheduler.handle();
 
     let running = scheduler.run();
-    assert_eq!(running.current(), id);
+    assert_eq!(running.current(), Some(id));
     assert!(!target.terminated());
 
     forwarder.set(Arc::new(handle));
@@ -881,7 +950,10 @@ fn process_terminate_via_handle_terminates_all_threads() {
 fn switch_to_next_skips_terminated_thread_in_ready_queue() {
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let t1 = scheduler
         .spawn(SpawnConfig::new("t1"), || {})
         .expect("spawn t1");
@@ -894,7 +966,7 @@ fn switch_to_next_skips_terminated_thread_in_ready_queue() {
     let t2_thread_object = scheduler.thread_object_for(t2).expect("t2 target");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), t1);
+    assert_eq!(running.current(), Some(t1));
 
     let handle = running.handle();
     handle
@@ -903,7 +975,7 @@ fn switch_to_next_skips_terminated_thread_in_ready_queue() {
     assert!(t2_thread_object.terminated());
 
     running.yield_now();
-    assert_eq!(running.current(), t3);
+    assert_eq!(running.current(), Some(t3));
 }
 
 #[test]
@@ -912,13 +984,16 @@ fn spawn_rollback_undoes_inherit_increment_on_thread_table_full() {
 
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let t1 = scheduler
         .spawn(SpawnConfig::new("t1"), || {})
         .expect("spawn t1");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), t1);
+    assert_eq!(running.current(), Some(t1));
     let pid = running.thread_process_id(t1).expect("pid");
     let handle = running.handle();
 

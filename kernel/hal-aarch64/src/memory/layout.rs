@@ -6,7 +6,7 @@ use memory::{
     aligned::{Address, Aligned},
     memory_range::MemoryRange,
     physical_address::{PageAlignedAddress, PhysicalAddress},
-    virtual_address::PageAlignedVirtualAddress,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 
 /// Максимальное количество регионов памяти.
@@ -25,6 +25,10 @@ pub enum RegionTag {
     Other,
 }
 
+/// Регионов больше, чем вмещает [`MAX_MEMORY_REGIONS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooManyMemoryRegions;
+
 /// Раскладка физической памяти ядра.
 pub struct MemoryLayout {
     /// Список регионов памяти.
@@ -38,8 +42,12 @@ impl MemoryLayout {
         }
     }
 
-    pub fn add(&mut self, region: MemoryRegion<PageAlignedAddress>) {
-        self.regions.push(region).expect("Too many memory regions");
+    /// Добавляет регион. `Err` - список регионов исчерпан.
+    pub fn add(
+        &mut self,
+        region: MemoryRegion<PageAlignedAddress>,
+    ) -> Result<(), TooManyMemoryRegions> {
+        self.regions.push(region).ok_or(TooManyMemoryRegions)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &MemoryRegion<PageAlignedAddress>> {
@@ -123,8 +131,11 @@ impl MemoryRegion<PageAlignedAddress> {
 
     /// Возвращает виртуальный адрес в higher half.
     pub fn virtual_start(&self, higher_half_base: usize) -> PageAlignedVirtualAddress {
-        PageAlignedVirtualAddress::from_usize(higher_half_base + self.start.as_usize())
-            .expect("address should be page aligned")
+        // База higher-half и start выровнены по странице, сумма тоже.
+        debug_assert!(higher_half_base.is_multiple_of(PageAlignedVirtualAddress::ALIGNMENT));
+        PageAlignedVirtualAddress::aligned_down(VirtualAddress::new(
+            higher_half_base + self.start.as_usize(),
+        ))
     }
 
     pub fn is_heap(&self) -> bool {

@@ -20,7 +20,7 @@ impl ThreadId {
 
 impl From<ThreadId> for WaitToken {
     fn from(value: ThreadId) -> Self {
-        WaitToken::new(NonZeroU64::new(u64::from(value.raw().get())).expect("ThreadId is nonzero"))
+        WaitToken::new(NonZeroU64::from(value.raw()))
     }
 }
 
@@ -158,7 +158,8 @@ pub trait SchedulerService: Send + Sync {
 
     fn sleep_ns(&self, ns: u64);
 
-    fn current(&self) -> ThreadId;
+    /// Текущий поток. `None`, если планировщик ещё не поднят на этом CPU.
+    fn current(&self) -> Option<ThreadId>;
 
     fn exit(&self) -> !;
 }

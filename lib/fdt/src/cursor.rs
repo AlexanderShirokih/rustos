@@ -36,9 +36,9 @@ impl<'a> Cursor<'a> {
     /// Возвращает `None`, если в буфере недостаточно байт, чтобы не паниковать на OOB-доступе.
     pub(crate) fn read_u32(&mut self) -> Option<u32> {
         let p = self.position;
-        let slice = self.buffer.get(p..p + 4)?;
+        let word = *self.buffer.get(p..)?.first_chunk::<4>()?;
         self.position = p + 4;
-        Some(u32::from_be_bytes(slice.try_into().unwrap()))
+        Some(u32::from_be_bytes(word))
     }
 
     pub fn read_cstr_at(&self, offset: usize) -> &'a str {

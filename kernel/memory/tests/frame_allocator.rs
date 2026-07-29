@@ -7,7 +7,10 @@ use common::make_range;
 use memory::{
     FrameBitmap,
     frame::Frame,
-    frame_allocator::{FrameAllocator, FrameError, PhysicalFrameAllocator, ReserveFrameError},
+    frame_allocator::{
+        FrameAllocator, FrameAllocatorInitError, FrameError, MAX_REGIONS, PhysicalFrameAllocator,
+        ReserveFrameError,
+    },
 };
 
 // =============================================================================
@@ -19,7 +22,7 @@ fn single_region_allocator(
     frame_count: usize,
 ) -> PhysicalFrameAllocator<MutexCell<FrameBitmap>> {
     let region = make_range(start_frame, frame_count);
-    PhysicalFrameAllocator::new([region].into_iter())
+    PhysicalFrameAllocator::new([region].into_iter()).expect("single region is valid")
 }
 
 fn multi_region_allocator(
@@ -29,7 +32,7 @@ fn multi_region_allocator(
         .iter()
         .map(|(start, count)| make_range(*start, *count))
         .collect();
-    PhysicalFrameAllocator::new(ranges.into_iter())
+    PhysicalFrameAllocator::new(ranges.into_iter()).expect("regions are valid")
 }
 
 // =============================================================================
@@ -53,10 +56,18 @@ fn new_with_multiple_regions_succeeds() {
 }
 
 #[test]
-#[should_panic(expected = "Managed memory regions should not be empty")]
-fn new_panics_on_empty_regions() {
-    let _: PhysicalFrameAllocator<MutexCell<FrameBitmap>> =
+fn new_rejects_empty_regions() {
+    let result: Result<PhysicalFrameAllocator<MutexCell<FrameBitmap>>, _> =
         PhysicalFrameAllocator::new(std::iter::empty());
+    assert_eq!(result.err(), Some(FrameAllocatorInitError::NoRegions));
+}
+
+#[test]
+fn new_rejects_more_regions_than_capacity() {
+    let ranges: Vec<_> = (0..=MAX_REGIONS).map(|i| make_range(i * 64, 32)).collect();
+    let result: Result<PhysicalFrameAllocator<MutexCell<FrameBitmap>>, _> =
+        PhysicalFrameAllocator::new(ranges.into_iter());
+    assert_eq!(result.err(), Some(FrameAllocatorInitError::TooManyRegions));
 }
 
 #[test]

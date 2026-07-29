@@ -24,15 +24,13 @@ use super::{
     wait::{CancelTarget, ParkWaker},
 };
 
-/// Роль заблокированной стороны - определяет, как её будят при встрече.
+/// Роль стороны, стоящей в очереди отправителей.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WaiterKind {
+pub(crate) enum SendKind {
     /// `send`: после доставки отправитель разблокируется немедленно.
     Send,
     /// `call`: вызывающая сторона остаётся блокированной до `reply`.
     Call,
-    /// `recv`: получатель ждёт отправителя/вызывателя.
-    Recv,
 }
 
 /// Исход операции, прочитанный разбуженной стороной из [`OutcomeSlot`].
@@ -187,20 +185,23 @@ impl OutcomeSlot {
     }
 }
 
-/// Запись о заблокированном на port потоке.
-struct Waiter {
-    kind: WaiterKind,
+// K - роль стороны: SendKind в очереди отправителей и () в очереди получателей.
+struct Waiter<K> {
+    kind: K,
     transport: ThreadTransport,
     waker: Arc<ParkWaker>,
     outcome: Arc<OutcomeSlot>,
     reply_slot: Arc<ReplySlot>,
 }
 
+type SenderWaiter = Waiter<SendKind>;
+type ReceiverWaiter = Waiter<()>;
+
 /// Очередь ожидания: либо отправители/вызыватели, либо получатели, но не оба.
 enum Queue {
     Empty,
-    Senders(VecDeque<Waiter>),
-    Receivers(VecDeque<Waiter>),
+    Senders(VecDeque<SenderWaiter>),
+    Receivers(VecDeque<ReceiverWaiter>),
 }
 
 /// Port - объект, реализующий синхронный обмен сообщениями.
@@ -208,17 +209,55 @@ pub struct Port {
     inner: MutexCell<Queue>,
 }
 
-/// Действие caller после операции.
-pub(crate) enum PortAction {
+/// Контекст парковки текущего потока: waker и слот исхода.
+pub(crate) struct ParkCtx {
+    waker: Arc<ParkWaker>,
+    outcome: Arc<OutcomeSlot>,
+}
+
+impl ParkCtx {
+    /// Вызывать только вне queue-лока. `current_wait_token` берёт scheduler-лок, а
+    /// обратный порядок захвата занят терминацией потока (`PortCancel`).
+    pub(crate) fn for_current(runtime: &Arc<dyn KernelRuntime>) -> Self {
+        let token = runtime.current_wait_token();
+        Self {
+            waker: Arc::new(ParkWaker::new(runtime.clone(), token)),
+            outcome: OutcomeSlot::new(),
+        }
+    }
+}
+
+pub(crate) enum SendAction {
     /// Текущий поток обязан заблокироваться на `waker.state()`.
     Park {
         waker: Arc<ParkWaker>,
         outcome: Arc<OutcomeSlot>,
-        reply_slot: Option<Arc<ReplySlot>>,
     },
-    /// Операция завершилась немедленно, без блокировки текущего потока.
-    Done { reply: Option<Arc<Reply>> },
+    /// Сообщение доставлено немедленно, без блокировки текущего потока.
+    Done,
     /// Ошибка (перенос caps/копирование тела провалились).
+    Failed(IpcError),
+}
+
+/// Варианта `Done` нет: вызывающая сторона всегда паркуется до reply.
+pub(crate) enum CallAction {
+    Park {
+        waker: Arc<ParkWaker>,
+        outcome: Arc<OutcomeSlot>,
+    },
+    Failed(IpcError),
+}
+
+pub(crate) enum RecvAction {
+    Park {
+        waker: Arc<ParkWaker>,
+        outcome: Arc<OutcomeSlot>,
+        reply_slot: Arc<ReplySlot>,
+    },
+    /// Сообщение получено немедленно. `reply` непуст, если встречным был `call`.
+    Done {
+        reply: Option<Arc<Reply>>,
+    },
     Failed(IpcError),
 }
 
@@ -229,135 +268,97 @@ impl Port {
         })
     }
 
-    /// Транспорт отправки текущего потока.
-    /// Для `call` caller обязан передать предсозданные `(waker, outcome)`, на которые
-    /// будет ссылаться Reply.
-    pub(crate) fn send_or_call(
-        self: &Arc<Self>,
-        kind: WaiterKind,
-        sender: ThreadTransport,
+    /// `send` текущего потока: доставляет ждущему получателю либо паркуется.
+    ///
+    /// Матч и постановка в очередь - разные захваты queue-лока: между ними берётся
+    /// wait-token. Появившийся в это окно получатель возвращает waiter обратно, и цикл
+    /// повторяет матч.
+    pub(crate) fn send(
+        &self,
+        mut sender: ThreadTransport,
         runtime: &Arc<dyn KernelRuntime>,
-        call_ctx: Option<(Arc<ParkWaker>, Arc<OutcomeSlot>)>,
-    ) -> PortAction {
-        debug_assert!(matches!(kind, WaiterKind::Send | WaiterKind::Call));
-
-        let receiver = self.inner.with_lock(pop_receiver);
-
-        if let Some(receiver) = receiver {
-            // current=sender, parked=receiver.
-            match transfer_rendezvous(&sender, &receiver.transport) {
-                Ok(()) => {
-                    match kind {
-                        WaiterKind::Send => {
-                            receiver.outcome.set(RendezvousOutcome::Delivered);
-                            receiver.waker.signal_match();
-                            PortAction::Done { reply: None }
-                        }
-                        WaiterKind::Call => {
-                            // вызывающая сторона паркуется до reply; Reply
-                            // ссылается на его предсозданные waker/outcome и
-                            // отдаётся получателю через его reply_slot.
-                            let (waker, outcome) =
-                                call_ctx.expect("call requires preallocated park ctx");
-                            outcome.set_awaiting_reply();
-
-                            let reply = Reply::new(sender.clone(), waker.clone(), outcome.clone());
-                            receiver.reply_slot.install(reply);
-                            receiver.outcome.set(RendezvousOutcome::Delivered);
-                            receiver.waker.signal_match();
-                            PortAction::Park {
-                                waker,
-                                outcome,
-                                reply_slot: None,
-                            }
-                        }
-                        WaiterKind::Recv => unreachable!(),
-                    }
-                }
-                Err(e) => {
-                    receiver.outcome.set(RendezvousOutcome::TransferFailed);
-                    receiver.waker.signal_match();
-                    PortAction::Failed(e)
-                }
+    ) -> SendAction {
+        loop {
+            if let Some(receiver) = self.inner.with_lock(pop_receiver) {
+                return deliver_send(&sender, &receiver);
             }
-        } else {
-            // Никто не ждёт - паркуем текущий поток как sender/caller.
-            let (waker, outcome) = if kind == WaiterKind::Call {
-                call_ctx.expect("call requires preallocated park ctx")
-            } else {
-                let token = runtime.current_wait_token();
-                (
-                    Arc::new(ParkWaker::new(runtime.clone(), token)),
-                    OutcomeSlot::new(),
-                )
-            };
-            self.enqueue(Waiter {
-                kind,
+
+            let ctx = ParkCtx::for_current(runtime);
+            let waiter = Waiter {
+                kind: SendKind::Send,
                 transport: sender,
-                waker: waker.clone(),
-                outcome: outcome.clone(),
+                waker: ctx.waker.clone(),
+                outcome: ctx.outcome.clone(),
                 reply_slot: ReplySlot::new(),
-            });
-            PortAction::Park {
-                waker,
-                outcome,
-                reply_slot: None,
+            };
+            match self.inner.with_lock(|q| try_push_sender(q, waiter)) {
+                Ok(()) => {
+                    return SendAction::Park {
+                        waker: ctx.waker,
+                        outcome: ctx.outcome,
+                    };
+                }
+                Err(returned) => sender = returned.transport,
             }
         }
     }
 
-    /// Транспорт приемки текущего потока.
-    pub(crate) fn recv(
-        self: &Arc<Self>,
-        receiver: ThreadTransport,
-        runtime: &Arc<dyn KernelRuntime>,
-    ) -> PortAction {
-        let sender = self.inner.with_lock(pop_sender);
-
-        if let Some(sender) = sender {
-            // current=receiver, parked=sender/caller.
-            match transfer_rendezvous(&sender.transport, &receiver) {
-                Ok(()) => match sender.kind {
-                    WaiterKind::Send => {
-                        sender.outcome.set(RendezvousOutcome::Delivered);
-                        sender.waker.signal_match();
-                        PortAction::Done { reply: None }
-                    }
-                    WaiterKind::Call => {
-                        // Запрос доставлен - переводим вызывателя в ожидание
-                        // reply до выдачи Reply серверу.
-                        sender.outcome.set_awaiting_reply();
-                        let reply = Reply::new(
-                            sender.transport.clone(),
-                            sender.waker.clone(),
-                            sender.outcome.clone(),
-                        );
-                        PortAction::Done { reply: Some(reply) }
-                    }
-                    WaiterKind::Recv => unreachable!("receiver found in senders queue"),
-                },
-                Err(e) => {
-                    sender.outcome.set(RendezvousOutcome::TransferFailed);
-                    sender.waker.signal_match();
-                    PortAction::Failed(e)
-                }
+    /// `call` текущего потока с готовым контекстом парковки. Ретрай - как в [`Self::send`].
+    pub(crate) fn call(&self, mut caller: ThreadTransport, ctx: ParkCtx) -> CallAction {
+        loop {
+            if let Some(receiver) = self.inner.with_lock(pop_receiver) {
+                return deliver_call(caller, &receiver, ctx);
             }
-        } else {
-            let token = runtime.current_wait_token();
-            let waker = Arc::new(ParkWaker::new(runtime.clone(), token));
-            let outcome = OutcomeSlot::new();
+
+            let waiter = Waiter {
+                kind: SendKind::Call,
+                transport: caller,
+                waker: ctx.waker.clone(),
+                outcome: ctx.outcome.clone(),
+                reply_slot: ReplySlot::new(),
+            };
+            match self.inner.with_lock(|q| try_push_sender(q, waiter)) {
+                Ok(()) => {
+                    return CallAction::Park {
+                        waker: ctx.waker,
+                        outcome: ctx.outcome,
+                    };
+                }
+                Err(returned) => caller = returned.transport,
+            }
+        }
+    }
+
+    /// `recv` текущего потока: забирает сообщение у ждущего отправителя либо паркуется.
+    /// Ретрай - как в [`Self::send`].
+    pub(crate) fn recv(
+        &self,
+        mut receiver: ThreadTransport,
+        runtime: &Arc<dyn KernelRuntime>,
+    ) -> RecvAction {
+        loop {
+            if let Some(sender) = self.inner.with_lock(pop_sender) {
+                return deliver_recv(sender, &receiver);
+            }
+
+            let ctx = ParkCtx::for_current(runtime);
             let reply_slot = ReplySlot::new();
-            self.enqueue(Waiter {
-                kind: WaiterKind::Recv,
+            let waiter = Waiter {
+                kind: (),
                 transport: receiver,
-                waker: waker.clone(),
-                outcome: outcome.clone(),
+                waker: ctx.waker.clone(),
+                outcome: ctx.outcome.clone(),
                 reply_slot: reply_slot.clone(),
-            });
-            PortAction::Park {
-                waker,
-                outcome,
-                reply_slot: Some(reply_slot),
+            };
+            match self.inner.with_lock(|q| try_push_receiver(q, waiter)) {
+                Ok(()) => {
+                    return RecvAction::Park {
+                        waker: ctx.waker,
+                        outcome: ctx.outcome,
+                        reply_slot,
+                    };
+                }
+                Err(returned) => receiver = returned.transport,
             }
         }
     }
@@ -367,13 +368,10 @@ impl Port {
         let drained = self
             .inner
             .with_lock(|q| core::mem::replace(q, Queue::Empty));
-        let waiters = match drained {
-            Queue::Empty => return,
-            Queue::Senders(ss) | Queue::Receivers(ss) => ss,
-        };
-        for w in waiters {
-            w.outcome.set(RendezvousOutcome::PeerGone);
-            w.waker.cancel();
+        match drained {
+            Queue::Empty => {}
+            Queue::Senders(ss) => cancel_each(ss),
+            Queue::Receivers(rs) => cancel_each(rs),
         }
     }
 
@@ -383,42 +381,92 @@ impl Port {
         self.inner.with_lock(|q| {
             let removed = match q {
                 Queue::Empty => false,
-                Queue::Senders(dq) | Queue::Receivers(dq) => {
-                    match dq.iter().position(|w| Arc::ptr_eq(&w.waker, waker)) {
-                        Some(pos) => {
-                            dq.remove(pos);
-                            true
-                        }
-                        None => false,
-                    }
-                }
+                Queue::Senders(dq) => remove_by_waker(dq, waker),
+                Queue::Receivers(dq) => remove_by_waker(dq, waker),
             };
             collapse_if_empty(q);
             removed
         })
     }
 
-    fn enqueue(&self, waiter: Waiter) {
-        let is_receiver = waiter.kind == WaiterKind::Recv;
-        self.inner.with_lock(|q| match q {
-            Queue::Empty => {
-                let mut dq = VecDeque::new();
-                dq.push_back(waiter);
-                *q = if is_receiver {
-                    Queue::Receivers(dq)
-                } else {
-                    Queue::Senders(dq)
-                };
-            }
-            Queue::Senders(ss) if !is_receiver => ss.push_back(waiter),
-            Queue::Receivers(rs) if is_receiver => rs.push_back(waiter),
-            _ => unreachable!("queue switched under single lock"),
-        });
-    }
-
     #[cfg(test)]
     pub(crate) fn queue_is_empty(&self) -> bool {
         self.inner.with_lock(|q| matches!(q, Queue::Empty))
+    }
+}
+
+fn deliver_send(sender: &ThreadTransport, receiver: &ReceiverWaiter) -> SendAction {
+    match transfer_rendezvous(sender, &receiver.transport) {
+        Ok(()) => {
+            receiver.outcome.set(RendezvousOutcome::Delivered);
+            receiver.waker.signal_match();
+            SendAction::Done
+        }
+        Err(e) => {
+            receiver.outcome.set(RendezvousOutcome::TransferFailed);
+            receiver.waker.signal_match();
+            SendAction::Failed(e)
+        }
+    }
+}
+
+fn deliver_call(caller: ThreadTransport, receiver: &ReceiverWaiter, ctx: ParkCtx) -> CallAction {
+    match transfer_rendezvous(&caller, &receiver.transport) {
+        Ok(()) => {
+            ctx.outcome.set_awaiting_reply();
+            let reply = Reply::new(caller, ctx.waker.clone(), ctx.outcome.clone());
+            receiver.reply_slot.install(reply);
+            receiver.outcome.set(RendezvousOutcome::Delivered);
+            receiver.waker.signal_match();
+            CallAction::Park {
+                waker: ctx.waker,
+                outcome: ctx.outcome,
+            }
+        }
+        Err(e) => {
+            receiver.outcome.set(RendezvousOutcome::TransferFailed);
+            receiver.waker.signal_match();
+            CallAction::Failed(e)
+        }
+    }
+}
+
+fn deliver_recv(sender: SenderWaiter, receiver: &ThreadTransport) -> RecvAction {
+    match transfer_rendezvous(&sender.transport, receiver) {
+        Ok(()) => match sender.kind {
+            SendKind::Send => {
+                sender.outcome.set(RendezvousOutcome::Delivered);
+                sender.waker.signal_match();
+                RecvAction::Done { reply: None }
+            }
+            SendKind::Call => {
+                sender.outcome.set_awaiting_reply();
+                let reply = Reply::new(sender.transport, sender.waker, sender.outcome);
+                RecvAction::Done { reply: Some(reply) }
+            }
+        },
+        Err(e) => {
+            sender.outcome.set(RendezvousOutcome::TransferFailed);
+            sender.waker.signal_match();
+            RecvAction::Failed(e)
+        }
+    }
+}
+
+fn cancel_each<K>(waiters: VecDeque<Waiter<K>>) {
+    for w in waiters {
+        w.outcome.set(RendezvousOutcome::PeerGone);
+        w.waker.cancel();
+    }
+}
+
+fn remove_by_waker<K>(dq: &mut VecDeque<Waiter<K>>, waker: &Arc<ParkWaker>) -> bool {
+    match dq.iter().position(|w| Arc::ptr_eq(&w.waker, waker)) {
+        Some(pos) => {
+            dq.remove(pos);
+            true
+        }
+        None => false,
     }
 }
 
@@ -468,10 +516,10 @@ pub fn port_send(
     runtime: &Arc<dyn KernelRuntime>,
     timeout_ns: Option<u64>,
 ) -> Result<(), IpcError> {
-    match port.send_or_call(WaiterKind::Send, sender, runtime, None) {
-        PortAction::Done { .. } => Ok(()),
-        PortAction::Failed(e) => Err(e),
-        PortAction::Park { waker, outcome, .. } => {
+    match port.send(sender, runtime) {
+        SendAction::Done => Ok(()),
+        SendAction::Failed(e) => Err(e),
+        SendAction::Park { waker, outcome } => {
             arm_port_cancel(port, runtime, &waker, &outcome);
             park_with_timeout(runtime, &waker, timeout_ns);
             let result = resolve_send_recv(port, runtime, &waker, &outcome);
@@ -494,21 +542,9 @@ pub fn port_call(
 ) -> Result<(), IpcError> {
     // вызывающая сторона всегда паркуется до reply - предсоздаём park-ctx, чтобы
     // Reply мог на него ссылаться даже на синхронном матче.
-    let token = runtime.current_wait_token();
-    let waker = Arc::new(ParkWaker::new(runtime.clone(), token));
-    let outcome = OutcomeSlot::new();
-    match port.send_or_call(
-        WaiterKind::Call,
-        caller,
-        runtime,
-        Some((waker.clone(), outcome.clone())),
-    ) {
-        PortAction::Failed(e) => Err(e),
-        PortAction::Done { .. } => {
-            // call никогда не завершается синхронно (всегда Park).
-            unreachable!("call always parks until reply");
-        }
-        PortAction::Park { waker, outcome, .. } => {
+    match port.call(caller, ParkCtx::for_current(runtime)) {
+        CallAction::Failed(e) => Err(e),
+        CallAction::Park { waker, outcome } => {
             arm_port_cancel(port, runtime, &waker, &outcome);
             park_with_timeout(runtime, &waker, timeout_ns);
             let result = resolve_call(port, runtime, &waker, &outcome, timeout_ns);
@@ -566,9 +602,9 @@ pub fn port_recv(
     timeout_ns: Option<u64>,
 ) -> Result<Option<Arc<Reply>>, IpcError> {
     match port.recv(receiver, runtime) {
-        PortAction::Done { reply } => Ok(reply),
-        PortAction::Failed(e) => Err(e),
-        PortAction::Park {
+        RecvAction::Done { reply } => Ok(reply),
+        RecvAction::Failed(e) => Err(e),
+        RecvAction::Park {
             waker,
             outcome,
             reply_slot,
@@ -579,7 +615,7 @@ pub fn port_recv(
             runtime.clear_blocked_cancel();
             resolved?;
 
-            Ok(reply_slot.and_then(|slot| slot.take()))
+            Ok(reply_slot.take())
         }
     }
 }
@@ -587,27 +623,65 @@ pub fn port_recv(
 /// Схлопывает очередь в `Empty`, когда её дек опустел: единственный источник
 /// инварианта "пустой дек -> состояние `Empty`".
 fn collapse_if_empty(q: &mut Queue) {
-    if matches!(q, Queue::Senders(dq) | Queue::Receivers(dq) if dq.is_empty()) {
+    let drained = match q {
+        Queue::Empty => false,
+        Queue::Senders(dq) => dq.is_empty(),
+        Queue::Receivers(dq) => dq.is_empty(),
+    };
+    if drained {
         *q = Queue::Empty;
     }
 }
 
-fn pop_receiver(q: &mut Queue) -> Option<Waiter> {
+fn pop_receiver(q: &mut Queue) -> Option<ReceiverWaiter> {
     let waiter = match q {
         Queue::Receivers(rs) => rs.pop_front(),
-        _ => None,
+        Queue::Empty | Queue::Senders(_) => None,
     };
     collapse_if_empty(q);
     waiter
 }
 
-fn pop_sender(q: &mut Queue) -> Option<Waiter> {
+fn pop_sender(q: &mut Queue) -> Option<SenderWaiter> {
     let waiter = match q {
         Queue::Senders(ss) => ss.pop_front(),
-        _ => None,
+        Queue::Empty | Queue::Receivers(_) => None,
     };
     collapse_if_empty(q);
     waiter
+}
+
+// Err - в очереди уже стоят получатели. Вызывающий обязан повторить матч.
+fn try_push_sender(q: &mut Queue, waiter: SenderWaiter) -> Result<(), SenderWaiter> {
+    match q {
+        Queue::Senders(ss) => {
+            ss.push_back(waiter);
+            Ok(())
+        }
+        Queue::Empty => {
+            let mut dq = VecDeque::new();
+            dq.push_back(waiter);
+            *q = Queue::Senders(dq);
+            Ok(())
+        }
+        Queue::Receivers(_) => Err(waiter),
+    }
+}
+
+fn try_push_receiver(q: &mut Queue, waiter: ReceiverWaiter) -> Result<(), ReceiverWaiter> {
+    match q {
+        Queue::Receivers(rs) => {
+            rs.push_back(waiter);
+            Ok(())
+        }
+        Queue::Empty => {
+            let mut dq = VecDeque::new();
+            dq.push_back(waiter);
+            *q = Queue::Receivers(dq);
+            Ok(())
+        }
+        Queue::Senders(_) => Err(waiter),
+    }
 }
 
 impl Drop for Port {
@@ -718,7 +792,7 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let action = ep.recv(transport(BASE_B), &rt);
-        assert!(matches!(action, PortAction::Park { .. }));
+        assert!(matches!(action, RecvAction::Park { .. }));
         assert!(!ep.queue_is_empty());
     }
 
@@ -729,7 +803,7 @@ mod tests {
 
         // Получатель паркуется.
         let recv_action = ep.recv(transport(BASE_B), &rt);
-        let PortAction::Park {
+        let RecvAction::Park {
             outcome: recv_outcome,
             reply_slot: recv_reply_slot,
             ..
@@ -740,20 +814,20 @@ mod tests {
         assert!(recv_outcome.get().is_none());
 
         // Отправитель встречает получателя: матч, доставка, queue пуст.
-        let send_action = ep.send_or_call(WaiterKind::Send, transport(BASE_A), &rt, None);
-        assert!(matches!(send_action, PortAction::Done { reply: None }));
+        let send_action = ep.send(transport(BASE_A), &rt);
+        assert!(matches!(send_action, SendAction::Done));
         assert_eq!(recv_outcome.get(), Some(RendezvousOutcome::Delivered));
         assert!(ep.queue_is_empty());
         // send -> recv: reply отсутствует.
-        assert!(recv_reply_slot.unwrap().take().is_none());
+        assert!(recv_reply_slot.take().is_none());
     }
 
     #[test]
     fn send_with_no_receiver_parks_as_sender() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let action = ep.send_or_call(WaiterKind::Send, transport(BASE_A), &rt, None);
-        assert!(matches!(action, PortAction::Park { .. }));
+        let action = ep.send(transport(BASE_A), &rt);
+        assert!(matches!(action, SendAction::Park { .. }));
         assert!(!ep.queue_is_empty());
     }
 
@@ -761,8 +835,8 @@ mod tests {
     fn recv_matches_parked_sender() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let send_action = ep.send_or_call(WaiterKind::Send, transport(BASE_A), &rt, None);
-        let PortAction::Park {
+        let send_action = ep.send(transport(BASE_A), &rt);
+        let SendAction::Park {
             outcome: send_outcome,
             ..
         } = send_action
@@ -771,7 +845,7 @@ mod tests {
         };
 
         let recv_action = ep.recv(transport(BASE_B), &rt);
-        assert!(matches!(recv_action, PortAction::Done { reply: None }));
+        assert!(matches!(recv_action, RecvAction::Done { reply: None }));
         assert_eq!(send_outcome.get(), Some(RendezvousOutcome::Delivered));
         assert!(ep.queue_is_empty());
     }
@@ -781,20 +855,15 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         // вызывающая сторона паркуется (call всегда паркуется).
-        let waker = Arc::new(ParkWaker::new(rt.clone(), rt.current_wait_token()));
-        let outcome = OutcomeSlot::new();
-        let call_action = ep.send_or_call(
-            WaiterKind::Call,
-            transport(BASE_A),
-            &rt,
-            Some((waker, outcome.clone())),
-        );
-        assert!(matches!(call_action, PortAction::Park { .. }));
+        let ctx = ParkCtx::for_current(&rt);
+        let outcome = ctx.outcome.clone();
+        let call_action = ep.call(transport(BASE_A), ctx);
+        assert!(matches!(call_action, CallAction::Park { .. }));
 
         // Получатель смэтчил call -> получает Reply, вызывающая сторона остаётся
         // заблокированным (outcome ещё pending).
         let recv_action = ep.recv(transport(BASE_B), &rt);
-        let PortAction::Done { reply: Some(reply) } = recv_action else {
+        let RecvAction::Done { reply: Some(reply) } = recv_action else {
             panic!("recv must return a reply for call");
         };
         assert!(outcome.get().is_none(), "caller stays blocked until reply");
@@ -812,7 +881,7 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let action = ep.recv(transport(BASE_B), &rt);
-        let PortAction::Park { outcome, .. } = action else {
+        let RecvAction::Park { outcome, .. } = action else {
             panic!("recv must park");
         };
         ep.cancel_all();
@@ -825,7 +894,7 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let action = ep.recv(transport(BASE_B), &rt);
-        let PortAction::Park { outcome, .. } = action else {
+        let RecvAction::Park { outcome, .. } = action else {
             panic!("recv must park");
         };
         drop(ep);
@@ -836,7 +905,7 @@ mod tests {
     fn port_cancel_removes_waiter_on_termination() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let PortAction::Park { waker, outcome, .. } = ep.recv(transport(BASE_B), &rt) else {
+        let RecvAction::Park { waker, outcome, .. } = ep.recv(transport(BASE_B), &rt) else {
             panic!("recv must park");
         };
         assert!(!ep.queue_is_empty());
@@ -861,19 +930,14 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         // вызывающая сторона паркуется (call всегда паркуется до reply).
-        let waker = Arc::new(ParkWaker::new(rt.clone(), rt.current_wait_token()));
-        let outcome = OutcomeSlot::new();
-        let call_action = ep.send_or_call(
-            WaiterKind::Call,
-            transport(BASE_A),
-            &rt,
-            Some((waker.clone(), outcome.clone())),
-        );
-        assert!(matches!(call_action, PortAction::Park { .. }));
+        let ctx = ParkCtx::for_current(&rt);
+        let (waker, outcome) = (ctx.waker.clone(), ctx.outcome.clone());
+        let call_action = ep.call(transport(BASE_A), ctx);
+        assert!(matches!(call_action, CallAction::Park { .. }));
 
         // Получатель забрал запрос -> вызывающая сторона в фазе 2 (AWAITING_REPLY); его
         // Waiter уже не в очереди, поэтому remove_waiter в cancel - no-op.
-        let PortAction::Done { reply: Some(reply) } = ep.recv(transport(BASE_B), &rt) else {
+        let RecvAction::Done { reply: Some(reply) } = ep.recv(transport(BASE_B), &rt) else {
             panic!("recv must return a reply for call");
         };
         assert_eq!(outcome.raw(), OutcomeSlot::AWAITING_REPLY);
@@ -901,7 +965,7 @@ mod tests {
     fn remove_waiter_is_arbiter_and_idempotent() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let PortAction::Park { waker, .. } = ep.recv(transport(BASE_B), &rt) else {
+        let RecvAction::Park { waker, .. } = ep.recv(transport(BASE_B), &rt) else {
             panic!("recv must park");
         };
         assert!(!ep.queue_is_empty());
@@ -941,7 +1005,7 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         // Получатель уже припаркован - poll-send встречает его немедленно.
-        let PortAction::Park {
+        let RecvAction::Park {
             outcome: recv_outcome,
             ..
         } = ep.recv(transport(BASE_B), &rt)
@@ -971,17 +1035,12 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         // вызывающая сторона паркуется (call всегда паркуется до reply).
-        let waker = Arc::new(ParkWaker::new(rt.clone(), rt.current_wait_token()));
-        let outcome = OutcomeSlot::new();
-        let call_action = ep.send_or_call(
-            WaiterKind::Call,
-            transport(BASE_A),
-            &rt,
-            Some((waker.clone(), outcome.clone())),
-        );
-        assert!(matches!(call_action, PortAction::Park { .. }));
+        let ctx = ParkCtx::for_current(&rt);
+        let (waker, outcome) = (ctx.waker.clone(), ctx.outcome.clone());
+        let call_action = ep.call(transport(BASE_A), ctx);
+        assert!(matches!(call_action, CallAction::Park { .. }));
 
-        let PortAction::Done { reply: Some(reply) } = ep.recv(transport(BASE_B), &rt) else {
+        let RecvAction::Done { reply: Some(reply) } = ep.recv(transport(BASE_B), &rt) else {
             panic!("recv must return a reply for call");
         };
         assert_eq!(outcome.raw(), OutcomeSlot::AWAITING_REPLY);

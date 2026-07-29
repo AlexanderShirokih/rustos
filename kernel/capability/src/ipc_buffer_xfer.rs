@@ -228,14 +228,17 @@ pub fn transfer_rendezvous(
         let reservations = receiver
             .handle_table
             .with_lock(|tbl| reserve_slots(tbl, ncaps))?;
-        let predicted: Vec<HandleId> = reservations.iter().map(|r| r.handle_id()).collect();
+        let predicted: Vec<HandleId> = reservations
+            .iter()
+            .map(HandleReservation::handle_id)
+            .collect();
 
         // Пишем предсказанные ID в caps получателя. На ошибке освобождаем
         // резервации - отправитель ещё не тронут.
         if let Err(e) = write_caps(receiver, &predicted) {
             receiver
                 .handle_table
-                .with_lock(|tbl| release_all(tbl, &reservations));
+                .with_lock(|tbl| release_all(tbl, reservations));
             return Err(e);
         }
 
@@ -247,7 +250,7 @@ pub fn transfer_rendezvous(
             Err(e) => {
                 receiver
                     .handle_table
-                    .with_lock(|tbl| release_all(tbl, &reservations));
+                    .with_lock(|tbl| release_all(tbl, reservations));
                 return Err(e);
             }
         };
@@ -269,7 +272,7 @@ fn reserve_slots(tbl: &mut HandleTable, n: usize) -> Result<Vec<HandleReservatio
         match tbl.reserve_slot() {
             Ok(r) => reservations.push(r),
             Err(e) => {
-                release_all(tbl, &reservations);
+                release_all(tbl, reservations);
                 return Err(e);
             }
         }
@@ -277,9 +280,9 @@ fn reserve_slots(tbl: &mut HandleTable, n: usize) -> Result<Vec<HandleReservatio
     Ok(reservations)
 }
 
-fn release_all(tbl: &mut HandleTable, reservations: &[HandleReservation]) {
+fn release_all(tbl: &mut HandleTable, reservations: Vec<HandleReservation>) {
     for r in reservations {
-        tbl.release_reservation(*r);
+        tbl.release_reservation(r);
     }
 }
 

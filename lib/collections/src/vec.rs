@@ -42,7 +42,15 @@ impl<T, const N: usize> Vec<T, N> {
             return None;
         }
 
-        self.items[index].as_ref()
+        self.items.get(index)?.as_ref()
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index >= self.len {
+            return None;
+        }
+
+        self.items.get_mut(index)?.as_mut()
     }
 
     pub fn push(&mut self, item: T) -> Option<()> {
@@ -63,22 +71,6 @@ impl<T, const N: usize> Vec<T, N> {
 
         self.len -= 1;
         self.items[self.len].take()
-    }
-
-    pub fn sort_unstable_by_key<K, F>(&mut self, mut key: F)
-    where
-        F: FnMut(&T) -> K,
-        K: Ord,
-    {
-        let slice = &mut self.items[..self.len];
-
-        slice.sort_unstable_by(|a, b| {
-            // по инварианту [0..len) всегда Some
-            let a = a.as_ref().unwrap();
-            let b = b.as_ref().unwrap();
-
-            key(a).cmp(&key(b))
-        });
     }
 
     pub fn truncate(&mut self, new_len: usize) {
@@ -103,27 +95,21 @@ impl<T, const N: usize> Index<usize> for Vec<T, N> {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
-        assert!(
-            index < self.len,
-            "index out of bounds: index {} >= len {}",
-            index,
-            self.len
-        );
-
-        self.items[index].as_ref().unwrap()
+        let len = self.len;
+        match self.get(index) {
+            Some(item) => item,
+            None => panic!("index out of bounds: index {index} >= len {len}"),
+        }
     }
 }
 
 impl<T, const N: usize> IndexMut<usize> for Vec<T, N> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        assert!(
-            index < self.len,
-            "index out of bounds: index {} >= len {}",
-            index,
-            self.len
-        );
-
-        self.items[index].as_mut().unwrap()
+        let len = self.len;
+        match self.get_mut(index) {
+            Some(item) => item,
+            None => panic!("index out of bounds: index {index} >= len {len}"),
+        }
     }
 }
 
@@ -208,17 +194,5 @@ impl<'a, T, const N: usize> IntoIterator for &'a Vec<T, N> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
-    }
-}
-
-impl<T, const N: usize> FromIterator<T> for Vec<T, N> {
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut vec = Self::new();
-
-        for item in iter {
-            vec.push(item).unwrap();
-        }
-
-        vec
     }
 }

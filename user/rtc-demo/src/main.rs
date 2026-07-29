@@ -25,7 +25,7 @@ pub extern "C" fn _start(root: Handle) -> ! {
 fn run(root: Handle) -> Result<()> {
     let root = OwnedHandle::from_handle(root);
     let kernel = BootstrapClient::new(PortTransport::client(root.borrow()));
-    let resource = Resource::self_resource();
+    let resource = Resource::self_resource()?;
 
     // Образ для спавна и device-окно PL031 от ядра.
     let image_region =

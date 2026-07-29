@@ -21,7 +21,7 @@ const PATTERN: u64 = 0x5EED_F00D_C0DE_AB1E;
 /// родителю.
 #[kernel_test]
 fn memory_region_shared_with_child() {
-    let resource = Resource::self_resource();
+    let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
         .expect("create shared region");

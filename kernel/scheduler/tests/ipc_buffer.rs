@@ -66,7 +66,9 @@ fn without_frame_allocator_user_thread_has_no_ipc_buffer_region() {
         TEST_CONFIG,
         Some(factory),
     )
-    .bootstrap();
+    .bootstrap()
+    .ok()
+    .expect("bootstrap must succeed in tests");
     let handle = scheduler.handle();
 
     let process = handle.create_empty_process("p").expect("create process");
@@ -90,7 +92,9 @@ fn with_frame_allocator_user_thread_attaches_one_ipc_buffer_region() {
         TEST_CONFIG,
         Some(factory),
     )
-    .bootstrap();
+    .bootstrap()
+    .ok()
+    .expect("bootstrap must succeed in tests");
     scheduler.set_frame_allocator(frame_allocator_static());
     let handle = scheduler.handle();
 
@@ -116,7 +120,9 @@ fn terminate_thread_releases_its_ipc_buffer_region() {
         TEST_CONFIG,
         Some(factory),
     )
-    .bootstrap();
+    .bootstrap()
+    .ok()
+    .expect("bootstrap must succeed in tests");
     scheduler.set_frame_allocator(frame_allocator_static());
     let handle = scheduler.handle();
 
@@ -147,7 +153,9 @@ fn ipc_buffer_install_failure_rolls_back_allocation_and_thread() {
         TEST_CONFIG,
         Some(factory),
     )
-    .bootstrap();
+    .bootstrap()
+    .ok()
+    .expect("bootstrap must succeed in tests");
     scheduler.set_frame_allocator(frame_allocator_static());
     let handle = scheduler.handle();
 

@@ -28,6 +28,7 @@ use crate::{
 };
 
 const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
+const IPC_BUFFER_PAGES: NonZeroUsize = NonZeroUsize::MIN;
 /// Длина кванта по умолчанию (нс). Экспонируется для тестов.
 pub const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
 
@@ -197,18 +198,17 @@ where
     }
 
     /// Создаёт per-CPU state, idle-поток и устанавливает CPU-local указатель.
-    /// Должен вызываться при замаскированных IRQ.
-    pub fn bootstrap(self) -> Scheduler<A, T, Bootstrapped> {
-        let bootstrapped = Scheduler {
+    /// Должен вызываться при замаскированных IRQ. На отказе возвращает исходный
+    /// планировщик: в `Bootstrapped` он не переходит.
+    pub fn bootstrap(self) -> Result<Scheduler<A, T, Bootstrapped>, (Self, SpawnError)> {
+        if let Err(e) = self.inner.with_lock(SchedulerInner::bootstrap_current_cpu) {
+            return Err((self, e));
+        }
+
+        Ok(Scheduler {
             inner: self.inner,
             _stage: PhantomData::<Bootstrapped>,
-        };
-
-        bootstrapped
-            .inner
-            .with_lock(SchedulerInner::bootstrap_current_cpu);
-
-        bootstrapped
+        })
     }
 }
 
@@ -255,12 +255,16 @@ where
         running
     }
 
-    /// Канонический boot-путь: выбирает первый поток и не возвращается.
-    pub fn start(self) -> ! {
+    /// Канонический boot-путь: выбирает первый поток и не возвращается. `Err(self)`
+    /// - нет per-CPU state либо выбранного потока нет в таблице.
+    pub fn start(self) -> Result<core::convert::Infallible, Self> {
         <A::Cpu as ArchCpu>::disable_preemption();
-        let (next_ptr, address_space) = self
+        let Some((next_ptr, address_space)) = self
             .inner
-            .with_lock(SchedulerInner::prepare_first_thread_start);
+            .with_lock(SchedulerInner::prepare_first_thread_start)
+        else {
+            return Err(self);
+        };
         A::switch_address_space(address_space);
         // SAFETY: `prepare_first_thread_start` под scheduler-lock выбирает первый
         // runnable поток и возвращает указатель на его уже инициализированный
@@ -276,7 +280,8 @@ where
     A: ArchContext,
     T: TimerSource,
 {
-    pub fn current(&self) -> ThreadId {
+    /// Текущий поток. `None`, если per-CPU state ещё не установлен.
+    pub fn current(&self) -> Option<ThreadId> {
         self.inner.with_lock(|inner| inner.current())
     }
 
@@ -458,7 +463,7 @@ where
                 cfg.name,
             )
         }) {
-            Ok(id) => id,
+            Ok(thread) => thread.id(),
             Err(e) => {
                 self.rollback_intern(process_id, is_new_process);
                 return Err(e);
@@ -474,34 +479,35 @@ where
         Ok(id)
     }
 
-    fn bootstrap_current_cpu(&mut self) {
+    fn bootstrap_current_cpu(&mut self) -> Result<(), SpawnError> {
         let cpu_id = <A::Cpu as ArchCpu>::current_id();
         let idle_priority = lowest_priority(self.config.priority_levels());
-        let idle_id = self
-            .spawn(SpawnConfig::new("idle").priority(idle_priority), || {
-                <A::Cpu as ArchCpu>::idle()
-            })
-            .expect("idle thread bootstrap must succeed");
+        let time_slice_ticks = self.time_slice_ticks;
+        let idle_id = self.spawn_boxed(
+            SpawnConfig::new("idle").priority(idle_priority),
+            Box::new(|| <A::Cpu as ArchCpu>::idle()),
+        )?;
 
         let idle = self
             .threads
             .get_mut(idle_id)
-            .expect("idle thread must exist after bootstrap");
+            .ok_or(SpawnError::NoFreeThreadSlots)?;
         idle.set_state(ThreadState::Running);
-        idle.set_time_slice_left(self.time_slice_ticks);
+        idle.set_time_slice_left(time_slice_ticks);
 
         let mut cpu = Box::new(Cpu::new(cpu_id, idle_id, self.config.priority_levels()));
         let cpu_ptr = core::ptr::from_mut::<Cpu>(&mut cpu).cast::<()>();
 
         self.ensure_cpu_slot(cpu_id);
-        let slot = self
-            .cpus
-            .get_mut(cpu_id.as_index())
-            .expect("CPU slot must exist after ensure_cpu_slot");
+        let Some(slot) = self.cpus.get_mut(cpu_id.as_index()) else {
+            debug_assert!(false, "CPU slot must exist after ensure_cpu_slot");
+            return Err(SpawnError::NoFreeThreadSlots);
+        };
         *slot = Some(cpu);
 
         // SAFETY: Box<Cpu> хранится в slot до конца жизни scheduler-а; адрес стабилен.
         unsafe { <A::Cpu as ArchCpu>::install_cpu_local(cpu_ptr) };
+        Ok(())
     }
 
     fn spawn<F>(&mut self, cfg: SpawnConfig, entry: F) -> Result<ThreadId, SpawnError>
@@ -538,33 +544,32 @@ where
                 .map_err(|_| PreparedUserProcessError::Spawn(SpawnError::StackAllocationFailed))?;
         let stack_top = stack.top();
 
-        let mut initial_handle_id = None;
         let initial_handle = launch.initial_handle;
 
         let user_vm = prepared.user_vm;
         let address_space_for_process = prepared.address_space.clone();
-        let process_id = self
+        let process = self
             .processes
             .insert_with(|id| {
                 let mut process = Process::new(id, prepared.name, address_space_for_process);
                 if let Some(vm) = user_vm {
                     process = process.with_user_vm(vm);
                 }
-
-                // child-table пуста, единственный хэндл всегда влезает.
-                process.handle_table().with_lock(|tbl| {
-                    initial_handle_id = Some(
-                        tbl.insert(initial_handle)
-                            .expect("initial handle into empty child-table"),
-                    );
-                });
-
                 process
             })
             .map_err(|_| PreparedUserProcessError::Spawn(SpawnError::NoFreeThreadSlots))?;
 
-        let initial_handle_id =
-            initial_handle_id.expect("insert_with populated the initial handle id");
+        let process_id = process.id();
+        let process_object = process.process_object().clone();
+        let Ok(initial_handle_id) = process
+            .handle_table()
+            .with_lock(|tbl| tbl.insert(initial_handle))
+        else {
+            self.processes.remove(process_id);
+            return Err(PreparedUserProcessError::Spawn(
+                SpawnError::NoFreeThreadSlots,
+            ));
+        };
         let bootstrap_arg = UserBootstrapArg(u64::from(initial_handle_id.raw().get()));
 
         let arch = A::init_user(crate::UserEntry {
@@ -578,7 +583,7 @@ where
             .current_cpu()
             .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
 
-        let thread_id = match self.threads.insert_with(|id| {
+        let (thread_id, thread_object) = match self.threads.insert_with(|id| {
             Thread::new(
                 id,
                 process_id,
@@ -589,7 +594,7 @@ where
                 prepared.name,
             )
         }) {
-            Ok(id) => id,
+            Ok(thread) => (thread.id(), thread.thread_object().clone()),
             Err(e) => {
                 // Откат: без потока thread_count=1 никогда не обнулится и AS не освободится.
                 self.processes.remove(process_id);
@@ -608,19 +613,6 @@ where
         {
             cpu.ready_queue_mut().push(thread_id, prepared.priority);
         }
-
-        let process_object = self
-            .processes
-            .get(process_id)
-            .expect("process must exist after insert")
-            .process_object()
-            .clone();
-        let thread_object = self
-            .threads
-            .get(thread_id)
-            .expect("thread must exist after insert")
-            .thread_object()
-            .clone();
 
         Ok(UserProcessLaunchInfo {
             process_id,
@@ -749,8 +741,9 @@ where
         }
 
         let wakeup_at_ns = now_ns.saturating_add(ns);
-        let current_id = self.current();
-        if let Some(thread) = self.threads.get_mut(current_id) {
+        if let Some(current_id) = self.current()
+            && let Some(thread) = self.threads.get_mut(current_id)
+        {
             thread.set_state(ThreadState::Sleeping { wakeup_at_ns });
             thread.set_time_slice_left(self.time_slice_ticks);
             self.sleepers.push(SleepEntry {
@@ -767,8 +760,9 @@ where
         now_ns: u64,
         timeout_ns: Option<u64>,
     ) -> ScheduleAction<A> {
-        let current_id = self.current();
-        if let Some(thread) = self.threads.get_mut(current_id) {
+        if let Some(current_id) = self.current()
+            && let Some(thread) = self.threads.get_mut(current_id)
+        {
             thread.set_time_slice_left(self.time_slice_ticks);
             if let Some(timeout) = timeout_ns {
                 let wakeup_at_ns = now_ns.saturating_add(timeout);
@@ -832,10 +826,8 @@ where
         Some((process.address_space().clone(), vm))
     }
 
-    pub(super) fn current(&self) -> ThreadId {
-        self.current_cpu()
-            .expect("scheduler must be bootstrapped before current()")
-            .current()
+    pub(super) fn current(&self) -> Option<ThreadId> {
+        Some(self.current_cpu()?.current())
     }
 
     pub(super) fn now_ns(&self) -> u64 {
@@ -844,7 +836,9 @@ where
 
     pub(super) fn begin_exit_current(&mut self, exit_code: i32) -> DeferredSignals {
         let mut signals = DeferredSignals::default();
-        let current_id = self.current();
+        let Some(current_id) = self.current() else {
+            return signals;
+        };
         let (exiting_pid, thread_object) = if let Some(thread) = self.threads.get_mut(current_id) {
             thread.set_state(ThreadState::Terminated);
             (Some(thread.process()), Some(thread.thread_object().clone()))
@@ -889,14 +883,10 @@ where
             .ok_or(SpawnError::AddressSpaceCreationFailed)?;
         let address_space =
             AddressSpace::new_user(factory).map_err(|_| SpawnError::AddressSpaceCreationFailed)?;
-        let pid = self
+        let process = self
             .processes
             .insert_with(|id| Process::empty(id, name, address_space))
             .map_err(|_| SpawnError::NoFreeThreadSlots)?;
-        let process = self
-            .processes
-            .get(pid)
-            .expect("process must exist after insert");
         Ok(process.process_object().clone())
     }
 
@@ -957,10 +947,10 @@ where
         let process = self
             .processes
             .get(process_id)
-            .expect("process must exist after lookup");
+            .ok_or(SpawnError::NoFreeThreadSlots)?;
         process.increment_thread_count();
 
-        let thread_id = match self.threads.insert_with(|id| {
+        let (thread_id, thread_object) = match self.threads.insert_with(|id| {
             Thread::new(
                 id,
                 process_id,
@@ -971,35 +961,26 @@ where
                 "<user>",
             )
         }) {
-            Ok(id) => id,
+            Ok(thread) => (thread.id(), thread.thread_object().clone()),
             Err(e) => {
-                let _ = self
-                    .processes
-                    .get(process_id)
-                    .expect("process still present")
-                    .decrement_thread_count();
+                self.undo_thread_count(process_id);
                 return Err(e);
             }
         };
 
         if let Err(e) = self.attach_ipc_buffer(process_id, thread_id) {
             self.threads.remove(thread_id);
-            let _ = self
-                .processes
-                .get(process_id)
-                .expect("process still present")
-                .decrement_thread_count();
+            self.undo_thread_count(process_id);
             return Err(e);
         }
 
-        let thread_object = self
-            .threads
-            .get(thread_id)
-            .expect("thread must exist after insert")
-            .thread_object()
-            .clone();
-
         Ok((thread_id, thread_object))
+    }
+
+    fn undo_thread_count(&mut self, process_id: ProcessId) {
+        if let Some(process) = self.processes.get(process_id) {
+            let _ = process.decrement_thread_count();
+        }
     }
 
     fn attach_ipc_buffer(
@@ -1011,10 +992,9 @@ where
             return Ok(());
         };
 
-        let process = self
-            .processes
-            .get(process_id)
-            .expect("process must exist after lookup");
+        let Some(process) = self.processes.get(process_id) else {
+            return Ok(());
+        };
         let Some(user_vm) = process.user_vm() else {
             return Ok(());
         };
@@ -1024,8 +1004,7 @@ where
             .mapper_arc()
             .ok_or(SpawnError::AddressSpaceCreationFailed)?;
 
-        let pages = NonZeroUsize::new(1).expect("1 is non-zero");
-        let region = MemoryRegion::create_virtual(fa, pages, AccessMask::RW)
+        let region = MemoryRegion::create_virtual(fa, IPC_BUFFER_PAGES, AccessMask::RW)
             .map_err(|_| SpawnError::StackAllocationFailed)?;
         let region = Arc::new(region);
         let flags = MemFlags::user_rw();
@@ -1055,11 +1034,16 @@ where
             return Err(SpawnError::StackAllocationFailed);
         }
 
-        let slot = IpcBufferSlot::new(base.into(), region);
-        self.threads
-            .get_mut(thread_id)
-            .expect("thread must exist after insert")
-            .set_ipc_buffer(slot);
+        let slot = IpcBufferSlot::new(base, region);
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            // Регион не должен остаться висеть в user-AS без владельца.
+            debug_assert!(false, "ipc-buffer target thread must exist");
+            user_vm.with_lock(|alloc| {
+                let _ = alloc.free(base, size);
+            });
+            return Err(SpawnError::StackAllocationFailed);
+        };
+        thread.set_ipc_buffer(slot);
         Ok(())
     }
 
@@ -1069,7 +1053,7 @@ where
         let Some(thread) = self.threads.get(thread_id) else {
             return;
         };
-        let Some(va) = thread.ipc_buffer_va() else {
+        let Some(base) = thread.ipc_buffer_va() else {
             return;
         };
         let pid = thread.process();
@@ -1081,8 +1065,6 @@ where
             )
         });
         if let Some((mapper, user_vm)) = resources {
-            let base = PageAlignedVirtualAddress::from_usize(va.as_usize())
-                .expect("ipc-buffer VA выровнен по построению");
             let size = PAGE_SIZE;
             // Фрейм возвращается аллокатору только если PTE снят: живой PTE
             // после "освобождения" фрейма = UAF-поверхность. NotMapped штатен
@@ -1125,22 +1107,24 @@ where
     }
 
     pub(crate) fn set_current_blocked_cancel(&mut self, cancel: Arc<dyn capability::CancelTarget>) {
-        let current_id = self.current();
-        if let Some(thread) = self.threads.get_mut(current_id) {
+        if let Some(current_id) = self.current()
+            && let Some(thread) = self.threads.get_mut(current_id)
+        {
             thread.set_blocked_cancel(cancel);
         }
     }
 
     pub(crate) fn clear_current_blocked_cancel(&mut self) {
-        let current_id = self.current();
-        if let Some(thread) = self.threads.get_mut(current_id) {
+        if let Some(current_id) = self.current()
+            && let Some(thread) = self.threads.get_mut(current_id)
+        {
             let _ = thread.take_blocked_cancel();
         }
     }
 
     pub(super) fn current_ipc_buffer_va(&self) -> Option<VirtualAddress> {
         let current_id = self.current_cpu()?.current();
-        self.threads.get(current_id)?.ipc_buffer_va()
+        Some(self.threads.get(current_id)?.ipc_buffer_va()?.as_virtual())
     }
 
     pub(crate) fn enqueue_user_thread_ready(&mut self, thread_id: ThreadId) {
@@ -1237,7 +1221,7 @@ where
         let vm = UserVmAllocator::new(install.user_vm_base, VirtualAddress::new(user_vm_end_usize));
         process
             .set_user_vm(vm)
-            .expect("precondition is_image_loaded()==false guarantees fresh user_vm");
+            .map_err(|_| LoadImageError::WrongState)?;
         let segments: Vec<Arc<MemoryRegion>> =
             install.segments.iter().map(|s| s.region.clone()).collect();
         process.set_image_segments(segments);
@@ -1280,10 +1264,10 @@ where
 
         // Резерв child-слота до prepare фиксирует child-table id потомка, не
         // трогая loader-handle: на ошибке prepare откат - только release.
-        let reservation = child_table.with_lock(|tbl| {
-            tbl.reserve_slot()
-                .expect("empty child-table has a free slot")
-        });
+        let reservation = match child_table.with_lock(HandleTable::reserve_slot) {
+            Ok(reservation) => reservation,
+            Err(e) => return Err(StartProcessError::HandleValidationFailed(e)),
+        };
 
         // X0 потомка - child-table id стартового хэндла-канала.
         entry.arg = u64::from(reservation.handle_id().raw().get());
@@ -1311,10 +1295,13 @@ where
 
         // commit_reserved кладёт хэндл в зарезервированный слот: child-table id
         // совпадает с уже вычисленным для X0.
-        let handle = drained
-            .into_iter()
-            .next()
-            .expect("drain returned the single transferred handle");
+        let Some(handle) = drained.into_iter().next() else {
+            child_table.with_lock(|tbl| tbl.release_reservation(reservation));
+            self.drop_prepared_thread(thread_id);
+            return Err(StartProcessError::HandleValidationFailed(
+                capability::IpcError::BadHandle,
+            ));
+        };
         child_table.with_lock(|tbl| tbl.commit_reserved(reservation, handle));
 
         // До enqueue: стартовый поток не должен аллоцировать раньше засева.
@@ -1418,12 +1405,8 @@ where
     }
 
     fn wake_sleepers(&mut self, now_ns: u64) {
-        while self
-            .sleepers
-            .peek()
-            .is_some_and(|entry| entry.wakeup_at_ns <= now_ns)
-        {
-            let entry = self.sleepers.pop().expect("peek returned entry");
+        // pop_if снимает голову очереди только когда её дедлайн наступил.
+        while let Some(entry) = self.sleepers.pop_if(|entry| entry.wakeup_at_ns <= now_ns) {
             let Some(thread) = self.threads.get_mut(entry.thread_id) else {
                 continue;
             };
@@ -1448,8 +1431,10 @@ where
     }
 
     fn preempt_current(&mut self, now_ns: u64) -> ScheduleAction<A> {
-        let current_id = self.current();
-        let idle_id = self.current_cpu().expect("cpu").idle();
+        let Some(cpu) = self.current_cpu() else {
+            return ScheduleAction::None;
+        };
+        let (current_id, idle_id) = (cpu.current(), cpu.idle());
 
         if current_id != idle_id {
             let priority = if let Some(current) = self.threads.get_mut(current_id) {
@@ -1501,9 +1486,9 @@ where
             }
         };
 
-        let cpu = self
-            .current_cpu_mut()
-            .expect("cpu still present after ready-queue drain");
+        let Some(cpu) = self.current_cpu_mut() else {
+            return ScheduleAction::None;
+        };
         cpu.set_current(next_id);
 
         if let Some(next) = self.threads.get_mut(next_id) {
@@ -1567,11 +1552,9 @@ where
         }
     }
 
-    fn prepare_first_thread_start(&mut self) -> (*const A, Option<AddressSpaceHandle>) {
+    fn prepare_first_thread_start(&mut self) -> Option<(*const A, Option<AddressSpaceHandle>)> {
         let now_ns = self.timer.now_ns();
-        let cpu = self
-            .current_cpu_mut()
-            .expect("scheduler must be bootstrapped");
+        let cpu = self.current_cpu_mut()?;
         let idle_id = cpu.idle();
         let next_id = cpu
             .ready_queue_mut()
@@ -1587,17 +1570,15 @@ where
             .and_then(|pid| self.processes.get(pid))
             .and_then(|p| p.address_space().handle());
 
+        let time_slice_ticks = self.time_slice_ticks;
         let next_ptr = {
-            let next = self
-                .threads
-                .get_mut(next_id)
-                .expect("first runnable thread must exist");
+            let next = self.threads.get_mut(next_id)?;
             next.set_state(ThreadState::Running);
-            next.set_time_slice_left(self.time_slice_ticks);
+            next.set_time_slice_left(time_slice_ticks);
             core::ptr::from_ref(next.arch())
         };
         self.schedule_next_deadline(now_ns);
-        (next_ptr, address_space)
+        Some((next_ptr, address_space))
     }
 
     fn schedule_next_deadline(&self, now_ns: u64) {

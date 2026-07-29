@@ -91,7 +91,8 @@ fn parse_size(size_bytes: u64) -> Result<NonZeroUsize, SyscallError> {
 }
 
 fn parse_access_mask(raw: u64) -> Result<AccessMask, SyscallError> {
-    let bits = u8::try_from(raw & 0b111).expect("masked to 3 bits");
+    // Значимы только младшие три бита ABI.
+    let bits = (raw & 0b111) as u8;
     let mask = AccessMask::from_bits_truncate(bits);
     if mask.bits() == 0 {
         return Err(SyscallError::InvalidArgument);

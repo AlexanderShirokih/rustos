@@ -20,13 +20,16 @@ fn on_tick_preempts_to_higher_priority_thread() {
 
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let low = scheduler
         .spawn(SpawnConfig::new("low").priority(Priority::new(20)), || {})
         .expect("spawn low");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), low);
+    assert_eq!(running.current(), Some(low));
 
     let high = running
         .handle()
@@ -39,7 +42,7 @@ fn on_tick_preempts_to_higher_priority_thread() {
     let switches_before = switch_count();
     with_simulated_irq(|| running.on_tick(0));
 
-    assert_eq!(running.current(), high);
+    assert_eq!(running.current(), Some(high));
     assert_eq!(switch_count(), switches_before + 1);
 }
 
@@ -49,13 +52,16 @@ fn on_tick_selects_highest_priority_among_several_ready() {
 
     reset_switches();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG).bootstrap();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
     let low = scheduler
         .spawn(SpawnConfig::new("low").priority(Priority::new(20)), || {})
         .expect("spawn low");
 
     let running = scheduler.run();
-    assert_eq!(running.current(), low);
+    assert_eq!(running.current(), Some(low));
 
     let handle = running.handle();
     let mid = handle
@@ -74,8 +80,8 @@ fn on_tick_selects_highest_priority_among_several_ready() {
     with_simulated_irq(|| running.on_tick(0));
     assert_eq!(
         running.current(),
-        high,
+        Some(high),
         "scheduler must pick the highest-priority ready thread, not mid"
     );
-    assert_ne!(running.current(), mid);
+    assert_ne!(running.current(), Some(mid));
 }

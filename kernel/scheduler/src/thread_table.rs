@@ -19,30 +19,30 @@ impl<A: ArchContext> ThreadTable<A> {
 
     /// Резервирует свободный слот и заполняет его потоком, сконструированным
     /// замыканием `builder` с использованием выделенного `ThreadId`.
-    pub fn insert_with<F>(&mut self, builder: F) -> Result<ThreadId, SpawnError>
+    ///
+    /// Возвращает сам вставленный поток. Его id доступен через [`Thread::id`].
+    pub fn insert_with<F>(&mut self, builder: F) -> Result<&mut Thread<A>, SpawnError>
     where
         F: FnOnce(ThreadId) -> Thread<A>,
     {
-        if let Some(index) = self.slots.iter().position(Option::is_none) {
-            let raw = NonZeroU32::new((index + 1) as u32).expect("slot index must fit into u32");
-            let id = ThreadId::new(raw);
-            let thread = builder(id);
-            debug_assert_eq!(thread.id(), id, "builder must store assigned ThreadId");
-            self.slots[index] = Some(thread);
-            return Ok(id);
-        }
+        let index = if let Some(index) = self.slots.iter().position(Option::is_none) {
+            index
+        } else {
+            if self.slots.len() >= self.max_threads {
+                return Err(SpawnError::NoFreeThreadSlots);
+            }
+            self.slots.push(None);
+            self.slots.len() - 1
+        };
 
-        if self.slots.len() >= self.max_threads {
-            return Err(SpawnError::NoFreeThreadSlots);
-        }
-
-        let index = self.slots.len();
-        let raw = NonZeroU32::new((index + 1) as u32).expect("slot index must fit into u32");
-        let id = ThreadId::new(raw);
+        let id = Self::slot_id(index);
         let thread = builder(id);
         debug_assert_eq!(thread.id(), id, "builder must store assigned ThreadId");
-        self.slots.push(Some(thread));
-        Ok(id)
+        let slot = self
+            .slots
+            .get_mut(index)
+            .ok_or(SpawnError::NoFreeThreadSlots)?;
+        Ok(slot.insert(thread))
     }
 
     pub fn get(&self, id: ThreadId) -> Option<&Thread<A>> {
@@ -89,6 +89,11 @@ impl<A: ArchContext> ThreadTable<A> {
 
     fn slot_index(id: ThreadId) -> usize {
         id.raw().get() as usize - 1
+    }
+
+    // Нумерация слотов с единицы.
+    fn slot_id(index: usize) -> ThreadId {
+        ThreadId::new(NonZeroU32::MIN.saturating_add(index as u32))
     }
 }
 

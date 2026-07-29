@@ -81,15 +81,15 @@ impl<'a> Property<'a> {
     }
 
     pub fn try_as_u32(&self, offset: usize) -> Option<u32> {
-        let bytes = self.value;
-        let slice = bytes.get(offset..offset + size_of::<u32>())?;
-        Some(u32::from_be_bytes(slice.try_into().unwrap()))
+        Some(u32::from_be_bytes(
+            *self.value.get(offset..)?.first_chunk()?,
+        ))
     }
 
     pub fn try_as_u64(&self, offset: usize) -> Option<u64> {
-        let bytes = self.value;
-        let slice = bytes.get(offset..offset + size_of::<u64>())?;
-        Some(u64::from_be_bytes(slice.try_into().unwrap()))
+        Some(u64::from_be_bytes(
+            *self.value.get(offset..)?.first_chunk()?,
+        ))
     }
 
     /// Возвращает значение как `usize` (4 или 8 байт big-endian).
@@ -289,8 +289,7 @@ impl Iterator for MemoryReservationIter<'_> {
 }
 
 fn read_u64_be(buffer: &[u8], offset: usize) -> Option<u64> {
-    let slice = buffer.get(offset..offset + size_of::<u64>())?;
-    Some(u64::from_be_bytes(slice.try_into().unwrap()))
+    Some(u64::from_be_bytes(*buffer.get(offset..)?.first_chunk()?))
 }
 
 /// Заголовок Flattened Device Tree.

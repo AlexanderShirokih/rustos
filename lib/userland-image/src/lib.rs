@@ -45,7 +45,9 @@ mod public_api_tests {
 
         let bytes = encode(&entries).expect("encode");
         let image = decode(&bytes).expect("decode");
-        let entry = image.bootstrap_entry();
+        let entry = image
+            .bootstrap_entry()
+            .expect("image carries a bootstrap entry");
 
         assert_eq!(entry.name(), "rootkeeper");
         assert_eq!(entry.entry_va(), 0x4000_0000);

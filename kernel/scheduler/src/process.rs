@@ -5,7 +5,7 @@ use core::{
 };
 
 use capability::{HandleTable, ProcessObject};
-use collections::{LockCell, MutexCell};
+use collections::{LockCell, MutexCell, StaticString};
 use memory::{MemoryRegion, user_vm_allocator::UserVmAllocator};
 
 use super::address_space::AddressSpace;
@@ -19,8 +19,7 @@ pub struct ProcessAlreadyLoaded;
 
 pub struct Process {
     id: ProcessId,
-    name: [u8; MAX_PROCESS_NAME_LEN],
-    name_len: u8,
+    name: StaticString<MAX_PROCESS_NAME_LEN>,
     address_space: Arc<AddressSpace>,
     handle_table: Arc<MutexCell<HandleTable>>,
     /// Per-process аллокатор user-VA. `None` для kernel-процессов (idle,
@@ -43,11 +42,7 @@ impl Process {
     pub fn new(id: ProcessId, name: &str, address_space: Arc<AddressSpace>) -> Self {
         Self {
             id,
-            name: encode_name(name),
-            name_len: name
-                .len()
-                .try_into()
-                .expect("process name length is bounded by MAX_PROCESS_NAME_LEN"),
+            name: StaticString::truncating(name),
             address_space,
             handle_table: Arc::new(MutexCell::new(HandleTable::new())),
             user_vm: None,
@@ -61,11 +56,7 @@ impl Process {
     pub fn empty(id: ProcessId, name: &str, address_space: Arc<AddressSpace>) -> Self {
         Self {
             id,
-            name: encode_name(name),
-            name_len: name
-                .len()
-                .try_into()
-                .expect("process name length is bounded by MAX_PROCESS_NAME_LEN"),
+            name: StaticString::truncating(name),
             address_space,
             handle_table: Arc::new(MutexCell::new(HandleTable::new())),
             user_vm: None,
@@ -114,8 +105,7 @@ impl Process {
     }
 
     pub fn name(&self) -> &str {
-        let len = usize::from(self.name_len);
-        core::str::from_utf8(&self.name[..len]).expect("process names are copied from valid UTF-8")
+        self.name.as_str()
     }
 
     pub fn address_space(&self) -> &Arc<AddressSpace> {
@@ -154,7 +144,7 @@ impl core::fmt::Debug for Process {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Process")
             .field("id", &self.id)
-            .field("name", &self.name)
+            .field("name", &self.name.as_str())
             .finish_non_exhaustive()
     }
 }
@@ -193,10 +183,13 @@ impl ProcessTable {
         address_space: Arc<AddressSpace>,
     ) -> Result<ProcessId, ProcessTableError> {
         self.insert_with(|id| Process::new(id, name, address_space))
+            .map(|process| process.id())
     }
 
     /// Вариант [`Self::insert`] с фабрикой, получающей выделенный `ProcessId`.
-    pub fn insert_with<F>(&mut self, factory: F) -> Result<ProcessId, ProcessTableError>
+    ///
+    /// Возвращает сам вставленный процесс. Его id доступен через [`Process::id`].
+    pub fn insert_with<F>(&mut self, factory: F) -> Result<&mut Process, ProcessTableError>
     where
         F: FnOnce(ProcessId) -> Process,
     {
@@ -207,20 +200,22 @@ impl ProcessTable {
             .checked_add(1)
             .ok_or(ProcessTableError::OutOfIds)?;
 
+        // Слот выбирается до фабрики: на переполнении её побочных эффектов не будет.
+        let index = if let Some(index) = self.slots.iter().position(Option::is_none) {
+            index
+        } else {
+            if self.slots.len() >= self.max_processes {
+                return Err(ProcessTableError::Full);
+            }
+            self.slots.push(None);
+            self.slots.len() - 1
+        };
+
         let process = factory(id);
         debug_assert_eq!(process.id(), id, "factory must use the supplied id");
 
-        if let Some(index) = self.slots.iter().position(Option::is_none) {
-            self.slots[index] = Some(process);
-            return Ok(id);
-        }
-
-        if self.slots.len() >= self.max_processes {
-            return Err(ProcessTableError::Full);
-        }
-
-        self.slots.push(Some(process));
-        Ok(id)
+        let slot = self.slots.get_mut(index).ok_or(ProcessTableError::Full)?;
+        Ok(slot.insert(process))
     }
 
     pub fn get(&self, id: ProcessId) -> Option<&Process> {
@@ -267,16 +262,6 @@ impl Default for ProcessTable {
     fn default() -> Self {
         Self::new(64)
     }
-}
-
-fn encode_name(name: &str) -> [u8; MAX_PROCESS_NAME_LEN] {
-    assert!(
-        name.len() <= MAX_PROCESS_NAME_LEN,
-        "process name is longer than MAX_PROCESS_NAME_LEN"
-    );
-    let mut buf = [0u8; MAX_PROCESS_NAME_LEN];
-    buf[..name.len()].copy_from_slice(name.as_bytes());
-    buf
 }
 
 #[cfg(test)]

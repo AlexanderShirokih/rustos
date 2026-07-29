@@ -60,7 +60,8 @@ fn bitmap_relocate_round_trip_preserves_length_and_access() {
 #[test]
 fn allocator_relocate_round_trip_keeps_allocator_usable() {
     let allocator: PhysicalFrameAllocator<MutexCell<FrameBitmap>> =
-        PhysicalFrameAllocator::new([make_range(0, 64), make_range(100, 64)].into_iter());
+        PhysicalFrameAllocator::new([make_range(0, 64), make_range(100, 64)].into_iter())
+            .expect("test regions are valid");
 
     let before = allocator.allocate_frame().expect("frame before relocation");
 

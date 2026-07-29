@@ -78,6 +78,12 @@ pub struct Header {
     pub flags: u16,
 }
 
+const ORDINAL_SIZE: usize = 8;
+const TXID_SIZE: usize = 4;
+const FLAGS_SIZE: usize = 2;
+
+const _: () = assert!(ORDINAL_SIZE + TXID_SIZE + FLAGS_SIZE == HEADER_SIZE);
+
 impl Header {
     /// Создаёт заголовок из полей.
     #[must_use]
@@ -104,13 +110,19 @@ impl Header {
     /// Читает заголовок из первых [`HEADER_SIZE`] байт `bytes`.
     /// `Truncated`, если байт меньше заголовка.
     pub fn decode(bytes: &[u8]) -> Result<Self, IpcError> {
-        if bytes.len() < HEADER_SIZE {
+        let Some((ordinal, rest)) = bytes.split_first_chunk::<ORDINAL_SIZE>() else {
             return Err(IpcError::Truncated);
-        }
+        };
+        let Some((txid, rest)) = rest.split_first_chunk::<TXID_SIZE>() else {
+            return Err(IpcError::Truncated);
+        };
+        let Some((flags, _)) = rest.split_first_chunk::<FLAGS_SIZE>() else {
+            return Err(IpcError::Truncated);
+        };
         Ok(Self {
-            ordinal: u64::from_le_bytes(bytes[0..8].try_into().expect("ordinal is 8 bytes")),
-            txid: u32::from_le_bytes(bytes[8..12].try_into().expect("txid is 4 bytes")),
-            flags: u16::from_le_bytes(bytes[12..14].try_into().expect("flags are 2 bytes")),
+            ordinal: u64::from_le_bytes(*ordinal),
+            txid: u32::from_le_bytes(*txid),
+            flags: u16::from_le_bytes(*flags),
         })
     }
 
@@ -262,7 +274,8 @@ impl<'a> FieldCursor<'a> {
         if self.done {
             return Ok(None);
         }
-        let Some(&field_id) = self.body.get(self.pos) else {
+        let tail = self.body.get(self.pos..).unwrap_or_default();
+        let Some((&field_id, after_id)) = tail.split_first() else {
             // Тело без терминатора трактуется как конец.
             self.done = true;
             return Ok(None);
@@ -277,16 +290,14 @@ impl<'a> FieldCursor<'a> {
         if field_id <= self.last_field_id {
             return Err(IpcError::FieldOrder);
         }
-        let Some(len_bytes) = self.body.get(self.pos + 1..self.pos + 3) else {
+        let Some((len_bytes, after_len)) = after_id.split_first_chunk::<2>() else {
             return Err(IpcError::Truncated);
         };
-        let len = u16::from_le_bytes(len_bytes.try_into().expect("len is 2 bytes")) as usize;
-        let data_start = self.pos + FIELD_OVERHEAD;
-        let data_end = data_start + len;
-        let Some(data) = self.body.get(data_start..data_end) else {
+        let len = u16::from_le_bytes(*len_bytes) as usize;
+        let Some((data, _)) = after_len.split_at_checked(len) else {
             return Err(IpcError::Truncated);
         };
-        self.pos = data_end;
+        self.pos += FIELD_OVERHEAD + len;
         self.last_field_id = field_id;
         Ok(Some(Field { id: field_id, data }))
     }
@@ -384,6 +395,21 @@ impl<'a, const N: usize> Str<'a, N> {
             return None;
         }
         Some(Self { value })
+    }
+
+    /// Префикс `value` длиной не более `N` байт, обрезанный по границе символа.
+    #[must_use]
+    pub fn truncating(value: &'a str) -> Self {
+        if value.len() <= N {
+            return Self { value };
+        }
+        let mut len = N;
+        while len > 0 && !value.is_char_boundary(len) {
+            len -= 1;
+        }
+        Self {
+            value: value.split_at_checked(len).map_or("", |(head, _)| head),
+        }
     }
 
     /// Строковое значение.

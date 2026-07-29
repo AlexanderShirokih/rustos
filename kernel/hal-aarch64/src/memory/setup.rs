@@ -7,7 +7,7 @@ use fdt::{
 use hal_aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
 use hal_common::boot::BootPayloadRange;
 
-use crate::memory::layout::{MemoryLayout, MemoryRegion, RegionTag};
+use crate::memory::layout::{MemoryLayout, MemoryRegion, RegionTag, TooManyMemoryRegions};
 
 unsafe extern "C" {
     /** Код ядра */
@@ -26,6 +26,12 @@ unsafe extern "C" {
 /// Ошибка построения раскладки памяти.
 pub(crate) struct MemoryLayoutBuildError;
 
+impl From<TooManyMemoryRegions> for MemoryLayoutBuildError {
+    fn from(_: TooManyMemoryRegions) -> Self {
+        Self
+    }
+}
+
 /// Строит раскладку памяти из DeviceTree.
 pub(crate) fn build_memory_layout(
     dt: &DeviceTree,
@@ -41,7 +47,7 @@ pub(crate) fn build_memory_layout(
             ram_region.start(),
             ram_region.end(),
             KernelData::flags(),
-        ));
+        ))?;
     }
 
     // Device tree
@@ -50,7 +56,7 @@ pub(crate) fn build_memory_layout(
         dt.base_address(),
         dt.base_address() + dt.size(),
         KernelRoData::flags(),
-    ));
+    ))?;
 
     // Userland blob (initrd)
     if let Some(range) = userland_blob {
@@ -59,7 +65,7 @@ pub(crate) fn build_memory_layout(
             range.start().as_usize(),
             range.end_exclusive().as_usize(),
             KernelRoData::flags(),
-        ));
+        ))?;
     }
 
     // Блок резервирования памяти из FDT.
@@ -75,7 +81,7 @@ pub(crate) fn build_memory_layout(
             reservation.address,
             end,
             KernelRoData::flags(),
-        ));
+        ))?;
     }
 
     // Статические reg-диапазоны под /reserved-memory.
@@ -86,7 +92,7 @@ pub(crate) fn build_memory_layout(
                 region.start(),
                 region.end(),
                 KernelRoData::flags(),
-            ));
+            ))?;
         }
     }
 
@@ -98,21 +104,21 @@ pub(crate) fn build_memory_layout(
             &_text_start,
             &_text_end,
             KernelText::flags(),
-        ));
+        ))?;
 
         layout.add(MemoryRegion::new_raw(
             RegionTag::Kernel,
             &_rw_start,
             &_rw_end,
             KernelData::flags(),
-        ));
+        ))?;
 
         layout.add(MemoryRegion::new_raw(
             RegionTag::Kernel,
             &_rodata_start,
             &_rodata_end,
             KernelRoData::flags(),
-        ));
+        ))?;
 
         Ok(layout)
     }

@@ -78,8 +78,8 @@ mod tests {
         }
         fn yield_now(&self) {}
         fn sleep_ns(&self, _ns: u64) {}
-        fn current(&self) -> ThreadId {
-            ThreadId::new(core::num::NonZeroU32::new(1).unwrap())
+        fn current(&self) -> Option<ThreadId> {
+            Some(ThreadId::new(core::num::NonZeroU32::MIN))
         }
         fn exit(&self) -> ! {
             panic!("exit")
@@ -125,7 +125,7 @@ mod tests {
         let service: Arc<dyn SchedulerService> = Arc::new(DummyScheduler);
         install_scheduler(service);
 
-        assert_eq!(scheduler().current().raw().get(), 1);
+        assert_eq!(scheduler().current().map(|id| id.raw().get()), Some(1));
 
         let again: Arc<dyn SchedulerService> = Arc::new(DummyScheduler);
         assert!(catch_unwind(AssertUnwindSafe(|| install_scheduler(again))).is_err());

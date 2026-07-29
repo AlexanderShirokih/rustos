@@ -972,7 +972,9 @@ mod tests {
         .expect("assemble image");
 
         let image = decode(&image_bytes).expect("assembled image must parse");
-        let bootstrap = image.bootstrap_entry();
+        let bootstrap = image
+            .bootstrap_entry()
+            .expect("image carries a bootstrap entry");
         let segments: Vec<_> = bootstrap.segments().collect();
         assert_eq!(segments[0].bytes, b"CODE");
         assert_eq!(segments[1].bytes, b"RW");

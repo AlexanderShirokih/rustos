@@ -17,6 +17,10 @@ use crate::{
     ThreadId,
 };
 
+/// Wait-token на случай отсутствия текущего потока. Значение вне диапазона `ThreadId`,
+/// `unblock` по нему не находит поток.
+const NO_CURRENT_THREAD_TOKEN: WaitToken = WaitToken::new(core::num::NonZeroU64::MAX);
+
 /// Thread-safe handle на планировщик для использования вне scheduler-lock.
 pub struct SchedulerHandle<A, T>
 where
@@ -182,7 +186,7 @@ where
         });
     }
 
-    fn current(&self) -> ThreadId {
+    fn current(&self) -> Option<ThreadId> {
         self.inner.with_lock(|inner| inner.current())
     }
 
@@ -197,7 +201,11 @@ where
     T: TimerSource,
 {
     fn current_wait_token(&self) -> WaitToken {
-        self.inner.with_lock(|inner| inner.current()).into()
+        let Some(current) = self.inner.with_lock(|inner| inner.current()) else {
+            debug_assert!(false, "wait token requested before scheduler bootstrap");
+            return NO_CURRENT_THREAD_TOKEN;
+        };
+        WaitToken::from(current)
     }
 
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {

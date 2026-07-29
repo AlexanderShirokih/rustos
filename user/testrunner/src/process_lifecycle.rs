@@ -30,6 +30,7 @@ extern "C" fn exiting_entry(code: usize) -> ! {
 #[kernel_test]
 fn thread_exit_publishes_exit_code() {
     let stack = Resource::self_resource()
+        .expect("self metering resource")
         .allocate(STACK_SIZE, UserMemFlags::ReadWrite)
         .expect("allocate worker stack");
     let process = Process::self_process().expect("self process handle");

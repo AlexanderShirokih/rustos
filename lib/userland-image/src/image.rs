@@ -149,10 +149,9 @@ impl<'a> DecodedImage<'a> {
         usize::from(self.header.entry_count)
     }
 
-    pub fn bootstrap_entry(&self) -> DecodedEntry<'a> {
-        self.entries()
-            .next()
-            .expect("decoded image contains an entry")
+    /// Первая запись образа - точка входа bootstrap-цепочки. `None` на пустом образе.
+    pub fn bootstrap_entry(&self) -> Option<DecodedEntry<'a>> {
+        self.entries().next()
     }
 
     /// Возвращает entry с заданным именем.
@@ -200,15 +199,15 @@ impl<'a> Iterator for DecodedEntries<'a> {
         if self.current_index == self.image.entry_count() {
             return None;
         }
+        // Записи проверены на этапе decode. Непрошедшая обрывает итерацию.
         let entry = parse_entry(
             self.image.bytes,
             self.next_offset,
             self.current_index,
             self.image.entries_end,
         )
-        .expect("entries were validated during decode");
-        self.next_offset +=
-            entry_encoded_size(entry.header, self.current_index).expect("validated entry size");
+        .ok()?;
+        self.next_offset += entry_encoded_size(entry.header, self.current_index).ok()?;
         self.current_index += 1;
         Some(entry)
     }
@@ -470,7 +469,9 @@ mod tests {
     fn round_trip_exposes_semantic_segments() {
         let bytes = image_bytes();
         let image = decode(&bytes).expect("decode");
-        let entry = image.bootstrap_entry();
+        let entry = image
+            .bootstrap_entry()
+            .expect("image carries a bootstrap entry");
         let segments: alloc::vec::Vec<_> = entry.segments().collect();
 
         assert_eq!(entry.name(), "rootkeeper");
@@ -484,7 +485,9 @@ mod tests {
         bytes.extend(core::iter::repeat(0u8).take(4096));
 
         let image = decode(&bytes).expect("padded buffer decodes");
-        let entry = image.bootstrap_entry();
+        let entry = image
+            .bootstrap_entry()
+            .expect("image carries a bootstrap entry");
         assert_eq!(entry.name(), "rootkeeper");
         assert_eq!(entry.segments().next().expect("segment").bytes, b"CODE");
     }

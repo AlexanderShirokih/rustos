@@ -33,6 +33,9 @@ use super::{
 /// В ABI считается в байтах; строка обязана быть UTF-8.
 const MAX_PROCESS_NAME_LEN: usize = 64;
 
+/// Exit-код потомка, снятого из-за невыданного вызывающему thread-хэндла.
+const EXIT_CODE_START_ROLLBACK: i32 = -1;
+
 pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallError> {
     let len = usize::try_from(name_len).map_err(|_| SyscallError::InvalidArgument)?;
     if len == 0 || len > MAX_PROCESS_NAME_LEN {
@@ -253,17 +256,25 @@ pub fn sys_process_start(
         .start_user_process(&process_object, spec)
         .map_err(|e| start_err_to_syscall(&e))?;
 
-    // Drain переданного хэндла освободил слот в caller-table, поэтому резерв
-    // под возвращаемый thread-handle не падает.
-    let reservation = loader_table
-        .with_lock(HandleTable::reserve_slot)
-        .expect("drain freed a caller slot; reserve_slot cannot fail");
+    // Предрезерв слота отказывал бы на штатном пути: caller-table бывает полна, и
+    // освобождает её как раз drain переданного bootstrap-хэндла. Но освобождённый
+    // слот может и не переиспользоваться - на MAX_GENERATION pop_free_slot выводит
+    // его из оборота. Тогда потомок уже запущен, а хэндла на него нет, и старт
+    // откатывается терминацией.
+    let insert_result = loader_table.with_lock(|tbl| {
+        tbl.insert(Capability::new_with_default_rights(
+            CapabilityTarget::Thread(thread.clone()),
+        ))
+    });
+    let handle_id = match insert_result {
+        Ok(handle_id) => handle_id,
+        Err(e) => {
+            let _ = syscall_runtime().terminate_process(&process_object, EXIT_CODE_START_ROLLBACK);
+            return Err(map_ipc_error(e));
+        }
+    };
 
-    Ok(commit_object_handle(
-        &loader_table,
-        reservation,
-        CapabilityTarget::Thread(thread),
-    ))
+    Ok(u64::from(handle_id.raw().get()))
 }
 
 pub(super) fn install_object_handle(target: CapabilityTarget) -> Result<u64, SyscallError> {
@@ -336,9 +347,7 @@ fn start_err_to_syscall(err: &StartProcessError) -> SyscallError {
 /// Декодирует младшие 32 бита аргумента в `i32` exit-код. Верхние биты
 /// игнорируются - ABI фиксирует exit_code в нижних 32-х.
 pub(super) fn exit_code_from_arg(raw: u64) -> i32 {
-    let low32 =
-        u32::try_from(raw & u64::from(u32::MAX)).expect("masking guarantees value fits into u32");
-    low32.cast_signed()
+    (raw as u32).cast_signed()
 }
 
 fn copy_in(user_vm: &UserVmContext, va: u64, dst: &mut [u8]) -> Result<(), SyscallError> {

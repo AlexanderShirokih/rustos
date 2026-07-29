@@ -46,15 +46,21 @@ impl BootInfo {
 pub struct BootPayloadRange {
     start: PhysicalAddress,
     size_bytes: usize,
+    end_exclusive: PhysicalAddress,
 }
 
 impl BootPayloadRange {
     pub fn new(start: PhysicalAddress, size_bytes: usize) -> Option<Self> {
-        if size_bytes == 0 || start.checked_add(size_bytes).is_none() {
+        if size_bytes == 0 {
             return None;
         }
+        let end_exclusive = start.checked_add(size_bytes)?;
 
-        Some(Self { start, size_bytes })
+        Some(Self {
+            start,
+            size_bytes,
+            end_exclusive,
+        })
     }
 
     pub const fn start(self) -> PhysicalAddress {
@@ -65,10 +71,8 @@ impl BootPayloadRange {
         self.size_bytes
     }
 
-    pub fn end_exclusive(self) -> PhysicalAddress {
-        self.start
-            .checked_add(self.size_bytes)
-            .expect("range validated in constructor")
+    pub const fn end_exclusive(self) -> PhysicalAddress {
+        self.end_exclusive
     }
 }
 
