@@ -1,27 +1,29 @@
 use alloc::{sync::Arc, vec::Vec};
 
-use collections::LockCell;
+use collections::{LockCell, MutexCell};
 use syscall::{Rights, WakeCount};
 
 use super::{
     errors::IpcError,
     handle::{Capability, HandleId},
-    handle_table::RejectedInsert,
+    handle_table::{HandleTable, RejectedInsert},
+    irq_control::IrqControl,
     irq_line::IrqLine,
     irq_runtime::interrupts_control,
-    runtime::{ParkState, runtime},
+    runtime::runtime,
     signal::Signal,
-    target::CapabilityTarget,
-    wait::{CancelTarget, IndexedWaker, ParkWaker, Waitable, Waker},
+    wait::{CancelTarget, IndexedWaker, ParkResolution, ParkWaker, Waitable, Waker},
 };
+
+/// Handle-таблица текущего процесса; `BadHandle` до инициализации планировщика.
+fn current_table() -> Result<Arc<MutexCell<HandleTable>>, IpcError> {
+    runtime().current_handle_table().ok_or(IpcError::BadHandle)
+}
 
 /// Устанавливает [`Capability`] в handle-таблицу текущего процесса и
 /// возвращает свежий [`HandleId`]
 pub fn install_handle(handle: Capability) -> Result<HandleId, IpcError> {
-    let table = runtime()
-        .current_handle_table()
-        .ok_or(IpcError::BadHandle)?;
-    table
+    current_table()?
         .with_lock(|tbl| tbl.insert(handle))
         .map_err(RejectedInsert::release)
 }
@@ -35,12 +37,8 @@ pub fn signal_set(
     clear: u32,
     count: WakeCount,
 ) -> Result<(), IpcError> {
-    let runtime = runtime();
-    let table = runtime.current_handle_table().ok_or(IpcError::BadHandle)?;
-    let object = table.with_lock(|tbl| tbl.clone_target(handle_id, Rights::WRITE))?;
-    let CapabilityTarget::Signal(signal) = &object else {
-        return Err(IpcError::WrongType);
-    };
+    let signal =
+        current_table()?.with_lock(|tbl| tbl.get_object::<Signal>(handle_id, Rights::WRITE))?;
 
     let limit = match count {
         WakeCount::None => 0,
@@ -73,19 +71,73 @@ pub struct WaitManyOutcome {
     pub observed: u32,
 }
 
-enum WaitSetup {
-    Observed(WaitManyOutcome),
-    Wait {
-        signals: Vec<Arc<dyn Waitable>>,
-        waker: Arc<ParkWaker>,
-        indexed_wakers: Vec<Arc<IndexedWaker>>,
-    },
+/// Взведённое ожидание [`signal_wait_many`]: cancel-цели на слотах и waiter'ы
+/// на источниках. `Drop` снимает обе регистрации.
+struct ArmedWait<'a> {
+    table: &'a Arc<MutexCell<HandleTable>>,
+    items: &'a [(HandleId, u32)],
+    sources: Vec<Arc<dyn Waitable>>,
+    waker: Arc<ParkWaker>,
+    indexed_wakers: Vec<Arc<IndexedWaker>>,
 }
 
-enum WaitResolution {
-    Signaled,
-    Timeout,
-    Canceled,
+impl<'a> ArmedWait<'a> {
+    /// Cancel-цели регистрируются под table-локом, waiter'ы на источниках - вне
+    /// его: взведение будит уже поднятый сигнал, а пробуждение берёт
+    /// scheduler-лок, который под table-локом запрещён.
+    fn arm(
+        table: &'a Arc<MutexCell<HandleTable>>,
+        items: &'a [(HandleId, u32)],
+        sources: Vec<Arc<dyn Waitable>>,
+        waker: Arc<ParkWaker>,
+    ) -> Result<Self, IpcError> {
+        let cancel: Arc<dyn CancelTarget> = waker.clone();
+        table.with_lock(|tbl| {
+            for (registered, &(handle, _mask)) in items.iter().enumerate() {
+                // Handle прошёл снимок источников, а к взведению исчез: закрыт или
+                // передан параллельно, и исход ожидания - `Canceled`.
+                if tbl.register_cancel(handle, cancel.clone()).is_err() {
+                    for &(done, _mask) in &items[..registered] {
+                        tbl.unregister_cancel(done, &cancel);
+                    }
+                    return Err(IpcError::Canceled);
+                }
+            }
+            Ok(())
+        })?;
+
+        let mut armed = Self {
+            table,
+            items,
+            sources,
+            waker,
+            indexed_wakers: Vec::with_capacity(items.len()),
+        };
+        for (index, (source, &(_handle, mask))) in
+            (0u32..).zip(armed.sources.iter().zip(items.iter()))
+        {
+            let indexed = Arc::new(IndexedWaker::new(armed.waker.clone(), index));
+            let dyn_waker: Arc<dyn Waker> = indexed.clone();
+            source.register_waiter(mask, dyn_waker);
+            armed.indexed_wakers.push(indexed);
+        }
+        Ok(armed)
+    }
+}
+
+impl Drop for ArmedWait<'_> {
+    fn drop(&mut self) {
+        for (source, indexed) in self.sources.iter().zip(self.indexed_wakers.iter()) {
+            let dyn_waker: Arc<dyn Waker> = indexed.clone();
+            source.remove_waiter(&dyn_waker);
+        }
+        let cancel: Arc<dyn CancelTarget> = self.waker.clone();
+        self.table.with_lock(|tbl| {
+            for &(handle, _mask) in self.items {
+                tbl.unregister_cancel(handle, &cancel);
+            }
+        });
+    }
 }
 
 /// Ждёт пока хотя бы на одном из `items` не поднимется бит из его
@@ -104,125 +156,61 @@ pub fn signal_wait_many(
     }
 
     let runtime = runtime();
-    let table = runtime.current_handle_table().ok_or(IpcError::BadHandle)?;
+    let table = current_table()?;
 
-    let (signals, waker, indexed_wakers) =
-        match table.with_lock(|tbl| wait_many_setup(tbl, runtime, items, timeout_ns))? {
-            WaitSetup::Observed(out) => return Ok(out),
-            WaitSetup::Wait {
-                signals,
-                waker,
-                indexed_wakers,
-            } => (signals, waker, indexed_wakers),
-        };
+    // Снимок источников: wait-путь не матчит тип объекта, а спрашивает у
+    // capability target его ожидаемый источник. Не-ожидаемые объекты дают WrongType.
+    let sources = table.with_lock(|tbl| {
+        items
+            .iter()
+            .map(|&(handle, _mask)| {
+                tbl.clone_target(handle, Rights::READ)?
+                    .as_waitable()
+                    .ok_or(IpcError::WrongType)
+            })
+            .collect::<Result<Vec<_>, IpcError>>()
+    })?;
 
-    runtime.block_current_until(waker.state(), timeout_ns);
-
-    let result = match resolve_wait(&waker) {
-        WaitResolution::Signaled => Ok(WaitManyOutcome {
-            index: waker.winner_index(),
-            observed: waker.observed(),
-        }),
-        WaitResolution::Timeout => Err(IpcError::Timeout),
-        WaitResolution::Canceled => Err(IpcError::Canceled),
-    };
-
-    for (signal, indexed) in signals.iter().zip(indexed_wakers.iter()) {
-        let dyn_waker: Arc<dyn Waker> = indexed.clone();
-        signal.remove_waiter(&dyn_waker);
+    if let Some(outcome) = peek_ready(&sources, items) {
+        return Ok(outcome);
     }
-    let cancel: Arc<dyn CancelTarget> = waker;
-    table.with_lock(|tbl| {
-        for &(h, _) in items {
-            tbl.unregister_cancel(h, &cancel);
-        }
-    });
-
-    result
-}
-
-fn wait_many_setup(
-    tbl: &mut crate::HandleTable,
-    runtime: &Arc<dyn crate::KernelRuntime>,
-    items: &[(HandleId, u32)],
-    timeout_ns: Option<u64>,
-) -> Result<WaitSetup, IpcError> {
-    let mut signals: Vec<Arc<dyn Waitable>> = Vec::with_capacity(items.len());
-    for &(h, _mask) in items {
-        let obj = tbl.clone_target(h, Rights::READ)?;
-        // Wait-путь не матчит тип объекта: он спрашивает у capability target его
-        // ожидаемый источник. Не-ожидаемые объекты дают WrongType.
-        let waitable = obj.as_waitable().ok_or(IpcError::WrongType)?;
-        signals.push(waitable);
-    }
-
-    for (index, (signal, &(_h, mask))) in (0u32..).zip(signals.iter().zip(items.iter())) {
-        let already = signal.peek() & mask;
-        if already != 0 {
-            return Ok(WaitSetup::Observed(WaitManyOutcome {
-                index,
-                observed: already,
-            }));
-        }
-    }
-
     if timeout_ns == Some(0) {
         return Err(IpcError::Timeout);
     }
 
-    let token = runtime.current_wait_token();
-    let waker = Arc::new(ParkWaker::new(runtime.clone(), token));
-    let cancel: Arc<dyn CancelTarget> = waker.clone();
+    let waker = Arc::new(ParkWaker::new(
+        runtime.clone(),
+        runtime.current_wait_token(),
+    ));
+    let armed = ArmedWait::arm(&table, items, sources, waker)?;
 
-    // Регистрация cancel'ов идёт до waiter'ов: отказать может только она.
-    for (registered, &(h, _mask)) in items.iter().enumerate() {
-        if let Err(e) = tbl.register_cancel(h, cancel.clone()) {
-            for &(done, _) in &items[..registered] {
-                tbl.unregister_cancel(done, &cancel);
-            }
-            return Err(e);
-        }
+    runtime.block_current_until(armed.waker.state(), timeout_ns);
+
+    match armed.waker.resolve() {
+        ParkResolution::Signaled => Ok(WaitManyOutcome {
+            index: armed.waker.winner_index(),
+            observed: armed.waker.observed(),
+        }),
+        ParkResolution::Timeout => Err(IpcError::Timeout),
+        ParkResolution::Canceled => Err(IpcError::Canceled),
     }
-
-    let mut indexed_wakers: Vec<Arc<IndexedWaker>> = Vec::with_capacity(items.len());
-    for (index, (signal, &(_h, mask))) in (0u32..).zip(signals.iter().zip(items.iter())) {
-        let indexed = Arc::new(IndexedWaker::new(waker.clone(), index));
-        let dyn_waker: Arc<dyn Waker> = indexed.clone();
-        signal.register_waiter(mask, dyn_waker);
-        indexed_wakers.push(indexed);
-    }
-
-    Ok(WaitSetup::Wait {
-        signals,
-        waker,
-        indexed_wakers,
-    })
 }
 
-fn resolve_wait(waker: &Arc<ParkWaker>) -> WaitResolution {
-    match waker.state().load(core::sync::atomic::Ordering::Acquire) {
-        ParkState::SIGNALED => WaitResolution::Signaled,
-        ParkState::CANCELED => WaitResolution::Canceled,
-        _ => {
-            if waker.claim_timeout() {
-                WaitResolution::Timeout
-            } else {
-                match waker.state().load(core::sync::atomic::Ordering::Acquire) {
-                    ParkState::CANCELED => WaitResolution::Canceled,
-                    _ => WaitResolution::Signaled,
-                }
-            }
-        }
-    }
+fn peek_ready(sources: &[Arc<dyn Waitable>], items: &[(HandleId, u32)]) -> Option<WaitManyOutcome> {
+    (0u32..).zip(sources.iter().zip(items.iter())).find_map(
+        |(index, (source, &(_handle, mask)))| {
+            let observed = source.peek() & mask;
+            (observed != 0).then_some(WaitManyOutcome { index, observed })
+        },
+    )
 }
 
 /// Закрывает handle и изымает его из таблицы. На несуществующем id - `BadHandle`.
 /// Прав на handle не требует.
 pub fn handle_close(handle_id: HandleId) -> Result<(), IpcError> {
-    let table = runtime()
-        .current_handle_table()
-        .ok_or(IpcError::BadHandle)?;
-    table.with_lock(|tbl| tbl.remove(handle_id))?.release();
+    current_table()?
+        .with_lock(|tbl| tbl.remove(handle_id))?
+        .release();
     Ok(())
 }
 
@@ -235,10 +223,7 @@ pub fn handle_duplicate(
     new_rights: Rights,
     new_badge: u64,
 ) -> Result<HandleId, IpcError> {
-    let table = runtime()
-        .current_handle_table()
-        .ok_or(IpcError::BadHandle)?;
-    table
+    current_table()?
         .with_lock(|tbl| tbl.duplicate(handle_id, new_rights, new_badge))
         .map_err(RejectedInsert::release)
 }
@@ -254,13 +239,7 @@ pub fn thread_exit(exit_code: i32) -> ! {
 /// Создаёт новый [`Signal`] и регистрирует handle в таблице текущего
 /// процесса. Стартовые права - [`default_rights_for`](super::rights::default_rights_for).
 pub fn signal_create() -> Result<HandleId, IpcError> {
-    let table = runtime()
-        .current_handle_table()
-        .ok_or(IpcError::BadHandle)?;
-    let handle = Capability::new_with_default_rights(Signal::new());
-    table
-        .with_lock(|tbl| tbl.insert(handle))
-        .map_err(RejectedInsert::release)
+    install_handle(Capability::new_with_default_rights(Signal::new()))
 }
 
 // Завершение Process/Thread наблюдается ожиданием прямо по их handle через
@@ -275,13 +254,9 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
 /// handle на свежий `IrqLine` со стартовыми правами
 /// [`default_rights_for`](super::rights::default_rights_for).
 pub fn irq_mint(control_handle: HandleId, irq: u16) -> Result<HandleId, IpcError> {
-    let table = runtime()
-        .current_handle_table()
-        .ok_or(IpcError::BadHandle)?;
-    let object = table.with_lock(|tbl| tbl.clone_target(control_handle, Rights::WRITE))?;
-    let CapabilityTarget::IrqControl(control) = &object else {
-        return Err(IpcError::WrongType);
-    };
+    let table = current_table()?;
+    let control =
+        table.with_lock(|tbl| tbl.get_object::<IrqControl>(control_handle, Rights::WRITE))?;
     if !control.permits(irq) {
         return Err(IpcError::AccessDenied);
     }
@@ -296,14 +271,9 @@ pub fn irq_mint(control_handle: HandleId, irq: u16) -> Result<HandleId, IpcError
 /// Подтверждает прерывание на `line_handle`: снимает latch `SIGNALED` и
 /// размаскирует линию (см. [`IrqLine::ack`]). Требует [`Rights::WRITE`].
 pub fn irq_ack(line_handle: HandleId) -> Result<(), IpcError> {
-    let table = runtime()
-        .current_handle_table()
-        .ok_or(IpcError::BadHandle)?;
-    let object = table.with_lock(|tbl| tbl.clone_target(line_handle, Rights::WRITE))?;
-    let CapabilityTarget::IrqLine(line) = &object else {
-        return Err(IpcError::WrongType);
-    };
-    line.ack()
+    current_table()?
+        .with_lock(|tbl| tbl.get_object::<IrqLine>(line_handle, Rights::WRITE))?
+        .ack()
 }
 
 #[cfg(test)]
@@ -363,6 +333,9 @@ mod tests {
     impl KernelRuntime for MockRuntime {
         fn current_wait_token(&self) -> WaitToken {
             WaitToken::new(NonZeroU64::new(1).unwrap())
+        }
+        fn now_ns(&self) -> u64 {
+            0
         }
 
         fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
@@ -514,6 +487,29 @@ mod tests {
 
         let err = signal_wait_many(&[(id, SIGNALED), (id, SIGNALED)], None).unwrap_err();
         assert_eq!(err, IpcError::Canceled);
+
+        mock().reset();
+    }
+
+    /// Regression guard: handle, исчезнувший между снимком источников и
+    /// взведением, закрывает ожидание тем же `Canceled`, что и уход во сне.
+    #[test]
+    fn arming_a_wait_on_a_vanished_handle_is_canceled() {
+        let _guard = test_lock();
+        let (table, id, signal) = install_signal_handle(Rights::READ);
+        mock().configure(Some(table.clone()), None);
+        table.with_lock(|tbl| tbl.remove(id).unwrap()).release();
+
+        let sources: Vec<Arc<dyn Waitable>> = alloc::vec![signal];
+        let runtime = runtime();
+        let waker = Arc::new(ParkWaker::new(
+            runtime.clone(),
+            runtime.current_wait_token(),
+        ));
+        let items = [(id, SIGNALED)];
+        let armed = ArmedWait::arm(&table, &items, sources, waker);
+
+        assert!(matches!(armed.err(), Some(IpcError::Canceled)));
 
         mock().reset();
     }

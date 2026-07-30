@@ -23,6 +23,14 @@ use crate::{
 /// `unblock` по нему не находит поток.
 const NO_CURRENT_THREAD_TOKEN: WaitToken = WaitToken::new(core::num::NonZeroU64::MAX);
 
+/// Снимок IPC-контекста текущего потока: user-VM его процесса, VA IPC-буфера
+/// и handle-таблица (см. [`SchedulerHandle::current_ipc_context`]).
+pub struct CurrentIpcContext {
+    pub user_vm: UserVmContext,
+    pub ipc_buffer_va: VirtualAddress,
+    pub handle_table: Arc<MutexCell<HandleTable>>,
+}
+
 /// Thread-safe handle на планировщик для использования вне scheduler-lock.
 pub struct SchedulerHandle<A, T>
 where
@@ -68,6 +76,18 @@ where
     /// User-VA IPC-буфера текущего потока; `None` для kernel-потоков или до bootstrap.
     pub fn current_ipc_buffer_va(&self) -> Option<VirtualAddress> {
         self.inner.with_lock(|inner| inner.current_ipc_buffer_va())
+    }
+
+    /// Снимок IPC-контекста текущего потока за один захват scheduler-лока:
+    /// user-VM, VA IPC-буфера и handle-таблица. `None` для kernel-потоков и до bootstrap.
+    pub fn current_ipc_context(&self) -> Option<CurrentIpcContext> {
+        let parts = self.inner.with_lock(|inner| inner.current_ipc_parts())?;
+        let mapper = parts.address_space.mapper_arc()?;
+        Some(CurrentIpcContext {
+            user_vm: UserVmContext::new(mapper, parts.allocator),
+            ipc_buffer_va: parts.ipc_buffer_va,
+            handle_table: parts.handle_table,
+        })
     }
 
     pub fn spawn_prepared_user_process(
@@ -214,6 +234,10 @@ where
             return NO_CURRENT_THREAD_TOKEN;
         };
         WaitToken::from(current)
+    }
+
+    fn now_ns(&self) -> u64 {
+        self.inner.with_lock(|inner| inner.now_ns())
     }
 
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {

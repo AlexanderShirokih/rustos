@@ -52,6 +52,10 @@ pub trait KernelRuntime: Send + Sync {
     /// Opaque token текущего потока/контекста.
     fn current_wait_token(&self) -> WaitToken;
 
+    /// Монотонное время ядра (нс) - источник тот же, что у дедлайнов
+    /// [`block_current_until`](Self::block_current_until).
+    fn now_ns(&self) -> u64;
+
     /// `Arc` per-process handle-таблицы текущего потока. `None`, если
     /// планировщик ещё не инициализирован.
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>>;

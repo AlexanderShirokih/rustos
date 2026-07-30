@@ -45,6 +45,14 @@ pub trait CancelTarget: Send + Sync {
     }
 }
 
+/// Терминальный исход парковки, разрешённый [`ParkWaker::resolve`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ParkResolution {
+    Signaled,
+    Timeout,
+    Canceled,
+}
+
 /// Waker запаркованного потока.
 pub(super) struct ParkWaker {
     state: AtomicU32,
@@ -121,6 +129,25 @@ impl ParkWaker {
                 Ordering::Acquire,
             )
             .is_ok()
+    }
+
+    /// Разрешает исход после возврата из парковки: незавершённое ожидание
+    /// закрывается тайм-аутом, а проигранный тайм-аут дочитывает фактический исход.
+    pub(super) fn resolve(&self) -> ParkResolution {
+        match self.state.load(Ordering::Acquire) {
+            ParkState::SIGNALED => ParkResolution::Signaled,
+            ParkState::CANCELED => ParkResolution::Canceled,
+            ParkState::TIMEOUT => ParkResolution::Timeout,
+            _ => {
+                if self.claim_timeout() {
+                    ParkResolution::Timeout
+                } else if self.state.load(Ordering::Acquire) == ParkState::CANCELED {
+                    ParkResolution::Canceled
+                } else {
+                    ParkResolution::Signaled
+                }
+            }
+        }
     }
 }
 
@@ -223,6 +250,9 @@ mod tests {
     impl KernelRuntime for StubRuntime {
         fn current_wait_token(&self) -> WaitToken {
             WaitToken::new(NonZeroU64::new(1).unwrap())
+        }
+        fn now_ns(&self) -> u64 {
+            0
         }
         fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<HandleTable>>> {
             None

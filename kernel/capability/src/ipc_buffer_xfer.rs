@@ -1,15 +1,15 @@
 //! Кросс-AS перенос рандеву-сообщения между IPC-буферами двух потоков.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 
-use collections::LockCell;
+use collections::{LockCell, MutexCell};
 use memory::{memory_mapper::UserCopyError, virtual_address::VirtualAddress};
 use syscall::{IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, Rights, decode_tag, encode_tag};
 
 use super::{
     errors::IpcError,
-    handle::HandleId,
+    handle::{Capability, HandleId},
     handle_table::{DrainedHandles, HandleReservation, HandleTable},
     port::{BufferAccess, ThreadTransport},
 };
@@ -71,75 +71,96 @@ fn write_bytes(t: &ThreadTransport, off: usize, src: &[u8]) -> Result<(), IpcErr
 /// Линейный размер kernel-резидентного буфера в байтах.
 const BUFFER_LEN: usize = BADGE_OFFSET + BADGE_SIZE;
 
-fn kernel_read(buf: &syscall::IpcBuffer, off: usize, dst: &mut [u8]) -> Result<(), IpcError> {
-    let end = off.checked_add(dst.len()).ok_or(IpcError::BufferTooSmall)?;
-    if end > BUFFER_LEN {
-        return Err(IpcError::BufferTooSmall);
+/// Поле [`syscall::IpcBuffer`], адресуемое парой `(off, len)`.
+///
+/// Единая точка валидации ABI-раскладки для kernel-резидентного буфера:
+/// доступ возможен только к целому полю (`tag`/`badge`), одному cap-слоту
+/// или диапазону тела.
+enum BufferField {
+    Tag,
+    /// Индекс cap-слота.
+    Cap(usize),
+    /// Смещение внутри тела; длина проверена по границе `data`.
+    Data(usize),
+    Badge,
+}
+
+impl BufferField {
+    fn classify(off: usize, len: usize) -> Result<Self, IpcError> {
+        let end = off.checked_add(len).ok_or(IpcError::BufferTooSmall)?;
+        if end > BUFFER_LEN {
+            return Err(IpcError::BufferTooSmall);
+        }
+        if off >= BADGE_OFFSET {
+            if off != BADGE_OFFSET || len != BADGE_SIZE {
+                return Err(IpcError::BufferTooSmall);
+            }
+            Ok(Self::Badge)
+        } else if off >= DATA_OFFSET {
+            let start = off - DATA_OFFSET;
+            if start + len > IPC_BUFFER_DATA_MAX {
+                return Err(IpcError::BufferTooSmall);
+            }
+            Ok(Self::Data(start))
+        } else if off >= CAPS_OFFSET {
+            if !(off - CAPS_OFFSET).is_multiple_of(CAP_SIZE) || len != CAP_SIZE {
+                return Err(IpcError::BufferTooSmall);
+            }
+            let index = (off - CAPS_OFFSET) / CAP_SIZE;
+            if index >= IPC_BUFFER_MAX_CAPS {
+                return Err(IpcError::BufferTooSmall);
+            }
+            Ok(Self::Cap(index))
+        } else {
+            if off != TAG_OFFSET || len != TAG_SIZE {
+                return Err(IpcError::BufferTooSmall);
+            }
+            Ok(Self::Tag)
+        }
     }
-    if off >= BADGE_OFFSET {
-        if off != BADGE_OFFSET || dst.len() != BADGE_SIZE {
-            return Err(IpcError::BufferTooSmall);
+}
+
+fn kernel_read(buf: &syscall::IpcBuffer, off: usize, dst: &mut [u8]) -> Result<(), IpcError> {
+    match BufferField::classify(off, dst.len())? {
+        BufferField::Tag => dst.copy_from_slice(&buf.tag.to_le_bytes()),
+        BufferField::Cap(index) => {
+            let cap = buf.caps.get(index).ok_or(IpcError::BufferTooSmall)?;
+            dst.copy_from_slice(&cap.to_le_bytes());
         }
-        dst.copy_from_slice(&buf.badge.to_le_bytes());
-    } else if off >= DATA_OFFSET {
-        let start = off - DATA_OFFSET;
-        let src = buf
-            .data
-            .get(start..start + dst.len())
-            .ok_or(IpcError::BufferTooSmall)?;
-        dst.copy_from_slice(src);
-    } else if off >= CAPS_OFFSET {
-        let src = caps_slot(buf, off, dst.len())?;
-        dst.copy_from_slice(&src);
-    } else {
-        if off != TAG_OFFSET || dst.len() != TAG_SIZE {
-            return Err(IpcError::BufferTooSmall);
+        BufferField::Data(start) => {
+            let src = buf
+                .data
+                .get(start..start + dst.len())
+                .ok_or(IpcError::BufferTooSmall)?;
+            dst.copy_from_slice(src);
         }
-        dst.copy_from_slice(&buf.tag.to_le_bytes());
+        BufferField::Badge => dst.copy_from_slice(&buf.badge.to_le_bytes()),
     }
     Ok(())
 }
 
 fn kernel_write(buf: &mut syscall::IpcBuffer, off: usize, src: &[u8]) -> Result<(), IpcError> {
-    let end = off.checked_add(src.len()).ok_or(IpcError::BufferTooSmall)?;
-    if end > BUFFER_LEN {
-        return Err(IpcError::BufferTooSmall);
-    }
-    if off >= BADGE_OFFSET {
-        if off != BADGE_OFFSET || src.len() != BADGE_SIZE {
-            return Err(IpcError::BufferTooSmall);
+    let le_u64 = |src: &[u8]| {
+        src.try_into()
+            .map(u64::from_le_bytes)
+            .map_err(|_| IpcError::BufferTooSmall)
+    };
+    match BufferField::classify(off, src.len())? {
+        BufferField::Tag => buf.tag = le_u64(src)?,
+        BufferField::Cap(index) => {
+            let slot = buf.caps.get_mut(index).ok_or(IpcError::BufferTooSmall)?;
+            *slot = u32::from_le_bytes(src.try_into().map_err(|_| IpcError::BufferTooSmall)?);
         }
-        buf.badge = u64::from_le_bytes(src.try_into().map_err(|_| IpcError::BufferTooSmall)?);
-    } else if off >= DATA_OFFSET {
-        let start = off - DATA_OFFSET;
-        let dst = buf
-            .data
-            .get_mut(start..start + src.len())
-            .ok_or(IpcError::BufferTooSmall)?;
-        dst.copy_from_slice(src);
-    } else if off >= CAPS_OFFSET {
-        if !(off - CAPS_OFFSET).is_multiple_of(CAP_SIZE) || src.len() != CAP_SIZE {
-            return Err(IpcError::BufferTooSmall);
+        BufferField::Data(start) => {
+            let dst = buf
+                .data
+                .get_mut(start..start + src.len())
+                .ok_or(IpcError::BufferTooSmall)?;
+            dst.copy_from_slice(src);
         }
-        let i = (off - CAPS_OFFSET) / CAP_SIZE;
-        let slot = buf.caps.get_mut(i).ok_or(IpcError::BufferTooSmall)?;
-        *slot = u32::from_le_bytes(src.try_into().map_err(|_| IpcError::BufferTooSmall)?);
-    } else {
-        if off != TAG_OFFSET || src.len() != TAG_SIZE {
-            return Err(IpcError::BufferTooSmall);
-        }
-        buf.tag = u64::from_le_bytes(src.try_into().map_err(|_| IpcError::BufferTooSmall)?);
+        BufferField::Badge => buf.badge = le_u64(src)?,
     }
     Ok(())
-}
-
-fn caps_slot(buf: &syscall::IpcBuffer, off: usize, len: usize) -> Result<[u8; CAP_SIZE], IpcError> {
-    if !(off - CAPS_OFFSET).is_multiple_of(CAP_SIZE) || len != CAP_SIZE {
-        return Err(IpcError::BufferTooSmall);
-    }
-    let i = (off - CAPS_OFFSET) / CAP_SIZE;
-    let v = buf.caps.get(i).ok_or(IpcError::BufferTooSmall)?;
-    Ok(v.to_le_bytes())
 }
 
 fn read_tag(t: &ThreadTransport) -> Result<u64, IpcError> {
@@ -198,6 +219,67 @@ fn copy_body(
     Ok(())
 }
 
+/// Слоты, зарезервированные в таблице получателя на время переноса caps.
+/// `Drop` возвращает непотреблённые резервации таблице.
+struct ReservedSlots<'t> {
+    table: &'t Arc<MutexCell<HandleTable>>,
+    slots: Vec<HandleReservation>,
+}
+
+impl<'t> ReservedSlots<'t> {
+    /// Резервирует `count` слотов (всё или ничего).
+    fn reserve(table: &'t Arc<MutexCell<HandleTable>>, count: usize) -> Result<Self, IpcError> {
+        let slots = table.with_lock(|tbl| {
+            let mut slots: Vec<HandleReservation> = Vec::with_capacity(count);
+            for _ in 0..count {
+                match tbl.reserve_slot() {
+                    Ok(slot) => slots.push(slot),
+                    Err(e) => {
+                        for slot in slots {
+                            tbl.release_reservation(slot);
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            Ok(slots)
+        })?;
+        Ok(Self { table, slots })
+    }
+
+    /// [`HandleId`], под которыми capability станут видны получателю.
+    fn handle_ids(&self) -> Vec<HandleId> {
+        self.slots
+            .iter()
+            .map(HandleReservation::handle_id)
+            .collect()
+    }
+
+    /// Вставляет `handles` в зарезервированные слоты; отклонённое уходит в `rejected`.
+    fn commit(mut self, handles: Vec<Capability>, rejected: &mut DrainedHandles) {
+        let slots = core::mem::take(&mut self.slots);
+        self.table.with_lock(|tbl| {
+            for (slot, handle) in slots.into_iter().zip(handles) {
+                let _ = tbl.commit_reserved(slot, handle, rejected);
+            }
+        });
+    }
+}
+
+impl Drop for ReservedSlots<'_> {
+    fn drop(&mut self) {
+        if self.slots.is_empty() {
+            return;
+        }
+        let slots = core::mem::take(&mut self.slots);
+        self.table.with_lock(|tbl| {
+            for slot in slots {
+                tbl.release_reservation(slot);
+            }
+        });
+    }
+}
+
 /// Переносит рандеву-сообщение из IPC-буфера `sender` в IPC-буфер
 /// `receiver`: тело (по `len` из tag), хендлы (по `ncaps`), и tag.
 ///
@@ -217,73 +299,45 @@ pub fn transfer_rendezvous(
     write_badge(receiver, sender.badge)?;
 
     if ncaps > 0 {
-        let raw_ids = read_caps(sender, ncaps)?;
-        let mut ids: Vec<HandleId> = Vec::with_capacity(ncaps);
-        for raw in raw_ids {
-            let nz = NonZeroU32::new(raw).ok_or(IpcError::BadHandle)?;
-            ids.push(HandleId::from_raw(nz));
-        }
-
-        // Резервируем ncaps слотов получателя (всё или ничего).
-        let reservations = receiver
-            .handle_table
-            .with_lock(|tbl| reserve_slots(tbl, ncaps))?;
-        let predicted: Vec<HandleId> = reservations
-            .iter()
-            .map(HandleReservation::handle_id)
-            .collect();
-
-        // Пишем предсказанные ID в caps получателя. На ошибке освобождаем
-        // резервации - отправитель ещё не тронут.
-        if let Err(e) = write_caps(receiver, &predicted) {
-            receiver
-                .handle_table
-                .with_lock(|tbl| release_all(tbl, reservations));
-            return Err(e);
-        }
-
-        let mut drained = DrainedHandles::empty();
-        let taken = sender
-            .handle_table
-            .with_lock(|tbl| tbl.try_drain_for_transfer(&ids, Rights::TRANSFER, &mut drained));
-        if let Err(e) = taken {
-            receiver
-                .handle_table
-                .with_lock(|tbl| release_all(tbl, reservations));
-            drained.release();
-            return Err(e);
-        }
-
-        let handles = drained.take_handles();
-        receiver.handle_table.with_lock(|tbl| {
-            for (res, handle) in reservations.into_iter().zip(handles) {
-                let _ = tbl.commit_reserved(res, handle, &mut drained);
-            }
-        });
-        drained.release();
+        transfer_caps(sender, receiver, ncaps)?;
     }
 
     write_tag(receiver, encode_tag(len, ncaps))?;
     Ok(())
 }
 
-fn reserve_slots(tbl: &mut HandleTable, n: usize) -> Result<Vec<HandleReservation>, IpcError> {
-    let mut reservations: Vec<HandleReservation> = Vec::with_capacity(n);
-    for _ in 0..n {
-        match tbl.reserve_slot() {
-            Ok(r) => reservations.push(r),
-            Err(e) => {
-                release_all(tbl, reservations);
-                return Err(e);
-            }
-        }
+/// Перемещает `ncaps` capability из таблицы отправителя в таблицу получателя.
+/// Изъятие у отправителя идёт после всех способных упасть шагов на стороне
+/// получателя.
+fn transfer_caps(
+    sender: &ThreadTransport,
+    receiver: &ThreadTransport,
+    ncaps: usize,
+) -> Result<(), IpcError> {
+    let raw_ids = read_caps(sender, ncaps)?;
+    let mut ids: Vec<HandleId> = Vec::with_capacity(ncaps);
+    for raw in raw_ids {
+        let nz = NonZeroU32::new(raw).ok_or(IpcError::BadHandle)?;
+        ids.push(HandleId::from_raw(nz));
     }
-    Ok(reservations)
-}
 
-fn release_all(tbl: &mut HandleTable, reservations: Vec<HandleReservation>) {
-    for r in reservations {
-        tbl.release_reservation(r);
+    let reserved = ReservedSlots::reserve(&receiver.handle_table, ncaps)?;
+    write_caps(receiver, &reserved.handle_ids())?;
+
+    let mut drained = DrainedHandles::empty();
+    let taken = sender
+        .handle_table
+        .with_lock(|tbl| tbl.try_drain_for_transfer(&ids, Rights::TRANSFER, &mut drained));
+    match taken {
+        Ok(()) => {
+            reserved.commit(drained.take_handles(), &mut drained);
+            drained.release();
+            Ok(())
+        }
+        Err(e) => {
+            drained.release();
+            Err(e)
+        }
     }
 }
 

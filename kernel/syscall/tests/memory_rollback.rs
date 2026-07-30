@@ -132,6 +132,9 @@ impl KernelRuntime for TableRuntime {
     fn current_wait_token(&self) -> WaitToken {
         WaitToken::new(core::num::NonZeroU64::new(1).unwrap())
     }
+    fn now_ns(&self) -> u64 {
+        0
+    }
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
         self.handle_table.lock().unwrap().clone()
     }

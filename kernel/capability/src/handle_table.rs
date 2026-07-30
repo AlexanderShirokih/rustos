@@ -1,20 +1,14 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU16;
 
-use memory::MemoryRegion;
 use syscall::Rights;
 
 use super::{
     errors::IpcError,
     handle::{Capability, HandleId},
-    port::PortAccess,
-    process::ProcessObject,
-    reply::Reply,
-    resource::Resource,
+    port::{Port, PortAccess},
     rev_node::{RevocationHook, revoke_subtree},
-    signal::Signal,
-    target::CapabilityTarget,
-    thread::ThreadObject,
+    target::{CapabilityTarget, TargetObject},
     wait::CancelTarget,
 };
 
@@ -151,6 +145,13 @@ impl core::fmt::Debug for RejectedInsert {
             .field("error", &self.error)
             .finish_non_exhaustive()
     }
+}
+
+/// Объект типа `T` вместе с полным набором прав его handle'а
+/// (см. [`HandleTable::get_object_with_rights`]).
+pub struct ObjectAccess<T> {
+    pub object: Arc<T>,
+    pub rights: Rights,
 }
 
 /// Линейный токен на зарезервированный слот: потребляется по значению ровно одним
@@ -416,161 +417,53 @@ impl HandleTable {
         Ok(handle)
     }
 
-    /// Извлекает снимок port-capability для одной операции, с проверкой прав и типа: учёт стороны
-    /// удерживается с этого момента и до снятия [`OperationHold`](super::OperationHold).
-    pub fn get_port(&self, id: HandleId, need: Rights) -> Result<PortAccess, IpcError> {
-        let h = self.lookup(id)?;
-        if !h.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        match &h.target {
-            CapabilityTarget::Port(e) => Ok(PortAccess {
-                port: e.clone(),
-                badge: h.badge(),
-                hold: h.hold_for_operation(),
-            }),
-            CapabilityTarget::Signal(_)
-            | CapabilityTarget::Process(_)
-            | CapabilityTarget::Thread(_)
-            | CapabilityTarget::Memory(_)
-            | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Reply(_)
-            | CapabilityTarget::IrqControl(_)
-            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
-        }
-    }
-
-    /// Извлекает `Arc<Reply>` с проверкой прав и типа.
-    pub fn get_reply(&self, id: HandleId, need: Rights) -> Result<Arc<Reply>, IpcError> {
-        let h = self.lookup(id)?;
-        if !h.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        match &h.target {
-            CapabilityTarget::Reply(r) => Ok(r.clone()),
-            CapabilityTarget::Signal(_)
-            | CapabilityTarget::Process(_)
-            | CapabilityTarget::Thread(_)
-            | CapabilityTarget::Memory(_)
-            | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Port(_)
-            | CapabilityTarget::IrqControl(_)
-            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
-        }
-    }
-
-    /// Извлекает `Arc<Signal>` с проверкой прав и типа.
-    pub fn get_signal(&self, id: HandleId, need: Rights) -> Result<Arc<Signal>, IpcError> {
-        let h = self.lookup(id)?;
-        if !h.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        match &h.target {
-            CapabilityTarget::Signal(n) => Ok(n.clone()),
-            CapabilityTarget::Process(_)
-            | CapabilityTarget::Thread(_)
-            | CapabilityTarget::Memory(_)
-            | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_)
-            | CapabilityTarget::IrqControl(_)
-            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
-        }
-    }
-
-    /// Извлекает `Arc<ProcessObject>` с проверкой прав и типа.
-    pub fn get_process(&self, id: HandleId, need: Rights) -> Result<Arc<ProcessObject>, IpcError> {
-        let h = self.lookup(id)?;
-        if !h.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        match &h.target {
-            CapabilityTarget::Process(p) => Ok(p.clone()),
-            CapabilityTarget::Signal(_)
-            | CapabilityTarget::Thread(_)
-            | CapabilityTarget::Memory(_)
-            | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_)
-            | CapabilityTarget::IrqControl(_)
-            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
-        }
-    }
-
-    /// Извлекает `Arc<ThreadObject>` с проверкой прав и типа.
-    pub fn get_thread(&self, id: HandleId, need: Rights) -> Result<Arc<ThreadObject>, IpcError> {
-        let h = self.lookup(id)?;
-        if !h.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        match &h.target {
-            CapabilityTarget::Thread(t) => Ok(t.clone()),
-            CapabilityTarget::Signal(_)
-            | CapabilityTarget::Process(_)
-            | CapabilityTarget::Memory(_)
-            | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_)
-            | CapabilityTarget::IrqControl(_)
-            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
-        }
-    }
-
-    /// Извлекает `Arc<MemoryRegion>` с проверкой прав и типа.
-    pub fn get_memory(&self, id: HandleId, need: Rights) -> Result<Arc<MemoryRegion>, IpcError> {
-        self.get_memory_with_rights(id, need).map(|(m, _)| m)
-    }
-
-    /// Извлекает `Arc<MemoryRegion>` вместе с полным набором `Rights` handle'а.
-    pub fn get_memory_with_rights(
+    /// Извлекает объект типа `T` с проверкой прав и типа. Соответствие типа
+    /// варианту [`CapabilityTarget`] задаёт [`TargetObject`].
+    pub fn get_object<T: TargetObject>(
         &self,
         id: HandleId,
         need: Rights,
-    ) -> Result<(Arc<MemoryRegion>, Rights), IpcError> {
-        let h = self.lookup(id)?;
-        if !h.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        match &h.target {
-            CapabilityTarget::Memory(m) => Ok((m.clone(), h.rights())),
-            CapabilityTarget::Signal(_)
-            | CapabilityTarget::Process(_)
-            | CapabilityTarget::Thread(_)
-            | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_)
-            | CapabilityTarget::IrqControl(_)
-            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
-        }
+    ) -> Result<Arc<T>, IpcError> {
+        let handle = self.get(id, need)?;
+        T::from_target(handle.target())
+            .cloned()
+            .ok_or(IpcError::WrongType)
     }
 
-    /// Извлекает `Arc<Resource>` с проверкой прав и типа.
-    pub fn get_resource(&self, id: HandleId, need: Rights) -> Result<Arc<Resource>, IpcError> {
-        let h = self.lookup(id)?;
-        if !h.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        match &h.target {
-            CapabilityTarget::Resource(r) => Ok(r.clone()),
-            CapabilityTarget::Signal(_)
-            | CapabilityTarget::Process(_)
-            | CapabilityTarget::Thread(_)
-            | CapabilityTarget::Memory(_)
-            | CapabilityTarget::Port(_)
-            | CapabilityTarget::Reply(_)
-            | CapabilityTarget::IrqControl(_)
-            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
-        }
+    /// Извлекает снимок port-capability для одной операции, с проверкой прав и типа: учёт стороны
+    /// удерживается с этого момента и до снятия [`OperationHold`](super::OperationHold).
+    pub fn get_port(&self, id: HandleId, need: Rights) -> Result<PortAccess, IpcError> {
+        let handle = self.get(id, need)?;
+        let port = Port::from_target(handle.target())
+            .cloned()
+            .ok_or(IpcError::WrongType)?;
+        Ok(PortAccess {
+            port,
+            badge: handle.badge(),
+            hold: handle.hold_for_operation(),
+        })
+    }
+
+    /// Извлекает объект типа `T` вместе с полным набором `Rights` handle'а.
+    pub fn get_object_with_rights<T: TargetObject>(
+        &self,
+        id: HandleId,
+        need: Rights,
+    ) -> Result<ObjectAccess<T>, IpcError> {
+        let handle = self.get(id, need)?;
+        let object = T::from_target(handle.target())
+            .cloned()
+            .ok_or(IpcError::WrongType)?;
+        Ok(ObjectAccess {
+            object,
+            rights: handle.rights(),
+        })
     }
 
     /// Доступ к capability target без проверки конкретного типа - для wait-пути,
     /// который применим к любому signalable (Signal/Process/...).
     pub fn clone_target(&self, id: HandleId, need: Rights) -> Result<CapabilityTarget, IpcError> {
-        let handle = self.lookup(id)?;
-        if !handle.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        Ok(handle.target().clone())
+        Ok(self.get(id, need)?.target().clone())
     }
 
     /// Атомарно проверяет, что все `ids` существуют, имеют `min_rights` и нет дубликатов, затем
@@ -861,7 +754,7 @@ mod tests {
         let proc_id = table.insert(process_handle(Rights::READ)).unwrap();
         let thread_id = table.insert(thread_handle(Rights::READ)).unwrap();
 
-        assert!(table.get_signal(signal_id, Rights::READ).is_ok());
+        assert!(table.get_object::<Signal>(signal_id, Rights::READ).is_ok());
         assert!(table.get_port(ep_id, Rights::READ).is_ok());
 
         assert!(matches!(
@@ -869,7 +762,7 @@ mod tests {
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_signal(ep_id, Rights::READ),
+            table.get_object::<Signal>(ep_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
@@ -877,7 +770,7 @@ mod tests {
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_signal(thread_id, Rights::READ),
+            table.get_object::<Signal>(thread_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
     }
@@ -890,17 +783,21 @@ mod tests {
         let ep_id = table.insert(port_handle(Rights::READ)).unwrap();
         let thread_id = table.insert(thread_handle(Rights::READ)).unwrap();
 
-        assert!(table.get_process(proc_id, Rights::READ).is_ok());
+        assert!(
+            table
+                .get_object::<ProcessObject>(proc_id, Rights::READ)
+                .is_ok()
+        );
         assert!(matches!(
-            table.get_process(signal_id, Rights::READ),
+            table.get_object::<ProcessObject>(signal_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_process(ep_id, Rights::READ),
+            table.get_object::<ProcessObject>(ep_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_process(thread_id, Rights::READ),
+            table.get_object::<ProcessObject>(thread_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
     }
@@ -913,17 +810,21 @@ mod tests {
         let ep_id = table.insert(port_handle(Rights::READ)).unwrap();
         let proc_id = table.insert(process_handle(Rights::READ)).unwrap();
 
-        assert!(table.get_thread(thread_id, Rights::READ).is_ok());
+        assert!(
+            table
+                .get_object::<ThreadObject>(thread_id, Rights::READ)
+                .is_ok()
+        );
         assert!(matches!(
-            table.get_thread(signal_id, Rights::READ),
+            table.get_object::<ThreadObject>(signal_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_thread(ep_id, Rights::READ),
+            table.get_object::<ThreadObject>(ep_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_thread(proc_id, Rights::READ),
+            table.get_object::<ThreadObject>(proc_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
     }
@@ -933,10 +834,10 @@ mod tests {
         let mut table = HandleTable::new();
         let id = table.insert(process_handle(Rights::READ)).unwrap();
         assert!(matches!(
-            table.get_process(id, Rights::WRITE),
+            table.get_object::<ProcessObject>(id, Rights::WRITE),
             Err(IpcError::AccessDenied)
         ));
-        assert!(table.get_process(id, Rights::READ).is_ok());
+        assert!(table.get_object::<ProcessObject>(id, Rights::READ).is_ok());
     }
 
     #[test]
@@ -944,10 +845,10 @@ mod tests {
         let mut table = HandleTable::new();
         let id = table.insert(thread_handle(Rights::READ)).unwrap();
         assert!(matches!(
-            table.get_thread(id, Rights::WRITE),
+            table.get_object::<ThreadObject>(id, Rights::WRITE),
             Err(IpcError::AccessDenied)
         ));
-        assert!(table.get_thread(id, Rights::READ).is_ok());
+        assert!(table.get_object::<ThreadObject>(id, Rights::READ).is_ok());
     }
 
     #[test]
@@ -969,13 +870,17 @@ mod tests {
         let signal_id = table.insert(signal_handle(Rights::READ)).unwrap();
         let ep_id = table.insert(port_handle(Rights::READ)).unwrap();
 
-        assert!(table.get_memory(mem_id, Rights::WRITE).is_ok());
+        assert!(
+            table
+                .get_object::<MemoryRegion>(mem_id, Rights::WRITE)
+                .is_ok()
+        );
         assert!(matches!(
-            table.get_memory(signal_id, Rights::READ),
+            table.get_object::<MemoryRegion>(signal_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_memory(ep_id, Rights::READ),
+            table.get_object::<MemoryRegion>(ep_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
@@ -983,7 +888,7 @@ mod tests {
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_signal(mem_id, Rights::READ),
+            table.get_object::<Signal>(mem_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
     }
@@ -1013,19 +918,19 @@ mod tests {
         let signal_id = table.insert(signal_handle(Rights::READ)).unwrap();
         let ep_id = table.insert(port_handle(Rights::READ)).unwrap();
 
-        assert!(table.get_resource(res_id, Rights::WRITE).is_ok());
+        assert!(table.get_object::<Resource>(res_id, Rights::WRITE).is_ok());
         assert_eq!(
             table
-                .get_resource(res_id, Rights::WRITE | Rights::EXECUTE)
+                .get_object::<Resource>(res_id, Rights::WRITE | Rights::EXECUTE)
                 .unwrap_err(),
             IpcError::AccessDenied
         );
         assert!(matches!(
-            table.get_resource(signal_id, Rights::READ),
+            table.get_object::<Resource>(signal_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_resource(ep_id, Rights::READ),
+            table.get_object::<Resource>(ep_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
@@ -1033,7 +938,7 @@ mod tests {
             Err(IpcError::WrongType)
         ));
         assert!(matches!(
-            table.get_signal(res_id, Rights::READ),
+            table.get_object::<Signal>(res_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
     }

@@ -27,7 +27,7 @@ pub use scheduler::{
     Bootstrapped, DEFAULT_QUANTUM_NS, Running, Scheduler, SchedulerConfig, SchedulerStage, Uninit,
     lowest_priority,
 };
-pub use service::{SchedulerHandle, UserProcessLauncher};
+pub use service::{CurrentIpcContext, SchedulerHandle, UserProcessLauncher};
 pub use thread::{Thread, ThreadState};
 pub use types::{
     Priority, ProcessId, SchedulerService, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig,

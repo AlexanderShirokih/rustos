@@ -31,7 +31,7 @@ fn lookup_memory(
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let region = table
-        .with_lock(|tbl| tbl.get_memory(id, need))
+        .with_lock(|tbl| tbl.get_object::<MemoryRegion>(id, need))
         .map_err(map_ipc_error)?;
     Ok(region)
 }
@@ -43,22 +43,23 @@ fn lookup_memory_grant(
     let table = capability::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let (region, rights) = table
-        .with_lock(|tbl| tbl.get_memory_with_rights(id, need))
+    let access = table
+        .with_lock(|tbl| tbl.get_object_with_rights::<MemoryRegion>(id, need))
         .map_err(map_ipc_error)?;
     let mut bits: u8 = 0;
-    if rights.contains(Rights::READ) {
+    if access.rights.contains(Rights::READ) {
         bits |= AccessMask::R.bits();
     }
-    if rights.contains(Rights::WRITE) {
+    if access.rights.contains(Rights::WRITE) {
         bits |= AccessMask::W.bits();
     }
-    if rights.contains(Rights::EXECUTE) {
+    if access.rights.contains(Rights::EXECUTE) {
         bits |= AccessMask::X.bits();
     }
     let handle_mask = AccessMask::from_bits_truncate(bits);
-    let grant = AccessMask::from_bits_truncate(handle_mask.bits() & region.access_mask().bits());
-    Ok((region, grant))
+    let grant =
+        AccessMask::from_bits_truncate(handle_mask.bits() & access.object.access_mask().bits());
+    Ok((access.object, grant))
 }
 
 // Срыв активного маппинга при отзыве авторизовавшей его капы. Держит СЛАБЫЙ
@@ -136,7 +137,7 @@ pub fn sys_memory_create_virtual(
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let resource = table
-        .with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))
+        .with_lock(|tbl| tbl.get_object::<capability::Resource>(resource_id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
     let fa = runtime()
@@ -213,7 +214,7 @@ pub fn sys_memory_allocate(
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let resource = table
-        .with_lock(|tbl| tbl.get_resource(resource_id, Rights::WRITE))
+        .with_lock(|tbl| tbl.get_object::<capability::Resource>(resource_id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
     let user_vm = runtime().current_user_vm().ok_or(SyscallError::WrongType)?;

@@ -8,12 +8,12 @@ use core::num::NonZeroU32;
 
 use capability::{
     Capability, CapabilityTarget, DrainedHandles, HandleId, HandleReservation, HandleTable,
-    LoadImageError, Rights, StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec,
-    UserThreadEntry, install_handle, runtime,
+    LoadImageError, ProcessObject, Rights, StartProcessError, UserImageInstall, UserSegmentInstall,
+    UserStartSpec, UserThreadEntry, install_handle, runtime,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
-    UserVmContext,
+    MemoryRegion, UserVmContext,
     memory_mapper::{MemoryMappingError, UserCopyError},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
@@ -94,7 +94,7 @@ pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let process = table
-        .with_lock(|tbl| tbl.get_process(id, Rights::READ))
+        .with_lock(|tbl| tbl.get_object::<ProcessObject>(id, Rights::READ))
         .map_err(map_ipc_error)?;
     let code = process.exit_code();
     Ok(u64::from(code.cast_unsigned()))
@@ -107,7 +107,7 @@ pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, Syscall
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let process = table
-        .with_lock(|tbl| tbl.get_process(id, Rights::WRITE))
+        .with_lock(|tbl| tbl.get_object::<ProcessObject>(id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
     // Self-terminate отвергается: dispatcher вернул бы в уже завершённый поток.
@@ -155,7 +155,7 @@ pub fn sys_process_load_image(
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let process_object = loader_table
-        .with_lock(|tbl| tbl.get_process(process_id, Rights::WRITE))
+        .with_lock(|tbl| tbl.get_object::<ProcessObject>(process_id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
     let mut segments_buf = [0u8; MAX_SEGMENTS_PER_IMG * USER_SEGMENT_SIZE];
@@ -173,8 +173,8 @@ pub fn sys_process_load_image(
             .map_err(|_| SyscallError::InvalidArgument)?;
         let needed_rights = Rights::WRITE | rights_for_access(flags);
         let region_handle_id = handle_id_from_raw(seg.region_handle)?;
-        let (region, _handle_rights) = loader_table
-            .with_lock(|tbl| tbl.get_memory_with_rights(region_handle_id, needed_rights))
+        let region = loader_table
+            .with_lock(|tbl| tbl.get_object::<MemoryRegion>(region_handle_id, needed_rights))
             .map_err(map_ipc_error)?;
         if region.size_bytes() != seg.mapped_size as usize {
             return Err(SyscallError::InvalidArgument);
@@ -236,7 +236,7 @@ pub fn sys_process_start(
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let process_object = loader_table
-        .with_lock(|tbl| tbl.get_process(process_id, Rights::WRITE))
+        .with_lock(|tbl| tbl.get_object::<ProcessObject>(process_id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
     let spec = UserStartSpec {

@@ -14,19 +14,29 @@
 //! изменение множества и разбор очереди атомарны. Операция удерживает учёт своей стороны от
 //! снимка capability до доставки или постановки в очередь ([`OperationHold`]).
 
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+mod outcome;
+mod state;
+mod transport;
+
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     num::NonZeroU64,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use collections::{LockCell, MutexCell};
-use memory::{memory_mapper::MemoryMapper, virtual_address::VirtualAddress};
 use syscall::Rights;
 
+#[cfg(test)]
+use self::state::DEPARTED_BADGE_LIMIT;
+use self::state::{PortState, ReceiverWaiter, RecvPick, SenderWaiter, Waiter};
+pub use self::transport::{KernelIpcBuffer, ThreadTransport};
+pub(crate) use self::{
+    outcome::{OutcomeSlot, RendezvousOutcome, SendKind},
+    transport::BufferAccess,
+};
 use super::{
     errors::IpcError,
-    handle_table::HandleTable,
     ipc_buffer_xfer::{transfer_rendezvous, write_badge},
     reply::{Reply, ReplySlot},
     rev_node::RevocationHook,
@@ -35,242 +45,33 @@ use super::{
     wait::{CancelTarget, ParkWaker},
 };
 
-/// Роль стороны, стоящей в очереди отправителей.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SendKind {
-    /// `send`: после доставки отправитель разблокируется немедленно.
-    Send,
-    /// `call`: вызывающая сторона остаётся блокированной до `reply`.
-    Call,
-}
-
-/// Исход операции, прочитанный разбуженной стороной из [`OutcomeSlot`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RendezvousOutcome {
-    /// Встреча состоялась, сообщение доставлено.
-    Delivered,
-    /// Port/Reply уничтожен или последний хендл закрыт.
-    PeerGone,
-    /// Перенос caps или копирование тела провалились.
-    TransferFailed,
-    /// Отправители значка исчезли: кадра нет, получателю доставлен значок.
-    SenderGone(u64),
-}
-
-/// Kernel-резидентный IPC-буфер, разделяемый kernel-потоком и
-/// рандеву-переносом. Тот же `#[repr(C)]`-layout, что и user-буфер.
-pub type KernelIpcBuffer = Arc<MutexCell<syscall::IpcBuffer>>;
-
-/// Способ доступа к телу IPC-буфера транспорта.
-#[derive(Clone)]
-pub(crate) enum BufferAccess {
-    /// User-буфер: mapper его AS и VA буфера.
-    User {
-        mapper: Arc<dyn MemoryMapper + Send + Sync>,
-        ipc_buffer_va: VirtualAddress,
-    },
-    /// Kernel-резидентный буфер за разделяемой ячейкой.
-    Kernel { buffer: KernelIpcBuffer },
-}
-
-/// Транспортный контекст потока для кросс-AS рандеву: доступ к телу его
-/// IPC-буфера ([`BufferAccess`]) и его handle-таблице. Снимок берётся до
-/// того, как поток уйдёт спать.
-///
-/// `badge` - значок port-хендла, через который отправитель инициировал send/call.
-/// После успешного рандеву значок отправителя записывается в `IpcBuffer.badge` получателя.
-#[derive(Clone)]
-pub struct ThreadTransport {
-    pub(crate) access: BufferAccess,
-    pub(crate) handle_table: Arc<MutexCell<HandleTable>>,
-    pub(crate) badge: u64,
-}
-
-impl ThreadTransport {
-    /// Транспорт user-потока: тело в буфере, замапленном в его user-AS.
-    pub fn new(
-        mapper: Arc<dyn MemoryMapper + Send + Sync>,
-        ipc_buffer_va: VirtualAddress,
-        handle_table: Arc<MutexCell<HandleTable>>,
-    ) -> Self {
-        Self {
-            access: BufferAccess::User {
-                mapper,
-                ipc_buffer_va,
-            },
-            handle_table,
-            badge: 0,
-        }
-    }
-
-    pub fn new_kernel(buffer: KernelIpcBuffer, handle_table: Arc<MutexCell<HandleTable>>) -> Self {
-        Self {
-            access: BufferAccess::Kernel { buffer },
-            handle_table,
-            badge: 0,
-        }
-    }
-
-    pub fn with_badge(mut self, badge: u64) -> Self {
-        self.badge = badge;
-        self
-    }
-}
-
-/// Атомарный слот исхода рандеву.
-pub(crate) struct OutcomeSlot {
-    state: AtomicU32,
-    badge: AtomicU64,
-}
-
-impl OutcomeSlot {
-    pub(crate) const PENDING: u32 = 0;
-    /// `call`: запрос доставлен серверу, вызывающая сторона ждёт reply.
-    pub(crate) const AWAITING_REPLY: u32 = 1;
-    /// Перенос ответа в процессе: вызывающая сторона обязан дождаться
-    /// терминального исхода, не уходя по тайм-ауту.
-    pub(crate) const DELIVERING: u32 = 2;
-    pub(crate) const DELIVERED: u32 = 3;
-    pub(crate) const PEER_GONE: u32 = 4;
-    pub(crate) const TRANSFER_FAILED: u32 = 5;
-    /// Вызывающая сторона ушла по тайм-ауту до reply.
-    pub(crate) const TIMEDOUT: u32 = 6;
-    /// Отправители значка исчезли; значок лежит в `badge`.
-    pub(crate) const SENDER_GONE: u32 = 7;
-
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: AtomicU32::new(Self::PENDING),
-            badge: AtomicU64::new(0),
-        })
-    }
-
-    pub(crate) fn set(&self, outcome: RendezvousOutcome) {
-        let v = match outcome {
-            RendezvousOutcome::Delivered => Self::DELIVERED,
-            RendezvousOutcome::PeerGone => Self::PEER_GONE,
-            RendezvousOutcome::TransferFailed => Self::TRANSFER_FAILED,
-            RendezvousOutcome::SenderGone(badge) => {
-                self.badge.store(badge, Ordering::Release);
-                Self::SENDER_GONE
-            }
-        };
-        self.state.store(v, Ordering::Release);
-    }
-
-    /// Терминальный исход; `None` для нетерминальных состояний
-    /// (`PENDING`/`AWAITING_REPLY`/`DELIVERING`/`TIMEDOUT`).
-    pub fn get(&self) -> Option<RendezvousOutcome> {
-        match self.state.load(Ordering::Acquire) {
-            Self::DELIVERED => Some(RendezvousOutcome::Delivered),
-            Self::PEER_GONE => Some(RendezvousOutcome::PeerGone),
-            Self::TRANSFER_FAILED => Some(RendezvousOutcome::TransferFailed),
-            Self::SENDER_GONE => Some(RendezvousOutcome::SenderGone(
-                self.badge.load(Ordering::Acquire),
-            )),
-            _ => None,
-        }
-    }
-
-    /// Сырое состояние слота.
-    pub(crate) fn raw(&self) -> u32 {
-        self.state.load(Ordering::Acquire)
-    }
-
-    /// `call`-матчер: запрос доставлен, переводим вызывающую сторону в ожидание reply.
-    pub(crate) fn set_awaiting_reply(&self) {
-        self.state.store(Self::AWAITING_REPLY, Ordering::Release);
-    }
-
-    /// Сервер-reply коммитит доставку ответа: `AWAITING_REPLY -> DELIVERING`.
-    /// `true`, если выиграл гонку с тайм-аутом вызывателя.
-    pub(crate) fn try_begin_reply(&self) -> bool {
-        self.state
-            .compare_exchange(
-                Self::AWAITING_REPLY,
-                Self::DELIVERING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-
-    /// Вызывающая сторона уходит по тайм-ауту ожидания reply: `AWAITING_REPLY ->
-    /// TIMEDOUT`. `true`, если выиграл гонку с reply.
-    pub(crate) fn try_timeout(&self) -> bool {
-        self.state
-            .compare_exchange(
-                Self::AWAITING_REPLY,
-                Self::TIMEDOUT,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-}
-
-// K - роль стороны: SendKind в очереди отправителей и () в очереди получателей.
-struct Waiter<K> {
-    kind: K,
-    transport: ThreadTransport,
-    waker: Arc<ParkWaker>,
-    outcome: Arc<OutcomeSlot>,
-    reply_slot: Arc<ReplySlot>,
-}
-
-type SenderWaiter = Waiter<SendKind>;
-type ReceiverWaiter = Waiter<()>;
-
-/// Очередь ожидания: либо отправители/вызыватели, либо получатели, но не оба.
-enum Queue {
-    Empty,
-    Senders(VecDeque<SenderWaiter>),
-    Receivers(VecDeque<ReceiverWaiter>),
-}
-
-/// Учётная запись держателей одного значка. Значения меняются только под локом порта.
-pub(super) struct BadgeRecord {
-    badge: u64,
-    holders: AtomicU32,
-}
-
-impl BadgeRecord {
-    fn new(badge: u64) -> Arc<Self> {
-        Arc::new(Self {
-            badge,
-            holders: AtomicU32::new(0),
-        })
-    }
-
-    fn holders(&self) -> u32 {
-        self.holders.load(Ordering::Relaxed)
-    }
-
-    fn add_holder(&self) {
-        self.holders.store(self.holders() + 1, Ordering::Relaxed);
-    }
-
-    fn remove_holder(&self) -> u32 {
-        let left = self.holders().saturating_sub(1);
-        self.holders.store(left, Ordering::Relaxed);
-        left
-    }
+/// Port - объект, реализующий синхронный обмен сообщениями.
+pub struct Port {
+    inner: MutexCell<PortState>,
 }
 
 /// Учёт одного экземпляра [`Capability`](super::Capability) в множествах порта.
+/// Билет двухфазный: создаётся без учёта, учёт вводит `activate` под локом порта.
+/// `release` неактивированного билета множеств не касается и потоков не будит.
 struct PortHolder {
     port: Arc<Port>,
     receiver: bool,
-    badge: Option<Arc<BadgeRecord>>,
+    badge: Option<NonZeroU64>,
+    /// Учёт введён; читается и меняется только под локом порта.
+    counted: AtomicBool,
     released: AtomicBool,
 }
 
 impl HolderTicket for PortHolder {
+    fn activate(&self) -> Result<(), IpcError> {
+        self.port.activate_holder(self)
+    }
+
     fn release(&self) {
         if self.released.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.port.release_holder(self.receiver, self.badge.as_ref());
+        self.port.release_holder(self);
     }
 
     fn reacquire(&self) -> Option<Arc<dyn HolderTicket>> {
@@ -282,272 +83,6 @@ impl RevocationHook for PortHolder {
     fn revoke(&self) {
         self.release();
     }
-}
-
-/// Снятый с очереди waiter любой из двух ролей: под локом порта не роняется.
-enum QueuedWaiter {
-    Sender(SenderWaiter),
-    Receiver(ReceiverWaiter),
-}
-
-impl QueuedWaiter {
-    fn waker(&self) -> &Arc<ParkWaker> {
-        match self {
-            Self::Sender(waiter) => &waiter.waker,
-            Self::Receiver(waiter) => &waiter.waker,
-        }
-    }
-}
-
-/// Снятый с очереди waiter с уже опубликованным исходом: пробуждение и разрушение под локом порта
-/// не выполняются.
-enum PendingWake {
-    /// Событие доставлено: значок ушедшей стороны лежит в слоте исхода.
-    Delivered(ReceiverWaiter),
-    /// Встречи не будет.
-    Broken(QueuedWaiter),
-}
-
-impl PendingWake {
-    fn wake(self) {
-        match self {
-            Self::Delivered(waiter) => waiter.waker.signal_match(),
-            Self::Broken(waiter) => waiter.waker().cancel(),
-        }
-    }
-}
-
-/// Что достаётся получателю из состояния порта.
-enum RecvPick {
-    /// Ушедший значок с непрочтённым событием.
-    DepartedBadge(u64),
-    /// Встречный отправитель или вызыватель, снятый с очереди.
-    Sender(SenderWaiter),
-    /// Ни события, ни отправителя.
-    Nothing,
-}
-
-// Потолок непрочтённых событий об уходе: на нём порт не заводит записей под новые значки, а `recv`
-// события освобождает запись.
-const DEPARTED_BADGE_LIMIT: usize = HandleTable::DEFAULT_CAPACITY as usize;
-
-/// Очередь ожидания и учёт держателей под одним локом: `receivers` - живые capability с правом
-/// `READ`, `badges` - записи значков, `departed` - записи с непрочтённым событием об уходе.
-struct PortState {
-    queue: Queue,
-    receivers: usize,
-    badges: Vec<Arc<BadgeRecord>>,
-    departed: usize,
-}
-
-impl PortState {
-    fn new() -> Self {
-        Self {
-            queue: Queue::Empty,
-            receivers: 0,
-            badges: Vec::new(),
-            departed: 0,
-        }
-    }
-
-    // Оживление записи с непрочтённым событием проходит и на потолке: потолком ограничены только
-    // новые записи.
-    fn register_badge(&mut self, badge: u64) -> Result<Arc<BadgeRecord>, IpcError> {
-        if let Some(index) = self.badges.iter().position(|r| r.badge == badge) {
-            let record = self.badges[index].clone();
-            if record.holders() == 0 {
-                self.departed -= 1;
-            }
-            record.add_holder();
-            return Ok(record);
-        }
-        if self.departed >= DEPARTED_BADGE_LIMIT {
-            return Err(IpcError::ResourceExhausted);
-        }
-        let record = BadgeRecord::new(badge);
-        record.add_holder();
-        self.badges.push(record.clone());
-        Ok(record)
-    }
-
-    fn release_badge(&mut self, record: &Arc<BadgeRecord>, wakes: &mut Vec<PendingWake>) {
-        if record.remove_holder() > 0 {
-            return;
-        }
-        for waiter in self.take_senders_with_badge(record.badge) {
-            waiter.outcome.set(RendezvousOutcome::PeerGone);
-            wakes.push(PendingWake::Broken(QueuedWaiter::Sender(waiter)));
-        }
-        match self.pop_receiver() {
-            Some(receiver) => {
-                receiver
-                    .outcome
-                    .set(RendezvousOutcome::SenderGone(record.badge));
-                wakes.push(PendingWake::Delivered(receiver));
-                self.forget_badge(record);
-            }
-            None => self.departed += 1,
-        }
-    }
-
-    fn release_receiver(&mut self, wakes: &mut Vec<PendingWake>) {
-        debug_assert!(self.receivers > 0, "receiver accounting underflow");
-        self.receivers = self.receivers.saturating_sub(1);
-        if self.receivers == 0 {
-            self.break_all(wakes);
-        }
-    }
-
-    fn take_departed_badge(&mut self) -> Option<u64> {
-        if self.departed == 0 {
-            return None;
-        }
-        let index = self.badges.iter().position(|r| r.holders() == 0);
-        debug_assert!(
-            index.is_some(),
-            "departed counts badge records without holders"
-        );
-        let index = index?;
-        self.departed -= 1;
-        Some(self.badges.swap_remove(index).badge)
-    }
-
-    fn forget_badge(&mut self, record: &Arc<BadgeRecord>) {
-        if let Some(index) = self.badges.iter().position(|r| Arc::ptr_eq(r, record)) {
-            self.badges.swap_remove(index);
-        }
-    }
-
-    fn take_receiver(&mut self) -> Result<Option<ReceiverWaiter>, IpcError> {
-        if self.receivers == 0 {
-            return Err(IpcError::PeerClosed);
-        }
-        Ok(self.pop_receiver())
-    }
-
-    // Готовое событие об уходе идёт впереди очереди отправителей.
-    fn pick_for_receiver(&mut self) -> RecvPick {
-        if let Some(badge) = self.take_departed_badge() {
-            return RecvPick::DepartedBadge(badge);
-        }
-        match self.pop_sender() {
-            Some(sender) => RecvPick::Sender(sender),
-            None => RecvPick::Nothing,
-        }
-    }
-
-    fn break_all(&mut self, wakes: &mut Vec<PendingWake>) {
-        match core::mem::replace(&mut self.queue, Queue::Empty) {
-            Queue::Empty => {}
-            Queue::Senders(senders) => break_each(senders, QueuedWaiter::Sender, wakes),
-            Queue::Receivers(receivers) => break_each(receivers, QueuedWaiter::Receiver, wakes),
-        }
-    }
-
-    fn take_senders_with_badge(&mut self, badge: u64) -> Vec<SenderWaiter> {
-        let Queue::Senders(queued) = &mut self.queue else {
-            return Vec::new();
-        };
-        let mut taken = Vec::new();
-        let mut kept = VecDeque::with_capacity(queued.len());
-        while let Some(waiter) = queued.pop_front() {
-            if waiter.transport.badge == badge {
-                taken.push(waiter);
-            } else {
-                kept.push_back(waiter);
-            }
-        }
-        *queued = kept;
-        self.collapse_if_empty();
-        taken
-    }
-
-    // Единственный источник инварианта "пустой дек -> состояние `Empty`".
-    fn collapse_if_empty(&mut self) {
-        let drained = match &self.queue {
-            Queue::Empty => false,
-            Queue::Senders(queued) => queued.is_empty(),
-            Queue::Receivers(queued) => queued.is_empty(),
-        };
-        if drained {
-            self.queue = Queue::Empty;
-        }
-    }
-
-    fn pop_receiver(&mut self) -> Option<ReceiverWaiter> {
-        let waiter = match &mut self.queue {
-            Queue::Receivers(receivers) => receivers.pop_front(),
-            Queue::Empty | Queue::Senders(_) => None,
-        };
-        self.collapse_if_empty();
-        waiter
-    }
-
-    fn pop_sender(&mut self) -> Option<SenderWaiter> {
-        let waiter = match &mut self.queue {
-            Queue::Senders(senders) => senders.pop_front(),
-            Queue::Empty | Queue::Receivers(_) => None,
-        };
-        self.collapse_if_empty();
-        waiter
-    }
-
-    // Err - waiter не поставлен: встал встречный получатель либо опустело их множество.
-    fn try_push_sender(&mut self, waiter: SenderWaiter) -> Result<(), SenderWaiter> {
-        if self.receivers == 0 {
-            return Err(waiter);
-        }
-        match &mut self.queue {
-            Queue::Senders(senders) => {
-                senders.push_back(waiter);
-                Ok(())
-            }
-            Queue::Empty => {
-                let mut queued = VecDeque::new();
-                queued.push_back(waiter);
-                self.queue = Queue::Senders(queued);
-                Ok(())
-            }
-            Queue::Receivers(_) => Err(waiter),
-        }
-    }
-
-    // Err - waiter не поставлен: встал встречный отправитель либо готово событие об уходе значка.
-    fn try_push_receiver(&mut self, waiter: ReceiverWaiter) -> Result<(), ReceiverWaiter> {
-        if self.departed > 0 {
-            return Err(waiter);
-        }
-        match &mut self.queue {
-            Queue::Receivers(receivers) => {
-                receivers.push_back(waiter);
-                Ok(())
-            }
-            Queue::Empty => {
-                let mut queued = VecDeque::new();
-                queued.push_back(waiter);
-                self.queue = Queue::Receivers(queued);
-                Ok(())
-            }
-            Queue::Senders(_) => Err(waiter),
-        }
-    }
-
-    fn take_by_waker(&mut self, waker: &Arc<ParkWaker>) -> Option<QueuedWaiter> {
-        let removed = match &mut self.queue {
-            Queue::Empty => None,
-            Queue::Senders(senders) => take_by_waker(senders, waker).map(QueuedWaiter::Sender),
-            Queue::Receivers(receivers) => {
-                take_by_waker(receivers, waker).map(QueuedWaiter::Receiver)
-            }
-        };
-        self.collapse_if_empty();
-        removed
-    }
-}
-
-/// Port - объект, реализующий синхронный обмен сообщениями.
-pub struct Port {
-    inner: MutexCell<PortState>,
 }
 
 /// Снимок port-capability для одной операции: объект, значок хендла и удержание учёта его стороны.
@@ -620,40 +155,71 @@ impl Port {
         })
     }
 
-    /// Учитывает нового держателя capability без значка: право `READ` вводит её в множество
-    /// получателей, без этого права учёта нет.
-    pub(super) fn register_holder(
+    /// Билет держателя capability без значка: право `READ` вводит её в множество получателей на
+    /// активации, без этого права учёта нет.
+    pub(super) fn holder_ticket(self: &Arc<Self>, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
+        rights
+            .contains(Rights::READ)
+            .then(|| self.make_ticket(true, None, false))
+    }
+
+    /// Билет держателя capability без значка с уже введённым учётом. Применим,
+    /// пока capability не видна другим потокам: отзывать билет ещё некому.
+    pub(super) fn counted_holder_ticket(
         self: &Arc<Self>,
         rights: Rights,
     ) -> Option<Arc<dyn HolderTicket>> {
         if !rights.contains(Rights::READ) {
             return None;
         }
-        self.inner.with_lock(|state| state.receivers += 1);
-        Some(self.holder_ticket(true, None))
+        self.inner.with_lock(PortState::add_receiver);
+        Some(self.make_ticket(true, None, true))
     }
 
-    /// Учитывает нового держателя capability со значком: право `WRITE` вводит её в множество
-    /// отправителей значка, право `READ` - в множество получателей. `ResourceExhausted` - порт не
-    /// заводит записи под новый значок.
-    pub(super) fn register_badged_holder(
+    /// Билет держателя capability со значком: право `WRITE` вводит её в множество отправителей
+    /// значка на активации, право `READ` - в множество получателей.
+    pub(super) fn badged_holder_ticket(
         self: &Arc<Self>,
         rights: Rights,
         badge: NonZeroU64,
-    ) -> Result<Option<Arc<dyn HolderTicket>>, IpcError> {
+    ) -> Option<Arc<dyn HolderTicket>> {
         if !rights.contains(Rights::WRITE) {
-            return Ok(self.register_holder(rights));
+            return self.holder_ticket(rights);
         }
-        let receiver = rights.contains(Rights::READ);
-        // Отказ учёта значка оставляет множество получателей нетронутым.
-        let record = self.inner.with_lock(|state| {
-            let record = state.register_badge(badge.get())?;
-            if receiver {
-                state.receivers += 1;
+        Some(self.make_ticket(rights.contains(Rights::READ), Some(badge), false))
+    }
+
+    fn make_ticket(
+        self: &Arc<Self>,
+        receiver: bool,
+        badge: Option<NonZeroU64>,
+        counted: bool,
+    ) -> Arc<dyn HolderTicket> {
+        Arc::new(PortHolder {
+            port: self.clone(),
+            receiver,
+            badge,
+            counted: AtomicBool::new(counted),
+            released: AtomicBool::new(false),
+        })
+    }
+
+    // Отказ учёта значка оставляет множество получателей нетронутым; билет, отозванный между
+    // созданием и активацией, отвергается без следов в учёте.
+    fn activate_holder(&self, holder: &PortHolder) -> Result<(), IpcError> {
+        self.inner.with_lock(|state| {
+            if holder.released.load(Ordering::Acquire) {
+                return Err(IpcError::Revoked);
             }
-            Ok(record)
-        })?;
-        Ok(Some(self.holder_ticket(receiver, Some(record))))
+            if let Some(badge) = holder.badge {
+                state.register_badge(badge.get())?;
+            }
+            if holder.receiver {
+                state.add_receiver();
+            }
+            holder.counted.store(true, Ordering::Release);
+            Ok(())
+        })
     }
 
     // Снятый учёт вторым токеном не оживает: `release` выставляет флаг до захвата лока, поэтому
@@ -663,39 +229,33 @@ impl Port {
             if holder.released.load(Ordering::Acquire) {
                 return false;
             }
-            if holder.receiver {
-                state.receivers += 1;
+            // Запись живого значка существует: в ней учтён как минимум сам холдер.
+            if let Some(badge) = holder.badge
+                && state.register_badge(badge.get()).is_err()
+            {
+                return false;
             }
-            if let Some(record) = &holder.badge {
-                record.add_holder();
+            if holder.receiver {
+                state.add_receiver();
             }
             true
         });
-        counted.then(|| self.holder_ticket(holder.receiver, holder.badge.clone()))
+        counted.then(|| self.make_ticket(holder.receiver, holder.badge, true))
     }
 
-    fn holder_ticket(
-        self: &Arc<Self>,
-        receiver: bool,
-        badge: Option<Arc<BadgeRecord>>,
-    ) -> Arc<dyn HolderTicket> {
-        Arc::new(PortHolder {
-            port: self.clone(),
-            receiver,
-            badge,
-            released: AtomicBool::new(false),
-        })
-    }
-
-    // Пробуждения опустевших множеств под локом порта не выполняются.
-    fn release_holder(&self, receiver: bool, badge: Option<&Arc<BadgeRecord>>) {
+    // Пробуждения опустевших множеств под локом порта не выполняются; неактивированный билет
+    // множеств не касается.
+    fn release_holder(&self, holder: &PortHolder) {
         let wakes = self.inner.with_lock(|state| {
             let mut wakes = Vec::new();
-            if receiver {
+            if !holder.counted.load(Ordering::Acquire) {
+                return wakes;
+            }
+            if holder.receiver {
                 state.release_receiver(&mut wakes);
             }
-            if let Some(record) = badge {
-                state.release_badge(record, &mut wakes);
+            if let Some(badge) = holder.badge {
+                state.release_badge(badge.get(), &mut wakes);
             }
             wakes
         });
@@ -847,8 +407,7 @@ impl Port {
 
     #[cfg(test)]
     pub(crate) fn queue_is_empty(&self) -> bool {
-        self.inner
-            .with_lock(|state| matches!(state.queue, Queue::Empty))
+        self.inner.with_lock(|state| state.queue_is_empty())
     }
 }
 
@@ -910,22 +469,6 @@ fn deliver_recv(sender: SenderWaiter, receiver: &ThreadTransport) -> RecvAction 
     }
 }
 
-fn break_each<K>(
-    waiters: VecDeque<Waiter<K>>,
-    role: fn(Waiter<K>) -> QueuedWaiter,
-    wakes: &mut Vec<PendingWake>,
-) {
-    for waiter in waiters {
-        waiter.outcome.set(RendezvousOutcome::PeerGone);
-        wakes.push(PendingWake::Broken(role(waiter)));
-    }
-}
-
-fn take_by_waker<K>(queued: &mut VecDeque<Waiter<K>>, waker: &Arc<ParkWaker>) -> Option<Waiter<K>> {
-    let position = queued.iter().position(|w| Arc::ptr_eq(&w.waker, waker))?;
-    queued.remove(position)
-}
-
 fn outcome_to_result(outcome: &Arc<OutcomeSlot>) -> Result<(), IpcError> {
     match outcome.get() {
         Some(RendezvousOutcome::Delivered) => Ok(()),
@@ -945,6 +488,20 @@ fn park_with_timeout(
     if timeout_ns != Some(0) {
         runtime.block_current_until(waker.state(), timeout_ns);
     }
+}
+
+// Шаг перепроверки состояния call'а с истёкшим дедлайном, пока перенос в полёте:
+// переход `PENDING -> AWAITING_REPLY` вызывателя не будит, и его надо переобнаружить.
+const EXPIRED_RECHECK_NS: u64 = 1_000_000;
+
+/// Абсолютный дедлайн операции; `None` - бессрочная.
+fn deadline_after(runtime: &Arc<dyn KernelRuntime>, timeout_ns: Option<u64>) -> Option<u64> {
+    timeout_ns.map(|timeout| runtime.now_ns().saturating_add(timeout))
+}
+
+/// Остаток до дедлайна: `None` - бессрочно, `Some(0)` - дедлайн пройден.
+fn remaining_until(runtime: &Arc<dyn KernelRuntime>, deadline_ns: Option<u64>) -> Option<u64> {
+    deadline_ns.map(|deadline| deadline.saturating_sub(runtime.now_ns()))
 }
 
 fn wait_resolved(runtime: &Arc<dyn KernelRuntime>, waker: &Arc<ParkWaker>) {
@@ -1001,14 +558,16 @@ pub fn port_call(
     timeout_ns: Option<u64>,
     hold: Option<OperationHold>,
 ) -> Result<(), IpcError> {
+    let deadline_ns = deadline_after(runtime, timeout_ns);
     // вызывающая сторона всегда паркуется до reply - предсоздаём park-ctx, чтобы
     // Reply мог на него ссылаться даже на синхронном матче.
     match port.call(caller, ParkCtx::for_current(runtime), hold) {
         CallAction::Failed(e) => Err(e),
         CallAction::Park { waker, outcome } => {
             arm_port_cancel(port, runtime, &waker, &outcome, None);
-            park_with_timeout(runtime, &waker, timeout_ns);
-            let result = resolve_call(port, runtime, &waker, &outcome, timeout_ns);
+            // Матч и перенос до парковки уже израсходовали часть тайм-аута.
+            park_with_timeout(runtime, &waker, remaining_until(runtime, deadline_ns));
+            let result = resolve_call(port, runtime, &waker, &outcome, deadline_ns);
             runtime.clear_blocked_cancel();
             result
         }
@@ -1018,7 +577,8 @@ pub fn port_call(
 /// Resolve для `call`.
 ///
 /// Фаза 1 (вызывающая сторона ещё в очереди отправителей): снятие себя с очереди под queue-локом.
-/// Фаза 2 (запрос уже забран получателем, ждём reply): арбитраж тайм-аута идёт по [`OutcomeSlot`].
+/// Фаза 2 (запрос уже забран получателем, ждём reply): арбитраж тайм-аута идёт по [`OutcomeSlot`]
+/// и абсолютному `deadline_ns`: каждая перепарковка взводит остаток до него.
 /// Пока получатель/сервер переносит данные (`PENDING`/`DELIVERING`), мы дожидаемся завершения переноса -
 /// так наш IPC-буфер не будет переиспользован под активным чтением/записью переноса.
 fn resolve_call(
@@ -1026,7 +586,7 @@ fn resolve_call(
     runtime: &Arc<dyn KernelRuntime>,
     waker: &Arc<ParkWaker>,
     outcome: &Arc<OutcomeSlot>,
-    timeout_ns: Option<u64>,
+    deadline_ns: Option<u64>,
 ) -> Result<(), IpcError> {
     if port.remove_waiter(waker) {
         waker.claim_timeout();
@@ -1034,19 +594,26 @@ fn resolve_call(
     }
     loop {
         match outcome.raw() {
-            // Получатель читает наш буфер либо сервер переносит ответ - паркуемся.
-            // Партнёр опубликует исход и/или разбудит нас (reply -> signal_match),
-            // иначе проснёмся по перевзведённому дедлайну и переоценим состояние.
+            // Получатель читает наш буфер либо сервер переносит ответ - уйти нельзя
+            // и на истёкшем дедлайне; тогда парковка перевзводится коротким шагом.
             OutcomeSlot::PENDING | OutcomeSlot::DELIVERING => {
-                runtime.block_current_until(waker.state(), timeout_ns);
+                let park_ns = match remaining_until(runtime, deadline_ns) {
+                    Some(0) => Some(EXPIRED_RECHECK_NS),
+                    remaining => remaining,
+                };
+                runtime.block_current_until(waker.state(), park_ns);
             }
-            OutcomeSlot::AWAITING_REPLY => {
-                if outcome.try_timeout() {
-                    waker.claim_timeout();
-                    return Err(IpcError::Timeout);
+            OutcomeSlot::AWAITING_REPLY => match remaining_until(runtime, deadline_ns) {
+                Some(0) => {
+                    if outcome.try_timeout() {
+                        waker.claim_timeout();
+                        return Err(IpcError::Timeout);
+                    }
+                    // Иначе сервер закоммитил reply (DELIVERING) - дочитываем.
                 }
-                // Иначе сервер закоммитил reply (DELIVERING) - дочитываем.
-            }
+                // Разбужены до дедлайна - досыпаем остаток, ранний Timeout запрещён.
+                remaining => runtime.block_current_until(waker.state(), remaining),
+            },
             OutcomeSlot::TIMEDOUT => return Err(IpcError::Timeout),
             _ => return outcome_to_result(outcome),
         }
@@ -1182,6 +749,9 @@ mod tests {
         fn current_wait_token(&self) -> WaitToken {
             WaitToken::new(NonZeroU64::new(1).unwrap())
         }
+        fn now_ns(&self) -> u64 {
+            0
+        }
         fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
             None
         }
@@ -1192,6 +762,59 @@ mod tests {
         fn unblock(&self, _t: WaitToken) {
             self.unblocks.fetch_add(1, Ordering::AcqRel);
         }
+        fn set_blocked_cancel(&self, _cancel: Arc<dyn CancelTarget>) {}
+        fn clear_blocked_cancel(&self) {}
+    }
+
+    /// Runtime с управляемыми часами: каждая парковка записывает запрошенный
+    /// тайм-аут, продвигает часы на него и один раз зовёт установленный хук.
+    struct DeadlineRuntime {
+        now: core::sync::atomic::AtomicU64,
+        parks: std::sync::Mutex<Vec<Option<u64>>>,
+        on_first_park: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl DeadlineRuntime {
+        fn arc(now: u64) -> Arc<Self> {
+            Arc::new(Self {
+                now: core::sync::atomic::AtomicU64::new(now),
+                parks: std::sync::Mutex::new(Vec::new()),
+                on_first_park: std::sync::Mutex::new(None),
+            })
+        }
+
+        fn set_first_park_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+            *self.on_first_park.lock().unwrap() = Some(hook);
+        }
+
+        fn parks(&self) -> Vec<Option<u64>> {
+            self.parks.lock().unwrap().clone()
+        }
+    }
+
+    impl KernelRuntime for DeadlineRuntime {
+        fn current_wait_token(&self) -> WaitToken {
+            WaitToken::new(NonZeroU64::new(1).unwrap())
+        }
+        fn now_ns(&self) -> u64 {
+            self.now.load(Ordering::Acquire)
+        }
+        fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
+            None
+        }
+        fn exit_current_thread(&self, _c: i32) -> ! {
+            unreachable!()
+        }
+        fn block_current_until(&self, _f: &AtomicU32, timeout_ns: Option<u64>) {
+            self.parks.lock().unwrap().push(timeout_ns);
+            if let Some(timeout) = timeout_ns {
+                self.now.fetch_add(timeout, Ordering::AcqRel);
+            }
+            if let Some(hook) = self.on_first_park.lock().unwrap().take() {
+                hook();
+            }
+        }
+        fn unblock(&self, _t: WaitToken) {}
         fn set_blocked_cancel(&self, _cancel: Arc<dyn CancelTarget>) {}
         fn clear_blocked_cancel(&self) {}
     }
@@ -1528,6 +1151,40 @@ mod tests {
         b.set_awaiting_reply();
         assert!(b.try_begin_reply());
         assert!(!b.try_timeout()); // тайм-аут проиграл - reply коммитнут
+    }
+
+    #[test]
+    fn resolve_call_woken_early_sleeps_the_remainder_before_timing_out() {
+        let rt = DeadlineRuntime::arc(500);
+        let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
+        let ep = Port::new();
+        let ctx = ParkCtx::for_current(&dyn_rt);
+        ctx.outcome.set_awaiting_reply();
+
+        let result = resolve_call(&ep, &dyn_rt, &ctx.waker, &ctx.outcome, Some(1000));
+
+        assert_eq!(result, Err(IpcError::Timeout));
+        // Единственная перепарковка - ровно на остаток до дедлайна (1000 - 500).
+        assert_eq!(rt.parks(), alloc::vec![Some(500)]);
+        assert_eq!(ctx.outcome.raw(), OutcomeSlot::TIMEDOUT);
+    }
+
+    /// Тихий переход в AWAITING_REPLY вызывателя не будит и переобнаруживается
+    /// коротким шагом перепарковки.
+    #[test]
+    fn resolve_call_expired_deadline_waits_out_an_in_flight_transfer() {
+        let rt = DeadlineRuntime::arc(2000);
+        let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
+        let ep = Port::new();
+        let ctx = ParkCtx::for_current(&dyn_rt);
+        let outcome = ctx.outcome.clone();
+        rt.set_first_park_hook(Box::new(move || outcome.set_awaiting_reply()));
+
+        let result = resolve_call(&ep, &dyn_rt, &ctx.waker, &ctx.outcome, Some(1000));
+
+        assert_eq!(result, Err(IpcError::Timeout));
+        assert_eq!(rt.parks(), alloc::vec![Some(EXPIRED_RECHECK_NS)]);
+        assert_eq!(ctx.outcome.raw(), OutcomeSlot::TIMEDOUT);
     }
 
     #[test]
@@ -1929,6 +1586,54 @@ mod tests {
             ep.send(&transport(BASE_A), &rt, None),
             SendAction::Failed(IpcError::PeerClosed)
         ));
+    }
+
+    /// Regression guard на гонку revoke между регистрацией хука и активацией.
+    #[test]
+    fn releasing_an_unactivated_ticket_neither_uncounts_nor_wakes() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let SendAction::Park {
+            outcome: sender, ..
+        } = ep.send(&transport(BASE_A), &rt, None)
+        else {
+            panic!("send must park");
+        };
+
+        let ticket = ep
+            .holder_ticket(Rights::READ)
+            .expect("port hands out receiver tickets");
+        ticket.release();
+
+        // Множество получателей не обнулялось - отправитель остаётся в очереди.
+        assert!(sender.get().is_none());
+        assert!(!ep.queue_is_empty());
+
+        assert_eq!(ticket.activate().unwrap_err(), IpcError::Revoked);
+        assert!(sender.get().is_none());
+    }
+
+    #[test]
+    fn an_unactivated_ticket_leaves_the_receiver_accounting_intact() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let receiver = receiver_capability(&ep);
+        let ticket = ep
+            .holder_ticket(Rights::READ)
+            .expect("port hands out receiver tickets");
+        ticket.release();
+
+        let SendAction::Park {
+            outcome: sender, ..
+        } = ep.send(&transport(BASE_A), &rt, None)
+        else {
+            panic!("send must park");
+        };
+
+        drop(receiver);
+        assert_eq!(sender.get(), Some(RendezvousOutcome::PeerGone));
+        assert!(ep.queue_is_empty());
     }
 
     #[test]

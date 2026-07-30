@@ -12,6 +12,16 @@ use capability::{
     install_runtime,
 };
 use collections::{LockCell, MutexCell};
+use memory::{
+    MemFlags, UserVmContext,
+    memory_mapper::{
+        AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
+        MemoryRemappingError, MemoryUnmappingError, UserCopyError,
+    },
+    physical_address::{PageAlignedAddress, PhysicalAddress},
+    user_vm_allocator::UserVmAllocator,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+};
 use syscall_kernel::SyscallError;
 
 struct TableRuntime {
@@ -34,6 +44,9 @@ impl KernelRuntime for TableRuntime {
     fn current_wait_token(&self) -> WaitToken {
         WaitToken::new(NonZeroU64::new(1).unwrap())
     }
+    fn now_ns(&self) -> u64 {
+        0
+    }
 
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
         self.handle_table.lock().unwrap().clone()
@@ -52,12 +65,145 @@ impl KernelRuntime for TableRuntime {
     fn clear_blocked_cancel(&self) {}
 }
 
+/// Mapper, не обслуживающий ни одного обращения: хендлеры до переноса тела
+/// в этих тестах не доходят.
+struct InertMapper;
+
+impl MemoryMapper for InertMapper {
+    fn map(
+        &self,
+        _va: PageAlignedVirtualAddress,
+        _pages: usize,
+        _init: &[u8],
+        _flags: MemFlags,
+    ) -> Result<(), MemoryMappingError> {
+        Err(MemoryMappingError::AlreadyMapped)
+    }
+    fn map_exact(
+        &self,
+        _va: PageAlignedVirtualAddress,
+        _pa: PageAlignedAddress,
+        _size: usize,
+        _flags: MemFlags,
+    ) -> Result<(), MemoryMappingError> {
+        Err(MemoryMappingError::AlreadyMapped)
+    }
+    fn unmap(
+        &self,
+        _va: PageAlignedVirtualAddress,
+        _size: usize,
+    ) -> Result<(), MemoryUnmappingError> {
+        Err(MemoryUnmappingError::NotMapped)
+    }
+    fn remap(
+        &self,
+        _va: PageAlignedVirtualAddress,
+        _size: usize,
+        _flags: MemFlags,
+    ) -> Result<(), MemoryRemappingError> {
+        Err(MemoryRemappingError::NotMapped)
+    }
+    fn activate_handle(&self) -> AddressSpaceHandle {
+        AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
+    }
+    fn zero_owned_frame(&self, _pa: PageAlignedAddress) {}
+    fn copy_user_in(&self, _va: VirtualAddress, _dst: &mut [u8]) -> Result<(), UserCopyError> {
+        Err(UserCopyError::NotMapped)
+    }
+    fn copy_user_out(&self, _va: VirtualAddress, _src: &[u8]) -> Result<(), UserCopyError> {
+        Err(UserCopyError::NotMapped)
+    }
+    fn as_any(&self) -> &(dyn core::any::Any + 'static) {
+        self
+    }
+}
+
+/// Стаб `SyscallRuntime`: снимок IPC-контекста собирается из inert-mapper'а и
+/// handle-таблицы capability-рантайма.
+struct StubSyscallRuntime;
+
+impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
+    fn current_user_vm(&self) -> Option<UserVmContext> {
+        let allocator = Arc::new(MutexCell::new(UserVmAllocator::new(
+            PageAlignedVirtualAddress::from_usize(0x1000_0000)?,
+            VirtualAddress::new(0x1100_0000),
+        )));
+        Some(UserVmContext::new(Arc::new(InertMapper), allocator))
+    }
+
+    fn current_ipc_buffer_va(&self) -> Option<u64> {
+        Some(0x3000_0000)
+    }
+
+    fn frame_allocator(
+        &self,
+    ) -> Option<&'static (dyn memory::frame_allocator::FrameAllocator + Send + Sync)> {
+        None
+    }
+
+    fn current_thread_object(&self) -> Option<Arc<capability::ThreadObject>> {
+        None
+    }
+
+    fn current_process_object(&self) -> Option<Arc<capability::ProcessObject>> {
+        None
+    }
+
+    fn create_empty_process(
+        &self,
+        _name: &str,
+    ) -> Result<Arc<capability::ProcessObject>, capability::SpawnError> {
+        Err(capability::SpawnError::NoFreeProcessSlots)
+    }
+
+    fn create_user_thread(
+        &self,
+        _process: &Arc<capability::ProcessObject>,
+        _entry: capability::UserThreadEntry,
+    ) -> Result<Arc<capability::ThreadObject>, capability::SpawnError> {
+        Err(capability::SpawnError::NoFreeThreadSlots)
+    }
+
+    fn terminate_thread(
+        &self,
+        _thread: &Arc<capability::ThreadObject>,
+        _exit_code: i32,
+    ) -> Result<(), capability::IpcError> {
+        Ok(())
+    }
+
+    fn terminate_process(
+        &self,
+        _process: &Arc<capability::ProcessObject>,
+        _exit_code: i32,
+    ) -> Result<(), capability::IpcError> {
+        Ok(())
+    }
+
+    fn load_user_image_into(
+        &self,
+        _process: &Arc<capability::ProcessObject>,
+        _install: &capability::UserImageInstall,
+    ) -> Result<(), capability::LoadImageError> {
+        Err(capability::LoadImageError::ProcessNotFound)
+    }
+
+    fn start_user_process(
+        &self,
+        _process: &Arc<capability::ProcessObject>,
+        _spec: capability::UserStartSpec,
+    ) -> Result<Arc<capability::ThreadObject>, capability::StartProcessError> {
+        Err(capability::StartProcessError::ProcessNotFound)
+    }
+}
+
 fn runtime() -> &'static Arc<TableRuntime> {
     static RUNTIME: OnceLock<Arc<TableRuntime>> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         let rt = Arc::new(TableRuntime::new());
         let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
         install_runtime(dyn_rt);
+        syscall_kernel::install_runtime(Arc::new(StubSyscallRuntime));
         rt
     })
 }

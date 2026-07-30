@@ -75,6 +75,15 @@ where
             .map(|va| va.as_usize() as u64)
     }
 
+    fn current_ipc_context(&self) -> Option<syscall_kernel::CurrentIpcContext> {
+        let context = self.handle.current_ipc_context()?;
+        Some(syscall_kernel::CurrentIpcContext {
+            user_vm: context.user_vm,
+            ipc_buffer_va: context.ipc_buffer_va.as_usize() as u64,
+            handle_table: context.handle_table,
+        })
+    }
+
     fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
         syscall_bridge::frame_allocator()
     }

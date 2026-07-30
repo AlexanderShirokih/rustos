@@ -84,7 +84,21 @@ impl core::fmt::Debug for Capability {
 impl Capability {
     /// Создаёт незаклеймённую capability (`badge == 0`).
     pub fn new(target: CapabilityTarget, rights: Rights) -> Self {
-        Self::unbadged(target, rights, RevNode::new_root())
+        let node = RevNode::new_root();
+        // Корневой узел ещё не виден другим потокам: учёт вводится сразу с билетом,
+        // отзыв не может опередить регистрацию хука.
+        let holder = target.counted_holder_ticket(rights);
+        if let Some(ticket) = &holder {
+            let hook: Weak<dyn HolderTicket> = Arc::downgrade(ticket);
+            node.register_hook(hook);
+        }
+        Self {
+            target,
+            rights,
+            badge: 0,
+            node,
+            holder,
+        }
     }
 
     /// Создаёт незаклеймённую capability со стартовыми правами объекта
@@ -95,41 +109,28 @@ impl Capability {
         Self::new(target, rights)
     }
 
-    fn unbadged(target: CapabilityTarget, rights: Rights, node: Arc<RevNode>) -> Self {
-        let holder = target.register_holder(rights);
-        Self::with_holder(target, rights, 0, node, holder)
-    }
-
-    fn badged(
-        target: CapabilityTarget,
+    /// Билет держателя с зарегистрированным хуком отзыва и введённым учётом.
+    /// `Ok(None)` - объект держателей не считает.
+    fn armed_holder(
+        target: &CapabilityTarget,
         rights: Rights,
-        badge: NonZeroU64,
-        node: Arc<RevNode>,
-    ) -> Result<Self, IpcError> {
-        let holder = target.register_badged_holder(rights, badge)?;
-        Ok(Self::with_holder(target, rights, badge.get(), node, holder))
-    }
-
-    fn with_holder(
-        target: CapabilityTarget,
-        rights: Rights,
-        badge: u64,
-        node: Arc<RevNode>,
-        holder: Option<Arc<dyn HolderTicket>>,
-    ) -> Self {
-        // Хук берёт scheduler-лок и потому под table-локом не выполняется: деривацию от
-        // отозванного родителя отвергает `RevNode::new_child`.
-        if let Some(holder) = &holder {
-            let hook: Weak<dyn HolderTicket> = Arc::downgrade(holder);
-            node.register_hook(hook);
-        }
-        Self {
-            target,
-            rights,
-            badge,
-            node,
-            holder,
-        }
+        badge: Option<NonZeroU64>,
+        node: &Arc<RevNode>,
+    ) -> Result<Option<Arc<dyn HolderTicket>>, IpcError> {
+        let ticket = match badge {
+            Some(badge) => target.badged_holder_ticket(rights, badge),
+            None => target.holder_ticket(rights),
+        };
+        let Some(ticket) = ticket else {
+            return Ok(None);
+        };
+        // Revoke неучтённого билета учёт не трогает и потоков не будит: синхронный
+        // отзыв на уже отозванном узле безопасен под локами вызывающего. Отзыв в
+        // окне до активации её отвергает.
+        let hook: Weak<dyn HolderTicket> = Arc::downgrade(&ticket);
+        node.register_hook(hook);
+        ticket.activate()?;
+        Ok(Some(ticket))
     }
 
     /// Узел графа деривации этой капы.
@@ -160,7 +161,8 @@ impl Capability {
     ///
     /// [`IpcError::AccessDenied`] - нет права [`Rights::DUPLICATE`] либо запрошенные права не
     /// подмножество существующих. [`IpcError::ResourceExhausted`] - объект не заводит учёта под
-    /// новый значок.
+    /// новый значок. [`IpcError::Revoked`] - исходная capability отозвана, в том числе
+    /// параллельно с дупликацией.
     pub fn duplicate(&self, new_rights: Rights, new_badge: u64) -> Result<Self, IpcError> {
         if !self.rights.contains(Rights::DUPLICATE) {
             return Err(IpcError::AccessDenied);
@@ -178,10 +180,14 @@ impl Capability {
         };
         let node = RevNode::new_child(&self.node).ok_or(IpcError::Revoked)?;
         let target = self.target.clone();
-        match NonZeroU64::new(badge) {
-            Some(badge) => Self::badged(target, new_rights, badge, node),
-            None => Ok(Self::unbadged(target, new_rights, node)),
-        }
+        let holder = Self::armed_holder(&target, new_rights, NonZeroU64::new(badge), &node)?;
+        Ok(Self {
+            target,
+            rights: new_rights,
+            badge,
+            node,
+            holder,
+        })
     }
 }
 

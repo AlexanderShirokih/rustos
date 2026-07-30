@@ -28,7 +28,7 @@ pub fn sys_thread_create(
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let process = table
-        .with_lock(|tbl| tbl.get_process(id, Rights::WRITE))
+        .with_lock(|tbl| tbl.get_object::<capability::ProcessObject>(id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
     let entry = UserThreadEntry {
@@ -76,7 +76,7 @@ pub fn sys_thread_exit_code(handle: u64) -> Result<u64, SyscallError> {
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let thread = table
-        .with_lock(|tbl| tbl.get_thread(id, Rights::READ))
+        .with_lock(|tbl| tbl.get_object::<capability::ThreadObject>(id, Rights::READ))
         .map_err(map_ipc_error)?;
     let code = thread.exit_code();
     Ok(u64::from(code.cast_unsigned()))
@@ -89,7 +89,7 @@ pub fn sys_thread_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallE
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let thread = table
-        .with_lock(|tbl| tbl.get_thread(id, Rights::WRITE))
+        .with_lock(|tbl| tbl.get_object::<capability::ThreadObject>(id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
     // Терминирование собственного потока через handle отвергается:

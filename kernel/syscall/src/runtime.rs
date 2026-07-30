@@ -1,11 +1,20 @@
 use alloc::sync::Arc;
 
 use capability::{
-    IpcError, LoadImageError, ProcessObject, SpawnError, StartProcessError, ThreadObject,
-    UserImageInstall, UserStartSpec, UserThreadEntry,
+    HandleTable, IpcError, LoadImageError, ProcessObject, SpawnError, StartProcessError,
+    ThreadObject, UserImageInstall, UserStartSpec, UserThreadEntry,
 };
+use collections::MutexCell;
 use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use spin::Once;
+
+/// Снимок IPC-контекста текущего потока: user-VM его процесса, VA IPC-буфера
+/// и handle-таблица.
+pub struct CurrentIpcContext {
+    pub user_vm: UserVmContext,
+    pub ipc_buffer_va: u64,
+    pub handle_table: Arc<MutexCell<HandleTable>>,
+}
 
 pub trait SyscallRuntime: Send + Sync {
     fn current_user_vm(&self) -> Option<UserVmContext>;
@@ -13,6 +22,16 @@ pub trait SyscallRuntime: Send + Sync {
     /// User-VA per-thread IPC-буфера текущего потока, либо `None`, если у
     /// потока нет буфера (kernel-поток).
     fn current_ipc_buffer_va(&self) -> Option<u64>;
+
+    /// Снимок IPC-контекста текущего потока. Реализация по умолчанию собирает
+    /// его по частям, без общей атомарности.
+    fn current_ipc_context(&self) -> Option<CurrentIpcContext> {
+        Some(CurrentIpcContext {
+            user_vm: self.current_user_vm()?,
+            ipc_buffer_va: self.current_ipc_buffer_va()?,
+            handle_table: capability::runtime().current_handle_table()?,
+        })
+    }
 
     /// Аллокатор фреймов для anonymous Memory CapabilityTarget. `None` до регистрации
     /// - соответствующие syscall'ы вернут `OutOfMemory`.

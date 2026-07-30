@@ -43,6 +43,15 @@ struct ChildHandleSlot {
     reservation: HandleReservation,
 }
 
+/// Снимок IPC-контекста текущего потока, собранный за один захват scheduler-лока
+/// (см. [`SchedulerInner::current_ipc_parts`]).
+pub(super) struct IpcContextParts {
+    pub(super) address_space: Arc<AddressSpace>,
+    pub(super) allocator: Arc<MutexCell<UserVmAllocator>>,
+    pub(super) ipc_buffer_va: VirtualAddress,
+    pub(super) handle_table: Arc<MutexCell<HandleTable>>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum AddressSpaceTransition {
     Keep,
@@ -959,6 +968,21 @@ where
         let process = self.processes.get(pid)?;
         let vm = process.user_vm()?.clone();
         Some((process.address_space().clone(), vm))
+    }
+
+    /// Снимок IPC-контекста текущего потока одним обращением: адресное
+    /// пространство, user-VM, VA IPC-буфера и handle-таблица его процесса.
+    pub(super) fn current_ipc_parts(&self) -> Option<IpcContextParts> {
+        let current_id = self.current_cpu()?.current();
+        let thread = self.threads.get(current_id)?;
+        let ipc_buffer_va = thread.ipc_buffer_va()?.as_virtual();
+        let process = self.processes.get(thread.process())?;
+        Some(IpcContextParts {
+            address_space: process.address_space().clone(),
+            allocator: process.user_vm()?.clone(),
+            ipc_buffer_va,
+            handle_table: process.handle_table().clone(),
+        })
     }
 
     pub(super) fn current(&self) -> Option<ThreadId> {

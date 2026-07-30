@@ -10,8 +10,14 @@ use super::{
     signal::Signal, thread::ThreadObject, wait::Waitable,
 };
 
-/// Учёт одного держателя объекта: `release` снимает учёт и повторного эффекта не имеет.
+/// Учёт одного держателя объекта. Билет создаётся без учёта; учёт вводит `activate`,
+/// `release` снимает его и повторного эффекта не имеет. `release` неактивированного
+/// билета учёта не касается.
 pub(crate) trait HolderTicket: RevocationHook {
+    /// Вводит билет в учёт его стороны объекта. `Revoked` - билет отозван до активации,
+    /// `ResourceExhausted` - объект не заводит учёта под новый значок; отказ учёт не меняет.
+    fn activate(&self) -> Result<(), IpcError>;
+
     fn release(&self);
 
     /// Второй токен того же учёта, снимаемый независимо от этого. `None` - учёт уже снят.
@@ -36,6 +42,7 @@ impl Drop for OperationHold {
 }
 
 /// capability target (capability target) - единица, к которой ядро выдаёт права.
+#[derive(Clone)]
 pub enum CapabilityTarget {
     Signal(Arc<Signal>),
     Process(Arc<ProcessObject>),
@@ -46,6 +53,39 @@ pub enum CapabilityTarget {
     Reply(Arc<Reply>),
     IrqControl(Arc<IrqControl>),
     IrqLine(Arc<IrqLine>),
+}
+
+/// Объект ядра, извлекаемый из своего варианта [`CapabilityTarget`].
+/// Единственная точка соответствия "тип объекта - вариант enum'а".
+pub trait TargetObject: Send + Sync {
+    /// Объект этого типа внутри `target`; `None` - вариант другого вида.
+    fn from_target(target: &CapabilityTarget) -> Option<&Arc<Self>>;
+}
+
+macro_rules! impl_target_object {
+    ($($object:ty => $variant:ident,)+) => {$(
+        impl TargetObject for $object {
+            fn from_target(target: &CapabilityTarget) -> Option<&Arc<Self>> {
+                if let CapabilityTarget::$variant(object) = target {
+                    Some(object)
+                } else {
+                    None
+                }
+            }
+        }
+    )+};
+}
+
+impl_target_object! {
+    Signal => Signal,
+    ProcessObject => Process,
+    ThreadObject => Thread,
+    MemoryRegion => Memory,
+    Resource => Resource,
+    Port => Port,
+    Reply => Reply,
+    IrqControl => IrqControl,
+    IrqLine => IrqLine,
 }
 
 impl CapabilityTarget {
@@ -72,11 +112,12 @@ impl CapabilityTarget {
         }
     }
 
-    /// Учёт держателя capability без значка. `None` - объект держателей не считает либо права не
-    /// вводят capability ни в одно его множество.
-    pub(crate) fn register_holder(&self, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
+    /// Билет держателя capability без значка, без учёта (его вводит
+    /// [`activate`](HolderTicket::activate)). `None` - объект держателей не считает либо права
+    /// не вводят capability ни в одно его множество.
+    pub(crate) fn holder_ticket(&self, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
         match self {
-            Self::Port(port) => port.register_holder(rights),
+            Self::Port(port) => port.holder_ticket(rights),
             Self::Signal(_)
             | Self::Process(_)
             | Self::Thread(_)
@@ -88,15 +129,11 @@ impl CapabilityTarget {
         }
     }
 
-    /// Учёт держателя capability со значком. `ResourceExhausted` - объект не заводит учёта под
-    /// новый значок.
-    pub(crate) fn register_badged_holder(
-        &self,
-        rights: Rights,
-        badge: NonZeroU64,
-    ) -> Result<Option<Arc<dyn HolderTicket>>, IpcError> {
+    /// Билет держателя capability без значка с уже введённым учётом. Применим,
+    /// пока capability не видна другим потокам: отзывать билет ещё некому.
+    pub(crate) fn counted_holder_ticket(&self, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
         match self {
-            Self::Port(port) => port.register_badged_holder(rights, badge),
+            Self::Port(port) => port.counted_holder_ticket(rights),
             Self::Signal(_)
             | Self::Process(_)
             | Self::Thread(_)
@@ -104,23 +141,27 @@ impl CapabilityTarget {
             | Self::Resource(_)
             | Self::Reply(_)
             | Self::IrqControl(_)
-            | Self::IrqLine(_) => Ok(None),
+            | Self::IrqLine(_) => None,
         }
     }
-}
 
-impl Clone for CapabilityTarget {
-    fn clone(&self) -> Self {
+    /// Билет держателя capability со значком, без учёта (его вводит
+    /// [`activate`](HolderTicket::activate)).
+    pub(crate) fn badged_holder_ticket(
+        &self,
+        rights: Rights,
+        badge: NonZeroU64,
+    ) -> Option<Arc<dyn HolderTicket>> {
         match self {
-            Self::Signal(s) => Self::Signal(s.clone()),
-            Self::Process(p) => Self::Process(p.clone()),
-            Self::Thread(t) => Self::Thread(t.clone()),
-            Self::Memory(m) => Self::Memory(m.clone()),
-            Self::Resource(r) => Self::Resource(r.clone()),
-            Self::Port(e) => Self::Port(e.clone()),
-            Self::Reply(r) => Self::Reply(r.clone()),
-            Self::IrqControl(c) => Self::IrqControl(c.clone()),
-            Self::IrqLine(l) => Self::IrqLine(l.clone()),
+            Self::Port(port) => port.badged_holder_ticket(rights, badge),
+            Self::Signal(_)
+            | Self::Process(_)
+            | Self::Thread(_)
+            | Self::Memory(_)
+            | Self::Resource(_)
+            | Self::Reply(_)
+            | Self::IrqControl(_)
+            | Self::IrqLine(_) => None,
         }
     }
 }
@@ -226,14 +267,13 @@ mod tests {
 
     #[test]
     fn holders_are_counted_by_ports_only() {
-        assert!(
-            CapabilityTarget::Port(Port::new())
-                .register_holder(Rights::READ)
-                .is_some()
-        );
+        let ticket = CapabilityTarget::Port(Port::new())
+            .holder_ticket(Rights::READ)
+            .expect("port counts holders");
+        assert!(ticket.activate().is_ok());
         assert!(
             CapabilityTarget::Signal(Signal::new())
-                .register_holder(Rights::READ)
+                .holder_ticket(Rights::READ)
                 .is_none()
         );
     }
@@ -241,15 +281,14 @@ mod tests {
     #[test]
     fn badged_holders_are_counted_by_ports_only() {
         let badge = NonZeroU64::MIN;
-        assert!(
-            CapabilityTarget::Port(Port::new())
-                .register_badged_holder(Rights::WRITE, badge)
-                .is_ok_and(|ticket| ticket.is_some())
-        );
+        let ticket = CapabilityTarget::Port(Port::new())
+            .badged_holder_ticket(Rights::WRITE, badge)
+            .expect("port counts badged holders");
+        assert!(ticket.activate().is_ok());
         assert!(
             CapabilityTarget::Signal(Signal::new())
-                .register_badged_holder(Rights::WRITE, badge)
-                .is_ok_and(|ticket| ticket.is_none())
+                .badged_holder_ticket(Rights::WRITE, badge)
+                .is_none()
         );
     }
 

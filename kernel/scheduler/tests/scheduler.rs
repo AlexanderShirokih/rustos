@@ -54,6 +54,10 @@ impl capability::KernelRuntime for ForwardingRuntime {
         self.with(|rt| rt.current_wait_token())
     }
 
+    fn now_ns(&self) -> u64 {
+        self.with(|rt| rt.now_ns())
+    }
+
     fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<capability::HandleTable>>> {
         self.with(|rt| rt.current_handle_table())
     }
