@@ -4,7 +4,7 @@ mod common;
 
 use std::boxed::Box;
 
-use capability::{Capability, CapabilityTarget, Rights, Signal};
+use capability::{Capability, CapabilityTarget, Port, Rights, Signal};
 use kernelspace::{SchedulerUserProcessLauncher, SpawnUserError, UserProcessLauncher};
 use memory::{
     MemFlags,
@@ -598,4 +598,45 @@ fn spawning_two_user_processes_creates_two_distinct_address_spaces() {
     assert_eq!(scheduler.process_count(), 3);
     // Каждый процесс - segment + stack = 2 вызова map(); итого 4.
     assert_eq!(factory.map_calls().len(), 4);
+}
+
+#[test]
+fn rolled_back_spawn_releases_the_initial_handle() {
+    reset_switches();
+    let factory = fresh_factory();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler(timer, factory);
+
+    let init = [0xAAu8; 4];
+    let segments = [UserSegment {
+        va_base: aligned(USER_SEGMENT_VA),
+        mapped_size: PAGE,
+        init_bytes: &init,
+        perms: MemFlags::user_rx(),
+    }];
+    let image = UserImage {
+        segments: &segments,
+        entry: VirtualAddress::new(USER_SEGMENT_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP_VA),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let port = Port::new();
+    let port_weak = std::sync::Arc::downgrade(&port);
+    let launch =
+        UserProcessLaunch::new(Capability::new(CapabilityTarget::Port(port), Rights::READ));
+
+    // Нулевой стек отвергается уже планировщиком - спавн откатывается.
+    let err = launcher(&scheduler)
+        .spawn_user_process_with_launch("stack-fail", &image, Priority::new(2), 0, launch)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        SpawnUserError::Prepared(scheduler::PreparedUserProcessError::Spawn(
+            scheduler::SpawnError::InvalidStackPages
+        ))
+    );
+
+    // Стартовый хэндл откатанного спавна разрушен, а не задержан планировщиком.
+    assert!(port_weak.upgrade().is_none());
 }

@@ -5,6 +5,7 @@
 use core::panic::PanicInfo;
 
 use io::mmio::{Mmio, Reg};
+use ipc::wire::IpcError;
 use rtc_demo::{ClockService, ClockState, Error, Result, dispatch_clock, dispatch_driver_args};
 use runtime::{MemoryRegion, PortTransport, UserMemFlags, thread_exit};
 use syscall::Handle;
@@ -47,8 +48,14 @@ fn run(server_args: Handle) -> Result<()> {
     let mut driver = ClockDriver::new(mapping.mmio());
 
     let clock_transport = PortTransport::server(&clock_port);
-    while dispatch_clock(&mut driver, &clock_transport).is_ok() {}
-    Ok(())
+    loop {
+        match dispatch_clock(&mut driver, &clock_transport) {
+            Ok(()) => {}
+            // Значок сессии ушёл: обслуживать больше некого.
+            Err(IpcError::SenderGone) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 #[panic_handler]

@@ -27,6 +27,7 @@ mod memory_share;
 mod owned_handle;
 mod pl031_rtc;
 mod port;
+mod port_liveness;
 mod process_handles;
 mod process_lifecycle;
 mod process_start;

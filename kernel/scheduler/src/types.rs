@@ -130,6 +130,7 @@ pub enum SpawnError {
     StackAllocationFailed,
     AddressSpaceCreationFailed,
     ImageNotLoaded,
+    ProcessTerminated,
 }
 
 impl From<SpawnError> for capability::SpawnError {
@@ -142,6 +143,7 @@ impl From<SpawnError> for capability::SpawnError {
             SpawnError::StackAllocationFailed => Self::StackAllocationFailed,
             SpawnError::AddressSpaceCreationFailed => Self::AddressSpaceCreationFailed,
             SpawnError::ImageNotLoaded => Self::ImageNotLoaded,
+            SpawnError::ProcessTerminated => Self::ProcessTerminated,
         }
     }
 }

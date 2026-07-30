@@ -5,14 +5,13 @@ use bootstrap::BootstrapClient;
 use runtime::{
     MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Timeout, UserMemFlags,
 };
-use syscall::Rights;
 use userland_image::decode;
 use userland_loader::load_entry;
 
 use crate::{fixture_protocol::encode_request, ipc_raw};
 
-/// Бюджет одного запроса к фикстуре: хэппи-пас отвечает за микросекунды,
-/// поэтому конечный тайм-аут работает детектором зависшего потомка.
+/// Бюджет одного запроса к фикстуре: мёртвый потомок отказывает сразу, поэтому
+/// конечный тайм-аут ловит только зависшего.
 const REQUEST_TIMEOUT_NS: u64 = 5_000_000_000;
 /// Бюджет ожидания завершения потомка.
 pub const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
@@ -20,17 +19,17 @@ pub const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
 /// Имя фикстуры в userland-образе.
 const FIXTURE_ENTRY: &str = "port-fixture";
 
-/// Запущенный потомок-фикстура и родительский конец его порта.
+/// Значок сессии родителя у фикстуры.
+const FIXTURE_SESSION_BADGE: u64 = 1;
+
+/// Запущенный потомок-фикстура и клиентская сторона его порта.
 pub struct Fixture {
     process: Process,
     port: Port,
 }
 
 impl Fixture {
-    /// Спавнит фикстуру из userland-образа, отдав ей производную порта.
-    ///
-    /// Потомок получает `duplicate` порта, а не сам порт: корень остаётся у
-    /// родителя и держит производную отзываемой.
+    /// Спавнит фикстуру из userland-образа, отдав ей серверную сторону порта.
     pub fn spawn() -> Self {
         let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
         let cap = client
@@ -48,16 +47,15 @@ impl Fixture {
             .entry(FIXTURE_ENTRY)
             .expect("image carries the port fixture");
 
-        let port = Port::create().expect("port create");
-        let child_end = port
-            .handle()
-            .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, 0)
-            .expect("duplicate port for child");
+        let service = Port::create_service(FIXTURE_SESSION_BADGE).expect("port create");
 
         let resource = Resource::self_resource().expect("self metering resource");
-        let process = load_entry(&entry, &resource, child_end).expect("spawn port fixture");
+        let process = load_entry(&entry, &resource, service.server).expect("spawn port fixture");
 
-        Self { process, port }
+        Self {
+            process,
+            port: service.client,
+        }
     }
 
     /// Шлёт запрос `op(arg)` с `caps` и складывает тело ответа в `out`.
@@ -83,14 +81,10 @@ impl Fixture {
     pub fn process(&self) -> &Process {
         &self.process
     }
-}
 
-/// Снимает потомка явно, не полагаясь на то, что отзыв производной капы
-/// разбудит его из блокирующего `recv`: иначе фикстуры, с которыми тест не
-/// попрощался через `OP_EXIT`, копились бы до конца прогона.
-/// Уже завершённый потомок отвечает ошибкой, она здесь ожидаема.
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = self.process.terminate(0);
+    /// Закрывает клиентскую сторону порта, оставляя процесс потомка: значок
+    /// сессии уходит, и потомок завершается сам.
+    pub fn into_process(self) -> Process {
+        self.process
     }
 }

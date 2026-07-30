@@ -9,9 +9,9 @@ use core::{
 use std::sync::{Arc, Mutex, OnceLock};
 
 use capability::{
-    Capability, CapabilityTarget, HandleTable, IpcError, KernelRuntime, LoadImageError,
-    ProcessObject, Rights, Signal, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
-    UserStartSpec, UserThreadEntry, WaitToken, install_runtime,
+    Capability, CapabilityTarget, DrainedHandles, HandleTable, IpcError, KernelRuntime,
+    LoadImageError, ProcessObject, Rights, Signal, SpawnError, StartProcessError, ThreadObject,
+    UserImageInstall, UserStartSpec, UserThreadEntry, WaitToken, install_runtime,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
@@ -240,9 +240,12 @@ impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
         self.start_user_process_calls.fetch_add(1, Ordering::SeqCst);
 
         // Моделируем drain bootstrap-handle:
-        spec.loader_handle_table
-            .with_lock(|tbl| tbl.try_drain_for_transfer(&[spec.handle_id], Rights::TRANSFER))
-            .map_err(StartProcessError::HandleValidationFailed)?;
+        let mut drained = DrainedHandles::empty();
+        let taken = spec.loader_handle_table.with_lock(|tbl| {
+            tbl.try_drain_for_transfer(&[spec.handle_id], Rights::TRANSFER, &mut drained)
+        });
+        drained.release();
+        taken.map_err(StartProcessError::HandleValidationFailed)?;
         Ok(ThreadObject::new())
     }
 }

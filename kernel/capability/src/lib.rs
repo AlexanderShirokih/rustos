@@ -39,14 +39,16 @@ pub use api::{
 };
 pub use errors::{IpcError, SpawnError};
 pub use handle::{Capability, HandleId};
-pub use handle_table::{HandleReservation, HandleTable};
+pub use handle_table::{DrainedHandles, HandleReservation, HandleTable, RejectedInsert};
 pub use ipc_buffer_xfer::transfer_rendezvous;
 pub use irq_control::IrqControl;
 pub use irq_line::IrqLine;
 pub use irq_runtime::{
     InterruptsControl, IrqBindToken, IrqSink, install_interrupts_control, interrupts_control,
 };
-pub use port::{KernelIpcBuffer, Port, ThreadTransport, port_call, port_recv, port_send};
+pub use port::{
+    KernelIpcBuffer, Port, PortAccess, ThreadTransport, port_call, port_recv, port_send,
+};
 pub use process::ProcessObject;
 pub use reply::Reply;
 pub use resource::{Resource, ResourceBudgetRefund};
@@ -58,6 +60,6 @@ pub use spawn::{
     LoadImageError, StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec,
 };
 pub use syscall::Rights;
-pub use target::CapabilityTarget;
+pub use target::{CapabilityTarget, OperationHold};
 pub use thread::ThreadObject;
 pub use wait::{CancelTarget, Waitable, Waker};

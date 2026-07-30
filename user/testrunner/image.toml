@@ -14,3 +14,15 @@ package = "testrunner"
 bin = "port-fixture"
 name = "port-fixture"
 bootstrap = false
+
+[[programs]]
+package = "testrunner"
+bin = "reply-holder"
+name = "reply-holder"
+bootstrap = false
+
+[[programs]]
+package = "testrunner"
+bin = "badge-client"
+name = "badge-client"
+bootstrap = false

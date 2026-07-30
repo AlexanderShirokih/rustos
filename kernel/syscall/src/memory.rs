@@ -155,7 +155,7 @@ pub fn sys_memory_create_virtual(
     let handle = Capability::new_with_default_rights(region_arc);
     let id = table
         .with_lock(|tbl| tbl.insert(handle))
-        .map_err(map_ipc_error)?;
+        .map_err(|rejected| map_ipc_error(rejected.release()))?;
     Ok(u64::from(id.raw().get()))
 }
 
@@ -191,7 +191,7 @@ pub fn sys_memory_slice(
         .ok_or(SyscallError::BadHandle)?;
     let id = table
         .with_lock(|tbl| tbl.insert(handle))
-        .map_err(map_ipc_error)?;
+        .map_err(|rejected| map_ipc_error(rejected.release()))?;
     Ok(u64::from(id.raw().get()))
 }
 
@@ -707,7 +707,9 @@ mod tests {
     mod revoke {
         use alloc::{sync::Weak, vec::Vec};
 
-        use capability::{Capability, CapabilityTarget, HandleTable, RevocationHook};
+        use capability::{
+            Capability, CapabilityTarget, DrainedHandles, HandleTable, RevocationHook,
+        };
         use collections::MutexCell;
         use memory::{
             MemFlags, MemoryRegion,
@@ -834,17 +836,20 @@ mod tests {
                 .unwrap();
             let derived = grantor.duplicate(root, rights, 0).unwrap();
             let res = recipient_tbl.reserve_slot().unwrap();
-            let drained = grantor
-                .try_drain_for_transfer(&[derived], Rights::TRANSFER)
+            let mut drained = DrainedHandles::empty();
+            grantor
+                .try_drain_for_transfer(&[derived], Rights::TRANSFER, &mut drained)
                 .unwrap();
-            let recv_id = recipient_tbl.commit_reserved(res, drained.into_iter().next().unwrap());
+            let moved = drained.take_handles().into_iter().next().unwrap();
+            let recv_id = recipient_tbl.commit_reserved(res, moved, &mut drained);
+            drained.release();
             recipient_tbl
                 .register_revocation_hook(recv_id, weak)
                 .unwrap();
 
             assert!(mapper.unmapped.with_lock(|u| u.is_empty()));
 
-            grantor.remove(root).unwrap();
+            grantor.remove(root).unwrap().release();
 
             assert_eq!(mapper.unmapped.with_lock(|u| u.clone()), [base.as_usize()]);
         }
@@ -870,7 +875,7 @@ mod tests {
             drop(hook);
             drop(mapping);
 
-            table.remove(id).unwrap();
+            table.remove(id).unwrap().release();
             assert!(mapper.unmapped.with_lock(|u| u.is_empty()));
         }
 

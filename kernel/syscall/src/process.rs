@@ -7,9 +7,9 @@ use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 
 use capability::{
-    Capability, CapabilityTarget, HandleId, HandleReservation, HandleTable, LoadImageError, Rights,
-    StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec, UserThreadEntry,
-    install_handle, runtime,
+    Capability, CapabilityTarget, DrainedHandles, HandleId, HandleReservation, HandleTable,
+    LoadImageError, Rights, StartProcessError, UserImageInstall, UserSegmentInstall, UserStartSpec,
+    UserThreadEntry, install_handle, runtime,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
@@ -268,9 +268,9 @@ pub fn sys_process_start(
     });
     let handle_id = match insert_result {
         Ok(handle_id) => handle_id,
-        Err(e) => {
+        Err(rejected) => {
             let _ = syscall_runtime().terminate_process(&process_object, EXIT_CODE_START_ROLLBACK);
-            return Err(map_ipc_error(e));
+            return Err(map_ipc_error(rejected.release()));
         }
     };
 
@@ -288,9 +288,16 @@ pub(super) fn commit_object_handle(
     reservation: HandleReservation,
     target: CapabilityTarget,
 ) -> u64 {
+    let mut rejected = DrainedHandles::empty();
     let handle_id = table.with_lock(|tbl| {
-        tbl.commit_reserved(reservation, Capability::new_with_default_rights(target))
+        tbl.commit_reserved(
+            reservation,
+            Capability::new_with_default_rights(target),
+            &mut rejected,
+        )
     });
+    // Отвергнутое разрушается вне table-лока.
+    rejected.release();
     u64::from(handle_id.raw().get())
 }
 

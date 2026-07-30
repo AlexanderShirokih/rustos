@@ -12,9 +12,12 @@ use calculator_demo::{CalculatorApiClient, Error, Result};
 use runtime::{
     MemoryRegion, OwnedHandle, Port, PortTransport, Resource, UserMemFlags, thread_exit,
 };
-use syscall::{Handle, Rights, Timeout};
+use syscall::{Handle, Timeout};
 use userland_image::decode;
 use userland_loader::load_entry;
+
+/// Значок сессии демо у калькулятора.
+const CALCULATOR_SESSION_BADGE: u64 = 1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(root: Handle) -> ! {
@@ -39,31 +42,32 @@ fn run(root: Handle) -> Result<()> {
     // Парсим контейнер userland-image
     let image = decode(image_mapping.as_bytes())?;
 
-    // Порт для связи с сервисом калькулятора
-    let calculator_port = Port::create()?;
+    // Порт для связи с сервисом калькулятора: корневая капа уезжает
+    // калькулятору, у демо остаётся клиентский минт со значком сессии.
+    let calculator_port = Port::create_service(CALCULATOR_SESSION_BADGE)?;
     let resource = Resource::self_resource()?;
 
     // Парсим контейнер initrd образа и получает из него программу
     let calculator_entry = image.entry("calculator").ok_or(Error::MissingEntry)?;
 
-    // Калькулятору нужны READ (recv как сервер), WRITE (reply) и TRANSFER
-    // (чтобы load_entry передал хэндл потомку).
-    let calculator_capability = calculator_port.handle();
-    let duplicated_capability =
-        calculator_capability.duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, 0)?;
-
     // Спавним процесс с нашей программой. Связвываем его с нашим metering-resource и capability.
-    let calculator_process = load_entry(&calculator_entry, &resource, duplicated_capability)?;
+    let calculator_process = load_entry(&calculator_entry, &resource, calculator_port.server)?;
 
-    let calculator_api = CalculatorApiClient::new(PortTransport::client(calculator_capability));
+    let calculator_client = calculator_port.client;
 
-    // Выполняем синхронный вызов через IPC канал
-    for n in 1..=6 {
-        let result = factorial(&calculator_api, n);
-        log(&bootstrap_client, &format!("Factorial of {n} is {result}"));
+    // Транспорт держит сырой хэндл, поэтому не переживает клиентскую капу.
+    {
+        let calculator_api =
+            CalculatorApiClient::new(PortTransport::client(calculator_client.handle()));
+        for n in 1..=6 {
+            let result = factorial(&calculator_api, n);
+            log(&bootstrap_client, &format!("Factorial of {n} is {result}"));
+        }
     }
 
-    let _ = calculator_process.join(Timeout::from_ns(500_000));
+    // Уход значка сессии завершает калькулятор, поэтому ждать его можно бессрочно.
+    calculator_client.into_handle().close()?;
+    calculator_process.join(Timeout::INFINITE)?;
 
     Ok(())
 }

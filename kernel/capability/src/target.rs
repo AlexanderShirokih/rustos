@@ -1,11 +1,39 @@
 use alloc::sync::Arc;
+use core::num::NonZeroU64;
 
 use memory::MemoryRegion;
+use syscall::Rights;
 
 use super::{
-    irq_control::IrqControl, irq_line::IrqLine, port::Port, process::ProcessObject, reply::Reply,
-    resource::Resource, signal::Signal, thread::ThreadObject, wait::Waitable,
+    errors::IpcError, irq_control::IrqControl, irq_line::IrqLine, port::Port,
+    process::ProcessObject, reply::Reply, resource::Resource, rev_node::RevocationHook,
+    signal::Signal, thread::ThreadObject, wait::Waitable,
 };
+
+/// Учёт одного держателя объекта: `release` снимает учёт и повторного эффекта не имеет.
+pub(crate) trait HolderTicket: RevocationHook {
+    fn release(&self);
+
+    /// Второй токен того же учёта, снимаемый независимо от этого. `None` - учёт уже снят.
+    fn reacquire(&self) -> Option<Arc<dyn HolderTicket>>;
+}
+
+/// Удержание учёта стороны объекта на время операции: снимается по `Drop` и переживает capability,
+/// от которой взято.
+#[must_use = "OperationHold удерживает учёт до конца операции"]
+pub struct OperationHold(Arc<dyn HolderTicket>);
+
+impl OperationHold {
+    pub(crate) fn new(ticket: Arc<dyn HolderTicket>) -> Self {
+        Self(ticket)
+    }
+}
+
+impl Drop for OperationHold {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
 
 /// capability target (capability target) - единица, к которой ядро выдаёт права.
 pub enum CapabilityTarget {
@@ -41,6 +69,42 @@ impl CapabilityTarget {
             | Self::Port(_)
             | Self::Reply(_)
             | Self::IrqControl(_) => None,
+        }
+    }
+
+    /// Учёт держателя capability без значка. `None` - объект держателей не считает либо права не
+    /// вводят capability ни в одно его множество.
+    pub(crate) fn register_holder(&self, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
+        match self {
+            Self::Port(port) => port.register_holder(rights),
+            Self::Signal(_)
+            | Self::Process(_)
+            | Self::Thread(_)
+            | Self::Memory(_)
+            | Self::Resource(_)
+            | Self::Reply(_)
+            | Self::IrqControl(_)
+            | Self::IrqLine(_) => None,
+        }
+    }
+
+    /// Учёт держателя capability со значком. `ResourceExhausted` - объект не заводит учёта под
+    /// новый значок.
+    pub(crate) fn register_badged_holder(
+        &self,
+        rights: Rights,
+        badge: NonZeroU64,
+    ) -> Result<Option<Arc<dyn HolderTicket>>, IpcError> {
+        match self {
+            Self::Port(port) => port.register_badged_holder(rights, badge),
+            Self::Signal(_)
+            | Self::Process(_)
+            | Self::Thread(_)
+            | Self::Memory(_)
+            | Self::Resource(_)
+            | Self::Reply(_)
+            | Self::IrqControl(_)
+            | Self::IrqLine(_) => Ok(None),
         }
     }
 }
@@ -158,6 +222,35 @@ mod tests {
     #[test]
     fn as_waitable_none_for_non_waitable_objects() {
         assert!(CapabilityTarget::Port(Port::new()).as_waitable().is_none());
+    }
+
+    #[test]
+    fn holders_are_counted_by_ports_only() {
+        assert!(
+            CapabilityTarget::Port(Port::new())
+                .register_holder(Rights::READ)
+                .is_some()
+        );
+        assert!(
+            CapabilityTarget::Signal(Signal::new())
+                .register_holder(Rights::READ)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn badged_holders_are_counted_by_ports_only() {
+        let badge = NonZeroU64::MIN;
+        assert!(
+            CapabilityTarget::Port(Port::new())
+                .register_badged_holder(Rights::WRITE, badge)
+                .is_ok_and(|ticket| ticket.is_some())
+        );
+        assert!(
+            CapabilityTarget::Signal(Signal::new())
+                .register_badged_holder(Rights::WRITE, badge)
+                .is_ok_and(|ticket| ticket.is_none())
+        );
     }
 
     #[test]

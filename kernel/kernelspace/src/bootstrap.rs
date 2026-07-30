@@ -8,7 +8,7 @@ use core::num::NonZeroUsize;
 use bootstrap::{BootstrapService, dispatch_bootstrap};
 use capability::{
     Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, IrqControl,
-    KernelIpcBuffer, Port, Reply, Resource, ThreadTransport, port_recv, port_send, runtime,
+    KernelIpcBuffer, Port, Reply, Resource, Rights, ThreadTransport, port_recv, port_send, runtime,
 };
 use collections::{LockCell, MutexCell};
 use ipc::{
@@ -37,6 +37,9 @@ const ROOT_RESOURCE_SPAN: NonZeroUsize = NonZeroUsize::new(usize::MAX & !0xFFF).
 /// Запущенный bootstrap-процесс.
 pub struct BootstrapLaunch {
     pub port: Arc<Port>,
+    /// Capability получателя: пока она жива, порт считает ядро возможным
+    /// получателем.
+    pub receiver: Capability,
     pub info: UserProcessLaunchInfo,
     pub resources: BootstrapResources,
 }
@@ -82,10 +85,14 @@ pub fn spawn_process(
         user_image_parts_from_entry(&entry, user_va_end).map_err(BootstrapSpawnError::Model)?;
     let user_image = parts.image();
 
-    // Ядро держит Arc как получатель; Handle на тот же объект уходит bootstrap-процессу
-    // как initial handle.
+    // Ядро принимает на порту, поэтому держит capability с READ. Стартовый
+    // хэндл bootstrap-процесса - клиентский: отправка, перенос и минт лог-капы.
     let port = Port::new();
-    let peer_handle = Capability::new_with_default_rights(port.clone());
+    let receiver = Capability::new(CapabilityTarget::Port(port.clone()), Rights::READ);
+    let peer_handle = Capability::new(
+        CapabilityTarget::Port(port.clone()),
+        Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE,
+    );
 
     // Корневой Resource: полномочие на минтинг физпамяти.
     let root_resource = Resource::new(
@@ -128,6 +135,7 @@ pub fn spawn_process(
 
     Ok(BootstrapLaunch {
         port,
+        receiver,
         info,
         resources: BootstrapResources {
             irq_control,
@@ -140,8 +148,9 @@ pub fn spawn_process(
 
 /// Цикл сервера bootstrap-port'а: kernel-поток аллоцирует kernel-резидентный
 /// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракт
-/// `Bootstrap`.
-pub fn run_bootstrap(port: &Arc<Port>, resources: BootstrapResources) {
+/// `Bootstrap`. `_receiver` - capability с `READ`: пока сервер работает, она
+/// держит ядро в множестве получателей порта.
+pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: BootstrapResources) {
     let Some(table) = runtime().current_handle_table() else {
         warn!("bootstrap: no kernel handle-table; server not started");
         return;
@@ -153,7 +162,9 @@ pub fn run_bootstrap(port: &Arc<Port>, resources: BootstrapResources) {
 
     loop {
         match dispatch_bootstrap(&mut server, &transport) {
-            Ok(()) => {}
+            // Уход значка приём не прерывает: сессий по значкам сервер не
+            // держит, и убирать ему нечего.
+            Ok(()) | Err(WireError::SenderGone) => {}
             Err(WireError::PeerClosed) => {
                 info!("bootstrap: port closed, exiting");
                 return;
@@ -185,7 +196,8 @@ pub fn close_bootstrap_port(port: &Arc<Port>, timeout_ns: u64) -> Result<(), Ker
         .map_err(|_| KernelIpcError::MessageTooBig)?;
 
     let sender = ThreadTransport::new_kernel(buffer, table);
-    port_send(port, sender, runtime(), Some(timeout_ns))
+    // Кадр закрытия идёт без значка - учёта отправителя у него нет.
+    port_send(port, &sender, runtime(), Some(timeout_ns), None)
 }
 
 /// Код ошибки выдачи в bootstrap-протоколе: отказ вставки дубликата в таблицу.
@@ -260,6 +272,7 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
         KernelIpcError::Timeout => WireError::Timeout,
         KernelIpcError::BufferTooSmall => WireError::Truncated,
         KernelIpcError::MessageTooBig => WireError::FrameOverflow,
+        KernelIpcError::SenderGone => WireError::SenderGone,
         KernelIpcError::PeerClosed
         | KernelIpcError::BadHandle
         | KernelIpcError::WrongType
@@ -322,7 +335,9 @@ impl Transport for KernelPortTransport {
 
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, WireError> {
         let receiver = self.thread_transport();
-        let reply = port_recv(&self.port, receiver, runtime(), None).map_err(map_kernel_error)?;
+        // Роль получателя держит capability сервера всё время его работы.
+        let reply =
+            port_recv(&self.port, &receiver, runtime(), None, None).map_err(map_kernel_error)?;
         self.pending_reply.with_lock(|slot| *slot = reply);
         self.buffer
             .with_lock(|buf| load_kernel_buffer(buf, bytes, handles))

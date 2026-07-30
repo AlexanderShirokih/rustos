@@ -86,12 +86,15 @@ fn bootstrap_chain(
 
     info!("bootstrap process spawned:");
 
-    let server_port = launch.port.clone();
+    // Capability получателя живёт ровно столько, сколько работает сервер:
+    // его уход объявляет порт без получателей.
+    let receiver = launch.receiver;
+    let port = launch.port.clone();
     let resources = launch.resources;
     syscall_bridge::scheduler()
         .spawn(
             SpawnConfig::new("bootstrap-log").priority(Priority::normal()),
-            move || run_bootstrap(&server_port, resources),
+            move || run_bootstrap(&port, receiver, resources),
         )
         .map_err(|e| warn!("bootstrap-log task spawn failed: {:?}", e))?;
 

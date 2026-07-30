@@ -1,7 +1,7 @@
 //! Типизированная обёртка над rendezvous-эндпоинтом ядра и одноразовым reply.
 
 use syscall::{
-    Handle, IPC_BUFFER_DATA_MAX, IpcBuffer, SyscallError, Timeout, decode_tag, encode_tag,
+    Handle, IPC_BUFFER_DATA_MAX, IpcBuffer, Rights, SyscallError, Timeout, decode_tag, encode_tag,
 };
 
 use crate::{
@@ -54,12 +54,37 @@ pub struct Reply {
     handle: OwnedHandle,
 }
 
+/// Порт с разделёнными сторонами: корневая capability отдаётся серверу, у
+/// создателя остаётся клиентский минт.
+#[derive(Debug)]
+pub struct ServicePort {
+    /// Серверная сторона: корневая capability, переносится серверу целиком.
+    /// Её уход лишает порт получателей.
+    pub server: OwnedHandle,
+    /// Клиентская сторона: `send`/`call` под значком сессии.
+    pub client: Port,
+}
+
 impl Port {
     /// Создаёт `Port` в текущей таблице.
     pub fn create() -> Result<Self> {
         svc::port_create()
             .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
+    }
+
+    /// Создаёт порт и разделяет его стороны: клиентская capability минтится как
+    /// `WRITE | TRANSFER` со значком `badge` (`0` - сессия без значка), серверной
+    /// остаётся корневая capability.
+    pub fn create_service(badge: u64) -> Result<ServicePort> {
+        let port = Self::create()?;
+        let client = port
+            .handle()
+            .duplicate(Rights::WRITE | Rights::TRANSFER, badge)?;
+        Ok(ServicePort {
+            server: port.into_handle(),
+            client: Self::from_handle(client),
+        })
     }
 
     /// Берёт во владение хэндл `Port`.
@@ -79,7 +104,8 @@ impl Port {
     }
 
     /// Принимает сообщение в IPC-буфер текущего потока, блокируясь до `timeout`.
-    /// `Some(Reply)`, если встречный был `call`, иначе `None`.
+    /// `Some(Reply)`, если встречный был `call`, иначе `None`. `SenderGone`:
+    /// кадра нет, значок ушедшей стороны лежит в `IpcBuffer.badge`.
     pub fn recv(&self, timeout: Timeout) -> Result<Option<Reply>> {
         let reply_raw = value(svc::port_recv(self.handle.as_raw(), timeout.raw()))?;
         #[allow(clippy::cast_possible_truncation)]

@@ -3,7 +3,9 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{marker::PhantomData, num::NonZeroUsize};
 
-use capability::{HandleTable, ProcessObject, ThreadObject};
+use capability::{
+    Capability, DrainedHandles, HandleReservation, HandleTable, ProcessObject, Reply, ThreadObject,
+};
 use collections::{LockCell, MutexCell};
 use memory::{
     AccessMask, MappingTag, MemFlags, MemoryRegion, PAGE_SIZE,
@@ -32,6 +34,15 @@ const IPC_BUFFER_PAGES: NonZeroUsize = NonZeroUsize::MIN;
 /// Длина кванта по умолчанию (нс). Экспонируется для тестов.
 pub const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
 
+/// Зарезервированный под стартовый хэндл слот child-таблицы вместе с процессом
+/// и таблицей: `commit_reserved` идёт после всех способных упасть шагов спавна.
+struct ChildHandleSlot {
+    process_id: ProcessId,
+    process_object: Arc<ProcessObject>,
+    table: Arc<MutexCell<HandleTable>>,
+    reservation: HandleReservation,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum AddressSpaceTransition {
     Keep,
@@ -47,11 +58,15 @@ pub(super) enum ScheduleAction<A: ArchContext> {
     },
 }
 
+/// Отложенное до выхода из-под scheduler-лока: пробуждения и дренаж таблиц
+/// терминированных процессов - и то, и другое берёт тот же лок.
 #[derive(Default)]
-#[must_use = "DeferredSignals содержит отложенные signal_terminated"]
+#[must_use = "DeferredSignals содержит отложенные пробуждения и дренаж таблиц"]
 pub(super) struct DeferredSignals {
     threads: Vec<(Arc<ThreadObject>, i32)>,
-    processes: Vec<(Arc<ProcessObject>, i32)>,
+    processes: Vec<Arc<ProcessObject>>,
+    replies: Vec<Arc<Reply>>,
+    handle_tables: Vec<Arc<MutexCell<HandleTable>>>,
 }
 
 impl DeferredSignals {
@@ -59,16 +74,63 @@ impl DeferredSignals {
         self.threads.push((thread, exit_code));
     }
 
-    fn push_process(&mut self, process: Arc<ProcessObject>, exit_code: i32) {
-        self.processes.push((process, exit_code));
+    fn push_process(&mut self, process: Arc<ProcessObject>) {
+        self.processes.push(process);
+    }
+
+    fn push_reply(&mut self, reply: Arc<Reply>) {
+        self.replies.push(reply);
+    }
+
+    fn push_handle_table(&mut self, table: Arc<MutexCell<HandleTable>>) {
+        self.handle_tables.push(table);
     }
 
     pub(super) fn emit(self) {
         for (thread, exit_code) in self.threads {
             thread.signal_terminated(exit_code);
         }
-        for (process, exit_code) in self.processes {
-            process.signal_terminated(exit_code);
+        // Процессы помечены завершёнными под scheduler-локом, здесь остаётся
+        // пробуждение наблюдателей.
+        for process in self.processes {
+            process.wake_terminated();
+        }
+        for reply in self.replies {
+            reply.cancel();
+        }
+        for table in self.handle_tables {
+            table.with_lock(HandleTable::drain).release();
+        }
+    }
+}
+
+/// Отложенное до выхода из-под scheduler-лока разрушение capability: и `Drop`
+/// стартового хэндла откатанного спавна, и освобождение изъятого из таблицы
+/// загрузчика будят ждущих через тот же лок.
+#[derive(Default)]
+#[must_use = "DeferredHandles содержит capability, ждущие разрушения вне лока"]
+pub(super) struct DeferredHandles {
+    rolled_back: Vec<Capability>,
+    drained: Vec<DrainedHandles>,
+}
+
+impl DeferredHandles {
+    /// Стартовый хэндл откатанного спавна: он никуда не встал, поэтому только
+    /// роняется, без отзыва производных.
+    fn push_rolled_back(&mut self, handle: Capability) {
+        self.rolled_back.push(handle);
+    }
+
+    /// Изъятое из таблицы загрузчика: cancel-цели снятых слотов и остаток
+    /// capability освобождает [`DrainedHandles::release`].
+    fn push_drained(&mut self, drained: DrainedHandles) {
+        self.drained.push(drained);
+    }
+
+    pub(super) fn emit(self) {
+        drop(self.rolled_back);
+        for drained in self.drained {
+            drained.release();
         }
     }
 }
@@ -149,8 +211,12 @@ where
     frame_allocator: Option<&'static (dyn FrameAllocator + Send + Sync)>,
     /// Процессы, у которых счётчик thread'ов достиг 0.
     pending_process_removals: Vec<ProcessId>,
+    /// Снятые с таблицы процессы, ждущие разрушения вне scheduler-лока.
+    pending_process_drops: Vec<Process>,
     /// Завершённые потоки, ждущие реапа из `ThreadTable`.
     pending_thread_removals: Vec<ThreadId>,
+    /// Capability, ждущие разрушения вне scheduler-лока.
+    deferred_handles: DeferredHandles,
     quantum_ns: u64,
     time_slice_ticks: u32,
 }
@@ -189,7 +255,9 @@ where
                 address_space_factory,
                 frame_allocator: None,
                 pending_process_removals: Vec::new(),
+                pending_process_drops: Vec::new(),
                 pending_thread_removals: Vec::new(),
+                deferred_handles: DeferredHandles::default(),
                 quantum_ns: DEFAULT_QUANTUM_NS,
                 time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
             })),
@@ -233,8 +301,11 @@ where
         &self,
         prepared: PreparedUserProcess,
     ) -> Result<UserProcessLaunchInfo, PreparedUserProcessError> {
-        self.inner
-            .with_lock(|inner| inner.spawn_prepared_user_process(prepared))
+        let result = self
+            .inner
+            .with_lock(|inner| inner.spawn_prepared_user_process(prepared));
+        release_deferred_handles(&self.inner);
+        result
     }
 
     /// Выполняет первый switch через `A::switch`, возвращая управление вызывающему.
@@ -249,7 +320,7 @@ where
                 let now_ns = inner.timer.now_ns();
                 inner.switch_to_next(now_ns)
             });
-            perform_schedule_action::<A>(action);
+            perform_schedule_action(&running.inner, action);
         });
 
         running
@@ -291,7 +362,7 @@ where
                 let now_ns = inner.timer.now_ns();
                 inner.yield_now(now_ns)
             });
-            perform_schedule_action::<A>(action);
+            perform_schedule_action(&self.inner, action);
         });
     }
 
@@ -301,13 +372,13 @@ where
                 let now_ns = inner.timer.now_ns();
                 inner.sleep_current(ns, now_ns)
             });
-            perform_schedule_action::<A>(action);
+            perform_schedule_action(&self.inner, action);
         });
     }
 
     pub fn on_tick(&self, now_ns: u64) {
         let action = self.inner.with_lock(|inner| inner.on_tick(now_ns));
-        perform_schedule_action::<A>(action);
+        perform_schedule_action(&self.inner, action);
     }
 
     /// Завершает текущий поток и переключается на следующий.
@@ -330,7 +401,7 @@ where
             let now_ns = inner.timer.now_ns();
             inner.finish_exit_current(now_ns)
         });
-        perform_schedule_action::<A>(action);
+        perform_schedule_action(&self.inner, action);
     }
 
     pub fn handle(&self) -> super::service::SchedulerHandle<A, T> {
@@ -341,8 +412,11 @@ where
         &self,
         prepared: PreparedUserProcess,
     ) -> Result<UserProcessLaunchInfo, PreparedUserProcessError> {
-        self.inner
-            .with_lock(|inner| inner.spawn_prepared_user_process(prepared))
+        let result = self
+            .inner
+            .with_lock(|inner| inner.spawn_prepared_user_process(prepared));
+        release_deferred_handles(&self.inner);
+        result
     }
 }
 
@@ -393,6 +467,12 @@ where
     pub fn thread_object_for(&self, id: ThreadId) -> Option<Arc<ThreadObject>> {
         self.inner
             .with_lock(|inner| inner.threads.get(id).map(|t| t.thread_object().clone()))
+    }
+
+    /// `Arc` handle-таблицы процесса `pid`; `None` если процесс не найден.
+    pub fn process_handle_table(&self, pid: ProcessId) -> Option<Arc<MutexCell<HandleTable>>> {
+        self.inner
+            .with_lock(|inner| inner.processes.get(pid).map(|p| p.handle_table().clone()))
     }
 
     /// `Arc<ProcessObject>` процесса `pid`; `None` если процесс не найден.
@@ -532,44 +612,89 @@ where
         Ok(())
     }
 
-    pub(crate) fn spawn_prepared_user_process(
+    /// Забирает отложенное разрушение capability: оно снимает учёт держателей
+    /// порта и будит ждущих, а это берёт scheduler-лок.
+    pub(super) fn take_deferred_handles(&mut self) -> DeferredHandles {
+        core::mem::take(&mut self.deferred_handles)
+    }
+
+    /// Заводит процесс потомка с зарезервированным слотом под стартовый хэндл.
+    /// `None` - слоты процессов или слоты child-таблицы исчерпаны.
+    ///
+    /// Заведённый здесь процесс откаты спавна роняют прямо под scheduler-локом,
+    /// минуя карантин `pending_process_drops`. Пробуждения на разрушении процесса
+    /// приходят только от capability его таблицы, а таблица потомка до
+    /// `commit_reserved` - последнего шага спавна - держит максимум резервацию
+    /// слота. Стартовый хэндл откаты отдают в `deferred_handles`, поэтому и он
+    /// разрушается вне лока.
+    fn insert_child_process(
         &mut self,
-        prepared: PreparedUserProcess,
-    ) -> Result<UserProcessLaunchInfo, PreparedUserProcessError> {
-        self.validate_prepared_user_process(&prepared)?;
-        let launch = prepared.launch;
-
-        let stack =
-            <A::Stack as super::arch::ThreadStackAllocator>::allocate(prepared.kernel_stack_pages)
-                .map_err(|_| PreparedUserProcessError::Spawn(SpawnError::StackAllocationFailed))?;
-        let stack_top = stack.top();
-
-        let initial_handle = launch.initial_handle;
-
-        let user_vm = prepared.user_vm;
-        let address_space_for_process = prepared.address_space.clone();
+        name: &'static str,
+        address_space: &Arc<AddressSpace>,
+        user_vm: Option<UserVmAllocator>,
+    ) -> Option<ChildHandleSlot> {
+        let address_space = address_space.clone();
         let process = self
             .processes
             .insert_with(|id| {
-                let mut process = Process::new(id, prepared.name, address_space_for_process);
+                let mut process = Process::new(id, name, address_space);
                 if let Some(vm) = user_vm {
                     process = process.with_user_vm(vm);
                 }
                 process
             })
-            .map_err(|_| PreparedUserProcessError::Spawn(SpawnError::NoFreeThreadSlots))?;
-
+            .ok()?;
         let process_id = process.id();
         let process_object = process.process_object().clone();
-        let Ok(initial_handle_id) = process
-            .handle_table()
-            .with_lock(|tbl| tbl.insert(initial_handle))
-        else {
+        let table = process.handle_table().clone();
+
+        let Ok(reservation) = table.with_lock(HandleTable::reserve_slot) else {
             self.processes.remove(process_id);
+            return None;
+        };
+        Some(ChildHandleSlot {
+            process_id,
+            process_object,
+            table,
+            reservation,
+        })
+    }
+
+    pub(crate) fn spawn_prepared_user_process(
+        &mut self,
+        prepared: PreparedUserProcess,
+    ) -> Result<UserProcessLaunchInfo, PreparedUserProcessError> {
+        if let Err(e) = self.validate_prepared_user_process(&prepared) {
+            self.deferred_handles
+                .push_rolled_back(prepared.launch.initial_handle);
+            return Err(e);
+        }
+        let launch = prepared.launch;
+        let initial_handle = launch.initial_handle;
+
+        let Ok(stack) =
+            <A::Stack as super::arch::ThreadStackAllocator>::allocate(prepared.kernel_stack_pages)
+        else {
+            self.deferred_handles.push_rolled_back(initial_handle);
+            return Err(PreparedUserProcessError::Spawn(
+                SpawnError::StackAllocationFailed,
+            ));
+        };
+        let stack_top = stack.top();
+
+        let Some(ChildHandleSlot {
+            process_id,
+            process_object,
+            table: child_table,
+            reservation,
+        }) = self.insert_child_process(prepared.name, &prepared.address_space, prepared.user_vm)
+        else {
+            self.deferred_handles.push_rolled_back(initial_handle);
             return Err(PreparedUserProcessError::Spawn(
                 SpawnError::NoFreeThreadSlots,
             ));
         };
+        let initial_handle_id = reservation.handle_id();
         let bootstrap_arg = UserBootstrapArg(u64::from(initial_handle_id.raw().get()));
 
         let arch = A::init_user(crate::UserEntry {
@@ -598,6 +723,7 @@ where
             Err(e) => {
                 // Откат: без потока thread_count=1 никогда не обнулится и AS не освободится.
                 self.processes.remove(process_id);
+                self.deferred_handles.push_rolled_back(initial_handle);
                 return Err(PreparedUserProcessError::Spawn(e));
             }
         };
@@ -605,8 +731,14 @@ where
         if let Err(e) = self.attach_ipc_buffer(process_id, thread_id) {
             self.threads.remove(thread_id);
             self.processes.remove(process_id);
+            self.deferred_handles.push_rolled_back(initial_handle);
             return Err(PreparedUserProcessError::Spawn(e));
         }
+
+        let mut rejected = DrainedHandles::empty();
+        child_table
+            .with_lock(|tbl| tbl.commit_reserved(reservation, initial_handle, &mut rejected));
+        self.deferred_handles.push_drained(rejected);
 
         if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
             && cpu.idle() != thread_id
@@ -665,6 +797,9 @@ where
         Ok((pid, true))
     }
 
+    /// Снятый процесс роняется прямо под scheduler-локом, минуя карантин
+    /// `pending_process_drops`: заведён он этим же спавном, хэндлов не получал,
+    /// и его разрушение никого не будит.
     fn rollback_intern(&mut self, pid: ProcessId, is_new: bool) {
         if is_new {
             self.processes.remove(pid);
@@ -853,11 +988,12 @@ where
         // На нуле поднимаем terminated процесса ДО `cleanup_pending_process_removals`
         // (вызов из `switch_to_next`); `Arc<ProcessObject>` переживёт удаление из таблицы.
         if let Some(pid) = exiting_pid
-            && let Some(process) = self.processes.get(pid)
-            && process.decrement_thread_count()
+            && self
+                .processes
+                .get(pid)
+                .is_some_and(Process::decrement_thread_count)
         {
-            signals.push_process(process.process_object().clone(), exit_code);
-            self.pending_process_removals.push(pid);
+            self.collect_process_termination(pid, exit_code, &mut signals);
         }
 
         // Kernel-стек освободится в `reap_pending_threads`, когда поток перестанет быть prev.
@@ -905,6 +1041,10 @@ where
         process_object: &Arc<ProcessObject>,
         entry: capability::UserThreadEntry,
     ) -> Result<(ThreadId, Arc<ThreadObject>), SpawnError> {
+        // Терминация необратима: снимаемый процесс новых потоков не получает.
+        if process_object.terminated() {
+            return Err(SpawnError::ProcessTerminated);
+        }
         if (entry.priority as usize) >= self.config.priority_levels() {
             return Err(SpawnError::InvalidPriority);
         }
@@ -1246,7 +1386,8 @@ where
             let Some(process) = self.process_by_object_mut(process_object) else {
                 return Err(StartProcessError::ProcessNotFound);
             };
-            if !process.is_image_loaded()
+            if process_object.terminated()
+                || !process.is_image_loaded()
                 || process.thread_count() != 0
                 || !process.handle_table_is_empty()
             {
@@ -1282,27 +1423,37 @@ where
 
         // Validate и drain в разных with_lock-окнах; на гонке (другой syscall
         // закрыл handle между шагами) откатываем prepared thread и резервацию.
-        let drained = match loader_handle_table
-            .with_lock(|tbl| tbl.try_drain_for_transfer(&[handle_id], capability::Rights::TRANSFER))
-        {
-            Ok(d) => d,
-            Err(e) => {
-                self.drop_prepared_thread(thread_id);
-                child_table.with_lock(|tbl| tbl.release_reservation(reservation));
-                return Err(StartProcessError::HandleValidationFailed(e));
-            }
+        // Изъятое уходит в отложенные: пробуждение cancel-целей снятого слота
+        // берёт scheduler-лок, который держится здесь.
+        let mut drained = DrainedHandles::empty();
+        let taken = loader_handle_table.with_lock(|tbl| {
+            tbl.try_drain_for_transfer(&[handle_id], capability::Rights::TRANSFER, &mut drained)
+        });
+        // На отказе снятое остаётся в токене: взятая наружу капа была бы
+        // разрушена под scheduler-локом.
+        let handle = match taken {
+            Ok(()) => drained.take_handles().into_iter().next(),
+            Err(_) => None,
         };
+        self.deferred_handles.push_drained(drained);
+        if let Err(e) = taken {
+            self.drop_prepared_thread(thread_id);
+            child_table.with_lock(|tbl| tbl.release_reservation(reservation));
+            return Err(StartProcessError::HandleValidationFailed(e));
+        }
 
         // commit_reserved кладёт хэндл в зарезервированный слот: child-table id
         // совпадает с уже вычисленным для X0.
-        let Some(handle) = drained.into_iter().next() else {
+        let Some(handle) = handle else {
             child_table.with_lock(|tbl| tbl.release_reservation(reservation));
             self.drop_prepared_thread(thread_id);
             return Err(StartProcessError::HandleValidationFailed(
                 capability::IpcError::BadHandle,
             ));
         };
-        child_table.with_lock(|tbl| tbl.commit_reserved(reservation, handle));
+        let mut rejected = DrainedHandles::empty();
+        child_table.with_lock(|tbl| tbl.commit_reserved(reservation, handle, &mut rejected));
+        self.deferred_handles.push_drained(rejected);
 
         // До enqueue: стартовый поток не должен аллоцировать раньше засева.
         if let Some(resource) = metering_resource {
@@ -1346,17 +1497,48 @@ where
 
         // Cancel снимает Waiter с очереди и переводит OutcomeSlot в TIMEDOUT,
         // отклоняя поздний reply. Thread не реапим: стек заморожен в syscall и держит Arc'и.
+        // Доставленный, но не изъятый reply забирает тот же cancel: в
+        // замороженном кадре он стал бы недостижим, а вызыватель - вечным.
         if let Some(cancel) = blocked_cancel {
             cancel.cancel();
+            if let Some(reply) = cancel.take_abandoned_reply() {
+                signals.push_reply(reply);
+            }
         }
         self.release_ipc_buffer(thread_id);
 
-        if let Some(process) = self.processes.get(pid)
-            && process.decrement_thread_count()
+        if self
+            .processes
+            .get(pid)
+            .is_some_and(Process::decrement_thread_count)
         {
-            signals.push_process(process.process_object().clone(), exit_code);
-            self.pending_process_removals.push(pid);
+            self.collect_process_termination(pid, exit_code, signals);
         }
+    }
+
+    /// Терминация процесса: пометка завершения, сигнал наблюдателям, дренаж
+    /// handle-таблицы и постановка в очередь на снятие из `ProcessTable`.
+    /// Дренаж и постановка - один раз на процесс, сигнал переживает повторный
+    /// вызов. Пометка идёт под scheduler-локом: её же читают отказы
+    /// `ProcessStart`/`ThreadCreate`, а дренаж и пробуждения отложены.
+    fn collect_process_termination(
+        &mut self,
+        pid: ProcessId,
+        exit_code: i32,
+        signals: &mut DeferredSignals,
+    ) {
+        let already_pending = self.pending_process_removals.contains(&pid);
+        let Some(process) = self.processes.get(pid) else {
+            return;
+        };
+        let process_object = process.process_object().clone();
+        process_object.mark_terminated(exit_code);
+        signals.push_process(process_object);
+        if already_pending {
+            return;
+        }
+        signals.push_handle_table(process.handle_table().clone());
+        self.pending_process_removals.push(pid);
     }
 
     pub(crate) fn terminate_thread_object(
@@ -1392,10 +1574,7 @@ where
             .map(|t| t.thread_object().clone())
             .collect();
         if live.is_empty() {
-            signals.push_process(process_object.clone(), exit_code);
-            if !self.pending_process_removals.contains(&pid) {
-                self.pending_process_removals.push(pid);
-            }
+            self.collect_process_termination(pid, exit_code, &mut signals);
             return signals;
         }
         for target in &live {
@@ -1622,6 +1801,7 @@ where
             .and_then(|slot| slot.as_deref_mut())
     }
 
+    /// Снятые процессы уходят в `pending_process_drops`, а не роняются здесь.
     /// Пропускает pid, совпадающий с процессом `next_id` (thread_count=0, но
     /// AS ещё нужен новому current; safety-net против невозможного случая).
     fn cleanup_pending_process_removals(&mut self, next_id: ThreadId) {
@@ -1637,8 +1817,15 @@ where
                 continue;
             }
             self.pending_process_removals.swap_remove(idx);
-            let _removed = self.processes.remove(pid);
+            if let Some(removed) = self.processes.remove(pid) {
+                self.pending_process_drops.push(removed);
+            }
         }
+    }
+
+    /// Забирает снятые процессы для разрушения вне scheduler-лока.
+    fn take_pending_process_drops(&mut self) -> Vec<Process> {
+        core::mem::take(&mut self.pending_process_drops)
     }
 
     fn ensure_cpu_slot(&mut self, id: CpuId) {
@@ -1653,22 +1840,41 @@ struct TrampolinePayload {
     entry: Box<dyn FnOnce() + Send + 'static>,
 }
 
-pub(super) fn perform_schedule_action<A: ArchContext>(action: ScheduleAction<A>) {
-    let ScheduleAction::Switch {
+/// Разрушает отложенные capability уже вне scheduler-лока: их `Drop`, отзыв и
+/// пробуждение cancel-целей берут тот же лок.
+pub(super) fn release_deferred_handles<A: ArchContext, T: TimerSource>(
+    inner: &MutexCell<SchedulerInner<A, T>>,
+) {
+    inner
+        .with_lock(SchedulerInner::take_deferred_handles)
+        .emit();
+}
+
+/// Выполняет переключение и роняет снятые процессы уже вне scheduler-лока:
+/// `Drop` их capability будит припаркованные потоки через тот же лок.
+pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
+    inner: &MutexCell<SchedulerInner<A, T>>,
+    action: ScheduleAction<A>,
+) {
+    if let ScheduleAction::Switch {
         prev,
         next,
         address_space,
     } = action
-    else {
-        return;
-    };
-    // Process-switch: активируем AS ДО context_switch, чтобы возобновляемый
-    // user-thread проснулся уже в своём адресном пространстве.
-    if let AddressSpaceTransition::Switch(handle) = address_space {
-        A::switch_address_space(handle);
+    {
+        // Process-switch: активируем AS ДО context_switch, чтобы возобновляемый
+        // user-thread проснулся уже в своём адресном пространстве.
+        if let AddressSpaceTransition::Switch(handle) = address_space {
+            A::switch_address_space(handle);
+        }
+        // SAFETY: raw pointers подготовлены под scheduler-lock-ом и валидны до завершения switch.
+        unsafe { A::switch(&mut *prev, &*next) };
     }
-    // SAFETY: raw pointers подготовлены под scheduler-lock-ом и валидны до завершения switch.
-    unsafe { A::switch(&mut *prev, &*next) };
+
+    // Ушедший в exit поток сюда не возвращается, его процесс роняет тот поток,
+    // который следующим пройдёт через переключение.
+    let dropped = inner.with_lock(SchedulerInner::take_pending_process_drops);
+    drop(dropped);
 }
 
 unsafe extern "C" fn thread_trampoline<A: ArchContext>(arg: *mut ()) -> ! {

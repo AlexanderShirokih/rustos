@@ -3,7 +3,10 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::runtime::{KernelRuntime, ParkState, WaitToken};
+use super::{
+    reply::Reply,
+    runtime::{KernelRuntime, ParkState, WaitToken},
+};
 
 /// Объект, который хочет быть разбуженным при изменении сигналов capability target.
 pub trait Waker: Send + Sync {
@@ -34,6 +37,12 @@ pub trait Waitable: Send + Sync {
 /// Коллбек закрытия хэндла.
 pub trait CancelTarget: Send + Sync {
     fn cancel(&self);
+
+    /// Изымает reply, доставленный снятому получателю и потому брошенный. Его отмена будит
+    /// вызывателя и под scheduler-локом не выполняется.
+    fn take_abandoned_reply(&self) -> Option<Arc<Reply>> {
+        None
+    }
 }
 
 /// Waker запаркованного потока.

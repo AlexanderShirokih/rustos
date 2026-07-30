@@ -4,7 +4,7 @@
 //! хендлы в `caps[..ncaps]`.
 
 use capability::{
-    Capability, Port, Rights, ThreadTransport, port_call, port_recv, port_send, runtime,
+    Capability, Port, PortAccess, Rights, ThreadTransport, port_call, port_recv, port_send, runtime,
 };
 use collections::LockCell;
 use memory::virtual_address::VirtualAddress;
@@ -41,7 +41,7 @@ pub(super) fn sys_port_create() -> Result<u64, SyscallError> {
 
     let id = table
         .with_lock(|tbl| tbl.insert(handle))
-        .map_err(map_ipc_error)?;
+        .map_err(|rejected| map_ipc_error(rejected.release()))?;
     Ok(u64::from(id.raw().get()))
 }
 
@@ -64,30 +64,44 @@ pub(super) fn sys_port_send(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     // Badge отправителя доставляется получателю в транспорте.
-    let (port, badge) = table
-        .with_lock(|tbl| tbl.get_port_with_badge(id, Rights::WRITE))
+    let PortAccess { port, badge, hold } = table
+        .with_lock(|tbl| tbl.get_port(id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
     let transport = current_transport()?.with_badge(badge);
-    port_send(&port, transport, runtime(), timeout_from_abi(timeout_ns)).map_err(map_ipc_error)?;
+    port_send(
+        &port,
+        &transport,
+        runtime(),
+        timeout_from_abi(timeout_ns),
+        hold,
+    )
+    .map_err(map_ipc_error)?;
     Ok(0)
 }
 
 /// `port_recv(handle, timeout_ns)` - блокирующий приём в IPC-буфер текущего
 /// потока. Требует `Rights::READ`. Возврат: reply handle id (если встречный
-/// был `call`), иначе `0`.
+/// был `call`), иначе `0`. `SenderGone`: кадра нет, значок ушедшей стороны
+/// лежит в `IpcBuffer.badge`, остальные поля буфера не изменены.
 pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let table = runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
-    let port = table
+    let PortAccess { port, hold, .. } = table
         .with_lock(|tbl| tbl.get_port(id, Rights::READ))
         .map_err(map_ipc_error)?;
 
     let transport = current_transport()?;
-    let reply = port_recv(&port, transport, runtime(), timeout_from_abi(timeout_ns))
-        .map_err(map_ipc_error)?;
+    let reply = port_recv(
+        &port,
+        &transport,
+        runtime(),
+        timeout_from_abi(timeout_ns),
+        hold,
+    )
+    .map_err(map_ipc_error)?;
 
     match reply {
         None => Ok(0),
@@ -95,7 +109,7 @@ pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
             let h = Capability::new_with_default_rights(reply);
             let reply_id = table
                 .with_lock(|tbl| tbl.insert(h))
-                .map_err(map_ipc_error)?;
+                .map_err(|rejected| map_ipc_error(rejected.release()))?;
             Ok(u64::from(reply_id.raw().get()))
         }
     }
@@ -109,12 +123,19 @@ pub(super) fn sys_port_call(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     // Badge вызывателя идёт на сторону сервера; reply badge не несёт.
-    let (port, badge) = table
-        .with_lock(|tbl| tbl.get_port_with_badge(id, Rights::WRITE))
+    let PortAccess { port, badge, hold } = table
+        .with_lock(|tbl| tbl.get_port(id, Rights::WRITE))
         .map_err(map_ipc_error)?;
 
     let transport = current_transport()?.with_badge(badge);
-    port_call(&port, transport, runtime(), timeout_from_abi(timeout_ns)).map_err(map_ipc_error)?;
+    port_call(
+        &port,
+        &transport,
+        runtime(),
+        timeout_from_abi(timeout_ns),
+        hold,
+    )
+    .map_err(map_ipc_error)?;
     Ok(0)
 }
 
@@ -134,7 +155,9 @@ pub(super) fn sys_port_reply(handle: u64) -> Result<u64, SyscallError> {
     let res = reply.reply(&server).map_err(map_ipc_error);
 
     // One-shot: после reply handle исчерпан; повторный вызов даёт BadHandle.
-    let _ = table.with_lock(|tbl| tbl.remove(id));
+    if let Ok(removed) = table.with_lock(|tbl| tbl.remove(id)) {
+        removed.release();
+    }
 
     res?;
     Ok(0)

@@ -1047,6 +1047,40 @@ fn create_user_thread_rejects_unloaded_process() {
 }
 
 #[test]
+fn create_user_thread_rejects_terminated_process() {
+    use capability::UserThreadEntry;
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+    // Загрузка образа до терминации: иначе отказ пришёл бы по ImageNotLoaded.
+    mark_process_loaded(&handle, &process);
+    handle
+        .terminate_process(&process, 5)
+        .expect("terminate_process");
+
+    let err = handle.create_user_thread(
+        &process,
+        UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+    );
+    match err {
+        Err(capability::SpawnError::ProcessTerminated) => {}
+        other => panic!("expected ProcessTerminated, got {:?}", other.err()),
+    }
+}
+
+#[test]
 fn load_user_image_into_attaches_user_vm() {
     reset_switches();
     let factory = new_factory_static();
@@ -1149,6 +1183,101 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
     assert!(!thread.terminated());
 }
 
+/// Cancel-цель, которая на срабатывании пробует взять scheduler-лок из другого
+/// потока: захват означает, что лок уже отпущен.
+struct SchedulerLockProbe {
+    handle: SchedulerHandle<MockContext, MockTimerSource>,
+    calls: std::sync::atomic::AtomicUsize,
+    acquisitions: std::sync::atomic::AtomicUsize,
+}
+
+impl SchedulerLockProbe {
+    fn new(handle: &SchedulerHandle<MockContext, MockTimerSource>) -> Arc<Self> {
+        Arc::new(Self {
+            handle: handle.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            acquisitions: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn acquisitions(&self) -> usize {
+        self.acquisitions.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl capability::CancelTarget for SchedulerLockProbe {
+    fn cancel(&self) {
+        use std::sync::atomic::Ordering;
+
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        let handle = self.handle.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(handle.current_thread_object().is_some());
+        });
+        if receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_ok()
+        {
+            self.acquisitions.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+#[test]
+fn start_user_process_cancels_loader_waiters_outside_scheduler_lock() {
+    // Изъятие bootstrap-хэндла идёт из-под scheduler-лока, а пробуждение
+    // cancel-цели снятого слота берёт тот же лок: оно обязано быть отложено.
+    use capability::{UserStartSpec, UserThreadEntry};
+    use collections::LockCell;
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+    mark_process_loaded(&handle, &process);
+
+    let (loader_table, handle_id) = loader_table_with_handle();
+    let probe = SchedulerLockProbe::new(&handle);
+    loader_table
+        .with_lock(|tbl| {
+            tbl.register_cancel(
+                handle_id,
+                probe.clone() as Arc<dyn capability::CancelTarget>,
+            )
+        })
+        .expect("register_cancel");
+
+    let spec = UserStartSpec {
+        entry: UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+        loader_handle_table: loader_table,
+        handle_id,
+        metering_resource: None,
+    };
+    handle.start_user_process(&process, spec).expect("start ok");
+
+    assert_eq!(probe.calls(), 1, "cancel снятого слота обязан сработать");
+    assert_eq!(
+        probe.acquisitions(),
+        1,
+        "cancel обязан идти вне scheduler-лока",
+    );
+}
+
 #[test]
 fn start_user_process_rejects_unloaded() {
     use capability::{StartProcessError, UserStartSpec, UserThreadEntry};
@@ -1176,6 +1305,45 @@ fn start_user_process_rejects_unloaded() {
         metering_resource: None,
     };
     match handle.start_user_process(&process, spec) {
+        Err(StartProcessError::WrongState) => {}
+        Err(other) => panic!("expected WrongState, got {other:?}"),
+        Ok(_) => panic!("expected WrongState, got Ok"),
+    }
+}
+
+#[test]
+fn start_user_process_rejects_terminated_process() {
+    use capability::{StartProcessError, UserStartSpec, UserThreadEntry};
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+    mark_process_loaded(&handle, &process);
+    handle
+        .terminate_process(&process, 5)
+        .expect("terminate_process");
+
+    let (loader_table, handle_id) = loader_table_with_handle();
+    let spec = UserStartSpec {
+        entry: UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+        loader_handle_table: loader_table,
+        handle_id,
+        metering_resource: None,
+    };
+    match handle.start_user_process(&process, spec) {
+        // Именно WrongState: отказ наступает до валидации loader-хэндла, а не
+        // внутри prepare_user_thread (тот дал бы SpawnFailed).
         Err(StartProcessError::WrongState) => {}
         Err(other) => panic!("expected WrongState, got {other:?}"),
         Ok(_) => panic!("expected WrongState, got Ok"),
@@ -1304,6 +1472,72 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
         fa.deallocated_count(),
         0,
         "image-segment frames must stay alive while process is live",
+    );
+}
+
+#[test]
+fn process_terminate_drains_handle_table_held_outside_process() {
+    // Убитый в парковке recv поток не реапится: его кадр port-syscall'а держит
+    // клон таблицы, поэтому `Drop for HandleTable` в этом сценарии никогда не
+    // наступает и освободить capability обязан дренаж на терминации.
+    use capability::{Capability, CapabilityTarget, Port, Rights, UserStartSpec, UserThreadEntry};
+    use collections::LockCell;
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("victim")
+        .expect("create_empty_process");
+    mark_process_loaded(&handle, &process);
+
+    let port = Port::new();
+    let port_weak = Arc::downgrade(&port);
+    let loader_table = Arc::new(collections::MutexCell::new(capability::HandleTable::new()));
+    let handle_id = loader_table
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Port(port),
+                Rights::TRANSFER | Rights::READ,
+            ))
+        })
+        .expect("insert loader handle");
+    let spec = UserStartSpec {
+        entry: UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+        loader_handle_table: loader_table,
+        handle_id,
+        metering_resource: None,
+    };
+    handle.start_user_process(&process, spec).expect("start ok");
+
+    let pid = scheduler.process_id_for(&process).expect("process id");
+    // Этот клон играет роль замороженного кадра: он переживает и удаление
+    // процесса из таблицы, и разрушение самого `Process`.
+    let frozen_frame_table = scheduler.process_handle_table(pid).expect("handle table");
+    assert_eq!(frozen_frame_table.with_lock(|tbl| tbl.live_count()), 1);
+
+    handle
+        .terminate_process(&process, 9)
+        .expect("terminate_process");
+    let running = scheduler.run();
+    running.yield_now();
+
+    assert_eq!(
+        frozen_frame_table.with_lock(|tbl| tbl.live_count()),
+        0,
+        "terminated process must not keep live handles",
+    );
+    assert!(
+        port_weak.upgrade().is_none(),
+        "port owned by the terminated process must be released",
     );
 }
 

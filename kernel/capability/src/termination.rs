@@ -27,15 +27,26 @@ impl TerminationState {
     /// Идемпотентно публикует `code`, помечает объект завершённым и, если
     /// bound-`Signal` уже материализован, поднимает на нём `SIGNALED`.
     pub(crate) fn signal_terminated(&self, code: i32) {
-        let to_signal = self.signal.with_lock(|slot| {
+        if self.mark_terminated(code) {
+            self.wake_terminated();
+        }
+    }
+
+    /// Помечает объект завершённым с кодом `code`, наблюдателей не будит. `true` - первая пометка.
+    pub(crate) fn mark_terminated(&self, code: i32) -> bool {
+        self.signal.with_lock(|_slot| {
             if self.terminated.load(Ordering::Acquire) {
-                return None;
+                return false;
             }
             self.exit_code.store(code, Ordering::Release);
             self.terminated.store(true, Ordering::Release);
-            slot.clone()
-        });
+            true
+        })
+    }
 
+    /// Поднимает `SIGNALED` на материализованном bound-`Signal`.
+    pub(crate) fn wake_terminated(&self) {
+        let to_signal = self.signal.with_lock(|slot| slot.clone());
         if let Some(signal) = to_signal {
             signal.signal(SIGNALED, 0);
         }
@@ -109,6 +120,38 @@ mod tests {
         s.signal_terminated(5);
         assert!(w.was_woken());
         assert_eq!(w.observed() & SIGNALED, SIGNALED);
+    }
+
+    #[test]
+    fn mark_terminated_publishes_state_without_waking_observers() {
+        let s = TerminationState::new();
+        let sig = s.termination_signal();
+        let w = MockWaker::new();
+        sig.register_waiter(SIGNALED, w.clone());
+
+        assert!(s.mark_terminated(11));
+        assert!(s.terminated());
+        assert_eq!(s.exit_code(), 11);
+        assert!(!w.was_woken());
+
+        s.wake_terminated();
+        assert!(w.was_woken());
+    }
+
+    #[test]
+    fn mark_terminated_reports_only_the_first_mark() {
+        let s = TerminationState::new();
+        assert!(s.mark_terminated(4));
+        assert!(!s.mark_terminated(9));
+        assert_eq!(s.exit_code(), 4);
+    }
+
+    #[test]
+    fn observer_arriving_after_mark_sees_presignaled_signal() {
+        let s = TerminationState::new();
+        s.mark_terminated(2);
+        let sig = s.termination_signal();
+        assert_eq!(sig.peek() & SIGNALED, SIGNALED);
     }
 
     #[test]

@@ -173,7 +173,9 @@ IPC опирается на underlying-транспорт, не определя
 
 Платформенный адаптер реализует этот интерфейс через rendezvous-syscalls port —
 `send`/`recv` (one-way) и `call`/`reply` (two-way). Адаптер сообщает `PeerClosed`
-после закрытия дальнего конца и `WouldBlock`, когда встречной стороны нет.
+после ухода дальней стороны, `SenderGone` — когда вместо кадра пришло событие об
+уходе значка ([port-liveness.md](port-liveness.md)), и `WouldBlock`, когда
+встречной стороны нет.
 Подробнее про syscalls и IPC-буфер — в [syscalls.md](syscalls.md).
 
 ## Транспортная плоскость

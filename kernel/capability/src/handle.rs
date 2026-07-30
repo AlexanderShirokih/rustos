@@ -1,10 +1,13 @@
-use alloc::sync::Arc;
-use core::num::{NonZeroU16, NonZeroU32};
+use alloc::sync::{Arc, Weak};
+use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
 use syscall::Rights;
 
 use super::{
-    errors::IpcError, rev_node::RevNode, rights::default_rights_for, target::CapabilityTarget,
+    errors::IpcError,
+    rev_node::RevNode,
+    rights::default_rights_for,
+    target::{CapabilityTarget, HolderTicket, OperationHold},
 };
 
 /// Публичный идентификатор записи в `HandleTable`, используемый процессами для IPC.
@@ -66,6 +69,7 @@ pub struct Capability {
     rights: Rights,
     badge: u64,
     node: Arc<RevNode>,
+    holder: Option<Arc<dyn HolderTicket>>,
 }
 
 impl core::fmt::Debug for Capability {
@@ -80,12 +84,7 @@ impl core::fmt::Debug for Capability {
 impl Capability {
     /// Создаёт незаклеймённую capability (`badge == 0`).
     pub fn new(target: CapabilityTarget, rights: Rights) -> Self {
-        Self {
-            target,
-            rights,
-            badge: 0,
-            node: RevNode::new_root(),
-        }
+        Self::unbadged(target, rights, RevNode::new_root())
     }
 
     /// Создаёт незаклеймённую capability со стартовыми правами объекта
@@ -96,13 +95,40 @@ impl Capability {
         Self::new(target, rights)
     }
 
-    /// Создаёт capability с заданным значком `badge`.
-    pub fn new_with_badge(target: CapabilityTarget, rights: Rights, badge: u64) -> Self {
+    fn unbadged(target: CapabilityTarget, rights: Rights, node: Arc<RevNode>) -> Self {
+        let holder = target.register_holder(rights);
+        Self::with_holder(target, rights, 0, node, holder)
+    }
+
+    fn badged(
+        target: CapabilityTarget,
+        rights: Rights,
+        badge: NonZeroU64,
+        node: Arc<RevNode>,
+    ) -> Result<Self, IpcError> {
+        let holder = target.register_badged_holder(rights, badge)?;
+        Ok(Self::with_holder(target, rights, badge.get(), node, holder))
+    }
+
+    fn with_holder(
+        target: CapabilityTarget,
+        rights: Rights,
+        badge: u64,
+        node: Arc<RevNode>,
+        holder: Option<Arc<dyn HolderTicket>>,
+    ) -> Self {
+        // Хук берёт scheduler-лок и потому под table-локом не выполняется: деривацию от
+        // отозванного родителя отвергает `RevNode::new_child`.
+        if let Some(holder) = &holder {
+            let hook: Weak<dyn HolderTicket> = Arc::downgrade(holder);
+            node.register_hook(hook);
+        }
         Self {
             target,
             rights,
             badge,
-            node: RevNode::new_root(),
+            node,
+            holder,
         }
     }
 
@@ -124,11 +150,17 @@ impl Capability {
         &self.target
     }
 
+    /// Удержание учёта этой capability на время операции: пока оно живо, закрытие capability не
+    /// обнуляет её сторону объекта. `None` - учёта нет либо он уже снят.
+    pub(crate) fn hold_for_operation(&self) -> Option<OperationHold> {
+        self.holder.as_ref()?.reacquire().map(OperationHold::new)
+    }
+
     /// Создаёт копию capability с подмножеством прав и (опционально) значком.
     ///
-    /// Возвращает [`IpcError::AccessDenied`], если у исходной capability нет
-    /// права [`Rights::DUPLICATE`] либо запрошенный набор прав не является
-    /// подмножеством существующего.
+    /// [`IpcError::AccessDenied`] - нет права [`Rights::DUPLICATE`] либо запрошенные права не
+    /// подмножество существующих. [`IpcError::ResourceExhausted`] - объект не заводит учёта под
+    /// новый значок.
     pub fn duplicate(&self, new_rights: Rights, new_badge: u64) -> Result<Self, IpcError> {
         if !self.rights.contains(Rights::DUPLICATE) {
             return Err(IpcError::AccessDenied);
@@ -145,11 +177,18 @@ impl Capability {
             new_badge
         };
         let node = RevNode::new_child(&self.node).ok_or(IpcError::Revoked)?;
-        Ok(Self {
-            target: self.target.clone(),
-            rights: new_rights,
-            badge,
-            node,
-        })
+        let target = self.target.clone();
+        match NonZeroU64::new(badge) {
+            Some(badge) => Self::badged(target, new_rights, badge, node),
+            None => Ok(Self::unbadged(target, new_rights, node)),
+        }
+    }
+}
+
+impl Drop for Capability {
+    fn drop(&mut self) {
+        if let Some(holder) = &self.holder {
+            holder.release();
+        }
     }
 }

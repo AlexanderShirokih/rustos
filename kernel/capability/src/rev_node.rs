@@ -52,8 +52,8 @@ impl RevNode {
         if inserted { Some(child) } else { None }
     }
 
-    /// Регистрирует `Weak` хука отзыва побочного эффекта.
-    /// Если узел уже отозван, хук вызывается немедленно.
+    /// Регистрирует `Weak` хука отзыва побочного эффекта. На уже отозванном узле хук вызывается
+    /// синхронно, под всеми удерживаемыми в этот момент локами.
     pub fn register_hook(&self, hook: Weak<dyn RevocationHook>) {
         self.hooks.with_lock(|h| {
             if self.revoked.load(Ordering::SeqCst) {

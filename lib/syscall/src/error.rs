@@ -38,17 +38,20 @@ pub enum SyscallError {
     /// Wait отменён: handle, на котором было зарегистрировано ожидание,
     /// был закрыт или передан другому процессу до прихода сигнала.
     Canceled = 15,
-    /// Бюджет ресурса исчерпан: метерящая операция запросила больше
-    /// страниц, чем осталось в `Resource`.
+    /// Учёт исчерпан: метерящая операция запросила больше страниц, чем
+    /// осталось в `Resource`, либо порт накопил непрочтённые уходы значков.
     ResourceExhausted = 16,
     /// Капа отозвана: предок по цепочке деривации закрыт (или умерла его
     /// таблица). Слот может ещё существовать, но полномочие невалидно.
     Revoked = 17,
+    /// Отправители значка исчезли: кадра нет, значок ушедшей стороны лежит в
+    /// `IpcBuffer.badge` получателя.
+    SenderGone = 18,
 }
 
 impl SyscallError {
     #[cfg(test)]
-    const ALL: [SyscallError; 17] = [
+    const ALL: [SyscallError; 18] = [
         SyscallError::BadSyscall,
         SyscallError::KernelOriginated,
         SyscallError::InvalidArgument,
@@ -66,6 +69,7 @@ impl SyscallError {
         SyscallError::Canceled,
         SyscallError::ResourceExhausted,
         SyscallError::Revoked,
+        SyscallError::SenderGone,
     ];
 
     pub const fn as_return_value(self) -> i64 {
@@ -97,6 +101,7 @@ impl SyscallError {
             15 => Some(Self::Canceled),
             16 => Some(Self::ResourceExhausted),
             17 => Some(Self::Revoked),
+            18 => Some(Self::SenderGone),
             _ => None,
         }
     }
@@ -168,7 +173,7 @@ mod tests {
             assert_eq!(SyscallError::from_return(e.as_return_value()), Some(e));
         }
         assert_eq!(SyscallError::from_code(0), None);
-        assert_eq!(SyscallError::from_code(18), None);
+        assert_eq!(SyscallError::from_code(19), None);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use syscall::Rights;
 use super::{
     errors::IpcError,
     handle::{Capability, HandleId},
-    port::Port,
+    port::PortAccess,
     process::ProcessObject,
     reply::Reply,
     resource::Resource,
@@ -19,6 +19,11 @@ use super::{
 };
 
 /// Per-process слот-таблица handle'ов.
+///
+/// Порядок блокировок: table-лок берётся под scheduler-локом, обратное ребро запрещено. Отзыв,
+/// пробуждение cancel-целей, разрушение capability и снятие учёта берут scheduler-лок и потому под
+/// table-локом не выполняются - их выносят [`DrainedHandles`], [`RejectedInsert`] и
+/// [`PortAccess`](super::PortAccess).
 pub struct HandleTable {
     slots: Vec<Slot>,
     free_head: Option<u32>,
@@ -58,6 +63,94 @@ enum SlotState {
     Occupied(Capability),
     /// Generation исчерпана; слот выведен из оборота навсегда.
     Retired,
+}
+
+/// Изъятое из [`HandleTable`] содержимое: capability и cancel-цели их слотов. Освобождение через
+/// [`DrainedHandles::release`] под table-локом не выполняется.
+#[must_use = "DrainedHandles держит изъятые capability и cancel-цели"]
+pub struct DrainedHandles {
+    handles: Vec<Capability>,
+    waiters: Vec<Arc<dyn CancelTarget>>,
+}
+
+impl DrainedHandles {
+    pub fn empty() -> Self {
+        Self {
+            handles: Vec::new(),
+            waiters: Vec::new(),
+        }
+    }
+
+    /// Освобождает изъятое: ожидания слотов отменяются с
+    /// [`IpcError::Canceled`](IpcError::Canceled), оставшиеся capability разрушаются вместе с
+    /// поддеревьями.
+    pub fn release(self) {
+        for waiter in self.waiters {
+            waiter.cancel();
+        }
+        for handle in &self.handles {
+            revoke_subtree(handle.node());
+        }
+        drop(self.handles);
+    }
+
+    /// Отдаёт capability новому владельцу: поддеревья не отзываются. Cancel-цели остаются за
+    /// [`Self::release`].
+    pub fn take_handles(&mut self) -> Vec<Capability> {
+        core::mem::take(&mut self.handles)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty() && self.waiters.is_empty()
+    }
+
+    fn push_handle(&mut self, handle: Capability) {
+        self.handles.push(handle);
+    }
+
+    fn push_waiters(&mut self, waiters: Vec<Arc<dyn CancelTarget>>) {
+        self.waiters.extend(waiters);
+    }
+}
+
+/// Отвергнутая вставка: причина отказа и невставленный объект. Разрушение через
+/// [`RejectedInsert::release`] под table-локом не выполняется.
+#[must_use = "RejectedInsert держит невставленный объект"]
+pub struct RejectedInsert {
+    error: IpcError,
+    handle: Option<Capability>,
+}
+
+impl RejectedInsert {
+    fn without_handle(error: IpcError) -> Self {
+        Self {
+            error,
+            handle: None,
+        }
+    }
+
+    /// Причина отказа; объект остаётся в токене.
+    pub fn error(&self) -> IpcError {
+        self.error
+    }
+
+    /// Разрушает невставленный объект и отдаёт причину отказа.
+    pub fn release(self) -> IpcError {
+        self.error
+    }
+
+    /// Забирает невставленный объект. `None`, если отказ наступил до его создания.
+    pub fn into_handle(self) -> Option<Capability> {
+        self.handle
+    }
+}
+
+impl core::fmt::Debug for RejectedInsert {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RejectedInsert")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Линейный токен на зарезервированный слот: потребляется по значению ровно одним
@@ -103,19 +196,14 @@ impl HandleTable {
             .count()
     }
 
-    /// Регистрирует handle, возвращая стабильный идентификатор.
-    /// На `OutOfHandles` объект закрывается.
-    /// Если caller'у важно сохранить объект на ошибке, используется
-    /// [`Self::try_insert`].
-    pub fn insert(&mut self, handle: Capability) -> Result<HandleId, IpcError> {
-        self.try_insert(handle).map_err(|(e, _)| e)
-    }
-
-    /// То же, что [`Self::insert`], но при `OutOfHandles` возвращает
-    /// `Capability` обратно вместо его закрытия.
-    pub fn try_insert(&mut self, handle: Capability) -> Result<HandleId, (IpcError, Capability)> {
+    /// Регистрирует handle, возвращая стабильный идентификатор. На `OutOfHandles` объект остаётся
+    /// в [`RejectedInsert`].
+    pub fn insert(&mut self, handle: Capability) -> Result<HandleId, RejectedInsert> {
         let Some((index, slot)) = self.claim_slot() else {
-            return Err((IpcError::OutOfHandles, handle));
+            return Err(RejectedInsert {
+                error: IpcError::OutOfHandles,
+                handle: Some(handle),
+            });
         };
         let generation = slot.issue_generation();
         slot.state = SlotState::Occupied(handle);
@@ -153,21 +241,22 @@ impl HandleTable {
         Some((index, slot))
     }
 
-    /// Вставляет `handle` в зарезервированный слот.
+    /// Вставляет `handle` в зарезервированный слот. Чужой живой слот не затирается: при
+    /// несовпадении резервации `handle` уходит в `rejected`.
     // Токен по значению: его потребление и есть закрытие резервации.
     #[allow(clippy::needless_pass_by_value)]
     pub fn commit_reserved(
         &mut self,
         reservation: HandleReservation,
         handle: Capability,
+        rejected: &mut DrainedHandles,
     ) -> HandleId {
         let id = reservation.handle_id();
         if let Some(slot) = self.reserved_slot_mut(&reservation) {
             slot.state = SlotState::Occupied(handle);
         } else {
-            // Затирать чужой живой слот нельзя. Капа отзывается вместе с производными.
             debug_assert!(false, "commit_reserved: slot is not the reserved one");
-            revoke_subtree(handle.node());
+            rejected.push_handle(handle);
         }
         id
     }
@@ -196,15 +285,14 @@ impl HandleTable {
         matches_reservation.then_some(slot)
     }
 
-    /// Удаляет handle из таблицы. Будит каждый cancel-target с исходом
-    /// [`IpcError::Canceled`](IpcError::Canceled).
-    pub fn remove(&mut self, id: HandleId) -> Result<Capability, IpcError> {
-        let handle = self.take_slot(id)?;
-        revoke_subtree(handle.node());
-        Ok(handle)
+    /// Удаляет handle из таблицы, отдавая его содержимое в [`DrainedHandles`].
+    pub fn remove(&mut self, id: HandleId) -> Result<DrainedHandles, IpcError> {
+        let mut drained = DrainedHandles::empty();
+        self.take_slot(id, &mut drained)?;
+        Ok(drained)
     }
 
-    fn take_slot(&mut self, id: HandleId) -> Result<Capability, IpcError> {
+    fn take_slot(&mut self, id: HandleId, drained: &mut DrainedHandles) -> Result<(), IpcError> {
         let idx = id.slot();
         let slot = self
             .slots
@@ -228,15 +316,47 @@ impl HandleTable {
         let waiters = core::mem::take(&mut slot.waiters);
         self.free_head = Some(idx);
 
-        for w in waiters {
-            w.cancel();
-        }
-
+        drained.push_waiters(waiters);
         match taken {
-            SlotState::Occupied(handle) => Ok(handle),
+            SlotState::Occupied(handle) => {
+                drained.push_handle(handle);
+                Ok(())
+            }
             // Невозможно по проверке выше, но обходимся без unreachable!.
             _ => Err(IpcError::BadHandle),
         }
+    }
+
+    /// Изымает все занятые слоты и cancel-цели таблицы в [`DrainedHandles`].
+    pub fn drain(&mut self) -> DrainedHandles {
+        let mut drained = DrainedHandles::empty();
+        self.drain_into(&mut drained);
+        drained
+    }
+
+    fn drain_into(&mut self, drained: &mut DrainedHandles) {
+        let mut free_head = self.free_head;
+
+        for (idx, slot) in self.slots.iter_mut().enumerate() {
+            drained.push_waiters(core::mem::take(&mut slot.waiters));
+            if !matches!(slot.state, SlotState::Occupied(_)) {
+                continue;
+            }
+
+            let taken = core::mem::replace(
+                &mut slot.state,
+                SlotState::Free {
+                    next_free: free_head,
+                },
+            );
+            free_head = Some(idx as u32);
+
+            if let SlotState::Occupied(handle) = taken {
+                drained.push_handle(handle);
+            }
+        }
+
+        self.free_head = free_head;
     }
 
     /// Регистрирует cancel-target на слот `id`. При закрытии/передаче
@@ -296,37 +416,19 @@ impl HandleTable {
         Ok(handle)
     }
 
-    /// Извлекает `Arc<Port>` с проверкой прав и типа.
-    pub fn get_port(&self, id: HandleId, need: Rights) -> Result<Arc<Port>, IpcError> {
+    /// Извлекает снимок port-capability для одной операции, с проверкой прав и типа: учёт стороны
+    /// удерживается с этого момента и до снятия [`OperationHold`](super::OperationHold).
+    pub fn get_port(&self, id: HandleId, need: Rights) -> Result<PortAccess, IpcError> {
         let h = self.lookup(id)?;
         if !h.rights().contains(need) {
             return Err(IpcError::AccessDenied);
         }
         match &h.target {
-            CapabilityTarget::Port(e) => Ok(e.clone()),
-            CapabilityTarget::Signal(_)
-            | CapabilityTarget::Process(_)
-            | CapabilityTarget::Thread(_)
-            | CapabilityTarget::Memory(_)
-            | CapabilityTarget::Resource(_)
-            | CapabilityTarget::Reply(_)
-            | CapabilityTarget::IrqControl(_)
-            | CapabilityTarget::IrqLine(_) => Err(IpcError::WrongType),
-        }
-    }
-
-    /// Извлекает `Arc<Port>` вместе с badge хендла, с проверкой прав и типа.
-    pub fn get_port_with_badge(
-        &self,
-        id: HandleId,
-        need: Rights,
-    ) -> Result<(Arc<Port>, u64), IpcError> {
-        let h = self.lookup(id)?;
-        if !h.rights().contains(need) {
-            return Err(IpcError::AccessDenied);
-        }
-        match &h.target {
-            CapabilityTarget::Port(e) => Ok((e.clone(), h.badge())),
+            CapabilityTarget::Port(e) => Ok(PortAccess {
+                port: e.clone(),
+                badge: h.badge(),
+                hold: h.hold_for_operation(),
+            }),
             CapabilityTarget::Signal(_)
             | CapabilityTarget::Process(_)
             | CapabilityTarget::Thread(_)
@@ -471,13 +573,14 @@ impl HandleTable {
         Ok(handle.target().clone())
     }
 
-    /// Атомарно проверяет, что все `ids` существуют, имеют `min_rights`
-    /// и нет дубликатов; затем удаляет их и возвращает `Vec<Capability>`.
+    /// Атомарно проверяет, что все `ids` существуют, имеют `min_rights` и нет дубликатов, затем
+    /// изымает их в `drained`. Капы для переноса отдаёт [`DrainedHandles::take_handles`].
     pub fn try_drain_for_transfer(
         &mut self,
         ids: &[HandleId],
         min_rights: Rights,
-    ) -> Result<Vec<Capability>, IpcError> {
+        drained: &mut DrainedHandles,
+    ) -> Result<(), IpcError> {
         for (i, id) in ids.iter().enumerate() {
             if ids[..i].iter().any(|prev| prev == id) {
                 return Err(IpcError::BadHandle);
@@ -486,17 +589,14 @@ impl HandleTable {
         for id in ids {
             self.get(*id, min_rights)?;
         }
-        // Валидация выше гарантирует, что take_slot не упадёт. На недоборе снятые
-        // капы отзываются вместе с производными.
-        let mut drained = Vec::with_capacity(ids.len());
-        drained.extend(ids.iter().map_while(|id| self.take_slot(*id).ok()));
-        if drained.len() != ids.len() {
-            for handle in &drained {
-                revoke_subtree(handle.node());
+        // Валидация выше гарантирует, что take_slot не упадёт. На недоборе снятое остаётся в
+        // `drained`.
+        for id in ids {
+            if self.take_slot(*id, drained).is_err() {
+                return Err(IpcError::BadHandle);
             }
-            return Err(IpcError::BadHandle);
         }
-        Ok(drained)
+        Ok(())
     }
 
     /// Создаёт новый handle на тот же capability target с подмножеством прав и (опционально) badge.
@@ -506,10 +606,12 @@ impl HandleTable {
         id: HandleId,
         new_rights: Rights,
         new_badge: u64,
-    ) -> Result<HandleId, IpcError> {
+    ) -> Result<HandleId, RejectedInsert> {
         let dup = {
-            let handle = self.lookup(id)?;
-            handle.duplicate(new_rights, new_badge)?
+            let handle = self.lookup(id).map_err(RejectedInsert::without_handle)?;
+            handle
+                .duplicate(new_rights, new_badge)
+                .map_err(RejectedInsert::without_handle)?
         };
         self.insert(dup)
     }
@@ -565,14 +667,9 @@ impl Default for HandleTable {
 impl Drop for HandleTable {
     /// Смерть таблицы (process exit) отзывает все её гранты.
     fn drop(&mut self) {
-        for slot in &mut self.slots {
-            for w in core::mem::take(&mut slot.waiters) {
-                w.cancel();
-            }
-            if let SlotState::Occupied(handle) = &slot.state {
-                revoke_subtree(handle.node());
-            }
-        }
+        let mut drained = DrainedHandles::empty();
+        self.drain_into(&mut drained);
+        drained.release();
     }
 }
 
@@ -580,13 +677,37 @@ impl Drop for HandleTable {
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
+    use collections::{LockCell, MutexCell};
+
     use super::{
         super::{
-            port::Port, process::ProcessObject, signal::Signal, target::CapabilityTarget,
-            thread::ThreadObject, wait::CancelTarget,
+            port::Port, process::ProcessObject, rev_node::RevocationHook, signal::Signal,
+            target::CapabilityTarget, thread::ThreadObject, wait::CancelTarget,
         },
         *,
     };
+
+    struct CountingHook(AtomicUsize);
+
+    impl CountingHook {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(AtomicUsize::new(0)))
+        }
+
+        fn count(&self) -> usize {
+            self.0.load(Ordering::Acquire)
+        }
+
+        fn weak(self: &Arc<Self>) -> alloc::sync::Weak<dyn RevocationHook> {
+            Arc::downgrade(self) as alloc::sync::Weak<dyn RevocationHook>
+        }
+    }
+
+    impl RevocationHook for CountingHook {
+        fn revoke(&self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 
     struct CountingCancel(AtomicUsize);
 
@@ -606,8 +727,84 @@ mod tests {
         }
     }
 
+    // Захват table-лока из другого потока означает, что cancel сработал вне этого лока.
+    struct LockProbeCancel {
+        table: Arc<MutexCell<HandleTable>>,
+        calls: AtomicUsize,
+        acquisitions: AtomicUsize,
+    }
+
+    impl LockProbeCancel {
+        fn new(table: &Arc<MutexCell<HandleTable>>) -> Arc<Self> {
+            Arc::new(Self {
+                table: table.clone(),
+                calls: AtomicUsize::new(0),
+                acquisitions: AtomicUsize::new(0),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Acquire)
+        }
+
+        fn acquisitions(&self) -> usize {
+            self.acquisitions.load(Ordering::Acquire)
+        }
+    }
+
+    impl CancelTarget for LockProbeCancel {
+        fn cancel(&self) {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let table = self.table.clone();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(table.with_lock(|tbl| tbl.live_count()));
+            });
+            if receiver
+                .recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok()
+            {
+                self.acquisitions.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+
     fn make_handle(obj: CapabilityTarget, rights: Rights) -> Capability {
         Capability::new(obj, rights)
+    }
+
+    fn close(table: &mut HandleTable, id: HandleId) -> Result<(), IpcError> {
+        table.remove(id).map(DrainedHandles::release)
+    }
+
+    fn drain_for_transfer(
+        table: &mut HandleTable,
+        ids: &[HandleId],
+        min_rights: Rights,
+    ) -> Result<Vec<Capability>, IpcError> {
+        let mut drained = DrainedHandles::empty();
+        match table.try_drain_for_transfer(ids, min_rights, &mut drained) {
+            Ok(()) => {
+                let handles = drained.take_handles();
+                drained.release();
+                Ok(handles)
+            }
+            Err(e) => {
+                drained.release();
+                Err(e)
+            }
+        }
+    }
+
+    fn commit(
+        table: &mut HandleTable,
+        reservation: HandleReservation,
+        handle: Capability,
+    ) -> HandleId {
+        let mut rejected = DrainedHandles::empty();
+        let id = table.commit_reserved(reservation, handle, &mut rejected);
+        assert!(rejected.is_empty(), "commit must not reject its own slot");
+        id
     }
 
     fn signal_handle(rights: Rights) -> Capability {
@@ -846,7 +1043,7 @@ mod tests {
         let mut table = HandleTable::new();
         let id = table.insert(port_handle(Rights::READ)).unwrap();
 
-        let _ = table.remove(id).unwrap();
+        close(&mut table, id).unwrap();
         assert_eq!(
             table.get(id, Rights::READ).unwrap_err(),
             IpcError::BadHandle
@@ -858,8 +1055,8 @@ mod tests {
         let mut table = HandleTable::new();
         let id = table.insert(signal_handle(Rights::READ)).unwrap();
 
-        table.remove(id).unwrap();
-        assert_eq!(table.remove(id).unwrap_err(), IpcError::BadHandle);
+        close(&mut table, id).unwrap();
+        assert_eq!(close(&mut table, id).unwrap_err(), IpcError::BadHandle);
     }
 
     #[test]
@@ -898,7 +1095,8 @@ mod tests {
         assert_eq!(
             table
                 .duplicate(id, Rights::READ | Rights::WRITE, 0)
-                .unwrap_err(),
+                .unwrap_err()
+                .error(),
             IpcError::AccessDenied
         );
     }
@@ -909,7 +1107,7 @@ mod tests {
         let id = table.insert(port_handle(Rights::READ)).unwrap();
 
         assert_eq!(
-            table.duplicate(id, Rights::READ, 0).unwrap_err(),
+            table.duplicate(id, Rights::READ, 0).unwrap_err().error(),
             IpcError::AccessDenied
         );
     }
@@ -944,7 +1142,10 @@ mod tests {
         let badged = table.duplicate(id, rights, 0x11).unwrap();
 
         assert_eq!(
-            table.duplicate(badged, Rights::READ, 0x22).unwrap_err(),
+            table
+                .duplicate(badged, Rights::READ, 0x22)
+                .unwrap_err()
+                .error(),
             IpcError::BadHandle
         );
     }
@@ -953,7 +1154,7 @@ mod tests {
     fn slot_reuse_invalidates_old_id() {
         let mut table = HandleTable::with_capacity(2);
         let id1 = table.insert(signal_handle(Rights::READ)).unwrap();
-        table.remove(id1).unwrap();
+        close(&mut table, id1).unwrap();
 
         let id2 = table.insert(signal_handle(Rights::READ)).unwrap();
         assert_eq!(id1.slot(), id2.slot());
@@ -972,11 +1173,11 @@ mod tests {
         let _ = table.insert(signal_handle(Rights::READ)).unwrap();
 
         let err = table.insert(signal_handle(Rights::READ)).unwrap_err();
-        assert_eq!(err, IpcError::OutOfHandles);
+        assert_eq!(err.error(), IpcError::OutOfHandles);
     }
 
     #[test]
-    fn try_insert_returns_handle_on_out_of_handles() {
+    fn rejected_insert_returns_the_object_instead_of_closing_it() {
         use alloc::sync::Arc;
 
         let mut table = HandleTable::with_capacity(1);
@@ -985,20 +1186,15 @@ mod tests {
         let signal = Signal::new();
         let weak = Arc::downgrade(&signal);
         let handle = Capability::new(CapabilityTarget::Signal(signal), Rights::READ);
-        let (err, returned) = table.try_insert(handle).unwrap_err();
-        assert_eq!(err, IpcError::OutOfHandles);
+        let rejected = table.insert(handle).unwrap_err();
+        assert_eq!(rejected.error(), IpcError::OutOfHandles);
         assert!(weak.upgrade().is_some());
 
         let mut other = HandleTable::with_capacity(1);
-        other.insert(returned).unwrap();
+        other
+            .insert(rejected.into_handle().expect("rejected object is returned"))
+            .unwrap();
         assert_eq!(other.live_count(), 1);
-    }
-
-    #[test]
-    fn try_insert_success_matches_insert() {
-        let mut table = HandleTable::with_capacity(2);
-        let id = table.try_insert(signal_handle(Rights::READ)).unwrap();
-        assert!(table.get(id, Rights::READ).is_ok());
     }
 
     #[test]
@@ -1010,14 +1206,17 @@ mod tests {
         assert_eq!(u32::from(id.generation()), 1);
 
         for expected_gen in 2..=max_gen {
-            table.remove(id).unwrap();
+            close(&mut table, id).unwrap();
             id = table.insert(signal_handle(Rights::READ)).unwrap();
             assert_eq!(u32::from(id.generation()), expected_gen);
         }
 
-        table.remove(id).unwrap();
+        close(&mut table, id).unwrap();
         assert_eq!(
-            table.insert(signal_handle(Rights::READ)).unwrap_err(),
+            table
+                .insert(signal_handle(Rights::READ))
+                .unwrap_err()
+                .error(),
             IpcError::OutOfHandles
         );
     }
@@ -1033,9 +1232,7 @@ mod tests {
             .unwrap();
         assert_eq!(table.live_count(), 2);
 
-        let drained = table
-            .try_drain_for_transfer(&[id1, id2], Rights::TRANSFER)
-            .unwrap();
+        let drained = drain_for_transfer(&mut table, &[id1, id2], Rights::TRANSFER).unwrap();
         assert_eq!(drained.len(), 2);
         assert_eq!(table.live_count(), 0);
     }
@@ -1043,7 +1240,7 @@ mod tests {
     #[test]
     fn try_drain_for_transfer_empty_ok() {
         let mut table = HandleTable::new();
-        let drained = table.try_drain_for_transfer(&[], Rights::TRANSFER).unwrap();
+        let drained = drain_for_transfer(&mut table, &[], Rights::TRANSFER).unwrap();
         assert!(drained.is_empty());
         assert_eq!(table.live_count(), 0);
     }
@@ -1056,9 +1253,7 @@ mod tests {
             .unwrap();
         let bogus = HandleId::pack(NonZeroU16::MIN, 999);
 
-        let err = table
-            .try_drain_for_transfer(&[id, bogus], Rights::TRANSFER)
-            .unwrap_err();
+        let err = drain_for_transfer(&mut table, &[id, bogus], Rights::TRANSFER).unwrap_err();
         assert_eq!(err, IpcError::BadHandle);
         // Никаких изменений в таблице.
         assert_eq!(table.live_count(), 1);
@@ -1069,9 +1264,7 @@ mod tests {
     fn try_drain_for_transfer_insufficient_rights_no_removal() {
         let mut table = HandleTable::new();
         let id = table.insert(signal_handle(Rights::READ)).unwrap();
-        let err = table
-            .try_drain_for_transfer(&[id], Rights::TRANSFER)
-            .unwrap_err();
+        let err = drain_for_transfer(&mut table, &[id], Rights::TRANSFER).unwrap_err();
         assert_eq!(err, IpcError::AccessDenied);
         assert_eq!(table.live_count(), 1);
         assert!(table.get(id, Rights::READ).is_ok());
@@ -1083,9 +1276,7 @@ mod tests {
         let id = table
             .insert(signal_handle(Rights::READ | Rights::TRANSFER))
             .unwrap();
-        let err = table
-            .try_drain_for_transfer(&[id, id], Rights::TRANSFER)
-            .unwrap_err();
+        let err = drain_for_transfer(&mut table, &[id, id], Rights::TRANSFER).unwrap_err();
         assert_eq!(err, IpcError::BadHandle);
         assert_eq!(table.live_count(), 1);
         assert!(table.get(id, Rights::TRANSFER).is_ok());
@@ -1102,9 +1293,7 @@ mod tests {
             .unwrap();
         let bogus = HandleId::pack(NonZeroU16::MIN, 999);
 
-        let err = table
-            .try_drain_for_transfer(&[id1, id2, bogus], Rights::TRANSFER)
-            .unwrap_err();
+        let err = drain_for_transfer(&mut table, &[id1, id2, bogus], Rights::TRANSFER).unwrap_err();
         assert_eq!(err, IpcError::BadHandle);
         assert_eq!(table.live_count(), 2);
     }
@@ -1116,7 +1305,7 @@ mod tests {
 
         let id_a = a.insert(port_handle(Rights::READ)).unwrap();
         let throwaway = b.insert(port_handle(Rights::WRITE)).unwrap();
-        b.remove(throwaway).unwrap();
+        close(&mut b, throwaway).unwrap();
         let id_b = b.insert(port_handle(Rights::WRITE)).unwrap();
 
         assert!(a.get(id_a, Rights::READ).is_ok());
@@ -1135,7 +1324,10 @@ mod tests {
         table.register_cancel(id, dyn_target).unwrap();
         assert_eq!(target.count(), 0);
 
-        let _h = table.remove(id).unwrap();
+        let drained = table.remove(id).unwrap();
+        assert_eq!(target.count(), 0);
+
+        drained.release();
         assert_eq!(target.count(), 1);
     }
 
@@ -1152,7 +1344,7 @@ mod tests {
             .register_cancel(id, b.clone() as Arc<dyn CancelTarget>)
             .unwrap();
 
-        let _h = table.remove(id).unwrap();
+        close(&mut table, id).unwrap();
         assert_eq!(a.count(), 1);
         assert_eq!(b.count(), 1);
     }
@@ -1172,7 +1364,7 @@ mod tests {
     fn register_cancel_after_close_returns_err() {
         let mut table = HandleTable::new();
         let id = table.insert(signal_handle(Rights::READ)).unwrap();
-        table.remove(id).unwrap();
+        close(&mut table, id).unwrap();
         let target: Arc<dyn CancelTarget> = CountingCancel::new();
         assert_eq!(
             table.register_cancel(id, target).unwrap_err(),
@@ -1189,7 +1381,7 @@ mod tests {
         table.register_cancel(id, dyn_target.clone()).unwrap();
         table.unregister_cancel(id, &dyn_target);
 
-        let _h = table.remove(id).unwrap();
+        close(&mut table, id).unwrap();
         assert_eq!(target.count(), 0);
     }
 
@@ -1224,12 +1416,91 @@ mod tests {
             .register_cancel(id2, b.clone() as Arc<dyn CancelTarget>)
             .unwrap();
 
-        let drained = table
-            .try_drain_for_transfer(&[id1, id2], Rights::TRANSFER)
-            .unwrap();
+        let drained = drain_for_transfer(&mut table, &[id1, id2], Rights::TRANSFER).unwrap();
         assert_eq!(drained.len(), 2);
         assert_eq!(a.count(), 1);
         assert_eq!(b.count(), 1);
+    }
+
+    #[test]
+    fn drain_empties_table_and_releases_capability_targets() {
+        let mut table = HandleTable::new();
+        let signal = Signal::new();
+        let weak = Arc::downgrade(&signal);
+        table
+            .insert(make_handle(CapabilityTarget::Signal(signal), Rights::READ))
+            .unwrap();
+        table.insert(port_handle(Rights::READ)).unwrap();
+
+        let drained = table.drain();
+        assert_eq!(table.live_count(), 0);
+        assert!(
+            weak.upgrade().is_some(),
+            "drained capabilities stay alive until release"
+        );
+
+        drained.release();
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn drain_fires_cancel_targets_only_on_release() {
+        let mut table = HandleTable::new();
+        let id = table.insert(signal_handle(Rights::READ)).unwrap();
+        let target = CountingCancel::new();
+        table
+            .register_cancel(id, target.clone() as Arc<dyn CancelTarget>)
+            .unwrap();
+
+        let drained = table.drain();
+        assert_eq!(target.count(), 0);
+
+        drained.release();
+        assert_eq!(target.count(), 1);
+    }
+
+    #[test]
+    fn drain_revokes_derived_capability_in_other_table() {
+        let mut grantor = HandleTable::new();
+        let mut recipient = HandleTable::new();
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
+
+        grantor.drain().release();
+
+        assert_eq!(
+            recipient.get(recv_id, Rights::READ).unwrap_err(),
+            IpcError::Revoked
+        );
+    }
+
+    #[test]
+    fn drop_after_drain_has_nothing_left() {
+        let mut table = HandleTable::new();
+        let id = table.insert(signal_handle(Rights::READ)).unwrap();
+        let target = CountingCancel::new();
+        table
+            .register_cancel(id, target.clone() as Arc<dyn CancelTarget>)
+            .unwrap();
+
+        table.drain().release();
+        drop(table);
+
+        assert_eq!(target.count(), 1);
+    }
+
+    #[test]
+    fn insert_after_drain_reuses_freed_slot() {
+        let mut table = HandleTable::with_capacity(1);
+        let id = table.insert(signal_handle(Rights::READ)).unwrap();
+        table.drain().release();
+
+        let reused = table
+            .insert(signal_handle(Rights::READ))
+            .expect("drained slot must return to the free list");
+        assert_eq!(id.slot(), reused.slot());
+        assert_ne!(id.generation(), reused.generation());
     }
 
     #[test]
@@ -1240,12 +1511,12 @@ mod tests {
         table
             .register_cancel(id1, target.clone() as Arc<dyn CancelTarget>)
             .unwrap();
-        table.remove(id1).unwrap();
+        close(&mut table, id1).unwrap();
         assert_eq!(target.count(), 1);
 
         let id2 = table.insert(signal_handle(Rights::READ)).unwrap();
         assert_eq!(id1.slot(), id2.slot());
-        table.remove(id2).unwrap();
+        close(&mut table, id2).unwrap();
         assert_eq!(target.count(), 1);
     }
 
@@ -1261,7 +1532,7 @@ mod tests {
         let mut table = HandleTable::with_capacity(1);
         let reservation = table.reserve_slot().expect("reserve must succeed");
         let predicted = reservation.handle_id();
-        let id = table.commit_reserved(reservation, signal_handle(Rights::READ));
+        let id = commit(&mut table, reservation, signal_handle(Rights::READ));
         assert_eq!(id, predicted);
         assert!(table.get(id, Rights::READ).is_ok());
         assert_eq!(table.live_count(), 1);
@@ -1303,14 +1574,12 @@ mod tests {
             .expect("insert 2");
         assert_eq!(table.reserve_slot().unwrap_err(), IpcError::OutOfHandles);
 
-        let _drained = table
-            .try_drain_for_transfer(&[id1], Rights::TRANSFER)
-            .expect("drain");
+        let _drained = drain_for_transfer(&mut table, &[id1], Rights::TRANSFER).expect("drain");
 
         let reservation = table
             .reserve_slot()
             .expect("post-drain reserve_slot must succeed");
-        table.commit_reserved(reservation, signal_handle(Rights::READ));
+        commit(&mut table, reservation, signal_handle(Rights::READ));
     }
 
     #[test]
@@ -1318,7 +1587,7 @@ mod tests {
         let mut table = HandleTable::with_capacity(1);
         let seed_id = table.insert(signal_handle(Rights::READ)).expect("insert");
         let seed_gen = seed_id.generation();
-        table.remove(seed_id).expect("remove");
+        close(&mut table, seed_id).expect("remove");
 
         // Многократный неуспешный reserve+release не должен жечь generation:
         // ни один HandleId не публиковался, поэтому слот не нужно ретайрить.
@@ -1340,13 +1609,11 @@ mod tests {
             .iter()
             .map(|_| dst.reserve_slot().expect("reserve"))
             .collect();
-        let drained = src
-            .try_drain_for_transfer(ids, Rights::TRANSFER)
-            .expect("drain");
+        let drained = drain_for_transfer(src, ids, Rights::TRANSFER).expect("drain");
         reservations
             .into_iter()
             .zip(drained)
-            .map(|(res, h)| dst.commit_reserved(res, h))
+            .map(|(res, h)| commit(dst, res, h))
             .collect()
     }
 
@@ -1365,7 +1632,7 @@ mod tests {
 
         assert!(recipient.get(recv_id, Rights::READ).is_ok());
 
-        grantor.remove(root).unwrap();
+        close(&mut grantor, root).unwrap();
         assert_eq!(
             recipient.get(recv_id, Rights::READ).unwrap_err(),
             IpcError::Revoked
@@ -1398,7 +1665,7 @@ mod tests {
         let p_id = transfer(&mut grantor, &mut client_p, &[give_p])[0];
         let q_id = transfer(&mut grantor, &mut client_q, &[give_q])[0];
 
-        grantor.remove(node_q).unwrap();
+        close(&mut grantor, node_q).unwrap();
 
         assert_eq!(
             client_q.get(q_id, Rights::READ).unwrap_err(),
@@ -1419,7 +1686,7 @@ mod tests {
         let p_id = transfer(&mut grantor, &mut client_p, &[give_p])[0];
         let q_id = transfer(&mut grantor, &mut client_q, &[give_q])[0];
 
-        grantor.remove(root).unwrap();
+        close(&mut grantor, root).unwrap();
 
         assert_eq!(
             client_p.get(p_id, Rights::READ).unwrap_err(),
@@ -1439,10 +1706,13 @@ mod tests {
         let root = grantor.insert(signal_handle(dup_rights())).unwrap();
         let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
         let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
-        grantor.remove(root).unwrap();
+        close(&mut grantor, root).unwrap();
 
         assert_eq!(
-            recipient.duplicate(recv_id, Rights::READ, 0).unwrap_err(),
+            recipient
+                .duplicate(recv_id, Rights::READ, 0)
+                .unwrap_err()
+                .error(),
             IpcError::Revoked
         );
     }
@@ -1455,9 +1725,9 @@ mod tests {
         let root = grantor.insert(signal_handle(dup_rights())).unwrap();
         let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
         let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
-        grantor.remove(root).unwrap();
+        close(&mut grantor, root).unwrap();
 
-        assert!(recipient.remove(recv_id).is_ok());
+        assert!(close(&mut recipient, recv_id).is_ok());
         assert_eq!(recipient.live_count(), 0);
     }
 
@@ -1468,7 +1738,7 @@ mod tests {
         let child_a = table.duplicate(root, dup_rights(), 0).unwrap();
         let child_b = table.duplicate(root, dup_rights(), 0).unwrap();
 
-        table.remove(child_a).unwrap();
+        close(&mut table, child_a).unwrap();
 
         assert!(table.get(root, Rights::READ).is_ok());
         assert!(table.get(child_b, Rights::READ).is_ok());
@@ -1476,55 +1746,116 @@ mod tests {
 
     #[test]
     fn registered_hook_fires_on_close() {
-        use alloc::sync::Weak;
-
-        use super::super::rev_node::RevocationHook;
-
-        struct CountingHook(AtomicUsize);
-        impl RevocationHook for CountingHook {
-            fn revoke(&self) {
-                self.0.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-
         let mut table = HandleTable::new();
         let id = table.insert(signal_handle(dup_rights())).unwrap();
-        let hook = Arc::new(CountingHook(AtomicUsize::new(0)));
-        table
-            .register_revocation_hook(id, Arc::downgrade(&hook) as Weak<dyn RevocationHook>)
-            .unwrap();
-        assert_eq!(hook.0.load(Ordering::Acquire), 0);
+        let hook = CountingHook::new();
+        table.register_revocation_hook(id, hook.weak()).unwrap();
+        assert_eq!(hook.count(), 0);
 
-        table.remove(id).unwrap();
-        assert_eq!(hook.0.load(Ordering::Acquire), 1);
+        close(&mut table, id).unwrap();
+        assert_eq!(hook.count(), 1);
     }
 
     #[test]
     fn registered_hook_fires_for_descendant_on_ancestor_close() {
-        use alloc::sync::Weak;
-
-        use super::super::rev_node::RevocationHook;
-
-        struct CountingHook(AtomicUsize);
-        impl RevocationHook for CountingHook {
-            fn revoke(&self) {
-                self.0.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-
         let mut grantor = HandleTable::new();
         let mut recipient = HandleTable::new();
         let root = grantor.insert(signal_handle(dup_rights())).unwrap();
         let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
         let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
 
-        let hook = Arc::new(CountingHook(AtomicUsize::new(0)));
+        let hook = CountingHook::new();
         recipient
-            .register_revocation_hook(recv_id, Arc::downgrade(&hook) as Weak<dyn RevocationHook>)
+            .register_revocation_hook(recv_id, hook.weak())
             .unwrap();
 
-        grantor.remove(root).unwrap();
-        assert_eq!(hook.0.load(Ordering::Acquire), 1);
+        close(&mut grantor, root).unwrap();
+        assert_eq!(hook.count(), 1);
+    }
+
+    #[test]
+    fn remove_revokes_and_destroys_only_on_release() {
+        let mut grantor = HandleTable::new();
+        let mut recipient = HandleTable::new();
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
+        let hook = CountingHook::new();
+        recipient
+            .register_revocation_hook(recv_id, hook.weak())
+            .unwrap();
+
+        let drained = grantor.remove(root).unwrap();
+        assert_eq!(hook.count(), 0, "отзыв не идёт из-под table-лока");
+        assert!(
+            recipient.get(recv_id, Rights::READ).is_ok(),
+            "изъятая капа жива, пока её не разрушил release",
+        );
+
+        drained.release();
+        assert_eq!(hook.count(), 1);
+        assert_eq!(
+            recipient.get(recv_id, Rights::READ).unwrap_err(),
+            IpcError::Revoked
+        );
+    }
+
+    #[test]
+    fn drain_revokes_only_on_release() {
+        let mut grantor = HandleTable::new();
+        let mut recipient = HandleTable::new();
+        let root = grantor.insert(signal_handle(dup_rights())).unwrap();
+        let derived = grantor.duplicate(root, dup_rights(), 0).unwrap();
+        let recv_id = transfer(&mut grantor, &mut recipient, &[derived])[0];
+        let hook = CountingHook::new();
+        recipient
+            .register_revocation_hook(recv_id, hook.weak())
+            .unwrap();
+
+        let drained = grantor.drain();
+        assert_eq!(hook.count(), 0, "отзыв не идёт из-под table-лока");
+
+        drained.release();
+        assert_eq!(hook.count(), 1);
+    }
+
+    #[test]
+    fn remove_cancels_outside_the_table_lock() {
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        let id = table
+            .with_lock(|tbl| tbl.insert(signal_handle(Rights::READ)))
+            .unwrap();
+        let probe = LockProbeCancel::new(&table);
+        table
+            .with_lock(|tbl| tbl.register_cancel(id, probe.clone() as Arc<dyn CancelTarget>))
+            .unwrap();
+
+        table.with_lock(|tbl| tbl.remove(id)).unwrap().release();
+
+        assert_eq!(probe.calls(), 1);
+        assert_eq!(probe.acquisitions(), 1, "cancel обязан идти вне table-лока");
+    }
+
+    #[test]
+    fn try_drain_for_transfer_cancels_outside_the_table_lock() {
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+        let id = table
+            .with_lock(|tbl| tbl.insert(signal_handle(Rights::READ | Rights::TRANSFER)))
+            .unwrap();
+        let probe = LockProbeCancel::new(&table);
+        table
+            .with_lock(|tbl| tbl.register_cancel(id, probe.clone() as Arc<dyn CancelTarget>))
+            .unwrap();
+
+        let mut drained = DrainedHandles::empty();
+        table
+            .with_lock(|tbl| tbl.try_drain_for_transfer(&[id], Rights::TRANSFER, &mut drained))
+            .unwrap();
+        assert!(!drained.is_empty());
+        drained.release();
+
+        assert_eq!(probe.calls(), 1);
+        assert_eq!(probe.acquisitions(), 1, "cancel обязан идти вне table-лока");
     }
 
     #[test]

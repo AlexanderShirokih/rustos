@@ -19,8 +19,8 @@ use fixture_protocol::{
     OP_EXIT, OP_MAP_CHECK, OP_READ_SLOT, OP_WRITE_SLOT, READ_REPLY_LEN, REPLY_MAP_FAILED, REPLY_OK,
     REPLY_PATTERN_MISMATCH, REQUEST_LEN, decode_request,
 };
-use runtime::{MemoryRegion, OwnedHandle, Port, Reply, Timeout, UserMemFlags, thread_exit};
-use syscall::Handle;
+use runtime::{Error, MemoryRegion, OwnedHandle, Port, Reply, Timeout, UserMemFlags, thread_exit};
+use syscall::{Handle, SyscallError};
 
 mod fixture_protocol;
 mod ipc_raw;
@@ -31,7 +31,7 @@ static SLOT: AtomicU64 = AtomicU64::new(0);
 
 /// Кадр не разобран.
 const EXIT_BAD_REQUEST: u64 = 101;
-/// `recv` на bootstrap-порту завершился ошибкой либо принёс кадр без
+/// `recv` на bootstrap-порту отказал не уходом значка либо принёс кадр без
 /// reply-хэндла (встречный сделал `send` вместо `call`).
 const EXIT_RECV_FAILED: u64 = 102;
 /// `reply` не доставлен.
@@ -42,8 +42,11 @@ pub extern "C" fn _start(root: Handle) -> ! {
     let port = Port::from_handle(OwnedHandle::from_handle(root));
 
     loop {
-        let Ok(Some(reply)) = port.recv(Timeout::INFINITE) else {
-            thread_exit(EXIT_RECV_FAILED)
+        let reply = match port.recv(Timeout::INFINITE) {
+            Ok(Some(reply)) => reply,
+            // Значок сессии ушёл: родитель закрыл клиентскую капу либо умер.
+            Err(Error::Syscall(SyscallError::SenderGone)) => thread_exit(0),
+            _ => thread_exit(EXIT_RECV_FAILED),
         };
 
         let mut body = [0u8; REQUEST_LEN];

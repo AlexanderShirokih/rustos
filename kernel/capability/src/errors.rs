@@ -11,6 +11,8 @@ pub enum IpcError {
     ShouldWait,
     /// Парный port закрыт.
     PeerClosed,
+    /// Отправители значка исчезли: кадра нет, значок доставлен в `IpcBuffer.badge` получателя.
+    SenderGone,
     /// Истёк deadline.
     Timeout,
     /// Wait отменён: handle, на котором зарегистрировано ожидание, был
@@ -50,4 +52,6 @@ pub enum SpawnError {
     /// Не удалось создать адресное пространство процесса.
     AddressSpaceCreationFailed,
     ImageNotLoaded,
+    /// Процесс уже завершён.
+    ProcessTerminated,
 }

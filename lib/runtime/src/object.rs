@@ -15,7 +15,7 @@ mod thread;
 
 pub use irq::{IrqControl, IrqLine};
 pub use memory::{AnonymousMapping, Mapping, MemoryRegion, RegionInfo, RegionKind, Resource};
-pub use port::{Port, Reply};
+pub use port::{Port, Reply, ServicePort};
 pub use process::Process;
 pub use signal::Signal;
 pub use spawn::{JoinHandle, spawn};

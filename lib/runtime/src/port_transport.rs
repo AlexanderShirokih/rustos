@@ -22,7 +22,7 @@ use ipc::{
 };
 use syscall::{
     Handle, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, PORT_TIMEOUT_INFINITE,
-    SYSCALL_RETURN_TIMEOUT, decode_tag, encode_tag,
+    SYSCALL_RETURN_TIMEOUT, SyscallError, decode_tag, encode_tag,
 };
 
 use crate::{
@@ -81,15 +81,13 @@ impl PortTransport {
 
     /// Серверный приём кадра в IPC-буфер с тайм-аутом `timeout_ns`. Сохраняет
     /// reply-handle (если встречный был `call`) для последующего
-    /// `write_message(RESPONSE)`. `Timeout` по истечении срока; `PeerClosed`
-    /// при закрытом port'е.
+    /// `write_message(RESPONSE)`. `Timeout` по истечении срока; `SenderGone` -
+    /// вместо кадра пришло событие об уходе значка; `PeerClosed` при закрытом
+    /// port'е.
     fn recv_into_buffer(&self, timeout_ns: u64) -> Result<(), IpcError> {
         let ret = port_recv(self.handle, timeout_ns);
-        if ret == SYSCALL_RETURN_TIMEOUT {
-            return Err(IpcError::Timeout);
-        }
         if ret < 0 {
-            return Err(IpcError::PeerClosed);
+            return Err(map_recv_error(ret));
         }
         #[allow(clippy::cast_sign_loss)]
         let reply = Handle::new(ret as u32);
@@ -140,6 +138,16 @@ impl PortTransport {
             (len, ncaps)
         };
         Ok(MessageLen::new(len, ncaps))
+    }
+}
+
+/// Сводит отрицательный код возврата `port_recv` к ошибке wire-транспорта:
+/// тайм-аут и уход значка отделены от закрытия порта.
+fn map_recv_error(ret: i64) -> IpcError {
+    match SyscallError::from_return(ret) {
+        Some(SyscallError::Timeout) => IpcError::Timeout,
+        Some(SyscallError::SenderGone) => IpcError::SenderGone,
+        _ => IpcError::PeerClosed,
     }
 }
 

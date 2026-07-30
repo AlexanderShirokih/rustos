@@ -7,6 +7,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 use calculator_demo::{CalculatorApiService, Result, dispatch_calculator_api};
+use ipc::wire::IpcError;
 use runtime::{PortTransport, thread_exit};
 use syscall::Handle;
 
@@ -29,7 +30,12 @@ fn run(root: Handle) -> Result<()> {
     let mut calculator = Calculator;
 
     loop {
-        let _ = dispatch_calculator_api(&mut calculator, &calc_api_transport);
+        match dispatch_calculator_api(&mut calculator, &calc_api_transport) {
+            Ok(()) => {}
+            // Значок сессии ушёл: обслуживать больше некого.
+            Err(IpcError::SenderGone) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 

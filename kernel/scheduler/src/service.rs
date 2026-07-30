@@ -10,7 +10,9 @@ use memory::{UserVmContext, virtual_address::VirtualAddress};
 
 use super::{
     arch::{ArchContext, ArchCpu, TimerSource, with_preemption_disabled},
-    scheduler::{ScheduleAction, SchedulerInner, perform_schedule_action},
+    scheduler::{
+        ScheduleAction, SchedulerInner, perform_schedule_action, release_deferred_handles,
+    },
 };
 use crate::{
     PreparedUserProcess, PreparedUserProcessError, SchedulerService, SpawnConfig, SpawnError,
@@ -53,7 +55,7 @@ where
 
     pub fn on_timer_tick(&self, now_ns: u64) {
         let action = self.inner.with_lock(|inner| inner.on_tick(now_ns));
-        perform_schedule_action::<A>(action);
+        perform_schedule_action(&self.inner, action);
     }
 
     pub fn current_user_vm(&self) -> Option<UserVmContext> {
@@ -72,8 +74,11 @@ where
         &self,
         prepared: PreparedUserProcess,
     ) -> Result<crate::UserProcessLaunchInfo, PreparedUserProcessError> {
-        self.inner
-            .with_lock(|inner| inner.spawn_prepared_user_process(prepared))
+        let result = self
+            .inner
+            .with_lock(|inner| inner.spawn_prepared_user_process(prepared));
+        release_deferred_handles(&self.inner);
+        result
     }
 
     pub fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
@@ -141,8 +146,11 @@ where
         process: &Arc<ProcessObject>,
         spec: UserStartSpec,
     ) -> Result<Arc<ThreadObject>, StartProcessError> {
-        self.inner
-            .with_lock(|inner| inner.start_user_process(process, spec))
+        let result = self
+            .inner
+            .with_lock(|inner| inner.start_user_process(process, spec));
+        release_deferred_handles(&self.inner);
+        result
     }
 }
 
@@ -172,7 +180,7 @@ where
                 let now_ns = inner.now_ns();
                 inner.yield_now(now_ns)
             });
-            perform_schedule_action::<A>(action);
+            perform_schedule_action(&self.inner, action);
         });
     }
 
@@ -182,7 +190,7 @@ where
                 let now_ns = inner.now_ns();
                 inner.sleep_current(ns, now_ns)
             });
-            perform_schedule_action::<A>(action);
+            perform_schedule_action(&self.inner, action);
         });
     }
 
@@ -223,7 +231,7 @@ where
             let now_ns = inner.now_ns();
             inner.finish_exit_current(now_ns)
         });
-        perform_schedule_action::<A>(action);
+        perform_schedule_action(&self.inner, action);
         unreachable!("terminated thread resumed after scheduler switch")
     }
 
@@ -239,7 +247,7 @@ where
                 let now_ns = inner.now_ns();
                 inner.block_current(now_ns, timeout_ns)
             });
-            perform_schedule_action::<A>(action);
+            perform_schedule_action(&self.inner, action);
         });
     }
 

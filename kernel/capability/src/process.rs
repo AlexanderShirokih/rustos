@@ -34,6 +34,16 @@ impl ProcessObject {
         self.inner.signal_terminated(code);
     }
 
+    /// Помечает процесс завершённым и публикует `code`. Наблюдателей не будит.
+    pub fn mark_terminated(&self, code: i32) {
+        self.inner.mark_terminated(code);
+    }
+
+    /// Будит наблюдателей завершения процесса.
+    pub fn wake_terminated(&self) {
+        self.inner.wake_terminated();
+    }
+
     /// Код завершения процесса. До завершения возвращает 0.
     pub fn exit_code(&self) -> i32 {
         self.inner.exit_code()

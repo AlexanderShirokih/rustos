@@ -12,6 +12,7 @@ pub(super) fn map_ipc_error(e: IpcError) -> SyscallError {
         IpcError::AccessDenied => SyscallError::AccessDenied,
         IpcError::ShouldWait => SyscallError::ShouldWait,
         IpcError::PeerClosed => SyscallError::PeerClosed,
+        IpcError::SenderGone => SyscallError::SenderGone,
         IpcError::Timeout => SyscallError::Timeout,
         IpcError::BufferTooSmall => SyscallError::BufferTooSmall,
         IpcError::MessageTooBig => SyscallError::MessageTooBig,
@@ -32,7 +33,7 @@ pub(super) fn map_spawn_error(e: SpawnError) -> SyscallError {
         SpawnError::InvalidName | SpawnError::InvalidPriority | SpawnError::InvalidStackPages => {
             SyscallError::InvalidArgument
         }
-        SpawnError::ImageNotLoaded => SyscallError::WrongType,
+        SpawnError::ImageNotLoaded | SpawnError::ProcessTerminated => SyscallError::WrongType,
     }
 }
 
@@ -64,6 +65,10 @@ mod tests {
         assert_eq!(
             map_ipc_error(IpcError::PeerClosed),
             SyscallError::PeerClosed
+        );
+        assert_eq!(
+            map_ipc_error(IpcError::SenderGone),
+            SyscallError::SenderGone
         );
         assert_eq!(map_ipc_error(IpcError::Timeout), SyscallError::Timeout);
         assert_eq!(
@@ -105,10 +110,9 @@ mod tests {
             assert_eq!(map_spawn_error(e), SyscallError::InvalidArgument, "{e:?}");
         }
         // Состояние объекта.
-        assert_eq!(
-            map_spawn_error(SpawnError::ImageNotLoaded),
-            SyscallError::WrongType
-        );
+        for e in [SpawnError::ImageNotLoaded, SpawnError::ProcessTerminated] {
+            assert_eq!(map_spawn_error(e), SyscallError::WrongType, "{e:?}");
+        }
     }
 
     #[test]

@@ -30,6 +30,18 @@ path = "src/port_fixture.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "reply-holder"
+path = "src/reply_holder.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "badge-client"
+path = "src/badge_client.rs"
+test = false
+bench = false
+
 [dependencies]
 bootstrap = { workspace = true }
 collections = { workspace = true }

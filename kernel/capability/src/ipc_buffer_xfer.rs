@@ -10,7 +10,7 @@ use syscall::{IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, Rights, decode_tag, enco
 use super::{
     errors::IpcError,
     handle::HandleId,
-    handle_table::{HandleReservation, HandleTable},
+    handle_table::{DrainedHandles, HandleReservation, HandleTable},
     port::{BufferAccess, ThreadTransport},
 };
 
@@ -152,7 +152,7 @@ fn write_tag(t: &ThreadTransport, tag: u64) -> Result<(), IpcError> {
     write_bytes(t, TAG_OFFSET, &tag.to_le_bytes())
 }
 
-fn write_badge(t: &ThreadTransport, badge: u64) -> Result<(), IpcError> {
+pub(super) fn write_badge(t: &ThreadTransport, badge: u64) -> Result<(), IpcError> {
     write_bytes(t, BADGE_OFFSET, &badge.to_le_bytes())
 }
 
@@ -242,24 +242,25 @@ pub fn transfer_rendezvous(
             return Err(e);
         }
 
-        let drained = match sender
+        let mut drained = DrainedHandles::empty();
+        let taken = sender
             .handle_table
-            .with_lock(|tbl| tbl.try_drain_for_transfer(&ids, Rights::TRANSFER))
-        {
-            Ok(d) => d,
-            Err(e) => {
-                receiver
-                    .handle_table
-                    .with_lock(|tbl| release_all(tbl, reservations));
-                return Err(e);
-            }
-        };
+            .with_lock(|tbl| tbl.try_drain_for_transfer(&ids, Rights::TRANSFER, &mut drained));
+        if let Err(e) = taken {
+            receiver
+                .handle_table
+                .with_lock(|tbl| release_all(tbl, reservations));
+            drained.release();
+            return Err(e);
+        }
 
+        let handles = drained.take_handles();
         receiver.handle_table.with_lock(|tbl| {
-            for (res, handle) in reservations.into_iter().zip(drained) {
-                let _ = tbl.commit_reserved(res, handle);
+            for (res, handle) in reservations.into_iter().zip(handles) {
+                let _ = tbl.commit_reserved(res, handle, &mut drained);
             }
         });
+        drained.release();
     }
 
     write_tag(receiver, encode_tag(len, ncaps))?;

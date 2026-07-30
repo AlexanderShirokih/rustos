@@ -6,6 +6,7 @@ use syscall::{Rights, WakeCount};
 use super::{
     errors::IpcError,
     handle::{Capability, HandleId},
+    handle_table::RejectedInsert,
     irq_line::IrqLine,
     irq_runtime::interrupts_control,
     runtime::{ParkState, runtime},
@@ -20,7 +21,9 @@ pub fn install_handle(handle: Capability) -> Result<HandleId, IpcError> {
     let table = runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
-    table.with_lock(|tbl| tbl.insert(handle))
+    table
+        .with_lock(|tbl| tbl.insert(handle))
+        .map_err(RejectedInsert::release)
 }
 
 /// Атомарно меняет биты сигнального состояния `Signal` (поднимает `set`,
@@ -219,8 +222,7 @@ pub fn handle_close(handle_id: HandleId) -> Result<(), IpcError> {
     let table = runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
-    let removed = table.with_lock(|tbl| tbl.remove(handle_id))?;
-    drop(removed);
+    table.with_lock(|tbl| tbl.remove(handle_id))?.release();
     Ok(())
 }
 
@@ -236,7 +238,9 @@ pub fn handle_duplicate(
     let table = runtime()
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
-    table.with_lock(|tbl| tbl.duplicate(handle_id, new_rights, new_badge))
+    table
+        .with_lock(|tbl| tbl.duplicate(handle_id, new_rights, new_badge))
+        .map_err(RejectedInsert::release)
 }
 
 /// Завершает текущий поток с заданным `exit_code`. Помечает уходящий поток
@@ -254,7 +258,9 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
         .current_handle_table()
         .ok_or(IpcError::BadHandle)?;
     let handle = Capability::new_with_default_rights(Signal::new());
-    table.with_lock(|tbl| tbl.insert(handle))
+    table
+        .with_lock(|tbl| tbl.insert(handle))
+        .map_err(RejectedInsert::release)
 }
 
 // Завершение Process/Thread наблюдается ожиданием прямо по их handle через
@@ -282,7 +288,9 @@ pub fn irq_mint(control_handle: HandleId, irq: u16) -> Result<HandleId, IpcError
 
     let line = IrqLine::bind(interrupts_control().clone(), irq)?;
     let handle = Capability::new_with_default_rights(line);
-    table.with_lock(|tbl| tbl.insert(handle))
+    table
+        .with_lock(|tbl| tbl.insert(handle))
+        .map_err(RejectedInsert::release)
 }
 
 /// Подтверждает прерывание на `line_handle`: снимает latch `SIGNALED` и
@@ -480,7 +488,9 @@ mod tests {
         let (table, id, _signal) = install_signal_handle(Rights::READ);
         let table_for_hook = table.clone();
         let hook: BlockHook = Box::new(move || {
-            table_for_hook.with_lock(|tbl| tbl.remove(id).unwrap());
+            table_for_hook
+                .with_lock(|tbl| tbl.remove(id).unwrap())
+                .release();
         });
         mock().configure(Some(table), Some(hook));
 
@@ -496,7 +506,9 @@ mod tests {
         let (table, id, _signal) = install_signal_handle(Rights::READ);
         let table_for_hook = table.clone();
         let hook: BlockHook = Box::new(move || {
-            table_for_hook.with_lock(|tbl| tbl.remove(id).unwrap());
+            table_for_hook
+                .with_lock(|tbl| tbl.remove(id).unwrap())
+                .release();
         });
         mock().configure(Some(table), Some(hook));
 

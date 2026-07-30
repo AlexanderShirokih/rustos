@@ -17,6 +17,9 @@ use syscall::{Handle, Rights};
 use userland_image::{DecodedImage, decode};
 use userland_loader::load_entry;
 
+/// Значок clock-сессии клиента у драйвера.
+const CLOCK_SESSION_BADGE: u64 = 1;
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(root: Handle) -> ! {
     thread_exit(u64::from(run(root).is_err()))
@@ -38,50 +41,32 @@ fn run(root: Handle) -> Result<()> {
         .ok_or(Error::NoDevice)?;
 
     // Clock-порт связывает драйвер и клиента; args-порты доставляют каждому
-    // его стартовые ресурсы.
-    let clock_port = Port::create()?;
-    let driver_args_port = Port::create()?;
-    let client_args_port = Port::create()?;
+    // его стартовые ресурсы. У init остаётся клиентская сторона каждого порта,
+    // серверная уезжает тому, кто на нём принимает.
+    let clock_port = Port::create_service(CLOCK_SESSION_BADGE)?;
+    let driver_args_port = Port::create_service(0)?;
+    let client_args_port = Port::create_service(0)?;
 
-    // Драйвер стартует с серверной частью своего args-порта.
-    let driver = spawn(
-        &image,
-        "rtc-driver",
-        &resource,
-        driver_args_port
-            .handle()
-            .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, 0)?,
-    )?;
+    // Драйвер стартует с серверной стороной своего args-порта.
+    let driver = spawn(&image, "rtc-driver", &resource, driver_args_port.server)?;
 
-    let driver_args = DriverArgsClient::new(PortTransport::client(driver_args_port.handle()));
-    driver_args.provide(
-        device.into_handle(),
-        clock_port
-            .handle()
-            .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, 0)?,
-    )?;
+    let driver_args =
+        DriverArgsClient::new(PortTransport::client(driver_args_port.client.handle()));
+    driver_args.provide(device.into_handle(), clock_port.server)?;
 
-    // Клиент - симметрично: клиентская часть clock-порта и write-копия klog.
-    let client = spawn(
-        &image,
-        "rtc-client",
-        &resource,
-        client_args_port
-            .handle()
-            .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, 0)?,
-    )?;
+    // Клиент - симметрично: клиентская сторона clock-порта и write-копия klog.
+    let client = spawn(&image, "rtc-client", &resource, client_args_port.server)?;
 
-    let client_args = ClientArgsClient::new(PortTransport::client(client_args_port.handle()));
+    let client_args =
+        ClientArgsClient::new(PortTransport::client(client_args_port.client.handle()));
     client_args.provide(
-        clock_port
-            .handle()
-            .duplicate(Rights::WRITE | Rights::TRANSFER, 0)?,
+        clock_port.client.into_handle(),
         root.duplicate(Rights::WRITE | Rights::TRANSFER, 0)?,
     )?;
 
-    let _ = client.join(Timeout::INFINITE);
-
-    drop(driver);
+    // Клиент уносит значок clock-сессии, поэтому его уход завершает и драйвер.
+    client.join(Timeout::INFINITE)?;
+    driver.join(Timeout::INFINITE)?;
     Ok(())
 }
 
