@@ -129,6 +129,6 @@ cargo xtask fuzz userland_image_decode --seconds 60
 cargo xtask check-layers
 ```
 
-Сверяет рёбра зависимостей между workspace-крейтами (по `cargo metadata`)
-с правилами слоёв из [`architecture.md`](architecture.md).
+Сверяет рёбра зависимостей между крейтами основного и fuzz-workspace
+(по `cargo metadata`) с правилами слоёв из [`architecture.md`](architecture.md).
 При нарушениях печатает запрещённые рёбра и завершается с ошибкой.
