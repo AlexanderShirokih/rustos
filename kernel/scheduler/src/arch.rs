@@ -7,14 +7,27 @@ use memory::memory_mapper::AddressSpaceHandle;
 
 use crate::UserEntry;
 
-/// Идентификатор CPU.
+/// Верхний предел числа CPU: [`CpuId`] за него не выходит, поэтому им
+/// ограничены и per-CPU таблицы платформенного слоя, и очередь готовых потоков
+/// на CPU внутри планировщика.
+pub const MAX_CPUS: usize = 16;
+
+/// Идентификатор CPU. Всегда меньше [`MAX_CPUS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct CpuId(u16);
 
 impl CpuId {
-    pub const fn new(raw: u16) -> Self {
-        Self(raw)
+    /// Boot CPU: он существует в любой конфигурации.
+    pub const ZERO: Self = Self(0);
+
+    /// `None` - идентификатор не меньше [`MAX_CPUS`]: такой CPU ядру неизвестен.
+    pub const fn new(raw: u16) -> Option<Self> {
+        if (raw as usize) < MAX_CPUS {
+            Some(Self(raw))
+        } else {
+            None
+        }
     }
 
     pub const fn raw(self) -> u16 {

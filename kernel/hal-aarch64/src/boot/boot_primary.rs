@@ -8,6 +8,7 @@ use drivers_common::scanner::EmbeddedDriversScanner;
 use drivers_common_aarch64::{
     adapt_to_fdt_tree, device_windows::enumerate_device_windows, tree_ext::AddressSpace,
 };
+use hal_common::cpu::CpuTopology;
 use io::buffered_writer::BufferedWriter;
 use kernelspace::{
     kernel_context::{BootDtb, KernelContext, KmmioArena, UserlandImage},
@@ -20,10 +21,12 @@ use memory::{
     physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
-use scheduler::{Bootstrapped, Scheduler, SchedulerConfig};
+use scheduler::{Bootstrapped, CpuId, Scheduler, SchedulerConfig};
 
 use crate::{
+    boot::boot_early::{_stack_bottom, _stack_top, BOOT_STACK_FILL},
     consts::{HIGHER_HALF_BASE, KMMIO_BASE, KMMIO_MAX_SIZE},
+    cpu,
     exception::ExceptionVectors,
     memory::memory_setup::{Enabled, MemorySetup},
     sched::Aarch64Context,
@@ -69,6 +72,7 @@ enum PrimaryBootError {
     UnalignedDtbBase,
     EmptyDtb,
     UnalignedInitrdBase,
+    BootStackExhausted,
 }
 
 impl core::fmt::Display for PrimaryBootError {
@@ -81,6 +85,7 @@ impl core::fmt::Display for PrimaryBootError {
             PrimaryBootError::UnalignedDtbBase => "DTB base is not 4K-aligned",
             PrimaryBootError::EmptyDtb => "DTB totalsize is zero",
             PrimaryBootError::UnalignedInitrdBase => "initrd base is not 4K-aligned",
+            PrimaryBootError::BootStackExhausted => "pre-MMU phase used up the whole boot stack",
         };
         f.write_str(text)
     }
@@ -121,8 +126,11 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
 
     let buffered = Box::leak(Box::new(BufferedWriter::new()));
     klog::set_stdout(buffered);
+    crate::set_log_sink(buffered);
 
     info!("primary_main: post-MMU initialization complete");
+
+    report_boot_stack(&boot_stack_usage())?;
 
     let dtb_virt = dtb_phys + HIGHER_HALF_BASE;
     let device_tree =
@@ -132,6 +140,10 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
     // продление времени жизни ссылки до `'static` корректно.
     let device_tree: &'static fdt::devicetree::DeviceTree =
         unsafe { core::mem::transmute(&device_tree) };
+
+    // До этой точки логический идентификатор CPU известен только по
+    // умолчанию: подсистемы с per-CPU состоянием идут ниже.
+    init_cpu_topology(device_tree);
 
     let mut driver_scanner = EmbeddedDriversScanner::new();
     let root = adapt_to_fdt_tree(device_tree)
@@ -202,6 +214,71 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
         SCHED_CONFIG,
         spawn_init_process_impl(),
     )
+}
+
+/// Высшая отметка стека pre-MMU фазы, найденная по маркеру заливки.
+struct BootStackUsage {
+    used: usize,
+    size: usize,
+}
+
+impl BootStackUsage {
+    /// Маркер не уцелел ни в одном слове: стек израсходован целиком, и запись
+    /// могла уйти ниже `_stack_bottom`.
+    fn is_exhausted(&self) -> bool {
+        self.used == self.size
+    }
+}
+
+/// Считает, сколько стека съела pre-MMU фаза: ищет снизу первое слово, где
+/// маркер заливки затёрт.
+fn boot_stack_usage() -> BootStackUsage {
+    let bottom = (&raw const _stack_bottom) as usize;
+    let top = (&raw const _stack_top) as usize;
+    let size = top.saturating_sub(bottom);
+
+    let mut address = bottom;
+    while address < top {
+        // SAFETY: адрес лежит в `.stack` между символами линкера, выровнен на
+        // 8 (граница секции кратна 16) и замаплен в higher-half.
+        let word = unsafe { (address as *const u64).read_volatile() };
+        if word != BOOT_STACK_FILL {
+            break;
+        }
+        address += size_of::<u64>();
+    }
+
+    BootStackUsage {
+        used: top.saturating_sub(address),
+        size,
+    }
+}
+
+/// Сообщает высшую отметку стека pre-MMU фазы. Исчерпание - отказ загрузки:
+/// запись за `_stack_bottom` рушит `.bss`, и продолжать по повреждённому
+/// состоянию нельзя.
+fn report_boot_stack(usage: &BootStackUsage) -> Result<(), PrimaryBootError> {
+    if usage.is_exhausted() {
+        return Err(PrimaryBootError::BootStackExhausted);
+    }
+
+    info!("boot stack: {} of {} bytes used", usage.used, usage.size);
+    Ok(())
+}
+
+fn init_cpu_topology(device_tree: &'static fdt::devicetree::DeviceTree<'static>) {
+    let boot = cpu::current_affinity();
+    cpu::init_topology(CpuTopology::parse(device_tree, boot));
+
+    // Нулевой индекс закреплён за boot CPU построением таблицы топологии,
+    // поэтому блок для него в `CPU_LOCALS` есть всегда.
+    let _boot_local = cpu::install_local(CpuId::ZERO);
+
+    info!(
+        "CPU topology: {} CPU(s), boot affinity {:#x}",
+        cpu::count(),
+        boot.raw()
+    );
 }
 
 /// Строит Device-MMIO регион поверх окна FDT. `None` - база не выровнена на

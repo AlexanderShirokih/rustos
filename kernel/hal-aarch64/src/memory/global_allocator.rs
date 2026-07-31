@@ -10,6 +10,7 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
+use collections::{LockCell, MutexCell};
 use memory::{bump_allocator::BumpAllocator, kernel_vm_allocator::HeapAllocator};
 
 #[global_allocator]
@@ -24,18 +25,21 @@ const PHASE_HEAP: u8 = 2;
 /// Заморожен (аллокации запрещены).
 const PHASE_FROZEN: u8 = 3;
 
-/// Двухфазный глобальный аллокатор ядра.
+/// Двухфазный глобальный аллокатор ядра: bump-фаза без лока до включения
+/// MMU, heap-фаза под локом с маскированием прерываний после.
 pub struct GlobalKernelAllocator {
     /// Текущая фаза работы.
     phase: AtomicU8,
     /// Bump-аллокатор для ранней инициализации.
     bump: UnsafeCell<MaybeUninit<BumpAllocator>>,
     /// Heap-аллокатор для основной работы.
-    heap: UnsafeCell<MaybeUninit<HeapAllocator>>,
+    heap: MutexCell<MaybeUninit<HeapAllocator>>,
 }
 
-// SAFETY: GlobalKernelAllocator использует атомарные операции для синхронизации
-// и гарантирует, что только одна фаза активна в любой момент времени
+// SAFETY: heap-фаза сериализована локом `heap`; bump-фаза однопоточна по
+// построению - она заканчивается до включения MMU, то есть до появления
+// прерываний и второго CPU. Переход между фазами публикуется атомарным
+// `phase` с `Acquire`/`Release`-семантикой.
 unsafe impl Sync for GlobalKernelAllocator {}
 
 impl GlobalKernelAllocator {
@@ -43,7 +47,7 @@ impl GlobalKernelAllocator {
         GlobalKernelAllocator {
             phase: AtomicU8::new(PHASE_UNINIT),
             bump: UnsafeCell::new(MaybeUninit::uninit()),
-            heap: UnsafeCell::new(MaybeUninit::uninit()),
+            heap: MutexCell::new(MaybeUninit::uninit()),
         }
     }
 
@@ -60,12 +64,9 @@ impl GlobalKernelAllocator {
 
     /// Переключает на heap-фазу.
     pub fn set_heap(&self, heap_allocator: HeapAllocator) {
-        let heap_ptr = self.heap.get();
-        // SAFETY: caller вызывает `set_heap` ровно один раз перед переходом в PHASE_HEAP,
-        // в этот момент конкурентного доступа к `heap` нет; затем фаза публикуется через Release.
-        unsafe {
-            (*heap_ptr).write(heap_allocator);
-        }
+        self.heap.with_lock(|slot| {
+            slot.write(heap_allocator);
+        });
         self.phase.store(PHASE_HEAP, Ordering::Release);
     }
 
@@ -85,21 +86,21 @@ impl GlobalKernelAllocator {
     }
 
     /// # Safety
-    /// Вызывающий должен гарантировать, что heap-аллокатор инициализирован
-    /// и не происходит конкурентного доступа.
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn get_heap(&self) -> &mut HeapAllocator {
-        // SAFETY: caller гарантирует инициализацию `heap` (фаза == PHASE_HEAP) и отсутствие гонок;
-        // `assume_init_mut` корректен.
-        unsafe { (*self.heap.get()).assume_init_mut() }
+    /// Вызывающий должен гарантировать фазу `PHASE_HEAP`: в ней слот
+    /// инициализирован.
+    unsafe fn with_heap<R>(&self, f: impl FnOnce(&mut HeapAllocator) -> R) -> R {
+        self.heap.with_lock(|slot| {
+            // SAFETY: caller гарантирует фазу PHASE_HEAP, в которой `set_heap`
+            // уже записал аллокатор в слот.
+            f(unsafe { slot.assume_init_mut() })
+        })
     }
 }
 
 // SAFETY: `alloc`/`dealloc` корректны: переходы между фазами защищены атомарным `phase` с
 // `Acquire`/`Release`-семантикой, в каждой фазе соответствующий аллокатор инициализирован,
-// сами аллокаторы (`BumpAllocator`, `HeapAllocator`) внутренне сериализуют доступ через
-// исключительный `&mut` к статическому состоянию (ядро однопоточное на старте, после
-// инициализации scheduler-а - единственный поток в kernel-space на CPU0 для allocate-ops).
+// а доступ к нему сериализован - к heap-фазе локом, к bump-фазе
+// однопоточностью pre-MMU фазы.
 unsafe impl GlobalAlloc for GlobalKernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match self.phase.load(Ordering::Acquire) {
@@ -112,7 +113,7 @@ unsafe impl GlobalAlloc for GlobalKernelAllocator {
                 panic!("Allocation attempted while bump allocator is frozen")
             }
             // SAFETY: фаза PHASE_HEAP гарантирует, что heap инициализирован
-            PHASE_HEAP => match unsafe { self.get_heap() }.allocate(layout) {
+            PHASE_HEAP => match unsafe { self.with_heap(|heap| heap.allocate(layout)) } {
                 Ok(ptr) => ptr.as_ptr(),
                 Err(_) => core::ptr::null_mut(),
             },
@@ -129,7 +130,7 @@ unsafe impl GlobalAlloc for GlobalKernelAllocator {
             && let Some(non_null_ptr) = NonNull::new(ptr)
         {
             // SAFETY: фаза PHASE_HEAP гарантирует, что heap инициализирован
-            unsafe { self.get_heap() }.deallocate(non_null_ptr);
+            unsafe { self.with_heap(|heap| heap.deallocate(non_null_ptr)) };
         }
     }
 }

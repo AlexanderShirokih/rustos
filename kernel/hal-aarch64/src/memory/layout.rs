@@ -91,16 +91,42 @@ pub struct MemoryRegion<A: Address + Aligned> {
     pub flags: Aarch64MemFlags,
 }
 
-impl MemoryRegion<PageAlignedAddress> {
-    /// Создаёт регион из указателей на символы линкера.
-    pub fn new_raw(tag: RegionTag, start: &u8, end: &u8, flags: Aarch64MemFlags) -> Self {
-        let start_addr = core::ptr::from_ref::<u8>(start) as usize;
-        let end_addr = core::ptr::from_ref::<u8>(end) as usize;
+/// Диапазон секции ядра, заданный парой символов линкера.
+///
+/// Символ материализуется PC-relative, поэтому его числовое значение живёт в
+/// том адресном пространстве, где исполняется код: до включения MMU это
+/// физический адрес, после - виртуальный. Тип держит границы
+/// неинтерпретированными до тех пор, пока пространство не названо явно.
+#[derive(Clone, Copy)]
+pub struct LinkTimeRange {
+    start: usize,
+    end: usize,
+}
 
-        Self::new(tag, start_addr, end_addr, flags)
+impl LinkTimeRange {
+    /// # Safety
+    ///
+    /// Вызывающий обязан находиться в pre-MMU фазе: только там PC, а с ним и
+    /// значение символа, совпадает с физическим адресом секции.
+    pub unsafe fn physical(start: &u8, end: &u8) -> Self {
+        Self {
+            start: core::ptr::from_ref::<u8>(start) as usize,
+            end: core::ptr::from_ref::<u8>(end) as usize,
+        }
     }
 
-    /// Создаёт регион из адресов.
+    /// Строит регион физической памяти, округляя границы наружу до страницы.
+    pub fn into_region(
+        self,
+        tag: RegionTag,
+        flags: Aarch64MemFlags,
+    ) -> MemoryRegion<PageAlignedAddress> {
+        MemoryRegion::new(tag, self.start, self.end, flags)
+    }
+}
+
+impl MemoryRegion<PageAlignedAddress> {
+    /// Создаёт регион из физических адресов.
     pub const fn new(
         tag: RegionTag,
         start_addr: usize,

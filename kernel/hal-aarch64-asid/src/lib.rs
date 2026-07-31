@@ -84,13 +84,10 @@ pub const fn unpack_asid(tag: u64) -> u16 {
     (tag & ASID_MASK) as u16
 }
 
-/// Верхний предел числа CPU. Каждый CPU занимает один слот в `active`-таблице.
-pub const MAX_CPUS: usize = 16;
-
 /// Глобально-инициализируемый аллокатор. Ширина ASID становится известна
 /// на boot (после чтения feature-регистра), поэтому ёмкость задаётся через
 /// `init` уже после конструирования.
-pub struct GlobalAsidAllocator {
+pub struct GlobalAsidAllocator<const CPUS: usize> {
     state: MutexCell<AsidAllocatorState>,
     max_asid: AtomicU64,
     on_rollover: fn(),
@@ -99,10 +96,10 @@ pub struct GlobalAsidAllocator {
     /// один user-AS). Rollover читает эти слоты и резервирует их ASID-ы в
     /// новой generation, чтобы не переиспользовать ASID, который сейчас
     /// активен на другом CPU (TTBR0 которого ещё указывает на старый root).
-    active: [AtomicU64; MAX_CPUS],
+    active: [AtomicU64; CPUS],
 }
 
-impl core::fmt::Debug for GlobalAsidAllocator {
+impl<const CPUS: usize> core::fmt::Debug for GlobalAsidAllocator<CPUS> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GlobalAsidAllocator")
             .field("max_asid", &self.max_asid.load(Ordering::Relaxed))
@@ -111,14 +108,14 @@ impl core::fmt::Debug for GlobalAsidAllocator {
     }
 }
 
-impl GlobalAsidAllocator {
+impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
     pub const fn new(on_rollover: fn()) -> Self {
         Self {
             state: MutexCell::new(AsidAllocatorState::new()),
             max_asid: AtomicU64::new(0),
             on_rollover,
             initialized: AtomicU64::new(0),
-            active: [const { AtomicU64::new(0) }; MAX_CPUS],
+            active: [const { AtomicU64::new(0) }; CPUS],
         }
     }
 
@@ -146,8 +143,10 @@ impl GlobalAsidAllocator {
     /// апдейтится `active[cpu_id]`, и две операции должны быть атомарны
     /// относительно конкурентного rollover'а на другом CPU.
     pub fn acquire(&self, tag_slot: &AtomicU64, cpu_id: u16) -> (u16, u64) {
-        debug_assert!((cpu_id as usize) < MAX_CPUS, "cpu_id out of MAX_CPUS range");
-        let active_slot = &self.active[cpu_id as usize];
+        let Some(active_slot) = self.active.get(cpu_id as usize) else {
+            debug_assert!(false, "cpu_id is outside the per-CPU table");
+            return (0, 0);
+        };
         loop {
             let cached = tag_slot.load(Ordering::Acquire);
             let outcome = self.state.with_lock(|s| {
@@ -236,7 +235,7 @@ impl GlobalAsidAllocator {
         s.next_asid = 1;
         (self.on_rollover)();
         // Ищем первый свободный после reservation'а active-ASID-ов. Поскольку
-        // активных CPU не больше MAX_CPUS << max_asid, свободный гарантированно
+        // активных CPU не больше `CPUS` << max_asid, свободный гарантированно
         // существует.
         while s.next_asid <= max && s.in_use.is_set(s.next_asid as usize) {
             s.next_asid += 1;
@@ -269,8 +268,13 @@ mod tests {
 
     use super::*;
 
-    fn make(width: AsidWidth, on_rollover: fn()) -> GlobalAsidAllocator {
-        let alloc = GlobalAsidAllocator::new(on_rollover);
+    /// Ёмкость per-CPU таблицы в тестах.
+    const TEST_CPUS: usize = 16;
+
+    type TestAsidAllocator = GlobalAsidAllocator<TEST_CPUS>;
+
+    fn make(width: AsidWidth, on_rollover: fn()) -> TestAsidAllocator {
+        let alloc = TestAsidAllocator::new(on_rollover);
         alloc.init(width);
         alloc
     }
@@ -393,7 +397,7 @@ mod tests {
     /// сменится (фактический rollover), а не фиксированное `0..max` - иначе
     /// тест молча перестаёт доходить до rollover при смене стартового asid.
     /// Возвращает поколение до и после.
-    fn drive_to_rollover(alloc: &GlobalAsidAllocator, cpu_id: u16) -> (u32, u32) {
+    fn drive_to_rollover(alloc: &TestAsidAllocator, cpu_id: u16) -> (u32, u32) {
         let gen_before = alloc.state.with_lock(|s| s.generation);
         let max = alloc.max_asid() as usize;
         // Запас итераций: не больше двух полных проходов по диапазону.
@@ -529,7 +533,7 @@ mod tests {
         let mut handles = Vec::new();
         for thread_idx in 0..THREADS {
             let a = alloc.clone();
-            let cpu_id = (thread_idx as u16) % (MAX_CPUS as u16);
+            let cpu_id = (thread_idx as u16) % (TEST_CPUS as u16);
             handles.push(thread::spawn(move || {
                 let mut got = Vec::new();
                 for _ in 0..PER_THREAD {

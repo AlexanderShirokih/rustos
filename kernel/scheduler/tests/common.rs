@@ -120,7 +120,7 @@ impl ArchContext for MockContext {
 
 impl ArchCpu for MockCpu {
     fn current_id() -> CpuId {
-        CpuId::new(0)
+        CpuId::ZERO
     }
 
     unsafe fn install_cpu_local(cpu: *mut ()) {
@@ -206,7 +206,7 @@ pub fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext
     let stack = MockStack::allocate(1).expect("mock stack allocation");
     let arch = MockContext;
     let id = ThreadId::new(NonZeroU32::new(1).expect("non-zero"));
-    Thread::new(id, process, CpuId::new(0), priority, arch, stack, name)
+    Thread::new(id, process, CpuId::ZERO, priority, arch, stack, name)
 }
 
 /// Запись о вызове `MemoryMapper::map` для проверок в тестах.

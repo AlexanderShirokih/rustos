@@ -8,7 +8,7 @@
 
 use alloc::sync::Arc;
 
-use collections::{MutexCell, NoLockCell};
+use collections::MutexCell;
 use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable};
 use memory::{
     FrameBitmap,
@@ -19,7 +19,7 @@ use memory::{
 
 use crate::memory::memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc};
 
-pub(crate) type FrameAllocatorImpl = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
+pub(crate) type FrameAllocatorImpl = PhysicalFrameAllocator<MutexCell<FrameBitmap>>;
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 
 /// Конкретный тип user-mapper-а, выдаваемый `Aarch64AddressSpaceFactory`
@@ -36,9 +36,8 @@ pub struct Aarch64AddressSpaceFactory {
     higher_half_base: PageAlignedVirtualAddress,
 }
 
-// SAFETY: `frame_allocator` - `&'static`-shared single-CPU аллокатор
-// с внутренней синхронизацией через `&self`-методы; никаких изменяемых
-// полей в фабрике нет.
+// SAFETY: `frame_allocator` - `&'static`-shared аллокатор, сериализующий
+// доступ к битмапам внутри `&self`-методов; изменяемых полей в фабрике нет.
 unsafe impl Send for Aarch64AddressSpaceFactory {}
 // SAFETY: см. `Send`.
 unsafe impl Sync for Aarch64AddressSpaceFactory {}

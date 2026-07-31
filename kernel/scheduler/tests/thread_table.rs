@@ -12,15 +12,7 @@ use crate::common::{MockContext, MockStack};
 fn build_thread(id: ThreadId, name: &'static str, priority: Priority) -> Thread<MockContext> {
     let process = ProcessId::new(NonZeroU32::new(1).expect("non-zero"));
     let stack: ThreadStack = MockStack::allocate(1).expect("mock stack allocation");
-    Thread::new(
-        id,
-        process,
-        CpuId::new(0),
-        priority,
-        MockContext,
-        stack,
-        name,
-    )
+    Thread::new(id, process, CpuId::ZERO, priority, MockContext, stack, name)
 }
 
 #[test]

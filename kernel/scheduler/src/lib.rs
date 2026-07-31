@@ -19,8 +19,8 @@ pub mod wait_queue;
 
 pub use address_space::AddressSpace;
 pub use arch::{
-    ArchContext, ArchCpu, CpuId, StackError, ThreadStack, ThreadStackAllocator, TimerSource,
-    with_preemption_disabled,
+    ArchContext, ArchCpu, CpuId, MAX_CPUS, StackError, ThreadStack, ThreadStackAllocator,
+    TimerSource, with_preemption_disabled,
 };
 pub use process::Process;
 pub use scheduler::{

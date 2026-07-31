@@ -24,17 +24,23 @@ use spin::Once;
 use crate::{
     consts::{KHEAP_BASE, KHEAP_MAX_SIZE},
     memory::{
+        address_space_factory::FrameAllocatorImpl,
         global_allocator::GLOBAL_ALLOCATOR,
         layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},
         memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
         mmu::{Mmu, NormalDualSpaceConfig},
-        regs::common::EL1,
+        regs::{common::EL1, dcache::DataCache},
     },
 };
 
+/// Аллокатор фреймов pre-MMU фазы. Спинлок здесь неприменим: он построен на
+/// exclusive-инструкциях, а с выключенным MMU память ведёт себя как
+/// Device-nGnRnE. Исполнение в этой фазе однопоточно.
+pub type BootFrameAllocator = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
+
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
+// Спинлок в pre-MMU фазе неприменим, а исполнение в ней однопоточно.
 type NoLockPageMapper<'a, FA> = NoLockCell<PageMapper<FrameTableAlloc<'a, FA>>>;
-type FrameAllocatorImpl = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
 type NoLockAarch64MemoryMapper<'a, FA> = Aarch64MemoryMapper<'a, FA, NoLockPageMapper<'a, FA>>;
 type KernelMemoryMapper =
     Aarch64MemoryMapper<'static, FrameAllocatorImpl, MutexPageMapper<'static, FrameAllocatorImpl>>;
@@ -43,6 +49,10 @@ type KernelMemoryMapper =
 /// `set_heap` происходит когда global allocator в PHASE_FROZEN, поэтому
 /// mapper нельзя положить в Box - он должен быть `&'static` без heap.
 static KERNEL_MEMORY_MAPPER: Once<KernelMemoryMapper> = Once::new();
+
+/// Аллокатор фреймов post-MMU фазы. Живёт в статике, а не в куче: сама куча
+/// строится на нём.
+static FRAME_ALLOCATOR: Once<FrameAllocatorImpl> = Once::new();
 
 /// Ранняя фаза: bump-аллокатор создан, но не установлен.
 pub struct Early {
@@ -76,9 +86,12 @@ pub struct Prepared {
     /// Корневые таблицы.
     roots: PageTableRoots,
     /// Аллокатор фреймов.
-    frame_allocator: &'static PhysicalFrameAllocator<NoLockCell<FrameBitmap>>,
+    frame_allocator: &'static BootFrameAllocator,
     /// Все регионы для маппинга.
     all_regions: StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
+    /// Арена bump-аллокатора: единственная часть свободной RAM, которой нет
+    /// среди `all_regions` под тегом [`RegionTag::Heap`].
+    bump: Interval<PageAlignedAddress>,
 }
 
 /// Фаза после включения MMU.
@@ -86,7 +99,7 @@ pub struct Enabled {
     /// Корневые таблицы.
     pub roots: PageTableRoots,
     /// Аллокатор фреймов (физический адрес, был Box::leak в bump-памяти).
-    pub frame_allocator: &'static FrameAllocatorImpl,
+    pub frame_allocator: &'static BootFrameAllocator,
 }
 
 /// Машина состояний настройки памяти.
@@ -102,6 +115,16 @@ impl MemorySetup<Early> {
             .map_err(|()| MemorySetupError::OutOfMemory)?;
 
         // Находим самую большую свободную область
+        // Свободная RAM ещё ничего не содержит: сброс строк идёт до первой
+        // записи, чтобы оставленная загрузчиком грязная строка не вытеснилась
+        // поверх неё позднее.
+        for interval in free_regions.iter() {
+            DataCache::<EL1>::invalidate_range_to_coherency(
+                interval.start.as_usize(),
+                interval.end.as_usize(),
+            );
+        }
+
         let largest =
             Self::get_largest_region(&free_regions).map_err(|()| MemorySetupError::OutOfMemory)?;
 
@@ -228,6 +251,10 @@ impl MemorySetup<Installed> {
                 roots,
                 frame_allocator,
                 all_regions,
+                bump: Interval {
+                    start: bump_start,
+                    end: bump_end,
+                },
             },
         })
     }
@@ -243,8 +270,11 @@ impl MemorySetup<Prepared> {
             roots,
             frame_allocator,
             all_regions,
+            bump,
         } = self.state;
         Self::linear_map_impl(frame_allocator, &roots, &all_regions, higher_half_base)?;
+
+        Self::drop_stale_cache_lines(&all_regions, bump);
 
         // Включение Memory Management Unit (MMU)
         Mmu::<EL1>::enable(&NormalDualSpaceConfig::new(
@@ -258,6 +288,30 @@ impl MemorySetup<Prepared> {
                 frame_allocator,
             },
         })
+    }
+
+    /// Закрывающий проход пары: отбрасывает строки, которые могли осесть над
+    /// свободной RAM за pre-MMU фазу. Открывающий проход идёт в
+    /// [`MemorySetup::<Early>::create`], до первой записи.
+    ///
+    /// Диапазон - свободная RAM: в ней лежат bump-арена, битмапы аллокатора
+    /// фреймов и таблицы страниц. Память загрузчика (DTB, initrd, резервации
+    /// FDT) из него исключена и грязных строк не теряет.
+    fn drop_stale_cache_lines(
+        all_regions: &StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
+        bump: Interval<PageAlignedAddress>,
+    ) {
+        DataCache::<EL1>::invalidate_range_to_coherency(bump.start.as_usize(), bump.end.as_usize());
+
+        for region in all_regions
+            .iter()
+            .filter(|region| region.tag == RegionTag::Heap)
+        {
+            DataCache::<EL1>::invalidate_range_to_coherency(
+                region.start.as_usize(),
+                region.end.as_usize(),
+            );
+        }
     }
 
     fn linear_map_impl<FA: FrameAllocator>(
@@ -333,19 +387,7 @@ impl MemorySetup<Enabled> {
         frame_allocator_phys: PhysicalAddress,
         higher_half_base: PageAlignedVirtualAddress,
     ) -> MemoryManagerResult {
-        // Аллокатор фреймов находится по физическому адресу (был Box::leak в bump-памяти).
-        let fa_virt: &'static FrameAllocatorImpl =
-            // SAFETY: PA + higher_half_base - корректный виртуальный адрес,
-            // замапленный через TTBR1. Аллокатор был создан в bump-памяти pre-MMU.
-            unsafe {
-                &*((frame_allocator_phys.as_usize() + higher_half_base.as_usize())
-                    as *const FrameAllocatorImpl)
-            };
-
-        // SAFETY: MMU уже включён, используется линейное отображение PA->VA (+higher_half_base),
-        unsafe {
-            fa_virt.relocate_inner_pointers_by_offset(higher_half_base.as_usize());
-        }
+        let fa_virt = Self::adopt_frame_allocator(frame_allocator_phys, higher_half_base);
 
         let higher_ptr_phys =
             PageAlignedVirtualAddress::identity(higher_root_pa).as_ptr::<PageTable<L0>>();
@@ -382,6 +424,32 @@ impl MemorySetup<Enabled> {
             address_space_factory,
             frame_allocator: fa_virt,
         }
+    }
+
+    /// Забирает аллокатор фреймов из bump-памяти pre-MMU фазы и пересобирает
+    /// его под спинлоком. Экземпляр pre-MMU фазы этим потребляется: включение
+    /// MMU - единственная точка, где стратегия блокировки меняется.
+    fn adopt_frame_allocator(
+        frame_allocator_phys: PhysicalAddress,
+        higher_half_base: PageAlignedVirtualAddress,
+    ) -> &'static FrameAllocatorImpl {
+        let boot_ptr = (frame_allocator_phys.as_usize() + higher_half_base.as_usize())
+            as *const BootFrameAllocator;
+
+        // SAFETY: `frame_allocator_phys` указывает на `Box::leak`-нутый в
+        // bump-памяти аллокатор, а PA + higher_half_base - его виртуальный
+        // адрес в линейном отображении TTBR1. Чтение забирает владение: bump-
+        // память под ним зарезервирована и больше никем не читается, а сам
+        // физический адрес дальше по загрузке не передаётся.
+        let boot = unsafe { boot_ptr.read() };
+
+        // SAFETY: MMU включён, отображение PA->VA линейно со сдвигом
+        // `higher_half_base`; вызов идёт до первого обращения к аллокатору.
+        unsafe {
+            boot.relocate_inner_pointers_by_offset(higher_half_base.as_usize());
+        }
+
+        FRAME_ALLOCATOR.call_once(|| boot.into_locked())
     }
 }
 

@@ -78,10 +78,9 @@ pub struct PhysicalFrameAllocator<L: LockCell<FrameBitmap>> {
 }
 
 // SAFETY: alloc/dealloc-методы берут `&self` и сериализуют доступ к битмапу
-// через `LockCell::with_lock`. Для `NoLockCell` инвариант однопоточности
-// поддерживается на уровне ядра (всё хождение в FA - с одного CPU
-// в kernel-mode либо под более крупным kernel-локом). Для SMP-сценариев
-// аллокатор должен инстанцироваться с `MutexCell`.
+// через `LockCell::with_lock`. Взаимное исключение обеспечивает стратегия `L`
+// на своих условиях: `MutexCell` - безусловно, `NoLockCell` - в однопоточном
+// окружении.
 unsafe impl<L: LockCell<FrameBitmap>> Send for PhysicalFrameAllocator<L> {}
 // SAFETY: см. комментарий к `Send`.
 unsafe impl<L: LockCell<FrameBitmap>> Sync for PhysicalFrameAllocator<L> {}
@@ -157,6 +156,16 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
         // `alloc_from` обходит регион кольцом от подсказки, поэтому её отказ
         // означает отсутствие свободного фрейма во всём регионе.
         bitmap.alloc_from(current)
+    }
+
+    /// Переносит регионы под стратегию блокировки `M`, потребляя исходный
+    /// аллокатор. Смена стратегии допустима только на границе фазы, где
+    /// прежний экземпляр перестаёт быть достижимым.
+    pub fn into_locked<M: LockCell<FrameBitmap>>(self) -> PhysicalFrameAllocator<M> {
+        PhysicalFrameAllocator {
+            regions: self.regions.map_into(|region| M::new(region.into_inner())),
+            next_frame_hint: self.next_frame_hint,
+        }
     }
 
     /// Релоцирует внутренние указатели bitmap'ов в каждом регионе.

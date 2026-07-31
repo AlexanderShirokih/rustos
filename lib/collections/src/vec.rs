@@ -89,6 +89,19 @@ impl<T, const N: usize> Vec<T, N> {
     pub fn clear(&mut self) {
         self.truncate(0);
     }
+
+    /// Заменяет тип элементов, сохраняя порядок. Ёмкость результата та же,
+    /// поэтому преобразование всегда полное.
+    pub fn map_into<U>(self, mut map: impl FnMut(T) -> U) -> Vec<U, N> {
+        let mut mapped: Vec<U, N> = Vec::new();
+
+        for item in self {
+            mapped.items[mapped.len] = Some(map(item));
+            mapped.len += 1;
+        }
+
+        mapped
+    }
 }
 
 impl<T, const N: usize> Index<usize> for Vec<T, N> {
@@ -194,5 +207,38 @@ impl<'a, T, const N: usize> IntoIterator for &'a Vec<T, N> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_into_keeps_order_of_elements() {
+        let mut vec: Vec<u8, 4> = Vec::new();
+        vec.push(1);
+        vec.push(2);
+        vec.push(3);
+
+        let mapped: Vec<u32, 4> = vec.map_into(|item| u32::from(item) * 10);
+
+        assert_eq!(mapped.len(), 3);
+        assert_eq!(mapped[0], 10);
+        assert_eq!(mapped[1], 20);
+        assert_eq!(mapped[2], 30);
+    }
+
+    #[test]
+    fn map_into_carries_every_element_of_a_full_vec() {
+        let mut vec: Vec<u8, 3> = Vec::new();
+        vec.push(7);
+        vec.push(8);
+        vec.push(9);
+
+        let mapped: Vec<u8, 3> = vec.map_into(|item| item);
+
+        assert_eq!(mapped.len(), 3);
+        assert_eq!(mapped[2], 9);
     }
 }

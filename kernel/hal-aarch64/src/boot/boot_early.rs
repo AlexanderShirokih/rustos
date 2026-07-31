@@ -20,10 +20,15 @@ use crate::{
 };
 
 unsafe extern "C" {
+    pub(super) static _stack_bottom: u8;
     pub(super) static _stack_top: u8;
     pub(super) static _bss_start: u8;
     pub(super) static _bss_end: u8;
 }
+
+/// Маркер, которым `_start` заливает стек pre-MMU фазы: по нему post-MMU фаза
+/// находит высшую отметку и отличает переполнение от нормального роста.
+pub(super) const BOOT_STACK_FILL: u64 = 0xFACE_FEED_FACE_FEED;
 
 /// Pre-MMU фаза: BootInfo -> память -> bump allocator -> page tables -> MMU -> jump.
 pub(super) fn boot_main(boot_info: &BootInfo) -> Result<(), ()> {

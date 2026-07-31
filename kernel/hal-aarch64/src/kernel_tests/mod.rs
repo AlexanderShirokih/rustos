@@ -2,6 +2,7 @@
 
 mod address_space;
 mod asid;
+mod cpu_identity;
 mod kheap;
 mod page_flags;
 mod syscall;

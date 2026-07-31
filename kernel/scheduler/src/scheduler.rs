@@ -1852,6 +1852,7 @@ where
         core::mem::take(&mut self.pending_process_drops)
     }
 
+    /// Длина таблицы CPU ограничена сверху: `CpuId` не выходит за `MAX_CPUS`.
     fn ensure_cpu_slot(&mut self, id: CpuId) {
         let required_len = id.as_index() + 1;
         if self.cpus.len() < required_len {

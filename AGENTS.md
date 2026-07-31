@@ -17,6 +17,7 @@
 | [`docs/syscalls.md`](docs/syscalls.md)         | ABI и полный реестр системных вызовов                      |
 | [`docs/ipc.md`](docs/ipc.md)                   | Формат типизированных IPC-контрактов поверх канала         |
 | [`docs/userland.md`](docs/userland.md)         | Устройство userland: образ, рантайм, bootstrap             |
+| [`docs/smp.md`](docs/smp.md)                   | Решение по внедрению SMP: модель, подъём ядер, дисциплина  |
 
 ## Дисциплина изменений
 

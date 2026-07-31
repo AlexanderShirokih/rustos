@@ -8,7 +8,7 @@
 use core::sync::atomic::AtomicU64;
 
 pub use hal_aarch64_asid::{GlobalAsidAllocator, unpack_asid};
-use scheduler::ArchCpu;
+use scheduler::{ArchCpu, MAX_CPUS};
 
 use crate::{
     memory::regs::{common::EL1, tlb::TranslationLookasideBuffer},
@@ -22,7 +22,8 @@ fn flush_all_inner_shareable() {
     TranslationLookasideBuffer::<EL1>::invalidate_global_inner_shareable();
 }
 
-static ASID_ALLOCATOR: GlobalAsidAllocator = GlobalAsidAllocator::new(flush_all_inner_shareable);
+static ASID_ALLOCATOR: GlobalAsidAllocator<MAX_CPUS> =
+    GlobalAsidAllocator::new(flush_all_inner_shareable);
 
 /// Конфигурирует глобальный аллокатор шириной ASID, обнаруженной на boot.
 pub fn init(width: hal_aarch64_asid::AsidWidth) {

@@ -1,27 +1,29 @@
 use scheduler::{ArchCpu, CpuId};
 
-use crate::{read_sysreg, write_sysreg};
+use crate::{cpu, read_sysreg};
 
 pub struct Aarch64Cpu;
 
 impl ArchCpu for Aarch64Cpu {
     fn current_id() -> CpuId {
-        // SAFETY: MPIDR_EL1 доступен на EL1 и только читается.
-        let mpidr = unsafe { read_sysreg!(mpidr_el1) };
-        CpuId::new((mpidr & 0xFF) as u16)
+        cpu::current_id()
     }
 
-    unsafe fn install_cpu_local(cpu: *mut ()) {
-        // SAFETY: TPIDR_EL1 - kernel-private CPU-local pointer на EL1.
-        // Указатель должен жить всё время работы scheduler-а на этом CPU.
-        unsafe { write_sysreg!(tpidr_el1, cpu as usize as u64) };
+    unsafe fn install_cpu_local(scheduler_cpu: *mut ()) {
+        // Per-CPU блок платформенного слоя установлен раньше: его ставит
+        // boot-путь CPU, а планировщик лишь добавляет своё состояние.
+        let Some(local) = cpu::current() else {
+            debug_assert!(
+                false,
+                "CpuLocal must be installed before scheduler bootstrap"
+            );
+            return;
+        };
+        local.set_scheduler(scheduler_cpu);
     }
 
     fn cpu_local_ptr() -> *mut () {
-        // SAFETY: TPIDR_EL1 ранее установлен через install_cpu_local; либо равен 0
-        // до bootstrap (валидное null-значение, scheduler выполняет fallback).
-        let raw = unsafe { read_sysreg!(tpidr_el1) };
-        raw as usize as *mut ()
+        cpu::current().map_or(core::ptr::null_mut(), cpu::CpuLocal::scheduler)
     }
 
     fn idle() -> ! {

@@ -7,7 +7,9 @@ use fdt::{
 use hal_aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
 use hal_common::boot::BootPayloadRange;
 
-use crate::memory::layout::{MemoryLayout, MemoryRegion, RegionTag, TooManyMemoryRegions};
+use crate::memory::layout::{
+    LinkTimeRange, MemoryLayout, MemoryRegion, RegionTag, TooManyMemoryRegions,
+};
 
 unsafe extern "C" {
     /** Код ядра */
@@ -32,7 +34,8 @@ impl From<TooManyMemoryRegions> for MemoryLayoutBuildError {
     }
 }
 
-/// Строит раскладку памяти из DeviceTree.
+/// Строит раскладку памяти из DeviceTree. Вызывается только в pre-MMU фазе:
+/// оттуда берутся физические адреса секций ядра.
 pub(crate) fn build_memory_layout(
     dt: &DeviceTree,
     userland_blob: Option<BootPayloadRange>,
@@ -96,32 +99,30 @@ pub(crate) fn build_memory_layout(
         }
     }
 
-    // SAFETY: символы `_text_start`/`_text_end`/`_rodata_*`/`_rw_*` определены линкером и
-    // указывают на границы соответствующих секций ядра - взятие `&` от них корректно.
-    unsafe {
-        layout.add(MemoryRegion::new_raw(
-            RegionTag::Kernel,
-            &_text_start,
-            &_text_end,
-            KernelText::flags(),
-        ))?;
+    // SAFETY: `build_memory_layout` вызывается только из pre-MMU фазы, где
+    // значение символа линкера равно физическому адресу секции.
+    let sections = unsafe {
+        [
+            (
+                LinkTimeRange::physical(&_text_start, &_text_end),
+                KernelText::flags(),
+            ),
+            (
+                LinkTimeRange::physical(&_rw_start, &_rw_end),
+                KernelData::flags(),
+            ),
+            (
+                LinkTimeRange::physical(&_rodata_start, &_rodata_end),
+                KernelRoData::flags(),
+            ),
+        ]
+    };
 
-        layout.add(MemoryRegion::new_raw(
-            RegionTag::Kernel,
-            &_rw_start,
-            &_rw_end,
-            KernelData::flags(),
-        ))?;
-
-        layout.add(MemoryRegion::new_raw(
-            RegionTag::Kernel,
-            &_rodata_start,
-            &_rodata_end,
-            KernelRoData::flags(),
-        ))?;
-
-        Ok(layout)
+    for (range, flags) in sections {
+        layout.add(range.into_region(RegionTag::Kernel, flags))?;
     }
+
+    Ok(layout)
 }
 
 fn find_ram_regions(dt: &DeviceTree) -> Option<impl Iterator<Item = AddressSpace>> {

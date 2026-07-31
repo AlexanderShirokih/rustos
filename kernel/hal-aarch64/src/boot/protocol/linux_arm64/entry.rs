@@ -5,7 +5,9 @@ use core::{arch::naked_asm, hint::spin_loop};
 use hal_common::boot::BootInfo;
 use memory::physical_address::PhysicalAddress;
 
-use crate::boot::boot_early::{_bss_end, _bss_start, _stack_top, boot_main};
+use crate::boot::boot_early::{
+    _bss_end, _bss_start, _stack_bottom, _stack_top, BOOT_STACK_FILL, boot_main,
+};
 
 /// Точка входа ядра. Передаёт управление от загрузчика к `boot_main`.
 #[unsafe(no_mangle)]
@@ -53,11 +55,50 @@ pub extern "C" fn _start() {
         "add    x1, x1, #:lo12:{stack_top}",
         "mov    sp, x1",
 
+        // Per-CPU блок ещё не установлен: TPIDR_EL1 после reset UNKNOWN,
+        // а платформенный слой читает ноль как "блока нет".
+        "msr    tpidr_el1, xzr",
+
         // Включение FP/SIMD
         "mrs    x0, cpacr_el1",
         "orr    x0, x0, #(0x3 << 20)",
         "msr    cpacr_el1, x0",
         "isb",
+
+        // Сброс строк кэша над `.bss` и стеком до точки когерентности.
+        // Записи ниже идут при выключенном MMU, то есть мимо кэша, и
+        // оставленная загрузчиком грязная строка вытеснилась бы поверх них.
+        "adrp   x0, {bss_start}",
+        "add    x0, x0, #:lo12:{bss_start}",
+        "adrp   x1, {stack_top}",
+        "add    x1, x1, #:lo12:{stack_top}",
+        "mrs    x2, ctr_el0",
+        "ubfx   x2, x2, #16, #4",       // CTR_EL0.DminLine
+        "mov    x3, #4",
+        "lsl    x2, x3, x2",            // длина строки в байтах
+        "sub    x3, x2, #1",
+        "bic    x0, x0, x3",            // выравнивание начала наружу
+        "12:",
+        "dc     ivac, x0",
+        "add    x0, x0, x2",
+        "cmp    x0, x1",
+        "b.lo   12b",
+        "dsb    sy",
+
+        // Заливка стека маркером. Идёт до первого использования стека:
+        // post-MMU фаза измеряет по нему, сколько стека съела pre-MMU.
+        "adrp   x0, {stack_bottom}",
+        "add    x0, x0, #:lo12:{stack_bottom}",
+        "adrp   x1, {stack_top}",
+        "add    x1, x1, #:lo12:{stack_top}",
+        "movz   x2, #{fill_0}",
+        "movk   x2, #{fill_1}, lsl #16",
+        "movk   x2, #{fill_2}, lsl #32",
+        "movk   x2, #{fill_3}, lsl #48",
+        "30:",
+        "str    x2, [x0], #8",
+        "cmp    x0, x1",
+        "b.lo   30b",
 
         // Очистка BSS (физические адреса через adrp)
         "adrp   x0, {bss_start}",
@@ -84,7 +125,12 @@ pub extern "C" fn _start() {
 
         bss_start       = sym _bss_start,
         bss_end         = sym _bss_end,
+        stack_bottom    = sym _stack_bottom,
         stack_top       = sym _stack_top,
+        fill_0          = const (BOOT_STACK_FILL & 0xFFFF) as u16,
+        fill_1          = const ((BOOT_STACK_FILL >> 16) & 0xFFFF) as u16,
+        fill_2          = const ((BOOT_STACK_FILL >> 32) & 0xFFFF) as u16,
+        fill_3          = const ((BOOT_STACK_FILL >> 48) & 0xFFFF) as u16,
         boot_main_entry = sym boot_main_entry,
     )
 }

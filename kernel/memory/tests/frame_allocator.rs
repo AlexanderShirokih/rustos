@@ -2,7 +2,7 @@ mod common;
 
 use std::collections::HashSet;
 
-use collections::MutexCell;
+use collections::{MutexCell, NoLockCell};
 use common::make_range;
 use memory::{
     FrameBitmap,
@@ -584,4 +584,56 @@ fn drain_of_multi_region_allocator_stays_inside_declared_regions() {
     }
 
     assert_eq!(issued.len(), 165);
+}
+
+// =============================================================================
+// Смена стратегии блокировки
+// =============================================================================
+
+#[test]
+fn into_locked_preserves_allocation_state() {
+    let region = make_range(1, 64);
+    let unlocked: PhysicalFrameAllocator<NoLockCell<FrameBitmap>> =
+        PhysicalFrameAllocator::new([region].into_iter()).expect("single region is valid");
+
+    let first = unlocked.allocate_frame().expect("region has free frames");
+    let second = unlocked.allocate_frame().expect("region has free frames");
+    unlocked
+        .deallocate_frame(first)
+        .expect("frame is allocated");
+
+    let locked: PhysicalFrameAllocator<MutexCell<FrameBitmap>> = unlocked.into_locked();
+
+    assert!(!locked.is_allocated(first), "освобождённый фрейм свободен");
+    assert!(locked.is_allocated(second), "выданный фрейм занят");
+}
+
+#[test]
+fn into_locked_keeps_regions_and_continues_allocation() {
+    let regions = [(1usize, 32usize), (100, 32)];
+    let unlocked: PhysicalFrameAllocator<NoLockCell<FrameBitmap>> = PhysicalFrameAllocator::new(
+        regions
+            .iter()
+            .map(|(start, count)| make_range(*start, *count)),
+    )
+    .expect("regions are valid");
+
+    let issued: HashSet<usize> = core::iter::from_fn(|| unlocked.allocate_frame())
+        .take(40)
+        .map(|frame| frame.number())
+        .collect();
+
+    let locked: PhysicalFrameAllocator<MutexCell<FrameBitmap>> = unlocked.into_locked();
+
+    let mut remaining = 0;
+    while let Some(frame) = locked.allocate_frame() {
+        assert!(
+            !issued.contains(&frame.number()),
+            "frame {} is issued twice across the strategy change",
+            frame.number()
+        );
+        remaining += 1;
+    }
+
+    assert_eq!(issued.len() + remaining, 64, "оба региона пережили переход");
 }
