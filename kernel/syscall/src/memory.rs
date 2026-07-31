@@ -503,9 +503,9 @@ fn allocate_err_to_syscall(err: AllocateError) -> SyscallError {
 fn map_err_to_syscall(err: &MemoryMappingError) -> SyscallError {
     match err {
         MemoryMappingError::OutOfMemory => SyscallError::OutOfMemory,
-        MemoryMappingError::AlreadyMapped | MemoryMappingError::VirtualMappingError => {
-            SyscallError::InvalidArgument
-        }
+        MemoryMappingError::AlreadyMapped
+        | MemoryMappingError::VirtualMappingError
+        | MemoryMappingError::InitExceedsMapping => SyscallError::InvalidArgument,
     }
 }
 
@@ -601,6 +601,10 @@ mod tests {
         );
         assert_eq!(
             map_err_to_syscall(&MemoryMappingError::VirtualMappingError),
+            SyscallError::InvalidArgument
+        );
+        assert_eq!(
+            map_err_to_syscall(&MemoryMappingError::InitExceedsMapping),
             SyscallError::InvalidArgument
         );
     }

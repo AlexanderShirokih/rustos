@@ -86,6 +86,12 @@ impl<FA: FrameAllocator> TableAlloc for FrameTableAlloc<'_, FA> {
         Some(frame.page_address())
     }
 
+    unsafe fn unlinked_table_ptr<L: Level>(&self, pa: PageAlignedAddress) -> *mut PageTable<L> {
+        // Линейная карта покрывает всю физическую память и не зависит от того,
+        // связана ли страница с деревом трансляции.
+        (pa.as_usize() + self.vaddr_offset) as *mut PageTable<L>
+    }
+
     unsafe fn table_ptr<L: Level>(
         &self,
         pa: PageAlignedAddress,
@@ -582,14 +588,19 @@ where
         init: &[u8],
         flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
+        let page_size = PageAlignedAddress::ALIGNMENT;
+        let mapped_size = page_count
+            .checked_mul(page_size)
+            .ok_or(MemoryMappingError::VirtualMappingError)?;
+        va.as_usize()
+            .checked_add(mapped_size)
+            .ok_or(MemoryMappingError::VirtualMappingError)?;
+        if init.len() > mapped_size {
+            return Err(MemoryMappingError::InitExceedsMapping);
+        }
         if page_count == 0 {
             return Ok(());
         }
-        let page_size = PageAlignedAddress::ALIGNMENT;
-        assert!(
-            init.len() <= page_count * page_size,
-            "init exceeds mapped size"
-        );
 
         let user_exec = matches!(
             &flags,

@@ -336,9 +336,9 @@ fn load_image_err_to_syscall(e: LoadImageError) -> SyscallError {
 fn mapping_err_to_syscall(e: &MemoryMappingError) -> SyscallError {
     match e {
         MemoryMappingError::OutOfMemory => SyscallError::OutOfMemory,
-        MemoryMappingError::AlreadyMapped | MemoryMappingError::VirtualMappingError => {
-            SyscallError::InvalidArgument
-        }
+        MemoryMappingError::AlreadyMapped
+        | MemoryMappingError::VirtualMappingError
+        | MemoryMappingError::InitExceedsMapping => SyscallError::InvalidArgument,
     }
 }
 

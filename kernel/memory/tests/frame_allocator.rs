@@ -560,3 +560,28 @@ fn is_allocated_returns_false_for_frame_outside_regions() {
         "is_allocated should return false for frame far outside managed regions"
     );
 }
+
+#[test]
+fn drain_of_multi_region_allocator_stays_inside_declared_regions() {
+    // Оба региона оставляют хвостовые биты в последних словах bitmap.
+    let regions = [(1usize, 100usize), (500, 65)];
+    let allocator = multi_region_allocator(&regions);
+
+    let mut issued = Vec::new();
+    while let Some(frame) = allocator.allocate_frame() {
+        let number = frame.number();
+        assert!(
+            regions
+                .iter()
+                .any(|(start, count)| (*start..start + count).contains(&number)),
+            "frame {number} is outside the declared regions"
+        );
+        issued.push(frame);
+        assert!(
+            issued.len() <= 165,
+            "allocator issued more frames than the regions hold"
+        );
+    }
+
+    assert_eq!(issued.len(), 165);
+}

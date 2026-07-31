@@ -51,6 +51,8 @@ pub enum MemoryMappingError {
     OutOfMemory,
     /// Адрес уже замаплен.
     AlreadyMapped,
+    /// `init` длиннее маппируемого диапазона.
+    InitExceedsMapping,
 }
 
 impl Display for MemoryMappingError {
@@ -59,6 +61,9 @@ impl Display for MemoryMappingError {
             MemoryMappingError::VirtualMappingError => f.write_str("Virtual memory mapping error"),
             MemoryMappingError::OutOfMemory => f.write_str("Out of memory"),
             MemoryMappingError::AlreadyMapped => f.write_str("Source address is already mapped"),
+            MemoryMappingError::InitExceedsMapping => {
+                f.write_str("Init bytes are longer than the mapped range")
+            }
         }
     }
 }
@@ -141,7 +146,10 @@ pub trait MemoryMapper {
     ///
     /// `init` копируется в начало региона - байт `i` оказывается в `va + i`.
     /// Хвост `[init.len(), page_count * 4K)` остаётся занулённым (страницы
-    /// свежие). Длина `init` должна быть `<= page_count * 4K`.
+    /// свежие). `init` длиннее `page_count * 4K` отвергается как
+    /// [`MemoryMappingError::InitExceedsMapping`] до первого маппинга.
+    /// Непредставимый в `usize` размер или конец диапазона возвращает
+    /// [`MemoryMappingError::VirtualMappingError`].
     ///
     /// **Атомарность leaf-страниц.** При ошибке посередине цикла уже
     /// замапленные leaf-страницы откатываются (PTE обнуляются, фреймы
@@ -285,6 +293,10 @@ mod tests {
         assert_eq!(
             MemoryMappingError::VirtualMappingError.to_string(),
             "Virtual memory mapping error"
+        );
+        assert_eq!(
+            MemoryMappingError::InitExceedsMapping.to_string(),
+            "Init bytes are longer than the mapped range"
         );
     }
 }

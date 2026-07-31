@@ -113,6 +113,64 @@ fn mapper_unmap_roundtrip() {
 }
 
 #[kernel_test]
+fn mapper_map_rejects_init_longer_than_range() {
+    let user_as = make_user_as();
+    let mapper = user_as.mapper().expect("user variant has mapper");
+    let base = va(PROBE_BASE + 0x50_0000);
+    let pages = 1;
+    let init = [0xA5u8; PAGE_SIZE + 1];
+
+    let err = mapper
+        .map(base, pages, &init, MemFlags::user_rw())
+        .expect_err("init longer than the range must be rejected");
+    kernel_tests::kassert!(matches!(err, MemoryMappingError::InitExceedsMapping));
+
+    kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
+}
+
+#[kernel_test]
+fn mapper_map_rejects_init_for_empty_range() {
+    let user_as = make_user_as();
+    let mapper = user_as.mapper().expect("user variant has mapper");
+    let base = va(PROBE_BASE + 0x60_0000);
+
+    let err = mapper
+        .map(base, 0, &[0xA5], MemFlags::user_rw())
+        .expect_err("init for an empty range must be rejected");
+    kernel_tests::kassert!(matches!(err, MemoryMappingError::InitExceedsMapping));
+
+    kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
+}
+
+#[kernel_test]
+fn mapper_map_rejects_page_count_size_overflow() {
+    let user_as = make_user_as();
+    let mapper = user_as.mapper().expect("user variant has mapper");
+    let base = va(PROBE_BASE + 0x70_0000);
+
+    let err = mapper
+        .map(base, usize::MAX, &[], MemFlags::user_rw())
+        .expect_err("mapping size overflow must be rejected");
+    kernel_tests::kassert!(matches!(err, MemoryMappingError::VirtualMappingError));
+
+    kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
+}
+
+#[kernel_test]
+fn mapper_map_rejects_virtual_range_overflow() {
+    let user_as = make_user_as();
+    let mapper = user_as.mapper().expect("user variant has mapper");
+    let base = va(usize::MAX & !(PAGE_SIZE - 1));
+
+    let err = mapper
+        .map(base, 1, &[], MemFlags::user_rw())
+        .expect_err("virtual range overflow must be rejected");
+    kernel_tests::kassert!(matches!(err, MemoryMappingError::VirtualMappingError));
+
+    kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
+}
+
+#[kernel_test]
 fn mapper_unmap_then_remap() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");

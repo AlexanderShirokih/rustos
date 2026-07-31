@@ -371,6 +371,41 @@ fn alloc_from_exhausted_region_returns_none() {
 }
 
 #[test]
+fn alloc_from_offset_past_region_end_returns_none_when_exhausted() {
+    // Некратный ширине слова регион оставляет хвостовые биты вне диапазона.
+    const BASE: usize = 1000;
+    const COUNT: usize = 100;
+
+    let mut bitmap = FrameBitmap::new(make_range(BASE, COUNT));
+    bitmap.set_range_unchecked(Frame::new(BASE), Frame::new(BASE + COUNT));
+
+    assert_eq!(bitmap.alloc_from(Frame::new(BASE + COUNT + 4096)), None);
+}
+
+#[test]
+fn alloc_from_offset_past_region_end_stays_inside_the_region() {
+    const BASE: usize = 1000;
+    const COUNT: usize = 100;
+
+    let mut bitmap = FrameBitmap::new(make_range(BASE, COUNT));
+    let hint = Frame::new(BASE + COUNT + 4096);
+
+    let mut issued = Vec::new();
+    while let Some(frame) = bitmap.alloc_from(hint) {
+        assert!(
+            bitmap.is_in_range(frame),
+            "frame {} is outside [{BASE}, {})",
+            frame.number(),
+            BASE + COUNT
+        );
+        issued.push(frame);
+        assert!(issued.len() <= COUNT, "issued more frames than region has");
+    }
+
+    assert_eq!(issued.len(), COUNT);
+}
+
+#[test]
 fn cleared_frame_can_be_reallocated_via_wrap() {
     let region = make_range(0, 32);
     let mut bitmap = FrameBitmap::new(region);

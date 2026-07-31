@@ -192,18 +192,22 @@ impl<A: TableAlloc> PageMapper<A> {
             AnyEntry::Invalid(_) => {
                 let child_pa = self.alloc.alloc_table_page().ok_or(MapError::OutOfMemory)?;
 
+                // SAFETY: child_pa только что выдан alloc-ом, не связан с деревом
+                // и не имеет другого владельца - предусловие unlinked_table_ptr.
+                let unlinked = unsafe { self.alloc.unlinked_table_ptr::<CL>(child_pa) };
+                // SAFETY: страница эксклюзивно принадлежит mapper-у до связывания;
+                // запись пустой PageTable инициализирует все 512 entries в Invalid.
+                unsafe { unlinked.write(PageTable::new()) };
+
+                // Опубликованная в родителе дочерняя таблица содержит только
+                // корректно инициализированные дескрипторы.
                 // SAFETY: parent валиден (см. ensure_next caller), idx в пределах 0..512;
-                // запись Table-entry создаёт маппинг для свежевыделенной страницы.
+                // запись Table-entry делает достижимой инициализированную страницу.
                 unsafe { (*parent).set(idx, Entry::<PL, Table>::new(child_pa, self.table_flags)) };
 
-                // SAFETY: child_pa только что выделен alloc-ом и связан с parent[idx],
-                // alloc.table_ptr выдаёт корректный VA для последующей инициализации.
-                let child = unsafe { self.alloc.table_ptr::<CL>(child_pa, target_va) };
-                // SAFETY: child указывает на свежевыделенную страницу, эксклюзивно владеемую mapper-ом
-                // до конца этой функции; запись пустой PageTable инициализирует все 512 entries в Invalid.
-                unsafe { child.write(PageTable::new()) };
-
-                Ok(child)
+                // SAFETY: таблица по child_pa инициализирована и достижима через
+                // parent[idx] - предусловие table_ptr выполнено.
+                Ok(unsafe { self.alloc.table_ptr::<CL>(child_pa, target_va) })
             }
 
             AnyEntry::Block(_) | AnyEntry::Page(_) => Err(MapError::AlreadyMapped),

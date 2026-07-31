@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{allocate_buffer, make_mapper};
+use common::{allocate_buffer, allocate_dirty_buffer, make_mapper};
 use hal_aarch64_paging::{
     entry::{Entry, Page},
     level::{L2, L3, Level, PagePa},
@@ -61,6 +61,28 @@ fn walk_returns_ok_for_mapped_4k_page() {
     // SAFETY: walk вернул валидный (l3, idx).
     let raw = unsafe { (*l3).get_raw(idx) };
     assert_eq!(raw & 0b11, 0b11, "leaf should be Page descriptor");
+}
+
+#[test]
+fn map_page_initializes_tables_taken_from_a_dirty_frame() {
+    let buffer = allocate_dirty_buffer(16);
+    let (mut mapper, _base) = make_mapper(buffer);
+
+    let virt = PageAlignedVirtualAddress::from_usize(0x4000_0000).unwrap();
+    mapper
+        .map_page(virt, make_pa(0x10_0000), user_rw_flags())
+        .unwrap();
+
+    let (l3, idx) = mapper.walk_to_l3_leaf(virt).expect("walk should succeed");
+    for i in 0..512 {
+        // SAFETY: walk вернул валидную L3-таблицу, индекс в пределах 0..512.
+        let raw = unsafe { (*l3).get_raw(i) };
+        if i == idx {
+            assert_eq!(raw & 0b11, 0b11, "leaf should be Page descriptor");
+        } else {
+            assert_eq!(raw, 0, "entry {i} should be left invalid, got {raw:#x}");
+        }
+    }
 }
 
 #[test]

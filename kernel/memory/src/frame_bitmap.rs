@@ -218,11 +218,18 @@ impl FrameBitmap {
         frame
     }
 
-    /// Выделяет в памяти свободный фрейм, начиная поиск с offset
+    /// Выделяет свободный фрейм, начиная кольцевой поиск с `offset`.
+    /// Выданный фрейм всегда принадлежит региону карты; `offset` вне
+    /// региона равносилен поиску с его начала.
     pub fn alloc_from(&mut self, offset: Frame) -> Option<Frame> {
-        let region_end_exclusive = Frame::from(self.target_region.end());
-        let start = self.entry_pos(offset);
-        let region_end = self.entry_pos(region_end_exclusive);
+        let region_begin = self.entry_pos(self.base_frame);
+        let region_end = self.entry_pos(Frame::from(self.target_region.end()));
+
+        let start = if self.is_in_range(offset) {
+            self.entry_pos(offset)
+        } else {
+            region_begin
+        };
 
         // Поиск от offset до конца региона
         if let Some(frame) = self.search_range(start, region_end) {
@@ -230,7 +237,6 @@ impl FrameBitmap {
         }
 
         // Поиск от начала региона до offset при неудаче
-        let region_begin = self.entry_pos(self.base_frame);
         self.search_range(region_begin, start)
     }
 

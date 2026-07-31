@@ -154,13 +154,9 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
             return None;
         }
 
-        if let Some(frame) = bitmap.alloc_from(current) {
-            // Нашли следующий фрейм с последней позиции
-            Some(frame)
-        } else {
-            // Дошли до конца, пробуем найти с начала
-            bitmap.alloc_from(Frame::from(bitmap.start()))
-        }
+        // `alloc_from` обходит регион кольцом от подсказки, поэтому её отказ
+        // означает отсутствие свободного фрейма во всём регионе.
+        bitmap.alloc_from(current)
     }
 
     /// Релоцирует внутренние указатели bitmap'ов в каждом регионе.

@@ -48,6 +48,10 @@ impl TableAlloc for MockAlloc {
         PageAlignedAddress::from_usize(idx * PAGE_SIZE)
     }
 
+    unsafe fn unlinked_table_ptr<L: Level>(&self, pa: PageAlignedAddress) -> *mut PageTable<L> {
+        (self.base + pa.as_usize()) as *mut PageTable<L>
+    }
+
     unsafe fn table_ptr<L: Level>(
         &self,
         pa: PageAlignedAddress,
@@ -61,6 +65,13 @@ impl TableAlloc for MockAlloc {
 /// под выравнивание начала.
 pub fn allocate_buffer(pages: usize) -> &'static [u8] {
     let buf = vec![0u8; pages * PAGE_SIZE + PAGE_SIZE].into_boxed_slice();
+    Box::leak(buf)
+}
+
+/// Выделяет тестовый буфер с ненулевым содержимым страниц.
+#[allow(dead_code)]
+pub fn allocate_dirty_buffer(pages: usize) -> &'static [u8] {
+    let buf = vec![0xFFu8; pages * PAGE_SIZE + PAGE_SIZE].into_boxed_slice();
     Box::leak(buf)
 }
 
