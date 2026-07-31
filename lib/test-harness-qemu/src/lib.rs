@@ -9,6 +9,6 @@ pub mod case;
 pub mod macros;
 pub mod runner;
 
-pub use case::TestCase;
-pub use runner::run_all_tests;
+pub use case::{TestCase, TestKind};
+pub use runner::{run_all_tests, run_tests};
 pub use test_harness_macros::kernel_test;

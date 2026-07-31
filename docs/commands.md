@@ -14,6 +14,9 @@
 | Загрузочный образ для QEMU          | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                   |
 | Запуск после сборки                 | `cargo xtask build devices/spec/<device>.yaml --run`                                                                 |
 | QEMU integration tests              | `cargo xtask qemu-test [--timeout <сек>]`                                                                            |
+| Userspace stress в QEMU             | `cargo xtask stress [--seed <n>] [--seeds <n>] [--steps <n>] [--timeout <сек>]`                                      |
+| Host race под ThreadSanitizer       | `cargo xtask race`                                                                                                    |
+| Ограниченный fuzz-прогон            | `cargo xtask fuzz <target> [--seconds <сек>]`                                                                         |
 
 ## Сборка
 
@@ -84,6 +87,41 @@ cargo xtask qemu-test [--timeout <сек>]
 
 Ядро пересобирается между прогонами из-за различия feature-флагов.
 Выбор прохода для нового теста — в [`code-style.md`](code-style.md).
+
+### Stress, race и fuzz
+
+`stress` собирает отдельный образ testrunner, выбирает только
+`#[kernel_test(stress)]` и повторяет одну последовательность операций для
+диапазона seed.
+
+```bash
+cargo xtask stress --seed 100 --seeds 32 --steps 256 --timeout 900
+```
+
+При сбое выводятся seed, номер операции и её имя. Тем же seed и числом шагов
+повторяется последовательность операций, но не их чередование с ядром: QEMU
+выполняется с одним vCPU, и этот слой проверяет границы жизненного цикла и
+ожиданий, оставляя межъядерную память слою `race`.
+
+`race` запускает host-only тесты низкоуровневых примитивов с ThreadSanitizer:
+
+```bash
+cargo xtask race
+```
+
+Fuzz-targets лежат в отдельном workspace `fuzz/` — он собирается своим
+toolchain и не меняет target-конфигурацию основного bare-metal workspace:
+
+```bash
+cargo xtask fuzz fdt_parse_walk --seconds 60
+cargo xtask fuzz ipc_wire_decode --seconds 60
+cargo xtask fuzz userland_image_decode --seconds 60
+```
+
+Корпус находится в `fuzz/corpus/<target>/`, crash-артефакты — в
+`fuzz/artifacts/<target>/` и не добавляются в Git автоматически. Для прямого
+запуска доступны также `cargo fuzz build --fuzz-dir fuzz` и `cargo fuzz run
+--fuzz-dir fuzz <target> -- <libFuzzer args>`.
 
 ## Проверка слоёв
 

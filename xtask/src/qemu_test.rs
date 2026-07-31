@@ -7,39 +7,97 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use userland_image_tool::build_userland;
+use userland_image_tool::{BuildEnvironment, build_userland};
 
 use crate::{
     artifacts::build_binary,
     context::{BuildContext, image_manifest_path},
 };
 
+/// Один проход QEMU-тестов: собираемый образ и ожидания от его вывода.
+struct QemuPass<'a> {
+    label: &'a str,
+    features: Option<String>,
+    image: &'a Path,
+    timeout: u64,
+    environment: &'a [BuildEnvironment<'a>],
+    expected_seeds: Option<u64>,
+}
+
 pub(crate) fn qemu_test(timeout: u64) -> Result<()> {
-    // Pass 1: тесты внутри ядра (feature kernel-tests). Pass 2: тесты в
-    // userland-образе testrunner.
-    qemu_test_pass(
-        "kernel",
-        Some(String::from("kernel-tests")),
-        Path::new("user/rootkeeper/image.toml"),
+    qemu_test_pass(QemuPass {
+        label: "kernel",
+        features: Some(String::from("kernel-tests")),
+        image: Path::new("user/rootkeeper/image.toml"),
         timeout,
-    )?;
-    qemu_test_pass(
-        "userland",
-        None,
-        Path::new("user/testrunner/image.toml"),
+        environment: &[],
+        expected_seeds: None,
+    })?;
+    qemu_test_pass(QemuPass {
+        label: "userland",
+        features: None,
+        image: Path::new("user/testrunner/image.toml"),
         timeout,
-    )?;
+        environment: &[],
+        expected_seeds: None,
+    })?;
     Ok(())
 }
 
-fn qemu_test_pass(label: &str, features: Option<String>, image: &Path, timeout: u64) -> Result<()> {
+pub(crate) fn qemu_stress(seed: u64, seeds: u64, steps: u64, timeout: u64) -> Result<()> {
+    let seed_count = seeds;
+    let seed = seed.to_string();
+    let seeds = seeds.to_string();
+    let steps = steps.to_string();
+    let environment = [
+        BuildEnvironment {
+            name: "RUSTOS_TEST_PROFILE",
+            value: "stress",
+        },
+        BuildEnvironment {
+            name: "RUSTOS_STRESS_SEED",
+            value: &seed,
+        },
+        BuildEnvironment {
+            name: "RUSTOS_STRESS_SEEDS",
+            value: &seeds,
+        },
+        BuildEnvironment {
+            name: "RUSTOS_STRESS_STEPS",
+            value: &steps,
+        },
+    ];
+    qemu_test_pass(QemuPass {
+        label: "stress",
+        features: None,
+        image: Path::new("user/testrunner/image.toml"),
+        timeout,
+        environment: &environment,
+        expected_seeds: Some(seed_count),
+    })
+}
+
+fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
+    let QemuPass {
+        label,
+        features,
+        image,
+        timeout,
+        environment,
+        expected_seeds,
+    } = pass;
     println!("=== qemu-test pass: {label} ===");
 
     let spec_path = PathBuf::from("devices/spec/qemu-aarch64-test.yaml");
     let ctx = BuildContext::new(spec_path, features)?;
 
     let manifest_path = image_manifest_path(&ctx.project_root, image)?;
-    build_userland(&ctx.project_root, &manifest_path, &ctx.build_dir)?;
+    build_userland(
+        &ctx.project_root,
+        &manifest_path,
+        &ctx.build_dir,
+        environment,
+    )?;
     build_binary(&ctx)?;
 
     let qemu_cmd = ctx
@@ -75,7 +133,7 @@ fn qemu_test_pass(label: &str, features: Option<String>, image: &Path, timeout: 
         bail!("QEMU pass '{label}' exited with code {code}");
     }
 
-    markers.verify(label)
+    markers.verify(label, expected_seeds)
 }
 
 /// Счётчики `[TEST-*]`-маркеров прогона.
@@ -86,6 +144,7 @@ struct TestMarkers {
     passed: usize,
     failed: usize,
     done: Option<usize>,
+    stress_seeds: usize,
 }
 
 impl TestMarkers {
@@ -105,10 +164,12 @@ impl TestMarkers {
             self.failed += 1;
         } else if line.contains("[TEST-DONE: ") {
             self.done = suffix_count(line, "[TEST-DONE: ");
+        } else if line.contains("[STRESS-PASS: ") {
+            self.stress_seeds += 1;
         }
     }
 
-    fn verify(&self, label: &str) -> Result<()> {
+    fn verify(&self, label: &str, expected_seeds: Option<u64>) -> Result<()> {
         if self.failed > 0 {
             bail!(
                 "QEMU pass '{label}': {} tests reported TEST-FAIL",
@@ -118,6 +179,9 @@ impl TestMarkers {
         let Some(announced) = self.announced else {
             bail!("QEMU pass '{label}': TEST-RUN marker not found");
         };
+        if announced == 0 {
+            bail!("QEMU pass '{label}': TEST-RUN announced no tests for this profile");
+        }
         if self.done != Some(announced) {
             bail!(
                 "QEMU pass '{label}': TEST-DONE does not match TEST-RUN ({:?} != {announced}) - \
@@ -132,6 +196,15 @@ impl TestMarkers {
                 self.started,
                 self.passed
             );
+        }
+        if let Some(expected) = expected_seeds {
+            let expected = usize::try_from(expected).unwrap_or(usize::MAX);
+            if self.stress_seeds != expected {
+                bail!(
+                    "QEMU pass '{label}': {} of {expected} stress seeds reported STRESS-PASS",
+                    self.stress_seeds
+                );
+            }
         }
         println!("qemu-test pass '{label}': {announced} tests passed");
         Ok(())

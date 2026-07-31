@@ -2,8 +2,10 @@
 
 mod artifacts;
 mod context;
+mod fuzz;
 mod layers;
 mod qemu_test;
+mod race;
 mod shell;
 
 use std::{
@@ -53,6 +55,31 @@ enum Commands {
         #[arg(long, default_value_t = 60)]
         timeout: u64,
     },
+    /// Run reproducible userspace stress tests in QEMU
+    Stress {
+        /// First deterministic seed
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Number of consecutive seeds
+        #[arg(long, default_value_t = 4)]
+        seeds: u64,
+        /// Operations generated for each seed
+        #[arg(long, default_value_t = 64)]
+        steps: u64,
+        /// Timeout in seconds
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+    },
+    /// Run host concurrency tests under ThreadSanitizer
+    Race,
+    /// Run one bounded libFuzzer target
+    Fuzz {
+        /// Fuzz target name, as listed by `cargo fuzz list --fuzz-dir fuzz`
+        target: String,
+        /// Maximum fuzzing time in seconds
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+    },
     /// Build userland.img from a TOML image manifest
     BuildUserland {
         /// Relative path to the image manifest
@@ -75,12 +102,20 @@ fn main() -> Result<()> {
             image,
         } => build(spec, run, debug, features, &image)?,
         Commands::QemuTest { timeout } => qemu_test::qemu_test(timeout)?,
+        Commands::Stress {
+            seed,
+            seeds,
+            steps,
+            timeout,
+        } => qemu_test::qemu_stress(seed, seeds, steps, timeout)?,
+        Commands::Race => race::run()?,
+        Commands::Fuzz { target, seconds } => fuzz::run(&target, seconds)?,
         Commands::BuildUserland { image } => {
             let project_root = project_root();
             let build_dir = project_root.join("target/build");
             fs::create_dir_all(&build_dir)?;
             let manifest_path = image_manifest_path(&project_root, &image)?;
-            let output = build_userland(&project_root, &manifest_path, &build_dir)?;
+            let output = build_userland(&project_root, &manifest_path, &build_dir, &[])?;
             println!("Done: {}", output.display());
         }
         Commands::CheckLayers => layers::run()?,
@@ -98,7 +133,7 @@ fn build(
 ) -> Result<()> {
     let ctx = BuildContext::new(spec, features)?;
     let manifest_path = image_manifest_path(&ctx.project_root, image)?;
-    build_userland(&ctx.project_root, &manifest_path, &ctx.build_dir)?;
+    build_userland(&ctx.project_root, &manifest_path, &ctx.build_dir, &[])?;
 
     let output = match ctx.spec.boot.format.as_str() {
         "linux_arm64" => build_binary(&ctx)?,

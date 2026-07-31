@@ -15,12 +15,13 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 # Системные зависимости:
 #   qemu-system-arm   — запуск QEMU integration tests (xtask qemu-test)
-#   gcc/libc6-dev     — линкер для host-сборок и build-скриптов
+#   gcc/g++/libc6-dev — линкер для host-сборок, build-скриптов и libFuzzer
 #   git/ca-certs/curl — checkout, rustup, загрузка crates
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         gcc \
+        g++ \
         git \
         libc6-dev \
         qemu-system-arm \
@@ -41,6 +42,8 @@ RUN cd /tmp \
     && rm rust-toolchain.toml
 
 # cargo-binutils нужен для `cargo objcopy` внутри `xtask build` / `qemu-test`.
-RUN cargo install cargo-binutils --locked
+# cargo-fuzz собирает и запускает fuzz-targets в CI.
+RUN cargo install cargo-binutils --locked \
+    && cargo install cargo-fuzz --locked
 
 WORKDIR /work

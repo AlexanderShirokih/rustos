@@ -34,6 +34,7 @@ mod process_start;
 mod ring_transport;
 mod signal;
 mod spawn_from_image;
+mod stress;
 mod sync;
 mod vm;
 
@@ -131,7 +132,11 @@ pub extern "C" fn _start(root: Handle) -> ! {
     BOOTSTRAP_HANDLE.call_once(|| root);
     kernel_tests::runner::install_writer(&LOG_WRITER);
     kernel_tests::runner::install_exit(runner_exit);
-    kernel_tests::run_all_tests()
+    let profile = match env!("RUSTOS_TEST_PROFILE") {
+        "stress" => kernel_tests::TestKind::Stress,
+        _ => kernel_tests::TestKind::Regular,
+    };
+    kernel_tests::run_tests(profile)
 }
 
 #[kernel_test]

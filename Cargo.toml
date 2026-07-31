@@ -39,6 +39,7 @@ members = [
     "user/rtc-demo",
     "xtask",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

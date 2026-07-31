@@ -14,24 +14,44 @@ pub fn kernel_test(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn expand_kernel_test(attr: TokenStream2, item: &ItemFn) -> syn::Result<TokenStream2> {
-    if !attr.is_empty() {
-        return Err(Error::new_spanned(
-            attr,
-            "#[kernel_test] does not accept arguments yet",
-        ));
-    }
+    let kind = parse_kind(attr)?;
 
     validate_signature(item)?;
 
     let ident = &item.sig.ident;
     let registration_ident = format_ident!("__kernel_test_{ident}");
     let test_name = ident.to_string();
+    let kind = match kind {
+        TestKind::Regular => quote!(::kernel_tests::TestKind::Regular),
+        TestKind::Stress => quote!(::kernel_tests::TestKind::Stress),
+    };
 
     Ok(quote! {
         #item
 
-        ::kernel_tests::register_test!(#registration_ident, #test_name, #ident);
+        ::kernel_tests::register_test!(#registration_ident, #test_name, #ident, #kind);
     })
+}
+
+#[derive(Clone, Copy)]
+enum TestKind {
+    Regular,
+    Stress,
+}
+
+fn parse_kind(attr: TokenStream2) -> syn::Result<TestKind> {
+    if attr.is_empty() {
+        return Ok(TestKind::Regular);
+    }
+    let ident = syn::parse2::<syn::Ident>(attr)?;
+    if ident == "stress" {
+        Ok(TestKind::Stress)
+    } else {
+        Err(Error::new_spanned(
+            ident,
+            "#[kernel_test] accepts only the `stress` profile",
+        ))
+    }
 }
 
 fn validate_signature(item: &ItemFn) -> syn::Result<()> {
@@ -109,16 +129,27 @@ mod tests {
         assert!(rendered.contains(":: kernel_tests :: register_test !"));
         assert!(rendered.contains("\"smoke\""));
         assert!(rendered.contains("__kernel_test_smoke"));
+        assert!(rendered.contains("TestKind :: Regular"));
     }
 
     #[test]
-    fn rejects_arguments_for_now() {
+    fn expands_stress_profile() {
         let item: syn::ItemFn = parse_quote! {
             fn smoke() {}
         };
 
-        let error = expand_kernel_test(quote!(timeout = 2), &item).unwrap_err();
-        assert!(error.to_string().contains("does not accept arguments yet"));
+        let expanded = expand_kernel_test(quote!(stress), &item).unwrap();
+        assert!(expanded.to_string().contains("TestKind :: Stress"));
+    }
+
+    #[test]
+    fn rejects_unknown_profile() {
+        let item: syn::ItemFn = parse_quote! {
+            fn smoke() {}
+        };
+
+        let error = expand_kernel_test(quote!(slow), &item).unwrap_err();
+        assert!(error.to_string().contains("accepts only"));
     }
 
     #[test]

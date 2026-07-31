@@ -67,12 +67,14 @@ impl RevNode {
         });
     }
 
-    /// Валидна, если жив каждый предок по цепочке.
+    /// Валидна, если живы сам узел и каждый предок по цепочке.
     pub fn is_alive(self: &Arc<Self>) -> bool {
         let mut current = self.clone();
         loop {
+            if current.revoked.load(Ordering::SeqCst) {
+                return false;
+            }
             let Some(weak_parent) = &current.parent else {
-                // Дошли до корня - все предки живы.
                 return true;
             };
             let Some(parent) = weak_parent.upgrade() else {
@@ -262,5 +264,48 @@ mod tests {
         let hook = CountingHook::new();
         root.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>);
         assert_eq!(hook.count(), 1);
+    }
+
+    #[test]
+    fn revoked_root_is_not_alive() {
+        let root = RevNode::new_root();
+        revoke_subtree(&root);
+        assert!(!root.is_alive());
+    }
+
+    #[test]
+    fn race_child_creation_and_revoke_never_leave_a_live_child() {
+        use std::{
+            sync::{Arc as StdArc, Barrier},
+            thread,
+        };
+
+        for _ in 0..128 {
+            let root = RevNode::new_root();
+            let barrier = StdArc::new(Barrier::new(3));
+
+            let child_root = root.clone();
+            let child_barrier = barrier.clone();
+            let child = thread::spawn(move || {
+                child_barrier.wait();
+                RevNode::new_child(&child_root)
+            });
+
+            let revoke_root = root.clone();
+            let revoke_barrier = barrier.clone();
+            let revoke = thread::spawn(move || {
+                revoke_barrier.wait();
+                revoke_subtree(&revoke_root);
+            });
+
+            barrier.wait();
+            let child = child.join().expect("child contender joins");
+            revoke.join().expect("revoke contender joins");
+
+            assert!(!root.is_alive());
+            if let Some(child) = child {
+                assert!(!child.is_alive());
+            }
+        }
     }
 }

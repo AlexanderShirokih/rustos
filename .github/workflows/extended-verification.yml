@@ -1,0 +1,72 @@
+name: Extended verification
+
+on:
+  schedule:
+    - cron: "0 12 */3 * *"
+  workflow_dispatch:
+    inputs:
+      stress_seed:
+        description: First deterministic userspace stress seed
+        required: false
+        default: "1"
+      stress_seeds:
+        description: Number of userspace stress seeds
+        required: false
+        default: "64"
+      stress_steps:
+        description: Operations per userspace stress seed
+        required: false
+        default: "256"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  userspace-stress:
+    name: userspace stress (QEMU)
+    runs-on: ubuntu-latest
+    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: aarch64
+      - run: >-
+          cargo xtask stress
+          --seed "${{ inputs.stress_seed || '1' }}"
+          --seeds "${{ inputs.stress_seeds || '64' }}"
+          --steps "${{ inputs.stress_steps || '256' }}"
+          --timeout 900
+
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fdt_parse_walk, ipc_wire_decode, userland_image_decode]
+    steps:
+      - uses: actions/checkout@v5
+      - run: >-
+          command -v g++ >/dev/null
+          || (apt-get update && apt-get install -y --no-install-recommends g++)
+      - run: cargo fuzz --version || cargo install cargo-fuzz --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz
+      - uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - run: cargo xtask fuzz "${{ matrix.target }}" --seconds 600
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

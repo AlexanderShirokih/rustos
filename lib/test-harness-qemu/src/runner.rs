@@ -12,7 +12,7 @@ use core::fmt::Write as _;
 use io::writer::Writer;
 use spin::Once;
 
-use crate::case::TestCase;
+use crate::case::{TestCase, TestKind};
 
 #[allow(improper_ctypes)]
 unsafe extern "C" {
@@ -93,26 +93,32 @@ fn run_case(case: &TestCase) {
     });
 }
 
-/// Прогоняет все зарегистрированные кейсы и выключает машину.
+/// Прогоняет зарегистрированные кейсы профиля `kind` и выключает машину.
 ///
 /// Порядок обхода задаётся раскладкой секции `.tests.kernel` линкером и не
 /// является частью контракта: кейс обязан быть самодостаточным - сам создавать
 /// нужное ему состояние и не полагаться на то, что оставил предыдущий.
-pub fn run_all_tests() -> ! {
+pub fn run_tests(kind: TestKind) -> ! {
     let cases = iter_cases();
+    let selected = cases.iter().filter(|case| case.kind == kind).count();
 
     with_writer(|w| {
         let mut fmt = FmtAdapter::new(w);
-        let _ = writeln!(fmt, "[TEST-RUN: {}]", cases.len());
+        let _ = writeln!(fmt, "[TEST-RUN: {selected}]");
     });
 
-    for case in cases {
+    for case in cases.iter().filter(|case| case.kind == kind) {
         run_case(case);
     }
 
     with_writer(|w| {
         let mut fmt = FmtAdapter::new(w);
-        let _ = writeln!(fmt, "[TEST-DONE: {}]", cases.len());
+        let _ = writeln!(fmt, "[TEST-DONE: {selected}]");
     });
     exit(0)
+}
+
+/// Прогоняет обычный профиль тестов.
+pub fn run_all_tests() -> ! {
+    run_tests(TestKind::Regular)
 }

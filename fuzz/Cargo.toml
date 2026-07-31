@@ -1,0 +1,39 @@
+[package]
+name = "mobile-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+fdt = { path = "../lib/fdt" }
+ipc = { path = "../lib/ipc" }
+libfuzzer-sys = "0.4"
+userland = { path = "../lib/userland" }
+userland-image = { path = "../lib/userland-image" }
+
+[[bin]]
+name = "fdt_parse_walk"
+path = "fuzz_targets/fdt_parse_walk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_wire_decode"
+path = "fuzz_targets/ipc_wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "userland_image_decode"
+path = "fuzz_targets/userland_image_decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

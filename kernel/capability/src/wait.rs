@@ -435,4 +435,40 @@ mod tests {
         assert_eq!(waker.winner_index(), 1);
         assert_eq!(waker.observed() & BIT0, BIT0);
     }
+
+    #[test]
+    fn race_signal_and_cancel_unblock_once() {
+        use std::{
+            sync::{Arc as StdArc, Barrier},
+            thread,
+        };
+
+        for _ in 0..128 {
+            let runtime = StubRuntime::new();
+            let waker = make_waker(runtime.clone() as Arc<dyn KernelRuntime>);
+            let barrier = StdArc::new(Barrier::new(3));
+
+            let signal_waker = waker.clone();
+            let signal_barrier = barrier.clone();
+            let signal = thread::spawn(move || {
+                signal_barrier.wait();
+                Waker::wake(signal_waker.as_ref(), BIT0);
+            });
+
+            let cancel_waker = waker.clone();
+            let cancel_barrier = barrier.clone();
+            let cancel = thread::spawn(move || {
+                cancel_barrier.wait();
+                CancelTarget::cancel(cancel_waker.as_ref());
+            });
+
+            barrier.wait();
+            signal.join().expect("signal contender joins");
+            cancel.join().expect("cancel contender joins");
+
+            let state = waker.state().load(Ordering::Acquire);
+            assert!(state == ParkState::SIGNALED || state == ParkState::CANCELED);
+            assert_eq!(runtime.unblock_count(), 1);
+        }
+    }
 }

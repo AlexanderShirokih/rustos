@@ -4,4 +4,4 @@
 mod host;
 
 #[cfg(not(target_os = "none"))]
-pub use host::build_userland;
+pub use host::{BuildEnvironment, build_userland};

@@ -119,3 +119,48 @@ impl OutcomeSlot {
             .is_ok()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc as StdArc, Barrier},
+        thread,
+    };
+
+    use super::OutcomeSlot;
+
+    #[test]
+    fn race_reply_and_timeout_choose_one_terminal_path() {
+        for _ in 0..128 {
+            let outcome = OutcomeSlot::new();
+            outcome.set_awaiting_reply();
+            let barrier = StdArc::new(Barrier::new(3));
+
+            let reply_outcome = outcome.clone();
+            let reply_barrier = barrier.clone();
+            let reply = thread::spawn(move || {
+                reply_barrier.wait();
+                reply_outcome.try_begin_reply()
+            });
+
+            let timeout_outcome = outcome.clone();
+            let timeout_barrier = barrier.clone();
+            let timeout = thread::spawn(move || {
+                timeout_barrier.wait();
+                timeout_outcome.try_timeout()
+            });
+
+            barrier.wait();
+            let reply_won = reply.join().expect("reply contender joins");
+            let timeout_won = timeout.join().expect("timeout contender joins");
+
+            assert_ne!(reply_won, timeout_won);
+            let expected = if reply_won {
+                OutcomeSlot::DELIVERING
+            } else {
+                OutcomeSlot::TIMEDOUT
+            };
+            assert_eq!(outcome.raw(), expected);
+        }
+    }
+}

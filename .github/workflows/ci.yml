@@ -6,7 +6,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Образ с зафиксированным toolchain + qemu + cargo-binutils собирается отдельным
+# Образ с зафиксированным toolchain + qemu + cargo-binutils/cargo-fuzz собирается отдельным
 # workflow (.github/workflows/ci-image.yml) и публикуется в GHCR как public —
 # поэтому pull анонимный, credentials/packages-права не нужны.
 
@@ -25,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: cargo fmt --all --check
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml --all --check
 
   check-layers:
     name: check-layers
@@ -67,6 +68,32 @@ jobs:
         with:
           shared-key: host
       - run: cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
+
+  race:
+    name: race (ThreadSanitizer)
+    runs-on: ubuntu-latest
+    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: race
+      - run: cargo xtask race
+
+  fuzz-build:
+    name: fuzz targets (AddressSanitizer)
+    runs-on: ubuntu-latest
+    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: >-
+          command -v g++ >/dev/null
+          || (apt-get update && apt-get install -y --no-install-recommends g++)
+      - run: cargo fuzz --version || cargo install cargo-fuzz --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz
+      - run: cargo fuzz build --fuzz-dir fuzz
 
   qemu-test:
     name: qemu-test (aarch64)

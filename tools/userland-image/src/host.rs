@@ -20,6 +20,13 @@ use userland_image::{USERLAND_IMAGE_VERSION, decode, encode};
 const USERLAND_MANIFEST_VERSION: u16 = USERLAND_IMAGE_VERSION;
 const USERLAND_STACK_ALIGN: u64 = USERLAND_PAGE_SIZE;
 
+/// Переменная окружения, передаваемая сборке каждой программы образа.
+#[derive(Clone, Copy, Debug)]
+pub struct BuildEnvironment<'a> {
+    pub name: &'a str,
+    pub value: &'a str,
+}
+
 /// Композиция образа: версия и список включаемых пакетов workspace.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +70,7 @@ struct ResolvedProgram {
 #[derive(Debug, Deserialize)]
 struct CargoMetadataOutput {
     packages: Vec<CargoPackage>,
+    target_directory: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +78,11 @@ struct CargoPackage {
     name: String,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+}
+
+struct WorkspaceMetadata {
+    packages: HashMap<String, UserlandMetadata>,
+    target_directory: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -92,18 +105,28 @@ fn default_manifest_version() -> u16 {
     USERLAND_MANIFEST_VERSION
 }
 
+/// Собирает userland-образ, передавая `environment` каждому cargo-процессу сборки.
 pub fn build_userland(
     project_root: &Path,
     manifest_path: &Path,
     build_dir: &Path,
+    environment: &[BuildEnvironment<'_>],
 ) -> Result<PathBuf> {
     let manifest = load_manifest(manifest_path)?;
-    let metadata = load_workspace_metadata(project_root)?;
-    let programs = resolve_programs(&manifest, &metadata)?;
+    let workspace = load_workspace_metadata(project_root)?;
+    let programs = resolve_programs(&manifest, &workspace.packages)?;
     let built_entries = programs
         .iter()
         .enumerate()
-        .map(|(image_order, program)| build_program(project_root, image_order, program))
+        .map(|(image_order, program)| {
+            build_program(
+                project_root,
+                &workspace.target_directory,
+                image_order,
+                program,
+                environment,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
 
     let blob = assemble_userland_image(&built_entries)?;
@@ -139,7 +162,7 @@ fn parse_manifest(src: &str) -> Result<ImageManifest> {
     Ok(manifest)
 }
 
-fn load_workspace_metadata(project_root: &Path) -> Result<HashMap<String, UserlandMetadata>> {
+fn load_workspace_metadata(project_root: &Path) -> Result<WorkspaceMetadata> {
     let output = Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(project_root)
@@ -152,14 +175,22 @@ fn load_workspace_metadata(project_root: &Path) -> Result<HashMap<String, Userla
         "cargo metadata failed with {}",
         output.status
     );
-    parse_workspace_metadata(&output.stdout)
+    let parsed = parse_cargo_metadata(&output.stdout)?;
+    let packages = collect_userland_metadata(parsed.packages)?;
+    Ok(WorkspaceMetadata {
+        packages,
+        target_directory: parsed.target_directory,
+    })
 }
 
-fn parse_workspace_metadata(json: &[u8]) -> Result<HashMap<String, UserlandMetadata>> {
-    let parsed: CargoMetadataOutput =
-        serde_json::from_slice(json).context("Failed to parse cargo metadata JSON")?;
-    parsed
-        .packages
+fn parse_cargo_metadata(json: &[u8]) -> Result<CargoMetadataOutput> {
+    serde_json::from_slice(json).context("Failed to parse cargo metadata JSON")
+}
+
+fn collect_userland_metadata(
+    packages: Vec<CargoPackage>,
+) -> Result<HashMap<String, UserlandMetadata>> {
+    packages
         .into_iter()
         .map(|package| {
             let metadata = userland_metadata(&package)?;
@@ -284,16 +315,23 @@ fn validate_program(program: &ResolvedProgram) -> Result<()> {
 
 fn build_program(
     project_root: &Path,
+    target_directory: &Path,
     image_order: usize,
     program: &ResolvedProgram,
+    environment: &[BuildEnvironment<'_>],
 ) -> Result<BuiltEntry> {
-    run_userland_build(project_root, program)?;
-    let binary_path = userland_binary_path(project_root, &program.bin);
+    run_userland_build(project_root, program, environment)?;
+    let binary_path = userland_binary_path(target_directory, &program.bin);
     read_and_extract_entry(image_order, &binary_path, program)
 }
 
-fn run_userland_build(project_root: &Path, program: &ResolvedProgram) -> Result<()> {
-    let status = Command::new("cargo")
+fn run_userland_build(
+    project_root: &Path,
+    program: &ResolvedProgram,
+    environment: &[BuildEnvironment<'_>],
+) -> Result<()> {
+    let mut command = Command::new("cargo");
+    command
         .args([
             "build",
             "--package",
@@ -307,7 +345,11 @@ fn run_userland_build(project_root: &Path, program: &ResolvedProgram) -> Result<
         .current_dir(project_root)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    for variable in environment {
+        command.env(variable.name, variable.value);
+    }
+    let status = command
         .status()
         .context("Failed to execute cargo build for userland entry")?;
 
@@ -322,9 +364,9 @@ fn run_userland_build(project_root: &Path, program: &ResolvedProgram) -> Result<
     Ok(())
 }
 
-fn userland_binary_path(project_root: &Path, bin: &str) -> PathBuf {
-    project_root
-        .join("target/aarch64-unknown-none/release")
+fn userland_binary_path(target_directory: &Path, bin: &str) -> PathBuf {
+    target_directory
+        .join("aarch64-unknown-none/release")
         .join(bin)
 }
 
@@ -803,13 +845,16 @@ mod tests {
 
     #[test]
     fn workspace_metadata_reads_userland_section() {
-        let json = br#"{"packages": [
+        let json = br#"{"target_directory": "/workspace/target", "packages": [
             {"name": "rootkeeper",
              "metadata": {"userland": {"bootstrap": true, "stack_size": 65536}}},
             {"name": "memory", "metadata": null}
         ]}"#;
 
-        let metadata = parse_workspace_metadata(json).expect("metadata must parse");
+        let parsed = parse_cargo_metadata(json).expect("cargo metadata must parse");
+        assert_eq!(parsed.target_directory, PathBuf::from("/workspace/target"));
+        let metadata =
+            collect_userland_metadata(parsed.packages).expect("userland metadata must parse");
         let rootkeeper = &metadata["rootkeeper"];
         assert_eq!(rootkeeper.bootstrap, Some(true));
         assert_eq!(rootkeeper.stack_size, Some(65536));
@@ -821,12 +866,14 @@ mod tests {
 
     #[test]
     fn workspace_metadata_rejects_unknown_userland_field() {
-        let json = br#"{"packages": [
+        let json = br#"{"target_directory": "/workspace/target", "packages": [
             {"name": "rootkeeper",
              "metadata": {"userland": {"bootstrap": true, "stak_size": 65536}}}
         ]}"#;
 
-        let err = parse_workspace_metadata(json).expect_err("typo in metadata must fail");
+        let parsed = parse_cargo_metadata(json).expect("cargo metadata must parse");
+        let err =
+            collect_userland_metadata(parsed.packages).expect_err("typo in metadata must fail");
         assert!(
             err.to_string()
                 .contains("Invalid [package.metadata.userland] in package 'rootkeeper'")
