@@ -45,7 +45,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: host
-      - run: cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
+      - run: cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64
 
   clippy-aarch64:
     name: clippy (aarch64)
@@ -67,7 +67,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: host
-      - run: cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --exclude main
+      - run: cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64
 
   race:
     name: race (ThreadSanitizer)
