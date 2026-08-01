@@ -11,6 +11,7 @@ forced-target = "aarch64-unknown-none"
 name = "kernel-aarch64"
 path = "src/start.rs"
 test = false
+bench = false
 
 [features]
 default = ["boot-linux-arm64"]
