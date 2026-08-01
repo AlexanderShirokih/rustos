@@ -108,6 +108,23 @@ pub enum IrqRegistrationError {
     Other(&'static str),
 }
 
+/// Ошибки настройки per-CPU части контроллера.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuInterfaceError {
+    /// Контроллер не нашёл per-CPU части, принадлежащей текущему CPU.
+    NotFound,
+}
+
+impl core::fmt::Display for CpuInterfaceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CpuInterfaceError::NotFound => {
+                f.write_str("the controller has no per-CPU interface for this CPU")
+            }
+        }
+    }
+}
+
 /// Контракт обработчика IRQ.
 ///
 /// Реализация должна выдерживать реентрантный вызов с другого стека.
@@ -168,6 +185,10 @@ pub trait InterruptsService: Send + Sync {
 
     /// Обрабатывает IRQ (не более одного за раз).
     fn dispatch_interrupt(&self);
+
+    /// Настраивает per-CPU часть контроллера на текущем CPU. Вызывается каждым
+    /// CPU при старте.
+    fn init_this_cpu(&self) -> Result<(), CpuInterfaceError>;
 }
 
 #[cfg(test)]
@@ -204,6 +225,10 @@ mod tests {
     }
 
     impl InterruptsService for SpyInterruptsService {
+        fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
+            Ok(())
+        }
+
         fn enable(&self) {}
 
         fn disable(&self) {}

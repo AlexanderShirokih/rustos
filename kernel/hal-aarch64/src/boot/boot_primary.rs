@@ -38,6 +38,8 @@ const SCHED_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 64);
 pub(super) struct BootHandoff {
     pub dtb_phys: usize,
     pub higher_root_pa: usize,
+    /// Корень identity-таблиц: по нему вторичные CPU переживают включение MMU.
+    pub lower_root_pa: usize,
     pub frame_allocator_phys: usize,
     pub initrd_start: usize,
     pub initrd_size: usize,
@@ -53,10 +55,12 @@ pub fn primary_main(
     frame_allocator_phys: usize,
     initrd_start: usize,
     initrd_size: usize,
+    lower_root_pa: usize,
 ) -> ! {
     let handoff = BootHandoff {
         dtb_phys,
         higher_root_pa,
+        lower_root_pa,
         frame_allocator_phys,
         initrd_start,
         initrd_size,
@@ -73,6 +77,7 @@ enum PrimaryBootError {
     EmptyDtb,
     UnalignedInitrdBase,
     BootStackExhausted,
+    UnalignedLowerRoot,
 }
 
 impl core::fmt::Display for PrimaryBootError {
@@ -86,6 +91,7 @@ impl core::fmt::Display for PrimaryBootError {
             PrimaryBootError::EmptyDtb => "DTB totalsize is zero",
             PrimaryBootError::UnalignedInitrdBase => "initrd base is not 4K-aligned",
             PrimaryBootError::BootStackExhausted => "pre-MMU phase used up the whole boot stack",
+            PrimaryBootError::UnalignedLowerRoot => "identity root table PA is not 4K-aligned",
         };
         f.write_str(text)
     }
@@ -105,6 +111,7 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
     let &BootHandoff {
         dtb_phys,
         higher_root_pa,
+        lower_root_pa,
         frame_allocator_phys,
         initrd_start,
         initrd_size,
@@ -143,6 +150,15 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
     // До этой точки логический идентификатор CPU известен только по
     // умолчанию: подсистемы с per-CPU состоянием идут ниже.
     init_cpu_topology(device_tree);
+
+    crate::smp::prepare(
+        device_tree,
+        &crate::smp::TranslationRoots {
+            lower: PageAlignedAddress::from_usize(lower_root_pa)
+                .ok_or(PrimaryBootError::UnalignedLowerRoot)?,
+            higher: higher_root,
+        },
+    );
 
     let mut driver_scanner = EmbeddedDriversScanner::new();
     let root = adapt_to_fdt_tree(device_tree)

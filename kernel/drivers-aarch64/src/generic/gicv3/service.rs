@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 
 use drivers_common::services::interrupts::{
-    InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqRegistrationError,
+    CpuInterfaceError, InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqRegistrationError,
 };
 use klog::debug;
 use spin::Mutex;
@@ -80,6 +80,10 @@ impl InterruptsService for GicV3InterruptsService {
     fn unmask(&self, irq: IrqNumber) {
         super::super::barrier_before_unmask();
         self.controller.lock().enable(irq);
+    }
+
+    fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
+        self.controller.lock().init_this_cpu()
     }
 
     fn dispatch_interrupt(&self) {

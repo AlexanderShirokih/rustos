@@ -130,6 +130,10 @@ where
 
     info!("Kernel drivers initialization completed");
 
+    // Вторичный CPU настраивает свой интерфейс контроллера прерываний: подъём
+    // идёт после инициализации контроллера.
+    <A::Cpu as ArchCpu>::start_secondaries();
+
     // Scheduler bootstrapится при замаскированных IRQ.
     <A::Cpu as ArchCpu>::disable_preemption();
 

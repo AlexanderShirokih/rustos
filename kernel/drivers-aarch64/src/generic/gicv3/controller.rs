@@ -4,26 +4,29 @@ use alloc::{collections::BTreeMap, sync::Arc};
 use core::hint::spin_loop;
 
 use drivers_common::services::{
-    interrupts::{CpuMask, IrqHandler, IrqNumber, IrqPriority, TriggerType},
+    interrupts::{CpuInterfaceError, CpuMask, IrqHandler, IrqNumber, IrqPriority, TriggerType},
     mmio::MmioBound,
 };
 use io::mmio::Reg;
-use klog::debug;
+use klog::{debug, warn};
 
 use super::regs::{
     GICD_CTLR, GICD_CTLR_ARE_NS, GICD_CTLR_ENABLE_GRP1NS, GICD_CTLR_RWP, GICD_ICENABLER,
     GICD_ICFGR, GICD_ICPENDR, GICD_IGROUPR, GICD_IGRPMODR, GICD_IPRIORITYR, GICD_IROUTER,
     GICD_ISENABLER, GICD_TYPER, GICR_ICENABLER0, GICR_ICFGR0, GICR_ICFGR1, GICR_IGROUPR0,
-    GICR_IGRPMODR0, GICR_IPRIORITYR, GICR_ISENABLER0, GICR_WAKER, GICR_WAKER_CHILDREN_ASLEEP,
-    GICR_WAKER_PROCESSOR_SLEEP, ITLinesNumber, IrqType, PRIORITY_MASK_ALL, bit_offset,
+    GICR_IGRPMODR0, GICR_IPRIORITYR, GICR_ISENABLER0, GICR_TYPER, GICR_TYPER_LAST, GICR_WAKER,
+    GICR_WAKER_CHILDREN_ASLEEP, GICR_WAKER_PROCESSOR_SLEEP, ITLinesNumber, IrqType,
+    PRIORITY_MASK_ALL, affinity_value, bit_offset, packed_affinity,
 };
 use crate::{read_sysreg, write_sysreg};
 
 /// Runtime-объект контроллера прерываний GICv3.
 pub(super) struct Gicv3Controller {
     pub(super) distributor: MmioBound,
-    /// GICR-регион текущего CPU (RD_base + SGI_base в одном маппинге).
+    /// Отображённая область Redistributor'ов: фреймы всех CPU подряд.
     pub(super) redistributor: MmioBound,
+    /// Расстояние между фреймами соседних CPU, объявленное device tree.
+    pub(super) redistributor_stride: usize,
     pub(super) interrupt_lines: ITLinesNumber,
     pub(super) handlers: BTreeMap<IrqNumber, Arc<dyn IrqHandler>>,
 }
@@ -33,12 +36,17 @@ pub(super) struct Gicv3Controller {
 unsafe impl Send for Gicv3Controller {}
 
 impl Gicv3Controller {
-    pub(super) fn new(distributor: MmioBound, redistributor: MmioBound) -> Self {
+    pub(super) fn new(
+        distributor: MmioBound,
+        redistributor: MmioBound,
+        redistributor_stride: usize,
+    ) -> Self {
         let interrupt_lines = Self::read_interrupt_lines(&distributor);
 
         Self {
             distributor,
             redistributor,
+            redistributor_stride,
             interrupt_lines,
             handlers: BTreeMap::new(),
         }
@@ -53,9 +61,56 @@ impl Gicv3Controller {
 
         Self::enable_sre();
         self.init_distributor();
-        self.wakeup_redistributor();
-        self.init_redistributor_sgi_ppi();
-        self.configure_cpu_interface();
+        if let Err(error) = self.init_this_cpu() {
+            warn!("GICv3: the boot CPU interface is not configured: {error}");
+        }
+        self.enable_distributor();
+    }
+
+    /// Настраивает Redistributor и CPU interface текущего CPU. Distributor
+    /// общий для всех CPU и здесь не участвует.
+    ///
+    /// Отказ значит, что прерывания этому CPU не доставляются. Оставляет IRQ
+    /// замаскированными на текущем CPU.
+    pub(super) fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
+        Self::set_irq_mask();
+        Self::enable_sre();
+
+        let frame = self
+            .current_redistributor_frame()
+            .ok_or(CpuInterfaceError::NotFound)?;
+
+        self.wakeup_redistributor(frame);
+        self.init_redistributor_sgi_ppi(frame);
+        Self::configure_cpu_interface();
+
+        Ok(())
+    }
+
+    // Фреймы перебираются подряд до отмеченного `Last`: порядок фреймов задаёт
+    // железо, и совпадать с нумерацией ядра он не обязан. Перебор ограничен
+    // отображённой областью - `MmioBound` границы не проверяет.
+    fn current_redistributor_frame(&self) -> Option<usize> {
+        // SAFETY: MPIDR_EL1 доступен на EL1 и только читается.
+        let mpidr = unsafe { read_sysreg!(mpidr_el1) };
+        let affinity = packed_affinity(mpidr);
+        let region = self.redistributor.base().size();
+
+        let mut frame = 0usize;
+        while frame + self.redistributor_stride <= region {
+            let typer: u64 = self.redistributor.read_reg(GICR_TYPER.with_offset(frame));
+
+            if affinity_value(typer) == affinity {
+                return Some(frame);
+            }
+            if typer & GICR_TYPER_LAST != 0 {
+                return None;
+            }
+
+            frame = frame.checked_add(self.redistributor_stride)?;
+        }
+
+        None
     }
 
     pub(super) fn enable_global() {
@@ -82,8 +137,15 @@ impl Gicv3Controller {
     ) {
         match IrqType::from_irq_number(irq) {
             IrqType::Sgi | IrqType::Ppi => {
+                let Some(frame) = self.current_redistributor_frame() else {
+                    warn!(
+                        "GICv3: no redistributor frame for this CPU, IRQ {} left as is",
+                        irq.raw()
+                    );
+                    return;
+                };
                 self.redistributor
-                    .write_reg(redistributor_reg, 1u32 << irq.raw());
+                    .write_reg(redistributor_reg.with_offset(frame), 1u32 << irq.raw());
             }
             IrqType::Spi => {
                 let (reg, bit) = bit_offset(irq, 1);
@@ -97,8 +159,15 @@ impl Gicv3Controller {
     pub(super) fn set_priority(&self, irq: IrqNumber, priority: IrqPriority) {
         match IrqType::from_irq_number(irq) {
             IrqType::Sgi | IrqType::Ppi => {
+                let Some(frame) = self.current_redistributor_frame() else {
+                    warn!(
+                        "GICv3: no redistributor frame for this CPU, IRQ {} keeps priority",
+                        irq.raw()
+                    );
+                    return;
+                };
                 let (reg, bit) = bit_offset(irq, 8);
-                let reg_desc = GICR_IPRIORITYR.with_offset(reg * 4);
+                let reg_desc = GICR_IPRIORITYR.with_offset(frame + reg * 4);
                 let mut val: u32 = self.redistributor.read_reg(reg_desc);
                 let shift = bit * 8;
                 val &= !(0xFF << shift);
@@ -199,42 +268,55 @@ impl Gicv3Controller {
         }
     }
 
-    fn wakeup_redistributor(&self) {
-        let waker: u32 = self.redistributor.read_reg(GICR_WAKER);
+    fn wakeup_redistributor(&self, frame: usize) {
+        let waker_reg = GICR_WAKER.with_offset(frame);
+        let waker: u32 = self.redistributor.read_reg(waker_reg);
 
         if (waker & GICR_WAKER_PROCESSOR_SLEEP) == 0 {
             return;
         }
 
         self.redistributor
-            .write_reg(GICR_WAKER, waker & !GICR_WAKER_PROCESSOR_SLEEP);
+            .write_reg(waker_reg, waker & !GICR_WAKER_PROCESSOR_SLEEP);
 
         // Ожидание снятия флага ChildrenAsleep
-        while (self.redistributor.read_reg(GICR_WAKER) & GICR_WAKER_CHILDREN_ASLEEP) != 0 {
+        while (self.redistributor.read_reg(waker_reg) & GICR_WAKER_CHILDREN_ASLEEP) != 0 {
             spin_loop();
         }
     }
 
-    fn init_redistributor_sgi_ppi(&self) {
+    fn init_redistributor_sgi_ppi(&self, frame: usize) {
         // Отключить все SGI/PPI перед настройкой
-        self.redistributor.write_reg(GICR_ICENABLER0, u32::MAX);
+        self.redistributor
+            .write_reg(GICR_ICENABLER0.with_offset(frame), u32::MAX);
 
         // Group 1 NS: IGROUPR0=0xFF...FF, IGRPMODR0=0
-        self.redistributor.write_reg(GICR_IGROUPR0, u32::MAX);
-        self.redistributor.write_reg(GICR_IGRPMODR0, 0u32);
+        self.redistributor
+            .write_reg(GICR_IGROUPR0.with_offset(frame), u32::MAX);
+        self.redistributor
+            .write_reg(GICR_IGRPMODR0.with_offset(frame), 0u32);
 
         // Наинизший приоритет для всех SGI/PPI (8 регистров, 4 IRQ каждый)
         for i in 0..8usize {
             self.redistributor
-                .write_reg(GICR_IPRIORITYR.with_offset(i * 4), 0xFFFF_FFFFu32);
+                .write_reg(GICR_IPRIORITYR.with_offset(frame + i * 4), 0xFFFF_FFFFu32);
         }
 
         // Level-sensitive конфигурация
-        self.redistributor.write_reg(GICR_ICFGR0, 0u32);
-        self.redistributor.write_reg(GICR_ICFGR1, 0u32);
+        self.redistributor
+            .write_reg(GICR_ICFGR0.with_offset(frame), 0u32);
+        self.redistributor
+            .write_reg(GICR_ICFGR1.with_offset(frame), 0u32);
     }
 
-    fn configure_cpu_interface(&self) {
+    // Distributor общий для всех CPU: включается однократно.
+    fn enable_distributor(&self) {
+        self.distributor
+            .write_reg(GICD_CTLR, GICD_CTLR_ENABLE_GRP1NS | GICD_CTLR_ARE_NS);
+        self.wait_gicd_rwp();
+    }
+
+    fn configure_cpu_interface() {
         // SAFETY: Запись в ICC_PMR_EL1 устанавливает порог приоритета.
         // Значение 0xFF пропускает все прерывания.
         unsafe { write_sysreg!(icc_pmr_el1, PRIORITY_MASK_ALL) };
@@ -243,13 +325,8 @@ impl Gicv3Controller {
         // все 8 бит приоритета участвуют в сравнении с PMR.
         unsafe { write_sysreg!(icc_bpr1_el1, 0u64) };
 
-        // Включить Distributor с ARE_NS и Group 1 NS
-        self.distributor
-            .write_reg(GICD_CTLR, GICD_CTLR_ENABLE_GRP1NS | GICD_CTLR_ARE_NS);
-        self.wait_gicd_rwp();
-
         // SAFETY: Запись 1 в ICC_IGRPEN1_EL1 разрешает доставку прерываний группы 1
-        // на текущий CPU. Должна выполняться после инициализации GICD и GICR.
+        // на текущий CPU. Должна выполняться после инициализации GICR.
         unsafe { write_sysreg!(icc_igrpen1_el1, 1u64) };
     }
 
@@ -307,12 +384,21 @@ impl Gicv3Controller {
         );
         let trigger_bit = (raw % 16) * 2 + 1;
 
-        let mut val = self.redistributor.read_reg(GICR_ICFGR1);
+        let Some(frame) = self.current_redistributor_frame() else {
+            warn!(
+                "GICv3: no redistributor frame for this CPU, IRQ {} keeps its trigger",
+                irq.raw()
+            );
+            return;
+        };
+        let reg_desc = GICR_ICFGR1.with_offset(frame);
+
+        let mut val = self.redistributor.read_reg(reg_desc);
         match trigger {
             TriggerType::Edge => val |= 1 << trigger_bit,
             TriggerType::Level => val &= !(1 << trigger_bit),
         }
-        self.redistributor.write_reg(GICR_ICFGR1, val);
+        self.redistributor.write_reg(reg_desc, val);
     }
 }
 

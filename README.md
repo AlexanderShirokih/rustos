@@ -54,7 +54,7 @@ Raspberry Pi 5 и на Android-телефоне (тестировалось на
 - [docs/syscalls.md](docs/syscalls.md) — syscall-ABI: права, сигналы, ошибки, примеры
 - [docs/ipc.md](docs/ipc.md) — формат типизированных IPC-контрактов
 - [docs/userland.md](docs/userland.md) — устройство userland
-- [docs/smp.md](docs/smp.md) — архитектурное решение по внедрению SMP
+- [docs/smp.md](docs/smp.md) — многопроцессорность: подъём ядер, per-CPU состояние, дисциплина
 - [docs/environment.md](docs/environment.md) — toolchain, зависимости, device specs
 - [docs/commands.md](docs/commands.md) — команды сборки и тестирования
 - [docs/code-style.md](docs/code-style.md) — соглашения по стилю кода

@@ -21,6 +21,7 @@ mod memory;
 #[cfg(feature = "power-semihosting")]
 mod power;
 mod sched;
+mod smp;
 
 #[cfg(feature = "kernel-tests")]
 #[path = "kernel_tests/mod.rs"]

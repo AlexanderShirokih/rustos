@@ -36,6 +36,30 @@ impl DataCache<EL1> {
         unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
     }
 
+    /// Вытесняет `[start, end)` до точки когерентности, сохраняя содержимое.
+    ///
+    /// Делает записи видимыми тому, кто читает мимо кэша: стартующему CPU до
+    /// включения MMU. Границы округляются наружу до строки кэша.
+    pub fn clean_range_to_coherency(start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+
+        let line = Self::line_size();
+        let mut address = start & !(line - 1);
+
+        while address < end {
+            // SAFETY: `dc cvac` принимает один регистровый операнд с адресом,
+            // не модифицирует регистры и разрешена на EL1.
+            unsafe { asm!("dc cvac, {}", in(reg) address, options(nostack, preserves_flags)) };
+            address += line;
+        }
+
+        // SAFETY: `dsb sy` - общесистемный барьер без операндов, дожидается
+        // завершения обслуживания кэша.
+        unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+    }
+
     /// Длина наименьшей строки кэша данных в байтах.
     fn line_size() -> usize {
         let ctr: u64;

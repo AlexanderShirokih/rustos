@@ -215,6 +215,10 @@ pub trait ArchCpu: Send + Sync + 'static {
         core::ptr::null_mut()
     }
 
+    /// Поднимает остальные CPU системы. Вызывается один раз boot CPU, после
+    /// инициализации контроллера прерываний и до старта планировщика.
+    fn start_secondaries() {}
+
     fn idle() -> !;
 
     fn enable_preemption() {}

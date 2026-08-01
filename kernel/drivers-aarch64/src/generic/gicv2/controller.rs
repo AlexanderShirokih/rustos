@@ -44,6 +44,15 @@ impl Gicv2Controller {
         debug!("  GICC @ {}", self.cpu_interface.base());
 
         self.init_distributor();
+        self.init_this_cpu();
+    }
+
+    /// Настраивает CPU interface текущего CPU: его регистры банкированы по CPU.
+    /// Distributor общий для всех CPU и здесь не участвует.
+    ///
+    /// Оставляет IRQ замаскированными на текущем CPU.
+    pub(super) fn init_this_cpu(&self) {
+        Self::set_irq_mask();
         self.init_cpu_interface();
     }
 

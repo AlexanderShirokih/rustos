@@ -192,7 +192,10 @@ mod tests {
 
     use super::*;
     use crate::services::{
-        interrupts::{InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqRegistrationError},
+        interrupts::{
+            CpuInterfaceError, InterruptsService, IrqBinding, IrqBound, IrqNumber,
+            IrqRegistrationError,
+        },
         mmio::{MmioAddress, MmioBound, MmioMapError},
         timer::TickHandler,
     };
@@ -225,6 +228,10 @@ mod tests {
     struct TestInterruptsService;
 
     impl InterruptsService for TestInterruptsService {
+        fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
+            Ok(())
+        }
+
         fn enable(&self) {}
 
         fn disable(&self) {}

@@ -7,14 +7,17 @@ use alloc::{
 };
 
 use drivers_common::{
-    BootServices, DeviceMemoryPermission, Driver, DriverFactory, DriverRunError, Owners,
+    BootServices, DeviceMemoryPermission, DeviceNode, Driver, DriverFactory, DriverRunError,
+    NodeProperty, Owners,
     probe::{ProbeError, ProbeResult},
     services::mmio::{MmioAddress, MmioService},
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatible};
 use spin::Mutex;
 
-use super::{controller::Gicv3Controller, service::GicV3InterruptsService};
+use super::{
+    controller::Gicv3Controller, regs::GICR_DEFAULT_STRIDE, service::GicV3InterruptsService,
+};
 use crate::register_driver;
 
 /// Драйвер Generic Interrupt Controller v3.
@@ -23,16 +26,23 @@ pub struct Gicv3 {
     distributor_address: MmioAddress,
     /// Адрес MMIO GICR (Redistributor).
     redistributor_address: MmioAddress,
+    /// Расстояние между фреймами соседних Redistributor'ов.
+    redistributor_stride: usize,
 }
 
 // SAFETY: Gicv3 содержит только MmioAddress (Copy-тип без внутреннего состояния).
 unsafe impl Send for Gicv3 {}
 
 impl Gicv3 {
-    pub fn new(distributor_address: MmioAddress, redistributor_address: MmioAddress) -> Self {
+    pub fn new(
+        distributor_address: MmioAddress,
+        redistributor_address: MmioAddress,
+        redistributor_stride: usize,
+    ) -> Self {
         Self {
             distributor_address,
             redistributor_address,
+            redistributor_stride,
         }
     }
 
@@ -51,7 +61,11 @@ impl Gicv3 {
             )
             .map_err(|err| err.to_string())?;
 
-        Ok(Gicv3Controller::new(distributor, redistributor))
+        Ok(Gicv3Controller::new(
+            distributor,
+            redistributor,
+            self.redistributor_stride,
+        ))
     }
 }
 
@@ -81,11 +95,12 @@ impl Driver for Gicv3 {
 struct Gicv3Factory {
     gicd: MmioAddress,
     gicr: MmioAddress,
+    gicr_stride: usize,
 }
 
 impl DriverFactory for Gicv3Factory {
     fn create(&self) -> Result<Box<dyn Driver>, String> {
-        Ok(Box::new(Gicv3::new(self.gicd, self.gicr)))
+        Ok(Box::new(Gicv3::new(self.gicd, self.gicr, self.gicr_stride)))
     }
 }
 
@@ -100,10 +115,29 @@ pub fn gicv3_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
         .get_mmio_address(1)
         .ok_or(ProbeError::MissingProperty("GICR base address"))?;
 
+    // Отображается только первая объявленная область Redistributor'ов. CPU,
+    // чей фрейм лежит в остальных, не найдёт себя и в работу не пойдёт -
+    // отказ виден на его старте, а не молча.
+    let redistributor_stride = context
+        .node()
+        .prop("redistributor-stride")
+        .and_then(|prop| read_stride(prop.raw()))
+        .unwrap_or(GICR_DEFAULT_STRIDE);
+
     Ok(Box::new(Gicv3Factory {
         gicd: distributor,
         gicr: redistributor,
+        gicr_stride: redistributor_stride,
     }))
+}
+
+/// Читает `redistributor-stride`: две ячейки big-endian. Нулевое значение
+/// биндинг трактует как «по умолчанию».
+fn read_stride(raw: &[u8]) -> Option<usize> {
+    let bytes: [u8; 8] = raw.first_chunk().copied()?;
+    let stride = u64::from_be_bytes(bytes);
+
+    (stride != 0).then_some(stride as usize)
 }
 
 register_driver!(GIC_V3_DRIVER, probe = gicv3_probe);

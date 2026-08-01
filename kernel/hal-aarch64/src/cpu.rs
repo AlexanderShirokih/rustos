@@ -64,6 +64,11 @@ pub fn count() -> usize {
     TOPOLOGY.get().map_or(1, Topology::len)
 }
 
+/// Affinity CPU с логическим идентификатором `index`.
+pub fn affinity(index: usize) -> Option<CpuAffinity> {
+    TOPOLOGY.get()?.affinity(index)
+}
+
 /// Логический идентификатор CPU с заданным `affinity`.
 pub fn logical_id(affinity: CpuAffinity) -> Option<CpuId> {
     let index = TOPOLOGY.get()?.index_of(affinity)?;

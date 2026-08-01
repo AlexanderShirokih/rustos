@@ -43,6 +43,34 @@ pub(super) const GICD_CTLR_RWP: u32 = 1 << 31;
 /// RD_base: Waker Register - управление переходом в сон/пробуждение.
 pub(super) const GICR_WAKER: Reg<u32> = Reg::new(0x014);
 
+/// RD_base: Type Register - affinity владельца фрейма и признак последнего.
+pub(super) const GICR_TYPER: Reg<u64> = Reg::new(0x008);
+
+/// `GICR_TYPER.Last`: фрейм последний в непрерывной области.
+pub(super) const GICR_TYPER_LAST: u64 = 1 << 4;
+
+/// Расстояние между фреймами соседних Redistributor'ов по умолчанию: два
+/// фрейма по 64 KB. Device tree вправе объявить другое через
+/// `redistributor-stride`.
+pub const GICR_DEFAULT_STRIDE: usize = 0x2_0000;
+
+/// `GICR_TYPER.Affinity_Value`: affinity владельца фрейма четырьмя байтами
+/// подряд - `Aff3:Aff2:Aff1:Aff0`.
+pub(super) fn affinity_value(typer: u64) -> u32 {
+    (typer >> 32) as u32
+}
+
+/// Упаковывает affinity из `MPIDR_EL1` в раскладку `GICR_TYPER`.
+///
+/// В `MPIDR_EL1` между `Aff3` (биты [39:32]) и `Aff2` (биты [23:16]) лежат
+/// служебные биты, а в `Affinity_Value` байты идут подряд.
+pub(super) fn packed_affinity(mpidr: u64) -> u32 {
+    let aff3 = ((mpidr >> 32) & 0xFF) as u32;
+    let aff2_0 = (mpidr & 0x00FF_FFFF) as u32;
+
+    (aff3 << 24) | aff2_0
+}
+
 /// Смещение SGI_base относительно RD_base.
 pub(super) const GICR_SGI_BASE_OFFSET: usize = 0x10000;
 

@@ -90,6 +90,12 @@ impl<const N: usize> CpuTopology<N> {
     }
 }
 
+/// Affinity, которым узел `cpu@N` адресует процессор. `None` - узел не
+/// описывает доступный CPU либо `/cpus` объявил неверный `#address-cells`.
+pub fn node_affinity(cpus: &Node<'_>, node: &Node<'_>) -> Option<CpuAffinity> {
+    cpu_affinity(node, address_cells(cpus)?)
+}
+
 // `None` - объявлено значение вне пары {1, 2}: узел описан неверно, и
 // разбирать его `reg` нечем.
 fn address_cells(cpus: &Node<'_>) -> Option<usize> {

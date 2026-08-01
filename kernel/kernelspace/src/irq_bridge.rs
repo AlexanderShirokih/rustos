@@ -2,7 +2,7 @@
 
 use alloc::sync::Arc;
 
-use drivers_common::services::interrupts::InterruptsService;
+use drivers_common::services::interrupts::{CpuInterfaceError, InterruptsService};
 use klog::{debug, warn};
 use spin::Once;
 
@@ -25,6 +25,16 @@ impl IrqBridge {
         );
 
         let _ = self.service.call_once(|| service);
+    }
+
+    /// Настраивает per-CPU часть контроллера на текущем CPU.
+    pub fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
+        let Some(service) = self.service.get() else {
+            warn!("IRQ bridge is not initialized: InterruptsService is missing");
+            return Err(CpuInterfaceError::NotFound);
+        };
+
+        service.init_this_cpu()
     }
 
     pub fn dispatch(&self) {
@@ -54,6 +64,11 @@ pub fn dispatch_interrupt() {
     IRQ_BRIDGE.dispatch();
 }
 
+/// Настраивает per-CPU часть контроллера прерываний на текущем CPU.
+pub fn init_interrupts_on_this_cpu() -> Result<(), CpuInterfaceError> {
+    IRQ_BRIDGE.init_this_cpu()
+}
+
 #[cfg(test)]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -66,17 +81,23 @@ mod tests {
 
     struct SpyInterruptsService {
         dispatch_calls: AtomicUsize,
+        cpu_init_calls: AtomicUsize,
     }
 
     impl SpyInterruptsService {
         fn new() -> Self {
             Self {
                 dispatch_calls: AtomicUsize::new(0),
+                cpu_init_calls: AtomicUsize::new(0),
             }
         }
 
         fn dispatch_calls(&self) -> usize {
             self.dispatch_calls.load(Ordering::SeqCst)
+        }
+
+        fn cpu_init_calls(&self) -> usize {
+            self.cpu_init_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -92,6 +113,11 @@ mod tests {
         fn mask(&self, _irq: IrqNumber) {}
 
         fn unmask(&self, _irq: IrqNumber) {}
+
+        fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
+            self.cpu_init_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
 
         fn dispatch_interrupt(&self) {
             self.dispatch_calls.fetch_add(1, Ordering::SeqCst);
@@ -112,6 +138,19 @@ mod tests {
         );
         bridge.dispatch();
         assert_eq!(service.dispatch_calls(), 1);
+    }
+
+    #[test]
+    fn cpu_init_without_install_reports_failure() {
+        let bridge = IrqBridge::new();
+        assert_eq!(bridge.init_this_cpu(), Err(CpuInterfaceError::NotFound));
+
+        let service = Arc::new(SpyInterruptsService::new());
+        bridge.install(service.clone());
+        assert_eq!(service.cpu_init_calls(), 0);
+
+        assert_eq!(bridge.init_this_cpu(), Ok(()));
+        assert_eq!(service.cpu_init_calls(), 1);
     }
 
     #[test]

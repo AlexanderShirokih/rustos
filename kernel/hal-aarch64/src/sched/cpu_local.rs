@@ -26,6 +26,10 @@ impl ArchCpu for Aarch64Cpu {
         cpu::current().map_or(core::ptr::null_mut(), cpu::CpuLocal::scheduler)
     }
 
+    fn start_secondaries() {
+        crate::smp::start_secondaries();
+    }
+
     fn idle() -> ! {
         loop {
             // SAFETY: WFI переводит ядро в idle до следующего interrupt event.
