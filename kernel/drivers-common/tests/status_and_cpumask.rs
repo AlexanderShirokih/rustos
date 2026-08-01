@@ -1,6 +1,8 @@
 //! Покрытие `is_node_enabled` (через scanner) для значений `status`
 //! `"ok"`/`"okay"`/`"fail*"`/мусор и `CpuMask::cpu` overflow сдвига.
 
+#![allow(clippy::unwrap_used)]
+
 use std::cell::Cell;
 
 use drivers_common::{

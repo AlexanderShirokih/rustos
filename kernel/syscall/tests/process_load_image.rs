@@ -2,6 +2,8 @@
 //! неверная версия, `segment_count` вне границ, `reserved != 0`,
 //! несовпадение `mapped_size`, `AccessDenied` при слабой access-mask.
 
+#![allow(clippy::unwrap_used)]
+
 use core::{num::NonZeroUsize, sync::atomic::AtomicU32};
 use std::sync::{Arc, Mutex, OnceLock};
 

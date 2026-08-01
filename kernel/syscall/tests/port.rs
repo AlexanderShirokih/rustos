@@ -4,6 +4,8 @@
 //! (недоступно в host-тесте); здесь проверяем только то, что достижимо через
 //! `KernelRuntime`: создание Port-хендла и корректный `IpcError`-маппинг.
 
+#![allow(clippy::unwrap_used)]
+
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 use std::sync::{Arc, Mutex, OnceLock};
 

@@ -65,7 +65,7 @@ fn run(root: Handle) -> Result<()> {
         let calculator_api =
             CalculatorApiClient::new(PortTransport::client(calculator_client.handle()));
         for n in 1..=6 {
-            let result = factorial(&calculator_api, n);
+            let result = factorial(&calculator_api, n)?;
             log(&bootstrap_client, &format!("Factorial of {n} is {result}"));
         }
     }
@@ -77,13 +77,11 @@ fn run(root: Handle) -> Result<()> {
     Ok(())
 }
 
-fn factorial(calculator: &CalculatorApiClient<PortTransport>, n: u64) -> u64 {
+fn factorial(calculator: &CalculatorApiClient<PortTransport>, n: u64) -> Result<u64> {
     if n <= 1 {
-        1
+        Ok(1)
     } else {
-        calculator
-            .multiply(n, factorial(calculator, n - 1))
-            .unwrap()
+        Ok(calculator.multiply(n, factorial(calculator, n - 1)?)?)
     }
 }
 

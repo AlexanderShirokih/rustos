@@ -105,7 +105,7 @@ pub(crate) fn project_root() -> PathBuf {
     let path = Path::new(&manifest_dir);
 
     if path.ends_with("xtask") {
-        path.parent().unwrap().to_path_buf()
+        path.parent().unwrap_or(Path::new(".")).to_path_buf()
     } else {
         path.to_path_buf()
     }

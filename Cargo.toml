@@ -126,6 +126,7 @@ return_self_not_must_use = "allow"
 # Ядерные unsafe-линты
 undocumented_unsafe_blocks = "warn"
 # Качество кода
+unwrap_used = "deny"
 cast_possible_truncation = "allow"
 cast_sign_loss = "warn"
 cast_lossless = "warn"

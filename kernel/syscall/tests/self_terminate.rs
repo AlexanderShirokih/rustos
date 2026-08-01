@@ -2,6 +2,8 @@
 //! (`process.rs:116`, `thread.rs:107`): self-exit обязан идти через
 //! `ThreadExit`, выполняющий context switch.
 
+#![allow(clippy::unwrap_used)]
+
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 use std::sync::{Arc, Mutex, OnceLock};
 

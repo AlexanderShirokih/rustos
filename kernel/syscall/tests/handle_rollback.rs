@@ -2,6 +2,8 @@
 //! `ThreadCreate`, `ProcessStart` НЕ должны выполнять сторонних эффектов
 //! (создавать процесс/поток, drain'ить bootstrap-handle).
 
+#![allow(clippy::unwrap_used)]
+
 use core::{
     num::NonZeroU64,
     sync::atomic::{AtomicU32, AtomicUsize, Ordering},

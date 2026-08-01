@@ -4,6 +4,8 @@
 //! Это исполняет реальные реализации `RegIter`, `range_to_parent`,
 //! `try_read_cell`, `is_compatible` и трансляцию адресов в `get_address`.
 
+#![allow(clippy::unwrap_used)]
+
 use drivers_common::{DeviceNode, probe::ProbeContext};
 use drivers_common_aarch64::{
     ProbeContextExt, adapt_to_fdt_tree,

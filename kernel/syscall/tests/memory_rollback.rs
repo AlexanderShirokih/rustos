@@ -2,6 +2,8 @@
 //! обязана откатить VA и освободить фреймы (alloc == dealloc).
 //! Проверяется через spy-FrameAllocator.
 
+#![allow(clippy::unwrap_used)]
+
 use core::{
     num::NonZeroUsize,
     sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},

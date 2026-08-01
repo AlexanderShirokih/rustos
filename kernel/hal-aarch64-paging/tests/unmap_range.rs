@@ -2,6 +2,7 @@
 //! освобождение опустевших промежуточных таблиц, отказ на partial-block,
 //! полный обход дерева в Drop-пути.
 #![allow(unsafe_code)]
+#![allow(clippy::unwrap_used)]
 
 mod common;
 

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use drivers_common::tree::{DeviceNode, DeviceTreeSource, NodeProperty};
 
 #[derive(Clone, Copy, Debug)]

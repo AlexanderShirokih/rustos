@@ -113,28 +113,27 @@ fn make_boot_img_v1(ctx: &BuildContext) -> Result<()> {
     output.write_all(&kernel)?;
     output.write_all(&dtb)?;
 
-    run_cmd(
-        Command::new("mkbootimg")
-            .args([
-                "--kernel",
-                ctx.kernel_gz_dtb().to_str().unwrap(),
-                "--ramdisk",
-                ctx.userland_img().to_str().unwrap(),
-                "--base",
-                "0x0",
-                "--kernel_offset",
-                &kernel_offset_str,
-                "--ramdisk_offset",
-                "0x01000000",
-                "--pagesize",
-                "4096",
-                "--header_version",
-                "1",
-                "--output",
-                ctx.boot_img().to_str().unwrap(),
-            ])
-            .current_dir(&ctx.project_root),
-    )?;
+    let mut cmd = Command::new("mkbootimg");
+    cmd.arg("--kernel")
+        .arg(ctx.kernel_gz_dtb())
+        .arg("--ramdisk")
+        .arg(ctx.userland_img())
+        .args([
+            "--base",
+            "0x0",
+            "--kernel_offset",
+            &kernel_offset_str,
+            "--ramdisk_offset",
+            "0x01000000",
+            "--pagesize",
+            "4096",
+            "--header_version",
+            "1",
+        ])
+        .arg("--output")
+        .arg(ctx.boot_img())
+        .current_dir(&ctx.project_root);
+    run_cmd(&mut cmd)?;
 
     Ok(())
 }
@@ -147,30 +146,29 @@ fn make_boot_img_v2(ctx: &BuildContext) -> Result<()> {
     let kernel_offset = ctx.spec.boot.offset.saturating_sub(base);
     let kernel_offset_str = format!("{kernel_offset:#x}");
 
-    run_cmd(
-        Command::new("mkbootimg")
-            .args([
-                "--kernel",
-                ctx.kernel_gz().to_str().unwrap(),
-                "--ramdisk",
-                ctx.userland_img().to_str().unwrap(),
-                "--dtb",
-                dtb_path.to_str().unwrap(),
-                "--base",
-                "0x0",
-                "--kernel_offset",
-                &kernel_offset_str,
-                "--ramdisk_offset",
-                "0x01000000",
-                "--pagesize",
-                "4096",
-                "--header_version",
-                "2",
-                "--output",
-                ctx.boot_img().to_str().unwrap(),
-            ])
-            .current_dir(&ctx.project_root),
-    )?;
+    let mut cmd = Command::new("mkbootimg");
+    cmd.arg("--kernel")
+        .arg(ctx.kernel_gz())
+        .arg("--ramdisk")
+        .arg(ctx.userland_img())
+        .arg("--dtb")
+        .arg(dtb_path)
+        .args([
+            "--base",
+            "0x0",
+            "--kernel_offset",
+            &kernel_offset_str,
+            "--ramdisk_offset",
+            "0x01000000",
+            "--pagesize",
+            "4096",
+            "--header_version",
+            "2",
+        ])
+        .arg("--output")
+        .arg(ctx.boot_img())
+        .current_dir(&ctx.project_root);
+    run_cmd(&mut cmd)?;
 
     Ok(())
 }

@@ -2,6 +2,7 @@
 //! многостраничный `unmap_range` (>1 leaf, пересечение границ L2/L1),
 //! невыровненные адреса и `free_all(high_half=true)`.
 #![allow(unsafe_code)]
+#![allow(clippy::unwrap_used)]
 
 mod common;
 

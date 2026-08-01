@@ -1,5 +1,7 @@
 //! Host-тесты на интеграцию userspace-процессов в scheduler.
 
+#![allow(clippy::unwrap_used)]
+
 mod common;
 
 use std::boxed::Box;

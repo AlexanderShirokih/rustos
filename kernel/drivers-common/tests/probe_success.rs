@@ -2,6 +2,8 @@
 //! `IntoIterator`, Occupied-ветка (один узел не регистрируется дважды),
 //! приоритет первого совпавшего драйвера.
 
+#![allow(clippy::unwrap_used)]
+
 extern crate alloc;
 
 use alloc::{boxed::Box, string::String};

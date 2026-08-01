@@ -2,6 +2,7 @@
 //! имитирующих per-process user-AS: каждый владеет собственным L0-root,
 //! маппинги одного не видны через walk во втором.
 #![allow(unsafe_code)]
+#![allow(clippy::unwrap_used)]
 
 mod common;
 

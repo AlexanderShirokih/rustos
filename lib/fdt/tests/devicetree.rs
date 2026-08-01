@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use fdt::{
     devicetree::DeviceTree,
     devicetreeext::{NodeExt, PropExt, reserved_memory_ranges},

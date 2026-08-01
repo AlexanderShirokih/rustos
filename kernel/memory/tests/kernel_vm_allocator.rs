@@ -3,6 +3,7 @@
 //! поэтому VA-операции реально пишут в host-память.
 
 #![allow(unsafe_code)]
+#![allow(clippy::unwrap_used)]
 
 mod common;
 
