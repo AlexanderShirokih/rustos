@@ -38,6 +38,7 @@ mod resource_split;
 mod ring_transport;
 mod signal;
 mod spawn_from_image;
+mod startup_fixture_protocol;
 mod stress;
 mod sync;
 mod vm;

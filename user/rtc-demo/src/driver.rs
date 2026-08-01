@@ -7,7 +7,7 @@ use core::panic::PanicInfo;
 use io::mmio::{Mmio, Reg};
 use ipc::wire::IpcError;
 use rtc_demo::{ClockService, ClockState, Error, Result, dispatch_clock, dispatch_driver_args};
-use runtime::{MemoryRegion, PortTransport, UserMemFlags, thread_exit};
+use runtime::{MemoryRegion, PortTransport, UserMemFlags, receive_startup, thread_exit};
 use syscall::Handle;
 
 /// Текущее время (секунды), RO.
@@ -36,11 +36,8 @@ pub extern "C" fn _start(server_args: Handle) -> ! {
 }
 
 fn run(server_args: Handle) -> Result<()> {
-    let args_transport = PortTransport::server(server_args);
-    let mut args: Option<ClockState> = None;
-
-    dispatch_driver_args(&mut args, &args_transport)?;
-    let ClockState { device, clock_port } = args.ok_or(Error::Vend)?;
+    let ClockState { device, clock_port } =
+        receive_startup(server_args, dispatch_driver_args)?.ok_or(Error::Vend)?;
 
     // Отображаем устройство в своё адресное пространство.
     let device = MemoryRegion::from_handle(device);

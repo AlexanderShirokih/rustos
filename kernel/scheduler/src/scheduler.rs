@@ -4,7 +4,7 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{marker::PhantomData, num::NonZeroUsize};
 
 use capability::{
-    Capability, DrainedHandles, HandleReservation, HandleTable, ProcessObject, Reply, ThreadObject,
+    Capability, DrainedHandles, HandleReservation, HandleTable, ProcessObject, ThreadObject,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
@@ -76,8 +76,9 @@ pub(super) enum ScheduleAction<A: ArchContext> {
 pub(super) struct DeferredSignals {
     threads: Vec<(Arc<ThreadObject>, i32)>,
     processes: Vec<Arc<ProcessObject>>,
-    replies: Vec<Arc<Reply>>,
+    cancels: Vec<Arc<dyn capability::CancelTarget>>,
     handle_tables: Vec<Arc<MutexCell<HandleTable>>>,
+    deferred_threads: Vec<ThreadId>,
 }
 
 impl DeferredSignals {
@@ -89,15 +90,19 @@ impl DeferredSignals {
         self.processes.push(process);
     }
 
-    fn push_reply(&mut self, reply: Arc<Reply>) {
-        self.replies.push(reply);
+    fn push_cancel(&mut self, cancel: Arc<dyn capability::CancelTarget>) {
+        self.cancels.push(cancel);
     }
 
     fn push_handle_table(&mut self, table: Arc<MutexCell<HandleTable>>) {
         self.handle_tables.push(table);
     }
 
-    pub(super) fn emit(self) {
+    fn push_deferred_thread(&mut self, thread_id: ThreadId) {
+        self.deferred_threads.push(thread_id);
+    }
+
+    pub(super) fn emit(self) -> Vec<ThreadId> {
         for (thread, exit_code) in self.threads {
             thread.signal_terminated(exit_code);
         }
@@ -106,12 +111,16 @@ impl DeferredSignals {
         for process in self.processes {
             process.wake_terminated();
         }
-        for reply in self.replies {
-            reply.cancel();
+        for cancel in self.cancels {
+            cancel.cancel();
+            if let Some(reply) = cancel.take_abandoned_reply() {
+                reply.cancel();
+            }
         }
         for table in self.handle_tables {
             table.with_lock(HandleTable::drain).release();
         }
+        self.deferred_threads
     }
 }
 
@@ -461,7 +470,8 @@ where
         let signals = self
             .inner
             .with_lock(|inner| inner.begin_exit_current(exit_code));
-        signals.emit();
+        let deferred = signals.emit();
+        debug_assert!(deferred.is_empty());
         let action = self.inner.with_lock(|inner| {
             let now_ns = inner.timer.now_ns();
             inner.finish_exit_current(now_ns)
@@ -1005,8 +1015,8 @@ where
     ///
     /// В отличие от тика, квант текущего потока не расходуется: сообщение
     /// говорит лишь о появившейся работе, а времени с прошлого тика не прошло.
-    /// Поэтому вытеснение только в пользу более приоритетного - и всегда, если
-    /// CPU стоял в idle.
+    /// Терминированный current снимается безусловно. Живой вытесняется только
+    /// в пользу более приоритетного потока или если CPU стоял в idle.
     pub(super) fn reschedule(&mut self, now_ns: u64) -> ScheduleAction<A> {
         let Some((current_id, idle_id, highest_ready)) = self.current_cpu().map(|cpu| {
             (
@@ -1017,6 +1027,14 @@ where
         }) else {
             return ScheduleAction::None;
         };
+
+        if self
+            .threads
+            .get(current_id)
+            .is_some_and(|current| matches!(current.state(), ThreadState::Terminated))
+        {
+            return self.preempt_current(now_ns);
+        }
 
         let Some(highest_ready) = highest_ready else {
             return ScheduleAction::None;
@@ -1036,6 +1054,9 @@ where
     }
 
     pub(super) fn yield_now(&mut self, now_ns: u64) -> ScheduleAction<A> {
+        if self.current_is_terminated() {
+            return self.preempt_current(now_ns);
+        }
         if let Some(cpu) = self.current_cpu()
             && cpu.ready_queue().is_empty()
         {
@@ -1047,6 +1068,9 @@ where
     }
 
     pub(super) fn sleep_current(&mut self, ns: u64, now_ns: u64) -> ScheduleAction<A> {
+        if self.current_is_terminated() {
+            return self.switch_to_next(now_ns);
+        }
         if ns == 0 {
             return self.yield_now(now_ns);
         }
@@ -1071,6 +1095,9 @@ where
         now_ns: u64,
         timeout_ns: Option<u64>,
     ) -> ScheduleAction<A> {
+        if self.current_is_terminated() {
+            return self.switch_to_next(now_ns);
+        }
         if let Some(current_id) = self.current()
             && let Some(thread) = self.threads.get_mut(current_id)
         {
@@ -1154,6 +1181,12 @@ where
         Some(self.current_cpu()?.current())
     }
 
+    pub(super) fn current_is_terminated(&self) -> bool {
+        self.current()
+            .and_then(|id| self.threads.get(id))
+            .is_some_and(|thread| matches!(thread.state(), ThreadState::Terminated))
+    }
+
     pub(super) fn now_ns(&self) -> u64 {
         self.timer.now_ns()
     }
@@ -1163,26 +1196,26 @@ where
         let Some(current_id) = self.current() else {
             return signals;
         };
-        let (exiting_pid, thread_object) = if let Some(thread) = self.threads.get_mut(current_id) {
-            thread.set_state(ThreadState::Terminated);
-            (Some(thread.process()), Some(thread.thread_object().clone()))
-        } else {
-            (None, None)
+        let Some(thread) = self.threads.get_mut(current_id) else {
+            return signals;
         };
-
-        if let Some(target) = thread_object {
-            signals.push_thread(target, exit_code);
+        if matches!(thread.state(), ThreadState::Terminated) {
+            return signals;
         }
+        thread.set_state(ThreadState::Terminated);
+        let exiting_pid = thread.process();
+        let thread_object = thread.thread_object().clone();
+
+        signals.push_thread(thread_object, exit_code);
 
         // На нуле поднимаем terminated процесса ДО `cleanup_pending_process_removals`
         // (вызов из `switch_to_next`); `Arc<ProcessObject>` переживёт удаление из таблицы.
-        if let Some(pid) = exiting_pid
-            && self
-                .processes
-                .get(pid)
-                .is_some_and(Process::decrement_thread_count)
+        if self
+            .processes
+            .get(exiting_pid)
+            .is_some_and(Process::decrement_thread_count)
         {
-            self.collect_process_termination(pid, exit_code, &mut signals);
+            self.collect_process_termination(exiting_pid, exit_code, &mut signals);
         }
 
         // Kernel-стек освободится в `reap_pending_threads`, когда поток перестанет быть prev.
@@ -1421,7 +1454,12 @@ where
         let mut idx = 0;
         while idx < self.pending_thread_removals.len() {
             let tid = self.pending_thread_removals[idx];
-            if self.is_thread_held(tid) {
+            if self.is_thread_held(tid)
+                || self
+                    .threads
+                    .get(tid)
+                    .is_some_and(Thread::cleanup_is_deferred)
+            {
                 idx += 1;
                 continue;
             }
@@ -1455,7 +1493,12 @@ where
         let mut idx = 0;
         while idx < self.pending_ipc_releases.len() {
             let tid = self.pending_ipc_releases[idx];
-            if self.is_thread_held(tid) {
+            if self.is_thread_held(tid)
+                || self
+                    .threads
+                    .get(tid)
+                    .is_some_and(Thread::cleanup_is_deferred)
+            {
                 idx += 1;
                 continue;
             }
@@ -1475,14 +1518,38 @@ where
         self.held_threads()
             .filter_map(|id| self.threads.get(id))
             .any(|thread| thread.process() == pid)
+            || self
+                .threads
+                .iter()
+                .any(|thread| thread.process() == pid && thread.cleanup_is_deferred())
     }
 
-    pub(crate) fn set_current_blocked_cancel(&mut self, cancel: Arc<dyn capability::CancelTarget>) {
+    pub(crate) fn set_current_blocked_cancel(
+        &mut self,
+        cancel: Arc<dyn capability::CancelTarget>,
+    ) -> Option<(Option<ThreadId>, Arc<dyn capability::CancelTarget>)> {
         if let Some(current_id) = self.current()
             && let Some(thread) = self.threads.get_mut(current_id)
         {
+            if matches!(thread.state(), ThreadState::Terminated) {
+                thread.defer_cleanup();
+                return Some((Some(current_id), cancel));
+            }
             thread.set_blocked_cancel(cancel);
+            return None;
         }
+        Some((None, cancel))
+    }
+
+    pub(crate) fn finish_deferred_cleanup(&mut self, thread_ids: &[ThreadId]) {
+        for &thread_id in thread_ids {
+            let Some(thread) = self.threads.get_mut(thread_id) else {
+                debug_assert!(false, "deferred cleanup thread disappeared");
+                continue;
+            };
+            thread.finish_deferred_cleanup();
+        }
+        self.release_pending_ipc_buffers();
     }
 
     pub(crate) fn clear_current_blocked_cancel(&mut self) {
@@ -1690,8 +1757,16 @@ where
             .threads
             .iter()
             .find(|t| Arc::ptr_eq(t.thread_object(), thread_object))
-            .map(|t| (t.id(), t.process(), t.state()));
-        let Some((thread_id, pid, state)) = lookup else {
+            .map(|t| {
+                (
+                    t.id(),
+                    t.process(),
+                    t.state(),
+                    t.cpu_affinity(),
+                    t.priority(),
+                )
+            });
+        let Some((thread_id, pid, state, affinity, priority)) = lookup else {
             return;
         };
         if matches!(state, ThreadState::Terminated) {
@@ -1700,25 +1775,33 @@ where
 
         let blocked_cancel = self.threads.get_mut(thread_id).and_then(|thread| {
             thread.set_state(ThreadState::Terminated);
+            thread.defer_cleanup();
             thread.take_blocked_cancel()
         });
         signals.push_thread(thread_object.clone(), exit_code);
+        signals.push_deferred_thread(thread_id);
+        // Wakeup меняет state, но не изымает stale SleepEntry; а
+        // preemption может оставить stale ready-owner. До reuse ThreadId процесс
+        // терминации безусловно снимает оба вида queue-ownership.
+        if let Some(cpu) = self.cpu_by_id_mut(affinity) {
+            let _ = cpu.ready_queue_mut().remove(thread_id, priority);
+        }
+        self.sleepers.remove_thread(thread_id);
+        if matches!(state, ThreadState::Running) {
+            self.mark_wakeup(affinity);
+        }
 
         // Cancel снимает Waiter с очереди и переводит OutcomeSlot в TIMEDOUT,
-        // отклоняя поздний reply. Thread не реапим: стек заморожен в syscall и держит Arc'и.
-        // Доставленный, но не изъятый reply забирает тот же cancel: в
-        // замороженном кадре он стал бы недостижим, а вызыватель - вечным.
+        // отклоняя поздний reply. Он выполняется вне scheduler-лока: cancel
+        // может будить другой поток через тот же планировщик.
         if let Some(cancel) = blocked_cancel {
-            cancel.cancel();
-            if let Some(reply) = cancel.take_abandoned_reply() {
-                signals.push_reply(reply);
-            }
+            signals.push_cancel(cancel);
         }
-        if self.is_thread_held(thread_id) {
-            self.pending_ipc_releases.push(thread_id);
-        } else {
-            self.release_ipc_buffer(thread_id);
-        }
+        self.pending_ipc_releases.push(thread_id);
+        // Стек снимается только после ухода со всех CPU current/previous.
+        // Rust-кадры принудительно не unwind'ятся, но сам thread/stack slot
+        // после quiescence больше не должен оставаться в таблице навсегда.
+        self.pending_thread_removals.push(thread_id);
 
         if self
             .processes
@@ -1849,15 +1932,10 @@ where
         self.switch_to_next(now_ns)
     }
 
-    fn switch_to_next(&mut self, now_ns: u64) -> ScheduleAction<A> {
-        let (prev_id, idle_id) = match self.current_cpu() {
-            Some(cpu) => (cpu.current(), cpu.idle()),
-            None => return ScheduleAction::None,
-        };
-
-        // Поток мог быть переведён в `Terminated` через `terminate_thread_object`
-        // пока стоял в ready_queue: пропускаем такие записи и берём следующую.
-        let next_id = loop {
+    // Извлекает первый живой runnable текущего CPU. Stale id остаются в
+    // очереди после внешней терминации до следующего выбора и пропускаются.
+    fn take_next_runnable(&mut self, idle_id: ThreadId) -> ThreadId {
+        loop {
             let popped = self
                 .current_cpu_mut()
                 .and_then(|cpu| cpu.ready_queue_mut().pop_highest())
@@ -1867,14 +1945,23 @@ where
                     let alive = self
                         .threads
                         .get(id)
-                        .is_some_and(|t| !matches!(t.state(), ThreadState::Terminated));
+                        .is_some_and(|thread| !matches!(thread.state(), ThreadState::Terminated));
                     if alive {
-                        break id;
+                        return id;
                     }
                 }
-                None => break idle_id,
+                None => return idle_id,
             }
+        }
+    }
+
+    fn switch_to_next(&mut self, now_ns: u64) -> ScheduleAction<A> {
+        let (prev_id, idle_id) = match self.current_cpu() {
+            Some(cpu) => (cpu.current(), cpu.idle()),
+            None => return ScheduleAction::None,
         };
+
+        let next_id = self.take_next_runnable(idle_id);
 
         let Some(cpu) = self.current_cpu_mut() else {
             return ScheduleAction::None;
@@ -1952,11 +2039,9 @@ where
         let now_ns = self.timer.now_ns();
         let cpu = self.current_cpu_mut()?;
         let idle_id = cpu.idle();
-        let next_id = cpu
-            .ready_queue_mut()
-            .pop_highest()
-            .map_or(idle_id, |(id, _)| id);
+        let next_id = self.take_next_runnable(idle_id);
 
+        let cpu = self.current_cpu_mut()?;
         cpu.set_current(next_id);
 
         let address_space = self

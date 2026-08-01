@@ -12,6 +12,11 @@ path = "/boot/spawn-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "startup-fixture"
+path = "/boot/startup-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "port-fixture"
 path = "/boot/port-fixture"
 

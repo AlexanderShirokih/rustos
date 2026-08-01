@@ -1,16 +1,44 @@
 //! E2E спавна из реального userland-образа.
 
 use bootstrap::BootstrapClient;
+use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
 use runtime::{MemoryRegion, OwnedHandle, PortTransport, Resource, Signal, Timeout};
+use syscall::SIGNALED;
+use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
 use userland_image::decode;
-use userland_loader::load_entry;
+use userland_loader::{launch_entry, load_entry};
+
+use crate::startup_fixture_protocol::{STARTUP_VALUE, StartupFixtureClient};
 
 const CHILD_WAIT_TIMEOUT_NS: u64 = 500_000_000;
 const CALL_TIMEOUT_NS: u64 = 2_000_000_000;
+const STARTUP_SLACK_PAGES: u64 = 8;
+const STARTUP_FAILURE_ATTEMPTS: usize = 16;
+const PROCESS_CLEANUP_RETRY_ATTEMPTS: usize = 64;
+const PROCESS_CLEANUP_RETRY_NS: u64 = 1_000_000;
+
+#[derive(Debug)]
+enum StartupError {
+    Runtime(runtime::Error),
+    Ipc,
+    Injected,
+}
+
+impl From<runtime::Error> for StartupError {
+    fn from(error: runtime::Error) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<IpcError> for StartupError {
+    fn from(_error: IpcError) -> Self {
+        Self::Ipc
+    }
+}
 
 #[kernel_test]
-fn spawn_child_from_image() {
+fn launch_child_delivers_startup_frame() {
     let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
 
     let cap = client
@@ -22,20 +50,52 @@ fn spawn_child_from_image() {
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("/boot/spawn-fixture")
+        .entry("/boot/startup-fixture")
         .expect("image carries a child entry")
         .program()
         .expect("child entry is a program");
 
     let resource = Resource::self_resource().expect("self metering resource");
-    let start_handle = Signal::create().expect("signal create").into_handle();
-    let process = load_entry(&child, &resource, start_handle).expect("spawn child from image");
+    let process = launch_entry(&child, &resource, |startup| -> Result<(), StartupError> {
+        StartupFixtureClient::new(PortTransport::client(startup.handle())).start(STARTUP_VALUE)?;
+        Ok(())
+    })
+    .expect("startup frame delivered");
 
     process
         .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
         .expect("child terminates");
 
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
+}
+
+#[kernel_test]
+fn failed_startup_returns_child_budget() {
+    let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+
+    let cap = client
+        .acquire_userland_image()
+        .expect("acquire_userland_image call")
+        .expect("vend ok");
+
+    let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
+    let mapping = region.map_full_read_only().expect("map image read-only");
+    let image = decode(mapping.as_bytes()).expect("decode acquired image");
+    let child = image
+        .entry("/boot/startup-fixture")
+        .expect("image carries a child entry")
+        .program()
+        .expect("child entry is a program");
+
+    let parent = Resource::self_resource().expect("self metering resource");
+    let budget = parent
+        .split(process_pages(&child) + STARTUP_SLACK_PAGES)
+        .expect("split startup budget");
+    let scheduler_turn = Signal::create().expect("termination timer");
+
+    for _ in 0..STARTUP_FAILURE_ATTEMPTS {
+        fail_startup_when_budget_returns(&child, &budget, &scheduler_turn);
+    }
 }
 
 /// Сервер принимает `call` и уходит, не ответив: вызыватель обязан быть
@@ -75,4 +135,32 @@ fn caller_wakes_when_server_dies_holding_reply() {
         result,
         Err(Error::Syscall(SyscallError::PeerClosed))
     ));
+}
+
+fn process_pages<'a, E: EntryView<'a>>(program: &E) -> u64 {
+    let segments = program
+        .segments()
+        .map(|segment| segment.mem_size().div_ceil(USERLAND_PAGE_SIZE))
+        .sum::<u64>();
+    segments + program.stack_size().div_ceil(USERLAND_PAGE_SIZE)
+}
+
+fn fail_startup_when_budget_returns<'a, E: EntryView<'a>>(
+    program: &E,
+    budget: &Resource,
+    timer: &Signal,
+) {
+    for _ in 0..PROCESS_CLEANUP_RETRY_ATTEMPTS {
+        match launch_entry(program, budget, |_| Err(StartupError::Injected)) {
+            Err(StartupError::Runtime(runtime::Error::Syscall(
+                syscall::SyscallError::ResourceExhausted,
+            ))) => {
+                let _ = timer.wait(SIGNALED, Timeout::from_ns(PROCESS_CLEANUP_RETRY_NS));
+            }
+            Err(StartupError::Injected) => return,
+            Err(error) => panic!("unexpected child launch failure: {error:?}"),
+            Ok(_) => panic!("injected startup failure succeeded"),
+        }
+    }
+    panic!("terminated child budget was not returned")
 }

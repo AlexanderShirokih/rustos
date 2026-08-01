@@ -14,11 +14,11 @@ use filesystem_abi::{
 use filesystem_server::{settle, vend};
 use ipc::wire::{Cap, IpcError, Str};
 use runtime::{
-    MemoryRegion, Mutex, OwnedHandle, Port, PortTransport, Process, Resource, log_fmt, log_line,
+    MemoryRegion, Mutex, OwnedHandle, PortTransport, Process, Resource, log_fmt, log_line,
 };
 use syscall::Rights;
 use userland_image::decode;
-use userland_loader::load_entry;
+use userland_loader::launch_entry_retained;
 
 use crate::error::{Error, Result as RouterResult};
 
@@ -162,22 +162,20 @@ impl<'a> Administering<'a> {
         let entry = image.entry(program).ok_or(Error::NoProgram)?;
         let program = entry.program().map_err(|_| Error::NoProgram)?;
 
-        // Серверная сторона порта уезжает файловой системе целиком: получателем на нём числится
-        // она одна, и её смерть маршрутизатору видна.
-        let admin = Port::create_service(0)?;
         let budget = self.resource.split(MOUNT_BUDGET_PAGES)?;
-        let process = load_entry(&program, &budget, admin.server)?;
-
-        let log = self.log.duplicate(Rights::WRITE | Rights::TRANSFER, 0)?;
-        // Право минта уходит вместе с капой: файловая система поверх образа режет из него окна
-        // узлов, а деривация региона требует `DUPLICATE`.
-        let image = self
-            .image
-            .handle()
-            .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, 0)?;
-        FileSystemAdminClient::new(PortTransport::client(admin.client.handle()))
-            .start(log, image)?;
-        Ok((process, admin.client.into_handle()))
+        let initialized =
+            launch_entry_retained(&program, &budget, |startup| -> RouterResult<()> {
+                let log = self.log.duplicate(Rights::WRITE | Rights::TRANSFER, 0)?;
+                // Капа образа сохраняет `DUPLICATE` для минта окон узлов.
+                let image = self
+                    .image
+                    .handle()
+                    .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, 0)?;
+                FileSystemAdminClient::new(PortTransport::client(startup.handle()))
+                    .start(log, image)?;
+                Ok(())
+            })?;
+        Ok((initialized.process, initialized.startup.into_handle()))
     }
 }
 

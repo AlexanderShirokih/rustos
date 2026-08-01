@@ -95,6 +95,11 @@ impl Signal {
             wl.entries.len() != initial
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn waiter_count(&self) -> usize {
+        self.waiters.with_lock(|waiters| waiters.entries.len())
+    }
 }
 
 impl Waitable for Signal {

@@ -50,10 +50,12 @@ pub struct Thread<A: ArchContext> {
     /// Per-thread IPC-буфер. `None` у kernel-потоков (нет user-памяти);
     /// у user-потоков заполняется при `prepare_user_thread`.
     ipc_buffer: Option<IpcBufferSlot>,
-    /// Cancel-хук активной блокировки на Port: при терминации потока его
-    /// `Waiter` снимается с очереди Port. `None`, когда поток не запаркован на
-    /// Port (выставляется на время парковки, снимается после resolve).
+    // Cancel-хук активной блокировки снимает внешние регистрации
+    // при терминации потока.
     blocked_cancel: Option<Arc<dyn CancelTarget>>,
+    // Число внешних cleanup-фаз, выполняемых без scheduler-лока. Пока оно
+    // ненулевое, thread, IPC-буфер и owning process нельзя реапить.
+    deferred_cleanup: usize,
 }
 
 impl<A: ArchContext> Thread<A> {
@@ -79,6 +81,7 @@ impl<A: ArchContext> Thread<A> {
             target: ThreadObject::new(),
             ipc_buffer: None,
             blocked_cancel: None,
+            deferred_cleanup: 0,
         }
     }
 
@@ -150,7 +153,7 @@ impl<A: ArchContext> Thread<A> {
         self.ipc_buffer.take()
     }
 
-    /// Привязывает cancel-хук блокировки на Port (на время парковки).
+    /// Привязывает cancel-хук активной блокировки.
     pub fn set_blocked_cancel(&mut self, cancel: Arc<dyn CancelTarget>) {
         self.blocked_cancel = Some(cancel);
     }
@@ -158,5 +161,24 @@ impl<A: ArchContext> Thread<A> {
     /// Изымает cancel-хук блокировки (после resolve либо при терминации).
     pub fn take_blocked_cancel(&mut self) -> Option<Arc<dyn CancelTarget>> {
         self.blocked_cancel.take()
+    }
+
+    pub(super) fn defer_cleanup(&mut self) {
+        self.deferred_cleanup = self
+            .deferred_cleanup
+            .checked_add(1)
+            .expect("deferred cleanup counter overflow");
+    }
+
+    pub(super) fn finish_deferred_cleanup(&mut self) {
+        debug_assert!(
+            self.deferred_cleanup > 0,
+            "deferred cleanup counter underflow"
+        );
+        self.deferred_cleanup = self.deferred_cleanup.saturating_sub(1);
+    }
+
+    pub(super) fn cleanup_is_deferred(&self) -> bool {
+        self.deferred_cleanup != 0
     }
 }

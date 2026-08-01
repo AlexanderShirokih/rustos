@@ -9,7 +9,7 @@ use core::panic::PanicInfo;
 
 use bootstrap::BootstrapClient;
 use rtc_demo::{ClientState, ClockClient, Error, Result, dispatch_client_args};
-use runtime::{PortTransport, Signal, Timeout, thread_exit};
+use runtime::{PortTransport, Signal, Timeout, receive_startup, thread_exit};
 use syscall::{Handle, SIGNALED};
 
 /// Пауза между опросами, чтобы в логе были разные секунды.
@@ -23,11 +23,8 @@ pub extern "C" fn _start(args_server: Handle) -> ! {
 }
 
 fn run(args_server: Handle) -> Result<()> {
-    let args_transport = PortTransport::server(args_server);
-    let mut args: Option<ClientState> = None;
-
-    dispatch_client_args(&mut args, &args_transport)?;
-    let ClientState { clock, klog } = args.ok_or(Error::Vend)?;
+    let ClientState { clock, klog } =
+        receive_startup(args_server, dispatch_client_args)?.ok_or(Error::Vend)?;
 
     let clock = ClockClient::new(PortTransport::client(&clock));
     let klog = BootstrapClient::new(PortTransport::client(&klog));

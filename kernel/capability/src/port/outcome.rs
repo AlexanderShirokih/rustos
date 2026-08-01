@@ -32,14 +32,16 @@ pub(crate) enum RendezvousOutcome {
 pub(crate) struct OutcomeSlot {
     state: AtomicU32,
     badge: AtomicU64,
+    #[cfg(test)]
+    cancel_waiters: AtomicU32,
 }
 
 impl OutcomeSlot {
     pub(crate) const PENDING: u32 = 0;
     /// `call`: запрос доставлен серверу, вызывающая сторона ждёт reply.
     pub(crate) const AWAITING_REPLY: u32 = 1;
-    /// Перенос ответа в процессе: вызывающая сторона обязан дождаться
-    /// терминального исхода, не уходя по тайм-ауту.
+    /// Matcher или reply уже изъял transport и выполняет перенос.
+    /// Владелец IPC-буфера обязан дождаться терминального исхода.
     pub(crate) const DELIVERING: u32 = 2;
     pub(crate) const DELIVERED: u32 = 3;
     pub(crate) const PEER_GONE: u32 = 4;
@@ -53,7 +55,21 @@ impl OutcomeSlot {
         Arc::new(Self {
             state: AtomicU32::new(Self::PENDING),
             badge: AtomicU64::new(0),
+            #[cfg(test)]
+            cancel_waiters: AtomicU32::new(0),
         })
+    }
+
+    /// Matcher под Port-локом линеаризует dequeue и сохраняет
+    /// transport до публикации исхода переноса.
+    pub(crate) fn begin_delivery(&self) {
+        let previous = self.state.compare_exchange(
+            Self::PENDING,
+            Self::DELIVERING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        debug_assert!(previous.is_ok(), "delivery started from non-pending state");
     }
 
     pub(crate) fn set(&self, outcome: RendezvousOutcome) {
@@ -117,6 +133,31 @@ impl OutcomeSlot {
                 Ordering::Acquire,
             )
             .is_ok()
+    }
+
+    /// External cancel после dequeue: либо отменяет ожидание reply,
+    /// либо дожидается завершения уже закоммиченного переноса.
+    pub(crate) fn cancel_after_dequeue(&self) {
+        #[cfg(test)]
+        self.cancel_waiters.fetch_add(1, Ordering::AcqRel);
+        loop {
+            match self.raw() {
+                Self::DELIVERING => core::hint::spin_loop(),
+                Self::AWAITING_REPLY => {
+                    if self.try_timeout() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        #[cfg(test)]
+        self.cancel_waiters.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_waiter_count(&self) -> u32 {
+        self.cancel_waiters.load(Ordering::Acquire)
     }
 }
 

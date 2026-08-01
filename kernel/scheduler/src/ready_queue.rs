@@ -43,6 +43,19 @@ impl ReadyQueue {
         Some((id, Priority::new(level as u8)))
     }
 
+    /// Удаляет все записи `id` на известном уровне приоритета.
+    pub fn remove(&mut self, id: ThreadId, priority: Priority) -> bool {
+        let level = self.priority_index(priority);
+        let before = self.queues[level].len();
+        self.queues[level].retain(|queued| *queued != id);
+        let removed = before - self.queues[level].len();
+        if self.queues[level].is_empty() {
+            self.bitmap &= !Self::mask_for(level);
+        }
+        self.len = self.len.saturating_sub(removed);
+        removed != 0
+    }
+
     /// Число потоков в очереди. Мера загрузки CPU при выборе, куда поставить
     /// новый поток.
     pub fn len(&self) -> usize {
@@ -128,5 +141,20 @@ mod tests {
         assert!(queue.is_empty());
         assert!(queue.pop_highest().is_none());
         assert_eq!(queue.len(), 0, "пустая очередь не уходит в минус");
+    }
+
+    #[test]
+    fn remove_drops_every_matching_entry_and_updates_level() {
+        let mut queue = ReadyQueue::new(4);
+        let victim = thread(1);
+        let other = thread(2);
+        queue.push(victim, Priority::new(1));
+        queue.push(other, Priority::new(1));
+        queue.push(victim, Priority::new(1));
+
+        assert!(queue.remove(victim, Priority::new(1)));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.pop_highest(), Some((other, Priority::new(1))),);
+        assert!(queue.is_empty());
     }
 }

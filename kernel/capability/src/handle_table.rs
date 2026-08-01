@@ -394,11 +394,11 @@ impl HandleTable {
     }
 
     /// Снимает cancel-target по identity.
-    pub fn unregister_cancel(&mut self, id: HandleId, target: &Arc<dyn CancelTarget>) {
+    pub fn unregister_cancel(&mut self, id: HandleId, target: &dyn CancelTarget) {
         let Some(slot) = self.slots.get_mut(id.slot() as usize) else {
             return;
         };
-        let target_ptr = Arc::as_ptr(target).cast::<()>();
+        let target_ptr = core::ptr::from_ref(target).cast::<()>();
         if let Some(pos) = slot
             .waiters
             .iter()
@@ -1428,7 +1428,7 @@ mod tests {
         let target = CountingCancel::new();
         let dyn_target: Arc<dyn CancelTarget> = target.clone();
         table.register_cancel(id, dyn_target.clone()).unwrap();
-        table.unregister_cancel(id, &dyn_target);
+        table.unregister_cancel(id, dyn_target.as_ref());
 
         close(&mut table, id).unwrap();
         assert_eq!(target.count(), 0);
@@ -1441,10 +1441,10 @@ mod tests {
         let target = CountingCancel::new();
         let dyn_target: Arc<dyn CancelTarget> = target.clone();
         table.register_cancel(id, dyn_target.clone()).unwrap();
-        table.unregister_cancel(id, &dyn_target);
-        table.unregister_cancel(id, &dyn_target);
+        table.unregister_cancel(id, dyn_target.as_ref());
+        table.unregister_cancel(id, dyn_target.as_ref());
         let bogus = HandleId::pack(NonZeroU16::new(99).unwrap(), 999);
-        table.unregister_cancel(bogus, &dyn_target);
+        table.unregister_cancel(bogus, dyn_target.as_ref());
     }
 
     #[test]

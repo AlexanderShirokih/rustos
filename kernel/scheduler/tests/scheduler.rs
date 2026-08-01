@@ -11,8 +11,8 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use scheduler::{
-    CpuBootstrapError, CpuEntry, CpuId, Priority, Scheduler, SchedulerConfig, SchedulerHandle,
-    SchedulerServiceExt, SpawnAddressSpace, SpawnConfig, SpawnError, Uninit,
+    CpuBootstrapError, CpuEntry, CpuId, DEFAULT_QUANTUM_NS, Priority, Scheduler, SchedulerConfig,
+    SchedulerHandle, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig, SpawnError, Uninit,
 };
 
 use crate::common::{
@@ -1261,6 +1261,46 @@ impl capability::CancelTarget for SchedulerLockProbe {
     }
 }
 
+struct CleanupQuarantineProbe {
+    handle: SchedulerHandle<MockContext, MockTimerSource>,
+    victim_cpu: CpuId,
+    return_cpu: CpuId,
+    factory: &'static MockAddressSpaceFactory,
+    calls: std::sync::atomic::AtomicUsize,
+    released_during_cancel: std::sync::atomic::AtomicUsize,
+}
+
+impl CleanupQuarantineProbe {
+    fn new(
+        handle: &SchedulerHandle<MockContext, MockTimerSource>,
+        victim_cpu: CpuId,
+        return_cpu: CpuId,
+        factory: &'static MockAddressSpaceFactory,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            handle: handle.clone(),
+            victim_cpu,
+            return_cpu,
+            factory,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            released_during_cancel: std::sync::atomic::AtomicUsize::new(usize::MAX),
+        })
+    }
+}
+
+impl capability::CancelTarget for CleanupQuarantineProbe {
+    fn cancel(&self) {
+        use std::sync::atomic::Ordering;
+
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        set_current_cpu(self.victim_cpu);
+        self.handle.on_reschedule();
+        self.released_during_cancel
+            .store(self.factory.released(), Ordering::Release);
+        set_current_cpu(self.return_cpu);
+    }
+}
+
 #[test]
 fn start_user_process_cancels_loader_waiters_outside_scheduler_lock() {
     // Изъятие bootstrap-хэндла идёт из-под scheduler-лока, а пробуждение
@@ -1627,6 +1667,118 @@ fn second_bootstrap_of_the_same_cpu_is_rejected() {
 }
 
 #[test]
+fn reaped_ready_id_can_be_reused_before_first_cpu_entry() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
+
+    let second = CpuId::new(1).expect("cpu id 1");
+    set_current_cpu(second);
+    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
+    set_current_cpu(CpuId::ZERO);
+
+    let first = scheduler
+        .spawn(SpawnConfig::new("first"), || {})
+        .expect("spawn first");
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(first));
+
+    let handle = running.handle();
+    let victim = SchedulerServiceExt::spawn(
+        &handle,
+        SpawnConfig::new("victim").address_space(SpawnAddressSpace::User),
+        || {},
+    )
+    .expect("enqueue victim on the idle second cpu");
+    assert_eq!(take_reschedules(), vec![second]);
+    let victim_object = running.thread_object_for(victim).expect("victim target");
+    handle
+        .terminate_thread(&victim_object, 9)
+        .expect("terminate victim before the second cpu enters");
+
+    // Любая scheduler boundary реапит не удерживаемый ready-thread. Его id
+    // переиспользуется сразу, поэтому старая ready-запись была бы ABA-ссылкой
+    // на replacement.
+    running.yield_now();
+    assert!(running.thread_object_for(victim).is_none());
+    let replacement = SchedulerServiceExt::spawn(&handle, SpawnConfig::new("replacement"), || {})
+        .expect("reuse victim slot");
+    assert_eq!(
+        replacement, victim,
+        "thread slot must be reused in this test"
+    );
+    assert_eq!(
+        take_reschedules(),
+        vec![second],
+        "the removed victim must not count as load on the second cpu",
+    );
+    take_address_space_switches();
+
+    set_current_cpu(second);
+    let entered = panic::catch_unwind(panic::AssertUnwindSafe(|| CpuEntry::enter(&handle)));
+    assert!(
+        entered.is_err(),
+        "mock first entry must stop in ArchContext::start"
+    );
+    assert_eq!(running.current(), Some(replacement));
+    assert_eq!(
+        take_address_space_switches(),
+        vec![None],
+        "first entry must start the replacement in the kernel address space",
+    );
+}
+
+#[test]
+fn unblocked_terminated_sleeper_leaves_no_reusable_aba_entry() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let victim = scheduler
+        .spawn(SpawnConfig::new("victim"), || {})
+        .expect("spawn victim");
+    let runner = scheduler
+        .spawn(SpawnConfig::new("runner"), || {})
+        .expect("spawn runner");
+    let victim_object = scheduler.thread_object_for(victim).expect("victim target");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(victim));
+    running.sleep_ns(100);
+    assert_eq!(running.current(), Some(runner));
+
+    capability::KernelRuntime::unblock(&running.handle(), capability::WaitToken::from(victim));
+    running
+        .handle()
+        .terminate_thread(&victim_object, 9)
+        .expect("terminate early-woken victim");
+    running.yield_now();
+
+    assert!(running.thread_object_for(victim).is_none());
+    assert_eq!(
+        timer.scheduled_deadline(),
+        DEFAULT_QUANTUM_NS,
+        "terminated ThreadId must own no stale sleep deadline",
+    );
+
+    let replacement =
+        SchedulerServiceExt::spawn(&running.handle(), SpawnConfig::new("replacement"), || {})
+            .expect("reuse victim slot");
+    assert_eq!(replacement, victim, "thread slot must be reused");
+    running.yield_now();
+    assert_eq!(running.current(), Some(replacement));
+
+    // Одинаковый absolute deadline принадлежит только новому владельцу ThreadId.
+    running.sleep_ns(100);
+    timer.advance_to(100);
+    with_simulated_irq(|| running.on_tick(100));
+    assert_eq!(running.current(), Some(replacement));
+}
+
+#[test]
 fn exiting_thread_and_its_address_space_survive_reap_from_another_cpu() {
     reset_switches();
     let factory = new_factory_static();
@@ -1715,4 +1867,205 @@ fn a_cpu_running_a_thread_is_not_picked_over_an_idle_one() {
         vec![second],
         "a new thread must go to the idle cpu, not to the one already running a thread",
     );
+}
+
+#[test]
+fn terminating_a_remote_running_thread_reschedules_its_cpu() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
+
+    let second = CpuId::new(1).expect("cpu id 1");
+    set_current_cpu(second);
+    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
+    set_current_cpu(CpuId::ZERO);
+
+    let first = scheduler
+        .spawn(SpawnConfig::new("first"), || {})
+        .expect("spawn first");
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(first));
+
+    let handle = running.handle();
+    let _ = take_reschedules();
+    let victim = SchedulerServiceExt::spawn(
+        &handle,
+        SpawnConfig::new("victim").address_space(SpawnAddressSpace::User),
+        || {},
+    )
+    .expect("spawn victim");
+    assert_eq!(take_reschedules(), vec![second]);
+
+    set_current_cpu(second);
+    handle.on_reschedule();
+    assert_eq!(running.current(), Some(victim));
+
+    set_current_cpu(CpuId::ZERO);
+    let victim_object = running.thread_object_for(victim).expect("victim target");
+    let victim_pid = running.thread_process_id(victim).expect("victim pid");
+    let victim_process = running
+        .process_object_for(victim_pid)
+        .expect("victim process");
+    handle
+        .terminate_process(&victim_process, 9)
+        .expect("terminate victim process");
+    assert_eq!(take_reschedules(), vec![second]);
+    assert_eq!(
+        factory.released(),
+        0,
+        "address space must stay alive until the remote cpu switches away",
+    );
+
+    set_current_cpu(second);
+    handle.on_reschedule();
+    assert_ne!(running.current(), Some(victim));
+    assert!(
+        running.thread_object_for(victim).is_none(),
+        "terminated remote thread must be reaped after quiescence",
+    );
+    assert_eq!(
+        factory.released(),
+        1,
+        "address space must be released after the remote cpu switches away",
+    );
+
+    drop(victim_object);
+}
+
+#[test]
+fn deferred_cancel_quarantines_remote_process_cleanup() {
+    use std::sync::atomic::Ordering;
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
+
+    let second = CpuId::new(1).expect("cpu id 1");
+    set_current_cpu(second);
+    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
+    set_current_cpu(CpuId::ZERO);
+
+    let first = scheduler
+        .spawn(SpawnConfig::new("first"), || {})
+        .expect("spawn first");
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(first));
+
+    let handle = running.handle();
+    let victim = SchedulerServiceExt::spawn(
+        &handle,
+        SpawnConfig::new("victim").address_space(SpawnAddressSpace::User),
+        || {},
+    )
+    .expect("spawn victim");
+    let _ = take_reschedules();
+
+    set_current_cpu(second);
+    handle.on_reschedule();
+    assert_eq!(running.current(), Some(victim));
+    let victim_pid = running.thread_process_id(victim).expect("victim pid");
+    let victim_process = running
+        .process_object_for(victim_pid)
+        .expect("victim process");
+    let probe = CleanupQuarantineProbe::new(&handle, second, CpuId::ZERO, factory);
+    capability::KernelRuntime::set_blocked_cancel(
+        &handle,
+        probe.clone() as Arc<dyn capability::CancelTarget>,
+    );
+
+    set_current_cpu(CpuId::ZERO);
+    handle
+        .terminate_process(&victim_process, 9)
+        .expect("terminate victim process");
+
+    assert_eq!(probe.calls.load(Ordering::Acquire), 1);
+    assert_eq!(
+        probe.released_during_cancel.load(Ordering::Acquire),
+        0,
+        "address space must survive a remote switch interleaved with cancel",
+    );
+    assert_eq!(
+        factory.released(),
+        0,
+        "address space must stay quarantined until cancel fully returns",
+    );
+
+    set_current_cpu(second);
+    handle.on_reschedule();
+    assert!(running.thread_object_for(victim).is_none());
+    assert_eq!(factory.released(), 1);
+}
+
+#[test]
+fn terminated_current_rejects_late_cancel_and_leaves_the_cpu() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let victim = scheduler
+        .spawn(SpawnConfig::new("victim"), || {})
+        .expect("spawn victim");
+    let victim_object = scheduler.thread_object_for(victim).expect("victim target");
+
+    let running = scheduler.run();
+    let handle = running.handle();
+    handle
+        .terminate_thread(&victim_object, 9)
+        .expect("terminate victim");
+
+    let probe = SchedulerLockProbe::new(&handle);
+    capability::KernelRuntime::set_blocked_cancel(
+        &handle,
+        probe.clone() as Arc<dyn capability::CancelTarget>,
+    );
+    assert_eq!(probe.calls(), 1, "late cancel must be rejected immediately");
+    assert_eq!(
+        probe.acquisitions(),
+        1,
+        "rejected cancel must run outside the scheduler lock",
+    );
+
+    // Даже уже разрешённый waker не даёт terminal current вернуться из
+    // syscall: планировщик обязан сначала снять его с CPU.
+    let ready = core::sync::atomic::AtomicU32::new(capability::ParkState::SIGNALED);
+    capability::KernelRuntime::block_current_until(&handle, &ready, None);
+
+    assert_ne!(running.current(), Some(victim));
+    assert!(
+        running.thread_object_for(victim).is_none(),
+        "terminated thread must be reaped after leaving the cpu",
+    );
+}
+
+#[test]
+fn thread_exit_after_external_termination_does_not_finalize_twice() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let victim = scheduler
+        .spawn(SpawnConfig::new("victim"), || {})
+        .expect("spawn victim");
+    let victim_object = scheduler.thread_object_for(victim).expect("victim target");
+
+    let running = scheduler.run();
+    let pid = running.thread_process_id(victim).expect("victim pid");
+    running
+        .handle()
+        .terminate_thread(&victim_object, 9)
+        .expect("terminate victim externally");
+
+    // Remote CPU мог уже войти в ThreadExit до reschedule IPI. Повторный
+    // exit обязан только переключиться, не уменьшая thread_count второй раз.
+    running.exit_current_with_code(3);
+
+    assert_eq!(victim_object.exit_code(), 9);
+    assert!(running.thread_object_for(victim).is_none());
+    assert!(running.process_object_for(pid).is_none());
 }

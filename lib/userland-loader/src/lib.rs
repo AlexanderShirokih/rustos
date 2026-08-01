@@ -2,8 +2,9 @@
 //!
 //! [`load_entry`] минтит свежие регионы под сегменты, копирует в них байты,
 //! собирает дескриптор образа и стартует процесс через `ProcessCreate`/
-//! `ProcessLoadImage`/`ProcessStart`. Источник байт абстрагирован за
-//! `EntryView`.
+//! `ProcessLoadImage`/`ProcessStart`. [`launch_entry`] добавляет стандартный
+//! startup-порт и отправляет через него стартовый кадр. Источник байт
+//! абстрагирован за `EntryView`.
 
 #![no_std]
 #![allow(unsafe_code)]
@@ -13,8 +14,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use runtime::{
-    Error, Mapping, MemoryAccess, MemoryRegion, OwnedHandle, Priority, Process, Resource, Result,
-    ThreadEntry, UserMemFlags,
+    Error, Mapping, MemoryAccess, MemoryRegion, OwnedHandle, Port, Priority, Process, Resource,
+    Result, ThreadEntry, UserMemFlags,
 };
 use syscall::{
     SEGMENT_ABI_VERSION, SyscallError, USER_VA_END, UserImageDescAbi, UserSegmentAbi,
@@ -24,15 +25,104 @@ use userland::{
     EntryView, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE, entry_name, user_vm_window,
 };
 
+const STARTUP_FAILURE_EXIT_CODE: u32 = 1;
+
+// RAII-владелец незавершенной startup-транзакции.
+struct PendingLaunch {
+    process: Option<Process>,
+    startup: Option<Port>,
+}
+
+/// Процесс с завершённой startup-транзакцией и сохранённым клиентским портом.
+#[derive(Debug)]
+pub struct InitializedProcess {
+    /// Запущенный процесс.
+    pub process: Process,
+    /// Клиентская сторона startup-протокола.
+    pub startup: Port,
+}
+
+impl PendingLaunch {
+    fn finish<E>(
+        mut self,
+        send: impl FnOnce(&Port) -> core::result::Result<(), E>,
+    ) -> core::result::Result<Process, E> {
+        send(self.startup())?;
+        let process = self.take_process();
+        drop(self.startup.take());
+        Ok(process)
+    }
+
+    fn retain<E>(
+        mut self,
+        send: impl FnOnce(&Port) -> core::result::Result<(), E>,
+    ) -> core::result::Result<InitializedProcess, E> {
+        send(self.startup())?;
+        Ok(InitializedProcess {
+            process: self.take_process(),
+            startup: self.startup.take().expect("startup port is present"),
+        })
+    }
+
+    fn startup(&self) -> &Port {
+        self.startup.as_ref().expect("startup port is present")
+    }
+
+    fn take_process(&mut self) -> Process {
+        self.process.take().expect("launched process is present")
+    }
+}
+
+impl Drop for PendingLaunch {
+    fn drop(&mut self) {
+        if let Some(process) = self.process.as_ref() {
+            let _ = process.terminate(STARTUP_FAILURE_EXIT_CODE);
+        }
+    }
+}
+
+/// Загружает `entry`, отправляет startup-кадр через `startup` и
+/// возвращает процесс. Ошибка callback завершает потомка.
+pub fn launch_entry<'a, V: EntryView<'a>, E: From<Error>>(
+    entry: &V,
+    resource: &Resource,
+    startup: impl FnOnce(&Port) -> core::result::Result<(), E>,
+) -> core::result::Result<Process, E> {
+    prepare_launch(entry, resource)
+        .map_err(E::from)?
+        .finish(startup)
+}
+
+/// Загружает `entry`, отправляет startup-кадр и возвращает процесс
+/// с сохранённой клиентской стороной startup-порта.
+pub fn launch_entry_retained<'a, V: EntryView<'a>, E: From<Error>>(
+    entry: &V,
+    resource: &Resource,
+    startup: impl FnOnce(&Port) -> core::result::Result<(), E>,
+) -> core::result::Result<InitializedProcess, E> {
+    prepare_launch(entry, resource)
+        .map_err(E::from)?
+        .retain(startup)
+}
+
+fn prepare_launch<'a, V: EntryView<'a>>(entry: &V, resource: &Resource) -> Result<PendingLaunch> {
+    let startup = Port::create_service(0)?;
+    let process = load_entry(entry, resource, startup.server)?;
+    Ok(PendingLaunch {
+        process: Some(process),
+        startup: Some(startup.client),
+    })
+}
+
 /// Загружает `entry` в новый процесс и стартует его первый поток.
 ///
 /// Сегменты копируются в свежие приватные регионы. `resource` оплачивает их и
-/// становится метеринг-ресурсом потомка. `bootstrap` - стартовый хэндл-канал.
+/// становится метеринг-ресурсом потомка. `initial` — начальная capability.
 /// `Ok` означает, что хэндл передан потомку.
 pub fn load_entry<'a, E: EntryView<'a>>(
     entry: &E,
     resource: &Resource,
-    bootstrap: OwnedHandle,
+    initial: OwnedHandle,
 ) -> Result<Process> {
     // Регионы, маппинги и буфер сегментов держим живыми до возврата из
     // `start`: регионы должны существовать до установки в child-AS.
@@ -112,7 +202,7 @@ pub fn load_entry<'a, E: EntryView<'a>>(
             arg: 0,
             priority: Priority::new(1),
         },
-        bootstrap,
+        initial,
         Some(resource),
     )?;
 

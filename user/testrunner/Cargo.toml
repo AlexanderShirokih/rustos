@@ -24,6 +24,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "startup-fixture"
+path = "src/startup_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "port-fixture"
 path = "src/port_fixture.rs"
 test = false

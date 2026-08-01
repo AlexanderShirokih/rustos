@@ -245,6 +245,9 @@ impl PortState {
             Queue::Receivers(receivers) => receivers.pop_front(),
             Queue::Empty | Queue::Senders(_) => None,
         };
+        if let Some(waiter) = &waiter {
+            waiter.outcome.begin_delivery();
+        }
         self.collapse_if_empty();
         waiter
     }
@@ -254,6 +257,9 @@ impl PortState {
             Queue::Senders(senders) => senders.pop_front(),
             Queue::Empty | Queue::Receivers(_) => None,
         };
+        if let Some(waiter) = &waiter {
+            waiter.outcome.begin_delivery();
+        }
         self.collapse_if_empty();
         waiter
     }

@@ -71,72 +71,146 @@ pub struct WaitManyOutcome {
     pub observed: u32,
 }
 
-/// Взведённое ожидание [`signal_wait_many`]: cancel-цели на слотах и waiter'ы
-/// на источниках. `Drop` снимает обе регистрации.
-struct ArmedWait<'a> {
-    table: &'a Arc<MutexCell<HandleTable>>,
-    items: &'a [(HandleId, u32)],
+struct SignalWaitState {
+    handles: usize,
+    sources: usize,
+    canceled: bool,
+}
+
+// Owned cleanup активного signal_wait_many доступен RAII-guard'у
+// и scheduler'у при external termination.
+struct SignalWaitCancel {
+    table: Arc<MutexCell<HandleTable>>,
+    handles: Vec<HandleId>,
     sources: Vec<Arc<dyn Waitable>>,
     waker: Arc<ParkWaker>,
     indexed_wakers: Vec<Arc<IndexedWaker>>,
+    state: MutexCell<SignalWaitState>,
 }
 
-impl<'a> ArmedWait<'a> {
-    /// Cancel-цели регистрируются под table-локом, waiter'ы на источниках - вне
-    /// его: взведение будит уже поднятый сигнал, а пробуждение берёт
-    /// scheduler-лок, который под table-локом запрещён.
-    fn arm(
-        table: &'a Arc<MutexCell<HandleTable>>,
-        items: &'a [(HandleId, u32)],
+impl SignalWaitCancel {
+    fn new(
+        table: Arc<MutexCell<HandleTable>>,
+        items: &[(HandleId, u32)],
         sources: Vec<Arc<dyn Waitable>>,
         waker: Arc<ParkWaker>,
-    ) -> Result<Self, IpcError> {
-        let cancel: Arc<dyn CancelTarget> = waker.clone();
-        table.with_lock(|tbl| {
-            for (registered, &(handle, _mask)) in items.iter().enumerate() {
-                // Handle прошёл снимок источников, а к взведению исчез: закрыт или
-                // передан параллельно, и исход ожидания - `Canceled`.
-                if tbl.register_cancel(handle, cancel.clone()).is_err() {
-                    for &(done, _mask) in &items[..registered] {
-                        tbl.unregister_cancel(done, &cancel);
-                    }
-                    return Err(IpcError::Canceled);
-                }
-            }
-            Ok(())
-        })?;
-
-        let mut armed = Self {
+    ) -> Arc<Self> {
+        let indexed_wakers = (0u32..)
+            .zip(items.iter())
+            .map(|(index, _)| Arc::new(IndexedWaker::new(waker.clone(), index)))
+            .collect();
+        Arc::new(Self {
             table,
-            items,
+            handles: items.iter().map(|&(handle, _)| handle).collect(),
             sources,
             waker,
-            indexed_wakers: Vec::with_capacity(items.len()),
-        };
-        for (index, (source, &(_handle, mask))) in
-            (0u32..).zip(armed.sources.iter().zip(items.iter()))
-        {
-            let indexed = Arc::new(IndexedWaker::new(armed.waker.clone(), index));
-            let dyn_waker: Arc<dyn Waker> = indexed.clone();
-            source.register_waiter(mask, dyn_waker);
-            armed.indexed_wakers.push(indexed);
-        }
-        Ok(armed)
+            indexed_wakers,
+            state: MutexCell::new(SignalWaitState {
+                handles: 0,
+                sources: 0,
+                canceled: false,
+            }),
+        })
+    }
+
+    fn arm(self: &Arc<Self>, items: &[(HandleId, u32)]) -> Result<(), IpcError> {
+        // Пробуждение scheduler'а под handle-table локом запрещено.
+        let cancel: Arc<dyn CancelTarget> = self.clone();
+        self.state.with_lock(|state| {
+            if state.canceled {
+                return Err(IpcError::Canceled);
+            }
+            self.table.with_lock(|tbl| {
+                for (registered, &handle) in self.handles.iter().enumerate() {
+                    // Handle прошёл снимок источников, а к взведению исчез:
+                    // закрыт или передан параллельно, и исход ожидания - `Canceled`.
+                    if tbl.register_cancel(handle, cancel.clone()).is_err() {
+                        for &done in &self.handles[..registered] {
+                            tbl.unregister_cancel(done, cancel.as_ref());
+                        }
+                        return Err(IpcError::Canceled);
+                    }
+                }
+                Ok(())
+            })?;
+            state.handles = self.handles.len();
+            for ((source, indexed), &(_handle, mask)) in self
+                .sources
+                .iter()
+                .zip(self.indexed_wakers.iter())
+                .zip(items.iter())
+            {
+                let dyn_waker: Arc<dyn Waker> = indexed.clone();
+                source.register_waiter(mask, dyn_waker);
+                state.sources += 1;
+            }
+            Ok(())
+        })
+    }
+
+    fn detach(&self) {
+        self.state.with_lock(|state| {
+            for (source, indexed) in self
+                .sources
+                .iter()
+                .zip(self.indexed_wakers.iter())
+                .take(state.sources)
+            {
+                let dyn_waker: Arc<dyn Waker> = indexed.clone();
+                source.remove_waiter(&dyn_waker);
+            }
+            state.sources = 0;
+            self.table.with_lock(|tbl| {
+                for &handle in self.handles.iter().take(state.handles) {
+                    tbl.unregister_cancel(handle, self);
+                }
+            });
+            state.handles = 0;
+        });
     }
 }
 
-impl Drop for ArmedWait<'_> {
-    fn drop(&mut self) {
-        for (source, indexed) in self.sources.iter().zip(self.indexed_wakers.iter()) {
-            let dyn_waker: Arc<dyn Waker> = indexed.clone();
-            source.remove_waiter(&dyn_waker);
+impl CancelTarget for SignalWaitCancel {
+    fn cancel(&self) {
+        self.state.with_lock(|state| state.canceled = true);
+        self.detach();
+        CancelTarget::cancel(self.waker.as_ref());
+    }
+}
+
+// RAII-владелец регистраций signal_wait_many.
+struct ArmedWait {
+    cancel: Arc<SignalWaitCancel>,
+}
+
+impl ArmedWait {
+    fn new(
+        table: Arc<MutexCell<HandleTable>>,
+        items: &[(HandleId, u32)],
+        sources: Vec<Arc<dyn Waitable>>,
+        waker: Arc<ParkWaker>,
+    ) -> Self {
+        Self {
+            cancel: SignalWaitCancel::new(table, items, sources, waker),
         }
-        let cancel: Arc<dyn CancelTarget> = self.waker.clone();
-        self.table.with_lock(|tbl| {
-            for &(handle, _mask) in self.items {
-                tbl.unregister_cancel(handle, &cancel);
-            }
-        });
+    }
+
+    fn arm(&self, items: &[(HandleId, u32)]) -> Result<(), IpcError> {
+        self.cancel.arm(items)
+    }
+
+    fn waker(&self) -> &Arc<ParkWaker> {
+        &self.cancel.waker
+    }
+
+    fn cancel_target(&self) -> Arc<dyn CancelTarget> {
+        self.cancel.clone()
+    }
+}
+
+impl Drop for ArmedWait {
+    fn drop(&mut self) {
+        self.cancel.detach();
     }
 }
 
@@ -182,14 +256,29 @@ pub fn signal_wait_many(
         runtime.clone(),
         runtime.current_wait_token(),
     ));
-    let armed = ArmedWait::arm(&table, items, sources, waker)?;
+    let armed = ArmedWait::new(table, items, sources, waker);
+    runtime.set_blocked_cancel(armed.cancel_target());
+    if let Err(error) = armed.arm(items) {
+        armed.cancel_target().cancel();
+        // Для живого current CANCELED-флаг делает checkpoint no-op;
+        // Terminated current обязан уйти с CPU до возврата из syscall.
+        runtime.block_current_until(armed.waker().state(), None);
+        drop(armed);
+        runtime.clear_blocked_cancel();
+        return Err(error);
+    }
 
-    runtime.block_current_until(armed.waker.state(), timeout_ns);
+    runtime.block_current_until(armed.waker().state(), timeout_ns);
+    let resolution = armed.waker().resolve();
+    let winner_index = armed.waker().winner_index();
+    let observed = armed.waker().observed();
+    drop(armed);
+    runtime.clear_blocked_cancel();
 
-    match armed.waker.resolve() {
+    match resolution {
         ParkResolution::Signaled => Ok(WaitManyOutcome {
-            index: armed.waker.winner_index(),
-            observed: armed.waker.observed(),
+            index: winner_index,
+            observed,
         }),
         ParkResolution::Timeout => Err(IpcError::Timeout),
         ParkResolution::Canceled => Err(IpcError::Canceled),
@@ -306,6 +395,7 @@ mod tests {
     struct MockRuntime {
         handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
         block_hook: Mutex<Option<BlockHook>>,
+        blocked_cancel: Mutex<Option<Arc<dyn CancelTarget>>>,
     }
 
     impl MockRuntime {
@@ -313,6 +403,7 @@ mod tests {
             Self {
                 handle_table: Mutex::new(None),
                 block_hook: Mutex::new(None),
+                blocked_cancel: Mutex::new(None),
             }
         }
 
@@ -327,6 +418,17 @@ mod tests {
 
         fn reset(&self) {
             self.configure(None, None);
+            *self.blocked_cancel.lock().unwrap() = None;
+        }
+
+        fn cancel_blocked(&self) {
+            let cancel = self
+                .blocked_cancel
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("blocked cancel is armed");
+            cancel.cancel();
         }
     }
 
@@ -355,9 +457,13 @@ mod tests {
 
         fn unblock(&self, _token: WaitToken) {}
 
-        fn set_blocked_cancel(&self, _cancel: Arc<dyn crate::CancelTarget>) {}
+        fn set_blocked_cancel(&self, cancel: Arc<dyn crate::CancelTarget>) {
+            *self.blocked_cancel.lock().unwrap() = Some(cancel);
+        }
 
-        fn clear_blocked_cancel(&self) {}
+        fn clear_blocked_cancel(&self) {
+            *self.blocked_cancel.lock().unwrap() = None;
+        }
     }
 
     /// install_runtime - once per process, поэтому singleton
@@ -491,6 +597,23 @@ mod tests {
         mock().reset();
     }
 
+    #[test]
+    fn signal_wait_runtime_cancel_detaches_owned_wait() {
+        let _guard = test_lock();
+        let (table, id, signal) = install_signal_handle(Rights::READ);
+        let hook: BlockHook = Box::new(|| mock().cancel_blocked());
+        mock().configure(Some(table.clone()), Some(hook));
+
+        let error = signal_wait_one(id, SIGNALED, None).unwrap_err();
+        assert_eq!(error, IpcError::Canceled);
+        assert_eq!(signal.waiter_count(), 0);
+
+        table.with_lock(|tbl| tbl.remove(id).unwrap()).release();
+        signal.signal(SIGNALED, 0);
+
+        mock().reset();
+    }
+
     /// Regression guard: handle, исчезнувший между снимком источников и
     /// взведением, закрывает ожидание тем же `Canceled`, что и уход во сне.
     #[test]
@@ -507,9 +630,10 @@ mod tests {
             runtime.current_wait_token(),
         ));
         let items = [(id, SIGNALED)];
-        let armed = ArmedWait::arm(&table, &items, sources, waker);
+        let armed = ArmedWait::new(table, &items, sources, waker);
+        let result = armed.arm(&items);
 
-        assert!(matches!(armed.err(), Some(IpcError::Canceled)));
+        assert!(matches!(result, Err(IpcError::Canceled)));
 
         mock().reset();
     }

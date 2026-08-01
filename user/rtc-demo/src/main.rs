@@ -15,7 +15,7 @@ use runtime::{
 };
 use syscall::{Handle, Rights};
 use userland_image::{DecodedImage, decode};
-use userland_loader::load_entry;
+use userland_loader::launch_entry;
 
 /// Значок clock-сессии клиента у драйвера.
 const CLOCK_SESSION_BADGE: u64 = 1;
@@ -42,38 +42,30 @@ fn run(root: Handle) -> Result<()> {
         .acquire_device_memory_by_base(base)?
         .ok_or(Error::NoDevice)?;
 
-    // Clock-порт связывает драйвер и клиента; args-порты доставляют каждому
-    // его стартовые ресурсы. У init остаётся клиентская сторона каждого порта,
-    // серверная уезжает тому, кто на нём принимает.
     let clock_port = Port::create_service(CLOCK_SESSION_BADGE)?;
-    let driver_args_port = Port::create_service(0)?;
-    let client_args_port = Port::create_service(0)?;
 
-    // Драйвер стартует с серверной стороной своего args-порта.
-    let driver = spawn(
+    let driver = launch(
         &image,
         "/boot/rtc-driver",
         &resource,
-        driver_args_port.server,
+        |startup| -> Result<()> {
+            DriverArgsClient::new(PortTransport::client(startup.handle()))
+                .provide(device.into_handle(), clock_port.server)?;
+            Ok(())
+        },
     )?;
 
-    let driver_args =
-        DriverArgsClient::new(PortTransport::client(driver_args_port.client.handle()));
-    driver_args.provide(device.into_handle(), clock_port.server)?;
-
-    // Клиент - симметрично: клиентская сторона clock-порта и write-копия klog.
-    let client = spawn(
+    let client = launch(
         &image,
         "/boot/rtc-client",
         &resource,
-        client_args_port.server,
-    )?;
-
-    let client_args =
-        ClientArgsClient::new(PortTransport::client(client_args_port.client.handle()));
-    client_args.provide(
-        clock_port.client.into_handle(),
-        root.duplicate(Rights::WRITE | Rights::TRANSFER, 0)?,
+        |startup| -> Result<()> {
+            ClientArgsClient::new(PortTransport::client(startup.handle())).provide(
+                clock_port.client.into_handle(),
+                root.duplicate(Rights::WRITE | Rights::TRANSFER, 0)?,
+            )?;
+            Ok(())
+        },
     )?;
 
     // Клиент уносит значок clock-сессии, поэтому его уход завершает и драйвер.
@@ -82,14 +74,14 @@ fn run(root: Handle) -> Result<()> {
     Ok(())
 }
 
-fn spawn(
+fn launch(
     image: &DecodedImage,
     path: &str,
     resource: &Resource,
-    startup: OwnedHandle,
+    startup: impl FnOnce(&Port) -> Result<()>,
 ) -> Result<Process> {
     let program = image.entry(path).ok_or(Error::MissingEntry)?.program()?;
-    Ok(load_entry(&program, resource, startup)?)
+    launch_entry(&program, resource, startup)
 }
 
 fn get_pl031_base(kernel: &BootstrapClient<PortTransport>) -> Result<u64> {

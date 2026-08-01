@@ -13,7 +13,7 @@ use memory::{UserVmContext, virtual_address::VirtualAddress};
 use super::{
     arch::{ArchContext, ArchCpu, TimerSource, with_preemption_disabled},
     scheduler::{
-        CpuBootstrapError, ScheduleAction, SchedulerInner, notify_pending_cpus,
+        CpuBootstrapError, DeferredSignals, ScheduleAction, SchedulerInner, notify_pending_cpus,
         perform_schedule_action, release_deferred_handles,
     },
 };
@@ -60,6 +60,12 @@ where
     A: ArchContext,
     T: TimerSource,
 {
+    fn emit_deferred_signals(&self, signals: DeferredSignals) {
+        let completed = signals.emit();
+        self.inner
+            .with_lock(|inner| inner.finish_deferred_cleanup(&completed));
+    }
+
     pub(crate) fn new(inner: Arc<collections::MutexCell<SchedulerInner<A, T>>>) -> Self {
         Self { inner }
     }
@@ -154,7 +160,8 @@ where
         let signals = self
             .inner
             .with_lock(|inner| inner.terminate_thread_object(thread, exit_code));
-        signals.emit();
+        self.emit_deferred_signals(signals);
+        notify_pending_cpus(&self.inner);
         Ok(())
     }
 
@@ -166,7 +173,8 @@ where
         let signals = self
             .inner
             .with_lock(|inner| inner.terminate_process_object(process, exit_code));
-        signals.emit();
+        self.emit_deferred_signals(signals);
+        notify_pending_cpus(&self.inner);
         Ok(())
     }
 
@@ -318,7 +326,8 @@ where
         let signals = self
             .inner
             .with_lock(|inner| inner.begin_exit_current(exit_code));
-        signals.emit();
+        let deferred = signals.emit();
+        debug_assert!(deferred.is_empty());
         let action = self.inner.with_lock(|inner| {
             let now_ns = inner.now_ns();
             inner.finish_exit_current(now_ns)
@@ -332,8 +341,11 @@ where
             let action = self.inner.with_lock(|inner| {
                 // Если waker успел отработать до того, как мы взяли
                 // scheduler-lock, не уходим в блокировку - иначе никто
-                // не разбудит нас обратно.
-                if ready_flag.load(Ordering::Acquire) != ParkState::REGISTERED {
+                // не разбудит нас обратно. Terminated current обязан уйти с
+                // CPU независимо от состояния waker.
+                if !inner.current_is_terminated()
+                    && ready_flag.load(Ordering::Acquire) != ParkState::REGISTERED
+                {
                     return ScheduleAction::None;
                 }
                 let now_ns = inner.now_ns();
@@ -353,8 +365,19 @@ where
     }
 
     fn set_blocked_cancel(&self, cancel: Arc<dyn capability::CancelTarget>) {
-        self.inner
+        let rejected = self
+            .inner
             .with_lock(|inner| inner.set_current_blocked_cancel(cancel));
+        if let Some((thread_id, cancel)) = rejected {
+            cancel.cancel();
+            if let Some(reply) = cancel.take_abandoned_reply() {
+                reply.cancel();
+            }
+            if let Some(thread_id) = thread_id {
+                self.inner
+                    .with_lock(|inner| inner.finish_deferred_cleanup(&[thread_id]));
+            }
+        }
     }
 
     fn clear_blocked_cancel(&self) {

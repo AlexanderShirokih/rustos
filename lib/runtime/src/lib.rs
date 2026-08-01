@@ -14,6 +14,7 @@ mod log;
 mod object;
 mod port_transport;
 mod ring_transport;
+mod startup;
 mod svc;
 mod sync;
 
@@ -28,6 +29,7 @@ pub use object::{
 };
 pub use port_transport::PortTransport;
 pub use ring_transport::RingTransport;
+pub use startup::receive_startup;
 pub use svc::{
     handle_close, handle_duplicate, ipc_buffer_addr, irq_ack, irq_mint, memory_allocate,
     memory_create_virtual, memory_free, memory_map, memory_region_inspect, memory_remap,

@@ -43,3 +43,27 @@ fn sleep_queue_returns_earliest_deadline_first() {
     assert_eq!(queue.pop(), Some(early));
     assert_eq!(queue.pop(), Some(late));
 }
+
+#[test]
+fn sleep_queue_removes_every_entry_for_a_thread() {
+    let mut queue = SleepQueue::new();
+    let victim = thread_id(1);
+    let survivor = SleepEntry {
+        wakeup_at_ns: 75,
+        thread_id: thread_id(2),
+    };
+    queue.push(SleepEntry {
+        wakeup_at_ns: 50,
+        thread_id: victim,
+    });
+    queue.push(survivor);
+    queue.push(SleepEntry {
+        wakeup_at_ns: 100,
+        thread_id: victim,
+    });
+
+    queue.remove_thread(victim);
+
+    assert_eq!(queue.pop(), Some(survivor));
+    assert!(queue.pop().is_none());
+}

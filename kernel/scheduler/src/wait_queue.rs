@@ -60,4 +60,10 @@ impl SleepQueue {
         }
         self.pop()
     }
+
+    /// Удаляет все отложенные пробуждения потока.
+    pub fn remove_thread(&mut self, thread_id: ThreadId) {
+        self.entries
+            .retain(|Reverse(entry)| entry.thread_id != thread_id);
+    }
 }

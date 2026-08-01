@@ -678,8 +678,9 @@ struct PortCancel {
 
 impl CancelTarget for PortCancel {
     fn cancel(&self) {
-        self.port.remove_waiter(&self.waker);
-        self.outcome.try_timeout();
+        if !self.port.remove_waiter(&self.waker) {
+            self.outcome.cancel_after_dequeue();
+        }
     }
 
     fn take_abandoned_reply(&self) -> Option<Arc<Reply>> {
@@ -708,7 +709,7 @@ mod tests {
     use alloc::sync::Arc;
     use core::{
         num::NonZeroU64,
-        sync::atomic::{AtomicU32, Ordering},
+        sync::atomic::{AtomicBool, AtomicU32, Ordering},
     };
 
     use collections::MutexCell;
@@ -995,6 +996,45 @@ mod tests {
         // Идемпотентность: повторный cancel - no-op.
         CancelTarget::cancel(&cancel);
         assert!(ep.queue_is_empty());
+    }
+
+    #[test]
+    fn port_cancel_waits_for_dequeued_transfer() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &rt, None) else {
+            panic!("recv must park");
+        };
+        let receiver = ep
+            .inner
+            .with_lock(PortState::take_receiver)
+            .expect("receiver set remains live")
+            .expect("parked receiver is dequeued");
+        assert_eq!(outcome.raw(), OutcomeSlot::DELIVERING);
+
+        let cancel = PortCancel {
+            port: ep,
+            waker,
+            outcome: outcome.clone(),
+            reply_slot: None,
+        };
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_by_cancel = completed.clone();
+        let cancel_thread = std::thread::spawn(move || {
+            CancelTarget::cancel(&cancel);
+            completed_by_cancel.store(true, Ordering::Release);
+        });
+
+        while outcome.cancel_waiter_count() == 0 {
+            std::thread::yield_now();
+        }
+        assert!(!completed.load(Ordering::Acquire));
+
+        receiver.outcome.set(RendezvousOutcome::Delivered);
+        receiver.waker.signal_match();
+        cancel_thread.join().expect("cancel joins");
+        assert!(completed.load(Ordering::Acquire));
     }
 
     #[test]
