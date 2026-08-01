@@ -2,20 +2,17 @@
 
 use memory::physical_address::PhysicalAddress;
 
-use crate::memory::{
-    asid,
-    regs::{
-        common::EL1,
-        id_aa64mmfr0::{AsidWidth, IdAa64Mmfr0},
-        mair,
-        mair::MemoryAttributeIndirectionRegister,
-        sctlr,
-        sctlr::SystemControlRegister,
-        tcr,
-        tcr::{TranslationControlRegister, TtbrSel},
-        tlb::TranslationLookasideBuffer,
-        ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister},
-    },
+use crate::memory::regs::{
+    common::{EL1, ExceptionLevel},
+    id_aa64mmfr0::{AsidWidth, IdAa64Mmfr0},
+    mair,
+    mair::MemoryAttributeIndirectionRegister,
+    sctlr,
+    sctlr::SystemControlRegister,
+    tcr,
+    tcr::{TranslationControlRegister, TtbrSel},
+    tlb::TranslationLookasideBuffer,
+    ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister},
 };
 
 /// Конфигурация адресного пространства.
@@ -87,7 +84,7 @@ impl MmuConfig for NormalDualSpaceConfig {
 }
 
 /// Операции с MMU.
-pub struct Mmu<EL> {
+pub struct Mmu<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 
@@ -128,10 +125,11 @@ impl Mmu<EL1> {
             mair::MairEntry::Device(config.device_memory_config()), // слот #1
         ]));
 
-        // 3) Runtime-detect ширины ASID - она прокидывается в TCR.AS и в
-        // глобальный аллокатор тегов, чтобы оба видели одинаковый предел.
+        // 3) Runtime-detect ширины ASID для TCR.AS. Глобальный аллокатор тегов
+        // здесь не трогается: этот путь проходит каждый CPU, а аллокатор -
+        // общий, и его настройка принадлежит загрузке boot CPU
+        // (`asid::init_global`).
         let asid_width = IdAa64Mmfr0::asid_width();
-        asid::init(asid_width);
 
         // 4) Запись корня таблицы и конфигурации адресации
         let lower_config = config.lower_half_config(asid_width);

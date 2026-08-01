@@ -22,8 +22,8 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 use scheduler::{
-    ArchContext, ArchCpu, CpuId, Priority, ProcessId, StackError, Thread, ThreadId, ThreadStack,
-    ThreadStackAllocator, TimerSource,
+    ArchContext, ArchCpu, CpuId, CpuLocalError, Priority, ProcessId, StackError, Thread, ThreadId,
+    ThreadStack, ThreadStackAllocator, TimerSource,
 };
 
 const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
@@ -121,8 +121,9 @@ impl ArchCpu for MockCpu {
         CpuId::ZERO
     }
 
-    unsafe fn install_cpu_local(cpu: *mut ()) {
+    unsafe fn install_cpu_local(cpu: *mut ()) -> Result<(), CpuLocalError> {
         CPU_LOCAL_PTR.with(|c| c.set(cpu as usize));
+        Ok(())
     }
 
     fn cpu_local_ptr() -> *mut () {

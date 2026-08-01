@@ -1,21 +1,25 @@
 //! Аппаратный контроллер GICv3: Distributor, Redistributor и CPU Interface.
 
 use alloc::{collections::BTreeMap, sync::Arc};
-use core::hint::spin_loop;
+use core::{cell::Cell, hint::spin_loop};
 
 use drivers_common::services::{
-    interrupts::{CpuInterfaceError, CpuMask, IrqHandler, IrqNumber, IrqPriority, TriggerType},
+    interrupts::{
+        CpuInterfaceError, CpuMask, IpiError, IpiTarget, IrqHandler, IrqNumber, IrqPriority,
+        TriggerType,
+    },
     mmio::MmioBound,
 };
+use drivers_common_aarch64::ipi_affinity::IpiAffinity;
 use io::mmio::Reg;
 use klog::{debug, warn};
 
 use super::regs::{
     GICD_CTLR, GICD_CTLR_ARE_NS, GICD_CTLR_ENABLE_GRP1NS, GICD_CTLR_RWP, GICD_ICENABLER,
     GICD_ICFGR, GICD_ICPENDR, GICD_IGROUPR, GICD_IGRPMODR, GICD_IPRIORITYR, GICD_IROUTER,
-    GICD_ISENABLER, GICD_TYPER, GICR_ICENABLER0, GICR_ICFGR0, GICR_ICFGR1, GICR_IGROUPR0,
-    GICR_IGRPMODR0, GICR_IPRIORITYR, GICR_ISENABLER0, GICR_TYPER, GICR_TYPER_LAST, GICR_WAKER,
-    GICR_WAKER_CHILDREN_ASLEEP, GICR_WAKER_PROCESSOR_SLEEP, ITLinesNumber, IrqType,
+    GICD_ISENABLER, GICD_TYPER, GICR_FRAME_SPAN, GICR_ICENABLER0, GICR_ICFGR0, GICR_ICFGR1,
+    GICR_IGROUPR0, GICR_IGRPMODR0, GICR_IPRIORITYR, GICR_ISENABLER0, GICR_TYPER, GICR_TYPER_LAST,
+    GICR_WAKER, GICR_WAKER_CHILDREN_ASLEEP, GICR_WAKER_PROCESSOR_SLEEP, ITLinesNumber, IrqType,
     PRIORITY_MASK_ALL, affinity_value, bit_offset, packed_affinity,
 };
 use crate::{read_sysreg, write_sysreg};
@@ -27,9 +31,50 @@ pub(super) struct Gicv3Controller {
     pub(super) redistributor: MmioBound,
     /// Расстояние между фреймами соседних CPU, объявленное device tree.
     pub(super) redistributor_stride: usize,
+    /// Последний найденный фрейм. Обращения к SGI и PPI идут во фрейм текущего
+    /// CPU, и подряд идущие приходят с одного: попадание снимает перебор
+    /// фреймов с чтением `GICR_TYPER` на каждом.
+    frame_cache: Cell<Option<RedistributorFrame>>,
     pub(super) interrupt_lines: ITLinesNumber,
-    pub(super) handlers: BTreeMap<IrqNumber, Arc<dyn IrqHandler>>,
+    pub(super) handlers: BTreeMap<IrqNumber, BoundIrq>,
 }
+
+/// Привязанная линия: обработчик и параметры её настройки.
+///
+/// Регистры SGI и PPI приватны для CPU: настройка, сделанная одним CPU, другому
+/// не видна, и на его per-CPU инициализации она повторяется отсюда.
+pub(super) struct BoundIrq {
+    pub(super) handler: Arc<dyn IrqHandler>,
+    pub(super) priority: IrqPriority,
+    pub(super) trigger: Option<TriggerType>,
+}
+
+#[derive(Clone, Copy)]
+struct RedistributorFrame {
+    affinity: u32,
+    offset: usize,
+}
+
+const SGI_TARGET_LIST_BITS: u64 = 16;
+
+// Aff3 [55:48], Aff2 [39:32], INTID [27:24], Aff1 [23:16], TargetList [15:0];
+// IRM (бит 40) нулевой - рассылка адресная.
+const fn sgi1r_value(irq: IrqNumber, affinity: IpiAffinity) -> u64 {
+    ((affinity.aff3 as u64) << 48)
+        | ((affinity.aff2 as u64) << 32)
+        | ((irq.raw() as u64 & 0xF) << 24)
+        | ((affinity.aff1 as u64) << 16)
+        | (1u64 << affinity.aff0)
+}
+
+const _: () = assert!(sgi1r_value(IrqNumber::new(0), IpiAffinity::from_mpidr(0)) == 1);
+// Aff3=3, Aff2=2, Aff1=1, Aff0=4, INTID=5.
+const _: () = assert!(
+    sgi1r_value(
+        IrqNumber::new(5),
+        IpiAffinity::from_mpidr(0x0000_0003_0002_0104)
+    ) == 0x0003_0002_0501_0010
+);
 
 // SAFETY: Gicv3Controller содержит только MmioBound (volatile-доступ) и BTreeMap.
 // Синхронизация обеспечивается Mutex на уровне сервиса.
@@ -47,6 +92,7 @@ impl Gicv3Controller {
             distributor,
             redistributor,
             redistributor_stride,
+            frame_cache: Cell::new(None),
             interrupt_lines,
             handlers: BTreeMap::new(),
         }
@@ -83,21 +129,93 @@ impl Gicv3Controller {
         self.wakeup_redistributor(frame);
         self.init_redistributor_sgi_ppi(frame);
         Self::configure_cpu_interface();
+        self.restore_private_lines();
 
         Ok(())
     }
 
-    // Фреймы перебираются подряд до отмеченного `Last`: порядок фреймов задаёт
-    // железо, и совпадать с нумерацией ядра он не обязан. Перебор ограничен
-    // отображённой областью - `MmioBound` границы не проверяет.
+    fn restore_private_lines(&self) {
+        for (irq, bound) in &self.handlers {
+            if !matches!(IrqType::from_irq_number(*irq), IrqType::Sgi | IrqType::Ppi) {
+                continue;
+            }
+
+            self.set_priority(*irq, bound.priority);
+            if let Some(trigger) = bound.trigger {
+                self.set_config(*irq, trigger);
+            }
+            self.enable(*irq);
+        }
+    }
+
+    /// Рассылает SGI процессору по его affinity через `ICC_SGI1R_EL1`.
+    ///
+    /// `TargetList` адресует Aff0 отдельным битом: в одной группе адресуются
+    /// шестнадцать процессоров. За этим пределом нужен `RS` из GICv3.1.
+    pub(super) fn send_sgi(irq: IrqNumber, target: IpiTarget) -> Result<(), IpiError> {
+        if !matches!(IrqType::from_irq_number(irq), IrqType::Sgi) {
+            return Err(IpiError::NotAnIpi);
+        }
+
+        let affinity = IpiAffinity::from_target(target);
+        if u64::from(affinity.aff0) >= SGI_TARGET_LIST_BITS {
+            return Err(IpiError::UnreachableTarget);
+        }
+
+        let value = sgi1r_value(irq, affinity);
+
+        // SAFETY: ICC_SGI1R_EL1 доступен на EL1 при `ICC_SRE_EL1.SRE=1`, что
+        // ставит `enable_sre`. `dsb ishst` публикует записи, ради которых
+        // прерывание и посылается, до его генерации; `isb` не даёт отправке
+        // отстать от возврата из функции.
+        unsafe {
+            core::arch::asm!(
+                "dsb    ishst",
+                "msr    icc_sgi1r_el1, {value}",
+                "isb",
+                value = in(reg) value,
+                options(nostack, preserves_flags),
+            );
+        }
+
+        Ok(())
+    }
+
     fn current_redistributor_frame(&self) -> Option<usize> {
         // SAFETY: MPIDR_EL1 доступен на EL1 и только читается.
         let mpidr = unsafe { read_sysreg!(mpidr_el1) };
         let affinity = packed_affinity(mpidr);
+
+        if let Some(frame) = self.cached_frame(affinity) {
+            return Some(frame);
+        }
+
+        let frame = self.scan_redistributor_frame(affinity)?;
+        self.remember_frame(affinity, frame);
+        Some(frame)
+    }
+
+    fn cached_frame(&self, affinity: u32) -> Option<usize> {
+        self.frame_cache
+            .get()
+            .filter(|frame| frame.affinity == affinity)
+            .map(|frame| frame.offset)
+    }
+
+    fn remember_frame(&self, affinity: u32, offset: usize) {
+        self.frame_cache
+            .set(Some(RedistributorFrame { affinity, offset }));
+    }
+
+    // Фреймы перебираются подряд до отмеченного `Last`: порядок фреймов задаёт
+    // железо, и совпадать с нумерацией ядра он не обязан. Фрейм принимается,
+    // только если целиком помещается в область: за её границей чтение вернуло
+    // бы ноль, а нулевое affinity принадлежит вполне реальному CPU.
+    fn scan_redistributor_frame(&self, affinity: u32) -> Option<usize> {
         let region = self.redistributor.base().size();
 
         let mut frame = 0usize;
-        while frame + self.redistributor_stride <= region {
+        while frame + GICR_FRAME_SPAN <= region {
             let typer: u64 = self.redistributor.read_reg(GICR_TYPER.with_offset(frame));
 
             if affinity_value(typer) == affinity {
@@ -376,12 +494,13 @@ impl Gicv3Controller {
     /// Конфигурирует триггер PPI-линии в GICR_ICFGR1 текущего CPU (2 бита на IRQ;
     /// старший бит поля: `1` = edge, `0` = level). Вызывать до enable: переконфиг
     /// включённой линии по спеке GIC UNPREDICTABLE.
+    ///
+    /// Триггер SGI задан архитектурой: такая линия проходит мимо.
     pub(super) fn set_config(&self, irq: IrqNumber, trigger: TriggerType) {
         let raw = irq.raw() as usize;
-        debug_assert!(
-            (16..32).contains(&raw),
-            "set_config рассчитан только на PPI (16..32)"
-        );
+        if !matches!(IrqType::from_irq_number(irq), IrqType::Ppi) {
+            return;
+        }
         let trigger_bit = (raw % 16) * 2 + 1;
 
         let Some(frame) = self.current_redistributor_frame() else {
@@ -406,7 +525,7 @@ impl super::super::DispatchController for Gicv3Controller {
     /// Подтверждает и деактивирует (EOI) один pending IRQ, возвращая его хендлер.
     fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>> {
         let irq = Self::acknowledge()?;
-        let handler = self.handlers.get(&irq).cloned();
+        let handler = self.handlers.get(&irq).map(|bound| bound.handler.clone());
 
         Self::end_of_interrupt(irq);
 

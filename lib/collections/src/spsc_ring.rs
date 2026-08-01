@@ -17,7 +17,7 @@
 
 use core::{
     mem::{align_of, size_of},
-    sync::atomic::{AtomicU8, AtomicU32, Ordering},
+    sync::atomic::{AtomicU8, AtomicU32, Ordering, fence},
 };
 
 /// Ошибка операции с кольцом.
@@ -35,9 +35,9 @@ pub enum RingError {
 /// Результат успешной вставки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushOutcome {
-    /// Было ли кольцо пустым **до** вставки. Используется для эвристики
-    /// пробуждения потребителя: будить только на переходе empty->non-empty.
-    pub was_empty: bool,
+    /// На момент публикации кадра других кадров в кольце не осталось: потребитель
+    /// мог уже уснуть и обязан быть разбужен.
+    pub wake_consumer: bool,
 }
 
 /// Результат успешного извлечения.
@@ -206,6 +206,15 @@ impl SpscRing {
         self.head_ref().load(Ordering::Acquire) == self.tail_ref().load(Ordering::Acquire)
     }
 
+    /// Пусто ли кольцо для потребителя, готового уснуть: барьер перед чтением
+    /// парен барьеру производителя в [`try_push`](Self::try_push).
+    #[must_use]
+    #[inline]
+    pub fn is_empty_before_park(&self) -> bool {
+        fence(Ordering::SeqCst);
+        self.is_empty()
+    }
+
     /// Полно ли кольцо в текущий момент.
     #[must_use]
     #[inline]
@@ -222,6 +231,16 @@ impl SpscRing {
     /// - [`RingError::TooLarge`] - `frame.len() > slot_payload`;
     /// - [`RingError::Full`] - нет свободного слота.
     pub fn try_push(&self, frame: &[u8]) -> Result<PushOutcome, RingError> {
+        self.push_interleaved(frame, || {})
+    }
+
+    // Разрез try_push для тестов: `between` исполняется между снимком индексов и
+    // публикацией кадра - в окне, где потребитель успевает вычерпать кольцо.
+    fn push_interleaved(
+        &self,
+        frame: &[u8],
+        between: impl FnOnce(),
+    ) -> Result<PushOutcome, RingError> {
         if frame.len() > self.slot_payload {
             return Err(RingError::TooLarge);
         }
@@ -231,11 +250,9 @@ impl SpscRing {
         // наблюдаем через Acquire, чтобы увидеть освобождённые слоты.
         let head = self.head_ref().load(Ordering::Relaxed);
         let tail = self.tail_ref().load(Ordering::Acquire);
-        let used = head.wrapping_sub(tail) as usize;
-        if used == self.capacity {
+        if head.wrapping_sub(tail) as usize == self.capacity {
             return Err(RingError::Full);
         }
-        let was_empty = used == 0;
 
         let slot = self.slot_index(head);
         let len_field = self.slot_len_ref(slot);
@@ -252,13 +269,21 @@ impl SpscRing {
         // усекает, но значение заведомо в диапазоне по инварианту выше.
         len_field.store(frame.len() as u32, Ordering::Relaxed);
 
+        between();
+
         // Release-публикация индекса: создаёт happens-before между записями выше
         // и Acquire-чтением `head` потребителем - тот гарантированно увидит
         // payload и len этого кадра.
         self.head_ref()
             .store(head.wrapping_add(1), Ordering::Release);
 
-        Ok(PushOutcome { was_empty })
+        // Предикат пробуждения считается по перечитанному `tail` уже после
+        // публикации и отделён от неё SeqCst-барьером, парным барьеру
+        // потребителя в `is_empty_before_park`.
+        fence(Ordering::SeqCst);
+        let wake_consumer = self.tail_ref().load(Ordering::Acquire) == head;
+
+        Ok(PushOutcome { wake_consumer })
     }
 
     /// Извлекает кадр из кольца в `out`. Вызывается **только потребителем**.
@@ -461,7 +486,7 @@ mod tests {
 
         let frame = b"hello spsc ring";
         let out = ring.try_push(frame).expect("push");
-        assert!(out.was_empty);
+        assert!(out.wake_consumer);
         assert!(!ring.is_empty());
 
         let mut buf = [0u8; 64];
@@ -586,13 +611,13 @@ mod tests {
     }
 
     #[test]
-    fn was_empty_flag_only_on_first_push_into_empty() {
+    fn wake_consumer_flag_only_on_push_into_drained_ring() {
         let mut region = Region::new();
         let ring = unsafe { make_ring(&mut region, 4096, 8) };
 
-        assert!(ring.try_push(&[1]).unwrap().was_empty);
-        assert!(!ring.try_push(&[2]).unwrap().was_empty);
-        assert!(!ring.try_push(&[3]).unwrap().was_empty);
+        assert!(ring.try_push(&[1]).unwrap().wake_consumer);
+        assert!(!ring.try_push(&[2]).unwrap().wake_consumer);
+        assert!(!ring.try_push(&[3]).unwrap().wake_consumer);
 
         let mut buf = [0u8; 8];
         ring.try_pop(&mut buf).unwrap();
@@ -601,7 +626,40 @@ mod tests {
         assert!(ring.is_empty());
 
         // Снова в пустое кольцо - флаг опять истинен.
-        assert!(ring.try_push(&[4]).unwrap().was_empty);
+        assert!(ring.try_push(&[4]).unwrap().wake_consumer);
+    }
+
+    #[test]
+    fn ring_drained_during_publication_still_requests_wake() {
+        let mut region = Region::new();
+        let ring = unsafe { make_ring(&mut region, 4096, 8) };
+
+        ring.try_push(&[1]).expect("first push");
+
+        // Роль потребителя отыгрывается тем же потоком внутри окна: снимок
+        // индексов уже взят, кадр ещё не опубликован, и кольцо пустеет ровно
+        // здесь. Предикат обязан учесть это, иначе потребитель уснёт навсегда.
+        let outcome = ring
+            .push_interleaved(&[2], || {
+                let mut buf = [0u8; 8];
+                ring.try_pop(&mut buf).expect("drain inside the window");
+                assert!(ring.is_empty_before_park());
+            })
+            .expect("second push");
+
+        assert!(outcome.wake_consumer);
+    }
+
+    #[test]
+    fn ring_kept_full_during_publication_does_not_request_wake() {
+        let mut region = Region::new();
+        let ring = unsafe { make_ring(&mut region, 4096, 8) };
+
+        ring.try_push(&[1]).expect("first push");
+
+        let outcome = ring.push_interleaved(&[2], || {}).expect("second push");
+
+        assert!(!outcome.wake_consumer);
     }
 
     #[test]
@@ -656,6 +714,127 @@ mod tests {
         assert_eq!(received.len(), N as usize);
         let expected: Vec<u32> = (0..N).collect();
         assert_eq!(received, expected);
+    }
+
+    // Модель липкого бита SIGNALED: производитель поднимает, потребитель гасит
+    // перед перепроверкой кольца и спит до подъёма. Липкость обязательна -
+    // голое пробуждение condvar семантику ядра не воспроизводит.
+    struct Latch {
+        signaled: std::sync::Mutex<bool>,
+        raised: std::sync::Condvar,
+    }
+
+    impl Latch {
+        fn new() -> Self {
+            Self {
+                signaled: std::sync::Mutex::new(false),
+                raised: std::sync::Condvar::new(),
+            }
+        }
+
+        fn set(&self) {
+            *self.signaled.lock().expect("latch") = true;
+            self.raised.notify_all();
+        }
+
+        fn clear(&self) {
+            *self.signaled.lock().expect("latch") = false;
+        }
+
+        // `false` - бюджет исчерпан, то есть пробуждение потеряно.
+        fn wait(&self, budget: std::time::Duration) -> bool {
+            let mut state = self.signaled.lock().expect("latch");
+            while !*state {
+                let (next, outcome) = self.raised.wait_timeout(state, budget).expect("latch");
+                state = next;
+                if outcome.timed_out() && !*state {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+
+    #[test]
+    fn park_protocol_never_loses_a_wakeup() {
+        const N: u32 = 50_000;
+        const FRAME_BYTES: usize = 256;
+        // Исчерпание бюджета означает потерянное пробуждение: дольше уступки
+        // планировщику производитель не блокируется.
+        const WAKE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+        let mut region = Region::new();
+        let stride = SpscRing::slot_bytes(FRAME_BYTES);
+        // Два слота: кольцо вычерпывается досуха на каждом круге.
+        let len = SpscRing::header_bytes() + 2 * stride;
+        let base = region.bytes.as_mut_ptr();
+
+        let ring = Arc::new(unsafe { SpscRing::from_raw(base, len, FRAME_BYTES).expect("ring") });
+        let producer = Arc::clone(&ring);
+        let consumer = Arc::clone(&ring);
+        let producer_latch = Arc::new(Latch::new());
+        let consumer_latch = Arc::clone(&producer_latch);
+
+        let producer_handle = thread::spawn(move || {
+            let mut frame = [0u8; FRAME_BYTES];
+            let mut i = 0u32;
+            while i < N {
+                frame[..4].copy_from_slice(&i.to_le_bytes());
+                match producer.try_push(&frame) {
+                    Ok(outcome) => {
+                        if outcome.wake_consumer {
+                            producer_latch.set();
+                        }
+                        i += 1;
+                    }
+                    Err(RingError::Full) => std::thread::yield_now(),
+                    Err(e) => panic!("unexpected error: {e:?}"),
+                }
+            }
+        });
+
+        let consumer_handle = thread::spawn(move || {
+            let mut buf = [0u8; FRAME_BYTES];
+            let mut next = 0u32;
+            while next < N {
+                // Тот же протокол, что у RingTransport::wait_readable.
+                loop {
+                    if !consumer.is_empty() {
+                        break;
+                    }
+                    consumer_latch.clear();
+                    if !consumer.is_empty_before_park() {
+                        break;
+                    }
+                    if !consumer_latch.wait(WAKE_BUDGET) {
+                        return Err(next);
+                    }
+                }
+                match consumer.try_pop(&mut buf) {
+                    Ok(popped) => {
+                        assert_eq!(popped.len, FRAME_BYTES);
+                        assert_eq!(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), next);
+                        next += 1;
+                    }
+                    Err(RingError::Empty) => std::thread::yield_now(),
+                    Err(e) => panic!("unexpected error: {e:?}"),
+                }
+            }
+            Ok(())
+        });
+
+        let outcome = consumer_handle.join();
+
+        // Потеря пробуждения оставляет производителя на полном кольце:
+        // дочерпываем за ушедшего потребителя, иначе отказ был бы зависанием.
+        let mut drain = [0u8; FRAME_BYTES];
+        while !producer_handle.is_finished() {
+            let _ = ring.try_pop(&mut drain);
+            std::thread::yield_now();
+        }
+        producer_handle.join().expect("producer joined");
+
+        assert_eq!(outcome.expect("consumer joined"), Ok(()));
     }
 
     #[test]

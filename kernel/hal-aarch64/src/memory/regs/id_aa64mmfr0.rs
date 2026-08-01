@@ -4,10 +4,13 @@
 
 pub use hal_aarch64_asid::AsidWidth;
 
-use crate::{memory::regs::common::EL1, read_sysreg};
+use crate::{
+    memory::regs::common::{EL1, ExceptionLevel},
+    read_sysreg,
+};
 
 /// Доступ к ID_AA64MMFR0_EL1.
-pub struct IdAa64Mmfr0<EL> {
+pub struct IdAa64Mmfr0<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 

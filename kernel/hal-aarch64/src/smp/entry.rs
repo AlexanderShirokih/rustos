@@ -72,16 +72,18 @@ unsafe extern "C" fn secondary_start() {
         "msr    cpacr_el1, x0",
         "isb",
 
-        // Логический идентификатор лежит первым полем блока передачи.
+        // Первые два поля блока передачи: логический идентификатор и номер
+        // загрузочного стека.
         "adrp   x19, {handoff}",
         "add    x19, x19, #:lo12:{handoff}",
+        "ldr    x22, [x19, #8]",
         "ldr    x19, [x19]",
 
-        // Границы своего стека: дно = база + id * размер, вершина = дно + размер.
+        // Границы своего стека: дно = база + номер * размер, вершина = дно + размер.
         "adrp   x20, {stacks}",
         "add    x20, x20, #:lo12:{stacks}",
         "mov    x21, #{stack_size}",
-        "madd   x20, x19, x21, x20",
+        "madd   x20, x22, x21, x20",
         "add    x21, x20, x21",
 
         // Сброс строк кэша над своим стеком: записи ниже идут при выключенном
@@ -167,9 +169,7 @@ extern "C" fn secondary_main(cpu_id: u64) -> ! {
     // сверяется со слотом: расхождение значит, что слот уже переиспользован под
     // другой CPU. Ниже по всем отказам CPU уходит в idle, не доложив о
     // готовности, и boot CPU прекращает подъём.
-    let Some(id) =
-        cpu::logical_id(cpu::current_affinity()).filter(|id| u64::from(id.raw()) == cpu_id)
-    else {
+    let Some(id) = cpu::confirm_current_id(cpu_id) else {
         warn!("CPU with handoff id {cpu_id} does not match the topology, parking it");
         Aarch64Cpu::idle();
     };
@@ -187,11 +187,30 @@ extern "C" fn secondary_main(cpu_id: u64) -> ! {
         Aarch64Cpu::idle();
     }
 
+    // Per-CPU состояние планировщика поднимается до отметки о готовности:
+    // отказ здесь ещё возвращается, а после отметки boot CPU уже считает CPU
+    // рабочим.
+    if let Err(error) = kernelspace::sched_bridge::bootstrap_this_cpu() {
+        warn!("CPU {}: {error}", id.raw());
+        Aarch64Cpu::idle();
+    }
+
     info!("CPU {} is online", id.raw());
 
-    // Отметка последней: пока её нет, boot CPU держит слот параметров за этим
-    // CPU и следующий не стартует.
-    handoff::mark_online();
+    // Отметка перед входом в планировщик: вход не возвращается, а слот
+    // параметров нужно освободить под следующий CPU.
+    if !handoff::mark_online() {
+        warn!(
+            "CPU {} reported readiness after bring-up was closed",
+            id.raw()
+        );
+        Aarch64Cpu::idle();
+    }
+
+    // Вход не возвращается: CPU уходит в свой idle-поток и дальше живёт под
+    // управлением планировщика, размаскировав IRQ.
+    let error = kernelspace::sched_bridge::enter_scheduler();
+    warn!("CPU {} did not enter the scheduler: {error}", id.raw());
 
     Aarch64Cpu::idle()
 }

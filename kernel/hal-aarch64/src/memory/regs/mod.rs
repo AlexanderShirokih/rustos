@@ -7,4 +7,5 @@ pub mod mair;
 pub mod sctlr;
 pub mod tcr;
 pub mod tlb;
+pub mod translate;
 pub mod ttbr;

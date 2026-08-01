@@ -13,7 +13,11 @@ use scheduler::{
     TimerSource, Uninit,
 };
 
-use crate::{kernel_context::KernelContext, syscall_bridge};
+use crate::{
+    kernel_context::KernelContext,
+    sched_bridge::{self, RescheduleTarget},
+    syscall_bridge,
+};
 
 /// Адаптер `TimerService` (capability) -> `TimerSource`.
 pub struct KernelTimerSource(Arc<dyn TimerService>);
@@ -49,6 +53,16 @@ where
 {
     fn on_tick(&self, now_ns: u64) {
         self.handle.on_timer_tick(now_ns);
+    }
+}
+
+impl<A, T> RescheduleTarget for SchedulerTickHandler<A, T>
+where
+    A: ArchContext,
+    T: TimerSource,
+{
+    fn on_reschedule(&self) {
+        self.handle.on_reschedule();
     }
 }
 
@@ -170,10 +184,12 @@ where
 
     let handle = scheduler.handle();
     let service: Arc<dyn SchedulerService> = Arc::new(handle.clone());
-    let tick_handler: Arc<dyn TickHandler> = Arc::new(SchedulerTickHandler {
+    let ticks = Arc::new(SchedulerTickHandler {
         handle: handle.clone(),
     });
+    let tick_handler: Arc<dyn TickHandler> = ticks.clone();
     let capability_runtime: Arc<dyn capability::KernelRuntime> = Arc::new(handle.clone());
+    let cpu_entry = handle.clone();
     let syscall_runtime: Arc<dyn syscall_kernel::SyscallRuntime> =
         Arc::new(SchedulerSyscallRuntime { handle });
 
@@ -185,6 +201,16 @@ where
     syscall_kernel::install_runtime(syscall_runtime);
     syscall_bridge::install_scheduler(service);
 
+    // Привязка reschedule-IPI и публикация входа идут до подъёма вторичных
+    // CPU: стартующий CPU входит в планировщик сразу, а линия IPI приватна и
+    // включается на каждом CPU его же per-CPU инициализацией.
+    let interrupts = kernel
+        .with_runtime_state(|services, _| services.require_interrupts())
+        .map_err(BootstrapSchedulerError::InterruptsUnavailable)?;
+    sched_bridge::bind_reschedule_ipi(&interrupts, ticks)
+        .map_err(BootstrapSchedulerError::RescheduleIpi)?;
+    sched_bridge::install_cpu_entry(Arc::new(cpu_entry));
+
     Ok(scheduler)
 }
 
@@ -193,10 +219,14 @@ where
 pub enum BootstrapSchedulerError {
     /// Таймер недоступен: планировщику не на чем считать кванты.
     TimerUnavailable(drivers_common::BootServicesError),
-    /// Не удалось создать idle-поток текущего CPU.
-    IdleThread(scheduler::SpawnError),
+    /// Не удалось создать per-CPU состояние планировщика на boot CPU.
+    IdleThread(scheduler::CpuBootstrapError),
     /// `SchedulerService` уже зарегистрирован.
     ServiceRegistration(drivers_common::BootServicesError),
+    /// Контроллер прерываний недоступен: без него CPU не разбудить.
+    InterruptsUnavailable(drivers_common::BootServicesError),
+    /// Не удалось привязать reschedule-IPI.
+    RescheduleIpi(drivers_common::services::interrupts::IrqRegistrationError),
 }
 
 impl core::fmt::Display for BootstrapSchedulerError {
@@ -208,6 +238,12 @@ impl core::fmt::Display for BootstrapSchedulerError {
             BootstrapSchedulerError::IdleThread(e) => write!(f, "idle thread spawn failed: {e:?}"),
             BootstrapSchedulerError::ServiceRegistration(e) => {
                 write!(f, "SchedulerService registration failed: {e:?}")
+            }
+            BootstrapSchedulerError::InterruptsUnavailable(e) => {
+                write!(f, "InterruptsService is unavailable: {e:?}")
+            }
+            BootstrapSchedulerError::RescheduleIpi(e) => {
+                write!(f, "reschedule IPI binding failed: {e:?}")
             }
         }
     }

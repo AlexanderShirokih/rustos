@@ -25,6 +25,12 @@ static CPU_LOCALS: [CpuLocal; MAX_CPUS] = [const { CpuLocal::new() }; MAX_CPUS];
 
 /// Per-CPU состояние платформенного слоя. Поле `scheduler` остаётся `null`
 /// до bootstrap планировщика.
+///
+/// Блок занимает строку кэша целиком: соседние блоки пишутся своими CPU, и в
+/// общей строке эти записи гоняли бы её между ядрами. Выравнивание взято по
+/// наибольшей строке среди целевых ядер - тому же числу, что у блока передачи
+/// параметров.
+#[repr(C, align(128))]
 pub struct CpuLocal {
     id: AtomicU16,
     scheduler: AtomicPtr<()>,
@@ -72,6 +78,21 @@ pub fn affinity(index: usize) -> Option<CpuAffinity> {
 /// Логический идентификатор CPU с заданным `affinity`.
 pub fn logical_id(affinity: CpuAffinity) -> Option<CpuId> {
     let index = TOPOLOGY.get()?.index_of(affinity)?;
+    u16::try_from(index).ok().and_then(CpuId::new)
+}
+
+/// Подтверждает идентификатор, взятый стартующим CPU из слота параметров.
+///
+/// `None` - топология отдаёт этот идентификатор другому CPU либо не знает
+/// текущего: в обоих случаях CPU в работу не идёт.
+pub fn confirm_current_id(claim: u64) -> Option<CpuId> {
+    let topology = TOPOLOGY.get()?;
+    let index = usize::try_from(claim).ok()?;
+
+    if !topology.confirms(current_affinity(), index) {
+        return None;
+    }
+
     u16::try_from(index).ok().and_then(CpuId::new)
 }
 

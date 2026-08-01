@@ -22,6 +22,9 @@ pub(super) const GICD_ITARGETSR: Reg<u32> = Reg::new(0x800);
 /// Interrupt Configuration Registers.
 pub(super) const GICD_ICFGR: Reg<u32> = Reg::new(0xC00);
 
+/// Генерация SGI: список целевых интерфейсов и номер прерывания.
+pub(super) const GICD_SGIR: Reg<u32> = Reg::new(0xF00);
+
 // Регистры CPU Interface
 
 /// CPU Interface Control Register - включение CPU interface.

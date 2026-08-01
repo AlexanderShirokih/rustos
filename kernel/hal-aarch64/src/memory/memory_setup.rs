@@ -25,11 +25,12 @@ use crate::{
     consts::{KHEAP_BASE, KHEAP_MAX_SIZE},
     memory::{
         address_space_factory::FrameAllocatorImpl,
+        asid,
         global_allocator::GLOBAL_ALLOCATOR,
         layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},
         memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
         mmu::{Mmu, NormalDualSpaceConfig},
-        regs::{common::EL1, dcache::DataCache},
+        regs::{common::EL1, dcache::DataCache, id_aa64mmfr0::IdAa64Mmfr0},
     },
 };
 
@@ -281,6 +282,11 @@ impl MemorySetup<Prepared> {
             roots.lower_pa.as_physical_address(),
             roots.higher_pa.as_physical_address(),
         ));
+
+        // Аллокатор ASID один на систему, и настраивает его только boot CPU;
+        // через `Mmu::enable` проходит каждый. Настройка идёт после включения
+        // MMU: до него запись легла бы мимо кэша.
+        asid::init_global(IdAa64Mmfr0::asid_width());
 
         Ok(MemorySetup::<Enabled> {
             state: Enabled {

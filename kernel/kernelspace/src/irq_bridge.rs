@@ -2,7 +2,9 @@
 
 use alloc::sync::Arc;
 
-use drivers_common::services::interrupts::{CpuInterfaceError, InterruptsService};
+use drivers_common::services::interrupts::{
+    CpuInterfaceError, InterruptsService, IpiError, IpiTarget, IrqNumber,
+};
 use klog::{debug, warn};
 use spin::Once;
 
@@ -45,6 +47,16 @@ impl IrqBridge {
 
         service.dispatch_interrupt();
     }
+
+    /// Отправляет межпроцессорное прерывание `irq` процессору `target`.
+    pub fn send_ipi(&self, irq: IrqNumber, target: IpiTarget) -> Result<(), IpiError> {
+        let Some(service) = self.service.get() else {
+            warn!("IRQ bridge is not initialized: InterruptsService is missing");
+            return Err(IpiError::Unsupported);
+        };
+
+        service.send_ipi(irq, target)
+    }
 }
 
 impl Default for IrqBridge {
@@ -67,6 +79,11 @@ pub fn dispatch_interrupt() {
 /// Настраивает per-CPU часть контроллера прерываний на текущем CPU.
 pub fn init_interrupts_on_this_cpu() -> Result<(), CpuInterfaceError> {
     IRQ_BRIDGE.init_this_cpu()
+}
+
+/// Отправляет межпроцессорное прерывание `irq` процессору `target`.
+pub fn send_ipi(irq: IrqNumber, target: IpiTarget) -> Result<(), IpiError> {
+    IRQ_BRIDGE.send_ipi(irq, target)
 }
 
 #[cfg(test)]

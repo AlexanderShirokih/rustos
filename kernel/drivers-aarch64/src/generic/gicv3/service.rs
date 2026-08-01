@@ -2,33 +2,37 @@
 
 use alloc::sync::Arc;
 
+use collections::{LockCell, MutexCell};
 use drivers_common::services::interrupts::{
-    CpuInterfaceError, InterruptsService, IrqBinding, IrqBound, IrqNumber, IrqRegistrationError,
+    CpuInterfaceError, InterruptsService, IpiError, IpiTarget, IrqBinding, IrqBound, IrqNumber,
+    IrqRegistrationError,
 };
 use klog::debug;
-use spin::Mutex;
 
-use super::{controller::Gicv3Controller, regs::IrqType};
+use super::{
+    controller::{BoundIrq, Gicv3Controller},
+    regs::IrqType,
+};
 
 pub(super) struct GicV3InterruptsService {
-    pub(super) controller: Arc<Mutex<Gicv3Controller>>,
+    pub(super) controller: Arc<MutexCell<Gicv3Controller>>,
 }
 
 impl GicV3InterruptsService {
-    pub(super) fn new(controller: Arc<Mutex<Gicv3Controller>>) -> Self {
+    pub(super) fn new(controller: Arc<MutexCell<Gicv3Controller>>) -> Self {
         Self { controller }
     }
 }
 
 impl InterruptsService for GicV3InterruptsService {
     fn enable(&self) {
-        let _guard = self.controller.lock();
-        Gicv3Controller::enable_global();
+        self.controller
+            .with_lock(|_| Gicv3Controller::enable_global());
     }
 
     fn disable(&self) {
-        let _guard = self.controller.lock();
-        Gicv3Controller::disable_global();
+        self.controller
+            .with_lock(|_| Gicv3Controller::disable_global());
     }
 
     fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
@@ -44,28 +48,37 @@ impl InterruptsService for GicV3InterruptsService {
             return Err(IrqRegistrationError::InvalidIrq);
         }
 
-        let mut guard = self.controller.lock();
+        self.controller.with_lock(|controller| {
+            if controller.handlers.contains_key(&irq) {
+                return Err(IrqRegistrationError::AlreadyRegistered);
+            }
 
-        if guard.handlers.contains_key(&irq) {
-            return Err(IrqRegistrationError::AlreadyRegistered);
-        }
+            controller.set_priority(irq, priority);
+            controller.set_affinity(irq, target);
 
-        guard.set_priority(irq, priority);
-        guard.set_affinity(irq, target);
+            // Триггер - до enable: переконфиг включённой линии может быть непредсказуемым.
+            if let Some(trigger) = trigger {
+                controller.set_config(irq, trigger);
+            }
 
-        // Триггер - до enable: переконфиг включённой линии может быть непредсказуемым.
-        if let Some(trigger) = trigger {
-            guard.set_config(irq, trigger);
-        }
-
-        guard.handlers.insert(irq, Arc::from(handler));
-        guard.enable(irq);
+            controller.handlers.insert(
+                irq,
+                BoundIrq {
+                    handler: Arc::from(handler),
+                    priority,
+                    trigger,
+                },
+            );
+            controller.enable(irq);
+            Ok(())
+        })?;
 
         let controller = self.controller.clone();
         let cleanup = move || {
-            let mut guard = controller.lock();
-            guard.disable(irq);
-            guard.handlers.remove(&irq);
+            controller.with_lock(|controller| {
+                controller.disable(irq);
+                controller.handlers.remove(&irq);
+            });
         };
 
         debug!("IRQ {irq:?} bound!");
@@ -74,16 +87,25 @@ impl InterruptsService for GicV3InterruptsService {
     }
 
     fn mask(&self, irq: IrqNumber) {
-        self.controller.lock().disable(irq);
+        self.controller
+            .with_lock(|controller| controller.disable(irq));
     }
 
     fn unmask(&self, irq: IrqNumber) {
         super::super::barrier_before_unmask();
-        self.controller.lock().enable(irq);
+        self.controller
+            .with_lock(|controller| controller.enable(irq));
     }
 
     fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
-        self.controller.lock().init_this_cpu()
+        self.controller
+            .with_lock(|controller| controller.init_this_cpu())
+    }
+
+    fn send_ipi(&self, irq: IrqNumber, target: IpiTarget) -> Result<(), IpiError> {
+        // Лок контроллера не нужен: `ICC_SGI1R_EL1` - регистр текущего CPU, и
+        // отображённых областей отправка не касается.
+        Gicv3Controller::send_sgi(irq, target)
     }
 
     fn dispatch_interrupt(&self) {

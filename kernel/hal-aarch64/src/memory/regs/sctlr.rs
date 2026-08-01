@@ -2,7 +2,11 @@
 //!
 //! Управляет MMU и кэшами.
 
-use crate::{combine_bits, memory::regs::common::EL1, read_sysreg, write_sysreg};
+use crate::{
+    combine_bits,
+    memory::regs::common::{EL1, ExceptionLevel},
+    read_sysreg, write_sysreg,
+};
 
 /// Бит SCTLR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +41,7 @@ impl SctlrBits {
 }
 
 /// Регистр SCTLR (System Control Register).
-pub struct SystemControlRegister<EL> {
+pub struct SystemControlRegister<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 

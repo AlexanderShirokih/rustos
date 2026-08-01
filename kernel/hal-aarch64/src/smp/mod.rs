@@ -17,10 +17,9 @@ use memory::physical_address::PageAlignedAddress;
 use spin::Once;
 use start_method::StartError;
 
-use crate::cpu;
+use crate::{cpu, read_sysreg};
 
-// Ожидание готовности идёт до инициализации таймера и измеряется итерациями.
-const READY_POLL_ATTEMPTS: usize = 100_000_000;
+const READY_TIMEOUT_MS: u64 = 500;
 
 /// Корни трансляции, которыми стартующий CPU включает MMU.
 pub struct TranslationRoots {
@@ -58,6 +57,11 @@ pub fn start_secondaries() {
         return;
     };
 
+    let Some(counter) = Counter::probe() else {
+        warn!("SMP: the firmware left the counter frequency unset, bring-up cannot bound the wait");
+        return;
+    };
+
     let psci = hal_common::smp::psci_method(device_tree);
     let entry_point = entry::entry_point_physical();
 
@@ -70,7 +74,23 @@ pub fn start_secondaries() {
             continue;
         }
 
-        match start_one(device_tree, psci, index, affinity, entry_point) {
+        // Номер стека - число уже поднятых CPU: стек занимает только тот, кто
+        // стартовал, а после отказа, не оставившего слот занятым, номер
+        // достаётся следующему CPU.
+        let Some(stack) = handoff::SecondaryStackIndex::new(started) else {
+            warn!("SMP: no boot stack left for CPU {index}");
+            break;
+        };
+
+        match start_one(
+            device_tree,
+            psci,
+            index,
+            stack,
+            affinity,
+            entry_point,
+            &counter,
+        ) {
             Ok(()) => started += 1,
             Err(error) if error.leaves_slot_claimed() => {
                 // Слот параметров описывает ровно один стартующий CPU.
@@ -83,15 +103,24 @@ pub fn start_secondaries() {
         }
     }
 
-    info!("SMP: {} of {} CPU(s) online", started + 1, cpu::count());
+    handoff::close_bringup();
+    info!("SMP: {} of {} CPU(s) online", online_cpus(), cpu::count());
+}
+
+/// Число CPU, работающих под управлением планировщика: вторичные, дошедшие до
+/// post-MMU кода, и boot CPU.
+pub fn online_cpus() -> usize {
+    handoff::online_count() + 1
 }
 
 fn start_one(
     device_tree: &DeviceTree<'_>,
     psci: Option<StartMethod>,
     index: usize,
+    stack: handoff::SecondaryStackIndex,
     affinity: CpuAffinity,
     entry_point: usize,
+    counter: &Counter,
 ) -> Result<(), StartError> {
     // Способ объявляет узел самого CPU; `/psci` - общий fallback.
     let method = cpu_node_method(device_tree, affinity)
@@ -99,17 +128,19 @@ fn start_one(
         .ok_or(StartError::MethodUnknown)?;
 
     let expected = handoff::online_count() + 1;
-    handoff::publish_pending_id(index as u64);
+    handoff::publish_pending(index as u64, stack);
 
     // SAFETY: `entry_point` - физический адрес точки входа вторичного CPU, а
     // сам CPU кода ядра ещё не исполняет.
     unsafe { start_method::start(method, affinity, entry_point)? };
 
-    wait_ready(expected)
+    wait_ready(expected, counter)
 }
 
-fn wait_ready(expected: usize) -> Result<(), StartError> {
-    for _ in 0..READY_POLL_ATTEMPTS {
+fn wait_ready(expected: usize, counter: &Counter) -> Result<(), StartError> {
+    let deadline = counter.deadline_after_ms(READY_TIMEOUT_MS);
+
+    while !Counter::passed(deadline) {
         if handoff::online_count() >= expected {
             return Ok(());
         }
@@ -117,6 +148,39 @@ fn wait_ready(expected: usize) -> Result<(), StartError> {
     }
 
     Err(StartError::NotReady)
+}
+
+struct Counter {
+    frequency: u64,
+}
+
+const MIN_COUNTER_HZ: u64 = 1_000;
+const MAX_COUNTER_HZ: u64 = 100_000_000_000;
+
+impl Counter {
+    fn probe() -> Option<Self> {
+        // SAFETY: CNTFRQ_EL0 доступен на EL1 и только читается.
+        let frequency = unsafe { read_sysreg!(cntfrq_el0) };
+
+        (MIN_COUNTER_HZ..=MAX_COUNTER_HZ)
+            .contains(&frequency)
+            .then_some(Self { frequency })
+    }
+
+    fn deadline_after_ms(&self, timeout_ms: u64) -> u64 {
+        let ticks = timeout_ms.saturating_mul(self.frequency) / 1_000;
+
+        Self::now().saturating_add(ticks)
+    }
+
+    fn passed(deadline: u64) -> bool {
+        Self::now() >= deadline
+    }
+
+    fn now() -> u64 {
+        // SAFETY: CNTPCT_EL0 доступен на EL1 и только читается.
+        unsafe { read_sysreg!(cntpct_el0) }
+    }
 }
 
 fn cpu_node_method(device_tree: &DeviceTree<'_>, affinity: CpuAffinity) -> Option<StartMethod> {

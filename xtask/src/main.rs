@@ -57,6 +57,9 @@ enum Commands {
         /// Timeout in seconds
         #[arg(long, default_value_t = 60)]
         timeout: u64,
+        /// Device spec to run against
+        #[arg(long, default_value = qemu_test::DEFAULT_SPEC)]
+        spec: PathBuf,
     },
     /// Run reproducible userspace stress tests in QEMU
     Stress {
@@ -108,7 +111,7 @@ fn main() -> Result<()> {
             image,
             files,
         } => build(spec, run, debug, features, &image, &files)?,
-        Commands::QemuTest { timeout } => qemu_test::qemu_test(timeout)?,
+        Commands::QemuTest { timeout, spec } => qemu_test::qemu_test(timeout, &spec)?,
         Commands::Stress {
             seed,
             seeds,

@@ -19,15 +19,15 @@ pub mod wait_queue;
 
 pub use address_space::AddressSpace;
 pub use arch::{
-    ArchContext, ArchCpu, CpuId, MAX_CPUS, StackError, ThreadStack, ThreadStackAllocator,
-    TimerSource, with_preemption_disabled,
+    ArchContext, ArchCpu, CpuId, CpuLocalError, MAX_CPUS, StackError, ThreadStack,
+    ThreadStackAllocator, TimerSource, with_preemption_disabled,
 };
 pub use process::{Process, ProcessName};
 pub use scheduler::{
-    Bootstrapped, DEFAULT_QUANTUM_NS, Running, Scheduler, SchedulerConfig, SchedulerStage, Uninit,
-    lowest_priority,
+    Bootstrapped, CpuBootstrapError, DEFAULT_QUANTUM_NS, Running, Scheduler, SchedulerConfig,
+    SchedulerStage, Uninit, lowest_priority,
 };
-pub use service::{CurrentIpcContext, SchedulerHandle, UserProcessLauncher};
+pub use service::{CpuEntry, CurrentIpcContext, SchedulerHandle, UserProcessLauncher};
 pub use thread::{Thread, ThreadState};
 pub use types::{
     Priority, ProcessId, SchedulerService, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig,

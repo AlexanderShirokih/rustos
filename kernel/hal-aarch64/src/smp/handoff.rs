@@ -4,7 +4,7 @@
 //! мимо кэша и по физическому адресу. Boot CPU публикует записи, вытесняя их
 //! до точки когерентности.
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use scheduler::MAX_CPUS;
 
@@ -20,27 +20,59 @@ pub(super) const SECONDARY_STACK_SIZE: usize = 16 * 1024;
 #[repr(C, align(128))]
 pub(super) struct SecondaryStack([u8; SECONDARY_STACK_SIZE]);
 
+/// Предел числа вторичных CPU: boot CPU идёт по стеку из линкер-скрипта и
+/// стека отсюда не занимает.
+pub(super) const MAX_SECONDARIES: usize = MAX_CPUS - 1;
+
 /// Загрузочные стеки вторичных CPU. Живут в `.bss`: стартующий CPU находит
 /// свой стек PC-относительно, до включения MMU и до всякой аллокации.
-pub(super) static mut SECONDARY_STACKS: [SecondaryStack; MAX_CPUS] =
-    [const { SecondaryStack([0; SECONDARY_STACK_SIZE]) }; MAX_CPUS];
+///
+/// Индексируются порядком старта, а не идентификатором CPU: идентификатор boot
+/// CPU задаёт топология, и нулю он равен не обязательно.
+pub(super) static mut SECONDARY_STACKS: [SecondaryStack; MAX_SECONDARIES] =
+    [const { SecondaryStack([0; SECONDARY_STACK_SIZE]) }; MAX_SECONDARIES];
+
+/// Номер загрузочного стека в [`SECONDARY_STACKS`]. Существование значения
+/// означает, что стек с таким номером есть.
+#[derive(Clone, Copy)]
+pub(super) struct SecondaryStackIndex(usize);
+
+impl SecondaryStackIndex {
+    /// `None` - стеков меньше, чем запрошенный номер.
+    pub(super) fn new(index: usize) -> Option<Self> {
+        (index < MAX_SECONDARIES).then_some(Self(index))
+    }
+
+    pub(super) fn raw(self) -> usize {
+        self.0
+    }
+}
 
 /// Параметры очередного стартующего CPU. Слот один на всех: CPU поднимаются по
 /// одному, и следующий не стартует, пока предыдущий не дошёл до post-MMU кода.
+///
+/// Порядок полей повторяет разбор в `entry.rs`: стартующий CPU читает их
+/// смещениями от базы блока, до включения MMU и вне типов Rust.
 #[repr(C, align(128))]
 pub(super) struct Handoff {
+    /// Логический идентификатор: по нему CPU берёт свой per-CPU блок.
     pending_id: AtomicU64,
+    /// Номер загрузочного стека в [`SECONDARY_STACKS`].
+    pending_stack: AtomicU64,
     lower_root: AtomicU64,
     higher_root: AtomicU64,
 }
 
 pub(super) static HANDOFF: Handoff = Handoff {
     pending_id: AtomicU64::new(0),
+    pending_stack: AtomicU64::new(0),
     lower_root: AtomicU64::new(0),
     higher_root: AtomicU64::new(0),
 };
 
 static ONLINE: AtomicUsize = AtomicUsize::new(0);
+
+static ACCEPTING: AtomicBool = AtomicBool::new(true);
 
 /// Физические адреса корней трансляции.
 pub(super) struct TranslationRoots {
@@ -56,10 +88,16 @@ pub(super) fn publish_roots(lower_root: u64, higher_root: u64) {
     flush();
 }
 
-/// Назначает идентификатор очередному стартующему CPU. Вызывается перед
-/// командой старта и вступает в силу до неё.
-pub(super) fn publish_pending_id(id: u64) {
+/// Назначает очередному стартующему CPU идентификатор и загрузочный стек.
+/// Вызывается перед командой старта и вступает в силу до неё.
+///
+/// `false` - номер стека вне [`SECONDARY_STACKS`]: под таким номером
+/// стартующий CPU взял бы под стек чужую память.
+pub(super) fn publish_pending(id: u64, stack: SecondaryStackIndex) {
     HANDOFF.pending_id.store(id, Ordering::Relaxed);
+    HANDOFF
+        .pending_stack
+        .store(stack.raw() as u64, Ordering::Relaxed);
     flush();
 }
 
@@ -72,9 +110,20 @@ pub(super) fn roots() -> TranslationRoots {
     }
 }
 
-/// Отмечает, что CPU дошёл до post-MMU кода.
-pub(super) fn mark_online() {
+/// Отмечает, что CPU дошёл до post-MMU кода. `false` - приём уже закрыт, и
+/// в работу этот CPU не идёт.
+pub(super) fn mark_online() -> bool {
+    if !ACCEPTING.load(Ordering::Acquire) {
+        return false;
+    }
+
     ONLINE.fetch_add(1, Ordering::Release);
+    true
+}
+
+/// Закрывает приём CPU. Вызывается boot CPU по завершении подъёма.
+pub(super) fn close_bringup() {
+    ACCEPTING.store(false, Ordering::Release);
 }
 
 /// Число вторичных CPU, дошедших до post-MMU кода.

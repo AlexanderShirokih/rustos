@@ -2,10 +2,10 @@
 
 use core::arch::asm;
 
-use crate::memory::regs::common::EL1;
+use crate::memory::regs::common::{EL1, ExceptionLevel};
 
 /// Кэш данных.
-pub struct DataCache<EL> {
+pub struct DataCache<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 

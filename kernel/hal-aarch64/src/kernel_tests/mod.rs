@@ -5,5 +5,6 @@ mod asid;
 mod cpu_identity;
 mod kheap;
 mod page_flags;
+mod smp;
 mod syscall;
 mod unmap;

@@ -6,6 +6,7 @@ pub struct Cpu {
     id: CpuId,
     ready_queue: ReadyQueue,
     current: ThreadId,
+    previous: Option<ThreadId>,
     idle: ThreadId,
 }
 
@@ -15,6 +16,7 @@ impl Cpu {
             id,
             ready_queue: ReadyQueue::new(priority_levels),
             current: idle,
+            previous: None,
             idle,
         }
     }
@@ -37,6 +39,18 @@ impl Cpu {
 
     pub fn set_current(&mut self, current: ThreadId) {
         self.current = current;
+    }
+
+    /// Поток, чей контекст этот CPU сохраняет прямо сейчас.
+    ///
+    /// Взведён от выдачи `ScheduleAction::Switch` до возврата из переключения:
+    /// всё это время указатель на контекст живёт вне scheduler-лока.
+    pub fn previous(&self) -> Option<ThreadId> {
+        self.previous
+    }
+
+    pub fn set_previous(&mut self, previous: Option<ThreadId>) {
+        self.previous = previous;
     }
 
     pub fn idle(&self) -> ThreadId {

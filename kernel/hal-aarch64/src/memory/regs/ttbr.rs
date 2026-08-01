@@ -6,7 +6,10 @@ use core::marker::PhantomData;
 
 use memory::physical_address::PhysicalAddress;
 
-use crate::{memory::regs::common::EL1, write_sysreg};
+use crate::{
+    memory::regs::common::{EL1, ExceptionLevel},
+    write_sysreg,
+};
 
 /// Маркер lower half (TTBR0).
 pub enum LowerHalf {}
@@ -14,7 +17,7 @@ pub enum LowerHalf {}
 pub enum HigherHalf {}
 
 /// Регистр TTBR (Translation Table Base Register).
-pub struct TranslationTableBaseRegister<EL, TTBRIndex> {
+pub struct TranslationTableBaseRegister<EL: ExceptionLevel, TTBRIndex> {
     _phantom: PhantomData<(EL, TTBRIndex)>,
 }
 

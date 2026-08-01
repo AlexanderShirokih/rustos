@@ -1,13 +1,21 @@
 //! Userspace `Mutex`/`Condvar` поверх Signal-syscall.
 //!
 //! Mutex - адаптированный 3-state futex: state 0=free, 1=locked без
-//! waiter'ов, 2=locked с возможными waiter'ами. park/notify делегируются
-//! Signal через `signal_wait_one`/`signal_set`; Signal создаётся лениво при
-//! первой контенции.
+//! waiter'ов, 2=locked с возможными waiter'ами. Общий Signal мьютекса служит
+//! латчем: разбуженный поток перепроверяет `state` и на потерянном
+//! пробуждении лишь повторяет круг.
+//!
+//! Condvar общего латча не имеет: предикат живёт в коде вызывающего, и
+//! перепроверить его за waiter'а некому. Каждый waiter паркуется на
+//! собственном Signal, а регистрируется в списке condvar'а до отпускания
+//! мьютекса - notify под тем же мьютексом видит его и адресует пробуждение
+//! именно ему.
 //!
 //! Уничтожать `Mutex`/`Condvar` только после завершения всех способных
-//! заблокироваться на нём потоков: `Drop` закрывает Signal, на котором они паркуются.
+//! заблокироваться на нём потоков: их парковка опирается на состояние,
+//! которое освобождает `Drop`.
 
+use alloc::vec::Vec;
 use core::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
@@ -38,7 +46,7 @@ pub struct MutexGuard<'a, T> {
 
 /// Уведомление потоков, ждущих изменения состояния под `Mutex`.
 pub struct Condvar {
-    signal_handle: AtomicU32,
+    waiters: Mutex<Vec<Handle>>,
 }
 
 // SAFETY: Mutex сериализует доступ к `data`, поэтому при `T: Send` его можно
@@ -149,12 +157,8 @@ impl Condvar {
     /// Создаёт `Condvar` без отложенных уведомлений.
     pub const fn new() -> Self {
         Self {
-            signal_handle: AtomicU32::new(0),
+            waiters: Mutex::new(Vec::new()),
         }
-    }
-
-    fn signal(&self) -> Handle {
-        lazy_signal(&self.signal_handle)
     }
 
     /// Атомарно отпускает `guard`, паркуется до уведомления и перезахватывает
@@ -162,33 +166,64 @@ impl Condvar {
     /// (возможны spurious-wakeup'ы; notify обязан сопровождать смену предиката
     /// под мьютексом).
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+        self.wait_interleaved(guard, || {})
+    }
+
+    /// Тестовый разрез [`Self::wait`]: `between` вызывается в окне между
+    /// отпусканием мьютекса и парковкой - там, где waiter уже зарегистрирован,
+    /// но ещё не спит.
+    #[doc(hidden)]
+    pub fn wait_interleaved<'a, T>(
+        &self,
+        guard: MutexGuard<'a, T>,
+        between: impl FnOnce(),
+    ) -> MutexGuard<'a, T> {
         let mutex: &Mutex<T> = guard.mutex;
+        // signal_create отказывает лишь при исчерпании ресурсов ядра. Без Signal
+        // парк невозможен, восстановиться нельзя (panic = abort по профилю).
+        let signal = signal_create().expect("signal_create");
+        self.waiters.lock().push(signal);
+
         drop(guard);
-        let _ = signal_wait_one(self.signal(), SIGNALED, FOREVER);
-        let _ = signal_set(self.signal(), 0, SIGNALED, WakeCount::None);
+        between();
+
+        let _ = signal_wait_one(signal, SIGNALED, FOREVER);
+        self.unregister(signal);
+        handle_close(signal);
         mutex.lock()
     }
 
-    /// Будит одного из waiter'ов, припаркованных на момент вызова.
+    /// Будит одного из waiter'ов, зарегистрированных на момент вызова, в
+    /// порядке регистрации.
     pub fn notify_one(&self) {
-        let _ = signal_set(self.signal(), SIGNALED, 0, WakeCount::One);
+        let mut waiters = self.waiters.lock();
+        if waiters.is_empty() {
+            return;
+        }
+        let target = waiters.remove(0);
+        drop(waiters);
+        let _ = signal_set(target, SIGNALED, 0, WakeCount::All);
     }
 
-    /// Будит всех waiter'ов, припаркованных на момент вызова (см. контракт wait).
+    /// Будит всех waiter'ов, зарегистрированных на момент вызова (см. контракт wait).
     pub fn notify_all(&self) {
-        let _ = signal_set(self.signal(), SIGNALED, 0, WakeCount::All);
+        let targets = core::mem::take(&mut *self.waiters.lock());
+        for target in targets {
+            let _ = signal_set(target, SIGNALED, 0, WakeCount::All);
+        }
+    }
+
+    fn unregister(&self, signal: Handle) {
+        let mut waiters = self.waiters.lock();
+        if let Some(position) = waiters.iter().position(|&waiter| waiter == signal) {
+            waiters.remove(position);
+        }
     }
 }
 
 impl Default for Condvar {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Drop for Condvar {
-    fn drop(&mut self) {
-        handle_load_and_close(&self.signal_handle);
     }
 }
 

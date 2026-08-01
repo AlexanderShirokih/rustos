@@ -12,7 +12,12 @@ pub struct ThreadTable<A: ArchContext> {
 impl<A: ArchContext> ThreadTable<A> {
     pub fn new(max_threads: usize) -> Self {
         Self {
-            slots: Vec::new(),
+            // Ёмкость берётся сразу и не меняется: планировщик передаёт в
+            // переключение контекста указатели на потоки, а другой CPU в это
+            // время может занять слот. Рост таблицы сдвинул бы потоки и
+            // оставил эти указатели висеть. Слотов не больше `max_threads`,
+            // поэтому дальше `push` не перевыделяет.
+            slots: Vec::with_capacity(max_threads),
             max_threads,
         }
     }

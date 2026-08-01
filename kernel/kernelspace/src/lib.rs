@@ -14,6 +14,7 @@ pub mod irq_control_adapter;
 pub mod kernel_context;
 pub mod kmain;
 pub mod power;
+pub mod sched_bridge;
 pub mod scheduler_bootstrap;
 pub mod syscall_bridge;
 pub mod user_process;

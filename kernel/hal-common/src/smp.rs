@@ -15,6 +15,83 @@ pub enum PsciConduit {
     Smc,
 }
 
+/// Отказ `CPU_ON`. Успех сюда не входит: его выражает `Ok` разбора.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PsciFailure {
+    NotSupported,
+    InvalidParameters,
+    Denied,
+    AlreadyOn,
+    OnPending,
+    InternalFailure,
+    NotPresent,
+    Disabled,
+    InvalidAddress,
+    /// Код вне множества, определённого спецификацией.
+    Unknown(i32),
+}
+
+impl PsciFailure {
+    /// Разбирает код возврата `CPU_ON`.
+    pub fn from_code(code: i32) -> Result<(), Self> {
+        match code {
+            0 => Ok(()),
+            -1 => Err(Self::NotSupported),
+            -2 => Err(Self::InvalidParameters),
+            -3 => Err(Self::Denied),
+            -4 => Err(Self::AlreadyOn),
+            -5 => Err(Self::OnPending),
+            -6 => Err(Self::InternalFailure),
+            -7 => Err(Self::NotPresent),
+            -8 => Err(Self::Disabled),
+            -9 => Err(Self::InvalidAddress),
+            other => Err(Self::Unknown(other)),
+        }
+    }
+
+    /// `true`, если после такого ответа целевой CPU может исполнять код.
+    ///
+    /// Отказ, названный спецификацией, делится надвое. Одни коды описывают
+    /// вызов, отклонённый до всякого действия: CPU остался выключенным, и
+    /// переданные ему параметры свободны. Другие говорят, что CPU уже
+    /// поднимается или что итог неизвестен - тогда параметры остаются за ним.
+    pub fn may_have_started(self) -> bool {
+        match self {
+            // CPU уже включён или включается - возможно, по переданной точке входа.
+            Self::AlreadyOn
+            | Self::OnPending
+            // Отказ реализации: на каком шаге - не сказано.
+            | Self::InternalFailure
+            // Код вне спецификации: судить об итоге не по чему.
+            | Self::Unknown(_) => true,
+            // Вызов отклонён до старта: CPU не тронут.
+            Self::NotSupported
+            | Self::InvalidParameters
+            | Self::Denied
+            | Self::NotPresent
+            | Self::Disabled
+            | Self::InvalidAddress => false,
+        }
+    }
+}
+
+impl core::fmt::Display for PsciFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotSupported => f.write_str("NOT_SUPPORTED"),
+            Self::InvalidParameters => f.write_str("INVALID_PARAMETERS"),
+            Self::Denied => f.write_str("DENIED"),
+            Self::AlreadyOn => f.write_str("ALREADY_ON"),
+            Self::OnPending => f.write_str("ON_PENDING"),
+            Self::InternalFailure => f.write_str("INTERNAL_FAILURE"),
+            Self::NotPresent => f.write_str("NOT_PRESENT"),
+            Self::Disabled => f.write_str("DISABLED"),
+            Self::InvalidAddress => f.write_str("INVALID_ADDRESS"),
+            Self::Unknown(code) => write!(f, "unspecified code {code}"),
+        }
+    }
+}
+
 /// Способ старта: общий для всех CPU либо заданный узлом конкретного CPU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartMethod {
@@ -194,5 +271,51 @@ mod tests {
         let bytes = build_cpu_dtb(Some("psci"), Some(0x4000_0000));
 
         assert_eq!(cpu_node_method(&bytes), None);
+    }
+
+    #[test]
+    fn reads_specified_status_codes() {
+        assert_eq!(PsciFailure::from_code(0), Ok(()));
+        assert_eq!(
+            PsciFailure::from_code(-2),
+            Err(PsciFailure::InvalidParameters)
+        );
+        assert_eq!(PsciFailure::from_code(-4), Err(PsciFailure::AlreadyOn));
+        assert_eq!(PsciFailure::from_code(-9), Err(PsciFailure::InvalidAddress));
+    }
+
+    #[test]
+    fn code_outside_the_specification_stays_unknown() {
+        assert_eq!(PsciFailure::from_code(-42), Err(PsciFailure::Unknown(-42)));
+        assert_eq!(PsciFailure::from_code(7), Err(PsciFailure::Unknown(7)));
+    }
+
+    #[test]
+    fn rejection_before_start_leaves_the_cpu_untouched() {
+        for status in [
+            PsciFailure::NotSupported,
+            PsciFailure::InvalidParameters,
+            PsciFailure::Denied,
+            PsciFailure::NotPresent,
+            PsciFailure::Disabled,
+            PsciFailure::InvalidAddress,
+        ] {
+            assert!(
+                !status.may_have_started(),
+                "{status} must not claim the CPU"
+            );
+        }
+    }
+
+    #[test]
+    fn unfinished_or_unclear_outcome_claims_the_cpu() {
+        for status in [
+            PsciFailure::AlreadyOn,
+            PsciFailure::OnPending,
+            PsciFailure::InternalFailure,
+            PsciFailure::Unknown(-42),
+        ] {
+            assert!(status.may_have_started(), "{status} must claim the CPU");
+        }
     }
 }

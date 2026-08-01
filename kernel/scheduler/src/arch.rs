@@ -201,23 +201,51 @@ pub trait ArchContext: Sized + Send + 'static {
     fn switch_address_space(_next: Option<AddressSpaceHandle>) {}
 }
 
+/// Платформенный слой не принял per-CPU состояние планировщика.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuLocalError {
+    /// Блок текущего CPU не установлен: планировщику некуда положить своё
+    /// состояние, и найти его обратно он не сможет.
+    NotInstalled,
+}
+
+impl core::fmt::Display for CpuLocalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CpuLocalError::NotInstalled => {
+                f.write_str("the platform has no per-CPU block for this CPU")
+            }
+        }
+    }
+}
+
 /// Операции CPU, необходимые планировщику.
 pub trait ArchCpu: Send + Sync + 'static {
     fn current_id() -> CpuId;
 
     /// Сохраняет указатель на per-CPU состояние в CPU-local регистре.
     ///
+    /// Отказ означает, что планировщик на этом CPU не поднимется: свой
+    /// `Cpu` он находит только через этот указатель.
+    ///
     /// # Safety
     /// Указатель должен жить всё время жизни CPU.
-    unsafe fn install_cpu_local(_cpu: *mut ()) {}
+    unsafe fn install_cpu_local(_cpu: *mut ()) -> Result<(), CpuLocalError> {
+        Ok(())
+    }
 
     fn cpu_local_ptr() -> *mut () {
         core::ptr::null_mut()
     }
 
     /// Поднимает остальные CPU системы. Вызывается один раз boot CPU, после
-    /// инициализации контроллера прерываний и до старта планировщика.
+    /// того как планировщик готов принимать CPU: стартующий CPU входит в него
+    /// сразу.
     fn start_secondaries() {}
+
+    /// Просит `target` перевыбрать поток: на нём появилась работа, а он мог
+    /// уйти в idle. Вызывается вне scheduler-лока.
+    fn send_reschedule(_target: CpuId) {}
 
     fn idle() -> !;
 

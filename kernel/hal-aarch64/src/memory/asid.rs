@@ -25,8 +25,9 @@ fn flush_all_inner_shareable() {
 static ASID_ALLOCATOR: GlobalAsidAllocator<MAX_CPUS> =
     GlobalAsidAllocator::new(flush_all_inner_shareable);
 
-/// Конфигурирует глобальный аллокатор шириной ASID, обнаруженной на boot.
-pub fn init(width: hal_aarch64_asid::AsidWidth) {
+/// Настраивает глобальный аллокатор ASID шириной, объявленной железом.
+/// Вызывается на загрузке boot CPU, после включения MMU.
+pub fn init_global(width: hal_aarch64_asid::AsidWidth) {
     ASID_ALLOCATOR.init(width);
 }
 

@@ -1,7 +1,18 @@
 //! Общие типы и макросы для системных регистров.
 
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Уровень исключения, на котором доступен регистр. Реализации перечислены
+/// здесь: снаружи модуля тип-маркер не завести.
+pub trait ExceptionLevel: sealed::Sealed {}
+
 /// Маркер уровня исключения EL1.
 pub enum EL1 {}
+
+impl sealed::Sealed for EL1 {}
+impl ExceptionLevel for EL1 {}
 
 /// Читает системный регистр AArch64 через инструкцию `mrs`.
 ///

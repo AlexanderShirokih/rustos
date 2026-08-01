@@ -13,7 +13,7 @@
 | Загрузочный образ (userland + ядро) | `cargo xtask build devices/spec/<device>.yaml [--image <путь>] [--file <путь>=<источник>]`                           |
 | Загрузочный образ для QEMU          | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                   |
 | Запуск после сборки                 | `cargo xtask build devices/spec/<device>.yaml --run`                                                                 |
-| QEMU integration tests              | `cargo xtask qemu-test [--timeout <сек>]`                                                                            |
+| QEMU integration tests              | `cargo xtask qemu-test [--timeout <сек>] [--spec <путь>]`                                                            |
 | Userspace stress в QEMU             | `cargo xtask stress [--seed <n>] [--seeds <n>] [--steps <n>] [--timeout <сек>]`                                      |
 | Host race под ThreadSanitizer       | `cargo xtask race`                                                                                                    |
 | Ограниченный fuzz-прогон            | `cargo xtask fuzz <target> [--seconds <сек>]`                                                                         |
@@ -82,10 +82,10 @@ cargo test --workspace
 QEMU integration tests:
 
 ```bash
-cargo xtask qemu-test [--timeout <сек>]
+cargo xtask qemu-test [--timeout <сек>] [--spec <путь>]
 ```
 
-По умолчанию тайм-аут — 60 секунд. `qemu-test` выполняет проход по спецификации `devices/spec/qemu-aarch64-test.yaml`:
+По умолчанию тайм-аут — 60 секунд, спека — `devices/spec/qemu-aarch64-test.yaml`. `qemu-test` выполняет два прохода:
 
 | Проход     | Feature ядра    | Userland-образ                | Что тестирует     |
 |------------|-----------------|-------------------------------|-------------------|
@@ -94,6 +94,16 @@ cargo xtask qemu-test [--timeout <сек>]
 
 Ядро пересобирается между прогонами из-за различия feature-флагов.
 Выбор прохода для нового теста — в [`code-style.md`](code-style.md).
+
+`--spec` меняет конфигурацию машины, оставляя проходы прежними. Спека по
+умолчанию поднимает четыре CPU с GICv3; `devices/spec/qemu-aarch64-test-gicv2.yaml`
+даёт ту же машину с GICv2, покрывая второй бэкенд контроллера прерываний:
+
+```bash
+cargo xtask qemu-test --spec devices/spec/qemu-aarch64-test-gicv2.yaml
+```
+
+`stress` спеку не выбирает и всегда идёт по умолчанию.
 
 ### Stress, race и fuzz
 

@@ -6,6 +6,7 @@ use alloc::{
     sync::Arc,
 };
 
+use collections::{LockCell, MutexCell};
 use drivers_common::{
     BootServices, DeviceMemoryPermission, DeviceNode, Driver, DriverFactory, DriverRunError,
     NodeProperty, Owners,
@@ -13,10 +14,11 @@ use drivers_common::{
     services::mmio::{MmioAddress, MmioService},
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatible};
-use spin::Mutex;
 
 use super::{
-    controller::Gicv3Controller, regs::GICR_DEFAULT_STRIDE, service::GicV3InterruptsService,
+    controller::Gicv3Controller,
+    regs::{GICR_DEFAULT_STRIDE, GICR_FRAME_SPAN},
+    service::GicV3InterruptsService,
 };
 use crate::register_driver;
 
@@ -75,13 +77,13 @@ impl Driver for Gicv3 {
             .require_mmio()
             .map_err(DriverRunError::from_boot_services_error)?;
 
-        let controller = Arc::new(Mutex::new(
+        let controller = Arc::new(MutexCell::new(
             self.create_controller(mmio.as_ref())
                 .map_err(DriverRunError::Fatal)?,
         ));
 
         {
-            controller.lock().init();
+            controller.with_lock(|controller| controller.init());
         }
 
         let handle = GicV3InterruptsService::new(controller);
@@ -131,13 +133,11 @@ pub fn gicv3_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
     }))
 }
 
-/// Читает `redistributor-stride`: две ячейки big-endian. Нулевое значение
-/// биндинг трактует как «по умолчанию».
 fn read_stride(raw: &[u8]) -> Option<usize> {
     let bytes: [u8; 8] = raw.first_chunk().copied()?;
-    let stride = u64::from_be_bytes(bytes);
+    let stride = usize::try_from(u64::from_be_bytes(bytes)).ok()?;
 
-    (stride != 0).then_some(stride as usize)
+    (stride >= GICR_FRAME_SPAN).then_some(stride)
 }
 
 register_driver!(GIC_V3_DRIVER, probe = gicv3_probe);

@@ -2,7 +2,7 @@
 
 use std::{
     io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -15,8 +15,12 @@ use crate::{
 };
 
 /// Один проход QEMU-тестов: собираемый образ и ожидания от его вывода.
+/// Спека, против которой идут прогоны по умолчанию.
+pub(crate) const DEFAULT_SPEC: &str = "devices/spec/qemu-aarch64-test.yaml";
+
 struct QemuPass<'a> {
     label: &'a str,
+    spec: &'a Path,
     features: Option<String>,
     image: &'a Path,
     timeout: u64,
@@ -24,9 +28,10 @@ struct QemuPass<'a> {
     expected_seeds: Option<u64>,
 }
 
-pub(crate) fn qemu_test(timeout: u64) -> Result<()> {
+pub(crate) fn qemu_test(timeout: u64, spec: &Path) -> Result<()> {
     qemu_test_pass(QemuPass {
         label: "kernel",
+        spec,
         features: Some(String::from("kernel-tests")),
         image: Path::new("user/rootkeeper/image.toml"),
         timeout,
@@ -35,6 +40,7 @@ pub(crate) fn qemu_test(timeout: u64) -> Result<()> {
     })?;
     qemu_test_pass(QemuPass {
         label: "userland",
+        spec,
         features: None,
         image: Path::new("user/testrunner/image.toml"),
         timeout,
@@ -69,6 +75,7 @@ pub(crate) fn qemu_stress(seed: u64, seeds: u64, steps: u64, timeout: u64) -> Re
     ];
     qemu_test_pass(QemuPass {
         label: "stress",
+        spec: Path::new(DEFAULT_SPEC),
         features: None,
         image: Path::new("user/testrunner/image.toml"),
         timeout,
@@ -80,6 +87,7 @@ pub(crate) fn qemu_stress(seed: u64, seeds: u64, steps: u64, timeout: u64) -> Re
 fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
     let QemuPass {
         label,
+        spec,
         features,
         image,
         timeout,
@@ -88,8 +96,7 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
     } = pass;
     println!("=== qemu-test pass: {label} ===");
 
-    let spec_path = PathBuf::from("devices/spec/qemu-aarch64-test.yaml");
-    let ctx = BuildContext::new(spec_path, features)?;
+    let ctx = BuildContext::new(spec.to_path_buf(), features)?;
 
     let manifest_path = image_manifest_path(&ctx.project_root, image)?;
     build_userland(
@@ -105,7 +112,7 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
         .spec
         .run
         .first()
-        .context("No run commands in qemu-aarch64-test.yaml")?;
+        .with_context(|| format!("No run commands in {}", spec.display()))?;
 
     let full_cmd = format!("timeout {timeout} {qemu_cmd}");
     let mut child = Command::new("sh")

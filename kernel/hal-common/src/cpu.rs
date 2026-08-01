@@ -88,6 +88,16 @@ impl<const N: usize> CpuTopology<N> {
     pub fn iter(&self) -> impl Iterator<Item = CpuAffinity> + '_ {
         self.entries.iter().copied()
     }
+
+    /// Подтверждает, что `affinity` принадлежит CPU с идентификатором `claim`.
+    ///
+    /// Стартующий CPU не получает параметров и берёт идентификатор из общего
+    /// слота. Собственное affinity - единственное, что он знает о себе
+    /// достоверно: взятый идентификатор сверяется с топологией -
+    /// расхождение значит, что слот уже описывает другой CPU.
+    pub fn confirms(&self, affinity: CpuAffinity, claim: usize) -> bool {
+        self.index_of(affinity) == Some(claim)
+    }
 }
 
 /// Affinity, которым узел `cpu@N` адресует процессор. `None` - узел не
@@ -440,5 +450,49 @@ mod tests {
 
         assert_eq!(topology.len(), 1, "разбор по двум ячейкам не состоялся");
         assert_eq!(topology.index_of(CpuAffinity::from_reg(5)), None);
+    }
+
+    #[test]
+    fn confirms_the_identifier_taken_by_the_starting_cpu() {
+        let bytes = build_cpus_dtb(
+            Some(1),
+            &[
+                CpuNode::new("cpu@0", reg_1(0)),
+                CpuNode::new("cpu@1", reg_1(1)),
+                CpuNode::new("cpu@2", reg_1(2)),
+            ],
+        );
+
+        let topology = parse(&bytes, 0);
+
+        assert!(topology.confirms(CpuAffinity::from_reg(2), 2));
+    }
+
+    #[test]
+    fn rejects_an_identifier_belonging_to_another_cpu() {
+        let bytes = build_cpus_dtb(
+            Some(1),
+            &[
+                CpuNode::new("cpu@0", reg_1(0)),
+                CpuNode::new("cpu@1", reg_1(1)),
+                CpuNode::new("cpu@2", reg_1(2)),
+            ],
+        );
+
+        let topology = parse(&bytes, 0);
+
+        assert!(
+            !topology.confirms(CpuAffinity::from_reg(2), 1),
+            "чужой идентификатор отдал бы CPU общий стек и общий per-CPU блок"
+        );
+    }
+
+    #[test]
+    fn rejects_an_identifier_for_a_cpu_outside_the_topology() {
+        let bytes = build_cpus_dtb(Some(1), &[CpuNode::new("cpu@0", reg_1(0))]);
+
+        let topology = parse(&bytes, 0);
+
+        assert!(!topology.confirms(CpuAffinity::from_reg(9), 0));
     }
 }

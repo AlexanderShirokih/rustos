@@ -5,15 +5,13 @@
 
 use hal_common::{
     cpu::CpuAffinity,
-    smp::{PsciConduit, StartMethod},
+    smp::{PsciConduit, PsciFailure, StartMethod},
 };
 
 use crate::{
     consts::HIGHER_HALF_BASE,
-    memory::regs::{common::EL1, dcache::DataCache},
+    memory::regs::{common::EL1, dcache::DataCache, translate::AddressTranslation},
 };
-
-const PSCI_SUCCESS: i32 = 0;
 
 /// Ошибка старта CPU.
 #[derive(Debug, PartialEq, Eq)]
@@ -21,10 +19,12 @@ pub enum StartError {
     /// Device tree не описывает способ старта.
     MethodUnknown,
     /// `CPU_ON` вернул код ошибки.
-    PsciRejected(i32),
+    PsciRejected(PsciFailure),
     /// `CPU_ON` вернул значение вне диапазона кодов PSCI.
     PsciMalformed(u64),
-    /// CPU не доложил о готовности за отведённое число опросов.
+    /// Адрес из `cpu-release-addr` не отображён на запись.
+    ReleaseAddressUnmapped(usize),
+    /// CPU не доложил о готовности за отведённое время.
     NotReady,
 }
 
@@ -33,10 +33,12 @@ impl StartError {
     /// публиковать в слоте следующий идентификатор нельзя.
     pub fn leaves_slot_claimed(&self) -> bool {
         match self {
-            StartError::MethodUnknown => false,
-            StartError::PsciRejected(_) | StartError::PsciMalformed(_) | StartError::NotReady => {
-                true
-            }
+            // Команда старта не отдавалась: слот свободен.
+            StartError::MethodUnknown | StartError::ReleaseAddressUnmapped(_) => false,
+            // Разбор ответа PSCI: часть кодов оставляет CPU нетронутым.
+            StartError::PsciRejected(status) => status.may_have_started(),
+            // Ответ не разобран или CPU молчит: судить об итоге не по чему.
+            StartError::PsciMalformed(_) | StartError::NotReady => true,
         }
     }
 }
@@ -47,11 +49,19 @@ impl core::fmt::Display for StartError {
             StartError::MethodUnknown => {
                 f.write_str("device tree declares no way to start the CPU")
             }
-            StartError::PsciRejected(code) => write!(f, "PSCI CPU_ON rejected the call: {code}"),
+            StartError::PsciRejected(status) => {
+                write!(f, "PSCI CPU_ON rejected the call: {status}")
+            }
             StartError::PsciMalformed(value) => {
                 write!(
                     f,
                     "PSCI CPU_ON returned a value outside the code range: {value:#x}"
+                )
+            }
+            StartError::ReleaseAddressUnmapped(address) => {
+                write!(
+                    f,
+                    "the release address {address:#x} is not mapped for writing"
                 )
             }
             StartError::NotReady => f.write_str("the CPU did not report readiness in time"),
@@ -85,16 +95,14 @@ pub unsafe fn start(
             };
 
             match i32::try_from(result.cast_signed()) {
-                Ok(PSCI_SUCCESS) => Ok(()),
-                Ok(code) => Err(StartError::PsciRejected(code)),
+                Ok(code) => PsciFailure::from_code(code).map_err(StartError::PsciRejected),
                 Err(_) => Err(StartError::PsciMalformed(result)),
             }
         }
         StartMethod::SpinTable { release_address } => {
-            // SAFETY: контракт функции; адрес освобождения объявлен узлом CPU
-            // и принадлежит зарезервированной загрузчиком памяти.
-            unsafe { release_spin_table(release_address, entry_point) };
-            Ok(())
+            // SAFETY: контракт функции; адрес освобождения объявлен узлом CPU,
+            // а его отображение проверяется внутри.
+            unsafe { release_spin_table(release_address, entry_point) }
         }
     }
 }
@@ -149,17 +157,28 @@ unsafe fn psci_call(conduit: PsciConduit, function: u64, arg0: u64, arg1: u64, a
 
 /// # Safety
 ///
-/// `release_address` - физический адрес, объявленный узлом CPU, доступный
-/// через линейное отображение higher-half.
-unsafe fn release_spin_table(release_address: usize, entry_point: usize) {
-    let slot = (release_address + HIGHER_HALF_BASE) as *mut u64;
+/// `release_address` - физический адрес, объявленный узлом CPU.
+unsafe fn release_spin_table(release_address: usize, entry_point: usize) -> Result<(), StartError> {
+    // Адрес приходит из device tree, а линейное отображение покрывает только
+    // память, описанную им же. Проверка исключает запись по неотображённому
+    // адресу; принадлежность адреса именно spin-table она не устанавливает.
+    let Some(slot) = release_address.checked_add(HIGHER_HALF_BASE) else {
+        return Err(StartError::ReleaseAddressUnmapped(release_address));
+    };
+    if !AddressTranslation::<EL1>::is_writable(slot) {
+        return Err(StartError::ReleaseAddressUnmapped(release_address));
+    }
 
-    // SAFETY: контракт функции; слот принадлежит зарезервированной памяти.
-    // Ждущий CPU читает его мимо кэша, и строка вытесняется следом.
+    let slot = slot as *mut u64;
+
+    // SAFETY: проверка выше подтвердила, что адрес транслируется на запись.
+    // Ждущий CPU читает слот мимо кэша, и строка вытесняется следом.
     unsafe { slot.write_volatile(entry_point as u64) };
 
     DataCache::<EL1>::clean_range_to_coherency(slot as usize, slot as usize + size_of::<u64>());
 
     // SAFETY: `sev` будит CPU, ждущие на `wfe`, и не имеет других эффектов.
     unsafe { core::arch::asm!("sev", options(nomem, nostack, preserves_flags)) };
+
+    Ok(())
 }

@@ -108,6 +108,46 @@ pub enum IrqRegistrationError {
     Other(&'static str),
 }
 
+/// Адрес CPU в понятиях контроллера прерываний.
+///
+/// Контроллер адресует CPU по-своему, и с нумерацией ядра это не связано:
+/// значение для него готовит платформенный слой: на ARM это affinity целевого
+/// процессора.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct IpiTarget(u64);
+
+impl IpiTarget {
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// Ошибки отправки межпроцессорного прерывания.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpiError {
+    /// Контроллер не умеет адресовать другой CPU.
+    Unsupported,
+    /// Номер вне диапазона межпроцессорных прерываний.
+    NotAnIpi,
+    /// Адрес не выражается в адресации этого контроллера.
+    UnreachableTarget,
+}
+
+impl core::fmt::Display for IpiError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            IpiError::Unsupported => f.write_str("the controller cannot address another CPU"),
+            IpiError::NotAnIpi => f.write_str("the interrupt number is not an IPI"),
+            IpiError::UnreachableTarget => f.write_str("the controller cannot address that CPU"),
+        }
+    }
+}
+
 /// Ошибки настройки per-CPU части контроллера.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuInterfaceError {
@@ -189,6 +229,14 @@ pub trait InterruptsService: Send + Sync {
     /// Настраивает per-CPU часть контроллера на текущем CPU. Вызывается каждым
     /// CPU при старте.
     fn init_this_cpu(&self) -> Result<(), CpuInterfaceError>;
+
+    /// Отправляет межпроцессорное прерывание `irq` процессору `target`.
+    ///
+    /// Линия должна быть привязана как обычная: доставленное прерывание
+    /// приходит на общий путь диспетчеризации.
+    fn send_ipi(&self, _irq: IrqNumber, _target: IpiTarget) -> Result<(), IpiError> {
+        Err(IpiError::Unsupported)
+    }
 }
 
 #[cfg(test)]

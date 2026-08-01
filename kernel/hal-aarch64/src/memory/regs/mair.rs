@@ -1,7 +1,11 @@
 //! Memory Attribute Indirection Register
 //! Регистр, который описывает типы памяти (cacheable, device, write-back).
 //!
-use crate::{combine_bits, memory::regs::common::EL1, write_sysreg};
+use crate::{
+    combine_bits,
+    memory::regs::common::{EL1, ExceptionLevel},
+    write_sysreg,
+};
 
 /// Атрибуты обычной памяти (Normal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +53,7 @@ impl MairBits {
 }
 
 /// Регистр MAIR (Memory Attribute Indirection Register).
-pub struct MemoryAttributeIndirectionRegister<EL> {
+pub struct MemoryAttributeIndirectionRegister<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 

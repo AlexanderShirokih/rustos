@@ -3,10 +3,10 @@
 //!
 use core::arch::asm;
 
-use crate::memory::regs::common::EL1;
+use crate::memory::regs::common::{EL1, ExceptionLevel};
 
 /// TLB (Translation Lookaside Buffer).
-pub struct TranslationLookasideBuffer<EL> {
+pub struct TranslationLookasideBuffer<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 

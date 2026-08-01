@@ -130,10 +130,6 @@ where
 
     info!("Kernel drivers initialization completed");
 
-    // Вторичный CPU настраивает свой интерфейс контроллера прерываний: подъём
-    // идёт после инициализации контроллера.
-    <A::Cpu as ArchCpu>::start_secondaries();
-
     // Scheduler bootstrapится при замаскированных IRQ.
     <A::Cpu as ArchCpu>::disable_preemption();
 
@@ -141,6 +137,11 @@ where
         bootstrap_scheduler::<A>(context, scheduler_config).map_err(BootError::Scheduler)?;
 
     init_task(&scheduler, context).map_err(BootError::InitProcess)?;
+
+    // Подъём идёт последним: стартующий CPU настраивает свой интерфейс
+    // контроллера прерываний и сразу входит в планировщик, поэтому к этому
+    // моменту готовы должны быть оба.
+    <A::Cpu as ArchCpu>::start_secondaries();
 
     scheduler.start().map_err(|_| BootError::NoRunnableThread)
 }

@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use crate::{
     combine_bits,
     memory::regs::{
-        common::EL1,
+        common::{EL1, ExceptionLevel},
         id_aa64mmfr0::AsidWidth,
         ttbr::{HigherHalf, LowerHalf},
     },
@@ -119,7 +119,7 @@ impl TCRBit {
 }
 
 /// Регистр TCR (Translation Control Register).
-pub struct TranslationControlRegister<EL> {
+pub struct TranslationControlRegister<EL: ExceptionLevel> {
     _phantom: PhantomData<EL>,
 }
 

@@ -89,6 +89,10 @@ pub(super) const GICR_ICFGR1: Reg<u32> = Reg::new(GICR_SGI_BASE_OFFSET + 0xC04);
 /// SGI_base: Group Modifier Register для SGI/PPI.
 pub(super) const GICR_IGRPMODR0: Reg<u32> = Reg::new(GICR_SGI_BASE_OFFSET + 0xD00);
 
+/// Сколько байт фрейма занимают программируемые драйвером регистры.
+/// `GICR_IGRPMODR0` - самый дальний из них.
+pub(super) const GICR_FRAME_SPAN: usize = GICR_SGI_BASE_OFFSET + 0xD00 + size_of::<u32>();
+
 /// Биты GICR_WAKER
 /// Перевести процессор в режим сна.
 pub(super) const GICR_WAKER_PROCESSOR_SLEEP: u32 = 1 << 1;

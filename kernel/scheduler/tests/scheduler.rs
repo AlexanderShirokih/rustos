@@ -11,14 +11,14 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use scheduler::{
-    Priority, Scheduler, SchedulerConfig, SchedulerHandle, SpawnAddressSpace, SpawnConfig,
-    SpawnError, Uninit,
+    CpuBootstrapError, CpuEntry, CpuId, Priority, Scheduler, SchedulerConfig, SchedulerHandle,
+    SchedulerServiceExt, SpawnAddressSpace, SpawnConfig, SpawnError, Uninit,
 };
 
 use crate::common::{
     CountingFrameAllocator, MockAddressSpaceFactory, MockContext, MockTimer, MockTimerSource,
-    preemption_enabled, reset_switches, switch_count, take_address_space_switches,
-    with_simulated_irq,
+    preemption_enabled, reset_switches, set_current_cpu, switch_count, take_address_space_switches,
+    take_reschedules, with_simulated_irq,
 };
 
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
@@ -1605,5 +1605,114 @@ fn process_terminate_on_empty_process_signals_terminated_and_releases_slot() {
     assert!(
         running.process_count() < before,
         "empty process slot must be reclaimed after scheduler tick",
+    );
+}
+
+#[test]
+fn second_bootstrap_of_the_same_cpu_is_rejected() {
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    // Тот же CPU второй раз получил бы вторую очередь готовых и второй
+    // idle-поток, а `TPIDR_EL1` указывал бы на последнюю из них: потоки первой
+    // очереди перестали бы выбираться.
+    let handle = scheduler.handle();
+    assert_eq!(
+        CpuEntry::bootstrap(&handle),
+        Err(CpuBootstrapError::AlreadyBootstrapped)
+    );
+}
+
+#[test]
+fn exiting_thread_and_its_address_space_survive_reap_from_another_cpu() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
+
+    let second = CpuId::new(1).expect("cpu id 1");
+    set_current_cpu(second);
+    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
+    set_current_cpu(CpuId::ZERO);
+
+    let victim = scheduler
+        .spawn(
+            SpawnConfig::new("victim").address_space(SpawnAddressSpace::User),
+            || {},
+        )
+        .expect("spawn victim");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(victim));
+    let pid = running.thread_process_id(victim).expect("owning pid");
+
+    // Окно между подготовкой переключения и его выполнением: указатель на
+    // контекст уходящего потока живёт вне лока, а `current` первого CPU уже
+    // переставлен на следующий поток.
+    running.exit_current_interleaved(0, || {
+        set_current_cpu(second);
+        running.yield_now();
+
+        assert!(
+            running.thread_object_for(victim).is_some(),
+            "thread whose context is still being saved must not be reaped",
+        );
+        assert!(
+            running.process_object_for(pid).is_some(),
+            "process of a thread still being switched away must stay in the table",
+        );
+        assert_eq!(
+            factory.released(),
+            0,
+            "address space must not be released while a cpu still runs on its thread",
+        );
+
+        set_current_cpu(CpuId::ZERO);
+    });
+
+    assert!(
+        running.thread_object_for(victim).is_none(),
+        "thread must be reaped once the switch is complete",
+    );
+    assert_eq!(
+        factory.released(),
+        1,
+        "address space must be released once the switch is complete",
+    );
+}
+
+#[test]
+fn a_cpu_running_a_thread_is_not_picked_over_an_idle_one() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    let second = CpuId::new(1).expect("cpu id 1");
+    set_current_cpu(second);
+    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
+    set_current_cpu(CpuId::ZERO);
+
+    // Первый CPU занимает поток, и очереди готовых пусты у обоих: по одной
+    // длине очереди занятый CPU неотличим от простаивающего.
+    let busy = scheduler
+        .spawn(SpawnConfig::new("busy"), || {})
+        .expect("spawn busy");
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(busy));
+
+    let handle = running.handle();
+    let _ = take_reschedules();
+    SchedulerServiceExt::spawn(&handle, SpawnConfig::new("next"), || {}).expect("spawn next");
+
+    assert_eq!(
+        take_reschedules(),
+        vec![second],
+        "a new thread must go to the idle cpu, not to the one already running a thread",
     );
 }

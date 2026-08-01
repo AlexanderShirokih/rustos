@@ -17,7 +17,9 @@ use memory::{
 
 use super::{
     address_space::AddressSpace,
-    arch::{ArchContext, ArchCpu, CpuId, TimerSource, with_preemption_disabled},
+    arch::{
+        ArchContext, ArchCpu, CpuId, CpuLocalError, MAX_CPUS, TimerSource, with_preemption_disabled,
+    },
     cpu::Cpu,
     process::{Process, ProcessName, ProcessTable},
     thread::{IpcBufferSlot, Thread, ThreadState},
@@ -224,10 +226,54 @@ where
     pending_process_drops: Vec<Process>,
     /// Завершённые потоки, ждущие реапа из `ThreadTable`.
     pending_thread_removals: Vec<ThreadId>,
+    /// Потоки, чей IPC-буфер ждёт освобождения: снимать отображение у потока,
+    /// исполняющегося на другом CPU, значит выдернуть память из-под syscall.
+    pending_ipc_releases: Vec<ThreadId>,
     /// Capability, ждущие разрушения вне scheduler-лока.
     deferred_handles: DeferredHandles,
+    /// CPU, которым под локом добавили работу. Бит на CPU: отправка идёт вне
+    /// лока, а там список уже не собрать.
+    pending_wakeups: u16,
     quantum_ns: u64,
     time_slice_ticks: u32,
+}
+
+// Маска пробуждений держит по биту на CPU и потому связана с тем же пределом,
+// что и `CpuId`.
+const _: () = assert!(MAX_CPUS <= u16::BITS as usize);
+
+/// Отказ подъёма планировщика на CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuBootstrapError {
+    /// Планировщик ещё не поднят: принимать CPU некому.
+    NotReady,
+    /// Планировщик на этом CPU уже поднят.
+    AlreadyBootstrapped,
+    /// Не удалось создать idle-поток этого CPU.
+    IdleThread(SpawnError),
+    /// Платформенный слой не принял per-CPU состояние.
+    CpuLocal(CpuLocalError),
+    /// Планировщику нечего запустить на этом CPU: нет даже idle-потока.
+    NoRunnableThread,
+    /// Таблица CPU не приняла слот под этот CPU.
+    NoCpuSlot,
+}
+
+impl core::fmt::Display for CpuBootstrapError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CpuBootstrapError::NotReady => f.write_str("the scheduler is not up yet"),
+            CpuBootstrapError::AlreadyBootstrapped => {
+                f.write_str("the scheduler is already running on this CPU")
+            }
+            CpuBootstrapError::IdleThread(e) => write!(f, "idle thread spawn failed: {e:?}"),
+            CpuBootstrapError::CpuLocal(e) => write!(f, "per-CPU state was not installed: {e}"),
+            CpuBootstrapError::NoRunnableThread => {
+                f.write_str("no runnable thread to start on this CPU")
+            }
+            CpuBootstrapError::NoCpuSlot => f.write_str("no CPU table slot for this CPU"),
+        }
+    }
 }
 
 /// Возвращает приоритет, используемый для idle-потока в scheduler с указанным
@@ -266,7 +312,9 @@ where
                 pending_process_removals: Vec::new(),
                 pending_process_drops: Vec::new(),
                 pending_thread_removals: Vec::new(),
+                pending_ipc_releases: Vec::new(),
                 deferred_handles: DeferredHandles::default(),
+                pending_wakeups: 0,
                 quantum_ns: DEFAULT_QUANTUM_NS,
                 time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
             })),
@@ -277,7 +325,7 @@ where
     /// Создаёт per-CPU state, idle-поток и устанавливает CPU-local указатель.
     /// Должен вызываться при замаскированных IRQ. На отказе возвращает исходный
     /// планировщик: в `Bootstrapped` он не переходит.
-    pub fn bootstrap(self) -> Result<Scheduler<A, T, Bootstrapped>, (Self, SpawnError)> {
+    pub fn bootstrap(self) -> Result<Scheduler<A, T, Bootstrapped>, (Self, CpuBootstrapError)> {
         if let Err(e) = self.inner.with_lock(SchedulerInner::bootstrap_current_cpu) {
             return Err((self, e));
         }
@@ -398,6 +446,14 @@ where
     /// Тестовый вариант [`Self::exit_current`] с явным `exit_code`.
     #[doc(hidden)]
     pub fn exit_current_with_code(&self, exit_code: i32) {
+        self.exit_current_interleaved(exit_code, || {});
+    }
+
+    /// Тестовый разрез [`Self::exit_current`]: `between` вызывается в окне
+    /// между подготовкой переключения и его выполнением - там, где указатель
+    /// на контекст уходящего потока живёт вне scheduler-лока.
+    #[doc(hidden)]
+    pub fn exit_current_interleaved(&self, exit_code: i32, between: impl FnOnce()) {
         // Bare disable: preempt должен оставаться выключенным до
         // `perform_schedule_action`, иначе tick может уйти с Terminated
         // потока до `finish_exit_current`. Парный enable не нужен.
@@ -410,6 +466,7 @@ where
             let now_ns = inner.timer.now_ns();
             inner.finish_exit_current(now_ns)
         });
+        between();
         perform_schedule_action(&self.inner, action);
     }
 
@@ -518,6 +575,19 @@ where
         cfg: SpawnConfig,
         entry: Box<dyn FnOnce() + Send + 'static>,
     ) -> Result<ThreadId, SpawnError> {
+        let target = self.pick_cpu();
+        let priority = cfg.priority;
+        let id = self.create_thread_on(cfg, entry, target)?;
+        self.enqueue_ready(id, priority, target);
+        Ok(id)
+    }
+
+    fn create_thread_on(
+        &mut self,
+        cfg: SpawnConfig,
+        entry: Box<dyn FnOnce() + Send + 'static>,
+        cpu_affinity: CpuId,
+    ) -> Result<ThreadId, SpawnError> {
         if cfg.stack_pages == 0 {
             return Err(SpawnError::InvalidStackPages);
         }
@@ -537,10 +607,6 @@ where
         let (process_id, is_new_process) =
             self.intern_process_for_spawn(cfg.name, address_space, cfg.address_space)?;
 
-        let cpu_affinity = self
-            .current_cpu()
-            .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
-
         let id = match self.threads.insert_with(|id| {
             Thread::new(
                 id,
@@ -559,44 +625,111 @@ where
             }
         };
 
-        if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
-            && cpu.idle() != id
-        {
-            cpu.ready_queue_mut().push(id, cfg.priority);
-        }
-
         Ok(id)
     }
 
-    fn bootstrap_current_cpu(&mut self) -> Result<(), SpawnError> {
+    /// Создаёт per-CPU состояние планировщика на текущем CPU.
+    ///
+    /// Порядок шагов задан откатом: указатель отдаётся платформенному слою до
+    /// того, как `Cpu` встанет в таблицу. Слот, заполненный для CPU, который в
+    /// планировщик так и не вошёл, копил бы потоки в очереди, которую никто не
+    /// разбирает.
+    pub(super) fn bootstrap_current_cpu(&mut self) -> Result<(), CpuBootstrapError> {
         let cpu_id = <A::Cpu as ArchCpu>::current_id();
+        if self.cpu_by_id(cpu_id).is_some() {
+            return Err(CpuBootstrapError::AlreadyBootstrapped);
+        }
+
         let idle_priority = lowest_priority(self.config.priority_levels());
         let time_slice_ticks = self.time_slice_ticks;
-        let idle_id = self.spawn_boxed(
-            SpawnConfig::new("idle").priority(idle_priority),
-            Box::new(|| <A::Cpu as ArchCpu>::idle()),
-        )?;
+        let idle_id = self
+            .create_thread_on(
+                SpawnConfig::new("idle").priority(idle_priority),
+                Box::new(|| <A::Cpu as ArchCpu>::idle()),
+                cpu_id,
+            )
+            .map_err(CpuBootstrapError::IdleThread)?;
 
         let idle = self
             .threads
             .get_mut(idle_id)
-            .ok_or(SpawnError::NoFreeThreadSlots)?;
+            .ok_or(CpuBootstrapError::IdleThread(SpawnError::NoFreeThreadSlots))?;
         idle.set_state(ThreadState::Running);
         idle.set_time_slice_left(time_slice_ticks);
 
         let mut cpu = Box::new(Cpu::new(cpu_id, idle_id, self.config.priority_levels()));
         let cpu_ptr = core::ptr::from_mut::<Cpu>(&mut cpu).cast::<()>();
 
+        // SAFETY: указатель ведёт в кучу, а не в `Box`, поэтому перемещение
+        // `Box` в таблицу ниже его не сдвигает; сама таблица живёт столько же,
+        // сколько планировщик.
+        if let Err(e) = unsafe { <A::Cpu as ArchCpu>::install_cpu_local(cpu_ptr) } {
+            self.drop_prepared_thread(idle_id);
+            return Err(CpuBootstrapError::CpuLocal(e));
+        }
+
         self.ensure_cpu_slot(cpu_id);
         let Some(slot) = self.cpus.get_mut(cpu_id.as_index()) else {
-            debug_assert!(false, "CPU slot must exist after ensure_cpu_slot");
-            return Err(SpawnError::NoFreeThreadSlots);
+            // Опубликованный указатель ведёт в `Box`, который сейчас будет
+            // уничтожен: снимаем его до возврата.
+            // SAFETY: null - разрешённое значение CPU-local слота, оно же
+            // стоит там до подъёма.
+            let _ = unsafe { <A::Cpu as ArchCpu>::install_cpu_local(core::ptr::null_mut()) };
+            self.drop_prepared_thread(idle_id);
+            return Err(CpuBootstrapError::NoCpuSlot);
         };
         *slot = Some(cpu);
 
-        // SAFETY: Box<Cpu> хранится в slot до конца жизни scheduler-а; адрес стабилен.
-        unsafe { <A::Cpu as ArchCpu>::install_cpu_local(cpu_ptr) };
         Ok(())
+    }
+
+    fn pick_cpu(&self) -> CpuId {
+        let current = self.current_cpu();
+        let current_id = current.map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
+        // CPU без поднятого состояния в выборе не участвует, и его нагрузка
+        // недостижимо велика: поставить поток некуда.
+        let current_load = current.map_or(usize::MAX, Self::cpu_load);
+
+        self.cpus
+            .iter()
+            .flatten()
+            .filter(|cpu| Self::cpu_load(cpu) < current_load)
+            .min_by_key(|cpu| Self::cpu_load(cpu))
+            .map_or(current_id, |cpu| cpu.id())
+    }
+
+    /// Число потоков, за которые CPU отвечает: очередь готовых и исполняемый
+    /// поток. Одной очереди мало - CPU, занятый потоком, опустошает её и по ней
+    /// неотличим от простаивающего.
+    fn cpu_load(cpu: &Cpu) -> usize {
+        let running = usize::from(cpu.current() != cpu.idle());
+
+        cpu.ready_queue().len() + running
+    }
+
+    fn enqueue_ready(&mut self, id: ThreadId, priority: Priority, target: CpuId) {
+        let Some(cpu) = self.cpu_by_id_mut(target) else {
+            return;
+        };
+        // Idle-поток в очереди не стоит: он выбирается, когда очередь пуста.
+        if cpu.idle() == id {
+            return;
+        }
+
+        cpu.ready_queue_mut().push(id, priority);
+        self.mark_wakeup(target);
+    }
+
+    fn mark_wakeup(&mut self, target: CpuId) {
+        if self.current_cpu().map(Cpu::id) == Some(target) {
+            return;
+        }
+
+        self.pending_wakeups |= 1u16 << target.as_index();
+    }
+
+    pub(super) fn take_pending_wakeups(&mut self) -> u16 {
+        core::mem::take(&mut self.pending_wakeups)
     }
 
     fn spawn<F>(&mut self, cfg: SpawnConfig, entry: F) -> Result<ThreadId, SpawnError>
@@ -718,9 +851,7 @@ where
             arg: bootstrap_arg,
         });
 
-        let cpu_affinity = self
-            .current_cpu()
-            .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
+        let cpu_affinity = self.pick_cpu();
 
         let (thread_id, thread_object) = match self.threads.insert_with(|id| {
             Thread::new(
@@ -754,11 +885,7 @@ where
             .with_lock(|tbl| tbl.commit_reserved(reservation, initial_handle, &mut rejected));
         self.deferred_handles.push_drained(rejected);
 
-        if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
-            && cpu.idle() != thread_id
-        {
-            cpu.ready_queue_mut().push(thread_id, prepared.priority);
-        }
+        self.enqueue_ready(thread_id, prepared.priority, cpu_affinity);
 
         Ok(UserProcessLaunchInfo {
             process_id,
@@ -874,6 +1001,40 @@ where
         }
     }
 
+    /// Перевыбор потока по требованию другого CPU.
+    ///
+    /// В отличие от тика, квант текущего потока не расходуется: сообщение
+    /// говорит лишь о появившейся работе, а времени с прошлого тика не прошло.
+    /// Поэтому вытеснение только в пользу более приоритетного - и всегда, если
+    /// CPU стоял в idle.
+    pub(super) fn reschedule(&mut self, now_ns: u64) -> ScheduleAction<A> {
+        let Some((current_id, idle_id, highest_ready)) = self.current_cpu().map(|cpu| {
+            (
+                cpu.current(),
+                cpu.idle(),
+                cpu.ready_queue().peek_highest_priority(),
+            )
+        }) else {
+            return ScheduleAction::None;
+        };
+
+        let Some(highest_ready) = highest_ready else {
+            return ScheduleAction::None;
+        };
+
+        let should_preempt = current_id == idle_id
+            || self
+                .threads
+                .get(current_id)
+                .is_some_and(|current| highest_ready < current.priority());
+
+        if should_preempt {
+            self.preempt_current(now_ns)
+        } else {
+            ScheduleAction::None
+        }
+    }
+
     pub(super) fn yield_now(&mut self, now_ns: u64) -> ScheduleAction<A> {
         if let Some(cpu) = self.current_cpu()
             && cpu.ready_queue().is_empty()
@@ -939,9 +1100,7 @@ where
                 let affinity = thread.cpu_affinity();
                 thread.set_state(ThreadState::Ready);
                 thread.set_time_slice_left(self.time_slice_ticks);
-                if let Some(cpu) = self.cpu_by_id_mut(affinity) {
-                    cpu.ready_queue_mut().push(id, priority);
-                }
+                self.enqueue_ready(id, priority, affinity);
             }
             _ => {}
         }
@@ -1107,9 +1266,7 @@ where
             arg: UserBootstrapArg(entry.arg),
         });
 
-        let cpu_affinity = self
-            .current_cpu()
-            .map_or_else(<A::Cpu as ArchCpu>::current_id, Cpu::id);
+        let cpu_affinity = self.pick_cpu();
 
         // Инкремент до insert: на ошибке компенсируем декремент без сигнала terminated.
         let process = self
@@ -1260,18 +1417,64 @@ where
         }
     }
 
-    /// Реап отложен: `perform_schedule_action` ещё сохраняет контекст в `prev.arch`.
-    fn reap_pending_threads(&mut self, prev_id: ThreadId, next_id: ThreadId) {
+    fn reap_pending_threads(&mut self) {
         let mut idx = 0;
         while idx < self.pending_thread_removals.len() {
             let tid = self.pending_thread_removals[idx];
-            if tid == prev_id || tid == next_id {
+            if self.is_thread_held(tid) {
                 idx += 1;
                 continue;
             }
             self.pending_thread_removals.swap_remove(idx);
             let _ = self.threads.remove(tid);
         }
+    }
+
+    fn held_threads(&self) -> impl Iterator<Item = ThreadId> + '_ {
+        self.cpus
+            .iter()
+            .flatten()
+            .flat_map(|cpu| [Some(cpu.current()), cpu.previous()])
+            .flatten()
+    }
+
+    fn is_thread_held(&self, id: ThreadId) -> bool {
+        self.held_threads().any(|held| held == id)
+    }
+
+    fn release_previous(&mut self) {
+        if let Some(cpu) = self.current_cpu_mut() {
+            cpu.set_previous(None);
+        }
+        self.release_pending_ipc_buffers();
+        self.reap_pending_threads();
+        self.cleanup_pending_process_removals();
+    }
+
+    fn release_pending_ipc_buffers(&mut self) {
+        let mut idx = 0;
+        while idx < self.pending_ipc_releases.len() {
+            let tid = self.pending_ipc_releases[idx];
+            if self.is_thread_held(tid) {
+                idx += 1;
+                continue;
+            }
+            self.pending_ipc_releases.swap_remove(idx);
+            self.release_ipc_buffer(tid);
+        }
+    }
+
+    /// Закрывает переключение и забирает снятые процессы для разрушения вне
+    /// scheduler-лока: их `Drop` берёт тот же лок.
+    pub(super) fn finish_switch(&mut self) -> Vec<Process> {
+        self.release_previous();
+        core::mem::take(&mut self.pending_process_drops)
+    }
+
+    fn is_process_running(&self, pid: ProcessId) -> bool {
+        self.held_threads()
+            .filter_map(|id| self.threads.get(id))
+            .any(|thread| thread.process() == pid)
     }
 
     pub(crate) fn set_current_blocked_cancel(&mut self, cancel: Arc<dyn capability::CancelTarget>) {
@@ -1302,11 +1505,7 @@ where
         let priority = thread.priority();
         let cpu_affinity = thread.cpu_affinity();
 
-        if let Some(cpu) = self.cpu_by_id_mut(cpu_affinity)
-            && cpu.idle() != thread_id
-        {
-            cpu.ready_queue_mut().push(thread_id, priority);
-        }
+        self.enqueue_ready(thread_id, priority, cpu_affinity);
     }
 
     pub(crate) fn drop_prepared_thread(&mut self, thread_id: ThreadId) {
@@ -1515,7 +1714,11 @@ where
                 signals.push_reply(reply);
             }
         }
-        self.release_ipc_buffer(thread_id);
+        if self.is_thread_held(thread_id) {
+            self.pending_ipc_releases.push(thread_id);
+        } else {
+            self.release_ipc_buffer(thread_id);
+        }
 
         if self
             .processes
@@ -1613,9 +1816,7 @@ where
             thread.set_state(ThreadState::Ready);
             thread.set_time_slice_left(self.time_slice_ticks);
 
-            if let Some(cpu) = self.cpu_by_id_mut(affinity) {
-                cpu.ready_queue_mut().push(entry.thread_id, priority);
-            }
+            self.enqueue_ready(entry.thread_id, priority, affinity);
         }
     }
 
@@ -1679,17 +1880,20 @@ where
             return ScheduleAction::None;
         };
         cpu.set_current(next_id);
+        // Взводится до выхода из-под лока: ниже из `prev` берётся указатель,
+        // который переживёт лок, и до конца переключения поток снимать нельзя.
+        cpu.set_previous(Some(prev_id));
 
         if let Some(next) = self.threads.get_mut(next_id) {
             next.set_state(ThreadState::Running);
             next.set_time_slice_left(self.time_slice_ticks);
         }
 
-        // Dying-поток не является current: удаление процессов с thread_count=0 безопасно.
-        self.cleanup_pending_process_removals(next_id);
-        self.reap_pending_threads(prev_id, next_id);
+        self.cleanup_pending_process_removals();
+        self.reap_pending_threads();
 
         if prev_id == next_id {
+            self.release_previous();
             self.schedule_next_deadline(now_ns);
             return ScheduleAction::None;
         }
@@ -1699,6 +1903,7 @@ where
         let address_space = self.address_space_change(from_proc, to_proc);
 
         let Some((prev, next)) = self.threads.split_pair_mut(prev_id, next_id) else {
+            self.release_previous();
             self.schedule_next_deadline(now_ns);
             return ScheduleAction::None;
         };
@@ -1741,7 +1946,9 @@ where
         }
     }
 
-    fn prepare_first_thread_start(&mut self) -> Option<(*const A, Option<AddressSpaceHandle>)> {
+    pub(super) fn prepare_first_thread_start(
+        &mut self,
+    ) -> Option<(*const A, Option<AddressSpaceHandle>)> {
         let now_ns = self.timer.now_ns();
         let cpu = self.current_cpu_mut()?;
         let idle_id = cpu.idle();
@@ -1805,24 +2012,26 @@ where
         Some(unsafe { &mut *(ptr.cast::<Cpu>()) })
     }
 
+    fn cpu_by_id(&self, id: CpuId) -> Option<&Cpu> {
+        self.cpus
+            .get(id.as_index())
+            .and_then(|slot| slot.as_deref())
+    }
+
     fn cpu_by_id_mut(&mut self, id: CpuId) -> Option<&mut Cpu> {
         self.cpus
             .get_mut(id.as_index())
             .and_then(|slot| slot.as_deref_mut())
     }
 
-    /// Снятые процессы уходят в `pending_process_drops`, а не роняются здесь.
-    /// Пропускает pid, совпадающий с процессом `next_id` (thread_count=0, но
-    /// AS ещё нужен новому current; safety-net против невозможного случая).
-    fn cleanup_pending_process_removals(&mut self, next_id: ThreadId) {
+    fn cleanup_pending_process_removals(&mut self) {
         if self.pending_process_removals.is_empty() {
             return;
         }
-        let active_process = self.threads.get(next_id).map(Thread::process);
         let mut idx = 0;
         while idx < self.pending_process_removals.len() {
             let pid = self.pending_process_removals[idx];
-            if Some(pid) == active_process {
+            if self.is_process_running(pid) {
                 idx += 1;
                 continue;
             }
@@ -1831,11 +2040,6 @@ where
                 self.pending_process_drops.push(removed);
             }
         }
-    }
-
-    /// Забирает снятые процессы для разрушения вне scheduler-лока.
-    fn take_pending_process_drops(&mut self) -> Vec<Process> {
-        core::mem::take(&mut self.pending_process_drops)
     }
 
     /// Длина таблицы CPU ограничена сверху: `CpuId` не выходит за `MAX_CPUS`.
@@ -1859,6 +2063,30 @@ pub(super) fn release_deferred_handles<A: ArchContext, T: TimerSource>(
     inner
         .with_lock(SchedulerInner::take_deferred_handles)
         .emit();
+    notify_pending_cpus(inner);
+}
+
+/// Будит CPU, которым под локом добавили работу.
+///
+/// Вне лока: отправка идёт через контроллер прерываний, а тот берёт свои
+/// локи - брать их из-под scheduler-лока значит задать двум локам порядок,
+/// обратный тому, в котором их берёт обработчик прерывания.
+pub(super) fn notify_pending_cpus<A: ArchContext, T: TimerSource>(
+    inner: &MutexCell<SchedulerInner<A, T>>,
+) {
+    let mut pending = inner.with_lock(SchedulerInner::take_pending_wakeups);
+
+    while pending != 0 {
+        let index = pending.trailing_zeros();
+        pending &= pending - 1;
+
+        // Бит выставлен по `CpuId`, поэтому обратное преобразование полное.
+        if let Ok(raw) = u16::try_from(index)
+            && let Some(target) = CpuId::new(raw)
+        {
+            <A::Cpu as ArchCpu>::send_reschedule(target);
+        }
+    }
 }
 
 /// Выполняет переключение и роняет снятые процессы уже вне scheduler-лока:
@@ -1867,6 +2095,10 @@ pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
     inner: &MutexCell<SchedulerInner<A, T>>,
     action: ScheduleAction<A>,
 ) {
+    // До переключения: биты собраны под локом, а вход в поток, стартующий
+    // впервые, не возвращается и хвост функции не исполняет.
+    notify_pending_cpus(inner);
+
     if let ScheduleAction::Switch {
         prev,
         next,
@@ -1878,13 +2110,14 @@ pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
         if let AddressSpaceTransition::Switch(handle) = address_space {
             A::switch_address_space(handle);
         }
-        // SAFETY: raw pointers подготовлены под scheduler-lock-ом и валидны до завершения switch.
+        // SAFETY: raw pointers подготовлены под scheduler-lock-ом, а поток, на
+        // который они смотрят, отмечен `previous` и до сюда не снимается.
         unsafe { A::switch(&mut *prev, &*next) };
     }
 
-    // Ушедший в exit поток сюда не возвращается, его процесс роняет тот поток,
-    // который следующим пройдёт через переключение.
-    let dropped = inner.with_lock(SchedulerInner::take_pending_process_drops);
+    // Ушедший в exit поток сюда не возвращается: отметку снимает и процесс
+    // роняет тот поток, который следующим пройдёт через переключение.
+    let dropped = inner.with_lock(SchedulerInner::finish_switch);
     drop(dropped);
 }
 

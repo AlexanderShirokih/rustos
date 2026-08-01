@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -11,7 +13,8 @@ use memory::{UserVmContext, virtual_address::VirtualAddress};
 use super::{
     arch::{ArchContext, ArchCpu, TimerSource, with_preemption_disabled},
     scheduler::{
-        ScheduleAction, SchedulerInner, perform_schedule_action, release_deferred_handles,
+        CpuBootstrapError, ScheduleAction, SchedulerInner, notify_pending_cpus,
+        perform_schedule_action, release_deferred_handles,
     },
 };
 use crate::{
@@ -64,6 +67,18 @@ where
     pub fn on_timer_tick(&self, now_ns: u64) {
         let action = self.inner.with_lock(|inner| inner.on_tick(now_ns));
         perform_schedule_action(&self.inner, action);
+    }
+
+    /// Перевыбор потока по требованию другого CPU: на этом CPU появилась
+    /// работа, пока он мог стоять в idle.
+    pub fn on_reschedule(&self) {
+        with_preemption_disabled::<A::Cpu, _>(|| {
+            let action = self.inner.with_lock(|inner| {
+                let now_ns = inner.now_ns();
+                inner.reschedule(now_ns)
+            });
+            perform_schedule_action(&self.inner, action);
+        });
     }
 
     pub fn current_user_vm(&self) -> Option<UserVmContext> {
@@ -123,9 +138,12 @@ where
         process: &Arc<ProcessObject>,
         entry: UserThreadEntry,
     ) -> Result<Arc<ThreadObject>, capability::SpawnError> {
-        self.inner
+        let result = self
+            .inner
             .with_lock(|inner| inner.create_user_thread(process, entry))
-            .map_err(Into::into)
+            .map_err(Into::into);
+        notify_pending_cpus(&self.inner);
+        result
     }
 
     pub fn terminate_thread(
@@ -174,6 +192,54 @@ where
     }
 }
 
+/// Передача CPU планировщику.
+///
+/// Контракт отделён от [`SchedulerService`]: тот описывает работу с потоками и
+/// доступен всем, а этот вызывается ровно один раз с загрузочного пути CPU.
+pub trait CpuEntry: Send + Sync {
+    /// Создаёт per-CPU состояние планировщика на текущем CPU: очередь готовых
+    /// и idle-поток. Отделён от [`Self::enter`] тем, что возвращается: пока
+    /// отказ ещё можно доложить, CPU не считается поднятым.
+    ///
+    /// Вызывается при замаскированных IRQ.
+    fn bootstrap(&self) -> Result<(), CpuBootstrapError>;
+
+    /// Отдаёт текущий CPU планировщику. Не возвращается: дальше CPU живёт под
+    /// его управлением, а в отсутствие работы стоит в своём idle-потоке.
+    ///
+    /// Вход в поток размаскирует IRQ: к этому моменту per-CPU состояние на
+    /// месте, и обработчику есть с чем работать.
+    fn enter(&self) -> !;
+}
+
+impl<A, T> CpuEntry for SchedulerHandle<A, T>
+where
+    A: ArchContext,
+    T: TimerSource,
+{
+    fn bootstrap(&self) -> Result<(), CpuBootstrapError> {
+        <A::Cpu as ArchCpu>::disable_preemption();
+        self.inner.with_lock(SchedulerInner::bootstrap_current_cpu)
+    }
+
+    fn enter(&self) -> ! {
+        <A::Cpu as ArchCpu>::disable_preemption();
+
+        let Some((next_ptr, address_space)) = self
+            .inner
+            .with_lock(SchedulerInner::prepare_first_thread_start)
+        else {
+            <A::Cpu as ArchCpu>::idle();
+        };
+
+        A::switch_address_space(address_space);
+        // SAFETY: как в `Scheduler::start` - указатель на контекст выбранного
+        // потока подготовлен под локом, IRQ замаскированы, и вход в поток
+        // происходит ровно один раз на этом CPU.
+        unsafe { A::start(&*next_ptr) }
+    }
+}
+
 pub trait UserProcessLauncher: Send + Sync {
     fn spawn_prepared_user_process(
         &self,
@@ -191,7 +257,9 @@ where
         cfg: SpawnConfig,
         entry: Box<dyn FnOnce() + Send + 'static>,
     ) -> Result<ThreadId, SpawnError> {
-        self.inner.with_lock(|inner| inner.spawn_boxed(cfg, entry))
+        let spawned = self.inner.with_lock(|inner| inner.spawn_boxed(cfg, entry));
+        notify_pending_cpus(&self.inner);
+        spawned
     }
 
     fn yield_now(&self) {
@@ -281,6 +349,7 @@ where
         };
         self.inner
             .with_lock(|inner| inner.unblock_thread(thread_id));
+        notify_pending_cpus(&self.inner);
     }
 
     fn set_blocked_cancel(&self, cancel: Arc<dyn capability::CancelTarget>) {

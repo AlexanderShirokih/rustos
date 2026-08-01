@@ -3,7 +3,7 @@
 use alloc::{boxed::Box, string::String};
 use core::fmt::{Display, Formatter};
 
-use io::mmio::Reg;
+use io::mmio::{Reg, VolatileInt};
 use memory::{
     mem_flags::{DeviceMemoryPermission, Owners},
     virtual_address::PageAlignedVirtualAddress,
@@ -70,30 +70,55 @@ impl MmioBound {
         self.mmio_address
     }
 
-    pub fn write<T>(&self, offset: usize, val: T) {
+    /// `true`, если регистр типа `T` по смещению `offset` доступен: лежит
+    /// целиком внутри области и выровнен под свой размер.
+    pub fn in_bounds<T>(&self, offset: usize) -> bool {
+        if !offset.is_multiple_of(align_of::<T>()) {
+            return false;
+        }
+        offset
+            .checked_add(size_of::<T>())
+            .is_some_and(|end| end <= self.mmio_address.size())
+    }
+
+    /// Доступ мимо области отбрасывается: `MmioBound` владеет ровно `size`
+    /// байтами от базы. Проверка молчалива - `MmioBound` несёт запись в
+    /// консоль, и диагностика отсюда замкнула бы её на себя; драйвер
+    /// проверяет доступность сам через [`MmioBound::in_bounds`].
+    pub fn write<T: VolatileInt>(&self, offset: usize, val: T) {
+        if !self.in_bounds::<T>(offset) {
+            return;
+        }
+
         // SAFETY: `MmioBound` владеет замапленным `[virtual_address; mmio_address.size]`-регионом
-        // (инвариант `MmioService::map_mmio`); caller передаёт `offset < size` и тип `T`
-        // соответствующий регистру, `write_volatile` корректен для MMIO.
+        // (инвариант `MmioService::map_mmio`); проверка выше оставила
+        // `offset + size_of::<T>()` внутри региона и выровненным,
+        // `write_volatile` корректен для MMIO.
         unsafe {
             let ptr: *mut T = self.virtual_address.as_ptr::<T>().byte_add(offset);
             ptr.write_volatile(val);
         }
     }
 
-    pub fn write_reg<T>(&self, reg: Reg<T>, val: T) {
+    pub fn write_reg<T: VolatileInt>(&self, reg: Reg<T>, val: T) {
         self.write(reg.offset, val);
     }
 
-    pub fn read<T>(&self, offset: usize) -> T {
+    /// Чтение мимо области возвращает ноль. О самой границе - [`MmioBound::write`].
+    pub fn read<T: VolatileInt>(&self, offset: usize) -> T {
+        if !self.in_bounds::<T>(offset) {
+            return T::default();
+        }
+
         // SAFETY: см. `write` - регион замаплен и принадлежит этому `MmioBound`,
-        // тип `T` соответствует регистру, `read_volatile` корректен для MMIO.
+        // проверка выше оставила регистр внутри региона, `read_volatile` корректен для MMIO.
         unsafe {
             let ptr = self.virtual_address.as_ptr::<T>().byte_add(offset);
             ptr.read_volatile()
         }
     }
 
-    pub fn read_reg<T>(&self, reg: Reg<T>) -> T {
+    pub fn read_reg<T: VolatileInt>(&self, reg: Reg<T>) -> T {
         self.read(reg.offset)
     }
 }
@@ -121,4 +146,40 @@ pub trait MmioService: Send + Sync {
         address: MmioAddress,
         permissions: Owners<DeviceMemoryPermission>,
     ) -> Result<MmioBound, MmioMapError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bound(size: usize) -> MmioBound {
+        MmioBound::new(
+            MmioAddress::new(0x1000, size).expect("non-zero base"),
+            PageAlignedVirtualAddress::from_usize(0x4000).expect("aligned"),
+            Box::new(|_, _| {}),
+        )
+    }
+
+    #[test]
+    fn register_at_the_last_aligned_offset_is_in_bounds() {
+        assert!(bound(8).in_bounds::<u32>(4));
+        assert!(bound(8).in_bounds::<u64>(0));
+    }
+
+    #[test]
+    fn register_crossing_the_upper_edge_is_out_of_bounds() {
+        assert!(!bound(8).in_bounds::<u32>(8));
+        assert!(!bound(6).in_bounds::<u32>(4));
+    }
+
+    #[test]
+    fn offset_overflowing_usize_is_out_of_bounds() {
+        assert!(!bound(8).in_bounds::<u32>(usize::MAX - 1));
+    }
+
+    #[test]
+    fn misaligned_offset_is_out_of_bounds() {
+        assert!(!bound(64).in_bounds::<u32>(2));
+        assert!(!bound(64).in_bounds::<u64>(4));
+    }
 }

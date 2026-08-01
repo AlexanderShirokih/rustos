@@ -70,10 +70,11 @@ impl Transport for RingTransport {
 
         match self.role {
             Role::Producer => match self.ring.try_push(bytes) {
-                Ok(PushOutcome { was_empty }) => {
-                    // Будим consumer'а только на переходе empty->non-empty: под
-                    // нагрузкой кольцо непусто и syscall'ов нет.
-                    if was_empty {
+                Ok(PushOutcome { wake_consumer }) => {
+                    // Будим consumer'а только когда на момент публикации других
+                    // кадров не осталось: под нагрузкой кольцо непусто и
+                    // syscall'ов нет.
+                    if wake_consumer {
                         signal_set(self.data, SIGNALED, 0, WakeCount::One);
                     }
                     Ok(())
@@ -113,7 +114,7 @@ impl Transport for RingTransport {
                 if signal_set(self.data, 0, SIGNALED, WakeCount::None) < 0 {
                     return Err(IpcError::PeerClosed);
                 }
-                if !self.ring.is_empty() {
+                if !self.ring.is_empty_before_park() {
                     return Ok(());
                 }
                 let r = signal_wait_one(self.data, SIGNALED, timeout_ns);

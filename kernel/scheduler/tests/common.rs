@@ -24,8 +24,8 @@ use memory::{
     virtual_address::PageAlignedVirtualAddress,
 };
 use scheduler::{
-    ArchContext, ArchCpu, CpuId, Priority, ProcessId, StackError, Thread, ThreadId, ThreadStack,
-    ThreadStackAllocator, TimerSource,
+    ArchContext, ArchCpu, CpuId, CpuLocalError, Priority, ProcessId, StackError, Thread, ThreadId,
+    ThreadStack, ThreadStackAllocator, TimerSource,
 };
 
 const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
@@ -33,7 +33,9 @@ const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 thread_local! {
     static SWITCH_COUNT: Cell<usize> = const { Cell::new(0) };
     static PREEMPTION_ENABLED: Cell<bool> = const { Cell::new(true) };
-    static CPU_LOCAL_PTR: Cell<usize> = const { Cell::new(0) };
+    static CURRENT_CPU: Cell<usize> = const { Cell::new(0) };
+    static CPU_LOCAL_PTRS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static RESCHEDULES: RefCell<Vec<CpuId>> = const { RefCell::new(Vec::new()) };
     static ADDRESS_SPACE_SWITCHES: RefCell<Vec<Option<AddressSpaceHandle>>> =
         const { RefCell::new(Vec::new()) };
 }
@@ -120,15 +122,28 @@ impl ArchContext for MockContext {
 
 impl ArchCpu for MockCpu {
     fn current_id() -> CpuId {
-        CpuId::ZERO
+        CpuId::new(CURRENT_CPU.with(Cell::get) as u16).unwrap_or(CpuId::ZERO)
     }
 
-    unsafe fn install_cpu_local(cpu: *mut ()) {
-        CPU_LOCAL_PTR.with(|c| c.set(cpu as usize));
+    unsafe fn install_cpu_local(cpu: *mut ()) -> Result<(), CpuLocalError> {
+        let index = CURRENT_CPU.with(Cell::get);
+        CPU_LOCAL_PTRS.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            if slots.len() <= index {
+                slots.resize(index + 1, 0);
+            }
+            slots[index] = cpu as usize;
+        });
+        Ok(())
     }
 
     fn cpu_local_ptr() -> *mut () {
-        CPU_LOCAL_PTR.with(Cell::get) as *mut ()
+        let index = CURRENT_CPU.with(Cell::get);
+        CPU_LOCAL_PTRS.with(|slots| slots.borrow().get(index).copied().unwrap_or(0)) as *mut ()
+    }
+
+    fn send_reschedule(target: CpuId) {
+        RESCHEDULES.with(|c| c.borrow_mut().push(target));
     }
 
     fn idle() -> ! {
@@ -162,8 +177,21 @@ impl ThreadStackAllocator for MockStack {
 pub fn reset_switches() {
     SWITCH_COUNT.with(|c| c.set(0));
     PREEMPTION_ENABLED.with(|c| c.set(true));
-    CPU_LOCAL_PTR.with(|c| c.set(0));
+    CURRENT_CPU.with(|c| c.set(0));
+    CPU_LOCAL_PTRS.with(|c| c.borrow_mut().clear());
+    RESCHEDULES.with(|c| c.borrow_mut().clear());
     ADDRESS_SPACE_SWITCHES.with(|c| c.borrow_mut().clear());
+}
+
+/// Переводит host-тест на другой смоделированный CPU: меняются и
+/// [`ArchCpu::current_id`], и CPU-local указатель.
+pub fn set_current_cpu(id: CpuId) {
+    CURRENT_CPU.with(|c| c.set(id.as_index()));
+}
+
+/// Извлекает накопленные цели `send_reschedule` и очищает буфер.
+pub fn take_reschedules() -> Vec<CpuId> {
+    RESCHEDULES.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 /// Извлекает накопленную последовательность вызовов

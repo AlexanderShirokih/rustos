@@ -6,13 +6,13 @@ use alloc::{
     sync::Arc,
 };
 
+use collections::{LockCell, MutexCell};
 use drivers_common::{
     BootServices, DeviceMemoryPermission, Driver, DriverFactory, DriverRunError, Owners,
     probe::{ProbeError, ProbeResult},
     services::mmio::{MmioAddress, MmioService},
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatible};
-use spin::Mutex;
 
 use super::{controller::Gicv2Controller, service::GicInterruptsService};
 use crate::register_driver;
@@ -63,12 +63,14 @@ impl Driver for Gicv2 {
             .require_mmio()
             .map_err(DriverRunError::from_boot_services_error)?;
 
-        let controller = Arc::new(Mutex::new(
+        let controller = Arc::new(MutexCell::new(
             self.create_controller(mmio.as_ref())
                 .map_err(DriverRunError::Fatal)?,
         ));
 
-        controller.lock().init();
+        controller
+            .with_lock(Gicv2Controller::init)
+            .map_err(|e| DriverRunError::Fatal(alloc::format!("GICv2 init failed: {e}")))?;
 
         let handle = GicInterruptsService::new(controller);
 

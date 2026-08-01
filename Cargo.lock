@@ -211,6 +211,7 @@ dependencies = [
 name = "drivers-aarch64"
 version = "0.1.0"
 dependencies = [
+ "collections",
  "drivers-common",
  "drivers-common-aarch64",
  "io",
