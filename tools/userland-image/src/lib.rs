@@ -6,6 +6,6 @@ mod host;
 mod seeds;
 
 #[cfg(not(target_os = "none"))]
-pub use host::{BuildEnvironment, build_userland};
+pub use host::{BuildEnvironment, ExtraFile, build_userland};
 #[cfg(not(target_os = "none"))]
 pub use seeds::{ImageSeed, userland_image_seeds};

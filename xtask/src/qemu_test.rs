@@ -97,6 +97,7 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
         &manifest_path,
         &ctx.build_dir,
         environment,
+        &[],
     )?;
     build_binary(&ctx)?;
 

@@ -9,8 +9,8 @@
 | AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --target aarch64-unknown-none` |
 | Форматирование                      | `cargo fmt --all --check`                                                                                            |
 | Проверка слоёв                      | `cargo xtask check-layers`                                                                                           |
-| Сборка userland                     | `cargo xtask build-userland [--image <путь>]`                                                                        |
-| Загрузочный образ (userland + ядро) | `cargo xtask build devices/spec/<device>.yaml [--image <путь>]`                                                      |
+| Сборка userland                     | `cargo xtask build-userland [--image <путь>] [--file <путь>=<источник>]`                                             |
+| Загрузочный образ (userland + ядро) | `cargo xtask build devices/spec/<device>.yaml [--image <путь>] [--file <путь>=<источник>]`                           |
 | Загрузочный образ для QEMU          | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                   |
 | Запуск после сборки                 | `cargo xtask build devices/spec/<device>.yaml --run`                                                                 |
 | QEMU integration tests              | `cargo xtask qemu-test [--timeout <сек>]`                                                                            |
@@ -21,7 +21,7 @@
 ## Сборка
 
 ```
-cargo xtask build <spec> [--run] [--debug] [--features <features>] [--image <путь>]
+cargo xtask build <spec> [--run] [--debug] [--features <features>] [--image <путь>] [--file <путь>=<источник>]
 ```
 
 Читает YAML-спеку устройства, собирает `target/build/userland.img`, затем собирает `hal-aarch64` под
@@ -35,6 +35,7 @@ cargo xtask build <spec> [--run] [--debug] [--features <features>] [--image <п�
 | `--debug`             | После сборки выполнить команды из секции `debug` YAML-спеки                                    |
 | `--features <список>` | Дополнительные features (через запятую)                                                        |
 | `--image <путь>`      | Относительный путь к TOML-манифесту userland-образа. По умолчанию `user/rootkeeper/image.toml` |
+| `--file <путь>=<источник>` | Файлы образа поверх манифеста: путь записи и источник относительно корня проекта, подстановки включая. Повторяется по числу источников |
 
 ```bash
 cargo xtask build devices/spec/xiaomi-lavender.yaml --image user/calculator-demo/image.toml
@@ -53,15 +54,21 @@ cargo xtask build devices/spec/xiaomi-lavender.yaml --image user/calculator-demo
 ## Userland
 
 ```
-cargo xtask build-userland [--image <путь>]
+cargo xtask build-userland [--image <путь>] [--file <путь>=<источник>]
 ```
 
 Собирает только `target/build/userland.img`. Флаг `--image` задаёт относительный путь к
 TOML-манифесту композиции. По умолчанию — `user/rootkeeper/image.toml`.
 
+Флаг `--file` добавляет в образ файл поверх манифеста: слева путь записи, справа источник
+относительно корня проекта. Источник принимает подстановки (`assets/**/*.txt`), и тогда путь
+записи служит префиксом отобранным файлам. Флаг повторяется по числу файлов. Состав
+манифеста описан в [userland.md](userland.md#образ).
+
 ```bash
 cargo xtask build-userland
 cargo xtask build-userland --image user/testrunner/image.toml
+cargo xtask build-userland --file /etc/motd=user/rootkeeper/motd.txt
 ```
 
 ## Тесты

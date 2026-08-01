@@ -30,6 +30,19 @@ pub fn userland_image_seeds() -> Result<Vec<ImageSeed>> {
                 data: b"",
             }])?,
         },
+        ImageSeed {
+            name: "shared_window",
+            bytes: image(&[
+                ImageRecord {
+                    path: "/data/first",
+                    data: b"same",
+                },
+                ImageRecord {
+                    path: "/data/second",
+                    data: b"same",
+                },
+            ])?,
+        },
     ])
 }
 

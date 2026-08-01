@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 
 use userland::{
     EntryView, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE, UserlandValidationError,
@@ -17,6 +17,14 @@ pub struct ImageRecord<'a> {
     pub data: &'a [u8],
 }
 
+// Ноль в `alias_of` означает собственное окно, ненулевое значение - номер
+// записи, чьё окно повторено, плюс один.
+struct DataWindow {
+    offset: u64,
+    size: u64,
+    alias_of: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageEncodeError {
     NoRecords,
@@ -30,7 +38,8 @@ pub enum ImageEncodeError {
 }
 
 /// Собирает образ: заголовок, таблица записей в порядке пути, байты путей и
-/// данные, выровненные на [`USERLAND_PAGE_SIZE`]. `boot_path` задаёт boot-запись.
+/// данные, выровненные на [`USERLAND_PAGE_SIZE`]. Записи с одинаковым
+/// содержимым делят одно окно данных. `boot_path` задаёт boot-запись.
 pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, ImageEncodeError> {
     if records.is_empty() {
         return Err(ImageEncodeError::NoRecords);
@@ -69,15 +78,34 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
     }
 
     let mut data_cursor = path_cursor;
-    let mut data_layout = Vec::with_capacity(sorted.len());
-    for record in &sorted {
-        let data_offset = align_up_to_page(data_cursor).ok_or(ImageEncodeError::SizeOverflow)?;
+    let mut data_layout: Vec<DataWindow> = Vec::with_capacity(sorted.len());
+    // Одинаковое содержимое кладётся в образ один раз: повторившая его запись
+    // ссылается на запись, открывшую окно.
+    let mut windows: BTreeMap<&[u8], u16> = BTreeMap::new();
+    let mut placed: Vec<(u64, &[u8])> = Vec::new();
+    for (index, record) in sorted.iter().enumerate() {
         let data_size =
             u64::try_from(record.data.len()).map_err(|_| ImageEncodeError::SizeOverflow)?;
+        if let Some(&owner) = windows.get(record.data) {
+            data_layout.push(DataWindow {
+                offset: data_layout[usize::from(owner)].offset,
+                size: data_size,
+                alias_of: owner + 1,
+            });
+            continue;
+        }
+        let data_offset = align_up_to_page(data_cursor).ok_or(ImageEncodeError::SizeOverflow)?;
         data_cursor = data_offset
             .checked_add(data_size)
             .ok_or(ImageEncodeError::SizeOverflow)?;
-        data_layout.push((data_offset, data_size));
+        let index = u16::try_from(index).map_err(|_| ImageEncodeError::TooManyRecords)?;
+        windows.insert(record.data, index);
+        placed.push((data_offset, record.data));
+        data_layout.push(DataWindow {
+            offset: data_offset,
+            size: data_size,
+            alias_of: 0,
+        });
     }
     let total_size = usize::try_from(data_cursor).map_err(|_| ImageEncodeError::SizeOverflow)?;
 
@@ -89,20 +117,20 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
     image.extend_from_slice(&0u16.to_le_bytes());
     image.extend_from_slice(&data_cursor.to_le_bytes());
 
-    for (&(path_offset, path_len), &(data_offset, data_size)) in table.iter().zip(&data_layout) {
+    for (&(path_offset, path_len), window) in table.iter().zip(&data_layout) {
         image.extend_from_slice(&path_offset.to_le_bytes());
         image.extend_from_slice(&path_len.to_le_bytes());
-        image.extend_from_slice(&0u16.to_le_bytes());
-        image.extend_from_slice(&data_offset.to_le_bytes());
-        image.extend_from_slice(&data_size.to_le_bytes());
+        image.extend_from_slice(&window.alias_of.to_le_bytes());
+        image.extend_from_slice(&window.offset.to_le_bytes());
+        image.extend_from_slice(&window.size.to_le_bytes());
     }
 
     image.extend_from_slice(&paths);
-    for (record, &(data_offset, _)) in sorted.iter().zip(&data_layout) {
+    for (data_offset, data) in placed {
         let data_offset =
             usize::try_from(data_offset).map_err(|_| ImageEncodeError::SizeOverflow)?;
         image.resize(data_offset, 0);
-        image.extend_from_slice(record.data);
+        image.extend_from_slice(data);
     }
     Ok(image)
 }

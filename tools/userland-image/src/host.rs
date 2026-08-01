@@ -5,6 +5,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    str::FromStr,
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -19,6 +20,8 @@ use userland_image::{ImageRecord, USERLAND_IMAGE_VERSION, decode, encode, encode
 const USERLAND_MANIFEST_VERSION: u16 = USERLAND_IMAGE_VERSION;
 const USERLAND_STACK_ALIGN: u64 = USERLAND_PAGE_SIZE;
 
+const WILDCARDS: [char; 2] = ['*', '?'];
+
 // Путь записи образа - путь контракта: граница длины у них общая.
 const _: () = assert!(PATH_MAX == USERLAND_ENTRY_PATH_CAPACITY);
 
@@ -27,6 +30,14 @@ const _: () = assert!(PATH_MAX == USERLAND_ENTRY_PATH_CAPACITY);
 pub struct BuildEnvironment<'a> {
     pub name: &'a str,
     pub value: &'a str,
+}
+
+/// Файл, добавляемый в образ поверх манифеста: путь записи и источник на диске
+/// относительно корня проекта. Разбирается из аргумента вида `path=source`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtraFile {
+    pub path: String,
+    pub source: PathBuf,
 }
 
 // Композиция образа: версия, программы и файлы, попадающие в таблицу записей.
@@ -51,7 +62,8 @@ struct ImageProgram {
     stack_size: Option<u64>,
 }
 
-// Файл: путь в образе и файл на диске, откуда берутся байты.
+// Файл: путь в образе и источник на диске. Источник без шаблона даёт одну
+// запись, источник с шаблоном - дерево под путём записи.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImageFile {
@@ -110,28 +122,91 @@ struct BuiltSegment {
     permissions: SegmentPermissions,
 }
 
-// Файл образа с прочитанным содержимым.
 #[derive(Clone, Debug)]
 struct LoadedFile {
     path: String,
+    source: PathBuf,
     bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct DirectoryFile {
+    relative: String,
+    source: PathBuf,
+}
+
+// Источник с подстановкой: корень обхода на диске и шаблон отбора его файлов.
+struct SourcePattern<'a> {
+    root: &'a str,
+    glob: &'a str,
+}
+
+// Повтор пути с тем же содержимым сливается в одну запись, с другим -
+// отвергается.
+#[derive(Debug, Default)]
+struct FileSet {
+    files: Vec<LoadedFile>,
+    positions: HashMap<String, usize>,
+}
+
+impl FromStr for ExtraFile {
+    type Err = anyhow::Error;
+
+    fn from_str(argument: &str) -> Result<Self> {
+        let (path, source) = argument
+            .split_once('=')
+            .ok_or_else(|| anyhow!("image file '{argument}' must be given as 'path=source'"))?;
+        ensure!(
+            !path.is_empty() && !source.is_empty(),
+            "image file '{argument}' must set both a non-empty path and a non-empty source"
+        );
+        Ok(Self {
+            path: path.to_string(),
+            source: PathBuf::from(source),
+        })
+    }
+}
+
+impl FileSet {
+    fn insert(&mut self, file: LoadedFile) -> Result<()> {
+        if let Some(&position) = self.positions.get(&file.path) {
+            let present = &self.files[position];
+            ensure!(
+                present.bytes == file.bytes,
+                "image path '{}' is filled by '{}' and '{}' with different content",
+                file.path,
+                present.source.display(),
+                file.source.display()
+            );
+            return Ok(());
+        }
+        self.positions.insert(file.path.clone(), self.files.len());
+        self.files.push(file);
+        Ok(())
+    }
+
+    fn into_files(self) -> Vec<LoadedFile> {
+        self.files
+    }
 }
 
 fn default_manifest_version() -> u16 {
     USERLAND_MANIFEST_VERSION
 }
 
-/// Собирает userland-образ, передавая `environment` каждому cargo-процессу сборки.
+/// Собирает userland-образ, передавая `environment` каждому cargo-процессу
+/// сборки. `extra_files` добавляются в образ поверх файлов манифеста.
 pub fn build_userland(
     project_root: &Path,
     manifest_path: &Path,
     build_dir: &Path,
     environment: &[BuildEnvironment<'_>],
+    extra_files: &[ExtraFile],
 ) -> Result<PathBuf> {
     let manifest = load_manifest(manifest_path)?;
     let workspace = load_workspace_metadata(project_root)?;
     let programs = resolve_programs(&manifest, &workspace.packages)?;
-    let files = load_files(project_root, &manifest.files)?;
+    let files = collect_files(project_root, &manifest, extra_files)?;
     let built_entries = programs
         .iter()
         .map(|program| {
@@ -177,25 +252,160 @@ fn parse_manifest(src: &str) -> Result<ImageManifest> {
     Ok(manifest)
 }
 
-fn load_files(project_root: &Path, files: &[ImageFile]) -> Result<Vec<LoadedFile>> {
-    files
-        .iter()
-        .map(|file| {
-            validate_image_path(&file.path)?;
-            let source = project_root.join(&file.source);
-            let bytes = fs::read(&source).with_context(|| {
-                format!(
-                    "Failed to read source of image file '{}' from '{}'",
-                    file.path,
-                    source.display()
-                )
-            })?;
-            Ok(LoadedFile {
-                path: file.path.clone(),
-                bytes,
-            })
-        })
+// Файлы образа собираются в одном порядке: файлы манифеста, затем файлы
+// командной строки.
+fn collect_files(
+    project_root: &Path,
+    manifest: &ImageManifest,
+    extra_files: &[ExtraFile],
+) -> Result<Vec<LoadedFile>> {
+    let mut files = FileSet::default();
+    for file in &manifest.files {
+        for loaded in load_source(&file.path, project_root, &file.source)? {
+            files.insert(loaded)?;
+        }
+    }
+    for file in extra_files {
+        for loaded in load_source(&file.path, project_root, &file.source)? {
+            files.insert(loaded)?;
+        }
+    }
+    Ok(files.into_files())
+}
+
+// Источник без шаблона даёт запись по пути `path`, источник с шаблоном - дерево
+// под ним, где путь записи наращивается путём файла от корня обхода.
+fn load_source(path: &str, project_root: &Path, source: &Path) -> Result<Vec<LoadedFile>> {
+    validate_image_path(path)?;
+    let text = source
+        .to_str()
+        .ok_or_else(|| anyhow!("image source '{}' is not UTF-8", source.display()))?;
+    let Some(pattern) = split_pattern(text) else {
+        let source = project_root.join(source);
+        ensure!(
+            !source.is_dir(),
+            "image source '{}' of path '{path}' is a directory; \
+             its files are selected by a pattern such as '{text}/**'",
+            source.display()
+        );
+        return Ok(vec![load_file(path, source)?]);
+    };
+
+    // Корень образа префикса не даёт, остальные пути дают себя целиком.
+    let prefix = path.trim_end_matches('/');
+    let mut found = Vec::new();
+    collect_directory_files(&project_root.join(pattern.root), "", &mut found)?;
+    found
+        .into_iter()
+        .filter(|file| glob_matches(pattern.glob, &file.relative))
+        .map(|file| load_file(&format!("{prefix}/{}", file.relative), file.source))
         .collect()
+}
+
+// Источник делится по первому компоненту с подстановкой: перед ним корень
+// обхода, с него начинается шаблон.
+fn split_pattern(source: &str) -> Option<SourcePattern<'_>> {
+    let mut cursor = 0;
+    for component in source.split('/') {
+        if component.contains(WILDCARDS) {
+            return Some(SourcePattern {
+                root: source[..cursor].trim_end_matches('/'),
+                glob: &source[cursor..],
+            });
+        }
+        cursor += component.len() + 1;
+    }
+    None
+}
+
+fn load_file(path: &str, source: PathBuf) -> Result<LoadedFile> {
+    validate_image_path(path)?;
+    let bytes = fs::read(&source).with_context(|| {
+        format!(
+            "Failed to read source of image file '{}' from '{}'",
+            path,
+            source.display()
+        )
+    })?;
+    Ok(LoadedFile {
+        path: path.to_string(),
+        source,
+        bytes,
+    })
+}
+
+// Записи каталога обходятся в порядке имени: состав образа не зависит от порядка
+// выдачи файловой системы.
+fn collect_directory_files(
+    directory: &Path,
+    prefix: &str,
+    found: &mut Vec<DirectoryFile>,
+) -> Result<()> {
+    let read_dir = fs::read_dir(directory)
+        .with_context(|| format!("Failed to read image directory '{}'", directory.display()))?;
+    let mut entries = read_dir
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("Failed to read image directory '{}'", directory.display()))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    for entry in entries {
+        let source = entry.path();
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow!("image directory entry '{}' is not UTF-8", source.display()))?;
+        let relative = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let file_type = entry.file_type().with_context(|| {
+            format!("Failed to read type of image entry '{}'", source.display())
+        })?;
+
+        if file_type.is_dir() {
+            collect_directory_files(&source, &relative, found)?;
+        } else if file_type.is_file() {
+            found.push(DirectoryFile { relative, source });
+        } else {
+            bail!(
+                "image directory entry '{}' is neither a file nor a directory",
+                source.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+// `?` - один символ, `*` - их последовательность внутри компонента, `**` -
+// вместе с разделителями, ведущий `**/` - и путь без каталогов.
+fn glob_matches(glob: &str, path: &str) -> bool {
+    matches_bytes(glob.as_bytes(), path.as_bytes())
+}
+
+fn matches_bytes(glob: &[u8], path: &[u8]) -> bool {
+    match glob.first() {
+        None => path.is_empty(),
+        Some(b'*') if glob.get(1) == Some(&b'*') => {
+            let tail = &glob[2..];
+            if tail.first() == Some(&b'/') && matches_bytes(&tail[1..], path) {
+                return true;
+            }
+            (0..=path.len()).any(|split| matches_bytes(tail, &path[split..]))
+        }
+        Some(b'*') => {
+            let component = path
+                .iter()
+                .position(|byte| *byte == b'/')
+                .unwrap_or(path.len());
+            (0..=component).any(|split| matches_bytes(&glob[1..], &path[split..]))
+        }
+        Some(b'?') => {
+            matches!(path.first(), Some(byte) if *byte != b'/')
+                && matches_bytes(&glob[1..], &path[1..])
+        }
+        Some(expected) => path.first() == Some(expected) && matches_bytes(&glob[1..], &path[1..]),
+    }
 }
 
 fn load_workspace_metadata(project_root: &Path) -> Result<WorkspaceMetadata> {
@@ -697,9 +907,40 @@ mod tests {
         }
     }
 
+    fn image_file(path: &str, source: &str) -> ImageFile {
+        ImageFile {
+            path: path.to_string(),
+            source: PathBuf::from(source),
+        }
+    }
+
+    fn manifest_with_file(path: &str, source: &str) -> ImageManifest {
+        let mut manifest = manifest_of(&[("rootkeeper", BOOT_PATH, true)]);
+        manifest.files.push(image_file(path, source));
+        manifest
+    }
+
+    // Дерево на диске под тест: прежнее содержимое каталога снимается перед раскладкой.
+    fn source_tree(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("userland-image-{name}"));
+        drop(fs::remove_dir_all(&root));
+        for (path, bytes) in files {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().expect("source path has a parent"))
+                .expect("create source directories");
+            fs::write(path, bytes).expect("write source file");
+        }
+        root
+    }
+
+    fn collected_paths(files: &[LoadedFile]) -> Vec<&str> {
+        files.iter().map(|file| file.path.as_str()).collect()
+    }
+
     fn loaded_file(path: &str, bytes: &[u8]) -> LoadedFile {
         LoadedFile {
             path: path.to_string(),
+            source: PathBuf::from("source"),
             bytes: bytes.to_vec(),
         }
     }
@@ -734,6 +975,29 @@ mod tests {
         assert_eq!(
             manifest.files[0].source,
             PathBuf::from("user/rootkeeper/sample.txt")
+        );
+    }
+
+    #[test]
+    fn manifest_parses_a_source_pattern() {
+        let manifest = parse_manifest(
+            "version = 1\n\
+             \n\
+             [[programs]]\n\
+             package = \"rootkeeper\"\n\
+             path = \"/boot/rootkeeper\"\n\
+             boot = true\n\
+             \n\
+             [[files]]\n\
+             path = \"/data/assets\"\n\
+             source = \"user/rootkeeper/assets/**/*.txt\"\n",
+        )
+        .expect("composition manifest must parse");
+
+        assert_eq!(manifest.files[0].path, "/data/assets");
+        assert_eq!(
+            manifest.files[0].source,
+            PathBuf::from("user/rootkeeper/assets/**/*.txt")
         );
     }
 
@@ -1162,6 +1426,199 @@ mod tests {
         assert_eq!(
             image.entry("/data/sample").expect("file record").data(),
             b"hello"
+        );
+    }
+
+    #[test]
+    fn star_stops_at_the_separator() {
+        assert!(glob_matches("*.txt", "notes.txt"));
+        assert!(!glob_matches("*.txt", "nested/notes.txt"));
+        assert!(glob_matches("nested/*.txt", "nested/notes.txt"));
+    }
+
+    #[test]
+    fn double_star_crosses_directories() {
+        assert!(glob_matches("**", "nested/deeper/notes.txt"));
+        assert!(glob_matches("**/*.txt", "nested/deeper/notes.txt"));
+        // Ведущий `**/` принимает и путь без каталогов.
+        assert!(glob_matches("**/*.txt", "notes.txt"));
+        assert!(!glob_matches("**/*.txt", "notes.md"));
+    }
+
+    #[test]
+    fn question_matches_one_character_inside_a_component() {
+        assert!(glob_matches("seed-?.bin", "seed-3.bin"));
+        assert!(!glob_matches("seed-?.bin", "seed-42.bin"));
+        assert!(!glob_matches("seed?bin", "seed/bin"));
+    }
+
+    #[test]
+    fn directory_files_are_collected_recursively_in_name_order() {
+        let root = source_tree(
+            "recursive",
+            &[
+                ("assets/b.txt", b"b"),
+                ("assets/a.txt", b"a"),
+                ("assets/nested/c.txt", b"c"),
+            ],
+        );
+        let manifest = manifest_with_file("/data", "assets/**");
+
+        let files = collect_files(&root, &manifest, &[]).expect("collect must succeed");
+        assert_eq!(
+            collected_paths(&files),
+            ["/data/a.txt", "/data/b.txt", "/data/nested/c.txt"]
+        );
+        assert_eq!(files[2].bytes, b"c");
+    }
+
+    #[test]
+    fn directory_glob_selects_the_files_that_enter_the_image() {
+        let root = source_tree(
+            "glob",
+            &[
+                ("assets/notes.md", b"md"),
+                ("assets/sample.txt", b"txt"),
+                ("assets/nested/deeper.txt", b"deeper"),
+            ],
+        );
+        let manifest = manifest_with_file("/data", "assets/**/*.txt");
+
+        let files = collect_files(&root, &manifest, &[]).expect("collect must succeed");
+        assert_eq!(
+            collected_paths(&files),
+            ["/data/nested/deeper.txt", "/data/sample.txt"]
+        );
+    }
+
+    #[test]
+    fn a_star_selects_the_files_of_one_directory() {
+        let root = source_tree(
+            "flat",
+            &[
+                ("assets/sample.txt", b"txt"),
+                ("assets/nested/deeper.txt", b"deeper"),
+            ],
+        );
+        let manifest = manifest_with_file("/data", "assets/*");
+
+        let files = collect_files(&root, &manifest, &[]).expect("collect must succeed");
+        assert_eq!(collected_paths(&files), ["/data/sample.txt"]);
+    }
+
+    #[test]
+    fn a_directory_source_without_a_pattern_is_rejected() {
+        let root = source_tree("bare-directory", &[("assets/sample.txt", b"txt")]);
+        let manifest = manifest_with_file("/data/assets", "assets");
+
+        let err = collect_files(&root, &manifest, &[])
+            .expect_err("directory without a pattern must fail");
+        assert!(err.to_string().ends_with(
+            "of path '/data/assets' is a directory; \
+             its files are selected by a pattern such as 'assets/**'"
+        ));
+    }
+
+    #[test]
+    fn a_source_splits_at_its_first_wildcard() {
+        let pattern =
+            split_pattern("user/rootkeeper/assets/**/*.txt").expect("source has a pattern");
+        assert_eq!(pattern.root, "user/rootkeeper/assets");
+        assert_eq!(pattern.glob, "**/*.txt");
+
+        let pattern = split_pattern("assets/*").expect("source has a pattern");
+        assert_eq!(pattern.root, "assets");
+        assert_eq!(pattern.glob, "*");
+
+        assert!(split_pattern("user/rootkeeper/sample.txt").is_none());
+    }
+
+    #[test]
+    fn directory_under_the_image_root_keeps_the_relative_path() {
+        let root = source_tree("root-prefix", &[("assets/boot/sample", b"hi")]);
+        let manifest = manifest_with_file("/", "assets/**");
+
+        let files = collect_files(&root, &manifest, &[]).expect("collect must succeed");
+        assert_eq!(collected_paths(&files), ["/boot/sample"]);
+    }
+
+    #[test]
+    fn command_line_files_join_the_files_of_the_manifest() {
+        let root = source_tree(
+            "command-line",
+            &[("assets/sample.txt", b"txt"), ("motd", b"welcome")],
+        );
+        let extra = [ExtraFile {
+            path: "/etc/motd".to_string(),
+            source: PathBuf::from("motd"),
+        }];
+        let manifest = manifest_with_file("/data", "assets/**");
+
+        let files = collect_files(&root, &manifest, &extra).expect("collect must succeed");
+        assert_eq!(collected_paths(&files), ["/data/sample.txt", "/etc/motd"]);
+        assert_eq!(files[1].bytes, b"welcome");
+    }
+
+    #[test]
+    fn one_path_filled_with_equal_content_gives_one_record() {
+        let root = source_tree("dedup", &[("assets/sample.txt", b"same")]);
+        let mut manifest = manifest_with_file("/data", "assets/**");
+        manifest
+            .files
+            .push(image_file("/data/sample.txt", "assets/sample.txt"));
+        let extra = [ExtraFile {
+            path: "/data/sample.txt".to_string(),
+            source: PathBuf::from("assets/sample.txt"),
+        }];
+
+        let files = collect_files(&root, &manifest, &extra).expect("collect must succeed");
+        assert_eq!(collected_paths(&files), ["/data/sample.txt"]);
+    }
+
+    #[test]
+    fn one_path_filled_with_different_content_is_rejected() {
+        let root = source_tree(
+            "conflict",
+            &[("assets/sample.txt", b"tree"), ("other.txt", b"other")],
+        );
+        let mut manifest = manifest_with_file("/data", "assets/**");
+        manifest
+            .files
+            .push(image_file("/data/sample.txt", "other.txt"));
+
+        let err = collect_files(&root, &manifest, &[]).expect_err("conflicting content must fail");
+        assert!(
+            err.to_string()
+                .starts_with("image path '/data/sample.txt' is filled by")
+        );
+        assert!(err.to_string().ends_with("with different content"));
+    }
+
+    #[test]
+    fn command_line_file_parses_path_and_source() {
+        let file: ExtraFile = "/etc/motd=user/rootkeeper/motd.txt"
+            .parse()
+            .expect("argument must parse");
+        assert_eq!(file.path, "/etc/motd");
+        assert_eq!(file.source, PathBuf::from("user/rootkeeper/motd.txt"));
+    }
+
+    #[test]
+    fn command_line_file_without_a_source_is_rejected() {
+        let err = "/etc/motd"
+            .parse::<ExtraFile>()
+            .expect_err("argument without a source must fail");
+        assert_eq!(
+            err.to_string(),
+            "image file '/etc/motd' must be given as 'path=source'"
+        );
+
+        let err = "/etc/motd="
+            .parse::<ExtraFile>()
+            .expect_err("empty source must fail");
+        assert_eq!(
+            err.to_string(),
+            "image file '/etc/motd=' must set both a non-empty path and a non-empty source"
         );
     }
 }

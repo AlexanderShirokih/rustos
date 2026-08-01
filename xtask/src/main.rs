@@ -15,7 +15,7 @@ use std::{
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use userland_image_tool::build_userland;
+use userland_image_tool::{ExtraFile, build_userland};
 
 use crate::{
     artifacts::{build_android, build_binary},
@@ -48,6 +48,9 @@ enum Commands {
         /// Relative path to the userland image manifest
         #[arg(long, default_value = "user/rootkeeper/image.toml")]
         image: PathBuf,
+        /// Extra image file as 'path=source'; repeat for several files
+        #[arg(long = "file", value_name = "PATH=SOURCE")]
+        files: Vec<ExtraFile>,
     },
     /// Run the QEMU integration tests
     QemuTest {
@@ -85,6 +88,9 @@ enum Commands {
         /// Relative path to the image manifest
         #[arg(long, default_value = "user/rootkeeper/image.toml")]
         image: PathBuf,
+        /// Extra image file as 'path=source'; repeat for several files
+        #[arg(long = "file", value_name = "PATH=SOURCE")]
+        files: Vec<ExtraFile>,
     },
     /// Check the layer rules between workspace crates
     CheckLayers,
@@ -100,7 +106,8 @@ fn main() -> Result<()> {
             debug,
             features,
             image,
-        } => build(spec, run, debug, features, &image)?,
+            files,
+        } => build(spec, run, debug, features, &image, &files)?,
         Commands::QemuTest { timeout } => qemu_test::qemu_test(timeout)?,
         Commands::Stress {
             seed,
@@ -110,12 +117,12 @@ fn main() -> Result<()> {
         } => qemu_test::qemu_stress(seed, seeds, steps, timeout)?,
         Commands::Race => race::run()?,
         Commands::Fuzz { target, seconds } => fuzz::run(&target, seconds)?,
-        Commands::BuildUserland { image } => {
+        Commands::BuildUserland { image, files } => {
             let project_root = project_root();
             let build_dir = project_root.join("target/build");
             fs::create_dir_all(&build_dir)?;
             let manifest_path = image_manifest_path(&project_root, &image)?;
-            let output = build_userland(&project_root, &manifest_path, &build_dir, &[])?;
+            let output = build_userland(&project_root, &manifest_path, &build_dir, &[], &files)?;
             println!("Done: {}", output.display());
         }
         Commands::CheckLayers => layers::run()?,
@@ -130,10 +137,17 @@ fn build(
     debug: bool,
     features: Option<String>,
     image: &Path,
+    files: &[ExtraFile],
 ) -> Result<()> {
     let ctx = BuildContext::new(spec, features)?;
     let manifest_path = image_manifest_path(&ctx.project_root, image)?;
-    build_userland(&ctx.project_root, &manifest_path, &ctx.build_dir, &[])?;
+    build_userland(
+        &ctx.project_root,
+        &manifest_path,
+        &ctx.build_dir,
+        &[],
+        files,
+    )?;
 
     let output = match ctx.spec.boot.format.as_str() {
         "linux_arm64" => build_binary(&ctx)?,

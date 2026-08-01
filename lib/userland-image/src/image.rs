@@ -20,6 +20,7 @@ struct ImageHeader {
 struct RecordHeader {
     path_offset: u64,
     path_len: u16,
+    alias_of: u16,
     data_offset: u64,
     data_size: u64,
 }
@@ -106,7 +107,7 @@ impl<'a> DecodedImage<'a> {
 
         let image = Self { bytes, header };
         let mut previous_path: Option<&str> = None;
-        let mut previous_data_end: u64 = 0;
+        let mut data_end: u64 = 0;
         for index in 0..image.entry_count() {
             let entry = parse_entry(bytes, header.entry_count, index)?;
             // Записи отсортированы строго по возрастанию пути: на этом стоит
@@ -116,14 +117,33 @@ impl<'a> DecodedImage<'a> {
             }
             previous_path = Some(entry.path);
 
-            // Окна данных лежат в порядке таблицы и не пересекаются: потребитель выводит окно
-            // узла из одной записи и вправе считать его байты только своими.
+            // Собственные окна лежат в порядке таблицы и не пересекаются, псевдоним
+            // повторяет окно более ранней записи целиком.
             let record = decode_record_header(bytes, IMAGE_HEADER_SIZE + index * RECORD_SIZE)
                 .ok_or(invalid_layout(Some(index), "record_bounds"))?;
-            if record.data_offset < previous_data_end {
-                return Err(invalid_layout(Some(index), "data_overlap"));
+            match record.alias_of {
+                0 => {
+                    if record.data_offset < data_end {
+                        return Err(invalid_layout(Some(index), "data_overlap"));
+                    }
+                    data_end = record.data_offset.saturating_add(record.data_size);
+                }
+                alias => {
+                    let aliased = usize::from(alias - 1);
+                    if aliased >= index {
+                        return Err(invalid_layout(Some(index), "alias_order"));
+                    }
+                    let owner =
+                        decode_record_header(bytes, IMAGE_HEADER_SIZE + aliased * RECORD_SIZE)
+                            .ok_or(invalid_layout(Some(index), "record_bounds"))?;
+                    if owner.alias_of != 0
+                        || owner.data_offset != record.data_offset
+                        || owner.data_size != record.data_size
+                    {
+                        return Err(invalid_layout(Some(index), "alias_window"));
+                    }
+                }
             }
-            previous_data_end = record.data_offset.saturating_add(record.data_size);
         }
         Ok(image)
     }
@@ -269,6 +289,7 @@ fn decode_record_header(bytes: &[u8], offset: usize) -> Option<RecordHeader> {
     Some(RecordHeader {
         path_offset: u64::from_le_bytes(bytes.get(0..8)?.try_into().ok()?),
         path_len: u16::from_le_bytes(bytes.get(8..10)?.try_into().ok()?),
+        alias_of: u16::from_le_bytes(bytes.get(10..12)?.try_into().ok()?),
         data_offset: u64::from_le_bytes(bytes.get(12..20)?.try_into().ok()?),
         data_size: u64::from_le_bytes(bytes.get(20..28)?.try_into().ok()?),
     })
@@ -345,8 +366,30 @@ mod tests {
         u64::from_le_bytes(bytes[at..at + 8].try_into().expect("field is eight bytes"))
     }
 
+    fn record_alias(bytes: &[u8], index: usize) -> u16 {
+        let at = IMAGE_HEADER_SIZE + index * RECORD_SIZE + 10;
+        u16::from_le_bytes(bytes[at..at + 2].try_into().expect("field is two bytes"))
+    }
+
     fn patch(bytes: &mut [u8], at: usize, value: u64) {
         bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn patch_alias(bytes: &mut [u8], index: usize, value: u16) {
+        let at = IMAGE_HEADER_SIZE + index * RECORD_SIZE + 10;
+        bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn alias_record(bytes: &mut [u8], index: usize, owner: usize) {
+        let offset = record_field(bytes, owner, 12);
+        let size = record_field(bytes, owner, 20);
+        patch(bytes, IMAGE_HEADER_SIZE + index * RECORD_SIZE + 12, offset);
+        patch(bytes, IMAGE_HEADER_SIZE + index * RECORD_SIZE + 20, size);
+        patch_alias(
+            bytes,
+            index,
+            u16::try_from(owner + 1).expect("record index"),
+        );
     }
 
     #[test]
@@ -427,15 +470,50 @@ mod tests {
         .expect("encode image");
         let image = decode(&bytes).expect("decode");
 
-        // Пустая запись стоит на смещении следующей за ней, а хвостовая - за
-        // концом образа.
+        // Пустая запись стоит на смещении следующей за ней, а вторая делит с ней
+        // одно окно нулевой длины.
         let head = image.entry("/boot/empty").expect("file record");
         assert!(head.data().is_empty());
         assert_eq!(head.data_offset(), image.boot_entry().data_offset());
 
         let tail = image.entry("/data/empty").expect("file record");
         assert!(tail.data().is_empty());
-        assert_eq!(tail.data_offset(), bytes.len() as u64);
+        assert_eq!(tail.data_offset(), head.data_offset());
+    }
+
+    #[test]
+    fn records_with_equal_content_share_one_window() {
+        let program = program_blob();
+        let bytes = encode(
+            &[
+                ImageRecord {
+                    path: BOOT_PATH,
+                    data: &program,
+                },
+                ImageRecord {
+                    path: "/data/first",
+                    data: b"same",
+                },
+                ImageRecord {
+                    path: "/data/second",
+                    data: b"same",
+                },
+            ],
+            BOOT_PATH,
+        )
+        .expect("encode image");
+        let image = decode(&bytes).expect("decode");
+
+        let first = image.entry("/data/first").expect("file record");
+        let second = image.entry("/data/second").expect("file record");
+        assert_eq!(first.data(), b"same");
+        assert_eq!(second.data(), b"same");
+        assert_eq!(second.data_offset(), first.data_offset());
+        // Повторившая содержимое запись ссылается на открывшую окно.
+        assert_eq!(record_alias(&bytes, 1), 0);
+        assert_eq!(record_alias(&bytes, 2), 2);
+        // Повторившееся содержимое своей страницы образа не занимает.
+        assert_eq!(bytes.len() as u64, first.data_offset() + 4);
     }
 
     #[test]
@@ -589,6 +667,82 @@ mod tests {
         assert_eq!(
             decode(&bytes).expect_err("overlapping data windows must fail"),
             invalid_layout(Some(1), "data_overlap")
+        );
+    }
+
+    #[test]
+    fn decode_accepts_a_record_repeating_an_earlier_window() {
+        let mut bytes = image_bytes();
+        alias_record(&mut bytes, 1, 0);
+
+        let image = decode(&bytes).expect("repeated data window decodes");
+        assert_eq!(
+            image.entry("/data/sample").expect("file record").data(),
+            image.boot_entry().data()
+        );
+    }
+
+    #[test]
+    fn decode_rejects_an_alias_that_does_not_repeat_the_window() {
+        // Окно псевдонима лежит внутри чужого, но повторяет его не целиком.
+        let mut bytes = image_bytes();
+        alias_record(&mut bytes, 1, 0);
+        let size = record_field(&bytes, 1, 20);
+        patch(&mut bytes, IMAGE_HEADER_SIZE + RECORD_SIZE + 20, size - 1);
+
+        assert_eq!(
+            decode(&bytes).expect_err("partial repeat must fail"),
+            invalid_layout(Some(1), "alias_window")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_an_alias_of_a_record_it_does_not_follow() {
+        let mut bytes = image_bytes();
+        alias_record(&mut bytes, 1, 0);
+        // Запись ссылается на себя: окно повторено, но его владельца в таблице нет.
+        patch_alias(&mut bytes, 1, 2);
+
+        assert_eq!(
+            decode(&bytes).expect_err("alias outside the earlier records must fail"),
+            invalid_layout(Some(1), "alias_order")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_an_alias_of_an_alias() {
+        let program = program_blob();
+        let mut bytes = encode(
+            &[
+                ImageRecord {
+                    path: BOOT_PATH,
+                    data: &program,
+                },
+                ImageRecord {
+                    path: "/data/a",
+                    data: b"same",
+                },
+                ImageRecord {
+                    path: "/data/b",
+                    data: b"same",
+                },
+                ImageRecord {
+                    path: "/data/c",
+                    data: b"same",
+                },
+            ],
+            BOOT_PATH,
+        )
+        .expect("encode image");
+        // Записи с повторившимся содержимым ссылаются на открывшую окно, а не друг на друга.
+        assert_eq!(record_alias(&bytes, 2), 2);
+        assert_eq!(record_alias(&bytes, 3), 2);
+
+        // Владельцем окна объявляется сам псевдоним: цепочка ссылок образу не принадлежит.
+        patch_alias(&mut bytes, 3, 3);
+        assert_eq!(
+            decode(&bytes).expect_err("alias of an alias must fail"),
+            invalid_layout(Some(3), "alias_window")
         );
     }
 }
