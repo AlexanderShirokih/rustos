@@ -3,10 +3,10 @@ version = 1
 [[programs]]
 package = "calculator-demo"
 bin = "demo"
-name = "demo"
-bootstrap = true
+path = "/boot/demo"
+boot = true
 
 [[programs]]
 package = "calculator-demo"
 bin = "calculator"
-name = "calculator"
+path = "/boot/calculator"

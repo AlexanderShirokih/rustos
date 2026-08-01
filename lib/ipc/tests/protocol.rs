@@ -468,6 +468,48 @@ struct Tagged<'a> {
     value: u32,
 }
 
+// Агрегат с полем-капой: handle едет слотом кадра, в суб-кадре лежит его индекс.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ipc::WireValue)]
+struct Vended {
+    session: ipc::wire::Cap,
+    prefix_len: u32,
+}
+
+#[ipc::protocol(name = "Vendor")]
+trait Vendor {
+    #[call]
+    fn vend(&self, prefix_len: u32) -> Vended;
+}
+
+struct VendorServer;
+
+impl VendorService for VendorServer {
+    fn vend(&mut self, prefix_len: u32) -> Vended {
+        Vended {
+            session: ipc::wire::Cap::from_raw(std::num::NonZeroU32::new(0x5151).expect("non-zero")),
+            prefix_len,
+        }
+    }
+}
+
+#[test]
+fn aggregate_carries_a_capability_alongside_scalars() {
+    let (client_end, server_end) = MockEnd::pair();
+    let client = VendorClient::new(client_end);
+    thread::scope(|scope| {
+        let server = scope.spawn(move || {
+            server_end.wait_readable(u64::MAX).expect("server wait");
+            dispatch_vendor(&mut VendorServer, &server_end).expect("dispatch ok");
+        });
+
+        let vended = client.vend(7).expect("vend ok");
+        assert_eq!(vended.prefix_len, 7);
+        assert_eq!(vended.session.raw().get(), 0x5151);
+
+        server.join().expect("server joins");
+    });
+}
+
 /// Протокол с пользовательскими агрегатами в сигнатурах.
 #[ipc::protocol(name = "Geo")]
 trait Geo {
@@ -606,7 +648,7 @@ fn aggregate_subframe_overflow_is_error() {
     };
     let mut buf = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
     assert_eq!(
-        ipc::WireValue::write_as_field(&big, &mut buf, 1),
+        ipc::WireValue::write_as_field(&big, &mut buf, 1, &mut ipc::wire::HandleSlots::new()),
         Err(IpcError::FrameOverflow)
     );
 }

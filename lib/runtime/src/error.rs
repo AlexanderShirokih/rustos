@@ -1,14 +1,16 @@
-//! Нормализация сырых syscall-возвратов в `Result`.
+//! Ошибки рантайма и нормализация сырых syscall-возвратов в `Result`.
 
 use syscall::SyscallError;
 
-/// Ошибка рантайма поверх сырого syscall-возврата.
+/// Ошибка операции рантайма.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// Распознанный код ошибки syscall-слоя.
     Syscall(SyscallError),
     /// Отрицательный возврат с неизвестным кодом.
     Unknown(i64),
+    /// Окно операции выходит за границу объекта.
+    OutOfBounds,
 }
 
 /// Результат операции рантайма.

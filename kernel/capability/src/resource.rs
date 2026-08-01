@@ -5,9 +5,10 @@
 //! Объект хранит:
 //! - границы и потолок доступа: право [`Rights::WRITE`](super::Rights::WRITE) разрешает минтить
 //!   только поддиапазоны этого ресурса;
-//! - атомарный `budget` (в страницах/фреймах): метеринг операций, расходующих физпамять.
+//! - атомарный `budget` (в страницах/фреймах): метеринг операций, расходующих физпамять;
+//! - родителя, из бюджета которого выделен собственный.
 
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use core::{
     num::NonZeroUsize,
     sync::atomic::{AtomicU64, Ordering},
@@ -17,12 +18,20 @@ use memory::{AccessMask, BudgetRefund, physical_address::PageAlignedAddress};
 
 use super::errors::IpcError;
 
+/// Потолок глубины цепочки `split`. Поле `parent` держит предков живыми даже после отзыва
+/// хэндлов, и длину этой цепочки в куче ядра задаёт userspace: без потолка она растёт
+/// неограниченно.
+pub const MAX_RESOURCE_DEPTH: u16 = 8;
+
 #[derive(Debug)]
 pub struct Resource {
     pa_base: PageAlignedAddress,
     size_bytes: NonZeroUsize,
     access_mask: AccessMask,
     budget: AtomicU64,
+    parent: Option<Arc<Resource>>,
+    /// Число предков в цепочке `split`: у корневого ресурса ноль.
+    depth: u16,
 }
 
 impl Resource {
@@ -39,11 +48,37 @@ impl Resource {
             size_bytes,
             access_mask,
             budget: AtomicU64::new(budget_pages),
+            parent: None,
+            depth: 0,
         })
+    }
+
+    /// Выделяет `budget_pages` страниц бюджета в отдельный ресурс с тем же
+    /// диапазоном и потолком доступа. Страницы списываются с текущего ресурса
+    /// и возвращаются ему, когда дочерний уходит. При нехватке бюджета либо на
+    /// глубине [`MAX_RESOURCE_DEPTH`] возвращает `ResourceExhausted`.
+    pub fn split(self: &Arc<Self>, budget_pages: u64) -> Result<Arc<Self>, IpcError> {
+        if self.depth >= MAX_RESOURCE_DEPTH {
+            return Err(IpcError::ResourceExhausted);
+        }
+        self.try_consume(budget_pages)?;
+        Ok(Arc::new(Self {
+            pa_base: self.pa_base,
+            size_bytes: self.size_bytes,
+            access_mask: self.access_mask,
+            budget: AtomicU64::new(budget_pages),
+            parent: Some(Arc::clone(self)),
+            depth: self.depth + 1,
+        }))
     }
 
     pub fn pa_base(&self) -> PageAlignedAddress {
         self.pa_base
+    }
+
+    /// Ресурс, из бюджета которого выделен собственный. `None` у корневого.
+    pub fn parent(&self) -> Option<&Arc<Resource>> {
+        self.parent.as_ref()
     }
 
     pub fn size_bytes(&self) -> NonZeroUsize {
@@ -118,16 +153,27 @@ impl Resource {
     }
 }
 
+impl Drop for Resource {
+    fn drop(&mut self) {
+        // Раскрутка цепочки рекурсивна: её глубину ограничивает `split`.
+        if let Some(parent) = &self.parent {
+            parent.release(*self.budget.get_mut());
+        }
+    }
+}
+
 /// [`BudgetRefund`](BudgetRefund), возвращающий `pages` бюджету.
 pub struct ResourceBudgetRefund {
-    resource: Weak<Resource>,
+    // Ссылка сильная: ресурс переживает выданные из него регионы и отдаёт
+    // родителю весь свой бюджет, включая неизрасходованный остаток.
+    resource: Arc<Resource>,
     pages: u64,
 }
 
 impl ResourceBudgetRefund {
     pub fn new(resource: &Arc<Resource>, pages: u64) -> Arc<Self> {
         Arc::new(Self {
-            resource: Arc::downgrade(resource),
+            resource: Arc::clone(resource),
             pages,
         })
     }
@@ -135,9 +181,7 @@ impl ResourceBudgetRefund {
 
 impl BudgetRefund for ResourceBudgetRefund {
     fn refund(&self) {
-        if let Some(resource) = self.resource.upgrade() {
-            resource.release(self.pages);
-        }
+        self.resource.release(self.pages);
     }
 }
 
@@ -279,19 +323,110 @@ mod tests {
     }
 
     #[test]
-    fn refund_after_resource_destroyed_is_noop() {
-        let refund: Arc<ResourceBudgetRefund>;
+    fn split_moves_pages_from_parent_to_child() {
+        let parent = Resource::new(pa(0x4000_0000), nz(0x4000), AccessMask::RW, 10);
 
-        {
-            let resource = Resource::new(pa(0x4000_0000), nz(0x1000), AccessMask::RW, 4);
-            resource.try_consume(4).unwrap();
-            refund = ResourceBudgetRefund::new(&resource, 4);
+        let child = parent.split(4).expect("budget must suffice");
+
+        assert_eq!(parent.remaining_budget(), 6);
+        assert_eq!(child.remaining_budget(), 4);
+    }
+
+    #[test]
+    fn split_keeps_range_and_access_ceiling_of_parent() {
+        let parent = Resource::new(pa(0x4000_0000), nz(0x4000), AccessMask::R, 10);
+
+        let child = parent.split(4).expect("budget must suffice");
+
+        assert_eq!(child.pa_base().as_usize(), parent.pa_base().as_usize());
+        assert_eq!(child.size_bytes(), parent.size_bytes());
+        assert_eq!(child.access_mask().bits(), parent.access_mask().bits());
+    }
+
+    #[test]
+    fn split_over_parent_budget_is_rejected_and_budget_unchanged() {
+        let parent = Resource::new(pa(0x4000_0000), nz(0x1000), AccessMask::RW, 3);
+
+        assert!(matches!(
+            parent.split(4).err(),
+            Some(IpcError::ResourceExhausted)
+        ));
+        assert_eq!(parent.remaining_budget(), 3);
+    }
+
+    #[test]
+    fn dropping_child_returns_unspent_budget_to_parent() {
+        let parent = Resource::new(pa(0x4000_0000), nz(0x4000), AccessMask::RW, 10);
+        let child = parent.split(6).expect("budget must suffice");
+        child.try_consume(2).unwrap();
+        assert_eq!(parent.remaining_budget(), 4);
+
+        drop(child);
+        // Возвращается остаток. Списанные страницы возвращает регион, который
+        // их держит, и до тех пор он не даёт ресурсу уйти.
+        assert_eq!(parent.remaining_budget(), 8);
+    }
+
+    #[test]
+    fn region_minted_from_child_keeps_it_alive_until_closed() {
+        let parent = Resource::new(pa(0x4000_0000), nz(0x4000), AccessMask::RW, 10);
+        let child = parent.split(4).expect("budget must suffice");
+        child.try_consume(4).unwrap();
+        let region =
+            MemoryRegion::create_physical_device(pa(0x4000_0000), nz(0x4000), AccessMask::RW)
+                .with_refund(ResourceBudgetRefund::new(&child, 4));
+
+        drop(child);
+        // Регион держит дочерний ресурс: его страницы родителю ещё не
+        // вернулись.
+        assert_eq!(parent.remaining_budget(), 6);
+
+        drop(region);
+        assert_eq!(parent.remaining_budget(), 10);
+    }
+
+    #[test]
+    fn split_depth_is_capped() {
+        // Закрытая капа объект не убивает: его держит поле `parent` потомка, и потолок
+        // отбирает у userspace длину цепочки в куче ядра.
+        let root = Resource::new(pa(0x4000_0000), nz(0x1000), AccessMask::RW, u64::MAX);
+        let mut leaf = Arc::clone(&root);
+        for _ in 0..MAX_RESOURCE_DEPTH {
+            leaf = leaf.split(1).expect("split within the depth ceiling");
         }
 
-        let region =
-            MemoryRegion::create_physical_device(pa(0x4000_0000), nz(0x1000), AccessMask::RW)
-                .with_refund(refund);
+        assert!(matches!(
+            leaf.split(1).err(),
+            Some(IpcError::ResourceExhausted)
+        ));
+        // Отказ по глубине бюджета не тронул: лист расходует свой сам.
+        assert_eq!(leaf.remaining_budget(), 1);
+    }
 
-        drop(region); // не должно паниковать
+    #[test]
+    fn split_chain_at_the_depth_ceiling_unwinds_budget() {
+        let root = Resource::new(pa(0x4000_0000), nz(0x1000), AccessMask::RW, 1);
+        let mut leaf = Arc::clone(&root);
+        for _ in 0..MAX_RESOURCE_DEPTH {
+            leaf = leaf.split(1).expect("each level hands its page down");
+        }
+        assert_eq!(root.remaining_budget(), 0);
+
+        drop(leaf);
+        assert_eq!(root.remaining_budget(), 1);
+    }
+
+    #[test]
+    fn split_chain_returns_budget_through_every_level() {
+        let root = Resource::new(pa(0x4000_0000), nz(0x4000), AccessMask::RW, 10);
+        let middle = root.split(8).expect("budget must suffice");
+        let leaf = middle.split(5).expect("budget must suffice");
+        assert_eq!(root.remaining_budget(), 2);
+
+        drop(leaf);
+        assert_eq!(middle.remaining_budget(), 8);
+
+        drop(middle);
+        assert_eq!(root.remaining_budget(), 10);
     }
 }

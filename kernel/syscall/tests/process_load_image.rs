@@ -215,10 +215,8 @@ fn encode_desc(version: u32, segment_count: u32, segments_va: u64) -> [u8; USER_
     d[4..8].copy_from_slice(&segment_count.to_le_bytes());
     d[8..16].copy_from_slice(&segments_va.to_le_bytes());
     d[16..24].copy_from_slice(&(SEG_VA_BASE as u64).to_le_bytes());
-    d[24..32].copy_from_slice(&0x5000_0000u64.to_le_bytes());
-    d[32..40].copy_from_slice(&0x4000u64.to_le_bytes());
-    d[40..48].copy_from_slice(&0x6000_0000u64.to_le_bytes());
-    d[48..56].copy_from_slice(&0x1_0000u64.to_le_bytes());
+    d[24..32].copy_from_slice(&0x6000_0000u64.to_le_bytes());
+    d[32..40].copy_from_slice(&0x1_0000u64.to_le_bytes());
     d
 }
 
@@ -338,7 +336,7 @@ fn rejects_wrong_abi_version() {
     let pid = insert_process(&table);
     rt.set_handle_table(table);
     stub.set_bytes(canned_buffer(
-        encode_desc(2, 1, (BASE_VA + 56) as u64),
+        encode_desc(2, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         None,
     ));
     assert_eq!(load_image(pid), expect(SyscallError::InvalidArgument));
@@ -352,7 +350,7 @@ fn rejects_zero_segment_count() {
     let pid = insert_process(&table);
     rt.set_handle_table(table);
     stub.set_bytes(canned_buffer(
-        encode_desc(1, 0, (BASE_VA + 56) as u64),
+        encode_desc(1, 0, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         None,
     ));
     assert_eq!(load_image(pid), expect(SyscallError::InvalidArgument));
@@ -367,7 +365,7 @@ fn rejects_segment_count_above_max() {
     rt.set_handle_table(table);
     let too_many = (syscall_kernel::MAX_SEGMENTS_PER_IMG as u32) + 1;
     stub.set_bytes(canned_buffer(
-        encode_desc(1, too_many, (BASE_VA + 56) as u64),
+        encode_desc(1, too_many, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         None,
     ));
     assert_eq!(load_image(pid), expect(SyscallError::InvalidArgument));
@@ -383,7 +381,7 @@ fn rejects_nonzero_reserved_field() {
     rt.set_handle_table(table);
     let seg = encode_segment(region.raw().get(), 0, REGION_SIZE as u64, 1);
     stub.set_bytes(canned_buffer(
-        encode_desc(1, 1, (BASE_VA + 56) as u64),
+        encode_desc(1, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         Some(seg),
     ));
     assert_eq!(load_image(pid), expect(SyscallError::InvalidArgument));
@@ -399,7 +397,7 @@ fn rejects_mapped_size_mismatch() {
     rt.set_handle_table(table);
     let seg = encode_segment(region.raw().get(), 0, (REGION_SIZE * 2) as u64, 0);
     stub.set_bytes(canned_buffer(
-        encode_desc(1, 1, (BASE_VA + 56) as u64),
+        encode_desc(1, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         Some(seg),
     ));
     assert_eq!(load_image(pid), expect(SyscallError::InvalidArgument));
@@ -423,7 +421,7 @@ fn rejects_access_denied_when_region_mask_too_weak() {
     rt.set_handle_table(table);
     let seg = encode_segment(region.raw().get(), 2, REGION_SIZE as u64, 0);
     stub.set_bytes(canned_buffer(
-        encode_desc(1, 1, (BASE_VA + 56) as u64),
+        encode_desc(1, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         Some(seg),
     ));
     assert_eq!(load_image(pid), expect(SyscallError::AccessDenied));

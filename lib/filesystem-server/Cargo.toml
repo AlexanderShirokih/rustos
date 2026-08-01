@@ -1,0 +1,26 @@
+cargo-features = ["per-package-target"]
+
+[package]
+name = "filesystem-server"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+forced-target = "aarch64-unknown-none"
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+bootstrap = { workspace = true }
+filesystem = { workspace = true }
+filesystem-abi = { workspace = true }
+ipc = { workspace = true }
+runtime = { workspace = true }
+spin = { workspace = true }
+syscall = { workspace = true }
+userland = { workspace = true }
+
+[lints]
+workspace = true

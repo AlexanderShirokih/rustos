@@ -9,6 +9,7 @@ spin = { workspace = true }
 collections = { workspace = true }
 capability = { workspace = true }
 memory = { workspace = true }
+syscall = { workspace = true }
 
 [lints]
 workspace = true

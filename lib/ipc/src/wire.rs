@@ -4,7 +4,7 @@
 //! Все целые - little-endian. Кадр (заголовок + тело) укладывается в
 //! [`MESSAGE_INLINE_MAX`]. Кодирование без heap.
 
-use core::{marker::PhantomData, num::NonZeroU32};
+use core::{cell::Cell, marker::PhantomData, num::NonZeroU32};
 
 pub use ipc_schema::{FIELD_OVERHEAD, HEADER_SIZE};
 
@@ -14,6 +14,87 @@ pub const MESSAGE_INLINE_MAX: usize = syscall::IPC_BUFFER_DATA_MAX;
 
 /// Максимум хэндлов в транспортном векторе кадра.
 pub const MESSAGE_MAX_HANDLES: usize = 4;
+
+// Всё, что ядро доставило с кадром, обязано попасть в слоты: отброшенный хэндл
+// уже установлен в таблицу получателя, и дотянуться до него нечем.
+const _: () = assert!(syscall::IPC_BUFFER_MAX_CAPS <= MESSAGE_MAX_HANDLES);
+
+/// Слоты capability сообщения. Значение-капа кладёт сюда сырой handle-id, а в
+/// тело пишет его индекс: сами хэндлы едут отдельным массивом кадра, минуя байты
+/// тела. Один набор общий для всего сообщения, включая вложенные суб-кадры
+/// агрегатов.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandleSlots {
+    ids: [u32; MESSAGE_MAX_HANDLES],
+    count: usize,
+    /// Битовая маска слотов, изъятых декодом.
+    taken: Cell<u8>,
+}
+
+impl HandleSlots {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            ids: [0; MESSAGE_MAX_HANDLES],
+            count: 0,
+            taken: Cell::new(0),
+        }
+    }
+
+    /// Набор для декодирования: хэндлы, приехавшие с кадром. Ядро не доставляет
+    /// больше [`syscall::IPC_BUFFER_MAX_CAPS`] хэндлов, и все они умещаются в
+    /// слоты.
+    #[must_use]
+    pub fn from_received(ids: &[u32]) -> Self {
+        let mut slots = Self::new();
+        for &id in ids.iter().take(MESSAGE_MAX_HANDLES) {
+            slots.ids[slots.count] = id;
+            slots.count += 1;
+        }
+        slots
+    }
+
+    /// Занимает слот под `id` и отдаёт его индекс. Сверх [`MESSAGE_MAX_HANDLES`]
+    /// - `TooManyHandles`.
+    pub fn push(&mut self, id: u32) -> Result<u8, IpcError> {
+        let index = u8::try_from(self.count).map_err(|_| IpcError::TooManyHandles)?;
+        let slot = self
+            .ids
+            .get_mut(self.count)
+            .ok_or(IpcError::TooManyHandles)?;
+        *slot = id;
+        self.count += 1;
+        Ok(index)
+    }
+
+    /// Изымает handle-id по индексу из тела. Слот потребляется один раз: два
+    /// поля кадра с одним индексом - это два владельца одного хэндла. Повторный
+    /// индекс, как и индекс вне занятых слотов, - `InvalidValue`.
+    pub fn take(&self, index: u8) -> Result<u32, IpcError> {
+        let position = usize::from(index);
+        if position >= self.count {
+            return Err(IpcError::InvalidValue);
+        }
+        let bit = 1u8 << position;
+        if self.taken.get() & bit != 0 {
+            return Err(IpcError::InvalidValue);
+        }
+        self.taken.set(self.taken.get() | bit);
+        Ok(self.ids[position])
+    }
+
+    /// Занятые слоты в порядке их выдачи.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u32] {
+        &self.ids[..self.count]
+    }
+}
+
+impl Default for HandleSlots {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Бюджет тела (включая терминатор): `MESSAGE_INLINE_MAX - HEADER_SIZE`.
 pub const BODY_MAX: usize = MESSAGE_INLINE_MAX - HEADER_SIZE;
@@ -67,6 +148,10 @@ pub enum IpcError {
     WouldBlock,
     /// Истёк отведённый на ожидание срок.
     Timeout,
+    /// Капы сообщения не умещаются в [`MESSAGE_MAX_HANDLES`] слотов.
+    TooManyHandles,
+    /// Ресурс приёмной стороны исчерпан: кадр доставлен, но принять его нечем.
+    ResourceExhausted,
 }
 
 /// Заголовок кадра: `ordinal` @0, `txid` @8, `flags` @12 (14 байт, LE).

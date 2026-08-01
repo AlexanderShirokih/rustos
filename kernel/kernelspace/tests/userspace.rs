@@ -155,6 +155,45 @@ fn spawn_user_process_creates_address_space_and_thread() {
 }
 
 #[test]
+fn spawn_user_process_rejects_name_over_capacity() {
+    reset_switches();
+    let factory = fresh_factory();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler(timer, factory);
+
+    let init = [0xAAu8; 8];
+    let segments = [UserSegment {
+        va_base: aligned(USER_SEGMENT_VA),
+        mapped_size: PAGE,
+        init_bytes: &init,
+        perms: MemFlags::user_rx(),
+    }];
+    let image = UserImage {
+        segments: &segments,
+        entry: VirtualAddress::new(USER_SEGMENT_VA),
+        user_stack_top: VirtualAddress::new(USER_STACK_TOP_VA),
+        user_stack_size: USER_STACK_SIZE,
+    };
+
+    let name: &'static str = Box::leak(
+        "n".repeat(syscall::MAX_PROCESS_NAME_LEN + 1)
+            .into_boxed_str(),
+    );
+    let err = launcher(&scheduler)
+        .spawn_user_process_with_launch(name, &image, Priority::new(2), 4, bootstrap_launch())
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        SpawnUserError::Prepared(scheduler::PreparedUserProcessError::Spawn(
+            scheduler::SpawnError::InvalidName
+        ))
+    );
+    // Процесс не зарегистрирован: остаётся только idle.
+    assert_eq!(scheduler.process_count(), 1);
+}
+
+#[test]
 fn spawn_user_process_with_launch_installs_initial_handles() {
     reset_switches();
     let factory = fresh_factory();

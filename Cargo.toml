@@ -26,6 +26,9 @@ members = [
     "lib/test-harness-qemu",
     "lib/collections",
     "lib/fdt",
+    "lib/filesystem",
+    "lib/filesystem-abi",
+    "lib/filesystem-server",
     "lib/userland",
     "lib/userland-build",
     "lib/userland-image",
@@ -33,6 +36,9 @@ members = [
     "lib/runtime",
     "lib/util",
     "tools/userland-image",
+    "user/filesystem-imagefs",
+    "user/filesystem-namespace-router",
+    "user/filesystem-ramfs",
     "user/rootkeeper",
     "user/testrunner",
     "user/calculator-demo",
@@ -74,6 +80,9 @@ collections = { path = "lib/collections" }
 io = { path = "lib/io" }
 klog = { path = "kernel/log" }
 fdt = { path = "lib/fdt" }
+filesystem = { path = "lib/filesystem" }
+filesystem-abi = { path = "lib/filesystem-abi" }
+filesystem-server = { path = "lib/filesystem-server" }
 memory = { path = "kernel/memory" }
 util = { path = "lib/util" }
 hal-common = { path = "kernel/hal-common" }

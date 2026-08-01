@@ -133,6 +133,17 @@ pub enum SyscallOp {
     /// Возвращает `resource_handle`.
     ProcessResourceSelf = 0x46,
 
+    /// Выделяет часть бюджета `Resource` в отдельный ресурс с тем же
+    /// физдиапазоном и потолком доступа. Аргументы:
+    ///  - `arg0=resource_handle`,
+    ///  - `arg1=budget_pages` (> 0).
+    ///
+    /// Требует `Rights::WRITE | Rights::DUPLICATE`. Страницы списываются с
+    /// исходного ресурса и возвращаются ему, когда производный уходит;
+    /// при нехватке бюджета - `ResourceExhausted`. Производный ресурс -
+    /// капа-потомок исходной. Возвращает `resource_handle`.
+    ResourceSplit = 0x47,
+
     /// Стартует первый поток уже загруженного образа и атомарно передаёт ему
     /// стартовый хэндл-канал. Аргументы:
     ///  - `arg0=process_handle`,
@@ -140,15 +151,16 @@ pub enum SyscallOp {
     ///  - `arg2=user_sp`,
     ///  - `arg3=bootstrap_handle` стартовый HandleId,
     ///  - `arg4=priority` (биты [0..8), [8..) = 0),
-    ///  - `arg5` - зарезервирован (0).
+    ///  - `arg5=resource_handle` метеринг-ресурс потомка (0 - наследовать).
     ///
     /// X0 первого потока - child-table id переданного хэндла (канал процесса),
     /// вычисляется ядром после вставки в child-таблицу. Нулевой `bootstrap_handle`
     /// - `InvalidArgument`.
     ///
-    /// Требует `Rights::WRITE` на `process_handle` и `Rights::TRANSFER` на
-    /// `bootstrap_handle`. Стартуемый процесс наследует метеринг-ресурс
-    /// вызывающего. Возвращает handle на свежий `ThreadObject`.
+    /// Требует `Rights::WRITE` на `process_handle`, `Rights::TRANSFER` на
+    /// `bootstrap_handle` и `Rights::WRITE` на `resource_handle`. Нулевой
+    /// `resource_handle` отдаёт потомку метеринг-ресурс вызывающего.
+    /// Возвращает handle на свежий `ThreadObject`.
     ProcessStart = 0x45,
 
     // 0x50..=0x5F - Thread CapabilityTarget.
@@ -289,6 +301,7 @@ impl SyscallOp {
             0x44 => Some(Self::ProcessTerminate),
             0x45 => Some(Self::ProcessStart),
             0x46 => Some(Self::ProcessResourceSelf),
+            0x47 => Some(Self::ResourceSplit),
             0x50 => Some(Self::ThreadCreate),
             0x51 => Some(Self::ThreadSelf),
             0x52 => Some(Self::ThreadExit),
@@ -340,6 +353,7 @@ mod tests {
             SyscallOp::from_raw(0x46),
             Some(SyscallOp::ProcessResourceSelf)
         );
+        assert_eq!(SyscallOp::from_raw(0x47), Some(SyscallOp::ResourceSplit));
         assert_eq!(SyscallOp::from_raw(0x50), Some(SyscallOp::ThreadCreate));
         assert_eq!(SyscallOp::from_raw(0x51), Some(SyscallOp::ThreadSelf));
         assert_eq!(SyscallOp::from_raw(0x52), Some(SyscallOp::ThreadExit));
@@ -376,7 +390,7 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x61), None);
         assert_eq!(SyscallOp::from_raw(0x68), None);
         assert_eq!(SyscallOp::from_raw(0x6F), None);
-        assert_eq!(SyscallOp::from_raw(0x47), None);
+        assert_eq!(SyscallOp::from_raw(0x48), None);
         assert_eq!(SyscallOp::from_raw(0x56), None);
         assert_eq!(SyscallOp::from_raw(0x72), None);
         assert_eq!(SyscallOp::from_raw(0x74), None);

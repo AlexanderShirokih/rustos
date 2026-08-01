@@ -2,27 +2,55 @@ version = 1
 
 [[programs]]
 package = "testrunner"
+path = "/boot/testrunner"
+boot = true
 
 [[programs]]
 package = "testrunner"
 bin = "spawn-fixture"
-name = "spawn-fixture"
-bootstrap = false
+path = "/boot/spawn-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "port-fixture"
-name = "port-fixture"
-bootstrap = false
+path = "/boot/port-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "reply-holder"
-name = "reply-holder"
-bootstrap = false
+path = "/boot/reply-holder"
 
 [[programs]]
 package = "testrunner"
 bin = "badge-client"
-name = "badge-client"
-bootstrap = false
+path = "/boot/badge-client"
+
+[[programs]]
+package = "testrunner"
+bin = "filesystem-client-fixture"
+path = "/boot/filesystem-client-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "unresponsive-filesystem"
+path = "/boot/unresponsive-filesystem"
+
+[[programs]]
+package = "filesystem-namespace-router"
+path = "/boot/filesystem-namespace-router"
+
+[[programs]]
+package = "filesystem-ramfs"
+path = "/boot/filesystem-ramfs"
+
+[[programs]]
+package = "filesystem-imagefs"
+path = "/boot/filesystem-imagefs"
+
+[[files]]
+path = "/boot/sample"
+source = "user/testrunner/assets/sample.txt"
+
+[[files]]
+path = "/boot/empty"
+source = "user/testrunner/assets/empty.txt"

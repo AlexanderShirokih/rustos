@@ -9,7 +9,6 @@ build = "build.rs"
 forced-target = "aarch64-unknown-none"
 
 [package.metadata.userland]
-bootstrap = true
 stack_size = 65536
 
 [[bin]]
@@ -42,10 +41,23 @@ path = "src/badge_client.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "filesystem-client-fixture"
+path = "src/filesystem_client_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "unresponsive-filesystem"
+path = "src/unresponsive_filesystem.rs"
+test = false
+bench = false
+
 [dependencies]
 bootstrap = { workspace = true }
 collections = { workspace = true }
 fdt = { workspace = true }
+filesystem-abi = { workspace = true }
 io = { workspace = true }
 ipc = { workspace = true }
 spin = { workspace = true }

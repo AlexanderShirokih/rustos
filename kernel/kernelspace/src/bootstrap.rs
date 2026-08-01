@@ -8,7 +8,8 @@ use core::num::NonZeroUsize;
 use bootstrap::{BootstrapService, dispatch_bootstrap};
 use capability::{
     Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, IrqControl,
-    KernelIpcBuffer, Port, Reply, Resource, Rights, ThreadTransport, port_recv, port_send, runtime,
+    KernelIpcBuffer, MeteringGrant, Port, Reply, Resource, Rights, ThreadTransport,
+    default_rights_for, port_recv, port_send, runtime,
 };
 use collections::{LockCell, MutexCell};
 use ipc::{
@@ -22,8 +23,8 @@ use memory::{AccessMask, MemoryRegion, page_round_up, physical_address::PageAlig
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
 use syscall::{IpcBuffer, decode_tag, encode_tag};
-use userland::EntryView;
-use userland_image::{ImageDecodeError, decode};
+use userland::{EntryView, entry_name};
+use userland_image::{ImageDecodeError, ProgramDecodeError, decode};
 
 use crate::{
     kernel_context::BootDtb,
@@ -56,10 +57,9 @@ pub struct BootstrapResources {
 #[derive(Debug)]
 pub enum BootstrapSpawnError {
     Image(ImageDecodeError),
+    Program(ProgramDecodeError),
     Model(UserImageFromModelError),
     Spawn(SpawnUserError),
-    /// В образе нет ни одной записи.
-    EmptyImage,
     /// Размер образа не округляется до страницы в пределах адресного пространства.
     ImageGeometry,
     /// Размер DTB не округляется до страницы в пределах адресного пространства.
@@ -77,12 +77,13 @@ pub fn spawn_process(
     user_va_end: usize,
 ) -> Result<BootstrapLaunch, BootstrapSpawnError> {
     let image = decode(blob).map_err(BootstrapSpawnError::Image)?;
-    let entry = image
-        .bootstrap_entry()
-        .ok_or(BootstrapSpawnError::EmptyImage)?;
-    let name = entry.name();
+    let program = image
+        .boot_entry()
+        .program()
+        .map_err(BootstrapSpawnError::Program)?;
+    let name = entry_name(program.path());
     let parts =
-        user_image_parts_from_entry(&entry, user_va_end).map_err(BootstrapSpawnError::Model)?;
+        user_image_parts_from_entry(&program, user_va_end).map_err(BootstrapSpawnError::Model)?;
     let user_image = parts.image();
 
     // Ядро принимает на порту, поэтому держит capability с READ. Стартовый
@@ -131,7 +132,13 @@ pub fn spawn_process(
         .map_err(BootstrapSpawnError::Spawn)?;
 
     // Корневой Resource - метеринг-ресурс bootstrap-процесса; ставится до старта scheduler.
-    info.process_object.set_metering_resource(root_resource);
+    // Корень дерева процессов держит его с полным набором прав.
+    let root_grant_rights =
+        default_rights_for(&CapabilityTarget::Resource(Arc::clone(&root_resource)));
+    info.process_object.set_metering(MeteringGrant {
+        resource: root_resource,
+        rights: root_grant_rights,
+    });
 
     Ok(BootstrapLaunch {
         port,

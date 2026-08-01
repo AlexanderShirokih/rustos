@@ -11,8 +11,7 @@ use bootstrap::BootstrapClient;
 use kernel_tests::kernel_test;
 use runtime::{
     Error, MemoryRegion, OwnedHandle, Port, PortTransport, Priority, Process, Reply, Resource,
-    Result, Timeout, UserMemFlags, handle_close, handle_duplicate, ipc_buffer_ptr, port_call,
-    port_send, spawn,
+    Result, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr, port_call, port_send, spawn,
 };
 use syscall::{Handle, Rights, SyscallError};
 use userland_image::decode;
@@ -74,21 +73,22 @@ fn assert_sender_gone(result: Result<Option<Reply>>, badge: u64) {
 
 /// Спавнит программу `name` из userland-образа, передавая ей `start` стартовым
 /// хэндлом.
-fn spawn_image_entry(name: &str, start: OwnedHandle) -> Process {
+fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
     let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
     let cap = client
         .acquire_userland_image()
         .expect("acquire_userland_image call")
         .expect("vend ok");
     let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
-    let info = region.inspect().expect("inspect image region");
-    let mapping = region
-        .map(info.size_bytes, UserMemFlags::ReadOnly)
-        .expect("map image read-only");
+    let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
-    let entry = image.entry(name).expect("image carries the entry");
+    let program = image
+        .entry(path)
+        .expect("image carries the entry")
+        .program()
+        .expect("entry record carries a program");
     let resource = Resource::self_resource().expect("self metering resource");
-    load_entry(&entry, &resource, start).expect("spawn entry from image")
+    load_entry(&program, &resource, start).expect("spawn entry from image")
 }
 
 /// Сырой HandleId клиентской капы, которой лишат получателя.
@@ -164,7 +164,7 @@ fn badge_departs_when_the_client_process_dies() {
         .handle()
         .duplicate(Rights::WRITE | Rights::TRANSFER, DYING_CLIENT_BADGE)
         .expect("mint client capability");
-    let process = spawn_image_entry("badge-client", client);
+    let process = spawn_image_entry("/boot/badge-client", client);
 
     port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS))
         .expect("client frame");

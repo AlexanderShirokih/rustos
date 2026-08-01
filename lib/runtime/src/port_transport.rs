@@ -27,7 +27,7 @@ use syscall::{
 
 use crate::{
     ipc_buffer::ipc_buffer_ptr,
-    svc::{port_call, port_recv, port_reply, port_send},
+    svc::{handle_close, port_call, port_recv, port_reply, port_send},
 };
 
 /// Фаза конца port-транспорта: кодирует и роль (клиент/сервер), и текущее
@@ -49,6 +49,13 @@ enum Phase {
     /// Сервер: `wait_readable` уже принял кадр (с тайм-аутом) в IPC-буфер;
     /// следующий `read_message` лишь декодирует его, без повторного `recv`.
     ServerStaged,
+}
+
+impl Phase {
+    // Серверная фаза: исходящий кадр адресован вызывателю принятого.
+    const fn is_server(self) -> bool {
+        matches!(self, Self::ServerIdle | Self::ServerStaged)
+    }
 }
 
 /// Порт ipc-контракта поверх синхронного port.
@@ -79,11 +86,52 @@ impl PortTransport {
         }
     }
 
-    /// Серверный приём кадра в IPC-буфер с тайм-аутом `timeout_ns`. Сохраняет
-    /// reply-handle (если встречный был `call`) для последующего
-    /// `write_message(RESPONSE)`. `Timeout` по истечении срока; `SenderGone` -
-    /// вместо кадра пришло событие об уходе значка; `PeerClosed` при закрытом
-    /// port'е.
+    /// Значок (badge) port-хэндла, через который пришёл принятый кадр. `0` -
+    /// отправитель слал через незаклеймённую копию.
+    ///
+    /// Действителен после `wait_readable` и до следующей операции над
+    /// IPC-буфером текущего потока: любой `port_send`/`port_call`/`port_recv`
+    /// (в том числе строка в лог из обработчика) перезапишет поле.
+    #[must_use]
+    pub fn peer_badge(&self) -> u64 {
+        // SAFETY: см. `load_buffer`. Здесь только чтение поля буфера.
+        ipc_buffer_ptr().map_or(0, |ptr| unsafe { (*ptr).badge })
+    }
+
+    /// Capability принятого кадра: ядро перенесло их в таблицу текущего
+    /// процесса при рандеву: закрыть их - дело получателя.
+    ///
+    /// Действительны там же, где [`peer_badge`](Self::peer_badge).
+    #[must_use]
+    pub fn staged_caps(&self) -> [Option<Handle>; IPC_BUFFER_MAX_CAPS] {
+        let Some(ptr) = ipc_buffer_ptr() else {
+            return [None; IPC_BUFFER_MAX_CAPS];
+        };
+        // SAFETY: см. `load_buffer`. Здесь только чтение полей буфера.
+        unsafe {
+            let buf = &*ptr;
+            let ncaps = decode_tag(buf.tag).ncaps.min(IPC_BUFFER_MAX_CAPS);
+            core::array::from_fn(|index| {
+                (index < ncaps)
+                    .then(|| Handle::new(buf.caps[index]))
+                    .flatten()
+            })
+        }
+    }
+
+    /// Закрывает сохранённый reply-объект: ответа по нему уже не будет, а
+    /// закрытие будит вызывателя отказом вместо бессрочной парковки.
+    /// No-op, когда ответ уже отправлен либо встречный был `cast`.
+    pub fn cancel_reply(&self) {
+        if let Some(reply) = self.pending_reply.take() {
+            let _ = handle_close(reply);
+        }
+    }
+
+    // Приём кадра в IPC-буфер с тайм-аутом. Сохраняет reply-handle встречного call для
+    // последующего write_message(RESPONSE). Timeout по истечении срока, SenderGone - вместо
+    // кадра пришло событие об уходе значка, ResourceExhausted - принять кадр нечем, PeerClosed
+    // при закрытом порте.
     fn recv_into_buffer(&self, timeout_ns: u64) -> Result<(), IpcError> {
         let ret = port_recv(self.handle, timeout_ns);
         if ret < 0 {
@@ -147,6 +195,7 @@ fn map_recv_error(ret: i64) -> IpcError {
     match SyscallError::from_return(ret) {
         Some(SyscallError::Timeout) => IpcError::Timeout,
         Some(SyscallError::SenderGone) => IpcError::SenderGone,
+        Some(SyscallError::ResourceExhausted) => IpcError::ResourceExhausted,
         _ => IpcError::PeerClosed,
     }
 }
@@ -169,8 +218,10 @@ impl Transport for PortTransport {
         let header = Header::decode(bytes)?;
 
         // Ответ сервера: тело уже в IPC-буфере, доставляем его вызывателю
-        // через сохранённый reply-handle.
-        if header.has_flag(ipc::wire::FLAG_RESPONSE) {
+        // через сохранённый reply-handle. Наружу серверная сторона иначе не
+        // пишет, и по этому пути идёт любой её кадр: без сохранённого reply
+        // адресата у него нет.
+        if header.has_flag(ipc::wire::FLAG_RESPONSE) || self.phase.get().is_server() {
             Self::store_buffer(bytes, handles)?;
             let reply = self.pending_reply.take().ok_or(IpcError::PeerClosed)?;
             return map_send_result(port_reply(reply));

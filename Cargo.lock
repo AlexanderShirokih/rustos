@@ -254,6 +254,74 @@ dependencies = [
 ]
 
 [[package]]
+name = "filesystem"
+version = "0.1.0"
+dependencies = [
+ "filesystem-abi",
+ "userland",
+ "userland-image",
+]
+
+[[package]]
+name = "filesystem-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "ipc-test",
+]
+
+[[package]]
+name = "filesystem-imagefs"
+version = "0.1.0"
+dependencies = [
+ "filesystem",
+ "filesystem-server",
+ "runtime",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
+name = "filesystem-namespace-router"
+version = "0.1.0"
+dependencies = [
+ "filesystem-abi",
+ "filesystem-server",
+ "ipc",
+ "runtime",
+ "spin",
+ "syscall",
+ "userland-build",
+ "userland-image",
+ "userland-loader",
+]
+
+[[package]]
+name = "filesystem-ramfs"
+version = "0.1.0"
+dependencies = [
+ "filesystem",
+ "filesystem-server",
+ "runtime",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
+name = "filesystem-server"
+version = "0.1.0"
+dependencies = [
+ "bootstrap",
+ "filesystem",
+ "filesystem-abi",
+ "ipc",
+ "runtime",
+ "spin",
+ "syscall",
+ "userland",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -547,6 +615,7 @@ dependencies = [
  "collections",
  "io",
  "ipc",
+ "spin",
  "syscall",
  "talc",
 ]
@@ -574,6 +643,7 @@ dependencies = [
  "collections",
  "memory",
  "spin",
+ "syscall",
 ]
 
 [[package]]
@@ -747,6 +817,7 @@ dependencies = [
  "bootstrap",
  "collections",
  "fdt",
+ "filesystem-abi",
  "io",
  "ipc",
  "runtime",
@@ -842,6 +913,7 @@ name = "userland-image-tool"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "filesystem-abi",
  "object",
  "serde",
  "serde_json",

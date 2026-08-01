@@ -5,7 +5,7 @@
 use core::num::NonZeroU32;
 
 use capability::{self, HandleId, Rights};
-use syscall::{SyscallError, WakeCount};
+use syscall::{SyscallError, WAIT_MANY_MAX_COUNT, WakeCount};
 
 use super::{
     error::{encode_return, map_ipc_error},
@@ -116,6 +116,10 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         }
         SyscallOp::ProcessResourceSelf => {
             let r = super::process::sys_process_resource_self();
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::ResourceSplit => {
+            let r = super::process::sys_resource_split(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
         SyscallOp::ProcessLoadImage => {
@@ -246,7 +250,6 @@ fn sys_signal_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64
 }
 
 const WAIT_MANY_ENTRY_SIZE: usize = 8;
-const WAIT_MANY_MAX_COUNT: usize = 256;
 
 // Заполнитель хвоста массива записей wait_many. Наружу не уходит.
 const WAIT_MANY_PLACEHOLDER: (HandleId, u32) = (HandleId::from_raw(NonZeroU32::MIN), 0);

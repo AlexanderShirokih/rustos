@@ -31,9 +31,7 @@ fn pl031_rtc_interrupt() {
 
     // База MMIO и линия прерывания PL031 - из boot FDT.
     let fdt_region = MemoryRegion::adopt(client.acquire_boot_fdt().expect("call").expect("vend"));
-    let fdt_mapping = fdt_region
-        .map_full(UserMemFlags::ReadOnly)
-        .expect("map fdt region");
+    let fdt_mapping = fdt_region.map_full_read_only().expect("map fdt region");
     let tree = DeviceTree::from_bytes(fdt_mapping.as_bytes()).expect("parse dtb");
     let root = tree.root().expect("dtb root node");
     let pl031 = root

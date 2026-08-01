@@ -165,27 +165,15 @@ fn decode_single_value(ty: &WireTy, body: &TokenStream) -> TokenStream {
     }}
 }
 
-/// Декод одного значения поля; для Cap читает индекс и достаёт id из `__in_handles`,
-/// иначе - обычный `WireValue::from_field`. Опирается на `__field`/`__in_handles` в области.
+// Опирается на __field и __handle_slots в области: значение-капа достаёт свой handle из
+// слотов кадра.
 fn decode_field_value(ty: &WireTy) -> TokenStream {
-    if let WireTy::Cap = ty {
-        quote! {{
-            let __idx = ::ipc::wire::value::decode_port_index(__field.data)?;
-            let __raw = *__in_handles
-                .get(__idx as usize)
-                .ok_or(::ipc::wire::IpcError::InvalidValue)?;
-            let __nz = ::core::num::NonZeroU32::new(__raw)
-                .ok_or(::ipc::wire::IpcError::InvalidValue)?;
-            ::ipc::wire::Cap::from_raw(__nz)
-        }}
-    } else {
-        let ty_tokens = wire_ty_tokens(ty, &quote!('_));
-        quote!(<#ty_tokens as ::ipc::WireValue>::from_field(__field.data)?)
-    }
+    let ty_tokens = wire_ty_tokens(ty, &quote!('_));
+    quote!(<#ty_tokens as ::ipc::WireValue>::from_field(__field.data, &__handle_slots)?)
 }
 
-/// Запись одного значения в `buf`; для Cap пишет индекс и кладёт id в `__out_handles`,
-/// иначе - обычный `WireValue::write_as_field`. Опирается на `__out_handles`/`__out_handle_count`.
+// Опирается на __handle_slots: значение-капа кладёт туда handle, а в тело пишет его индекс.
+// Cap-параметр верхнего уровня принимается как impl IntoWireHandle, и его id берётся у трейта.
 fn encode_field(
     value: &TokenStream,
     field_id: u8,
@@ -193,32 +181,20 @@ fn encode_field(
     buf: &TokenStream,
     owned: bool,
 ) -> TokenStream {
-    if let WireTy::Cap = ty {
-        let id_expr = if owned {
-            quote!(::ipc::IntoWireHandle::wire_id(&#value))
-        } else {
-            quote!(#value.raw().get())
+    if let (WireTy::Cap, true) = (ty, owned) {
+        return quote! {
+            let __index = __handle_slots.push(::ipc::IntoWireHandle::wire_id(&#value))?;
+            #buf.write_field(#field_id, &::ipc::wire::value::encode_port_index(__index))?;
         };
-
-        quote! {
-            #buf.write_field(
-                #field_id,
-                &::ipc::wire::value::encode_port_index(__out_handle_count as u8),
-            )?;
-            __out_handles[__out_handle_count] = #id_expr;
-            __out_handle_count += 1;
-        }
-    } else {
-        quote! {
-            ::ipc::WireValue::write_as_field(&#value, &mut #buf, #field_id)?;
-        }
+    }
+    quote! {
+        ::ipc::WireValue::write_as_field(&#value, &mut #buf, #field_id, &mut __handle_slots)?;
     }
 }
 
 /// Эмитит запись параметров запроса в `__buf` и аргумент handle-среза для `write_message`.
 /// Массив `__out_handles` объявляется только при наличии Cap-поля.
 fn encode_params(params: &[Param]) -> (TokenStream, TokenStream) {
-    let has_cap = params.iter().any(|param| matches!(param.ty, WireTy::Cap));
     let writes = params.iter().map(|param| {
         let ident = &param.ident;
         encode_field(
@@ -229,9 +205,8 @@ fn encode_params(params: &[Param]) -> (TokenStream, TokenStream) {
             true,
         )
     });
-    let decl = handles_out_decl(has_cap);
-    let handles_arg = handles_out_arg(has_cap);
-    (quote! { #decl #(#writes)* }, handles_arg)
+    let decl = handles_out_decl();
+    (quote! { #decl #(#writes)* }, handles_out_arg())
 }
 
 /// Эмитит запись возвращаемого значения `value` в `buf` и аргумент handle-среза.
@@ -241,33 +216,25 @@ fn encode_return(
     buf: &TokenStream,
     owned: bool,
 ) -> (TokenStream, TokenStream) {
-    let has_cap = matches!(ty, WireTy::Cap);
-    let decl = handles_out_decl(has_cap);
+    let decl = handles_out_decl();
     let write = encode_field(value, 1u8, ty, buf, owned);
-    (quote! { #decl #write }, handles_out_arg(has_cap))
+    (quote! { #decl #write }, handles_out_arg())
 }
 
 fn is_cap_value_return(ret: &RetType) -> bool {
     matches!(ret.ok(), WireTy::Cap) && ret.err().is_none()
 }
 
-fn handles_out_decl(has_cap: bool) -> TokenStream {
-    if has_cap {
-        quote! {
-            let mut __out_handles = [0u32; ::ipc::wire::MESSAGE_MAX_HANDLES];
-            let mut __out_handle_count = 0usize;
-        }
-    } else {
-        TokenStream::new()
+// Слоты исходящего кадра заводятся всегда: капа прячется и внутри агрегата, чей wire-тип по
+// имени не разобрать.
+fn handles_out_decl() -> TokenStream {
+    quote! {
+        let mut __handle_slots = ::ipc::wire::HandleSlots::new();
     }
 }
 
-fn handles_out_arg(has_cap: bool) -> TokenStream {
-    if has_cap {
-        quote!(&__out_handles[..__out_handle_count])
-    } else {
-        quote!(&[])
-    }
+fn handles_out_arg() -> TokenStream {
+    quote!(__handle_slots.as_slice())
 }
 
 fn param_signature(params: &[Param]) -> TokenStream {
@@ -468,13 +435,7 @@ fn expand_client_call(protocol: &Protocol, op: &Operation) -> TokenStream {
     let params_sig = param_signature_send(&op.params);
 
     let ret = op.ret.as_ref().expect("two-way carries a return type");
-    let ret_has_cap =
-        matches!(ret.ok(), WireTy::Cap) || ret.err().is_some_and(|err| matches!(err, WireTy::Cap));
-    let in_handles_decl = if ret_has_cap {
-        quote!(let __in_handles = &__handles[..__len.handles];)
-    } else {
-        TokenStream::new()
-    };
+    let in_handles_decl = quote!(let __handle_slots = ::ipc::wire::HandleSlots::from_received(&__handles[..__len.handles]););
     let (ret_ty, decode_response) = expand_call_return(ret);
 
     // Per-call `#[call(timeout_ns = N)]` перекрывает дефолт клиента.
@@ -634,12 +595,7 @@ fn decode_params(params: &[Param]) -> (TokenStream, TokenStream) {
         }
     });
 
-    let has_cap = params.iter().any(|param| matches!(param.ty, WireTy::Cap));
-    let in_handles_decl = if has_cap {
-        quote!(let __in_handles = &__handles[..__len.handles];)
-    } else {
-        TokenStream::new()
-    };
+    let in_handles_decl = quote!(let __handle_slots = ::ipc::wire::HandleSlots::from_received(&__handles[..__len.handles]););
     let decode = quote! {
         #in_handles_decl
         #(#decls)*

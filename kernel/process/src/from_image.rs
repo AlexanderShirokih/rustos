@@ -133,7 +133,7 @@ mod tests {
             },
         ];
         let entry = Entry {
-            name: "test",
+            path: "/test",
             entry_va: 0x40_0000,
             stack_size: 0x8000,
             segments: &segments,
@@ -162,7 +162,7 @@ mod tests {
             bytes: b"CODE",
         }];
         let entry = Entry {
-            name: "test",
+            path: "/test",
             entry_va: 0x40_0001,
             stack_size: 0x4000,
             segments: &segments,
@@ -187,7 +187,7 @@ mod tests {
             bytes: b"CODE",
         }];
         let entry = Entry {
-            name: "test",
+            path: "/test",
             entry_va: 0,
             stack_size: 0x4000,
             segments: &segments,

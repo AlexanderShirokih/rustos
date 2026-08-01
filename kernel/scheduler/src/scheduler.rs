@@ -19,7 +19,7 @@ use super::{
     address_space::AddressSpace,
     arch::{ArchContext, ArchCpu, CpuId, TimerSource, with_preemption_disabled},
     cpu::Cpu,
-    process::{Process, ProcessTable},
+    process::{Process, ProcessName, ProcessTable},
     thread::{IpcBufferSlot, Thread, ThreadState},
     thread_table::ThreadTable,
     wait_queue::{SleepEntry, SleepQueue},
@@ -609,7 +609,9 @@ where
     fn validate_prepared_user_process(
         &self,
         prepared: &PreparedUserProcess,
-    ) -> Result<(), PreparedUserProcessError> {
+    ) -> Result<ProcessName<'static>, PreparedUserProcessError> {
+        let name = ProcessName::new(prepared.name)
+            .ok_or(PreparedUserProcessError::Spawn(SpawnError::InvalidName))?;
         if prepared.kernel_stack_pages == 0 {
             return Err(PreparedUserProcessError::Spawn(
                 SpawnError::InvalidStackPages,
@@ -618,7 +620,7 @@ where
         if (prepared.priority.raw() as usize) >= self.config.priority_levels() {
             return Err(PreparedUserProcessError::Spawn(SpawnError::InvalidPriority));
         }
-        Ok(())
+        Ok(name)
     }
 
     /// Забирает отложенное разрушение capability: оно снимает учёт держателей
@@ -638,7 +640,7 @@ where
     /// разрушается вне лока.
     fn insert_child_process(
         &mut self,
-        name: &'static str,
+        name: ProcessName<'_>,
         address_space: &Arc<AddressSpace>,
         user_vm: Option<UserVmAllocator>,
     ) -> Option<ChildHandleSlot> {
@@ -673,11 +675,14 @@ where
         &mut self,
         prepared: PreparedUserProcess,
     ) -> Result<UserProcessLaunchInfo, PreparedUserProcessError> {
-        if let Err(e) = self.validate_prepared_user_process(&prepared) {
-            self.deferred_handles
-                .push_rolled_back(prepared.launch.initial_handle);
-            return Err(e);
-        }
+        let name = match self.validate_prepared_user_process(&prepared) {
+            Ok(name) => name,
+            Err(e) => {
+                self.deferred_handles
+                    .push_rolled_back(prepared.launch.initial_handle);
+                return Err(e);
+            }
+        };
         let launch = prepared.launch;
         let initial_handle = launch.initial_handle;
 
@@ -696,7 +701,7 @@ where
             process_object,
             table: child_table,
             reservation,
-        }) = self.insert_child_process(prepared.name, &prepared.address_space, prepared.user_vm)
+        }) = self.insert_child_process(name, &prepared.address_space, prepared.user_vm)
         else {
             self.deferred_handles.push_rolled_back(initial_handle);
             return Err(PreparedUserProcessError::Spawn(
@@ -799,6 +804,7 @@ where
             existing.increment_thread_count();
             return Ok((current_pid, false));
         }
+        let name = ProcessName::new(name).ok_or(SpawnError::InvalidName)?;
         let pid = self
             .processes
             .insert(name, address_space)
@@ -1035,9 +1041,7 @@ where
         &mut self,
         name: &str,
     ) -> Result<Arc<ProcessObject>, SpawnError> {
-        if name.is_empty() {
-            return Err(SpawnError::InvalidName);
-        }
+        let name = ProcessName::new(name).ok_or(SpawnError::InvalidName)?;
         let factory = self
             .address_space_factory
             .ok_or(SpawnError::AddressSpaceCreationFailed)?;
@@ -1362,30 +1366,12 @@ where
             installed.push((seg.va_base, seg.mapped_size));
         }
 
-        let stack_base_usize = install
-            .user_stack_top
-            .as_usize()
-            .checked_sub(install.user_stack_size)
-            .ok_or(LoadImageError::MappingFailed(
-                memory::memory_mapper::MemoryMappingError::VirtualMappingError,
-            ))?;
-        let stack_base = PageAlignedVirtualAddress::from_usize(stack_base_usize).ok_or(
-            LoadImageError::MappingFailed(
-                memory::memory_mapper::MemoryMappingError::VirtualMappingError,
-            ),
-        )?;
-        let stack_pages = install.user_stack_size / PAGE_SIZE;
-        if let Err(e) = mapper.map(stack_base, stack_pages, &[], memory::MemFlags::user_rw()) {
-            for (va, size) in installed.iter().rev() {
-                let _ = mapper.unmap(*va, *size);
-            }
-            return Err(LoadImageError::MappingFailed(e));
-        }
-
         let vm = UserVmAllocator::new(install.user_vm_base, VirtualAddress::new(user_vm_end_usize));
         process
             .set_user_vm(vm)
             .map_err(|_| LoadImageError::WrongState)?;
+        // Регионы образа держит процесс: их бюджет возвращается вызывающему,
+        // когда процесс уходит. Стек - такой же сегмент.
         let segments: Vec<Arc<MemoryRegion>> =
             install.segments.iter().map(|s| s.region.clone()).collect();
         process.set_image_segments(segments);
@@ -1403,7 +1389,7 @@ where
             mut entry,
             loader_handle_table,
             handle_id,
-            metering_resource,
+            metering_grant,
         } = spec;
 
         let child_table = {
@@ -1480,8 +1466,8 @@ where
         self.deferred_handles.push_drained(rejected);
 
         // До enqueue: стартовый поток не должен аллоцировать раньше засева.
-        if let Some(resource) = metering_resource {
-            process_object.set_metering_resource(resource);
+        if let Some(grant) = metering_grant {
+            process_object.set_metering(grant);
         }
 
         self.enqueue_user_thread_ready(thread_id);

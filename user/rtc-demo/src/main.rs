@@ -34,7 +34,9 @@ fn run(root: Handle) -> Result<()> {
     let image_region =
         MemoryRegion::adopt(kernel.acquire_userland_image()?.map_err(|_| Error::Vend)?);
     let image_mapping = image_region.map_full(UserMemFlags::ReadOnly)?;
-    let image = decode(image_mapping.as_bytes())?;
+    // SAFETY: регион образа ядро выдаёт только на чтение: отображений на запись
+    // у него нет ни в одном адресном пространстве.
+    let image = decode(unsafe { image_mapping.as_bytes() })?;
     let base = get_pl031_base(&kernel)?;
     let device: MemoryRegion = kernel
         .acquire_device_memory_by_base(base)?
@@ -48,14 +50,24 @@ fn run(root: Handle) -> Result<()> {
     let client_args_port = Port::create_service(0)?;
 
     // Драйвер стартует с серверной стороной своего args-порта.
-    let driver = spawn(&image, "rtc-driver", &resource, driver_args_port.server)?;
+    let driver = spawn(
+        &image,
+        "/boot/rtc-driver",
+        &resource,
+        driver_args_port.server,
+    )?;
 
     let driver_args =
         DriverArgsClient::new(PortTransport::client(driver_args_port.client.handle()));
     driver_args.provide(device.into_handle(), clock_port.server)?;
 
     // Клиент - симметрично: клиентская сторона clock-порта и write-копия klog.
-    let client = spawn(&image, "rtc-client", &resource, client_args_port.server)?;
+    let client = spawn(
+        &image,
+        "/boot/rtc-client",
+        &resource,
+        client_args_port.server,
+    )?;
 
     let client_args =
         ClientArgsClient::new(PortTransport::client(client_args_port.client.handle()));
@@ -72,18 +84,21 @@ fn run(root: Handle) -> Result<()> {
 
 fn spawn(
     image: &DecodedImage,
-    name: &str,
+    path: &str,
     resource: &Resource,
     startup: OwnedHandle,
 ) -> Result<Process> {
-    let entry = image.entry(name).ok_or(Error::MissingEntry)?;
-    Ok(load_entry(&entry, resource, startup)?)
+    let program = image.entry(path).ok_or(Error::MissingEntry)?.program()?;
+    Ok(load_entry(&program, resource, startup)?)
 }
 
 fn get_pl031_base(kernel: &BootstrapClient<PortTransport>) -> Result<u64> {
     let fdt_region = MemoryRegion::adopt(kernel.acquire_boot_fdt()?.map_err(|_| Error::Vend)?);
     let fdt_mapping = fdt_region.map_full(UserMemFlags::ReadOnly)?;
-    let tree = DeviceTree::from_bytes(fdt_mapping.as_bytes()).map_err(|_| Error::Dtb)?;
+    // SAFETY: регион DTB ядро выдаёт только на чтение: отображений на запись у
+    // него нет ни в одном адресном пространстве.
+    let fdt_bytes = unsafe { fdt_mapping.as_bytes() };
+    let tree = DeviceTree::from_bytes(fdt_bytes).map_err(|_| Error::Dtb)?;
     let root = tree.root().ok_or(Error::Dtb)?;
     let pl031 = root
         .children()

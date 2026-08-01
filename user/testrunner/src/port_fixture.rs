@@ -16,11 +16,17 @@ use core::{
 };
 
 use fixture_protocol::{
-    OP_EXIT, OP_MAP_CHECK, OP_READ_SLOT, OP_WRITE_SLOT, READ_REPLY_LEN, REPLY_MAP_FAILED, REPLY_OK,
+    OP_ALLOCATE_PAGES, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT, OP_MAP_CHECK, OP_READ_SLOT,
+    OP_WRITE_SLOT, READ_REPLY_LEN, REPLY_ACCESS_DENIED, REPLY_ALLOCATE_FAILED,
+    REPLY_BUDGET_EXHAUSTED, REPLY_DUPLICATE_FAILED, REPLY_MAP_FAILED, REPLY_OK,
     REPLY_PATTERN_MISMATCH, REQUEST_LEN, decode_request,
 };
-use runtime::{Error, MemoryRegion, OwnedHandle, Port, Reply, Timeout, UserMemFlags, thread_exit};
-use syscall::{Handle, SyscallError};
+use runtime::{
+    Error, MemoryAccess, MemoryRegion, OwnedHandle, Port, Reply, Resource, Timeout, UserMemFlags,
+    thread_exit,
+};
+use syscall::{Handle, Rights, SyscallError};
+use userland::USERLAND_PAGE_SIZE;
 
 mod fixture_protocol;
 mod ipc_raw;
@@ -73,6 +79,8 @@ pub extern "C" fn _start(root: Handle) -> ! {
                 let cap = if ncaps == 1 { ipc_raw::read_cap(0) } else { 0 };
                 answer(reply, &[map_check(cap, arg)]);
             }
+            OP_ALLOCATE_PAGES => answer(reply, &[allocate_pages(arg)]),
+            OP_DUPLICATE_TRANSFER_CAP => answer(reply, &[duplicate_transfer_cap()]),
             OP_EXIT => {
                 answer(reply, &[REPLY_OK]);
                 thread_exit(arg)
@@ -88,6 +96,33 @@ fn answer(reply: Reply, body: &[u8]) {
     ipc_raw::write_frame(body, &[]);
     if reply.reply().is_err() {
         thread_exit(EXIT_REPLY_FAILED)
+    }
+}
+
+// Регион сразу закрывается: наблюдаемо только то, пропустил ли выделение бюджет.
+fn allocate_pages(pages: u64) -> u8 {
+    let Ok(resource) = Resource::self_resource() else {
+        return REPLY_ALLOCATE_FAILED;
+    };
+    match resource.create_virtual(pages.saturating_mul(USERLAND_PAGE_SIZE), MemoryAccess::RW) {
+        Ok(_) => REPLY_OK,
+        Err(Error::Syscall(SyscallError::ResourceExhausted)) => REPLY_BUDGET_EXHAUSTED,
+        Err(_) => REPLY_ALLOCATE_FAILED,
+    }
+}
+
+// Ширину прав капы метеринг-ресурса задаёт грант старта, у самой фикстуры её нет.
+fn duplicate_transfer_cap() -> u8 {
+    let Ok(resource) = Resource::self_resource() else {
+        return REPLY_DUPLICATE_FAILED;
+    };
+    match resource
+        .handle()
+        .duplicate(Rights::WRITE | Rights::TRANSFER, 0)
+    {
+        Ok(_) => REPLY_OK,
+        Err(Error::Syscall(SyscallError::AccessDenied)) => REPLY_ACCESS_DENIED,
+        Err(_) => REPLY_DUPLICATE_FAILED,
     }
 }
 

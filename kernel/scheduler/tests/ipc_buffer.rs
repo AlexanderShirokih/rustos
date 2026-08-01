@@ -37,8 +37,6 @@ fn mark_loaded(
     let install = capability::UserImageInstall {
         segments: std::vec::Vec::new(),
         entry: VirtualAddress::new(0x4000_0000),
-        user_stack_top: VirtualAddress::new(0x5000_1000),
-        user_stack_size: 0x1000,
         user_vm_base: PageAlignedVirtualAddress::from_usize(0x4000_0000).expect("aligned"),
         user_vm_size: 0x100_0000,
     };

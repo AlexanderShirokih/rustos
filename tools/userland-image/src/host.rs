@@ -8,17 +8,19 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use filesystem_abi::{NAME_MAX, PATH_MAX};
 use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSegment, SegmentFlags, elf};
 use serde::Deserialize;
-#[cfg(test)]
-use userland::EntryView;
 use userland::{
-    Entry, Segment, SegmentPermissions, USERLAND_ENTRY_NAME_CAPACITY, USERLAND_PAGE_SIZE,
+    Entry, Segment, SegmentPermissions, USERLAND_ENTRY_PATH_CAPACITY, USERLAND_PAGE_SIZE,
 };
-use userland_image::{USERLAND_IMAGE_VERSION, decode, encode};
+use userland_image::{ImageRecord, USERLAND_IMAGE_VERSION, decode, encode, encode_program};
 
 const USERLAND_MANIFEST_VERSION: u16 = USERLAND_IMAGE_VERSION;
 const USERLAND_STACK_ALIGN: u64 = USERLAND_PAGE_SIZE;
+
+// Путь записи образа - путь контракта: граница длины у них общая.
+const _: () = assert!(PATH_MAX == USERLAND_ENTRY_PATH_CAPACITY);
 
 /// Переменная окружения, передаваемая сборке каждой программы образа.
 #[derive(Clone, Copy, Debug)]
@@ -27,43 +29,51 @@ pub struct BuildEnvironment<'a> {
     pub value: &'a str,
 }
 
-/// Композиция образа: версия и список включаемых пакетов workspace.
+// Композиция образа: версия, программы и файлы, попадающие в таблицу записей.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImageManifest {
     #[serde(default = "default_manifest_version")]
     version: u16,
     programs: Vec<ImageProgram>,
+    #[serde(default)]
+    files: Vec<ImageFile>,
 }
 
-/// Элемент композиции: имя пакета плюс точечные override полей метаданных.
+// Программа: путь в образе, пакет workspace и точечные override метаданных.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImageProgram {
     package: String,
-    name: Option<String>,
+    path: String,
     bin: Option<String>,
-    bootstrap: Option<bool>,
+    boot: Option<bool>,
     stack_size: Option<u64>,
+}
+
+// Файл: путь в образе и файл на диске, откуда берутся байты.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageFile {
+    path: String,
+    source: PathBuf,
 }
 
 /// Свойства программы из секции `[package.metadata.userland]` её Cargo.toml.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UserlandMetadata {
-    name: Option<String>,
     bin: Option<String>,
-    bootstrap: Option<bool>,
     stack_size: Option<u64>,
 }
 
 /// Программа после слияния метаданных пакета и override образа.
 #[derive(Clone, Debug)]
 struct ResolvedProgram {
-    name: String,
+    path: String,
     package: String,
     bin: String,
-    bootstrap: bool,
+    boot: bool,
     stack_size: u64,
 }
 
@@ -87,7 +97,6 @@ struct WorkspaceMetadata {
 
 #[derive(Clone, Debug)]
 struct BuiltEntry {
-    image_order: usize,
     program: ResolvedProgram,
     entry_va: u64,
     segments: Vec<BuiltSegment>,
@@ -99,6 +108,13 @@ struct BuiltSegment {
     va_base: u64,
     mem_size: u64,
     permissions: SegmentPermissions,
+}
+
+// Файл образа с прочитанным содержимым.
+#[derive(Clone, Debug)]
+struct LoadedFile {
+    path: String,
+    bytes: Vec<u8>,
 }
 
 fn default_manifest_version() -> u16 {
@@ -115,21 +131,20 @@ pub fn build_userland(
     let manifest = load_manifest(manifest_path)?;
     let workspace = load_workspace_metadata(project_root)?;
     let programs = resolve_programs(&manifest, &workspace.packages)?;
+    let files = load_files(project_root, &manifest.files)?;
     let built_entries = programs
         .iter()
-        .enumerate()
-        .map(|(image_order, program)| {
+        .map(|program| {
             build_program(
                 project_root,
                 &workspace.target_directory,
-                image_order,
                 program,
                 environment,
             )
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let blob = assemble_userland_image(&built_entries)?;
+    let blob = assemble_userland_image(&built_entries, &files)?;
     let output_path = build_dir.join("userland.img");
     fs::write(&output_path, blob)
         .with_context(|| format!("Failed to write userland image '{}'", output_path.display()))?;
@@ -160,6 +175,27 @@ fn parse_manifest(src: &str) -> Result<ImageManifest> {
         "userland image manifest must contain at least one [[programs]] item"
     );
     Ok(manifest)
+}
+
+fn load_files(project_root: &Path, files: &[ImageFile]) -> Result<Vec<LoadedFile>> {
+    files
+        .iter()
+        .map(|file| {
+            validate_image_path(&file.path)?;
+            let source = project_root.join(&file.source);
+            let bytes = fs::read(&source).with_context(|| {
+                format!(
+                    "Failed to read source of image file '{}' from '{}'",
+                    file.path,
+                    source.display()
+                )
+            })?;
+            Ok(LoadedFile {
+                path: file.path.clone(),
+                bytes,
+            })
+        })
+        .collect()
 }
 
 fn load_workspace_metadata(project_root: &Path) -> Result<WorkspaceMetadata> {
@@ -238,18 +274,13 @@ fn resolve_programs(
                 program.package,
                 program.bin
             );
-            ensure!(
-                program.name != earlier.name,
-                "userland entry name '{}' is duplicated in image manifest",
-                program.name
-            );
         }
     }
 
-    match resolved.iter().filter(|program| program.bootstrap).count() {
+    match resolved.iter().filter(|program| program.boot).count() {
         1 => {}
-        0 => bail!("userland image must contain exactly one bootstrap program; found none"),
-        count => bail!("userland image must contain exactly one bootstrap program; found {count}"),
+        0 => bail!("userland image must contain exactly one boot program; found none"),
+        count => bail!("userland image must contain exactly one boot program; found {count}"),
     }
 
     Ok(resolved)
@@ -268,45 +299,44 @@ fn resolve_program(program: &ImageProgram, meta: &UserlandMetadata) -> Result<Re
         )
     })?;
     let resolved = ResolvedProgram {
-        name: program
-            .name
-            .clone()
-            .or_else(|| meta.name.clone())
-            .unwrap_or_else(|| program.package.clone()),
+        path: program.path.clone(),
         package: program.package.clone(),
         bin: program
             .bin
             .clone()
             .or_else(|| meta.bin.clone())
             .unwrap_or_else(|| program.package.clone()),
-        bootstrap: program.bootstrap.or(meta.bootstrap).unwrap_or(false),
+        boot: program.boot.unwrap_or(false),
         stack_size,
     };
     validate_program(&resolved)?;
     Ok(resolved)
 }
 
+// Правила пути контракта (filesystem_abi::Path) одни на программы и файлы, включая
+// ASCII-ограничение записи образа.
+fn validate_image_path(path: &str) -> Result<()> {
+    filesystem_abi::Path::new(path).map_err(|_| {
+        anyhow!(
+            "image path '{path}' must be absolute and at most {PATH_MAX} bytes, \
+             with components of 1..={NAME_MAX} bytes other than '.' and '..'"
+        )
+    })?;
+    ensure!(path.is_ascii(), "image path '{path}' must be ASCII");
+    Ok(())
+}
+
 fn validate_program(program: &ResolvedProgram) -> Result<()> {
-    ensure!(
-        !program.name.is_empty() && program.name.len() <= USERLAND_ENTRY_NAME_CAPACITY,
-        "userland entry '{}' name must be 1..={} bytes",
-        program.name,
-        USERLAND_ENTRY_NAME_CAPACITY
-    );
-    ensure!(
-        program.name.is_ascii(),
-        "userland entry '{}' name must be ASCII",
-        program.name
-    );
+    validate_image_path(&program.path)?;
     ensure!(
         !program.bin.is_empty(),
         "userland entry '{}' bin must not be empty",
-        program.name
+        program.path
     );
     ensure!(
         program.stack_size != 0 && program.stack_size.is_multiple_of(USERLAND_STACK_ALIGN),
         "userland entry '{}' stack_size must be a non-zero multiple of {} bytes; got {}",
-        program.name,
+        program.path,
         USERLAND_STACK_ALIGN,
         program.stack_size
     );
@@ -316,13 +346,12 @@ fn validate_program(program: &ResolvedProgram) -> Result<()> {
 fn build_program(
     project_root: &Path,
     target_directory: &Path,
-    image_order: usize,
     program: &ResolvedProgram,
     environment: &[BuildEnvironment<'_>],
 ) -> Result<BuiltEntry> {
     run_userland_build(project_root, program, environment)?;
     let binary_path = userland_binary_path(target_directory, &program.bin);
-    read_and_extract_entry(image_order, &binary_path, program)
+    read_and_extract_entry(&binary_path, program)
 }
 
 fn run_userland_build(
@@ -356,7 +385,7 @@ fn run_userland_build(
     if !status.success() {
         bail!(
             "Failed to build userland entry '{}' with status {}",
-            program.name,
+            program.path,
             status
         );
     }
@@ -370,11 +399,7 @@ fn userland_binary_path(target_directory: &Path, bin: &str) -> PathBuf {
         .join(bin)
 }
 
-fn read_and_extract_entry(
-    image_order: usize,
-    path: &Path,
-    program: &ResolvedProgram,
-) -> Result<BuiltEntry> {
+fn read_and_extract_entry(path: &Path, program: &ResolvedProgram) -> Result<BuiltEntry> {
     let mut payload = Vec::new();
     File::open(path)
         .with_context(|| format!("Failed to open userland ELF '{}'", path.display()))?
@@ -384,13 +409,13 @@ fn read_and_extract_entry(
     ensure!(
         path.extension() != Some(OsStr::new("d")),
         "unexpected dep-info path for userland entry '{}'",
-        program.name
+        program.path
     );
 
     let file = object::File::parse(payload.as_slice()).with_context(|| {
         format!(
             "Failed to parse payload ELF for userland entry '{}'",
-            program.name
+            program.path
         )
     })?;
 
@@ -399,7 +424,6 @@ fn read_and_extract_entry(
     let segments = extract_segments(&file, program)?;
 
     Ok(BuiltEntry {
-        image_order,
         program: program.clone(),
         entry_va,
         segments,
@@ -410,27 +434,27 @@ fn validate_file(file: &object::File<'_>, program: &ResolvedProgram) -> Result<(
     ensure!(
         file.format() == BinaryFormat::Elf,
         "userland entry '{}' payload is not ELF",
-        program.name
+        program.path
     );
     ensure!(
         file.architecture() == Architecture::Aarch64,
         "userland entry '{}' payload must target AArch64",
-        program.name
+        program.path
     );
     ensure!(
         file.kind() == ObjectKind::Executable,
         "userland entry '{}' payload must be ET_EXEC",
-        program.name
+        program.path
     );
     ensure!(
         file.is_little_endian(),
         "userland entry '{}' payload must be little-endian",
-        program.name
+        program.path
     );
     ensure!(
         file.is_64(),
         "userland entry '{}' payload must be ELF64",
-        program.name
+        program.path
     );
     Ok(())
 }
@@ -444,7 +468,7 @@ fn extract_segments(
     for segment in file.segments() {
         let bytes = segment
             .data()
-            .with_context(|| format!("Failed to read PT_LOAD bytes for '{}'", program.name))?;
+            .with_context(|| format!("Failed to read PT_LOAD bytes for '{}'", program.path))?;
         let permissions = map_segment_permissions(segment.flags(), program)?;
         segments.push(BuiltSegment {
             bytes: bytes.to_vec(),
@@ -457,7 +481,7 @@ fn extract_segments(
     ensure!(
         !segments.is_empty(),
         "userland entry '{}' must contain at least one PT_LOAD segment",
-        program.name
+        program.path
     );
 
     Ok(segments)
@@ -470,7 +494,7 @@ fn map_segment_permissions(
     let SegmentFlags::Elf { p_flags } = flags else {
         bail!(
             "userland entry '{}' must expose ELF PT_LOAD segment flags",
-            program.name
+            program.path
         );
     };
 
@@ -484,50 +508,71 @@ fn map_segment_permissions(
         (true, false, true) => Ok(SegmentPermissions::ReadExecute),
         _ => bail!(
             "userland entry '{}' has unsupported PT_LOAD flags {p_flags:#x}",
-            program.name
+            program.path
         ),
     }
 }
 
-fn assemble_userland_image(entries: &[BuiltEntry]) -> Result<Vec<u8>> {
-    validate_built_entries(entries)?;
+// Собранный образ разбирается обратно как проверка сборки.
+fn assemble_userland_image(entries: &[BuiltEntry], files: &[LoadedFile]) -> Result<Vec<u8>> {
+    let boot_path = validate_built_entries(entries, files)?;
 
-    let ordered = order_entries(entries);
-
-    let segments: Vec<Vec<Segment<'_>>> = ordered
+    let blobs = entries
         .iter()
-        .map(|entry| {
-            entry
-                .segments
-                .iter()
-                .map(|segment| Segment {
-                    va_base: segment.va_base,
-                    mem_size: segment.mem_size,
-                    permissions: segment.permissions,
-                    bytes: &segment.bytes,
-                })
-                .collect()
-        })
-        .collect();
-    let inputs: Vec<Entry<'_>> = ordered
+        .map(build_program_blob)
+        .collect::<Result<Vec<_>>>()?;
+    let records: Vec<ImageRecord<'_>> = entries
         .iter()
-        .zip(&segments)
-        .map(|(entry, segments)| Entry {
-            name: &entry.program.name,
-            entry_va: entry.entry_va,
-            stack_size: entry.program.stack_size,
-            segments,
+        .zip(&blobs)
+        .map(|(entry, blob)| ImageRecord {
+            path: &entry.program.path,
+            data: blob,
         })
+        .chain(files.iter().map(|file| ImageRecord {
+            path: &file.path,
+            data: &file.bytes,
+        }))
         .collect();
 
-    let image =
-        encode(&inputs).map_err(|err| anyhow!("failed to serialize userland image: {err:?}"))?;
+    let image = encode(&records, boot_path)
+        .map_err(|err| anyhow!("failed to serialize userland image: {err:?}"))?;
 
-    decode(&image).map_err(|err| anyhow!("assembled userland image is invalid: {err:?}"))?;
+    let decoded =
+        decode(&image).map_err(|err| anyhow!("assembled userland image is invalid: {err:?}"))?;
+    decoded
+        .boot_entry()
+        .program()
+        .map_err(|err| anyhow!("boot record '{boot_path}' is not a program: {err:?}"))?;
     Ok(image)
 }
 
-fn validate_built_entries(entries: &[BuiltEntry]) -> Result<()> {
+fn build_program_blob(entry: &BuiltEntry) -> Result<Vec<u8>> {
+    let segments: Vec<Segment<'_>> = entry
+        .segments
+        .iter()
+        .map(|segment| Segment {
+            va_base: segment.va_base,
+            mem_size: segment.mem_size,
+            permissions: segment.permissions,
+            bytes: &segment.bytes,
+        })
+        .collect();
+
+    encode_program(&Entry {
+        path: &entry.program.path,
+        entry_va: entry.entry_va,
+        stack_size: entry.program.stack_size,
+        segments: &segments,
+    })
+    .map_err(|err| {
+        anyhow!(
+            "failed to serialize program '{}': {err:?}",
+            entry.program.path
+        )
+    })
+}
+
+fn validate_built_entries<'a>(entries: &'a [BuiltEntry], files: &[LoadedFile]) -> Result<&'a str> {
     ensure!(
         !entries.is_empty(),
         "userland image must contain at least one entry"
@@ -538,90 +583,94 @@ fn validate_built_entries(entries: &[BuiltEntry]) -> Result<()> {
         ensure!(
             !entry.segments.is_empty(),
             "userland entry '{}' must contain at least one segment",
-            entry.program.name
+            entry.program.path
         );
     }
 
-    let bootstrap_entries = entries
+    let paths = entries
         .iter()
-        .filter(|entry| entry.program.bootstrap)
-        .collect::<Vec<_>>();
-    match bootstrap_entries.len() {
-        1 => {
-            let bootstrap = bootstrap_entries[0];
-            ensure!(
-                bootstrap
-                    .segments
-                    .iter()
-                    .any(|segment| !segment.bytes.is_empty()),
-                "bootstrap entry '{}' payload must not be empty",
-                bootstrap.program.name
-            );
-        }
-        0 => bail!("userland image must contain exactly one bootstrap entry; found none"),
-        count => bail!("userland image must contain exactly one bootstrap entry; found {count}"),
+        .map(|entry| entry.program.path.as_str())
+        .chain(files.iter().map(|file| file.path.as_str()));
+    let mut seen = Vec::new();
+    for path in paths {
+        validate_image_path(path)?;
+        ensure!(
+            !seen.contains(&path),
+            "image path '{path}' is used by more than one record"
+        );
+        seen.push(path);
     }
 
-    Ok(())
-}
-
-fn order_entries(entries: &[BuiltEntry]) -> Vec<&BuiltEntry> {
-    let mut ordered = entries.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|entry| (!entry.program.bootstrap, entry.image_order));
-    ordered
+    let boot_entries = entries
+        .iter()
+        .filter(|entry| entry.program.boot)
+        .collect::<Vec<_>>();
+    match boot_entries.len() {
+        1 => {
+            let boot = boot_entries[0];
+            ensure!(
+                boot.segments
+                    .iter()
+                    .any(|segment| !segment.bytes.is_empty()),
+                "boot entry '{}' payload must not be empty",
+                boot.program.path
+            );
+            Ok(&boot.program.path)
+        }
+        0 => bail!("userland image must contain exactly one boot entry; found none"),
+        count => bail!("userland image must contain exactly one boot entry; found {count}"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use userland::EntryView;
+
     use super::*;
 
-    fn image_program(package: &str) -> ImageProgram {
+    const BOOT_PATH: &str = "/boot/rootkeeper";
+
+    fn image_program(package: &str, path: &str, boot: bool) -> ImageProgram {
         ImageProgram {
             package: package.to_string(),
-            name: None,
+            path: path.to_string(),
             bin: None,
-            bootstrap: None,
+            boot: Some(boot),
             stack_size: None,
         }
     }
 
-    fn package_metadata(bootstrap: bool, stack_size: u64) -> UserlandMetadata {
+    fn package_metadata(stack_size: u64) -> UserlandMetadata {
         UserlandMetadata {
-            name: None,
             bin: None,
-            bootstrap: Some(bootstrap),
             stack_size: Some(stack_size),
         }
     }
 
-    fn metadata_map(packages: &[(&str, bool, u64)]) -> HashMap<String, UserlandMetadata> {
+    fn metadata_map(packages: &[(&str, u64)]) -> HashMap<String, UserlandMetadata> {
         packages
             .iter()
-            .map(|(package, bootstrap, stack_size)| {
-                (
-                    (*package).to_string(),
-                    package_metadata(*bootstrap, *stack_size),
-                )
-            })
+            .map(|(package, stack_size)| ((*package).to_string(), package_metadata(*stack_size)))
             .collect()
     }
 
-    fn manifest_of(packages: &[&str]) -> ImageManifest {
+    fn manifest_of(programs: &[(&str, &str, bool)]) -> ImageManifest {
         ImageManifest {
             version: USERLAND_MANIFEST_VERSION,
-            programs: packages
+            programs: programs
                 .iter()
-                .map(|package| image_program(package))
+                .map(|(package, path, boot)| image_program(package, path, *boot))
                 .collect(),
+            files: Vec::new(),
         }
     }
 
-    fn resolved_program(name: &str, bootstrap: bool, stack_size: u64) -> ResolvedProgram {
+    fn resolved_program(package: &str, path: &str, boot: bool, stack_size: u64) -> ResolvedProgram {
         ResolvedProgram {
-            name: name.to_string(),
-            package: name.to_string(),
-            bin: name.to_string(),
-            bootstrap,
+            path: path.to_string(),
+            package: package.to_string(),
+            bin: package.to_string(),
+            boot,
             stack_size,
         }
     }
@@ -640,57 +689,75 @@ mod tests {
         }
     }
 
-    fn built_entry(
-        image_order: usize,
-        name: &str,
-        bootstrap: bool,
-        entry_va: u64,
-        segments: &[BuiltSegment],
-    ) -> BuiltEntry {
+    fn built_entry(path: &str, boot: bool, entry_va: u64, segments: &[BuiltSegment]) -> BuiltEntry {
         BuiltEntry {
-            image_order,
-            program: resolved_program(name, bootstrap, 0x4000),
+            program: resolved_program("package", path, boot, 0x4000),
             entry_va,
             segments: segments.to_vec(),
         }
     }
 
+    fn loaded_file(path: &str, bytes: &[u8]) -> LoadedFile {
+        LoadedFile {
+            path: path.to_string(),
+            bytes: bytes.to_vec(),
+        }
+    }
+
     #[test]
-    fn manifest_parses_composition_with_overrides() {
+    fn manifest_parses_programs_and_files() {
         let manifest = parse_manifest(
             "version = 1\n\
              \n\
              [[programs]]\n\
              package = \"rootkeeper\"\n\
+             path = \"/boot/rootkeeper\"\n\
+             boot = true\n\
              \n\
              [[programs]]\n\
              package = \"testrunner\"\n\
-             name = \"tests\"\n\
-             stack_size = 131072\n",
+             path = \"/boot/tests\"\n\
+             stack_size = 131072\n\
+             \n\
+             [[files]]\n\
+             path = \"/data/sample\"\n\
+             source = \"user/rootkeeper/sample.txt\"\n",
         )
         .expect("composition manifest must parse");
 
         assert_eq!(manifest.version, 1);
         assert_eq!(manifest.programs.len(), 2);
-        assert_eq!(manifest.programs[0].package, "rootkeeper");
-        assert_eq!(manifest.programs[0].stack_size, None);
-        assert_eq!(manifest.programs[1].name.as_deref(), Some("tests"));
+        assert_eq!(manifest.programs[0].path, "/boot/rootkeeper");
+        assert_eq!(manifest.programs[0].boot, Some(true));
         assert_eq!(manifest.programs[1].stack_size, Some(131_072));
+        assert_eq!(manifest.files[0].path, "/data/sample");
+        assert_eq!(
+            manifest.files[0].source,
+            PathBuf::from("user/rootkeeper/sample.txt")
+        );
     }
 
     #[test]
-    fn manifest_rejects_legacy_entries_format() {
+    fn manifest_rejects_program_without_path() {
+        let err = parse_manifest("version = 1\n\n[[programs]]\npackage = \"rootkeeper\"\n")
+            .expect_err("path is required");
+        assert!(
+            err.to_string()
+                .contains("Failed to parse userland image manifest TOML")
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_entry_name_override() {
         let err = parse_manifest(
             "version = 1\n\
              \n\
-             [[entries]]\n\
-             name = \"rootkeeper\"\n\
+             [[programs]]\n\
              package = \"rootkeeper\"\n\
-             bin = \"rootkeeper\"\n\
-             bootstrap = true\n\
-             stack_size = 65536\n",
+             path = \"/boot/rootkeeper\"\n\
+             name = \"rootkeeper\"\n",
         )
-        .expect_err("legacy entries format must fail");
+        .expect_err("name override must fail");
         assert!(
             err.to_string()
                 .contains("Failed to parse userland image manifest TOML")
@@ -699,8 +766,10 @@ mod tests {
 
     #[test]
     fn manifest_rejects_unsupported_version() {
-        let err = parse_manifest("version = 2\n\n[[programs]]\npackage = \"rootkeeper\"\n")
-            .expect_err("unsupported version must fail");
+        let err = parse_manifest(
+            "version = 2\n\n[[programs]]\npackage = \"rootkeeper\"\npath = \"/boot/rootkeeper\"\n",
+        )
+        .expect_err("unsupported version must fail");
         assert_eq!(
             err.to_string(),
             "Unsupported userland image manifest version 2; expected 1"
@@ -719,38 +788,38 @@ mod tests {
 
     #[test]
     fn resolve_takes_defaults_from_package_metadata() {
-        let manifest = manifest_of(&["rootkeeper", "logger"]);
-        let metadata = metadata_map(&[("rootkeeper", true, 0x10000), ("logger", false, 0x4000)]);
+        let manifest = manifest_of(&[
+            ("rootkeeper", BOOT_PATH, true),
+            ("logger", "/boot/logger", false),
+        ]);
+        let metadata = metadata_map(&[("rootkeeper", 0x10000), ("logger", 0x4000)]);
 
         let programs = resolve_programs(&manifest, &metadata).expect("resolve must succeed");
         assert_eq!(programs.len(), 2);
-        assert_eq!(programs[0].name, "rootkeeper");
+        assert_eq!(programs[0].path, BOOT_PATH);
         assert_eq!(programs[0].bin, "rootkeeper");
-        assert!(programs[0].bootstrap);
+        assert!(programs[0].boot);
         assert_eq!(programs[0].stack_size, 0x10000);
-        assert!(!programs[1].bootstrap);
+        assert!(!programs[1].boot);
         assert_eq!(programs[1].stack_size, 0x4000);
     }
 
     #[test]
     fn resolve_prefers_image_overrides_over_metadata() {
-        let mut manifest = manifest_of(&["rootkeeper"]);
-        manifest.programs[0].name = Some("keeper".to_string());
+        let mut manifest = manifest_of(&[("rootkeeper", BOOT_PATH, true)]);
         manifest.programs[0].bin = Some("rootkeeper-min".to_string());
         manifest.programs[0].stack_size = Some(0x8000);
-        let metadata = metadata_map(&[("rootkeeper", true, 0x10000)]);
+        let metadata = metadata_map(&[("rootkeeper", 0x10000)]);
 
         let programs = resolve_programs(&manifest, &metadata).expect("resolve must succeed");
-        assert_eq!(programs[0].name, "keeper");
         assert_eq!(programs[0].bin, "rootkeeper-min");
-        assert!(programs[0].bootstrap);
         assert_eq!(programs[0].stack_size, 0x8000);
     }
 
     #[test]
     fn resolve_rejects_package_missing_from_workspace() {
-        let manifest = manifest_of(&["ghost"]);
-        let metadata = metadata_map(&[("rootkeeper", true, 0x10000)]);
+        let manifest = manifest_of(&[("ghost", "/boot/ghost", true)]);
+        let metadata = metadata_map(&[("rootkeeper", 0x10000)]);
 
         let err = resolve_programs(&manifest, &metadata).expect_err("unknown package must fail");
         assert_eq!(
@@ -761,8 +830,8 @@ mod tests {
 
     #[test]
     fn resolve_rejects_missing_stack_size() {
-        let manifest = manifest_of(&["rootkeeper"]);
-        let mut metadata = metadata_map(&[("rootkeeper", true, 0x10000)]);
+        let manifest = manifest_of(&[("rootkeeper", BOOT_PATH, true)]);
+        let mut metadata = metadata_map(&[("rootkeeper", 0x10000)]);
         metadata.get_mut("rootkeeper").unwrap().stack_size = None;
 
         let err = resolve_programs(&manifest, &metadata).expect_err("missing stack_size must fail");
@@ -774,8 +843,8 @@ mod tests {
 
     #[test]
     fn resolve_rejects_bad_stack_size() {
-        let manifest = manifest_of(&["rootkeeper"]);
-        let metadata = metadata_map(&[("rootkeeper", true, 123)]);
+        let manifest = manifest_of(&[("rootkeeper", BOOT_PATH, true)]);
+        let metadata = metadata_map(&[("rootkeeper", 123)]);
 
         let err = resolve_programs(&manifest, &metadata).expect_err("bad stack_size must fail");
         assert!(
@@ -785,33 +854,97 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_zero_bootstrap_programs() {
-        let manifest = manifest_of(&["rootkeeper", "shell"]);
-        let metadata = metadata_map(&[("rootkeeper", false, 0x4000), ("shell", false, 0x4000)]);
+    fn resolve_rejects_paths_outside_the_contract() {
+        let metadata = metadata_map(&[("rootkeeper", 0x4000)]);
+        let rejected = |path: &str| {
+            let manifest = manifest_of(&[("rootkeeper", path, true)]);
+            resolve_programs(&manifest, &metadata)
+                .expect_err("path outside the contract must fail")
+                .to_string()
+        };
 
-        let err = resolve_programs(&manifest, &metadata).expect_err("no bootstrap must fail");
+        // Правила пути берутся из контракта: сборка отвергает путь, на котором
+        // сервер не поднимет дерево имён.
+        let overlong = String::from("/boot/") + &"n".repeat(NAME_MAX + 1);
+        for path in [overlong.as_str(), "boot/rootkeeper", "/boot/../rootkeeper"] {
+            assert!(rejected(path).starts_with(&format!("image path '{path}' must be")));
+        }
+    }
+
+    #[test]
+    fn assemble_rejects_a_file_path_outside_the_contract() {
+        let entries = [built_entry(
+            BOOT_PATH,
+            true,
+            0x4000_0000,
+            &[built_segment(
+                b"BOOT",
+                0x4000_0000,
+                0x1000,
+                SegmentPermissions::ReadExecute,
+            )],
+        )];
+        let err = assemble_userland_image(&entries, &[loaded_file("/data/./sample", b"hi")])
+            .expect_err("path outside the contract must fail");
+        assert!(err.to_string().starts_with("image path '/data/./sample'"));
+    }
+
+    #[test]
+    fn assemble_rejects_a_non_ascii_file_path() {
+        let entries = [built_entry(
+            BOOT_PATH,
+            true,
+            0x4000_0000,
+            &[built_segment(
+                b"BOOT",
+                0x4000_0000,
+                0x1000,
+                SegmentPermissions::ReadExecute,
+            )],
+        )];
+        // Правило ASCII одно на все записи образа, не только на программы.
+        let err = assemble_userland_image(&entries, &[loaded_file("/data/мотд", b"hi")])
+            .expect_err("non-ascii path must fail");
+        assert_eq!(err.to_string(), "image path '/data/мотд' must be ASCII");
+    }
+
+    #[test]
+    fn resolve_rejects_zero_boot_programs() {
+        let manifest = manifest_of(&[
+            ("rootkeeper", BOOT_PATH, false),
+            ("shell", "/boot/shell", false),
+        ]);
+        let metadata = metadata_map(&[("rootkeeper", 0x4000), ("shell", 0x4000)]);
+
+        let err = resolve_programs(&manifest, &metadata).expect_err("no boot must fail");
         assert_eq!(
             err.to_string(),
-            "userland image must contain exactly one bootstrap program; found none"
+            "userland image must contain exactly one boot program; found none"
         );
     }
 
     #[test]
-    fn resolve_rejects_multiple_bootstrap_programs() {
-        let manifest = manifest_of(&["rootkeeper", "shell"]);
-        let metadata = metadata_map(&[("rootkeeper", true, 0x4000), ("shell", true, 0x4000)]);
+    fn resolve_rejects_multiple_boot_programs() {
+        let manifest = manifest_of(&[
+            ("rootkeeper", BOOT_PATH, true),
+            ("shell", "/boot/shell", true),
+        ]);
+        let metadata = metadata_map(&[("rootkeeper", 0x4000), ("shell", 0x4000)]);
 
-        let err = resolve_programs(&manifest, &metadata).expect_err("two bootstraps must fail");
+        let err = resolve_programs(&manifest, &metadata).expect_err("two boot programs must fail");
         assert_eq!(
             err.to_string(),
-            "userland image must contain exactly one bootstrap program; found 2"
+            "userland image must contain exactly one boot program; found 2"
         );
     }
 
     #[test]
     fn resolve_rejects_duplicate_package() {
-        let manifest = manifest_of(&["rootkeeper", "rootkeeper"]);
-        let metadata = metadata_map(&[("rootkeeper", true, 0x4000)]);
+        let manifest = manifest_of(&[
+            ("rootkeeper", BOOT_PATH, true),
+            ("rootkeeper", "/boot/second", false),
+        ]);
+        let metadata = metadata_map(&[("rootkeeper", 0x4000)]);
 
         let err = resolve_programs(&manifest, &metadata).expect_err("duplicate package must fail");
         assert_eq!(
@@ -822,32 +955,24 @@ mod tests {
 
     #[test]
     fn resolve_allows_same_package_distinct_bins() {
-        let manifest = ImageManifest {
-            version: USERLAND_MANIFEST_VERSION,
-            programs: vec![
-                image_program("testrunner"),
-                ImageProgram {
-                    package: "testrunner".to_string(),
-                    name: Some("fixture".to_string()),
-                    bin: Some("fixture".to_string()),
-                    bootstrap: Some(false),
-                    stack_size: None,
-                },
-            ],
-        };
-        let metadata = metadata_map(&[("testrunner", true, 0x4000)]);
+        let mut manifest = manifest_of(&[
+            ("testrunner", "/boot/testrunner", true),
+            ("testrunner", "/boot/fixture", false),
+        ]);
+        manifest.programs[1].bin = Some("fixture".to_string());
+        let metadata = metadata_map(&[("testrunner", 0x4000)]);
 
         let resolved = resolve_programs(&manifest, &metadata).expect("distinct bins allowed");
         assert_eq!(resolved.len(), 2);
         assert_eq!(resolved[1].bin, "fixture");
-        assert!(!resolved[1].bootstrap);
+        assert!(!resolved[1].boot);
     }
 
     #[test]
     fn workspace_metadata_reads_userland_section() {
         let json = br#"{"target_directory": "/workspace/target", "packages": [
             {"name": "rootkeeper",
-             "metadata": {"userland": {"bootstrap": true, "stack_size": 65536}}},
+             "metadata": {"userland": {"bin": "rootkeeper", "stack_size": 65536}}},
             {"name": "memory", "metadata": null}
         ]}"#;
 
@@ -856,11 +981,11 @@ mod tests {
         let metadata =
             collect_userland_metadata(parsed.packages).expect("userland metadata must parse");
         let rootkeeper = &metadata["rootkeeper"];
-        assert_eq!(rootkeeper.bootstrap, Some(true));
+        assert_eq!(rootkeeper.bin.as_deref(), Some("rootkeeper"));
         assert_eq!(rootkeeper.stack_size, Some(65536));
 
         let memory = &metadata["memory"];
-        assert_eq!(memory.bootstrap, None);
+        assert_eq!(memory.bin, None);
         assert_eq!(memory.stack_size, None);
     }
 
@@ -868,12 +993,11 @@ mod tests {
     fn workspace_metadata_rejects_unknown_userland_field() {
         let json = br#"{"target_directory": "/workspace/target", "packages": [
             {"name": "rootkeeper",
-             "metadata": {"userland": {"bootstrap": true, "stak_size": 65536}}}
+             "metadata": {"userland": {"bootstrap": true, "stack_size": 65536}}}
         ]}"#;
 
         let parsed = parse_cargo_metadata(json).expect("cargo metadata must parse");
-        let err =
-            collect_userland_metadata(parsed.packages).expect_err("typo in metadata must fail");
+        let err = collect_userland_metadata(parsed.packages).expect_err("unknown field must fail");
         assert!(
             err.to_string()
                 .contains("Invalid [package.metadata.userland] in package 'rootkeeper'")
@@ -881,10 +1005,9 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_entry_must_not_be_empty() {
+    fn boot_entry_must_not_be_empty() {
         let entries = [built_entry(
-            0,
-            "rootkeeper",
+            BOOT_PATH,
             true,
             0x4000_0000,
             &[built_segment(
@@ -894,19 +1017,39 @@ mod tests {
                 SegmentPermissions::ReadExecute,
             )],
         )];
-        let err = assemble_userland_image(&entries).expect_err("empty bootstrap must fail");
+        let err = assemble_userland_image(&entries, &[]).expect_err("empty boot must fail");
         assert_eq!(
             err.to_string(),
-            "bootstrap entry 'rootkeeper' payload must not be empty"
+            "boot entry '/boot/rootkeeper' payload must not be empty"
         );
     }
 
     #[test]
-    fn bootstrap_is_always_serialized_as_entries_zero() {
+    fn assemble_rejects_duplicate_paths() {
+        let entries = [built_entry(
+            BOOT_PATH,
+            true,
+            0x4000_0000,
+            &[built_segment(
+                b"BOOT",
+                0x4000_0000,
+                0x1000,
+                SegmentPermissions::ReadExecute,
+            )],
+        )];
+        let err = assemble_userland_image(&entries, &[loaded_file(BOOT_PATH, b"clash")])
+            .expect_err("duplicate path must fail");
+        assert_eq!(
+            err.to_string(),
+            "image path '/boot/rootkeeper' is used by more than one record"
+        );
+    }
+
+    #[test]
+    fn boot_index_follows_the_boot_path_after_sorting() {
         let entries = [
             built_entry(
-                2,
-                "shell",
+                "/boot/shell",
                 false,
                 0x5000_0000,
                 &[built_segment(
@@ -917,8 +1060,7 @@ mod tests {
                 )],
             ),
             built_entry(
-                0,
-                "rootkeeper",
+                BOOT_PATH,
                 true,
                 0x4000_0000,
                 &[built_segment(
@@ -929,8 +1071,7 @@ mod tests {
                 )],
             ),
             built_entry(
-                1,
-                "logger",
+                "/boot/logger",
                 false,
                 0x4800_0000,
                 &[built_segment(
@@ -942,18 +1083,23 @@ mod tests {
             ),
         ];
 
-        let image_bytes = assemble_userland_image(&entries).expect("assemble image");
+        let image_bytes = assemble_userland_image(&entries, &[loaded_file("/data/sample", b"hi")])
+            .expect("assemble image");
         let image = decode(&image_bytes).expect("assembled image must parse");
-        let order: Vec<_> = image.entries().map(|entry| entry.name()).collect();
-        assert_eq!(order, ["rootkeeper", "logger", "shell"]);
+
+        let paths: Vec<_> = image.entries().map(|entry| entry.path()).collect();
+        assert_eq!(
+            paths,
+            ["/boot/logger", BOOT_PATH, "/boot/shell", "/data/sample"]
+        );
+        assert_eq!(image.boot_entry().path(), BOOT_PATH);
     }
 
     #[test]
     fn userland_image_layout_is_deterministic() {
         let entries = [
             built_entry(
-                1,
-                "shell",
+                "/boot/shell",
                 false,
                 0x5000_0000,
                 &[built_segment(
@@ -964,8 +1110,7 @@ mod tests {
                 )],
             ),
             built_entry(
-                0,
-                "rootkeeper",
+                BOOT_PATH,
                 true,
                 0x4000_0000,
                 &[
@@ -980,17 +1125,16 @@ mod tests {
             ),
         ];
 
-        let first = assemble_userland_image(&entries).expect("assemble image");
-        let second = assemble_userland_image(&entries).expect("assemble image");
+        let first = assemble_userland_image(&entries, &[]).expect("assemble image");
+        let second = assemble_userland_image(&entries, &[]).expect("assemble image");
         assert_eq!(first, second);
     }
 
     #[test]
-    fn assembled_blob_uses_absolute_blob_offsets() {
-        let image_bytes = assemble_userland_image(&[
-            built_entry(
-                0,
-                "rootkeeper",
+    fn assembled_image_exposes_program_segments_and_file_bytes() {
+        let image_bytes = assemble_userland_image(
+            &[built_entry(
+                BOOT_PATH,
                 true,
                 0x4000_0000,
                 &[
@@ -1002,28 +1146,22 @@ mod tests {
                     ),
                     built_segment(b"RW", 0x4000_1000, 0x1000, SegmentPermissions::ReadWrite),
                 ],
-            ),
-            built_entry(
-                1,
-                "shell",
-                false,
-                0x5000_0000,
-                &[built_segment(
-                    b"ELF",
-                    0x5000_0000,
-                    0x1000,
-                    SegmentPermissions::ReadExecute,
-                )],
-            ),
-        ])
+            )],
+            &[loaded_file("/data/sample", b"hello")],
+        )
         .expect("assemble image");
 
         let image = decode(&image_bytes).expect("assembled image must parse");
-        let bootstrap = image
-            .bootstrap_entry()
-            .expect("image carries a bootstrap entry");
-        let segments: Vec<_> = bootstrap.segments().collect();
+        let program = image
+            .boot_entry()
+            .program()
+            .expect("boot record carries a program");
+        let segments: Vec<_> = program.segments().collect();
         assert_eq!(segments[0].bytes, b"CODE");
         assert_eq!(segments[1].bytes, b"RW");
+        assert_eq!(
+            image.entry("/data/sample").expect("file record").data(),
+            b"hello"
+        );
     }
 }

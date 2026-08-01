@@ -1,0 +1,16 @@
+[package]
+name = "filesystem"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+filesystem-abi = { workspace = true }
+userland = { workspace = true }
+userland-image = { workspace = true }
+
+[dev-dependencies]
+userland-image = { workspace = true, features = ["alloc"] }
+
+[lints]
+workspace = true

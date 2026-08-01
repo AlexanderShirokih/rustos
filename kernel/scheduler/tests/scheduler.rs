@@ -430,8 +430,6 @@ fn mark_process_loaded(
     let install = capability::UserImageInstall {
         segments: Vec::new(),
         entry: VirtualAddress::new(0x4000_0000),
-        user_stack_top: VirtualAddress::new(0x5000_1000),
-        user_stack_size: 0x1000,
         user_vm_base: PageAlignedVirtualAddress::from_usize(0x4000_0000).expect("aligned"),
         user_vm_size: 0x100_0000,
     };
@@ -870,6 +868,39 @@ fn process_create_rejects_empty_name() {
 }
 
 #[test]
+fn process_create_accepts_name_at_capacity() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let processes_before = scheduler.process_count();
+    let handle = scheduler.handle();
+
+    handle
+        .create_empty_process(&"n".repeat(syscall::MAX_PROCESS_NAME_LEN))
+        .expect("name of exactly MAX_PROCESS_NAME_LEN bytes is accepted");
+
+    assert_eq!(scheduler.process_count(), processes_before + 1);
+}
+
+#[test]
+fn process_create_rejects_name_over_capacity() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let processes_before = scheduler.process_count();
+    let handle = scheduler.handle();
+
+    let name = "n".repeat(syscall::MAX_PROCESS_NAME_LEN + 1);
+    let Err(err) = handle.create_empty_process(&name) else {
+        panic!("process name over capacity must be rejected");
+    };
+    assert_eq!(err, capability::SpawnError::InvalidName);
+    assert_eq!(scheduler.process_count(), processes_before);
+}
+
+#[test]
 fn thread_terminate_via_handle_signals_terminated() {
     use capability::UserThreadEntry;
 
@@ -1127,8 +1158,6 @@ fn load_user_image_into_rejects_double_load() {
     let install = capability::UserImageInstall {
         segments: Vec::new(),
         entry: VirtualAddress::new(0x4000_0000),
-        user_stack_top: VirtualAddress::new(0x5000_1000),
-        user_stack_size: 0x1000,
         user_vm_base: PageAlignedVirtualAddress::from_usize(0x4000_0000).expect("aligned"),
         user_vm_size: 0x100_0000,
     };
@@ -1181,7 +1210,7 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
         },
         loader_handle_table: loader_table,
         handle_id,
-        metering_resource: None,
+        metering_grant: None,
     };
     let thread = handle.start_user_process(&process, spec).expect("start ok");
     assert!(!thread.terminated());
@@ -1270,7 +1299,7 @@ fn start_user_process_cancels_loader_waiters_outside_scheduler_lock() {
         },
         loader_handle_table: loader_table,
         handle_id,
-        metering_resource: None,
+        metering_grant: None,
     };
     handle.start_user_process(&process, spec).expect("start ok");
 
@@ -1306,7 +1335,7 @@ fn start_user_process_rejects_unloaded() {
         },
         loader_handle_table: loader_table,
         handle_id,
-        metering_resource: None,
+        metering_grant: None,
     };
     match handle.start_user_process(&process, spec) {
         Err(StartProcessError::WrongState) => {}
@@ -1343,7 +1372,7 @@ fn start_user_process_rejects_terminated_process() {
         },
         loader_handle_table: loader_table,
         handle_id,
-        metering_resource: None,
+        metering_grant: None,
     };
     match handle.start_user_process(&process, spec) {
         // Именно WrongState: отказ наступает до валидации loader-хэндла, а не
@@ -1412,7 +1441,7 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
         },
         loader_handle_table: loader_table.clone(),
         handle_id,
-        metering_resource: None,
+        metering_grant: None,
     };
 
     match handle.start_user_process(&process, spec) {
@@ -1459,8 +1488,6 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
             flags: MemFlags::user_rw(),
         }],
         entry: VirtualAddress::new(0x4000_0000),
-        user_stack_top: VirtualAddress::new(0x5000_1000),
-        user_stack_size: 0x1000,
         user_vm_base: PageAlignedVirtualAddress::from_usize(0x6000_0000).unwrap(),
         user_vm_size: 0x100_0000,
     };
@@ -1518,7 +1545,7 @@ fn process_terminate_drains_handle_table_held_outside_process() {
         },
         loader_handle_table: loader_table,
         handle_id,
-        metering_resource: None,
+        metering_grant: None,
     };
     handle.start_user_process(&process, spec).expect("start ok");
 

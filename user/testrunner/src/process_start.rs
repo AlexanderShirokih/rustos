@@ -27,7 +27,7 @@ fn start_error_closes_passed_handles() {
     };
 
     // Процесс без load_image не стартует: start возвращает ошибку.
-    let error = process.start(entry, owned).err();
+    let error = process.start(entry, owned, None).err();
     kernel_tests::kassert!(error.is_some());
 
     kernel_tests::kassert!(is_closed(stale));

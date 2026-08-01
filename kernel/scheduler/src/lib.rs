@@ -22,7 +22,7 @@ pub use arch::{
     ArchContext, ArchCpu, CpuId, MAX_CPUS, StackError, ThreadStack, ThreadStackAllocator,
     TimerSource, with_preemption_disabled,
 };
-pub use process::Process;
+pub use process::{Process, ProcessName};
 pub use scheduler::{
     Bootstrapped, DEFAULT_QUANTUM_NS, Running, Scheduler, SchedulerConfig, SchedulerStage, Uninit,
     lowest_priority,

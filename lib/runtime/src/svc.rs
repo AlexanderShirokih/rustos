@@ -368,10 +368,11 @@ pub fn process_start(
     user_sp: u64,
     bootstrap_handle: u64,
     priority: u64,
+    resource_handle: u64,
 ) -> Result<Handle, SyscallError> {
     let ret: i64;
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x4 (x5
-    // зарезервирован); ядро переносит bootstrap_handle потомку до возврата.
+    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x5. Ядро
+    // переносит bootstrap_handle потомку до возврата.
     unsafe {
         asm!(
             "svc #{op}",
@@ -381,7 +382,28 @@ pub fn process_start(
             in("x2") user_sp,
             in("x3") bootstrap_handle,
             in("x4") priority,
-            in("x5") 0u64,
+            in("x5") resource_handle,
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    Handle::from_syscall_return(ret)
+}
+
+/// Выделяет `budget_pages` страниц бюджета `resource` в производный
+/// `Resource` с тем же физдиапазоном и потолком доступа. Возврат:
+/// resource-handle либо `-(SyscallError)` (`ResourceExhausted` при нехватке
+/// бюджета).
+pub fn resource_split(resource: Handle, budget_pages: u64) -> Result<Handle, SyscallError> {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1. x0 на
+    // выходе - handle либо -(SyscallError).
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::ResourceSplit as u16,
+            in("x0") u64::from(resource.raw()),
+            in("x1") budget_pages,
             lateout("x0") ret,
             options(nostack),
         );

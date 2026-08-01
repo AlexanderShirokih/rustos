@@ -12,7 +12,7 @@ const _: () = assert!(
 use bootstrap::DeviceWindow;
 use io::mmio::Mmio;
 use ipc::wire::Cap;
-use syscall::{MemoryAccess, UserMemFlags};
+use syscall::{MemoryAccess, SyscallError, UserMemFlags};
 
 use crate::{
     error::{Error, Result, unit, value},
@@ -74,6 +74,13 @@ pub struct Mapping {
     size_bytes: u64,
 }
 
+/// Маппинг региона, чья маска доступа не допускает запись: страницы неизменны во всех адресных
+/// пространствах, и содержимое читается безопасным срезом.
+#[derive(Debug)]
+pub struct ReadOnlyMapping {
+    mapping: Mapping,
+}
+
 /// Анонимный маппинг (allocate-fastpath); освобождается в `Drop` через
 /// `memory_free`.
 #[derive(Debug)]
@@ -97,6 +104,15 @@ impl Resource {
     /// Заимствование хэндла на время одного вызова.
     pub fn handle(&self) -> BorrowedHandle<'_> {
         self.handle.borrow()
+    }
+
+    /// Выделяет `budget_pages` страниц бюджета в отдельный `Resource` с тем же
+    /// физдиапазоном и потолком доступа. Страницы возвращаются исходному
+    /// ресурсу, когда производный уходит.
+    pub fn split(&self, budget_pages: u64) -> Result<Self> {
+        svc::resource_split(self.handle.as_raw(), budget_pages)
+            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
+            .map_err(Error::Syscall)
     }
 
     /// Создаёт регион с Virtual backing размера `size_bytes` и маской `access`.
@@ -153,6 +169,18 @@ impl MemoryRegion {
     pub fn map_full(&self, flags: UserMemFlags) -> Result<Mapping> {
         let info = self.inspect()?;
         self.map(info.size_bytes, flags)
+    }
+
+    /// Маппит регион целиком на чтение, удостоверяя неизменность его страниц. Регион, чья маска
+    /// доступа допускает запись, отвергается `AccessDenied`: его страницы вправе меняться под
+    /// другим отображением.
+    pub fn map_full_read_only(&self) -> Result<ReadOnlyMapping> {
+        let info = self.inspect()?;
+        if info.access.raw() & MemoryAccess::WRITE.raw() != 0 {
+            return Err(Error::Syscall(SyscallError::AccessDenied));
+        }
+        let mapping = self.map(info.size_bytes, UserMemFlags::ReadOnly)?;
+        Ok(ReadOnlyMapping { mapping })
     }
 
     /// Деривация под-региона `[offset, offset+size_bytes)` с маской `access`
@@ -217,12 +245,59 @@ impl Mapping {
     }
 
     /// Содержимое маппинга как байтовый срез, заимствованный на время маппинга.
-    pub fn as_bytes(&self) -> &[u8] {
+    ///
+    /// # Safety
+    ///
+    /// Страницы маппинга остаются неизменными на всё время жизни среза: у
+    /// региона нет отображений на запись ни в одном адресном пространстве.
+    pub unsafe fn as_bytes(&self) -> &[u8] {
         let base = self.va as *const u8;
-        let len = self.size_bytes as usize;
-        // SAFETY: маппинг владеет диапазоном [va, va+size_bytes) памяти, инициализированной ядром.
-        // Срез заимствует его на время `&self` и не переживёт unmap/Drop.
+        let len = usize::try_from(self.size_bytes).expect("mapping size fits usize");
+        // SAFETY: ядро установило маппинг на [va, va+size_bytes) и
+        // инициализировало эту память. Срез заимствует диапазон на время `&self`
+        // и не переживёт unmap/Drop, а неизменность страниц на это время
+        // гарантирует вызывающий.
         unsafe { core::slice::from_raw_parts(base, len) }
+    }
+
+    /// Копирует в `dst` первые `dst.len()` байт маппинга. Длина сверх размера
+    /// маппинга - `OutOfBounds`.
+    pub fn copy_out(&self, dst: &mut [u8]) -> Result<()> {
+        let base = self.head_ptr(dst.len())?;
+        // SAFETY: [va, va+dst.len()) лежит в маппинге, установленном ядром.
+        // Копия идёт побайтно volatile: те же страницы бывают отображены в
+        // другом адресном пространстве, и каждый байт читается ровно один раз.
+        unsafe {
+            for (index, byte) in dst.iter_mut().enumerate() {
+                *byte = base.add(index).read_volatile();
+            }
+        }
+        Ok(())
+    }
+
+    /// Копирует `src` в начало маппинга. Длина сверх размера маппинга -
+    /// `OutOfBounds`. Приём по `&self`: эксклюзивности над страницами маппинг
+    /// не даёт.
+    pub fn copy_in(&self, src: &[u8]) -> Result<()> {
+        let base = self.head_ptr(src.len())?;
+        // SAFETY: [va, va+src.len()) лежит в маппинге, установленном ядром.
+        // Копия идёт побайтно volatile: те же страницы бывают отображены в
+        // другом адресном пространстве, и каждый байт пишется ровно один раз.
+        unsafe {
+            for (index, byte) in src.iter().enumerate() {
+                base.add(index).write_volatile(*byte);
+            }
+        }
+        Ok(())
+    }
+
+    // Окно за границей маппинга - OutOfBounds.
+    fn head_ptr(&self, len: usize) -> Result<*mut u8> {
+        let size = usize::try_from(self.size_bytes).expect("mapping size fits usize");
+        if len > size {
+            return Err(Error::OutOfBounds);
+        }
+        Ok(usize::try_from(self.va).expect("va fits usize") as *mut u8)
     }
 
     /// Меняет флаги маппинга на `flags`.
@@ -241,6 +316,20 @@ impl Mapping {
 impl Drop for Mapping {
     fn drop(&mut self) {
         let _ = svc::memory_free(self.va, self.size_bytes);
+    }
+}
+
+impl ReadOnlyMapping {
+    /// Содержимое маппинга. Срез заимствован на время его жизни.
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: маска доступа региона не допускает запись, так что отображений на запись у его
+        // страниц нет ни в одном адресном пространстве, а срез не переживает маппинг.
+        unsafe { self.mapping.as_bytes() }
+    }
+
+    /// Размер маппинга в байтах.
+    pub fn size_bytes(&self) -> u64 {
+        self.mapping.size_bytes()
     }
 }
 

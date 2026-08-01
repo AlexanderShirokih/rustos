@@ -8,8 +8,8 @@ use core::num::NonZeroU32;
 
 use capability::{
     Capability, CapabilityTarget, DrainedHandles, HandleId, HandleReservation, HandleTable,
-    LoadImageError, ProcessObject, Rights, StartProcessError, UserImageInstall, UserSegmentInstall,
-    UserStartSpec, UserThreadEntry, install_handle, runtime,
+    LoadImageError, MeteringGrant, ProcessObject, Resource, Rights, StartProcessError,
+    UserImageInstall, UserSegmentInstall, UserStartSpec, UserThreadEntry, install_handle, runtime,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
@@ -18,8 +18,8 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use syscall::{
-    MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, SyscallError, USER_IMAGE_DESC_SIZE,
-    USER_SEGMENT_SIZE, UserMemFlags, decode_image_desc, decode_segment,
+    MAX_PROCESS_NAME_LEN, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, SyscallError,
+    USER_IMAGE_DESC_SIZE, USER_SEGMENT_SIZE, UserMemFlags, decode_image_desc, decode_segment,
 };
 
 use super::{
@@ -28,10 +28,6 @@ use super::{
     flags::to_mem_flags,
     runtime::runtime as syscall_runtime,
 };
-
-/// Максимальная длина имени процесса, передаваемая через user-память.
-/// В ABI считается в байтах; строка обязана быть UTF-8.
-const MAX_PROCESS_NAME_LEN: usize = 64;
 
 /// Exit-код потомка, снятого из-за невыданного вызывающему thread-хэндла.
 const EXIT_CODE_START_ROLLBACK: i32 = -1;
@@ -78,14 +74,48 @@ pub fn sys_process_self() -> Result<u64, SyscallError> {
     install_object_handle(CapabilityTarget::Process(process))
 }
 
-/// Capability на метеринг-`Resource` текущего процесса (права включают `WRITE`).
+/// Capability на метеринг-`Resource` текущего процесса. Права капы - те, с которыми ресурс
+/// передали при старте: шире прав передавшего хэндла процессу не достаётся.
 /// `WrongType`, если процесс стартовал без метеринг-ресурса.
 pub fn sys_process_resource_self() -> Result<u64, SyscallError> {
     let process = syscall_runtime()
         .current_process_object()
         .ok_or(SyscallError::WrongType)?;
-    let resource = process.metering_resource().ok_or(SyscallError::WrongType)?;
-    install_object_handle(CapabilityTarget::Resource(resource))
+    let grant = process.metering().ok_or(SyscallError::WrongType)?;
+    let handle_id = install_handle(Capability::new(
+        CapabilityTarget::Resource(grant.resource),
+        grant.rights,
+    ))
+    .map_err(map_ipc_error)?;
+    Ok(u64::from(handle_id.raw().get()))
+}
+
+/// `resource_split(resource_handle, budget_pages) -> resource_handle`
+///
+/// Выделяет `budget_pages` страниц бюджета в производный `Resource` с тем же
+/// физдиапазоном и потолком доступа. Требует `Rights::WRITE` на списание с
+/// исходного ресурса и `Rights::DUPLICATE` на деривацию. Отзыв исходной капы
+/// отзывает и производную.
+pub fn sys_resource_split(resource_h: u64, budget_pages: u64) -> Result<u64, SyscallError> {
+    let resource_id = parse_handle_id(resource_h)?;
+    if budget_pages == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let table = runtime()
+        .current_handle_table()
+        .ok_or(SyscallError::BadHandle)?;
+    let parent = table
+        .with_lock(|tbl| tbl.get_object::<Resource>(resource_id, Rights::WRITE))
+        .map_err(map_ipc_error)?;
+    // Отказ деривации роняет производный ресурс, и его Drop возвращает
+    // списанные страницы исходному.
+    let child = parent.split(budget_pages).map_err(map_ipc_error)?;
+
+    let id = table
+        .with_lock(|tbl| tbl.derive(resource_id, CapabilityTarget::Resource(child)))
+        .map_err(|rejected| map_ipc_error(rejected.release()))?;
+    Ok(u64::from(id.raw().get()))
 }
 
 pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
@@ -197,8 +227,6 @@ pub fn sys_process_load_image(
     let install = UserImageInstall {
         segments,
         entry: VirtualAddress::new(desc.entry_va as usize),
-        user_stack_top: VirtualAddress::new(desc.user_stack_top as usize),
-        user_stack_size: desc.user_stack_size as usize,
         user_vm_base,
         user_vm_size: desc.user_vm_size as usize,
     };
@@ -217,7 +245,7 @@ pub fn sys_process_start(
     user_sp: u64,
     bootstrap_handle: u64,
     priority: u64,
-    _reserved: u64,
+    resource_handle: u64,
 ) -> Result<u64, SyscallError> {
     let process_id = parse_handle_id(process_h)?;
     if priority & !0xFF != 0 {
@@ -228,13 +256,32 @@ pub fn sys_process_start(
     let nz = NonZeroU32::new(handle_raw).ok_or(SyscallError::InvalidArgument)?;
     let handle_id = HandleId::from_raw(nz);
 
-    let metering_resource = syscall_runtime()
-        .current_process_object()
-        .and_then(|caller| caller.metering_resource());
-
     let loader_table = runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
+    let metering_grant = if resource_handle == 0 {
+        // Наследование: потомку достаётся грант родителя с теми же правами.
+        syscall_runtime()
+            .current_process_object()
+            .and_then(|caller| caller.metering())
+    } else {
+        let resource_id = parse_handle_id(resource_handle)?;
+        // Гейт тот же, что у `ResourceSplit`: отдача ресурса - деривация капы в чужую таблицу.
+        // Права гранта - права этого хэндла: `ProcessResourceSelf` у потомка не выдаст шире,
+        // и намеренно неделегируемая капа (без `TRANSFER`) не станет делегируемой через старт.
+        let access = loader_table
+            .with_lock(|tbl| {
+                tbl.get_object_with_rights::<Resource>(
+                    resource_id,
+                    Rights::WRITE | Rights::DUPLICATE,
+                )
+            })
+            .map_err(map_ipc_error)?;
+        Some(MeteringGrant {
+            resource: access.object,
+            rights: access.rights,
+        })
+    };
     let process_object = loader_table
         .with_lock(|tbl| tbl.get_object::<ProcessObject>(process_id, Rights::WRITE))
         .map_err(map_ipc_error)?;
@@ -249,7 +296,7 @@ pub fn sys_process_start(
         },
         loader_handle_table: loader_table.clone(),
         handle_id,
-        metering_resource,
+        metering_grant,
     };
 
     let thread = syscall_runtime()
@@ -374,6 +421,16 @@ mod tests {
     use syscall::{MAX_SEGMENTS_PER_IMG, USER_IMAGE_DESC_SIZE};
 
     use super::*;
+
+    #[test]
+    fn sys_resource_split_rejects_zero_budget() {
+        assert_eq!(sys_resource_split(1, 0), Err(SyscallError::InvalidArgument));
+    }
+
+    #[test]
+    fn sys_resource_split_rejects_zero_handle() {
+        assert_eq!(sys_resource_split(0, 4), Err(SyscallError::InvalidArgument));
+    }
 
     #[test]
     fn sys_process_load_image_rejects_bad_desc_len() {

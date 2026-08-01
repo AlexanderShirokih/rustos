@@ -5,7 +5,7 @@ use syscall::{SIGNALED, Timeout};
 use crate::{
     error::{Error, Result, unit, value},
     handle::{BorrowedHandle, OwnedHandle},
-    object::{Thread, ThreadEntry},
+    object::{Resource, Thread, ThreadEntry},
     svc,
 };
 
@@ -46,10 +46,17 @@ impl Process {
     }
 
     /// Запускает первый поток процесса с параметрами `entry`, передавая потомку
-    /// стартовый хэндл-канал `handle`. На `Ok` ядро забрало
+    /// стартовый хэндл-канал `handle`. `resource` задаёт метеринг-ресурс
+    /// потомка, `None` отдаёт ему ресурс вызывающего. На `Ok` ядро забрало
     /// `handle` (ушёл потомку), на `Err` он закрывается своим `Drop`.
-    pub fn start(&self, entry: ThreadEntry, handle: OwnedHandle) -> Result<Thread> {
+    pub fn start(
+        &self,
+        entry: ThreadEntry,
+        handle: OwnedHandle,
+        resource: Option<&Resource>,
+    ) -> Result<Thread> {
         let bootstrap_handle = u64::from(handle.as_raw().raw());
+        let resource_handle = resource.map_or(0, |r| u64::from(r.handle().as_raw().raw()));
 
         let result = svc::process_start(
             self.handle.as_raw(),
@@ -57,6 +64,7 @@ impl Process {
             entry.user_sp,
             bootstrap_handle,
             u64::from(entry.priority),
+            resource_handle,
         );
 
         match result {

@@ -2,7 +2,7 @@
 
 use bootstrap::BootstrapClient;
 use kernel_tests::kernel_test;
-use runtime::{MemoryRegion, OwnedHandle, PortTransport, Resource, Signal, Timeout, UserMemFlags};
+use runtime::{MemoryRegion, OwnedHandle, PortTransport, Resource, Signal, Timeout};
 use userland_image::decode;
 use userland_loader::load_entry;
 
@@ -19,15 +19,13 @@ fn spawn_child_from_image() {
         .expect("vend ok");
 
     let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
-    let info = region.inspect().expect("inspect image region");
-    let mapping = region
-        .map(info.size_bytes, UserMemFlags::ReadOnly)
-        .expect("map image read-only");
-
+    let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("spawn-fixture")
-        .expect("image carries a child entry");
+        .entry("/boot/spawn-fixture")
+        .expect("image carries a child entry")
+        .program()
+        .expect("child entry is a program");
 
     let resource = Resource::self_resource().expect("self metering resource");
     let start_handle = Signal::create().expect("signal create").into_handle();
@@ -53,14 +51,13 @@ fn caller_wakes_when_server_dies_holding_reply() {
         .expect("acquire_userland_image call")
         .expect("vend ok");
     let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
-    let info = region.inspect().expect("inspect image region");
-    let mapping = region
-        .map(info.size_bytes, UserMemFlags::ReadOnly)
-        .expect("map image read-only");
+    let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("reply-holder")
-        .expect("image carries the holder");
+        .entry("/boot/reply-holder")
+        .expect("image carries the holder")
+        .program()
+        .expect("holder record carries a program");
 
     let service = Port::create_service(0).expect("port create");
 

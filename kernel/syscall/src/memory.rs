@@ -166,6 +166,7 @@ pub fn sys_memory_create_virtual(
 /// `Rights::DUPLICATE` на исходном регионе; запрошенный доступ не шире гранта
 /// (права хендла, суженные access-маской региона). Нарезка ничего не
 /// аллоцирует - бюджет не списывается, обязательства возврата под-регион не несёт.
+/// Под-регион - производная капа источника: отзыв источника отзывает и её.
 pub fn sys_memory_slice(
     region_h: u64,
     offset_raw: u64,
@@ -185,13 +186,12 @@ pub fn sys_memory_slice(
     let sub = region
         .slice(offset, size, access)
         .map_err(|e| slice_err_to_syscall(&e))?;
-    let handle = Capability::new_with_default_rights(Arc::new(sub));
 
     let table = capability::runtime()
         .current_handle_table()
         .ok_or(SyscallError::BadHandle)?;
     let id = table
-        .with_lock(|tbl| tbl.insert(handle))
+        .with_lock(|tbl| tbl.derive(region_id, Arc::new(sub)))
         .map_err(|rejected| map_ipc_error(rejected.release()))?;
     Ok(u64::from(id.raw().get()))
 }

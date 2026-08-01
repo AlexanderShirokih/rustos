@@ -3,15 +3,15 @@ version = 1
 [[programs]]
 package = "rtc-demo"
 bin = "rtc-init"
-name = "rtc-init"
-bootstrap = true
+path = "/boot/rtc-init"
+boot = true
 
 [[programs]]
 package = "rtc-demo"
 bin = "rtc-driver"
-name = "rtc-driver"
+path = "/boot/rtc-driver"
 
 [[programs]]
 package = "rtc-demo"
 bin = "rtc-client"
-name = "rtc-client"
+path = "/boot/rtc-client"

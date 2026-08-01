@@ -2,6 +2,8 @@
 //!
 //! Значение агрегата укладывается во вложенный суб-кадр одного wire-поля:
 //! `MessageBuf<FIELD_DATA_MAX>`, поля по позиционному индексу `1..`, терминатор.
+//! Слоты capability общие с внешним кадром: поле-капа кладёт handle туда, а в
+//! суб-кадр пишет его индекс.
 //! Суб-кадр сверх `FIELD_DATA_MAX` даёт `IpcError` из `write_field`/`finish` -
 //! без паники. Вложенность работает рекурсивно: поле-агрегат пишет свой суб-кадр.
 
@@ -53,6 +55,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 &self,
                 __buf: &mut ::ipc::wire::MessageBuf<__N>,
                 __field_id: u8,
+                __handles: &mut ::ipc::wire::HandleSlots,
             ) -> ::core::result::Result<(), ::ipc::wire::IpcError> {
                 let mut __sub = ::ipc::wire::MessageBuf::<{ ::ipc::wire::FIELD_DATA_MAX }>::new();
                 #write
@@ -62,6 +65,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
             fn from_field(
                 __data: &#read_lifetime [u8],
+                __handles: &::ipc::wire::HandleSlots,
             ) -> ::core::result::Result<Self, ::ipc::wire::IpcError> {
                 #read
             }
@@ -148,7 +152,7 @@ fn expand_write(fields: &[AggField]) -> TokenStream {
         let ident = &field.ident;
         let field_id = field.field_id;
         quote! {
-            ::ipc::WireValue::write_as_field(&self.#ident, &mut __sub, #field_id)?;
+            ::ipc::WireValue::write_as_field(&self.#ident, &mut __sub, #field_id, __handles)?;
         }
     });
     quote! { #(#writes)* }
@@ -169,7 +173,7 @@ fn expand_read(fields: &[AggField]) -> TokenStream {
         quote! {
             #field_id => {
                 #opt = ::core::option::Option::Some(
-                    <#ty as ::ipc::WireValue>::from_field(__field.data)?,
+                    <#ty as ::ipc::WireValue>::from_field(__field.data, __handles)?,
                 );
             }
         }

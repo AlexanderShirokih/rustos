@@ -51,7 +51,7 @@ pub use irq_runtime::{
 pub use port::{
     KernelIpcBuffer, Port, PortAccess, ThreadTransport, port_call, port_recv, port_send,
 };
-pub use process::ProcessObject;
+pub use process::{MeteringGrant, ProcessObject};
 pub use reply::Reply;
 pub use resource::{Resource, ResourceBudgetRefund};
 pub use rev_node::RevocationHook;

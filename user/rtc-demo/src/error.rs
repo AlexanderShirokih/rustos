@@ -1,20 +1,21 @@
 //! Единый тип ошибки setup-фазы драйвера под оператор `?`.
 
 use ipc::wire::IpcError;
-use userland_image::ImageDecodeError;
+use userland_image::{ImageDecodeError, ProgramDecodeError};
 
 #[derive(Debug)]
 pub enum Error {
     Runtime(runtime::Error),
     Ipc(IpcError),
     Decode(ImageDecodeError),
+    Program(ProgramDecodeError),
     /// bootstrap отказал в выдаче ресурса.
     Vend,
     /// Boot FDT не распарсился, либо не содержит искомого устройства.
     Dtb,
     /// Окно устройства с искомой базой не найдено.
     NoDevice,
-    /// В образе нет программы с искомым именем.
+    /// В образе нет записи с искомым путём.
     MissingEntry,
 }
 
@@ -35,5 +36,11 @@ impl From<IpcError> for Error {
 impl From<ImageDecodeError> for Error {
     fn from(error: ImageDecodeError) -> Self {
         Self::Decode(error)
+    }
+}
+
+impl From<ProgramDecodeError> for Error {
+    fn from(error: ProgramDecodeError) -> Self {
+        Self::Program(error)
     }
 }

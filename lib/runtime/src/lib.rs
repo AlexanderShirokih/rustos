@@ -10,6 +10,7 @@ mod error;
 mod handle;
 mod heap;
 mod ipc_buffer;
+mod log;
 mod object;
 mod port_transport;
 mod ring_transport;
@@ -19,10 +20,11 @@ mod sync;
 pub use error::{Error, Result};
 pub use handle::{BorrowedHandle, OwnedHandle};
 pub use ipc_buffer::ipc_buffer_ptr;
+pub use log::{install_log, log_fmt, log_line};
 pub use object::{
     AnonymousMapping, IrqControl, IrqLine, JoinHandle, Mapping, MemoryRegion, Port, Priority,
-    Process, RegionInfo, RegionKind, Reply, Resource, ServicePort, Signal, Thread, ThreadEntry,
-    spawn,
+    Process, ReadOnlyMapping, RegionInfo, RegionKind, Reply, Resource, ServicePort, Signal, Thread,
+    ThreadEntry, spawn, wait_any,
 };
 pub use port_transport::PortTransport;
 pub use ring_transport::RingTransport;

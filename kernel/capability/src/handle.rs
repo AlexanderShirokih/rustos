@@ -189,6 +189,29 @@ impl Capability {
             holder,
         })
     }
+
+    /// Создаёт capability на объект `target`, выведенный из объекта этой капы,
+    /// узлом-потомком: отзыв источника отзывает и производную.
+    ///
+    /// Права - стартовые для `target` ([`default_rights_for`]), суженные
+    /// правами источника. Значок источника не наследуется: объект другой.
+    /// Требует [`Rights::DUPLICATE`] у источника.
+    pub fn derive(&self, target: impl Into<CapabilityTarget>) -> Result<Self, IpcError> {
+        if !self.rights.contains(Rights::DUPLICATE) {
+            return Err(IpcError::AccessDenied);
+        }
+        let target = target.into();
+        let rights = default_rights_for(&target) & self.rights;
+        let node = RevNode::new_child(&self.node).ok_or(IpcError::Revoked)?;
+        let holder = Self::armed_holder(&target, rights, None, &node)?;
+        Ok(Self {
+            target,
+            rights,
+            badge: 0,
+            node,
+            holder,
+        })
+    }
 }
 
 impl Drop for Capability {

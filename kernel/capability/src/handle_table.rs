@@ -169,8 +169,8 @@ impl HandleReservation {
 }
 
 impl HandleTable {
-    /// Стандартная ёмкость таблицы handle'ов одного процесса.
-    pub const DEFAULT_CAPACITY: u32 = 1024;
+    /// Стандартная ёмкость таблицы handle'ов одного процесса, обещанная syscall ABI.
+    pub const DEFAULT_CAPACITY: u32 = syscall::HANDLE_TABLE_CAPACITY;
 
     pub fn new() -> Self {
         Self::with_capacity(Self::DEFAULT_CAPACITY)
@@ -509,6 +509,56 @@ impl HandleTable {
         self.insert(dup)
     }
 
+    /// Регистрирует capability на объект `target`, выведенный из объекта
+    /// записи `id`, производной от неё ([`Capability::derive`]). Происхождение
+    /// проверяется здесь: объект, не выведенный из объекта записи, - `WrongType`.
+    pub fn derive(
+        &mut self,
+        id: HandleId,
+        target: impl Into<CapabilityTarget>,
+    ) -> Result<HandleId, RejectedInsert> {
+        let target = target.into();
+        let derived = {
+            let handle = self.lookup(id).map_err(RejectedInsert::without_handle)?;
+            if !Self::is_target_derived_from(handle.target(), &target) {
+                return Err(RejectedInsert::without_handle(IpcError::WrongType));
+            }
+            handle
+                .derive(target)
+                .map_err(RejectedInsert::without_handle)?
+        };
+        self.insert(derived)
+    }
+
+    // Производный Resource несёт источник в поле родителя, производный Memory-регион лежит
+    // окном внутри источника с доступом не шире.
+    fn is_target_derived_from(source: &CapabilityTarget, target: &CapabilityTarget) -> bool {
+        match (source, target) {
+            (CapabilityTarget::Resource(parent), CapabilityTarget::Resource(child)) => child
+                .parent()
+                .is_some_and(|origin| Arc::ptr_eq(origin, parent)),
+            (CapabilityTarget::Memory(origin), CapabilityTarget::Memory(sub)) => {
+                let (Some(origin_base), Some(sub_base)) =
+                    (origin.physical_base(), sub.physical_base())
+                else {
+                    return false;
+                };
+                let origin_start = origin_base.as_usize();
+                let sub_start = sub_base.as_usize();
+                let (Some(origin_end), Some(sub_end)) = (
+                    origin_start.checked_add(origin.size_bytes()),
+                    sub_start.checked_add(sub.size_bytes()),
+                ) else {
+                    return false;
+                };
+                origin_start <= sub_start
+                    && sub_end <= origin_end
+                    && origin.access_mask().allows(sub.access_mask())
+            }
+            _ => false,
+        }
+    }
+
     fn lookup(&self, id: HandleId) -> Result<&Capability, IpcError> {
         let idx = id.slot();
         let slot = self.slots.get(idx as usize).ok_or(IpcError::BadHandle)?;
@@ -571,6 +621,7 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use collections::{LockCell, MutexCell};
+    use memory::MemoryRegion;
 
     use super::{
         super::{
@@ -855,7 +906,7 @@ mod tests {
     fn get_memory_type_checks() {
         use core::num::NonZeroUsize;
 
-        use memory::{AccessMask, MemoryRegion};
+        use memory::AccessMask;
 
         let region = Arc::new(MemoryRegion::create_physical_device(
             memory::physical_address::PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
@@ -891,6 +942,99 @@ mod tests {
             table.get_object::<Signal>(mem_id, Rights::READ),
             Err(IpcError::WrongType)
         ));
+    }
+
+    fn memory_handle(rights: Rights) -> Capability {
+        make_handle(CapabilityTarget::Memory(sub_region()), rights)
+    }
+
+    #[test]
+    fn derived_target_is_revoked_with_its_source() {
+        let mut table = HandleTable::new();
+        let source = table
+            .insert(memory_handle(Rights::DUPLICATE | Rights::READ))
+            .unwrap();
+        let sub = table.derive(source, sub_region()).unwrap();
+        assert!(table.get_object::<MemoryRegion>(sub, Rights::READ).is_ok());
+
+        close(&mut table, source).unwrap();
+
+        assert!(matches!(
+            table.get_object::<MemoryRegion>(sub, Rights::READ),
+            Err(IpcError::Revoked)
+        ));
+    }
+
+    #[test]
+    fn derive_requires_duplicate_right() {
+        let mut table = HandleTable::new();
+        let source = table.insert(memory_handle(Rights::READ)).unwrap();
+        assert_eq!(
+            table.derive(source, sub_region()).unwrap_err().error(),
+            IpcError::AccessDenied
+        );
+    }
+
+    #[test]
+    fn derive_rejects_a_target_outside_the_source() {
+        use core::num::NonZeroUsize;
+
+        use memory::AccessMask;
+
+        let mut table = HandleTable::new();
+        let source = table
+            .insert(memory_handle(Rights::DUPLICATE | Rights::READ))
+            .unwrap();
+
+        // Окно вне источника: происхождение от объекта записи не подтверждено.
+        let foreign = Arc::new(MemoryRegion::create_physical_device(
+            memory::physical_address::PageAlignedAddress::from_usize(0x8000_0000).unwrap(),
+            NonZeroUsize::new(4096).unwrap(),
+            AccessMask::R,
+        ));
+        assert_eq!(
+            table.derive(source, foreign).unwrap_err().error(),
+            IpcError::WrongType
+        );
+
+        // Доступ шире источника не проходит и при вложенном окне.
+        let escalated = Arc::new(MemoryRegion::create_physical_device(
+            memory::physical_address::PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
+            NonZeroUsize::new(4096).unwrap(),
+            AccessMask::RW,
+        ));
+        assert_eq!(
+            table.derive(source, escalated).unwrap_err().error(),
+            IpcError::WrongType
+        );
+    }
+
+    #[test]
+    fn derived_rights_are_narrowed_by_source() {
+        let mut table = HandleTable::new();
+        // Источник без TRANSFER: производная не получает его из стартового набора.
+        let source = table
+            .insert(memory_handle(Rights::DUPLICATE | Rights::READ))
+            .unwrap();
+        let sub = table.derive(source, sub_region()).unwrap();
+
+        assert!(table.get_object::<MemoryRegion>(sub, Rights::READ).is_ok());
+        assert!(matches!(
+            table.get_object::<MemoryRegion>(sub, Rights::TRANSFER),
+            Err(IpcError::AccessDenied)
+        ));
+    }
+
+    fn sub_region() -> Arc<MemoryRegion> {
+        use core::num::NonZeroUsize;
+
+        use memory::AccessMask;
+
+        Arc::new(MemoryRegion::create_physical_device(
+            memory::physical_address::PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
+            NonZeroUsize::new(4096).unwrap(),
+            AccessMask::R,
+        ))
     }
 
     #[test]

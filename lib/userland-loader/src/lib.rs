@@ -3,7 +3,7 @@
 //! [`load_entry`] минтит свежие регионы под сегменты, копирует в них байты,
 //! собирает дескриптор образа и стартует процесс через `ProcessCreate`/
 //! `ProcessLoadImage`/`ProcessStart`. Источник байт абстрагирован за
-//! `EntryView`: образ initrd сегодня, файл VFS позже.
+//! `EntryView`.
 
 #![no_std]
 #![allow(unsafe_code)]
@@ -20,12 +20,15 @@ use syscall::{
     SEGMENT_ABI_VERSION, SyscallError, USER_VA_END, UserImageDescAbi, UserSegmentAbi,
     encode_image_desc, encode_segment,
 };
-use userland::{EntryView, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE, user_vm_window};
+use userland::{
+    EntryView, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE, entry_name, user_vm_window,
+};
 
 /// Загружает `entry` в новый процесс и стартует его первый поток.
 ///
-/// Сегменты копируются в свежие приватные регионы. `bootstrap` - стартовый
-/// хэндл-канал. `Ok` означает, что хэндл передан потомку.
+/// Сегменты копируются в свежие приватные регионы. `resource` оплачивает их и
+/// становится метеринг-ресурсом потомка. `bootstrap` - стартовый хэндл-канал.
+/// `Ok` означает, что хэндл передан потомку.
 pub fn load_entry<'a, E: EntryView<'a>>(
     entry: &E,
     resource: &Resource,
@@ -69,25 +72,38 @@ pub fn load_entry<'a, E: EntryView<'a>>(
     // Стек - на потолке user-AS; окно кучи (user_vm) - промежуток между концом
     // сегментов и низом стека, выведенный из самого образа.
     let stack_top = USER_VA_END;
+    let stack_size = round_up_to_page(entry.stack_size());
     let window = user_vm_window(
         entry.segments().map(|seg| (seg.va_base(), seg.mem_size())),
         stack_top,
-        entry.stack_size(),
+        stack_size,
     )
     .ok_or(Error::Syscall(SyscallError::InvalidArgument))?;
+
+    // Стек - обычный сегмент: ядро о нём отдельно не знает, а его страницы
+    // оплачивает тот же `resource`, что и остальной образ.
+    let stack = resource.create_virtual(stack_size, MemoryAccess::RW)?;
+    let stack_abi = UserSegmentAbi {
+        region_handle: stack.handle().as_raw().raw(),
+        flags: UserMemFlags::ReadWrite.raw() as u32,
+        va_base: stack_top - stack_size,
+        mapped_size: stack_size,
+        reserved: 0,
+    };
+    segment_abi.extend_from_slice(&encode_segment(&stack_abi));
+    segment_count += 1;
+    regions.push(stack);
 
     let desc = UserImageDescAbi {
         version: SEGMENT_ABI_VERSION,
         segment_count,
         segments_va: segment_abi.as_ptr() as u64,
         entry_va: entry.entry_va(),
-        user_stack_top: stack_top,
-        user_stack_size: entry.stack_size(),
         user_vm_base: window.start,
         user_vm_size: window.end - window.start,
     };
 
-    let process = Process::create(entry.name())?;
+    let process = Process::create(entry_name(entry.path()))?;
     process.load_image(&encode_image_desc(&desc))?;
     let thread = process.start(
         ThreadEntry {
@@ -97,6 +113,7 @@ pub fn load_entry<'a, E: EntryView<'a>>(
             priority: Priority::new(1),
         },
         bootstrap,
+        Some(resource),
     )?;
 
     // Регионы и маппинги прочитаны ядром при load_image/start; thread-handle

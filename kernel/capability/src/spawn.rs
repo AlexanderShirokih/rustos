@@ -11,7 +11,7 @@ use super::{
     HandleTable,
     errors::{IpcError, SpawnError},
     handle::HandleId,
-    resource::Resource,
+    process::MeteringGrant,
     runtime::UserThreadEntry,
 };
 
@@ -32,10 +32,6 @@ pub struct UserImageInstall {
     pub segments: Vec<UserSegmentInstall>,
     /// PC первого user-инструкции.
     pub entry: VirtualAddress,
-    /// Вершина user-стека.
-    pub user_stack_top: VirtualAddress,
-    /// Размер user-стека в байтах (4K-кратен).
-    pub user_stack_size: usize,
     /// База диапазона user_vm-аллокатора.
     pub user_vm_base: PageAlignedVirtualAddress,
     /// Размер диапазона user_vm-аллокатора в байтах.
@@ -46,23 +42,6 @@ impl UserImageInstall {
     /// Проверяет структурную геометрию образа.
     pub fn validate_geometry(&self) -> Result<(), LoadImageError> {
         use LoadImageError::{InvalidGeometry, UserVmRangeOverflow};
-
-        if self.user_stack_size == 0 || !self.user_stack_size.is_multiple_of(PAGE_SIZE.get()) {
-            return Err(InvalidGeometry);
-        }
-        if !self
-            .user_stack_top
-            .as_usize()
-            .is_multiple_of(PAGE_SIZE.get())
-        {
-            return Err(InvalidGeometry);
-        }
-        let stack_base = self
-            .user_stack_top
-            .as_usize()
-            .checked_sub(self.user_stack_size)
-            .ok_or(InvalidGeometry)?;
-        let stack_end = self.user_stack_top.as_usize();
 
         let uvm_start = self.user_vm_base.as_usize();
         let uvm_end = uvm_start
@@ -78,10 +57,7 @@ impl UserImageInstall {
                 .checked_add(seg.mapped_size)
                 .ok_or(InvalidGeometry)?;
 
-            // Перекрытие со стеком и с окном user_vm.
-            if seg_end > stack_base && stack_end > seg_start {
-                return Err(InvalidGeometry);
-            }
+            // Перекрытие с окном user_vm.
             if seg_end > uvm_start && uvm_end > seg_start {
                 return Err(InvalidGeometry);
             }
@@ -98,10 +74,6 @@ impl UserImageInstall {
             }
         }
 
-        // Окно user_vm не должно пересекать стек.
-        if uvm_end > stack_base && stack_end > uvm_start {
-            return Err(InvalidGeometry);
-        }
         Ok(())
     }
 }
@@ -111,7 +83,7 @@ pub struct UserStartSpec {
     pub entry: UserThreadEntry,
     pub loader_handle_table: Arc<MutexCell<HandleTable>>,
     pub handle_id: HandleId,
-    pub metering_resource: Option<Arc<Resource>>,
+    pub metering_grant: Option<MeteringGrant>,
 }
 
 /// Ошибки [`KernelRuntime::load_user_image_into`].
@@ -124,10 +96,10 @@ pub enum LoadImageError {
     NoUserAddressSpace,
     /// `user_vm_base + user_vm_size` переполняет `usize`.
     UserVmRangeOverflow,
-    /// Геометрия образа нарушает инвариант: невыровненный/нулевой стек,
-    /// пересечение сегментов между собой, со стеком или с окном user_vm.
+    /// Геометрия образа нарушает инвариант: невыровненный или нулевой размер
+    /// сегмента, пересечение сегментов между собой или с окном user_vm.
     InvalidGeometry,
-    /// Ошибка установки PTE для сегмента или стека.
+    /// Ошибка установки PTE для сегмента.
     MappingFailed(MemoryMappingError),
 }
 
@@ -135,65 +107,98 @@ pub enum LoadImageError {
 mod tests {
     use super::*;
 
-    fn segmentless(user_stack_size: usize, user_stack_top: usize) -> UserImageInstall {
+    const SEG_VA: usize = 0x4000_0000;
+    const UVM_VA: usize = 0x1000_0000;
+
+    fn segmentless() -> UserImageInstall {
         UserImageInstall {
             segments: Vec::new(),
             entry: VirtualAddress::new(0x4000_0000),
-            user_stack_top: VirtualAddress::new(user_stack_top),
-            user_stack_size,
-            user_vm_base: PageAlignedVirtualAddress::from_usize(0x1000_0000).expect("aligned"),
+            user_vm_base: PageAlignedVirtualAddress::from_usize(UVM_VA).expect("aligned"),
             user_vm_size: 0x100_0000,
+        }
+    }
+
+    fn segment(va_base: usize, mapped_size: usize) -> UserSegmentInstall {
+        UserSegmentInstall {
+            va_base: PageAlignedVirtualAddress::from_usize(va_base).expect("aligned"),
+            mapped_size,
+            // Геометрию считают поля выше: сам регион в ней не участвует.
+            region: Arc::new(MemoryRegion::create_physical_normal(
+                memory::physical_address::PageAlignedAddress::from_usize(0x8000_0000)
+                    .expect("aligned"),
+                core::num::NonZeroUsize::new(PAGE_SIZE.get()).expect("non-zero"),
+                memory::AccessMask::RW,
+            )),
+            flags: MemFlags::user_rw(),
+        }
+    }
+
+    fn with_segments(segments: Vec<UserSegmentInstall>) -> UserImageInstall {
+        UserImageInstall {
+            segments,
+            ..segmentless()
         }
     }
 
     #[test]
     fn accepts_aligned_segmentless_image() {
-        assert!(segmentless(0x1000, 0x5000_1000).validate_geometry().is_ok());
+        assert!(segmentless().validate_geometry().is_ok());
     }
 
     #[test]
-    fn rejects_zero_stack_size() {
+    fn accepts_disjoint_segments() {
+        let image = with_segments(vec![
+            segment(SEG_VA, PAGE_SIZE.get()),
+            segment(SEG_VA + PAGE_SIZE.get(), PAGE_SIZE.get()),
+        ]);
+        assert!(image.validate_geometry().is_ok());
+    }
+
+    #[test]
+    fn rejects_zero_segment_size() {
         assert!(matches!(
-            segmentless(0, 0x5000_1000).validate_geometry(),
+            with_segments(vec![segment(SEG_VA, 0)]).validate_geometry(),
             Err(LoadImageError::InvalidGeometry)
         ));
     }
 
     #[test]
-    fn rejects_unaligned_stack_size() {
+    fn rejects_unaligned_segment_size() {
         assert!(matches!(
-            segmentless(0x1001, 0x5000_1000).validate_geometry(),
+            with_segments(vec![segment(SEG_VA, PAGE_SIZE.get() + 1)]).validate_geometry(),
             Err(LoadImageError::InvalidGeometry)
         ));
     }
 
     #[test]
-    fn rejects_unaligned_stack_top() {
+    fn rejects_overlapping_segments() {
+        let image = with_segments(vec![
+            segment(SEG_VA, 2 * PAGE_SIZE.get()),
+            segment(SEG_VA + PAGE_SIZE.get(), PAGE_SIZE.get()),
+        ]);
         assert!(matches!(
-            segmentless(0x1000, 0x5000_1001).validate_geometry(),
+            image.validate_geometry(),
+            Err(LoadImageError::InvalidGeometry)
+        ));
+    }
+
+    #[test]
+    fn rejects_segment_overlapping_user_vm_window() {
+        assert!(matches!(
+            with_segments(vec![segment(UVM_VA, PAGE_SIZE.get())]).validate_geometry(),
             Err(LoadImageError::InvalidGeometry)
         ));
     }
 
     #[test]
     fn rejects_user_vm_range_overflow() {
-        let mut image = segmentless(0x1000, 0x5000_1000);
+        let mut image = segmentless();
         image.user_vm_base = PageAlignedVirtualAddress::from_usize(0x1000).expect("aligned");
         image.user_vm_size = usize::MAX;
         assert!(matches!(
             image.validate_geometry(),
             Err(LoadImageError::UserVmRangeOverflow)
-        ));
-    }
-
-    #[test]
-    fn rejects_user_vm_window_overlapping_stack() {
-        let mut image = segmentless(0x1000, 0x5000_1000);
-        image.user_vm_base = PageAlignedVirtualAddress::from_usize(0x5000_0000).expect("aligned");
-        image.user_vm_size = 0x2000;
-        assert!(matches!(
-            image.validate_geometry(),
-            Err(LoadImageError::InvalidGeometry)
         ));
     }
 }

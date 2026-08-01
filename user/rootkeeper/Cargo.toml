@@ -9,7 +9,6 @@ build = "build.rs"
 forced-target = "aarch64-unknown-none"
 
 [package.metadata.userland]
-bootstrap = true
 stack_size = 65536
 
 [[bin]]

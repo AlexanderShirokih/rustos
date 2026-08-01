@@ -6,6 +6,9 @@ use crate::SyscallError;
 /// `0` означает невалидный handle.
 pub type RawHandle = u32;
 
+/// Ёмкость handle-таблицы процесса: заполненная таблица отвечает `OutOfHandles`.
+pub const HANDLE_TABLE_CAPACITY: u32 = 1024;
+
 /// Capability процесса: непрозрачный идентификатор записи в handle-таблице.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +33,11 @@ impl Handle {
         self.0.get()
     }
 
+    /// Сырое значение с сохранённым инвариантом ненулевости.
+    pub const fn as_nonzero(self) -> NonZeroU32 {
+        self.0
+    }
+
     /// Разбирает знаковый возврат системного вызова:
     /// значение в `1..=u32::MAX` - валидный handle,
     /// иначе декодированный `SyscallError`.
@@ -49,6 +57,10 @@ impl Handle {
         }
     }
 }
+
+/// Граница длины массива `SignalWaitMany`: `count` вне `1..=WAIT_MANY_MAX_COUNT`
+/// ядро отвергает как `InvalidArgument`.
+pub const WAIT_MANY_MAX_COUNT: usize = 256;
 
 /// Запись массива `SignalWaitMany`: capability target `handle` и маска ожидаемых сигналов
 /// `mask`.

@@ -39,7 +39,7 @@ fn load_entry_passes_bootstrap_handle() {
         bytes: &code,
     }];
     let entry = Entry {
-        name: "child",
+        path: "/child",
         entry_va: CHILD_CODE_VA,
         stack_size: PAGE_SIZE,
         segments: &segments,

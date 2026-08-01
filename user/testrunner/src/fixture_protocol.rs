@@ -17,6 +17,12 @@ pub const OP_READ_SLOT: u8 = 2;
 pub const OP_MAP_CHECK: u8 = 3;
 /// Ответить [`REPLY_OK`] и завершиться с кодом из аргумента.
 pub const OP_EXIT: u8 = 4;
+/// Выделить регион на аргумент страниц из собственного метеринг-ресурса и
+/// сразу закрыть его. Ответ - [`REPLY_OK`] либо код отказа.
+pub const OP_ALLOCATE_PAGES: u8 = 5;
+/// Снять с собственного метеринг-ресурса капу с правом `TRANSFER`. Ответ -
+/// [`REPLY_OK`], [`REPLY_ACCESS_DENIED`] либо [`REPLY_DUPLICATE_FAILED`].
+pub const OP_DUPLICATE_TRANSFER_CAP: u8 = 6;
 
 /// Длина запроса: опкод и `u64`-аргумент.
 pub const REQUEST_LEN: usize = 1 + 8;
@@ -29,6 +35,14 @@ pub const REPLY_OK: u8 = 0;
 pub const REPLY_PATTERN_MISMATCH: u8 = 1;
 /// `OP_MAP_CHECK`: регион не удалось замапить.
 pub const REPLY_MAP_FAILED: u8 = 2;
+/// `OP_ALLOCATE_PAGES`: бюджет метеринг-ресурса фикстуры исчерпан.
+pub const REPLY_BUDGET_EXHAUSTED: u8 = 3;
+/// `OP_ALLOCATE_PAGES`: выделение отказано не бюджетом.
+pub const REPLY_ALLOCATE_FAILED: u8 = 4;
+/// `OP_DUPLICATE_TRANSFER_CAP`: право `TRANSFER` капе фикстуры не выдано.
+pub const REPLY_ACCESS_DENIED: u8 = 5;
+/// `OP_DUPLICATE_TRANSFER_CAP`: дубликат отказан не правами.
+pub const REPLY_DUPLICATE_FAILED: u8 = 6;
 
 /// Сериализует запрос в кадр фиксированной длины.
 pub fn encode_request(op: u8, arg: u64) -> [u8; REQUEST_LEN] {

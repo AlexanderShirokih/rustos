@@ -34,14 +34,8 @@ fn image_carries_magic(client: &BootstrapClient<PortTransport>) -> bool {
     };
 
     let mut magic = [0u8; USERLAND_IMAGE_MAGIC.len()];
-    if mapping.size_bytes() < magic.len() as u64 {
+    if mapping.copy_out(&mut magic).is_err() {
         return false;
-    }
-    let base = mapping.va() as *const u8;
-    for (i, slot) in magic.iter_mut().enumerate() {
-        // SAFETY: маппинг покрывает size_bytes >= magic.len() байт read-only памяти
-        // образа; читаем in-bounds по сырому указателю на живой маппинг.
-        *slot = unsafe { base.add(i).read_volatile() };
     }
     magic == USERLAND_IMAGE_MAGIC
 }

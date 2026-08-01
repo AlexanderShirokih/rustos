@@ -1,7 +1,13 @@
 #![cfg_attr(not(test), no_std)]
 
-pub const USERLAND_ENTRY_NAME_CAPACITY: usize = 64;
+pub const USERLAND_ENTRY_PATH_CAPACITY: usize = 255;
 pub const USERLAND_PAGE_SIZE: u64 = 4096;
+
+/// Имя записи - последний компонент её пути (`/boot/filesystem-ramfs` -> `filesystem-ramfs`).
+/// Пусто, если путь оканчивается разделителем. [`validate_entry`] такой путь отвергает.
+pub fn entry_name(path: &str) -> &str {
+    &path[path.rfind('/').map_or(0, |index| index + 1)..]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentPermissions {
@@ -26,7 +32,7 @@ pub trait SegmentView<'a>: Copy {
 pub trait EntryView<'a> {
     type Segment: SegmentView<'a>;
 
-    fn name(&self) -> &'a str;
+    fn path(&self) -> &'a str;
     fn entry_va(&self) -> u64;
     fn stack_size(&self) -> u64;
     fn segments(&self) -> impl Iterator<Item = Self::Segment> + '_;
@@ -60,7 +66,7 @@ impl<'a> SegmentView<'a> for Segment<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entry<'a> {
-    pub name: &'a str,
+    pub path: &'a str,
     pub entry_va: u64,
     pub stack_size: u64,
     pub segments: &'a [Segment<'a>],
@@ -69,8 +75,8 @@ pub struct Entry<'a> {
 impl<'a> EntryView<'a> for Entry<'a> {
     type Segment = Segment<'a>;
 
-    fn name(&self) -> &'a str {
-        self.name
+    fn path(&self) -> &'a str {
+        self.path
     }
 
     fn entry_va(&self) -> u64 {
@@ -88,9 +94,10 @@ impl<'a> EntryView<'a> for Entry<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserlandValidationError {
+    EmptyPath,
+    NonAsciiPath,
+    PathTooLong,
     EmptyName,
-    NonAsciiName,
-    NameTooLong,
     NoSegments,
     ZeroStackSize,
     MisalignedSegment,
@@ -102,15 +109,18 @@ pub enum UserlandValidationError {
 }
 
 pub fn validate_entry<'a, E: EntryView<'a>>(entry: &E) -> Result<(), UserlandValidationError> {
-    let name = entry.name();
-    if name.is_empty() {
+    let path = entry.path();
+    if path.is_empty() {
+        return Err(UserlandValidationError::EmptyPath);
+    }
+    if !path.is_ascii() {
+        return Err(UserlandValidationError::NonAsciiPath);
+    }
+    if path.len() > USERLAND_ENTRY_PATH_CAPACITY {
+        return Err(UserlandValidationError::PathTooLong);
+    }
+    if entry_name(path).is_empty() {
         return Err(UserlandValidationError::EmptyName);
-    }
-    if !name.is_ascii() {
-        return Err(UserlandValidationError::NonAsciiName);
-    }
-    if name.len() > USERLAND_ENTRY_NAME_CAPACITY {
-        return Err(UserlandValidationError::NameTooLong);
     }
     if entry.stack_size() == 0 {
         return Err(UserlandValidationError::ZeroStackSize);
@@ -206,9 +216,9 @@ mod tests {
         }
     }
 
-    fn entry<'a>(name: &'a str, segments: &'a [Segment<'a>], entry_va: u64) -> Entry<'a> {
+    fn entry<'a>(path: &'a str, segments: &'a [Segment<'a>], entry_va: u64) -> Entry<'a> {
         Entry {
-            name,
+            path,
             entry_va,
             stack_size: PAGE,
             segments,
@@ -222,40 +232,59 @@ mod tests {
             segment(0x4000_1000, PAGE, SegmentPermissions::ReadWrite),
         ];
         assert_eq!(
-            validate_entry(&entry("rootkeeper", &segments, 0x4000_0000)),
+            validate_entry(&entry("/boot/rootkeeper", &segments, 0x4000_0000)),
             Ok(())
         );
     }
 
     #[test]
-    fn rejects_invalid_names() {
+    fn rejects_invalid_paths() {
         let segments = [segment(0x4000_0000, PAGE, SegmentPermissions::ReadExecute)];
         assert_eq!(
             validate_entry(&entry("", &segments, 0x4000_0000)),
-            Err(UserlandValidationError::EmptyName)
+            Err(UserlandValidationError::EmptyPath)
         );
         assert_eq!(
-            validate_entry(&entry("не ascii", &segments, 0x4000_0000)),
-            Err(UserlandValidationError::NonAsciiName)
+            validate_entry(&entry("/boot/не ascii", &segments, 0x4000_0000)),
+            Err(UserlandValidationError::NonAsciiPath)
         );
 
-        let long_name = "x".repeat(USERLAND_ENTRY_NAME_CAPACITY + 1);
+        let long_path = "x".repeat(USERLAND_ENTRY_PATH_CAPACITY + 1);
         assert_eq!(
-            validate_entry(&entry(&long_name, &segments, 0x4000_0000)),
-            Err(UserlandValidationError::NameTooLong)
+            validate_entry(&entry(&long_path, &segments, 0x4000_0000)),
+            Err(UserlandValidationError::PathTooLong)
+        );
+
+        assert_eq!(
+            validate_entry(&entry("/boot/", &segments, 0x4000_0000)),
+            Err(UserlandValidationError::EmptyName)
         );
     }
 
     #[test]
+    fn entry_name_is_last_path_component() {
+        assert_eq!(entry_name("/boot/filesystem-ramfs"), "filesystem-ramfs");
+        assert_eq!(entry_name("filesystem-ramfs"), "filesystem-ramfs");
+    }
+
+    #[test]
+    fn entry_name_of_longest_path_is_its_tail() {
+        let name = "n".repeat(USERLAND_ENTRY_PATH_CAPACITY - "/boot/".len());
+        let path = format!("/boot/{name}");
+        assert_eq!(path.len(), USERLAND_ENTRY_PATH_CAPACITY);
+        assert_eq!(entry_name(&path), name);
+    }
+
+    #[test]
     fn rejects_empty_segments_and_zero_stack() {
-        let empty = entry("rootkeeper", &[], 0x4000_0000);
+        let empty = entry("/boot/rootkeeper", &[], 0x4000_0000);
         assert_eq!(
             validate_entry(&empty),
             Err(UserlandValidationError::NoSegments)
         );
 
         let segments = [segment(0x4000_0000, PAGE, SegmentPermissions::ReadExecute)];
-        let mut zero_stack = entry("rootkeeper", &segments, 0x4000_0000);
+        let mut zero_stack = entry("/boot/rootkeeper", &segments, 0x4000_0000);
         zero_stack.stack_size = 0;
         assert_eq!(
             validate_entry(&zero_stack),
@@ -267,13 +296,13 @@ mod tests {
     fn rejects_invalid_segment_memory() {
         let zero = [segment(0x4000_0000, 0, SegmentPermissions::ReadExecute)];
         assert_eq!(
-            validate_entry(&entry("rootkeeper", &zero, 0x4000_0000)),
+            validate_entry(&entry("/boot/rootkeeper", &zero, 0x4000_0000)),
             Err(UserlandValidationError::ZeroSegmentMemory)
         );
 
         let too_small = [segment(0x4000_0000, 2, SegmentPermissions::ReadExecute)];
         assert_eq!(
-            validate_entry(&entry("rootkeeper", &too_small, 0x4000_0000)),
+            validate_entry(&entry("/boot/rootkeeper", &too_small, 0x4000_0000)),
             Err(UserlandValidationError::InitBytesExceedMemory)
         );
     }
@@ -282,7 +311,7 @@ mod tests {
     fn rejects_misaligned_overflowing_and_overlapping_segments() {
         let misaligned = [segment(0x4000_0001, PAGE, SegmentPermissions::ReadExecute)];
         assert_eq!(
-            validate_entry(&entry("rootkeeper", &misaligned, 0x4000_0001)),
+            validate_entry(&entry("/boot/rootkeeper", &misaligned, 0x4000_0001)),
             Err(UserlandValidationError::MisalignedSegment)
         );
 
@@ -292,7 +321,7 @@ mod tests {
             SegmentPermissions::ReadExecute,
         )];
         assert_eq!(
-            validate_entry(&entry("rootkeeper", &overflow, u64::MAX)),
+            validate_entry(&entry("/boot/rootkeeper", &overflow, u64::MAX)),
             Err(UserlandValidationError::SegmentRangeOverflow)
         );
 
@@ -301,7 +330,7 @@ mod tests {
             segment(0x4000_1000, PAGE, SegmentPermissions::ReadWrite),
         ];
         assert_eq!(
-            validate_entry(&entry("rootkeeper", &overlap, 0x4000_0000)),
+            validate_entry(&entry("/boot/rootkeeper", &overlap, 0x4000_0000)),
             Err(UserlandValidationError::OverlappingSegments)
         );
     }
@@ -310,7 +339,7 @@ mod tests {
     fn rejects_entry_outside_executable_segment() {
         let segments = [segment(0x4000_0000, PAGE, SegmentPermissions::ReadWrite)];
         assert_eq!(
-            validate_entry(&entry("rootkeeper", &segments, 0x4000_0000)),
+            validate_entry(&entry("/boot/rootkeeper", &segments, 0x4000_0000)),
             Err(UserlandValidationError::EntryNotExecutable)
         );
     }

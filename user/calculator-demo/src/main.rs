@@ -40,7 +40,9 @@ fn run(root: Handle) -> Result<()> {
     let image_mapping = image_region.map_full(UserMemFlags::ReadOnly)?;
 
     // Парсим контейнер userland-image
-    let image = decode(image_mapping.as_bytes())?;
+    // SAFETY: регион образа ядро выдаёт только на чтение: отображений на запись
+    // у него нет ни в одном адресном пространстве.
+    let image = decode(unsafe { image_mapping.as_bytes() })?;
 
     // Порт для связи с сервисом калькулятора: корневая капа уезжает
     // калькулятору, у демо остаётся клиентский минт со значком сессии.
@@ -48,10 +50,13 @@ fn run(root: Handle) -> Result<()> {
     let resource = Resource::self_resource()?;
 
     // Парсим контейнер initrd образа и получает из него программу
-    let calculator_entry = image.entry("calculator").ok_or(Error::MissingEntry)?;
+    let calculator_program = image
+        .entry("/boot/calculator")
+        .ok_or(Error::MissingEntry)?
+        .program()?;
 
     // Спавним процесс с нашей программой. Связвываем его с нашим metering-resource и capability.
-    let calculator_process = load_entry(&calculator_entry, &resource, calculator_port.server)?;
+    let calculator_process = load_entry(&calculator_program, &resource, calculator_port.server)?;
 
     let calculator_client = calculator_port.client;
 

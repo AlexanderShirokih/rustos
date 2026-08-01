@@ -2,7 +2,7 @@
 
 use crate::{
     schema::WireType,
-    wire::{Bytes, IpcError, MessageBuf, Str, value},
+    wire::{Bytes, Cap, HandleSlots, IpcError, MessageBuf, Str, value},
 };
 
 /// Значение, занимающее одну запись поля.
@@ -10,14 +10,17 @@ use crate::{
 /// Для owned-типов (целые, `bool`) `'a` не задействован.
 pub trait WireValue<'a>: Sized {
     /// Кодирует значение в `data` и дописывает запись `field_id` в `buf`.
+    /// Значение-капа кладёт handle-id в `handles`, а в тело пишет его индекс.
     fn write_as_field<const N: usize>(
         &self,
         buf: &mut MessageBuf<N>,
         field_id: u8,
+        handles: &mut HandleSlots,
     ) -> Result<(), IpcError>;
 
-    /// Декодирует значение из `data` записи поля.
-    fn from_field(data: &'a [u8]) -> Result<Self, IpcError>;
+    /// Декодирует значение из `data` записи поля. `handles` - слоты кадра, из
+    /// которых значение-капа достаёт свой handle по индексу.
+    fn from_field(data: &'a [u8], handles: &HandleSlots) -> Result<Self, IpcError>;
 }
 
 /// Структурный wire-дескриптор типа для схемы протокола.
@@ -35,11 +38,12 @@ macro_rules! int_wire_value {
                 &self,
                 buf: &mut MessageBuf<N>,
                 field_id: u8,
+                _handles: &mut HandleSlots,
             ) -> Result<(), IpcError> {
                 buf.write_field(field_id, &value::$encode(*self))
             }
 
-            fn from_field(data: &'a [u8]) -> Result<Self, IpcError> {
+            fn from_field(data: &'a [u8], _handles: &HandleSlots) -> Result<Self, IpcError> {
                 value::$decode(data)
             }
         }
@@ -76,11 +80,12 @@ impl<'a> WireValue<'a> for bool {
         &self,
         buf: &mut MessageBuf<N>,
         field_id: u8,
+        _handles: &mut HandleSlots,
     ) -> Result<(), IpcError> {
         buf.write_field(field_id, &value::encode_bool(*self))
     }
 
-    fn from_field(data: &'a [u8]) -> Result<Self, IpcError> {
+    fn from_field(data: &'a [u8], _handles: &HandleSlots) -> Result<Self, IpcError> {
         value::decode_bool(data)
     }
 }
@@ -90,11 +95,12 @@ impl<'a, const N: usize> WireValue<'a> for Str<'a, N> {
         &self,
         buf: &mut MessageBuf<M>,
         field_id: u8,
+        _handles: &mut HandleSlots,
     ) -> Result<(), IpcError> {
         buf.write_field(field_id, self.as_str().as_bytes())
     }
 
-    fn from_field(data: &'a [u8]) -> Result<Self, IpcError> {
+    fn from_field(data: &'a [u8], _handles: &HandleSlots) -> Result<Self, IpcError> {
         Str::new(value::decode_str(data)?).ok_or(IpcError::InvalidValue)
     }
 }
@@ -104,19 +110,44 @@ impl<'a, const N: usize> WireValue<'a> for Bytes<'a, N> {
         &self,
         buf: &mut MessageBuf<M>,
         field_id: u8,
+        _handles: &mut HandleSlots,
     ) -> Result<(), IpcError> {
         buf.write_field(field_id, self.as_bytes())
     }
 
-    fn from_field(data: &'a [u8]) -> Result<Self, IpcError> {
+    fn from_field(data: &'a [u8], _handles: &HandleSlots) -> Result<Self, IpcError> {
         Bytes::new(data).ok_or(IpcError::InvalidValue)
+    }
+}
+
+impl WireTyped for Cap {
+    const WIRE_TYPE: WireType = WireType::Capability;
+}
+
+impl<'a> WireValue<'a> for Cap {
+    fn write_as_field<const N: usize>(
+        &self,
+        buf: &mut MessageBuf<N>,
+        field_id: u8,
+        handles: &mut HandleSlots,
+    ) -> Result<(), IpcError> {
+        let index = handles.push(self.raw().get())?;
+        buf.write_field(field_id, &value::encode_port_index(index))
+    }
+
+    fn from_field(data: &'a [u8], handles: &HandleSlots) -> Result<Self, IpcError> {
+        let raw = handles.take(value::decode_port_index(data)?)?;
+        let id = core::num::NonZeroU32::new(raw).ok_or(IpcError::InvalidValue)?;
+        Ok(Cap::from_raw(id))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::WireValue;
-    use crate::wire::{Bytes, FieldCursor, IpcError, MESSAGE_INLINE_MAX, MessageBuf, Str};
+    use crate::wire::{
+        Bytes, Cap, FieldCursor, HandleSlots, IpcError, MESSAGE_INLINE_MAX, MessageBuf, Str,
+    };
 
     const FIELD_ID: u8 = 1;
 
@@ -124,12 +155,14 @@ mod tests {
     where
         V: WireValue<'b> + core::fmt::Debug,
     {
-        v.write_as_field(buf, FIELD_ID).expect("write ok");
+        let mut handles = HandleSlots::new();
+        v.write_as_field(buf, FIELD_ID, &mut handles)
+            .expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");
         assert_eq!(field.id, FIELD_ID);
-        V::from_field(field.data).expect("from_field ok")
+        V::from_field(field.data, &handles).expect("from_field ok")
     }
 
     macro_rules! int_round_trip_test {
@@ -185,7 +218,7 @@ mod tests {
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("ok").expect("present");
         assert_eq!(
-            <Str<3> as WireValue>::from_field(field.data),
+            <Str<3> as WireValue>::from_field(field.data, &HandleSlots::new()),
             Err(IpcError::InvalidValue)
         );
     }
@@ -198,8 +231,75 @@ mod tests {
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("ok").expect("present");
         assert_eq!(
-            <Bytes<2> as WireValue>::from_field(field.data),
+            <Bytes<2> as WireValue>::from_field(field.data, &HandleSlots::new()),
             Err(IpcError::InvalidValue)
         );
+    }
+    #[test]
+    fn cap_round_trip_through_the_handle_slots() {
+        let cap = Cap::from_raw(core::num::NonZeroU32::new(0x2A).expect("non-zero"));
+        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
+        let mut handles = HandleSlots::new();
+        cap.write_as_field(&mut buf, FIELD_ID, &mut handles)
+            .expect("write ok");
+        buf.finish().expect("finish ok");
+
+        // Handle уехал слотом кадра, в теле лежит только его индекс.
+        assert_eq!(handles.as_slice(), [0x2A]);
+
+        let mut cursor = FieldCursor::new(buf.as_bytes());
+        let field = cursor.next_field().expect("ok").expect("present");
+        let received = HandleSlots::from_received(handles.as_slice());
+        assert_eq!(
+            <Cap as WireValue>::from_field(field.data, &received),
+            Ok(cap)
+        );
+    }
+
+    #[test]
+    fn cap_from_field_consumes_its_slot_once() {
+        let cap = Cap::from_raw(core::num::NonZeroU32::new(0x2A).expect("non-zero"));
+        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
+        let mut handles = HandleSlots::new();
+        cap.write_as_field(&mut buf, FIELD_ID, &mut handles)
+            .expect("write ok");
+        buf.finish().expect("finish ok");
+
+        let mut cursor = FieldCursor::new(buf.as_bytes());
+        let field = cursor.next_field().expect("ok").expect("present");
+        let received = HandleSlots::from_received(handles.as_slice());
+        assert_eq!(
+            <Cap as WireValue>::from_field(field.data, &received),
+            Ok(cap)
+        );
+        // Второе поле с тем же индексом - это второй владелец того же хэндла.
+        assert_eq!(
+            <Cap as WireValue>::from_field(field.data, &received),
+            Err(IpcError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn cap_from_field_rejects_an_index_without_a_slot() {
+        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
+        buf.write_field(FIELD_ID, &[3]).expect("write ok");
+        buf.finish().expect("finish ok");
+        let mut cursor = FieldCursor::new(buf.as_bytes());
+        let field = cursor.next_field().expect("ok").expect("present");
+        assert_eq!(
+            <Cap as WireValue>::from_field(field.data, &HandleSlots::new()),
+            Err(IpcError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn handle_slots_reject_more_caps_than_the_frame_carries() {
+        let mut handles = HandleSlots::new();
+        for id in 0..crate::wire::MESSAGE_MAX_HANDLES {
+            handles
+                .push(id as u32 + 1)
+                .expect("within the frame budget");
+        }
+        assert_eq!(handles.push(99), Err(IpcError::TooManyHandles));
     }
 }

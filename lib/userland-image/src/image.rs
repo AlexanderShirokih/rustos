@@ -1,36 +1,27 @@
-use userland::{EntryView, Segment, SegmentPermissions, UserlandValidationError, validate_entry};
+use userland::USERLAND_PAGE_SIZE;
+
+use crate::program::{DecodedProgram, ProgramDecodeError, decode_program};
 
 pub const USERLAND_IMAGE_MAGIC: [u8; 8] = *b"USRLIMG\0";
 pub const USERLAND_IMAGE_VERSION: u16 = 1;
-pub(crate) const IMAGE_HEADER_SIZE: usize = 20;
-pub(crate) const ENTRY_HEADER_SIZE: usize = 36;
-pub(crate) const SEGMENT_SIZE: usize = 36;
+pub(crate) const IMAGE_HEADER_SIZE: usize = 24;
+pub(crate) const RECORD_SIZE: usize = 28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ImageHeader {
     magic: [u8; 8],
     version: u16,
     entry_count: u16,
+    boot_index: u16,
     total_size: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EntryHeader {
-    payload_offset: u64,
-    payload_size: u64,
-    entry_va: u64,
-    stack_size: u64,
-    segment_count: u16,
-    name_len: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WireSegment {
-    file_offset: u64,
-    file_size: u64,
-    va_base: u64,
-    mem_size: u64,
-    flags: u32,
+struct RecordHeader {
+    path_offset: u64,
+    path_len: u16,
+    data_offset: u64,
+    data_size: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,37 +41,26 @@ pub enum ImageDecodeError {
         offset: u64,
         size: u64,
     },
-    Semantic {
-        entry_index: usize,
-        source: UserlandValidationError,
-    },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct DecodedImage<'a> {
     bytes: &'a [u8],
     header: ImageHeader,
-    entries_end: usize,
 }
 
+/// Запись таблицы: путь и байты содержимого. Что это за содержимое, знает тот,
+/// кто его разбирает.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodedEntry<'a> {
-    bytes: &'a [u8],
-    header: EntryHeader,
-    segments_offset: usize,
-    name: &'a str,
+    path: &'a str,
+    data: &'a [u8],
+    data_offset: u64,
 }
 
 pub struct DecodedEntries<'a> {
     image: DecodedImage<'a>,
-    next_offset: usize,
-    current_index: usize,
-}
-
-pub struct DecodedSegments<'a> {
-    bytes: &'a [u8],
-    next_offset: usize,
-    remaining: usize,
+    next_index: usize,
 }
 
 /// Декодирует образ из буфера. Длина буфера должна быть не меньше размера, объявленного в заголовке.
@@ -103,6 +83,9 @@ impl<'a> DecodedImage<'a> {
         if header.entry_count == 0 {
             return Err(invalid_layout(None, "entry_count"));
         }
+        if header.boot_index >= header.entry_count {
+            return Err(invalid_layout(None, "boot_index"));
+        }
 
         let total_size =
             usize::try_from(header.total_size).map_err(|_| invalid_layout(None, "total_size"))?;
@@ -116,79 +99,89 @@ impl<'a> DecodedImage<'a> {
         }
         let bytes = &bytes[..total_size];
 
-        let mut next_offset = IMAGE_HEADER_SIZE;
-        for index in 0..usize::from(header.entry_count) {
-            let entry_header = decode_entry_header_checked(bytes, next_offset)?;
-            let encoded_size = entry_encoded_size(entry_header, index)?;
-            next_offset = next_offset
-                .checked_add(encoded_size)
-                .ok_or(invalid_layout(Some(index), "entry_size_overflow"))?;
-            if next_offset > total_size {
-                return Err(invalid_layout(Some(index), "entry_bounds"));
-            }
+        let table_end = table_end(header.entry_count).ok_or(invalid_layout(None, "table_size"))?;
+        if table_end > total_size {
+            return Err(invalid_layout(None, "table_bounds"));
         }
-        let entries_end = next_offset;
 
-        next_offset = IMAGE_HEADER_SIZE;
-        for index in 0..usize::from(header.entry_count) {
-            let entry = parse_entry(bytes, next_offset, index, entries_end)?;
-            validate_entry(&entry).map_err(|source| ImageDecodeError::Semantic {
-                entry_index: index,
-                source,
-            })?;
-            next_offset += entry_encoded_size(entry.header, index)?;
+        let image = Self { bytes, header };
+        let mut previous_path: Option<&str> = None;
+        let mut previous_data_end: u64 = 0;
+        for index in 0..image.entry_count() {
+            let entry = parse_entry(bytes, header.entry_count, index)?;
+            // Записи отсортированы строго по возрастанию пути: на этом стоит
+            // двоичный поиск, а строгость запрещает дубликаты путей.
+            if previous_path.is_some_and(|previous| previous >= entry.path) {
+                return Err(invalid_layout(Some(index), "path_order"));
+            }
+            previous_path = Some(entry.path);
+
+            // Окна данных лежат в порядке таблицы и не пересекаются: потребитель выводит окно
+            // узла из одной записи и вправе считать его байты только своими.
+            let record = decode_record_header(bytes, IMAGE_HEADER_SIZE + index * RECORD_SIZE)
+                .ok_or(invalid_layout(Some(index), "record_bounds"))?;
+            if record.data_offset < previous_data_end {
+                return Err(invalid_layout(Some(index), "data_overlap"));
+            }
+            previous_data_end = record.data_offset.saturating_add(record.data_size);
         }
-        Ok(Self {
-            bytes,
-            header,
-            entries_end,
-        })
+        Ok(image)
     }
 
     pub fn entry_count(&self) -> usize {
         usize::from(self.header.entry_count)
     }
 
-    /// Первая запись образа - точка входа bootstrap-цепочки. `None` на пустом образе.
-    pub fn bootstrap_entry(&self) -> Option<DecodedEntry<'a>> {
-        self.entries().next()
+    /// Запись, с которой поднимается bootstrap-процесс.
+    pub fn boot_entry(&self) -> DecodedEntry<'a> {
+        self.entry_at(usize::from(self.header.boot_index))
     }
 
-    /// Возвращает entry с заданным именем.
-    pub fn entry(&self, name: &str) -> Option<DecodedEntry<'a>> {
-        self.entries().find(|entry| entry.name() == name)
+    /// Возвращает запись с заданным путём двоичным поиском по таблице.
+    pub fn entry(&self, path: &str) -> Option<DecodedEntry<'a>> {
+        let (mut low, mut high) = (0, self.entry_count());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let entry = self.entry_at(middle);
+            match entry.path.cmp(path) {
+                core::cmp::Ordering::Less => low = middle + 1,
+                core::cmp::Ordering::Greater => high = middle,
+                core::cmp::Ordering::Equal => return Some(entry),
+            }
+        }
+        None
     }
 
     pub fn entries(&self) -> DecodedEntries<'a> {
         DecodedEntries {
             image: *self,
-            next_offset: IMAGE_HEADER_SIZE,
-            current_index: 0,
+            next_index: 0,
         }
+    }
+
+    fn entry_at(&self, index: usize) -> DecodedEntry<'a> {
+        parse_entry(self.bytes, self.header.entry_count, index)
+            .expect("entries were validated during decode")
     }
 }
 
-impl<'a> EntryView<'a> for DecodedEntry<'a> {
-    type Segment = Segment<'a>;
-
-    fn name(&self) -> &'a str {
-        self.name
+impl<'a> DecodedEntry<'a> {
+    pub fn path(&self) -> &'a str {
+        self.path
     }
 
-    fn entry_va(&self) -> u64 {
-        self.header.entry_va
+    pub fn data(&self) -> &'a [u8] {
+        self.data
     }
 
-    fn stack_size(&self) -> u64 {
-        self.header.stack_size
+    /// Смещение байт содержимого от начала образа, кратное [`USERLAND_PAGE_SIZE`].
+    pub fn data_offset(&self) -> u64 {
+        self.data_offset
     }
 
-    fn segments(&self) -> impl Iterator<Item = Self::Segment> + '_ {
-        DecodedSegments {
-            bytes: self.bytes,
-            next_offset: self.segments_offset,
-            remaining: usize::from(self.header.segment_count),
-        }
+    /// Разбирает содержимое записи как программу.
+    pub fn program(&self) -> Result<DecodedProgram<'a>, ProgramDecodeError> {
+        decode_program(self.path, self.data)
     }
 }
 
@@ -196,168 +189,69 @@ impl<'a> Iterator for DecodedEntries<'a> {
     type Item = DecodedEntry<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_index == self.image.entry_count() {
+        if self.next_index == self.image.entry_count() {
             return None;
         }
-        // Записи проверены на этапе decode. Непрошедшая обрывает итерацию.
-        let entry = parse_entry(
-            self.image.bytes,
-            self.next_offset,
-            self.current_index,
-            self.image.entries_end,
-        )
-        .ok()?;
-        self.next_offset += entry_encoded_size(entry.header, self.current_index).ok()?;
-        self.current_index += 1;
+        let entry = self.image.entry_at(self.next_index);
+        self.next_index += 1;
         Some(entry)
-    }
-}
-
-impl<'a> Iterator for DecodedSegments<'a> {
-    type Item = Segment<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let wire = decode_segment(
-            self.bytes
-                .get(self.next_offset..self.next_offset + SEGMENT_SIZE)?,
-        )?;
-        self.next_offset += SEGMENT_SIZE;
-        self.remaining -= 1;
-
-        let start = usize::try_from(wire.file_offset).ok()?;
-        let size = usize::try_from(wire.file_size).ok()?;
-        let bytes = self.bytes.get(start..start.checked_add(size)?)?;
-        Some(Segment {
-            va_base: wire.va_base,
-            mem_size: wire.mem_size,
-            permissions: decode_permissions(wire.flags)?,
-            bytes,
-        })
     }
 }
 
 fn parse_entry(
     bytes: &[u8],
-    entry_offset: usize,
-    entry_index: usize,
-    entries_end: usize,
+    entry_count: u16,
+    index: usize,
 ) -> Result<DecodedEntry<'_>, ImageDecodeError> {
-    let header = decode_entry_header_checked(bytes, entry_offset)?;
-    let segments_size = usize::from(header.segment_count)
-        .checked_mul(SEGMENT_SIZE)
-        .ok_or(invalid_layout(Some(entry_index), "segments_size_overflow"))?;
-    let segments_offset = entry_offset
-        .checked_add(ENTRY_HEADER_SIZE)
-        .ok_or(invalid_layout(
-            Some(entry_index),
-            "segments_offset_overflow",
-        ))?;
-    let name_offset = segments_offset
-        .checked_add(segments_size)
-        .ok_or(invalid_layout(Some(entry_index), "name_offset_overflow"))?;
-    let name_end = name_offset
-        .checked_add(usize::from(header.name_len))
-        .ok_or(invalid_layout(Some(entry_index), "name_end_overflow"))?;
-    let name_bytes = bytes
-        .get(name_offset..name_end)
-        .ok_or(invalid_layout(Some(entry_index), "entry_bounds"))?;
-    let name = core::str::from_utf8(name_bytes)
-        .map_err(|_| invalid_layout(Some(entry_index), "name_utf8"))?;
+    let table_end = table_end(entry_count).ok_or(invalid_layout(None, "table_size"))?;
+    let header = decode_record_header(bytes, IMAGE_HEADER_SIZE + index * RECORD_SIZE).ok_or(
+        ImageDecodeError::BufferTooShort {
+            needed: table_end,
+            actual: bytes.len(),
+        },
+    )?;
 
-    validate_payload_bounds(bytes, header, entry_index, entries_end)?;
-    validate_wire_segments(bytes, header, entry_index, segments_offset)?;
+    let path_offset = usize::try_from(header.path_offset)
+        .map_err(|_| invalid_layout(Some(index), "path_bounds"))?;
+    let path_end = path_offset
+        .checked_add(usize::from(header.path_len))
+        .ok_or(invalid_layout(Some(index), "path_bounds"))?;
+    if path_offset < table_end {
+        return Err(invalid_layout(Some(index), "path_overlaps_table"));
+    }
+    let path_bytes = bytes
+        .get(path_offset..path_end)
+        .ok_or(invalid_layout(Some(index), "path_bounds"))?;
+    let path =
+        core::str::from_utf8(path_bytes).map_err(|_| invalid_layout(Some(index), "path_utf8"))?;
+
+    if !header.data_offset.is_multiple_of(USERLAND_PAGE_SIZE) {
+        return Err(invalid_layout(Some(index), "data_alignment"));
+    }
+    let data_offset =
+        usize::try_from(header.data_offset).map_err(|_| out_of_bounds(index, header))?;
+    let data_size = usize::try_from(header.data_size).map_err(|_| out_of_bounds(index, header))?;
+    let data_end = data_offset
+        .checked_add(data_size)
+        .ok_or(out_of_bounds(index, header))?;
+    if data_offset < table_end {
+        return Err(invalid_layout(Some(index), "data_overlaps_table"));
+    }
+    let data = bytes
+        .get(data_offset..data_end)
+        .ok_or(out_of_bounds(index, header))?;
 
     Ok(DecodedEntry {
-        bytes,
-        header,
-        segments_offset,
-        name,
+        path,
+        data,
+        data_offset: header.data_offset,
     })
 }
 
-fn validate_payload_bounds(
-    bytes: &[u8],
-    header: EntryHeader,
-    entry_index: usize,
-    entries_end: usize,
-) -> Result<(), ImageDecodeError> {
-    let offset =
-        usize::try_from(header.payload_offset).map_err(|_| out_of_bounds(entry_index, header))?;
-    let size =
-        usize::try_from(header.payload_size).map_err(|_| out_of_bounds(entry_index, header))?;
-    let end = offset
-        .checked_add(size)
-        .ok_or(out_of_bounds(entry_index, header))?;
-    if offset < entries_end {
-        return Err(invalid_layout(
-            Some(entry_index),
-            "payload_overlaps_entries",
-        ));
-    }
-    if end > bytes.len() {
-        return Err(out_of_bounds(entry_index, header));
-    }
-    Ok(())
-}
-
-fn validate_wire_segments(
-    bytes: &[u8],
-    header: EntryHeader,
-    entry_index: usize,
-    segments_offset: usize,
-) -> Result<(), ImageDecodeError> {
-    let payload_end = header
-        .payload_offset
-        .checked_add(header.payload_size)
-        .ok_or(out_of_bounds(entry_index, header))?;
-    let mut previous_end = header.payload_offset;
-
-    for segment_index in 0..usize::from(header.segment_count) {
-        let offset = segments_offset
-            .checked_add(
-                segment_index
-                    .checked_mul(SEGMENT_SIZE)
-                    .ok_or(invalid_layout(Some(entry_index), "segment_offset_overflow"))?,
-            )
-            .ok_or(invalid_layout(Some(entry_index), "segment_offset_overflow"))?;
-        let segment = decode_segment(
-            bytes
-                .get(offset..offset + SEGMENT_SIZE)
-                .ok_or(invalid_layout(Some(entry_index), "segment_bounds"))?,
-        )
-        .ok_or(invalid_layout(Some(entry_index), "segment_bounds"))?;
-
-        if decode_permissions(segment.flags).is_none() {
-            return Err(invalid_layout(Some(entry_index), "segment_flags"));
-        }
-        if segment.file_offset % userland::USERLAND_PAGE_SIZE
-            != segment.va_base % userland::USERLAND_PAGE_SIZE
-        {
-            return Err(invalid_layout(Some(entry_index), "segment_alignment"));
-        }
-        let segment_end = segment.file_offset.checked_add(segment.file_size).ok_or(
-            ImageDecodeError::OutOfBounds {
-                entry_index,
-                offset: segment.file_offset,
-                size: segment.file_size,
-            },
-        )?;
-        if segment.file_offset < previous_end
-            || segment.file_offset < header.payload_offset
-            || segment_end > payload_end
-        {
-            return Err(ImageDecodeError::OutOfBounds {
-                entry_index,
-                offset: segment.file_offset,
-                size: segment.file_size,
-            });
-        }
-        previous_end = segment_end;
-    }
-    Ok(())
+fn table_end(entry_count: u16) -> Option<usize> {
+    usize::from(entry_count)
+        .checked_mul(RECORD_SIZE)?
+        .checked_add(IMAGE_HEADER_SIZE)
 }
 
 fn decode_image_header(bytes: &[u8]) -> Option<ImageHeader> {
@@ -365,58 +259,19 @@ fn decode_image_header(bytes: &[u8]) -> Option<ImageHeader> {
         magic: bytes.get(0..8)?.try_into().ok()?,
         version: u16::from_le_bytes(bytes.get(8..10)?.try_into().ok()?),
         entry_count: u16::from_le_bytes(bytes.get(10..12)?.try_into().ok()?),
-        total_size: u64::from_le_bytes(bytes.get(12..20)?.try_into().ok()?),
+        boot_index: u16::from_le_bytes(bytes.get(12..14)?.try_into().ok()?),
+        total_size: u64::from_le_bytes(bytes.get(16..24)?.try_into().ok()?),
     })
 }
 
-fn decode_entry_header_checked(
-    bytes: &[u8],
-    offset: usize,
-) -> Result<EntryHeader, ImageDecodeError> {
-    decode_entry_header(bytes.get(offset..).unwrap_or_default()).ok_or(
-        ImageDecodeError::BufferTooShort {
-            needed: offset.saturating_add(ENTRY_HEADER_SIZE),
-            actual: bytes.len(),
-        },
-    )
-}
-
-fn decode_entry_header(bytes: &[u8]) -> Option<EntryHeader> {
-    Some(EntryHeader {
-        payload_offset: u64::from_le_bytes(bytes.get(0..8)?.try_into().ok()?),
-        payload_size: u64::from_le_bytes(bytes.get(8..16)?.try_into().ok()?),
-        entry_va: u64::from_le_bytes(bytes.get(16..24)?.try_into().ok()?),
-        stack_size: u64::from_le_bytes(bytes.get(24..32)?.try_into().ok()?),
-        segment_count: u16::from_le_bytes(bytes.get(32..34)?.try_into().ok()?),
-        name_len: u16::from_le_bytes(bytes.get(34..36)?.try_into().ok()?),
+fn decode_record_header(bytes: &[u8], offset: usize) -> Option<RecordHeader> {
+    let bytes = bytes.get(offset..offset.checked_add(RECORD_SIZE)?)?;
+    Some(RecordHeader {
+        path_offset: u64::from_le_bytes(bytes.get(0..8)?.try_into().ok()?),
+        path_len: u16::from_le_bytes(bytes.get(8..10)?.try_into().ok()?),
+        data_offset: u64::from_le_bytes(bytes.get(12..20)?.try_into().ok()?),
+        data_size: u64::from_le_bytes(bytes.get(20..28)?.try_into().ok()?),
     })
-}
-
-fn decode_segment(bytes: &[u8]) -> Option<WireSegment> {
-    Some(WireSegment {
-        file_offset: u64::from_le_bytes(bytes.get(0..8)?.try_into().ok()?),
-        file_size: u64::from_le_bytes(bytes.get(8..16)?.try_into().ok()?),
-        va_base: u64::from_le_bytes(bytes.get(16..24)?.try_into().ok()?),
-        mem_size: u64::from_le_bytes(bytes.get(24..32)?.try_into().ok()?),
-        flags: u32::from_le_bytes(bytes.get(32..36)?.try_into().ok()?),
-    })
-}
-
-fn decode_permissions(value: u32) -> Option<SegmentPermissions> {
-    match value {
-        0 => Some(SegmentPermissions::ReadWrite),
-        1 => Some(SegmentPermissions::ReadOnly),
-        2 => Some(SegmentPermissions::ReadExecute),
-        _ => None,
-    }
-}
-
-fn entry_encoded_size(header: EntryHeader, entry_index: usize) -> Result<usize, ImageDecodeError> {
-    usize::from(header.segment_count)
-        .checked_mul(SEGMENT_SIZE)
-        .and_then(|size| size.checked_add(ENTRY_HEADER_SIZE))
-        .and_then(|size| size.checked_add(usize::from(header.name_len)))
-        .ok_or(invalid_layout(Some(entry_index), "entry_size_overflow"))
 }
 
 fn invalid_layout(entry_index: Option<usize>, detail: &'static str) -> ImageDecodeError {
@@ -426,11 +281,11 @@ fn invalid_layout(entry_index: Option<usize>, detail: &'static str) -> ImageDeco
     }
 }
 
-fn out_of_bounds(entry_index: usize, header: EntryHeader) -> ImageDecodeError {
+fn out_of_bounds(entry_index: usize, header: RecordHeader) -> ImageDecodeError {
     ImageDecodeError::OutOfBounds {
         entry_index,
-        offset: header.payload_offset,
-        size: header.payload_size,
+        offset: header.data_offset,
+        size: header.data_size,
     }
 }
 
@@ -439,9 +294,11 @@ mod tests {
     use userland::{Entry, EntryView, Segment, SegmentPermissions};
 
     use super::*;
-    use crate::encode;
+    use crate::{ImageEncodeError, ImageRecord, encode, encode_program};
 
-    fn image_bytes() -> alloc::vec::Vec<u8> {
+    const BOOT_PATH: &str = "/boot/rootkeeper";
+
+    fn program_blob() -> Vec<u8> {
         let segments = [
             Segment {
                 va_base: 0x4000_0000,
@@ -456,27 +313,173 @@ mod tests {
                 bytes: b"RW",
             },
         ];
-        encode(&[Entry {
-            name: "rootkeeper",
+        encode_program(&Entry {
+            path: BOOT_PATH,
             entry_va: 0x4000_0000,
             stack_size: 0x4000,
             segments: &segments,
-        }])
-        .expect("encode")
+        })
+        .expect("encode program")
+    }
+
+    fn image_bytes() -> Vec<u8> {
+        let program = program_blob();
+        encode(
+            &[
+                ImageRecord {
+                    path: "/data/sample",
+                    data: b"hello",
+                },
+                ImageRecord {
+                    path: BOOT_PATH,
+                    data: &program,
+                },
+            ],
+            BOOT_PATH,
+        )
+        .expect("encode image")
+    }
+
+    fn record_field(bytes: &[u8], index: usize, offset: usize) -> u64 {
+        let at = IMAGE_HEADER_SIZE + index * RECORD_SIZE + offset;
+        u64::from_le_bytes(bytes[at..at + 8].try_into().expect("field is eight bytes"))
+    }
+
+    fn patch(bytes: &mut [u8], at: usize, value: u64) {
+        bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
     }
 
     #[test]
-    fn round_trip_exposes_semantic_segments() {
+    fn round_trip_exposes_records_and_program() {
         let bytes = image_bytes();
         let image = decode(&bytes).expect("decode");
-        let entry = image
-            .bootstrap_entry()
-            .expect("image carries a bootstrap entry");
-        let segments: alloc::vec::Vec<_> = entry.segments().collect();
 
-        assert_eq!(entry.name(), "rootkeeper");
+        let boot = image.boot_entry();
+        assert_eq!(boot.path(), BOOT_PATH);
+
+        let program = boot.program().expect("boot record carries a program");
+        let segments: Vec<_> = program.segments().collect();
+        assert_eq!(program.entry_va(), 0x4000_0000);
+        assert_eq!(program.stack_size(), 0x4000);
         assert_eq!(segments[0].bytes, b"CODE");
         assert_eq!(segments[1].permissions, SegmentPermissions::ReadWrite);
+
+        let sample = image.entry("/data/sample").expect("file record");
+        assert_eq!(sample.data(), b"hello");
+    }
+
+    #[test]
+    fn entries_are_sorted_by_path_and_boot_index_follows() {
+        let bytes = image_bytes();
+        let image = decode(&bytes).expect("decode");
+
+        let paths: Vec<_> = image.entries().map(|entry| entry.path()).collect();
+        assert_eq!(paths, [BOOT_PATH, "/data/sample"]);
+        assert_eq!(image.boot_entry().path(), BOOT_PATH);
+    }
+
+    #[test]
+    fn record_data_is_page_aligned() {
+        let bytes = image_bytes();
+        let image = decode(&bytes).expect("decode");
+
+        for index in 0..image.entry_count() {
+            let data_offset = record_field(&bytes, index, 12);
+            assert_eq!(data_offset % USERLAND_PAGE_SIZE, 0);
+        }
+    }
+
+    #[test]
+    fn entry_reports_the_offset_of_its_data() {
+        let bytes = image_bytes();
+        let image = decode(&bytes).expect("decode");
+
+        for (index, entry) in image.entries().enumerate() {
+            let offset = entry.data_offset();
+            assert_eq!(offset, record_field(&bytes, index, 12));
+            assert_eq!(
+                &bytes[offset as usize..offset as usize + entry.data().len()],
+                entry.data()
+            );
+        }
+    }
+
+    #[test]
+    fn records_without_bytes_take_no_space() {
+        let program = program_blob();
+        let bytes = encode(
+            &[
+                ImageRecord {
+                    path: "/boot/empty",
+                    data: b"",
+                },
+                ImageRecord {
+                    path: BOOT_PATH,
+                    data: &program,
+                },
+                ImageRecord {
+                    path: "/data/empty",
+                    data: b"",
+                },
+            ],
+            BOOT_PATH,
+        )
+        .expect("encode image");
+        let image = decode(&bytes).expect("decode");
+
+        // Пустая запись стоит на смещении следующей за ней, а хвостовая - за
+        // концом образа.
+        let head = image.entry("/boot/empty").expect("file record");
+        assert!(head.data().is_empty());
+        assert_eq!(head.data_offset(), image.boot_entry().data_offset());
+
+        let tail = image.entry("/data/empty").expect("file record");
+        assert!(tail.data().is_empty());
+        assert_eq!(tail.data_offset(), bytes.len() as u64);
+    }
+
+    #[test]
+    fn lookup_by_path_is_exact() {
+        let bytes = image_bytes();
+        let image = decode(&bytes).expect("decode");
+
+        assert_eq!(
+            image.entry(BOOT_PATH).expect("boot record").path(),
+            BOOT_PATH
+        );
+        assert!(image.entry("/data").is_none());
+        assert!(image.entry("/data/sample/x").is_none());
+    }
+
+    #[test]
+    fn encode_rejects_missing_boot_record() {
+        let records = [ImageRecord {
+            path: "/data/sample",
+            data: b"hello",
+        }];
+        assert_eq!(
+            encode(&records, BOOT_PATH).expect_err("boot path must be present"),
+            ImageEncodeError::BootRecordMissing
+        );
+    }
+
+    #[test]
+    fn encode_rejects_duplicate_paths() {
+        let program = program_blob();
+        let records = [
+            ImageRecord {
+                path: BOOT_PATH,
+                data: &program,
+            },
+            ImageRecord {
+                path: BOOT_PATH,
+                data: b"clash",
+            },
+        ];
+        assert_eq!(
+            encode(&records, BOOT_PATH).expect_err("duplicate paths must fail"),
+            ImageEncodeError::DuplicatePath
+        );
     }
 
     #[test]
@@ -485,11 +488,7 @@ mod tests {
         bytes.extend(core::iter::repeat_n(0u8, 4096));
 
         let image = decode(&bytes).expect("padded buffer decodes");
-        let entry = image
-            .bootstrap_entry()
-            .expect("image carries a bootstrap entry");
-        assert_eq!(entry.name(), "rootkeeper");
-        assert_eq!(entry.segments().next().expect("segment").bytes, b"CODE");
+        assert_eq!(image.boot_entry().path(), BOOT_PATH);
     }
 
     #[test]
@@ -502,12 +501,61 @@ mod tests {
     }
 
     #[test]
-    fn rejects_segment_outside_payload() {
+    fn decode_rejects_foreign_magic() {
         let mut bytes = image_bytes();
-        let segment_offset = IMAGE_HEADER_SIZE + ENTRY_HEADER_SIZE;
-        let aligned_out_of_bounds = u64::MAX - (userland::USERLAND_PAGE_SIZE - 1);
-        bytes[segment_offset..segment_offset + 8]
-            .copy_from_slice(&aligned_out_of_bounds.to_le_bytes());
+        bytes[0] = b'X';
+        assert!(matches!(
+            decode(&bytes),
+            Err(ImageDecodeError::InvalidMagic(_))
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_boot_index_outside_table() {
+        let mut bytes = image_bytes();
+        bytes[12..14].copy_from_slice(&2u16.to_le_bytes());
+        assert_eq!(
+            decode(&bytes).expect_err("boot_index must be in range"),
+            invalid_layout(None, "boot_index")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_unsorted_table() {
+        let mut bytes = image_bytes();
+        // Меняем местами описания путей у двух записей: таблица перестаёт возрастать.
+        let second = IMAGE_HEADER_SIZE + RECORD_SIZE;
+        let first_path: [u8; 12] = bytes[IMAGE_HEADER_SIZE..IMAGE_HEADER_SIZE + 12]
+            .try_into()
+            .expect("path fields of a record");
+        let second_path: [u8; 12] = bytes[second..second + 12]
+            .try_into()
+            .expect("path fields of a record");
+        bytes[IMAGE_HEADER_SIZE..IMAGE_HEADER_SIZE + 12].copy_from_slice(&second_path);
+        bytes[second..second + 12].copy_from_slice(&first_path);
+
+        assert_eq!(
+            decode(&bytes).expect_err("descending paths must fail"),
+            invalid_layout(Some(1), "path_order")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_unaligned_data_offset() {
+        let mut bytes = image_bytes();
+        let data_offset = record_field(&bytes, 0, 12);
+        patch(&mut bytes, IMAGE_HEADER_SIZE + 12, data_offset + 1);
+
+        assert_eq!(
+            decode(&bytes).expect_err("unaligned data must fail"),
+            invalid_layout(Some(0), "data_alignment")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_data_outside_image() {
+        let mut bytes = image_bytes();
+        patch(&mut bytes, IMAGE_HEADER_SIZE + 20, u64::MAX);
 
         assert!(matches!(
             decode(&bytes),
@@ -516,18 +564,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_semantically_overlapping_segments() {
+    fn decode_rejects_path_inside_table() {
         let mut bytes = image_bytes();
-        let second_segment = IMAGE_HEADER_SIZE + ENTRY_HEADER_SIZE + SEGMENT_SIZE;
-        bytes[second_segment + 16..second_segment + 24]
-            .copy_from_slice(&0x4000_0000u64.to_le_bytes());
+        patch(&mut bytes, IMAGE_HEADER_SIZE, 0);
 
         assert_eq!(
-            decode(&bytes).expect_err("overlap must fail"),
-            ImageDecodeError::Semantic {
-                entry_index: 0,
-                source: UserlandValidationError::OverlappingSegments,
-            }
+            decode(&bytes).expect_err("path inside table must fail"),
+            invalid_layout(Some(0), "path_overlaps_table")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_overlapping_data_windows() {
+        let mut bytes = image_bytes();
+        // Окно второй записи сажается на окно первой: границы образа и таблицы
+        // при этом не нарушены.
+        let first_data_offset = record_field(&bytes, 0, 12);
+        patch(
+            &mut bytes,
+            IMAGE_HEADER_SIZE + RECORD_SIZE + 12,
+            first_data_offset,
+        );
+
+        assert_eq!(
+            decode(&bytes).expect_err("overlapping data windows must fail"),
+            invalid_layout(Some(1), "data_overlap")
         );
     }
 }

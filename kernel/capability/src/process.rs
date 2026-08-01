@@ -3,12 +3,22 @@
 use alloc::sync::Arc;
 
 use spin::Once;
+use syscall::Rights;
 
 use super::{resource::Resource, signal::Signal, termination::TerminationState};
 
+/// Метеринг-ресурс процесса вместе с правами, с которыми его передали.
+#[derive(Clone)]
+pub struct MeteringGrant {
+    pub resource: Arc<Resource>,
+    /// Права капы, которую `ProcessResourceSelf` кладёт в таблицу процесса: не шире прав
+    /// хэндла, которым ресурс отдали при старте.
+    pub rights: Rights,
+}
+
 pub struct ProcessObject {
     inner: TerminationState,
-    metering_resource: Once<Arc<Resource>>,
+    metering: Once<MeteringGrant>,
 }
 
 impl ProcessObject {
@@ -16,17 +26,21 @@ impl ProcessObject {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: TerminationState::new(),
-            metering_resource: Once::new(),
+            metering: Once::new(),
         })
     }
 
-    /// Задаёт metering resource текущему процессу.
-    pub fn set_metering_resource(&self, resource: Arc<Resource>) {
-        self.metering_resource.call_once(|| resource);
+    /// Задаёт метеринг текущему процессу.
+    pub fn set_metering(&self, grant: MeteringGrant) {
+        self.metering.call_once(|| grant);
+    }
+
+    pub fn metering(&self) -> Option<MeteringGrant> {
+        self.metering.get().cloned()
     }
 
     pub fn metering_resource(&self) -> Option<Arc<Resource>> {
-        self.metering_resource.get().cloned()
+        self.metering.get().map(|grant| Arc::clone(&grant.resource))
     }
 
     /// Публикует `code` и помечает процесс завершённым. Повторный вызов - no-op.

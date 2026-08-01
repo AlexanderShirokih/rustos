@@ -1,8 +1,9 @@
-//! E2E проверка `SignalCreate`/`SignalSet`/`SignalWaitOne` из EL0.
+//! E2E проверка `SignalCreate`/`SignalSet`/`SignalWaitOne`/`SignalWaitMany`
+//! из EL0.
 
 use kernel_tests::kernel_test;
-use runtime::{Priority, Signal, Timeout, signal_set, spawn};
-use syscall::{Handle, SIGNALED, WakeCount};
+use runtime::{Priority, Signal, Timeout, signal_set, spawn, wait_any};
+use syscall::{Handle, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem, WakeCount};
 
 /// Размер стека рабочего потока.
 const STACK_SIZE: u64 = 0x4000;
@@ -63,4 +64,65 @@ fn wait_blocks_until_another_thread_signals() {
     worker
         .join(Timeout::from_ns(WAKE_TIMEOUT_NS))
         .expect("signaler joins before timeout");
+}
+
+#[kernel_test]
+fn wait_many_returns_the_index_of_the_raised_signal() {
+    let idle = Signal::create().expect("idle signal create");
+    let raised = Signal::create().expect("raised signal create");
+    raised
+        .set(SIGNALED, 0, WakeCount::All)
+        .expect("signal set must succeed");
+
+    let items = [
+        WaitItem::new(idle.handle().as_raw(), SIGNALED),
+        WaitItem::new(raised.handle().as_raw(), SIGNALED),
+    ];
+    let index = wait_any(&items, Timeout::POLL).expect("raised entry satisfies the wait");
+    kernel_tests::kassert_eq!(index, 1);
+}
+
+#[kernel_test]
+fn wait_many_blocks_until_another_thread_signals() {
+    let idle = Signal::create().expect("idle signal create");
+    let target = Signal::create().expect("target signal create");
+    let raw = target.handle().as_raw().raw() as usize;
+
+    let worker =
+        spawn(delayed_signaler, raw, STACK_SIZE, Priority::new(1)).expect("spawn signaler");
+
+    let items = [
+        WaitItem::new(idle.handle().as_raw(), SIGNALED),
+        WaitItem::new(target.handle().as_raw(), SIGNALED),
+    ];
+    // Биты ещё не подняты: ожидание уходит в блокировку вместо немедленного возврата.
+    kernel_tests::kassert!(matches!(
+        wait_any(&items, Timeout::POLL),
+        Err(runtime::Error::Syscall(SyscallError::Timeout))
+    ));
+
+    let index = wait_any(&items, Timeout::from_ns(WAKE_TIMEOUT_NS))
+        .expect("waiter must be woken by the signaler");
+    kernel_tests::kassert_eq!(index, 1);
+
+    worker
+        .join(Timeout::from_ns(WAKE_TIMEOUT_NS))
+        .expect("signaler joins before timeout");
+}
+
+#[kernel_test]
+fn wait_many_rejects_a_set_outside_the_bound() {
+    let signal = Signal::create().expect("signal create");
+    let item = WaitItem::new(signal.handle().as_raw(), SIGNALED);
+
+    kernel_tests::kassert!(matches!(
+        wait_any(&[], Timeout::POLL),
+        Err(runtime::Error::Syscall(SyscallError::InvalidArgument))
+    ));
+
+    let oversized = [item; WAIT_MANY_MAX_COUNT + 1];
+    kernel_tests::kassert!(matches!(
+        wait_any(&oversized, Timeout::POLL),
+        Err(runtime::Error::Syscall(SyscallError::InvalidArgument))
+    ));
 }

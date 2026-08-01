@@ -7,11 +7,25 @@ use core::{
 use capability::{HandleTable, ProcessObject};
 use collections::{LockCell, MutexCell, StaticString};
 use memory::{MemoryRegion, user_vm_allocator::UserVmAllocator};
+use syscall::MAX_PROCESS_NAME_LEN;
 
 use super::address_space::AddressSpace;
 use crate::ProcessId;
 
-const MAX_PROCESS_NAME_LEN: usize = 64;
+/// Имя процесса: непустая строка не длиннее [`MAX_PROCESS_NAME_LEN`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessName<'a>(&'a str);
+
+impl<'a> ProcessName<'a> {
+    /// `None`, если имя пусто либо превышает [`MAX_PROCESS_NAME_LEN`].
+    pub fn new(name: &'a str) -> Option<Self> {
+        (!name.is_empty() && name.len() <= MAX_PROCESS_NAME_LEN).then_some(Self(name))
+    }
+
+    pub fn as_str(self) -> &'a str {
+        self.0
+    }
+}
 
 /// Возвращается из [`Process::set_user_vm`], если образ уже загружен.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,29 +53,29 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn new(id: ProcessId, name: &str, address_space: Arc<AddressSpace>) -> Self {
-        Self {
-            id,
-            name: StaticString::truncating(name),
-            address_space,
-            handle_table: Arc::new(MutexCell::new(HandleTable::new())),
-            user_vm: None,
-            image_segments: Vec::new(),
-            thread_count: AtomicUsize::new(1),
-            target: ProcessObject::new(),
-        }
+    pub fn new(id: ProcessId, name: ProcessName<'_>, address_space: Arc<AddressSpace>) -> Self {
+        Self::with_thread_count(id, name, address_space, 1)
     }
 
     /// Создаёт процесс с нулевым счётчиком потоков.
-    pub fn empty(id: ProcessId, name: &str, address_space: Arc<AddressSpace>) -> Self {
+    pub fn empty(id: ProcessId, name: ProcessName<'_>, address_space: Arc<AddressSpace>) -> Self {
+        Self::with_thread_count(id, name, address_space, 0)
+    }
+
+    fn with_thread_count(
+        id: ProcessId,
+        name: ProcessName<'_>,
+        address_space: Arc<AddressSpace>,
+        thread_count: usize,
+    ) -> Self {
         Self {
             id,
-            name: StaticString::truncating(name),
+            name: StaticString::truncating(name.as_str()),
             address_space,
             handle_table: Arc::new(MutexCell::new(HandleTable::new())),
             user_vm: None,
             image_segments: Vec::new(),
-            thread_count: AtomicUsize::new(0),
+            thread_count: AtomicUsize::new(thread_count),
             target: ProcessObject::new(),
         }
     }
@@ -179,7 +193,7 @@ impl ProcessTable {
 
     pub fn insert(
         &mut self,
-        name: &str,
+        name: ProcessName<'_>,
         address_space: Arc<AddressSpace>,
     ) -> Result<ProcessId, ProcessTableError> {
         self.insert_with(|id| Process::new(id, name, address_space))
@@ -279,8 +293,19 @@ mod tests {
         ProcessId::new(NonZeroU32::new(raw).expect("non-zero pid"))
     }
 
+    fn name(value: &str) -> ProcessName<'_> {
+        ProcessName::new(value).expect("valid process name")
+    }
+
+    #[test]
+    fn process_name_rejects_empty_and_oversized() {
+        assert!(ProcessName::new("").is_none());
+        assert!(ProcessName::new(&"x".repeat(MAX_PROCESS_NAME_LEN + 1)).is_none());
+        assert!(ProcessName::new(&"x".repeat(MAX_PROCESS_NAME_LEN)).is_some());
+    }
+
     fn fresh_process() -> Process {
-        Process::empty(pid(1), "p", AddressSpace::kernel())
+        Process::empty(pid(1), name("p"), AddressSpace::kernel())
     }
 
     fn make_vm() -> UserVmAllocator {
@@ -318,17 +343,17 @@ mod tests {
 
     #[test]
     fn process_keeps_owned_name() {
-        let p = Process::empty(pid(1), "user-proc", AddressSpace::kernel());
+        let p = Process::empty(pid(1), name("user-proc"), AddressSpace::kernel());
         assert_eq!(p.name(), "user-proc");
     }
 
     #[test]
     fn process_table_full_when_all_slots_occupied() {
         let mut table = ProcessTable::new(2);
-        assert!(table.insert("a", AddressSpace::kernel()).is_ok());
-        assert!(table.insert("b", AddressSpace::kernel()).is_ok());
+        assert!(table.insert(name("a"), AddressSpace::kernel()).is_ok());
+        assert!(table.insert(name("b"), AddressSpace::kernel()).is_ok());
         assert_eq!(
-            table.insert("c", AddressSpace::kernel()),
+            table.insert(name("c"), AddressSpace::kernel()),
             Err(ProcessTableError::Full)
         );
         assert_eq!(table.live_count(), 2);
@@ -337,9 +362,11 @@ mod tests {
     #[test]
     fn process_table_reuses_slot_after_remove() {
         let mut table = ProcessTable::new(1);
-        let first = table.insert("a", AddressSpace::kernel()).expect("first");
+        let first = table
+            .insert(name("a"), AddressSpace::kernel())
+            .expect("first");
         assert_eq!(
-            table.insert("b", AddressSpace::kernel()),
+            table.insert(name("b"), AddressSpace::kernel()),
             Err(ProcessTableError::Full)
         );
 
@@ -347,7 +374,9 @@ mod tests {
         assert_eq!(removed.id(), first);
         assert!(table.get(first).is_none());
 
-        let second = table.insert("b", AddressSpace::kernel()).expect("reuse");
+        let second = table
+            .insert(name("b"), AddressSpace::kernel())
+            .expect("reuse");
         assert_ne!(first, second, "reused slot must still yield a fresh id");
         assert_eq!(table.live_count(), 1);
     }
@@ -357,7 +386,7 @@ mod tests {
         let mut table = ProcessTable::new(4);
         table.next_id = u32::MAX;
         assert_eq!(
-            table.insert("overflow", AddressSpace::kernel()),
+            table.insert(name("overflow"), AddressSpace::kernel()),
             Err(ProcessTableError::OutOfIds)
         );
         assert_eq!(table.live_count(), 0);

@@ -16,8 +16,10 @@
 | [`docs/code-style.md`](docs/code-style.md)     | Стиль кода: структура файлов, комментарии, `no_std`        |
 | [`docs/syscalls.md`](docs/syscalls.md)         | ABI и полный реестр системных вызовов                      |
 | [`docs/ipc.md`](docs/ipc.md)                   | Формат типизированных IPC-контрактов поверх канала         |
+| [`docs/port.md`](docs/port.md)                 | Семантика `Port`: рандеву, значки, живость сторон          |
 | [`docs/userland.md`](docs/userland.md)         | Устройство userland: образ, рантайм, bootstrap             |
 | [`docs/smp.md`](docs/smp.md)                   | Многопроцессорность: подъём ядер, per-CPU состояние, локи  |
+| [`docs/filesystem.md`](docs/filesystem.md)     | Файловая подсистема: маршрутизатор имён, серверы, сессии   |
 
 ## Дисциплина изменений
 
