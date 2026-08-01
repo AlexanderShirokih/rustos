@@ -92,7 +92,8 @@ cargo xtask qemu-test [--timeout <сек>]
 
 `stress` собирает отдельный образ testrunner, выбирает только
 `#[kernel_test(stress)]` и повторяет одну последовательность операций для
-диапазона seed.
+диапазона seed. Диапазон проходит каждый stress-тест, и каждый отчитывается за
+свой seed маркером `[STRESS-PASS]`.
 
 ```bash
 cargo xtask stress --seed 100 --seeds 32 --steps 256 --timeout 900
@@ -115,6 +116,7 @@ toolchain и не меняет target-конфигурацию основног�
 ```bash
 cargo xtask fuzz fdt_parse_walk --seconds 60
 cargo xtask fuzz ipc_wire_decode --seconds 60
+cargo xtask fuzz ramfs_ops --seconds 60
 cargo xtask fuzz userland_image_decode --seconds 60
 ```
 
@@ -122,6 +124,11 @@ cargo xtask fuzz userland_image_decode --seconds 60
 `fuzz/artifacts/<target>/` и не добавляются в Git автоматически. Для прямого
 запуска доступны также `cargo fuzz build --fuzz-dir fuzz` и `cargo fuzz run
 --fuzz-dir fuzz <target> -- <libFuzzer args>`.
+
+Перед прогоном `xtask` пересобирает затравки корпуса в `fuzz/seeds/<target>/` и
+передаёт директорию вторым корпусом, доступным только на чтение. Затравки
+`userland_image_decode` собираются кодировщиком `userland-image` и обновляются
+вместе с форматом образа.
 
 ## Проверка слоёв
 

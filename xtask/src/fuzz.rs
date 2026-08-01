@@ -7,10 +7,16 @@ use std::{
 };
 
 use anyhow::{Result, bail};
+use userland_image_tool::userland_image_seeds;
 
 use crate::{context::project_root, shell::run_cmd};
 
-const TARGETS: &[&str] = &["fdt_parse_walk", "ipc_wire_decode", "userland_image_decode"];
+const TARGETS: &[&str] = &[
+    "fdt_parse_walk",
+    "ipc_wire_decode",
+    "ramfs_ops",
+    "userland_image_decode",
+];
 
 pub(crate) fn run(target: &str, seconds: u64) -> Result<()> {
     if !TARGETS.contains(&target) {
@@ -25,12 +31,22 @@ pub(crate) fn run(target: &str, seconds: u64) -> Result<()> {
 
     let project_root = project_root();
     let fuzz_dir = project_root.join("fuzz");
-    fs::create_dir_all(fuzz_dir.join("corpus").join(target))?;
+    let corpus_dir = fuzz_dir.join("corpus").join(target);
+    fs::create_dir_all(&corpus_dir)?;
+    let seeds_dir = write_seeds(&fuzz_dir, target)?;
+
     let mut command = Command::new("cargo");
     command
         .args(["fuzz", "run", "--fuzz-dir"])
         .arg(&fuzz_dir)
         .arg(target)
+        // Первая директория корпуса принимает новые юниты, остальные читаются
+        // только на вход.
+        .arg(&corpus_dir);
+    if let Some(seeds_dir) = &seeds_dir {
+        command.arg(seeds_dir);
+    }
+    command
         .arg("--")
         .arg(format!("-max_total_time={seconds}"))
         .arg("-timeout=10")
@@ -45,6 +61,23 @@ pub(crate) fn run(target: &str, seconds: u64) -> Result<()> {
 
     run_cmd(&mut command)?;
     Ok(())
+}
+
+fn write_seeds(fuzz_dir: &Path, target: &str) -> Result<Option<PathBuf>> {
+    let seeds = match target {
+        "userland_image_decode" => userland_image_seeds()?,
+        _ => return Ok(None),
+    };
+
+    let seeds_dir = fuzz_dir.join("seeds").join(target);
+    if seeds_dir.exists() {
+        fs::remove_dir_all(&seeds_dir)?;
+    }
+    fs::create_dir_all(&seeds_dir)?;
+    for seed in seeds {
+        fs::write(seeds_dir.join(seed.name), &seed.bytes)?;
+    }
+    Ok(Some(seeds_dir))
 }
 
 fn dictionary_path(fuzz_dir: &Path, target: &str) -> Option<PathBuf> {

@@ -18,21 +18,55 @@ const OPERATION_TIMEOUT_NS: u64 = 1_000_000_000;
 const JOIN_TIMEOUT_NS: u64 = 2_000_000_000;
 const READY_SPIN_LIMIT: usize = 10_000_000;
 
-struct SplitMix64 {
+/// Генератор последовательности прогона: та же цепочка значений на том же seed.
+pub(crate) struct SplitMix64 {
     state: u64,
 }
 
+/// Параметры воспроизводимого прогона, зашитые в образ сборкой.
+pub(crate) struct StressPlan {
+    first_seed: u64,
+    seed_count: u64,
+    /// Операций на один seed.
+    pub(crate) steps: u64,
+}
+
 impl SplitMix64 {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self { state: seed }
     }
 
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut value = self.state;
         value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         value ^ (value >> 31)
+    }
+}
+
+impl StressPlan {
+    /// Читает параметры прогона из окружения сборки образа.
+    pub(crate) fn from_env() -> Self {
+        let plan = Self {
+            first_seed: env!("STRESS_SEED").parse::<u64>().unwrap_or(0),
+            seed_count: env!("STRESS_SEEDS").parse::<u64>().unwrap_or(0),
+            steps: env!("STRESS_STEPS").parse::<u64>().unwrap_or(0),
+        };
+        kernel_tests::kassert!(
+            plan.seed_count > 0,
+            "stress seed count must be a positive number"
+        );
+        kernel_tests::kassert!(
+            plan.steps > 0,
+            "stress step count must be a positive number"
+        );
+        plan
+    }
+
+    pub(crate) fn seeds(&self) -> impl Iterator<Item = u64> {
+        let first_seed = self.first_seed;
+        (0..self.seed_count).map(move |offset| first_seed.wrapping_add(offset))
     }
 }
 
@@ -282,26 +316,28 @@ fn port_poll_timeout() -> Result<(), i64> {
     }
 }
 
-fn log_seed(seed: u64, steps: u64) {
+/// Открывает прогон одного seed: маркер несёт всё, чем воспроизводится последовательность.
+pub(crate) fn log_seed(seed: u64, steps: u64) {
     kernel_tests::runner::with_writer(|writer| {
         let mut output = kernel_tests::runner::FmtAdapter::new(writer);
         let _ = writeln!(output, "[STRESS-START: seed={seed} steps={steps}]");
     });
 }
 
+/// Закрывает прогон одного seed: маркер считает xtask.
+pub(crate) fn log_pass(seed: u64) {
+    kernel_tests::runner::with_writer(|writer| {
+        let mut output = kernel_tests::runner::FmtAdapter::new(writer);
+        let _ = writeln!(output, "[STRESS-PASS: seed={seed}]");
+    });
+}
+
 #[kernel_test(stress)]
 fn port_signal_lifecycle_stress() {
-    let first_seed = env!("RUSTOS_STRESS_SEED").parse::<u64>().unwrap_or(0);
-    let seed_count = env!("RUSTOS_STRESS_SEEDS").parse::<u64>().unwrap_or(0);
-    let steps = env!("RUSTOS_STRESS_STEPS").parse::<u64>().unwrap_or(0);
-    kernel_tests::kassert!(
-        seed_count > 0,
-        "stress seed count must be a positive number"
-    );
-    kernel_tests::kassert!(steps > 0, "stress step count must be a positive number");
+    let plan = StressPlan::from_env();
+    let steps = plan.steps;
 
-    for seed_offset in 0..seed_count {
-        let seed = first_seed.wrapping_add(seed_offset);
+    for seed in plan.seeds() {
         log_seed(seed, steps);
         let mut random = SplitMix64::new(seed);
         for step in 0..steps {

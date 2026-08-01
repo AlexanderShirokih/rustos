@@ -51,19 +51,19 @@ pub(crate) fn qemu_stress(seed: u64, seeds: u64, steps: u64, timeout: u64) -> Re
     let steps = steps.to_string();
     let environment = [
         BuildEnvironment {
-            name: "RUSTOS_TEST_PROFILE",
+            name: "TEST_PROFILE",
             value: "stress",
         },
         BuildEnvironment {
-            name: "RUSTOS_STRESS_SEED",
+            name: "STRESS_SEED",
             value: &seed,
         },
         BuildEnvironment {
-            name: "RUSTOS_STRESS_SEEDS",
+            name: "STRESS_SEEDS",
             value: &seeds,
         },
         BuildEnvironment {
-            name: "RUSTOS_STRESS_STEPS",
+            name: "STRESS_STEPS",
             value: &steps,
         },
     ];
@@ -197,8 +197,10 @@ impl TestMarkers {
                 self.passed
             );
         }
-        if let Some(expected) = expected_seeds {
-            let expected = usize::try_from(expected).unwrap_or(usize::MAX);
+        if let Some(seeds) = expected_seeds {
+            // Диапазон seed проходит каждый stress-тест прохода, и каждый отчитывается за свой
+            // seed отдельным маркером.
+            let expected = usize::try_from(seeds).unwrap_or(usize::MAX) * announced;
             if self.stress_seeds != expected {
                 bail!(
                     "QEMU pass '{label}': {} of {expected} stress seeds reported STRESS-PASS",

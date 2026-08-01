@@ -9,6 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 fdt = { path = "../lib/fdt" }
+filesystem = { path = "../lib/filesystem" }
+filesystem-abi = { path = "../lib/filesystem-abi" }
 ipc = { path = "../lib/ipc" }
 libfuzzer-sys = "0.4"
 userland = { path = "../lib/userland" }
@@ -17,6 +19,13 @@ userland-image = { path = "../lib/userland-image" }
 [[bin]]
 name = "fdt_parse_walk"
 path = "fuzz_targets/fdt_parse_walk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ramfs_ops"
+path = "fuzz_targets/ramfs_ops.rs"
 test = false
 doc = false
 bench = false

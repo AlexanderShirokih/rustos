@@ -16,6 +16,7 @@ use syscall::Handle;
 
 mod address_space_isolation;
 mod filesystem;
+mod filesystem_stress;
 mod fixture;
 mod fixture_protocol;
 mod heap;
@@ -135,7 +136,7 @@ pub extern "C" fn _start(root: Handle) -> ! {
     BOOTSTRAP_HANDLE.call_once(|| root);
     kernel_tests::runner::install_writer(&LOG_WRITER);
     kernel_tests::runner::install_exit(runner_exit);
-    let profile = match env!("RUSTOS_TEST_PROFILE") {
+    let profile = match env!("TEST_PROFILE") {
         "stress" => kernel_tests::TestKind::Stress,
         _ => kernel_tests::TestKind::Regular,
     };

@@ -48,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fdt_parse_walk, ipc_wire_decode, userland_image_decode]
+        target: [fdt_parse_walk, ipc_wire_decode, ramfs_ops, userland_image_decode]
     steps:
       - uses: actions/checkout@v5
       - run: >-

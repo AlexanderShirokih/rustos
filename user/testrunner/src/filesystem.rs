@@ -177,8 +177,23 @@ fn namespace_client(capability: &OwnedHandle) -> NamespaceClient<PortTransport> 
     NamespaceClient::new(PortTransport::client(capability)).with_wait_ns(CALL_TIMEOUT_NS)
 }
 
+// Поднимает изменяемое дерево под своим префиксом: у свежего процесса файловой системы пустая
+// арена узлов и свой бюджет страниц.
+pub(crate) fn mount_ram_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
+    namespace_admin_client(router_admin())
+        .mount(path(prefix), path(RAM_FILESYSTEM_PROGRAM))
+        .expect("mount call")
+}
+
+// Снимает монтирование вместе с его процессом.
+pub(crate) fn unmount_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
+    namespace_admin_client(router_admin())
+        .unmount(path(prefix))
+        .expect("unmount call")
+}
+
 // Значок сессии назначает сама файловая система.
-fn session_for(text: &str) -> OwnedHandle {
+pub(crate) fn session_for(text: &str) -> OwnedHandle {
     let mounted = namespace_client(router_minter())
         .resolve(path(text))
         .expect("resolve call")
@@ -194,7 +209,7 @@ fn image_session() -> OwnedHandle {
     session_for(IMAGE_DIRECTORY)
 }
 
-fn connect(capability: &OwnedHandle) -> FileSystemClient<PortTransport> {
+pub(crate) fn connect(capability: &OwnedHandle) -> FileSystemClient<PortTransport> {
     FileSystemClient::new(PortTransport::client(capability)).with_wait_ns(CALL_TIMEOUT_NS)
 }
 
@@ -286,7 +301,7 @@ fn acquire_buffer(client: &FileSystemClient<PortTransport>) -> MemoryRegion {
     MemoryRegion::adopt(cap)
 }
 
-fn path(text: &str) -> Str<'_, { filesystem_abi::PATH_MAX }> {
+pub(crate) fn path(text: &str) -> Str<'_, { filesystem_abi::PATH_MAX }> {
     Str::new(text).expect("path within bound")
 }
 
