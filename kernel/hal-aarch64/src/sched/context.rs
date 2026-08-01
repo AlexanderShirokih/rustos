@@ -161,9 +161,14 @@ unsafe extern "C" fn thread_entry_shim() -> ! {
 ///
 /// Перед `eret` обнуляем все остальные GPR и `tpidr_el0`, чтобы kernel-значения
 /// не утекали в EL0 через регистры.
+///
+/// Первой инструкцией маскируем IRQ: окно `msr ELR_EL1/SPSR_EL1` -> `eret`
+/// обязано быть атомарным, иначе трап затирает эти регистры и `eret` уходит
+/// по чужому адресу. Обратно IRQ размаскирует сам `eret` через `SPSR_EL1 = 0`.
 #[unsafe(naked)]
 unsafe extern "C" fn el0_entry_shim() -> ! {
     core::arch::naked_asm!(
+        "msr daifset, #0b0010",
         "mov x0, x19",
         "msr sp_el0, x21",
         "msr elr_el1, x20",
