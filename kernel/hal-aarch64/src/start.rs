@@ -28,23 +28,27 @@ mod qemu_tests;
 
 extern crate drivers_common_aarch64;
 
-/// Сток логов, который панике нужно перевести в неаллоцирующий режим.
-static LOG_SINK: spin::Once<&'static io::buffered_writer::BufferedWriter> = spin::Once::new();
-
-/// Отдаёт панике сток логов. Вызывается один раз, сразу после `set_stdout`.
-pub(crate) fn set_log_sink(sink: &'static io::buffered_writer::BufferedWriter) {
-    let _ = LOG_SINK.call_once(|| sink);
-}
+static PANICKING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    // Паника достижима из аллокатора, поэтому накопление лога в куче
-    // отключается до первой записи.
-    if let Some(sink) = LOG_SINK.get() {
-        sink.stop_buffering();
+    use core::sync::atomic::Ordering;
+
+    use collections::{CriticalSection as _, DaifCriticalSection};
+
+    // IRQ маскируются на весь путь паники: печать причины не прерывается,
+    // а обработчик не вытесняется до выключения машины.
+    let _irq_mask = DaifCriticalSection::enter();
+
+    // Паника на пути печати причины гасит машину молча: стек ядра защитной
+    // страницы не имеет, и рекурсивная печать затирает соседнюю память.
+    if PANICKING.swap(true, Ordering::Relaxed) {
+        kernelspace::power::system_off(1);
     }
 
-    klog::fatal!("Kernel panic: {}", info);
+    // Причина печатается в обход локов пути записи: их держатель - контекст,
+    // прерванный паникой, и своих локов он уже не освобождает.
+    klog::panic_logf(format_args!("Kernel panic: {info}"));
     kernelspace::power::system_off(1)
 }

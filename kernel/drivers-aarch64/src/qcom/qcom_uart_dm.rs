@@ -1,6 +1,10 @@
 //! Драйвер Qualcomm UART DM (Data Mover).
 
 use alloc::{boxed::Box, sync::Arc};
+use core::{
+    hint::spin_loop,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use drivers_common::{
     BootServices, DeviceMemoryPermission, Driver, DriverFactory, DriverRunError, Owners,
@@ -36,15 +40,102 @@ const CMD_CLEAR_TX_READY: u32 = 0x300;
 /// Индекс записи reg в DeviceTree.
 const REG_UART_INDEX: usize = 0;
 
+/// Предел ожидания последовательности передачи на пути паники.
+const TX_SEQUENCE_SPIN_LIMIT: usize = 1_000_000;
+
 /// Драйвер Qualcomm UART DM.
 pub struct UartDm {
     /// MMIO-доступ к регистрам.
     mmio: MmioBound,
+    /// Занятость последовательности передачи.
+    tx_sequence_claimed: AtomicBool,
 }
+
+/// Эксклюзивное владение последовательностью передачи UART DM: `NCF_TX`, `CR`
+/// и `TF` записываются только через него.
+struct TxSequenceClaim<'a>(&'a UartDm);
 
 impl UartDm {
     pub fn new(mmio: MmioBound) -> Self {
-        Self { mmio }
+        Self {
+            mmio,
+            tx_sequence_claimed: AtomicBool::new(false),
+        }
+    }
+
+    /// Захватывает последовательность передачи, ожидая освобождения без
+    /// предела: таймаут не доказывает смерть владельца.
+    fn claim_tx_sequence(&self) -> TxSequenceClaim<'_> {
+        loop {
+            if let Some(claim) = self.try_claim_tx_sequence() {
+                return claim;
+            }
+            spin_loop();
+        }
+    }
+
+    /// Захват для пути паники: ожидание ограничено
+    /// [`TX_SEQUENCE_SPIN_LIMIT`], затем захват переходит силой. Вызывающий
+    /// гарантирует, что вытесняемый владелец не возобновится.
+    fn claim_tx_sequence_for_panic(&self) -> TxSequenceClaim<'_> {
+        for _ in 0..TX_SEQUENCE_SPIN_LIMIT {
+            if let Some(claim) = self.try_claim_tx_sequence() {
+                return claim;
+            }
+            spin_loop();
+        }
+
+        // Брошенная последовательность не мешает свежей: слово, не поданное
+        // в TF, передачу не начинает, а поданное дренируется железом и
+        // наблюдается через SR_TXEMT.
+        self.tx_sequence_claimed.swap(true, Ordering::Acquire);
+        TxSequenceClaim(self)
+    }
+
+    fn try_claim_tx_sequence(&self) -> Option<TxSequenceClaim<'_>> {
+        self.tx_sequence_claimed
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+            .then(|| TxSequenceClaim(self))
+    }
+}
+
+impl TxSequenceClaim<'_> {
+    /// Подаёт передатчику одно слово (до 4 байт, LF -> CRLF).
+    /// Возвращает число потреблённых байт входа.
+    fn try_feed_word(&self, buf: &[u8]) -> Result<usize, Pending> {
+        let mmio = &self.0.mmio;
+
+        // Очередь должна быть пуста
+        if (mmio.read_reg(SR) & SR_TXEMT) == 0 {
+            return Err(Pending);
+        }
+
+        // Формирование слова (LF -> CRLF, до 4 байт)
+        let mut crlf = Crlf::new(buf);
+        let (word, out_len, in_consumed) = crlf.pack_u32_le();
+        if out_len == 0 {
+            return Ok(0);
+        }
+
+        // Установка размера выпуска и сброс TX_READY (старт передачи после записи в TF)
+        mmio.write_reg(NCF_TX, out_len as u32);
+        mmio.write_reg(CR, CMD_CLEAR_TX_READY);
+
+        // Проверка готовности к приему слова
+        if (mmio.read_reg(SR) & SR_TXRDY) == 0 {
+            return Err(Pending);
+        }
+
+        mmio.write_reg(TF, word);
+
+        Ok(in_consumed)
+    }
+}
+
+impl Drop for TxSequenceClaim<'_> {
+    fn drop(&mut self) {
+        self.0.tx_sequence_claimed.store(false, Ordering::Release);
     }
 }
 
@@ -61,36 +152,13 @@ impl ByteSink for UartDm {
             return Ok(0);
         }
 
-        // Очередь должна быть пуста
-        if (self.mmio.read_reg(SR) & SR_TXEMT) == 0 {
-            return Err(Pending);
-        }
-
-        // Формирование слова (LF -> CRLF, до 4 байт)
-        let mut crlf = Crlf::new(buf);
-        let (word, out_len, in_consumed) = crlf.pack_u32_le();
-        if out_len == 0 {
-            return Ok(0);
-        }
-
-        // Установка размера выпуска и сброс TX_READY (старт передачи после записи в TF)
-        self.mmio.write_reg(NCF_TX, out_len as u32);
-        self.mmio.write_reg(CR, CMD_CLEAR_TX_READY);
-
-        // Проверка готовности к приему слова
-        if (self.mmio.read_reg(SR) & SR_TXRDY) == 0 {
-            return Err(Pending);
-        }
-
-        self.mmio.write_reg(TF, word);
-
-        Ok(in_consumed)
+        self.claim_tx_sequence().try_feed_word(buf)
     }
 
     fn flush(&self) {
         // Ожидание полного опустошения передатчика
         while (self.mmio.read_reg(SR) & SR_TXEMT) == 0 {
-            core::hint::spin_loop();
+            spin_loop();
         }
     }
 }
@@ -100,7 +168,23 @@ impl Writer for UartDm {
         while !s.is_empty() {
             match self.try_write_slice(s) {
                 Ok(n) if n > 0 => s = &s[n..],
-                _ => core::hint::spin_loop(),
+                _ => spin_loop(),
+            }
+        }
+    }
+
+    fn write_all_panic(&self, mut s: &[u8]) {
+        if s.is_empty() {
+            return;
+        }
+
+        // Один захват на всё сообщение: конкуренты пути паники мертвы или
+        // остановлены, отдавать им последовательность между словами незачем.
+        let claim = self.claim_tx_sequence_for_panic();
+        while !s.is_empty() {
+            match claim.try_feed_word(s) {
+                Ok(n) if n > 0 => s = &s[n..],
+                _ => spin_loop(),
             }
         }
     }
@@ -110,7 +194,8 @@ impl Writer for UartDm {
     }
 }
 
-// SAFETY: UartDm содержит только MmioBound (Sync), операции через volatile.
+// SAFETY: UartDm содержит MmioBound (доступ через volatile) и AtomicBool -
+// оба корректны при передаче между потоками.
 unsafe impl Send for UartDm {}
 
 struct UartDmDriver {

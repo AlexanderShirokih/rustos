@@ -126,7 +126,6 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
 
     let buffered = Box::leak(Box::new(BufferedWriter::new()));
     klog::set_stdout(buffered);
-    crate::set_log_sink(buffered);
 
     info!("primary_main: post-MMU initialization complete");
 

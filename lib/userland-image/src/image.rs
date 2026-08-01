@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn decode_tolerates_trailing_padding() {
         let mut bytes = image_bytes();
-        bytes.extend(core::iter::repeat(0u8).take(4096));
+        bytes.extend(core::iter::repeat_n(0u8, 4096));
 
         let image = decode(&bytes).expect("padded buffer decodes");
         let entry = image

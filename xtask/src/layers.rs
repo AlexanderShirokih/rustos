@@ -355,7 +355,9 @@ mod tests {
             .collect()
     }
 
-    fn metadata(root: &str, packages: &[(&str, &str, &[(&str, &str)])]) -> CargoMetadata {
+    type PackageSpec<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+
+    fn metadata(root: &str, packages: &[PackageSpec<'_>]) -> CargoMetadata {
         CargoMetadata {
             workspace_root: PathBuf::from(root),
             packages: packages

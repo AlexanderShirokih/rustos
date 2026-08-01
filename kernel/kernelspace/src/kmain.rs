@@ -185,7 +185,11 @@ fn run_all_drivers(
 fn bind_console(kernel: &mut KernelContext, buffered: &BufferedWriter) {
     kernel.with_runtime_state(|services, _| {
         if let Some(console) = services.console() {
-            buffered.attach(&(console as Arc<dyn io::writer::Writer + Send + Sync>));
+            let console = console as Arc<dyn io::writer::Writer + Send + Sync>;
+            // Сток паники указывает на драйвер консоли напрямую: путь паники
+            // не проходит через локи `STDOUT` и `BufferedWriter`.
+            klog::set_panic_stdout(console.clone());
+            buffered.attach(&console);
         }
     });
 }
