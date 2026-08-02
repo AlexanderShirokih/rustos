@@ -37,6 +37,7 @@ members = [
     "lib/userland-loader",
     "lib/runtime",
     "lib/util",
+    "tools/style",
     "tools/userland-image",
     "user/filesystem-imagefs",
     "user/filesystem-namespace-router",
@@ -71,6 +72,8 @@ proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 sha2 = "0.11.0"
+ra_ap_syntax = "=0.0.344"
+regex = "1"
 
 # Внутренние крейты workspace
 ipc = { path = "lib/ipc" }
@@ -109,6 +112,7 @@ userland-loader = { path = "lib/userland-loader" }
 runtime = { path = "lib/runtime" }
 process = { path = "kernel/process" }
 userland-image-tool = { path = "tools/userland-image" }
+style-tool = { path = "tools/style" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

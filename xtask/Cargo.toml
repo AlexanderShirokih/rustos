@@ -12,6 +12,7 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 flate2 = { workspace = true }
 userland-image-tool = { workspace = true }
+style-tool = { workspace = true }
 
 [lints]
 workspace = true

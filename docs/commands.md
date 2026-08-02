@@ -6,9 +6,10 @@
 |-------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | Host-тесты                          | `cargo test --workspace`                                                                                             |
 | Host-clippy                         | `cargo clippy --workspace`                                                                                           |
-| AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --target aarch64-unknown-none` |
+| AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --exclude style-tool --target aarch64-unknown-none` |
 | Форматирование                      | `cargo fmt --all --check`                                                                                            |
 | Проверка слоёв                      | `cargo xtask check-layers`                                                                                           |
+| Проверка кодстайла                  | `cargo xtask style [--all] [--staged] [--since <rev>]`                                                               |
 | Сборка userland                     | `cargo xtask build-userland [--image <путь>] [--file <путь>=<источник>]`                                             |
 | Загрузочный образ (userland + ядро) | `cargo xtask build devices/spec/<device>.yaml [--image <путь>] [--file <путь>=<источник>]`                           |
 | Загрузочный образ для QEMU          | `cargo xtask build devices/spec/qemu-aarch64.yaml`                                                                   |
@@ -156,3 +157,32 @@ cargo xtask check-layers
 Сверяет рёбра зависимостей между крейтами основного и fuzz-workspace
 (по `cargo metadata`) с правилами слоёв из [`architecture.md`](architecture.md).
 При нарушениях печатает запрещённые рёбра и завершается с ошибкой.
+
+## Проверка кодстайла
+
+```bash
+cargo xtask style [--all | --staged | --since <rev>]
+                  [--write-baseline | --no-baseline]
+                  [--format text|json] [--rule <id>]
+```
+
+Проверяет то, что не берут `cargo fmt` и `cargo clippy`: doc-комментарии, язык
+строковых литералов, типографику прозы. Правила и уровни — в `style.toml`.
+
+По умолчанию сверяются строки, изменённые относительно `origin/main`. `--all`
+берёт дерево целиком, `--staged` — индекс, этот режим и стоит в
+`hooks/pre-commit`.
+
+Накопленные нарушения приняты снапшотом `style-baseline.txt` и молчат.
+`--write-baseline` пересобирает его, `--no-baseline` печатает всё.
+
+Единичное исключение — директива с обязательным обоснованием:
+
+```rust
+// style:allow(doc_on_declaration) regression guard kept by owner request
+```
+
+Директива без обоснования, с неизвестным правилом или не покрывшая находок сама
+становится находкой.
+
+Коды возврата: `1` — осталась находка уровня `deny`, `2` — отказ инструмента.

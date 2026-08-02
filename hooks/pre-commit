@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-commit hook: проверка форматирования Rust-кода через rustfmt.
+# Pre-commit hook: форматирование Rust-кода и проверка кодстайла.
 #
 # Запускается автоматически перед `git commit`, если репозиторий настроен на
 # использование этой директории (см. README/BUILD.md):
@@ -10,20 +10,41 @@
 
 set -euo pipefail
 
-# Не запускаемся, если в индексе нет ни одного *.rs файла.
-if ! git diff --cached --name-only --diff-filter=ACMR | grep -q '\.rs$'; then
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+rust_staged=false
+if grep -q '\.rs$' <<<"$staged"; then
+    rust_staged=true
+fi
+
+style_staged=false
+if grep -qE '^(style\.toml|rustfmt\.toml|style-baseline\.txt)$' <<<"$staged"; then
+    style_staged=true
+fi
+
+if [ "$rust_staged" = false ] && [ "$style_staged" = false ]; then
     exit 0
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then
-    echo "pre-commit: cargo не найден в PATH - пропускаю rustfmt." >&2
+    echo "pre-commit: cargo not found in PATH, skipping checks." >&2
     exit 0
 fi
 
-echo "pre-commit: cargo fmt --all --check"
-if ! cargo fmt --all --check; then
+if [ "$rust_staged" = true ]; then
+    echo "pre-commit: cargo fmt --all --check"
+    if ! cargo fmt --all --check; then
+        echo >&2
+        echo "pre-commit: formatting issues found." >&2
+        echo "pre-commit: fix them with: cargo fmt --all" >&2
+        exit 1
+    fi
+fi
+
+echo "pre-commit: cargo xtask style --staged"
+if ! cargo xtask style --staged; then
     echo >&2
-    echo "pre-commit: обнаружены проблемы форматирования." >&2
-    echo "pre-commit: исправьте их командой: cargo fmt --all" >&2
+    echo "pre-commit: code style violations found." >&2
+    echo "pre-commit: inspect them with: cargo xtask style --staged" >&2
     exit 1
 fi

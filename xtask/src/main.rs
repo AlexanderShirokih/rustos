@@ -7,6 +7,7 @@ mod layers;
 mod qemu_test;
 mod race;
 mod shell;
+mod style;
 
 use std::{
     fs,
@@ -97,6 +98,30 @@ enum Commands {
     },
     /// Check the layer rules between workspace crates
     CheckLayers,
+    /// Check the code style conventions
+    Style {
+        /// Check the whole tree instead of the changed lines
+        #[arg(long)]
+        all: bool,
+        /// Check the staged contents, for the pre-commit hook
+        #[arg(long)]
+        staged: bool,
+        /// Compare against a revision instead of the default base
+        #[arg(long, value_name = "REV")]
+        since: Option<String>,
+        /// Regenerate the baseline snapshot from the current tree
+        #[arg(long)]
+        write_baseline: bool,
+        /// Report findings accepted by the baseline as well
+        #[arg(long)]
+        no_baseline: bool,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Restrict the run to the listed rules
+        #[arg(long = "rule", value_name = "ID")]
+        rules: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -129,6 +154,26 @@ fn main() -> Result<()> {
             println!("Done: {}", output.display());
         }
         Commands::CheckLayers => layers::run()?,
+        Commands::Style {
+            all,
+            staged,
+            since,
+            write_baseline,
+            no_baseline,
+            format,
+            rules,
+        } => style::run(&style::Options {
+            all,
+            staged,
+            since,
+            baseline: match (write_baseline, no_baseline) {
+                (true, _) => style::BaselineMode::Write,
+                (false, true) => style::BaselineMode::Ignore,
+                (false, false) => style::BaselineMode::Apply,
+            },
+            format,
+            rules,
+        })?,
     }
 
     Ok(())

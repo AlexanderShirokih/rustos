@@ -1,0 +1,13 @@
+# Конфигурация `cargo xtask style`.
+#
+# Правила категории прозы объявляются здесь данными: узор плюс сужающие
+# фильтры. Скомпилированные правила живут в `tools/style/src/rules`.
+
+[rules]
+
+[[text]]
+id = "latin_apostrophe"
+title = "latin term declined through an apostrophe"
+message = "latin term declined through an apostrophe, write it without the ending"
+target = "comment"
+pattern = "[A-Za-z]+'[а-яёА-ЯЁ]"
