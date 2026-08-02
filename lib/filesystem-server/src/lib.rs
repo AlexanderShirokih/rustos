@@ -7,7 +7,6 @@
 //! который сервисный поток обслуживает прямо сейчас.
 
 #![no_std]
-#![allow(unsafe_code)]
 
 extern crate alloc;
 
@@ -19,7 +18,7 @@ use filesystem_abi::{dispatch_file_system, dispatch_file_system_admin};
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
     MemoryRegion, Mutex, OwnedHandle, Port, PortTransport, Priority, ReadOnlyMapping, Resource,
-    install_log, log_line, spawn,
+    install_log, log_line, spawn_owned,
 };
 use spin::Once;
 use syscall::{Handle, PORT_TIMEOUT_INFINITE};
@@ -44,12 +43,10 @@ static IMAGE: Once<ReadOnlyMapping> = Once::new();
 // Состояние, разделённое потоками сервисного и admin-порта.
 struct Shared {
     state: Mutex<FileSystemState>,
-    /// Корневая capability сервисного порта: по ней идёт приём кадров сессий, из неё же минтятся
-    /// их значки.
+    // Корневая capability сервисного порта: из неё минтятся значки сессий.
     service: OwnedHandle,
-    /// Серверная сторона admin-порта.
     admin: OwnedHandle,
-    /// Источник значков сессий: значения не переиспользуются.
+    // Значки сессий не переиспользуются.
     next_badge: AtomicU64,
 }
 
@@ -75,7 +72,7 @@ where
     let bytes = IMAGE.call_once(|| mapping).as_bytes();
     let backend = found(bytes)?;
 
-    let shared = Box::leak(Box::new(Shared {
+    let shared: &'static Shared = Box::leak(Box::new(Shared {
         state: Mutex::new(FileSystemState::new(
             Box::new(backend),
             image,
@@ -86,12 +83,7 @@ where
         next_badge: AtomicU64::new(1),
     }));
     // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
-    let _ = spawn(
-        serve_admin,
-        core::ptr::from_ref::<Shared>(shared) as usize,
-        ADMIN_STACK,
-        Priority::new(1),
-    )?;
+    let _ = spawn_owned(move || serve_admin(shared), ADMIN_STACK, Priority::new(1))?;
     log_line("started");
     serve_sessions(shared);
     Ok(())
@@ -137,11 +129,8 @@ fn serve_sessions(shared: &Shared) {
     log_line("service port closed");
 }
 
-/// Цикл admin-порта в отдельном потоке: установление сессий, пока порт открыт.
-extern "C" fn serve_admin(arg: usize) -> u32 {
-    // SAFETY: `arg` - указатель на `Shared`, утёкший в `serve`: он живёт до конца процесса и
-    // разделяется только на чтение.
-    let shared: &Shared = unsafe { &*(arg as *const Shared) };
+// Цикл admin-порта в отдельном потоке: установление сессий, пока порт открыт.
+fn serve_admin(shared: &Shared) -> u32 {
     let transport = PortTransport::server(shared.admin.borrow());
     loop {
         match transport.wait_readable(PORT_TIMEOUT_INFINITE) {

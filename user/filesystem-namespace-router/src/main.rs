@@ -12,7 +12,6 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use core::panic::PanicInfo;
 
 use filesystem_abi::{
@@ -24,7 +23,7 @@ use ipc::{
 };
 use runtime::{
     MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Resource,
-    install_log, log_fmt, log_line, spawn, thread_exit,
+    install_log, log_fmt, log_line, spawn_owned, thread_exit,
 };
 use spin::Once;
 use syscall::{Handle, PORT_TIMEOUT_INFINITE, Rights};
@@ -77,8 +76,7 @@ fn run(admin: Handle) -> Result<()> {
     let image = MemoryRegion::from_handle(image);
     let mapping = image.map_full_read_only()?;
     let bytes = IMAGE.call_once(|| mapping).as_bytes();
-    // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
-    let admin_port = Box::leak(Box::new(AdminPort {
+    let admin_port = AdminPort {
         port: admin,
         administering: Administering::new(
             &MOUNTS,
@@ -87,10 +85,10 @@ fn run(admin: Handle) -> Result<()> {
             log_for_children,
             Resource::self_resource()?,
         ),
-    }));
-    let _ = spawn(
-        serve_admin,
-        core::ptr::from_mut::<AdminPort>(admin_port) as usize,
+    };
+    // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
+    let _ = spawn_owned(
+        move || serve_admin(admin_port),
         ADMIN_STACK,
         Priority::new(1),
     )?;
@@ -120,17 +118,14 @@ fn serve(service: &OwnedHandle) {
     log_line("service port closed");
 }
 
-// Аргумент потока admin-порта: сам порт и admin-сторона с ресурсами подъёма.
+// Состояние потока admin-порта.
 struct AdminPort {
     port: OwnedHandle,
     administering: Administering<'static>,
 }
 
-/// Цикл admin-порта в отдельном потоке: монтирования, пока порт открыт.
-extern "C" fn serve_admin(arg: usize) -> u32 {
-    // SAFETY: `arg` - указатель на `AdminPort`, утёкший в `run`: он живёт до конца процесса, и
-    // этот поток - единственный его владелец.
-    let admin: &mut AdminPort = unsafe { &mut *(arg as *mut AdminPort) };
+// Цикл admin-порта в отдельном потоке: монтирования, пока порт открыт.
+fn serve_admin(mut admin: AdminPort) -> u32 {
     let transport = PortTransport::server(admin.port.borrow());
     loop {
         match transport.wait_readable(PORT_TIMEOUT_INFINITE) {
@@ -174,7 +169,7 @@ impl NamespaceAdminService for Handshake {
         });
     }
 
-    /// Монтирования заводит поднятый маршрутизатор: до стартового кадра дерева имён ещё нет.
+    // Монтирования заводит поднятый маршрутизатор: до стартового кадра дерева имён ещё нет.
     fn mount(
         &mut self,
         _path: Str<'_, PATH_MAX>,
