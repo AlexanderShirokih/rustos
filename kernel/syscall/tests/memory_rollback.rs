@@ -141,7 +141,10 @@ impl KernelRuntime for TableRuntime {
         self.handle_table.lock().unwrap().clone()
     }
     fn exit_current_thread(&self, _c: i32) -> ! {
-        panic!()
+        panic!("exit_current_thread must not be called in this test")
+    }
+    fn exit_current_process(&self, _c: i32) -> ! {
+        panic!("exit_current_process must not be called in this test")
     }
     fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
     fn unblock(&self, _t: WaitToken) {}

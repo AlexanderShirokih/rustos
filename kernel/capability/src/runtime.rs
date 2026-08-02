@@ -66,6 +66,11 @@ pub trait KernelRuntime: Send + Sync {
     /// на следующий runnable. Не возвращается.
     fn exit_current_thread(&self, exit_code: i32) -> !;
 
+    /// Завершает все потоки текущего процесса с заданным `exit_code`,
+    /// освобождает его ресурсы и переключает контекст на следующий runnable.
+    /// Не возвращается.
+    fn exit_current_process(&self, exit_code: i32) -> !;
+
     /// Паркует текущий поток.
     /// `timeout_ns = None` означает бессрочный wait, `Some(d)` -
     /// wakeup-deadline через тот же `SleepQueue`, что и `sleep_ns`.

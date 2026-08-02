@@ -68,6 +68,10 @@ impl capability::KernelRuntime for ForwardingRuntime {
         self.with(|rt| rt.exit_current_thread(exit_code))
     }
 
+    fn exit_current_process(&self, exit_code: i32) -> ! {
+        self.with(|rt| rt.exit_current_process(exit_code))
+    }
+
     fn block_current_until(
         &self,
         ready_flag: &core::sync::atomic::AtomicU32,
@@ -833,6 +837,70 @@ fn kernel_thread_completion_signals_terminated() {
 
     assert!(target.terminated());
     assert_eq!(target.exit_code(), 0);
+}
+
+#[test]
+fn process_exit_terminates_all_threads_and_releases_handles() {
+    use capability::{Capability, CapabilityTarget, KernelRuntime, Rights, Signal};
+    use collections::LockCell;
+    use scheduler::SchedulerService;
+
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let first = scheduler
+        .spawn(SpawnConfig::new("first"), || {})
+        .expect("spawn first");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(first));
+    let handle = running.handle();
+    let second = handle
+        .spawn_boxed(
+            SpawnConfig::new("second").address_space(SpawnAddressSpace::Inherit),
+            Box::new(|| {}),
+        )
+        .expect("spawn second");
+    let first_object = running.thread_object_for(first).expect("first target");
+    let second_object = running.thread_object_for(second).expect("second target");
+    let pid = running.thread_process_id(first).expect("process id");
+    let process_object = running.process_object_for(pid).expect("process target");
+    let table = handle
+        .current_handle_table()
+        .expect("current process handle table");
+    let signal = Signal::new();
+    let signal_weak = Arc::downgrade(&signal);
+    table
+        .with_lock(|handles| {
+            handles.insert(Capability::new(
+                CapabilityTarget::Signal(signal),
+                Rights::READ,
+            ))
+        })
+        .expect("insert process-owned handle");
+
+    let prev_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        KernelRuntime::exit_current_process(&handle, 17)
+    }));
+    panic::set_hook(prev_hook);
+
+    assert!(result.is_err(), "process_exit must not return");
+    assert!(first_object.terminated());
+    assert_eq!(first_object.exit_code(), 17);
+    assert!(second_object.terminated());
+    assert_eq!(second_object.exit_code(), 17);
+    assert!(process_object.terminated());
+    assert_eq!(process_object.exit_code(), 17);
+    assert_eq!(table.with_lock(|handles| handles.live_count()), 0);
+    assert!(signal_weak.upgrade().is_none());
+    assert!(running.thread_object_for(first).is_none());
+    assert!(running.thread_object_for(second).is_none());
+    assert!(running.process_object_for(pid).is_none());
 }
 
 #[test]

@@ -58,6 +58,10 @@ impl KernelRuntime for TableRuntime {
         panic!("exit_current_thread must not be called");
     }
 
+    fn exit_current_process(&self, _exit_code: i32) -> ! {
+        panic!("exit_current_process must not be called");
+    }
+
     fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
 
     fn unblock(&self, _token: WaitToken) {}

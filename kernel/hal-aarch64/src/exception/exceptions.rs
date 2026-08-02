@@ -8,11 +8,13 @@ use collections::StaticString;
 use super::{
     esr::{Esr, ExceptionClass},
     gpreg::GpReg,
+    originates_from_el0,
 };
 use crate::write_sysreg;
 
 /// Ёмкость stack-буфера для диагностики исключений (байт).
 const EXCEPTION_BUF_SIZE: usize = 2048;
+const USER_EXCEPTION_EXIT_CODE: i32 = -1;
 
 // Размер фрейма должен быть кратен 16 (требование AArch64 ABI для выравнивания стека).
 const _: () = assert!(size_of::<ExceptionFrame>().is_multiple_of(16));
@@ -169,6 +171,10 @@ fn sync_handler(frame: &mut ExceptionFrame) {
     if frame.esr.exception_class() == ExceptionClass::Svc {
         syscall_kernel::dispatch(frame);
         return;
+    }
+
+    if originates_from_el0(frame.spsr) {
+        capability::process_exit(USER_EXCEPTION_EXIT_CODE);
     }
 
     let ec = frame.esr.exception_class();

@@ -1225,6 +1225,13 @@ where
         signals
     }
 
+    pub(super) fn begin_exit_current_process(&mut self, exit_code: i32) -> DeferredSignals {
+        let Some(process_object) = self.current_process_object() else {
+            return DeferredSignals::default();
+        };
+        self.terminate_process_object(&process_object, exit_code)
+    }
+
     pub(super) fn finish_exit_current(&mut self, now_ns: u64) -> ScheduleAction<A> {
         self.switch_to_next(now_ns)
     }

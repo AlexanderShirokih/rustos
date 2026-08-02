@@ -1,8 +1,11 @@
-//! E2E проверка `userland_loader::load_entry` из EL0: загрузка синтетической
-//! программы из `EntryView` и передача ей bootstrap-хэндла в `x0`.
+//! E2E проверка `userland_loader::load_entry`: загрузка синтетической программы,
+//! передача bootstrap-хэндла и локализация исключения в дочернем процессе.
+//!
+//! Машинный код фикстур использует AArch64, соответствующий target этого
+//! `testrunner`.
 
 use kernel_tests::kernel_test;
-use runtime::{Resource, Signal, Timeout};
+use runtime::{Process, Resource, Signal, Timeout};
 use syscall::SyscallOp;
 use userland::{Entry, Segment, SegmentPermissions};
 use userland_loader::load_entry;
@@ -11,11 +14,9 @@ const PAGE_SIZE: u64 = 4096;
 const CHILD_CODE_VA: u64 = 0x2000_0000;
 const CHILD_WAIT_TIMEOUT_NS: u64 = 500_000_000;
 
-/// Child-код: `svc HandleClose; svc ThreadExit; b .`. На входе `x0` несёт
-/// child-table id переданного bootstrap-хэндла; `HandleClose` закрывает его и
-/// кладёт результат в `x0`, `ThreadExit` выходит с этим кодом. Валидный хэндл
-/// -> close вернул 0 -> exit 0; нулевой/битый x0 дал бы ненулевой код.
-fn child_code() -> [u8; 12] {
+fn clean_exit_child_code() -> [u8; 12] {
+    // AArch64: `svc HandleClose; svc ThreadExit; b .` закрывает bootstrap-хэндл,
+    // переданный в x0, и публикует код возврата `HandleClose` как exit-код.
     let words: [u32; 3] = [
         0xD400_0001 | ((SyscallOp::HandleClose as u32) << 5),
         0xD400_0001 | ((SyscallOp::ThreadExit as u32) << 5),
@@ -28,28 +29,62 @@ fn child_code() -> [u8; 12] {
     bytes
 }
 
-#[kernel_test]
-fn load_entry_passes_bootstrap_handle() {
-    let resource = Resource::self_resource().expect("self metering resource");
-    let code = child_code();
+fn data_abort_child_code() -> [u8; 12] {
+    // AArch64: `mov x0, xzr; ldr x0, [x0]; b .` вызывает Data Abort чтением
+    // незамапленной VA 0.
+    let words: [u32; 3] = [0xAA1F_03E0, 0xF940_0000, 0x1400_0000];
+    let mut bytes = [0u8; 12];
+    for (i, word) in words.iter().enumerate() {
+        bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
+fn load_synthetic_child(resource: &Resource, path: &str, code: &[u8]) -> Process {
     let segments = [Segment {
         va_base: CHILD_CODE_VA,
         mem_size: PAGE_SIZE,
         permissions: SegmentPermissions::ReadExecute,
-        bytes: &code,
+        bytes: code,
     }];
     let entry = Entry {
-        path: "/child",
+        path,
         entry_va: CHILD_CODE_VA,
         stack_size: PAGE_SIZE,
         segments: &segments,
     };
     let bootstrap = Signal::create().expect("signal create").into_handle();
-    let process = load_entry(&entry, &resource, bootstrap).expect("load_entry spawns child");
+    load_entry(&entry, resource, bootstrap).expect("load_entry spawns child")
+}
+
+#[kernel_test]
+fn load_entry_passes_bootstrap_handle() {
+    let resource = Resource::self_resource().expect("self metering resource");
+    let code = clean_exit_child_code();
+    let process = load_synthetic_child(&resource, "/child", &code);
 
     process
         .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
         .expect("child terminates");
     // x0 нёс валидный child-table id -> HandleClose вернул 0.
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
+}
+
+#[kernel_test]
+fn synchronous_fault_terminates_child_and_runner_continues() {
+    let resource = Resource::self_resource().expect("self metering resource");
+    let fault_code = data_abort_child_code();
+    let faulting = load_synthetic_child(&resource, "/faulting-child", &fault_code);
+
+    faulting
+        .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
+        .expect("faulting child terminates");
+    kernel_tests::kassert!(faulting.exit_code().expect("fault exit code") != 0);
+
+    let canary_code = clean_exit_child_code();
+    let canary = load_synthetic_child(&resource, "/post-fault-canary", &canary_code);
+    canary
+        .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
+        .expect("post-fault child terminates");
+    kernel_tests::kassert_eq!(canary.exit_code().expect("canary exit code"), 0);
 }

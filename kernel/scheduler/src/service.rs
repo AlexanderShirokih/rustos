@@ -336,6 +336,21 @@ where
         unreachable!("terminated thread resumed after scheduler switch")
     }
 
+    fn exit_current_process(&self, exit_code: i32) -> ! {
+        // Bare disable: путь не возвращается, парный enable не нужен.
+        <A::Cpu as ArchCpu>::disable_preemption();
+        let signals = self
+            .inner
+            .with_lock(|inner| inner.begin_exit_current_process(exit_code));
+        self.emit_deferred_signals(signals);
+        let action = self.inner.with_lock(|inner| {
+            let now_ns = inner.now_ns();
+            inner.finish_exit_current(now_ns)
+        });
+        perform_schedule_action(&self.inner, action);
+        unreachable!("terminated process resumed after scheduler switch")
+    }
+
     fn block_current_until(&self, ready_flag: &AtomicU32, timeout_ns: Option<u64>) {
         with_preemption_disabled::<A::Cpu, _>(|| {
             let action = self.inner.with_lock(|inner| {

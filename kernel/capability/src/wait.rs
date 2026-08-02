@@ -260,6 +260,9 @@ mod tests {
         fn exit_current_thread(&self, _exit_code: i32) -> ! {
             unreachable!("not used in wait.rs tests")
         }
+        fn exit_current_process(&self, _exit_code: i32) -> ! {
+            unreachable!("not used in wait.rs tests")
+        }
         fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
         fn unblock(&self, _token: WaitToken) {
             self.unblocks.fetch_add(1, Ordering::AcqRel);

@@ -44,7 +44,7 @@ pub struct Process {
     /// чтобы PTE снимались до возврата фреймов в `FrameAllocator`.
     image_segments: Vec<Arc<MemoryRegion>>,
     /// Количество живых thread'ов, привязанных к этому процессу. Декремент
-    /// при `thread_exit`; ноль - сигнал планировщику удалить процесс.
+    /// при терминации потока. Ноль - сигнал планировщику удалить процесс.
     thread_count: AtomicUsize,
     /// Lifecycle-capability target процесса: переживает запись в `ProcessTable`, чтобы
     /// держатели `Capability` могли наблюдать завершение процесса и читать

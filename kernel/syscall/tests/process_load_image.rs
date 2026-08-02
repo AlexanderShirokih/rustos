@@ -60,6 +60,9 @@ impl KernelRuntime for TableRuntime {
     fn exit_current_thread(&self, _exit_code: i32) -> ! {
         panic!("must not exit");
     }
+    fn exit_current_process(&self, _exit_code: i32) -> ! {
+        panic!("must not exit process");
+    }
     fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
     fn unblock(&self, _token: WaitToken) {}
     fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}

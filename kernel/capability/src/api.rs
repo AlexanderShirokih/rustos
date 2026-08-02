@@ -325,6 +325,13 @@ pub fn thread_exit(exit_code: i32) -> ! {
     runtime().exit_current_thread(exit_code)
 }
 
+/// Завершает все потоки текущего процесса с заданным `exit_code`, поднимает
+/// `SIGNALED` на их lifecycle-object и lifecycle-object процесса, освобождает
+/// ресурсы процесса и переключает контекст на следующий runnable. Не возвращается.
+pub fn process_exit(exit_code: i32) -> ! {
+    runtime().exit_current_process(exit_code)
+}
+
 /// Создаёт новый [`Signal`] и регистрирует handle в таблице текущего
 /// процесса. Стартовые права - [`default_rights_for`](super::rights::default_rights_for).
 pub fn signal_create() -> Result<HandleId, IpcError> {
@@ -387,8 +394,9 @@ mod tests {
         target::CapabilityTarget,
     };
 
-    const PANIC_SENTINEL: &str = "thread_exit-mock-noreturn";
+    const PANIC_SENTINEL: &str = "exit-mock-noreturn";
     static CAPTURED_EXIT_CODE: AtomicI32 = AtomicI32::new(i32::MIN);
+    static CAPTURED_PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(i32::MIN);
 
     type BlockHook = Box<dyn FnMut() + Send>;
 
@@ -446,6 +454,11 @@ mod tests {
 
         fn exit_current_thread(&self, exit_code: i32) -> ! {
             CAPTURED_EXIT_CODE.store(exit_code, Ordering::SeqCst);
+            panic!("{PANIC_SENTINEL}");
+        }
+
+        fn exit_current_process(&self, exit_code: i32) -> ! {
+            CAPTURED_PROCESS_EXIT_CODE.store(exit_code, Ordering::SeqCst);
             panic!("{PANIC_SENTINEL}");
         }
 
@@ -512,6 +525,20 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(CAPTURED_EXIT_CODE.load(Ordering::SeqCst), 7);
+    }
+
+    #[test]
+    fn process_exit_forwards_code_to_runtime() {
+        let _guard = test_lock();
+        mock().reset();
+
+        let prev_hook = panic::take_hook();
+        panic::set_hook(Box::new(|_| {}));
+        let result = panic::catch_unwind(|| process_exit(11));
+        panic::set_hook(prev_hook);
+
+        assert!(result.is_err());
+        assert_eq!(CAPTURED_PROCESS_EXIT_CODE.load(Ordering::SeqCst), 11);
     }
 
     #[test]
