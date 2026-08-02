@@ -1,6 +1,9 @@
-//! Способ старта вторичного CPU, объявленный в device tree.
+//! Подъём вторичных CPU: способ старта, объявленный в device tree, и учёт
+//! поднятых.
 //!
 //! Разбор биндинга; сам вызов делает платформенный слой.
+
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fdt::devicetree::{DeviceTree, Node};
 
@@ -119,6 +122,48 @@ pub fn psci_method(device_tree: &DeviceTree<'_>) -> Option<StartMethod> {
         .unwrap_or(PSCI_CPU_ON_AARCH64);
 
     Some(StartMethod::Psci { conduit, cpu_on })
+}
+
+/// Учёт вторичных CPU, доложивших о готовности, и признак открытого приёма.
+pub struct OnlineCpus {
+    count: AtomicUsize,
+    accepting: AtomicBool,
+}
+
+impl OnlineCpus {
+    pub const fn new() -> Self {
+        Self {
+            count: AtomicUsize::new(0),
+            accepting: AtomicBool::new(true),
+        }
+    }
+
+    /// Отмечает CPU дошедшим до работы. `false` - приём уже закрыт, и в работу
+    /// этот CPU не идёт.
+    pub fn mark_online(&self) -> bool {
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+
+        self.count.fetch_add(1, Ordering::Release);
+        true
+    }
+
+    /// Закрывает приём. Вызывается boot CPU по завершении подъёма.
+    pub fn close(&self) {
+        self.accepting.store(false, Ordering::Release);
+    }
+
+    /// Число CPU, доложивших о готовности.
+    pub fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+}
+
+impl Default for OnlineCpus {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Читает способ старта из узла `cpu@N`. Задаёт spin-table для этого CPU.
@@ -271,6 +316,27 @@ mod tests {
         let bytes = build_cpu_dtb(Some("psci"), Some(0x4000_0000));
 
         assert_eq!(cpu_node_method(&bytes), None);
+    }
+
+    #[test]
+    fn readiness_is_counted_while_the_bring_up_accepts() {
+        let online = OnlineCpus::new();
+
+        assert_eq!(online.count(), 0);
+        assert!(online.mark_online());
+        assert!(online.mark_online());
+        assert_eq!(online.count(), 2);
+    }
+
+    #[test]
+    fn readiness_after_the_bring_up_was_closed_is_refused() {
+        let online = OnlineCpus::new();
+        assert!(online.mark_online());
+
+        online.close();
+
+        assert!(!online.mark_online());
+        assert_eq!(online.count(), 1);
     }
 
     #[test]

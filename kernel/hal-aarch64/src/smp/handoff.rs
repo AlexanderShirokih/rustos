@@ -4,8 +4,9 @@
 //! мимо кэша и по физическому адресу. Boot CPU публикует записи, вытесняя их
 //! до точки когерентности.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
+use hal_common::smp::OnlineCpus;
 use scheduler::MAX_CPUS;
 
 use crate::memory::regs::{common::EL1, dcache::DataCache};
@@ -70,9 +71,7 @@ pub(super) static HANDOFF: Handoff = Handoff {
     higher_root: AtomicU64::new(0),
 };
 
-static ONLINE: AtomicUsize = AtomicUsize::new(0);
-
-static ACCEPTING: AtomicBool = AtomicBool::new(true);
+pub(super) static ONLINE: OnlineCpus = OnlineCpus::new();
 
 /// Физические адреса корней трансляции.
 pub(super) struct TranslationRoots {
@@ -108,27 +107,6 @@ pub(super) fn roots() -> TranslationRoots {
         lower: HANDOFF.lower_root.load(Ordering::Relaxed),
         higher: HANDOFF.higher_root.load(Ordering::Relaxed),
     }
-}
-
-/// Отмечает, что CPU дошёл до post-MMU кода. `false` - приём уже закрыт, и
-/// в работу этот CPU не идёт.
-pub(super) fn mark_online() -> bool {
-    if !ACCEPTING.load(Ordering::Acquire) {
-        return false;
-    }
-
-    ONLINE.fetch_add(1, Ordering::Release);
-    true
-}
-
-/// Закрывает приём CPU. Вызывается boot CPU по завершении подъёма.
-pub(super) fn close_bringup() {
-    ACCEPTING.store(false, Ordering::Release);
-}
-
-/// Число вторичных CPU, дошедших до post-MMU кода.
-pub(super) fn online_count() -> usize {
-    ONLINE.load(Ordering::Acquire)
 }
 
 fn flush() {

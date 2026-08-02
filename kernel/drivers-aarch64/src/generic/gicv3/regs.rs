@@ -1,6 +1,7 @@
 //! Определения MMIO-регистров GICv3 и вспомогательные типы.
 
 use drivers_common::services::interrupts::IrqNumber;
+use drivers_common_aarch64::{affinity_frames::FrameOwner, ipi_affinity::IpiAffinity};
 use io::mmio::Reg;
 
 // Регистры Distributor (GICD)
@@ -47,29 +48,38 @@ pub(super) const GICR_WAKER: Reg<u32> = Reg::new(0x014);
 pub(super) const GICR_TYPER: Reg<u64> = Reg::new(0x008);
 
 /// `GICR_TYPER.Last`: фрейм последний в непрерывной области.
-pub(super) const GICR_TYPER_LAST: u64 = 1 << 4;
+const GICR_TYPER_LAST: u64 = 1 << 4;
+
+/// Раскладывает `GICR_TYPER` на владельца фрейма.
+///
+/// `Affinity_Value` (биты [63:32]) держит уровни четырьмя байтами подряд,
+/// `Aff0` младшим, а в `MPIDR_EL1` между `Aff3` и `Aff2` лежат служебные биты.
+pub(super) const fn frame_owner(typer: u64) -> FrameOwner {
+    let value = (typer >> 32) as u32;
+
+    FrameOwner {
+        affinity: IpiAffinity {
+            aff0: (value & 0xFF) as u8,
+            aff1: ((value >> 8) & 0xFF) as u8,
+            aff2: ((value >> 16) & 0xFF) as u8,
+            aff3: ((value >> 24) & 0xFF) as u8,
+        },
+        last: typer & GICR_TYPER_LAST != 0,
+    }
+}
+
+// Aff3=4, Aff2=3, Aff1=2, Aff0=1.
+const _: () = assert!(frame_owner(0x0403_0201_0000_0000).affinity.aff3 == 4);
+const _: () = assert!(frame_owner(0x0403_0201_0000_0000).affinity.aff2 == 3);
+const _: () = assert!(frame_owner(0x0403_0201_0000_0000).affinity.aff1 == 2);
+const _: () = assert!(frame_owner(0x0403_0201_0000_0000).affinity.aff0 == 1);
+const _: () = assert!(!frame_owner(0x0403_0201_0000_0000).last);
+const _: () = assert!(frame_owner(GICR_TYPER_LAST).last);
 
 /// Расстояние между фреймами соседних Redistributor'ов по умолчанию: два
 /// фрейма по 64 KB. Device tree вправе объявить другое через
 /// `redistributor-stride`.
 pub const GICR_DEFAULT_STRIDE: usize = 0x2_0000;
-
-/// `GICR_TYPER.Affinity_Value`: affinity владельца фрейма четырьмя байтами
-/// подряд - `Aff3:Aff2:Aff1:Aff0`.
-pub(super) fn affinity_value(typer: u64) -> u32 {
-    (typer >> 32) as u32
-}
-
-/// Упаковывает affinity из `MPIDR_EL1` в раскладку `GICR_TYPER`.
-///
-/// В `MPIDR_EL1` между `Aff3` (биты [39:32]) и `Aff2` (биты [23:16]) лежат
-/// служебные биты, а в `Affinity_Value` байты идут подряд.
-pub(super) fn packed_affinity(mpidr: u64) -> u32 {
-    let aff3 = ((mpidr >> 32) & 0xFF) as u32;
-    let aff2_0 = (mpidr & 0x00FF_FFFF) as u32;
-
-    (aff3 << 24) | aff2_0
-}
 
 /// Смещение SGI_base относительно RD_base.
 pub(super) const GICR_SGI_BASE_OFFSET: usize = 0x10000;

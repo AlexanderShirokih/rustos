@@ -103,14 +103,14 @@ pub fn start_secondaries() {
         }
     }
 
-    handoff::close_bringup();
+    handoff::ONLINE.close();
     info!("SMP: {} of {} CPU(s) online", online_cpus(), cpu::count());
 }
 
 /// Число CPU, работающих под управлением планировщика: вторичные, дошедшие до
 /// post-MMU кода, и boot CPU.
 pub fn online_cpus() -> usize {
-    handoff::online_count() + 1
+    handoff::ONLINE.count() + 1
 }
 
 fn start_one(
@@ -127,7 +127,7 @@ fn start_one(
         .or(psci)
         .ok_or(StartError::MethodUnknown)?;
 
-    let expected = handoff::online_count() + 1;
+    let expected = handoff::ONLINE.count() + 1;
     handoff::publish_pending(index as u64, stack);
 
     // SAFETY: `entry_point` - физический адрес точки входа вторичного CPU, а
@@ -141,7 +141,7 @@ fn wait_ready(expected: usize, counter: &Counter) -> Result<(), StartError> {
     let deadline = counter.deadline_after_ms(READY_TIMEOUT_MS);
 
     while !Counter::passed(deadline) {
-        if handoff::online_count() >= expected {
+        if handoff::ONLINE.count() >= expected {
             return Ok(());
         }
         spin_loop();

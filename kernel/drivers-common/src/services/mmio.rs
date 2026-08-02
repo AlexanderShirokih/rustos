@@ -70,21 +70,23 @@ impl MmioBound {
         self.mmio_address
     }
 
-    /// `true`, если регистр типа `T` по смещению `offset` доступен: лежит
-    /// целиком внутри области и выровнен под свой размер.
-    pub fn in_bounds<T>(&self, offset: usize) -> bool {
-        if !offset.is_multiple_of(align_of::<T>()) {
-            return false;
-        }
+    /// `true`, если `len` байт от смещения `offset` лежат внутри области.
+    pub fn contains(&self, offset: usize, len: usize) -> bool {
         offset
-            .checked_add(size_of::<T>())
+            .checked_add(len)
             .is_some_and(|end| end <= self.mmio_address.size())
+    }
+
+    fn in_bounds<T>(&self, offset: usize) -> bool {
+        offset.is_multiple_of(align_of::<T>()) && self.contains(offset, size_of::<T>())
     }
 
     /// Доступ мимо области отбрасывается: `MmioBound` владеет ровно `size`
     /// байтами от базы. Проверка молчалива - `MmioBound` несёт запись в
-    /// консоль, и диагностика отсюда замкнула бы её на себя; драйвер
-    /// проверяет доступность сам через [`MmioBound::in_bounds`].
+    /// консоль, и диагностика отсюда замкнула бы её на себя. Смещение, снятое
+    /// с геометрии device tree, драйвер проверяет сам через
+    /// [`MmioBound::contains`]; смещение, ограниченное номером регистра,
+    /// лежит внутри области по построению.
     pub fn write<T: VolatileInt>(&self, offset: usize, val: T) {
         if !self.in_bounds::<T>(offset) {
             return;
@@ -158,6 +160,29 @@ mod tests {
             PageAlignedVirtualAddress::from_usize(0x4000).expect("aligned"),
             Box::new(|_, _| {}),
         )
+    }
+
+    #[test]
+    fn range_up_to_the_upper_edge_is_contained() {
+        assert!(bound(64).contains(0, 64));
+        assert!(bound(64).contains(32, 32));
+    }
+
+    #[test]
+    fn range_crossing_the_upper_edge_is_not_contained() {
+        assert!(!bound(64).contains(32, 33));
+        assert!(!bound(64).contains(64, 1));
+    }
+
+    #[test]
+    fn range_overflowing_usize_is_not_contained() {
+        assert!(!bound(64).contains(usize::MAX, 1));
+    }
+
+    #[test]
+    fn empty_range_inside_the_region_is_contained() {
+        assert!(bound(64).contains(64, 0));
+        assert!(!bound(64).contains(65, 0));
     }
 
     #[test]

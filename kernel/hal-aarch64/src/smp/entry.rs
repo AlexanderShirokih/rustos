@@ -4,11 +4,15 @@
 //! включения MMU действуют те же ограничения, что и в `boot_early`: адреса
 //! физические, `klog` недоступен, спинлоки неприменимы.
 
-use core::arch::naked_asm;
+use core::{
+    arch::naked_asm,
+    fmt::{self, Display, Formatter},
+};
 
+use drivers_common::services::interrupts::CpuInterfaceError;
 use klog::{info, warn};
 use memory::physical_address::PhysicalAddress;
-use scheduler::ArchCpu;
+use scheduler::{ArchCpu, CpuBootstrapError, CpuId};
 
 use super::handoff::{self, HANDOFF, SECONDARY_STACK_SIZE, SECONDARY_STACKS};
 use crate::{
@@ -165,52 +169,87 @@ extern "C" fn secondary_main(cpu_id: u64) -> ! {
 
     ExceptionVectors::instance().install();
 
+    // Путь до планировщика возвращается только отказом. По любому из них CPU
+    // уходит в idle, не доложив о готовности, и boot CPU прекращает подъём.
+    let failure = bring_up(cpu_id);
+    warn!("SMP: {failure}, parking the CPU");
+
+    Aarch64Cpu::idle()
+}
+
+fn bring_up(cpu_id: u64) -> BringUpFailure {
     // Идентификатор берётся из таблицы топологии по собственному affinity и
     // сверяется со слотом: расхождение значит, что слот уже переиспользован под
-    // другой CPU. Ниже по всем отказам CPU уходит в idle, не доложив о
-    // готовности, и boot CPU прекращает подъём.
+    // другой CPU.
     let Some(id) = cpu::confirm_current_id(cpu_id) else {
-        warn!("CPU with handoff id {cpu_id} does not match the topology, parking it");
-        Aarch64Cpu::idle();
+        return BringUpFailure::UnclaimedHandoff(cpu_id);
     };
 
-    // CPU, не получивший ни блока, ни своего интерфейса контроллера
-    // прерываний, в работу не идёт и о готовности не докладывает: boot CPU
-    // увидит отказ и остановит подъём.
     if cpu::install_local(id).is_none() {
-        warn!("CPU {} has no per-CPU block for this id", id.raw());
-        Aarch64Cpu::idle();
+        return BringUpFailure::NoCpuBlock(id);
     }
 
     if let Err(error) = super::per_cpu_init() {
-        warn!("CPU {}: {error}", id.raw());
-        Aarch64Cpu::idle();
+        return BringUpFailure::NoCpuInterface { id, error };
     }
 
     // Per-CPU состояние планировщика поднимается до отметки о готовности:
     // отказ здесь ещё возвращается, а после отметки boot CPU уже считает CPU
     // рабочим.
     if let Err(error) = kernelspace::sched_bridge::bootstrap_this_cpu() {
-        warn!("CPU {}: {error}", id.raw());
-        Aarch64Cpu::idle();
+        return BringUpFailure::NoSchedulerState { id, error };
     }
 
     info!("CPU {} is online", id.raw());
 
     // Отметка перед входом в планировщик: вход не возвращается, а слот
     // параметров нужно освободить под следующий CPU.
-    if !handoff::mark_online() {
-        warn!(
-            "CPU {} reported readiness after bring-up was closed",
-            id.raw()
-        );
-        Aarch64Cpu::idle();
+    if !handoff::ONLINE.mark_online() {
+        return BringUpFailure::BringUpClosed(id);
     }
 
     // Вход не возвращается: CPU уходит в свой idle-поток и дальше живёт под
     // управлением планировщика, размаскировав IRQ.
-    let error = kernelspace::sched_bridge::enter_scheduler();
-    warn!("CPU {} did not enter the scheduler: {error}", id.raw());
+    BringUpFailure::NoScheduler {
+        id,
+        error: kernelspace::sched_bridge::enter_scheduler(),
+    }
+}
 
-    Aarch64Cpu::idle()
+enum BringUpFailure {
+    UnclaimedHandoff(u64),
+    NoCpuBlock(CpuId),
+    NoCpuInterface { id: CpuId, error: CpuInterfaceError },
+    NoSchedulerState { id: CpuId, error: CpuBootstrapError },
+    BringUpClosed(CpuId),
+    NoScheduler { id: CpuId, error: CpuBootstrapError },
+}
+
+impl Display for BringUpFailure {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnclaimedHandoff(claim) => {
+                write!(f, "handoff id {claim} does not match the topology")
+            }
+            Self::NoCpuBlock(id) => write!(f, "CPU {} has no per-CPU block", id.raw()),
+            Self::NoCpuInterface { id, error } => write!(
+                f,
+                "CPU {} got no interrupt controller interface: {error}",
+                id.raw()
+            ),
+            Self::NoSchedulerState { id, error } => write!(
+                f,
+                "CPU {} got no per-CPU scheduler state: {error}",
+                id.raw()
+            ),
+            Self::BringUpClosed(id) => write!(
+                f,
+                "CPU {} reported readiness after bring-up was closed",
+                id.raw()
+            ),
+            Self::NoScheduler { id, error } => {
+                write!(f, "CPU {} did not enter the scheduler: {error}", id.raw())
+            }
+        }
+    }
 }

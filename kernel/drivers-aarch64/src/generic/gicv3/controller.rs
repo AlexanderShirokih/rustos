@@ -1,7 +1,7 @@
 //! Аппаратный контроллер GICv3: Distributor, Redistributor и CPU Interface.
 
 use alloc::{collections::BTreeMap, sync::Arc};
-use core::{cell::Cell, hint::spin_loop};
+use core::hint::spin_loop;
 
 use drivers_common::services::{
     interrupts::{
@@ -10,7 +10,7 @@ use drivers_common::services::{
     },
     mmio::MmioBound,
 };
-use drivers_common_aarch64::ipi_affinity::IpiAffinity;
+use drivers_common_aarch64::{affinity_frames::AffinityFrames, ipi_affinity::IpiAffinity};
 use io::mmio::Reg;
 use klog::{debug, warn};
 
@@ -18,9 +18,9 @@ use super::regs::{
     GICD_CTLR, GICD_CTLR_ARE_NS, GICD_CTLR_ENABLE_GRP1NS, GICD_CTLR_RWP, GICD_ICENABLER,
     GICD_ICFGR, GICD_ICPENDR, GICD_IGROUPR, GICD_IGRPMODR, GICD_IPRIORITYR, GICD_IROUTER,
     GICD_ISENABLER, GICD_TYPER, GICR_FRAME_SPAN, GICR_ICENABLER0, GICR_ICFGR0, GICR_ICFGR1,
-    GICR_IGROUPR0, GICR_IGRPMODR0, GICR_IPRIORITYR, GICR_ISENABLER0, GICR_TYPER, GICR_TYPER_LAST,
-    GICR_WAKER, GICR_WAKER_CHILDREN_ASLEEP, GICR_WAKER_PROCESSOR_SLEEP, ITLinesNumber, IrqType,
-    PRIORITY_MASK_ALL, affinity_value, bit_offset, packed_affinity,
+    GICR_IGROUPR0, GICR_IGRPMODR0, GICR_IPRIORITYR, GICR_ISENABLER0, GICR_TYPER, GICR_WAKER,
+    GICR_WAKER_CHILDREN_ASLEEP, GICR_WAKER_PROCESSOR_SLEEP, ITLinesNumber, IrqType,
+    PRIORITY_MASK_ALL, bit_offset, frame_owner,
 };
 use crate::{read_sysreg, write_sysreg};
 
@@ -29,12 +29,7 @@ pub(super) struct Gicv3Controller {
     pub(super) distributor: MmioBound,
     /// Отображённая область Redistributor'ов: фреймы всех CPU подряд.
     pub(super) redistributor: MmioBound,
-    /// Расстояние между фреймами соседних CPU, объявленное device tree.
-    pub(super) redistributor_stride: usize,
-    /// Последний найденный фрейм. Обращения к SGI и PPI идут во фрейм текущего
-    /// CPU, и подряд идущие приходят с одного: попадание снимает перебор
-    /// фреймов с чтением `GICR_TYPER` на каждом.
-    frame_cache: Cell<Option<RedistributorFrame>>,
+    frames: AffinityFrames,
     pub(super) interrupt_lines: ITLinesNumber,
     pub(super) handlers: BTreeMap<IrqNumber, BoundIrq>,
 }
@@ -47,12 +42,6 @@ pub(super) struct BoundIrq {
     pub(super) handler: Arc<dyn IrqHandler>,
     pub(super) priority: IrqPriority,
     pub(super) trigger: Option<TriggerType>,
-}
-
-#[derive(Clone, Copy)]
-struct RedistributorFrame {
-    affinity: u32,
-    offset: usize,
 }
 
 const SGI_TARGET_LIST_BITS: u64 = 16;
@@ -76,8 +65,9 @@ const _: () = assert!(
     ) == 0x0003_0002_0501_0010
 );
 
-// SAFETY: Gicv3Controller содержит только MmioBound (volatile-доступ) и BTreeMap.
-// Синхронизация обеспечивается Mutex на уровне сервиса.
+// SAFETY: Gicv3Controller содержит только MmioBound (volatile-доступ),
+// снятую с железа таблицу фреймов и BTreeMap. Синхронизация обеспечивается
+// Mutex на уровне сервиса.
 unsafe impl Send for Gicv3Controller {}
 
 impl Gicv3Controller {
@@ -87,12 +77,12 @@ impl Gicv3Controller {
         redistributor_stride: usize,
     ) -> Self {
         let interrupt_lines = Self::read_interrupt_lines(&distributor);
+        let frames = Self::scan_redistributor_frames(&redistributor, redistributor_stride);
 
         Self {
             distributor,
             redistributor,
-            redistributor_stride,
-            frame_cache: Cell::new(None),
+            frames,
             interrupt_lines,
             handlers: BTreeMap::new(),
         }
@@ -184,51 +174,16 @@ impl Gicv3Controller {
     fn current_redistributor_frame(&self) -> Option<usize> {
         // SAFETY: MPIDR_EL1 доступен на EL1 и только читается.
         let mpidr = unsafe { read_sysreg!(mpidr_el1) };
-        let affinity = packed_affinity(mpidr);
 
-        if let Some(frame) = self.cached_frame(affinity) {
-            return Some(frame);
-        }
-
-        let frame = self.scan_redistributor_frame(affinity)?;
-        self.remember_frame(affinity, frame);
-        Some(frame)
+        self.frames.offset_of(IpiAffinity::from_mpidr(mpidr))
     }
 
-    fn cached_frame(&self, affinity: u32) -> Option<usize> {
-        self.frame_cache
-            .get()
-            .filter(|frame| frame.affinity == affinity)
-            .map(|frame| frame.offset)
-    }
-
-    fn remember_frame(&self, affinity: u32, offset: usize) {
-        self.frame_cache
-            .set(Some(RedistributorFrame { affinity, offset }));
-    }
-
-    // Фреймы перебираются подряд до отмеченного `Last`: порядок фреймов задаёт
-    // железо, и совпадать с нумерацией ядра он не обязан. Фрейм принимается,
-    // только если целиком помещается в область: за её границей чтение вернуло
-    // бы ноль, а нулевое affinity принадлежит вполне реальному CPU.
-    fn scan_redistributor_frame(&self, affinity: u32) -> Option<usize> {
-        let region = self.redistributor.base().size();
-
-        let mut frame = 0usize;
-        while frame + GICR_FRAME_SPAN <= region {
-            let typer: u64 = self.redistributor.read_reg(GICR_TYPER.with_offset(frame));
-
-            if affinity_value(typer) == affinity {
-                return Some(frame);
-            }
-            if typer & GICR_TYPER_LAST != 0 {
-                return None;
-            }
-
-            frame = frame.checked_add(self.redistributor_stride)?;
-        }
-
-        None
+    fn scan_redistributor_frames(redistributor: &MmioBound, stride: usize) -> AffinityFrames {
+        AffinityFrames::scan(stride, |offset| {
+            redistributor
+                .contains(offset, GICR_FRAME_SPAN)
+                .then(|| frame_owner(redistributor.read_reg(GICR_TYPER.with_offset(offset))))
+        })
     }
 
     pub(super) fn enable_global() {

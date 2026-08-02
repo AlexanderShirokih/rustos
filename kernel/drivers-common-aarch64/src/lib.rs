@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+pub mod affinity_frames;
 mod commons;
 pub mod device_windows;
 pub mod fdt_adapter;
