@@ -6,6 +6,13 @@ const fn validate_priority_levels(priority_levels: usize) {
     assert!(priority_levels > 0 && priority_levels <= 32);
 }
 
+/// Поток в очереди вместе с уровнем, на котором он стоит.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueuedThread {
+    pub thread: ThreadId,
+    pub priority: Priority,
+}
+
 /// Очередь runnable-потоков: per-уровневые FIFO + bitmap для O(1) выбора старшего приоритета.
 pub struct ReadyQueue {
     priority_levels: usize,
@@ -60,6 +67,24 @@ impl ReadyQueue {
     /// новый поток.
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Старший по приоритету поток, принятый `accept`. Порядок обхода тот же,
+    /// что у [`Self::pop_highest`], а очередь остаётся нетронутой.
+    pub fn highest_matching(&self, accept: impl Fn(ThreadId) -> bool) -> Option<QueuedThread> {
+        let mut levels = self.bitmap;
+        while levels != 0 {
+            let level = levels.leading_zeros() as usize;
+            levels &= !Self::mask_for(level);
+            let queue = self.queues.get(level)?;
+            if let Some(thread) = queue.iter().copied().find(|id| accept(*id)) {
+                return Some(QueuedThread {
+                    thread,
+                    priority: Priority::new(level as u8),
+                });
+            }
+        }
+        None
     }
 
     pub fn peek_highest_priority(&self) -> Option<Priority> {
@@ -141,6 +166,25 @@ mod tests {
         assert!(queue.is_empty());
         assert!(queue.pop_highest().is_none());
         assert_eq!(queue.len(), 0, "пустая очередь не уходит в минус");
+    }
+
+    #[test]
+    fn highest_matching_walks_levels_in_selection_order() {
+        let mut queue = ReadyQueue::new(4);
+        let rejected = thread(1);
+        let accepted = thread(2);
+        queue.push(rejected, Priority::new(0));
+        queue.push(accepted, Priority::new(2));
+
+        assert_eq!(
+            queue.highest_matching(|id| id != rejected),
+            Some(QueuedThread {
+                thread: accepted,
+                priority: Priority::new(2)
+            })
+        );
+        assert_eq!(queue.highest_matching(|_| false), None);
+        assert_eq!(queue.len(), 2, "поиск оставляет очередь нетронутой");
     }
 
     #[test]

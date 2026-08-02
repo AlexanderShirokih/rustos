@@ -1743,10 +1743,7 @@ fn reaped_ready_id_can_be_reused_before_first_cpu_entry() {
     let timer = MockTimer::new();
     let scheduler = make_scheduler_with_factory(timer.clone(), factory);
 
-    let second = CpuId::new(1).expect("cpu id 1");
-    set_current_cpu(second);
-    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
-    set_current_cpu(CpuId::ZERO);
+    let second = bootstrap_cpu(&scheduler.handle(), 1);
 
     let first = scheduler
         .spawn(SpawnConfig::new("first"), || {})
@@ -1855,10 +1852,7 @@ fn exiting_thread_and_its_address_space_survive_reap_from_another_cpu() {
     let timer = MockTimer::new();
     let scheduler = make_scheduler_with_factory(timer.clone(), factory);
 
-    let second = CpuId::new(1).expect("cpu id 1");
-    set_current_cpu(second);
-    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
-    set_current_cpu(CpuId::ZERO);
+    let second = bootstrap_cpu(&scheduler.handle(), 1);
 
     let victim = scheduler
         .spawn(
@@ -1915,10 +1909,7 @@ fn a_cpu_running_a_thread_is_not_picked_over_an_idle_one() {
         .ok()
         .expect("bootstrap must succeed in tests");
 
-    let second = CpuId::new(1).expect("cpu id 1");
-    set_current_cpu(second);
-    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
-    set_current_cpu(CpuId::ZERO);
+    let second = bootstrap_cpu(&scheduler.handle(), 1);
 
     // Первый CPU занимает поток, и очереди готовых пусты у обоих: по одной
     // длине очереди занятый CPU неотличим от простаивающего.
@@ -1946,10 +1937,7 @@ fn terminating_a_remote_running_thread_reschedules_its_cpu() {
     let timer = MockTimer::new();
     let scheduler = make_scheduler_with_factory(timer.clone(), factory);
 
-    let second = CpuId::new(1).expect("cpu id 1");
-    set_current_cpu(second);
-    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
-    set_current_cpu(CpuId::ZERO);
+    let second = bootstrap_cpu(&scheduler.handle(), 1);
 
     let first = scheduler
         .spawn(SpawnConfig::new("first"), || {})
@@ -2012,10 +2000,7 @@ fn deferred_cancel_quarantines_remote_process_cleanup() {
     let timer = MockTimer::new();
     let scheduler = make_scheduler_with_factory(timer.clone(), factory);
 
-    let second = CpuId::new(1).expect("cpu id 1");
-    set_current_cpu(second);
-    CpuEntry::bootstrap(&scheduler.handle()).expect("bootstrap of the second cpu");
-    set_current_cpu(CpuId::ZERO);
+    let second = bootstrap_cpu(&scheduler.handle(), 1);
 
     let first = scheduler
         .spawn(SpawnConfig::new("first"), || {})
@@ -2138,4 +2123,415 @@ fn thread_exit_after_external_termination_does_not_finalize_twice() {
     assert_eq!(victim_object.exit_code(), 9);
     assert!(running.thread_object_for(victim).is_none());
     assert!(running.process_object_for(pid).is_none());
+}
+
+fn bootstrap_cpu(handle: &SchedulerHandle<MockContext, MockTimerSource>, raw: u16) -> CpuId {
+    let id = CpuId::new(raw).expect("cpu id within MAX_CPUS");
+    set_current_cpu(id);
+    CpuEntry::bootstrap(handle).expect("bootstrap of a secondary cpu");
+    set_current_cpu(CpuId::ZERO);
+    id
+}
+
+#[test]
+fn an_idle_cpu_steals_a_queued_thread_from_a_backlogged_one() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    // Потоки заводятся до подъёма второго CPU: оба достаются первому.
+    let busy = scheduler
+        .spawn(SpawnConfig::new("busy"), || {})
+        .expect("spawn busy");
+    let queued = scheduler
+        .spawn(SpawnConfig::new("queued"), || {})
+        .expect("spawn queued");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(busy));
+
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+
+    set_current_cpu(second);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(
+        running.current(),
+        Some(queued),
+        "an idle cpu must take a waiting thread from a backlogged one",
+    );
+
+    set_current_cpu(CpuId::ZERO);
+    assert_eq!(
+        running.current(),
+        Some(busy),
+        "the running thread of the donor stays where it is",
+    );
+    assert_eq!(
+        running.thread_cpu_affinity(queued),
+        Some(second),
+        "a stolen thread must be re-homed to the cpu that took it",
+    );
+}
+
+#[test]
+fn a_stolen_thread_wakes_on_the_cpu_that_took_it() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    let busy = scheduler
+        .spawn(SpawnConfig::new("busy"), || {})
+        .expect("spawn busy");
+    let queued = scheduler
+        .spawn(SpawnConfig::new("queued"), || {})
+        .expect("spawn queued");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(busy));
+
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+
+    set_current_cpu(second);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(running.current(), Some(queued));
+
+    running.sleep_ns(100);
+    assert_ne!(running.current(), Some(queued));
+
+    set_current_cpu(CpuId::ZERO);
+    timer.advance_to(100);
+    let _ = take_reschedules();
+    with_simulated_irq(|| handle.on_timer_tick(100));
+
+    assert_eq!(
+        take_reschedules(),
+        vec![second],
+        "a woken thread must return to the queue of the cpu that stole it",
+    );
+}
+
+#[test]
+fn a_cpu_running_its_only_thread_keeps_it() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    let busy = scheduler
+        .spawn(SpawnConfig::new("busy"), || {})
+        .expect("spawn busy");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(busy));
+
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+
+    set_current_cpu(second);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_ne!(
+        running.current(),
+        Some(busy),
+        "a thread executing on another cpu must not be taken",
+    );
+
+    set_current_cpu(CpuId::ZERO);
+    assert_eq!(running.current(), Some(busy));
+    assert_eq!(
+        running.thread_cpu_affinity(busy),
+        Some(CpuId::ZERO),
+        "the only thread of a cpu stays home",
+    );
+}
+
+#[test]
+fn a_backlog_appearing_after_a_cpu_went_idle_is_migrated() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    let first = scheduler
+        .spawn(SpawnConfig::new("first"), || {})
+        .expect("spawn first");
+    let second_thread = scheduler
+        .spawn(SpawnConfig::new("second"), || {})
+        .expect("spawn second");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(first));
+
+    // Оба потока уходят в сон: первый CPU остаётся без работы, и перекос
+    // возникает позже, на их общем пробуждении.
+    running.sleep_ns(100);
+    running.sleep_ns(100);
+
+    let handle = running.handle();
+    let second_cpu = bootstrap_cpu(&handle, 1);
+
+    timer.advance_to(100);
+    with_simulated_irq(|| handle.on_timer_tick(100));
+    assert_eq!(running.current(), Some(first));
+
+    set_current_cpu(second_cpu);
+    with_simulated_irq(|| handle.on_timer_tick(100));
+    assert_eq!(
+        running.current(),
+        Some(second_thread),
+        "a backlog built by wakeups must be migrated as well",
+    );
+    set_current_cpu(CpuId::ZERO);
+}
+
+#[test]
+fn a_thread_whose_context_is_still_being_saved_is_not_stolen() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    let leaving = scheduler
+        .spawn(SpawnConfig::new("leaving"), || {})
+        .expect("spawn leaving");
+    let taking_over = scheduler
+        .spawn(SpawnConfig::new("taking-over"), || {})
+        .expect("spawn taking-over");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(leaving));
+
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+
+    // Окно переключения: вытесненный поток уже стоит в очереди готовых, а
+    // указатель на его контекст живёт вне scheduler-лока.
+    running.yield_now_interleaved(|| {
+        set_current_cpu(second);
+        with_simulated_irq(|| handle.on_timer_tick(1));
+        assert_ne!(
+            running.current(),
+            Some(leaving),
+            "a thread whose context is still being saved must not be stolen",
+        );
+        set_current_cpu(CpuId::ZERO);
+    });
+
+    assert_eq!(running.current(), Some(taking_over));
+    assert_eq!(
+        running.thread_cpu_affinity(leaving),
+        Some(CpuId::ZERO),
+        "a thread held by a cpu keeps its home",
+    );
+}
+
+#[test]
+fn a_thread_queued_for_an_idle_cpu_is_left_to_it() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    let busy = scheduler
+        .spawn(SpawnConfig::new("busy"), || {})
+        .expect("spawn busy");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(busy));
+
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+    let third = bootstrap_cpu(&handle, 2);
+
+    // Новый поток встаёт к наименее загруженному CPU и ждёт своего IPI.
+    let pending = SchedulerServiceExt::spawn(&handle, SpawnConfig::new("pending"), || {})
+        .expect("spawn pending");
+    assert_eq!(take_reschedules(), vec![second]);
+
+    set_current_cpu(third);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_ne!(
+        running.current(),
+        Some(pending),
+        "a thread just assigned to an idle cpu must not be taken away from it",
+    );
+
+    set_current_cpu(second);
+    handle.on_reschedule();
+    assert_eq!(
+        running.current(),
+        Some(pending),
+        "the assigned cpu must get its thread",
+    );
+    set_current_cpu(CpuId::ZERO);
+}
+
+#[test]
+fn a_cpu_left_without_work_steals_without_waiting_for_a_tick() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    let busy = scheduler
+        .spawn(SpawnConfig::new("busy"), || {})
+        .expect("spawn busy");
+    let first_queued = scheduler
+        .spawn(SpawnConfig::new("first-queued"), || {})
+        .expect("spawn first-queued");
+    let second_queued = scheduler
+        .spawn(SpawnConfig::new("second-queued"), || {})
+        .expect("spawn second-queued");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(busy));
+
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+
+    set_current_cpu(second);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(running.current(), Some(first_queued));
+
+    // Поток второго CPU уходит спать: работу он ищет тут же, на том же уходе
+    // в idle.
+    running.sleep_ns(100);
+    assert_eq!(
+        running.current(),
+        Some(second_queued),
+        "a cpu losing its thread must pick up work from a backlogged one at once",
+    );
+    set_current_cpu(CpuId::ZERO);
+}
+
+#[test]
+fn a_donor_without_stealable_work_does_not_end_the_search() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    let first = scheduler
+        .spawn(SpawnConfig::new("first"), || {})
+        .expect("spawn first");
+    let queued_here = scheduler
+        .spawn(SpawnConfig::new("queued-here"), || {})
+        .expect("spawn queued-here");
+    let taken_by_second = scheduler
+        .spawn(SpawnConfig::new("taken-by-second"), || {})
+        .expect("spawn taken-by-second");
+    let taken_by_third = scheduler
+        .spawn(SpawnConfig::new("taken-by-third"), || {})
+        .expect("spawn taken-by-third");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(first));
+
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+    let third = bootstrap_cpu(&handle, 2);
+
+    set_current_cpu(second);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(running.current(), Some(queued_here));
+    set_current_cpu(third);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(running.current(), Some(taken_by_second));
+    set_current_cpu(CpuId::ZERO);
+
+    // Догружаем второй и третий CPU до загрузки первого: у всех троих по
+    // исполняемому потоку и одному в очереди.
+    let queued_on_second =
+        SchedulerServiceExt::spawn(&handle, SpawnConfig::new("on-second"), || {})
+            .expect("spawn on-second");
+    let queued_on_third = SchedulerServiceExt::spawn(&handle, SpawnConfig::new("on-third"), || {})
+        .expect("spawn on-third");
+    assert_eq!(running.thread_cpu_affinity(queued_on_second), Some(second));
+    assert_eq!(running.thread_cpu_affinity(queued_on_third), Some(third));
+
+    // Вор поднимается последним: пустой CPU притягивал бы постановку новых
+    // потоков к себе.
+    let fourth = bootstrap_cpu(&handle, 3);
+
+    set_current_cpu(third);
+    running.yield_now_interleaved(|| {
+        // Очередь третьего CPU состоит из одного потока, чей контекст он
+        // сохраняет прямо сейчас: переселять оттуда нечего.
+        set_current_cpu(fourth);
+        with_simulated_irq(|| handle.on_timer_tick(1));
+        let taken = running.current();
+        assert!(
+            taken == Some(taken_by_third) || taken == Some(queued_on_second),
+            "an unusable donor must not stop the search: cpu took {taken:?}",
+        );
+        set_current_cpu(third);
+    });
+    set_current_cpu(CpuId::ZERO);
+}
+
+#[test]
+fn a_terminated_thread_stops_counting_towards_the_load_of_its_cpu() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+
+    let busy = scheduler
+        .spawn(SpawnConfig::new("busy"), || {})
+        .expect("spawn busy");
+    let taken = scheduler
+        .spawn(SpawnConfig::new("taken"), || {})
+        .expect("spawn taken");
+    let victim = scheduler
+        .spawn(SpawnConfig::new("victim"), || {})
+        .expect("spawn victim");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(busy));
+
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+
+    set_current_cpu(second);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(running.current(), Some(taken));
+    set_current_cpu(CpuId::ZERO);
+
+    // Оба CPU исполняют по потоку, и лишний в очереди - только у первого.
+    let victim_object = running.thread_object_for(victim).expect("victim target");
+    handle
+        .terminate_thread(&victim_object, 9)
+        .expect("terminate the queued thread");
+
+    // Постановка идёт к наименее загруженному CPU, а при равной загрузке
+    // остаётся на текущем: терминированный поток загрузку больше не создаёт.
+    let next =
+        SchedulerServiceExt::spawn(&handle, SpawnConfig::new("next"), || {}).expect("spawn next");
+    assert_eq!(
+        running.thread_cpu_affinity(next),
+        Some(CpuId::ZERO),
+        "a terminated thread must not keep inflating the load of its cpu",
+    );
+    assert_ne!(running.thread_cpu_affinity(next), Some(second));
 }

@@ -22,6 +22,7 @@ use super::{
     },
     cpu::Cpu,
     process::{Process, ProcessName, ProcessTable},
+    ready_queue::QueuedThread,
     thread::{IpcBufferSlot, Thread, ThreadState},
     thread_table::ThreadTable,
     wait_queue::{SleepEntry, SleepQueue},
@@ -33,6 +34,9 @@ use crate::{
 
 const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
 const IPC_BUFFER_PAGES: NonZeroUsize = NonZeroUsize::MIN;
+// Загрузка, начиная с которой CPU отдаёт поток: свою единственную работу он
+// исполняет сам.
+const MIN_DONOR_LOAD: usize = 2;
 /// Длина кванта по умолчанию (нс). Экспонируется для тестов.
 pub const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
 
@@ -43,6 +47,11 @@ struct ChildHandleSlot {
     process_object: Arc<ProcessObject>,
     table: Arc<MutexCell<HandleTable>>,
     reservation: HandleReservation,
+}
+
+struct StealCandidate {
+    donor: CpuId,
+    queued: QueuedThread,
 }
 
 /// Снимок IPC-контекста текущего потока, собранный за один захват scheduler-лока
@@ -423,11 +432,20 @@ where
     }
 
     pub fn yield_now(&self) {
+        self.yield_now_interleaved(|| {});
+    }
+
+    /// Тестовый разрез [`Self::yield_now`]: `between` вызывается в окне, где
+    /// вытесненный поток уже стоит в очереди готовых, а указатель на его
+    /// контекст живёт вне scheduler-лока.
+    #[doc(hidden)]
+    pub fn yield_now_interleaved(&self, between: impl FnOnce()) {
         with_preemption_disabled::<A::Cpu, _>(|| {
             let action = self.inner.with_lock(|inner| {
                 let now_ns = inner.timer.now_ns();
                 inner.yield_now(now_ns)
             });
+            between();
             perform_schedule_action(&self.inner, action);
         });
     }
@@ -561,6 +579,13 @@ where
     pub fn thread_process_id(&self, id: ThreadId) -> Option<ProcessId> {
         self.inner
             .with_lock(|inner| inner.threads.get(id).map(Thread::process))
+    }
+
+    /// CPU, в очередь которого поток `id` возвращают пробуждения; `None` если
+    /// поток не найден.
+    pub fn thread_cpu_affinity(&self, id: ThreadId) -> Option<CpuId> {
+        self.inner
+            .with_lock(|inner| inner.threads.get(id).map(Thread::cpu_affinity))
     }
 
     /// `ProcessId` процесса по lifecycle-capability target; `None` если процесс не найден.
@@ -708,13 +733,77 @@ where
             .map_or(current_id, |cpu| cpu.id())
     }
 
-    /// Число потоков, за которые CPU отвечает: очередь готовых и исполняемый
-    /// поток. Одной очереди мало - CPU, занятый потоком, опустошает её и по ней
-    /// неотличим от простаивающего.
+    // Число потоков, за которые CPU отвечает: очередь готовых и исполняемый
+    // поток. Одной очереди мало - CPU, занятый потоком, опустошает её и по ней
+    // неотличим от простаивающего. Терминация снимает поток с очереди: в длине
+    // стоят живые записи.
     fn cpu_load(cpu: &Cpu) -> usize {
         let running = usize::from(cpu.current() != cpu.idle());
 
         cpu.ready_queue().len() + running
+    }
+
+    // Вместе с потоком переезжает его привязка - CPU, в очередь которого поток
+    // возвращают все пути пробуждения.
+    fn steal_into_current(&mut self) -> bool {
+        let Some(own_id) = self.current_cpu().map(Cpu::id) else {
+            return false;
+        };
+        let Some(candidate) = self.find_steal_candidate(own_id) else {
+            return false;
+        };
+        let QueuedThread { thread, priority } = candidate.queued;
+        let Some(donor) = self.cpu_by_id_mut(candidate.donor) else {
+            return false;
+        };
+        if !donor.ready_queue_mut().remove(thread, priority) {
+            return false;
+        }
+
+        if let Some(migrated) = self.threads.get_mut(thread) {
+            migrated.set_cpu_affinity(own_id);
+        }
+        self.enqueue_ready(thread, priority, own_id);
+        true
+    }
+
+    fn find_steal_candidate(&self, own_id: CpuId) -> Option<StealCandidate> {
+        let mut best: Option<StealCandidate> = None;
+        let mut best_load = MIN_DONOR_LOAD - 1;
+
+        for cpu in self.cpus.iter().flatten() {
+            let load = Self::cpu_load(cpu);
+            if cpu.id() == own_id || load <= best_load {
+                continue;
+            }
+            // Очередь самого загруженного CPU состоит из записей, которые не
+            // переселяются, пока их потоки заняты. Поиск идёт дальше, к
+            // следующему по загрузке.
+            let Some(queued) = cpu
+                .ready_queue()
+                .highest_matching(|id| self.is_stealable(id))
+            else {
+                continue;
+            };
+            best_load = load;
+            best = Some(StealCandidate {
+                donor: cpu.id(),
+                queued,
+            });
+        }
+
+        best
+    }
+
+    // Занятый поток остаётся своему CPU: `current` исполняется на своём стеке,
+    // а контекст потока, чьё переключение идёт прямо сейчас, записывается вне
+    // scheduler-лока.
+    fn is_stealable(&self, id: ThreadId) -> bool {
+        !self.is_thread_held(id)
+            && self
+                .threads
+                .get(id)
+                .is_some_and(|thread| !matches!(thread.state(), ThreadState::Terminated))
     }
 
     fn enqueue_ready(&mut self, id: ThreadId, priority: Priority, target: CpuId) {
@@ -988,19 +1077,20 @@ where
             return ScheduleAction::None;
         };
 
+        // Перекос возникает и после того, как CPU остановился, а перевыбор
+        // потока - единственная точка, где работа забирается у соседа.
+        if current_id == idle_id {
+            return self.preempt_current(now_ns);
+        }
+
         let should_preempt = {
             let Some(current) = self.threads.get_mut(current_id) else {
                 self.schedule_next_deadline(now_ns);
                 return ScheduleAction::None;
             };
-
-            if current_id == idle_id {
-                highest_ready.is_some()
-            } else {
-                let remaining = current.time_slice_left().saturating_sub(1);
-                current.set_time_slice_left(remaining);
-                remaining == 0 || highest_ready.is_some_and(|prio| prio < current.priority())
-            }
+            let remaining = current.time_slice_left().saturating_sub(1);
+            current.set_time_slice_left(remaining);
+            remaining == 0 || highest_ready.is_some_and(|prio| prio < current.priority())
         };
 
         if should_preempt {
@@ -1939,8 +2029,9 @@ where
         self.switch_to_next(now_ns)
     }
 
-    // Извлекает первый живой runnable текущего CPU. Stale id остаются в
-    // очереди после внешней терминации до следующего выбора и пропускаются.
+    // Извлекает первый живой runnable текущего CPU: запись, пережившая
+    // терминацию своего потока, пропускается. Забранный у соседа поток жив, и
+    // следующий проход цикла его возвращает.
     fn take_next_runnable(&mut self, idle_id: ThreadId) -> ThreadId {
         loop {
             let popped = self
@@ -1957,7 +2048,11 @@ where
                         return id;
                     }
                 }
-                None => return idle_id,
+                None => {
+                    if !self.steal_into_current() {
+                        return idle_id;
+                    }
+                }
             }
         }
     }

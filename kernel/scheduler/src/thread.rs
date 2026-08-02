@@ -93,8 +93,13 @@ impl<A: ArchContext> Thread<A> {
         self.process
     }
 
+    /// CPU, в очередь которого поток возвращают все пути пробуждения.
     pub fn cpu_affinity(&self) -> CpuId {
         self.cpu_affinity
+    }
+
+    pub fn set_cpu_affinity(&mut self, cpu_affinity: CpuId) {
+        self.cpu_affinity = cpu_affinity;
     }
 
     pub fn priority(&self) -> Priority {
