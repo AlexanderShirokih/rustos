@@ -20,7 +20,7 @@ pub use memory::{
 pub use port::{Port, Reply, ServicePort};
 pub use process::Process;
 pub use signal::Signal;
-pub use spawn::{JoinHandle, spawn};
+pub use spawn::{JoinHandle, spawn, spawn_owned};
 pub use thread::{Priority, Thread, ThreadEntry};
 
 pub(super) fn wait_signals(handle: Handle, mask: u32, timeout: Timeout) -> Result<u32> {

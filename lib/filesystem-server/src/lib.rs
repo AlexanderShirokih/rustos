@@ -117,11 +117,6 @@ fn serve_sessions(shared: &Shared) {
                 shared.state.lock().remove_session(transport.peer_badge());
                 continue;
             }
-            // Кадр доставлен, но принять его нечем: неудача касается одного кадра, порт жив.
-            Err(IpcError::ResourceExhausted) => {
-                log_line("frame dropped: resources exhausted");
-                continue;
-            }
             Err(_) => break,
         }
         frame.begin(
@@ -132,17 +127,12 @@ fn serve_sessions(shared: &Shared) {
             state: shared.state.lock(),
             frame: &mut frame,
         };
-        let dispatched = dispatch_file_system(&mut serving, &transport);
+        let delivered = dispatch_file_system(&mut serving, &transport).is_ok();
         drop(serving);
-        frame.end(dispatched.is_ok());
+        frame.end(delivered);
         // Reply-объект не переживает свой кадр: закрытие неотправленного ответа будит
         // припаркованного вызывателя.
         transport.cancel_reply();
-        // Отказ на кадре - неудача с одним клиентом: его вызыватель ответа не получит, а
-        // остальные сессии продолжают обслуживаться.
-        if dispatched.is_err() {
-            log_line("frame rejected");
-        }
     }
     log_line("service port closed");
 }
@@ -158,11 +148,6 @@ extern "C" fn serve_admin(arg: usize) -> u32 {
             Ok(()) => {}
             // Уход маршрутизатора новых сессий лишает, а выданные оставляет работать.
             Err(IpcError::SenderGone) => continue,
-            // Кадр доставлен, но принять его нечем: неудача касается одного кадра, порт жив.
-            Err(IpcError::ResourceExhausted) => {
-                log_line("admin frame dropped: resources exhausted");
-                continue;
-            }
             Err(IpcError::PeerClosed) => break,
             // Прочий отказ приёма оставляет процесс без установления сессий и уходит ненулевым
             // кодом потока, отличимым от закрытия порта.
@@ -172,12 +157,9 @@ extern "C" fn serve_admin(arg: usize) -> u32 {
             }
         }
         let mut binding = Binding::new(shared);
-        let dispatched = dispatch_file_system_admin(&mut binding, &transport);
-        binding.end(dispatched.is_ok());
+        let delivered = dispatch_file_system_admin(&mut binding, &transport).is_ok();
+        binding.end(delivered);
         transport.cancel_reply();
-        if dispatched.is_err() {
-            log_line("admin frame rejected");
-        }
     }
     log_line("admin port closed");
     0

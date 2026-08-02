@@ -19,9 +19,9 @@ pub trait DriverArgs {
 /// Стартовые аргументы клиента часов.
 #[ipc::protocol(name = "ClientArgs")]
 pub trait ClientArgs {
-    /// Клиентская часть Clock-порта и канал вывода в klog.
+    /// Клиентская часть Clock-порта и лог-сессия клиента.
     #[cast]
-    fn provide(&self, clock: ipc::wire::Cap, klog: ipc::wire::Cap);
+    fn provide(&self, clock: ipc::wire::Cap, log: ipc::wire::Cap);
 }
 
 /// Стартовые ресурсы драйвера, принятые по args-порту.
@@ -42,14 +42,14 @@ impl DriverArgsService for Option<ClockState> {
 /// Стартовые ресурсы клиента, принятые по args-порту.
 pub struct ClientState {
     pub clock: OwnedHandle,
-    pub klog: OwnedHandle,
+    pub log: OwnedHandle,
 }
 
 impl ClientArgsService for Option<ClientState> {
-    fn provide(&mut self, clock: ipc::wire::Cap, klog: ipc::wire::Cap) {
+    fn provide(&mut self, clock: ipc::wire::Cap, log: ipc::wire::Cap) {
         *self = Some(ClientState {
             clock: OwnedHandle::adopt(clock),
-            klog: OwnedHandle::adopt(klog),
+            log: OwnedHandle::adopt(log),
         });
     }
 }

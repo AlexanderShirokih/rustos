@@ -11,7 +11,7 @@ mod log;
 pub use device_window::DeviceWindow;
 
 /// Граница тега источника в [`Bootstrap::log`].
-pub const LOG_TAG_MAX: usize = 32;
+pub const LOG_TAG_MAX: usize = 64;
 
 /// Граница строки [`Bootstrap::log`]: остаток кадра за тегом.
 pub const LOG_MESSAGE_MAX: usize =

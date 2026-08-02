@@ -35,8 +35,7 @@ mod router;
 use error::{Error, Result};
 use router::{Administering, MountTable, Resolving};
 
-// Тег строк маршрутизатора в klog.
-const LOG_TAG: &str = "filesystem-namespace-router";
+const LOG_TAG: &str = "router";
 
 // Стек потока admin-порта: он ведёт монтирования и подъём процессов файловых систем.
 const ADMIN_STACK: u64 = 0x4000;
@@ -109,22 +108,14 @@ fn serve(service: &OwnedHandle) {
             Ok(()) => {}
             // Уход значка кадра не несёт: сессий у маршрутизатора нет, приём продолжается.
             Err(IpcError::SenderGone) => continue,
-            // Кадр доставлен, но принять его нечем: неудача касается одного кадра, порт жив.
-            Err(IpcError::ResourceExhausted) => {
-                log_line("frame dropped: resources exhausted");
-                continue;
-            }
             Err(_) => break,
         }
         let mut resolving = Resolving::new(&MOUNTS);
-        let dispatched = dispatch_namespace(&mut resolving, &transport);
-        resolving.end_frame(dispatched.is_ok());
+        let delivered = dispatch_namespace(&mut resolving, &transport).is_ok();
+        resolving.end_frame(delivered);
         // Reply-объект не переживает свой кадр: закрытие неотправленного ответа будит
         // припаркованного вызывателя.
         transport.cancel_reply();
-        if dispatched.is_err() {
-            log_line("frame rejected");
-        }
     }
     log_line("service port closed");
 }
@@ -146,11 +137,6 @@ extern "C" fn serve_admin(arg: usize) -> u32 {
             Ok(()) => {}
             // Уход поднявшего новых монтирований не несёт, а выданные продолжают работать.
             Err(IpcError::SenderGone) => continue,
-            // Кадр доставлен, но принять его нечем: неудача касается одного кадра, порт жив.
-            Err(IpcError::ResourceExhausted) => {
-                log_line("admin frame dropped: resources exhausted");
-                continue;
-            }
             Err(IpcError::PeerClosed) => break,
             // Прочий отказ приёма оставляет маршрутизатор без монтирований и уходит ненулевым
             // кодом потока, отличимым от закрытия порта.
@@ -159,11 +145,8 @@ extern "C" fn serve_admin(arg: usize) -> u32 {
                 return 1;
             }
         }
-        let dispatched = dispatch_namespace_admin(&mut admin.administering, &transport);
+        let _ = dispatch_namespace_admin(&mut admin.administering, &transport);
         transport.cancel_reply();
-        if dispatched.is_err() {
-            log_line("admin frame rejected");
-        }
     }
     log_line("admin port closed");
     0

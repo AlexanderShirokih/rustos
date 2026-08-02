@@ -15,7 +15,7 @@ use ipc::{
 use kernel_tests::kernel_test;
 use runtime::{
     MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Signal, Timeout,
-    UserMemFlags, handle_duplicate,
+    UserMemFlags, port_send,
 };
 use spin::Once;
 use syscall::Rights;
@@ -117,15 +117,8 @@ fn start_namespace() -> NamespacePorts {
     drop(spawn_from_image(ROUTER_PROGRAM, admin.into_handle()));
 
     let bootstrap = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
-    // Право минта уходит вместе с капой: маршрутизатор раздаёт канал логирования детям.
-    let log = OwnedHandle::from_handle(
-        handle_duplicate(
-            crate::bootstrap_handle(),
-            (Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE).bits(),
-            0,
-        )
-        .expect("log capability"),
-    );
+    // Маршрутизатор получает лог-сессию: детям он раздаёт только её производные.
+    let log = crate::log_relay::router_log_session();
 
     NamespaceAdminClient::new(PortTransport::client(&admin_client))
         .start(
@@ -1051,21 +1044,24 @@ fn filesystem_releases_the_reply_of_an_unparsed_frame() {
 }
 
 // Кадр сервер не разберёт: ordinal вне контракта, тело пустое, txid == 0 оставляет его без
-// ответа. Владение capability кадр переносит в таблицу сервера.
-fn send_unparsed_frame_with_capability(port: &PortTransport, capability: OwnedHandle) {
+// ответа. Владение capability кадр переносит в таблицу сервера. Отправка идёт сырым syscall:
+// транспорт сводит любой отказ к PeerClosed, а сроком отказ сервера отличается от зависания.
+fn send_unparsed_frame_with_capability(session: &OwnedHandle, capability: OwnedHandle) {
     let mut frame = [0u8; MESSAGE_INLINE_MAX];
     Header::new(u64::MAX, 0, 0)
         .encode(&mut frame)
         .expect("frame header");
     frame[HEADER_SIZE] = TERMINATOR;
-    port.write_message(&frame[..=HEADER_SIZE], &[capability.into_raw().raw()])
-        .expect("frame with a capability sent");
+    crate::ipc_raw::write_frame(&frame[..=HEADER_SIZE], &[capability.into_raw().raw()]);
+    kernel_tests::kassert_eq!(
+        port_send(session.as_raw(), Timeout::from_ns(CALL_TIMEOUT_NS).raw()),
+        0
+    );
 }
 
 #[kernel_test]
 fn filesystem_closes_the_capability_of_an_unparsed_frame() {
     let capability = ram_session();
-    let port = PortTransport::client(&capability);
     let signal = Signal::create().expect("signal to ride the frames");
     for _ in 0..LEAK_FRAMES {
         // Капа приехала в кадре, который не разобран: закрыть её больше некому.
@@ -1073,7 +1069,7 @@ fn filesystem_closes_the_capability_of_an_unparsed_frame() {
             .handle()
             .duplicate(Rights::READ | Rights::TRANSFER, 0)
             .expect("capability for the frame");
-        send_unparsed_frame_with_capability(&port, rider);
+        send_unparsed_frame_with_capability(&capability, rider);
     }
     kernel_tests::kassert!(vends_a_buffer());
 }

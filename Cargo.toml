@@ -14,6 +14,8 @@ members = [
     "lib/ipc-macros",
     "lib/ipc-schema",
     "lib/ipc-test",
+    "lib/log-abi",
+    "lib/log-relay",
     "lib/syscall",
     "kernel/kernelspace",
     "kernel/capability",
@@ -76,6 +78,8 @@ ipc-macros = { path = "lib/ipc-macros" }
 ipc-schema = { path = "lib/ipc-schema" }
 ipc-test = { path = "lib/ipc-test" }
 bootstrap = { path = "lib/bootstrap-abi" }
+log-abi = { path = "lib/log-abi" }
+log-relay = { path = "lib/log-relay" }
 collections = { path = "lib/collections" }
 io = { path = "lib/io" }
 klog = { path = "kernel/log" }

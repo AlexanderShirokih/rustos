@@ -24,6 +24,8 @@ mod ipc_buffer;
 mod ipc_raw;
 mod irq_provision;
 mod load_entry;
+mod log_fixture_protocol;
+mod log_relay;
 mod memory_capability_target;
 mod memory_share;
 mod owned_handle;
@@ -126,8 +128,11 @@ pub(crate) fn bootstrap_handle() -> Handle {
         .expect("bootstrap handle set in _start")
 }
 
+// Прогон уходит и по отказу kassert, и цикл relay останавливается здесь: процесс
+// уходит с последним живым потоком, а оставленный цикл держит его до тайм-аута.
 fn runner_exit(code: u32) -> ! {
     LOG_WRITER.flush();
+    log_relay::shutdown_relays();
     thread_exit(u64::from(code))
 }
 
@@ -175,5 +180,6 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     };
     let _ = write!(buf, "[TEST-PANIC] {info}");
     send_log_frame(&buf.bytes[..buf.len]);
+    log_relay::shutdown_relays();
     thread_exit(1)
 }

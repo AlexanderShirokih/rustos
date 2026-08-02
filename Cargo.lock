@@ -514,6 +514,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "log-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "ipc-test",
+]
+
+[[package]]
+name = "log-relay"
+version = "0.1.0"
+dependencies = [
+ "bootstrap",
+ "ipc",
+ "log-abi",
+ "runtime",
+ "syscall",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -586,7 +605,8 @@ name = "rootkeeper"
 version = "0.1.0"
 dependencies = [
  "bootstrap",
- "ipc",
+ "log-abi",
+ "log-relay",
  "runtime",
  "syscall",
  "userland-build",
@@ -601,6 +621,8 @@ dependencies = [
  "fdt",
  "io",
  "ipc",
+ "log-abi",
+ "log-relay",
  "runtime",
  "syscall",
  "userland-build",
@@ -616,6 +638,7 @@ dependencies = [
  "collections",
  "io",
  "ipc",
+ "log-abi",
  "spin",
  "syscall",
  "talc",
@@ -821,6 +844,8 @@ dependencies = [
  "filesystem-abi",
  "io",
  "ipc",
+ "log-abi",
+ "log-relay",
  "runtime",
  "spin",
  "syscall",

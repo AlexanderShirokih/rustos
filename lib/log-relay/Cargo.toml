@@ -1,0 +1,23 @@
+cargo-features = ["per-package-target"]
+
+[package]
+name = "log-relay"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+forced-target = "aarch64-unknown-none"
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+bootstrap = { workspace = true }
+ipc = { workspace = true }
+log-abi = { workspace = true }
+runtime = { workspace = true }
+syscall = { workspace = true }
+
+[lints]
+workspace = true

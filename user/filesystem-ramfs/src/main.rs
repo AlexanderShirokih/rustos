@@ -12,8 +12,7 @@ use filesystem_server::serve;
 use runtime::{log_fmt, thread_exit};
 use syscall::Handle;
 
-// Тег строк процесса в klog.
-const LOG_TAG: &str = "filesystem-ramfs";
+const LOG_TAG: &str = "ramfs";
 
 /// `admin` приходит в x0 как HandleId серверной стороны admin-порта.
 #[unsafe(no_mangle)]

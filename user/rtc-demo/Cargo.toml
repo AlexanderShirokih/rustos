@@ -39,6 +39,8 @@ bootstrap = { workspace = true }
 fdt = { workspace = true }
 io = { workspace = true }
 ipc = { workspace = true }
+log-abi = { workspace = true }
+log-relay = { workspace = true }
 syscall = { workspace = true }
 runtime = { workspace = true }
 userland-image = { workspace = true }

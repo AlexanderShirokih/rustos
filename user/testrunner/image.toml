@@ -32,6 +32,11 @@ path = "/boot/badge-client"
 
 [[programs]]
 package = "testrunner"
+bin = "log-client-fixture"
+path = "/boot/log-client-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "filesystem-client-fixture"
 path = "/boot/filesystem-client-fixture"
 

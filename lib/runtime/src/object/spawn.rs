@@ -26,6 +26,33 @@ extern "C" fn trampoline(payload: usize) -> ! {
     thread_exit(u64::from(entry(arg)))
 }
 
+/// Запускает поток в текущем процессе с телом `body`. Владение перенесённым в
+/// него состоянием берёт на себя поток: `spawn_owned` снимает с вызывающего
+/// передачу состояния через сырой указатель.
+pub fn spawn_owned<F>(body: F, stack_bytes: u64, priority: Priority) -> Result<JoinHandle>
+where
+    F: FnOnce() -> u32 + Send + 'static,
+{
+    let body: Box<dyn FnOnce() -> u32> = Box::new(body);
+    let payload = Box::into_raw(Box::new(body)) as usize;
+    match spawn(run_owned, payload, stack_bytes, priority) {
+        Ok(thread) => Ok(thread),
+        Err(error) => {
+            // Поток не стартовал - тело его не прочитает.
+            // SAFETY: указатель только что из Box::into_raw, других владельцев нет.
+            drop(unsafe { Box::from_raw(payload as *mut Box<dyn FnOnce() -> u32>) });
+            Err(error)
+        }
+    }
+}
+
+extern "C" fn run_owned(payload: usize) -> u32 {
+    // SAFETY: payload получен из Box::into_raw в spawn_owned и реконструируется
+    // ровно один раз: этот поток - единственный его владелец.
+    let body = *unsafe { Box::from_raw(payload as *mut Box<dyn FnOnce() -> u32>) };
+    body()
+}
+
 /// Запускает поток в текущем процессе: выделяет стек `stack_bytes` и входит в
 /// `entry(arg)` с приоритетом `priority`. Поток завершается кодом возврата `entry`.
 pub fn spawn(

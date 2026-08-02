@@ -14,7 +14,9 @@ Userspace опирается на несколько крейтов из `lib/`:
 | `lib/ipc`            | кодек кадров и типы контрактов поверх транспортов              |
 | `lib/userland`       | модель образа: сегменты, права, точка входа, валидация         |
 | `lib/userland-image` | бинарный формат `userland.img` (encode/decode)                 |
-| `lib/bootstrap-abi`  | контракт `Bootstrap` — канал процесса к ядру                   |
+| `lib/bootstrap-abi`  | контракт `Bootstrap` — канал корневого процесса к ядру         |
+| `lib/log-abi`        | контракт `Log` — запись строки в системный журнал              |
+| `lib/log-relay`      | лог-порт и его relay: пересылка строк доверенному стоку        |
 
 ## Образ
 
@@ -214,6 +216,16 @@ capability.
 Bootstrap — типизированный канал между bootstrap-процессом и ядром. Контракт определён в `lib/bootstrap-abi`.
 Через него корневой процесс запрашивает корневые capability.
 
+Капа этого канала остаётся у корневого процесса: она открывает весь набор корневых полномочий сразу, и её
+передача потомку равнозначна передаче их всех.
+
+## Журнал
+
+Строки в системный журнал процесс шлёт по контракту `Log` из `lib/log-abi`. Сервером контракта служит relay из
+`lib/log-relay` в корневом процессе: он пересылает принятые строки ядру по bootstrap-каналу. Потомкам достаются
+лог-сессии его порта, сам bootstrap-канал остаётся у корневого процесса. Свою лог-капу процесс отдаёт рантайму
+через `runtime::install_log` и дальше пишет строки через `log_line` и `log_fmt`.
+
 ## Как написать процесс
 
 Программа userland — бинарь без стандартной библиотеки и без `main`, с
@@ -223,14 +235,14 @@ Bootstrap — типизированный канал между bootstrap-пр�
 #![no_std]
 #![no_main]
 
-use bootstrap::BootstrapClient;
+use log_abi::LogClient;
 use runtime::{PortTransport, thread_exit};
 use syscall::Handle;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(root: Handle) -> ! {
-    let client = BootstrapClient::new(PortTransport::client(root));
-    let result = client.log_str("init", "process started");
+pub extern "C" fn _start(log: Handle) -> ! {
+    let client = LogClient::new(PortTransport::client(log));
+    let result = client.write_str("init", "process started");
 
     thread_exit(u64::from(result.is_err()))
 }
@@ -260,19 +272,21 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 Первый проход — kernel-сторона: ядро собирается с фичей `kernel-tests`, тесты выполняются в пространстве ядра.
 
 Второй проход — userspace-сторона: собирается `testrunner` как обычный userland-контейнер (`user/testrunner/image.toml`),
-и те же `#[kernel_test]`-функции прогоняются в userspace. `testrunner` устанавливает writer, шлющий лог через
-`Bootstrap` в ядро, и exit-делегат.
+и те же `#[kernel_test]`-функции прогоняются в userspace. `testrunner` — корневой процесс прохода: он
+устанавливает writer, шлющий лог через `Bootstrap` в ядро, и exit-делегат, а поднимаемым процессам выдаёт
+лог-сессии своего relay.
 
 Выбор прохода для нового теста — в [code-style.md](code-style.md).
 
 Образ `testrunner` включает, в частности, следующие программы-фикстуры,
 спавнимые тестами как отдельные процессы:
 
-| Программа         | Назначение                                                                         |
-|-------------------|------------------------------------------------------------------------------------|
-| `spawn-fixture`   | минимальный потомок: закрывает стартовый хэндл и выходит его кодом                  |
-| `startup-fixture` | принимает стандартный типизированный startup-кадр и проверяет его значение         |
-| `port-fixture`    | обслуживает запрос-ответ по bootstrap-порту: слот в `.bss`, маппинг чужого региона |
+| Программа            | Назначение                                                                         |
+|----------------------|------------------------------------------------------------------------------------|
+| `spawn-fixture`      | минимальный потомок: закрывает стартовый хэндл и выходит его кодом                 |
+| `startup-fixture`    | принимает стандартный типизированный startup-кадр и проверяет его значение         |
+| `port-fixture`       | обслуживает запрос-ответ по bootstrap-порту: слот в `.bss`, маппинг чужого региона |
+| `log-client-fixture` | пробует полномочия bootstrap-контракта по выданной ей лог-капе                     |
 
 ```rust
 #[kernel_test]
