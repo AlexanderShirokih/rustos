@@ -46,6 +46,21 @@ bin = "unresponsive-filesystem"
 path = "/boot/unresponsive-filesystem"
 
 [[programs]]
+package = "testrunner"
+bin = "managed-startup-fixture"
+path = "/boot/managed-startup-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "managed-startup-hung"
+path = "/boot/managed-startup-hung"
+
+[[programs]]
+package = "testrunner"
+bin = "managed-startup-closed"
+path = "/boot/managed-startup-closed"
+
+[[programs]]
 package = "filesystem-namespace-router"
 path = "/boot/filesystem-namespace-router"
 

@@ -3,7 +3,14 @@
 //! доменную ошибку (DOMAIN_ERR), неизвестный ordinal (PEER_CLOSE), cast, event
 //! и txid-корреляцию (R2).
 
-use std::thread;
+use std::{
+    cell::RefCell,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+};
 
 use ipc::{
     Transport,
@@ -383,6 +390,105 @@ trait CapProto {
 
     #[call]
     fn acquire(&self, ok: bool) -> Result<ipc::wire::Cap, u32>;
+}
+
+#[ipc::protocol(name = "OwnedCast")]
+trait OwnedCast {
+    #[cast]
+    fn deliver(&self, capability: ipc::wire::Cap);
+}
+
+struct CastOutcome {
+    result: Result<(), ipc::wire::IpcError>,
+    handles: RefCell<Vec<u32>>,
+}
+
+impl CastOutcome {
+    fn new(result: Result<(), ipc::wire::IpcError>) -> Self {
+        Self {
+            result,
+            handles: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Transport for CastOutcome {
+    fn write_message(&self, _bytes: &[u8], handles: &[u32]) -> Result<(), ipc::wire::IpcError> {
+        self.handles.borrow_mut().extend_from_slice(handles);
+        self.result
+    }
+
+    fn read_message(
+        &self,
+        _bytes: &mut [u8],
+        _handles: &mut [u32],
+    ) -> Result<ipc::MessageLen, ipc::wire::IpcError> {
+        Err(ipc::wire::IpcError::WouldBlock)
+    }
+
+    fn wait_readable(&self, _timeout_ns: u64) -> Result<(), ipc::wire::IpcError> {
+        Err(ipc::wire::IpcError::WouldBlock)
+    }
+}
+
+struct TrackedHandle {
+    raw: u32,
+    drops: Arc<AtomicUsize>,
+    relinquishes: Arc<AtomicUsize>,
+}
+
+impl Drop for TrackedHandle {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl ipc::IntoWireHandle for TrackedHandle {
+    fn wire_id(&self) -> u32 {
+        self.raw
+    }
+
+    fn relinquish(self) {
+        self.relinquishes.fetch_add(1, Ordering::SeqCst);
+        core::mem::forget(self);
+    }
+}
+
+#[test]
+fn successful_cast_relinquishes_owned_handle() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let relinquishes = Arc::new(AtomicUsize::new(0));
+    let transport = CastOutcome::new(Ok(()));
+    let client = OwnedCastClient::new(transport);
+
+    client
+        .deliver(TrackedHandle {
+            raw: 41,
+            drops: Arc::clone(&drops),
+            relinquishes: Arc::clone(&relinquishes),
+        })
+        .expect("cast succeeds");
+
+    assert_eq!(client.into_transport().handles.into_inner(), vec![41]);
+    assert_eq!(relinquishes.load(Ordering::SeqCst), 1);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn timed_out_cast_drops_owned_handle_without_relinquishing() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let relinquishes = Arc::new(AtomicUsize::new(0));
+    let client = OwnedCastClient::new(CastOutcome::new(Err(ipc::wire::IpcError::Timeout)));
+
+    let result = client.deliver(TrackedHandle {
+        raw: 42,
+        drops: Arc::clone(&drops),
+        relinquishes: Arc::clone(&relinquishes),
+    });
+
+    assert_eq!(result, Err(ipc::wire::IpcError::Timeout));
+    assert_eq!(relinquishes.load(Ordering::SeqCst), 0);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 /// Сервис: возвращает присланный handle и минтит фиксированный по запросу.

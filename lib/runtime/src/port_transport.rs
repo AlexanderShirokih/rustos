@@ -13,6 +13,8 @@
 //! очередного кадра (принятый кадр стейджится для следующего `read_message`).
 //! На истечении возвращается `Timeout`. Прямой серверный `read_message` без
 //! предшествующего `wait_readable` блокируется бессрочно.
+//! One-way отправка отдельно настраивается через
+//! [`PortTransport::with_send_timeout_ns`].
 
 use core::cell::Cell;
 
@@ -63,6 +65,7 @@ pub struct PortTransport {
     handle: Handle,
     phase: Cell<Phase>,
     pending_reply: Cell<Option<Handle>>,
+    send_timeout_ns: u64,
 }
 
 impl PortTransport {
@@ -83,7 +86,22 @@ impl PortTransport {
             handle,
             phase: Cell::new(phase),
             pending_reply: Cell::new(None),
+            send_timeout_ns: PORT_TIMEOUT_INFINITE,
         }
+    }
+
+    /// Задаёт тайм-аут rendezvous для one-way `send`/`#[cast]` в наносекундах.
+    /// Two-way `call`, server receive и reply используют свои сроки.
+    #[must_use]
+    pub const fn with_send_timeout_ns(mut self, send_timeout_ns: u64) -> Self {
+        self.send_timeout_ns = send_timeout_ns;
+        self
+    }
+
+    /// Текущий тайм-аут one-way отправки в наносекундах.
+    #[must_use]
+    pub const fn send_timeout_ns(&self) -> u64 {
+        self.send_timeout_ns
     }
 
     /// Значок (badge) port-хэндла, через который пришёл принятый кадр. `0` -
@@ -195,18 +213,20 @@ fn map_recv_error(ret: i64) -> IpcError {
     match SyscallError::from_return(ret) {
         Some(SyscallError::Timeout) => IpcError::Timeout,
         Some(SyscallError::SenderGone) => IpcError::SenderGone,
-        Some(SyscallError::ResourceExhausted) => IpcError::ResourceExhausted,
+        Some(SyscallError::OutOfHandles | SyscallError::ResourceExhausted) => {
+            IpcError::ResourceExhausted
+        }
         _ => IpcError::PeerClosed,
     }
 }
 
-/// Сводит код возврата port-svc к ошибке wire-транспорта.
-/// `0` - успех; отрицательное - закрытый/битый port.
+// Сводит код возврата port-svc к ошибке wire-транспорта: `0` - успех,
+// `Timeout` сохраняется, остальные отказы означают закрытый port.
 fn map_send_result(ret: i64) -> Result<(), IpcError> {
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(IpcError::PeerClosed)
+    match SyscallError::from_return(ret) {
+        None if ret == 0 => Ok(()),
+        Some(SyscallError::Timeout) => Err(IpcError::Timeout),
+        _ => Err(IpcError::PeerClosed),
     }
 }
 
@@ -236,7 +256,7 @@ impl Transport for PortTransport {
             Ok(())
         } else {
             // One-way cast.
-            map_send_result(port_send(self.handle, PORT_TIMEOUT_INFINITE))
+            map_send_result(port_send(self.handle, self.send_timeout_ns))
         }
     }
 

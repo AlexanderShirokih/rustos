@@ -4,8 +4,8 @@ use bootstrap::BootstrapClient;
 use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
 use runtime::{MemoryRegion, OwnedHandle, PortTransport, Resource, Signal, Timeout};
-use syscall::SIGNALED;
-use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
+use syscall::{Rights, SIGNALED, SyscallError};
+use userland::{Entry, EntryView, Segment, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE};
 use userland_image::decode;
 use userland_loader::{launch_entry, load_entry};
 
@@ -17,6 +17,7 @@ const STARTUP_SLACK_PAGES: u64 = 8;
 const STARTUP_FAILURE_ATTEMPTS: usize = 16;
 const PROCESS_CLEANUP_RETRY_ATTEMPTS: usize = 64;
 const PROCESS_CLEANUP_RETRY_NS: u64 = 1_000_000;
+const PROCESS_CREATE_ROLLBACK_ATTEMPTS: usize = 80;
 
 #[derive(Debug)]
 enum StartupError {
@@ -95,6 +96,72 @@ fn failed_startup_returns_child_budget() {
 
     for _ in 0..STARTUP_FAILURE_ATTEMPTS {
         fail_startup_when_budget_returns(&child, &budget, &scheduler_turn);
+    }
+}
+
+#[kernel_test]
+fn load_image_error_reclaims_each_created_process() {
+    const BASE: u64 = 0x4000_0000;
+    let segments = [
+        Segment {
+            va_base: BASE,
+            mem_size: USERLAND_PAGE_SIZE,
+            permissions: SegmentPermissions::ReadExecute,
+            bytes: &[],
+        },
+        Segment {
+            va_base: BASE,
+            mem_size: USERLAND_PAGE_SIZE,
+            permissions: SegmentPermissions::ReadWrite,
+            bytes: &[],
+        },
+    ];
+    let invalid = Entry {
+        path: "/boot/load-image-rollback",
+        entry_va: BASE,
+        stack_size: USERLAND_PAGE_SIZE,
+        segments: &segments,
+    };
+    let resource = Resource::self_resource().expect("self metering resource");
+
+    for _ in 0..PROCESS_CREATE_ROLLBACK_ATTEMPTS {
+        let initial = Signal::create().expect("initial capability").into_handle();
+        kernel_tests::kassert!(matches!(
+            load_entry(&invalid, &resource, initial),
+            Err(runtime::Error::Syscall(SyscallError::InvalidArgument))
+        ));
+    }
+}
+
+#[kernel_test]
+fn start_error_reclaims_each_loaded_process() {
+    let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let cap = client
+        .acquire_userland_image()
+        .expect("acquire_userland_image call")
+        .expect("vend ok");
+    let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
+    let mapping = region.map_full_read_only().expect("map image read-only");
+    let image = decode(mapping.as_bytes()).expect("decode acquired image");
+    let child = image
+        .entry("/boot/startup-fixture")
+        .expect("image carries a child entry")
+        .program()
+        .expect("child entry is a program");
+
+    let root = Resource::self_resource().expect("self metering resource");
+    let write_only = Resource::from_handle(
+        root.handle()
+            .duplicate(Rights::WRITE, 0)
+            .expect("resource without duplicate right"),
+    );
+
+    for _ in 0..PROCESS_CREATE_ROLLBACK_ATTEMPTS {
+        let initial = Signal::create().expect("initial capability").into_handle();
+        kernel_tests::kassert!(matches!(
+            load_entry(&child, &write_only, initial),
+            Err(runtime::Error::Syscall(SyscallError::AccessDenied))
+        ));
     }
 }
 

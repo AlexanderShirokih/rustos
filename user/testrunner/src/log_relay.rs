@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use bootstrap::BootstrapClient;
 use ipc::wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf};
 use kernel_tests::kernel_test;
-use log_abi::{LogClient, log_ordinal};
+use log_abi::{LOG_MESSAGE_MAX, LogClient, log_ordinal};
 use log_relay::{KernelLogSink, LogRelayThread, LogSink};
 use runtime::{
     MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Timeout, port_send,
@@ -216,7 +216,7 @@ fn send_unknown_ordinal(session: &OwnedHandle) {
 }
 
 // Шлёт по лог-сессии валидный кадр лога с приложенной capability.
-fn send_log_frame_with_cap(session: &OwnedHandle, cap: OwnedHandle) {
+fn send_log_frame_with_cap(session: &OwnedHandle, cap: OwnedHandle) -> i64 {
     let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
     frame
         .write_header(&Header::new(log_ordinal::WRITE, 0, 0))
@@ -233,7 +233,29 @@ fn send_log_frame_with_cap(session: &OwnedHandle, cap: OwnedHandle) {
     let carried = cap.into_raw();
     ipc_raw::write_frame(frame.as_bytes(), &[carried.raw()]);
     let sent = port_send(session.as_raw(), Timeout::from_ns(SEND_TIMEOUT_NS).raw());
-    kernel_tests::kassert_eq!(sent, 0);
+    if sent < 0 {
+        drop(OwnedHandle::from_handle(carried));
+    }
+    sent
+}
+
+// Заполняет оставшиеся слоты таблицы хэндлов капами с одним правом переноса.
+fn exhaust_handle_table() -> (Port, Vec<OwnedHandle>) {
+    let source = Port::create().expect("filler port");
+    let mut handles = Vec::new();
+    loop {
+        match source.handle().duplicate(Rights::TRANSFER, 0) {
+            Ok(handle) => handles.push(handle),
+            Err(error) => {
+                kernel_tests::kassert!(matches!(
+                    error,
+                    runtime::Error::Syscall(SyscallError::OutOfHandles)
+                ));
+                break;
+            }
+        }
+    }
+    (source, handles)
 }
 
 // Спавнит программу образа, передавая ей `start` стартовым хэндлом.
@@ -295,6 +317,131 @@ fn relay_names_an_unnamed_badge_numerically() {
     });
 }
 
+// Переводы строк, табуляция и terminal controls доходят до стока только
+// видимыми escape-последовательностями.
+#[kernel_test]
+fn relay_escapes_control_characters_in_the_message() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        write_log(&logger, "local", "first\r\n\tsecond\u{1b}[2J\u{0}\u{85}");
+
+        let records = wait_for_records(1);
+        let expected = "first\\r\\n\\tsecond\\u{1b}[2J\\u{0}\\u{85}";
+        kernel_tests::kassert!(records[0].message == expected);
+    });
+}
+
+// Клиентская часть source не меняет его скобочную структуру и не создаёт
+// физической строки.
+#[kernel_test]
+fn relay_escapes_control_characters_and_brackets_in_the_local_tag() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        write_log(&logger, "left[inner]\r\nright", "line");
+
+        let records = wait_for_records(1);
+        kernel_tests::kassert!(records[0].source == "named-subsystem/left\\[inner\\]\\r\\nright");
+    });
+}
+
+// Unicode-разделители строк и абзацев нормализуются независимо от свойства
+// `char::is_control`.
+#[kernel_test]
+fn relay_escapes_unicode_line_and_paragraph_separators() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        write_log(&logger, "local", "a\u{2028}b\u{2029}c");
+
+        let records = wait_for_records(1);
+        let expected = "a\\u{2028}b\\u{2029}c";
+        kernel_tests::kassert!(records[0].message == expected);
+    });
+}
+
+// Unicode format controls не могут переставить доверенный source или текст
+// сообщения при отображении журнала.
+#[kernel_test]
+fn relay_escapes_unicode_format_controls() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        write_log(&logger, "a\u{202e}b", "c\u{2066}d");
+
+        let records = wait_for_records(1);
+        let source = "named-subsystem/a\\u{202e}b";
+        let message = "c\\u{2066}d";
+        kernel_tests::kassert!(records[0].source == source);
+        kernel_tests::kassert!(records[0].message == message);
+    });
+}
+
+// Рост строки после escaping порождает несколько bounded-записей без потери
+// хвоста нормализованного сообщения.
+#[kernel_test]
+fn relay_splits_a_grown_message_without_losing_its_tail() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        let message = "\u{1b}".repeat(LOG_MESSAGE_MAX);
+        write_log(&logger, "local", &message);
+
+        let escaped_character_len = "\\u{1b}".len();
+        let characters_per_record = LOG_MESSAGE_MAX / escaped_character_len;
+        let record_count = LOG_MESSAGE_MAX.div_ceil(characters_per_record);
+        let records = wait_for_records(record_count);
+        let joined: String = records
+            .iter()
+            .map(|record| record.message.as_str())
+            .collect();
+        let expected = "\\u{1b}".repeat(LOG_MESSAGE_MAX);
+        kernel_tests::kassert!(joined == expected);
+        kernel_tests::kassert!(
+            records
+                .iter()
+                .all(|record| record.message.len() <= LOG_MESSAGE_MAX)
+        );
+    });
+}
+
+// Обычный печатный UTF-8 relay передаёт без изменений.
+#[kernel_test]
+fn relay_keeps_ordinary_utf8_unchanged() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        write_log(&logger, "播放器", "こんにちは, 世界!");
+
+        let records = wait_for_records(1);
+        kernel_tests::kassert!(records[0].source == "named-subsystem/播放器");
+        kernel_tests::kassert!(records[0].message == "こんにちは, 世界!");
+    });
+}
+
+// Враждебные tag/message не дают стоку строку без trusted badge-prefix и не
+// оставляют физических управляющих символов.
+#[kernel_test]
+fn relay_never_writes_an_unprefixed_physical_line() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        write_log(&logger, "]\n[forged", "ok\n\u{1b}[31mforged");
+
+        let records = wait_for_records(1);
+        kernel_tests::kassert!(records[0].source.starts_with("named-subsystem/"));
+        kernel_tests::kassert!(!records[0].source.chars().any(char::is_control));
+        kernel_tests::kassert!(!records[0].message.chars().any(char::is_control));
+    });
+}
+
+// Пустой message сохраняет семантику одного входного кадра и одной записи.
+#[kernel_test]
+fn relay_forwards_an_empty_message_once() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        write_log(&logger, "local", "");
+
+        let records = wait_for_records(1);
+        kernel_tests::kassert_eq!(records.len(), 1);
+        kernel_tests::kassert!(records[0].message.is_empty());
+    });
+}
+
 // Уход сессии relay не останавливает: следующая сессия обслуживается.
 #[kernel_test]
 fn relay_serves_past_a_departed_session() {
@@ -337,7 +484,7 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
             .duplicate(Rights::WRITE | Rights::TRANSFER, 0)
             .expect("writer side");
         // Корневая капа - единственный получатель: она уезжает кадром.
-        send_log_frame_with_cap(&logger, carried.into_handle());
+        kernel_tests::kassert_eq!(send_log_frame_with_cap(&logger, carried.into_handle()), 0);
         wait_for_records(1);
 
         // Закрытие корневой капы отзывает выведенную из неё клиентскую, а
@@ -346,6 +493,26 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
             port_send(writer.as_raw(), Timeout::from_ns(SEND_TIMEOUT_NS).raw()),
             SyscallError::Revoked.as_return_value()
         );
+    });
+}
+
+// Нехватка слота под capability отклоняет один кадр на стороне relay. После
+// освобождения слота следующий обычный кадр доходит до стока.
+#[kernel_test]
+fn relay_serves_after_receiver_resource_exhaustion() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        let (_source, mut fillers) = exhaust_handle_table();
+        let carried = fillers.pop().expect("full table contains filler handles");
+
+        kernel_tests::kassert_eq!(
+            send_log_frame_with_cap(&logger, carried),
+            SyscallError::OutOfHandles.as_return_value()
+        );
+        write_log(&logger, "local", "after resource exhaustion");
+
+        let records = wait_for_records(1);
+        kernel_tests::kassert!(records[0].message == "after resource exhaustion");
     });
 }
 
@@ -402,6 +569,26 @@ fn relay_stops_when_its_log_port_closes() {
     relay
         .shutdown(Timeout::from_ns(JOIN_TIMEOUT_NS))
         .expect("test log relay stops");
+}
+
+// Первый отказ стока прекращает куски текущего кадра. Сам кадр учитывается
+// одним отказом, и следующий успешный кадр сбрасывает последовательность.
+#[kernel_test]
+fn relay_stops_a_frame_at_the_first_refused_chunk() {
+    with_relay(|session| {
+        let logger = session(NAMED_BADGE);
+        let message = "\u{1b}".repeat(LOG_MESSAGE_MAX);
+
+        SINK_REFUSES.store(true, SeqCst);
+        write_log(&logger, "local", &message);
+        let records = wait_for_records(1);
+        kernel_tests::kassert_eq!(records.len(), 1);
+
+        SINK_REFUSES.store(false, SeqCst);
+        write_log(&logger, "local", "accepted after refused frame");
+        let records = wait_for_records(2);
+        kernel_tests::kassert!(records[1].message == "accepted after refused frame");
+    });
 }
 
 // Предел подряд идущих отказов стока уводит relay из цикла, а прерванная

@@ -1,5 +1,6 @@
 /// Ошибки операций над handle'ами и kernel-объектами.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 pub enum IpcError {
     /// Указан невалидный или уже закрытый handle.
     BadHandle,

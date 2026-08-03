@@ -65,6 +65,24 @@ path = "src/unresponsive_filesystem.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "managed-startup-fixture"
+path = "src/managed_startup_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "managed-startup-hung"
+path = "src/managed_startup_hung.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "managed-startup-closed"
+path = "src/managed_startup_closed.rs"
+test = false
+bench = false
+
 [dependencies]
 bootstrap = { workspace = true }
 collections = { workspace = true }
@@ -78,6 +96,7 @@ spin = { workspace = true }
 test-harness-qemu = { workspace = true }
 syscall = { workspace = true }
 runtime = { workspace = true }
+rootkeeper = { path = "../rootkeeper" }
 userland = { workspace = true }
 userland-image = { workspace = true }
 userland-loader = { workspace = true }

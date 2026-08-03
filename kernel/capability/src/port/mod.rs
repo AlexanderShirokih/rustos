@@ -419,7 +419,7 @@ fn deliver_send(sender: &ThreadTransport, receiver: &ReceiverWaiter) -> SendActi
             SendAction::Done
         }
         Err(e) => {
-            receiver.outcome.set(RendezvousOutcome::TransferFailed);
+            receiver.outcome.set(RendezvousOutcome::TransferFailed(e));
             receiver.waker.signal_match();
             SendAction::Failed(e)
         }
@@ -440,7 +440,7 @@ fn deliver_call(caller: &ThreadTransport, receiver: &ReceiverWaiter, ctx: ParkCt
             }
         }
         Err(e) => {
-            receiver.outcome.set(RendezvousOutcome::TransferFailed);
+            receiver.outcome.set(RendezvousOutcome::TransferFailed(e));
             receiver.waker.signal_match();
             CallAction::Failed(e)
         }
@@ -462,7 +462,7 @@ fn deliver_recv(sender: SenderWaiter, receiver: &ThreadTransport) -> RecvAction 
             }
         },
         Err(e) => {
-            sender.outcome.set(RendezvousOutcome::TransferFailed);
+            sender.outcome.set(RendezvousOutcome::TransferFailed(e));
             sender.waker.signal_match();
             RecvAction::Failed(e)
         }
@@ -470,13 +470,13 @@ fn deliver_recv(sender: SenderWaiter, receiver: &ThreadTransport) -> RecvAction 
 }
 
 fn outcome_to_result(outcome: &Arc<OutcomeSlot>) -> Result<(), IpcError> {
-    match outcome.get() {
-        Some(RendezvousOutcome::Delivered) => Ok(()),
-        Some(RendezvousOutcome::PeerGone) => Err(IpcError::PeerClosed),
-        Some(RendezvousOutcome::TransferFailed) => Err(IpcError::BufferTooSmall),
-        Some(RendezvousOutcome::SenderGone(_)) => Err(IpcError::SenderGone),
+    match outcome.try_get() {
+        Ok(Some(RendezvousOutcome::Delivered)) => Ok(()),
+        Ok(Some(RendezvousOutcome::PeerGone)) => Err(IpcError::PeerClosed),
+        Ok(Some(RendezvousOutcome::TransferFailed(error))) => Err(error),
+        Ok(Some(RendezvousOutcome::SenderGone(_))) => Err(IpcError::SenderGone),
         // Парковка завершилась без публикации исхода - трактуем как Canceled.
-        None => Err(IpcError::Canceled),
+        Ok(None) | Err(_) => Err(IpcError::Canceled),
     }
 }
 
@@ -644,8 +644,12 @@ pub fn port_recv(
             park_with_timeout(runtime, &waker, timeout_ns);
             let resolved = resolve_send_recv(port, runtime, &waker, &outcome);
             runtime.clear_blocked_cancel();
-            if let Some(RendezvousOutcome::SenderGone(badge)) = outcome.get() {
-                return Err(publish_departed_badge(receiver, badge));
+            match outcome.try_get() {
+                Ok(Some(RendezvousOutcome::SenderGone(badge))) => {
+                    return Err(publish_departed_badge(receiver, badge));
+                }
+                Err(_) => return Err(IpcError::Canceled),
+                _ => {}
             }
             resolved?;
 

@@ -104,9 +104,14 @@ fn serve(service: &OwnedHandle) {
     loop {
         match transport.wait_readable(PORT_TIMEOUT_INFINITE) {
             Ok(()) => {}
-            // Уход значка кадра не несёт: сессий у маршрутизатора нет, приём продолжается.
-            Err(IpcError::SenderGone) => continue,
-            Err(_) => break,
+            // Оба исхода кадра не несут: маршрутизатор не хранит сессий, а покадровое
+            // исчерпание не закрывает порт.
+            Err(IpcError::SenderGone | IpcError::ResourceExhausted) => continue,
+            Err(IpcError::PeerClosed) => break,
+            Err(_) => {
+                log_line("service port failed");
+                return;
+            }
         }
         let mut resolving = Resolving::new(&MOUNTS);
         let delivered = dispatch_namespace(&mut resolving, &transport).is_ok();
@@ -130,8 +135,9 @@ fn serve_admin(mut admin: AdminPort) -> u32 {
     loop {
         match transport.wait_readable(PORT_TIMEOUT_INFINITE) {
             Ok(()) => {}
-            // Уход поднявшего новых монтирований не несёт, а выданные продолжают работать.
-            Err(IpcError::SenderGone) => continue,
+            // Оба исхода кадра не несут. Уход поднявшего оставляет монтирования работать,
+            // а покадровое исчерпание не закрывает порт.
+            Err(IpcError::SenderGone | IpcError::ResourceExhausted) => continue,
             Err(IpcError::PeerClosed) => break,
             // Прочий отказ приёма оставляет маршрутизатор без монтирований и уходит ненулевым
             // кодом потока, отличимым от закрытия порта.

@@ -11,12 +11,21 @@ use syscall::PORT_TIMEOUT_INFINITE;
 // Источник собственных строк relay в стоке.
 const RELAY_SOURCE: &str = "log-relay";
 
+// Диагностика покадрового отказа приёма.
+const RESOURCE_EXHAUSTED_MESSAGE: &str = "frame dropped: resources exhausted";
+
 // Подряд идущих отказов стока, после которых пересылка прекращается.
 const SINK_FAILURE_LIMIT: u32 = 8;
 
+// Наибольшая видимая форма одного Unicode scalar: `\\u{10ffff}`.
+const ESCAPED_CHARACTER_MAX: usize = 10;
+
+const _: () = assert!(LOG_MESSAGE_MAX >= ESCAPED_CHARACTER_MAX);
+
 /// Сток строк лога: доверенный канал, недоступный клиентам лог-порта.
 pub trait LogSink {
-    /// Пишет строку источника `source` в журнал.
+    /// Пишет нормализованный bounded-кусок строки источника `source` в журнал.
+    /// Аргументы не содержат физических переводов строк и Unicode controls.
     fn write(&mut self, source: &str, message: &str) -> Result<(), IpcError>;
 }
 
@@ -52,8 +61,14 @@ impl<S: LogSink> LogRelay<S> {
                 Ok(()) => {}
                 // Уход значка кадра не несёт: состояния сессий relay не держит.
                 Err(IpcError::SenderGone) => continue,
-                // Бессрочный приём отказывает только исчерпанием получателей.
-                Err(_) => return "stopped: log port closed",
+                // Исчерпание относится к одному кадру. Буфер приёма при этом
+                // не содержит доставленного сообщения.
+                Err(IpcError::ResourceExhausted) => {
+                    let _ = self.sink.write(RELAY_SOURCE, RESOURCE_EXHAUSTED_MESSAGE);
+                    continue;
+                }
+                Err(IpcError::PeerClosed) => return "stopped: log port closed",
+                Err(_) => return "stopped: log port receive failed",
             }
 
             // Значок и capability кадра читаются до пересылки: исходящий IPC
@@ -99,13 +114,12 @@ impl<S: LogSink> LogService for Forwarding<'_, S> {
         tag: ipc::wire::Str<'_, { LOG_TAG_MAX }>,
         message: ipc::wire::Str<'_, { LOG_MESSAGE_MAX }>,
     ) {
-        let mut source = LogBuffer::<LOG_SOURCE_MAX>::new();
-        source.push_str(self.source);
-        if !tag.as_str().is_empty() {
-            source.push_str("/");
-            source.push_str(tag.as_str());
-        }
-        self.forwarded = Some(self.sink.write(source.as_str(), message.as_str()));
+        let source = compose_source(self.source, tag.as_str());
+        self.forwarded = Some(forward_message(
+            self.sink,
+            source.as_str(),
+            message.as_str(),
+        ));
     }
 }
 
@@ -113,13 +127,88 @@ fn source_of(names: SourceNames, badge: u64) -> LogBuffer<LOG_SOURCE_MAX> {
     let mut source = LogBuffer::new();
     match names(badge) {
         Some(name) => {
-            source.push_str(name);
+            append_escaped(&mut source, name, false);
         }
         None => {
             let _ = write!(source, "badge-{badge:016x}");
         }
     }
     source
+}
+
+fn compose_source(trusted: &str, local: &str) -> LogBuffer<LOG_SOURCE_MAX> {
+    let mut source = LogBuffer::new();
+    source.push_str(trusted);
+    if !local.is_empty() && source.as_str().len() < LOG_SOURCE_MAX {
+        source.push_str("/");
+        append_escaped(&mut source, local, true);
+    }
+    source
+}
+
+// Экранирование увеличивает один scalar за раз. Стековый scratch позволяет обрезать source
+// или сбросить кусок message только между целыми scalar.
+fn forward_message<S: LogSink>(sink: &mut S, source: &str, message: &str) -> Result<(), IpcError> {
+    if message.is_empty() {
+        return sink.write(source, "");
+    }
+
+    let mut chunk = LogBuffer::<LOG_MESSAGE_MAX>::new();
+    for character in message.chars() {
+        let escaped = escape_character(character, false);
+        if escaped.as_str().len() > LOG_MESSAGE_MAX - chunk.as_str().len() {
+            sink.write(source, chunk.as_str())?;
+            chunk.clear();
+        }
+        chunk.push_str(escaped.as_str());
+    }
+    sink.write(source, chunk.as_str())
+}
+
+fn append_escaped<const N: usize>(buffer: &mut LogBuffer<N>, text: &str, brackets: bool) {
+    for character in text.chars() {
+        let escaped = escape_character(character, brackets);
+        if escaped.as_str().len() > N - buffer.as_str().len() {
+            break;
+        }
+        buffer.push_str(escaped.as_str());
+    }
+}
+
+fn escape_character(character: char, brackets: bool) -> LogBuffer<ESCAPED_CHARACTER_MAX> {
+    let mut escaped = LogBuffer::new();
+    match character {
+        '\n' => {
+            escaped.push_str("\\n");
+        }
+        '\r' => {
+            escaped.push_str("\\r");
+        }
+        '\t' => {
+            escaped.push_str("\\t");
+        }
+        '[' | ']' if brackets => {
+            escaped.push_str("\\");
+            let mut bytes = [0; 4];
+            escaped.push_str(character.encode_utf8(&mut bytes));
+        }
+        // Unicode line separators создают физическую строку, а bidi-controls
+        // могут визуально переставить доверенный prefix при отображении журнала.
+        '\u{061c}'
+        | '\u{200e}'..='\u{200f}'
+        | '\u{2028}'..='\u{202e}'
+        | '\u{2066}'..='\u{2069}' => {
+            let _ = write!(escaped, "\\u{{{:x}}}", u32::from(character));
+        }
+        control if control.is_control() => {
+            let _ = write!(escaped, "\\u{{{:x}}}", u32::from(control));
+        }
+        printable => {
+            let mut bytes = [0; 4];
+            escaped.push_str(printable.encode_utf8(&mut bytes));
+        }
+    }
+    escaped
 }
 
 // Capability, приехавшие с кадром, ядро уже положило в таблицу relay: контракт

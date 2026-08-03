@@ -45,7 +45,7 @@ impl Reply {
     /// вызывателя, переносит caps, будит вызывателя и инвалидирует Reply.
     ///
     /// Повторный `reply` на том же объекте вернёт [`IpcError::BadHandle`].
-    /// На провале переноса вызывающая сторона будится с `TransferFailed`.
+    /// На провале переноса вызывающая сторона будится с точной причиной отказа.
     pub fn reply(&self, server: &ThreadTransport) -> Result<(), IpcError> {
         if self
             .used
@@ -68,7 +68,7 @@ impl Reply {
                 Ok(())
             }
             Err(e) => {
-                self.outcome.set(RendezvousOutcome::TransferFailed);
+                self.outcome.set(RendezvousOutcome::TransferFailed(e));
                 self.waker.signal_match();
                 Err(e)
             }

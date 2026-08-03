@@ -26,6 +26,8 @@ mod irq_provision;
 mod load_entry;
 mod log_fixture_protocol;
 mod log_relay;
+mod managed_fixture_protocol;
+mod managed_startup;
 mod memory_capability_target;
 mod memory_share;
 mod owned_handle;

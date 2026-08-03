@@ -109,7 +109,14 @@ fn serve_sessions(shared: &Shared) {
                 shared.state.lock().remove_session(transport.peer_badge());
                 continue;
             }
-            Err(_) => break,
+            // Исчерпание относится к одному кадру. Буфер приёма при этом не
+            // содержит доставленного сообщения.
+            Err(IpcError::ResourceExhausted) => continue,
+            Err(IpcError::PeerClosed) => break,
+            Err(_) => {
+                log_line("service port failed");
+                return;
+            }
         }
         frame.begin(
             transport.peer_badge(),
@@ -135,8 +142,9 @@ fn serve_admin(shared: &Shared) -> u32 {
     loop {
         match transport.wait_readable(PORT_TIMEOUT_INFINITE) {
             Ok(()) => {}
-            // Уход маршрутизатора новых сессий лишает, а выданные оставляет работать.
-            Err(IpcError::SenderGone) => continue,
+            // Оба исхода кадра не несут. Уход маршрутизатора оставляет выданные сессии
+            // работать, а покадровое исчерпание не закрывает порт.
+            Err(IpcError::SenderGone | IpcError::ResourceExhausted) => continue,
             Err(IpcError::PeerClosed) => break,
             // Прочий отказ приёма оставляет процесс без установления сессий и уходит ненулевым
             // кодом потока, отличимым от закрытия порта.

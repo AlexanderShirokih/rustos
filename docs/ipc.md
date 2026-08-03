@@ -191,8 +191,15 @@ IPC опирается на underlying-транспорт, не определя
 `send`/`recv` (one-way) и `call`/`reply` (two-way). Адаптер сообщает `PeerClosed`
 после ухода дальней стороны, `SenderGone` — когда вместо кадра пришло событие об
 уходе значка ([port.md](port.md)), `ResourceExhausted` — когда кадр доставлен, а
-принять его нечем, и `WouldBlock`, когда встречной стороны нет. Исчерпание ресурса
-относится к одному кадру, а не к порту: цикл обслуживания его переживает.
+принять его нечем (`OutOfHandles` нормализуется в этот покадровый исход), и
+`WouldBlock`, когда встречной стороны нет. `PortTransport::client` по умолчанию
+ждёт one-way rendezvous бессрочно; `with_send_timeout_ns(ns)` задаёт срок только
+для `send`/`#[cast]`: `0` означает poll, `u64::MAX` — бессрочное ожидание, другое
+значение — относительный deadline. Истечение возвращает `IpcError::Timeout`,
+кадр остаётся у отправителя и capability не передаются. После
+`ResourceExhausted` цикл продолжает приём, не читая поля недоставленного кадра;
+`PeerClosed` и отзыв серверной стороны остаются терминальными. Syscall
+`Revoked` на отправке нормализуется в `IpcError::PeerClosed`.
 Подробнее про syscalls и IPC-буфер — в [syscalls.md](syscalls.md).
 
 ## Транспортная плоскость
@@ -304,3 +311,16 @@ pub trait Sensor {
     #[call(timeout_ns = 0)]      fn poll(&self) -> u32;  // не блокировать
 }
 ```
+
+`with_wait_ns` не меняет срок one-way отправки. Клиент, которому нужны оба
+ограничения, настраивает transport до передачи его сгенерированному клиенту:
+
+```rust
+let transport = PortTransport::client(startup.handle())
+    .with_send_timeout_ns(50_000_000);
+let client = DriverArgsClient::new(transport).with_wait_ns(200_000_000);
+```
+
+Успешный `#[cast]` означает состоявшийся rendezvous: получатель уже принял кадр,
+а capability перемещены в его таблицу. При `Timeout` встреча не состоялась,
+поэтому владеющие аргументы кадра закрываются обычным RAII-путём отправителя.

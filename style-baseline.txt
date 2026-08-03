@@ -155,7 +155,6 @@ doc_on_declaration|kernel/capability/src/port/outcome.rs|OutcomeSlot|96512edb
 doc_on_declaration|kernel/capability/src/port/outcome.rs|RendezvousOutcome::Delivered|4a7eed0e
 doc_on_declaration|kernel/capability/src/port/outcome.rs|RendezvousOutcome::PeerGone|f96340ca
 doc_on_declaration|kernel/capability/src/port/outcome.rs|RendezvousOutcome::SenderGone|7ef98f0b
-doc_on_declaration|kernel/capability/src/port/outcome.rs|RendezvousOutcome::TransferFailed|20205223
 doc_on_declaration|kernel/capability/src/port/outcome.rs|RendezvousOutcome|c9544cd6
 doc_on_declaration|kernel/capability/src/port/outcome.rs|SendKind::Call|931a25bf
 doc_on_declaration|kernel/capability/src/port/outcome.rs|SendKind::Send|5b1ecd61
@@ -194,7 +193,6 @@ doc_on_declaration|kernel/capability/src/termination.rs|TerminationState::exit_c
 doc_on_declaration|kernel/capability/src/termination.rs|TerminationState::mark_terminated|8d374dfd
 doc_on_declaration|kernel/capability/src/termination.rs|TerminationState::signal_terminated|eaaed233
 doc_on_declaration|kernel/capability/src/termination.rs|TerminationState::terminated|db7c3ff0
-doc_on_declaration|kernel/capability/src/termination.rs|TerminationState::termination_signal|8189b50e
 doc_on_declaration|kernel/capability/src/termination.rs|TerminationState::wake_terminated|95e06c1e
 doc_on_declaration|kernel/capability/src/wait.rs|IndexedWaker|51605b7c
 doc_on_declaration|kernel/capability/src/wait.rs|ParkResolution|f45fc8fb
@@ -747,7 +745,6 @@ doc_on_declaration|lib/runtime/src/port_transport.rs|Phase|8ac935da
 doc_on_declaration|lib/runtime/src/port_transport.rs|PortTransport::load_buffer|5d5a4855
 doc_on_declaration|lib/runtime/src/port_transport.rs|PortTransport::store_buffer|4091fcb3
 doc_on_declaration|lib/runtime/src/port_transport.rs|map_recv_error|8ce63398
-doc_on_declaration|lib/runtime/src/port_transport.rs|map_send_result|5c3c34a0
 doc_on_declaration|lib/runtime/src/ring_transport.rs|Role|0d438a26
 doc_on_declaration|lib/runtime/src/sync.rs|FOREVER|9576a138
 doc_on_declaration|lib/runtime/src/sync.rs|Mutex<T>::lock_contended|5fabcc4a

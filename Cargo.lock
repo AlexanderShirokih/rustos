@@ -821,12 +821,15 @@ name = "rootkeeper"
 version = "0.1.0"
 dependencies = [
  "bootstrap",
+ "ipc",
  "log-abi",
  "log-relay",
  "runtime",
  "syscall",
+ "userland",
  "userland-build",
  "userland-image",
+ "userland-loader",
 ]
 
 [[package]]
@@ -1121,6 +1124,7 @@ dependencies = [
  "ipc",
  "log-abi",
  "log-relay",
+ "rootkeeper",
  "runtime",
  "spin",
  "syscall",

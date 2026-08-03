@@ -2,9 +2,10 @@
 //!
 //! [`load_entry`] минтит свежие регионы под сегменты, копирует в них байты,
 //! собирает дескриптор образа и стартует процесс через `ProcessCreate`/
-//! `ProcessLoadImage`/`ProcessStart`. [`launch_entry`] добавляет стандартный
-//! startup-порт и отправляет через него стартовый кадр. Источник байт
-//! абстрагирован за `EntryView`.
+//! `ProcessLoadImage`/`ProcessStart`. Ошибка после `ProcessCreate` завершает
+//! пустой процесс служебным кодом и конечным ожиданием. [`launch_entry`]
+//! добавляет стандартный startup-порт и отправляет через него стартовый кадр.
+//! Источник байт абстрагирован за `EntryView`.
 
 #![no_std]
 #![allow(unsafe_code)]
@@ -15,10 +16,10 @@ use alloc::vec::Vec;
 
 use runtime::{
     Error, Mapping, MemoryAccess, MemoryRegion, OwnedHandle, Port, Priority, Process, Resource,
-    Result, ThreadEntry, UserMemFlags,
+    Result, Signal, ThreadEntry, Timeout, UserMemFlags,
 };
 use syscall::{
-    SEGMENT_ABI_VERSION, SyscallError, USER_VA_END, UserImageDescAbi, UserSegmentAbi,
+    SEGMENT_ABI_VERSION, SIGNALED, SyscallError, USER_VA_END, UserImageDescAbi, UserSegmentAbi,
     encode_image_desc, encode_segment,
 };
 use userland::{
@@ -26,11 +27,18 @@ use userland::{
 };
 
 const STARTUP_FAILURE_EXIT_CODE: u32 = 1;
+const STARTUP_CLEANUP_TIMEOUT_NS: u64 = 5_000_000_000;
+const CREATED_PROCESS_REAP_TURN_NS: u64 = 1_000_000;
 
 // RAII-владелец незавершенной startup-транзакции.
 struct PendingLaunch {
     process: Option<Process>,
     startup: Option<Port>,
+}
+
+// RAII-владелец процесса между ProcessCreate и успешным ProcessStart.
+struct PendingProcess {
+    process: Option<Process>,
 }
 
 /// Процесс с завершённой startup-транзакцией и сохранённым клиентским портом.
@@ -46,18 +54,34 @@ impl PendingLaunch {
     fn finish<E>(
         mut self,
         send: impl FnOnce(&Port) -> core::result::Result<(), E>,
-    ) -> core::result::Result<Process, E> {
-        send(self.startup())?;
+    ) -> core::result::Result<Process, E>
+    where
+        E: From<Error>,
+    {
+        if let Err(error) = send(self.startup()) {
+            return match self.rollback() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(E::from(cleanup)),
+            };
+        }
         let process = self.take_process();
-        drop(self.startup.take());
+        self.startup = None;
         Ok(process)
     }
 
     fn retain<E>(
         mut self,
         send: impl FnOnce(&Port) -> core::result::Result<(), E>,
-    ) -> core::result::Result<InitializedProcess, E> {
-        send(self.startup())?;
+    ) -> core::result::Result<InitializedProcess, E>
+    where
+        E: From<Error>,
+    {
+        if let Err(error) = send(self.startup()) {
+            return match self.rollback() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(E::from(cleanup)),
+            };
+        }
         Ok(InitializedProcess {
             process: self.take_process(),
             startup: self.startup.take().expect("startup port is present"),
@@ -71,6 +95,16 @@ impl PendingLaunch {
     fn take_process(&mut self) -> Process {
         self.process.take().expect("launched process is present")
     }
+
+    fn rollback(mut self) -> Result<()> {
+        self.startup = None;
+        let Some(process) = self.process.as_ref() else {
+            return Ok(());
+        };
+        terminate_and_join(process)?;
+        self.process = None;
+        Ok(())
+    }
 }
 
 impl Drop for PendingLaunch {
@@ -81,8 +115,64 @@ impl Drop for PendingLaunch {
     }
 }
 
+impl PendingProcess {
+    fn new(process: Process) -> Self {
+        Self {
+            process: Some(process),
+        }
+    }
+
+    fn process(&self) -> &Process {
+        self.process.as_ref().expect("created process is present")
+    }
+
+    fn finish(mut self) -> Process {
+        self.process.take().expect("created process is present")
+    }
+
+    fn fail<T>(self, error: Error) -> Result<T> {
+        match self.rollback() {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(cleanup),
+        }
+    }
+
+    fn rollback(mut self) -> Result<()> {
+        let Some(process) = self.process.as_ref() else {
+            return Ok(());
+        };
+        terminate_and_join(process)?;
+        confirm_created_process_reaped()?;
+        self.process = None;
+        Ok(())
+    }
+}
+
+impl Drop for PendingProcess {
+    fn drop(&mut self) {
+        if let Some(process) = self.process.as_ref() {
+            let _ = process.terminate(STARTUP_FAILURE_EXIT_CODE);
+        }
+    }
+}
+
+fn terminate_and_join(process: &Process) -> Result<()> {
+    process.terminate(STARTUP_FAILURE_EXIT_CODE)?;
+    process.join(Timeout::from_ns(STARTUP_CLEANUP_TIMEOUT_NS))
+}
+
+fn confirm_created_process_reaped() -> Result<()> {
+    let timer = Signal::create()?;
+    match timer.wait(SIGNALED, Timeout::from_ns(CREATED_PROCESS_REAP_TURN_NS)) {
+        Err(Error::Syscall(SyscallError::Timeout)) => Ok(()),
+        Err(error) => Err(error),
+        Ok(_) => Err(Error::Syscall(SyscallError::Canceled)),
+    }
+}
+
 /// Загружает `entry`, отправляет startup-кадр через `startup` и
-/// возвращает процесс. Ошибка callback завершает потомка.
+/// возвращает процесс. Ошибка callback завершает потомка и ждёт его cleanup с
+/// конечным сроком.
 pub fn launch_entry<'a, V: EntryView<'a>, E: From<Error>>(
     entry: &V,
     resource: &Resource,
@@ -193,9 +283,11 @@ pub fn load_entry<'a, E: EntryView<'a>>(
         user_vm_size: window.end - window.start,
     };
 
-    let process = Process::create(entry_name(entry.path()))?;
-    process.load_image(&encode_image_desc(&desc))?;
-    let thread = process.start(
+    let pending = PendingProcess::new(Process::create(entry_name(entry.path()))?);
+    if let Err(error) = pending.process().load_image(&encode_image_desc(&desc)) {
+        return pending.fail(error);
+    }
+    let thread = match pending.process().start(
         ThreadEntry {
             entry_pc: entry.entry_va(),
             user_sp: stack_top,
@@ -204,14 +296,17 @@ pub fn load_entry<'a, E: EntryView<'a>>(
         },
         initial,
         Some(resource),
-    )?;
+    ) {
+        Ok(thread) => thread,
+        Err(error) => return pending.fail(error),
+    };
 
     // Регионы и маппинги прочитаны ядром при load_image/start; thread-handle
     // здесь не нужен (процесс ждут по его handle).
     drop(thread);
     drop(mappings);
     drop(regions);
-    Ok(process)
+    Ok(pending.finish())
 }
 
 fn permissions_to_flags(permissions: SegmentPermissions) -> UserMemFlags {

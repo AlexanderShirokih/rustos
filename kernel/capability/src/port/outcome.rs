@@ -6,6 +6,8 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use crate::IpcError;
+
 /// Роль стороны, стоящей в очереди отправителей.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SendKind {
@@ -22,16 +24,20 @@ pub(crate) enum RendezvousOutcome {
     Delivered,
     /// Port/Reply уничтожен или последний хендл закрыт.
     PeerGone,
-    /// Перенос caps или копирование тела провалились.
-    TransferFailed,
+    // Перенос caps или копирование тела провалились с указанной причиной.
+    TransferFailed(IpcError),
     /// Отправители значка исчезли: кадра нет, получателю доставлен значок.
     SenderGone(u64),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InvalidTransferError(u32);
 
 /// Атомарный слот исхода рандеву.
 pub(crate) struct OutcomeSlot {
     state: AtomicU32,
     badge: AtomicU64,
+    transfer_error: AtomicU32,
     #[cfg(test)]
     cancel_waiters: AtomicU32,
 }
@@ -55,6 +61,7 @@ impl OutcomeSlot {
         Arc::new(Self {
             state: AtomicU32::new(Self::PENDING),
             badge: AtomicU64::new(0),
+            transfer_error: AtomicU32::new(0),
             #[cfg(test)]
             cancel_waiters: AtomicU32::new(0),
         })
@@ -76,7 +83,11 @@ impl OutcomeSlot {
         let v = match outcome {
             RendezvousOutcome::Delivered => Self::DELIVERED,
             RendezvousOutcome::PeerGone => Self::PEER_GONE,
-            RendezvousOutcome::TransferFailed => Self::TRANSFER_FAILED,
+            RendezvousOutcome::TransferFailed(error) => {
+                self.transfer_error
+                    .store(encode_transfer_error(error), Ordering::Relaxed);
+                Self::TRANSFER_FAILED
+            }
             RendezvousOutcome::SenderGone(badge) => {
                 self.badge.store(badge, Ordering::Release);
                 Self::SENDER_GONE
@@ -85,18 +96,27 @@ impl OutcomeSlot {
         self.state.store(v, Ordering::Release);
     }
 
-    /// Терминальный исход; `None` для нетерминальных состояний
-    /// (`PENDING`/`AWAITING_REPLY`/`DELIVERING`/`TIMEDOUT`).
-    pub fn get(&self) -> Option<RendezvousOutcome> {
-        match self.state.load(Ordering::Acquire) {
+    // Терминальный исход; `None` для нетерминальных состояний
+    // (`PENDING`/`AWAITING_REPLY`/`DELIVERING`/`TIMEDOUT`).
+    pub(crate) fn try_get(&self) -> Result<Option<RendezvousOutcome>, InvalidTransferError> {
+        let outcome = match self.state.load(Ordering::Acquire) {
             Self::DELIVERED => Some(RendezvousOutcome::Delivered),
             Self::PEER_GONE => Some(RendezvousOutcome::PeerGone),
-            Self::TRANSFER_FAILED => Some(RendezvousOutcome::TransferFailed),
+            Self::TRANSFER_FAILED => Some(RendezvousOutcome::TransferFailed(
+                decode_transfer_error(self.transfer_error.load(Ordering::Relaxed))?,
+            )),
             Self::SENDER_GONE => Some(RendezvousOutcome::SenderGone(
                 self.badge.load(Ordering::Acquire),
             )),
             _ => None,
-        }
+        };
+        Ok(outcome)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self) -> Option<RendezvousOutcome> {
+        self.try_get()
+            .expect("outcome holds a valid transfer error")
     }
 
     /// Сырое состояние слота.
@@ -161,6 +181,34 @@ impl OutcomeSlot {
     }
 }
 
+const TRANSFER_ERRORS: [IpcError; 13] = [
+    IpcError::BadHandle,
+    IpcError::WrongType,
+    IpcError::AccessDenied,
+    IpcError::ShouldWait,
+    IpcError::PeerClosed,
+    IpcError::SenderGone,
+    IpcError::Timeout,
+    IpcError::Canceled,
+    IpcError::BufferTooSmall,
+    IpcError::MessageTooBig,
+    IpcError::OutOfHandles,
+    IpcError::ResourceExhausted,
+    IpcError::Revoked,
+];
+
+fn encode_transfer_error(error: IpcError) -> u32 {
+    error as u32
+}
+
+fn decode_transfer_error(raw: u32) -> Result<IpcError, InvalidTransferError> {
+    usize::try_from(raw)
+        .ok()
+        .and_then(|index| TRANSFER_ERRORS.get(index))
+        .copied()
+        .ok_or(InvalidTransferError(raw))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -168,7 +216,27 @@ mod tests {
         thread,
     };
 
-    use super::OutcomeSlot;
+    use super::{
+        InvalidTransferError, OutcomeSlot, RendezvousOutcome, TRANSFER_ERRORS,
+        decode_transfer_error,
+    };
+
+    #[test]
+    fn transfer_failure_preserves_its_exact_error() {
+        for error in TRANSFER_ERRORS {
+            let outcome = OutcomeSlot::new();
+            outcome.set(RendezvousOutcome::TransferFailed(error));
+            assert_eq!(
+                outcome.get(),
+                Some(RendezvousOutcome::TransferFailed(error))
+            );
+            assert_eq!(decode_transfer_error(error as u32), Ok(error));
+        }
+        assert_eq!(
+            decode_transfer_error(u32::MAX),
+            Err(InvalidTransferError(u32::MAX))
+        );
+    }
 
     #[test]
     fn race_reply_and_timeout_choose_one_terminal_path() {
