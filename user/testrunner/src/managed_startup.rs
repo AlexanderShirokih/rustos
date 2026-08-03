@@ -4,8 +4,7 @@ use bootstrap::BootstrapClient;
 use ipc::{IntoWireHandle, wire::IpcError};
 use kernel_tests::kernel_test;
 use rootkeeper::{
-    BoundedStartupTransport, ComponentId, ManagedComponent, ManagedFailure, ManagedStartupError,
-    ManagedStatus,
+    BoundedStartupTransport, ManagedComponent, ManagedFailure, ManagedStartupError, ManagedStatus,
 };
 use runtime::{
     Error, MemoryRegion, OwnedHandle, PortTransport, ReadOnlyMapping, Resource, Signal, Timeout,
@@ -113,8 +112,8 @@ fn managed_startup_times_out_before_recv_and_repeatedly_rolls_back() {
         .split(budget_pages)
         .expect("reserve exact repeated budget");
 
-    for id in 0..ROLLBACK_ATTEMPTS {
-        let mut component = ManagedComponent::<FixtureRoots>::new(ComponentId::new(id));
+    for _ in 0..ROLLBACK_ATTEMPTS {
+        let mut component = ManagedComponent::<FixtureRoots>::new();
         let result = component.launch(
             &program,
             &exact_parent,
@@ -148,8 +147,8 @@ fn managed_startup_peer_close_repeatedly_rolls_back() {
         .split(budget_pages)
         .expect("reserve exact repeated budget");
 
-    for id in 0..ROLLBACK_ATTEMPTS {
-        let mut component = ManagedComponent::<FixtureRoots>::new(ComponentId::new(id));
+    for _ in 0..ROLLBACK_ATTEMPTS {
+        let mut component = ManagedComponent::<FixtureRoots>::new();
         let result = component.launch(
             &program,
             &exact_parent,
@@ -178,7 +177,7 @@ fn managed_startup_observes_nonzero_exit_after_running() {
     let mapping = image_mapping();
     let program = image_program(&mapping, FIXTURE_ENTRY);
     let parent = Resource::self_resource().expect("self metering resource");
-    let mut component = ManagedComponent::<FixtureRoots>::new(ComponentId::new(1));
+    let mut component = ManagedComponent::<FixtureRoots>::new();
 
     component
         .launch(
@@ -208,7 +207,7 @@ fn managed_startup_observes_zero_exit_after_running() {
     let mapping = image_mapping();
     let program = image_program(&mapping, FIXTURE_ENTRY);
     let parent = Resource::self_resource().expect("self metering resource");
-    let mut component = ManagedComponent::<FixtureRoots>::new(ComponentId::new(2));
+    let mut component = ManagedComponent::<FixtureRoots>::new();
 
     component
         .launch(
@@ -237,10 +236,10 @@ fn managed_startup_timeout_rendezvous_race_has_one_ownership_outcome() {
     let parent = Resource::self_resource().expect("self metering resource");
     let budget_pages = process_pages(&program) + PROCESS_SLACK_PAGES;
 
-    for id in 0..RACE_ATTEMPTS {
+    for _ in 0..RACE_ATTEMPTS {
         let observer = Signal::create().expect("independent observer root");
         let sender_cleanup = Signal::create().expect("sender cleanup observer");
-        let mut component = ManagedComponent::<FixtureRoots>::new(ComponentId::new(id));
+        let mut component = ManagedComponent::<FixtureRoots>::new();
         let result = component.launch(
             &program,
             &parent,
@@ -290,7 +289,7 @@ fn managed_startup_rejects_infinite_send_timeout() {
     let mapping = image_mapping();
     let program = image_program(&mapping, FIXTURE_ENTRY);
     let parent = Resource::self_resource().expect("self metering resource");
-    let mut component = ManagedComponent::<FixtureRoots>::new(ComponentId::new(3));
+    let mut component = ManagedComponent::<FixtureRoots>::new();
 
     let result = component.launch(
         &program,
@@ -314,7 +313,7 @@ fn dropping_running_component_terminates_child_and_returns_budget() {
     let exact_parent = root
         .split(budget_pages)
         .expect("reserve exact managed budget");
-    let mut component = ManagedComponent::<FixtureRoots>::new(ComponentId::new(4));
+    let mut component = ManagedComponent::<FixtureRoots>::new();
 
     component
         .launch(

@@ -6,7 +6,7 @@ use core::{
 
 use capability::{HandleTable, ProcessObject};
 use collections::{LockCell, MutexCell, StaticString};
-use memory::{MemoryRegion, user_vm_allocator::UserVmAllocator};
+use memory::{MemoryRegion, UserVmContext, user_vm_allocator::UserVmAllocator};
 use syscall::MAX_PROCESS_NAME_LEN;
 
 use super::address_space::AddressSpace;
@@ -160,6 +160,17 @@ impl core::fmt::Debug for Process {
             .field("id", &self.id)
             .field("name", &self.name.as_str())
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        if let (Some(mapper), Some(allocator)) =
+            (self.address_space.mapper_arc(), self.user_vm.clone())
+        {
+            UserVmContext::new(mapper, allocator).drain();
+        }
+        self.target.clear_metering();
     }
 }
 

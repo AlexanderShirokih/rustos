@@ -2,7 +2,7 @@
 
 use alloc::sync::Arc;
 
-use spin::Once;
+use collections::{LockCell, MutexCell};
 use syscall::Rights;
 
 use super::{resource::Resource, signal::Signal, termination::TerminationState};
@@ -18,7 +18,7 @@ pub struct MeteringGrant {
 
 pub struct ProcessObject {
     inner: TerminationState,
-    metering: Once<MeteringGrant>,
+    metering: MutexCell<Option<MeteringGrant>>,
 }
 
 impl ProcessObject {
@@ -26,21 +26,31 @@ impl ProcessObject {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: TerminationState::new(),
-            metering: Once::new(),
+            metering: MutexCell::new(None),
         })
     }
 
     /// Задаёт метеринг текущему процессу.
     pub fn set_metering(&self, grant: MeteringGrant) {
-        self.metering.call_once(|| grant);
+        self.metering.with_lock(|slot| {
+            if slot.is_none() {
+                *slot = Some(grant);
+            }
+        });
     }
 
     pub fn metering(&self) -> Option<MeteringGrant> {
-        self.metering.get().cloned()
+        self.metering.with_lock(|slot| slot.clone())
     }
 
     pub fn metering_resource(&self) -> Option<Arc<Resource>> {
-        self.metering.get().map(|grant| Arc::clone(&grant.resource))
+        self.metering
+            .with_lock(|slot| slot.as_ref().map(|grant| Arc::clone(&grant.resource)))
+    }
+
+    /// Отвязывает metering-грант от объекта процесса.
+    pub fn clear_metering(&self) {
+        self.metering.with_lock(Option::take);
     }
 
     /// Публикует `code` и помечает процесс завершённым. Повторный вызов - no-op.
@@ -77,6 +87,10 @@ impl ProcessObject {
 
 #[cfg(test)]
 mod tests {
+    use core::num::NonZeroUsize;
+
+    use memory::{AccessMask, physical_address::PageAlignedAddress};
+
     use super::{super::signal::SIGNALED, *};
 
     #[test]
@@ -89,5 +103,28 @@ mod tests {
         assert!(proc.terminated());
         assert_eq!(proc.exit_code(), 42);
         assert_eq!(proc.termination_signal().peek() & SIGNALED, SIGNALED);
+    }
+
+    #[test]
+    fn clearing_metering_preserves_termination_state() {
+        let parent = Resource::new(
+            PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
+            NonZeroUsize::new(0x1000).unwrap(),
+            AccessMask::RW,
+            4,
+        );
+        let child = parent.split(4).unwrap();
+        let process = ProcessObject::new();
+        process.set_metering(MeteringGrant {
+            resource: child,
+            rights: Rights::READ | Rights::WRITE,
+        });
+        process.signal_terminated(42);
+
+        process.clear_metering();
+
+        assert_eq!(process.exit_code(), 42);
+        assert!(process.terminated());
+        assert_eq!(parent.remaining_budget(), 4);
     }
 }

@@ -1,3 +1,5 @@
+const NS_PER_SEC: u64 = 1_000_000_000;
+
 /// Типизированный фасад над `timeout_ns` блокирующих syscall'ов.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -14,6 +16,11 @@ impl Timeout {
     /// Дедлайн в наносекундах.
     pub const fn from_ns(ns: u64) -> Self {
         Self(ns)
+    }
+
+    /// Дедлайн в секундах.
+    pub const fn from_secs(secs: u64) -> Self {
+        Self(secs.saturating_mul(NS_PER_SEC))
     }
 
     /// ABI-значение `timeout_ns` для укладки в аргумент syscall'а.

@@ -4,3 +4,15 @@ version = 1
 package = "rootkeeper"
 path = "/boot/rootkeeper"
 boot = true
+
+[[programs]]
+package = "namespace-router"
+path = "/boot/namespace-router"
+
+[[programs]]
+package = "filesystem-imagefs"
+path = "/boot/filesystem-imagefs"
+
+[[programs]]
+package = "filesystem-ramfs"
+path = "/boot/filesystem-ramfs"

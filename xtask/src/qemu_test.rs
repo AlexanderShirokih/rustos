@@ -28,12 +28,16 @@ struct QemuPass<'a> {
     expected_seeds: Option<u64>,
 }
 
+// Оба прохода идут по образу testrunner: kernel-проход подменяет init-таск
+// внутриядерным worker и userland не исполняет, а второй образ дал бы только
+// лишнюю сборку.
 pub(crate) fn qemu_test(timeout: u64, spec: &Path) -> Result<()> {
+    let image = Path::new("user/testrunner/image.toml");
     qemu_test_pass(QemuPass {
         label: "kernel",
         spec,
         features: Some(String::from("kernel-tests")),
-        image: Path::new("user/rootkeeper/image.toml"),
+        image,
         timeout,
         environment: &[],
         expected_seeds: None,
@@ -42,7 +46,7 @@ pub(crate) fn qemu_test(timeout: u64, spec: &Path) -> Result<()> {
         label: "userland",
         spec,
         features: None,
-        image: Path::new("user/testrunner/image.toml"),
+        image,
         timeout,
         environment: &[],
         expected_seeds: None,

@@ -32,6 +32,16 @@ impl Error {
             _ => FileSystemError::NoSpace,
         }
     }
+
+    pub(crate) const fn exit_code(&self) -> u32 {
+        match self {
+            Self::Runtime(_) => 2,
+            Self::Ipc(_) => 3,
+            Self::Image(_) => 4,
+            Self::NoProgram => 5,
+            Self::Start => 6,
+        }
+    }
 }
 
 impl Display for Error {

@@ -88,6 +88,12 @@ static ACTIVE: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 // Режим стока: отказ вместо пересылки.
 static SINK_REFUSES: AtomicBool = AtomicBool::new(false);
 
+// Waitable handle потока общего relay: supervisor-сценарий ждёт его наравне с
+// process маршрутизатора.
+pub(crate) fn shared_relay_thread() -> Option<syscall::Handle> {
+    SHARED.lock().as_ref().map(|relay| relay.handle().as_raw())
+}
+
 // Лог-сессия маршрутизатора имён с правом минта: производные достаются его
 // файловым системам.
 pub(crate) fn router_log_session() -> OwnedHandle {

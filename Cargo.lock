@@ -353,21 +353,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "filesystem-namespace-router"
-version = "0.1.0"
-dependencies = [
- "filesystem-abi",
- "filesystem-server",
- "ipc",
- "runtime",
- "spin",
- "syscall",
- "userland-build",
- "userland-image",
- "userland-loader",
-]
-
-[[package]]
 name = "filesystem-ramfs"
 version = "0.1.0"
 dependencies = [
@@ -667,6 +652,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "namespace-router"
+version = "0.1.0"
+dependencies = [
+ "filesystem-abi",
+ "filesystem-server",
+ "ipc",
+ "runtime",
+ "spin",
+ "syscall",
+ "userland-build",
+ "userland-image",
+ "userland-loader",
+]
+
+[[package]]
 name = "object"
 version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -821,10 +821,12 @@ name = "rootkeeper"
 version = "0.1.0"
 dependencies = [
  "bootstrap",
+ "filesystem-abi",
  "ipc",
  "log-abi",
  "log-relay",
  "runtime",
+ "spin",
  "syscall",
  "userland",
  "userland-build",

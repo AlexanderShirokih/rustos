@@ -1,6 +1,8 @@
 //! Лог-порт и его цикл пересылки в выделенном потоке.
 
-use runtime::{JoinHandle, OwnedHandle, Port, Priority, Result, Timeout, spawn_owned};
+use runtime::{
+    BorrowedHandle, JoinHandle, OwnedHandle, Port, Priority, Result, Timeout, spawn_owned,
+};
 use syscall::Rights;
 
 use crate::relay::{LogRelay, LogSink, SourceNames};
@@ -47,6 +49,17 @@ impl LogRelayThread {
     pub fn delegated_session(&self, badge: u64) -> Result<OwnedHandle> {
         self.root
             .duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, badge)
+    }
+
+    /// Заимствует waitable handle потока relay для supervisor loop.
+    #[must_use]
+    pub fn handle(&self) -> BorrowedHandle<'_> {
+        self.thread.handle()
+    }
+
+    /// Возвращает финальный exit-код завершённого потока relay.
+    pub fn exit_code(&self) -> Result<u32> {
+        self.thread.exit_code()
     }
 
     /// Ждёт завершения цикла пересылки и закрывает лог-порт. Пока цикл жив, не

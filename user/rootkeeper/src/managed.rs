@@ -8,10 +8,6 @@ const BUDGET_RETURN_ATTEMPTS: usize = 1_000;
 const BUDGET_RETURN_WAIT_NS: u64 = 5_000_000;
 const OWNER_DROP_EXIT_CODE: u32 = 1;
 
-/// Стабильный идентификатор managed-компонента.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ComponentId(u32);
-
 /// Наблюдаемое состояние managed-компонента.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagedStatus {
@@ -53,7 +49,8 @@ pub struct RunningComponent<R> {
     roots: R,
     process: Process,
     resource: Resource,
-    _reserved_budget: Resource,
+    reserved_budget: Resource,
+    budget_pages: u64,
 }
 
 /// Единственный transport одноразового startup-кадра. Его конечный send
@@ -71,22 +68,7 @@ enum ManagedState<R> {
 
 /// Managed-компонент с capability roots конкретного типа `R`.
 pub struct ManagedComponent<R> {
-    id: ComponentId,
     state: ManagedState<R>,
-}
-
-impl ComponentId {
-    /// Создаёт идентификатор из устойчивого номера deployment-модели.
-    #[must_use]
-    pub const fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    /// Возвращает устойчивый номер компонента.
-    #[must_use]
-    pub const fn raw(self) -> u32 {
-        self.0
-    }
 }
 
 impl From<Error> for ManagedStartupError {
@@ -127,28 +109,21 @@ impl<R> RunningComponent<R> {
     pub const fn process(&self) -> &Process {
         &self.process
     }
+}
 
-    /// Дочерний metering resource текущего экземпляра.
-    #[must_use]
-    pub const fn resource(&self) -> &Resource {
-        &self.resource
+impl<R> Default for ManagedComponent<R> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl<R> ManagedComponent<R> {
     /// Создаёт компонент в состоянии [`ManagedStatus::Launching`].
     #[must_use]
-    pub const fn new(id: ComponentId) -> Self {
+    pub const fn new() -> Self {
         Self {
-            id,
             state: ManagedState::Launching,
         }
-    }
-
-    /// Стабильный идентификатор компонента.
-    #[must_use]
-    pub const fn id(&self) -> ComponentId {
-        self.id
     }
 
     /// Текущее состояние компонента.
@@ -188,7 +163,7 @@ impl<R> ManagedComponent<R> {
         budget_pages: u64,
         startup_timeout: Timeout,
         create_roots: impl FnOnce() -> Result<R, ManagedStartupError>,
-        send_startup: impl FnOnce(BoundedStartupTransport, &R) -> Result<(), ManagedStartupError>,
+        send_startup: impl FnOnce(BoundedStartupTransport, &mut R) -> Result<(), ManagedStartupError>,
     ) -> Result<(), ManagedStartupError> {
         if !matches!(self.state, ManagedState::Launching) {
             return Err(ManagedStartupError::InvalidState);
@@ -213,7 +188,7 @@ impl<R> ManagedComponent<R> {
         let launch = {
             let result = launch_entry(entry, &child_resource, |startup| {
                 let component_roots = roots
-                    .as_ref()
+                    .as_mut()
                     .expect("startup roots are present before delivery");
                 let transport = bounded_transport(startup, startup_timeout);
                 let result = send_startup(transport, component_roots);
@@ -230,7 +205,8 @@ impl<R> ManagedComponent<R> {
                         .expect("successful startup retains capability roots"),
                     process,
                     resource: child_resource,
-                    _reserved_budget: reserved_budget,
+                    reserved_budget,
+                    budget_pages,
                 }),
                 Err(error) => Err((error, reserved_budget, child_resource)),
             }
@@ -264,12 +240,30 @@ impl<R> ManagedComponent<R> {
             _ => return Err(ManagedStartupError::InvalidState),
         };
 
+        let ManagedState::Running(running) =
+            core::mem::replace(&mut self.state, ManagedState::Launching)
+        else {
+            unreachable!("state was checked before replacement");
+        };
+        let RunningComponent {
+            roots,
+            process,
+            resource,
+            reserved_budget,
+            budget_pages,
+        } = running;
+        drop(roots);
+        drop(process);
+        drop(resource);
+        let cleanup = wait_for_budget_return(&reserved_budget, budget_pages);
+        drop(reserved_budget);
+
         self.state = if exit_code == 0 {
             ManagedState::Exited
         } else {
             ManagedState::Failed(ManagedFailure::Exit(exit_code))
         };
-        Ok(())
+        cleanup.map_err(ManagedStartupError::Runtime)
     }
 
     fn fail_startup(&mut self, error: ManagedStartupError) -> Result<(), ManagedStartupError> {

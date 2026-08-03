@@ -1,4 +1,7 @@
-use alloc::sync::{Arc, Weak};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::num::NonZeroUsize;
 
 use collections::{LockCell, MutexCell};
@@ -54,6 +57,20 @@ impl UserVmContext {
         self.allocator.with_lock(|alloc| {
             let _ = alloc.free(base, size);
         });
+    }
+
+    /// Снимает все зарегистрированные маппинги и освобождает их теги.
+    pub fn drain(&self) {
+        let ranges: Vec<_> = self.allocator.with_lock(|allocator| {
+            allocator
+                .allocated()
+                .iter()
+                .map(|range| (range.base(), range.pages()))
+                .collect()
+        });
+        for (base, pages) in ranges {
+            self.unmap_range(base, pages.saturating_mul(crate::PAGE_SIZE));
+        }
     }
 
     /// Слабый снимок, не удерживающий AS живым. Нужен отзыву: хук маппинга
@@ -227,5 +244,20 @@ mod tests {
         // Второй unmap дошёл до mapper и был отклонён как NotMapped - в логе
         // только первый успешный вызов.
         assert_eq!(mapper.unmapped.with_lock(|u| u.len()), 1);
+    }
+
+    #[test]
+    fn drain_releases_mappings_while_an_allocator_clone_survives() {
+        let (ctx, mapper, base) = setup();
+        let allocator = ctx.allocator().clone();
+
+        ctx.drain();
+        drop(ctx);
+
+        assert_eq!(
+            mapper.unmapped.with_lock(|u| u.clone()),
+            vec![(base.as_usize(), PAGE)]
+        );
+        allocator.with_lock(|a| assert_eq!(a.live_count(), 0));
     }
 }

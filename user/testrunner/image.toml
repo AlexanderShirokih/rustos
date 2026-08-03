@@ -61,8 +61,8 @@ bin = "managed-startup-closed"
 path = "/boot/managed-startup-closed"
 
 [[programs]]
-package = "filesystem-namespace-router"
-path = "/boot/filesystem-namespace-router"
+package = "namespace-router"
+path = "/boot/namespace-router"
 
 [[programs]]
 package = "filesystem-ramfs"

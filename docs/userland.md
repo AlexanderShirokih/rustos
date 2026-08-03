@@ -189,9 +189,11 @@ let process = launch_entry(&program, &resource, |startup| -> Result<()> {
 })?;
 ```
 
-Если callback возвращает ошибку, внутренний RAII-guard завершает потомка через
-`ProcessTerminate`. Это освобождает его таблицу хэндлов и metering-бюджет. После
-успешной отправки `launch_entry` закрывает startup-порт и возвращает `Process`.
+Если callback возвращает ошибку, `launch_entry` завершает потомка через
+`ProcessTerminate` и ждёт его с конечным сроком. Это освобождает его таблицу
+хэндлов и metering-бюджет. Отказ самого cleanup заменяет исходную ошибку
+callback: вызывающий не получает ложного подтверждения отката. После успешной
+отправки `launch_entry` закрывает startup-порт и возвращает `Process`.
 
 Одноразовый получатель принимает этот кадр через `runtime::receive_startup`.
 Функция закрывает серверную сторону startup-порта после диспетчеризации:
@@ -207,6 +209,10 @@ IPC-контракта. Если тот же порт после стартов�
 с полями `process` и `startup`; порт обслуживают обычным `PortTransport`.
 `load_entry` остаётся низкоуровневым путём для программ с произвольной начальной
 capability.
+
+Срок прикладному callback общий loader не задаёт: конечный send timeout и
+подтверждение возврата бюджета — контракт managed startup
+([rootkeeper.md](rootkeeper.md#managed-startup)).
 
 Подробности Resource-модели — в [architecture.md](architecture.md) и
 [syscalls.md](syscalls.md).

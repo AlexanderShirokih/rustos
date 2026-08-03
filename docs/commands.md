@@ -90,10 +90,12 @@ cargo xtask qemu-test [--timeout <сек>] [--spec <путь>]
 
 | Проход     | Feature ядра    | Userland-образ                | Что тестирует     |
 |------------|-----------------|-------------------------------|-------------------|
-| `kernel`   | `kernel-tests`  | `user/rootkeeper/image.toml`  | тесты внутри ядра |
+| `kernel`   | `kernel-tests`  | `user/testrunner/image.toml`  | тесты внутри ядра |
 | `userland` | —               | `user/testrunner/image.toml`  | тесты в userspace |
 
-Ядро пересобирается между прогонами из-за различия feature-флагов.
+Ядро пересобирается между прогонами из-за различия feature-флагов. Образ у
+проходов общий: под `kernel-tests` init-таском становится внутриядерный worker,
+и userland в этом проходе не исполняется вовсе.
 Выбор прохода для нового теста — в [`code-style.md`](code-style.md).
 
 `--spec` меняет конфигурацию машины, оставляя проходы прежними. Спека по

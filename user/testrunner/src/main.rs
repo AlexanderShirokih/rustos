@@ -40,6 +40,7 @@ mod process_lifecycle;
 mod process_start;
 mod resource_split;
 mod ring_transport;
+mod rootkeeper_system;
 mod signal;
 mod spawn_from_image;
 mod startup_fixture_protocol;

@@ -40,7 +40,7 @@ members = [
     "tools/style",
     "tools/userland-image",
     "user/filesystem-imagefs",
-    "user/filesystem-namespace-router",
+    "user/namespace-router",
     "user/filesystem-ramfs",
     "user/rootkeeper",
     "user/testrunner",

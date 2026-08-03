@@ -12,9 +12,9 @@ use filesystem_abi::{
     PATH_MAX, Path,
 };
 use filesystem_server::{settle, vend};
-use ipc::wire::{Cap, IpcError, Str};
+use ipc::wire::{IpcError, Str};
 use runtime::{
-    MemoryRegion, Mutex, OwnedHandle, PortTransport, Process, Resource, log_fmt, log_line,
+    MemoryRegion, Mutex, OwnedHandle, PortTransport, Process, Resource, Timeout, log_fmt, log_line,
 };
 use syscall::Rights;
 use userland_image::decode;
@@ -28,6 +28,7 @@ const DONE: u32 = 0;
 // Бюджет страниц, выдаваемый процессу файловой системы: его образ, стек, куча и буферы данных
 // сессий укладываются в него, а исчерпание не задевает ни маршрутизатор, ни соседей.
 const MOUNT_BUDGET_PAGES: u64 = 512;
+const UNMOUNT_TIMEOUT_NS: u64 = 5_000_000_000;
 
 // Срок ответа файловой системы на bind. Монтирование, не ответившее в срок, отпускает поток
 // диспетчеризации, а клиенту уходит Unresponsive.
@@ -180,15 +181,6 @@ impl<'a> Administering<'a> {
 }
 
 impl NamespaceAdminService for Administering<'_> {
-    /// Стартовый кадр маршрутизатор принимает один раз, до подъёма. Повторный несёт capability,
-    /// которых он не ждёт: они закрываются вместе с кадром.
-    fn start(&mut self, log: Cap, image: Cap, service: Cap) {
-        drop(OwnedHandle::adopt(log));
-        drop(OwnedHandle::adopt(image));
-        drop(OwnedHandle::adopt(service));
-        log_line("repeated start frame ignored");
-    }
-
     fn mount(
         &mut self,
         path: Str<'_, PATH_MAX>,
@@ -227,7 +219,17 @@ impl NamespaceAdminService for Administering<'_> {
         };
         // Снятие монтирования снимает и его процесс: выданные им сессии ядро отзывает каскадом
         // вместе с корневой капой его сервисного порта.
-        let _ = mount.process.terminate(0);
+        mount.process.terminate(0).map_err(|error| {
+            log_fmt(format_args!("unmount terminate refused: {error:?}"));
+            Error::Runtime(error).as_file_system_error()
+        })?;
+        mount
+            .process
+            .join(Timeout::from_ns(UNMOUNT_TIMEOUT_NS))
+            .map_err(|error| {
+                log_fmt(format_args!("unmount join refused: {error:?}"));
+                Error::Runtime(error).as_file_system_error()
+            })?;
         log_line("unmounted");
         Ok(DONE)
     }

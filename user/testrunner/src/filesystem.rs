@@ -13,8 +13,12 @@ use ipc::{
     wire::{HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, Str, TERMINATOR},
 };
 use kernel_tests::kernel_test;
+use rootkeeper::{
+    ManagedComponent, Mount, NamespaceBootError, NamespaceRoots, boot_config,
+    launch_namespace as launch_managed_namespace,
+};
 use runtime::{
-    MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Signal, Timeout,
+    BorrowedHandle, MemoryRegion, OwnedHandle, PortTransport, Process, Resource, Signal, Timeout,
     UserMemFlags, port_send,
 };
 use spin::Once;
@@ -31,8 +35,7 @@ const CLIENT_TIMEOUT_NS: u64 = 2_000_000_000;
 const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture";
 
 // Программы файловой подсистемы в образе.
-const ROUTER_PROGRAM: &str = "/boot/filesystem-namespace-router";
-const IMAGE_FILESYSTEM_PROGRAM: &str = "/boot/filesystem-imagefs";
+const ROUTER_PROGRAM: &str = "/boot/namespace-router";
 const RAM_FILESYSTEM_PROGRAM: &str = "/boot/filesystem-ramfs";
 
 // Фикстура зависшего монтирования: принимает стартовый кадр и замолкает.
@@ -74,75 +77,59 @@ const REAP_SESSIONS: usize = 40;
 // Буфер сессии в проверке уборки: на потолке буфера бюджет монтирования кончается быстрее.
 const REAP_BUFFER_SIZE: u32 = 64 * 1024;
 
-// Капы поднятого маршрутизатора на стороне прогона.
 struct NamespacePorts {
-    // Минт-капа сервисного порта: из неё идут вызовы Namespace. Корневая capability с READ
-    // уехала маршрутизатору, и его смерть оставит порт без получателей.
-    minter: OwnedHandle,
-    // Клиентская сторона admin-порта: по ней идут mount и unmount.
-    admin: OwnedHandle,
+    component: ManagedComponent<NamespaceRoots>,
 }
 
 static NAMESPACE_PORTS: Once<NamespacePorts> = Once::new();
 
 // Первый вызов поднимает маршрутизатор вместе с деревом имён прогона.
-fn router_minter() -> &'static OwnedHandle {
-    &namespace_ports().minter
+fn router_minter() -> BorrowedHandle<'static> {
+    namespace_roots().service_minter()
 }
 
-fn router_admin() -> &'static OwnedHandle {
-    &namespace_ports().admin
+fn router_admin() -> BorrowedHandle<'static> {
+    namespace_roots().admin()
 }
 
 fn namespace_ports() -> &'static NamespacePorts {
     NAMESPACE_PORTS.call_once(start_namespace)
 }
 
-fn namespace_admin_client(capability: &OwnedHandle) -> NamespaceAdminClient<PortTransport> {
+fn namespace_roots() -> &'static NamespaceRoots {
+    namespace_ports()
+        .component
+        .running()
+        .expect("namespace router is running")
+        .roots()
+}
+
+fn namespace_admin_client(capability: BorrowedHandle<'_>) -> NamespaceAdminClient<PortTransport> {
     NamespaceAdminClient::new(PortTransport::client(capability)).with_wait_ns(CALL_TIMEOUT_NS)
 }
 
 fn start_namespace() -> NamespacePorts {
-    let admin = Port::create().expect("admin port");
-    let service = Port::create().expect("service port");
-    let admin_client = admin
-        .handle()
-        .duplicate(Rights::WRITE | Rights::TRANSFER, 0)
-        .expect("admin client side");
-    let minter = service
-        .handle()
-        .duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, 0)
-        .expect("service client minter");
-    // Хэндл процесса не нужен: маршрутизатор живёт до конца прогона.
-    drop(spawn_from_image(ROUTER_PROGRAM, admin.into_handle()));
+    let resource = Resource::self_resource().expect("self metering resource");
+    let component = launch_namespace(&resource, rootkeeper::BOOT_MOUNTS)
+        .expect("namespace router and boot filesystems started");
+    NamespacePorts { component }
+}
 
+fn launch_namespace(
+    resource: &Resource,
+    mounts: &[Mount<'_>],
+) -> Result<ManagedComponent<NamespaceRoots>, NamespaceBootError> {
     let bootstrap = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
-    // Маршрутизатор получает лог-сессию: детям он раздаёт только её производные.
+    let image = MemoryRegion::adopt(acquire_image(&bootstrap));
+    let mapping = image.map_full_read_only().expect("map userland image");
+    let decoded = decode(mapping.as_bytes()).expect("decode userland image");
+    let program = decoded
+        .entry(ROUTER_PROGRAM)
+        .expect("image carries namespace router")
+        .program()
+        .expect("namespace router entry is a program");
     let log = crate::log_relay::router_log_session();
-
-    NamespaceAdminClient::new(PortTransport::client(&admin_client))
-        .start(
-            log,
-            OwnedHandle::adopt(acquire_image(&bootstrap)),
-            service.into_handle(),
-        )
-        .expect("start frame delivered");
-
-    // Дерево имён прогона поднимает тот, кто поднял маршрутизатор: mount живёт на admin-порту,
-    // и капы на него у клиентов нет.
-    let namespace = namespace_admin_client(&admin_client);
-    namespace
-        .mount(path("/"), path(IMAGE_FILESYSTEM_PROGRAM))
-        .expect("mount call")
-        .expect("image file system mounted");
-    namespace
-        .mount(path(RAM_MOUNT), path(RAM_FILESYSTEM_PROGRAM))
-        .expect("mount call")
-        .expect("ram file system mounted");
-    NamespacePorts {
-        minter,
-        admin: admin_client,
-    }
+    launch_managed_namespace(&program, resource, image, log, boot_config(mounts))
 }
 
 fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
@@ -166,7 +153,7 @@ fn acquire_image(bootstrap: &BootstrapClient<PortTransport>) -> ipc::wire::Cap {
         .expect("image vend")
 }
 
-fn namespace_client(capability: &OwnedHandle) -> NamespaceClient<PortTransport> {
+fn namespace_client(capability: BorrowedHandle<'_>) -> NamespaceClient<PortTransport> {
     NamespaceClient::new(PortTransport::client(capability)).with_wait_ns(CALL_TIMEOUT_NS)
 }
 
@@ -715,7 +702,7 @@ fn filesystem_lists_the_image_directory() {
 
     // Состав образа задаёт манифест: перечисление несёт и программы, и
     // файл-данные.
-    for expected in ["testrunner", "filesystem-namespace-router", "sample"] {
+    for expected in ["testrunner", "namespace-router", "sample"] {
         kernel_tests::kassert!(names.iter().any(|name| name.as_str() == expected));
     }
 }
