@@ -159,6 +159,8 @@ struct RawExempt {
 struct RawText {
     id: String,
     title: String,
+    #[serde(default)]
+    explain: String,
     message: String,
     pattern: String,
     #[serde(default = "default_target")]
@@ -194,6 +196,9 @@ fn default_target() -> String {
 }
 
 fn declare(raw: RawText) -> Result<Rule> {
+    if raw.explain.trim().is_empty() {
+        bail!("rule {} carries no explanation", raw.id);
+    }
     let target = match raw.target.as_str() {
         "comment" => TextTarget::Comment,
         "doc" => TextTarget::Doc,
@@ -258,6 +263,7 @@ fn declare(raw: RawText) -> Result<Rule> {
         meta: RuleMeta {
             id: raw.id.clone(),
             title: raw.title,
+            explain: raw.explain.trim().to_owned(),
             category: Category::Prose,
             severity: Severity::Warn,
         },

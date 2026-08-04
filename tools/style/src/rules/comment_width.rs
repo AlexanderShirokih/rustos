@@ -6,12 +6,17 @@ use crate::{
     view::{CommentView, LineView, View},
 };
 
-/// Правило C2: строка комментария укладывается в предельную ширину строки кода.
+/// Строка комментария укладывается в предельную ширину строки кода.
 pub fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "comment_width".to_owned(),
             title: "comment line is wider than the code width limit".to_owned(),
+            explain: concat!(
+                "A comment wraps at the width `rustfmt.toml` sets for code, so a block of ",
+                "prose keeps the shape of the file around it. Rewrap the block at that width.",
+            )
+            .to_owned(),
             category: Category::Prose,
             severity: Severity::Warn,
         },

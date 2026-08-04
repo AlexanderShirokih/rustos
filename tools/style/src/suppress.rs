@@ -35,11 +35,7 @@ impl Suppressions {
 
         for comment in &parsed.comments {
             let body = comment.text.trim_start_matches('/').trim_start();
-            let (marker, whole_file) = if body.starts_with(WHOLE_FILE) {
-                (WHOLE_FILE, true)
-            } else if body.starts_with(INLINE) {
-                (INLINE, false)
-            } else {
+            let Some((marker, whole_file)) = marker_of(&comment.text) else {
                 continue;
             };
             let rest = body.get(marker.len()..).unwrap_or_default();
@@ -92,6 +88,21 @@ impl Suppressions {
         }
         hit
     }
+}
+
+pub fn is_directive(text: &str) -> bool {
+    marker_of(text).is_some()
+}
+
+fn marker_of(text: &str) -> Option<(&'static str, bool)> {
+    let body = text.trim_start_matches('/').trim_start();
+    if body.starts_with(WHOLE_FILE) {
+        return Some((WHOLE_FILE, true));
+    }
+    if body.starts_with(INLINE) {
+        return Some((INLINE, false));
+    }
+    None
 }
 
 fn split_directive(rest: &str) -> Option<(Vec<String>, String)> {

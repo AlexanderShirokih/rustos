@@ -123,9 +123,81 @@ fn doc_on_a_test_is_left_to_its_own_rule() {
 }
 
 #[test]
+fn comment_attached_to_a_private_declaration_is_reported() {
+    let hits = check(
+        &rule("comment_on_declaration"),
+        "// Helper of the parser.\nfn helper() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn comment_attached_to_a_public_declaration_is_accepted() {
+    let hits = check(
+        &rule("comment_on_declaration"),
+        "// Helper of the parser.\npub fn helper() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn comment_separated_by_a_blank_line_stands_on_its_own() {
+    let hits = check(
+        &rule("comment_on_declaration"),
+        "// Section of the file.\n\nfn helper() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn comment_survives_attributes_between_it_and_the_declaration() {
+    let hits = check(
+        &rule("comment_on_declaration"),
+        "#[derive(Debug)]\n// Layout of the frame.\nstruct Hidden;\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn safety_contract_of_a_private_declaration_is_accepted() {
+    let hits = check(
+        &rule("comment_on_declaration"),
+        "// SAFETY: the caller holds the mapping.\nunsafe fn raw() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn suppression_directive_is_not_prose_of_its_own() {
+    let hits = check(
+        &rule("comment_on_declaration"),
+        "// style:allow(comment_width) fixture\nfn helper() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn comment_trailing_the_line_it_constrains_is_accepted() {
+    let hits = check(
+        &rule("comment_on_declaration"),
+        "const LIMIT: usize = 4; // the device counts frames from one\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn comment_on_a_test_is_left_to_its_own_rule() {
+    let hits = check(
+        &rule("comment_on_declaration"),
+        "// Guards the badge rollover.\n#[test]\nfn scenario() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
 fn short_doc_on_a_test_fits_the_regression_budget() {
     let source = "/// Guards the badge rollover.\n#[test]\nfn scenario() {}\n";
-    let hits = check(&rule("doc_on_test"), source);
+    let hits = check(&rule("comment_on_test"), source);
     assert!(hits.is_empty(), "{hits:?}");
 }
 
@@ -138,7 +210,20 @@ fn long_doc_on_a_test_exceeds_the_regression_budget() {
         "#[test]\n",
         "fn scenario() {}\n"
     );
-    let hits = check(&rule("doc_on_test"), source);
+    let hits = check(&rule("comment_on_test"), source);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn plain_comment_on_a_test_spends_the_same_budget() {
+    let source = concat!(
+        "// Line one.\n",
+        "// Line two.\n",
+        "// Line three.\n",
+        "#[test]\n",
+        "fn scenario() {}\n"
+    );
+    let hits = check(&rule("comment_on_test"), source);
     assert_eq!(hits.len(), 1, "{hits:?}");
 }
 

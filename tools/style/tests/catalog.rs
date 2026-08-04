@@ -32,6 +32,34 @@ fn every_compiled_rule_has_a_source_file_named_after_it() {
 }
 
 #[test]
+fn every_rule_carries_an_explanation() {
+    let catalog = compiled();
+    let Ok(mut config) = Config::parse(&style_toml(), &catalog) else {
+        panic!("style.toml must load");
+    };
+    for rule in config.catalog(compiled()) {
+        assert!(!rule.meta.explain.trim().is_empty(), "{}", rule.meta.id);
+    }
+}
+
+#[test]
+fn declared_rule_without_an_explanation_is_rejected() {
+    let catalog = compiled();
+    let mute = concat!(
+        "[[text]]\n",
+        "id = \"mute\"\n",
+        "title = \"t\"\n",
+        "explain = \"  \"\n",
+        "message = \"m\"\n",
+        "pattern = \"x\"\n"
+    );
+    let Err(error) = Config::parse(mute, &catalog) else {
+        panic!("rule without an explanation must be rejected");
+    };
+    assert!(error.to_string().contains("explanation"), "{error}");
+}
+
+#[test]
 fn prose_rules_stay_at_warn() {
     let catalog = compiled();
     let Ok(mut config) = Config::parse(&style_toml(), &catalog) else {
@@ -71,6 +99,7 @@ fn broken_pattern_in_a_declared_rule_is_rejected() {
         "[[text]]\n",
         "id = \"broken\"\n",
         "title = \"t\"\n",
+        "explain = \"e\"\n",
         "message = \"m\"\n",
         "pattern = \"[unclosed\"\n"
     );
@@ -87,6 +116,7 @@ fn declared_rule_may_not_shadow_a_compiled_one() {
         "[[text]]\n",
         "id = \"comment_width\"\n",
         "title = \"t\"\n",
+        "explain = \"e\"\n",
         "message = \"m\"\n",
         "pattern = \"x\"\n"
     );

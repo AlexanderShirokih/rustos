@@ -6,12 +6,19 @@ use crate::{
     view::{SyntaxView, View},
 };
 
-/// Правило B1: doc-комментарий стоит только над объявлением, объявленным `pub`.
+/// Doc-комментарий стоит только над объявлением, объявленным `pub`.
 pub fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "doc_on_declaration".to_owned(),
             title: "doc comment on a declaration that is not declared `pub`".to_owned(),
+            explain: concat!(
+                "A declaration outside the public surface is read together with its body, ",
+                "and its name and signature carry the whole contract. Delete the comment ",
+                "and rename what stays unclear. Rewriting `///` as `//` keeps the same ",
+                "prose in the same place and is reported all the same.",
+            )
+            .to_owned(),
             category: Category::Ast,
             severity: Severity::Deny,
         },

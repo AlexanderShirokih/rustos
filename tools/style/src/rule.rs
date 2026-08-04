@@ -43,6 +43,8 @@ pub struct RuleMeta {
     pub id: String,
     /// Однострочное описание для отчёта.
     pub title: String,
+    /// Норма, которую держит правило, и способ привести код к ней.
+    pub explain: String,
     /// Семейство.
     pub category: Category,
     /// Уровень по умолчанию.

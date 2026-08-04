@@ -4,10 +4,8 @@ use anyhow::{Context as _, Result};
 pub struct Settings {
     /// Предельная ширина строки, источник — `rustfmt.toml`.
     pub max_width: usize,
-    /// Предельный объём doc-комментария на публичном объявлении.
-    pub doc_max_lines: usize,
-    /// Предельный объём doc-комментария на тестовой функции.
-    pub test_doc_max_lines: usize,
+    /// Предельный объём комментария на тестовой функции.
+    pub test_comment_max_lines: usize,
     /// Атрибуты, помечающие функцию как тест.
     pub test_attributes: Vec<String>,
     /// Атрибуты деривации, чей doc принадлежит порождённой поверхности.
@@ -33,8 +31,7 @@ impl Settings {
 
         Ok(Settings {
             max_width,
-            doc_max_lines: 3,
-            test_doc_max_lines: 2,
+            test_comment_max_lines: 2,
             test_attributes: vec!["test".to_owned(), "kernel_test".to_owned()],
             doc_bearing_derives: vec![
                 "Parser".to_owned(),
@@ -50,8 +47,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             max_width: DEFAULT_MAX_WIDTH,
-            doc_max_lines: 3,
-            test_doc_max_lines: 2,
+            test_comment_max_lines: 2,
             test_attributes: vec!["test".to_owned(), "kernel_test".to_owned()],
             doc_bearing_derives: vec![
                 "Parser".to_owned(),

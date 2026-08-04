@@ -8,6 +8,11 @@
 [[text]]
 id = "latin_apostrophe"
 title = "latin term declined through an apostrophe"
+explain = """
+A latin term keeps its own spelling inside russian prose, and an apostrophe with \
+a russian ending glues two alphabets into one word. Drop the ending, or rebuild \
+the phrase around the term.
+"""
 message = "latin term declined through an apostrophe, write it without the ending"
 target = "comment"
 pattern = "[A-Za-z]+'[а-яёА-ЯЁ]"

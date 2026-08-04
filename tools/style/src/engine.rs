@@ -155,6 +155,8 @@ impl Engine {
             remaining.push(report);
         }
 
+        explain(&catalog, &remaining, &mut notes);
+
         let code = i32::from(
             remaining
                 .iter()
@@ -194,6 +196,15 @@ impl Outcome {
                 });
                 format!("{body:#}\n")
             }
+        }
+    }
+}
+
+fn explain(catalog: &[Rule], reports: &[Report], notes: &mut Vec<String>) {
+    let fired: BTreeSet<&str> = reports.iter().map(|report| report.rule.as_str()).collect();
+    for rule in catalog {
+        if fired.contains(rule.meta.id.as_str()) {
+            notes.push(format!("{}: {}", rule.meta.id, rule.meta.explain));
         }
     }
 }
@@ -434,4 +445,47 @@ fn level_of(catalog: &[Rule], config: &Config, key: &str) -> Option<Severity> {
     }
     let rule = catalog.iter().find(|rule| rule.meta.id == id)?;
     config.level(&rule.meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        engine::explain,
+        report::Report,
+        rule::Severity,
+        rules::catalog,
+        span::{Position, Span},
+    };
+
+    fn report(rule: &str) -> Report {
+        Report {
+            rule: rule.to_owned(),
+            severity: Severity::Deny,
+            path: std::path::PathBuf::from("kernel/demo/src/demo.rs"),
+            at: Span::new(0, 1),
+            position: Position { line: 1, column: 1 },
+            item: "<file-root>".to_owned(),
+            fingerprint: "00000000".to_owned(),
+            occurrence: 1,
+            message: "finding".to_owned(),
+        }
+    }
+
+    #[test]
+    fn fired_rule_appends_its_explanation_once() {
+        let catalog = catalog::compiled();
+        let reports = vec![report("doc_on_declaration"), report("doc_on_declaration")];
+        let mut notes = Vec::new();
+        explain(&catalog, &reports, &mut notes);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("doc_on_declaration: "), "{notes:?}");
+    }
+
+    #[test]
+    fn silent_rule_leaves_the_footer_alone() {
+        let catalog = catalog::compiled();
+        let mut notes = Vec::new();
+        explain(&catalog, &[], &mut notes);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
 }

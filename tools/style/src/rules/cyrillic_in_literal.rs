@@ -6,12 +6,18 @@ use crate::{
     view::{LiteralView, View},
 };
 
-/// Правило B4: строковый литерал не содержит кириллицы, включая тела макро-вызовов.
+/// Строковый литерал не содержит кириллицы, включая тела макро-вызовов.
 pub fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "cyrillic_in_literal".to_owned(),
             title: "cyrillic text in a string literal reaches program output".to_owned(),
+            explain: concat!(
+                "A string literal reaches the user through output, a panic or a log, and ",
+                "that surface is english. Translate the literal and keep the russian text ",
+                "in comments and documentation.",
+            )
+            .to_owned(),
             category: Category::Ast,
             severity: Severity::Deny,
         },

@@ -1,9 +1,9 @@
 use ra_ap_syntax::{
-    AstNode, AstToken, SyntaxKind, SyntaxNode,
+    AstNode, AstToken, NodeOrToken, SyntaxKind, SyntaxNode,
     ast::{self, HasAttrs, HasDocComments, HasVisibility},
 };
 
-use crate::{settings::Settings, span::Span};
+use crate::{settings::Settings, span::Span, suppress::is_directive};
 
 pub const DECLARATIONS: &[SyntaxKind] = &[
     SyntaxKind::CONST,
@@ -22,30 +22,81 @@ pub const DECLARATIONS: &[SyntaxKind] = &[
     SyntaxKind::VARIANT,
 ];
 
-pub struct DocBlock {
+pub struct CommentBlock {
     pub span: Span,
     pub lines: usize,
 }
 
-pub fn doc_block(node: &SyntaxNode) -> Option<DocBlock> {
+pub fn doc_block(node: &SyntaxNode) -> Option<CommentBlock> {
     let owner = ast::AnyHasDocComments::cast(node.clone())?;
     let mut comments: Vec<ast::Comment> = owner.doc_comments().collect();
     if let Some(inner) = owner.inner_attributes_node() {
         comments.extend(ast::DocCommentIter::from_syntax_node(&inner));
     }
+    block(&comments)
+}
+
+pub fn plain_block(node: &SyntaxNode) -> Option<CommentBlock> {
+    block(&leading_plain_comments(node))
+}
+
+pub fn leading_block(node: &SyntaxNode) -> Option<CommentBlock> {
+    match (doc_block(node), plain_block(node)) {
+        (Some(doc), Some(plain)) => Some(CommentBlock {
+            span: Span::new(
+                doc.span.start.min(plain.span.start),
+                doc.span.end.max(plain.span.end),
+            ),
+            lines: doc.lines + plain.lines,
+        }),
+        (doc, plain) => doc.or(plain),
+    }
+}
+
+pub fn opens_safety_contract(node: &SyntaxNode) -> bool {
+    leading_plain_comments(node)
+        .first()
+        .is_some_and(|comment| body_of(comment).starts_with("SAFETY:"))
+}
+
+fn block(comments: &[ast::Comment]) -> Option<CommentBlock> {
     let first = comments.first()?;
     let last = comments.last()?;
     let lines = comments
         .iter()
         .map(|comment| comment.syntax().text().to_string().lines().count().max(1))
         .sum();
-    Some(DocBlock {
+    Some(CommentBlock {
         span: Span::new(
             first.syntax().text_range().start().into(),
             last.syntax().text_range().end().into(),
         ),
         lines,
     })
+}
+
+fn leading_plain_comments(node: &SyntaxNode) -> Vec<ast::Comment> {
+    let mut comments = Vec::new();
+    for element in node.children_with_tokens() {
+        match element {
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::WHITESPACE => {}
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMENT => {
+                let Some(comment) = ast::Comment::cast(token) else {
+                    continue;
+                };
+                if comment.kind().doc.is_none() && !is_directive(comment.text()) {
+                    comments.push(comment);
+                }
+            }
+            NodeOrToken::Node(child) if child.kind() == SyntaxKind::ATTR => {}
+            _ => break,
+        }
+    }
+    comments
+}
+
+fn body_of(comment: &ast::Comment) -> &str {
+    comment.text().trim_start_matches('/').trim_start()
 }
 
 pub fn carries_test_attribute(node: &SyntaxNode, settings: &Settings) -> bool {
