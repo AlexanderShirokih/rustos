@@ -159,6 +159,34 @@ impl CancelTarget for ParkWaker {
     }
 }
 
+pub(super) fn deadline_after(
+    runtime: &Arc<dyn KernelRuntime>,
+    timeout_ns: Option<u64>,
+) -> Option<u64> {
+    timeout_ns.map(|timeout| runtime.now_ns().saturating_add(timeout))
+}
+
+pub(super) fn remaining_until(
+    runtime: &Arc<dyn KernelRuntime>,
+    deadline_ns: Option<u64>,
+) -> Option<u64> {
+    deadline_ns.map(|deadline| deadline.saturating_sub(runtime.now_ns()))
+}
+
+pub(super) fn park_until_deadline(
+    runtime: &Arc<dyn KernelRuntime>,
+    waker: &Arc<ParkWaker>,
+    deadline_ns: Option<u64>,
+) {
+    while waker.state().load(Ordering::Acquire) == ParkState::REGISTERED {
+        let remaining = remaining_until(runtime, deadline_ns);
+        if remaining == Some(0) {
+            return;
+        }
+        runtime.block_current_until(waker.state(), remaining);
+    }
+}
+
 impl Waker for ParkWaker {
     fn wake(&self, observed: u32) {
         self.signal(0, observed);

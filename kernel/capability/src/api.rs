@@ -12,7 +12,10 @@ use super::{
     irq_runtime::interrupts_control,
     runtime::runtime,
     signal::Signal,
-    wait::{CancelTarget, IndexedWaker, ParkResolution, ParkWaker, Waitable, Waker},
+    wait::{
+        CancelTarget, IndexedWaker, ParkResolution, ParkWaker, Waitable, Waker, deadline_after,
+        park_until_deadline,
+    },
 };
 
 /// Handle-таблица текущего процесса; `BadHandle` до инициализации планировщика.
@@ -252,6 +255,7 @@ pub fn signal_wait_many(
         return Err(IpcError::Timeout);
     }
 
+    let deadline_ns = deadline_after(runtime, timeout_ns);
     let waker = Arc::new(ParkWaker::new(
         runtime.clone(),
         runtime.current_wait_token(),
@@ -268,7 +272,7 @@ pub fn signal_wait_many(
         return Err(error);
     }
 
-    runtime.block_current_until(armed.waker().state(), timeout_ns);
+    park_until_deadline(runtime, armed.waker(), deadline_ns);
     let resolution = armed.waker().resolve();
     let winner_index = armed.waker().winner_index();
     let observed = armed.waker().observed();
@@ -584,6 +588,29 @@ mod tests {
         assert_eq!(outcome.index, 1);
         assert_eq!(outcome.observed & SIGNALED, SIGNALED);
         assert_eq!(signal_b.peek() & SIGNALED, 0);
+
+        mock().reset();
+    }
+
+    /// Бессрочное ожидание сигнала тайм-аута не знает: пробуждение, не принёсшее
+    /// сигнала, возвращает поток в ожидание.
+    #[test]
+    fn signal_wait_without_deadline_waits_out_a_wake_without_a_signal() {
+        let _guard = test_lock();
+        let (table, id, signal) = install_signal_handle(Rights::READ | Rights::WRITE);
+        let parks = Arc::new(AtomicU32::new(0));
+        let (signal_for_hook, parks_for_hook) = (signal.clone(), parks.clone());
+        let hook: BlockHook = Box::new(move || {
+            // Первое пробуждение сигнала не приносит.
+            if parks_for_hook.fetch_add(1, Ordering::AcqRel) == 1 {
+                signal_for_hook.signal(SIGNALED, 0);
+            }
+        });
+        mock().configure(Some(table), Some(hook));
+
+        let observed = signal_wait_one(id, SIGNALED, None).expect("Ok");
+        assert_eq!(observed & SIGNALED, SIGNALED);
+        assert_eq!(parks.load(Ordering::Acquire), 2);
 
         mock().reset();
     }

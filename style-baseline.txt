@@ -1,5 +1,4 @@
 comment_width|kernel/capability/src/port/mod.rs|<file-root>|696df927
-comment_width|kernel/capability/src/port/mod.rs|resolve_call|0c3f823e
 comment_width|kernel/capability/src/termination.rs|<file-root>|7b08a152
 comment_width|kernel/hal-aarch64/src/boot/protocol/linux_arm64/entry.rs|_start|51eb17fc
 comment_width|kernel/hal-aarch64/src/memory/memory_setup.rs|MemorySetup<Any>::create_root_table|052ce1df
@@ -131,9 +130,6 @@ doc_on_declaration|kernel/capability/src/port/mod.rs|RecvAction::SenderGone|1828
 doc_on_declaration|kernel/capability/src/port/mod.rs|SendAction::Done|4ed9dadc
 doc_on_declaration|kernel/capability/src/port/mod.rs|SendAction::Failed|9213cfa2
 doc_on_declaration|kernel/capability/src/port/mod.rs|SendAction::Park|81cf8320
-doc_on_declaration|kernel/capability/src/port/mod.rs|deadline_after|d9e8a10e
-doc_on_declaration|kernel/capability/src/port/mod.rs|remaining_until|91eaf31e
-doc_on_declaration|kernel/capability/src/port/mod.rs|resolve_call|0a3b7fea
 doc_on_declaration|kernel/capability/src/port/mod.rs|tests::DeadlineRuntime|bf247134
 doc_on_declaration|kernel/capability/src/port/mod.rs|tests::EXTRA_BADGE|4a1cf6a7
 doc_on_declaration|kernel/capability/src/port/mod.rs|tests::StubRuntime|10f413ae

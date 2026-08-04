@@ -42,7 +42,7 @@ use super::{
     rev_node::RevocationHook,
     runtime::{KernelRuntime, ParkState},
     target::{HolderTicket, OperationHold},
-    wait::{CancelTarget, ParkWaker},
+    wait::{CancelTarget, ParkWaker, deadline_after, park_until_deadline, remaining_until},
 };
 
 /// Port - объект, реализующий синхронный обмен сообщениями.
@@ -480,29 +480,9 @@ fn outcome_to_result(outcome: &Arc<OutcomeSlot>) -> Result<(), IpcError> {
     }
 }
 
-fn park_with_timeout(
-    runtime: &Arc<dyn KernelRuntime>,
-    waker: &Arc<ParkWaker>,
-    timeout_ns: Option<u64>,
-) {
-    if timeout_ns != Some(0) {
-        runtime.block_current_until(waker.state(), timeout_ns);
-    }
-}
-
 // Шаг перепроверки состояния call'а с истёкшим дедлайном, пока перенос в полёте:
 // переход `PENDING -> AWAITING_REPLY` вызывателя не будит, и его надо переобнаружить.
 const EXPIRED_RECHECK_NS: u64 = 1_000_000;
-
-/// Абсолютный дедлайн операции; `None` - бессрочная.
-fn deadline_after(runtime: &Arc<dyn KernelRuntime>, timeout_ns: Option<u64>) -> Option<u64> {
-    timeout_ns.map(|timeout| runtime.now_ns().saturating_add(timeout))
-}
-
-/// Остаток до дедлайна: `None` - бессрочно, `Some(0)` - дедлайн пройден.
-fn remaining_until(runtime: &Arc<dyn KernelRuntime>, deadline_ns: Option<u64>) -> Option<u64> {
-    deadline_ns.map(|deadline| deadline.saturating_sub(runtime.now_ns()))
-}
 
 fn wait_resolved(runtime: &Arc<dyn KernelRuntime>, waker: &Arc<ParkWaker>) {
     while waker.state().load(Ordering::Acquire) == ParkState::REGISTERED {
@@ -515,12 +495,17 @@ fn resolve_send_recv(
     runtime: &Arc<dyn KernelRuntime>,
     waker: &Arc<ParkWaker>,
     outcome: &Arc<OutcomeSlot>,
+    deadline_ns: Option<u64>,
 ) -> Result<(), IpcError> {
-    if port.remove_waiter(waker) {
-        waker.claim_timeout();
-        return Err(IpcError::Timeout);
+    park_until_deadline(runtime, waker, deadline_ns);
+    if waker.state().load(Ordering::Acquire) == ParkState::REGISTERED {
+        if port.remove_waiter(waker) {
+            waker.claim_timeout();
+            return Err(IpcError::Timeout);
+        }
+        // Waiter забран матчером: исход публикуется, дожидаемся сигнала.
+        wait_resolved(runtime, waker);
     }
-    wait_resolved(runtime, waker);
     outcome_to_result(outcome)
 }
 
@@ -533,13 +518,13 @@ pub fn port_send(
     timeout_ns: Option<u64>,
     hold: Option<OperationHold>,
 ) -> Result<(), IpcError> {
+    let deadline_ns = deadline_after(runtime, timeout_ns);
     match port.send(sender, runtime, hold) {
         SendAction::Done => Ok(()),
         SendAction::Failed(e) => Err(e),
         SendAction::Park { waker, outcome } => {
             arm_port_cancel(port, runtime, &waker, &outcome, None);
-            park_with_timeout(runtime, &waker, timeout_ns);
-            let result = resolve_send_recv(port, runtime, &waker, &outcome);
+            let result = resolve_send_recv(port, runtime, &waker, &outcome, deadline_ns);
             runtime.clear_blocked_cancel();
             result
         }
@@ -565,8 +550,6 @@ pub fn port_call(
         CallAction::Failed(e) => Err(e),
         CallAction::Park { waker, outcome } => {
             arm_port_cancel(port, runtime, &waker, &outcome, None);
-            // Матч и перенос до парковки уже израсходовали часть тайм-аута.
-            park_with_timeout(runtime, &waker, remaining_until(runtime, deadline_ns));
             let result = resolve_call(port, runtime, &waker, &outcome, deadline_ns);
             runtime.clear_blocked_cancel();
             result
@@ -574,13 +557,6 @@ pub fn port_call(
     }
 }
 
-/// Resolve для `call`.
-///
-/// Фаза 1 (вызывающая сторона ещё в очереди отправителей): снятие себя с очереди под queue-локом.
-/// Фаза 2 (запрос уже забран получателем, ждём reply): арбитраж тайм-аута идёт по [`OutcomeSlot`]
-/// и абсолютному `deadline_ns`: каждая перепарковка взводит остаток до него.
-/// Пока получатель/сервер переносит данные (`PENDING`/`DELIVERING`), мы дожидаемся завершения переноса -
-/// так наш IPC-буфер не будет переиспользован под активным чтением/записью переноса.
 fn resolve_call(
     port: &Arc<Port>,
     runtime: &Arc<dyn KernelRuntime>,
@@ -588,17 +564,19 @@ fn resolve_call(
     outcome: &Arc<OutcomeSlot>,
     deadline_ns: Option<u64>,
 ) -> Result<(), IpcError> {
-    if port.remove_waiter(waker) {
-        waker.claim_timeout();
-        return Err(IpcError::Timeout);
-    }
     loop {
         match outcome.raw() {
-            // Получатель читает наш буфер либо сервер переносит ответ - уйти нельзя
-            // и на истёкшем дедлайне; тогда парковка перевзводится коротким шагом.
             OutcomeSlot::PENDING | OutcomeSlot::DELIVERING => {
                 let park_ns = match remaining_until(runtime, deadline_ns) {
-                    Some(0) => Some(EXPIRED_RECHECK_NS),
+                    // Из очереди уводит истёкший дедлайн; в переносе уйти нельзя и на
+                    // нём, поэтому парковка перевзводится коротким шагом.
+                    Some(0) => {
+                        if port.remove_waiter(waker) {
+                            waker.claim_timeout();
+                            return Err(IpcError::Timeout);
+                        }
+                        Some(EXPIRED_RECHECK_NS)
+                    }
                     remaining => remaining,
                 };
                 runtime.block_current_until(waker.state(), park_ns);
@@ -631,6 +609,7 @@ pub fn port_recv(
     timeout_ns: Option<u64>,
     hold: Option<OperationHold>,
 ) -> Result<Option<Arc<Reply>>, IpcError> {
+    let deadline_ns = deadline_after(runtime, timeout_ns);
     match port.recv(receiver, runtime, hold) {
         RecvAction::Done { reply } => Ok(reply),
         RecvAction::Failed(e) => Err(e),
@@ -641,8 +620,7 @@ pub fn port_recv(
             reply_slot,
         } => {
             arm_port_cancel(port, runtime, &waker, &outcome, Some(reply_slot.clone()));
-            park_with_timeout(runtime, &waker, timeout_ns);
-            let resolved = resolve_send_recv(port, runtime, &waker, &outcome);
+            let resolved = resolve_send_recv(port, runtime, &waker, &outcome, deadline_ns);
             runtime.clear_blocked_cancel();
             match outcome.try_get() {
                 Ok(Some(RendezvousOutcome::SenderGone(badge))) => {
@@ -1235,6 +1213,109 @@ mod tests {
         assert_eq!(result, Err(IpcError::Timeout));
         assert_eq!(rt.parks(), alloc::vec![Some(EXPIRED_RECHECK_NS)]);
         assert_eq!(ctx.outcome.raw(), OutcomeSlot::TIMEDOUT);
+    }
+
+    /// Бессрочный приём тайм-аута не знает: пробуждение, заставшее waiter в очереди,
+    /// возвращает поток в ожидание.
+    #[test]
+    fn resolve_recv_without_deadline_waits_out_a_wake_without_resolution() {
+        let rt = DeadlineRuntime::arc(0);
+        let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &dyn_rt, None)
+        else {
+            panic!("recv must park");
+        };
+
+        // Разрешение приходит встречным отправителем на следующей парковке.
+        let (matcher, matcher_rt) = (ep.clone(), dyn_rt.clone());
+        rt.set_first_park_hook(Box::new(move || {
+            assert!(matches!(
+                matcher.send(&transport(BASE_A), &matcher_rt, None),
+                SendAction::Done
+            ));
+        }));
+
+        let result = resolve_send_recv(&ep, &dyn_rt, &waker, &outcome, None);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(rt.parks(), alloc::vec![None]);
+    }
+
+    /// Отправитель на бессрочной операции ведёт себя так же.
+    #[test]
+    fn resolve_send_without_deadline_waits_out_a_wake_without_resolution() {
+        let rt = DeadlineRuntime::arc(0);
+        let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let SendAction::Park { waker, outcome } = ep.send(&transport(BASE_A), &dyn_rt, None) else {
+            panic!("send must park");
+        };
+
+        let (matcher, matcher_rt) = (ep.clone(), dyn_rt.clone());
+        rt.set_first_park_hook(Box::new(move || {
+            assert!(matches!(
+                matcher.recv(&transport(BASE_B), &matcher_rt, None),
+                RecvAction::Done { reply: None }
+            ));
+        }));
+
+        let result = resolve_send_recv(&ep, &dyn_rt, &waker, &outcome, None);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(rt.parks(), alloc::vec![None]);
+    }
+
+    /// Бессрочный `call`, разбуженный в очереди отправителей, возвращается в ожидание.
+    #[test]
+    fn resolve_call_without_deadline_waits_out_a_wake_without_resolution() {
+        let rt = DeadlineRuntime::arc(0);
+        let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let ctx = ParkCtx::for_current(&dyn_rt);
+        let (waker, outcome) = (ctx.waker.clone(), ctx.outcome.clone());
+        assert!(matches!(
+            ep.call(&transport(BASE_A), ctx, None),
+            CallAction::Park { .. }
+        ));
+
+        // Разрешение приходит следующей парковкой: сервер забирает запрос и отвечает.
+        let (server, server_rt) = (ep.clone(), dyn_rt.clone());
+        rt.set_first_park_hook(Box::new(move || {
+            let RecvAction::Done { reply: Some(reply) } =
+                server.recv(&transport(BASE_B), &server_rt, None)
+            else {
+                panic!("recv must return a reply for call");
+            };
+            reply.reply(&transport(BASE_B)).expect("reply ok");
+        }));
+
+        let result = resolve_call(&ep, &dyn_rt, &waker, &outcome, None);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(rt.parks(), alloc::vec![None]);
+    }
+
+    /// Приём со сроком: пробуждение раньше дедлайна досыпает остаток.
+    #[test]
+    fn resolve_recv_woken_early_sleeps_the_remainder_before_timing_out() {
+        let rt = DeadlineRuntime::arc(500);
+        let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
+        let ep = Port::new();
+        let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &dyn_rt, None)
+        else {
+            panic!("recv must park");
+        };
+
+        let result = resolve_send_recv(&ep, &dyn_rt, &waker, &outcome, Some(1000));
+
+        assert_eq!(result, Err(IpcError::Timeout));
+        // Единственная перепарковка - ровно на остаток до дедлайна (1000 - 500).
+        assert_eq!(rt.parks(), alloc::vec![Some(500)]);
+        assert!(ep.queue_is_empty());
     }
 
     #[test]
