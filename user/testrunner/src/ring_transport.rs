@@ -27,9 +27,9 @@ const FRAMES: u32 = 4096;
 /// Размер стека consumer-потока (page-aligned выдача -> вершина выровнена).
 const STACK_SIZE: u64 = 0x4000;
 /// Таймаут join'а: конечный, чтобы зависший consumer падал по timeout.
-const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 /// Таймаут одного `wait_readable` consumer'а.
-const WAIT_TIMEOUT_NS: u64 = 1_000_000_000;
+const WAIT_TIMEOUT: Timeout = Timeout::from_secs(1);
 
 /// Размер страницы: регион-кольцо аллоцируется и маппится постранично.
 const PAGE_SIZE: u64 = 4096;
@@ -65,7 +65,7 @@ extern "C" fn consumer_worker(arg: usize) -> u32 {
     let mut next = 0u32;
     let mut handles: [u32; 0] = [];
     while next < FRAMES {
-        match transport.wait_readable(WAIT_TIMEOUT_NS) {
+        match transport.wait_readable(WAIT_TIMEOUT) {
             Ok(()) => {}
             Err(_) => return 1,
         }
@@ -139,7 +139,7 @@ fn ring_transport_round_trip() {
 
     // Join consumer'а с конечным таймаутом (ожидание по thread-handle).
     thread
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("consumer joins before timeout");
 
     kernel_tests::kassert!(shared.ok.load(core::sync::atomic::Ordering::Acquire));

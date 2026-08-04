@@ -12,7 +12,7 @@
 
 use collections::{PopOutcome, PushOutcome, RingError, SpscRing};
 use ipc::{MessageLen, Transport, wire::IpcError};
-use syscall::{Handle, SIGNALED, SYSCALL_RETURN_TIMEOUT, WakeCount};
+use syscall::{Handle, SIGNALED, SYSCALL_RETURN_TIMEOUT, Timeout, WakeCount};
 
 use crate::{
     handle::BorrowedHandle,
@@ -101,7 +101,7 @@ impl Transport for RingTransport {
         }
     }
 
-    fn wait_readable(&self, timeout_ns: u64) -> Result<(), IpcError> {
+    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
         match self.role {
             Role::Consumer => loop {
                 if !self.ring.is_empty() {
@@ -117,7 +117,7 @@ impl Transport for RingTransport {
                 if !self.ring.is_empty_before_park() {
                     return Ok(());
                 }
-                let r = signal_wait_one(self.data, SIGNALED, timeout_ns);
+                let r = signal_wait_one(self.data, SIGNALED, timeout);
                 if r == SYSCALL_RETURN_TIMEOUT {
                     return Err(IpcError::Timeout);
                 }

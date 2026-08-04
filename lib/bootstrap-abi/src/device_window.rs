@@ -106,7 +106,7 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut vendor = Vendor;
-                while server_end.wait_readable(u64::MAX).is_ok() {
+                while server_end.wait_readable(ipc::Timeout::INFINITE).is_ok() {
                     if dispatch_bootstrap(&mut vendor, &server_end).is_err() {
                         break;
                     }

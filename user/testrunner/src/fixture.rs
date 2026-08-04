@@ -11,9 +11,9 @@ use crate::{fixture_protocol::encode_request, ipc_raw};
 
 /// Бюджет одного запроса к фикстуре: мёртвый потомок отказывает сразу, поэтому
 /// конечный тайм-аут ловит только зависшего.
-const REQUEST_TIMEOUT_NS: u64 = 5_000_000_000;
+const REQUEST_TIMEOUT: Timeout = Timeout::from_secs(5);
 /// Бюджет ожидания завершения потомка.
-pub const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
+pub const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 /// Имя фикстуры в userland-образе.
 const FIXTURE_ENTRY: &str = "/boot/port-fixture";
@@ -121,7 +121,7 @@ impl Fixture {
     pub fn request(&self, op: u8, arg: u64, caps: &[u32], out: &mut [u8]) -> usize {
         ipc_raw::write_frame(&encode_request(op, arg), caps);
         self.port
-            .call(Timeout::from_ns(REQUEST_TIMEOUT_NS))
+            .call(REQUEST_TIMEOUT)
             .expect("fixture answers the request");
         let (len, _) = ipc_raw::read_frame(out);
         len

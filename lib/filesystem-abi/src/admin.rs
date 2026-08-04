@@ -258,7 +258,8 @@ mod tests {
         std::thread::scope(|scope| {
             let server = scope.spawn(|| {
                 for _ in 0..2 {
-                    ipc::Transport::wait_readable(&server_end, u64::MAX).expect("server wait");
+                    ipc::Transport::wait_readable(&server_end, ipc::Timeout::INFINITE)
+                        .expect("server wait");
                     dispatch_namespace_admin(&mut sink, &server_end).expect("dispatch ok");
                 }
             });
@@ -286,7 +287,8 @@ mod tests {
         std::thread::scope(|scope| {
             let server = scope.spawn(|| {
                 for _ in 0..2 {
-                    ipc::Transport::wait_readable(&server_end, u64::MAX).expect("server wait");
+                    ipc::Transport::wait_readable(&server_end, ipc::Timeout::INFINITE)
+                        .expect("server wait");
                     dispatch_file_system_admin(&mut sink, &server_end).expect("dispatch ok");
                 }
             });

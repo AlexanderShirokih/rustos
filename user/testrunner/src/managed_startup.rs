@@ -18,16 +18,16 @@ use crate::managed_fixture_protocol::ManagedFixtureClient;
 const FIXTURE_ENTRY: &str = "/boot/managed-startup-fixture";
 const HUNG_ENTRY: &str = "/boot/managed-startup-hung";
 const CLOSED_ENTRY: &str = "/boot/managed-startup-closed";
-const DELIVERY_TIMEOUT_NS: u64 = 1_000_000_000;
-const HUNG_DELIVERY_TIMEOUT_NS: u64 = 5_000_000;
-const PROCESS_TIMEOUT_NS: u64 = 1_000_000_000;
+const DELIVERY_TIMEOUT: Timeout = Timeout::from_secs(1);
+const HUNG_DELIVERY_TIMEOUT: Timeout = Timeout::from_millis(5);
+const PROCESS_TIMEOUT: Timeout = Timeout::from_secs(1);
 const PROCESS_SLACK_PAGES: u64 = 4;
 const ROLLBACK_ATTEMPTS: u32 = 64;
 const RACE_ATTEMPTS: u32 = 64;
-const RACE_TIMEOUT_NS: u64 = 50_000;
+const RACE_TIMEOUT: Timeout = Timeout::from_micros(50);
 const FAILURE_EXIT_CODE: u32 = 37;
 const DROP_BUDGET_RETURN_ATTEMPTS: usize = 1_000;
-const DROP_BUDGET_RETURN_WAIT_NS: u64 = 5_000_000;
+const DROP_BUDGET_RETURN_WAIT: Timeout = Timeout::from_millis(5);
 
 struct FixtureRoots {
     authority: Signal,
@@ -118,7 +118,7 @@ fn managed_startup_times_out_before_recv_and_repeatedly_rolls_back() {
             &program,
             &exact_parent,
             budget_pages,
-            Timeout::from_ns(HUNG_DELIVERY_TIMEOUT_NS),
+            HUNG_DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, false),
         );
@@ -153,7 +153,7 @@ fn managed_startup_peer_close_repeatedly_rolls_back() {
             &program,
             &exact_parent,
             budget_pages,
-            Timeout::from_ns(DELIVERY_TIMEOUT_NS),
+            DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, false),
         );
@@ -184,7 +184,7 @@ fn managed_startup_observes_nonzero_exit_after_running() {
             &program,
             &parent,
             process_pages(&program) + PROCESS_SLACK_PAGES,
-            Timeout::from_ns(DELIVERY_TIMEOUT_NS),
+            DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, FAILURE_EXIT_CODE, false),
         )
@@ -193,7 +193,7 @@ fn managed_startup_observes_nonzero_exit_after_running() {
     kernel_tests::kassert_eq!(component.status(), ManagedStatus::Running);
     wait_for_authority(&component);
     component
-        .observe_exit(Timeout::from_ns(PROCESS_TIMEOUT_NS))
+        .observe_exit(PROCESS_TIMEOUT)
         .expect("observe fixture exit");
     kernel_tests::kassert_eq!(component.status(), ManagedStatus::Failed);
     kernel_tests::kassert_eq!(
@@ -214,7 +214,7 @@ fn managed_startup_observes_zero_exit_after_running() {
             &program,
             &parent,
             process_pages(&program) + PROCESS_SLACK_PAGES,
-            Timeout::from_ns(DELIVERY_TIMEOUT_NS),
+            DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, false),
         )
@@ -223,7 +223,7 @@ fn managed_startup_observes_zero_exit_after_running() {
     kernel_tests::kassert_eq!(component.status(), ManagedStatus::Running);
     wait_for_authority(&component);
     component
-        .observe_exit(Timeout::from_ns(PROCESS_TIMEOUT_NS))
+        .observe_exit(PROCESS_TIMEOUT)
         .expect("observe fixture exit");
     kernel_tests::kassert_eq!(component.status(), ManagedStatus::Exited);
     kernel_tests::kassert_eq!(component.failure(), None);
@@ -244,7 +244,7 @@ fn managed_startup_timeout_rendezvous_race_has_one_ownership_outcome() {
             &program,
             &parent,
             budget_pages,
-            Timeout::from_ns(RACE_TIMEOUT_NS),
+            RACE_TIMEOUT,
             || FixtureRoots::from_observer(&observer),
             |transport, roots| {
                 let authority = TrackedAuthority::new(roots.child_authority()?, &sender_cleanup);
@@ -262,10 +262,10 @@ fn managed_startup_timeout_rendezvous_race_has_one_ownership_outcome() {
                     Err(Error::Syscall(SyscallError::Timeout))
                 ));
                 observer
-                    .wait(SIGNALED, Timeout::from_ns(PROCESS_TIMEOUT_NS))
+                    .wait(SIGNALED, PROCESS_TIMEOUT)
                     .expect("transferred authority was signaled");
                 component
-                    .observe_exit(Timeout::from_ns(PROCESS_TIMEOUT_NS))
+                    .observe_exit(PROCESS_TIMEOUT)
                     .expect("observe successful race fixture");
                 kernel_tests::kassert_eq!(component.status(), ManagedStatus::Exited);
             }
@@ -320,7 +320,7 @@ fn dropping_running_component_terminates_child_and_returns_budget() {
             &program,
             &exact_parent,
             budget_pages,
-            Timeout::from_ns(DELIVERY_TIMEOUT_NS),
+            DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, true),
         )
@@ -349,7 +349,7 @@ fn wait_for_authority(component: &ManagedComponent<FixtureRoots>) {
         .expect("component owns running instance")
         .roots()
         .authority
-        .wait(SIGNALED, Timeout::from_ns(PROCESS_TIMEOUT_NS))
+        .wait(SIGNALED, PROCESS_TIMEOUT)
         .expect("fixture used transferred authority");
 }
 
@@ -390,7 +390,7 @@ fn wait_for_budget_return(resource: &Resource, budget_pages: u64) {
         match resource.split(budget_pages) {
             Ok(_returned_budget) => return,
             Err(Error::Syscall(SyscallError::ResourceExhausted)) => {
-                match timer.wait(SIGNALED, Timeout::from_ns(DROP_BUDGET_RETURN_WAIT_NS)) {
+                match timer.wait(SIGNALED, DROP_BUDGET_RETURN_WAIT) {
                     Err(Error::Syscall(SyscallError::Timeout)) => {}
                     Err(error) => panic!("budget return wait failed: {error:?}"),
                     Ok(_) => panic!("private timer was signaled"),

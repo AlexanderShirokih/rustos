@@ -5,7 +5,7 @@ use userland::EntryView;
 use userland_loader::launch_entry;
 
 const BUDGET_RETURN_ATTEMPTS: usize = 1_000;
-const BUDGET_RETURN_WAIT_NS: u64 = 5_000_000;
+const BUDGET_RETURN_WAIT: Timeout = Timeout::from_millis(5);
 const OWNER_DROP_EXIT_CODE: u32 = 1;
 
 /// Наблюдаемое состояние managed-компонента.
@@ -92,8 +92,8 @@ impl Transport for BoundedStartupTransport {
         self.inner.read_message(bytes, handles)
     }
 
-    fn wait_readable(&self, timeout_ns: u64) -> Result<(), IpcError> {
-        self.inner.wait_readable(timeout_ns)
+    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
+        self.inner.wait_readable(timeout)
     }
 }
 
@@ -283,7 +283,7 @@ impl<R> Drop for ManagedComponent<R> {
 fn bounded_transport(startup: &Port, timeout: Timeout) -> BoundedStartupTransport {
     debug_assert_ne!(timeout, Timeout::INFINITE);
     BoundedStartupTransport {
-        inner: PortTransport::client(startup.handle()).with_send_timeout_ns(timeout.raw()),
+        inner: PortTransport::client(startup.handle()).with_send_timeout(timeout),
     }
 }
 
@@ -293,7 +293,7 @@ fn wait_for_budget_return(resource: &Resource, budget_pages: u64) -> Result<(), 
         match resource.split(budget_pages) {
             Ok(_returned_budget) => return Ok(()),
             Err(Error::Syscall(SyscallError::ResourceExhausted)) => {
-                match timer.wait(SIGNALED, Timeout::from_ns(BUDGET_RETURN_WAIT_NS)) {
+                match timer.wait(SIGNALED, BUDGET_RETURN_WAIT) {
                     Err(Error::Syscall(SyscallError::Timeout)) => {}
                     Err(error) => return Err(error),
                     Ok(_) => unreachable!("private timer is never signaled"),

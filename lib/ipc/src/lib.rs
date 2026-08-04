@@ -15,4 +15,5 @@ pub mod wire;
 pub use codec::{WireTyped, WireValue};
 pub use handle::IntoWireHandle;
 pub use ipc_macros::{WireValue, protocol};
+pub use syscall::Timeout;
 pub use transport::{MessageLen, Transport};

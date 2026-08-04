@@ -11,12 +11,12 @@ use userland_loader::{launch_entry, load_entry};
 
 use crate::startup_fixture_protocol::{STARTUP_VALUE, StartupFixtureClient};
 
-const CHILD_WAIT_TIMEOUT_NS: u64 = 500_000_000;
-const CALL_TIMEOUT_NS: u64 = 2_000_000_000;
+const CHILD_WAIT_TIMEOUT: Timeout = Timeout::from_millis(500);
+const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 const STARTUP_SLACK_PAGES: u64 = 8;
 const STARTUP_FAILURE_ATTEMPTS: usize = 16;
 const PROCESS_CLEANUP_RETRY_ATTEMPTS: usize = 64;
-const PROCESS_CLEANUP_RETRY_NS: u64 = 1_000_000;
+const PROCESS_CLEANUP_RETRY: Timeout = Timeout::from_millis(1);
 const PROCESS_CREATE_ROLLBACK_ATTEMPTS: usize = 80;
 
 #[derive(Debug)]
@@ -63,9 +63,7 @@ fn launch_child_delivers_startup_frame() {
     })
     .expect("startup frame delivered");
 
-    process
-        .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
-        .expect("child terminates");
+    process.join(CHILD_WAIT_TIMEOUT).expect("child terminates");
 
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 }
@@ -195,9 +193,7 @@ fn caller_wakes_when_server_dies_holding_reply() {
     // Кадр уже принят, поэтому вызыватель снят с очереди порта: его будит снос
     // reply-хэндла вместе с таблицей ушедшего сервера, а не пустое множество
     // получателей. Тайм-аут страхует от вечной парковки, исход - `PeerClosed`.
-    let result = service
-        .client
-        .call_bytes(b"x", &mut out, Timeout::from_ns(CALL_TIMEOUT_NS));
+    let result = service.client.call_bytes(b"x", &mut out, CALL_TIMEOUT);
     kernel_tests::kassert!(matches!(
         result,
         Err(Error::Syscall(SyscallError::PeerClosed))
@@ -222,7 +218,7 @@ fn fail_startup_when_budget_returns<'a, E: EntryView<'a>>(
             Err(StartupError::Runtime(runtime::Error::Syscall(
                 syscall::SyscallError::ResourceExhausted,
             ))) => {
-                let _ = timer.wait(SIGNALED, Timeout::from_ns(PROCESS_CLEANUP_RETRY_NS));
+                let _ = timer.wait(SIGNALED, PROCESS_CLEANUP_RETRY);
             }
             Err(StartupError::Injected) => return,
             Err(error) => panic!("unexpected child launch failure: {error:?}"),

@@ -49,13 +49,13 @@ const LOG_CLIENT_FIXTURE: &str = "/boot/log-client-fixture";
 const RELAY_SOURCE: &str = "log-relay";
 
 // Срок ожидания записи стока: пересылка идёт в потоке relay.
-const RECORD_TIMEOUT_NS: u64 = 3_000_000_000;
+const RECORD_TIMEOUT: Timeout = Timeout::from_secs(3);
 // Шаг ожидания записи стока.
-const RECORD_POLL_NS: u64 = 10_000_000;
+const RECORD_POLL: Timeout = Timeout::from_millis(10);
 // Срок остановки relay и завершения фикстуры.
-const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 // Срок отправки, за который живой получатель успевает встретить кадр.
-const SEND_TIMEOUT_NS: u64 = 500_000_000;
+const SEND_TIMEOUT: Timeout = Timeout::from_millis(500);
 
 // Подряд идущих отказов стока, после которых цикл relay уходит. Значение
 // повторяет предел `lib/log-relay`: тест проверяет его границу с обеих сторон.
@@ -122,7 +122,7 @@ fn stop(slot: &Mutex<Option<LogRelayThread>>) {
     if let Some(mut held) = slot.try_lock()
         && let Some(relay) = held.take()
     {
-        let _ = relay.shutdown(Timeout::from_ns(JOIN_TIMEOUT_NS));
+        let _ = relay.shutdown(JOIN_TIMEOUT);
     }
 }
 
@@ -174,7 +174,7 @@ fn with_relay(body: impl FnOnce(&dyn Fn(u64) -> OwnedHandle)) {
         .lock()
         .take()
         .expect("scenario relay is running")
-        .shutdown(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .shutdown(JOIN_TIMEOUT)
         .expect("test log relay stops");
 }
 
@@ -194,9 +194,9 @@ fn wait_for_records(count: usize) -> Vec<Record> {
         if records.len() >= count {
             return records;
         }
-        kernel_tests::kassert!(waited < RECORD_TIMEOUT_NS);
-        let _ = idle.recv(Timeout::from_ns(RECORD_POLL_NS));
-        waited += RECORD_POLL_NS;
+        kernel_tests::kassert!(waited < RECORD_TIMEOUT.raw());
+        let _ = idle.recv(RECORD_POLL);
+        waited += RECORD_POLL.raw();
     }
 }
 
@@ -215,10 +215,7 @@ fn send_unknown_ordinal(session: &OwnedHandle) {
         .expect("header fits");
     frame.finish().expect("frame fits");
     ipc_raw::write_frame(frame.as_bytes(), &[]);
-    kernel_tests::kassert_eq!(
-        port_send(session.as_raw(), Timeout::from_ns(SEND_TIMEOUT_NS).raw()),
-        0
-    );
+    kernel_tests::kassert_eq!(port_send(session.as_raw(), SEND_TIMEOUT), 0);
 }
 
 // Шлёт по лог-сессии валидный кадр лога с приложенной capability.
@@ -238,7 +235,7 @@ fn send_log_frame_with_cap(session: &OwnedHandle, cap: OwnedHandle) -> i64 {
     // хэндлом отдаётся кадру.
     let carried = cap.into_raw();
     ipc_raw::write_frame(frame.as_bytes(), &[carried.raw()]);
-    let sent = port_send(session.as_raw(), Timeout::from_ns(SEND_TIMEOUT_NS).raw());
+    let sent = port_send(session.as_raw(), SEND_TIMEOUT);
     if sent < 0 {
         drop(OwnedHandle::from_handle(carried));
     }
@@ -496,7 +493,7 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
         // Закрытие корневой капы отзывает выведенную из неё клиентскую, а
         // сохранённая капа оставляет отправителя ждать до срока.
         kernel_tests::kassert_eq!(
-            port_send(writer.as_raw(), Timeout::from_ns(SEND_TIMEOUT_NS).raw()),
+            port_send(writer.as_raw(), SEND_TIMEOUT),
             SyscallError::Revoked.as_return_value()
         );
     });
@@ -528,9 +525,7 @@ fn relay_serves_after_receiver_resource_exhaustion() {
 fn log_session_denies_bootstrap_operations() {
     with_relay(|session| {
         let fixture = spawn_image_entry(LOG_CLIENT_FIXTURE, session(NAMED_BADGE));
-        fixture
-            .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
-            .expect("fixture terminates");
+        fixture.join(JOIN_TIMEOUT).expect("fixture terminates");
         kernel_tests::kassert_eq!(fixture.exit_code().expect("exit code"), 0);
 
         // Строка фикстуры прошла тем же кадром, каким не прошли acquire-вызовы.
@@ -572,9 +567,7 @@ fn relay_drains_departed_badges_so_new_sessions_mint() {
 fn relay_stops_when_its_log_port_closes() {
     let relay =
         LogRelayThread::start(test_source_name, RecordingSink).expect("test log relay starts");
-    relay
-        .shutdown(Timeout::from_ns(JOIN_TIMEOUT_NS))
-        .expect("test log relay stops");
+    relay.shutdown(JOIN_TIMEOUT).expect("test log relay stops");
 }
 
 // Первый отказ стока прекращает куски текущего кадра. Сам кадр учитывается
@@ -622,7 +615,7 @@ fn relay_stops_after_the_sink_refuses_in_a_row() {
         SINK_REFUSES.store(false, SeqCst);
 
         kernel_tests::kassert_eq!(
-            port_send(logger.as_raw(), Timeout::from_ns(SEND_TIMEOUT_NS).raw()),
+            port_send(logger.as_raw(), SEND_TIMEOUT),
             SyscallError::Timeout.as_return_value()
         );
     });

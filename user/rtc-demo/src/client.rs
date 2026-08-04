@@ -13,7 +13,7 @@ use runtime::{PortTransport, Signal, Timeout, receive_startup, thread_exit};
 use syscall::{Handle, SIGNALED};
 
 /// Пауза между опросами, чтобы в логе были разные секунды.
-const POLL_PERIOD: Timeout = Timeout::from_ns(1_500_000_000);
+const POLL_PERIOD: Timeout = Timeout::from_millis(1_500);
 
 /// Локальный тег строк клиента: доверенный источник ему добавляет relay.
 const LOG_TAG: &str = "clock";

@@ -71,7 +71,7 @@ fn reply_cap_relinquished_on_ok() {
         thread::spawn(move || {
             let mut src = Source { id: 77, fate };
             server_end
-                .wait_readable(1_000_000_000)
+                .wait_readable(ipc::Timeout::from_secs(1))
                 .expect("server wait");
             dispatch_cap_source(&mut src, &server_end).expect("dispatch");
         })

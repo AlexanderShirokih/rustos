@@ -76,7 +76,9 @@ fn round_trip<R: Send>(
         let server_handle = scope.spawn(move || {
             let mut server = CalcServer::default();
             for _ in 0..rounds {
-                server_end.wait_readable(u64::MAX).expect("server wait");
+                server_end
+                    .wait_readable(ipc::Timeout::INFINITE)
+                    .expect("server wait");
                 dispatch_calc(&mut server, &server_end).expect("dispatch ok");
             }
             server
@@ -426,7 +428,7 @@ impl Transport for CastOutcome {
         Err(ipc::wire::IpcError::WouldBlock)
     }
 
-    fn wait_readable(&self, _timeout_ns: u64) -> Result<(), ipc::wire::IpcError> {
+    fn wait_readable(&self, _timeout: ipc::Timeout) -> Result<(), ipc::wire::IpcError> {
         Err(ipc::wire::IpcError::WouldBlock)
     }
 }
@@ -518,7 +520,9 @@ fn cap_param_and_return_round_trip() {
         let server = scope.spawn(move || {
             let mut srv = CapServer;
             for _ in 0..2 {
-                server_end.wait_readable(u64::MAX).expect("server wait");
+                server_end
+                    .wait_readable(ipc::Timeout::INFINITE)
+                    .expect("server wait");
                 dispatch_cap_proto(&mut srv, &server_end).expect("dispatch ok");
             }
         });
@@ -544,7 +548,9 @@ fn cap_domain_error_carries_no_handle() {
     thread::scope(|scope| {
         let server = scope.spawn(move || {
             let mut srv = CapServer;
-            server_end.wait_readable(u64::MAX).expect("server wait");
+            server_end
+                .wait_readable(ipc::Timeout::INFINITE)
+                .expect("server wait");
             dispatch_cap_proto(&mut srv, &server_end).expect("dispatch ok");
         });
         let acquired = client.acquire(false).expect("acquire ok");
@@ -604,7 +610,9 @@ fn aggregate_carries_a_capability_alongside_scalars() {
     let client = VendorClient::new(client_end);
     thread::scope(|scope| {
         let server = scope.spawn(move || {
-            server_end.wait_readable(u64::MAX).expect("server wait");
+            server_end
+                .wait_readable(ipc::Timeout::INFINITE)
+                .expect("server wait");
             dispatch_vendor(&mut VendorServer, &server_end).expect("dispatch ok");
         });
 
@@ -659,7 +667,9 @@ fn aggregate_param_and_return_round_trip() {
         let server = scope.spawn(move || {
             let mut srv = GeoServer;
             for _ in 0..3 {
-                server_end.wait_readable(u64::MAX).expect("server wait");
+                server_end
+                    .wait_readable(ipc::Timeout::INFINITE)
+                    .expect("server wait");
                 dispatch_geo(&mut srv, &server_end).expect("dispatch ok");
             }
         });
@@ -801,10 +811,10 @@ trait Mixed {
 
 #[test]
 fn protocol_level_default_timeout_times_out() {
-    // server_end жив (sender_open), но не отвечает -> wait_readable(0) -> Timeout.
+    // server_end жив (sender_open), но не отвечает -> wait_readable(POLL) -> Timeout.
     let (client_end, _server_end) = MockEnd::pair();
     let client = TimedClient::new(client_end);
-    assert_eq!(client.wait_ns(), 0);
+    assert_eq!(client.wait(), ipc::Timeout::POLL);
     assert_eq!(client.ping(), Err(IpcError::Timeout));
 }
 
@@ -813,15 +823,15 @@ fn per_call_timeout_override_times_out() {
     let (client_end, _server_end) = MockEnd::pair();
     let client = MixedClient::new(client_end);
     // Дефолт клиента бессрочный, но `quick` несёт собственный timeout_ns = 0.
-    assert_eq!(client.wait_ns(), u64::MAX);
+    assert_eq!(client.wait(), ipc::Timeout::INFINITE);
     assert_eq!(client.quick(), Err(IpcError::Timeout));
 }
 
 #[test]
-fn with_wait_ns_builder_overrides_default() {
+fn with_wait_builder_overrides_default() {
     let (client_end, _server_end) = MockEnd::pair();
-    let client = CalcClient::new(client_end).with_wait_ns(0);
-    assert_eq!(client.wait_ns(), 0);
+    let client = CalcClient::new(client_end).with_wait(ipc::Timeout::POLL);
+    assert_eq!(client.wait(), ipc::Timeout::POLL);
     // Сервера нет -> two-way call истекает по тайм-ауту.
     assert_eq!(client.add(1, 2), Err(IpcError::Timeout));
 }

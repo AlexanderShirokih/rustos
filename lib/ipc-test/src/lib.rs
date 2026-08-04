@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
-use ipc::{MessageLen, Transport, wire::IpcError};
+use ipc::{MessageLen, Timeout, Transport, wire::IpcError};
 
 /// Один кадр в очереди.
 struct Frame {
@@ -113,7 +113,7 @@ impl Transport for MockEnd {
         Ok(MessageLen::new(frame.bytes.len(), frame.handles.len()))
     }
 
-    fn wait_readable(&self, timeout_ns: u64) -> Result<(), IpcError> {
+    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
         // Ненулевой timeout трактуется как ожидание до готовности или закрытия.
         let mut pipe = self.inbox.pipe.lock().expect("mutex not poisoned");
         loop {
@@ -123,7 +123,7 @@ impl Transport for MockEnd {
             if !pipe.sender_open {
                 return Err(IpcError::PeerClosed);
             }
-            if timeout_ns == 0 {
+            if timeout == Timeout::POLL {
                 return Err(IpcError::Timeout);
             }
             pipe = self.inbox.readable.wait(pipe).expect("condvar wait");
@@ -134,7 +134,7 @@ impl Transport for MockEnd {
 #[cfg(test)]
 mod tests {
     use ipc::{
-        MessageLen, Transport,
+        MessageLen, Timeout, Transport,
         wire::{
             FieldCursor, HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf,
             value::{decode_u16, encode_u16},
@@ -172,9 +172,9 @@ mod tests {
     #[test]
     fn wait_readable_times_out_then_succeeds() {
         let (a, b) = MockEnd::pair();
-        assert_eq!(a.wait_readable(0), Err(IpcError::Timeout));
+        assert_eq!(a.wait_readable(Timeout::POLL), Err(IpcError::Timeout));
         b.write_message(&[1], &[]).expect("write ok");
-        assert_eq!(a.wait_readable(0), Ok(()));
+        assert_eq!(a.wait_readable(Timeout::POLL), Ok(()));
     }
 
     #[test]
@@ -194,7 +194,7 @@ mod tests {
             b.read_message(&mut bytes, &mut handles),
             Err(IpcError::PeerClosed)
         );
-        assert_eq!(b.wait_readable(0), Err(IpcError::PeerClosed));
+        assert_eq!(b.wait_readable(Timeout::POLL), Err(IpcError::PeerClosed));
     }
 
     #[test]

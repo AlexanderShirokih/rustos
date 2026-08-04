@@ -117,7 +117,9 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
-                server_end.wait_readable(u64::MAX).expect("server wait");
+                server_end
+                    .wait_readable(ipc::Timeout::INFINITE)
+                    .expect("server wait");
                 dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
             });
             let cap = client.acquire_irq_control().expect("call ok");
@@ -135,7 +137,9 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
-                server_end.wait_readable(u64::MAX).expect("server wait");
+                server_end
+                    .wait_readable(ipc::Timeout::INFINITE)
+                    .expect("server wait");
                 dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
             });
             let cap = client.acquire_userland_image().expect("call ok");
@@ -153,7 +157,9 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
-                server_end.wait_readable(u64::MAX).expect("server wait");
+                server_end
+                    .wait_readable(ipc::Timeout::INFINITE)
+                    .expect("server wait");
                 dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
             });
             let cap = client.acquire_boot_fdt().expect("call ok");
@@ -171,7 +177,9 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
-                server_end.wait_readable(u64::MAX).expect("server wait");
+                server_end
+                    .wait_readable(ipc::Timeout::INFINITE)
+                    .expect("server wait");
                 dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
             });
             // Аргумент index доезжает до сервера и влияет на ответный Cap.
@@ -190,7 +198,9 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
-                server_end.wait_readable(u64::MAX).expect("server wait");
+                server_end
+                    .wait_readable(ipc::Timeout::INFINITE)
+                    .expect("server wait");
                 dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
             });
             let result = client.acquire_device_memory(9).expect("call ok");

@@ -116,7 +116,7 @@ fn call_cap_relinquished_on_ok() {
     let server = thread::spawn(move || {
         let mut echo = Echo;
         server_end
-            .wait_readable(1_000_000_000)
+            .wait_readable(ipc::Timeout::from_secs(1))
             .expect("server wait");
         dispatch_cap_proto(&mut echo, &server_end).expect("dispatch");
     });

@@ -11,7 +11,7 @@ use syscall::{SIGNALED, WakeCount};
 const STACK_SIZE: u64 = 0x4000;
 
 /// Таймаут join'а: конечный, чтобы зависший worker падал по timeout.
-const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 struct Shared {
     m: Mutex<u64>,
@@ -73,7 +73,7 @@ fn mutex_contention() {
     });
     for thread in threads {
         thread
-            .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+            .join(JOIN_TIMEOUT)
             .expect("worker joins before timeout");
     }
     kernel_tests::kassert_eq!(*shared.m.lock(), WORKERS * ITERS);
@@ -102,13 +102,13 @@ fn condvar_ping_pong() {
     }
 
     thread
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("worker joins before timeout");
     kernel_tests::kassert_eq!(shared.m.lock().count, 2 * ROUNDS);
 }
 
 /// Бюджет окна между отпусканием мьютекса и парковкой жертвы.
-const STEAL_WINDOW_NS: u64 = 50_000_000;
+const STEAL_WINDOW: Timeout = Timeout::from_millis(50);
 
 /// Кому из двух потоков адресовано уведомление.
 struct Turns {
@@ -136,9 +136,7 @@ extern "C" fn theft_victim(arg: usize) -> u32 {
     while !guard.victim_wake {
         guard = shared.condvar.wait_interleaved(guard, || {
             shared.in_window.notify_all().expect("report the window");
-            let _ = shared
-                .stolen
-                .wait(SIGNALED, Timeout::from_ns(STEAL_WINDOW_NS));
+            let _ = shared.stolen.wait(SIGNALED, STEAL_WINDOW);
         });
     }
     0
@@ -147,7 +145,7 @@ extern "C" fn theft_victim(arg: usize) -> u32 {
 extern "C" fn theft_thief(arg: usize) -> u32 {
     // SAFETY: см. theft_victim.
     let shared = unsafe { &*(arg as *const Theft) };
-    let _ = shared.go.wait(SIGNALED, Timeout::from_ns(JOIN_TIMEOUT_NS));
+    let _ = shared.go.wait(SIGNALED, JOIN_TIMEOUT);
 
     let mut guard = shared.turns.lock();
     while !guard.thief_wake {
@@ -176,7 +174,7 @@ fn condvar_notify_is_not_stolen_by_a_later_waiter() {
 
     shared
         .in_window
-        .wait(SIGNALED, Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .wait(SIGNALED, JOIN_TIMEOUT)
         .expect("victim reaches the window");
 
     {
@@ -188,7 +186,7 @@ fn condvar_notify_is_not_stolen_by_a_later_waiter() {
 
     // Исход жертвы проверяется после снятия вора: оба потока обязаны уйти до
     // выхода из кадра, которому принадлежит `shared`.
-    let victim_joined = victim.join(Timeout::from_ns(JOIN_TIMEOUT_NS));
+    let victim_joined = victim.join(JOIN_TIMEOUT);
 
     {
         let mut guard = shared.turns.lock();
@@ -196,7 +194,7 @@ fn condvar_notify_is_not_stolen_by_a_later_waiter() {
         shared.condvar.notify_all();
     }
     thief
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("thief joins before timeout");
 
     victim_joined.expect("victim joins before timeout");
@@ -218,10 +216,7 @@ struct Baton {
 // `false` - счётчик не дошёл до `target` за отведённый бюджет.
 fn wait_for_count(progress: &Signal, counter: &AtomicU32, target: u32) -> bool {
     while counter.load(Ordering::Acquire) < target {
-        if progress
-            .wait(SIGNALED, Timeout::from_ns(JOIN_TIMEOUT_NS))
-            .is_err()
-        {
+        if progress.wait(SIGNALED, JOIN_TIMEOUT).is_err() {
             return false;
         }
         if progress.set(0, SIGNALED, WakeCount::None).is_err() {
@@ -287,10 +282,10 @@ fn condvar_notify_one_releases_waiters_one_by_one() {
         shared.condvar.notify_all();
     }
     first
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("first joins before timeout");
     second
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("second joins before timeout");
 
     kernel_tests::kassert!(released_in_turn);

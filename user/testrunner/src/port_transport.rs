@@ -7,13 +7,13 @@ use core::sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst};
 use ipc::{Transport, wire::IpcError};
 use kernel_tests::kernel_test;
 use runtime::{OwnedHandle, Port, PortTransport, Priority, Timeout, spawn};
-use syscall::{PORT_TIMEOUT_INFINITE, Rights};
+use syscall::Rights;
 
 use crate::startup_fixture_protocol::StartupFixtureClient;
 
 const STACK_SIZE: u64 = 0x4000;
-const RECV_TIMEOUT_NS: u64 = 5_000_000_000;
-const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
+const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 const BADGE: u64 = 0x00C0_FFEE;
 
@@ -63,11 +63,11 @@ fn server_reads_badge_of_receiving_handle() {
     // логирует строку, а это port_send, перезаписывающий буфер.
     let server = PortTransport::server(port.handle());
     server
-        .wait_readable(RECV_TIMEOUT_NS)
+        .wait_readable(RECV_TIMEOUT)
         .expect("frame from badged copy");
     let badged_seen = server.peer_badge();
     server
-        .wait_readable(RECV_TIMEOUT_NS)
+        .wait_readable(RECV_TIMEOUT)
         .expect("frame from unbadged copy");
     let plain_seen = server.peer_badge();
 
@@ -75,7 +75,7 @@ fn server_reads_badge_of_receiving_handle() {
     kernel_tests::kassert_eq!(plain_seen, 0);
 
     client
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("client joins before timeout");
     kernel_tests::kassert_eq!(CLIENT_RESULT.load(SeqCst), 1);
 }
@@ -84,10 +84,10 @@ fn server_reads_badge_of_receiving_handle() {
 fn client_cast_timeout_when_receiver_stays_open_without_recv() {
     let service = Port::create_service(0).expect("port create");
     let default = PortTransport::client(service.client.handle());
-    kernel_tests::kassert_eq!(default.send_timeout_ns(), PORT_TIMEOUT_INFINITE);
+    kernel_tests::kassert_eq!(default.send_timeout(), Timeout::INFINITE);
 
-    let bounded = PortTransport::client(service.client.handle()).with_send_timeout_ns(0);
-    kernel_tests::kassert_eq!(bounded.send_timeout_ns(), 0);
+    let bounded = PortTransport::client(service.client.handle()).with_send_timeout(Timeout::POLL);
+    kernel_tests::kassert_eq!(bounded.send_timeout(), Timeout::POLL);
     let client = StartupFixtureClient::new(bounded);
 
     kernel_tests::kassert_eq!(client.start(7), Err(IpcError::Timeout));
@@ -96,7 +96,7 @@ fn client_cast_timeout_when_receiver_stays_open_without_recv() {
 #[kernel_test]
 fn client_cast_reports_peer_close_when_receiver_closes_before_recv() {
     let service = Port::create_service(0).expect("port create");
-    let bounded = PortTransport::client(service.client.handle()).with_send_timeout_ns(0);
+    let bounded = PortTransport::client(service.client.handle()).with_send_timeout(Timeout::POLL);
     drop(service.server);
 
     let client = StartupFixtureClient::new(bounded);

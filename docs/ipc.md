@@ -185,7 +185,7 @@ IPC опирается на underlying-транспорт, не определя
 |-----------------------------------------------------|---------------------------|
 | `write_message(&[u8], &[u32]) -> Result<..>`        | отправить кадр            |
 | `read_message(&mut [u8], &mut [u32]) -> Result<..>` | принять кадр              |
-| `wait_readable(timeout_ns: u64) -> Result<..>`      | ждать готовности к приёму |
+| `wait_readable(timeout: Timeout) -> Result<..>`     | ждать готовности к приёму |
 
 Платформенный адаптер реализует этот интерфейс через rendezvous-syscalls port —
 `send`/`recv` (one-way) и `call`/`reply` (two-way). Адаптер сообщает `PeerClosed`
@@ -193,9 +193,10 @@ IPC опирается на underlying-транспорт, не определя
 уходе значка ([port.md](port.md)), `ResourceExhausted` — когда кадр доставлен, а
 принять его нечем (`OutOfHandles` нормализуется в этот покадровый исход), и
 `WouldBlock`, когда встречной стороны нет. `PortTransport::client` по умолчанию
-ждёт one-way rendezvous бессрочно; `with_send_timeout_ns(ns)` задаёт срок только
-для `send`/`#[cast]`: `0` означает poll, `u64::MAX` — бессрочное ожидание, другое
-значение — относительный deadline. Истечение возвращает `IpcError::Timeout`,
+ждёт one-way rendezvous бессрочно; `with_send_timeout(timeout)` задаёт срок
+только для `send`/`#[cast]`: `Timeout::POLL` означает poll, `Timeout::INFINITE` —
+бессрочное ожидание, другое значение — относительный deadline. Истечение
+возвращает `IpcError::Timeout`,
 кадр остаётся у отправителя и capability не передаются. После
 `ResourceExhausted` цикл продолжает приём, не читая поля недоставленного кадра;
 `PeerClosed` и отзыв серверной стороны остаются терминальными. Syscall
@@ -292,17 +293,18 @@ pub trait Bootstrap {
 
 ### Тайм-аут ожидания ответа
 
-Two-way `#[call]` ждёт ответ через `Transport::wait_readable(timeout_ns)`. Срок
+Two-way `#[call]` ждёт ответ через `Transport::wait_readable(timeout)`. Срок
 задаётся декларативно и пробрасывается до транспорта:
 
 - `#[protocol(timeout_ns = N)]` — дефолтный срок (нс) для всех `#[call]`
-  клиента (по умолчанию `u64::MAX` — бессрочно);
+  клиента (по умолчанию бессрочно);
 - `#[call(timeout_ns = N)]` — per-call перекрытие дефолта;
-- `Client::with_wait_ns(ns)` — переопределение дефолта в рантайме при
-  конструировании клиента; `Client::wait_ns()` возвращает текущее значение.
+- `Client::with_wait(timeout)` — переопределение дефолта в рантайме при
+  конструировании клиента; `Client::wait()` возвращает текущее значение.
 
-`N == 0` — poll (не блокироваться), `u64::MAX` — бессрочно, иначе относительный
-дедлайн. По истечении операция возвращает `IpcError::Timeout`.
+Атрибуты макроса несут число наносекунд: `N == 0` — poll (не блокироваться),
+иначе относительный дедлайн. По истечении операция возвращает
+`IpcError::Timeout`.
 
 ```rust
 #[ipc::protocol(name = "Sensor", timeout_ns = 50_000_000)] // 50 мс по умолчанию
@@ -312,13 +314,13 @@ pub trait Sensor {
 }
 ```
 
-`with_wait_ns` не меняет срок one-way отправки. Клиент, которому нужны оба
+`with_wait` не меняет срок one-way отправки. Клиент, которому нужны оба
 ограничения, настраивает transport до передачи его сгенерированному клиенту:
 
 ```rust
 let transport = PortTransport::client(startup.handle())
-    .with_send_timeout_ns(50_000_000);
-let client = DriverArgsClient::new(transport).with_wait_ns(200_000_000);
+    .with_send_timeout(Timeout::from_millis(50));
+let client = DriverArgsClient::new(transport).with_wait(Timeout::from_millis(200));
 ```
 
 Успешный `#[cast]` означает состоявшийся rendezvous: получатель уже принял кадр,

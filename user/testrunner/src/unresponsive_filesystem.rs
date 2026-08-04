@@ -7,7 +7,7 @@ use core::panic::PanicInfo;
 use filesystem_abi::{FileSystemAdminService, FileSystemError, dispatch_file_system_admin};
 use ipc::{Transport as _, wire::Cap};
 use runtime::{OwnedHandle, Port, PortTransport, thread_exit};
-use syscall::{Handle, PORT_TIMEOUT_INFINITE, Timeout};
+use syscall::{Handle, Timeout};
 
 /// Сторона admin-порта, у которой сессий не бывает.
 struct Muted;
@@ -30,7 +30,7 @@ impl FileSystemAdminService for Muted {
 pub extern "C" fn _start(admin: Handle) -> ! {
     let admin = OwnedHandle::from_handle(admin);
     let transport = PortTransport::server(admin.borrow());
-    let _ = transport.wait_readable(PORT_TIMEOUT_INFINITE);
+    let _ = transport.wait_readable(Timeout::INFINITE);
     let _ = dispatch_file_system_admin(&mut Muted, &transport);
 
     // Парковка без кадров: у свежего порта нет отправителей, его приём не вернётся никогда.

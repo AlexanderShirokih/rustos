@@ -1,4 +1,6 @@
 const NS_PER_SEC: u64 = 1_000_000_000;
+const NS_PER_MILLI: u64 = 1_000_000;
+const NS_PER_MICRO: u64 = 1_000;
 
 /// Типизированный фасад над `timeout_ns` блокирующих syscall'ов.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +18,16 @@ impl Timeout {
     /// Дедлайн в наносекундах.
     pub const fn from_ns(ns: u64) -> Self {
         Self(ns)
+    }
+
+    /// Дедлайн в микросекундах.
+    pub const fn from_micros(micros: u64) -> Self {
+        Self(micros.saturating_mul(NS_PER_MICRO))
+    }
+
+    /// Дедлайн в миллисекундах.
+    pub const fn from_millis(millis: u64) -> Self {
+        Self(millis.saturating_mul(NS_PER_MILLI))
     }
 
     /// Дедлайн в секундах.
@@ -38,3 +50,24 @@ pub const PORT_TIMEOUT_INFINITE: u64 = Timeout::INFINITE.raw();
 /// (poll): операция завершается немедленно, иначе возвращается
 /// [`SYSCALL_RETURN_TIMEOUT`].
 pub const PORT_TIMEOUT_POLL: u64 = Timeout::POLL.raw();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn units_scale_to_nanoseconds() {
+        assert_eq!(Timeout::from_ns(5_000_000).raw(), 5_000_000);
+        assert_eq!(Timeout::from_micros(50).raw(), 50_000);
+        assert_eq!(Timeout::from_millis(5).raw(), 5_000_000);
+        assert_eq!(Timeout::from_millis(500).raw(), 500_000_000);
+        assert_eq!(Timeout::from_secs(3).raw(), 3_000_000_000);
+    }
+
+    #[test]
+    fn overflowing_unit_saturates() {
+        assert_eq!(Timeout::from_micros(u64::MAX), Timeout::INFINITE);
+        assert_eq!(Timeout::from_millis(u64::MAX), Timeout::INFINITE);
+        assert_eq!(Timeout::from_secs(u64::MAX), Timeout::INFINITE);
+    }
+}

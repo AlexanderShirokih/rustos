@@ -23,7 +23,7 @@ const RTC_IMSC: Reg<u32> = Reg::new(0x10);
 const RTC_ICR: Reg<u32> = Reg::new(0x1C);
 
 /// Бюджет ожидания.
-const WAIT_BUDGET: Timeout = Timeout::from_ns(10_000_000_000);
+const WAIT_BUDGET: Timeout = Timeout::from_secs(10);
 
 #[kernel_test]
 fn pl031_rtc_interrupt() {

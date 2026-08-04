@@ -11,7 +11,7 @@ use runtime::{Priority, Timeout, spawn};
 const STACK_SIZE: u64 = 0x4000;
 
 /// Таймаут join'а: конечный, чтобы зависший worker падал по timeout.
-const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 #[kernel_test]
 fn heap_basic() {
@@ -92,7 +92,7 @@ fn heap_concurrent() {
     }
     for thread in threads {
         thread
-            .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+            .join(JOIN_TIMEOUT)
             .expect("worker joins before timeout");
     }
 

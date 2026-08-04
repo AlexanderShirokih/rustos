@@ -9,10 +9,10 @@ use syscall::{Handle, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem, Wak
 const STACK_SIZE: u64 = 0x4000;
 /// Бюджет ожидания пробуждения: конечный, чтобы потерянное пробуждение падало
 /// по тайм-ауту, а не вешало прогон.
-const WAKE_TIMEOUT_NS: u64 = 5_000_000_000;
+const WAKE_TIMEOUT: Timeout = Timeout::from_secs(5);
 /// Задержка воркера перед сигналом: за это время ожидающий гарантированно
 /// успевает заблокироваться.
-const WORKER_DELAY_NS: u64 = 50_000_000;
+const WORKER_DELAY: Timeout = Timeout::from_millis(50);
 
 #[kernel_test]
 fn signal_wait_round_trip() {
@@ -28,17 +28,17 @@ fn signal_wait_round_trip() {
     kernel_tests::kassert!(observed & SIGNALED == SIGNALED);
 }
 
-/// Приостанавливает поток на `ns`: ждём на собственном сигнале бит, который
-/// никто не поднимает, и выходим по тайм-ауту.
-fn sleep_ns(ns: u64) {
+// Приостанавливает поток на `budget`: ждём на собственном сигнале бит, который
+// никто не поднимает, и выходим по тайм-ауту.
+fn sleep(budget: Timeout) {
     let idle = Signal::create().expect("signal create for sleep");
-    kernel_tests::kassert!(idle.wait(SIGNALED, Timeout::from_ns(ns)).is_err());
+    kernel_tests::kassert!(idle.wait(SIGNALED, budget).is_err());
 }
 
 /// Воркер: выжидает, затем поднимает `SIGNALED` на сигнале, чей сырой
 /// HandleId приехал аргументом.
 extern "C" fn delayed_signaler(raw: usize) -> u32 {
-    sleep_ns(WORKER_DELAY_NS);
+    sleep(WORKER_DELAY);
     let handle = Handle::new(raw as u32).expect("signal handle id");
     u32::from(signal_set(handle, SIGNALED, 0, WakeCount::All) != 0)
 }
@@ -57,12 +57,12 @@ fn wait_blocks_until_another_thread_signals() {
     kernel_tests::kassert!(signal.wait(SIGNALED, Timeout::POLL).is_err());
 
     let observed = signal
-        .wait(SIGNALED, Timeout::from_ns(WAKE_TIMEOUT_NS))
+        .wait(SIGNALED, WAKE_TIMEOUT)
         .expect("waiter must be woken by the signaler");
     kernel_tests::kassert!(observed & SIGNALED == SIGNALED);
 
     worker
-        .join(Timeout::from_ns(WAKE_TIMEOUT_NS))
+        .join(WAKE_TIMEOUT)
         .expect("signaler joins before timeout");
 }
 
@@ -101,12 +101,11 @@ fn wait_many_blocks_until_another_thread_signals() {
         Err(runtime::Error::Syscall(SyscallError::Timeout))
     ));
 
-    let index = wait_any(&items, Timeout::from_ns(WAKE_TIMEOUT_NS))
-        .expect("waiter must be woken by the signaler");
+    let index = wait_any(&items, WAKE_TIMEOUT).expect("waiter must be woken by the signaler");
     kernel_tests::kassert_eq!(index, 1);
 
     worker
-        .join(Timeout::from_ns(WAKE_TIMEOUT_NS))
+        .join(WAKE_TIMEOUT)
         .expect("signaler joins before timeout");
 }
 

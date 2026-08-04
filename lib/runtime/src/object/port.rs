@@ -100,14 +100,14 @@ impl Port {
     /// Отправляет сообщение из IPC-буфера текущего потока, блокируясь до
     /// `timeout`.
     pub fn send(&self, timeout: Timeout) -> Result<()> {
-        unit(svc::port_send(self.handle.as_raw(), timeout.raw()))
+        unit(svc::port_send(self.handle.as_raw(), timeout))
     }
 
     /// Принимает сообщение в IPC-буфер текущего потока, блокируясь до `timeout`.
     /// `Some(Reply)`, если встречный был `call`, иначе `None`. `SenderGone`:
     /// кадра нет, значок ушедшей стороны лежит в `IpcBuffer.badge`.
     pub fn recv(&self, timeout: Timeout) -> Result<Option<Reply>> {
-        let reply_raw = value(svc::port_recv(self.handle.as_raw(), timeout.raw()))?;
+        let reply_raw = value(svc::port_recv(self.handle.as_raw(), timeout))?;
         #[allow(clippy::cast_possible_truncation)]
         let reply_id = reply_raw as u32;
         Ok(Handle::new(reply_id).map(|handle| Reply {
@@ -118,7 +118,7 @@ impl Port {
     /// Запрос-ответ: сообщение из IPC-буфера текущего потока, ответ оказывается
     /// там же. `timeout` ограничивает всю операцию.
     pub fn call(&self, timeout: Timeout) -> Result<()> {
-        unit(svc::port_call(self.handle.as_raw(), timeout.raw()))
+        unit(svc::port_call(self.handle.as_raw(), timeout))
     }
 
     /// Отдаёт владеемый хэндл.

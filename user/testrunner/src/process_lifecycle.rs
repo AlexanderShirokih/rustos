@@ -3,12 +3,10 @@
 //! процесса-потомка целиком.
 
 use kernel_tests::kernel_test;
-use runtime::{
-    Priority, Process, Resource, Thread, ThreadEntry, Timeout, UserMemFlags, thread_exit,
-};
+use runtime::{Priority, Process, Resource, Thread, ThreadEntry, UserMemFlags, thread_exit};
 
 use crate::{
-    fixture::{Fixture, JOIN_TIMEOUT_NS},
+    fixture::{Fixture, JOIN_TIMEOUT},
     fixture_protocol::{OP_EXIT, REPLY_OK},
 };
 
@@ -48,7 +46,7 @@ fn thread_exit_publishes_exit_code() {
     .expect("create worker thread");
 
     thread
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("worker terminates before timeout");
     kernel_tests::kassert_eq!(thread.exit_code().expect("thread exit code"), EXIT_CODE);
 }
@@ -64,7 +62,7 @@ fn child_process_exit_code_is_observable() {
 
     fixture
         .process()
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("child terminates");
     kernel_tests::kassert_eq!(
         fixture.process().exit_code().expect("child exit code"),

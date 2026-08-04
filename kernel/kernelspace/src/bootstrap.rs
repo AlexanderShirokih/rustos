@@ -22,7 +22,7 @@ use klog::{info, warn};
 use memory::{AccessMask, MemoryRegion, page_round_up, physical_address::PageAlignedAddress};
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
-use syscall::{IpcBuffer, decode_tag, encode_tag};
+use syscall::{IpcBuffer, Timeout, decode_tag, encode_tag};
 use userland::{EntryView, entry_name};
 use userland_image::{ImageDecodeError, ProgramDecodeError, decode};
 
@@ -350,7 +350,7 @@ impl Transport for KernelPortTransport {
             .with_lock(|buf| load_kernel_buffer(buf, bytes, handles))
     }
 
-    fn wait_readable(&self, _timeout_ns: u64) -> Result<(), WireError> {
+    fn wait_readable(&self, _timeout: Timeout) -> Result<(), WireError> {
         // recv сам блокирует в read_message.
         Ok(())
     }

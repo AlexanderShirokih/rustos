@@ -12,7 +12,7 @@ use userland_loader::load_entry;
 
 const PAGE_SIZE: u64 = 4096;
 const CHILD_CODE_VA: u64 = 0x2000_0000;
-const CHILD_WAIT_TIMEOUT_NS: u64 = 500_000_000;
+const CHILD_WAIT_TIMEOUT: Timeout = Timeout::from_millis(500);
 
 fn clean_exit_child_code() -> [u8; 12] {
     // AArch64: `svc HandleClose; svc ThreadExit; b .` закрывает bootstrap-хэндл,
@@ -63,9 +63,7 @@ fn load_entry_passes_bootstrap_handle() {
     let code = clean_exit_child_code();
     let process = load_synthetic_child(&resource, "/child", &code);
 
-    process
-        .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
-        .expect("child terminates");
+    process.join(CHILD_WAIT_TIMEOUT).expect("child terminates");
     // x0 нёс валидный child-table id -> HandleClose вернул 0.
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 }
@@ -77,14 +75,14 @@ fn synchronous_fault_terminates_child_and_runner_continues() {
     let faulting = load_synthetic_child(&resource, "/faulting-child", &fault_code);
 
     faulting
-        .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
+        .join(CHILD_WAIT_TIMEOUT)
         .expect("faulting child terminates");
     kernel_tests::kassert!(faulting.exit_code().expect("fault exit code") != 0);
 
     let canary_code = clean_exit_child_code();
     let canary = load_synthetic_child(&resource, "/post-fault-canary", &canary_code);
     canary
-        .join(Timeout::from_ns(CHILD_WAIT_TIMEOUT_NS))
+        .join(CHILD_WAIT_TIMEOUT)
         .expect("post-fault child terminates");
     kernel_tests::kassert_eq!(canary.exit_code().expect("canary exit code"), 0);
 }

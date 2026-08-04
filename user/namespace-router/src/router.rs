@@ -28,11 +28,11 @@ const DONE: u32 = 0;
 // Бюджет страниц, выдаваемый процессу файловой системы: его образ, стек, куча и буферы данных
 // сессий укладываются в него, а исчерпание не задевает ни маршрутизатор, ни соседей.
 const MOUNT_BUDGET_PAGES: u64 = 512;
-const UNMOUNT_TIMEOUT_NS: u64 = 5_000_000_000;
+const UNMOUNT_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 // Срок ответа файловой системы на bind. Монтирование, не ответившее в срок, отпускает поток
 // диспетчеризации, а клиенту уходит Unresponsive.
-const BIND_TIMEOUT_NS: u64 = 1_000_000_000;
+const BIND_TIMEOUT: Timeout = Timeout::from_secs(1);
 
 // Монтирование: префикс дерева имён и процесс, который его обслуживает.
 struct Mount {
@@ -106,7 +106,7 @@ impl NamespaceService for Resolving<'_> {
         // Значок сессии минтит сама файловая система: политика допуска принадлежит ей, а
         // маршрутизатор только переносит выданную капу клиенту.
         let bound = FileSystemAdminClient::new(PortTransport::client(&mount.admin))
-            .with_wait_ns(BIND_TIMEOUT_NS)
+            .with_wait(BIND_TIMEOUT)
             .bind()
             .map_err(|error| {
                 log_fmt(format_args!("bind refused: {error:?}"));
@@ -223,13 +223,10 @@ impl NamespaceAdminService for Administering<'_> {
             log_fmt(format_args!("unmount terminate refused: {error:?}"));
             Error::Runtime(error).as_file_system_error()
         })?;
-        mount
-            .process
-            .join(Timeout::from_ns(UNMOUNT_TIMEOUT_NS))
-            .map_err(|error| {
-                log_fmt(format_args!("unmount join refused: {error:?}"));
-                Error::Runtime(error).as_file_system_error()
-            })?;
+        mount.process.join(UNMOUNT_TIMEOUT).map_err(|error| {
+            log_fmt(format_args!("unmount join refused: {error:?}"));
+            Error::Runtime(error).as_file_system_error()
+        })?;
         log_line("unmounted");
         Ok(DONE)
     }

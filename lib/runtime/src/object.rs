@@ -24,7 +24,7 @@ pub use spawn::{JoinHandle, spawn, spawn_owned};
 pub use thread::{Priority, Thread, ThreadEntry};
 
 pub(super) fn wait_signals(handle: Handle, mask: u32, timeout: Timeout) -> Result<u32> {
-    value(svc::signal_wait_one(handle, mask, timeout.raw()))
+    value(svc::signal_wait_one(handle, mask, timeout))
         .map(|observed| (observed & 0xFFFF_FFFF) as u32)
 }
 
@@ -32,7 +32,7 @@ pub(super) fn wait_signals(handle: Handle, mask: u32, timeout: Timeout) -> Resul
 /// индекс сработавшей записи. Длина `items` - от 1 до
 /// [`syscall::WAIT_MANY_MAX_COUNT`].
 pub fn wait_any(items: &[WaitItem], timeout: Timeout) -> Result<usize> {
-    let (observed, index) = svc::signal_wait_many(items, timeout.raw());
+    let (observed, index) = svc::signal_wait_many(items, timeout);
     value(observed)?;
     Ok(usize::try_from(index).expect("wait index is an index into items"))
 }

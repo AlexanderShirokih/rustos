@@ -11,7 +11,7 @@ use runtime::{Priority, Timeout, ipc_buffer_addr, ipc_buffer_ptr, spawn};
 use syscall::{IPC_BUFFER_DATA_MAX, encode_tag};
 
 const STACK_SIZE: u64 = 0x4000;
-const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 /// Куда sibling-поток кладёт VA своего IPC-буфера (0 = ещё не записал).
 static SIBLING_VA: AtomicU64 = AtomicU64::new(0);
@@ -73,7 +73,7 @@ fn ipc_buffer_per_thread_distinct() {
     let thread =
         spawn(sibling_worker, 0, STACK_SIZE, Priority::new(1)).expect("spawn sibling worker");
     thread
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("sibling joins before timeout");
 
     let sibling_va = SIBLING_VA.load(Relaxed);

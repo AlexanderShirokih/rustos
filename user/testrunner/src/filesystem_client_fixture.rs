@@ -7,10 +7,10 @@ use core::panic::PanicInfo;
 use filesystem_abi::{AccessMode, FileSystemClient, OpenFlags};
 use ipc::wire::Str;
 use runtime::{OwnedHandle, PortTransport, thread_exit};
-use syscall::Handle;
+use syscall::{Handle, Timeout};
 
 // Конечный срок ответа сервера превращает зависание фикстуры в диагностируемую ошибку.
-const CALL_TIMEOUT_NS: u64 = 2_000_000_000;
+const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 // Буфер в потолок: сессия заметно весит на бюджете монтирования, пока сервер её не убрал.
 const BUFFER_SIZE: u32 = 64 * 1024;
@@ -29,8 +29,7 @@ pub extern "C" fn _start(service: Handle) -> ! {
 
 // Буфер данных и открытый дескриптор остаются за сессией до уборки.
 fn populate_session(service: Handle) -> bool {
-    let client =
-        FileSystemClient::new(PortTransport::client(service)).with_wait_ns(CALL_TIMEOUT_NS);
+    let client = FileSystemClient::new(PortTransport::client(service)).with_wait(CALL_TIMEOUT);
 
     let Ok(Ok(buffer)) = client.acquire_buffer(BUFFER_SIZE) else {
         return false;

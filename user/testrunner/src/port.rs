@@ -25,7 +25,7 @@ use runtime::{
 use syscall::{Handle, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
 
 const STACK_SIZE: u64 = 0x4000;
-const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 /// Офсеты полей IpcBuffer для доступа из `#[repr(C)]`-layout.
 const CAPS_OFF: usize = core::mem::offset_of!(syscall::IpcBuffer, caps);
@@ -122,7 +122,7 @@ fn spawn_worker(entry: extern "C" fn(usize) -> u32) -> JoinHandle {
 
 fn join(thread: JoinHandle) {
     thread
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("worker joins before timeout");
 }
 
@@ -135,7 +135,7 @@ extern "C" fn sender_worker(_arg: usize) -> u32 {
         write_msg(va, b"ping", &[]);
     }
     WORKER_READY.store(1, SeqCst);
-    let r = port_send(ep_handle(), Timeout::INFINITE.raw());
+    let r = port_send(ep_handle(), Timeout::INFINITE);
     WORKER_RESULT.store(r, SeqCst);
     0
 }
@@ -168,7 +168,7 @@ fn send_recv_round_trip_sender_first() {
 extern "C" fn receiver_worker(_arg: usize) -> u32 {
     let va = ipc_va();
     WORKER_READY.store(1, SeqCst);
-    let r = port_recv(ep_handle(), Timeout::INFINITE.raw());
+    let r = port_recv(ep_handle(), Timeout::INFINITE);
     if r != 0 {
         WORKER_RESULT.store(-100, SeqCst);
         return 0;
@@ -237,7 +237,7 @@ fn call_reply_round_trip() {
     unsafe {
         write_msg(va, b"req", &[]);
     }
-    kernel_tests::kassert_eq!(port_call(ep, Timeout::INFINITE.raw()), 0);
+    kernel_tests::kassert_eq!(port_call(ep, Timeout::INFINITE), 0);
 
     let mut buf = [0u8; 8];
     // SAFETY: собственный буфер.
@@ -268,7 +268,7 @@ extern "C" fn cap_sender_worker(_arg: usize) -> u32 {
         write_msg(va, b"", &[notif.raw()]);
     }
     WORKER_READY.store(1, SeqCst);
-    let r = port_send(ep_handle(), Timeout::INFINITE.raw());
+    let r = port_send(ep_handle(), Timeout::INFINITE);
     WORKER_RESULT.store(r, SeqCst);
     0
 }
@@ -299,7 +299,7 @@ fn cap_transfer_through_port() {
     let received = Handle::new(received_raw).expect("received cap handle");
 
     // Идентичность: бит, поднятый отправителем ДО переноса, виден здесь.
-    let observed = signal_wait_one(received, SIGNALED, 0);
+    let observed = signal_wait_one(received, SIGNALED, Timeout::POLL);
     let bit = i64::from(SIGNALED);
     kernel_tests::kassert!(observed & bit == bit);
 
@@ -330,7 +330,7 @@ extern "C" fn badge_client_a(_arg: usize) -> u32 {
         write_msg(va, b"a", &[]);
     }
     CLIENTS_READY.fetch_add(1, SeqCst);
-    let r = port_send(h, Timeout::INFINITE.raw());
+    let r = port_send(h, Timeout::INFINITE);
     CLIENT_A_RESULT.store(r, SeqCst);
     0
 }
@@ -343,7 +343,7 @@ extern "C" fn badge_client_b(_arg: usize) -> u32 {
         write_msg(va, b"b", &[]);
     }
     CLIENTS_READY.fetch_add(1, SeqCst);
-    let r = port_send(h, Timeout::INFINITE.raw());
+    let r = port_send(h, Timeout::INFINITE);
     CLIENT_B_RESULT.store(r, SeqCst);
     0
 }
@@ -412,7 +412,7 @@ fn recv_poll_no_sender_should_wait() {
 fn recv_finite_timeout_no_sender_should_wait() {
     let ep = Port::create().expect("port create");
     // 10 мс - заведомо истечёт, отправителя нет.
-    assert_timeout(ep.recv(Timeout::from_ns(10_000_000)).map(|_| ()));
+    assert_timeout(ep.recv(Timeout::from_millis(10)).map(|_| ()));
 }
 
 #[kernel_test]
@@ -420,7 +420,7 @@ fn call_finite_timeout_no_server_should_wait() {
     let ep = Port::create().expect("port create");
     let mut buf = [0u8; 8];
     assert_timeout(
-        ep.call_bytes(b"req", &mut buf, Timeout::from_ns(10_000_000))
+        ep.call_bytes(b"req", &mut buf, Timeout::from_millis(10))
             .map(|_| ()),
     );
 }

@@ -8,13 +8,13 @@
 //! клиента и сервера различается, роль задаётся явно при конструировании
 //! ([`PortTransport::client`] / [`PortTransport::server`]).
 //!
-//! Тайм-аут типизированного IPC доступен через `wait_readable(timeout_ns)`:
+//! Тайм-аут типизированного IPC доступен через `wait_readable(timeout)`:
 //! у клиента он ограничивает `port_call`, у сервера - приём (`port_recv`)
 //! очередного кадра (принятый кадр стейджится для следующего `read_message`).
 //! На истечении возвращается `Timeout`. Прямой серверный `read_message` без
 //! предшествующего `wait_readable` блокируется бессрочно.
 //! One-way отправка отдельно настраивается через
-//! [`PortTransport::with_send_timeout_ns`].
+//! [`PortTransport::with_send_timeout`].
 
 use core::cell::Cell;
 
@@ -23,8 +23,8 @@ use ipc::{
     wire::{Header, IpcError, MESSAGE_MAX_HANDLES},
 };
 use syscall::{
-    Handle, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, PORT_TIMEOUT_INFINITE,
-    SYSCALL_RETURN_TIMEOUT, SyscallError, decode_tag, encode_tag,
+    Handle, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, SYSCALL_RETURN_TIMEOUT, SyscallError,
+    Timeout, decode_tag, encode_tag,
 };
 
 use crate::{
@@ -41,7 +41,7 @@ enum Phase {
     /// Клиент между сообщениями: `cast` -> send, `call` -> отложенный call.
     ClientIdle,
     /// Клиент: запрос two-way `call` уложен в IPC-буфер, блокирующий
-    /// `port_call` отложен до `wait_readable` (там доступен `timeout_ns`).
+    /// `port_call` отложен до `wait_readable` (там доступен `timeout`).
     ClientCallPending,
     /// Клиент: ответ на `call` лежит в IPC-буфер, его ждёт следующий
     /// `read_message`.
@@ -65,7 +65,7 @@ pub struct PortTransport {
     handle: Handle,
     phase: Cell<Phase>,
     pending_reply: Cell<Option<Handle>>,
-    send_timeout_ns: u64,
+    send_timeout: Timeout,
 }
 
 impl PortTransport {
@@ -86,22 +86,22 @@ impl PortTransport {
             handle,
             phase: Cell::new(phase),
             pending_reply: Cell::new(None),
-            send_timeout_ns: PORT_TIMEOUT_INFINITE,
+            send_timeout: Timeout::INFINITE,
         }
     }
 
-    /// Задаёт тайм-аут rendezvous для one-way `send`/`#[cast]` в наносекундах.
+    /// Задаёт тайм-аут rendezvous для one-way `send`/`#[cast]`.
     /// Two-way `call`, server receive и reply используют свои сроки.
     #[must_use]
-    pub const fn with_send_timeout_ns(mut self, send_timeout_ns: u64) -> Self {
-        self.send_timeout_ns = send_timeout_ns;
+    pub const fn with_send_timeout(mut self, send_timeout: Timeout) -> Self {
+        self.send_timeout = send_timeout;
         self
     }
 
-    /// Текущий тайм-аут one-way отправки в наносекундах.
+    /// Текущий тайм-аут one-way отправки.
     #[must_use]
-    pub const fn send_timeout_ns(&self) -> u64 {
-        self.send_timeout_ns
+    pub const fn send_timeout(&self) -> Timeout {
+        self.send_timeout
     }
 
     /// Значок (badge) port-хэндла, через который пришёл принятый кадр. `0` -
@@ -150,8 +150,8 @@ impl PortTransport {
     // последующего write_message(RESPONSE). Timeout по истечении срока, SenderGone - вместо
     // кадра пришло событие об уходе значка, ResourceExhausted - принять кадр нечем, PeerClosed
     // при закрытом порте.
-    fn recv_into_buffer(&self, timeout_ns: u64) -> Result<(), IpcError> {
-        let ret = port_recv(self.handle, timeout_ns);
+    fn recv_into_buffer(&self, timeout: Timeout) -> Result<(), IpcError> {
+        let ret = port_recv(self.handle, timeout);
         if ret < 0 {
             return Err(map_recv_error(ret));
         }
@@ -251,12 +251,12 @@ impl Transport for PortTransport {
         if header.txid != 0 {
             // Two-way клиентский запрос: запрос уложен в IPC-буфер, но сам
             // port_call (блокирующий до reply) откладываем до wait_readable,
-            // где доступен timeout_ns клиента. Ответ окажется в том же буфере.
+            // где доступен timeout клиента. Ответ окажется в том же буфере.
             self.phase.set(Phase::ClientCallPending);
             Ok(())
         } else {
             // One-way cast.
-            map_send_result(port_send(self.handle, self.send_timeout_ns))
+            map_send_result(port_send(self.handle, self.send_timeout))
         }
     }
 
@@ -277,20 +277,20 @@ impl Transport for PortTransport {
             // Блокирующий приём (бессрочно), как при прямом dispatch без
             // wait_readable.
             Phase::ServerIdle => {
-                self.recv_into_buffer(PORT_TIMEOUT_INFINITE)?;
+                self.recv_into_buffer(Timeout::INFINITE)?;
                 Self::load_buffer(bytes, handles)
             }
         }
     }
 
-    fn wait_readable(&self, timeout_ns: u64) -> Result<(), IpcError> {
+    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
         match self.phase.get() {
             // Клиент: выполняем отложенный two-way call С тайм-аутом клиента.
             // Ответ ложится в IPC-буфер; его декодирует следующий
             // read_message. `Timeout` пробрасывается вызывающему.
             Phase::ClientCallPending => {
                 self.phase.set(Phase::ClientIdle);
-                let ret = port_call(self.handle, timeout_ns);
+                let ret = port_call(self.handle, timeout);
                 if ret == SYSCALL_RETURN_TIMEOUT {
                     return Err(IpcError::Timeout);
                 }
@@ -305,7 +305,7 @@ impl Transport for PortTransport {
             // остаётся в IPC-буфере, его декодирует следующий read_message.
             // `Timeout` пробрасывается вызывающему (например, dispatch-циклу).
             Phase::ServerIdle | Phase::ServerStaged => {
-                self.recv_into_buffer(timeout_ns)?;
+                self.recv_into_buffer(timeout)?;
                 self.phase.set(Phase::ServerStaged);
                 Ok(())
             }

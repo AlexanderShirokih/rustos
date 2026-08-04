@@ -14,8 +14,8 @@ use runtime::{
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
 
 const STACK_SIZE: u64 = 0x4000;
-const OPERATION_TIMEOUT_NS: u64 = 1_000_000_000;
-const JOIN_TIMEOUT_NS: u64 = 2_000_000_000;
+const OPERATION_TIMEOUT: Timeout = Timeout::from_secs(1);
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(2);
 const READY_SPIN_LIMIT: usize = 10_000_000;
 
 /// Генератор последовательности прогона: та же цепочка значений на том же seed.
@@ -152,7 +152,7 @@ extern "C" fn send_worker(arg: usize) -> u32 {
     }
     let result = state
         .handle()
-        .map_or(-1001, |handle| port_send(handle, OPERATION_TIMEOUT_NS));
+        .map_or(-1001, |handle| port_send(handle, OPERATION_TIMEOUT));
     state.result.store(result, SeqCst);
     0
 }
@@ -166,7 +166,7 @@ extern "C" fn call_worker(arg: usize) -> u32 {
     }
     let result = state
         .handle()
-        .map_or(-1001, |handle| port_call(handle, OPERATION_TIMEOUT_NS));
+        .map_or(-1001, |handle| port_call(handle, OPERATION_TIMEOUT));
     if result == 0 {
         state.observed.store(read_payload().unwrap_or(0), SeqCst);
     }
@@ -178,7 +178,7 @@ extern "C" fn signal_wait_worker(arg: usize) -> u32 {
     let state = worker_state(arg);
     state.ready.store(true, SeqCst);
     let result = state.handle().map_or(-1001, |handle| {
-        signal_wait_one(handle, SIGNALED, OPERATION_TIMEOUT_NS)
+        signal_wait_one(handle, SIGNALED, OPERATION_TIMEOUT)
     });
     state.result.store(result, SeqCst);
     0
@@ -195,9 +195,7 @@ fn wait_until_ready(state: &WorkerState) -> Result<(), i64> {
 }
 
 fn join(worker: JoinHandle) -> Result<(), i64> {
-    worker
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
-        .map_err(|_| -1002)
+    worker.join(JOIN_TIMEOUT).map_err(|_| -1002)
 }
 
 fn send_recv(payload: u64) -> Result<(), i64> {
@@ -208,7 +206,7 @@ fn send_recv(payload: u64) -> Result<(), i64> {
 
     let mut bytes = [0u8; size_of::<u64>()];
     let (len, reply) = port
-        .recv_bytes(&mut bytes, Timeout::from_ns(OPERATION_TIMEOUT_NS))
+        .recv_bytes(&mut bytes, OPERATION_TIMEOUT)
         .map_err(|_| -1102)?;
     if len != bytes.len() || reply.is_some() || u64::from_le_bytes(bytes) != payload {
         return Err(-1103);
@@ -228,7 +226,7 @@ fn call_reply(payload: u64) -> Result<(), i64> {
 
     let mut bytes = [0u8; size_of::<u64>()];
     let (len, reply) = port
-        .recv_bytes(&mut bytes, Timeout::from_ns(OPERATION_TIMEOUT_NS))
+        .recv_bytes(&mut bytes, OPERATION_TIMEOUT)
         .map_err(|_| -1202)?;
     let Some(reply) = reply else {
         return Err(-1203);

@@ -6,7 +6,7 @@ use core::fmt::Write as _;
 use ipc::{Transport as _, wire::IpcError};
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LOG_TAG_MAX, LogBuffer, LogService, dispatch_log};
 use runtime::{OwnedHandle, PortTransport, handle_close};
-use syscall::PORT_TIMEOUT_INFINITE;
+use syscall::Timeout;
 
 // Источник собственных строк relay в стоке.
 const RELAY_SOURCE: &str = "log-relay";
@@ -57,7 +57,7 @@ impl<S: LogSink> LogRelay<S> {
         let transport = PortTransport::server(self.receiver.borrow());
         let mut failures = 0;
         loop {
-            match transport.wait_readable(PORT_TIMEOUT_INFINITE) {
+            match transport.wait_readable(Timeout::INFINITE) {
                 Ok(()) => {}
                 // Уход значка кадра не несёт: состояния сессий relay не держит.
                 Err(IpcError::SenderGone) => continue,

@@ -2,11 +2,11 @@
 
 use core::arch::asm;
 
-use syscall::{Handle, SyscallError, SyscallOp, WaitItem, WakeCount};
+use syscall::{Handle, SyscallError, SyscallOp, Timeout, WaitItem, WakeCount};
 
-/// Ждёт сигналы `signals` на capability target `handle`; `timeout_ns == 0` - non-blocking
-/// poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
-pub fn signal_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
+/// Ждёт сигналы `signals` на capability target `handle`; [`Timeout::POLL`] -
+/// non-blocking poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
+pub fn signal_wait_one(handle: Handle, signals: u32, timeout: Timeout) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
     // в x0..x2: handle, маска сигналов, timeout_ns; память ядру не
@@ -17,7 +17,7 @@ pub fn signal_wait_one(handle: Handle, signals: u32, timeout_ns: u64) -> i64 {
             op = const SyscallOp::SignalWaitOne as u16,
             in("x0") u64::from(handle.raw()),
             in("x1") u64::from(signals),
-            in("x2") timeout_ns,
+            in("x2") timeout.raw(),
             lateout("x0") ret,
             options(nostack),
         );
@@ -48,10 +48,10 @@ pub fn signal_set(handle: Handle, set: u32, clear: u32, count: WakeCount) -> i64
 }
 
 /// Ждёт сигналы на нескольких capability target: `items` - записи `[handle, mask]`,
-/// `timeout_ns == 0` - non-blocking poll. Возврат: `(observed, index)` -
+/// [`Timeout::POLL`] - non-blocking poll. Возврат: `(observed, index)` -
 /// observed-маска сработавшего capability target (>=0 либо `-(SyscallError)`) и его индекс
 /// в `items`.
-pub fn signal_wait_many(items: &[WaitItem], timeout_ns: u64) -> (i64, u64) {
+pub fn signal_wait_many(items: &[WaitItem], timeout: Timeout) -> (i64, u64) {
     let observed: i64;
     let index: u64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
@@ -64,7 +64,7 @@ pub fn signal_wait_many(items: &[WaitItem], timeout_ns: u64) -> (i64, u64) {
             op = const SyscallOp::SignalWaitMany as u16,
             in("x0") items.as_ptr() as u64,
             in("x1") items.len() as u64,
-            in("x2") timeout_ns,
+            in("x2") timeout.raw(),
             lateout("x0") observed,
             lateout("x1") index,
             options(nostack),
@@ -108,13 +108,12 @@ pub fn port_create() -> Result<Handle, SyscallError> {
 }
 
 /// `send` на port `handle`: блокирующая отправка сообщения из
-/// IPC-буфера текущего потока. `timeout_ns`:
-/// [`PORT_TIMEOUT_INFINITE`](syscall::PORT_TIMEOUT_INFINITE) - бессрочно,
-/// `0` - poll, иначе дедлайн в нс. Требует `Rights::WRITE`.
+/// IPC-буфера текущего потока. `timeout`: [`Timeout::INFINITE`] - бессрочно,
+/// [`Timeout::POLL`] - poll, иначе дедлайн. Требует `Rights::WRITE`.
 /// Возврат: 0,
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
-pub fn port_send(handle: Handle, timeout_ns: u64) -> i64 {
+pub fn port_send(handle: Handle, timeout: Timeout) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
     // timeout_ns; сообщение лежит в per-thread IPC-буфере (ядро читает
@@ -124,7 +123,7 @@ pub fn port_send(handle: Handle, timeout_ns: u64) -> i64 {
             "svc #{op}",
             op = const SyscallOp::PortSend as u16,
             in("x0") u64::from(handle.raw()),
-            in("x1") timeout_ns,
+            in("x1") timeout.raw(),
             lateout("x0") ret,
             options(nostack),
         );
@@ -133,11 +132,11 @@ pub fn port_send(handle: Handle, timeout_ns: u64) -> i64 {
 }
 
 /// `recv` на port `handle`: блокирующий приём в IPC-буфер текущего
-/// потока. `timeout_ns` - как у [`port_send`]. Требует `Rights::READ`.
+/// потока. `timeout` - как у [`port_send`]. Требует `Rights::READ`.
 /// Возврат: reply handle id (если встречный был `call`, иначе 0),
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
-pub fn port_recv(handle: Handle, timeout_ns: u64) -> i64 {
+pub fn port_recv(handle: Handle, timeout: Timeout) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
     // timeout_ns; принятое сообщение ядро пишет в per-thread IPC-буфер
@@ -147,7 +146,7 @@ pub fn port_recv(handle: Handle, timeout_ns: u64) -> i64 {
             "svc #{op}",
             op = const SyscallOp::PortRecv as u16,
             in("x0") u64::from(handle.raw()),
-            in("x1") timeout_ns,
+            in("x1") timeout.raw(),
             lateout("x0") ret,
             options(nostack),
         );
@@ -156,12 +155,12 @@ pub fn port_recv(handle: Handle, timeout_ns: u64) -> i64 {
 }
 
 /// `call` на port `handle`: блокирующий запрос-ответ. Сообщение из
-/// IPC-буфера текущего потока; ответ оказывается там же. `timeout_ns`
+/// IPC-буфера текущего потока; ответ оказывается там же. `timeout`
 /// ограничивает всю операцию (см. [`port_send`]). Требует `Rights::WRITE`.
 /// Возврат: 0,
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
-pub fn port_call(handle: Handle, timeout_ns: u64) -> i64 {
+pub fn port_call(handle: Handle, timeout: Timeout) -> i64 {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
     // timeout_ns; запрос и ответ ходят через per-thread IPC-буфер текущего
@@ -171,7 +170,7 @@ pub fn port_call(handle: Handle, timeout_ns: u64) -> i64 {
             "svc #{op}",
             op = const SyscallOp::PortCall as u16,
             in("x0") u64::from(handle.raw()),
-            in("x1") timeout_ns,
+            in("x1") timeout.raw(),
             lateout("x0") ret,
             options(nostack),
         );

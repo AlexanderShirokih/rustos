@@ -3,6 +3,8 @@
 //! [`Transport`] реализуется платформенным адаптером поверх syscall-ов канала.
 //! Кадр кодируется в `bytes`, порты - в отдельном `handles`-векторе.
 
+use syscall::Timeout;
+
 use crate::wire::IpcError;
 
 /// Длины прочитанного кадра: байты тела и число хэндлов.
@@ -35,7 +37,7 @@ pub trait Transport {
     /// `Truncated`, если буфер короче кадра или хэндлов больше места.
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError>;
 
-    /// Ждёт готовности к чтению до `timeout_ns` наносекунд.
+    /// Ждёт готовности к чтению до истечения `timeout`.
     /// `Timeout` по истечении срока; `PeerClosed`, если дальний конец закрыт.
-    fn wait_readable(&self, timeout_ns: u64) -> Result<(), IpcError>;
+    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError>;
 }

@@ -80,7 +80,9 @@ mod tests {
         thread::scope(|scope| {
             let server = scope.spawn(|| {
                 for _ in 0..calls_expected {
-                    server_end.wait_readable(u64::MAX).expect("server wait");
+                    server_end
+                        .wait_readable(ipc::Timeout::INFINITE)
+                        .expect("server wait");
                     dispatch_namespace(&mut router, &server_end).expect("dispatch ok");
                 }
             });

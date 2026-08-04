@@ -27,8 +27,8 @@ use userland::{
 };
 
 const STARTUP_FAILURE_EXIT_CODE: u32 = 1;
-const STARTUP_CLEANUP_TIMEOUT_NS: u64 = 5_000_000_000;
-const CREATED_PROCESS_REAP_TURN_NS: u64 = 1_000_000;
+const STARTUP_CLEANUP_TIMEOUT: Timeout = Timeout::from_secs(5);
+const CREATED_PROCESS_REAP_TURN: Timeout = Timeout::from_millis(1);
 
 // RAII-владелец незавершенной startup-транзакции.
 struct PendingLaunch {
@@ -158,12 +158,12 @@ impl Drop for PendingProcess {
 
 fn terminate_and_join(process: &Process) -> Result<()> {
     process.terminate(STARTUP_FAILURE_EXIT_CODE)?;
-    process.join(Timeout::from_ns(STARTUP_CLEANUP_TIMEOUT_NS))
+    process.join(STARTUP_CLEANUP_TIMEOUT)
 }
 
 fn confirm_created_process_reaped() -> Result<()> {
     let timer = Signal::create()?;
-    match timer.wait(SIGNALED, Timeout::from_ns(CREATED_PROCESS_REAP_TURN_NS)) {
+    match timer.wait(SIGNALED, CREATED_PROCESS_REAP_TURN) {
         Err(Error::Syscall(SyscallError::Timeout)) => Ok(()),
         Err(error) => Err(error),
         Ok(_) => Err(Error::Syscall(SyscallError::Canceled)),

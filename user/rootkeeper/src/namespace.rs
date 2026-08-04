@@ -126,7 +126,7 @@ impl NamespaceRoots {
         let path = wire_path(mount.path)?;
         let program = wire_path(mount.program)?;
         NamespaceAdminClient::new(PortTransport::client(&self.admin))
-            .with_wait_ns(timeout.raw())
+            .with_wait(timeout)
             .mount(path, program)
             .map_err(MountFailure::Transport)?
             .map(|_| ())
@@ -137,7 +137,7 @@ impl NamespaceRoots {
     pub fn unmount(&self, path: &str, timeout: Timeout) -> Result<(), MountFailure> {
         let path = wire_path(path)?;
         NamespaceAdminClient::new(PortTransport::client(&self.admin))
-            .with_wait_ns(timeout.raw())
+            .with_wait(timeout)
             .unmount(path)
             .map_err(MountFailure::Transport)?
             .map(|_| ())

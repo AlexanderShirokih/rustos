@@ -25,12 +25,9 @@ use core::{
     },
 };
 
-use syscall::{Handle, SIGNALED, WakeCount};
+use syscall::{Handle, SIGNALED, Timeout, WakeCount};
 
 use crate::{handle_close, signal_create, signal_set, signal_wait_one};
-
-/// Таймаут бесконечного паркинга.
-const FOREVER: u64 = u64::MAX;
 
 /// Взаимоисключающий доступ к `T` для userspace-потоков.
 pub struct Mutex<T> {
@@ -109,7 +106,7 @@ impl<T> Mutex<T> {
             if self.state.swap(2, Acquire) == 0 {
                 return;
             }
-            let _ = signal_wait_one(self.signal(), SIGNALED, FOREVER);
+            let _ = signal_wait_one(self.signal(), SIGNALED, Timeout::INFINITE);
             let _ = signal_set(self.signal(), 0, SIGNALED, WakeCount::None);
         }
     }
@@ -187,7 +184,7 @@ impl Condvar {
         drop(guard);
         between();
 
-        let _ = signal_wait_one(signal, SIGNALED, FOREVER);
+        let _ = signal_wait_one(signal, SIGNALED, Timeout::INFINITE);
         self.unregister(signal);
         handle_close(signal);
         mutex.lock()

@@ -336,7 +336,7 @@ IPC-буфером потока.
 ```rust
 let ipc = ipc_buffer_addr() as *mut IpcBuffer;
 loop {
-    match port_recv(service_handle, PORT_TIMEOUT_INFINITE) {
+    match port_recv(service_handle, Timeout::INFINITE) {
         Ok(reply_handle) => serve_frame(reply_handle),
         Err(SenderGone) => drop_session(unsafe { (*ipc).badge }),
         Err(err) => break err,

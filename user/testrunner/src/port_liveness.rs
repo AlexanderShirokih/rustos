@@ -25,10 +25,10 @@ use crate::{
 const STACK_SIZE: u64 = 0x4000;
 /// Срок серверной операции: механизм обязан ответить раньше, поэтому истечение
 /// срока - провал теста, а не штатный исход.
-const SERVE_TIMEOUT_NS: u64 = 3_000_000_000;
-const JOIN_TIMEOUT_NS: u64 = 5_000_000_000;
+const SERVE_TIMEOUT: Timeout = Timeout::from_secs(3);
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 /// Пауза, за которую клиентский поток успевает уйти в парковку.
-const PARK_SETTLE_NS: u64 = 100_000_000;
+const PARK_SETTLE: Timeout = Timeout::from_millis(100);
 
 /// Значки клиентских сессий: значения различаются в каждом байте, поэтому
 /// прочитанный значок нельзя спутать с оставшимся от предыдущей операции.
@@ -50,10 +50,10 @@ fn received_badge() -> u64 {
     unsafe { (*buffer).badge }
 }
 
-/// Ждёт `ns` на свежем порту, которому никто не пишет.
-fn pause(ns: u64) {
+// Ждёт `budget` на свежем порту, которому никто не пишет.
+fn pause(budget: Timeout) {
     let idle = Port::create().expect("port create");
-    let waited = idle.recv(Timeout::from_ns(ns));
+    let waited = idle.recv(budget);
     kernel_tests::kassert!(matches!(waited, Err(Error::Syscall(SyscallError::Timeout))));
 }
 
@@ -104,15 +104,9 @@ extern "C" fn refused_client(_arg: usize) -> u32 {
     let client = client_capability(&REFUSED_CLIENT_CAP);
     // Рандеву-подтверждение: сервер роняет свою капу, только узнав, что поток
     // дошёл до порта.
-    REFUSED_HANDSHAKE.store(
-        port_send(client, Timeout::from_ns(SERVE_TIMEOUT_NS).raw()),
-        SeqCst,
-    );
-    REFUSED_PARKED_CALL.store(
-        port_call(client, Timeout::from_ns(SERVE_TIMEOUT_NS).raw()),
-        SeqCst,
-    );
-    REFUSED_FRESH_CALL.store(port_call(client, Timeout::POLL.raw()), SeqCst);
+    REFUSED_HANDSHAKE.store(port_send(client, SERVE_TIMEOUT), SeqCst);
+    REFUSED_PARKED_CALL.store(port_call(client, SERVE_TIMEOUT), SeqCst);
+    REFUSED_FRESH_CALL.store(port_call(client, Timeout::POLL), SeqCst);
     0
 }
 
@@ -131,17 +125,14 @@ fn sender_is_refused_when_the_last_receiver_goes() {
     REFUSED_FRESH_CALL.store(i64::MIN, SeqCst);
 
     let worker = spawn(refused_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
-    port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS))
-        .expect("handshake frame");
+    port.recv(SERVE_TIMEOUT).expect("handshake frame");
     // Кадр принят - клиент вышел из send; пауза отдаёт ему процессор, чтобы он
     // припарковался в call до обнуления множества получателей.
-    pause(PARK_SETTLE_NS);
+    pause(PARK_SETTLE);
 
     // Корневая капа - единственный держатель READ.
     drop(port);
-    worker
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
-        .expect("client joins");
+    worker.join(JOIN_TIMEOUT).expect("client joins");
 
     kernel_tests::kassert_eq!(REFUSED_HANDSHAKE.load(SeqCst), 0);
     kernel_tests::kassert_eq!(
@@ -166,20 +157,14 @@ fn badge_departs_when_the_client_process_dies() {
         .expect("mint client capability");
     let process = spawn_image_entry("/boot/badge-client", client);
 
-    port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS))
-        .expect("client frame");
+    port.recv(SERVE_TIMEOUT).expect("client frame");
     kernel_tests::kassert_eq!(received_badge(), DYING_CLIENT_BADGE);
 
-    process
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
-        .expect("client terminates");
+    process.join(JOIN_TIMEOUT).expect("client terminates");
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 
     // Капа осталась в таблице клиента: держателей значка лишила смерть процесса.
-    assert_sender_gone(
-        port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS)),
-        DYING_CLIENT_BADGE,
-    );
+    assert_sender_gone(port.recv(SERVE_TIMEOUT), DYING_CLIENT_BADGE);
 }
 
 /// Сырые HandleId капы со значком и капы без значка: обе принадлежат клиенту.
@@ -192,10 +177,10 @@ extern "C" fn living_client(_arg: usize) -> u32 {
     let badged = client_capability(&LIVING_CLIENT_BADGED_CAP);
     let plain = client_capability(&LIVING_CLIENT_PLAIN_CAP);
 
-    let framed = port_send(badged, Timeout::from_ns(SERVE_TIMEOUT_NS).raw());
+    let framed = port_send(badged, SERVE_TIMEOUT);
     let closed = handle_close(badged);
     // Кадр без значка после закрытия: им клиент подтверждает, что жив.
-    let alive = port_send(plain, Timeout::from_ns(SERVE_TIMEOUT_NS).raw());
+    let alive = port_send(plain, SERVE_TIMEOUT);
     let released = handle_close(plain);
 
     LIVING_CLIENT_RESULT.store(framed | closed | alive | released, SeqCst);
@@ -220,23 +205,17 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
 
     let worker = spawn(living_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
 
-    port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS))
-        .expect("badged frame");
+    port.recv(SERVE_TIMEOUT).expect("badged frame");
     kernel_tests::kassert_eq!(received_badge(), LIVING_CLIENT_BADGE);
 
-    assert_sender_gone(
-        port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS)),
-        LIVING_CLIENT_BADGE,
-    );
+    assert_sender_gone(port.recv(SERVE_TIMEOUT), LIVING_CLIENT_BADGE);
 
     // Кадр без значка приходит следом: его отправитель был жив, когда значок ушёл.
-    port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS))
+    port.recv(SERVE_TIMEOUT)
         .expect("frame from the living client");
     kernel_tests::kassert_eq!(received_badge(), 0);
 
-    worker
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
-        .expect("client joins");
+    worker.join(JOIN_TIMEOUT).expect("client joins");
     kernel_tests::kassert_eq!(LIVING_CLIENT_RESULT.load(SeqCst), 0);
 }
 
@@ -249,7 +228,7 @@ static SERVED_CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
 extern "C" fn served_client(_arg: usize) -> u32 {
     let badged = client_capability(&SERVED_CLIENT_CAP);
-    let framed = port_send(badged, Timeout::from_ns(SERVE_TIMEOUT_NS).raw());
+    let framed = port_send(badged, SERVE_TIMEOUT);
     let closed = handle_close(badged);
     SERVED_CLIENT_RESULT.store(framed | closed, SeqCst);
     SERVED_CLIENT_CLOSED.store(1, SeqCst);
@@ -269,8 +248,7 @@ fn departed_badge_waits_for_the_busy_server() {
 
     let worker = spawn(served_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
 
-    port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS))
-        .expect("client frame");
+    port.recv(SERVE_TIMEOUT).expect("client frame");
     kernel_tests::kassert_eq!(received_badge(), SERVED_CLIENT_BADGE);
 
     // Сервер разбирает принятый кадр и в recv не стоит, пока значок уходит.
@@ -282,9 +260,7 @@ fn departed_badge_waits_for_the_busy_server() {
     // состоянии порта.
     assert_sender_gone(port.recv(Timeout::POLL), SERVED_CLIENT_BADGE);
 
-    worker
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
-        .expect("client joins");
+    worker.join(JOIN_TIMEOUT).expect("client joins");
     kernel_tests::kassert_eq!(SERVED_CLIENT_RESULT.load(SeqCst), 0);
 }
 
@@ -300,9 +276,7 @@ fn served_child_exits_when_its_client_capability_goes() {
     );
 
     let process = fixture.into_process();
-    process
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
-        .expect("fixture terminates");
+    process.join(JOIN_TIMEOUT).expect("fixture terminates");
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 }
 
@@ -339,19 +313,13 @@ static SECOND_CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
 extern "C" fn first_client(_arg: usize) -> u32 {
     let client = client_capability(&FIRST_CLIENT_CAP);
-    FIRST_CLIENT_RESULT.store(
-        port_send(client, Timeout::from_ns(SERVE_TIMEOUT_NS).raw()),
-        SeqCst,
-    );
+    FIRST_CLIENT_RESULT.store(port_send(client, SERVE_TIMEOUT), SeqCst);
     0
 }
 
 extern "C" fn second_client(_arg: usize) -> u32 {
     let client = client_capability(&SECOND_CLIENT_CAP);
-    SECOND_CLIENT_RESULT.store(
-        port_send(client, Timeout::from_ns(SERVE_TIMEOUT_NS).raw()),
-        SeqCst,
-    );
+    SECOND_CLIENT_RESULT.store(port_send(client, SERVE_TIMEOUT), SeqCst);
     0
 }
 
@@ -379,33 +347,24 @@ fn departed_badge_names_the_session_that_left() {
     // Порядок прихода кадров не определён, поэтому значки сверяются как множество.
     let mut seen = [0u64; 2];
     for slot in &mut seen {
-        port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS))
-            .expect("client frame");
+        port.recv(SERVE_TIMEOUT).expect("client frame");
         *slot = received_badge();
     }
     kernel_tests::kassert!(seen.contains(&FIRST_CLIENT_BADGE));
     kernel_tests::kassert!(seen.contains(&SECOND_CLIENT_BADGE));
 
-    first_worker
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
-        .expect("first client joins");
+    first_worker.join(JOIN_TIMEOUT).expect("first client joins");
     second_worker
-        .join(Timeout::from_ns(JOIN_TIMEOUT_NS))
+        .join(JOIN_TIMEOUT)
         .expect("second client joins");
     kernel_tests::kassert_eq!(FIRST_CLIENT_RESULT.load(SeqCst), 0);
     kernel_tests::kassert_eq!(SECOND_CLIENT_RESULT.load(SeqCst), 0);
 
     // Уходит только первая сессия: событие обязано назвать её значок.
     first.close().expect("close first client capability");
-    assert_sender_gone(
-        port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS)),
-        FIRST_CLIENT_BADGE,
-    );
+    assert_sender_gone(port.recv(SERVE_TIMEOUT), FIRST_CLIENT_BADGE);
 
     // Вторая сессия была жива и уходит отдельным событием.
     second.close().expect("close second client capability");
-    assert_sender_gone(
-        port.recv(Timeout::from_ns(SERVE_TIMEOUT_NS)),
-        SECOND_CLIENT_BADGE,
-    );
+    assert_sender_gone(port.recv(SERVE_TIMEOUT), SECOND_CLIENT_BADGE);
 }

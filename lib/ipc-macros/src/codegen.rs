@@ -295,16 +295,17 @@ fn expand_client(protocol: &Protocol) -> TokenStream {
         .filter(|op| matches!(op.kind, Kind::Call | Kind::Cast))
         .map(|op| expand_client_method(protocol, op));
 
-    // Дефолт `wait_ns` из `#[protocol(timeout_ns = N)]`; иначе бессрочно.
-    let default_wait_ns = protocol
-        .default_timeout_ns
-        .map_or_else(|| quote!(u64::MAX), |ns| quote!(#ns));
+    // Дефолт `wait` из `#[protocol(timeout_ns = N)]`; иначе бессрочно.
+    let default_wait = protocol.default_timeout_ns.map_or_else(
+        || quote!(::ipc::Timeout::INFINITE),
+        |ns| quote!(::ipc::Timeout::from_ns(#ns)),
+    );
 
     quote! {
         #vis struct #client_ident<T: ::ipc::Transport> {
             transport: T,
             next_txid: ::core::cell::Cell<u32>,
-            wait_ns: u64,
+            wait: ::ipc::Timeout,
         }
 
         impl<T: ::ipc::Transport> #client_ident<T> {
@@ -312,22 +313,22 @@ fn expand_client(protocol: &Protocol) -> TokenStream {
                 Self {
                     transport,
                     next_txid: ::core::cell::Cell::new(1u32),
-                    wait_ns: #default_wait_ns,
+                    wait: #default_wait,
                 }
             }
 
             /// Переопределяет дефолтный тайм-аут ожидания ответа two-way
-            /// `#[call]` (в нс), применяемый к операциям без собственного
+            /// `#[call]`, применяемый к операциям без собственного
             /// `#[call(timeout_ns = N)]`.
             #[must_use]
-            #vis fn with_wait_ns(mut self, wait_ns: u64) -> Self {
-                self.wait_ns = wait_ns;
+            #vis fn with_wait(mut self, wait: ::ipc::Timeout) -> Self {
+                self.wait = wait;
                 self
             }
 
-            /// Текущий дефолтный тайм-аут ожидания ответа (нс).
-            #vis fn wait_ns(&self) -> u64 {
-                self.wait_ns
+            /// Текущий дефолтный тайм-аут ожидания ответа.
+            #vis fn wait(&self) -> ::ipc::Timeout {
+                self.wait
             }
 
             #vis fn into_transport(self) -> T {
@@ -439,9 +440,10 @@ fn expand_client_call(protocol: &Protocol, op: &Operation) -> TokenStream {
     let (ret_ty, decode_response) = expand_call_return(ret);
 
     // Per-call `#[call(timeout_ns = N)]` перекрывает дефолт клиента.
-    let wait_ns = op
-        .timeout_ns
-        .map_or_else(|| quote!(self.wait_ns), |ns| quote!(#ns));
+    let wait = op.timeout_ns.map_or_else(
+        || quote!(self.wait),
+        |ns| quote!(::ipc::Timeout::from_ns(#ns)),
+    );
 
     let docs = op_docs(op);
     let body = if has_cap_params(&op.params) {
@@ -458,7 +460,7 @@ fn expand_client_call(protocol: &Protocol, op: &Operation) -> TokenStream {
                 #encode
                 __buf.finish()?;
                 self.transport.write_message(__buf.as_bytes(), #encode_handles)?;
-                self.transport.wait_readable(#wait_ns)
+                self.transport.wait_readable(#wait)
             })();
             #relinquish
             __req?;
@@ -470,7 +472,7 @@ fn expand_client_call(protocol: &Protocol, op: &Operation) -> TokenStream {
                     return ::core::result::Result::Err(::ipc::wire::IpcError::PeerClosed);
                 }
                 if !__header.has_flag(::ipc::wire::FLAG_RESPONSE) || __header.txid != __txid {
-                    self.transport.wait_readable(#wait_ns)?;
+                    self.transport.wait_readable(#wait)?;
                     continue;
                 }
                 let __body = &__frame[::ipc::wire::HEADER_SIZE..];
@@ -490,7 +492,7 @@ fn expand_client_call(protocol: &Protocol, op: &Operation) -> TokenStream {
             let mut __bytes = [0u8; ::ipc::wire::MESSAGE_INLINE_MAX];
             let mut __handles = [0u32; ::ipc::wire::MESSAGE_MAX_HANDLES];
             loop {
-                self.transport.wait_readable(#wait_ns)?;
+                self.transport.wait_readable(#wait)?;
                 let __len = self.transport.read_message(&mut __bytes, &mut __handles)?;
                 let __frame = &__bytes[..__len.bytes];
                 let __header = ::ipc::wire::Header::decode(__frame)?;

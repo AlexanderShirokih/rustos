@@ -301,7 +301,7 @@ mod tests {
                 calls: Arc::clone(&calls),
             };
             scope.spawn(move || {
-                while server_end.wait_readable(u64::MAX).is_ok() {
+                while server_end.wait_readable(ipc::Timeout::INFINITE).is_ok() {
                     if dispatch_file_system(&mut service, &server_end).is_err() {
                         break;
                     }

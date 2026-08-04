@@ -27,9 +27,9 @@ use userland_image::decode;
 use userland_loader::load_entry;
 
 // Конечный срок ответа сервера превращает зависание в диагностируемый Timeout.
-const CALL_TIMEOUT_NS: u64 = 2_000_000_000;
+const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
-const CLIENT_TIMEOUT_NS: u64 = 2_000_000_000;
+const CLIENT_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 // Программа-клиент, чья сессия умирает вместе с процессом.
 const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture";
@@ -105,7 +105,7 @@ fn namespace_roots() -> &'static NamespaceRoots {
 }
 
 fn namespace_admin_client(capability: BorrowedHandle<'_>) -> NamespaceAdminClient<PortTransport> {
-    NamespaceAdminClient::new(PortTransport::client(capability)).with_wait_ns(CALL_TIMEOUT_NS)
+    NamespaceAdminClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
 fn start_namespace() -> NamespacePorts {
@@ -154,7 +154,7 @@ fn acquire_image(bootstrap: &BootstrapClient<PortTransport>) -> ipc::wire::Cap {
 }
 
 fn namespace_client(capability: BorrowedHandle<'_>) -> NamespaceClient<PortTransport> {
-    NamespaceClient::new(PortTransport::client(capability)).with_wait_ns(CALL_TIMEOUT_NS)
+    NamespaceClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
 // Поднимает изменяемое дерево под своим префиксом: у свежего процесса файловой системы пустая
@@ -190,7 +190,7 @@ fn image_session() -> OwnedHandle {
 }
 
 pub(crate) fn connect(capability: &OwnedHandle) -> FileSystemClient<PortTransport> {
-    FileSystemClient::new(PortTransport::client(capability)).with_wait_ns(CALL_TIMEOUT_NS)
+    FileSystemClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
 // Порча кадра запроса: чем он отличается от описанного контрактом.
@@ -247,8 +247,8 @@ impl Transport for Tampered {
         self.port.read_message(bytes, handles)
     }
 
-    fn wait_readable(&self, timeout_ns: u64) -> Result<(), IpcError> {
-        self.port.wait_readable(timeout_ns)
+    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
+        self.port.wait_readable(timeout)
     }
 }
 
@@ -257,7 +257,7 @@ fn connect_tampered(capability: &OwnedHandle, tamper: Tamper) -> FileSystemClien
         port: PortTransport::client(capability),
         tamper,
     })
-    .with_wait_ns(CALL_TIMEOUT_NS)
+    .with_wait(CALL_TIMEOUT)
 }
 
 // Ответ этому клиенту доставить некому: port_reply сервера отказывает так же, как на ушедшем
@@ -1040,10 +1040,7 @@ fn send_unparsed_frame_with_capability(session: &OwnedHandle, capability: OwnedH
         .expect("frame header");
     frame[HEADER_SIZE] = TERMINATOR;
     crate::ipc_raw::write_frame(&frame[..=HEADER_SIZE], &[capability.into_raw().raw()]);
-    kernel_tests::kassert_eq!(
-        port_send(session.as_raw(), Timeout::from_ns(CALL_TIMEOUT_NS).raw()),
-        0
-    );
+    kernel_tests::kassert_eq!(port_send(session.as_raw(), CALL_TIMEOUT), 0);
 }
 
 #[kernel_test]
@@ -1105,7 +1102,7 @@ fn take_and_drop_session() {
 fn run_client_fixture() {
     let client = spawn_from_image(CLIENT_FIXTURE, ram_session());
     client
-        .join(Timeout::from_ns(CLIENT_TIMEOUT_NS))
+        .join(CLIENT_TIMEOUT)
         .expect("client fixture terminates");
     kernel_tests::kassert_eq!(client.exit_code().expect("exit code"), 0);
 }

@@ -21,7 +21,7 @@ use runtime::{
     install_log, log_line, spawn_owned,
 };
 use spin::Once;
-use syscall::{Handle, PORT_TIMEOUT_INFINITE};
+use syscall::{Handle, Timeout};
 
 mod admin;
 mod buffer;
@@ -102,7 +102,7 @@ fn serve_sessions(shared: &Shared) {
     let transport = PortTransport::server(shared.service.borrow());
     let mut frame = Frame::default();
     loop {
-        match transport.wait_readable(PORT_TIMEOUT_INFINITE) {
+        match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
             // Уход значка кадра не несёт: сессия ушедшей стороны убирается, а приём продолжается.
             Err(IpcError::SenderGone) => {
@@ -140,7 +140,7 @@ fn serve_sessions(shared: &Shared) {
 fn serve_admin(shared: &Shared) -> u32 {
     let transport = PortTransport::server(shared.admin.borrow());
     loop {
-        match transport.wait_readable(PORT_TIMEOUT_INFINITE) {
+        match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
             // Оба исхода кадра не несут. Уход маршрутизатора оставляет выданные сессии
             // работать, а покадровое исчерпание не закрывает порт.

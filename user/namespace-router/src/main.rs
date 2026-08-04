@@ -23,7 +23,7 @@ use runtime::{
     install_log, log_fmt, log_line, receive_startup, spawn_owned, thread_exit,
 };
 use spin::Once;
-use syscall::{Handle, PORT_TIMEOUT_INFINITE, Rights};
+use syscall::{Handle, Rights, Timeout};
 
 mod error;
 mod router;
@@ -99,7 +99,7 @@ fn run(startup: Handle) -> Result<()> {
 fn serve(service: &OwnedHandle) {
     let transport = PortTransport::server(service.borrow());
     loop {
-        match transport.wait_readable(PORT_TIMEOUT_INFINITE) {
+        match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
             // Оба исхода кадра не несут: маршрутизатор не хранит сессий, а покадровое
             // исчерпание не закрывает порт.
@@ -130,7 +130,7 @@ struct AdminPort {
 fn serve_admin(mut admin: AdminPort) -> u32 {
     let transport = PortTransport::server(admin.port.borrow());
     loop {
-        match transport.wait_readable(PORT_TIMEOUT_INFINITE) {
+        match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
             // Оба исхода кадра не несут. Уход поднявшего оставляет монтирования работать,
             // а покадровое исчерпание не закрывает порт.
