@@ -21,7 +21,7 @@ pub use port::{Port, Reply, ServicePort};
 pub use process::Process;
 pub use signal::Signal;
 pub use spawn::{JoinHandle, spawn, spawn_owned};
-pub use thread::{Priority, Thread, ThreadEntry};
+pub use thread::{Priority, Thread, ThreadEntry, exit_with_sibling};
 
 pub(super) fn wait_signals(handle: Handle, mask: u32, timeout: Timeout) -> Result<u32> {
     value(svc::signal_wait_one(handle, mask, timeout))

@@ -12,13 +12,17 @@ const _: () = assert!(
 use bootstrap::DeviceWindow;
 use io::mmio::Mmio;
 use ipc::wire::Cap;
-use syscall::{MemoryAccess, SyscallError, UserMemFlags};
+use syscall::{MemoryAccess, SIGNALED, SyscallError, Timeout, UserMemFlags};
 
 use crate::{
     error::{Error, Result, unit, value},
     handle::{BorrowedHandle, OwnedHandle},
+    object::Signal,
     svc,
 };
+
+// Оборот ожидания возврата бюджета уходящим поддеревом.
+const SPLIT_RETRY_TURN: Timeout = Timeout::from_millis(5);
 
 /// Backing региона памяти, декодированный из `kind_tag` inspect'а.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +117,32 @@ impl Resource {
         svc::resource_split(self.handle.as_raw(), budget_pages)
             .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
+    }
+
+    /// Выделяет `budget_pages` страниц, повторяя попытку до `timeout`, пока
+    /// бюджета не хватает. Исчерпание срока возвращает `Timeout`.
+    ///
+    /// Страницы ушедшего поддерева возвращаются позже наблюдаемого завершения
+    /// его процессов.
+    pub fn split_when_available(&self, budget_pages: u64, timeout: Timeout) -> Result<Self> {
+        match self.split(budget_pages) {
+            Err(Error::Syscall(SyscallError::ResourceExhausted)) => {}
+            outcome => return outcome,
+        }
+
+        let turn = Signal::create()?;
+        for _ in 1..timeout.raw() / SPLIT_RETRY_TURN.raw() {
+            match turn.wait(SIGNALED, SPLIT_RETRY_TURN) {
+                Err(Error::Syscall(SyscallError::Timeout)) => {}
+                Err(error) => return Err(error),
+                Ok(_) => return Err(Error::Syscall(SyscallError::Canceled)),
+            }
+            match self.split(budget_pages) {
+                Err(Error::Syscall(SyscallError::ResourceExhausted)) => {}
+                outcome => return outcome,
+            }
+        }
+        Err(Error::Syscall(SyscallError::Timeout))
     }
 
     /// Создаёт регион с Virtual backing размера `size_bytes` и маской `access`.

@@ -14,12 +14,11 @@ use ipc::{
 };
 use kernel_tests::kernel_test;
 use rootkeeper::{
-    ManagedComponent, Mount, NamespaceBootError, NamespaceRoots, boot_config,
-    launch_namespace as launch_managed_namespace,
+    ManagedComponent, NamespaceRoots, boot_config, launch_namespace as launch_managed_namespace,
 };
 use runtime::{
-    BorrowedHandle, MemoryRegion, OwnedHandle, PortTransport, Process, Resource, Signal, Timeout,
-    UserMemFlags, port_send,
+    BorrowedHandle, MemoryRegion, OwnedHandle, PortTransport, Process, ReadOnlyMapping, Resource,
+    Signal, Timeout, UserMemFlags, port_send,
 };
 use spin::Once;
 use syscall::Rights;
@@ -27,7 +26,7 @@ use userland_image::decode;
 use userland_loader::load_entry;
 
 // Конечный срок ответа сервера превращает зависание в диагностируемый Timeout.
-const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
+pub(crate) const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const CLIENT_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -79,6 +78,10 @@ const REAP_BUFFER_SIZE: u32 = 64 * 1024;
 
 struct NamespacePorts {
     component: ManagedComponent<NamespaceRoots>,
+    _resource: Resource,
+    _image: MemoryRegion,
+    _mapping: ReadOnlyMapping,
+    _log: OwnedHandle,
 }
 
 static NAMESPACE_PORTS: Once<NamespacePorts> = Once::new();
@@ -108,28 +111,37 @@ fn namespace_admin_client(capability: BorrowedHandle<'_>) -> NamespaceAdminClien
     NamespaceAdminClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
+// Источники capability маршрутизатора переживают его: производные образа и лог-сессии
+// отзываются вместе со своими источниками.
 fn start_namespace() -> NamespacePorts {
-    let resource = Resource::self_resource().expect("self metering resource");
-    let component = launch_namespace(&resource, rootkeeper::BOOT_MOUNTS)
-        .expect("namespace router and boot filesystems started");
-    NamespacePorts { component }
-}
-
-fn launch_namespace(
-    resource: &Resource,
-    mounts: &[Mount<'_>],
-) -> Result<ManagedComponent<NamespaceRoots>, NamespaceBootError> {
     let bootstrap = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
     let image = MemoryRegion::adopt(acquire_image(&bootstrap));
     let mapping = image.map_full_read_only().expect("map userland image");
-    let decoded = decode(mapping.as_bytes()).expect("decode userland image");
-    let program = decoded
-        .entry(ROUTER_PROGRAM)
-        .expect("image carries namespace router")
-        .program()
-        .expect("namespace router entry is a program");
     let log = crate::log_relay::router_log_session();
-    launch_managed_namespace(&program, resource, image, log, boot_config(mounts))
+    let resource = Resource::self_resource().expect("self metering resource");
+    let component = {
+        let decoded = decode(mapping.as_bytes()).expect("decode userland image");
+        let program = decoded
+            .entry(ROUTER_PROGRAM)
+            .expect("image carries namespace router")
+            .program()
+            .expect("namespace router entry is a program");
+        launch_managed_namespace(
+            &program,
+            &resource,
+            &image,
+            &log,
+            boot_config(rootkeeper::BOOT_MOUNTS),
+        )
+        .expect("namespace router and boot filesystems started")
+    };
+    NamespacePorts {
+        component,
+        _resource: resource,
+        _image: image,
+        _mapping: mapping,
+        _log: log,
+    }
 }
 
 fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
@@ -1051,7 +1063,7 @@ fn filesystem_closes_the_capability_of_an_unparsed_frame() {
         // Капа приехала в кадре, который не разобран: закрыть её больше некому.
         let rider = signal
             .handle()
-            .duplicate(Rights::READ | Rights::TRANSFER, 0)
+            .duplicate(Rights::READ | Rights::TRANSFER, None)
             .expect("capability for the frame");
         send_unparsed_frame_with_capability(&capability, rider);
     }

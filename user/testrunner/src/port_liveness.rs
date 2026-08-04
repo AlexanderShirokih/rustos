@@ -5,7 +5,10 @@
 //! капу с `READ`, клиент получает минт с `WRITE` и значком. Клиентские потоки
 //! обращаются к капе по сырому HandleId, потому что аргумент потока - не хэндл.
 
-use core::sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst};
+use core::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst},
+};
 
 use bootstrap::BootstrapClient;
 use kernel_tests::kernel_test;
@@ -32,11 +35,16 @@ const PARK_SETTLE: Timeout = Timeout::from_millis(100);
 
 /// Значки клиентских сессий: значения различаются в каждом байте, поэтому
 /// прочитанный значок нельзя спутать с оставшимся от предыдущей операции.
-const DYING_CLIENT_BADGE: u64 = 0x1111_1111_1111_1111;
-const LIVING_CLIENT_BADGE: u64 = 0x2222_2222_2222_2222;
-const SERVED_CLIENT_BADGE: u64 = 0x3333_3333_3333_3333;
-const FIRST_CLIENT_BADGE: u64 = 0x4444_4444_4444_4444;
-const SECOND_CLIENT_BADGE: u64 = 0x5555_5555_5555_5555;
+const DYING_CLIENT_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x1111_1111_1111_1111).expect("badge is non-zero");
+const LIVING_CLIENT_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x2222_2222_2222_2222).expect("badge is non-zero");
+const SERVED_CLIENT_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x3333_3333_3333_3333).expect("badge is non-zero");
+const FIRST_CLIENT_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x4444_4444_4444_4444).expect("badge is non-zero");
+const SECOND_CLIENT_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x5555_5555_5555_5555).expect("badge is non-zero");
 const BOOTSTRAP_CLIENT_BADGE: u64 = 0x7777_7777_7777_7777;
 
 /// Произвольное значение для проверочной записи в слот фикстуры.
@@ -117,7 +125,7 @@ fn sender_is_refused_when_the_last_receiver_goes() {
     // множеств значков.
     let client = port
         .handle()
-        .duplicate(Rights::WRITE, 0)
+        .duplicate(Rights::WRITE, None)
         .expect("mint client capability");
     REFUSED_CLIENT_CAP.store(client.as_raw().raw(), SeqCst);
     REFUSED_HANDSHAKE.store(i64::MIN, SeqCst);
@@ -153,18 +161,18 @@ fn badge_departs_when_the_client_process_dies() {
     // TRANSFER нужен, чтобы капа ушла потомку стартовым хэндлом.
     let client = port
         .handle()
-        .duplicate(Rights::WRITE | Rights::TRANSFER, DYING_CLIENT_BADGE)
+        .duplicate(Rights::WRITE | Rights::TRANSFER, Some(DYING_CLIENT_BADGE))
         .expect("mint client capability");
     let process = spawn_image_entry("/boot/badge-client", client);
 
     port.recv(SERVE_TIMEOUT).expect("client frame");
-    kernel_tests::kassert_eq!(received_badge(), DYING_CLIENT_BADGE);
+    kernel_tests::kassert_eq!(received_badge(), DYING_CLIENT_BADGE.get());
 
     process.join(JOIN_TIMEOUT).expect("client terminates");
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 
     // Капа осталась в таблице клиента: держателей значка лишила смерть процесса.
-    assert_sender_gone(port.recv(SERVE_TIMEOUT), DYING_CLIENT_BADGE);
+    assert_sender_gone(port.recv(SERVE_TIMEOUT), DYING_CLIENT_BADGE.get());
 }
 
 /// Сырые HandleId капы со значком и капы без значка: обе принадлежат клиенту.
@@ -192,11 +200,11 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
     let port = Port::create().expect("port create");
     let badged = port
         .handle()
-        .duplicate(Rights::WRITE, LIVING_CLIENT_BADGE)
+        .duplicate(Rights::WRITE, Some(LIVING_CLIENT_BADGE))
         .expect("mint badged capability");
     let plain = port
         .handle()
-        .duplicate(Rights::WRITE, 0)
+        .duplicate(Rights::WRITE, None)
         .expect("mint unbadged capability");
     // Обе капы отданы клиенту: закрывает их он.
     LIVING_CLIENT_BADGED_CAP.store(badged.into_raw().raw(), SeqCst);
@@ -206,9 +214,9 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
     let worker = spawn(living_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
 
     port.recv(SERVE_TIMEOUT).expect("badged frame");
-    kernel_tests::kassert_eq!(received_badge(), LIVING_CLIENT_BADGE);
+    kernel_tests::kassert_eq!(received_badge(), LIVING_CLIENT_BADGE.get());
 
-    assert_sender_gone(port.recv(SERVE_TIMEOUT), LIVING_CLIENT_BADGE);
+    assert_sender_gone(port.recv(SERVE_TIMEOUT), LIVING_CLIENT_BADGE.get());
 
     // Кадр без значка приходит следом: его отправитель был жив, когда значок ушёл.
     port.recv(SERVE_TIMEOUT)
@@ -240,7 +248,7 @@ fn departed_badge_waits_for_the_busy_server() {
     let port = Port::create().expect("port create");
     let badged = port
         .handle()
-        .duplicate(Rights::WRITE, SERVED_CLIENT_BADGE)
+        .duplicate(Rights::WRITE, Some(SERVED_CLIENT_BADGE))
         .expect("mint badged capability");
     SERVED_CLIENT_CAP.store(badged.into_raw().raw(), SeqCst);
     SERVED_CLIENT_CLOSED.store(0, SeqCst);
@@ -249,7 +257,7 @@ fn departed_badge_waits_for_the_busy_server() {
     let worker = spawn(served_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
 
     port.recv(SERVE_TIMEOUT).expect("client frame");
-    kernel_tests::kassert_eq!(received_badge(), SERVED_CLIENT_BADGE);
+    kernel_tests::kassert_eq!(received_badge(), SERVED_CLIENT_BADGE.get());
 
     // Сервер разбирает принятый кадр и в recv не стоит, пока значок уходит.
     while SERVED_CLIENT_CLOSED.load(SeqCst) == 0 {
@@ -258,7 +266,7 @@ fn departed_badge_waits_for_the_busy_server() {
 
     // POLL не паркуется, поэтому событие могло дождаться сервера только в
     // состоянии порта.
-    assert_sender_gone(port.recv(Timeout::POLL), SERVED_CLIENT_BADGE);
+    assert_sender_gone(port.recv(Timeout::POLL), SERVED_CLIENT_BADGE.get());
 
     worker.join(JOIN_TIMEOUT).expect("client joins");
     kernel_tests::kassert_eq!(SERVED_CLIENT_RESULT.load(SeqCst), 0);
@@ -328,11 +336,11 @@ fn departed_badge_names_the_session_that_left() {
     let port = Port::create().expect("port create");
     let first = port
         .handle()
-        .duplicate(Rights::WRITE, FIRST_CLIENT_BADGE)
+        .duplicate(Rights::WRITE, Some(FIRST_CLIENT_BADGE))
         .expect("mint first client capability");
     let second = port
         .handle()
-        .duplicate(Rights::WRITE, SECOND_CLIENT_BADGE)
+        .duplicate(Rights::WRITE, Some(SECOND_CLIENT_BADGE))
         .expect("mint second client capability");
     FIRST_CLIENT_CAP.store(first.as_raw().raw(), SeqCst);
     SECOND_CLIENT_CAP.store(second.as_raw().raw(), SeqCst);
@@ -350,8 +358,8 @@ fn departed_badge_names_the_session_that_left() {
         port.recv(SERVE_TIMEOUT).expect("client frame");
         *slot = received_badge();
     }
-    kernel_tests::kassert!(seen.contains(&FIRST_CLIENT_BADGE));
-    kernel_tests::kassert!(seen.contains(&SECOND_CLIENT_BADGE));
+    kernel_tests::kassert!(seen.contains(&FIRST_CLIENT_BADGE.get()));
+    kernel_tests::kassert!(seen.contains(&SECOND_CLIENT_BADGE.get()));
 
     first_worker.join(JOIN_TIMEOUT).expect("first client joins");
     second_worker
@@ -362,9 +370,9 @@ fn departed_badge_names_the_session_that_left() {
 
     // Уходит только первая сессия: событие обязано назвать её значок.
     first.close().expect("close first client capability");
-    assert_sender_gone(port.recv(SERVE_TIMEOUT), FIRST_CLIENT_BADGE);
+    assert_sender_gone(port.recv(SERVE_TIMEOUT), FIRST_CLIENT_BADGE.get());
 
     // Вторая сессия была жива и уходит отдельным событием.
     second.close().expect("close second client capability");
-    assert_sender_gone(port.recv(SERVE_TIMEOUT), SECOND_CLIENT_BADGE);
+    assert_sender_gone(port.recv(SERVE_TIMEOUT), SECOND_CLIENT_BADGE.get());
 }

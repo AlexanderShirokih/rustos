@@ -1,5 +1,7 @@
 //! Типизированная обёртка над rendezvous-эндпоинтом ядра и одноразовым reply.
 
+use core::num::NonZeroU64;
+
 use syscall::{
     Handle, IPC_BUFFER_DATA_MAX, IpcBuffer, Rights, SyscallError, Timeout, decode_tag, encode_tag,
 };
@@ -74,9 +76,9 @@ impl Port {
     }
 
     /// Создаёт порт и разделяет его стороны: клиентская capability минтится как
-    /// `WRITE | TRANSFER` со значком `badge` (`0` - сессия без значка), серверной
-    /// остаётся корневая capability.
-    pub fn create_service(badge: u64) -> Result<ServicePort> {
+    /// `WRITE | TRANSFER` со значком `badge`, серверной остаётся корневая
+    /// capability. `None` даёт клиента без значка.
+    pub fn create_service(badge: Option<NonZeroU64>) -> Result<ServicePort> {
         let port = Self::create()?;
         let client = port
             .handle()

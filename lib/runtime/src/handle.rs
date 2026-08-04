@@ -1,6 +1,6 @@
 //! Владеющая (`OwnedHandle`) и заимствующая (`BorrowedHandle`) обёртки хэндла.
 
-use core::{marker::PhantomData, mem::ManuallyDrop};
+use core::{marker::PhantomData, mem::ManuallyDrop, num::NonZeroU64};
 
 use ipc::{IntoWireHandle, wire::Cap};
 use syscall::{Handle, RawHandle, Rights};
@@ -9,6 +9,10 @@ use crate::{
     error::{Error, Result, unit},
     svc,
 };
+
+// Значок, которого нет: ABI задаёт его нулём, корневая capability остаётся без значка, а
+// производная наследует значок источника.
+const UNBADGED: u64 = 0;
 
 /// Владеет хэндлом и закрывает его в `Drop`.
 ///
@@ -57,7 +61,7 @@ impl OwnedHandle {
     }
 
     /// Дублирует через заимствование.
-    pub fn duplicate(&self, rights: Rights, badge: u64) -> Result<OwnedHandle> {
+    pub fn duplicate(&self, rights: Rights, badge: Option<NonZeroU64>) -> Result<OwnedHandle> {
         self.borrow().duplicate(rights, badge)
     }
 
@@ -113,9 +117,13 @@ impl BorrowedHandle<'_> {
     /// Дублирует хэндл с правами `rights` (подмножество исходных) и значком `badge`.
     /// Закрытие дубликата не трогает оригинал. Требует право `DUPLICATE`.
     /// Возвращает независимый `OwnedHandle`.
-    pub fn duplicate(self, rights: Rights, badge: u64) -> Result<OwnedHandle> {
-        svc::handle_duplicate(self.handle, rights.into(), badge)
-            .map(OwnedHandle::from_handle)
-            .map_err(Error::Syscall)
+    pub fn duplicate(self, rights: Rights, badge: Option<NonZeroU64>) -> Result<OwnedHandle> {
+        svc::handle_duplicate(
+            self.handle,
+            rights.into(),
+            badge.map_or(UNBADGED, NonZeroU64::get),
+        )
+        .map(OwnedHandle::from_handle)
+        .map_err(Error::Syscall)
     }
 }

@@ -26,8 +26,7 @@ const ROLLBACK_ATTEMPTS: u32 = 64;
 const RACE_ATTEMPTS: u32 = 64;
 const RACE_TIMEOUT: Timeout = Timeout::from_micros(50);
 const FAILURE_EXIT_CODE: u32 = 37;
-const DROP_BUDGET_RETURN_ATTEMPTS: usize = 1_000;
-const DROP_BUDGET_RETURN_WAIT: Timeout = Timeout::from_millis(5);
+const DROP_BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 struct FixtureRoots {
     authority: Signal,
@@ -54,14 +53,14 @@ impl FixtureRoots {
     fn child_authority(&self) -> Result<OwnedHandle, ManagedStartupError> {
         self.authority
             .handle()
-            .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, 0)
+            .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(ManagedStartupError::from)
     }
 
     fn from_observer(observer: &Signal) -> Result<Self, ManagedStartupError> {
         let rights = Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE;
         Ok(Self {
-            authority: Signal::from_handle(observer.handle().duplicate(rights, 0)?),
+            authority: Signal::from_handle(observer.handle().duplicate(rights, None)?),
         })
     }
 }
@@ -113,11 +112,10 @@ fn managed_startup_times_out_before_recv_and_repeatedly_rolls_back() {
         .expect("reserve exact repeated budget");
 
     for _ in 0..ROLLBACK_ATTEMPTS {
-        let mut component = ManagedComponent::<FixtureRoots>::new();
+        let mut component = ManagedComponent::<FixtureRoots>::new(&exact_parent, budget_pages)
+            .expect("reserve the component budget");
         let result = component.launch(
             &program,
-            &exact_parent,
-            budget_pages,
             HUNG_DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, false),
@@ -148,11 +146,10 @@ fn managed_startup_peer_close_repeatedly_rolls_back() {
         .expect("reserve exact repeated budget");
 
     for _ in 0..ROLLBACK_ATTEMPTS {
-        let mut component = ManagedComponent::<FixtureRoots>::new();
+        let mut component = ManagedComponent::<FixtureRoots>::new(&exact_parent, budget_pages)
+            .expect("reserve the component budget");
         let result = component.launch(
             &program,
-            &exact_parent,
-            budget_pages,
             DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, false),
@@ -177,13 +174,15 @@ fn managed_startup_observes_nonzero_exit_after_running() {
     let mapping = image_mapping();
     let program = image_program(&mapping, FIXTURE_ENTRY);
     let parent = Resource::self_resource().expect("self metering resource");
-    let mut component = ManagedComponent::<FixtureRoots>::new();
+    let mut component = ManagedComponent::<FixtureRoots>::new(
+        &parent,
+        process_pages(&program) + PROCESS_SLACK_PAGES,
+    )
+    .expect("reserve the component budget");
 
     component
         .launch(
             &program,
-            &parent,
-            process_pages(&program) + PROCESS_SLACK_PAGES,
             DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, FAILURE_EXIT_CODE, false),
@@ -207,13 +206,15 @@ fn managed_startup_observes_zero_exit_after_running() {
     let mapping = image_mapping();
     let program = image_program(&mapping, FIXTURE_ENTRY);
     let parent = Resource::self_resource().expect("self metering resource");
-    let mut component = ManagedComponent::<FixtureRoots>::new();
+    let mut component = ManagedComponent::<FixtureRoots>::new(
+        &parent,
+        process_pages(&program) + PROCESS_SLACK_PAGES,
+    )
+    .expect("reserve the component budget");
 
     component
         .launch(
             &program,
-            &parent,
-            process_pages(&program) + PROCESS_SLACK_PAGES,
             DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, false),
@@ -239,11 +240,10 @@ fn managed_startup_timeout_rendezvous_race_has_one_ownership_outcome() {
     for _ in 0..RACE_ATTEMPTS {
         let observer = Signal::create().expect("independent observer root");
         let sender_cleanup = Signal::create().expect("sender cleanup observer");
-        let mut component = ManagedComponent::<FixtureRoots>::new();
+        let mut component = ManagedComponent::<FixtureRoots>::new(&parent, budget_pages)
+            .expect("reserve the component budget");
         let result = component.launch(
             &program,
-            &parent,
-            budget_pages,
             RACE_TIMEOUT,
             || FixtureRoots::from_observer(&observer),
             |transport, roots| {
@@ -289,16 +289,15 @@ fn managed_startup_rejects_infinite_send_timeout() {
     let mapping = image_mapping();
     let program = image_program(&mapping, FIXTURE_ENTRY);
     let parent = Resource::self_resource().expect("self metering resource");
-    let mut component = ManagedComponent::<FixtureRoots>::new();
-
-    let result = component.launch(
-        &program,
+    let mut component = ManagedComponent::<FixtureRoots>::new(
         &parent,
         process_pages(&program) + PROCESS_SLACK_PAGES,
-        Timeout::INFINITE,
-        FixtureRoots::create,
-        |_, _| panic!("infinite timeout must be rejected before startup"),
-    );
+    )
+    .expect("reserve the component budget");
+
+    let result = component.launch(&program, Timeout::INFINITE, FixtureRoots::create, |_, _| {
+        panic!("infinite timeout must be rejected before startup")
+    });
 
     kernel_tests::kassert_eq!(result, Err(ManagedStartupError::InfiniteTimeout));
     kernel_tests::kassert_eq!(component.status(), ManagedStatus::Failed);
@@ -313,13 +312,12 @@ fn dropping_running_component_terminates_child_and_returns_budget() {
     let exact_parent = root
         .split(budget_pages)
         .expect("reserve exact managed budget");
-    let mut component = ManagedComponent::<FixtureRoots>::new();
+    let mut component = ManagedComponent::<FixtureRoots>::new(&exact_parent, budget_pages)
+        .expect("reserve the component budget");
 
     component
         .launch(
             &program,
-            &exact_parent,
-            budget_pages,
             DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, true),
@@ -385,19 +383,7 @@ fn process_pages<'a, E: EntryView<'a>>(program: &E) -> u64 {
 }
 
 fn wait_for_budget_return(resource: &Resource, budget_pages: u64) {
-    let timer = Signal::create().expect("budget return timer");
-    for _ in 0..DROP_BUDGET_RETURN_ATTEMPTS {
-        match resource.split(budget_pages) {
-            Ok(_returned_budget) => return,
-            Err(Error::Syscall(SyscallError::ResourceExhausted)) => {
-                match timer.wait(SIGNALED, DROP_BUDGET_RETURN_WAIT) {
-                    Err(Error::Syscall(SyscallError::Timeout)) => {}
-                    Err(error) => panic!("budget return wait failed: {error:?}"),
-                    Ok(_) => panic!("private timer was signaled"),
-                }
-            }
-            Err(error) => panic!("budget return failed: {error:?}"),
-        }
-    }
-    panic!("managed budget was not returned");
+    resource
+        .split_when_available(budget_pages, DROP_BUDGET_RETURN_TIMEOUT)
+        .expect("managed budget returned");
 }

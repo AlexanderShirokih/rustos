@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use core::panic::PanicInfo;
+use core::{num::NonZeroU64, panic::PanicInfo};
 
 use bootstrap::BootstrapClient;
 use fdt::{devicetree::DeviceTree, devicetreeext::NodeExt};
@@ -19,13 +19,13 @@ use userland_image::{DecodedImage, decode};
 use userland_loader::launch_entry;
 
 // Значок clock-сессии клиента у драйвера.
-const CLOCK_SESSION_BADGE: u64 = 1;
+const CLOCK_SESSION_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
 
 // Значок лог-сессии клиента часов.
-const CLIENT_LOG_BADGE: u64 = 2;
+const CLIENT_LOG_BADGE: NonZeroU64 = NonZeroU64::new(2).expect("badge is non-zero");
 
 fn log_source_name(badge: u64) -> Option<&'static str> {
-    (badge == CLIENT_LOG_BADGE).then_some("rtc-client")
+    (badge == CLIENT_LOG_BADGE.get()).then_some("rtc-client")
 }
 
 #[unsafe(no_mangle)]
@@ -60,7 +60,7 @@ fn run_clock(kernel: &BootstrapClient<PortTransport>, relay: &LogRelayThread) ->
         .acquire_device_memory_by_base(base)?
         .ok_or(Error::NoDevice)?;
 
-    let clock_port = Port::create_service(CLOCK_SESSION_BADGE)?;
+    let clock_port = Port::create_service(Some(CLOCK_SESSION_BADGE))?;
 
     let driver = launch(
         &image,

@@ -12,8 +12,8 @@ pub use managed::{
 };
 pub use namespace::{
     Mount, MountFailure, NamespaceBootConfig, NamespaceBootError, NamespaceMountError,
-    NamespaceRoots, launch_namespace, stop_namespace,
+    NamespaceRoots, launch_namespace, relaunch_namespace, stop_namespace,
 };
 pub use system::{
-    BOOT_MOUNTS, BootFailure, RootSystem, STOP_TIMEOUT, Stopped, boot_config, supervise,
+    BOOT_MOUNTS, BootFailure, RootSystem, STOP_TIMEOUT, Stopped, Supervised, boot_config, supervise,
 };

@@ -12,7 +12,7 @@ use userland_image::decode;
 
 use crate::{
     ManagedComponent, Mount, NamespaceBootConfig, NamespaceBootError, NamespaceRoots,
-    launch_namespace, namespace::unmount_all, relay, stop_namespace,
+    launch_namespace, namespace::unmount_all, relaunch_namespace, relay, stop_namespace,
 };
 
 // Тег строк supervisor в журнале.
@@ -61,13 +61,30 @@ pub enum BootFailure {
     Namespace(NamespaceBootError),
 }
 
+/// Исход одного оборота supervisor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Supervised {
+    /// Маршрутизатор ушёл с кодом `exit_code`, и композиция подняла его новую
+    /// incarnation вместе с деревом имён.
+    Restarted { exit_code: Option<u32> },
+    /// Композиция остановлена: восстановить её оборот supervisor не смог.
+    Stopped(Stopped),
+}
+
 /// Поднятая композиция rootkeeper.
 pub struct RootSystem {
     namespace: ManagedComponent<NamespaceRoots>,
     mounts: &'static [Mount<'static>],
-    // Отображение образа переживает маршрутизатор: он читает его страницы всё
-    // время работы своих монтирований.
-    _image: ReadOnlyMapping,
+    // Родительская капа резерва компонента: её закрытие отозвало бы весь бюджет
+    // маршрутизатора.
+    _resource: Resource,
+    // Регион и отображение образа переживают маршрутизатор: каждая incarnation
+    // получает производную капу региона, а его байты читает загрузчик.
+    image: MemoryRegion,
+    mapping: ReadOnlyMapping,
+    // Делегированная лог-сессия подсистемы: производную от неё получает каждая
+    // incarnation.
+    log: OwnedHandle,
 }
 
 // Запись образа с программой маршрутизатора имён.
@@ -84,6 +101,10 @@ const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 // Код выхода маршрутизатора, снимаемого штатным завершением системы.
 const SHUTDOWN_EXIT_CODE: u32 = 1;
+
+// Предел запусков маршрутизатора: исчерпав его, композиция останавливается, а
+// не поднимает следующую incarnation.
+const ROUTER_GENERATION_MAX: u32 = 3;
 
 // Ёмкость строки о завершившейся подсистеме.
 const EXIT_MESSAGE_MAX: usize = 96;
@@ -140,12 +161,15 @@ impl RootSystem {
             .ok_or(BootFailure::RouterMissing)?;
         let resource = Resource::self_resource().map_err(|_| BootFailure::Resource)?;
 
-        let namespace = launch_namespace(&program, &resource, region, log, boot_config(mounts))
+        let namespace = launch_namespace(&program, &resource, &region, &log, boot_config(mounts))
             .map_err(BootFailure::Namespace)?;
         Ok(Self {
             namespace,
             mounts,
-            _image: mapping,
+            _resource: resource,
+            image: region,
+            mapping,
+            log,
         })
     }
 
@@ -155,36 +179,77 @@ impl RootSystem {
         &self.namespace
     }
 
-    /// Ждёт завершения маршрутизатора либо потока `relay_thread` и записывает
-    /// исход завершившегося в журнал ядра.
-    pub fn wait_for_critical(&mut self, kernel: Handle, relay_thread: Handle) -> Stopped {
+    /// Оборот supervisor: ждёт завершения маршрутизатора либо потока
+    /// `relay_thread`, записывает исход в журнал ядра и поднимает
+    /// маршрутизатору смену.
+    ///
+    /// Завершение потока пересылки критично: восстановить его композиция не
+    /// умеет.
+    pub fn supervise_turn(&mut self, kernel: Handle, relay_thread: Handle) -> Supervised {
         let kernel_log = BootstrapClient::new(PortTransport::client(kernel));
         let Some(router) = self
             .namespace
             .running()
             .map(|running| running.process().handle().as_raw())
         else {
-            return Stopped::Subsystem;
+            return Supervised::Stopped(Stopped::Subsystem);
         };
         let waits = [
             WaitItem::new(router, SIGNALED),
             WaitItem::new(relay_thread, SIGNALED),
         ];
         match wait_any(&waits, Timeout::INFINITE) {
-            Ok(0) => {
-                let exit_code = self
-                    .namespace
-                    .running()
-                    .and_then(|running| running.process().exit_code().ok());
-                let _ = self.namespace.observe_exit(Timeout::POLL);
-                log_exit(&kernel_log, "namespace router", exit_code);
+            Ok(0) => self.replace_router(&kernel_log),
+            Ok(_) => {
+                log_exit(&kernel_log, "log relay", relay::exit_code());
+                Supervised::Stopped(Stopped::Subsystem)
             }
-            Ok(_) => log_exit(&kernel_log, "log relay", relay::exit_code()),
             Err(_) => {
                 let _ = kernel_log.log_str(LOG_TAG, "supervisor wait failed");
+                Supervised::Stopped(Stopped::Subsystem)
             }
         }
-        Stopped::Subsystem
+    }
+
+    // Снимает ушедшую incarnation маршрутизатора и поднимает следующую, пока
+    // компонент не исчерпал свой предел запусков.
+    fn replace_router(&mut self, kernel_log: &BootstrapClient<PortTransport>) -> Supervised {
+        let exit_code = self
+            .namespace
+            .running()
+            .and_then(|running| running.process().exit_code().ok());
+        let observed = self.namespace.observe_exit(Timeout::POLL);
+        log_exit(kernel_log, "namespace router", exit_code);
+        if observed.is_err() {
+            let _ = kernel_log.log_str(LOG_TAG, "namespace router budget not returned");
+            return Supervised::Stopped(Stopped::Subsystem);
+        }
+        if self.namespace.generation() >= ROUTER_GENERATION_MAX {
+            let _ = kernel_log.log_str(LOG_TAG, "namespace router restart limit reached");
+            return Supervised::Stopped(Stopped::Subsystem);
+        }
+        if self.restart().is_err() {
+            let _ = kernel_log.log_str(LOG_TAG, "namespace router not restarted");
+            return Supervised::Stopped(Stopped::Subsystem);
+        }
+        Supervised::Restarted { exit_code }
+    }
+
+    // Новая incarnation поднимается из того же образа и с тем же деревом имён.
+    fn restart(&mut self) -> Result<(), BootFailure> {
+        let decoded = decode(self.mapping.as_bytes()).map_err(|_| BootFailure::Image)?;
+        let program = decoded
+            .entry(ROUTER_PROGRAM)
+            .and_then(|entry| entry.program().ok())
+            .ok_or(BootFailure::RouterMissing)?;
+        relaunch_namespace(
+            &mut self.namespace,
+            &program,
+            &self.image,
+            &self.log,
+            boot_config(self.mounts),
+        )
+        .map_err(BootFailure::Namespace)
     }
 
     /// Снимает дерево имён и завершает маршрутизатор.
@@ -243,7 +308,14 @@ fn run(kernel: Handle, kernel_log: &BootstrapClient<PortTransport>) -> Stopped {
     match RootSystem::bring_up(kernel, router_log, BOOT_MOUNTS) {
         Ok(mut system) => {
             let _ = log.write_str(LOG_TAG, "filesystem namespace ready");
-            let stopped = system.wait_for_critical(kernel, relay_thread);
+            let stopped = loop {
+                match system.supervise_turn(kernel, relay_thread) {
+                    Supervised::Restarted { .. } => {
+                        let _ = log.write_str(LOG_TAG, "filesystem namespace restarted");
+                    }
+                    Supervised::Stopped(stopped) => break stopped,
+                }
+            };
             system.shutdown();
             stopped
         }

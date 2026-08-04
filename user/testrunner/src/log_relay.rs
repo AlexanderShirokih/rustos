@@ -9,7 +9,10 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use core::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicBool, Ordering::SeqCst},
+};
 
 use bootstrap::BootstrapClient;
 use ipc::wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf};
@@ -27,18 +30,20 @@ use userland_loader::load_entry;
 use crate::{ipc_raw, log_fixture_protocol::FIXTURE_LINE};
 
 // Значок лог-сессии маршрутизатора имён у общего relay прогона.
-pub(crate) const ROUTER_BADGE: u64 = 0x1001_1001_1001_1001;
+pub(crate) const ROUTER_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x1001_1001_1001_1001).expect("badge is non-zero");
 
 // Значки тестовых сессий: первый назван таблицей, второй в неё не входит.
-const NAMED_BADGE: u64 = 0x0101_0101_0101_0101;
-const UNNAMED_BADGE: u64 = 0x0202_0202_0202_0202;
+const NAMED_BADGE: NonZeroU64 = NonZeroU64::new(0x0101_0101_0101_0101).expect("badge is non-zero");
+const UNNAMED_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x0202_0202_0202_0202).expect("badge is non-zero");
 
 fn shared_source_name(badge: u64) -> Option<&'static str> {
-    (badge == ROUTER_BADGE).then_some("filesystem")
+    (badge == ROUTER_BADGE.get()).then_some("filesystem")
 }
 
 fn test_source_name(badge: u64) -> Option<&'static str> {
-    (badge == NAMED_BADGE).then_some("named-subsystem")
+    (badge == NAMED_BADGE.get()).then_some("named-subsystem")
 }
 
 // Фикстура, пробующая bootstrap-операции по выданной ей лог-капе.
@@ -67,7 +72,7 @@ const CHURN_BATCH: u64 = 64;
 
 // База значков синхронизирующих сессий: с меняющимися значками она не
 // пересекается.
-const SYNC_BADGE_BASE: u64 = 0x0300_0000;
+const SYNC_BADGE_BASE: NonZeroU64 = NonZeroU64::new(0x0300_0000).expect("badge is non-zero");
 
 // Строка, пересланная стоком тестового relay.
 #[derive(Clone)]
@@ -150,7 +155,7 @@ impl LogSink for RecordingSink {
 
 // Минт лог-сессии идущего сценария. Лок держится только на время минта, и путь
 // завершения прогона застаёт его свободным.
-fn scenario_session(badge: u64) -> OwnedHandle {
+fn scenario_session(badge: NonZeroU64) -> OwnedHandle {
     ACTIVE
         .lock()
         .as_ref()
@@ -160,7 +165,7 @@ fn scenario_session(badge: u64) -> OwnedHandle {
 }
 
 // Поднимает тестовый relay, отдаёт сценарию минт его сессий и останавливает.
-fn with_relay(body: impl FnOnce(&dyn Fn(u64) -> OwnedHandle)) {
+fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> OwnedHandle)) {
     RECORDED.lock().clear();
     SINK_REFUSES.store(false, SeqCst);
     *ACTIVE.lock() = Some(
@@ -247,7 +252,7 @@ fn exhaust_handle_table() -> (Port, Vec<OwnedHandle>) {
     let source = Port::create().expect("filler port");
     let mut handles = Vec::new();
     loop {
-        match source.handle().duplicate(Rights::TRANSFER, 0) {
+        match source.handle().duplicate(Rights::TRANSFER, None) {
             Ok(handle) => handles.push(handle),
             Err(error) => {
                 kernel_tests::kassert!(matches!(
@@ -484,7 +489,7 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
         let carried = Port::create().expect("carried port");
         let writer = carried
             .handle()
-            .duplicate(Rights::WRITE | Rights::TRANSFER, 0)
+            .duplicate(Rights::WRITE | Rights::TRANSFER, None)
             .expect("writer side");
         // Корневая капа - единственный получатель: она уезжает кадром.
         kernel_tests::kassert_eq!(send_log_frame_with_cap(&logger, carried.into_handle()), 0);
@@ -549,11 +554,11 @@ fn relay_drains_departed_badges_so_new_sessions_mint() {
         let mut records = 0;
         while minted < u64::from(HANDLE_TABLE_CAPACITY) + CHURN_BATCH {
             for badge in minted..minted + CHURN_BATCH {
-                drop(session(badge + 1));
+                drop(session(NonZeroU64::MIN.saturating_add(badge)));
             }
             minted += CHURN_BATCH;
             // Доставленный кадр означает, что relay разобрал накопленные уходы.
-            let sync = session(SYNC_BADGE_BASE + minted);
+            let sync = session(SYNC_BADGE_BASE.saturating_add(minted));
             write_log(&sync, "churn", "session after churn");
             records += 1;
             wait_for_records(records);

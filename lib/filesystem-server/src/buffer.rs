@@ -56,7 +56,7 @@ impl DataBuffer {
     pub(crate) fn share(&self) -> Result<OwnedHandle, FileSystemError> {
         self.region
             .handle()
-            .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, 0)
+            .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(no_space)
     }
 

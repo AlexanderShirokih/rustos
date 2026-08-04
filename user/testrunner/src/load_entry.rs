@@ -1,5 +1,5 @@
-//! E2E проверка `userland_loader::load_entry`: загрузка синтетической программы,
-//! передача bootstrap-хэндла и локализация исключения в дочернем процессе.
+//! E2E проверка загрузчика: загрузка синтетической программы, передача bootstrap-хэндла,
+//! локализация исключения в дочернем процессе и значок retained startup-порта.
 //!
 //! Машинный код фикстур использует AArch64, соответствующий target этого
 //! `testrunner`.
@@ -9,6 +9,8 @@ use runtime::{Process, Resource, Signal, Timeout};
 use syscall::SyscallOp;
 use userland::{Entry, Segment, SegmentPermissions};
 use userland_loader::load_entry;
+
+use crate::fixture::{Fixture, JOIN_TIMEOUT};
 
 const PAGE_SIZE: u64 = 4096;
 const CHILD_CODE_VA: u64 = 0x2000_0000;
@@ -85,4 +87,19 @@ fn synchronous_fault_terminates_child_and_runner_continues() {
         .join(CHILD_WAIT_TIMEOUT)
         .expect("post-fault child terminates");
     kernel_tests::kassert_eq!(canary.exit_code().expect("canary exit code"), 0);
+}
+
+#[kernel_test]
+fn retained_startup_port_reports_the_gone_launcher() {
+    // Стартовый кадр доставлен и обслужен, значит сессия под lease-значком жива.
+    let fixture = Fixture::spawn_leased();
+
+    // Клиентскую сторону порта закрывает уход `Fixture`, и потомок остаётся без держателей
+    // своего значка.
+    let process = fixture.into_process();
+
+    process
+        .join(JOIN_TIMEOUT)
+        .expect("child leaves with its launcher");
+    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 }

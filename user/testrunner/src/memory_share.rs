@@ -42,7 +42,7 @@ fn memory_region_shared_with_child() {
     // держит регион живым, пока потомок с ним работает.
     let lease = region
         .handle()
-        .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, 0)
+        .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
         .expect("duplicate region handle for child");
     let leased_raw = lease.as_raw();
 

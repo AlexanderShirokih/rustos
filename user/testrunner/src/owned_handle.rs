@@ -61,7 +61,7 @@ fn close_does_not_double_close() {
 fn duplicate_is_independent() {
     let original = mint();
     let duplicate = original
-        .duplicate(Rights::READ | Rights::WRITE | Rights::DUPLICATE, 0)
+        .duplicate(Rights::READ | Rights::WRITE | Rights::DUPLICATE, None)
         .expect("duplicate must succeed");
     let original_raw = original.as_raw();
 
@@ -78,7 +78,7 @@ fn borrow_duplicate_is_independent() {
     let original = mint();
     let duplicate = original
         .borrow()
-        .duplicate(Rights::READ | Rights::WRITE | Rights::DUPLICATE, 0)
+        .duplicate(Rights::READ | Rights::WRITE | Rights::DUPLICATE, None)
         .expect("borrow duplicate must succeed");
     let original_raw = original.as_raw();
 

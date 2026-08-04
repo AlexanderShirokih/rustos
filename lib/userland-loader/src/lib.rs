@@ -13,6 +13,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 
 use runtime::{
     Error, Mapping, MemoryAccess, MemoryRegion, OwnedHandle, Port, Priority, Process, Resource,
@@ -170,33 +171,44 @@ fn confirm_created_process_reaped() -> Result<()> {
     }
 }
 
-/// Загружает `entry`, отправляет startup-кадр через `startup` и
-/// возвращает процесс. Ошибка callback завершает потомка и ждёт его cleanup с
-/// конечным сроком.
+/// Загружает `entry`, отправляет startup-кадр через одноразовый порт и
+/// возвращает процесс.
+///
+/// Ошибка callback завершает потомка синхронным `terminate`/`join` с конечным
+/// сроком. Отказ этого пути заменяет исходную ошибку callback.
 pub fn launch_entry<'a, V: EntryView<'a>, E: From<Error>>(
     entry: &V,
     resource: &Resource,
     startup: impl FnOnce(&Port) -> core::result::Result<(), E>,
 ) -> core::result::Result<Process, E> {
-    prepare_launch(entry, resource)
+    prepare_launch(entry, resource, None)
         .map_err(E::from)?
         .finish(startup)
 }
 
-/// Загружает `entry`, отправляет startup-кадр и возвращает процесс
-/// с сохранённой клиентской стороной startup-порта.
+/// Загружает `entry`, отправляет startup-кадр и возвращает процесс с
+/// сохранённой клиентской стороной порта под значком `lease`.
+///
+/// Значок делает исчезновение вызывающего наблюдаемым: потомок, оставшийся без
+/// держателей `lease`, получает `SenderGone` очередным приёмом на этом порту.
+/// Ошибка callback проходит тот же cleanup, что и у [`launch_entry`].
 pub fn launch_entry_retained<'a, V: EntryView<'a>, E: From<Error>>(
     entry: &V,
     resource: &Resource,
+    lease: NonZeroU64,
     startup: impl FnOnce(&Port) -> core::result::Result<(), E>,
 ) -> core::result::Result<InitializedProcess, E> {
-    prepare_launch(entry, resource)
+    prepare_launch(entry, resource, Some(lease))
         .map_err(E::from)?
         .retain(startup)
 }
 
-fn prepare_launch<'a, V: EntryView<'a>>(entry: &V, resource: &Resource) -> Result<PendingLaunch> {
-    let startup = Port::create_service(0)?;
+fn prepare_launch<'a, V: EntryView<'a>>(
+    entry: &V,
+    resource: &Resource,
+    badge: Option<NonZeroU64>,
+) -> Result<PendingLaunch> {
+    let startup = Port::create_service(badge)?;
     let process = load_entry(entry, resource, startup.server)?;
     Ok(PendingLaunch {
         process: Some(process),

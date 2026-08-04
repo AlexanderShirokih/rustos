@@ -134,7 +134,7 @@ fn starting_a_child_on_a_write_only_resource_is_denied() {
     let write_only = Resource::from_handle(
         resource
             .handle()
-            .duplicate(Rights::WRITE, 0)
+            .duplicate(Rights::WRITE, None)
             .expect("write-only resource capability"),
     );
     let process = Process::create("resource-rights").expect("process create");
@@ -173,7 +173,7 @@ fn granted_resource_rights_shrink_to_the_passing_handle() {
     let untransferable = Resource::from_handle(
         parent
             .handle()
-            .duplicate(Rights::WRITE | Rights::DUPLICATE, 0)
+            .duplicate(Rights::WRITE | Rights::DUPLICATE, None)
             .expect("resource capability without TRANSFER"),
     );
     let child = Fixture::spawn_on(&untransferable);

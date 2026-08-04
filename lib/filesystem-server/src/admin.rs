@@ -1,7 +1,7 @@
 //! Обслуживание admin-порта: стартовый кадр с capability, которых не даёт `ProcessStart`, и
 //! установление сессий. Порт отдан тому, кто поднял файловую систему, и клиентам недоступен.
 
-use core::sync::atomic::Ordering::Relaxed;
+use core::{num::NonZeroU64, sync::atomic::Ordering::Relaxed};
 
 use filesystem_abi::{FileSystemAdminService, FileSystemError};
 use ipc::wire::Cap;
@@ -80,16 +80,15 @@ impl FileSystemAdminService for Binding<'_> {
     }
 
     fn bind(&mut self) -> Result<Cap, FileSystemError> {
-        // Значения значков не переиспользуются: счётчик только растёт, а нулевой значок означает
-        // капу без сессии и наружу не уходит.
-        let badge = self.shared.next_badge.fetch_add(1, Relaxed);
+        // Значения значков не переиспользуются: счётчик только растёт.
+        let badge = NonZeroU64::MIN.saturating_add(self.shared.next_badge.fetch_add(1, Relaxed));
         let session = self
             .shared
             .service
-            .duplicate(Rights::WRITE | Rights::TRANSFER, badge)
+            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
             .map_err(no_space)?;
         // Сессия заводится до того, как её капа ушла клиенту: кадр по ней застанет её заведённой.
-        self.shared.state.lock().open_session(badge)?;
+        self.shared.state.lock().open_session(badge.get())?;
         Ok(vend(&mut self.vended, session))
     }
 }

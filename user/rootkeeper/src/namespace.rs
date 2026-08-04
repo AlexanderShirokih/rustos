@@ -1,3 +1,5 @@
+use core::num::NonZeroU64;
+
 use filesystem_abi::{FileSystemError, NamespaceAdminClient, NamespaceStartupClient, PATH_MAX};
 use ipc::wire::{IpcError, Str};
 use runtime::{BorrowedHandle, MemoryRegion, OwnedHandle, Port, PortTransport, Resource, Timeout};
@@ -66,6 +68,10 @@ pub enum MountFailure {
     Rejected(FileSystemError),
 }
 
+// Значок lease-капы admin-порта маршрутизатора: supervisor остаётся его единственным
+// отправителем, и его уход завершает процесс маршрутизатора.
+const ROUTER_LEASE_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("lease badge is non-zero");
+
 struct NamespaceServers {
     admin: OwnedHandle,
     service: OwnedHandle,
@@ -74,26 +80,27 @@ struct NamespaceServers {
 /// Capability roots маршрутизатора имён, остающиеся у rootkeeper.
 pub struct NamespaceRoots {
     admin: OwnedHandle,
-    image: MemoryRegion,
     service_minter: OwnedHandle,
     servers: Option<NamespaceServers>,
 }
 
 impl NamespaceRoots {
     /// Создаёт раздельные admin- и service-порты маршрутизатора.
-    pub fn create(image: MemoryRegion) -> Result<Self, ManagedStartupError> {
+    ///
+    /// Порты принадлежат одной incarnation: их корни уезжают её процессу, а
+    /// оставшиеся у rootkeeper стороны `READ` не несут.
+    pub fn create() -> Result<Self, ManagedStartupError> {
         let admin = Port::create()?;
         let admin_client = admin
             .handle()
-            .duplicate(Rights::WRITE | Rights::TRANSFER, 0)?;
+            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(ROUTER_LEASE_BADGE))?;
         let service = Port::create()?;
         let service_minter = service
             .handle()
-            .duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, 0)?;
+            .duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, None)?;
 
         Ok(Self {
             admin: admin_client,
-            image,
             service_minter,
             servers: Some(NamespaceServers {
                 admin: admin.into_handle(),
@@ -103,15 +110,21 @@ impl NamespaceRoots {
     }
 
     /// Передаёт router-у startup capability и серверные корни его портов.
+    ///
+    /// Лог-сессия и образ минтятся производными: их источники переживают
+    /// incarnation.
     pub fn send_startup(
         &mut self,
         transport: BoundedStartupTransport,
-        log: OwnedHandle,
+        log: &OwnedHandle,
+        image: &MemoryRegion,
     ) -> Result<(), ManagedStartupError> {
-        let image = self
-            .image
+        // Значок лог-сессии set-once: производная несёт значок подсистемы, а
+        // `DUPLICATE` нужно маршрутизатору для делегирования монтированиям.
+        let log = log.duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, None)?;
+        let image = image
             .handle()
-            .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, 0)?;
+            .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)?;
         let servers = self
             .servers
             .take()
@@ -145,9 +158,9 @@ impl NamespaceRoots {
     }
 
     /// Минтит клиентскую capability опубликованного Namespace-сервиса.
-    pub fn session(&self, badge: u64) -> Result<OwnedHandle, runtime::Error> {
+    pub fn session(&self, badge: NonZeroU64) -> Result<OwnedHandle, runtime::Error> {
         self.service_minter
-            .duplicate(Rights::WRITE | Rights::TRANSFER, badge)
+            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
     }
 
     /// Заимствует постоянную клиентскую сторону admin-порта.
@@ -163,23 +176,40 @@ impl NamespaceRoots {
     }
 }
 
-/// Запускает router и транзакционно поднимает дерево имён `config.mounts`.
+/// Заводит компонент маршрутизатора на бюджете `config.budget_pages` и
+/// поднимает его первую incarnation вместе с деревом имён.
 pub fn launch_namespace<'a, V: EntryView<'a>>(
     program: &V,
     parent_resource: &Resource,
-    image: MemoryRegion,
-    log: OwnedHandle,
+    image: &MemoryRegion,
+    log: &OwnedHandle,
     config: NamespaceBootConfig<'_>,
 ) -> Result<ManagedComponent<NamespaceRoots>, NamespaceBootError> {
-    let mut component = ManagedComponent::new();
+    let mut component = ManagedComponent::new(parent_resource, config.budget_pages)
+        .map_err(NamespaceBootError::Startup)?;
+    relaunch_namespace(&mut component, program, image, log, config)?;
+    Ok(component)
+}
+
+/// Поднимает новую incarnation маршрутизатора и транзакционно монтирует дерево
+/// имён `config.mounts`.
+///
+/// Incarnation получает свежие порты, свежую производную лог-сессии и ресурс из
+/// резерва компонента. Отказ монтирования снимает уже поднятые префиксы и
+/// завершает маршрутизатор.
+pub fn relaunch_namespace<'a, V: EntryView<'a>>(
+    component: &mut ManagedComponent<NamespaceRoots>,
+    program: &V,
+    image: &MemoryRegion,
+    log: &OwnedHandle,
+    config: NamespaceBootConfig<'_>,
+) -> Result<(), NamespaceBootError> {
     component
         .launch(
             program,
-            parent_resource,
-            config.budget_pages,
             config.startup_timeout,
-            || NamespaceRoots::create(image),
-            |transport, roots| roots.send_startup(transport, log),
+            NamespaceRoots::create,
+            |transport, roots| roots.send_startup(transport, log, image),
         )
         .map_err(NamespaceBootError::Startup)?;
 
@@ -192,12 +222,12 @@ pub fn launch_namespace<'a, V: EntryView<'a>>(
         }
     };
     if let Err(mount) = mounted {
-        return match stop_namespace(&mut component, ROLLBACK_EXIT_CODE, config.stop_timeout) {
+        return match stop_namespace(component, ROLLBACK_EXIT_CODE, config.stop_timeout) {
             Ok(()) => Err(NamespaceBootError::Mount(mount)),
             Err(cleanup) => Err(NamespaceBootError::Cleanup { mount, cleanup }),
         };
     }
-    Ok(component)
+    Ok(())
 }
 
 /// Завершает живой managed router и сохраняет его exit code.

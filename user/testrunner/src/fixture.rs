@@ -1,13 +1,18 @@
 //! Клиентская сторона `port-fixture`: спавн потомка из userland-образа и
 //! запрос-ответ по его bootstrap-порту.
 
+use core::num::NonZeroU64;
+
 use bootstrap::BootstrapClient;
 use runtime::{MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Result, Timeout};
 use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
 use userland_image::decode;
-use userland_loader::load_entry;
+use userland_loader::{launch_entry_retained, load_entry};
 
-use crate::{fixture_protocol::encode_request, ipc_raw};
+use crate::{
+    fixture_protocol::{OP_WRITE_SLOT, encode_request},
+    ipc_raw,
+};
 
 /// Бюджет одного запроса к фикстуре: мёртвый потомок отказывает сразу, поэтому
 /// конечный тайм-аут ловит только зависшего.
@@ -19,7 +24,21 @@ pub const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const FIXTURE_ENTRY: &str = "/boot/port-fixture";
 
 /// Значок сессии родителя у фикстуры.
-const FIXTURE_SESSION_BADGE: u64 = 1;
+const FIXTURE_SESSION_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
+
+// Значок retained-порта, который минтит загрузчик.
+const FIXTURE_LEASE_BADGE: NonZeroU64 = NonZeroU64::new(2).expect("lease badge is non-zero");
+
+// Аргумент стартового запроса retained-запуска.
+const LEASE_START_PROBE: u64 = 0xC0DE;
+
+/// Путь запуска фикстуры.
+pub enum Launch {
+    /// Порт заводит вызывающий и передаёт серверную сторону стартовым хэндлом.
+    Bootstrap,
+    /// Порт заводит загрузчик, а клиентскую сторону минтит под lease-значком.
+    Leased,
+}
 
 /// Метеринг спавнимой фикстуры.
 pub enum Metering<'a> {
@@ -44,7 +63,13 @@ pub struct Fixture {
 impl Fixture {
     /// Спавнит фикстуру на метеринг-ресурсе родителя.
     pub fn spawn() -> Self {
-        Self::spawn_metered_by(&Metering::Inherited).expect("spawn port fixture")
+        Self::spawn_metered_by(&Metering::Inherited, &Launch::Bootstrap)
+            .expect("spawn port fixture")
+    }
+
+    /// Спавнит фикстуру retained-запуском загрузчика.
+    pub fn spawn_leased() -> Self {
+        Self::spawn_metered_by(&Metering::Inherited, &Launch::Leased).expect("spawn port fixture")
     }
 
     /// Спавнит фикстуру на отделённом от родителя бюджете: страницы сегментов
@@ -56,12 +81,13 @@ impl Fixture {
     /// То же, что [`spawn_with_slack`](Self::spawn_with_slack), но отказ
     /// загрузки образа возвращается вызывающему.
     pub fn try_spawn_with_slack(slack_pages: u64) -> Result<Self> {
-        Self::spawn_metered_by(&Metering::SplitWithSlack(slack_pages))
+        Self::spawn_metered_by(&Metering::SplitWithSlack(slack_pages), &Launch::Bootstrap)
     }
 
     /// Спавнит фикстуру на ресурсе вызывающего.
     pub fn spawn_on(resource: &Resource) -> Self {
-        Self::spawn_metered_by(&Metering::Provided(resource)).expect("spawn port fixture")
+        Self::spawn_metered_by(&Metering::Provided(resource), &Launch::Bootstrap)
+            .expect("spawn port fixture")
     }
 
     /// Отделённый под потомка бюджет в страницах.
@@ -70,7 +96,7 @@ impl Fixture {
             .expect("fixture spawned on a split budget")
     }
 
-    fn spawn_metered_by(metering: &Metering<'_>) -> Result<Self> {
+    fn spawn_metered_by(metering: &Metering<'_>, launch: &Launch) -> Result<Self> {
         let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
         let cap = client
             .acquire_userland_image()
@@ -85,8 +111,6 @@ impl Fixture {
             .expect("image carries the port fixture")
             .program()
             .expect("fixture record carries a program");
-
-        let service = Port::create_service(FIXTURE_SESSION_BADGE).expect("port create");
 
         let mut budget_pages = None;
         let own_resource;
@@ -107,11 +131,30 @@ impl Fixture {
                 &own_resource
             }
         };
-        let process = load_entry(&program, resource, service.server)?;
+        let (process, port) = match launch {
+            Launch::Bootstrap => {
+                let service = Port::create_service(Some(FIXTURE_SESSION_BADGE))?;
+                (
+                    load_entry(&program, resource, service.server)?,
+                    service.client,
+                )
+            }
+            Launch::Leased => {
+                let initialized =
+                    launch_entry_retained(&program, resource, FIXTURE_LEASE_BADGE, |startup| {
+                        ipc_raw::write_frame(
+                            &encode_request(OP_WRITE_SLOT, LEASE_START_PROBE),
+                            &[],
+                        );
+                        startup.call(REQUEST_TIMEOUT)
+                    })?;
+                (initialized.process, initialized.startup)
+            }
+        };
 
         Ok(Self {
             process,
-            port: service.client,
+            port,
             budget_pages,
         })
     }

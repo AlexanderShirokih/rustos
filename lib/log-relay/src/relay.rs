@@ -59,8 +59,9 @@ impl<S: LogSink> LogRelay<S> {
         loop {
             match transport.wait_readable(Timeout::INFINITE) {
                 Ok(()) => {}
-                // Уход значка кадра не несёт: состояния сессий relay не держит.
-                Err(IpcError::SenderGone) => continue,
+                // Ни один исход кадра не несёт: состояния сессий relay не держит, а
+                // бессрочный приём срока не имеет и пробуждение без кадра цикл не завершает.
+                Err(IpcError::SenderGone | IpcError::Timeout) => continue,
                 // Исчерпание относится к одному кадру. Буфер приёма при этом
                 // не содержит доставленного сообщения.
                 Err(IpcError::ResourceExhausted) => {

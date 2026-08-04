@@ -5,6 +5,9 @@
 //! отвечает за допуск к файловой системе. Admin-порт приносит `ProcessStart`, и на нём отвечает
 //! отдельный поток: это отвязывает `bind` и стоящий за ним маршрутизатор имён от вызова,
 //! который сервисный поток обслуживает прямо сейчас.
+//!
+//! Клиентская сторона admin-порта принадлежит поднявшему процесс маршрутизатору и несёт его
+//! значок: её уход завершает процесс, а не оставляет монтирование сиротой.
 
 #![no_std]
 
@@ -18,7 +21,7 @@ use filesystem_abi::{dispatch_file_system, dispatch_file_system_admin};
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
     MemoryRegion, Mutex, OwnedHandle, Port, PortTransport, Priority, ReadOnlyMapping, Resource,
-    install_log, log_line, spawn_owned,
+    Thread, exit_with_sibling, install_log, log_line, spawn_owned,
 };
 use spin::Once;
 use syscall::{Handle, Timeout};
@@ -36,6 +39,9 @@ pub use service::{settle, vend};
 // Стек потока admin-порта: он ведёт только приём кадра и минт capability.
 const ADMIN_STACK: u64 = 0x4000;
 
+// Код выхода процесса, потерявшего поднявший его маршрутизатор.
+const SUPERVISOR_LOST_EXIT_CODE: u32 = 2;
+
 // Маппинг региона образа: его байты держат дерево имён файловой системы поверх образа и живут
 // всё время работы процесса.
 static IMAGE: Once<ReadOnlyMapping> = Once::new();
@@ -46,6 +52,7 @@ struct Shared {
     // Корневая capability сервисного порта: из неё минтятся значки сессий.
     service: OwnedHandle,
     admin: OwnedHandle,
+    sessions_thread: Thread,
     // Значки сессий не переиспользуются.
     next_badge: AtomicU64,
 }
@@ -80,7 +87,8 @@ where
         )),
         service: Port::create()?.into_handle(),
         admin,
-        next_badge: AtomicU64::new(1),
+        sessions_thread: Thread::self_thread()?,
+        next_badge: AtomicU64::new(0),
     }));
     // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
     let _ = spawn_owned(move || serve_admin(shared), ADMIN_STACK, Priority::new(1))?;
@@ -109,9 +117,9 @@ fn serve_sessions(shared: &Shared) {
                 shared.state.lock().remove_session(transport.peer_badge());
                 continue;
             }
-            // Исчерпание относится к одному кадру. Буфер приёма при этом не
-            // содержит доставленного сообщения.
-            Err(IpcError::ResourceExhausted) => continue,
+            // Исчерпание относится к одному кадру, а бессрочный приём срока не имеет:
+            // буфер приёма в обоих случаях не содержит доставленного сообщения.
+            Err(IpcError::ResourceExhausted | IpcError::Timeout) => continue,
             Err(IpcError::PeerClosed) => break,
             Err(_) => {
                 log_line("service port failed");
@@ -142,9 +150,14 @@ fn serve_admin(shared: &Shared) -> u32 {
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
-            // Оба исхода кадра не несут. Уход маршрутизатора оставляет выданные сессии
-            // работать, а покадровое исчерпание не закрывает порт.
-            Err(IpcError::SenderGone | IpcError::ResourceExhausted) => continue,
+            // Отправитель на admin-порту один - поднявший монтирование
+            // маршрутизатор, поэтому его уход снимает процесс целиком.
+            Err(IpcError::SenderGone) => {
+                log_line("supervisor gone");
+                exit_with_sibling(&shared.sessions_thread, SUPERVISOR_LOST_EXIT_CODE)
+            }
+            // Покадровое исчерпание и пробуждение без кадра цикл не закрывают.
+            Err(IpcError::ResourceExhausted | IpcError::Timeout) => continue,
             Err(IpcError::PeerClosed) => break,
             // Прочий отказ приёма оставляет процесс без установления сессий и уходит ненулевым
             // кодом потока, отличимым от закрытия порта.

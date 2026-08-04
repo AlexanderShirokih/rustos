@@ -25,7 +25,7 @@ pub use log::{install_log, log_fmt, log_line};
 pub use object::{
     AnonymousMapping, IrqControl, IrqLine, JoinHandle, Mapping, MemoryRegion, Port, Priority,
     Process, ReadOnlyMapping, RegionInfo, RegionKind, Reply, Resource, ServicePort, Signal, Thread,
-    ThreadEntry, spawn, spawn_owned, wait_any,
+    ThreadEntry, exit_with_sibling, spawn, spawn_owned, wait_any,
 };
 pub use port_transport::PortTransport;
 pub use ring_transport::RingTransport;

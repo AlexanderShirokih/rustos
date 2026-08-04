@@ -1,5 +1,7 @@
 //! Лог-порт и его цикл пересылки в выделенном потоке.
 
+use core::num::NonZeroU64;
+
 use runtime::{
     BorrowedHandle, JoinHandle, OwnedHandle, Port, Priority, Result, Timeout, spawn_owned,
 };
@@ -25,7 +27,7 @@ impl LogRelayThread {
     /// `names` именует значки подсистем в журнале.
     pub fn start<S: LogSink + Send + 'static>(names: SourceNames, sink: S) -> Result<Self> {
         let root = Port::create()?.into_handle();
-        let mut relay = LogRelay::new(root.duplicate(Rights::READ, 0)?, names, sink);
+        let mut relay = LogRelay::new(root.duplicate(Rights::READ, None)?, names, sink);
         let thread = spawn_owned(
             move || {
                 relay.serve();
@@ -39,16 +41,19 @@ impl LogRelayThread {
 
     /// Лог-сессия со значком `badge`: отправка и перенос кадром. Приёма и минта
     /// производных сессия не даёт.
-    pub fn session(&self, badge: u64) -> Result<OwnedHandle> {
-        self.root.duplicate(Rights::WRITE | Rights::TRANSFER, badge)
+    pub fn session(&self, badge: NonZeroU64) -> Result<OwnedHandle> {
+        self.root
+            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
     }
 
     /// Лог-сессия подсистемы, раздающей логирование своим процессам: к правам
     /// сессии добавлен минт производных. Значок set-once, и производные несут
     /// тот же `badge`.
-    pub fn delegated_session(&self, badge: u64) -> Result<OwnedHandle> {
-        self.root
-            .duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, badge)
+    pub fn delegated_session(&self, badge: NonZeroU64) -> Result<OwnedHandle> {
+        self.root.duplicate(
+            Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE,
+            Some(badge),
+        )
     }
 
     /// Заимствует waitable handle потока relay для supervisor loop.

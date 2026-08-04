@@ -19,8 +19,8 @@ use filesystem_abi::{
 };
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
-    MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Resource,
-    install_log, log_fmt, log_line, receive_startup, spawn_owned, thread_exit,
+    MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Resource, Thread,
+    exit_with_sibling, install_log, log_fmt, log_line, receive_startup, spawn_owned, thread_exit,
 };
 use spin::Once;
 use syscall::{Handle, Rights, Timeout};
@@ -35,6 +35,13 @@ const LOG_TAG: &str = "router";
 
 // Стек потока admin-порта: он ведёт монтирования и подъём процессов файловых систем.
 const ADMIN_STACK: u64 = 0x4000;
+
+// Код выхода маршрутизатора, потерявшего поднявший его supervisor.
+const SUPERVISOR_LOST_EXIT_CODE: u32 = 7;
+
+// Оборот приёма на admin-порту: он же задаёт задержку между уходом файловой системы и подъёмом
+// её смены.
+const ADMIN_TURN: Timeout = Timeout::from_millis(100);
 
 // Маппинг региона образа: его байты держат программы файловых систем и живут всё время работы
 // маршрутизатора.
@@ -67,7 +74,7 @@ fn run(startup: Handle) -> Result<()> {
     // Копия канала логирования для поднимаемых файловых систем: право минта остаётся за
     // маршрутизатором, детям уходит капа без него.
     let log_for_children =
-        log.duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, 0)?;
+        log.duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, None)?;
     install_log(log, LOG_TAG);
 
     let image = MemoryRegion::from_handle(image);
@@ -82,6 +89,7 @@ fn run(startup: Handle) -> Result<()> {
             log_for_children,
             Resource::self_resource()?,
         ),
+        service_thread: Thread::self_thread()?,
     };
     // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
     let _ = spawn_owned(
@@ -101,9 +109,11 @@ fn serve(service: &OwnedHandle) {
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
-            // Оба исхода кадра не несут: маршрутизатор не хранит сессий, а покадровое
-            // исчерпание не закрывает порт.
-            Err(IpcError::SenderGone | IpcError::ResourceExhausted) => continue,
+            // Ни один исход кадра не несёт: маршрутизатор не хранит сессий, а покадровое
+            // исчерпание и пробуждение без кадра порт не закрывают.
+            Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout) => {
+                continue;
+            }
             Err(IpcError::PeerClosed) => break,
             Err(_) => {
                 log_line("service port failed");
@@ -124,17 +134,29 @@ fn serve(service: &OwnedHandle) {
 struct AdminPort {
     port: OwnedHandle,
     administering: Administering<'static>,
+    service_thread: Thread,
 }
 
-// Цикл admin-порта в отдельном потоке: монтирования, пока порт открыт.
+// Цикл admin-порта в отдельном потоке: монтирования и наблюдение за их процессами, пока порт
+// открыт. Наблюдение идёт каждым оборотом, а не только пустым: поток admin-кадров его не
+// вытесняет.
 fn serve_admin(mut admin: AdminPort) -> u32 {
     let transport = PortTransport::server(admin.port.borrow());
     loop {
-        match transport.wait_readable(Timeout::INFINITE) {
-            Ok(()) => {}
-            // Оба исхода кадра не несут. Уход поднявшего оставляет монтирования работать,
-            // а покадровое исчерпание не закрывает порт.
-            Err(IpcError::SenderGone | IpcError::ResourceExhausted) => continue,
+        match transport.wait_readable(ADMIN_TURN) {
+            Ok(()) => {
+                let _ = dispatch_namespace_admin(&mut admin.administering, &transport);
+                transport.cancel_reply();
+            }
+            Err(IpcError::Timeout) => {}
+            // Отправитель на admin-порту один - поднявший маршрутизатор supervisor, поэтому
+            // его уход снимает процесс целиком вместе с монтированиями.
+            Err(IpcError::SenderGone) => {
+                log_line("supervisor gone");
+                exit_with_sibling(&admin.service_thread, SUPERVISOR_LOST_EXIT_CODE)
+            }
+            // Покадровое исчерпание не закрывает порт.
+            Err(IpcError::ResourceExhausted) => continue,
             Err(IpcError::PeerClosed) => break,
             // Прочий отказ приёма оставляет маршрутизатор без монтирований и уходит ненулевым
             // кодом потока, отличимым от закрытия порта.
@@ -143,8 +165,7 @@ fn serve_admin(mut admin: AdminPort) -> u32 {
                 return 1;
             }
         }
-        let _ = dispatch_namespace_admin(&mut admin.administering, &transport);
-        transport.cancel_reply();
+        admin.administering.supervise();
     }
     log_line("admin port closed");
     0

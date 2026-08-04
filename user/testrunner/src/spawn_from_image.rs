@@ -150,7 +150,7 @@ fn start_error_reclaims_each_loaded_process() {
     let root = Resource::self_resource().expect("self metering resource");
     let write_only = Resource::from_handle(
         root.handle()
-            .duplicate(Rights::WRITE, 0)
+            .duplicate(Rights::WRITE, None)
             .expect("resource without duplicate right"),
     );
 
@@ -184,7 +184,7 @@ fn caller_wakes_when_server_dies_holding_reply() {
         .program()
         .expect("holder record carries a program");
 
-    let service = Port::create_service(0).expect("port create");
+    let service = Port::create_service(None).expect("port create");
 
     let resource = Resource::self_resource().expect("self metering resource");
     let _process = load_entry(&child, &resource, service.server).expect("spawn holder from image");

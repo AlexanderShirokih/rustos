@@ -5,7 +5,7 @@
 extern crate alloc;
 
 use alloc::format;
-use core::panic::PanicInfo;
+use core::{num::NonZeroU64, panic::PanicInfo};
 
 use bootstrap::BootstrapClient;
 use calculator_demo::{CalculatorApiClient, Error, Result};
@@ -17,7 +17,7 @@ use userland_image::decode;
 use userland_loader::load_entry;
 
 /// Значок сессии демо у калькулятора.
-const CALCULATOR_SESSION_BADGE: u64 = 1;
+const CALCULATOR_SESSION_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(root: Handle) -> ! {
@@ -46,7 +46,7 @@ fn run(root: Handle) -> Result<()> {
 
     // Порт для связи с сервисом калькулятора: корневая капа уезжает
     // калькулятору, у демо остаётся клиентский минт со значком сессии.
-    let calculator_port = Port::create_service(CALCULATOR_SESSION_BADGE)?;
+    let calculator_port = Port::create_service(Some(CALCULATOR_SESSION_BADGE))?;
     let resource = Resource::self_resource()?;
 
     // Парсим контейнер initrd образа и получает из него программу

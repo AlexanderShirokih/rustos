@@ -61,6 +61,11 @@ bin = "managed-startup-closed"
 path = "/boot/managed-startup-closed"
 
 [[programs]]
+package = "testrunner"
+bin = "crash-filesystem"
+path = "/boot/crash-filesystem"
+
+[[programs]]
 package = "namespace-router"
 path = "/boot/namespace-router"
 

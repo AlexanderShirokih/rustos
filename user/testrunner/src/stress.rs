@@ -3,6 +3,7 @@
 use alloc::sync::Arc;
 use core::{
     fmt::Write as _,
+    num::NonZeroU64,
     sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::SeqCst},
 };
 
@@ -291,7 +292,7 @@ fn port_peer_close(payload: u64) -> Result<(), i64> {
     let port = Port::create().map_err(|_| -1500)?;
     let client = port
         .handle()
-        .duplicate(Rights::WRITE, payload | 1)
+        .duplicate(Rights::WRITE, Some(NonZeroU64::MIN.saturating_add(payload)))
         .map_err(|_| -1501)?;
     let state = WorkerState::new(client.as_raw(), payload);
     let worker = spawn_worker(send_worker, &state, -1502)?;

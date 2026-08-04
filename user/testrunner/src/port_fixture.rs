@@ -118,7 +118,7 @@ fn duplicate_transfer_cap() -> u8 {
     };
     match resource
         .handle()
-        .duplicate(Rights::WRITE | Rights::TRANSFER, 0)
+        .duplicate(Rights::WRITE | Rights::TRANSFER, None)
     {
         Ok(_) => REPLY_OK,
         Err(Error::Syscall(SyscallError::AccessDenied)) => REPLY_ACCESS_DENIED,

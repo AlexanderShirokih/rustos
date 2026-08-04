@@ -1,11 +1,9 @@
 use ipc::{MessageLen, Transport, wire::IpcError};
-use runtime::{Error, Port, PortTransport, Process, Resource, Signal, Timeout};
-use syscall::{SIGNALED, SyscallError};
+use runtime::{Error, Port, PortTransport, Process, Resource, Timeout};
 use userland::EntryView;
 use userland_loader::launch_entry;
 
-const BUDGET_RETURN_ATTEMPTS: usize = 1_000;
-const BUDGET_RETURN_WAIT: Timeout = Timeout::from_millis(5);
+const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const OWNER_DROP_EXIT_CODE: u32 = 1;
 
 /// Наблюдаемое состояние managed-компонента.
@@ -49,8 +47,6 @@ pub struct RunningComponent<R> {
     roots: R,
     process: Process,
     resource: Resource,
-    reserved_budget: Resource,
-    budget_pages: u64,
 }
 
 /// Единственный transport одноразового startup-кадра. Его конечный send
@@ -69,6 +65,11 @@ enum ManagedState<R> {
 /// Managed-компонент с capability roots конкретного типа `R`.
 pub struct ManagedComponent<R> {
     state: ManagedState<R>,
+    // Резерв бюджета компонента: он переживает свои экземпляры, и подтверждение
+    // возврата бюджета опирается на него.
+    reserve: Resource,
+    budget_pages: u64,
+    generation: u32,
 }
 
 impl From<Error> for ManagedStartupError {
@@ -111,19 +112,26 @@ impl<R> RunningComponent<R> {
     }
 }
 
-impl<R> Default for ManagedComponent<R> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<R> ManagedComponent<R> {
-    /// Создаёт компонент в состоянии [`ManagedStatus::Launching`].
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
+    /// Резервирует `budget_pages` страниц под компонент и создаёт его в
+    /// состоянии [`ManagedStatus::Launching`].
+    ///
+    /// Резерв принадлежит компоненту до его уничтожения: каждый запуск нарезает
+    /// ресурс экземпляра из него, а не из родительского ресурса. Резерв - капа-
+    /// потомок `parent_resource`, и закрытие родительской капы его отзывает.
+    pub fn new(parent_resource: &Resource, budget_pages: u64) -> Result<Self, ManagedStartupError> {
+        Ok(Self {
             state: ManagedState::Launching,
-        }
+            reserve: parent_resource.split_when_available(budget_pages, BUDGET_RETURN_TIMEOUT)?,
+            budget_pages,
+            generation: 0,
+        })
+    }
+
+    /// Номер текущей попытки запуска: первый запуск даёт `1`.
+    #[must_use]
+    pub const fn generation(&self) -> u32 {
+        self.generation
     }
 
     /// Текущее состояние компонента.
@@ -155,37 +163,37 @@ impl<R> ManagedComponent<R> {
         }
     }
 
-    /// Выполняет startup-транзакцию с отдельным budget и typed roots `R`.
+    /// Выполняет startup-транзакцию на резерве компонента с typed roots `R`.
+    ///
+    /// Запуск начинает новую incarnation и поднимает [`generation`](Self::generation).
+    /// Компонент в состоянии `Running` уже владеет экземпляром, и повторный
+    /// запуск отвергается `InvalidState`.
     pub fn launch<'a, V: EntryView<'a>>(
         &mut self,
         entry: &V,
-        parent_resource: &Resource,
-        budget_pages: u64,
         startup_timeout: Timeout,
         create_roots: impl FnOnce() -> Result<R, ManagedStartupError>,
         send_startup: impl FnOnce(BoundedStartupTransport, &mut R) -> Result<(), ManagedStartupError>,
     ) -> Result<(), ManagedStartupError> {
-        if !matches!(self.state, ManagedState::Launching) {
+        if matches!(self.state, ManagedState::Running(_)) {
             return Err(ManagedStartupError::InvalidState);
         }
         if startup_timeout == Timeout::INFINITE {
             return self.fail_startup(ManagedStartupError::InfiniteTimeout);
         }
+        self.generation += 1;
 
-        let reserved_budget = match parent_resource.split(budget_pages) {
-            Ok(resource) => resource,
-            Err(error) => return self.fail_startup(error.into()),
-        };
-        let child_resource = match reserved_budget.split(budget_pages) {
-            Ok(resource) => resource,
-            Err(error) => return self.fail_startup(error.into()),
-        };
-        let mut roots = match create_roots() {
-            Ok(roots) => Some(roots),
-            Err(error) => return self.fail_startup(error),
-        };
-
+        // Ресурс экземпляра живёт в этом блоке: неудачный запуск освобождает его
+        // концом блока, до подтверждения возврата бюджета.
         let launch = {
+            let child_resource = match self.reserve.split(self.budget_pages) {
+                Ok(resource) => resource,
+                Err(error) => return self.fail_startup(error.into()),
+            };
+            let mut roots = match create_roots() {
+                Ok(roots) => Some(roots),
+                Err(error) => return self.fail_startup(error),
+            };
             let result = launch_entry(entry, &child_resource, |startup| {
                 let component_roots = roots
                     .as_mut()
@@ -205,10 +213,8 @@ impl<R> ManagedComponent<R> {
                         .expect("successful startup retains capability roots"),
                     process,
                     resource: child_resource,
-                    reserved_budget,
-                    budget_pages,
                 }),
-                Err(error) => Err((error, reserved_budget, child_resource)),
+                Err(error) => Err(error),
             }
         };
 
@@ -217,12 +223,8 @@ impl<R> ManagedComponent<R> {
                 self.state = ManagedState::Running(running);
                 Ok(())
             }
-            Err((error, reserved_budget, child_resource)) => {
-                let reserved_budget = {
-                    let _child_resource = child_resource;
-                    reserved_budget
-                };
-                if let Err(cleanup) = wait_for_budget_return(&reserved_budget, budget_pages) {
+            Err(error) => {
+                if let Err(cleanup) = self.confirm_budget_return() {
                     return self.fail_startup(cleanup.into());
                 }
                 self.fail_startup(error)
@@ -249,14 +251,11 @@ impl<R> ManagedComponent<R> {
             roots,
             process,
             resource,
-            reserved_budget,
-            budget_pages,
         } = running;
         drop(roots);
         drop(process);
         drop(resource);
-        let cleanup = wait_for_budget_return(&reserved_budget, budget_pages);
-        drop(reserved_budget);
+        let cleanup = self.confirm_budget_return();
 
         self.state = if exit_code == 0 {
             ManagedState::Exited
@@ -264,6 +263,15 @@ impl<R> ManagedComponent<R> {
             ManagedState::Failed(ManagedFailure::Exit(exit_code))
         };
         cleanup.map_err(ManagedStartupError::Runtime)
+    }
+
+    // Возврат бюджета подтверждается повторным выделением полного лимита: до
+    // уничтожения последнего объекта ушедшего поддерева страницы резерву не
+    // принадлежат.
+    fn confirm_budget_return(&self) -> Result<(), Error> {
+        self.reserve
+            .split_when_available(self.budget_pages, BUDGET_RETURN_TIMEOUT)
+            .map(drop)
     }
 
     fn fail_startup(&mut self, error: ManagedStartupError) -> Result<(), ManagedStartupError> {
@@ -285,22 +293,4 @@ fn bounded_transport(startup: &Port, timeout: Timeout) -> BoundedStartupTranspor
     BoundedStartupTransport {
         inner: PortTransport::client(startup.handle()).with_send_timeout(timeout),
     }
-}
-
-fn wait_for_budget_return(resource: &Resource, budget_pages: u64) -> Result<(), Error> {
-    let timer = Signal::create()?;
-    for _ in 0..BUDGET_RETURN_ATTEMPTS {
-        match resource.split(budget_pages) {
-            Ok(_returned_budget) => return Ok(()),
-            Err(Error::Syscall(SyscallError::ResourceExhausted)) => {
-                match timer.wait(SIGNALED, BUDGET_RETURN_WAIT) {
-                    Err(Error::Syscall(SyscallError::Timeout)) => {}
-                    Err(error) => return Err(error),
-                    Ok(_) => unreachable!("private timer is never signaled"),
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(Error::Syscall(SyscallError::Timeout))
 }

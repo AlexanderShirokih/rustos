@@ -763,9 +763,6 @@ doc_on_declaration|user/namespace-router/src/router.rs|Administering::image|3216
 doc_on_declaration|user/namespace-router/src/router.rs|Administering::log|51169f3c
 doc_on_declaration|user/namespace-router/src/router.rs|Administering::resource|2d8dd205
 doc_on_declaration|user/namespace-router/src/router.rs|Administering|d1d4cd5c
-doc_on_declaration|user/namespace-router/src/router.rs|Mount::admin|fe95cc30
-doc_on_declaration|user/namespace-router/src/router.rs|Mount::prefix|38dbe54b
-doc_on_declaration|user/namespace-router/src/router.rs|Mount::process|9b784c65
 doc_on_declaration|user/namespace-router/src/router.rs|MountTable|70c20db6
 doc_on_declaration|user/namespace-router/src/router.rs|Resolving::vended|04d6adfd
 doc_on_declaration|user/namespace-router/src/router.rs|Resolving<'a>::end_frame|f36fdf23

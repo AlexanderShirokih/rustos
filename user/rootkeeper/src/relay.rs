@@ -1,16 +1,18 @@
 //! Relay логирования rootkeeper: сток - bootstrap-капа ядра, которая процесс не
 //! покидает, а подсистемам достаются только лог-сессии.
 
+use core::num::NonZeroU64;
+
 use log_relay::{KernelLogSink, LogRelayThread};
 use runtime::{OwnedHandle, Result, Timeout};
 use spin::Mutex;
 use syscall::Handle;
 
 /// Значок лог-сессии супервизора.
-pub const SUPERVISOR_BADGE: u64 = 1;
+pub const SUPERVISOR_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
 
 /// Значок лог-сессии файловой подсистемы.
-pub const FILESYSTEM_BADGE: u64 = 2;
+pub const FILESYSTEM_BADGE: NonZeroU64 = NonZeroU64::new(2).expect("badge is non-zero");
 
 // Цикл пересылки процесса. Владение общее, а не на стеке вызывающего: путь
 // паники обязан остановить цикл, иначе живой поток relay не даёт процессу уйти.
@@ -26,13 +28,13 @@ pub fn start(kernel: Handle) -> Result<()> {
 
 /// Минтит лог-сессию со значком `badge`.
 #[must_use]
-pub fn session(badge: u64) -> Option<OwnedHandle> {
+pub fn session(badge: NonZeroU64) -> Option<OwnedHandle> {
     RELAY.lock().as_ref()?.session(badge).ok()
 }
 
 /// Минтит лог-сессию подсистемы, раздающей логирование своим процессам.
 #[must_use]
-pub fn delegated_session(badge: u64) -> Option<OwnedHandle> {
+pub fn delegated_session(badge: NonZeroU64) -> Option<OwnedHandle> {
     RELAY.lock().as_ref()?.delegated_session(badge).ok()
 }
 
@@ -62,8 +64,8 @@ pub fn shutdown(timeout: Timeout) {
 
 fn source_name(badge: u64) -> Option<&'static str> {
     match badge {
-        SUPERVISOR_BADGE => Some("rootkeeper"),
-        FILESYSTEM_BADGE => Some("filesystem"),
+        _ if badge == SUPERVISOR_BADGE.get() => Some("rootkeeper"),
+        _ if badge == FILESYSTEM_BADGE.get() => Some("filesystem"),
         _ => None,
     }
 }

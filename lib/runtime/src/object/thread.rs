@@ -8,6 +8,15 @@ use crate::{
     svc,
 };
 
+/// Снимает поток `sibling` и уходит из текущего кодом `exit_code`.
+///
+/// Процесс уходит вместе со своим последним потоком: `ProcessTerminate` на
+/// собственный процесс ядро отвергает.
+pub fn exit_with_sibling(sibling: &Thread, exit_code: u32) -> ! {
+    let _ = sibling.terminate(exit_code);
+    svc::thread_exit(u64::from(exit_code))
+}
+
 /// Приоритет потока: занимает биты [0..8) ABI, биты [8..32) нулевые по
 /// построению, поэтому отдельная проверка `priority > 0xFF` не нужна.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
