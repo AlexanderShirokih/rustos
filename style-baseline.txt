@@ -1175,12 +1175,6 @@ doc_on_declaration|user/testrunner/src/main.rs|send_log_frame|9142f1ce
 doc_on_declaration|user/testrunner/src/memory_share.rs|PATTERN|95384595
 doc_on_declaration|user/testrunner/src/owned_handle.rs|is_closed|04b7937a
 doc_on_declaration|user/testrunner/src/owned_handle.rs|mint|b675bf5b
-doc_on_declaration|user/testrunner/src/pl031_rtc.rs|RTC_DR|63efe420
-doc_on_declaration|user/testrunner/src/pl031_rtc.rs|RTC_ICR|f64f7fc4
-doc_on_declaration|user/testrunner/src/pl031_rtc.rs|RTC_IMSC|f28cae22
-doc_on_declaration|user/testrunner/src/pl031_rtc.rs|RTC_MR|0250d973
-doc_on_declaration|user/testrunner/src/pl031_rtc.rs|WAIT_BUDGET|a8b9e535
-doc_on_declaration|user/testrunner/src/pl031_rtc.rs|gic_spi_intid|106c4eaf
 doc_on_declaration|user/testrunner/src/port.rs|CAPS_OFF|839e50cc
 doc_on_declaration|user/testrunner/src/port.rs|CLIENTS_READY|85918319
 doc_on_declaration|user/testrunner/src/port.rs|CLIENT_A_RESULT|5cf91cba

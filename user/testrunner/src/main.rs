@@ -31,7 +31,6 @@ mod managed_startup;
 mod memory_capability_target;
 mod memory_share;
 mod owned_handle;
-mod pl031_rtc;
 mod port;
 mod port_liveness;
 mod port_transport;
