@@ -105,7 +105,7 @@ mod tests {
         services::{
             console::ConsoleService,
             interrupts::{
-                CpuInterfaceError, InterruptsService, IrqBinding, IrqBound, IrqNumber,
+                CpuInterfaceError, InterruptsService, IrqBinding, IrqBound, IrqLineSpan, IrqNumber,
                 IrqRegistrationError,
             },
             timer::{TickHandler, TimerService},
@@ -127,6 +127,13 @@ mod tests {
     struct TestInterruptHandle;
 
     impl InterruptsService for TestInterruptHandle {
+        fn assignable_lines(&self) -> IrqLineSpan {
+            IrqLineSpan {
+                first: IrqNumber::new(32),
+                last: IrqNumber::new(255),
+            }
+        }
+
         fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
             Ok(())
         }

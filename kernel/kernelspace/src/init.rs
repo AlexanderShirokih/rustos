@@ -8,6 +8,7 @@ extern crate alloc;
 use alloc::{sync::Arc, vec::Vec};
 
 use capability::{Capability, CapabilityTarget, Rights, SIGNALED, install_handle, signal_wait_one};
+use drivers_common::services::interrupts::IrqLineSpan;
 use klog::{info, warn};
 use memory::MemoryRegion;
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
@@ -41,13 +42,21 @@ where
     let image = kernel.userland_image();
     let dtb = kernel.dtb();
     let device_regions = kernel.device_regions();
+    let irq_lines = kernel.assignable_irq_lines();
     let user_va_end = A::USER_VA_END;
 
     scheduler
         .spawn(
             SpawnConfig::new("init").priority(Priority::highest()),
             move || {
-                start_bootstrap_chain(launcher.as_ref(), image, dtb, device_regions, user_va_end)
+                start_bootstrap_chain(
+                    launcher.as_ref(),
+                    image,
+                    dtb,
+                    device_regions,
+                    irq_lines,
+                    user_va_end,
+                )
             },
         )
         .map(|_| ())
@@ -58,9 +67,11 @@ fn start_bootstrap_chain(
     image: Option<UserlandImage>,
     dtb: BootDtb,
     device_regions: Vec<Arc<MemoryRegion>>,
+    irq_lines: Option<IrqLineSpan>,
     user_va_end: usize,
 ) -> ! {
-    let exit_code = bootstrap_chain(launcher, image, dtb, device_regions, user_va_end).unwrap_or(1);
+    let exit_code =
+        bootstrap_chain(launcher, image, dtb, device_regions, irq_lines, user_va_end).unwrap_or(1);
     power::system_off(exit_code)
 }
 
@@ -69,10 +80,13 @@ fn bootstrap_chain(
     image: Option<UserlandImage>,
     dtb: BootDtb,
     device_regions: Vec<Arc<MemoryRegion>>,
+    irq_lines: Option<IrqLineSpan>,
     user_va_end: usize,
 ) -> Result<i32, ()> {
     let image =
         image.ok_or_else(|| warn!("userland blob missing; bootstrap process not started"))?;
+    let irq_lines = irq_lines
+        .ok_or_else(|| warn!("interrupts service missing; bootstrap process not started"))?;
 
     let launch = spawn_process(
         launcher,
@@ -80,6 +94,7 @@ fn bootstrap_chain(
         image.phys_base,
         dtb,
         device_regions,
+        irq_lines,
         user_va_end,
     )
     .map_err(|e| warn!("bootstrap process spawn failed: {:?}", e))?;

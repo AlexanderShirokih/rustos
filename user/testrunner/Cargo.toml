@@ -104,9 +104,10 @@ spin = { workspace = true }
 test-harness-qemu = { workspace = true }
 syscall = { workspace = true }
 runtime = { workspace = true }
+managed-component = { workspace = true }
 rootkeeper = { path = "../rootkeeper" }
 userland = { workspace = true }
-userland-image = { workspace = true }
+userland-image = { workspace = true, features = ["alloc"] }
 userland-loader = { workspace = true }
 
 [build-dependencies]

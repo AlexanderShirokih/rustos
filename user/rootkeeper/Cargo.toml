@@ -24,16 +24,13 @@ doctest = false
 
 [dependencies]
 bootstrap = { workspace = true }
-filesystem-abi = { workspace = true }
-ipc = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }
+managed-component = { workspace = true }
+runtime = { workspace = true }
 spin = { workspace = true }
 syscall = { workspace = true }
-runtime = { workspace = true }
-userland = { workspace = true }
 userland-image = { workspace = true }
-userland-loader = { workspace = true }
 
 [build-dependencies]
 userland-build = { workspace = true }

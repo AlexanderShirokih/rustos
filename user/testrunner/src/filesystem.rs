@@ -2,6 +2,7 @@
 //! выдаёт клиентам сессии с ними, а сами файловые системы работают над своим монтированием.
 
 use alloc::{format, string::String, vec, vec::Vec};
+use core::num::NonZeroU64;
 
 use bootstrap::BootstrapClient;
 use filesystem_abi::{
@@ -13,16 +14,14 @@ use ipc::{
     wire::{HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, Str, TERMINATOR},
 };
 use kernel_tests::kernel_test;
-use rootkeeper::{
-    ManagedComponent, NamespaceRoots, boot_config, launch_namespace as launch_managed_namespace,
-};
+use managed_component::{ComponentRoots, ManagedComponent, launch_component};
 use runtime::{
     BorrowedHandle, MemoryRegion, OwnedHandle, PortTransport, Process, ReadOnlyMapping, Resource,
     Signal, Timeout, UserMemFlags, port_send,
 };
 use spin::Once;
-use syscall::Rights;
-use userland_image::decode;
+use syscall::{Rights, SIGNALED};
+use userland_image::{decode, decode_plan};
 use userland_loader::load_entry;
 
 // Конечный срок ответа сервера превращает зависание в диагностируемый Timeout.
@@ -30,11 +29,13 @@ pub(crate) const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const CLIENT_TIMEOUT: Timeout = Timeout::from_secs(2);
 
+const BOOT_TREE_BADGE: NonZeroU64 = NonZeroU64::new(0x0B00).expect("badge is non-zero");
+const BOOT_TREE_ATTEMPTS: usize = 200;
+const BOOT_TREE_TURN: Timeout = Timeout::from_ns(10_000_000);
+
 // Программа-клиент, чья сессия умирает вместе с процессом.
 const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture";
 
-// Программы файловой подсистемы в образе.
-const ROUTER_PROGRAM: &str = "/boot/namespace-router";
 const RAM_FILESYSTEM_PROGRAM: &str = "/boot/filesystem-ramfs";
 
 // Фикстура зависшего монтирования: принимает стартовый кадр и замолкает.
@@ -77,7 +78,7 @@ const REAP_SESSIONS: usize = 40;
 const REAP_BUFFER_SIZE: u32 = 64 * 1024;
 
 struct NamespacePorts {
-    component: ManagedComponent<NamespaceRoots>,
+    component: ManagedComponent<ComponentRoots>,
     _resource: Resource,
     _image: MemoryRegion,
     _mapping: ReadOnlyMapping,
@@ -92,14 +93,14 @@ fn router_minter() -> BorrowedHandle<'static> {
 }
 
 fn router_admin() -> BorrowedHandle<'static> {
-    namespace_roots().admin()
+    namespace_roots().control()
 }
 
 fn namespace_ports() -> &'static NamespacePorts {
     NAMESPACE_PORTS.call_once(start_namespace)
 }
 
-fn namespace_roots() -> &'static NamespaceRoots {
+fn namespace_roots() -> &'static ComponentRoots {
     namespace_ports()
         .component
         .running()
@@ -121,20 +122,30 @@ fn start_namespace() -> NamespacePorts {
     let resource = Resource::self_resource().expect("self metering resource");
     let component = {
         let decoded = decode(mapping.as_bytes()).expect("decode userland image");
+        let record = decoded
+            .entry(crate::rootkeeper_system::BOOT_PLAN_ENTRY)
+            .expect("image carries the compiled boot plan");
+        let plan = decode_plan(record.data()).expect("decode boot plan");
+        let plan_component = plan.component();
         let program = decoded
-            .entry(ROUTER_PROGRAM)
-            .expect("image carries namespace router")
+            .entry(plan_component.program())
+            .expect("image carries the component program")
             .program()
-            .expect("namespace router entry is a program");
-        launch_managed_namespace(
+            .expect("component entry is a program");
+        let mut component = ManagedComponent::new(&resource, plan_component.budget_pages())
+            .expect("component budget reserved");
+        launch_component(
+            &mut component,
             &program,
-            &resource,
             &image,
             &log,
-            boot_config(rootkeeper::BOOT_MOUNTS),
+            plan_component.startup_timeout(),
+            plan_component.config(),
         )
-        .expect("namespace router and boot filesystems started")
+        .expect("namespace router started");
+        component
     };
+    await_boot_tree(&component);
     NamespacePorts {
         component,
         _resource: resource,
@@ -142,6 +153,31 @@ fn start_namespace() -> NamespacePorts {
         _mapping: mapping,
         _log: log,
     }
+}
+
+fn await_boot_tree(component: &ManagedComponent<ComponentRoots>) {
+    // Маршрутизатор монтирует дерево имён сам, и стартовый кадр только доставлен: путь
+    // становится накрытым оборотами его подъёма.
+    let roots = component
+        .running()
+        .expect("namespace router is running")
+        .roots();
+    let session = roots
+        .session(BOOT_TREE_BADGE)
+        .expect("namespace session minted");
+    for _ in 0..BOOT_TREE_ATTEMPTS {
+        if let Ok(Ok(mounted)) = namespace_client(session.borrow()).resolve(path(RAM_MOUNT)) {
+            drop(OwnedHandle::adopt(mounted.session));
+            return;
+        }
+        pause(BOOT_TREE_TURN);
+    }
+    panic!("boot tree is not mounted");
+}
+
+fn pause(timeout: Timeout) {
+    let timer = Signal::create().expect("pause timer");
+    let _ = timer.wait(SIGNALED, timeout);
 }
 
 fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {

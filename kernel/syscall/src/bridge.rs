@@ -205,7 +205,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             super::memory::sys_memory_region_inspect(frame);
         }
         SyscallOp::IrqMint => {
-            let r = super::irq::sys_irq_mint(frame.arg(0), frame.arg(1));
+            let r = super::irq::sys_irq_mint(frame.arg(0), frame.arg(1), frame.arg(2));
             frame.set_return(encode_return(r));
         }
         SyscallOp::IrqAck => {

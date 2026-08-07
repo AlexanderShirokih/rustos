@@ -5,6 +5,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
@@ -17,6 +18,7 @@ mod flags;
 mod kind;
 mod limits;
 mod mode;
+mod mount_table;
 mod namespace;
 mod path;
 mod protocol;
@@ -31,6 +33,10 @@ pub use flags::OpenFlags;
 pub use kind::NodeKind;
 pub use limits::{NAME_MAX, PATH_MAX};
 pub use mode::AccessMode;
+pub use mount_table::{
+    MOUNT_TABLE_MAGIC, MOUNT_TABLE_VERSION, Mount, MountTable, MountTableDecodeError,
+    MountTableEncodeError, Mounts, decode_mount_table, encode_mount_table,
+};
 pub use namespace::*;
 pub use path::{Component, Path, SEPARATOR};
 pub use protocol::*;

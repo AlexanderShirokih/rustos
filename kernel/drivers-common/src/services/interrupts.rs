@@ -18,6 +18,14 @@ impl IrqNumber {
     }
 }
 
+/// Полоса линий, которые контроллер платформы отдаёт наружу: включительные
+/// границы. Приватные для CPU линии в неё не входят.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IrqLineSpan {
+    pub first: IrqNumber,
+    pub last: IrqNumber,
+}
+
 /// Приоритет прерывания (0 = наивысший, 255 = наинизший).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -215,6 +223,9 @@ pub trait InterruptsService: Send + Sync {
     /// Регистрирует обработчик, настраивает IRQ и возвращает RAII-объект.
     fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError>;
 
+    /// Полоса линий контроллера, доступных для выдачи наружу.
+    fn assignable_lines(&self) -> IrqLineSpan;
+
     /// Маскирует (запрещает) линию `irq` на контроллере, не снимая привязку.
     /// Используется уровневым IRQ-протоколом: линия маскируется при срабатывании и размаскируется
     /// на `ack`.
@@ -273,6 +284,13 @@ mod tests {
     }
 
     impl InterruptsService for SpyInterruptsService {
+        fn assignable_lines(&self) -> IrqLineSpan {
+            IrqLineSpan {
+                first: IrqNumber::new(32),
+                last: IrqNumber::new(255),
+            }
+        }
+
         fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
             Ok(())
         }

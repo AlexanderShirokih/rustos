@@ -1,6 +1,6 @@
 //! Типизированные обёртки над IRQ-полномочием и линией прерывания ядра.
 
-use syscall::{SIGNALED, Timeout};
+use syscall::{IrqTrigger, SIGNALED, Timeout};
 
 use crate::{
     error::{Error, Result, unit},
@@ -32,10 +32,11 @@ impl IrqControl {
         self.handle.borrow()
     }
 
-    /// Минтит линию `irq` по полномочию. Требует `Rights::WRITE` и попадания
-    /// `irq` в диапазон полномочия; уже занятая линия - `ResourceExhausted`.
-    pub fn mint(&self, irq: u16) -> Result<IrqLine> {
-        svc::irq_mint(self.handle.as_raw(), irq)
+    /// Минтит линию `irq` с триггером `trigger` по полномочию. Требует
+    /// `Rights::WRITE` и попадания `irq` в диапазон полномочия; уже занятая
+    /// линия - `AlreadyBound`.
+    pub fn mint(&self, irq: u16, trigger: IrqTrigger) -> Result<IrqLine> {
+        svc::irq_mint(self.handle.as_raw(), irq, trigger)
             .map(|handle| IrqLine::from_handle(OwnedHandle::from_handle(handle)))
             .map_err(Error::Syscall)
     }

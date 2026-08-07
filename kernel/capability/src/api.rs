@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use collections::{LockCell, MutexCell};
-use syscall::{Rights, WakeCount};
+use syscall::{IrqTrigger, Rights, WakeCount};
 
 use super::{
     errors::IpcError,
@@ -347,13 +347,18 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
 // лениво) — отдельная op материализации Signal-хендла больше не нужна.
 // Подделать событие нельзя: `signal_set` строго принимает только `Signal`.
 
-/// Минтит [`IrqLine`] для линии `irq` по полномочию `control_handle`.
+/// Минтит [`IrqLine`] для линии `irq` с триггером `trigger` по полномочию
+/// `control_handle`.
 /// Требует [`Rights::WRITE`] на `IrqControl`-хендле и попадания `irq` в его
 /// диапазон (`permits`).
 /// Привязка линии идёт через установленный [`interrupts_control`]. Возвращает
 /// handle на свежий `IrqLine` со стартовыми правами
 /// [`default_rights_for`](super::rights::default_rights_for).
-pub fn irq_mint(control_handle: HandleId, irq: u16) -> Result<HandleId, IpcError> {
+pub fn irq_mint(
+    control_handle: HandleId,
+    irq: u16,
+    trigger: IrqTrigger,
+) -> Result<HandleId, IpcError> {
     let table = current_table()?;
     let control =
         table.with_lock(|tbl| tbl.get_object::<IrqControl>(control_handle, Rights::WRITE))?;
@@ -361,7 +366,7 @@ pub fn irq_mint(control_handle: HandleId, irq: u16) -> Result<HandleId, IpcError
         return Err(IpcError::AccessDenied);
     }
 
-    let line = IrqLine::bind(interrupts_control().clone(), irq)?;
+    let line = IrqLine::bind(interrupts_control().clone(), irq, trigger)?;
     let handle = Capability::new_with_default_rights(line);
     table
         .with_lock(|tbl| tbl.insert(handle))
@@ -974,6 +979,7 @@ mod tests {
                 fn bind_line(
                     &self,
                     _irq: u16,
+                    _trigger: IrqTrigger,
                     _sink: Arc<dyn crate::IrqSink>,
                 ) -> Result<crate::IrqBindToken, IpcError> {
                     Ok(crate::IrqBindToken::new(()))
@@ -1009,7 +1015,7 @@ mod tests {
         let (table, ctl_id) = irq_control_handle(Rights::WRITE, 32, 64);
         mock().configure(Some(table.clone()), None);
 
-        let line_id = irq_mint(ctl_id, 40).expect("mint ok");
+        let line_id = irq_mint(ctl_id, 40, IrqTrigger::Level).expect("mint ok");
         let is_line = table.with_lock(|tbl| {
             matches!(
                 tbl.clone_target(line_id, Rights::READ),
@@ -1028,7 +1034,10 @@ mod tests {
         let (table, ctl_id) = irq_control_handle(Rights::WRITE, 32, 64);
         mock().configure(Some(table), None);
 
-        assert_eq!(irq_mint(ctl_id, 100), Err(IpcError::AccessDenied));
+        assert_eq!(
+            irq_mint(ctl_id, 100, IrqTrigger::Level),
+            Err(IpcError::AccessDenied)
+        );
 
         mock().reset();
     }
@@ -1040,7 +1049,10 @@ mod tests {
         let (table, ctl_id) = irq_control_handle(Rights::READ, 32, 64);
         mock().configure(Some(table), None);
 
-        assert_eq!(irq_mint(ctl_id, 40), Err(IpcError::AccessDenied));
+        assert_eq!(
+            irq_mint(ctl_id, 40, IrqTrigger::Level),
+            Err(IpcError::AccessDenied)
+        );
 
         mock().reset();
     }
@@ -1052,7 +1064,10 @@ mod tests {
         let (table, id, _sig) = install_signal_handle(Rights::WRITE);
         mock().configure(Some(table), None);
 
-        assert_eq!(irq_mint(id, 40), Err(IpcError::WrongType));
+        assert_eq!(
+            irq_mint(id, 40, IrqTrigger::Level),
+            Err(IpcError::WrongType)
+        );
 
         mock().reset();
     }
@@ -1064,7 +1079,7 @@ mod tests {
         let (table, ctl_id) = irq_control_handle(Rights::WRITE, 32, 64);
         mock().configure(Some(table), None);
 
-        let line_id = irq_mint(ctl_id, 40).expect("mint ok");
+        let line_id = irq_mint(ctl_id, 40, IrqTrigger::Level).expect("mint ok");
         // Свежеминченная линия в ARMED — подтверждать нечего.
         assert_eq!(irq_ack(line_id), Err(IpcError::WrongType));
 

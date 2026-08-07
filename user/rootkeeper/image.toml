@@ -1,5 +1,12 @@
 version = 1
 
+[plan]
+source = "user/rootkeeper/system.toml"
+
+[[mount_tables]]
+source = "user/rootkeeper/namespace.toml"
+path = "/boot/namespace.mounts"
+
 [[programs]]
 package = "rootkeeper"
 path = "/boot/rootkeeper"

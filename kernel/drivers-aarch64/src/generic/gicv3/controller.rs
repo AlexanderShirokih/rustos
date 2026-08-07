@@ -446,17 +446,18 @@ impl Gicv3Controller {
         }
     }
 
-    /// Конфигурирует триггер PPI-линии в GICR_ICFGR1 текущего CPU (2 бита на IRQ;
-    /// старший бит поля: `1` = edge, `0` = level). Вызывать до enable: переконфиг
-    /// включённой линии по спеке GIC UNPREDICTABLE.
-    ///
-    /// Триггер SGI задан архитектурой: такая линия проходит мимо.
     pub(super) fn set_config(&self, irq: IrqNumber, trigger: TriggerType) {
-        let raw = irq.raw() as usize;
-        if !matches!(IrqType::from_irq_number(irq), IrqType::Ppi) {
-            return;
+        // PPI приватна для CPU и живёт в GICR_ICFGR1 своего redistributor, SPI -
+        // в GICD_ICFGR распределителя; триггер SGI задан архитектурой.
+        match IrqType::from_irq_number(irq) {
+            IrqType::Ppi => self.set_private_config(irq, trigger),
+            IrqType::Spi => self.set_shared_config(irq, trigger),
+            IrqType::Sgi | IrqType::Spurious => {}
         }
-        let trigger_bit = (raw % 16) * 2 + 1;
+    }
+
+    fn set_private_config(&self, irq: IrqNumber, trigger: TriggerType) {
+        let trigger_bit = (irq.raw() as usize % 16) * 2 + 1;
 
         let Some(frame) = self.current_redistributor_frame() else {
             warn!(
@@ -465,14 +466,32 @@ impl Gicv3Controller {
             );
             return;
         };
-        let reg_desc = GICR_ICFGR1.with_offset(frame);
 
-        let mut val = self.redistributor.read_reg(reg_desc);
+        Self::write_trigger_bit(
+            &self.redistributor,
+            GICR_ICFGR1.with_offset(frame),
+            trigger_bit,
+            trigger,
+        );
+    }
+
+    fn set_shared_config(&self, irq: IrqNumber, trigger: TriggerType) {
+        let (reg, entry) = bit_offset(irq, 2);
+        Self::write_trigger_bit(
+            &self.distributor,
+            GICD_ICFGR.with_offset(reg * 4),
+            entry * 2 + 1,
+            trigger,
+        );
+    }
+
+    fn write_trigger_bit(mmio: &MmioBound, reg: Reg<u32>, bit: usize, trigger: TriggerType) {
+        let mut val = mmio.read_reg(reg);
         match trigger {
-            TriggerType::Edge => val |= 1 << trigger_bit,
-            TriggerType::Level => val &= !(1 << trigger_bit),
+            TriggerType::Edge => val |= 1 << bit,
+            TriggerType::Level => val &= !(1 << bit),
         }
-        self.redistributor.write_reg(reg_desc, val);
+        mmio.write_reg(reg, val);
     }
 }
 

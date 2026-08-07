@@ -1,53 +1,7 @@
-//! Startup- и admin-контракты процессов файловой подсистемы. Startup одноразово
-//! передаёт исходные capability, admin-порты живут всё время работы процесса и клиентам
-//! недоступны.
+//! Admin-контракты процессов файловой подсистемы: они живут всё время работы процесса
+//! и клиентским капам недоступны.
 
 use crate::{error::FileSystemError, limits::PATH_MAX};
-
-/// Одноразовый startup-кадр маршрутизатора имён.
-#[ipc::protocol(name = "NamespaceStartup")]
-pub trait NamespaceStartup {
-    /// Отдаёт маршрутизатору канал логирования, регион userland-образа, сервисный
-    /// и admin-порты. Корневые capability обоих портов переносятся целиком.
-    #[cast]
-    fn start(
-        &self,
-        log: ipc::wire::Cap,
-        image: ipc::wire::Cap,
-        service: ipc::wire::Cap,
-        admin: ipc::wire::Cap,
-    );
-}
-
-/// Capability, принятые из одноразового startup-кадра маршрутизатора.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NamespaceStartupFrame {
-    /// Делегированная log-сессия.
-    pub log: ipc::wire::Cap,
-    /// Read-only userland image.
-    pub image: ipc::wire::Cap,
-    /// Серверная сторона namespace service Port.
-    pub service: ipc::wire::Cap,
-    /// Серверная сторона постоянного namespace admin Port.
-    pub admin: ipc::wire::Cap,
-}
-
-impl NamespaceStartupService for Option<NamespaceStartupFrame> {
-    fn start(
-        &mut self,
-        log: ipc::wire::Cap,
-        image: ipc::wire::Cap,
-        service: ipc::wire::Cap,
-        admin: ipc::wire::Cap,
-    ) {
-        *self = Some(NamespaceStartupFrame {
-            log,
-            image,
-            service,
-            admin,
-        });
-    }
-}
 
 /// Управление маршрутизатором имён со стороны того, кто его поднял. Таблица монтирования - тоже
 /// здесь: клиентской капе сервисного порта она недоступна по построению.
@@ -88,55 +42,19 @@ pub trait FileSystemAdmin {
 #[cfg(test)]
 mod tests {
     use core::num::NonZeroU32;
-    use std::{cell::Cell, rc::Rc, string::ToString, vec::Vec};
+    use std::{string::ToString, vec::Vec};
 
-    use ipc::{
-        IntoWireHandle,
-        wire::{Cap, IpcError, Str},
-    };
+    use ipc::wire::{Cap, Str};
     use ipc_test::MockEnd;
 
     use super::{
         FileSystemAdminClient, FileSystemAdminService, FileSystemError, NamespaceAdminClient,
-        NamespaceAdminService, NamespaceStartupClient, NamespaceStartupFrame, PATH_MAX,
-        dispatch_file_system_admin, dispatch_namespace_admin, dispatch_namespace_startup,
+        NamespaceAdminService, PATH_MAX, dispatch_file_system_admin, dispatch_namespace_admin,
     };
 
     const LOG_CAP: Cap = cap(0x21);
     const IMAGE_CAP: Cap = cap(0x22);
-    const SERVICE_CAP: Cap = cap(0x23);
-
-    const ADMIN_CAP: Cap = cap(0x24);
     const SESSION_CAP: Cap = cap(0x25);
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum Fate {
-        Pending,
-        Relinquished,
-        Dropped,
-    }
-
-    struct FakeHandle {
-        id: u32,
-        fate: Rc<Cell<Fate>>,
-    }
-
-    impl IntoWireHandle for FakeHandle {
-        fn wire_id(&self) -> u32 {
-            self.id
-        }
-
-        fn relinquish(self) {
-            self.fate.set(Fate::Relinquished);
-            core::mem::forget(self);
-        }
-    }
-
-    impl Drop for FakeHandle {
-        fn drop(&mut self) {
-            self.fate.set(Fate::Dropped);
-        }
-    }
 
     #[derive(Default)]
     struct Sink {
@@ -185,17 +103,6 @@ mod tests {
         Cap::from_raw(NonZeroU32::new(raw).expect("non-zero"))
     }
 
-    fn fake(id: u32) -> (FakeHandle, Rc<Cell<Fate>>) {
-        let fate = Rc::new(Cell::new(Fate::Pending));
-        (
-            FakeHandle {
-                id,
-                fate: Rc::clone(&fate),
-            },
-            fate,
-        )
-    }
-
     #[test]
     fn file_system_start_carries_two_caps_in_order() {
         let (client_end, server_end) = MockEnd::pair();
@@ -204,51 +111,6 @@ mod tests {
         let mut sink = Sink::default();
         dispatch_file_system_admin(&mut sink, &server_end).expect("dispatch ok");
         assert_eq!(sink.received, Some([LOG_CAP, IMAGE_CAP]));
-    }
-
-    #[test]
-    fn namespace_startup_is_separate_and_carries_four_caps_in_order() {
-        let (client_end, server_end) = MockEnd::pair();
-        let client = NamespaceStartupClient::new(client_end);
-        client
-            .start(LOG_CAP, IMAGE_CAP, SERVICE_CAP, ADMIN_CAP)
-            .expect("start write");
-        let mut sink = None;
-        dispatch_namespace_startup(&mut sink, &server_end).expect("dispatch ok");
-        assert_eq!(
-            sink,
-            Some(NamespaceStartupFrame {
-                log: LOG_CAP,
-                image: IMAGE_CAP,
-                service: SERVICE_CAP,
-                admin: ADMIN_CAP,
-            })
-        );
-    }
-
-    #[test]
-    fn namespace_startup_closes_all_caps_when_the_cast_is_not_delivered() {
-        let (client_end, server_end) = MockEnd::pair();
-        drop(server_end);
-        let client = NamespaceStartupClient::new(client_end);
-        let (log, log_fate) = fake(0x31);
-        let (image, image_fate) = fake(0x32);
-        let (service, service_fate) = fake(0x33);
-        let (admin, admin_fate) = fake(0x34);
-
-        assert_eq!(
-            client.start(log, image, service, admin),
-            Err(IpcError::PeerClosed)
-        );
-        assert_eq!(
-            [
-                log_fate.get(),
-                image_fate.get(),
-                service_fate.get(),
-                admin_fate.get(),
-            ],
-            [Fate::Dropped; 4]
-        );
     }
 
     #[test]

@@ -11,8 +11,9 @@ use alloc::{boxed::Box, sync::Arc};
 use capability::{InterruptsControl, IpcError, IrqBindToken, IrqSink};
 use drivers_common::services::interrupts::{
     CpuMask, InterruptsService, IrqBinding, IrqHandler, IrqNumber, IrqPriority,
-    IrqRegistrationError,
+    IrqRegistrationError, TriggerType,
 };
+use syscall::IrqTrigger;
 
 pub struct InterruptsControlAdapter {
     service: Arc<dyn InterruptsService>,
@@ -37,11 +38,15 @@ impl IrqHandler for SinkHandler {
 }
 
 impl InterruptsControl for InterruptsControlAdapter {
-    fn bind_line(&self, irq: u16, sink: Arc<dyn IrqSink>) -> Result<IrqBindToken, IpcError> {
+    fn bind_line(
+        &self,
+        irq: u16,
+        trigger: IrqTrigger,
+        sink: Arc<dyn IrqSink>,
+    ) -> Result<IrqBindToken, IpcError> {
         let binding = IrqBinding::new(
             IrqNumber::new(irq),
-            // Триггер из FDT недоступен на mint-пути; линия наследует boot-ICFGR.
-            None,
+            Some(trigger_of(trigger)),
             IrqPriority::HIGHEST,
             CpuMask::ALL,
             Box::new(SinkHandler { sink }),
@@ -61,12 +66,87 @@ impl InterruptsControl for InterruptsControlAdapter {
     }
 }
 
+fn trigger_of(trigger: IrqTrigger) -> TriggerType {
+    match trigger {
+        IrqTrigger::Edge => TriggerType::Edge,
+        IrqTrigger::Level => TriggerType::Level,
+    }
+}
+
 fn map_bind_error(err: IrqRegistrationError) -> IpcError {
     match err {
-        // Линия уже занята — аналог исчерпания ресурса.
-        IrqRegistrationError::AlreadyRegistered => IpcError::ResourceExhausted,
+        IrqRegistrationError::AlreadyRegistered => IpcError::AlreadyBound,
         IrqRegistrationError::InvalidIrq
         | IrqRegistrationError::Unsupported
         | IrqRegistrationError::Other(_) => IpcError::WrongType,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use collections::{LockCell, MutexCell};
+    use drivers_common::services::interrupts::{
+        CpuInterfaceError, IrqBound, IrqLineSpan, IrqRegistrationError, TriggerType,
+    };
+
+    use super::{
+        Arc, InterruptsControl, InterruptsControlAdapter, InterruptsService, IrqBinding, IrqNumber,
+        IrqSink, IrqTrigger,
+    };
+
+    struct SpyService {
+        bound: MutexCell<Option<(IrqNumber, Option<TriggerType>)>>,
+    }
+
+    struct SilentSink;
+
+    impl IrqSink for SilentSink {
+        fn fire(&self) {}
+    }
+
+    impl InterruptsService for SpyService {
+        fn assignable_lines(&self) -> IrqLineSpan {
+            IrqLineSpan {
+                first: IrqNumber::new(32),
+                last: IrqNumber::new(255),
+            }
+        }
+
+        fn enable(&self) {}
+
+        fn disable(&self) {}
+
+        fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {
+            self.bound
+                .with_lock(|slot| *slot = Some((binding.irq, binding.trigger)));
+            Ok(IrqBound::new(|| {}))
+        }
+
+        fn mask(&self, _irq: IrqNumber) {}
+
+        fn unmask(&self, _irq: IrqNumber) {}
+
+        fn dispatch_interrupt(&self) {}
+
+        fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn bound_line_carries_its_trigger_to_the_controller() {
+        let service = Arc::new(SpyService {
+            bound: MutexCell::new(None),
+        });
+        let adapter = InterruptsControlAdapter::new(service.clone());
+
+        let bound = adapter.bind_line(37, IrqTrigger::Edge, Arc::new(SilentSink));
+
+        assert!(bound.is_ok());
+        assert_eq!(
+            service.bound.with_lock(|slot| *slot),
+            Some((IrqNumber::new(37), Some(TriggerType::Edge))),
+            "edge line must reach the controller as edge"
+        );
     }
 }

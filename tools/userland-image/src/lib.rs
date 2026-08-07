@@ -3,6 +3,10 @@
 #[cfg(not(target_os = "none"))]
 mod host;
 #[cfg(not(target_os = "none"))]
+mod mounts;
+#[cfg(not(target_os = "none"))]
+mod plan;
+#[cfg(not(target_os = "none"))]
 mod seeds;
 
 #[cfg(not(target_os = "none"))]

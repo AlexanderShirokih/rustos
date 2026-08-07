@@ -18,6 +18,7 @@ test = false
 bench = false
 
 [dependencies]
+component-abi = { workspace = true }
 filesystem-abi = { workspace = true }
 filesystem-server = { workspace = true }
 ipc = { workspace = true }

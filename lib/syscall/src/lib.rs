@@ -7,7 +7,9 @@ mod error;
 mod flags;
 mod handle;
 mod ipc_buffer;
+mod irq;
 mod memory;
+mod resource;
 mod rights;
 mod signal;
 mod spawn_abi;
@@ -20,7 +22,9 @@ pub use handle::{HANDLE_TABLE_CAPACITY, Handle, RawHandle, WAIT_MANY_MAX_COUNT, 
 pub use ipc_buffer::{
     DecodedTag, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, IpcBuffer, decode_tag, encode_tag,
 };
+pub use irq::IrqTrigger;
 pub use memory::{MemoryAccess, USER_VA_END};
+pub use resource::MAX_RESOURCE_DEPTH;
 pub use rights::Rights;
 pub use signal::{SIGNALED, WakeCount};
 pub use spawn_abi::{

@@ -193,7 +193,7 @@ mod tests {
     use super::*;
     use crate::services::{
         interrupts::{
-            CpuInterfaceError, InterruptsService, IrqBinding, IrqBound, IrqNumber,
+            CpuInterfaceError, InterruptsService, IrqBinding, IrqBound, IrqLineSpan, IrqNumber,
             IrqRegistrationError,
         },
         mmio::{MmioAddress, MmioBound, MmioMapError},
@@ -228,6 +228,13 @@ mod tests {
     struct TestInterruptsService;
 
     impl InterruptsService for TestInterruptsService {
+        fn assignable_lines(&self) -> IrqLineSpan {
+            IrqLineSpan {
+                first: IrqNumber::new(32),
+                last: IrqNumber::new(255),
+            }
+        }
+
         fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
             Ok(())
         }

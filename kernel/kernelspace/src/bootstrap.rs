@@ -12,6 +12,7 @@ use capability::{
     default_rights_for, port_recv, port_send, runtime,
 };
 use collections::{LockCell, MutexCell};
+use drivers_common::services::interrupts::IrqLineSpan;
 use ipc::{
     MessageLen, Transport,
     wire::{
@@ -74,6 +75,7 @@ pub fn spawn_process(
     image_phys: PageAlignedAddress,
     dtb: BootDtb,
     device_regions: Vec<Arc<MemoryRegion>>,
+    irq_lines: IrqLineSpan,
     user_va_end: usize,
 ) -> Result<BootstrapLaunch, BootstrapSpawnError> {
     let image = decode(blob).map_err(BootstrapSpawnError::Image)?;
@@ -103,8 +105,7 @@ pub fn spawn_process(
         1 << 20,
     );
 
-    // Корневое полномочие на IRQ-линии: весь SPI-диапазон.
-    let irq_control = IrqControl::new(32, 1019);
+    let irq_control = IrqControl::new(irq_lines.first.raw(), irq_lines.last.raw());
 
     // Read-only Normal-регион поверх байт образа; размер округлён до страницы
     // для маппинга. blob непуст (decode прошёл), поэтому размер ненулевой.
@@ -287,7 +288,8 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
         | KernelIpcError::Canceled
         | KernelIpcError::OutOfHandles
         | KernelIpcError::ResourceExhausted
-        | KernelIpcError::Revoked => WireError::PeerClosed,
+        | KernelIpcError::Revoked
+        | KernelIpcError::AlreadyBound => WireError::PeerClosed,
     }
 }
 

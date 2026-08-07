@@ -115,6 +115,12 @@ pub(super) const PRIORITY_MASK_ALL: u64 = 0xFF;
 /// ITLinesNumber - количество банков по 32 IRQ.
 pub(super) type ITLinesNumber = usize;
 
+pub(super) const SPI_BASE: u16 = 32;
+
+pub(super) const LINES_PER_BANK: usize = 32;
+
+pub(super) const LAST_SPI: u16 = 1019;
+
 /// Тип прерывания в контексте GIC.
 pub(super) enum IrqType {
     /// Software Generated Interrupt (0-15).

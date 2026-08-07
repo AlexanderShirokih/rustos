@@ -65,8 +65,6 @@ enum ManagedState<R> {
 /// Managed-компонент с capability roots конкретного типа `R`.
 pub struct ManagedComponent<R> {
     state: ManagedState<R>,
-    // Резерв бюджета компонента: он переживает свои экземпляры, и подтверждение
-    // возврата бюджета опирается на него.
     reserve: Resource,
     budget_pages: u64,
     generation: u32,
@@ -232,6 +230,16 @@ impl<R> ManagedComponent<R> {
         }
     }
 
+    /// Завершает живой экземпляр и ждёт его с конечным сроком.
+    pub fn stop(&mut self, exit_code: u32, timeout: Timeout) -> Result<(), ManagedStartupError> {
+        let running = self.running().ok_or(ManagedStartupError::InvalidState)?;
+        running
+            .process
+            .terminate(exit_code)
+            .map_err(ManagedStartupError::Runtime)?;
+        self.observe_exit(timeout)
+    }
+
     /// Ждёт завершения `Running`-процесса и сохраняет его exit code.
     pub fn observe_exit(&mut self, timeout: Timeout) -> Result<(), ManagedStartupError> {
         let exit_code = match &self.state {
@@ -265,10 +273,9 @@ impl<R> ManagedComponent<R> {
         cleanup.map_err(ManagedStartupError::Runtime)
     }
 
-    // Возврат бюджета подтверждается повторным выделением полного лимита: до
-    // уничтожения последнего объекта ушедшего поддерева страницы резерву не
-    // принадлежат.
     fn confirm_budget_return(&self) -> Result<(), Error> {
+        // До уничтожения последнего объекта ушедшего поддерева страницы резерву
+        // не принадлежат: возврат подтверждается повторным выделением лимита.
         self.reserve
             .split_when_available(self.budget_pages, BUDGET_RETURN_TIMEOUT)
             .map(drop)

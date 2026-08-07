@@ -19,6 +19,7 @@ pub(crate) enum Error {
     NoProgram,
     // Стартовый кадр не принёс capability.
     Start,
+    MountTable,
 }
 
 pub(crate) type Result<T> = core::result::Result<T, Error>;
@@ -28,7 +29,7 @@ impl Error {
     /// различить не даёт, и подробность уходит строкой в лог.
     pub(crate) fn as_file_system_error(&self) -> FileSystemError {
         match self {
-            Self::NoProgram | Self::Image(_) => FileSystemError::NotFound,
+            Self::NoProgram | Self::Image(_) | Self::MountTable => FileSystemError::NotFound,
             _ => FileSystemError::NoSpace,
         }
     }
@@ -40,6 +41,7 @@ impl Error {
             Self::Image(_) => 4,
             Self::NoProgram => 5,
             Self::Start => 6,
+            Self::MountTable => 8,
         }
     }
 }
@@ -52,6 +54,7 @@ impl Display for Error {
             Self::Image(error) => write!(formatter, "image error {error:?}"),
             Self::NoProgram => formatter.write_str("no such program in the image"),
             Self::Start => formatter.write_str("no start frame"),
+            Self::MountTable => formatter.write_str("boot mount table not applied"),
         }
     }
 }

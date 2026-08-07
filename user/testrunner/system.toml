@@ -1,0 +1,10 @@
+version = 1
+
+[[components]]
+id = "filesystem"
+program = "/boot/namespace-router"
+budget_pages = 2048
+startup_timeout_ms = 2000
+critical = true
+restart = 3
+config = "/boot/namespace.mounts"

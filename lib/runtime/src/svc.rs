@@ -2,7 +2,7 @@
 
 use core::arch::asm;
 
-use syscall::{Handle, SyscallError, SyscallOp, Timeout, WaitItem, WakeCount};
+use syscall::{Handle, IrqTrigger, SyscallError, SyscallOp, Timeout, WaitItem, WakeCount};
 
 /// Ждёт сигналы `signals` на capability target `handle`; [`Timeout::POLL`] -
 /// non-blocking poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
@@ -669,20 +669,22 @@ pub fn ipc_buffer_addr() -> i64 {
     ret
 }
 
-/// Минтит `IrqLine` по полномочию `control` для линии `irq`. Требует
-/// `Rights::WRITE` на `control` и попадания `irq` в его диапазон. Возврат:
-/// irq-line handle либо `-(SyscallError)`. Срабатывание ожидается через
-/// `signal_wait_one`/`signal_wait_many` прямо по возвращённому handle (бит `SIGNALED`).
-pub fn irq_mint(control: Handle, irq: u16) -> Result<Handle, SyscallError> {
+/// Минтит `IrqLine` по полномочию `control` для линии `irq` с триггером
+/// `trigger`. Требует `Rights::WRITE` на `control` и попадания `irq` в его
+/// диапазон. Возврат: irq-line handle либо `-(SyscallError)`. Срабатывание
+/// ожидается через `signal_wait_one`/`signal_wait_many` прямо по возвращённому
+/// handle (бит `SIGNALED`).
+pub fn irq_mint(control: Handle, irq: u16, trigger: IrqTrigger) -> Result<Handle, SyscallError> {
     let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - control handle,
-    // x1 - номер линии; память ядру не передаётся.
+    // x1 - номер линии, x2 - код триггера; память ядру не передаётся.
     unsafe {
         asm!(
             "svc #{op}",
             op = const SyscallOp::IrqMint as u16,
             in("x0") u64::from(control.raw()),
             in("x1") u64::from(irq),
+            in("x2") u64::from(trigger.code()),
             lateout("x0") ret,
             options(nostack),
         );

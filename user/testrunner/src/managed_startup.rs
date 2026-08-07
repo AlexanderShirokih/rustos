@@ -3,7 +3,7 @@
 use bootstrap::BootstrapClient;
 use ipc::{IntoWireHandle, wire::IpcError};
 use kernel_tests::kernel_test;
-use rootkeeper::{
+use managed_component::{
     BoundedStartupTransport, ManagedComponent, ManagedFailure, ManagedStartupError, ManagedStatus,
 };
 use runtime::{

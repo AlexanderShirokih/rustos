@@ -15,7 +15,11 @@ use serde::Deserialize;
 use userland::{
     Entry, Segment, SegmentPermissions, USERLAND_ENTRY_PATH_CAPACITY, USERLAND_PAGE_SIZE,
 };
-use userland_image::{ImageRecord, USERLAND_IMAGE_VERSION, decode, encode, encode_program};
+use userland_image::{
+    BOOT_PLAN_PATH, ImageRecord, USERLAND_IMAGE_VERSION, decode, encode, encode_program,
+};
+
+use crate::{mounts::compile_mount_table, plan::compile_boot_plan};
 
 const USERLAND_MANIFEST_VERSION: u16 = USERLAND_IMAGE_VERSION;
 const USERLAND_STACK_ALIGN: u64 = USERLAND_PAGE_SIZE;
@@ -49,6 +53,24 @@ struct ImageManifest {
     programs: Vec<ImageProgram>,
     #[serde(default)]
     files: Vec<ImageFile>,
+    plan: Option<ImagePlan>,
+    #[serde(default)]
+    mount_tables: Vec<ImageMountTable>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageMountTable {
+    source: PathBuf,
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImagePlan {
+    source: PathBuf,
+    #[serde(default = "default_plan_path")]
+    path: String,
 }
 
 // Программа: путь в образе, пакет workspace и точечные override метаданных.
@@ -194,6 +216,10 @@ fn default_manifest_version() -> u16 {
     USERLAND_MANIFEST_VERSION
 }
 
+fn default_plan_path() -> String {
+    BOOT_PLAN_PATH.to_string()
+}
+
 /// Собирает userland-образ, передавая `environment` каждому cargo-процессу
 /// сборки. `extra_files` добавляются в образ поверх файлов манифеста.
 pub fn build_userland(
@@ -206,7 +232,22 @@ pub fn build_userland(
     let manifest = load_manifest(manifest_path)?;
     let workspace = load_workspace_metadata(project_root)?;
     let programs = resolve_programs(&manifest, &workspace.packages)?;
-    let files = collect_files(project_root, &manifest, extra_files)?;
+    let mut files = collect_files(project_root, &manifest, extra_files)?;
+    let paths: Vec<&str> = programs
+        .iter()
+        .map(|program| program.path.as_str())
+        .collect();
+    for table in &manifest.mount_tables {
+        files.push(compile_mount_table_record(project_root, table, &paths)?);
+    }
+    if let Some(plan) = &manifest.plan {
+        let configs: Vec<&str> = manifest
+            .mount_tables
+            .iter()
+            .map(|table| table.path.as_str())
+            .collect();
+        files.push(compile_plan_record(project_root, plan, &paths, &configs)?);
+    }
     let built_entries = programs
         .iter()
         .map(|program| {
@@ -523,9 +564,56 @@ fn resolve_program(program: &ImageProgram, meta: &UserlandMetadata) -> Result<Re
     Ok(resolved)
 }
 
+fn compile_plan_record(
+    project_root: &Path,
+    plan: &ImagePlan,
+    programs: &[&str],
+    configs: &[&str],
+) -> Result<LoadedFile> {
+    validate_image_path(&plan.path)?;
+    let source = project_root.join(&plan.source);
+    let text = fs::read_to_string(&source).with_context(|| {
+        format!(
+            "Failed to read boot plan '{}' of image record '{}'",
+            source.display(),
+            plan.path
+        )
+    })?;
+    let bytes = compile_boot_plan(&text, programs, configs)
+        .with_context(|| format!("Failed to compile boot plan '{}'", source.display()))?;
+    Ok(LoadedFile {
+        path: plan.path.clone(),
+        source,
+        bytes,
+    })
+}
+
+fn compile_mount_table_record(
+    project_root: &Path,
+    table: &ImageMountTable,
+    programs: &[&str],
+) -> Result<LoadedFile> {
+    validate_image_path(&table.path)?;
+    let source = project_root.join(&table.source);
+    let text = fs::read_to_string(&source).with_context(|| {
+        format!(
+            "Failed to read mount table '{}' of image record '{}'",
+            source.display(),
+            table.path
+        )
+    })?;
+    let bytes = compile_mount_table(&text, programs)
+        .with_context(|| format!("Failed to compile mount table '{}'", source.display()))?;
+    Ok(LoadedFile {
+        path: table.path.clone(),
+        source,
+        bytes,
+    })
+}
+
 // Правила пути контракта (filesystem_abi::Path) одни на программы и файлы, включая
 // ASCII-ограничение записи образа.
-fn validate_image_path(path: &str) -> Result<()> {
+pub(crate) fn validate_image_path(path: &str) -> Result<()> {
     filesystem_abi::Path::new(path).map_err(|_| {
         anyhow!(
             "image path '{path}' must be absolute and at most {PATH_MAX} bytes, \
@@ -872,6 +960,8 @@ mod tests {
                 .map(|(package, path, boot)| image_program(package, path, *boot))
                 .collect(),
             files: Vec::new(),
+            plan: None,
+            mount_tables: Vec::new(),
         }
     }
 

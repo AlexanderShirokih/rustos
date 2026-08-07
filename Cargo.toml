@@ -15,6 +15,7 @@ members = [
     "lib/ipc-schema",
     "lib/ipc-test",
     "lib/log-abi",
+    "lib/managed-component",
     "lib/log-relay",
     "lib/syscall",
     "kernel/kernelspace",
@@ -27,6 +28,7 @@ members = [
     "lib/test-harness-macros",
     "lib/test-harness-qemu",
     "lib/collections",
+    "lib/component-abi",
     "lib/fdt",
     "lib/filesystem",
     "lib/filesystem-abi",
@@ -84,12 +86,14 @@ bootstrap = { path = "lib/bootstrap-abi" }
 log-abi = { path = "lib/log-abi" }
 log-relay = { path = "lib/log-relay" }
 collections = { path = "lib/collections" }
+component-abi = { path = "lib/component-abi" }
 io = { path = "lib/io" }
 klog = { path = "kernel/log" }
 fdt = { path = "lib/fdt" }
 filesystem = { path = "lib/filesystem" }
 filesystem-abi = { path = "lib/filesystem-abi" }
 filesystem-server = { path = "lib/filesystem-server" }
+managed-component = { path = "lib/managed-component" }
 memory = { path = "kernel/memory" }
 util = { path = "lib/util" }
 hal-common = { path = "kernel/hal-common" }

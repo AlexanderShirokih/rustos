@@ -47,11 +47,14 @@ pub enum SyscallError {
     /// Отправители значка исчезли: кадра нет, значок ушедшей стороны лежит в
     /// `IpcBuffer.badge` получателя.
     SenderGone = 18,
+    /// Линия прерывания уже привязана: минт занятой линии отвергается, и
+    /// разделяемых линий не существует.
+    AlreadyBound = 19,
 }
 
 impl SyscallError {
     #[cfg(test)]
-    const ALL: [SyscallError; 18] = [
+    const ALL: [SyscallError; 19] = [
         SyscallError::BadSyscall,
         SyscallError::KernelOriginated,
         SyscallError::InvalidArgument,
@@ -70,6 +73,7 @@ impl SyscallError {
         SyscallError::ResourceExhausted,
         SyscallError::Revoked,
         SyscallError::SenderGone,
+        SyscallError::AlreadyBound,
     ];
 
     pub const fn as_return_value(self) -> i64 {
@@ -102,6 +106,7 @@ impl SyscallError {
             16 => Some(Self::ResourceExhausted),
             17 => Some(Self::Revoked),
             18 => Some(Self::SenderGone),
+            19 => Some(Self::AlreadyBound),
             _ => None,
         }
     }
@@ -173,7 +178,7 @@ mod tests {
             assert_eq!(SyscallError::from_return(e.as_return_value()), Some(e));
         }
         assert_eq!(SyscallError::from_code(0), None);
-        assert_eq!(SyscallError::from_code(19), None);
+        assert_eq!(SyscallError::from_code(20), None);
     }
 
     #[test]

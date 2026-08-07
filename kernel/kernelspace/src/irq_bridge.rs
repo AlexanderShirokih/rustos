@@ -91,7 +91,7 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use drivers_common::services::interrupts::{
-        IrqBinding, IrqBound, IrqNumber, IrqRegistrationError,
+        IrqBinding, IrqBound, IrqLineSpan, IrqNumber, IrqRegistrationError,
     };
 
     use super::*;
@@ -119,6 +119,13 @@ mod tests {
     }
 
     impl InterruptsService for SpyInterruptsService {
+        fn assignable_lines(&self) -> IrqLineSpan {
+            IrqLineSpan {
+                first: IrqNumber::new(32),
+                last: IrqNumber::new(255),
+            }
+        }
+
         fn enable(&self) {}
 
         fn disable(&self) {}

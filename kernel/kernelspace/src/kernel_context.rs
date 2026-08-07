@@ -1,7 +1,10 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
 
-use drivers_common::{BootServices, RuntimeDriverRegistry, services::mmio::MmioService};
+use drivers_common::{
+    BootServices, RuntimeDriverRegistry,
+    services::{interrupts::IrqLineSpan, mmio::MmioService},
+};
 use memory::{
     MemoryRegion,
     frame_allocator::FrameAllocator,
@@ -97,6 +100,17 @@ impl KernelContext {
     /// userspace-драйверам по индексу через bootstrap-протокол.
     pub fn device_regions(&self) -> Vec<Arc<MemoryRegion>> {
         self.device_regions.clone()
+    }
+
+    /// Полоса линий прерываний, которую контроллер платформы отдаёт наружу;
+    /// `None` до установки сервиса прерываний.
+    pub fn assignable_irq_lines(&mut self) -> Option<IrqLineSpan> {
+        self.with_runtime_state(|services, _| {
+            services
+                .require_interrupts()
+                .ok()
+                .map(|interrupts| interrupts.assignable_lines())
+        })
     }
 
     /// DTB от загрузчика: физдиапазон блоба.

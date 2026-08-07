@@ -14,9 +14,8 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use filesystem_abi::{
-    NamespaceStartupFrame, dispatch_namespace, dispatch_namespace_admin, dispatch_namespace_startup,
-};
+use component_abi::{ComponentConfig, ComponentStartupFrame, dispatch_component_startup};
+use filesystem_abi::{decode_mount_table, dispatch_namespace, dispatch_namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
     MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Resource, Thread,
@@ -24,6 +23,7 @@ use runtime::{
 };
 use spin::Once;
 use syscall::{Handle, Rights, Timeout};
+use userland_image::decode;
 
 mod error;
 mod router;
@@ -69,7 +69,8 @@ fn run(startup: Handle) -> Result<()> {
         log,
         image,
         service,
-        admin,
+        control,
+        mounts,
     } = handshake(startup)?;
     // Копия канала логирования для поднимаемых файловых систем: право минта остаётся за
     // маршрутизатором, детям уходит капа без него.
@@ -81,7 +82,7 @@ fn run(startup: Handle) -> Result<()> {
     let mapping = image.map_full_read_only()?;
     let bytes = IMAGE.call_once(|| mapping).as_bytes();
     let admin_port = AdminPort {
-        port: admin,
+        port: control,
         administering: Administering::new(
             &MOUNTS,
             bytes,
@@ -91,6 +92,7 @@ fn run(startup: Handle) -> Result<()> {
         ),
         service_thread: Thread::self_thread()?,
     };
+    mount_boot_table(&admin_port.administering, bytes, mounts.as_str())?;
     // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
     let _ = spawn_owned(
         move || serve_admin(admin_port),
@@ -171,26 +173,43 @@ fn serve_admin(mut admin: AdminPort) -> u32 {
     0
 }
 
-// Capability стартового кадра.
+fn mount_boot_table(
+    administering: &router::Administering<'_>,
+    image_bytes: &[u8],
+    mounts: &str,
+) -> Result<()> {
+    let record = decode(image_bytes)?
+        .entry(mounts)
+        .ok_or(Error::MountTable)?;
+    let table = decode_mount_table(record.data()).map_err(|error| {
+        log_fmt(format_args!("boot mount table rejected: {error:?}"));
+        Error::MountTable
+    })?;
+    administering.mount_boot_table(table)
+}
+
 struct StartResources {
     log: OwnedHandle,
     image: OwnedHandle,
     service: OwnedHandle,
-    admin: OwnedHandle,
+    control: OwnedHandle,
+    mounts: ComponentConfig,
 }
 
 fn handshake(startup: Handle) -> Result<StartResources> {
-    let NamespaceStartupFrame {
+    let ComponentStartupFrame {
         log,
         image,
+        control,
         service,
-        admin,
-    } = receive_startup(startup, dispatch_namespace_startup)?.ok_or(Error::Start)?;
+        config,
+    } = receive_startup(startup, dispatch_component_startup)?.ok_or(Error::Start)?;
     Ok(StartResources {
         log: OwnedHandle::adopt(log),
         image: OwnedHandle::adopt(image),
         service: OwnedHandle::adopt(service),
-        admin: OwnedHandle::adopt(admin),
+        control: OwnedHandle::adopt(control),
+        mounts: config,
     })
 }
 

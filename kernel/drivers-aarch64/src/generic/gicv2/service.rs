@@ -4,14 +4,14 @@ use alloc::sync::Arc;
 
 use collections::{LockCell, MutexCell};
 use drivers_common::services::interrupts::{
-    CpuInterfaceError, InterruptsService, IpiError, IpiTarget, IrqBinding, IrqBound, IrqNumber,
-    IrqRegistrationError,
+    CpuInterfaceError, InterruptsService, IpiError, IpiTarget, IrqBinding, IrqBound, IrqLineSpan,
+    IrqNumber, IrqRegistrationError,
 };
 use klog::debug;
 
 use super::{
     controller::{BoundIrq, Gicv2Controller},
-    regs::IrqType,
+    regs::{IrqType, LAST_SPI, LINES_PER_BANK, SPI_BASE},
 };
 
 pub(super) struct GicInterruptsService {
@@ -42,6 +42,20 @@ impl InterruptsService for GicInterruptsService {
     fn send_ipi(&self, irq: IrqNumber, target: IpiTarget) -> Result<(), IpiError> {
         self.controller
             .with_lock(|controller| controller.send_sgi(irq, target))
+    }
+
+    fn assignable_lines(&self) -> IrqLineSpan {
+        let last = self
+            .controller
+            .with_lock(|controller| controller.interrupt_lines)
+            .saturating_mul(LINES_PER_BANK)
+            .saturating_sub(1);
+        // INTID за LAST_SPI зарезервированы архитектурой и линиями не являются.
+        let last = u16::try_from(last).unwrap_or(u16::MAX).min(LAST_SPI);
+        IrqLineSpan {
+            first: IrqNumber::new(SPI_BASE),
+            last: IrqNumber::new(last),
+        }
     }
 
     fn bind(&self, binding: IrqBinding) -> Result<IrqBound, IrqRegistrationError> {

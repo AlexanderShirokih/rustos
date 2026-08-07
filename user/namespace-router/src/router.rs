@@ -13,8 +13,8 @@ use alloc::{
 use core::num::{NonZeroU32, NonZeroU64};
 
 use filesystem_abi::{
-    FileSystemAdminClient, FileSystemError, Mounted, NamespaceAdminService, NamespaceService,
-    PATH_MAX, Path,
+    FileSystemAdminClient, FileSystemError, MountTable as BootMountTable, Mounted,
+    NamespaceAdminService, NamespaceService, PATH_MAX, Path,
 };
 use filesystem_server::{settle, vend};
 use ipc::wire::Str;
@@ -240,6 +240,54 @@ impl<'a> Administering<'a> {
         }
     }
 
+    pub(crate) fn mount_boot_table(&self, table: BootMountTable<'_>) -> RouterResult<()> {
+        // Отказ монтирования уносит процесс маршрутизатора, а с ним и уже поднятые
+        // монтирования: наружу дерево уходит либо целиком, либо никак.
+        for mount in table {
+            let prefix = Path::new(mount.path).map_err(|_| Error::MountTable)?;
+            self.mount_prefix(prefix, FileSystemProgram::new(mount.program))
+                .map_err(|error| {
+                    log_fmt(format_args!("boot mount {} refused: {error:?}", mount.path));
+                    Error::MountTable
+                })?;
+        }
+        Ok(())
+    }
+
+    fn mount_prefix(
+        &self,
+        prefix: Path<'_>,
+        program: FileSystemProgram,
+    ) -> Result<u32, FileSystemError> {
+        // Гонки на занятости нет: таблицу меняет один admin-поток.
+        if self.table.lock().covers(prefix) {
+            return Err(FileSystemError::AlreadyExists);
+        }
+        // Подъём идёт вне лока: сервисный поток продолжает разбирать пути, пока файловая
+        // система стартует.
+        let budget = self
+            .resource
+            .split_when_available(MOUNT_BUDGET_PAGES, MOUNT_BUDGET_TIMEOUT)
+            .map_err(|error| {
+                log_fmt(format_args!("mount budget refused: {error:?}"));
+                Error::Runtime(error).as_file_system_error()
+            })?;
+        let incarnation = self.found(&program, &budget).map_err(|error| {
+            log_fmt(format_args!("mount refused: {error}"));
+            error.as_file_system_error()
+        })?;
+        self.table.lock().mounts.push(Mount {
+            record: MountRecord {
+                prefix: prefix.as_str().to_string(),
+                program,
+                generation: FIRST_GENERATION,
+            },
+            incarnation: Some(incarnation),
+        });
+        log_line("mounted");
+        Ok(DONE)
+    }
+
     // Оборот наблюдения: снимает ушедшие экземпляры монтирований и поднимает им смену.
     pub(crate) fn supervise(&self) {
         while let Some(gone) = self.gone_mount() {
@@ -352,34 +400,7 @@ impl NamespaceAdminService for Administering<'_> {
         program: Str<'_, PATH_MAX>,
     ) -> Result<u32, FileSystemError> {
         let prefix = Path::new(path.as_str())?;
-        // Гонки на занятости нет: таблицу меняет один admin-поток.
-        if self.table.lock().covers(prefix) {
-            return Err(FileSystemError::AlreadyExists);
-        }
-        let program = FileSystemProgram::new(program.as_str());
-        // Подъём идёт вне лока: сервисный поток продолжает разбирать пути, пока файловая
-        // система стартует.
-        let budget = self
-            .resource
-            .split_when_available(MOUNT_BUDGET_PAGES, MOUNT_BUDGET_TIMEOUT)
-            .map_err(|error| {
-                log_fmt(format_args!("mount budget refused: {error:?}"));
-                Error::Runtime(error).as_file_system_error()
-            })?;
-        let incarnation = self.found(&program, &budget).map_err(|error| {
-            log_fmt(format_args!("mount refused: {error}"));
-            error.as_file_system_error()
-        })?;
-        self.table.lock().mounts.push(Mount {
-            record: MountRecord {
-                prefix: prefix.as_str().to_string(),
-                program,
-                generation: FIRST_GENERATION,
-            },
-            incarnation: Some(incarnation),
-        });
-        log_line("mounted");
-        Ok(DONE)
+        self.mount_prefix(prefix, FileSystemProgram::new(program.as_str()))
     }
 
     fn unmount(&mut self, path: Str<'_, PATH_MAX>) -> Result<u32, FileSystemError> {

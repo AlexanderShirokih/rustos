@@ -11,7 +11,7 @@ use fdt::{
 use io::mmio::Reg;
 use kernel_tests::kernel_test;
 use runtime::{IrqControl, MemoryRegion, OwnedHandle, PortTransport, Timeout, UserMemFlags};
-use syscall::SIGNALED;
+use syscall::{IrqTrigger, SIGNALED};
 
 /// Текущее значение (секунды), RO.
 const RTC_DR: Reg<u32> = Reg::new(0x00);
@@ -45,7 +45,9 @@ fn pl031_rtc_interrupt() {
     let control = IrqControl::from_handle(OwnedHandle::adopt(
         client.acquire_irq_control().expect("call").expect("vend"),
     ));
-    let line = control.mint(intid).expect("mint PL031 line");
+    let line = control
+        .mint(intid, IrqTrigger::Level)
+        .expect("mint PL031 line");
 
     // Device-окно PL031 по базовому PA + отображение. Device-атрибуты ставит
     // ядро из типа региона; userspace выбирает только доступ.

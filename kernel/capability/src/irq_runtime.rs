@@ -8,6 +8,7 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use spin::Once;
+use syscall::IrqTrigger;
 
 use super::errors::IpcError;
 
@@ -22,9 +23,15 @@ pub trait IrqSink: Send + Sync {
 /// Контроллер прерываний с точки зрения capability-слоя: привязка линии к
 /// `sink` и маск/анмаск по «сырому» номеру. Ставится один раз в kmain.
 pub trait InterruptsControl: Send + Sync {
-    /// Привязывает линию `irq` так, что её срабатывания зовут `sink.fire()`,
-    /// и возвращает RAII-токен, чей drop снимает привязку (и маскирует линию).
-    fn bind_line(&self, irq: u16, sink: Arc<dyn IrqSink>) -> Result<IrqBindToken, IpcError>;
+    /// Привязывает линию `irq` с триггером `trigger` так, что её срабатывания
+    /// зовут `sink.fire()`, и возвращает RAII-токен, чей drop снимает привязку
+    /// (и маскирует линию).
+    fn bind_line(
+        &self,
+        irq: u16,
+        trigger: IrqTrigger,
+        sink: Arc<dyn IrqSink>,
+    ) -> Result<IrqBindToken, IpcError>;
 
     /// Маскирует (запрещает) линию на контроллере.
     fn mask(&self, irq: u16);

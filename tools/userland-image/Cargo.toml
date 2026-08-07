@@ -10,6 +10,7 @@ filesystem-abi = { workspace = true }
 object = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+syscall = { workspace = true }
 toml = { workspace = true }
 userland = { workspace = true }
 userland-image = { workspace = true, features = ["alloc"] }

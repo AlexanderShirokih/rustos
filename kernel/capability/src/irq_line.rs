@@ -14,6 +14,7 @@ use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use collections::{LockCell, MutexCell};
+use syscall::IrqTrigger;
 
 use super::{
     errors::IpcError,
@@ -35,10 +36,15 @@ pub struct IrqLine {
 }
 
 impl IrqLine {
-    /// Привязывает линию `irq` через `control` и возвращает готовый объект.
+    /// Привязывает линию `irq` с триггером `trigger` через `control` и
+    /// возвращает готовый объект.
     /// При срабатывании линии вызывается [`on_fire`](Self::on_fire). На ошибке
     /// привязки объект дропается, не оставляя зависшей линии.
-    pub fn bind(control: Arc<dyn InterruptsControl>, irq: u16) -> Result<Arc<Self>, IpcError> {
+    pub fn bind(
+        control: Arc<dyn InterruptsControl>,
+        irq: u16,
+        trigger: IrqTrigger,
+    ) -> Result<Arc<Self>, IpcError> {
         let line = Arc::new(Self {
             irq,
             signal: Signal::new(),
@@ -49,7 +55,7 @@ impl IrqLine {
         let sink: Arc<dyn IrqSink> = Arc::new(LineSink {
             line: Arc::downgrade(&line),
         });
-        let token = line.control.bind_line(irq, sink)?;
+        let token = line.control.bind_line(irq, trigger, sink)?;
         line.bound.with_lock(|slot| *slot = Some(token));
         Ok(line)
     }
@@ -150,7 +156,12 @@ mod tests {
     }
 
     impl InterruptsControl for MockControl {
-        fn bind_line(&self, _irq: u16, sink: Arc<dyn IrqSink>) -> Result<IrqBindToken, IpcError> {
+        fn bind_line(
+            &self,
+            _irq: u16,
+            _trigger: IrqTrigger,
+            sink: Arc<dyn IrqSink>,
+        ) -> Result<IrqBindToken, IpcError> {
             *self.sink.lock().unwrap() = Some(sink);
             Ok(IrqBindToken::new(()))
         }
@@ -167,7 +178,7 @@ mod tests {
     #[test]
     fn fire_masks_then_latches_and_ack_clears_and_unmasks() {
         let control = MockControl::new();
-        let line = IrqLine::bind(control.clone(), 42).expect("bind ok");
+        let line = IrqLine::bind(control.clone(), 42, IrqTrigger::Level).expect("bind ok");
         assert_eq!(line.event_signal().peek() & SIGNALED, 0);
 
         control.fire();
@@ -190,7 +201,7 @@ mod tests {
     #[test]
     fn double_fire_before_ack_coalesces_to_single_mask() {
         let control = MockControl::new();
-        let _line = IrqLine::bind(control.clone(), 42).expect("bind ok");
+        let _line = IrqLine::bind(control.clone(), 42, IrqTrigger::Level).expect("bind ok");
         control.fire();
         control.fire();
         assert_eq!(control.masks(), 1, "second fire before ack coalesces");
@@ -199,7 +210,7 @@ mod tests {
     #[test]
     fn ack_without_fire_is_wrong_type_and_no_unmask() {
         let control = MockControl::new();
-        let line = IrqLine::bind(control.clone(), 42).expect("bind ok");
+        let line = IrqLine::bind(control.clone(), 42, IrqTrigger::Level).expect("bind ok");
         assert_eq!(line.ack(), Err(IpcError::WrongType));
         assert_eq!(control.unmasks(), 0);
     }
@@ -208,7 +219,7 @@ mod tests {
     fn fire_after_drop_is_noop() {
         let control = MockControl::new();
         {
-            let _line = IrqLine::bind(control.clone(), 42).expect("bind ok");
+            let _line = IrqLine::bind(control.clone(), 42, IrqTrigger::Level).expect("bind ok");
         }
         // Линия дропнута; Weak в sink не апгрейдится -> fire ничего не делает.
         control.fire();
@@ -231,6 +242,7 @@ mod tests {
             fn bind_line(
                 &self,
                 _irq: u16,
+                _trigger: IrqTrigger,
                 _sink: Arc<dyn IrqSink>,
             ) -> Result<IrqBindToken, IpcError> {
                 Ok(IrqBindToken::new(Probe))
@@ -239,7 +251,7 @@ mod tests {
             fn unmask(&self, _irq: u16) {}
         }
 
-        let line = IrqLine::bind(Arc::new(ProbeControl), 7).expect("bind ok");
+        let line = IrqLine::bind(Arc::new(ProbeControl), 7, IrqTrigger::Level).expect("bind ok");
         assert!(!DROPPED.load(Ordering::Acquire));
         drop(line);
         assert!(

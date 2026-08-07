@@ -15,13 +15,9 @@ use core::{
 };
 
 use memory::{AccessMask, BudgetRefund, physical_address::PageAlignedAddress};
+use syscall::MAX_RESOURCE_DEPTH;
 
 use super::errors::IpcError;
-
-/// Потолок глубины цепочки `split`. Поле `parent` держит предков живыми даже после отзыва
-/// хэндлов, и длину этой цепочки в куче ядра задаёт userspace: без потолка она растёт
-/// неограниченно.
-pub const MAX_RESOURCE_DEPTH: u16 = 8;
 
 #[derive(Debug)]
 pub struct Resource {

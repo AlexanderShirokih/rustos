@@ -20,6 +20,7 @@ pub(super) fn map_ipc_error(e: IpcError) -> SyscallError {
         IpcError::Canceled => SyscallError::Canceled,
         IpcError::ResourceExhausted => SyscallError::ResourceExhausted,
         IpcError::Revoked => SyscallError::Revoked,
+        IpcError::AlreadyBound => SyscallError::AlreadyBound,
     }
 }
 

@@ -290,5 +290,6 @@ version = "0.1.0"
 name = "userland-image"
 version = "0.1.0"
 dependencies = [
+ "syscall",
  "userland",
 ]
