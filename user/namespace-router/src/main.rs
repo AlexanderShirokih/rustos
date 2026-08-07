@@ -14,12 +14,12 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use component_abi::{ComponentConfig, ComponentStartupFrame, dispatch_component_startup};
+use component_abi::{ComponentConfig, receive_startup_transaction};
 use filesystem_abi::{decode_mount_table, dispatch_namespace, dispatch_namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
     MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Resource, Thread,
-    exit_with_sibling, install_log, log_fmt, log_line, receive_startup, spawn_owned, thread_exit,
+    exit_with_sibling, install_log, log_fmt, log_line, spawn_owned, thread_exit,
 };
 use spin::Once;
 use syscall::{Handle, Rights, Timeout};
@@ -32,6 +32,8 @@ use error::{Error, Result};
 use router::{Administering, MountTable, Resolving};
 
 const LOG_TAG: &str = "router";
+
+const IMAGE_SLOT: u16 = 0;
 
 // Стек потока admin-порта: он ведёт монтирования и подъём процессов файловых систем.
 const ADMIN_STACK: u64 = 0x4000;
@@ -197,19 +199,15 @@ struct StartResources {
 }
 
 fn handshake(startup: Handle) -> Result<StartResources> {
-    let ComponentStartupFrame {
-        log,
-        image,
-        control,
-        service,
-        config,
-    } = receive_startup(startup, dispatch_component_startup)?.ok_or(Error::Start)?;
+    let startup = OwnedHandle::from_handle(startup);
+    let started = receive_startup_transaction(&PortTransport::server(startup.borrow()))?
+        .ok_or(Error::Start)?;
     Ok(StartResources {
-        log: OwnedHandle::adopt(log),
-        image: OwnedHandle::adopt(image),
-        service: OwnedHandle::adopt(service),
-        control: OwnedHandle::adopt(control),
-        mounts: config,
+        log: OwnedHandle::adopt(started.log),
+        image: OwnedHandle::adopt(started.slot(IMAGE_SLOT).ok_or(Error::Start)?),
+        service: OwnedHandle::adopt(started.service),
+        control: OwnedHandle::adopt(started.control),
+        mounts: started.config.ok_or(Error::Start)?,
     })
 }
 

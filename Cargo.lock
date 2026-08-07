@@ -263,6 +263,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "device-resolver"
+version = "0.1.0"
+dependencies = [
+ "bootstrap",
+ "fdt",
+ "ipc",
+ "ipc-test",
+ "syscall",
+]
+
+[[package]]
+name = "device-resolver-aarch64"
+version = "0.1.0"
+dependencies = [
+ "device-resolver",
+ "fdt",
+ "syscall",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -271,6 +291,19 @@ dependencies = [
  "block-buffer",
  "const-oid",
  "crypto-common",
+]
+
+[[package]]
+name = "driver-pl031"
+version = "0.1.0"
+dependencies = [
+ "component-abi",
+ "io",
+ "ipc",
+ "rtc-abi",
+ "runtime",
+ "syscall",
+ "userland-build",
 ]
 
 [[package]]
@@ -842,6 +875,9 @@ name = "rootkeeper"
 version = "0.1.0"
 dependencies = [
  "bootstrap",
+ "device-resolver",
+ "device-resolver-aarch64",
+ "fdt",
  "log-abi",
  "log-relay",
  "managed-component",
@@ -866,20 +902,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-demo"
+name = "rtc-abi"
 version = "0.1.0"
 dependencies = [
- "bootstrap",
- "fdt",
- "io",
  "ipc",
- "log-abi",
- "log-relay",
- "runtime",
- "syscall",
- "userland-build",
- "userland-image",
- "userland-loader",
 ]
 
 [[package]]
@@ -1138,6 +1164,8 @@ version = "0.1.0"
 dependencies = [
  "bootstrap",
  "collections",
+ "component-abi",
+ "device-resolver",
  "fdt",
  "filesystem",
  "filesystem-abi",
@@ -1148,6 +1176,7 @@ dependencies = [
  "log-relay",
  "managed-component",
  "rootkeeper",
+ "rtc-abi",
  "runtime",
  "spin",
  "syscall",
@@ -1279,6 +1308,7 @@ name = "userland-image-tool"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "component-abi",
  "filesystem-abi",
  "object",
  "serde",
@@ -1346,6 +1376,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "style-tool",
+ "toml",
  "userland-image-tool",
 ]
 

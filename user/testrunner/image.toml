@@ -57,6 +57,11 @@ path = "/boot/log-client-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "namespace-consumer-fixture"
+path = "/boot/namespace-consumer-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "filesystem-client-fixture"
 path = "/boot/filesystem-client-fixture"
 
@@ -84,6 +89,10 @@ path = "/boot/managed-startup-closed"
 package = "testrunner"
 bin = "crash-filesystem"
 path = "/boot/crash-filesystem"
+
+[[programs]]
+package = "driver-pl031"
+path = "/boot/driver-pl031"
 
 [[programs]]
 package = "namespace-router"

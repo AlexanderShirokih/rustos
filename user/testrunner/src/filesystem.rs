@@ -126,7 +126,7 @@ fn start_namespace() -> NamespacePorts {
             .entry(crate::rootkeeper_system::BOOT_PLAN_ENTRY)
             .expect("image carries the compiled boot plan");
         let plan = decode_plan(record.data()).expect("decode boot plan");
-        let plan_component = plan.component();
+        let plan_component = plan.component(0).expect("boot plan carries the router");
         let program = decoded
             .entry(plan_component.program())
             .expect("image carries the component program")
@@ -137,10 +137,10 @@ fn start_namespace() -> NamespacePorts {
         launch_component(
             &mut component,
             &program,
-            &image,
             &log,
             plan_component.startup_timeout(),
             plan_component.config(),
+            crate::rootkeeper_system::image_slot(&image),
         )
         .expect("namespace router started");
         component

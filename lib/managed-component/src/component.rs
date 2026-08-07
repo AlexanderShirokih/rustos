@@ -30,6 +30,8 @@ pub enum ManagedStartupError {
     InvalidState,
     /// Managed startup требует конечного send timeout.
     InfiniteTimeout,
+    /// Слотов компонента больше, чем несёт стартовая транзакция.
+    TooManySlots,
 }
 
 /// Причина состояния [`ManagedStatus::Failed`].

@@ -16,6 +16,7 @@ members = [
     "lib/ipc-test",
     "lib/log-abi",
     "lib/managed-component",
+    "lib/rtc-abi",
     "lib/log-relay",
     "lib/syscall",
     "kernel/kernelspace",
@@ -29,6 +30,8 @@ members = [
     "lib/test-harness-qemu",
     "lib/collections",
     "lib/component-abi",
+    "lib/device-resolver",
+    "lib/device-resolver-aarch64",
     "lib/fdt",
     "lib/filesystem",
     "lib/filesystem-abi",
@@ -44,10 +47,10 @@ members = [
     "user/filesystem-imagefs",
     "user/namespace-router",
     "user/filesystem-ramfs",
+    "user/driver-pl031",
     "user/rootkeeper",
     "user/testrunner",
     "user/calculator-demo",
-    "user/rtc-demo",
     "xtask",
 ]
 exclude = ["fuzz"]
@@ -87,6 +90,8 @@ log-abi = { path = "lib/log-abi" }
 log-relay = { path = "lib/log-relay" }
 collections = { path = "lib/collections" }
 component-abi = { path = "lib/component-abi" }
+device-resolver = { path = "lib/device-resolver" }
+device-resolver-aarch64 = { path = "lib/device-resolver-aarch64" }
 io = { path = "lib/io" }
 klog = { path = "kernel/log" }
 fdt = { path = "lib/fdt" }
@@ -113,6 +118,7 @@ userland = { path = "lib/userland" }
 userland-build = { path = "lib/userland-build" }
 userland-image = { path = "lib/userland-image" }
 userland-loader = { path = "lib/userland-loader" }
+rtc-abi = { path = "lib/rtc-abi" }
 runtime = { path = "lib/runtime" }
 process = { path = "kernel/process" }
 userland-image-tool = { path = "tools/userland-image" }

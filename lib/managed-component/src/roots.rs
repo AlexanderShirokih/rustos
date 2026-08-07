@@ -1,8 +1,8 @@
 use core::num::NonZeroU64;
 
-use component_abi::ComponentStartupClient;
+use component_abi::{COMPONENT_SLOT_MAX, ComponentStartupClient};
 use ipc::wire::Str;
-use runtime::{BorrowedHandle, MemoryRegion, OwnedHandle, Port, Timeout};
+use runtime::{BorrowedHandle, OwnedHandle, Port, Timeout};
 use syscall::Rights;
 use userland::EntryView;
 
@@ -15,11 +15,44 @@ struct ComponentServers {
     service: OwnedHandle,
 }
 
+/// Capability слотов компонента в порядке плана. Недоставленные слоты
+/// закрываются вместе с ней.
+#[derive(Default)]
+pub struct ComponentSlots {
+    slots: [Option<OwnedHandle>; COMPONENT_SLOT_MAX],
+    count: u16,
+}
+
 /// Capability roots компонента, остающиеся у supervisor.
 pub struct ComponentRoots {
     control: OwnedHandle,
     service_minter: OwnedHandle,
     servers: Option<ComponentServers>,
+}
+
+impl ComponentSlots {
+    /// Добавляет capability очередным слотом.
+    pub fn push(&mut self, capability: OwnedHandle) -> Result<(), ManagedStartupError> {
+        let place = self
+            .slots
+            .get_mut(usize::from(self.count))
+            .ok_or(ManagedStartupError::TooManySlots)?;
+        *place = Some(capability);
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Число заполненных слотов.
+    #[must_use]
+    pub const fn len(&self) -> u16 {
+        self.count
+    }
+
+    /// Компонент без слотов capability не получает.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 }
 
 impl ComponentRoots {
@@ -71,40 +104,41 @@ impl ComponentRoots {
         &mut self,
         transport: BoundedStartupTransport,
         log: &OwnedHandle,
-        image: &MemoryRegion,
-        config: &str,
+        config: Option<&str>,
+        slots: ComponentSlots,
     ) -> Result<(), ManagedStartupError> {
         // Значок лог-сессии set-once: производная несёт значок компонента, а
         // `DUPLICATE` нужно ему для делегирования своим потомкам.
         let log = log.duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, None)?;
-        let image = image
-            .handle()
-            .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)?;
-        let config = Str::new(config).ok_or(ManagedStartupError::InvalidState)?;
+        let config =
+            Str::new(config.unwrap_or_default()).ok_or(ManagedStartupError::InvalidState)?;
         let servers = self
             .servers
             .take()
             .ok_or(ManagedStartupError::InvalidState)?;
-        ComponentStartupClient::new(transport)
-            .start(log, image, servers.control, servers.service, config)
-            .map_err(ManagedStartupError::from)
+        let client = ComponentStartupClient::new(transport);
+        client.start(log, servers.control, servers.service, config, slots.len())?;
+        for slot in slots.slots.into_iter().flatten() {
+            client.slot(slot)?;
+        }
+        Ok(())
     }
 }
 
-/// Поднимает incarnation компонента: свежие порты, производные лог-сессии и
-/// образа, конечный срок стартового рандеву и путь записи конфигурации.
+/// Поднимает incarnation компонента: свежие порты, производная лог-сессия,
+/// конечный срок стартового рандеву, путь записи конфигурации и слоты плана.
 pub fn launch_component<'a, V: EntryView<'a>>(
     component: &mut ManagedComponent<ComponentRoots>,
     program: &V,
-    image: &MemoryRegion,
     log: &OwnedHandle,
     startup_timeout: Timeout,
-    config: &str,
+    config: Option<&str>,
+    slots: ComponentSlots,
 ) -> Result<(), ManagedStartupError> {
     component.launch(
         program,
         startup_timeout,
         ComponentRoots::create,
-        |transport, roots| roots.send_startup(transport, log, image, config),
+        move |transport, roots| roots.send_startup(transport, log, config, slots),
     )
 }

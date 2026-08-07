@@ -13,6 +13,10 @@ path = "/boot/rootkeeper"
 boot = true
 
 [[programs]]
+package = "driver-pl031"
+path = "/boot/driver-pl031"
+
+[[programs]]
 package = "namespace-router"
 path = "/boot/namespace-router"
 

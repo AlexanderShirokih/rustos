@@ -1,21 +1,25 @@
-//! Композиция rootkeeper по плану загрузки: чтение плана из образа и наблюдение
-//! supervisor за завершением компонента.
+//! Композиция rootkeeper по плану загрузки: чтение плана из образа, порядок
+//! запуска по графу зависимостей, слоты capability и наблюдение supervisor за
+//! завершением компонентов.
 
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
+use device_resolver::ResolveError;
 use filesystem_abi::{
     AccessMode, FileSystemError, Mount, NamespaceClient, OpenFlags, Opened, Path,
     decode_mount_table,
 };
 use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
-use managed_component::ManagedFailure;
-use rootkeeper::{BootFailure, RootSystem, Stopped, Supervised, SystemImage};
-use runtime::{OwnedHandle, PortTransport, Signal, Timeout};
-use syscall::SIGNALED;
+use managed_component::{ComponentRoots, ComponentSlots, ManagedComponent, ManagedFailure};
+use rootkeeper::{BootFailure, RootSystem, SHUTDOWN_EXIT_CODE, Stopped, Supervised, SystemImage};
+use rtc_abi::RtcClient;
+use runtime::{MemoryRegion, OwnedHandle, PortTransport, Signal, Timeout};
+use syscall::{Rights, SIGNALED};
 use userland_image::{
-    BOOT_PLAN_PATH, ComponentSpec, PlanComponent, PlanDecodeError, decode_plan, encode_plan,
+    BOOT_PLAN_PATH, BootPlan, ComponentSpec, PlanDecodeError, PlanDevice, SlotSource, decode_plan,
+    encode_plan,
 };
 
 use crate::filesystem::{CALL_TIMEOUT, connect, path};
@@ -35,6 +39,13 @@ const RAM_MOUNT: &str = "/tmp";
 const ROUTER_PROGRAM: &str = "/boot/namespace-router";
 const ROUTER_BUDGET_PAGES: u64 = 2_048;
 const ROUTER_STARTUP_TIMEOUT: Timeout = Timeout::from_secs(2);
+
+const RTC_PROGRAM: &str = "/boot/driver-pl031";
+const RTC_BUDGET_PAGES: u64 = 256;
+const RTC_COMPATIBLE: &str = "arm,pl031";
+
+const CONSUMER_PROGRAM: &str = "/boot/namespace-consumer-fixture";
+const CONSUMER_BUDGET_PAGES: u64 = 256;
 
 const BOOT_MOUNTS: &str = "/boot/namespace.mounts";
 const CRASH_MOUNTS: &str = "/boot/crash.mounts";
@@ -70,39 +81,115 @@ const ROUTER_ATTEMPTS: usize = 6;
 const RESTART_ATTEMPTS: usize = 100;
 const RESTART_TURN: Timeout = Timeout::from_ns(20_000_000);
 
-fn plan_bytes(mounts: &str, critical: bool, restart_limit: u32) -> Vec<u8> {
-    encode_plan(&ComponentSpec {
+const RTC_CALL_TIMEOUT: Timeout = Timeout::from_secs(15);
+
+const CONSUMER_TURN: Timeout = Timeout::from_millis(200);
+
+const DEVICE_EXIT_CODE: u32 = 41;
+
+const IMAGE_SLOT: &[SlotSource<'static>] = &[SlotSource::Image];
+
+pub(crate) fn image_slot(image: &MemoryRegion) -> ComponentSlots {
+    let mut slots = ComponentSlots::default();
+    slots
+        .push(
+            image
+                .handle()
+                .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)
+                .expect("image slot minted"),
+        )
+        .expect("slot fits the transaction");
+    slots
+}
+
+fn router(mounts: &str, critical: bool, restart_limit: u32) -> ComponentSpec<'_> {
+    ComponentSpec {
         id: "filesystem",
         program: ROUTER_PROGRAM,
-        config: mounts,
+        config: Some(mounts),
+        slots: IMAGE_SLOT,
+        requires: &[],
+        after: &[],
         budget_pages: ROUTER_BUDGET_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
         restart_limit,
         critical,
-    })
-    .expect("scenario plan encodes")
+    }
+}
+
+fn plan_bytes(mounts: &str, critical: bool, restart_limit: u32) -> Vec<u8> {
+    encode_plan(&[router(mounts, critical, restart_limit)]).expect("scenario plan encodes")
 }
 
 fn boot_plan(mounts: &str) -> Vec<u8> {
     plan_bytes(mounts, true, ROUTER_INCARNATIONS)
 }
 
+fn rtc_device(compatible: &str) -> [SlotSource<'_>; 2] {
+    let device = PlanDevice {
+        compatible,
+        instance: 0,
+        resource: 0,
+    };
+    [SlotSource::Irq(device), SlotSource::Mmio(device)]
+}
+
+fn rtc<'a>(slots: &'a [SlotSource<'a>]) -> ComponentSpec<'a> {
+    ComponentSpec {
+        id: "rtc",
+        program: RTC_PROGRAM,
+        config: None,
+        slots,
+        requires: &[],
+        after: &[],
+        budget_pages: RTC_BUDGET_PAGES,
+        startup_timeout: ROUTER_STARTUP_TIMEOUT,
+        restart_limit: 1,
+        critical: false,
+    }
+}
+
 fn image() -> SystemImage {
     SystemImage::acquire(crate::bootstrap_handle()).expect("userland image is mapped")
 }
 
-fn component(bytes: &[u8]) -> PlanComponent<'_> {
-    decode_plan(bytes)
-        .expect("scenario plan decodes")
-        .component()
+fn plan(bytes: &[u8]) -> BootPlan<'_> {
+    decode_plan(bytes).expect("scenario plan decodes")
+}
+
+fn bring_up<'a>(image: &'a SystemImage, bytes: &'a [u8]) -> Result<RootSystem<'a>, BootFailure> {
+    RootSystem::bring_up(
+        image,
+        plan(bytes),
+        crate::bootstrap_handle(),
+        crate::log_relay::component_log_session,
+    )
+}
+
+fn started<'a>(image: &'a SystemImage, bytes: &'a [u8]) -> RootSystem<'a> {
+    bring_up(image, bytes).expect("composition started")
+}
+
+fn managed<'a>(system: &'a RootSystem<'_>, index: u16) -> &'a ManagedComponent<ComponentRoots> {
+    system
+        .component(index)
+        .expect("composition carries the component")
+        .managed()
+}
+
+fn roots<'a>(system: &'a RootSystem<'_>, index: u16) -> &'a ComponentRoots {
+    managed(system, index)
+        .running()
+        .expect("component is running")
+        .roots()
+}
+
+fn relay_thread() -> syscall::Handle {
+    crate::log_relay::shared_relay_thread().expect("shared relay is running")
 }
 
 fn try_session(system: &RootSystem<'_>, prefix: &str) -> Result<OwnedHandle, FileSystemError> {
-    let namespace = system
-        .managed()
-        .running()
-        .expect("namespace router is running")
-        .roots()
+    let namespace = roots(system, 0)
         .session(PROBE_BADGE)
         .expect("namespace session minted");
     // Отказ транспорта на пути к ещё не обслуживающему порт маршрутизатору неотличим
@@ -146,11 +233,17 @@ fn crash(session: &OwnedHandle) {
     kernel_tests::kassert_eq!(outcome, Err(IpcError::PeerClosed));
 }
 
-fn router_alive(system: &RootSystem<'_>) -> bool {
-    system
-        .managed()
+fn alive(system: &RootSystem<'_>, index: u16) -> bool {
+    managed(system, index)
         .running()
         .is_some_and(|running| running.process().join(Timeout::POLL).is_err())
+}
+
+fn terminate(system: &RootSystem<'_>, index: u16, exit_code: u32) -> bool {
+    let terminated = managed(system, index)
+        .running()
+        .map(|running| running.process().terminate(exit_code));
+    matches!(terminated, Some(Ok(())))
 }
 
 // Приватный сигнал не поднимается, поэтому ожидание истекает целиком.
@@ -170,11 +263,7 @@ fn probe(session: &OwnedHandle) -> Result<Result<Opened, FileSystemError>, IpcEr
 }
 
 fn terminate_router(system: &RootSystem<'_>) -> bool {
-    let terminated = system
-        .managed()
-        .running()
-        .map(|running| running.process().terminate(ROUTER_EXIT_CODE));
-    matches!(terminated, Some(Ok(())))
+    terminate(system, 0, ROUTER_EXIT_CODE)
 }
 
 #[kernel_test]
@@ -183,14 +272,17 @@ fn compiled_plan_carries_the_boot_composition() {
 
     let plan = image.plan(BOOT_PLAN_ENTRY).expect("compiled plan decodes");
 
-    let component = plan.component();
+    kernel_tests::kassert_eq!(plan.len(), 1);
+    let component = plan.component(0).expect("plan carries the router");
     kernel_tests::kassert_eq!(component.program(), ROUTER_PROGRAM);
     kernel_tests::kassert_eq!(component.budget_pages(), ROUTER_BUDGET_PAGES);
     kernel_tests::kassert_eq!(component.startup_timeout(), ROUTER_STARTUP_TIMEOUT);
     kernel_tests::kassert_eq!(component.restart_limit(), ROUTER_INCARNATIONS);
     kernel_tests::kassert!(component.critical());
 
-    kernel_tests::kassert_eq!(component.config(), BOOT_MOUNTS);
+    kernel_tests::kassert_eq!(component.config(), Some(BOOT_MOUNTS));
+    kernel_tests::kassert_eq!(component.slots().count(), 1);
+    kernel_tests::kassert_eq!(component.slots().next(), Some(SlotSource::Image));
 }
 
 #[kernel_test]
@@ -232,36 +324,30 @@ fn boot_with_a_corrupted_plan_record_names_its_failure() {
 
 #[kernel_test]
 fn a_mount_table_that_does_not_come_up_stops_the_composition() {
-    let log = crate::log_relay::router_log_session();
-    let relay_thread = crate::log_relay::shared_relay_thread().expect("shared relay is running");
     let image = image();
     let bytes = plan_bytes(BROKEN_MOUNTS, true, 1);
-    let mut system =
-        RootSystem::bring_up(&image, component(&bytes), log).expect("router startup delivered");
+    let mut system = started(&image, &bytes);
 
-    let supervised = system.supervise_turn(crate::bootstrap_handle(), relay_thread);
+    let supervised = system.supervise_turn(relay_thread());
 
     // Дерево имён поднимает маршрутизатор, и отказ монтирования уносит его процесс вместе с
     // уже поднятыми монтированиями: наружу дерево уходит либо целиком, либо никак.
     kernel_tests::kassert_eq!(supervised, Supervised::Stopped(Stopped::Subsystem));
     kernel_tests::kassert_eq!(
-        system.managed().failure(),
+        managed(&system, 0).failure(),
         Some(ManagedFailure::Exit(MOUNT_TABLE_EXIT_CODE))
     );
 }
 
 #[kernel_test]
 fn supervisor_restarts_the_router_with_a_fresh_namespace() {
-    let log = crate::log_relay::router_log_session();
-    let relay_thread = crate::log_relay::shared_relay_thread().expect("shared relay is running");
     let image = image();
     let bytes = boot_plan(BOOT_MOUNTS);
-    let mut system =
-        RootSystem::bring_up(&image, component(&bytes), log).expect("boot filesystem namespace");
+    let mut system = started(&image, &bytes);
     let session = await_tree(&system, RAM_MOUNT);
     kernel_tests::kassert!(terminate_router(&system));
 
-    let supervised = system.supervise_turn(crate::bootstrap_handle(), relay_thread);
+    let supervised = system.supervise_turn(relay_thread());
 
     kernel_tests::kassert_eq!(
         supervised,
@@ -272,7 +358,7 @@ fn supervisor_restarts_the_router_with_a_fresh_namespace() {
     // Capability ушедшей incarnation отозваны вместе с её процессами, а новая подняла дерево
     // имён заново и выдаёт свежие сессии.
     kernel_tests::kassert_eq!(probe(&session), Err(IpcError::PeerClosed));
-    kernel_tests::kassert_eq!(system.managed().generation(), 2);
+    kernel_tests::kassert_eq!(managed(&system, 0).generation(), 2);
     let fresh = await_tree(&system, RAM_MOUNT);
     kernel_tests::kassert!(matches!(probe(&fresh), Ok(Ok(_))));
     system.shutdown();
@@ -280,17 +366,14 @@ fn supervisor_restarts_the_router_with_a_fresh_namespace() {
 
 #[kernel_test]
 fn supervisor_stops_the_composition_at_the_router_restart_limit() {
-    let log = crate::log_relay::router_log_session();
-    let relay_thread = crate::log_relay::shared_relay_thread().expect("shared relay is running");
     let image = image();
     let bytes = boot_plan(NO_MOUNTS);
-    let mut system =
-        RootSystem::bring_up(&image, component(&bytes), log).expect("boot empty namespace");
+    let mut system = started(&image, &bytes);
 
     let mut supervised = Supervised::Restarted { exit_code: None };
     for _ in 0..ROUTER_ATTEMPTS {
         kernel_tests::kassert!(terminate_router(&system));
-        supervised = system.supervise_turn(crate::bootstrap_handle(), relay_thread);
+        supervised = system.supervise_turn(relay_thread());
         if matches!(supervised, Supervised::Stopped(_)) {
             break;
         }
@@ -301,42 +384,36 @@ fn supervisor_stops_the_composition_at_the_router_restart_limit() {
     kernel_tests::kassert_eq!(supervised, Supervised::Stopped(Stopped::Subsystem));
     // Остановил композицию именно предел запусков: рестарт, отказавший раньше, оставил бы
     // меньшее число попыток.
-    kernel_tests::kassert_eq!(system.managed().generation(), ROUTER_INCARNATIONS);
+    kernel_tests::kassert_eq!(managed(&system, 0).generation(), ROUTER_INCARNATIONS);
     kernel_tests::kassert_eq!(
-        system.managed().failure(),
+        managed(&system, 0).failure(),
         Some(ManagedFailure::Exit(ROUTER_EXIT_CODE))
     );
 }
 
 #[kernel_test]
 fn critical_component_without_restarts_stops_the_composition() {
-    let log = crate::log_relay::router_log_session();
-    let relay_thread = crate::log_relay::shared_relay_thread().expect("shared relay is running");
     let image = image();
     let bytes = plan_bytes(NO_MOUNTS, true, 1);
-    let mut system =
-        RootSystem::bring_up(&image, component(&bytes), log).expect("boot empty namespace");
+    let mut system = started(&image, &bytes);
     kernel_tests::kassert!(terminate_router(&system));
 
-    let supervised = system.supervise_turn(crate::bootstrap_handle(), relay_thread);
+    let supervised = system.supervise_turn(relay_thread());
 
     // Предел в один запуск исчерпан первым же отказом, и критический компонент
     // доводит композицию до остановки.
     kernel_tests::kassert_eq!(supervised, Supervised::Stopped(Stopped::Subsystem));
-    kernel_tests::kassert_eq!(system.managed().generation(), 1);
+    kernel_tests::kassert_eq!(managed(&system, 0).generation(), 1);
 }
 
 #[kernel_test]
 fn optional_component_without_restarts_leaves_the_composition_up() {
-    let log = crate::log_relay::router_log_session();
-    let relay_thread = crate::log_relay::shared_relay_thread().expect("shared relay is running");
     let image = image();
     let bytes = plan_bytes(NO_MOUNTS, false, 1);
-    let mut system =
-        RootSystem::bring_up(&image, component(&bytes), log).expect("boot empty namespace");
+    let mut system = started(&image, &bytes);
     kernel_tests::kassert!(terminate_router(&system));
 
-    let supervised = system.supervise_turn(crate::bootstrap_handle(), relay_thread);
+    let supervised = system.supervise_turn(relay_thread());
 
     // Некритический компонент снимается с композиции, а сама композиция остаётся
     // поднятой: её поток пересылки жив и продолжает выдавать сессии.
@@ -346,24 +423,20 @@ fn optional_component_without_restarts_leaves_the_composition_up() {
             exit_code: Some(ROUTER_EXIT_CODE)
         }
     );
-    kernel_tests::kassert!(system.managed().running().is_none());
-    drop(crate::log_relay::router_log_session());
+    kernel_tests::kassert!(managed(&system, 0).running().is_none());
     system.shutdown();
 }
 
 #[kernel_test]
 fn router_exit_takes_down_its_mount_processes() {
-    let log = crate::log_relay::router_log_session();
-    let relay_thread = crate::log_relay::shared_relay_thread().expect("shared relay is running");
     let image = image();
     let bytes = boot_plan(BOOT_MOUNTS);
-    let mut system =
-        RootSystem::bring_up(&image, component(&bytes), log).expect("boot filesystem namespace");
+    let mut system = started(&image, &bytes);
     let session = await_tree(&system, RAM_MOUNT);
     kernel_tests::kassert!(matches!(probe(&session), Ok(Ok(_))));
 
     kernel_tests::kassert!(terminate_router(&system));
-    system.supervise_turn(crate::bootstrap_handle(), relay_thread);
+    system.supervise_turn(relay_thread());
 
     // Монтирование ушло вместе с поднявшим его маршрутизатором, и его сессия
     // терминальна: сирот подсистема не оставляет.
@@ -372,11 +445,9 @@ fn router_exit_takes_down_its_mount_processes() {
 
 #[kernel_test]
 fn router_replaces_a_faulted_mount() {
-    let log = crate::log_relay::router_log_session();
     let image = image();
     let bytes = boot_plan(CRASH_MOUNTS);
-    let system =
-        RootSystem::bring_up(&image, component(&bytes), log).expect("boot filesystem namespace");
+    let system = started(&image, &bytes);
     let first = await_tree(&system, Path::ROOT.as_str());
     kernel_tests::kassert!(matches!(probe(&first), Ok(Ok(_))));
 
@@ -384,7 +455,7 @@ fn router_replaces_a_faulted_mount() {
 
     // Отказ файловой системы уносит только её процесс: маршрутизатор остаётся жив и поднимает
     // монтированию новый экземпляр, а сессии ушедшего терминальны.
-    kernel_tests::kassert!(router_alive(&system));
+    kernel_tests::kassert!(alive(&system, 0));
     kernel_tests::kassert_eq!(probe(&first), Err(IpcError::PeerClosed));
     let second = await_session(&system, Path::ROOT.as_str()).expect("mount got a new incarnation");
     kernel_tests::kassert!(matches!(probe(&second), Ok(Ok(_))));
@@ -392,11 +463,9 @@ fn router_replaces_a_faulted_mount() {
 
 #[kernel_test]
 fn restart_limit_takes_the_mount_off_the_tree() {
-    let log = crate::log_relay::router_log_session();
     let image = image();
     let bytes = boot_plan(CRASH_MOUNTS);
-    let system =
-        RootSystem::bring_up(&image, component(&bytes), log).expect("boot filesystem namespace");
+    let system = started(&image, &bytes);
 
     let mut incarnations = 0;
     let mut outcome = Ok(());
@@ -417,5 +486,118 @@ fn restart_limit_takes_the_mount_off_the_tree() {
     // перестаёт быть накрытым.
     kernel_tests::kassert_eq!(incarnations, MOUNT_INCARNATIONS);
     kernel_tests::kassert_eq!(outcome, Err(FileSystemError::NotFound));
-    kernel_tests::kassert!(router_alive(&system));
+    kernel_tests::kassert!(alive(&system, 0));
+}
+
+#[kernel_test]
+fn a_device_component_serves_time_over_a_minted_session() {
+    let image = image();
+    let device = rtc_device(RTC_COMPATIBLE);
+    let bytes = encode_plan(&[rtc(&device)]).expect("scenario plan encodes");
+    let mut system = started(&image, &bytes);
+
+    let session = roots(&system, 0)
+        .session(PROBE_BADGE)
+        .expect("rtc session minted");
+    let clock = RtcClient::new(PortTransport::client(&session)).with_wait(RTC_CALL_TIMEOUT);
+    let now = clock.now().expect("rtc answers the time");
+    // Будильник устройства снимается реальным прерыванием линии, сминченной
+    // супервизором по описанию платформы.
+    let ticked = clock.tick().expect("rtc alarm fires");
+
+    kernel_tests::kassert!(ticked >= now);
+    drop(session);
+    // Линию устройства освобождает уход процесса драйвера: следующий минт той
+    // же линии иначе получает AlreadyBound.
+    system.shutdown();
+}
+
+#[kernel_test]
+fn a_device_outside_the_platform_description_names_the_boot_failure() {
+    let image = image();
+    let device = rtc_device("acme,absent-clock");
+    let bytes = encode_plan(&[rtc(&device)]).expect("scenario plan encodes");
+
+    let failure = bring_up(&image, &bytes).err();
+
+    kernel_tests::kassert_eq!(
+        failure,
+        Some(BootFailure::Device(ResolveError::DeviceNotFound))
+    );
+    kernel_tests::kassert_eq!(failure.map(BootFailure::stopped), Some(Stopped::Device));
+}
+
+#[kernel_test]
+fn a_service_slot_carries_the_provider_session_and_stops_before_it() {
+    let image = image();
+    // Потребитель стоит в плане первым, а поднимается вторым: сессию слота
+    // supervisor минтит из уже поднятого провайдера.
+    let bytes = encode_plan(&[
+        ComponentSpec {
+            id: "consumer",
+            program: CONSUMER_PROGRAM,
+            config: None,
+            slots: &[SlotSource::Service { provider: 1 }],
+            requires: &[1],
+            after: &[],
+            budget_pages: CONSUMER_BUDGET_PAGES,
+            startup_timeout: ROUTER_STARTUP_TIMEOUT,
+            restart_limit: 1,
+            critical: false,
+        },
+        router(BOOT_MOUNTS, true, 1),
+    ])
+    .expect("scenario plan encodes");
+    let mut system = started(&image, &bytes);
+
+    kernel_tests::kassert_eq!(system.start_order(), &[1, 0][..]);
+    // Потребитель разрешает путь по сессии слота, пока провайдер жив: отказ
+    // первого resolve увёл бы его собственным кодом.
+    pause(CONSUMER_TURN);
+    kernel_tests::kassert!(alive(&system, 0));
+
+    system.shutdown();
+
+    // Остановка обратна порядку запуска: потребитель снят раньше провайдера и
+    // ухода его сессии увидеть не успел.
+    kernel_tests::kassert_eq!(
+        managed(&system, 0).failure(),
+        Some(ManagedFailure::Exit(SHUTDOWN_EXIT_CODE))
+    );
+}
+
+#[kernel_test]
+fn an_optional_component_leaves_the_composition_and_a_critical_one_stops_it() {
+    let image = image();
+    let device = rtc_device(RTC_COMPATIBLE);
+    // Драйвер стоит в плане первым, а поднимается вторым: порядок задаёт `after`.
+    let bytes = encode_plan(&[
+        ComponentSpec {
+            after: &[1],
+            ..rtc(&device)
+        },
+        router(BOOT_MOUNTS, true, 1),
+    ])
+    .expect("scenario plan encodes");
+    let mut system = started(&image, &bytes);
+    kernel_tests::kassert_eq!(system.start_order(), &[1, 0][..]);
+
+    kernel_tests::kassert!(terminate(&system, 0, DEVICE_EXIT_CODE));
+    let abandoned = system.supervise_turn(relay_thread());
+
+    // Некритический компонент снят с композиции, а критический остался жив.
+    kernel_tests::kassert_eq!(
+        abandoned,
+        Supervised::Abandoned {
+            exit_code: Some(DEVICE_EXIT_CODE)
+        }
+    );
+    kernel_tests::kassert!(managed(&system, 0).running().is_none());
+    kernel_tests::kassert!(alive(&system, 1));
+
+    kernel_tests::kassert!(terminate(&system, 1, ROUTER_EXIT_CODE));
+    let stopped = system.supervise_turn(relay_thread());
+
+    // Уход критического компонента останавливает всю композицию.
+    kernel_tests::kassert_eq!(stopped, Supervised::Stopped(Stopped::Subsystem));
 }

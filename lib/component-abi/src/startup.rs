@@ -1,55 +1,134 @@
+use ipc::{Transport, wire::IpcError};
+
 use crate::config::{COMPONENT_CONFIG_MAX, ComponentConfig};
 
-/// Одноразовый стартовый кадр компонента композиции.
+/// Граница числа слотов capability одного компонента.
+pub const COMPONENT_SLOT_MAX: usize = 8;
+
+/// Одноразовая стартовая транзакция компонента композиции.
 #[ipc::protocol(name = "ComponentStartup")]
 pub trait ComponentStartup {
-    /// Отдаёт компоненту лог-сессию, регион userland-образа, серверные стороны
-    /// его control- и service-портов и путь записи его конфигурации.
+    /// Открывает транзакцию: лог-сессия, серверные стороны control- и
+    /// service-портов компонента, путь записи его конфигурации и число слотов,
+    /// которые придут следом.
     #[cast]
     fn start(
         &self,
         log: ipc::wire::Cap,
-        image: ipc::wire::Cap,
         control: ipc::wire::Cap,
         service: ipc::wire::Cap,
         config: ipc::wire::Str<{ COMPONENT_CONFIG_MAX }>,
+        slot_count: u16,
     );
+
+    /// Отдаёт capability очередного слота в порядке плана.
+    #[cast]
+    fn slot(&self, capability: ipc::wire::Cap);
 }
 
-/// Capability и параметры, принятые из стартового кадра.
+/// Capability и параметры принятой стартовой транзакции. Семантику позиции
+/// слота знает сам компонент.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ComponentStartupFrame {
+pub struct StartedComponent {
     /// Делегированная log-сессия.
     pub log: ipc::wire::Cap,
-    /// Read-only userland image.
-    pub image: ipc::wire::Cap,
     /// Серверная сторона control-порта: его клиентскую сторону держит supervisor.
     pub control: ipc::wire::Cap,
     /// Серверная сторона service-порта: его сессии supervisor минтит клиентам.
     pub service: ipc::wire::Cap,
     /// Запись образа с конфигурацией компонента.
-    pub config: ComponentConfig,
+    pub config: Option<ComponentConfig>,
+    slots: [Option<ipc::wire::Cap>; COMPONENT_SLOT_MAX],
+    slot_count: u16,
 }
 
-impl ComponentStartupService for Option<ComponentStartupFrame> {
+/// Приёмник стартовой транзакции: базовый кадр и ровно `slot_count` слотов.
+#[derive(Debug, Default)]
+pub struct StartupReceiver {
+    started: Option<StartedComponent>,
+    received: u16,
+    broken: bool,
+}
+
+/// Принимает стартовую транзакцию целиком: базовый кадр и следом слоты в
+/// порядке плана. `None` - транзакция не сложилась в контракт.
+pub fn receive_startup_transaction<T: Transport>(
+    transport: &T,
+) -> Result<Option<StartedComponent>, IpcError> {
+    let mut receiver = StartupReceiver::default();
+    while !receiver.is_complete() {
+        dispatch_component_startup(&mut receiver, transport)?;
+        if receiver.broken {
+            return Ok(None);
+        }
+    }
+    Ok(receiver.started)
+}
+
+impl StartedComponent {
+    /// Capability слота `index`.
+    #[must_use]
+    pub fn slot(&self, index: u16) -> Option<ipc::wire::Cap> {
+        if index >= self.slot_count {
+            return None;
+        }
+        *self.slots.get(usize::from(index))?
+    }
+
+    /// Число слотов транзакции.
+    #[must_use]
+    pub const fn slot_count(&self) -> u16 {
+        self.slot_count
+    }
+}
+
+impl StartupReceiver {
+    const fn is_complete(&self) -> bool {
+        match &self.started {
+            Some(started) => self.received == started.slot_count,
+            None => false,
+        }
+    }
+}
+
+impl ComponentStartupService for StartupReceiver {
     fn start(
         &mut self,
         log: ipc::wire::Cap,
-        image: ipc::wire::Cap,
         control: ipc::wire::Cap,
         service: ipc::wire::Cap,
         config: ipc::wire::Str<'_, { COMPONENT_CONFIG_MAX }>,
+        slot_count: u16,
     ) {
-        let Some(config) = ComponentConfig::new(config.as_str()) else {
+        if self.started.is_some() || usize::from(slot_count) > COMPONENT_SLOT_MAX {
+            self.broken = true;
             return;
-        };
-        *self = Some(ComponentStartupFrame {
+        }
+        self.started = Some(StartedComponent {
             log,
-            image,
             control,
             service,
-            config,
+            config: ComponentConfig::new(config.as_str()),
+            slots: [None; COMPONENT_SLOT_MAX],
+            slot_count,
         });
+    }
+
+    fn slot(&mut self, capability: ipc::wire::Cap) {
+        let Some(started) = self.started.as_mut() else {
+            self.broken = true;
+            return;
+        };
+        if self.received >= started.slot_count {
+            self.broken = true;
+            return;
+        }
+        let Some(place) = started.slots.get_mut(usize::from(self.received)) else {
+            self.broken = true;
+            return;
+        };
+        *place = Some(capability);
+        self.received += 1;
     }
 }
 
@@ -65,14 +144,14 @@ mod tests {
     use ipc_test::MockEnd;
 
     use super::{
-        COMPONENT_CONFIG_MAX, ComponentConfig, ComponentStartupClient, ComponentStartupFrame,
-        dispatch_component_startup,
+        COMPONENT_CONFIG_MAX, ComponentConfig, ComponentStartupClient, receive_startup_transaction,
     };
 
     const LOG_CAP: Cap = cap(0x21);
-    const IMAGE_CAP: Cap = cap(0x22);
     const CONTROL_CAP: Cap = cap(0x23);
     const SERVICE_CAP: Cap = cap(0x24);
+    const IMAGE_CAP: Cap = cap(0x25);
+    const DEVICE_CAP: Cap = cap(0x26);
 
     const CONFIG_RECORD: &str = "/boot/namespace.mounts";
 
@@ -125,44 +204,61 @@ mod tests {
     }
 
     #[test]
-    fn startup_carries_four_caps_and_the_config_record() {
+    fn a_transaction_carries_the_base_frame_and_every_slot() {
         let (client_end, server_end) = MockEnd::pair();
         let client = ComponentStartupClient::new(client_end);
         client
-            .start(LOG_CAP, IMAGE_CAP, CONTROL_CAP, SERVICE_CAP, config())
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, config(), 2)
             .expect("start write");
+        client.slot(IMAGE_CAP).expect("slot write");
+        client.slot(DEVICE_CAP).expect("slot write");
 
-        let mut sink = None;
-        dispatch_component_startup(&mut sink, &server_end).expect("dispatch ok");
-        assert_eq!(
-            sink,
-            Some(ComponentStartupFrame {
-                log: LOG_CAP,
-                image: IMAGE_CAP,
-                control: CONTROL_CAP,
-                service: SERVICE_CAP,
-                config: ComponentConfig::new(CONFIG_RECORD).expect("record path"),
-            })
-        );
+        let started = receive_startup_transaction(&server_end)
+            .expect("dispatch ok")
+            .expect("transaction complete");
+
+        assert_eq!(started.log, LOG_CAP);
+        assert_eq!(started.control, CONTROL_CAP);
+        assert_eq!(started.service, SERVICE_CAP);
+        assert_eq!(started.config, ComponentConfig::new(CONFIG_RECORD));
+        assert_eq!(started.slot_count(), 2);
+        assert_eq!(started.slot(0), Some(IMAGE_CAP));
+        assert_eq!(started.slot(1), Some(DEVICE_CAP));
+        assert_eq!(started.slot(2), None);
     }
 
     #[test]
-    fn startup_without_a_config_record_is_not_accepted() {
+    fn a_transaction_without_slots_needs_no_further_casts() {
         let (client_end, server_end) = MockEnd::pair();
         let client = ComponentStartupClient::new(client_end);
         client
             .start(
                 LOG_CAP,
-                IMAGE_CAP,
                 CONTROL_CAP,
                 SERVICE_CAP,
                 Str::new("").expect("empty path fits the frame"),
+                0,
             )
             .expect("start write");
 
-        let mut sink = None;
-        dispatch_component_startup(&mut sink, &server_end).expect("dispatch ok");
-        assert_eq!(sink, None);
+        let started = receive_startup_transaction(&server_end)
+            .expect("dispatch ok")
+            .expect("transaction complete");
+
+        assert_eq!(started.config, None);
+        assert_eq!(started.slot_count(), 0);
+    }
+
+    #[test]
+    fn a_slot_before_the_base_frame_breaks_the_transaction() {
+        let (client_end, server_end) = MockEnd::pair();
+        let client = ComponentStartupClient::new(client_end);
+        client.slot(IMAGE_CAP).expect("slot write");
+
+        assert_eq!(
+            receive_startup_transaction(&server_end).expect("dispatch ok"),
+            None
+        );
     }
 
     #[test]
@@ -171,22 +267,20 @@ mod tests {
         drop(server_end);
         let client = ComponentStartupClient::new(client_end);
         let (log, log_fate) = fake(0x31);
-        let (image, image_fate) = fake(0x32);
         let (control, control_fate) = fake(0x33);
         let (service, service_fate) = fake(0x34);
 
         assert_eq!(
-            client.start(log, image, control, service, config()),
+            client.start(log, control, service, config(), 1),
             Err(IpcError::PeerClosed)
         );
         assert_eq!(
-            [
-                log_fate.get(),
-                image_fate.get(),
-                control_fate.get(),
-                service_fate.get(),
-            ],
-            [Fate::Dropped; 4]
+            [log_fate.get(), control_fate.get(), service_fate.get()],
+            [Fate::Dropped; 3]
         );
+
+        let (image, image_fate) = fake(0x35);
+        assert_eq!(client.slot(image), Err(IpcError::PeerClosed));
+        assert_eq!(image_fate.get(), Fate::Dropped);
     }
 }

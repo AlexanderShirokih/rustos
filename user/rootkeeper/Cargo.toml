@@ -24,6 +24,9 @@ doctest = false
 
 [dependencies]
 bootstrap = { workspace = true }
+device-resolver = { workspace = true }
+device-resolver-aarch64 = { workspace = true }
+fdt = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }
 managed-component = { workspace = true }

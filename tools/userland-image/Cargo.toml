@@ -6,6 +6,7 @@ publish.workspace = true
 
 [target.'cfg(not(target_os = "none"))'.dependencies]
 anyhow = { workspace = true }
+component-abi = { workspace = true }
 filesystem-abi = { workspace = true }
 object = { workspace = true }
 serde = { workspace = true }

@@ -21,8 +21,8 @@ pub use image::{
     USERLAND_IMAGE_VERSION, decode,
 };
 pub use plan::{
-    BOOT_PLAN_MAGIC, BOOT_PLAN_PATH, BOOT_PLAN_VERSION, BootPlan, PlanComponent, PlanDecodeError,
-    decode_plan,
+    BOOT_PLAN_MAGIC, BOOT_PLAN_PATH, BOOT_PLAN_VERSION, BootPlan, PlanComponent, PlanComponents,
+    PlanDecodeError, PlanDevice, PlanEdges, PlanSlots, SlotSource, decode_plan,
 };
 #[cfg(any(test, feature = "alloc"))]
 pub use plan_builder::{ComponentSpec, PlanEncodeError, encode_plan};

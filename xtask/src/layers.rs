@@ -1,6 +1,7 @@
 //! Проверка правил слоев workspace: домен крейта задается его верхней директорией, ребра
 //! зависимостей сверяются с таблицей разрешений. Архитектурно-зависимые крейты (сегмент
-//! `aarch64` в пути) доступны только другим архитектурно-зависимым крейтам.
+//! `aarch64` в пути либо `forced-target` на этот триплет) доступны только другим
+//! архитектурно-зависимым крейтам.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -40,6 +41,7 @@ struct MetaDependency {
 pub(crate) struct WorkspaceCrate {
     pub(crate) name: String,
     pub(crate) dir: String,
+    pub(crate) forced_arch: bool,
 }
 
 /// Ребро зависимости между крейтами workspace.
@@ -71,7 +73,7 @@ pub(crate) fn run() -> Result<()> {
         .to_path_buf();
     collect_workspace(&fuzz_meta, &fuzz_root, &mut crates, &mut edges)?;
 
-    let crates: Vec<WorkspaceCrate> = crates.into_iter().collect();
+    let crates = merge_crates(crates);
     let edges: Vec<Edge> = edges.into_iter().collect();
 
     let violations = check_layers(&crates, &edges)?;
@@ -119,6 +121,7 @@ fn collect_workspace(
         crates.insert(WorkspaceCrate {
             name: pkg.name.clone(),
             dir: relative_dir(&pkg.name, manifest_dir, root)?,
+            forced_arch: forced_arch_target(&pkg.manifest_path),
         });
         // dependencies включает normal-, dev- и build-зависимости, path = Some отбирает
         // локальные. Дубликаты (normal + dev) схлопывает BTreeSet.
@@ -129,6 +132,7 @@ fn collect_workspace(
             crates.insert(WorkspaceCrate {
                 name: dep.name.clone(),
                 dir: relative_dir(&dep.name, dep_path, root)?,
+                forced_arch: false,
             });
             edges.insert(Edge {
                 from: pkg.name.clone(),
@@ -137,6 +141,41 @@ fn collect_workspace(
         }
     }
     Ok(())
+}
+
+fn merge_crates(crates: BTreeSet<WorkspaceCrate>) -> Vec<WorkspaceCrate> {
+    // Пакет приходит с манифестом, цель path-зависимости - без него: признак
+    // архитектуры собирается по всем вхождениям крейта.
+    let mut merged: BTreeMap<(String, String), bool> = BTreeMap::new();
+    for krate in crates {
+        let forced = merged
+            .entry((krate.name, krate.dir))
+            .or_insert(krate.forced_arch);
+        *forced |= krate.forced_arch;
+    }
+    merged
+        .into_iter()
+        .map(|((name, dir), forced_arch)| WorkspaceCrate {
+            name,
+            dir,
+            forced_arch,
+        })
+        .collect()
+}
+
+fn forced_arch_target(manifest: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return false;
+    };
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return false;
+    };
+    table
+        .get("package")
+        .and_then(toml::Value::as_table)
+        .and_then(|package| package.get("forced-target"))
+        .and_then(toml::Value::as_str)
+        .is_some_and(|target| target.split('-').any(|segment| segment == ARCH_SEGMENT))
 }
 
 fn relative_dir(name: &str, dir: &Path, root: &Path) -> Result<String> {
@@ -267,19 +306,27 @@ impl<'a> CrateRules<'a> {
 /// Проверяет ребра зависимостей по правилам слоев: таблица разрешений доменов и запрет
 /// зависимости архитектурно-независимого крейта от архитектурного.
 pub(crate) fn check_layers(crates: &[WorkspaceCrate], edges: &[Edge]) -> Result<Vec<Violation>> {
-    let mut rules = BTreeMap::new();
+    let mut rules: BTreeMap<&str, CrateRules<'_>> = BTreeMap::new();
     for krate in crates {
-        let crate_rules =
+        let mut crate_rules =
             CrateRules::from_dir(&krate.dir).with_context(|| format!("crate {}", krate.name))?;
-        if let Some(known) = rules.insert(krate.name.as_str(), crate_rules)
-            && known.dir != crate_rules.dir
-        {
-            bail!(
-                "crate {}: conflicting directories '{}' and '{}'",
-                krate.name,
-                known.dir,
-                crate_rules.dir
-            );
+        crate_rules.arch_specific |= krate.forced_arch;
+        if let Some(known) = rules.insert(krate.name.as_str(), crate_rules) {
+            if known.dir != crate_rules.dir {
+                bail!(
+                    "crate {}: conflicting directories '{}' and '{}'",
+                    krate.name,
+                    known.dir,
+                    crate_rules.dir
+                );
+            }
+            // Запись пакета несёт манифест, запись цели path-зависимости - нет:
+            // признак архитектуры собирается по всем вхождениям крейта.
+            let merged = CrateRules {
+                arch_specific: known.arch_specific || crate_rules.arch_specific,
+                ..crate_rules
+            };
+            rules.insert(krate.name.as_str(), merged);
         }
     }
 
@@ -341,6 +388,7 @@ mod tests {
         .map(|(name, dir)| WorkspaceCrate {
             name: name.to_string(),
             dir: dir.to_string(),
+            forced_arch: false,
         })
         .to_vec()
     }
@@ -458,10 +506,12 @@ mod tests {
             WorkspaceCrate {
                 name: "a-lib".to_string(),
                 dir: "lib/a-lib".to_string(),
+                forced_arch: false,
             },
             WorkspaceCrate {
                 name: "a-lib".to_string(),
                 dir: "kernel/a-lib".to_string(),
+                forced_arch: false,
             },
         ];
         assert!(check_layers(&crates, &[]).is_err());
@@ -595,10 +645,34 @@ mod tests {
     }
 
     #[test]
+    fn a_forced_target_crate_is_arch_specific_whatever_its_path() {
+        let mut crates = crates();
+        crates.push(WorkspaceCrate {
+            name: "arch-user".to_string(),
+            dir: "user/arch-user".to_string(),
+            forced_arch: true,
+        });
+        crates.push(WorkspaceCrate {
+            name: "arch-lib".to_string(),
+            dir: "lib/arch-lib".to_string(),
+            forced_arch: true,
+        });
+
+        // Крейт, собираемый только под архитектуру, вправе зависеть от
+        // архитектурного, а нейтральный - нет.
+        let allowed = edges(&[("arch-user", "arch-lib")]);
+        assert!(check_layers(&crates, &allowed).unwrap().is_empty());
+
+        let refused = edges(&[("a-user", "arch-lib"), ("a-lib", "arch-lib")]);
+        assert_eq!(check_layers(&crates, &refused).unwrap().len(), 2);
+    }
+
+    #[test]
     fn unknown_directory_is_error() {
         let crates = vec![WorkspaceCrate {
             name: "stray".to_string(),
             dir: "scripts/stray".to_string(),
+            forced_arch: false,
         }];
         assert!(check_layers(&crates, &[]).is_err());
     }

@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 [[components]]
 id = "filesystem"
@@ -8,3 +8,16 @@ startup_timeout_ms = 2000
 critical = true
 restart = 3
 config = "/boot/namespace.mounts"
+slots = [{ source = "image" }]
+
+[[components]]
+id = "rtc"
+program = "/boot/driver-pl031"
+budget_pages = 256
+startup_timeout_ms = 2000
+critical = false
+restart = 1
+slots = [
+    { source = "irq", compatible = "arm,pl031" },
+    { source = "mmio", compatible = "arm,pl031" },
+]

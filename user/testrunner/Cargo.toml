@@ -54,6 +54,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "namespace-consumer-fixture"
+path = "src/namespace_consumer_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "filesystem-client-fixture"
 path = "src/filesystem_client_fixture.rs"
 test = false
@@ -92,6 +98,8 @@ bench = false
 [dependencies]
 bootstrap = { workspace = true }
 collections = { workspace = true }
+component-abi = { workspace = true }
+device-resolver = { workspace = true }
 fdt = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }
@@ -106,6 +114,7 @@ syscall = { workspace = true }
 runtime = { workspace = true }
 managed-component = { workspace = true }
 rootkeeper = { path = "../rootkeeper" }
+rtc-abi = { workspace = true }
 userland = { workspace = true }
 userland-image = { workspace = true, features = ["alloc"] }
 userland-loader = { workspace = true }

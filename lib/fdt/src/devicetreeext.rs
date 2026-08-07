@@ -86,6 +86,16 @@ pub trait NodeExt {
     /// База первого `reg`-окна узла в координатах шины `bus` (узел - её прямой
     /// потомок). Трансляция адресов промежуточных шин (`ranges`) не выполняется.
     fn first_reg_base(&self, bus: &Node<'_>) -> Option<u64>;
+
+    /// Значение свойства `phandle`: идентификатор, которым на узел ссылаются
+    /// другие узлы.
+    fn phandle(&self) -> Option<u32>;
+
+    /// Phandle контроллера прерываний узла из свойства `interrupt-parent`.
+    fn interrupt_parent(&self) -> Option<u32>;
+
+    /// Число ячеек одного interrupt-specifier из свойства `#interrupt-cells`.
+    fn interrupt_cells(&self) -> Option<usize>;
 }
 
 impl NodeExt for Node<'_> {
@@ -142,6 +152,19 @@ impl NodeExt for Node<'_> {
         let cells = bus.cells_size().unwrap_or_default();
         let windows = self.prop("reg")?.try_as_reg_list::<1>(cells)?;
         windows.get(0).map(|window| window.offset as u64)
+    }
+
+    fn phandle(&self) -> Option<u32> {
+        self.prop("phandle")?.try_as_u32(0)
+    }
+
+    fn interrupt_parent(&self) -> Option<u32> {
+        self.prop("interrupt-parent")?.try_as_u32(0)
+    }
+
+    fn interrupt_cells(&self) -> Option<usize> {
+        let cells = self.prop("#interrupt-cells")?.try_as_u32(0)?;
+        Some(cells as usize)
     }
 }
 

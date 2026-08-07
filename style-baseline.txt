@@ -244,8 +244,6 @@ comment_on_declaration|user/namespace-router/src/router.rs|Mount|796da329
 comment_on_declaration|user/namespace-router/src/router.rs|prefix_len|dd025566
 comment_on_declaration|user/rootkeeper/src/relay.rs|RELAY|73a09479
 comment_on_declaration|user/rootkeeper/src/system.rs|LOG_TAG|a968f4f3
-comment_on_declaration|user/rtc-demo/src/main.rs|CLIENT_LOG_BADGE|9ee2f469
-comment_on_declaration|user/rtc-demo/src/main.rs|CLOCK_SESSION_BADGE|a2adda29
 comment_on_declaration|user/testrunner/src/crash_filesystem.rs|CrashingFileSystem|f6694b4e
 comment_on_declaration|user/testrunner/src/crash_filesystem.rs|fault|f13c64bc
 comment_on_declaration|user/testrunner/src/filesystem.rs|ABANDONED_PATH|f00c57b6
@@ -1152,10 +1150,6 @@ doc_on_declaration|user/namespace-router/src/router.rs|MountTable|70c20db6
 doc_on_declaration|user/namespace-router/src/router.rs|Resolving::vended|04d6adfd
 doc_on_declaration|user/namespace-router/src/router.rs|Resolving<'a>::end_frame|f36fdf23
 doc_on_declaration|user/namespace-router/src/router.rs|Resolving|504a9394
-doc_on_declaration|user/rtc-demo/src/client.rs|LOG_TAG|429eb1a4
-doc_on_declaration|user/rtc-demo/src/client.rs|POLL_PERIOD|a260f160
-doc_on_declaration|user/rtc-demo/src/driver.rs|ClockDriver|a23969a1
-doc_on_declaration|user/rtc-demo/src/driver.rs|RTC_DR|3a3b506d
 doc_on_declaration|user/testrunner/src/address_space_isolation.rs|Slot|264b91a4
 doc_on_declaration|user/testrunner/src/filesystem.rs|Tamper::empty_body|a709f0f0
 doc_on_declaration|user/testrunner/src/filesystem.rs|Tamper::one_way|9317d20f

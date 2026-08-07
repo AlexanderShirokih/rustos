@@ -10,4 +10,4 @@ pub use component::{
     BoundedStartupTransport, ManagedComponent, ManagedFailure, ManagedStartupError, ManagedStatus,
     RunningComponent,
 };
-pub use roots::{ComponentRoots, launch_component};
+pub use roots::{ComponentRoots, ComponentSlots, launch_component};

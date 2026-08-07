@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 [[components]]
 id = "filesystem"
@@ -8,3 +8,4 @@ startup_timeout_ms = 2000
 critical = true
 restart = 3
 config = "/boot/namespace.mounts"
+slots = [{ source = "image" }]

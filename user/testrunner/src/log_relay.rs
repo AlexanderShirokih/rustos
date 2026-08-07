@@ -102,6 +102,10 @@ pub(crate) fn shared_relay_thread() -> Option<syscall::Handle> {
 // Лог-сессия маршрутизатора имён с правом минта: производные достаются его
 // файловым системам.
 pub(crate) fn router_log_session() -> OwnedHandle {
+    component_log_session(ROUTER_BADGE).expect("router log session")
+}
+
+pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<OwnedHandle> {
     let mut shared = SHARED.lock();
     let relay = shared.get_or_insert_with(|| {
         LogRelayThread::start(
@@ -110,9 +114,7 @@ pub(crate) fn router_log_session() -> OwnedHandle {
         )
         .expect("shared log relay starts")
     });
-    relay
-        .delegated_session(ROUTER_BADGE)
-        .expect("router log session")
+    relay.delegated_session(badge).ok()
 }
 
 // Останавливает циклы relay прогона: их потоки иначе остаются живыми и не дают
