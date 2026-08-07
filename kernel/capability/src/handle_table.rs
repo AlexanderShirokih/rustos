@@ -12,7 +12,7 @@ use super::{
     wait::CancelTarget,
 };
 
-/// Per-process слот-таблица handle'ов.
+/// Per-process слот-таблица handle.
 ///
 /// Порядок блокировок: table-лок берётся под scheduler-локом, обратное ребро запрещено. Отзыв,
 /// пробуждение cancel-целей, разрушение capability и снятие учёта берут scheduler-лок и потому под
@@ -25,7 +25,6 @@ pub struct HandleTable {
 }
 
 struct Slot {
-    // 0 - поколение ещё не выдавалось: свежий слот либо откаченная резервация.
     generation: u16,
     state: SlotState,
     waiters: Vec<Arc<dyn CancelTarget>>,
@@ -40,8 +39,9 @@ impl Slot {
         }
     }
 
-    // Насыщение недостижимо: pop_free_slot выводит слот из оборота на MAX_GENERATION.
     fn issue_generation(&mut self) -> NonZeroU16 {
+        // 0 - поколение ещё не выдавалось: свежий слот либо откаченная резервация.
+        // Насыщение недостижимо: pop_free_slot выводит слот из оборота на MAX_GENERATION.
         let issued = NonZeroU16::MIN.saturating_add(self.generation);
         self.generation = issued.get();
         issued
@@ -49,19 +49,15 @@ impl Slot {
 }
 
 enum SlotState {
-    /// Слот свободен, ссылка на следующий элемент free-list'а.
     Free { next_free: Option<u32> },
-    /// Слот удерживается под `commit_reserved`/`release_reservation`.
     Reserved,
-    /// Слот занят живым handle'ом.
     Occupied(Capability),
-    /// Generation исчерпана; слот выведен из оборота навсегда.
     Retired,
 }
 
 /// Изъятое из [`HandleTable`] содержимое: capability и cancel-цели их слотов. Освобождение через
 /// [`DrainedHandles::release`] под table-локом не выполняется.
-#[must_use = "DrainedHandles держит изъятые capability и cancel-цели"]
+#[must_use = "DrainedHandles holds the drained capabilities and their cancel targets"]
 pub struct DrainedHandles {
     handles: Vec<Capability>,
     waiters: Vec<Arc<dyn CancelTarget>>,
@@ -109,7 +105,7 @@ impl DrainedHandles {
 
 /// Отвергнутая вставка: причина отказа и невставленный объект. Разрушение через
 /// [`RejectedInsert::release`] под table-локом не выполняется.
-#[must_use = "RejectedInsert держит невставленный объект"]
+#[must_use = "RejectedInsert holds the object that was not inserted"]
 pub struct RejectedInsert {
     error: IpcError,
     handle: Option<Capability>,
@@ -147,7 +143,7 @@ impl core::fmt::Debug for RejectedInsert {
     }
 }
 
-/// Объект типа `T` вместе с полным набором прав его handle'а
+/// Объект типа `T` вместе с полным набором прав его handle
 /// (см. [`HandleTable::get_object_with_rights`]).
 pub struct ObjectAccess<T> {
     pub object: Arc<T>,
@@ -169,7 +165,7 @@ impl HandleReservation {
 }
 
 impl HandleTable {
-    /// Стандартная ёмкость таблицы handle'ов одного процесса, обещанная syscall ABI.
+    /// Стандартная ёмкость таблицы handle одного процесса, обещанная syscall ABI.
     pub const DEFAULT_CAPACITY: u32 = syscall::HANDLE_TABLE_CAPACITY;
 
     pub fn new() -> Self {
@@ -224,13 +220,13 @@ impl HandleTable {
         })
     }
 
-    // На отказе таблица не изменяется.
     fn claim_slot(&mut self) -> Option<(u32, &mut Slot)> {
         let index = if let Some(index) = self.pop_free_slot() {
             index
         } else {
             let index = self.slots.len() as u32;
             if index >= self.capacity {
+                // Отказ наступает до push: таблица остаётся неизменной.
                 return None;
             }
             // Состояние - заглушка: вызывающий перезаписывает его сразу.
@@ -444,7 +440,7 @@ impl HandleTable {
         })
     }
 
-    /// Извлекает объект типа `T` вместе с полным набором `Rights` handle'а.
+    /// Извлекает объект типа `T` вместе с полным набором `Rights` handle.
     pub fn get_object_with_rights<T: TargetObject>(
         &self,
         id: HandleId,
@@ -530,8 +526,6 @@ impl HandleTable {
         self.insert(derived)
     }
 
-    // Производный Resource несёт источник в поле родителя, производный Memory-регион лежит
-    // окном внутри источника с доступом не шире.
     fn is_target_derived_from(source: &CapabilityTarget, target: &CapabilityTarget) -> bool {
         match (source, target) {
             (CapabilityTarget::Resource(parent), CapabilityTarget::Resource(child)) => child
@@ -608,7 +602,6 @@ impl Default for HandleTable {
 }
 
 impl Drop for HandleTable {
-    /// Смерть таблицы (process exit) отзывает все её гранты.
     fn drop(&mut self) {
         let mut drained = DrainedHandles::empty();
         self.drain_into(&mut drained);
@@ -671,7 +664,6 @@ mod tests {
         }
     }
 
-    // Захват table-лока из другого потока означает, что cancel сработал вне этого лока.
     struct LockProbeCancel {
         table: Arc<MutexCell<HandleTable>>,
         calls: AtomicUsize,
@@ -1649,7 +1641,7 @@ mod tests {
         assert_eq!(
             final_id.generation(),
             seed_gen + 1,
-            "лишь один реальный commit должен сдвинуть generation",
+            "only a real commit advances the generation",
         );
     }
 
@@ -1835,10 +1827,14 @@ mod tests {
             .unwrap();
 
         let drained = grantor.remove(root).unwrap();
-        assert_eq!(hook.count(), 0, "отзыв не идёт из-под table-лока");
+        assert_eq!(
+            hook.count(),
+            0,
+            "revocation does not run under the table lock"
+        );
         assert!(
             recipient.get(recv_id, Rights::READ).is_ok(),
-            "изъятая капа жива, пока её не разрушил release",
+            "the drained capability stays alive until release destroys it",
         );
 
         drained.release();
@@ -1862,7 +1858,11 @@ mod tests {
             .unwrap();
 
         let drained = grantor.drain();
-        assert_eq!(hook.count(), 0, "отзыв не идёт из-под table-лока");
+        assert_eq!(
+            hook.count(),
+            0,
+            "revocation does not run under the table lock"
+        );
 
         drained.release();
         assert_eq!(hook.count(), 1);
@@ -1882,7 +1882,11 @@ mod tests {
         table.with_lock(|tbl| tbl.remove(id)).unwrap().release();
 
         assert_eq!(probe.calls(), 1);
-        assert_eq!(probe.acquisitions(), 1, "cancel обязан идти вне table-лока");
+        assert_eq!(
+            probe.acquisitions(),
+            1,
+            "cancel must run outside the table lock"
+        );
     }
 
     #[test]
@@ -1904,7 +1908,11 @@ mod tests {
         drained.release();
 
         assert_eq!(probe.calls(), 1);
-        assert_eq!(probe.acquisitions(), 1, "cancel обязан идти вне table-лока");
+        assert_eq!(
+            probe.acquisitions(),
+            1,
+            "cancel must run outside the table lock"
+        );
     }
 
     #[test]

@@ -17,13 +17,10 @@ use crate::{
 
 const CHILD_PAGES: u64 = 2;
 
-// Потолок глубины цепочки производных ресурсов, обещанный syscall ABI.
 const DEPTH_CEILING: usize = 8;
 
-// Запас поверх посчитанной стоимости образа: фикстуре хватает его на собственные аллокации.
 const FIXTURE_SLACK_PAGES: u64 = 64;
 
-// Во сколько раз запрос превышает бюджет фикстуры.
 const OVERSIZE_FACTOR: u64 = 4;
 
 #[kernel_test]

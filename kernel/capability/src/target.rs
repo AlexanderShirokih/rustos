@@ -10,23 +10,17 @@ use super::{
     signal::Signal, thread::ThreadObject, wait::Waitable,
 };
 
-/// Учёт одного держателя объекта. Билет создаётся без учёта; учёт вводит `activate`,
-/// `release` снимает его и повторного эффекта не имеет. `release` неактивированного
-/// билета учёта не касается.
 pub(crate) trait HolderTicket: RevocationHook {
-    /// Вводит билет в учёт его стороны объекта. `Revoked` - билет отозван до активации,
-    /// `ResourceExhausted` - объект не заводит учёта под новый значок; отказ учёт не меняет.
     fn activate(&self) -> Result<(), IpcError>;
 
     fn release(&self);
 
-    /// Второй токен того же учёта, снимаемый независимо от этого. `None` - учёт уже снят.
     fn reacquire(&self) -> Option<Arc<dyn HolderTicket>>;
 }
 
 /// Удержание учёта стороны объекта на время операции: снимается по `Drop` и переживает capability,
 /// от которой взято.
-#[must_use = "OperationHold удерживает учёт до конца операции"]
+#[must_use = "OperationHold keeps the object side counted until the operation ends"]
 pub struct OperationHold(Arc<dyn HolderTicket>);
 
 impl OperationHold {
@@ -56,7 +50,7 @@ pub enum CapabilityTarget {
 }
 
 /// Объект ядра, извлекаемый из своего варианта [`CapabilityTarget`].
-/// Единственная точка соответствия "тип объекта - вариант enum'а".
+/// Единственная точка соответствия "тип объекта - вариант enum".
 pub trait TargetObject: Send + Sync {
     /// Объект этого типа внутри `target`; `None` - вариант другого вида.
     fn from_target(target: &CapabilityTarget) -> Option<&Arc<Self>>;
@@ -89,18 +83,11 @@ impl_target_object! {
 }
 
 impl CapabilityTarget {
-    /// Источник [`Waitable`], на котором можно ждать этот объект, если он
-    /// ожидаем. Wait-путь спрашивает объект, а не матчит его тип, поэтому
-    /// знание «какой объект ожидаем и каким сигналом» живёт здесь, рядом с
-    /// определением вариантов, а не в `signal_wait_many`.
-    ///
-    /// `Process`/`Thread` лениво материализуют bound-`Signal` терминации
-    /// (как делал прежний `*_termination_signal`): отдельный `Signal`-хендл
-    /// при этом не создаётся, поэтому подделать событие через `signal_set`
-    /// нельзя — `signal_set` строго принимает только `Signal`.
     pub(crate) fn as_waitable(&self) -> Option<Arc<dyn Waitable>> {
         match self {
             Self::Signal(s) => Some(s.clone() as Arc<dyn Waitable>),
+            // Bound-сигнал терминации хендлом не выдаётся: `signal_set` принимает только
+            // `Signal`, поэтому событие терминации из userspace не подделывается.
             Self::Process(p) => Some(p.termination_signal() as Arc<dyn Waitable>),
             Self::Thread(t) => Some(t.termination_signal() as Arc<dyn Waitable>),
             Self::IrqLine(l) => Some(l.event_signal() as Arc<dyn Waitable>),
@@ -112,9 +99,6 @@ impl CapabilityTarget {
         }
     }
 
-    /// Билет держателя capability без значка, без учёта (его вводит
-    /// [`activate`](HolderTicket::activate)). `None` - объект держателей не считает либо права
-    /// не вводят capability ни в одно его множество.
     pub(crate) fn holder_ticket(&self, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
         match self {
             Self::Port(port) => port.holder_ticket(rights),
@@ -129,8 +113,6 @@ impl CapabilityTarget {
         }
     }
 
-    /// Билет держателя capability без значка с уже введённым учётом. Применим,
-    /// пока capability не видна другим потокам: отзывать билет ещё некому.
     pub(crate) fn counted_holder_ticket(&self, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
         match self {
             Self::Port(port) => port.counted_holder_ticket(rights),
@@ -145,8 +127,6 @@ impl CapabilityTarget {
         }
     }
 
-    /// Билет держателя capability со значком, без учёта (его вводит
-    /// [`activate`](HolderTicket::activate)).
     pub(crate) fn badged_holder_ticket(
         &self,
         rights: Rights,

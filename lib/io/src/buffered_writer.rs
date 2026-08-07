@@ -11,11 +11,8 @@ use spin::Mutex;
 
 use crate::writer::Writer;
 
-/// Состояние буфера: накопление или прямая запись в writer.
 enum BufferState {
-    /// Накопление данных в памяти.
     Buffering(Vec<u8>),
-    /// Прямая запись в подключённый writer.
     Attached(Arc<dyn Writer + Send + Sync>),
 }
 

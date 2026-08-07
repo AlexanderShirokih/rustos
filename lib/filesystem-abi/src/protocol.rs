@@ -22,9 +22,8 @@ use crate::{
     reply::{Listed, NodeInfo, Opened, Written},
 };
 
-// Бюджет кадра `open` макрос не проверяет: Opaque-параметр снимает проверку.
-// Слагаемое `1` - терминатор тела.
 const _: () = assert!(
+    // Слагаемое `1` - терминатор тела кадра.
     1 + FIELD_OVERHEAD
         + PATH_MAX
         + FIELD_OVERHEAD

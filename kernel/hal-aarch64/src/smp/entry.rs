@@ -26,15 +26,13 @@ use crate::{
     sched::Aarch64Cpu,
 };
 
-/// Физический адрес точки входа: его boot CPU передаёт в `CPU_ON` и пишет по
-/// `cpu-release-addr`.
 pub(super) fn entry_point_physical() -> usize {
     secondary_start as *const () as usize - HIGHER_HALF_BASE
 }
 
-// Точка входа вторичного CPU. Регистры при входе не несут параметров:
-// spin-table их не передаёт, а `context_id` из PSCI не используется.
-// Идентификатор читается из блока передачи параметров.
+// SAFETY: вход по физическому адресу с выключенными MMU и кэшами. Регистры
+// при входе параметров не несут - spin-table их не передаёт, а `context_id`
+// из PSCI не используется, поэтому идентификатор берётся из блока передачи.
 #[unsafe(naked)]
 unsafe extern "C" fn secondary_start() {
     naked_asm!(
@@ -91,7 +89,8 @@ unsafe extern "C" fn secondary_start() {
         "add    x21, x20, x21",
 
         // Сброс строк кэша над своим стеком: записи ниже идут при выключенном
-        // MMU, мимо кэша, и вытеснение чужой строки ложится поверх них.
+        // MMU, мимо кэша, и вытеснение чужой строки ложится поверх них. Границы
+        // стека кратны 128 байтам - `dc ivac` разрушающая и бьёт строку целиком.
         "mrs    x2, ctr_el0",
         "ubfx   x2, x2, #16, #4",       // CTR_EL0.DminLine
         "mov    x3, #4",
@@ -115,8 +114,6 @@ unsafe extern "C" fn secondary_start() {
     )
 }
 
-// Pre-MMU фаза: включение MMU теми же корнями, что у boot CPU, и уход в
-// higher half.
 extern "C" fn secondary_boot(cpu_id: u64) -> ! {
     let roots = handoff::roots();
 
@@ -130,9 +127,7 @@ extern "C" fn secondary_boot(cpu_id: u64) -> ! {
     unsafe { jump_to_higher_half(cpu_id) }
 }
 
-/// # Safety
-///
-/// MMU включён, TTBR1 содержит higher-half, TTBR0 покрывает текущий PC.
+// SAFETY: MMU включён, TTBR1 содержит higher-half, TTBR0 покрывает текущий PC.
 #[unsafe(naked)]
 unsafe extern "C" fn jump_to_higher_half(_cpu_id: u64) -> ! {
     const HALF_47_32: u64 = ((HIGHER_HALF_BASE as u64) >> 32) & 0xFFFF;

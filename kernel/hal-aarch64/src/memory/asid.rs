@@ -15,9 +15,6 @@ use crate::{
     sched::Aarch64Cpu,
 };
 
-/// На rollover'е "освобождаем" все ранее выданные ASID и сбрасываем TLB
-/// inner-shareable, чтобы ни один CPU не удерживал stale-трансляции
-/// прошлой generation.
 fn flush_all_inner_shareable() {
     TranslationLookasideBuffer::<EL1>::invalidate_global_inner_shareable();
 }

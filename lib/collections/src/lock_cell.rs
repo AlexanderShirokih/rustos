@@ -19,7 +19,8 @@ pub trait LockCell<T> {
 
 /// Стратегия критической секции для защиты от прерываний.
 ///
-/// Перед захватом спинлока входим в критическую секцию, при выходе - восстанавливаем предыдущее состояние.
+/// Перед захватом спинлока входим в критическую секцию, при выходе — восстанавливаем предыдущее
+/// состояние.
 pub trait CriticalSection {
     /// RAII-guard, восстанавливающий состояние при Drop.
     type Guard;
@@ -94,7 +95,6 @@ pub type DefaultCriticalSection = NoCriticalSection;
 /// Вызывающий код должен гарантировать отсутствие
 /// одновременного доступа из разных потоков.
 pub struct NoLockCell<T> {
-    /// Внутреннее значение.
     inner: UnsafeCell<T>,
 }
 
@@ -128,7 +128,6 @@ impl<T> LockCell<T> for NoLockCell<T> {
 /// Перед захватом мьютекса входит в критическую секцию `CS`
 /// для предотвращения deadlock при вложенных прерываниях.
 pub struct MutexCell<T, CS: CriticalSection = DefaultCriticalSection> {
-    /// Мьютекс для синхронизации доступа.
     mutex: spin::Mutex<T>,
     _cs: PhantomData<CS>,
 }

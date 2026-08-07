@@ -7,17 +7,14 @@ use kernel_tests::kernel_test;
 use runtime::{Condvar, Mutex, Priority, Signal, Timeout, spawn};
 use syscall::{SIGNALED, WakeCount};
 
-/// Размер стека рабочего потока (page-aligned выдача -> вершина 16-байт-выровнена).
 const STACK_SIZE: u64 = 0x4000;
 
-/// Таймаут join'а: конечный, чтобы зависший worker падал по timeout.
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 struct Shared {
     m: Mutex<u64>,
 }
 
-/// Состояние ping-pong: чей ход и общий счётчик инкрементов.
 struct PingPong {
     turn: u32,
     count: u64,
@@ -28,19 +25,16 @@ struct Shared2 {
     cv: Condvar,
 }
 
-/// Число рабочих потоков в `mutex_contention`.
 const WORKERS: u64 = 2;
-/// Инкрементов на поток.
 const ITERS: u64 = 500;
 
-/// Раундов ping-pong на каждую сторону в `condvar_ping_pong`.
 const ROUNDS: u64 = 50;
 const TURN_MAIN: u32 = 0;
 const TURN_WORKER: u32 = 1;
 
 extern "C" fn contention_worker(arg: usize) -> u32 {
-    // SAFETY: arg - адрес Shared в кадре спавнящего потока; жив до join'а,
-    // который выполняется до выхода из кадра.
+    // SAFETY: arg - адрес Shared в кадре спавнящего потока, живой до завершения
+    // join, который выполняется до выхода из кадра.
     let s = unsafe { &*(arg as *const Shared) };
     for _ in 0..ITERS {
         *s.m.lock() += 1;
@@ -49,8 +43,8 @@ extern "C" fn contention_worker(arg: usize) -> u32 {
 }
 
 extern "C" fn pingpong_worker(arg: usize) -> u32 {
-    // SAFETY: arg - адрес Shared2 в кадре спавнящего потока; жив до join'а,
-    // который выполняется до выхода из кадра.
+    // SAFETY: arg - адрес Shared2 в кадре спавнящего потока, живой до завершения
+    // join, который выполняется до выхода из кадра.
     let s = unsafe { &*(arg as *const Shared2) };
     for _ in 0..ROUNDS {
         let mut g = s.m.lock();
@@ -107,30 +101,24 @@ fn condvar_ping_pong() {
     kernel_tests::kassert_eq!(shared.m.lock().count, 2 * ROUNDS);
 }
 
-/// Бюджет окна между отпусканием мьютекса и парковкой жертвы.
 const STEAL_WINDOW: Timeout = Timeout::from_millis(50);
 
-/// Кому из двух потоков адресовано уведомление.
 struct Turns {
     victim_wake: bool,
     thief_wake: bool,
 }
 
-/// Обстановка для `condvar_notify_is_not_stolen_by_a_later_waiter`.
 struct Theft {
     turns: Mutex<Turns>,
     condvar: Condvar,
-    /// Жертва вошла в окно между отпусканием мьютекса и парковкой.
     in_window: Signal,
-    /// Вор прошёл круг `wait` целиком.
     stolen: Signal,
-    /// Вору разрешено обратиться к condvar.
-    go: Signal,
+    thief_release: Signal,
 }
 
 extern "C" fn theft_victim(arg: usize) -> u32 {
-    // SAFETY: arg - адрес Theft в кадре спавнящего потока; жив до join'а,
-    // который выполняется до выхода из кадра.
+    // SAFETY: arg - адрес Theft в кадре спавнящего потока, живой до завершения
+    // join, который выполняется до выхода из кадра.
     let shared = unsafe { &*(arg as *const Theft) };
     let mut guard = shared.turns.lock();
     while !guard.victim_wake {
@@ -145,7 +133,7 @@ extern "C" fn theft_victim(arg: usize) -> u32 {
 extern "C" fn theft_thief(arg: usize) -> u32 {
     // SAFETY: см. theft_victim.
     let shared = unsafe { &*(arg as *const Theft) };
-    let _ = shared.go.wait(SIGNALED, JOIN_TIMEOUT);
+    let _ = shared.thief_release.wait(SIGNALED, JOIN_TIMEOUT);
 
     let mut guard = shared.turns.lock();
     while !guard.thief_wake {
@@ -165,7 +153,7 @@ fn condvar_notify_is_not_stolen_by_a_later_waiter() {
         condvar: Condvar::new(),
         in_window: Signal::create().expect("create in_window"),
         stolen: Signal::create().expect("create stolen"),
-        go: Signal::create().expect("create go"),
+        thief_release: Signal::create().expect("create thief_release"),
     };
     let arg = (&raw const shared) as usize;
 
@@ -182,7 +170,10 @@ fn condvar_notify_is_not_stolen_by_a_later_waiter() {
         guard.victim_wake = true;
         shared.condvar.notify_all();
     }
-    shared.go.notify_all().expect("release the thief");
+    shared
+        .thief_release
+        .notify_all()
+        .expect("release the thief");
 
     // Исход жертвы проверяется после снятия вора: оба потока обязаны уйти до
     // выхода из кадра, которому принадлежит `shared`.
@@ -200,20 +191,14 @@ fn condvar_notify_is_not_stolen_by_a_later_waiter() {
     victim_joined.expect("victim joins before timeout");
 }
 
-/// Обстановка для `condvar_notify_one_releases_waiters_one_by_one`.
 struct Baton {
-    /// Выданные разрешения: waiter уходит, забрав одно.
     tokens: Mutex<u32>,
     condvar: Condvar,
-    /// Число регистраций waiter'ов на condvar.
     registrations: AtomicU32,
-    /// Сколько waiter'ов забрало разрешение и вышло.
     released: AtomicU32,
-    /// Пинок главному потоку на каждое изменение счётчиков.
     progress: Signal,
 }
 
-// `false` - счётчик не дошёл до `target` за отведённый бюджет.
 fn wait_for_count(progress: &Signal, counter: &AtomicU32, target: u32) -> bool {
     while counter.load(Ordering::Acquire) < target {
         if progress.wait(SIGNALED, JOIN_TIMEOUT).is_err() {
@@ -227,8 +212,8 @@ fn wait_for_count(progress: &Signal, counter: &AtomicU32, target: u32) -> bool {
 }
 
 extern "C" fn baton_waiter(arg: usize) -> u32 {
-    // SAFETY: arg - адрес Baton в кадре спавнящего потока; жив до join'а,
-    // который выполняется до выхода из кадра.
+    // SAFETY: arg - адрес Baton в кадре спавнящего потока, живой до завершения
+    // join, который выполняется до выхода из кадра.
     let shared = unsafe { &*(arg as *const Baton) };
 
     let mut guard = shared.tokens.lock();

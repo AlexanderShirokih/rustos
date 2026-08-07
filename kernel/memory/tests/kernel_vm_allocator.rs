@@ -1,5 +1,5 @@
 //! Unit-тесты `HeapAllocator`. Mock-mapper использует backing-буфер
-//! напрямую как арену heap'а - адрес буфера становится `arena_base`,
+//! напрямую как арену heap - адрес буфера становится `arena_base`,
 //! поэтому VA-операции реально пишут в host-память.
 
 #![allow(unsafe_code)]
@@ -25,11 +25,8 @@ const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 struct MockKernelMapper {
     arena_base: usize,
     arena_size: usize,
-    /// Сколько успешных map-вызовов осталось до возврата OOM (None = не падать).
     map_calls_until_fail: Cell<Option<usize>>,
     pages_mapped: Cell<usize>,
-    /// Сколько байт арены "поднято" - для проверки, что heap не выходит за
-    /// arena_top и зовёт map строго в следующий слот.
     arena_top: Cell<usize>,
 }
 
@@ -497,7 +494,7 @@ fn current_size_grows_with_expands() {
         .unwrap();
     let after_first = heap.current_size();
     assert!(after_first > initial, "expand must increase current_size");
-    // Большое выделение, требующее повторного expand'а.
+    // Большое выделение, требующее повторного expand.
     let _ = heap
         .allocate(Layout::from_size_align(10 * PAGE_SIZE, 8).unwrap())
         .unwrap();

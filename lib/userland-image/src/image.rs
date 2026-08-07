@@ -64,7 +64,8 @@ pub struct DecodedEntries<'a> {
     next_index: usize,
 }
 
-/// Декодирует образ из буфера. Длина буфера должна быть не меньше размера, объявленного в заголовке.
+/// Декодирует образ из буфера. Длина буфера должна быть не меньше размера, объявленного в
+/// заголовке.
 pub fn decode(bytes: &[u8]) -> Result<DecodedImage<'_>, ImageDecodeError> {
     DecodedImage::decode(bytes)
 }

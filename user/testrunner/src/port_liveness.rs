@@ -26,15 +26,10 @@ use crate::{
 };
 
 const STACK_SIZE: u64 = 0x4000;
-/// Срок серверной операции: механизм обязан ответить раньше, поэтому истечение
-/// срока - провал теста, а не штатный исход.
 const SERVE_TIMEOUT: Timeout = Timeout::from_secs(3);
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
-/// Пауза, за которую клиентский поток успевает уйти в парковку.
 const PARK_SETTLE: Timeout = Timeout::from_millis(100);
 
-/// Значки клиентских сессий: значения различаются в каждом байте, поэтому
-/// прочитанный значок нельзя спутать с оставшимся от предыдущей операции.
 const DYING_CLIENT_BADGE: NonZeroU64 =
     NonZeroU64::new(0x1111_1111_1111_1111).expect("badge is non-zero");
 const LIVING_CLIENT_BADGE: NonZeroU64 =
@@ -47,10 +42,8 @@ const SECOND_CLIENT_BADGE: NonZeroU64 =
     NonZeroU64::new(0x5555_5555_5555_5555).expect("badge is non-zero");
 const BOOTSTRAP_CLIENT_BADGE: u64 = 0x7777_7777_7777_7777;
 
-/// Произвольное значение для проверочной записи в слот фикстуры.
 const SESSION_PROBE: u64 = 0x6666_6666_6666_6666;
 
-/// Значок, положенный ядром в IPC-буфер текущего потока.
 fn received_badge() -> u64 {
     let buffer = ipc_buffer_ptr().expect("thread owns an IPC buffer");
     // SAFETY: ядро замаппило per-thread IPC-буфер user-RW, текущий поток -
@@ -58,19 +51,16 @@ fn received_badge() -> u64 {
     unsafe { (*buffer).badge }
 }
 
-// Ждёт `budget` на свежем порту, которому никто не пишет.
 fn pause(budget: Timeout) {
     let idle = Port::create().expect("port create");
     let waited = idle.recv(budget);
     kernel_tests::kassert!(matches!(waited, Err(Error::Syscall(SyscallError::Timeout))));
 }
 
-/// Хэндл клиентской капы, переданной потоку через статик.
 fn client_capability(slot: &AtomicU32) -> Handle {
     Handle::new(slot.load(SeqCst)).expect("client capability id")
 }
 
-/// Падает, если `result` - не событие об уходе значка `badge`.
 fn assert_sender_gone(result: Result<Option<Reply>>, badge: u64) {
     kernel_tests::kassert!(matches!(
         result.err(),
@@ -79,8 +69,6 @@ fn assert_sender_gone(result: Result<Option<Reply>>, badge: u64) {
     kernel_tests::kassert_eq!(received_badge(), badge);
 }
 
-/// Спавнит программу `name` из userland-образа, передавая ей `start` стартовым
-/// хэндлом.
 fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
     let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
     let cap = client
@@ -99,13 +87,9 @@ fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
     load_entry(&program, &resource, start).expect("spawn entry from image")
 }
 
-/// Сырой HandleId клиентской капы, которой лишат получателя.
 static REFUSED_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
-/// Код возврата рандеву-подтверждения клиента.
 static REFUSED_HANDSHAKE: AtomicI64 = AtomicI64::new(i64::MIN);
-/// Код возврата call'а, застигнутого обнулением множества получателей.
 static REFUSED_PARKED_CALL: AtomicI64 = AtomicI64::new(i64::MIN);
-/// Код возврата call'а, поданного уже после обнуления множества.
 static REFUSED_FRESH_CALL: AtomicI64 = AtomicI64::new(i64::MIN);
 
 extern "C" fn refused_client(_arg: usize) -> u32 {
@@ -175,10 +159,8 @@ fn badge_departs_when_the_client_process_dies() {
     assert_sender_gone(port.recv(SERVE_TIMEOUT), DYING_CLIENT_BADGE.get());
 }
 
-/// Сырые HandleId капы со значком и капы без значка: обе принадлежат клиенту.
 static LIVING_CLIENT_BADGED_CAP: AtomicU32 = AtomicU32::new(0);
 static LIVING_CLIENT_PLAIN_CAP: AtomicU32 = AtomicU32::new(0);
-/// Итог клиентского потока: `0`, только если все его шаги вернули `0`.
 static LIVING_CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
 extern "C" fn living_client(_arg: usize) -> u32 {
@@ -227,11 +209,8 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
     kernel_tests::kassert_eq!(LIVING_CLIENT_RESULT.load(SeqCst), 0);
 }
 
-/// Сырой HandleId капы клиента, который уйдёт между кадрами сервера.
 static SERVED_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
-/// Признак того, что клиент уже закрыл свою капу.
 static SERVED_CLIENT_CLOSED: AtomicU32 = AtomicU32::new(0);
-/// Итог клиентского потока: `0`, только если оба шага вернули `0`.
 static SERVED_CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
 extern "C" fn served_client(_arg: usize) -> u32 {
@@ -312,10 +291,8 @@ fn kernel_server_serves_past_a_departed_badge() {
         .expect("log after the badge departure");
 }
 
-/// Сырые HandleId двух клиентских кап с разными значками.
 static FIRST_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
 static SECOND_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
-/// Коды возврата клиентских send'ов.
 static FIRST_CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 static SECOND_CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 

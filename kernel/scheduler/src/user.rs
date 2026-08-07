@@ -6,7 +6,7 @@ use memory::{user_vm_allocator::UserVmAllocator, virtual_address::VirtualAddress
 
 use crate::{AddressSpace, Priority, ProcessId, SpawnError, ThreadId};
 
-/// Значение, передаваемое первому user-thread'у через ABI-аргумент.
+/// Значение, передаваемое первому user-thread через ABI-аргумент.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct UserBootstrapArg(pub u64);

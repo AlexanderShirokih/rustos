@@ -25,7 +25,6 @@ use userland_image::{
 
 use crate::relay;
 
-// Тег строк supervisor в журнале.
 const LOG_TAG: &str = "supervisor";
 
 /// Конечный срок остановки компонента: terminate маршрутизатора тянет за собой

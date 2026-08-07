@@ -14,22 +14,16 @@ use crate::{
     ipc_raw,
 };
 
-/// Бюджет одного запроса к фикстуре: мёртвый потомок отказывает сразу, поэтому
-/// конечный тайм-аут ловит только зависшего.
 const REQUEST_TIMEOUT: Timeout = Timeout::from_secs(5);
 /// Бюджет ожидания завершения потомка.
 pub const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-/// Имя фикстуры в userland-образе.
 const FIXTURE_ENTRY: &str = "/boot/port-fixture";
 
-/// Значок сессии родителя у фикстуры.
 const FIXTURE_SESSION_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
 
-// Значок retained-порта, который минтит загрузчик.
 const FIXTURE_LEASE_BADGE: NonZeroU64 = NonZeroU64::new(2).expect("lease badge is non-zero");
 
-// Аргумент стартового запроса retained-запуска.
 const LEASE_START_PROBE: u64 = 0xC0DE;
 
 /// Путь запуска фикстуры.
@@ -55,8 +49,6 @@ pub enum Metering<'a> {
 pub struct Fixture {
     process: Process,
     port: Port,
-    /// Отделённый под потомка бюджет. `None` - потомок метерится ресурсом
-    /// родителя.
     budget_pages: Option<u64>,
 }
 
@@ -190,8 +182,6 @@ impl Fixture {
     }
 }
 
-// Страницы, которых стоит образ программы: её сегменты. Стек потомка оплачивается тем же
-// ресурсом сверх этой оценки.
 fn image_pages<'a, E: EntryView<'a>>(program: &E) -> u64 {
     program
         .segments()

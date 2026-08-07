@@ -1,6 +1,7 @@
 //! Общий lifecycle-стейт Process/Thread: exit-код + bound-`Signal`.
 //!
-//! Завершение наблюдается через [`Signal`], материализуемый по требованию (`termination_signal`): ненаблюдаемый объект не аллоцирует `Signal` вовсе и
+//! Завершение наблюдается через [`Signal`], материализуемый по требованию
+//! (`termination_signal`): ненаблюдаемый объект не аллоцирует `Signal` вовсе.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -24,15 +25,12 @@ impl TerminationState {
         }
     }
 
-    /// Идемпотентно публикует `code`, помечает объект завершённым и, если
-    /// bound-`Signal` уже материализован, поднимает на нём `SIGNALED`.
     pub(crate) fn signal_terminated(&self, code: i32) {
         if self.mark_terminated(code) {
             self.wake_terminated();
         }
     }
 
-    /// Помечает объект завершённым с кодом `code`, наблюдателей не будит. `true` - первая пометка.
     pub(crate) fn mark_terminated(&self, code: i32) -> bool {
         self.signal.with_lock(|_slot| {
             if self.terminated.load(Ordering::Acquire) {
@@ -44,7 +42,6 @@ impl TerminationState {
         })
     }
 
-    /// Поднимает `SIGNALED` на материализованном bound-`Signal`.
     pub(crate) fn wake_terminated(&self) {
         let to_signal = self.signal.with_lock(|slot| slot.clone());
         if let Some(signal) = to_signal {
@@ -52,17 +49,14 @@ impl TerminationState {
         }
     }
 
-    /// Завершён ли объект.
     pub(crate) fn terminated(&self) -> bool {
         self.terminated.load(Ordering::Acquire)
     }
 
-    /// Финальный exit-код. До завершения возвращает 0.
     pub(crate) fn exit_code(&self) -> i32 {
         self.exit_code.load(Ordering::Acquire)
     }
 
-    // Возвращает `Signal` терминации, уже поднятый для завершённого объекта.
     pub(crate) fn termination_signal(&self) -> Arc<Signal> {
         self.signal.with_lock(|slot| {
             if let Some(signal) = slot.as_ref() {

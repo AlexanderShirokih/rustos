@@ -4,13 +4,9 @@ use alloc::{boxed::Box, vec};
 
 use crate::{frame::Frame, memory_range::MemoryRange, physical_address::PageAlignedAddress};
 
-/// Позиция бита в битовой карте
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EntryPos {
-    // Индекс 64-битного слова
     word: usize,
-
-    // индекс бита в слове
     bit: usize,
 }
 
@@ -27,21 +23,13 @@ impl EntryPos {
 
 /// Битовая карта для отслеживания статуса выделения фреймов
 pub struct FrameBitmap {
-    // Битовая карта для отслеживания занятых участков
     bitmap: Box<[u64]>,
-
-    // Количество свободных фреймов
     free: usize,
-
-    // Область памяти, которая управляется битовой картой
     target_region: MemoryRange<PageAlignedAddress>,
-
-    // Фрейм начала [target_region]
     base_frame: Frame,
 }
 
 impl FrameBitmap {
-    // Количество фреймов (битов), описываемых одной записью
     const BITS_PER_ENTRY: usize = u64::BITS as usize;
 
     pub fn new(target_region: MemoryRange<PageAlignedAddress>) -> Self {
@@ -186,7 +174,6 @@ impl FrameBitmap {
         )
     }
 
-    /// Находит первый свободный бит (0) в слове в пределах указанной маски.
     #[inline]
     fn first_free_bit(word: u64, allowed_mask: u64) -> Option<usize> {
         let free_bits = !word & allowed_mask;
@@ -208,7 +195,6 @@ impl FrameBitmap {
         Some(self.allocate_frame_at(word_index, bit_index))
     }
 
-    /// Выделяет фрейм по индексу слова и индексу бита
     #[inline]
     fn allocate_frame_at(&mut self, word_index: usize, bit_index: usize) -> Frame {
         let frame_number = self.base_frame.number() + word_index * Self::BITS_PER_ENTRY + bit_index;
@@ -240,7 +226,6 @@ impl FrameBitmap {
         self.search_range(region_begin, start)
     }
 
-    /// Вспомогательный метод для поиска свободного фрейма в диапазоне слов
     fn search_range(&mut self, start: EntryPos, end: EntryPos) -> Option<Frame> {
         if !start.is_before(end) {
             return None;

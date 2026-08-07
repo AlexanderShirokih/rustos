@@ -12,28 +12,18 @@ use memory::{
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct Aarch64MemFlags(u64);
 
-/// Сдвиг поля AttrIndx (индекс MAIR).
 const ATTR_IDX_SHIFT: u32 = 2;
-/// Маска поля AttrIndx.
 const ATTR_IDX_MASK: u64 = 0b111;
 
-/// Сдвиг поля AP (права доступа).
 const AP_SHIFT: u32 = 6;
-/// Маска поля AP.
 const AP_MASK: u64 = 0b11;
 
-/// Сдвиг поля SH (режим совместного доступа).
 const SH_SHIFT: u32 = 8;
-/// Маска поля SH.
 const SH_MASK: u64 = 0b11;
 
-/// Бит Access Flag.
 const AF_BIT: u64 = 1 << 10;
-/// Бит not-Global: страница изолирована тегом адресного пространства.
 const NG_BIT: u64 = 1 << 11;
-/// Бит Privileged Execute-Never.
 const PXN_BIT: u64 = 1 << 53;
-/// Бит Unprivileged Execute-Never.
 const UXN_BIT: u64 = 1 << 54;
 
 const ATTR_INDEX_NORMAL: u8 = 0;

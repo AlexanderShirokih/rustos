@@ -1,5 +1,5 @@
-//! Регрессии kernel-heap'а: aligned-аллокации не должны зависеть от
-//! фрагментации physical-bitmap'а (root-фреймы Drop'нутых AS и т.п.).
+//! Регрессии kernel-heap: aligned-аллокации не зависят от фрагментации
+//! physical-bitmap (root-фреймы освобождённых AS и т.п.).
 #![allow(unsafe_code)]
 
 extern crate alloc;
@@ -10,8 +10,8 @@ use scheduler::AddressSpace;
 
 const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 
-/// Цикл `new_user + drop ×N` (без map) рассыпает дырки в physical-bitmap'е;
-/// последующий `alloc_zeroed(4K, 4K)` не должен возвращать null.
+/// Цикл `new_user + drop ×N` (без map) рассыпает дырки в physical-bitmap,
+/// последующий `alloc_zeroed(4K, 4K)` всё равно отдаёт память.
 #[kernel_test]
 fn empty_user_as_drop_cycle_does_not_block_aligned_kheap_alloc() {
     let factory =

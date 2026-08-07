@@ -14,60 +14,44 @@ use filesystem_abi::{
 };
 use libfuzzer_sys::fuzz_target;
 
-// Операций в одном прогоне. Потолок держит конечную сверку дешёвой и оставляет число заводимых
-// узлов внутри потолка арены ramfs: рост дерева отказывает по своей причине, а не по числу шагов.
 const OPS_MAX: usize = 256;
 
-// Имена компонентов: короткий алфавит сталкивает операции на одних и тех же именах.
 const SHORT_NAMES: [&str; 5] = ["a", "b", "c", "dd", "e"];
 
-// Компонентов в генерируемом пути: с именами по NAME_MAX глубина держится внутри PATH_MAX.
 const DEPTH_MAX: u8 = 3;
 
-// Длина, до которой доводит рост одним шагом. Файл набирает её шагами по PAYLOAD_MAX, и за
-// OPS_MAX шагов длина остаётся заведомо внутри потолка файла ramfs.
 const SMALL_SIZE_MAX: u64 = 8 * 1024;
 
-// Наименьшая длина, лежащая заведомо за потолком файла ramfs: рост до неё отвергается `NoSpace`.
 const OVERSIZE_MIN: u64 = 1 << 40;
 
-// Длины и смещения за потолком файла ramfs.
 const OVERSIZE: [u64; 3] = [OVERSIZE_MIN, u64::MAX - 1, u64::MAX];
 
-// Доля генерируемых длин, приходящаяся на значения за потолком.
 const OVERSIZE_ODDS: u8 = 8;
 
-// Байт полезной нагрузки за одну запись.
 const PAYLOAD_MAX: usize = 64;
 
-// Размер буфера перечисления: буфер короче записи оставляет обход на месте.
 const LIST_CAPACITY_MAX: usize = 4 * (ENTRY_HEADER_SIZE + NAME_MAX);
 
-// Заходов перечисления на один каталог: обход сходится задолго до потолка.
 const LIST_BATCHES_MAX: usize = 2 * OPS_MAX;
 
-// Узел модели: идентичность, вид и содержимое файла.
 struct ModelNode {
     node: NodeId,
     kind: NodeKind,
     data: Vec<u8>,
 }
 
-// Узел, переживший снятие последнего имени: путей к нему больше нет, и содержимое его заморожено.
 struct Orphan {
     node: NodeId,
     kind: NodeKind,
     data: Vec<u8>,
 }
 
-// Референсное дерево: узлы по их полным путям, выданные идентичности и узлы без имён.
 struct Model {
     nodes: BTreeMap<String, ModelNode>,
     issued: BTreeSet<NodeId>,
     orphans: Vec<Orphan>,
 }
 
-// Курсор по байтам входа: за концом отдаёт нули, и прогон останавливает `is_empty`.
 struct Input<'a> {
     bytes: &'a [u8],
     at: usize,
@@ -87,8 +71,6 @@ impl Model {
         }
     }
 
-    // Узел по пути так, как его находит `lookup` бекенда: спуск через файл - `NotADirectory`,
-    // отсутствующее имя - `NotFound`.
     fn resolve(&self, path: &str) -> Result<&ModelNode, FileSystemError> {
         let mut current = String::from("/");
         let mut node = self.nodes.get(&current).expect("root node");
@@ -102,8 +84,6 @@ impl Model {
         Ok(node)
     }
 
-    // Каталог, в котором лежит последний компонент пути. У корня его нет, а каталог, оказавшийся
-    // файлом, отказывает на поиске имени.
     fn directory_of(&self, path: &str) -> Result<&ModelNode, FileSystemError> {
         let (parent, _) = split_last(path).ok_or(FileSystemError::InvalidPath)?;
         let node = self.resolve(parent)?;
@@ -113,7 +93,6 @@ impl Model {
         Ok(node)
     }
 
-    // Имена записей каталога вместе с их видом.
     fn children(&self, path: &str) -> Vec<(String, NodeKind)> {
         self.nodes
             .iter()
@@ -131,8 +110,6 @@ impl Model {
         }
     }
 
-    // Заводит узел под путём. Идентичность выдаётся один раз за прогон: арена не переиспользует
-    // номер узла, переставшего быть достижимым по имени.
     fn insert(&mut self, path: &str, node: NodeId, kind: NodeKind) {
         assert!(
             self.issued.insert(node),
@@ -148,7 +125,6 @@ impl Model {
         );
     }
 
-    // Снимает имя с узла: узел переживает своё последнее имя.
     fn detach(&mut self, path: &str) {
         let Some(node) = self.nodes.remove(path) else {
             return;
@@ -180,7 +156,6 @@ impl<'a> Input<'a> {
         byte
     }
 
-    // Путь из компонентов короткого алфавита. Нулевая глубина даёт корень.
     fn path(&mut self, long_name: &str) -> String {
         let depth = self.byte() % (DEPTH_MAX + 1);
         let mut path = String::from("/");
@@ -204,7 +179,6 @@ impl<'a> Input<'a> {
         (0..len).map(|_| self.byte()).collect()
     }
 
-    // Длина файла: внутри потолка ramfs либо заведомо за ним.
     fn size(&mut self) -> u64 {
         let choice = self.byte();
         if let Some(oversize) = OVERSIZE.get((choice % OVERSIZE_ODDS) as usize) {
@@ -280,7 +254,6 @@ fn path_of(text: &str) -> Path<'_> {
     Path::new(text).expect("path checked before the operation")
 }
 
-// Компоненты пути от корня.
 fn components(path: &str) -> impl Iterator<Item = &str> {
     path[1..].split('/').filter(|name| !name.is_empty())
 }
@@ -292,7 +265,6 @@ fn join(parent: &str, name: &str) -> String {
     String::from(parent) + "/" + name
 }
 
-// Родительский путь и последний компонент. У корня их нет.
 fn split_last(path: &str) -> Option<(&str, &str)> {
     if path == "/" {
         return None;
@@ -302,7 +274,6 @@ fn split_last(path: &str) -> Option<(&str, &str)> {
     Some((parent, &path[cut + 1..]))
 }
 
-// Узел пути в дереве вместе со сверкой того, что путь ведёт туда же, куда и в модели.
 fn node_of(fs: &RamFileSystem, model: &Model, path: &str) -> Option<NodeId> {
     let expected = model.resolve(path).map(|node| node.node);
     let found = fs.lookup(path_of(path));
@@ -389,7 +360,6 @@ fn expected_rename(model: &Model, from: &str, to: &str) -> Result<(), FileSystem
     Ok(())
 }
 
-// Переносит узел вместе с его поддеревом: идентичности узлов перенос сохраняет.
 fn move_subtree(model: &mut Model, from: &str, to: &str) {
     let prefix = String::from(from) + "/";
     let moved: Vec<String> = model
@@ -420,13 +390,13 @@ fn write_at(fs: &mut RamFileSystem, model: &mut Model, path: &str, offset: u64, 
     }
 }
 
-// Запись за потолком файла отказывает `NoSpace`, не тронув содержимое узла. Смещение лежит либо
-// внутри потолка, либо за OVERSIZE_MIN: промежуток между ними прогон не генерирует.
 fn expected_write(model: &Model, path: &str, offset: u64) -> Result<(), FileSystemError> {
     let node = model.resolve(path)?;
     if node.kind == NodeKind::Directory {
         return Err(FileSystemError::IsADirectory);
     }
+    // Смещение генерируется либо внутри потолка файла, либо за OVERSIZE_MIN: промежуток между
+    // ними прогон не выдаёт, поэтому одной границы хватает.
     if offset >= OVERSIZE_MIN {
         return Err(FileSystemError::NoSpace);
     }
@@ -524,8 +494,6 @@ fn list(fs: &RamFileSystem, model: &Model, path: &str, capacity: usize) {
     assert_entries(&listed, &model.children(path), path);
 }
 
-// Записи каталога, собранные обходом с буфером на `capacity` байт. `None` - буфер короче записи,
-// и обход стоит на своём слоте.
 fn walk(fs: &RamFileSystem, node: NodeId, capacity: usize) -> Option<Vec<(String, NodeKind)>> {
     let mut out = vec![0; capacity];
     let mut names = Vec::new();
@@ -562,7 +530,6 @@ fn collect(out: &[u8], listed: Listed, names: &mut Vec<(String, NodeKind)>) {
     }
 }
 
-// Перечисление отдаёт ровно записи каталога, каждую по одному разу.
 fn assert_entries(listed: &[(String, NodeKind)], expected: &[(String, NodeKind)], path: &str) {
     let mut seen = listed.to_vec();
     seen.sort_by(|left, right| left.0.cmp(&right.0));
@@ -571,8 +538,6 @@ fn assert_entries(listed: &[(String, NodeKind)], expected: &[(String, NodeKind)]
     assert_eq!(seen, want, "listing of {path}");
 }
 
-// Дерево целиком: путь ведёт к своему узлу, вид и длина совпадают с моделью, содержимое файла
-// читается байт в байт, а каталог перечисляет ровно свои записи.
 fn verify(fs: &RamFileSystem, model: &Model) {
     for (path, node) in &model.nodes {
         // Перенос каталога уводит его записи на глубину, чей путь целиком выходит за границу
@@ -620,7 +585,6 @@ fn assert_bytes(fs: &RamFileSystem, node: NodeId, expected: &[u8], path: &str) {
     assert_eq!(out, expected, "bytes of {path}");
 }
 
-// Промежуток от прежней длины файла до начала записи заполняется нулями.
 fn write_into(file: &mut Vec<u8>, start: usize, data: &[u8]) {
     let end = start + data.len();
     if file.len() < end {

@@ -71,8 +71,6 @@ impl KernelRuntime for TableRuntime {
     fn clear_blocked_cancel(&self) {}
 }
 
-/// Mapper, не обслуживающий ни одного обращения: хендлеры до переноса тела
-/// в этих тестах не доходят.
 struct InertMapper;
 
 impl MemoryMapper for InertMapper {
@@ -124,8 +122,6 @@ impl MemoryMapper for InertMapper {
     }
 }
 
-/// Стаб `SyscallRuntime`: снимок IPC-контекста собирается из inert-mapper'а и
-/// handle-таблицы capability-рантайма.
 struct StubSyscallRuntime;
 
 impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {

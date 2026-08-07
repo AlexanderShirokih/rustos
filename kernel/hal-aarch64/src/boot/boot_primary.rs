@@ -39,7 +39,6 @@ const QUANTUM_NS: u64 = scheduler::DEFAULT_QUANTUM_NS;
 
 const SCHED_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 64).with_quantum_ns(QUANTUM_NS);
 
-/// Физические адреса, пробрасываемые из pre-MMU фазы в post-MMU.
 pub(super) struct BootHandoff {
     pub dtb_phys: usize,
     pub higher_root_pa: usize,
@@ -236,22 +235,17 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
     )
 }
 
-/// Высшая отметка стека pre-MMU фазы, найденная по маркеру заливки.
 struct BootStackUsage {
     used: usize,
     size: usize,
 }
 
 impl BootStackUsage {
-    /// Маркер не уцелел ни в одном слове: стек израсходован целиком, и запись
-    /// могла уйти ниже `_stack_bottom`.
     fn is_exhausted(&self) -> bool {
         self.used == self.size
     }
 }
 
-/// Считает, сколько стека съела pre-MMU фаза: ищет снизу первое слово, где
-/// маркер заливки затёрт.
 fn boot_stack_usage() -> BootStackUsage {
     let bottom = (&raw const _stack_bottom) as usize;
     let top = (&raw const _stack_top) as usize;
@@ -274,11 +268,10 @@ fn boot_stack_usage() -> BootStackUsage {
     }
 }
 
-/// Сообщает высшую отметку стека pre-MMU фазы. Исчерпание - отказ загрузки:
-/// запись за `_stack_bottom` рушит `.bss`, и продолжать по повреждённому
-/// состоянию нельзя.
 fn report_boot_stack(usage: &BootStackUsage) -> Result<(), PrimaryBootError> {
     if usage.is_exhausted() {
+        // Ниже `_stack_bottom` линкер кладёт `.bss`: продолжать загрузку по
+        // повреждённому состоянию нельзя.
         return Err(PrimaryBootError::BootStackExhausted);
     }
 
@@ -301,12 +294,10 @@ fn init_cpu_topology(device_tree: &'static fdt::devicetree::DeviceTree<'static>)
     );
 }
 
-/// Строит Device-MMIO регион поверх окна FDT. `None` - база не выровнена на
-/// страницу (окно пропускается, что сдвигает индексы последующих в наборе).
-/// Размер округляется вверх до страницы; округление предполагает постраничную
-/// изоляцию device-окон от kernel-owned MMIO (верно для плоской раскладки).
 fn device_window_to_region(window: &AddressSpace) -> Option<Arc<MemoryRegion>> {
     let base = PageAlignedAddress::from_usize(window.offset)?;
+    // Округление вверх опирается на постраничную изоляцию device-окон от
+    // kernel-owned MMIO — она держится на плоской раскладке платформы.
     let size = page_round_up(NonZeroUsize::new(window.size)?)?;
     Some(Arc::new(MemoryRegion::create_physical_device(
         base,

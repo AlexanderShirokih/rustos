@@ -6,18 +6,12 @@ use filesystem_abi::FileSystemError;
 use ipc::wire::IpcError;
 use userland_image::ImageDecodeError;
 
-// Отказ старта маршрутизатора либо подъёма файловой системы.
 #[derive(Debug)]
 pub(crate) enum Error {
-    // Отказ рантайма: syscall, маппинг либо спавн процесса.
     Runtime(runtime::Error),
-    // Отказ транспорта при обмене кадрами.
     Ipc(IpcError),
-    // Образ не разобран кодеком.
     Image(ImageDecodeError),
-    // В образе нет программы с таким путём либо запись программой не является.
     NoProgram,
-    // Стартовый кадр не принёс capability.
     Start,
     MountTable,
 }
@@ -25,8 +19,6 @@ pub(crate) enum Error {
 pub(crate) type Result<T> = core::result::Result<T, Error>;
 
 impl Error {
-    /// Причина отказа в терминах контракта. Нехватку ресурса от прочих отказов ядра контракт
-    /// различить не даёт, и подробность уходит строкой в лог.
     pub(crate) fn as_file_system_error(&self) -> FileSystemError {
         match self {
             Self::NoProgram | Self::Image(_) | Self::MountTable => FileSystemError::NotFound,

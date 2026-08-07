@@ -76,8 +76,6 @@ fn record(ctx: &mut ProbeContext<Node>) -> ProbeResult {
     Err(ProbeError::Unsupported("record"))
 }
 
-/// Возвращает маску id узлов, по которым прошёл probe, для дерева
-/// root(id=0) с одним потомком (id=1) с заданным `status`.
 fn probed_mask_for_status(status: Option<&'static [u8]>) -> u32 {
     PROBED.with(|p| p.set(0));
 

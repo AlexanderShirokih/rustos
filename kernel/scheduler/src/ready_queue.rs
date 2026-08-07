@@ -149,7 +149,7 @@ mod tests {
         queue.push(thread(2), Priority::new(7));
         queue.push(thread(3), Priority::new(0));
 
-        assert_eq!(queue.len(), 3, "длина - мера загрузки CPU при выборе");
+        assert_eq!(queue.len(), 3, "length is the CPU load used for selection");
     }
 
     #[test]
@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(queue.len(), 0);
         assert!(queue.is_empty());
         assert!(queue.pop_highest().is_none());
-        assert_eq!(queue.len(), 0, "пустая очередь не уходит в минус");
+        assert_eq!(queue.len(), 0, "an empty queue never goes negative");
     }
 
     #[test]
@@ -184,7 +184,7 @@ mod tests {
             })
         );
         assert_eq!(queue.highest_matching(|_| false), None);
-        assert_eq!(queue.len(), 2, "поиск оставляет очередь нетронутой");
+        assert_eq!(queue.len(), 2, "lookup leaves the queue untouched");
     }
 
     #[test]

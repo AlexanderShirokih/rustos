@@ -2,8 +2,8 @@
 //! разделяемой памяти и `Signal` для park/wake.
 //!
 //! `RingTransport` - однонаправленное соединение producer->consumer над одним
-//! общим кольцом и одним "data"-сигналом, которым producer будит уснувшего
-//! consumer'а. Роль задаётся при конструировании
+//! общим кольцом и одним "data"-сигналом, которым producer будит уснувший
+//! consumer. Роль задаётся при конструировании
 //! ([`RingTransport::producer`] / [`RingTransport::consumer`]).
 //!
 //! Запись не блокируется: при полном кольце возвращается `WouldBlock`.
@@ -19,7 +19,6 @@ use crate::{
     svc::{signal_set, signal_wait_one},
 };
 
-/// Роль конца ring-транспорта над общим кольцом и "data"-сигналом.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     Producer,
@@ -34,7 +33,7 @@ pub struct RingTransport {
 }
 
 impl RingTransport {
-    /// Producer-конец: пишет кадры в кольцо, будит consumer'а.
+    /// Producer-конец: пишет кадры в кольцо, будит consumer.
     #[must_use]
     pub fn producer(ring: SpscRing, data: Handle) -> Self {
         Self {
@@ -71,9 +70,9 @@ impl Transport for RingTransport {
         match self.role {
             Role::Producer => match self.ring.try_push(bytes) {
                 Ok(PushOutcome { wake_consumer }) => {
-                    // Будим consumer'а только когда на момент публикации других
+                    // Consumer будим только когда на момент публикации других
                     // кадров не осталось: под нагрузкой кольцо непусто и
-                    // syscall'ов нет.
+                    // syscall не нужен.
                     if wake_consumer {
                         signal_set(self.data, SIGNALED, 0, WakeCount::One);
                     }

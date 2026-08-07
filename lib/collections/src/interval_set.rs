@@ -24,19 +24,16 @@ impl<T: Ord + Copy> Interval<T> {
         }
     }
 
-    /// Проверяет пересечение или смежность с другим интервалом.
     #[inline]
     fn overlaps_or_touches(&self, other: &Self) -> bool {
         !(self.end < other.start || other.end < self.start)
     }
 
-    /// Проверяет пересечение с другим интервалом.
     #[inline]
     fn overlaps(&self, other: &Self) -> bool {
         self.start < other.end && other.start < self.end
     }
 
-    /// Расширяет интервал, объединяя с другим.
     #[inline]
     fn merge_with(&mut self, other: &Self) {
         if other.start < self.start {
@@ -204,9 +201,6 @@ impl<T: Ord + Copy> IntervalSet<T> {
     }
 }
 
-/// Добавляет интервал одним проходом. Хранимые интервалы упорядочены и не пересекаются:
-/// каждый строго слева от `incoming`, касается его или строго справа. `incoming` встаёт
-/// перед первым "строго справа".
 fn add_impl<T, S>(ranges: &mut S, start: T, end: T) -> Option<()>
 where
     T: Ord + Copy,
@@ -219,6 +213,8 @@ where
     let mut out = S::new();
     let mut pending = true;
 
+    // Хранимые интервалы упорядочены и не пересекаются: каждый строго слева от `incoming`,
+    // касается его или строго справа. `incoming` встаёт перед первым строго правым.
     for item in ranges.iter().copied() {
         if pending {
             if item.overlaps_or_touches(&incoming) {

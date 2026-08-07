@@ -29,7 +29,6 @@ fn frame_allocator_static() -> &'static CountingFrameAllocator {
     Box::leak(Box::new(CountingFrameAllocator::new()))
 }
 
-/// Помечает процесс загруженным (user_vm прикреплён) без сегментов.
 fn mark_loaded(
     handle: &SchedulerHandle<MockContext, MockTimerSource>,
     process: &Arc<capability::ProcessObject>,

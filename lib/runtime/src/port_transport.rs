@@ -32,29 +32,16 @@ use crate::{
     svc::{handle_close, port_call, port_recv, port_reply, port_send},
 };
 
-/// Фаза конца port-транспорта: кодирует и роль (клиент/сервер), и текущее
-/// транзиентное состояние round-trip одним значением, делая нелегальные
-/// комбинации (например, одновременно отложенный `call` и готовый ответ)
-/// непредставимыми.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Клиент между сообщениями: `cast` -> send, `call` -> отложенный call.
     ClientIdle,
-    /// Клиент: запрос two-way `call` уложен в IPC-буфер, блокирующий
-    /// `port_call` отложен до `wait_readable` (там доступен `timeout`).
     ClientCallPending,
-    /// Клиент: ответ на `call` лежит в IPC-буфер, его ждёт следующий
-    /// `read_message`.
     ClientResponseReady,
-    /// Сервер между приёмами: `read_message` делает блокирующий `recv`.
     ServerIdle,
-    /// Сервер: `wait_readable` уже принял кадр (с тайм-аутом) в IPC-буфер;
-    /// следующий `read_message` лишь декодирует его, без повторного `recv`.
     ServerStaged,
 }
 
 impl Phase {
-    // Серверная фаза: исходящий кадр адресован вызывателю принятого.
     const fn is_server(self) -> bool {
         matches!(self, Self::ServerIdle | Self::ServerStaged)
     }
@@ -146,10 +133,6 @@ impl PortTransport {
         }
     }
 
-    // Приём кадра в IPC-буфер с тайм-аутом. Сохраняет reply-handle встречного call для
-    // последующего write_message(RESPONSE). Timeout по истечении срока, SenderGone - вместо
-    // кадра пришло событие об уходе значка, ResourceExhausted - принять кадр нечем, PeerClosed
-    // при закрытом порте.
     fn recv_into_buffer(&self, timeout: Timeout) -> Result<(), IpcError> {
         let ret = port_recv(self.handle, timeout);
         if ret < 0 {
@@ -161,8 +144,6 @@ impl PortTransport {
         Ok(())
     }
 
-    /// Записывает кадр (`bytes`) и его `handles` в per-thread IPC-буфер
-    /// текущего потока: `data[..len]`, `caps[..ncaps]`, `tag`.
     fn store_buffer(bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
         if bytes.len() > IPC_BUFFER_DATA_MAX {
             return Err(IpcError::FrameOverflow);
@@ -185,7 +166,6 @@ impl PortTransport {
         Ok(())
     }
 
-    /// Читает кадр из per-thread IPC-буфера в `bytes`/`handles` по `tag`.
     fn load_buffer(bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError> {
         let ptr = ipc_buffer_ptr().ok_or(IpcError::PeerClosed)?;
         // SAFETY: см. `store_buffer`; здесь только чтение полей буфера.
@@ -207,8 +187,6 @@ impl PortTransport {
     }
 }
 
-/// Сводит отрицательный код возврата `port_recv` к ошибке wire-транспорта:
-/// тайм-аут и уход значка отделены от закрытия порта.
 fn map_recv_error(ret: i64) -> IpcError {
     match SyscallError::from_return(ret) {
         Some(SyscallError::Timeout) => IpcError::Timeout,
@@ -220,8 +198,6 @@ fn map_recv_error(ret: i64) -> IpcError {
     }
 }
 
-// Сводит код возврата port-svc к ошибке wire-транспорта: `0` - успех,
-// `Timeout` сохраняется, остальные отказы означают закрытый port.
 fn map_send_result(ret: i64) -> Result<(), IpcError> {
     match SyscallError::from_return(ret) {
         None if ret == 0 => Ok(()),
@@ -262,7 +238,7 @@ impl Transport for PortTransport {
 
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError> {
         match self.phase.get() {
-            // Ответ на call уже доставлен port_call'ом в IPC-буфер.
+            // Ответ на call уже доставлен вызовом port_call в IPC-буфер.
             Phase::ClientResponseReady => {
                 self.phase.set(Phase::ClientIdle);
                 Self::load_buffer(bytes, handles)

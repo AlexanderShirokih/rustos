@@ -50,8 +50,6 @@ pub enum StackError {
 /// Функция trampoline для первого запуска потока.
 pub type TrampolineFn = unsafe extern "C" fn(arg: *mut ()) -> !;
 
-/// Canary в начале стека (low addresses): повреждение сигнализирует переполнение вниз.
-/// Хранится как `[u8; 16]` (не `[u64; 2]`), чтобы обойти требования к выравниванию.
 const STACK_CANARY_VALUE: u128 = 0xDEAD_C0DE_FACE_FEED_BEEF_BAD0_DEAD_F00Du128;
 
 /// Размер canary в байтах.

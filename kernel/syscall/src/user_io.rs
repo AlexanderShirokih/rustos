@@ -1,12 +1,9 @@
-//! Хелперы копирования user -> kernel в syscall-handler'ах:
+//! Хелперы копирования user -> kernel в syscall-обработчиках:
 //! валидация указателей и отображение [`UserCopyError`] в [`SyscallError`].
 
 use memory::{UserVmContext, memory_mapper::UserCopyError, virtual_address::VirtualAddress};
 use syscall::SyscallError;
 
-/// Грубая проверка user-указателя: пустой буфер пропускаем без
-/// валидации, иначе адрес не должен быть нулевым, а диапазон `[va, va+len)`
-/// не должен переполнять адресное пространство.
 pub(super) fn validate_user_ptr(va: u64, len: usize) -> Result<(), SyscallError> {
     if len == 0 {
         return Ok(());
@@ -14,8 +11,7 @@ pub(super) fn validate_user_ptr(va: u64, len: usize) -> Result<(), SyscallError>
     if va == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    // `va + len` не должен заворачиваться за границу адресного пространства:
-    // иначе валидация прошла бы, но диапазон был бы бессмысленным.
+    // `va + len` не заворачивается за границу адресного пространства.
     let len_u64 = u64::try_from(len).map_err(|_| SyscallError::InvalidArgument)?;
     va.checked_add(len_u64)
         .ok_or(SyscallError::InvalidArgument)?;
@@ -34,8 +30,6 @@ pub(super) fn copy_in(
         .map_err(user_copy_err)
 }
 
-/// Все варианты [`UserCopyError`] -> [`SyscallError::InvalidArgument`]:
-/// с точки зрения caller'а user-указатель непригоден в любом случае.
 pub(super) fn user_copy_err(_e: UserCopyError) -> SyscallError {
     SyscallError::InvalidArgument
 }
@@ -58,7 +52,6 @@ mod tests {
 
     use super::*;
 
-    // Чтение за пределами буфера -> NotMapped.
     struct CannedMapper {
         base_va: usize,
         writable: bool,

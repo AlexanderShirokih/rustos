@@ -12,20 +12,16 @@ use crate::memory::layout::{
 };
 
 unsafe extern "C" {
-    /** Код ядра */
     static _text_start: u8;
     static _text_end: u8;
 
-    /** Статика ядра */
     static _rodata_start: u8;
     static _rodata_end: u8;
 
-    /** Данные ядра */
     static _rw_start: u8;
     static _rw_end: u8;
 }
 
-/// Ошибка построения раскладки памяти.
 pub(crate) struct MemoryLayoutBuildError;
 
 impl From<TooManyMemoryRegions> for MemoryLayoutBuildError {
@@ -34,8 +30,6 @@ impl From<TooManyMemoryRegions> for MemoryLayoutBuildError {
     }
 }
 
-/// Строит раскладку памяти из DeviceTree. Вызывается только в pre-MMU фазе:
-/// оттуда берутся физические адреса секций ядра.
 pub(crate) fn build_memory_layout(
     dt: &DeviceTree,
     userland_blob: Option<BootPayloadRange>,

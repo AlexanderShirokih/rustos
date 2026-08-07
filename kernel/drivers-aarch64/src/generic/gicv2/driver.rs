@@ -19,10 +19,7 @@ use crate::register_driver;
 
 /// Драйвер Generic Interrupt Controller v2.
 pub struct Gicv2 {
-    /// Адрес MMIO GICD (Distributor).
     distributor_address: MmioAddress,
-
-    /// Адрес MMIO GICC (CPU Interface).
     cpu_interface_address: MmioAddress,
 }
 

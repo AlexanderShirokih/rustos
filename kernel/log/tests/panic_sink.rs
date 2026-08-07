@@ -17,9 +17,9 @@ use io::writer::Writer;
 struct ReentrantWriter;
 
 impl Writer for ReentrantWriter {
-    // Панический вывод изнутри записи: модель паники в драйвере консоли,
-    // когда лок `STDOUT` уже захвачен `printf`.
     fn write_all(&self, _buf: &[u8]) {
+        // Панический вывод изнутри записи: модель паники в драйвере консоли,
+        // когда лок `STDOUT` уже захвачен `printf`.
         klog::panic_printf(format_args!("reason-under-lock"));
     }
 
@@ -57,7 +57,7 @@ fn panic_printf_reaches_sink_while_stdout_lock_is_held() {
 
     done_rx
         .recv_timeout(Duration::from_secs(10))
-        .expect("printf завис: печать паники ждала лок STDOUT вместо обхода");
+        .expect("printf hung: the panic path waited for the STDOUT lock");
     assert!(sink.panic_contents().contains("reason-under-lock"));
     assert!(!sink.normal_contents().contains("reason-under-lock"));
 }

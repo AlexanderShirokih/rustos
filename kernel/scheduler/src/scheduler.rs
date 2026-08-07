@@ -35,14 +35,10 @@ use crate::{
 
 const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
 const IPC_BUFFER_PAGES: NonZeroUsize = NonZeroUsize::MIN;
-// Загрузка, начиная с которой CPU отдаёт поток: свою единственную работу он
-// исполняет сам.
 const MIN_DONOR_LOAD: usize = 2;
 /// Длина кванта по умолчанию (нс). Экспонируется для тестов.
 pub const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
 
-/// Зарезервированный под стартовый хэндл слот child-таблицы вместе с процессом
-/// и таблицей: `commit_reserved` идёт после всех способных упасть шагов спавна.
 struct ChildHandleSlot {
     process_id: ProcessId,
     process_object: Arc<ProcessObject>,
@@ -55,8 +51,6 @@ struct StealCandidate {
     queued: QueuedThread,
 }
 
-/// Снимок IPC-контекста текущего потока, собранный за один захват scheduler-лока
-/// (см. [`SchedulerInner::current_ipc_parts`]).
 pub(super) struct IpcContextParts {
     pub(super) address_space: Arc<AddressSpace>,
     pub(super) allocator: Arc<MutexCell<UserVmAllocator>>,
@@ -79,10 +73,8 @@ pub(super) enum ScheduleAction<A: ArchContext> {
     },
 }
 
-/// Отложенное до выхода из-под scheduler-лока: пробуждения и дренаж таблиц
-/// терминированных процессов - и то, и другое берёт тот же лок.
 #[derive(Default)]
-#[must_use = "DeferredSignals содержит отложенные пробуждения и дренаж таблиц"]
+#[must_use = "DeferredSignals holds wakeups and drains to run outside the scheduler lock"]
 pub(super) struct DeferredSignals {
     threads: Vec<(Arc<ThreadObject>, i32)>,
     processes: Vec<Arc<ProcessObject>>,
@@ -134,25 +126,18 @@ impl DeferredSignals {
     }
 }
 
-/// Отложенное до выхода из-под scheduler-лока разрушение capability: и `Drop`
-/// стартового хэндла откатанного спавна, и освобождение изъятого из таблицы
-/// загрузчика будят ждущих через тот же лок.
 #[derive(Default)]
-#[must_use = "DeferredHandles содержит capability, ждущие разрушения вне лока"]
+#[must_use = "DeferredHandles holds capabilities to destroy outside the scheduler lock"]
 pub(super) struct DeferredHandles {
     rolled_back: Vec<Capability>,
     drained: Vec<DrainedHandles>,
 }
 
 impl DeferredHandles {
-    /// Стартовый хэндл откатанного спавна: он никуда не встал, поэтому только
-    /// роняется, без отзыва производных.
     fn push_rolled_back(&mut self, handle: Capability) {
         self.rolled_back.push(handle);
     }
 
-    /// Изъятое из таблицы загрузчика: cancel-цели снятых слотов и остаток
-    /// capability освобождает [`DrainedHandles::release`].
     fn push_drained(&mut self, drained: DrainedHandles) {
         self.drained.push(drained);
     }
@@ -250,28 +235,17 @@ where
     sleepers: SleepQueue,
     kernel_address_space: Arc<AddressSpace>,
     address_space_factory: Option<&'static (dyn AddressSpaceFactory + Send + Sync)>,
-    /// Глобальный аллокатор фреймов для backing per-thread IPC-буферов.
     frame_allocator: Option<&'static (dyn FrameAllocator + Send + Sync)>,
-    /// Процессы, у которых счётчик thread'ов достиг 0.
     pending_process_removals: Vec<ProcessId>,
-    /// Снятые с таблицы процессы, ждущие разрушения вне scheduler-лока.
     pending_process_drops: Vec<Process>,
-    /// Завершённые потоки, ждущие реапа из `ThreadTable`.
     pending_thread_removals: Vec<ThreadId>,
-    /// Потоки, чей IPC-буфер ждёт освобождения: снимать отображение у потока,
-    /// исполняющегося на другом CPU, значит выдернуть память из-под syscall.
     pending_ipc_releases: Vec<ThreadId>,
-    /// Capability, ждущие разрушения вне scheduler-лока.
     deferred_handles: DeferredHandles,
-    /// CPU, которым под локом добавили работу. Бит на CPU: отправка идёт вне
-    /// лока, а там список уже не собрать.
     pending_wakeups: u16,
     quantum_ns: u64,
     time_slice_ticks: u32,
 }
 
-// Маска пробуждений держит по биту на CPU и потому связана с тем же пределом,
-// что и `CpuId`.
 const _: () = assert!(MAX_CPUS <= u16::BITS as usize);
 
 /// Отказ подъёма планировщика на CPU.
@@ -677,12 +651,6 @@ where
         Ok(id)
     }
 
-    /// Создаёт per-CPU состояние планировщика на текущем CPU.
-    ///
-    /// Порядок шагов задан откатом: указатель отдаётся платформенному слою до
-    /// того, как `Cpu` встанет в таблицу. Слот, заполненный для CPU, который в
-    /// планировщик так и не вошёл, копил бы потоки в очереди, которую никто не
-    /// разбирает.
     pub(super) fn bootstrap_current_cpu(&mut self) -> Result<(), CpuBootstrapError> {
         let cpu_id = <A::Cpu as ArchCpu>::current_id();
         if self.cpu_by_id(cpu_id).is_some() {
@@ -747,18 +715,12 @@ where
             .map_or(current_id, |cpu| cpu.id())
     }
 
-    // Число потоков, за которые CPU отвечает: очередь готовых и исполняемый
-    // поток. Одной очереди мало - CPU, занятый потоком, опустошает её и по ней
-    // неотличим от простаивающего. Терминация снимает поток с очереди: в длине
-    // стоят живые записи.
     fn cpu_load(cpu: &Cpu) -> usize {
         let running = usize::from(cpu.current() != cpu.idle());
 
         cpu.ready_queue().len() + running
     }
 
-    // Вместе с потоком переезжает его привязка - CPU, в очередь которого поток
-    // возвращают все пути пробуждения.
     fn steal_into_current(&mut self) -> bool {
         let Some(own_id) = self.current_cpu().map(Cpu::id) else {
             return false;
@@ -774,6 +736,8 @@ where
             return false;
         }
 
+        // Привязка переезжает вместе с потоком: все пути пробуждения ставят
+        // поток в очередь того CPU, который записан в его affinity.
         if let Some(migrated) = self.threads.get_mut(thread) {
             migrated.set_cpu_affinity(own_id);
         }
@@ -809,10 +773,10 @@ where
         best
     }
 
-    // Занятый поток остаётся своему CPU: `current` исполняется на своём стеке,
-    // а контекст потока, чьё переключение идёт прямо сейчас, записывается вне
-    // scheduler-лока.
     fn is_stealable(&self, id: ThreadId) -> bool {
+        // Занятый поток остаётся своему CPU: `current` исполняется на своём
+        // стеке, а контекст переключаемого потока записывается вне
+        // scheduler-лока.
         !self.is_thread_held(id)
             && self
                 .threads
@@ -869,21 +833,10 @@ where
         Ok(name)
     }
 
-    /// Забирает отложенное разрушение capability: оно снимает учёт держателей
-    /// порта и будит ждущих, а это берёт scheduler-лок.
     pub(super) fn take_deferred_handles(&mut self) -> DeferredHandles {
         core::mem::take(&mut self.deferred_handles)
     }
 
-    /// Заводит процесс потомка с зарезервированным слотом под стартовый хэндл.
-    /// `None` - слоты процессов или слоты child-таблицы исчерпаны.
-    ///
-    /// Заведённый здесь процесс откаты спавна роняют прямо под scheduler-локом,
-    /// минуя карантин `pending_process_drops`. Пробуждения на разрушении процесса
-    /// приходят только от capability его таблицы, а таблица потомка до
-    /// `commit_reserved` - последнего шага спавна - держит максимум резервацию
-    /// слота. Стартовый хэндл откаты отдают в `deferred_handles`, поэтому и он
-    /// разрушается вне лока.
     fn insert_child_process(
         &mut self,
         name: ProcessName<'_>,
@@ -1052,11 +1005,11 @@ where
         Ok((pid, true))
     }
 
-    /// Снятый процесс роняется прямо под scheduler-локом, минуя карантин
-    /// `pending_process_drops`: заведён он этим же спавном, хэндлов не получал,
-    /// и его разрушение никого не будит.
     fn rollback_intern(&mut self, pid: ProcessId, is_new: bool) {
         if is_new {
+            // Процесс заведён этим же спавном и хэндлов никому не отдал: его
+            // разрушение никого не будит и карантина `pending_process_drops`
+            // не требует. Стартовый хэндл уходит в `deferred_handles`.
             self.processes.remove(pid);
         } else if let Some(process) = self.processes.get(pid) {
             let was_last = process.decrement_thread_count();
@@ -1115,12 +1068,6 @@ where
         }
     }
 
-    /// Перевыбор потока по требованию другого CPU.
-    ///
-    /// В отличие от тика, квант текущего потока не расходуется: сообщение
-    /// говорит лишь о появившейся работе, а времени с прошлого тика не прошло.
-    /// Терминированный current снимается безусловно. Живой вытесняется только
-    /// в пользу более приоритетного потока или если CPU стоял в idle.
     pub(super) fn reschedule(&mut self, now_ns: u64) -> ScheduleAction<A> {
         let Some((current_id, idle_id, highest_ready)) = self.current_cpu().map(|cpu| {
             (
@@ -1274,8 +1221,6 @@ where
         Some((process.address_space().clone(), vm))
     }
 
-    /// Снимок IPC-контекста текущего потока одним обращением: адресное
-    /// пространство, user-VM, VA IPC-буфера и handle-таблица его процесса.
     pub(super) fn current_ipc_parts(&self) -> Option<IpcContextParts> {
         let current_id = self.current_cpu()?.current();
         let thread = self.threads.get(current_id)?;
@@ -1524,9 +1469,9 @@ where
         Ok(())
     }
 
-    /// БЕЗОПАСНОСТЬ: для потока, заблокированного на Port, caller обязан снять
-    /// `Waiter` с очереди Port до вызова - иначе матчер пишет в уже снятый VA.
     fn release_ipc_buffer(&mut self, thread_id: ThreadId) {
+        // Для потока, заблокированного на Port, caller снимает `Waiter` с
+        // очереди Port до вызова: иначе матчер пишет в уже снятый VA.
         let Some(thread) = self.threads.get(thread_id) else {
             return;
         };
@@ -1626,8 +1571,6 @@ where
         }
     }
 
-    /// Закрывает переключение и забирает снятые процессы для разрушения вне
-    /// scheduler-лока: их `Drop` берёт тот же лок.
     pub(super) fn finish_switch(&mut self) -> Vec<Process> {
         self.release_previous();
         core::mem::take(&mut self.pending_process_drops)
@@ -1791,7 +1734,7 @@ where
             process.handle_table().clone()
         };
 
-        // Validate хэндл под loader-lock'ом до drain: existence + TRANSFER.
+        // Validate хэндл под loader-lock до drain: existence + TRANSFER.
         if let Err(e) = loader_handle_table
             .with_lock(|tbl| tbl.get(handle_id, capability::Rights::TRANSFER).map(|_| ()))
         {
@@ -1918,7 +1861,7 @@ where
         }
         self.pending_ipc_releases.push(thread_id);
         // Стек снимается только после ухода со всех CPU current/previous.
-        // Rust-кадры принудительно не unwind'ятся, но сам thread/stack slot
+        // Rust-кадры принудительно не разматываются, но сам thread/stack slot
         // после quiescence больше не должен оставаться в таблице навсегда.
         self.pending_thread_removals.push(thread_id);
 
@@ -1931,11 +1874,6 @@ where
         }
     }
 
-    /// Терминация процесса: пометка завершения, сигнал наблюдателям, дренаж
-    /// handle-таблицы и постановка в очередь на снятие из `ProcessTable`.
-    /// Дренаж и постановка - один раз на процесс, сигнал переживает повторный
-    /// вызов. Пометка идёт под scheduler-локом: её же читают отказы
-    /// `ProcessStart`/`ThreadCreate`, а дренаж и пробуждения отложены.
     fn collect_process_termination(
         &mut self,
         pid: ProcessId,
@@ -1947,6 +1885,9 @@ where
             return;
         };
         let process_object = process.process_object().clone();
+        // Пометка ставится под scheduler-локом: её же читают отказы
+        // `ProcessStart`/`ThreadCreate`. Дренаж таблицы и пробуждения
+        // наблюдателей под этим локом не выполняются.
         process_object.mark_terminated(exit_code);
         signals.push_process(process_object);
         if already_pending {
@@ -1980,8 +1921,8 @@ where
         let Some(pid) = pid_lookup else {
             return signals;
         };
-        // Собираем снимок capability target живых потоков под scheduler-lock'ом, чтобы
-        // не держать одновременно &self и &mut self при итерации.
+        // Собираем снимок capability target живых потоков под scheduler-lock,
+        // чтобы не держать одновременно &self и &mut self при итерации.
         let live: Vec<Arc<ThreadObject>> = self
             .threads
             .iter()
@@ -2004,7 +1945,7 @@ where
             let Some(thread) = self.threads.get_mut(entry.thread_id) else {
                 continue;
             };
-            // Сравниваем deadline'ы: если поток уже разбужен по signal-стороне
+            // Сравниваем дедлайны: если поток уже разбужен по signal-стороне
             // и снова ушёл в Sleeping с другим wakeup_at_ns - старая stale-entry
             // не должна тригернуть преждевременное пробуждение.
             if !matches!(
@@ -2051,9 +1992,6 @@ where
         self.switch_to_next(now_ns)
     }
 
-    // Извлекает первый живой runnable текущего CPU: запись, пережившая
-    // терминацию своего потока, пропускается. Забранный у соседа поток жив, и
-    // следующий проход цикла его возвращает.
     fn take_next_runnable(&mut self, idle_id: ThreadId) -> ThreadId {
         loop {
             let popped = self
@@ -2251,7 +2189,6 @@ where
         }
     }
 
-    /// Длина таблицы CPU ограничена сверху: `CpuId` не выходит за `MAX_CPUS`.
     fn ensure_cpu_slot(&mut self, id: CpuId) {
         let required_len = id.as_index() + 1;
         if self.cpus.len() < required_len {
@@ -2264,27 +2201,25 @@ struct TrampolinePayload {
     entry: Box<dyn FnOnce() + Send + 'static>,
 }
 
-/// Разрушает отложенные capability уже вне scheduler-лока: их `Drop`, отзыв и
-/// пробуждение cancel-целей берут тот же лок.
 pub(super) fn release_deferred_handles<A: ArchContext, T: TimerSource>(
     inner: &MutexCell<SchedulerInner<A, T>>,
 ) {
+    // Разрушение capability не выполняется под scheduler-локом: их `Drop`,
+    // отзыв и пробуждение cancel-целей берут тот же лок.
     inner
         .with_lock(SchedulerInner::take_deferred_handles)
         .emit();
     notify_pending_cpus(inner);
 }
 
-/// Будит CPU, которым под локом добавили работу.
-///
-/// Вне лока: отправка идёт через контроллер прерываний, а тот берёт свои
-/// локи - брать их из-под scheduler-лока значит задать двум локам порядок,
-/// обратный тому, в котором их берёт обработчик прерывания.
 pub(super) fn notify_pending_cpus<A: ArchContext, T: TimerSource>(
     inner: &MutexCell<SchedulerInner<A, T>>,
 ) {
     let mut pending = inner.with_lock(SchedulerInner::take_pending_wakeups);
 
+    // Отправка не выполняется под scheduler-локом: она идёт через контроллер
+    // прерываний, который берёт свои локи, а обработчик прерывания берёт ту же
+    // пару в обратном порядке.
     while pending != 0 {
         let index = pending.trailing_zeros();
         pending &= pending - 1;
@@ -2298,8 +2233,6 @@ pub(super) fn notify_pending_cpus<A: ArchContext, T: TimerSource>(
     }
 }
 
-/// Выполняет переключение и роняет снятые процессы уже вне scheduler-лока:
-/// `Drop` их capability будит припаркованные потоки через тот же лок.
 pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
     inner: &MutexCell<SchedulerInner<A, T>>,
     action: ScheduleAction<A>,
@@ -2327,6 +2260,8 @@ pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
     // Ушедший в exit поток сюда не возвращается: отметку снимает и процесс
     // роняет тот поток, который следующим пройдёт через переключение.
     let dropped = inner.with_lock(SchedulerInner::finish_switch);
+    // Снятые процессы роняются не под scheduler-локом: `Drop` их capability
+    // будит припаркованные потоки через тот же лок.
     drop(dropped);
 }
 

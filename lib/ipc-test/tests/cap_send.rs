@@ -18,7 +18,6 @@ trait CapProto {
     fn exchange(&self, cap: ipc::wire::Cap) -> u64;
 }
 
-/// Исход владения cap-источником.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Fate {
     Pending,
@@ -26,7 +25,6 @@ enum Fate {
     Dropped,
 }
 
-/// Источник cap, фиксирующий исход: relinquish (отдан ядру) или Drop (закрыт).
 struct FakeHandle {
     id: u32,
     fate: Rc<Cell<Fate>>,
@@ -49,7 +47,6 @@ impl Drop for FakeHandle {
     }
 }
 
-/// Сервис двунаправленного обмена: возвращает id принятого cap.
 struct Echo;
 
 impl CapProtoService for Echo {

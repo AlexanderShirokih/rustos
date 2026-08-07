@@ -1,12 +1,7 @@
-/// Курсор для последовательного чтения бинарных данных.
-///
-/// Предоставляет методы для чтения big-endian значений и C-строк.
 #[derive(Clone)]
 pub(crate) struct Cursor<'a> {
-    /// Буфер с данными для чтения.
     pub(crate) buffer: &'a [u8],
 
-    /// Текущая позиция чтения в буфере.
     position: usize,
 }
 
@@ -31,9 +26,6 @@ impl<'a> Cursor<'a> {
         self.set_position(p);
     }
 
-    /// Читает big-endian `u32` из текущей позиции.
-    ///
-    /// Возвращает `None`, если в буфере недостаточно байт, чтобы не паниковать на OOB-доступе.
     pub(crate) fn read_u32(&mut self) -> Option<u32> {
         let p = self.position;
         let word = *self.buffer.get(p..)?.first_chunk::<4>()?;

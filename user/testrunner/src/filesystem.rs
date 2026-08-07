@@ -24,7 +24,6 @@ use syscall::{Rights, SIGNALED};
 use userland_image::{decode, decode_plan};
 use userland_loader::load_entry;
 
-// Конечный срок ответа сервера превращает зависание в диагностируемый Timeout.
 pub(crate) const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const CLIENT_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -33,48 +32,33 @@ const BOOT_TREE_BADGE: NonZeroU64 = NonZeroU64::new(0x0B00).expect("badge is non
 const BOOT_TREE_ATTEMPTS: usize = 200;
 const BOOT_TREE_TURN: Timeout = Timeout::from_ns(10_000_000);
 
-// Программа-клиент, чья сессия умирает вместе с процессом.
 const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture";
 
 const RAM_FILESYSTEM_PROGRAM: &str = "/boot/filesystem-ramfs";
 
-// Фикстура зависшего монтирования: принимает стартовый кадр и замолкает.
 const UNRESPONSIVE_FILESYSTEM_PROGRAM: &str = "/boot/unresponsive-filesystem";
 
-// Дерево имён прогона: образ лежит на корне, изменяемая файловая система - под RAM_MOUNT.
 const RAM_MOUNT: &str = "/tmp";
 
-// Смещение записи, означающее дозапись в конец.
 const APPEND_OFFSET: u64 = u64::MAX;
 
 const BUFFER_SIZE: u32 = 4096;
 
-// Записей в каталоге перечисления: с именами по NAME_MAX они не умещаются в один буфер, и
-// обход требует продолжения по DirCursor.
 const LISTING_ENTRIES: usize = 70;
 
-// Каталог образа, накрытый корневым монтированием: его записи задаёт манифест образа.
 const IMAGE_DIRECTORY: &str = "/boot";
 
-// Файл-данные образа: путь и байты, заданные манифестом образа.
 const IMAGE_FILE: &str = "/boot/sample";
 const IMAGE_FILE_BODY: &[u8] = b"hello from the userland image\n";
 
-// Файл образа нулевой длины, заданный манифестом образа.
 const IMAGE_EMPTY_FILE: &str = "/boot/empty";
 
-// Узел, который заводит клиент, не ждущий ответа.
 const ABANDONED_PATH: &str = "/abandoned";
 
-// Кадров в проверке утечки capability: их число обязано превысить ёмкость capability-таблицы
-// процесса, иначе утечка не станет видимой.
 const LEAK_FRAMES: usize = syscall::HANDLE_TABLE_CAPACITY as usize + 128;
 
-// Сессий в проверке уборки: каждая держит буфер данных на бюджете монтирования, и все они
-// вместе его превосходят. Цикл сходится только на сервере, убирающем ушедшие сессии.
 const REAP_SESSIONS: usize = 40;
 
-// Буфер сессии в проверке уборки: на потолке буфера бюджет монтирования кончается быстрее.
 const REAP_BUFFER_SIZE: u32 = 64 * 1024;
 
 struct NamespacePorts {
@@ -87,7 +71,6 @@ struct NamespacePorts {
 
 static NAMESPACE_PORTS: Once<NamespacePorts> = Once::new();
 
-// Первый вызов поднимает маршрутизатор вместе с деревом имён прогона.
 fn router_minter() -> BorrowedHandle<'static> {
     namespace_roots().service_minter()
 }
@@ -112,8 +95,6 @@ fn namespace_admin_client(capability: BorrowedHandle<'_>) -> NamespaceAdminClien
     NamespaceAdminClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
-// Источники capability маршрутизатора переживают его: производные образа и лог-сессии
-// отзываются вместе со своими источниками.
 fn start_namespace() -> NamespacePorts {
     let bootstrap = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
     let image = MemoryRegion::adopt(acquire_image(&bootstrap));
@@ -146,6 +127,7 @@ fn start_namespace() -> NamespacePorts {
         component
     };
     await_boot_tree(&component);
+    // Источники переживают маршрутизатор: производные капы отзываются вместе с ними.
     NamespacePorts {
         component,
         _resource: resource,
@@ -205,22 +187,18 @@ fn namespace_client(capability: BorrowedHandle<'_>) -> NamespaceClient<PortTrans
     NamespaceClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
-// Поднимает изменяемое дерево под своим префиксом: у свежего процесса файловой системы пустая
-// арена узлов и свой бюджет страниц.
 pub(crate) fn mount_ram_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
     namespace_admin_client(router_admin())
         .mount(path(prefix), path(RAM_FILESYSTEM_PROGRAM))
         .expect("mount call")
 }
 
-// Снимает монтирование вместе с его процессом.
 pub(crate) fn unmount_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
     namespace_admin_client(router_admin())
         .unmount(path(prefix))
         .expect("unmount call")
 }
 
-// Значок сессии назначает сама файловая система.
 pub(crate) fn session_for(text: &str) -> OwnedHandle {
     let mounted = namespace_client(router_minter())
         .resolve(path(text))
@@ -241,19 +219,13 @@ pub(crate) fn connect(capability: &OwnedHandle) -> FileSystemClient<PortTranspor
     FileSystemClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
-// Порча кадра запроса: чем он отличается от описанного контрактом.
 #[derive(Clone, Copy)]
 struct Tamper {
-    /// Обнулить `txid`: запрос уходит односторонним, и ответить на него некому -
-    /// то же положение сервера, что и с ушедшим по тайм-ауту вызывателем.
     one_way: bool,
-    /// Сдвинуть ordinal за пределы контракта.
     unknown_ordinal: bool,
-    /// Оставить тело без полей: обязательное поле запроса не приедет.
     empty_body: bool,
 }
 
-// Клиентский транспорт, портящий кадр запроса перед отправкой.
 struct Tampered {
     port: PortTransport,
     tamper: Tamper,
@@ -308,8 +280,6 @@ fn connect_tampered(capability: &OwnedHandle, tamper: Tamper) -> FileSystemClien
     .with_wait(CALL_TIMEOUT)
 }
 
-// Ответ этому клиенту доставить некому: port_reply сервера отказывает так же, как на ушедшем
-// по тайм-ауту вызывателе.
 fn connect_abandoning(capability: &OwnedHandle) -> FileSystemClient<Tampered> {
     connect_tampered(
         capability,
@@ -320,7 +290,6 @@ fn connect_abandoning(capability: &OwnedHandle) -> FileSystemClient<Tampered> {
     )
 }
 
-// Маппинг буфера живёт, пока жива его капа.
 fn acquire_buffer(client: &FileSystemClient<PortTransport>) -> MemoryRegion {
     let cap = client
         .acquire_buffer(BUFFER_SIZE)
@@ -360,7 +329,6 @@ fn write_all(
     written.count
 }
 
-// Страницы буфера отображены и у сервера: проверяется их приватная копия.
 fn buffer_head(buffer: &runtime::Mapping, len: usize) -> Vec<u8> {
     let mut bytes = vec![0; len];
     buffer.copy_out(&mut bytes).expect("buffer head");
@@ -383,12 +351,10 @@ fn collect_entries(buffer: &[u8], count: u32, names: &mut Vec<String>) {
     }
 }
 
-// Имя записи длиной NAME_MAX, уникальное по индексу.
 fn entry_name(index: usize) -> String {
     format!("{index:0>NAME_MAX$}")
 }
 
-// Вызов list повторяется с выданной позиции, пока перечисление не дойдёт до конца.
 fn walk_directory(
     client: &FileSystemClient<PortTransport>,
     buffer: &runtime::Mapping,
@@ -1078,15 +1044,13 @@ fn filesystem_releases_the_reply_of_an_unparsed_frame() {
     kernel_tests::kassert_eq!(refused, Err(IpcError::PeerClosed));
 }
 
-// Кадр сервер не разберёт: ordinal вне контракта, тело пустое, txid == 0 оставляет его без
-// ответа. Владение capability кадр переносит в таблицу сервера. Отправка идёт сырым syscall:
-// транспорт сводит любой отказ к PeerClosed, а сроком отказ сервера отличается от зависания.
 fn send_unparsed_frame_with_capability(session: &OwnedHandle, capability: OwnedHandle) {
     let mut frame = [0u8; MESSAGE_INLINE_MAX];
     Header::new(u64::MAX, 0, 0)
         .encode(&mut frame)
         .expect("frame header");
     frame[HEADER_SIZE] = TERMINATOR;
+    // Отправка идёт сырым syscall: транспорт сводит любой отказ сервера к PeerClosed.
     crate::ipc_raw::write_frame(&frame[..=HEADER_SIZE], &[capability.into_raw().raw()]);
     kernel_tests::kassert_eq!(port_send(session.as_raw(), CALL_TIMEOUT), 0);
 }
@@ -1123,7 +1087,6 @@ fn filesystem_closes_the_capability_of_an_undelivered_reply() {
     kernel_tests::kassert!(vends_a_buffer());
 }
 
-// Выдаёт ли сервер capability новому клиенту: заполненную утечкой таблицу выдаёт отказ.
 fn vends_a_buffer() -> bool {
     let capability = image_session();
     let client = connect(&capability);
@@ -1134,8 +1097,6 @@ fn vends_a_buffer() -> bool {
     true
 }
 
-// Значок сессии назначает сервер: снаружи её видно только по бюджету монтирования, который
-// держит её буфер.
 fn take_and_drop_session() {
     let capability = ram_session();
     let client = connect(&capability);
@@ -1146,7 +1107,6 @@ fn take_and_drop_session() {
     drop(OwnedHandle::adopt(buffer));
 }
 
-// Капу сессии фикстура держит одна: её смерть равна уходу значка.
 fn run_client_fixture() {
     let client = spawn_from_image(CLIENT_FIXTURE, ram_session());
     client

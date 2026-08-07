@@ -48,7 +48,6 @@ mod tests {
     use super::DeviceWindow;
     use crate::{BootstrapClient, BootstrapService, dispatch_bootstrap};
 
-    /// Набор из двух окон: индекс `i` -> cap `0x90 + i`.
     struct Vendor;
 
     impl BootstrapService for Vendor {
@@ -81,8 +80,6 @@ mod tests {
         }
     }
 
-    /// Окно-заглушка: база выводится из raw cap как `(raw - 0x90) * 0x1000`;
-    /// окно с raw `0x90` не инспектируется.
     struct FakeWindow {
         cap: Cap,
     }

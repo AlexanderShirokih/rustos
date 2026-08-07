@@ -846,7 +846,7 @@ mod tests {
         let _ = region.install(&mapper, va, MemFlags::user_rw());
         // Зануление должно покрыть все фреймы независимо от того, на каком
         // map_exact упадём - иначе следующий install пропустит зануление
-        // непоказанных user'у фреймов.
+        // фреймов, ещё не показанных user.
         let zeroed = mapper.zeroed.lock().unwrap().clone();
         assert_eq!(zeroed.len(), 4);
 

@@ -20,19 +20,16 @@ use crate::{
 
 const SEPARATOR: char = '/';
 
-// Корень дерева: первая запись таблицы, взятая с нулевой глубины.
 const ROOT: NodeId = NodeId::from_raw(0);
 
-// Младшие биты NodeId заняты глубиной узла, старшие - номером записи.
 const DEPTH_BITS: u32 = 8;
 const DEPTH_MASK: u32 = (1 << DEPTH_BITS) - 1;
 
-// Компонент вместе с разделителем занимает не меньше двух байт пути, и глубина
-// укладывается в отведённые ей биты.
-const _: () = assert!(PATH_MAX / 2 <= DEPTH_MASK as usize);
+const _: () = assert!(
+    // Компонент вместе с разделителем занимает не меньше двух байт пути.
+    PATH_MAX / 2 <= DEPTH_MASK as usize
+);
 
-// Путь записи образа приходит в дерево именем контракта: его ёмкость обязана умещаться в границу
-// пути, иначе собранный образ не поднимется.
 const _: () = assert!(userland::USERLAND_ENTRY_PATH_CAPACITY <= PATH_MAX);
 
 /// Отказ построения дерева по образу.
@@ -46,15 +43,12 @@ pub enum ImageFileSystemError {
     EmptyImage,
 }
 
-// Запись таблицы образа: путь, байты содержимого и их смещение от начала образа.
 struct Record {
     path: Path<'static>,
     data: &'static [u8],
     offset: u64,
 }
 
-// Узел дерева: запись таблицы и число её компонентов, образующих путь узла. Глубина по всей
-// записи - сама запись, меньшая - каталог из записей с таким префиксом.
 #[derive(Clone, Copy)]
 struct Located<'a> {
     record: &'a Record,
@@ -93,7 +87,6 @@ impl ImageFileSystem {
         Ok(Self { entries })
     }
 
-    // Номер записи или глубина вне таблицы дают NotFound.
     fn locate(&self, node: NodeId) -> Result<Located<'_>, FileSystemError> {
         let index = (node.raw() >> DEPTH_BITS) as usize;
         let depth = (node.raw() & DEPTH_MASK) as usize;
@@ -108,7 +101,6 @@ impl ImageFileSystem {
         })
     }
 
-    // Каждое имя каталога отдаётся ровно один раз вместе с позицией записи, которая его дала.
     fn entries_under<'a>(
         &'a self,
         prefix: &'a str,
@@ -123,6 +115,7 @@ impl ImageFileSystem {
             .map_while(move |(offset, record)| {
                 Some((from + offset, entry_under(record.path.as_str(), prefix)?))
             })
+            // Соседние записи каталога с общим первым компонентом дают его имя один раз.
             .filter(move |(_, entry)| listed.replace(entry.name) != Some(entry.name))
     }
 
@@ -141,7 +134,6 @@ impl ImageFileSystem {
             .binary_search_by(|record| record.path.as_str().cmp(path.as_str()))
     }
 
-    // Запись выше по ненайденному пути значит спуск через файл: исход NotADirectory.
     fn missing(&self, path: Path<'_>) -> FileSystemError {
         let mut current = path;
         while let Some((parent, _)) = current.split_last() {
@@ -153,7 +145,6 @@ impl ImageFileSystem {
         FileSystemError::NotFound
     }
 
-    // Вид узла - более конкретная причина отказа, чем режим монтирования.
     fn refuse_change(&self, node: NodeId) -> FileSystemError {
         self.locate(node)
             .and_then(Located::data)
@@ -161,7 +152,6 @@ impl ImageFileSystem {
             .unwrap_or(FileSystemError::ReadOnly)
     }
 
-    // У корня имени нет, спуск через файл каталога не даёт.
     fn parent_directory(&self, path: Path<'_>) -> Result<(), FileSystemError> {
         let (parent, _) = path.split_last().ok_or(FileSystemError::InvalidPath)?;
         if self.locate(self.lookup(parent)?)?.is_file() {
@@ -175,7 +165,6 @@ impl ImageFileSystem {
         self.locate(self.lookup(path)?)
     }
 
-    // Неразрешённый каталог и занятое имя - причины пути, они важнее режима монтирования.
     fn refuse_new_name(&self, path: Path<'_>) -> FileSystemError {
         if let Err(error) = self.parent_directory(path) {
             return error;
@@ -186,7 +175,6 @@ impl ImageFileSystem {
         FileSystemError::ReadOnly
     }
 
-    // Неразрешённый путь и вид замещаемого узла важнее режима монтирования.
     fn refuse_rename(&self, from: Path<'_>, to: Path<'_>) -> FileSystemError {
         if let Err(error) = self.locate_path(from) {
             return error;
@@ -204,7 +192,6 @@ impl ImageFileSystem {
 }
 
 impl<'a> Located<'a> {
-    // Первые depth компонентов записи вместе с разделителями. У корня длина нулевая.
     fn prefix_len(self) -> usize {
         self.record
             .path
@@ -214,17 +201,14 @@ impl<'a> Located<'a> {
             .sum()
     }
 
-    // Узел, взятый по записи целиком, - файл.
     fn is_file(self) -> bool {
         self.prefix_len() == self.record.path.as_str().len()
     }
 
-    // Общий префикс путей каталога, без завершающего разделителя.
     fn prefix(self) -> &'a str {
         &self.record.path.as_str()[..self.prefix_len()]
     }
 
-    // Каталог байт не несёт: IsADirectory.
     fn data(self) -> Result<&'a [u8], FileSystemError> {
         self.is_file()
             .then_some(self.record.data)
@@ -237,8 +221,6 @@ impl FileSystemBackend for ImageFileSystem {
         false
     }
 
-    /// Путь, совпавший с записью таблицы целиком, даёт файл. Путь, под которым лежат записи, даёт
-    /// каталог.
     fn lookup(&self, path: Path<'_>) -> Result<NodeId, FileSystemError> {
         if path.is_root() {
             return Ok(ROOT);
@@ -356,8 +338,6 @@ impl FileSystemBackend for ImageFileSystem {
         })
     }
 
-    /// Возвращает окно записи в байтах образа. Запись без байт своих страниц не занимает, и
-    /// окна у неё нет: такой узел даёт `NotSupported`.
     fn backing(&self, node: NodeId) -> Result<Window, FileSystemError> {
         let node = self.locate(node)?;
         let size = node.data()?.len() as u64;
@@ -371,12 +351,11 @@ impl FileSystemBackend for ImageFileSystem {
     }
 }
 
-// Записей в образе не больше u16::MAX, и пара (номер, глубина) укладывается в NodeId.
 fn node_id(index: usize, depth: usize) -> NodeId {
+    // Записей в образе не больше u16::MAX: пара (номер, глубина) укладывается в NodeId.
     NodeId::from_raw(((index as u32) << DEPTH_BITS) | depth as u32)
 }
 
-// Первый компонент пути за префиксом каталога и его вид. None - путь лежит вне каталога.
 fn entry_under<'a>(path: &'a str, prefix: &str) -> Option<DirEntry<'a>> {
     let rest = path.strip_prefix(prefix)?.strip_prefix(SEPARATOR)?;
     Some(match rest.find(SEPARATOR) {
@@ -391,7 +370,6 @@ fn entry_under<'a>(path: &'a str, prefix: &str) -> Option<DirEntry<'a>> {
     })
 }
 
-// Лежит ли путь в таблице раньше содержимого каталога, то есть раньше его пути с разделителем.
 fn precedes_content(path: &str, prefix: &str) -> bool {
     path.chars()
         .cmp(prefix.chars().chain(iter::once(SEPARATOR)))
@@ -424,8 +402,6 @@ mod tests {
         DirCursor::from_raw(slot)
     }
 
-    // Таблица с вложенным каталогом и с именем, которое отличается от каталога
-    // байтом меньше разделителя.
     fn image_bytes() -> &'static [u8] {
         static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
         BYTES.get_or_init(|| {
@@ -462,10 +438,9 @@ mod tests {
         ImageFileSystem::new(image_bytes()).expect("decode image")
     }
 
-    // Байты одноразовой таблицы живут до конца процесса, как регион образа в
-    // сервере. Boot-запись роли для дерева не играет.
     fn image_from(records: &[ImageRecord<'_>]) -> Result<ImageFileSystem, ImageFileSystemError> {
         let bytes = encode(records, records[0].path).expect("encode image");
+        // Байты живут до конца процесса, как регион образа в сервере.
         ImageFileSystem::new(Vec::leak(bytes))
     }
 
@@ -488,7 +463,6 @@ mod tests {
         }
     }
 
-    // Записи, уложенные `list` в буфер, и сам итог перечисления.
     fn listing(
         fs: &ImageFileSystem,
         node: NodeId,

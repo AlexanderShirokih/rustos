@@ -1,14 +1,12 @@
 //! Безопасный accessor к per-thread IPC-буферу.
 //!
-//! IPC-буфер выдаётся ядром per-thread; VA запрашивается syscall'ом на
+//! IPC-буфер выдаётся ядром per-thread; VA запрашивается через syscall на
 //! каждый вызов (кэш недопустим, так как разные потоки имеют разные VA).
 
 use syscall::IpcBuffer;
 
 use crate::svc::ipc_buffer_addr;
 
-/// Возвращает VA IPC-буфера текущего потока.
-/// `None`, если у потока нет буфера (syscall вернул ошибку или ноль).
 fn ipc_buffer_va() -> Option<u64> {
     let ret = ipc_buffer_addr();
     if ret <= 0 {

@@ -13,9 +13,10 @@ use drivers_common_aarch64::ipi_affinity::IpiAffinity;
 use klog::debug;
 
 use super::regs::{
-    GICC_BPR, GICC_CTLR, GICC_EOIR, GICC_IAR, GICC_PMR, GICD_CTLR, GICD_ICENABLER, GICD_ICFGR,
-    GICD_ICPENDR, GICD_IPRIORITYR, GICD_ISENABLER, GICD_ITARGETSR, GICD_SGIR, GICD_TYPER,
-    ITLinesNumber, IrqType, PRIORITY_MASK_ALL, bit_offset,
+    BINARY_POINT_NO_SUBPRIORITY, CTLR_DISABLE, CTLR_ENABLE_GRP0, GICC_BPR, GICC_CTLR, GICC_EOIR,
+    GICC_IAR, GICC_PMR, GICD_CTLR, GICD_ICENABLER, GICD_ICFGR, GICD_ICPENDR, GICD_IPRIORITYR,
+    GICD_ISENABLER, GICD_ITARGETSR, GICD_SGIR, GICD_TYPER, IrqBankCount, IrqType,
+    PRIORITY_MASK_ALL, bit_offset,
 };
 use crate::read_sysreg;
 
@@ -26,21 +27,14 @@ const fn sgir_value(irq: IrqNumber, target_list: u8) -> u32 {
 const _: () = assert!(sgir_value(IrqNumber::new(0), 0b0000_0010) == 0x0002_0000);
 const _: () = assert!(sgir_value(IrqNumber::new(15), 0b1000_0000) == 0x0080_000F);
 
-/// Runtime-объект контроллера прерываний GICv2.
 pub(super) struct Gicv2Controller {
     pub(super) distributor: MmioBound,
     pub(super) cpu_interface: MmioBound,
-    pub(super) interrupt_lines: ITLinesNumber,
+    pub(super) interrupt_lines: IrqBankCount,
     pub(super) handlers: BTreeMap<IrqNumber, BoundIrq>,
-    /// Маска CPU interface каждого CPU по его `Aff0`. Заполняется каждым CPU
-    /// на своей инициализации: соответствие объявляет железо, а не топология.
     interface_masks: BTreeMap<u8, u8>,
 }
 
-/// Привязанная линия: обработчик и параметры её настройки.
-///
-/// Регистры SGI и PPI банкированы по CPU: настройка, сделанная одним CPU,
-/// другому не видна, и на его per-CPU инициализации она повторяется отсюда.
 pub(super) struct BoundIrq {
     pub(super) handler: Arc<dyn IrqHandler>,
     pub(super) priority: IrqPriority,
@@ -73,12 +67,10 @@ impl Gicv2Controller {
         self.init_this_cpu()
     }
 
-    /// Настраивает CPU interface текущего CPU: его регистры банкированы по CPU.
-    /// Distributor общий для всех CPU и здесь не участвует.
-    ///
-    /// Оставляет IRQ замаскированными на текущем CPU.
     pub(super) fn init_this_cpu(&mut self) -> Result<(), CpuInterfaceError> {
         Self::set_irq_mask();
+        // Регистры CPU interface банкированы по CPU, поэтому настройку выполняет
+        // каждый CPU у себя. Distributor общий и здесь не участвует.
         self.init_cpu_interface();
         self.reset_private_lines();
         self.learn_interface_mask()?;
@@ -100,6 +92,8 @@ impl Gicv2Controller {
     fn learn_interface_mask(&mut self) -> Result<(), CpuInterfaceError> {
         // SAFETY: MPIDR_EL1 доступен на EL1 и только читается.
         let aff0 = IpiAffinity::from_mpidr(unsafe { read_sysreg!(mpidr_el1) }).aff0;
+        // Соответствие CPU и маски его интерфейса объявляет железо: GICD_ITARGETSR
+        // для SGI/PPI банкирован, поэтому на каждом CPU читается своё значение.
         let mask = (self.distributor.read_reg(GICD_ITARGETSR) & 0xFF) as u8;
         if mask == 0 {
             return Err(CpuInterfaceError::NotFound);
@@ -110,6 +104,8 @@ impl Gicv2Controller {
     }
 
     fn restore_private_lines(&self) {
+        // Регистры SGI и PPI банкированы по CPU: настройка, сделанная одним CPU,
+        // другому не видна и повторяется на его per-CPU инициализации.
         for (irq, bound) in &self.handlers {
             if !matches!(IrqType::from_irq_number(*irq), IrqType::Sgi | IrqType::Ppi) {
                 continue;
@@ -123,10 +119,6 @@ impl Gicv2Controller {
         }
     }
 
-    /// Рассылает SGI процессору через `GICD_SGIR`.
-    ///
-    /// GICv2 адресует CPU маской его интерфейса, а не affinity; маску объявил
-    /// сам CPU на своей инициализации, до неё адресовать его нечем.
     pub(super) fn send_sgi(&self, irq: IrqNumber, target: IpiTarget) -> Result<(), IpiError> {
         if !matches!(IrqType::from_irq_number(irq), IrqType::Sgi) {
             return Err(IpiError::NotAnIpi);
@@ -136,6 +128,8 @@ impl Gicv2Controller {
         if !affinity.is_single_cluster() {
             return Err(IpiError::UnreachableTarget);
         }
+        // GICD_SGIR адресует CPU маской его интерфейса. Маску объявляет сам CPU на
+        // своей инициализации, до неё адресовать его нечем.
         let target_list = *self
             .interface_masks
             .get(&affinity.aff0)
@@ -159,33 +153,28 @@ impl Gicv2Controller {
 
     pub(super) fn disable_global() {
         Self::set_irq_mask();
-
-        // self.cpu_interface.write_reg(GICC_CTLR, 0);
-        // self.distributor.write_reg(GICD_CTLR, 0);
     }
 
     fn init_distributor(&self) {
-        // Отключаем Distributor перед настройкой
-        self.distributor.write_reg(GICD_CTLR, 0);
+        // Настройка идёт при выключенном Distributor: до включения ни одна линия не
+        // доезжает до CPU interface, и GICD_ICFGR пишется по отключённым линиям.
+        self.distributor.write_reg(GICD_CTLR, CTLR_DISABLE);
 
-        // Сбрасываем прерывания, pending флаги и configuration
         self.reset_interrupt_lines();
         self.set_level_sensitive_mode();
 
-        // Включаем Distributor (EnableGrp0)
-        self.distributor.write_reg(GICD_CTLR, 1);
+        self.distributor.write_reg(GICD_CTLR, CTLR_ENABLE_GRP0);
     }
 
     fn init_cpu_interface(&self) {
-        // Устанавливаем маски приоритета
         self.cpu_interface.write_reg(GICC_PMR, PRIORITY_MASK_ALL);
-        self.cpu_interface.write_reg(GICC_BPR, 0);
+        self.cpu_interface
+            .write_reg(GICC_BPR, BINARY_POINT_NO_SUBPRIORITY);
 
-        // Включаем CPU interface (EnableGrp0)
-        self.cpu_interface.write_reg(GICC_CTLR, 0x01);
+        self.cpu_interface.write_reg(GICC_CTLR, CTLR_ENABLE_GRP0);
     }
 
-    fn get_interrupts_lines(distributor: &MmioBound) -> ITLinesNumber {
+    fn get_interrupts_lines(distributor: &MmioBound) -> IrqBankCount {
         let typer = distributor.read_reg(GICD_TYPER);
         let it_lines_number = typer & 0x1F;
 
@@ -196,11 +185,8 @@ impl Gicv2Controller {
         for bank in 0..self.interrupt_lines {
             let offset = bank * 4;
 
-            // Отключаем все прерывания
             self.distributor
                 .write_reg(GICD_ICENABLER.with_offset(offset), u32::MAX);
-
-            // Сбрасываем pending флаги
             self.distributor
                 .write_reg(GICD_ICPENDR.with_offset(offset), u32::MAX);
         }
@@ -247,7 +233,6 @@ impl Gicv2Controller {
         let priority_reg = GICD_IPRIORITYR.with_offset(reg * 4);
         let mut val = self.distributor.read_reg(priority_reg);
 
-        // Очищаем старое значение и устанавливаем новое
         let bit_shift = bit * 8;
         val &= !(0xFF << bit_shift);
         val |= u32::from(priority.raw()) << bit_shift;
@@ -255,20 +240,17 @@ impl Gicv2Controller {
         self.distributor.write_reg(priority_reg, val);
     }
 
-    /// Назначает целевые CPU для SPI через GICD_ITARGETSR.
-    ///
-    /// Поле прерывания - 8-битная маска, бит N = CPU interface N.
     pub(super) fn set_target_cpu(&self, irq: IrqNumber, target: CpuMask) {
         if !matches!(IrqType::from_irq_number(irq), IrqType::Spi) {
             return;
         }
 
+        // Поле прерывания в GICD_ITARGETSR - 8-битная маска, бит N = CPU interface N.
         let (reg, bit) = bit_offset(irq, 8);
 
         let target_cpu_reg = GICD_ITARGETSR.with_offset(reg * 4);
         let mut val = self.distributor.read_reg(target_cpu_reg);
 
-        // Очищаем старое значение и устанавливаем новое
         let bit_shift = bit * 8;
         val &= !(0xFF << bit_shift);
         val |= u32::from(target.raw()) << bit_shift;
@@ -276,10 +258,10 @@ impl Gicv2Controller {
         self.distributor.write_reg(target_cpu_reg, val);
     }
 
-    /// Конфигурирует триггер линии через GICD_ICFGR (2 бита на IRQ; старший бит
-    /// поля: `1` = edge, `0` = level). Вызывать до enable: переконфигурация
-    /// включённой линии по спеке GIC UNPREDICTABLE.
     pub(super) fn set_config(&self, irq: IrqNumber, trigger: TriggerType) {
+        // Спека GIC объявляет переконфигурацию включённой линии UNPREDICTABLE,
+        // поэтому вызов допустим только до enable.
+        // GICD_ICFGR отводит 2 бита на IRQ, старший бит поля: 1 = edge, 0 = level.
         let (reg, entry) = bit_offset(irq, 2);
         let trigger_bit = entry * 2 + 1;
         let reg_addr = GICD_ICFGR.with_offset(reg * 4);
@@ -293,6 +275,7 @@ impl Gicv2Controller {
     }
 
     fn acknowledge(&mut self) -> Option<IrqNumber> {
+        // GICC_IAR отдаёт INTID группы 0 в Secure view и переводит линию в active.
         let raw = (self.cpu_interface.read_reg(GICC_IAR) & 0x3FF) as u16;
 
         match IrqType::from_irq_number(IrqNumber::new(raw)) {
@@ -302,13 +285,13 @@ impl Gicv2Controller {
     }
 
     fn end_of_interrupt(&self, irq: IrqNumber) {
+        // GICC_EOIR закрывает прерывание группы 0 в том же Secure view.
         self.cpu_interface
             .write_reg(GICC_EOIR, u32::from(irq.raw()));
     }
 }
 
 impl super::super::DispatchController for Gicv2Controller {
-    /// Подтверждает и деактивирует (EOI) один pending IRQ, возвращая его хендлер.
     fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>> {
         let irq = self.acknowledge()?;
         let handler = self.handlers.get(&irq).map(|bound| bound.handler.clone());

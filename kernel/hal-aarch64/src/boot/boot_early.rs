@@ -26,11 +26,8 @@ unsafe extern "C" {
     pub(super) static _bss_end: u8;
 }
 
-/// Маркер, которым `_start` заливает стек pre-MMU фазы: по нему post-MMU фаза
-/// находит высшую отметку и отличает переполнение от нормального роста.
 pub(super) const BOOT_STACK_FILL: u64 = 0xFACE_FEED_FACE_FEED;
 
-/// Pre-MMU фаза: BootInfo -> память -> bump allocator -> page tables -> MMU -> jump.
 pub(super) fn boot_main(boot_info: &BootInfo) -> Result<(), ()> {
     let dtb_phys = match boot_info.hw_description {
         HwDescription::Fdt(ref blob) => blob.phys.as_usize(),
@@ -86,13 +83,8 @@ pub(super) fn boot_main(boot_info: &BootInfo) -> Result<(), ()> {
     }
 }
 
-/// Прыжок с identity-адреса на higher-half адрес, переключение стека, вызов primary_main.
-/// После прыжка управление передаётся в `primary_main` и не возвращается.
-///
-/// # Safety
-///
-/// MMU должен быть включён. TTBR1 должен содержать корректный маппинг higher-half.
-/// TTBR0 должен покрывать текущий PC (identity mapping ещё нужен для инструкции `br x0`).
+// SAFETY: MMU включён, TTBR1 содержит корректный маппинг higher-half, TTBR0 покрывает
+// текущий PC — identity mapping ещё нужен для инструкции `br x0`.
 #[unsafe(naked)]
 unsafe extern "C" fn jump_to_higher_half(
     _dtb_phys: usize,

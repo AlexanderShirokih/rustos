@@ -22,13 +22,14 @@ use memory::{
 const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
 use scheduler::{AddressSpace, ArchContext};
 
+use super::probe_va;
 use crate::{
     consts::HIGHER_HALF_BASE,
     memory::regs::{common::EL1, id_aa64mmfr0::IdAa64Mmfr0},
     sched::Aarch64Context,
 };
 
-const PROBE_VA: usize = 0x6000_0000;
+const PROBE_VA: usize = probe_va::ASID.base();
 
 fn user_rw_flags() -> MemFlags {
     MemFlags::Private(Owners {
@@ -43,10 +44,9 @@ fn user_rw_flags() -> MemFlags {
     })
 }
 
-/// Свежий 4К-фрейм + его kernel-VA через линейную PA->VA-карту. Намеренная
-/// утечка: после маппинга в user-AS вернуть фрейм нельзя.
 fn allocate_probe_page() -> (*mut u8, PageAlignedAddress) {
     let fa = syscall_bridge::frame_allocator().expect("FrameAllocator must be installed");
+    // Фрейм течёт намеренно: после маппинга в user-AS вернуть его нельзя.
     let frame = fa.allocate_frame().expect("RAM frame available");
     let pa = frame.page_address();
     let ptr = (HIGHER_HALF_BASE + pa.as_usize()) as *mut u8;
@@ -84,7 +84,6 @@ fn read_tcr() -> u64 {
     raw
 }
 
-/// ASID из `TTBR0_EL1[63:48]`.
 fn asid_of(ttbr0: u64) -> u64 {
     (ttbr0 >> 48) & 0xFFFF
 }
@@ -171,7 +170,7 @@ fn rollover_smoke() {
     let probe_va = PageAlignedVirtualAddress::from_usize(PROBE_VA + 0x1000).expect("aligned");
 
     // >255 итераций ради 8-bit-режима. В 16-bit rollover не сработает, но
-    // цепочка switch'ей всё равно проверяется.
+    // цепочка переключений всё равно проверяется.
     for _ in 0..260 {
         let a = AddressSpace::new_user(factory).expect("create AS");
         let mapper = a.mapper().expect("user mapper");

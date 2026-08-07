@@ -50,12 +50,10 @@ mod tests {
         }
     }
 
-    /// Дописывает property с сырыми байтами; `name_off` - смещение имени в
-    /// блоке строк.
-    fn push_prop(structure: &mut Vec<u8>, name_off: u32, value: &[u8]) {
+    fn push_prop(structure: &mut Vec<u8>, name_offset: u32, value: &[u8]) {
         push_u32(structure, 0x3);
         push_u32(structure, value.len() as u32);
-        push_u32(structure, name_off);
+        push_u32(structure, name_offset);
         structure.extend_from_slice(value);
         align4(structure);
     }
@@ -71,7 +69,6 @@ mod tests {
         push_u32(structure, 0x2);
     }
 
-    /// reg-запись для root с `#address-cells = 2`, `#size-cells = 2`.
     fn reg_2_2(base: u64, size: u64) -> Vec<u8> {
         let mut reg = Vec::new();
         push_u32(&mut reg, (base >> 32) as u32);
@@ -104,13 +101,6 @@ mod tests {
         buf
     }
 
-    /// ```text
-    /// / { #address-cells = <2>; #size-cells = <2>;
-    ///     pl011@9000000 { compatible = "arm,pl011"; reg = <0 0x9000000 0 0x1000>; };
-    ///     rtc@9010000   { compatible = "arm,pl031"; reg = <0 0x9010000 0 0x1000>; };
-    ///     memory@40000000 { device_type = "memory"; reg = <0 0x40000000 0 0x1000>; };
-    /// };
-    /// ```
     fn build_dtb() -> Vec<u8> {
         let strings = b"#address-cells\0#size-cells\0compatible\0reg\0device_type\0";
         let s_addr: u32 = 0;

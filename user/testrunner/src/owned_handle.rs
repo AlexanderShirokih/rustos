@@ -6,14 +6,11 @@ use kernel_tests::kernel_test;
 use runtime::{OwnedHandle, handle_close, signal_create, signal_set};
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 
-/// Минтит свежий `Signal` и оборачивает во владеющий хэндл.
 fn mint() -> OwnedHandle {
     let handle = signal_create().expect("signal_create must succeed");
     OwnedHandle::from_handle(handle)
 }
 
-/// `true`, если non-blocking операция на `handle` отвергнута как `BadHandle`
-/// (хэндл закрыт).
 fn is_closed(handle: Handle) -> bool {
     signal_set(handle, SIGNALED, 0, WakeCount::None) == SyscallError::BadHandle.as_return_value()
 }

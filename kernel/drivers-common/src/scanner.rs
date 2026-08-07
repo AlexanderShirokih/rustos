@@ -8,10 +8,8 @@ use crate::{
     probe::{ProbeContext, ProbeError, ProbeResult},
 };
 
-/// Узел считается рабочим, если у него либо нет `status`-свойства, либо
-/// значение `"okay"`/`"ok"` (DT spec). Любой другой статус (`"disabled"`,
-/// `"fail*"`, `"reserved"`) исключает узел и его поддерево из пробинга.
 fn is_node_enabled<N: DeviceNode>(node: &N) -> bool {
+    // DT spec: отсутствие `status` равнозначно рабочему узлу.
     let Some(prop) = node.prop("status") else {
         return true;
     };

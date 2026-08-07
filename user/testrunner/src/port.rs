@@ -27,23 +27,15 @@ use syscall::{Handle, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag}
 const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-/// Офсеты полей IpcBuffer для доступа из `#[repr(C)]`-layout.
 const CAPS_OFF: usize = core::mem::offset_of!(syscall::IpcBuffer, caps);
 const DATA_OFF: usize = core::mem::offset_of!(syscall::IpcBuffer, data);
 const BADGE_OFF: usize = core::mem::offset_of!(syscall::IpcBuffer, badge);
 
-/// Право `Rights::WRITE` (бит `1<<3`) для минта badged-копии port'а,
-/// через которую клиент может слать (`send` гейтится WRITE).
 const RIGHTS_WRITE: u32 = 1 << 3;
 
-/// Сырой HandleId port'а, передаваемый worker-потоку (он не может
-/// принять аргумент handle напрямую кроме x0).
 static EP_RAW: AtomicU64 = AtomicU64::new(0);
-/// Результат worker-потока (>=0 - ok-код, <0 - ошибка/маркер).
 static WORKER_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
-/// Готовность worker'а (для биаса порядка прихода).
 static WORKER_READY: AtomicU64 = AtomicU64::new(0);
-/// Сырой HandleId Signal, который worker создаёт для cap-transfer теста.
 static NOTIF_RAW: AtomicU64 = AtomicU64::new(0);
 
 fn ipc_va() -> usize {
@@ -56,10 +48,8 @@ fn assert_positive(v: i64) {
     kernel_tests::kassert!(v > 0);
 }
 
-/// Пишет tag + тело в собственный IPC-буфер.
-///
-/// SAFETY: ядро замаппило per-thread IPC-буфер user-RW (одна страница);
-/// запись tag/data лежит в его границах, поток - единственный владелец.
+// SAFETY: ядро замаппило per-thread IPC-буфер user-RW (одна страница);
+// запись tag/data лежит в его границах, поток - единственный владелец.
 unsafe fn write_msg(va: usize, body: &[u8], caps: &[u32]) {
     // SAFETY: caller guarantees `va` points to the current thread's per-thread IPC-буфер.
     unsafe {
@@ -76,9 +66,7 @@ unsafe fn write_msg(va: usize, body: &[u8], caps: &[u32]) {
     }
 }
 
-/// Читает (len, ncaps) и первые `out.len()` байт тела из собственного буфера.
-///
-/// SAFETY: см. [`write_msg`].
+// SAFETY: см. `write_msg`.
 unsafe fn read_msg(va: usize, out: &mut [u8]) -> (usize, usize) {
     // SAFETY: caller guarantees `va` points to the current thread's per-thread IPC-буфер.
     unsafe {
@@ -93,18 +81,13 @@ unsafe fn read_msg(va: usize, out: &mut [u8]) -> (usize, usize) {
     }
 }
 
-/// Читает cap[i] из собственного буфера.
-///
-/// SAFETY: см. [`write_msg`].
+// SAFETY: см. `write_msg`.
 unsafe fn read_cap(va: usize, i: usize) -> u32 {
     // SAFETY: caller guarantees `va` points to the current thread's per-thread IPC-буфер.
     unsafe { ((va + CAPS_OFF) as *const u32).add(i).read_volatile() }
 }
 
-/// Читает значок (badge) отправителя из собственного буфера (ядро пишет его
-/// туда на recv/call).
-///
-/// SAFETY: см. [`write_msg`].
+// SAFETY: см. `write_msg`.
 unsafe fn read_badge(va: usize) -> u64 {
     // SAFETY: caller guarantees `va` points to the current thread's per-thread IPC-буфер.
     unsafe { ((va + BADGE_OFF) as *const u64).read_volatile() }
@@ -313,12 +296,9 @@ fn cap_transfer_through_port() {
 const BADGE_A: u64 = 0xA11CE;
 const BADGE_B: u64 = 0xB0B;
 
-/// Сырые HandleId badged-копий port'а для клиентов A и B.
 static EP_BADGED_A: AtomicU64 = AtomicU64::new(0);
 static EP_BADGED_B: AtomicU64 = AtomicU64::new(0);
-/// Готовность клиентов (оба должны заклеймиться и быть готовы слать).
 static CLIENTS_READY: AtomicU64 = AtomicU64::new(0);
-/// Результаты клиентских send (>=0 ok).
 static CLIENT_A_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 static CLIENT_B_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
@@ -394,7 +374,7 @@ fn badge_round_trip_two_clients() {
     kernel_tests::kassert_eq!(CLIENT_B_RESULT.load(SeqCst), 0);
 }
 
-// --- (f) timeout/poll: блокирующие Port-syscall'ы не виснут на RT-пути. -------
+// --- (f) timeout/poll: блокирующие Port-syscall не виснут на RT-пути. ---------
 
 #[kernel_test]
 fn send_poll_no_receiver_should_wait() {
@@ -425,7 +405,6 @@ fn call_finite_timeout_no_server_should_wait() {
     );
 }
 
-/// Падает, если результат не `Err(SyscallError::Timeout)`.
 fn assert_timeout(result: runtime::Result<()>) {
     kernel_tests::kassert!(matches!(result, Err(Error::Syscall(SyscallError::Timeout))));
 }

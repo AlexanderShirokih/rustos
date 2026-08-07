@@ -8,19 +8,20 @@ use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LOG_TAG_MAX, LogBuffer, LogServic
 use runtime::{OwnedHandle, PortTransport, handle_close};
 use syscall::Timeout;
 
-// Источник собственных строк relay в стоке.
 const RELAY_SOURCE: &str = "log-relay";
 
-// Диагностика покадрового отказа приёма.
 const RESOURCE_EXHAUSTED_MESSAGE: &str = "frame dropped: resources exhausted";
 
-// Подряд идущих отказов стока, после которых пересылка прекращается.
-const SINK_FAILURE_LIMIT: u32 = 8;
+/// Предел подряд идущих отказов стока: на нём relay уходит из своего цикла.
+/// Успешная пересылка обнуляет счёт.
+pub const SINK_FAILURE_LIMIT: u32 = 8;
 
-// Наибольшая видимая форма одного Unicode scalar: `\\u{10ffff}`.
 const ESCAPED_CHARACTER_MAX: usize = 10;
 
-const _: () = assert!(LOG_MESSAGE_MAX >= ESCAPED_CHARACTER_MAX);
+const _: () = assert!(
+    LOG_MESSAGE_MAX >= ESCAPED_CHARACTER_MAX,
+    "a log message holds the widest escaped scalar, `\\u{{10ffff}}`"
+);
 
 /// Сток строк лога: доверенный канал, недоступный клиентам лог-порта.
 pub trait LogSink {
@@ -147,14 +148,14 @@ fn compose_source(trusted: &str, local: &str) -> LogBuffer<LOG_SOURCE_MAX> {
     source
 }
 
-// Экранирование увеличивает один scalar за раз. Стековый scratch позволяет обрезать source
-// или сбросить кусок message только между целыми scalar.
 fn forward_message<S: LogSink>(sink: &mut S, source: &str, message: &str) -> Result<(), IpcError> {
     if message.is_empty() {
         return sink.write(source, "");
     }
 
     let mut chunk = LogBuffer::<LOG_MESSAGE_MAX>::new();
+    // Экранирование растёт по одному scalar, поэтому кусок сбрасывается в сток только
+    // между целыми scalar.
     for character in message.chars() {
         let escaped = escape_character(character, false);
         if escaped.as_str().len() > LOG_MESSAGE_MAX - chunk.as_str().len() {
@@ -212,9 +213,9 @@ fn escape_character(character: char, brackets: bool) -> LogBuffer<ESCAPED_CHARAC
     escaped
 }
 
-// Capability, приехавшие с кадром, ядро уже положило в таблицу relay: контракт
-// их не несёт, и дальше они не идут.
 fn discard_staged_caps(transport: &PortTransport) {
+    // Capability, приехавшие с кадром, ядро уже положило в таблицу relay. Контракт их
+    // не несёт, и дальше они не идут.
     for handle in transport.staged_caps().into_iter().flatten() {
         let _ = handle_close(handle);
     }

@@ -6,10 +6,8 @@ use core::ops::{Index, IndexMut};
 /// как замена `alloc::vec::Vec`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Vec<T, const N: usize> {
-    /// Массив слотов для элементов.
     items: [Option<T>; N],
 
-    /// Текущее количество элементов.
     len: usize,
 }
 

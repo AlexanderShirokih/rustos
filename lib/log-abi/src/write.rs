@@ -27,7 +27,6 @@ mod tests {
 
     use crate::{LOG_MESSAGE_MAX, LOG_TAG_MAX, LogClient, dispatch_log, tests::Sink};
 
-    // Все кадры, которыми ушла строка.
     fn logged_frames(tag: &str, message: &str) -> Vec<String> {
         let (client_end, server_end) = MockEnd::pair();
         LogClient::new(client_end)
@@ -89,8 +88,8 @@ mod tests {
     #[test]
     fn write_str_cuts_the_tag_on_a_char_boundary() {
         // Тег из двухбайтовых символов не делится границей LOG_TAG_MAX ровно.
-        let long_tag = "ё".repeat(LOG_TAG_MAX);
+        let long_tag = "é".repeat(LOG_TAG_MAX);
         let line = logged(&long_tag, "line");
-        assert_eq!(line, format!("[{}] line", "ё".repeat(LOG_TAG_MAX / 2)));
+        assert_eq!(line, format!("[{}] line", "é".repeat(LOG_TAG_MAX / 2)));
     }
 }

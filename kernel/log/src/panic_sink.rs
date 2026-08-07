@@ -6,11 +6,8 @@ use spin::Once;
 
 use crate::level::{Level, prefix};
 
-/// Тип стока пути паники.
 type PanicWriter = dyn Writer + Send + Sync;
 
-// Сток хранится отдельно от `STDOUT` и читается неблокирующим `Once::get`:
-// лок пути записи на пути паники уже никем не освобождается.
 static PANIC_STDOUT: Once<Arc<PanicWriter>> = Once::new();
 
 struct PanicFmtWriter<'a>(&'a PanicWriter);
@@ -31,6 +28,8 @@ pub fn set_panic_stdout(w: Arc<PanicWriter>) {
 /// Печатает причину паники панической стороной стока ([`Writer::write_all_panic`]),
 /// минуя лок `STDOUT`. До регистрации стока вывод отбрасывается.
 pub fn panic_printf(arguments: Arguments) {
+    // Сток хранится отдельно от `STDOUT` и читается неблокирующим `Once::get`:
+    // лок пути записи на пути паники уже никем не освобождается.
     let Some(writer) = PANIC_STDOUT.get() else {
         return;
     };

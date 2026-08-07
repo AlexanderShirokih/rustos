@@ -18,8 +18,6 @@ pub fn component_badge(index: u16) -> NonZeroU64 {
     NonZeroU64::new(SUPERVISOR_BADGE.get() + 1 + u64::from(index)).expect("badge is non-zero")
 }
 
-// Цикл пересылки процесса. Владение общее, а не на стеке вызывающего: путь
-// паники обязан остановить цикл, иначе живой поток relay не даёт процессу уйти.
 static RELAY: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 
 static COMPONENT_NAMES: Mutex<&'static [&'static str]> = Mutex::new(&[]);

@@ -9,10 +9,9 @@ use ipc::{Transport as _, wire::Cap};
 use runtime::{OwnedHandle, Port, PortTransport, thread_exit};
 use syscall::{Handle, Timeout};
 
-/// Сторона admin-порта, у которой сессий не бывает.
-struct Muted;
+struct SessionlessAdmin;
 
-impl FileSystemAdminService for Muted {
+impl FileSystemAdminService for SessionlessAdmin {
     fn start(&mut self, log: Cap, image: Cap) {
         drop(OwnedHandle::adopt(log));
         drop(OwnedHandle::adopt(image));
@@ -31,7 +30,7 @@ pub extern "C" fn _start(admin: Handle) -> ! {
     let admin = OwnedHandle::from_handle(admin);
     let transport = PortTransport::server(admin.borrow());
     let _ = transport.wait_readable(Timeout::INFINITE);
-    let _ = dispatch_file_system_admin(&mut Muted, &transport);
+    let _ = dispatch_file_system_admin(&mut SessionlessAdmin, &transport);
 
     // Парковка без кадров: у свежего порта нет отправителей, его приём не вернётся никогда.
     let Ok(parking) = Port::create() else {

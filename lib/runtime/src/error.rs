@@ -33,7 +33,6 @@ impl Error {
     }
 }
 
-/// Разбирает возврат-код: `0` - успех, отрицательное - ошибка.
 pub(crate) fn unit(ret: i64) -> Result<()> {
     if ret == 0 {
         Ok(())
@@ -42,7 +41,6 @@ pub(crate) fn unit(ret: i64) -> Result<()> {
     }
 }
 
-/// Разбирает возврат-значение: неотрицательное - успех, отрицательное - ошибка.
 pub(crate) fn value(ret: i64) -> Result<u64> {
     if ret < 0 {
         Err(Error::from_return(ret))

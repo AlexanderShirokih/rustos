@@ -15,15 +15,13 @@ use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use scheduler::{ArchCpu, SchedulerServiceExt, SpawnConfig, with_preemption_disabled};
 
-use crate::{sched::Aarch64Cpu, smp};
+use crate::{memory::address_space_factory::FrameAllocatorImpl, sched::Aarch64Cpu, smp};
 
 const BARRIER_SPINS: usize = 50_000_000;
 
 const WAIT_STEP_MS: u64 = 1;
 const WAIT_STEPS: usize = 2_000;
 
-// Срок парковки работяги: перекос собирается за единицы миллисекунд, а
-// провалившийся тест не оставляет потоков, ждущих пробуждения навсегда.
 const PARK_TIMEOUT_NS: u64 = 5_000_000_000;
 
 struct Run {
@@ -51,8 +49,6 @@ impl Run {
     }
 }
 
-// Перекос, собранный на одном CPU: работяги паркуются, пока соседние ядра
-// заняты якорями, и просыпаются все разом в очередь своего CPU.
 struct Backlog {
     started_on: AtomicU32,
     ran_on: AtomicU32,
@@ -102,7 +98,6 @@ impl Backlog {
         self.done.fetch_add(1, Ordering::Release);
     }
 
-    // Маска пройденных ядер и есть след миграции.
     fn occupy_cpu(&self) {
         let mut marked = 0u32;
         spin_while(|| {
@@ -127,7 +122,6 @@ fn current_cpu_bit() -> u32 {
     1u32 << Aarch64Cpu::current_id().as_index()
 }
 
-// Число оборотов ограничено: провалившийся тест не вешает машину на спине.
 fn spin_while(mut hold: impl FnMut() -> bool) {
     let mut spins = 0;
     while hold() && spins < BARRIER_SPINS {
@@ -257,7 +251,7 @@ const AUDIT_CYCLES: usize = 8;
 const SETTLE_MATCHES: usize = 8;
 
 fn free_frames() -> usize {
-    crate::memory::memory_setup::frame_allocator().map_or(0, |allocator| allocator.free_frames())
+    crate::memory::memory_setup::frame_allocator().map_or(0, FrameAllocatorImpl::free_frames)
 }
 
 fn load_cycle() {

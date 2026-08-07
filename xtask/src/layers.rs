@@ -36,7 +36,6 @@ struct MetaDependency {
     path: Option<PathBuf>,
 }
 
-/// Крейт workspace: имя пакета и директория относительно корня репозитория.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct WorkspaceCrate {
     pub(crate) name: String,
@@ -44,15 +43,12 @@ pub(crate) struct WorkspaceCrate {
     pub(crate) forced_arch: bool,
 }
 
-/// Ребро зависимости между крейтами workspace.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Edge {
     pub(crate) from: String,
     pub(crate) to: String,
 }
 
-/// Собирает крейты и ребра основного и fuzz-workspace из `cargo metadata` и прогоняет их
-/// через [`check_layers`]. Нарушения печатает и завершается ошибкой.
 pub(crate) fn run() -> Result<()> {
     let mut crates = BTreeSet::new();
     let mut edges = BTreeSet::new();
@@ -196,7 +192,6 @@ fn relative_dir(name: &str, dir: &Path, root: &Path) -> Result<String> {
     Ok(components.join("/"))
 }
 
-/// Домен крейта: верхняя директория относительно корня репозитория.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Domain {
     Lib,
@@ -208,7 +203,6 @@ pub(crate) enum Domain {
 }
 
 impl Domain {
-    /// Определяет домен по имени верхней директории. Незнакомая директория - ошибка.
     pub(crate) fn from_dir(dir: &str) -> Result<Self> {
         Ok(match dir {
             "lib" => Self::Lib,
@@ -232,7 +226,6 @@ impl Domain {
         }
     }
 
-    /// Разрешено ли крейту этого домена зависеть от крейта домена `dep`.
     fn allows(self, dep: Self) -> bool {
         match self {
             Self::Lib => matches!(dep, Self::Lib),
@@ -251,18 +244,18 @@ impl fmt::Display for Domain {
     }
 }
 
-/// Запрещенное ребро зависимости между крейтами.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Violation {
-    /// Нарушение таблицы разрешений между доменами.
     Domain {
         from: String,
         from_domain: Domain,
         to: String,
         to_domain: Domain,
     },
-    /// Зависимость архитектурно-независимого крейта от архитектурного.
-    Arch { from: String, to: String },
+    Arch {
+        from: String,
+        to: String,
+    },
 }
 
 impl fmt::Display for Violation {
@@ -303,8 +296,6 @@ impl<'a> CrateRules<'a> {
     }
 }
 
-/// Проверяет ребра зависимостей по правилам слоев: таблица разрешений доменов и запрет
-/// зависимости архитектурно-независимого крейта от архитектурного.
 pub(crate) fn check_layers(crates: &[WorkspaceCrate], edges: &[Edge]) -> Result<Vec<Violation>> {
     let mut rules: BTreeMap<&str, CrateRules<'_>> = BTreeMap::new();
     for krate in crates {

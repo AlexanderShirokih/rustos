@@ -5,13 +5,8 @@ use kernel_tests::kernel_test;
 use runtime::{Priority, Signal, Timeout, signal_set, spawn, wait_any};
 use syscall::{Handle, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem, WakeCount};
 
-/// Размер стека рабочего потока.
 const STACK_SIZE: u64 = 0x4000;
-/// Бюджет ожидания пробуждения: конечный, чтобы потерянное пробуждение падало
-/// по тайм-ауту, а не вешало прогон.
 const WAKE_TIMEOUT: Timeout = Timeout::from_secs(5);
-/// Задержка воркера перед сигналом: за это время ожидающий гарантированно
-/// успевает заблокироваться.
 const WORKER_DELAY: Timeout = Timeout::from_millis(50);
 
 #[kernel_test]
@@ -28,15 +23,11 @@ fn signal_wait_round_trip() {
     kernel_tests::kassert!(observed & SIGNALED == SIGNALED);
 }
 
-// Приостанавливает поток на `budget`: ждём на собственном сигнале бит, который
-// никто не поднимает, и выходим по тайм-ауту.
 fn sleep(budget: Timeout) {
     let idle = Signal::create().expect("signal create for sleep");
     kernel_tests::kassert!(idle.wait(SIGNALED, budget).is_err());
 }
 
-/// Воркер: выжидает, затем поднимает `SIGNALED` на сигнале, чей сырой
-/// HandleId приехал аргументом.
 extern "C" fn delayed_signaler(raw: usize) -> u32 {
     sleep(WORKER_DELAY);
     let handle = Handle::new(raw as u32).expect("signal handle id");

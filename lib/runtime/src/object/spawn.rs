@@ -12,13 +12,11 @@ use crate::{
     svc::thread_exit,
 };
 
-/// Точка входа и её аргумент, передаваемые трамплину одним указателем.
 struct SpawnPayload {
     entry: extern "C" fn(usize) -> u32,
     arg: usize,
 }
 
-/// Распаковывает payload, вызывает точку входа и завершает поток её кодом.
 extern "C" fn trampoline(payload: usize) -> ! {
     // SAFETY: payload получен из Box::into_raw в spawn и реконструируется ровно
     // один раз; разыменование освобождает аллокацию до расходящегося thread_exit.
@@ -98,8 +96,6 @@ pub fn spawn(
 /// поток: стек утекает, так как поток мог ещё выполняться на нём.
 pub struct JoinHandle {
     thread: Thread,
-    /// Стек потока; `ManuallyDrop`, чтобы detach (drop без join) его не
-    /// освобождал, а `join` освобождал ровно один раз после терминации.
     stack: ManuallyDrop<AnonymousMapping>,
 }
 

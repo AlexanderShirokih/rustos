@@ -23,8 +23,6 @@ use crate::{
     ThreadId,
 };
 
-/// Wait-token на случай отсутствия текущего потока. Значение вне диапазона `ThreadId`,
-/// `unblock` по нему не находит поток.
 const NO_CURRENT_THREAD_TOKEN: WaitToken = WaitToken::new(core::num::NonZeroU64::MAX);
 
 /// Снимок IPC-контекста текущего потока: user-VM его процесса, VA IPC-буфера
@@ -308,6 +306,7 @@ where
     fn current_wait_token(&self) -> WaitToken {
         let Some(current) = self.inner.with_lock(|inner| inner.current()) else {
             debug_assert!(false, "wait token requested before scheduler bootstrap");
+            // Токен вне диапазона `ThreadId`, и `unblock` по нему не находит поток.
             return NO_CURRENT_THREAD_TOKEN;
         };
         WaitToken::from(current)

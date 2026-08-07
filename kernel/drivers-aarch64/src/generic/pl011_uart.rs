@@ -18,31 +18,27 @@ use util::crlf::Crlf;
 
 use crate::register_driver;
 
-/// Регистр данных.
+// Регистры PL011
+
 const DR: Reg<u32> = Reg::new(0x00);
-/// Регистр флагов.
 const FR: Reg<u32> = Reg::new(0x18);
-/// Регистр управления.
 const CR: Reg<u32> = Reg::new(0x30);
 
-/// TX FIFO заполнен.
+// Биты FR
+
 const FR_TXFF: u32 = 1 << 5;
-/// UART занят передачей.
 const FR_BUSY: u32 = 1 << 3;
 
-/// Включение UART.
+// Биты CR
+
 const CR_UARTEN: u32 = 1 << 0;
-/// Включение передатчика.
 const CR_TXE: u32 = 1 << 8;
-/// Включение приёмника.
 const CR_RXE: u32 = 1 << 9;
 
-/// Индекс записи reg в DeviceTree.
 const REG_UART_INDEX: usize = 0;
 
 /// Драйвер UART PL011.
 pub struct UartPl011 {
-    /// MMIO-доступ к регистрам.
     mmio: MmioBound,
 }
 

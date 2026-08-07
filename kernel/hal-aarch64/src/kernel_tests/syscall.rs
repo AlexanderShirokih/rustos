@@ -6,7 +6,7 @@
 //! [`super::userspace_entry`] и `super::userspace_via_scheduler`;
 //! тонкие случаи диспатчера (`BadSyscall`, `InvalidArgument`, маски
 //! сигналов) - host-юнит-тестами в `syscall_kernel::bridge`. Здесь нужен
-//! только один интеграционный тест на реальном trap-vector'е, доказывающий,
+//! только один интеграционный тест поверх реального trap-vector, доказывающий,
 //! что Origin-фильтр действительно стоит раньше парсинга op.
 
 use core::arch::asm;

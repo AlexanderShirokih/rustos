@@ -10,8 +10,6 @@ use crate::{
     svc,
 };
 
-// Значок, которого нет: ABI задаёт его нулём, корневая capability остаётся без значка, а
-// производная наследует значок источника.
 const UNBADGED: u64 = 0;
 
 /// Владеет хэндлом и закрывает его в `Drop`.
@@ -47,7 +45,7 @@ impl OwnedHandle {
         Self::from_handle(Handle::from_nonzero(cap.raw()))
     }
 
-    /// Владеемый хэндл для укладки в аргумент syscall'а.
+    /// Владеемый хэндл для укладки в аргумент syscall.
     pub fn as_raw(&self) -> Handle {
         self.handle
     }
@@ -121,6 +119,8 @@ impl BorrowedHandle<'_> {
         svc::handle_duplicate(
             self.handle,
             rights.into(),
+            // Отсутствие значка ABI задаёт нулём: производная capability наследует значок
+            // источника.
             badge.map_or(UNBADGED, NonZeroU64::get),
         )
         .map(OwnedHandle::from_handle)

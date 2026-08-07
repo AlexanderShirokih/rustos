@@ -90,7 +90,7 @@ pub struct UserStartSpec {
 #[derive(Debug)]
 pub enum LoadImageError {
     ProcessNotFound,
-    /// Образ уже загружен или у процесса есть потоки/handle'ы.
+    /// Образ уже загружен или у процесса есть потоки либо handle.
     WrongState,
     /// Процесс создан в kernel-AS (без mapper-а user-страниц).
     NoUserAddressSpace,

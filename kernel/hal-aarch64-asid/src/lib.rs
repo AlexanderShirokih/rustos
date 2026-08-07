@@ -1,4 +1,4 @@
-//! Аллокатор Address Space Identifier'ов (ASID) для AArch64.
+//! Аллокатор идентификаторов адресного пространства (ASID) для AArch64.
 //!
 //! Выдаёт per-AS 16-битный ASID с monotonic generation в одном 64-битном теге.
 //! Тег хранится во владеющем `AtomicU64` и обновляется с помощью CAS, чтобы
@@ -31,7 +31,6 @@ impl AsidWidth {
     }
 }
 
-/// Ёмкость bitmap по числу `u64`-слов: достаточна для 16-bit ASID (65536 значений).
 const BITMAP_WORDS: usize = bits_to_words(u16::MAX as usize + 1);
 
 type AsidBitmap = BitSet<BITMAP_WORDS>;
@@ -92,10 +91,6 @@ pub struct GlobalAsidAllocator<const CPUS: usize> {
     max_asid: AtomicU64,
     on_rollover: fn(),
     initialized: AtomicU64,
-    /// Последний выданный тег для каждого CPU (`0` - CPU не активировал ни
-    /// один user-AS). Rollover читает эти слоты и резервирует их ASID-ы в
-    /// новой generation, чтобы не переиспользовать ASID, который сейчас
-    /// активен на другом CPU (TTBR0 которого ещё указывает на старый root).
     active: [AtomicU64; CPUS],
 }
 
@@ -139,9 +134,9 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
     /// `tag_slot` - `AtomicU64` владельца AS, `cpu_id` - индекс текущего CPU.
     /// Возвращает (asid, raw_tag).
     ///
-    /// Hot-path и slow-path выполняются под общим lock'ом: помимо state'а
+    /// Hot-path и slow-path выполняются под общим lock: помимо state
     /// апдейтится `active[cpu_id]`, и две операции должны быть атомарны
-    /// относительно конкурентного rollover'а на другом CPU.
+    /// относительно конкурентного rollover на другом CPU.
     pub fn acquire(&self, tag_slot: &AtomicU64, cpu_id: u16) -> (u16, u64) {
         let Some(active_slot) = self.active.get(cpu_id as usize) else {
             debug_assert!(false, "cpu_id is outside the per-CPU table");
@@ -173,7 +168,7 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
                     // CAS провален - параллельный acquire поставил другой тег.
                     // Наш `new_tag` уже записан в active[cpu]; на следующей
                     // итерации мы перепишем его актуальным значением. Бит в
-                    // bitmap осядет до ближайшего rollover'а - приемлемая
+                    // bitmap осядет до ближайшего rollover - приемлемая
                     // плата за редкий contention.
                 }
             }
@@ -181,7 +176,7 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
     }
 
     /// Освобождает ASID, описанный `raw_tag`. Не вызывает TLB-flush - записи
-    /// будут переиспользованы на следующем rollover'е (lazy reclaim).
+    /// будут переиспользованы на следующем rollover (lazy reclaim).
     pub fn release(&self, raw_tag: u64) {
         if raw_tag == 0 {
             return;
@@ -228,13 +223,14 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
         for slot in &self.active {
             let active_raw = slot.load(Ordering::Acquire);
             let active_asid = unpack_asid(active_raw);
+            // Тег `0` в слоте - CPU ещё не активировал ни одного user-AS.
             if active_asid != 0 {
                 s.in_use.set(active_asid as usize);
             }
         }
         s.next_asid = 1;
         (self.on_rollover)();
-        // Ищем первый свободный после reservation'а active-ASID-ов. Поскольку
+        // Ищем первый свободный после резервирования active-ASID. Поскольку
         // активных CPU не больше `CPUS` << max_asid, свободный гарантированно
         // существует.
         while s.next_asid <= max && s.in_use.is_set(s.next_asid as usize) {
@@ -268,7 +264,6 @@ mod tests {
 
     use super::*;
 
-    /// Ёмкость per-CPU таблицы в тестах.
     const TEST_CPUS: usize = 16;
 
     type TestAsidAllocator = GlobalAsidAllocator<TEST_CPUS>;
@@ -462,7 +457,7 @@ mod tests {
     #[test]
     fn rollover_preserves_active_asids_per_cpu() {
         // CPU0 удерживает AS_A; CPU1 заполняет диапазон ASID и упирается в
-        // rollover. После rollover'а ASID, активный на CPU0, не должен быть
+        // rollover. После rollover ASID, активный на CPU0, не должен быть
         // выдан другому AS - иначе два разных root окажутся под одним ASID.
         let alloc = make(AsidWidth::Bits8, noop);
         let slot_a = AtomicU64::new(0);
@@ -488,7 +483,7 @@ mod tests {
             "ASID {asid_active_on_cpu0} active on CPU0 must be reserved after rollover"
         );
 
-        // Свежие acquire'ы на CPU1 не должны выдать тот же ASID.
+        // Свежие acquire на CPU1 не должны выдать тот же ASID.
         for _ in 0..max - 1 {
             let s = AtomicU64::new(0);
             let (asid, _) = alloc.acquire(&s, 1);
@@ -499,10 +494,6 @@ mod tests {
         }
     }
 
-    /// Крутит acquire через свежие slot'ы на `cpu_id`, пока `generation` не
-    /// сменится (фактический rollover), а не фиксированное `0..max` - иначе
-    /// тест молча перестаёт доходить до rollover при смене стартового asid.
-    /// Возвращает поколение до и после.
     fn drive_to_rollover(alloc: &TestAsidAllocator, cpu_id: u16) -> (u32, u32) {
         let gen_before = alloc.state.with_lock(|s| s.generation);
         let max = alloc.max_asid() as usize;
@@ -574,7 +565,7 @@ mod tests {
         let set_before = alloc
             .state
             .with_lock(|s| s.in_use.is_set(asid_new as usize));
-        assert!(set_before, "новый ASID должен быть занят");
+        assert!(set_before, "the freshly acquired ASID must be in use");
 
         // release устаревшего тега (старая generation) не должен снять bit.
         alloc.release(tag_old);
@@ -583,7 +574,7 @@ mod tests {
             .with_lock(|s| s.in_use.is_set(asid_new as usize));
         assert!(
             set_after,
-            "release устаревшего тега не должен освобождать bit текущей generation"
+            "releasing a stale tag must not clear a bit of the current generation"
         );
         let _ = asid;
     }
@@ -602,7 +593,7 @@ mod tests {
         alloc.release(pack_tag(1, 0));
 
         let after = alloc.state.with_lock(|s| s.in_use.is_set(asid as usize));
-        assert_eq!(before, after, "release(0) не должен менять состояние");
+        assert_eq!(before, after, "release(0) must not change the state");
     }
 
     #[test]

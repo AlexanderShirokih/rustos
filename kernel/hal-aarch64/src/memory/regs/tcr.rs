@@ -136,7 +136,6 @@ impl TranslationControlRegister<EL1> {
 
 /// Конфигурация трансляции адресов.
 pub struct AddressTranslationConfig<T: TtbrSel> {
-    /// Значение TCR.
     value: u64,
     _phantom: PhantomData<T>,
 }
@@ -159,9 +158,9 @@ impl<T: TtbrSel> AddressTranslationConfig<T> {
 
     /// Создаёт стандартную конфигурацию.
     ///
-    /// `asid_width` определяет глобальный бит `AS` (bit 36); итоговое значение
-    /// побитово OR'ится с конфигом второй половины - поэтому достаточно
-    /// передать ширину один раз (в любом из двух вызовов).
+    /// `asid_width` определяет глобальный бит `AS` (bit 36). Итоговое значение
+    /// уходит под побитовое OR с конфигом второй половины, поэтому ширина
+    /// передаётся один раз - в любом из двух вызовов.
     pub const fn create(enable: bool, asid_width: AsidWidth) -> Self {
         Self::combine(&[
             TCRBit::size_48bit::<T>(),

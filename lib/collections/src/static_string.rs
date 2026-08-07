@@ -15,9 +15,7 @@ use core::fmt::{self, Write};
 /// writeln!(buf, "{:#018x}", 0xDEAD_BEEFu64).ok();
 /// ```
 pub struct StaticString<const N: usize> {
-    /// Буфер для хранения UTF-8 байт.
     buf: [u8; N],
-    /// Количество записанных байт.
     len: usize,
 }
 

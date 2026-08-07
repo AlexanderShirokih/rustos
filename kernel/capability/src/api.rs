@@ -18,7 +18,6 @@ use super::{
     },
 };
 
-/// Handle-таблица текущего процесса; `BadHandle` до инициализации планировщика.
 fn current_table() -> Result<Arc<MutexCell<HandleTable>>, IpcError> {
     runtime().current_handle_table().ok_or(IpcError::BadHandle)
 }
@@ -32,7 +31,7 @@ pub fn install_handle(handle: Capability) -> Result<HandleId, IpcError> {
 }
 
 /// Атомарно меняет биты сигнального состояния `Signal` (поднимает `set`,
-/// снимает `clear`) и будит waiter'ов согласно [`WakeCount`].
+/// снимает `clear`) и будит ожидающих согласно [`WakeCount`].
 /// Требует [`Rights::WRITE`] на handle.
 pub fn signal_set(
     handle_id: HandleId,
@@ -66,7 +65,7 @@ pub fn signal_wait_one(
     Ok(outcome.observed)
 }
 
-/// Исход [`signal_wait_many`]: индекс сработавшего item'а в `items`
+/// Исход [`signal_wait_many`]: индекс сработавшего item в `items`
 /// и observed-маска на нём (пересечение с переданной маской).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaitManyOutcome {
@@ -80,8 +79,6 @@ struct SignalWaitState {
     canceled: bool,
 }
 
-// Owned cleanup активного signal_wait_many доступен RAII-guard'у
-// и scheduler'у при external termination.
 struct SignalWaitCancel {
     table: Arc<MutexCell<HandleTable>>,
     handles: Vec<HandleId>,
@@ -117,7 +114,7 @@ impl SignalWaitCancel {
     }
 
     fn arm(self: &Arc<Self>, items: &[(HandleId, u32)]) -> Result<(), IpcError> {
-        // Пробуждение scheduler'а под handle-table локом запрещено.
+        // Пробуждение scheduler под handle-table локом запрещено.
         let cancel: Arc<dyn CancelTarget> = self.clone();
         self.state.with_lock(|state| {
             if state.canceled {
@@ -181,7 +178,6 @@ impl CancelTarget for SignalWaitCancel {
     }
 }
 
-// RAII-владелец регистраций signal_wait_many.
 struct ArmedWait {
     cancel: Arc<SignalWaitCancel>,
 }
@@ -219,7 +215,7 @@ impl Drop for ArmedWait {
 
 /// Ждёт пока хотя бы на одном из `items` не поднимется бит из его
 /// маски. Дубликаты `HandleId` допустимы. На `timeout_ns = Some(0)` -
-/// poll. `Canceled` - один из handle'ов закрыт или передан до сигнала.
+/// poll. `Canceled` - один из handle закрыт или передан до сигнала.
 pub fn signal_wait_many(
     items: &[(HandleId, u32)],
     timeout_ns: Option<u64>,
@@ -494,9 +490,6 @@ mod tests {
         }
     }
 
-    /// install_runtime - once per process, поэтому singleton
-    /// с переключаемой конфигурацией. test_lock сериализует тесты,
-    /// чтобы block_hook не перетирался между ними.
     fn mock() -> &'static MockRuntime {
         static MOCK: OnceLock<Arc<MockRuntime>> = OnceLock::new();
         MOCK.get_or_init(|| {
@@ -973,9 +966,6 @@ mod tests {
         mock().reset();
     }
 
-    /// Ставит тривиальный глобальный контроллер один раз: bind_line всегда
-    /// успешен, mask/unmask — no-op. Протокол fire/ack проверяется отдельно в
-    /// `irq_line` с записывающим моком; здесь — только гейтинг минта.
     fn ensure_irq_control() {
         use std::sync::OnceLock;
         static INSTALLED: OnceLock<()> = OnceLock::new();

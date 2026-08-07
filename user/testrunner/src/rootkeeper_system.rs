@@ -26,14 +26,10 @@ use crate::filesystem::{CALL_TIMEOUT, connect, path};
 
 pub(crate) const BOOT_PLAN_ENTRY: &str = "/boot/testrunner.plan";
 
-// Код выхода, которым сценарий снимает маршрутизатор: supervisor обязан
-// увидеть именно его.
 const ROUTER_EXIT_CODE: u32 = 73;
 
-// Значок namespace-сессии, которой сценарии ходят к дереву имён.
 const PROBE_BADGE: NonZeroU64 = NonZeroU64::new(9).expect("badge is non-zero");
 
-// Изменяемое монтирование дерева имён загрузки.
 const RAM_MOUNT: &str = "/tmp";
 
 const ROUTER_PROGRAM: &str = "/boot/namespace-router";
@@ -65,19 +61,14 @@ const BOOT_TREE: &[Mount<'static>] = &[
 
 const MOUNT_TABLE_EXIT_CODE: u32 = 8;
 
-// Заходов на падающее монтирование: их число обязано превысить предел его перезапусков.
 const CRASH_ATTEMPTS: usize = 8;
 
-// Экземпляров, которые маршрутизатор поднимает одному монтированию, считая первый.
 const MOUNT_INCARNATIONS: usize = 3;
 
-// Запусков маршрутизатора, которые выполняет supervisor, считая первый.
 const ROUTER_INCARNATIONS: u32 = 3;
 
-// Заходов на маршрутизатор: их число обязано превысить предел его запусков.
 const ROUTER_ATTEMPTS: usize = 6;
 
-// Ожидание смены ушедшего экземпляра: она приходит оборотом наблюдения маршрутизатора.
 const RESTART_ATTEMPTS: usize = 100;
 const RESTART_TURN: Timeout = Timeout::from_ns(20_000_000);
 
@@ -201,8 +192,6 @@ fn try_session(system: &RootSystem<'_>, prefix: &str) -> Result<OwnedHandle, Fil
     Ok(OwnedHandle::adopt(mounted.session))
 }
 
-// Ждёт сессию, пока маршрутизатор поднимает монтированию смену: между экземплярами путь накрыт,
-// но сессий не выдаёт.
 fn await_session(system: &RootSystem<'_>, prefix: &str) -> Result<OwnedHandle, FileSystemError> {
     for _ in 0..RESTART_ATTEMPTS {
         match try_session(system, prefix) {
@@ -225,8 +214,6 @@ fn await_tree(system: &RootSystem<'_>, prefix: &str) -> OwnedHandle {
     panic!("boot tree is not mounted")
 }
 
-// Вызов, уносящий процесс монтирования: фикстура падает на переносе имени, и ответить на вызов
-// уже некому.
 fn crash(session: &OwnedHandle) {
     let root = path(Path::ROOT.as_str());
     let outcome = connect(session).rename(root, root);
@@ -246,14 +233,11 @@ fn terminate(system: &RootSystem<'_>, index: u16, exit_code: u32) -> bool {
     matches!(terminated, Some(Ok(())))
 }
 
-// Приватный сигнал не поднимается, поэтому ожидание истекает целиком.
 fn pause(timeout: Timeout) {
     let timer = Signal::create().expect("pause timer");
     let _ = timer.wait(SIGNALED, timeout);
 }
 
-// Обращение к корню монтирования: живая файловая система отвечает, ушедшая даёт терминальный
-// отказ транспорта.
 fn probe(session: &OwnedHandle) -> Result<Result<Opened, FileSystemError>, IpcError> {
     connect(session).open(
         path(Path::ROOT.as_str()),

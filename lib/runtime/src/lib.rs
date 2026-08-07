@@ -41,11 +41,9 @@ pub use svc::{
 pub use sync::{Condvar, Mutex, MutexGuard};
 pub use syscall::{MemoryAccess, Timeout, UserMemFlags};
 
-/// Глобальный heap процесса поверх memory_allocate/memory_free.
 #[global_allocator]
 static PROCESS_HEAP: heap::ProcessHeap = heap::ProcessHeap::new();
 
-/// Отказ аллокации переходит в panic-handler процесса.
 #[alloc_error_handler]
 fn on_alloc_error(_layout: core::alloc::Layout) -> ! {
     panic!("userspace heap: allocation failed");

@@ -1,6 +1,6 @@
 //! Test-mode ядра под `cfg(feature = "kernel-tests")`.
 //!
-//! `kmain` после bootstrap'а создаёт init-таск и под этой фичей запускает все
+//! `kmain` после bootstrap создаёт init-таск и под этой фичей запускает все
 //! зарегистрированные тест-кейсы через `kernel_tests::run_all_tests()`.
 //!
 //! Тестам вендится только консоль для маркеров.
@@ -43,11 +43,10 @@ pub fn spawn_kernel_tests_process<A>(
 where
     A: ArchContext,
 {
-    /// `*mut KernelContext` не Send автоматически; обёртка делает его
-    /// перемещаемым в spawn-closure.
     struct KernelCtxPtr(*mut KernelContext);
 
-    // SAFETY: см. комментарий выше - единственный читатель указателя.
+    // SAFETY: `*mut KernelContext` не Send автоматически, и обёртка переносит
+    // его в spawn-closure. Единственный читатель указателя - тело таска.
     unsafe impl Send for KernelCtxPtr {}
 
     let kernel_ptr = KernelCtxPtr(core::ptr::from_mut(kernel));
@@ -65,7 +64,6 @@ where
         .map(|_| ())
 }
 
-/// Делегат для harness-а: выключает машину через [`crate::power::system_off`].
 fn harness_exit(code: u32) -> ! {
     crate::power::system_off(i32::try_from(code).unwrap_or(i32::MAX))
 }

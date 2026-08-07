@@ -17,7 +17,6 @@ use ipc::{
 pub struct NodeDescriptor(u32);
 
 impl NodeDescriptor {
-    // Бит под номер слота, старшие биты занимает поколение.
     const SLOT_BITS: u32 = 16;
     const SLOT_MASK: u32 = (1 << Self::SLOT_BITS) - 1;
 

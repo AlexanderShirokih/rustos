@@ -47,14 +47,8 @@ pub struct Thread<A: ArchContext> {
     stack: ThreadStack,
     name: &'static str,
     target: Arc<ThreadObject>,
-    /// Per-thread IPC-буфер. `None` у kernel-потоков (нет user-памяти);
-    /// у user-потоков заполняется при `prepare_user_thread`.
     ipc_buffer: Option<IpcBufferSlot>,
-    // Cancel-хук активной блокировки снимает внешние регистрации
-    // при терминации потока.
     blocked_cancel: Option<Arc<dyn CancelTarget>>,
-    // Число внешних cleanup-фаз, выполняемых без scheduler-лока. Пока оно
-    // ненулевое, thread, IPC-буфер и owning process нельзя реапить.
     deferred_cleanup: usize,
 }
 

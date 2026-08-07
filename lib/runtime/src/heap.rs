@@ -14,8 +14,6 @@ use talc::{OomHandler, Span, Talc};
 
 use crate::{Mutex, handle_close, memory_allocate, memory_free, process_resource_self};
 
-/// Кэш метеринг-handle: `process_resource_self` ставит свежий handle на каждый вызов,
-/// поэтому кэшируем первый; проигравшая CAS-ветка закрывает свой дубль.
 static METERING_HANDLE: AtomicU32 = AtomicU32::new(0);
 
 fn metering_handle() -> Option<Handle> {
@@ -24,6 +22,7 @@ fn metering_handle() -> Option<Handle> {
         return Handle::new(cached);
     }
 
+    // `process_resource_self` выдаёт свежий handle на каждый вызов: кэшируется первый.
     let raw = process_resource_self().ok()?.raw();
     match METERING_HANDLE.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => Handle::new(raw),
@@ -35,27 +34,19 @@ fn metering_handle() -> Option<Handle> {
     }
 }
 
-/// Гранулярность маппинга ядра.
 const PAGE_SIZE: usize = 4096;
 
-/// Все аллокации свыше этого размера будут обслуживаться напрямую через
-/// memory_allocate/memory_free, минуя talc.
 const PASSTHROUGH_THRESHOLD: usize = 64 * 1024;
 
-/// Размер первого чанка арены talc.
 const FIRST_CHUNK: usize = 64 * 1024;
 
-/// Потолок чанка: claim растёт геометрически до этого значения.
 const MAX_CHUNK: usize = 1024 * 1024;
 
 const fn align_up(value: usize, align: usize) -> usize {
     value.saturating_add(align - 1) & !(align - 1)
 }
 
-/// OOM-обработчик talc: запрашивает у ядра новый чанк и отдаёт его через claim.
-/// Чанк растёт геометрически от FIRST_CHUNK до MAX_CHUNK.
 struct SyscallOom {
-    /// Размер следующего claim-чанка.
     next_chunk: usize,
 }
 
@@ -87,7 +78,6 @@ impl OomHandler for SyscallOom {
     }
 }
 
-/// Глобальный аллокатор процесса
 pub(crate) struct ProcessHeap {
     talc: Mutex<Talc<SyscallOom>>,
 }
@@ -103,7 +93,7 @@ impl ProcessHeap {
 }
 
 // SAFETY: alloc/dealloc выдают валидные блоки и согласованно маршрутизируют
-// passthrough и talc по layout.size(); talc-доступ сериализован Mutex'ом.
+// passthrough и talc по layout.size(); talc-доступ сериализован под Mutex.
 unsafe impl GlobalAlloc for ProcessHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if layout.size() >= PASSTHROUGH_THRESHOLD {
@@ -113,7 +103,7 @@ unsafe impl GlobalAlloc for ProcessHeap {
 
         // SAFETY: GlobalAlloc гарантирует ненулевой size - единственное
         // предусловие talc.malloc; выравнивание talc обслуживает сам, доступ
-        // эксклюзивен под guard'ом.
+        // эксклюзивен под guard.
         match unsafe { talc.malloc(layout) } {
             Ok(block) => block.as_ptr(),
             Err(()) => ptr::null_mut(),
@@ -136,9 +126,8 @@ unsafe impl GlobalAlloc for ProcessHeap {
     }
 }
 
-/// Выделяет блок напрямую у ядра; page-выровненный VA покрывает любой
-/// `align <= PAGE_SIZE`, для более строгого выравнивания - отказ.
 fn passthrough_alloc(layout: Layout) -> *mut u8 {
+    // Page-выровненный VA ядра покрывает любой `align <= PAGE_SIZE`, более строгий - отказ.
     if layout.align() > PAGE_SIZE {
         return ptr::null_mut();
     }

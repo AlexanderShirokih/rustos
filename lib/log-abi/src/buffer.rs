@@ -81,7 +81,6 @@ pub fn chunks<const N: usize>(text: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-// Длина наибольшего префикса text, укладывающегося в room байт по границе символа.
 fn fitting_prefix(text: &str, room: usize) -> usize {
     if text.len() <= room {
         return text.len();
@@ -118,10 +117,10 @@ mod tests {
 
     #[test]
     fn cut_lands_on_a_char_boundary() {
-        // "ё" - два байта: срез проходит по границе символа.
+        // "é" занимает два байта, срез проходит по границе символа.
         let mut buffer = LogBuffer::<5>::new();
-        buffer.push_str("ёжик");
-        assert_eq!(buffer.as_str(), "ёж");
+        buffer.push_str("éèêë");
+        assert_eq!(buffer.as_str(), "éè");
     }
 
     #[test]
@@ -134,14 +133,14 @@ mod tests {
 
     #[test]
     fn chunks_join_back_into_the_source() {
-        let text = "ёжик в тумане";
+        let text = "éèêë dans le brouillard";
         let joined: std::string::String = super::chunks::<4>(text).collect();
         assert_eq!(joined, text);
     }
 
     #[test]
     fn chunks_never_split_a_char() {
-        for chunk in super::chunks::<3>("ёжик") {
+        for chunk in super::chunks::<3>("éèêë") {
             assert!(chunk.chars().count() >= 1);
         }
     }

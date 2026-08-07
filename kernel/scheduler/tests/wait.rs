@@ -16,7 +16,6 @@ use crate::common::{MockContext, MockTimer, MockTimerSource, reset_switches, wit
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
 const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 16);
 
-/// `ready_flag` в состоянии REGISTERED: park-сторона уйдёт в блокировку.
 fn registered_flag() -> AtomicU32 {
     AtomicU32::new(ParkState::REGISTERED)
 }

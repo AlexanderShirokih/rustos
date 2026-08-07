@@ -374,10 +374,10 @@ fn alloc_from_exhausted_region_returns_none() {
 
 #[test]
 fn alloc_from_offset_past_region_end_returns_none_when_exhausted() {
-    // Некратный ширине слова регион оставляет хвостовые биты вне диапазона.
     const BASE: usize = 1000;
     const COUNT: usize = 100;
 
+    // Некратный ширине слова регион оставляет хвостовые биты вне диапазона.
     let mut bitmap = FrameBitmap::new(make_range(BASE, COUNT));
     bitmap.set_range_unchecked(Frame::new(BASE), Frame::new(BASE + COUNT));
 

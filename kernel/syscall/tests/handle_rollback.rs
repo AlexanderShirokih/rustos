@@ -1,6 +1,6 @@
-//! При `OutOfHandles` в caller-table syscall'ы `ProcessCreate`,
+//! При `OutOfHandles` в caller-table syscall `ProcessCreate`,
 //! `ThreadCreate`, `ProcessStart` НЕ должны выполнять сторонних эффектов
-//! (создавать процесс/поток, drain'ить bootstrap-handle).
+//! (создавать процесс/поток, дренировать bootstrap-handle).
 
 #![allow(clippy::unwrap_used)]
 
@@ -74,10 +74,8 @@ impl KernelRuntime for CountingRuntime {
     fn clear_blocked_cancel(&self) {}
 }
 
-/// User-VA, по которому стаб отдаёт байты имени процесса для `ProcessCreate`.
 const NAME_VA: usize = 0x2000_0000;
 
-/// Минимальный mapper: обслуживает только `copy_user_in` для имени по `NAME_VA`.
 struct NameMapper {
     bytes: Mutex<Vec<u8>>,
 }
@@ -345,7 +343,6 @@ fn dispatch(op: SyscallOp, args: [u64; 6]) -> Result<u64, SyscallError> {
     }
 }
 
-/// Декодирует через `as_return_value`, не через хардкод, чтобы новые коды не давали панику.
 const ALL_ERRORS: &[SyscallError] = &[
     SyscallError::BadSyscall,
     SyscallError::KernelOriginated,

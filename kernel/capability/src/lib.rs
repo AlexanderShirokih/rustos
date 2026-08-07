@@ -1,4 +1,4 @@
-//! capability targets и таблица handle'ов.
+//! capability targets и таблица handle.
 //!
 //! Модуль реализует базис capability-based IPC: всё, к чему один процесс
 //! может обращаться у другого (канал, событие, в перспективе -

@@ -13,8 +13,6 @@ use crate::{
     svc,
 };
 
-/// Пишет тело без caps в IPC-буфер текущего потока: `tag = (len, 0)`,
-/// `data[..len] = body`. `body` длиннее [`IPC_BUFFER_DATA_MAX`] - ошибка.
 fn store_body(body: &[u8]) -> Result<()> {
     if body.len() > IPC_BUFFER_DATA_MAX {
         return Err(Error::Syscall(SyscallError::MessageTooBig));
@@ -30,8 +28,6 @@ fn store_body(body: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Читает тело из IPC-буфера: декодирует `len`, копирует `min(len, out.len())`
-/// байт в `out`. Возвращает полный `len` (а не число скопированных байт).
 fn load_body(out: &mut [u8]) -> Result<usize> {
     let ptr = ipc_buffer_ptr().ok_or(Error::Syscall(SyscallError::WrongType))?;
     // SAFETY: см. `store_body`; здесь только чтение полей буфера.
@@ -40,6 +36,7 @@ fn load_body(out: &mut [u8]) -> Result<usize> {
         let len = decode_tag(buf.tag).len;
         let copy = len.min(out.len()).min(IPC_BUFFER_DATA_MAX);
         out[..copy].copy_from_slice(&buf.data[..copy]);
+        // Наружу уходит длина кадра целиком: в `out` легло не больше его вместимости.
         Ok(len)
     }
 }

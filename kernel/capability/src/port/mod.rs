@@ -3,7 +3,8 @@
 //!
 //! Транспорт сообщения - per-thread IPC-буфер. Тело копируется
 //! напрямую между IPC-буферами двух потоков через линейное физическое отображение.
-//! Хендлы переносятся кросс-процессно через handle-таблицы (см. [`ipc_buffer_xfer`](super::ipc_buffer_xfer)).
+//! Хендлы переносятся кросс-процессно через handle-таблицы
+//! (см. [`ipc_buffer_xfer`](super::ipc_buffer_xfer)).
 //!
 //! Парковка/пробуждение используют [`ParkWaker`](super::wait): CAS на
 //! `state` (REGISTERED -> SIGNALED/CANCELED) выбирает ровно одного победителя
@@ -50,14 +51,10 @@ pub struct Port {
     inner: MutexCell<PortState>,
 }
 
-/// Учёт одного экземпляра [`Capability`](super::Capability) в множествах порта.
-/// Билет двухфазный: создаётся без учёта, учёт вводит `activate` под локом порта.
-/// `release` неактивированного билета множеств не касается и потоков не будит.
 struct PortHolder {
     port: Arc<Port>,
     receiver: bool,
     badge: Option<NonZeroU64>,
-    /// Учёт введён; читается и меняется только под локом порта.
     counted: AtomicBool,
     released: AtomicBool,
 }
@@ -92,16 +89,15 @@ pub struct PortAccess {
     pub hold: Option<OperationHold>,
 }
 
-/// Контекст парковки текущего потока: waker и слот исхода.
 pub(crate) struct ParkCtx {
     waker: Arc<ParkWaker>,
     outcome: Arc<OutcomeSlot>,
 }
 
 impl ParkCtx {
-    /// Вызывать только вне queue-лока. `current_wait_token` берёт scheduler-лок, а
-    /// обратный порядок захвата занят терминацией потока (`PortCancel`).
     pub(crate) fn for_current(runtime: &Arc<dyn KernelRuntime>) -> Self {
+        // Вызов идёт вне queue-лока: `current_wait_token` берёт scheduler-лок, а обратное
+        // ребро занято терминацией потока (`PortCancel`).
         let token = runtime.current_wait_token();
         Self {
             waker: Arc::new(ParkWaker::new(runtime.clone(), token)),
@@ -111,18 +107,14 @@ impl ParkCtx {
 }
 
 pub(crate) enum SendAction {
-    /// Текущий поток обязан заблокироваться на `waker.state()`.
     Park {
         waker: Arc<ParkWaker>,
         outcome: Arc<OutcomeSlot>,
     },
-    /// Сообщение доставлено немедленно, без блокировки текущего потока.
     Done,
-    /// Ошибка (перенос caps/копирование тела провалились, множество получателей пусто).
     Failed(IpcError),
 }
 
-/// Варианта `Done` нет: вызывающая сторона всегда паркуется до reply.
 pub(crate) enum CallAction {
     Park {
         waker: Arc<ParkWaker>,
@@ -137,11 +129,9 @@ pub(crate) enum RecvAction {
         outcome: Arc<OutcomeSlot>,
         reply_slot: Arc<ReplySlot>,
     },
-    /// Сообщение получено немедленно. `reply` непуст, если встречным был `call`.
     Done {
         reply: Option<Arc<Reply>>,
     },
-    /// Получателю досталось событие об уходе значка, а не кадр.
     SenderGone {
         badge: u64,
     },
@@ -155,16 +145,12 @@ impl Port {
         })
     }
 
-    /// Билет держателя capability без значка: право `READ` вводит её в множество получателей на
-    /// активации, без этого права учёта нет.
     pub(super) fn holder_ticket(self: &Arc<Self>, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
         rights
             .contains(Rights::READ)
             .then(|| self.make_ticket(true, None, false))
     }
 
-    /// Билет держателя capability без значка с уже введённым учётом. Применим,
-    /// пока capability не видна другим потокам: отзывать билет ещё некому.
     pub(super) fn counted_holder_ticket(
         self: &Arc<Self>,
         rights: Rights,
@@ -176,8 +162,6 @@ impl Port {
         Some(self.make_ticket(true, None, true))
     }
 
-    /// Билет держателя capability со значком: право `WRITE` вводит её в множество отправителей
-    /// значка на активации, право `READ` - в множество получателей.
     pub(super) fn badged_holder_ticket(
         self: &Arc<Self>,
         rights: Rights,
@@ -204,13 +188,14 @@ impl Port {
         })
     }
 
-    // Отказ учёта значка оставляет множество получателей нетронутым; билет, отозванный между
-    // созданием и активацией, отвергается без следов в учёте.
     fn activate_holder(&self, holder: &PortHolder) -> Result<(), IpcError> {
         self.inner.with_lock(|state| {
+            // Билет, отозванный между созданием и активацией, отвергается без следов в учёте.
             if holder.released.load(Ordering::Acquire) {
                 return Err(IpcError::Revoked);
             }
+            // Значок учитывается до получателя: его отказ оставляет множество получателей
+            // нетронутым.
             if let Some(badge) = holder.badge {
                 state.register_badge(badge.get())?;
             }
@@ -222,10 +207,10 @@ impl Port {
         })
     }
 
-    // Снятый учёт вторым токеном не оживает: `release` выставляет флаг до захвата лока, поэтому
-    // сброшенный под локом флаг означает живого держателя.
     fn reacquire_holder(self: &Arc<Self>, holder: &PortHolder) -> Option<Arc<dyn HolderTicket>> {
         let counted = self.inner.with_lock(|state| {
+            // Снятый учёт вторым токеном не оживает: `release` выставляет флаг до захвата
+            // лока, поэтому сброшенный под локом флаг означает живого держателя.
             if holder.released.load(Ordering::Acquire) {
                 return false;
             }
@@ -243,8 +228,6 @@ impl Port {
         counted.then(|| self.make_ticket(holder.receiver, holder.badge, true))
     }
 
-    // Пробуждения опустевших множеств под локом порта не выполняются; неактивированный билет
-    // множеств не касается.
     fn release_holder(&self, holder: &PortHolder) {
         let wakes = self.inner.with_lock(|state| {
             let mut wakes = Vec::new();
@@ -264,11 +247,6 @@ impl Port {
         }
     }
 
-    /// `send` текущего потока: доставляет ждущему получателю либо паркуется. `hold` держит учёт
-    /// значка отправителя до доставки или постановки в очередь.
-    ///
-    /// Матч и постановка в очередь - разные захваты queue-лока: между ними берётся wait-token.
-    /// Изменившееся в это окно состояние отвергает постановку, и цикл повторяет матч.
     pub(crate) fn send(
         &self,
         sender: &ThreadTransport,
@@ -282,6 +260,9 @@ impl Port {
                 Ok(None) => {}
             }
 
+            // Матч и постановка в очередь - разные захваты queue-лока: между ними берётся
+            // wait-token. Изменившееся в это окно состояние отвергает постановку, и цикл
+            // повторяет матч.
             let ctx = ParkCtx::for_current(runtime);
             let waiter = Waiter {
                 kind: SendKind::Send,
@@ -306,8 +287,6 @@ impl Port {
         action
     }
 
-    /// `call` текущего потока с готовым контекстом парковки. Удержание и ретрай - как в
-    /// [`Self::send`].
     pub(crate) fn call(
         &self,
         caller: &ThreadTransport,
@@ -343,9 +322,6 @@ impl Port {
         action
     }
 
-    /// `recv` текущего потока: забирает готовое событие или сообщение ждущего отправителя, либо
-    /// паркуется. `hold` держит роль получателя до приёма или постановки в очередь, ретрай - как в
-    /// [`Self::send`].
     pub(crate) fn recv(
         &self,
         receiver: &ThreadTransport,
@@ -397,8 +373,6 @@ impl Port {
         }
     }
 
-    /// Снимает с очереди waiter по идентичности `waker`.
-    /// Возвращает `true`, если он был найден и удалён.
     pub(crate) fn remove_waiter(&self, waker: &Arc<ParkWaker>) -> bool {
         // Waiter не роняется под локом порта: его транспорт держит capability-таблицу.
         let removed = self.inner.with_lock(|state| state.take_by_waker(waker));
@@ -480,8 +454,6 @@ fn outcome_to_result(outcome: &Arc<OutcomeSlot>) -> Result<(), IpcError> {
     }
 }
 
-// Шаг перепроверки состояния call'а с истёкшим дедлайном, пока перенос в полёте:
-// переход `PENDING -> AWAITING_REPLY` вызывателя не будит, и его надо переобнаружить.
 const EXPIRED_RECHECK_NS: u64 = 1_000_000;
 
 fn wait_resolved(runtime: &Arc<dyn KernelRuntime>, waker: &Arc<ParkWaker>) {
@@ -636,7 +608,6 @@ pub fn port_recv(
     }
 }
 
-// Отказ буфера теряет событие, как и провалившийся перенос кадра.
 fn publish_departed_badge(receiver: &ThreadTransport, badge: u64) -> IpcError {
     match write_badge(receiver, badge) {
         Ok(()) => IpcError::SenderGone,
@@ -654,7 +625,6 @@ struct PortCancel {
     port: Arc<Port>,
     waker: Arc<ParkWaker>,
     outcome: Arc<OutcomeSlot>,
-    /// Слот получателя: матчер `call` кладёт туда reply до пробуждения.
     reply_slot: Option<Arc<ReplySlot>>,
 }
 
@@ -715,7 +685,6 @@ mod tests {
     const BADGE_A: u64 = 0xA1;
     const BADGE_B: u64 = 0xB2;
 
-    /// Stub-runtime: block_current_until - no-op, unblock считается.
     struct StubRuntime {
         unblocks: AtomicU32,
     }
@@ -752,8 +721,6 @@ mod tests {
         fn clear_blocked_cancel(&self) {}
     }
 
-    /// Runtime с управляемыми часами: каждая парковка записывает запрошенный
-    /// тайм-аут, продвигает часы на него и один раз зовёт установленный хук.
     struct DeadlineRuntime {
         now: core::sync::atomic::AtomicU64,
         parks: std::sync::Mutex<Vec<Option<u64>>>,
@@ -823,13 +790,10 @@ mod tests {
         ThreadTransport::new(mapper, VirtualAddress::new(base), table)
     }
 
-    /// Учтённый получатель: без живой capability с `READ` порт отвергает
-    /// отправителей.
     fn receiver_capability(port: &Arc<Port>) -> Capability {
         Capability::new(CapabilityTarget::Port(port.clone()), Rights::READ)
     }
 
-    /// Корневая capability сервера: получатель и источник минта клиентских.
     fn root_capability(port: &Arc<Port>) -> Capability {
         Capability::new(
             CapabilityTarget::Port(port.clone()),
@@ -837,7 +801,6 @@ mod tests {
         )
     }
 
-    /// Клиентская capability со значком, выведенная из корневой.
     fn badged_capability(root: &Capability, badge: u64) -> Capability {
         root.duplicate(Rights::WRITE, badge)
             .expect("mint badged capability")
@@ -1115,7 +1078,7 @@ mod tests {
             panic!("recv must park");
         };
         assert!(!ep.queue_is_empty());
-        // Снятие найденного waiter'а -> true, очередь пустеет.
+        // Снятие найденного waiter -> true, очередь пустеет.
         assert!(ep.remove_waiter(&waker));
         assert!(ep.queue_is_empty());
         // Идемпотентность: повторное снятие -> false.
@@ -1531,15 +1494,12 @@ mod tests {
         drop(badged_capability(&root, BADGE_A));
     }
 
-    /// Уходы значков при пустой очереди получателей: каждый оставляет на порту
-    /// запись с непрочтённым событием.
     fn accumulate_departed_badges(root: &Capability, count: u64) {
         for badge in 1..=count {
             drop(badged_capability(root, badge));
         }
     }
 
-    /// Значок, для которого записи на порту с накопленными уходами заведомо нет.
     const EXTRA_BADGE: u64 = DEPARTED_BADGE_LIMIT as u64 + 1;
 
     #[test]

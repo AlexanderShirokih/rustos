@@ -24,11 +24,9 @@ pub enum AllocationError {
     InvalidLayout,
 }
 
-/// Free-list-узел: лежит в начале каждого свободного блока кучи.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 struct FreeBlock {
-    /// Размер полезной области блока в байтах, без заголовка.
     size: usize,
     next: Option<NonNull<FreeBlock>>,
 }
@@ -38,10 +36,9 @@ impl FreeBlock {
         FreeBlock { size, next: None }
     }
 
-    /// Откалывает хвост блока в новый `FreeBlock`, оставляя в `self`
-    /// ровно `align_up(requested_size, ALLOC_ALIGN)` байт. `None`, если
-    /// остатка не хватает на новый header + `MIN_ALLOC_SIZE`.
     fn split(&mut self, requested_size: usize) -> Option<NonNull<FreeBlock>> {
+        // Заголовок `FreeBlock` лежит в начале свободного блока, а `size`
+        // считает только полезную область за ним.
         let aligned_size = align_up(requested_size, ALLOC_ALIGN);
         let block_header_size = size_of::<FreeBlock>();
 
@@ -89,7 +86,6 @@ impl HeapArena {
 pub struct HeapAllocator {
     kernel_mapper: &'static (dyn MemoryMapper + Send + Sync),
     arena: HeapArena,
-    /// VA первой ещё не замапленной страницы арены; растёт только вверх.
     arena_top: PageAlignedVirtualAddress,
     free_list_head: Option<NonNull<FreeBlock>>,
     current_size: usize,
@@ -107,9 +103,6 @@ impl HeapAllocator {
         }
     }
 
-    /// Маппит подряд `align_up(min_size, PAGE_SIZE)` байт в следующий
-    /// VA-слот арены. Атомарность leaf-страниц при partial-OOM
-    /// обеспечивает `MemoryMapper::map`.
     fn expand(&mut self, min_size: usize) -> Result<(), AllocationError> {
         let pages_needed = align_up(min_size, PAGE_SIZE.get()) / PAGE_SIZE;
         let bytes = pages_needed * PAGE_SIZE.get();
@@ -184,8 +177,6 @@ impl HeapAllocator {
         None
     }
 
-    /// Вставляет блок в free-list по возрастанию адреса и сливает с
-    /// VA-смежными соседями.
     fn add_to_free_list(&mut self, block_ptr: NonNull<FreeBlock>) {
         // SAFETY: `block_ptr` - валидный `FreeBlock` в замапленной арене,
         // эксклюзивно принадлежит аллокатору.

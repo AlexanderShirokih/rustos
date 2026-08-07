@@ -83,8 +83,8 @@ mod tests {
 
     #[test]
     fn truncating_respects_char_boundary() {
-        // "ё" - два байта; срез по середине символа запрещён.
-        assert_eq!(Str::<4>::truncating("ааа").as_str(), "аа");
+        // "é" занимает два байта, срез по середине символа запрещён.
+        assert_eq!(Str::<4>::truncating("ééé").as_str(), "éé");
         assert_eq!(Str::<4>::truncating("abc").as_str(), "abc");
     }
 }

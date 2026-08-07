@@ -16,7 +16,6 @@ use syscall::{Handle, Timeout};
 use userland_image::decode;
 use userland_loader::load_entry;
 
-/// Значок сессии демо у калькулятора.
 const CALCULATOR_SESSION_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
 
 #[unsafe(no_mangle)]

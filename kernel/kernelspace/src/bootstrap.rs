@@ -32,8 +32,6 @@ use crate::{
     user_process::{SpawnUserError, UserProcessLauncher},
 };
 
-/// Диапазон корневого Resource: всё адресное пространство, выровненное вниз
-/// до страницы.
 const ROOT_RESOURCE_SPAN: NonZeroUsize = NonZeroUsize::new(usize::MAX & !0xFFF).unwrap();
 
 /// Запущенный bootstrap-процесс.
@@ -118,7 +116,8 @@ pub fn spawn_process(
         AccessMask::R,
     ));
 
-    // Read-only Normal-регион поверх байт DTB. Память DTB зарезервирована раскладкой на весь срок ядра.
+    // Read-only Normal-регион поверх байт DTB. Память DTB зарезервирована раскладкой на весь срок
+    // ядра.
     let fdt_size = page_round_up(dtb.size_bytes).ok_or(BootstrapSpawnError::FdtGeometry)?;
     let fdt_region = Arc::new(MemoryRegion::create_physical_normal(
         dtb.phys_base,
@@ -154,7 +153,7 @@ pub fn spawn_process(
     })
 }
 
-/// Цикл сервера bootstrap-port'а: kernel-поток аллоцирует kernel-резидентный
+/// Цикл сервера bootstrap-port: kernel-поток аллоцирует kernel-резидентный
 /// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракт
 /// `Bootstrap`. `_receiver` - capability с `READ`: пока сервер работает, она
 /// держит ядро в множестве получателей порта.
@@ -208,20 +207,15 @@ pub fn close_bootstrap_port(port: &Arc<Port>, timeout_ns: u64) -> Result<(), Ker
     port_send(port, &sender, runtime(), Some(timeout_ns), None)
 }
 
-/// Код ошибки выдачи в bootstrap-протоколе: отказ вставки дубликата в таблицу.
 const ACQUIRE_FAILED: u32 = 1;
-/// Код ошибки выдачи: индекс device-окна вне набора.
 const NO_SUCH_WINDOW: u32 = 2;
 
-/// Серверная сторона контракта `Bootstrap`.
 struct BootstrapServer {
     table: Arc<MutexCell<HandleTable>>,
     resources: BootstrapResources,
 }
 
 impl BootstrapServer {
-    /// Кладёт дубликат `target` в таблицу сервера, возвращает его индекс как
-    /// `Cap`; перенос вызывателю делает reply-путь транспорта.
     fn vend(&self, target: CapabilityTarget) -> Result<Cap, u32> {
         let cap = Capability::new_with_default_rights(target);
         let id = self
@@ -273,7 +267,6 @@ impl BootstrapService for BootstrapServer {
     }
 }
 
-/// Сводит kernel-ошибку IPC к ошибке wire-транспорта.
 fn map_kernel_error(error: KernelIpcError) -> WireError {
     match error {
         KernelIpcError::ShouldWait => WireError::WouldBlock,
@@ -293,10 +286,6 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
     }
 }
 
-/// Kernel-side port-транспорт серверной роли поверх kernel-резидентного
-/// IPC-буфера и kernel port API.
-///
-/// Реализует только то, что нужно `dispatch_bootstrap`.
 struct KernelPortTransport {
     port: Arc<Port>,
     buffer: KernelIpcBuffer,

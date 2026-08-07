@@ -58,31 +58,23 @@ macro_rules! component_manifest {
             $visibility fn receive<T: ::ipc::Transport>(
                 transport: &T,
             ) -> ::core::result::Result<::core::option::Option<Self>, ::ipc::wire::IpcError> {
-                let started = match $crate::receive_startup_transaction(transport)? {
-                    ::core::option::Option::Some(started) => started,
-                    ::core::option::Option::None => {
-                        return ::core::result::Result::Ok(::core::option::Option::None);
-                    }
+                let ::core::option::Option::Some(started) =
+                    $crate::receive_startup_transaction(transport)?
+                else {
+                    return ::core::result::Result::Ok(::core::option::Option::None);
                 };
-                const DECLARES_CONFIG: bool = $config;
-                if started.config.is_some() != DECLARES_CONFIG {
+                if started.config.is_some() != $config {
                     return ::core::result::Result::Ok(::core::option::Option::None);
                 }
                 $(
-                    let $config_field = match started.config {
-                        ::core::option::Option::Some(config) => config,
-                        ::core::option::Option::None => {
-                            return ::core::result::Result::Ok(::core::option::Option::None);
-                        }
+                    let ::core::option::Option::Some($config_field) = started.config else {
+                        return ::core::result::Result::Ok(::core::option::Option::None);
                     };
                 )?
                 let mut slots = started.slots();
                 $(
-                    let $slot = match slots.next() {
-                        ::core::option::Option::Some(capability) => capability,
-                        ::core::option::Option::None => {
-                            return ::core::result::Result::Ok(::core::option::Option::None);
-                        }
+                    let ::core::option::Option::Some($slot) = slots.next() else {
+                        return ::core::result::Result::Ok(::core::option::Option::None);
                     };
                 )*
                 if slots.next().is_some() {

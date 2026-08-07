@@ -10,7 +10,6 @@ use filesystem_abi::{AccessMode, FileSystemError, NodeDescriptor};
 
 use crate::node::NodeId;
 
-// Потолок одновременно открытых узлов одной сессии.
 const OPEN_NODE_LIMIT: usize = 64;
 
 /// Ключ, по которому сервер узнаёт клиента своей сессии. Значение назначает
@@ -25,7 +24,6 @@ pub struct OpenNode {
     pub mode: AccessMode,
 }
 
-// Слот дескриптора: счётчик выданных поколений живёт дольше открытого в слоте узла.
 struct DescriptorSlot {
     generation: u16,
     node: Option<OpenNode>,
@@ -39,13 +37,12 @@ impl DescriptorSlot {
         }
     }
 
-    // Слот с исчерпанным поколением выведен из оборота: его повторная выдача повторяет значение
-    // жившего когда-то дескриптора.
     fn is_vacant(&self) -> bool {
+        // Исчерпанное поколение выводит слот из оборота: иначе дескриптор повторит значение
+        // жившего когда-то.
         self.node.is_none() && self.generation < u16::MAX
     }
 
-    // Занимает слот узлом и выдаёт дескриптор со свежим поколением.
     fn occupy(&mut self, slot: u32, open_node: OpenNode) -> NodeDescriptor {
         let issued = NonZeroU16::MIN.saturating_add(self.generation);
         self.generation = issued.get();

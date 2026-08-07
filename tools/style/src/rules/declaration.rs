@@ -110,7 +110,7 @@ pub fn permits_doc(node: &SyntaxNode, settings: &Settings) -> bool {
     if node.kind() == SyntaxKind::MACRO_RULES {
         return attribute_names(node).any(|name| name == "macro_export");
     }
-    if node.kind() == SyntaxKind::VARIANT {
+    if node.kind() == SyntaxKind::VARIANT || is_variant_payload(node) {
         return enclosing(node).is_some_and(|owner| is_plain_pub(&owner));
     }
     if let Some(owner) = enclosing(node)
@@ -180,6 +180,13 @@ fn has_doc_bearing_derive(node: &SyntaxNode, settings: &Settings) -> bool {
             .iter()
             .any(|want| listed.contains(want.as_str()))
     })
+}
+
+fn is_variant_payload(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::RECORD_FIELD | SyntaxKind::TUPLE_FIELD
+    ) && owning_type(node).is_some_and(|owner| owner.kind() == SyntaxKind::ENUM)
 }
 
 fn owning_type(node: &SyntaxNode) -> Option<SyntaxNode> {

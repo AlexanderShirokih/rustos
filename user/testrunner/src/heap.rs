@@ -7,10 +7,8 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use kernel_tests::kernel_test;
 use runtime::{Priority, Timeout, spawn};
 
-/// Размер стека рабочего потока (page-aligned выдача -> вершина 16-байт-выровнена).
 const STACK_SIZE: u64 = 0x4000;
 
-/// Таймаут join'а: конечный, чтобы зависший worker падал по timeout.
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 #[kernel_test]
@@ -55,23 +53,21 @@ fn heap_passthrough() {
     }
 }
 
-/// Число рабочих потоков и итераций в `heap_concurrent`.
 const WORKERS: u64 = 4;
 const ITERS: u64 = 200;
-/// Длина рабочего вектора на итерацию.
-const LEN: u64 = 64;
+const VECTOR_LEN: u64 = 64;
 
 struct ConcurrentShared {
     total: AtomicU64,
 }
 
 extern "C" fn churn_worker(arg: usize) -> u32 {
-    // SAFETY: arg - адрес ConcurrentShared в кадре спавнящего потока; жив до
-    // join'а, который выполняется до выхода из кадра.
+    // SAFETY: arg - адрес ConcurrentShared в кадре спавнящего потока, живой до
+    // завершения join, который выполняется до выхода из кадра.
     let shared = unsafe { &*(arg as *const ConcurrentShared) };
     for _ in 0..ITERS {
-        let mut v: Vec<u64> = Vec::with_capacity(LEN as usize);
-        for i in 0..LEN {
+        let mut v: Vec<u64> = Vec::with_capacity(VECTOR_LEN as usize);
+        for i in 0..VECTOR_LEN {
             v.push(i);
         }
         let sum: u64 = v.iter().copied().sum();
@@ -96,7 +92,7 @@ fn heap_concurrent() {
             .expect("worker joins before timeout");
     }
 
-    let per_iter = LEN * (LEN - 1) / 2;
+    let per_iter = VECTOR_LEN * (VECTOR_LEN - 1) / 2;
     let expected = WORKERS * ITERS * per_iter;
     kernel_tests::kassert_eq!(shared.total.load(Relaxed), expected);
 }

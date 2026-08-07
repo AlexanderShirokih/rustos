@@ -18,6 +18,7 @@ impl IntoWireHandle for crate::wire::Cap {
         self.raw().get()
     }
 
-    // Cap не владеет хэндлом - отдавать нечего.
-    fn relinquish(self) {}
+    fn relinquish(self) {
+        // Cap не владеет handle, отдавать нечего.
+    }
 }

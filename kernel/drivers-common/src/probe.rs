@@ -29,9 +29,7 @@ impl fmt::Display for ProbeError {
 
 /// Контекст пробирования устройства для произвольного типа узла
 pub struct ProbeContext<N: DeviceNode> {
-    /// Узел, который пробируется.
     pub(crate) node: N,
-    /// Иерархия узлов от корня до текущего.
     pub(crate) hierarchy: Vec<N>,
 }
 

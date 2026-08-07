@@ -33,21 +33,14 @@ use router::{Administering, MountTable, Resolving};
 
 const LOG_TAG: &str = "router";
 
-// Стек потока admin-порта: он ведёт монтирования и подъём процессов файловых систем.
 const ADMIN_STACK: u64 = 0x4000;
 
-// Код выхода маршрутизатора, потерявшего поднявший его supervisor.
 const SUPERVISOR_LOST_EXIT_CODE: u32 = 7;
 
-// Оборот приёма на admin-порту: он же задаёт задержку между уходом файловой системы и подъёмом
-// её смены.
 const ADMIN_TURN: Timeout = Timeout::from_millis(100);
 
-// Маппинг региона образа: его байты держат программы файловых систем и живут всё время работы
-// маршрутизатора.
 static IMAGE: Once<ReadOnlyMapping> = Once::new();
 
-// Таблица монтирования, разделённая потоками сервисного и admin-порта.
 static MOUNTS: Mutex<MountTable> = Mutex::new(MountTable::new());
 
 component_manifest! {
@@ -69,8 +62,6 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     }
 }
 
-// Принимает стартовый кадр, отдаёт admin-порт своему потоку и обслуживает сервисный порт, пока
-// приём кадров не откажет.
 fn run(startup: Handle) -> Result<()> {
     let StartResources {
         log,
@@ -112,7 +103,6 @@ fn run(startup: Handle) -> Result<()> {
     Ok(())
 }
 
-// Цикл сервисного порта: кадры клиентов до его закрытия.
 fn serve(service: &OwnedHandle) {
     let transport = PortTransport::server(service.borrow());
     loop {
@@ -139,16 +129,12 @@ fn serve(service: &OwnedHandle) {
     log_line("service port closed");
 }
 
-// Состояние потока admin-порта.
 struct AdminPort {
     port: OwnedHandle,
     administering: Administering<'static>,
     service_thread: Thread,
 }
 
-// Цикл admin-порта в отдельном потоке: монтирования и наблюдение за их процессами, пока порт
-// открыт. Наблюдение идёт каждым оборотом, а не только пустым: поток admin-кадров его не
-// вытесняет.
 fn serve_admin(mut admin: AdminPort) -> u32 {
     let transport = PortTransport::server(admin.port.borrow());
     loop {

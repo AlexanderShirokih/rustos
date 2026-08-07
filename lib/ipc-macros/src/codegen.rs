@@ -38,9 +38,6 @@ pub fn expand(protocol: &Protocol) -> TokenStream {
     }
 }
 
-/// Для операций с не-литеральной границей бюджет кадра нельзя проверить на
-/// этапе раскрытия макроса; эмитим эквивалентный `const`-assert, где значения
-/// границ уже резолвятся.
 fn expand_budget_asserts(protocol: &Protocol) -> TokenStream {
     let asserts = protocol
         .operations
@@ -73,7 +70,6 @@ fn has_opaque(op: &Operation) -> bool {
         .any(|param| matches!(&param.ty, WireTy::Opaque(_)))
 }
 
-/// Длина `data` поля как const-выражение для бюджет-assert'а.
 fn data_len_expr(ty: &WireTy) -> TokenStream {
     match ty {
         WireTy::Uint(width) | WireTy::Int(width) => {
@@ -165,15 +161,13 @@ fn decode_single_value(ty: &WireTy, body: &TokenStream) -> TokenStream {
     }}
 }
 
-// Опирается на __field и __handle_slots в области: значение-капа достаёт свой handle из
-// слотов кадра.
 fn decode_field_value(ty: &WireTy) -> TokenStream {
     let ty_tokens = wire_ty_tokens(ty, &quote!('_));
+    // Раскрытие опирается на `__field` и `__handle_slots` в области вызова: значение-капа
+    // достаёт свой handle из слотов кадра.
     quote!(<#ty_tokens as ::ipc::WireValue>::from_field(__field.data, &__handle_slots)?)
 }
 
-// Опирается на __handle_slots: значение-капа кладёт туда handle, а в тело пишет его индекс.
-// Cap-параметр верхнего уровня принимается как impl IntoWireHandle, и его id берётся у трейта.
 fn encode_field(
     value: &TokenStream,
     field_id: u8,
@@ -181,6 +175,8 @@ fn encode_field(
     buf: &TokenStream,
     owned: bool,
 ) -> TokenStream {
+    // Раскрытие опирается на `__handle_slots` в области вызова: значение-капа кладёт туда
+    // handle, а в тело пишет его индекс.
     if let (WireTy::Cap, true) = (ty, owned) {
         return quote! {
             let __index = __handle_slots.push(::ipc::IntoWireHandle::wire_id(&#value))?;
@@ -192,8 +188,6 @@ fn encode_field(
     }
 }
 
-/// Эмитит запись параметров запроса в `__buf` и аргумент handle-среза для `write_message`.
-/// Массив `__out_handles` объявляется только при наличии Cap-поля.
 fn encode_params(params: &[Param]) -> (TokenStream, TokenStream) {
     let writes = params.iter().map(|param| {
         let ident = &param.ident;
@@ -209,7 +203,6 @@ fn encode_params(params: &[Param]) -> (TokenStream, TokenStream) {
     (quote! { #decl #(#writes)* }, handles_out_arg())
 }
 
-/// Эмитит запись возвращаемого значения `value` в `buf` и аргумент handle-среза.
 fn encode_return(
     value: &TokenStream,
     ty: &WireTy,
@@ -225,9 +218,9 @@ fn is_cap_value_return(ret: &RetType) -> bool {
     matches!(ret.ok(), WireTy::Cap) && ret.err().is_none()
 }
 
-// Слоты исходящего кадра заводятся всегда: капа прячется и внутри агрегата, чей wire-тип по
-// имени не разобрать.
 fn handles_out_decl() -> TokenStream {
+    // Слоты исходящего кадра заводятся всегда: капа прячется и внутри агрегата, чей
+    // wire-тип по имени не разобрать.
     quote! {
         let mut __handle_slots = ::ipc::wire::HandleSlots::new();
     }
@@ -267,8 +260,6 @@ fn has_cap_params(params: &[Param]) -> bool {
     params.iter().any(|param| matches!(param.ty, WireTy::Cap))
 }
 
-/// Отдаёт cap-параметры при успешной передаче `transferred`; иначе они роняются
-/// и `Drop` закрывает хэндл.
 fn relinquish_send(params: &[Param], transferred: &TokenStream) -> TokenStream {
     let calls = params
         .iter()
@@ -277,6 +268,7 @@ fn relinquish_send(params: &[Param], transferred: &TokenStream) -> TokenStream {
             let ident = &param.ident;
             quote!(::ipc::IntoWireHandle::relinquish(#ident);)
         });
+    // Без передачи капы роняются на месте, и `Drop` закрывает handle.
     quote! {
         if #transferred {
             #(#calls)*

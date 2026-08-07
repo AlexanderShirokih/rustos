@@ -24,11 +24,8 @@ use crate::register_driver;
 
 /// Драйвер Generic Interrupt Controller v3.
 pub struct Gicv3 {
-    /// Адрес MMIO GICD (Distributor).
     distributor_address: MmioAddress,
-    /// Адрес MMIO GICR (Redistributor).
     redistributor_address: MmioAddress,
-    /// Расстояние между фреймами соседних Redistributor'ов.
     redistributor_stride: usize,
 }
 
@@ -117,7 +114,7 @@ pub fn gicv3_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
         .get_mmio_address(1)
         .ok_or(ProbeError::MissingProperty("GICR base address"))?;
 
-    // Отображается только первая объявленная область Redistributor'ов. CPU,
+    // Отображается только первая объявленная область Redistributor. CPU,
     // чей фрейм лежит в остальных, не найдёт себя и в работу не пойдёт -
     // отказ виден на его старте, а не молча.
     let redistributor_stride = context

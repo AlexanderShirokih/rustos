@@ -40,19 +40,13 @@ use crate::{
 pub type BootFrameAllocator = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
 
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
-// Спинлок в pre-MMU фазе неприменим, а исполнение в ней однопоточно.
 type NoLockPageMapper<'a, FA> = NoLockCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 type NoLockAarch64MemoryMapper<'a, FA> = Aarch64MemoryMapper<'a, FA, NoLockPageMapper<'a, FA>>;
 type KernelMemoryMapper =
     Aarch64MemoryMapper<'static, FrameAllocatorImpl, MutexPageMapper<'static, FrameAllocatorImpl>>;
 
-/// Статический слот kernel-mapper'а: heap зовёт его в expand'е, а сам
-/// `set_heap` происходит когда global allocator в PHASE_FROZEN, поэтому
-/// mapper нельзя положить в Box - он должен быть `&'static` без heap.
 static KERNEL_MEMORY_MAPPER: Once<KernelMemoryMapper> = Once::new();
 
-/// Аллокатор фреймов post-MMU фазы. Живёт в статике, а не в куче: сама куча
-/// строится на нём.
 static FRAME_ALLOCATOR: Once<FrameAllocatorImpl> = Once::new();
 
 #[cfg(feature = "kernel-tests")]
@@ -89,14 +83,9 @@ pub struct PageTableRoots {
 
 /// Фаза после подготовки таблиц страниц.
 pub struct Prepared {
-    /// Корневые таблицы.
     roots: PageTableRoots,
-    /// Аллокатор фреймов.
     frame_allocator: &'static BootFrameAllocator,
-    /// Все регионы для маппинга.
     all_regions: StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
-    /// Арена bump-аллокатора: единственная часть свободной RAM, которой нет
-    /// среди `all_regions` под тегом [`RegionTag::Heap`].
     bump: Interval<PageAlignedAddress>,
 }
 
@@ -301,17 +290,13 @@ impl MemorySetup<Prepared> {
         })
     }
 
-    /// Закрывающий проход пары: отбрасывает строки, которые могли осесть над
-    /// свободной RAM за pre-MMU фазу. Открывающий проход идёт в
-    /// [`MemorySetup::<Early>::create`], до первой записи.
-    ///
-    /// Диапазон - свободная RAM: в ней лежат bump-арена, битмапы аллокатора
-    /// фреймов и таблицы страниц. Память загрузчика (DTB, initrd, резервации
-    /// FDT) из него исключена и грязных строк не теряет.
     fn drop_stale_cache_lines(
         all_regions: &StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
         bump: Interval<PageAlignedAddress>,
     ) {
+        // Парный открывающий проход идёт в `MemorySetup::<Early>::create`, до
+        // первой записи. Bump-арены нет среди `all_regions` под тегом
+        // [`RegionTag::Heap`], поэтому она инвалидируется отдельно.
         DataCache::<EL1>::invalidate_range_to_coherency(bump.start.as_usize(), bump.end.as_usize());
 
         for region in all_regions
@@ -402,10 +387,13 @@ impl MemorySetup<Enabled> {
 
         let higher_ptr_phys =
             PageAlignedVirtualAddress::identity(higher_root_pa).as_ptr::<PageTable<L0>>();
-        // SAFETY: `higher_ptr_phys` - валидный указатель на PageTable<L0> в higher-half identity-region;
-        // сдвиг на `higher_half_base` корректен (страница принадлежит замапленному региону).
+        // SAFETY: `higher_ptr_phys` - валидный указатель на PageTable<L0> в higher-half
+        // identity-region. Сдвиг на `higher_half_base` корректен: страница принадлежит замапленному
+        // региону.
         let higher_ptr_rel = unsafe { higher_ptr_phys.byte_add(higher_half_base.as_usize()) };
 
+        // Слот статический: `set_heap` идёт при global allocator в PHASE_FROZEN,
+        // и положить mapper в Box в этот момент уже нельзя.
         let kernel_mapper: &'static KernelMemoryMapper = KERNEL_MEMORY_MAPPER.call_once(|| {
             Aarch64MemoryMapper::new_with_offset(
                 fa_virt,
@@ -437,9 +425,6 @@ impl MemorySetup<Enabled> {
         }
     }
 
-    /// Забирает аллокатор фреймов из bump-памяти pre-MMU фазы и пересобирает
-    /// его под спинлоком. Экземпляр pre-MMU фазы этим потребляется: включение
-    /// MMU - единственная точка, где стратегия блокировки меняется.
     fn adopt_frame_allocator(
         frame_allocator_phys: PhysicalAddress,
         higher_half_base: PageAlignedVirtualAddress,
@@ -460,6 +445,7 @@ impl MemorySetup<Enabled> {
             boot.relocate_inner_pointers_by_offset(higher_half_base.as_usize());
         }
 
+        // Аллокатор живёт в статике: куча ядра строится поверх него.
         FRAME_ALLOCATOR.call_once(|| boot.into_locked())
     }
 }
@@ -469,8 +455,9 @@ impl<Any> MemorySetup<Any> {
         let va = PageAlignedVirtualAddress::identity(root);
         let ptr = va.as_ptr::<PageTable<L0>>();
 
-        // SAFETY: `root` - свежевыделенный фрейм, доступный через identity-mapping pre-MMU,
-        // эксклюзивно принадлежит вызывающему; запись пустой PageTable инициализирует все entries в Invalid.
+        // SAFETY: `root` - свежевыделенный фрейм, доступный через identity-mapping pre-MMU и
+        // эксклюзивно принадлежащий вызывающему. Запись пустой PageTable инициализирует все entries
+        // в Invalid.
         unsafe {
             *ptr = PageTable::new();
         }

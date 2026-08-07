@@ -1,7 +1,7 @@
-//! Handler-ы Process-syscall'ов: create/self/load_image/exit_code/terminate/start.
+//! Обработчики Process-syscall: create/self/load_image/exit_code/terminate/start.
 //!
 //! Парсят аргументы, пробрасывают в `capability` API и регистрируют новые
-//! handle'ы в текущей handle-таблице вызывающего процесса.
+//! handle в текущей handle-таблице вызывающего процесса.
 
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
@@ -29,7 +29,6 @@ use super::{
     runtime::runtime as syscall_runtime,
 };
 
-/// Exit-код потомка, снятого из-за невыданного вызывающему thread-хэндла.
 const EXIT_CODE_START_ROLLBACK: i32 = -1;
 
 pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallError> {
@@ -398,8 +397,6 @@ fn start_err_to_syscall(err: &StartProcessError) -> SyscallError {
     }
 }
 
-/// Декодирует младшие 32 бита аргумента в `i32` exit-код. Верхние биты
-/// игнорируются - ABI фиксирует exit_code в нижних 32-х.
 pub(super) fn exit_code_from_arg(raw: u64) -> i32 {
     (raw as u32).cast_signed()
 }

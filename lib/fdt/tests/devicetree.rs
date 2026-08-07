@@ -7,17 +7,6 @@ use fdt::{
 
 // --- Построение DTB ---
 
-/// ```text
-/// / {
-///     #address-cells = <2>;
-///     #size-cells = <2>;
-///     memory@80000000 {
-///         device_type = "memory";
-///         reg = <0x00 0x80000000 0x00 0x80000000
-///                0x01 0x00000000 0x00 0x80000000>;
-///     };
-/// };
-/// ```
 fn build_dtb_two_banks() -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -27,6 +16,15 @@ fn build_dtb_two_banks() -> Vec<u8> {
     let str_device_type: u32 = 27;
     let str_reg: u32 = 39;
 
+    // / {
+    //     #address-cells = <2>;
+    //     #size-cells = <2>;
+    //     memory@80000000 {
+    //         device_type = "memory";
+    //         reg = <0x00 0x80000000 0x00 0x80000000
+    //                0x01 0x00000000 0x00 0x80000000>;
+    //     };
+    // };
     let mut st = Vec::new();
 
     // root
@@ -64,26 +62,6 @@ fn build_dtb_two_banks() -> Vec<u8> {
     buf
 }
 
-/// ```text
-/// / {
-///     #address-cells = <2>;
-///     #size-cells = <1>;
-///     memory@0 {
-///         device_type = "memory";
-///         reg = <0x00 0x00000000 0x40000000>;
-///     };
-///     reserved-memory {
-///         #address-cells = <2>;
-///         #size-cells = <1>;
-///         ranges;
-///         rsv@10000000 {
-///             reg = <0x00 0x10000000 0x1000>;
-///         };
-///     };
-///     chosen {
-///     };
-/// };
-/// ```
 fn build_dtb_with_children() -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -94,6 +72,24 @@ fn build_dtb_with_children() -> Vec<u8> {
     let str_reg: u32 = 39;
     let str_ranges: u32 = 43;
 
+    // / {
+    //     #address-cells = <2>;
+    //     #size-cells = <1>;
+    //     memory@0 {
+    //         device_type = "memory";
+    //         reg = <0x00 0x00000000 0x40000000>;
+    //     };
+    //     reserved-memory {
+    //         #address-cells = <2>;
+    //         #size-cells = <1>;
+    //         ranges;
+    //         rsv@10000000 {
+    //             reg = <0x00 0x10000000 0x1000>;
+    //         };
+    //     };
+    //     chosen {
+    //     };
+    // };
     let mut st = Vec::new();
 
     // root
@@ -401,13 +397,6 @@ fn build_dtb_with_reservations(reservations: &[(u64, u64)]) -> Vec<u8> {
     buf
 }
 
-/// ```text
-/// reserved-memory {
-///     #address-cells = <2>; #size-cells = <1>;
-///     static@20000000 { reg = <0x00 0x20000000 0x1000>; };
-///     dynamic        { size = <0x4000>; };
-/// };
-/// ```
 fn build_dtb_reserved_mixed() -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -417,6 +406,11 @@ fn build_dtb_reserved_mixed() -> Vec<u8> {
     let str_reg: u32 = 27;
     let str_size: u32 = 31;
 
+    // reserved-memory {
+    //     #address-cells = <2>; #size-cells = <1>;
+    //     static@20000000 { reg = <0x00 0x20000000 0x1000>; };
+    //     dynamic        { size = <0x4000>; };
+    // };
     let mut st = Vec::new();
 
     // root
@@ -540,8 +534,8 @@ fn from_bytes_rejects_invalid_magic() {
     dtb[0] ^= 0xFF;
     match DeviceTree::from_bytes(&dtb) {
         Err(fdt::devicetree::DtError::InvalidMagic(_)) => {}
-        Ok(_) => panic!("ожидался InvalidMagic, разбор не должен был пройти"),
-        Err(other) => panic!("ожидался InvalidMagic, получено {other:?}"),
+        Ok(_) => panic!("expected InvalidMagic, parsing must not succeed"),
+        Err(other) => panic!("expected InvalidMagic, got {other:?}"),
     }
 }
 
@@ -555,8 +549,8 @@ fn from_bytes_rejects_truncated_header() {
             assert_eq!(total_size, 24);
             assert_eq!(actual, short.len());
         }
-        Ok(_) => panic!("ожидался Incomplete на обрезанном заголовке"),
-        Err(other) => panic!("ожидался Incomplete, получено {other:?}"),
+        Ok(_) => panic!("expected Incomplete on a truncated header"),
+        Err(other) => panic!("expected Incomplete, got {other:?}"),
     }
 }
 
@@ -570,8 +564,8 @@ fn from_bytes_rejects_inflated_total_size() {
         Err(fdt::devicetree::DtError::Incomplete { total_size, actual }) => {
             assert!(total_size > actual);
         }
-        Ok(_) => panic!("ожидался Incomplete на завышенном total_size"),
-        Err(other) => panic!("ожидался Incomplete, получено {other:?}"),
+        Ok(_) => panic!("expected Incomplete on an inflated total_size"),
+        Err(other) => panic!("expected Incomplete, got {other:?}"),
     }
 }
 
@@ -603,16 +597,6 @@ fn walker_does_not_panic_on_inflated_property_length() {
 
 // --- aliases / find_by_alias ---
 
-/// ```text
-/// / {
-///     aliases { serial0 = "/soc/serial@1000"; };
-///     soc {
-///         #address-cells = <1>; #size-cells = <1>;
-///         ranges = <0x0 0x1000_0000 0x0010_0000>;
-///         serial@1000 { reg = <0x1000 0x100>; };
-///     };
-/// };
-/// ```
 fn build_dtb_with_aliases_and_bus() -> Vec<u8> {
     let mut strings: Vec<u8> = Vec::new();
     let mut intern = |name: &str| -> u32 {
@@ -627,6 +611,14 @@ fn build_dtb_with_aliases_and_bus() -> Vec<u8> {
     let s_ranges = intern("ranges");
     let s_reg = intern("reg");
 
+    // / {
+    //     aliases { serial0 = "/soc/serial@1000"; };
+    //     soc {
+    //         #address-cells = <1>; #size-cells = <1>;
+    //         ranges = <0x0 0x1000_0000 0x0010_0000>;
+    //         serial@1000 { reg = <0x1000 0x100>; };
+    //     };
+    // };
     let mut st = Vec::new();
     push_u32(&mut st, 0x1); // begin root
     push_u32(&mut st, 0x0);
@@ -678,9 +670,7 @@ fn find_by_alias_resolves_to_node() {
     let dt = DeviceTree::from_bytes(&dtb).unwrap();
 
     // find по alias и по абсолютному пути дают тот же узел.
-    let via_alias = dt
-        .find("serial0")
-        .expect("alias serial0 должен резолвиться");
+    let via_alias = dt.find("serial0").expect("alias serial0 resolves");
     assert_eq!(via_alias.name(), "serial@1000");
 
     let via_path = dt.find("/soc/serial@1000").unwrap();
@@ -699,7 +689,7 @@ fn try_get_range_reads_bus_ranges() {
 
     // Родитель (root) по умолчанию #address-cells=2.
     let parent_cells = CellsSize::default();
-    let range = soc.try_get_range(parent_cells).expect("soc имеет ranges");
+    let range = soc.try_get_range(parent_cells).expect("soc has ranges");
     assert_eq!(range.child_addr(), 0x0);
     assert_eq!(range.parent_addr(), 0x1000_0000);
     assert_eq!(range.size(), 0x0010_0000);
@@ -717,7 +707,6 @@ fn try_get_range_none_without_ranges_prop() {
 
 // --- as_usize / try_as_u64 ---
 
-/// Корень с тремя свойствами: val4 (4 байта), val8 (8 байт), val3 (3 байта).
 fn build_dtb_with_scalar_props() -> Vec<u8> {
     let mut strings: Vec<u8> = Vec::new();
     let mut intern = |name: &str| -> u32 {
@@ -769,7 +758,6 @@ fn property_scalar_conversions() {
 
 // --- Вложенность > 2 уровней ---
 
-/// `/ a { b { c { leaf {} } } }` - глубина 4 уровня под корнем.
 fn build_dtb_deeply_nested() -> Vec<u8> {
     let strings = b"\0";
     let mut st = Vec::new();
@@ -796,7 +784,7 @@ fn find_traverses_more_than_two_levels() {
     let dtb = build_dtb_deeply_nested();
     let dt = DeviceTree::from_bytes(&dtb).unwrap();
 
-    let leaf = dt.find("/a/b/c/leaf").expect("глубоко вложенный узел");
+    let leaf = dt.find("/a/b/c/leaf").expect("deeply nested node");
     assert_eq!(leaf.name(), "leaf");
 
     // Промежуточные уровни тоже находятся.

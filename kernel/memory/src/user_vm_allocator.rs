@@ -1,9 +1,9 @@
 //! Per-process аллокатор виртуального адресного пространства user-процесса.
 //!
 //! Tag хранит текущие флаги доступа маппинга, `Arc<MemoryRegion>` -
-//! владельца PA - и `grant`: потолок access-битов, разрешённый caller'у при
+//! владельца PA - и `grant`: потолок access-битов, разрешённый caller при
 //! `MemoryMap`. `MemoryRemap` ограничен этим потолком, иначе процесс с
-//! handle'ом на R-only мог бы апгрейднуть mapping до RW через remap, в
+//! handle на R-only апгрейднет mapping до RW через remap, в
 //! обход capability на handle (на этапе remap handle уже не проверяется).
 //!
 //! Освобождённый регион возвращается в free-list и сливается с соседними;

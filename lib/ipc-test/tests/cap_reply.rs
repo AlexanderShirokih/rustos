@@ -16,7 +16,6 @@ trait CapSource {
     fn get_cap(&self) -> ipc::wire::Cap;
 }
 
-/// Исход владения cap-источником.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Fate {
     Pending,
@@ -24,7 +23,6 @@ enum Fate {
     Dropped,
 }
 
-/// Источник cap, фиксирующий исход: relinquish (отдан ядру) или Drop (закрыт).
 struct FakeHandle {
     id: u32,
     fate: Arc<Mutex<Fate>>,
@@ -47,7 +45,6 @@ impl Drop for FakeHandle {
     }
 }
 
-/// Сервис, отдающий cap через `impl IntoWireHandle` (RPITIT).
 struct Source {
     id: u32,
     fate: Arc<Mutex<Fate>>,

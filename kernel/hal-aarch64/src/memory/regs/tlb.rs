@@ -61,7 +61,7 @@ impl TranslationLookasideBuffer<EL1> {
     }
 
     /// Инвалидация всех записей конкретного ASID, inner-shareable.
-    /// Используется для unmap'а L1 block (1 ГБ) в user-AS.
+    /// Используется на unmap L1 block (1 ГБ) в user-AS.
     pub fn invalidate_asid_inner_shareable(asid: u16) {
         // tlbi aside1is, Xt: Xt[63:48] = ASID.
         let xt: u64 = u64::from(asid) << 48;

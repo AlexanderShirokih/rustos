@@ -21,11 +21,12 @@ pub struct UserSegment<'a> {
     pub perms: MemFlags,
 }
 
-/// Описание user-process образа. Передаётся в `UserProcessLauncher::spawn_user_process_with_launch`.
+/// Описание user-process образа. Передаётся в
+/// `UserProcessLauncher::spawn_user_process_with_launch`.
 pub struct UserImage<'a> {
     /// Сегменты программы. Не должны пересекаться по VA-диапазонам.
     pub segments: &'a [UserSegment<'a>],
-    /// User entry point (попадает в первый PC user-thread'а).
+    /// User entry point (попадает в первый PC user-thread).
     pub entry: VirtualAddress,
     /// Вершина user-stack (выровнена на 4К). Под
     /// `[user_stack_top - user_stack_size, user_stack_top)` маппится

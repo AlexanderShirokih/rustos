@@ -245,7 +245,7 @@ mod tests {
             Err(UserlandValidationError::EmptyPath)
         );
         assert_eq!(
-            validate_entry(&entry("/boot/не ascii", &segments, 0x4000_0000)),
+            validate_entry(&entry("/boot/café", &segments, 0x4000_0000)),
             Err(UserlandValidationError::NonAsciiPath)
         );
 

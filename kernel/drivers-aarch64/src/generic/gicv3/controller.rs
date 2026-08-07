@@ -15,29 +15,23 @@ use io::mmio::Reg;
 use klog::{debug, warn};
 
 use super::regs::{
-    GICD_CTLR, GICD_CTLR_ARE_NS, GICD_CTLR_ENABLE_GRP1NS, GICD_CTLR_RWP, GICD_ICENABLER,
-    GICD_ICFGR, GICD_ICPENDR, GICD_IGROUPR, GICD_IGRPMODR, GICD_IPRIORITYR, GICD_IROUTER,
-    GICD_ISENABLER, GICD_TYPER, GICR_FRAME_SPAN, GICR_ICENABLER0, GICR_ICFGR0, GICR_ICFGR1,
-    GICR_IGROUPR0, GICR_IGRPMODR0, GICR_IPRIORITYR, GICR_ISENABLER0, GICR_TYPER, GICR_WAKER,
-    GICR_WAKER_CHILDREN_ASLEEP, GICR_WAKER_PROCESSOR_SLEEP, ITLinesNumber, IrqType,
-    PRIORITY_MASK_ALL, bit_offset, frame_owner,
+    GICD_CTLR, GICD_CTLR_ARE_NS, GICD_CTLR_DISABLE, GICD_CTLR_ENABLE_GRP1NS, GICD_CTLR_RWP,
+    GICD_ICENABLER, GICD_ICFGR, GICD_ICPENDR, GICD_IGROUPR, GICD_IGRPMODR, GICD_IPRIORITYR,
+    GICD_IROUTER, GICD_ISENABLER, GICD_TYPER, GICR_FRAME_SPAN, GICR_ICENABLER0, GICR_ICFGR0,
+    GICR_ICFGR1, GICR_IGROUPR0, GICR_IGRPMODR0, GICR_IPRIORITYR, GICR_ISENABLER0, GICR_TYPER,
+    GICR_WAKER, GICR_WAKER_CHILDREN_ASLEEP, GICR_WAKER_PROCESSOR_SLEEP, IrqBankCount, IrqType,
+    PRIORITY_MASK_ALL, PRIORITY_MASK_ALL_BANK, bit_offset, frame_owner,
 };
 use crate::{read_sysreg, write_sysreg};
 
-/// Runtime-объект контроллера прерываний GICv3.
 pub(super) struct Gicv3Controller {
     pub(super) distributor: MmioBound,
-    /// Отображённая область Redistributor'ов: фреймы всех CPU подряд.
     pub(super) redistributor: MmioBound,
     frames: AffinityFrames,
-    pub(super) interrupt_lines: ITLinesNumber,
+    pub(super) interrupt_lines: IrqBankCount,
     pub(super) handlers: BTreeMap<IrqNumber, BoundIrq>,
 }
 
-/// Привязанная линия: обработчик и параметры её настройки.
-///
-/// Регистры SGI и PPI приватны для CPU: настройка, сделанная одним CPU, другому
-/// не видна, и на его per-CPU инициализации она повторяется отсюда.
 pub(super) struct BoundIrq {
     pub(super) handler: Arc<dyn IrqHandler>,
     pub(super) priority: IrqPriority,
@@ -46,9 +40,9 @@ pub(super) struct BoundIrq {
 
 const SGI_TARGET_LIST_BITS: u64 = 16;
 
-// Aff3 [55:48], Aff2 [39:32], INTID [27:24], Aff1 [23:16], TargetList [15:0];
-// IRM (бит 40) нулевой - рассылка адресная.
 const fn sgi1r_value(irq: IrqNumber, affinity: IpiAffinity) -> u64 {
+    // ICC_SGI1R_EL1 раскладывает поля так: Aff3 [55:48], Aff2 [39:32], INTID [27:24],
+    // Aff1 [23:16], TargetList [15:0]. IRM (бит 40) нулевой, рассылка адресная.
     ((affinity.aff3 as u64) << 48)
         | ((affinity.aff2 as u64) << 32)
         | ((irq.raw() as u64 & 0xF) << 24)
@@ -57,7 +51,6 @@ const fn sgi1r_value(irq: IrqNumber, affinity: IpiAffinity) -> u64 {
 }
 
 const _: () = assert!(sgi1r_value(IrqNumber::new(0), IpiAffinity::from_mpidr(0)) == 1);
-// Aff3=3, Aff2=2, Aff1=1, Aff0=4, INTID=5.
 const _: () = assert!(
     sgi1r_value(
         IrqNumber::new(5),
@@ -103,11 +96,6 @@ impl Gicv3Controller {
         self.enable_distributor();
     }
 
-    /// Настраивает Redistributor и CPU interface текущего CPU. Distributor
-    /// общий для всех CPU и здесь не участвует.
-    ///
-    /// Отказ значит, что прерывания этому CPU не доставляются. Оставляет IRQ
-    /// замаскированными на текущем CPU.
     pub(super) fn init_this_cpu(&self) -> Result<(), CpuInterfaceError> {
         Self::set_irq_mask();
         Self::enable_sre();
@@ -125,6 +113,8 @@ impl Gicv3Controller {
     }
 
     fn restore_private_lines(&self) {
+        // Регистры SGI и PPI приватны для CPU: настройка, сделанная одним CPU,
+        // другому не видна и повторяется на его per-CPU инициализации.
         for (irq, bound) in &self.handlers {
             if !matches!(IrqType::from_irq_number(*irq), IrqType::Sgi | IrqType::Ppi) {
                 continue;
@@ -138,16 +128,14 @@ impl Gicv3Controller {
         }
     }
 
-    /// Рассылает SGI процессору по его affinity через `ICC_SGI1R_EL1`.
-    ///
-    /// `TargetList` адресует Aff0 отдельным битом: в одной группе адресуются
-    /// шестнадцать процессоров. За этим пределом нужен `RS` из GICv3.1.
     pub(super) fn send_sgi(irq: IrqNumber, target: IpiTarget) -> Result<(), IpiError> {
         if !matches!(IrqType::from_irq_number(irq), IrqType::Sgi) {
             return Err(IpiError::NotAnIpi);
         }
 
         let affinity = IpiAffinity::from_target(target);
+        // `TargetList` адресует Aff0 отдельным битом, поэтому в одной группе
+        // адресуются шестнадцать процессоров. За этим пределом нужен `RS` из GICv3.1.
         if u64::from(affinity.aff0) >= SGI_TARGET_LIST_BITS {
             return Err(IpiError::UnreachableTarget);
         }
@@ -179,6 +167,8 @@ impl Gicv3Controller {
     }
 
     fn scan_redistributor_frames(redistributor: &MmioBound, stride: usize) -> AffinityFrames {
+        // Фреймы Redistributor лежат в отображённой области подряд, по одному на CPU,
+        // с шагом stride. Свою affinity фрейм объявляет сам через GICR_TYPER.
         AffinityFrames::scan(stride, |offset| {
             redistributor
                 .contains(offset, GICR_FRAME_SPAN)
@@ -260,10 +250,6 @@ impl Gicv3Controller {
         }
     }
 
-    /// Маршрутизирует SPI через GICD_IROUTER.
-    ///
-    /// Один CPU в маске: Aff0 = индекс PE в affinity-кластере 0 (Aff1..Aff3 = 0).
-    /// Несколько CPU: IRM=1 (бит 31), любой участвующий PE.
     pub(super) fn set_affinity(&self, irq: IrqNumber, target: CpuMask) {
         if !matches!(IrqType::from_irq_number(irq), IrqType::Spi) {
             return;
@@ -272,10 +258,10 @@ impl Gicv3Controller {
         let router_offset = (irq.raw() as usize - 32) * 8;
 
         let route: u64 = if target.raw().count_ones() > 1 {
-            // IRM=1: доставить любому доступному PE
+            // IRM (бит 31) = 1: доставить любому участвующему PE.
             1u64 << 31
         } else {
-            // Специфическая маршрутизация: Aff0 = индекс CPU
+            // Aff0 = индекс PE в affinity-кластере 0, старшие уровни нулевые.
             u64::from(target.raw().trailing_zeros())
         };
 
@@ -295,15 +281,16 @@ impl Gicv3Controller {
     }
 
     fn init_distributor(&self) {
-        // Отключить Distributor перед настройкой
-        self.distributor.write_reg(GICD_CTLR, 0u32);
+        // Настройка идёт при выключенном Distributor: до включения ни одна линия не
+        // доезжает до CPU interface, и GICD_ICFGR пишется по отключённым линиям.
+        self.distributor.write_reg(GICD_CTLR, GICD_CTLR_DISABLE);
         self.wait_gicd_rwp();
 
-        // ARE_NS до конфигурации групп: записи групп эффективны только при ARE_NS=1.
+        // ARE_NS идёт до конфигурации групп: записи групп эффективны при ARE_NS=1.
         self.distributor.write_reg(GICD_CTLR, GICD_CTLR_ARE_NS);
         self.wait_gicd_rwp();
 
-        // Сбросить все SPI (банки 1+, банк 0 относится к SGI/PPI и управляется через GICR)
+        // Банк 0 держит SGI/PPI и настраивается через GICR: SPI начинаются с банка 1.
         let spi_banks = self.interrupt_lines.saturating_sub(1);
 
         for bank in 1..=spi_banks {
@@ -321,20 +308,22 @@ impl Gicv3Controller {
                 .write_reg(GICD_IGRPMODR.with_offset(offset), 0);
         }
 
-        // Установить наинизший приоритет для всех SPI (4 IRQ на регистр, начиная с IRQ 32)
+        // GICD_IPRIORITYR отводит 4 IRQ на регистр, и SPI начинаются с IRQ 32.
         let spi_count = (self.interrupt_lines * 32).saturating_sub(32);
         for i in 0..spi_count.div_ceil(4) {
-            self.distributor
-                .write_reg(GICD_IPRIORITYR.with_offset((8 + i) * 4), 0xFFFF_FFFFu32);
+            self.distributor.write_reg(
+                GICD_IPRIORITYR.with_offset((8 + i) * 4),
+                PRIORITY_MASK_ALL_BANK,
+            );
         }
 
-        // Level-sensitive конфигурация для всех SPI (2 бита на IRQ, банки 2+)
+        // GICD_ICFGR отводит 2 бита на IRQ: нулевое поле - level-sensitive линия.
         for i in 0..spi_count.div_ceil(16) {
             self.distributor
                 .write_reg(GICD_ICFGR.with_offset((2 + i) * 4), 0u32);
         }
 
-        // Маршрутизация всех SPI на CPU0 по умолчанию (Aff0=0, IRM=0)
+        // Нулевой GICD_IROUTER - Aff0=0 и IRM=0: SPI приходит на CPU0 адресно.
         for i in 0..spi_count {
             self.distributor
                 .write_reg(GICD_IROUTER.with_offset(i * 8), 0u64);
@@ -382,8 +371,8 @@ impl Gicv3Controller {
             .write_reg(GICR_ICFGR1.with_offset(frame), 0u32);
     }
 
-    // Distributor общий для всех CPU: включается однократно.
     fn enable_distributor(&self) {
+        // Distributor общий для всех CPU и включается однократно.
         self.distributor
             .write_reg(GICD_CTLR, GICD_CTLR_ENABLE_GRP1NS | GICD_CTLR_ARE_NS);
         self.wait_gicd_rwp();
@@ -409,7 +398,7 @@ impl Gicv3Controller {
         }
     }
 
-    fn read_interrupt_lines(distributor: &MmioBound) -> ITLinesNumber {
+    fn read_interrupt_lines(distributor: &MmioBound) -> IrqBankCount {
         let typer: u32 = distributor.read_reg(GICD_TYPER);
         let it_lines = typer & 0x1F;
         (it_lines + 1) as usize
@@ -496,7 +485,6 @@ impl Gicv3Controller {
 }
 
 impl super::super::DispatchController for Gicv3Controller {
-    /// Подтверждает и деактивирует (EOI) один pending IRQ, возвращая его хендлер.
     fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>> {
         let irq = Self::acknowledge()?;
         let handler = self.handlers.get(&irq).map(|bound| bound.handler.clone());

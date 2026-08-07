@@ -15,41 +15,29 @@ use userland::USERLAND_PAGE_SIZE;
 
 use crate::{buffer::DataBuffer, error::no_space};
 
-// Результат операции, у которой нет собственного возврата.
 const DONE: u32 = 0;
 
-// Смещение записи, означающее дозапись в конец.
 const APPEND: u64 = u64::MAX;
 
-/// Прикрепление сессии: буфер данных, разделяемый с клиентом.
 #[derive(Default)]
 pub(crate) struct Attachment {
     buffer: Option<DataBuffer>,
 }
 
-/// Состояние файловой системы, разделённое между потоком сервисного порта и потоком admin-порта:
-/// дерево имён, сессии клиентов и память, из которой сервер нарезает окна и буферы.
 pub(crate) struct FileSystemState {
     backend: Box<dyn FileSystemBackend + Send>,
     sessions: SessionTable<Attachment>,
     resource: Resource,
-    /// Регион userland-образа. Файловая система поверх образа режет из него окна своих узлов;
-    /// той, что байт образа не занимает, он не нужен - её `backing` отказывает раньше.
     image: MemoryRegion,
 }
 
-/// Состояние одного принятого кадра: им владеет поток сервисного порта.
 #[derive(Default)]
 pub(crate) struct Frame {
     badge: u64,
-    /// Capability принятого кадра: ядро перенесло их в таблицу сервера до вызова обработчика,
-    /// и до конца кадра ими владеет сервер.
     received: Vec<OwnedHandle>,
-    /// Capability, уложенная в кадр ответа: пока ответ не доставлен, она принадлежит серверу.
     vended: Option<OwnedHandle>,
 }
 
-/// Обслуживание кадра: состояние сервера под замком вместе с состоянием самого кадра.
 pub(crate) struct Serving<'a> {
     pub(crate) state: MutexGuard<'a, FileSystemState>,
     pub(crate) frame: &'a mut Frame,
@@ -69,14 +57,12 @@ impl FileSystemState {
         }
     }
 
-    /// Заводит сессию клиента `badge`. Занятый значок - `AlreadyExists`.
     pub(crate) fn open_session(&mut self, badge: u64) -> Result<(), FileSystemError> {
         self.sessions.open(ClientId::from_raw(badge)).map(|_| ())
     }
 
-    /// Убирает сессию ушедшего значка вместе с её открытыми узлами и буфером данных. Значок
-    /// берётся из события `SenderGone`. Значок без сессии - no-op.
     pub(crate) fn remove_session(&mut self, badge: u64) {
+        // Нулевой значок ядро выдаёт кадру без значка: сессии за ним нет.
         if badge == 0 {
             return;
         }
@@ -85,8 +71,6 @@ impl FileSystemState {
 }
 
 impl Frame {
-    /// Открывает кадр: значок отправителя и приехавшие с кадром capability. И то, и другое
-    /// читается из IPC-буфера до `dispatch_file_system`.
     pub(crate) fn begin(&mut self, badge: u64, caps: impl IntoIterator<Item = Handle>) {
         self.badge = badge;
         self.received.clear();
@@ -94,9 +78,6 @@ impl Frame {
             .extend(caps.into_iter().map(OwnedHandle::from_handle));
     }
 
-    /// Закрывает кадр: capability, которых не забрал обработчик, закрываются, а выданная
-    /// capability остаётся за клиентом только при доставленном ответе (`delivered`) - иначе ядро
-    /// её не переносило и закрыть её некому.
     pub(crate) fn end(&mut self, delivered: bool) {
         self.received.clear();
         settle(&mut self.vended, delivered);
@@ -124,7 +105,6 @@ pub fn vend(vended: &mut Option<OwnedHandle>, handle: OwnedHandle) -> Cap {
 }
 
 impl Serving<'_> {
-    // Кадр по хэндлу без значка - NoSession.
     fn client(&self) -> Result<ClientId, FileSystemError> {
         if self.frame.badge == 0 {
             return Err(FileSystemError::NoSession);
@@ -132,7 +112,6 @@ impl Serving<'_> {
         Ok(ClientId::from_raw(self.frame.badge))
     }
 
-    // Кадр вне заведённой сессии - NoSession.
     fn session(&mut self) -> Result<&mut Session<Attachment>, FileSystemError> {
         let client = self.client()?;
         self.state.sessions.get_mut(client)
@@ -148,7 +127,6 @@ impl Serving<'_> {
         Ok((backend.as_mut(), sessions.get_mut(client)?))
     }
 
-    // Сессия без буфера - NoBuffer.
     fn buffer(session: &mut Session<Attachment>) -> Result<&mut DataBuffer, FileSystemError> {
         session
             .attachment_mut()
@@ -157,7 +135,6 @@ impl Serving<'_> {
             .ok_or(FileSystemError::NoBuffer)
     }
 
-    // Доступ капы на окно региона образа выводится из режима дескриптора.
     fn slice(&self, window: Window, mode: AccessMode) -> Result<OwnedHandle, FileSystemError> {
         let info = self.state.image.inspect().map_err(no_space)?;
         // Смещение окна кратно странице по построению образа, а его длина - нет: маппинг
@@ -309,18 +286,16 @@ impl FileSystemService for Serving<'_> {
     }
 }
 
-// Режим дескриптора, пересечённый с доступом региона. Права производной капы сужает ядро, но
-// доступ шире регионного оно отвергает: пересечение считает сервер.
 fn access_for(mode: AccessMode, region: MemoryAccess) -> MemoryAccess {
     let requested = if mode.writable() {
         MemoryAccess::RW
     } else {
         MemoryAccess::READ
     };
+    // Доступ производной капы шире регионного ядро отвергает: пересечение считает сервер.
     MemoryAccess::from_bits_truncate(requested.raw() & region.raw())
 }
 
-// Узел, открытый на чтение. Иначе WrongMode.
 fn readable(open_node: OpenNode) -> Result<OpenNode, FileSystemError> {
     if open_node.mode.readable() {
         return Ok(open_node);
@@ -328,7 +303,6 @@ fn readable(open_node: OpenNode) -> Result<OpenNode, FileSystemError> {
     Err(FileSystemError::WrongMode)
 }
 
-// Узел, открытый на запись. Иначе WrongMode.
 fn writable(open_node: OpenNode) -> Result<OpenNode, FileSystemError> {
     if open_node.mode.writable() {
         return Ok(open_node);
@@ -336,14 +310,11 @@ fn writable(open_node: OpenNode) -> Result<OpenNode, FileSystemError> {
     Err(FileSystemError::WrongMode)
 }
 
-// Узел, открытый в бекенде, вместе с тем, завёл ли его этот вызов.
 struct OpenedNode {
     node: NodeId,
     created: bool,
 }
 
-// CREATE заводит отсутствующий узел, EXCLUSIVE требует его отсутствия, DIRECTORY проверяет вид,
-// TRUNCATE очищает содержимое.
 fn open_in_backend(
     backend: &mut dyn FileSystemBackend,
     path: Path<'_>,

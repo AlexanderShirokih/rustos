@@ -7,7 +7,6 @@ use spin::Once;
 
 use crate::{handle::OwnedHandle, port_transport::PortTransport};
 
-// Лог-капа и тег строк живут дольше цикла обслуживания: логируется и его ранний отказ.
 static LOG: Once<(OwnedHandle, &'static str)> = Once::new();
 
 /// Запоминает лог-капу процесса и тег его строк. Повторный вызов ничего не
@@ -35,8 +34,6 @@ pub fn log_fmt(args: core::fmt::Arguments<'_>) {
     log_line(writer.buffer.as_str());
 }
 
-// Форматирование идёт на стеке без heap, поэтому накопитель сливается по мере
-// заполнения.
 struct LineWriter {
     buffer: LogBuffer<LOG_MESSAGE_MAX>,
 }

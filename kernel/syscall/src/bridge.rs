@@ -215,14 +215,11 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
     }
 }
 
-/// Помечает текущий поток `Terminated` и делает context switch. Не возвращается.
 fn sys_thread_exit(code: u64) -> ! {
     let exit_code = super::process::exit_code_from_arg(code);
     capability::thread_exit(exit_code)
 }
 
-/// Атомарно меняет биты сигналов объекта и будит waiter'ов по [`WakeCount`] (arg3).
-/// Неизвестное значение `count` - `InvalidArgument`.
 fn sys_signal_set(handle: u64, set: u64, clear: u64, count: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let count = WakeCount::from_raw(count).ok_or(SyscallError::InvalidArgument)?;
@@ -231,13 +228,11 @@ fn sys_signal_set(handle: u64, set: u64, clear: u64, count: u64) -> Result<u64, 
     Ok(0)
 }
 
-/// Создаёт `Signal` и возвращает его сырой `HandleId`.
 fn sys_signal_create() -> Result<u64, SyscallError> {
     let id = capability::signal_create().map_err(map_ipc_error)?;
     Ok(u64::from(id.raw().get()))
 }
 
-/// `timeout_ns == 0` - poll. Возвращает observed-маску.
 fn sys_signal_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let mask = signals_from_arg(signals);
@@ -251,10 +246,8 @@ fn sys_signal_wait_one(handle: u64, signals: u64, timeout_ns: u64) -> Result<u64
 
 const WAIT_MANY_ENTRY_SIZE: usize = 8;
 
-// Заполнитель хвоста массива записей wait_many. Наружу не уходит.
 const WAIT_MANY_PLACEHOLDER: (HandleId, u32) = (HandleId::from_raw(NonZeroU32::MIN), 0);
 
-// Раскладка записи закреплена сигнатурой: handle (LE u32) @0, mask (LE u32) @4.
 fn parse_wait_many_entry(
     entry: [u8; WAIT_MANY_ENTRY_SIZE],
 ) -> Result<(HandleId, u32), SyscallError> {
@@ -268,7 +261,6 @@ fn parse_wait_many_entry(
     Ok((HandleId::from_raw(handle), mask))
 }
 
-/// Primary возврат - observed-маска, secondary - индекс сработавшей записи.
 fn sys_signal_wait_many(frame: &mut dyn SyscallFrame) {
     match sys_signal_wait_many_impl(frame.arg(0), frame.arg(1), frame.arg(2)) {
         Ok((index, observed)) => {
@@ -313,16 +305,12 @@ fn sys_signal_wait_many_impl(
     Ok((outcome.index, outcome.observed))
 }
 
-/// Изымает handle из таблицы и закрывает.
 fn sys_handle_close(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     capability::handle_close(id).map_err(map_ipc_error)?;
     Ok(0)
 }
 
-/// Создаёт копию handle'а с подмножеством прав. `new_rights` - нижние 32 бита arg1,
-/// неизвестные биты отбрасываются. `badge` - set-once: переклеймить уже
-/// заклеймённый -> `BadHandle`.
 fn sys_handle_duplicate(handle: u64, new_rights: u64, badge: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let rights = Rights::from_bits_truncate(low_u32(new_rights));
@@ -334,12 +322,10 @@ const fn low_u32(raw: u64) -> u32 {
     raw as u32
 }
 
-/// Верхние биты игнорируются: ABI фиксирует биты сигналов в нижних 32.
 fn signals_from_arg(raw: u64) -> u32 {
     low_u32(raw)
 }
 
-/// `0` и значения > `u32::MAX` - `InvalidArgument`.
 pub(super) fn parse_handle_id(raw: u64) -> Result<capability::HandleId, SyscallError> {
     let raw32 = u32::try_from(raw).map_err(|_| SyscallError::InvalidArgument)?;
     let nz = NonZeroU32::new(raw32).ok_or(SyscallError::InvalidArgument)?;

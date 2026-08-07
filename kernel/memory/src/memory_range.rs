@@ -3,9 +3,7 @@ use crate::{aligned::Address, frame::Frame, physical_address::PageAlignedAddress
 /// Полуоткрытый диапазон адресов [start, end).
 #[derive(Copy, Clone, Debug)]
 pub struct MemoryRange<A: Address> {
-    /// Начальный адрес (включительно).
     from_inclusive: A,
-    /// Конечный адрес (исключительно).
     to_exclusive: A,
 }
 
@@ -60,9 +58,7 @@ impl IntoIterator for &MemoryRange<PageAlignedAddress> {
 
 /// Итератор по выровненным адресам в диапазоне.
 pub struct MemoryRangeIter {
-    /// Текущий адрес итерации.
     current: PageAlignedAddress,
-    /// Конечный адрес (исключительно).
     end: PageAlignedAddress,
 }
 

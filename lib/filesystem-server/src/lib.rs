@@ -36,24 +36,17 @@ pub use error::{Error, Result};
 use service::{FileSystemState, Frame, Serving};
 pub use service::{settle, vend};
 
-// Стек потока admin-порта: он ведёт только приём кадра и минт capability.
 const ADMIN_STACK: u64 = 0x4000;
 
-// Код выхода процесса, потерявшего поднявший его маршрутизатор.
 const SUPERVISOR_LOST_EXIT_CODE: u32 = 2;
 
-// Маппинг региона образа: его байты держат дерево имён файловой системы поверх образа и живут
-// всё время работы процесса.
 static IMAGE: Once<ReadOnlyMapping> = Once::new();
 
-// Состояние, разделённое потоками сервисного и admin-порта.
 struct Shared {
     state: Mutex<FileSystemState>,
-    // Корневая capability сервисного порта: из неё минтятся значки сессий.
     service: OwnedHandle,
     admin: OwnedHandle,
     sessions_thread: Thread,
-    // Значки сессий не переиспользуются.
     next_badge: AtomicU64,
 }
 
@@ -97,7 +90,6 @@ where
     Ok(())
 }
 
-// Кадр без capability - Start.
 fn handshake(admin: &OwnedHandle) -> Result<StartResources> {
     let transport = PortTransport::server(admin.borrow());
     let mut received = Handshake::default();
@@ -105,7 +97,6 @@ fn handshake(admin: &OwnedHandle) -> Result<StartResources> {
     received.take().ok_or(Error::Start)
 }
 
-// Цикл сервисного порта: кадры сессий до его закрытия.
 fn serve_sessions(shared: &Shared) {
     let transport = PortTransport::server(shared.service.borrow());
     let mut frame = Frame::default();
@@ -144,7 +135,6 @@ fn serve_sessions(shared: &Shared) {
     log_line("service port closed");
 }
 
-// Цикл admin-порта в отдельном потоке: установление сессий, пока порт открыт.
 fn serve_admin(shared: &Shared) -> u32 {
     let transport = PortTransport::server(shared.admin.borrow());
     loop {

@@ -17,8 +17,6 @@ pub struct ImageRecord<'a> {
     pub data: &'a [u8],
 }
 
-// Ноль в `alias_of` означает собственное окно, ненулевое значение - номер
-// записи, чьё окно повторено, плюс один.
 struct DataWindow {
     offset: u64,
     size: u64,
@@ -87,6 +85,8 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
         let data_size =
             u64::try_from(record.data.len()).map_err(|_| ImageEncodeError::SizeOverflow)?;
         if let Some(&owner) = windows.get(record.data) {
+            // Ноль в `alias_of` означает собственное окно, поэтому номер повторённой записи
+            // едет увеличенным на единицу.
             data_layout.push(DataWindow {
                 offset: data_layout[usize::from(owner)].offset,
                 size: data_size,

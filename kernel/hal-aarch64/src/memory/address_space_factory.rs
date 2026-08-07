@@ -23,9 +23,9 @@ pub(crate) type FrameAllocatorImpl = PhysicalFrameAllocator<MutexCell<FrameBitma
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 
 /// Конкретный тип user-mapper-а, выдаваемый `Aarch64AddressSpaceFactory`
-/// в виде `Arc<dyn MemoryMapper + Send + Sync>`. Платформенный код может
-/// downcast'ить через `MemoryMapper::as_any` для доступа к API,
-/// специфичным для AArch64 (например, `query_leaf_raw`).
+/// в виде `Arc<dyn MemoryMapper + Send + Sync>`. Платформенный код делает
+/// downcast через `MemoryMapper::as_any` ради API, специфичных для AArch64
+/// (например, `query_leaf_raw`).
 pub type UserAarch64MemoryMapper =
     Aarch64MemoryMapper<'static, FrameAllocatorImpl, MutexPageMapper<'static, FrameAllocatorImpl>>;
 

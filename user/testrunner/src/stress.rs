@@ -19,16 +19,13 @@ const OPERATION_TIMEOUT: Timeout = Timeout::from_secs(1);
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(2);
 const READY_SPIN_LIMIT: usize = 10_000_000;
 
-/// Генератор последовательности прогона: та же цепочка значений на том же seed.
 pub(crate) struct SplitMix64 {
     state: u64,
 }
 
-/// Параметры воспроизводимого прогона, зашитые в образ сборкой.
 pub(crate) struct StressPlan {
     first_seed: u64,
     seed_count: u64,
-    /// Операций на один seed.
     pub(crate) steps: u64,
 }
 
@@ -47,7 +44,6 @@ impl SplitMix64 {
 }
 
 impl StressPlan {
-    /// Читает параметры прогона из окружения сборки образа.
     pub(crate) fn from_env() -> Self {
         let plan = Self {
             first_seed: env!("STRESS_SEED").parse::<u64>().unwrap_or(0),
@@ -315,7 +311,6 @@ fn port_poll_timeout() -> Result<(), i64> {
     }
 }
 
-/// Открывает прогон одного seed: маркер несёт всё, чем воспроизводится последовательность.
 pub(crate) fn log_seed(seed: u64, steps: u64) {
     kernel_tests::runner::with_writer(|writer| {
         let mut output = kernel_tests::runner::FmtAdapter::new(writer);
@@ -323,10 +318,10 @@ pub(crate) fn log_seed(seed: u64, steps: u64) {
     });
 }
 
-/// Закрывает прогон одного seed: маркер считает xtask.
 pub(crate) fn log_pass(seed: u64) {
     kernel_tests::runner::with_writer(|writer| {
         let mut output = kernel_tests::runner::FmtAdapter::new(writer);
+        // Форму маркера разбирает xtask, считая пройденные seed прогона.
         let _ = writeln!(output, "[STRESS-PASS: seed={seed}]");
     });
 }

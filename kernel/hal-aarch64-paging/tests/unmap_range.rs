@@ -1,4 +1,4 @@
-//! Тесты `mapper::unmap_range` и `mapper::free_all`: снятие 4K/2M/1G leaf'ов,
+//! Тесты `mapper::unmap_range` и `mapper::free_all`: снятие 4K/2M/1G leaf,
 //! освобождение опустевших промежуточных таблиц, отказ на partial-block,
 //! полный обход дерева в Drop-пути.
 #![allow(unsafe_code)]
@@ -189,15 +189,12 @@ fn free_all_walks_mixed_leaf_kinds() {
     assert!(shifts.contains(&L3::SHIFT));
     assert!(shifts.contains(&L2::SHIFT));
     assert!(shifts.contains(&L1::SHIFT));
-    // Все 3 leaf'а в одном L0/L1: L3 + 2*L2 + L1 = 4 child-таблицы.
+    // Все 3 leaf в одном L0/L1: L3 + 2*L2 + L1 = 4 child-таблицы.
     assert_eq!(visitor.tables.len(), 4);
 }
 
-/// Регресс: walker должен индексировать L0 через `(va >> 39) & 0x1FF`,
-/// а не через `(va - 0) / (512G)`. Для kernel higher-half VA
-/// (`0xFFFF_FF80_...`) деление даёт OOB-индекс и OOB на `get_raw`.
-/// `MmioServiceImpl` cleanup и любой kernel-side unmap полагаются на
-/// этот путь.
+/// Регресс: walker индексирует L0 через `(va >> 39) & 0x1FF`. Деление на 512G
+/// давало OOB-индекс на kernel higher-half VA и OOB-чтение в `get_raw`.
 #[test]
 fn unmap_range_higher_half_va() {
     let buf = allocate_buffer(16);
@@ -229,9 +226,8 @@ fn unmap_range_higher_half_va() {
     assert_eq!(visitor.tables.len(), 3);
 }
 
-/// Регресс на overflow: 1G block-leaf на последнем 1G канонического AS.
-/// `entry_va + entry_size` переполнило бы u64, exclusive walker отвалится
-/// либо silent-wrap'нет в 0; inclusive (entry_last == usize::MAX) - OK.
+/// Регресс на overflow: 1G block-leaf на последнем 1G канонического AS, где
+/// exclusive `entry_va + entry_size` заворачивал usize в 0.
 #[test]
 fn unmap_range_last_1g_block() {
     let buf = allocate_buffer(8);

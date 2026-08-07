@@ -7,14 +7,17 @@ use kernel_tests::kernel_test;
 use runtime::{Error, IrqControl, OwnedHandle, PortTransport};
 use syscall::{IrqTrigger, SyscallError};
 
-/// PL031 RTC на qemu virt: `GIC_SPI 2` -> INTID 34.
-const PL031_IRQ: u16 = 34;
+const SPI_BASE: u16 = 32;
+
+const PL031_SPI: u16 = 2;
+
+const PL031_IRQ: u16 = SPI_BASE + PL031_SPI;
 
 const SPARE_IRQ: u16 = 47;
 
 const SPI_MAX: u16 = 1019;
 
-const PRIVATE_IRQ_MAX: u16 = 31;
+const PRIVATE_IRQ_MAX: u16 = SPI_BASE - 1;
 
 #[kernel_test]
 fn acquire_irq_control_and_mint_line() {

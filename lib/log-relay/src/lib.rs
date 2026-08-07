@@ -10,5 +10,5 @@ mod relay;
 mod thread;
 
 pub use kernel_sink::KernelLogSink;
-pub use relay::{LogSink, SourceNames};
+pub use relay::{LogSink, SINK_FAILURE_LIMIT, SourceNames};
 pub use thread::LogRelayThread;

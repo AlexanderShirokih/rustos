@@ -63,7 +63,6 @@ impl ArchContext for Aarch64Context {
     type Cpu = Aarch64Cpu;
     type Stack = Aarch64Stack;
 
-    // Полный нижний 48-бит TTBR0; старший валидный user-байт 0x0000_FFFF_FFFF_FFFF.
     const USER_VA_END: usize = syscall::USER_VA_END as usize;
 
     fn init(stack_top: NonNull<u8>, entry: scheduler::arch::TrampolineFn, arg: *mut ()) -> Self {
@@ -147,32 +146,24 @@ unsafe extern "C" fn thread_entry_shim() -> ! {
     core::arch::naked_asm!("mov x0, x19", "br x20",)
 }
 
-/// Шим первого входа в EL0.
-///
-/// `context_start` восстанавливает callee-saved регистры и делает `ret` сюда. К этому
-/// моменту:
-/// - `x19` = `bootstrap_x0` -> user `x0`,
-/// - `x20` = `user_pc` -> `ELR_EL1`,
-/// - `x21` = `user_sp` -> `SP_EL0`,
-/// - текущий `sp` = kernel stack top -> останется в `SP_EL1` после `eret`.
-///
-/// `SPSR_EL1` ставим в 0: `M[3:0]=0000` (EL0t), `M[4]=0` (AArch64), `DAIF=0`,
-/// `NZCV=0`.
-///
-/// Перед `eret` обнуляем все остальные GPR и `tpidr_el0`, чтобы kernel-значения
-/// не утекали в EL0 через регистры.
-///
-/// Первой инструкцией маскируем IRQ: окно `msr ELR_EL1/SPSR_EL1` -> `eret`
-/// обязано быть атомарным, иначе трап затирает эти регистры и `eret` уходит
-/// по чужому адресу. Обратно IRQ размаскирует сам `eret` через `SPSR_EL1 = 0`.
+// SAFETY: вход только из `context_start`, который восстановил callee-saved
+// регистры и сделал `ret` сюда: `x19` = `bootstrap_x0` -> user `x0`, `x20` =
+// `user_pc` -> `ELR_EL1`, `x21` = `user_sp` -> `SP_EL0`, а текущий `sp` -
+// вершина kernel-стека, остающаяся в `SP_EL1` после `eret`.
 #[unsafe(naked)]
 unsafe extern "C" fn el0_entry_shim() -> ! {
     core::arch::naked_asm!(
+        // Окно `msr ELR_EL1/SPSR_EL1` -> `eret` обязано быть атомарным: трап
+        // внутри него затирает оба регистра и `eret` уходит по чужому адресу.
+        // Обратно IRQ размаскирует сам `eret` через `SPSR_EL1 = 0`.
         "msr daifset, #0b0010",
         "mov x0, x19",
         "msr sp_el0, x21",
         "msr elr_el1, x20",
+        // `SPSR_EL1 = 0`: `M[3:0]=0000` (EL0t), `M[4]=0` (AArch64), `DAIF=0`, `NZCV=0`.
         "msr spsr_el1, xzr",
+        // Остальные GPR и `tpidr_el0` обнуляются: kernel-значения в EL0 через
+        // регистры не утекают.
         "msr tpidr_el0, xzr",
         "mov x1,  xzr",
         "mov x2,  xzr",

@@ -12,14 +12,17 @@ use super::{
 };
 use crate::write_sysreg;
 
-/// Ёмкость stack-буфера для диагностики исключений (байт).
 const EXCEPTION_BUF_SIZE: usize = 2048;
 const USER_EXCEPTION_EXIT_CODE: i32 = -1;
 
-// Размер фрейма должен быть кратен 16 (требование AArch64 ABI для выравнивания стека).
-const _: () = assert!(size_of::<ExceptionFrame>().is_multiple_of(16));
-// Asm в `exception_entry!` обращается к sp_el0 по литеральному offset-у.
-const _: () = assert!(core::mem::offset_of!(ExceptionFrame, sp_el0) == 288);
+const _: () = assert!(
+    size_of::<ExceptionFrame>().is_multiple_of(16),
+    "AArch64 ABI keeps the stack 16-byte aligned, so the frame size must be a multiple of 16"
+);
+const _: () = assert!(
+    core::mem::offset_of!(ExceptionFrame, sp_el0) == 288,
+    "exception_entry! reaches sp_el0 by a literal offset"
+);
 
 /// Контекст процессора, сохраняемый при входе в обработчик исключения.
 #[repr(C)]
@@ -39,7 +42,6 @@ pub struct ExceptionFrame {
     /// User-указатель стека (SP_EL0). Живёт в железе между трапами, поэтому
     /// сохраняется на входе и восстанавливается перед `eret`.
     pub sp_el0: u64,
-    /// Выравнивание фрейма до кратности 16.
     _reserved: u64,
 }
 
@@ -156,7 +158,6 @@ impl ExceptionVectors {
     }
 }
 
-/// Общий диспетчер исключений
 extern "C" fn exception_handler(frame: &mut ExceptionFrame, kind: ExceptionKind) {
     match kind {
         ExceptionKind::Sync => sync_handler(frame),
@@ -166,7 +167,6 @@ extern "C" fn exception_handler(frame: &mut ExceptionFrame, kind: ExceptionKind)
     }
 }
 
-/// Обработчик синхронных исключений
 fn sync_handler(frame: &mut ExceptionFrame) {
     if frame.esr.exception_class() == ExceptionClass::Svc {
         syscall_kernel::dispatch(frame);
@@ -203,12 +203,10 @@ fn sync_handler(frame: &mut ExceptionFrame) {
     panic!("{}", buf);
 }
 
-/// Обработчик IRQ делегирует диспетчеризацию bridge-слою ядра.
 fn irq_handler(_frame: &ExceptionFrame) {
     kernelspace::irq_bridge::dispatch_interrupt();
 }
 
-/// Обработчик FIQ - паника с диагностикой.
 fn fiq_handler(frame: &ExceptionFrame) {
     let mut buf = StaticString::<EXCEPTION_BUF_SIZE>::new();
     let _ = writeln!(buf, "FIQ");
@@ -217,7 +215,6 @@ fn fiq_handler(frame: &ExceptionFrame) {
     panic!("{}", buf);
 }
 
-/// Обработчик SError - паника с диагностикой.
 fn serror_handler(frame: &ExceptionFrame) {
     let iss = frame.esr.iss();
 
@@ -261,7 +258,6 @@ fn write_frame(buf: &mut StaticString<EXCEPTION_BUF_SIZE>, frame: &ExceptionFram
     );
 }
 
-/// Генерирует `#[naked]` функцию-заглушку для обработки исключения.
 macro_rules! exception_entry {
     ($name:ident, $kind:expr) => {
         #[unsafe(naked)]

@@ -1,13 +1,13 @@
 //! Userspace `Mutex`/`Condvar` поверх Signal-syscall.
 //!
-//! Mutex - адаптированный 3-state futex: state 0=free, 1=locked без
-//! waiter'ов, 2=locked с возможными waiter'ами. Общий Signal мьютекса служит
+//! Mutex - адаптированный 3-state futex: state 0=free, 1=locked без waiter,
+//! 2=locked с возможными waiter. Общий Signal мьютекса служит
 //! латчем: разбуженный поток перепроверяет `state` и на потерянном
 //! пробуждении лишь повторяет круг.
 //!
 //! Condvar общего латча не имеет: предикат живёт в коде вызывающего, и
-//! перепроверить его за waiter'а некому. Каждый waiter паркуется на
-//! собственном Signal, а регистрируется в списке condvar'а до отпускания
+//! перепроверить его за waiter некому. Каждый waiter паркуется на
+//! собственном Signal, а регистрируется в списке condvar до отпускания
 //! мьютекса - notify под тем же мьютексом видит его и адресует пробуждение
 //! именно ему.
 //!
@@ -52,8 +52,6 @@ unsafe impl<T: Send> Send for Mutex<T> {}
 // SAFETY: см. impl Send - эксклюзивность доступа гарантирует lock().
 unsafe impl<T: Send> Sync for Mutex<T> {}
 
-/// Лениво получает Signal по сырому handle из `ev`, создавая его при
-/// первой контенции; гонку на создание разрешает CAS, лишний закрывается.
 fn lazy_signal(signal_handle: &AtomicU32) -> Handle {
     loop {
         if let Some(handle) = Handle::new(signal_handle.load(Acquire)) {
@@ -99,8 +97,6 @@ impl<T> Mutex<T> {
         lazy_signal(&self.signal_handle)
     }
 
-    /// Медленный путь: помечает lock как "с waiter'ами" (state=2) и паркуется
-    /// на Signal, пока чей-то unlock не освободит state.
     fn lock_contended(&self) {
         loop {
             if self.state.swap(2, Acquire) == 0 {
@@ -128,16 +124,16 @@ impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        // SAFETY: удержание guard'а - эксклюзивный доступ к Mutex, поэтому
-        // других живых ссылок на data нет.
+        // SAFETY: пока guard жив, доступ к Mutex эксклюзивен, поэтому других
+        // живых ссылок на data нет.
         unsafe { &*self.mutex.data.get() }
     }
 }
 
 impl<T> DerefMut for MutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: удержание guard'а - эксклюзивный доступ к Mutex, поэтому
-        // других живых ссылок на data нет.
+        // SAFETY: пока guard жив, доступ к Mutex эксклюзивен, поэтому других
+        // живых ссылок на data нет.
         unsafe { &mut *self.mutex.data.get() }
     }
 }
@@ -160,7 +156,7 @@ impl Condvar {
 
     /// Атомарно отпускает `guard`, паркуется до уведомления и перезахватывает
     /// мьютекс. Вызывать **только** в цикле `while !predicate { guard = cv.wait(guard) }`
-    /// (возможны spurious-wakeup'ы; notify обязан сопровождать смену предиката
+    /// (возможен spurious wakeup; notify обязан сопровождать смену предиката
     /// под мьютексом).
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
         self.wait_interleaved(guard, || {})
@@ -190,8 +186,8 @@ impl Condvar {
         mutex.lock()
     }
 
-    /// Будит одного из waiter'ов, зарегистрированных на момент вызова, в
-    /// порядке регистрации.
+    /// Будит один waiter из зарегистрированных на момент вызова, в порядке
+    /// регистрации.
     pub fn notify_one(&self) {
         let mut waiters = self.waiters.lock();
         if waiters.is_empty() {
@@ -202,7 +198,7 @@ impl Condvar {
         let _ = signal_set(target, SIGNALED, 0, WakeCount::All);
     }
 
-    /// Будит всех waiter'ов, зарегистрированных на момент вызова (см. контракт wait).
+    /// Будит все waiter, зарегистрированные на момент вызова (см. контракт wait).
     pub fn notify_all(&self) {
         let targets = core::mem::take(&mut *self.waiters.lock());
         for target in targets {

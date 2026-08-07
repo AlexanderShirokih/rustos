@@ -56,7 +56,6 @@ impl SpyFrameAllocator {
         let deallocated = i64::try_from(self.deallocated.load(Ordering::SeqCst)).unwrap();
         allocated - deallocated
     }
-    /// Симулирует исчерпание фреймов: `allocate_frame` отдаёт `None`.
     fn set_blocked(&self, blocked: bool) {
         self.blocked.store(blocked, Ordering::SeqCst);
     }
@@ -248,8 +247,6 @@ fn setup() -> TestEnv {
     (rt, table, allocator.clone(), fa)
 }
 
-/// Кладёт в таблицу метеринг-`Resource` с достаточным бюджетом и возвращает
-/// raw `HandleId` для передачи как `resource_h` в memory-syscall'ы.
 fn insert_metering_resource(table: &Arc<MutexCell<HandleTable>>) -> (u64, Arc<Resource>) {
     let resource = Resource::new(
         PageAlignedAddress::ZERO,
@@ -417,8 +414,6 @@ fn memory_map_rolls_back_va_and_keeps_region_frames_on_install_failure() {
     );
 }
 
-/// `MemoryRegion::create_virtual` требует `&'static dyn FrameAllocator`;
-/// возвращаем именно такой reference из leaked spy-аллокатора.
 fn fa_static(
     fa: &'static SpyFrameAllocator,
 ) -> &'static &'static (dyn FrameAllocator + Send + Sync) {

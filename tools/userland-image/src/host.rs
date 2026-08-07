@@ -33,7 +33,6 @@ const USERLAND_STACK_ALIGN: u64 = USERLAND_PAGE_SIZE;
 
 const WILDCARDS: [char; 2] = ['*', '?'];
 
-// Путь записи образа - путь контракта: граница длины у них общая.
 const _: () = assert!(PATH_MAX == USERLAND_ENTRY_PATH_CAPACITY);
 
 /// Переменная окружения, передаваемая сборке каждой программы образа.
@@ -51,7 +50,6 @@ pub struct ExtraFile {
     pub source: PathBuf,
 }
 
-// Композиция образа: версия, программы и файлы, попадающие в таблицу записей.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImageManifest {
@@ -80,7 +78,6 @@ struct ImagePlan {
     path: String,
 }
 
-// Программа: путь в образе, пакет workspace и точечные override метаданных.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImageProgram {
@@ -91,8 +88,6 @@ struct ImageProgram {
     stack_size: Option<u64>,
 }
 
-// Файл: путь в образе и источник на диске. Источник без шаблона даёт одну
-// запись, источник с шаблоном - дерево под путём записи.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImageFile {
@@ -100,7 +95,6 @@ struct ImageFile {
     source: PathBuf,
 }
 
-/// Свойства программы из секции `[package.metadata.userland]` её Cargo.toml.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UserlandMetadata {
@@ -108,7 +102,6 @@ struct UserlandMetadata {
     stack_size: Option<u64>,
 }
 
-/// Программа после слияния метаданных пакета и override образа.
 #[derive(Clone, Debug)]
 struct ResolvedProgram {
     path: String,
@@ -165,14 +158,11 @@ struct DirectoryFile {
     source: PathBuf,
 }
 
-// Источник с подстановкой: корень обхода на диске и шаблон отбора его файлов.
 struct SourcePattern<'a> {
     root: &'a str,
     glob: &'a str,
 }
 
-// Повтор пути с тем же содержимым сливается в одну запись, с другим -
-// отвергается.
 #[derive(Debug, Default)]
 struct FileSet {
     files: Vec<LoadedFile>,
@@ -312,8 +302,6 @@ fn parse_manifest(src: &str) -> Result<ImageManifest> {
     Ok(manifest)
 }
 
-// Файлы образа собираются в одном порядке: файлы манифеста, затем файлы
-// командной строки.
 fn collect_files(
     project_root: &Path,
     manifest: &ImageManifest,
@@ -333,8 +321,6 @@ fn collect_files(
     Ok(files.into_files())
 }
 
-// Источник без шаблона даёт запись по пути `path`, источник с шаблоном - дерево
-// под ним, где путь записи наращивается путём файла от корня обхода.
 fn load_source(path: &str, project_root: &Path, source: &Path) -> Result<Vec<LoadedFile>> {
     validate_image_path(path)?;
     let text = source
@@ -362,8 +348,6 @@ fn load_source(path: &str, project_root: &Path, source: &Path) -> Result<Vec<Loa
         .collect()
 }
 
-// Источник делится по первому компоненту с подстановкой: перед ним корень
-// обхода, с него начинается шаблон.
 fn split_pattern(source: &str) -> Option<SourcePattern<'_>> {
     let mut cursor = 0;
     for component in source.split('/') {
@@ -394,8 +378,6 @@ fn load_file(path: &str, source: PathBuf) -> Result<LoadedFile> {
     })
 }
 
-// Записи каталога обходятся в порядке имени: состав образа не зависит от порядка
-// выдачи файловой системы.
 fn collect_directory_files(
     directory: &Path,
     prefix: &str,
@@ -437,8 +419,6 @@ fn collect_directory_files(
     Ok(())
 }
 
-// `?` - один символ, `*` - их последовательность внутри компонента, `**` -
-// вместе с разделителями, ведущий `**/` - и путь без каталогов.
 fn glob_matches(glob: &str, path: &str) -> bool {
     matches_bytes(glob.as_bytes(), path.as_bytes())
 }
@@ -630,8 +610,6 @@ fn compile_mount_table_record(
     })
 }
 
-// Правила пути контракта (filesystem_abi::Path) одни на программы и файлы, включая
-// ASCII-ограничение записи образа.
 pub(crate) fn validate_image_path(path: &str) -> Result<()> {
     filesystem_abi::Path::new(path).map_err(|_| {
         anyhow!(
@@ -866,7 +844,6 @@ fn map_segment_permissions(
     }
 }
 
-// Собранный образ разбирается обратно как проверка сборки.
 fn assemble_userland_image(entries: &[BuiltEntry], files: &[LoadedFile]) -> Result<Vec<u8>> {
     let boot_path = validate_built_entries(entries, files)?;
 
@@ -1066,7 +1043,6 @@ mod tests {
         manifest
     }
 
-    // Дерево на диске под тест: прежнее содержимое каталога снимается перед раскладкой.
     fn source_tree(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
         let root = std::env::temp_dir().join(format!("userland-image-{name}"));
         drop(fs::remove_dir_all(&root));
@@ -1313,9 +1289,9 @@ mod tests {
             )],
         )];
         // Правило ASCII одно на все записи образа, не только на программы.
-        let err = assemble_userland_image(&entries, &[loaded_file("/data/мотд", b"hi")])
+        let err = assemble_userland_image(&entries, &[loaded_file("/data/motdé", b"hi")])
             .expect_err("non-ascii path must fail");
-        assert_eq!(err.to_string(), "image path '/data/мотд' must be ASCII");
+        assert_eq!(err.to_string(), "image path '/data/motdé' must be ASCII");
     }
 
     #[test]

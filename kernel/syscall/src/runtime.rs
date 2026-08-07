@@ -33,8 +33,8 @@ pub trait SyscallRuntime: Send + Sync {
         })
     }
 
-    /// Аллокатор фреймов для anonymous Memory CapabilityTarget. `None` до регистрации
-    /// - соответствующие syscall'ы вернут `OutOfMemory`.
+    /// Аллокатор фреймов для anonymous Memory CapabilityTarget. `None` до
+    /// регистрации - соответствующие syscall вернут `OutOfMemory`.
     fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)>;
 
     /// `Arc<ThreadObject>` текущего потока. `None`, если планировщик ещё

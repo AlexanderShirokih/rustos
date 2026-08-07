@@ -266,9 +266,6 @@ fn insert_region(table: &Arc<MutexCell<HandleTable>>, size: usize, access: Acces
     insert_region_with_rights(table, size, access, None)
 }
 
-/// Как [`insert_region`], но позволяет задать права хендла независимо от
-/// access-mask региона - нужно, чтобы изолировать проверку маски (строка
-/// `process.rs:184`) от проверки прав хендла (`:178`).
 fn insert_region_with_rights(
     table: &Arc<MutexCell<HandleTable>>,
     size: usize,

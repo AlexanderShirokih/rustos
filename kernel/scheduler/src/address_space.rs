@@ -9,7 +9,7 @@ pub enum AddressSpace {
 }
 
 impl AddressSpace {
-    /// Возвращает shared kernel-AS для всех kernel-thread'ов.
+    /// Возвращает shared kernel-AS, общий для всех kernel-thread.
     pub fn kernel() -> Arc<Self> {
         Arc::new(Self::Kernel)
     }
@@ -20,7 +20,8 @@ impl AddressSpace {
         Ok(Arc::new(Self::User(mapper)))
     }
 
-    /// Capability для передачи в [`super::ArchContext::switch_address_space`]; `None` для kernel-AS.
+    /// Capability для передачи в [`super::ArchContext::switch_address_space`].
+    /// Для kernel-AS — `None`.
     pub fn handle(&self) -> Option<AddressSpaceHandle> {
         match self {
             Self::Kernel => None,
@@ -36,7 +37,7 @@ impl AddressSpace {
         }
     }
 
-    /// `Arc` user-mapper'а для использования вне scheduler-lock; `None` для kernel-AS.
+    /// `Arc` на user-mapper для использования вне scheduler-lock. Для kernel-AS — `None`.
     pub fn mapper_arc(&self) -> Option<Arc<dyn MemoryMapper + Send + Sync>> {
         match self {
             Self::Kernel => None,

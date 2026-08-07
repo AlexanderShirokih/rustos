@@ -7,16 +7,12 @@ use crate::cursor::Cursor;
 /// Узел Device Tree.
 #[derive(Clone, Copy)]
 pub struct Node<'a> {
-    /// Имя узла (например, "serial@7d001000").
     name: &'a str,
 
-    /// Смещение содержимого узла в буфере.
     offset: usize,
 
-    /// Ссылка на заголовок FDT.
     header: &'a FdtHeader,
 
-    /// Буфер с данными всего дерева.
     buffer: &'a [u8],
 }
 
@@ -56,10 +52,8 @@ impl<'a> Node<'a> {
 /// Свойство (атрибут) узла Device Tree.
 #[derive(Clone, Copy)]
 pub struct Property<'a> {
-    /// Имя свойства.
     name: &'a str,
 
-    /// Сырые байты значения свойства.
     value: &'a [u8],
 }
 
@@ -108,10 +102,8 @@ impl<'a> Property<'a> {
 
 /// Flattened Device Tree (FDT).
 pub struct DeviceTree<'a> {
-    /// Буфер с бинарными данными дерева.
     buffer: &'a [u8],
 
-    /// Разобранный заголовок FDT.
     header: FdtHeader,
 }
 
@@ -132,7 +124,6 @@ pub enum DtError {
 }
 
 impl<'a> DeviceTree<'a> {
-    /// Верхний предел total_size из недоверенного FDT-blob.
     const MAX_DTB_SIZE: usize = 2 * 1024 * 1024;
 
     pub fn from_ptr(address: usize) -> Result<Self, DtError> {
@@ -218,7 +209,6 @@ impl<'a> DeviceTree<'a> {
         self.find_by_alias(path)
     }
 
-    /// Возвращает узел по названию псевдонима (секция aliases)
     fn find_by_alias(&'a self, alias: &str) -> Option<Node<'a>> {
         let root = self.root()?;
         let aliases = root.children().find(|n| n.name == "aliases")?;
@@ -228,8 +218,6 @@ impl<'a> DeviceTree<'a> {
         self.find_node(path)
     }
 
-    /// Ищет узел в списке структур. Принимает только абсолютный путь
-    /// Например: find("/soc@107c000000/serial@7d001000")
     fn find_node(&'a self, path: &str) -> Option<Node<'a>> {
         // Быстрый путь. "/" -> корень
         if path == "/" {
@@ -292,27 +280,20 @@ fn read_u64_be(buffer: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_be_bytes(*buffer.get(offset..)?.first_chunk()?))
 }
 
-/// Заголовок Flattened Device Tree.
 #[derive(Clone, Copy)]
 struct FdtHeader {
-    /// Полный размер FDT в байтах.
     total_size: usize,
 
-    /// Смещение блока структур от начала буфера.
     struct_off: u32,
 
-    /// Смещение пула строк от начала буфера.
     strings_off: u32,
 
-    /// Смещение блока резервирования памяти от начала буфера.
     mem_rsvmap_off: u32,
 }
 
 impl FdtHeader {
-    /// Магическое число FDT.
     const MAGIC: u32 = 0xD00D_FEED;
 
-    /// Минимальный размер заголовка: 6 x u32 = 24 байта.
     const HEADER_MIN_SIZE: usize = size_of::<u32>() * 6;
 
     fn read_checked(cur: &mut Cursor<'_>) -> Result<Self, DtError> {

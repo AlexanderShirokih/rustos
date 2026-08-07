@@ -17,13 +17,9 @@ use super::{
 
 /// Одноразовый ответный объект на заблокированного вызывателя `call`.
 pub struct Reply {
-    /// Транспорт вызывателя (mapper его AS, VA IPC-буфера, handle-table).
     caller: ThreadTransport,
-    /// Park-waker вызывателя - тот же, на котором он заблокирован в `call`.
     waker: Arc<ParkWaker>,
-    /// Outcome-слот вызывателя: сюда пишется исход reply.
     outcome: Arc<OutcomeSlot>,
-    /// `true` после использования или инвалидизации.
     used: AtomicBool,
 }
 
@@ -96,7 +92,6 @@ impl Drop for Reply {
     }
 }
 
-/// Одноразовый ящик для Reply.
 pub(crate) struct ReplySlot {
     inner: MutexCell<Option<Arc<Reply>>>,
 }

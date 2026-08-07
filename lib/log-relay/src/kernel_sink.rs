@@ -7,10 +7,14 @@ use syscall::Handle;
 
 use crate::relay::LogSink;
 
-// Границы полей лог-кадра лежат в границах полей bootstrap-кадра: пересылка
-// строку не усекает.
-const _: () = assert!(log_abi::LOG_SOURCE_MAX <= bootstrap::LOG_TAG_MAX);
-const _: () = assert!(log_abi::LOG_MESSAGE_MAX <= bootstrap::LOG_MESSAGE_MAX);
+const _: () = assert!(
+    log_abi::LOG_SOURCE_MAX <= bootstrap::LOG_TAG_MAX,
+    "the bootstrap tag field holds a composed log source without truncation"
+);
+const _: () = assert!(
+    log_abi::LOG_MESSAGE_MAX <= bootstrap::LOG_MESSAGE_MAX,
+    "the bootstrap message field holds a log message without truncation"
+);
 
 /// Сток поверх bootstrap-капы ядра. Капа остаётся в процессе-владельце relay и
 /// живёт дольше цикла пересылки: клиентам лог-порта она недоступна.

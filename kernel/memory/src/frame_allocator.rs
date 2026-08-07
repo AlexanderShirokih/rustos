@@ -70,10 +70,7 @@ pub enum FrameAllocatorInitError {
 /// Управляет выделением и освобождением фреймов физической памяти
 /// в заданных регионах ОЗУ. Поддерживает несколько регионов.
 pub struct PhysicalFrameAllocator<L: LockCell<FrameBitmap>> {
-    /// Управляемые регионы оперативной памяти.
     regions: Vec<L, MAX_REGIONS>,
-
-    /// Номер следующего фрейма для выделения.
     next_frame_hint: AtomicUsize,
 }
 
@@ -125,7 +122,6 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
         })
     }
 
-    /// Находит регион, содержащий диапазон фреймов [from_inclusive, to_exclusive)
     fn find_containing_region(&self, from_inclusive: Frame, to_exclusive: Frame) -> Option<&L> {
         // Преобразуем эксклюзивную границу в инклюзивную
         let to_inclusive = if to_exclusive.number() > from_inclusive.number() {
@@ -176,7 +172,7 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
         }
     }
 
-    /// Релоцирует внутренние указатели bitmap'ов в каждом регионе.
+    /// Релоцирует внутренние указатели bitmap в каждом регионе.
     ///
     /// # Safety
     ///
@@ -185,7 +181,7 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
     pub unsafe fn relocate_inner_pointers_by_offset(&self, offset: usize) {
         for region in &self.regions {
             region.with_lock(|bitmap| {
-                // SAFETY: Выполняется в post-MMU фазе до первого использования allocator'а.
+                // SAFETY: Выполняется в post-MMU фазе до первого использования allocator.
                 unsafe { bitmap.relocate_ptr_by_offset(offset) };
             });
         }
@@ -212,7 +208,6 @@ impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
         }
     }
 
-    /// Выделяет один фрейм памяти
     fn allocate_frame(&self) -> Option<Frame> {
         let next_frame_hint = Frame::new(self.next_frame_hint.load(Ordering::Relaxed));
 

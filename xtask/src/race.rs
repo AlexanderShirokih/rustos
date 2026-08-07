@@ -73,7 +73,6 @@ pub(crate) fn run() -> Result<()> {
     Ok(())
 }
 
-/// Число пройденных тестов из строки итога libtest.
 fn passed_count(line: &str) -> Option<usize> {
     if !line.starts_with("test result:") {
         return None;

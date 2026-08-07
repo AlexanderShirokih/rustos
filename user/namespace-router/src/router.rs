@@ -28,33 +28,21 @@ use userland_loader::launch_entry_retained;
 
 use crate::error::{Error, Result as RouterResult};
 
-// Результат операции, у которой нет собственного возврата.
 const DONE: u32 = 0;
 
-// Бюджет страниц, выдаваемый процессу файловой системы: его образ, стек, куча и буферы данных
-// сессий укладываются в него, а исчерпание не задевает ни маршрутизатор, ни соседей.
 const MOUNT_BUDGET_PAGES: u64 = 512;
 const UNMOUNT_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-// Предел экземпляров одного монтирования: исчерпавшее его монтирование снимается с дерева имён,
-// и накрытый им путь становится непокрытым.
 const MOUNT_GENERATION_MAX: NonZeroU32 = NonZeroU32::new(3).expect("generation limit is non-zero");
 
 const FIRST_GENERATION: NonZeroU32 = NonZeroU32::new(1).expect("first generation is non-zero");
 
-// Срок ожидания бюджета на монтировании: страницы прежнего экземпляра префикса возвращаются
-// позже его завершения, а вызывающий ждёт ответа по своему сроку.
 const MOUNT_BUDGET_TIMEOUT: Timeout = Timeout::from_ns(500_000_000);
 
-// Срок ответа файловой системы на bind. Монтирование, не ответившее в срок, отпускает поток
-// диспетчеризации, а клиенту уходит Unresponsive.
 const BIND_TIMEOUT: Timeout = Timeout::from_secs(1);
 
-// Значок lease-капы admin-порта монтирования: маршрутизатор остаётся его единственным
-// отправителем, и его уход завершает процесс файловой системы.
 const MOUNT_LEASE_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("lease badge is non-zero");
 
-// Программа файловой системы: путь записи userland-образа.
 #[derive(Clone)]
 struct FileSystemProgram(String);
 
@@ -68,23 +56,18 @@ impl FileSystemProgram {
     }
 }
 
-// Запущенный экземпляр файловой системы монтирования.
 struct Incarnation {
     admin: OwnedHandle,
     process: Process,
 }
 
-// Монтирование без своего экземпляра.
 #[derive(Clone)]
 struct MountRecord {
-    // Префикс в форме, проверенной [`Path`]. Строка своя: пути приезжают кадрами и живут только
-    // до конца обработчика.
     prefix: String,
     program: FileSystemProgram,
     generation: NonZeroU32,
 }
 
-// Монтирование: префикс дерева имён и файловая система, которая его обслуживает.
 struct Mount {
     record: MountRecord,
     incarnation: Option<Incarnation>,
@@ -95,7 +78,6 @@ struct GoneMount {
     exit_code: Option<u32>,
 }
 
-/// Таблица монтирования, разделённая потоками сервисного и admin-порта.
 pub(crate) struct MountTable {
     mounts: Vec<Mount>,
 }
@@ -105,7 +87,6 @@ impl MountTable {
         Self { mounts: Vec::new() }
     }
 
-    // Монтирование, чей префикс совпал с путём и оказался самым длинным.
     fn longest_prefix(&self, path: Path<'_>) -> Option<&Mount> {
         self.mounts
             .iter()
@@ -140,19 +121,13 @@ impl Mount {
     }
 }
 
-// Монтирование, выбранное под один вызов клиента.
 struct MountTarget {
-    // Хэндл lease-капы admin-порта: он несёт generation своей записи, поэтому смена экземпляра
-    // под вызовом отвечает отказом, а не чужим объектом.
     admin: Handle,
     prefix_len: u32,
 }
 
-/// Сервисная сторона маршрутизатора: разбирает пути клиентов в сессии файловых систем.
 pub(crate) struct Resolving<'a> {
     table: &'a Mutex<MountTable>,
-    /// Capability, уложенная в кадр ответа: пока ответ не доставлен, она принадлежит
-    /// маршрутизатору.
     vended: Option<OwnedHandle>,
 }
 
@@ -164,8 +139,6 @@ impl<'a> Resolving<'a> {
         }
     }
 
-    /// Закрывает кадр: выданная capability остаётся за клиентом только при доставленном ответе -
-    /// иначе ядро её не переносило и закрыть её некому.
     pub(crate) fn end_frame(&mut self, delivered: bool) {
         settle(&mut self.vended, delivered);
     }
@@ -209,17 +182,11 @@ impl NamespaceService for Resolving<'_> {
     }
 }
 
-/// Admin-сторона маршрутизатора: держит ресурсы подъёма файловых систем и меняет таблицу
-/// монтирования.
 pub(crate) struct Administering<'a> {
     table: &'a Mutex<MountTable>,
-    /// Байты userland-образа: из них берутся программы файловых систем.
     image_bytes: &'static [u8],
-    /// Регион образа: его копия уходит каждой поднятой файловой системе.
     image: MemoryRegion,
-    /// Канал логирования: его копия уходит каждой поднятой файловой системе.
     log: OwnedHandle,
-    /// Metering resource маршрутизатора: из него нарезаются бюджеты монтирований.
     resource: Resource,
 }
 
@@ -288,7 +255,6 @@ impl<'a> Administering<'a> {
         Ok(DONE)
     }
 
-    // Оборот наблюдения: снимает ушедшие экземпляры монтирований и поднимает им смену.
     pub(crate) fn supervise(&self) {
         while let Some(gone) = self.gone_mount() {
             log_fmt(format_args!(
@@ -303,8 +269,6 @@ impl<'a> Administering<'a> {
         }
     }
 
-    // Поднимает монтированию смену. `false` - бюджет ушедшего экземпляра ещё не вернулся, и
-    // оборот наблюдения кончается: ожидание держало бы приём admin-кадров.
     fn replace(&self, record: &MountRecord) -> bool {
         let prefix = record.prefix.as_str();
         if record.generation >= MOUNT_GENERATION_MAX {
@@ -435,8 +399,6 @@ impl NamespaceAdminService for Administering<'_> {
     }
 }
 
-// Сколько байт пути накрывает префикс. Корень не накрывает ничего: путь под ним идёт файловой
-// системе как есть.
 fn prefix_len(prefix: &str) -> u32 {
     if prefix == Path::ROOT.as_str() {
         return 0;

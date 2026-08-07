@@ -16,23 +16,16 @@ use memory::{bump_allocator::BumpAllocator, kernel_vm_allocator::HeapAllocator};
 #[global_allocator]
 pub(crate) static GLOBAL_ALLOCATOR: GlobalKernelAllocator = GlobalKernelAllocator::new();
 
-/// Не инициализирован.
 const PHASE_UNINIT: u8 = 0;
-/// Bump-фаза (ранняя инициализация).
 const PHASE_BUMP: u8 = 1;
-/// Heap-фаза (основная работа).
 const PHASE_HEAP: u8 = 2;
-/// Заморожен (аллокации запрещены).
 const PHASE_FROZEN: u8 = 3;
 
 /// Двухфазный глобальный аллокатор ядра: bump-фаза без лока до включения
 /// MMU, heap-фаза под локом с маскированием прерываний после.
 pub struct GlobalKernelAllocator {
-    /// Текущая фаза работы.
     phase: AtomicU8,
-    /// Bump-аллокатор для ранней инициализации.
     bump: UnsafeCell<MaybeUninit<BumpAllocator>>,
-    /// Heap-аллокатор для основной работы.
     heap: MutexCell<MaybeUninit<HeapAllocator>>,
 }
 
@@ -75,9 +68,8 @@ impl GlobalKernelAllocator {
         self.phase.store(PHASE_FROZEN, Ordering::Release);
     }
 
-    /// # Safety
-    /// Вызывающий должен гарантировать, что bump-аллокатор инициализирован
-    /// и не происходит конкурентного доступа.
+    // SAFETY: caller держит фазу >= PHASE_BUMP, в которой bump-аллокатор
+    // инициализирован, и не допускает конкурентного доступа к нему.
     #[allow(clippy::mut_from_ref)]
     pub(crate) unsafe fn get_bump(&self) -> &mut BumpAllocator {
         // SAFETY: caller гарантирует инициализацию `bump` (фаза >= PHASE_BUMP) и отсутствие гонок;
@@ -85,9 +77,7 @@ impl GlobalKernelAllocator {
         unsafe { (*self.bump.get()).assume_init_mut() }
     }
 
-    /// # Safety
-    /// Вызывающий должен гарантировать фазу `PHASE_HEAP`: в ней слот
-    /// инициализирован.
+    // SAFETY: caller держит фазу PHASE_HEAP, в которой слот heap инициализирован.
     unsafe fn with_heap<R>(&self, f: impl FnOnce(&mut HeapAllocator) -> R) -> R {
         self.heap.with_lock(|slot| {
             // SAFETY: caller гарантирует фазу PHASE_HEAP, в которой `set_heap`

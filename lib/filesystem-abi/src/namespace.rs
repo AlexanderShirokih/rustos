@@ -67,7 +67,6 @@ mod tests {
         Str::new(text).expect("path within the bound")
     }
 
-    /// Гоняет `body` против маршрутизатора-заглушки, обслуживающего `calls` запросов.
     fn with_router<R>(
         calls_expected: usize,
         body: impl FnOnce(&NamespaceClient<MockEnd>) -> R,

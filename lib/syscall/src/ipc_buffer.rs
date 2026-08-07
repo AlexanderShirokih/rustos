@@ -12,7 +12,7 @@
 //! | биты      | значение                          |
 //! |-----------|-----------------------------------|
 //! | `[0..16)` | `len` - длина тела в `data` (байт)|
-//! | `[16..20)`| `ncaps` - число handle'ов в `caps`|
+//! | `[16..20)`| `ncaps` - число handle в `caps`   |
 //! | `[20..)`  | флаги (резерв)                    |
 //!
 //! `len` ограничен [`IPC_BUFFER_DATA_MAX`], `ncaps` - [`IPC_BUFFER_MAX_CAPS`];
@@ -20,11 +20,9 @@
 
 use core::cmp::min;
 
-/// Гранула страницы ABI: [`IpcBuffer`] занимает её целиком. Ядро и так маппит
-/// буфер по одной странице, поэтому расширение тела бесплатно по памяти.
 const ABI_PAGE: usize = 4096;
 
-/// Максимум переносимых/принимаемых handle'ов в [`IpcBuffer::caps`].
+/// Максимум переносимых/принимаемых handle в [`IpcBuffer::caps`].
 pub const IPC_BUFFER_MAX_CAPS: usize = 4;
 
 /// Максимум байт тела сообщения в [`IpcBuffer::data`]: остаток страницы за
@@ -32,11 +30,8 @@ pub const IPC_BUFFER_MAX_CAPS: usize = 4;
 /// `size_of::<IpcBuffer>()` равен [`ABI_PAGE`] (закреплено статик-ассертом).
 pub const IPC_BUFFER_DATA_MAX: usize = ABI_PAGE - 32;
 
-/// Сдвиг поля `ncaps` в [`IpcBuffer::tag`].
 const TAG_NCAPS_SHIFT: u32 = 16;
-/// Маска поля `len` (`[0..16)`) в `tag`.
 const TAG_LEN_MASK: u64 = 0xFFFF;
-/// Маска поля `ncaps` после сдвига (`[16..20)`, 4 бита).
 const TAG_NCAPS_MASK: u64 = 0xF;
 
 /// Per-thread IPC-буфер.
@@ -45,7 +40,7 @@ const TAG_NCAPS_MASK: u64 = 0xF;
 pub struct IpcBuffer {
     /// `len(bytes)` в `[0..16)`, `ncaps` в `[16..20)`, флаги в `[20..)`.
     pub tag: u64,
-    /// HandleId'ы для переноса/приёма.
+    /// HandleId для переноса/приёма.
     pub caps: [u32; IPC_BUFFER_MAX_CAPS],
     /// Тело сообщения.
     pub data: [u8; IPC_BUFFER_DATA_MAX],
@@ -53,9 +48,10 @@ pub struct IpcBuffer {
     pub badge: u64,
 }
 
-/// Буфер заполняет страницу ABI ровно: `len` поля выводятся так, чтобы сумма
-/// совпала с [`ABI_PAGE`]. Расхождение - перестановка/выравнивание полей.
-const _: () = assert!(size_of::<IpcBuffer>() == ABI_PAGE);
+const _: () = assert!(
+    size_of::<IpcBuffer>() == ABI_PAGE,
+    "IpcBuffer fills the ABI page exactly"
+);
 
 impl IpcBuffer {
     /// Создает устой буфер.
@@ -69,7 +65,7 @@ impl IpcBuffer {
     }
 }
 
-/// Упаковывает `len` (длина тела) и `ncaps` (число handle'ов) в `tag`.
+/// Упаковывает `len` (длина тела) и `ncaps` (число handle) в `tag`.
 pub const fn encode_tag(len: usize, ncaps: usize) -> u64 {
     let len = min(len, IPC_BUFFER_DATA_MAX);
     let ncaps = min(ncaps, IPC_BUFFER_MAX_CAPS);

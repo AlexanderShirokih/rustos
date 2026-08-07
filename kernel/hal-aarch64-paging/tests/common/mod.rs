@@ -61,7 +61,7 @@ impl TableAlloc for MockAlloc {
     }
 }
 
-/// Заглушка `Box::leak(Vec<u8>)` нужного размера. `pages + 1` ради padding'а
+/// Заглушка `Box::leak(Vec<u8>)` нужного размера. `pages + 1` ради padding
 /// под выравнивание начала.
 pub fn allocate_buffer(pages: usize) -> &'static [u8] {
     let buf = vec![0u8; pages * PAGE_SIZE + PAGE_SIZE].into_boxed_slice();

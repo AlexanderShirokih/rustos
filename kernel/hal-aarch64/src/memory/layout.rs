@@ -31,7 +31,6 @@ pub struct TooManyMemoryRegions;
 
 /// Раскладка физической памяти ядра.
 pub struct MemoryLayout {
-    /// Список регионов памяти.
     regions: Vec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
 }
 

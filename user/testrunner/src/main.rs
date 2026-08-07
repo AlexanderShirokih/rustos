@@ -48,11 +48,8 @@ mod stress;
 mod sync;
 mod vm;
 
-/// HandleId WRITE-конца bootstrap-канала, полученный в `_start`; ставится один раз.
 static BOOTSTRAP_HANDLE: Once<Handle> = Once::new();
 
-/// Накопитель строки лога: байты копятся до `\n` либо заполнения, затем
-/// уходят одним cast `log` контракта `Bootstrap`.
 struct LogBuffer {
     len: usize,
     bytes: [u8; LOG_MESSAGE_MAX],
@@ -63,7 +60,6 @@ static LOG_BUFFER: Mutex<LogBuffer> = Mutex::new(LogBuffer {
     bytes: [0; LOG_MESSAGE_MAX],
 });
 
-/// Writer harness'а: шлёт построчные cast'ы `log` в bootstrap-канал.
 struct ChannelLogWriter;
 
 static LOG_WRITER: ChannelLogWriter = ChannelLogWriter;
@@ -90,7 +86,6 @@ impl Writer for ChannelLogWriter {
     }
 }
 
-/// Отправляет накопленную строку cast'ом `log` и очищает буфер.
 fn flush_line(state: &mut LogBuffer) {
     if state.len == 0 {
         return;
@@ -99,11 +94,8 @@ fn flush_line(state: &mut LogBuffer) {
     state.len = 0;
 }
 
-/// Тег строк testrunner в klog.
 const LOG_TAG: &str = "testrunner";
 
-/// Best-effort отправка строки лога контрактом `Bootstrap`: на WouldBlock -
-/// ограниченный спин-retry, иная ошибка либо не-UTF8 молча дропает кадр.
 fn send_log_frame(payload: &[u8]) {
     const SEND_RETRY_LIMIT: usize = 1024;
 
@@ -124,15 +116,12 @@ fn send_log_frame(payload: &[u8]) {
     }
 }
 
-/// Handle WRITE-конца bootstrap-канала для тестов, обслуживающих контракт `Bootstrap`.
 pub(crate) fn bootstrap_handle() -> Handle {
     *BOOTSTRAP_HANDLE
         .get()
         .expect("bootstrap handle set in _start")
 }
 
-// Прогон уходит и по отказу kassert, и цикл relay останавливается здесь: процесс
-// уходит с последним живым потоком, а оставленный цикл держит его до тайм-аута.
 fn runner_exit(code: u32) -> ! {
     LOG_WRITER.flush();
     log_relay::shutdown_relays();
@@ -159,8 +148,6 @@ fn userland_smoke() {
     kernel_tests::kassert!(sum.is_multiple_of(5));
 }
 
-/// Стековый форматтер сообщения паники: излишек сверх ёмкости кадра
-/// молча обрезается.
 struct PanicBuffer {
     len: usize,
     bytes: [u8; LOG_MESSAGE_MAX],

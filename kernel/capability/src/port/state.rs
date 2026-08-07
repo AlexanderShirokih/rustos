@@ -2,8 +2,9 @@
 //!
 //! Очередь держит либо отправителей, либо получателей - но никогда оба
 //! одновременно. Учёт значков и получателей меняется только под тем же локом,
-//! поэтому изменение множества и разбор очереди атомарны. Пробуждения наружу
-//! выносятся значениями [`PendingWake`]: под локом порта они не выполняются.
+//! поэтому изменение множества и разбор очереди атомарны. Пробуждение и разрушение
+//! снятых сторон выносятся наружу значениями [`PendingWake`] и [`QueuedWaiter`]: под
+//! локом порта они не выполняются.
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
@@ -18,7 +19,6 @@ use crate::{
     wait::{CancelTarget, ParkWaker},
 };
 
-// K - роль стороны: SendKind в очереди отправителей и () в очереди получателей.
 pub(super) struct Waiter<K> {
     pub(super) kind: K,
     pub(super) transport: ThreadTransport,
@@ -30,20 +30,17 @@ pub(super) struct Waiter<K> {
 pub(super) type SenderWaiter = Waiter<SendKind>;
 pub(super) type ReceiverWaiter = Waiter<()>;
 
-/// Очередь ожидания: либо отправители/вызыватели, либо получатели, но не оба.
 enum Queue {
     Empty,
     Senders(VecDeque<SenderWaiter>),
     Receivers(VecDeque<ReceiverWaiter>),
 }
 
-/// Учётная запись держателей одного значка; живёт только под локом порта.
 struct BadgeRecord {
     badge: u64,
     holders: u32,
 }
 
-/// Снятый с очереди waiter любой из двух ролей: под локом порта не роняется.
 pub(super) enum QueuedWaiter {
     Sender(SenderWaiter),
     Receiver(ReceiverWaiter),
@@ -58,12 +55,8 @@ impl QueuedWaiter {
     }
 }
 
-/// Снятый с очереди waiter с уже опубликованным исходом: пробуждение и разрушение под локом порта
-/// не выполняются.
 pub(super) enum PendingWake {
-    /// Событие доставлено: значок ушедшей стороны лежит в слоте исхода.
     Delivered(ReceiverWaiter),
-    /// Встречи не будет.
     Broken(QueuedWaiter),
 }
 
@@ -76,22 +69,14 @@ impl PendingWake {
     }
 }
 
-/// Что достаётся получателю из состояния порта.
 pub(super) enum RecvPick {
-    /// Ушедший значок с непрочтённым событием.
     DepartedBadge(u64),
-    /// Встречный отправитель или вызыватель, снятый с очереди.
     Sender(SenderWaiter),
-    /// Ни события, ни отправителя.
     Nothing,
 }
 
-// Потолок непрочтённых событий об уходе: на нём порт не заводит записей под новые значки, а `recv`
-// события освобождает запись.
 pub(super) const DEPARTED_BADGE_LIMIT: usize = HandleTable::DEFAULT_CAPACITY as usize;
 
-/// Очередь ожидания и учёт держателей под одним локом: `receivers` - живые capability с правом
-/// `READ`, `badges` - записи значков, `departed` - записи с непрочтённым событием об уходе.
 pub(super) struct PortState {
     queue: Queue,
     receivers: usize,
@@ -109,7 +94,6 @@ impl PortState {
         }
     }
 
-    /// Вводит нового получателя в множество.
     pub(super) fn add_receiver(&mut self) {
         self.receivers += 1;
     }
@@ -119,8 +103,6 @@ impl PortState {
         matches!(self.queue, Queue::Empty)
     }
 
-    // Оживление записи с непрочтённым событием проходит и на потолке: потолком ограничены только
-    // новые записи.
     pub(super) fn register_badge(&mut self, badge: u64) -> Result<(), IpcError> {
         if let Some(record) = self.badges.iter_mut().find(|r| r.badge == badge) {
             if record.holders == 0 {
@@ -129,6 +111,8 @@ impl PortState {
             record.holders += 1;
             return Ok(());
         }
+        // Потолок ограничивает только новые записи: оживление записи с непрочтённым
+        // событием проходит и на потолке.
         if self.departed >= DEPARTED_BADGE_LIMIT {
             return Err(IpcError::ResourceExhausted);
         }
@@ -189,7 +173,6 @@ impl PortState {
         Ok(self.pop_receiver())
     }
 
-    // Готовое событие об уходе идёт впереди очереди отправителей.
     pub(super) fn pick_for_receiver(&mut self) -> RecvPick {
         if let Some(badge) = self.take_departed_badge() {
             return RecvPick::DepartedBadge(badge);
@@ -208,12 +191,12 @@ impl PortState {
         }
     }
 
-    // Полный оборот деки на месте: совпавшие изымаются, порядок остальных сохраняется.
     fn take_senders_with_badge(&mut self, badge: u64) -> Vec<SenderWaiter> {
         let Queue::Senders(queued) = &mut self.queue else {
             return Vec::new();
         };
         let mut taken = Vec::new();
+        // Полный оборот деки на месте: совпавшие изымаются, порядок остальных сохраняется.
         for _ in 0..queued.len() {
             let Some(waiter) = queued.pop_front() else {
                 break;
@@ -228,7 +211,6 @@ impl PortState {
         taken
     }
 
-    // Единственный источник инварианта "пустой дек -> состояние `Empty`".
     fn collapse_if_empty(&mut self) {
         let drained = match &self.queue {
             Queue::Empty => false,
@@ -236,6 +218,7 @@ impl PortState {
             Queue::Receivers(queued) => queued.is_empty(),
         };
         if drained {
+            // Единственный источник инварианта "пустой дек -> состояние `Empty`".
             self.queue = Queue::Empty;
         }
     }
@@ -264,7 +247,6 @@ impl PortState {
         waiter
     }
 
-    // Err - waiter не поставлен: встал встречный получатель либо опустело их множество.
     pub(super) fn try_push_sender(&mut self, waiter: SenderWaiter) -> Result<(), SenderWaiter> {
         if self.receivers == 0 {
             return Err(waiter);
@@ -284,7 +266,6 @@ impl PortState {
         }
     }
 
-    // Err - waiter не поставлен: встал встречный отправитель либо готово событие об уходе значка.
     pub(super) fn try_push_receiver(
         &mut self,
         waiter: ReceiverWaiter,

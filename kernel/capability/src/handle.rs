@@ -29,7 +29,6 @@ impl HandleId {
         None => NonZeroU32::MIN,
     };
 
-    /// Упаковывает `(generation, slot)` в идентификатор.
     pub(super) fn pack(generation: NonZeroU16, slot: u32) -> Self {
         debug_assert!(slot <= Self::MAX_SLOT_INDEX, "slot index overflow");
         let scaled = NonZeroU32::from(generation).saturating_mul(Self::GENERATION_SCALE);
@@ -109,8 +108,6 @@ impl Capability {
         Self::new(target, rights)
     }
 
-    /// Билет держателя с зарегистрированным хуком отзыва и введённым учётом.
-    /// `Ok(None)` - объект держателей не считает.
     fn armed_holder(
         target: &CapabilityTarget,
         rights: Rights,
@@ -133,7 +130,6 @@ impl Capability {
         Ok(Some(ticket))
     }
 
-    /// Узел графа деривации этой капы.
     pub(super) fn node(&self) -> &Arc<RevNode> {
         &self.node
     }
@@ -151,8 +147,6 @@ impl Capability {
         &self.target
     }
 
-    /// Удержание учёта этой capability на время операции: пока оно живо, закрытие capability не
-    /// обнуляет её сторону объекта. `None` - учёта нет либо он уже снят.
     pub(crate) fn hold_for_operation(&self) -> Option<OperationHold> {
         self.holder.as_ref()?.reacquire().map(OperationHold::new)
     }

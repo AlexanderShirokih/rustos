@@ -22,7 +22,6 @@ use crate::{
     user_process::{SchedulerUserProcessLauncher, UserProcessLauncher},
 };
 
-/// Бюджет закрытия лог-порта.
 const KLOG_CLOSE_TIMEOUT_NS: u64 = 1_000_000_000;
 
 /// Спавнит init-процесс с приоритетом `highest`. Init-процесс ведёт

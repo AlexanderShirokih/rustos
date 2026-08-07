@@ -10,7 +10,6 @@ use crate::{
     table_flags::TableFlags,
 };
 
-/// Sealed traits для ограничения типов записей на каждом уровне.
 mod seal {
     /// Уровень поддерживает запись-таблицу.
     pub trait CanTable {}
@@ -53,7 +52,6 @@ impl Kind for Page {}
 /// Типизирована по уровню и виду записи для compile-time гарантий корректности.
 #[repr(transparent)]
 pub struct Entry<L: Level, K: Kind> {
-    /// Сырое 64-битное значение дескриптора.
     raw: u64,
     _p: PhantomData<(L, K)>,
 }
@@ -198,9 +196,9 @@ impl<L: Level> AnyEntry<L> {
     }
 }
 
-/// Извлекает тип дескриптора (биты `[1:0]`).
 #[inline]
 fn desc_type(raw: u64) -> u64 {
+    // Тип дескриптора закодирован в битах `[1:0]`.
     raw & 0b11
 }
 

@@ -503,7 +503,7 @@ fn allocate_frames_prefers_first_region_even_with_short_run() {
 
 #[test]
 fn allocate_frames_spans_word_boundary() {
-    // 128 фреймов = 2 u64-word'а; проверяем счёт через границу.
+    // 128 фреймов = 2 u64-word. Проверяем счёт через границу.
     let allocator = single_region_allocator(0, 128);
     let (first_frame, count) = allocator
         .allocate_frames(80)
@@ -606,8 +606,8 @@ fn into_locked_preserves_allocation_state() {
 
     let locked: PhysicalFrameAllocator<MutexCell<FrameBitmap>> = unlocked.into_locked();
 
-    assert!(!locked.is_allocated(first), "освобождённый фрейм свободен");
-    assert!(locked.is_allocated(second), "выданный фрейм занят");
+    assert!(!locked.is_allocated(first), "the released frame is free");
+    assert!(locked.is_allocated(second), "the issued frame stays in use");
 }
 
 #[test]
@@ -637,5 +637,9 @@ fn into_locked_keeps_regions_and_continues_allocation() {
         remaining += 1;
     }
 
-    assert_eq!(issued.len() + remaining, 64, "оба региона пережили переход");
+    assert_eq!(
+        issued.len() + remaining,
+        64,
+        "both regions survive the strategy change"
+    );
 }

@@ -42,7 +42,8 @@ pub enum SyscallOp {
     /// `send` на port: блокирующая отправка сообщения из IPC-буфера
     /// текущего потока. Аргументы:
     ///  - `arg0=handle`,
-    ///  - `arg1=timeout_ns` ([`PORT_TIMEOUT_INFINITE`] - бессрочно, `0` - poll, иначе дедлайн в нс).
+    ///  - `arg1=timeout_ns` ([`PORT_TIMEOUT_INFINITE`] - бессрочно, `0` - poll,
+    ///    иначе дедлайн в нс).
     ///
     /// Требует `Rights::WRITE`.
     /// Возврат: `0`, [`SYSCALL_RETURN_TIMEOUT`] при истечении тайм-аута, либо `-(SyscallError)`.
@@ -109,7 +110,8 @@ pub enum SyscallOp {
     ///  - `arg1=desc_va` (user-указатель на `UserImageDescAbi`),
     ///  - `arg2=desc_len` (== `USER_IMAGE_DESC_SIZE = 56`).
     ///
-    /// Требует `Rights::WRITE` на `process_handle`; для каждого региона - `WRITE | (R/W/X по flags)`.
+    /// Требует `Rights::WRITE` на `process_handle`, для каждого региона -
+    /// `WRITE | (R/W/X по flags)`.
     /// Возврат `0`.
     ProcessLoadImage = 0x42,
 

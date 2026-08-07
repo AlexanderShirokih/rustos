@@ -551,12 +551,9 @@ mod tests {
         )
     }
 
-    fn declaration<const LEN: usize>(
-        slots: &[SlotKind],
-        config: bool,
-    ) -> Option<ComponentManifest> {
+    fn declaration<const LEN: usize>(slots: &[SlotKind], config: bool) -> ComponentManifest {
         let bytes = encode_manifest::<LEN>(slots, config);
-        Some(decode_manifest(&bytes).expect("declaration decodes"))
+        decode_manifest(&bytes).expect("declaration decodes")
     }
 
     fn program(path: &str, manifest: Option<ComponentManifest>) -> PlanProgram<'_> {
@@ -568,22 +565,31 @@ mod tests {
             program(ROOTKEEPER, None),
             program(
                 ROUTER,
-                declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 1 }>(&[SlotKind::Image], true),
+                Some(declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 1 }>(
+                    &[SlotKind::Image],
+                    true,
+                )),
             ),
             program(
                 DRIVER,
-                declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 2 }>(
+                Some(declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 2 }>(
                     &[SlotKind::Irq, SlotKind::Mmio],
                     false,
-                ),
+                )),
             ),
             program(
                 CONSUMER,
-                declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 1 }>(&[SlotKind::Service], false),
+                Some(declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 1 }>(
+                    &[SlotKind::Service],
+                    false,
+                )),
             ),
             program(
                 IMAGE_FS,
-                declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 1 }>(&[SlotKind::Image], false),
+                Some(declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 1 }>(
+                    &[SlotKind::Image],
+                    false,
+                )),
             ),
             program(RAM_FS, None),
         ]

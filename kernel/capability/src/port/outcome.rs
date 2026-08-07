@@ -8,32 +8,23 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::IpcError;
 
-/// Роль стороны, стоящей в очереди отправителей.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SendKind {
-    /// `send`: после доставки отправитель разблокируется немедленно.
     Send,
-    /// `call`: вызывающая сторона остаётся блокированной до `reply`.
     Call,
 }
 
-/// Исход операции, прочитанный разбуженной стороной из [`OutcomeSlot`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RendezvousOutcome {
-    /// Встреча состоялась, сообщение доставлено.
     Delivered,
-    /// Port/Reply уничтожен или последний хендл закрыт.
     PeerGone,
-    // Перенос caps или копирование тела провалились с указанной причиной.
     TransferFailed(IpcError),
-    /// Отправители значка исчезли: кадра нет, получателю доставлен значок.
     SenderGone(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InvalidTransferError(u32);
 
-/// Атомарный слот исхода рандеву.
 pub(crate) struct OutcomeSlot {
     state: AtomicU32,
     badge: AtomicU64,
@@ -44,17 +35,12 @@ pub(crate) struct OutcomeSlot {
 
 impl OutcomeSlot {
     pub(crate) const PENDING: u32 = 0;
-    /// `call`: запрос доставлен серверу, вызывающая сторона ждёт reply.
     pub(crate) const AWAITING_REPLY: u32 = 1;
-    /// Matcher или reply уже изъял transport и выполняет перенос.
-    /// Владелец IPC-буфера обязан дождаться терминального исхода.
     pub(crate) const DELIVERING: u32 = 2;
     pub(crate) const DELIVERED: u32 = 3;
     pub(crate) const PEER_GONE: u32 = 4;
     pub(crate) const TRANSFER_FAILED: u32 = 5;
-    /// Вызывающая сторона ушла по тайм-ауту до reply.
     pub(crate) const TIMEDOUT: u32 = 6;
-    /// Отправители значка исчезли; значок лежит в `badge`.
     pub(crate) const SENDER_GONE: u32 = 7;
 
     pub fn new() -> Arc<Self> {
@@ -67,8 +53,6 @@ impl OutcomeSlot {
         })
     }
 
-    /// Matcher под Port-локом линеаризует dequeue и сохраняет
-    /// transport до публикации исхода переноса.
     pub(crate) fn begin_delivery(&self) {
         let previous = self.state.compare_exchange(
             Self::PENDING,
@@ -96,8 +80,6 @@ impl OutcomeSlot {
         self.state.store(v, Ordering::Release);
     }
 
-    // Терминальный исход; `None` для нетерминальных состояний
-    // (`PENDING`/`AWAITING_REPLY`/`DELIVERING`/`TIMEDOUT`).
     pub(crate) fn try_get(&self) -> Result<Option<RendezvousOutcome>, InvalidTransferError> {
         let outcome = match self.state.load(Ordering::Acquire) {
             Self::DELIVERED => Some(RendezvousOutcome::Delivered),
@@ -119,18 +101,14 @@ impl OutcomeSlot {
             .expect("outcome holds a valid transfer error")
     }
 
-    /// Сырое состояние слота.
     pub(crate) fn raw(&self) -> u32 {
         self.state.load(Ordering::Acquire)
     }
 
-    /// `call`-матчер: запрос доставлен, переводим вызывающую сторону в ожидание reply.
     pub(crate) fn set_awaiting_reply(&self) {
         self.state.store(Self::AWAITING_REPLY, Ordering::Release);
     }
 
-    /// Сервер-reply коммитит доставку ответа: `AWAITING_REPLY -> DELIVERING`.
-    /// `true`, если выиграл гонку с тайм-аутом вызывателя.
     pub(crate) fn try_begin_reply(&self) -> bool {
         self.state
             .compare_exchange(
@@ -142,8 +120,6 @@ impl OutcomeSlot {
             .is_ok()
     }
 
-    /// Вызывающая сторона уходит по тайм-ауту ожидания reply: `AWAITING_REPLY ->
-    /// TIMEDOUT`. `true`, если выиграл гонку с reply.
     pub(crate) fn try_timeout(&self) -> bool {
         self.state
             .compare_exchange(
@@ -155,13 +131,13 @@ impl OutcomeSlot {
             .is_ok()
     }
 
-    /// External cancel после dequeue: либо отменяет ожидание reply,
-    /// либо дожидается завершения уже закоммиченного переноса.
     pub(crate) fn cancel_after_dequeue(&self) {
         #[cfg(test)]
         self.cancel_waiters.fetch_add(1, Ordering::AcqRel);
         loop {
             match self.raw() {
+                // Перенос уже закоммичен и держит IPC-буфер: отмена не обрывает его,
+                // а ждёт терминального исхода.
                 Self::DELIVERING => core::hint::spin_loop(),
                 Self::AWAITING_REPLY => {
                     if self.try_timeout() {

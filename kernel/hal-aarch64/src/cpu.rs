@@ -19,8 +19,6 @@ pub type Topology = CpuTopology<MAX_CPUS>;
 
 static TOPOLOGY: Once<Topology> = Once::new();
 
-// Блоки живут всё время работы ядра - условие того, что их адрес допустимо
-// держать в `TPIDR_EL1`.
 static CPU_LOCALS: [CpuLocal; MAX_CPUS] = [const { CpuLocal::new() }; MAX_CPUS];
 
 /// Per-CPU состояние платформенного слоя. Поле `scheduler` остаётся `null`

@@ -71,6 +71,60 @@ fn variant_of_a_private_enum_is_reported() {
 }
 
 #[test]
+fn field_of_a_public_variant_inherits_visibility() {
+    let source = concat!(
+        "pub enum Kind {\n",
+        "    First {\n",
+        "        /// Doc.\n",
+        "        span: usize,\n",
+        "    },\n",
+        "}\n"
+    );
+    let hits = check(&rule("doc_on_declaration"), source);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn field_of_a_private_variant_is_reported() {
+    let source = concat!(
+        "enum Kind {\n",
+        "    First {\n",
+        "        /// Doc.\n",
+        "        span: usize,\n",
+        "    },\n",
+        "}\n"
+    );
+    let hits = check(&rule("doc_on_declaration"), source);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn field_of_a_public_struct_still_needs_its_own_pub() {
+    let source = concat!(
+        "pub struct Frame {\n",
+        "    /// Doc.\n",
+        "    span: usize,\n",
+        "}\n"
+    );
+    let hits = check(&rule("doc_on_declaration"), source);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn comment_on_a_field_of_a_public_variant_inherits_visibility() {
+    let source = concat!(
+        "pub enum Kind {\n",
+        "    First {\n",
+        "        // Span of the record.\n",
+        "        span: usize,\n",
+        "    },\n",
+        "}\n"
+    );
+    let hits = check(&rule("comment_on_declaration"), source);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
 fn exported_macro_counts_as_public() {
     let hits = check(
         &rule("doc_on_declaration"),

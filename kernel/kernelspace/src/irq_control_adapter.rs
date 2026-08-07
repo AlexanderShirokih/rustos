@@ -25,14 +25,14 @@ impl InterruptsControlAdapter {
     }
 }
 
-/// Мост drivers-common `IrqHandler` -> capability `IrqSink`. Исполняется в
-/// IRQ-контексте; `sink.fire()` синхронно маскирует линию и поднимает `SIGNALED`.
 struct SinkHandler {
     sink: Arc<dyn IrqSink>,
 }
 
 impl IrqHandler for SinkHandler {
     fn handle(&self) {
+        // Вызов идёт в IRQ-контексте: `fire` синхронно маскирует линию и
+        // поднимает `SIGNALED`.
         self.sink.fire();
     }
 }

@@ -135,9 +135,6 @@ fn run_starts_highest_priority_thread() {
     assert_eq!(switch_count(), 1);
 }
 
-/// Точки входа preemption, ротирующие равноприоритетные потоки round-robin.
-/// Параметризуем тест по способу уступки кванта (time-slice-тик vs явный yield),
-/// чтобы не плодить три почти идентичных теста на один и тот же контракт.
 enum PreemptKind {
     OnTick,
     Yield,
@@ -332,12 +329,12 @@ fn yield_from_masked_context_keeps_preemption_masked() {
         running.yield_now();
         assert!(
             !preemption_enabled(),
-            "вложенный yield не должен разрешать preemption"
+            "nested yield must not re-enable preemption"
         );
     });
     assert!(
         preemption_enabled(),
-        "preemption восстановлен после masked-scope"
+        "preemption is restored after the masked scope"
     );
 }
 
@@ -1286,8 +1283,6 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
     assert!(!thread.terminated());
 }
 
-/// Cancel-цель, которая на срабатывании пробует взять scheduler-лок из другого
-/// потока: захват означает, что лок уже отпущен.
 struct SchedulerLockProbe {
     handle: SchedulerHandle<MockContext, MockTimerSource>,
     calls: std::sync::atomic::AtomicUsize,
@@ -1371,10 +1366,10 @@ impl capability::CancelTarget for CleanupQuarantineProbe {
     }
 }
 
+// Пробуждение cancel-цели снятого слота берёт scheduler-лок, под которым идёт
+// изъятие bootstrap-хэндла, и потому обязано быть отложено.
 #[test]
 fn start_user_process_cancels_loader_waiters_outside_scheduler_lock() {
-    // Изъятие bootstrap-хэндла идёт из-под scheduler-лока, а пробуждение
-    // cancel-цели снятого слота берёт тот же лок: оно обязано быть отложено.
     use capability::{UserStartSpec, UserThreadEntry};
     use collections::LockCell;
 
@@ -1413,11 +1408,11 @@ fn start_user_process_cancels_loader_waiters_outside_scheduler_lock() {
     };
     handle.start_user_process(&process, spec).expect("start ok");
 
-    assert_eq!(probe.calls(), 1, "cancel снятого слота обязан сработать");
+    assert_eq!(probe.calls(), 1, "cancel of the released slot must fire");
     assert_eq!(
         probe.acquisitions(),
         1,
-        "cancel обязан идти вне scheduler-лока",
+        "cancel must run outside the scheduler lock",
     );
 }
 
@@ -1493,10 +1488,10 @@ fn start_user_process_rejects_terminated_process() {
     }
 }
 
+// `start_user_process` при SpawnFailed оставляет handle в loader-table
+// нетронутым, с исходным `HandleId`.
 #[test]
 fn start_user_process_preserves_handles_on_spawn_failure() {
-    // start_user_process при SpawnFailed обязан оставить handle нетронутым
-    // в loader-table с исходным HandleId (не дропать и не менять id).
     use capability::{
         Capability, CapabilityTarget, KernelRuntime, Rights, Signal, StartProcessError,
         UserStartSpec, UserThreadEntry,
@@ -1616,11 +1611,10 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
     );
 }
 
+// Кадр port-syscall убитого в парковке recv потока держит клон таблицы, и
+// `Drop for HandleTable` не наступает: capability освобождает дренаж терминации.
 #[test]
 fn process_terminate_drains_handle_table_held_outside_process() {
-    // Убитый в парковке recv поток не реапится: его кадр port-syscall'а держит
-    // клон таблицы, поэтому `Drop for HandleTable` в этом сценарии никогда не
-    // наступает и освободить capability обязан дренаж на терминации.
     use capability::{Capability, CapabilityTarget, Port, Rights, UserStartSpec, UserThreadEntry};
     use collections::LockCell;
 

@@ -3,7 +3,6 @@
 
 use core::mem;
 
-// Рантайм собирается только под 64-битные цели.
 const _: () = assert!(
     usize::BITS >= u64::BITS,
     "userland runtime targets 64-bit only"
@@ -21,10 +20,9 @@ use crate::{
     svc,
 };
 
-// Оборот ожидания возврата бюджета уходящим поддеревом.
 const SPLIT_RETRY_TURN: Timeout = Timeout::from_millis(5);
 
-/// Backing региона памяти, декодированный из `kind_tag` inspect'а.
+/// Backing региона памяти, декодированный из `kind_tag` вызова `inspect`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionKind {
     /// Анонимные страницы (`kind_tag == 1`).
@@ -34,8 +32,6 @@ pub enum RegionKind {
 }
 
 impl RegionKind {
-    /// Декодирует `kind_tag`; провенанс - ядро (валидны 1/2), поэтому неизвестный
-    /// тег сводится к `Virtual`, а `debug_assert` ловит дрейф ABI в debug.
     const fn from_tag(tag: u64) -> Self {
         debug_assert!(tag == 1 || tag == 2);
         match tag {
@@ -226,8 +222,7 @@ impl MemoryRegion {
             .map_err(Error::Syscall)
     }
 
-    /// Декодирует сырой возврат inspect'а `(kind_tag << 16) | access_bits`
-    /// в [`RegionInfo`].
+    /// Декодирует сырой возврат `memory_region_inspect` в [`RegionInfo`].
     pub fn inspect(&self) -> Result<RegionInfo> {
         let (size, secondary) = svc::memory_region_inspect(self.handle.as_raw());
         let size_bytes = value(size)?;
@@ -321,7 +316,6 @@ impl Mapping {
         Ok(())
     }
 
-    // Окно за границей маппинга - OutOfBounds.
     fn head_ptr(&self, len: usize) -> Result<*mut u8> {
         let size = usize::try_from(self.size_bytes).expect("mapping size fits usize");
         if len > size {

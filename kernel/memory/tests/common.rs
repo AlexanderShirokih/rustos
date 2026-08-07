@@ -1,3 +1,9 @@
+//! Общие помощники интеграционных тестов `memory`.
+//!
+//! Каждый файл в `tests/` компилируется отдельным крейтом, и помощник,
+//! нужный одному файлу, виден остальным как `dead_code` - отсюда
+//! `#[allow(dead_code)]` на элементах ниже.
+
 use std::sync::Arc;
 
 use memory::{
@@ -5,8 +11,6 @@ use memory::{
     physical_address::PageAlignedAddress, virtual_address::AlignedVirtualAddress,
 };
 
-// Каждый тест-файл в tests/ компилируется как отдельный crate.
-// Функции, используемые в одних тестах, показываются как dead_code при компиляции других.
 #[allow(dead_code)]
 const TEST_FRAME_SIZE: usize = PageAlignedAddress::ALIGNMENT;
 
@@ -23,7 +27,6 @@ pub fn make_range(start_frame: usize, frame_count: usize) -> MemoryRange<PageAli
     MemoryRange::new(start, end)
 }
 
-/// Внутренние данные мока для `MemoryAccessProvider`.
 struct MockMemoryAccessProviderInner {
     frame_size: usize,
     len: usize,

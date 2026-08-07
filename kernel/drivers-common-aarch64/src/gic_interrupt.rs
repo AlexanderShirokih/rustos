@@ -4,7 +4,6 @@ use core::mem::size_of;
 
 use drivers_common::services::interrupts::{IrqNumber, TriggerType};
 
-/// Число ячеек в одном GIC interrupt-specifier: `type`, `number`, `flags`.
 const SPECIFIER_CELLS: usize = 3;
 const CELL_SIZE: usize = size_of::<u32>();
 const SPECIFIER_SIZE: usize = SPECIFIER_CELLS * CELL_SIZE;
@@ -21,7 +20,7 @@ pub struct GicInterrupt {
 
 /// Разбирает `index`-й specifier (3 ячейки big-endian) свойства `interrupts`:
 /// `type` (SPI/PPI) и `number` дают INTID (`+32`/`+16`), `flags` - [`TriggerType`].
-/// `None` при некорректной длине, отсутствии specifier'а или неизвестном типе.
+/// `None` при некорректной длине, отсутствии specifier или неизвестном типе.
 pub fn parse_gic_interrupt(raw: &[u8], index: usize) -> Option<GicInterrupt> {
     if raw.is_empty() || !raw.len().is_multiple_of(SPECIFIER_SIZE) {
         return None;
@@ -46,9 +45,9 @@ pub fn parse_gic_interrupt(raw: &[u8], index: usize) -> Option<GicInterrupt> {
     })
 }
 
-/// Флаги триггера (DT GIC binding): биты 0..4 - `1`=edge-rising, `2`=edge-falling,
-/// `4`=level-high, `8`=level-low. Неизвестное сводится к `Level` (безопасный дефолт).
 fn trigger_from_flags(flags: u32) -> TriggerType {
+    // DT GIC binding кладёт триггер в биты 0..4: 1 = edge-rising, 2 = edge-falling,
+    // 4 = level-high, 8 = level-low. Неизвестное сводится к Level как безопасному.
     match flags & 0xF {
         1 | 2 => TriggerType::Edge,
         _ => TriggerType::Level,

@@ -2,7 +2,7 @@
 //! процесс ramfs по IPC, а их итоги сверяются с моделью дерева, которую прогон держит у себя.
 //!
 //! Каждый seed работает на своём монтировании: у свежего процесса файловой системы пустая арена
-//! узлов, и последовательность операций seed'а не зависит от того, что оставили соседние.
+//! узлов, и последовательность операций одного seed не зависит от того, что оставили соседние.
 
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 
@@ -18,70 +18,49 @@ use crate::{
     stress::{SplitMix64, StressPlan, log_pass, log_seed},
 };
 
-// Префикс дерева прогона: своё монтирование на каждый seed.
 const STRESS_MOUNT: &str = "/stress";
 
 const BUFFER_SIZE: u32 = 4096;
 
-// Байт полезной нагрузки за одну запись.
 const PAYLOAD_MAX: usize = 192;
 
-// Наибольшее смещение записи и чтения.
 const OFFSET_MAX: u64 = 512;
 
-// Наибольшая длина, задаваемая усечением.
 const SIZE_MAX: u64 = 1024;
 
-// Дескрипторов, открытых прогоном одновременно: потолок сессии заметно выше.
 const DESCRIPTORS_MAX: usize = 8;
 
-// Каталоги дерева прогона: их заводит подготовка seed'а, и живут они до конца прогона.
 const DIRECTORIES: [&str; 2] = ["/d0", "/d1"];
 
-// Имена файлов: короткий набор сталкивает операции на одних и тех же узлах.
 const FILE_NAMES: [&str; 4] = ["f0", "f1", "f2", "f3"];
 
-// Смещение записи, означающее дозапись в конец.
 const APPEND_OFFSET: u64 = u64::MAX;
 
-// Заходов перечисления на один каталог: записи каталога умещаются в буфер за один заход.
 const LIST_BATCHES_MAX: usize = 16;
 
-// Итог шага прогона: расхождение печатается вместе с seed и номером шага.
 type Step = Result<(), Mismatch>;
 
-// Расхождение шага прогона с моделью дерева.
 #[derive(Debug)]
 enum Mismatch {
-    // Вызов не дошёл до сервера.
     Call(&'static str),
-    // Отказ сервера операции, которую модель считает допустимой.
     Refused(&'static str, FileSystemError),
-    // Итог операции разошёлся с моделью.
     Model(&'static str),
 }
 
-// Сессия с файловой системой вместе с её буфером данных.
 struct Session {
     client: FileSystemClient<PortTransport>,
     buffer: Mapping,
-    // Регион буфера и капа сессии живут, пока по ним идут вызовы.
     _region: MemoryRegion,
     _capability: OwnedHandle,
 }
 
-// Дескриптор, открытый прогоном.
 struct Descriptor {
     fd: NodeDescriptor,
     mode: AccessMode,
-    // Путь узла. `None` - имя с узла снято, и содержимое его заморожено снимком.
     path: Option<String>,
-    // Снимок содержимого узла, снятый вместе с последним его именем.
     frozen: Vec<u8>,
 }
 
-// Прогон одного seed: сессия, модель дерева, открытые дескрипторы и генератор
-// последовательности.
 struct Run {
     session: Session,
     files: BTreeMap<String, Vec<u8>>,
@@ -187,7 +166,6 @@ impl Run {
         }
     }
 
-    // Заводит узел, если его нет, и открывает дескриптор на чтение и запись.
     fn open_create(&mut self) -> Step {
         let text = self.file_path();
         let expected = self.files.get(&text).map_or(0, Vec::len) as u64;
@@ -211,7 +189,6 @@ impl Run {
         })
     }
 
-    // Занятое имя отказывает открытию, требующему отсутствия узла.
     fn open_exclusive(&mut self) -> Step {
         let text = self.file_path();
         let known = self.files.contains_key(&text);
@@ -241,7 +218,6 @@ impl Run {
         })
     }
 
-    // Отсутствующее имя открытию без CREATE не даётся.
     fn open_existing(&mut self) -> Step {
         let text = self.file_path();
         let expected = self.files.get(&text).map(|data| data.len() as u64);
@@ -291,7 +267,6 @@ impl Run {
         Ok(())
     }
 
-    // Дозапись кладёт байты в конец файла и отдаёт их смещение.
     fn append(&mut self) -> Step {
         let Some(index) = self.writable_descriptor() else {
             return Ok(());
@@ -317,7 +292,6 @@ impl Run {
         Ok(())
     }
 
-    // Чтение отдаёт байты модели, а хвост за длиной файла - ничего.
     fn read(&mut self) -> Step {
         let Some(index) = self.any_descriptor() else {
             return Ok(());
@@ -380,7 +354,6 @@ impl Run {
         )
     }
 
-    // Снятие имени оставляет узел живым: открытые на него дескрипторы читают прежние байты.
     fn unlink(&mut self) -> Step {
         let text = self.file_path();
         let known = self.files.remove(&text);
@@ -400,7 +373,6 @@ impl Run {
         Ok(())
     }
 
-    // Перенос ведёт имя к тому же узлу, а замещённое имя теряет свой узел.
     fn rename(&mut self) -> Step {
         let from = self.file_path();
         let to = self.file_path();
@@ -432,13 +404,11 @@ impl Run {
         Ok(())
     }
 
-    // Перечисление отдаёт ровно записи каталога, каждую по одному разу.
     fn list(&mut self) -> Step {
         let text = self.directory_path();
         self.assert_listing(&text)
     }
 
-    // Закрытый дескриптор до своего узла больше не достаёт.
     fn close(&mut self) -> Step {
         if self.descriptors.is_empty() {
             return Ok(());
@@ -461,7 +431,6 @@ impl Run {
         )
     }
 
-    // Уход клиента уносит его сессию вместе с дескрипторами и буфером, а дерево переживает её.
     fn renew_session(&mut self) -> Step {
         self.descriptors.clear();
         self.session = Session::open()?;
@@ -486,7 +455,6 @@ impl Run {
         Ok(())
     }
 
-    // Дескриптор держит свой режим: без права записи узел через него не меняется.
     fn write_through_a_read_only(&mut self) -> Step {
         let Some(index) = self.descriptor_matching(|mode| !mode.writable()) else {
             return Ok(());
@@ -503,7 +471,6 @@ impl Run {
         )
     }
 
-    // Длина сверх буфера данных отказывает, не задевая ни сессию, ни узел.
     fn read_over_the_buffer(&mut self) -> Step {
         let Some(index) = self.any_descriptor() else {
             return Ok(());
@@ -520,7 +487,6 @@ impl Run {
         )
     }
 
-    // Дерево целиком: длина и содержимое каждого файла и записи каждого каталога.
     fn verify(&mut self) -> Step {
         let known: Vec<String> = self.files.keys().cloned().collect();
         for text in known {
@@ -564,7 +530,6 @@ impl Run {
         Ok(())
     }
 
-    // Записи каталога, собранные обходом, против записей модели.
     fn assert_listing(&mut self, text: &str) -> Step {
         let opened = self
             .session
@@ -584,7 +549,6 @@ impl Run {
         expect(listed == expected, "listing differs from the model")
     }
 
-    // Записи каталога, собранные обходом с позиции продолжения.
     fn walk(&self, fd: NodeDescriptor) -> Result<Vec<String>, Mismatch> {
         let mut names = Vec::new();
         let mut from = DirCursor::START;
@@ -615,8 +579,6 @@ impl Run {
         Err(Mismatch::Model("listing did not converge"))
     }
 
-    // Дескриптор, чьё имя ещё на месте и чей режим допускает запись. Содержимое узла со снятым
-    // именем заморожено снимком, и запись в него модель не отслеживает.
     fn writable_descriptor(&mut self) -> Option<usize> {
         let writable: Vec<usize> = self
             .descriptors
@@ -659,7 +621,6 @@ impl Run {
             .ok_or(Mismatch::Model("file left the model"))
     }
 
-    // Содержимое узла под дескриптором: у имени - байты модели, у снятого имени - снимок.
     fn content(&self, index: usize) -> Vec<u8> {
         let descriptor = &self.descriptors[index];
         match &descriptor.path {
@@ -668,7 +629,6 @@ impl Run {
         }
     }
 
-    // Держит дескриптор до потолка прогона, закрывая ради него самый давний.
     fn keep(&mut self, descriptor: Descriptor) -> Step {
         if self.descriptors.len() >= DESCRIPTORS_MAX {
             let oldest = self.descriptors.remove(0);
@@ -752,7 +712,6 @@ fn run_seed(seed: u64, steps: u64) {
     unmount_filesystem(STRESS_MOUNT).expect("unmount of the run");
 }
 
-// Останавливает прогон на расхождении, называя всё, чем оно повторяется.
 fn report(seed: u64, step: u64, operation: &'static str, mismatch: &Mismatch) -> ! {
     kernel_tests::macros::fail(
         format_args!("stress seed={seed} step={step} operation={operation}: {mismatch}"),
@@ -768,7 +727,6 @@ fn expect(condition: bool, reason: &'static str) -> Step {
     Err(Mismatch::Model(reason))
 }
 
-// Замораживает содержимое узла у дескрипторов, чьё имя снято.
 fn freeze(descriptors: &mut [Descriptor], text: &str, content: &[u8]) {
     for descriptor in descriptors {
         if descriptor.path.as_deref() == Some(text) {
@@ -778,7 +736,6 @@ fn freeze(descriptors: &mut [Descriptor], text: &str, content: &[u8]) {
     }
 }
 
-// Родительский путь и последний компонент. У корня их нет.
 fn split_last(path: &str) -> Option<(&str, &str)> {
     if path == "/" {
         return None;
@@ -788,7 +745,6 @@ fn split_last(path: &str) -> Option<(&str, &str)> {
     Some((parent, &path[cut + 1..]))
 }
 
-// Промежуток от прежней длины файла до начала записи заполняется нулями.
 fn write_into(file: &mut Vec<u8>, start: usize, data: &[u8]) {
     let end = start + data.len();
     if file.len() < end {

@@ -21,7 +21,6 @@ impl Signal {
         Arc::new(Self::with_bits(0))
     }
 
-    /// Создаёт `Signal` с заранее выставленными битами.
     pub(crate) fn with_bits(initial: u32) -> Self {
         Self {
             bits: AtomicU32::new(initial),
@@ -124,7 +123,6 @@ impl core::fmt::Debug for Signal {
     }
 }
 
-/// Cписок зарегистрированных waiter'ов.
 struct WaiterList {
     entries: Vec<WaiterEntry>,
 }

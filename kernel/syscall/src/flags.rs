@@ -4,7 +4,6 @@ use memory::{
 };
 use syscall::UserMemFlags;
 
-/// Преобразует ABI-флаги user-памяти в Normal [`MemFlags`] страничной таблицы.
 pub(super) const fn to_mem_flags(flags: UserMemFlags) -> MemFlags {
     match flags {
         UserMemFlags::ReadWrite => MemFlags::user_rw(),
@@ -13,13 +12,11 @@ pub(super) const fn to_mem_flags(flags: UserMemFlags) -> MemFlags {
     }
 }
 
-/// Выбирает [`MemFlags`] по типу памяти региона: Device получает
-/// Device-nGnRE-атрибут, Normal - cacheable. Device не исполняется, поэтому
-/// `ReadExecute` сводится к read.
 pub(super) fn mem_flags_for(memory_type: MemoryType, flags: UserMemFlags) -> MemFlags {
     match memory_type {
         MemoryType::Normal => to_mem_flags(flags),
         MemoryType::Device => {
+            // Device-память не исполняется, и `ReadExecute` сводится к read.
             let user = match flags {
                 UserMemFlags::ReadWrite => DeviceMemoryPermission::writable(),
                 UserMemFlags::ReadOnly | UserMemFlags::ReadExecute => {

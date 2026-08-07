@@ -1,4 +1,4 @@
-//! Handler-ы memory-syscall'ов.
+//! Обработчики memory-syscall.
 //!
 //! ABI флагов памяти: 0 = RW, 1 = RO, 2 = RX.
 
@@ -62,11 +62,6 @@ fn lookup_memory_grant(
     Ok((access.object, grant))
 }
 
-// Срыв активного маппинга при отзыве авторизовавшей его капы. Держит СЛАБЫЙ
-// снимок AS получателя: сильную ссылку на сам MemoryMapping хранит
-// MappingTag::revocation, и weak-ссылка на AS разрывает цикл
-// MappingTag -> MemoryMapping -> AS -> MappingTag (иначе AS течёт после
-// transfer'а капы, когда HandleTable::Drop процесса её уже не отзывает).
 struct MemoryMapping {
     user_vm: WeakUserVmContext,
     base: PageAlignedVirtualAddress,
@@ -347,9 +342,6 @@ pub fn sys_memory_map(
     Ok(base.as_usize() as u64)
 }
 
-// Привязывает срыв к установленному маппингу. Если капа отозвана в гонке до
-// регистрации - маппинг срывается здесь и syscall валится (иначе живой VA на
-// отозванную капу).
 fn register_mapping_revocation(
     user_vm: &UserVmContext,
     base: PageAlignedVirtualAddress,
@@ -357,6 +349,11 @@ fn register_mapping_revocation(
     cap_id: capability::HandleId,
     mut tag: MappingTag,
 ) -> Result<(), SyscallError> {
+    // Снимок AS получателя держится слабым: сильную ссылку на сам
+    // `MemoryMapping` хранит `MappingTag::revocation`, и weak-ссылка разрывает
+    // цикл `MappingTag -> MemoryMapping -> AS -> MappingTag`. Иначе AS течёт
+    // после передачи капы, когда `HandleTable::Drop` процесса её уже не
+    // отзывает.
     let mapping = Arc::new(MemoryMapping {
         user_vm: user_vm.downgrade(),
         base,
@@ -378,6 +375,8 @@ fn register_mapping_revocation(
             table.with_lock(|tbl| tbl.register_revocation_hook(cap_id, weak))
         });
 
+    // Отозванная в гонке до регистрации капа не оставляет за собой живой VA:
+    // маппинг срывается здесь, и syscall возвращает ошибку.
     if registered.is_err() {
         user_vm.unmap_range(base, size);
         return Err(SyscallError::Revoked);
@@ -388,9 +387,8 @@ fn register_mapping_revocation(
 /// `memory_remap(va, size, flags) -> ()`
 ///
 /// Меняет флаги уже зарегистрированного маппинга. Регион не меняется,
-/// апгрейд ограничен `grant`'ом, сохранённым при `MemoryMap`/`MemoryAllocate`:
-/// иначе процесс с handle'ом на R-only смог бы апгрейднуть mapping до RW
-/// (сам handle на этапе remap не проверяется - только VA).
+/// апгрейд ограничен `grant`, сохранённым при `MemoryMap`/`MemoryAllocate`.
+/// Сам handle на этапе remap не проверяется - только VA.
 pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<u64, SyscallError> {
     let size = parse_size(size_bytes)?;
     let va_usize = usize::try_from(va_raw).map_err(|_| SyscallError::InvalidArgument)?;

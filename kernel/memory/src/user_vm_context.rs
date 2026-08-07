@@ -118,8 +118,6 @@ mod tests {
     const PAGE: usize = crate::PAGE_SIZE.get();
     const ARENA: usize = 0x4000_0000;
 
-    /// Mapper, фиксирующий вызовы unmap; первый unmap каждого base успешен,
-    /// повторный отдаёт `NotMapped` (моделирует уже снятый range).
     struct TrackingMapper {
         unmapped: MutexCell<Vec<(usize, usize)>>,
     }

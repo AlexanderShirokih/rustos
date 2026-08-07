@@ -1,4 +1,8 @@
 //! Кросс-AS перенос рандеву-сообщения между IPC-буферами двух потоков.
+//!
+//! Офсеты полей [`syscall::IpcBuffer`] (`#[repr(C)]`), по которым адресуются оба
+//! буфера: `tag: u64` @ 0, `caps: [u32; 4]` @ 8, `data: [u8; IPC_BUFFER_DATA_MAX]`
+//! @ 24, `badge: u64` сразу за `data`.
 
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
@@ -14,11 +18,6 @@ use super::{
     port::{BufferAccess, ThreadTransport},
 };
 
-/// ABI-офсеты полей [`syscall::IpcBuffer`] (`#[repr(C)]`):
-/// `tag: u64` @ 0,
-/// `caps: [u32; 4]` @ 8,
-/// `data: [u8; IPC_BUFFER_DATA_MAX]` @ 24,
-/// `badge: u64` сразу за `data`.
 const TAG_OFFSET: usize = 0;
 const TAG_SIZE: usize = 8;
 const CAPS_OFFSET: usize = TAG_OFFSET + TAG_SIZE;
@@ -27,11 +26,8 @@ const DATA_OFFSET: usize = CAPS_OFFSET + IPC_BUFFER_MAX_CAPS * CAP_SIZE;
 const BADGE_OFFSET: usize = DATA_OFFSET + IPC_BUFFER_DATA_MAX;
 const BADGE_SIZE: usize = 8;
 
-/// Буфер маппится в одну страницу, поэтому ABI-структура обязана в неё влезать.
 const _: () = assert!(size_of::<syscall::IpcBuffer>() <= memory::PAGE_SIZE.get());
 
-/// Шаг чанк-копии тела: переносится всё тело (до [`IPC_BUFFER_DATA_MAX`]), но
-/// порциями по `BODY_CHUNK`, чтобы не держать его целиком на стеке ядра.
 const BODY_CHUNK: usize = 512;
 
 fn map_copy_err(_e: UserCopyError) -> IpcError {
@@ -39,9 +35,6 @@ fn map_copy_err(_e: UserCopyError) -> IpcError {
     IpcError::BufferTooSmall
 }
 
-/// Читает `dst.len()` байт тела буфера со смещения `off` (ABI-офсет внутри
-/// [`syscall::IpcBuffer`]). Диспетчеризует по виду доступа: User - через
-/// mapper, Kernel - прямым доступом к kernel-резидентному буферу.
 fn read_bytes(t: &ThreadTransport, off: usize, dst: &mut [u8]) -> Result<(), IpcError> {
     match &t.access {
         BufferAccess::User {
@@ -54,8 +47,6 @@ fn read_bytes(t: &ThreadTransport, off: usize, dst: &mut [u8]) -> Result<(), Ipc
     }
 }
 
-/// Пишет `src` в тело буфера со смещения `off`. Диспетчер по виду доступа,
-/// см. [`read_bytes`].
 fn write_bytes(t: &ThreadTransport, off: usize, src: &[u8]) -> Result<(), IpcError> {
     match &t.access {
         BufferAccess::User {
@@ -68,19 +59,11 @@ fn write_bytes(t: &ThreadTransport, off: usize, src: &[u8]) -> Result<(), IpcErr
     }
 }
 
-/// Линейный размер kernel-резидентного буфера в байтах.
 const BUFFER_LEN: usize = BADGE_OFFSET + BADGE_SIZE;
 
-/// Поле [`syscall::IpcBuffer`], адресуемое парой `(off, len)`.
-///
-/// Единая точка валидации ABI-раскладки для kernel-резидентного буфера:
-/// доступ возможен только к целому полю (`tag`/`badge`), одному cap-слоту
-/// или диапазону тела.
 enum BufferField {
     Tag,
-    /// Индекс cap-слота.
     Cap(usize),
-    /// Смещение внутри тела; длина проверена по границе `data`.
     Data(usize),
     Badge,
 }
@@ -199,14 +182,12 @@ fn offset_va(base: VirtualAddress, off: usize) -> VirtualAddress {
     VirtualAddress::new(base.as_usize() + off)
 }
 
-/// Копирует `len` байт тела из буфера отправителя в буфер получателя чанками по
-/// [`BODY_CHUNK`]. Тег пишется позже, поэтому частичное тело при ошибке середины
-/// не наблюдается как принятое сообщение.
 fn copy_body(
     sender: &ThreadTransport,
     receiver: &ThreadTransport,
     len: usize,
 ) -> Result<(), IpcError> {
+    // Тело идёт порциями: кадр стека ядра не вмещает `IPC_BUFFER_DATA_MAX` целиком.
     let mut chunk = [0u8; BODY_CHUNK];
     let mut copied = 0;
     while copied < len {
@@ -219,15 +200,12 @@ fn copy_body(
     Ok(())
 }
 
-/// Слоты, зарезервированные в таблице получателя на время переноса caps.
-/// `Drop` возвращает непотреблённые резервации таблице.
 struct ReservedSlots<'t> {
     table: &'t Arc<MutexCell<HandleTable>>,
     slots: Vec<HandleReservation>,
 }
 
 impl<'t> ReservedSlots<'t> {
-    /// Резервирует `count` слотов (всё или ничего).
     fn reserve(table: &'t Arc<MutexCell<HandleTable>>, count: usize) -> Result<Self, IpcError> {
         let slots = table.with_lock(|tbl| {
             let mut slots: Vec<HandleReservation> = Vec::with_capacity(count);
@@ -247,7 +225,6 @@ impl<'t> ReservedSlots<'t> {
         Ok(Self { table, slots })
     }
 
-    /// [`HandleId`], под которыми capability станут видны получателю.
     fn handle_ids(&self) -> Vec<HandleId> {
         self.slots
             .iter()
@@ -255,7 +232,6 @@ impl<'t> ReservedSlots<'t> {
             .collect()
     }
 
-    /// Вставляет `handles` в зарезервированные слоты; отклонённое уходит в `rejected`.
     fn commit(mut self, handles: Vec<Capability>, rejected: &mut DrainedHandles) {
         let slots = core::mem::take(&mut self.slots);
         self.table.with_lock(|tbl| {
@@ -302,13 +278,12 @@ pub fn transfer_rendezvous(
         transfer_caps(sender, receiver, ncaps)?;
     }
 
+    // Тег пишется последним: до него частичное тело не наблюдается получателем как
+    // принятое сообщение.
     write_tag(receiver, encode_tag(len, ncaps))?;
     Ok(())
 }
 
-/// Перемещает `ncaps` capability из таблицы отправителя в таблицу получателя.
-/// Изъятие у отправителя идёт после всех способных упасть шагов на стороне
-/// получателя.
 fn transfer_caps(
     sender: &ThreadTransport,
     receiver: &ThreadTransport,
@@ -325,6 +300,7 @@ fn transfer_caps(
     write_caps(receiver, &reserved.handle_ids())?;
 
     let mut drained = DrainedHandles::empty();
+    // Изъятие у отправителя идёт после всех способных упасть шагов на стороне получателя.
     let taken = sender
         .handle_table
         .with_lock(|tbl| tbl.try_drain_for_transfer(&ids, Rights::TRANSFER, &mut drained));

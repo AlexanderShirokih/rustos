@@ -6,9 +6,7 @@ use crate::virtual_address::VirtualAddress;
 ///
 /// Корректно работает с fat pointers (dyn Trait).
 pub struct RelocatablePtr<T: ?Sized> {
-    /// Fat pointer как пара [data_ptr, vtable_ptr].
     raw: [usize; 2],
-    /// Маркер для типа T.
     _marker: core::marker::PhantomData<*const T>,
 }
 
@@ -44,8 +42,9 @@ impl<T: ?Sized> RelocatablePtr<T> {
     }
 
     pub fn get(&self) -> &'static T {
-        // SAFETY: `self.raw` был создан в `new` из живой `&'static T`-ссылки и не изменялся;
-        // указатель остаётся валидным на всё время жизни `'static`, layout пары usize совпадает с `*const T`.
+        // SAFETY: `self.raw` был создан в `new` из живой `&'static T`-ссылки и не изменялся.
+        // Указатель остаётся валидным на всё время жизни `'static`, layout пары usize совпадает
+        // с `*const T`.
         unsafe {
             let ptr: *const T = core::mem::transmute_copy(&self.raw);
             &*ptr

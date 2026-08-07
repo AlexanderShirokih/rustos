@@ -22,9 +22,7 @@ use super::{
     signal::{SIGNALED, Signal},
 };
 
-/// Линия вооружена и ждёт срабатывания.
 const ARMED: u32 = 0;
-/// Линия сработала и замаскирована; ждёт `ack`.
 const FIRED: u32 = 1;
 
 pub struct IrqLine {
@@ -60,10 +58,6 @@ impl IrqLine {
         Ok(line)
     }
 
-    /// Вызывается из IRQ-контекста при срабатывании. Маскирует линию
-    /// СИНХРОННО (до `signal` и до возврата в вектор), затем поднимает
-    /// `SIGNALED`. Повторное срабатывание до `ack` коалесится: линия уже
-    /// замаскирована, бит уже взведён.
     pub(crate) fn on_fire(&self) {
         if self
             .state
@@ -102,8 +96,6 @@ impl IrqLine {
     }
 }
 
-/// Мост IRQ-обработчик -> `IrqLine`. Держит `Weak`, поэтому срабатывание в
-/// гонке с дропом линии становится no-op.
 struct LineSink {
     line: Weak<IrqLine>,
 }
@@ -123,7 +115,6 @@ mod tests {
 
     use super::*;
 
-    /// Контроллер-мок: считает mask/unmask и хранит sink для имитации железа.
     struct MockControl {
         masks: AtomicU32,
         unmasks: AtomicU32,

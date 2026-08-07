@@ -18,10 +18,8 @@ use ipc::{
 };
 use ipc_test::MockEnd;
 
-/// Доменная ошибка тестового калькулятора (закодирована как u32).
 const ERR_DIVIDE_BY_ZERO: u32 = 1;
 
-/// Тестовый протокол: two-way с Result и без, bounded-Str-параметр, cast, event.
 #[ipc::protocol(name = "Calc")]
 trait Calc {
     #[call]
@@ -40,7 +38,6 @@ trait Calc {
     fn tick(seq: u64);
 }
 
-/// Сервис: суммирует, делит с доменной ошибкой, считает длину, хранит seed.
 #[derive(Default)]
 struct CalcServer {
     seed: u64,
@@ -64,8 +61,6 @@ impl CalcService for CalcServer {
     }
 }
 
-/// Прогоняет `client_body` на потоке клиента, обслуживая `rounds` кадров
-/// сервером на встречном конце; возвращает результат тела клиента.
 fn round_trip<R: Send>(
     rounds: usize,
     client_body: impl FnOnce(&CalcClient<MockEnd>) -> R + Send,
@@ -292,14 +287,12 @@ fn bounded_bytes_param_round_trips() {
     assert_eq!(server.last_len, 4);
 }
 
-/// Проверяет Bytes-параметр и независимый namespace ordinal.
 #[ipc::protocol(name = "Blob")]
 trait Blob {
     #[cast]
     fn store(&self, data: Bytes<8>);
 }
 
-/// Ring-плоскостной протокол.
 #[ipc::protocol(name = "Counter", transport = "ring")]
 trait Counter {
     #[cast]
@@ -320,7 +313,6 @@ impl CounterService for CounterServer {
     }
 }
 
-/// Клиентский обработчик события `overflow`.
 #[derive(Default)]
 struct OverflowHandler {
     last_count: Option<u32>,
@@ -372,7 +364,6 @@ impl BlobService for BlobServer {
     }
 }
 
-/// Клиентский обработчик события `tick`.
 #[derive(Default)]
 struct TickHandler {
     last_seq: Option<u64>,
@@ -384,7 +375,6 @@ impl CalcEvents for TickHandler {
     }
 }
 
-/// Протокол с capability: проверяет, что handle едет вне тела.
 #[ipc::protocol(name = "CapProto")]
 trait CapProto {
     #[call]
@@ -493,7 +483,6 @@ fn timed_out_cast_drops_owned_handle_without_relinquishing() {
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
-/// Сервис: возвращает присланный handle и минтит фиксированный по запросу.
 struct CapServer;
 
 impl CapProtoService for CapServer {
@@ -559,28 +548,24 @@ fn cap_domain_error_carries_no_handle() {
     });
 }
 
-/// Owned-агрегат: годен и в параметре, и в возврате two-way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ipc::WireValue)]
 struct Point {
     x: u32,
     y: u32,
 }
 
-/// Вложенный агрегат: поля-агрегаты дают рекурсивный суб-кадр.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ipc::WireValue)]
 struct Segment {
     from: Point,
     to: Point,
 }
 
-/// Агрегат с borrow-полем: проверяет derive с одним лайфтаймом (как параметр).
 #[derive(ipc::WireValue)]
 struct Tagged<'a> {
     label: Str<'a, 8>,
     value: u32,
 }
 
-// Агрегат с полем-капой: handle едет слотом кадра, в суб-кадре лежит его индекс.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ipc::WireValue)]
 struct Vended {
     session: ipc::wire::Cap,
@@ -624,7 +609,6 @@ fn aggregate_carries_a_capability_alongside_scalars() {
     });
 }
 
-/// Протокол с пользовательскими агрегатами в сигнатурах.
 #[ipc::protocol(name = "Geo")]
 trait Geo {
     #[call]
@@ -706,7 +690,6 @@ fn aggregate_param_and_return_round_trip() {
 
 #[test]
 fn aggregate_descriptor_is_structural() {
-    // Вложенный агрегат описан рекурсивно: агрегат из агрегатов.
     const POINT_DESC: ipc::schema::WireType = ipc::schema::WireType::Aggregate(&[
         ipc::schema::WireType::Uint(4),
         ipc::schema::WireType::Uint(4),
@@ -748,8 +731,6 @@ fn aggregate_descriptor_is_structural() {
     );
 }
 
-/// Агрегат, чей суб-кадр заведомо превышает `FIELD_DATA_MAX`: тело поля занимает
-/// весь потолок, а overhead записи выводит суб-кадр за границу.
 #[derive(ipc::WireValue)]
 struct Oversized<'a> {
     blob: ipc::wire::FieldBytes<'a>,
@@ -769,8 +750,6 @@ fn aggregate_subframe_overflow_is_error() {
     );
 }
 
-/// Протокол с полем максимального размера: фиксирует, что граница `FieldStr`,
-/// запекаемая кодогеном, совпадает с рантайм-`FIELD_DATA_MAX`.
 #[ipc::protocol(name = "Wide")]
 trait Wide {
     #[cast]
@@ -792,14 +771,12 @@ fn field_str_bound_tracks_field_data_max() {
 
 use ipc::wire::IpcError;
 
-/// Дефолтный тайм-аут клиента из атрибута протокола.
 #[ipc::protocol(name = "Timed", timeout_ns = 0)]
 trait Timed {
     #[call]
     fn ping(&self) -> u32;
 }
 
-/// Per-call тайм-аут перекрывает (бессрочный) дефолт клиента.
 #[ipc::protocol(name = "Mixed")]
 trait Mixed {
     #[call(timeout_ns = 0)]

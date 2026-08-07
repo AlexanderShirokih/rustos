@@ -11,7 +11,6 @@ use crate::{
 ///
 /// Содержит 512 записей (4 КБ).
 pub struct PageTable<L: Level> {
-    /// 512 записей по 8 байт.
     entries: [u64; 512],
     _p: PhantomData<L>,
 }

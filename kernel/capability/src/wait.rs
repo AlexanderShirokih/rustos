@@ -45,7 +45,6 @@ pub trait CancelTarget: Send + Sync {
     }
 }
 
-/// Терминальный исход парковки, разрешённый [`ParkWaker::resolve`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ParkResolution {
     Signaled,
@@ -53,7 +52,6 @@ pub(super) enum ParkResolution {
     Canceled,
 }
 
-/// Waker запаркованного потока.
 pub(super) struct ParkWaker {
     state: AtomicU32,
     observed: AtomicU32,
@@ -104,7 +102,6 @@ impl ParkWaker {
         }
     }
 
-    /// Сигнал "рандеву-встреча состоялась" от матчера port'а.
     pub(super) fn signal_match(&self) {
         self.signal(0, 0);
     }
@@ -131,8 +128,6 @@ impl ParkWaker {
             .is_ok()
     }
 
-    /// Разрешает исход после возврата из парковки: незавершённое ожидание
-    /// закрывается тайм-аутом, а проигранный тайм-аут дочитывает фактический исход.
     pub(super) fn resolve(&self) -> ParkResolution {
         match self.state.load(Ordering::Acquire) {
             ParkState::SIGNALED => ParkResolution::Signaled,
@@ -193,7 +188,6 @@ impl Waker for ParkWaker {
     }
 }
 
-/// Адаптер `Waker` поверх [`ParkWaker`] для `signal_wait_many`:
 pub(super) struct IndexedWaker {
     inner: Arc<ParkWaker>,
     index: u32,

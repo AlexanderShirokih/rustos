@@ -6,5 +6,4 @@ pub const PATH_MAX: usize = 255;
 /// Граница длины имени одного компонента пути в байтах.
 pub const NAME_MAX: usize = 63;
 
-// Имя - компонент пути: его граница лежит внутри границы пути.
 const _: () = assert!(NAME_MAX < PATH_MAX);

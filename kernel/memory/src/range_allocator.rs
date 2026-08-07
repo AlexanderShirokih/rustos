@@ -22,8 +22,6 @@ const PAGE_SIZE: usize = PageAlignedVirtualAddress::ALIGNMENT;
 /// Дефолтный лимит одновременно живых регионов в реестре.
 pub const DEFAULT_LIVE_REGION_CAPACITY: usize = 64;
 
-/// Стартовый резерв покрывает обычный сценарий с единицами живых регионов,
-/// не выделяя память под весь верхний лимит заранее.
 const DEFAULT_PREALLOCATED_LIVE_REGIONS: usize = 4;
 const DEFAULT_PREALLOCATED_FREE_RANGES: usize = DEFAULT_PREALLOCATED_LIVE_REGIONS + 1;
 

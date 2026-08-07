@@ -94,8 +94,6 @@ impl<'a> Iterator for DecodedSegments<'a> {
     }
 }
 
-/// Разбирает содержимое записи как программу: магия, заголовок, дескрипторы
-/// сегментов в границах записи и семантика [`validate_entry`].
 pub(crate) fn decode_program<'a>(
     path: &'a str,
     data: &'a [u8],

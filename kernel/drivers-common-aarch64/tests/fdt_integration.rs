@@ -82,19 +82,6 @@ fn write_dtb(structure: &[u8], strings: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// ```text
-/// / {
-///     #address-cells = <2>; #size-cells = <1>;
-///     soc {
-///         #address-cells = <1>; #size-cells = <1>;
-///         ranges = <0x0  0x0 0x1000_0000  0x0010_0000>;
-///         serial@2000 {
-///             compatible = "arm,pl011\0arm,primecell";
-///             reg = <0x2000 0x1000>;
-///         };
-///     };
-/// };
-/// ```
 fn build_soc_dtb() -> Vec<u8> {
     let mut s = Strings::new();
     let s_addr = s.intern("#address-cells");
@@ -144,7 +131,7 @@ fn build_soc_dtb() -> Vec<u8> {
 fn find_child<'a>(node: &FdtNode<'a>, name: &str) -> FdtNode<'a> {
     node.children()
         .find(|c| c.name() == name)
-        .unwrap_or_else(|| panic!("узел {name} не найден"))
+        .unwrap_or_else(|| panic!("node {name} is not found"))
 }
 
 // Тесты через реальный адаптер
@@ -184,7 +171,7 @@ fn real_fdt_range_to_parent_reads_ranges() {
 
     // Родитель (root) использует #address-cells=2.
     let parent_cells = root.cells_size().unwrap();
-    let range = soc.range_to_parent(parent_cells).expect("soc имеет ranges");
+    let range = soc.range_to_parent(parent_cells).expect("soc has ranges");
     assert_eq!(range.child, 0x0);
     assert_eq!(range.parent, 0x1000_0000);
     assert_eq!(range.size, 0x0010_0000);
@@ -227,7 +214,7 @@ fn real_fdt_get_address_translates_through_bus() {
     assert_eq!(reg.size, 0x1000);
 
     // mmio-обёртка.
-    let mmio = ctx.get_mmio_address(0).expect("валидный mmio");
+    let mmio = ctx.get_mmio_address(0).expect("valid mmio");
     assert_eq!(mmio.base(), 0x1000_2000);
 }
 

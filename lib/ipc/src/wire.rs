@@ -15,9 +15,10 @@ pub const MESSAGE_INLINE_MAX: usize = syscall::IPC_BUFFER_DATA_MAX;
 /// Максимум хэндлов в транспортном векторе кадра.
 pub const MESSAGE_MAX_HANDLES: usize = 4;
 
-// Всё, что ядро доставило с кадром, обязано попасть в слоты: отброшенный хэндл
-// уже установлен в таблицу получателя, и дотянуться до него нечем.
-const _: () = assert!(syscall::IPC_BUFFER_MAX_CAPS <= MESSAGE_MAX_HANDLES);
+const _: () = assert!(
+    syscall::IPC_BUFFER_MAX_CAPS <= MESSAGE_MAX_HANDLES,
+    "every handle the kernel delivers with a frame must fit into the slots"
+);
 
 /// Слоты capability сообщения. Значение-капа кладёт сюда сырой handle-id, а в
 /// тело пишет его индекс: сами хэндлы едут отдельным массивом кадра, минуя байты
@@ -27,7 +28,6 @@ const _: () = assert!(syscall::IPC_BUFFER_MAX_CAPS <= MESSAGE_MAX_HANDLES);
 pub struct HandleSlots {
     ids: [u32; MESSAGE_MAX_HANDLES],
     count: usize,
-    /// Битовая маска слотов, изъятых декодом.
     taken: Cell<u8>,
 }
 

@@ -40,8 +40,6 @@ pub enum WireTy {
     Opaque(Box<Type>),
 }
 
-/// Верхняя оценка длины `data` поля при максимальном значении; `None` для
-/// не-литеральной границы (бюджет проверяется генерируемым const-assert).
 fn max_data_len(ty: &WireTy) -> Option<usize> {
     match ty {
         WireTy::Uint(width) | WireTy::Int(width) => Some(*width as usize),
@@ -51,9 +49,9 @@ fn max_data_len(ty: &WireTy) -> Option<usize> {
     }
 }
 
-/// Owned-тип допустим в возврате two-way. Opaque пропускается: фактический
-/// borrow из буфера ответа поймает компилятор по лайфтайму.
 fn is_owned(ty: &WireTy) -> bool {
+    // Opaque числится owned: фактический borrow из буфера ответа ловит компилятор по
+    // лайфтайму.
     matches!(
         ty,
         WireTy::Uint(_) | WireTy::Int(_) | WireTy::Bool | WireTy::Cap | WireTy::Opaque(_)
@@ -163,8 +161,6 @@ fn parse_protocol_args(
     })
 }
 
-/// Разбирает `transport = "port" | "ring"` в [`TransportPlane`]; любое иное
-/// значение - ошибка со span литерала.
 fn parse_transport_plane(expr: &Expr) -> syn::Result<TransportPlane> {
     match parse_str_lit(expr)?.as_str() {
         "port" => Ok(TransportPlane::Port),
@@ -295,8 +291,6 @@ fn build_operation(protocol: &str, method: &TraitItemFn) -> syn::Result<Operatio
     })
 }
 
-/// Определяет вид операции и (для `#[call(timeout_ns = N)]`) её per-call
-/// тайм-аут. `#[cast]`/`#[event]` аргументов не несут.
 fn classify_kind(method: &TraitItemFn) -> syn::Result<(Kind, Option<u64>)> {
     let mut found: Option<Kind> = None;
     let mut timeout_ns: Option<u64> = None;
@@ -339,8 +333,6 @@ fn classify_kind(method: &TraitItemFn) -> syn::Result<(Kind, Option<u64>)> {
     Ok((kind, timeout_ns))
 }
 
-/// Разбирает `#[call(timeout_ns = N)]`: единственный аргумент - целочисленный
-/// `timeout_ns` (нс).
 fn parse_call_timeout(attr: &Attribute) -> syn::Result<u64> {
     let mut timeout_ns: Option<u64> = None;
     attr.parse_nested_meta(|meta| {
@@ -548,8 +540,6 @@ fn field_data_max_bound() -> Bound {
     }
 }
 
-/// Извлекает границу bounded-типа: любой const-аргумент `Str<N>` / `Str<{ N }>`.
-/// Литерал запоминается отдельно для compile-time проверки бюджета.
 fn bound_arg(segment: &syn::PathSegment, ty: &Type) -> syn::Result<Bound> {
     let PathArguments::AngleBracketed(generics) = &segment.arguments else {
         return Err(Error::new(
@@ -578,9 +568,9 @@ fn bound_arg(segment: &syn::PathSegment, ty: &Type) -> syn::Result<Bound> {
     ))
 }
 
-/// Снимает скобки `{ PATH }`/`{ LIT }`: syn требует их, чтобы распознать
-/// const-аргумент, но компилятор считает их лишними в const-generic позиции.
 fn unwrap_const_block(expr: Expr) -> Expr {
+    // syn требует скобки `{ PATH }`, чтобы распознать const-аргумент, а компилятор
+    // считает их лишними в const-generic позиции.
     if let Expr::Block(block) = &expr
         && let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice()
         && matches!(inner, Expr::Path(_) | Expr::Lit(_))

@@ -21,7 +21,6 @@ use syscall::{Handle, USER_VA_END};
 
 const LOG_TAG: &str = "crashfs";
 
-// Изменяемое дерево, падающее по требованию клиента.
 struct CrashingFileSystem {
     inner: RamFileSystem,
 }
@@ -44,7 +43,7 @@ impl FileSystemBackend for CrashingFileSystem {
     }
 
     fn rename(&mut self, _from: Path<'_>, _to: Path<'_>) -> Result<(), FileSystemError> {
-        fault()
+        kill_process_by_fault()
     }
 
     fn metadata(&self, node: NodeId) -> Result<NodeInfo, FileSystemError> {
@@ -86,9 +85,7 @@ impl FileSystemBackend for CrashingFileSystem {
     }
 }
 
-// Чтение за пределом пользовательского адресного пространства: синхронное исключение из EL0
-// уносит процесс целиком, а не только виновный поток.
-fn fault() -> ! {
+fn kill_process_by_fault() -> ! {
     let unmapped = USER_VA_END as *const u64;
     // SAFETY: адрес намеренно недоступен из EL0 - фикстура проверяет завершение процесса ядром.
     unsafe {

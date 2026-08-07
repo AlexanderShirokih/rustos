@@ -4,7 +4,6 @@
 use capability::{IpcError, SpawnError};
 use syscall::SyscallError;
 
-/// Преобразует IPC-ошибку в [`SyscallError`].
 pub(super) fn map_ipc_error(e: IpcError) -> SyscallError {
     match e {
         IpcError::BadHandle => SyscallError::BadHandle,
@@ -24,7 +23,6 @@ pub(super) fn map_ipc_error(e: IpcError) -> SyscallError {
     }
 }
 
-/// Преобразует ошибку запуска процесса в [`SyscallError`].
 pub(super) fn map_spawn_error(e: SpawnError) -> SyscallError {
     match e {
         SpawnError::NoFreeProcessSlots
@@ -38,7 +36,6 @@ pub(super) fn map_spawn_error(e: SpawnError) -> SyscallError {
     }
 }
 
-/// Кодирует syscall-результат в формат ABI-возврата (`i64`).
 pub(super) fn encode_return(r: Result<u64, SyscallError>) -> i64 {
     match r {
         Ok(v) => i64::try_from(v).unwrap_or(i64::MAX),

@@ -13,7 +13,7 @@ pub const HIGHER_HALF_BASE: usize = 0xFFFF_FF80_0000_0000;
 pub const KHEAP_BASE: PageAlignedVirtualAddress =
     PageAlignedVirtualAddress::from_usize(0xFFFF_FFF8_0000_0000).unwrap();
 
-/// VA-cap heap-арены. Физическая RAM приходит лениво при expand'е.
+/// VA-cap heap-арены. Физическая RAM приходит лениво, на expand.
 pub const KHEAP_MAX_SIZE: usize = 16 * 1024 * 1024 * 1024;
 
 /// База kernel-MMIO арены - окно kernel-VA, из которого ядро выдаёт страницы под маппинг

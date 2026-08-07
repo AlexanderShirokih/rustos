@@ -54,17 +54,11 @@ pub struct PopOutcome {
 /// потребитель. Это гарантирует SPSC-инвариант: `head` пишет ровно один поток,
 /// `tail` - ровно один поток.
 pub struct SpscRing {
-    /// Вьюшка на `head` в заголовке региона.
     head: *const AtomicU32,
-    /// Вьюшка на `tail` в заголовке региона.
     tail: *const AtomicU32,
-    /// Базовый указатель массива слотов (сразу за заголовком).
     slots: *const u8,
-    /// Размер одного слота в байтах: `len`-поле плюс payload.
     slot_stride: usize,
-    /// Полезная ёмкость payload одного слота.
     slot_payload: usize,
-    /// Число слотов (степень двойки).
     capacity: usize,
 }
 
@@ -234,8 +228,6 @@ impl SpscRing {
         self.push_interleaved(frame, || {})
     }
 
-    // Разрез try_push для тестов: `between` исполняется между снимком индексов и
-    // публикацией кадра - в окне, где потребитель успевает вычерпать кольцо.
     fn push_interleaved(
         &self,
         frame: &[u8],
@@ -382,7 +374,6 @@ impl SpscRing {
     }
 }
 
-/// Наибольшая степень двойки, не превосходящая `n` (для `n >= 1`); `0` для `n == 0`.
 #[inline]
 const fn prev_power_of_two(n: usize) -> usize {
     if n == 0 {
@@ -397,16 +388,12 @@ const fn prev_power_of_two(n: usize) -> usize {
 extern crate std;
 
 #[cfg(test)]
-// Тесты конструируют кольцо над heap-буфером через `from_raw`; контракт unsafe
-// одинаков для всех вызовов и задокументирован у `make_ring`/конструктора, чтобы
-// не дублировать `// SAFETY:` в каждом тесте.
 #[allow(clippy::undocumented_unsafe_blocks)]
 mod tests {
     use std::{sync::Arc, thread, vec::Vec};
 
     use super::*;
 
-    /// Выровненный под страницу буфер-носитель региона для тестов на хосте.
     const REGION_BYTES: usize = 8 * 1024;
 
     #[repr(C, align(4096))]
@@ -422,11 +409,9 @@ mod tests {
         }
     }
 
-    /// Создаёт кольцо над частью буфера `region` заданной длины.
-    ///
-    /// SAFETY (для теста): `region` живёт дольше возвращаемого кольца, замаплен
-    /// RW, выровнен под страницу; в каждом тесте над одним регионом существует
-    /// не более одного producer и одного consumer.
+    // SAFETY: `region` живёт дольше возвращаемого кольца, замаплен RW, выровнен под
+    // страницу. В каждом тесте над одним регионом существует не более одного producer
+    // и одного consumer.
     unsafe fn make_ring(region: &mut Region, region_len: usize, slot_payload: usize) -> SpscRing {
         let base = region.bytes.as_mut_ptr();
         unsafe { SpscRing::from_raw(base, region_len, slot_payload) }.expect("ring must construct")
@@ -675,7 +660,7 @@ mod tests {
 
         // Producer и consumer держат отдельные значения SpscRing над одним
         // регионом. Сам буфер не двигается (Box), указатель валиден всё время:
-        // `region` живёт до конца теста, оба потока join'ятся до его дропа.
+        // `region` живёт до конца теста, оба потока завершаются через join до его дропа.
         let producer =
             Arc::new(unsafe { SpscRing::from_raw(base, len, slot_payload).expect("ring") });
         let consumer = Arc::clone(&producer);
@@ -716,15 +701,12 @@ mod tests {
         assert_eq!(received, expected);
     }
 
-    // Модель липкого бита SIGNALED: производитель поднимает, потребитель гасит
-    // перед перепроверкой кольца и спит до подъёма. Липкость обязательна -
-    // голое пробуждение condvar семантику ядра не воспроизводит.
-    struct Latch {
+    struct StickySignal {
         signaled: std::sync::Mutex<bool>,
         raised: std::sync::Condvar,
     }
 
-    impl Latch {
+    impl StickySignal {
         fn new() -> Self {
             Self {
                 signaled: std::sync::Mutex::new(false),
@@ -733,19 +715,18 @@ mod tests {
         }
 
         fn set(&self) {
-            *self.signaled.lock().expect("latch") = true;
+            *self.signaled.lock().expect("signal") = true;
             self.raised.notify_all();
         }
 
         fn clear(&self) {
-            *self.signaled.lock().expect("latch") = false;
+            *self.signaled.lock().expect("signal") = false;
         }
 
-        // `false` - бюджет исчерпан, то есть пробуждение потеряно.
         fn wait(&self, budget: std::time::Duration) -> bool {
-            let mut state = self.signaled.lock().expect("latch");
+            let mut state = self.signaled.lock().expect("signal");
             while !*state {
-                let (next, outcome) = self.raised.wait_timeout(state, budget).expect("latch");
+                let (next, outcome) = self.raised.wait_timeout(state, budget).expect("signal");
                 state = next;
                 if outcome.timed_out() && !*state {
                     return false;
@@ -770,8 +751,8 @@ mod tests {
         let ring = Arc::new(unsafe { SpscRing::from_raw(base, len, FRAME_BYTES).expect("ring") });
         let producer = Arc::clone(&ring);
         let consumer = Arc::clone(&ring);
-        let producer_latch = Arc::new(Latch::new());
-        let consumer_latch = Arc::clone(&producer_latch);
+        let producer_signal = Arc::new(StickySignal::new());
+        let consumer_signal = Arc::clone(&producer_signal);
 
         let producer_handle = thread::spawn(move || {
             let mut frame = [0u8; FRAME_BYTES];
@@ -781,7 +762,7 @@ mod tests {
                 match producer.try_push(&frame) {
                     Ok(outcome) => {
                         if outcome.wake_consumer {
-                            producer_latch.set();
+                            producer_signal.set();
                         }
                         i += 1;
                     }
@@ -800,13 +781,13 @@ mod tests {
                     if !consumer.is_empty() {
                         break;
                     }
-                    consumer_latch.clear();
+                    consumer_signal.clear();
                     if !consumer.is_empty_before_park() {
                         break;
                     }
                     // Исчерпание бюджета означает потерянное пробуждение:
                     // дольше уступки планировщику производитель не блокируется.
-                    if !consumer_latch.wait(WAKE_BUDGET) {
+                    if !consumer_signal.wait(WAKE_BUDGET) {
                         return Err(next);
                     }
                 }

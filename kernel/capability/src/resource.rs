@@ -26,7 +26,6 @@ pub struct Resource {
     access_mask: AccessMask,
     budget: AtomicU64,
     parent: Option<Arc<Resource>>,
-    /// Число предков в цепочке `split`: у корневого ресурса ноль.
     depth: u16,
 }
 
@@ -160,8 +159,6 @@ impl Drop for Resource {
 
 /// [`BudgetRefund`](BudgetRefund), возвращающий `pages` бюджету.
 pub struct ResourceBudgetRefund {
-    // Ссылка сильная: ресурс переживает выданные из него регионы и отдаёт
-    // родителю весь свой бюджет, включая неизрасходованный остаток.
     resource: Arc<Resource>,
     pages: u64,
 }
@@ -169,6 +166,8 @@ pub struct ResourceBudgetRefund {
 impl ResourceBudgetRefund {
     pub fn new(resource: &Arc<Resource>, pages: u64) -> Arc<Self> {
         Arc::new(Self {
+            // Ссылка сильная: ресурс переживает выданные из него регионы и отдаёт родителю
+            // весь свой бюджет, включая неизрасходованный остаток.
             resource: Arc::clone(resource),
             pages,
         })

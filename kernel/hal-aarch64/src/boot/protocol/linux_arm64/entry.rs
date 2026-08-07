@@ -36,7 +36,7 @@ pub extern "C" fn _start() {
         "orr    x0, x0, #0b11",     // EL1PCTEN | EL1PCEN
         "msr    cnthctl_el2, x0",
 
-        // Сбрасываем CNTVOFF_EL2: гарантируем, что CNTVCT_EL0 тикает без смещения относительно физического.
+        // Сбрасываем CNTVOFF_EL2: CNTVCT_EL0 тикает без смещения от физического счётчика.
         "msr    cntvoff_el2, xzr",
 
         // SPSR_EL2: возврат в EL1h, DAIF masked

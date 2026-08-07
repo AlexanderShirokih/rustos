@@ -10,10 +10,8 @@ use scheduler::{AddressSpace, ArchContext};
 
 use crate::sched::Aarch64Context;
 
-/// Маска PA корневой таблицы в `TTBR0_EL1`: `[47:12]`, выше - ASID.
 const TTBR0_ROOT_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
-/// Читает `TTBR0_EL1`.
 fn read_ttbr0() -> u64 {
     let raw: u64;
     // SAFETY: чтение TTBR0_EL1 на EL1 разрешено и безопасно.
@@ -27,9 +25,6 @@ fn read_ttbr0() -> u64 {
     raw
 }
 
-/// `switch_address_space` кладёт в `TTBR0_EL1` корень активного user-AS,
-/// возврат в kernel-AS обнуляет регистр, а drop AS после возврата не
-/// оставляет регистр указывающим на освобождённую память.
 #[kernel_test]
 fn ttbr0_tracks_active_address_space() {
     let factory =
@@ -41,8 +36,8 @@ fn ttbr0_tracks_active_address_space() {
     Aarch64Context::switch_address_space(Some(handle));
     kernel_tests::kassert_eq!(read_ttbr0() & TTBR0_ROOT_MASK, root);
 
-    // Возврат в kernel-AS до drop'а: иначе TLB удержит трансляции из
-    // освобождённого user-AS до следующего switch'а.
+    // Возврат в kernel-AS идёт до drop: TLB держит трансляции освобождённого
+    // user-AS до следующего switch.
     Aarch64Context::switch_address_space(None);
     kernel_tests::kassert_eq!(read_ttbr0(), 0);
 

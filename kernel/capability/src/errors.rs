@@ -1,4 +1,4 @@
-/// Ошибки операций над handle'ами и kernel-объектами.
+/// Ошибки операций над handle и kernel-объектами.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum IpcError {
@@ -6,7 +6,7 @@ pub enum IpcError {
     BadHandle,
     /// Тип объекта не соответствует ожидаемому.
     WrongType,
-    /// На handle'е недостаточно прав.
+    /// На handle недостаточно прав.
     AccessDenied,
     /// Операция должна быть повторена позже (queue full / no message).
     ShouldWait,

@@ -3,7 +3,7 @@
 //!
 //! Нужна тестам, которым мало одного exit-кода потомка: изоляции адресных
 //! пространств (слот в `.bss` лежит на одном и том же VA у всех экземпляров
-//! этого бинаря) и разделяемой памяти (регион приезжает capability'ю в
+//! этого бинаря) и разделяемой памяти (регион приезжает как capability в
 //! `caps[0]`).
 
 #![no_std]
@@ -31,16 +31,10 @@ use userland::USERLAND_PAGE_SIZE;
 mod fixture_protocol;
 mod ipc_raw;
 
-/// Слот в `.bss`: у всех экземпляров этого бинаря он лежит по одному VA,
-/// поэтому различие содержимого доказывает изоляцию адресных пространств.
 static SLOT: AtomicU64 = AtomicU64::new(0);
 
-/// Кадр не разобран.
 const EXIT_BAD_REQUEST: u64 = 101;
-/// `recv` на bootstrap-порту отказал не уходом значка либо принёс кадр без
-/// reply-хэндла (встречный сделал `send` вместо `call`).
 const EXIT_RECV_FAILED: u64 = 102;
-/// `reply` не доставлен.
 const EXIT_REPLY_FAILED: u64 = 103;
 
 #[unsafe(no_mangle)]
@@ -90,8 +84,6 @@ pub extern "C" fn _start(root: Handle) -> ! {
     }
 }
 
-/// Доставляет ответ; недоставленный ответ оставил бы родителя в `call`
-/// навсегда, поэтому это терминальная ошибка фикстуры.
 fn answer(reply: Reply, body: &[u8]) {
     ipc_raw::write_frame(body, &[]);
     if reply.reply().is_err() {
@@ -99,7 +91,6 @@ fn answer(reply: Reply, body: &[u8]) {
     }
 }
 
-// Регион сразу закрывается: наблюдаемо только то, пропустил ли выделение бюджет.
 fn allocate_pages(pages: u64) -> u8 {
     let Ok(resource) = Resource::self_resource() else {
         return REPLY_ALLOCATE_FAILED;
@@ -111,7 +102,6 @@ fn allocate_pages(pages: u64) -> u8 {
     }
 }
 
-// Ширину прав капы метеринг-ресурса задаёт грант старта, у самой фикстуры её нет.
 fn duplicate_transfer_cap() -> u8 {
     let Ok(resource) = Resource::self_resource() else {
         return REPLY_DUPLICATE_FAILED;
@@ -126,8 +116,6 @@ fn duplicate_transfer_cap() -> u8 {
     }
 }
 
-/// Мапит доставленный регион, сверяет первые 8 байт с `expected` и пишет
-/// туда инверсию - родитель проверит её через свой маппинг того же фрейма.
 fn map_check(cap: u32, expected: u64) -> u8 {
     let Some(handle) = OwnedHandle::from_raw(cap) else {
         return REPLY_MAP_FAILED;

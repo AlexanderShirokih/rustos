@@ -1,4 +1,4 @@
-//! Handler-ы port-syscall'ов.
+//! Обработчики port-syscall.
 //!
 //! Сообщение в per-thread IPC-буфере: tag задаёт `(len, ncaps)`, тело в `data[..len]`,
 //! хендлы в `caps[..ncaps]`.
@@ -17,15 +17,12 @@ use super::{
     runtime::{CurrentIpcContext, runtime as syscall_runtime},
 };
 
-/// Снимок IPC-контекста текущего потока. `Err`, если поток не имеет user-AS
-/// или IPC-буфера (kernel-поток).
 fn current_ipc_context() -> Result<CurrentIpcContext, SyscallError> {
     syscall_runtime()
         .current_ipc_context()
         .ok_or(SyscallError::WrongType)
 }
 
-/// Собирает [`ThreadTransport`] текущего потока из снимка контекста.
 fn transport_from(context: &CurrentIpcContext) -> Result<ThreadTransport, SyscallError> {
     let ipc_va =
         usize::try_from(context.ipc_buffer_va).map_err(|_| SyscallError::InvalidArgument)?;
@@ -36,16 +33,12 @@ fn transport_from(context: &CurrentIpcContext) -> Result<ThreadTransport, Syscal
     ))
 }
 
-/// `port_create()` - создаёт `Port`. Требует handle-таблицы текущего потока.
 pub(super) fn sys_port_create() -> Result<u64, SyscallError> {
     let handle = Capability::new_with_default_rights(Port::new());
     let id = install_handle(handle).map_err(map_ipc_error)?;
     Ok(u64::from(id.raw().get()))
 }
 
-/// ABI тайм-аут -> `Option<u64>`: `u64::MAX` ([`syscall::PORT_TIMEOUT_INFINITE`])
-/// -> `None` (бессрочно), `0` ([`syscall::PORT_TIMEOUT_POLL`]) -> `Some(0)`,
-/// остальное -> `Some(timeout_ns)`.
 fn timeout_from_abi(raw: u64) -> Option<u64> {
     if raw == syscall::PORT_TIMEOUT_INFINITE {
         None
@@ -54,8 +47,6 @@ fn timeout_from_abi(raw: u64) -> Option<u64> {
     }
 }
 
-/// `port_send(handle, timeout_ns)` - блокирующая отправка из IPC-буфера
-/// текущего потока. Требует `Rights::WRITE`.
 pub(super) fn sys_port_send(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let context = current_ipc_context()?;
@@ -77,10 +68,6 @@ pub(super) fn sys_port_send(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
     Ok(0)
 }
 
-/// `port_recv(handle, timeout_ns)` - блокирующий приём в IPC-буфер текущего
-/// потока. Требует `Rights::READ`. Возврат: reply handle id (если встречный
-/// был `call`), иначе `0`. `SenderGone`: кадра нет, значок ушедшей стороны
-/// лежит в `IpcBuffer.badge`, остальные поля буфера не изменены.
 pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let context = current_ipc_context()?;
@@ -112,8 +99,6 @@ pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
     }
 }
 
-/// `port_call(handle, timeout_ns)` - блокирующий запрос-ответ. Сообщение из
-/// IPC-буфера; ответ оказывается там же. Требует `Rights::WRITE`.
 pub(super) fn sys_port_call(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let context = current_ipc_context()?;
@@ -135,9 +120,6 @@ pub(super) fn sys_port_call(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
     Ok(0)
 }
 
-/// `port_reply(reply_handle)` - доставляет ответ из IPC-буфера сервера
-/// вызывателю. Требует `Rights::WRITE`. One-shot: реплай-handle становится
-/// невалидным после успеха.
 pub(super) fn sys_port_reply(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let context = current_ipc_context()?;

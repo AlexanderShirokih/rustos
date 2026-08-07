@@ -24,9 +24,6 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Сводит отказ ядра в памяти к `NoSpace`. Причину вне нехватки ресурса
-/// (например, нехватку прав) контракт выразить не даёт, и она уходит
-/// строкой в лог.
 pub(crate) fn no_space(error: runtime::Error) -> FileSystemError {
     let out_of_resource = matches!(
         error,

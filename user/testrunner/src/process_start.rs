@@ -6,8 +6,6 @@ use kernel_tests::kernel_test;
 use runtime::{Priority, Process, Signal, ThreadEntry, handle_close, signal_set};
 use syscall::{Handle, SIGNALED, SyscallError, WakeCount};
 
-/// `true`, если non-blocking операция на `handle` отвергнута как `BadHandle`
-/// (хэндл закрыт).
 fn is_closed(handle: Handle) -> bool {
     signal_set(handle, SIGNALED, 0, WakeCount::None) == SyscallError::BadHandle.as_return_value()
 }

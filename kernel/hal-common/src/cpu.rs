@@ -5,14 +5,8 @@
 use collections::Vec;
 use fdt::devicetree::{DeviceTree, Node};
 
-// Поле affinity ARM-биндинга `cpus`: `Aff3` в битах [39:32],
-// `Aff2:Aff1:Aff0` - в [23:0].
 const AFFINITY_MASK: u64 = 0x0000_00FF_00FF_FFFF;
 
-// Devicetree Specification §2.3.5: отсутствие свойства значит два. Для `/cpus`
-// оно обязательно (§3.7), так что путь достижим только на битом DT, и разбор
-// по двум ячейкам там отказывает вместо того, чтобы принять старшую половину
-// `reg` за affinity.
 const DEFAULT_ADDRESS_CELLS: usize = 2;
 
 /// Аппаратный идентификатор CPU: поле affinity, которым ARM-биндинг `cpus`
@@ -25,6 +19,7 @@ impl CpuAffinity {
     /// Строит affinity из значения `reg` узла `cpu@N`, отбрасывая биты вне
     /// поля affinity.
     pub const fn from_reg(reg: u64) -> Self {
+        // ARM-биндинг `cpus` кладёт `Aff3` в биты [39:32], а `Aff2:Aff1:Aff0` - в [23:0].
         Self(reg & AFFINITY_MASK)
     }
 
@@ -106,8 +101,6 @@ pub fn node_affinity(cpus: &Node<'_>, node: &Node<'_>) -> Option<CpuAffinity> {
     cpu_affinity(node, address_cells(cpus)?)
 }
 
-// `None` - объявлено значение вне пары {1, 2}: узел описан неверно, и
-// разбирать его `reg` нечем.
 fn address_cells(cpus: &Node<'_>) -> Option<usize> {
     match cpus
         .prop("#address-cells")
@@ -115,7 +108,10 @@ fn address_cells(cpus: &Node<'_>) -> Option<usize> {
     {
         Some(1) => Some(1),
         Some(2) => Some(2),
+        // Значение вне пары {1, 2}: узел описан неверно, и разбирать его `reg` нечем.
         Some(_) => None,
+        // Devicetree Specification §2.3.5: отсутствие свойства значит два. Для
+        // `/cpus` оно обязательно (§3.7), и путь достижим только на битом DT.
         None => Some(DEFAULT_ADDRESS_CELLS),
     }
 }
@@ -229,7 +225,6 @@ mod tests {
         build_fdt(&structure, pool.bytes())
     }
 
-    /// Ёмкость таблицы в тестах: покрывает и отсечение по границе.
     const TEST_CPUS: usize = 16;
 
     fn parse(bytes: &[u8], boot: u64) -> CpuTopology<TEST_CPUS> {
@@ -279,7 +274,7 @@ mod tests {
 
         assert_eq!(topology.affinity(0), Some(CpuAffinity::from_reg(2)));
         assert_eq!(topology.index_of(CpuAffinity::from_reg(2)), Some(0));
-        assert_eq!(topology.len(), 3, "boot CPU не задваивается");
+        assert_eq!(topology.len(), 3, "the boot CPU is not counted twice");
     }
 
     #[test]
@@ -302,12 +297,12 @@ mod tests {
         assert_eq!(
             topology.index_of(CpuAffinity::from_reg(0x0100)),
             Some(0),
-            "boot CPU второго кластера получает индекс 0"
+            "the boot CPU of the second cluster gets index 0"
         );
         assert_ne!(
             topology.index_of(CpuAffinity::from_reg(0x0000)),
             topology.index_of(CpuAffinity::from_reg(0x0100)),
-            "CPU разных кластеров с общим Aff0 различимы"
+            "CPUs of different clusters sharing Aff0 stay distinct"
         );
     }
 
@@ -327,7 +322,7 @@ mod tests {
         assert_eq!(
             topology.affinity(1),
             Some(CpuAffinity::from_reg(0x0000_0001_0000_0000)),
-            "Aff3 лежит в старшей ячейке"
+            "Aff3 lives in the high cell"
         );
     }
 
@@ -386,7 +381,11 @@ mod tests {
         // Биты 30 и 31 лежат вне полей Aff0..Aff3 (в `MPIDR_EL1` это `U` и `RES1`).
         let topology = parse(&bytes, 0xC000_0001);
 
-        assert_eq!(topology.len(), 1, "affinity boot CPU совпал с узлом FDT");
+        assert_eq!(
+            topology.len(),
+            1,
+            "the boot CPU affinity matches the FDT node"
+        );
         assert_eq!(topology.affinity(0), Some(CpuAffinity::from_reg(1)));
     }
 
@@ -415,7 +414,7 @@ mod tests {
         );
 
         let topology = parse(&bytes, 0);
-        assert_eq!(topology.len(), 2, "boot CPU и один узел");
+        assert_eq!(topology.len(), 2, "the boot CPU and one node");
         assert_eq!(topology.index_of(CpuAffinity::from_reg(1)), Some(1));
     }
 
@@ -448,7 +447,7 @@ mod tests {
 
         let topology = parse(&bytes, 0);
 
-        assert_eq!(topology.len(), 1, "разбор по двум ячейкам не состоялся");
+        assert_eq!(topology.len(), 1, "the two-cell parse must not succeed");
         assert_eq!(topology.index_of(CpuAffinity::from_reg(5)), None);
     }
 
@@ -483,7 +482,7 @@ mod tests {
 
         assert!(
             !topology.confirms(CpuAffinity::from_reg(2), 1),
-            "чужой идентификатор отдал бы CPU общий стек и общий per-CPU блок"
+            "a foreign identifier shares the stack and the per-CPU block with another CPU"
         );
     }
 

@@ -315,7 +315,6 @@ mod tests {
         drop(second);
     }
 
-    /// Mapper, чей `map_exact` всегда падает - для проверки отката VA.
     struct FailingMapper;
 
     impl MemoryMapper for FailingMapper {

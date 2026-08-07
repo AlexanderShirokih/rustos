@@ -96,7 +96,6 @@ impl<A: ArchContext> ThreadTable<A> {
         id.raw().get() as usize - 1
     }
 
-    // Нумерация слотов с единицы.
     fn slot_id(index: usize) -> ThreadId {
         ThreadId::new(NonZeroU32::MIN.saturating_add(index as u32))
     }

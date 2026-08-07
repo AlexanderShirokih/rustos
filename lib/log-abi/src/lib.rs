@@ -21,11 +21,8 @@ pub const LOG_SOURCE_MAX: usize = 64;
 pub const LOG_MESSAGE_MAX: usize =
     ipc::wire::FIELD_DATA_MAX - LOG_SOURCE_MAX - ipc::wire::FIELD_OVERHEAD;
 
-// Байт-терминатор тела кадра: его бюджет учитывается наравне с полями.
 const TERMINATOR_SIZE: usize = 1;
 
-// Кадр с доверенным источником вместо локального тега укладывается в бюджет
-// сообщения целиком.
 const _: () = assert!(
     TERMINATOR_SIZE
         + ipc::wire::FIELD_OVERHEAD

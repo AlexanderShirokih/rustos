@@ -86,7 +86,6 @@ pub struct Reg<T> {
     /// Смещение регистра относительно базового адреса MMIO (в байтах).
     pub offset: usize,
 
-    /// Маркер типа для compile-time проверки размера регистра.
     _t: PhantomData<T>,
 }
 

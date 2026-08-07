@@ -17,9 +17,7 @@ use crate::memory::regs::{
 
 /// Конфигурация адресного пространства.
 pub struct AddressSpaceConfig<T: TtbrSel> {
-    /// Физический адрес корня таблиц страниц.
     base: PhysicalAddress,
-    /// Параметры трансляции.
     config: tcr::AddressTranslationConfig<T>,
 }
 
@@ -52,9 +50,7 @@ pub trait MmuConfig {
 
 /// Стандартная конфигурация с двумя адресными пространствами.
 pub struct NormalDualSpaceConfig {
-    /// Корень lower half (TTBR0).
     lower_root: PhysicalAddress,
-    /// Корень higher half (TTBR1).
     higher_root: PhysicalAddress,
 }
 

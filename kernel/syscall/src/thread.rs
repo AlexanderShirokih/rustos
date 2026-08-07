@@ -1,4 +1,4 @@
-//! Handler-ы Thread-syscall'ов: create/self/exit_code/terminate.
+//! Обработчики Thread-syscall: create/self/exit_code/terminate.
 //!
 //! `ThreadExit` живёт в [`bridge`](super::bridge) рядом с диспатчером,
 //! т.к. имеет not-returning контракт.

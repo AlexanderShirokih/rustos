@@ -16,7 +16,6 @@ use crate::{
 const SENTINEL_A: u64 = 0xA1A1_A1A1_A1A1_A1A1;
 const SENTINEL_B: u64 = 0xB2B2_B2B2_B2B2_B2B2;
 
-/// Слот потомка: значение и его адрес.
 struct Slot {
     value: u64,
     address: u64,

@@ -9,13 +9,10 @@ use ipc::wire::Str;
 use runtime::{OwnedHandle, PortTransport, thread_exit};
 use syscall::{Handle, Timeout};
 
-// Конечный срок ответа сервера превращает зависание фикстуры в диагностируемую ошибку.
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
-// Буфер в потолок: сессия заметно весит на бюджете монтирования, пока сервер её не убрал.
 const BUFFER_SIZE: u32 = 64 * 1024;
 
-// Узел, который фикстура открывает: его дескриптор - первый в сессии.
 const PATH: &str = "/fixture";
 
 /// Программа-клиент для теста уборки сессий: берёт буфер, открывает узел и
@@ -27,7 +24,6 @@ pub extern "C" fn _start(service: Handle) -> ! {
     thread_exit(u64::from(!populate_session(service)))
 }
 
-// Буфер данных и открытый дескриптор остаются за сессией до уборки.
 fn populate_session(service: Handle) -> bool {
     let client = FileSystemClient::new(PortTransport::client(service)).with_wait(CALL_TIMEOUT);
 

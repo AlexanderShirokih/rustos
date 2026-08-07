@@ -24,8 +24,6 @@ use crate::register_driver;
 
 const TIMER_IRQ_PRIORITY: IrqPriority = IrqPriority::HIGHEST;
 
-/// Индекс specifier-а virtual timer в `interrupts` ноды `arm,armv8-timer`.
-/// Порядок specifier-ов: secure-physical, non-secure-physical, virtual, hypervisor.
 const VIRTUAL_TIMER_SPEC_INDEX: usize = 2;
 
 /// Runtime-драйвер ARM Generic Timer.
@@ -100,6 +98,8 @@ pub fn arm_generic_timer_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult
         .prop("interrupts")
         .ok_or(ProbeError::MissingProperty("interrupts"))?;
 
+    // Биндинг `arm,armv8-timer` перечисляет specifier-ы в порядке secure-physical,
+    // non-secure-physical, virtual, hypervisor.
     let interrupt = parse_gic_interrupt(interrupts.raw(), VIRTUAL_TIMER_SPEC_INDEX).ok_or(
         ProbeError::Unsupported("unsupported virtual timer interrupt specifier"),
     )?;

@@ -6,7 +6,7 @@ use memory::virtual_address::VirtualAddress;
 
 use crate::image::UserImage;
 
-/// Первый аргумент user-thread'а по ABI; `ArchContext::init_user` кладёт его
+/// Первый аргумент user-thread по ABI. `ArchContext::init_user` кладёт его
 /// в нужный регистр.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]

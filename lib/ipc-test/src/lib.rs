@@ -7,20 +7,17 @@ use std::{
 
 use ipc::{MessageLen, Timeout, Transport, wire::IpcError};
 
-/// Один кадр в очереди.
 struct Frame {
     bytes: Vec<u8>,
     handles: Vec<u32>,
 }
 
-/// Очередь одного направления.
 struct Pipe {
     frames: VecDeque<Frame>,
     sender_open: bool,
     receiver_open: bool,
 }
 
-/// Очередь с переменной ожидания для блокирующего чтения.
 struct Shared {
     pipe: Mutex<Pipe>,
     readable: Condvar,

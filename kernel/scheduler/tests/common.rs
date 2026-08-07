@@ -247,14 +247,10 @@ pub struct MapCall {
     pub init_len: usize,
 }
 
-/// Stub-реализация; нужен только для уникального `root_pa`. `map` логируется;
-/// остальные операции возвращают `Unsupported`/`OutOfMemory`.
 struct MockUserMapper {
     root_pa: PhysicalAddress,
     released: Arc<AtomicUsize>,
     map_calls: Arc<Mutex<Vec<MapCall>>>,
-    /// Если `true`, `map_exact` возвращает ошибку - для проверки
-    /// rollback-путей (`attach_ipc_buffer`, `MemoryRegion::install`).
     fail_map_exact: bool,
 }
 
@@ -337,7 +333,6 @@ pub struct MockAddressSpaceFactory {
     inner: Mutex<MockFactoryInner>,
     released: Arc<AtomicUsize>,
     map_calls: Arc<Mutex<Vec<MapCall>>>,
-    /// Если `true`, маппер-ы, выданные фабрикой, будут проваливать `map_exact`.
     fail_map_exact: bool,
 }
 

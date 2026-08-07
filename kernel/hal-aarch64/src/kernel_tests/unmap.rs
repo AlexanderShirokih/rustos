@@ -6,7 +6,7 @@
 //! `feature = "kernel-tests"`). По завершении функции `Arc<AddressSpace>`
 //! дропается - Drop возвращает все фреймы (root + intermediate L1/L2/L3
 //! таблицы) во `FrameAllocator`. AS никогда не активируется в текущем CPU,
-//! поэтому в TLB его entries нет и инвалидация перед drop'ом не нужна.
+//! поэтому в TLB его entries нет и инвалидация перед drop не нужна.
 
 #![allow(unsafe_code)]
 
@@ -33,6 +33,7 @@ use memory::{
 };
 use scheduler::AddressSpace;
 
+use super::probe_va;
 use crate::{
     consts::HIGHER_HALF_BASE,
     memory::{
@@ -41,8 +42,6 @@ use crate::{
     },
 };
 
-/// Downcast'ит `&dyn MemoryMapper`, выданный `Aarch64AddressSpaceFactory`,
-/// до конкретного типа для доступа к платформенному API диагностики.
 fn downcast_user_mapper(mapper: &(dyn MemoryMapper + Send + Sync)) -> &UserAarch64MemoryMapper {
     mapper
         .as_any()
@@ -52,8 +51,6 @@ fn downcast_user_mapper(mapper: &(dyn MemoryMapper + Send + Sync)) -> &UserAarch
 
 type RuntimeFrameAllocator = dyn FrameAllocator + Send + Sync;
 
-/// Mapper-тип под `CappedAllocator` с `MutexCell`-стратегией -
-/// та же, что и у production-фабрики user-AS.
 type CappedMapper<'a> = Aarch64MemoryMapper<
     'a,
     CappedAllocator<'a>,
@@ -64,8 +61,13 @@ const PAGE_SIZE: usize = 1usize << L3::SHIFT;
 const L2_BLOCK_SIZE: usize = 1usize << L2::SHIFT;
 const L1_BLOCK_SIZE: usize = 1usize << L1::SHIFT;
 
-/// Lower-half VA, не пересекающаяся с другими user-AS-тестами.
-const PROBE_BASE: usize = 0x6000_0000;
+const PROBE_BASE: usize = probe_va::UNMAP.base();
+
+const L2_BLOCK_VA: usize = probe_va::UNMAP_L2_BLOCK.base();
+
+const L1_BLOCK_VA: usize = probe_va::UNMAP_L1_BLOCK.base();
+
+const PARTIAL_BLOCK_VA: usize = probe_va::UNMAP_PARTIAL_BLOCK.base();
 
 fn make_user_as() -> Arc<AddressSpace> {
     let factory =
@@ -197,8 +199,8 @@ fn mapper_unmap_then_remap() {
         );
     }
 
-    // Очищаем, чтобы Drop AS не упал на остаточном маппинге, если в Drop'е
-    // когда-нибудь появится sanity-check.
+    // Очищаем, чтобы Drop AS не упал на остаточном маппинге, когда у него
+    // появится sanity-check.
     mapper
         .unmap(base, pages * PAGE_SIZE)
         .expect("cleanup unmap");
@@ -217,20 +219,17 @@ fn mapper_unmap_unmapped_returns_not_mapped() {
     kernel_tests::kassert!(matches!(err, MemoryUnmappingError::NotMapped));
 }
 
-/// `unmap` после `map_exact` НЕ возвращает PA в `FrameAllocator` - для
-/// caller-supplied маппингов (MMIO, image, identity) PA не принадлежит
-/// RAM-bitmap'у. Регресс-тест к Codex P1: до фикса OWNED_BY_FA_BIT
-/// `unmap` безусловно дёргал `deallocate_frame` для любого leaf'а и
-/// корруптил bitmap при cleanup MMIO-маппинга.
+/// Регресс к Codex P1: до появления `OWNED_BY_FA_BIT` `unmap` дёргал
+/// `deallocate_frame` на любом leaf и корруптил bitmap на cleanup MMIO.
 #[kernel_test]
 fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
     let real_fa = runtime_frame_allocator();
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
 
-    // Sentinel-фрейм через настоящий FA: PA заведомо в RAM-bitmap'е и помечен
-    // как `is_allocated`. Имитирует caller-supplied PA, который mapper не
-    // должен возвращать в FA.
+    // Sentinel-фрейм через настоящий FA: PA заведомо лежит в RAM-bitmap и
+    // помечен как `is_allocated`. Имитирует caller-supplied PA, который mapper
+    // в FA не возвращает.
     let sentinel = real_fa.allocate_frame().expect("sentinel frame");
     let sentinel_pa = sentinel.page_address();
     kernel_tests::kassert!(real_fa.is_allocated(sentinel));
@@ -245,15 +244,10 @@ fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
     // Главный assert: после unmap sentinel-фрейм всё ещё считается занятым.
     kernel_tests::kassert!(real_fa.is_allocated(sentinel));
 
-    // Sentinel освобождаем сами - фрейм был наш, не mapper'а.
+    // Sentinel освобождаем сами - фрейм наш, mapper его не выдавал.
     let _ = real_fa.deallocate_frame(sentinel);
 }
 
-/// Создаёт mapper над `CappedAllocator` для тестов, замеряющих outstanding-счётчик.
-/// Возвращает `(mapper, capped, root_frame)` - root-фрейм должен быть вручную
-/// возвращён в FA после теста, чтобы не фрагментировать bitmap (Box::leak'нутый
-/// mapper никогда не дропается, а его DropPath срабатывает только если
-/// `had_mappings == true`).
 fn build_capped_mapper() -> (
     &'static CappedMapper<'static>,
     &'static CappedAllocator<'static>,
@@ -303,7 +297,7 @@ fn mapper_unmap_releases_empty_tables() {
 fn mapper_unmap_partial_block_rejected() {
     let (mapper, capped, root_frame) = build_capped_mapper();
 
-    let base = va(0x9000_0000);
+    let base = va(PARTIAL_BLOCK_VA);
     let phys = pa(0x6000_0000);
     mapper
         .map_exact(base, phys, L2_BLOCK_SIZE, MemFlags::user_rw())
@@ -338,7 +332,7 @@ fn mapper_unmap_partial_block_rejected() {
 fn mapper_unmap_l2_block_then_remap() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
-    let base = va(0x7000_0000);
+    let base = va(L2_BLOCK_VA);
     let phys = pa(0x2000_0000);
 
     mapper
@@ -362,7 +356,7 @@ fn mapper_unmap_l2_block_then_remap() {
 fn mapper_unmap_l1_block_then_remap() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
-    let base = va(0x8000_0000);
+    let base = va(L1_BLOCK_VA);
     let phys = pa(0x4000_0000);
 
     mapper
@@ -402,9 +396,6 @@ fn mapper_unmap_misaligned_size_rejected() {
     mapper.unmap(base, PAGE_SIZE).expect("cleanup unmap");
 }
 
-/// Обёртка над настоящим `FrameAllocator` с лимитом на allocate'ы и
-/// счётчиком outstanding (allocated - deallocated). `outstanding == 0`
-/// после `map`/`unmap` означает, что mapper вернул все фреймы.
 struct CappedAllocator<'a> {
     inner: &'a RuntimeFrameAllocator,
     remaining: AtomicIsize,
@@ -452,9 +443,6 @@ impl FrameAllocator for CappedAllocator<'_> {
     }
 }
 
-/// `map(VA, 4)` при OOM на середине цикла откатывает все успешно
-/// замапленные leaf-страницы. После Err - `query_leaf_raw` всех страниц
-/// диапазона возвращает `None`.
 #[kernel_test]
 fn mapper_map_partial_oom_rollback() {
     let real_fa = runtime_frame_allocator();
@@ -500,7 +488,7 @@ fn mapper_map_partial_oom_rollback() {
         kernel_tests::kassert!(mapper.query_leaf_raw(p).is_none());
     }
 
-    // Drop mapper'а вернёт root + intermediate L1/L2/L3 в реальный FA через
+    // Drop mapper вернёт root + intermediate L1/L2/L3 в реальный FA через
     // делегирование `deallocate_frame`. Leaf-фреймов 0..2 уже нет в дереве -
-    // они откачены rollback'ом до возврата ошибки.
+    // их откатил rollback до возврата ошибки.
 }

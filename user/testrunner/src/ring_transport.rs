@@ -1,12 +1,12 @@
 //! E2E проверка `RingTransport` из EL0: producer и consumer над общим
 //! регионом-кольцом (`SpscRing`) в shared memory и одним "data"-сигналом.
 //!
-//! Главный поток выступает producer'ом, рабочий поток - consumer'ом. Регион
-//! создаётся через `Resource`/`MemoryRegion` и маппится, оборачивается двумя
-//! значениями `SpscRing` (по одному на конец). Consumer в цикле
-//! `wait_readable` + `read_message` выгребает `FRAMES` кадров, producer шлёт
-//! те же `FRAMES` (retry на `WouldBlock` с уступкой планировщику). Проверяем,
-//! что все кадры получены по порядку.
+//! Главный поток выступает стороной producer, рабочий поток - стороной
+//! consumer. Регион создаётся через `Resource`/`MemoryRegion` и маппится,
+//! оборачивается двумя значениями `SpscRing` (по одному на конец). Consumer в
+//! цикле `wait_readable` + `read_message` выгребает `FRAMES` кадров, producer
+//! шлёт те же `FRAMES` (retry на `WouldBlock` с уступкой планировщику).
+//! Проверяем, что все кадры получены по порядку.
 
 use collections::SpscRing;
 use ipc::{Transport, wire::IpcError};
@@ -16,41 +16,26 @@ use runtime::{
 };
 use syscall::Handle;
 
-/// Полезная ёмкость одного слота кольца: вмещает 4-байтовый кадр-счётчик.
 const SLOT_PAYLOAD: usize = 4;
-/// Число слотов кольца (степень двойки) - намеренно мало, чтобы producer и
-/// consumer боролись и проходили путь park/wake.
 const RING_CAPACITY: usize = 4;
-/// Число кадров, прогоняемых через кольцо.
 const FRAMES: u32 = 4096;
 
-/// Размер стека consumer-потока (page-aligned выдача -> вершина выровнена).
 const STACK_SIZE: u64 = 0x4000;
-/// Таймаут join'а: конечный, чтобы зависший consumer падал по timeout.
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
-/// Таймаут одного `wait_readable` consumer'а.
 const WAIT_TIMEOUT: Timeout = Timeout::from_secs(1);
 
-/// Размер страницы: регион-кольцо аллоцируется и маппится постранично.
 const PAGE_SIZE: u64 = 4096;
 
-/// Разделяемое между потоками состояние теста.
 struct Shared {
-    /// Базовый VA замапленной страницы-носителя кольца.
     region_va: u64,
-    /// Логическая длина кольца в байтах (`region_bytes`), вмещается в страницу.
     region_len: usize,
-    /// "data"-сигнал producer->consumer.
     data: Handle,
-    /// Признак валидности результата consumer'а (заполняется им перед exit).
     ok: core::sync::atomic::AtomicBool,
 }
 
-/// Consumer-поток: оборачивает регион в consumer-`SpscRing`, выгребает все
-/// `FRAMES` кадров через `RingTransport` и сверяет их порядок.
 extern "C" fn consumer_worker(arg: usize) -> u32 {
-    // SAFETY: arg - адрес Shared в кадре главного потока; жив до join'а,
-    // который выполняется до выхода из его кадра.
+    // SAFETY: arg - адрес Shared в кадре главного потока; жив до завершения
+    // join, который выполняется до выхода из его кадра.
     let shared = unsafe { &*(arg as *const Shared) };
 
     let base = shared.region_va as *mut u8;
@@ -137,7 +122,7 @@ fn ring_transport_round_trip() {
         }
     }
 
-    // Join consumer'а с конечным таймаутом (ожидание по thread-handle).
+    // Ожидание consumer с конечным таймаутом (по thread-handle).
     thread
         .join(JOIN_TIMEOUT)
         .expect("consumer joins before timeout");

@@ -107,9 +107,7 @@ pub unsafe fn start(
     }
 }
 
-/// # Safety
-///
-/// Вызов уходит на уровень выше EL1 и обязан быть корректным вызовом PSCI.
+// SAFETY: вызов уходит на уровень выше EL1 и обязан быть корректным вызовом PSCI.
 unsafe fn psci_call(conduit: PsciConduit, function: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let result: u64;
 
@@ -155,9 +153,7 @@ unsafe fn psci_call(conduit: PsciConduit, function: u64, arg0: u64, arg1: u64, a
     result
 }
 
-/// # Safety
-///
-/// `release_address` - физический адрес, объявленный узлом CPU.
+// SAFETY: `release_address` - физический адрес, объявленный узлом CPU.
 unsafe fn release_spin_table(release_address: usize, entry_point: usize) -> Result<(), StartError> {
     // Адрес приходит из device tree, а линейное отображение покрывает только
     // память, описанную им же. Проверка исключает запись по неотображённому

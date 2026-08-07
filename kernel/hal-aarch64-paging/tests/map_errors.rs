@@ -51,12 +51,12 @@ fn map_page_already_mapped_4k() {
     let virt = PageAlignedVirtualAddress::from_usize(0x4000_0000).unwrap();
     let phys = AlignedPhysicalAddress::<{ L3::SHIFT }>::from_usize(0x10_0000).unwrap();
 
-    mapper.map_page(virt, phys, user_rw()).expect("первый map");
+    mapper.map_page(virt, phys, user_rw()).expect("first map");
     // Повторный map той же страницы -> AlreadyMapped.
     let err = mapper
         .map_page(virt, phys, user_rw())
-        .expect_err("повторный map должен отказать");
-    assert!(matches!(err, MapError::AlreadyMapped), "получено {err:?}");
+        .expect_err("a repeated map must fail");
+    assert!(matches!(err, MapError::AlreadyMapped), "got {err:?}");
 }
 
 #[test]
@@ -69,8 +69,8 @@ fn map_page_already_mapped_2m_block() {
     mapper.map_page(virt, phys, user_rw()).expect("map 2M");
     let err = mapper
         .map_page(virt, phys, user_rw())
-        .expect_err("повторный 2M map должен отказать");
-    assert!(matches!(err, MapError::AlreadyMapped), "получено {err:?}");
+        .expect_err("a repeated 2M map must fail");
+    assert!(matches!(err, MapError::AlreadyMapped), "got {err:?}");
 }
 
 #[test]
@@ -92,11 +92,8 @@ fn map_page_needs_smaller_pages_when_table_present() {
     let block_phys = AlignedPhysicalAddress::<{ L2::SHIFT }>::from_usize(0x4000_0000).unwrap();
     let err = mapper
         .map_page(block_virt, block_phys, user_rw())
-        .expect_err("2M поверх существующей L3-таблицы");
-    assert!(
-        matches!(err, MapError::NeedsSmallerPages),
-        "получено {err:?}"
-    );
+        .expect_err("2M block over an existing L3 table");
+    assert!(matches!(err, MapError::NeedsSmallerPages), "got {err:?}");
 }
 
 #[test]
@@ -110,8 +107,8 @@ fn map_page_out_of_memory_on_alloc_exhaustion() {
 
     let err = mapper
         .map_page(virt, phys, user_rw())
-        .expect_err("исчерпание аллокатора");
-    assert!(matches!(err, MapError::OutOfMemory), "получено {err:?}");
+        .expect_err("allocator exhaustion");
+    assert!(matches!(err, MapError::OutOfMemory), "got {err:?}");
 }
 
 // Невыровненные адреса (type-level guard)
@@ -152,9 +149,9 @@ fn unmap_range_multiple_4k_leaves() {
             3 * (1usize << L3::SHIFT),
             &mut visitor,
         )
-        .expect("unmap 3 страниц");
+        .expect("unmap of 3 pages");
     }
-    assert_eq!(visitor.leaves.len(), 3, "должны сняться 3 leaf'а");
+    assert_eq!(visitor.leaves.len(), 3, "3 leaves must be unmapped");
     for leaf in &visitor.leaves {
         assert_eq!(leaf.1, L3::SHIFT);
     }
@@ -162,7 +159,7 @@ fn unmap_range_multiple_4k_leaves() {
 
 #[test]
 fn unmap_range_crossing_l2_boundary() {
-    // Две 2M-блок-leaf'а в соседних L2-ячейках одного L1: диапазон 4M пересекает
+    // Две 2M-блок-leaf в соседних L2-ячейках одного L1: диапазон 4M пересекает
     // границу L2.
     let buf = allocate_buffer(16);
     let (mut mapper, _) = make_mapper(buf);

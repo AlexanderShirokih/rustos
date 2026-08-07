@@ -70,10 +70,10 @@ impl DriverFactory for NoopFactory {
     }
 }
 
-// Сигнатура обязана совпадать с типом поля `probe` (fn -> ProbeResult),
-// поэтому Result обязателен, даже если функция всегда возвращает Ok.
 #[allow(clippy::unnecessary_wraps)]
 fn always_match(_ctx: &mut ProbeContext<SimpleNode>) -> ProbeResult {
+    // Сигнатура обязана совпадать с типом поля `probe` (fn -> ProbeResult),
+    // поэтому Result остаётся при постоянном Ok.
     Ok(Box::new(NoopFactory))
 }
 
@@ -183,8 +183,6 @@ fn skips_non_matching_driver_then_registers_matching() {
 
 #[test]
 fn occupied_entry_keeps_first_registration_per_node() {
-    // Два узла с ОДИНАКОВЫМ id: после регистрации первого, у второго ключ занят
-    // (Occupied-ветка) и повторная вставка не происходит.
     static DUP: [SimpleNode; 1] = [SimpleNode {
         id: 7,
         children: &[],

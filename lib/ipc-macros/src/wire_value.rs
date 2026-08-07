@@ -14,10 +14,8 @@ use syn::{
     spanned::Spanned,
 };
 
-/// Верхняя граница позиционного `field_id` суб-кадра (`wire::FIELD_ID_MAX`).
 const FIELD_ID_MAX: u8 = 254;
 
-/// Именованное поле агрегата: имя, позиционный `field_id` и тип.
 struct AggField {
     ident: Ident,
     field_id: u8,
@@ -96,7 +94,7 @@ fn collect_fields(input: &DeriveInput) -> syn::Result<Vec<AggField>> {
         let ident = field.ident.clone().ok_or_else(|| {
             Error::new(field.span(), "#[derive(WireValue)] field is a named field")
         })?;
-        // Позиционный field_id 1.. строго возрастает, потолок - FIELD_ID_MAX.
+        // Позиционный field_id 1.. строго возрастает, потолок повторяет `wire::FIELD_ID_MAX`.
         let field_id = u8::try_from(index + 1)
             .ok()
             .filter(|id| *id <= FIELD_ID_MAX)
@@ -115,8 +113,6 @@ fn collect_fields(input: &DeriveInput) -> syn::Result<Vec<AggField>> {
     Ok(fields)
 }
 
-/// Лайфтайм для `WireValue<'a>`: единственный у структуры либо отсутствует.
-/// type/const-генерики и более одного лайфтайма не поддержаны.
 fn resolve_lifetime(input: &DeriveInput) -> syn::Result<Option<Lifetime>> {
     let mut lifetime: Option<&LifetimeParam> = None;
     for param in &input.generics.params {

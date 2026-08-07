@@ -110,11 +110,8 @@ impl MapLeaf<{ L1::SHIFT }> for L1BlockPa {
 ///
 /// Управляет иерархией таблиц страниц и создаёт маппинги.
 pub struct PageMapper<A: TableAlloc> {
-    /// Корневая таблица L0.
     root: *mut PageTable<L0>,
-    /// Аллокатор таблиц страниц.
     alloc: A,
-    /// Флаги для новых записей-таблиц.
     table_flags: TableFlags,
 }
 
@@ -161,9 +158,6 @@ impl<A: TableAlloc> PageMapper<A> {
         P::map_into(self, virt, phys, flags)
     }
 
-    /// Гарантирует наличие дочерней таблицы в `parent` для `target_va`.
-    ///
-    /// Если записи нет - выделяет новую таблицу.
     fn ensure_next<PL, CL>(
         &mut self,
         parent: *mut PageTable<PL>,
@@ -311,27 +305,6 @@ impl<A: TableAlloc> PageMapper<A> {
     }
 }
 
-/// Маска битов, которые сохраняются при обновлении флагов leaf-записи `Entry<L3, Page>`:
-/// PA (биты `[47:12]`) и desc-type (биты `[1:0]`, для Page всегда `0b11`).
-///
-/// Битовая раскладка page-дескриптора (ARMv8-A, 4К granule):
-/// - `[1:0]`   - desc-type;
-/// - `[4:2]`   - `AttrIndx` (индекс MAIR);
-/// - `[5]`     - `NS` (non-secure);
-/// - `[7:6]`   - `AP` (права доступа EL0/EL1);
-/// - `[9:8]`   - `SH` (shareability);
-/// - `[10]`    - `AF` (access flag);
-/// - `[11]`    - `nG` (not-global);
-/// - `[47:12]` - physical-address биты;
-/// - `[53]`    - `PXN`;
-/// - `[54]`    - `UXN`.
-///
-/// `update_l3_flags` сохраняет PA, desc-type и бит `nG` (свойство владельца
-/// AS, а не permission'ов - не должно меняться при `remap`); остальное
-/// (`AttrIndx`, `AP`, `SH`, `AF`, `PXN`, `UXN`, …) перезаписывается из
-/// `new_flags`. `0xF803` - это `0b1111_1000_0000_0011`: биты `[1:0]`
-/// (desc-type), `[11]` (nG) и `[12:15]` как часть PA-mask
-/// `0x0000_FFFF_FFFF_F000`.
 const LEAF_PA_AND_DESC_MASK: u64 = 0x0000_FFFF_FFFF_F803;
 
 /// Меняет только биты атрибутов в L3-leaf-записи (`table[idx]`), сохраняя PA и desc-type.
@@ -356,6 +329,11 @@ pub unsafe fn update_l3_flags(
     if raw & 0b11 != 0b11 {
         return Err(WalkError::NotMapped);
     }
+    // Раскладка page-дескриптора (ARMv8-A, 4К granule): `[1:0]` desc-type (у Page
+    // всегда `0b11`), `[4:2]` `AttrIndx`, `[5]` `NS`, `[7:6]` `AP`, `[9:8]` `SH`,
+    // `[10]` `AF`, `[11]` `nG`, `[47:12]` PA, `[53]` `PXN`, `[54]` `UXN`.
+    // Маска удерживает PA, desc-type и `nG`: бит `nG` принадлежит владеющему AS и
+    // переживает `remap`. Остальные биты берутся из `new_flags`.
     let preserved = raw & LEAF_PA_AND_DESC_MASK;
     let new_raw = preserved | (new_flags.bits() & !LEAF_PA_AND_DESC_MASK);
     let entry = Entry::<L3, Page>::from_raw_unchecked(new_raw);
@@ -384,7 +362,6 @@ pub enum UnmapError {
     Decode(DecodeError),
 }
 
-/// Sign-extension bits 48..63 канонической AArch64 VA.
 const HIGH_HALF_MASK: usize = 0xFFFF_0000_0000_0000;
 
 /// Снимает leaf-записи в `[va, va + size)`. Опустевшие L1/L2/L3
@@ -416,7 +393,7 @@ where
 }
 
 /// Полный обход дерева для Drop AS: `on_leaf` на каждый leaf, `on_free_table`
-/// на каждую L1/L2/L3. Root в callback не идёт - решение про него за caller'ом.
+/// на каждую L1/L2/L3. Root в callback не идёт - решение про него принимает caller.
 /// Invalid и corrupt-дескрипторы пропускаются.
 ///
 /// # Safety
@@ -431,15 +408,8 @@ where
     unsafe { L0::free_subtree(root, alloc, canonical_top, visitor) };
 }
 
-/// Per-level dispatch для `unmap_range`/`free_all`. L0/L1/L2 делегируют в
-/// `descend_unmap`/`descend_free`; L3 - терминал.
 trait UnmapWalk: Level + Sized {
-    /// Снимает leaf-записи в `[range_start, range_end)` внутри subtree
-    /// `[table_va_base, table_va_base + 512 << SHIFT)`. Возвращает `true`,
-    /// если таблица стала пустой.
-    ///
-    /// # Safety
-    /// см. [`unmap_range`].
+    // SAFETY: см. [`unmap_range`].
     unsafe fn unmap_subtree<A, V>(
         table: *mut PageTable<Self>,
         alloc: &A,
@@ -452,10 +422,7 @@ trait UnmapWalk: Level + Sized {
         A: TableAlloc,
         V: UnmapVisitor + ?Sized;
 
-    /// Полный обход subtree без проверок диапазона.
-    ///
-    /// # Safety
-    /// см. [`free_all`].
+    // SAFETY: см. [`free_all`].
     unsafe fn free_subtree<A, V>(
         table: *mut PageTable<Self>,
         alloc: &A,
@@ -479,7 +446,7 @@ impl UnmapWalk for L0 {
         A: TableAlloc,
         V: UnmapVisitor + ?Sized,
     {
-        // SAFETY: контракт прокидывается из caller'а.
+        // SAFETY: контракт прокидывается из caller.
         unsafe {
             descend_unmap::<L0, L1, A, V>(
                 table,
@@ -639,10 +606,7 @@ impl UnmapWalk for L3 {
     }
 }
 
-/// Нисходящий обход для L0/L1/L2.
-///
-/// # Safety
-/// см. [`unmap_range`].
+// SAFETY: см. [`unmap_range`].
 unsafe fn descend_unmap<Parent, Child, A, V>(
     table: *mut PageTable<Parent>,
     alloc: &A,
@@ -698,11 +662,7 @@ where
     Ok(unsafe { table_is_empty::<Parent>(table) })
 }
 
-/// Полный обход subtree уровня-родителя (L0/L1/L2). Decode-ошибки и
-/// неожиданные Page пропускаются.
-///
-/// # Safety
-/// см. [`free_all`].
+// SAFETY: см. [`free_all`].
 unsafe fn descend_free<Parent, Child, A, V>(
     table: *mut PageTable<Parent>,
     alloc: &A,
@@ -736,7 +696,6 @@ unsafe fn descend_free<Parent, Child, A, V>(
     }
 }
 
-// entry_va_at собирает адрес из выровненной базы таблицы и сдвинутого индекса.
 #[inline]
 fn leaf_va(va: usize) -> PageAlignedVirtualAddress {
     debug_assert!(
@@ -763,10 +722,7 @@ fn entry_va_at<L: Level>(table_va_base: usize, idx: usize) -> usize {
     table_va_base | (idx << L::SHIFT)
 }
 
-/// Все 512 entries имеют desc-type 0b00 (Invalid).
-///
-/// # Safety
-/// `table` валиден; caller владеет эксклюзивным доступом.
+// SAFETY: `table` валиден; caller владеет эксклюзивным доступом.
 #[allow(clippy::verbose_bit_mask)]
 unsafe fn table_is_empty<L: Level>(table: *mut PageTable<L>) -> bool {
     (0..512).all(|idx| {

@@ -13,14 +13,10 @@ use crate::{
 
 const ROOT: NodeId = NodeId::from_raw(0);
 
-// Наибольшая длина файла в дереве.
 const FILE_SIZE_MAX: u64 = 16 * 1024 * 1024;
 
-// Потолок числа узлов дерева. Арена не сжимается: узел переживает снятие последнего имени, и
-// рост оканчивается NoSpace до исчерпания бюджета процесса.
 const NODE_LIMIT: usize = 4096;
 
-// Занятый слот каталога: имя и узел, за которым оно закреплено.
 struct Slot {
     name: String,
     node: NodeId,
@@ -182,7 +178,6 @@ impl FileSystemBackend for RamFileSystem {
         Ok(node)
     }
 
-    /// Слот записи занимает надгробие: соседи по каталогу остаются на своих позициях.
     fn unlink(&mut self, path: Path<'_>) -> Result<(), FileSystemError> {
         let (directory, name) = self.parent_of(path)?;
         let (index, node) = self
@@ -192,12 +187,11 @@ impl FileSystemBackend for RamFileSystem {
         if info.kind.is_directory() && info.size != 0 {
             return Err(FileSystemError::NotEmpty);
         }
+        // Слот записи занимает надгробие: соседи по каталогу остаются на своих позициях.
         self.entries_mut(directory)?[index] = None;
         Ok(())
     }
 
-    /// Перенос каталога внутрь себя возвращает `InvalidPath`. Замещённое имя остаётся в своём
-    /// слоте, а на месте прежнего имени встаёт надгробие.
     fn rename(&mut self, from: Path<'_>, to: Path<'_>) -> Result<(), FileSystemError> {
         let (source, source_name) = self.parent_of(from)?;
         let (index, node) = self
@@ -314,14 +308,11 @@ impl FileSystemBackend for RamFileSystem {
         })
     }
 
-    /// Узлы лежат в куче сервера, вне региона: окна нет ни у одного из них.
     fn backing(&self, _node: NodeId) -> Result<Window, FileSystemError> {
         Err(FileSystemError::NotSupported)
     }
 }
 
-// Расширяет файл нулями до len байт. Длина в пределах уже занятой оставляет файл как есть,
-// длина за FILE_SIZE_MAX и нехватка памяти под рост дают NoSpace.
 fn grow(file: &mut Vec<u8>, len: usize) -> Result<(), FileSystemError> {
     if len as u64 > FILE_SIZE_MAX {
         return Err(FileSystemError::NoSpace);
@@ -335,7 +326,6 @@ fn grow(file: &mut Vec<u8>, len: usize) -> Result<(), FileSystemError> {
     Ok(())
 }
 
-// Промежуток от прежней длины файла до начала записи заполняется нулями.
 fn write_into(file: &mut Vec<u8>, start: usize, data: &[u8]) -> Result<(), FileSystemError> {
     let end = start
         .checked_add(data.len())
@@ -388,7 +378,6 @@ mod tests {
         }
     }
 
-    // Имена записей, уложенных `list` в буфер, и сам итог перечисления.
     fn listing(
         fs: &RamFileSystem,
         node: NodeId,

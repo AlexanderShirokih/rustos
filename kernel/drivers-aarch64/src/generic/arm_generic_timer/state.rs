@@ -10,7 +10,6 @@ use crate::{read_sysreg, write_sysreg};
 
 pub(super) const CNTV_CTL_ENABLE: u32 = 1 << 0;
 
-/// Runtime-состояние ARM Generic Timer.
 pub(super) struct ArmGenericTimerState {
     pub(super) frequency: u64,
     pub(super) handler: Once<Arc<dyn TickHandler>>,

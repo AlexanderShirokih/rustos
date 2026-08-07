@@ -13,7 +13,6 @@ use syscall::{IPC_BUFFER_DATA_MAX, encode_tag};
 const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-/// Куда sibling-поток кладёт VA своего IPC-буфера (0 = ещё не записал).
 static SIBLING_VA: AtomicU64 = AtomicU64::new(0);
 
 #[kernel_test]

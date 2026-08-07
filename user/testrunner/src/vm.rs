@@ -1,4 +1,4 @@
-//! E2E проверка VM-syscall'ов из EL0: `MemoryAllocate`, `MemoryRemap`,
+//! E2E проверка VM-syscall из EL0: `MemoryAllocate`, `MemoryRemap`,
 //! `MemoryFree`.
 //!
 //! Раньше эти сценарии жили kernel-тестами, где payload собирался машинными

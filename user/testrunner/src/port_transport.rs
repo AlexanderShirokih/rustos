@@ -20,10 +20,8 @@ const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 const BADGE: NonZeroU64 = NonZeroU64::new(0x00C0_FFEE).expect("badge is non-zero");
 
-// Сырые HandleId копий порта, отданных клиенту во владение.
 static BADGED_RAW: AtomicU64 = AtomicU64::new(0);
 static PLAIN_RAW: AtomicU64 = AtomicU64::new(0);
-// Результат клиента: 1 - обе отправки прошли.
 static CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
 extern "C" fn badge_client(_arg: usize) -> u32 {
@@ -62,7 +60,7 @@ fn server_reads_badge_of_receiving_handle() {
 
     let client = spawn(badge_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
 
-    // Значки снимаются в локальные переменные до assert'ов: провал kassert
+    // Значки снимаются в локальные переменные до проверок: провал kassert
     // логирует строку, а это port_send, перезаписывающий буфер.
     let server = PortTransport::server(port.handle());
     server

@@ -31,13 +31,11 @@ const STARTUP_FAILURE_EXIT_CODE: u32 = 1;
 const STARTUP_CLEANUP_TIMEOUT: Timeout = Timeout::from_secs(5);
 const CREATED_PROCESS_REAP_TURN: Timeout = Timeout::from_millis(1);
 
-// RAII-владелец незавершенной startup-транзакции.
 struct PendingLaunch {
     process: Option<Process>,
     startup: Option<Port>,
 }
 
-// RAII-владелец процесса между ProcessCreate и успешным ProcessStart.
 struct PendingProcess {
     process: Option<Process>,
 }

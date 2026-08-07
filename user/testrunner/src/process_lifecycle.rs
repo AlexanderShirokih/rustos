@@ -10,21 +10,13 @@ use crate::{
     fixture_protocol::{OP_EXIT, REPLY_OK},
 };
 
-/// Размер стека рабочего потока (page-aligned выдача -> вершина 16-байт-выровнена).
 const STACK_SIZE: u64 = 0x4000;
-/// Код, которым завершаются и поток, и потомок.
 const EXIT_CODE: u32 = 42;
 
-/// Точка входа рабочего потока: сразу уходит в `ThreadExit(arg)`.
 extern "C" fn exiting_entry(code: usize) -> ! {
     thread_exit(code as u64)
 }
 
-/// Поток, вызвавший `ThreadExit(N)`, наблюдается терминированным с кодом `N`.
-///
-/// Поток создаётся напрямую через `Thread::create`, а не через `spawn`:
-/// `JoinHandle::join` поглощает дескриптор, а тесту нужен exit-код уже
-/// после присоединения.
 #[kernel_test]
 fn thread_exit_publishes_exit_code() {
     let stack = Resource::self_resource()

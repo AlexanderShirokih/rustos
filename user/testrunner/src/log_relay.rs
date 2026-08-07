@@ -29,11 +29,9 @@ use userland_loader::load_entry;
 
 use crate::{ipc_raw, log_fixture_protocol::FIXTURE_LINE};
 
-// Значок лог-сессии маршрутизатора имён у общего relay прогона.
 pub(crate) const ROUTER_BADGE: NonZeroU64 =
     NonZeroU64::new(0x1001_1001_1001_1001).expect("badge is non-zero");
 
-// Значки тестовых сессий: первый назван таблицей, второй в неё не входит.
 const NAMED_BADGE: NonZeroU64 = NonZeroU64::new(0x0101_0101_0101_0101).expect("badge is non-zero");
 const UNNAMED_BADGE: NonZeroU64 =
     NonZeroU64::new(0x0202_0202_0202_0202).expect("badge is non-zero");
@@ -46,35 +44,21 @@ fn test_source_name(badge: u64) -> Option<&'static str> {
     (badge == NAMED_BADGE.get()).then_some("named-subsystem")
 }
 
-// Фикстура, пробующая bootstrap-операции по выданной ей лог-капе.
 const LOG_CLIENT_FIXTURE: &str = "/boot/log-client-fixture";
 
-// Источник собственных строк relay: диагностика отвергнутых кадров идёт в тот
-// же сток, что и клиентские строки.
 const RELAY_SOURCE: &str = "log-relay";
 
-// Срок ожидания записи стока: пересылка идёт в потоке relay.
 const RECORD_TIMEOUT: Timeout = Timeout::from_secs(3);
-// Шаг ожидания записи стока.
 const RECORD_POLL: Timeout = Timeout::from_millis(10);
-// Срок остановки relay и завершения фикстуры.
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
-// Срок отправки, за который живой получатель успевает встретить кадр.
 const SEND_TIMEOUT: Timeout = Timeout::from_millis(500);
 
-// Подряд идущих отказов стока, после которых цикл relay уходит. Значение
-// повторяет предел `lib/log-relay`: тест проверяет его границу с обеих сторон.
-const SINK_FAILURE_LIMIT: usize = 8;
+const SINK_FAILURE_LIMIT: usize = log_relay::SINK_FAILURE_LIMIT as usize;
 
-// Сессий, минтящихся между синхронизациями с relay: непрочтённых событий об
-// уходе значка порт держит не больше ёмкости таблицы хэндлов.
 const CHURN_BATCH: u64 = 64;
 
-// База значков синхронизирующих сессий: с меняющимися значками она не
-// пересекается.
 const SYNC_BADGE_BASE: NonZeroU64 = NonZeroU64::new(0x0300_0000).expect("badge is non-zero");
 
-// Строка, пересланная стоком тестового relay.
 #[derive(Clone)]
 struct Record {
     source: String,
@@ -83,24 +67,16 @@ struct Record {
 
 static RECORDED: Mutex<Vec<Record>> = Mutex::new(Vec::new());
 
-// Общий relay прогона: его сессии получают процессы, поднимаемые тестами.
 static SHARED: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 
-// Relay идущего сценария: отказ kassert уходит из его тела прямо в путь
-// завершения прогона, и остановить цикл может только он.
 static ACTIVE: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 
-// Режим стока: отказ вместо пересылки.
 static SINK_REFUSES: AtomicBool = AtomicBool::new(false);
 
-// Waitable handle потока общего relay: supervisor-сценарий ждёт его наравне с
-// process маршрутизатора.
 pub(crate) fn shared_relay_thread() -> Option<syscall::Handle> {
     SHARED.lock().as_ref().map(|relay| relay.handle().as_raw())
 }
 
-// Лог-сессия маршрутизатора имён с правом минта: производные достаются его
-// файловым системам.
 pub(crate) fn router_log_session() -> OwnedHandle {
     component_log_session(ROUTER_BADGE).expect("router log session")
 }
@@ -117,15 +93,13 @@ pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<OwnedHandle> {
     relay.delegated_session(badge).ok()
 }
 
-// Останавливает циклы relay прогона: их потоки иначе остаются живыми и не дают
-// процессу завершиться. Путь завершения не ждёт лока: занятый лок оставляет
-// цикл живым, а ожидание превращает провал теста в зависание.
 pub(crate) fn shutdown_relays() {
     stop(&ACTIVE);
     stop(&SHARED);
 }
 
 fn stop(slot: &Mutex<Option<LogRelayThread>>) {
+    // Путь завершения прогона не ждёт лока: ожидание превращает провал теста в зависание.
     if let Some(mut held) = slot.try_lock()
         && let Some(relay) = held.take()
     {
@@ -133,7 +107,6 @@ fn stop(slot: &Mutex<Option<LogRelayThread>>) {
     }
 }
 
-// Сток тестового relay.
 struct RecordingSink;
 
 impl LogSink for RecordingSink {
@@ -155,9 +128,8 @@ impl LogSink for RecordingSink {
     }
 }
 
-// Минт лог-сессии идущего сценария. Лок держится только на время минта, и путь
-// завершения прогона застаёт его свободным.
 fn scenario_session(badge: NonZeroU64) -> OwnedHandle {
+    // Лок ACTIVE не удерживается за пределами минта.
     ACTIVE
         .lock()
         .as_ref()
@@ -166,7 +138,6 @@ fn scenario_session(badge: NonZeroU64) -> OwnedHandle {
         .expect("log session")
 }
 
-// Поднимает тестовый relay, отдаёт сценарию минт его сессий и останавливает.
 fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> OwnedHandle)) {
     RECORDED.lock().clear();
     SINK_REFUSES.store(false, SeqCst);
@@ -185,8 +156,6 @@ fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> OwnedHandle)) {
         .expect("test log relay stops");
 }
 
-// Ждёт, пока сток снимет `count` клиентских записей, и отдаёт их снимок.
-// Собственные строки relay в счёт не идут.
 fn wait_for_records(count: usize) -> Vec<Record> {
     // Порт-таймер заводится один на всё ожидание: приёмник ему не нужен.
     let idle = Port::create().expect("port create");
@@ -207,14 +176,12 @@ fn wait_for_records(count: usize) -> Vec<Record> {
     }
 }
 
-// Пишет строку по лог-сессии.
 fn write_log(session: &OwnedHandle, tag: &str, message: &str) {
     LogClient::new(PortTransport::client(session))
         .write_str(tag, message)
         .expect("log frame delivered");
 }
 
-// Шлёт по лог-сессии кадр с ordinal вне контракта.
 fn send_unknown_ordinal(session: &OwnedHandle) {
     let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
     frame
@@ -225,7 +192,6 @@ fn send_unknown_ordinal(session: &OwnedHandle) {
     kernel_tests::kassert_eq!(port_send(session.as_raw(), SEND_TIMEOUT), 0);
 }
 
-// Шлёт по лог-сессии валидный кадр лога с приложенной capability.
 fn send_log_frame_with_cap(session: &OwnedHandle, cap: OwnedHandle) -> i64 {
     let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
     frame
@@ -249,7 +215,6 @@ fn send_log_frame_with_cap(session: &OwnedHandle, cap: OwnedHandle) -> i64 {
     sent
 }
 
-// Заполняет оставшиеся слоты таблицы хэндлов капами с одним правом переноса.
 fn exhaust_handle_table() -> (Port, Vec<OwnedHandle>) {
     let source = Port::create().expect("filler port");
     let mut handles = Vec::new();
@@ -268,7 +233,6 @@ fn exhaust_handle_table() -> (Port, Vec<OwnedHandle>) {
     (source, handles)
 }
 
-// Спавнит программу образа, передавая ей `start` стартовым хэндлом.
 fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
     let kernel = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
     let cap = kernel
@@ -560,6 +524,7 @@ fn relay_drains_departed_badges_so_new_sessions_mint() {
             }
             minted += CHURN_BATCH;
             // Доставленный кадр означает, что relay разобрал накопленные уходы.
+            // База синхронизирующих значков не пересекается с меняющимися.
             let sync = session(SYNC_BADGE_BASE.saturating_add(minted));
             write_log(&sync, "churn", "session after churn");
             records += 1;
@@ -598,8 +563,7 @@ fn relay_stops_a_frame_at_the_first_refused_chunk() {
 }
 
 // Предел подряд идущих отказов стока уводит relay из цикла, а прерванная
-// успехом череда отказов его не трогает. Оставшийся без цикла порт держит
-// получателя корневой капой владельца, и кадру некому встретиться.
+// успехом череда отказов его не трогает.
 #[kernel_test]
 fn relay_stops_after_the_sink_refuses_in_a_row() {
     with_relay(|session| {

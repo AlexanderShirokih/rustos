@@ -32,21 +32,11 @@ use crate::memory::{
     regs::{common::EL1, tlb::TranslationLookasideBuffer},
 };
 
-/// Software-bit в leaf-PTE (бит 55 - software-available по AArch64 ARM):
-/// установлен -> фрейм был аллоцирован `frame_allocator` mapper'а (путь
-/// [`MemoryMapper::map`]); сброшен -> PA пришёл от вызывающего (путь
-/// [`MemoryMapper::map_exact`] - MMIO, image, identity). `unmap`/Drop
-/// возвращают в FA только страницы с битом - MMIO/устройственные PA не
-/// попадают в bitmap RAM.
 const OWNED_BY_FA_BIT: u64 = 1 << 55;
 
-/// Бит AP[0] (биты [7:6] leaf-PTE - поле AP[2:1]). Установлен -> EL0
-/// имеет доступ к странице; сброшен -> только EL1.
 const AP_USER_BIT: u64 = 1 << 6;
-/// Бит AP[1]. Установлен -> страница read-only; сброшен -> read-write.
 const AP_RO_BIT: u64 = 1 << 7;
 
-/// Направление user-копии: kernel читает из user-AS либо пишет в него.
 enum CopyDirection<'a> {
     In(&'a mut [u8]),
     Out(&'a [u8]),
@@ -60,13 +50,8 @@ fn leaf_user_writable(raw: u64) -> bool {
     raw & AP_USER_BIT != 0 && raw & AP_RO_BIT == 0
 }
 
-/// Адаптер FrameAllocator для выделения таблиц страниц.
-///
-/// Использует identity mapping (VA = PA) до включения MMU.
 pub(crate) struct FrameTableAlloc<'a, FA: FrameAllocator> {
-    /// Базовый аллокатор фреймов.
     allocator: &'a FA,
-    /// Смещение для VA относительно PA (0 для identity).
     vaddr_offset: usize,
 }
 
@@ -118,20 +103,11 @@ where
     FA: FrameAllocator,
     L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 {
-    /// Аллокатор физических фреймов.
     frame_allocator: &'a FA,
-    /// Физический адрес корня таблиц.
     root_pa: PhysicalAddress,
-    /// Сдвиг линейного отображения PA->VA (`higher_half_base` в production,
-    /// 0 для identity-mapping). Используется в `map` для kernel-side доступа
-    /// к свежевыделенным фреймам при копировании `init`-байтов.
     vaddr_offset: usize,
-    /// Внутренний маппер таблиц страниц.
     mapper: L,
-    /// Текущий тег AS (`0` - никогда не активирован). Lazy-allocated на пути
-    /// `activate_handle`.
     asid_tag: AtomicU64,
-    /// Kernel или user - определяет `nG` leaf-страниц и стратегию TLB-flush.
     kind: AddressSpaceKind,
 }
 
@@ -270,12 +246,8 @@ where
         })
     }
 
-    /// Заполняет страницу через kernel-VA: зануляет её, затем копирует
-    /// срез `init[seg_offset..]` максимум в FRAME_SIZE байт.
-    ///
-    /// # Safety
-    /// `kernel_ptr` указывает на эксклюзивно-владеемую 4К-выровненную
-    /// kernel-side mapping страницы.
+    // SAFETY: `kernel_ptr` указывает на эксклюзивно владеемую 4К-выровненную
+    // kernel-side mapping страницы.
     unsafe fn fill_frame_init(kernel_ptr: *mut u8, init: &[u8], seg_offset: usize) {
         let page_size = PageAlignedAddress::ALIGNMENT;
         // SAFETY: kernel_ptr валиден на FRAME_SIZE байт по контракту caller-а.
@@ -288,30 +260,18 @@ where
         }
     }
 
-    /// Откатывает первые `mapped_pages` страниц диапазона начиная с `va`:
-    /// обнуляет PTE, возвращает фрейм аллокатору, инвалидирует TLB.
-    ///
-    /// Используется на пути транзакционного `map` при partial-OOM. Все
-    /// страницы только что замаплены этим же циклом и помечены
-    /// `OWNED_BY_FA_BIT`, поэтому walk_to_l3_leaf не может вернуть
-    /// `HitBlock`/`NotMapped`, а deallocate безопасен.
-    ///
-    /// Промежуточные L1/L2/L3-таблицы, которые `map_contiguous_inner` мог
-    /// создать в этом же цикле, **не** освобождаются - они освободятся при
-    /// Drop AS. Это безопасно: пустые таблицы не нарушают семантику и не
-    /// мешают повторному `map` по тем же VA.
     fn rollback_map(
         &self,
         mapper: &mut PageMapper<FrameTableAlloc<'a, FA>>,
         va: PageAlignedVirtualAddress,
         mapped_pages: usize,
     ) {
+        // Промежуточные L1/L2/L3-таблицы этого же цикла остаются на месте:
+        // пустая таблица не меняет семантику маппинга и уходит при Drop AS.
         for i in 0..mapped_pages {
             let page_va = va.add_blocks(i);
-            // Должно быть невозможно: страница только что замаплена этим же
-            // циклом. Если walker всё-таки вернул ошибку - дальнейший откат
-            // невозможен; останавливаемся, чтобы не trail'ить ещё один
-            // источник несогласованности.
+            // Ошибка walker по только что замапленной странице означает, что
+            // таблицы уже несогласованы - откат останавливается здесь.
             let Ok((l3, idx)) = mapper.walk_to_l3_leaf(page_va) else {
                 break;
             };
@@ -330,15 +290,12 @@ where
         }
     }
 
-    /// Точечно инвалидирует TLB для одной 4К-страницы по `va`.
-    ///
-    /// Для user-AS использует `tlbi vae1is, (va | asid)`; если AS ни разу не
-    /// активировался (`asid == 0`), TLB заведомо пуст и tlbi пропускается.
-    /// Для kernel-AS - broadcast по всем ASID (`tlbi vaae1is`).
     fn invalidate_tlb_page(&self, va: usize) {
         match self.kind {
             AddressSpaceKind::User => {
                 let asid = unpack_asid(self.asid_tag.load(Ordering::Acquire));
+                // Нулевой тег означает AS, который ни разу не активировался:
+                // его трансляций в TLB нет.
                 if asid != 0 {
                     TranslationLookasideBuffer::<EL1>::invalidate_va_asid(va, asid);
                 }
@@ -349,8 +306,6 @@ where
         }
     }
 
-    /// Инвалидирует TLB для leaf-маппинга уровня `leaf_shift` по `va`.
-    /// 4К/2М идут per-page; 1G - ASID-wide для user, broadcast для kernel.
     fn invalidate_tlb_leaf(&self, va: usize, leaf_shift: u8) {
         if leaf_shift == L1::SHIFT {
             match self.kind {
@@ -374,10 +329,9 @@ where
         }
     }
 
-    /// Возвращает фрейм во `frame_allocator`, если PA принадлежит RAM-bitmap'у
-    /// (бит `OWNED_BY_FA_BIT` в leaf-PTE). Map_exact-leaves пропускаются: PA
-    /// пришёл от caller'а (MMIO, image, identity).
     fn dealloc_owned_leaf(&self, raw: u64) {
+        // Leaf без software-бита пришёл через `map_exact`: его PA (MMIO, image,
+        // identity) в RAM-bitmap не числится и в FA не возвращается.
         if raw & OWNED_BY_FA_BIT == 0 {
             return;
         }
@@ -393,12 +347,6 @@ where
             .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
     }
 
-    /// Побайтовое копирование между user-AS и kernel-буфером.
-    ///
-    /// Семантика - по странице: walk leaf, проверка user-access (R/W),
-    /// `memcpy` через kernel-physmap. Под `mapper.with_lock` -
-    /// конкурентный unmap не может race'нуть (все мутации таблиц
-    /// держат тот же lock).
     fn copy_user_bytes(
         &self,
         start: VirtualAddress,
@@ -411,6 +359,8 @@ where
         let page_size = PageAlignedAddress::ALIGNMENT;
         let need_writable = matches!(dir, CopyDirection::Out(_));
 
+        // Все мутации таблиц идут под этим же lock, поэтому конкурентный unmap
+        // с копированием не пересекается.
         self.mapper.with_lock(|mapper| {
             let mut copied = 0usize;
             while copied < len {
@@ -465,11 +415,7 @@ where
         })
     }
 
-    /// Per-line `ic ivau` по kernel-VA для свежезаписанной exec-страницы.
-    /// Шаг 64 байта - минимальный гарантированный размер I-cache line на aarch64.
-    ///
-    /// # Safety
-    /// `kernel_ptr` - валидный VA в линейной higher-half-карте.
+    // SAFETY: `kernel_ptr` - валидный VA в линейной higher-half-карте.
     unsafe fn flush_icache_page(kernel_ptr: *mut u8) {
         let page_size = PageAlignedAddress::ALIGNMENT;
         // SAFETY: см. контракт caller-а.
@@ -482,6 +428,8 @@ where
                     in(reg) p,
                     options(nostack, preserves_flags),
                 );
+                // 64 байта - минимальный гарантированный размер I-cache line
+                // на aarch64.
                 p = p.add(64);
             }
         }
@@ -530,7 +478,6 @@ where
     }
 }
 
-/// Visitor для `unmap`: TLB-инвалидация + возврат owned-leaf'ов и пустых таблиц.
 struct UnmapPath<'m, 'a, FA, L>
 where
     FA: FrameAllocator,
@@ -553,7 +500,6 @@ where
     }
 }
 
-/// Visitor для `Drop`: возвращает owned-leaf'ы и все таблицы, без TLB.
 struct DropPath<'a, FA: FrameAllocator> {
     frame_allocator: &'a FA,
 }
@@ -642,10 +588,9 @@ where
                     return Err(e);
                 }
 
-                // Помечаем leaf SW-битом OWNED_BY_FA_BIT: фрейм аллоцирован
-                // нашим frame_allocator-ом - его можно вернуть в FA при unmap.
-                // map_exact-leaves остаются без бита и не освобождаются.
-                // Без бита OWNED_BY_FA фрейм не вернётся в FA при unmap.
+                // Бит 55 leaf-PTE отдан software по AArch64 ARM. Он помечает
+                // фрейм, выданный нашим frame_allocator: только такой фрейм
+                // `unmap` и Drop возвращают в FA.
                 if let Ok((l3, idx)) = mapper.walk_to_l3_leaf(page_va) {
                     // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) leaf-Page;
                     // mapper-lock держится этим with_lock - эксклюзивный доступ.
@@ -733,7 +678,7 @@ where
     fn zero_owned_frame(&self, pa: PageAlignedAddress) {
         let kernel_ptr = (pa.as_usize() + self.vaddr_offset) as *mut u8;
         // SAFETY: kernel-side линейная карта покрывает всю физическую память,
-        // фрейм по `pa` существует и принадлежит caller'у (контракт
+        // фрейм по `pa` существует и принадлежит caller (контракт
         // `MemoryRegion::Virtual`); 4К-выравнивание гарантировано типом `pa`.
         unsafe { core::ptr::write_bytes(kernel_ptr, 0, PageAlignedAddress::ALIGNMENT) };
     }
@@ -820,7 +765,7 @@ where
         };
         self.mapper.with_lock(|mapper_inner| {
             // SAFETY: AS больше не используется (scheduler переключил CPU до
-            // cleanup'а), TTBR0 на root не указывает.
+            // cleanup), TTBR0 на root не указывает.
             unsafe {
                 free_all(
                     mapper_inner.root_ptr(),
@@ -839,7 +784,7 @@ where
 fn walk_to_remap_err(err: &WalkError) -> MemoryRemappingError {
     match err {
         WalkError::HitBlock => MemoryRemappingError::UnsupportedBlockMapping,
-        // Decode error в leaf-walk означает мусор в дескрипторе - для caller'а
+        // Decode error в leaf-walk означает мусор в дескрипторе - для caller
         // практически неотличимо от Invalid: семантически "страница не замаплена".
         WalkError::NotMapped | WalkError::Decode(_) => MemoryRemappingError::NotMapped,
     }
@@ -847,7 +792,7 @@ fn walk_to_remap_err(err: &WalkError) -> MemoryRemappingError {
 
 fn unmap_to_unmap_err(err: &UnmapError) -> MemoryUnmappingError {
     match err {
-        // Corrupt дескриптор для caller'а семантически = "не замаплено".
+        // Corrupt дескриптор для caller семантически = "не замаплено".
         UnmapError::NotMapped | UnmapError::Decode(_) => MemoryUnmappingError::NotMapped,
         UnmapError::UnsupportedPartialBlock => MemoryUnmappingError::UnsupportedBlockMapping,
     }

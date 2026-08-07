@@ -21,38 +21,29 @@ use util::crlf::Crlf;
 
 use crate::register_driver;
 
-/// Количество символов для передачи.
+// Регистры UART DM. TF принимает слово целиком, 32-битной записью.
+
 const NCF_TX: Reg<u32> = Reg::new(0x040);
-/// Регистр статуса.
 const SR: Reg<u32> = Reg::new(0x0A4);
-/// Регистр команд.
 const CR: Reg<u32> = Reg::new(0x0A8);
-/// TX FIFO (32-битная запись).
 const TF: Reg<u32> = Reg::new(0x100);
 
-/// TX готов к приёму данных.
+// Биты SR и команды CR
+
 const SR_TXRDY: u32 = 1 << 2;
-/// TX FIFO пуст.
 const SR_TXEMT: u32 = 1 << 3;
-/// Команда сброса TX_READY.
 const CMD_CLEAR_TX_READY: u32 = 0x300;
 
-/// Индекс записи reg в DeviceTree.
 const REG_UART_INDEX: usize = 0;
 
-/// Предел ожидания последовательности передачи на пути паники.
 const TX_SEQUENCE_SPIN_LIMIT: usize = 1_000_000;
 
 /// Драйвер Qualcomm UART DM.
 pub struct UartDm {
-    /// MMIO-доступ к регистрам.
     mmio: MmioBound,
-    /// Занятость последовательности передачи.
     tx_sequence_claimed: AtomicBool,
 }
 
-/// Эксклюзивное владение последовательностью передачи UART DM: `NCF_TX`, `CR`
-/// и `TF` записываются только через него.
 struct TxSequenceClaim<'a>(&'a UartDm);
 
 impl UartDm {
@@ -63,9 +54,8 @@ impl UartDm {
         }
     }
 
-    /// Захватывает последовательность передачи, ожидая освобождения без
-    /// предела: таймаут не доказывает смерть владельца.
     fn claim_tx_sequence(&self) -> TxSequenceClaim<'_> {
+        // Ожидание без предела: таймаут не доказывает смерть владельца.
         loop {
             if let Some(claim) = self.try_claim_tx_sequence() {
                 return claim;
@@ -74,9 +64,6 @@ impl UartDm {
         }
     }
 
-    /// Захват для пути паники: ожидание ограничено
-    /// [`TX_SEQUENCE_SPIN_LIMIT`], затем захват переходит силой. Вызывающий
-    /// гарантирует, что вытесняемый владелец не возобновится.
     fn claim_tx_sequence_for_panic(&self) -> TxSequenceClaim<'_> {
         for _ in 0..TX_SEQUENCE_SPIN_LIMIT {
             if let Some(claim) = self.try_claim_tx_sequence() {
@@ -85,9 +72,10 @@ impl UartDm {
             spin_loop();
         }
 
-        // Брошенная последовательность не мешает свежей: слово, не поданное
-        // в TF, передачу не начинает, а поданное дренируется железом и
-        // наблюдается через SR_TXEMT.
+        // Захват переходит силой, и вызывающий гарантирует, что вытесняемый
+        // владелец не возобновится. Брошенная последовательность не мешает
+        // свежей: слово, не поданное в TF, передачу не начинает, а поданное
+        // дренируется железом и наблюдается через SR_TXEMT.
         self.tx_sequence_claimed.swap(true, Ordering::Acquire);
         TxSequenceClaim(self)
     }
@@ -101,9 +89,9 @@ impl UartDm {
 }
 
 impl TxSequenceClaim<'_> {
-    /// Подаёт передатчику одно слово (до 4 байт, LF -> CRLF).
-    /// Возвращает число потреблённых байт входа.
     fn try_feed_word(&self, buf: &[u8]) -> Result<usize, Pending> {
+        // NCF_TX, CR и TF образуют одну последовательность передачи и пишутся
+        // только под захваченным `TxSequenceClaim`.
         let mmio = &self.0.mmio;
 
         // Очередь должна быть пуста

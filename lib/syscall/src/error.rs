@@ -1,7 +1,7 @@
 /// Ошибки, возвращаемые syscall-слоем.
 ///
 /// Численные коды стабильны и являются частью ABI: они кодируются в
-/// возвращаемое значение syscall'а как отрицательные числа.
+/// возвращаемое значение syscall как отрицательные числа.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SyscallError {
@@ -10,7 +10,7 @@ pub enum SyscallError {
     /// Syscall вызван из kernel-контекста; kernel-side IPC должен ходить
     /// через прямой вызов `capability`, а не через trap.
     KernelOriginated = 2,
-    /// Аргумент syscall'а не прошёл валидацию (например, `HandleId == 0`).
+    /// Аргумент syscall не прошёл валидацию (например, `HandleId == 0`).
     InvalidArgument = 3,
     /// Невалидный/закрытый handle.
     BadHandle = 4,

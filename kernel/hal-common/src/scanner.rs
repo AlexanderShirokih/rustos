@@ -4,7 +4,6 @@ use memory::physical_address::PhysicalAddress;
 
 use crate::boot::BootPayloadRange;
 
-/// Stack depth limit for iterative serial-node search.
 const MAX_SERIAL_SCAN_DEPTH: usize = 128;
 
 /// Находит узел консоли из stdout-path или первый serial.
@@ -31,15 +30,12 @@ fn stdout_node<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
 }
 
 fn first_serial<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
-    // `DeviceTree::nodes()` returns only direct children of root, so a serial
-    // inside a bus (`/soc/serial@...`) is not found that way. Walk the whole
-    // tree iteratively to stay stack-safe against untrusted FDT blobs.
+    // Serial живёт и внутри шины (`/soc/serial@...`): обход берёт всё дерево.
+    // Итеративная форма держит стек ограниченным на недоверенном блобе.
     let root = device_tree.root()?;
     find_serial_iterative(root)
 }
 
-/// Iterative DFS for a serial node. Bounded by `MAX_SERIAL_SCAN_DEPTH`
-/// so an untrusted FDT blob cannot exhaust the call stack.
 fn find_serial_iterative<'dt>(root: Node<'dt>) -> Option<Node<'dt>> {
     let mut stack: Vec<Node<'dt>, MAX_SERIAL_SCAN_DEPTH> = Vec::new();
     stack.push(root)?;
@@ -61,7 +57,6 @@ fn find_serial_iterative<'dt>(root: Node<'dt>) -> Option<Node<'dt>> {
     None
 }
 
-/// Признаёт узел serial-консолью по `device_type`, имени или `compatible`.
 fn is_serial(node: &Node<'_>) -> bool {
     let by_device_type = node
         .prop("device_type")
@@ -75,7 +70,6 @@ fn is_serial(node: &Node<'_>) -> bool {
     by_device_type || by_name || by_compat
 }
 
-/// Итерирует по null-terminated строкам из свойства `compatible`.
 fn compatible_strings<'a>(node: &'a Node<'a>) -> impl Iterator<Item = &'a str> {
     let data = node.prop("compatible").map_or(&[] as &[u8], |p| p.value());
 
@@ -153,8 +147,6 @@ mod tests {
 
     // --- Console / serial search ---
 
-    /// DTB с serial внутри шины soc, опциональным `aliases` и опциональным
-    /// `/chosen { stdout-path = ... }`.
     fn build_console_dtb(stdout_path: Option<&str>) -> Vec<u8> {
         let mut pool = StringPool::new();
         let s_addr = pool.intern("#address-cells");

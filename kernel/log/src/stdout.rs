@@ -5,7 +5,6 @@ use io::writer::Writer;
 
 use crate::level::{Level, prefix};
 
-/// Тип статического writer'а для вывода логов.
 type StaticWriter = dyn Writer + Sync + 'static;
 
 struct NilWriter;

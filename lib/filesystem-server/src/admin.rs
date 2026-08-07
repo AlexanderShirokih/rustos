@@ -14,28 +14,22 @@ use crate::{
     service::{settle, vend},
 };
 
-/// Capability стартового кадра.
 pub(crate) struct StartResources {
-    /// Канал логирования в klog.
     pub(crate) log: OwnedHandle,
-    /// Регион userland-образа.
     pub(crate) image: OwnedHandle,
 }
 
-/// Сторона admin-порта до подъёма сервера: она только принимает стартовый кадр.
 #[derive(Default)]
 pub(crate) struct Handshake {
     resources: Option<StartResources>,
 }
 
-/// Сторона admin-порта поднятого сервера: она заводит сессии.
 pub(crate) struct Binding<'a> {
     shared: &'a Shared,
     vended: Option<OwnedHandle>,
 }
 
 impl Handshake {
-    /// Принятые capability. `None` - стартового кадра не было.
     pub(crate) fn take(self) -> Option<StartResources> {
         self.resources
     }
@@ -49,8 +43,6 @@ impl FileSystemAdminService for Handshake {
         });
     }
 
-    /// Сессии заводит поднятый сервер: до стартового кадра ни сервисного порта, ни таблицы сессий
-    /// ещё нет.
     fn bind(&mut self) -> Result<Cap, FileSystemError> {
         Err(FileSystemError::NoSession)
     }
@@ -64,15 +56,12 @@ impl<'a> Binding<'a> {
         }
     }
 
-    /// Закрывает кадр: выданная capability остаётся за вызывателем только при доставленном ответе.
     pub(crate) fn end(&mut self, delivered: bool) {
         settle(&mut self.vended, delivered);
     }
 }
 
 impl FileSystemAdminService for Binding<'_> {
-    /// Стартовый кадр сервер принимает один раз, до подъёма. Повторный несёт capability, которых
-    /// сервер не ждёт: они закрываются вместе с кадром.
     fn start(&mut self, log: Cap, image: Cap) {
         drop(OwnedHandle::adopt(log));
         drop(OwnedHandle::adopt(image));

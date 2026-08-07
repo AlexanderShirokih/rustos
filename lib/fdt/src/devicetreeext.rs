@@ -24,13 +24,10 @@ impl AddressSpace {
 /// Адресное пространство шины
 #[derive(Debug, Copy, Clone, Default)]
 pub struct Ranges {
-    /// Адрес устройства в координатах шины
     child: usize,
 
-    /// Адрес в координатах родительской шины
     parent: usize,
 
-    /// Размер адресного пространства шины
     size: usize,
 }
 
@@ -51,10 +48,8 @@ impl Ranges {
 /// Кратность регистров устройства в 32-битных словах
 #[derive(Debug, Copy, Clone)]
 pub struct CellsSize {
-    /// Количество 32-битных ячеек для описания адреса
     address_cells: usize,
 
-    /// Количество 32-битных ячеек для описания размера
     size_cells: usize,
 }
 

@@ -60,7 +60,6 @@ impl DataCache<EL1> {
         unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
     }
 
-    /// Длина наименьшей строки кэша данных в байтах.
     fn line_size() -> usize {
         let ctr: u64;
         // SAFETY: CTR_EL0 читается на EL1 без побочных эффектов.

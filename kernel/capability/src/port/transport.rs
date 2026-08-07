@@ -11,16 +11,15 @@ use crate::handle_table::HandleTable;
 /// рандеву-переносом. Тот же `#[repr(C)]`-layout, что и user-буфер.
 pub type KernelIpcBuffer = Arc<MutexCell<syscall::IpcBuffer>>;
 
-/// Способ доступа к телу IPC-буфера транспорта.
 #[derive(Clone)]
 pub(crate) enum BufferAccess {
-    /// User-буфер: mapper его AS и VA буфера.
     User {
         mapper: Arc<dyn MemoryMapper + Send + Sync>,
         ipc_buffer_va: VirtualAddress,
     },
-    /// Kernel-резидентный буфер за разделяемой ячейкой.
-    Kernel { buffer: KernelIpcBuffer },
+    Kernel {
+        buffer: KernelIpcBuffer,
+    },
 }
 
 /// Транспортный контекст потока для кросс-AS рандеву: доступ к телу его

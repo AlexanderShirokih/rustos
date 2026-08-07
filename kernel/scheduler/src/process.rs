@@ -1,5 +1,6 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::{
+    mem::offset_of,
     num::NonZeroU32,
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -31,26 +32,25 @@ impl<'a> ProcessName<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAlreadyLoaded;
 
+#[repr(C)]
 pub struct Process {
     id: ProcessId,
     name: StaticString<MAX_PROCESS_NAME_LEN>,
     address_space: Arc<AddressSpace>,
     handle_table: Arc<MutexCell<HandleTable>>,
-    /// Per-process аллокатор user-VA. `None` для kernel-процессов (idle,
-    /// kernel-thread'ы) - у них пользовательской памяти нет, syscall'ы
-    /// `vm_*` для них вернут `WrongType`.
     user_vm: Option<Arc<MutexCell<UserVmAllocator>>>,
-    /// Регионы загруженного образа. Объявлены после `address_space`/`user_vm`,
-    /// чтобы PTE снимались до возврата фреймов в `FrameAllocator`.
     image_segments: Vec<Arc<MemoryRegion>>,
-    /// Количество живых thread'ов, привязанных к этому процессу. Декремент
-    /// при терминации потока. Ноль - сигнал планировщику удалить процесс.
     thread_count: AtomicUsize,
-    /// Lifecycle-capability target процесса: переживает запись в `ProcessTable`, чтобы
-    /// держатели `Capability` могли наблюдать завершение процесса и читать
-    /// `exit_code` после удаления процесса (zombie-семантика).
     target: Arc<ProcessObject>,
 }
+
+const _: () = assert!(
+    offset_of!(Process, address_space) < offset_of!(Process, image_segments)
+        && offset_of!(Process, user_vm) < offset_of!(Process, image_segments),
+    "image segments drop after the address space and the user-VA allocator, so that the leaf \
+     PTEs of the image are gone before its frames return to the frame allocator; `repr(C)` \
+     makes the declaration order that Drop follows visible to this assert"
+);
 
 impl Process {
     pub fn new(id: ProcessId, name: ProcessName<'_>, address_space: Arc<AddressSpace>) -> Self {
@@ -86,7 +86,8 @@ impl Process {
         self
     }
 
-    /// In-place аналог [`Self::with_user_vm`]; отказывается перезаписать уже прикреплённый аллокатор.
+    /// In-place аналог [`Self::with_user_vm`]. Отказывается перезаписать
+    /// уже прикреплённый аллокатор.
     pub fn set_user_vm(&mut self, vm: UserVmAllocator) -> Result<(), ProcessAlreadyLoaded> {
         if self.user_vm.is_some() {
             return Err(ProcessAlreadyLoaded);
@@ -104,7 +105,7 @@ impl Process {
         self.user_vm.is_some()
     }
 
-    /// `true`, если в handle-таблице процесса нет живых handle'ов.
+    /// `true`, если в handle-таблице процесса нет живых handle.
     pub fn handle_table_is_empty(&self) -> bool {
         self.handle_table.with_lock(|t| t.live_count() == 0)
     }
@@ -126,12 +127,13 @@ impl Process {
         &self.address_space
     }
 
-    /// Per-process таблица capability-handle'ов.
+    /// Per-process таблица capability-handle.
     pub fn handle_table(&self) -> &Arc<MutexCell<HandleTable>> {
         &self.handle_table
     }
 
-    /// Lifecycle-capability target процесса; переживает удаление из `ProcessTable` (zombie-семантика).
+    /// Lifecycle-capability target процесса. Переживает удаление из
+    /// `ProcessTable` (zombie-семантика).
     pub fn process_object(&self) -> &Arc<ProcessObject> {
         &self.target
     }

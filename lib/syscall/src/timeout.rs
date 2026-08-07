@@ -2,7 +2,7 @@ const NS_PER_SEC: u64 = 1_000_000_000;
 const NS_PER_MILLI: u64 = 1_000_000;
 const NS_PER_MICRO: u64 = 1_000;
 
-/// Типизированный фасад над `timeout_ns` блокирующих syscall'ов.
+/// Типизированный фасад над `timeout_ns` блокирующих syscall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Timeout(u64);
@@ -35,18 +35,18 @@ impl Timeout {
         Self(secs.saturating_mul(NS_PER_SEC))
     }
 
-    /// ABI-значение `timeout_ns` для укладки в аргумент syscall'а.
+    /// ABI-значение `timeout_ns` для укладки в аргумент syscall.
     pub const fn raw(self) -> u64 {
         self.0
     }
 }
 
-/// ABI-значение `timeout_ns` блокирующих Port-syscall'ов "ждать бессрочно".
+/// ABI-значение `timeout_ns` блокирующих Port-syscall "ждать бессрочно".
 /// Sentinel `u64::MAX` отображается ядром в бессрочную блокировку и не занимает
 /// слот в sleeper-heap.
 pub const PORT_TIMEOUT_INFINITE: u64 = Timeout::INFINITE.raw();
 
-/// ABI-значение `timeout_ns` блокирующих Port-syscall'ов "не блокироваться"
+/// ABI-значение `timeout_ns` блокирующих Port-syscall "не блокироваться"
 /// (poll): операция завершается немедленно, иначе возвращается
 /// [`SYSCALL_RETURN_TIMEOUT`].
 pub const PORT_TIMEOUT_POLL: u64 = Timeout::POLL.raw();
