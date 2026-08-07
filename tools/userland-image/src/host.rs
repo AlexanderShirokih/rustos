@@ -9,8 +9,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use component_abi::{COMPONENT_MANIFEST_SECTION, ComponentManifest, decode_manifest};
 use filesystem_abi::{NAME_MAX, PATH_MAX};
-use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSegment, SegmentFlags, elf};
+use object::{
+    Architecture, BinaryFormat, Object, ObjectKind, ObjectSection, ObjectSegment, SectionFlags,
+    SegmentFlags, elf,
+};
 use serde::Deserialize;
 use userland::{
     Entry, Segment, SegmentPermissions, USERLAND_ENTRY_PATH_CAPACITY, USERLAND_PAGE_SIZE,
@@ -19,7 +23,10 @@ use userland_image::{
     BOOT_PLAN_PATH, ImageRecord, USERLAND_IMAGE_VERSION, decode, encode, encode_program,
 };
 
-use crate::{mounts::compile_mount_table, plan::compile_boot_plan};
+use crate::{
+    mounts::compile_mount_table,
+    plan::{PlanProgram, compile_boot_plan},
+};
 
 const USERLAND_MANIFEST_VERSION: u16 = USERLAND_IMAGE_VERSION;
 const USERLAND_STACK_ALIGN: u64 = USERLAND_PAGE_SIZE;
@@ -134,6 +141,7 @@ struct BuiltEntry {
     program: ResolvedProgram,
     entry_va: u64,
     segments: Vec<BuiltSegment>,
+    manifest: Option<ComponentManifest>,
 }
 
 #[derive(Clone, Debug)]
@@ -233,21 +241,8 @@ pub fn build_userland(
     let workspace = load_workspace_metadata(project_root)?;
     let programs = resolve_programs(&manifest, &workspace.packages)?;
     let mut files = collect_files(project_root, &manifest, extra_files)?;
-    let paths: Vec<&str> = programs
-        .iter()
-        .map(|program| program.path.as_str())
-        .collect();
-    for table in &manifest.mount_tables {
-        files.push(compile_mount_table_record(project_root, table, &paths)?);
-    }
-    if let Some(plan) = &manifest.plan {
-        let configs: Vec<&str> = manifest
-            .mount_tables
-            .iter()
-            .map(|table| table.path.as_str())
-            .collect();
-        files.push(compile_plan_record(project_root, plan, &paths, &configs)?);
-    }
+    // План сверяется с манифестами компонентов, поэтому программы собираются до
+    // его компиляции.
     let built_entries = programs
         .iter()
         .map(|program| {
@@ -259,6 +254,30 @@ pub fn build_userland(
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    let built_programs: Vec<PlanProgram<'_>> = built_entries
+        .iter()
+        .map(|entry| PlanProgram {
+            path: &entry.program.path,
+            manifest: entry.manifest,
+        })
+        .collect();
+    let paths: Vec<&str> = built_programs.iter().map(|program| program.path).collect();
+    for table in &manifest.mount_tables {
+        files.push(compile_mount_table_record(project_root, table, &paths)?);
+    }
+    if let Some(plan) = &manifest.plan {
+        let configs: Vec<&str> = manifest
+            .mount_tables
+            .iter()
+            .map(|table| table.path.as_str())
+            .collect();
+        files.push(compile_plan_record(
+            project_root,
+            plan,
+            &built_programs,
+            &configs,
+        )?);
+    }
 
     let blob = assemble_userland_image(&built_entries, &files)?;
     let output_path = build_dir.join("userland.img");
@@ -567,7 +586,7 @@ fn resolve_program(program: &ImageProgram, meta: &UserlandMetadata) -> Result<Re
 fn compile_plan_record(
     project_root: &Path,
     plan: &ImagePlan,
-    programs: &[&str],
+    programs: &[PlanProgram<'_>],
     configs: &[&str],
 ) -> Result<LoadedFile> {
     validate_image_path(&plan.path)?;
@@ -720,12 +739,48 @@ fn read_and_extract_entry(path: &Path, program: &ResolvedProgram) -> Result<Buil
     validate_file(&file, program)?;
     let entry_va = file.entry();
     let segments = extract_segments(&file, program)?;
+    let manifest = extract_manifest(&file, program)?;
 
     Ok(BuiltEntry {
         program: program.clone(),
         entry_va,
         segments,
+        manifest,
     })
+}
+
+fn extract_manifest(
+    file: &object::File<'_>,
+    program: &ResolvedProgram,
+) -> Result<Option<ComponentManifest>> {
+    let Some(section) = file.section_by_name(COMPONENT_MANIFEST_SECTION) else {
+        return Ok(None);
+    };
+    let SectionFlags::Elf { sh_flags } = section.flags() else {
+        bail!(
+            "userland entry '{}' must expose ELF component manifest section flags",
+            program.path
+        );
+    };
+    ensure!(
+        sh_flags & u64::from(elf::SHF_ALLOC) == 0,
+        "userland entry '{}' loads its '{COMPONENT_MANIFEST_SECTION}' section into the image; \
+         its linker script must place the section outside the loaded ones",
+        program.path
+    );
+    let bytes = section.data().with_context(|| {
+        format!(
+            "Failed to read component manifest section of userland entry '{}'",
+            program.path
+        )
+    })?;
+    let manifest = decode_manifest(bytes).map_err(|error| {
+        anyhow!(
+            "userland entry '{}' carries an invalid component manifest: {error:?}",
+            program.path
+        )
+    })?;
+    Ok(Some(manifest))
 }
 
 fn validate_file(file: &object::File<'_>, program: &ResolvedProgram) -> Result<()> {
@@ -994,6 +1049,7 @@ mod tests {
             program: resolved_program("package", path, boot, 0x4000),
             entry_va,
             segments: segments.to_vec(),
+            manifest: None,
         }
     }
 

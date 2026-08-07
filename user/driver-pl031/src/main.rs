@@ -8,7 +8,7 @@
 
 use core::panic::PanicInfo;
 
-use component_abi::receive_startup_transaction;
+use component_abi::component_manifest;
 use io::mmio::{Mmio, Reg};
 use ipc::wire::IpcError;
 use rtc_abi::{RtcService, dispatch_rtc};
@@ -33,10 +33,13 @@ const ALARM_TICKS: u32 = 2;
 
 const ALARM_BUDGET: Timeout = Timeout::from_secs(10);
 
-const SLOT_LINE: u16 = 0;
-const SLOT_WINDOW: u16 = 1;
-
 const ALARM_LOST_EXIT_CODE: u32 = 5;
+
+component_manifest! {
+    struct RtcStartup {
+        slots: { line: irq, window: mmio },
+    }
+}
 
 struct Pl031 {
     device: Mmio,
@@ -83,8 +86,8 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 
 fn run(startup: Handle) -> Result<()> {
     let startup = OwnedHandle::from_handle(startup);
-    let started = receive_startup_transaction(&PortTransport::server(startup.borrow()))?
-        .ok_or(Error::Start)?;
+    let started =
+        RtcStartup::receive(&PortTransport::server(startup.borrow()))?.ok_or(Error::Start)?;
     drop(startup);
 
     install_log(OwnedHandle::adopt(started.log), LOG_TAG);
@@ -93,12 +96,8 @@ fn run(startup: Handle) -> Result<()> {
     let _control = OwnedHandle::adopt(started.control);
     let service = OwnedHandle::adopt(started.service);
 
-    let line = IrqLine::from_handle(OwnedHandle::adopt(
-        started.slot(SLOT_LINE).ok_or(Error::Start)?,
-    ));
-    let window = MemoryRegion::from_handle(OwnedHandle::adopt(
-        started.slot(SLOT_WINDOW).ok_or(Error::Start)?,
-    ));
+    let line = IrqLine::from_handle(OwnedHandle::adopt(started.line));
+    let window = MemoryRegion::from_handle(OwnedHandle::adopt(started.window));
     let mapping = window.map_full(UserMemFlags::ReadWrite)?;
     let mut driver = Pl031 {
         device: mapping.mmio(),

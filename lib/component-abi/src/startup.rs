@@ -66,19 +66,17 @@ pub fn receive_startup_transaction<T: Transport>(
 }
 
 impl StartedComponent {
-    /// Capability слота `index`.
-    #[must_use]
-    pub fn slot(&self, index: u16) -> Option<ipc::wire::Cap> {
+    fn slot(&self, index: u16) -> Option<ipc::wire::Cap> {
         if index >= self.slot_count {
             return None;
         }
         *self.slots.get(usize::from(index))?
     }
 
-    /// Число слотов транзакции.
-    #[must_use]
-    pub const fn slot_count(&self) -> u16 {
-        self.slot_count
+    /// Capability слотов в порядке плана.
+    pub fn slots(&self) -> impl Iterator<Item = ipc::wire::Cap> {
+        let started = *self;
+        (0..started.slot_count).map_while(move |index| started.slot(index))
     }
 }
 
@@ -221,7 +219,7 @@ mod tests {
         assert_eq!(started.control, CONTROL_CAP);
         assert_eq!(started.service, SERVICE_CAP);
         assert_eq!(started.config, ComponentConfig::new(CONFIG_RECORD));
-        assert_eq!(started.slot_count(), 2);
+        assert_eq!(started.slots().count(), 2);
         assert_eq!(started.slot(0), Some(IMAGE_CAP));
         assert_eq!(started.slot(1), Some(DEVICE_CAP));
         assert_eq!(started.slot(2), None);
@@ -246,7 +244,7 @@ mod tests {
             .expect("transaction complete");
 
         assert_eq!(started.config, None);
-        assert_eq!(started.slot_count(), 0);
+        assert_eq!(started.slots().count(), 0);
     }
 
     #[test]

@@ -4,13 +4,11 @@
 
 use core::panic::PanicInfo;
 
-use component_abi::receive_startup_transaction;
+use component_abi::component_manifest;
 use filesystem_abi::{NamespaceClient, PATH_MAX};
 use ipc::wire::Str;
 use runtime::{OwnedHandle, PortTransport, Signal, Timeout, thread_exit};
 use syscall::{Handle, SIGNALED};
-
-const NAMESPACE_SLOT: u16 = 0;
 
 const PROBE_PATH: &str = "/tmp";
 
@@ -19,23 +17,25 @@ const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 const PROBE_TURN: Timeout = Timeout::from_millis(10);
 
 const NO_STARTUP_EXIT_CODE: u64 = 1;
-const NO_SESSION_EXIT_CODE: u64 = 2;
 const RESOLVE_FAILED_EXIT_CODE: u64 = 3;
 const PROVIDER_GONE_EXIT_CODE: u64 = 9;
+
+component_manifest! {
+    struct ConsumerStartup {
+        slots: { namespace: service },
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(startup: Handle) -> ! {
     let startup = OwnedHandle::from_handle(startup);
-    let Ok(Some(started)) = receive_startup_transaction(&PortTransport::server(startup.borrow()))
+    let Ok(Some(started)) = ConsumerStartup::receive(&PortTransport::server(startup.borrow()))
     else {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
     drop(startup);
 
-    let Some(session) = started.slot(NAMESPACE_SLOT) else {
-        thread_exit(NO_SESSION_EXIT_CODE);
-    };
-    let session = OwnedHandle::adopt(session);
+    let session = OwnedHandle::adopt(started.namespace);
     let namespace = NamespaceClient::new(PortTransport::client(&session)).with_wait(CALL_TIMEOUT);
     let Some(path) = Str::<{ PATH_MAX }>::new(PROBE_PATH) else {
         thread_exit(RESOLVE_FAILED_EXIT_CODE);
