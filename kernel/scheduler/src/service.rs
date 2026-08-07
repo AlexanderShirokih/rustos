@@ -7,8 +7,9 @@ use capability::{
     HandleTable, IpcError, KernelRuntime, LoadImageError, ParkState, ProcessObject,
     StartProcessError, ThreadObject, UserImageInstall, UserStartSpec, UserThreadEntry, WaitToken,
 };
-use collections::{LockCell, MutexCell};
+use collections::{LockCell, MutexCell, StaticString};
 use memory::{UserVmContext, virtual_address::VirtualAddress};
+use syscall::MAX_PROCESS_NAME_LEN;
 
 use super::{
     arch::{ArchContext, ArchCpu, TimerSource, with_preemption_disabled},
@@ -318,6 +319,10 @@ where
 
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
         self.inner.with_lock(|inner| inner.current_handle_table())
+    }
+
+    fn current_process_name(&self) -> Option<StaticString<MAX_PROCESS_NAME_LEN>> {
+        self.inner.with_lock(|inner| inner.current_process_name())
     }
 
     fn exit_current_thread(&self, exit_code: i32) -> ! {

@@ -3,8 +3,9 @@
 use alloc::sync::Arc;
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 
-use collections::MutexCell;
+use collections::{MutexCell, StaticString};
 use spin::Once;
+use syscall::MAX_PROCESS_NAME_LEN;
 
 use super::{HandleTable, wait::CancelTarget};
 
@@ -60,6 +61,12 @@ pub trait KernelRuntime: Send + Sync {
     /// планировщик ещё не инициализирован.
     fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>>;
 
+    /// Имя текущего процесса для диагностики. `None`, если рантайм имён
+    /// не ведёт.
+    fn current_process_name(&self) -> Option<StaticString<MAX_PROCESS_NAME_LEN>> {
+        None
+    }
+
     /// Завершает текущий поток с заданным `exit_code`: поднимает
     /// terminated-флаг потока на `Arc<ThreadObject>`, при последнем
     /// потоке процесса - terminated-флаг процесса, и переключает контекст
@@ -103,4 +110,8 @@ pub fn runtime() -> &'static Arc<dyn KernelRuntime> {
     RUNTIME
         .get()
         .expect("KernelRuntime not installed; install_runtime() must be called in kmain")
+}
+
+pub(crate) fn installed_runtime() -> Option<&'static Arc<dyn KernelRuntime>> {
+    RUNTIME.get()
 }

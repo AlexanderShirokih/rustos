@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
-use collections::{LockCell, MutexCell};
-use syscall::{IrqTrigger, Rights, WakeCount};
+use collections::{LockCell, MutexCell, StaticString};
+use syscall::{IrqTrigger, MAX_PROCESS_NAME_LEN, Rights, WakeCount};
 
 use super::{
     errors::IpcError,
@@ -10,7 +10,7 @@ use super::{
     irq_control::IrqControl,
     irq_line::IrqLine,
     irq_runtime::interrupts_control,
-    runtime::runtime,
+    runtime::{installed_runtime, runtime},
     signal::Signal,
     wait::{
         CancelTarget, IndexedWaker, ParkResolution, ParkWaker, Waitable, Waker, deadline_after,
@@ -334,6 +334,12 @@ pub fn thread_exit(exit_code: i32) -> ! {
 /// ресурсы процесса и переключает контекст на следующий runnable. Не возвращается.
 pub fn process_exit(exit_code: i32) -> ! {
     runtime().exit_current_process(exit_code)
+}
+
+/// Имя текущего процесса для диагностики. `None` до установки рантайма и
+/// когда рантайм имён не ведёт.
+pub fn current_process_name() -> Option<StaticString<MAX_PROCESS_NAME_LEN>> {
+    installed_runtime()?.current_process_name()
 }
 
 /// Создаёт новый [`Signal`] и регистрирует handle в таблице текущего

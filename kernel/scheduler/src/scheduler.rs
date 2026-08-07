@@ -6,7 +6,7 @@ use core::{marker::PhantomData, num::NonZeroUsize};
 use capability::{
     Capability, DrainedHandles, HandleReservation, HandleTable, ProcessObject, ThreadObject,
 };
-use collections::{LockCell, MutexCell};
+use collections::{LockCell, MutexCell, StaticString};
 use memory::{
     AccessMask, MappingTag, MemFlags, MemoryRegion, PAGE_SIZE,
     frame_allocator::FrameAllocator,
@@ -14,6 +14,7 @@ use memory::{
     user_vm_allocator::UserVmAllocator,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
+use syscall::MAX_PROCESS_NAME_LEN;
 
 use super::{
     address_space::AddressSpace,
@@ -1240,6 +1241,14 @@ where
         let current_id = self.current_cpu()?.current();
         let pid = self.threads.get(current_id)?.process();
         self.processes.get(pid).map(|p| p.process_object().clone())
+    }
+
+    pub(super) fn current_process_name(&self) -> Option<StaticString<MAX_PROCESS_NAME_LEN>> {
+        let current_id = self.current_cpu()?.current();
+        let pid = self.threads.get(current_id)?.process();
+        self.processes
+            .get(pid)
+            .map(|p| StaticString::truncating(p.name()))
     }
 
     pub(super) fn current_user_vm_pair(

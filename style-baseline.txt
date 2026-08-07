@@ -183,7 +183,6 @@ comment_on_declaration|lib/log-relay/src/relay.rs|RESOURCE_EXHAUSTED_MESSAGE|700
 comment_on_declaration|lib/log-relay/src/relay.rs|SINK_FAILURE_LIMIT|3e24d238
 comment_on_declaration|lib/log-relay/src/relay.rs|discard_staged_caps|3055e782
 comment_on_declaration|lib/log-relay/src/relay.rs|forward_message|27422168
-comment_on_declaration|lib/log-relay/src/thread.rs|RELAY_STACK|6a481ec9
 comment_on_declaration|lib/runtime/src/handle.rs|UNBADGED|a5fa38b2
 comment_on_declaration|lib/runtime/src/log.rs|LOG|ebaa5a0b
 comment_on_declaration|lib/runtime/src/log.rs|LineWriter|0bacef05

@@ -2,6 +2,7 @@
 
 use core::num::NonZeroU64;
 
+use ipc::wire::MESSAGE_INLINE_MAX;
 use runtime::{
     BorrowedHandle, JoinHandle, OwnedHandle, Port, Priority, Result, Timeout, spawn_owned,
 };
@@ -9,9 +10,16 @@ use syscall::Rights;
 
 use crate::relay::{LogRelay, LogSink, SourceNames};
 
-// Стек потока relay: на нём лежат два инлайновых буфера кадра - принятого
-// диспетчером и составленного стоком.
-const RELAY_STACK: u64 = 0x4000;
+const RELAY_STACK: u64 = 0x8000;
+
+const RELAY_STACK_FRAME_BUFFERS: usize = 4;
+
+const RELAY_STACK_CALL_RESERVE: usize = 0x1000;
+
+const _: () = assert!(
+    RELAY_STACK as usize
+        >= RELAY_STACK_FRAME_BUFFERS * MESSAGE_INLINE_MAX + RELAY_STACK_CALL_RESERVE
+);
 
 /// Лог-порт с циклом пересылки в отдельном потоке. Корневая capability не
 /// покидает владельца и держит порт с получателем: пока она открыта,
