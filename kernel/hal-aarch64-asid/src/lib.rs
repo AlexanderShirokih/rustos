@@ -287,6 +287,112 @@ mod tests {
         ROLLOVER_COUNT.fetch_add(1, Ordering::SeqCst);
     }
 
+    const RACE_HOLDERS: usize = 3;
+    const RACE_MIN_ITERS: usize = 4_000;
+    const RACE_MAX_ITERS: usize = 200_000;
+    const RACE_ROLLOVER_TARGET: usize = 8;
+    const RACE_CHURN_LIMIT: usize = 1_000_000;
+
+    static RACE_ROLLOVERS: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_race_rollover() {
+        RACE_ROLLOVERS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn race_rollover_never_reuses_an_asid_active_on_another_cpu() {
+        // Узкий диапазон: rollover наступает за сотни выдач, а не за 65 тысяч,
+        // и держатели переживают его многократно за прогон.
+        let alloc = Arc::new(make(AsidWidth::Bits8, count_race_rollover));
+        RACE_ROLLOVERS.store(0, Ordering::SeqCst);
+
+        // Активные ASID держателей: слот на держателя, `0` - между выдачами.
+        let active: Arc<Vec<AtomicU64>> = Arc::new(
+            (0..RACE_HOLDERS)
+                .map(|_| AtomicU64::new(0))
+                .collect::<Vec<_>>(),
+        );
+        let stop = Arc::new(AtomicU64::new(0));
+        let mut holders = Vec::with_capacity(RACE_HOLDERS);
+
+        for index in 0..RACE_HOLDERS {
+            let alloc = Arc::clone(&alloc);
+            let active = Arc::clone(&active);
+            holders.push(thread::spawn(move || {
+                let slot = AtomicU64::new(0);
+                let cpu_id = index as u16;
+                let mut reused = Vec::new();
+                for iteration in 0..RACE_MAX_ITERS {
+                    // Своя отметка снимается до выдачи: после неё прежний ASID
+                    // держателем не занят, и чужая выдача его законно берёт.
+                    active[index].store(0, Ordering::Release);
+                    let (asid, _tag) = alloc.acquire(&slot, cpu_id);
+
+                    active[index].store(u64::from(asid), Ordering::Release);
+
+                    // Rollover обязан зарезервировать ASID, активные на чужих
+                    // CPU: снятый бит означает, что ASID ушёл в свободные и
+                    // будет выдан второму адресному пространству. Отметку
+                    // сосед ставит после своей выдачи, а аллокатор знает её с
+                    // самой выдачи, поэтому опубликованный ASID активен.
+                    alloc.state.with_lock(|state| {
+                        for (other, slot) in active.iter().enumerate() {
+                            if other == index {
+                                continue;
+                            }
+                            let foreign = slot.load(Ordering::Acquire) as u16;
+                            if foreign != 0 && !state.in_use.is_set(foreign as usize) {
+                                reused.push(foreign);
+                            }
+                        }
+                    });
+
+                    // Держатель работает, пока диапазон не пройден нужное
+                    // число раз: на медленной машине это дольше, а не реже.
+                    if iteration >= RACE_MIN_ITERS
+                        && RACE_ROLLOVERS.load(Ordering::SeqCst) >= RACE_ROLLOVER_TARGET
+                    {
+                        break;
+                    }
+                }
+                active[index].store(0, Ordering::Release);
+                reused
+            }));
+        }
+
+        let churn = {
+            let alloc = Arc::clone(&alloc);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                // Свежий слот на каждой выдаче гонит диапазон к исчерпанию:
+                // rollover идут всё время, пока держатели крутят свои слоты.
+                let mut spins = 0;
+                while stop.load(Ordering::Acquire) == 0 && spins < RACE_CHURN_LIMIT {
+                    let slot = AtomicU64::new(0);
+                    let _ = alloc.acquire(&slot, RACE_HOLDERS as u16);
+                    spins += 1;
+                }
+            })
+        };
+
+        let mut reused = Vec::new();
+        for holder in holders {
+            reused.extend(holder.join().expect("holder joins"));
+        }
+        stop.store(1, Ordering::Release);
+        churn.join().expect("churn joins");
+
+        assert!(
+            reused.is_empty(),
+            "ASIDs {reused:?} were taken from a live holder across a rollover"
+        );
+        // Прогон без единого rollover проверил бы только обычную выдачу.
+        assert!(
+            RACE_ROLLOVERS.load(Ordering::SeqCst) >= 2,
+            "the run must cross a rollover at least twice"
+        );
+    }
+
     #[test]
     fn acquires_distinct_within_generation() {
         let alloc = make(AsidWidth::Bits8, noop);

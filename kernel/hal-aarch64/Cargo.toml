@@ -18,6 +18,7 @@ default = ["boot-linux-arm64"]
 boot-linux-arm64 = []
 boot-uefi = []
 power-semihosting = []
+short-quantum = []
 kernel-tests = [
     "kernelspace/kernel-tests",
     "dep:test-harness-qemu",

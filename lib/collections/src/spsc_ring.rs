@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_producer_consumer_preserves_order_and_completeness() {
+    fn race_producer_and_consumer_preserve_order_and_completeness() {
         const N: u32 = 100_000;
 
         let mut region = Region::new();
@@ -756,11 +756,9 @@ mod tests {
     }
 
     #[test]
-    fn park_protocol_never_loses_a_wakeup() {
+    fn race_park_protocol_never_loses_a_wakeup() {
         const N: u32 = 50_000;
         const FRAME_BYTES: usize = 256;
-        // Исчерпание бюджета означает потерянное пробуждение: дольше уступки
-        // планировщику производитель не блокируется.
         const WAKE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
         let mut region = Region::new();
@@ -806,6 +804,8 @@ mod tests {
                     if !consumer.is_empty_before_park() {
                         break;
                     }
+                    // Исчерпание бюджета означает потерянное пробуждение:
+                    // дольше уступки планировщику производитель не блокируется.
                     if !consumer_latch.wait(WAKE_BUDGET) {
                         return Err(next);
                     }

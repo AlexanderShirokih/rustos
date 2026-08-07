@@ -11,6 +11,14 @@ use crate::context::project_root;
 
 const TEST_FILTER: &str = "race_";
 
+const PACKAGES: &[&str] = &[
+    "capability",
+    "collections",
+    "hal-aarch64-asid",
+    "memory",
+    "scheduler",
+];
+
 pub(crate) fn run() -> Result<()> {
     let target = host_target()?;
     let project_root = project_root();
@@ -29,12 +37,11 @@ pub(crate) fn run() -> Result<()> {
         target_dir
             .to_str()
             .context("Race target directory is not valid UTF-8")?,
-        "-p",
-        "capability",
-        TEST_FILTER,
-        "--",
-        "--test-threads=1",
     ]);
+    for package in PACKAGES {
+        command.args(["-p", package]);
+    }
+    command.args([TEST_FILTER, "--", "--test-threads=1"]);
     command
         .current_dir(project_root)
         .env(rustflags_key, "-Zsanitizer=thread")

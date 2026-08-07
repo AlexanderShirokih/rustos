@@ -55,6 +55,11 @@ static KERNEL_MEMORY_MAPPER: Once<KernelMemoryMapper> = Once::new();
 /// строится на нём.
 static FRAME_ALLOCATOR: Once<FrameAllocatorImpl> = Once::new();
 
+#[cfg(feature = "kernel-tests")]
+pub(crate) fn frame_allocator() -> Option<&'static FrameAllocatorImpl> {
+    FRAME_ALLOCATOR.get()
+}
+
 /// Ранняя фаза: bump-аллокатор создан, но не установлен.
 pub struct Early {
     bump_allocator: BumpAllocator,

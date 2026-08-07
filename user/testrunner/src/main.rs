@@ -41,6 +41,7 @@ mod resource_split;
 mod ring_transport;
 mod rootkeeper_system;
 mod signal;
+mod smp_stress;
 mod spawn_from_image;
 mod startup_fixture_protocol;
 mod stress;

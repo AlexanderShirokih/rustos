@@ -80,7 +80,8 @@ pub(crate) fn qemu_stress(seed: u64, seeds: u64, steps: u64, timeout: u64) -> Re
     qemu_test_pass(QemuPass {
         label: "stress",
         spec: Path::new(DEFAULT_SPEC),
-        features: None,
+        // Короткий квант режет окно между операциями и расширяет чередования.
+        features: Some(String::from("short-quantum")),
         image: Path::new("user/testrunner/image.toml"),
         timeout,
         environment: &environment,

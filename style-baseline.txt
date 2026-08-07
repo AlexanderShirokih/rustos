@@ -106,7 +106,6 @@ comment_on_declaration|kernel/syscall/src/user_io.rs|tests::CannedMapper|188f70c
 comment_on_declaration|lib/collections/src/spsc_ring.rs|SpscRing::push_interleaved|fec73675
 comment_on_declaration|lib/collections/src/spsc_ring.rs|tests::Latch::wait|a9268096
 comment_on_declaration|lib/collections/src/spsc_ring.rs|tests::Latch|e944d782
-comment_on_declaration|lib/collections/src/spsc_ring.rs|tests::park_protocol_never_loses_a_wakeup::WAKE_BUDGET|c5b38ce1
 comment_on_declaration|lib/collections/src/spsc_ring.rs|tests|1ba555ea
 comment_on_declaration|lib/filesystem-abi/src/descriptor.rs|NodeDescriptor::SLOT_BITS|f877ff5a
 comment_on_declaration|lib/filesystem-abi/src/limits.rs|<file-root>|b5c95ba1
@@ -1409,7 +1408,7 @@ latin_apostrophe|kernel/syscall/tests/handle_rollback.rs|<file-root>|7ff6b1eb
 latin_apostrophe|kernel/syscall/tests/handle_rollback.rs|<file-root>|ea362a52
 latin_apostrophe|kernel/syscall/tests/memory_rollback.rs|insert_metering_resource|7ff6b1eb
 latin_apostrophe|kernel/syscall/tests/port.rs|StubSyscallRuntime|a4b9461d
-latin_apostrophe|lib/collections/src/spsc_ring.rs|tests::concurrent_producer_consumer_preserves_order_and_completeness|d53b747a
+latin_apostrophe|lib/collections/src/spsc_ring.rs|tests::race_producer_and_consumer_preserve_order_and_completeness|d53b747a
 latin_apostrophe|lib/io/src/writer.rs|Writer::write_all_panic|62d89c0f
 latin_apostrophe|lib/ipc-macros/src/codegen.rs|data_len_expr|db138754
 latin_apostrophe|lib/runtime/src/handle.rs|OwnedHandle::as_raw|7ff9a45f

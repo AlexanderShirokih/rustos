@@ -249,3 +249,78 @@ fn a_backlog_on_one_cpu_is_drained_by_migration() {
         "a backlog of {worker_count} threads must spread over every online CPU, mask {used:#x} of {online} CPU(s)"
     );
 }
+
+const AUDIT_THREADS: usize = 16;
+
+const AUDIT_CYCLES: usize = 8;
+
+const SETTLE_MATCHES: usize = 8;
+
+fn free_frames() -> usize {
+    crate::memory::memory_setup::frame_allocator().map_or(0, |allocator| allocator.free_frames())
+}
+
+fn load_cycle() {
+    let scheduler = syscall_bridge::scheduler();
+    let done = Arc::new(AtomicUsize::new(0));
+
+    for _ in 0..AUDIT_THREADS {
+        let done = done.clone();
+        scheduler
+            .spawn(SpawnConfig::new("audit"), move || {
+                done.fetch_add(1, Ordering::Release);
+            })
+            .expect("audit thread spawns");
+    }
+
+    assert!(
+        wait_until(|| done.load(Ordering::Acquire) == AUDIT_THREADS),
+        "every audit thread must finish"
+    );
+}
+
+fn settled_free_frames() -> usize {
+    // Реап потока откладывается, пока его не отпустят все CPU, поэтому сразу
+    // после круга остаток ещё меняется: замер берётся, когда он осел.
+    let scheduler = syscall_bridge::scheduler();
+    let mut last = free_frames();
+    let mut matches = 0;
+    for _ in 0..WAIT_STEPS {
+        scheduler.sleep_ms(WAIT_STEP_MS);
+        let free = free_frames();
+        if free == last {
+            matches += 1;
+            if matches == SETTLE_MATCHES {
+                return free;
+            }
+        } else {
+            matches = 0;
+            last = free;
+        }
+    }
+    last
+}
+
+#[kernel_test]
+fn repeated_thread_load_stops_spending_frames() {
+    assert!(
+        free_frames() > 0,
+        "the frame allocator must be installed by this point"
+    );
+
+    // Куча ядра растёт под нагрузку и фреймы обратно не отдаёт, поэтому первые
+    // круги расходуют их законно. Расход обязан прекратиться: круг, вернувший
+    // всё, что взял, оставляет тот же остаток, что и предыдущий. Утечка на
+    // круг не даёт такой пары никогда.
+    let mut marks = Vec::with_capacity(AUDIT_CYCLES);
+    for _ in 0..AUDIT_CYCLES {
+        load_cycle();
+        let free = settled_free_frames();
+        if marks.last() == Some(&free) {
+            return;
+        }
+        marks.push(free);
+    }
+
+    panic!("repeated load must stop spending frames, marks {marks:?}");
+}

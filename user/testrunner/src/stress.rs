@@ -114,7 +114,7 @@ fn spawn_worker(
     })
 }
 
-fn write_payload(payload: u64) -> bool {
+pub(crate) fn write_payload(payload: u64) -> bool {
     let Some(buffer) = ipc_buffer_ptr() else {
         return false;
     };
@@ -128,7 +128,7 @@ fn write_payload(payload: u64) -> bool {
     true
 }
 
-fn read_payload() -> Option<u64> {
+pub(crate) fn read_payload() -> Option<u64> {
     let buffer = ipc_buffer_ptr()?;
     // SAFETY: текущий поток единолично читает свой IPC-буфер после завершения
     // rendezvous; границы data подтверждаются декодированным tag.

@@ -192,6 +192,7 @@ impl SchedulerStage for Running {}
 pub struct SchedulerConfig {
     priority_levels: usize,
     max_threads: usize,
+    quantum_ns: u64,
 }
 
 impl SchedulerConfig {
@@ -202,7 +203,15 @@ impl SchedulerConfig {
         Self {
             priority_levels,
             max_threads,
+            quantum_ns: DEFAULT_QUANTUM_NS,
         }
+    }
+
+    /// Задаёт квант вытеснения вместо [`DEFAULT_QUANTUM_NS`].
+    pub const fn with_quantum_ns(self, quantum_ns: u64) -> Self {
+        assert!(quantum_ns > 0);
+
+        Self { quantum_ns, ..self }
     }
 
     pub const fn priority_levels(self) -> usize {
@@ -211,6 +220,10 @@ impl SchedulerConfig {
 
     pub const fn max_threads(self) -> usize {
         self.max_threads
+    }
+
+    pub const fn quantum_ns(self) -> u64 {
+        self.quantum_ns
     }
 }
 
@@ -334,7 +347,7 @@ where
                 pending_ipc_releases: Vec::new(),
                 deferred_handles: DeferredHandles::default(),
                 pending_wakeups: 0,
-                quantum_ns: DEFAULT_QUANTUM_NS,
+                quantum_ns: config.quantum_ns(),
                 time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
             })),
             _stage: PhantomData,

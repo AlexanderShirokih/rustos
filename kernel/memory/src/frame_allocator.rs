@@ -158,6 +158,14 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
         bitmap.alloc_from(current)
     }
 
+    /// Число свободных фреймов во всех регионах на момент вызова.
+    pub fn free_frames(&self) -> usize {
+        self.regions
+            .iter()
+            .map(|region| region.with_lock(|bitmap| bitmap.remaining()))
+            .sum()
+    }
+
     /// Переносит регионы под стратегию блокировки `M`, потребляя исходный
     /// аллокатор. Смена стратегии допустима только на границе фазы, где
     /// прежний экземпляр перестаёт быть достижимым.

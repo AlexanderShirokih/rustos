@@ -32,7 +32,12 @@ use crate::{
     sched::Aarch64Context,
 };
 
-const SCHED_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 64);
+#[cfg(feature = "short-quantum")]
+const QUANTUM_NS: u64 = 500_000;
+#[cfg(not(feature = "short-quantum"))]
+const QUANTUM_NS: u64 = scheduler::DEFAULT_QUANTUM_NS;
+
+const SCHED_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 64).with_quantum_ns(QUANTUM_NS);
 
 /// Физические адреса, пробрасываемые из pre-MMU фазы в post-MMU.
 pub(super) struct BootHandoff {
