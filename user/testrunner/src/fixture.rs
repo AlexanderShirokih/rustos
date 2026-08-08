@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT: Timeout = Timeout::from_secs(5);
 /// Бюджет ожидания завершения потомка.
 pub const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-const FIXTURE_ENTRY: &str = "/boot/port-fixture";
+const FIXTURE_ENTRY: &str = "/boot/port-fixture/program";
 
 const FIXTURE_SESSION_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
 

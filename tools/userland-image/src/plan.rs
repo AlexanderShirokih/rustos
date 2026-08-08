@@ -1,12 +1,16 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use component_abi::{COMPONENT_SLOT_MAX, ComponentManifest, SlotKind};
+use component_abi::{COMPONENT_SLOT_MAX, SlotKind};
 use serde::Deserialize;
 use syscall::{HANDLE_TABLE_CAPACITY, MAX_RESOURCE_DEPTH, Timeout, WAIT_MANY_MAX_COUNT};
-use userland_image::{ComponentSpec, PlanDevice, SlotSource, encode_plan};
+use userland_image::{ComponentSpec, DeviceSpec, OnExhausted, SlotSpec, encode_plan};
 
-use crate::host::validate_image_path;
+use crate::{
+    host::validate_image_path,
+    manifest::ProgramManifest,
+    units::{parse_duration, parse_memory_pages},
+};
 
-const BOOT_PLAN_MANIFEST_VERSION: u16 = 2;
+const BOOT_PLAN_MANIFEST_VERSION: u16 = 1;
 
 const BOOT_COMPOSITION_DEPTH: u16 = 0;
 
@@ -16,15 +20,17 @@ const SUPERVISOR_HANDLES: usize = 16;
 
 const COMPONENT_HANDLES: usize = 12;
 
-const SLOT_IMAGE: &str = "image";
-const SLOT_IRQ: &str = "irq";
-const SLOT_MMIO: &str = "mmio";
-const SLOT_SERVICE: &str = "service";
+const DEFAULT_STARTUP_TIMEOUT: Timeout = Timeout::from_secs(2);
+
+const RESTART_KEYWORD: &str = "restart";
+const THEN_KEYWORD: &str = "then";
+const OUTCOME_HALT: &str = "halt";
+const OUTCOME_DETACH: &str = "detach";
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlanProgram<'a> {
     pub path: &'a str,
-    pub manifest: Option<ComponentManifest>,
+    pub manifest: Option<&'a ProgramManifest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,30 +44,25 @@ struct SystemManifest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ComponentEntry {
-    id: String,
-    program: String,
+    executable: String,
+    memory_limit: String,
     #[serde(default)]
-    config: Option<String>,
-    budget_pages: u64,
-    startup_timeout_ms: u64,
-    critical: bool,
-    restart: u32,
-    #[serde(default)]
-    slots: Vec<SlotEntry>,
-    #[serde(default)]
-    requires: Vec<String>,
+    startup_timeout: Option<String>,
+    on_failure: String,
     #[serde(default)]
     after: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SlotEntry {
-    source: String,
-    compatible: Option<String>,
-    instance: Option<u16>,
-    resource: Option<u16>,
-    provider: Option<String>,
+struct FailurePolicy {
+    launches: u32,
+    on_exhausted: OnExhausted,
+}
+
+struct Policy {
+    memory_pages: u64,
+    startup_timeout: Timeout,
+    launches: u32,
+    on_exhausted: OnExhausted,
 }
 
 fn default_plan_version() -> u16 {
@@ -71,51 +72,91 @@ fn default_plan_version() -> u16 {
 pub(crate) fn compile_boot_plan(
     source: &str,
     programs: &[PlanProgram<'_>],
-    configs: &[&str],
+    records: &[&str],
 ) -> Result<Vec<u8>> {
     let manifest = parse_system_manifest(source)?;
-    validate_composition(&manifest, programs, configs)?;
-
-    let ids: Vec<&str> = manifest
+    let executables: Vec<&str> = manifest
         .components
         .iter()
-        .map(|component| component.id.as_str())
+        .map(|component| component.executable.as_str())
+        .collect();
+    let declarations = resolve_declarations(&manifest, programs)?;
+    validate_composition(&manifest, &declarations)?;
+
+    // Строки совместимости переживают слоты, которые на них ссылаются: слот
+    // плана несёт срез объявления, а не копию.
+    let selectors: Vec<Vec<Vec<&str>>> = declarations
+        .iter()
+        .map(|declared| {
+            declared
+                .slots
+                .iter()
+                .map(|slot| slot.names.iter().map(String::as_str).collect())
+                .collect()
+        })
+        .collect();
+    // Файл компонент называет именем в своём каталоге: путь наружу оттуда не
+    // выразим, и чужую запись имя не назовёт.
+    let files: Vec<Vec<Vec<String>>> = manifest
+        .components
+        .iter()
+        .zip(&declarations)
+        .map(|(component, declared)| {
+            declared
+                .slots
+                .iter()
+                .map(|slot| {
+                    slot.names
+                        .iter()
+                        .map(|name| format!("{}/{name}", component.executable))
+                        .collect()
+                })
+                .collect()
+        })
         .collect();
     let slots = manifest
         .components
         .iter()
-        .map(|component| compile_slots(component, &ids))
+        .zip(&declarations)
+        .zip(selectors.iter().zip(&files))
+        .map(|((component, declared), (selectors, files))| {
+            compile_slots(
+                component,
+                declared,
+                selectors,
+                files,
+                &declarations,
+                &executables,
+                records,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
-    for (component, slots) in manifest.components.iter().zip(&slots) {
-        validate_declaration(component, slots, programs)?;
-    }
-    let requires = manifest
-        .components
-        .iter()
-        .map(|component| resolve_edges(component, &component.requires, "requires", &ids))
-        .collect::<Result<Vec<_>>>()?;
+    let requires: Vec<Vec<u16>> = slots.iter().map(|slots| service_edges(slots)).collect();
     let after = manifest
         .components
         .iter()
-        .map(|component| resolve_edges(component, &component.after, "after", &ids))
+        .map(|component| resolve_after(component, &executables))
         .collect::<Result<Vec<_>>>()?;
-    validate_acyclic(&requires, &after, &ids)?;
+    validate_acyclic(&requires, &after, &executables)?;
 
+    let policies = manifest
+        .components
+        .iter()
+        .map(compile_policy)
+        .collect::<Result<Vec<_>>>()?;
     let components: Vec<ComponentSpec<'_>> = manifest
         .components
         .iter()
         .enumerate()
         .map(|(index, component)| ComponentSpec {
-            id: &component.id,
-            program: &component.program,
-            config: component.config.as_deref(),
+            executable: &component.executable,
             slots: &slots[index],
             requires: &requires[index],
             after: &after[index],
-            budget_pages: component.budget_pages,
-            startup_timeout: Timeout::from_millis(component.startup_timeout_ms),
-            restart_limit: component.restart,
-            critical: component.critical,
+            memory_pages: policies[index].memory_pages,
+            startup_timeout: policies[index].startup_timeout,
+            launches: policies[index].launches,
+            on_exhausted: policies[index].on_exhausted,
         })
         .collect();
     encode_plan(&components).map_err(|err| anyhow!("failed to serialize boot plan: {err:?}"))
@@ -130,188 +171,141 @@ fn parse_system_manifest(source: &str) -> Result<SystemManifest> {
         manifest.version,
         BOOT_PLAN_MANIFEST_VERSION
     );
-    Ok(manifest)
-}
-
-fn validate_composition(
-    manifest: &SystemManifest,
-    programs: &[PlanProgram<'_>],
-    configs: &[&str],
-) -> Result<()> {
-    // Компонент проверяется целиком, затем композиция: у каждой проверки своя
-    // названная причина отказа.
     ensure!(
         !manifest.components.is_empty(),
         "boot plan must contain at least one component; found none"
     );
-    for component in &manifest.components {
-        validate_component(component, programs, configs)?;
-    }
+    Ok(manifest)
+}
+
+fn resolve_declarations<'a>(
+    manifest: &SystemManifest,
+    programs: &[PlanProgram<'a>],
+) -> Result<Vec<&'a ProgramManifest>> {
+    manifest
+        .components
+        .iter()
+        .map(|component| {
+            let executable = &component.executable;
+            validate_image_path(executable)
+                .context("boot plan component names an invalid executable")?;
+            let program = programs
+                .iter()
+                .find(|program| program.path == executable)
+                .with_context(|| {
+                    format!(
+                        "boot plan names executable '{executable}' that the image does not contain"
+                    )
+                })?;
+            program.manifest.with_context(|| {
+                format!("boot plan component '{executable}' has no component manifest section")
+            })
+        })
+        .collect()
+}
+
+fn compile_policy(component: &ComponentEntry) -> Result<Policy> {
+    let executable = &component.executable;
+    let memory_pages = parse_memory_pages(&component.memory_limit)
+        .with_context(|| format!("boot plan component '{executable}' sets 'memory_limit'"))?;
+    let startup_timeout = match &component.startup_timeout {
+        Some(text) => parse_duration(text).with_context(|| {
+            format!("boot plan component '{executable}' sets 'startup_timeout'")
+        })?,
+        None => DEFAULT_STARTUP_TIMEOUT,
+    };
+    let policy = parse_failure_policy(&component.on_failure)
+        .with_context(|| format!("boot plan component '{executable}' sets 'on_failure'"))?;
+    Ok(Policy {
+        memory_pages,
+        startup_timeout,
+        launches: policy.launches,
+        on_exhausted: policy.on_exhausted,
+    })
+}
+
+fn parse_failure_policy(text: &str) -> Result<FailurePolicy> {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let (restarts, outcome) = match tokens.as_slice() {
+        [outcome] => (0, *outcome),
+        [RESTART_KEYWORD, count, THEN_KEYWORD, outcome] => (parse_restarts(count)?, *outcome),
+        _ => bail!(
+            "'{text}' is not '{OUTCOME_HALT}', '{OUTCOME_DETACH}' \
+             or '{RESTART_KEYWORD} N {THEN_KEYWORD} {OUTCOME_HALT}|{OUTCOME_DETACH}'"
+        ),
+    };
+    let on_exhausted = match outcome {
+        OUTCOME_HALT => OnExhausted::Halt,
+        OUTCOME_DETACH => OnExhausted::Detach,
+        _ => bail!("'{outcome}' is not '{OUTCOME_HALT}' or '{OUTCOME_DETACH}'"),
+    };
+    // Первый запуск перезапуском не считается: он есть у любого компонента.
+    let launches = restarts
+        .checked_add(1)
+        .with_context(|| format!("restart count {restarts} overflows"))?;
+    Ok(FailurePolicy {
+        launches,
+        on_exhausted,
+    })
+}
+
+fn parse_restarts(text: &str) -> Result<u32> {
+    let count: u32 = text
+        .parse()
+        .with_context(|| format!("'{text}' is not a restart count"))?;
+    ensure!(
+        count != 0,
+        "'{RESTART_KEYWORD} 0' carries no restarts: name the outcome alone"
+    );
+    Ok(count)
+}
+
+fn validate_composition(
+    manifest: &SystemManifest,
+    declarations: &[&ProgramManifest],
+) -> Result<()> {
     for (index, component) in manifest.components.iter().enumerate() {
         for earlier in &manifest.components[..index] {
             ensure!(
-                earlier.id != component.id,
-                "boot plan component id '{}' is used more than once",
-                component.id
+                earlier.executable != component.executable,
+                "boot plan names executable '{}' more than once; \
+                 a composition of several instances needs component names",
+                component.executable
             );
         }
     }
-    validate_supervisor_limits(manifest)
-}
-
-fn validate_component(
-    component: &ComponentEntry,
-    programs: &[PlanProgram<'_>],
-    configs: &[&str],
-) -> Result<()> {
-    ensure!(
-        !component.id.is_empty(),
-        "boot plan component must set a non-empty 'id'"
-    );
-    ensure!(
-        component.budget_pages != 0,
-        "boot plan component '{}' must set a non-zero 'budget_pages'",
-        component.id
-    );
-    ensure!(
-        component.startup_timeout_ms != 0,
-        "boot plan component '{}' must set a non-zero 'startup_timeout_ms'",
-        component.id
-    );
-    ensure!(
-        component.restart >= 1,
-        "boot plan component '{}' must set 'restart' to at least one launch",
-        component.id
-    );
-    ensure!(
-        component.slots.len() <= COMPONENT_SLOT_MAX,
-        "boot plan component '{}' declares {} slots; the startup transaction carries {}",
-        component.id,
-        component.slots.len(),
-        COMPONENT_SLOT_MAX
-    );
-    validate_program(&component.id, &component.program, programs)?;
-    validate_config(component, configs)?;
-    validate_resource_depth(&component.id, COMPONENT_RESOURCE_LEVELS)
-}
-
-fn validate_config(component: &ComponentEntry, configs: &[&str]) -> Result<()> {
-    let Some(config) = &component.config else {
-        return Ok(());
-    };
-    validate_image_path(config).with_context(|| {
-        format!(
-            "boot plan component '{}' names an invalid config record",
-            component.id
-        )
-    })?;
-    ensure!(
-        configs.contains(&config.as_str()),
-        "boot plan component '{}' names config record '{}' \
-         that the image does not compile",
-        component.id,
-        config
-    );
-    // Запись конфигурации компонент читает из образа: без слота образа читать
-    // её нечем.
-    ensure!(
-        component.slots.iter().any(|slot| slot.source == SLOT_IMAGE),
-        "boot plan component '{}' names a config record without an 'image' slot to read it from",
-        component.id
-    );
-    Ok(())
-}
-
-fn validate_program(id: &str, program: &str, programs: &[PlanProgram<'_>]) -> Result<()> {
-    validate_image_path(program)
-        .with_context(|| format!("boot plan component '{id}' names an invalid program"))?;
-    ensure!(
-        find_program(program, programs).is_some(),
-        "boot plan component '{id}' names program '{program}' \
-         that the image does not contain"
-    );
-    Ok(())
-}
-
-fn find_program<'a>(path: &str, programs: &'a [PlanProgram<'_>]) -> Option<&'a PlanProgram<'a>> {
-    programs.iter().find(|program| program.path == path)
-}
-
-fn validate_declaration(
-    component: &ComponentEntry,
-    slots: &[SlotSource<'_>],
-    programs: &[PlanProgram<'_>],
-) -> Result<()> {
-    let id = &component.id;
-    let program = &component.program;
-    let declared = find_program(program, programs)
-        .and_then(|program| program.manifest)
-        .with_context(|| {
-            format!(
-                "boot plan component '{id}' names program '{program}' \
-                 without a component manifest section"
-            )
-        })?;
-
-    ensure!(
-        declared.slots().len() == slots.len(),
-        "boot plan component '{id}' declares {} slots; program '{program}' declares {}",
-        slots.len(),
-        declared.slots().len()
-    );
-    for (index, (planned, declared)) in slots.iter().zip(declared.slots()).enumerate() {
-        let planned = slot_kind(planned);
-        ensure!(
-            planned == *declared,
-            "boot plan component '{id}' declares a '{}' slot {index}; \
-             program '{program}' declares '{}'",
-            slot_source_name(planned),
-            slot_source_name(*declared)
-        );
+    for (component, declared) in manifest.components.iter().zip(declarations) {
+        validate_component(component, declared)?;
     }
-    match (component.config.is_some(), declared.config()) {
-        (true, false) => bail!(
-            "boot plan component '{id}' names a config record; \
-             program '{program}' declares none"
-        ),
-        (false, true) => bail!(
-            "boot plan component '{id}' names no config record; \
-             program '{program}' declares one"
-        ),
-        _ => Ok(()),
-    }
+    validate_supervisor_limits(manifest, declarations)
 }
 
-const fn slot_kind(slot: &SlotSource<'_>) -> SlotKind {
-    match slot {
-        SlotSource::Image => SlotKind::Image,
-        SlotSource::Irq(_) => SlotKind::Irq,
-        SlotSource::Mmio(_) => SlotKind::Mmio,
-        SlotSource::Service { .. } => SlotKind::Service,
-    }
+fn validate_component(component: &ComponentEntry, declared: &ProgramManifest) -> Result<()> {
+    let executable = &component.executable;
+    ensure!(
+        declared.slots.len() <= COMPONENT_SLOT_MAX,
+        "boot plan component '{executable}' declares {} slots; \
+         the startup transaction carries {COMPONENT_SLOT_MAX}",
+        declared.slots.len()
+    );
+    validate_resource_depth(executable, COMPONENT_RESOURCE_LEVELS)
 }
 
-const fn slot_source_name(kind: SlotKind) -> &'static str {
-    match kind {
-        SlotKind::Image => SLOT_IMAGE,
-        SlotKind::Irq => SLOT_IRQ,
-        SlotKind::Mmio => SLOT_MMIO,
-        SlotKind::Service => SLOT_SERVICE,
-    }
-}
-
-fn validate_resource_depth(id: &str, levels: u16) -> Result<()> {
+fn validate_resource_depth(executable: &str, levels: u16) -> Result<()> {
     // Дерево метеринга компонента укладывается в потолок глубины split: резерв
     // компонента, ресурс incarnation и ресурс поднятого ею потомка.
     ensure!(
         BOOT_COMPOSITION_DEPTH + levels <= MAX_RESOURCE_DEPTH,
-        "boot plan component '{id}' needs {levels} resource levels \
+        "boot plan component '{executable}' needs {levels} resource levels \
          under depth {BOOT_COMPOSITION_DEPTH}; the ceiling is {MAX_RESOURCE_DEPTH}"
     );
     Ok(())
 }
 
-fn validate_supervisor_limits(manifest: &SystemManifest) -> Result<()> {
+fn validate_supervisor_limits(
+    manifest: &SystemManifest,
+    declarations: &[&ProgramManifest],
+) -> Result<()> {
     // Supervisor ждёт процессы компонентов вместе с потоком relay одним
     // массивом ожидания.
     let waits = manifest.components.len() + 1;
@@ -322,10 +316,9 @@ fn validate_supervisor_limits(manifest: &SystemManifest) -> Result<()> {
         manifest.components.len()
     );
 
-    let slots: usize = manifest
-        .components
+    let slots: usize = declarations
         .iter()
-        .map(|component| component.slots.len())
+        .map(|declared| declared.slots.len())
         .sum();
     // Оценка сверху: у supervisor bootstrap-капа, регион образа с отображением,
     // лог-порт relay и его поток, собственный ресурс, а у каждого компонента -
@@ -341,119 +334,131 @@ fn validate_supervisor_limits(manifest: &SystemManifest) -> Result<()> {
     Ok(())
 }
 
-fn compile_slots<'a>(component: &'a ComponentEntry, ids: &[&str]) -> Result<Vec<SlotSource<'a>>> {
-    component
+fn compile_slots<'a>(
+    component: &'a ComponentEntry,
+    declared: &ProgramManifest,
+    selectors: &'a [Vec<&'a str>],
+    files: &'a [Vec<String>],
+    declarations: &[&ProgramManifest],
+    executables: &[&str],
+    records: &[&str],
+) -> Result<Vec<SlotSpec<'a>>> {
+    declared
         .slots
         .iter()
-        .map(|slot| compile_slot(component, slot, ids))
+        .zip(selectors)
+        .zip(files)
+        .map(|((slot, names), file)| {
+            let device = DeviceSpec {
+                compatible: names,
+                // Экземпляр устройства выбирает композиция, а различать их
+                // нечем, пока у компонентов нет имён: берётся первый.
+                instance: 0,
+                resource: slot.resource,
+            };
+            match slot.kind {
+                SlotKind::Image => Ok(SlotSpec::Image),
+                SlotKind::Irq => Ok(SlotSpec::Irq(device)),
+                SlotKind::Mmio => Ok(SlotSpec::Mmio(device)),
+                SlotKind::Service => {
+                    let protocol = names.first().copied().with_context(|| {
+                        format!(
+                            "boot plan component '{}' declares a service slot without a protocol",
+                            component.executable
+                        )
+                    })?;
+                    Ok(SlotSpec::Service {
+                        provider: find_provider(component, protocol, declarations, executables)?,
+                    })
+                }
+                SlotKind::File => {
+                    let path = file.first().map(String::as_str).with_context(|| {
+                        format!(
+                            "boot plan component '{}' declares a file slot without a name",
+                            component.executable
+                        )
+                    })?;
+                    ensure!(
+                        records.contains(&path),
+                        "boot plan component '{}' takes file '{path}', \
+                         which its directory does not contain",
+                        component.executable
+                    );
+                    Ok(SlotSpec::File { path })
+                }
+            }
+        })
         .collect()
 }
 
-fn compile_slot<'a>(
-    component: &'a ComponentEntry,
-    slot: &'a SlotEntry,
-    ids: &[&str],
-) -> Result<SlotSource<'a>> {
-    let id = &component.id;
-    match slot.source.as_str() {
-        SLOT_IMAGE => {
-            reject_device_fields(id, slot)?;
-            reject_provider(id, slot)?;
-            Ok(SlotSource::Image)
-        }
-        SLOT_SERVICE => {
-            reject_device_fields(id, slot)?;
-            let provider = slot.provider.as_deref().with_context(|| {
-                format!("boot plan component '{id}' declares a service slot without a 'provider'")
-            })?;
-            ensure!(
-                provider != id,
-                "boot plan component '{id}' takes its own service as a slot"
-            );
-            let index = ids.iter().position(|known| *known == provider);
-            let index = index.with_context(|| {
-                format!(
-                    "boot plan component '{id}' takes the service of '{provider}', \
-                     which the composition does not contain"
-                )
-            })?;
-            Ok(SlotSource::Service {
-                provider: u16::try_from(index).context("component index fits the plan")?,
-            })
-        }
-        SLOT_IRQ | SLOT_MMIO => {
-            reject_provider(id, slot)?;
-            let compatible = slot.compatible.as_deref().with_context(|| {
-                format!(
-                    "boot plan component '{id}' declares a '{}' slot without a 'compatible'",
-                    slot.source
-                )
-            })?;
-            ensure!(
-                !compatible.is_empty(),
-                "boot plan component '{id}' declares a '{}' slot with an empty 'compatible'",
-                slot.source
-            );
-            let device = PlanDevice {
-                compatible,
-                instance: slot.instance.unwrap_or(0),
-                resource: slot.resource.unwrap_or(0),
-            };
-            Ok(if slot.source == SLOT_IRQ {
-                SlotSource::Irq(device)
-            } else {
-                SlotSource::Mmio(device)
-            })
-        }
-        source => bail!("boot plan component '{id}' declares a slot of unknown source '{source}'"),
-    }
-}
-
-fn reject_device_fields(id: &str, slot: &SlotEntry) -> Result<()> {
-    for (key, present) in [
-        ("compatible", slot.compatible.is_some()),
-        ("instance", slot.instance.is_some()),
-        ("resource", slot.resource.is_some()),
-    ] {
-        ensure!(
-            !present,
-            "boot plan component '{id}' sets '{key}' on a '{}' slot",
-            slot.source
-        );
-    }
-    Ok(())
-}
-
-fn reject_provider(id: &str, slot: &SlotEntry) -> Result<()> {
-    ensure!(
-        slot.provider.is_none(),
-        "boot plan component '{id}' sets 'provider' on a '{}' slot",
-        slot.source
-    );
-    Ok(())
-}
-
-fn resolve_edges(
+fn find_provider(
     component: &ComponentEntry,
-    edges: &[String],
-    key: &str,
-    ids: &[&str],
-) -> Result<Vec<u16>> {
-    let id = &component.id;
+    protocol: &str,
+    declarations: &[&ProgramManifest],
+    executables: &[&str],
+) -> Result<u16> {
+    let executable = &component.executable;
+    let exporters: Vec<usize> = declarations
+        .iter()
+        .enumerate()
+        .filter(|(_, declared)| declared.export.as_deref() == Some(protocol))
+        .map(|(index, _)| index)
+        .collect();
+    let [index] = exporters[..] else {
+        if exporters.is_empty() {
+            bail!(
+                "boot plan component '{executable}' imports protocol '{protocol}', \
+                 which no component of the composition exports"
+            );
+        }
+        let names: Vec<&str> = exporters.iter().map(|index| executables[*index]).collect();
+        bail!(
+            "boot plan component '{executable}' imports protocol '{protocol}', \
+             which {} components export: {}; \
+             a choice between them needs component names",
+            exporters.len(),
+            names.join(", ")
+        );
+    };
+    ensure!(
+        executables[index] != executable,
+        "boot plan component '{executable}' imports the protocol it exports itself"
+    );
+    u16::try_from(index).context("component index fits the plan")
+}
+
+fn service_edges(slots: &[SlotSpec<'_>]) -> Vec<u16> {
+    // Импорт сервиса поднимает провайдера раньше потребителя: ребро выводится
+    // из связывания.
+    let mut edges: Vec<u16> = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            SlotSpec::Service { provider } => Some(*provider),
+            _ => None,
+        })
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
     edges
+}
+
+fn resolve_after(component: &ComponentEntry, executables: &[&str]) -> Result<Vec<u16>> {
+    let executable = &component.executable;
+    component
+        .after
         .iter()
         .map(|edge| {
             ensure!(
-                edge != id,
-                "boot plan component '{id}' names itself in '{key}'"
+                edge != executable,
+                "boot plan component '{executable}' names itself in 'after'"
             );
-            let index = ids
+            let index = executables
                 .iter()
                 .position(|known| known == edge)
                 .with_context(|| {
                     format!(
-                        "boot plan component '{id}' names '{edge}' in '{key}', \
-                     which the composition does not contain"
+                        "boot plan component '{executable}' names '{edge}' in 'after', \
+                         which the composition does not contain"
                     )
                 })?;
             u16::try_from(index).context("component index fits the plan")
@@ -461,17 +466,17 @@ fn resolve_edges(
         .collect()
 }
 
-fn validate_acyclic(requires: &[Vec<u16>], after: &[Vec<u16>], ids: &[&str]) -> Result<()> {
+fn validate_acyclic(requires: &[Vec<u16>], after: &[Vec<u16>], executables: &[&str]) -> Result<()> {
     // Порядок запуска - топологический по объединению requires и after: цикл
     // делает его невыразимым.
     let edges = |index: usize| requires[index].iter().chain(&after[index]);
-    let mut dependents: Vec<usize> = vec![0; ids.len()];
-    for index in 0..ids.len() {
+    let mut dependents: Vec<usize> = vec![0; executables.len()];
+    for index in 0..executables.len() {
         for edge in edges(index) {
             dependents[usize::from(*edge)] += 1;
         }
     }
-    let mut ready: Vec<usize> = (0..ids.len())
+    let mut ready: Vec<usize> = (0..executables.len())
         .filter(|index| dependents[*index] == 0)
         .collect();
     let mut ordered = 0;
@@ -485,10 +490,10 @@ fn validate_acyclic(requires: &[Vec<u16>], after: &[Vec<u16>], ids: &[&str]) -> 
             }
         }
     }
-    if ordered != ids.len() {
-        let looped: Vec<&str> = (0..ids.len())
+    if ordered != executables.len() {
+        let looped: Vec<&str> = (0..executables.len())
             .filter(|index| dependents[*index] != 0)
-            .map(|index| ids[index])
+            .map(|index| executables[index])
             .collect();
         bail!(
             "boot plan dependencies form a cycle over components: {}",
@@ -500,10 +505,10 @@ fn validate_acyclic(requires: &[Vec<u16>], after: &[Vec<u16>], ids: &[&str]) -> 
 
 #[cfg(test)]
 mod tests {
-    use component_abi::{COMPONENT_MANIFEST_HEADER_SIZE, decode_manifest, encode_manifest};
-    use userland_image::{PlanDevice, SlotSource, decode_plan};
+    use userland_image::{SlotSource, decode_plan};
 
     use super::*;
+    use crate::manifest::ManifestSlot;
 
     const ROUTER: &str = "/boot/namespace-router";
     const DRIVER: &str = "/boot/driver-pl031";
@@ -512,24 +517,22 @@ mod tests {
     const ROOTKEEPER: &str = "/boot/rootkeeper";
     const CONSUMER: &str = "/boot/namespace-consumer-fixture";
 
-    const CONFIG: &str = "/boot/namespace.mounts";
-    const CONFIGS: &[&str] = &[CONFIG];
+    const RTC_COMPATIBLE: &[&str] = &["arm,pl031", "arm,primecell"];
+    const NAMESPACE: &str = "Namespace";
 
-    const RTC_COMPATIBLE: &str = "arm,pl031";
+    const DRIVER_FAMILY: usize = WAIT_MANY_MAX_COUNT;
+
+    fn plan(components: &[String]) -> String {
+        format!("version = 1\n{}", components.concat())
+    }
 
     fn filesystem(fields: &str) -> String {
         format!(
-            "version = 2\n\
-             \n\
-             [[components]]\n\
-             id = \"filesystem\"\n\
-             program = \"{ROUTER}\"\n\
-             budget_pages = 2048\n\
-             startup_timeout_ms = 2000\n\
-             critical = true\n\
-             restart = 3\n\
-             config = \"{CONFIG}\"\n\
-             slots = [{{ source = \"image\" }}]\n\
+            "\n[[components]]\n\
+             executable = \"{ROUTER}\"\n\
+             memory_limit = \"8M\"\n\
+             startup_timeout = \"2s\"\n\
+             on_failure = \"restart 2 then halt\"\n\
              {fields}"
         )
     }
@@ -537,453 +540,453 @@ mod tests {
     fn rtc(fields: &str) -> String {
         format!(
             "\n[[components]]\n\
-             id = \"rtc\"\n\
-             program = \"{DRIVER}\"\n\
-             budget_pages = 64\n\
-             startup_timeout_ms = 1000\n\
-             critical = false\n\
-             restart = 1\n\
-             slots = [\n\
-             {{ source = \"irq\", compatible = \"{RTC_COMPATIBLE}\" }},\n\
-             {{ source = \"mmio\", compatible = \"{RTC_COMPATIBLE}\" }},\n\
-             ]\n\
+             executable = \"{DRIVER}\"\n\
+             memory_limit = \"256K\"\n\
+             on_failure = \"detach\"\n\
              {fields}"
         )
-    }
-
-    fn declaration<const LEN: usize>(slots: &[SlotKind], config: bool) -> ComponentManifest {
-        let bytes = encode_manifest::<LEN>(slots, config);
-        decode_manifest(&bytes).expect("declaration decodes")
-    }
-
-    fn program(path: &str, manifest: Option<ComponentManifest>) -> PlanProgram<'_> {
-        PlanProgram { path, manifest }
-    }
-
-    fn programs() -> Vec<PlanProgram<'static>> {
-        vec![
-            program(ROOTKEEPER, None),
-            program(
-                ROUTER,
-                Some(declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 1 }>(
-                    &[SlotKind::Image],
-                    true,
-                )),
-            ),
-            program(
-                DRIVER,
-                Some(declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 2 }>(
-                    &[SlotKind::Irq, SlotKind::Mmio],
-                    false,
-                )),
-            ),
-            program(
-                CONSUMER,
-                Some(declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 1 }>(
-                    &[SlotKind::Service],
-                    false,
-                )),
-            ),
-            program(
-                IMAGE_FS,
-                Some(declaration::<{ COMPONENT_MANIFEST_HEADER_SIZE + 1 }>(
-                    &[SlotKind::Image],
-                    false,
-                )),
-            ),
-            program(RAM_FS, None),
-        ]
     }
 
     fn consumer(fields: &str) -> String {
         format!(
             "\n[[components]]\n\
-             id = \"consumer\"\n\
-             program = \"{CONSUMER}\"\n\
-             budget_pages = 64\n\
-             startup_timeout_ms = 1000\n\
-             critical = false\n\
-             restart = 1\n\
-             slots = [{{ source = \"service\", provider = \"filesystem\" }}]\n\
+             executable = \"{CONSUMER}\"\n\
+             memory_limit = \"256K\"\n\
+             on_failure = \"detach\"\n\
              {fields}"
         )
     }
 
+    fn slot(kind: SlotKind, resource: u16, names: &[&str]) -> ManifestSlot {
+        ManifestSlot {
+            kind,
+            resource,
+            names: names.iter().map(|name| String::from(*name)).collect(),
+        }
+    }
+
+    fn declaration(slots: Vec<ManifestSlot>, export: Option<&str>) -> ProgramManifest {
+        ProgramManifest {
+            slots,
+            export: export.map(String::from),
+        }
+    }
+
+    fn router_declaration() -> ProgramManifest {
+        declaration(
+            vec![
+                slot(SlotKind::Image, 0, &[]),
+                slot(SlotKind::File, 0, &["mounts"]),
+            ],
+            Some(NAMESPACE),
+        )
+    }
+
+    fn device_declaration() -> ProgramManifest {
+        declaration(
+            vec![
+                slot(SlotKind::Irq, 0, RTC_COMPATIBLE),
+                slot(SlotKind::Mmio, 1, RTC_COMPATIBLE),
+            ],
+            None,
+        )
+    }
+
+    fn consumer_declaration() -> ProgramManifest {
+        declaration(vec![slot(SlotKind::Service, 0, &[NAMESPACE])], None)
+    }
+
+    struct Image {
+        entries: Vec<(String, Option<ProgramManifest>)>,
+        records: Vec<String>,
+    }
+
+    impl Image {
+        fn new() -> Self {
+            let mut entries = vec![
+                (String::from(ROOTKEEPER), None),
+                (String::from(ROUTER), Some(router_declaration())),
+                (String::from(DRIVER), Some(device_declaration())),
+                (String::from(CONSUMER), Some(consumer_declaration())),
+                (
+                    String::from(IMAGE_FS),
+                    Some(declaration(vec![slot(SlotKind::Image, 0, &[])], None)),
+                ),
+                (String::from(RAM_FS), None),
+            ];
+            for index in 0..DRIVER_FAMILY {
+                entries.push((driver_family_member(index), Some(device_declaration())));
+            }
+            Self {
+                entries,
+                records: vec![format!("{ROUTER}/mounts")],
+            }
+        }
+
+        fn with(mut self, path: &str, manifest: ProgramManifest) -> Self {
+            self.entries.push((String::from(path), Some(manifest)));
+            self
+        }
+
+        fn with_record(mut self, path: &str) -> Self {
+            self.records.push(String::from(path));
+            self
+        }
+
+        fn programs(&self) -> Vec<PlanProgram<'_>> {
+            self.entries
+                .iter()
+                .map(|(path, manifest)| PlanProgram {
+                    path,
+                    manifest: manifest.as_ref(),
+                })
+                .collect()
+        }
+
+        fn compile(&self, source: &str) -> Result<Vec<u8>> {
+            let records: Vec<&str> = self.records.iter().map(String::as_str).collect();
+            compile_boot_plan(source, &self.programs(), &records)
+        }
+    }
+
+    fn driver_family_member(index: usize) -> String {
+        format!("/boot/driver-{index}")
+    }
+
     fn compiled(source: &str) -> Vec<u8> {
-        compile_boot_plan(source, &programs(), CONFIGS).expect("compile must succeed")
+        Image::new().compile(source).expect("compile must succeed")
     }
 
     fn rejected(source: &str) -> String {
-        compile_boot_plan(source, &programs(), CONFIGS)
-            .expect_err("invalid composition must fail")
-            .to_string()
+        let error = Image::new()
+            .compile(source)
+            .expect_err("invalid composition must fail");
+        // Причина читается вместе со своей цепочкой: значение и компонент,
+        // который его назвал, лежат на разных её звеньях.
+        format!("{error:#}")
     }
 
     #[test]
-    fn plan_carries_every_component_with_its_slots_and_edges() {
-        let source = format!("{}{}", filesystem(""), rtc("after = [\"filesystem\"]\n"));
-        let bytes = compiled(&source);
+    fn plan_takes_every_slot_from_the_program_declaration() {
+        let bytes = compiled(&plan(&[filesystem(""), rtc("")]));
 
         let plan = decode_plan(&bytes).expect("compiled plan must decode");
         assert_eq!(plan.len(), 2);
 
-        let filesystem = plan.component(0).expect("first component");
-        assert_eq!(filesystem.id(), "filesystem");
-        assert_eq!(filesystem.program(), ROUTER);
-        assert_eq!(filesystem.budget_pages(), 2048);
-        assert_eq!(filesystem.startup_timeout(), Timeout::from_millis(2000));
-        assert_eq!(filesystem.restart_limit(), 3);
-        assert!(filesystem.critical());
-        assert_eq!(filesystem.config(), Some(CONFIG));
-        assert_eq!(filesystem.slots().collect::<Vec<_>>(), [SlotSource::Image]);
-
-        let rtc = plan.component(1).expect("second component");
-        assert_eq!(rtc.config(), None);
-        assert!(!rtc.critical());
-        assert_eq!(rtc.after().collect::<Vec<_>>(), [0]);
-        let device = PlanDevice {
-            compatible: RTC_COMPATIBLE,
-            instance: 0,
-            resource: 0,
-        };
+        let router = plan.component(0).expect("router");
+        assert_eq!(router.executable(), ROUTER);
         assert_eq!(
-            rtc.slots().collect::<Vec<_>>(),
-            [SlotSource::Irq(device), SlotSource::Mmio(device)]
+            router.slots().collect::<Vec<_>>(),
+            [
+                SlotSource::Image,
+                SlotSource::File {
+                    path: "/boot/namespace-router/mounts"
+                }
+            ]
+        );
+
+        let rtc = plan.component(1).expect("rtc");
+        let slots: Vec<SlotSource<'_>> = rtc.slots().collect();
+        let SlotSource::Irq(line) = slots[0] else {
+            panic!("first slot is an interrupt line")
+        };
+        assert_eq!(line.compatible().collect::<Vec<_>>(), RTC_COMPATIBLE);
+        assert_eq!(line.resource, 0);
+        let SlotSource::Mmio(window) = slots[1] else {
+            panic!("second slot is an MMIO window")
+        };
+        assert_eq!(window.compatible().collect::<Vec<_>>(), RTC_COMPATIBLE);
+        assert_eq!(window.resource, 1);
+    }
+
+    #[test]
+    fn plan_resolves_a_file_under_the_component_directory() {
+        const OWNER: &str = "/boot/owner";
+        let image = Image::new()
+            .with(
+                OWNER,
+                declaration(vec![slot(SlotKind::File, 0, &["data"])], None),
+            )
+            .with_record("/boot/owner/data");
+        let source = plan(&[rtc("").replace(DRIVER, OWNER)]);
+
+        let bytes = image.compile(&source).expect("compile must succeed");
+        let plan = decode_plan(&bytes).expect("compiled plan must decode");
+        assert_eq!(
+            plan.component(0).expect("owner").slots().next(),
+            Some(SlotSource::File {
+                path: "/boot/owner/data"
+            })
         );
     }
 
     #[test]
-    fn plan_resolves_a_service_slot_to_its_provider() {
-        let bytes = compiled(&format!("{}{}", filesystem(""), consumer("")));
+    fn plan_rejects_a_file_the_component_directory_does_not_contain() {
+        const OWNER: &str = "/boot/owner";
+        let image = Image::new().with(
+            OWNER,
+            declaration(vec![slot(SlotKind::File, 0, &["ghost"])], None),
+        );
+        let source = plan(&[rtc("").replace(DRIVER, OWNER)]);
+
+        let error = image.compile(&source).expect_err("the record is absent");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "boot plan component '{OWNER}' takes file '/boot/owner/ghost', \
+                 which its directory does not contain"
+            )
+        );
+    }
+
+    #[test]
+    fn plan_binds_an_imported_protocol_to_its_exporter() {
+        let bytes = compiled(&plan(&[filesystem(""), consumer("")]));
+
+        let plan = decode_plan(&bytes).expect("compiled plan must decode");
+        let consumer = plan.component(1).expect("consumer");
+        assert_eq!(
+            consumer.slots().collect::<Vec<_>>(),
+            [SlotSource::Service { provider: 0 }]
+        );
+        // Ребро зависимости выведено из связывания: рукой оно не написано.
+        assert_eq!(consumer.requires().collect::<Vec<_>>(), [0]);
+    }
+
+    #[test]
+    fn plan_orders_an_importer_after_its_exporter() {
+        // Потребитель стоит в записи первым, а зависит от провайдера: ребро
+        // ведёт вперёд по плану, и порядок остаётся выразимым.
+        let bytes = compiled(&plan(&[consumer(""), filesystem("")]));
 
         let plan = decode_plan(&bytes).expect("compiled plan must decode");
         assert_eq!(
-            plan.component(1)
+            plan.component(0)
                 .expect("consumer")
-                .slots()
+                .requires()
                 .collect::<Vec<_>>(),
-            [SlotSource::Service { provider: 0 }]
+            [1]
+        );
+    }
+
+    #[test]
+    fn plan_keeps_an_after_edge_without_an_import() {
+        let bytes = compiled(&plan(&[
+            filesystem(""),
+            rtc(&format!("after = [\"{ROUTER}\"]\n")),
+        ]));
+
+        let plan = decode_plan(&bytes).expect("compiled plan must decode");
+        let rtc = plan.component(1).expect("rtc");
+        assert_eq!(rtc.after().collect::<Vec<_>>(), [0]);
+        assert_eq!(rtc.requires().count(), 0);
+    }
+
+    #[test]
+    fn plan_rejects_an_import_no_component_exports() {
+        let source = plan(&[rtc(""), consumer("")]);
+        assert_eq!(
+            rejected(&source),
+            format!(
+                "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE}', \
+                 which no component of the composition exports"
+            )
+        );
+    }
+
+    #[test]
+    fn plan_rejects_an_import_two_components_export() {
+        const TWIN: &str = "/boot/namespace-router-twin";
+        let image = Image::new()
+            .with(TWIN, router_declaration())
+            .with_record("/boot/namespace-router-twin/mounts");
+        let twin = filesystem("").replace(ROUTER, TWIN);
+        let source = plan(&[filesystem(""), twin, consumer("")]);
+
+        let error = image.compile(&source).expect_err("the choice is ambiguous");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE}', \
+                 which 2 components export: {ROUTER}, {TWIN}; \
+                 a choice between them needs component names"
+            )
+        );
+    }
+
+    #[test]
+    fn plan_rejects_a_component_importing_what_it_exports() {
+        const SELF_BOUND: &str = "/boot/self-bound";
+        let image = Image::new().with(
+            SELF_BOUND,
+            declaration(
+                vec![slot(SlotKind::Service, 0, &[NAMESPACE])],
+                Some(NAMESPACE),
+            ),
+        );
+        let source = plan(&[consumer("").replace(CONSUMER, SELF_BOUND)]);
+
+        let error = image
+            .compile(&source)
+            .expect_err("a component does not take its own service");
+        assert_eq!(
+            format!("{error:#}"),
+            format!("boot plan component '{SELF_BOUND}' imports the protocol it exports itself")
         );
     }
 
     #[test]
     fn plan_rejects_an_unsupported_version() {
-        let source = filesystem("").replace("version = 2", "version = 3");
+        let source = plan(&[filesystem("")]).replace("version = 1", "version = 3");
         assert_eq!(
             rejected(&source),
-            "Unsupported boot plan version 3; expected 2"
+            "Unsupported boot plan version 3; expected 1"
         );
     }
 
     #[test]
-    fn plan_rejects_a_component_without_an_id() {
-        let source = filesystem("").replace("id = \"filesystem\"", "id = \"\"");
+    fn plan_rejects_a_repeated_executable() {
+        let source = plan(&[filesystem(""), rtc("").replace(DRIVER, ROUTER)]);
         assert_eq!(
             rejected(&source),
-            "boot plan component must set a non-empty 'id'"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_repeated_id() {
-        let source = format!(
-            "{}{}",
-            filesystem(""),
-            rtc("").replace("\"rtc\"", "\"filesystem\"")
-        );
-        assert_eq!(
-            rejected(&source),
-            "boot plan component id 'filesystem' is used more than once"
+            format!(
+                "boot plan names executable '{ROUTER}' more than once; \
+                 a composition of several instances needs component names"
+            )
         );
     }
 
     #[test]
     fn plan_rejects_an_empty_composition() {
         assert_eq!(
-            rejected("version = 2\ncomponents = []\n"),
+            rejected("version = 1\ncomponents = []\n"),
             "boot plan must contain at least one component; found none"
         );
     }
 
     #[test]
-    fn plan_rejects_a_zero_budget() {
-        let source = filesystem("").replace("budget_pages = 2048", "budget_pages = 0");
-        assert_eq!(
-            rejected(&source),
-            "boot plan component 'filesystem' must set a non-zero 'budget_pages'"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_zero_startup_timeout() {
-        let source = filesystem("").replace("startup_timeout_ms = 2000", "startup_timeout_ms = 0");
-        assert_eq!(
-            rejected(&source),
-            "boot plan component 'filesystem' must set a non-zero 'startup_timeout_ms'"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_component_that_never_launches() {
-        let source = filesystem("").replace("restart = 3", "restart = 0");
-        assert_eq!(
-            rejected(&source),
-            "boot plan component 'filesystem' must set 'restart' to at least one launch"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_program_outside_the_image() {
-        let source = filesystem("").replace(ROUTER, "/boot/ghost-router");
-        assert_eq!(
-            rejected(&source),
-            "boot plan component 'filesystem' names program '/boot/ghost-router' \
-             that the image does not contain"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_program_without_a_manifest() {
-        let source = filesystem("").replace(ROUTER, ROOTKEEPER);
-        assert_eq!(
-            rejected(&source),
-            format!(
-                "boot plan component 'filesystem' names program '{ROOTKEEPER}' \
-                 without a component manifest section"
-            )
-        );
-    }
-
-    #[test]
-    fn plan_rejects_slots_swapped_against_the_declaration() {
-        let source = format!("{}{}", filesystem(""), rtc("")).replace(
-            "{ source = \"irq\", compatible = \"arm,pl031\" },\n\
-             { source = \"mmio\", compatible = \"arm,pl031\" },",
-            "{ source = \"mmio\", compatible = \"arm,pl031\" },\n\
-             { source = \"irq\", compatible = \"arm,pl031\" },",
-        );
-        assert_eq!(
-            rejected(&source),
-            format!(
-                "boot plan component 'rtc' declares a 'mmio' slot 0; \
-                 program '{DRIVER}' declares 'irq'"
-            )
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_slot_kind_the_declaration_does_not_name() {
-        let source = format!("{}{}", filesystem(""), rtc("")).replace(
-            "{ source = \"mmio\", compatible = \"arm,pl031\" },",
-            "{ source = \"service\", provider = \"filesystem\" },",
-        );
-        assert_eq!(
-            rejected(&source),
-            format!(
-                "boot plan component 'rtc' declares a 'service' slot 1; \
-                 program '{DRIVER}' declares 'mmio'"
-            )
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_slot_count_past_the_declaration() {
-        let source = format!("{}{}", filesystem(""), rtc("")).replace(
-            "{ source = \"mmio\", compatible = \"arm,pl031\" },",
-            "{ source = \"mmio\", compatible = \"arm,pl031\" },\n\
-             { source = \"mmio\", compatible = \"arm,pl031\" },",
-        );
-        assert_eq!(
-            rejected(&source),
-            format!("boot plan component 'rtc' declares 3 slots; program '{DRIVER}' declares 2")
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_slot_the_declaration_names_and_the_plan_does_not() {
-        let source = format!("{}{}", filesystem(""), rtc(""))
-            .replace("{ source = \"mmio\", compatible = \"arm,pl031\" },", "");
-        assert_eq!(
-            rejected(&source),
-            format!("boot plan component 'rtc' declares 1 slots; program '{DRIVER}' declares 2")
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_config_record_the_plan_does_not_name() {
-        let source = filesystem("").replace(&format!("config = \"{CONFIG}\"\n"), "");
-        assert_eq!(
-            rejected(&source),
-            format!(
-                "boot plan component 'filesystem' names no config record; \
-                 program '{ROUTER}' declares one"
-            )
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_config_record_the_program_does_not_declare() {
-        let source = filesystem("").replace(ROUTER, IMAGE_FS);
-        assert_eq!(
-            rejected(&source),
-            format!(
-                "boot plan component 'filesystem' names a config record; \
-                 program '{IMAGE_FS}' declares none"
-            )
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_config_record_the_image_does_not_compile() {
-        let source = filesystem("").replace(CONFIG, "/boot/ghost.mounts");
-        assert_eq!(
-            rejected(&source),
-            "boot plan component 'filesystem' names config record '/boot/ghost.mounts' \
-             that the image does not compile"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_config_path_outside_the_contract() {
-        let source = filesystem("").replace(CONFIG, "boot/namespace.mounts");
-        assert!(
-            rejected(&source)
-                .starts_with("boot plan component 'filesystem' names an invalid config record")
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_config_record_without_an_image_slot() {
-        let source = filesystem("").replace("slots = [{ source = \"image\" }]", "slots = []");
-        assert_eq!(
-            rejected(&source),
-            "boot plan component 'filesystem' names a config record \
-             without an 'image' slot to read it from"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_cycle_over_requires() {
-        let source = format!(
-            "{}{}",
-            filesystem("requires = [\"rtc\"]\n"),
-            rtc("requires = [\"filesystem\"]\n")
-        );
-        assert_eq!(
-            rejected(&source),
-            "boot plan dependencies form a cycle over components: filesystem, rtc"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_cycle_over_after() {
-        let source = format!(
-            "{}{}",
-            filesystem("after = [\"rtc\"]\n"),
-            rtc("after = [\"filesystem\"]\n")
-        );
-        assert_eq!(
-            rejected(&source),
-            "boot plan dependencies form a cycle over components: filesystem, rtc"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_self_dependency() {
-        for key in ["requires", "after"] {
-            let source = filesystem(&format!("{key} = [\"filesystem\"]\n"));
-            assert_eq!(
-                rejected(&source),
-                format!("boot plan component 'filesystem' names itself in '{key}'")
+    fn plan_rejects_a_memory_limit_outside_the_grammar() {
+        for limit in ["\"0\"", "\"8MB\"", "\"5000\"", "\"\""] {
+            let source = plan(&[filesystem("")])
+                .replace("memory_limit = \"8M\"", &format!("memory_limit = {limit}"));
+            assert!(
+                rejected(&source).starts_with(&format!(
+                    "boot plan component '{ROUTER}' sets 'memory_limit'"
+                )),
+                "'{limit}' must fail on the memory limit"
             );
         }
     }
 
     #[test]
-    fn plan_rejects_a_component_taking_its_own_service() {
-        let source = filesystem("")
-            .replace(
-                "slots = [{ source = \"image\" }]",
-                "slots = [{ source = \"service\", provider = \"filesystem\" }]",
-            )
-            .replace(&format!("config = \"{CONFIG}\"\n"), "");
+    fn plan_rejects_a_startup_timeout_outside_the_grammar() {
+        let source =
+            plan(&[filesystem("")]).replace("startup_timeout = \"2s\"", "startup_timeout = \"0s\"");
+        assert!(rejected(&source).starts_with(&format!(
+            "boot plan component '{ROUTER}' sets 'startup_timeout'"
+        )));
+    }
+
+    #[test]
+    fn plan_rejects_a_failure_policy_outside_the_grammar() {
+        for policy in [
+            "\"\"",
+            "\"reboot\"",
+            "\"restart 2\"",
+            "\"restart two then halt\"",
+            "\"restart 0 then halt\"",
+            "\"restart 2 then reboot\"",
+        ] {
+            let source = plan(&[filesystem("")]).replace(
+                "on_failure = \"restart 2 then halt\"",
+                &format!("on_failure = {policy}"),
+            );
+            assert!(
+                rejected(&source)
+                    .starts_with(&format!("boot plan component '{ROUTER}' sets 'on_failure'")),
+                "'{policy}' must fail on the failure policy"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_rejects_an_executable_outside_the_image() {
+        let source = plan(&[filesystem("")]).replace(ROUTER, "/boot/ghost-router");
         assert_eq!(
             rejected(&source),
-            "boot plan component 'filesystem' takes its own service as a slot"
+            "boot plan names executable '/boot/ghost-router' that the image does not contain"
         );
     }
 
     #[test]
-    fn plan_rejects_an_unknown_service_provider() {
-        let source = format!(
-            "{}{}",
-            filesystem(""),
-            rtc("").replace(
-                "{ source = \"mmio\", compatible = \"arm,pl031\" },",
-                "{ source = \"service\", provider = \"logger\" },"
-            )
-        );
+    fn plan_rejects_a_program_without_a_manifest() {
+        let source = plan(&[filesystem("")]).replace(ROUTER, ROOTKEEPER);
         assert_eq!(
             rejected(&source),
-            "boot plan component 'rtc' takes the service of 'logger', \
-             which the composition does not contain"
+            format!("boot plan component '{ROOTKEEPER}' has no component manifest section")
+        );
+    }
+
+    #[test]
+    fn plan_rejects_a_cycle_over_after() {
+        let source = plan(&[
+            filesystem(&format!("after = [\"{DRIVER}\"]\n")),
+            rtc(&format!("after = [\"{ROUTER}\"]\n")),
+        ]);
+        assert_eq!(
+            rejected(&source),
+            format!("boot plan dependencies form a cycle over components: {ROUTER}, {DRIVER}")
+        );
+    }
+
+    #[test]
+    fn plan_rejects_a_self_dependency() {
+        let source = plan(&[filesystem(&format!("after = [\"{ROUTER}\"]\n"))]);
+        assert_eq!(
+            rejected(&source),
+            format!("boot plan component '{ROUTER}' names itself in 'after'")
         );
     }
 
     #[test]
     fn plan_rejects_an_unknown_edge() {
-        let source = filesystem("requires = [\"logger\"]\n");
+        let source = plan(&[filesystem("after = [\"/boot/logger\"]\n")]);
         assert_eq!(
             rejected(&source),
-            "boot plan component 'filesystem' names 'logger' in 'requires', \
-             which the composition does not contain"
+            format!(
+                "boot plan component '{ROUTER}' names '/boot/logger' in 'after', \
+                 which the composition does not contain"
+            )
         );
     }
 
     #[test]
-    fn plan_rejects_a_slot_of_an_unknown_source() {
-        let source = format!("{}{}", filesystem(""), rtc("")).replace("\"irq\"", "\"disk\"");
-        assert_eq!(
-            rejected(&source),
-            "boot plan component 'rtc' declares a slot of unknown source 'disk'"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_device_selector_on_a_slot_that_has_none() {
-        let source = filesystem("").replace(
-            "{ source = \"image\" }",
-            "{ source = \"image\", compatible = \"arm,pl031\" }",
-        );
-        assert_eq!(
-            rejected(&source),
-            "boot plan component 'filesystem' sets 'compatible' on a 'image' slot"
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_device_slot_without_a_selector() {
-        let source = filesystem("").replace(
-            "{ source = \"image\" }",
-            "{ source = \"image\" }, { source = \"irq\" }",
-        );
-        assert_eq!(
-            rejected(&source),
-            "boot plan component 'filesystem' declares a 'irq' slot without a 'compatible'"
-        );
+    fn plan_rejects_an_unknown_key() {
+        let source = plan(&[filesystem("slots = [{ source = \"image\" }]\n")]);
+        assert!(rejected(&source).starts_with("Failed to parse boot plan TOML"));
     }
 
     #[test]
     fn plan_rejects_more_slots_than_the_startup_transaction_carries() {
-        let slots = format!(
-            "slots = [{}]",
-            ["{ source = \"image\" }"; COMPONENT_SLOT_MAX + 1].join(", ")
+        const CROWDED: &str = "/boot/crowded";
+        let image = Image::new().with(
+            CROWDED,
+            declaration(
+                (0..=COMPONENT_SLOT_MAX)
+                    .map(|_| slot(SlotKind::Image, 0, &[]))
+                    .collect(),
+                None,
+            ),
         );
-        let source = filesystem("").replace("slots = [{ source = \"image\" }]", &slots);
+        let source = plan(&[rtc("").replace(DRIVER, CROWDED)]);
+
+        let error = image
+            .compile(&source)
+            .expect_err("slots past the transaction must fail");
         assert_eq!(
-            rejected(&source),
+            format!("{error:#}"),
             format!(
-                "boot plan component 'filesystem' declares {} slots; \
+                "boot plan component '{CROWDED}' declares {} slots; \
                  the startup transaction carries {COMPONENT_SLOT_MAX}",
                 COMPONENT_SLOT_MAX + 1
             )
@@ -991,23 +994,17 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_an_unknown_key() {
-        let source = filesystem("backoff_ms = 100\n");
-        assert!(rejected(&source).starts_with("Failed to parse boot plan TOML"));
-    }
-
-    #[test]
     fn components_fit_the_resource_depth_ceiling() {
-        validate_resource_depth("filesystem", COMPONENT_RESOURCE_LEVELS)
+        validate_resource_depth(ROUTER, COMPONENT_RESOURCE_LEVELS)
             .expect("a component fits the ceiling");
 
-        let too_deep = validate_resource_depth("deep", MAX_RESOURCE_DEPTH + 1)
+        let too_deep = validate_resource_depth(ROUTER, MAX_RESOURCE_DEPTH + 1)
             .expect_err("a component past the ceiling must fail")
             .to_string();
         assert_eq!(
             too_deep,
             format!(
-                "boot plan component 'deep' needs {} resource levels under depth 0; \
+                "boot plan component '{ROUTER}' needs {} resource levels under depth 0; \
                  the ceiling is {MAX_RESOURCE_DEPTH}",
                 MAX_RESOURCE_DEPTH + 1
             )
@@ -1016,10 +1013,11 @@ mod tests {
 
     #[test]
     fn plan_rejects_a_composition_past_the_supervisor_wait_ceiling() {
-        let mut source = filesystem("");
+        let mut components = vec![filesystem("")];
         for index in 1..WAIT_MANY_MAX_COUNT {
-            source.push_str(&rtc("").replace("\"rtc\"", &format!("\"rtc{index}\"")));
+            components.push(rtc("").replace(DRIVER, &driver_family_member(index)));
         }
+        let source = plan(&components);
         assert_eq!(
             rejected(&source),
             format!(
@@ -1033,10 +1031,11 @@ mod tests {
     #[test]
     fn plan_rejects_a_composition_past_the_handle_estimate() {
         let components = (HANDLE_TABLE_CAPACITY as usize - SUPERVISOR_HANDLES) / COMPONENT_HANDLES;
-        let mut source = filesystem("");
+        let mut entries = vec![filesystem("")];
         for index in 1..=components {
-            source.push_str(&rtc("").replace("\"rtc\"", &format!("\"rtc{index}\"")));
+            entries.push(rtc("").replace(DRIVER, &driver_family_member(index)));
         }
+        let source = plan(&entries);
         assert!(
             rejected(&source).contains("rootkeeper handles; the table holds"),
             "handle estimate must be the failing check"

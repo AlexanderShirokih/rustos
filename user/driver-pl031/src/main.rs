@@ -37,7 +37,10 @@ const ALARM_LOST_EXIT_CODE: u32 = 5;
 
 component_manifest! {
     struct RtcStartup {
-        slots: { line: irq, window: mmio },
+        slots: {
+            line: irq(compatible = ["arm,pl031"]),
+            window: mmio(compatible = ["arm,pl031"]),
+        },
     }
 }
 

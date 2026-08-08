@@ -1,12 +1,22 @@
-/// Объявляет манифест компонента: именованные слоты с их видами и запись
-/// конфигурации. Порождает приёмник стартовой транзакции с полями-капами и
-/// запись манифеста в секции программы.
+/// Объявляет манифест компонента: экспортируемый протокол и именованные слоты
+/// вместе с тем, чем композиция их наполняет - строками совместимости у
+/// устройства и именем протокола у сервиса. Порождает приёмник стартовой
+/// транзакции с полями-капами и запись манифеста в секции программы.
 ///
 /// ```ignore
 /// component_abi::component_manifest! {
 ///     pub struct RouterStartup {
-///         config,
-///         slots: { image: image },
+///         exports: "Namespace",
+///         slots: { image: image, mounts: file("mounts") },
+///     }
+/// }
+///
+/// component_abi::component_manifest! {
+///     pub struct RtcStartup {
+///         slots: {
+///             line: irq(compatible = ["arm,pl031"]),
+///             window: mmio(compatible = ["arm,pl031"]),
+///         },
 ///     }
 /// }
 /// ```
@@ -15,42 +25,41 @@ macro_rules! component_manifest {
     (
         $(#[$attribute:meta])*
         $visibility:vis struct $name:ident {
-            config,
-            slots: { $($slot:ident: $kind:ident),* $(,)? } $(,)?
+            exports: $export:literal,
+            slots: { $($slot:ident: $kind:ident $(($($parameter:tt)*))?),* $(,)? } $(,)?
         }
     ) => {
         $crate::component_manifest!(@declare
             $(#[$attribute])*
             $visibility struct $name
-            config = true (config)
-            slots { $($slot: $kind),* }
+            export = $export
+            slots { $($slot: $kind $(($($parameter)*))?),* }
         );
     };
     (
         $(#[$attribute:meta])*
         $visibility:vis struct $name:ident {
-            slots: { $($slot:ident: $kind:ident),* $(,)? } $(,)?
+            slots: { $($slot:ident: $kind:ident $(($($parameter:tt)*))?),* $(,)? } $(,)?
         }
     ) => {
         $crate::component_manifest!(@declare
             $(#[$attribute])*
             $visibility struct $name
-            config = false ()
-            slots { $($slot: $kind),* }
+            export = ""
+            slots { $($slot: $kind $(($($parameter)*))?),* }
         );
     };
     (@declare
         $(#[$attribute:meta])*
         $visibility:vis struct $name:ident
-        config = $config:literal ($($config_field:ident)?)
-        slots { $($slot:ident: $kind:ident),* }
+        export = $export:literal
+        slots { $($slot:ident: $kind:ident $(($($parameter:tt)*))?),* }
     ) => {
         $(#[$attribute])*
         $visibility struct $name {
             pub log: ::ipc::wire::Cap,
             pub control: ::ipc::wire::Cap,
             pub service: ::ipc::wire::Cap,
-            $(pub $config_field: $crate::ComponentConfig,)?
             $(pub $slot: ::ipc::wire::Cap,)*
         }
 
@@ -63,14 +72,6 @@ macro_rules! component_manifest {
                 else {
                     return ::core::result::Result::Ok(::core::option::Option::None);
                 };
-                if started.config.is_some() != $config {
-                    return ::core::result::Result::Ok(::core::option::Option::None);
-                }
-                $(
-                    let ::core::option::Option::Some($config_field) = started.config else {
-                        return ::core::result::Result::Ok(::core::option::Option::None);
-                    };
-                )?
                 let mut slots = started.slots();
                 $(
                     let ::core::option::Option::Some($slot) = slots.next() else {
@@ -84,36 +85,52 @@ macro_rules! component_manifest {
                     log: started.log,
                     control: started.control,
                     service: started.service,
-                    $($config_field,)?
                     $($slot,)*
                 }))
             }
         }
 
         const _: () = {
-            const SLOTS: &[$crate::SlotKind] =
-                &[$($crate::component_manifest!(@kind $kind)),*];
-            const RECORD_LEN: usize = $crate::COMPONENT_MANIFEST_HEADER_SIZE + SLOTS.len();
+            const SLOTS: &[$crate::SlotDeclaration] = &[
+                $($crate::component_manifest!(@slot $kind $(($($parameter)*))?)),*
+            ];
+            const RECORD_LEN: usize = $crate::manifest_len(SLOTS, $export);
 
             #[cfg_attr(target_os = "none", unsafe(link_section = ".component.manifest"))]
             #[used]
-            static MANIFEST: [u8; RECORD_LEN] = $crate::encode_manifest(SLOTS, $config);
+            static MANIFEST: [u8; RECORD_LEN] = $crate::encode_manifest(SLOTS, $export);
         };
     };
-    (@kind image) => { $crate::SlotKind::Image };
-    (@kind irq) => { $crate::SlotKind::Irq };
-    (@kind mmio) => { $crate::SlotKind::Mmio };
-    (@kind service) => { $crate::SlotKind::Service };
+    (@slot image) => { $crate::SlotDeclaration::image() };
+    (@slot irq(compatible = [$($compatible:literal),+ $(,)?])) => {
+        $crate::SlotDeclaration::irq(&[$($compatible),+], 0)
+    };
+    (@slot irq(compatible = [$($compatible:literal),+ $(,)?], resource = $resource:literal)) => {
+        $crate::SlotDeclaration::irq(&[$($compatible),+], $resource)
+    };
+    (@slot mmio(compatible = [$($compatible:literal),+ $(,)?])) => {
+        $crate::SlotDeclaration::mmio(&[$($compatible),+], 0)
+    };
+    (@slot mmio(compatible = [$($compatible:literal),+ $(,)?], resource = $resource:literal)) => {
+        $crate::SlotDeclaration::mmio(&[$($compatible),+], $resource)
+    };
+    (@slot service(protocol = $protocol:literal)) => {
+        $crate::SlotDeclaration::service(&[$protocol])
+    };
+    (@slot file($name:literal)) => { $crate::SlotDeclaration::file(&[$name]) };
 }
 
 #[cfg(test)]
 mod tests {
     use core::num::NonZeroU32;
 
-    use ipc::wire::{Cap, Str};
+    use ipc::wire::Cap;
     use ipc_test::MockEnd;
 
-    use crate::{COMPONENT_CONFIG_MAX, ComponentConfig, ComponentStartupClient};
+    use crate::{
+        COMPONENT_MANIFEST_SECTION, ComponentStartupClient, SlotKind, decode_manifest,
+        encode_manifest, manifest_len,
+    };
 
     const LOG_CAP: Cap = cap(0x21);
     const CONTROL_CAP: Cap = cap(0x23);
@@ -121,27 +138,33 @@ mod tests {
     const IMAGE_CAP: Cap = cap(0x25);
     const DEVICE_CAP: Cap = cap(0x26);
 
-    const CONFIG_RECORD: &str = "/boot/namespace.mounts";
+    const ROUTER_SLOTS: &[crate::SlotDeclaration] = &[crate::SlotDeclaration::image()];
+    const ROUTER_LEN: usize = manifest_len(ROUTER_SLOTS, "Namespace");
 
     crate::component_manifest! {
         struct RouterStartup {
-            config,
+            exports: "Namespace",
             slots: { image: image },
         }
     }
 
     crate::component_manifest! {
         struct DeviceStartup {
-            slots: { line: irq, window: mmio },
+            slots: {
+                line: irq(compatible = ["arm,pl031", "arm,primecell"]),
+                window: mmio(compatible = ["arm,pl031"], resource = 1),
+            },
+        }
+    }
+
+    crate::component_manifest! {
+        struct ConsumerStartup {
+            slots: { namespace: service(protocol = "Namespace") },
         }
     }
 
     const fn cap(raw: u32) -> Cap {
         Cap::from_raw(NonZeroU32::new(raw).expect("non-zero"))
-    }
-
-    fn config(record: &str) -> Str<'_, COMPONENT_CONFIG_MAX> {
-        Str::new(record).expect("record path fits the frame")
     }
 
     fn client(end: MockEnd) -> ComponentStartupClient<MockEnd> {
@@ -153,7 +176,7 @@ mod tests {
         let (client_end, server_end) = MockEnd::pair();
         let sender = client(client_end);
         sender
-            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, config(""), 2)
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 2)
             .expect("start write");
         sender.slot(DEVICE_CAP).expect("slot write");
         sender.slot(IMAGE_CAP).expect("slot write");
@@ -170,11 +193,62 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_config_arrives_with_the_base_frame() {
+    fn a_service_slot_arrives_as_a_named_capability() {
         let (client_end, server_end) = MockEnd::pair();
         let sender = client(client_end);
         sender
-            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, config(CONFIG_RECORD), 1)
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 1)
+            .expect("start write");
+        sender.slot(DEVICE_CAP).expect("slot write");
+
+        let started = ConsumerStartup::receive(&server_end)
+            .expect("dispatch ok")
+            .expect("transaction matches the declaration");
+
+        assert_eq!(started.log, LOG_CAP);
+        assert_eq!(started.control, CONTROL_CAP);
+        assert_eq!(started.service, SERVICE_CAP);
+        assert_eq!(started.namespace, DEVICE_CAP);
+    }
+
+    #[test]
+    fn a_transaction_past_the_declared_slots_is_refused() {
+        let (client_end, server_end) = MockEnd::pair();
+        let sender = client(client_end);
+        sender
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 2)
+            .expect("start write");
+        sender.slot(DEVICE_CAP).expect("slot write");
+        sender.slot(IMAGE_CAP).expect("slot write");
+
+        assert!(
+            ConsumerStartup::receive(&server_end)
+                .expect("dispatch ok")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_transaction_short_of_the_declared_slots_is_refused() {
+        let (client_end, server_end) = MockEnd::pair();
+        let sender = client(client_end);
+        sender
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 0)
+            .expect("start write");
+
+        assert!(
+            RouterStartup::receive(&server_end)
+                .expect("dispatch ok")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_exporting_declaration_takes_its_slot() {
+        let (client_end, server_end) = MockEnd::pair();
+        let sender = client(client_end);
+        sender
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 1)
             .expect("start write");
         sender.slot(IMAGE_CAP).expect("slot write");
 
@@ -186,59 +260,16 @@ mod tests {
         assert_eq!(started.control, CONTROL_CAP);
         assert_eq!(started.service, SERVICE_CAP);
         assert_eq!(started.image, IMAGE_CAP);
-        assert_eq!(
-            started.config,
-            ComponentConfig::new(CONFIG_RECORD).expect("record")
-        );
     }
 
     #[test]
-    fn a_transaction_past_the_declared_slots_is_refused() {
-        let (client_end, server_end) = MockEnd::pair();
-        let sender = client(client_end);
-        sender
-            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, config(""), 2)
-            .expect("start write");
-        sender.slot(DEVICE_CAP).expect("slot write");
-        sender.slot(IMAGE_CAP).expect("slot write");
+    fn a_declaration_encodes_its_slots_and_export() {
+        assert_eq!(COMPONENT_MANIFEST_SECTION, ".component.manifest");
+        let bytes: [u8; ROUTER_LEN] = encode_manifest(ROUTER_SLOTS, "Namespace");
 
-        assert!(
-            RouterStartup::receive(&server_end)
-                .expect("dispatch ok")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn a_transaction_without_the_declared_config_is_refused() {
-        let (client_end, server_end) = MockEnd::pair();
-        let sender = client(client_end);
-        sender
-            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, config(""), 1)
-            .expect("start write");
-        sender.slot(IMAGE_CAP).expect("slot write");
-
-        assert!(
-            RouterStartup::receive(&server_end)
-                .expect("dispatch ok")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn a_config_the_declaration_does_not_name_is_refused() {
-        let (client_end, server_end) = MockEnd::pair();
-        let sender = client(client_end);
-        sender
-            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, config(CONFIG_RECORD), 2)
-            .expect("start write");
-        sender.slot(DEVICE_CAP).expect("slot write");
-        sender.slot(IMAGE_CAP).expect("slot write");
-
-        assert!(
-            DeviceStartup::receive(&server_end)
-                .expect("dispatch ok")
-                .is_none()
-        );
+        let manifest = decode_manifest(&bytes).expect("record decodes");
+        assert_eq!(manifest.export(), Some("Namespace"));
+        let slot = manifest.slots().next().expect("image slot");
+        assert_eq!(slot.kind(), SlotKind::Image);
     }
 }

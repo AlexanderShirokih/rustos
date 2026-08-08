@@ -22,7 +22,7 @@ const PROVIDER_GONE_EXIT_CODE: u64 = 9;
 
 component_manifest! {
     struct ConsumerStartup {
-        slots: { namespace: service },
+        slots: { namespace: service(protocol = "Namespace") },
     }
 }
 

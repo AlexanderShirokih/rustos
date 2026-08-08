@@ -73,7 +73,9 @@ pub fn decode_mount_table(bytes: &[u8]) -> Result<MountTable<'_>, MountTableDeco
         let (_, next) = parse_mount(bytes, cursor)?;
         cursor = next;
     }
-    if cursor != bytes.len() {
+    // Запись приезжает окном своей страницы: хвост за таблицей - нули
+    // дополнения, а всё прочее там - порча.
+    if bytes[cursor..].iter().any(|byte| *byte != 0) {
         return Err(MountTableDecodeError::InvalidLayout("trailing_bytes"));
     }
     Ok(MountTable {
@@ -300,10 +302,23 @@ mod tests {
     #[test]
     fn decode_rejects_bytes_past_the_last_mount() {
         let mut bytes = table_bytes();
-        bytes.push(0);
+        bytes.push(1);
         assert_eq!(
             decode_mount_table(&bytes).expect_err("trailing bytes must fail"),
             MountTableDecodeError::InvalidLayout("trailing_bytes")
+        );
+    }
+
+    #[test]
+    fn decode_reads_a_table_padded_with_zeroes() {
+        // Запись приезжает окном страницы: за таблицей идут нули дополнения.
+        let bytes = table_bytes();
+        let mut padded = bytes.clone();
+        padded.resize(bytes.len() + 64, 0);
+
+        assert_eq!(
+            decode_mount_table(&padded).expect("padding decodes"),
+            decode_mount_table(&bytes).expect("table decodes")
         );
     }
 

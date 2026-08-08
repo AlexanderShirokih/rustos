@@ -1,9 +1,0 @@
-version = 1
-
-[[mounts]]
-path = "/"
-program = "/boot/filesystem-imagefs"
-
-[[mounts]]
-path = "/tmp"
-program = "/boot/managed-startup-closed"

@@ -1,7 +1,6 @@
 use core::num::NonZeroU64;
 
 use component_abi::{COMPONENT_SLOT_MAX, ComponentStartupClient};
-use ipc::wire::Str;
 use runtime::{BorrowedHandle, OwnedHandle, Port, Timeout};
 use syscall::Rights;
 use userland::EntryView;
@@ -104,20 +103,17 @@ impl ComponentRoots {
         &mut self,
         transport: BoundedStartupTransport,
         log: &OwnedHandle,
-        config: Option<&str>,
         slots: ComponentSlots,
     ) -> Result<(), ManagedStartupError> {
         // Значок лог-сессии set-once: производная несёт значок компонента, а
         // `DUPLICATE` нужно ему для делегирования своим потомкам.
         let log = log.duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, None)?;
-        let config =
-            Str::new(config.unwrap_or_default()).ok_or(ManagedStartupError::InvalidState)?;
         let servers = self
             .servers
             .take()
             .ok_or(ManagedStartupError::InvalidState)?;
         let client = ComponentStartupClient::new(transport);
-        client.start(log, servers.control, servers.service, config, slots.len())?;
+        client.start(log, servers.control, servers.service, slots.len())?;
         for slot in slots.slots.into_iter().flatten() {
             client.slot(slot)?;
         }
@@ -126,19 +122,18 @@ impl ComponentRoots {
 }
 
 /// Поднимает incarnation компонента: свежие порты, производная лог-сессия,
-/// конечный срок стартового рандеву, путь записи конфигурации и слоты плана.
+/// конечный срок стартового рандеву и слоты плана.
 pub fn launch_component<'a, V: EntryView<'a>>(
     component: &mut ManagedComponent<ComponentRoots>,
     program: &V,
     log: &OwnedHandle,
     startup_timeout: Timeout,
-    config: Option<&str>,
     slots: ComponentSlots,
 ) -> Result<(), ManagedStartupError> {
     component.launch(
         program,
         startup_timeout,
         ComponentRoots::create,
-        move |transport, roots| roots.send_startup(transport, log, config, slots),
+        move |transport, roots| roots.send_startup(transport, log, slots),
     )
 }

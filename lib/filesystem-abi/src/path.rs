@@ -88,6 +88,29 @@ impl<'a> Component<'a> {
     }
 }
 
+/// Полный путь `tail`, пересаженный под окно `scope`: корень окна равен `scope`,
+/// а границы `PATH_MAX` принадлежат полному пути - окно, удлинившее путь за
+/// предел, даёт `InvalidPath`. Результат живёт в `out`.
+pub fn rebase<'a>(
+    scope: Path<'_>,
+    tail: Path<'_>,
+    out: &'a mut [u8; PATH_MAX],
+) -> Result<Path<'a>, FileSystemError> {
+    let scope = if scope.is_root() { "" } else { scope.as_str() };
+    let tail = if tail.is_root() { "" } else { tail.as_str() };
+    let len = scope.len() + tail.len();
+    if len > PATH_MAX {
+        return Err(FileSystemError::InvalidPath);
+    }
+    if len == 0 {
+        return Ok(Path::ROOT);
+    }
+    out[..scope.len()].copy_from_slice(scope.as_bytes());
+    out[scope.len()..len].copy_from_slice(tail.as_bytes());
+    let joined = core::str::from_utf8(&out[..len]).map_err(|_| FileSystemError::InvalidPath)?;
+    Path::new(joined)
+}
+
 fn validate_name(name: &str) -> Result<(), FileSystemError> {
     if name.is_empty() || name.len() > NAME_MAX || name == "." || name == ".." {
         return Err(FileSystemError::InvalidPath);
@@ -213,5 +236,46 @@ mod tests {
         let path = Path::new("/data/sample").expect("valid path");
         assert_eq!(path.strip_prefix(Path::ROOT), Some(path));
         assert_eq!(Path::ROOT.strip_prefix(Path::ROOT), Some(Path::ROOT));
+    }
+
+    fn rebased(scope: &str, tail: &str) -> Result<String, FileSystemError> {
+        let scope = Path::new(scope).expect("valid scope");
+        let tail = Path::new(tail).expect("valid tail");
+        let mut out = [0; PATH_MAX];
+        super::rebase(scope, tail, &mut out).map(|path| String::from(path.as_str()))
+    }
+
+    #[test]
+    fn rebase_puts_the_tail_under_the_scope() {
+        assert_eq!(
+            rebased("/window", "/data/sample").as_deref(),
+            Ok("/window/data/sample")
+        );
+        assert_eq!(rebased("/a/b", "/c").as_deref(), Ok("/a/b/c"));
+    }
+
+    #[test]
+    fn rebase_maps_the_tail_root_to_the_scope_itself() {
+        assert_eq!(rebased("/window", "/").as_deref(), Ok("/window"));
+        assert_eq!(rebased("/", "/").as_deref(), Ok("/"));
+    }
+
+    #[test]
+    fn rebase_under_the_root_scope_keeps_the_tail() {
+        assert_eq!(rebased("/", "/data/sample").as_deref(), Ok("/data/sample"));
+    }
+
+    #[test]
+    fn rebase_rejects_a_path_past_the_bound() {
+        // Оба пути в границах, а их сумма - нет: предел принадлежит полному пути.
+        let scope = String::from("/") + &"s".repeat(NAME_MAX);
+        let mut tail = String::new();
+        while tail.len() + scope.len() <= PATH_MAX {
+            tail.push('/');
+            tail.push_str(&"t".repeat(NAME_MAX));
+        }
+        assert_eq!(rebased(&scope, &tail), Err(FileSystemError::InvalidPath));
+        // Без окна тот же хвост валиден: его длина в границах.
+        assert!(rebased("/", &tail).is_ok());
     }
 }

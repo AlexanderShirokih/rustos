@@ -17,6 +17,7 @@ use syscall::Handle;
 mod address_space_isolation;
 mod clock;
 mod filesystem;
+mod filesystem_scope;
 mod filesystem_stress;
 mod fixture;
 mod fixture_protocol;

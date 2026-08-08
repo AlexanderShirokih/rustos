@@ -1,7 +1,5 @@
 use ipc::{Transport, wire::IpcError};
 
-use crate::config::{COMPONENT_CONFIG_MAX, ComponentConfig};
-
 /// Граница числа слотов capability одного компонента.
 pub const COMPONENT_SLOT_MAX: usize = 8;
 
@@ -9,15 +7,13 @@ pub const COMPONENT_SLOT_MAX: usize = 8;
 #[ipc::protocol(name = "ComponentStartup")]
 pub trait ComponentStartup {
     /// Открывает транзакцию: лог-сессия, серверные стороны control- и
-    /// service-портов компонента, путь записи его конфигурации и число слотов,
-    /// которые придут следом.
+    /// service-портов компонента и число слотов, которые придут следом.
     #[cast]
     fn start(
         &self,
         log: ipc::wire::Cap,
         control: ipc::wire::Cap,
         service: ipc::wire::Cap,
-        config: ipc::wire::Str<{ COMPONENT_CONFIG_MAX }>,
         slot_count: u16,
     );
 
@@ -36,8 +32,6 @@ pub struct StartedComponent {
     pub control: ipc::wire::Cap,
     /// Серверная сторона service-порта: его сессии supervisor минтит клиентам.
     pub service: ipc::wire::Cap,
-    /// Запись образа с конфигурацией компонента.
-    pub config: Option<ComponentConfig>,
     slots: [Option<ipc::wire::Cap>; COMPONENT_SLOT_MAX],
     slot_count: u16,
 }
@@ -95,7 +89,6 @@ impl ComponentStartupService for StartupReceiver {
         log: ipc::wire::Cap,
         control: ipc::wire::Cap,
         service: ipc::wire::Cap,
-        config: ipc::wire::Str<'_, { COMPONENT_CONFIG_MAX }>,
         slot_count: u16,
     ) {
         if self.started.is_some() || usize::from(slot_count) > COMPONENT_SLOT_MAX {
@@ -106,7 +99,6 @@ impl ComponentStartupService for StartupReceiver {
             log,
             control,
             service,
-            config: ComponentConfig::new(config.as_str()),
             slots: [None; COMPONENT_SLOT_MAX],
             slot_count,
         });
@@ -137,21 +129,17 @@ mod tests {
 
     use ipc::{
         IntoWireHandle,
-        wire::{Cap, IpcError, Str},
+        wire::{Cap, IpcError},
     };
     use ipc_test::MockEnd;
 
-    use super::{
-        COMPONENT_CONFIG_MAX, ComponentConfig, ComponentStartupClient, receive_startup_transaction,
-    };
+    use super::{ComponentStartupClient, receive_startup_transaction};
 
     const LOG_CAP: Cap = cap(0x21);
     const CONTROL_CAP: Cap = cap(0x23);
     const SERVICE_CAP: Cap = cap(0x24);
     const IMAGE_CAP: Cap = cap(0x25);
     const DEVICE_CAP: Cap = cap(0x26);
-
-    const CONFIG_RECORD: &str = "/boot/namespace.mounts";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Fate {
@@ -186,10 +174,6 @@ mod tests {
         Cap::from_raw(NonZeroU32::new(raw).expect("non-zero"))
     }
 
-    fn config() -> Str<'static, COMPONENT_CONFIG_MAX> {
-        Str::new(CONFIG_RECORD).expect("record path fits the frame")
-    }
-
     fn fake(id: u32) -> (FakeHandle, Rc<Cell<Fate>>) {
         let fate = Rc::new(Cell::new(Fate::Pending));
         (
@@ -206,7 +190,7 @@ mod tests {
         let (client_end, server_end) = MockEnd::pair();
         let client = ComponentStartupClient::new(client_end);
         client
-            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, config(), 2)
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 2)
             .expect("start write");
         client.slot(IMAGE_CAP).expect("slot write");
         client.slot(DEVICE_CAP).expect("slot write");
@@ -218,7 +202,6 @@ mod tests {
         assert_eq!(started.log, LOG_CAP);
         assert_eq!(started.control, CONTROL_CAP);
         assert_eq!(started.service, SERVICE_CAP);
-        assert_eq!(started.config, ComponentConfig::new(CONFIG_RECORD));
         assert_eq!(started.slots().count(), 2);
         assert_eq!(started.slot(0), Some(IMAGE_CAP));
         assert_eq!(started.slot(1), Some(DEVICE_CAP));
@@ -230,20 +213,13 @@ mod tests {
         let (client_end, server_end) = MockEnd::pair();
         let client = ComponentStartupClient::new(client_end);
         client
-            .start(
-                LOG_CAP,
-                CONTROL_CAP,
-                SERVICE_CAP,
-                Str::new("").expect("empty path fits the frame"),
-                0,
-            )
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 0)
             .expect("start write");
 
         let started = receive_startup_transaction(&server_end)
             .expect("dispatch ok")
             .expect("transaction complete");
 
-        assert_eq!(started.config, None);
         assert_eq!(started.slots().count(), 0);
     }
 
@@ -269,7 +245,7 @@ mod tests {
         let (service, service_fate) = fake(0x34);
 
         assert_eq!(
-            client.start(log, control, service, config(), 1),
+            client.start(log, control, service, 1),
             Err(IpcError::PeerClosed)
         );
         assert_eq!(

@@ -1,6 +1,6 @@
 //! Композиция, которую rootkeeper поднимает при загрузке, и её supervisor.
 
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 use core::{fmt::Write as _, num::NonZeroU64};
 
 use bootstrap::BootstrapClient;
@@ -19,13 +19,15 @@ use runtime::{
 };
 use syscall::{Handle, Rights, SIGNALED, WaitItem};
 use userland_image::{
-    BOOT_PLAN_PATH, BootPlan, DecodedImage, DecodedProgram, PlanComponent, PlanDecodeError,
-    PlanDevice, SlotSource, decode, decode_plan,
+    BOOT_PLAN_PATH, BootPlan, COMPONENT_PROGRAM_NAME, DecodedImage, DecodedProgram, OnExhausted,
+    PlanComponent, PlanDecodeError, PlanDevice, SlotSource, decode, decode_plan,
 };
 
 use crate::relay;
 
 const LOG_TAG: &str = "supervisor";
+
+const PAGE_SIZE: u64 = 4096;
 
 /// Конечный срок остановки компонента: terminate маршрутизатора тянет за собой
 /// join каждого его монтирования, и каждое отвечает в пределах admin-срока.
@@ -62,6 +64,8 @@ pub enum BootFailure {
     PlanOrder,
     /// В образе нет программы компонента.
     ProgramMissing,
+    /// В образе нет записи, названной файловым слотом.
+    RecordMissing,
     /// Корневой metering resource недоступен.
     Resource,
     /// Полномочия провижининга устройств недоступны.
@@ -138,7 +142,8 @@ impl BootFailure {
             | Self::PlanMissing
             | Self::Plan(_)
             | Self::PlanOrder
-            | Self::ProgramMissing => Stopped::BadImage,
+            | Self::ProgramMissing
+            | Self::RecordMissing => Stopped::BadImage,
             Self::DeviceAuthority | Self::Device(_) => Stopped::Device,
             Self::LogSession | Self::Resource | Self::Provider | Self::Slot | Self::Launch(_) => {
                 Stopped::Startup
@@ -156,6 +161,7 @@ impl BootFailure {
             Self::Plan(_) => "boot plan not decoded",
             Self::PlanOrder => "boot plan dependencies have no start order",
             Self::ProgramMissing => "component program missing",
+            Self::RecordMissing => "component record missing",
             Self::Resource => "root resource unavailable",
             Self::DeviceAuthority => "platform description unavailable",
             Self::Device(_) => "device not described by the platform",
@@ -249,8 +255,9 @@ impl DeviceAuthority {
     }
 
     fn line(&self, device: PlanDevice<'_>) -> Result<OwnedHandle, BootFailure> {
-        let interrupt =
-            self.resolve(|platform| platform.interrupt(selector(device), device.resource))?;
+        let interrupt = self.first_match(device, |platform, selector| {
+            platform.interrupt(selector, device.resource)
+        })?;
         let lines = self.lines.as_ref().ok_or(BootFailure::DeviceAuthority)?;
         lines
             .mint(interrupt.line.number(), interrupt.trigger)
@@ -259,10 +266,33 @@ impl DeviceAuthority {
     }
 
     fn window(&self, kernel: Handle, device: PlanDevice<'_>) -> Result<OwnedHandle, BootFailure> {
-        let window = self.resolve(|platform| platform.mmio(selector(device), device.resource))?;
+        let window = self.first_match(device, |platform, selector| {
+            platform.mmio(selector, device.resource)
+        })?;
         let client = BootstrapClient::new(PortTransport::client(kernel));
         let region: MemoryRegion = acquire_mmio(&client, window).map_err(BootFailure::Device)?;
         Ok(region.into_handle())
+    }
+
+    fn first_match<R>(
+        &self,
+        device: PlanDevice<'_>,
+        body: impl Fn(&DeviceTreePlatform<'_>, DeviceSelector<'_>) -> Result<R, ResolveError> + Copy,
+    ) -> Result<R, BootFailure> {
+        // Драйвер объявил семейство: описание платформы решает, какая из его
+        // совместимостей стоит на этой машине. Причину отказа несёт последняя.
+        let mut failure = BootFailure::Device(ResolveError::DeviceNotFound);
+        for compatible in device.compatible() {
+            let selector = DeviceSelector {
+                compatible,
+                instance: device.instance,
+            };
+            match self.resolve(|platform| body(platform, selector)) {
+                Ok(resolved) => return Ok(resolved),
+                Err(error) => failure = error,
+            }
+        }
+        Err(failure)
     }
 }
 
@@ -296,7 +326,7 @@ impl<'a> RootSystem<'a> {
             let component = plan.component(index).ok_or(BootFailure::PlanOrder)?;
             let log = log_sessions(relay::component_badge(index)).ok_or(BootFailure::LogSession)?;
             components.push(Component {
-                managed: ManagedComponent::new(&resource, component.budget_pages())
+                managed: ManagedComponent::new(&resource, component.memory_pages())
                     .map_err(BootFailure::Launch)?,
                 plan: component,
                 log,
@@ -386,7 +416,6 @@ impl<'a> RootSystem<'a> {
             &program,
             &component.log,
             plan.startup_timeout(),
-            plan.config(),
             slots,
         )
         .map_err(BootFailure::Launch)
@@ -416,10 +445,25 @@ impl<'a> RootSystem<'a> {
                     .roots()
                     .session(badge)
                     .map_err(|_| BootFailure::Slot)?,
+                SlotSource::File { path } => self.record(path)?,
             };
             slots.push(capability).map_err(BootFailure::Launch)?;
         }
         Ok(slots)
+    }
+
+    fn record(&self, path: &str) -> Result<OwnedHandle, BootFailure> {
+        // Компоненту уезжает окно его записи: своей области хватает, чтобы
+        // прочитать собственный файл.
+        let entry = self.entries.entry(path).ok_or(BootFailure::RecordMissing)?;
+        // Записи образа выровнены на страницу: хвост окна - её дополнение, а не
+        // байты соседа.
+        let size = (entry.data().len() as u64).div_ceil(PAGE_SIZE) * PAGE_SIZE;
+        self.image
+            .region()
+            .slice(entry.data_offset(), size, runtime::MemoryAccess::READ)
+            .map(MemoryRegion::into_handle)
+            .map_err(|_| BootFailure::Slot)
     }
 
     fn plan_len(&self) -> u16 {
@@ -441,12 +485,12 @@ impl<'a> RootSystem<'a> {
             .and_then(|running| running.process().exit_code().ok());
         let observed = component.managed.observe_exit(Timeout::POLL);
         let generation = component.managed.generation();
-        log_exit(kernel_log, plan.id(), exit_code);
+        log_exit(kernel_log, plan.name(), exit_code);
         if observed.is_err() {
             let _ = kernel_log.log_str(LOG_TAG, "component budget not returned");
             return Supervised::Stopped(Stopped::Subsystem);
         }
-        if generation >= plan.restart_limit() {
+        if generation >= plan.launches() {
             let _ = kernel_log.log_str(LOG_TAG, "component restart limit reached");
             return give_up(plan, exit_code);
         }
@@ -498,7 +542,7 @@ fn run(kernel: Handle, kernel_log: &BootstrapClient<PortTransport>) -> Stopped {
             return failure.stopped();
         }
     };
-    relay::install_names(plan.components().map(|component| component.id()));
+    relay::install_names(plan.components().map(|component| component.name()));
 
     run_composition(&image, plan, kernel, relay_thread, &log)
 }
@@ -535,19 +579,9 @@ fn run_composition(
 }
 
 const fn give_up(plan: PlanComponent<'_>, exit_code: Option<u32>) -> Supervised {
-    // Уход критического компонента останавливает композицию, некритический
-    // оставляет её поднятой без него.
-    if plan.critical() {
-        Supervised::Stopped(Stopped::Subsystem)
-    } else {
-        Supervised::Abandoned { exit_code }
-    }
-}
-
-fn selector(device: PlanDevice<'_>) -> DeviceSelector<'_> {
-    DeviceSelector {
-        compatible: device.compatible,
-        instance: device.instance,
+    match plan.on_exhausted() {
+        OnExhausted::Halt => Supervised::Stopped(Stopped::Subsystem),
+        OnExhausted::Detach => Supervised::Abandoned { exit_code },
     }
 }
 
@@ -593,8 +627,9 @@ fn component_program<'a>(
     entries: &DecodedImage<'a>,
     plan: PlanComponent<'a>,
 ) -> Result<DecodedProgram<'a>, BootFailure> {
+    let record = format!("{}/{COMPONENT_PROGRAM_NAME}", plan.executable());
     entries
-        .entry(plan.program())
+        .entry(&record)
         .and_then(|entry| entry.program().ok())
         .ok_or(BootFailure::ProgramMissing)
 }

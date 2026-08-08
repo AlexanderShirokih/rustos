@@ -147,7 +147,7 @@ fn badge_departs_when_the_client_process_dies() {
         .handle()
         .duplicate(Rights::WRITE | Rights::TRANSFER, Some(DYING_CLIENT_BADGE))
         .expect("mint client capability");
-    let process = spawn_image_entry("/boot/badge-client", client);
+    let process = spawn_image_entry("/boot/badge-client/program", client);
 
     port.recv(SERVE_TIMEOUT).expect("client frame");
     kernel_tests::kassert_eq!(received_badge(), DYING_CLIENT_BADGE.get());

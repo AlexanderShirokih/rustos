@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use component_abi::{COMPONENT_MANIFEST_SECTION, ComponentManifest, decode_manifest};
+use component_abi::{COMPONENT_MANIFEST_SECTION, decode_manifest};
 use filesystem_abi::{NAME_MAX, PATH_MAX};
 use object::{
     Architecture, BinaryFormat, Object, ObjectKind, ObjectSection, ObjectSegment, SectionFlags,
@@ -20,10 +20,12 @@ use userland::{
     Entry, Segment, SegmentPermissions, USERLAND_ENTRY_PATH_CAPACITY, USERLAND_PAGE_SIZE,
 };
 use userland_image::{
-    BOOT_PLAN_PATH, ImageRecord, USERLAND_IMAGE_VERSION, decode, encode, encode_program,
+    BOOT_PLAN_PATH, COMPONENT_PROGRAM_NAME, ImageRecord, USERLAND_IMAGE_VERSION, decode, encode,
+    encode_program,
 };
 
 use crate::{
+    manifest::ProgramManifest,
     mounts::compile_mount_table,
     plan::{PlanProgram, compile_boot_plan},
 };
@@ -131,10 +133,11 @@ struct WorkspaceMetadata {
 
 #[derive(Clone, Debug)]
 struct BuiltEntry {
+    record_path: String,
     program: ResolvedProgram,
     entry_va: u64,
     segments: Vec<BuiltSegment>,
-    manifest: Option<ComponentManifest>,
+    manifest: Option<ProgramManifest>,
 }
 
 #[derive(Clone, Debug)]
@@ -248,7 +251,7 @@ pub fn build_userland(
         .iter()
         .map(|entry| PlanProgram {
             path: &entry.program.path,
-            manifest: entry.manifest,
+            manifest: entry.manifest.as_ref(),
         })
         .collect();
     let paths: Vec<&str> = built_programs.iter().map(|program| program.path).collect();
@@ -256,16 +259,12 @@ pub fn build_userland(
         files.push(compile_mount_table_record(project_root, table, &paths)?);
     }
     if let Some(plan) = &manifest.plan {
-        let configs: Vec<&str> = manifest
-            .mount_tables
-            .iter()
-            .map(|table| table.path.as_str())
-            .collect();
+        let records: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
         files.push(compile_plan_record(
             project_root,
             plan,
             &built_programs,
-            &configs,
+            &records,
         )?);
     }
 
@@ -567,7 +566,7 @@ fn compile_plan_record(
     project_root: &Path,
     plan: &ImagePlan,
     programs: &[PlanProgram<'_>],
-    configs: &[&str],
+    records: &[&str],
 ) -> Result<LoadedFile> {
     validate_image_path(&plan.path)?;
     let source = project_root.join(&plan.source);
@@ -578,7 +577,7 @@ fn compile_plan_record(
             plan.path
         )
     })?;
-    let bytes = compile_boot_plan(&text, programs, configs)
+    let bytes = compile_boot_plan(&text, programs, records)
         .with_context(|| format!("Failed to compile boot plan '{}'", source.display()))?;
     Ok(LoadedFile {
         path: plan.path.clone(),
@@ -720,6 +719,7 @@ fn read_and_extract_entry(path: &Path, program: &ResolvedProgram) -> Result<Buil
     let manifest = extract_manifest(&file, program)?;
 
     Ok(BuiltEntry {
+        record_path: component_record_path(&program.path),
         program: program.clone(),
         entry_va,
         segments,
@@ -730,7 +730,7 @@ fn read_and_extract_entry(path: &Path, program: &ResolvedProgram) -> Result<Buil
 fn extract_manifest(
     file: &object::File<'_>,
     program: &ResolvedProgram,
-) -> Result<Option<ComponentManifest>> {
+) -> Result<Option<ProgramManifest>> {
     let Some(section) = file.section_by_name(COMPONENT_MANIFEST_SECTION) else {
         return Ok(None);
     };
@@ -758,7 +758,7 @@ fn extract_manifest(
             program.path
         )
     })?;
-    Ok(Some(manifest))
+    Ok(Some(ProgramManifest::from_record(&manifest)))
 }
 
 fn validate_file(file: &object::File<'_>, program: &ResolvedProgram) -> Result<()> {
@@ -855,7 +855,7 @@ fn assemble_userland_image(entries: &[BuiltEntry], files: &[LoadedFile]) -> Resu
         .iter()
         .zip(&blobs)
         .map(|(entry, blob)| ImageRecord {
-            path: &entry.program.path,
+            path: &entry.record_path,
             data: blob,
         })
         .chain(files.iter().map(|file| ImageRecord {
@@ -902,6 +902,41 @@ fn build_program_blob(entry: &BuiltEntry) -> Result<Vec<u8>> {
     })
 }
 
+pub(crate) fn component_record_path(directory: &str) -> String {
+    format!("{directory}/{COMPONENT_PROGRAM_NAME}")
+}
+
+fn validate_component_directories(entries: &[BuiltEntry], files: &[LoadedFile]) -> Result<()> {
+    // Каталог компонента - его файловая область: чужих записей в ней нет, и
+    // назвать что-то вне её компонент не может.
+    for (index, entry) in entries.iter().enumerate() {
+        let directory = entry.program.path.as_str();
+        for earlier in &entries[..index] {
+            let other = earlier.program.path.as_str();
+            ensure!(
+                !under_directory(directory, other) && !under_directory(other, directory),
+                "component directory '{directory}' lies inside '{other}'"
+            );
+        }
+    }
+    for file in files {
+        let owner = entries
+            .iter()
+            .find(|entry| under_directory(&file.path, &entry.program.path));
+        ensure!(
+            owner.is_some(),
+            "image record '{}' lies outside every component directory",
+            file.path
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn under_directory(path: &str, directory: &str) -> bool {
+    path.strip_prefix(directory)
+        .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
+}
+
 fn validate_built_entries<'a>(entries: &'a [BuiltEntry], files: &[LoadedFile]) -> Result<&'a str> {
     ensure!(
         !entries.is_empty(),
@@ -917,9 +952,10 @@ fn validate_built_entries<'a>(entries: &'a [BuiltEntry], files: &[LoadedFile]) -
         );
     }
 
+    validate_component_directories(entries, files)?;
     let paths = entries
         .iter()
-        .map(|entry| entry.program.path.as_str())
+        .map(|entry| entry.record_path.as_str())
         .chain(files.iter().map(|file| file.path.as_str()));
     let mut seen = Vec::new();
     for path in paths {
@@ -945,7 +981,7 @@ fn validate_built_entries<'a>(entries: &'a [BuiltEntry], files: &[LoadedFile]) -
                 "boot entry '{}' payload must not be empty",
                 boot.program.path
             );
-            Ok(&boot.program.path)
+            Ok(&boot.record_path)
         }
         0 => bail!("userland image must contain exactly one boot entry; found none"),
         count => bail!("userland image must contain exactly one boot entry; found {count}"),
@@ -1023,6 +1059,7 @@ mod tests {
 
     fn built_entry(path: &str, boot: bool, entry_va: u64, segments: &[BuiltSegment]) -> BuiltEntry {
         BuiltEntry {
+            record_path: component_record_path(path),
             program: resolved_program("package", path, boot, 0x4000),
             entry_va,
             segments: segments.to_vec(),
@@ -1270,9 +1307,13 @@ mod tests {
                 SegmentPermissions::ReadExecute,
             )],
         )];
-        let err = assemble_userland_image(&entries, &[loaded_file("/data/./sample", b"hi")])
-            .expect_err("path outside the contract must fail");
-        assert!(err.to_string().starts_with("image path '/data/./sample'"));
+        let err =
+            assemble_userland_image(&entries, &[loaded_file("/boot/rootkeeper/./sample", b"hi")])
+                .expect_err("path outside the contract must fail");
+        assert!(
+            err.to_string()
+                .starts_with("image path '/boot/rootkeeper/./sample'")
+        );
     }
 
     #[test]
@@ -1289,9 +1330,13 @@ mod tests {
             )],
         )];
         // Правило ASCII одно на все записи образа, не только на программы.
-        let err = assemble_userland_image(&entries, &[loaded_file("/data/motdé", b"hi")])
-            .expect_err("non-ascii path must fail");
-        assert_eq!(err.to_string(), "image path '/data/motdé' must be ASCII");
+        let err =
+            assemble_userland_image(&entries, &[loaded_file("/boot/rootkeeper/motdé", b"hi")])
+                .expect_err("non-ascii path must fail");
+        assert_eq!(
+            err.to_string(),
+            "image path '/boot/rootkeeper/motdé' must be ASCII"
+        );
     }
 
     #[test]
@@ -1423,11 +1468,17 @@ mod tests {
                 SegmentPermissions::ReadExecute,
             )],
         )];
-        let err = assemble_userland_image(&entries, &[loaded_file(BOOT_PATH, b"clash")])
-            .expect_err("duplicate path must fail");
+        let err = assemble_userland_image(
+            &entries,
+            &[loaded_file(&component_record_path(BOOT_PATH), b"clash")],
+        )
+        .expect_err("duplicate path must fail");
         assert_eq!(
             err.to_string(),
-            "image path '/boot/rootkeeper' is used by more than one record"
+            format!(
+                "image path '{}' is used by more than one record",
+                component_record_path(BOOT_PATH)
+            )
         );
     }
 
@@ -1469,16 +1520,22 @@ mod tests {
             ),
         ];
 
-        let image_bytes = assemble_userland_image(&entries, &[loaded_file("/data/sample", b"hi")])
-            .expect("assemble image");
+        let image_bytes =
+            assemble_userland_image(&entries, &[loaded_file("/boot/rootkeeper/sample", b"hi")])
+                .expect("assemble image");
         let image = decode(&image_bytes).expect("assembled image must parse");
 
         let paths: Vec<_> = image.entries().map(|entry| entry.path()).collect();
         assert_eq!(
             paths,
-            ["/boot/logger", BOOT_PATH, "/boot/shell", "/data/sample"]
+            [
+                "/boot/logger/program",
+                "/boot/rootkeeper/program",
+                "/boot/rootkeeper/sample",
+                "/boot/shell/program",
+            ]
         );
-        assert_eq!(image.boot_entry().path(), BOOT_PATH);
+        assert_eq!(image.boot_entry().path(), component_record_path(BOOT_PATH));
     }
 
     #[test]
@@ -1533,7 +1590,7 @@ mod tests {
                     built_segment(b"RW", 0x4000_1000, 0x1000, SegmentPermissions::ReadWrite),
                 ],
             )],
-            &[loaded_file("/data/sample", b"hello")],
+            &[loaded_file("/boot/rootkeeper/sample", b"hello")],
         )
         .expect("assemble image");
 
@@ -1546,7 +1603,10 @@ mod tests {
         assert_eq!(segments[0].bytes, b"CODE");
         assert_eq!(segments[1].bytes, b"RW");
         assert_eq!(
-            image.entry("/data/sample").expect("file record").data(),
+            image
+                .entry("/boot/rootkeeper/sample")
+                .expect("file record")
+                .data(),
             b"hello"
         );
     }

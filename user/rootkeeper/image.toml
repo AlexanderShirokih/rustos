@@ -5,7 +5,7 @@ source = "user/rootkeeper/system.toml"
 
 [[mount_tables]]
 source = "user/rootkeeper/namespace.toml"
-path = "/boot/namespace.mounts"
+path = "/boot/namespace-router/mounts"
 
 [[programs]]
 package = "rootkeeper"

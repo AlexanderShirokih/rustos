@@ -51,7 +51,7 @@ fn launch_child_delivers_startup_frame() {
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("/boot/startup-fixture")
+        .entry("/boot/startup-fixture/program")
         .expect("image carries a child entry")
         .program()
         .expect("child entry is a program");
@@ -81,7 +81,7 @@ fn failed_startup_returns_child_budget() {
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("/boot/startup-fixture")
+        .entry("/boot/startup-fixture/program")
         .expect("image carries a child entry")
         .program()
         .expect("child entry is a program");
@@ -142,7 +142,7 @@ fn start_error_reclaims_each_loaded_process() {
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("/boot/startup-fixture")
+        .entry("/boot/startup-fixture/program")
         .expect("image carries a child entry")
         .program()
         .expect("child entry is a program");
@@ -179,7 +179,7 @@ fn caller_wakes_when_server_dies_holding_reply() {
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("/boot/reply-holder")
+        .entry("/boot/reply-holder/program")
         .expect("image carries the holder")
         .program()
         .expect("holder record carries a program");

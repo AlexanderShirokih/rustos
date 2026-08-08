@@ -44,7 +44,7 @@ fn test_source_name(badge: u64) -> Option<&'static str> {
     (badge == NAMED_BADGE.get()).then_some("named-subsystem")
 }
 
-const LOG_CLIENT_FIXTURE: &str = "/boot/log-client-fixture";
+const LOG_CLIENT_FIXTURE: &str = "/boot/log-client-fixture/program";
 
 const RELAY_SOURCE: &str = "log-relay";
 
@@ -470,8 +470,8 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
     });
 }
 
-// Нехватка слота под capability отклоняет один кадр на стороне relay. После
-// освобождения слота следующий обычный кадр доходит до стока.
+// Нехватка слота под capability отклоняет один кадр на стороне relay. По
+// освободившимся слотам следующий обычный кадр доходит до стока.
 #[kernel_test]
 fn relay_serves_after_receiver_resource_exhaustion() {
     with_relay(|session| {
@@ -483,6 +483,12 @@ fn relay_serves_after_receiver_resource_exhaustion() {
             send_log_frame_with_cap(&logger, carried),
             SyscallError::OutOfHandles.as_return_value()
         );
+        // После проверенного отказа свободный слот один, а претендента два: транзитная
+        // капа стока в потоке relay и порт-таймер ожидания записей. Освобождение ещё
+        // двух слотов снимает гонку потоков за единственный, не трогая сам сценарий.
+        for _ in 0..2 {
+            drop(fillers.pop().expect("full table contains filler handles"));
+        }
         write_log(&logger, "local", "after resource exhaustion");
 
         let records = wait_for_records(1);

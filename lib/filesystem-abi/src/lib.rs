@@ -38,6 +38,6 @@ pub use mount_table::{
     MountTableEncodeError, Mounts, decode_mount_table, encode_mount_table,
 };
 pub use namespace::*;
-pub use path::{Component, Path, SEPARATOR};
+pub use path::{Component, Path, SEPARATOR, rebase};
 pub use protocol::*;
 pub use reply::{Listed, Mounted, NodeInfo, Opened, Written};

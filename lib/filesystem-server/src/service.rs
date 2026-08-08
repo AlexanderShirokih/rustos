@@ -1,16 +1,20 @@
 //! Обслуживание сервисного порта: трансляция операций контракта `FileSystem` в модель
 //! `lib/filesystem` поверх состояния, разделённого с admin-потоком.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
+use core::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
+};
 
 use filesystem::{ClientId, FileSystemBackend, NodeId, OpenNode, Session, SessionTable, Window};
 use filesystem_abi::{
     AccessMode, DirCursor, FileSystemError, FileSystemService, Listed, NodeDescriptor, NodeInfo,
-    NodeKind, OpenFlags, Opened, PATH_MAX, Path, Written,
+    NodeKind, OpenFlags, Opened, PATH_MAX, Path, Written, rebase,
 };
 use ipc::wire::{Cap, Str};
 use runtime::{MemoryAccess, MemoryRegion, MutexGuard, OwnedHandle, Resource};
-use syscall::Handle;
+use syscall::{Handle, Rights};
 use userland::USERLAND_PAGE_SIZE;
 
 use crate::{buffer::DataBuffer, error::no_space};
@@ -22,6 +26,7 @@ const APPEND: u64 = u64::MAX;
 #[derive(Default)]
 pub(crate) struct Attachment {
     buffer: Option<DataBuffer>,
+    scope: String,
 }
 
 pub(crate) struct FileSystemState {
@@ -41,6 +46,45 @@ pub(crate) struct Frame {
 pub(crate) struct Serving<'a> {
     pub(crate) state: MutexGuard<'a, FileSystemState>,
     pub(crate) frame: &'a mut Frame,
+    pub(crate) service: &'a OwnedHandle,
+    pub(crate) next_badge: &'a AtomicU64,
+}
+
+pub(crate) fn mint_session(
+    service: &OwnedHandle,
+    next_badge: &AtomicU64,
+) -> Result<(NonZeroU64, OwnedHandle), FileSystemError> {
+    // Значения значков не переиспользуются: счётчик только растёт.
+    let badge = NonZeroU64::MIN.saturating_add(next_badge.fetch_add(1, Relaxed));
+    let session = service
+        .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
+        .map_err(no_space)?;
+    Ok((badge, session))
+}
+
+fn scoped<'a>(
+    scope: &str,
+    tail: Str<'a, PATH_MAX>,
+    out: &'a mut [u8; PATH_MAX],
+) -> Result<Path<'a>, FileSystemError> {
+    let tail = Path::new(tail.as_str())?;
+    if scope.is_empty() {
+        return Ok(tail);
+    }
+    rebase(Path::new(scope)?, tail, out)
+}
+
+fn scoped_entry<'a>(
+    scope: &str,
+    tail: Str<'a, PATH_MAX>,
+    out: &'a mut [u8; PATH_MAX],
+) -> Result<Path<'a>, FileSystemError> {
+    // Корень окна - запись каталога над ним: операция над именем его не называет. Корень
+    // монтирования у сессии без окна отвергает бекенд.
+    if !scope.is_empty() && Path::new(tail.as_str())?.is_root() {
+        return Err(FileSystemError::InvalidPath);
+    }
+    scoped(scope, tail, out)
 }
 
 impl FileSystemState {
@@ -59,6 +103,12 @@ impl FileSystemState {
 
     pub(crate) fn open_session(&mut self, badge: u64) -> Result<(), FileSystemError> {
         self.sessions.open(ClientId::from_raw(badge)).map(|_| ())
+    }
+
+    fn open_session_scoped(&mut self, badge: u64, scope: String) -> Result<(), FileSystemError> {
+        let session = self.sessions.open(ClientId::from_raw(badge))?;
+        session.attachment_mut().scope = scope;
+        Ok(())
     }
 
     pub(crate) fn remove_session(&mut self, badge: u64) {
@@ -172,10 +222,17 @@ impl FileSystemService for Serving<'_> {
         mode: AccessMode,
         flags: OpenFlags,
     ) -> Result<Opened, FileSystemError> {
-        let path = Path::new(path.as_str())?;
-        let (backend, _) = self.backend_and_session()?;
+        let mut full = [0; PATH_MAX];
+        let (backend, session) = self.backend_and_session()?;
+        let scope = &session.attachment().scope;
+        // Корень окна - запись каталога над ним: сессия его открывает, но не заводит.
+        let names_window_root = !scope.is_empty() && Path::new(path.as_str())?.is_root();
+        let path = scoped(scope, path, &mut full)?;
         if mode.writable() && !backend.is_mutable() {
             return Err(FileSystemError::ReadOnly);
+        }
+        if names_window_root {
+            backend.lookup(path)?;
         }
         let opened = open_in_backend(backend, path, mode, flags)?;
         let node = opened.node;
@@ -264,15 +321,19 @@ impl FileSystemService for Serving<'_> {
         from: Str<'_, PATH_MAX>,
         to: Str<'_, PATH_MAX>,
     ) -> Result<u32, FileSystemError> {
-        let (from, to) = (Path::new(from.as_str())?, Path::new(to.as_str())?);
-        let (backend, _) = self.backend_and_session()?;
+        let (mut full_from, mut full_to) = ([0; PATH_MAX], [0; PATH_MAX]);
+        let (backend, session) = self.backend_and_session()?;
+        let scope = &session.attachment().scope;
+        let from = scoped_entry(scope, from, &mut full_from)?;
+        let to = scoped_entry(scope, to, &mut full_to)?;
         backend.rename(from, to)?;
         Ok(DONE)
     }
 
     fn unlink(&mut self, path: Str<'_, PATH_MAX>) -> Result<u32, FileSystemError> {
-        let path = Path::new(path.as_str())?;
-        let (backend, _) = self.backend_and_session()?;
+        let mut full = [0; PATH_MAX];
+        let (backend, session) = self.backend_and_session()?;
+        let path = scoped_entry(&session.attachment().scope, path, &mut full)?;
         backend.unlink(path)?;
         Ok(DONE)
     }
@@ -283,6 +344,28 @@ impl FileSystemService for Serving<'_> {
         let window = backend.backing(open_node.node)?;
         let slice = self.slice(window, open_node.mode)?;
         Ok(vend(&mut self.frame.vended, slice))
+    }
+
+    fn open_root(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap, FileSystemError> {
+        let mut full = [0; PATH_MAX];
+        let (backend, session) = self.backend_and_session()?;
+        let root = scoped(&session.attachment().scope, path, &mut full)?;
+        let node = backend.lookup(root)?;
+        if !backend.metadata(node)?.kind.is_directory() {
+            return Err(FileSystemError::NotADirectory);
+        }
+        // Окно производной сессии - полный путь каталога: сужение складывается, а
+        // расширить окно обратно производной нечем.
+        let scope = if root.is_root() {
+            String::new()
+        } else {
+            String::from(root.as_str())
+        };
+        let (badge, capability) = mint_session(self.service, self.next_badge)?;
+        // Сессия заводится до того, как её капа ушла клиенту: кадр по ней застанет
+        // её заведённой.
+        self.state.open_session_scoped(badge.get(), scope)?;
+        Ok(vend(&mut self.frame.vended, capability))
     }
 }
 

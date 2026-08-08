@@ -1,23 +1,13 @@
-version = 2
+version = 1
 
 [[components]]
-id = "filesystem"
-program = "/boot/namespace-router"
-budget_pages = 2048
-startup_timeout_ms = 2000
-critical = true
-restart = 3
-config = "/boot/namespace.mounts"
-slots = [{ source = "image" }]
+executable = "/boot/namespace-router"
+memory_limit = "8M"
+startup_timeout = "2s"
+on_failure = "restart 2 then halt"
 
 [[components]]
-id = "rtc"
-program = "/boot/driver-pl031"
-budget_pages = 256
-startup_timeout_ms = 2000
-critical = false
-restart = 1
-slots = [
-    { source = "irq", compatible = "arm,pl031" },
-    { source = "mmio", compatible = "arm,pl031" },
-]
+executable = "/boot/driver-pl031"
+memory_limit = "1M"
+startup_timeout = "2s"
+on_failure = "detach"

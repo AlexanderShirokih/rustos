@@ -7,6 +7,7 @@
 //! его оборотами, а сервисный поток таблицу только читает.
 
 use alloc::{
+    format,
     string::{String, ToString},
     vec::Vec,
 };
@@ -23,7 +24,7 @@ use runtime::{
     log_line,
 };
 use syscall::{Handle, Rights};
-use userland_image::decode;
+use userland_image::{COMPONENT_PROGRAM_NAME, decode};
 use userland_loader::launch_entry_retained;
 
 use crate::error::{Error, Result as RouterResult};
@@ -47,8 +48,10 @@ const MOUNT_LEASE_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("lease badge is 
 struct FileSystemProgram(String);
 
 impl FileSystemProgram {
-    fn new(path: &str) -> Self {
-        Self(path.to_string())
+    fn new(directory: &str) -> Self {
+        // Программа названа своим каталогом, как и в плане: запись с ней лежит
+        // в нём под известным именем.
+        Self(format!("{directory}/{COMPONENT_PROGRAM_NAME}"))
     }
 
     fn as_str(&self) -> &str {

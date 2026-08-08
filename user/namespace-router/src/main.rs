@@ -14,7 +14,7 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use component_abi::{ComponentConfig, component_manifest};
+use component_abi::component_manifest;
 use filesystem_abi::{decode_mount_table, dispatch_namespace, dispatch_namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
@@ -23,7 +23,6 @@ use runtime::{
 };
 use spin::Once;
 use syscall::{Handle, Rights, Timeout};
-use userland_image::decode;
 
 mod error;
 mod router;
@@ -45,8 +44,8 @@ static MOUNTS: Mutex<MountTable> = Mutex::new(MountTable::new());
 
 component_manifest! {
     struct RouterStartup {
-        config,
-        slots: { image: image },
+        exports: "Namespace",
+        slots: { image: image, mounts: file("mounts") },
     }
 }
 
@@ -66,9 +65,9 @@ fn run(startup: Handle) -> Result<()> {
     let StartResources {
         log,
         image,
+        mounts,
         service,
         control,
-        mounts,
     } = handshake(startup)?;
     // Копия канала логирования для поднимаемых файловых систем: право минта остаётся за
     // маршрутизатором, детям уходит капа без него.
@@ -90,7 +89,12 @@ fn run(startup: Handle) -> Result<()> {
         ),
         service_thread: Thread::self_thread()?,
     };
-    mount_boot_table(&admin_port.administering, bytes, mounts.as_str())?;
+    // Дерево имён приезжает окном своей записи: остального образа для него не
+    // нужно. Регион переживает своё отображение.
+    let mounts = MemoryRegion::from_handle(mounts);
+    let table = mounts.map_full_read_only()?;
+    mount_boot_table(&admin_port.administering, table.as_bytes())?;
+    drop(table);
     // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
     let _ = spawn_owned(
         move || serve_admin(admin_port),
@@ -166,15 +170,8 @@ fn serve_admin(mut admin: AdminPort) -> u32 {
     0
 }
 
-fn mount_boot_table(
-    administering: &router::Administering<'_>,
-    image_bytes: &[u8],
-    mounts: &str,
-) -> Result<()> {
-    let record = decode(image_bytes)?
-        .entry(mounts)
-        .ok_or(Error::MountTable)?;
-    let table = decode_mount_table(record.data()).map_err(|error| {
+fn mount_boot_table(administering: &router::Administering<'_>, bytes: &[u8]) -> Result<()> {
+    let table = decode_mount_table(bytes).map_err(|error| {
         log_fmt(format_args!("boot mount table rejected: {error:?}"));
         Error::MountTable
     })?;
@@ -184,9 +181,9 @@ fn mount_boot_table(
 struct StartResources {
     log: OwnedHandle,
     image: OwnedHandle,
+    mounts: OwnedHandle,
     service: OwnedHandle,
     control: OwnedHandle,
-    mounts: ComponentConfig,
 }
 
 fn handshake(startup: Handle) -> Result<StartResources> {
@@ -196,9 +193,9 @@ fn handshake(startup: Handle) -> Result<StartResources> {
     Ok(StartResources {
         log: OwnedHandle::adopt(started.log),
         image: OwnedHandle::adopt(started.image),
+        mounts: OwnedHandle::adopt(started.mounts),
         service: OwnedHandle::adopt(started.service),
         control: OwnedHandle::adopt(started.control),
-        mounts: started.config,
     })
 }
 

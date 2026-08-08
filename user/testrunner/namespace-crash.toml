@@ -1,5 +1,0 @@
-version = 1
-
-[[mounts]]
-path = "/"
-program = "/boot/crash-filesystem"

@@ -21,7 +21,7 @@ use runtime::{
 };
 use spin::Once;
 use syscall::{Rights, SIGNALED};
-use userland_image::{decode, decode_plan};
+use userland_image::{COMPONENT_PROGRAM_NAME, decode, decode_plan};
 use userland_loader::load_entry;
 
 pub(crate) const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -32,7 +32,7 @@ const BOOT_TREE_BADGE: NonZeroU64 = NonZeroU64::new(0x0B00).expect("badge is non
 const BOOT_TREE_ATTEMPTS: usize = 200;
 const BOOT_TREE_TURN: Timeout = Timeout::from_ns(10_000_000);
 
-const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture";
+const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture/program";
 
 const RAM_FILESYSTEM_PROGRAM: &str = "/boot/filesystem-ramfs";
 
@@ -42,16 +42,18 @@ const RAM_MOUNT: &str = "/tmp";
 
 const APPEND_OFFSET: u64 = u64::MAX;
 
-const BUFFER_SIZE: u32 = 4096;
+pub(crate) const BUFFER_SIZE: u32 = 4096;
 
 const LISTING_ENTRIES: usize = 70;
 
-const IMAGE_DIRECTORY: &str = "/boot";
+pub(crate) const IMAGE_DIRECTORY: &str = "/boot";
 
-const IMAGE_FILE: &str = "/boot/sample";
-const IMAGE_FILE_BODY: &[u8] = b"hello from the userland image\n";
+pub(crate) const COMPONENT_DIRECTORY: &str = "/boot/testrunner";
 
-const IMAGE_EMPTY_FILE: &str = "/boot/empty";
+pub(crate) const IMAGE_FILE: &str = "/boot/testrunner/sample";
+pub(crate) const IMAGE_FILE_BODY: &[u8] = b"hello from the userland image\n";
+
+const IMAGE_EMPTY_FILE: &str = "/boot/testrunner/empty";
 
 const ABANDONED_PATH: &str = "/abandoned";
 
@@ -109,19 +111,21 @@ fn start_namespace() -> NamespacePorts {
         let plan = decode_plan(record.data()).expect("decode boot plan");
         let plan_component = plan.component(0).expect("boot plan carries the router");
         let program = decoded
-            .entry(plan_component.program())
+            .entry(&alloc::format!(
+                "{}/{COMPONENT_PROGRAM_NAME}",
+                plan_component.executable()
+            ))
             .expect("image carries the component program")
             .program()
             .expect("component entry is a program");
-        let mut component = ManagedComponent::new(&resource, plan_component.budget_pages())
+        let mut component = ManagedComponent::new(&resource, plan_component.memory_pages())
             .expect("component budget reserved");
         launch_component(
             &mut component,
             &program,
             &log,
             plan_component.startup_timeout(),
-            plan_component.config(),
-            crate::rootkeeper_system::image_slot(&image),
+            crate::rootkeeper_system::router_slots(&image, &decoded),
         )
         .expect("namespace router started");
         component
@@ -207,11 +211,11 @@ pub(crate) fn session_for(text: &str) -> OwnedHandle {
     OwnedHandle::adopt(mounted.session)
 }
 
-fn ram_session() -> OwnedHandle {
+pub(crate) fn ram_session() -> OwnedHandle {
     session_for(RAM_MOUNT)
 }
 
-fn image_session() -> OwnedHandle {
+pub(crate) fn image_session() -> OwnedHandle {
     session_for(IMAGE_DIRECTORY)
 }
 
@@ -290,7 +294,7 @@ fn connect_abandoning(capability: &OwnedHandle) -> FileSystemClient<Tampered> {
     )
 }
 
-fn acquire_buffer(client: &FileSystemClient<PortTransport>) -> MemoryRegion {
+pub(crate) fn acquire_buffer(client: &FileSystemClient<PortTransport>) -> MemoryRegion {
     let cap = client
         .acquire_buffer(BUFFER_SIZE)
         .expect("acquire_buffer call")
@@ -302,7 +306,7 @@ pub(crate) fn path(text: &str) -> Str<'_, { filesystem_abi::PATH_MAX }> {
     Str::new(text).expect("path within bound")
 }
 
-fn open(
+pub(crate) fn open(
     client: &FileSystemClient<PortTransport>,
     text: &str,
     mode: AccessMode,
@@ -314,7 +318,7 @@ fn open(
         .expect("open ok")
 }
 
-fn write_all(
+pub(crate) fn write_all(
     client: &FileSystemClient<PortTransport>,
     buffer: &runtime::Mapping,
     opened: &Opened,
@@ -329,7 +333,7 @@ fn write_all(
     written.count
 }
 
-fn buffer_head(buffer: &runtime::Mapping, len: usize) -> Vec<u8> {
+pub(crate) fn buffer_head(buffer: &runtime::Mapping, len: usize) -> Vec<u8> {
     let mut bytes = vec![0; len];
     buffer.copy_out(&mut bytes).expect("buffer head");
     bytes
@@ -355,7 +359,7 @@ fn entry_name(index: usize) -> String {
     format!("{index:0>NAME_MAX$}")
 }
 
-fn walk_directory(
+pub(crate) fn walk_directory(
     client: &FileSystemClient<PortTransport>,
     buffer: &runtime::Mapping,
     fd: NodeDescriptor,
@@ -714,9 +718,20 @@ fn filesystem_lists_the_image_directory() {
 
     let names = walk_directory(&client, &buffer, directory.fd);
 
-    // Состав образа задаёт манифест: перечисление несёт и программы, и
-    // файл-данные.
-    for expected in ["testrunner", "namespace-router", "sample"] {
+    // Каждая программа образа лежит своим каталогом: под `/boot` перечисляются
+    // они, а её записи - внутри.
+    for expected in ["testrunner", "namespace-router"] {
+        kernel_tests::kassert!(names.iter().any(|name| name.as_str() == expected));
+    }
+
+    let own = open(
+        &client,
+        COMPONENT_DIRECTORY,
+        AccessMode::Read,
+        OpenFlags::DIRECTORY,
+    );
+    let names = walk_directory(&client, &buffer, own.fd);
+    for expected in ["program", "sample", "empty"] {
         kernel_tests::kassert!(names.iter().any(|name| name.as_str() == expected));
     }
 }
@@ -858,7 +873,7 @@ fn filesystem_refuses_to_change_the_image() {
     kernel_tests::kassert_eq!(absent, Err(FileSystemError::NotFound));
 
     let through_a_file = client
-        .unlink(path("/boot/sample/inner"))
+        .unlink(path("/boot/testrunner/sample/inner"))
         .expect("unlink call");
     kernel_tests::kassert_eq!(through_a_file, Err(FileSystemError::NotADirectory));
 }

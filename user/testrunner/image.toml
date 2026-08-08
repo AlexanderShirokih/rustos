@@ -2,23 +2,11 @@ version = 1
 
 [plan]
 source = "user/testrunner/system.toml"
-path = "/boot/testrunner.plan"
+path = "/boot/testrunner/plan"
 
 [[mount_tables]]
 source = "user/testrunner/namespace.toml"
-path = "/boot/namespace.mounts"
-
-[[mount_tables]]
-source = "user/testrunner/namespace-crash.toml"
-path = "/boot/crash.mounts"
-
-[[mount_tables]]
-source = "user/testrunner/namespace-empty.toml"
-path = "/boot/empty.mounts"
-
-[[mount_tables]]
-source = "user/testrunner/namespace-broken.toml"
-path = "/boot/broken.mounts"
+path = "/boot/namespace-router/mounts"
 
 [[programs]]
 package = "testrunner"
@@ -107,9 +95,9 @@ package = "filesystem-imagefs"
 path = "/boot/filesystem-imagefs"
 
 [[files]]
-path = "/boot/sample"
+path = "/boot/testrunner/sample"
 source = "user/testrunner/assets/sample.txt"
 
 [[files]]
-path = "/boot/empty"
+path = "/boot/testrunner/empty"
 source = "user/testrunner/assets/empty.txt"

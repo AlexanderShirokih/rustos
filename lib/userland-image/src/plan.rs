@@ -1,10 +1,13 @@
 use syscall::Timeout;
 
 /// Путь записи образа, из которой rootkeeper читает план загрузочной композиции.
-pub const BOOT_PLAN_PATH: &str = "/boot/rootkeeper.plan";
+pub const BOOT_PLAN_PATH: &str = "/boot/rootkeeper/plan";
+
+/// Имя записи с программой в каталоге компонента.
+pub const COMPONENT_PROGRAM_NAME: &str = "program";
 
 pub const BOOT_PLAN_MAGIC: [u8; 8] = *b"RKPLAN\0\0";
-pub const BOOT_PLAN_VERSION: u16 = 2;
+pub const BOOT_PLAN_VERSION: u16 = 1;
 
 pub(crate) const PLAN_HEADER_SIZE: usize = 16;
 pub(crate) const COMPONENT_HEADER_SIZE: usize = 40;
@@ -14,18 +17,68 @@ pub(crate) const SLOT_KIND_IMAGE: u8 = 0;
 pub(crate) const SLOT_KIND_IRQ: u8 = 1;
 pub(crate) const SLOT_KIND_MMIO: u8 = 2;
 pub(crate) const SLOT_KIND_SERVICE: u8 = 3;
+pub(crate) const SLOT_KIND_FILE: u8 = 4;
+
+pub(crate) const EXHAUSTED_HALT: u8 = 0;
+pub(crate) const EXHAUSTED_DETACH: u8 = 1;
 
 const INDEX_SIZE: usize = 2;
 
-/// Устройство описания платформы, названное слотом.
+/// Исход компонента, исчерпавшего свои запуски.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnExhausted {
+    /// Останавливает композицию.
+    Halt,
+    /// Снимается с композиции, а та остаётся поднятой без него.
+    Detach,
+}
+
+/// Устройство описания платформы, названное слотом: набор совместимостей, с
+/// которыми работает драйвер, вместе с номерами экземпляра и ресурса.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanDevice<'a> {
-    /// Строка совместимости устройства.
-    pub compatible: &'a str,
+    selectors: &'a [u8],
+    selector_count: u16,
     /// Номер экземпляра среди устройств той же совместимости.
     pub instance: u16,
     /// Номер ресурса устройства: линии либо окна.
     pub resource: u16,
+}
+
+/// Строки совместимости устройства в порядке объявления.
+#[derive(Debug, Clone)]
+pub struct PlanSelectors<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+    remaining: u16,
+}
+
+impl<'a> PlanDevice<'a> {
+    /// Строки совместимости, любая из которых подходит драйверу.
+    #[must_use]
+    pub const fn compatible(&self) -> PlanSelectors<'a> {
+        PlanSelectors {
+            bytes: self.selectors,
+            cursor: 0,
+            remaining: self.selector_count,
+        }
+    }
+}
+
+impl<'a> Iterator for PlanSelectors<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let len = usize::from(read_u16(self.bytes, self.cursor).ok()?);
+        let at = self.cursor + 2;
+        let name = core::str::from_utf8(self.bytes.get(at..at + len)?).ok()?;
+        self.remaining -= 1;
+        self.cursor = at + len;
+        Some(name)
+    }
 }
 
 /// Источник capability, которую supervisor кладёт в слот компонента.
@@ -39,22 +92,22 @@ pub enum SlotSource<'a> {
     Mmio(PlanDevice<'a>),
     /// Сессия service-порта компонента с номером `provider` в плане.
     Service { provider: u16 },
+    /// Регион записи образа из каталога компонента.
+    File { path: &'a str },
 }
 
 /// Компонент загрузочной композиции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanComponent<'a> {
-    id: &'a str,
-    program: &'a str,
-    config: Option<&'a str>,
+    executable: &'a str,
     slots: &'a [u8],
     slot_count: u16,
     requires: &'a [u8],
     after: &'a [u8],
-    budget_pages: u64,
+    memory_pages: u64,
     startup_timeout: Timeout,
-    restart_limit: u32,
-    critical: bool,
+    launches: u32,
+    on_exhausted: OnExhausted,
 }
 
 /// План загрузочной композиции, разобранный из записи образа.
@@ -112,22 +165,20 @@ pub fn decode_plan(bytes: &[u8]) -> Result<BootPlan<'_>, PlanDecodeError> {
 }
 
 impl<'a> PlanComponent<'a> {
-    /// Имя компонента в журнале композиции.
+    /// Запись образа с программой компонента. Она же называет компонент:
+    /// композиция не поднимает одну программу дважды.
     #[must_use]
-    pub const fn id(&self) -> &'a str {
-        self.id
+    pub const fn executable(&self) -> &'a str {
+        self.executable
     }
 
-    /// Запись образа с программой компонента.
+    /// Имя компонента в журнале композиции: последний компонент пути программы.
     #[must_use]
-    pub const fn program(&self) -> &'a str {
-        self.program
-    }
-
-    /// Запись образа с конфигурацией компонента.
-    #[must_use]
-    pub const fn config(&self) -> Option<&'a str> {
-        self.config
+    pub fn name(&self) -> &'a str {
+        match self.executable.rsplit_once('/') {
+            Some((_, name)) => name,
+            None => self.executable,
+        }
     }
 
     /// Число слотов capability компонента.
@@ -164,10 +215,11 @@ impl<'a> PlanComponent<'a> {
         }
     }
 
-    /// Бюджет страниц, отрезаемый компоненту.
+    /// Предел памяти компонента в страницах: об него метрится всё, что процесс
+    /// занимает.
     #[must_use]
-    pub const fn budget_pages(&self) -> u64 {
-        self.budget_pages
+    pub const fn memory_pages(&self) -> u64 {
+        self.memory_pages
     }
 
     /// Конечный срок доставки startup-кадра.
@@ -178,14 +230,14 @@ impl<'a> PlanComponent<'a> {
 
     /// Предел числа запусков: первый запуск считается.
     #[must_use]
-    pub const fn restart_limit(&self) -> u32 {
-        self.restart_limit
+    pub const fn launches(&self) -> u32 {
+        self.launches
     }
 
-    /// Уход критического компонента останавливает композицию.
+    /// Исход компонента, исчерпавшего свои запуски.
     #[must_use]
-    pub const fn critical(&self) -> bool {
-        self.critical
+    pub const fn on_exhausted(&self) -> OnExhausted {
+        self.on_exhausted
     }
 }
 
@@ -300,27 +352,28 @@ fn parse_component(
     let header = bytes
         .get(at..at + COMPONENT_HEADER_SIZE)
         .ok_or(truncated(bytes, at + COMPONENT_HEADER_SIZE))?;
-    let restart_limit = read_u32(header, 0)?;
-    if restart_limit == 0 {
-        return Err(PlanDecodeError::InvalidLayout("restart_limit"));
+    let launches = read_u32(header, 0)?;
+    if launches == 0 {
+        return Err(PlanDecodeError::InvalidLayout("launches"));
     }
-    let critical = match header[4] {
-        0 => false,
-        1 => true,
-        _ => return Err(PlanDecodeError::InvalidLayout("critical")),
+    let on_exhausted = match header[4] {
+        EXHAUSTED_HALT => OnExhausted::Halt,
+        EXHAUSTED_DETACH => OnExhausted::Detach,
+        _ => return Err(PlanDecodeError::InvalidLayout("on_exhausted")),
     };
-    if header[5] != 0 || read_u16(header, 18)? != 0 || read_u32(header, 20)? != 0 {
+    if header[5] != 0 || read_u64(header, 16)? != 0 {
         return Err(PlanDecodeError::InvalidLayout("reserved"));
     }
-    let id_len = usize::from(read_u16(header, 6)?);
-    let program_len = usize::from(read_u16(header, 8)?);
-    let config_len = usize::from(read_u16(header, 10)?);
-    let slot_count = read_u16(header, 12)?;
-    let requires_count = read_u16(header, 14)?;
-    let after_count = read_u16(header, 16)?;
-    let budget_pages = read_u64(header, 24)?;
-    if budget_pages == 0 {
-        return Err(PlanDecodeError::InvalidLayout("budget_pages"));
+    let executable_len = usize::from(read_u16(header, 6)?);
+    if read_u16(header, 8)? != 0 {
+        return Err(PlanDecodeError::InvalidLayout("reserved"));
+    }
+    let slot_count = read_u16(header, 10)?;
+    let requires_count = read_u16(header, 12)?;
+    let after_count = read_u16(header, 14)?;
+    let memory_pages = read_u64(header, 24)?;
+    if memory_pages == 0 {
+        return Err(PlanDecodeError::InvalidLayout("memory_pages"));
     }
     let startup_timeout = Timeout::from_ns(read_u64(header, 32)?);
     if startup_timeout == Timeout::POLL || startup_timeout == Timeout::INFINITE {
@@ -328,15 +381,7 @@ fn parse_component(
     }
 
     let cursor = at + COMPONENT_HEADER_SIZE;
-    let (id, cursor) = parse_str(bytes, cursor, id_len, "id")?;
-    let (program, cursor) = parse_str(bytes, cursor, program_len, "program")?;
-    let (config, mut cursor) = match config_len {
-        0 => (None, cursor),
-        len => {
-            let (config, cursor) = parse_str(bytes, cursor, len, "config")?;
-            (Some(config), cursor)
-        }
-    };
+    let (executable, mut cursor) = parse_str(bytes, cursor, executable_len, "executable")?;
 
     let slots_at = cursor;
     for _ in 0..slot_count {
@@ -353,17 +398,15 @@ fn parse_component(
 
     Ok(ParsedComponent {
         component: PlanComponent {
-            id,
-            program,
-            config,
+            executable,
             slots,
             slot_count,
             requires,
             after,
-            budget_pages,
+            memory_pages,
             startup_timeout,
-            restart_limit,
-            critical,
+            launches,
+            on_exhausted,
         },
         end: cursor,
     })
@@ -380,15 +423,23 @@ fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, Pla
     let provider = read_u16(header, 2)?;
     let instance = read_u16(header, 4)?;
     let resource = read_u16(header, 6)?;
-    let selector_len = usize::from(read_u16(header, 8)?);
+    let selector_count = read_u16(header, 8)?;
 
     let cursor = at + SLOT_HEADER_SIZE;
     let device_kind = matches!(kind, SLOT_KIND_IRQ | SLOT_KIND_MMIO);
-    if !device_kind && !matches!(kind, SLOT_KIND_IMAGE | SLOT_KIND_SERVICE) {
+    if !device_kind && !matches!(kind, SLOT_KIND_IMAGE | SLOT_KIND_SERVICE | SLOT_KIND_FILE) {
         return Err(PlanDecodeError::InvalidLayout("slot_kind"));
     }
-    if !device_kind && (instance != 0 || resource != 0 || selector_len != 0) {
+    if !device_kind && (instance != 0 || resource != 0) {
         return Err(PlanDecodeError::InvalidLayout("slot_device"));
+    }
+    if device_kind && selector_count == 0 {
+        return Err(PlanDecodeError::InvalidLayout("slot_selector"));
+    }
+    // Строку несут устройство набором совместимостей и файл своим путём.
+    let expected_strings = u16::from(kind == SLOT_KIND_FILE);
+    if !device_kind && selector_count != expected_strings {
+        return Err(PlanDecodeError::InvalidLayout("slot_strings"));
     }
     if kind != SLOT_KIND_SERVICE && provider != 0 {
         return Err(PlanDecodeError::InvalidLayout("slot_provider"));
@@ -402,10 +453,21 @@ fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, Pla
             }
             (SlotSource::Service { provider }, cursor)
         }
+        SLOT_KIND_FILE => {
+            let len = usize::from(read_u16(bytes, cursor)?);
+            let (path, end) = parse_str(bytes, cursor + 2, len, "slot_file")?;
+            (SlotSource::File { path }, end)
+        }
         SLOT_KIND_IRQ | SLOT_KIND_MMIO => {
-            let (compatible, end) = parse_str(bytes, cursor, selector_len, "slot_selector")?;
+            let mut end = cursor;
+            for _ in 0..selector_count {
+                let len = usize::from(read_u16(bytes, end)?);
+                let (_, next) = parse_str(bytes, end + 2, len, "slot_selector")?;
+                end = next;
+            }
             let device = PlanDevice {
-                compatible,
+                selectors: bytes.get(cursor..end).ok_or(truncated(bytes, end))?,
+                selector_count,
                 instance,
                 resource,
             };
@@ -487,50 +549,45 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use super::*;
-    use crate::{ComponentSpec, PlanEncodeError, encode_plan};
+    use crate::{ComponentSpec, DeviceSpec, PlanEncodeError, SlotSpec, encode_plan};
 
-    const CONFIG: &str = "/boot/namespace.mounts";
-    const RTC_SELECTOR: &str = "arm,pl031";
+    const RTC_SELECTORS: &[&str] = &["arm,pl031", "arm,primecell"];
 
     fn router() -> ComponentSpec<'static> {
         ComponentSpec {
-            id: "filesystem",
-            program: "/boot/namespace-router",
-            config: Some(CONFIG),
-            slots: &[SlotSource::Image],
+            executable: "/boot/namespace-router",
+            slots: &[SlotSpec::Image],
             requires: &[],
             after: &[],
-            budget_pages: 2_048,
+            memory_pages: 2_048,
             startup_timeout: Timeout::from_millis(2_000),
-            restart_limit: 3,
-            critical: true,
+            launches: 3,
+            on_exhausted: OnExhausted::Halt,
         }
     }
 
     fn rtc() -> ComponentSpec<'static> {
         ComponentSpec {
-            id: "rtc",
-            program: "/boot/driver-pl031",
-            config: None,
+            executable: "/boot/driver-pl031",
             slots: &[
-                SlotSource::Irq(PlanDevice {
-                    compatible: RTC_SELECTOR,
+                SlotSpec::Irq(DeviceSpec {
+                    compatible: RTC_SELECTORS,
                     instance: 0,
                     resource: 0,
                 }),
-                SlotSource::Mmio(PlanDevice {
-                    compatible: RTC_SELECTOR,
+                SlotSpec::Mmio(DeviceSpec {
+                    compatible: RTC_SELECTORS,
                     instance: 0,
-                    resource: 0,
+                    resource: 1,
                 }),
-                SlotSource::Service { provider: 0 },
+                SlotSpec::Service { provider: 0 },
             ],
             requires: &[0],
             after: &[0],
-            budget_pages: 64,
+            memory_pages: 64,
             startup_timeout: Timeout::from_millis(1_000),
-            restart_limit: 1,
-            critical: false,
+            launches: 1,
+            on_exhausted: OnExhausted::Detach,
         }
     }
 
@@ -545,50 +602,33 @@ mod tests {
         assert_eq!(plan.len(), 2);
 
         let router = plan.component(0).expect("first component");
-        assert_eq!(router.id(), "filesystem");
-        assert_eq!(router.program(), "/boot/namespace-router");
-        assert_eq!(router.config(), Some(CONFIG));
-        assert_eq!(router.budget_pages(), 2_048);
+        assert_eq!(router.executable(), "/boot/namespace-router");
+        assert_eq!(router.name(), "namespace-router");
+        assert_eq!(router.memory_pages(), 2_048);
         assert_eq!(router.startup_timeout(), Timeout::from_millis(2_000));
-        assert_eq!(router.restart_limit(), 3);
-        assert!(router.critical());
+        assert_eq!(router.launches(), 3);
+        assert_eq!(router.on_exhausted(), OnExhausted::Halt);
         assert_eq!(router.slots().collect::<Vec<_>>(), vec![SlotSource::Image]);
         assert_eq!(router.requires().count(), 0);
 
         let rtc = plan.component(1).expect("second component");
-        assert_eq!(rtc.id(), "rtc");
-        assert_eq!(rtc.config(), None);
-        assert!(!rtc.critical());
+        assert_eq!(rtc.name(), "driver-pl031");
+        assert_eq!(rtc.on_exhausted(), OnExhausted::Detach);
         assert_eq!(rtc.slot_count(), 3);
-        assert_eq!(
-            rtc.slots().collect::<Vec<_>>(),
-            vec![
-                SlotSource::Irq(PlanDevice {
-                    compatible: RTC_SELECTOR,
-                    instance: 0,
-                    resource: 0,
-                }),
-                SlotSource::Mmio(PlanDevice {
-                    compatible: RTC_SELECTOR,
-                    instance: 0,
-                    resource: 0,
-                }),
-                SlotSource::Service { provider: 0 },
-            ]
-        );
+        let slots: Vec<SlotSource<'_>> = rtc.slots().collect();
+        let SlotSource::Irq(line) = slots[0] else {
+            panic!("first slot is an interrupt line")
+        };
+        assert_eq!(line.compatible().collect::<Vec<_>>(), RTC_SELECTORS);
+        assert_eq!(line.resource, 0);
+        let SlotSource::Mmio(window) = slots[1] else {
+            panic!("second slot is an MMIO window")
+        };
+        assert_eq!(window.compatible().collect::<Vec<_>>(), RTC_SELECTORS);
+        assert_eq!(window.resource, 1);
+        assert_eq!(slots[2], SlotSource::Service { provider: 0 });
         assert_eq!(rtc.requires().collect::<Vec<_>>(), vec![0]);
         assert_eq!(rtc.after().collect::<Vec<_>>(), vec![0]);
-    }
-
-    #[test]
-    fn round_trip_keeps_a_component_without_a_config_record() {
-        let bytes = encode_plan(&[rtc()]).expect("encode plan");
-
-        let component = decode_plan(&bytes)
-            .expect("decode plan")
-            .component(0)
-            .expect("component");
-        assert_eq!(component.config(), None);
     }
 
     #[test]
@@ -604,10 +644,10 @@ mod tests {
     #[test]
     fn decode_rejects_another_version() {
         let mut bytes = plan_bytes();
-        bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
         assert_eq!(
             decode_plan(&bytes).expect_err("version must match"),
-            PlanDecodeError::InvalidVersion(1)
+            PlanDecodeError::InvalidVersion(2)
         );
     }
 
@@ -651,7 +691,7 @@ mod tests {
             decode_plan(&bytes).expect_err("component must be runnable")
         };
 
-        assert_eq!(field(24, 0), PlanDecodeError::InvalidLayout("budget_pages"));
+        assert_eq!(field(24, 0), PlanDecodeError::InvalidLayout("memory_pages"));
         assert_eq!(
             field(32, Timeout::POLL.raw()),
             PlanDecodeError::InvalidLayout("startup_timeout")
@@ -665,17 +705,17 @@ mod tests {
         bytes[PLAN_HEADER_SIZE..PLAN_HEADER_SIZE + 4].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             decode_plan(&bytes).expect_err("component must launch at least once"),
-            PlanDecodeError::InvalidLayout("restart_limit")
+            PlanDecodeError::InvalidLayout("launches")
         );
     }
 
     #[test]
-    fn decode_rejects_a_flag_outside_its_values() {
+    fn decode_rejects_an_outcome_outside_its_values() {
         let mut bytes = plan_bytes();
         bytes[PLAN_HEADER_SIZE + 4] = 2;
         assert_eq!(
-            decode_plan(&bytes).expect_err("critical is a flag"),
-            PlanDecodeError::InvalidLayout("critical")
+            decode_plan(&bytes).expect_err("exhausted outcome is a closed set"),
+            PlanDecodeError::InvalidLayout("on_exhausted")
         );
     }
 
@@ -692,24 +732,41 @@ mod tests {
     #[test]
     fn decode_rejects_a_string_that_is_not_utf8() {
         let mut bytes = plan_bytes();
-        let id_at = PLAN_HEADER_SIZE + COMPONENT_HEADER_SIZE;
-        bytes[id_at] = 0xFF;
+        let executable_at = PLAN_HEADER_SIZE + COMPONENT_HEADER_SIZE;
+        bytes[executable_at] = 0xFF;
         assert_eq!(
             decode_plan(&bytes).expect_err("strings are UTF-8"),
-            PlanDecodeError::InvalidLayout("id")
+            PlanDecodeError::InvalidLayout("executable")
         );
     }
 
     #[test]
     fn decode_rejects_a_slot_of_an_unknown_kind() {
         let bytes = encode_plan(&[rtc()]).expect("encode plan");
-        let slot_at = bytes.len() - 3 * SLOT_HEADER_SIZE - 2 * RTC_SELECTOR.len() - 2 * INDEX_SIZE;
+        let slot_at = first_slot_offset(&rtc());
         let mut broken = bytes;
         broken[slot_at] = 9;
         assert_eq!(
             decode_plan(&broken).expect_err("slot kinds are closed"),
             PlanDecodeError::InvalidLayout("slot_kind")
         );
+    }
+
+    #[test]
+    fn decode_rejects_a_device_slot_without_selectors() {
+        let bytes = encode_plan(&[rtc()]).expect("encode plan");
+        let count_at = first_slot_offset(&rtc()) + 8;
+        let mut broken = bytes;
+        broken[count_at..count_at + 2].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(
+            decode_plan(&broken).expect_err("a device slot names its compatibles"),
+            PlanDecodeError::InvalidLayout("slot_selector")
+        );
+    }
+
+    fn first_slot_offset(component: &ComponentSpec<'_>) -> usize {
+        // Слоты идут сразу за строками записи компонента.
+        PLAN_HEADER_SIZE + COMPONENT_HEADER_SIZE + component.executable.len()
     }
 
     #[test]
@@ -726,22 +783,22 @@ mod tests {
 
     #[test]
     fn encode_rejects_a_composition_that_cannot_run() {
-        let zero_budget = ComponentSpec {
-            budget_pages: 0,
+        let zero_memory = ComponentSpec {
+            memory_pages: 0,
             ..router()
         };
         assert_eq!(
-            encode_plan(&[zero_budget]).expect_err("budget must be non-zero"),
-            PlanEncodeError::ZeroBudget
+            encode_plan(&[zero_memory]).expect_err("memory limit must be non-zero"),
+            PlanEncodeError::ZeroMemory
         );
 
         let no_launches = ComponentSpec {
-            restart_limit: 0,
+            launches: 0,
             ..router()
         };
         assert_eq!(
             encode_plan(&[no_launches]).expect_err("component must launch once"),
-            PlanEncodeError::ZeroRestartLimit
+            PlanEncodeError::ZeroLaunches
         );
 
         let unbounded = ComponentSpec {
@@ -753,9 +810,12 @@ mod tests {
             PlanEncodeError::UnboundedStartupTimeout
         );
 
-        let nameless = ComponentSpec { id: "", ..router() };
+        let nameless = ComponentSpec {
+            executable: "",
+            ..router()
+        };
         assert_eq!(
-            encode_plan(&[nameless]).expect_err("id must be non-empty"),
+            encode_plan(&[nameless]).expect_err("executable must be non-empty"),
             PlanEncodeError::EmptyString
         );
 
@@ -765,7 +825,7 @@ mod tests {
         );
 
         let unknown_provider = ComponentSpec {
-            slots: &[SlotSource::Service { provider: 4 }],
+            slots: &[SlotSpec::Service { provider: 4 }],
             ..router()
         };
         assert_eq!(

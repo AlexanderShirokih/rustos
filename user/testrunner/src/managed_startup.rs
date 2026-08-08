@@ -15,9 +15,9 @@ use userland_image::{DecodedProgram, decode};
 
 use crate::managed_fixture_protocol::ManagedFixtureClient;
 
-const FIXTURE_ENTRY: &str = "/boot/managed-startup-fixture";
-const HUNG_ENTRY: &str = "/boot/managed-startup-hung";
-const CLOSED_ENTRY: &str = "/boot/managed-startup-closed";
+const FIXTURE_ENTRY: &str = "/boot/managed-startup-fixture/program";
+const HUNG_ENTRY: &str = "/boot/managed-startup-hung/program";
+const CLOSED_ENTRY: &str = "/boot/managed-startup-closed/program";
 const DELIVERY_TIMEOUT: Timeout = Timeout::from_secs(1);
 const HUNG_DELIVERY_TIMEOUT: Timeout = Timeout::from_millis(5);
 const PROCESS_TIMEOUT: Timeout = Timeout::from_secs(1);

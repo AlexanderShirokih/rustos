@@ -1,17 +1,13 @@
 //! Обслуживание admin-порта: стартовый кадр с capability, которых не даёт `ProcessStart`, и
 //! установление сессий. Порт отдан тому, кто поднял файловую систему, и клиентам недоступен.
 
-use core::{num::NonZeroU64, sync::atomic::Ordering::Relaxed};
-
 use filesystem_abi::{FileSystemAdminService, FileSystemError};
 use ipc::wire::Cap;
 use runtime::{OwnedHandle, log_line};
-use syscall::Rights;
 
 use crate::{
     Shared,
-    error::no_space,
-    service::{settle, vend},
+    service::{mint_session, settle, vend},
 };
 
 pub(crate) struct StartResources {
@@ -69,13 +65,7 @@ impl FileSystemAdminService for Binding<'_> {
     }
 
     fn bind(&mut self) -> Result<Cap, FileSystemError> {
-        // Значения значков не переиспользуются: счётчик только растёт.
-        let badge = NonZeroU64::MIN.saturating_add(self.shared.next_badge.fetch_add(1, Relaxed));
-        let session = self
-            .shared
-            .service
-            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
-            .map_err(no_space)?;
+        let (badge, session) = mint_session(&self.shared.service, &self.shared.next_badge)?;
         // Сессия заводится до того, как её капа ушла клиенту: кадр по ней застанет её заведённой.
         self.shared.state.lock().open_session(badge.get())?;
         Ok(vend(&mut self.vended, session))

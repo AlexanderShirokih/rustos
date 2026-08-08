@@ -95,6 +95,14 @@ pub trait FileSystem {
     /// Бекенд без такого региона отвечает `NotSupported`.
     #[call]
     fn backing_memory(&self, fd: NodeDescriptor) -> Result<ipc::wire::Cap, FileSystemError>;
+
+    /// Отдаёт capability свежей сессии с каталогом `path` в роли корня: окно только сужается.
+    /// Путь не каталога - `NotADirectory`, путь за `PATH_MAX` вместе с окном - `InvalidPath`.
+    #[call]
+    fn open_root(
+        &self,
+        path: ipc::wire::Str<{ PATH_MAX }>,
+    ) -> Result<ipc::wire::Cap, FileSystemError>;
 }
 
 #[cfg(test)]
@@ -121,6 +129,7 @@ mod tests {
 
     const BUFFER_CAP: Cap = cap(0x11);
     const BACKING_CAP: Cap = cap(0x22);
+    const SCOPED_CAP: Cap = cap(0x33);
     const READ_COUNT: u32 = 512;
     const DONE: u32 = 0;
     const FD: NodeDescriptor = NodeDescriptor::from_raw(7);
@@ -186,6 +195,9 @@ mod tests {
         },
         BackingMemory {
             fd: NodeDescriptor,
+        },
+        OpenRoot {
+            path: String,
         },
     }
 
@@ -284,6 +296,13 @@ mod tests {
         fn backing_memory(&mut self, fd: NodeDescriptor) -> Result<Cap, FileSystemError> {
             self.record(Call::BackingMemory { fd });
             Ok(BACKING_CAP)
+        }
+
+        fn open_root(&mut self, path: Str<'_, { PATH_MAX }>) -> Result<Cap, FileSystemError> {
+            self.record(Call::OpenRoot {
+                path: path.as_str().to_string(),
+            });
+            Ok(SCOPED_CAP)
         }
     }
 
@@ -476,5 +495,21 @@ mod tests {
         let (result, calls) = with_service(|client| client.backing_memory(FD).expect("call ok"));
         assert_eq!(result, Ok(BACKING_CAP));
         assert_eq!(calls, [Call::BackingMemory { fd: FD }]);
+    }
+
+    #[test]
+    fn open_root_round_trip() {
+        let (result, calls) = with_service(|client| {
+            client
+                .open_root(Str::new("/window").expect("path within bound"))
+                .expect("call ok")
+        });
+        assert_eq!(result, Ok(SCOPED_CAP));
+        assert_eq!(
+            calls,
+            [Call::OpenRoot {
+                path: "/window".to_string(),
+            }]
+        );
     }
 }
