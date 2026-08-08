@@ -27,6 +27,18 @@ const _: () = assert!(
     core::mem::offset_of!(ExceptionFrame, tpidr_el0) == 296,
     "exception_entry! reaches tpidr_el0 by a literal offset"
 );
+const _: () = assert!(
+    core::mem::offset_of!(ExceptionFrame, simd_regs) == 304,
+    "exception_entry! reaches simd_regs by a literal offset"
+);
+const _: () = assert!(
+    core::mem::offset_of!(ExceptionFrame, fpcr) == 816,
+    "exception_entry! reaches fpcr by a literal offset"
+);
+const _: () = assert!(
+    core::mem::offset_of!(ExceptionFrame, fpsr) == 824,
+    "exception_entry! reaches fpsr by a literal offset"
+);
 
 /// Контекст процессора, сохраняемый при входе в обработчик исключения.
 #[repr(C)]
@@ -49,6 +61,12 @@ pub struct ExceptionFrame {
     /// Указатель локальных данных потока (TPIDR_EL0): сохраняется на входе и восстанавливается
     /// перед `eret`.
     pub tpidr_el0: u64,
+    /// Регистры SIMD/FP v0-v31 целиком.
+    pub simd_regs: [u128; 32],
+    /// Floating-point Control Register.
+    pub fpcr: u64,
+    /// Floating-point Status Register.
+    pub fpsr: u64,
 }
 
 /// Тип исключения, определяемый вектором входа.
@@ -305,6 +323,29 @@ macro_rules! exception_entry {
                 "mrs x10, tpidr_el0",
                 "stp x9,  x10, [sp, #288]",
 
+                // Кадр несёт весь регистровый файл SIMD/FP: код ядра между трапом и
+                // возвратом эмитит NEON.
+                "stp q0,  q1,  [sp, #304]",
+                "stp q2,  q3,  [sp, #336]",
+                "stp q4,  q5,  [sp, #368]",
+                "stp q6,  q7,  [sp, #400]",
+                "stp q8,  q9,  [sp, #432]",
+                "stp q10, q11, [sp, #464]",
+                "stp q12, q13, [sp, #496]",
+                "stp q14, q15, [sp, #528]",
+                "stp q16, q17, [sp, #560]",
+                "stp q18, q19, [sp, #592]",
+                "stp q20, q21, [sp, #624]",
+                "stp q22, q23, [sp, #656]",
+                "stp q24, q25, [sp, #688]",
+                "stp q26, q27, [sp, #720]",
+                "stp q28, q29, [sp, #752]",
+                "stp q30, q31, [sp, #784]",
+                "mrs x9,  fpcr",
+                "str x9,  [sp, #816]",
+                "mrs x9,  fpsr",
+                "str x9,  [sp, #824]",
+
                 // Вызов Rust-диспетчера
                 // x0 = &mut ExceptionFrame, x1 = ExceptionKind (u64)
                 "mov x0, sp",
@@ -318,6 +359,29 @@ macro_rules! exception_entry {
                 "ldp x9,  x10, [sp, #288]",
                 "msr sp_el0,  x9",
                 "msr tpidr_el0, x10",
+
+                // SIMD/FP: запись FPCR синхронизирует сам `eret` как context synchronization
+                // event, отдельный `isb` не нужен.
+                "ldr x9,  [sp, #816]",
+                "msr fpcr, x9",
+                "ldr x9,  [sp, #824]",
+                "msr fpsr, x9",
+                "ldp q0,  q1,  [sp, #304]",
+                "ldp q2,  q3,  [sp, #336]",
+                "ldp q4,  q5,  [sp, #368]",
+                "ldp q6,  q7,  [sp, #400]",
+                "ldp q8,  q9,  [sp, #432]",
+                "ldp q10, q11, [sp, #464]",
+                "ldp q12, q13, [sp, #496]",
+                "ldp q14, q15, [sp, #528]",
+                "ldp q16, q17, [sp, #560]",
+                "ldp q18, q19, [sp, #592]",
+                "ldp q20, q21, [sp, #624]",
+                "ldp q22, q23, [sp, #656]",
+                "ldp q24, q25, [sp, #688]",
+                "ldp q26, q27, [sp, #720]",
+                "ldp q28, q29, [sp, #752]",
+                "ldp q30, q31, [sp, #784]",
 
                 // Регистры общего назначения
                 "ldp x0,  x1,  [sp, #0]",
