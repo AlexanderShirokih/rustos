@@ -21,6 +21,7 @@ mod filesystem_scope;
 mod filesystem_stress;
 mod fixture;
 mod fixture_protocol;
+mod futex;
 mod heap;
 mod ipc_buffer;
 mod ipc_raw;
