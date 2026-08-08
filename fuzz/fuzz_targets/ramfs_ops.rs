@@ -243,7 +243,7 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn kind(byte: u8) -> NodeKind {
-    if byte % 2 == 0 {
+    if byte.is_multiple_of(2) {
         NodeKind::File
     } else {
         NodeKind::Directory
@@ -288,12 +288,11 @@ fn lookup(fs: &RamFileSystem, model: &Model, path: &str) {
 fn create(fs: &mut RamFileSystem, model: &mut Model, path: &str, kind: NodeKind) {
     let expected = expected_create(model, path);
     let created = fs.create(path_of(path), kind);
-    match expected {
-        Err(error) => assert_eq!(created, Err(error), "create {path}"),
-        Ok(()) => {
-            let node = created.unwrap_or_else(|error| panic!("create {path}: {error:?}"));
-            model.insert(path, node, kind);
-        }
+    if let Err(error) = expected {
+        assert_eq!(created, Err(error), "create {path}");
+    } else {
+        let node = created.unwrap_or_else(|error| panic!("create {path}: {error:?}"));
+        model.insert(path, node, kind);
     }
 }
 
@@ -381,12 +380,11 @@ fn write_at(fs: &mut RamFileSystem, model: &mut Model, path: &str, offset: u64, 
     };
     let expected = expected_write(model, path, offset);
     let written = fs.write_at(node, offset, data);
-    match expected {
-        Err(error) => assert_eq!(written, Err(error), "write {path} at {offset}"),
-        Ok(()) => {
-            assert_eq!(written, Ok(data.len()), "write {path} at {offset}");
-            write_into(model.file_mut(path), offset as usize, data);
-        }
+    if let Err(error) = expected {
+        assert_eq!(written, Err(error), "write {path} at {offset}");
+    } else {
+        assert_eq!(written, Ok(data.len()), "write {path} at {offset}");
+        write_into(model.file_mut(path), offset as usize, data);
     }
 }
 

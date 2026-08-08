@@ -6,7 +6,7 @@ use core::num::NonZeroU64;
 use bootstrap::BootstrapClient;
 use runtime::{MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Result, Timeout};
 use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
-use userland_image::decode;
+use userland_image::{component_name, decode};
 use userland_loader::{launch_entry_retained, load_entry};
 
 use crate::{
@@ -127,19 +127,29 @@ impl Fixture {
             Launch::Bootstrap => {
                 let service = Port::create_service(Some(FIXTURE_SESSION_BADGE))?;
                 (
-                    load_entry(&program, resource, service.server)?,
+                    load_entry(
+                        &program,
+                        Some(component_name(FIXTURE_ENTRY)),
+                        resource,
+                        service.server,
+                    )?,
                     service.client,
                 )
             }
             Launch::Leased => {
-                let initialized =
-                    launch_entry_retained(&program, resource, FIXTURE_LEASE_BADGE, |startup| {
+                let initialized = launch_entry_retained(
+                    &program,
+                    Some(component_name(FIXTURE_ENTRY)),
+                    resource,
+                    FIXTURE_LEASE_BADGE,
+                    |startup| {
                         ipc_raw::write_frame(
                             &encode_request(OP_WRITE_SLOT, LEASE_START_PROBE),
                             &[],
                         );
                         startup.call(REQUEST_TIMEOUT)
-                    })?;
+                    },
+                )?;
                 (initialized.process, initialized.startup)
             }
         };

@@ -38,6 +38,7 @@ pub enum SlotSpec<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComponentSpec<'a> {
     pub executable: &'a str,
+    pub name: &'a str,
     pub slots: &'a [SlotSpec<'a>],
     pub requires: &'a [u16],
     pub after: &'a [u16],
@@ -94,6 +95,7 @@ fn encode_component(
         return Err(PlanEncodeError::UnboundedStartupTimeout);
     }
     let executable_len = string_len(component.executable)?;
+    let name_len = string_len(component.name)?;
     let slot_count = entry_count(component.slots.len())?;
     let requires_count = entry_count(component.requires.len())?;
     let after_count = entry_count(component.after.len())?;
@@ -105,7 +107,7 @@ fn encode_component(
     });
     bytes.push(0);
     bytes.extend_from_slice(&executable_len.to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&name_len.to_le_bytes());
     bytes.extend_from_slice(&slot_count.to_le_bytes());
     bytes.extend_from_slice(&requires_count.to_le_bytes());
     bytes.extend_from_slice(&after_count.to_le_bytes());
@@ -113,6 +115,7 @@ fn encode_component(
     bytes.extend_from_slice(&component.memory_pages.to_le_bytes());
     bytes.extend_from_slice(&component.startup_timeout.raw().to_le_bytes());
     bytes.extend_from_slice(component.executable.as_bytes());
+    bytes.extend_from_slice(component.name.as_bytes());
 
     for slot in component.slots {
         encode_slot(bytes, slot, count)?;

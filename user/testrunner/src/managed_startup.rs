@@ -16,6 +16,7 @@ use userland_image::{DecodedProgram, decode};
 use crate::managed_fixture_protocol::ManagedFixtureClient;
 
 const FIXTURE_ENTRY: &str = "/boot/managed-startup-fixture/program";
+const INSTANCE_NAME: &str = "managed-fixture";
 const HUNG_ENTRY: &str = "/boot/managed-startup-hung/program";
 const CLOSED_ENTRY: &str = "/boot/managed-startup-closed/program";
 const DELIVERY_TIMEOUT: Timeout = Timeout::from_secs(1);
@@ -116,6 +117,7 @@ fn managed_startup_times_out_before_recv_and_repeatedly_rolls_back() {
             .expect("reserve the component budget");
         let result = component.launch(
             &program,
+            INSTANCE_NAME,
             HUNG_DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, false),
@@ -150,6 +152,7 @@ fn managed_startup_peer_close_repeatedly_rolls_back() {
             .expect("reserve the component budget");
         let result = component.launch(
             &program,
+            INSTANCE_NAME,
             DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, false),
@@ -183,6 +186,7 @@ fn managed_startup_observes_nonzero_exit_after_running() {
     component
         .launch(
             &program,
+            INSTANCE_NAME,
             DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, FAILURE_EXIT_CODE, false),
@@ -215,6 +219,7 @@ fn managed_startup_observes_zero_exit_after_running() {
     component
         .launch(
             &program,
+            INSTANCE_NAME,
             DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, false),
@@ -244,6 +249,7 @@ fn managed_startup_timeout_rendezvous_race_has_one_ownership_outcome() {
             .expect("reserve the component budget");
         let result = component.launch(
             &program,
+            INSTANCE_NAME,
             RACE_TIMEOUT,
             || FixtureRoots::from_observer(&observer),
             |transport, roots| {
@@ -295,9 +301,13 @@ fn managed_startup_rejects_infinite_send_timeout() {
     )
     .expect("reserve the component budget");
 
-    let result = component.launch(&program, Timeout::INFINITE, FixtureRoots::create, |_, _| {
-        panic!("infinite timeout must be rejected before startup")
-    });
+    let result = component.launch(
+        &program,
+        INSTANCE_NAME,
+        Timeout::INFINITE,
+        FixtureRoots::create,
+        |_, _| panic!("infinite timeout must be rejected before startup"),
+    );
 
     kernel_tests::kassert_eq!(result, Err(ManagedStartupError::InfiniteTimeout));
     kernel_tests::kassert_eq!(component.status(), ManagedStatus::Failed);
@@ -318,6 +328,7 @@ fn dropping_running_component_terminates_child_and_returns_budget() {
     component
         .launch(
             &program,
+            INSTANCE_NAME,
             DELIVERY_TIMEOUT,
             FixtureRoots::create,
             |transport, roots| send_startup(transport, roots, 0, true),

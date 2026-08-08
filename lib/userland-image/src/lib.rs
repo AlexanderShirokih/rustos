@@ -23,7 +23,7 @@ pub use image::{
 pub use plan::{
     BOOT_PLAN_MAGIC, BOOT_PLAN_PATH, BOOT_PLAN_VERSION, BootPlan, COMPONENT_PROGRAM_NAME,
     OnExhausted, PlanComponent, PlanComponents, PlanDecodeError, PlanDevice, PlanEdges,
-    PlanSelectors, PlanSlots, SlotSource, decode_plan,
+    PlanSelectors, PlanSlots, SlotSource, component_name, decode_plan,
 };
 #[cfg(any(test, feature = "alloc"))]
 pub use plan_builder::{ComponentSpec, DeviceSpec, PlanEncodeError, SlotSpec, encode_plan};

@@ -22,7 +22,7 @@ use core::{
     },
 };
 
-use crate::futex::{futex_wait, futex_wake, futex_wake_all};
+use molecular_rt::{futex_wait, futex_wake, futex_wake_all};
 
 /// Взаимоисключающий доступ к `T` для userspace-потоков.
 pub struct Mutex<T> {

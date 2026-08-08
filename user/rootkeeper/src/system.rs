@@ -27,7 +27,7 @@ use crate::relay;
 
 const LOG_TAG: &str = "supervisor";
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 
 /// Конечный срок остановки компонента: terminate маршрутизатора тянет за собой
 /// join каждого его монтирования, и каждое отвечает в пределах admin-срока.
@@ -414,6 +414,7 @@ impl<'a> RootSystem<'a> {
         launch_component(
             &mut component.managed,
             &program,
+            plan.name(),
             &component.log,
             plan.startup_timeout(),
             slots,

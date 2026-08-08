@@ -48,6 +48,7 @@ mod simd_state;
 mod smp_stress;
 mod spawn_from_image;
 mod startup_fixture_protocol;
+mod std_rt;
 mod stress;
 mod sync;
 mod thread_pointer;

@@ -24,7 +24,7 @@ use runtime::{
     log_line,
 };
 use syscall::{Handle, Rights};
-use userland_image::{COMPONENT_PROGRAM_NAME, decode};
+use userland_image::{COMPONENT_PROGRAM_NAME, component_name, decode};
 use userland_loader::launch_entry_retained;
 
 use crate::error::{Error, Result as RouterResult};
@@ -56,6 +56,10 @@ impl FileSystemProgram {
 
     fn as_str(&self) -> &str {
         &self.0
+    }
+
+    fn name(&self) -> &str {
+        component_name(&self.0)
     }
 }
 
@@ -309,11 +313,13 @@ impl<'a> Administering<'a> {
     fn found(&self, program: &FileSystemProgram, budget: &Resource) -> RouterResult<Incarnation> {
         let image = decode(self.image_bytes)?;
         let entry = image.entry(program.as_str()).ok_or(Error::NoProgram)?;
+        let name = program.name();
         let program = entry.program().map_err(|_| Error::NoProgram)?;
 
-        let initialized = launch_entry_retained(&program, budget, MOUNT_LEASE_BADGE, |startup| {
-            self.start_frame(startup)
-        })?;
+        let initialized =
+            launch_entry_retained(&program, Some(name), budget, MOUNT_LEASE_BADGE, |startup| {
+                self.start_frame(startup)
+            })?;
         Ok(Incarnation {
             admin: initialized.startup.into_handle(),
             process: initialized.process,

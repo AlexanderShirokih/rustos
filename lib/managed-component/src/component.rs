@@ -166,11 +166,12 @@ impl<R> ManagedComponent<R> {
     /// Выполняет startup-транзакцию на резерве компонента с typed roots `R`.
     ///
     /// Запуск начинает новую incarnation и поднимает [`generation`](Self::generation).
-    /// Компонент в состоянии `Running` уже владеет экземпляром, и повторный
-    /// запуск отвергается `InvalidState`.
+    /// `name` называет процесс экземпляра. Компонент в состоянии `Running` уже
+    /// владеет экземпляром, и повторный запуск отвергается `InvalidState`.
     pub fn launch<'a, V: EntryView<'a>>(
         &mut self,
         entry: &V,
+        name: &str,
         startup_timeout: Timeout,
         create_roots: impl FnOnce() -> Result<R, ManagedStartupError>,
         send_startup: impl FnOnce(BoundedStartupTransport, &mut R) -> Result<(), ManagedStartupError>,
@@ -194,7 +195,7 @@ impl<R> ManagedComponent<R> {
                 Ok(roots) => Some(roots),
                 Err(error) => return self.fail_startup(error),
             };
-            let result = launch_entry(entry, &child_resource, |startup| {
+            let result = launch_entry(entry, Some(name), &child_resource, |startup| {
                 let component_roots = roots
                     .as_mut()
                     .expect("startup roots are present before delivery");

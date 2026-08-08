@@ -4,6 +4,10 @@
 /// пространства процесса).
 pub const USER_VA_END: u64 = 0x0001_0000_0000_0000;
 
+/// Гранула трансляции: размер страницы, которой ядро выдает, маппит и снимает память.
+/// Байтовые размеры в memory-syscalls кратны ей.
+pub const PAGE_SIZE: usize = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct MemoryAccess(u64);

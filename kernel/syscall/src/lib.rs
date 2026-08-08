@@ -20,6 +20,11 @@ mod runtime;
 mod thread;
 mod user_io;
 
+const _: () = assert!(
+    ::memory::PAGE_SIZE.get() == ::syscall::PAGE_SIZE,
+    "syscall ABI page size disagrees with the kernel translation granule"
+);
+
 pub use bridge::{Origin, SyscallFrame, dispatch};
 pub use numbers::SyscallOp;
 pub use runtime::{CurrentIpcContext, SyscallRuntime, install_runtime};

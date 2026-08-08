@@ -11,7 +11,7 @@ use crate::{
     fixture_protocol::{OP_MAP_CHECK, REPLY_OK},
 };
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0x5EED_F00D_C0DE_AB1E;
 
 #[kernel_test]

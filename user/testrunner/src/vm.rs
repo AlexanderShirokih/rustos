@@ -10,7 +10,7 @@
 use kernel_tests::kernel_test;
 use runtime::{Resource, UserMemFlags};
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0xC0DE_F00D_DEAD_BEEF;
 
 /// `MemoryAllocate` выдаёт writable-страницу, `MemoryRemap` снимает с неё

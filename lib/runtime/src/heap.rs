@@ -6,35 +6,13 @@
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr::{self, NonNull},
-    sync::atomic::{AtomicU32, Ordering},
 };
 
-use syscall::{Handle, UserMemFlags};
+use molecular_rt::metering_handle;
+use syscall::{PAGE_SIZE, UserMemFlags};
 use talc::{OomHandler, Span, Talc};
 
-use crate::{Mutex, handle_close, memory_allocate, memory_free, process_resource_self};
-
-static METERING_HANDLE: AtomicU32 = AtomicU32::new(0);
-
-fn metering_handle() -> Option<Handle> {
-    let cached = METERING_HANDLE.load(Ordering::Acquire);
-    if cached != 0 {
-        return Handle::new(cached);
-    }
-
-    // `process_resource_self` выдаёт свежий handle на каждый вызов: кэшируется первый.
-    let raw = process_resource_self().ok()?.raw();
-    match METERING_HANDLE.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => Handle::new(raw),
-        Err(existing) => {
-            // Проиграли гонку: закрываем свежевыданный дубль, возвращаем победителя.
-            let _ = handle_close(Handle::new(raw)?);
-            Handle::new(existing)
-        }
-    }
-}
-
-const PAGE_SIZE: usize = 4096;
+use crate::{Mutex, memory_allocate, memory_free};
 
 const PASSTHROUGH_THRESHOLD: usize = 64 * 1024;
 

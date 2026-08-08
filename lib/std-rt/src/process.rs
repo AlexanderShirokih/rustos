@@ -1,0 +1,32 @@
+//! Завершение процесса и его метеринг-ресурс.
+
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use syscall::Handle;
+
+use crate::svc;
+
+static METERING: AtomicU32 = AtomicU32::new(0);
+
+/// Завершает процесс со всеми его потоками. Не возвращается.
+pub fn exit(code: i32) -> ! {
+    svc::process_exit(u64::from(code.cast_unsigned()))
+}
+
+/// Кэшированный handle метеринг-ресурса процесса.
+pub fn metering_handle() -> Option<Handle> {
+    if let Some(cached) = Handle::new(METERING.load(Ordering::Acquire)) {
+        return Some(cached);
+    }
+
+    // `ProcessResourceSelf` ставит свежий handle на каждый вызов: кэш держит первый,
+    // проигравшая гонку сторона закрывает свой дубль.
+    let fresh = svc::process_resource_self().ok()?;
+    match METERING.compare_exchange(0, fresh.raw(), Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Some(fresh),
+        Err(existing) => {
+            svc::handle_close(fresh);
+            Handle::new(existing)
+        }
+    }
+}

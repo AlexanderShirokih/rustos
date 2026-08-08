@@ -110,25 +110,26 @@ path = "/boot/rootkeeper"
 boot = true
 
 [[files]]
-path = "/data/sample"
+path = "/boot/rootkeeper/sample"
 source = "user/rootkeeper/sample.txt"
 
 [[files]]
-path = "/data/assets"
+path = "/boot/rootkeeper/assets"
 source = "user/rootkeeper/assets/**/*.txt"
 ```
 
 `[[programs]]` и `[[files]]` различаются только тем, откуда инструмент берёт
-байты: из собранного ELF пакета либо с диска. `boot = true` стоит ровно у одной
-программы: её запись инструмент и проставляет в `boot_index` заголовка образа,
-соглашения об имени пути нет.
+байты: из собранного ELF пакета либо с диска. Запись файла лежит в каталоге своей
+программы: записи вне каталогов образ не принимает. `boot = true` стоит ровно у
+одной программы: её запись инструмент и проставляет в `boot_index` заголовка
+образа, соглашения об имени пути нет.
 
 Секция `[plan]` называет host-side описание загрузочной композиции, а повторяемая
 `[[mount_tables]]` — описания деревьев имён файловой подсистемы, которые читает
 маршрутизатор. Инструмент проверяет их, компилирует и кладёт в образ обычными
 записями. Ключ `source` — путь TOML от корня
 проекта, `path` — путь записи в образе; у плана он необязателен и по умолчанию равен
-`/boot/rootkeeper.plan`.
+`/boot/rootkeeper/plan`.
 
 ```toml
 [plan]
@@ -136,7 +137,7 @@ source = "user/rootkeeper/system.toml"
 
 [[mount_tables]]
 source = "user/rootkeeper/namespace.toml"
-path = "/boot/namespace.mounts"
+path = "/boot/namespace-router/mounts"
 ```
 
 Манифест отвечает на вопрос, что лежит в образе, план — на вопрос, что и с какими
@@ -210,7 +211,7 @@ pub extern "C" fn _start(startup: Handle) -> ! { /* ... */ }
 кадра прикладного типизированного IPC-контракта:
 
 ```rust
-let process = launch_entry(&program, &resource, |startup| -> Result<()> {
+let process = launch_entry(&program, None, &resource, |startup| -> Result<()> {
     DriverArgsClient::new(PortTransport::client(startup.handle()))
         .provide(device, service)?;
     Ok(())
@@ -240,6 +241,12 @@ IPC-контракта. Если тот же порт после стартов�
 ([port.md](port.md#уход-значка)). Значка без множества отправителей аргумент не
 принимает: он типизирован `NonZeroU64`, а «без значка» выражается отсутствием
 значения.
+
+Процесс называет второй аргумент, а `None` берёт имя самой записи. Запись с
+программой лежит в каталоге компонента под именем `program`, поэтому вызывающий,
+который поднимает компонент, берёт имя каталога: его даёт `component_name`. Имя
+экземпляра композиции приходит планом
+([rootkeeper.md](rootkeeper.md#план-загрузки)).
 
 `load_entry` остаётся низкоуровневым путём для программ с произвольной начальной
 capability.

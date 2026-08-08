@@ -17,7 +17,7 @@ use runtime::{
     Result, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr, port_call, port_send, spawn,
 };
 use syscall::{Handle, Rights, SyscallError};
-use userland_image::decode;
+use userland_image::{component_name, decode};
 use userland_loader::load_entry;
 
 use crate::{
@@ -84,7 +84,8 @@ fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
         .program()
         .expect("entry record carries a program");
     let resource = Resource::self_resource().expect("self metering resource");
-    load_entry(&program, &resource, start).expect("spawn entry from image")
+    load_entry(&program, Some(component_name(path)), &resource, start)
+        .expect("spawn entry from image")
 }
 
 static REFUSED_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);

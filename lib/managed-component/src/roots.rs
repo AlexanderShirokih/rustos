@@ -122,16 +122,19 @@ impl ComponentRoots {
 }
 
 /// Поднимает incarnation компонента: свежие порты, производная лог-сессия,
-/// конечный срок стартового рандеву и слоты плана.
+/// конечный срок стартового рандеву и слоты плана. `name` называет процесс
+/// экземпляра.
 pub fn launch_component<'a, V: EntryView<'a>>(
     component: &mut ManagedComponent<ComponentRoots>,
     program: &V,
+    name: &str,
     log: &OwnedHandle,
     startup_timeout: Timeout,
     slots: ComponentSlots,
 ) -> Result<(), ManagedStartupError> {
     component.launch(
         program,
+        name,
         startup_timeout,
         ComponentRoots::create,
         move |transport, roots| roots.send_startup(transport, log, slots),

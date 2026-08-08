@@ -33,14 +33,19 @@ const PROBE_BADGE: NonZeroU64 = NonZeroU64::new(9).expect("badge is non-zero");
 const RAM_MOUNT: &str = "/tmp";
 
 const ROUTER_PROGRAM: &str = "/boot/namespace-router";
+const ROUTER_NAME: &str = "namespace-router";
+
+const INSTANCE_NAMES: [&str; 2] = ["names-boot", "names-spare"];
 const ROUTER_MEMORY_PAGES: u64 = 2_048;
 const ROUTER_STARTUP_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const RTC_PROGRAM: &str = "/boot/driver-pl031";
+const RTC_NAME: &str = "driver-pl031";
 const RTC_MEMORY_PAGES: u64 = 256;
 const RTC_COMPATIBLE: &str = "arm,pl031";
 
 const CONSUMER_PROGRAM: &str = "/boot/namespace-consumer-fixture";
+const CONSUMER_NAME: &str = "namespace-consumer-fixture";
 const CONSUMER_MEMORY_PAGES: u64 = 256;
 
 const BOOT_MOUNTS_RECORD: &str = "/boot/namespace-router/mounts";
@@ -108,11 +113,12 @@ pub(crate) fn router_slots(image: &MemoryRegion, entries: &DecodedImage<'_>) -> 
     slots
 }
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 
 fn router(on_exhausted: OnExhausted, launches: u32) -> ComponentSpec<'static> {
     ComponentSpec {
         executable: ROUTER_PROGRAM,
+        name: ROUTER_NAME,
         slots: ROUTER_SLOTS,
         requires: &[],
         after: &[],
@@ -143,6 +149,7 @@ fn rtc_device<'a>(compatible: &'a [&'a str]) -> [SlotSpec<'a>; 2] {
 fn rtc<'a>(slots: &'a [SlotSpec<'a>]) -> ComponentSpec<'a> {
     ComponentSpec {
         executable: RTC_PROGRAM,
+        name: RTC_NAME,
         slots,
         requires: &[],
         after: &[],
@@ -288,6 +295,53 @@ fn mount_crash_filesystem(system: &RootSystem<'_>) {
         .mount(path(CRASH_MOUNT), path(CRASH_FILESYSTEM))
         .expect("mount call");
     kernel_tests::kassert!(mounted.is_ok());
+}
+
+#[kernel_test]
+fn two_instances_of_one_program_run_under_their_own_names() {
+    let image = image();
+    let bytes = encode_plan(&[
+        ComponentSpec {
+            name: INSTANCE_NAMES[0],
+            ..router(OnExhausted::Halt, 1)
+        },
+        ComponentSpec {
+            name: INSTANCE_NAMES[1],
+            ..router(OnExhausted::Halt, 1)
+        },
+    ])
+    .expect("scenario plan encodes");
+    let decoded = plan(&bytes);
+    // Имена источников журнала выводит сам rootkeeper из записей плана: строка
+    // приходит под именем экземпляра, а не под путём его программы.
+    crate::log_relay::start_component_relay(decoded.components().map(|component| component.name()));
+
+    let mut system = RootSystem::bring_up(
+        &image,
+        decoded,
+        crate::bootstrap_handle(),
+        crate::log_relay::component_scenario_session,
+    )
+    .expect("composition started");
+
+    kernel_tests::kassert!(alive(&system, 0));
+    kernel_tests::kassert!(alive(&system, 1));
+    let sources = crate::log_relay::await_component_sources(&INSTANCE_NAMES);
+    for name in INSTANCE_NAMES {
+        kernel_tests::kassert!(
+            sources
+                .iter()
+                .any(|source| source.split('/').next() == Some(name))
+        );
+    }
+    kernel_tests::kassert!(
+        !sources
+            .iter()
+            .any(|source| source.split('/').next() == Some(ROUTER_NAME))
+    );
+
+    system.shutdown();
+    crate::log_relay::stop_component_relay();
 }
 
 #[kernel_test]
@@ -551,6 +605,7 @@ fn a_service_slot_carries_the_provider_session_and_stops_before_it() {
     let bytes = encode_plan(&[
         ComponentSpec {
             executable: CONSUMER_PROGRAM,
+            name: CONSUMER_NAME,
             slots: &[SlotSpec::Service { provider: 1 }],
             requires: &[1],
             after: &[],

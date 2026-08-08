@@ -1,4 +1,7 @@
-//! SVC-обёртки syscall-ABI для userspace кода.
+//! Рантайм userspace-программы: объекты ядра, транспорты IPC, куча и синхронизация.
+//!
+//! Базовый слой — svc-обёртки, futex и монотонные часы — живёт в `molecular-rt` и
+//! реэкспортируется отсюда: тот же код обслуживает стандартную библиотеку Rust.
 
 #![no_std]
 #![allow(unsafe_code)]
@@ -6,9 +9,7 @@
 
 extern crate alloc;
 
-mod clock;
 mod error;
-mod futex;
 mod handle;
 mod heap;
 mod ipc_buffer;
@@ -17,18 +18,17 @@ mod object;
 mod port_transport;
 mod ring_transport;
 mod startup;
-mod svc;
 mod sync;
 
-pub use clock::Instant;
 pub use error::{Error, Result};
-pub use futex::{
-    Futex, Primitive, SmallFutex, SmallPrimitive, futex_bucket, futex_wait, futex_wait_interleaved,
-    futex_wait_without_slot, futex_wake, futex_wake_all,
-};
 pub use handle::{BorrowedHandle, OwnedHandle};
 pub use ipc_buffer::ipc_buffer_ptr;
 pub use log::{install_log, log_fmt, log_line};
+pub(crate) use molecular_rt as svc;
+pub use molecular_rt::{
+    Futex, Instant, Primitive, SmallFutex, SmallPrimitive, futex_bucket, futex_wait,
+    futex_wait_interleaved, futex_wait_without_slot, futex_wake, futex_wake_all,
+};
 pub use object::{
     AnonymousMapping, IrqControl, IrqLine, JoinHandle, Mapping, MemoryRegion, Port, Priority,
     Process, ReadOnlyMapping, RegionInfo, RegionKind, Reply, Resource, ServicePort, Signal, Thread,

@@ -176,10 +176,11 @@ fn confirm_created_process_reaped() -> Result<()> {
 /// сроком. Отказ этого пути заменяет исходную ошибку callback.
 pub fn launch_entry<'a, V: EntryView<'a>, E: From<Error>>(
     entry: &V,
+    name: Option<&str>,
     resource: &Resource,
     startup: impl FnOnce(&Port) -> core::result::Result<(), E>,
 ) -> core::result::Result<Process, E> {
-    prepare_launch(entry, resource, None)
+    prepare_launch(entry, name, resource, None)
         .map_err(E::from)?
         .finish(startup)
 }
@@ -192,22 +193,24 @@ pub fn launch_entry<'a, V: EntryView<'a>, E: From<Error>>(
 /// Ошибка callback проходит тот же cleanup, что и у [`launch_entry`].
 pub fn launch_entry_retained<'a, V: EntryView<'a>, E: From<Error>>(
     entry: &V,
+    name: Option<&str>,
     resource: &Resource,
     lease: NonZeroU64,
     startup: impl FnOnce(&Port) -> core::result::Result<(), E>,
 ) -> core::result::Result<InitializedProcess, E> {
-    prepare_launch(entry, resource, Some(lease))
+    prepare_launch(entry, name, resource, Some(lease))
         .map_err(E::from)?
         .retain(startup)
 }
 
 fn prepare_launch<'a, V: EntryView<'a>>(
     entry: &V,
+    name: Option<&str>,
     resource: &Resource,
     badge: Option<NonZeroU64>,
 ) -> Result<PendingLaunch> {
     let startup = Port::create_service(badge)?;
-    let process = load_entry(entry, resource, startup.server)?;
+    let process = load_entry(entry, name, resource, startup.server)?;
     Ok(PendingLaunch {
         process: Some(process),
         startup: Some(startup.client),
@@ -217,10 +220,12 @@ fn prepare_launch<'a, V: EntryView<'a>>(
 /// Загружает `entry` в новый процесс и стартует его первый поток.
 ///
 /// Сегменты копируются в свежие приватные регионы. `resource` оплачивает их и
-/// становится метеринг-ресурсом потомка. `initial` — начальная capability.
-/// `Ok` означает, что хэндл передан потомку.
+/// становится метеринг-ресурсом потомка. `name` называет процесс, а без имени
+/// он зовётся по записи программы. `initial` — начальная capability. `Ok`
+/// означает, что хэндл передан потомку.
 pub fn load_entry<'a, E: EntryView<'a>>(
     entry: &E,
+    name: Option<&str>,
     resource: &Resource,
     initial: OwnedHandle,
 ) -> Result<Process> {
@@ -293,7 +298,8 @@ pub fn load_entry<'a, E: EntryView<'a>>(
         user_vm_size: window.end - window.start,
     };
 
-    let pending = PendingProcess::new(Process::create(entry_name(entry.path()))?);
+    let name = name.unwrap_or_else(|| entry_name(entry.path()));
+    let pending = PendingProcess::new(Process::create(name)?);
     if let Err(error) = pending.process().load_image(&encode_image_desc(&desc)) {
         return pending.fail(error);
     }

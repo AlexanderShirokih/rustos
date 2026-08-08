@@ -12,7 +12,7 @@ use userland_loader::load_entry;
 
 use crate::fixture::{Fixture, JOIN_TIMEOUT};
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const CHILD_CODE_VA: u64 = 0x2000_0000;
 const CHILD_WAIT_TIMEOUT: Timeout = Timeout::from_millis(500);
 
@@ -56,7 +56,7 @@ fn load_synthetic_child(resource: &Resource, path: &str, code: &[u8]) -> Process
         segments: &segments,
     };
     let bootstrap = Signal::create().expect("signal create").into_handle();
-    load_entry(&entry, resource, bootstrap).expect("load_entry spawns child")
+    load_entry(&entry, None, resource, bootstrap).expect("load_entry spawns child")
 }
 
 #[kernel_test]

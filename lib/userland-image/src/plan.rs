@@ -1,4 +1,5 @@
 use syscall::Timeout;
+use userland::entry_name;
 
 /// Путь записи образа, из которой rootkeeper читает план загрузочной композиции.
 pub const BOOT_PLAN_PATH: &str = "/boot/rootkeeper/plan";
@@ -6,8 +7,22 @@ pub const BOOT_PLAN_PATH: &str = "/boot/rootkeeper/plan";
 /// Имя записи с программой в каталоге компонента.
 pub const COMPONENT_PROGRAM_NAME: &str = "program";
 
+/// Имя компонента, которому принадлежит запись: каталог записи с программой.
+/// Запись вне каталога компонента названа собственным именем.
+#[must_use]
+pub fn component_name(record: &str) -> &str {
+    match record.rsplit_once('/') {
+        Some((directory, name))
+            if name == COMPONENT_PROGRAM_NAME && !entry_name(directory).is_empty() =>
+        {
+            entry_name(directory)
+        }
+        _ => entry_name(record),
+    }
+}
+
 pub const BOOT_PLAN_MAGIC: [u8; 8] = *b"RKPLAN\0\0";
-pub const BOOT_PLAN_VERSION: u16 = 1;
+pub const BOOT_PLAN_VERSION: u16 = 2;
 
 pub(crate) const PLAN_HEADER_SIZE: usize = 16;
 pub(crate) const COMPONENT_HEADER_SIZE: usize = 40;
@@ -100,6 +115,7 @@ pub enum SlotSource<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanComponent<'a> {
     executable: &'a str,
+    name: &'a str,
     slots: &'a [u8],
     slot_count: u16,
     requires: &'a [u8],
@@ -165,20 +181,18 @@ pub fn decode_plan(bytes: &[u8]) -> Result<BootPlan<'_>, PlanDecodeError> {
 }
 
 impl<'a> PlanComponent<'a> {
-    /// Запись образа с программой компонента. Она же называет компонент:
-    /// композиция не поднимает одну программу дважды.
+    /// Запись образа с программой компонента. Одну программу композиция
+    /// поднимает несколькими экземплярами.
     #[must_use]
     pub const fn executable(&self) -> &'a str {
         self.executable
     }
 
-    /// Имя компонента в журнале композиции: последний компонент пути программы.
+    /// Имя экземпляра: им композиция называет компонент, и под ним его
+    /// процесс и строки журнала.
     #[must_use]
-    pub fn name(&self) -> &'a str {
-        match self.executable.rsplit_once('/') {
-            Some((_, name)) => name,
-            None => self.executable,
-        }
+    pub const fn name(&self) -> &'a str {
+        self.name
     }
 
     /// Число слотов capability компонента.
@@ -365,9 +379,7 @@ fn parse_component(
         return Err(PlanDecodeError::InvalidLayout("reserved"));
     }
     let executable_len = usize::from(read_u16(header, 6)?);
-    if read_u16(header, 8)? != 0 {
-        return Err(PlanDecodeError::InvalidLayout("reserved"));
-    }
+    let name_len = usize::from(read_u16(header, 8)?);
     let slot_count = read_u16(header, 10)?;
     let requires_count = read_u16(header, 12)?;
     let after_count = read_u16(header, 14)?;
@@ -381,7 +393,8 @@ fn parse_component(
     }
 
     let cursor = at + COMPONENT_HEADER_SIZE;
-    let (executable, mut cursor) = parse_str(bytes, cursor, executable_len, "executable")?;
+    let (executable, cursor) = parse_str(bytes, cursor, executable_len, "executable")?;
+    let (name, mut cursor) = parse_str(bytes, cursor, name_len, "name")?;
 
     let slots_at = cursor;
     for _ in 0..slot_count {
@@ -399,6 +412,7 @@ fn parse_component(
     Ok(ParsedComponent {
         component: PlanComponent {
             executable,
+            name,
             slots,
             slot_count,
             requires,
@@ -556,6 +570,7 @@ mod tests {
     fn router() -> ComponentSpec<'static> {
         ComponentSpec {
             executable: "/boot/namespace-router",
+            name: "router-a",
             slots: &[SlotSpec::Image],
             requires: &[],
             after: &[],
@@ -569,6 +584,7 @@ mod tests {
     fn rtc() -> ComponentSpec<'static> {
         ComponentSpec {
             executable: "/boot/driver-pl031",
+            name: "clock",
             slots: &[
                 SlotSpec::Irq(DeviceSpec {
                     compatible: RTC_SELECTORS,
@@ -603,7 +619,7 @@ mod tests {
 
         let router = plan.component(0).expect("first component");
         assert_eq!(router.executable(), "/boot/namespace-router");
-        assert_eq!(router.name(), "namespace-router");
+        assert_eq!(router.name(), "router-a");
         assert_eq!(router.memory_pages(), 2_048);
         assert_eq!(router.startup_timeout(), Timeout::from_millis(2_000));
         assert_eq!(router.launches(), 3);
@@ -612,7 +628,7 @@ mod tests {
         assert_eq!(router.requires().count(), 0);
 
         let rtc = plan.component(1).expect("second component");
-        assert_eq!(rtc.name(), "driver-pl031");
+        assert_eq!(rtc.name(), "clock");
         assert_eq!(rtc.on_exhausted(), OnExhausted::Detach);
         assert_eq!(rtc.slot_count(), 3);
         let slots: Vec<SlotSource<'_>> = rtc.slots().collect();
@@ -632,6 +648,34 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_keeps_two_instances_of_one_program_apart() {
+        let second = ComponentSpec {
+            name: "router-b",
+            ..router()
+        };
+        let bytes = encode_plan(&[router(), second]).expect("encode plan");
+
+        let plan = decode_plan(&bytes).expect("decode plan");
+        let first = plan.component(0).expect("first instance");
+        let second = plan.component(1).expect("second instance");
+        assert_eq!(first.executable(), second.executable());
+        assert_eq!(first.name(), "router-a");
+        assert_eq!(second.name(), "router-b");
+    }
+
+    #[test]
+    fn a_program_record_is_named_by_the_directory_that_holds_it() {
+        assert_eq!(
+            component_name("/boot/namespace-router/program"),
+            "namespace-router"
+        );
+        assert_eq!(component_name("/boot/namespace-router/mounts"), "mounts");
+        assert_eq!(component_name("/boot/rootkeeper"), "rootkeeper");
+        assert_eq!(component_name("/program"), "program");
+        assert_eq!(component_name("program"), "program");
+    }
+
+    #[test]
     fn decode_rejects_foreign_magic() {
         let mut bytes = plan_bytes();
         bytes[0] = b'X';
@@ -644,10 +688,10 @@ mod tests {
     #[test]
     fn decode_rejects_another_version() {
         let mut bytes = plan_bytes();
-        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&3u16.to_le_bytes());
         assert_eq!(
             decode_plan(&bytes).expect_err("version must match"),
-            PlanDecodeError::InvalidVersion(2)
+            PlanDecodeError::InvalidVersion(3)
         );
     }
 
@@ -766,7 +810,7 @@ mod tests {
 
     fn first_slot_offset(component: &ComponentSpec<'_>) -> usize {
         // Слоты идут сразу за строками записи компонента.
-        PLAN_HEADER_SIZE + COMPONENT_HEADER_SIZE + component.executable.len()
+        PLAN_HEADER_SIZE + COMPONENT_HEADER_SIZE + component.executable.len() + component.name.len()
     }
 
     #[test]
@@ -810,12 +854,21 @@ mod tests {
             PlanEncodeError::UnboundedStartupTimeout
         );
 
-        let nameless = ComponentSpec {
+        let no_executable = ComponentSpec {
             executable: "",
             ..router()
         };
         assert_eq!(
-            encode_plan(&[nameless]).expect_err("executable must be non-empty"),
+            encode_plan(&[no_executable]).expect_err("executable must be non-empty"),
+            PlanEncodeError::EmptyString
+        );
+
+        let nameless = ComponentSpec {
+            name: "",
+            ..router()
+        };
+        assert_eq!(
+            encode_plan(&[nameless]).expect_err("instance name must be non-empty"),
             PlanEncodeError::EmptyString
         );
 

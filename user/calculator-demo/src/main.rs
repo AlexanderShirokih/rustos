@@ -55,7 +55,8 @@ fn run(root: Handle) -> Result<()> {
         .program()?;
 
     // Спавним процесс с нашей программой. Связвываем его с нашим metering-resource и capability.
-    let calculator_process = load_entry(&calculator_program, &resource, calculator_port.server)?;
+    let calculator_process =
+        load_entry(&calculator_program, None, &resource, calculator_port.server)?;
 
     let calculator_client = calculator_port.client;
 

@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use component_abi::{COMPONENT_SLOT_MAX, SlotKind};
 use serde::Deserialize;
-use syscall::{HANDLE_TABLE_CAPACITY, MAX_RESOURCE_DEPTH, Timeout, WAIT_MANY_MAX_COUNT};
+use syscall::{
+    HANDLE_TABLE_CAPACITY, MAX_PROCESS_NAME_LEN, MAX_RESOURCE_DEPTH, Timeout, WAIT_MANY_MAX_COUNT,
+};
+use userland::entry_name;
 use userland_image::{ComponentSpec, DeviceSpec, OnExhausted, SlotSpec, encode_plan};
 
 use crate::{
@@ -45,6 +48,8 @@ struct SystemManifest {
 #[serde(deny_unknown_fields)]
 struct ComponentEntry {
     executable: String,
+    #[serde(default)]
+    name: Option<String>,
     memory_limit: String,
     #[serde(default)]
     startup_timeout: Option<String>,
@@ -75,13 +80,9 @@ pub(crate) fn compile_boot_plan(
     records: &[&str],
 ) -> Result<Vec<u8>> {
     let manifest = parse_system_manifest(source)?;
-    let executables: Vec<&str> = manifest
-        .components
-        .iter()
-        .map(|component| component.executable.as_str())
-        .collect();
+    let names = resolve_names(&manifest)?;
     let declarations = resolve_declarations(&manifest, programs)?;
-    validate_composition(&manifest, &declarations)?;
+    validate_composition(&manifest, &names, &declarations)?;
 
     // Строки совместимости переживают слоты, которые на них ссылаются: слот
     // плана несёт срез объявления, а не копию.
@@ -114,19 +115,18 @@ pub(crate) fn compile_boot_plan(
                 .collect()
         })
         .collect();
-    let slots = manifest
-        .components
+    let slots = declarations
         .iter()
-        .zip(&declarations)
         .zip(selectors.iter().zip(&files))
-        .map(|((component, declared), (selectors, files))| {
+        .zip(&names)
+        .map(|((declared, (selectors, files)), name)| {
             compile_slots(
-                component,
+                name,
                 declared,
                 selectors,
                 files,
                 &declarations,
-                &executables,
+                &names,
                 records,
             )
         })
@@ -135,14 +135,16 @@ pub(crate) fn compile_boot_plan(
     let after = manifest
         .components
         .iter()
-        .map(|component| resolve_after(component, &executables))
+        .zip(&names)
+        .map(|(component, name)| resolve_after(component, name, &names))
         .collect::<Result<Vec<_>>>()?;
-    validate_acyclic(&requires, &after, &executables)?;
+    validate_acyclic(&requires, &after, &names)?;
 
     let policies = manifest
         .components
         .iter()
-        .map(compile_policy)
+        .zip(&names)
+        .map(|(component, name)| compile_policy(component, name))
         .collect::<Result<Vec<_>>>()?;
     let components: Vec<ComponentSpec<'_>> = manifest
         .components
@@ -150,6 +152,7 @@ pub(crate) fn compile_boot_plan(
         .enumerate()
         .map(|(index, component)| ComponentSpec {
             executable: &component.executable,
+            name: names[index],
             slots: &slots[index],
             requires: &requires[index],
             after: &after[index],
@@ -160,6 +163,44 @@ pub(crate) fn compile_boot_plan(
         })
         .collect();
     encode_plan(&components).map_err(|err| anyhow!("failed to serialize boot plan: {err:?}"))
+}
+
+fn resolve_names(manifest: &SystemManifest) -> Result<Vec<&str>> {
+    let names: Vec<&str> = manifest
+        .components
+        .iter()
+        .map(|component| match &component.name {
+            Some(name) => name.as_str(),
+            None => entry_name(&component.executable),
+        })
+        .collect();
+    for (index, name) in names.iter().enumerate() {
+        validate_name(name)?;
+        ensure!(
+            !names[..index].contains(name),
+            "boot plan names component '{name}' more than once"
+        );
+    }
+    Ok(names)
+}
+
+fn validate_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty(),
+        "boot plan component name must not be empty"
+    );
+    ensure!(
+        name.is_ascii() && !name.contains('/'),
+        "boot plan component name '{name}' must be ASCII without '/'"
+    );
+    // Именем экземпляра зовётся его процесс: имя длиннее ёмкости `ProcessCreate`
+    // не поднялось бы на устройстве.
+    ensure!(
+        name.len() <= MAX_PROCESS_NAME_LEN,
+        "boot plan component name '{name}' is longer than \
+         {MAX_PROCESS_NAME_LEN} bytes, which a process name holds"
+    );
+    Ok(())
 }
 
 fn parse_system_manifest(source: &str) -> Result<SystemManifest> {
@@ -204,18 +245,16 @@ fn resolve_declarations<'a>(
         .collect()
 }
 
-fn compile_policy(component: &ComponentEntry) -> Result<Policy> {
-    let executable = &component.executable;
+fn compile_policy(component: &ComponentEntry, name: &str) -> Result<Policy> {
     let memory_pages = parse_memory_pages(&component.memory_limit)
-        .with_context(|| format!("boot plan component '{executable}' sets 'memory_limit'"))?;
+        .with_context(|| format!("boot plan component '{name}' sets 'memory_limit'"))?;
     let startup_timeout = match &component.startup_timeout {
-        Some(text) => parse_duration(text).with_context(|| {
-            format!("boot plan component '{executable}' sets 'startup_timeout'")
-        })?,
+        Some(text) => parse_duration(text)
+            .with_context(|| format!("boot plan component '{name}' sets 'startup_timeout'"))?,
         None => DEFAULT_STARTUP_TIMEOUT,
     };
     let policy = parse_failure_policy(&component.on_failure)
-        .with_context(|| format!("boot plan component '{executable}' sets 'on_failure'"))?;
+        .with_context(|| format!("boot plan component '{name}' sets 'on_failure'"))?;
     Ok(Policy {
         memory_pages,
         startup_timeout,
@@ -262,41 +301,31 @@ fn parse_restarts(text: &str) -> Result<u32> {
 
 fn validate_composition(
     manifest: &SystemManifest,
+    names: &[&str],
     declarations: &[&ProgramManifest],
 ) -> Result<()> {
-    for (index, component) in manifest.components.iter().enumerate() {
-        for earlier in &manifest.components[..index] {
-            ensure!(
-                earlier.executable != component.executable,
-                "boot plan names executable '{}' more than once; \
-                 a composition of several instances needs component names",
-                component.executable
-            );
-        }
-    }
-    for (component, declared) in manifest.components.iter().zip(declarations) {
-        validate_component(component, declared)?;
+    for (name, declared) in names.iter().zip(declarations) {
+        validate_component(name, declared)?;
     }
     validate_supervisor_limits(manifest, declarations)
 }
 
-fn validate_component(component: &ComponentEntry, declared: &ProgramManifest) -> Result<()> {
-    let executable = &component.executable;
+fn validate_component(name: &str, declared: &ProgramManifest) -> Result<()> {
     ensure!(
         declared.slots.len() <= COMPONENT_SLOT_MAX,
-        "boot plan component '{executable}' declares {} slots; \
+        "boot plan component '{name}' declares {} slots; \
          the startup transaction carries {COMPONENT_SLOT_MAX}",
         declared.slots.len()
     );
-    validate_resource_depth(executable, COMPONENT_RESOURCE_LEVELS)
+    validate_resource_depth(name, COMPONENT_RESOURCE_LEVELS)
 }
 
-fn validate_resource_depth(executable: &str, levels: u16) -> Result<()> {
+fn validate_resource_depth(name: &str, levels: u16) -> Result<()> {
     // Дерево метеринга компонента укладывается в потолок глубины split: резерв
     // компонента, ресурс incarnation и ресурс поднятого ею потомка.
     ensure!(
         BOOT_COMPOSITION_DEPTH + levels <= MAX_RESOURCE_DEPTH,
-        "boot plan component '{executable}' needs {levels} resource levels \
+        "boot plan component '{name}' needs {levels} resource levels \
          under depth {BOOT_COMPOSITION_DEPTH}; the ceiling is {MAX_RESOURCE_DEPTH}"
     );
     Ok(())
@@ -335,12 +364,12 @@ fn validate_supervisor_limits(
 }
 
 fn compile_slots<'a>(
-    component: &'a ComponentEntry,
+    name: &'a str,
     declared: &ProgramManifest,
     selectors: &'a [Vec<&'a str>],
     files: &'a [Vec<String>],
     declarations: &[&ProgramManifest],
-    executables: &[&str],
+    names: &[&str],
     records: &[&str],
 ) -> Result<Vec<SlotSpec<'a>>> {
     declared
@@ -348,11 +377,11 @@ fn compile_slots<'a>(
         .iter()
         .zip(selectors)
         .zip(files)
-        .map(|((slot, names), file)| {
+        .map(|((slot, compatible), file)| {
             let device = DeviceSpec {
-                compatible: names,
-                // Экземпляр устройства выбирает композиция, а различать их
-                // нечем, пока у компонентов нет имён: берётся первый.
+                compatible,
+                // Экземпляр среди совместимых устройств всегда нулевой:
+                // назвать второй композиции нечем.
                 instance: 0,
                 resource: slot.resource,
             };
@@ -361,28 +390,23 @@ fn compile_slots<'a>(
                 SlotKind::Irq => Ok(SlotSpec::Irq(device)),
                 SlotKind::Mmio => Ok(SlotSpec::Mmio(device)),
                 SlotKind::Service => {
-                    let protocol = names.first().copied().with_context(|| {
+                    let protocol = compatible.first().copied().with_context(|| {
                         format!(
-                            "boot plan component '{}' declares a service slot without a protocol",
-                            component.executable
+                            "boot plan component '{name}' declares a service slot without a protocol"
                         )
                     })?;
                     Ok(SlotSpec::Service {
-                        provider: find_provider(component, protocol, declarations, executables)?,
+                        provider: find_provider(name, protocol, declarations, names)?,
                     })
                 }
                 SlotKind::File => {
                     let path = file.first().map(String::as_str).with_context(|| {
-                        format!(
-                            "boot plan component '{}' declares a file slot without a name",
-                            component.executable
-                        )
+                        format!("boot plan component '{name}' declares a file slot without a name")
                     })?;
                     ensure!(
                         records.contains(&path),
-                        "boot plan component '{}' takes file '{path}', \
-                         which its directory does not contain",
-                        component.executable
+                        "boot plan component '{name}' takes file '{path}', \
+                         which its directory does not contain"
                     );
                     Ok(SlotSpec::File { path })
                 }
@@ -392,12 +416,11 @@ fn compile_slots<'a>(
 }
 
 fn find_provider(
-    component: &ComponentEntry,
+    name: &str,
     protocol: &str,
     declarations: &[&ProgramManifest],
-    executables: &[&str],
+    names: &[&str],
 ) -> Result<u16> {
-    let executable = &component.executable;
     let exporters: Vec<usize> = declarations
         .iter()
         .enumerate()
@@ -407,22 +430,21 @@ fn find_provider(
     let [index] = exporters[..] else {
         if exporters.is_empty() {
             bail!(
-                "boot plan component '{executable}' imports protocol '{protocol}', \
+                "boot plan component '{name}' imports protocol '{protocol}', \
                  which no component of the composition exports"
             );
         }
-        let names: Vec<&str> = exporters.iter().map(|index| executables[*index]).collect();
+        let exporters: Vec<&str> = exporters.iter().map(|index| names[*index]).collect();
         bail!(
-            "boot plan component '{executable}' imports protocol '{protocol}', \
-             which {} components export: {}; \
-             a choice between them needs component names",
+            "boot plan component '{name}' imports protocol '{protocol}', \
+             which {} components export: {}",
             exporters.len(),
-            names.join(", ")
+            exporters.join(", ")
         );
     };
     ensure!(
-        executables[index] != executable,
-        "boot plan component '{executable}' imports the protocol it exports itself"
+        names[index] != name,
+        "boot plan component '{name}' imports the protocol it exports itself"
     );
     u16::try_from(index).context("component index fits the plan")
 }
@@ -442,22 +464,21 @@ fn service_edges(slots: &[SlotSpec<'_>]) -> Vec<u16> {
     edges
 }
 
-fn resolve_after(component: &ComponentEntry, executables: &[&str]) -> Result<Vec<u16>> {
-    let executable = &component.executable;
+fn resolve_after(component: &ComponentEntry, name: &str, names: &[&str]) -> Result<Vec<u16>> {
     component
         .after
         .iter()
         .map(|edge| {
             ensure!(
-                edge != executable,
-                "boot plan component '{executable}' names itself in 'after'"
+                edge != name,
+                "boot plan component '{name}' names itself in 'after'"
             );
-            let index = executables
+            let index = names
                 .iter()
                 .position(|known| known == edge)
                 .with_context(|| {
                     format!(
-                        "boot plan component '{executable}' names '{edge}' in 'after', \
+                        "boot plan component '{name}' names '{edge}' in 'after', \
                          which the composition does not contain"
                     )
                 })?;
@@ -466,17 +487,17 @@ fn resolve_after(component: &ComponentEntry, executables: &[&str]) -> Result<Vec
         .collect()
 }
 
-fn validate_acyclic(requires: &[Vec<u16>], after: &[Vec<u16>], executables: &[&str]) -> Result<()> {
+fn validate_acyclic(requires: &[Vec<u16>], after: &[Vec<u16>], names: &[&str]) -> Result<()> {
     // Порядок запуска - топологический по объединению requires и after: цикл
     // делает его невыразимым.
     let edges = |index: usize| requires[index].iter().chain(&after[index]);
-    let mut dependents: Vec<usize> = vec![0; executables.len()];
-    for index in 0..executables.len() {
+    let mut dependents: Vec<usize> = vec![0; names.len()];
+    for index in 0..names.len() {
         for edge in edges(index) {
             dependents[usize::from(*edge)] += 1;
         }
     }
-    let mut ready: Vec<usize> = (0..executables.len())
+    let mut ready: Vec<usize> = (0..names.len())
         .filter(|index| dependents[*index] == 0)
         .collect();
     let mut ordered = 0;
@@ -490,10 +511,10 @@ fn validate_acyclic(requires: &[Vec<u16>], after: &[Vec<u16>], executables: &[&s
             }
         }
     }
-    if ordered != executables.len() {
-        let looped: Vec<&str> = (0..executables.len())
+    if ordered != names.len() {
+        let looped: Vec<&str> = (0..names.len())
             .filter(|index| dependents[*index] != 0)
-            .map(|index| executables[index])
+            .map(|index| names[index])
             .collect();
         bail!(
             "boot plan dependencies form a cycle over components: {}",
@@ -516,6 +537,10 @@ mod tests {
     const RAM_FS: &str = "/boot/filesystem-ramfs";
     const ROOTKEEPER: &str = "/boot/rootkeeper";
     const CONSUMER: &str = "/boot/namespace-consumer-fixture";
+
+    const ROUTER_NAME: &str = "namespace-router";
+    const DRIVER_NAME: &str = "driver-pl031";
+    const CONSUMER_NAME: &str = "namespace-consumer-fixture";
 
     const RTC_COMPATIBLE: &[&str] = &["arm,pl031", "arm,primecell"];
     const NAMESPACE: &str = "Namespace";
@@ -732,10 +757,8 @@ mod tests {
         let error = image.compile(&source).expect_err("the record is absent");
         assert_eq!(
             format!("{error:#}"),
-            format!(
-                "boot plan component '{OWNER}' takes file '/boot/owner/ghost', \
-                 which its directory does not contain"
-            )
+            "boot plan component 'owner' takes file '/boot/owner/ghost', \
+             which its directory does not contain"
         );
     }
 
@@ -773,7 +796,7 @@ mod tests {
     fn plan_keeps_an_after_edge_without_an_import() {
         let bytes = compiled(&plan(&[
             filesystem(""),
-            rtc(&format!("after = [\"{ROUTER}\"]\n")),
+            rtc(&format!("after = [\"{ROUTER_NAME}\"]\n")),
         ]));
 
         let plan = decode_plan(&bytes).expect("compiled plan must decode");
@@ -788,7 +811,7 @@ mod tests {
         assert_eq!(
             rejected(&source),
             format!(
-                "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE}', \
+                "boot plan component '{CONSUMER_NAME}' imports protocol '{NAMESPACE}', \
                  which no component of the composition exports"
             )
         );
@@ -807,9 +830,8 @@ mod tests {
         assert_eq!(
             format!("{error:#}"),
             format!(
-                "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE}', \
-                 which 2 components export: {ROUTER}, {TWIN}; \
-                 a choice between them needs component names"
+                "boot plan component '{CONSUMER_NAME}' imports protocol '{NAMESPACE}', \
+                 which 2 components export: {ROUTER_NAME}, namespace-router-twin"
             )
         );
     }
@@ -831,7 +853,7 @@ mod tests {
             .expect_err("a component does not take its own service");
         assert_eq!(
             format!("{error:#}"),
-            format!("boot plan component '{SELF_BOUND}' imports the protocol it exports itself")
+            "boot plan component 'self-bound' imports the protocol it exports itself"
         );
     }
 
@@ -845,14 +867,86 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_a_repeated_executable() {
+    fn a_component_without_a_name_is_called_by_its_directory() {
+        let bytes = compiled(&plan(&[filesystem("")]));
+
+        let plan = decode_plan(&bytes).expect("compiled plan must decode");
+        let router = plan.component(0).expect("router");
+        assert_eq!(router.executable(), ROUTER);
+        assert_eq!(router.name(), ROUTER_NAME);
+    }
+
+    #[test]
+    fn a_named_component_keeps_its_name_apart_from_the_program() {
+        let bytes = compiled(&plan(&[filesystem("name = \"names\"\n")]));
+
+        let plan = decode_plan(&bytes).expect("compiled plan must decode");
+        let router = plan.component(0).expect("router");
+        assert_eq!(router.executable(), ROUTER);
+        assert_eq!(router.name(), "names");
+    }
+
+    #[test]
+    fn one_program_carries_two_named_instances() {
+        let source = plan(&[
+            filesystem("name = \"names-boot\"\n"),
+            filesystem("name = \"names-spare\"\n"),
+        ]);
+
+        let bytes = compiled(&source);
+
+        let plan = decode_plan(&bytes).expect("compiled plan must decode");
+        assert_eq!(plan.len(), 2);
+        let first = plan.component(0).expect("first instance");
+        let second = plan.component(1).expect("second instance");
+        assert_eq!(first.executable(), second.executable());
+        assert_eq!(first.name(), "names-boot");
+        assert_eq!(second.name(), "names-spare");
+        // Каталог у экземпляров общий, а значит и файлы: запись каталога
+        // называет программа, а не композиция.
+        assert_eq!(
+            first.slots().collect::<Vec<_>>(),
+            second.slots().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_after_edge_names_another_instance_of_the_same_program() {
+        let source = plan(&[
+            filesystem("name = \"names-boot\"\n"),
+            filesystem("name = \"names-spare\"\nafter = [\"names-boot\"]\n"),
+        ]);
+
+        let bytes = compiled(&source);
+
+        let plan = decode_plan(&bytes).expect("compiled plan must decode");
+        assert_eq!(
+            plan.component(1)
+                .expect("second instance")
+                .after()
+                .collect::<Vec<_>>(),
+            [0]
+        );
+    }
+
+    #[test]
+    fn plan_rejects_a_name_outside_the_grammar() {
+        let long = format!("\"{}\"", "n".repeat(MAX_PROCESS_NAME_LEN + 1));
+        for name in ["\"\"", "\"boot/names\"", "\"имя\"", &long] {
+            let source = plan(&[filesystem(&format!("name = {name}\n"))]);
+            assert!(
+                rejected(&source).starts_with("boot plan component name"),
+                "'{name}' must fail on the component name"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_rejects_a_repeated_name() {
         let source = plan(&[filesystem(""), rtc("").replace(DRIVER, ROUTER)]);
         assert_eq!(
             rejected(&source),
-            format!(
-                "boot plan names executable '{ROUTER}' more than once; \
-                 a composition of several instances needs component names"
-            )
+            format!("boot plan names component '{ROUTER_NAME}' more than once")
         );
     }
 
@@ -871,7 +965,7 @@ mod tests {
                 .replace("memory_limit = \"8M\"", &format!("memory_limit = {limit}"));
             assert!(
                 rejected(&source).starts_with(&format!(
-                    "boot plan component '{ROUTER}' sets 'memory_limit'"
+                    "boot plan component '{ROUTER_NAME}' sets 'memory_limit'"
                 )),
                 "'{limit}' must fail on the memory limit"
             );
@@ -883,7 +977,7 @@ mod tests {
         let source =
             plan(&[filesystem("")]).replace("startup_timeout = \"2s\"", "startup_timeout = \"0s\"");
         assert!(rejected(&source).starts_with(&format!(
-            "boot plan component '{ROUTER}' sets 'startup_timeout'"
+            "boot plan component '{ROUTER_NAME}' sets 'startup_timeout'"
         )));
     }
 
@@ -902,8 +996,9 @@ mod tests {
                 &format!("on_failure = {policy}"),
             );
             assert!(
-                rejected(&source)
-                    .starts_with(&format!("boot plan component '{ROUTER}' sets 'on_failure'")),
+                rejected(&source).starts_with(&format!(
+                    "boot plan component '{ROUTER_NAME}' sets 'on_failure'"
+                )),
                 "'{policy}' must fail on the failure policy"
             );
         }
@@ -930,31 +1025,33 @@ mod tests {
     #[test]
     fn plan_rejects_a_cycle_over_after() {
         let source = plan(&[
-            filesystem(&format!("after = [\"{DRIVER}\"]\n")),
-            rtc(&format!("after = [\"{ROUTER}\"]\n")),
+            filesystem(&format!("after = [\"{DRIVER_NAME}\"]\n")),
+            rtc(&format!("after = [\"{ROUTER_NAME}\"]\n")),
         ]);
         assert_eq!(
             rejected(&source),
-            format!("boot plan dependencies form a cycle over components: {ROUTER}, {DRIVER}")
+            format!(
+                "boot plan dependencies form a cycle over components: {ROUTER_NAME}, {DRIVER_NAME}"
+            )
         );
     }
 
     #[test]
     fn plan_rejects_a_self_dependency() {
-        let source = plan(&[filesystem(&format!("after = [\"{ROUTER}\"]\n"))]);
+        let source = plan(&[filesystem(&format!("after = [\"{ROUTER_NAME}\"]\n"))]);
         assert_eq!(
             rejected(&source),
-            format!("boot plan component '{ROUTER}' names itself in 'after'")
+            format!("boot plan component '{ROUTER_NAME}' names itself in 'after'")
         );
     }
 
     #[test]
     fn plan_rejects_an_unknown_edge() {
-        let source = plan(&[filesystem("after = [\"/boot/logger\"]\n")]);
+        let source = plan(&[filesystem("after = [\"logger\"]\n")]);
         assert_eq!(
             rejected(&source),
             format!(
-                "boot plan component '{ROUTER}' names '/boot/logger' in 'after', \
+                "boot plan component '{ROUTER_NAME}' names 'logger' in 'after', \
                  which the composition does not contain"
             )
         );
@@ -986,7 +1083,7 @@ mod tests {
         assert_eq!(
             format!("{error:#}"),
             format!(
-                "boot plan component '{CROWDED}' declares {} slots; \
+                "boot plan component 'crowded' declares {} slots; \
                  the startup transaction carries {COMPONENT_SLOT_MAX}",
                 COMPONENT_SLOT_MAX + 1
             )
@@ -995,16 +1092,16 @@ mod tests {
 
     #[test]
     fn components_fit_the_resource_depth_ceiling() {
-        validate_resource_depth(ROUTER, COMPONENT_RESOURCE_LEVELS)
+        validate_resource_depth(ROUTER_NAME, COMPONENT_RESOURCE_LEVELS)
             .expect("a component fits the ceiling");
 
-        let too_deep = validate_resource_depth(ROUTER, MAX_RESOURCE_DEPTH + 1)
+        let too_deep = validate_resource_depth(ROUTER_NAME, MAX_RESOURCE_DEPTH + 1)
             .expect_err("a component past the ceiling must fail")
             .to_string();
         assert_eq!(
             too_deep,
             format!(
-                "boot plan component '{ROUTER}' needs {} resource levels under depth 0; \
+                "boot plan component '{ROUTER_NAME}' needs {} resource levels under depth 0; \
                  the ceiling is {MAX_RESOURCE_DEPTH}",
                 MAX_RESOURCE_DEPTH + 1
             )

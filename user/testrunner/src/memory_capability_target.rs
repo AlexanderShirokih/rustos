@@ -4,7 +4,7 @@
 use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, RegionInfo, RegionKind, Resource, UserMemFlags};
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
 #[kernel_test]

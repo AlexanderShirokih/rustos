@@ -1,0 +1,25 @@
+{
+  "arch": "aarch64",
+  "crt-objects-fallback": "false",
+  "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
+  "dynamic-linking": false,
+  "executables": true,
+  "features": "+v8a,+strict-align,+neon",
+  "has-thread-local": false,
+  "linker": "rust-lld",
+  "linker-flavor": "gnu-lld",
+  "llvm-target": "aarch64-unknown-none",
+  "max-atomic-width": 128,
+  "os": "molecular",
+  "panic-strategy": "abort",
+  "position-independent-executables": false,
+  "pre-link-args": {
+    "gnu-lld": [
+      "--fix-cortex-a53-843419"
+    ]
+  },
+  "relocation-model": "static",
+  "static-position-independent-executables": false,
+  "target-pointer-width": 64,
+  "vendor": "unknown"
+}

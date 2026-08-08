@@ -1,11 +1,18 @@
-//! Проверка правил слоев workspace: домен крейта задается его верхней директорией, ребра
+//! Проверка правил workspace: домен крейта задается его верхней директорией, ребра
 //! зависимостей сверяются с таблицей разрешений. Архитектурно-зависимые крейты (сегмент
-//! `aarch64` в пути либо `forced-target` на этот триплет) доступны только другим
-//! архитектурно-зависимым крейтам.
+//! `aarch64` в пути, `forced-target` на этот триплет либо ключ `package.metadata.molecular.arch`)
+//! доступны только другим архитектурно-зависимым крейтам.
+//!
+//! Ключ нужен крейтам отделенных workspace: `forced-target` задает триплет всем сборкам крейта,
+//! а такой крейт собирает чужой workspace под свой таргет.
+//!
+//! Отделенные workspace перечисляет `workspace.exclude` корневого манифеста. Их крейты входят в
+//! проверку наравне с членами корневого, а таблица линтов каждого сверяется с корневой:
+//! наследовать ее вне корневого дерева нечем.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
+    fmt, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -20,7 +27,6 @@ const ARCH_SEGMENT: &str = "aarch64";
 #[derive(Deserialize)]
 struct CargoMetadata {
     packages: Vec<MetaPackage>,
-    workspace_root: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -40,7 +46,7 @@ struct MetaDependency {
 pub(crate) struct WorkspaceCrate {
     pub(crate) name: String,
     pub(crate) dir: String,
-    pub(crate) forced_arch: bool,
+    pub(crate) arch_specific: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,21 +59,16 @@ pub(crate) fn run() -> Result<()> {
     let mut crates = BTreeSet::new();
     let mut edges = BTreeSet::new();
 
-    let root_meta = load_metadata(&project_root())?;
-    collect_workspace(
-        &root_meta,
-        &root_meta.workspace_root.clone(),
-        &mut crates,
-        &mut edges,
-    )?;
+    let root = project_root();
+    let root_meta = load_metadata(&root)?;
+    collect_workspace(&root_meta, &root, &mut crates, &mut edges)?;
 
-    let fuzz_meta = load_metadata(&project_root().join("fuzz"))?;
-    let fuzz_root = fuzz_meta
-        .workspace_root
-        .parent()
-        .context("fuzz workspace root has no parent directory")?
-        .to_path_buf();
-    collect_workspace(&fuzz_meta, &fuzz_root, &mut crates, &mut edges)?;
+    let detached = detached_workspaces(&root)?;
+    for workspace in &detached {
+        let meta = load_metadata(workspace)?;
+        collect_workspace(&meta, &root, &mut crates, &mut edges)?;
+    }
+    check_lint_policy(&root, &detached)?;
 
     let crates = merge_crates(crates);
     let edges: Vec<Edge> = edges.into_iter().collect();
@@ -80,11 +81,67 @@ pub(crate) fn run() -> Result<()> {
         bail!("check-layers: {} layer rule violations", violations.len());
     }
     println!(
-        "check-layers: OK ({} crates, {} edges)",
+        "check-layers: OK ({} crates, {} edges, {} detached workspaces)",
         crates.len(),
-        edges.len()
+        edges.len(),
+        detached.len()
     );
     Ok(())
+}
+
+fn check_lint_policy(root: &Path, detached: &[PathBuf]) -> Result<()> {
+    let expected = workspace_lints(&root.join("Cargo.toml"))?;
+    for workspace in detached {
+        let manifest = workspace.join("Cargo.toml");
+        if workspace_lints(&manifest)? != expected {
+            bail!(
+                "check-layers: {} declares a [workspace.lints] table that differs from the root one",
+                manifest.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn workspace_lints(manifest: &Path) -> Result<toml::Value> {
+    let text = fs::read_to_string(manifest)
+        .with_context(|| format!("Failed to read {}", manifest.display()))?;
+    let table = text
+        .parse::<toml::Table>()
+        .with_context(|| format!("Failed to parse {}", manifest.display()))?;
+    table
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .and_then(|workspace| workspace.get("lints"))
+        .cloned()
+        .with_context(|| format!("{} declares no [workspace.lints]", manifest.display()))
+}
+
+fn detached_workspaces(root: &Path) -> Result<Vec<PathBuf>> {
+    let manifest = root.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest)
+        .with_context(|| format!("Failed to read {}", manifest.display()))?;
+    let table = text
+        .parse::<toml::Table>()
+        .with_context(|| format!("Failed to parse {}", manifest.display()))?;
+    let excluded = table
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .and_then(|workspace| workspace.get("exclude"))
+        .and_then(toml::Value::as_array)
+        .context("root manifest declares no workspace.exclude")?;
+
+    let mut detached = Vec::new();
+    for entry in excluded {
+        let dir = entry
+            .as_str()
+            .context("workspace.exclude holds a non-string entry")?;
+        let candidate = root.join(dir);
+        if candidate.join("Cargo.toml").is_file() {
+            detached.push(candidate);
+        }
+    }
+    Ok(detached)
 }
 
 fn load_metadata(dir: &Path) -> Result<CargoMetadata> {
@@ -117,7 +174,7 @@ fn collect_workspace(
         crates.insert(WorkspaceCrate {
             name: pkg.name.clone(),
             dir: relative_dir(&pkg.name, manifest_dir, root)?,
-            forced_arch: forced_arch_target(&pkg.manifest_path),
+            arch_specific: arch_specific_manifest(&pkg.manifest_path),
         });
         // dependencies включает normal-, dev- и build-зависимости, path = Some отбирает
         // локальные. Дубликаты (normal + dev) схлопывает BTreeSet.
@@ -128,7 +185,7 @@ fn collect_workspace(
             crates.insert(WorkspaceCrate {
                 name: dep.name.clone(),
                 dir: relative_dir(&dep.name, dep_path, root)?,
-                forced_arch: false,
+                arch_specific: false,
             });
             edges.insert(Edge {
                 from: pkg.name.clone(),
@@ -144,34 +201,46 @@ fn merge_crates(crates: BTreeSet<WorkspaceCrate>) -> Vec<WorkspaceCrate> {
     // архитектуры собирается по всем вхождениям крейта.
     let mut merged: BTreeMap<(String, String), bool> = BTreeMap::new();
     for krate in crates {
-        let forced = merged
+        let known = merged
             .entry((krate.name, krate.dir))
-            .or_insert(krate.forced_arch);
-        *forced |= krate.forced_arch;
+            .or_insert(krate.arch_specific);
+        *known |= krate.arch_specific;
     }
     merged
         .into_iter()
-        .map(|((name, dir), forced_arch)| WorkspaceCrate {
+        .map(|((name, dir), arch_specific)| WorkspaceCrate {
             name,
             dir,
-            forced_arch,
+            arch_specific,
         })
         .collect()
 }
 
-fn forced_arch_target(manifest: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(manifest) else {
+fn arch_specific_manifest(manifest: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(manifest) else {
         return false;
     };
     let Ok(table) = text.parse::<toml::Table>() else {
         return false;
     };
-    table
-        .get("package")
-        .and_then(toml::Value::as_table)
-        .and_then(|package| package.get("forced-target"))
+    let Some(package) = table.get("package").and_then(toml::Value::as_table) else {
+        return false;
+    };
+    let forced = package
+        .get("forced-target")
         .and_then(toml::Value::as_str)
-        .is_some_and(|target| target.split('-').any(|segment| segment == ARCH_SEGMENT))
+        .is_some_and(|target| target.split('-').any(|segment| segment == ARCH_SEGMENT));
+    forced || declared_arch(package) == Some(ARCH_SEGMENT)
+}
+
+fn declared_arch(package: &toml::Table) -> Option<&str> {
+    package
+        .get("metadata")
+        .and_then(toml::Value::as_table)?
+        .get("molecular")
+        .and_then(toml::Value::as_table)?
+        .get("arch")
+        .and_then(toml::Value::as_str)
 }
 
 fn relative_dir(name: &str, dir: &Path, root: &Path) -> Result<String> {
@@ -301,7 +370,7 @@ pub(crate) fn check_layers(crates: &[WorkspaceCrate], edges: &[Edge]) -> Result<
     for krate in crates {
         let mut crate_rules =
             CrateRules::from_dir(&krate.dir).with_context(|| format!("crate {}", krate.name))?;
-        crate_rules.arch_specific |= krate.forced_arch;
+        crate_rules.arch_specific |= krate.arch_specific;
         if let Some(known) = rules.insert(krate.name.as_str(), crate_rules) {
             if known.dir != crate_rules.dir {
                 bail!(
@@ -379,7 +448,7 @@ mod tests {
         .map(|(name, dir)| WorkspaceCrate {
             name: name.to_string(),
             dir: dir.to_string(),
-            forced_arch: false,
+            arch_specific: false,
         })
         .to_vec()
     }
@@ -396,9 +465,8 @@ mod tests {
 
     type PackageSpec<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
 
-    fn metadata(root: &str, packages: &[PackageSpec<'_>]) -> CargoMetadata {
+    fn metadata(packages: &[PackageSpec<'_>]) -> CargoMetadata {
         CargoMetadata {
-            workspace_root: PathBuf::from(root),
             packages: packages
                 .iter()
                 .map(|(name, dir, deps)| MetaPackage {
@@ -436,14 +504,11 @@ mod tests {
 
     #[test]
     fn path_dependency_target_becomes_a_crate() {
-        let meta = metadata(
-            "/repo",
-            &[(
-                "a-kernel",
-                "/repo/kernel/a-kernel",
-                &[("a-lib", "/repo/lib/a-lib")],
-            )],
-        );
+        let meta = metadata(&[(
+            "a-kernel",
+            "/repo/kernel/a-kernel",
+            &[("a-lib", "/repo/lib/a-lib")],
+        )]);
         let mut collected_crates = BTreeSet::new();
         let mut collected_edges = BTreeSet::new();
         collect_workspace(
@@ -470,14 +535,11 @@ mod tests {
 
     #[test]
     fn path_dependency_outside_root_is_error() {
-        let meta = metadata(
-            "/repo",
-            &[(
-                "a-kernel",
-                "/repo/kernel/a-kernel",
-                &[("vendored", "/vendor/vendored")],
-            )],
-        );
+        let meta = metadata(&[(
+            "a-kernel",
+            "/repo/kernel/a-kernel",
+            &[("vendored", "/vendor/vendored")],
+        )]);
         let mut collected_crates = BTreeSet::new();
         let mut collected_edges = BTreeSet::new();
         assert!(
@@ -497,12 +559,12 @@ mod tests {
             WorkspaceCrate {
                 name: "a-lib".to_string(),
                 dir: "lib/a-lib".to_string(),
-                forced_arch: false,
+                arch_specific: false,
             },
             WorkspaceCrate {
                 name: "a-lib".to_string(),
                 dir: "kernel/a-lib".to_string(),
-                forced_arch: false,
+                arch_specific: false,
             },
         ];
         assert!(check_layers(&crates, &[]).is_err());
@@ -641,12 +703,12 @@ mod tests {
         crates.push(WorkspaceCrate {
             name: "arch-user".to_string(),
             dir: "user/arch-user".to_string(),
-            forced_arch: true,
+            arch_specific: true,
         });
         crates.push(WorkspaceCrate {
             name: "arch-lib".to_string(),
             dir: "lib/arch-lib".to_string(),
-            forced_arch: true,
+            arch_specific: true,
         });
 
         // Крейт, собираемый только под архитектуру, вправе зависеть от
@@ -663,7 +725,7 @@ mod tests {
         let crates = vec![WorkspaceCrate {
             name: "stray".to_string(),
             dir: "scripts/stray".to_string(),
-            forced_arch: false,
+            arch_specific: false,
         }];
         assert!(check_layers(&crates, &[]).is_err());
     }

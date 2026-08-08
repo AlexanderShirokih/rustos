@@ -74,7 +74,9 @@ pub fn shutdown(timeout: Timeout) {
     }
 }
 
-fn source_name(badge: u64) -> Option<&'static str> {
+/// Имя источника строк журнала по значку его лог-сессии.
+#[must_use]
+pub fn source_name(badge: u64) -> Option<&'static str> {
     if badge == SUPERVISOR_BADGE.get() {
         return Some("rootkeeper");
     }

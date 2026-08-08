@@ -24,7 +24,7 @@ use runtime::{
 };
 use spin::Mutex;
 use syscall::{HANDLE_TABLE_CAPACITY, Rights, SyscallError};
-use userland_image::decode;
+use userland_image::{component_name, decode};
 use userland_loader::load_entry;
 
 use crate::{ipc_raw, log_fixture_protocol::FIXTURE_LINE};
@@ -126,6 +126,49 @@ impl LogSink for RecordingSink {
         }
         forwarded
     }
+}
+
+pub(crate) fn start_component_relay<'a>(names: impl Iterator<Item = &'a str>) {
+    // Имена источников ставит и читает сам rootkeeper: сценарий подменяет
+    // только сток, чтобы прочитать пересланные строки.
+    RECORDED.lock().clear();
+    SINK_REFUSES.store(false, SeqCst);
+    rootkeeper::relay::install_names(names);
+    *ACTIVE.lock() = Some(
+        LogRelayThread::start(rootkeeper::relay::source_name, RecordingSink)
+            .expect("component log relay starts"),
+    );
+}
+
+pub(crate) fn component_scenario_session(badge: NonZeroU64) -> Option<OwnedHandle> {
+    ACTIVE.lock().as_ref()?.delegated_session(badge).ok()
+}
+
+pub(crate) fn await_component_sources(names: &[&str]) -> Vec<String> {
+    let idle = Port::create().expect("port create");
+    let mut waited = 0;
+    loop {
+        let sources: Vec<String> = RECORDED
+            .lock()
+            .iter()
+            .map(|record| record.source.clone())
+            .collect();
+        let complete = names.iter().all(|name| {
+            sources
+                .iter()
+                .any(|source| source.split('/').next() == Some(name))
+        });
+        if complete || waited >= RECORD_TIMEOUT.raw() {
+            return sources;
+        }
+        let _ = idle.recv(RECORD_POLL);
+        waited += RECORD_POLL.raw();
+    }
+}
+
+pub(crate) fn stop_component_relay() {
+    stop(&ACTIVE);
+    rootkeeper::relay::install_names(core::iter::empty());
 }
 
 fn scenario_session(badge: NonZeroU64) -> OwnedHandle {
@@ -248,7 +291,7 @@ fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
         .program()
         .expect("entry record carries a program");
     let resource = Resource::self_resource().expect("self metering resource");
-    load_entry(&program, &resource, start).expect("spawn from image")
+    load_entry(&program, Some(component_name(path)), &resource, start).expect("spawn from image")
 }
 
 // Кадр лог-сессии доходит до стока под именем её значка, а локальный тег

@@ -8,6 +8,7 @@
 | Host-clippy                         | `cargo clippy --workspace`                                                                                           |
 | AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --exclude style-tool --target aarch64-unknown-none` |
 | Форматирование                      | `cargo fmt --all --check`                                                                                            |
+| Отделённые workspace                | см. [«Отделённые workspace»](#отделённые-workspace): свой прогон fmt и clippy на каждый                              |
 | Проверка слоёв                      | `cargo xtask check-layers`                                                                                           |
 | Проверка кодстайла                  | `cargo xtask style [--all] [--staged] [--since <rev>]`                                                               |
 | Сборка userland                     | `cargo xtask build-userland [--image <путь>] [--file <путь>=<источник>]`                                             |
@@ -69,7 +70,7 @@ TOML-манифесту композиции. По умолчанию — `user/
 ```bash
 cargo xtask build-userland
 cargo xtask build-userland --image user/testrunner/image.toml
-cargo xtask build-userland --file /etc/motd=user/rootkeeper/motd.txt
+cargo xtask build-userland --file /boot/rootkeeper/motd=user/rootkeeper/motd.txt
 ```
 
 ## Тесты
@@ -158,15 +159,48 @@ cargo xtask fuzz userland_image_decode --seconds 60
 `userland_image_decode` собираются кодировщиком `userland-image` и обновляются
 вместе с форматом образа.
 
+## Отделённые workspace
+
+Часть дерева живёт вне корневого workspace — их перечисляет `workspace.exclude`
+корневого манифеста:
+
+| Каталог      | Крейт          | Почему отделён                                                                  |
+|--------------|----------------|---------------------------------------------------------------------------------|
+| `fuzz/`      | `mobile-fuzz`  | Собирается своим toolchain и не меняет target-конфигурацию bare-metal workspace  |
+| `lib/std-rt` | `molecular-rt` | Собирается как зависимость `std`, граф зависимостей ему задаёт workspace `std`   |
+
+`--workspace` их не видит, поэтому форматирование и clippy идут по manifest-пути:
+
+```bash
+cargo fmt --manifest-path fuzz/Cargo.toml --all --check
+cargo fmt --manifest-path lib/std-rt/Cargo.toml --all --check
+cargo clippy --manifest-path lib/std-rt/Cargo.toml \
+             --target targets/aarch64-unknown-molecular.json \
+             -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
+```
+
+`molecular-rt` линтуется под тем же таргетом, под который его собирает `std`:
+готового `core` для него нет, поэтому `core` и `alloc` идут из исходников
+(`rust-src` ставится по `rust-toolchain.toml`). Крейт исполняют e2e-тесты
+`user/testrunner/src/std_rt.rs` под QEMU.
+
+Политику линтов такой workspace обязан повторять в своём манифесте, наследовать
+её неоткуда. Совпадение с корневой сверяет `cargo xtask check-layers`.
+
 ## Проверка слоёв
 
 ```bash
 cargo xtask check-layers
 ```
 
-Сверяет рёбра зависимостей между крейтами основного и fuzz-workspace
+Сверяет рёбра зависимостей между крейтами корневого workspace и всех отделённых
 (по `cargo metadata`) с правилами слоёв из [`architecture.md`](architecture.md).
 При нарушениях печатает запрещённые рёбра и завершается с ошибкой.
+
+Список отделённых workspace команда берёт из `workspace.exclude` корневого
+манифеста — второго реестра в дереве нет. Заодно она сверяет таблицу
+`[workspace.lints]` каждого из них с корневой: наследовать её вне корневого
+дерева нечем, а разойдясь, крейт собирается по более слабым правилам.
 
 ## Проверка кодстайла
 

@@ -6,10 +6,13 @@ use kernel_tests::kernel_test;
 use runtime::{MemoryRegion, OwnedHandle, PortTransport, Resource, Signal, Timeout};
 use syscall::{Rights, SIGNALED, SyscallError};
 use userland::{Entry, EntryView, Segment, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE};
-use userland_image::decode;
+use userland_image::{component_name, decode};
 use userland_loader::{launch_entry, load_entry};
 
 use crate::startup_fixture_protocol::{STARTUP_VALUE, StartupFixtureClient};
+
+const STARTUP_FIXTURE: &str = "/boot/startup-fixture/program";
+const REPLY_HOLDER: &str = "/boot/reply-holder/program";
 
 const CHILD_WAIT_TIMEOUT: Timeout = Timeout::from_millis(500);
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -51,16 +54,22 @@ fn launch_child_delivers_startup_frame() {
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("/boot/startup-fixture/program")
+        .entry(STARTUP_FIXTURE)
         .expect("image carries a child entry")
         .program()
         .expect("child entry is a program");
 
     let resource = Resource::self_resource().expect("self metering resource");
-    let process = launch_entry(&child, &resource, |startup| -> Result<(), StartupError> {
-        StartupFixtureClient::new(PortTransport::client(startup.handle())).start(STARTUP_VALUE)?;
-        Ok(())
-    })
+    let process = launch_entry(
+        &child,
+        Some(component_name(STARTUP_FIXTURE)),
+        &resource,
+        |startup| -> Result<(), StartupError> {
+            StartupFixtureClient::new(PortTransport::client(startup.handle()))
+                .start(STARTUP_VALUE)?;
+            Ok(())
+        },
+    )
     .expect("startup frame delivered");
 
     process.join(CHILD_WAIT_TIMEOUT).expect("child terminates");
@@ -81,7 +90,7 @@ fn failed_startup_returns_child_budget() {
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("/boot/startup-fixture/program")
+        .entry(STARTUP_FIXTURE)
         .expect("image carries a child entry")
         .program()
         .expect("child entry is a program");
@@ -125,7 +134,7 @@ fn load_image_error_reclaims_each_created_process() {
     for _ in 0..PROCESS_CREATE_ROLLBACK_ATTEMPTS {
         let initial = Signal::create().expect("initial capability").into_handle();
         kernel_tests::kassert!(matches!(
-            load_entry(&invalid, &resource, initial),
+            load_entry(&invalid, None, &resource, initial),
             Err(runtime::Error::Syscall(SyscallError::InvalidArgument))
         ));
     }
@@ -142,7 +151,7 @@ fn start_error_reclaims_each_loaded_process() {
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("/boot/startup-fixture/program")
+        .entry(STARTUP_FIXTURE)
         .expect("image carries a child entry")
         .program()
         .expect("child entry is a program");
@@ -157,7 +166,12 @@ fn start_error_reclaims_each_loaded_process() {
     for _ in 0..PROCESS_CREATE_ROLLBACK_ATTEMPTS {
         let initial = Signal::create().expect("initial capability").into_handle();
         kernel_tests::kassert!(matches!(
-            load_entry(&child, &write_only, initial),
+            load_entry(
+                &child,
+                Some(component_name(STARTUP_FIXTURE)),
+                &write_only,
+                initial
+            ),
             Err(runtime::Error::Syscall(SyscallError::AccessDenied))
         ));
     }
@@ -179,7 +193,7 @@ fn caller_wakes_when_server_dies_holding_reply() {
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
-        .entry("/boot/reply-holder/program")
+        .entry(REPLY_HOLDER)
         .expect("image carries the holder")
         .program()
         .expect("holder record carries a program");
@@ -187,7 +201,13 @@ fn caller_wakes_when_server_dies_holding_reply() {
     let service = Port::create_service(None).expect("port create");
 
     let resource = Resource::self_resource().expect("self metering resource");
-    let _process = load_entry(&child, &resource, service.server).expect("spawn holder from image");
+    let _process = load_entry(
+        &child,
+        Some(component_name(REPLY_HOLDER)),
+        &resource,
+        service.server,
+    )
+    .expect("spawn holder from image");
 
     let mut out = [0u8; 8];
     // Кадр уже принят, поэтому вызыватель снят с очереди порта: его будит снос
@@ -214,7 +234,8 @@ fn fail_startup_when_budget_returns<'a, E: EntryView<'a>>(
     timer: &Signal,
 ) {
     for _ in 0..PROCESS_CLEANUP_RETRY_ATTEMPTS {
-        match launch_entry(program, budget, |_| Err(StartupError::Injected)) {
+        let name = component_name(program.path());
+        match launch_entry(program, Some(name), budget, |_| Err(StartupError::Injected)) {
             Err(StartupError::Runtime(runtime::Error::Syscall(
                 syscall::SyscallError::ResourceExhausted,
             ))) => {

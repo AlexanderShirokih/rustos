@@ -1,7 +1,8 @@
 #![cfg_attr(not(test), no_std)]
 
 pub const USERLAND_ENTRY_PATH_CAPACITY: usize = 255;
-pub const USERLAND_PAGE_SIZE: u64 = 4096;
+/// Выравнивание сегментов и стека в образе: гранула трансляции, которой ядро их маппит.
+pub const USERLAND_PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 
 /// Имя записи - последний компонент её пути (`/boot/filesystem-ramfs` -> `filesystem-ramfs`).
 /// Пусто, если путь оканчивается разделителем. [`validate_entry`] такой путь отвергает.

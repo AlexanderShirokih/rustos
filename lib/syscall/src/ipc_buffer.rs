@@ -20,15 +20,15 @@
 
 use core::cmp::min;
 
-const ABI_PAGE: usize = 4096;
+use crate::memory::PAGE_SIZE;
 
 /// Максимум переносимых/принимаемых handle в [`IpcBuffer::caps`].
 pub const IPC_BUFFER_MAX_CAPS: usize = 4;
 
 /// Максимум байт тела сообщения в [`IpcBuffer::data`]: остаток страницы за
 /// фиксированными полями (`tag` 8 + `caps` 16 + `badge` 8), так что
-/// `size_of::<IpcBuffer>()` равен [`ABI_PAGE`] (закреплено статик-ассертом).
-pub const IPC_BUFFER_DATA_MAX: usize = ABI_PAGE - 32;
+/// `size_of::<IpcBuffer>()` равен [`PAGE_SIZE`] (закреплено статик-ассертом).
+pub const IPC_BUFFER_DATA_MAX: usize = PAGE_SIZE - 32;
 
 const TAG_NCAPS_SHIFT: u32 = 16;
 const TAG_LEN_MASK: u64 = 0xFFFF;
@@ -49,7 +49,7 @@ pub struct IpcBuffer {
 }
 
 const _: () = assert!(
-    size_of::<IpcBuffer>() == ABI_PAGE,
+    size_of::<IpcBuffer>() == PAGE_SIZE,
     "IpcBuffer fills the ABI page exactly"
 );
 
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn buffer_fills_one_page() {
-        assert_eq!(size_of::<IpcBuffer>(), ABI_PAGE);
+        assert_eq!(size_of::<IpcBuffer>(), PAGE_SIZE);
     }
 
     #[test]

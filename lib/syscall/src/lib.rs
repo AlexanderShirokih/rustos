@@ -23,7 +23,7 @@ pub use ipc_buffer::{
     DecodedTag, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, IpcBuffer, decode_tag, encode_tag,
 };
 pub use irq::IrqTrigger;
-pub use memory::{MemoryAccess, USER_VA_END};
+pub use memory::{MemoryAccess, PAGE_SIZE, USER_VA_END};
 pub use resource::MAX_RESOURCE_DEPTH;
 pub use rights::Rights;
 pub use signal::{SIGNALED, WakeCount};

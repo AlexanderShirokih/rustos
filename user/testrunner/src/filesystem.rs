@@ -21,7 +21,7 @@ use runtime::{
 };
 use spin::Once;
 use syscall::{Rights, SIGNALED};
-use userland_image::{COMPONENT_PROGRAM_NAME, decode, decode_plan};
+use userland_image::{COMPONENT_PROGRAM_NAME, component_name, decode, decode_plan};
 use userland_loader::load_entry;
 
 pub(crate) const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -123,6 +123,7 @@ fn start_namespace() -> NamespacePorts {
         launch_component(
             &mut component,
             &program,
+            plan_component.name(),
             &log,
             plan_component.startup_timeout(),
             crate::rootkeeper_system::router_slots(&image, &decoded),
@@ -177,7 +178,7 @@ fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
         .program()
         .expect("entry is a program");
     let resource = Resource::self_resource().expect("self metering resource");
-    load_entry(&program, &resource, start).expect("spawn from image")
+    load_entry(&program, Some(component_name(path)), &resource, start).expect("spawn from image")
 }
 
 fn acquire_image(bootstrap: &BootstrapClient<PortTransport>) -> ipc::wire::Cap {

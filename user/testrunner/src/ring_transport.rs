@@ -24,7 +24,7 @@ const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const WAIT_TIMEOUT: Timeout = Timeout::from_secs(1);
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 
 struct Shared {
     region_va: u64,
