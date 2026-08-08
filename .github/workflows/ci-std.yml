@@ -1,0 +1,44 @@
+name: CI std
+
+# Сборка `std` под таргет Molecular OS стоит дороже остальных проверок: она поднимает
+# core, alloc и саму стандартную библиотеку из исходников. На каждый PR она не нужна —
+# сломать её может только изменение того, из чего она собрана.
+#
+# `paths` в Actions задаётся на workflow, не на джобу, поэтому проверка вынесена из
+# основного `ci.yml` отдельным файлом.
+on:
+  pull_request:
+    paths:
+      # Сам оверлей и инструмент его наложения.
+      - patches/std-molecular.patch
+      - xtask/src/std_src.rs
+      # Пин toolchain: бамп сдвигает контексты в патче, и `git apply` перестаёт ложиться.
+      - rust-toolchain.toml
+      # Спека таргета, под который собирается программа.
+      - targets/aarch64-unknown-molecular.json
+      # Крейт, который `std` берёт платформенным слоем, и ABI под ним. Отображение ошибок
+      # в оверлее разбирает `SyscallError` по вариантам: новый вариант ломает сборку здесь.
+      - lib/std-rt/**
+      - lib/syscall/**
+      - .github/workflows/ci-std.yml
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  std:
+    name: std (aarch64-unknown-molecular)
+    runs-on: ubuntu-latest
+    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    steps:
+      - uses: actions/checkout@v5
+      # Оверлей накладывается через `git apply`, а checkout внутри контейнера
+      # оставляет каталог с чужим владельцем.
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: std
+      - run: cargo xtask std-src --verify

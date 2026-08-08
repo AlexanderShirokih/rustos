@@ -67,6 +67,9 @@ extern "C" fn pointer_worker(arg: usize) -> u32 {
             shared.mismatches.fetch_add(1, Ordering::Relaxed);
         }
     }
+    // Регистр принадлежит локальным данным потока, а тест занял его под свою метку. Уход
+    // потока разбирает эти данные по указателю из регистра, поэтому метку надо снять.
+    set_thread_pointer(0);
     0
 }
 

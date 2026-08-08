@@ -1,8 +1,8 @@
 //! E2E базового слоя `molecular-rt` из EL0: куча по классам размера, futex-взаимоисключение и
 //! локальные данные потока с деструкторами.
 //!
-//! Слой обслуживает стандартную библиотеку и вызывающих внутри дерева не имеет, поэтому его
-//! исполняют эти тесты.
+//! Слой обслуживает стандартную библиотеку и вызывающих внутри дерева не имеет. Его исполняют
+//! эти тесты.
 
 use alloc::vec::Vec;
 use core::{
@@ -138,6 +138,34 @@ fn std_rt_lock_serialises_workers() {
     kernel_tests::kassert_eq!(*counter, LOCK_WORKERS * LOCK_ITERS);
 }
 
+/// Стартовый handle доезжает от точки входа до потребителя.
+#[kernel_test]
+fn std_rt_start_publishes_the_bootstrap_handle() {
+    let root = crate::bootstrap_handle();
+    molecular_rt::start(root.raw());
+    let published = molecular_rt::bootstrap_handle().expect("bootstrap handle is published");
+    kernel_tests::kassert_eq!(published.raw(), root.raw());
+}
+
+const RANDOM_MAX_LEN: usize = 17;
+
+/// Буфер любой длины заполняется целиком, а хвост короче слова не роняет генератор.
+#[kernel_test]
+fn std_rt_random_fills_buffers_of_any_length() {
+    let mut buffer = [0u8; RANDOM_MAX_LEN];
+    for len in 0..=RANDOM_MAX_LEN {
+        molecular_rt::random::fill_bytes(&mut buffer[..len]);
+    }
+
+    // SplitMix64 биективен, а состояние сдвигается на каждый вызов: два подряд идущих слова
+    // различаются всегда, поэтому проверка не плавает.
+    let mut first = [0u8; 8];
+    let mut second = [0u8; 8];
+    molecular_rt::random::fill_bytes(&mut first);
+    molecular_rt::random::fill_bytes(&mut second);
+    kernel_tests::kassert!(first != second);
+}
+
 const TLS_WORKERS: u32 = 3;
 
 static TLS_KEY: AtomicU64 = AtomicU64::new(0);
@@ -171,7 +199,6 @@ extern "C" fn tls_worker(_arg: usize) -> u32 {
         }
     }
 
-    molecular_rt::run_destructors();
     0
 }
 

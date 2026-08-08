@@ -7,6 +7,7 @@ mod layers;
 mod qemu_test;
 mod race;
 mod shell;
+mod std_src;
 mod style;
 
 use std::{
@@ -98,6 +99,15 @@ enum Commands {
     },
     /// Check the layer rules between workspace crates
     CheckLayers,
+    /// Materialize the patched `std` sources under target/std-src
+    StdSrc {
+        /// Rebuild the tree even when the overlay and the toolchain are unchanged
+        #[arg(long)]
+        force: bool,
+        /// Build a `std` program against the patched tree to prove it works
+        #[arg(long)]
+        verify: bool,
+    },
     /// Check the code style conventions
     Style {
         /// Check the whole tree instead of the changed lines
@@ -154,6 +164,7 @@ fn main() -> Result<()> {
             println!("Done: {}", output.display());
         }
         Commands::CheckLayers => layers::run()?,
+        Commands::StdSrc { force, verify } => std_src::run(force, verify)?,
         Commands::Style {
             all,
             staged,

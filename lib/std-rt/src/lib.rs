@@ -10,11 +10,14 @@
 
 mod alloc;
 mod clock;
-mod futex;
+// Стандартная библиотека берёт futex по пути модуля: её реализации мьютекса, condvar, rwlock и
+// парковки потока импортируют `crate::sys::futex::{self, ...}`.
+pub mod futex;
 mod lock;
 mod process;
+pub mod random;
 mod svc;
-mod tls;
+pub mod tls;
 
 pub use alloc::{alloc, dealloc};
 
@@ -24,7 +27,7 @@ pub use futex::{
     futex_wait_without_slot, futex_wake, futex_wake_all,
 };
 pub use lock::{Lock, LockGuard};
-pub use process::{exit, metering_handle};
+pub use process::{bootstrap_handle, exit, metering_handle, start};
 pub use svc::{
     handle_close, handle_duplicate, ipc_buffer_addr, irq_ack, irq_mint, memory_allocate,
     memory_create_virtual, memory_free, memory_map, memory_region_inspect, memory_remap,
@@ -34,4 +37,7 @@ pub use svc::{
     signal_wait_one, thread_create, thread_exit, thread_exit_code, thread_self, thread_terminate,
     thread_yield,
 };
+// Стандартная библиотека отображает коды syscall-ABI в свои типы ошибок и берёт перечисление
+// отсюда: числа этой таблицы не должны переписываться руками на её стороне.
+pub use syscall;
 pub use tls::{Dtor, Key, create, destroy, get, run_destructors, set};

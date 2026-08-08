@@ -8,6 +8,20 @@ use crate::svc;
 
 static METERING: AtomicU32 = AtomicU32::new(0);
 
+static BOOTSTRAP: AtomicU32 = AtomicU32::new(0);
+
+/// Принимает стартовый handle, который ядро кладёт в `x0` точки входа.
+///
+/// Вызывается точкой входа программы один раз до `main`.
+pub fn start(bootstrap: u32) {
+    BOOTSTRAP.store(bootstrap, Ordering::Release);
+}
+
+/// Стартовый handle процесса, если точка входа его передала.
+pub fn bootstrap_handle() -> Option<Handle> {
+    Handle::new(BOOTSTRAP.load(Ordering::Acquire))
+}
+
 /// Завершает процесс со всеми его потоками. Не возвращается.
 pub fn exit(code: i32) -> ! {
     svc::process_exit(u64::from(code.cast_unsigned()))

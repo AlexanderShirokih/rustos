@@ -3,6 +3,7 @@
 use alloc::boxed::Box;
 use core::mem::ManuallyDrop;
 
+use molecular_rt::tls::run_destructors;
 use syscall::{Timeout, UserMemFlags};
 
 use crate::{
@@ -21,7 +22,10 @@ extern "C" fn trampoline(payload: usize) -> ! {
     // SAFETY: payload получен из Box::into_raw в spawn и реконструируется ровно
     // один раз; разыменование освобождает аллокацию до расходящегося thread_exit.
     let SpawnPayload { entry, arg } = *unsafe { Box::from_raw(payload as *mut SpawnPayload) };
-    thread_exit(u64::from(entry(arg)))
+    let code = entry(arg);
+    // Уход потока - последний момент, когда его локальные данные ещё адресуемы.
+    run_destructors();
+    thread_exit(u64::from(code))
 }
 
 /// Запускает поток в текущем процессе с телом `body`. Владение перенесённым в

@@ -9,6 +9,7 @@
 | AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --exclude style-tool --target aarch64-unknown-none` |
 | Форматирование                      | `cargo fmt --all --check`                                                                                            |
 | Отделённые workspace                | см. [«Отделённые workspace»](#отделённые-workspace): свой прогон fmt и clippy на каждый                              |
+| Исходники `std` с оверлеем          | `cargo xtask std-src [--force] [--verify]`                                                                           |
 | Проверка слоёв                      | `cargo xtask check-layers`                                                                                           |
 | Проверка кодстайла                  | `cargo xtask style [--all] [--staged] [--since <rev>]`                                                               |
 | Сборка userland                     | `cargo xtask build-userland [--image <путь>] [--file <путь>=<источник>]`                                             |
@@ -158,6 +159,41 @@ cargo xtask fuzz userland_image_decode --seconds 60
 передаёт директорию вторым корпусом, доступным только на чтение. Затравки
 `userland_image_decode` собираются кодировщиком `userland-image` и обновляются
 вместе с форматом образа.
+
+## Исходники `std` с оверлеем
+
+```bash
+cargo xtask std-src [--force] [--verify]
+```
+
+Копирует дерево `library` из компонента `rust-src` зафиксированного toolchain в
+`target/std-src` и накладывает оверлей `patches/std-molecular.patch` — он добавляет
+платформенный слой Molecular OS. Установленный toolchain не трогается: sysroot общий,
+копия принадлежит сборке.
+
+Повторный вызов молчит, пока не сменились ни оверлей, ни sysroot: их отпечаток лежит в
+`target/std-src/.stamp`. `--force` пересоздаёт дерево всегда. `--verify` дополнительно
+собирает программу на `std` под таргет — этим ловится расхождение оверлея с пином из
+`rust-toolchain.toml`, из-за которого `git apply` перестаёт ложиться.
+
+Проверка стоит дороже остальных: она поднимает `core`, `alloc` и саму стандартную
+библиотеку из исходников. Поэтому в CI она живёт отдельным workflow
+(`.github/workflows/ci-std.yml`) и запускается не на каждый PR, а по изменению того, из
+чего собрана: оверлея, пина toolchain, спеки таргета, `lib/std-rt` и `lib/syscall`.
+
+Команда печатает путь к дереву `library`. Программа на `std` собирается против него так:
+
+```bash
+LIBRARY=$(cargo xtask std-src | sed -n 's/^std-src: \(.*\)$/\1/p' | tail -1)
+__CARGO_TESTS_ONLY_SRC_ROOT="$LIBRARY" cargo build \
+    --target targets/aarch64-unknown-molecular.json \
+    -Zbuild-std=std,panic_abort \
+    -Zbuild-std-features=compiler-builtins-mem \
+    -Zjson-target-spec
+```
+
+`compiler-builtins-mem` обязателен: без него не резолвятся `memcpy`, `memset`, `memcmp` и
+`memmove`. Собранная программа пока не попадает в `userland.img` — это отдельный шаг.
 
 ## Отделённые workspace
 

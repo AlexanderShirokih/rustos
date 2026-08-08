@@ -1,0 +1,393 @@
+diff -ruN '--exclude=Cargo.lock' a/std/Cargo.toml b/std/Cargo.toml
+--- a/std/Cargo.toml	2026-08-07 22:42:11.982085856 +0000
++++ b/std/Cargo.toml	2026-08-08 22:48:54.697524405 +0000
+@@ -70,6 +70,9 @@
+     'rustc-dep-of-std',
+ ], public = true }
+ 
++[target.'cfg(target_os = "molecular")'.dependencies]
++molecular-rt = { path = "../../../../lib/std-rt", features = ['rustc-dep-of-std'], public = true }
++
+ [target.'cfg(target_os = "motor")'.dependencies]
+ moto-rt = { version = "0.16", features = ['rustc-dep-of-std'], public = true }
+ 
+diff -ruN '--exclude=Cargo.lock' a/std/build.rs b/std/build.rs
+--- a/std/build.rs	2026-08-07 22:42:12.114085864 +0000
++++ b/std/build.rs	2026-08-08 22:48:54.697583148 +0000
+@@ -33,6 +33,7 @@
+         || target_os == "windows"
+         || target_os == "fuchsia"
+         || (target_vendor == "fortanix" && target_env == "sgx")
++        || target_os == "molecular"
+         || target_os == "motor"
+         || target_os == "hermit"
+         || target_os == "trusty"
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
+--- a/std/src/sys/alloc/mod.rs	2026-08-07 22:42:12.130085865 +0000
++++ b/std/src/sys/alloc/mod.rs	2026-08-08 22:48:54.697583148 +0000
+@@ -81,6 +81,10 @@
+         mod hermit;
+         use hermit as imp;
+     }
++    target_os = "molecular" => {
++        mod molecular;
++        use molecular as imp;
++    }
+     target_os = "motor" => {
+         mod motor;
+         use motor as imp;
+@@ -120,6 +124,7 @@
+ cfg_select! {
+     any(
+         target_os = "hermit",
++        target_os = "molecular",
+         target_os = "solid_asp3",
+         target_os = "uefi",
+         target_os = "zkvm",
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/alloc/molecular.rs b/std/src/sys/alloc/molecular.rs
+--- a/std/src/sys/alloc/molecular.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/sys/alloc/molecular.rs	2026-08-08 22:48:54.697635187 +0000
+@@ -0,0 +1,17 @@
++use super::realloc_fallback;
++use crate::alloc::Layout;
++
++#[inline]
++pub unsafe fn alloc(layout: Layout) -> *mut u8 {
++    unsafe { molecular_rt::alloc(layout.size(), layout.align()) }
++}
++
++#[inline]
++pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
++    unsafe { molecular_rt::dealloc(ptr, layout.size(), layout.align()) }
++}
++
++#[inline]
++pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
++    unsafe { realloc_fallback(ptr, layout, new_size) }
++}
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/exit.rs b/std/src/sys/exit.rs
+--- a/std/src/sys/exit.rs	2026-08-07 22:42:12.486085886 +0000
++++ b/std/src/sys/exit.rs	2026-08-08 22:48:54.697635187 +0000
+@@ -98,6 +98,9 @@
+                 libc::exit(code)
+             }
+         }
++        target_os = "molecular" => {
++            molecular_rt::exit(code)
++        }
+         target_os = "motor" => {
+             moto_rt::process::exit(code)
+         }
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/io/error/mod.rs b/std/src/sys/io/error/mod.rs
+--- a/std/src/sys/io/error/mod.rs	2026-08-07 22:42:12.158085867 +0000
++++ b/std/src/sys/io/error/mod.rs	2026-08-08 22:48:54.697635187 +0000
+@@ -3,6 +3,10 @@
+         mod hermit;
+         pub use hermit::*;
+     }
++    target_os = "molecular" => {
++        mod molecular;
++        pub use molecular::*;
++    }
+     target_os = "motor" => {
+         mod motor;
+         pub use motor::*;
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/io/error/molecular.rs b/std/src/sys/io/error/molecular.rs
+--- a/std/src/sys/io/error/molecular.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/sys/io/error/molecular.rs	2026-08-08 23:02:33.551970719 +0000
+@@ -0,0 +1,75 @@
++//! Отображение ошибок syscall-ABI в `io::ErrorKind`.
++//!
++//! Перечисление берётся из крейта ABI через `molecular-rt`, а не переписывается числами:
++//! новый вариант ломает сборку здесь, а не молча уезжает в `Uncategorized`.
++
++use molecular_rt::syscall::SyscallError;
++
++use crate::io::ErrorKind;
++
++/// Глобального «последнего errno» в ABI нет: каждый syscall возвращает свой код.
++pub fn errno() -> i32 {
++    0
++}
++
++/// Повторяемых кодов в ABI нет: `Canceled` означает исчезнувший handle, и повтор его не вернёт.
++pub fn is_interrupted(_code: i32) -> bool {
++    false
++}
++
++pub fn decode_error_kind(code: i32) -> ErrorKind {
++    let Ok(code) = u32::try_from(code) else {
++        return ErrorKind::Uncategorized;
++    };
++    let Some(error) = SyscallError::from_code(code) else {
++        return ErrorKind::Uncategorized;
++    };
++    match error {
++        SyscallError::BadSyscall | SyscallError::KernelOriginated => ErrorKind::Unsupported,
++        SyscallError::InvalidArgument
++        | SyscallError::WrongType
++        | SyscallError::BufferTooSmall
++        | SyscallError::MessageTooBig => ErrorKind::InvalidInput,
++        SyscallError::BadHandle | SyscallError::Revoked => ErrorKind::InvalidData,
++        SyscallError::AccessDenied => ErrorKind::PermissionDenied,
++        SyscallError::ShouldWait => ErrorKind::WouldBlock,
++        // Ожидание сорвал уход парной стороны или самого handle: повторять нечего.
++        SyscallError::PeerClosed | SyscallError::SenderGone | SyscallError::Canceled => {
++            ErrorKind::BrokenPipe
++        }
++        SyscallError::Timeout => ErrorKind::TimedOut,
++        SyscallError::OutOfHandles
++        | SyscallError::OutOfMemory
++        | SyscallError::ResourceExhausted => ErrorKind::OutOfMemory,
++        SyscallError::NotFound => ErrorKind::NotFound,
++        SyscallError::AlreadyBound => ErrorKind::AlreadyExists,
++    }
++}
++
++pub fn error_string(errno: i32) -> String {
++    let text = u32::try_from(errno)
++        .ok()
++        .and_then(SyscallError::from_code)
++        .map_or("unknown error", |error| match error {
++            SyscallError::BadSyscall => "unknown syscall number",
++            SyscallError::KernelOriginated => "syscall issued from kernel context",
++            SyscallError::InvalidArgument => "invalid argument",
++            SyscallError::BadHandle => "invalid or closed handle",
++            SyscallError::WrongType => "handle refers to an object of another type",
++            SyscallError::AccessDenied => "handle lacks the required rights",
++            SyscallError::ShouldWait => "operation must be retried later",
++            SyscallError::PeerClosed => "peer port is closed",
++            SyscallError::Timeout => "deadline expired",
++            SyscallError::BufferTooSmall => "receive buffer is smaller than the message",
++            SyscallError::MessageTooBig => "message exceeds the size limit",
++            SyscallError::OutOfHandles => "capability table is exhausted",
++            SyscallError::OutOfMemory => "out of memory",
++            SyscallError::NotFound => "region is not in the process registry",
++            SyscallError::Canceled => "wait was canceled",
++            SyscallError::ResourceExhausted => "resource accounting is exhausted",
++            SyscallError::Revoked => "capability was revoked",
++            SyscallError::AlreadyBound => "interrupt line is already bound",
++            SyscallError::SenderGone => "all badge senders are gone",
++        });
++    text.to_string()
++}
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.rs
+--- a/std/src/sys/pal/mod.rs	2026-08-07 22:42:12.150085866 +0000
++++ b/std/src/sys/pal/mod.rs	2026-08-08 22:48:54.697724498 +0000
+@@ -20,6 +20,10 @@
+         mod hermit;
+         pub use self::hermit::*;
+     }
++    target_os = "molecular" => {
++        mod molecular;
++        pub use self::molecular::*;
++    }
+     target_os = "motor" => {
+         mod motor;
+         pub use self::motor::*;
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
+--- a/std/src/sys/pal/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/sys/pal/molecular/mod.rs	2026-08-08 23:02:12.095971338 +0000
+@@ -0,0 +1,53 @@
++//! Платформенный слой Molecular OS.
++//!
++//! Работу выполняет крейт `molecular-rt`: он же обслуживает userspace-программы вне `std`.
++//! Здесь только точка входа и перенос futex наружу, где его ждут реализации синхронизации.
++
++#![allow(unsafe_op_in_unsafe_fn)]
++
++pub use molecular_rt::futex;
++
++use crate::io;
++
++/// Точка входа программы: ядро передаёт handle стартового порта в `x0`.
++#[cfg(not(test))]
++#[unsafe(no_mangle)]
++pub extern "C" fn _start(bootstrap: u32) -> ! {
++    molecular_rt::start(bootstrap);
++
++    unsafe extern "C" {
++        fn main(argc: isize, argv: *const *const u8, sigpipe: u8) -> i32;
++    }
++    // Аргументов командной строки процесс пока не получает: ядро их не передаёт.
++    let code = unsafe { main(0, crate::ptr::null(), 0) };
++
++    molecular_rt::exit(code)
++}
++
++/// # Safety
++///
++/// Вызывается один раз при инициализации рантайма.
++pub unsafe fn init(_argc: isize, _argv: *const *const u8, _sigpipe: u8) {}
++
++/// # Safety
++///
++/// Вызывается один раз при остановке рантайма и не гарантирован при аварийном завершении.
++pub unsafe fn cleanup() {
++    // Ключевой TLS рассчитывает, что деструкторы ключей гоняет платформа на выходе потока.
++    // Для главного потока этот выход здесь: `rt::cleanup` зовут и возврат из `main`, и
++    // `process::exit`. Без этого не отработали бы ни `Drop` у `thread_local!`, ни
++    // `rt::thread_cleanup`.
++    molecular_rt::tls::run_destructors();
++}
++
++pub fn unsupported<T>() -> io::Result<T> {
++    Err(unsupported_err())
++}
++
++pub fn unsupported_err() -> io::Error {
++    io::Error::UNSUPPORTED_PLATFORM
++}
++
++pub fn abort_internal() -> ! {
++    molecular_rt::exit(-1)
++}
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/random/mod.rs b/std/src/sys/random/mod.rs
+--- a/std/src/sys/random/mod.rs	2026-08-07 22:42:12.150085866 +0000
++++ b/std/src/sys/random/mod.rs	2026-08-08 22:48:54.698164492 +0000
+@@ -99,6 +99,10 @@
+         mod wasi;
+         pub use wasi::{fill_bytes, hashmap_random_keys};
+     }
++    target_os = "molecular" => {
++        mod molecular;
++        pub use molecular::{fill_bytes, hashmap_random_keys};
++    }
+     target_os = "zkvm" => {
+         mod zkvm;
+         pub use zkvm::fill_bytes;
+@@ -119,6 +123,7 @@
+ #[cfg(not(any(
+     target_os = "linux",
+     target_os = "android",
++    target_os = "molecular",
+     all(target_family = "wasm", target_os = "unknown"),
+     all(target_os = "wasi", not(target_env = "p1")),
+     target_os = "xous",
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/random/molecular.rs b/std/src/sys/random/molecular.rs
+--- a/std/src/sys/random/molecular.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/sys/random/molecular.rs	2026-08-08 22:48:54.698277207 +0000
+@@ -0,0 +1,18 @@
++//! Источника энтропии в системе нет.
++//!
++//! `SystemRng` по контракту `std` отдаёт данные, пригодные для криптографии. Такого источника
++//! у нас пока не существует, поэтому запрос падает, а не возвращает предсказуемый поток под
++//! видом случайного. Ключи хеш-таблиц сеются отдельным генератором: там предсказуемость — это
++//! вопрос устойчивости к HashDoS, а не секретности, и цена молчаливой слабости иная.
++
++pub fn fill_bytes(_bytes: &mut [u8]) {
++    panic!("Molecular OS has no entropy source: SystemRng is unavailable");
++}
++
++pub fn hashmap_random_keys() -> (u64, u64) {
++    let mut seed = [0; 16];
++    molecular_rt::random::fill_bytes(&mut seed);
++    let first = u64::from_ne_bytes(seed[..8].try_into().unwrap());
++    let second = u64::from_ne_bytes(seed[8..].try_into().unwrap());
++    (first, second)
++}
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/condvar/mod.rs b/std/src/sys/sync/condvar/mod.rs
+--- a/std/src/sys/sync/condvar/mod.rs	2026-08-07 22:42:12.158085867 +0000
++++ b/std/src/sys/sync/condvar/mod.rs	2026-08-08 22:48:54.698277207 +0000
+@@ -6,6 +6,7 @@
+         target_os = "freebsd",
+         target_os = "openbsd",
+         target_os = "dragonfly",
++        target_os = "molecular",
+         target_os = "motor",
+         target_os = "fuchsia",
+         all(target_family = "wasm", target_feature = "atomics"),
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/mutex/mod.rs b/std/src/sys/sync/mutex/mod.rs
+--- a/std/src/sys/sync/mutex/mod.rs	2026-08-07 22:42:12.170085868 +0000
++++ b/std/src/sys/sync/mutex/mod.rs	2026-08-08 22:48:54.698277207 +0000
+@@ -5,6 +5,7 @@
+         target_os = "android",
+         target_os = "freebsd",
+         target_os = "openbsd",
++        target_os = "molecular",
+         target_os = "motor",
+         target_os = "dragonfly",
+         all(target_family = "wasm", target_feature = "atomics"),
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/once/mod.rs b/std/src/sys/sync/once/mod.rs
+--- a/std/src/sys/sync/once/mod.rs	2026-08-07 22:42:12.138085866 +0000
++++ b/std/src/sys/sync/once/mod.rs	2026-08-08 22:48:54.698277207 +0000
+@@ -14,6 +14,7 @@
+         target_os = "android",
+         all(target_family = "wasm", target_feature = "atomics"),
+         target_os = "freebsd",
++        target_os = "molecular",
+         target_os = "motor",
+         target_os = "openbsd",
+         target_os = "dragonfly",
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/rwlock/mod.rs b/std/src/sys/sync/rwlock/mod.rs
+--- a/std/src/sys/sync/rwlock/mod.rs	2026-08-07 22:42:12.150085866 +0000
++++ b/std/src/sys/sync/rwlock/mod.rs	2026-08-08 22:48:54.698277207 +0000
+@@ -9,6 +9,7 @@
+         target_os = "fuchsia",
+         all(target_family = "wasm", target_feature = "atomics"),
+         target_os = "hermit",
++        target_os = "molecular",
+         target_os = "motor",
+         all(target_os = "wasi", target_env = "p3"),
+     ) => {
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/thread_parking/mod.rs b/std/src/sys/sync/thread_parking/mod.rs
+--- a/std/src/sys/sync/thread_parking/mod.rs	2026-08-07 22:42:12.146085866 +0000
++++ b/std/src/sys/sync/thread_parking/mod.rs	2026-08-08 22:48:54.698277207 +0000
+@@ -8,6 +8,7 @@
+         target_os = "openbsd",
+         target_os = "dragonfly",
+         target_os = "fuchsia",
++        target_os = "molecular",
+         target_os = "motor",
+         target_os = "hermit",
+         all(target_os = "wasi", target_env = "p3"),
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/thread_local/key/molecular.rs b/std/src/sys/thread_local/key/molecular.rs
+--- a/std/src/sys/thread_local/key/molecular.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/sys/thread_local/key/molecular.rs	2026-08-08 22:48:54.698277207 +0000
+@@ -0,0 +1,27 @@
++//! Ключи локальных данных потока обслуживает `molecular-rt` поверх `TPIDR_EL0`.
++
++pub type Key = molecular_rt::tls::Key;
++
++#[inline]
++pub fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
++    let key = molecular_rt::tls::create(dtor);
++    if key == 0 {
++        rtabort!("out of TLS keys");
++    }
++    key
++}
++
++#[inline]
++pub unsafe fn set(key: Key, value: *mut u8) {
++    unsafe { molecular_rt::tls::set(key, value) }
++}
++
++#[inline]
++pub unsafe fn get(key: Key) -> *mut u8 {
++    unsafe { molecular_rt::tls::get(key) }
++}
++
++#[inline]
++pub unsafe fn destroy(key: Key) {
++    unsafe { molecular_rt::tls::destroy(key) }
++}
+diff -ruN '--exclude=Cargo.lock' a/std/src/sys/thread_local/mod.rs b/std/src/sys/thread_local/mod.rs
+--- a/std/src/sys/thread_local/mod.rs	2026-08-07 22:42:12.150085866 +0000
++++ b/std/src/sys/thread_local/mod.rs	2026-08-08 22:48:54.698277207 +0000
+@@ -163,6 +163,15 @@
+             pub(super) use unix::get;
+             use unix::{create, destroy};
+         }
++        target_os = "molecular" => {
++            mod racy;
++            mod molecular;
++            pub(super) use racy::LazyKey;
++            pub(super) use molecular::{Key, set};
++            #[cfg(any(not(target_thread_local), test))]
++            pub(super) use molecular::get;
++            use molecular::{create, destroy};
++        }
+         all(not(target_thread_local), target_os = "windows") => {
+             #[cfg(test)]
+             mod tests;
