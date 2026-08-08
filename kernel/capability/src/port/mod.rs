@@ -713,6 +713,7 @@ mod tests {
         fn exit_current_process(&self, _c: i32) -> ! {
             unreachable!("not used in port tests")
         }
+        fn yield_current(&self) {}
         fn block_current_until(&self, _f: &AtomicU32, _t: Option<u64>) {}
         fn unblock(&self, _t: WaitToken) {
             self.unblocks.fetch_add(1, Ordering::AcqRel);
@@ -761,6 +762,7 @@ mod tests {
         fn exit_current_process(&self, _c: i32) -> ! {
             unreachable!("not used in port tests")
         }
+        fn yield_current(&self) {}
         fn block_current_until(&self, _f: &AtomicU32, timeout_ns: Option<u64>) {
             self.parks.lock().unwrap().push(timeout_ns);
             if let Some(timeout) = timeout_ns {

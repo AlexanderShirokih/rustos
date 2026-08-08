@@ -15,6 +15,7 @@ use spin::{Mutex, Once};
 use syscall::Handle;
 
 mod address_space_isolation;
+mod clock;
 mod filesystem;
 mod filesystem_stress;
 mod fixture;
@@ -46,6 +47,8 @@ mod spawn_from_image;
 mod startup_fixture_protocol;
 mod stress;
 mod sync;
+mod thread_pointer;
+mod thread_yield;
 mod vm;
 
 static BOOTSTRAP_HANDLE: Once<Handle> = Once::new();

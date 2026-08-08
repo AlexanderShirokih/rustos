@@ -62,6 +62,8 @@ impl KernelRuntime for TableRuntime {
         panic!("exit_current_process must not be called");
     }
 
+    fn yield_current(&self) {}
+
     fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
 
     fn unblock(&self, _token: WaitToken) {}

@@ -23,6 +23,10 @@ const _: () = assert!(
     core::mem::offset_of!(ExceptionFrame, sp_el0) == 288,
     "exception_entry! reaches sp_el0 by a literal offset"
 );
+const _: () = assert!(
+    core::mem::offset_of!(ExceptionFrame, tpidr_el0) == 296,
+    "exception_entry! reaches tpidr_el0 by a literal offset"
+);
 
 /// Контекст процессора, сохраняемый при входе в обработчик исключения.
 #[repr(C)]
@@ -42,7 +46,9 @@ pub struct ExceptionFrame {
     /// User-указатель стека (SP_EL0). Живёт в железе между трапами, поэтому
     /// сохраняется на входе и восстанавливается перед `eret`.
     pub sp_el0: u64,
-    _reserved: u64,
+    /// Указатель локальных данных потока (TPIDR_EL0): сохраняется на входе и восстанавливается
+    /// перед `eret`.
+    pub tpidr_el0: u64,
 }
 
 /// Тип исключения, определяемый вектором входа.
@@ -233,6 +239,7 @@ fn write_frame(buf: &mut StaticString<EXCEPTION_BUF_SIZE>, frame: &ExceptionFram
     let _ = writeln!(buf, "  SPSR: {:#018x}", frame.spsr);
     let _ = writeln!(buf, "  SP:   {:#018x}", frame.sp);
     let _ = writeln!(buf, "  SP_EL0: {:#018x}", frame.sp_el0);
+    let _ = writeln!(buf, "  TPIDR_EL0: {:#018x}", frame.tpidr_el0);
     let _ = writeln!(buf, "Registers:");
 
     let r = &frame.regs;
@@ -295,7 +302,8 @@ macro_rules! exception_entry {
                 "mrs x10, far_el1",
                 "stp x9,  x10, [sp, #272]",
                 "mrs x9,  sp_el0",
-                "str x9,  [sp, #288]",
+                "mrs x10, tpidr_el0",
+                "stp x9,  x10, [sp, #288]",
 
                 // Вызов Rust-диспетчера
                 // x0 = &mut ExceptionFrame, x1 = ExceptionKind (u64)
@@ -307,8 +315,9 @@ macro_rules! exception_entry {
                 "ldp x9,  x10, [sp, #256]",
                 "msr elr_el1,  x9",
                 "msr spsr_el1, x10",
-                "ldr x9,  [sp, #288]",
+                "ldp x9,  x10, [sp, #288]",
                 "msr sp_el0,  x9",
+                "msr tpidr_el0, x10",
 
                 // Регистры общего назначения
                 "ldp x0,  x1,  [sp, #0]",

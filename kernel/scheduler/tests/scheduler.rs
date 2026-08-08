@@ -72,6 +72,10 @@ impl capability::KernelRuntime for ForwardingRuntime {
         self.with(|rt| rt.exit_current_process(exit_code))
     }
 
+    fn yield_current(&self) {
+        self.with(|rt| rt.yield_current());
+    }
+
     fn block_current_until(
         &self,
         ready_flag: &core::sync::atomic::AtomicU32,

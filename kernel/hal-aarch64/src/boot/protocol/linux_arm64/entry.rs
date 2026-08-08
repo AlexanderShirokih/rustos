@@ -5,8 +5,11 @@ use core::{arch::naked_asm, hint::spin_loop};
 use hal_common::boot::BootInfo;
 use memory::physical_address::PhysicalAddress;
 
-use crate::boot::boot_early::{
-    _bss_end, _bss_start, _stack_bottom, _stack_top, BOOT_STACK_FILL, boot_main,
+use crate::{
+    boot::boot_early::{
+        _bss_end, _bss_start, _stack_bottom, _stack_top, BOOT_STACK_FILL, boot_main,
+    },
+    consts::CNTKCTL_EL1_USER_COUNTER,
 };
 
 /// Точка входа ядра. Передаёт управление от загрузчика к `boot_main`.
@@ -63,6 +66,12 @@ pub extern "C" fn _start() {
         "mrs    x0, cpacr_el1",
         "orr    x0, x0, #(0x3 << 20)",
         "msr    cpacr_el1, x0",
+        "isb",
+
+        // Открываем userspace счётчик времени и его частоту. Регистр пишется целиком: после
+        // reset его значение неизвестно, а лишние биты открыли бы и управление таймером.
+        "mov    x0, #{cntkctl}",
+        "msr    cntkctl_el1, x0",
         "isb",
 
         // Сброс строк кэша над `.bss` и стеком до точки когерентности.
@@ -131,6 +140,7 @@ pub extern "C" fn _start() {
         fill_1          = const ((BOOT_STACK_FILL >> 16) & 0xFFFF) as u16,
         fill_2          = const ((BOOT_STACK_FILL >> 32) & 0xFFFF) as u16,
         fill_3          = const ((BOOT_STACK_FILL >> 48) & 0xFFFF) as u16,
+        cntkctl         = const CNTKCTL_EL1_USER_COUNTER,
         boot_main_entry = sym boot_main_entry,
     )
 }

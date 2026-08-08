@@ -23,3 +23,7 @@ pub const KMMIO_BASE: PageAlignedVirtualAddress =
 
 /// VA-cap kernel-MMIO арены.
 pub const KMMIO_MAX_SIZE: NonZeroUsize = NonZeroUsize::new(4 * 1024 * 1024 * 1024).unwrap();
+
+/// `CNTKCTL_EL1` для userspace: `EL0VCTEN` открывает счётчик времени и его частоту, остальные
+/// биты нулевые и держат управление таймером за ядром.
+pub const CNTKCTL_EL1_USER_COUNTER: u64 = 1 << 1;

@@ -145,6 +145,7 @@ impl KernelRuntime for TableRuntime {
     fn exit_current_process(&self, _c: i32) -> ! {
         panic!("exit_current_process must not be called in this test")
     }
+    fn yield_current(&self) {}
     fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
     fn unblock(&self, _t: WaitToken) {}
     fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}

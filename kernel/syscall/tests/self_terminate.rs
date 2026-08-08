@@ -1,6 +1,6 @@
 //! Self-terminate через handle отвергается с `AccessDenied`
 //! (`process.rs:116`, `thread.rs:107`): self-exit обязан идти через
-//! `ThreadExit`, выполняющий context switch.
+//! `ThreadExit` либо `ProcessExit`, выполняющие context switch.
 
 #![allow(clippy::unwrap_used)]
 
@@ -48,6 +48,7 @@ impl KernelRuntime for SelfRuntime {
     fn exit_current_process(&self, _c: i32) -> ! {
         panic!("must not exit process");
     }
+    fn yield_current(&self) {}
     fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
     fn unblock(&self, _t: WaitToken) {}
     fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
@@ -177,6 +178,20 @@ fn process_terminate_on_self_handle_is_access_denied() {
         terminate(SyscallOp::ProcessTerminate, pid),
         Err(SyscallError::AccessDenied.as_return_value())
     );
+}
+
+#[test]
+#[should_panic(expected = "must not exit process")]
+fn process_exit_reaches_the_runtime() {
+    let _g = test_lock();
+    let _rt = runtime();
+
+    let mut frame = TestFrame {
+        op: SyscallOp::ProcessExit as u16,
+        args: [7, 0, 0, 0, 0, 0],
+        ret: 0,
+    };
+    syscall_kernel::dispatch(&mut frame);
 }
 
 #[test]

@@ -16,17 +16,20 @@ use core::{
 };
 
 use fixture_protocol::{
-    OP_ALLOCATE_PAGES, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT, OP_MAP_CHECK, OP_READ_SLOT,
-    OP_WRITE_SLOT, READ_REPLY_LEN, REPLY_ACCESS_DENIED, REPLY_ALLOCATE_FAILED,
+    OP_ALLOCATE_PAGES, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT, OP_MAP_CHECK, OP_PROCESS_EXIT,
+    OP_READ_SLOT, OP_WRITE_SLOT, READ_REPLY_LEN, REPLY_ACCESS_DENIED, REPLY_ALLOCATE_FAILED,
     REPLY_BUDGET_EXHAUSTED, REPLY_DUPLICATE_FAILED, REPLY_MAP_FAILED, REPLY_OK,
-    REPLY_PATTERN_MISMATCH, REQUEST_LEN, decode_request,
+    REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED, REQUEST_LEN, decode_request,
 };
 use runtime::{
-    Error, MemoryAccess, MemoryRegion, OwnedHandle, Port, Reply, Resource, Timeout, UserMemFlags,
-    thread_exit,
+    Error, MemoryAccess, MemoryRegion, OwnedHandle, Port, Priority, Reply, Resource, Signal,
+    Timeout, UserMemFlags, process_exit, signal_set, spawn_owned, thread_exit,
 };
-use syscall::{Handle, Rights, SyscallError};
+use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 use userland::USERLAND_PAGE_SIZE;
+
+const PARKED_STACK_SIZE: u64 = 0x4000;
+const PARK_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 mod fixture_protocol;
 mod ipc_raw;
@@ -36,6 +39,7 @@ static SLOT: AtomicU64 = AtomicU64::new(0);
 const EXIT_BAD_REQUEST: u64 = 101;
 const EXIT_RECV_FAILED: u64 = 102;
 const EXIT_REPLY_FAILED: u64 = 103;
+const EXIT_SPAWN_FAILED: u64 = 104;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(root: Handle) -> ! {
@@ -79,9 +83,45 @@ pub extern "C" fn _start(root: Handle) -> ! {
                 answer(reply, &[REPLY_OK]);
                 thread_exit(arg)
             }
+            OP_PROCESS_EXIT => {
+                if !start_parked_sibling() {
+                    answer(reply, &[REPLY_SPAWN_FAILED]);
+                    thread_exit(EXIT_SPAWN_FAILED)
+                }
+                answer(reply, &[REPLY_OK]);
+                process_exit(arg)
+            }
             _ => thread_exit(EXIT_BAD_REQUEST),
         }
     }
+}
+
+fn start_parked_sibling() -> bool {
+    let Ok(ready) = Signal::create() else {
+        return false;
+    };
+    let ready_handle = ready.handle().as_raw();
+    let spawned = spawn_owned(
+        move || park_forever(ready_handle),
+        PARKED_STACK_SIZE,
+        Priority::new(1),
+    );
+    if spawned.is_err() {
+        return false;
+    }
+    // Возврат отложен до того, как сосед встал в ожидание: без этого
+    // `ProcessExit` снимал бы поток, ни разу не получавший CPU.
+    ready.wait(SIGNALED, PARK_TIMEOUT).is_ok()
+}
+
+fn park_forever(ready: Handle) -> u32 {
+    let Ok(signal) = Signal::create() else {
+        return 1;
+    };
+    let _ = signal_set(ready, SIGNALED, 0, WakeCount::All);
+    // Пробуждения у этого сигнала нет ни одного: поток снимает `ProcessExit`.
+    let _ = signal.wait(SIGNALED, Timeout::INFINITE);
+    0
 }
 
 fn answer(reply: Reply, body: &[u8]) {

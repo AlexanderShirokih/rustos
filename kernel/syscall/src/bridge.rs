@@ -38,7 +38,7 @@ pub trait SyscallFrame {
 }
 
 /// Главная точка входа: декодирует op, диспатчит на handler, кодирует результат.
-/// Для `ThreadExit` не возвращается.
+/// Для `ThreadExit` и `ProcessExit` не возвращается.
 #[allow(clippy::too_many_lines)]
 pub fn dispatch(frame: &mut dyn SyscallFrame) {
     if frame.origin() == Origin::Kernel {
@@ -135,6 +135,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::process::sys_process_terminate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
+        SyscallOp::ProcessExit => sys_process_exit(frame.arg(0)),
         SyscallOp::ProcessStart => {
             let r = super::process::sys_process_start(
                 frame.arg(0),
@@ -170,6 +171,10 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
         SyscallOp::ThreadTerminate => {
             let r = super::thread::sys_thread_terminate(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
+        }
+        SyscallOp::ThreadYield => {
+            capability::thread_yield();
+            frame.set_return(0);
         }
         SyscallOp::MemoryCreateVirtual => {
             let r =
@@ -218,6 +223,11 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
 fn sys_thread_exit(code: u64) -> ! {
     let exit_code = super::process::exit_code_from_arg(code);
     capability::thread_exit(exit_code)
+}
+
+fn sys_process_exit(code: u64) -> ! {
+    let exit_code = super::process::exit_code_from_arg(code);
+    capability::process_exit(exit_code)
 }
 
 fn sys_signal_set(handle: u64, set: u64, clear: u64, count: u64) -> Result<u64, SyscallError> {

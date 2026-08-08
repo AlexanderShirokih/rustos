@@ -355,6 +355,10 @@ where
         unreachable!("terminated process resumed after scheduler switch")
     }
 
+    fn yield_current(&self) {
+        SchedulerService::yield_now(self);
+    }
+
     fn block_current_until(&self, ready_flag: &AtomicU32, timeout_ns: Option<u64>) {
         with_preemption_disabled::<A::Cpu, _>(|| {
             let action = self.inner.with_lock(|inner| {

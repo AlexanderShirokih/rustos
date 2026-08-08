@@ -16,7 +16,7 @@ use scheduler::{ArchCpu, CpuBootstrapError, CpuId};
 
 use super::handoff::{self, HANDOFF, SECONDARY_STACK_SIZE, SECONDARY_STACKS};
 use crate::{
-    consts::HIGHER_HALF_BASE,
+    consts::{CNTKCTL_EL1_USER_COUNTER, HIGHER_HALF_BASE},
     cpu,
     exception::ExceptionVectors,
     memory::{
@@ -74,6 +74,12 @@ unsafe extern "C" fn secondary_start() {
         "msr    cpacr_el1, x0",
         "isb",
 
+        // Открываем userspace счётчик времени и его частоту. Регистр пишется целиком: после
+        // reset его значение неизвестно, а лишние биты открыли бы и управление таймером.
+        "mov    x0, #{cntkctl}",
+        "msr    cntkctl_el1, x0",
+        "isb",
+
         // Первые два поля блока передачи: логический идентификатор и номер
         // загрузочного стека.
         "adrp   x19, {handoff}",
@@ -110,6 +116,7 @@ unsafe extern "C" fn secondary_start() {
         handoff        = sym HANDOFF,
         stacks         = sym SECONDARY_STACKS,
         stack_size     = const SECONDARY_STACK_SIZE,
+        cntkctl        = const CNTKCTL_EL1_USER_COUNTER,
         secondary_boot = sym secondary_boot,
     )
 }

@@ -23,6 +23,9 @@ pub const OP_ALLOCATE_PAGES: u8 = 5;
 /// Снять с собственного метеринг-ресурса капу с правом `TRANSFER`. Ответ -
 /// [`REPLY_OK`], [`REPLY_ACCESS_DENIED`] либо [`REPLY_DUPLICATE_FAILED`].
 pub const OP_DUPLICATE_TRANSFER_CAP: u8 = 6;
+/// Поднять поток, паркующийся бессрочно, ответить [`REPLY_OK`] либо
+/// [`REPLY_SPAWN_FAILED`] и завершить процесс целиком с кодом из аргумента.
+pub const OP_PROCESS_EXIT: u8 = 7;
 
 /// Длина запроса: опкод и `u64`-аргумент.
 pub const REQUEST_LEN: usize = 1 + 8;
@@ -43,6 +46,8 @@ pub const REPLY_ALLOCATE_FAILED: u8 = 4;
 pub const REPLY_ACCESS_DENIED: u8 = 5;
 /// `OP_DUPLICATE_TRANSFER_CAP`: дубликат отказан не правами.
 pub const REPLY_DUPLICATE_FAILED: u8 = 6;
+/// `OP_PROCESS_EXIT`: паркующийся поток не поднялся.
+pub const REPLY_SPAWN_FAILED: u8 = 7;
 
 /// Сериализует запрос в кадр фиксированной длины.
 pub fn encode_request(op: u8, arg: u64) -> [u8; REQUEST_LEN] {

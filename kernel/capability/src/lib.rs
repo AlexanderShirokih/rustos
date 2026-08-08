@@ -36,7 +36,7 @@ mod wait;
 pub use api::{
     WaitManyOutcome, current_process_name, handle_close, handle_duplicate, install_handle, irq_ack,
     irq_mint, process_exit, signal_create, signal_set, signal_wait_many, signal_wait_one,
-    thread_exit,
+    thread_exit, thread_yield,
 };
 pub use errors::{IpcError, SpawnError};
 pub use handle::{Capability, HandleId};

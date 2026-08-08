@@ -7,11 +7,12 @@ use runtime::{Priority, Process, Resource, Thread, ThreadEntry, UserMemFlags, th
 
 use crate::{
     fixture::{Fixture, JOIN_TIMEOUT},
-    fixture_protocol::{OP_EXIT, REPLY_OK},
+    fixture_protocol::{OP_EXIT, OP_PROCESS_EXIT, REPLY_OK},
 };
 
 const STACK_SIZE: u64 = 0x4000;
 const EXIT_CODE: u32 = 42;
+const PROCESS_EXIT_CODE: u32 = 77;
 
 extern "C" fn exiting_entry(code: usize) -> ! {
     thread_exit(code as u64)
@@ -59,5 +60,24 @@ fn child_process_exit_code_is_observable() {
     kernel_tests::kassert_eq!(
         fixture.process().exit_code().expect("child exit code"),
         EXIT_CODE
+    );
+}
+
+/// `ProcessExit(N)` снимает процесс вместе с припаркованным потоком, которого
+/// `ThreadExit` вызывающего не касается.
+#[kernel_test]
+fn process_exit_terminates_the_parked_sibling() {
+    let fixture = Fixture::spawn();
+
+    let status = fixture.request_status(OP_PROCESS_EXIT, u64::from(PROCESS_EXIT_CODE), &[]);
+    kernel_tests::kassert_eq!(status, REPLY_OK);
+
+    fixture
+        .process()
+        .join(JOIN_TIMEOUT)
+        .expect("child terminates");
+    kernel_tests::kassert_eq!(
+        fixture.process().exit_code().expect("child exit code"),
+        PROCESS_EXIT_CODE
     );
 }

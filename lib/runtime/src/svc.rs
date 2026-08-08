@@ -723,3 +723,32 @@ pub fn thread_exit(code: u64) -> ! {
         )
     }
 }
+
+/// Завершает текущий процесс со всеми его потоками с кодом `code`;
+/// не возвращается.
+pub fn process_exit(code: u64) -> ! {
+    // SAFETY: ProcessExit не возвращается, поэтому asm помечен noreturn и
+    // удовлетворяет `-> !`; x0 несёт exit code.
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::ProcessExit as u16,
+            in("x0") code,
+            options(noreturn, nostack),
+        )
+    }
+}
+
+/// Уступает остаток кванта текущего потока.
+pub fn thread_yield() {
+    // SAFETY: svc-immediate несёт номер операции, аргументов нет; память
+    // ядру не передаётся, возврат не используется.
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::ThreadYield as u16,
+            lateout("x0") _,
+            options(nostack),
+        );
+    }
+}

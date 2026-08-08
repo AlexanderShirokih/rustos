@@ -78,6 +78,10 @@ pub trait KernelRuntime: Send + Sync {
     /// Не возвращается.
     fn exit_current_process(&self, exit_code: i32) -> !;
 
+    /// Уступает остаток кванта: текущий поток встаёт в конец своей
+    /// ready-очереди и остаётся runnable.
+    fn yield_current(&self);
+
     /// Паркует текущий поток.
     /// `timeout_ns = None` означает бессрочный wait, `Some(d)` -
     /// wakeup-deadline через тот же `SleepQueue`, что и `sleep_ns`.

@@ -165,6 +165,13 @@ pub enum SyscallOp {
     /// Возвращает handle на свежий `ThreadObject`.
     ProcessStart = 0x45,
 
+    /// Завершает текущий процесс вместе со всеми его потоками. Аргументы:
+    ///  - `arg0=exit_code`.
+    ///
+    /// Не возвращается. Хэндла не требует: завершение собственного процесса
+    /// через `Self::ProcessTerminate` отвергается.
+    ProcessExit = 0x48,
+
     // 0x50..=0x5F - Thread CapabilityTarget.
     /// Создаёт user-поток в указанном процессе. Аргументы:
     ///  - `arg0=process_handle`,
@@ -204,6 +211,12 @@ pub enum SyscallOp {
     /// потока. Аргументов нет.
     /// Возврат: VA (>0) либо `-(SyscallError)`, если у потока нет буфера (kernel-поток).
     ThreadIpcBufferAddr = 0x55,
+
+    /// Уступает остаток кванта: текущий поток встаёт в конец своей
+    /// ready-очереди. Аргументов нет.
+    ///
+    /// Возврат `0`.
+    ThreadYield = 0x56,
 
     // 0x60..=0x6F - Memory CapabilityTarget.
     /// Создаёт `CapabilityTarget::Memory` с Virtual backing. Аргументы:
@@ -304,12 +317,14 @@ impl SyscallOp {
             0x45 => Some(Self::ProcessStart),
             0x46 => Some(Self::ProcessResourceSelf),
             0x47 => Some(Self::ResourceSplit),
+            0x48 => Some(Self::ProcessExit),
             0x50 => Some(Self::ThreadCreate),
             0x51 => Some(Self::ThreadSelf),
             0x52 => Some(Self::ThreadExit),
             0x53 => Some(Self::ThreadExitCode),
             0x54 => Some(Self::ThreadTerminate),
             0x55 => Some(Self::ThreadIpcBufferAddr),
+            0x56 => Some(Self::ThreadYield),
             0x60 => Some(Self::MemoryCreateVirtual),
             0x62 => Some(Self::MemorySlice),
             0x63 => Some(Self::MemoryMap),
@@ -356,11 +371,13 @@ mod tests {
             Some(SyscallOp::ProcessResourceSelf)
         );
         assert_eq!(SyscallOp::from_raw(0x47), Some(SyscallOp::ResourceSplit));
+        assert_eq!(SyscallOp::from_raw(0x48), Some(SyscallOp::ProcessExit));
         assert_eq!(SyscallOp::from_raw(0x50), Some(SyscallOp::ThreadCreate));
         assert_eq!(SyscallOp::from_raw(0x51), Some(SyscallOp::ThreadSelf));
         assert_eq!(SyscallOp::from_raw(0x52), Some(SyscallOp::ThreadExit));
         assert_eq!(SyscallOp::from_raw(0x53), Some(SyscallOp::ThreadExitCode));
         assert_eq!(SyscallOp::from_raw(0x54), Some(SyscallOp::ThreadTerminate));
+        assert_eq!(SyscallOp::from_raw(0x56), Some(SyscallOp::ThreadYield));
         assert_eq!(
             SyscallOp::from_raw(0x60),
             Some(SyscallOp::MemoryCreateVirtual)
@@ -392,13 +409,13 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(0x61), None);
         assert_eq!(SyscallOp::from_raw(0x68), None);
         assert_eq!(SyscallOp::from_raw(0x6F), None);
-        assert_eq!(SyscallOp::from_raw(0x48), None);
-        assert_eq!(SyscallOp::from_raw(0x56), None);
+        assert_eq!(SyscallOp::from_raw(0x49), None);
         assert_eq!(SyscallOp::from_raw(0x72), None);
         assert_eq!(SyscallOp::from_raw(0x74), None);
         assert_eq!(SyscallOp::from_raw(0x75), None);
         assert_eq!(SyscallOp::from_raw(0x76), None);
         assert_eq!(SyscallOp::from_raw(0x7F), None);
+        assert_eq!(SyscallOp::from_raw(0x80), None);
         assert_eq!(SyscallOp::from_raw(u16::MAX), None);
     }
 }

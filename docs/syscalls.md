@@ -296,6 +296,7 @@ Process-вызовы создают процесс, возвращают handle 
 | `0x45` | `ProcessStart`        | `process_h`, `entry_pc`, `user_sp`, `bootstrap_handle`, `priority`, `resource_h` | `thread_h`            | `WRITE` на `process_h`; `TRANSFER` на `bootstrap_handle`; `WRITE` и `DUPLICATE` на `resource_h` |
 | `0x46` | `ProcessResourceSelf` | —                                                                                 | `resource_h`          | —                                                                        |
 | `0x47` | `ResourceSplit`       | `resource_h`, `budget_pages`                                                      | `resource_h` (производный) | `WRITE` и `DUPLICATE` на `resource_h`                               |
+| `0x48` | `ProcessExit`         | `exit_code`                                                                       | не возвращается       | —                                                                        |
 
 Завершение процесса наблюдается ожиданием по `process_h`
 (`SignalWaitOne`/`Many`, бит `SIGNALED`).
@@ -332,7 +333,11 @@ ABI.
 потолке глубины возвращает `ResourceExhausted`.
 
 `ProcessTerminate` не используется для self-exit: handle на текущий процесс возвращает `AccessDenied` даже при `WRITE`. 
-Собственное завершение идёт через `ThreadExit`; последний поток процесса помечает процесс завершённым.
+Собственное завершение идёт через `ProcessExit` либо `ThreadExit`; последний поток процесса помечает процесс завершённым.
+
+`ProcessExit` снимает все потоки текущего процесса разом, включая те, что стоят в ожидании, и публикует `exit_code`
+как код выхода процесса. Хэндла вызов не берёт: полномочие на собственный процесс есть у каждого потока по построению.
+`ThreadExit` уносит только вызывающий поток, поэтому процессу с несколькими потоками нужен именно `ProcessExit`.
 
 Завершение необратимо: `ProcessStart` и `ThreadCreate` на handle завершённого процесса возвращают `WrongType`.
 
@@ -372,8 +377,12 @@ Thread-вызовы создают поток в процессе, возвра�
 | `0x53` | `ThreadExitCode`          | `thread_h`                                            | `exit_code` как `u32`  | `READ`  |
 | `0x54` | `ThreadTerminate`         | `thread_h`, `exit_code`                               | `0`                    | `WRITE` |
 | `0x55` | `ThreadIpcBufferAddr`     | —                                                     | `ipc_buffer_va`        | —       |
+| `0x56` | `ThreadYield`             | —                                                     | `0`                    | —       |
 
 `ThreadSelf` возвращает handle на текущий поток.
+
+`ThreadYield` уступает остаток кванта: поток встаёт в конец очереди готовых своего приоритета и остаётся runnable.
+Готовых потоков того же приоритета может не оказаться — тогда вызов возвращается тому же потоку.
 
 `ThreadTerminate` не используется для self-exit. Handle на текущий поток возвращает `AccessDenied` даже при `WRITE`. 
 Для завершения текущего потока вызывается `ThreadExit`.

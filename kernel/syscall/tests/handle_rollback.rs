@@ -65,6 +65,8 @@ impl KernelRuntime for CountingRuntime {
         panic!("exit_current_process must not be called in this test");
     }
 
+    fn yield_current(&self) {}
+
     fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
 
     fn unblock(&self, _token: WaitToken) {}

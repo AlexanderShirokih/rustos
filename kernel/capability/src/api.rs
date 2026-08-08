@@ -332,6 +332,12 @@ pub fn process_exit(exit_code: i32) -> ! {
     runtime().exit_current_process(exit_code)
 }
 
+/// Уступает остаток кванта текущего потока: поток встаёт в конец своей
+/// ready-очереди и остаётся runnable.
+pub fn thread_yield() {
+    runtime().yield_current();
+}
+
 /// Имя текущего процесса для диагностики. `None` до установки рантайма и
 /// когда рантайм имён не ведёт.
 pub fn current_process_name() -> Option<StaticString<MAX_PROCESS_NAME_LEN>> {
@@ -472,6 +478,8 @@ mod tests {
             CAPTURED_PROCESS_EXIT_CODE.store(exit_code, Ordering::SeqCst);
             panic!("{PANIC_SENTINEL}");
         }
+
+        fn yield_current(&self) {}
 
         fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {
             if let Some(hook) = self.block_hook.lock().unwrap().as_mut() {
