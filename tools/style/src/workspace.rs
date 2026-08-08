@@ -78,19 +78,8 @@ impl Workspace {
         FileMeta {
             path: path.to_path_buf(),
             package,
-            domain: domain_of(path),
+            domain: Domain::of(path),
         }
-    }
-}
-
-fn domain_of(path: &Path) -> Option<Domain> {
-    let head = path.components().next()?;
-    match head.as_os_str().to_str()? {
-        "kernel" => Some(Domain::Kernel),
-        "lib" => Some(Domain::Library),
-        "user" => Some(Domain::User),
-        "tools" | "xtask" => Some(Domain::Tool),
-        _ => None,
     }
 }
 

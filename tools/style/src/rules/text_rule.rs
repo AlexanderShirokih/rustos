@@ -1,5 +1,6 @@
 use crate::{
     rule::{Finding, Strip, TextRule, TextTarget},
+    rules::attached,
     source::Source,
     span::Span,
     text::mask_backticks,
@@ -35,6 +36,14 @@ struct Unit {
 
 fn units(target: TextTarget, source: &Source) -> Vec<Unit> {
     match target {
+        TextTarget::Attached => attached::blocks(source)
+            .into_iter()
+            .flatten()
+            .map(|line| Unit {
+                start: line.span.start,
+                text: line.text,
+            })
+            .collect(),
         TextTarget::Comment | TextTarget::Doc => {
             let Some(view) = CommentView::of(source) else {
                 return Vec::new();

@@ -8,7 +8,7 @@ use crate::{Priority, ProcessId, ThreadId};
 
 /// Backing per-thread IPC-буфера: user-VA замапленной страницы и владение `MemoryRegion`.
 ///
-/// `region` - одна из двух ссылок на регион; фрейм освобождается только когда дропнуты
+/// `region` - одна из двух ссылок на регион. Фрейм освобождается только когда дропнуты
 /// обе (вторая - `MappingTag` в `UserVmAllocator`). Изымать через [`Thread::take_ipc_buffer`].
 pub struct IpcBufferSlot {
     user_va: PageAlignedVirtualAddress,
@@ -132,17 +132,17 @@ impl<A: ArchContext> Thread<A> {
         self.name
     }
 
-    /// Lifecycle-capability target потока; переживает удаление из `ThreadTable`.
+    /// Lifecycle-capability target потока. Переживает удаление из `ThreadTable`.
     pub fn thread_object(&self) -> &Arc<ThreadObject> {
         &self.target
     }
 
-    /// User-VA per-thread IPC-буфера; `None` у kernel-потоков.
+    /// User-VA per-thread IPC-буфера. `None` у kernel-потоков.
     pub fn ipc_buffer_va(&self) -> Option<PageAlignedVirtualAddress> {
         self.ipc_buffer.as_ref().map(IpcBufferSlot::user_va)
     }
 
-    /// Прикрепляет backing IPC-буфера к потоку; вызывается один раз при создании user-потока.
+    /// Прикрепляет backing IPC-буфера к потоку. Вызывается один раз при создании user-потока.
     pub fn set_ipc_buffer(&mut self, slot: IpcBufferSlot) {
         self.ipc_buffer = Some(slot);
     }

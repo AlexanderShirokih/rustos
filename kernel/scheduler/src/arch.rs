@@ -7,7 +7,7 @@ use memory::memory_mapper::AddressSpaceHandle;
 
 use crate::UserEntry;
 
-/// Верхний предел числа CPU: [`CpuId`] за него не выходит, поэтому им
+/// Верхний предел числа CPU: [`CpuId`] за него не выходит, и им
 /// ограничены и per-CPU таблицы платформенного слоя, и очередь готовых потоков
 /// на CPU внутри планировщика.
 pub const MAX_CPUS: usize = 16;
@@ -194,7 +194,7 @@ pub trait ArchContext: Sized + Send + 'static {
     /// Оба указателя должны указывать на живые `ThreadStack`-владеемые контексты.
     unsafe fn switch(prev: &mut Self, next: &Self);
 
-    /// Переключает трансляцию адресов на `next`; `None` - kernel-only режим.
+    /// Переключает трансляцию адресов на `next`. `None` - kernel-only режим.
     /// Гарантирует, что после возврата трансляции предыдущего AS не видны.
     fn switch_address_space(_next: Option<AddressSpaceHandle>) {}
 }

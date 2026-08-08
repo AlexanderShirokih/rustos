@@ -1,5 +1,5 @@
 //! Reply-сторона cap: сервис возвращает `impl IntoWireHandle`, dispatch отдаёт
-//! его при успешной reply-передаче (relinquish); клиент получает Cap с тем же
+//! его при успешной reply-передаче (relinquish). Клиент получает Cap с тем же
 //! wire-id.
 
 use std::{

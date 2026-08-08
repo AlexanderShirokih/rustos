@@ -20,7 +20,7 @@ pub const LOG_MESSAGE_MAX: usize =
 #[ipc::protocol(name = "Bootstrap")]
 pub trait Bootstrap {
     /// Передаёт строку для логгера ядра klog. `tag` - источник строки
-    /// (обычно имя процесса); пустой тег - строка без тега.
+    /// (обычно имя процесса). Пустой тег - строка без тега.
     #[cast]
     fn log(
         &self,

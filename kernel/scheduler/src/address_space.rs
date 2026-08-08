@@ -14,7 +14,7 @@ impl AddressSpace {
         Arc::new(Self::Kernel)
     }
 
-    /// Создаёт user-AS через фабрику; возвращает уникальный `Arc<Self>`.
+    /// Создаёт user-AS через фабрику. Возвращает уникальный `Arc<Self>`.
     pub fn new_user(factory: &dyn AddressSpaceFactory) -> Result<Arc<Self>, AsCreateError> {
         let mapper = factory.create_user()?;
         Ok(Arc::new(Self::User(mapper)))
@@ -29,7 +29,7 @@ impl AddressSpace {
         }
     }
 
-    /// Mapper user-AS для kernel-side операций над user-страницами; `None` для kernel-AS.
+    /// Mapper user-AS для kernel-side операций над user-страницами. `None` для kernel-AS.
     pub fn mapper(&self) -> Option<&(dyn MemoryMapper + Send + Sync)> {
         match self {
             Self::Kernel => None,

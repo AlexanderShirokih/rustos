@@ -114,7 +114,7 @@ fn access_mask_for(flags: UserMemFlags) -> AccessMask {
 
 /// `memory_create_virtual(resource_handle, size_bytes, access_mask) -> region_handle`
 ///
-/// Требует `Rights::WRITE` на ресурс; бюджет возвращается при дропе региона.
+/// Требует `Rights::WRITE` на ресурс. Бюджет возвращается при дропе региона.
 pub fn sys_memory_create_virtual(
     resource_h: u64,
     size_bytes: u64,
@@ -158,7 +158,7 @@ pub fn sys_memory_create_virtual(
 /// `memory_slice(region_handle, offset, size_bytes, access_mask) -> region_handle`
 ///
 /// Деривация узкого под-региона `[offset, offset+size)`. Требует
-/// `Rights::DUPLICATE` на исходном регионе; запрошенный доступ не шире гранта
+/// `Rights::DUPLICATE` на исходном регионе. Запрошенный доступ не шире гранта
 /// (права хендла, суженные access-маской региона). Нарезка ничего не
 /// аллоцирует - бюджет не списывается, обязательства возврата под-регион не несёт.
 /// Под-регион - производная капа источника: отзыв источника отзывает и её.
@@ -193,7 +193,7 @@ pub fn sys_memory_slice(
 
 /// `memory_allocate(resource_handle, size, flags) -> va`
 ///
-/// Анонимный маппинг без handle; бюджет возвращается при `memory_free`/смерти AS.
+/// Анонимный маппинг без handle. Бюджет возвращается при `memory_free`/смерти AS.
 pub fn sys_memory_allocate(
     resource_h: u64,
     size_bytes: u64,
@@ -444,7 +444,7 @@ pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<
 /// `memory_free(va, size) -> ()`
 ///
 /// Снимает маппинг и убирает запись из аллокатора. `Arc<MemoryRegion>` в
-/// теге дропается; если последний - `Drop` региона возвращает фреймы в FA.
+/// теге дропается. Если последний - `Drop` региона возвращает фреймы в FA.
 pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError> {
     let size = parse_size(size_bytes)?;
     let va_usize = usize::try_from(va_raw).map_err(|_| SyscallError::InvalidArgument)?;
@@ -467,9 +467,9 @@ pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError
 
 /// `memory_region_inspect(region_handle)`
 ///
-/// Primary возврат - `size_bytes`; secondary - `base_pa | (kind_tag << 3) |
-/// access_bits`. `base_pa` page-aligned, поэтому его младшие 12 бит свободны
-/// под `kind_tag` (биты 3..5) и `access_bits` (биты 0..3); для `Virtual`
+/// Primary возврат - `size_bytes`. Secondary - `base_pa | (kind_tag << 3) |
+/// access_bits`. `base_pa` page-aligned, и его младшие 12 бит свободны
+/// под `kind_tag` (биты 3..5) и `access_bits` (биты 0..3). Для `Virtual`
 /// `base_pa = 0`.
 pub fn sys_memory_region_inspect(frame: &mut dyn SyscallFrame) {
     let result = (|| -> Result<(u64, u64), SyscallError> {

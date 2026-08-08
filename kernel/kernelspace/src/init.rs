@@ -1,6 +1,6 @@
 //! Production-init: запускает bootstrap-цепочку userland.
 //!
-//! Передаётся в [`kmain`](crate::kmain::kmain) как init-таск; завершение
+//! Передаётся в [`kmain`](crate::kmain::kmain) как init-таск. Завершение
 //! bootstrap-процесса выключает машину с его exit code.
 
 extern crate alloc;

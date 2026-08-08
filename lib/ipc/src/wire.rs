@@ -9,7 +9,7 @@ use core::{cell::Cell, marker::PhantomData, num::NonZeroU32};
 pub use ipc_schema::{FIELD_OVERHEAD, HEADER_SIZE};
 
 /// Максимальная длина кадра (заголовок + тело) в байтах: кадр заполняет тело
-/// IPC-буфера, поэтому равен [`syscall::IPC_BUFFER_DATA_MAX`].
+/// IPC-буфера, и равен [`syscall::IPC_BUFFER_DATA_MAX`].
 pub const MESSAGE_INLINE_MAX: usize = syscall::IPC_BUFFER_DATA_MAX;
 
 /// Максимум хэндлов в транспортном векторе кадра.
@@ -100,13 +100,13 @@ impl Default for HandleSlots {
 pub const BODY_MAX: usize = MESSAGE_INLINE_MAX - HEADER_SIZE;
 
 /// Максимум `data` одиночного поля, занимающего кадр целиком:
-/// `BODY_MAX - FIELD_OVERHEAD - 1` (терминатор). Длина поля - `u16` LE, поэтому
+/// `BODY_MAX - FIELD_OVERHEAD - 1` (терминатор). Длина поля - `u16` LE, и она
 /// должна укладываться в её диапазон.
 pub const FIELD_DATA_MAX: usize = BODY_MAX - FIELD_OVERHEAD - 1;
 
 const _: () = assert!(FIELD_DATA_MAX <= u16::MAX as usize);
 
-/// Байт-терминатор тела; `field_id == 0` зарезервирован под него.
+/// Байт-терминатор тела. `field_id == 0` зарезервирован под него.
 pub const TERMINATOR: u8 = 0x00;
 
 /// Минимальный допустимый `field_id` записи.
@@ -121,7 +121,7 @@ pub const FLAG_RESPONSE: u16 = 1 << 0;
 /// Флаг: peer завершает соединение этим последним кадром.
 pub const FLAG_PEER_CLOSE: u16 = 1 << 1;
 
-/// Флаг: ответ несёт доменную ошибку `E`, а не успех `T`.
+/// Флаг: ответ несёт доменную ошибку `E`.
 pub const FLAG_DOMAIN_ERR: u16 = 1 << 3;
 
 /// Размер дискриминанта закрытого enum в сообщении (`u16` LE).
@@ -159,7 +159,7 @@ pub enum IpcError {
 pub struct Header {
     /// Идентификатор операции (хэш канонического имени).
     pub ordinal: u64,
-    /// Идентификатор транзакции; `0` - односторонняя операция.
+    /// Идентификатор транзакции. `0` - односторонняя операция.
     pub txid: u32,
     /// Битовая маска флагов кадра.
     pub flags: u16,
@@ -266,7 +266,7 @@ impl<const N: usize> MessageBuf<N> {
         &self.bytes[..self.pos]
     }
 
-    /// Записывает заголовок в начало буфера; продвигает позицию на
+    /// Записывает заголовок в начало буфера. Продвигает позицию на
     /// [`HEADER_SIZE`]. Допустим только как первая запись.
     pub fn write_header(&mut self, header: &Header) -> Result<(), IpcError> {
         if self.pos != 0 {
@@ -281,7 +281,7 @@ impl<const N: usize> MessageBuf<N> {
     }
 
     /// Записывает запись поля `field_id` с телом `data`.
-    /// Держит строго возрастающий `field_id`; нарушение - `FieldOrder`.
+    /// Держит строго возрастающий `field_id`. Нарушение - `FieldOrder`.
     /// Превышение бюджета кадра - `FrameOverflow`.
     pub fn write_field(&mut self, field_id: u8, data: &[u8]) -> Result<(), IpcError> {
         if self.terminated {
@@ -390,7 +390,7 @@ impl<'a> FieldCursor<'a> {
     }
 }
 
-/// Маркер-трейт протокола; его реализуют сгенерированные контракты.
+/// Маркер-трейт протокола. Его реализуют сгенерированные контракты.
 pub trait Protocol {}
 
 /// Handle клиентского конца канала с меткой протокола `P`.
@@ -446,7 +446,7 @@ impl<P> ServerEnd<P> {
 }
 
 /// Нетипизированный capability: сырой `u32`-идентификатор хэндла в сообщении.
-/// В теле едет индекс в handle-массиве; сам id - вне тела.
+/// В теле едет индекс в handle-массиве. Сам id - вне тела.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cap {
@@ -570,7 +570,7 @@ pub mod value {
         [u8::from(value)]
     }
 
-    /// Декодирует `bool` из одного байта; `InvalidValue` при неверном байте или размере.
+    /// Декодирует `bool` из одного байта. `InvalidValue` при неверном байте или размере.
     pub fn decode_bool(data: &[u8]) -> Result<bool, IpcError> {
         match data {
             [0] => Ok(false),
@@ -585,13 +585,13 @@ pub mod value {
         value.to_le_bytes()
     }
 
-    /// Декодирует дискриминант `u16` LE; `InvalidValue` при неверном размере.
+    /// Декодирует дискриминант `u16` LE. `InvalidValue` при неверном размере.
     pub fn decode_discriminant(data: &[u8]) -> Result<u16, IpcError> {
         let bytes = data.try_into().map_err(|_| IpcError::InvalidValue)?;
         Ok(u16::from_le_bytes(bytes))
     }
 
-    /// Декодирует `data` как UTF-8; `InvalidValue` при некорректной кодировке.
+    /// Декодирует `data` как UTF-8. `InvalidValue` при некорректной кодировке.
     pub fn decode_str(data: &[u8]) -> Result<&str, IpcError> {
         core::str::from_utf8(data).map_err(|_| IpcError::InvalidValue)
     }

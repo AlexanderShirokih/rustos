@@ -283,35 +283,35 @@ fn plain_comment_on_a_test_spends_the_same_budget() {
 
 #[test]
 fn cyrillic_literal_inside_a_macro_call_is_reported() {
-    let source = "fn boom() {\n    panic!(\"\u{43e}\u{448}\u{438}\u{431}\u{43a}\u{430}\");\n}\n";
+    let source = "fn boom() {\n    panic!(\"ошибка\");\n}\n";
     let hits = check(&rule("cyrillic_in_literal"), source);
     assert_eq!(hits.len(), 1, "{hits:?}");
 }
 
 #[test]
 fn cyrillic_comment_is_not_a_literal() {
-    let source = "// \u{43a}\u{43e}\u{43c}\u{43c}\u{435}\u{43d}\u{442}\u{430}\u{440}\u{438}\u{439}\nfn quiet() {}\n";
+    let source = "// комментарий\nfn quiet() {}\n";
     let hits = check(&rule("cyrillic_in_literal"), source);
     assert!(hits.is_empty(), "{hits:?}");
 }
 
 #[test]
 fn comment_inside_a_raw_string_is_not_a_comment() {
-    let source = "pub const ASM: &str = r#\"\n    // \u{43d}\u{435} \u{43a}\u{43e}\u{43c}\u{43c}\u{435}\u{43d}\u{442}\u{430}\u{440}\u{438}\u{439}\n\"#;\n";
+    let source = "pub const ASM: &str = r#\"\n    // не комментарий\n\"#;\n";
     let hits = check(&declared("latin_apostrophe"), source);
     assert!(hits.is_empty(), "{hits:?}");
 }
 
 #[test]
 fn apostrophe_declension_is_reported() {
-    let source = "// \u{441}\u{447}\u{451}\u{442}\u{447}\u{438}\u{43a} handle'\u{43e}\u{432}\nfn count() {}\n";
+    let source = "// счётчик handle'ов\nfn count() {}\n";
     let hits = check(&declared("latin_apostrophe"), source);
     assert_eq!(hits.len(), 1, "{hits:?}");
 }
 
 #[test]
 fn lifetime_is_not_an_apostrophe_declension() {
-    let source = "// \u{436}\u{438}\u{432}\u{451}\u{442} 'static \u{438} 'a\nfn borrow() {}\n";
+    let source = "// живёт 'static и 'a\nfn borrow() {}\n";
     let hits = check(&declared("latin_apostrophe"), source);
     assert!(hits.is_empty(), "{hits:?}");
 }
@@ -329,5 +329,108 @@ fn wide_code_line_is_not_a_comment() {
     let wide = "x".repeat(120);
     let source = format!("pub const NAME: &str = \"{wide}\";\n");
     let hits = check(&rule("comment_width"), &source);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn semicolon_between_sentences_is_reported() {
+    let source = "/// Первое; второе.\npub fn thing() {}\n";
+    let hits = check(&rule("semicolon_in_prose"), source);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn semicolon_closing_a_list_item_is_accepted() {
+    let source = "/// - первое;\n/// - второе.\npub fn thing() {}\n";
+    let hits = check(&rule("semicolon_in_prose"), source);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn causal_connective_is_reported() {
+    let source = "/// Держит слот, поэтому очередь не растёт.\npub fn thing() {}\n";
+    let hits = check(&declared("causal_connective"), source);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn statement_without_a_reason_is_accepted() {
+    let source = "/// Держит слот очереди.\npub fn thing() {}\n";
+    let hits = check(&declared("causal_connective"), source);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn definition_through_negation_is_reported() {
+    let source = "/// Серверная сторона, а не клиентская.\npub fn thing() {}\n";
+    let hits = check(&declared("definition_by_negation"), source);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn naming_the_thing_alone_is_accepted() {
+    let source = "/// Серверная сторона порта.\npub fn thing() {}\n";
+    let hits = check(&declared("definition_by_negation"), source);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn subjunctive_mood_is_reported() {
+    let source = "/// Хук снял бы учёт.\npub fn thing() {}\n";
+    let hits = check(&declared("subjunctive_mood"), source);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn present_tense_is_accepted() {
+    let source = "/// Хук снимает учёт.\npub fn thing() {}\n";
+    let hits = check(&declared("subjunctive_mood"), source);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn tuple_in_a_public_signature_is_reported() {
+    let hits = check(
+        &rule("tuple_in_public_signature"),
+        "pub fn split() -> (u8, u8) {\n    (0, 0)\n}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn tuple_in_a_private_signature_is_accepted() {
+    let hits = check(
+        &rule("tuple_in_public_signature"),
+        "fn split() -> (u8, u8) {\n    (0, 0)\n}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn tuple_in_a_test_helper_is_out_of_scope() {
+    let hits = check_one(
+        &rule("tuple_in_public_signature"),
+        Path::new("kernel/demo/src/test_util.rs"),
+        "pub fn split() -> (u8, u8) {\n    (0, 0)\n}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn expect_in_kernel_code_is_reported() {
+    let hits = check(
+        &rule("expect_in_kernel"),
+        "pub fn install(slot: Option<u8>) -> u8 {\n    slot.expect(\"installed\")\n}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn expect_outside_the_kernel_is_out_of_scope() {
+    let hits = check_one(
+        &rule("expect_in_kernel"),
+        Path::new("lib/demo/src/demo.rs"),
+        "pub fn install(slot: Option<u8>) -> u8 {\n    slot.expect(\"installed\")\n}\n",
+    );
     assert!(hits.is_empty(), "{hits:?}");
 }

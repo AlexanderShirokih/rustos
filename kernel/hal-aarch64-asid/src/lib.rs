@@ -84,7 +84,7 @@ pub const fn unpack_asid(tag: u64) -> u16 {
 }
 
 /// Глобально-инициализируемый аллокатор. Ширина ASID становится известна
-/// на boot (после чтения feature-регистра), поэтому ёмкость задаётся через
+/// на boot (после чтения feature-регистра), и ёмкость задаётся через
 /// `init` уже после конструирования.
 pub struct GlobalAsidAllocator<const CPUS: usize> {
     state: MutexCell<AsidAllocatorState>,

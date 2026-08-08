@@ -33,11 +33,11 @@ pub trait Transport {
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError>;
 
     /// Принимает один кадр в `bytes` и его хэндлы в `handles`.
-    /// `WouldBlock`, если кадра нет; `PeerClosed` после закрытия и опустошения.
+    /// `WouldBlock`, если кадра нет. `PeerClosed` после закрытия и опустошения.
     /// `Truncated`, если буфер короче кадра или хэндлов больше места.
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError>;
 
     /// Ждёт готовности к чтению до истечения `timeout`.
-    /// `Timeout` по истечении срока; `PeerClosed`, если дальний конец закрыт.
+    /// `Timeout` по истечении срока. `PeerClosed`, если дальний конец закрыт.
     fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError>;
 }

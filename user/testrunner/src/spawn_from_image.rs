@@ -164,7 +164,7 @@ fn start_error_reclaims_each_loaded_process() {
 }
 
 /// Сервер принимает `call` и уходит, не ответив: вызыватель обязан быть
-/// разбужен отказом, а не остаться припаркованным.
+/// разбужен отказом.
 #[kernel_test]
 fn caller_wakes_when_server_dies_holding_reply() {
     use runtime::{Error, Port};

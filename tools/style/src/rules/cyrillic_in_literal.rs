@@ -1,10 +1,13 @@
 use crate::{
     rule::{Category, Check, Finding, Rule, RuleMeta, Severity},
-    scope::{Applies, Context, MacroBodies, Scope},
+    scope::{Applies, Context, MacroBodies, Scope, Selector},
     source::Source,
     text::has_cyrillic,
     view::{LiteralView, View},
 };
+
+const TEST_SEGMENTS: [&str; 3] = ["tests", "kernel_tests", "benches"];
+const TEST_FILES: [&str; 1] = ["test_util.rs"];
 
 /// Строковый литерал не содержит кириллицы, включая тела макро-вызовов.
 pub fn rule() -> Rule {
@@ -22,8 +25,12 @@ pub fn rule() -> Rule {
             severity: Severity::Deny,
         },
         applies: Applies {
-            scope: Scope::rust(),
-            context: Context::Any,
+            scope: Scope(vec![
+                Selector::Extension("rs".to_owned()),
+                Selector::NotSegmentAny(TEST_SEGMENTS.map(str::to_owned).to_vec()),
+                Selector::NotFileNameAny(TEST_FILES.map(str::to_owned).to_vec()),
+            ]),
+            context: Context::Prod,
             macro_bodies: MacroBodies::Include,
         },
         check: Check::Compiled(run),

@@ -4,7 +4,7 @@ use core::arch::asm;
 
 use syscall::{Handle, IrqTrigger, SyscallError, SyscallOp, Timeout, WaitItem, WakeCount};
 
-/// Ждёт сигналы `signals` на capability target `handle`; [`Timeout::POLL`] -
+/// Ждёт сигналы `signals` на capability target `handle`. [`Timeout::POLL`] -
 /// non-blocking poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
 pub fn signal_wait_one(handle: Handle, signals: u32, timeout: Timeout) -> i64 {
     let ret: i64;
@@ -155,7 +155,7 @@ pub fn port_recv(handle: Handle, timeout: Timeout) -> i64 {
 }
 
 /// `call` на port `handle`: блокирующий запрос-ответ. Сообщение из
-/// IPC-буфера текущего потока; ответ оказывается там же. `timeout`
+/// IPC-буфера текущего потока. Ответ оказывается там же. `timeout`
 /// ограничивает всю операцию (см. [`port_send`]). Требует `Rights::WRITE`.
 /// Возврат: 0,
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
@@ -218,8 +218,8 @@ pub fn handle_close(handle: Handle) -> i64 {
 /// неизвестные биты отбрасываются) и значком `badge` (set-once: `0` - без
 /// значка / наследовать). Возврат: новый handle либо `-(SyscallError)`.
 ///
-/// Семантика `badge`: заклеймить можно только незаклеймённый источник;
-/// заклеймённый наследует свой значок при `badge == 0`, а попытка
+/// Семантика `badge`: заклеймить можно только незаклеймённый источник.
+/// Заклеймённый наследует свой значок при `badge == 0`, а попытка
 /// переклеймить (`badge != 0` на уже заклеймённом) даёт `BadHandle`.
 pub fn handle_duplicate(
     handle: Handle,
@@ -630,8 +630,8 @@ pub fn memory_free(va: u64, size_bytes: u64) -> i64 {
 
 /// Инспектирует Memory-регион `handle`. Возврат: `(size_bytes,
 /// base_pa | (kind_tag << 3) | access_bits)` — первый элемент знаковый
-/// (`-(SyscallError)` при ошибке), второй валиден только при успехе;
-/// base_pa page-aligned, младшие 12 бит несут kind/access; для `Virtual`
+/// (`-(SyscallError)` при ошибке), второй валиден только при успехе.
+/// base_pa page-aligned, младшие 12 бит несут kind/access. Для `Virtual`
 /// base_pa = 0.
 pub fn memory_region_inspect(handle: Handle) -> (i64, u64) {
     let primary: i64;
@@ -710,7 +710,7 @@ pub fn irq_ack(line: Handle) -> i64 {
     ret
 }
 
-/// Завершает текущий поток с кодом `code`; не возвращается.
+/// Завершает текущий поток с кодом `code`. Не возвращается.
 pub fn thread_exit(code: u64) -> ! {
     // SAFETY: ThreadExit не возвращается, поэтому asm помечен noreturn и
     // удовлетворяет `-> !`; x0 несёт exit code.
@@ -724,8 +724,8 @@ pub fn thread_exit(code: u64) -> ! {
     }
 }
 
-/// Завершает текущий процесс со всеми его потоками с кодом `code`;
-/// не возвращается.
+/// Завершает текущий процесс со всеми его потоками с кодом `code`.
+/// Не возвращается.
 pub fn process_exit(code: u64) -> ! {
     // SAFETY: ProcessExit не возвращается, поэтому asm помечен noreturn и
     // удовлетворяет `-> !`; x0 несёт exit code.

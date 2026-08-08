@@ -48,7 +48,7 @@ pub const PAGE_SIZE: NonZeroUsize =
         .unwrap();
 
 /// Округляет ненулевой размер вверх до кратного [`PAGE_SIZE`]. Ненулевость
-/// входа сохраняется типом; `None` только при переполнении `usize`.
+/// входа сохраняется типом. `None` только при переполнении `usize`.
 pub const fn page_round_up(value: NonZeroUsize) -> Option<NonZeroUsize> {
     let page = PAGE_SIZE.get();
     let rem = value.get() % page;

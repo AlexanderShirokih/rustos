@@ -93,7 +93,7 @@ where
         Some(UserVmContext::new(mapper, allocator))
     }
 
-    /// User-VA IPC-буфера текущего потока; `None` для kernel-потоков или до bootstrap.
+    /// User-VA IPC-буфера текущего потока. `None` для kernel-потоков или до bootstrap.
     pub fn current_ipc_buffer_va(&self) -> Option<VirtualAddress> {
         self.inner.with_lock(|inner| inner.current_ipc_buffer_va())
     }

@@ -16,3 +16,45 @@ the phrase around the term.
 message = "latin term declined through an apostrophe, write it without the ending"
 target = "comment"
 pattern = "[A-Za-z]+'[а-яёА-ЯЁ]"
+
+[[text]]
+id = "causal_connective"
+title = "prose of a declaration argues instead of stating its contract"
+explain = """
+Prose of a declaration states the contract, and a causal connective turns it into \
+a defence of the implementation behind it. Keep the statement and drop the reason, \
+or move the reason to the line it constrains.
+"""
+message = "causal connective in the prose of a declaration, state the contract instead"
+target = "attached"
+pattern = "(?i)\\b(?:поэтому|потому\\s+что|так\\s+как)\\b"
+strip = ["backticks"]
+macro_bodies = "exclude"
+
+[[text]]
+id = "subjunctive_mood"
+title = "prose of a declaration describes what does not happen"
+explain = """
+Prose of a declaration is stated in the affirmative and in the present tense. The \
+subjunctive describes a run that never happens, and the reader has to rebuild the \
+real behaviour out of it. Name the behaviour that does happen.
+"""
+message = "subjunctive mood in the prose of a declaration, state the present behaviour"
+target = "attached"
+pattern = "(?i)\\b[а-яё]+л(?:а|о|и|ся|ась|ось|ись)?\\s+бы\\b"
+strip = ["backticks"]
+macro_bodies = "exclude"
+
+[[text]]
+id = "definition_by_negation"
+title = "prose of a declaration defines a thing through what it is not"
+explain = """
+A declaration is named by what it is. The form "X, and not Y" spends the sentence \
+on the reading that was rejected, and the reader keeps both. Drop the second half \
+and name X alone.
+"""
+message = "definition through negation, name the thing itself"
+target = "attached"
+pattern = "(?i),\\s*а\\s+не\\b"
+strip = ["backticks"]
+macro_bodies = "exclude"

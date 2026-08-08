@@ -8,7 +8,7 @@ use runtime::{OwnedHandle, Port, Timeout, thread_exit};
 use syscall::Handle;
 
 /// Программа-фикстура: шлёт один кадр и уходит, не закрывая клиентскую капу.
-/// `thread_exit` не разматывает стек, поэтому капа остаётся в таблице процесса
+/// `thread_exit` не разматывает стек, и капа остаётся в таблице процесса
 /// до её разрушения.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(client: Handle) -> ! {

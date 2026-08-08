@@ -1,6 +1,6 @@
 //! ABI описания для `ProcessLoadImage`/`ProcessStart`.
 //!
-//! Все поля little-endian, без выравнивания; декодеры читают по полям
+//! Все поля little-endian, без выравнивания. Декодеры читают по полям
 //! через `u32::from_le_bytes`/`u64::from_le_bytes`, не полагаясь на
 //! `repr(C)`-layout.
 
@@ -20,9 +20,9 @@ pub const USER_SEGMENT_SIZE: usize = 32;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserImageDescAbi {
-    /// Версия ABI; принимается только [`SEGMENT_ABI_VERSION`].
+    /// Версия ABI. Принимается только [`SEGMENT_ABI_VERSION`].
     pub version: u32,
-    /// Число сегментов; должно лежать в `1..=MAX_SEGMENTS_PER_IMG`.
+    /// Число сегментов. Должно лежать в `1..=MAX_SEGMENTS_PER_IMG`.
     pub segment_count: u32,
     /// User-указатель на массив сегментов длиной `segment_count`.
     pub segments_va: u64,
@@ -47,7 +47,7 @@ pub struct UserSegmentAbi {
     pub va_base: u64,
     /// Замапливаемый размер (равен `region.size_bytes()`).
     pub mapped_size: u64,
-    /// Зарезервировано; должно быть `0`.
+    /// Зарезервировано. Должно быть `0`.
     pub reserved: u64,
 }
 

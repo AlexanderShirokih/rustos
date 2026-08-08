@@ -89,7 +89,7 @@ impl<T, const N: usize> Vec<T, N> {
     }
 
     /// Заменяет тип элементов, сохраняя порядок. Ёмкость результата та же,
-    /// поэтому преобразование всегда полное.
+    /// и преобразование всегда полное.
     pub fn map_into<U>(self, mut map: impl FnMut(T) -> U) -> Vec<U, N> {
         let mut mapped: Vec<U, N> = Vec::new();
 

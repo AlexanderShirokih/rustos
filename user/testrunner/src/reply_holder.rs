@@ -8,7 +8,7 @@ use runtime::{OwnedHandle, Port, Timeout, thread_exit};
 use syscall::Handle;
 
 /// Программа-фикстура: принимает запрос и уходит, не ответив на него.
-/// `thread_exit` не разматывает стек, поэтому reply-хэндл остаётся в таблице
+/// `thread_exit` не разматывает стек, и reply-хэндл остаётся в таблице
 /// процесса до её разрушения.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(service: Handle) -> ! {

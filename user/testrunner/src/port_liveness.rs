@@ -3,7 +3,7 @@
 //!
 //! Роль стороны задаётся правами капы: серверный поток теста держит корневую
 //! капу с `READ`, клиент получает минт с `WRITE` и значком. Клиентские потоки
-//! обращаются к капе по сырому HandleId, потому что аргумент потока - не хэндл.
+//! обращаются к капе по сырому HandleId: аргумент потока - не хэндл.
 
 use core::{
     num::NonZeroU64,
@@ -268,7 +268,7 @@ fn served_child_exits_when_its_client_capability_goes() {
 }
 
 /// Уход значка на bootstrap-порту не закрывает kernel-сервер: следующий кадр
-/// принимает он же, а не пустое множество получателей.
+/// принимает он же.
 #[kernel_test]
 fn kernel_server_serves_past_a_departed_badge() {
     let session = OwnedHandle::from_handle(

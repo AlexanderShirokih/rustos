@@ -109,7 +109,7 @@ pub fn install_runtime(rt: Arc<dyn KernelRuntime>) {
     let _ = RUNTIME.call_once(|| rt);
 }
 
-/// Доступ к глобальному runtime; Паникует, если он ещё не установлен.
+/// Доступ к глобальному runtime. Паникует, если он ещё не установлен.
 pub fn runtime() -> &'static Arc<dyn KernelRuntime> {
     RUNTIME
         .get()

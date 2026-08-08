@@ -1,7 +1,7 @@
 //! Глобальный heap процесса: talc поверх memory_allocate/memory_free.
 //!
 //! Аллокации свыше PASSTHROUGH_THRESHOLD идут напрямую к ядру и возвращаются на
-//! free; мелкие обслуживает talc, растущий чанками от ядра.
+//! free. Мелкие обслуживает talc, растущий чанками от ядра.
 
 use core::{
     alloc::{GlobalAlloc, Layout},

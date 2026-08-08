@@ -49,6 +49,19 @@ jobs:
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask style --all
+      # Снапшот принятых нарушений сокращается по каждому действующему правилу.
+      # Правило, заведённое этим же изменением, приносит свой долг однократно.
+      - name: baseline does not grow
+        run: |
+          git show "origin/${GITHUB_BASE_REF:-main}:style-baseline.txt" \
+            | cut -d'|' -f1 | sort | uniq -c > /tmp/baseline-base
+          cut -d'|' -f1 style-baseline.txt | sort | uniq -c > /tmp/baseline-head
+          awk 'NR==FNR { was[$2] = $1; next }
+               ($2 in was) && $1 > was[$2] {
+                 printf "%s: %d accepted violations, was %d\n", $2, $1, was[$2]
+                 failed = 1
+               }
+               END { exit failed }' /tmp/baseline-base /tmp/baseline-head
 
   clippy-host:
     name: clippy (host)

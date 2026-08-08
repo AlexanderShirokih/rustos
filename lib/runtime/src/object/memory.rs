@@ -46,7 +46,7 @@ impl RegionKind {
 pub struct RegionInfo {
     /// Размер региона в байтах.
     pub size_bytes: u64,
-    /// Базовый PA `Physical`-региона (для корреляции с FDT-узлом); `0` для
+    /// Базовый PA `Physical`-региона (для корреляции с FDT-узлом). `0` для
     /// `Virtual`.
     pub base: u64,
     /// Backing региона.
@@ -67,7 +67,7 @@ pub struct MemoryRegion {
     handle: OwnedHandle,
 }
 
-/// Маппинг региона в текущий AS; освобождается в `Drop` через `memory_free`.
+/// Маппинг региона в текущий AS. Освобождается в `Drop` через `memory_free`.
 #[derive(Debug)]
 pub struct Mapping {
     va: u64,
@@ -81,7 +81,7 @@ pub struct ReadOnlyMapping {
     mapping: Mapping,
 }
 
-/// Анонимный маппинг (allocate-fastpath); освобождается в `Drop` через
+/// Анонимный маппинг (allocate-fastpath). Освобождается в `Drop` через
 /// `memory_free`.
 #[derive(Debug)]
 pub struct AnonymousMapping {

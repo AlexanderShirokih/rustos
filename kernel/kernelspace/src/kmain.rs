@@ -77,8 +77,8 @@ fn boot_failure(error: &BootError) -> ! {
 
 /// Платформо-независимая точка входа ядра. После полного bootstrap вызывает `init_task` под
 /// замаскированными IRQ - задача обязана зарегистрировать первый спавн-thread
-/// (например, через [`Scheduler::spawn`]) и вернуть управление;
-/// дальше kmain отдаёт CPU scheduler-у через [`Scheduler::start`].
+/// (например, через [`Scheduler::spawn`]) и вернуть управление.
+/// Дальше kmain отдаёт CPU scheduler-у через [`Scheduler::start`].
 pub fn kmain<A, F>(
     driver_scanner: EmbeddedDriversScanner,
     context: &mut KernelContext,

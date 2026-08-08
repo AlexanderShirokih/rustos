@@ -1,6 +1,6 @@
 //! Исполнение команды старта вторичного CPU.
 //!
-//! Разбор device tree лежит в `hal_common::smp`; здесь - сам вызов PSCI и
+//! Разбор device tree лежит в `hal_common::smp`. Здесь - сам вызов PSCI и
 //! освобождение CPU, ждущего на spin-table.
 
 use hal_common::{

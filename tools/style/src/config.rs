@@ -202,6 +202,7 @@ fn declare(raw: RawText) -> Result<Rule> {
     let target = match raw.target.as_str() {
         "comment" => TextTarget::Comment,
         "doc" => TextTarget::Doc,
+        "attached" => TextTarget::Attached,
         "line" => TextTarget::Line,
         other => bail!("unknown target for rule {}: {other}", raw.id),
     };

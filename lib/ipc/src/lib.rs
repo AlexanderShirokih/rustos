@@ -1,4 +1,4 @@
-//! Wire-формат IPC-сообщений поверх port-транспорта; ordinal
+//! Wire-формат IPC-сообщений поверх port-транспорта. Ordinal
 //! вычисляет `ipc-macros`, wire переносит готовое значение.
 
 #![cfg_attr(not(test), no_std)]

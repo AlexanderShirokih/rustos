@@ -33,7 +33,7 @@ impl IrqControl {
     }
 
     /// Минтит линию `irq` с триггером `trigger` по полномочию. Требует
-    /// `Rights::WRITE` и попадания `irq` в диапазон полномочия; уже занятая
+    /// `Rights::WRITE` и попадания `irq` в диапазон полномочия. Уже занятая
     /// линия - `AlreadyBound`.
     pub fn mint(&self, irq: u16, trigger: IrqTrigger) -> Result<IrqLine> {
         svc::irq_mint(self.handle.as_raw(), irq, trigger)
@@ -58,7 +58,7 @@ impl IrqLine {
         self.handle.borrow()
     }
 
-    /// Ждёт срабатывания линии до `timeout`; возвращает наблюдаемую маску,
+    /// Ждёт срабатывания линии до `timeout`. Возвращает наблюдаемую маску,
     /// тайм-аут - `Err`.
     pub fn wait(&self, timeout: Timeout) -> Result<u32> {
         super::wait_signals(self.handle.as_raw(), SIGNALED, timeout)

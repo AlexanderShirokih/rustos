@@ -34,7 +34,7 @@ impl OwnedHandle {
         Self { handle }
     }
 
-    /// Усыновляет сырой HandleId, помещённый ядром в таблицу процесса; `None`
+    /// Усыновляет сырой HandleId, помещённый ядром в таблицу процесса. `None`
     /// на нуле (невалидный handle).
     pub fn from_raw(raw: RawHandle) -> Option<Self> {
         Handle::new(raw).map(Self::from_handle)
@@ -64,7 +64,7 @@ impl OwnedHandle {
     }
 
     /// Закрывает хэндл, возвращая результат syscall. Извлекает хэндл через
-    /// `into_raw` до `svc::handle_close`, иначе `Drop` закрыл бы его повторно.
+    /// `into_raw` до `svc::handle_close`, и `Drop` его повторно не закрывает.
     pub fn close(self) -> Result<()> {
         unit(svc::handle_close(self.into_raw()))
     }

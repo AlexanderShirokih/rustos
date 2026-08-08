@@ -52,7 +52,7 @@ pub enum CapabilityTarget {
 /// Объект ядра, извлекаемый из своего варианта [`CapabilityTarget`].
 /// Единственная точка соответствия "тип объекта - вариант enum".
 pub trait TargetObject: Send + Sync {
-    /// Объект этого типа внутри `target`; `None` - вариант другого вида.
+    /// Объект этого типа внутри `target`. `None` - вариант другого вида.
     fn from_target(target: &CapabilityTarget) -> Option<&Arc<Self>>;
 }
 

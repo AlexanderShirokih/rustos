@@ -32,7 +32,7 @@ impl Signal {
         self.handle.borrow()
     }
 
-    /// Ждёт пересечения с `mask` до `timeout`; возвращает наблюдаемую маску.
+    /// Ждёт пересечения с `mask` до `timeout`. Возвращает наблюдаемую маску.
     pub fn wait(&self, mask: u32, timeout: Timeout) -> Result<u32> {
         super::wait_signals(self.handle.as_raw(), mask, timeout)
     }

@@ -41,7 +41,7 @@ impl CriticalSection for NoCriticalSection {
 ///
 /// Доступна только в bare-metal окружении (`target_os = "none"`). В
 /// hosted-окружении на aarch64 (macOS, Linux) инструкция `msr daifset`
-/// запрещена в EL0 и вызывает SIGILL - поэтому host-сборки используют
+/// запрещена в EL0 и вызывает SIGILL, и host-сборки используют
 /// [`NoCriticalSection`] (см. ниже).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub struct DaifCriticalSection;

@@ -5,7 +5,7 @@
 use syscall::SyscallError;
 pub use syscall::SyscallOp;
 
-/// Декодирует сырой 16-битный op в [`SyscallOp`]; неизвестный код -
+/// Декодирует сырой 16-битный op в [`SyscallOp`]. Неизвестный код -
 /// [`SyscallError::BadSyscall`].
 pub const fn op_from_raw(raw: u16) -> Result<SyscallOp, SyscallError> {
     match SyscallOp::from_raw(raw) {

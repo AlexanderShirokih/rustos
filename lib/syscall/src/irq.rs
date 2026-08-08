@@ -16,7 +16,7 @@ impl IrqTrigger {
         self as u32
     }
 
-    /// Восстанавливает вариант по его коду; `None` на неизвестном коде.
+    /// Восстанавливает вариант по его коду. `None` на неизвестном коде.
     pub const fn from_code(code: u32) -> Option<Self> {
         match code {
             1 => Some(Self::Edge),

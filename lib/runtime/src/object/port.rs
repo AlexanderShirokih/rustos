@@ -151,7 +151,7 @@ impl Port {
 
 impl Reply {
     /// Доставляет ответ из IPC-буфера сервера вызывателю. Ядро снимает reply-хэндл
-    /// безусловно, поэтому повторный `Drop`-close подавлен.
+    /// безусловно, и повторный `Drop`-close подавлен.
     pub fn reply(self) -> Result<()> {
         unit(svc::port_reply(self.handle.into_raw()))
     }

@@ -29,7 +29,7 @@ pub struct Bound {
     pub lit: Option<usize>,
 }
 
-/// Тип параметра/значения в макро-модели; bounded-типы несут выражение границы.
+/// Тип параметра/значения в макро-модели. Bounded-типы несут выражение границы.
 pub enum WireTy {
     Uint(u8),
     Int(u8),
@@ -97,7 +97,7 @@ pub struct Operation {
     pub canonical: String,
     pub ordinal: u64,
     pub params: Vec<Param>,
-    /// Тип возврата; задан только для two-way (`Kind::Call`).
+    /// Тип возврата. Задан только для two-way (`Kind::Call`).
     pub ret: Option<RetType>,
     /// doc-атрибуты операции, пробрасываемые в сгенерированные методы.
     pub docs: Vec<Attribute>,

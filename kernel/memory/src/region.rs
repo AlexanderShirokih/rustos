@@ -232,7 +232,7 @@ impl MemoryRegion {
         }
     }
 
-    /// Базовый PA для `Physical`-региона; `None` для анонимного `Virtual`.
+    /// Базовый PA для `Physical`-региона. `None` для анонимного `Virtual`.
     /// Userspace сопоставляет выданный device-регион с FDT-узлом по этому PA.
     pub fn physical_base(&self) -> Option<PageAlignedAddress> {
         match self.backing {
@@ -241,7 +241,7 @@ impl MemoryRegion {
         }
     }
 
-    /// Тип памяти региона. `Virtual` всегда `Normal`; для `Physical` хранится в
+    /// Тип памяти региона. `Virtual` всегда `Normal`. Для `Physical` хранится в
     /// бэкинге.
     pub fn memory_type(&self) -> MemoryType {
         match self.backing {

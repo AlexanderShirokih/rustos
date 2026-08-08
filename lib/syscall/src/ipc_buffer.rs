@@ -2,7 +2,7 @@
 //! Port-syscalls обмениваются короткими сообщениями.
 //!
 //! Структура [`IpcBuffer`] разделяется ядром и userspace. Буфер маппится ядром по
-//! одной странице на каждый user-поток; userspace получает его VA через
+//! одной странице на каждый user-поток. Userspace получает его VA через
 //! `ThreadIpcBufferAddr`-syscall.
 //!
 //! # Tag
@@ -15,8 +15,8 @@
 //! | `[16..20)`| `ncaps` - число handle в `caps`   |
 //! | `[20..)`  | флаги (резерв)                    |
 //!
-//! `len` ограничен [`IPC_BUFFER_DATA_MAX`], `ncaps` - [`IPC_BUFFER_MAX_CAPS`];
-//! оба укладываются в выделенные битовые поля.
+//! `len` ограничен [`IPC_BUFFER_DATA_MAX`], `ncaps` - [`IPC_BUFFER_MAX_CAPS`].
+//! Оба укладываются в выделенные битовые поля.
 
 use core::cmp::min;
 

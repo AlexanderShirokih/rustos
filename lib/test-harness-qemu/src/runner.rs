@@ -27,7 +27,7 @@ pub fn install_writer(writer: &'static (dyn Writer + Send + Sync)) {
     WRITER.call_once(|| writer);
 }
 
-/// Регистрирует функцию выключения машины; повторные вызовы игнорируются.
+/// Регистрирует функцию выключения машины. Повторные вызовы игнорируются.
 pub fn install_exit(exit: fn(u32) -> !) {
     EXIT.call_once(|| exit);
 }
@@ -41,8 +41,8 @@ where
     }
 }
 
-/// Завершает прогон с кодом `code` через установленную exit-функцию;
-/// без установленной функции уходит в spin loop.
+/// Завершает прогон с кодом `code` через установленную exit-функцию.
+/// Без установленной функции уходит в spin loop.
 pub fn exit(code: u32) -> ! {
     if let Some(exit) = EXIT.get() {
         exit(code);

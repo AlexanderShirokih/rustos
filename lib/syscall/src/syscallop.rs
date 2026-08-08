@@ -8,7 +8,7 @@ pub enum SyscallOp {
     ///  - `arg0=handle`,
     ///  - `arg1=set` (нижние 32 бита),
     ///  - `arg2=clear` (нижние 32 бита),
-    ///  - `arg3=wake_count` (0=None, 1=One, 2=All; неизвестное `InvalidArgument`).
+    ///  - `arg3=wake_count` (0=None, 1=One, 2=All, неизвестное `InvalidArgument`).
     ///
     /// Возврат `0`.
     SignalSet = 0x10,
@@ -60,7 +60,7 @@ pub enum SyscallOp {
     PortRecv = 0x25,
 
     /// `call` на port: блокирующий запрос-ответ. Сообщение из
-    /// IPC-буфера текущего потока; ответ оказывается там же. Аргументы:
+    /// IPC-буфера текущего потока. Ответ оказывается там же. Аргументы:
     ///  - `arg0=handle`,
     ///  - `arg1=timeout_ns` (ограничивает всю операцию: ожидание
     ///    получателя + ожидание reply).
@@ -87,7 +87,7 @@ pub enum SyscallOp {
     ///  - `arg0=handle`,
     ///  - `arg1=new_rights` (нижние 32 бита),
     ///  - `arg2=badge` (полные 64 бита). Значок set-once: заклеймить можно только
-    ///    незаклеймённый источник; заклеймённый наследует свой значок при
+    ///    незаклеймённый источник. Заклеймённый наследует свой значок при
     ///    `badge == 0`, переклеймить (`badge != 0` на заклеймённом) - `BadHandle`.
     ///
     /// Возврат: новый handle id либо `-(SyscallError)`.
@@ -141,8 +141,8 @@ pub enum SyscallOp {
     ///  - `arg1=budget_pages` (> 0).
     ///
     /// Требует `Rights::WRITE | Rights::DUPLICATE`. Страницы списываются с
-    /// исходного ресурса и возвращаются ему, когда производный уходит;
-    /// при нехватке бюджета - `ResourceExhausted`. Производный ресурс -
+    /// исходного ресурса и возвращаются ему, когда производный уходит.
+    /// При нехватке бюджета - `ResourceExhausted`. Производный ресурс -
     /// капа-потомок исходной. Возвращает `resource_handle`.
     ResourceSplit = 0x47,
 
@@ -220,7 +220,7 @@ pub enum SyscallOp {
 
     // 0x60..=0x6F - Memory CapabilityTarget.
     /// Создаёт `CapabilityTarget::Memory` с Virtual backing. Аргументы:
-    ///  - `arg0=resource_handle` (требует `Rights::WRITE`; метерится `size_bytes / PAGE` страниц),
+    ///  - `arg0=resource_handle` (требует `Rights::WRITE`, метерится `size_bytes / PAGE` страниц),
     ///  - `arg1=size_bytes`,
     ///  - `arg2=access_mask`.
     ///
@@ -255,7 +255,7 @@ pub enum SyscallOp {
 
     /// Создаёт анонимный `Virtual` регион и сразу маппит его
     /// в свободный VA. `region_handle` не выкладывается. Аргументы:
-    ///  - `arg0=resource_handle` (требует `Rights::WRITE`; метерится `size / PAGE` страниц),
+    ///  - `arg0=resource_handle` (требует `Rights::WRITE`, метерится `size / PAGE` страниц),
     ///  - `arg1=size_bytes`,
     ///  - `arg2=flags_raw`.
     ///
@@ -274,13 +274,13 @@ pub enum SyscallOp {
     ///
     /// Primary возврат - `size_bytes`,
     /// secondary - `base_pa | (kind_tag << 3) | access_bits`
-    /// (base_pa page-aligned, младшие 12 бит несут kind/access; для `Virtual` base_pa = 0).
+    /// (base_pa page-aligned, младшие 12 бит несут kind/access, для `Virtual` base_pa = 0).
     MemoryRegionInspect = 0x67,
 
     // 0x70..=0x7F - IRQ CapabilityTarget.
     /// Минтит `IrqLine` по полномочию `IrqControl`. Аргументы:
     ///  - `arg0=irq_control_handle` (требует `Rights::WRITE`),
-    ///  - `arg1=irq` (номер линии в нижних 16 битах; должен попадать в диапазон полномочия).
+    ///  - `arg1=irq` (номер линии в нижних 16 битах, должен попадать в диапазон полномочия).
     ///
     /// Возвращает handle на свежий `IrqLine`. Срабатывание ожидается через
     /// `SignalWaitOne`/`SignalWaitMany` прямо по этому handle (бит `SIGNALED`).

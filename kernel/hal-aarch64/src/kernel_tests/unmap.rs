@@ -6,7 +6,7 @@
 //! `feature = "kernel-tests"`). По завершении функции `Arc<AddressSpace>`
 //! дропается - Drop возвращает все фреймы (root + intermediate L1/L2/L3
 //! таблицы) во `FrameAllocator`. AS никогда не активируется в текущем CPU,
-//! поэтому в TLB его entries нет и инвалидация перед drop не нужна.
+//! и в TLB его entries нет, инвалидация перед drop не нужна.
 
 #![allow(unsafe_code)]
 
@@ -326,7 +326,7 @@ fn mapper_unmap_partial_block_rejected() {
     let _ = runtime_frame_allocator().deallocate_frame(root_frame);
 }
 
-/// `map_exact` может поставить L2 block descriptor; exact unmap всего блока
+/// `map_exact` может поставить L2 block descriptor. Exact unmap всего блока
 /// должен снять его без split и разрешить повторный map_exact.
 #[kernel_test]
 fn mapper_unmap_l2_block_then_remap() {

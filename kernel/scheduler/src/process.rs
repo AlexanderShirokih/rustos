@@ -110,7 +110,7 @@ impl Process {
         self.handle_table.with_lock(|t| t.live_count() == 0)
     }
 
-    /// `Arc` per-process аллокатора user-VA; `None` для kernel-процессов.
+    /// `Arc` per-process аллокатора user-VA. `None` для kernel-процессов.
     pub fn user_vm(&self) -> Option<&Arc<MutexCell<UserVmAllocator>>> {
         self.user_vm.as_ref()
     }
@@ -143,7 +143,7 @@ impl Process {
         self.thread_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Снимает с учёта поток; возвращает `true`, если это был последний.
+    /// Снимает с учёта поток. Возвращает `true`, если это был последний.
     pub fn decrement_thread_count(&self) -> bool {
         // AcqRel: prior thread-state writes happen-before наблюдения нуля.
         let prev = self.thread_count.fetch_sub(1, Ordering::AcqRel);
@@ -269,7 +269,7 @@ impl ProcessTable {
         self.slots.iter_mut().filter_map(|s| s.as_mut())
     }
 
-    /// Удаляет процесс из таблицы; возвращает `Some(Process)` если найден.
+    /// Удаляет процесс из таблицы. Возвращает `Some(Process)` если найден.
     pub fn remove(&mut self, id: ProcessId) -> Option<Process> {
         for slot in &mut self.slots {
             if slot.as_ref().is_some_and(|p| p.id() == id) {

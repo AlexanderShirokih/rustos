@@ -138,7 +138,7 @@ impl Capability {
         self.rights
     }
 
-    /// Значок (badge) этой capability; `0` означает "без значка".
+    /// Значок (badge) этой capability. `0` означает "без значка".
     pub fn badge(&self) -> u64 {
         self.badge
     }

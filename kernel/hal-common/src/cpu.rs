@@ -60,7 +60,7 @@ impl<const N: usize> CpuTopology<N> {
         Self { entries }
     }
 
-    /// Число CPU в таблице; не меньше единицы (boot CPU есть всегда).
+    /// Число CPU в таблице. Не меньше единицы (boot CPU есть всегда).
     pub fn len(&self) -> usize {
         self.entries.len()
     }

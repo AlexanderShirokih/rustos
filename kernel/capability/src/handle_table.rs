@@ -119,7 +119,7 @@ impl RejectedInsert {
         }
     }
 
-    /// Причина отказа; объект остаётся в токене.
+    /// Причина отказа. Объект остаётся в токене.
     pub fn error(&self) -> IpcError {
         self.error
     }
@@ -207,7 +207,7 @@ impl HandleTable {
         Ok(HandleId::pack(generation, index))
     }
 
-    /// Резервирует слот; на исчерпании ёмкости - `OutOfHandles` без эффектов.
+    /// Резервирует слот. На исчерпании ёмкости - `OutOfHandles` без эффектов.
     pub fn reserve_slot(&mut self) -> Result<HandleReservation, IpcError> {
         let Some((index, slot)) = self.claim_slot() else {
             return Err(IpcError::OutOfHandles);

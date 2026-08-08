@@ -102,7 +102,7 @@ impl KernelContext {
         self.device_regions.clone()
     }
 
-    /// Полоса линий прерываний, которую контроллер платформы отдаёт наружу;
+    /// Полоса линий прерываний, которую контроллер платформы отдаёт наружу.
     /// `None` до установки сервиса прерываний.
     pub fn assignable_irq_lines(&mut self) -> Option<IrqLineSpan> {
         self.with_runtime_state(|services, _| {

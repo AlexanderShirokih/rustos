@@ -14,7 +14,7 @@ use crate::{
 /// Узлы без `compatible` (memory, cpus, chosen) и без `reg` окон не дают. Окна
 /// идут в порядке узлов FDT и их `reg`-записей.
 ///
-/// Обходятся только прямые дети корня (плоская раскладка); узлы под шиной с
+/// Обходятся только прямые дети корня (плоская раскладка). Узлы под шиной с
 /// собственным `ranges` в набор не попадают.
 pub fn enumerate_device_windows(root: &FdtNode, claimed: &BTreeSet<usize>) -> Vec<AddressSpace> {
     let root_cells = root.cells_size().unwrap_or_default();

@@ -6,7 +6,7 @@ use ra_ap_syntax::{
 };
 
 use crate::{
-    scope::FileMeta,
+    scope::{Domain, FileMeta},
     settings::Settings,
     span::{LineIndex, Span},
 };
@@ -75,11 +75,12 @@ impl Source {
 
     /// Собирает файл вне репозитория, для тестов и фикстур.
     pub fn detached(path: impl Into<PathBuf>, text: &str) -> Source {
+        let path = path.into();
         Source::new(
             FileMeta {
-                path: path.into(),
+                domain: Domain::of(&path),
+                path,
                 package: None,
-                domain: None,
             },
             text,
             Arc::new(Settings::default()),
@@ -209,14 +210,56 @@ fn declares_test(node: &SyntaxNode, settings: &Settings) -> bool {
         return false;
     };
     owner.attrs().any(|attr| {
-        let Some(path) = attr.path() else {
-            return false;
-        };
-        let name = path.syntax().text().to_string();
-        let name = name.trim();
-        if settings.test_attributes.iter().any(|want| want == name) {
+        let text = attr.syntax().text().to_string();
+        let name = attribute_head(&text);
+        if settings.test_attributes.contains(&name) {
             return true;
         }
-        name == "cfg" && attr.syntax().text().to_string().contains("test")
+        name == "cfg" && names_test(&drop_negations(&text))
     })
+}
+
+fn attribute_head(text: &str) -> String {
+    text.trim_start_matches(['#', '!', '['])
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+        .collect()
+}
+
+fn drop_negations(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("not(") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + "not(".len()..];
+        let mut depth = 1usize;
+        let mut cut = tail.len();
+        for (offset, ch) in tail.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                cut = offset + 1;
+                break;
+            }
+        }
+        rest = &tail[cut..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn names_test(text: &str) -> bool {
+    text.match_indices("test").any(|(at, word)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + word.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
+}
+
+fn is_word(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }

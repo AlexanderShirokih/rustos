@@ -1,6 +1,6 @@
 //! Идентификация CPU и per-CPU блок платформенного слоя.
 //!
-//! `TPIDR_EL1` хранит адрес [`CpuLocal`] текущего CPU; ноль в регистре
+//! `TPIDR_EL1` хранит адрес [`CpuLocal`] текущего CPU. Ноль в регистре
 //! означает, что блок ещё не установлен.
 
 use core::{
@@ -25,7 +25,7 @@ static CPU_LOCALS: [CpuLocal; MAX_CPUS] = [const { CpuLocal::new() }; MAX_CPUS];
 /// до bootstrap планировщика.
 ///
 /// Блок занимает строку кэша целиком: соседние блоки пишутся своими CPU, и в
-/// общей строке эти записи гоняли бы её между ядрами. Выравнивание взято по
+/// общей строке эти записи гоняют её между ядрами. Выравнивание взято по
 /// наибольшей строке среди целевых ядер - тому же числу, что у блока передачи
 /// параметров.
 #[repr(C, align(128))]
@@ -47,7 +47,7 @@ impl CpuLocal {
         CpuId::new(self.id.load(Ordering::Relaxed)).unwrap_or(CpuId::ZERO)
     }
 
-    /// Per-CPU состояние планировщика; `null` до его bootstrap.
+    /// Per-CPU состояние планировщика. `null` до его bootstrap.
     pub fn scheduler(&self) -> *mut () {
         self.scheduler.load(Ordering::Acquire)
     }
@@ -58,7 +58,7 @@ impl CpuLocal {
 }
 
 /// Публикует таблицу топологии. Вызывается boot CPU один раз, до старта
-/// вторичных CPU; повторный вызов таблицу не меняет.
+/// вторичных CPU. Повторный вызов таблицу не меняет.
 pub fn init_topology(topology: Topology) {
     let _ = TOPOLOGY.call_once(|| topology);
 }
@@ -122,7 +122,7 @@ pub fn current_id() -> CpuId {
     try_current_id().unwrap_or(CpuId::ZERO)
 }
 
-/// Per-CPU блок текущего CPU; `None`, пока он не установлен.
+/// Per-CPU блок текущего CPU. `None`, пока он не установлен.
 pub fn current() -> Option<&'static CpuLocal> {
     // SAFETY: TPIDR_EL1 либо нулевой (блок не установлен), либо хранит адрес
     // элемента `CPU_LOCALS`, записанный `install_local`.

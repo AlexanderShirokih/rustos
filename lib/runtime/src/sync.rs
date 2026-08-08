@@ -156,7 +156,7 @@ impl Condvar {
 
     /// Атомарно отпускает `guard`, паркуется до уведомления и перезахватывает
     /// мьютекс. Вызывать **только** в цикле `while !predicate { guard = cv.wait(guard) }`
-    /// (возможен spurious wakeup; notify обязан сопровождать смену предиката
+    /// (возможен spurious wakeup, notify обязан сопровождать смену предиката
     /// под мьютексом).
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
         self.wait_interleaved(guard, || {})

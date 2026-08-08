@@ -15,7 +15,7 @@ pub const HANDLE_TABLE_CAPACITY: u32 = 1024;
 pub struct Handle(NonZeroU32);
 
 impl Handle {
-    /// Оборачивает сырой HandleId; `None` при нулевом значении.
+    /// Оборачивает сырой HandleId. `None` при нулевом значении.
     pub const fn new(raw: RawHandle) -> Option<Self> {
         match NonZeroU32::new(raw) {
             Some(nz) => Some(Self(nz)),
@@ -72,8 +72,8 @@ pub struct WaitItem {
 }
 
 impl WaitItem {
-    /// Собирает запись из `handle` и ненулевой маски сигналов `mask`;
-    /// нулевую маску ядро отвергает как `InvalidArgument`.
+    /// Собирает запись из `handle` и ненулевой маски сигналов `mask`.
+    /// Нулевую маску ядро отвергает как `InvalidArgument`.
     pub const fn new(handle: Handle, mask: u32) -> Self {
         Self { handle, mask }
     }

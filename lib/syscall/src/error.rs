@@ -7,8 +7,8 @@
 pub enum SyscallError {
     /// Неизвестный номер операции.
     BadSyscall = 1,
-    /// Syscall вызван из kernel-контекста; kernel-side IPC должен ходить
-    /// через прямой вызов `capability`, а не через trap.
+    /// Syscall вызван из kernel-контекста. Kernel-side IPC должен ходить
+    /// через прямой вызов `capability`.
     KernelOriginated = 2,
     /// Аргумент syscall не прошёл валидацию (например, `HandleId == 0`).
     InvalidArgument = 3,
@@ -85,7 +85,7 @@ impl SyscallError {
         self as u32
     }
 
-    /// Восстанавливает вариант по его коду; `None` на неизвестном коде.
+    /// Восстанавливает вариант по его коду. `None` на неизвестном коде.
     pub const fn from_code(code: u32) -> Option<Self> {
         match code {
             1 => Some(Self::BadSyscall),
@@ -111,7 +111,7 @@ impl SyscallError {
         }
     }
 
-    /// Декодирует отрицательный ABI-возврат `-(code as i64)` обратно в вариант;
+    /// Декодирует отрицательный ABI-возврат `-(code as i64)` обратно в вариант.
     /// `None` на неотрицательном значении (успех) или неизвестном коде.
     pub const fn from_return(ret: i64) -> Option<Self> {
         if ret >= 0 || ret < -(u32::MAX as i64) {

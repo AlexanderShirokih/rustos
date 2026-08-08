@@ -305,7 +305,7 @@ pub fn handle_close(handle_id: HandleId) -> Result<(), IpcError> {
 
 /// Создаёт новый handle на тот же capability target с подмножеством прав и (опционально)
 /// значком (badge). Требует [`Rights::DUPLICATE`] на исходном handle.
-/// Семантика значка - set-once: заклеймить можно только незаклеймённый хендл; заклеймённый
+/// Семантика значка - set-once: заклеймить можно только незаклеймённый хендл. Заклеймённый
 /// наследует значок, переклеймить нельзя (см. [`Capability::duplicate`]).
 pub fn handle_duplicate(
     handle_id: HandleId,

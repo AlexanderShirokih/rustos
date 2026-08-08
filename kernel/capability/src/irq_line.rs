@@ -4,11 +4,11 @@
 //! ARMED/FIRED и RAII-токен развязки. Доставка переиспользует `Signal`:
 //! объект ожидается напрямую через
 //! [`as_waitable`](super::CapabilityTarget::as_waitable), отдельный
-//! `Signal`-хендл наружу не выдаётся, поэтому подделать срабатывание нельзя.
+//! `Signal`-хендл наружу не выдаётся, и подделать срабатывание нельзя.
 //!
 //! Уровневый протокол (линии GIC level-sensitive): при срабатывании линия
 //! маскируется СИНХРОННО (до возврата из IRQ-обработчика) и поднимается
-//! `SIGNALED`; [`ack`](IrqLine::ack) снимает latch и размаскирует линию.
+//! `SIGNALED`. [`ack`](IrqLine::ack) снимает latch и размаскирует линию.
 
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -73,7 +73,7 @@ impl IrqLine {
     }
 
     /// Подтверждает обработку: снимает latch `SIGNALED`, затем размаскирует
-    /// линию. Вне состояния FIRED — `WrongType` (нечего подтверждать; защита
+    /// линию. Вне состояния FIRED — `WrongType` (нечего подтверждать, защита
     /// от двойного `unmask`).
     pub fn ack(&self) -> Result<(), IpcError> {
         if self

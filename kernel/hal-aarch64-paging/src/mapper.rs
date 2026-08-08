@@ -242,8 +242,8 @@ impl<A: TableAlloc> PageMapper<A> {
     /// Проходит таблицы L0->L1->L2->L3 и возвращает указатель на L3-таблицу
     /// и индекс внутри неё для leaf-записи (Page) `virt`.
     ///
-    /// На L0/L1/L2 ожидается Table-дескриптор; Block (L1=1G, L2=2M) -> `HitBlock`.
-    /// На L3 ожидается Page; иначе -> `NotMapped`.
+    /// На L0/L1/L2 ожидается Table-дескриптор. Block (L1=1G, L2=2M) -> `HitBlock`.
+    /// На L3 ожидается Page. Иначе -> `NotMapped`.
     pub fn walk_to_l3_leaf(
         &self,
         virt: PageAlignedVirtualAddress,
@@ -309,15 +309,15 @@ const LEAF_PA_AND_DESC_MASK: u64 = 0x0000_FFFF_FFFF_F803;
 
 /// Меняет только биты атрибутов в L3-leaf-записи (`table[idx]`), сохраняя PA и desc-type.
 ///
-/// Запись 8-байтового выровненного значения single-copy atomic; race с MMU-walker
-/// безопасен. Метод корректен только для **расширения** прав (RX->RW, RO->RW); сужение
+/// Запись 8-байтового выровненного значения single-copy atomic. Race с MMU-walker
+/// безопасен. Метод корректен только для **расширения** прав (RX->RW, RO->RW). Сужение
 /// требует break-before-make и здесь не реализовано.
 ///
 /// # Safety
 ///
 /// - `table` валиден и эксклюзивно доступен (вызывающий держит lock на mapper);
 /// - `idx < 512`;
-/// - запись по `idx` имеет desc-type Page (0b11); иначе вернётся `WalkError::NotMapped`
+/// - запись по `idx` имеет desc-type Page (0b11). Иначе вернётся `WalkError::NotMapped`
 ///   и таблица не изменяется.
 pub unsafe fn update_l3_flags(
     table: *mut PageTable<L3>,
@@ -345,7 +345,7 @@ pub unsafe fn update_l3_flags(
 /// Колбэки для путей `unmap_range` и `free_all`.
 pub trait UnmapVisitor {
     /// Снятая leaf-запись по `va` уровня `leaf_shift`
-    /// (`L3::SHIFT`/`L2::SHIFT`/`L1::SHIFT`); `raw` - старое значение PTE.
+    /// (`L3::SHIFT`/`L2::SHIFT`/`L1::SHIFT`). `raw` - старое значение PTE.
     fn on_leaf(&mut self, va: PageAlignedVirtualAddress, leaf_shift: u8, raw: u64);
     /// Опустевшая дочерняя таблица.
     fn on_free_table(&mut self, pa: PageAlignedAddress);
@@ -356,7 +356,7 @@ pub trait UnmapVisitor {
 pub enum UnmapError {
     /// Invalid-запись внутри запрошенного диапазона.
     NotMapped,
-    /// Диапазон частично пересекает block-leaf; split не поддерживается.
+    /// Диапазон частично пересекает block-leaf. Split не поддерживается.
     UnsupportedPartialBlock,
     /// Невалидный дескриптор.
     Decode(DecodeError),
@@ -366,7 +366,7 @@ const HIGH_HALF_MASK: usize = 0xFFFF_0000_0000_0000;
 
 /// Снимает leaf-записи в `[va, va + size)`. Опустевшие L1/L2/L3
 /// возвращаются через `visitor.on_free_table`. Block-leaf снимается
-/// только целиком; partial -> [`UnmapError::UnsupportedPartialBlock`].
+/// только целиком. Partial -> [`UnmapError::UnsupportedPartialBlock`].
 ///
 /// # Safety
 /// `root` валиден, `alloc.table_ptr` транслирует PA->VA для всех subtree,
@@ -397,7 +397,7 @@ where
 /// Invalid и corrupt-дескрипторы пропускаются.
 ///
 /// # Safety
-/// см. [`unmap_range`]; AS не активен ни на одном CPU.
+/// см. [`unmap_range`]. AS не активен ни на одном CPU.
 pub unsafe fn free_all<A, V>(root: *mut PageTable<L0>, alloc: &A, high_half: bool, visitor: &mut V)
 where
     A: TableAlloc,

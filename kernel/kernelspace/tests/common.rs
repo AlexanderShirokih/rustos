@@ -171,7 +171,7 @@ pub fn take_address_space_switches() -> Vec<Option<AddressSpaceHandle>> {
 }
 
 /// Последний handle, переданный в `MockContext::switch_address_space`.
-/// Внешний `Option` - был ли вообще вызов; внутренний - значение `next`,
+/// Внешний `Option` - был ли вообще вызов. Внутренний - значение `next`,
 /// которое могло быть `None` для перехода на kernel-thread.
 #[allow(clippy::option_option)]
 pub fn last_address_space_root() -> Option<Option<AddressSpaceHandle>> {

@@ -13,6 +13,19 @@ pub enum Domain {
     Tool,
 }
 
+impl Domain {
+    /// Определяет слой по пути файла от корня репозитория.
+    pub fn of(path: &Path) -> Option<Domain> {
+        match path.components().next()?.as_os_str().to_str()? {
+            "kernel" => Some(Domain::Kernel),
+            "lib" => Some(Domain::Library),
+            "user" => Some(Domain::User),
+            "tools" | "xtask" => Some(Domain::Tool),
+            _ => None,
+        }
+    }
+}
+
 /// Паспорт файла, по которому вычисляется область действия правила.
 pub struct FileMeta {
     /// Путь от корня репозитория.
@@ -38,6 +51,10 @@ pub enum Selector {
     NotPackageAny(Vec<String>),
     /// Имя файла совпадает с одним из перечисленных.
     FileNameAny(Vec<String>),
+    /// Имя файла не совпадает ни с одним из перечисленных.
+    NotFileNameAny(Vec<String>),
+    /// Путь не содержит ни одного из перечисленных сегментов.
+    NotSegmentAny(Vec<String>),
     /// Пакет принадлежит одному из слоёв.
     DomainAny(Vec<Domain>),
 }
@@ -112,6 +129,10 @@ impl Selector {
             Selector::FileNameAny(names) => {
                 file_name(&meta.path).is_some_and(|got| names.iter().any(|want| want == got))
             }
+            Selector::NotFileNameAny(names) => {
+                !file_name(&meta.path).is_some_and(|got| names.iter().any(|want| want == got))
+            }
+            Selector::NotSegmentAny(segments) => !has_segment_any(&meta.path, segments),
             Selector::DomainAny(domains) => meta.domain.is_some_and(|got| domains.contains(&got)),
         }
     }
@@ -130,6 +151,15 @@ fn under_any(path: &Path, prefixes: &[String]) -> bool {
     prefixes
         .iter()
         .any(|prefix| text.starts_with(prefix.as_str()))
+}
+
+fn has_segment_any(path: &Path, segments: &[String]) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|got| segments.iter().any(|want| want == got))
+    })
 }
 
 fn in_package(meta: &FileMeta, names: &[String]) -> bool {

@@ -1,10 +1,10 @@
 //! Proc-macro `#[protocol]`: кодоген IPC-контрактов поверх рантайма `ipc`.
 //!
-//! Атрибут на trait объявляет протокол; методы с
+//! Атрибут на trait объявляет протокол. Методы с
 //! `#[call]`/`#[cast]`/`#[event]` - его операции. Макрос
 //! заменяет trait маркер-типом и эмитит client/service/dispatch/events,
 //! ordinal-константы и дескриптор схемы. Хэш ordinal считается
-//! host-стороной (`sha2`); рантайм хранит готовые литералы.
+//! host-стороной (`sha2`). Рантайм хранит готовые литералы.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -19,7 +19,7 @@ mod wire_value;
 /// Объявляет IPC-протокол:
 /// `#[protocol(name = "...", timeout_ns = N, transport = "...")]` на trait.
 /// `name` - неймспейс ordinal (по умолчанию имя trait). `timeout_ns` - дефолтный
-/// срок ожидания ответа two-way `#[call]` (нс; по умолчанию `u64::MAX` -
+/// срок ожидания ответа two-way `#[call]` (нс, по умолчанию `u64::MAX` -
 /// бессрочно), перекрываемый на операции через `#[call(timeout_ns = N)]`.
 /// `transport` - плоскость: `"port"` (по умолчанию) или `"ring"` (SPSC-кольцо,
 /// допускает только `#[cast]`/`#[event]`).
@@ -35,8 +35,8 @@ pub fn protocol(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Выводит `WireValue`/`WireTyped` для struct с именованными полями (каждое -
-/// `WireValue`). Значение укладывается во вложенный суб-кадр одного wire-поля;
-/// дескриптор - `WireType::Aggregate` из полей. Допускает ноль или один лайфтайм;
+/// `WireValue`). Значение укладывается во вложенный суб-кадр одного wire-поля.
+/// Дескриптор - `WireType::Aggregate` из полей. Допускает ноль или один лайфтайм.
 /// type/const-генерики и более одного лайфтайма отвергаются.
 #[proc_macro_derive(WireValue)]
 pub fn derive_wire_value(item: TokenStream) -> TokenStream {

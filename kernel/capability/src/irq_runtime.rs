@@ -13,7 +13,7 @@ use syscall::IrqTrigger;
 use super::errors::IpcError;
 
 /// Приёмник аппаратного прерывания: мост к [`IrqLine::on_fire`](super::IrqLine).
-/// Реализация держит `Weak<IrqLine>`, поэтому срабатывание в гонке с закрытием
+/// Реализация держит `Weak<IrqLine>`, и срабатывание в гонке с закрытием
 /// линии становится no-op.
 pub trait IrqSink: Send + Sync {
     /// Вызывается из IRQ-контекста при срабатывании линии.
@@ -43,11 +43,11 @@ pub trait InterruptsControl: Send + Sync {
 /// Непрозрачный RAII-развязчик линии. Дроп токена снимает привязку: на стороне
 /// kernelspace это дропает `IrqBound`, чей cleanup отключает линию и удаляет
 /// обработчик. Токен владеется единственным `Arc<IrqLine>` — `IrqBound` (FnOnce)
-/// нельзя клонировать, поэтому несколько хендлов разделяют линию через `Arc`.
+/// нельзя клонировать, и несколько хендлов разделяют линию через `Arc`.
 pub struct IrqBindToken(#[allow(dead_code)] Box<dyn Send>);
 
 impl IrqBindToken {
-    /// Оборачивает произвольный `Send`-гард; его `Drop` исполняется при дропе токена.
+    /// Оборачивает произвольный `Send`-гард. Его `Drop` исполняется при дропе токена.
     pub fn new<G: Send + 'static>(guard: G) -> Self {
         Self(Box::new(guard))
     }
@@ -64,7 +64,7 @@ pub fn install_interrupts_control(control: Arc<dyn InterruptsControl>) {
     let _ = IRQ_CONTROL.call_once(|| control);
 }
 
-/// Доступ к глобальному контроллеру; паникует, если он ещё не установлен.
+/// Доступ к глобальному контроллеру. Паникует, если он ещё не установлен.
 pub fn interrupts_control() -> &'static Arc<dyn InterruptsControl> {
     IRQ_CONTROL
         .get()

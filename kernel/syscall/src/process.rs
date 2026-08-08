@@ -236,7 +236,7 @@ pub fn sys_process_load_image(
 }
 
 /// `ProcessStart` - стартует первый поток процесса.
-/// ABI: `bootstrap_handle` - raw HandleId стартового хэндла-канала; `priority` в битах [0..8),
+/// ABI: `bootstrap_handle` - raw HandleId стартового хэндла-канала. `priority` в битах [0..8),
 /// биты [8..) = 0.
 pub fn sys_process_start(
     process_h: u64,

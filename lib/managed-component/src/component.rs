@@ -117,7 +117,7 @@ impl<R> ManagedComponent<R> {
     /// состоянии [`ManagedStatus::Launching`].
     ///
     /// Резерв принадлежит компоненту до его уничтожения: каждый запуск нарезает
-    /// ресурс экземпляра из него, а не из родительского ресурса. Резерв - капа-
+    /// ресурс экземпляра из него. Резерв - капа-
     /// потомок `parent_resource`, и закрытие родительской капы его отзывает.
     pub fn new(parent_resource: &Resource, budget_pages: u64) -> Result<Self, ManagedStartupError> {
         Ok(Self {

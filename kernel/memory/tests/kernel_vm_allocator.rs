@@ -1,6 +1,6 @@
 //! Unit-тесты `HeapAllocator`. Mock-mapper использует backing-буфер
 //! напрямую как арену heap - адрес буфера становится `arena_base`,
-//! поэтому VA-операции реально пишут в host-память.
+//! и VA-операции реально пишут в host-память.
 
 #![allow(unsafe_code)]
 #![allow(clippy::unwrap_used)]

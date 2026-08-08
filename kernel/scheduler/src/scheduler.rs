@@ -164,9 +164,9 @@ pub trait SchedulerStage {}
 
 /// Планировщик создан, но per-CPU состояние ещё не установлено.
 pub struct Uninit;
-/// Per-CPU состояние установлено; доступен `spawn` и регистрация сервисов.
+/// Per-CPU состояние установлено. Доступен `spawn` и регистрация сервисов.
 pub struct Bootstrapped;
-/// Произошёл первый context switch; доступны yield, sleep, exit.
+/// Произошёл первый context switch. Доступны yield, sleep, exit.
 pub struct Running;
 
 impl SchedulerStage for Uninit {}
@@ -298,7 +298,7 @@ where
         Self::with_address_space_factory(timer, config, None)
     }
 
-    /// `None` - режим без user-AS; `SpawnAddressSpace::User` вернёт `AddressSpaceCreationFailed`.
+    /// `None` - режим без user-AS. `SpawnAddressSpace::User` вернёт `AddressSpaceCreationFailed`.
     pub fn with_address_space_factory(
         timer: T,
         config: SchedulerConfig,
@@ -529,13 +529,13 @@ where
         self.inner.with_lock(|inner| inner.processes.live_count())
     }
 
-    /// Количество живых потоков процесса `pid`; `None` если процесс не найден.
+    /// Количество живых потоков процесса `pid`. `None` если процесс не найден.
     pub fn process_thread_count(&self, pid: ProcessId) -> Option<usize> {
         self.inner
             .with_lock(|inner| inner.processes.get(pid).map(Process::thread_count))
     }
 
-    /// Количество user-VM-регионов процесса `pid`; `None` если нет процесса или user-vm.
+    /// Количество user-VM-регионов процесса `pid`. `None` если нет процесса или user-vm.
     pub fn process_user_vm_region_count(&self, pid: ProcessId) -> Option<usize> {
         use collections::LockCell;
         self.inner.with_lock(|inner| {
@@ -545,38 +545,38 @@ where
         })
     }
 
-    /// `Arc<ThreadObject>` потока `id`; `None` если поток не найден.
+    /// `Arc<ThreadObject>` потока `id`. `None` если поток не найден.
     pub fn thread_object_for(&self, id: ThreadId) -> Option<Arc<ThreadObject>> {
         self.inner
             .with_lock(|inner| inner.threads.get(id).map(|t| t.thread_object().clone()))
     }
 
-    /// `Arc` handle-таблицы процесса `pid`; `None` если процесс не найден.
+    /// `Arc` handle-таблицы процесса `pid`. `None` если процесс не найден.
     pub fn process_handle_table(&self, pid: ProcessId) -> Option<Arc<MutexCell<HandleTable>>> {
         self.inner
             .with_lock(|inner| inner.processes.get(pid).map(|p| p.handle_table().clone()))
     }
 
-    /// `Arc<ProcessObject>` процесса `pid`; `None` если процесс не найден.
+    /// `Arc<ProcessObject>` процесса `pid`. `None` если процесс не найден.
     pub fn process_object_for(&self, pid: ProcessId) -> Option<Arc<ProcessObject>> {
         self.inner
             .with_lock(|inner| inner.processes.get(pid).map(|p| p.process_object().clone()))
     }
 
-    /// `ProcessId` процесса, к которому привязан поток `id`; `None` если поток не найден.
+    /// `ProcessId` процесса, к которому привязан поток `id`. `None` если поток не найден.
     pub fn thread_process_id(&self, id: ThreadId) -> Option<ProcessId> {
         self.inner
             .with_lock(|inner| inner.threads.get(id).map(Thread::process))
     }
 
-    /// CPU, в очередь которого поток `id` возвращают пробуждения; `None` если
+    /// CPU, в очередь которого поток `id` возвращают пробуждения. `None` если
     /// поток не найден.
     pub fn thread_cpu_affinity(&self, id: ThreadId) -> Option<CpuId> {
         self.inner
             .with_lock(|inner| inner.threads.get(id).map(Thread::cpu_affinity))
     }
 
-    /// `ProcessId` процесса по lifecycle-capability target; `None` если процесс не найден.
+    /// `ProcessId` процесса по lifecycle-capability target. `None` если процесс не найден.
     pub fn process_id_for(&self, target: &Arc<ProcessObject>) -> Option<ProcessId> {
         self.inner.with_lock(|inner| {
             inner

@@ -6,7 +6,7 @@ use crate::{
 /// Фрейм физической памяти.
 ///
 /// Представляет страницу физической памяти фиксированного размера (4 КБ).
-/// Хранит номер фрейма, а не адрес.
+/// Хранит номер фрейма.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Frame(usize);

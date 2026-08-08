@@ -74,7 +74,7 @@ pub enum MemoryUnmappingError {
     /// В диапазоне есть незамапленная страница. Уже снятые с маппинга страницы
     /// **не** возвращаются - частичный unmap валиден от вызывающего.
     NotMapped,
-    /// Запрошен частичный unmap внутри block-mapping; split не поддерживается.
+    /// Запрошен частичный unmap внутри block-mapping. Split не поддерживается.
     UnsupportedBlockMapping,
     /// Размер диапазона не кратен 4 КБ.
     MisalignedRange,
@@ -116,7 +116,7 @@ impl Display for UserCopyError {
 pub enum MemoryRemappingError {
     /// В диапазоне есть незамапленная страница.
     NotMapped,
-    /// На пути встретился block-mapping (1G/2M); split не поддерживается.
+    /// На пути встретился block-mapping (1G/2M). Split не поддерживается.
     UnsupportedBlockMapping,
     /// Размер диапазона не кратен 4 КБ.
     MisalignedRange,
@@ -183,10 +183,10 @@ pub trait MemoryMapper {
     /// поданного через [`Self::map_exact`] (MMIO, identity, фреймы из
     /// внешнего владельца), `unmap` PA не освобождает. Регионы, владеющие
     /// фреймами на стороне caller (`MemoryRegion::Virtual`), возвращают свои
-    /// фреймы при `Drop` региона, а не при `unmap`.
+    /// фреймы при `Drop` региона.
     ///
     /// `size` должен быть кратен размеру страницы. Диапазон может покрывать
-    /// 4К leaf-страницы и whole block leaf-маппинги; частичный unmap внутри
+    /// 4К leaf-страницы и whole block leaf-маппинги. Частичный unmap внутри
     /// block leaf возвращает [`MemoryUnmappingError::UnsupportedBlockMapping`].
     /// При первой незамапленной странице - [`MemoryUnmappingError::NotMapped`].
     /// Уже снятые с маппинга страницы при этом **не** возвращаются.
@@ -198,7 +198,7 @@ pub trait MemoryMapper {
 
     /// Меняет флаги уже замапленного 4К-диапазона на `new_flags` без перевыделения фреймов.
     ///
-    /// `size` должен быть кратен размеру страницы (4 КБ); диапазон должен быть полностью
+    /// `size` должен быть кратен размеру страницы (4 КБ). Диапазон должен быть полностью
     /// замаплен 4К-страницами. На L1/L2 block-mappings возвращается
     /// [`MemoryRemappingError::UnsupportedBlockMapping`].
     ///
@@ -225,7 +225,7 @@ pub trait MemoryMapper {
     fn zero_owned_frame(&self, pa: PageAlignedAddress);
 
     /// Копирует `[va, va + dst.len())` из user-AS в `dst`. `va`
-    /// произволен, диапазон может пересекать страницы; каждая leaf-page
+    /// произволен, диапазон может пересекать страницы. Каждая leaf-page
     /// проверяется на user-readable. AS не обязан быть активным root:
     /// доступ идёт через линейную карту физических фреймов.
     fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
@@ -233,8 +233,8 @@ pub trait MemoryMapper {
         Err(UserCopyError::NotMapped)
     }
 
-    /// Симметрично [`Self::copy_user_in`] для записи `src` в user-AS;
-    /// требует user-writable на каждой leaf-page.
+    /// Симметрично [`Self::copy_user_in`] для записи `src` в user-AS.
+    /// Требует user-writable на каждой leaf-page.
     fn copy_user_out(&self, va: VirtualAddress, src: &[u8]) -> Result<(), UserCopyError> {
         let _ = (va, src);
         Err(UserCopyError::NotMapped)
