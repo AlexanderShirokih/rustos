@@ -35,7 +35,7 @@ const OUTCOME_DETACH: &str = "detach";
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlanProgram<'a> {
     pub path: &'a str,
-    pub manifest: Option<&'a ProgramManifest>,
+    pub manifest: &'a ProgramManifest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,9 +209,7 @@ fn resolve_declarations<'a>(
                         "boot plan names executable '{executable}' that the image does not contain"
                     )
                 })?;
-            program.manifest.with_context(|| {
-                format!("boot plan component '{executable}' has no component manifest section")
-            })
+            Ok(program.manifest)
         })
         .collect()
 }
@@ -611,40 +609,37 @@ mod tests {
     }
 
     struct Image {
-        entries: Vec<(String, Option<ProgramManifest>)>,
+        entries: Vec<(String, ProgramManifest)>,
     }
 
     impl Image {
         fn new() -> Self {
             let mut entries = vec![
-                (String::from(ROOTKEEPER), None),
-                (String::from(ROUTER), Some(router_declaration())),
-                (String::from(DRIVER), Some(device_declaration())),
-                (String::from(CONSUMER), Some(consumer_declaration())),
+                (String::from(ROOTKEEPER), ProgramManifest::default()),
+                (String::from(ROUTER), router_declaration()),
+                (String::from(DRIVER), device_declaration()),
+                (String::from(CONSUMER), consumer_declaration()),
                 (
                     String::from(IMAGE_FS),
-                    Some(declaration(vec![slot(SlotKind::Userland, 0, &[])], None)),
+                    declaration(vec![slot(SlotKind::Userland, 0, &[])], None),
                 ),
-                (String::from(RAM_FS), None),
+                (String::from(RAM_FS), ProgramManifest::default()),
             ];
             for index in 0..DRIVER_FAMILY {
-                entries.push((driver_family_member(index), Some(device_declaration())));
+                entries.push((driver_family_member(index), device_declaration()));
             }
             Self { entries }
         }
 
         fn with(mut self, path: &str, manifest: ProgramManifest) -> Self {
-            self.entries.push((String::from(path), Some(manifest)));
+            self.entries.push((String::from(path), manifest));
             self
         }
 
         fn programs(&self) -> Vec<PlanProgram<'_>> {
             self.entries
                 .iter()
-                .map(|(path, manifest)| PlanProgram {
-                    path,
-                    manifest: manifest.as_ref(),
-                })
+                .map(|(path, manifest)| PlanProgram { path, manifest })
                 .collect()
         }
 
@@ -1025,12 +1020,14 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_a_program_without_a_manifest() {
-        let source = plan(&[filesystem("")]).replace(ROUTER, ROOTKEEPER);
-        assert_eq!(
-            rejected(&source),
-            format!("boot plan component '{ROOTKEEPER}' has no component manifest section")
-        );
+    fn a_program_without_a_manifest_declares_nothing() {
+        let source = plan(&[rtc("").replace(DRIVER, ROOTKEEPER)]);
+
+        let bytes = compiled(&source);
+        let plan = decode_plan(&bytes).expect("compiled plan must decode");
+        let component = plan.component(0).expect("component");
+        assert_eq!(component.executable(), ROOTKEEPER);
+        assert_eq!(component.slots().count(), 0);
     }
 
     #[test]

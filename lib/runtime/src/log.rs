@@ -5,7 +5,7 @@ use core::fmt::Write as _;
 use log_abi::{LOG_MESSAGE_MAX, LogBuffer, log};
 use spin::Once;
 
-use crate::{handle::OwnedHandle, port_transport::PortTransport};
+use crate::{PortTransport, handle::OwnedHandle};
 
 static LOG: Once<(OwnedHandle, &'static str)> = Once::new();
 

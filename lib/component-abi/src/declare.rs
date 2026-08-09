@@ -26,8 +26,34 @@
 ///     }
 /// }
 /// ```
+///
+/// Форма без структуры кладёт только запись манифеста: приёмник транзакции программе на
+/// стандартной библиотеке не нужен, набор ей отдаёт `std::os::molecular`.
+///
+/// ```ignore
+/// component_abi::component_manifest! {
+///     slots: { rtc: service(protocol = "Rtc") },
+/// }
+/// ```
 #[macro_export]
 macro_rules! component_manifest {
+    (
+        exports: $export:literal,
+        slots: { $($slot:ident: $kind:ident $(($($parameter:tt)*))?),* $(,)? } $(,)?
+    ) => {
+        $crate::component_manifest!(@section
+            &[$($crate::component_manifest!(@slot $kind $(($($parameter)*))?)),*],
+            $export
+        );
+    };
+    (
+        slots: { $($slot:ident: $kind:ident $(($($parameter:tt)*))?),* $(,)? } $(,)?
+    ) => {
+        $crate::component_manifest!(@section
+            &[$($crate::component_manifest!(@slot $kind $(($($parameter)*))?)),*],
+            ""
+        );
+    };
     (
         $(#[$attribute:meta])*
         $visibility:vis struct $name:ident {
@@ -96,13 +122,22 @@ macro_rules! component_manifest {
             }
         }
 
+        $crate::component_manifest!(@section
+            &[$($crate::component_manifest!(@slot $kind $(($($parameter)*))?)),*],
+            $export
+        );
+    };
+    (@section $slots:expr, $export:literal) => {
         const _: () = {
-            const SLOTS: &[$crate::SlotDeclaration] = &[
-                $($crate::component_manifest!(@slot $kind $(($($parameter)*))?)),*
-            ];
+            const SLOTS: &[$crate::SlotDeclaration] = $slots;
             const RECORD_LEN: usize = $crate::manifest_len(SLOTS, $export);
 
-            #[cfg_attr(target_os = "none", unsafe(link_section = ".component.manifest"))]
+            // Секцию читает сборщик образа из ELF программы, и кладёт её только сборка под
+            // таргет системы: на хосте образ не собирается, а имя секции там своё.
+            #[cfg_attr(
+                target_os = "molecular",
+                unsafe(link_section = ".component.manifest")
+            )]
             #[used]
             static MANIFEST: [u8; RECORD_LEN] = $crate::encode_manifest(SLOTS, $export);
         };
@@ -295,6 +330,7 @@ mod tests {
 
     #[test]
     fn a_declaration_encodes_its_slots_and_export() {
+        // Имя секции макрос пишет литералом: `link_section` берёт только его.
         assert_eq!(COMPONENT_MANIFEST_SECTION, ".component.manifest");
         let bytes: [u8; ROUTER_LEN] = encode_manifest(ROUTER_SLOTS, "Namespace");
 

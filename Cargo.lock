@@ -104,19 +104,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
-name = "calculator-demo"
-version = "0.1.0"
-dependencies = [
- "component-abi",
- "filesystem-abi",
- "ipc",
- "rtc-abi",
- "runtime",
- "syscall",
- "userland-build",
-]
-
-[[package]]
 name = "capability"
 version = "0.1.0"
 dependencies = [
@@ -197,6 +184,7 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "ipc-test",
+ "rustc-std-workspace-core",
 ]
 
 [[package]]
@@ -246,19 +234,6 @@ dependencies = [
  "device-resolver",
  "fdt",
  "syscall",
-]
-
-[[package]]
-name = "driver-pl031"
-version = "0.1.0"
-dependencies = [
- "component-abi",
- "io",
- "ipc",
- "rtc-abi",
- "runtime",
- "syscall",
- "userland-build",
 ]
 
 [[package]]
@@ -332,41 +307,6 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "ipc-test",
-]
-
-[[package]]
-name = "filesystem-imagefs"
-version = "0.1.0"
-dependencies = [
- "filesystem",
- "filesystem-server",
- "runtime",
- "syscall",
- "userland-build",
-]
-
-[[package]]
-name = "filesystem-ramfs"
-version = "0.1.0"
-dependencies = [
- "filesystem",
- "filesystem-server",
- "runtime",
- "syscall",
- "userland-build",
-]
-
-[[package]]
-name = "filesystem-server"
-version = "0.1.0"
-dependencies = [
- "filesystem",
- "filesystem-abi",
- "ipc",
- "runtime",
- "spin",
- "syscall",
- "userland",
 ]
 
 [[package]]
@@ -559,29 +499,7 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "ipc-test",
-]
-
-[[package]]
-name = "log-relay"
-version = "0.1.0"
-dependencies = [
- "bootstrap-abi",
- "ipc",
- "log-abi",
- "runtime",
- "syscall",
-]
-
-[[package]]
-name = "managed-component"
-version = "0.1.0"
-dependencies = [
- "component-abi",
- "ipc",
- "runtime",
- "syscall",
- "userland",
- "userland-loader",
+ "rustc-std-workspace-core",
 ]
 
 [[package]]
@@ -624,29 +542,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
  "windows-sys",
-]
-
-[[package]]
-name = "molecular-rt"
-version = "0.1.0"
-dependencies = [
- "syscall",
-]
-
-[[package]]
-name = "namespace-router"
-version = "0.1.0"
-dependencies = [
- "component-abi",
- "filesystem-abi",
- "filesystem-server",
- "ipc",
- "runtime",
- "spin",
- "syscall",
- "userland-build",
- "userland-image",
- "userland-loader",
 ]
 
 [[package]]
@@ -800,26 +695,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "rootkeeper"
-version = "0.1.0"
-dependencies = [
- "bootstrap-abi",
- "device-resolver",
- "device-resolver-aarch64",
- "fdt",
- "filesystem-abi",
- "ipc",
- "log-abi",
- "log-relay",
- "managed-component",
- "runtime",
- "spin",
- "syscall",
- "userland-build",
- "userland-image",
-]
-
-[[package]]
 name = "rowan"
 version = "0.15.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -837,21 +712,6 @@ name = "rtc-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
-]
-
-[[package]]
-name = "runtime"
-version = "0.1.0"
-dependencies = [
- "bootstrap-abi",
- "collections",
- "io",
- "ipc",
- "log-abi",
- "molecular-rt",
- "spin",
- "syscall",
- "talc",
 ]
 
 [[package]]
@@ -1065,12 +925,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "talc"
-version = "4.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
-
-[[package]]
 name = "test-harness-macros"
 version = "0.1.0"
 dependencies = [
@@ -1086,35 +940,6 @@ dependencies = [
  "io",
  "spin",
  "test-harness-macros",
-]
-
-[[package]]
-name = "testrunner"
-version = "0.1.0"
-dependencies = [
- "bootstrap-abi",
- "collections",
- "component-abi",
- "device-resolver",
- "filesystem",
- "filesystem-abi",
- "filesystem-server",
- "io",
- "ipc",
- "log-abi",
- "log-relay",
- "managed-component",
- "molecular-rt",
- "rootkeeper",
- "rtc-abi",
- "runtime",
- "spin",
- "syscall",
- "test-harness-qemu",
- "userland",
- "userland-build",
- "userland-image",
- "userland-loader",
 ]
 
 [[package]]
@@ -1244,15 +1069,6 @@ dependencies = [
  "toml",
  "userland",
  "userland-image",
-]
-
-[[package]]
-name = "userland-loader"
-version = "0.1.0"
-dependencies = [
- "runtime",
- "syscall",
- "userland",
 ]
 
 [[package]]

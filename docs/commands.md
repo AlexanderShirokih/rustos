@@ -6,7 +6,8 @@
 |-------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | Host-тесты                          | `cargo test --workspace`                                                                                             |
 | Host-clippy                         | `cargo clippy --workspace`                                                                                           |
-| AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --exclude style-tool --target aarch64-unknown-none` |
+| AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --exclude style-tool --exclude userland-image-tool --target aarch64-unknown-none` |
+| Cargo в workspace userspace         | `cargo xtask userland <аргументы cargo>`                                                                             |
 | Форматирование                      | `cargo fmt --all --check`                                                                                            |
 | Ссылки в документации               | `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" cargo doc --no-deps --workspace`                       |
 | Отделённые workspace                | см. [«Отделённые workspace»](#отделённые-workspace): свой прогон fmt и clippy на каждый                              |
@@ -29,7 +30,9 @@ cargo xtask build <spec> [--run] [--debug] [--features <features>] [--image <п�
 ```
 
 Читает YAML-спеку устройства, собирает `target/build/userland.img`, затем собирает `hal-aarch64` под
-`aarch64-unknown-none --release` и упаковывает результат по правилам `boot.format`.
+`aarch64-unknown-none --release` и упаковывает результат по правилам `boot.format`. Программы
+образа идут под свой таргет — `targets/aarch64-unknown-molecular.json`, — и стандартная
+библиотека поднимается им из исходников, которые готовит `cargo xtask std-src`.
 
 Флаги:
 
@@ -173,44 +176,44 @@ cargo xtask std-src [--force] [--verify]
 копия принадлежит сборке.
 
 Повторный вызов молчит, пока не сменились ни оверлей, ни sysroot: их отпечаток лежит в
-`target/std-src/.stamp`. `--force` пересоздаёт дерево всегда. `--verify` дополнительно
-собирает программу на `std` под таргет — этим ловится расхождение оверлея с пином из
-`rust-toolchain.toml`, из-за которого `git apply` перестаёт ложиться.
+`target/std-src/.stamp`. `--force` пересоздаёт дерево всегда.
+
+Вторая половина подготовки — крейты дерева, которые собираются внутрь `std` (объявляют фичу
+`rustc-dep-of-std`). Юниты графа `-Zbuild-std` cargo пересобирает по смене зависимостей и
+флагов, но не по смене исходников: правка в `lib/std-rt` иначе молча уходит в собранный `std`
+старой версией. Отпечаток их файлов лежит в `target/std-src/.graph-stamp`, и по его смене эти
+пакеты чистятся `cargo clean`. `--verify` дополнительно собирает `hello-std` — программу
+образа, которая живёт на стандартной библиотеке. Этим ловится расхождение оверлея с пином из
+`rust-toolchain.toml`, из-за которого `git apply` перестаёт ложиться, и поломка дерева,
+которая ложится, но не собирается.
 
 Проверка стоит дороже остальных: она поднимает `core`, `alloc` и саму стандартную
 библиотеку из исходников. Поэтому в CI она живёт отдельным workflow
-(`.github/workflows/ci-std.yml`) и запускается не на каждый PR, а по изменению того, из
-чего собрана: оверлея, пина toolchain, спеки таргета, `lib/std-rt` и `lib/syscall`.
+(`.github/workflows/ci-std.yml`) и запускается не на каждый PR, а по изменению того, из чего
+собрана: оверлея, пина toolchain, спеки таргета, крейтов графа `std` и настроек workspace
+`user/`.
 
-Команда печатает путь к дереву `library`. Программа на `std` собирается против него так:
-
-```bash
-LIBRARY=$(cargo xtask std-src | sed -n 's/^std-src: \(.*\)$/\1/p' | tail -1)
-__CARGO_TESTS_ONLY_SRC_ROOT="$LIBRARY" cargo build \
-    --target targets/aarch64-unknown-molecular.json \
-    -Zbuild-std=std,panic_abort \
-    -Zbuild-std-features=compiler-builtins-mem \
-    -Zjson-target-spec
-```
-
-`compiler-builtins-mem` обязателен: без него не резолвятся `memcpy`, `memset`, `memcmp` и
-`memmove`. Собранная программа пока не попадает в `userland.img` — это отдельный шаг.
+Команда печатает путь к дереву `library`. Сборкой по нему распоряжается
+`cargo xtask userland` — он же передаёт путь сборке (см. [«Отделённые
+workspace»](#отделённые-workspace)).
 
 ## Отделённые workspace
 
 Часть дерева живёт вне корневого workspace — их перечисляет `workspace.exclude`
 корневого манифеста:
 
-| Каталог      | Крейт          | Почему отделён                                                                  |
-|--------------|----------------|---------------------------------------------------------------------------------|
-| `fuzz/`      | `mobile-fuzz`  | Собирается своим toolchain и не меняет target-конфигурацию bare-metal workspace  |
-| `lib/std-rt` | `molecular-rt` | Собирается как зависимость `std`, граф зависимостей ему задаёт workspace `std`   |
+| Каталог      | Крейты                    | Почему отделён                                                                  |
+|--------------|---------------------------|---------------------------------------------------------------------------------|
+| `fuzz/`      | `mobile-fuzz`             | Собирается своим toolchain и не меняет target-конфигурацию bare-metal workspace  |
+| `lib/std-rt` | `molecular-rt`            | Собирается как зависимость `std`, граф зависимостей ему задаёт workspace `std`   |
+| `user/`      | программы образа и их `lib/` | Идёт под таргет Molecular OS, см. [architecture.md](architecture.md#таргеты-сборки) |
 
 `--workspace` их не видит, поэтому форматирование и clippy идут по manifest-пути:
 
 ```bash
 cargo fmt --manifest-path fuzz/Cargo.toml --all --check
 cargo fmt --manifest-path lib/std-rt/Cargo.toml --all --check
+cargo fmt --manifest-path user/Cargo.toml --all --check
 cargo clippy --manifest-path lib/std-rt/Cargo.toml \
              --target targets/aarch64-unknown-molecular.json \
              -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
@@ -220,6 +223,17 @@ cargo clippy --manifest-path lib/std-rt/Cargo.toml \
 готового `core` для него нет, поэтому `core` и `alloc` идут из исходников
 (`rust-src` ставится по `rust-toolchain.toml`). Крейт исполняют e2e-тесты
 `user/testrunner/src/std_rt.rs` под QEMU.
+
+Таргет и флаги сборки `std` workspace `user/` держит в `user/.cargo/config.toml`,
+а путь к дереву исходников приходит переменной окружения. И то и другое ставит
+`cargo xtask userland`: он материализует дерево и запускает cargo из каталога
+workspace:
+
+```bash
+cargo xtask userland build --release --workspace
+cargo xtask userland clippy --workspace --all-targets -- -D warnings
+cargo xtask userland doc --no-deps --workspace
+```
 
 Политику линтов такой workspace обязан повторять в своём манифесте, наследовать
 её неоткуда. Совпадение с корневой сверяет `cargo xtask check-layers`.

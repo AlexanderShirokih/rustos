@@ -1,6 +1,6 @@
 use component_abi::{ComponentManifest, SlotKind};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ProgramManifest {
     pub slots: Vec<ManifestSlot>,
     pub export: Option<String>,

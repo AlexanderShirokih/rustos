@@ -1,4 +1,4 @@
-//! Материализация исходников `std` с наложенным оверлеем Molecular OS.
+//! Подготовка исходников, из которых собирается `std` под Molecular OS.
 //!
 //! Исходники берутся из компонента `rust-src` зафиксированного toolchain, копируются в
 //! `target/std-src` и патчатся оверлеем. Сам toolchain не трогается: sysroot общий, а копия
@@ -7,18 +7,21 @@
 //! Повторный вызов ничего не делает, пока не сменились ни оверлей, ни toolchain: отпечаток
 //! того и другого лежит в `target/std-src/.stamp`.
 //!
-//! [`materialize`] возвращает путь к дереву `library`, готовый для передачи в
-//! `__CARGO_TESTS_ONLY_SRC_ROOT`. С `--verify` команда ещё и собирает под таргет программу на
-//! `std`: оверлей должен не только ложиться, но и давать рабочее дерево. Исходник программы
-//! генерируется, чтобы проверка ничего не требовала снаружи.
+//! Вторая половина подготовки — крейты дерева, которые собираются внутрь `std`. Юниты графа
+//! `-Zbuild-std` cargo пересобирает по изменению зависимостей и флагов, но не по изменению
+//! исходников: правка в `lib/std-rt` молча уходит в собранный `std` старой версией. Отпечаток
+//! их файлов лежит в `target/std-src/.graph-stamp`, и по его смене эти пакеты чистятся.
 
 use std::{
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, Result, bail};
+use userland_image_tool::USERLAND_WORKSPACE;
 
 use crate::context::project_root;
 
@@ -26,32 +29,18 @@ const OVERLAY: &str = "patches/std-molecular.patch";
 
 const DEST: &str = "target/std-src";
 
-const TARGET_SPEC: &str = "targets/aarch64-unknown-molecular.json";
+const LIB_DIR: &str = "lib";
 
-const BUILD_STD_FLAGS: [&str; 3] = [
-    "-Zbuild-std=std,panic_abort",
-    "-Zbuild-std-features=compiler-builtins-mem",
-    "-Zjson-target-spec",
-];
-
-const PROBE_MANIFEST: &str = "\
-[workspace]
-
-[package]
-name = \"std-probe\"
-version = \"0.0.0\"
-edition = \"2024\"
-publish = false
-";
-
-const PROBE_MAIN: &str = "\
-fn main() {
-    println!(\"hello\");
-}
-";
+const STD_GRAPH_FEATURE: &str = "rustc-dep-of-std";
 
 pub(crate) fn materialize(force: bool) -> Result<PathBuf> {
     let root = project_root();
+    let library = materialize_tree(&root, force)?;
+    refresh_std_graph(&root, &library)?;
+    Ok(library)
+}
+
+fn materialize_tree(root: &Path, force: bool) -> Result<PathBuf> {
     let source = rust_src()?;
     let dest = root.join(DEST);
     let library = dest.join("library");
@@ -80,43 +69,129 @@ pub(crate) fn materialize(force: bool) -> Result<PathBuf> {
     Ok(library)
 }
 
-pub(crate) fn run(force: bool, verify: bool) -> Result<()> {
-    let library = materialize(force)?;
-    println!("std-src: {}", library.display());
-    if verify {
-        verify_build(&library)?;
+fn refresh_std_graph(root: &Path, library: &Path) -> Result<()> {
+    let packages = std_graph_packages(root)?;
+    if packages.is_empty() {
+        bail!("no crate under {LIB_DIR}/ declares the '{STD_GRAPH_FEATURE}' feature");
+    }
+    let stamp = std_graph_stamp(&packages)?;
+    let stamp_path = root.join(DEST).join(".graph-stamp");
+    if fs::read_to_string(&stamp_path).ok().as_deref() == Some(stamp.as_str()) {
+        return Ok(());
+    }
+
+    // `cargo clean --package` снимает артефакты одного профиля: образ идёт release, линты dev.
+    for profile in ["dev", "release"] {
+        let mut command = Command::new("cargo");
+        command.args(["clean", "--profile", profile]);
+        for package in &packages {
+            command.args(["--package", &package.name]);
+        }
+        let status = command
+            .current_dir(root.join(USERLAND_WORKSPACE))
+            .env("__CARGO_TESTS_ONLY_SRC_ROOT", library)
+            .status()
+            .context("Failed to run cargo clean for the std graph crates")?;
+        if !status.success() {
+            bail!("cargo clean for the std graph crates failed with {status}");
+        }
+    }
+
+    fs::write(&stamp_path, &stamp)
+        .with_context(|| format!("Failed to write {}", stamp_path.display()))?;
+    Ok(())
+}
+
+struct StdGraphPackage {
+    name: String,
+    dir: PathBuf,
+}
+
+fn std_graph_packages(root: &Path) -> Result<Vec<StdGraphPackage>> {
+    let lib = root.join(LIB_DIR);
+    let entries =
+        fs::read_dir(&lib).with_context(|| format!("Failed to read {}", lib.display()))?;
+    let mut packages = Vec::new();
+    for entry in entries {
+        let dir = entry
+            .with_context(|| format!("Failed to walk {}", lib.display()))?
+            .path();
+        let manifest_path = dir.join("Cargo.toml");
+        let Ok(text) = fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let manifest = text
+            .parse::<toml::Table>()
+            .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+        let declares = manifest
+            .get("features")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|features| features.contains_key(STD_GRAPH_FEATURE));
+        if !declares {
+            continue;
+        }
+        let name = manifest
+            .get("package")
+            .and_then(toml::Value::as_table)
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+            .with_context(|| format!("{} declares no package name", manifest_path.display()))?;
+        packages.push(StdGraphPackage {
+            name: name.to_string(),
+            dir,
+        });
+    }
+    packages.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(packages)
+}
+
+fn std_graph_stamp(packages: &[StdGraphPackage]) -> Result<String> {
+    let mut stamp = String::new();
+    for package in packages {
+        stamp_tree(&package.dir, &mut stamp)?;
+    }
+    Ok(stamp)
+}
+
+fn stamp_tree(dir: &Path, stamp: &mut String) -> Result<()> {
+    let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+        .with_context(|| format!("Failed to read {}", dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("Failed to walk {}", dir.display()))?;
+    entries.sort();
+    for path in entries {
+        let metadata =
+            fs::metadata(&path).with_context(|| format!("Failed to stat {}", path.display()))?;
+        if metadata.is_dir() {
+            // Каталог сборки принадлежит cargo и в отпечаток исходников не входит.
+            if path.file_name().is_some_and(|name| name == "target") {
+                continue;
+            }
+            stamp_tree(&path, stamp)?;
+            continue;
+        }
+        let modified = metadata
+            .modified()
+            .with_context(|| format!("Failed to read mtime of {}", path.display()))?
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        writeln!(
+            stamp,
+            "{} {} {}",
+            path.display(),
+            metadata.len(),
+            modified.as_nanos()
+        )
+        .expect("writing to a String does not fail");
     }
     Ok(())
 }
 
-fn verify_build(library: &Path) -> Result<()> {
-    let root = project_root();
-    let probe = root.join(DEST).join("probe");
-    fs::create_dir_all(probe.join("src"))
-        .with_context(|| format!("Failed to create {}", probe.display()))?;
-    fs::write(probe.join("Cargo.toml"), PROBE_MANIFEST)
-        .context("Failed to write the probe manifest")?;
-    fs::write(probe.join("src/main.rs"), PROBE_MAIN).context("Failed to write the probe source")?;
-
-    let target = root.join(TARGET_SPEC);
-    let status = Command::new("cargo")
-        .args(["build", "--target"])
-        .arg(&target)
-        .args(BUILD_STD_FLAGS)
-        .current_dir(&probe)
-        .env("__CARGO_TESTS_ONLY_SRC_ROOT", library)
-        .status()
-        .context("Failed to run cargo build for the std probe")?;
-    if !status.success() {
-        bail!("std probe build failed with {status}");
-    }
-
-    let binary = probe.join("target/aarch64-unknown-molecular/debug/std-probe");
-    if !binary.is_file() {
-        bail!("std probe produced no binary at {}", binary.display());
-    }
-    println!("std-src: probe linked at {}", binary.display());
-    Ok(())
+pub(crate) fn run(force: bool) -> Result<PathBuf> {
+    let library = materialize(force)?;
+    println!("std-src: {}", library.display());
+    Ok(library)
 }
 
 fn rust_src() -> Result<PathBuf> {

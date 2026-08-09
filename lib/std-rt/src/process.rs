@@ -22,6 +22,10 @@ pub fn bootstrap_handle() -> Option<Handle> {
     Handle::new(BOOTSTRAP.load(Ordering::Acquire))
 }
 
+pub(crate) fn take_bootstrap() -> Option<Handle> {
+    Handle::new(BOOTSTRAP.swap(0, Ordering::AcqRel))
+}
+
 /// Завершает процесс со всеми его потоками. Не возвращается.
 pub fn exit(code: i32) -> ! {
     svc::process_exit(u64::from(code.cast_unsigned()))

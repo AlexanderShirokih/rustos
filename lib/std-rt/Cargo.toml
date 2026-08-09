@@ -22,9 +22,19 @@ bench = false
 doctest = false
 
 [features]
-rustc-dep-of-std = ["dep:core", "dep:alloc", "syscall/rustc-dep-of-std"]
+rustc-dep-of-std = [
+    "dep:core",
+    "dep:alloc",
+    "component-abi/rustc-dep-of-std",
+    "ipc/rustc-dep-of-std",
+    "log-abi/rustc-dep-of-std",
+    "syscall/rustc-dep-of-std",
+]
 
 [dependencies]
+component-abi = { path = "../component-abi" }
+ipc = { path = "../ipc" }
+log-abi = { path = "../log-abi" }
 syscall = { path = "../syscall" }
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
@@ -33,10 +43,13 @@ alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-all
 workspace = true
 
 # Таблица повторяет корневую дословно, комментарии к отдельным правилам лежат там же.
-# Расхождение ловит `xtask/tests/lint_policy.rs`.
+# Расхождение ловит `cargo xtask check-layers`.
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unsafe_code = "deny"
+# Имя таргета Molecular OS задаёт спека в `targets/`, встроенным rustc его не знает: хостовая
+# сборка иначе ругается на `target_os` из кода, общего с userspace.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("molecular"))'] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

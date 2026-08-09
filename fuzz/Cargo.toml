@@ -55,6 +55,9 @@ members = ["."]
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unsafe_code = "deny"
+# Имя таргета Molecular OS задаёт спека в `targets/`, встроенным rustc его не знает: хостовая
+# сборка иначе ругается на `target_os` из кода, общего с userspace.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("molecular"))'] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

@@ -1,0 +1,27 @@
+[package]
+name = "clock-std"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+stack_size = 1048576
+
+[[bin]]
+name = "clock-std"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+component-abi = { workspace = true }
+molecular-rt = { workspace = true }
+rtc-abi = { workspace = true }
+syscall = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true

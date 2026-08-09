@@ -9,6 +9,7 @@ mod race;
 mod shell;
 mod std_src;
 mod style;
+mod userland;
 
 use std::{
     fs,
@@ -24,6 +25,8 @@ use crate::{
     context::{BuildContext, image_manifest_path, project_root},
     shell::execute_commands,
 };
+
+const STD_VERIFY_ARGS: [&str; 4] = ["build", "--release", "--package", "hello-std"];
 
 #[derive(Parser)]
 #[command(name = "xtask")]
@@ -97,6 +100,12 @@ enum Commands {
         #[arg(long = "file", value_name = "PATH=SOURCE")]
         files: Vec<ExtraFile>,
     },
+    /// Run cargo in the userspace workspace, against the patched `std` sources
+    Userland {
+        /// cargo arguments, for example `clippy --workspace -- -D warnings`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+        args: Vec<String>,
+    },
     /// Check the layer rules between workspace crates
     CheckLayers,
     /// Materialize the patched `std` sources under target/std-src
@@ -104,7 +113,7 @@ enum Commands {
         /// Rebuild the tree even when the overlay and the toolchain are unchanged
         #[arg(long)]
         force: bool,
-        /// Build a `std` program against the patched tree to prove it works
+        /// Build the image program that runs on `std` to prove the tree works
         #[arg(long)]
         verify: bool,
     },
@@ -160,11 +169,27 @@ fn main() -> Result<()> {
             let build_dir = project_root.join("target/build");
             fs::create_dir_all(&build_dir)?;
             let manifest_path = image_manifest_path(&project_root, &image)?;
-            let output = build_userland(&project_root, &manifest_path, &build_dir, &[], &files)?;
+            let std_src = std_src::materialize(false)?;
+            let output = build_userland(
+                &project_root,
+                &manifest_path,
+                &build_dir,
+                &std_src,
+                &[],
+                &files,
+            )?;
             println!("Done: {}", output.display());
         }
+        Commands::Userland { args } => userland::run(&args)?,
         Commands::CheckLayers => layers::run()?,
-        Commands::StdSrc { force, verify } => std_src::run(force, verify)?,
+        Commands::StdSrc { force, verify } => {
+            std_src::run(force)?;
+            if verify {
+                // Оверлей обязан не только ложиться, но и давать дерево, из которого
+                // собирается программа образа.
+                userland::run(&STD_VERIFY_ARGS.map(String::from))?;
+            }
+        }
         Commands::Style {
             all,
             staged,
@@ -200,10 +225,12 @@ fn build(
 ) -> Result<()> {
     let ctx = BuildContext::new(spec, features)?;
     let manifest_path = image_manifest_path(&ctx.project_root, image)?;
+    let std_src = std_src::materialize(false)?;
     build_userland(
         &ctx.project_root,
         &manifest_path,
         &ctx.build_dir,
+        &std_src,
         &[],
         files,
     )?;

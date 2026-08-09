@@ -1,6 +1,6 @@
-diff -ruN '--exclude=Cargo.lock' a/std/Cargo.toml b/std/Cargo.toml
+diff -ruN a/std/Cargo.toml b/std/Cargo.toml
 --- a/std/Cargo.toml	2026-08-07 22:42:11.982085856 +0000
-+++ b/std/Cargo.toml	2026-08-08 22:48:54.697524405 +0000
++++ b/std/Cargo.toml	2026-08-09 21:48:01.619216661 +0000
 @@ -70,6 +70,9 @@
      'rustc-dep-of-std',
  ], public = true }
@@ -11,9 +11,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/Cargo.toml b/std/Cargo.toml
  [target.'cfg(target_os = "motor")'.dependencies]
  moto-rt = { version = "0.16", features = ['rustc-dep-of-std'], public = true }
  
-diff -ruN '--exclude=Cargo.lock' a/std/build.rs b/std/build.rs
+diff -ruN a/std/build.rs b/std/build.rs
 --- a/std/build.rs	2026-08-07 22:42:12.114085864 +0000
-+++ b/std/build.rs	2026-08-08 22:48:54.697583148 +0000
++++ b/std/build.rs	2026-08-09 21:48:01.620961246 +0000
 @@ -33,6 +33,7 @@
          || target_os == "windows"
          || target_os == "fuchsia"
@@ -22,9 +22,83 @@ diff -ruN '--exclude=Cargo.lock' a/std/build.rs b/std/build.rs
          || target_os == "motor"
          || target_os == "hermit"
          || target_os == "trusty"
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
+diff -ruN a/std/src/os/mod.rs b/std/src/os/mod.rs
+--- a/std/src/os/mod.rs	2026-08-07 22:42:12.162085867 +0000
++++ b/std/src/os/mod.rs	2026-08-09 21:48:01.620961246 +0000
+@@ -117,6 +117,8 @@
+ pub mod l4re;
+ #[cfg(target_os = "macos")]
+ pub mod macos;
++#[cfg(target_os = "molecular")]
++pub mod molecular;
+ #[cfg(target_os = "motor")]
+ pub mod motor;
+ #[cfg(target_os = "netbsd")]
+diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
+--- a/std/src/os/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/os/molecular/mod.rs	2026-08-09 21:48:01.621019477 +0000
+@@ -0,0 +1,58 @@
++//! Molecular OS specific definitions.
++//!
++//! Процесс получает ресурсы системы стартовым набором capability, который композиция выдаёт
++//! ему при запуске. Лог-сессию из набора забирает сама библиотека: по ней идут `stdout` и
++//! `stderr`. Остальное - control- и service-порты компонента и слоты его плана - принадлежит
++//! программе и выдаётся ей здесь.
++//!
++//! Capability названы сырым идентификатором: типизированные обёртки над ним и контракты IPC
++//! живут в крейтах userspace, и программа берёт их своей зависимостью. Внутри библиотеки те же
++//! крейты собраны отдельной копией - как `libc` внутри `std` на Unix, - и её типы наружу не
++//! выходят.
++
++#![unstable(feature = "molecular_ext", issue = "none")]
++
++use crate::num::NonZeroU32;
++
++/// Граница числа слотов capability одного компонента.
++pub const SLOT_MAX: usize = molecular_rt::component_abi::COMPONENT_SLOT_MAX;
++
++/// Идентификатор capability в таблице handle процесса.
++pub type RawHandle = NonZeroU32;
++
++/// Стартовый набор capability компонента композиции.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Startup {
++    control: RawHandle,
++    service: RawHandle,
++    slots: [Option<RawHandle>; SLOT_MAX],
++}
++
++impl Startup {
++    /// Серверная сторона control-порта: его клиентскую сторону держит supervisor.
++    pub fn control(&self) -> RawHandle {
++        self.control
++    }
++
++    /// Серверная сторона service-порта: его сессии supervisor минтит клиентам компонента.
++    pub fn service(&self) -> RawHandle {
++        self.service
++    }
++
++    /// Capability слотов в порядке, в котором их объявил манифест компонента.
++    pub fn slots(&self) -> impl Iterator<Item = RawHandle> {
++        self.slots.into_iter().map_while(|slot| slot)
++    }
++}
++
++/// Стартовый набор, который композиция выдала процессу.
++///
++/// `None` - процесс запущен вне композиции, и набора ему никто не слал.
++pub fn startup() -> Option<Startup> {
++    let started = molecular_rt::startup()?;
++    let mut slots = [None; SLOT_MAX];
++    for (place, slot) in slots.iter_mut().zip(started.slots()) {
++        *place = Some(slot.raw());
++    }
++    Some(Startup { control: started.control.raw(), service: started.service.raw(), slots })
++}
+diff -ruN a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
 --- a/std/src/sys/alloc/mod.rs	2026-08-07 22:42:12.130085865 +0000
-+++ b/std/src/sys/alloc/mod.rs	2026-08-08 22:48:54.697583148 +0000
++++ b/std/src/sys/alloc/mod.rs	2026-08-09 21:48:01.621019477 +0000
 @@ -81,6 +81,10 @@
          mod hermit;
          use hermit as imp;
@@ -44,9 +118,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/
          target_os = "solid_asp3",
          target_os = "uefi",
          target_os = "zkvm",
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/alloc/molecular.rs b/std/src/sys/alloc/molecular.rs
+diff -ruN a/std/src/sys/alloc/molecular.rs b/std/src/sys/alloc/molecular.rs
 --- a/std/src/sys/alloc/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/alloc/molecular.rs	2026-08-08 22:48:54.697635187 +0000
++++ b/std/src/sys/alloc/molecular.rs	2026-08-09 21:48:01.621070596 +0000
 @@ -0,0 +1,17 @@
 +use super::realloc_fallback;
 +use crate::alloc::Layout;
@@ -65,9 +139,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/alloc/molecular.rs b/std/src/sys/
 +pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
 +    unsafe { realloc_fallback(ptr, layout, new_size) }
 +}
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/exit.rs b/std/src/sys/exit.rs
+diff -ruN a/std/src/sys/exit.rs b/std/src/sys/exit.rs
 --- a/std/src/sys/exit.rs	2026-08-07 22:42:12.486085886 +0000
-+++ b/std/src/sys/exit.rs	2026-08-08 22:48:54.697635187 +0000
++++ b/std/src/sys/exit.rs	2026-08-09 21:48:01.621070596 +0000
 @@ -98,6 +98,9 @@
                  libc::exit(code)
              }
@@ -78,9 +152,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/exit.rs b/std/src/sys/exit.rs
          target_os = "motor" => {
              moto_rt::process::exit(code)
          }
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/io/error/mod.rs b/std/src/sys/io/error/mod.rs
+diff -ruN a/std/src/sys/io/error/mod.rs b/std/src/sys/io/error/mod.rs
 --- a/std/src/sys/io/error/mod.rs	2026-08-07 22:42:12.158085867 +0000
-+++ b/std/src/sys/io/error/mod.rs	2026-08-08 22:48:54.697635187 +0000
++++ b/std/src/sys/io/error/mod.rs	2026-08-09 21:48:01.621070596 +0000
 @@ -3,6 +3,10 @@
          mod hermit;
          pub use hermit::*;
@@ -92,9 +166,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/io/error/mod.rs b/std/src/sys/io/
      target_os = "motor" => {
          mod motor;
          pub use motor::*;
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/io/error/molecular.rs b/std/src/sys/io/error/molecular.rs
+diff -ruN a/std/src/sys/io/error/molecular.rs b/std/src/sys/io/error/molecular.rs
 --- a/std/src/sys/io/error/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/io/error/molecular.rs	2026-08-08 23:02:33.551970719 +0000
++++ b/std/src/sys/io/error/molecular.rs	2026-08-09 21:48:01.621363166 +0000
 @@ -0,0 +1,75 @@
 +//! Отображение ошибок syscall-ABI в `io::ErrorKind`.
 +//!
@@ -171,9 +245,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/io/error/molecular.rs b/std/src/s
 +        });
 +    text.to_string()
 +}
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.rs
+diff -ruN a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.rs
 --- a/std/src/sys/pal/mod.rs	2026-08-07 22:42:12.150085866 +0000
-+++ b/std/src/sys/pal/mod.rs	2026-08-08 22:48:54.697724498 +0000
++++ b/std/src/sys/pal/mod.rs	2026-08-09 21:48:01.621363166 +0000
 @@ -20,6 +20,10 @@
          mod hermit;
          pub use self::hermit::*;
@@ -185,10 +259,10 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.
      target_os = "motor" => {
          mod motor;
          pub use self::motor::*;
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
+diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 --- a/std/src/sys/pal/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/pal/molecular/mod.rs	2026-08-08 23:02:12.095971338 +0000
-@@ -0,0 +1,53 @@
++++ b/std/src/sys/pal/molecular/mod.rs	2026-08-09 22:09:33.403187115 +0000
+@@ -0,0 +1,59 @@
 +//! Платформенный слой Molecular OS.
 +//!
 +//! Работу выполняет крейт `molecular-rt`: он же обслуживает userspace-программы вне `std`.
@@ -205,6 +279,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/pal/molecular/mod.rs b/std/src/sy
 +#[unsafe(no_mangle)]
 +pub extern "C" fn _start(bootstrap: u32) -> ! {
 +    molecular_rt::start(bootstrap);
++    // Стартовый набор capability уходит рандеву с крайним сроком у supervisor, поэтому
++    // принимается он до `main`.
++    molecular_rt::adopt_startup();
 +
 +    unsafe extern "C" {
 +        fn main(argc: isize, argv: *const *const u8, sigpipe: u8) -> i32;
@@ -229,6 +306,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/pal/molecular/mod.rs b/std/src/sy
 +    // `process::exit`. Без этого не отработали бы ни `Drop` у `thread_local!`, ни
 +    // `rt::thread_cleanup`.
 +    molecular_rt::tls::run_destructors();
++    // Строку без перевода строки держит накопитель потока. Свой буфер `stdout` выталкивает
++    // `rt::cleanup`, а `stderr` доходит до журнала только отсюда.
++    crate::sys::stdio::flush_streams();
 +}
 +
 +pub fn unsupported<T>() -> io::Result<T> {
@@ -242,9 +322,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/pal/molecular/mod.rs b/std/src/sy
 +pub fn abort_internal() -> ! {
 +    molecular_rt::exit(-1)
 +}
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/random/mod.rs b/std/src/sys/random/mod.rs
+diff -ruN a/std/src/sys/random/mod.rs b/std/src/sys/random/mod.rs
 --- a/std/src/sys/random/mod.rs	2026-08-07 22:42:12.150085866 +0000
-+++ b/std/src/sys/random/mod.rs	2026-08-08 22:48:54.698164492 +0000
++++ b/std/src/sys/random/mod.rs	2026-08-09 21:48:01.621430147 +0000
 @@ -99,6 +99,10 @@
          mod wasi;
          pub use wasi::{fill_bytes, hashmap_random_keys};
@@ -264,9 +344,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/random/mod.rs b/std/src/sys/rando
      all(target_family = "wasm", target_os = "unknown"),
      all(target_os = "wasi", not(target_env = "p1")),
      target_os = "xous",
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/random/molecular.rs b/std/src/sys/random/molecular.rs
+diff -ruN a/std/src/sys/random/molecular.rs b/std/src/sys/random/molecular.rs
 --- a/std/src/sys/random/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/random/molecular.rs	2026-08-08 22:48:54.698277207 +0000
++++ b/std/src/sys/random/molecular.rs	2026-08-09 21:48:01.621479629 +0000
 @@ -0,0 +1,18 @@
 +//! Источника энтропии в системе нет.
 +//!
@@ -286,9 +366,163 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/random/molecular.rs b/std/src/sys
 +    let second = u64::from_ne_bytes(seed[8..].try_into().unwrap());
 +    (first, second)
 +}
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/condvar/mod.rs b/std/src/sys/sync/condvar/mod.rs
+diff -ruN a/std/src/sys/stdio/mod.rs b/std/src/sys/stdio/mod.rs
+--- a/std/src/sys/stdio/mod.rs	2026-08-07 22:42:12.154085867 +0000
++++ b/std/src/sys/stdio/mod.rs	2026-08-09 21:48:01.621479629 +0000
+@@ -13,6 +13,10 @@
+         mod sgx;
+         pub use sgx::*;
+     }
++    target_os = "molecular" => {
++        mod molecular;
++        pub use molecular::*;
++    }
+     target_os = "motor" => {
+         mod motor;
+         pub use motor::*;
+diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
+--- a/std/src/sys/stdio/molecular.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/sys/stdio/molecular.rs	2026-08-09 22:09:22.406059918 +0000
+@@ -0,0 +1,136 @@
++use molecular_rt::{ipc::wire::IpcError, log};
++
++use crate::io::{self, BorrowedCursor};
++use crate::str;
++
++pub struct Stdin;
++pub struct Stdout;
++pub struct Stderr;
++
++// Журнал ведёт записи, а `core::fmt` пишет форматную строку кусками: у каждого потока свой
++// накопитель, и записью становится напечатанная строка целиком. `Stdout` поверх накопителя
++// ещё и буферизует `std`, `Stderr` идёт сюда напрямую.
++static STDOUT: log::Stream = log::Stream::new();
++static STDERR: log::Stream = log::Stream::new();
++
++impl Stdin {
++    pub const fn new() -> Stdin {
++        Stdin
++    }
++}
++
++// Канал ввода приходит отдельной capability, и стартовый кадр её пока не несёт: чтение
++// сразу отдаёт конец потока.
++impl io::Read for Stdin {
++    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
++        Ok(0)
++    }
++
++    fn read_buf(&mut self, _cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
++        Ok(())
++    }
++}
++
++impl Stdout {
++    pub const fn new() -> Stdout {
++        Stdout
++    }
++}
++
++impl io::Write for Stdout {
++    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++        write_to(&STDOUT, buf)
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        STDOUT.flush().map_err(map_ipc_error)
++    }
++}
++
++impl Stderr {
++    pub const fn new() -> Stderr {
++        Stderr
++    }
++}
++
++impl io::Write for Stderr {
++    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++        write_to(&STDERR, buf)
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        STDERR.flush().map_err(map_ipc_error)
++    }
++}
++
++/// Вывод паники: идёт мимо накопителей потоков.
++///
++/// Накопитель берёт лок, а паника случается и под ним. Сообщение паники ценнее целой строки,
++/// поэтому оно уходит в журнал прямой записью.
++pub struct PanicOutput;
++
++impl io::Write for PanicOutput {
++    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++        let text = valid_prefix(buf)?;
++        log::write(text).map_err(map_ipc_error)?;
++        Ok(text.len())
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++
++fn write_to(stream: &log::Stream, buf: &[u8]) -> io::Result<usize> {
++    let text = valid_prefix(buf)?;
++    stream.write(text).map_err(map_ipc_error)?;
++    Ok(text.len())
++}
++
++// Журнал несёт UTF-8. Оборванная на границе буфера последовательность уходит коротким
++// счётчиком: её остаток придёт следующим вызовом.
++fn valid_prefix(buf: &[u8]) -> io::Result<&str> {
++    match str::from_utf8(buf) {
++        Ok(text) => Ok(text),
++        Err(error) if error.valid_up_to() > 0 => Ok(str::from_utf8(&buf[..error.valid_up_to()])
++            .expect("prefix up to the error is valid UTF-8")),
++        Err(_) => Err(io::const_error!(
++            io::ErrorKind::InvalidData,
++            "stream did not contain valid UTF-8",
++        )),
++    }
++}
++
++fn map_ipc_error(error: IpcError) -> io::Error {
++    let kind = match error {
++        IpcError::PeerClosed | IpcError::SenderGone => io::ErrorKind::BrokenPipe,
++        IpcError::WouldBlock => io::ErrorKind::WouldBlock,
++        IpcError::Timeout => io::ErrorKind::TimedOut,
++        IpcError::ResourceExhausted | IpcError::TooManyHandles => io::ErrorKind::QuotaExceeded,
++        IpcError::FrameOverflow => io::ErrorKind::InvalidInput,
++        IpcError::Truncated
++        | IpcError::FieldOrder
++        | IpcError::MissingField
++        | IpcError::InvalidValue => io::ErrorKind::InvalidData,
++    };
++    io::Error::from(kind)
++}
++
++pub const STDIN_BUF_SIZE: usize = 0;
++
++pub fn is_ebadf(_err: &io::Error) -> bool {
++    true
++}
++
++pub fn panic_output() -> Option<impl io::Write> {
++    Some(PanicOutput)
++}
++
++/// Отдаёт журналу незавершённые строки обоих потоков.
++///
++/// Зовётся на остановке рантайма: `std` выталкивает свой буфер `stdout`, а `stderr` держит
++/// незавершённую строку только здесь.
++pub fn flush_streams() {
++    let _ = STDERR.flush();
++    let _ = STDOUT.flush();
++}
+diff -ruN a/std/src/sys/sync/condvar/mod.rs b/std/src/sys/sync/condvar/mod.rs
 --- a/std/src/sys/sync/condvar/mod.rs	2026-08-07 22:42:12.158085867 +0000
-+++ b/std/src/sys/sync/condvar/mod.rs	2026-08-08 22:48:54.698277207 +0000
++++ b/std/src/sys/sync/condvar/mod.rs	2026-08-09 21:48:01.621516609 +0000
 @@ -6,6 +6,7 @@
          target_os = "freebsd",
          target_os = "openbsd",
@@ -297,9 +531,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/condvar/mod.rs b/std/src/sys
          target_os = "motor",
          target_os = "fuchsia",
          all(target_family = "wasm", target_feature = "atomics"),
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/mutex/mod.rs b/std/src/sys/sync/mutex/mod.rs
+diff -ruN a/std/src/sys/sync/mutex/mod.rs b/std/src/sys/sync/mutex/mod.rs
 --- a/std/src/sys/sync/mutex/mod.rs	2026-08-07 22:42:12.170085868 +0000
-+++ b/std/src/sys/sync/mutex/mod.rs	2026-08-08 22:48:54.698277207 +0000
++++ b/std/src/sys/sync/mutex/mod.rs	2026-08-09 21:48:01.621516609 +0000
 @@ -5,6 +5,7 @@
          target_os = "android",
          target_os = "freebsd",
@@ -308,9 +542,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/mutex/mod.rs b/std/src/sys/s
          target_os = "motor",
          target_os = "dragonfly",
          all(target_family = "wasm", target_feature = "atomics"),
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/once/mod.rs b/std/src/sys/sync/once/mod.rs
+diff -ruN a/std/src/sys/sync/once/mod.rs b/std/src/sys/sync/once/mod.rs
 --- a/std/src/sys/sync/once/mod.rs	2026-08-07 22:42:12.138085866 +0000
-+++ b/std/src/sys/sync/once/mod.rs	2026-08-08 22:48:54.698277207 +0000
++++ b/std/src/sys/sync/once/mod.rs	2026-08-09 21:48:01.621516609 +0000
 @@ -14,6 +14,7 @@
          target_os = "android",
          all(target_family = "wasm", target_feature = "atomics"),
@@ -319,9 +553,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/once/mod.rs b/std/src/sys/sy
          target_os = "motor",
          target_os = "openbsd",
          target_os = "dragonfly",
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/rwlock/mod.rs b/std/src/sys/sync/rwlock/mod.rs
+diff -ruN a/std/src/sys/sync/rwlock/mod.rs b/std/src/sys/sync/rwlock/mod.rs
 --- a/std/src/sys/sync/rwlock/mod.rs	2026-08-07 22:42:12.150085866 +0000
-+++ b/std/src/sys/sync/rwlock/mod.rs	2026-08-08 22:48:54.698277207 +0000
++++ b/std/src/sys/sync/rwlock/mod.rs	2026-08-09 21:48:01.621516609 +0000
 @@ -9,6 +9,7 @@
          target_os = "fuchsia",
          all(target_family = "wasm", target_feature = "atomics"),
@@ -330,9 +564,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/rwlock/mod.rs b/std/src/sys/
          target_os = "motor",
          all(target_os = "wasi", target_env = "p3"),
      ) => {
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/thread_parking/mod.rs b/std/src/sys/sync/thread_parking/mod.rs
+diff -ruN a/std/src/sys/sync/thread_parking/mod.rs b/std/src/sys/sync/thread_parking/mod.rs
 --- a/std/src/sys/sync/thread_parking/mod.rs	2026-08-07 22:42:12.146085866 +0000
-+++ b/std/src/sys/sync/thread_parking/mod.rs	2026-08-08 22:48:54.698277207 +0000
++++ b/std/src/sys/sync/thread_parking/mod.rs	2026-08-09 21:48:01.621516609 +0000
 @@ -8,6 +8,7 @@
          target_os = "openbsd",
          target_os = "dragonfly",
@@ -341,9 +575,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/sync/thread_parking/mod.rs b/std/
          target_os = "motor",
          target_os = "hermit",
          all(target_os = "wasi", target_env = "p3"),
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/thread_local/key/molecular.rs b/std/src/sys/thread_local/key/molecular.rs
+diff -ruN a/std/src/sys/thread_local/key/molecular.rs b/std/src/sys/thread_local/key/molecular.rs
 --- a/std/src/sys/thread_local/key/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/thread_local/key/molecular.rs	2026-08-08 22:48:54.698277207 +0000
++++ b/std/src/sys/thread_local/key/molecular.rs	2026-08-09 21:48:01.621516609 +0000
 @@ -0,0 +1,27 @@
 +//! Ключи локальных данных потока обслуживает `molecular-rt` поверх `TPIDR_EL0`.
 +
@@ -372,9 +606,9 @@ diff -ruN '--exclude=Cargo.lock' a/std/src/sys/thread_local/key/molecular.rs b/s
 +pub unsafe fn destroy(key: Key) {
 +    unsafe { molecular_rt::tls::destroy(key) }
 +}
-diff -ruN '--exclude=Cargo.lock' a/std/src/sys/thread_local/mod.rs b/std/src/sys/thread_local/mod.rs
+diff -ruN a/std/src/sys/thread_local/mod.rs b/std/src/sys/thread_local/mod.rs
 --- a/std/src/sys/thread_local/mod.rs	2026-08-07 22:42:12.150085866 +0000
-+++ b/std/src/sys/thread_local/mod.rs	2026-08-08 22:48:54.698277207 +0000
++++ b/std/src/sys/thread_local/mod.rs	2026-08-09 21:48:01.621516609 +0000
 @@ -163,6 +163,15 @@
              pub(super) use unix::get;
              use unix::{create, destroy};

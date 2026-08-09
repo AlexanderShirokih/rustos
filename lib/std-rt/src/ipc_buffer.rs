@@ -3,8 +3,9 @@
 //! IPC-буфер выдаётся ядром per-thread. VA запрашивается через syscall на
 //! каждый вызов (кэш недопустим: разные потоки имеют разные VA).
 
-use molecular_rt::ipc_buffer_addr;
 use syscall::IpcBuffer;
+
+use crate::svc::ipc_buffer_addr;
 
 fn ipc_buffer_va() -> Option<u64> {
     let ret = ipc_buffer_addr();

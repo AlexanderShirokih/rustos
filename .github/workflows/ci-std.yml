@@ -16,10 +16,18 @@ on:
       - rust-toolchain.toml
       # Спека таргета, под который собирается программа.
       - targets/aarch64-unknown-molecular.json
-      # Крейт, который `std` берёт платформенным слоем, и ABI под ним. Отображение ошибок
-      # в оверлее разбирает `SyscallError` по вариантам: новый вариант ломает сборку здесь.
+      # Граф зависимостей `std`: крейт платформенного слоя и всё, что объявляет фичу
+      # `rustc-dep-of-std`. Оверлей разбирает их типы по вариантам, и новый вариант ломает
+      # сборку здесь.
       - lib/std-rt/**
+      - lib/component-abi/**
+      - lib/ipc/**
+      - lib/log-abi/**
       - lib/syscall/**
+      # Программа, которой проверка собирает дерево, и настройки её workspace.
+      - user/hello-std/**
+      - user/Cargo.toml
+      - user/.cargo/config.toml
       - .github/workflows/ci-std.yml
 
 env:

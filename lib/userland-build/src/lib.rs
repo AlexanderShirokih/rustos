@@ -1,3 +1,3 @@
 mod linker;
 
-pub use linker::attach_linker_script;
+pub use linker::emit_linker_script;

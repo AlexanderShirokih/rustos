@@ -1,5 +1,5 @@
 fn main() {
-    userland_build::attach_linker_script("link.ld");
+    userland_build::emit_linker_script();
     println!("cargo::rerun-if-env-changed=TEST_PROFILE");
     println!("cargo::rerun-if-env-changed=STRESS_SEED");
     println!("cargo::rerun-if-env-changed=STRESS_SEEDS");

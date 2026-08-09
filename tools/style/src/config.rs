@@ -31,7 +31,7 @@ impl Config {
         }
     }
 
-    /// Разбирает и проверяет конфигурацию против каталога.
+    /// Разбирает конфигурацию и сверяет её с каталогом.
     pub fn parse(text: &str, compiled: &[Rule]) -> Result<Config> {
         Config::build(
             toml::from_str(text).context("parse style configuration")?,

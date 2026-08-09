@@ -1,0 +1,21 @@
+# Имя таргета резолвится по `RUST_TARGET_PATH`, а `core` и `std` поднимаются из дерева,
+# которое готовит `cargo xtask std-src`.
+[build]
+target = "aarch64-unknown-molecular"
+target-dir = "../target"
+rustflags = [
+    "-Zunstable-options",
+    "-C",
+    "link-arg=--gc-sections",
+    "-C",
+    "link-arg=--build-id=none",
+]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true
+
+[env]
+RUST_TARGET_PATH = { value = "../targets", relative = true }
+__CARGO_TESTS_ONLY_SRC_ROOT = { value = "../target/std-src/library", relative = true }

@@ -33,6 +33,11 @@ use crate::{
 const USERLAND_MANIFEST_VERSION: u16 = USERLAND_IMAGE_VERSION;
 const USERLAND_STACK_ALIGN: u64 = USERLAND_PAGE_SIZE;
 
+/// Каталог workspace программ образа относительно корня проекта.
+pub const USERLAND_WORKSPACE: &str = "user";
+
+const CARGO_CONFIG: &str = ".cargo/config.toml";
+
 const WILDCARDS: [char; 2] = ['*', '?'];
 
 const _: () = assert!(PATH_MAX == USERLAND_ENTRY_PATH_CAPACITY);
@@ -136,7 +141,7 @@ struct BuiltEntry {
     program: ResolvedProgram,
     entry_va: u64,
     segments: Vec<BuiltSegment>,
-    manifest: Option<ProgramManifest>,
+    manifest: ProgramManifest,
 }
 
 #[derive(Clone, Debug)]
@@ -221,16 +226,20 @@ fn default_plan_path() -> String {
 }
 
 /// Собирает userland-образ, передавая `environment` каждому cargo-процессу
-/// сборки. `extra_files` добавляются в образ поверх файлов манифеста.
+/// сборки. `extra_files` добавляются в образ поверх файлов манифеста, `std_src` — дерево
+/// `library`, из которого сборка поднимает стандартную библиотеку.
 pub fn build_userland(
     project_root: &Path,
     manifest_path: &Path,
     build_dir: &Path,
+    std_src: &Path,
     environment: &[BuildEnvironment<'_>],
     extra_files: &[ExtraFile],
 ) -> Result<PathBuf> {
     let manifest = load_manifest(manifest_path)?;
-    let workspace = load_workspace_metadata(project_root)?;
+    let userland_root = userland_workspace(project_root);
+    let target = userland_target(&userland_root)?;
+    let workspace = load_workspace_metadata(&userland_root)?;
     let programs = resolve_programs(&manifest, &workspace.packages)?;
     let mut files = collect_files(project_root, &manifest, extra_files)?;
     // План сверяется с манифестами компонентов, поэтому программы собираются до
@@ -239,8 +248,10 @@ pub fn build_userland(
         .iter()
         .map(|program| {
             build_program(
-                project_root,
+                &userland_root,
                 &workspace.target_directory,
+                &target,
+                std_src,
                 program,
                 environment,
             )
@@ -250,7 +261,7 @@ pub fn build_userland(
         .iter()
         .map(|entry| PlanProgram {
             path: &entry.program.path,
-            manifest: entry.manifest.as_ref(),
+            manifest: &entry.manifest,
         })
         .collect();
     let paths: Vec<&str> = built_programs.iter().map(|program| program.path).collect();
@@ -440,6 +451,26 @@ fn matches_bytes(glob: &[u8], path: &[u8]) -> bool {
     }
 }
 
+fn userland_workspace(project_root: &Path) -> PathBuf {
+    project_root.join(USERLAND_WORKSPACE)
+}
+
+fn userland_target(userland_root: &Path) -> Result<String> {
+    let config_path = userland_root.join(CARGO_CONFIG);
+    let text = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read {}", config_path.display()))?;
+    let config: toml::Table = text
+        .parse()
+        .with_context(|| format!("Failed to parse {}", config_path.display()))?;
+    config
+        .get("build")
+        .and_then(toml::Value::as_table)
+        .and_then(|build| build.get("target"))
+        .and_then(toml::Value::as_str)
+        .map(String::from)
+        .with_context(|| format!("{} declares no build.target", config_path.display()))
+}
+
 fn load_workspace_metadata(project_root: &Path) -> Result<WorkspaceMetadata> {
     let output = Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version", "1"])
@@ -624,18 +655,21 @@ fn validate_program(program: &ResolvedProgram) -> Result<()> {
 }
 
 fn build_program(
-    project_root: &Path,
+    userland_root: &Path,
     target_directory: &Path,
+    target: &str,
+    std_src: &Path,
     program: &ResolvedProgram,
     environment: &[BuildEnvironment<'_>],
 ) -> Result<BuiltEntry> {
-    run_userland_build(project_root, program, environment)?;
-    let binary_path = userland_binary_path(target_directory, &program.bin);
+    run_userland_build(userland_root, std_src, program, environment)?;
+    let binary_path = userland_binary_path(target_directory, target, &program.bin);
     read_and_extract_entry(&binary_path, program)
 }
 
 fn run_userland_build(
-    project_root: &Path,
+    userland_root: &Path,
+    std_src: &Path,
     program: &ResolvedProgram,
     environment: &[BuildEnvironment<'_>],
 ) -> Result<()> {
@@ -647,11 +681,11 @@ fn run_userland_build(
             &program.package,
             "--bin",
             &program.bin,
-            "--target",
-            "aarch64-unknown-none",
             "--release",
         ])
-        .current_dir(project_root)
+        // Cargo читает конфигурацию таргета по рабочему каталогу процесса.
+        .current_dir(userland_root)
+        .env("__CARGO_TESTS_ONLY_SRC_ROOT", std_src)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -673,10 +707,8 @@ fn run_userland_build(
     Ok(())
 }
 
-fn userland_binary_path(target_directory: &Path, bin: &str) -> PathBuf {
-    target_directory
-        .join("aarch64-unknown-none/release")
-        .join(bin)
+fn userland_binary_path(target_directory: &Path, target: &str, bin: &str) -> PathBuf {
+    target_directory.join(target).join("release").join(bin)
 }
 
 fn read_and_extract_entry(path: &Path, program: &ResolvedProgram) -> Result<BuiltEntry> {
@@ -713,12 +745,10 @@ fn read_and_extract_entry(path: &Path, program: &ResolvedProgram) -> Result<Buil
     })
 }
 
-fn extract_manifest(
-    file: &object::File<'_>,
-    program: &ResolvedProgram,
-) -> Result<Option<ProgramManifest>> {
+fn extract_manifest(file: &object::File<'_>, program: &ResolvedProgram) -> Result<ProgramManifest> {
+    // Секции нет у программы, которой объявлять нечего: её манифест пуст.
     let Some(section) = file.section_by_name(COMPONENT_MANIFEST_SECTION) else {
-        return Ok(None);
+        return Ok(ProgramManifest::default());
     };
     let SectionFlags::Elf { sh_flags } = section.flags() else {
         bail!(
@@ -744,7 +774,7 @@ fn extract_manifest(
             program.path
         )
     })?;
-    Ok(Some(ProgramManifest::from_record(&manifest)))
+    Ok(ProgramManifest::from_record(&manifest))
 }
 
 fn validate_file(file: &object::File<'_>, program: &ResolvedProgram) -> Result<()> {
@@ -1049,7 +1079,7 @@ mod tests {
             program: resolved_program("package", path, boot, 0x4000),
             entry_va,
             segments: segments.to_vec(),
-            manifest: None,
+            manifest: ProgramManifest::default(),
         }
     }
 

@@ -9,8 +9,7 @@ use syscall::{
 use crate::{
     error::{Error, Result, unit, value},
     handle::{BorrowedHandle, OwnedHandle},
-    ipc_buffer::ipc_buffer_ptr,
-    svc,
+    ipc_buffer_ptr, svc,
 };
 
 fn store_body(body: &[u8]) -> Result<()> {

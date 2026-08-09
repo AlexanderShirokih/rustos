@@ -1,10 +1,11 @@
 //! Проверка правил workspace: домен крейта задается его верхней директорией, ребра
 //! зависимостей сверяются с таблицей разрешений. Архитектурно-зависимые крейты (сегмент
-//! `aarch64` в пути, `forced-target` на этот триплет либо ключ `package.metadata.molecular.arch`)
+//! `aarch64` в пути, `forced-target` на этот триплет либо ключ `metadata.molecular.arch`)
 //! доступны только другим архитектурно-зависимым крейтам.
 //!
 //! Ключ нужен крейтам отделенных workspace: `forced-target` задает триплет всем сборкам крейта,
-//! а такой крейт собирает чужой workspace под свой таргет.
+//! а такой крейт собирает чужой workspace под свой таргет. Ключ читается и у пакета, и у
+//! workspace целиком.
 //!
 //! Отделенные workspace перечисляет `workspace.exclude` корневого манифеста. Их крейты входят в
 //! проверку наравне с членами корневого, а таблица линтов каждого сверяется с корневой:
@@ -30,6 +31,8 @@ const ARCH_SEGMENT: &str = "aarch64";
 #[derive(Deserialize)]
 struct CargoMetadata {
     packages: Vec<MetaPackage>,
+    #[serde(default, rename = "metadata")]
+    workspace_metadata: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +191,7 @@ fn collect_workspace(
     crates: &mut BTreeSet<WorkspaceCrate>,
     edges: &mut BTreeSet<Edge>,
 ) -> Result<()> {
+    let workspace_arch = workspace_arch(meta) == Some(ARCH_SEGMENT);
     for pkg in &meta.packages {
         let manifest_dir = pkg
             .manifest_path
@@ -196,7 +200,7 @@ fn collect_workspace(
         crates.insert(WorkspaceCrate {
             name: pkg.name.clone(),
             dir: relative_dir(&pkg.name, manifest_dir, root)?,
-            arch_specific: arch_specific_manifest(&pkg.manifest_path),
+            arch_specific: workspace_arch || arch_specific_manifest(&pkg.manifest_path),
         });
         // dependencies включает normal-, dev- и build-зависимости, path = Some отбирает
         // локальные. Дубликаты (normal + dev) схлопывает BTreeSet.
@@ -349,6 +353,14 @@ fn arch_specific_manifest(manifest: &Path) -> bool {
         .and_then(toml::Value::as_str)
         .is_some_and(|target| target.split('-').any(|segment| segment == ARCH_SEGMENT));
     forced || declared_arch(package) == Some(ARCH_SEGMENT)
+}
+
+fn workspace_arch(meta: &CargoMetadata) -> Option<&str> {
+    meta.workspace_metadata
+        .as_ref()?
+        .get("molecular")?
+        .get("arch")?
+        .as_str()
 }
 
 fn declared_arch(package: &toml::Table) -> Option<&str> {
@@ -601,7 +613,29 @@ mod tests {
                     targets: Vec::new(),
                 })
                 .collect(),
+            workspace_metadata: None,
         }
+    }
+
+    #[test]
+    fn workspace_arch_key_marks_every_member() {
+        let mut meta = metadata(&[("a-program", "/repo/user/a-program", &[])]);
+        meta.workspace_metadata = Some(serde_json::json!({ "molecular": { "arch": "aarch64" } }));
+        let mut collected_crates = BTreeSet::new();
+        let mut collected_edges = BTreeSet::new();
+        collect_workspace(
+            &meta,
+            Path::new("/repo"),
+            &mut collected_crates,
+            &mut collected_edges,
+        )
+        .unwrap();
+
+        let member = collected_crates
+            .iter()
+            .find(|krate| krate.name == "a-program")
+            .expect("member is collected");
+        assert!(member.arch_specific);
     }
 
     #[test]
@@ -876,6 +910,7 @@ mod tests {
                     kind: vec!["lib".to_string()],
                 }],
             }],
+            workspace_metadata: None,
         };
         let names = lib_target_names(std::slice::from_ref(&meta));
         assert_eq!(

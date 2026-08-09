@@ -13,9 +13,7 @@ members = [
     "lib/ipc",
     "lib/ipc-test",
     "lib/log-abi",
-    "lib/managed-component",
     "lib/rtc-abi",
-    "lib/log-relay",
     "lib/syscall",
     "kernel/kernelspace",
     "kernel/capability",
@@ -33,25 +31,15 @@ members = [
     "lib/fdt",
     "lib/filesystem",
     "lib/filesystem-abi",
-    "lib/filesystem-server",
     "lib/userland",
     "lib/userland-build",
     "lib/userland-image",
-    "lib/userland-loader",
-    "lib/runtime",
     "lib/util",
     "tools/style",
     "tools/userland-image",
-    "user/filesystem-imagefs",
-    "user/namespace-router",
-    "user/filesystem-ramfs",
-    "user/driver-pl031",
-    "user/rootkeeper",
-    "user/testrunner",
-    "user/calculator-demo",
     "xtask",
 ]
-exclude = ["fuzz", "lib/std-rt"]
+exclude = ["fuzz", "lib/std-rt", "user"]
 
 [workspace.package]
 version = "0.1.0"
@@ -61,7 +49,6 @@ publish = false
 [workspace.dependencies]
 # Внешние зависимости
 spin = "0.12.0"
-talc = { version = "4", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -82,7 +69,6 @@ ipc = { path = "lib/ipc" }
 ipc-test = { path = "lib/ipc-test" }
 bootstrap-abi = { path = "lib/bootstrap-abi" }
 log-abi = { path = "lib/log-abi" }
-log-relay = { path = "lib/log-relay" }
 collections = { path = "lib/collections" }
 component-abi = { path = "lib/component-abi" }
 device-resolver = { path = "lib/device-resolver" }
@@ -92,8 +78,6 @@ klog = { path = "kernel/log" }
 fdt = { path = "lib/fdt" }
 filesystem = { path = "lib/filesystem" }
 filesystem-abi = { path = "lib/filesystem-abi" }
-filesystem-server = { path = "lib/filesystem-server" }
-managed-component = { path = "lib/managed-component" }
 memory = { path = "kernel/memory" }
 util = { path = "lib/util" }
 hal-common = { path = "kernel/hal-common" }
@@ -112,11 +96,7 @@ test-harness-macros = { path = "lib/test-harness-macros" }
 userland = { path = "lib/userland" }
 userland-build = { path = "lib/userland-build" }
 userland-image = { path = "lib/userland-image" }
-userland-loader = { path = "lib/userland-loader" }
 rtc-abi = { path = "lib/rtc-abi" }
-# Крейт живёт в отделённом workspace (см. lib/std-rt/Cargo.toml), путь тот же.
-molecular-rt = { path = "lib/std-rt" }
-runtime = { path = "lib/runtime" }
 process = { path = "kernel/process" }
 userland-image-tool = { path = "tools/userland-image" }
 style-tool = { path = "tools/style" }
@@ -125,6 +105,9 @@ style-tool = { path = "tools/style" }
 unsafe_op_in_unsafe_fn = "deny"
 # Архитектурно-независимый код не должен использовать `unsafe`.
 unsafe_code = "deny"
+# Имя таргета Molecular OS задаёт спека в `targets/`, встроенным rustc его не знает: хостовая
+# сборка иначе ругается на `target_os` из кода, общего с userspace.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("molecular"))'] }
 
 [workspace.lints.clippy]
 # Группы линтов

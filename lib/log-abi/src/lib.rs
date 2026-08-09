@@ -6,9 +6,11 @@
 extern crate std;
 
 mod buffer;
+mod line;
 mod write;
 
 pub use buffer::{LogBuffer, chunks};
+pub use line::LineAssembler;
 
 /// Граница локального тега источника, назначаемого клиентом.
 pub const LOG_TAG_MAX: usize = 32;

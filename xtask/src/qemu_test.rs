@@ -12,6 +12,7 @@ use userland_image_tool::{BuildEnvironment, build_userland};
 use crate::{
     artifacts::build_binary,
     context::{BuildContext, image_manifest_path},
+    std_src,
 };
 
 pub(crate) const DEFAULT_SPEC: &str = "devices/spec/qemu-aarch64-test.yaml";
@@ -99,10 +100,12 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
     let ctx = BuildContext::new(spec.to_path_buf(), features)?;
 
     let manifest_path = image_manifest_path(&ctx.project_root, image)?;
+    let std_src = std_src::materialize(false)?;
     build_userland(
         &ctx.project_root,
         &manifest_path,
         &ctx.build_dir,
+        &std_src,
         environment,
         &[],
     )?;

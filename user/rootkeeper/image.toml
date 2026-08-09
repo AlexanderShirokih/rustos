@@ -26,3 +26,11 @@ path = "/boot/filesystem-imagefs"
 [[programs]]
 package = "filesystem-ramfs"
 path = "/boot/filesystem-ramfs"
+
+[[programs]]
+package = "hello-std"
+path = "/boot/hello-std"
+
+[[programs]]
+package = "clock-std"
+path = "/boot/clock-std"

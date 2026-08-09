@@ -32,7 +32,12 @@ pub enum TestKind {
 #[macro_export]
 macro_rules! register_test {
     ($symbol:ident, $name:expr, $run:expr, $kind:expr) => {
-        #[cfg_attr(target_os = "none", unsafe(link_section = ".tests.kernel"))]
+        // Секцию раскладывает линкер-скрипт: у ядра свой, у testrunner свой. Оба таргета
+        // перечислены здесь, потому что проходы `qemu-test` идут и там, и там.
+        #[cfg_attr(
+            any(target_os = "none", target_os = "molecular"),
+            unsafe(link_section = ".tests.kernel")
+        )]
         #[used]
         static $symbol: $crate::case::TestCase = $crate::case::TestCase {
             name: $name,

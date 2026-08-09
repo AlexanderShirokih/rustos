@@ -1,7 +1,8 @@
 //! Рантайм userspace-программы: объекты ядра, транспорты IPC, куча и синхронизация.
 //!
-//! Базовый слой — svc-обёртки, futex и монотонные часы — живёт в `molecular-rt` и
-//! реэкспортируется отсюда: тот же код обслуживает стандартную библиотеку Rust.
+//! Базовый слой — svc-обёртки, futex, монотонные часы и транспорт контрактов поверх port —
+//! живёт в `molecular-rt` и реэкспортируется отсюда: тот же код обслуживает стандартную
+//! библиотеку Rust.
 
 #![no_std]
 #![allow(unsafe_code)]
@@ -12,29 +13,25 @@ extern crate alloc;
 mod error;
 mod handle;
 mod heap;
-mod ipc_buffer;
 mod log;
 mod object;
-mod port_transport;
 mod ring_transport;
 mod startup;
 mod sync;
 
 pub use error::{Error, Result};
 pub use handle::{BorrowedHandle, OwnedHandle};
-pub use ipc_buffer::ipc_buffer_ptr;
 pub use log::{install_log, log_fmt, log_line};
 pub(crate) use molecular_rt as svc;
 pub use molecular_rt::{
-    Futex, Instant, Primitive, SmallFutex, SmallPrimitive, futex_bucket, futex_wait,
-    futex_wait_interleaved, futex_wait_without_slot, futex_wake, futex_wake_all,
+    Futex, Instant, PortTransport, Primitive, SmallFutex, SmallPrimitive, futex_bucket, futex_wait,
+    futex_wait_interleaved, futex_wait_without_slot, futex_wake, futex_wake_all, ipc_buffer_ptr,
 };
 pub use object::{
     AnonymousMapping, IrqControl, IrqLine, JoinHandle, Mapping, MemoryRegion, Port, Priority,
     Process, ReadOnlyMapping, RegionInfo, RegionKind, Reply, Resource, ServicePort, Signal, Thread,
     ThreadEntry, exit_with_sibling, spawn, spawn_owned, wait_any,
 };
-pub use port_transport::PortTransport;
 pub use ring_transport::RingTransport;
 pub use startup::receive_startup;
 pub use svc::{
