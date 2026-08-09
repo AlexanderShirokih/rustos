@@ -118,6 +118,11 @@ impl JoinHandle {
         stack.free()
     }
 
+    /// Поток за хэндлом. Его принимает [`exit_with_sibling`](crate::exit_with_sibling).
+    pub const fn thread(&self) -> &Thread {
+        &self.thread
+    }
+
     /// Финальный exit-код завершённого потока.
     pub fn exit_code(&self) -> Result<u32> {
         self.thread.exit_code()

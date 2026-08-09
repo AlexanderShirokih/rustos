@@ -21,6 +21,10 @@ SECTIONS
     *(COMMON)
   }
 
+  .component.manifest 0 (INFO) : {
+    KEEP(*(.component.manifest))
+  }
+
   /DISCARD/ : {
     *(.eh_frame*)
     *(.comment*)

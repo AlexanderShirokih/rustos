@@ -1,12 +1,23 @@
 version = 1
 
+[plan]
+source = "user/calculator-demo/system.toml"
+
 [[programs]]
-package = "calculator-demo"
-bin = "demo"
-path = "/boot/demo"
+package = "rootkeeper"
+path = "/boot/rootkeeper"
 boot = true
+
+[[programs]]
+package = "driver-pl031"
+path = "/boot/driver-pl031"
 
 [[programs]]
 package = "calculator-demo"
 bin = "calculator"
 path = "/boot/calculator"
+
+[[programs]]
+package = "calculator-demo"
+bin = "demo"
+path = "/boot/demo"
