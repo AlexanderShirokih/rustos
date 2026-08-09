@@ -3,6 +3,9 @@
 
 use alloc::vec::Vec;
 
+/// Путь записи образа, из которой маршрутизатор читает дерево имён загрузки.
+pub const BOOT_MOUNT_TABLE_PATH: &str = "/boot/namespace-router/mounts";
+
 pub const MOUNT_TABLE_MAGIC: [u8; 8] = *b"NSMOUNT\0";
 pub const MOUNT_TABLE_VERSION: u16 = 1;
 
@@ -73,7 +76,7 @@ pub fn decode_mount_table(bytes: &[u8]) -> Result<MountTable<'_>, MountTableDeco
         let (_, next) = parse_mount(bytes, cursor)?;
         cursor = next;
     }
-    // Запись приезжает окном своей страницы: хвост за таблицей - нули
+    // Запись выдана окном своей страницы: хвост за таблицей - нули
     // дополнения, а всё прочее там - порча.
     if bytes[cursor..].iter().any(|byte| *byte != 0) {
         return Err(MountTableDecodeError::InvalidLayout("trailing_bytes"));
@@ -311,7 +314,7 @@ mod tests {
 
     #[test]
     fn decode_reads_a_table_padded_with_zeroes() {
-        // Запись приезжает окном страницы: за таблицей идут нули дополнения.
+        // Запись выдана окном страницы: за таблицей идут нули дополнения.
         let bytes = table_bytes();
         let mut padded = bytes.clone();
         padded.resize(bytes.len() + 64, 0);

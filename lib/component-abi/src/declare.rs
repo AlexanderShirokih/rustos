@@ -7,7 +7,7 @@
 /// component_abi::component_manifest! {
 ///     pub struct RouterStartup {
 ///         exports: "Namespace",
-///         slots: { image: image, mounts: file("mounts") },
+///         slots: { image: userland },
 ///     }
 /// }
 ///
@@ -17,6 +17,12 @@
 ///             line: irq(compatible = ["arm,pl031"]),
 ///             window: mmio(compatible = ["arm,pl031"]),
 ///         },
+///     }
+/// }
+///
+/// component_abi::component_manifest! {
+///     pub struct DemoStartup {
+///         slots: { area: directory },
 ///     }
 /// }
 /// ```
@@ -101,7 +107,7 @@ macro_rules! component_manifest {
             static MANIFEST: [u8; RECORD_LEN] = $crate::encode_manifest(SLOTS, $export);
         };
     };
-    (@slot image) => { $crate::SlotDeclaration::image() };
+    (@slot userland) => { $crate::SlotDeclaration::userland() };
     (@slot irq(compatible = [$($compatible:literal),+ $(,)?])) => {
         $crate::SlotDeclaration::irq(&[$($compatible),+], 0)
     };
@@ -117,7 +123,7 @@ macro_rules! component_manifest {
     (@slot service(protocol = $protocol:literal)) => {
         $crate::SlotDeclaration::service(&[$protocol])
     };
-    (@slot file($name:literal)) => { $crate::SlotDeclaration::file(&[$name]) };
+    (@slot directory) => { $crate::SlotDeclaration::directory() };
 }
 
 #[cfg(test)]
@@ -138,13 +144,13 @@ mod tests {
     const IMAGE_CAP: Cap = cap(0x25);
     const DEVICE_CAP: Cap = cap(0x26);
 
-    const ROUTER_SLOTS: &[crate::SlotDeclaration] = &[crate::SlotDeclaration::image()];
+    const ROUTER_SLOTS: &[crate::SlotDeclaration] = &[crate::SlotDeclaration::userland()];
     const ROUTER_LEN: usize = manifest_len(ROUTER_SLOTS, "Namespace");
 
     crate::component_manifest! {
         struct RouterStartup {
             exports: "Namespace",
-            slots: { image: image },
+            slots: { image: userland },
         }
     }
 
@@ -160,6 +166,12 @@ mod tests {
     crate::component_manifest! {
         struct ConsumerStartup {
             slots: { namespace: service(protocol = "Namespace") },
+        }
+    }
+
+    crate::component_manifest! {
+        struct AreaStartup {
+            slots: { area: directory },
         }
     }
 
@@ -209,6 +221,25 @@ mod tests {
         assert_eq!(started.control, CONTROL_CAP);
         assert_eq!(started.service, SERVICE_CAP);
         assert_eq!(started.namespace, DEVICE_CAP);
+    }
+
+    #[test]
+    fn a_directory_slot_arrives_as_a_named_capability() {
+        let (client_end, server_end) = MockEnd::pair();
+        let sender = client(client_end);
+        sender
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 1)
+            .expect("start write");
+        sender.slot(IMAGE_CAP).expect("slot write");
+
+        let started = AreaStartup::receive(&server_end)
+            .expect("dispatch ok")
+            .expect("transaction matches the declaration");
+
+        assert_eq!(started.log, LOG_CAP);
+        assert_eq!(started.control, CONTROL_CAP);
+        assert_eq!(started.service, SERVICE_CAP);
+        assert_eq!(started.area, IMAGE_CAP);
     }
 
     #[test]
@@ -269,7 +300,7 @@ mod tests {
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         assert_eq!(manifest.export(), Some("Namespace"));
-        let slot = manifest.slots().next().expect("image slot");
-        assert_eq!(slot.kind(), SlotKind::Image);
+        let slot = manifest.slots().next().expect("userland slot");
+        assert_eq!(slot.kind(), SlotKind::Userland);
     }
 }

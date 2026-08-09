@@ -28,11 +28,11 @@ pub(crate) const PLAN_HEADER_SIZE: usize = 16;
 pub(crate) const COMPONENT_HEADER_SIZE: usize = 40;
 pub(crate) const SLOT_HEADER_SIZE: usize = 12;
 
-pub(crate) const SLOT_KIND_IMAGE: u8 = 0;
+pub(crate) const SLOT_KIND_USERLAND: u8 = 0;
 pub(crate) const SLOT_KIND_IRQ: u8 = 1;
 pub(crate) const SLOT_KIND_MMIO: u8 = 2;
 pub(crate) const SLOT_KIND_SERVICE: u8 = 3;
-pub(crate) const SLOT_KIND_FILE: u8 = 4;
+pub(crate) const SLOT_KIND_DIRECTORY: u8 = 4;
 
 pub(crate) const EXHAUSTED_HALT: u8 = 0;
 pub(crate) const EXHAUSTED_DETACH: u8 = 1;
@@ -100,15 +100,16 @@ impl<'a> Iterator for PlanSelectors<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotSource<'a> {
     /// Регион userland-образа целиком.
-    Image,
+    Userland,
     /// Линия прерывания устройства.
     Irq(PlanDevice<'a>),
     /// MMIO-окно устройства.
     Mmio(PlanDevice<'a>),
     /// Сессия service-порта компонента с номером `provider` в плане.
     Service { provider: u16 },
-    /// Регион записи образа из каталога компонента.
-    File { path: &'a str },
+    /// Сессия файловой системы с каталогом компонента в роли корня, выданная
+    /// маршрутизатором имён с номером `provider` в плане.
+    Directory { provider: u16 },
 }
 
 /// Компонент загрузочной композиции.
@@ -441,7 +442,8 @@ fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, Pla
 
     let cursor = at + SLOT_HEADER_SIZE;
     let device_kind = matches!(kind, SLOT_KIND_IRQ | SLOT_KIND_MMIO);
-    if !device_kind && !matches!(kind, SLOT_KIND_IMAGE | SLOT_KIND_SERVICE | SLOT_KIND_FILE) {
+    let provider_kind = matches!(kind, SLOT_KIND_SERVICE | SLOT_KIND_DIRECTORY);
+    if !device_kind && !provider_kind && kind != SLOT_KIND_USERLAND {
         return Err(PlanDecodeError::InvalidLayout("slot_kind"));
     }
     if !device_kind && (instance != 0 || resource != 0) {
@@ -450,28 +452,21 @@ fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, Pla
     if device_kind && selector_count == 0 {
         return Err(PlanDecodeError::InvalidLayout("slot_selector"));
     }
-    // Строку несут устройство набором совместимостей и файл своим путём.
-    let expected_strings = u16::from(kind == SLOT_KIND_FILE);
-    if !device_kind && selector_count != expected_strings {
+    // Строки несёт только устройство: набор своих совместимостей.
+    if !device_kind && selector_count != 0 {
         return Err(PlanDecodeError::InvalidLayout("slot_strings"));
     }
-    if kind != SLOT_KIND_SERVICE && provider != 0 {
+    if !provider_kind && provider != 0 {
+        return Err(PlanDecodeError::InvalidLayout("slot_provider"));
+    }
+    if provider_kind && provider >= count {
         return Err(PlanDecodeError::InvalidLayout("slot_provider"));
     }
 
     let (source, end) = match kind {
-        SLOT_KIND_IMAGE => (SlotSource::Image, cursor),
-        SLOT_KIND_SERVICE => {
-            if provider >= count {
-                return Err(PlanDecodeError::InvalidLayout("slot_provider"));
-            }
-            (SlotSource::Service { provider }, cursor)
-        }
-        SLOT_KIND_FILE => {
-            let len = usize::from(read_u16(bytes, cursor)?);
-            let (path, end) = parse_str(bytes, cursor + 2, len, "slot_file")?;
-            (SlotSource::File { path }, end)
-        }
+        SLOT_KIND_USERLAND => (SlotSource::Userland, cursor),
+        SLOT_KIND_SERVICE => (SlotSource::Service { provider }, cursor),
+        SLOT_KIND_DIRECTORY => (SlotSource::Directory { provider }, cursor),
         SLOT_KIND_IRQ | SLOT_KIND_MMIO => {
             let mut end = cursor;
             for _ in 0..selector_count {
@@ -571,7 +566,7 @@ mod tests {
         ComponentSpec {
             executable: "/boot/namespace-router",
             name: "router-a",
-            slots: &[SlotSpec::Image],
+            slots: &[SlotSpec::Userland],
             requires: &[],
             after: &[],
             memory_pages: 2_048,
@@ -624,7 +619,10 @@ mod tests {
         assert_eq!(router.startup_timeout(), Timeout::from_millis(2_000));
         assert_eq!(router.launches(), 3);
         assert_eq!(router.on_exhausted(), OnExhausted::Halt);
-        assert_eq!(router.slots().collect::<Vec<_>>(), vec![SlotSource::Image]);
+        assert_eq!(
+            router.slots().collect::<Vec<_>>(),
+            vec![SlotSource::Userland]
+        );
         assert_eq!(router.requires().count(), 0);
 
         let rtc = plan.component(1).expect("second component");
@@ -645,6 +643,24 @@ mod tests {
         assert_eq!(slots[2], SlotSource::Service { provider: 0 });
         assert_eq!(rtc.requires().collect::<Vec<_>>(), vec![0]);
         assert_eq!(rtc.after().collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
+    fn round_trip_carries_a_directory_slot_with_its_provider() {
+        let consumer = ComponentSpec {
+            slots: &[SlotSpec::Directory { provider: 0 }],
+            requires: &[0],
+            ..rtc()
+        };
+        let bytes = encode_plan(&[router(), consumer]).expect("encode plan");
+
+        let plan = decode_plan(&bytes).expect("decode plan");
+        let consumer = plan.component(1).expect("second component");
+        assert_eq!(
+            consumer.slots().collect::<Vec<_>>(),
+            vec![SlotSource::Directory { provider: 0 }]
+        );
+        assert_eq!(consumer.requires().collect::<Vec<_>>(), vec![0]);
     }
 
     #[test]
@@ -808,6 +824,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decode_rejects_a_directory_slot_naming_a_component_outside_the_composition() {
+        let component = ComponentSpec {
+            slots: &[SlotSpec::Directory { provider: 0 }],
+            ..router()
+        };
+        let bytes = encode_plan(&[component]).expect("encode plan");
+        let provider_at = first_slot_offset(&component) + 2;
+        let mut broken = bytes;
+        broken[provider_at..provider_at + 2].copy_from_slice(&5u16.to_le_bytes());
+
+        assert_eq!(
+            decode_plan(&broken).expect_err("provider is a component of the plan"),
+            PlanDecodeError::InvalidLayout("slot_provider")
+        );
+    }
+
     fn first_slot_offset(component: &ComponentSpec<'_>) -> usize {
         // Слоты идут сразу за строками записи компонента.
         PLAN_HEADER_SIZE + COMPONENT_HEADER_SIZE + component.executable.len() + component.name.len()
@@ -883,6 +916,15 @@ mod tests {
         };
         assert_eq!(
             encode_plan(&[unknown_provider]).expect_err("provider is a component of the plan"),
+            PlanEncodeError::IndexOutOfRange
+        );
+
+        let unknown_directory = ComponentSpec {
+            slots: &[SlotSpec::Directory { provider: 4 }],
+            ..router()
+        };
+        assert_eq!(
+            encode_plan(&[unknown_directory]).expect_err("provider is a component of the plan"),
             PlanEncodeError::IndexOutOfRange
         );
 

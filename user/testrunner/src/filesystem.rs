@@ -128,7 +128,7 @@ fn start_namespace() -> NamespacePorts {
             plan_component.name(),
             &log,
             plan_component.startup_timeout(),
-            crate::rootkeeper_system::router_slots(&image, &decoded),
+            crate::rootkeeper_system::router_slots(&image),
         )
         .expect("namespace router started");
         component

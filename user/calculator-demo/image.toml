@@ -3,6 +3,9 @@ version = 1
 [plan]
 source = "user/calculator-demo/system.toml"
 
+[[mount_tables]]
+source = "user/calculator-demo/namespace.toml"
+
 [[programs]]
 package = "rootkeeper"
 path = "/boot/rootkeeper"
@@ -13,6 +16,14 @@ package = "driver-pl031"
 path = "/boot/driver-pl031"
 
 [[programs]]
+package = "namespace-router"
+path = "/boot/namespace-router"
+
+[[programs]]
+package = "filesystem-imagefs"
+path = "/boot/filesystem-imagefs"
+
+[[programs]]
 package = "calculator-demo"
 bin = "calculator"
 path = "/boot/calculator"
@@ -21,3 +32,7 @@ path = "/boot/calculator"
 package = "calculator-demo"
 bin = "demo"
 path = "/boot/demo"
+
+[[files]]
+path = "/boot/demo/banner"
+source = "user/calculator-demo/assets/banner.txt"

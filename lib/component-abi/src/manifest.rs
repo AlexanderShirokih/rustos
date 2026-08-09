@@ -25,15 +25,15 @@ const OFFSET_RESERVED: usize = 13;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotKind {
     /// Регион userland-образа.
-    Image = 0,
+    Userland = 0,
     /// Линия прерывания устройства.
     Irq = 1,
     /// MMIO-окно устройства.
     Mmio = 2,
     /// Сессия service-порта другого компонента.
     Service = 3,
-    /// Регион записи образа из каталога компонента.
-    File = 4,
+    /// Сессия файловой системы с каталогом компонента в роли корня.
+    Directory = 4,
 }
 
 /// Слот, объявленный программой: вид, номер ресурса устройства и имена, по
@@ -95,11 +95,11 @@ pub enum ManifestDecodeError {
 impl SlotKind {
     const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
-            0 => Some(Self::Image),
+            0 => Some(Self::Userland),
             1 => Some(Self::Irq),
             2 => Some(Self::Mmio),
             3 => Some(Self::Service),
-            4 => Some(Self::File),
+            4 => Some(Self::Directory),
             _ => None,
         }
     }
@@ -112,9 +112,9 @@ impl SlotKind {
 impl SlotDeclaration {
     /// Регион userland-образа.
     #[must_use]
-    pub const fn image() -> Self {
+    pub const fn userland() -> Self {
         Self {
-            kind: SlotKind::Image,
+            kind: SlotKind::Userland,
             resource: 0,
             names: &[],
         }
@@ -152,13 +152,13 @@ impl SlotDeclaration {
         }
     }
 
-    /// Запись из каталога компонента, названная относительным именем.
+    /// Сессия файловой системы, суженная на каталог компонента.
     #[must_use]
-    pub const fn file(name: &'static [&'static str]) -> Self {
+    pub const fn directory() -> Self {
         Self {
-            kind: SlotKind::File,
+            kind: SlotKind::Directory,
             resource: 0,
-            names: name,
+            names: &[],
         }
     }
 }
@@ -409,16 +409,16 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, ManifestDecodeE
     let name_count = header[3];
 
     // Устройство названо хотя бы одной совместимостью, сервис - своим
-    // протоколом, а образ именами не выбирается.
+    // протоколом, а образ и каталог компонента именами не выбираются.
     match kind {
-        SlotKind::Image if name_count != 0 || resource != 0 => {
-            return Err(ManifestDecodeError::InvalidLayout("image slot"));
+        SlotKind::Userland if name_count != 0 || resource != 0 => {
+            return Err(ManifestDecodeError::InvalidLayout("userland slot"));
+        }
+        SlotKind::Directory if name_count != 0 || resource != 0 => {
+            return Err(ManifestDecodeError::InvalidLayout("directory slot"));
         }
         SlotKind::Service if name_count != 1 || resource != 0 => {
             return Err(ManifestDecodeError::InvalidLayout("service slot"));
-        }
-        SlotKind::File if name_count != 1 || resource != 0 => {
-            return Err(ManifestDecodeError::InvalidLayout("file slot"));
         }
         kind if kind.names_device() && name_count == 0 => {
             return Err(ManifestDecodeError::InvalidLayout("device slot"));
@@ -503,27 +503,40 @@ mod tests {
 
     #[test]
     fn a_record_carries_the_exported_protocol() {
-        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::image()];
+        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::userland()];
         const LEN: usize = manifest_len(SLOTS, "Namespace");
         let bytes: [u8; LEN] = encode_manifest(SLOTS, "Namespace");
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         assert_eq!(manifest.export(), Some("Namespace"));
         let slots: Vec<ManifestSlot<'_>> = manifest.slots().collect();
-        assert_eq!(slots[0].kind(), SlotKind::Image);
+        assert_eq!(slots[0].kind(), SlotKind::Userland);
         assert_eq!(names(&slots[0]), Vec::<&str>::new());
     }
 
     #[test]
-    fn a_file_slot_carries_its_name() {
-        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::file(&["mounts"])];
+    fn a_directory_slot_carries_no_names() {
+        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::directory()];
         const LEN: usize = manifest_len(SLOTS, "");
         let bytes: [u8; LEN] = encode_manifest(SLOTS, "");
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let slots: Vec<ManifestSlot<'_>> = manifest.slots().collect();
-        assert_eq!(slots[0].kind(), SlotKind::File);
-        assert_eq!(names(&slots[0]), ["mounts"]);
+        assert_eq!(slots[0].kind(), SlotKind::Directory);
+        assert_eq!(names(&slots[0]), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_directory_slot_with_a_name_is_refused() {
+        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::directory()];
+        const LEN: usize = manifest_len(SLOTS, "");
+        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, "");
+        bytes[COMPONENT_MANIFEST_HEADER_SIZE + 3] = 1;
+
+        assert_eq!(
+            decode_manifest(&bytes),
+            Err(ManifestDecodeError::InvalidLayout("directory slot"))
+        );
     }
 
     #[test]
@@ -619,15 +632,15 @@ mod tests {
     }
 
     #[test]
-    fn an_image_slot_with_a_resource_is_refused() {
-        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::image()];
+    fn a_userland_slot_with_a_resource_is_refused() {
+        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::userland()];
         const LEN: usize = manifest_len(SLOTS, "");
         let mut bytes: [u8; LEN] = encode_manifest(SLOTS, "");
         bytes[COMPONENT_MANIFEST_HEADER_SIZE + 1] = 1;
 
         assert_eq!(
             decode_manifest(&bytes),
-            Err(ManifestDecodeError::InvalidLayout("image slot"))
+            Err(ManifestDecodeError::InvalidLayout("userland slot"))
         );
     }
 

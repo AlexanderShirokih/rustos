@@ -66,6 +66,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "directory-consumer-fixture"
+path = "src/directory_consumer_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "unresponsive-filesystem"
 path = "src/unresponsive_filesystem.rs"
 test = false

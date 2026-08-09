@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use component_abi::{COMPONENT_MANIFEST_SECTION, decode_manifest};
-use filesystem_abi::{NAME_MAX, PATH_MAX};
+use filesystem_abi::{BOOT_MOUNT_TABLE_PATH, NAME_MAX, PATH_MAX};
 use object::{
     Architecture, BinaryFormat, Object, ObjectKind, ObjectSection, ObjectSegment, SectionFlags,
     SegmentFlags, elf,
@@ -69,7 +69,6 @@ struct ImageManifest {
 #[serde(deny_unknown_fields)]
 struct ImageMountTable {
     source: PathBuf,
-    path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,13 +258,7 @@ pub fn build_userland(
         files.push(compile_mount_table_record(project_root, table, &paths)?);
     }
     if let Some(plan) = &manifest.plan {
-        let records: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
-        files.push(compile_plan_record(
-            project_root,
-            plan,
-            &built_programs,
-            &records,
-        )?);
+        files.push(compile_plan_record(project_root, plan, &built_programs)?);
     }
 
     let blob = assemble_userland_image(&built_entries, &files)?;
@@ -566,7 +559,6 @@ fn compile_plan_record(
     project_root: &Path,
     plan: &ImagePlan,
     programs: &[PlanProgram<'_>],
-    records: &[&str],
 ) -> Result<LoadedFile> {
     validate_image_path(&plan.path)?;
     let source = project_root.join(&plan.source);
@@ -577,7 +569,7 @@ fn compile_plan_record(
             plan.path
         )
     })?;
-    let bytes = compile_boot_plan(&text, programs, records)
+    let bytes = compile_boot_plan(&text, programs)
         .with_context(|| format!("Failed to compile boot plan '{}'", source.display()))?;
     Ok(LoadedFile {
         path: plan.path.clone(),
@@ -591,19 +583,13 @@ fn compile_mount_table_record(
     table: &ImageMountTable,
     programs: &[&str],
 ) -> Result<LoadedFile> {
-    validate_image_path(&table.path)?;
     let source = project_root.join(&table.source);
-    let text = fs::read_to_string(&source).with_context(|| {
-        format!(
-            "Failed to read mount table '{}' of image record '{}'",
-            source.display(),
-            table.path
-        )
-    })?;
+    let text = fs::read_to_string(&source)
+        .with_context(|| format!("Failed to read mount table '{}'", source.display()))?;
     let bytes = compile_mount_table(&text, programs)
         .with_context(|| format!("Failed to compile mount table '{}'", source.display()))?;
     Ok(LoadedFile {
-        path: table.path.clone(),
+        path: BOOT_MOUNT_TABLE_PATH.to_string(),
         source,
         bytes,
     })

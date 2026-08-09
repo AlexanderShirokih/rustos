@@ -40,7 +40,7 @@ mod tests {
     #[test]
     fn a_record_becomes_owned_strings() {
         const SLOTS: &[SlotDeclaration] = &[
-            SlotDeclaration::image(),
+            SlotDeclaration::userland(),
             SlotDeclaration::irq(&["arm,pl031", "arm,primecell"], 2),
             SlotDeclaration::service(&["Namespace"]),
         ];
@@ -51,7 +51,7 @@ mod tests {
 
         assert_eq!(manifest.export.as_deref(), Some("FileSystem"));
         assert_eq!(manifest.slots.len(), 3);
-        assert_eq!(manifest.slots[0].kind, SlotKind::Image);
+        assert_eq!(manifest.slots[0].kind, SlotKind::Userland);
         assert!(manifest.slots[0].names.is_empty());
         assert_eq!(manifest.slots[1].kind, SlotKind::Irq);
         assert_eq!(manifest.slots[1].resource, 2);

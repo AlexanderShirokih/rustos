@@ -15,6 +15,8 @@ use crate::{
 
 const BOOT_PLAN_MANIFEST_VERSION: u16 = 1;
 
+const NAMESPACE_PROTOCOL: &str = "Namespace";
+
 const BOOT_COMPOSITION_DEPTH: u16 = 0;
 
 const COMPONENT_RESOURCE_LEVELS: u16 = 3;
@@ -74,11 +76,7 @@ fn default_plan_version() -> u16 {
     BOOT_PLAN_MANIFEST_VERSION
 }
 
-pub(crate) fn compile_boot_plan(
-    source: &str,
-    programs: &[PlanProgram<'_>],
-    records: &[&str],
-) -> Result<Vec<u8>> {
+pub(crate) fn compile_boot_plan(source: &str, programs: &[PlanProgram<'_>]) -> Result<Vec<u8>> {
     let manifest = parse_system_manifest(source)?;
     let names = resolve_names(&manifest)?;
     let declarations = resolve_declarations(&manifest, programs)?;
@@ -96,42 +94,15 @@ pub(crate) fn compile_boot_plan(
                 .collect()
         })
         .collect();
-    // Файл компонент называет именем в своём каталоге: путь наружу оттуда не
-    // выразим, и чужую запись имя не назовёт.
-    let files: Vec<Vec<Vec<String>>> = manifest
-        .components
-        .iter()
-        .zip(&declarations)
-        .map(|(component, declared)| {
-            declared
-                .slots
-                .iter()
-                .map(|slot| {
-                    slot.names
-                        .iter()
-                        .map(|name| format!("{}/{name}", component.executable))
-                        .collect()
-                })
-                .collect()
-        })
-        .collect();
     let slots = declarations
         .iter()
-        .zip(selectors.iter().zip(&files))
+        .zip(&selectors)
         .zip(&names)
-        .map(|((declared, (selectors, files)), name)| {
-            compile_slots(
-                name,
-                declared,
-                selectors,
-                files,
-                &declarations,
-                &names,
-                records,
-            )
+        .map(|((declared, selectors), name)| {
+            compile_slots(name, declared, selectors, &declarations, &names)
         })
         .collect::<Result<Vec<_>>>()?;
-    let requires: Vec<Vec<u16>> = slots.iter().map(|slots| service_edges(slots)).collect();
+    let requires: Vec<Vec<u16>> = slots.iter().map(|slots| provider_edges(slots)).collect();
     let after = manifest
         .components
         .iter()
@@ -352,7 +323,9 @@ fn validate_supervisor_limits(
     // Оценка сверху: у supervisor bootstrap-капа, регион образа с отображением,
     // лог-порт relay и его поток, собственный ресурс, а у каждого компонента -
     // резерв бюджета, ресурс incarnation, процесс, две стороны control-порта,
-    // минтер service-порта и лог-сессия.
+    // минтер service-порта и лог-сессия. Провижининг каталога держит ещё сессию
+    // маршрутизатора и сессию монтирования, и обе уходят до следующего
+    // компонента.
     let handles = SUPERVISOR_HANDLES + manifest.components.len() * COMPONENT_HANDLES + slots;
     ensure!(
         handles <= HANDLE_TABLE_CAPACITY as usize,
@@ -367,17 +340,14 @@ fn compile_slots<'a>(
     name: &'a str,
     declared: &ProgramManifest,
     selectors: &'a [Vec<&'a str>],
-    files: &'a [Vec<String>],
     declarations: &[&ProgramManifest],
     names: &[&str],
-    records: &[&str],
 ) -> Result<Vec<SlotSpec<'a>>> {
     declared
         .slots
         .iter()
         .zip(selectors)
-        .zip(files)
-        .map(|((slot, compatible), file)| {
+        .map(|(slot, compatible)| {
             let device = DeviceSpec {
                 compatible,
                 // Экземпляр среди совместимых устройств всегда нулевой:
@@ -386,7 +356,7 @@ fn compile_slots<'a>(
                 resource: slot.resource,
             };
             match slot.kind {
-                SlotKind::Image => Ok(SlotSpec::Image),
+                SlotKind::Userland => Ok(SlotSpec::Userland),
                 SlotKind::Irq => Ok(SlotSpec::Irq(device)),
                 SlotKind::Mmio => Ok(SlotSpec::Mmio(device)),
                 SlotKind::Service => {
@@ -399,23 +369,41 @@ fn compile_slots<'a>(
                         provider: find_provider(name, protocol, declarations, names)?,
                     })
                 }
-                SlotKind::File => {
-                    let path = file.first().map(String::as_str).with_context(|| {
-                        format!("boot plan component '{name}' declares a file slot without a name")
-                    })?;
-                    ensure!(
-                        records.contains(&path),
-                        "boot plan component '{name}' takes file '{path}', \
-                         which its directory does not contain"
-                    );
-                    Ok(SlotSpec::File { path })
-                }
+                SlotKind::Directory => Ok(SlotSpec::Directory {
+                    provider: find_namespace(name, declarations, names)?,
+                }),
             }
         })
         .collect()
 }
 
 fn find_provider(
+    name: &str,
+    protocol: &str,
+    declarations: &[&ProgramManifest],
+    names: &[&str],
+) -> Result<u16> {
+    let index = find_exporter(name, protocol, declarations, names)?;
+    ensure!(
+        names[usize::from(index)] != name,
+        "boot plan component '{name}' imports the protocol it exports itself"
+    );
+    Ok(index)
+}
+
+fn find_namespace(name: &str, declarations: &[&ProgramManifest], names: &[&str]) -> Result<u16> {
+    let index = find_exporter(name, NAMESPACE_PROTOCOL, declarations, names)?;
+    // Каталог компонента выдан сессией маршрутизатора, и взять её от себя
+    // самого экспортёру нечем: файловой системы на его старте нет.
+    ensure!(
+        names[usize::from(index)] != name,
+        "boot plan component '{name}' takes its directory from the \
+         '{NAMESPACE_PROTOCOL}' it exports itself"
+    );
+    Ok(index)
+}
+
+fn find_exporter(
     name: &str,
     protocol: &str,
     declarations: &[&ProgramManifest],
@@ -442,20 +430,16 @@ fn find_provider(
             exporters.join(", ")
         );
     };
-    ensure!(
-        names[index] != name,
-        "boot plan component '{name}' imports the protocol it exports itself"
-    );
     u16::try_from(index).context("component index fits the plan")
 }
 
-fn service_edges(slots: &[SlotSpec<'_>]) -> Vec<u16> {
-    // Импорт сервиса поднимает провайдера раньше потребителя: ребро выводится
-    // из связывания.
+fn provider_edges(slots: &[SlotSpec<'_>]) -> Vec<u16> {
+    // Импорт сервиса и каталог компонента поднимают провайдера раньше
+    // потребителя: ребро выводится из связывания.
     let mut edges: Vec<u16> = slots
         .iter()
         .filter_map(|slot| match slot {
-            SlotSpec::Service { provider } => Some(*provider),
+            SlotSpec::Service { provider } | SlotSpec::Directory { provider } => Some(*provider),
             _ => None,
         })
         .collect();
@@ -537,13 +521,14 @@ mod tests {
     const RAM_FS: &str = "/boot/filesystem-ramfs";
     const ROOTKEEPER: &str = "/boot/rootkeeper";
     const CONSUMER: &str = "/boot/namespace-consumer-fixture";
+    const AREA: &str = "/boot/area-consumer";
 
     const ROUTER_NAME: &str = "namespace-router";
     const DRIVER_NAME: &str = "driver-pl031";
     const CONSUMER_NAME: &str = "namespace-consumer-fixture";
+    const AREA_NAME: &str = "area-consumer";
 
     const RTC_COMPATIBLE: &[&str] = &["arm,pl031", "arm,primecell"];
-    const NAMESPACE: &str = "Namespace";
 
     const DRIVER_FAMILY: usize = WAIT_MANY_MAX_COUNT;
 
@@ -599,11 +584,8 @@ mod tests {
 
     fn router_declaration() -> ProgramManifest {
         declaration(
-            vec![
-                slot(SlotKind::Image, 0, &[]),
-                slot(SlotKind::File, 0, &["mounts"]),
-            ],
-            Some(NAMESPACE),
+            vec![slot(SlotKind::Userland, 0, &[])],
+            Some(NAMESPACE_PROTOCOL),
         )
     }
 
@@ -618,12 +600,18 @@ mod tests {
     }
 
     fn consumer_declaration() -> ProgramManifest {
-        declaration(vec![slot(SlotKind::Service, 0, &[NAMESPACE])], None)
+        declaration(
+            vec![slot(SlotKind::Service, 0, &[NAMESPACE_PROTOCOL])],
+            None,
+        )
+    }
+
+    fn area_declaration() -> ProgramManifest {
+        declaration(vec![slot(SlotKind::Directory, 0, &[])], None)
     }
 
     struct Image {
         entries: Vec<(String, Option<ProgramManifest>)>,
-        records: Vec<String>,
     }
 
     impl Image {
@@ -635,26 +623,18 @@ mod tests {
                 (String::from(CONSUMER), Some(consumer_declaration())),
                 (
                     String::from(IMAGE_FS),
-                    Some(declaration(vec![slot(SlotKind::Image, 0, &[])], None)),
+                    Some(declaration(vec![slot(SlotKind::Userland, 0, &[])], None)),
                 ),
                 (String::from(RAM_FS), None),
             ];
             for index in 0..DRIVER_FAMILY {
                 entries.push((driver_family_member(index), Some(device_declaration())));
             }
-            Self {
-                entries,
-                records: vec![format!("{ROUTER}/mounts")],
-            }
+            Self { entries }
         }
 
         fn with(mut self, path: &str, manifest: ProgramManifest) -> Self {
             self.entries.push((String::from(path), Some(manifest)));
-            self
-        }
-
-        fn with_record(mut self, path: &str) -> Self {
-            self.records.push(String::from(path));
             self
         }
 
@@ -669,8 +649,7 @@ mod tests {
         }
 
         fn compile(&self, source: &str) -> Result<Vec<u8>> {
-            let records: Vec<&str> = self.records.iter().map(String::as_str).collect();
-            compile_boot_plan(source, &self.programs(), &records)
+            compile_boot_plan(source, &self.programs())
         }
     }
 
@@ -700,15 +679,7 @@ mod tests {
 
         let router = plan.component(0).expect("router");
         assert_eq!(router.executable(), ROUTER);
-        assert_eq!(
-            router.slots().collect::<Vec<_>>(),
-            [
-                SlotSource::Image,
-                SlotSource::File {
-                    path: "/boot/namespace-router/mounts"
-                }
-            ]
-        );
+        assert_eq!(router.slots().collect::<Vec<_>>(), [SlotSource::Userland]);
 
         let rtc = plan.component(1).expect("rtc");
         let slots: Vec<SlotSource<'_>> = rtc.slots().collect();
@@ -722,44 +693,6 @@ mod tests {
         };
         assert_eq!(window.compatible().collect::<Vec<_>>(), RTC_COMPATIBLE);
         assert_eq!(window.resource, 1);
-    }
-
-    #[test]
-    fn plan_resolves_a_file_under_the_component_directory() {
-        const OWNER: &str = "/boot/owner";
-        let image = Image::new()
-            .with(
-                OWNER,
-                declaration(vec![slot(SlotKind::File, 0, &["data"])], None),
-            )
-            .with_record("/boot/owner/data");
-        let source = plan(&[rtc("").replace(DRIVER, OWNER)]);
-
-        let bytes = image.compile(&source).expect("compile must succeed");
-        let plan = decode_plan(&bytes).expect("compiled plan must decode");
-        assert_eq!(
-            plan.component(0).expect("owner").slots().next(),
-            Some(SlotSource::File {
-                path: "/boot/owner/data"
-            })
-        );
-    }
-
-    #[test]
-    fn plan_rejects_a_file_the_component_directory_does_not_contain() {
-        const OWNER: &str = "/boot/owner";
-        let image = Image::new().with(
-            OWNER,
-            declaration(vec![slot(SlotKind::File, 0, &["ghost"])], None),
-        );
-        let source = plan(&[rtc("").replace(DRIVER, OWNER)]);
-
-        let error = image.compile(&source).expect_err("the record is absent");
-        assert_eq!(
-            format!("{error:#}"),
-            "boot plan component 'owner' takes file '/boot/owner/ghost', \
-             which its directory does not contain"
-        );
     }
 
     #[test]
@@ -811,7 +744,7 @@ mod tests {
         assert_eq!(
             rejected(&source),
             format!(
-                "boot plan component '{CONSUMER_NAME}' imports protocol '{NAMESPACE}', \
+                "boot plan component '{CONSUMER_NAME}' imports protocol '{NAMESPACE_PROTOCOL}', \
                  which no component of the composition exports"
             )
         );
@@ -820,9 +753,7 @@ mod tests {
     #[test]
     fn plan_rejects_an_import_two_components_export() {
         const TWIN: &str = "/boot/namespace-router-twin";
-        let image = Image::new()
-            .with(TWIN, router_declaration())
-            .with_record("/boot/namespace-router-twin/mounts");
+        let image = Image::new().with(TWIN, router_declaration());
         let twin = filesystem("").replace(ROUTER, TWIN);
         let source = plan(&[filesystem(""), twin, consumer("")]);
 
@@ -830,7 +761,7 @@ mod tests {
         assert_eq!(
             format!("{error:#}"),
             format!(
-                "boot plan component '{CONSUMER_NAME}' imports protocol '{NAMESPACE}', \
+                "boot plan component '{CONSUMER_NAME}' imports protocol '{NAMESPACE_PROTOCOL}', \
                  which 2 components export: {ROUTER_NAME}, namespace-router-twin"
             )
         );
@@ -842,8 +773,8 @@ mod tests {
         let image = Image::new().with(
             SELF_BOUND,
             declaration(
-                vec![slot(SlotKind::Service, 0, &[NAMESPACE])],
-                Some(NAMESPACE),
+                vec![slot(SlotKind::Service, 0, &[NAMESPACE_PROTOCOL])],
+                Some(NAMESPACE_PROTOCOL),
             ),
         );
         let source = plan(&[consumer("").replace(CONSUMER, SELF_BOUND)]);
@@ -854,6 +785,86 @@ mod tests {
         assert_eq!(
             format!("{error:#}"),
             "boot plan component 'self-bound' imports the protocol it exports itself"
+        );
+    }
+
+    #[test]
+    fn plan_binds_a_directory_slot_to_the_namespace_exporter() {
+        let image = Image::new().with(AREA, area_declaration());
+        let source = plan(&[filesystem(""), rtc("").replace(DRIVER, AREA)]);
+
+        let bytes = image.compile(&source).expect("compile must succeed");
+        let plan = decode_plan(&bytes).expect("compiled plan must decode");
+        let area = plan.component(1).expect("area");
+        assert_eq!(
+            area.slots().collect::<Vec<_>>(),
+            [SlotSource::Directory { provider: 0 }]
+        );
+        // Ребро зависимости выведено из связывания: маршрутизатор поднимается
+        // раньше того, кому выдаёт каталог.
+        assert_eq!(area.requires().collect::<Vec<_>>(), [0]);
+    }
+
+    #[test]
+    fn plan_rejects_a_directory_slot_on_the_namespace_exporter() {
+        const SELF_BOUND: &str = "/boot/self-rooted";
+        let image = Image::new().with(
+            SELF_BOUND,
+            declaration(
+                vec![slot(SlotKind::Directory, 0, &[])],
+                Some(NAMESPACE_PROTOCOL),
+            ),
+        );
+        let source = plan(&[rtc("").replace(DRIVER, SELF_BOUND)]);
+
+        let error = image
+            .compile(&source)
+            .expect_err("the exporter takes no directory of its own");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "boot plan component 'self-rooted' takes its directory from the \
+                 '{NAMESPACE_PROTOCOL}' it exports itself"
+            )
+        );
+    }
+
+    #[test]
+    fn plan_rejects_a_directory_slot_without_a_namespace_exporter() {
+        let image = Image::new().with(AREA, area_declaration());
+        let source = plan(&[rtc(""), rtc("").replace(DRIVER, AREA)]);
+
+        let error = image
+            .compile(&source)
+            .expect_err("the composition carries no namespace");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "boot plan component '{AREA_NAME}' imports protocol '{NAMESPACE_PROTOCOL}', \
+                 which no component of the composition exports"
+            )
+        );
+    }
+
+    #[test]
+    fn plan_rejects_a_directory_slot_of_a_component_the_exporter_waits_for() {
+        let image = Image::new().with(AREA, area_declaration());
+        let source = plan(&[
+            filesystem(&format!("after = [\"{AREA_NAME}\"]\n")),
+            rtc("").replace(DRIVER, AREA),
+        ]);
+
+        // Компонент, которого маршрутизатор ждёт сам, каталога от него не
+        // получает: порядок запуска такой композиции невыразим.
+        let error = image
+            .compile(&source)
+            .expect_err("the directory edge closes the order");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "boot plan dependencies form a cycle over components: \
+                 {ROUTER_NAME}, {AREA_NAME}"
+            )
         );
     }
 
@@ -1070,7 +1081,7 @@ mod tests {
             CROWDED,
             declaration(
                 (0..=COMPONENT_SLOT_MAX)
-                    .map(|_| slot(SlotKind::Image, 0, &[]))
+                    .map(|_| slot(SlotKind::Userland, 0, &[]))
                     .collect(),
                 None,
             ),

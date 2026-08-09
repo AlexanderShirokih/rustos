@@ -4,8 +4,8 @@ use syscall::Timeout;
 
 use crate::plan::{
     BOOT_PLAN_MAGIC, BOOT_PLAN_VERSION, EXHAUSTED_DETACH, EXHAUSTED_HALT, OnExhausted,
-    PLAN_HEADER_SIZE, SLOT_KIND_FILE, SLOT_KIND_IMAGE, SLOT_KIND_IRQ, SLOT_KIND_MMIO,
-    SLOT_KIND_SERVICE,
+    PLAN_HEADER_SIZE, SLOT_KIND_DIRECTORY, SLOT_KIND_IRQ, SLOT_KIND_MMIO, SLOT_KIND_SERVICE,
+    SLOT_KIND_USERLAND,
 };
 
 /// Устройство, названное слотом композиции.
@@ -23,15 +23,16 @@ pub struct DeviceSpec<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotSpec<'a> {
     /// Регион userland-образа целиком.
-    Image,
+    Userland,
     /// Линия прерывания устройства.
     Irq(DeviceSpec<'a>),
     /// MMIO-окно устройства.
     Mmio(DeviceSpec<'a>),
     /// Сессия service-порта компонента с номером `provider` в плане.
     Service { provider: u16 },
-    /// Регион записи образа из каталога компонента.
-    File { path: &'a str },
+    /// Сессия файловой системы с каталогом компонента в роли корня, выданная
+    /// маршрутизатором имён с номером `provider` в плане.
+    Directory { provider: u16 },
 }
 
 /// Компонент композиции, укладываемый в план.
@@ -137,16 +138,9 @@ fn encode_slot(
     count: u16,
 ) -> Result<(), PlanEncodeError> {
     let mut header = [0u8; 12];
-    let mut file = None;
     let device = match slot {
-        SlotSpec::Image => {
-            header[0] = SLOT_KIND_IMAGE;
-            None
-        }
-        SlotSpec::File { path } => {
-            header[0] = SLOT_KIND_FILE;
-            header[8..10].copy_from_slice(&1u16.to_le_bytes());
-            file = Some(*path);
+        SlotSpec::Userland => {
+            header[0] = SLOT_KIND_USERLAND;
             None
         }
         SlotSpec::Service { provider } => {
@@ -154,6 +148,14 @@ fn encode_slot(
                 return Err(PlanEncodeError::IndexOutOfRange);
             }
             header[0] = SLOT_KIND_SERVICE;
+            header[2..4].copy_from_slice(&provider.to_le_bytes());
+            None
+        }
+        SlotSpec::Directory { provider } => {
+            if *provider >= count {
+                return Err(PlanEncodeError::IndexOutOfRange);
+            }
+            header[0] = SLOT_KIND_DIRECTORY;
             header[2..4].copy_from_slice(&provider.to_le_bytes());
             None
         }
@@ -179,11 +181,6 @@ fn encode_slot(
     }
 
     bytes.extend_from_slice(&header);
-    if let Some(path) = file {
-        let len = string_len(path)?;
-        bytes.extend_from_slice(&len.to_le_bytes());
-        bytes.extend_from_slice(path.as_bytes());
-    }
     if let Some(device) = device {
         for compatible in device.compatible {
             let len = string_len(compatible)?;

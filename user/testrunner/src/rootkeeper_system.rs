@@ -7,19 +7,19 @@ use core::num::NonZeroU64;
 
 use device_resolver::ResolveError;
 use filesystem_abi::{
-    AccessMode, FileSystemError, Mount, OpenFlags, Opened, Path, decode_mount_table, namespace,
-    namespace_admin,
+    AccessMode, BOOT_MOUNT_TABLE_PATH, FileSystemError, Mount, OpenFlags, Opened, Path,
+    decode_mount_table, namespace, namespace_admin,
 };
 use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
 use managed_component::{ComponentRoots, ComponentSlots, ManagedComponent, ManagedFailure};
 use rootkeeper::{BootFailure, RootSystem, SHUTDOWN_EXIT_CODE, Stopped, Supervised, SystemImage};
 use rtc_abi::rtc;
-use runtime::{MemoryAccess, MemoryRegion, OwnedHandle, PortTransport, Signal, Timeout};
+use runtime::{MemoryRegion, OwnedHandle, PortTransport, Signal, Timeout};
 use syscall::{Rights, SIGNALED};
 use userland_image::{
-    BOOT_PLAN_PATH, BootPlan, ComponentSpec, DecodedImage, DeviceSpec, OnExhausted,
-    PlanDecodeError, SlotSource, SlotSpec, decode_plan, encode_plan,
+    BOOT_PLAN_PATH, BootPlan, ComponentSpec, DeviceSpec, OnExhausted, PlanDecodeError, SlotSource,
+    SlotSpec, decode_plan, encode_plan,
 };
 
 use crate::filesystem::{CALL_TIMEOUT, connect, path};
@@ -49,7 +49,13 @@ const CONSUMER_PROGRAM: &str = "/boot/namespace-consumer-fixture";
 const CONSUMER_NAME: &str = "namespace-consumer-fixture";
 const CONSUMER_MEMORY_PAGES: u64 = 256;
 
-const BOOT_MOUNTS_RECORD: &str = "/boot/namespace-router/mounts";
+const AREA_PROGRAM: &str = "/boot/directory-consumer-fixture";
+const AREA_NAME: &str = "directory-consumer-fixture";
+const AREA_MEMORY_PAGES: u64 = 512;
+const AREA_INCARNATIONS: u32 = 2;
+const AREA_READ_EXIT_CODE: u32 = 0;
+
+const AREA_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Directory { provider: 1 }];
 
 const CRASH_MOUNT: &str = "/crash";
 const CRASH_FILESYSTEM: &str = "/boot/crash-filesystem";
@@ -82,39 +88,20 @@ const CONSUMER_TURN: Timeout = Timeout::from_millis(200);
 
 const DEVICE_EXIT_CODE: u32 = 41;
 
-const ROUTER_SLOTS: &[SlotSpec<'static>] = &[
-    SlotSpec::Image,
-    SlotSpec::File {
-        path: BOOT_MOUNTS_RECORD,
-    },
-];
+const ROUTER_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Userland];
 
-pub(crate) fn router_slots(image: &MemoryRegion, entries: &DecodedImage<'_>) -> ComponentSlots {
+pub(crate) fn router_slots(image: &MemoryRegion) -> ComponentSlots {
     let mut slots = ComponentSlots::default();
     slots
         .push(
             image
                 .handle()
                 .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)
-                .expect("image slot minted"),
-        )
-        .expect("slot fits the transaction");
-    let mounts = entries
-        .entry(BOOT_MOUNTS_RECORD)
-        .expect("image carries the boot mount table");
-    let size = (mounts.data().len() as u64).div_ceil(PAGE_SIZE) * PAGE_SIZE;
-    slots
-        .push(
-            image
-                .slice(mounts.data_offset(), size, MemoryAccess::READ)
-                .expect("mount table window")
-                .into_handle(),
+                .expect("userland slot minted"),
         )
         .expect("slot fits the transaction");
     slots
 }
-
-const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 
 fn router(on_exhausted: OnExhausted, launches: u32) -> ComponentSpec<'static> {
     ComponentSpec {
@@ -360,16 +347,10 @@ fn compiled_plan_carries_the_boot_composition() {
     kernel_tests::kassert_eq!(component.launches(), ROUTER_INCARNATIONS);
     kernel_tests::kassert_eq!(component.on_exhausted(), OnExhausted::Halt);
 
-    // Слоты пришли из манифеста программы: образ и запись её каталога.
-    kernel_tests::kassert_eq!(component.slots().count(), 2);
+    // Слот пришёл из манифеста программы: регион userland-образа.
+    kernel_tests::kassert_eq!(component.slots().count(), 1);
     let slots: Vec<SlotSource<'_>> = component.slots().collect();
-    kernel_tests::kassert_eq!(slots[0], SlotSource::Image);
-    kernel_tests::kassert_eq!(
-        slots[1],
-        SlotSource::File {
-            path: BOOT_MOUNTS_RECORD
-        }
-    );
+    kernel_tests::kassert_eq!(slots[0], SlotSource::Userland);
 }
 
 #[kernel_test]
@@ -378,7 +359,7 @@ fn compiled_mount_table_carries_the_boot_tree() {
     let entries = image.entries().expect("image decodes");
 
     let record = entries
-        .entry(BOOT_MOUNTS_RECORD)
+        .entry(BOOT_MOUNT_TABLE_PATH)
         .expect("image carries the compiled mount table");
     let table = decode_mount_table(record.data()).expect("compiled table decodes");
 
@@ -402,7 +383,7 @@ fn boot_with_a_corrupted_plan_record_names_its_failure() {
     let image = image();
 
     // Запись программы планом не является: её байты декодер отвергает.
-    let corrupted = image.plan(BOOT_MOUNTS_RECORD).err();
+    let corrupted = image.plan(BOOT_MOUNT_TABLE_PATH).err();
     kernel_tests::kassert!(matches!(
         corrupted,
         Some(BootFailure::Plan(PlanDecodeError::InvalidMagic(_)))
@@ -678,6 +659,52 @@ fn a_service_slot_carries_the_provider_session_and_stops_before_it() {
         managed(&system, 0).failure(),
         Some(ManagedFailure::Exit(SHUTDOWN_EXIT_CODE))
     );
+}
+
+#[kernel_test]
+fn a_directory_slot_carries_the_component_area_to_every_incarnation() {
+    let image = image();
+    // Потребитель стоит в плане первым, а поднимается вторым: область его
+    // каталога supervisor берёт у уже поднятого маршрутизатора.
+    let bytes = encode_plan(&[
+        ComponentSpec {
+            executable: AREA_PROGRAM,
+            name: AREA_NAME,
+            slots: AREA_SLOTS,
+            requires: &[1],
+            after: &[],
+            memory_pages: AREA_MEMORY_PAGES,
+            startup_timeout: ROUTER_STARTUP_TIMEOUT,
+            launches: AREA_INCARNATIONS,
+            on_exhausted: OnExhausted::Detach,
+        },
+        router(OnExhausted::Halt, 1),
+    ])
+    .expect("scenario plan encodes");
+    let mut system = started(&image, &bytes);
+    kernel_tests::kassert_eq!(system.start_order(), &[1, 0][..]);
+
+    // Компонент читает свою запись сессией каталога и сам проверяет, что путь
+    // наружу область не выражает: прочие исходы он уносит своим кодом выхода.
+    let first = system.supervise_turn(relay_thread());
+    kernel_tests::kassert_eq!(
+        first,
+        Supervised::Restarted {
+            exit_code: Some(AREA_READ_EXIT_CODE)
+        }
+    );
+
+    // Область выдаётся заново: следующая incarnation читает свой каталог той же
+    // сессией маршрутизатора.
+    let second = system.supervise_turn(relay_thread());
+    kernel_tests::kassert_eq!(
+        second,
+        Supervised::Abandoned {
+            exit_code: Some(AREA_READ_EXIT_CODE)
+        }
+    );
+
+    system.shutdown();
 }
 
 #[kernel_test]

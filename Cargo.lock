@@ -108,6 +108,7 @@ name = "calculator-demo"
 version = "0.1.0"
 dependencies = [
  "component-abi",
+ "filesystem-abi",
  "ipc",
  "rtc-abi",
  "runtime",
@@ -806,6 +807,8 @@ dependencies = [
  "device-resolver",
  "device-resolver-aarch64",
  "fdt",
+ "filesystem-abi",
+ "ipc",
  "log-abi",
  "log-relay",
  "managed-component",

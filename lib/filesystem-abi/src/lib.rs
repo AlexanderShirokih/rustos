@@ -34,8 +34,8 @@ pub use kind::NodeKind;
 pub use limits::{NAME_MAX, PATH_MAX};
 pub use mode::AccessMode;
 pub use mount_table::{
-    MOUNT_TABLE_MAGIC, MOUNT_TABLE_VERSION, Mount, MountTable, MountTableDecodeError,
-    MountTableEncodeError, Mounts, decode_mount_table, encode_mount_table,
+    BOOT_MOUNT_TABLE_PATH, MOUNT_TABLE_MAGIC, MOUNT_TABLE_VERSION, Mount, MountTable,
+    MountTableDecodeError, MountTableEncodeError, Mounts, decode_mount_table, encode_mount_table,
 };
 pub use path::{Component, Path, SEPARATOR, rebase};
 pub use protocol::*;

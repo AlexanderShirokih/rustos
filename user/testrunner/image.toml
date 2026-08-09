@@ -6,7 +6,6 @@ path = "/boot/testrunner/plan"
 
 [[mount_tables]]
 source = "user/testrunner/namespace.toml"
-path = "/boot/namespace-router/mounts"
 
 [[programs]]
 package = "testrunner"
@@ -52,6 +51,11 @@ path = "/boot/namespace-consumer-fixture"
 package = "testrunner"
 bin = "filesystem-client-fixture"
 path = "/boot/filesystem-client-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "directory-consumer-fixture"
+path = "/boot/directory-consumer-fixture"
 
 [[programs]]
 package = "testrunner"
@@ -101,3 +105,7 @@ source = "user/testrunner/assets/sample.txt"
 [[files]]
 path = "/boot/testrunner/empty"
 source = "user/testrunner/assets/empty.txt"
+
+[[files]]
+path = "/boot/directory-consumer-fixture/sample"
+source = "user/testrunner/assets/area.txt"

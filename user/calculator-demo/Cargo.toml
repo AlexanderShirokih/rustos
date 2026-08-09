@@ -30,6 +30,7 @@ bench = false
 
 [dependencies]
 component-abi = { workspace = true }
+filesystem-abi = { workspace = true }
 ipc = { workspace = true }
 rtc-abi = { workspace = true }
 runtime = { workspace = true }
