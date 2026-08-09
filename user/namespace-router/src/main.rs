@@ -15,7 +15,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 use component_abi::component_manifest;
-use filesystem_abi::{decode_mount_table, dispatch_namespace, dispatch_namespace_admin};
+use filesystem_abi::{decode_mount_table, namespace, namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
     MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Resource, Thread,
@@ -35,6 +35,8 @@ const LOG_TAG: &str = "router";
 const ADMIN_STACK: u64 = 0x4000;
 
 const SUPERVISOR_LOST_EXIT_CODE: u32 = 7;
+
+const SERVICE_PORT_FAILED_EXIT_CODE: u32 = 9;
 
 const ADMIN_TURN: Timeout = Timeout::from_millis(100);
 
@@ -96,7 +98,7 @@ fn run(startup: Handle) -> Result<()> {
     mount_boot_table(&admin_port.administering, table.as_bytes())?;
     drop(table);
     // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
-    let _ = spawn_owned(
+    let admin = spawn_owned(
         move || serve_admin(admin_port),
         ADMIN_STACK,
         Priority::new(1),
@@ -104,7 +106,9 @@ fn run(startup: Handle) -> Result<()> {
     log_line("started");
 
     serve(&service);
-    Ok(())
+    // Разбирать пути больше некому, и уход одного потока процесс не снимает:
+    // supervisor узнаёт об уходе компонента только по его коду выхода.
+    exit_with_sibling(admin.thread(), SERVICE_PORT_FAILED_EXIT_CODE)
 }
 
 fn serve(service: &OwnedHandle) {
@@ -124,7 +128,7 @@ fn serve(service: &OwnedHandle) {
             }
         }
         let mut resolving = Resolving::new(&MOUNTS);
-        let delivered = dispatch_namespace(&mut resolving, &transport).is_ok();
+        let delivered = namespace::dispatch(&mut resolving, &transport).is_ok();
         resolving.end_frame(delivered);
         // Reply-объект не переживает свой кадр: закрытие неотправленного ответа будит
         // припаркованного вызывателя.
@@ -144,7 +148,7 @@ fn serve_admin(mut admin: AdminPort) -> u32 {
     loop {
         match transport.wait_readable(ADMIN_TURN) {
             Ok(()) => {
-                let _ = dispatch_namespace_admin(&mut admin.administering, &transport);
+                let _ = namespace_admin::dispatch(&mut admin.administering, &transport);
                 transport.cancel_reply();
             }
             Err(IpcError::Timeout) => {}

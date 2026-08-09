@@ -18,9 +18,9 @@ rendezvous-примитив, на котором отправитель и по�
 
 Операция бывает трёх видов:
 
-- two-way (`#[call]`): клиент шлёт запрос и ждёт ответ;
-- one-way клиент -> сервер (`#[cast]`): запрос без ответа;
-- событие сервер -> клиент (`#[event]`): уведомление без ответа.
+- two-way (`call`): клиент шлёт запрос и ждёт ответ;
+- one-way клиент -> сервер (`cast`): запрос без ответа;
+- событие сервер -> клиент (`event`): уведомление без ответа.
 
 Ответ two-way несёт один из трёх исходов:
 
@@ -130,8 +130,8 @@ field_id = 1
 Агрегат — пользовательский тип, укладывающийся в одно поле: его значение
 пишется вложенным суб-кадром той же раскладки (записи полей по позиционному
 `field_id`, терминатор), а `len` поля равен длине суб-кадра. Вложенность
-рекурсивна. `#[derive(WireValue)]` выводит такую укладку для структуры с
-именованными полями; структура без лайфтайма годится и в возврат two-way.
+рекурсивна. `ipc::wire_value!` объявляет структуру с именованными полями и выводит
+такую укладку; структура без лайфтайма годится и в возврат two-way.
 
 Вектор хэндлов у кадра один и общий со всеми его суб-кадрами, поэтому `Cap` —
 такое же поле агрегата, как целое: агрегат вправе нести capability вместе со
@@ -194,7 +194,7 @@ IPC опирается на underlying-транспорт, не определя
 принять его нечем (`OutOfHandles` нормализуется в этот покадровый исход), и
 `WouldBlock`, когда встречной стороны нет. `PortTransport::client` по умолчанию
 ждёт one-way rendezvous бессрочно; `with_send_timeout(timeout)` задаёт срок
-только для `send`/`#[cast]`: `Timeout::POLL` означает poll, `Timeout::INFINITE` —
+только для `send`/`cast`: `Timeout::POLL` означает poll, `Timeout::INFINITE` —
 бессрочное ожидание, другое значение — относительный deadline. Истечение
 возвращает `IpcError::Timeout`,
 кадр остаётся у отправителя и capability не передаются. После
@@ -205,16 +205,16 @@ IPC опирается на underlying-транспорт, не определя
 
 ## Транспортная плоскость
 
-Плоскость объявляется на весь протокол атрибутом `transport`:
+Плоскость объявляется на весь протокол настройкой `plane`:
 
-| Плоскость | `#[call]` | `#[cast]` | `#[event]` |
-|-----------|-----------|-----------|------------|
-| `port`    | да        | да        | да         |
-| `ring`    | нет       | да        | да         |
+| Плоскость | `call` | `cast` | `event` |
+|-----------|--------|--------|---------|
+| `port`    | да     | да     | да      |
+| `ring`    | нет    | да     | да      |
 
-Дефолт — `"port"`. Атрибут включает компиляторную валидацию операций под плоскость:
-`ring`-протокол с `#[call]` не скомпилируется. Выбранная плоскость отражается в
-сгенерированной константе `<protocol>_ordinal::TRANSPORT_PLANE: &str` — для
+Дефолт — `port`. Настройка включает компиляторную проверку операций под плоскость:
+`ring`-протокол с `call` не скомпилируется — const-ассерт по дескриптору не проходит.
+Выбранная плоскость отражается в константе `<protocol>::TRANSPORT_PLANE: &str` — для
 runtime-диагностики и тестов.
 
 ## Стабильность
@@ -230,38 +230,57 @@ runtime-диагностики и тестов.
 
 ## Объявление контракта
 
-Контракт пишется как Rust trait с атрибутом `#[protocol]`; операции размечаются
-`#[call]` (two-way), `#[cast]` (one-way клиент -> сервер) и `#[event]` (событие).
-Proc-macro по trait строит клиента с методом на операцию и серверный диспетчер
-кадра; `#[protocol(name = "...")]` задаёт namespace для `ordinal`.
+Контракт объявляется макросом `ipc::protocol!` в виде модуля; операции размечаются
+ключевым словом `call` (two-way), `cast` (one-way клиент -> сервер) и `event`
+(событие). Макрос строит в этом модуле клиента с методом на операцию и серверный
+диспетчер кадра; `name` задаёт namespace для `ordinal`.
 
 ```rust
-#[ipc::protocol(name = "Clock")]
-pub trait Clock {
-    #[call]  fn now(&self) -> u64;
-    #[call]  fn checked(&self, value: u32) -> Result<u32, u8>;
-    #[cast]  fn arm(&self, deadline_ns: u64);
-    #[event] fn tick(seq: u64);
+ipc::protocol! {
+    /// Часы устройства.
+    pub mod clock {
+        name = "Clock";
+
+        call fn now() -> u64;
+        call fn checked(value: u32) -> Result<u32, u8>;
+        cast fn arm(deadline_ns: u64);
+        event fn tick(seq: u64);
+    }
 }
 ```
+
+Макрос декларативный (`macro_rules!`), а не производный: крейт `ipc` попадает в граф
+зависимостей стандартной библиотеки, где proc-макрос собраться не может. Разбор типов,
+который проделывал бы proc-макрос, снят уровнем типов — трейтами `WireValue`,
+`WireTyped`, `WireReply` и `IntoWireHandle`, — а бюджет кадра и совместимость с
+плоскостью проверяются const-функциями по готовому дескриптору.
 
 `Cap` как параметр, возвращаемый тип или поле агрегата указывает, что операция
 передаёт capability-хэндл:
 
 ```rust
-#[derive(ipc::WireValue)]
-pub struct Vended {
-    pub session: ipc::wire::Cap,
-    pub prefix_len: u32,
+ipc::wire_value! {
+    pub struct Vended {
+        pub session: ipc::wire::Cap,
+        pub prefix_len: u32,
+    }
 }
 
-#[ipc::protocol(name = "Resource")]
-pub trait Resource {
-    #[call] fn acquire(&self, exclusive: bool) -> Result<ipc::wire::Cap, u32>;
-    #[call] fn vend(&self, prefix_len: u32) -> Vended;
-    #[cast] fn release(&self, handle: ipc::wire::Cap);
+ipc::protocol! {
+    pub mod resource {
+        name = "Resource";
+
+        call fn acquire(exclusive: bool) -> Result<ipc::wire::Cap, u32>;
+        call fn vend(prefix_len: u32) -> Vended;
+        cast fn release(handle: Cap);
+    }
 }
 ```
+
+Параметр верхнего уровня объявляется именно словом `Cap`: по нему макрос выбирает
+`IntoWireHandle` вместо `WireValue`. Возврат `-> Cap` означает то же для ответа —
+сервис возвращает `impl IntoWireHandle`, и владение снимается после успешной
+передачи. Внутри `Result<..>` и агрегата пишется обычный тип `ipc::wire::Cap`.
 
 Cap-параметр верхнего уровня принимается как `impl IntoWireHandle`, поэтому в
 него передаётся и владеющий хэндл: после успешной отправки владение снимается.
@@ -276,41 +295,49 @@ Cap-параметр верхнего уровня принимается как
 закрыть принимающий цикл. Каждый слот кадра потребляется декодом один раз:
 второе поле с тем же индексом отвергается как `InvalidValue`.
 
-Макрос отвергает контракт при типе вне допустимого набора, кадре сверх бюджета или
-коллизии `ordinal`. Сгенерированные типы: `<Name>Client`, `<Name>Service` trait,
-`dispatch_<snake>` функция, `Events` trait + `EventSender`, модуль `<snake>_ordinal`
-с константами ordinal и `DESC: ProtocolDesc`.
+Кадр сверх бюджета тела и операция, чьих параметров больше, чем несёт пространство
+`field_id` записи (`1..=254`), отвергаются const-ассертом на месте объявления. Модуль
+контракта несёт: `Client`, trait `Service`, функцию `dispatch`, trait `Events` вместе
+с `EventSender` и `dispatch_event`, `DESC: ProtocolDesc`, `TRANSPORT_PLANE` и по
+модулю на операцию с её `ORDINAL` и `CANONICAL`.
 
-Пример объявления операции из `lib/bootstrap-abi` (односторонняя `#[cast]`):
+Пример объявления операции из `lib/bootstrap-abi` (односторонняя `cast`):
 
 ```rust
-#[ipc::protocol(name = "Bootstrap")]
-pub trait Bootstrap {
-    #[cast]
-    fn log(&self, message: ipc::wire::Str<{ crate::LOG_MESSAGE_MAX }>);
+ipc::protocol! {
+    pub mod bootstrap {
+        name = "Bootstrap";
+
+        cast fn log(
+            tag: ipc::wire::Str<{ crate::LOG_TAG_MAX }>,
+            message: ipc::wire::Str<{ crate::LOG_MESSAGE_MAX }>,
+        );
+    }
 }
 ```
 
 ### Тайм-аут ожидания ответа
 
-Two-way `#[call]` ждёт ответ через `Transport::wait_readable(timeout)`. Срок
-задаётся декларативно и пробрасывается до транспорта:
+Two-way `call` ждёт ответ через `Transport::wait_readable(timeout)`. Срок задаётся
+декларативно и пробрасывается до транспорта:
 
-- `#[protocol(timeout_ns = N)]` — дефолтный срок (нс) для всех `#[call]`
-  клиента (по умолчанию бессрочно);
-- `#[call(timeout_ns = N)]` — per-call перекрытие дефолта;
+- `name = "...", wait = N` — дефолтный срок (нс) для всех `call` клиента (по
+  умолчанию бессрочно);
+- `call(wait = N)` — перекрытие дефолта на отдельной операции;
 - `Client::with_wait(timeout)` — переопределение дефолта в рантайме при
   конструировании клиента; `Client::wait()` возвращает текущее значение.
 
-Атрибуты макроса несут число наносекунд: `N == 0` — poll (не блокироваться),
-иначе относительный дедлайн. По истечении операция возвращает
-`IpcError::Timeout`.
+Настройки макроса несут число наносекунд: `N == 0` — poll (не блокироваться), иначе
+относительный дедлайн. По истечении операция возвращает `IpcError::Timeout`.
 
 ```rust
-#[ipc::protocol(name = "Sensor", timeout_ns = 50_000_000)] // 50 мс по умолчанию
-pub trait Sensor {
-    #[call]                      fn read(&self) -> u32;  // 50 мс
-    #[call(timeout_ns = 0)]      fn poll(&self) -> u32;  // не блокировать
+ipc::protocol! {
+    pub mod sensor {
+        name = "Sensor", wait = 50_000_000; // 50 мс по умолчанию
+
+        call fn read() -> u32; // 50 мс
+        call(wait = 0) fn poll() -> u32; // не блокировать
+    }
 }
 ```
 
@@ -320,9 +347,9 @@ pub trait Sensor {
 ```rust
 let transport = PortTransport::client(startup.handle())
     .with_send_timeout(Timeout::from_millis(50));
-let client = DriverArgsClient::new(transport).with_wait(Timeout::from_millis(200));
+let client = driver_args::Client::new(transport).with_wait(Timeout::from_millis(200));
 ```
 
-Успешный `#[cast]` означает состоявшийся rendezvous: получатель уже принял кадр,
+Успешный `cast` означает состоявшийся rendezvous: получатель уже принял кадр,
 а capability перемещены в его таблицу. При `Timeout` встреча не состоялась,
 поэтому владеющие аргументы кадра закрываются обычным RAII-путём отправителя.

@@ -4,7 +4,7 @@
 use core::fmt::Write as _;
 
 use ipc::{Transport as _, wire::IpcError};
-use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LOG_TAG_MAX, LogBuffer, LogService, dispatch_log};
+use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LOG_TAG_MAX, LogBuffer, log};
 use runtime::{OwnedHandle, PortTransport, handle_close};
 use syscall::Timeout;
 
@@ -83,7 +83,7 @@ impl<S: LogSink> LogRelay<S> {
                 source: source.as_str(),
                 forwarded: None,
             };
-            let _ = dispatch_log(&mut forwarding, &transport);
+            let _ = log::dispatch(&mut forwarding, &transport);
             let forwarded = forwarding.forwarded;
             // Закрытие неотправленного ответа будит припаркованного вызывателя.
             transport.cancel_reply();
@@ -110,7 +110,7 @@ struct Forwarding<'a, S: LogSink> {
     forwarded: Option<Result<(), IpcError>>,
 }
 
-impl<S: LogSink> LogService for Forwarding<'_, S> {
+impl<S: LogSink> log::Service for Forwarding<'_, S> {
     fn write(
         &mut self,
         tag: ipc::wire::Str<'_, { LOG_TAG_MAX }>,

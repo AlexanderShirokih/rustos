@@ -7,14 +7,14 @@ use core::num::NonZeroU64;
 
 use device_resolver::ResolveError;
 use filesystem_abi::{
-    AccessMode, FileSystemError, Mount, NamespaceAdminClient, NamespaceClient, OpenFlags, Opened,
-    Path, decode_mount_table,
+    AccessMode, FileSystemError, Mount, OpenFlags, Opened, Path, decode_mount_table, namespace,
+    namespace_admin,
 };
 use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
 use managed_component::{ComponentRoots, ComponentSlots, ManagedComponent, ManagedFailure};
 use rootkeeper::{BootFailure, RootSystem, SHUTDOWN_EXIT_CODE, Stopped, Supervised, SystemImage};
-use rtc_abi::RtcClient;
+use rtc_abi::rtc;
 use runtime::{MemoryAccess, MemoryRegion, OwnedHandle, PortTransport, Signal, Timeout};
 use syscall::{Rights, SIGNALED};
 use userland_image::{
@@ -43,6 +43,7 @@ const RTC_PROGRAM: &str = "/boot/driver-pl031";
 const RTC_NAME: &str = "driver-pl031";
 const RTC_MEMORY_PAGES: u64 = 256;
 const RTC_COMPATIBLE: &str = "arm,pl031";
+const RTC_TWIN_NAME: &str = "driver-pl031-twin";
 
 const CONSUMER_PROGRAM: &str = "/boot/namespace-consumer-fixture";
 const CONSUMER_NAME: &str = "namespace-consumer-fixture";
@@ -210,7 +211,7 @@ fn try_mount(system: &RootSystem<'_>, prefix: &str) -> Result<Resolved, FileSyst
         .expect("namespace session minted");
     // Отказ транспорта на пути к ещё не обслуживающему порт маршрутизатору неотличим
     // для клиента от неотвечающего монтирования.
-    let mounted = NamespaceClient::new(PortTransport::client(&namespace))
+    let mounted = namespace::Client::new(PortTransport::client(&namespace))
         .with_wait(CALL_TIMEOUT)
         .resolve(path(prefix))
         .map_err(|_| FileSystemError::Unresponsive)??;
@@ -290,7 +291,7 @@ fn mount_crash_filesystem(system: &RootSystem<'_>) {
         .expect("router is running")
         .roots()
         .control();
-    let mounted = NamespaceAdminClient::new(PortTransport::client(admin))
+    let mounted = namespace_admin::Client::new(PortTransport::client(admin))
         .with_wait(CALL_TIMEOUT)
         .mount(path(CRASH_MOUNT), path(CRASH_FILESYSTEM))
         .expect("mount call");
@@ -569,7 +570,7 @@ fn a_device_component_serves_time_over_a_minted_session() {
     let session = roots(&system, 0)
         .session(PROBE_BADGE)
         .expect("rtc session minted");
-    let clock = RtcClient::new(PortTransport::client(&session)).with_wait(RTC_CALL_TIMEOUT);
+    let clock = rtc::Client::new(PortTransport::client(&session)).with_wait(RTC_CALL_TIMEOUT);
     let now = clock.now().expect("rtc answers the time");
     // Будильник устройства снимается реальным прерыванием линии, сминченной
     // супервизором по описанию платформы.
@@ -594,6 +595,50 @@ fn a_device_outside_the_platform_description_names_the_boot_failure() {
         failure,
         Some(BootFailure::Device(ResolveError::DeviceNotFound))
     );
+    kernel_tests::kassert_eq!(failure.map(BootFailure::stopped), Some(Stopped::Device));
+}
+
+#[kernel_test]
+fn two_components_taking_one_device_line_name_the_conflict() {
+    let image = image();
+    let device = rtc_device(&[RTC_COMPATIBLE]);
+    // Экземпляр устройства у обоих нулевой: описание платформы приводит их к
+    // одному узлу, и линию получает тот, кто поднялся первым.
+    let bytes = encode_plan(&[
+        rtc(&device),
+        ComponentSpec {
+            name: RTC_TWIN_NAME,
+            ..rtc(&device)
+        },
+    ])
+    .expect("scenario plan encodes");
+
+    let failure = bring_up(&image, &bytes).err();
+
+    kernel_tests::kassert_eq!(failure, Some(BootFailure::DeviceBusy));
+    kernel_tests::kassert_eq!(failure.map(BootFailure::stopped), Some(Stopped::Device));
+}
+
+#[kernel_test]
+fn two_components_taking_one_device_window_name_the_conflict() {
+    let image = image();
+    let device = rtc_device(&[RTC_COMPATIBLE]);
+    // Второй компонент называет одно окно с первым, линии не касаясь:
+    // исключительность окна держит учёт композиции, а не ядро.
+    let window = [device[1]];
+    let bytes = encode_plan(&[
+        rtc(&device),
+        ComponentSpec {
+            name: RTC_TWIN_NAME,
+            slots: &window,
+            ..rtc(&device)
+        },
+    ])
+    .expect("scenario plan encodes");
+
+    let failure = bring_up(&image, &bytes).err();
+
+    kernel_tests::kassert_eq!(failure, Some(BootFailure::DeviceBusy));
     kernel_tests::kassert_eq!(failure.map(BootFailure::stopped), Some(Stopped::Device));
 }
 

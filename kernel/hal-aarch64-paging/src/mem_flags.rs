@@ -42,7 +42,7 @@ pub enum Shareability {
     Inner = 0b11,
 }
 
-/// Права доступа (AP[2:1]).
+/// Права доступа (`AP[2:1]`).
 ///
 /// Кодировка соответствует ARMv8-A Architecture Reference Manual (D5.5.3,
 /// stage-1 attributes table). Раньше у проекта значения `KernelRO`/`UserRW`

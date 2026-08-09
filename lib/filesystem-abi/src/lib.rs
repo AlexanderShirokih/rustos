@@ -1,5 +1,5 @@
-//! Контракты файловой подсистемы: `Namespace` разбирает путь в монтирование, `FileSystem`
-//! работает с узлами внутри монтирования, `NamespaceAdmin` и `FileSystemAdmin` поднимают эти
+//! Контракты файловой подсистемы: `namespace` разбирает путь в монтирование, `file_system`
+//! работает с узлами внутри монтирования, `namespace_admin` и `file_system_admin` поднимают эти
 //! процессы, а второй ещё и заводит сессии. Здесь же типы ответов, флаги открытия, правила пути
 //! и раскладка записи каталога в буфере данных.
 
@@ -19,10 +19,10 @@ mod kind;
 mod limits;
 mod mode;
 mod mount_table;
-mod namespace;
 mod path;
 mod protocol;
 mod reply;
+mod router;
 
 pub use admin::*;
 pub use cursor::DirCursor;
@@ -37,7 +37,7 @@ pub use mount_table::{
     MOUNT_TABLE_MAGIC, MOUNT_TABLE_VERSION, Mount, MountTable, MountTableDecodeError,
     MountTableEncodeError, Mounts, decode_mount_table, encode_mount_table,
 };
-pub use namespace::*;
 pub use path::{Component, Path, SEPARATOR, rebase};
 pub use protocol::*;
 pub use reply::{Listed, Mounted, NodeInfo, Opened, Written};
+pub use router::*;

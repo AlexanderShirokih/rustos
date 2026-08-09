@@ -3,7 +3,7 @@
 
 use core::num::NonZeroU64;
 
-use bootstrap::BootstrapClient;
+use bootstrap_abi::bootstrap;
 use runtime::{MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Result, Timeout};
 use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
 use userland_image::{component_name, decode};
@@ -89,7 +89,7 @@ impl Fixture {
     }
 
     fn spawn_metered_by(metering: &Metering<'_>, launch: &Launch) -> Result<Self> {
-        let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+        let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
         let cap = client
             .acquire_userland_image()
             .expect("acquire_userland_image call")

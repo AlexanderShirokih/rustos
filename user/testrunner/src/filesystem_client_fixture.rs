@@ -4,7 +4,7 @@
 
 use core::panic::PanicInfo;
 
-use filesystem_abi::{AccessMode, FileSystemClient, OpenFlags};
+use filesystem_abi::{AccessMode, OpenFlags, file_system};
 use ipc::wire::Str;
 use runtime::{OwnedHandle, PortTransport, thread_exit};
 use syscall::{Handle, Timeout};
@@ -25,7 +25,7 @@ pub extern "C" fn _start(service: Handle) -> ! {
 }
 
 fn populate_session(service: Handle) -> bool {
-    let client = FileSystemClient::new(PortTransport::client(service)).with_wait(CALL_TIMEOUT);
+    let client = file_system::Client::new(PortTransport::client(service)).with_wait(CALL_TIMEOUT);
 
     let Ok(Ok(buffer)) = client.acquire_buffer(BUFFER_SIZE) else {
         return false;

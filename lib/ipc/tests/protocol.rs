@@ -1,4 +1,4 @@
-//! Интеграция кодогена `#[protocol]`: round-trip client -> dispatch -> service
+//! Интеграция кодогена `protocol!`: round-trip client -> dispatch -> service
 //! через блокирующий host-mock транспорта на двух потоках. Покрывает успех,
 //! доменную ошибку (DOMAIN_ERR), неизвестный ordinal (PEER_CLOSE), cast, event
 //! и txid-корреляцию (R2).
@@ -20,22 +20,17 @@ use ipc_test::MockEnd;
 
 const ERR_DIVIDE_BY_ZERO: u32 = 1;
 
-#[ipc::protocol(name = "Calc")]
-trait Calc {
-    #[call]
-    fn add(&self, a: u32, b: u32) -> u32;
+ipc::protocol! {
+    // Контракт со всеми видами операций сразу.
+    mod calc {
+        name = "Calc";
 
-    #[call]
-    fn div(&self, a: u32, b: u32) -> Result<u32, u32>;
-
-    #[call]
-    fn echo_len(&self, text: Str<16>) -> u32;
-
-    #[cast]
-    fn reset(&self, seed: u64);
-
-    #[event]
-    fn tick(seq: u64);
+        call fn add(a: u32, b: u32) -> u32;
+        call fn div(a: u32, b: u32) -> Result<u32, u32>;
+        call fn echo_len(text: Str<16>) -> u32;
+        cast fn reset(seed: u64);
+        event fn tick(seq: u64);
+    }
 }
 
 #[derive(Default)]
@@ -43,7 +38,7 @@ struct CalcServer {
     seed: u64,
 }
 
-impl CalcService for CalcServer {
+impl calc::Service for CalcServer {
     fn add(&mut self, a: u32, b: u32) -> u32 {
         a + b
     }
@@ -63,10 +58,10 @@ impl CalcService for CalcServer {
 
 fn round_trip<R: Send>(
     rounds: usize,
-    client_body: impl FnOnce(&CalcClient<MockEnd>) -> R + Send,
+    client_body: impl FnOnce(&calc::Client<MockEnd>) -> R + Send,
 ) -> (R, CalcServer) {
     let (client_end, server_end) = MockEnd::pair();
-    let client = CalcClient::new(client_end);
+    let client = calc::Client::new(client_end);
     thread::scope(|scope| {
         let server_handle = scope.spawn(move || {
             let mut server = CalcServer::default();
@@ -74,7 +69,7 @@ fn round_trip<R: Send>(
                 server_end
                     .wait_readable(ipc::Timeout::INFINITE)
                     .expect("server wait");
-                dispatch_calc(&mut server, &server_end).expect("dispatch ok");
+                calc::dispatch(&mut server, &server_end).expect("dispatch ok");
             }
             server
         });
@@ -139,7 +134,7 @@ fn unknown_ordinal_yields_peer_close() {
         .write_message(frame.as_bytes(), &[])
         .expect("write ok");
 
-    dispatch_calc(&mut server, &server_end).expect("dispatch returns ok");
+    calc::dispatch(&mut server, &server_end).expect("dispatch returns ok");
 
     let mut bytes = [0u8; 64];
     let mut handles = [0u32; 4];
@@ -167,7 +162,7 @@ fn close_frame_yields_peer_closed_from_dispatch() {
         .expect("write ok");
 
     assert_eq!(
-        dispatch_calc(&mut server, &server_end),
+        calc::dispatch(&mut server, &server_end),
         Err(ipc::wire::IpcError::PeerClosed)
     );
 }
@@ -175,13 +170,13 @@ fn close_frame_yields_peer_closed_from_dispatch() {
 #[test]
 fn mismatched_txid_is_skipped() {
     let (client_end, server_end) = MockEnd::pair();
-    let client = CalcClient::new(client_end);
+    let client = calc::Client::new(client_end);
 
     // Кадр-ответ с чужим txid вброшен в очередь до настоящего ответа.
     let mut stray = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
     stray
         .write_header(&Header::new(
-            calc_ordinal::ADD,
+            calc::add::ORDINAL,
             0xFFFF,
             ipc::wire::FLAG_RESPONSE,
         ))
@@ -196,8 +191,12 @@ fn mismatched_txid_is_skipped() {
 
     // Затем корректный ответ на txid=1 (первый txid клиента).
     let mut good = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
-    good.write_header(&Header::new(calc_ordinal::ADD, 1, ipc::wire::FLAG_RESPONSE))
-        .expect("header ok");
+    good.write_header(&Header::new(
+        calc::add::ORDINAL,
+        1,
+        ipc::wire::FLAG_RESPONSE,
+    ))
+    .expect("header ok");
     good.write_field(1, &ipc::wire::value::encode_u32(42))
         .expect("field ok");
     good.finish().expect("finish ok");
@@ -216,16 +215,16 @@ fn event_round_trip() {
     let (server_end, client_end) = MockEnd::pair();
 
     // Сервер эмитит событие в клиентский конец.
-    CalcEventSender::emit_tick(&server_end, 0xABCD).expect("emit ok");
+    calc::EventSender::tick(&server_end, 0xABCD).expect("emit ok");
 
     let mut handler = TickHandler::default();
-    dispatch_calc_event(&mut handler, &client_end).expect("dispatch event ok");
+    calc::dispatch_event(&mut handler, &client_end).expect("dispatch event ok");
     assert_eq!(handler.last_seq, Some(0xABCD));
 }
 
 #[test]
 fn descriptor_exposes_operations() {
-    let desc = calc_ordinal::DESC;
+    let desc = calc::DESC;
     assert_eq!(desc.operations.len(), 5);
 
     let add = desc
@@ -233,7 +232,7 @@ fn descriptor_exposes_operations() {
         .iter()
         .find(|op| op.name == "add")
         .expect("add present");
-    assert_eq!(add.ordinal, calc_ordinal::ADD);
+    assert_eq!(add.ordinal, calc::add::ORDINAL);
     assert_eq!(add.ordinal, 0xb744_87cd_9b28_41ba);
     assert_eq!(add.canonical, "Calc.add");
     assert_eq!(add.kind, ipc::schema::Kind::Call);
@@ -269,37 +268,41 @@ fn descriptor_exposes_operations() {
 
 #[test]
 fn ordinal_constants_match_golden() {
-    assert_eq!(calc_ordinal::ADD, 0xb744_87cd_9b28_41ba);
-    assert_eq!(calc_ordinal::DIV, 0x2420_7b95_a0d9_84fc);
-    assert_eq!(calc_ordinal::RESET, 0x1cb8_08a6_5161_cd40);
+    assert_eq!(calc::add::ORDINAL, 0xb744_87cd_9b28_41ba);
+    assert_eq!(calc::div::ORDINAL, 0x2420_7b95_a0d9_84fc);
+    assert_eq!(calc::reset::ORDINAL, 0x1cb8_08a6_5161_cd40);
 }
 
 #[test]
 fn bounded_bytes_param_round_trips() {
     let (blob_client_end, blob_server_end) = MockEnd::pair();
-    let client = BlobClient::new(blob_client_end);
+    let client = blob::Client::new(blob_client_end);
     let mut server = BlobServer::default();
 
     client
         .store(Bytes::<8>::new(&[1, 2, 3, 4]).expect("within bound"))
         .expect("cast write ok");
-    dispatch_blob(&mut server, &blob_server_end).expect("dispatch ok");
+    blob::dispatch(&mut server, &blob_server_end).expect("dispatch ok");
     assert_eq!(server.last_len, 4);
 }
 
-#[ipc::protocol(name = "Blob")]
-trait Blob {
-    #[cast]
-    fn store(&self, data: Bytes<8>);
+ipc::protocol! {
+    // Контракт с байтовым полем.
+    mod blob {
+        name = "Blob";
+
+        cast fn store(data: Bytes<8>);
+    }
 }
 
-#[ipc::protocol(name = "Counter", transport = "ring")]
-trait Counter {
-    #[cast]
-    fn sample(&self, value: u64);
+ipc::protocol! {
+    // Контракт поверх SPSC-кольца: только односторонние операции.
+    mod counter {
+        name = "Counter", plane = ring;
 
-    #[event]
-    fn overflow(count: u32);
+        cast fn sample(value: u64);
+        event fn overflow(count: u32);
+    }
 }
 
 #[derive(Default)]
@@ -307,7 +310,7 @@ struct CounterServer {
     last_sample: u64,
 }
 
-impl CounterService for CounterServer {
+impl counter::Service for CounterServer {
     fn sample(&mut self, value: u64) {
         self.last_sample = value;
     }
@@ -318,7 +321,7 @@ struct OverflowHandler {
     last_count: Option<u32>,
 }
 
-impl CounterEvents for OverflowHandler {
+impl counter::Events for OverflowHandler {
     fn overflow(&mut self, count: u32) {
         self.last_count = Some(count);
     }
@@ -327,11 +330,11 @@ impl CounterEvents for OverflowHandler {
 #[test]
 fn ring_plane_cast_round_trips() {
     let (client_end, server_end) = MockEnd::pair();
-    let client = CounterClient::new(client_end);
+    let client = counter::Client::new(client_end);
     let mut server = CounterServer::default();
 
     client.sample(0xCAFE).expect("cast write ok");
-    dispatch_counter(&mut server, &server_end).expect("dispatch ok");
+    counter::dispatch(&mut server, &server_end).expect("dispatch ok");
     assert_eq!(server.last_sample, 0xCAFE);
 }
 
@@ -339,18 +342,18 @@ fn ring_plane_cast_round_trips() {
 fn ring_plane_event_round_trips() {
     let (server_end, client_end) = MockEnd::pair();
 
-    CounterEventSender::emit_overflow(&server_end, 17).expect("emit ok");
+    counter::EventSender::overflow(&server_end, 17).expect("emit ok");
 
     let mut handler = OverflowHandler::default();
-    dispatch_counter_event(&mut handler, &client_end).expect("dispatch event ok");
+    counter::dispatch_event(&mut handler, &client_end).expect("dispatch event ok");
     assert_eq!(handler.last_count, Some(17));
 }
 
 #[test]
 fn transport_plane_const_reflects_attribute() {
-    assert_eq!(counter_ordinal::TRANSPORT_PLANE, "ring");
+    assert_eq!(counter::TRANSPORT_PLANE, "ring");
     // Дефолт (без transport) - port.
-    assert_eq!(calc_ordinal::TRANSPORT_PLANE, "port");
+    assert_eq!(calc::TRANSPORT_PLANE, "port");
 }
 
 #[derive(Default)]
@@ -358,7 +361,7 @@ struct BlobServer {
     last_len: usize,
 }
 
-impl BlobService for BlobServer {
+impl blob::Service for BlobServer {
     fn store(&mut self, data: Bytes<8>) {
         self.last_len = data.as_bytes().len();
     }
@@ -369,25 +372,29 @@ struct TickHandler {
     last_seq: Option<u64>,
 }
 
-impl CalcEvents for TickHandler {
+impl calc::Events for TickHandler {
     fn tick(&mut self, seq: u64) {
         self.last_seq = Some(seq);
     }
 }
 
-#[ipc::protocol(name = "CapProto")]
-trait CapProto {
-    #[call]
-    fn echo_cap(&self, c: ipc::wire::Cap) -> ipc::wire::Cap;
+ipc::protocol! {
+    // Контракт передачи capability в обе стороны.
+    mod cap_proto {
+        name = "CapProto";
 
-    #[call]
-    fn acquire(&self, ok: bool) -> Result<ipc::wire::Cap, u32>;
+        call fn echo_cap(c: Cap) -> Cap;
+        call fn acquire(ok: bool) -> Result<ipc::wire::Cap, u32>;
+    }
 }
 
-#[ipc::protocol(name = "OwnedCast")]
-trait OwnedCast {
-    #[cast]
-    fn deliver(&self, capability: ipc::wire::Cap);
+ipc::protocol! {
+    // Контракт односторонней передачи владения capability.
+    mod owned_cast {
+        name = "OwnedCast";
+
+        cast fn deliver(capability: Cap);
+    }
 }
 
 struct CastOutcome {
@@ -451,7 +458,7 @@ fn successful_cast_relinquishes_owned_handle() {
     let drops = Arc::new(AtomicUsize::new(0));
     let relinquishes = Arc::new(AtomicUsize::new(0));
     let transport = CastOutcome::new(Ok(()));
-    let client = OwnedCastClient::new(transport);
+    let client = owned_cast::Client::new(transport);
 
     client
         .deliver(TrackedHandle {
@@ -470,7 +477,7 @@ fn successful_cast_relinquishes_owned_handle() {
 fn timed_out_cast_drops_owned_handle_without_relinquishing() {
     let drops = Arc::new(AtomicUsize::new(0));
     let relinquishes = Arc::new(AtomicUsize::new(0));
-    let client = OwnedCastClient::new(CastOutcome::new(Err(ipc::wire::IpcError::Timeout)));
+    let client = owned_cast::Client::new(CastOutcome::new(Err(ipc::wire::IpcError::Timeout)));
 
     let result = client.deliver(TrackedHandle {
         raw: 42,
@@ -485,7 +492,7 @@ fn timed_out_cast_drops_owned_handle_without_relinquishing() {
 
 struct CapServer;
 
-impl CapProtoService for CapServer {
+impl cap_proto::Service for CapServer {
     fn echo_cap(&mut self, c: ipc::wire::Cap) -> impl ipc::IntoWireHandle {
         c
     }
@@ -504,7 +511,7 @@ impl CapProtoService for CapServer {
 #[test]
 fn cap_param_and_return_round_trip() {
     let (client_end, server_end) = MockEnd::pair();
-    let client = CapProtoClient::new(client_end);
+    let client = cap_proto::Client::new(client_end);
     thread::scope(|scope| {
         let server = scope.spawn(move || {
             let mut srv = CapServer;
@@ -512,7 +519,7 @@ fn cap_param_and_return_round_trip() {
                 server_end
                     .wait_readable(ipc::Timeout::INFINITE)
                     .expect("server wait");
-                dispatch_cap_proto(&mut srv, &server_end).expect("dispatch ok");
+                cap_proto::dispatch(&mut srv, &server_end).expect("dispatch ok");
             }
         });
         let sent = ipc::wire::Cap::from_raw(std::num::NonZeroU32::new(0x1234).expect("non-zero"));
@@ -533,14 +540,14 @@ fn cap_param_and_return_round_trip() {
 #[test]
 fn cap_domain_error_carries_no_handle() {
     let (client_end, server_end) = MockEnd::pair();
-    let client = CapProtoClient::new(client_end);
+    let client = cap_proto::Client::new(client_end);
     thread::scope(|scope| {
         let server = scope.spawn(move || {
             let mut srv = CapServer;
             server_end
                 .wait_readable(ipc::Timeout::INFINITE)
                 .expect("server wait");
-            dispatch_cap_proto(&mut srv, &server_end).expect("dispatch ok");
+            cap_proto::dispatch(&mut srv, &server_end).expect("dispatch ok");
         });
         let acquired = client.acquire(false).expect("acquire ok");
         assert_eq!(acquired, Err(7));
@@ -548,39 +555,49 @@ fn cap_domain_error_carries_no_handle() {
     });
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ipc::WireValue)]
-struct Point {
-    x: u32,
-    y: u32,
+ipc::wire_value! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Point {
+        x: u32,
+        y: u32,
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ipc::WireValue)]
-struct Segment {
-    from: Point,
-    to: Point,
+ipc::wire_value! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Segment {
+        from: Point,
+        to: Point,
+    }
 }
 
-#[derive(ipc::WireValue)]
-struct Tagged<'a> {
-    label: Str<'a, 8>,
-    value: u32,
+ipc::wire_value! {
+    struct Tagged<'a> {
+        label: Str<'a, 8>,
+        value: u32,
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ipc::WireValue)]
-struct Vended {
-    session: ipc::wire::Cap,
-    prefix_len: u32,
+ipc::wire_value! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Vended {
+        session: ipc::wire::Cap,
+        prefix_len: u32,
+    }
 }
 
-#[ipc::protocol(name = "Vendor")]
-trait Vendor {
-    #[call]
-    fn vend(&self, prefix_len: u32) -> Vended;
+ipc::protocol! {
+    // Контракт с агрегатом, несущим capability.
+    mod vendor {
+        name = "Vendor";
+
+        call fn vend(prefix_len: u32) -> Vended;
+    }
 }
 
 struct VendorServer;
 
-impl VendorService for VendorServer {
+impl vendor::Service for VendorServer {
     fn vend(&mut self, prefix_len: u32) -> Vended {
         Vended {
             session: ipc::wire::Cap::from_raw(std::num::NonZeroU32::new(0x5151).expect("non-zero")),
@@ -592,13 +609,13 @@ impl VendorService for VendorServer {
 #[test]
 fn aggregate_carries_a_capability_alongside_scalars() {
     let (client_end, server_end) = MockEnd::pair();
-    let client = VendorClient::new(client_end);
+    let client = vendor::Client::new(client_end);
     thread::scope(|scope| {
         let server = scope.spawn(move || {
             server_end
                 .wait_readable(ipc::Timeout::INFINITE)
                 .expect("server wait");
-            dispatch_vendor(&mut VendorServer, &server_end).expect("dispatch ok");
+            vendor::dispatch(&mut VendorServer, &server_end).expect("dispatch ok");
         });
 
         let vended = client.vend(7).expect("vend ok");
@@ -609,21 +626,20 @@ fn aggregate_carries_a_capability_alongside_scalars() {
     });
 }
 
-#[ipc::protocol(name = "Geo")]
-trait Geo {
-    #[call]
-    fn translate(&self, p: Point, dx: u32, dy: u32) -> Point;
+ipc::protocol! {
+    // Контракт с агрегатами, включая вложенный и заимствующий.
+    mod geo {
+        name = "Geo";
 
-    #[call]
-    fn flip(&self, s: Segment) -> Segment;
-
-    #[call]
-    fn label_len(&self, t: Tagged<'_>) -> u32;
+        call fn translate(p: Point, dx: u32, dy: u32) -> Point;
+        call fn flip(s: Segment) -> Segment;
+        call fn label_len(t: Tagged) -> u32;
+    }
 }
 
 struct GeoServer;
 
-impl GeoService for GeoServer {
+impl geo::Service for GeoServer {
     fn translate(&mut self, p: Point, dx: u32, dy: u32) -> Point {
         Point {
             x: p.x + dx,
@@ -646,7 +662,7 @@ impl GeoService for GeoServer {
 #[test]
 fn aggregate_param_and_return_round_trip() {
     let (client_end, server_end) = MockEnd::pair();
-    let client = GeoClient::new(client_end);
+    let client = geo::Client::new(client_end);
     thread::scope(|scope| {
         let server = scope.spawn(move || {
             let mut srv = GeoServer;
@@ -654,7 +670,7 @@ fn aggregate_param_and_return_round_trip() {
                 server_end
                     .wait_readable(ipc::Timeout::INFINITE)
                     .expect("server wait");
-                dispatch_geo(&mut srv, &server_end).expect("dispatch ok");
+                geo::dispatch(&mut srv, &server_end).expect("dispatch ok");
             }
         });
         let moved = client
@@ -697,7 +713,7 @@ fn aggregate_descriptor_is_structural() {
     const SEGMENT_DESC: ipc::schema::WireType =
         ipc::schema::WireType::Aggregate(&[POINT_DESC, POINT_DESC]);
 
-    let translate = geo_ordinal::DESC
+    let translate = geo::DESC
         .operations
         .iter()
         .find(|op| op.name == "translate")
@@ -710,14 +726,14 @@ fn aggregate_descriptor_is_structural() {
         ])
     );
 
-    let flip = geo_ordinal::DESC
+    let flip = geo::DESC
         .operations
         .iter()
         .find(|op| op.name == "flip")
         .expect("flip present");
     assert_eq!(flip.fields[0].field_type, SEGMENT_DESC);
 
-    let label_len = geo_ordinal::DESC
+    let label_len = geo::DESC
         .operations
         .iter()
         .find(|op| op.name == "label_len")
@@ -731,9 +747,10 @@ fn aggregate_descriptor_is_structural() {
     );
 }
 
-#[derive(ipc::WireValue)]
-struct Oversized<'a> {
-    blob: ipc::wire::FieldBytes<'a>,
+ipc::wire_value! {
+    struct Oversized<'a> {
+        blob: ipc::wire::FieldBytes<'a>,
+    }
 }
 
 #[test]
@@ -750,15 +767,18 @@ fn aggregate_subframe_overflow_is_error() {
     );
 }
 
-#[ipc::protocol(name = "Wide")]
-trait Wide {
-    #[cast]
-    fn note(&self, text: ipc::wire::FieldStr<'_>);
+ipc::protocol! {
+    // Контракт со строкой во всю запись поля.
+    mod wide {
+        name = "Wide";
+
+        cast fn note(text: ipc::wire::FieldStr);
+    }
 }
 
 #[test]
 fn field_str_bound_tracks_field_data_max() {
-    let note = wide_ordinal::DESC
+    let note = wide::DESC
         .operations
         .iter()
         .find(|op| op.name == "note")
@@ -771,26 +791,30 @@ fn field_str_bound_tracks_field_data_max() {
 
 use ipc::wire::IpcError;
 
-#[ipc::protocol(name = "Timed", timeout_ns = 0)]
-trait Timed {
-    #[call]
-    fn ping(&self) -> u32;
+ipc::protocol! {
+    // Контракт с нулевым сроком ожидания ответа по умолчанию.
+    mod timed {
+        name = "Timed", wait = 0;
+
+        call fn ping() -> u32;
+    }
 }
 
-#[ipc::protocol(name = "Mixed")]
-trait Mixed {
-    #[call(timeout_ns = 0)]
-    fn quick(&self) -> u32;
+ipc::protocol! {
+    // Контракт, где срок ожидания задан на отдельной операции.
+    mod mixed {
+        name = "Mixed";
 
-    #[call]
-    fn patient(&self) -> u32;
+        call(wait = 0) fn quick() -> u32;
+        call fn patient() -> u32;
+    }
 }
 
 #[test]
 fn protocol_level_default_timeout_times_out() {
     // server_end жив (sender_open), но не отвечает -> wait_readable(POLL) -> Timeout.
     let (client_end, _server_end) = MockEnd::pair();
-    let client = TimedClient::new(client_end);
+    let client = timed::Client::new(client_end);
     assert_eq!(client.wait(), ipc::Timeout::POLL);
     assert_eq!(client.ping(), Err(IpcError::Timeout));
 }
@@ -798,7 +822,7 @@ fn protocol_level_default_timeout_times_out() {
 #[test]
 fn per_call_timeout_override_times_out() {
     let (client_end, _server_end) = MockEnd::pair();
-    let client = MixedClient::new(client_end);
+    let client = mixed::Client::new(client_end);
     // Дефолт клиента бессрочный, но `quick` несёт собственный timeout_ns = 0.
     assert_eq!(client.wait(), ipc::Timeout::INFINITE);
     assert_eq!(client.quick(), Err(IpcError::Timeout));
@@ -807,7 +831,7 @@ fn per_call_timeout_override_times_out() {
 #[test]
 fn with_wait_builder_overrides_default() {
     let (client_end, _server_end) = MockEnd::pair();
-    let client = CalcClient::new(client_end).with_wait(ipc::Timeout::POLL);
+    let client = calc::Client::new(client_end).with_wait(ipc::Timeout::POLL);
     assert_eq!(client.wait(), ipc::Timeout::POLL);
     // Сервера нет -> two-way call истекает по тайм-ауту.
     assert_eq!(client.add(1, 2), Err(IpcError::Timeout));

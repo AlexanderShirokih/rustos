@@ -7,8 +7,8 @@
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 
 use filesystem_abi::{
-    AccessMode, DirCursor, DirEntry, FileSystemClient, FileSystemError, NodeDescriptor, NodeKind,
-    OpenFlags,
+    AccessMode, DirCursor, DirEntry, FileSystemError, NodeDescriptor, NodeKind, OpenFlags,
+    file_system,
 };
 use kernel_tests::kernel_test;
 use runtime::{Mapping, MemoryRegion, OwnedHandle, PortTransport, UserMemFlags};
@@ -48,7 +48,7 @@ enum Mismatch {
 }
 
 struct Session {
-    client: FileSystemClient<PortTransport>,
+    client: file_system::Client<PortTransport>,
     buffer: Mapping,
     _region: MemoryRegion,
     _capability: OwnedHandle,

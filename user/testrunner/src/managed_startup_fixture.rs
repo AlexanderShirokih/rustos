@@ -10,7 +10,7 @@ use syscall::Handle;
 mod managed_fixture_protocol;
 
 use ipc::wire::Cap;
-use managed_fixture_protocol::{ManagedFixtureService, dispatch_managed_fixture};
+use managed_fixture_protocol::managed_fixture;
 
 struct ManagedFixtureArgs {
     authority: Cap,
@@ -18,7 +18,7 @@ struct ManagedFixtureArgs {
     keep_running: bool,
 }
 
-impl ManagedFixtureService for Option<ManagedFixtureArgs> {
+impl managed_fixture::Service for Option<ManagedFixtureArgs> {
     fn start(&mut self, authority: Cap, exit_code: u32, keep_running: bool) {
         *self = Some(ManagedFixtureArgs {
             authority,
@@ -30,7 +30,7 @@ impl ManagedFixtureService for Option<ManagedFixtureArgs> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(startup: Handle) -> ! {
-    let received = receive_startup(startup, dispatch_managed_fixture);
+    let received = receive_startup(startup, managed_fixture::dispatch);
     let Ok(Some(ManagedFixtureArgs {
         authority,
         exit_code,

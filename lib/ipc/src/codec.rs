@@ -2,7 +2,10 @@
 
 use crate::{
     schema::WireType,
-    wire::{Bytes, Cap, HandleSlots, IpcError, MessageBuf, Str, value},
+    wire::{
+        Bytes, Cap, FIELD_ID_MIN, FLAG_DOMAIN_ERR, FieldCursor, HandleSlots, Header, IpcError,
+        MessageBuf, Str, value,
+    },
 };
 
 /// Значение, занимающее одну запись поля.
@@ -21,6 +24,91 @@ pub trait WireValue<'a>: Sized {
     /// Декодирует значение из `data` записи поля. `handles` - слоты кадра, из
     /// которых значение-капа достаёт свой handle по индексу.
     fn from_field(data: &'a [u8], handles: &HandleSlots) -> Result<Self, IpcError>;
+}
+
+/// Значение ответа two-way операции: занимает единственную запись поля кадра-ответа.
+///
+/// Значение едет как есть, а доменная ошибка `Result<T, E>` - под флагом
+/// [`FLAG_DOMAIN_ERR`] с телом из `E`.
+pub trait WireReply<'a>: Sized {
+    /// Флаги заголовка, которые несёт этот ответ поверх `FLAG_RESPONSE`.
+    fn reply_flags(&self) -> u16;
+
+    /// Кодирует значение в тело ответа.
+    fn write_reply<const N: usize>(
+        &self,
+        buf: &mut MessageBuf<N>,
+        handles: &mut HandleSlots,
+    ) -> Result<(), IpcError>;
+
+    /// Восстанавливает значение из тела ответа, разбирая флаги заголовка.
+    fn read_reply(header: &Header, body: &'a [u8], handles: &HandleSlots)
+    -> Result<Self, IpcError>;
+}
+
+fn read_only_field<'a, V: WireValue<'a>>(
+    body: &'a [u8],
+    handles: &HandleSlots,
+) -> Result<V, IpcError> {
+    let mut cursor = FieldCursor::new(body);
+    let mut value = None;
+    while let Some(field) = cursor.next_field()? {
+        if field.id == FIELD_ID_MIN {
+            value = Some(V::from_field(field.data, handles)?);
+        }
+    }
+    value.ok_or(IpcError::MissingField)
+}
+
+impl<'a, T: WireValue<'a>> WireReply<'a> for T {
+    fn reply_flags(&self) -> u16 {
+        0
+    }
+
+    fn write_reply<const N: usize>(
+        &self,
+        buf: &mut MessageBuf<N>,
+        handles: &mut HandleSlots,
+    ) -> Result<(), IpcError> {
+        self.write_as_field(buf, FIELD_ID_MIN, handles)
+    }
+
+    fn read_reply(
+        _header: &Header,
+        body: &'a [u8],
+        handles: &HandleSlots,
+    ) -> Result<Self, IpcError> {
+        read_only_field(body, handles)
+    }
+}
+
+impl<'a, T: WireValue<'a>, E: WireValue<'a>> WireReply<'a> for Result<T, E> {
+    fn reply_flags(&self) -> u16 {
+        if self.is_err() { FLAG_DOMAIN_ERR } else { 0 }
+    }
+
+    fn write_reply<const N: usize>(
+        &self,
+        buf: &mut MessageBuf<N>,
+        handles: &mut HandleSlots,
+    ) -> Result<(), IpcError> {
+        match self {
+            Ok(ok) => ok.write_as_field(buf, FIELD_ID_MIN, handles),
+            Err(err) => err.write_as_field(buf, FIELD_ID_MIN, handles),
+        }
+    }
+
+    fn read_reply(
+        header: &Header,
+        body: &'a [u8],
+        handles: &HandleSlots,
+    ) -> Result<Self, IpcError> {
+        if header.has_flag(FLAG_DOMAIN_ERR) {
+            Ok(Err(read_only_field(body, handles)?))
+        } else {
+            Ok(Ok(read_only_field(body, handles)?))
+        }
+    }
 }
 
 /// Структурный wire-дескриптор типа для схемы протокола.

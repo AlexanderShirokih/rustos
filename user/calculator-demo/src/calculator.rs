@@ -8,7 +8,7 @@
 
 use core::panic::PanicInfo;
 
-use calculator_demo::{CalculatorApiService, dispatch_calculator_api};
+use calculator_demo::calculator;
 use component_abi::component_manifest;
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
@@ -36,7 +36,7 @@ component_manifest! {
 
 struct Calculator;
 
-impl CalculatorApiService for Calculator {
+impl calculator::Service for Calculator {
     fn multiply(&mut self, a: u64, b: u64) -> u64 {
         a * b
     }
@@ -82,7 +82,7 @@ fn serve(service: &OwnedHandle) {
     // Порт остаётся открытым, пока кадр доставлен, значок ушёл либо бюджет
     // кадра исчерпан. Прочий отказ закрывает обслуживание.
     while matches!(
-        dispatch_calculator_api(&mut calculator, &transport),
+        calculator::dispatch(&mut calculator, &transport),
         Ok(()) | Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout)
     ) {}
     log_line("service port closed");

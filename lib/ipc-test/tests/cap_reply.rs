@@ -10,10 +10,13 @@ use std::{
 use ipc::{IntoWireHandle, Transport};
 use ipc_test::MockEnd;
 
-#[ipc::protocol(name = "CapSource")]
-trait CapSource {
-    #[call]
-    fn get_cap(&self) -> ipc::wire::Cap;
+ipc::protocol! {
+    // Источник capability: ответ отдаёт владение хэндлом.
+    mod cap_source {
+        name = "CapSource";
+
+        call fn get_cap() -> Cap;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,7 +53,7 @@ struct Source {
     fate: Arc<Mutex<Fate>>,
 }
 
-impl CapSourceService for Source {
+impl cap_source::Service for Source {
     fn get_cap(&mut self) -> impl IntoWireHandle {
         FakeHandle {
             id: self.id,
@@ -70,11 +73,11 @@ fn reply_cap_relinquished_on_ok() {
             server_end
                 .wait_readable(ipc::Timeout::from_secs(1))
                 .expect("server wait");
-            dispatch_cap_source(&mut src, &server_end).expect("dispatch");
+            cap_source::dispatch(&mut src, &server_end).expect("dispatch");
         })
     };
 
-    let client = CapSourceClient::new(client_end);
+    let client = cap_source::Client::new(client_end);
     let cap = client.get_cap().expect("get_cap ok");
 
     assert_eq!(cap.raw().get(), 77);

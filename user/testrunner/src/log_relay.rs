@@ -14,10 +14,10 @@ use core::{
     sync::atomic::{AtomicBool, Ordering::SeqCst},
 };
 
-use bootstrap::BootstrapClient;
+use bootstrap_abi::bootstrap;
 use ipc::wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf};
 use kernel_tests::kernel_test;
-use log_abi::{LOG_MESSAGE_MAX, LogClient, log_ordinal};
+use log_abi::{LOG_MESSAGE_MAX, log};
 use log_relay::{KernelLogSink, LogRelayThread, LogSink};
 use runtime::{
     MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Timeout, port_send,
@@ -111,7 +111,7 @@ struct RecordingSink;
 
 impl LogSink for RecordingSink {
     fn write(&mut self, source: &str, message: &str) -> Result<(), IpcError> {
-        let kernel = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+        let kernel = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
         let forwarded = kernel.log_str(source, message);
         // Двусторонний вызов ядра перезаписывает значок в IPC-буфере потока.
         if let Ok(Ok(cap)) = kernel.acquire_userland_image() {
@@ -220,7 +220,7 @@ fn wait_for_records(count: usize) -> Vec<Record> {
 }
 
 fn write_log(session: &OwnedHandle, tag: &str, message: &str) {
-    LogClient::new(PortTransport::client(session))
+    log::Client::new(PortTransport::client(session))
         .write_str(tag, message)
         .expect("log frame delivered");
 }
@@ -228,7 +228,7 @@ fn write_log(session: &OwnedHandle, tag: &str, message: &str) {
 fn send_unknown_ordinal(session: &OwnedHandle) {
     let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
     frame
-        .write_header(&Header::new(log_ordinal::WRITE ^ 1, 0, 0))
+        .write_header(&Header::new(log::write::ORDINAL ^ 1, 0, 0))
         .expect("header fits");
     frame.finish().expect("frame fits");
     ipc_raw::write_frame(frame.as_bytes(), &[]);
@@ -238,7 +238,7 @@ fn send_unknown_ordinal(session: &OwnedHandle) {
 fn send_log_frame_with_cap(session: &OwnedHandle, cap: OwnedHandle) -> i64 {
     let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
     frame
-        .write_header(&Header::new(log_ordinal::WRITE, 0, 0))
+        .write_header(&Header::new(log::write::ORDINAL, 0, 0))
         .expect("header fits");
     frame
         .write_field(1, "carrier".as_bytes())
@@ -277,7 +277,7 @@ fn exhaust_handle_table() -> (Port, Vec<OwnedHandle>) {
 }
 
 fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
-    let kernel = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let kernel = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let cap = kernel
         .acquire_userland_image()
         .expect("acquire_userland_image call")

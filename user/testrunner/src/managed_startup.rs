@@ -1,6 +1,6 @@
 //! QEMU-сценарии managed startup rootkeeper.
 
-use bootstrap::BootstrapClient;
+use bootstrap_abi::bootstrap;
 use ipc::{IntoWireHandle, wire::IpcError};
 use kernel_tests::kernel_test;
 use managed_component::{
@@ -13,7 +13,7 @@ use syscall::{Rights, SIGNALED, SyscallError};
 use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
 use userland_image::{DecodedProgram, decode};
 
-use crate::managed_fixture_protocol::ManagedFixtureClient;
+use crate::managed_fixture_protocol::managed_fixture;
 
 const FIXTURE_ENTRY: &str = "/boot/managed-startup-fixture/program";
 const INSTANCE_NAME: &str = "managed-fixture";
@@ -254,7 +254,7 @@ fn managed_startup_timeout_rendezvous_race_has_one_ownership_outcome() {
             || FixtureRoots::from_observer(&observer),
             |transport, roots| {
                 let authority = TrackedAuthority::new(roots.child_authority()?, &sender_cleanup);
-                ManagedFixtureClient::new(transport)
+                managed_fixture::Client::new(transport)
                     .start(authority, 0, false)
                     .map_err(ManagedStartupError::from)
             },
@@ -347,7 +347,7 @@ fn send_startup(
     keep_running: bool,
 ) -> Result<(), ManagedStartupError> {
     let authority = roots.child_authority()?;
-    ManagedFixtureClient::new(transport)
+    managed_fixture::Client::new(transport)
         .start(authority, exit_code, keep_running)
         .map_err(ManagedStartupError::from)
 }
@@ -363,7 +363,7 @@ fn wait_for_authority(component: &ManagedComponent<FixtureRoots>) {
 }
 
 fn image_mapping() -> ImageMapping {
-    let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let cap = client
         .acquire_userland_image()
         .expect("acquire_userland_image call")

@@ -2,7 +2,7 @@
 
 use core::fmt::Write as _;
 
-use log_abi::{LOG_MESSAGE_MAX, LogBuffer, LogClient};
+use log_abi::{LOG_MESSAGE_MAX, LogBuffer, log};
 use spin::Once;
 
 use crate::{handle::OwnedHandle, port_transport::PortTransport};
@@ -20,7 +20,7 @@ pub fn log_line(message: &str) {
     let Some((handle, tag)) = LOG.get() else {
         return;
     };
-    let client = LogClient::new(PortTransport::client(handle));
+    let client = log::Client::new(PortTransport::client(handle));
     let _ = client.write_str(tag, message);
 }
 

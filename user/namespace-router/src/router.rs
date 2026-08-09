@@ -14,8 +14,8 @@ use alloc::{
 use core::num::{NonZeroU32, NonZeroU64};
 
 use filesystem_abi::{
-    FileSystemAdminClient, FileSystemError, MountTable as BootMountTable, Mounted,
-    NamespaceAdminService, NamespaceService, PATH_MAX, Path,
+    FileSystemError, MountTable as BootMountTable, Mounted, PATH_MAX, Path, file_system_admin,
+    namespace, namespace_admin,
 };
 use filesystem_server::{settle, vend};
 use ipc::wire::Str;
@@ -168,14 +168,14 @@ impl<'a> Resolving<'a> {
     }
 }
 
-impl NamespaceService for Resolving<'_> {
+impl namespace::Service for Resolving<'_> {
     fn resolve(&mut self, path: Str<'_, PATH_MAX>) -> Result<Mounted, FileSystemError> {
         let path = Path::new(path.as_str())?;
         let target = self.target(path)?;
 
         // Значок сессии минтит сама файловая система: политика допуска принадлежит ей, а
         // маршрутизатор только переносит выданную капу клиенту.
-        let bound = FileSystemAdminClient::new(PortTransport::client(target.admin))
+        let bound = file_system_admin::Client::new(PortTransport::client(target.admin))
             .with_wait(BIND_TIMEOUT)
             .bind()
             .map_err(|error| {
@@ -361,12 +361,13 @@ impl<'a> Administering<'a> {
             .image
             .handle()
             .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)?;
-        FileSystemAdminClient::new(PortTransport::client(startup.handle())).start(log, image)?;
+        file_system_admin::Client::new(PortTransport::client(startup.handle()))
+            .start(log, image)?;
         Ok(())
     }
 }
 
-impl NamespaceAdminService for Administering<'_> {
+impl namespace_admin::Service for Administering<'_> {
     fn mount(
         &mut self,
         path: Str<'_, PATH_MAX>,

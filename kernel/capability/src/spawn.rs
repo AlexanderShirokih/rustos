@@ -86,7 +86,7 @@ pub struct UserStartSpec {
     pub metering_grant: Option<MeteringGrant>,
 }
 
-/// Ошибки [`KernelRuntime::load_user_image_into`].
+/// Ошибки `KernelRuntime::load_user_image_into`.
 #[derive(Debug)]
 pub enum LoadImageError {
     ProcessNotFound,
@@ -203,7 +203,7 @@ mod tests {
     }
 }
 
-/// Ошибки [`KernelRuntime::start_user_process`].
+/// Ошибки `KernelRuntime::start_user_process`.
 #[derive(Debug)]
 pub enum StartProcessError {
     ProcessNotFound,

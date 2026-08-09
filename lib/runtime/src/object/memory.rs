@@ -8,7 +8,7 @@ const _: () = assert!(
     "userland runtime targets 64-bit only"
 );
 
-use bootstrap::DeviceWindow;
+use bootstrap_abi::DeviceWindow;
 use io::mmio::Mmio;
 use ipc::wire::Cap;
 use syscall::{MemoryAccess, SIGNALED, SyscallError, Timeout, UserMemFlags};

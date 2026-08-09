@@ -3,23 +3,19 @@ use ipc::{Transport, wire::IpcError};
 /// Граница числа слотов capability одного компонента.
 pub const COMPONENT_SLOT_MAX: usize = 8;
 
-/// Одноразовая стартовая транзакция компонента композиции.
-#[ipc::protocol(name = "ComponentStartup")]
-pub trait ComponentStartup {
-    /// Открывает транзакцию: лог-сессия, серверные стороны control- и
-    /// service-портов компонента и число слотов, которые придут следом.
-    #[cast]
-    fn start(
-        &self,
-        log: ipc::wire::Cap,
-        control: ipc::wire::Cap,
-        service: ipc::wire::Cap,
-        slot_count: u16,
-    );
+ipc::protocol! {
+    /// Одноразовая стартовая транзакция компонента композиции: передача стартового
+    /// набора capability.
+    pub mod component_startup {
+        name = "ComponentStartup";
 
-    /// Отдаёт capability очередного слота в порядке плана.
-    #[cast]
-    fn slot(&self, capability: ipc::wire::Cap);
+        /// Открывает транзакцию: лог-сессия, серверные стороны control- и
+        /// service-портов компонента и число слотов, которые придут следом.
+        cast fn start(log: Cap, control: Cap, service: Cap, slot_count: u16);
+
+        /// Отдаёт capability очередного слота в порядке плана.
+        cast fn slot(capability: Cap);
+    }
 }
 
 /// Capability и параметры принятой стартовой транзакции. Семантику позиции
@@ -51,7 +47,7 @@ pub fn receive_startup_transaction<T: Transport>(
 ) -> Result<Option<StartedComponent>, IpcError> {
     let mut receiver = StartupReceiver::default();
     while !receiver.is_complete() {
-        dispatch_component_startup(&mut receiver, transport)?;
+        component_startup::dispatch(&mut receiver, transport)?;
         if receiver.broken {
             return Ok(None);
         }
@@ -83,7 +79,7 @@ impl StartupReceiver {
     }
 }
 
-impl ComponentStartupService for StartupReceiver {
+impl component_startup::Service for StartupReceiver {
     fn start(
         &mut self,
         log: ipc::wire::Cap,
@@ -133,7 +129,7 @@ mod tests {
     };
     use ipc_test::MockEnd;
 
-    use super::{ComponentStartupClient, receive_startup_transaction};
+    use super::{component_startup, receive_startup_transaction};
 
     const LOG_CAP: Cap = cap(0x21);
     const CONTROL_CAP: Cap = cap(0x23);
@@ -188,7 +184,7 @@ mod tests {
     #[test]
     fn a_transaction_carries_the_base_frame_and_every_slot() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = ComponentStartupClient::new(client_end);
+        let client = component_startup::Client::new(client_end);
         client
             .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 2)
             .expect("start write");
@@ -211,7 +207,7 @@ mod tests {
     #[test]
     fn a_transaction_without_slots_needs_no_further_casts() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = ComponentStartupClient::new(client_end);
+        let client = component_startup::Client::new(client_end);
         client
             .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 0)
             .expect("start write");
@@ -226,7 +222,7 @@ mod tests {
     #[test]
     fn a_slot_before_the_base_frame_breaks_the_transaction() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = ComponentStartupClient::new(client_end);
+        let client = component_startup::Client::new(client_end);
         client.slot(IMAGE_CAP).expect("slot write");
 
         assert_eq!(
@@ -239,7 +235,7 @@ mod tests {
     fn startup_closes_all_caps_when_the_cast_is_not_delivered() {
         let (client_end, server_end) = MockEnd::pair();
         drop(server_end);
-        let client = ComponentStartupClient::new(client_end);
+        let client = component_startup::Client::new(client_end);
         let (log, log_fate) = fake(0x31);
         let (control, control_fate) = fake(0x33);
         let (service, service_fate) = fake(0x34);

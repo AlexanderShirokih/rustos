@@ -8,10 +8,10 @@
 
 use core::panic::PanicInfo;
 
-use calculator_demo::CalculatorApiClient;
+use calculator_demo::calculator;
 use component_abi::component_manifest;
 use ipc::{Transport as _, wire::IpcError};
-use rtc_abi::RtcClient;
+use rtc_abi::rtc;
 use runtime::{OwnedHandle, PortTransport, Timeout, install_log, log_fmt, log_line, thread_exit};
 use syscall::Handle;
 
@@ -59,9 +59,9 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     let calculator_session = OwnedHandle::adopt(started.calculator);
     let clock_session = OwnedHandle::adopt(started.clock);
 
-    let calculator = CalculatorApiClient::new(PortTransport::client(&calculator_session))
-        .with_wait(CALL_TIMEOUT);
-    let clock = RtcClient::new(PortTransport::client(&clock_session)).with_wait(CALL_TIMEOUT);
+    let calculator =
+        calculator::Client::new(PortTransport::client(&calculator_session)).with_wait(CALL_TIMEOUT);
+    let clock = rtc::Client::new(PortTransport::client(&clock_session)).with_wait(CALL_TIMEOUT);
 
     log_line("started");
     thread_exit(run(
@@ -72,8 +72,8 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 }
 
 fn run(
-    calculator: &CalculatorApiClient<PortTransport>,
-    clock: &RtcClient<PortTransport>,
+    calculator: &calculator::Client<PortTransport>,
+    clock: &rtc::Client<PortTransport>,
     control: &PortTransport,
 ) -> u64 {
     let mut step: u64 = 1;

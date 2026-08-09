@@ -6,7 +6,7 @@ use ipc::{
     wire::{Cap, IpcError},
 };
 
-use crate::BootstrapClient;
+use crate::bootstrap;
 
 /// Окно device-памяти, восстановимое из транспортного cap.
 pub trait DeviceWindow: Sized {
@@ -17,7 +17,7 @@ pub trait DeviceWindow: Sized {
     fn base(&self) -> Option<u64>;
 }
 
-impl<T: Transport> BootstrapClient<T> {
+impl<T: Transport> bootstrap::Client<T> {
     /// Находит device-окно с базой `base` перебором `acquire_device_memory`.
     /// `Ok(None)` - набор исчерпан (индекс вне набора либо отказ выдачи).
     pub fn acquire_device_memory_by_base<W: DeviceWindow>(
@@ -46,11 +46,11 @@ mod tests {
     use ipc_test::MockEnd;
 
     use super::DeviceWindow;
-    use crate::{BootstrapClient, BootstrapService, dispatch_bootstrap};
+    use crate::bootstrap;
 
     struct Vendor;
 
-    impl BootstrapService for Vendor {
+    impl bootstrap::Service for Vendor {
         fn log(
             &mut self,
             _tag: ipc::wire::Str<'_, { crate::LOG_TAG_MAX }>,
@@ -97,14 +97,14 @@ mod tests {
         }
     }
 
-    fn with_vendor<R>(body: impl FnOnce(&BootstrapClient<MockEnd>) -> R) -> R {
+    fn with_vendor<R>(body: impl FnOnce(&bootstrap::Client<MockEnd>) -> R) -> R {
         let (client_end, server_end) = MockEnd::pair();
-        let client = BootstrapClient::new(client_end);
+        let client = bootstrap::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut vendor = Vendor;
                 while server_end.wait_readable(ipc::Timeout::INFINITE).is_ok() {
-                    if dispatch_bootstrap(&mut vendor, &server_end).is_err() {
+                    if bootstrap::dispatch(&mut vendor, &server_end).is_err() {
                         break;
                     }
                 }

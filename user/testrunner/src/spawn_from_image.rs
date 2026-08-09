@@ -1,6 +1,6 @@
 //! E2E спавна из реального userland-образа.
 
-use bootstrap::BootstrapClient;
+use bootstrap_abi::bootstrap;
 use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
 use runtime::{MemoryRegion, OwnedHandle, PortTransport, Resource, Signal, Timeout};
@@ -9,7 +9,7 @@ use userland::{Entry, EntryView, Segment, SegmentPermissions, SegmentView, USERL
 use userland_image::{component_name, decode};
 use userland_loader::{launch_entry, load_entry};
 
-use crate::startup_fixture_protocol::{STARTUP_VALUE, StartupFixtureClient};
+use crate::startup_fixture_protocol::{STARTUP_VALUE, startup_fixture};
 
 const STARTUP_FIXTURE: &str = "/boot/startup-fixture/program";
 const REPLY_HOLDER: &str = "/boot/reply-holder/program";
@@ -43,7 +43,7 @@ impl From<IpcError> for StartupError {
 
 #[kernel_test]
 fn launch_child_delivers_startup_frame() {
-    let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
 
     let cap = client
         .acquire_userland_image()
@@ -65,7 +65,7 @@ fn launch_child_delivers_startup_frame() {
         Some(component_name(STARTUP_FIXTURE)),
         &resource,
         |startup| -> Result<(), StartupError> {
-            StartupFixtureClient::new(PortTransport::client(startup.handle()))
+            startup_fixture::Client::new(PortTransport::client(startup.handle()))
                 .start(STARTUP_VALUE)?;
             Ok(())
         },
@@ -79,7 +79,7 @@ fn launch_child_delivers_startup_frame() {
 
 #[kernel_test]
 fn failed_startup_returns_child_budget() {
-    let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
 
     let cap = client
         .acquire_userland_image()
@@ -142,7 +142,7 @@ fn load_image_error_reclaims_each_created_process() {
 
 #[kernel_test]
 fn start_error_reclaims_each_loaded_process() {
-    let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let cap = client
         .acquire_userland_image()
         .expect("acquire_userland_image call")
@@ -184,7 +184,7 @@ fn caller_wakes_when_server_dies_holding_reply() {
     use runtime::{Error, Port};
     use syscall::SyscallError;
 
-    let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let cap = client
         .acquire_userland_image()
         .expect("acquire_userland_image call")

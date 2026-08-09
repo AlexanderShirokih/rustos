@@ -9,8 +9,8 @@ use core::{
 
 use filesystem::{ClientId, FileSystemBackend, NodeId, OpenNode, Session, SessionTable, Window};
 use filesystem_abi::{
-    AccessMode, DirCursor, FileSystemError, FileSystemService, Listed, NodeDescriptor, NodeInfo,
-    NodeKind, OpenFlags, Opened, PATH_MAX, Path, Written, rebase,
+    AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
+    Opened, PATH_MAX, Path, Written, file_system, rebase,
 };
 use ipc::wire::{Cap, Str};
 use runtime::{MemoryAccess, MemoryRegion, MutexGuard, OwnedHandle, Resource};
@@ -198,7 +198,7 @@ impl Serving<'_> {
     }
 }
 
-impl FileSystemService for Serving<'_> {
+impl file_system::Service for Serving<'_> {
     fn acquire_buffer(&mut self, size: u32) -> Result<Cap, FileSystemError> {
         let client = self.client()?;
         let FileSystemState {

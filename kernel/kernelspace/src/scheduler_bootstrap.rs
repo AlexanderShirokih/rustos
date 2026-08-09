@@ -155,7 +155,7 @@ where
 /// bootstrap services и привязывает `TickHandler` к `TimerService`.
 ///
 /// Возвращает scheduler в состоянии [`Bootstrapped`] - вызывающий должен
-/// зарегистрировать начальные потоки и перевести scheduler в [`super::Running`]
+/// зарегистрировать начальные потоки и перевести scheduler в [`scheduler::Running`]
 /// через [`Scheduler::start`].
 pub fn bootstrap_scheduler<A>(
     kernel: &mut KernelContext,

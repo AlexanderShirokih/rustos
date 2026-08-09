@@ -10,7 +10,7 @@ use core::{
     sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst},
 };
 
-use bootstrap::BootstrapClient;
+use bootstrap_abi::bootstrap;
 use kernel_tests::kernel_test;
 use runtime::{
     Error, MemoryRegion, OwnedHandle, Port, PortTransport, Priority, Process, Reply, Resource,
@@ -70,7 +70,7 @@ fn assert_sender_gone(result: Result<Option<Reply>>, badge: u64) {
 }
 
 fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
-    let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let cap = client
         .acquire_userland_image()
         .expect("acquire_userland_image call")
@@ -283,7 +283,7 @@ fn kernel_server_serves_past_a_departed_badge() {
     session.close().expect("close badged bootstrap capability");
 
     // Cast встречается с получателем, поэтому его успех означает живого сервера.
-    let client = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     client
         .log_str(
             "port-liveness",

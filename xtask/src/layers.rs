@@ -9,6 +9,9 @@
 //! Отделенные workspace перечисляет `workspace.exclude` корневого манифеста. Их крейты входят в
 //! проверку наравне с членами корневого, а таблица линтов каждого сверяется с корневой:
 //! наследовать ее вне корневого дерева нечем.
+//!
+//! Заодно сверяется, что каждое объявленное ребро есть и в коде: манифест задает граф, по
+//! которому идет проверка слоев, и ребро без единой ссылки в исходниках этот граф искажает.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -34,12 +37,22 @@ struct MetaPackage {
     name: String,
     manifest_path: PathBuf,
     dependencies: Vec<MetaDependency>,
+    #[serde(default)]
+    targets: Vec<MetaTarget>,
 }
 
 #[derive(Deserialize)]
 struct MetaDependency {
     name: String,
     path: Option<PathBuf>,
+    #[serde(default)]
+    rename: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MetaTarget {
+    name: String,
+    kind: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,15 +73,24 @@ pub(crate) fn run() -> Result<()> {
     let mut edges = BTreeSet::new();
 
     let root = project_root();
-    let root_meta = load_metadata(&root)?;
-    collect_workspace(&root_meta, &root, &mut crates, &mut edges)?;
-
     let detached = detached_workspaces(&root)?;
+
+    let mut metas = vec![load_metadata(&root)?];
     for workspace in &detached {
-        let meta = load_metadata(workspace)?;
-        collect_workspace(&meta, &root, &mut crates, &mut edges)?;
+        metas.push(load_metadata(workspace)?);
+    }
+    for meta in &metas {
+        collect_workspace(meta, &root, &mut crates, &mut edges)?;
     }
     check_lint_policy(&root, &detached)?;
+
+    let unused = unused_dependencies(&metas, &root)?;
+    if !unused.is_empty() {
+        for entry in &unused {
+            eprintln!("{entry}");
+        }
+        bail!("check-layers: {} unused path dependencies", unused.len());
+    }
 
     let crates = merge_crates(crates);
     let edges: Vec<Edge> = edges.into_iter().collect();
@@ -194,6 +216,102 @@ fn collect_workspace(
         }
     }
     Ok(())
+}
+
+fn unused_dependencies(metas: &[CargoMetadata], root: &Path) -> Result<Vec<String>> {
+    let lib_names = lib_target_names(metas);
+    let mut findings = BTreeSet::new();
+    for meta in metas {
+        for pkg in &meta.packages {
+            let manifest_dir = pkg
+                .manifest_path
+                .parent()
+                .with_context(|| format!("crate {}: manifest path has no parent", pkg.name))?;
+            let paths: Vec<&MetaDependency> = pkg
+                .dependencies
+                .iter()
+                .filter(|dep| dep.path.is_some())
+                .collect();
+            if paths.is_empty() {
+                continue;
+            }
+            let sources = read_sources(manifest_dir)?;
+            for dep in paths {
+                // В коде зависимость зовут либо переименованием из манифеста, либо именем её
+                // lib-цели: у пакета оно вправе отличаться от собственного.
+                let referenced = dep.rename.as_deref().unwrap_or_else(|| {
+                    lib_names
+                        .get(dep.name.as_str())
+                        .map_or(dep.name.as_str(), |name| name.as_str())
+                });
+                if !mentions_crate(&sources, referenced) {
+                    findings.insert(format!(
+                        "{}: dependency `{}` is declared but never used in {}",
+                        pkg.name,
+                        dep.name,
+                        relative_dir(&pkg.name, manifest_dir, root)?
+                    ));
+                }
+            }
+        }
+    }
+    Ok(findings.into_iter().collect())
+}
+
+fn lib_target_names(metas: &[CargoMetadata]) -> BTreeMap<&str, &String> {
+    let mut names = BTreeMap::new();
+    for meta in metas {
+        for pkg in &meta.packages {
+            let lib = pkg
+                .targets
+                .iter()
+                .find(|target| target.kind.iter().any(|kind| kind.contains("lib")));
+            if let Some(lib) = lib {
+                names.insert(pkg.name.as_str(), &lib.name);
+            }
+        }
+    }
+    names
+}
+
+fn read_sources(dir: &Path) -> Result<Vec<String>> {
+    let mut sources = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = fs::read_dir(&current)
+            .with_context(|| format!("Failed to read {}", current.display()))?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                // В `target` лежат чужие сборочные артефакты, и крейт их не объявлял.
+                if path.file_name().is_some_and(|name| name != "target") {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                sources.push(
+                    fs::read_to_string(&path)
+                        .with_context(|| format!("Failed to read {}", path.display()))?,
+                );
+            }
+        }
+    }
+    Ok(sources)
+}
+
+fn mentions_crate(sources: &[String], dep: &str) -> bool {
+    let ident = dep.replace('-', "_");
+    sources.iter().any(|text| {
+        text.match_indices(&ident).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + ident.len()..].chars().next();
+            !before.is_some_and(is_ident_char) && !after.is_some_and(is_ident_char)
+        })
+    })
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 fn merge_crates(crates: BTreeSet<WorkspaceCrate>) -> Vec<WorkspaceCrate> {
@@ -477,8 +595,10 @@ mod tests {
                         .map(|(dep_name, dep_dir)| MetaDependency {
                             name: (*dep_name).to_string(),
                             path: Some(PathBuf::from(dep_dir)),
+                            rename: None,
                         })
                         .collect(),
+                    targets: Vec::new(),
                 })
                 .collect(),
         }
@@ -734,5 +854,33 @@ mod tests {
     fn edge_with_unknown_crate_is_error() {
         let edges = edges(&[("a-lib", "ghost")]);
         assert!(check_layers(&crates(), &edges).is_err());
+    }
+
+    #[test]
+    fn crate_identifier_is_matched_as_a_whole_word() {
+        let sources = vec!["use ipc_test::MockEnd;\nlet x = my_ipc + 1;\n".to_string()];
+        assert!(mentions_crate(&sources, "ipc-test"));
+        assert!(!mentions_crate(&sources, "ipc"));
+        assert!(!mentions_crate(&sources, "test"));
+    }
+
+    #[test]
+    fn lib_target_name_wins_over_the_package_name() {
+        let meta = CargoMetadata {
+            packages: vec![MetaPackage {
+                name: "test-harness-qemu".to_string(),
+                manifest_path: PathBuf::from("lib/test-harness-qemu/Cargo.toml"),
+                dependencies: Vec::new(),
+                targets: vec![MetaTarget {
+                    name: "kernel_tests".to_string(),
+                    kind: vec!["lib".to_string()],
+                }],
+            }],
+        };
+        let names = lib_target_names(std::slice::from_ref(&meta));
+        assert_eq!(
+            names.get("test-harness-qemu").map(|name| name.as_str()),
+            Some("kernel_tests")
+        );
     }
 }

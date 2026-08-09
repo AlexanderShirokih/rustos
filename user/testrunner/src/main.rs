@@ -6,7 +6,7 @@ extern crate alloc;
 
 use core::{fmt::Write as _, panic::PanicInfo};
 
-use bootstrap::{BootstrapClient, LOG_MESSAGE_MAX};
+use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap};
 use io::writer::Writer;
 use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
@@ -113,7 +113,7 @@ fn send_log_frame(payload: &[u8]) {
     let Some(&handle) = BOOTSTRAP_HANDLE.get() else {
         return;
     };
-    let client = BootstrapClient::new(PortTransport::client(handle));
+    let client = bootstrap::Client::new(PortTransport::client(handle));
 
     for _ in 0..SEND_RETRY_LIMIT {
         match client.log_str(LOG_TAG, text) {

@@ -9,13 +9,14 @@ use ipc::{
 };
 use ipc_test::MockEnd;
 
-#[ipc::protocol(name = "CapProto")]
-trait CapProto {
-    #[cast]
-    fn send_cap(&self, cap: ipc::wire::Cap);
+ipc::protocol! {
+    // Контракт передачи capability в запросе.
+    mod cap_proto {
+        name = "CapProto";
 
-    #[call]
-    fn exchange(&self, cap: ipc::wire::Cap) -> u64;
+        cast fn send_cap(cap: Cap);
+        call fn exchange(cap: Cap) -> u64;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,7 +50,7 @@ impl Drop for FakeHandle {
 
 struct Echo;
 
-impl CapProtoService for Echo {
+impl cap_proto::Service for Echo {
     fn send_cap(&mut self, _cap: Cap) {}
 
     fn exchange(&mut self, cap: Cap) -> u64 {
@@ -71,7 +72,7 @@ fn fake(id: u32) -> (FakeHandle, Rc<Cell<Fate>>) {
 #[test]
 fn cast_cap_relinquished_on_ok() {
     let (client_end, server_end) = MockEnd::pair();
-    let client = CapProtoClient::new(client_end);
+    let client = cap_proto::Client::new(client_end);
     let (handle, fate) = fake(42);
 
     client.send_cap(handle).expect("send ok");
@@ -89,7 +90,7 @@ fn cast_cap_relinquished_on_ok() {
 fn cast_cap_dropped_on_peer_closed() {
     let (client_end, server_end) = MockEnd::pair();
     drop(server_end);
-    let client = CapProtoClient::new(client_end);
+    let client = cap_proto::Client::new(client_end);
     let (handle, fate) = fake(7);
 
     assert_eq!(client.send_cap(handle), Err(IpcError::PeerClosed));
@@ -100,7 +101,7 @@ fn cast_cap_dropped_on_peer_closed() {
 fn call_cap_dropped_on_peer_closed() {
     let (client_end, server_end) = MockEnd::pair();
     drop(server_end);
-    let client = CapProtoClient::new(client_end);
+    let client = cap_proto::Client::new(client_end);
     let (handle, fate) = fake(5);
 
     assert_eq!(client.exchange(handle), Err(IpcError::PeerClosed));
@@ -115,10 +116,10 @@ fn call_cap_relinquished_on_ok() {
         server_end
             .wait_readable(ipc::Timeout::from_secs(1))
             .expect("server wait");
-        dispatch_cap_proto(&mut echo, &server_end).expect("dispatch");
+        cap_proto::dispatch(&mut echo, &server_end).expect("dispatch");
     });
 
-    let client = CapProtoClient::new(client_end);
+    let client = cap_proto::Client::new(client_end);
     let (handle, fate) = fake(42);
 
     let reply = client.exchange(handle).expect("exchange ok");

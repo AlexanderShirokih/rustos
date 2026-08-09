@@ -4,9 +4,9 @@
 //! Все целые - little-endian. Кадр (заголовок + тело) укладывается в
 //! [`MESSAGE_INLINE_MAX`]. Кодирование без heap.
 
-use core::{cell::Cell, marker::PhantomData, num::NonZeroU32};
+use core::{cell::Cell, num::NonZeroU32};
 
-pub use ipc_schema::{FIELD_OVERHEAD, HEADER_SIZE};
+pub use crate::schema::{FIELD_OVERHEAD, HEADER_SIZE};
 
 /// Максимальная длина кадра (заголовок + тело) в байтах: кадр заполняет тело
 /// IPC-буфера, и равен [`syscall::IPC_BUFFER_DATA_MAX`].
@@ -387,61 +387,6 @@ impl<'a> FieldCursor<'a> {
         self.pos += FIELD_OVERHEAD + len;
         self.last_field_id = field_id;
         Ok(Some(Field { id: field_id, data }))
-    }
-}
-
-/// Маркер-трейт протокола. Его реализуют сгенерированные контракты.
-pub trait Protocol {}
-
-/// Handle клиентского конца канала с меткой протокола `P`.
-/// В сообщении - сырой `u32`-идентификатор хэндла.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClientEnd<P> {
-    raw: NonZeroU32,
-    _protocol: PhantomData<fn() -> P>,
-}
-
-impl<P> ClientEnd<P> {
-    /// Оборачивает сырой handle-id в типизированный клиентский конец.
-    #[must_use]
-    pub const fn from_raw(raw: NonZeroU32) -> Self {
-        Self {
-            raw,
-            _protocol: PhantomData,
-        }
-    }
-
-    /// Сырой handle-id порта.
-    #[must_use]
-    pub const fn raw(self) -> NonZeroU32 {
-        self.raw
-    }
-}
-
-/// Handle серверного конца канала с меткой протокола `P`.
-/// В сообщении - сырой `u32`-идентификатор хэндла.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ServerEnd<P> {
-    raw: NonZeroU32,
-    _protocol: PhantomData<fn() -> P>,
-}
-
-impl<P> ServerEnd<P> {
-    /// Оборачивает сырой handle-id в типизированный серверный конец.
-    #[must_use]
-    pub const fn from_raw(raw: NonZeroU32) -> Self {
-        Self {
-            raw,
-            _protocol: PhantomData,
-        }
-    }
-
-    /// Сырой handle-id порта.
-    #[must_use]
-    pub const fn raw(self) -> NonZeroU32 {
-        self.raw
     }
 }
 
@@ -943,21 +888,5 @@ mod tests {
         buf.write_field(1, &encode_u8(1)).expect("ok");
         buf.finish().expect("finish");
         assert_eq!(buf.write_field(2, &encode_u8(2)), Err(IpcError::FieldOrder));
-    }
-
-    #[test]
-    fn port_repr_transparent_size() {
-        assert_eq!(size_of::<ClientEnd<()>>(), 4);
-        assert_eq!(size_of::<ServerEnd<()>>(), 4);
-        assert_eq!(size_of::<Option<ClientEnd<()>>>(), 4);
-    }
-
-    #[test]
-    fn port_from_raw_round_trip() {
-        let raw = NonZeroU32::new(7).expect("nonzero");
-        let client = ClientEnd::<()>::from_raw(raw);
-        let server = ServerEnd::<()>::from_raw(raw);
-        assert_eq!(client.raw(), raw);
-        assert_eq!(server.raw(), raw);
     }
 }

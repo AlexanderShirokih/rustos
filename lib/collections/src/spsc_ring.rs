@@ -81,7 +81,7 @@ impl SpscRing {
     }
 
     /// Размер одного слота в байтах для заданного `slot_payload`: `len`-поле
-    /// плюс payload, выровненные вверх до align_of::<AtomicU32>(), чтобы поле
+    /// плюс payload, выровненные вверх до `align_of::<AtomicU32>()`, чтобы поле
     /// `len` каждого слота оставалось выровненным при любом `slot_payload`.
     #[must_use]
     pub const fn slot_bytes(slot_payload: usize) -> usize {

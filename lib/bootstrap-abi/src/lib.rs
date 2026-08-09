@@ -10,41 +10,39 @@ mod log;
 
 pub use device_window::DeviceWindow;
 
-/// Граница тега источника в [`Bootstrap::log`].
+/// Граница тега источника в [`bootstrap::log`].
 pub const LOG_TAG_MAX: usize = 64;
 
-/// Граница строки [`Bootstrap::log`]: остаток кадра за тегом.
+/// Граница строки [`bootstrap::log`]: остаток кадра за тегом.
 pub const LOG_MESSAGE_MAX: usize =
     ipc::wire::FIELD_DATA_MAX - LOG_TAG_MAX - ipc::wire::FIELD_OVERHEAD;
 
-#[ipc::protocol(name = "Bootstrap")]
-pub trait Bootstrap {
-    /// Передаёт строку для логгера ядра klog. `tag` - источник строки
-    /// (обычно имя процесса). Пустой тег - строка без тега.
-    #[cast]
-    fn log(
-        &self,
-        tag: ipc::wire::Str<{ LOG_TAG_MAX }>,
-        message: ipc::wire::Str<{ LOG_MESSAGE_MAX }>,
-    );
+ipc::protocol! {
+    /// Канал init-процесса к ядру.
+    pub mod bootstrap {
+        name = "Bootstrap";
 
-    /// Выдаёт копию корневого `IrqControl` в таблицу вызывателя (оригинал
-    /// остаётся у ядра). `Err` - ненулевой код ошибки выдачи.
-    #[call]
-    fn acquire_irq_control(&self) -> Result<ipc::wire::Cap, u32>;
+        /// Передаёт строку для логгера ядра klog. `tag` - источник строки
+        /// (обычно имя процесса). Пустой тег - строка без тега.
+        cast fn log(
+            tag: ipc::wire::Str<{ LOG_TAG_MAX }>,
+            message: ipc::wire::Str<{ LOG_MESSAGE_MAX }>,
+        );
 
-    /// Выдаёт вызывателю read-only capability на регион поверх байт userland-образа.
-    #[call]
-    fn acquire_userland_image(&self) -> Result<ipc::wire::Cap, u32>;
+        /// Выдаёт копию корневого `IrqControl` в таблицу вызывателя (оригинал
+        /// остаётся у ядра). `Err` - ненулевой код ошибки выдачи.
+        call fn acquire_irq_control() -> Result<ipc::wire::Cap, u32>;
 
-    /// Выдаёт вызывателю read-only capability на регион поверх байт boot FDT (DTB).
-    #[call]
-    fn acquire_boot_fdt(&self) -> Result<ipc::wire::Cap, u32>;
+        /// Выдаёт вызывателю read-only capability на регион поверх байт userland-образа.
+        call fn acquire_userland_image() -> Result<ipc::wire::Cap, u32>;
 
-    /// Выдаёт capability на Device-MMIO регион `index` (kernel-owned
-    /// исключены). `Err` - индекс вне набора либо отказ выдачи.
-    #[call]
-    fn acquire_device_memory(&self, index: u32) -> Result<ipc::wire::Cap, u32>;
+        /// Выдаёт вызывателю read-only capability на регион поверх байт boot FDT (DTB).
+        call fn acquire_boot_fdt() -> Result<ipc::wire::Cap, u32>;
+
+        /// Выдаёт capability на Device-MMIO регион `index` (kernel-owned
+        /// исключены). `Err` - индекс вне набора либо отказ выдачи.
+        call fn acquire_device_memory(index: u32) -> Result<ipc::wire::Cap, u32>;
+    }
 }
 
 #[cfg(test)]
@@ -58,16 +56,14 @@ mod tests {
     };
     use ipc_test::MockEnd;
 
-    use super::{
-        BootstrapClient, BootstrapService, LOG_MESSAGE_MAX, LOG_TAG_MAX, dispatch_bootstrap,
-    };
+    use super::{LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap};
 
     #[derive(Default)]
     struct Sink {
         last_log: Option<String>,
     }
 
-    impl BootstrapService for Sink {
+    impl bootstrap::Service for Sink {
         fn log(&mut self, tag: Str<'_, { LOG_TAG_MAX }>, message: Str<'_, { LOG_MESSAGE_MAX }>) {
             self.last_log = Some(format!("[{}] {}", tag.as_str(), message.as_str()));
         }
@@ -98,7 +94,7 @@ mod tests {
     #[test]
     fn log_round_trip() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = BootstrapClient::new(client_end);
+        let client = bootstrap::Client::new(client_end);
         client
             .log(
                 Str::new("rootkeeper").expect("tag within bound"),
@@ -106,21 +102,21 @@ mod tests {
             )
             .expect("log write");
         let mut sink = Sink::default();
-        dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
+        bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
         assert_eq!(sink.last_log.as_deref(), Some("[rootkeeper] boot ok"));
     }
 
     #[test]
     fn acquire_irq_control_round_trip() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = BootstrapClient::new(client_end);
+        let client = bootstrap::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
                 server_end
                     .wait_readable(ipc::Timeout::INFINITE)
                     .expect("server wait");
-                dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
+                bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
             let cap = client.acquire_irq_control().expect("call ok");
             assert_eq!(
@@ -133,14 +129,14 @@ mod tests {
     #[test]
     fn acquire_userland_image_round_trip() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = BootstrapClient::new(client_end);
+        let client = bootstrap::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
                 server_end
                     .wait_readable(ipc::Timeout::INFINITE)
                     .expect("server wait");
-                dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
+                bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
             let cap = client.acquire_userland_image().expect("call ok");
             assert_eq!(
@@ -153,14 +149,14 @@ mod tests {
     #[test]
     fn acquire_boot_fdt_round_trip() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = BootstrapClient::new(client_end);
+        let client = bootstrap::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
                 server_end
                     .wait_readable(ipc::Timeout::INFINITE)
                     .expect("server wait");
-                dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
+                bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
             let cap = client.acquire_boot_fdt().expect("call ok");
             assert_eq!(
@@ -173,14 +169,14 @@ mod tests {
     #[test]
     fn acquire_device_memory_round_trip() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = BootstrapClient::new(client_end);
+        let client = bootstrap::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
                 server_end
                     .wait_readable(ipc::Timeout::INFINITE)
                     .expect("server wait");
-                dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
+                bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
             // Аргумент index доезжает до сервера и влияет на ответный Cap.
             let cap = client.acquire_device_memory(1).expect("call ok");
@@ -194,14 +190,14 @@ mod tests {
     #[test]
     fn acquire_device_memory_out_of_range_returns_err() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = BootstrapClient::new(client_end);
+        let client = bootstrap::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
                 server_end
                     .wait_readable(ipc::Timeout::INFINITE)
                     .expect("server wait");
-                dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
+                bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
             let result = client.acquire_device_memory(9).expect("call ok");
             assert_eq!(result, Err(7));

@@ -13,7 +13,7 @@ bench = false
 doctest = false
 
 [dependencies]
-bootstrap = { workspace = true }
+bootstrap-abi = { workspace = true }
 ipc = { workspace = true }
 log-abi = { workspace = true }
 runtime = { workspace = true }

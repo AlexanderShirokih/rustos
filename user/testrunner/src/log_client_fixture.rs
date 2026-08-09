@@ -7,8 +7,8 @@
 
 use core::panic::PanicInfo;
 
-use bootstrap::BootstrapClient;
-use log_abi::LogClient;
+use bootstrap_abi::bootstrap;
+use log_abi::log;
 use runtime::{OwnedHandle, PortTransport, thread_exit};
 use syscall::Handle;
 
@@ -27,7 +27,7 @@ pub extern "C" fn _start(log: Handle) -> ! {
 }
 
 fn probe(log: &OwnedHandle) -> u64 {
-    let bootstrap = BootstrapClient::new(PortTransport::client(log.borrow()));
+    let bootstrap = bootstrap::Client::new(PortTransport::client(log.borrow()));
     if let Ok(Ok(cap)) = bootstrap.acquire_irq_control() {
         drop(OwnedHandle::adopt(cap));
         return EXIT_IRQ_CONTROL;
@@ -45,7 +45,7 @@ fn probe(log: &OwnedHandle) -> u64 {
         return EXIT_DEVICE_MEMORY;
     }
 
-    let client = LogClient::new(PortTransport::client(log.borrow()));
+    let client = log::Client::new(PortTransport::client(log.borrow()));
     if client.write_str("probe", FIXTURE_LINE).is_err() {
         return EXIT_LOG_REFUSED;
     }

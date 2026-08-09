@@ -11,7 +11,7 @@ use core::panic::PanicInfo;
 use component_abi::component_manifest;
 use io::mmio::{Mmio, Reg};
 use ipc::wire::IpcError;
-use rtc_abi::{RtcService, dispatch_rtc};
+use rtc_abi::rtc;
 use runtime::{
     IrqLine, MemoryRegion, OwnedHandle, PortTransport, Timeout, UserMemFlags, install_log,
     log_line, thread_exit,
@@ -67,7 +67,7 @@ impl Pl031 {
     }
 }
 
-impl RtcService for Pl031 {
+impl rtc::Service for Pl031 {
     fn now(&mut self) -> u64 {
         u64::from(self.device.read_reg(RTC_DATA))
     }
@@ -118,7 +118,7 @@ fn serve(service: &OwnedHandle, driver: &mut Pl031) {
     // Ни один исход кадра не несёт: драйвер не хранит сессий, а уход значка и
     // покадровое исчерпание порт не закрывают. Прочий отказ терминален.
     while matches!(
-        dispatch_rtc(driver, &transport),
+        rtc::dispatch(driver, &transport),
         Ok(()) | Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout)
     ) {}
 }

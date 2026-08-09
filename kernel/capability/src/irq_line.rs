@@ -36,7 +36,7 @@ pub struct IrqLine {
 impl IrqLine {
     /// Привязывает линию `irq` с триггером `trigger` через `control` и
     /// возвращает готовый объект.
-    /// При срабатывании линии вызывается [`on_fire`](Self::on_fire). На ошибке
+    /// При срабатывании линии вызывается `on_fire`. На ошибке
     /// привязки объект дропается, не оставляя зависшей линии.
     pub fn bind(
         control: Arc<dyn InterruptsControl>,

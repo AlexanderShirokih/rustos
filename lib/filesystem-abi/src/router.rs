@@ -1,19 +1,21 @@
 //! Контракт маршрутизатора имён: разбор пути в монтирование. Данные через маршрутизатор не идут -
 //! он участвует только в установлении сессии. Управление таблицей монтирования живёт в admin-
-//! контракте [`crate::admin::NamespaceAdmin`] на другом порту.
+//! контракте [`crate::namespace_admin`] на другом порту.
 
 use crate::{error::FileSystemError, limits::PATH_MAX, reply::Mounted};
 
-/// Маршрутизатор имён: выдаёт клиентам сессии файловых систем по пути.
-#[ipc::protocol(name = "Namespace")]
-pub trait Namespace {
-    /// Отдаёт сессию монтирования, накрывающего `path`, вместе с длиной его префикса. Путь, не
-    /// накрытый ни одним монтированием, - `NotFound`.
-    ///
-    /// Capability выдаёт сама файловая система, применяя свою политику допуска: от неё же
-    /// приходит и отказ установления.
-    #[call]
-    fn resolve(&self, path: ipc::wire::Str<{ PATH_MAX }>) -> Result<Mounted, FileSystemError>;
+ipc::protocol! {
+    /// Маршрутизатор имён: выдаёт клиентам сессии файловых систем по пути.
+    pub mod namespace {
+        name = "Namespace";
+
+        /// Отдаёт сессию монтирования, накрывающего `path`, вместе с длиной его префикса.
+        /// Путь, не накрытый ни одним монтированием, - `NotFound`.
+        ///
+        /// Capability выдаёт сама файловая система, применяя свою политику допуска: от неё же
+        /// приходит и отказ установления.
+        call fn resolve(path: ipc::wire::Str<{ PATH_MAX }>) -> Result<Mounted, FileSystemError>;
+    }
 }
 
 #[cfg(test)]
@@ -32,9 +34,7 @@ mod tests {
     };
     use ipc_test::MockEnd;
 
-    use super::{
-        FileSystemError, Mounted, NamespaceClient, NamespaceService, PATH_MAX, dispatch_namespace,
-    };
+    use super::{FileSystemError, Mounted, PATH_MAX, namespace};
 
     const SESSION_CAP: Cap = cap(0x31);
     const BOOT_PREFIX_LEN: u32 = 5;
@@ -43,7 +43,7 @@ mod tests {
         resolved: Arc<Mutex<Vec<String>>>,
     }
 
-    impl NamespaceService for Router {
+    impl namespace::Service for Router {
         fn resolve(&mut self, path: Str<'_, PATH_MAX>) -> Result<Mounted, FileSystemError> {
             self.resolved
                 .lock()
@@ -69,7 +69,7 @@ mod tests {
 
     fn with_router<R>(
         calls_expected: usize,
-        body: impl FnOnce(&NamespaceClient<MockEnd>) -> R,
+        body: impl FnOnce(&namespace::Client<MockEnd>) -> R,
     ) -> (R, Vec<String>) {
         let (client_end, server_end) = MockEnd::pair();
         let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -82,11 +82,11 @@ mod tests {
                     server_end
                         .wait_readable(ipc::Timeout::INFINITE)
                         .expect("server wait");
-                    dispatch_namespace(&mut router, &server_end).expect("dispatch ok");
+                    namespace::dispatch(&mut router, &server_end).expect("dispatch ok");
                 }
             });
 
-            let result = body(&NamespaceClient::new(client_end));
+            let result = body(&namespace::Client::new(client_end));
             server.join().expect("server joins");
             let resolved = recorded.lock().expect("mutex not poisoned").clone();
             (result, resolved)

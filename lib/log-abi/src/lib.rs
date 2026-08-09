@@ -33,18 +33,20 @@ const _: () = assert!(
     "log frame with a composed source exceeds the message budget"
 );
 
-#[ipc::protocol(name = "Log")]
-pub trait Log {
-    /// Пишет строку в системный журнал. `tag` - локальный тег источника внутри
-    /// процесса-клиента, пустой тег - строка без него. Строку длиннее кадра
-    /// клиентская обёртка разбивает на несколько вызовов. Полномочий сверх
-    /// записи строки capability на этот контракт не даёт.
-    #[cast]
-    fn write(
-        &self,
-        tag: ipc::wire::Str<{ LOG_TAG_MAX }>,
-        message: ipc::wire::Str<{ LOG_MESSAGE_MAX }>,
-    );
+ipc::protocol! {
+    /// Запись строки в системный журнал.
+    pub mod log {
+        name = "Log";
+
+        /// Пишет строку в системный журнал. `tag` - локальный тег источника внутри
+        /// процесса-клиента, пустой тег - строка без него. Строку длиннее кадра
+        /// клиентская обёртка разбивает на несколько вызовов. Полномочий сверх
+        /// записи строки capability на этот контракт не даёт.
+        cast fn write(
+            tag: ipc::wire::Str<{ LOG_TAG_MAX }>,
+            message: ipc::wire::Str<{ LOG_MESSAGE_MAX }>,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -54,14 +56,14 @@ mod tests {
     use ipc::wire::Str;
     use ipc_test::MockEnd;
 
-    use super::{LOG_MESSAGE_MAX, LOG_TAG_MAX, LogClient, LogService, dispatch_log};
+    use super::{LOG_MESSAGE_MAX, LOG_TAG_MAX, log};
 
     #[derive(Default)]
     pub(crate) struct Sink {
         pub(crate) last: Option<String>,
     }
 
-    impl LogService for Sink {
+    impl log::Service for Sink {
         fn write(&mut self, tag: Str<'_, { LOG_TAG_MAX }>, message: Str<'_, { LOG_MESSAGE_MAX }>) {
             self.last = Some(format!("[{}] {}", tag.as_str(), message.as_str()));
         }
@@ -70,7 +72,7 @@ mod tests {
     #[test]
     fn write_round_trip() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = LogClient::new(client_end);
+        let client = log::Client::new(client_end);
         client
             .write(
                 Str::new("relay").expect("tag within bound"),
@@ -79,14 +81,14 @@ mod tests {
             .expect("log write");
 
         let mut sink = Sink::default();
-        dispatch_log(&mut sink, &server_end).expect("dispatch ok");
+        log::dispatch(&mut sink, &server_end).expect("dispatch ok");
         assert_eq!(sink.last.as_deref(), Some("[relay] log line"));
     }
 
     #[test]
     fn empty_tag_round_trips() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = LogClient::new(client_end);
+        let client = log::Client::new(client_end);
         client
             .write(
                 Str::new("").expect("empty tag within bound"),
@@ -95,14 +97,14 @@ mod tests {
             .expect("log write");
 
         let mut sink = Sink::default();
-        dispatch_log(&mut sink, &server_end).expect("dispatch ok");
+        log::dispatch(&mut sink, &server_end).expect("dispatch ok");
         assert_eq!(sink.last.as_deref(), Some("[] untagged"));
     }
 
     #[test]
     fn message_at_the_bound_round_trips() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = LogClient::new(client_end);
+        let client = log::Client::new(client_end);
         let message = "m".repeat(LOG_MESSAGE_MAX);
         client
             .write(
@@ -112,7 +114,7 @@ mod tests {
             .expect("log write");
 
         let mut sink = Sink::default();
-        dispatch_log(&mut sink, &server_end).expect("dispatch ok");
+        log::dispatch(&mut sink, &server_end).expect("dispatch ok");
         assert_eq!(sink.last.expect("logged").len(), 8 + LOG_MESSAGE_MAX);
     }
 }

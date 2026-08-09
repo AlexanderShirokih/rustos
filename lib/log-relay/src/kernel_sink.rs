@@ -1,6 +1,6 @@
 //! Сток relay в klog: строки уходят ядру по bootstrap-контракту.
 
-use bootstrap::BootstrapClient;
+use bootstrap_abi::bootstrap;
 use ipc::wire::IpcError;
 use runtime::PortTransport;
 use syscall::Handle;
@@ -8,11 +8,11 @@ use syscall::Handle;
 use crate::relay::LogSink;
 
 const _: () = assert!(
-    log_abi::LOG_SOURCE_MAX <= bootstrap::LOG_TAG_MAX,
+    log_abi::LOG_SOURCE_MAX <= bootstrap_abi::LOG_TAG_MAX,
     "the bootstrap tag field holds a composed log source without truncation"
 );
 const _: () = assert!(
-    log_abi::LOG_MESSAGE_MAX <= bootstrap::LOG_MESSAGE_MAX,
+    log_abi::LOG_MESSAGE_MAX <= bootstrap_abi::LOG_MESSAGE_MAX,
     "the bootstrap message field holds a log message without truncation"
 );
 
@@ -30,6 +30,6 @@ impl KernelLogSink {
 
 impl LogSink for KernelLogSink {
     fn write(&mut self, source: &str, message: &str) -> Result<(), IpcError> {
-        BootstrapClient::new(PortTransport::client(self.bootstrap)).log_str(source, message)
+        bootstrap::Client::new(PortTransport::client(self.bootstrap)).log_str(source, message)
     }
 }

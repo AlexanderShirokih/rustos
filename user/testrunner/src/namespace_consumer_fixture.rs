@@ -5,7 +5,7 @@
 use core::panic::PanicInfo;
 
 use component_abi::component_manifest;
-use filesystem_abi::{NamespaceClient, PATH_MAX};
+use filesystem_abi::{PATH_MAX, namespace};
 use ipc::wire::Str;
 use runtime::{OwnedHandle, PortTransport, Signal, Timeout, thread_exit};
 use syscall::{Handle, SIGNALED};
@@ -36,7 +36,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     drop(startup);
 
     let session = OwnedHandle::adopt(started.namespace);
-    let namespace = NamespaceClient::new(PortTransport::client(&session)).with_wait(CALL_TIMEOUT);
+    let namespace = namespace::Client::new(PortTransport::client(&session)).with_wait(CALL_TIMEOUT);
     let Some(path) = Str::<{ PATH_MAX }>::new(PROBE_PATH) else {
         thread_exit(RESOLVE_FAILED_EXIT_CODE);
     };
@@ -51,7 +51,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     thread_exit(PROVIDER_GONE_EXIT_CODE)
 }
 
-fn resolve(namespace: &NamespaceClient<PortTransport>, path: Str<'_, { PATH_MAX }>) -> bool {
+fn resolve(namespace: &namespace::Client<PortTransport>, path: Str<'_, { PATH_MAX }>) -> bool {
     match namespace.resolve(path) {
         Ok(Ok(mounted)) => {
             drop(OwnedHandle::adopt(mounted.session));

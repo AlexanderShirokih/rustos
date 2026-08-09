@@ -4,10 +4,10 @@
 use alloc::{format, string::String, vec, vec::Vec};
 use core::num::NonZeroU64;
 
-use bootstrap::BootstrapClient;
+use bootstrap_abi::bootstrap;
 use filesystem_abi::{
-    AccessMode, DirCursor, DirEntry, FileSystemClient, FileSystemError, NAME_MAX,
-    NamespaceAdminClient, NamespaceClient, NodeDescriptor, NodeKind, OpenFlags, Opened,
+    AccessMode, DirCursor, DirEntry, FileSystemError, NAME_MAX, NodeDescriptor, NodeKind,
+    OpenFlags, Opened, file_system, namespace, namespace_admin,
 };
 use ipc::{
     MessageLen, Transport,
@@ -93,12 +93,14 @@ fn namespace_roots() -> &'static ComponentRoots {
         .roots()
 }
 
-fn namespace_admin_client(capability: BorrowedHandle<'_>) -> NamespaceAdminClient<PortTransport> {
-    NamespaceAdminClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
+fn namespace_admin_client(
+    capability: BorrowedHandle<'_>,
+) -> namespace_admin::Client<PortTransport> {
+    namespace_admin::Client::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
 fn start_namespace() -> NamespacePorts {
-    let bootstrap = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let bootstrap = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let image = MemoryRegion::adopt(acquire_image(&bootstrap));
     let mapping = image.map_full_read_only().expect("map userland image");
     let log = crate::log_relay::router_log_session();
@@ -168,7 +170,7 @@ fn pause(timeout: Timeout) {
 }
 
 fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
-    let bootstrap = BootstrapClient::new(PortTransport::client(crate::bootstrap_handle()));
+    let bootstrap = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let region = MemoryRegion::adopt(acquire_image(&bootstrap));
     let mapping = region.map_full_read_only().expect("map userland image");
     let image = decode(mapping.as_bytes()).expect("decode userland image");
@@ -181,15 +183,15 @@ fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
     load_entry(&program, Some(component_name(path)), &resource, start).expect("spawn from image")
 }
 
-fn acquire_image(bootstrap: &BootstrapClient<PortTransport>) -> ipc::wire::Cap {
+fn acquire_image(bootstrap: &bootstrap::Client<PortTransport>) -> ipc::wire::Cap {
     bootstrap
         .acquire_userland_image()
         .expect("acquire_userland_image call")
         .expect("image vend")
 }
 
-fn namespace_client(capability: BorrowedHandle<'_>) -> NamespaceClient<PortTransport> {
-    NamespaceClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
+fn namespace_client(capability: BorrowedHandle<'_>) -> namespace::Client<PortTransport> {
+    namespace::Client::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
 pub(crate) fn mount_ram_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
@@ -220,8 +222,8 @@ pub(crate) fn image_session() -> OwnedHandle {
     session_for(IMAGE_DIRECTORY)
 }
 
-pub(crate) fn connect(capability: &OwnedHandle) -> FileSystemClient<PortTransport> {
-    FileSystemClient::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
+pub(crate) fn connect(capability: &OwnedHandle) -> file_system::Client<PortTransport> {
+    file_system::Client::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
 #[derive(Clone, Copy)]
@@ -277,15 +279,15 @@ impl Transport for Tampered {
     }
 }
 
-fn connect_tampered(capability: &OwnedHandle, tamper: Tamper) -> FileSystemClient<Tampered> {
-    FileSystemClient::new(Tampered {
+fn connect_tampered(capability: &OwnedHandle, tamper: Tamper) -> file_system::Client<Tampered> {
+    file_system::Client::new(Tampered {
         port: PortTransport::client(capability),
         tamper,
     })
     .with_wait(CALL_TIMEOUT)
 }
 
-fn connect_abandoning(capability: &OwnedHandle) -> FileSystemClient<Tampered> {
+fn connect_abandoning(capability: &OwnedHandle) -> file_system::Client<Tampered> {
     connect_tampered(
         capability,
         Tamper {
@@ -295,7 +297,7 @@ fn connect_abandoning(capability: &OwnedHandle) -> FileSystemClient<Tampered> {
     )
 }
 
-pub(crate) fn acquire_buffer(client: &FileSystemClient<PortTransport>) -> MemoryRegion {
+pub(crate) fn acquire_buffer(client: &file_system::Client<PortTransport>) -> MemoryRegion {
     let cap = client
         .acquire_buffer(BUFFER_SIZE)
         .expect("acquire_buffer call")
@@ -308,7 +310,7 @@ pub(crate) fn path(text: &str) -> Str<'_, { filesystem_abi::PATH_MAX }> {
 }
 
 pub(crate) fn open(
-    client: &FileSystemClient<PortTransport>,
+    client: &file_system::Client<PortTransport>,
     text: &str,
     mode: AccessMode,
     flags: OpenFlags,
@@ -320,7 +322,7 @@ pub(crate) fn open(
 }
 
 pub(crate) fn write_all(
-    client: &FileSystemClient<PortTransport>,
+    client: &file_system::Client<PortTransport>,
     buffer: &runtime::Mapping,
     opened: &Opened,
     offset: u64,
@@ -361,7 +363,7 @@ fn entry_name(index: usize) -> String {
 }
 
 pub(crate) fn walk_directory(
-    client: &FileSystemClient<PortTransport>,
+    client: &file_system::Client<PortTransport>,
     buffer: &runtime::Mapping,
     fd: NodeDescriptor,
 ) -> Vec<String> {

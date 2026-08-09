@@ -12,7 +12,7 @@ use kernel_tests::kernel_test;
 use runtime::{OwnedHandle, Port, PortTransport, Priority, Timeout, spawn};
 use syscall::Rights;
 
-use crate::startup_fixture_protocol::StartupFixtureClient;
+use crate::startup_fixture_protocol::startup_fixture;
 
 const STACK_SIZE: u64 = 0x4000;
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -89,7 +89,7 @@ fn client_cast_timeout_when_receiver_stays_open_without_recv() {
 
     let bounded = PortTransport::client(service.client.handle()).with_send_timeout(Timeout::POLL);
     kernel_tests::kassert_eq!(bounded.send_timeout(), Timeout::POLL);
-    let client = StartupFixtureClient::new(bounded);
+    let client = startup_fixture::Client::new(bounded);
 
     kernel_tests::kassert_eq!(client.start(7), Err(IpcError::Timeout));
 }
@@ -100,6 +100,6 @@ fn client_cast_reports_peer_close_when_receiver_closes_before_recv() {
     let bounded = PortTransport::client(service.client.handle()).with_send_timeout(Timeout::POLL);
     drop(service.server);
 
-    let client = StartupFixtureClient::new(bounded);
+    let client = startup_fixture::Client::new(bounded);
     kernel_tests::kassert_eq!(client.start(7), Err(IpcError::PeerClosed));
 }

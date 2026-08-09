@@ -11,8 +11,6 @@ members = [
     "lib/bootstrap-abi",
     "lib/io",
     "lib/ipc",
-    "lib/ipc-macros",
-    "lib/ipc-schema",
     "lib/ipc-test",
     "lib/log-abi",
     "lib/managed-component",
@@ -76,16 +74,13 @@ toml = "1.1.2"
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
-sha2 = "0.11.0"
 ra_ap_syntax = "=0.0.344"
 regex = "1"
 
 # Внутренние крейты workspace
 ipc = { path = "lib/ipc" }
-ipc-macros = { path = "lib/ipc-macros" }
-ipc-schema = { path = "lib/ipc-schema" }
 ipc-test = { path = "lib/ipc-test" }
-bootstrap = { path = "lib/bootstrap-abi" }
+bootstrap-abi = { path = "lib/bootstrap-abi" }
 log-abi = { path = "lib/log-abi" }
 log-relay = { path = "lib/log-relay" }
 collections = { path = "lib/collections" }

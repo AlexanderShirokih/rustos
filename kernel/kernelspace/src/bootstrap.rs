@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
 
-use bootstrap::{BootstrapService, dispatch_bootstrap};
+use bootstrap_abi::bootstrap;
 use capability::{
     Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, IrqControl,
     KernelIpcBuffer, MeteringGrant, Port, Reply, Resource, Rights, ThreadTransport,
@@ -168,7 +168,7 @@ pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: Bootstr
     let mut server = BootstrapServer { table, resources };
 
     loop {
-        match dispatch_bootstrap(&mut server, &transport) {
+        match bootstrap::dispatch(&mut server, &transport) {
             // Уход значка приём не прерывает: сессий по значкам сервер не
             // держит, и убирать ему нечего.
             Ok(()) | Err(WireError::SenderGone) => {}
@@ -227,11 +227,11 @@ impl BootstrapServer {
     }
 }
 
-impl BootstrapService for BootstrapServer {
+impl bootstrap::Service for BootstrapServer {
     fn log(
         &mut self,
-        tag: Str<{ bootstrap::LOG_TAG_MAX }>,
-        message: Str<{ bootstrap::LOG_MESSAGE_MAX }>,
+        tag: Str<{ bootstrap_abi::LOG_TAG_MAX }>,
+        message: Str<{ bootstrap_abi::LOG_MESSAGE_MAX }>,
     ) {
         if tag.as_str().is_empty() {
             info!("{}", message.as_str());

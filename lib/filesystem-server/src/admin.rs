@@ -1,7 +1,7 @@
 //! Обслуживание admin-порта: стартовый кадр с capability, которых не даёт `ProcessStart`, и
 //! установление сессий. Порт отдан тому, кто поднял файловую систему, и клиентам недоступен.
 
-use filesystem_abi::{FileSystemAdminService, FileSystemError};
+use filesystem_abi::{FileSystemError, file_system_admin};
 use ipc::wire::Cap;
 use runtime::{OwnedHandle, log_line};
 
@@ -31,7 +31,7 @@ impl Handshake {
     }
 }
 
-impl FileSystemAdminService for Handshake {
+impl file_system_admin::Service for Handshake {
     fn start(&mut self, log: Cap, image: Cap) {
         self.resources = Some(StartResources {
             log: OwnedHandle::adopt(log),
@@ -57,7 +57,7 @@ impl<'a> Binding<'a> {
     }
 }
 
-impl FileSystemAdminService for Binding<'_> {
+impl file_system_admin::Service for Binding<'_> {
     fn start(&mut self, log: Cap, image: Cap) {
         drop(OwnedHandle::adopt(log));
         drop(OwnedHandle::adopt(image));

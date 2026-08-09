@@ -128,8 +128,8 @@ mod tests {
     use ipc_test::MockEnd;
 
     use crate::{
-        COMPONENT_MANIFEST_SECTION, ComponentStartupClient, SlotKind, decode_manifest,
-        encode_manifest, manifest_len,
+        COMPONENT_MANIFEST_SECTION, SlotKind, component_startup, decode_manifest, encode_manifest,
+        manifest_len,
     };
 
     const LOG_CAP: Cap = cap(0x21);
@@ -167,8 +167,8 @@ mod tests {
         Cap::from_raw(NonZeroU32::new(raw).expect("non-zero"))
     }
 
-    fn client(end: MockEnd) -> ComponentStartupClient<MockEnd> {
-        ComponentStartupClient::new(end)
+    fn client(end: MockEnd) -> component_startup::Client<MockEnd> {
+        component_startup::Client::new(end)
     }
 
     #[test]

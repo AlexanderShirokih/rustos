@@ -1,6 +1,6 @@
 use core::num::NonZeroU64;
 
-use component_abi::{COMPONENT_SLOT_MAX, ComponentStartupClient};
+use component_abi::{COMPONENT_SLOT_MAX, component_startup};
 use runtime::{BorrowedHandle, OwnedHandle, Port, Timeout};
 use syscall::Rights;
 use userland::EntryView;
@@ -112,7 +112,7 @@ impl ComponentRoots {
             .servers
             .take()
             .ok_or(ManagedStartupError::InvalidState)?;
-        let client = ComponentStartupClient::new(transport);
+        let client = component_startup::Client::new(transport);
         client.start(log, servers.control, servers.service, slots.len())?;
         for slot in slots.slots.into_iter().flatten() {
             client.slot(slot)?;

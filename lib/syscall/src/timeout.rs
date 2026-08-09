@@ -9,7 +9,7 @@ pub struct Timeout(u64);
 
 impl Timeout {
     /// Не блокироваться: операция завершается немедленно, иначе возвращается
-    /// [`SYSCALL_RETURN_TIMEOUT`].
+    /// [`crate::SYSCALL_RETURN_TIMEOUT`].
     pub const POLL: Self = Self(0);
 
     /// Ждать бессрочно (не занимает слот в sleeper-heap).
@@ -48,7 +48,7 @@ pub const PORT_TIMEOUT_INFINITE: u64 = Timeout::INFINITE.raw();
 
 /// ABI-значение `timeout_ns` блокирующих Port-syscall "не блокироваться"
 /// (poll): операция завершается немедленно, иначе возвращается
-/// [`SYSCALL_RETURN_TIMEOUT`].
+/// [`crate::SYSCALL_RETURN_TIMEOUT`].
 pub const PORT_TIMEOUT_POLL: u64 = Timeout::POLL.raw();
 
 #[cfg(test)]

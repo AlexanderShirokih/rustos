@@ -31,8 +31,6 @@ hal-common = { workspace = true }
 drivers-common-aarch64 = { workspace = true }
 drivers-common = { workspace = true }
 drivers-aarch64 = { workspace = true }
-bootstrap = { workspace = true }
-ipc = { workspace = true }
 kernelspace = { workspace = true }
 capability = { workspace = true }
 scheduler = { workspace = true }

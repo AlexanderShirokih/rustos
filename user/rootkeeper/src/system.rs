@@ -1,23 +1,26 @@
 //! Композиция, которую rootkeeper поднимает при загрузке, и её supervisor.
 
 use alloc::{format, vec::Vec};
-use core::{fmt::Write as _, num::NonZeroU64};
+use core::{
+    fmt::{Arguments, Write as _},
+    num::NonZeroU64,
+};
 
-use bootstrap::BootstrapClient;
+use bootstrap_abi::bootstrap;
 use device_resolver::{
-    DeviceSelector, DeviceTreePlatform, PlatformDescription, ResolveError, acquire_mmio,
+    DeviceMmio, DeviceSelector, DeviceTreePlatform, PlatformDescription, ResolveError, acquire_mmio,
 };
 use device_resolver_aarch64::PLATFORM_BINDINGS;
 use fdt::devicetree::DeviceTree;
-use log_abi::{LogBuffer, LogClient};
+use log_abi::{LogBuffer, log};
 use managed_component::{
     ComponentRoots, ComponentSlots, ManagedComponent, ManagedStartupError, launch_component,
 };
 use runtime::{
-    IrqControl, IrqLine, MemoryRegion, OwnedHandle, PortTransport, ReadOnlyMapping, Resource,
-    Timeout, wait_any,
+    IrqControl, MemoryRegion, OwnedHandle, PortTransport, ReadOnlyMapping, Resource, Timeout,
+    wait_any,
 };
-use syscall::{Handle, Rights, SIGNALED, WaitItem};
+use syscall::{Handle, Rights, SIGNALED, SyscallError, WaitItem};
 use userland_image::{
     BOOT_PLAN_PATH, BootPlan, COMPONENT_PROGRAM_NAME, DecodedImage, DecodedProgram, OnExhausted,
     PlanComponent, PlanDecodeError, PlanDevice, SlotSource, decode, decode_plan,
@@ -45,7 +48,7 @@ pub enum Stopped {
     BadImage = 2,
     /// Критический компонент завершился.
     Subsystem = 3,
-    /// Описание платформы не дало ресурс, названный планом.
+    /// Ресурс устройства, названный планом, недоступен композиции.
     Device = 4,
 }
 
@@ -72,6 +75,8 @@ pub enum BootFailure {
     DeviceAuthority,
     /// Описание платформы не дало ресурс, названный слотом.
     Device(ResolveError),
+    /// Ресурс устройства уже отдан другому компоненту композиции.
+    DeviceBusy,
     /// Провайдер сервисного слота не поднят.
     Provider,
     /// Capability слота не сминчена.
@@ -103,6 +108,12 @@ struct DeviceAuthority {
     description: Option<ReadOnlyMapping>,
     _region: Option<MemoryRegion>,
     lines: Option<IrqControl>,
+    windows: Vec<GrantedWindow>,
+}
+
+struct GrantedWindow {
+    window: DeviceMmio,
+    owner: u16,
 }
 
 /// Компонент композиции вместе с его записью плана.
@@ -144,7 +155,7 @@ impl BootFailure {
             | Self::PlanOrder
             | Self::ProgramMissing
             | Self::RecordMissing => Stopped::BadImage,
-            Self::DeviceAuthority | Self::Device(_) => Stopped::Device,
+            Self::DeviceAuthority | Self::Device(_) | Self::DeviceBusy => Stopped::Device,
             Self::LogSession | Self::Resource | Self::Provider | Self::Slot | Self::Launch(_) => {
                 Stopped::Startup
             }
@@ -165,6 +176,7 @@ impl BootFailure {
             Self::Resource => "root resource unavailable",
             Self::DeviceAuthority => "platform description unavailable",
             Self::Device(_) => "device not described by the platform",
+            Self::DeviceBusy => "device resource taken by another component",
             Self::Provider => "service provider not running",
             Self::Slot => "component slot not minted",
             Self::Launch(_) => "component not started",
@@ -175,7 +187,7 @@ impl BootFailure {
 impl SystemImage {
     /// Забирает у ядра capability образа и отображает его read-only.
     pub fn acquire(kernel: Handle) -> Result<Self, BootFailure> {
-        let client = BootstrapClient::new(PortTransport::client(kernel));
+        let client = bootstrap::Client::new(PortTransport::client(kernel));
         let cap = client
             .acquire_userland_image()
             .ok()
@@ -215,11 +227,12 @@ impl DeviceAuthority {
             description: None,
             _region: None,
             lines: None,
+            windows: Vec::new(),
         }
     }
 
     fn acquire(kernel: Handle) -> Result<Self, BootFailure> {
-        let client = BootstrapClient::new(PortTransport::client(kernel));
+        let client = bootstrap::Client::new(PortTransport::client(kernel));
         let cap = client
             .acquire_boot_fdt()
             .ok()
@@ -238,6 +251,7 @@ impl DeviceAuthority {
             description: Some(description),
             _region: Some(region),
             lines: Some(IrqControl::from_handle(OwnedHandle::adopt(lines))),
+            windows: Vec::new(),
         })
     }
 
@@ -254,23 +268,60 @@ impl DeviceAuthority {
         body(&DeviceTreePlatform::new(&tree, PLATFORM_BINDINGS)).map_err(BootFailure::Device)
     }
 
-    fn line(&self, device: PlanDevice<'_>) -> Result<OwnedHandle, BootFailure> {
+    fn line(
+        &self,
+        device: PlanDevice<'_>,
+        owner: &str,
+        kernel_log: &bootstrap::Client<PortTransport>,
+    ) -> Result<OwnedHandle, BootFailure> {
         let interrupt = self.first_match(device, |platform, selector| {
             platform.interrupt(selector, device.resource)
         })?;
         let lines = self.lines.as_ref().ok_or(BootFailure::DeviceAuthority)?;
-        lines
-            .mint(interrupt.line.number(), interrupt.trigger)
-            .map(IrqLine::into_handle)
-            .map_err(|_| BootFailure::Slot)
+        let number = interrupt.line.number();
+        match lines.mint(number, interrupt.trigger) {
+            Ok(line) => Ok(line.into_handle()),
+            Err(runtime::Error::Syscall(SyscallError::AlreadyBound)) => {
+                // Линия принадлежит одному компоненту: занявший её держит
+                // capability, и второй bind ядро отвергает.
+                log_device_conflict(kernel_log, owner, format_args!("irq line {number}"));
+                Err(BootFailure::DeviceBusy)
+            }
+            Err(_) => Err(BootFailure::Slot),
+        }
     }
 
-    fn window(&self, kernel: Handle, device: PlanDevice<'_>) -> Result<OwnedHandle, BootFailure> {
+    fn window(
+        &mut self,
+        kernel: Handle,
+        device: PlanDevice<'_>,
+        owner: u16,
+        name: &str,
+        kernel_log: &bootstrap::Client<PortTransport>,
+    ) -> Result<OwnedHandle, BootFailure> {
         let window = self.first_match(device, |platform, selector| {
             platform.mmio(selector, device.resource)
         })?;
-        let client = BootstrapClient::new(PortTransport::client(kernel));
+        if self
+            .windows
+            .iter()
+            .any(|granted| granted.window == window && granted.owner != owner)
+        {
+            let base = window.base;
+            log_device_conflict(kernel_log, name, format_args!("mmio window {base:#x}"));
+            return Err(BootFailure::DeviceBusy);
+        }
+        let client = bootstrap::Client::new(PortTransport::client(kernel));
         let region: MemoryRegion = acquire_mmio(&client, window).map_err(BootFailure::Device)?;
+        // Смена incarnation забирает окно заново, и запись владельца остаётся
+        // одна: учёт ведётся по компоненту плана, а не по его запуску.
+        if !self
+            .windows
+            .iter()
+            .any(|granted| granted.window == window && granted.owner == owner)
+        {
+            self.windows.push(GrantedWindow { window, owner });
+        }
         Ok(region.into_handle())
     }
 
@@ -343,7 +394,12 @@ impl<'a> RootSystem<'a> {
             _resource: resource,
         };
         for index in system.order.clone() {
-            system.launch(index)?;
+            if let Err(failure) = system.launch(index) {
+                // Поднятые компоненты уходят вместе с загрузкой: иначе они
+                // держат линии и окна устройств за композицией, которой нет.
+                system.shutdown();
+                return Err(failure);
+            }
         }
         Ok(system)
     }
@@ -367,7 +423,7 @@ impl<'a> RootSystem<'a> {
     /// Завершение потока пересылки критично: восстановить его композиция не
     /// умеет.
     pub fn supervise_turn(&mut self, relay_thread: Handle) -> Supervised {
-        let kernel_log = BootstrapClient::new(PortTransport::client(self.kernel));
+        let kernel_log = bootstrap::Client::new(PortTransport::client(self.kernel));
         let mut waits = Vec::with_capacity(self.components.len() + 1);
         let mut watched: Vec<u16> = Vec::with_capacity(self.components.len());
         for index in 0..self.plan_len() {
@@ -423,11 +479,12 @@ impl<'a> RootSystem<'a> {
     }
 
     fn provision(
-        &self,
+        &mut self,
         index: u16,
         plan: PlanComponent<'a>,
     ) -> Result<ComponentSlots, BootFailure> {
         let badge = relay::component_badge(index);
+        let kernel_log = bootstrap::Client::new(PortTransport::client(self.kernel));
         let mut slots = ComponentSlots::default();
         for source in plan.slots() {
             let capability = match source {
@@ -437,8 +494,11 @@ impl<'a> RootSystem<'a> {
                     .handle()
                     .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)
                     .map_err(|_| BootFailure::Slot)?,
-                SlotSource::Irq(device) => self.devices.line(device)?,
-                SlotSource::Mmio(device) => self.devices.window(self.kernel, device)?,
+                SlotSource::Irq(device) => self.devices.line(device, plan.name(), &kernel_log)?,
+                SlotSource::Mmio(device) => {
+                    self.devices
+                        .window(self.kernel, device, index, plan.name(), &kernel_log)?
+                }
                 SlotSource::Service { provider } => self
                     .component(provider)
                     .and_then(|component| component.managed.running())
@@ -474,7 +534,7 @@ impl<'a> RootSystem<'a> {
     fn replace_component(
         &mut self,
         index: u16,
-        kernel_log: &BootstrapClient<PortTransport>,
+        kernel_log: &bootstrap::Client<PortTransport>,
     ) -> Supervised {
         let Some(component) = self.components.get_mut(usize::from(index)) else {
             return Supervised::Stopped(Stopped::Subsystem);
@@ -505,7 +565,7 @@ impl<'a> RootSystem<'a> {
 
 /// Поднимает систему и держит её до завершения критического компонента.
 pub fn supervise(kernel: Handle) -> Stopped {
-    let kernel_log = BootstrapClient::new(PortTransport::client(kernel));
+    let kernel_log = bootstrap::Client::new(PortTransport::client(kernel));
     if relay::start(kernel).is_err() {
         // Отказ relay идёт в bootstrap-канал: по отказавшему пути диагностика не проходит.
         let _ = kernel_log.log_str(LOG_TAG, "log relay not started");
@@ -516,12 +576,12 @@ pub fn supervise(kernel: Handle) -> Stopped {
     stopped
 }
 
-fn run(kernel: Handle, kernel_log: &BootstrapClient<PortTransport>) -> Stopped {
+fn run(kernel: Handle, kernel_log: &bootstrap::Client<PortTransport>) -> Stopped {
     let Some(session) = relay::session(relay::SUPERVISOR_BADGE) else {
         let _ = kernel_log.log_str(LOG_TAG, "supervisor log session not minted");
         return Stopped::Startup;
     };
-    let log = LogClient::new(PortTransport::client(&session));
+    let log = log::Client::new(PortTransport::client(&session));
     let _ = log.write_str(LOG_TAG, "started");
 
     let Some(relay_thread) = relay::thread_handle() else {
@@ -553,7 +613,7 @@ fn run_composition(
     plan: BootPlan<'_>,
     kernel: Handle,
     relay_thread: Handle,
-    log: &LogClient<PortTransport>,
+    log: &log::Client<PortTransport>,
 ) -> Stopped {
     match RootSystem::bring_up(image, plan, kernel, relay::delegated_session) {
         Ok(mut system) => {
@@ -635,7 +695,27 @@ fn component_program<'a>(
         .ok_or(BootFailure::ProgramMissing)
 }
 
-fn log_exit(kernel_log: &BootstrapClient<PortTransport>, subsystem: &str, exit_code: Option<u32>) {
+fn log_device_conflict(
+    kernel_log: &bootstrap::Client<PortTransport>,
+    component: &str,
+    resource: Arguments<'_>,
+) {
+    let mut message = LogBuffer::<EXIT_MESSAGE_MAX>::new();
+    if write!(
+        message,
+        "{component} takes {resource}, held by another component"
+    )
+    .is_ok()
+    {
+        let _ = kernel_log.log_str(LOG_TAG, message.as_str());
+    }
+}
+
+fn log_exit(
+    kernel_log: &bootstrap::Client<PortTransport>,
+    subsystem: &str,
+    exit_code: Option<u32>,
+) {
     let mut message = LogBuffer::<EXIT_MESSAGE_MAX>::new();
     let written = match exit_code {
         Some(code) => write!(message, "{subsystem} stopped with exit code {code}"),

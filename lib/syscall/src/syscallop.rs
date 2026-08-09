@@ -42,11 +42,12 @@ pub enum SyscallOp {
     /// `send` на port: блокирующая отправка сообщения из IPC-буфера
     /// текущего потока. Аргументы:
     ///  - `arg0=handle`,
-    ///  - `arg1=timeout_ns` ([`PORT_TIMEOUT_INFINITE`] - бессрочно, `0` - poll,
+    ///  - `arg1=timeout_ns` ([`crate::PORT_TIMEOUT_INFINITE`] - бессрочно, `0` - poll,
     ///    иначе дедлайн в нс).
     ///
     /// Требует `Rights::WRITE`.
-    /// Возврат: `0`, [`SYSCALL_RETURN_TIMEOUT`] при истечении тайм-аута, либо `-(SyscallError)`.
+    /// Возврат: `0`, [`crate::SYSCALL_RETURN_TIMEOUT`] при истечении тайм-аута,
+    /// либо `-(SyscallError)`.
     PortSend = 0x24,
 
     /// `recv` на port: блокирующий приём в IPC-буфер текущего потока.
@@ -56,7 +57,7 @@ pub enum SyscallOp {
     ///
     /// Требует `Rights::READ`.
     /// Возврат: reply handle id, если встречный был `call` (иначе `0`),
-    /// [`SYSCALL_RETURN_TIMEOUT`] при истечении тайм-аута, либо `-(SyscallError)`.
+    /// [`crate::SYSCALL_RETURN_TIMEOUT`] при истечении тайм-аута, либо `-(SyscallError)`.
     PortRecv = 0x25,
 
     /// `call` на port: блокирующий запрос-ответ. Сообщение из
@@ -66,7 +67,7 @@ pub enum SyscallOp {
     ///    получателя + ожидание reply).
     ///
     /// Требует `Rights::WRITE`.
-    /// Возврат: `0`, [`SYSCALL_RETURN_TIMEOUT`] при истечении тайм-аута,
+    /// Возврат: `0`, [`crate::SYSCALL_RETURN_TIMEOUT`] при истечении тайм-аута,
     /// либо `-(SyscallError)`.
     PortCall = 0x26,
 
@@ -207,7 +208,7 @@ pub enum SyscallOp {
     /// для self-exit предусмотрен `Self::ThreadExit`.
     ThreadTerminate = 0x54,
 
-    /// Возвращает user-VA per-thread IPC-буфер ([`IpcBuffer`]) текущего
+    /// Возвращает user-VA per-thread IPC-буфер ([`crate::IpcBuffer`]) текущего
     /// потока. Аргументов нет.
     /// Возврат: VA (>0) либо `-(SyscallError)`, если у потока нет буфера (kernel-поток).
     ThreadIpcBufferAddr = 0x55,

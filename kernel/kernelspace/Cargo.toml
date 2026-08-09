@@ -12,7 +12,7 @@ kernel-tests = [
 
 [dependencies]
 spin = { workspace = true }
-bootstrap = { workspace = true }
+bootstrap-abi = { workspace = true }
 collections = { workspace = true }
 drivers-common = { workspace = true }
 io = { workspace = true, features = ["alloc"] }

@@ -1,5 +1,5 @@
 [package]
-name = "bootstrap"
+name = "bootstrap-abi"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

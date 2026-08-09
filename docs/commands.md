@@ -8,6 +8,7 @@
 | Host-clippy                         | `cargo clippy --workspace`                                                                                           |
 | AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --exclude style-tool --target aarch64-unknown-none` |
 | Форматирование                      | `cargo fmt --all --check`                                                                                            |
+| Ссылки в документации               | `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" cargo doc --no-deps --workspace`                       |
 | Отделённые workspace                | см. [«Отделённые workspace»](#отделённые-workspace): свой прогон fmt и clippy на каждый                              |
 | Исходники `std` с оверлеем          | `cargo xtask std-src [--force] [--verify]`                                                                           |
 | Проверка слоёв                      | `cargo xtask check-layers`                                                                                           |
@@ -237,6 +238,22 @@ cargo xtask check-layers
 манифеста — второго реестра в дереве нет. Заодно она сверяет таблицу
 `[workspace.lints]` каждого из них с корневой: наследовать её вне корневого
 дерева нечем, а разойдясь, крейт собирается по более слабым правилам.
+
+Каждая объявленная path-зависимость сверяется с исходниками пакета: манифест задаёт
+граф, по которому идёт проверка слоёв, и ребро без единой ссылки в коде этот граф
+искажает. В коде зависимость ищется под именем её lib-цели либо под переименованием
+из манифеста.
+
+## Ссылки в документации
+
+```bash
+RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" cargo doc --no-deps --workspace
+```
+
+Ссылка на переименованный или приватный элемент молча пропадает из документации,
+оставляя текст, который читателю некуда открыть. Флаг переводит такую ссылку в ошибку
+вместе с прочими предупреждениями rustdoc: незакрытым HTML-тегом в прозе и ссылкой из
+публичной документации на приватный элемент.
 
 ## Проверка кодстайла
 

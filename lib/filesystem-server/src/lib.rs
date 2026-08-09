@@ -17,7 +17,7 @@ use alloc::boxed::Box;
 use core::sync::atomic::AtomicU64;
 
 use filesystem::FileSystemBackend;
-use filesystem_abi::{dispatch_file_system, dispatch_file_system_admin};
+use filesystem_abi::{file_system, file_system_admin};
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
     MemoryRegion, Mutex, OwnedHandle, Port, PortTransport, Priority, ReadOnlyMapping, Resource,
@@ -93,7 +93,7 @@ where
 fn handshake(admin: &OwnedHandle) -> Result<StartResources> {
     let transport = PortTransport::server(admin.borrow());
     let mut received = Handshake::default();
-    dispatch_file_system_admin(&mut received, &transport)?;
+    file_system_admin::dispatch(&mut received, &transport)?;
     received.take().ok_or(Error::Start)
 }
 
@@ -127,7 +127,7 @@ fn serve_sessions(shared: &Shared) {
             service: &shared.service,
             next_badge: &shared.next_badge,
         };
-        let delivered = dispatch_file_system(&mut serving, &transport).is_ok();
+        let delivered = file_system::dispatch(&mut serving, &transport).is_ok();
         drop(serving);
         frame.end(delivered);
         // Reply-объект не переживает свой кадр: закрытие неотправленного ответа будит
@@ -159,7 +159,7 @@ fn serve_admin(shared: &Shared) -> u32 {
             }
         }
         let mut binding = Binding::new(shared);
-        let delivered = dispatch_file_system_admin(&mut binding, &transport).is_ok();
+        let delivered = file_system_admin::dispatch(&mut binding, &transport).is_ok();
         binding.end(delivered);
         transport.cancel_reply();
     }

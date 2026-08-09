@@ -96,11 +96,10 @@ test = false
 bench = false
 
 [dependencies]
-bootstrap = { workspace = true }
+bootstrap-abi = { workspace = true }
 collections = { workspace = true }
 component-abi = { workspace = true }
 device-resolver = { workspace = true }
-fdt = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }
 filesystem-server = { workspace = true }

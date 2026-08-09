@@ -21,7 +21,7 @@ pub enum TestKind {
 
 /// Регистрирует тест-кейс в секции `.tests.kernel`.
 ///
-/// Обычно вызывается не напрямую, а через атрибут [`kernel_test`].
+/// Обычно вызывается не напрямую, а через атрибут `kernel_test`.
 ///
 /// ```ignore
 /// use kernel_tests::kernel_test;

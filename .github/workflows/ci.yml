@@ -37,6 +37,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask check-layers
 
+  doc:
+    name: doc links
+    runs-on: ubuntu-latest
+    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    env:
+      # Ссылка на переименованный или приватный элемент молча пропадает из документации,
+      # оставляя текст, который читателю некуда открыть.
+      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D warnings
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --workspace
+
   style:
     name: style
     runs-on: ubuntu-latest

@@ -23,7 +23,7 @@ bench = false
 doctest = false
 
 [dependencies]
-bootstrap = { workspace = true }
+bootstrap-abi = { workspace = true }
 device-resolver = { workspace = true }
 device-resolver-aarch64 = { workspace = true }
 fdt = { workspace = true }

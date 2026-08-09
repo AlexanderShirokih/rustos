@@ -34,75 +34,69 @@ const _: () = assert!(
     "open frame exceeds the body budget"
 );
 
-/// Файловый сервис: дерево имён и содержимое узлов. Операции без собственного результата
-/// возвращают `0`.
-#[ipc::protocol(name = "FileSystem")]
-pub trait FileSystem {
-    /// Выделяет сессии буфер данных на `size` байт и отдаёт RW-capability на него.
-    #[call]
-    fn acquire_buffer(&self, size: u32) -> Result<ipc::wire::Cap, FileSystemError>;
+ipc::protocol! {
+    /// Файловый сервис: дерево имён и содержимое узлов. Операции без собственного результата
+    /// возвращают `0`.
+    pub mod file_system {
+        name = "FileSystem";
 
-    /// Открывает узел по пути внутри монтирования, закрепляя за дескриптором его идентичность.
-    /// `mode` задаёт режим доступа дескриптора, `flags` - действия над деревом имён.
-    #[call]
-    fn open(
-        &self,
-        path: ipc::wire::Str<{ PATH_MAX }>,
-        mode: AccessMode,
-        flags: OpenFlags,
-    ) -> Result<Opened, FileSystemError>;
+        /// Выделяет сессии буфер данных на `size` байт и отдаёт RW-capability на него.
+        call fn acquire_buffer(size: u32) -> Result<ipc::wire::Cap, FileSystemError>;
 
-    /// Закрывает дескриптор сессии.
-    #[call]
-    fn close(&self, fd: NodeDescriptor) -> Result<u32, FileSystemError>;
+        /// Открывает узел по пути внутри монтирования, закрепляя за дескриптором его
+        /// идентичность. `mode` задаёт режим доступа дескриптора, `flags` - действия над
+        /// деревом имён.
+        call fn open(
+            path: ipc::wire::Str<{ PATH_MAX }>,
+            mode: AccessMode,
+            flags: OpenFlags,
+        ) -> Result<Opened, FileSystemError>;
 
-    /// Кладёт в начало буфера сессии до `len` байт узла со смещения `offset`. Возвращает число
-    /// прочитанных байт.
-    #[call]
-    fn read(&self, fd: NodeDescriptor, offset: u64, len: u32) -> Result<u32, FileSystemError>;
+        /// Закрывает дескриптор сессии.
+        call fn close(fd: NodeDescriptor) -> Result<u32, FileSystemError>;
 
-    /// Пишет в узел `len` байт из начала буфера сессии по смещению `offset`. Значение
-    /// `offset == u64::MAX` - дозапись в конец, неделимая между сессиями.
-    #[call]
-    fn write(&self, fd: NodeDescriptor, offset: u64, len: u32) -> Result<Written, FileSystemError>;
+        /// Кладёт в начало буфера сессии до `len` байт узла со смещения `offset`. Возвращает
+        /// число прочитанных байт.
+        call fn read(fd: NodeDescriptor, offset: u64, len: u32) -> Result<u32, FileSystemError>;
 
-    /// Задаёт длину узла: усечение либо предварительное расширение.
-    #[call]
-    fn set_size(&self, fd: NodeDescriptor, size: u64) -> Result<u32, FileSystemError>;
+        /// Пишет в узел `len` байт из начала буфера сессии по смещению `offset`. Значение
+        /// `offset == u64::MAX` - дозапись в конец, неделимая между сессиями.
+        call fn write(
+            fd: NodeDescriptor,
+            offset: u64,
+            len: u32,
+        ) -> Result<Written, FileSystemError>;
 
-    /// Отдаёт метаданные узла, закреплённого за дескриптором.
-    #[call]
-    fn stat(&self, fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError>;
+        /// Задаёт длину узла: усечение либо предварительное расширение.
+        call fn set_size(fd: NodeDescriptor, size: u64) -> Result<u32, FileSystemError>;
 
-    /// Заполняет буфер сессии записями каталога начиная с позиции `from`. Перечисление
-    /// продолжает вызов с `from` из [`Listed::next`].
-    #[call]
-    fn list(&self, fd: NodeDescriptor, from: DirCursor) -> Result<Listed, FileSystemError>;
+        /// Отдаёт метаданные узла, закреплённого за дескриптором.
+        call fn stat(fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError>;
 
-    /// Переименовывает узел. Переход через границу монтирования - `CrossMount`.
-    #[call]
-    fn rename(
-        &self,
-        from: ipc::wire::Str<{ PATH_MAX }>,
-        to: ipc::wire::Str<{ PATH_MAX }>,
-    ) -> Result<u32, FileSystemError>;
+        /// Заполняет буфер сессии записями каталога начиная с позиции `from`. Перечисление
+        /// продолжает вызов с `from` из [`Listed::next`].
+        call fn list(fd: NodeDescriptor, from: DirCursor) -> Result<Listed, FileSystemError>;
 
-    /// Удаляет узел по пути. Каталог с записями - `NotEmpty`.
-    #[call]
-    fn unlink(&self, path: ipc::wire::Str<{ PATH_MAX }>) -> Result<u32, FileSystemError>;
+        /// Переименовывает узел. Переход через границу монтирования - `CrossMount`.
+        call fn rename(
+            from: ipc::wire::Str<{ PATH_MAX }>,
+            to: ipc::wire::Str<{ PATH_MAX }>,
+        ) -> Result<u32, FileSystemError>;
 
-    /// Отдаёт capability на регион с содержимым узла. Права выводятся из режима дескриптора.
-    /// Бекенд без такого региона отвечает `NotSupported`.
-    #[call]
-    fn backing_memory(&self, fd: NodeDescriptor) -> Result<ipc::wire::Cap, FileSystemError>;
+        /// Удаляет узел по пути. Каталог с записями - `NotEmpty`.
+        call fn unlink(path: ipc::wire::Str<{ PATH_MAX }>) -> Result<u32, FileSystemError>;
 
-    /// Отдаёт capability свежей сессии с каталогом `path` в роли корня: окно только сужается.
-    /// Путь не каталога - `NotADirectory`, путь за `PATH_MAX` вместе с окном - `InvalidPath`.
-    #[call]
-    fn open_root(
-        &self,
-        path: ipc::wire::Str<{ PATH_MAX }>,
-    ) -> Result<ipc::wire::Cap, FileSystemError>;
+        /// Отдаёт capability на регион с содержимым узла. Права выводятся из режима
+        /// дескриптора. Бекенд без такого региона отвечает `NotSupported`.
+        call fn backing_memory(fd: NodeDescriptor) -> Result<ipc::wire::Cap, FileSystemError>;
+
+        /// Отдаёт capability свежей сессии с каталогом `path` в роли корня: окно только
+        /// сужается. Путь не каталога - `NotADirectory`, путь за `PATH_MAX` вместе с окном -
+        /// `InvalidPath`.
+        call fn open_root(
+            path: ipc::wire::Str<{ PATH_MAX }>,
+        ) -> Result<ipc::wire::Cap, FileSystemError>;
+    }
 }
 
 #[cfg(test)]
@@ -122,8 +116,8 @@ mod tests {
     use ipc_test::MockEnd;
 
     use super::{
-        AccessMode, DirCursor, FileSystemClient, FileSystemError, FileSystemService, Listed,
-        NodeDescriptor, NodeInfo, OpenFlags, Opened, PATH_MAX, Written, dispatch_file_system,
+        AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, OpenFlags,
+        Opened, PATH_MAX, Written, file_system,
     };
     use crate::kind::NodeKind;
 
@@ -211,7 +205,7 @@ mod tests {
         }
     }
 
-    impl FileSystemService for Recorder {
+    impl file_system::Service for Recorder {
         fn acquire_buffer(&mut self, size: u32) -> Result<Cap, FileSystemError> {
             self.record(Call::AcquireBuffer { size });
             if size == 0 {
@@ -310,9 +304,9 @@ mod tests {
         Cap::from_raw(NonZeroU32::new(raw).expect("non-zero"))
     }
 
-    fn with_service<R>(body: impl FnOnce(&FileSystemClient<MockEnd>) -> R) -> (R, Vec<Call>) {
+    fn with_service<R>(body: impl FnOnce(&file_system::Client<MockEnd>) -> R) -> (R, Vec<Call>) {
         let (client_end, server_end) = MockEnd::pair();
-        let client = FileSystemClient::new(client_end);
+        let client = file_system::Client::new(client_end);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let result = thread::scope(|scope| {
             let mut service = Recorder {
@@ -320,7 +314,7 @@ mod tests {
             };
             scope.spawn(move || {
                 while server_end.wait_readable(ipc::Timeout::INFINITE).is_ok() {
-                    if dispatch_file_system(&mut service, &server_end).is_err() {
+                    if file_system::dispatch(&mut service, &server_end).is_err() {
                         break;
                     }
                 }

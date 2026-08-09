@@ -212,7 +212,7 @@ pub extern "C" fn _start(startup: Handle) -> ! { /* ... */ }
 
 ```rust
 let process = launch_entry(&program, None, &resource, |startup| -> Result<()> {
-    DriverArgsClient::new(PortTransport::client(startup.handle()))
+    driver_args::Client::new(PortTransport::client(startup.handle()))
         .provide(device, service)?;
     Ok(())
 })?;
@@ -229,7 +229,7 @@ callback: вызывающий не получает ложного подтве
 
 ```rust
 let DriverState { device, service } =
-    receive_startup(startup, dispatch_driver_args)?.ok_or(Error::Start)?;
+    receive_startup(startup, driver_args::dispatch)?.ok_or(Error::Start)?;
 ```
 
 Тип аргументов и владение передаваемыми capability остаются частью прикладного
@@ -376,13 +376,12 @@ Bootstrap — типизированный канал между bootstrap-пр�
 #![no_std]
 #![no_main]
 
-use log_abi::LogClient;
 use runtime::{PortTransport, thread_exit};
 use syscall::Handle;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(log: Handle) -> ! {
-    let client = LogClient::new(PortTransport::client(log));
+    let client = log_abi::log::Client::new(PortTransport::client(log));
     let result = client.write_str("init", "process started");
 
     thread_exit(u64::from(result.is_err()))

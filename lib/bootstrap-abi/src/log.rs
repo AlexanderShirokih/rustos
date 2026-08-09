@@ -1,4 +1,4 @@
-//! Строковый фасад [`Bootstrap::log`](crate::Bootstrap::log): принимает `&str`
+//! Строковый фасад [`bootstrap::log`]: принимает `&str`
 //! и усекает их до границ кадра, снимая с вызывателя конструирование `Str`.
 
 use ipc::{
@@ -6,10 +6,10 @@ use ipc::{
     wire::{IpcError, Str},
 };
 
-use crate::BootstrapClient;
+use crate::bootstrap;
 
-impl<T: Transport> BootstrapClient<T> {
-    /// Шлёт [`Bootstrap::log`](crate::Bootstrap::log), усекая `tag` и
+impl<T: Transport> bootstrap::Client<T> {
+    /// Шлёт [`bootstrap::log`], усекая `tag` и
     /// `message` до границ кадра по границе символа.
     pub fn log_str(&self, tag: &str, message: &str) -> Result<(), IpcError> {
         self.log(Str::truncating(tag), Str::truncating(message))
@@ -23,14 +23,14 @@ mod tests {
     use ipc::wire::Str;
     use ipc_test::MockEnd;
 
-    use crate::{BootstrapClient, LOG_MESSAGE_MAX, LOG_TAG_MAX, dispatch_bootstrap};
+    use crate::{LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap};
 
     #[derive(Default)]
     struct Sink {
         last_log: Option<String>,
     }
 
-    impl crate::BootstrapService for Sink {
+    impl crate::bootstrap::Service for Sink {
         fn log(
             &mut self,
             tag: ipc::wire::Str<'_, { LOG_TAG_MAX }>,
@@ -59,24 +59,24 @@ mod tests {
     #[test]
     fn log_str_round_trip() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = BootstrapClient::new(client_end);
+        let client = bootstrap::Client::new(client_end);
         client.log_str("rtc-client", "clock ok").expect("log write");
         let mut sink = Sink::default();
-        dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
+        bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
         assert_eq!(sink.last_log.as_deref(), Some("[rtc-client] clock ok"));
     }
 
     #[test]
     fn log_str_clamps_overlong_strings() {
         let (client_end, server_end) = MockEnd::pair();
-        let client = BootstrapClient::new(client_end);
+        let client = bootstrap::Client::new(client_end);
         let long_tag = "t".repeat(LOG_TAG_MAX + 5);
         let long_message = "m".repeat(LOG_MESSAGE_MAX + 5);
         client
             .log_str(&long_tag, &long_message)
             .expect("clamped log write");
         let mut sink = Sink::default();
-        dispatch_bootstrap(&mut sink, &server_end).expect("dispatch ok");
+        bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
         let logged = sink.last_log.expect("logged");
         assert_eq!(logged.len(), 1 + LOG_TAG_MAX + 2 + LOG_MESSAGE_MAX);
     }
