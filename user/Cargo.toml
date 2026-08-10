@@ -11,6 +11,7 @@ members = [
     "hello-std",
     "namespace-router",
     "rootkeeper",
+    "std-selftest",
     "testrunner",
     "../lib/filesystem-server",
     "../lib/log-relay",

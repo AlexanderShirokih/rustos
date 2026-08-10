@@ -39,7 +39,7 @@ struct TrackedAuthority<'a> {
     relinquished: bool,
 }
 
-struct ImageMapping {
+pub(crate) struct ImageMapping {
     mapping: ReadOnlyMapping,
     _region: MemoryRegion,
 }
@@ -362,7 +362,7 @@ fn wait_for_authority(component: &ManagedComponent<FixtureRoots>) {
         .expect("fixture used transferred authority");
 }
 
-fn image_mapping() -> ImageMapping {
+pub(crate) fn image_mapping() -> ImageMapping {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let cap = client
         .acquire_userland_image()
@@ -376,16 +376,16 @@ fn image_mapping() -> ImageMapping {
     }
 }
 
-fn image_program<'a>(image: &'a ImageMapping, path: &str) -> DecodedProgram<'a> {
+pub(crate) fn image_program<'a>(image: &'a ImageMapping, path: &str) -> DecodedProgram<'a> {
     decode(image.mapping.as_bytes())
         .expect("decode acquired image")
         .entry(path)
-        .expect("image carries managed fixture")
+        .expect("image carries the entry")
         .program()
-        .expect("managed fixture entry is a program")
+        .expect("image entry is a program")
 }
 
-fn process_pages<'a, E: EntryView<'a>>(program: &E) -> u64 {
+pub(crate) fn process_pages<'a, E: EntryView<'a>>(program: &E) -> u64 {
     let segments = program
         .segments()
         .map(|segment| segment.mem_size().div_ceil(USERLAND_PAGE_SIZE))

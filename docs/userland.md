@@ -1,8 +1,8 @@
 # Userland
 
 Userland — init radmisk контейнер, который принимает управление от ядра и начинает инициализацию всей userspace-системы.
-Userspace-процесс — freestanding-бинарь, который несёт весь свой код и работает
-поверх syscall ABI ядра. С ядром он общается через системные вызовы. Код программ userland лежит в `user/`.
+Userspace-процесс несёт весь свой код и работает поверх syscall ABI ядра: динамической
+загрузки и разделяемых библиотек система не знает. Код программ userland лежит в `user/`.
 
 ## Состав
 
@@ -368,31 +368,13 @@ Bootstrap — типизированный канал между bootstrap-пр�
 
 ## Как написать процесс
 
-Программа userland — бинарь без стандартной библиотеки и без `main`, с
-собственными `_start` и `panic_handler`.
+Программа образа существует в двух формах. На стандартной библиотеке пишутся
+компоненты композиции: точку входа и приём стартового набора им отдаёт
+платформенный слой. Freestanding-форма — свои `_start` и `panic_handler` без
+`main` — обслуживает запуск мимо стартовой транзакции компонента: корневой
+процесс, `testrunner` и его фикстуры. В ней написана и остальная часть образа.
 
-```rust
-#![no_std]
-#![no_main]
-
-use runtime::{PortTransport, thread_exit};
-use syscall::Handle;
-
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(log: Handle) -> ! {
-    let client = log_abi::log::Client::new(PortTransport::client(log));
-    let result = client.write_str("init", "process started");
-
-    thread_exit(u64::from(result.is_err()))
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-    loop { core::hint::spin_loop() }
-}
-```
-
-Что нужно новому процессу помимо кода:
+Что нужно новому процессу в обеих формах помимо кода:
 
 - линкер-скрипт: точка входа `_start`, базовый адрес образа (`0x00400000`),
   выравнивание секций `.text/.rodata/.data/.bss` на страницу (4 KiB), границы
@@ -404,10 +386,9 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 
 ### Программа на стандартной библиотеке
 
-Программе на `std` точка входа и приём стартового набора capability достаются от
-платформенного слоя: `_start` принимает набор до `main` и оставляет от него
-лог-сессию. Поэтому исходник такой программы — обычный `fn main`, а `println!`
-уходит в системный журнал под именем компонента:
+Точка входа принимает стартовый набор capability до `main` и оставляет от него
+лог-сессию. Исходник — обычный `fn main`, а `println!` уходит в системный журнал
+под именем компонента:
 
 ```rust
 fn main() {
@@ -415,8 +396,7 @@ fn main() {
 }
 ```
 
-Собирается она так же, как остальные программы образа, и объявляет то же самое —
-кроме кода: `hello-std` в `user/` служит образцом.
+Образец — `hello-std` в `user/`.
 
 #### Свой манифест и стартовый набор
 
@@ -444,10 +424,39 @@ let clock = rtc::Client::new(PortTransport::client(Handle::from_nonzero(session)
 println!("rtc reads {}", clock.now()?);
 ```
 
-Рабочий пример — `clock-std` в `user/`. Отсюда же следует граница: состояние
+Рабочий пример — `clock-std` в `user/`. Стеки потоков программа берёт из своей кучи, и
+предел памяти компонента в плане покрывает их наравне с ней. Отсюда же следует граница: состояние
 `molecular-rt`, взятого программой в зависимости, — своё, не то, что внутри
 `std`. Лог-сессия живёт в копии `std`, и строка в журнал идёт `println!`, а не
 `molecular_rt::log`.
+
+### Freestanding-программа
+
+Свои `_start` и `panic_handler` программа объявляет сама, а базовый слой берёт из
+`lib/runtime`. Стартовую транзакцию компонента она принимает приёмником из своего
+`component_manifest!` (`driver-pl031` в `user/`); низкоуровневый `load_entry`
+кладёт ей в `x0` одну начальную capability:
+
+```rust
+#![no_std]
+#![no_main]
+
+use runtime::{PortTransport, thread_exit};
+use syscall::Handle;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _start(log: Handle) -> ! {
+    let client = log_abi::log::Client::new(PortTransport::client(log));
+    let result = client.write_str("init", "process started");
+
+    thread_exit(u64::from(result.is_err()))
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
+    loop { core::hint::spin_loop() }
+}
+```
 
 ## Сборка и запуск
 

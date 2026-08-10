@@ -1,6 +1,6 @@
 diff -ruN a/std/Cargo.toml b/std/Cargo.toml
 --- a/std/Cargo.toml	2026-08-07 22:42:11.982085856 +0000
-+++ b/std/Cargo.toml	2026-08-09 21:48:01.619216661 +0000
++++ b/std/Cargo.toml	2026-08-10 18:37:47.249202613 +0000
 @@ -70,6 +70,9 @@
      'rustc-dep-of-std',
  ], public = true }
@@ -13,7 +13,7 @@ diff -ruN a/std/Cargo.toml b/std/Cargo.toml
  
 diff -ruN a/std/build.rs b/std/build.rs
 --- a/std/build.rs	2026-08-07 22:42:12.114085864 +0000
-+++ b/std/build.rs	2026-08-09 21:48:01.620961246 +0000
++++ b/std/build.rs	2026-08-10 18:37:47.249227649 +0000
 @@ -33,6 +33,7 @@
          || target_os == "windows"
          || target_os == "fuchsia"
@@ -24,7 +24,7 @@ diff -ruN a/std/build.rs b/std/build.rs
          || target_os == "trusty"
 diff -ruN a/std/src/os/mod.rs b/std/src/os/mod.rs
 --- a/std/src/os/mod.rs	2026-08-07 22:42:12.162085867 +0000
-+++ b/std/src/os/mod.rs	2026-08-09 21:48:01.620961246 +0000
++++ b/std/src/os/mod.rs	2026-08-10 18:37:47.249227649 +0000
 @@ -117,6 +117,8 @@
  pub mod l4re;
  #[cfg(target_os = "macos")]
@@ -36,7 +36,7 @@ diff -ruN a/std/src/os/mod.rs b/std/src/os/mod.rs
  #[cfg(target_os = "netbsd")]
 diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 --- a/std/src/os/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/os/molecular/mod.rs	2026-08-09 21:48:01.621019477 +0000
++++ b/std/src/os/molecular/mod.rs	2026-08-10 18:37:47.249314886 +0000
 @@ -0,0 +1,58 @@
 +//! Molecular OS specific definitions.
 +//!
@@ -98,7 +98,7 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +}
 diff -ruN a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
 --- a/std/src/sys/alloc/mod.rs	2026-08-07 22:42:12.130085865 +0000
-+++ b/std/src/sys/alloc/mod.rs	2026-08-09 21:48:01.621019477 +0000
++++ b/std/src/sys/alloc/mod.rs	2026-08-10 18:37:47.249314886 +0000
 @@ -81,6 +81,10 @@
          mod hermit;
          use hermit as imp;
@@ -120,7 +120,7 @@ diff -ruN a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
          target_os = "zkvm",
 diff -ruN a/std/src/sys/alloc/molecular.rs b/std/src/sys/alloc/molecular.rs
 --- a/std/src/sys/alloc/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/alloc/molecular.rs	2026-08-09 21:48:01.621070596 +0000
++++ b/std/src/sys/alloc/molecular.rs	2026-08-10 18:37:47.249395615 +0000
 @@ -0,0 +1,17 @@
 +use super::realloc_fallback;
 +use crate::alloc::Layout;
@@ -141,7 +141,7 @@ diff -ruN a/std/src/sys/alloc/molecular.rs b/std/src/sys/alloc/molecular.rs
 +}
 diff -ruN a/std/src/sys/exit.rs b/std/src/sys/exit.rs
 --- a/std/src/sys/exit.rs	2026-08-07 22:42:12.486085886 +0000
-+++ b/std/src/sys/exit.rs	2026-08-09 21:48:01.621070596 +0000
++++ b/std/src/sys/exit.rs	2026-08-10 18:37:47.249395615 +0000
 @@ -98,6 +98,9 @@
                  libc::exit(code)
              }
@@ -154,7 +154,7 @@ diff -ruN a/std/src/sys/exit.rs b/std/src/sys/exit.rs
          }
 diff -ruN a/std/src/sys/io/error/mod.rs b/std/src/sys/io/error/mod.rs
 --- a/std/src/sys/io/error/mod.rs	2026-08-07 22:42:12.158085867 +0000
-+++ b/std/src/sys/io/error/mod.rs	2026-08-09 21:48:01.621070596 +0000
++++ b/std/src/sys/io/error/mod.rs	2026-08-10 18:37:47.249395615 +0000
 @@ -3,6 +3,10 @@
          mod hermit;
          pub use hermit::*;
@@ -168,7 +168,7 @@ diff -ruN a/std/src/sys/io/error/mod.rs b/std/src/sys/io/error/mod.rs
          pub use motor::*;
 diff -ruN a/std/src/sys/io/error/molecular.rs b/std/src/sys/io/error/molecular.rs
 --- a/std/src/sys/io/error/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/io/error/molecular.rs	2026-08-09 21:48:01.621363166 +0000
++++ b/std/src/sys/io/error/molecular.rs	2026-08-10 18:37:47.249441451 +0000
 @@ -0,0 +1,75 @@
 +//! Отображение ошибок syscall-ABI в `io::ErrorKind`.
 +//!
@@ -247,7 +247,7 @@ diff -ruN a/std/src/sys/io/error/molecular.rs b/std/src/sys/io/error/molecular.r
 +}
 diff -ruN a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.rs
 --- a/std/src/sys/pal/mod.rs	2026-08-07 22:42:12.150085866 +0000
-+++ b/std/src/sys/pal/mod.rs	2026-08-09 21:48:01.621363166 +0000
++++ b/std/src/sys/pal/mod.rs	2026-08-10 18:37:47.249441451 +0000
 @@ -20,6 +20,10 @@
          mod hermit;
          pub use self::hermit::*;
@@ -261,7 +261,7 @@ diff -ruN a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.rs
          pub use self::motor::*;
 diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 --- a/std/src/sys/pal/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/pal/molecular/mod.rs	2026-08-09 22:09:33.403187115 +0000
++++ b/std/src/sys/pal/molecular/mod.rs	2026-08-10 18:37:47.249510846 +0000
 @@ -0,0 +1,59 @@
 +//! Платформенный слой Molecular OS.
 +//!
@@ -324,7 +324,7 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +}
 diff -ruN a/std/src/sys/random/mod.rs b/std/src/sys/random/mod.rs
 --- a/std/src/sys/random/mod.rs	2026-08-07 22:42:12.150085866 +0000
-+++ b/std/src/sys/random/mod.rs	2026-08-09 21:48:01.621430147 +0000
++++ b/std/src/sys/random/mod.rs	2026-08-10 18:37:47.249510846 +0000
 @@ -99,6 +99,10 @@
          mod wasi;
          pub use wasi::{fill_bytes, hashmap_random_keys};
@@ -346,7 +346,7 @@ diff -ruN a/std/src/sys/random/mod.rs b/std/src/sys/random/mod.rs
      target_os = "xous",
 diff -ruN a/std/src/sys/random/molecular.rs b/std/src/sys/random/molecular.rs
 --- a/std/src/sys/random/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/random/molecular.rs	2026-08-09 21:48:01.621479629 +0000
++++ b/std/src/sys/random/molecular.rs	2026-08-10 18:37:47.249554653 +0000
 @@ -0,0 +1,18 @@
 +//! Источника энтропии в системе нет.
 +//!
@@ -368,7 +368,7 @@ diff -ruN a/std/src/sys/random/molecular.rs b/std/src/sys/random/molecular.rs
 +}
 diff -ruN a/std/src/sys/stdio/mod.rs b/std/src/sys/stdio/mod.rs
 --- a/std/src/sys/stdio/mod.rs	2026-08-07 22:42:12.154085867 +0000
-+++ b/std/src/sys/stdio/mod.rs	2026-08-09 21:48:01.621479629 +0000
++++ b/std/src/sys/stdio/mod.rs	2026-08-10 18:37:47.249554653 +0000
 @@ -13,6 +13,10 @@
          mod sgx;
          pub use sgx::*;
@@ -382,7 +382,7 @@ diff -ruN a/std/src/sys/stdio/mod.rs b/std/src/sys/stdio/mod.rs
          pub use motor::*;
 diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 --- a/std/src/sys/stdio/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/stdio/molecular.rs	2026-08-09 22:09:22.406059918 +0000
++++ b/std/src/sys/stdio/molecular.rs	2026-08-10 18:37:47.249583975 +0000
 @@ -0,0 +1,136 @@
 +use molecular_rt::{ipc::wire::IpcError, log};
 +
@@ -522,7 +522,7 @@ diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 +}
 diff -ruN a/std/src/sys/sync/condvar/mod.rs b/std/src/sys/sync/condvar/mod.rs
 --- a/std/src/sys/sync/condvar/mod.rs	2026-08-07 22:42:12.158085867 +0000
-+++ b/std/src/sys/sync/condvar/mod.rs	2026-08-09 21:48:01.621516609 +0000
++++ b/std/src/sys/sync/condvar/mod.rs	2026-08-10 18:37:47.249583975 +0000
 @@ -6,6 +6,7 @@
          target_os = "freebsd",
          target_os = "openbsd",
@@ -533,7 +533,7 @@ diff -ruN a/std/src/sys/sync/condvar/mod.rs b/std/src/sys/sync/condvar/mod.rs
          all(target_family = "wasm", target_feature = "atomics"),
 diff -ruN a/std/src/sys/sync/mutex/mod.rs b/std/src/sys/sync/mutex/mod.rs
 --- a/std/src/sys/sync/mutex/mod.rs	2026-08-07 22:42:12.170085868 +0000
-+++ b/std/src/sys/sync/mutex/mod.rs	2026-08-09 21:48:01.621516609 +0000
++++ b/std/src/sys/sync/mutex/mod.rs	2026-08-10 18:37:47.249583975 +0000
 @@ -5,6 +5,7 @@
          target_os = "android",
          target_os = "freebsd",
@@ -544,7 +544,7 @@ diff -ruN a/std/src/sys/sync/mutex/mod.rs b/std/src/sys/sync/mutex/mod.rs
          all(target_family = "wasm", target_feature = "atomics"),
 diff -ruN a/std/src/sys/sync/once/mod.rs b/std/src/sys/sync/once/mod.rs
 --- a/std/src/sys/sync/once/mod.rs	2026-08-07 22:42:12.138085866 +0000
-+++ b/std/src/sys/sync/once/mod.rs	2026-08-09 21:48:01.621516609 +0000
++++ b/std/src/sys/sync/once/mod.rs	2026-08-10 18:37:47.249583975 +0000
 @@ -14,6 +14,7 @@
          target_os = "android",
          all(target_family = "wasm", target_feature = "atomics"),
@@ -555,7 +555,7 @@ diff -ruN a/std/src/sys/sync/once/mod.rs b/std/src/sys/sync/once/mod.rs
          target_os = "dragonfly",
 diff -ruN a/std/src/sys/sync/rwlock/mod.rs b/std/src/sys/sync/rwlock/mod.rs
 --- a/std/src/sys/sync/rwlock/mod.rs	2026-08-07 22:42:12.150085866 +0000
-+++ b/std/src/sys/sync/rwlock/mod.rs	2026-08-09 21:48:01.621516609 +0000
++++ b/std/src/sys/sync/rwlock/mod.rs	2026-08-10 18:37:47.249583975 +0000
 @@ -9,6 +9,7 @@
          target_os = "fuchsia",
          all(target_family = "wasm", target_feature = "atomics"),
@@ -566,7 +566,7 @@ diff -ruN a/std/src/sys/sync/rwlock/mod.rs b/std/src/sys/sync/rwlock/mod.rs
      ) => {
 diff -ruN a/std/src/sys/sync/thread_parking/mod.rs b/std/src/sys/sync/thread_parking/mod.rs
 --- a/std/src/sys/sync/thread_parking/mod.rs	2026-08-07 22:42:12.146085866 +0000
-+++ b/std/src/sys/sync/thread_parking/mod.rs	2026-08-09 21:48:01.621516609 +0000
++++ b/std/src/sys/sync/thread_parking/mod.rs	2026-08-10 18:37:47.249583975 +0000
 @@ -8,6 +8,7 @@
          target_os = "openbsd",
          target_os = "dragonfly",
@@ -575,9 +575,160 @@ diff -ruN a/std/src/sys/sync/thread_parking/mod.rs b/std/src/sys/sync/thread_par
          target_os = "motor",
          target_os = "hermit",
          all(target_os = "wasi", target_env = "p3"),
+diff -ruN a/std/src/sys/thread/mod.rs b/std/src/sys/thread/mod.rs
+--- a/std/src/sys/thread/mod.rs	2026-08-07 22:42:12.130085865 +0000
++++ b/std/src/sys/thread/mod.rs	2026-08-10 19:14:46.709336153 +0000
+@@ -6,6 +6,15 @@
+         mod unsupported;
+         pub use unsupported::{current_os_id, set_name};
+     }
++    target_os = "molecular" => {
++        mod molecular;
++        pub use molecular::{DEFAULT_MIN_STACK_SIZE, Thread, sleep, yield_now};
++        // Число процессоров ядро наружу не отдаёт, имени у потока нет, а handle потока
++        // идентификатором для чужого наблюдателя не служит.
++        #[expect(dead_code)]
++        mod unsupported;
++        pub use unsupported::{available_parallelism, current_os_id, set_name};
++    }
+     target_os = "motor" => {
+         mod motor;
+         pub use motor::*;
+diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
+--- a/std/src/sys/thread/molecular.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/sys/thread/molecular.rs	2026-08-10 19:14:46.640556524 +0000
+@@ -0,0 +1,128 @@
++use crate::alloc::{Layout, alloc, dealloc};
++use crate::io;
++use crate::ptr::NonNull;
++use crate::thread::ThreadInit;
++use crate::time::Duration;
++use crate::{cmp, mem};
++
++use molecular_rt::syscall::{Handle, SIGNALED, Timeout};
++
++/// Приоритет потока: тот же, с каким userspace поднимает свои рабочие потоки.
++const PRIORITY: u64 = 1;
++
++/// Выравнивание вершины стека, которого требует AArch64 от SP.
++const STACK_ALIGN: usize = 16;
++
++pub const DEFAULT_MIN_STACK_SIZE: usize = 256 * 1024;
++
++/// Запущенный поток: его handle и стек, выделенный кучей процесса.
++///
++/// `join` освобождает стек. Поток, брошенный без `join`, остаётся отвязанным, и стек с ним:
++/// на нём поток ещё может исполняться.
++pub struct Thread {
++    handle: Handle,
++    stack: NonNull<u8>,
++    stack_layout: Layout,
++}
++
++// SAFETY: поля описывают чужой поток и его стек, и владение ими переносится целиком.
++unsafe impl Send for Thread {}
++// SAFETY: см. impl Send.
++unsafe impl Sync for Thread {}
++
++impl Thread {
++    // unsafe: see thread::Builder::spawn_unchecked for safety requirements
++    pub unsafe fn new(stack: usize, init: Box<ThreadInit>) -> io::Result<Thread> {
++        let rounded = cmp::max(stack, DEFAULT_MIN_STACK_SIZE)
++            .checked_next_multiple_of(STACK_ALIGN)
++            .and_then(|size| Layout::from_size_align(size, STACK_ALIGN).ok());
++        let Some(stack_layout) = rounded else {
++            return Err(io::const_error!(
++                io::ErrorKind::InvalidInput,
++                "thread stack size overflows its layout",
++            ));
++        };
++        // SAFETY: размер ненулевой по построению границы снизу.
++        let Some(base) = NonNull::new(unsafe { alloc(stack_layout) }) else {
++            return Err(io::const_error!(
++                io::ErrorKind::OutOfMemory,
++                "thread stack not allocated",
++            ));
++        };
++
++        let start: extern "C" fn(usize) -> ! = start;
++        let payload = Box::into_raw(init);
++        let started = molecular_rt::process_self().and_then(|process| {
++            let created = molecular_rt::thread_create(
++                process,
++                start as *const () as u64,
++                base.addr().get() as u64 + stack_layout.size() as u64,
++                payload as u64,
++                PRIORITY,
++            );
++            // `ProcessSelf` ставит свежую запись таблицы handle на каждый вызов.
++            molecular_rt::handle_close(process);
++            created
++        });
++
++        match started {
++            Ok(handle) => Ok(Thread {
++                handle,
++                stack: base,
++                stack_layout,
++            }),
++            Err(error) => {
++                // Поток не стартовал: точку входа его аргумент не прочитает.
++                // SAFETY: указатель только что из `Box::into_raw`, других владельцев нет.
++                drop(unsafe { Box::from_raw(payload) });
++                // SAFETY: тот же указатель и тот же layout, что у `alloc` выше.
++                unsafe { dealloc(base.as_ptr(), stack_layout) };
++                Err(io::Error::from_raw_os_error(error as i32))
++            }
++        }
++    }
++
++    pub fn join(self) {
++        let outcome = molecular_rt::signal_wait_one(self.handle, SIGNALED, Timeout::INFINITE);
++        assert!(outcome >= 0, "failed to join thread");
++        // SAFETY: поток терминирован, и его стек больше никем не адресуется. Указатель и
++        // layout - те же, с какими стек выделен.
++        unsafe { dealloc(self.stack.as_ptr(), self.stack_layout) };
++        molecular_rt::handle_close(self.handle);
++        mem::forget(self);
++    }
++}
++
++extern "C" fn start(payload: usize) -> ! {
++    // SAFETY: аргумент пришёл из `Box::into_raw` в `Thread::new` и разбирается ровно один
++    // раз: этот поток - его единственный владелец.
++    let init = unsafe { Box::from_raw(payload as *mut ThreadInit) };
++    let rust_start = init.init();
++    rust_start();
++
++    // Уход потока - последний момент, когда его локальные данные ещё адресуемы.
++    molecular_rt::tls::run_destructors();
++    crate::rt::thread_cleanup();
++    molecular_rt::thread_exit(0)
++}
++
++pub fn yield_now() {
++    molecular_rt::thread_yield();
++}
++
++pub fn sleep(dur: Duration) {
++    // Адрес futex локален вызову, и разбудить по нему некому: ожидание истекает сроком.
++    // Ложное пробуждение возвращает управление раньше, поэтому срок досчитывается.
++    let idle = molecular_rt::Futex::new(0);
++    let started = molecular_rt::Instant::now();
++    let mut remaining = dur;
++    while molecular_rt::futex_wait(&idle, 0, Some(remaining)) {
++        let elapsed = Duration::from_nanos(molecular_rt::Instant::now().as_nanos().wrapping_sub(
++            started.as_nanos(),
++        ));
++        let Some(left) = dur.checked_sub(elapsed) else {
++            return;
++        };
++        remaining = left;
++    }
++}
 diff -ruN a/std/src/sys/thread_local/key/molecular.rs b/std/src/sys/thread_local/key/molecular.rs
 --- a/std/src/sys/thread_local/key/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/thread_local/key/molecular.rs	2026-08-09 21:48:01.621516609 +0000
++++ b/std/src/sys/thread_local/key/molecular.rs	2026-08-10 18:37:47.249583975 +0000
 @@ -0,0 +1,27 @@
 +//! Ключи локальных данных потока обслуживает `molecular-rt` поверх `TPIDR_EL0`.
 +
@@ -608,7 +759,7 @@ diff -ruN a/std/src/sys/thread_local/key/molecular.rs b/std/src/sys/thread_local
 +}
 diff -ruN a/std/src/sys/thread_local/mod.rs b/std/src/sys/thread_local/mod.rs
 --- a/std/src/sys/thread_local/mod.rs	2026-08-07 22:42:12.150085866 +0000
-+++ b/std/src/sys/thread_local/mod.rs	2026-08-09 21:48:01.621516609 +0000
++++ b/std/src/sys/thread_local/mod.rs	2026-08-10 18:37:47.249583975 +0000
 @@ -163,6 +163,15 @@
              pub(super) use unix::get;
              use unix::{create, destroy};
@@ -625,3 +776,55 @@ diff -ruN a/std/src/sys/thread_local/mod.rs b/std/src/sys/thread_local/mod.rs
          all(not(target_thread_local), target_os = "windows") => {
              #[cfg(test)]
              mod tests;
+diff -ruN a/std/src/sys/time/mod.rs b/std/src/sys/time/mod.rs
+--- a/std/src/sys/time/mod.rs	2026-08-07 22:42:12.142085866 +0000
++++ b/std/src/sys/time/mod.rs	2026-08-10 18:37:47.249583975 +0000
+@@ -3,6 +3,18 @@
+         mod hermit;
+         use hermit as imp;
+     }
++    target_os = "molecular" => {
++        mod molecular;
++        // Стенных часов процессу система не выдаёт: время суток держит драйвер RTC, и берётся
++        // оно сессией его контракта, а не платформенным слоем.
++        #[expect(unused)]
++        mod unsupported;
++
++        mod imp {
++            pub use super::molecular::Instant;
++            pub use super::unsupported::{SystemTime, UNIX_EPOCH};
++        }
++    }
+     target_os = "motor" => {
+         use moto_rt::time as imp;
+     }
+diff -ruN a/std/src/sys/time/molecular.rs b/std/src/sys/time/molecular.rs
+--- a/std/src/sys/time/molecular.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/sys/time/molecular.rs	2026-08-10 18:37:47.249780906 +0000
+@@ -0,0 +1,26 @@
++use crate::time::Duration;
++
++/// Монотонные часы: тот же источник и та же точка отсчёта, что у сроков блокирующих
++/// операций ядра.
++#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
++pub struct Instant(Duration);
++
++impl Instant {
++    pub fn now() -> Instant {
++        Instant(Duration::from_nanos(
++            molecular_rt::Instant::now().as_nanos(),
++        ))
++    }
++
++    pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
++        self.0.checked_sub(other.0)
++    }
++
++    pub fn checked_add_duration(&self, other: &Duration) -> Option<Instant> {
++        Some(Instant(self.0.checked_add(*other)?))
++    }
++
++    pub fn checked_sub_duration(&self, other: &Duration) -> Option<Instant> {
++        Some(Instant(self.0.checked_sub(*other)?))
++    }
++}

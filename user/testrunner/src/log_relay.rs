@@ -36,8 +36,15 @@ const NAMED_BADGE: NonZeroU64 = NonZeroU64::new(0x0101_0101_0101_0101).expect("b
 const UNNAMED_BADGE: NonZeroU64 =
     NonZeroU64::new(0x0202_0202_0202_0202).expect("badge is non-zero");
 
+pub(crate) const SELFTEST_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x0400_0000).expect("badge is non-zero");
+
 fn shared_source_name(badge: u64) -> Option<&'static str> {
-    (badge == ROUTER_BADGE.get()).then_some("filesystem")
+    match badge {
+        _ if badge == ROUTER_BADGE.get() => Some("filesystem"),
+        _ if badge == SELFTEST_BADGE.get() => Some("std-selftest"),
+        _ => None,
+    }
 }
 
 fn test_source_name(badge: u64) -> Option<&'static str> {

@@ -109,3 +109,7 @@ source = "user/testrunner/assets/empty.txt"
 [[files]]
 path = "/boot/directory-consumer-fixture/sample"
 source = "user/testrunner/assets/area.txt"
+
+[[programs]]
+package = "std-selftest"
+path = "/boot/std-selftest"
