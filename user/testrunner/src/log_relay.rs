@@ -77,10 +77,6 @@ pub(crate) fn shared_relay_thread() -> Option<syscall::Handle> {
     SHARED.lock().as_ref().map(|relay| relay.handle().as_raw())
 }
 
-pub(crate) fn router_log_session() -> OwnedHandle {
-    component_log_session(ROUTER_BADGE).expect("router log session")
-}
-
 pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<OwnedHandle> {
     let mut shared = SHARED.lock();
     let relay = shared.get_or_insert_with(|| {

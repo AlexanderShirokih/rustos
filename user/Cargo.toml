@@ -54,6 +54,7 @@ ipc = { path = "../lib/ipc" }
 log-abi = { path = "../lib/log-abi" }
 molecular-rt = { path = "../lib/std-rt" }
 rtc-abi = { path = "../lib/rtc-abi" }
+rootkeeper-abi = { path = "../lib/rootkeeper-abi" }
 syscall = { path = "../lib/syscall" }
 test-harness-qemu = { path = "../lib/test-harness-qemu" }
 userland = { path = "../lib/userland" }

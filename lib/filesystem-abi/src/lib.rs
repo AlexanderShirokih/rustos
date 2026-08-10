@@ -1,6 +1,6 @@
 //! Контракты файловой подсистемы: `namespace` разбирает путь в монтирование, `file_system`
-//! работает с узлами внутри монтирования, `namespace_admin` и `file_system_admin` поднимают эти
-//! процессы, а второй ещё и заводит сессии. Здесь же типы ответов, флаги открытия, правила пути
+//! работает с узлами внутри монтирования, `namespace_admin` меняет таблицу, а
+//! `file_system_admin` заводит сессии. Здесь же типы ответов, флаги открытия, правила пути
 //! и раскладка записи каталога в буфере данных.
 
 #![cfg_attr(not(test), no_std)]
@@ -39,5 +39,5 @@ pub use mount_table::{
 };
 pub use path::{Component, Path, SEPARATOR, rebase};
 pub use protocol::*;
-pub use reply::{Listed, Mounted, NodeInfo, Opened, Written};
+pub use reply::{Listed, NodeInfo, Opened, Written};
 pub use router::*;

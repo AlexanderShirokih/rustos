@@ -1,44 +1,38 @@
-//! E2E файловой подсистемы: маршрутизатор имён поднимает процессы файловых систем из образа,
-//! выдаёт клиентам сессии с ними, а сами файловые системы работают над своим монтированием.
+//! E2E файловой подсистемы: rootkeeper поднимает файловые системы, а маршрутизатор получает их
+//! сессии у supervisor и владеет таблицей монтирования.
 
-use alloc::{format, string::String, vec, vec::Vec};
-use core::num::NonZeroU64;
+use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 use bootstrap_abi::bootstrap;
 use filesystem_abi::{
     AccessMode, DirCursor, DirEntry, FileSystemError, NAME_MAX, NodeDescriptor, NodeKind,
-    OpenFlags, Opened, file_system, namespace, namespace_admin,
+    OpenFlags, Opened, Path, file_system, namespace, namespace_admin,
 };
 use ipc::{
     MessageLen, Transport,
     wire::{HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, Str, TERMINATOR},
 };
 use kernel_tests::kernel_test;
-use managed_component::{ComponentRoots, ManagedComponent, launch_component};
+use managed_component::ComponentRoots;
+use rootkeeper::{RootSystem, SystemImage};
 use runtime::{
-    BorrowedHandle, MemoryRegion, OwnedHandle, PortTransport, Process, ReadOnlyMapping, Resource,
-    Signal, Timeout, UserMemFlags, port_send,
+    BorrowedHandle, MemoryRegion, OwnedHandle, PortTransport, Process, Resource, Signal, Timeout,
+    UserMemFlags, port_send,
 };
 use spin::Once;
-use syscall::{Rights, SIGNALED};
-use userland_image::{COMPONENT_PROGRAM_NAME, component_name, decode, decode_plan};
+use syscall::Rights;
+use userland_image::{component_name, decode};
 use userland_loader::load_entry;
 
 pub(crate) const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const CLIENT_TIMEOUT: Timeout = Timeout::from_secs(2);
 
-const BOOT_TREE_BADGE: NonZeroU64 = NonZeroU64::new(0x0B00).expect("badge is non-zero");
-const BOOT_TREE_ATTEMPTS: usize = 200;
-const BOOT_TREE_TURN: Timeout = Timeout::from_ns(10_000_000);
-
 const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture/program";
 
-const RAM_FILESYSTEM_PROGRAM: &str = "/boot/filesystem-ramfs";
-
-const UNRESPONSIVE_FILESYSTEM_PROGRAM: &str = "/boot/unresponsive-filesystem";
-
 const RAM_MOUNT: &str = "/tmp";
+const RAM_FILESYSTEM_PROGRAM: &str = "/boot/filesystem-ramfs";
+const UNRESPONSIVE_FILESYSTEM_PROGRAM: &str = "/boot/unresponsive-filesystem";
 
 const APPEND_OFFSET: u64 = u64::MAX;
 
@@ -64,11 +58,7 @@ const REAP_SESSIONS: usize = 40;
 const REAP_BUFFER_SIZE: u32 = 64 * 1024;
 
 struct NamespacePorts {
-    component: ManagedComponent<ComponentRoots>,
-    _resource: Resource,
-    _image: MemoryRegion,
-    _mapping: ReadOnlyMapping,
-    _log: OwnedHandle,
+    system: RootSystem<'static>,
 }
 
 static NAMESPACE_PORTS: Once<NamespacePorts> = Once::new();
@@ -87,7 +77,10 @@ fn namespace_ports() -> &'static NamespacePorts {
 
 fn namespace_roots() -> &'static ComponentRoots {
     namespace_ports()
-        .component
+        .system
+        .component(0)
+        .expect("composition carries the namespace router")
+        .managed()
         .running()
         .expect("namespace router is running")
         .roots()
@@ -100,73 +93,20 @@ fn namespace_admin_client(
 }
 
 fn start_namespace() -> NamespacePorts {
-    let bootstrap = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let image = MemoryRegion::adopt(acquire_image(&bootstrap));
-    let mapping = image.map_full_read_only().expect("map userland image");
-    let log = crate::log_relay::router_log_session();
-    let resource = Resource::self_resource().expect("self metering resource");
-    let component = {
-        let decoded = decode(mapping.as_bytes()).expect("decode userland image");
-        let record = decoded
-            .entry(crate::rootkeeper_system::BOOT_PLAN_ENTRY)
-            .expect("image carries the compiled boot plan");
-        let plan = decode_plan(record.data()).expect("decode boot plan");
-        let plan_component = plan.component(0).expect("boot plan carries the router");
-        let program = decoded
-            .entry(&alloc::format!(
-                "{}/{COMPONENT_PROGRAM_NAME}",
-                plan_component.executable()
-            ))
-            .expect("image carries the component program")
-            .program()
-            .expect("component entry is a program");
-        let mut component = ManagedComponent::new(&resource, plan_component.memory_pages())
-            .expect("component budget reserved");
-        launch_component(
-            &mut component,
-            &program,
-            plan_component.name(),
-            &log,
-            plan_component.startup_timeout(),
-            crate::rootkeeper_system::router_slots(&image),
-        )
-        .expect("namespace router started");
-        component
-    };
-    await_boot_tree(&component);
-    // Источники переживают маршрутизатор: производные капы отзываются вместе с ними.
-    NamespacePorts {
-        component,
-        _resource: resource,
-        _image: image,
-        _mapping: mapping,
-        _log: log,
-    }
-}
-
-fn await_boot_tree(component: &ManagedComponent<ComponentRoots>) {
-    // Маршрутизатор монтирует дерево имён сам, и стартовый кадр только доставлен: путь
-    // становится накрытым оборотами его подъёма.
-    let roots = component
-        .running()
-        .expect("namespace router is running")
-        .roots();
-    let session = roots
-        .session(BOOT_TREE_BADGE)
-        .expect("namespace session minted");
-    for _ in 0..BOOT_TREE_ATTEMPTS {
-        if let Ok(Ok(mounted)) = namespace_client(session.borrow()).resolve(path(RAM_MOUNT)) {
-            drop(OwnedHandle::adopt(mounted.session));
-            return;
-        }
-        pause(BOOT_TREE_TURN);
-    }
-    panic!("boot tree is not mounted");
-}
-
-fn pause(timeout: Timeout) {
-    let timer = Signal::create().expect("pause timer");
-    let _ = timer.wait(SIGNALED, timeout);
+    let image = Box::leak(Box::new(
+        SystemImage::acquire(crate::bootstrap_handle()).expect("userland image is mapped"),
+    ));
+    let plan = image
+        .plan(crate::rootkeeper_system::BOOT_PLAN_ENTRY)
+        .expect("compiled boot plan decodes");
+    let system = RootSystem::bring_up(
+        image,
+        plan,
+        crate::bootstrap_handle(),
+        crate::log_relay::component_log_session,
+    )
+    .expect("filesystem composition started");
+    NamespacePorts { system }
 }
 
 fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
@@ -207,11 +147,11 @@ pub(crate) fn unmount_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
 }
 
 pub(crate) fn session_for(text: &str) -> OwnedHandle {
-    let mounted = namespace_client(router_minter())
+    let session = namespace_client(router_minter())
         .resolve(path(text))
         .expect("resolve call")
         .expect("path is covered by a mount");
-    OwnedHandle::adopt(mounted.session)
+    OwnedHandle::adopt(session)
 }
 
 pub(crate) fn ram_session() -> OwnedHandle {
@@ -219,7 +159,7 @@ pub(crate) fn ram_session() -> OwnedHandle {
 }
 
 pub(crate) fn image_session() -> OwnedHandle {
-    session_for(IMAGE_DIRECTORY)
+    session_for(Path::ROOT.as_str())
 }
 
 pub(crate) fn connect(capability: &OwnedHandle) -> file_system::Client<PortTransport> {
@@ -597,25 +537,33 @@ fn filesystem_rejects_write_through_a_read_only_descriptor() {
 fn namespace_resolves_each_path_to_the_longest_prefix() {
     let namespace = namespace_client(router_minter());
 
-    // Корень накрывает всё: путь под ним уходит файловой системе целиком.
+    // Каталог образа существует только в корневой imagefs.
     let image = namespace
-        .resolve(path(IMAGE_FILE))
+        .resolve(path(IMAGE_DIRECTORY))
         .expect("resolve call")
         .expect("root mount covers the path");
-    kernel_tests::kassert_eq!(image.prefix_len, 0);
-    drop(OwnedHandle::adopt(image.session));
+    drop(OwnedHandle::adopt(image));
 
-    // Более длинный префикс выигрывает у корня, и его длину клиент снимает с пути сам.
+    let ram = ram_session();
+    connect(&ram)
+        .open(
+            path("/inner"),
+            AccessMode::ReadWrite,
+            OpenFlags::CREATE | OpenFlags::DIRECTORY,
+        )
+        .expect("create directory call")
+        .expect("directory created");
+
+    // `/tmp/inner` отсутствует в imagefs: успешное окно доказывает выбор длинного префикса.
     let ram = namespace
         .resolve(path("/tmp/inner"))
         .expect("resolve call")
         .expect("ram mount covers the path");
-    kernel_tests::kassert_eq!(ram.prefix_len, RAM_MOUNT.len() as u32);
-    drop(OwnedHandle::adopt(ram.session));
+    drop(OwnedHandle::adopt(ram));
 }
 
 #[kernel_test]
-fn namespace_refuses_an_occupied_prefix_and_an_unknown_program() {
+fn namespace_refuses_an_occupied_prefix_without_changing_the_table() {
     let namespace = namespace_admin_client(router_admin());
 
     let occupied = namespace
@@ -623,21 +571,16 @@ fn namespace_refuses_an_occupied_prefix_and_an_unknown_program() {
         .expect("mount call");
     kernel_tests::kassert_eq!(occupied, Err(FileSystemError::AlreadyExists));
 
-    let absent = namespace
-        .mount(path("/absent-mount"), path("/boot/no-such-program"))
-        .expect("mount call");
-    kernel_tests::kassert_eq!(absent, Err(FileSystemError::NotFound));
-
-    // Отказ монтирования не занял префикс: он остаётся свободным.
-    let unmounted = namespace
-        .unmount(path("/absent-mount"))
-        .expect("unmount call");
-    kernel_tests::kassert_eq!(unmounted, Err(FileSystemError::NotFound));
+    let mounted = namespace_client(router_minter())
+        .resolve(path(RAM_MOUNT))
+        .expect("resolve call")
+        .expect("original mount remains");
+    drop(OwnedHandle::adopt(mounted));
 }
 
 #[kernel_test]
 fn namespace_rejects_admin_operations_on_the_service_port() {
-    // Управление таблицей монтирования живёт на admin-порту: его ordinal сервисный порт не
+    // Управление таблицей монтирования живёт на control-порту: его ordinal service-порт не
     // разбирает, и кадр отвергается целиком, не доходя до операции.
     let admin_on_service = namespace_admin_client(router_minter());
     let refused = admin_on_service.unmount(path("/"));
@@ -648,12 +591,12 @@ fn namespace_rejects_admin_operations_on_the_service_port() {
         .resolve(path(IMAGE_FILE))
         .expect("resolve call")
         .expect("root mount survives the rejected frame");
-    drop(OwnedHandle::adopt(mounted.session));
+    drop(OwnedHandle::adopt(mounted));
 }
 
 #[kernel_test]
 fn namespace_reports_an_unresponsive_mount() {
-    const STUCK_MOUNT: &str = "/stuck";
+    const STUCK_MOUNT: &str = "/boot";
 
     let namespace = namespace_admin_client(router_admin());
     namespace
@@ -661,14 +604,14 @@ fn namespace_reports_an_unresponsive_mount() {
         .expect("mount call")
         .expect("fixture mounted");
 
-    // Файловая система приняла стартовый кадр и замолчала: `bind` не отвечает, и маршрутизатор
-    // обязан отпустить вызов по своему сроку, отличив зависшее монтирование от отсутствующего.
+    // Сессия остаётся живой без обслуживающего потока: `open_root` не отвечает, и маршрутизатор
+    // отпускает вызов по своему сроку.
     let resolved = namespace_client(router_minter())
         .resolve(path(STUCK_MOUNT))
         .expect("resolve call");
     kernel_tests::kassert_eq!(resolved, Err(FileSystemError::Unresponsive));
 
-    // Снятие убирает зависший процесс, и путь снова накрывает корневое монтирование.
+    // Снятие отпускает зависшую сессию, и путь снова накрывает корневое монтирование.
     namespace
         .unmount(path(STUCK_MOUNT))
         .expect("unmount call")
@@ -677,8 +620,27 @@ fn namespace_reports_an_unresponsive_mount() {
         .resolve(path(STUCK_MOUNT))
         .expect("resolve call")
         .expect("root mount covers the path again");
-    kernel_tests::kassert_eq!(rerouted.prefix_len, 0);
-    drop(OwnedHandle::adopt(rerouted.session));
+    drop(OwnedHandle::adopt(rerouted));
+}
+
+#[kernel_test]
+fn unmount_only_removes_the_route_and_keeps_existing_sessions_alive() {
+    const DETACHED_MOUNT: &str = "/boot";
+
+    mount_ram_filesystem(DETACHED_MOUNT).expect("fixture mounted");
+    let session = session_for(DETACHED_MOUNT);
+    unmount_filesystem(DETACHED_MOUNT).expect("fixture unmounted");
+
+    let opened = connect(&session)
+        .open(path("/"), AccessMode::Read, OpenFlags::NONE)
+        .expect("existing session still answers")
+        .expect("existing session keeps its root");
+    kernel_tests::kassert_eq!(opened.kind, NodeKind::Directory);
+    let rerouted = namespace_client(router_minter())
+        .resolve(path(DETACHED_MOUNT))
+        .expect("resolve call")
+        .expect("root mount covers the path after unmount");
+    drop(OwnedHandle::adopt(rerouted));
 }
 
 #[kernel_test]

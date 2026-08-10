@@ -5,7 +5,7 @@ use syscall::Timeout;
 use crate::plan::{
     BOOT_PLAN_MAGIC, BOOT_PLAN_VERSION, EXHAUSTED_DETACH, EXHAUSTED_HALT, OnExhausted,
     PLAN_HEADER_SIZE, SLOT_KIND_DIRECTORY, SLOT_KIND_IRQ, SLOT_KIND_MMIO, SLOT_KIND_SERVICE,
-    SLOT_KIND_USERLAND,
+    SLOT_KIND_SUPERVISOR, SLOT_KIND_USERLAND,
 };
 
 /// Устройство, названное слотом композиции.
@@ -22,7 +22,7 @@ pub struct DeviceSpec<'a> {
 /// Источник capability слота, укладываемый в план.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotSpec<'a> {
-    /// Регион userland-образа целиком.
+    /// Read-only регион userland-образа.
     Userland,
     /// Линия прерывания устройства.
     Irq(DeviceSpec<'a>),
@@ -33,6 +33,8 @@ pub enum SlotSpec<'a> {
     /// Сессия файловой системы с каталогом компонента в роли корня, выданная
     /// маршрутизатором имён с номером `provider` в плане.
     Directory { provider: u16 },
+    /// Клиентская capability supervisor, поднявшего компонент.
+    Supervisor,
 }
 
 /// Компонент композиции, укладываемый в план.
@@ -157,6 +159,10 @@ fn encode_slot(
             }
             header[0] = SLOT_KIND_DIRECTORY;
             header[2..4].copy_from_slice(&provider.to_le_bytes());
+            None
+        }
+        SlotSpec::Supervisor => {
+            header[0] = SLOT_KIND_SUPERVISOR;
             None
         }
         SlotSpec::Irq(device) => {

@@ -8,15 +8,15 @@ use core::num::NonZeroU64;
 use device_resolver::ResolveError;
 use filesystem_abi::{
     AccessMode, BOOT_MOUNT_TABLE_PATH, FileSystemError, Mount, OpenFlags, Opened, Path,
-    decode_mount_table, namespace, namespace_admin,
+    decode_mount_table, namespace,
 };
 use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
-use managed_component::{ComponentRoots, ComponentSlots, ManagedComponent, ManagedFailure};
+use managed_component::{ComponentRoots, ManagedComponent, ManagedFailure};
 use rootkeeper::{BootFailure, RootSystem, SHUTDOWN_EXIT_CODE, Stopped, Supervised, SystemImage};
 use rtc_abi::rtc;
-use runtime::{MemoryRegion, OwnedHandle, PortTransport, Signal, Timeout};
-use syscall::{Rights, SIGNALED};
+use runtime::{OwnedHandle, PortTransport, Signal, Timeout};
+use syscall::SIGNALED;
 use userland_image::{
     BOOT_PLAN_PATH, BootPlan, ComponentSpec, DeviceSpec, OnExhausted, PlanDecodeError, SlotSource,
     SlotSpec, decode_plan, encode_plan,
@@ -34,9 +34,14 @@ const RAM_MOUNT: &str = "/tmp";
 
 const ROUTER_PROGRAM: &str = "/boot/namespace-router";
 const ROUTER_NAME: &str = "namespace-router";
+const IMAGE_FS_PROGRAM: &str = "/boot/filesystem-imagefs";
+const IMAGE_FS_NAME: &str = "filesystem-imagefs";
+const RAM_FS_PROGRAM: &str = "/boot/filesystem-ramfs";
+const RAM_FS_NAME: &str = "filesystem-ramfs";
 
 const INSTANCE_NAMES: [&str; 2] = ["names-boot", "names-spare"];
-const ROUTER_MEMORY_PAGES: u64 = 2_048;
+const ROUTER_MEMORY_PAGES: u64 = 512;
+const FILE_SYSTEM_MEMORY_PAGES: u64 = 1_024;
 const ROUTER_STARTUP_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const RTC_PROGRAM: &str = "/boot/driver-pl031";
@@ -57,9 +62,6 @@ const AREA_READ_EXIT_CODE: u32 = 0;
 
 const AREA_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Directory { provider: 1 }];
 
-const CRASH_MOUNT: &str = "/crash";
-const CRASH_FILESYSTEM: &str = "/boot/crash-filesystem";
-
 const BOOT_TREE: &[Mount<'static>] = &[
     Mount {
         path: "/",
@@ -70,10 +72,6 @@ const BOOT_TREE: &[Mount<'static>] = &[
         program: "/boot/filesystem-ramfs",
     },
 ];
-
-const CRASH_ATTEMPTS: usize = 8;
-
-const MOUNT_INCARNATIONS: usize = 3;
 
 const ROUTER_INCARNATIONS: u32 = 3;
 
@@ -88,20 +86,9 @@ const CONSUMER_TURN: Timeout = Timeout::from_millis(200);
 
 const DEVICE_EXIT_CODE: u32 = 41;
 
-const ROUTER_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Userland];
-
-pub(crate) fn router_slots(image: &MemoryRegion) -> ComponentSlots {
-    let mut slots = ComponentSlots::default();
-    slots
-        .push(
-            image
-                .handle()
-                .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)
-                .expect("userland slot minted"),
-        )
-        .expect("slot fits the transaction");
-    slots
-}
+const USERLAND_SLOT: &[SlotSpec<'static>] = &[SlotSpec::Userland];
+const ROUTER_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Userland, SlotSpec::Supervisor];
+const BOOT_ROUTER_AFTER: &[u16] = &[1, 2];
 
 fn router(on_exhausted: OnExhausted, launches: u32) -> ComponentSpec<'static> {
     ComponentSpec {
@@ -109,7 +96,7 @@ fn router(on_exhausted: OnExhausted, launches: u32) -> ComponentSpec<'static> {
         name: ROUTER_NAME,
         slots: ROUTER_SLOTS,
         requires: &[],
-        after: &[],
+        after: BOOT_ROUTER_AFTER,
         memory_pages: ROUTER_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
         launches,
@@ -117,8 +104,41 @@ fn router(on_exhausted: OnExhausted, launches: u32) -> ComponentSpec<'static> {
     }
 }
 
+fn image_filesystem() -> ComponentSpec<'static> {
+    ComponentSpec {
+        executable: IMAGE_FS_PROGRAM,
+        name: IMAGE_FS_NAME,
+        slots: USERLAND_SLOT,
+        requires: &[],
+        after: &[],
+        memory_pages: FILE_SYSTEM_MEMORY_PAGES,
+        startup_timeout: ROUTER_STARTUP_TIMEOUT,
+        launches: 1,
+        on_exhausted: OnExhausted::Halt,
+    }
+}
+
+fn ram_filesystem() -> ComponentSpec<'static> {
+    ComponentSpec {
+        executable: RAM_FS_PROGRAM,
+        name: RAM_FS_NAME,
+        slots: &[],
+        requires: &[],
+        after: &[],
+        memory_pages: FILE_SYSTEM_MEMORY_PAGES,
+        startup_timeout: ROUTER_STARTUP_TIMEOUT,
+        launches: 1,
+        on_exhausted: OnExhausted::Halt,
+    }
+}
+
 fn plan_bytes(on_exhausted: OnExhausted, launches: u32) -> Vec<u8> {
-    encode_plan(&[router(on_exhausted, launches)]).expect("scenario plan encodes")
+    encode_plan(&[
+        router(on_exhausted, launches),
+        image_filesystem(),
+        ram_filesystem(),
+    ])
+    .expect("scenario plan encodes")
 }
 
 fn boot_plan() -> Vec<u8> {
@@ -183,43 +203,21 @@ fn roots<'a>(system: &'a RootSystem<'_>, index: u16) -> &'a ComponentRoots {
         .roots()
 }
 
-struct Resolved {
-    session: OwnedHandle,
-    prefix_len: u32,
-}
-
 fn relay_thread() -> syscall::Handle {
     crate::log_relay::shared_relay_thread().expect("shared relay is running")
 }
 
-fn try_mount(system: &RootSystem<'_>, prefix: &str) -> Result<Resolved, FileSystemError> {
+fn try_mount(system: &RootSystem<'_>, prefix: &str) -> Result<OwnedHandle, FileSystemError> {
     let namespace = roots(system, 0)
         .session(PROBE_BADGE)
         .expect("namespace session minted");
     // Отказ транспорта на пути к ещё не обслуживающему порт маршрутизатору неотличим
     // для клиента от неотвечающего монтирования.
-    let mounted = namespace::Client::new(PortTransport::client(&namespace))
+    let session = namespace::Client::new(PortTransport::client(&namespace))
         .with_wait(CALL_TIMEOUT)
         .resolve(path(prefix))
         .map_err(|_| FileSystemError::Unresponsive)??;
-    Ok(Resolved {
-        session: OwnedHandle::adopt(mounted.session),
-        prefix_len: mounted.prefix_len,
-    })
-}
-
-fn await_mount(system: &RootSystem<'_>, prefix: &str) -> Result<Resolved, FileSystemError> {
-    for _ in 0..RESTART_ATTEMPTS {
-        match try_mount(system, prefix) {
-            Err(FileSystemError::Unresponsive) => pause(RESTART_TURN),
-            outcome => return outcome,
-        }
-    }
-    Err(FileSystemError::Unresponsive)
-}
-
-fn await_session(system: &RootSystem<'_>, prefix: &str) -> Result<OwnedHandle, FileSystemError> {
-    await_mount(system, prefix).map(|resolved| resolved.session)
+    Ok(OwnedHandle::adopt(session))
 }
 
 fn await_tree(system: &RootSystem<'_>, prefix: &str) -> OwnedHandle {
@@ -227,17 +225,11 @@ fn await_tree(system: &RootSystem<'_>, prefix: &str) -> OwnedHandle {
     // становится накрытым его оборотами.
     for _ in 0..RESTART_ATTEMPTS {
         match try_mount(system, prefix) {
-            Ok(resolved) => return resolved.session,
+            Ok(session) => return session,
             Err(_) => pause(RESTART_TURN),
         }
     }
     panic!("boot tree is not mounted")
-}
-
-fn crash(session: &OwnedHandle) {
-    let root = path(Path::ROOT.as_str());
-    let outcome = connect(session).rename(root, root);
-    kernel_tests::kassert_eq!(outcome, Err(IpcError::PeerClosed));
 }
 
 fn alive(system: &RootSystem<'_>, index: u16) -> bool {
@@ -270,32 +262,17 @@ fn terminate_router(system: &RootSystem<'_>) -> bool {
     terminate(system, 0, ROUTER_EXIT_CODE)
 }
 
-fn mount_crash_filesystem(system: &RootSystem<'_>) {
-    // Сценарии крашей поднимают монтирование поверх дерева загрузки: своё дерево
-    // маршрутизатор читает сам, и композиция его состав не выбирает.
-    let admin = managed(system, 0)
-        .running()
-        .expect("router is running")
-        .roots()
-        .control();
-    let mounted = namespace_admin::Client::new(PortTransport::client(admin))
-        .with_wait(CALL_TIMEOUT)
-        .mount(path(CRASH_MOUNT), path(CRASH_FILESYSTEM))
-        .expect("mount call");
-    kernel_tests::kassert!(mounted.is_ok());
-}
-
 #[kernel_test]
 fn two_instances_of_one_program_run_under_their_own_names() {
     let image = image();
     let bytes = encode_plan(&[
         ComponentSpec {
             name: INSTANCE_NAMES[0],
-            ..router(OnExhausted::Halt, 1)
+            ..ram_filesystem()
         },
         ComponentSpec {
             name: INSTANCE_NAMES[1],
-            ..router(OnExhausted::Halt, 1)
+            ..ram_filesystem()
         },
     ])
     .expect("scenario plan encodes");
@@ -325,7 +302,7 @@ fn two_instances_of_one_program_run_under_their_own_names() {
     kernel_tests::kassert!(
         !sources
             .iter()
-            .any(|source| source.split('/').next() == Some(ROUTER_NAME))
+            .any(|source| source.split('/').next() == Some(RAM_FS_NAME))
     );
 
     system.shutdown();
@@ -338,19 +315,30 @@ fn compiled_plan_carries_the_boot_composition() {
 
     let plan = image.plan(BOOT_PLAN_ENTRY).expect("compiled plan decodes");
 
-    kernel_tests::kassert_eq!(plan.len(), 1);
-    let component = plan.component(0).expect("plan carries the router");
-    kernel_tests::kassert_eq!(component.executable(), ROUTER_PROGRAM);
-    kernel_tests::kassert_eq!(component.name(), "namespace-router");
-    kernel_tests::kassert_eq!(component.memory_pages(), ROUTER_MEMORY_PAGES);
-    kernel_tests::kassert_eq!(component.startup_timeout(), ROUTER_STARTUP_TIMEOUT);
-    kernel_tests::kassert_eq!(component.launches(), ROUTER_INCARNATIONS);
-    kernel_tests::kassert_eq!(component.on_exhausted(), OnExhausted::Halt);
+    kernel_tests::kassert_eq!(plan.len(), 4);
+    let router = plan.component(0).expect("plan carries the router");
+    kernel_tests::kassert_eq!(router.executable(), ROUTER_PROGRAM);
+    kernel_tests::kassert_eq!(router.name(), ROUTER_NAME);
+    kernel_tests::kassert_eq!(router.memory_pages(), ROUTER_MEMORY_PAGES);
+    kernel_tests::kassert_eq!(router.startup_timeout(), ROUTER_STARTUP_TIMEOUT);
+    kernel_tests::kassert_eq!(router.launches(), ROUTER_INCARNATIONS);
+    kernel_tests::kassert_eq!(router.on_exhausted(), OnExhausted::Halt);
+    kernel_tests::kassert_eq!(
+        router.slots().collect::<Vec<_>>(),
+        [SlotSource::Userland, SlotSource::Supervisor]
+    );
+    kernel_tests::kassert_eq!(router.after().collect::<Vec<_>>(), [1, 2]);
 
-    // Слот пришёл из манифеста программы: регион userland-образа.
-    kernel_tests::kassert_eq!(component.slots().count(), 1);
-    let slots: Vec<SlotSource<'_>> = component.slots().collect();
-    kernel_tests::kassert_eq!(slots[0], SlotSource::Userland);
+    let imagefs = plan
+        .component(1)
+        .expect("plan carries the root file system");
+    kernel_tests::kassert_eq!(imagefs.executable(), IMAGE_FS_PROGRAM);
+    kernel_tests::kassert_eq!(imagefs.on_exhausted(), OnExhausted::Halt);
+    let slots: Vec<SlotSource<'_>> = imagefs.slots().collect();
+    kernel_tests::kassert_eq!(slots, [SlotSource::Userland]);
+
+    let ramfs = plan.component(2).expect("plan carries ramfs");
+    kernel_tests::kassert_eq!(ramfs.executable(), RAM_FS_PROGRAM);
 }
 
 #[kernel_test]
@@ -406,9 +394,8 @@ fn supervisor_restarts_the_router_with_a_fresh_namespace() {
             exit_code: Some(ROUTER_EXIT_CODE)
         }
     );
-    // Capability ушедшей incarnation отозваны вместе с её процессами, а новая подняла дерево
-    // имён заново и выдаёт свежие сессии.
-    kernel_tests::kassert_eq!(probe(&session), Err(IpcError::PeerClosed));
+    // Сессия принадлежит файловой системе, а не маршрутизатору: его смена её не отзывает.
+    kernel_tests::kassert!(matches!(probe(&session), Ok(Ok(_))));
     kernel_tests::kassert_eq!(managed(&system, 0).generation(), 2);
     let fresh = await_tree(&system, RAM_MOUNT);
     kernel_tests::kassert!(matches!(probe(&fresh), Ok(Ok(_))));
@@ -479,7 +466,7 @@ fn optional_component_without_restarts_leaves_the_composition_up() {
 }
 
 #[kernel_test]
-fn router_exit_takes_down_its_mount_processes() {
+fn router_restart_keeps_file_system_components_and_their_sessions() {
     let image = image();
     let bytes = boot_plan();
     let mut system = started(&image, &bytes);
@@ -489,56 +476,29 @@ fn router_exit_takes_down_its_mount_processes() {
     kernel_tests::kassert!(terminate_router(&system));
     system.supervise_turn(relay_thread());
 
-    // Монтирование ушло вместе с поднявшим его маршрутизатором, и его сессия
-    // терминальна: сирот подсистема не оставляет.
-    kernel_tests::kassert_eq!(probe(&session), Err(IpcError::PeerClosed));
+    // Файловые системы принадлежат композиции rootkeeper: смена router не меняет их generation
+    // и не отзывает уже выданную сессию.
+    kernel_tests::kassert_eq!(managed(&system, 1).generation(), 1);
+    kernel_tests::kassert_eq!(managed(&system, 2).generation(), 1);
+    kernel_tests::kassert!(matches!(probe(&session), Ok(Ok(_))));
+    system.shutdown();
 }
 
 #[kernel_test]
-fn router_replaces_a_faulted_mount() {
+fn root_file_system_failure_is_seen_by_the_supervisor() {
     let image = image();
     let bytes = boot_plan();
-    let system = started(&image, &bytes);
-    await_tree(&system, Path::ROOT.as_str());
-    mount_crash_filesystem(&system);
-    let first = await_session(&system, CRASH_MOUNT).expect("crash mount serves the prefix");
-    kernel_tests::kassert!(matches!(probe(&first), Ok(Ok(_))));
+    let mut system = started(&image, &bytes);
+    kernel_tests::kassert!(terminate(&system, 1, ROUTER_EXIT_CODE));
 
-    crash(&first);
+    let supervised = system.supervise_turn(relay_thread());
 
-    // Отказ файловой системы уносит только её процесс: маршрутизатор остаётся жив и поднимает
-    // монтированию новый экземпляр, а сессии ушедшего терминальны.
-    kernel_tests::kassert!(alive(&system, 0));
-    kernel_tests::kassert_eq!(probe(&first), Err(IpcError::PeerClosed));
-    let second = await_session(&system, CRASH_MOUNT).expect("mount got a new incarnation");
-    kernel_tests::kassert!(matches!(probe(&second), Ok(Ok(_))));
-}
-
-#[kernel_test]
-fn restart_limit_takes_the_mount_off_the_tree() {
-    let image = image();
-    let bytes = boot_plan();
-    let system = started(&image, &bytes);
-    await_tree(&system, Path::ROOT.as_str());
-    mount_crash_filesystem(&system);
-
-    let mut incarnations = 0;
-    let mut rerouted = false;
-    for _ in 0..CRASH_ATTEMPTS {
-        let resolved = await_mount(&system, CRASH_MOUNT).expect("path stays covered");
-        if resolved.prefix_len != CRASH_MOUNT.len() as u32 {
-            rerouted = true;
-            break;
-        }
-        incarnations += 1;
-        crash(&resolved.session);
-    }
-
-    // Монтирование, исчерпавшее перезапуски, снимается с дерева имён, и его путь снова
-    // накрывает корневое монтирование.
-    kernel_tests::kassert_eq!(incarnations, MOUNT_INCARNATIONS);
-    kernel_tests::kassert!(rerouted);
-    kernel_tests::kassert!(alive(&system, 0));
+    kernel_tests::kassert_eq!(supervised, Supervised::Stopped(Stopped::Subsystem));
+    kernel_tests::kassert_eq!(
+        managed(&system, 1).failure(),
+        Some(ManagedFailure::Exit(ROUTER_EXIT_CODE))
+    );
+    system.shutdown();
 }
 
 #[kernel_test]
@@ -640,12 +600,17 @@ fn a_service_slot_carries_the_provider_session_and_stops_before_it() {
             launches: 1,
             on_exhausted: OnExhausted::Detach,
         },
-        router(OnExhausted::Halt, 1),
+        ComponentSpec {
+            after: &[2, 3],
+            ..router(OnExhausted::Halt, 1)
+        },
+        image_filesystem(),
+        ram_filesystem(),
     ])
     .expect("scenario plan encodes");
     let mut system = started(&image, &bytes);
 
-    kernel_tests::kassert_eq!(system.start_order(), &[1, 0][..]);
+    kernel_tests::kassert_eq!(system.start_order(), &[2, 3, 1, 0][..]);
     // Потребитель разрешает путь по сессии слота, пока провайдер жив: отказ
     // первого resolve увёл бы его собственным кодом.
     pause(CONSUMER_TURN);
@@ -665,7 +630,7 @@ fn a_service_slot_carries_the_provider_session_and_stops_before_it() {
 fn a_directory_slot_carries_the_component_area_to_every_incarnation() {
     let image = image();
     // Потребитель стоит в плане первым, а поднимается вторым: область его
-    // каталога supervisor берёт у уже поднятого маршрутизатора.
+    // каталога supervisor берёт напрямую у уже поднятой корневой файловой системы.
     let bytes = encode_plan(&[
         ComponentSpec {
             executable: AREA_PROGRAM,
@@ -678,11 +643,16 @@ fn a_directory_slot_carries_the_component_area_to_every_incarnation() {
             launches: AREA_INCARNATIONS,
             on_exhausted: OnExhausted::Detach,
         },
-        router(OnExhausted::Halt, 1),
+        ComponentSpec {
+            after: &[2, 3],
+            ..router(OnExhausted::Halt, 1)
+        },
+        image_filesystem(),
+        ram_filesystem(),
     ])
     .expect("scenario plan encodes");
     let mut system = started(&image, &bytes);
-    kernel_tests::kassert_eq!(system.start_order(), &[1, 0][..]);
+    kernel_tests::kassert_eq!(system.start_order(), &[2, 3, 1, 0][..]);
 
     // Компонент читает свою запись сессией каталога и сам проверяет, что путь
     // наружу область не выражает: прочие исходы он уносит своим кодом выхода.
@@ -694,8 +664,7 @@ fn a_directory_slot_carries_the_component_area_to_every_incarnation() {
         }
     );
 
-    // Область выдаётся заново: следующая incarnation читает свой каталог той же
-    // сессией маршрутизатора.
+    // Область выдаётся заново: следующая incarnation получает свежую сессию корневой ФС.
     let second = system.supervise_turn(relay_thread());
     kernel_tests::kassert_eq!(
         second,
@@ -717,11 +686,16 @@ fn an_optional_component_leaves_the_composition_and_a_critical_one_stops_it() {
             after: &[1],
             ..rtc(&device)
         },
-        router(OnExhausted::Halt, 1),
+        ComponentSpec {
+            after: &[2, 3],
+            ..router(OnExhausted::Halt, 1)
+        },
+        image_filesystem(),
+        ram_filesystem(),
     ])
     .expect("scenario plan encodes");
     let mut system = started(&image, &bytes);
-    kernel_tests::kassert_eq!(system.start_order(), &[1, 0][..]);
+    kernel_tests::kassert_eq!(system.start_order(), &[2, 3, 1, 0][..]);
 
     kernel_tests::kassert!(terminate(&system, 0, DEVICE_EXIT_CODE));
     let abandoned = system.supervise_turn(relay_thread());

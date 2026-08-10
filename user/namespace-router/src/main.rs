@@ -1,10 +1,10 @@
-//! Маршрутизатор имён: держит таблицу монтирования, поднимает процессы файловых систем из
-//! userland-образа и выдаёт клиентам сессии с ними. Данные через него не идут.
+//! Маршрутизатор имён владеет таблицей монтирования, получает у supervisor сессии поднятых
+//! файловых систем и выдаёт клиентам окна на запрошенные пути. Данные клиенты передают напрямую
+//! файловым системам.
 //!
-//! Одноразовый startup-порт передаёт сервисный и admin-порты. Сервисный порт разбирает пути
-//! клиентов, admin-порт управляет таблицей монтирования и клиентам недоступен.
-//! Admin-порт обслуживает отдельный поток. Монтирование не ждёт завершения клиентского
-//! вызова сервисным потоком.
+//! Одноразовый startup-порт передаёт service- и control-порты. Service-порт разбирает пути
+//! клиентов, а control-порт принимает операции над таблицей от capability rootkeeper.
+//! Control-порт обслуживает отдельный поток.
 
 #![no_std]
 #![no_main]
@@ -18,11 +18,11 @@ use component_abi::component_manifest;
 use filesystem_abi::{BOOT_MOUNT_TABLE_PATH, decode_mount_table, namespace, namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
-    MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Resource, Thread,
+    MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Thread,
     exit_with_sibling, install_log, log_fmt, log_line, spawn_owned, thread_exit,
 };
 use spin::Once;
-use syscall::{Handle, Rights, Timeout};
+use syscall::{Handle, Timeout};
 use userland_image::decode;
 
 mod error;
@@ -39,16 +39,14 @@ const SUPERVISOR_LOST_EXIT_CODE: u32 = 7;
 
 const SERVICE_PORT_FAILED_EXIT_CODE: u32 = 9;
 
-const ADMIN_TURN: Timeout = Timeout::from_millis(100);
+static MOUNTS: Mutex<MountTable> = Mutex::new(MountTable::new());
 
 static IMAGE: Once<ReadOnlyMapping> = Once::new();
-
-static MOUNTS: Mutex<MountTable> = Mutex::new(MountTable::new());
 
 component_manifest! {
     struct RouterStartup {
         exports: "Namespace",
-        slots: { image: userland },
+        slots: { image: userland, supervisor: supervisor },
     }
 }
 
@@ -68,31 +66,25 @@ fn run(startup: Handle) -> Result<()> {
     let StartResources {
         log,
         image,
+        supervisor,
         service,
         control,
     } = handshake(startup)?;
-    // Копия канала логирования для поднимаемых файловых систем: право минта остаётся за
-    // маршрутизатором, детям уходит капа без него.
-    let log_for_children =
-        log.duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, None)?;
     install_log(log, LOG_TAG);
 
     let image = MemoryRegion::from_handle(image);
     let mapping = image.map_full_read_only()?;
     let bytes = IMAGE.call_once(|| mapping).as_bytes();
+
+    let mut administering = Administering::new(&MOUNTS, supervisor);
+    mount_boot_table(&mut administering, bytes)?;
+
     let admin_port = AdminPort {
         port: control,
-        administering: Administering::new(
-            &MOUNTS,
-            bytes,
-            image,
-            log_for_children,
-            Resource::self_resource()?,
-        ),
+        administering,
         service_thread: Thread::self_thread()?,
     };
-    mount_boot_table(&admin_port.administering, bytes)?;
-    // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
+    // Control-поток разделяет время жизни процесса и владеет собственным стеком.
     let admin = spawn_owned(
         move || serve_admin(admin_port),
         ADMIN_STACK,
@@ -106,13 +98,25 @@ fn run(startup: Handle) -> Result<()> {
     exit_with_sibling(admin.thread(), SERVICE_PORT_FAILED_EXIT_CODE)
 }
 
+fn mount_boot_table(administering: &mut Administering<'_>, image: &[u8]) -> Result<()> {
+    let record = decode(image)
+        .ok()
+        .and_then(|entries| entries.entry(BOOT_MOUNT_TABLE_PATH))
+        .ok_or(Error::MountTable)?;
+    let table = decode_mount_table(record.data()).map_err(|error| {
+        log_fmt(format_args!("boot mount table rejected: {error:?}"));
+        Error::MountTable
+    })?;
+    administering.mount_boot_table(table)
+}
+
 fn serve(service: &OwnedHandle) {
     let transport = PortTransport::server(service.borrow());
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
-            // Ни один исход кадра не несёт: маршрутизатор не хранит сессий, а покадровое
-            // исчерпание и пробуждение без кадра порт не закрывают.
+            // Ни один исход кадра не несёт: покадровое исчерпание и пробуждение без кадра
+            // порт не закрывают.
             Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout) => {
                 continue;
             }
@@ -141,51 +145,36 @@ struct AdminPort {
 fn serve_admin(mut admin: AdminPort) -> u32 {
     let transport = PortTransport::server(admin.port.borrow());
     loop {
-        match transport.wait_readable(ADMIN_TURN) {
+        match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {
                 let _ = namespace_admin::dispatch(&mut admin.administering, &transport);
                 transport.cancel_reply();
             }
-            Err(IpcError::Timeout) => {}
-            // Отправитель на admin-порту один - поднявший маршрутизатор supervisor, поэтому
+            // Отправитель на control-порту один - поднявший маршрутизатор supervisor, поэтому
             // его уход снимает процесс целиком вместе с монтированиями.
             Err(IpcError::SenderGone) => {
                 log_line("supervisor gone");
                 exit_with_sibling(&admin.service_thread, SUPERVISOR_LOST_EXIT_CODE)
             }
             // Покадровое исчерпание не закрывает порт.
-            Err(IpcError::ResourceExhausted) => continue,
+            Err(IpcError::ResourceExhausted) => {}
             Err(IpcError::PeerClosed) => break,
-            // Прочий отказ приёма оставляет маршрутизатор без монтирований и уходит ненулевым
-            // кодом потока, отличимым от закрытия порта.
+            // Прочий отказ приёма оставляет маршрутизатор без управления таблицей и уходит
+            // ненулевым кодом потока, отличимым от закрытия порта.
             Err(_) => {
-                log_line("admin port failed");
+                log_line("control port failed");
                 return 1;
             }
         }
-        admin.administering.supervise();
     }
-    log_line("admin port closed");
+    log_line("control port closed");
     0
-}
-
-fn mount_boot_table(administering: &router::Administering<'_>, image: &[u8]) -> Result<()> {
-    // Запись дерева лежит в образе по известному пути: свой состав монтирований
-    // маршрутизатор выбирает сам.
-    let record = decode(image)
-        .ok()
-        .and_then(|entries| entries.entry(BOOT_MOUNT_TABLE_PATH))
-        .ok_or(Error::MountTable)?;
-    let table = decode_mount_table(record.data()).map_err(|error| {
-        log_fmt(format_args!("boot mount table rejected: {error:?}"));
-        Error::MountTable
-    })?;
-    administering.mount_boot_table(table)
 }
 
 struct StartResources {
     log: OwnedHandle,
     image: OwnedHandle,
+    supervisor: OwnedHandle,
     service: OwnedHandle,
     control: OwnedHandle,
 }
@@ -197,6 +186,7 @@ fn handshake(startup: Handle) -> Result<StartResources> {
     Ok(StartResources {
         log: OwnedHandle::adopt(started.log),
         image: OwnedHandle::adopt(started.image),
+        supervisor: OwnedHandle::adopt(started.supervisor),
         service: OwnedHandle::adopt(started.service),
         control: OwnedHandle::adopt(started.control),
     })

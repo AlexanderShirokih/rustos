@@ -20,10 +20,10 @@ filesystem-abi = { workspace = true }
 filesystem-server = { workspace = true }
 ipc = { workspace = true }
 runtime = { workspace = true }
+rootkeeper-abi = { workspace = true }
 spin = { workspace = true }
-syscall = { workspace = true }
 userland-image = { workspace = true }
-userland-loader = { workspace = true }
+syscall = { workspace = true }
 
 [build-dependencies]
 userland-build = { workspace = true }

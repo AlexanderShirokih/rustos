@@ -63,9 +63,10 @@ impl ComponentRoots {
         // Значок lease-капы control-порта: supervisor остаётся его единственным
         // отправителем, и его уход завершает процесс компонента.
         let control = Port::create()?;
-        let control_client = control
-            .handle()
-            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(CONTROL_LEASE_BADGE))?;
+        let control_client = control.handle().duplicate(
+            Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE,
+            Some(CONTROL_LEASE_BADGE),
+        )?;
         let service = Port::create()?;
         let service_minter = service
             .handle()

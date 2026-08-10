@@ -4,6 +4,7 @@
 extern crate alloc;
 
 pub mod relay;
+mod sessions;
 mod system;
 
 pub use system::{

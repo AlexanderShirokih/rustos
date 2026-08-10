@@ -43,19 +43,6 @@ ipc::wire_value! {
 }
 
 ipc::wire_value! {
-    /// Монтирование, накрывающее запрошенный путь.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct Mounted {
-        /// Capability сессии монтирования: по ней клиент говорит контрактом `FileSystem`.
-        pub session: ipc::wire::Cap,
-        /// Сколько байт пути накрыл префикс монтирования. Остаток - путь внутри
-        /// монтирования, пустой остаток означает его корень. У монтирования на корне
-        /// дерева имён длина нулевая: корень пути не покрывает, а открывает его.
-        pub prefix_len: u32,
-    }
-}
-
-ipc::wire_value! {
     /// Метаданные узла.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct NodeInfo {

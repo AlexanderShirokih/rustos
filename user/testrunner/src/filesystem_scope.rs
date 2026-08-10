@@ -1,4 +1,4 @@
-//! E2E scoped-сессий: `open_root` выдаёт сессию-окно подкаталога, и пути её кадров живут
+//! E2E scoped-сессий: `open_root` выдаёт сессию-окно узла, и пути её кадров живут
 //! внутри окна. Сужение складывается по цепочке производных, а расширить окно обратно
 //! производная сессия не может.
 
@@ -198,13 +198,18 @@ fn filesystem_scoped_session_writes_through_its_window() {
 }
 
 #[kernel_test]
-fn filesystem_open_root_requires_a_directory_of_the_window() {
+fn filesystem_open_root_accepts_any_existing_node() {
     let capability = image_session();
 
-    // Окно открывается только над каталогом.
+    let file_window = window_of(&capability, IMAGE_FILE);
+    let file = connect(&file_window);
+    let opened = open(&file, "/", AccessMode::Read, OpenFlags::NONE);
+    kernel_tests::kassert_eq!(opened.kind, NodeKind::File);
+    kernel_tests::kassert_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
     kernel_tests::kassert_eq!(
-        open_root(&capability, IMAGE_FILE).err(),
-        Some(FileSystemError::NotADirectory)
+        file.open(path("/child"), AccessMode::Read, OpenFlags::NONE)
+            .expect("open call"),
+        Err(FileSystemError::NotADirectory)
     );
     kernel_tests::kassert_eq!(
         open_root(&capability, "/absent-window").err(),

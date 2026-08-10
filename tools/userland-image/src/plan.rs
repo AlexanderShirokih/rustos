@@ -21,9 +21,9 @@ const BOOT_COMPOSITION_DEPTH: u16 = 0;
 
 const COMPONENT_RESOURCE_LEVELS: u16 = 3;
 
-const SUPERVISOR_HANDLES: usize = 16;
+const SUPERVISOR_HANDLES: usize = 20;
 
-const COMPONENT_HANDLES: usize = 12;
+const COMPONENT_HANDLES: usize = 13;
 
 const DEFAULT_STARTUP_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -319,11 +319,12 @@ fn validate_supervisor_limits(
         .map(|declared| declared.slots.len())
         .sum();
     // Оценка сверху: у supervisor bootstrap-капа, регион образа с отображением,
-    // лог-порт relay и его поток, собственный ресурс, а у каждого компонента -
-    // резерв бюджета, ресурс incarnation, процесс, две стороны control-порта,
-    // минтер service-порта и лог-сессия. Провижининг каталога держит ещё сессию
-    // маршрутизатора и сессию монтирования, и обе уходят до следующего
-    // компонента.
+    // лог-порт relay и его поток, broker-порт с потоком, собственный ресурс, а у
+    // каждого компонента - резерв бюджета, ресурс incarnation, процесс, две стороны
+    // control-порта, минтер service-порта, копия control-порта в broker и лог-сессия.
+    // Провижининг каталога держит ещё сессию
+    // файловой системы и выданное ей окно; промежуточная сессия уходит до
+    // следующего компонента.
     let handles = SUPERVISOR_HANDLES + manifest.components.len() * COMPONENT_HANDLES + slots;
     ensure!(
         handles <= HANDLE_TABLE_CAPACITY as usize,
@@ -370,6 +371,7 @@ fn compile_slots<'a>(
                 SlotKind::Directory => Ok(SlotSpec::Directory {
                     provider: find_namespace(name, declarations, names)?,
                 }),
+                SlotKind::Supervisor => Ok(SlotSpec::Supervisor),
             }
         })
         .collect()
@@ -545,6 +547,17 @@ mod tests {
         )
     }
 
+    fn image_filesystem(fields: &str) -> String {
+        format!(
+            "\n[[components]]\n\
+             executable = \"{IMAGE_FS}\"\n\
+             memory_limit = \"8M\"\n\
+             startup_timeout = \"2s\"\n\
+             on_failure = \"halt\"\n\
+             {fields}"
+        )
+    }
+
     fn rtc(fields: &str) -> String {
         format!(
             "\n[[components]]\n\
@@ -582,7 +595,10 @@ mod tests {
 
     fn router_declaration() -> ProgramManifest {
         declaration(
-            vec![slot(SlotKind::Userland, 0, &[])],
+            vec![
+                slot(SlotKind::Userland, 0, &[]),
+                slot(SlotKind::Supervisor, 0, &[]),
+            ],
             Some(NAMESPACE_PROTOCOL),
         )
     }
@@ -667,14 +683,17 @@ mod tests {
 
     #[test]
     fn plan_takes_every_slot_from_the_program_declaration() {
-        let bytes = compiled(&plan(&[filesystem(""), rtc("")]));
+        let bytes = compiled(&plan(&[image_filesystem(""), rtc("")]));
 
         let plan = decode_plan(&bytes).expect("compiled plan must decode");
         assert_eq!(plan.len(), 2);
 
-        let router = plan.component(0).expect("router");
-        assert_eq!(router.executable(), ROUTER);
-        assert_eq!(router.slots().collect::<Vec<_>>(), [SlotSource::Userland]);
+        let filesystem = plan.component(0).expect("image filesystem");
+        assert_eq!(filesystem.executable(), IMAGE_FS);
+        assert_eq!(
+            filesystem.slots().collect::<Vec<_>>(),
+            [SlotSource::Userland]
+        );
 
         let rtc = plan.component(1).expect("rtc");
         let slots: Vec<SlotSource<'_>> = rtc.slots().collect();
@@ -1096,6 +1115,18 @@ mod tests {
                 COMPONENT_SLOT_MAX + 1
             )
         );
+    }
+
+    #[test]
+    fn plan_allows_two_userland_slot_consumers() {
+        const TWIN: &str = "/boot/filesystem-imagefs-twin";
+        let userland = declaration(vec![slot(SlotKind::Userland, 0, &[])], None);
+        let image = Image::new().with(TWIN, userland);
+        let twin = image_filesystem("").replace(IMAGE_FS, TWIN);
+        let source = plan(&[image_filesystem(""), twin]);
+        image
+            .compile(&source)
+            .expect("userland image may have several readers");
     }
 
     #[test]

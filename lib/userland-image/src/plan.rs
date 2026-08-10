@@ -33,6 +33,7 @@ pub(crate) const SLOT_KIND_IRQ: u8 = 1;
 pub(crate) const SLOT_KIND_MMIO: u8 = 2;
 pub(crate) const SLOT_KIND_SERVICE: u8 = 3;
 pub(crate) const SLOT_KIND_DIRECTORY: u8 = 4;
+pub(crate) const SLOT_KIND_SUPERVISOR: u8 = 5;
 
 pub(crate) const EXHAUSTED_HALT: u8 = 0;
 pub(crate) const EXHAUSTED_DETACH: u8 = 1;
@@ -99,7 +100,7 @@ impl<'a> Iterator for PlanSelectors<'a> {
 /// Источник capability, которую supervisor кладёт в слот компонента.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotSource<'a> {
-    /// Регион userland-образа целиком.
+    /// Read-only регион userland-образа.
     Userland,
     /// Линия прерывания устройства.
     Irq(PlanDevice<'a>),
@@ -107,9 +108,11 @@ pub enum SlotSource<'a> {
     Mmio(PlanDevice<'a>),
     /// Сессия service-порта компонента с номером `provider` в плане.
     Service { provider: u16 },
-    /// Сессия файловой системы с каталогом компонента в роли корня, выданная
-    /// маршрутизатором имён с номером `provider` в плане.
+    /// Сессия файловой системы с каталогом компонента в роли корня. `provider`
+    /// хранит ребро к экспортёру Namespace, у которого rootkeeper запрашивает каталог.
     Directory { provider: u16 },
+    /// Клиентская capability supervisor, поднявшего компонент.
+    Supervisor,
 }
 
 /// Компонент загрузочной композиции.
@@ -443,7 +446,8 @@ fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, Pla
     let cursor = at + SLOT_HEADER_SIZE;
     let device_kind = matches!(kind, SLOT_KIND_IRQ | SLOT_KIND_MMIO);
     let provider_kind = matches!(kind, SLOT_KIND_SERVICE | SLOT_KIND_DIRECTORY);
-    if !device_kind && !provider_kind && kind != SLOT_KIND_USERLAND {
+    if !device_kind && !provider_kind && kind != SLOT_KIND_USERLAND && kind != SLOT_KIND_SUPERVISOR
+    {
         return Err(PlanDecodeError::InvalidLayout("slot_kind"));
     }
     if !device_kind && (instance != 0 || resource != 0) {
@@ -467,6 +471,7 @@ fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, Pla
         SLOT_KIND_USERLAND => (SlotSource::Userland, cursor),
         SLOT_KIND_SERVICE => (SlotSource::Service { provider }, cursor),
         SLOT_KIND_DIRECTORY => (SlotSource::Directory { provider }, cursor),
+        SLOT_KIND_SUPERVISOR => (SlotSource::Supervisor, cursor),
         SLOT_KIND_IRQ | SLOT_KIND_MMIO => {
             let mut end = cursor;
             for _ in 0..selector_count {
@@ -566,6 +571,20 @@ mod tests {
         ComponentSpec {
             executable: "/boot/namespace-router",
             name: "router-a",
+            slots: &[],
+            requires: &[],
+            after: &[],
+            memory_pages: 2_048,
+            startup_timeout: Timeout::from_millis(2_000),
+            launches: 3,
+            on_exhausted: OnExhausted::Halt,
+        }
+    }
+
+    fn image_filesystem() -> ComponentSpec<'static> {
+        ComponentSpec {
+            executable: "/boot/filesystem-imagefs",
+            name: "imagefs",
             slots: &[SlotSpec::Userland],
             requires: &[],
             after: &[],
@@ -603,7 +622,7 @@ mod tests {
     }
 
     fn plan_bytes() -> Vec<u8> {
-        encode_plan(&[router(), rtc()]).expect("encode plan")
+        encode_plan(&[image_filesystem(), rtc()]).expect("encode plan")
     }
 
     #[test]
@@ -612,18 +631,18 @@ mod tests {
         let plan = decode_plan(&bytes).expect("decode plan");
         assert_eq!(plan.len(), 2);
 
-        let router = plan.component(0).expect("first component");
-        assert_eq!(router.executable(), "/boot/namespace-router");
-        assert_eq!(router.name(), "router-a");
-        assert_eq!(router.memory_pages(), 2_048);
-        assert_eq!(router.startup_timeout(), Timeout::from_millis(2_000));
-        assert_eq!(router.launches(), 3);
-        assert_eq!(router.on_exhausted(), OnExhausted::Halt);
+        let filesystem = plan.component(0).expect("first component");
+        assert_eq!(filesystem.executable(), "/boot/filesystem-imagefs");
+        assert_eq!(filesystem.name(), "imagefs");
+        assert_eq!(filesystem.memory_pages(), 2_048);
+        assert_eq!(filesystem.startup_timeout(), Timeout::from_millis(2_000));
+        assert_eq!(filesystem.launches(), 3);
+        assert_eq!(filesystem.on_exhausted(), OnExhausted::Halt);
         assert_eq!(
-            router.slots().collect::<Vec<_>>(),
+            filesystem.slots().collect::<Vec<_>>(),
             vec![SlotSource::Userland]
         );
-        assert_eq!(router.requires().count(), 0);
+        assert_eq!(filesystem.requires().count(), 0);
 
         let rtc = plan.component(1).expect("second component");
         assert_eq!(rtc.name(), "clock");

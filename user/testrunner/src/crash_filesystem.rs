@@ -1,6 +1,6 @@
 //! Программа-фикстура падающего монтирования: изменяемое дерево, которое обращается по
 //! невалидному адресу на переносе имени. Ядро завершает виновный процесс целиком, и
-//! маршрутизатор наблюдает уход монтирования, вызванный отказом файловой системы.
+//! rootkeeper наблюдает отказ компонента файловой системы.
 //!
 //! Перенос выбран за то, что сервер зовёт его только по запросу клиента: `unlink` он вызывает
 //! ещё и откатом неудавшегося `open` с `CREATE`.
@@ -13,13 +13,20 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
+use component_abi::component_manifest;
 use filesystem::{FileSystemBackend, NodeId, RamFileSystem, Window};
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path};
-use filesystem_server::serve;
-use runtime::{log_fmt, thread_exit};
+use filesystem_server::{Error, Result as ServerResult, serve};
+use runtime::{OwnedHandle, PortTransport, log_fmt, thread_exit};
 use syscall::{Handle, USER_VA_END};
 
 const LOG_TAG: &str = "crashfs";
+
+component_manifest! {
+    struct CrashFileSystemStartup {
+        slots: {},
+    }
+}
 
 struct CrashingFileSystem {
     inner: RamFileSystem,
@@ -94,21 +101,35 @@ fn kill_process_by_fault() -> ! {
     thread_exit(1)
 }
 
-/// `admin` приходит в x0 как HandleId серверной стороны admin-порта.
+/// `startup` приходит в x0 как HandleId одноразового startup-порта.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(admin: Handle) -> ! {
-    let backend = |_: &'static [u8]| {
-        Ok(CrashingFileSystem {
-            inner: RamFileSystem::new(),
-        })
-    };
-    match serve(admin, LOG_TAG, backend) {
+pub extern "C" fn _start(startup: Handle) -> ! {
+    match run(startup) {
         Ok(()) => thread_exit(0),
         Err(error) => {
             log_fmt(format_args!("stopped: {error}"));
             thread_exit(1)
         }
     }
+}
+
+fn run(startup: Handle) -> ServerResult<()> {
+    let startup = OwnedHandle::from_handle(startup);
+    let started = CrashFileSystemStartup::receive(&PortTransport::server(startup.borrow()))?
+        .ok_or(Error::Start)?;
+    let backend = |_| {
+        Ok(CrashingFileSystem {
+            inner: RamFileSystem::new(),
+        })
+    };
+    serve(
+        started.log,
+        started.control,
+        started.service,
+        None,
+        LOG_TAG,
+        backend,
+    )
 }
 
 #[panic_handler]

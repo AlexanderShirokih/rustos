@@ -15,8 +15,10 @@ test = false
 bench = false
 
 [dependencies]
+component-abi = { workspace = true }
 filesystem = { workspace = true }
 filesystem-server = { workspace = true }
+ipc = { workspace = true }
 runtime = { workspace = true }
 syscall = { workspace = true }
 

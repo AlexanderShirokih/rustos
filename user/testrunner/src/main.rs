@@ -10,7 +10,7 @@ use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap};
 use io::writer::Writer;
 use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
-use runtime::{PortTransport, thread_exit};
+use runtime::{PortTransport, process_exit, thread_exit};
 use spin::{Mutex, Once};
 use syscall::Handle;
 
@@ -132,7 +132,7 @@ pub(crate) fn bootstrap_handle() -> Handle {
 fn runner_exit(code: u32) -> ! {
     LOG_WRITER.flush();
     log_relay::shutdown_relays();
-    thread_exit(u64::from(code))
+    process_exit(u64::from(code))
 }
 
 /// `root` приходит в x0 как HandleId WRITE-конца канала, переданного ядром при спавне.

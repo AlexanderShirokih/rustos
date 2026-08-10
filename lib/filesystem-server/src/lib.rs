@@ -1,13 +1,12 @@
-//! Процесс файловой системы: стартовый кадр, сессии клиентов и цикл обслуживания. Крейт держит
-//! всё, что у файловых систем общее: конкретная сводится к построению своего бекенда.
+//! Процесс файловой системы: компонентные порты, сессии клиентов и цикл обслуживания. Крейт
+//! держит всё, что у файловых систем общее: конкретная сводится к построению своего бекенда.
 //!
-//! Портов у процесса два. Сервисный порт создаёт он сам, и капу сессии минтит только он: по
-//! `bind` с admin-порта и по `open_root` с сервисного. Admin-порт приносит `ProcessStart`, и на
-//! нём отвечает отдельный поток: это отвязывает `bind` и стоящий за ним маршрутизатор имён от
-//! вызова, который сервисный поток обслуживает прямо сейчас.
+//! Портов у процесса два. Control-порт устанавливает сессии по `bind`, service-порт обслуживает
+//! их и выдаёт производные по `open_root`. Control-порт обслуживает отдельный поток: это
+//! отвязывает rootkeeper от вызова, который сервисный поток обслуживает прямо сейчас.
 //!
-//! Клиентская сторона admin-порта принадлежит поднявшему процесс маршрутизатору и несёт его
-//! значок: её уход завершает процесс.
+//! Клиентская сторона control-порта принадлежит rootkeeper и несёт его значок: её уход завершает
+//! процесс.
 
 #![no_std]
 
@@ -18,20 +17,23 @@ use core::sync::atomic::AtomicU64;
 
 use filesystem::FileSystemBackend;
 use filesystem_abi::{file_system, file_system_admin};
-use ipc::{Transport as _, wire::IpcError};
+use ipc::{
+    Transport as _,
+    wire::{Cap, IpcError},
+};
 use runtime::{
-    MemoryRegion, Mutex, OwnedHandle, Port, PortTransport, Priority, ReadOnlyMapping, Resource,
-    Thread, exit_with_sibling, install_log, log_line, spawn_owned,
+    MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Resource, Thread,
+    exit_with_sibling, install_log, log_line, spawn_owned,
 };
 use spin::Once;
-use syscall::{Handle, Timeout};
+use syscall::Timeout;
 
 mod admin;
 mod buffer;
 mod error;
 mod service;
 
-use admin::{Binding, Handshake, StartResources};
+use admin::Binding;
 pub use error::{Error, Result};
 use service::{FileSystemState, Frame, Serving};
 pub use service::{settle, vend};
@@ -50,51 +52,50 @@ struct Shared {
     next_badge: AtomicU64,
 }
 
-/// Поднимает файловую систему и обслуживает её, пока сервисный порт не закроется.
+/// Поднимает файловую систему и обслуживает её до закрытия service-порта.
 ///
-/// `admin` - серверная сторона admin-порта, полученная стартовым хэндлом процесса. `tag` метит
-/// строки процесса в klog. `found` строит бекенд по байтам userland-образа. Файловой системе, не
-/// опирающейся на образ, они не нужны.
+/// `control` и `service` приходят компонентной стартовой транзакцией. `found` строит бекенд из
+/// `Some(bytes)` отображённого региона либо из `None` для автономного бекенда.
 pub fn serve<B>(
-    admin: Handle,
+    log: Cap,
+    control: Cap,
+    service: Cap,
+    backing: Option<Cap>,
     tag: &'static str,
-    found: impl FnOnce(&'static [u8]) -> Result<B>,
+    found: impl FnOnce(Option<&'static [u8]>) -> Result<B>,
 ) -> Result<()>
 where
     B: FileSystemBackend + Send + 'static,
 {
-    let admin = OwnedHandle::from_handle(admin);
-    let StartResources { log, image } = handshake(&admin)?;
-    install_log(log, tag);
-
-    let image = MemoryRegion::from_handle(image);
-    let mapping = image.map_full_read_only()?;
-    let bytes = IMAGE.call_once(|| mapping).as_bytes();
+    install_log(OwnedHandle::adopt(log), tag);
+    let control = OwnedHandle::adopt(control);
+    let service = OwnedHandle::adopt(service);
+    let backing = backing.map(MemoryRegion::adopt);
+    let bytes = match backing.as_ref() {
+        Some(backing) => {
+            let mapping = backing.map_full_read_only()?;
+            Some(IMAGE.call_once(|| mapping).as_bytes())
+        }
+        None => None,
+    };
     let backend = found(bytes)?;
 
     let shared: &'static Shared = Box::leak(Box::new(Shared {
         state: Mutex::new(FileSystemState::new(
             Box::new(backend),
-            image,
+            backing,
             Resource::self_resource()?,
         )),
-        service: Port::create()?.into_handle(),
-        admin,
+        service,
+        admin: control,
         sessions_thread: Thread::self_thread()?,
         next_badge: AtomicU64::new(0),
     }));
-    // Поток admin-порта живёт до конца процесса: join ему не нужен, а стек он держит своим.
+    // Control-поток разделяет время жизни процесса и владеет собственным стеком.
     let _ = spawn_owned(move || serve_admin(shared), ADMIN_STACK, Priority::new(1))?;
     log_line("started");
     serve_sessions(shared);
     Ok(())
-}
-
-fn handshake(admin: &OwnedHandle) -> Result<StartResources> {
-    let transport = PortTransport::server(admin.borrow());
-    let mut received = Handshake::default();
-    file_system_admin::dispatch(&mut received, &transport)?;
-    received.take().ok_or(Error::Start)
 }
 
 fn serve_sessions(shared: &Shared) {
@@ -142,8 +143,8 @@ fn serve_admin(shared: &Shared) -> u32 {
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
-            // Отправитель на admin-порту один - поднявший монтирование
-            // маршрутизатор, поэтому его уход снимает процесс целиком.
+            // Отправитель на control-порту один - rootkeeper, поэтому его уход снимает процесс
+            // целиком.
             Err(IpcError::SenderGone) => {
                 log_line("supervisor gone");
                 exit_with_sibling(&shared.sessions_thread, SUPERVISOR_LOST_EXIT_CODE)
@@ -154,7 +155,7 @@ fn serve_admin(shared: &Shared) -> u32 {
             // Прочий отказ приёма оставляет процесс без установления сессий и уходит ненулевым
             // кодом потока, отличимым от закрытия порта.
             Err(_) => {
-                log_line("admin port failed");
+                log_line("control port failed");
                 return 1;
             }
         }
@@ -163,6 +164,6 @@ fn serve_admin(shared: &Shared) -> u32 {
         binding.end(delivered);
         transport.cancel_reply();
     }
-    log_line("admin port closed");
+    log_line("control port closed");
     0
 }

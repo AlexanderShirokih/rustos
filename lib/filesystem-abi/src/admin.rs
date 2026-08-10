@@ -9,8 +9,8 @@ ipc::protocol! {
     pub mod namespace_admin {
         name = "NamespaceAdmin";
 
-        /// Поднимает файловую систему из записи образа `program` и монтирует её под префикс
-        /// `path`. Занятый префикс - `AlreadyExists`.
+        /// Монтирует под префикс `path` файловую систему, которую обслуживает программа
+        /// `program`. Занятый префикс - `AlreadyExists`.
         call fn mount(
             path: ipc::wire::Str<{ PATH_MAX }>,
             program: ipc::wire::Str<{ PATH_MAX }>,
@@ -22,14 +22,9 @@ ipc::protocol! {
 }
 
 ipc::protocol! {
-    /// Управление самой файловой системой: запуск и установление сессий.
+    /// Установление сессий файловой системы владельцем компонента.
     pub mod file_system_admin {
         name = "FileSystemAdmin";
-
-        /// Отдаёт серверу канал логирования и регион userland-образа. Сервисный порт сервер
-        /// создаёт сам: минтить сессии вправе только тот, кто отвечает за допуск к файловой
-        /// системе.
-        cast fn start(log: Cap, image: Cap);
 
         /// Заводит сессию и отдаёт capability сервисного порта под её значком. Значок
         /// назначает сервер: политика допуска принадлежит владельцу файловой системы, и место
@@ -51,13 +46,10 @@ mod tests {
 
     use super::{FileSystemError, PATH_MAX, file_system_admin, namespace_admin};
 
-    const LOG_CAP: Cap = cap(0x21);
-    const IMAGE_CAP: Cap = cap(0x22);
     const SESSION_CAP: Cap = cap(0x25);
 
     #[derive(Default)]
     struct Sink {
-        received: Option<[Cap; 2]>,
         binds: u32,
     }
 
@@ -67,10 +59,6 @@ mod tests {
     }
 
     impl file_system_admin::Service for Sink {
-        fn start(&mut self, log: Cap, image: Cap) {
-            self.received = Some([log, image]);
-        }
-
         fn bind(&mut self) -> Result<Cap, FileSystemError> {
             self.binds += 1;
             // Вторая сессия сверх квоты этой заглушки не заводится.
@@ -103,16 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn file_system_start_carries_two_caps_in_order() {
-        let (client_end, server_end) = MockEnd::pair();
-        let client = file_system_admin::Client::new(client_end);
-        client.start(LOG_CAP, IMAGE_CAP).expect("start write");
-        let mut sink = Sink::default();
-        file_system_admin::dispatch(&mut sink, &server_end).expect("dispatch ok");
-        assert_eq!(sink.received, Some([LOG_CAP, IMAGE_CAP]));
-    }
-
-    #[test]
     fn mount_and_unmount_ride_the_admin_port() {
         let (client_end, server_end) = MockEnd::pair();
         let mut sink = RouterSink::default();
@@ -127,7 +105,7 @@ mod tests {
 
             let client = namespace_admin::Client::new(client_end);
             let path = Str::new("/tmp").expect("path within the bound");
-            let program = Str::new("/boot/ramfs").expect("path within the bound");
+            let program = Str::new("/boot/filesystem-ramfs").expect("path within the bound");
             assert_eq!(client.mount(path, program).expect("call"), Ok(0));
             assert_eq!(client.unmount(path).expect("call"), Ok(0));
             server.join().expect("server joins");
@@ -135,7 +113,7 @@ mod tests {
         assert_eq!(
             sink.mounted,
             [
-                "mount /tmp /boot/ramfs".to_string(),
+                "mount /tmp /boot/filesystem-ramfs".to_string(),
                 "unmount /tmp".to_string()
             ]
         );

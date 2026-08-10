@@ -105,8 +105,10 @@ dependencies = [
 name = "filesystem-imagefs"
 version = "0.1.0"
 dependencies = [
+ "component-abi",
  "filesystem",
  "filesystem-server",
+ "ipc",
  "runtime",
  "syscall",
  "userland-build",
@@ -116,8 +118,10 @@ dependencies = [
 name = "filesystem-ramfs"
 version = "0.1.0"
 dependencies = [
+ "component-abi",
  "filesystem",
  "filesystem-server",
+ "ipc",
  "runtime",
  "syscall",
  "userland-build",
@@ -214,12 +218,12 @@ dependencies = [
  "filesystem-abi",
  "filesystem-server",
  "ipc",
+ "rootkeeper-abi",
  "runtime",
  "spin",
  "syscall",
  "userland-build",
  "userland-image",
- "userland-loader",
 ]
 
 [[package]]
@@ -253,11 +257,20 @@ dependencies = [
  "log-abi",
  "log-relay",
  "managed-component",
+ "rootkeeper-abi",
  "runtime",
  "spin",
  "syscall",
  "userland-build",
  "userland-image",
+]
+
+[[package]]
+name = "rootkeeper-abi"
+version = "0.1.0"
+dependencies = [
+ "filesystem-abi",
+ "ipc",
 ]
 
 [[package]]

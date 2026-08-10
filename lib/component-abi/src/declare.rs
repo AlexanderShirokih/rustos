@@ -5,8 +5,7 @@
 ///
 /// ```ignore
 /// component_abi::component_manifest! {
-///     pub struct RouterStartup {
-///         exports: "Namespace",
+///     pub struct ImageFileSystemStartup {
 ///         slots: { image: userland },
 ///     }
 /// }
@@ -159,6 +158,7 @@ macro_rules! component_manifest {
         $crate::SlotDeclaration::service(&[$protocol])
     };
     (@slot directory) => { $crate::SlotDeclaration::directory() };
+    (@slot supervisor) => { $crate::SlotDeclaration::supervisor() };
 }
 
 #[cfg(test)]
@@ -179,12 +179,11 @@ mod tests {
     const IMAGE_CAP: Cap = cap(0x25);
     const DEVICE_CAP: Cap = cap(0x26);
 
-    const ROUTER_SLOTS: &[crate::SlotDeclaration] = &[crate::SlotDeclaration::userland()];
-    const ROUTER_LEN: usize = manifest_len(ROUTER_SLOTS, "Namespace");
+    const FILE_SYSTEM_SLOTS: &[crate::SlotDeclaration] = &[crate::SlotDeclaration::userland()];
+    const FILE_SYSTEM_LEN: usize = manifest_len(FILE_SYSTEM_SLOTS, "");
 
     crate::component_manifest! {
-        struct RouterStartup {
-            exports: "Namespace",
+        struct ImageFileSystemStartup {
             slots: { image: userland },
         }
     }
@@ -303,14 +302,14 @@ mod tests {
             .expect("start write");
 
         assert!(
-            RouterStartup::receive(&server_end)
+            ImageFileSystemStartup::receive(&server_end)
                 .expect("dispatch ok")
                 .is_none()
         );
     }
 
     #[test]
-    fn an_exporting_declaration_takes_its_slot() {
+    fn a_userland_declaration_takes_its_slot() {
         let (client_end, server_end) = MockEnd::pair();
         let sender = client(client_end);
         sender
@@ -318,7 +317,7 @@ mod tests {
             .expect("start write");
         sender.slot(IMAGE_CAP).expect("slot write");
 
-        let started = RouterStartup::receive(&server_end)
+        let started = ImageFileSystemStartup::receive(&server_end)
             .expect("dispatch ok")
             .expect("transaction matches the declaration");
 
@@ -332,10 +331,10 @@ mod tests {
     fn a_declaration_encodes_its_slots_and_export() {
         // Имя секции макрос пишет литералом: `link_section` берёт только его.
         assert_eq!(COMPONENT_MANIFEST_SECTION, ".component.manifest");
-        let bytes: [u8; ROUTER_LEN] = encode_manifest(ROUTER_SLOTS, "Namespace");
+        let bytes: [u8; FILE_SYSTEM_LEN] = encode_manifest(FILE_SYSTEM_SLOTS, "");
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
-        assert_eq!(manifest.export(), Some("Namespace"));
+        assert_eq!(manifest.export(), None);
         let slot = manifest.slots().next().expect("userland slot");
         assert_eq!(slot.kind(), SlotKind::Userland);
     }

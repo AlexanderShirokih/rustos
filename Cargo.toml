@@ -14,6 +14,7 @@ members = [
     "lib/ipc-test",
     "lib/log-abi",
     "lib/rtc-abi",
+    "lib/rootkeeper-abi",
     "lib/syscall",
     "kernel/kernelspace",
     "kernel/capability",
@@ -97,6 +98,7 @@ userland = { path = "lib/userland" }
 userland-build = { path = "lib/userland-build" }
 userland-image = { path = "lib/userland-image" }
 rtc-abi = { path = "lib/rtc-abi" }
+rootkeeper-abi = { path = "lib/rootkeeper-abi" }
 process = { path = "kernel/process" }
 userland-image-tool = { path = "tools/userland-image" }
 style-tool = { path = "tools/style" }

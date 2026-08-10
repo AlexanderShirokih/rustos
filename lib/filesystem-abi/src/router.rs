@@ -1,20 +1,22 @@
-//! Контракт маршрутизатора имён: разбор пути в монтирование. Данные через маршрутизатор не идут -
-//! он участвует только в установлении сессии. Управление таблицей монтирования живёт в admin-
-//! контракте [`crate::namespace_admin`] на другом порту.
+//! Контракт маршрутизатора имён: разбор пути в монтирование и выдача scoped-сессии.
+//! Клиент передаёт данные напрямую выбранной файловой системе. Таблицей монтирования управляет
+//! admin-контракт [`crate::namespace_admin`] на другом порту.
 
-use crate::{error::FileSystemError, limits::PATH_MAX, reply::Mounted};
+use crate::{error::FileSystemError, limits::PATH_MAX};
 
 ipc::protocol! {
     /// Маршрутизатор имён: выдаёт клиентам сессии файловых систем по пути.
     pub mod namespace {
         name = "Namespace";
 
-        /// Отдаёт сессию монтирования, накрывающего `path`, вместе с длиной его префикса.
-        /// Путь, не накрытый ни одним монтированием, - `NotFound`.
+        /// Отдаёт сессию файловой системы, уже открытую на `path`. Путь, не накрытый ни одним
+        /// монтированием, - `NotFound`.
         ///
         /// Capability выдаёт сама файловая система, применяя свою политику допуска: от неё же
         /// приходит и отказ установления.
-        call fn resolve(path: ipc::wire::Str<{ PATH_MAX }>) -> Result<Mounted, FileSystemError>;
+        call fn resolve(
+            path: ipc::wire::Str<{ PATH_MAX }>,
+        ) -> Result<ipc::wire::Cap, FileSystemError>;
     }
 }
 
@@ -34,17 +36,16 @@ mod tests {
     };
     use ipc_test::MockEnd;
 
-    use super::{FileSystemError, Mounted, PATH_MAX, namespace};
+    use super::{FileSystemError, PATH_MAX, namespace};
 
     const SESSION_CAP: Cap = cap(0x31);
-    const BOOT_PREFIX_LEN: u32 = 5;
 
     struct Router {
         resolved: Arc<Mutex<Vec<String>>>,
     }
 
     impl namespace::Service for Router {
-        fn resolve(&mut self, path: Str<'_, PATH_MAX>) -> Result<Mounted, FileSystemError> {
+        fn resolve(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap, FileSystemError> {
             self.resolved
                 .lock()
                 .expect("mutex not poisoned")
@@ -52,10 +53,7 @@ mod tests {
             if !path.as_str().starts_with("/boot") {
                 return Err(FileSystemError::NotFound);
             }
-            Ok(Mounted {
-                session: SESSION_CAP,
-                prefix_len: BOOT_PREFIX_LEN,
-            })
+            Ok(SESSION_CAP)
         }
     }
 
@@ -94,18 +92,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_carries_the_session_and_its_prefix_in_one_call() {
+    fn resolve_carries_the_session_opened_on_the_path() {
         let (mounted, resolved) = with_router(1, |client| {
             client.resolve(path("/boot/sample")).expect("call")
         });
 
-        assert_eq!(
-            mounted,
-            Ok(Mounted {
-                session: SESSION_CAP,
-                prefix_len: BOOT_PREFIX_LEN,
-            })
-        );
+        assert_eq!(mounted, Ok(SESSION_CAP));
         assert_eq!(resolved, ["/boot/sample".to_string()]);
     }
 

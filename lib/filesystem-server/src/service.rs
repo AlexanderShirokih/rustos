@@ -1,5 +1,5 @@
 //! Обслуживание сервисного порта: трансляция операций контракта `FileSystem` в модель
-//! `lib/filesystem` поверх состояния, разделённого с admin-потоком.
+//! `lib/filesystem` поверх состояния, разделённого с control-потоком.
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
@@ -33,7 +33,7 @@ pub(crate) struct FileSystemState {
     backend: Box<dyn FileSystemBackend + Send>,
     sessions: SessionTable<Attachment>,
     resource: Resource,
-    image: MemoryRegion,
+    backing: Option<MemoryRegion>,
 }
 
 #[derive(Default)]
@@ -90,14 +90,14 @@ fn scoped_entry<'a>(
 impl FileSystemState {
     pub(crate) fn new(
         backend: Box<dyn FileSystemBackend + Send>,
-        image: MemoryRegion,
+        backing: Option<MemoryRegion>,
         resource: Resource,
     ) -> Self {
         Self {
             backend,
             sessions: SessionTable::new(),
             resource,
-            image,
+            backing,
         }
     }
 
@@ -186,12 +186,19 @@ impl Serving<'_> {
     }
 
     fn slice(&self, window: Window, mode: AccessMode) -> Result<OwnedHandle, FileSystemError> {
-        let info = self.state.image.inspect().map_err(no_space)?;
+        let backing = self
+            .state
+            .backing
+            .as_ref()
+            .ok_or(FileSystemError::NotSupported)?;
+        let info = backing.inspect().map_err(no_space)?;
         // Смещение окна кратно странице по построению образа, а его длина - нет: маппинг
         // округляется вверх и бывает длиннее файла.
         let size = window.size.div_ceil(USERLAND_PAGE_SIZE) * USERLAND_PAGE_SIZE;
         self.state
-            .image
+            .backing
+            .as_ref()
+            .ok_or(FileSystemError::NotSupported)?
             .slice(window.offset, size, access_for(mode, info.access))
             .map(MemoryRegion::into_handle)
             .map_err(no_space)
@@ -350,11 +357,8 @@ impl file_system::Service for Serving<'_> {
         let mut full = [0; PATH_MAX];
         let (backend, session) = self.backend_and_session()?;
         let root = scoped(&session.attachment().scope, path, &mut full)?;
-        let node = backend.lookup(root)?;
-        if !backend.metadata(node)?.kind.is_directory() {
-            return Err(FileSystemError::NotADirectory);
-        }
-        // Окно производной сессии - полный путь каталога: сужение складывается, а
+        backend.lookup(root)?;
+        // Окно производной сессии - полный путь узла: сужение складывается, а
         // расширить окно обратно производной нечем.
         let scope = if root.is_root() {
             String::new()

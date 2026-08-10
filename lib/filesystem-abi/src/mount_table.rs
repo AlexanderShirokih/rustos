@@ -1,5 +1,5 @@
 //! Запись дерева имён: упорядоченный список монтирований, который маршрутизатор
-//! читает из userland-образа при запуске.
+//! читает из userland-образа при своём запуске.
 
 use alloc::vec::Vec;
 
@@ -12,7 +12,7 @@ pub const MOUNT_TABLE_VERSION: u16 = 1;
 const TABLE_HEADER_SIZE: usize = 16;
 const MOUNT_HEADER_SIZE: usize = 4;
 
-/// Монтирование: префикс дерева имён и программа файловой системы в образе.
+/// Монтирование: префикс дерева имён и программа компонента файловой системы в плане.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mount<'a> {
     pub path: &'a str,

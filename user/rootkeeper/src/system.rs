@@ -12,7 +12,7 @@ use device_resolver::{
 };
 use device_resolver_aarch64::PLATFORM_BINDINGS;
 use fdt::devicetree::DeviceTree;
-use filesystem_abi::{PATH_MAX, Path, file_system, namespace};
+use filesystem_abi::{PATH_MAX, namespace};
 use ipc::wire::Str;
 use log_abi::{LogBuffer, log};
 use managed_component::{
@@ -28,12 +28,11 @@ use userland_image::{
     PlanComponent, PlanDecodeError, PlanDevice, SlotSource, decode, decode_plan,
 };
 
-use crate::relay;
+use crate::{relay, sessions::SessionBroker};
 
 const LOG_TAG: &str = "supervisor";
 
-/// Конечный срок остановки компонента: terminate маршрутизатора тянет за собой
-/// join каждого его монтирования, и каждое отвечает в пределах admin-срока.
+/// Конечный срок остановки компонента.
 pub const STOP_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 /// Источник делегированных лог-сессий компонентов.
@@ -77,7 +76,9 @@ pub enum BootFailure {
     DeviceBusy,
     /// Провайдер сервисного слота не поднят.
     Provider,
-    /// Каталог компонента не выдан сессией маршрутизатора имён.
+    /// Broker сессий компонентов не поднят.
+    Broker,
+    /// Каталог компонента не выдан сессией файловой системы.
     Directory,
     /// Capability слота не сминчена.
     Slot,
@@ -131,6 +132,7 @@ pub struct RootSystem<'a> {
     kernel: Handle,
     image: &'a SystemImage,
     entries: DecodedImage<'a>,
+    broker: SessionBroker,
     _resource: Resource,
 }
 
@@ -158,6 +160,7 @@ impl BootFailure {
             Self::LogSession
             | Self::Resource
             | Self::Provider
+            | Self::Broker
             | Self::Directory
             | Self::Slot
             | Self::Launch(_) => Stopped::Startup,
@@ -179,6 +182,7 @@ impl BootFailure {
             Self::Device(_) => "device not described by the platform",
             Self::DeviceBusy => "device resource taken by another component",
             Self::Provider => "service provider not running",
+            Self::Broker => "component session broker not started",
             Self::Directory => "component directory not granted",
             Self::Slot => "component slot not minted",
             Self::Launch(_) => "component not started",
@@ -366,6 +370,7 @@ impl<'a> RootSystem<'a> {
         log_sessions: LogSessions,
     ) -> Result<Self, BootFailure> {
         let entries = image.entries()?;
+        let broker = SessionBroker::start().map_err(|_| BootFailure::Broker)?;
         let resource = Resource::self_resource().map_err(|_| BootFailure::Resource)?;
         let order = start_order(&plan).ok_or(BootFailure::PlanOrder)?;
         let devices = if plan_needs_devices(&plan) {
@@ -393,6 +398,7 @@ impl<'a> RootSystem<'a> {
             kernel,
             image,
             entries,
+            broker,
             _resource: resource,
         };
         for index in system.order.clone() {
@@ -459,25 +465,38 @@ impl<'a> RootSystem<'a> {
                 let _ = component.managed.stop(SHUTDOWN_EXIT_CODE, STOP_TIMEOUT);
             }
         }
+        self.broker.shutdown();
     }
 
     fn launch(&mut self, index: u16) -> Result<(), BootFailure> {
         let plan = self.component(index).ok_or(BootFailure::PlanOrder)?.plan;
         let program = component_program(&self.entries, plan)?;
         let slots = self.provision(index, plan)?;
-        let component = self
-            .components
-            .get_mut(usize::from(index))
-            .ok_or(BootFailure::PlanOrder)?;
-        launch_component(
-            &mut component.managed,
-            &program,
-            plan.name(),
-            &component.log,
-            plan.startup_timeout(),
-            slots,
-        )
-        .map_err(BootFailure::Launch)
+        {
+            let component = self
+                .components
+                .get_mut(usize::from(index))
+                .ok_or(BootFailure::PlanOrder)?;
+            launch_component(
+                &mut component.managed,
+                &program,
+                plan.name(),
+                &component.log,
+                plan.startup_timeout(),
+                slots,
+            )
+            .map_err(BootFailure::Launch)?;
+        }
+        let control = self
+            .component(index)
+            .and_then(|component| component.managed.running())
+            .ok_or(BootFailure::Provider)?
+            .roots()
+            .control();
+        self.broker
+            .publish(index, plan.executable(), control, plan.startup_timeout())
+            .map_err(|_| BootFailure::Broker)?;
+        Ok(())
     }
 
     fn provision(
@@ -505,6 +524,7 @@ impl<'a> RootSystem<'a> {
                 SlotSource::Directory { provider } => {
                     component_area(&self.session(provider, badge)?, plan)?
                 }
+                SlotSource::Supervisor => self.broker.session().ok_or(BootFailure::Broker)?,
             };
             slots.push(capability).map_err(BootFailure::Launch)?;
         }
@@ -692,34 +712,13 @@ fn component_area(
     namespace_session: &OwnedHandle,
     plan: PlanComponent<'_>,
 ) -> Result<OwnedHandle, BootFailure> {
-    // Компонент получает сессию-окно своего каталога: имя разрешается внутри окна,
-    // и путей наружу оно не выражает.
-    let deadline = plan.startup_timeout();
     let directory = Str::<PATH_MAX>::new(plan.executable()).ok_or(BootFailure::Directory)?;
-    let mounted = namespace::Client::new(PortTransport::client(namespace_session))
-        .with_wait(deadline)
+    let session = namespace::Client::new(PortTransport::client(namespace_session))
+        .with_wait(plan.startup_timeout())
         .resolve(directory)
         .map_err(|_| BootFailure::Directory)?
         .map_err(|_| BootFailure::Directory)?;
-    let mount = OwnedHandle::adopt(mounted.session);
-
-    let tail = plan
-        .executable()
-        .get(mounted.prefix_len as usize..)
-        .ok_or(BootFailure::Directory)?;
-    // Каталог самого монтирования остатка не оставляет: корень окна совпадает с
-    // корнем сессии.
-    let tail = if tail.is_empty() {
-        Path::ROOT.as_str()
-    } else {
-        tail
-    };
-    let window = file_system::Client::new(PortTransport::client(&mount))
-        .with_wait(deadline)
-        .open_root(Str::new(tail).ok_or(BootFailure::Directory)?)
-        .map_err(|_| BootFailure::Directory)?
-        .map_err(|_| BootFailure::Directory)?;
-    Ok(OwnedHandle::adopt(window))
+    Ok(OwnedHandle::adopt(session))
 }
 
 fn log_device_conflict(

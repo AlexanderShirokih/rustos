@@ -24,7 +24,7 @@ const OFFSET_RESERVED: usize = 13;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotKind {
-    /// Регион userland-образа.
+    /// Read-only регион userland-образа.
     Userland = 0,
     /// Линия прерывания устройства.
     Irq = 1,
@@ -34,6 +34,8 @@ pub enum SlotKind {
     Service = 3,
     /// Сессия файловой системы с каталогом компонента в роли корня.
     Directory = 4,
+    /// Клиентская capability supervisor, поднявшего компонент.
+    Supervisor = 5,
 }
 
 /// Слот, объявленный программой: вид, номер ресурса устройства и имена, по
@@ -100,6 +102,7 @@ impl SlotKind {
             2 => Some(Self::Mmio),
             3 => Some(Self::Service),
             4 => Some(Self::Directory),
+            5 => Some(Self::Supervisor),
             _ => None,
         }
     }
@@ -110,7 +113,7 @@ impl SlotKind {
 }
 
 impl SlotDeclaration {
-    /// Регион userland-образа.
+    /// Read-only регион userland-образа.
     #[must_use]
     pub const fn userland() -> Self {
         Self {
@@ -157,6 +160,16 @@ impl SlotDeclaration {
     pub const fn directory() -> Self {
         Self {
             kind: SlotKind::Directory,
+            resource: 0,
+            names: &[],
+        }
+    }
+
+    /// Клиентская capability supervisor, поднявшего компонент.
+    #[must_use]
+    pub const fn supervisor() -> Self {
+        Self {
+            kind: SlotKind::Supervisor,
             resource: 0,
             names: &[],
         }
@@ -409,13 +422,16 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, ManifestDecodeE
     let name_count = header[3];
 
     // Устройство названо хотя бы одной совместимостью, сервис - своим
-    // протоколом, а образ и каталог компонента именами не выбираются.
+    // протоколом, а у userland-образа, supervisor и каталога число имён равно нулю.
     match kind {
         SlotKind::Userland if name_count != 0 || resource != 0 => {
             return Err(ManifestDecodeError::InvalidLayout("userland slot"));
         }
         SlotKind::Directory if name_count != 0 || resource != 0 => {
             return Err(ManifestDecodeError::InvalidLayout("directory slot"));
+        }
+        SlotKind::Supervisor if name_count != 0 || resource != 0 => {
+            return Err(ManifestDecodeError::InvalidLayout("supervisor slot"));
         }
         SlotKind::Service if name_count != 1 || resource != 0 => {
             return Err(ManifestDecodeError::InvalidLayout("service slot"));

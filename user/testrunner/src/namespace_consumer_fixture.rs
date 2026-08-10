@@ -53,8 +53,8 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 
 fn resolve(namespace: &namespace::Client<PortTransport>, path: Str<'_, { PATH_MAX }>) -> bool {
     match namespace.resolve(path) {
-        Ok(Ok(mounted)) => {
-            drop(OwnedHandle::adopt(mounted.session));
+        Ok(Ok(session)) => {
+            drop(OwnedHandle::adopt(session));
             true
         }
         _ => false,
