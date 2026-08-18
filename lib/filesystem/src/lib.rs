@@ -17,9 +17,11 @@ mod image;
 mod node;
 mod ram;
 mod session;
+mod store;
 
 pub use backend::FileSystemBackend;
 pub use image::{ImageFileSystem, ImageFileSystemError};
 pub use node::{NodeId, Window};
 pub use ram::RamFileSystem;
 pub use session::{ClientId, OpenNode, Session, SessionTable};
+pub use store::{ByteStore, HeapByteStore, StoreId, insert_store};

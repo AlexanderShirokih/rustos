@@ -86,6 +86,14 @@ ipc::protocol! {
         /// Удаляет узел по пути. Каталог с записями - `NotEmpty`.
         call fn unlink(path: ipc::wire::Str<{ PATH_MAX }>) -> Result<u32, FileSystemError>;
 
+        /// Заводит файл под `path` поверх переданного RW-региона без копирования. `size` задаёт
+        /// начальную длину и не может превышать ёмкость региона.
+        call fn create_backed(
+            path: ipc::wire::Str<{ PATH_MAX }>,
+            region: Cap,
+            size: u64,
+        ) -> Result<u32, FileSystemError>;
+
         /// Отдаёт capability на регион с содержимым узла. Права выводятся из режима
         /// дескриптора. Бекенд без такого региона отвечает `NotSupported`.
         call fn backing_memory(fd: NodeDescriptor) -> Result<ipc::wire::Cap, FileSystemError>;
@@ -124,6 +132,7 @@ mod tests {
     const BUFFER_CAP: Cap = cap(0x11);
     const BACKING_CAP: Cap = cap(0x22);
     const SCOPED_CAP: Cap = cap(0x33);
+    const IMPORT_CAP: Cap = cap(0x44);
     const READ_COUNT: u32 = 512;
     const DONE: u32 = 0;
     const FD: NodeDescriptor = NodeDescriptor::from_raw(7);
@@ -186,6 +195,11 @@ mod tests {
         },
         Unlink {
             path: String,
+        },
+        CreateBacked {
+            path: String,
+            region: u32,
+            size: u64,
         },
         BackingMemory {
             fd: NodeDescriptor,
@@ -283,6 +297,20 @@ mod tests {
         fn unlink(&mut self, path: Str<'_, { PATH_MAX }>) -> Result<u32, FileSystemError> {
             self.record(Call::Unlink {
                 path: path.as_str().to_string(),
+            });
+            Ok(DONE)
+        }
+
+        fn create_backed(
+            &mut self,
+            path: Str<'_, { PATH_MAX }>,
+            region: Cap,
+            size: u64,
+        ) -> Result<u32, FileSystemError> {
+            self.record(Call::CreateBacked {
+                path: path.as_str().to_string(),
+                region: region.raw().get(),
+                size,
             });
             Ok(DONE)
         }
@@ -489,6 +517,28 @@ mod tests {
         let (result, calls) = with_service(|client| client.backing_memory(FD).expect("call ok"));
         assert_eq!(result, Ok(BACKING_CAP));
         assert_eq!(calls, [Call::BackingMemory { fd: FD }]);
+    }
+
+    #[test]
+    fn create_backed_round_trip() {
+        let (result, calls) = with_service(|client| {
+            client
+                .create_backed(
+                    Str::new("/store/shared").expect("path within bound"),
+                    IMPORT_CAP,
+                    123,
+                )
+                .expect("call ok")
+        });
+        assert_eq!(result, Ok(DONE));
+        assert_eq!(
+            calls,
+            [Call::CreateBacked {
+                path: "/store/shared".to_string(),
+                region: IMPORT_CAP.raw().get(),
+                size: 123,
+            }]
+        );
     }
 
     #[test]

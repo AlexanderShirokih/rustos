@@ -7,7 +7,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
 
-use filesystem::{ClientId, FileSystemBackend, NodeId, OpenNode, Session, SessionTable, Window};
+use filesystem::{ByteStore, ClientId, FileSystemBackend, NodeId, OpenNode, Session, SessionTable};
 use filesystem_abi::{
     AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
     Opened, PATH_MAX, Path, Written, file_system, rebase,
@@ -15,9 +15,8 @@ use filesystem_abi::{
 use ipc::wire::{Cap, Str};
 use runtime::{MemoryAccess, MemoryRegion, MutexGuard, OwnedHandle, Resource};
 use syscall::{Handle, Rights};
-use userland::USERLAND_PAGE_SIZE;
 
-use crate::{buffer::DataBuffer, error::no_space};
+use crate::{buffer::DataBuffer, error::no_space, store::StoreTable};
 
 const DONE: u32 = 0;
 
@@ -32,8 +31,7 @@ pub(crate) struct Attachment {
 pub(crate) struct FileSystemState {
     backend: Box<dyn FileSystemBackend + Send>,
     sessions: SessionTable<Attachment>,
-    resource: Resource,
-    backing: Option<MemoryRegion>,
+    stores: StoreTable,
 }
 
 #[derive(Default)]
@@ -41,6 +39,7 @@ pub(crate) struct Frame {
     badge: u64,
     received: Vec<OwnedHandle>,
     vended: Option<OwnedHandle>,
+    pending_pin: Option<NodeId>,
 }
 
 pub(crate) struct Serving<'a> {
@@ -96,8 +95,7 @@ impl FileSystemState {
         Self {
             backend,
             sessions: SessionTable::new(),
-            resource,
-            backing,
+            stores: StoreTable::new(resource, backing),
         }
     }
 
@@ -128,9 +126,27 @@ impl Frame {
             .extend(caps.into_iter().map(OwnedHandle::from_handle));
     }
 
-    pub(crate) fn end(&mut self, delivered: bool) {
+    pub(crate) fn end(&mut self, delivered: bool, state: &mut FileSystemState) {
         self.received.clear();
+        if delivered {
+            if let Some(node) = self.pending_pin.take() {
+                let pinned = state.backend.pin(node);
+                debug_assert!(pinned.is_ok());
+            }
+        } else {
+            self.pending_pin = None;
+        }
         settle(&mut self.vended, delivered);
+    }
+
+    fn take(&mut self, capability: Cap) -> Result<OwnedHandle, FileSystemError> {
+        let raw = capability.raw().get();
+        let index = self
+            .received
+            .iter()
+            .position(|handle| handle.as_raw().raw() == raw)
+            .ok_or(FileSystemError::NotSupported)?;
+        Ok(self.received.swap_remove(index))
     }
 }
 
@@ -167,14 +183,23 @@ impl Serving<'_> {
         self.state.sessions.get_mut(client)
     }
 
-    fn backend_and_session(
+    fn backend_stores_session(
         &mut self,
-    ) -> Result<(&mut dyn FileSystemBackend, &mut Session<Attachment>), FileSystemError> {
+    ) -> Result<
+        (
+            &mut dyn FileSystemBackend,
+            &mut StoreTable,
+            &mut Session<Attachment>,
+        ),
+        FileSystemError,
+    > {
         let client = self.client()?;
         let FileSystemState {
-            backend, sessions, ..
+            backend,
+            stores,
+            sessions,
         } = &mut *self.state;
-        Ok((backend.as_mut(), sessions.get_mut(client)?))
+        Ok((backend.as_mut(), stores, sessions.get_mut(client)?))
     }
 
     fn buffer(session: &mut Session<Attachment>) -> Result<&mut DataBuffer, FileSystemError> {
@@ -184,32 +209,13 @@ impl Serving<'_> {
             .as_mut()
             .ok_or(FileSystemError::NoBuffer)
     }
-
-    fn slice(&self, window: Window, mode: AccessMode) -> Result<OwnedHandle, FileSystemError> {
-        let backing = self
-            .state
-            .backing
-            .as_ref()
-            .ok_or(FileSystemError::NotSupported)?;
-        let info = backing.inspect().map_err(no_space)?;
-        // Смещение окна кратно странице по построению образа, а его длина - нет: маппинг
-        // округляется вверх и бывает длиннее файла.
-        let size = window.size.div_ceil(USERLAND_PAGE_SIZE) * USERLAND_PAGE_SIZE;
-        self.state
-            .backing
-            .as_ref()
-            .ok_or(FileSystemError::NotSupported)?
-            .slice(window.offset, size, access_for(mode, info.access))
-            .map(MemoryRegion::into_handle)
-            .map_err(no_space)
-    }
 }
 
 impl file_system::Service for Serving<'_> {
     fn acquire_buffer(&mut self, size: u32) -> Result<Cap, FileSystemError> {
         let client = self.client()?;
         let FileSystemState {
-            resource, sessions, ..
+            stores, sessions, ..
         } = &mut *self.state;
         let session = sessions.get_mut(client)?;
         // Буфер заводится один раз за сессию: раскладка под уже выданной клиенту капой
@@ -217,7 +223,7 @@ impl file_system::Service for Serving<'_> {
         if session.attachment().buffer.is_some() {
             return Err(FileSystemError::AlreadyExists);
         }
-        let buffer = DataBuffer::create(resource, size)?;
+        let buffer = DataBuffer::create(stores.resource(), size)?;
         let shared = buffer.share()?;
         session.attachment_mut().buffer = Some(buffer);
         Ok(vend(&mut self.frame.vended, shared))
@@ -230,7 +236,7 @@ impl file_system::Service for Serving<'_> {
         flags: OpenFlags,
     ) -> Result<Opened, FileSystemError> {
         let mut full = [0; PATH_MAX];
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, stores, session) = self.backend_stores_session()?;
         let scope = &session.attachment().scope;
         // Корень окна - запись каталога над ним: сессия его открывает, но не заводит.
         let names_window_root = !scope.is_empty() && Path::new(path.as_str())?.is_root();
@@ -241,7 +247,7 @@ impl file_system::Service for Serving<'_> {
         if names_window_root {
             backend.lookup(path)?;
         }
-        let opened = open_in_backend(backend, path, mode, flags)?;
+        let opened = open_in_backend(backend, stores, path, mode, flags)?;
         let node = opened.node;
         let info = backend.metadata(node)?;
         let fd = match self.session()?.open(OpenNode { node, mode }) {
@@ -250,7 +256,7 @@ impl file_system::Service for Serving<'_> {
                 // Узел, заведённый ради этого дескриптора, не переживает отказ его выдачи:
                 // откат не даёт отказному вызову оставить в дереве узел без дескриптора.
                 if opened.created {
-                    let (backend, _) = self.backend_and_session()?;
+                    let (backend, _, _) = self.backend_stores_session()?;
                     let _ = backend.unlink(path);
                 }
                 return Err(error);
@@ -269,10 +275,10 @@ impl file_system::Service for Serving<'_> {
     }
 
     fn read(&mut self, fd: NodeDescriptor, offset: u64, len: u32) -> Result<u32, FileSystemError> {
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, stores, session) = self.backend_stores_session()?;
         let open_node = readable(session.get(fd)?)?;
         let count = Self::buffer(session)?.publish(len as usize, |out| {
-            backend.read_at(open_node.node, offset, out)
+            backend.read_at(stores, open_node.node, offset, out)
         })?;
         Ok(count as u32)
     }
@@ -283,11 +289,11 @@ impl file_system::Service for Serving<'_> {
         offset: u64,
         len: u32,
     ) -> Result<Written, FileSystemError> {
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, stores, session) = self.backend_stores_session()?;
         let open_node = writable(session.get(fd)?)?;
         Self::buffer(session)?.snapshot(len as usize, |data| {
             if offset == APPEND {
-                let at = backend.append(open_node.node, data)?;
+                let at = backend.append(stores, open_node.node, data)?;
                 // Сколько байт легло, знает бекенд: дозапись отдаёт только их смещение, а длину
                 // даёт выросшая длина узла.
                 let size = backend.metadata(open_node.node)?.size;
@@ -296,26 +302,26 @@ impl file_system::Service for Serving<'_> {
                     offset: at,
                 });
             }
-            let count = backend.write_at(open_node.node, offset, data)? as u32;
+            let count = backend.write_at(stores, open_node.node, offset, data)? as u32;
             Ok(Written { count, offset })
         })
     }
 
     fn set_size(&mut self, fd: NodeDescriptor, size: u64) -> Result<u32, FileSystemError> {
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, stores, session) = self.backend_stores_session()?;
         let open_node = writable(session.get(fd)?)?;
-        backend.set_size(open_node.node, size)?;
+        backend.set_size(stores, open_node.node, size)?;
         Ok(DONE)
     }
 
     fn stat(&mut self, fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError> {
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, _, session) = self.backend_stores_session()?;
         let open_node = readable(session.get(fd)?)?;
         backend.metadata(open_node.node)
     }
 
     fn list(&mut self, fd: NodeDescriptor, from: DirCursor) -> Result<Listed, FileSystemError> {
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, _, session) = self.backend_stores_session()?;
         let open_node = readable(session.get(fd)?)?;
         let buffer = Self::buffer(session)?;
         // Пачка записей занимает буфер целиком: сколько их уместилось, решает перечисление.
@@ -329,7 +335,7 @@ impl file_system::Service for Serving<'_> {
         to: Str<'_, PATH_MAX>,
     ) -> Result<u32, FileSystemError> {
         let (mut full_from, mut full_to) = ([0; PATH_MAX], [0; PATH_MAX]);
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, _, session) = self.backend_stores_session()?;
         let scope = &session.attachment().scope;
         let from = scoped_entry(scope, from, &mut full_from)?;
         let to = scoped_entry(scope, to, &mut full_to)?;
@@ -339,23 +345,56 @@ impl file_system::Service for Serving<'_> {
 
     fn unlink(&mut self, path: Str<'_, PATH_MAX>) -> Result<u32, FileSystemError> {
         let mut full = [0; PATH_MAX];
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, _, session) = self.backend_stores_session()?;
         let path = scoped_entry(&session.attachment().scope, path, &mut full)?;
         backend.unlink(path)?;
         Ok(DONE)
     }
 
+    fn create_backed(
+        &mut self,
+        path: Str<'_, PATH_MAX>,
+        region: Cap,
+        size: u64,
+    ) -> Result<u32, FileSystemError> {
+        let client = self.client()?;
+        let scope = self
+            .state
+            .sessions
+            .get_mut(client)?
+            .attachment()
+            .scope
+            .clone();
+        let mut full = [0; PATH_MAX];
+        let path = scoped_entry(&scope, path, &mut full)?;
+        if !self.state.backend.is_mutable() {
+            return Err(FileSystemError::ReadOnly);
+        }
+
+        let region = MemoryRegion::from_handle(self.frame.take(region)?);
+        let FileSystemState {
+            backend, stores, ..
+        } = &mut *self.state;
+        let (store, capacity) = stores.import(region)?;
+        if let Err(error) = backend.create_backed(path, store, size, capacity) {
+            stores.release(store);
+            return Err(error);
+        }
+        Ok(DONE)
+    }
+
     fn backing_memory(&mut self, fd: NodeDescriptor) -> Result<Cap, FileSystemError> {
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, stores, session) = self.backend_stores_session()?;
         let open_node = readable(session.get(fd)?)?;
-        let window = backend.backing(open_node.node)?;
-        let slice = self.slice(window, open_node.mode)?;
+        let window = backend.backing(stores, open_node.node)?;
+        let slice = stores.slice(window, open_node.mode)?;
+        self.frame.pending_pin = Some(open_node.node);
         Ok(vend(&mut self.frame.vended, slice))
     }
 
     fn open_root(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap, FileSystemError> {
         let mut full = [0; PATH_MAX];
-        let (backend, session) = self.backend_and_session()?;
+        let (backend, _, session) = self.backend_stores_session()?;
         let root = scoped(&session.attachment().scope, path, &mut full)?;
         backend.lookup(root)?;
         // Окно производной сессии - полный путь узла: сужение складывается, а
@@ -373,7 +412,7 @@ impl file_system::Service for Serving<'_> {
     }
 }
 
-fn access_for(mode: AccessMode, region: MemoryAccess) -> MemoryAccess {
+pub(crate) fn access_for(mode: AccessMode, region: MemoryAccess) -> MemoryAccess {
     let requested = if mode.writable() {
         MemoryAccess::RW
     } else {
@@ -404,6 +443,7 @@ struct OpenedNode {
 
 fn open_in_backend(
     backend: &mut dyn FileSystemBackend,
+    stores: &mut StoreTable,
     path: Path<'_>,
     mode: AccessMode,
     flags: OpenFlags,
@@ -438,7 +478,7 @@ fn open_in_backend(
         return Err(FileSystemError::NotADirectory);
     }
     if flags.contains(OpenFlags::TRUNCATE) {
-        backend.set_size(opened.node, 0)?;
+        backend.set_size(stores, opened.node, 0)?;
     }
     Ok(opened)
 }

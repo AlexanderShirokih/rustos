@@ -20,6 +20,7 @@
 | Запуск после сборки                 | `cargo xtask build devices/spec/<device>.yaml --run`                                                                 |
 | QEMU integration tests              | `cargo xtask qemu-test [--timeout <сек>] [--spec <путь>]`                                                            |
 | Userspace stress в QEMU             | `cargo xtask stress [--seed <n>] [--seeds <n>] [--steps <n>] [--timeout <сек>]`                                      |
+| Замеры файловых плоскостей в QEMU   | `cargo xtask bench [--timeout <сек>]`                                                                                |
 | Host race под ThreadSanitizer       | `cargo xtask race`                                                                                                    |
 | Ограниченный fuzz-прогон            | `cargo xtask fuzz <target> [--seconds <сек>]`                                                                         |
 
@@ -113,6 +114,20 @@ cargo xtask qemu-test --spec devices/spec/qemu-aarch64-test-gicv2.yaml
 ```
 
 `stress` спеку не выбирает и всегда идёт по умолчанию.
+
+### Замеры
+
+`bench` собирает образ testrunner с профилем `bench` и выбирает только
+`#[kernel_test(bench)]`. Каждый замер печатает строку `[TEST-REPORT]` с видом
+плоскости, размером операции и наносекундами на операцию:
+
+```bash
+cargo xtask bench
+```
+
+Прогон идёт под TCG, где нет модели кеша и TLB. Зависимость цены операции от
+размера региона наблюдаема и переносима, абсолютная пропускная способность и
+соотношение цены IPC к цене копирования - нет.
 
 ### Stress, race и fuzz
 

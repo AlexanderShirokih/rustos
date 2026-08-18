@@ -16,6 +16,7 @@ use userland_image::{ImageDecodeError, decode};
 use crate::{
     backend::FileSystemBackend,
     node::{NodeId, Window},
+    store::{ByteStore, StoreId},
 };
 
 const SEPARATOR: char = '/';
@@ -272,7 +273,13 @@ impl FileSystemBackend for ImageFileSystem {
         })
     }
 
-    fn read_at(&self, node: NodeId, offset: u64, out: &mut [u8]) -> Result<usize, FileSystemError> {
+    fn read_at(
+        &self,
+        _stores: &dyn ByteStore,
+        node: NodeId,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, FileSystemError> {
         let data = self.locate(node)?.data()?;
         let Ok(start) = usize::try_from(offset) else {
             return Ok(0);
@@ -287,6 +294,7 @@ impl FileSystemBackend for ImageFileSystem {
 
     fn write_at(
         &mut self,
+        _stores: &mut dyn ByteStore,
         node: NodeId,
         _offset: u64,
         _data: &[u8],
@@ -294,11 +302,21 @@ impl FileSystemBackend for ImageFileSystem {
         Err(self.refuse_change(node))
     }
 
-    fn append(&mut self, node: NodeId, _data: &[u8]) -> Result<u64, FileSystemError> {
+    fn append(
+        &mut self,
+        _stores: &mut dyn ByteStore,
+        node: NodeId,
+        _data: &[u8],
+    ) -> Result<u64, FileSystemError> {
         Err(self.refuse_change(node))
     }
 
-    fn set_size(&mut self, node: NodeId, _size: u64) -> Result<(), FileSystemError> {
+    fn set_size(
+        &mut self,
+        _stores: &mut dyn ByteStore,
+        node: NodeId,
+        _size: u64,
+    ) -> Result<(), FileSystemError> {
         Err(self.refuse_change(node))
     }
 
@@ -338,16 +356,26 @@ impl FileSystemBackend for ImageFileSystem {
         })
     }
 
-    fn backing(&self, node: NodeId) -> Result<Window, FileSystemError> {
+    fn backing(
+        &mut self,
+        _stores: &mut dyn ByteStore,
+        node: NodeId,
+    ) -> Result<Window, FileSystemError> {
         let node = self.locate(node)?;
         let size = node.data()?.len() as u64;
         if size == 0 {
             return Err(FileSystemError::NotSupported);
         }
         Ok(Window {
+            store: StoreId::MOUNT,
             offset: node.record.offset,
             size,
         })
+    }
+
+    fn pin(&mut self, node: NodeId) -> Result<(), FileSystemError> {
+        self.locate(node)?;
+        Ok(())
     }
 }
 
@@ -386,13 +414,26 @@ mod tests {
     };
     use userland_image::{ImageRecord, encode};
 
-    use super::{ImageFileSystem, ImageFileSystemError};
+    use super::{ImageFileSystem as Backend, ImageFileSystemError};
     use crate::{
+        HeapByteStore,
         backend::FileSystemBackend,
         node::{NodeId, Window},
+        store::host::WithStore,
     };
 
     const SAMPLE: &[u8] = b"hello from the image";
+
+    type ImageFileSystem = WithStore<Backend>;
+
+    impl ImageFileSystem {
+        fn new(image: &'static [u8]) -> Result<Self, ImageFileSystemError> {
+            Ok(Self {
+                backend: Backend::new(image)?,
+                stores: HeapByteStore::new(),
+            })
+        }
+    }
 
     fn path(text: &str) -> Path<'_> {
         Path::new(text).expect("valid path")
@@ -676,7 +717,7 @@ mod tests {
 
     #[test]
     fn file_and_directory_operations_do_not_mix() {
-        let fs = image();
+        let mut fs = image();
         let boot = node(&fs, "/boot");
         let sample = node(&fs, "/data/sample");
         assert_eq!(
@@ -692,8 +733,8 @@ mod tests {
 
     #[test]
     fn backing_points_at_the_bytes_of_the_entry() {
-        let fs = image();
-        let Window { offset, size } = fs.backing(node(&fs, "/data/sample")).expect("backing");
+        let mut fs = image();
+        let Window { offset, size, .. } = fs.backing(node(&fs, "/data/sample")).expect("backing");
         assert_eq!(size, SAMPLE.len() as u64);
         let at = offset as usize;
         assert_eq!(&image_bytes()[at..at + size as usize], SAMPLE);
@@ -701,7 +742,7 @@ mod tests {
 
     #[test]
     fn empty_record_is_a_file_without_a_backing_window() {
-        let fs = image_from(&[
+        let mut fs = image_from(&[
             ImageRecord {
                 path: "/boot/init",
                 data: b"init",

@@ -6,6 +6,8 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use spin::Mutex;
+
 use crate::{
     MemFlags,
     aligned::Aligned,
@@ -63,9 +65,8 @@ pub enum MemoryType {
 pub enum MemoryBacking {
     /// Анонимные фреймы, выделенные из `FrameAllocator`.
     Virtual {
-        frames: Vec<Frame>,
-        fa: &'static (dyn FrameAllocator + Send + Sync),
-        zeroed: AtomicBool,
+        owner: Arc<VirtualBacking>,
+        first: usize,
     },
 
     /// Фиксированный PA-диапазон: PA не принадлежит региону. `memory_type`
@@ -74,6 +75,14 @@ pub enum MemoryBacking {
         pa_base: PageAlignedAddress,
         memory_type: MemoryType,
     },
+}
+
+/// Общее владение фреймами Virtual-региона и его metering-обязательством.
+pub struct VirtualBacking {
+    frames: Vec<Frame>,
+    fa: &'static (dyn FrameAllocator + Send + Sync),
+    zeroed: AtomicBool,
+    refund: Mutex<Option<Arc<dyn BudgetRefund>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,8 +99,6 @@ pub enum RegionSliceError {
     MisalignedOffset,
     /// Запрошенный доступ шире исходного.
     AccessEscalation,
-    /// Бэкинг исходного региона не поддерживает нарезку.
-    UnsupportedBacking,
 }
 
 pub struct MemoryRegion {
@@ -122,9 +129,13 @@ impl MemoryRegion {
         }
         Ok(Self {
             backing: MemoryBacking::Virtual {
-                frames,
-                fa,
-                zeroed: AtomicBool::new(false),
+                owner: Arc::new(VirtualBacking {
+                    frames,
+                    fa,
+                    zeroed: AtomicBool::new(false),
+                    refund: Mutex::new(None),
+                }),
+                first: 0,
             },
             size_bytes: pages.get() * PAGE_SIZE,
             access_mask: access,
@@ -174,7 +185,7 @@ impl MemoryRegion {
     /// Возвращает под-регион `[offset_bytes, offset_bytes + size)` с маской
     /// доступа `access`. `offset_bytes` должен быть выровнен на страницу, окно
     /// должно умещаться внутри исходного региона, `access` - не шире исходного.
-    /// Результат не несёт `refund`. Бэкинг `Virtual` не поддерживается.
+    /// Результат разделяет владение бэкингом с исходным регионом и отдельного `refund` не несёт.
     pub fn slice(
         &self,
         offset_bytes: usize,
@@ -206,13 +217,26 @@ impl MemoryRegion {
                     .ok_or(RegionSliceError::OutOfBounds)?;
                 Ok(Self::create_physical(sub_pa, size, access, *memory_type))
             }
-            MemoryBacking::Virtual { .. } => Err(RegionSliceError::UnsupportedBacking),
+            MemoryBacking::Virtual { owner, first } => Ok(Self {
+                backing: MemoryBacking::Virtual {
+                    owner: Arc::clone(owner),
+                    first: first + offset_bytes / PAGE_SIZE,
+                },
+                size_bytes: size.get(),
+                access_mask: access,
+                refund: None,
+            }),
         }
     }
 
     /// Навешивает метеринг-обязательство (см. [`BudgetRefund`]).
     pub fn with_refund(mut self, refund: Arc<dyn BudgetRefund>) -> Self {
-        self.refund = Some(refund);
+        match &mut self.backing {
+            MemoryBacking::Virtual { owner, .. } => {
+                *owner.refund.lock() = Some(refund);
+            }
+            MemoryBacking::Physical { .. } => self.refund = Some(refund),
+        }
         self
     }
 
@@ -222,6 +246,47 @@ impl MemoryRegion {
 
     pub fn access_mask(&self) -> AccessMask {
         self.access_mask
+    }
+
+    /// Проверяет, что `sub` ссылается на вложенное окно того же бэкинга и не расширяет доступ.
+    pub fn contains_subregion(&self, sub: &Self) -> bool {
+        if !self.access_mask.allows(sub.access_mask) {
+            return false;
+        }
+        match (&self.backing, &sub.backing) {
+            (
+                MemoryBacking::Physical {
+                    pa_base: origin, ..
+                },
+                MemoryBacking::Physical {
+                    pa_base: nested, ..
+                },
+            ) => contains_range(
+                origin.as_usize(),
+                self.size_bytes,
+                nested.as_usize(),
+                sub.size_bytes,
+            ),
+            (
+                MemoryBacking::Virtual {
+                    owner: origin,
+                    first: origin_first,
+                },
+                MemoryBacking::Virtual {
+                    owner: nested,
+                    first: nested_first,
+                },
+            ) => {
+                Arc::ptr_eq(origin, nested)
+                    && contains_range(
+                        origin_first * PAGE_SIZE,
+                        self.size_bytes,
+                        nested_first * PAGE_SIZE,
+                        sub.size_bytes,
+                    )
+            }
+            _ => false,
+        }
     }
 
     /// Численный 8-битный тег вариантов backing.
@@ -259,13 +324,14 @@ impl MemoryRegion {
         flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
         match &self.backing {
-            MemoryBacking::Virtual { frames, zeroed, .. } => {
-                if !zeroed.swap(true, Ordering::AcqRel) {
-                    for frame in frames {
+            MemoryBacking::Virtual { owner, first } => {
+                if !owner.zeroed.swap(true, Ordering::AcqRel) {
+                    for frame in &owner.frames {
                         mapper.zero_owned_frame(frame.page_address());
                     }
                 }
-                for (i, frame) in frames.iter().enumerate() {
+                let pages = self.size_bytes / PAGE_SIZE;
+                for (i, frame) in owner.frames[*first..*first + pages].iter().enumerate() {
                     let target_va = va
                         .offset(i * PAGE_SIZE)
                         .ok_or(MemoryMappingError::VirtualMappingError)?;
@@ -298,16 +364,30 @@ impl MemoryRegion {
     }
 }
 
+fn contains_range(origin: usize, origin_size: usize, nested: usize, nested_size: usize) -> bool {
+    let (Some(origin_end), Some(nested_end)) = (
+        origin.checked_add(origin_size),
+        nested.checked_add(nested_size),
+    ) else {
+        return false;
+    };
+    origin <= nested && nested_end <= origin_end
+}
+
 impl Drop for MemoryRegion {
     fn drop(&mut self) {
-        // Virtual владеет фреймами - возвращает их в FA.
-        if let MemoryBacking::Virtual { frames, fa, .. } = &mut self.backing {
-            for frame in frames.drain(..) {
-                let _ = fa.deallocate_frame(frame);
-            }
-        }
-
         if let Some(refund) = self.refund.take() {
+            refund.refund();
+        }
+    }
+}
+
+impl Drop for VirtualBacking {
+    fn drop(&mut self) {
+        for frame in self.frames.drain(..) {
+            let _ = self.fa.deallocate_frame(frame);
+        }
+        if let Some(refund) = self.refund.lock().take() {
             refund.refund();
         }
     }
@@ -514,7 +594,7 @@ mod tests {
         assert_eq!(region.size_bytes(), 3 * PAGE_SIZE);
         assert_eq!(region.kind_tag(), 1);
         let allocated_frames: StdVec<Frame> = match &region.backing {
-            MemoryBacking::Virtual { frames, .. } => frames.clone(),
+            MemoryBacking::Virtual { owner, .. } => owner.frames.clone(),
             MemoryBacking::Physical { .. } => panic!("expected Virtual"),
         };
         assert_eq!(fa.deallocated().len(), 0);
@@ -648,13 +728,22 @@ mod tests {
     }
 
     #[test]
-    fn slice_of_virtual_is_unsupported() {
+    fn slice_of_virtual_maps_the_selected_frames() {
         let fa = leak_fa();
         let region = MemoryRegion::create_virtual(fa, nz(2), AccessMask::RW).unwrap();
-        assert!(matches!(
-            region.slice(0, nz(PAGE_SIZE), AccessMask::R),
-            Err(RegionSliceError::UnsupportedBacking)
-        ));
+        let frames = match &region.backing {
+            MemoryBacking::Virtual { owner, .. } => owner.frames.clone(),
+            MemoryBacking::Physical { .. } => panic!("expected Virtual"),
+        };
+        let sub = region
+            .slice(PAGE_SIZE, nz(PAGE_SIZE), AccessMask::R)
+            .expect("virtual slice");
+        let mapper = MockMapper::default();
+        sub.install(&mapper, aligned_va(0x4000_0000), MemFlags::user_ro())
+            .expect("install slice");
+        let entries = mapper.mapped.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, frames[1].page_address().as_usize());
     }
 
     #[test]
@@ -740,6 +829,25 @@ mod tests {
         drop(region);
         // Virtual-регион под бюджет: на Drop И возвращает фреймы в FA, И
         // возвращает метеринг-бюджет ровно один раз.
+        assert_eq!(refund.0.load(Ordering::Acquire), 1);
+        assert_eq!(fa.deallocated().len(), 2);
+    }
+
+    #[test]
+    fn virtual_slice_keeps_frames_and_refund_alive() {
+        let fa = leak_fa();
+        let refund = Arc::new(CountingRefund(std::sync::atomic::AtomicUsize::new(0)));
+        let region = MemoryRegion::create_virtual(fa, nz(2), AccessMask::RW)
+            .expect("alloc must succeed")
+            .with_refund(refund.clone());
+        let sub = region
+            .slice(PAGE_SIZE, nz(PAGE_SIZE), AccessMask::R)
+            .expect("virtual slice");
+
+        drop(region);
+        assert_eq!(refund.0.load(Ordering::Acquire), 0);
+        assert_eq!(fa.deallocated().len(), 0);
+        drop(sub);
         assert_eq!(refund.0.load(Ordering::Acquire), 1);
         assert_eq!(fa.deallocated().len(), 2);
     }

@@ -24,3 +24,9 @@ executable = "/boot/unresponsive-filesystem"
 memory_limit = "1M"
 startup_timeout = "2s"
 on_failure = "halt"
+
+[[components]]
+executable = "/boot/spare-filesystem"
+memory_limit = "4M"
+startup_timeout = "2s"
+on_failure = "halt"

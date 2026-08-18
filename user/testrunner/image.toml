@@ -83,6 +83,11 @@ bin = "crash-filesystem"
 path = "/boot/crash-filesystem"
 
 [[programs]]
+package = "testrunner"
+bin = "spare-filesystem"
+path = "/boot/spare-filesystem"
+
+[[programs]]
 package = "driver-pl031"
 path = "/boot/driver-pl031"
 

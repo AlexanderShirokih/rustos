@@ -32,6 +32,7 @@ mod admin;
 mod buffer;
 mod error;
 mod service;
+mod store;
 
 use admin::Binding;
 pub use error::{Error, Result};
@@ -130,7 +131,7 @@ fn serve_sessions(shared: &Shared) {
         };
         let delivered = file_system::dispatch(&mut serving, &transport).is_ok();
         drop(serving);
-        frame.end(delivered);
+        frame.end(delivered, &mut shared.state.lock());
         // Reply-объект не переживает свой кадр: закрытие неотправленного ответа будит
         // припаркованного вызывателя.
         transport.cancel_reply();

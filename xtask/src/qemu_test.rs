@@ -50,6 +50,21 @@ pub(crate) fn qemu_test(timeout: u64, spec: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn qemu_bench(timeout: u64) -> Result<()> {
+    qemu_test_pass(QemuPass {
+        label: "bench",
+        spec: Path::new(DEFAULT_SPEC),
+        features: None,
+        image: Path::new("user/testrunner/image.toml"),
+        timeout,
+        environment: &[BuildEnvironment {
+            name: "TEST_PROFILE",
+            value: "bench",
+        }],
+        expected_seeds: None,
+    })
+}
+
 pub(crate) fn qemu_stress(seed: u64, seeds: u64, steps: u64, timeout: u64) -> Result<()> {
     let seed_count = seeds;
     let seed = seed.to_string();

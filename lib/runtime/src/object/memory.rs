@@ -22,6 +22,20 @@ use crate::{
 
 const SPLIT_RETRY_TURN: Timeout = Timeout::from_millis(5);
 
+const WORD: usize = mem::size_of::<u64>();
+
+fn head_len(base: *const u8, len: usize) -> usize {
+    let offset = base.align_offset(WORD);
+    if offset == usize::MAX { len } else { offset.min(len) }
+}
+
+#[allow(clippy::cast_ptr_alignment)]
+unsafe fn word_ptr(base: *mut u8, index: usize) -> *mut u64 {
+    // SAFETY: вызывающий даёт индекс внутри маппинга, смещённый на `head_len` от базы и кратный
+    // размеру слова, поэтому адрес выровнен на слово.
+    unsafe { base.add(index).cast::<u64>() }
+}
+
 /// Backing региона памяти, декодированный из `kind_tag` вызова `inspect`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionKind {
@@ -288,13 +302,34 @@ impl Mapping {
     /// Копирует в `dst` первые `dst.len()` байт маппинга. Длина сверх размера
     /// маппинга - `OutOfBounds`.
     pub fn copy_out(&self, dst: &mut [u8]) -> Result<()> {
-        let base = self.head_ptr(dst.len())?;
-        // SAFETY: [va, va+dst.len()) лежит в маппинге, установленном ядром.
-        // Копия идёт побайтно volatile: те же страницы бывают отображены в
-        // другом адресном пространстве, и каждый байт читается ровно один раз.
+        self.copy_out_at(0, dst)
+    }
+
+    /// Копирует в `dst` байты маппинга со смещения `offset`. Диапазон сверх размера маппинга -
+    /// `OutOfBounds`.
+    pub fn copy_out_at(&self, offset: usize, dst: &mut [u8]) -> Result<()> {
+        let len = dst.len();
+        let base = self.range_ptr(offset, len)?;
+        let head = head_len(base, len);
+        let target = dst.as_mut_ptr();
+        // SAFETY: [va, va+len) лежит в маппинге, установленном ядром, а `target` покрывает
+        // столько же байт. Сторона маппинга читается volatile: те же страницы бывают отображены
+        // в другом адресном пространстве. Середина идёт словами по выровненному адресу, голова и
+        // хвост - побайтно; каждый байт читается ровно один раз, а разрыв, наблюдаемый писателем
+        // из другого адресного пространства, атомарен с точностью до слова.
         unsafe {
-            for (index, byte) in dst.iter_mut().enumerate() {
-                *byte = base.add(index).read_volatile();
+            for index in 0..head {
+                target.add(index).write(base.add(index).read_volatile());
+            }
+            let mut index = head;
+            while index + WORD <= len {
+                let word = word_ptr(base, index).read_volatile();
+                target.add(index).cast::<u64>().write_unaligned(word);
+                index += WORD;
+            }
+            while index < len {
+                target.add(index).write(base.add(index).read_volatile());
+                index += 1;
             }
         }
         Ok(())
@@ -304,24 +339,73 @@ impl Mapping {
     /// `OutOfBounds`. Приём по `&self`: эксклюзивности над страницами маппинг
     /// не даёт.
     pub fn copy_in(&self, src: &[u8]) -> Result<()> {
-        let base = self.head_ptr(src.len())?;
-        // SAFETY: [va, va+src.len()) лежит в маппинге, установленном ядром.
-        // Копия идёт побайтно volatile: те же страницы бывают отображены в
-        // другом адресном пространстве, и каждый байт пишется ровно один раз.
+        self.copy_in_at(0, src)
+    }
+
+    /// Копирует `src` в маппинг со смещения `offset`. Диапазон сверх размера маппинга -
+    /// `OutOfBounds`.
+    pub fn copy_in_at(&self, offset: usize, src: &[u8]) -> Result<()> {
+        let len = src.len();
+        let base = self.range_ptr(offset, len)?;
+        let head = head_len(base, len);
+        let source = src.as_ptr();
+        // SAFETY: [va, va+len) лежит в маппинге, установленном ядром, а `source` покрывает
+        // столько же байт. Сторона маппинга пишется volatile: те же страницы бывают отображены
+        // в другом адресном пространстве. Середина идёт словами по выровненному адресу, голова и
+        // хвост - побайтно; каждый байт пишется ровно один раз, а разрыв, наблюдаемый читателем
+        // из другого адресного пространства, атомарен с точностью до слова.
         unsafe {
-            for (index, byte) in src.iter().enumerate() {
-                base.add(index).write_volatile(*byte);
+            for index in 0..head {
+                base.add(index).write_volatile(source.add(index).read());
+            }
+            let mut index = head;
+            while index + WORD <= len {
+                let word = source.add(index).cast::<u64>().read_unaligned();
+                word_ptr(base, index).write_volatile(word);
+                index += WORD;
+            }
+            while index < len {
+                base.add(index).write_volatile(source.add(index).read());
+                index += 1;
             }
         }
         Ok(())
     }
 
-    fn head_ptr(&self, len: usize) -> Result<*mut u8> {
+    /// Заполняет нулями `len` байт маппинга со смещения `offset`. Диапазон сверх размера
+    /// маппинга - `OutOfBounds`.
+    pub fn zero_at(&self, offset: usize, len: usize) -> Result<()> {
+        let base = self.range_ptr(offset, len)?;
+        let head = head_len(base, len);
+        // SAFETY: [va, va+len) лежит в маппинге, установленном ядром. Запись идёт volatile: те
+        // же страницы бывают отображены в другом адресном пространстве. Середина идёт словами по
+        // выровненному адресу, голова и хвост - побайтно; каждый байт пишется ровно один раз, а
+        // разрыв, наблюдаемый читателем из другого адресного пространства, атомарен с точностью
+        // до слова.
+        unsafe {
+            for index in 0..head {
+                base.add(index).write_volatile(0);
+            }
+            let mut index = head;
+            while index + WORD <= len {
+                word_ptr(base, index).write_volatile(0);
+                index += WORD;
+            }
+            while index < len {
+                base.add(index).write_volatile(0);
+                index += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn range_ptr(&self, offset: usize, len: usize) -> Result<*mut u8> {
         let size = usize::try_from(self.size_bytes).expect("mapping size fits usize");
-        if len > size {
+        let end = offset.checked_add(len).ok_or(Error::OutOfBounds)?;
+        if end > size {
             return Err(Error::OutOfBounds);
         }
-        Ok(usize::try_from(self.va).expect("va fits usize") as *mut u8)
+        Ok((usize::try_from(self.va).expect("va fits usize") + offset) as *mut u8)
     }
 
     /// Меняет флаги маппинга на `flags`.

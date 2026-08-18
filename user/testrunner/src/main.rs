@@ -17,6 +17,7 @@ use syscall::Handle;
 mod address_space_isolation;
 mod clock;
 mod filesystem;
+mod filesystem_bench;
 mod filesystem_scope;
 mod filesystem_stress;
 mod fixture;
@@ -144,6 +145,7 @@ pub extern "C" fn _start(root: Handle) -> ! {
     kernel_tests::runner::install_exit(runner_exit);
     let profile = match env!("TEST_PROFILE") {
         "stress" => kernel_tests::TestKind::Stress,
+        "bench" => kernel_tests::TestKind::Bench,
         _ => kernel_tests::TestKind::Regular,
     };
     kernel_tests::run_tests(profile)

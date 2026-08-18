@@ -519,7 +519,6 @@ fn slice_err_to_syscall(err: &RegionSliceError) -> SyscallError {
             SyscallError::InvalidArgument
         }
         RegionSliceError::AccessEscalation => SyscallError::AccessDenied,
-        RegionSliceError::UnsupportedBacking => SyscallError::WrongType,
     }
 }
 
@@ -673,10 +672,6 @@ mod tests {
         assert_eq!(
             slice_err_to_syscall(&RegionSliceError::AccessEscalation),
             SyscallError::AccessDenied
-        );
-        assert_eq!(
-            slice_err_to_syscall(&RegionSliceError::UnsupportedBacking),
-            SyscallError::WrongType
         );
     }
 

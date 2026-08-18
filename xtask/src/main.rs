@@ -66,6 +66,12 @@ enum Commands {
         #[arg(long, default_value = qemu_test::DEFAULT_SPEC)]
         spec: PathBuf,
     },
+    /// Run the userspace filesystem benchmarks in QEMU
+    Bench {
+        /// Timeout in seconds
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+    },
     /// Run reproducible userspace stress tests in QEMU
     Stress {
         /// First deterministic seed
@@ -156,6 +162,7 @@ fn main() -> Result<()> {
             files,
         } => build(spec, run, debug, features, &image, &files)?,
         Commands::QemuTest { timeout, spec } => qemu_test::qemu_test(timeout, &spec)?,
+        Commands::Bench { timeout } => qemu_test::qemu_bench(timeout)?,
         Commands::Stress {
             seed,
             seeds,

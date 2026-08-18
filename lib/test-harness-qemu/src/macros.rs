@@ -1,8 +1,15 @@
-//! `kassert!`/`kassert_eq!`/`kassert_ne!` и [`fail`].
+//! `kassert!`/`kassert_eq!`/`kassert_ne!`/`kreport!` и [`fail`].
 
 use core::fmt::{Arguments, Write as _};
 
 use crate::runner::{FmtAdapter, exit, with_writer};
+
+pub fn report(line: Arguments<'_>) {
+    with_writer(|w| {
+        let mut fmt = FmtAdapter::new(w);
+        let _ = writeln!(fmt, "[TEST-REPORT] {line}");
+    });
+}
 
 pub fn fail(reason: Arguments<'_>, file: &'static str, line: u32) -> ! {
     with_writer(|w| {
@@ -10,6 +17,13 @@ pub fn fail(reason: Arguments<'_>, file: &'static str, line: u32) -> ! {
         let _ = writeln!(fmt, "[TEST-FAIL: {reason}] at {file}:{line}");
     });
     exit(1)
+}
+
+#[macro_export]
+macro_rules! kreport {
+    ($($arg:tt)+) => {
+        $crate::macros::report(::core::format_args!($($arg)+));
+    };
 }
 
 #[macro_export]

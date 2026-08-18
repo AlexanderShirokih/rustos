@@ -4,7 +4,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_tests::kernel_test;
-use runtime::{Condvar, Mutex, Priority, Signal, Timeout, spawn};
+use runtime::{Condvar, Instant, Mutex, Priority, Signal, Timeout, spawn};
 use syscall::{SIGNALED, WakeCount};
 
 const STACK_SIZE: u64 = 0x4000;
@@ -56,6 +56,37 @@ extern "C" fn pingpong_worker(arg: usize) -> u32 {
         s.cv.notify_all();
     }
     0
+}
+
+#[kernel_test(bench)]
+fn bench_thread_round_trip() {
+    // Раунд между потоками одного процесса: переключение без смены адресного пространства.
+    let shared = Shared2 {
+        m: Mutex::new(PingPong {
+            turn: TURN_MAIN,
+            count: 0,
+        }),
+        cv: Condvar::new(),
+    };
+    let arg = (&raw const shared) as usize;
+    let thread = spawn(pingpong_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn worker");
+
+    let start = Instant::now();
+    for _ in 0..ROUNDS {
+        let mut g = shared.m.lock();
+        while g.turn != TURN_MAIN {
+            g = shared.cv.wait(g);
+        }
+        g.count += 1;
+        g.turn = TURN_WORKER;
+        shared.cv.notify_all();
+    }
+    let elapsed = Instant::now().as_nanos().saturating_sub(start.as_nanos());
+
+    thread
+        .join(JOIN_TIMEOUT)
+        .expect("worker joins before timeout");
+    kernel_tests::kreport!("sched thread_round_trip ns_per_op={}", elapsed / ROUNDS);
 }
 
 #[kernel_test]

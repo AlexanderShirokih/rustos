@@ -2,7 +2,10 @@
 
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path};
 
-use crate::node::{NodeId, Window};
+use crate::{
+    node::{NodeId, Window},
+    store::{ByteStore, StoreId},
+};
 
 /// Файловая система точки монтирования. Пути отсчитываются от её корня, [`NodeId`] действителен
 /// только внутри неё.
@@ -35,7 +38,13 @@ pub trait FileSystemBackend {
     /// Копирует в `out` байты файла, начиная со смещения `offset`, и возвращает их число.
     /// Смещение от длины файла и дальше даёт ноль байт. Если узел оказался каталогом, возвращает
     /// `IsADirectory`.
-    fn read_at(&self, node: NodeId, offset: u64, out: &mut [u8]) -> Result<usize, FileSystemError>;
+    fn read_at(
+        &self,
+        stores: &dyn ByteStore,
+        node: NodeId,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, FileSystemError>;
 
     /// Кладёт `data` по смещению `offset` и возвращает число записанных байт. Промежуток между
     /// прежней длиной файла и началом записи заполняется нулями. Если запись выводит файл
@@ -43,6 +52,7 @@ pub trait FileSystemBackend {
     /// оставляет как есть. Если узел оказался каталогом, возвращает `IsADirectory`.
     fn write_at(
         &mut self,
+        stores: &mut dyn ByteStore,
         node: NodeId,
         offset: u64,
         data: &[u8],
@@ -51,12 +61,22 @@ pub trait FileSystemBackend {
     /// Дописывает `data` в конец файла и возвращает смещение, по которому легли байты. Если
     /// дозапись выводит файл за предел, установленный файловой системой, возвращает `NoSpace`.
     /// Если узел оказался каталогом, возвращает `IsADirectory`.
-    fn append(&mut self, node: NodeId, data: &[u8]) -> Result<u64, FileSystemError>;
+    fn append(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        node: NodeId,
+        data: &[u8],
+    ) -> Result<u64, FileSystemError>;
 
     /// Задаёт длину файла: байты за `size` отбрасываются, недостающие дописываются нулями. Если
     /// `size` больше предела, установленного файловой системой, возвращает `NoSpace`. Если узел
     /// оказался каталогом, возвращает `IsADirectory`.
-    fn set_size(&mut self, node: NodeId, size: u64) -> Result<(), FileSystemError>;
+    fn set_size(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        node: NodeId,
+        size: u64,
+    ) -> Result<(), FileSystemError>;
 
     /// Укладывает записи каталога подряд в начало `out`, начиная с позиции `from`, пока они
     /// помещаются, и возвращает итог перечисления: число уложенных записей, позицию продолжения и
@@ -71,7 +91,26 @@ pub trait FileSystemBackend {
         out: &mut [u8],
     ) -> Result<Listed, FileSystemError>;
 
-    /// Возвращает окно байт узла в регионе точки монтирования. Если узел байт региона не занимает,
-    /// возвращает `NotSupported`.
-    fn backing(&self, node: NodeId) -> Result<Window, FileSystemError>;
+    /// Возвращает окно байт узла, при необходимости перенося их в отдельное хранилище. Если узел
+    /// байт хранилища не занимает, возвращает `NotSupported`.
+    fn backing(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        node: NodeId,
+    ) -> Result<Window, FileSystemError>;
+
+    /// Закрепляет ёмкость узла после выдачи клиенту capability его хранилища.
+    fn pin(&mut self, node: NodeId) -> Result<(), FileSystemError>;
+
+    /// Заводит файл поверх уже существующего хранилища. Бекенд без такой формы отвечает
+    /// `NotSupported`.
+    fn create_backed(
+        &mut self,
+        _path: Path<'_>,
+        _store: StoreId,
+        _size: u64,
+        _capacity: u64,
+    ) -> Result<NodeId, FileSystemError> {
+        Err(FileSystemError::NotSupported)
+    }
 }

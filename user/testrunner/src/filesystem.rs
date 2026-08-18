@@ -21,6 +21,7 @@ use runtime::{
 };
 use spin::Once;
 use syscall::Rights;
+use userland::USERLAND_PAGE_SIZE;
 use userland_image::{component_name, decode};
 use userland_loader::load_entry;
 
@@ -33,6 +34,8 @@ const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture/program";
 const RAM_MOUNT: &str = "/tmp";
 const RAM_FILESYSTEM_PROGRAM: &str = "/boot/filesystem-ramfs";
 const UNRESPONSIVE_FILESYSTEM_PROGRAM: &str = "/boot/unresponsive-filesystem";
+const SPARE_MOUNT: &str = "/spare";
+const SPARE_FILESYSTEM_PROGRAM: &str = "/boot/spare-filesystem";
 
 const APPEND_OFFSET: u64 = u64::MAX;
 
@@ -261,6 +264,13 @@ pub(crate) fn open(
         .expect("open ok")
 }
 
+fn close(client: &file_system::Client<PortTransport>, opened: &Opened) {
+    client
+        .close(opened.fd)
+        .expect("close call")
+        .expect("close ok");
+}
+
 pub(crate) fn write_all(
     client: &file_system::Client<PortTransport>,
     buffer: &runtime::Mapping,
@@ -447,10 +457,7 @@ fn filesystem_lists_directory_across_batches() {
             AccessMode::ReadWrite,
             OpenFlags::CREATE,
         );
-        client
-            .close(entry.fd)
-            .expect("close call")
-            .expect("close ok");
+        close(&client, &entry);
     }
 
     let mut names: Vec<String> = Vec::new();
@@ -489,10 +496,7 @@ fn filesystem_unlinks_a_file() {
         AccessMode::ReadWrite,
         OpenFlags::CREATE,
     );
-    client
-        .close(opened.fd)
-        .expect("close call")
-        .expect("close ok");
+    close(&client, &opened);
     client
         .unlink(path("/removed"))
         .expect("unlink call")
@@ -791,7 +795,7 @@ fn filesystem_serves_an_empty_file_from_the_image() {
 }
 
 #[kernel_test]
-fn filesystem_has_no_backing_window_for_a_ramfs_file() {
+fn filesystem_has_no_backing_window_for_an_empty_ramfs_file() {
     let capability = ram_session();
     let client = connect(&capability);
 
@@ -805,6 +809,312 @@ fn filesystem_has_no_backing_window_for_a_ramfs_file() {
         .backing_memory(opened.fd)
         .expect("backing_memory call");
     kernel_tests::kassert_eq!(refused, Err(FileSystemError::NotSupported));
+}
+
+#[kernel_test]
+fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
+    let capability = ram_session();
+    let client = connect(&capability);
+    let data_region = acquire_buffer(&client);
+    let data = data_region
+        .map_full(UserMemFlags::ReadWrite)
+        .expect("map data buffer");
+    let opened = open(
+        &client,
+        "/region-backed",
+        AccessMode::ReadWrite,
+        OpenFlags::CREATE,
+    );
+    write_all(&client, &data, &opened, 0, b"before");
+
+    let backing = MemoryRegion::adopt(
+        client
+            .backing_memory(opened.fd)
+            .expect("backing_memory call")
+            .expect("backing granted"),
+    );
+    let mapped = backing
+        .map_full(UserMemFlags::ReadWrite)
+        .expect("map ramfs backing");
+    mapped.copy_in(b"mapped").expect("write through mapping");
+    let count = client
+        .read(opened.fd, 0, 6)
+        .expect("read call")
+        .expect("read ok");
+    kernel_tests::kassert_eq!(count, 6);
+    kernel_tests::kassert_eq!(buffer_head(&data, 6), b"mapped");
+
+    write_all(&client, &data, &opened, 0, b"server");
+    kernel_tests::kassert_eq!(buffer_head(&mapped, 6), b"server");
+
+    data.copy_in(b"x").expect("payload into data buffer");
+    let beyond = client
+        .write(opened.fd, mapped.size_bytes(), 1)
+        .expect("write call");
+    kernel_tests::kassert_eq!(beyond, Err(FileSystemError::NoSpace));
+
+    let growing = open(
+        &client,
+        "/heap-backed",
+        AccessMode::ReadWrite,
+        OpenFlags::CREATE,
+    );
+    let written = client
+        .write(growing.fd, mapped.size_bytes(), 1)
+        .expect("write call")
+        .expect("unmapped file grows");
+    kernel_tests::kassert_eq!(written.count, 1);
+}
+
+#[kernel_test]
+fn filesystem_ramfs_zeroes_the_gap_of_a_sparse_write() {
+    let capability = ram_session();
+    let client = connect(&capability);
+    let data_region = acquire_buffer(&client);
+    let data = data_region
+        .map_full(UserMemFlags::ReadWrite)
+        .expect("map data buffer");
+    let opened = open(&client, "/sparse", AccessMode::ReadWrite, OpenFlags::CREATE);
+    write_all(&client, &data, &opened, 0, b"head");
+
+    let backing = MemoryRegion::adopt(
+        client
+            .backing_memory(opened.fd)
+            .expect("backing_memory call")
+            .expect("backing granted"),
+    );
+    let mapped = backing
+        .map_full(UserMemFlags::ReadWrite)
+        .expect("map ramfs backing");
+    // Разрыв заполнен через маппинг: запись за прежней длиной обязана вернуть туда нули.
+    mapped.copy_in_at(4, b"stale").expect("stale bytes");
+
+    data.copy_in(b"tail").expect("payload into data buffer");
+    let written = client
+        .write(opened.fd, 16, 4)
+        .expect("write call")
+        .expect("sparse write within capacity");
+    kernel_tests::kassert_eq!(written.count, 4);
+
+    let count = client.read(opened.fd, 0, 20).expect("read call").expect("read ok");
+    kernel_tests::kassert_eq!(count, 20);
+    kernel_tests::kassert_eq!(
+        buffer_head(&data, 20),
+        b"head\0\0\0\0\0\0\0\0\0\0\0\0tail"
+    );
+}
+
+#[kernel_test]
+fn filesystem_ramfs_accepts_a_client_region_without_copying() {
+    let creator_capability = ram_session();
+    let creator = connect(&creator_capability);
+    let resource = Resource::self_resource().expect("self resource");
+    let region = resource
+        .create_virtual(2 * USERLAND_PAGE_SIZE, runtime::MemoryAccess::RW)
+        .expect("create shared region");
+    let mapped = region
+        .map_full(UserMemFlags::ReadWrite)
+        .expect("map shared region");
+    mapped.copy_in(b"client").expect("initialize region");
+    creator
+        .create_backed(path("/client-region"), region.into_handle(), 6)
+        .expect("create_backed call")
+        .expect("create backed file");
+
+    let reader_capability = ram_session();
+    let reader = connect(&reader_capability);
+    let data_region = acquire_buffer(&reader);
+    let data = data_region
+        .map_full(UserMemFlags::ReadWrite)
+        .expect("map data buffer");
+    let opened = open(
+        &reader,
+        "/client-region",
+        AccessMode::ReadWrite,
+        OpenFlags::NONE,
+    );
+    let count = reader
+        .read(opened.fd, 0, 6)
+        .expect("read call")
+        .expect("read ok");
+    kernel_tests::kassert_eq!(count, 6);
+    kernel_tests::kassert_eq!(buffer_head(&data, 6), b"client");
+
+    mapped.copy_in(b"mapped").expect("change client mapping");
+    let count = reader
+        .read(opened.fd, 0, 6)
+        .expect("read call")
+        .expect("read ok");
+    kernel_tests::kassert_eq!(count, 6);
+    kernel_tests::kassert_eq!(buffer_head(&data, 6), b"mapped");
+
+    write_all(&reader, &data, &opened, 0, b"server");
+    kernel_tests::kassert_eq!(buffer_head(&mapped, 6), b"server");
+
+    let shared = MemoryRegion::adopt(
+        reader
+            .backing_memory(opened.fd)
+            .expect("backing_memory call")
+            .expect("backing granted"),
+    );
+    kernel_tests::kassert!(
+        shared
+            .handle()
+            .duplicate(Rights::READ | Rights::TRANSFER, None)
+            .is_err()
+    );
+}
+
+fn create_filler_tree(
+    client: &file_system::Client<PortTransport>,
+    data: &runtime::Mapping,
+    names: &[String],
+) {
+    for name in names {
+        let opened = open(client, name, AccessMode::ReadWrite, OpenFlags::CREATE);
+        write_all(client, data, &opened, 0, b"f");
+        close(client, &opened);
+    }
+}
+
+fn occupy_mapping_slots(
+    client: &file_system::Client<PortTransport>,
+    names: &[String],
+) -> Vec<String> {
+    let mut occupied = Vec::new();
+    for name in names {
+        let opened = open(client, name, AccessMode::ReadWrite, OpenFlags::NONE);
+        let backed = client
+            .backing_memory(opened.fd)
+            .expect("backing_memory call");
+        close(client, &opened);
+        match backed {
+            Ok(cap) => {
+                drop(OwnedHandle::adopt(cap));
+                occupied.push(name.clone());
+            }
+            Err(error) => {
+                kernel_tests::kassert_eq!(error, FileSystemError::NoSpace);
+                break;
+            }
+        }
+    }
+    occupied
+}
+
+fn buffered_sessions(mount: &str, count: usize) -> Vec<OwnedHandle> {
+    (0..count)
+        .map(|_| {
+            let capability = session_for(mount);
+            let buffer = connect(&capability)
+                .acquire_buffer(BUFFER_SIZE)
+                .expect("acquire_buffer call")
+                .expect("buffer granted");
+            drop(OwnedHandle::adopt(buffer));
+            capability
+        })
+        .collect()
+}
+
+fn region_carrying(payload: &[u8]) -> OwnedHandle {
+    let resource = Resource::self_resource().expect("self resource");
+    let region = resource
+        .create_virtual(USERLAND_PAGE_SIZE, runtime::MemoryAccess::RW)
+        .expect("create imported region");
+    let mapped = region
+        .map_full(UserMemFlags::ReadWrite)
+        .expect("map imported region");
+    mapped.copy_in(payload).expect("payload into the region");
+    drop(mapped);
+    region.into_handle()
+}
+
+#[kernel_test]
+fn filesystem_serves_an_imported_region_left_without_a_mapping() {
+    const PAYLOAD: &[u8] = b"degraded";
+    const IMPORTED: &str = "/imported";
+    const FILLER_LIMIT: usize = 96;
+    const RELEASED_SESSIONS: usize = 3;
+    const REAP_ATTEMPTS: usize = 64;
+    const REAP_TURN: Timeout = Timeout::from_millis(5);
+
+    // Занятые слоты сценарий не возвращает: закреплённые регионы держат их до конца жизни
+    // процесса, поэтому дерево берётся отдельным экземпляром, а не общей точкой монтирования.
+    namespace_admin_client(router_admin())
+        .mount(path(SPARE_MOUNT), path(SPARE_FILESYSTEM_PROGRAM))
+        .expect("mount call")
+        .expect("fixture mounted");
+    let capability = session_for(SPARE_MOUNT);
+    let client = connect(&capability);
+    // Буфер сессии заводится до наполнения: его маппинг занимает слот наравне с остальными.
+    let data_region = acquire_buffer(&client);
+    let data = data_region
+        .map_full(UserMemFlags::ReadWrite)
+        .expect("map data buffer");
+
+    // Дерево заводится заранее: под исчерпанными слотами куче сервера уже не вырасти. Слотов у
+    // адресного пространства конечное число, и наполнение упирается в них задолго до предела имён.
+    let names: Vec<String> = (0..FILLER_LIMIT)
+        .map(|index| format!("/filler-{index}"))
+        .collect();
+    create_filler_tree(&client, &data, &names);
+    // Освободит слот уход сессии, и капы берутся заранее: под исчерпанными слотами буфер уже не
+    // завести. Их несколько: за освободившийся слот состязаются и другие маппинги сервера.
+    let spare_sessions = buffered_sessions(SPARE_MOUNT, RELEASED_SESSIONS);
+
+    // Регион под содержимым файла сервер держит отображённым, и слоты уходят по одному на файл.
+    let fillers = occupy_mapping_slots(&client, &names);
+    kernel_tests::kassert!(fillers.len() < FILLER_LIMIT);
+
+    // Отобразить принесённый регион серверу нечем, и файл всё равно заводится.
+    client
+        .create_backed(
+            path(IMPORTED),
+            region_carrying(PAYLOAD),
+            PAYLOAD.len() as u64,
+        )
+        .expect("create_backed call")
+        .expect("registration outlives the refused mapping");
+
+    let imported = open(&client, IMPORTED, AccessMode::ReadWrite, OpenFlags::NONE);
+    let length = PAYLOAD.len() as u32;
+    // Без резидентного маппинга обращение идёт за слотом и упирается в то же исчерпание.
+    kernel_tests::kassert_eq!(
+        client.read(imported.fd, 0, length).expect("read call"),
+        Err(FileSystemError::NoSpace)
+    );
+    // Файл на резидентном регионе читается: сервер обслуживает сессию, и отказ выше принадлежит
+    // отложенному маппингу, а не циклу.
+    let resident = open(
+        &client,
+        fillers.last().expect("filling consumed at least one file"),
+        AccessMode::Read,
+        OpenFlags::NONE,
+    );
+    let count = client
+        .read(resident.fd, 0, 1)
+        .expect("read call")
+        .expect("resident store reads");
+    kernel_tests::kassert_eq!(count, 1);
+    close(&client, &resident);
+
+    // Уход сессий возвращает слоты их буферов, а уборка идёт своим чередом: слот появляется не в
+    // тот же кадр.
+    drop(spare_sessions);
+    let turn = Signal::create().expect("signal create");
+    let mut read = client.read(imported.fd, 0, length).expect("read call");
+    for _ in 0..REAP_ATTEMPTS {
+        if read.is_ok() {
+            break;
+        }
+        let _ = turn.wait(syscall::SIGNALED, REAP_TURN);
+        read = client.read(imported.fd, 0, length).expect("read call");
+    }
+
+    // Слот появился, и отложенный маппинг доносит содержимое принесённого региона.
+    let count = read.expect("degraded store maps on demand");
+    kernel_tests::kassert_eq!(count, length);
+    kernel_tests::kassert_eq!(buffer_head(&data, PAYLOAD.len()), PAYLOAD);
 }
 
 #[kernel_test]
@@ -925,10 +1235,7 @@ fn filesystem_rejects_a_stale_descriptor_after_slot_reuse() {
         AccessMode::ReadWrite,
         OpenFlags::CREATE,
     );
-    client
-        .close(stale.fd)
-        .expect("close call")
-        .expect("close ok");
+    close(&client, &stale);
     let fresh = open(
         &client,
         "/stale-second",
@@ -1065,6 +1372,44 @@ fn filesystem_closes_the_capability_of_an_undelivered_reply() {
         let _ = abandoned.backing_memory(opened.fd);
     }
     kernel_tests::kassert!(vends_a_buffer());
+}
+
+#[kernel_test]
+fn filesystem_does_not_pin_an_undelivered_backing() {
+    let capability = ram_session();
+    let client = connect(&capability);
+    let data_region = acquire_buffer(&client);
+    let data = data_region
+        .map_full(UserMemFlags::ReadWrite)
+        .expect("map data buffer");
+    let opened = open(
+        &client,
+        "/undelivered-backing",
+        AccessMode::ReadWrite,
+        OpenFlags::CREATE,
+    );
+    write_all(&client, &data, &opened, 0, b"body");
+
+    let abandoned = connect_abandoning(&capability);
+    let _ = abandoned.backing_memory(opened.fd);
+
+    data.copy_in(b"x").expect("payload into data buffer");
+    let grown = client
+        .write(opened.fd, USERLAND_PAGE_SIZE, 1)
+        .expect("write call")
+        .expect("undelivered backing does not pin");
+    kernel_tests::kassert_eq!(grown.count, 1);
+
+    let backing = MemoryRegion::adopt(
+        client
+            .backing_memory(opened.fd)
+            .expect("backing_memory call")
+            .expect("backing granted"),
+    );
+    let capacity = backing.inspect().expect("inspect backing").size_bytes;
+    data.copy_in(b"y").expect("payload into data buffer");
+    let pinned = client.write(opened.fd, capacity, 1).expect("write call");
+    kernel_tests::kassert_eq!(pinned, Err(FileSystemError::NoSpace));
 }
 
 fn vends_a_buffer() -> bool {

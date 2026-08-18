@@ -24,6 +24,7 @@ fn expand_kernel_test(attr: TokenStream2, item: &ItemFn) -> syn::Result<TokenStr
     let kind = match kind {
         TestKind::Regular => quote!(::kernel_tests::TestKind::Regular),
         TestKind::Stress => quote!(::kernel_tests::TestKind::Stress),
+        TestKind::Bench => quote!(::kernel_tests::TestKind::Bench),
     };
 
     Ok(quote! {
@@ -37,6 +38,7 @@ fn expand_kernel_test(attr: TokenStream2, item: &ItemFn) -> syn::Result<TokenStr
 enum TestKind {
     Regular,
     Stress,
+    Bench,
 }
 
 fn parse_kind(attr: TokenStream2) -> syn::Result<TestKind> {
@@ -45,13 +47,15 @@ fn parse_kind(attr: TokenStream2) -> syn::Result<TestKind> {
     }
     let ident = syn::parse2::<syn::Ident>(attr)?;
     if ident == "stress" {
-        Ok(TestKind::Stress)
-    } else {
-        Err(Error::new_spanned(
-            ident,
-            "#[kernel_test] accepts only the `stress` profile",
-        ))
+        return Ok(TestKind::Stress);
     }
+    if ident == "bench" {
+        return Ok(TestKind::Bench);
+    }
+    Err(Error::new_spanned(
+        ident,
+        "#[kernel_test] accepts only the `stress` and `bench` profiles",
+    ))
 }
 
 fn validate_signature(item: &ItemFn) -> syn::Result<()> {

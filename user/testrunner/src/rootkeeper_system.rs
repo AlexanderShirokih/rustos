@@ -315,7 +315,7 @@ fn compiled_plan_carries_the_boot_composition() {
 
     let plan = image.plan(BOOT_PLAN_ENTRY).expect("compiled plan decodes");
 
-    kernel_tests::kassert_eq!(plan.len(), 4);
+    kernel_tests::kassert_eq!(plan.len(), 5);
     let router = plan.component(0).expect("plan carries the router");
     kernel_tests::kassert_eq!(router.executable(), ROUTER_PROGRAM);
     kernel_tests::kassert_eq!(router.name(), ROUTER_NAME);

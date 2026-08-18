@@ -532,22 +532,7 @@ impl HandleTable {
                 .parent()
                 .is_some_and(|origin| Arc::ptr_eq(origin, parent)),
             (CapabilityTarget::Memory(origin), CapabilityTarget::Memory(sub)) => {
-                let (Some(origin_base), Some(sub_base)) =
-                    (origin.physical_base(), sub.physical_base())
-                else {
-                    return false;
-                };
-                let origin_start = origin_base.as_usize();
-                let sub_start = sub_base.as_usize();
-                let (Some(origin_end), Some(sub_end)) = (
-                    origin_start.checked_add(origin.size_bytes()),
-                    sub_start.checked_add(sub.size_bytes()),
-                ) else {
-                    return false;
-                };
-                origin_start <= sub_start
-                    && sub_end <= origin_end
-                    && origin.access_mask().allows(sub.access_mask())
+                origin.contains_subregion(sub)
             }
             _ => false,
         }

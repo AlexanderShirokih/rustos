@@ -35,7 +35,7 @@ pub use frame_bitmap::FrameBitmap;
 pub use mem_flags::MemFlags;
 pub use region::{
     AccessMask, BudgetRefund, MemoryBacking, MemoryRegion, MemoryType, RegionCreateError,
-    RegionSliceError,
+    RegionSliceError, VirtualBacking,
 };
 pub use relocatable_ptr::RelocatablePtr;
 pub use user_vm_allocator::{MappingTag, UserVmAllocator};

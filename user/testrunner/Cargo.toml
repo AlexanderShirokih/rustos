@@ -81,6 +81,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "spare-filesystem"
+path = "src/spare_filesystem.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "managed-startup-fixture"
 path = "src/managed_startup_fixture.rs"
 test = false

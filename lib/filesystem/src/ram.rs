@@ -5,10 +5,12 @@
 use alloc::{string::String, vec, vec::Vec};
 
 use filesystem_abi::{DirCursor, DirEntry, FileSystemError, Listed, NodeInfo, NodeKind, Path};
+use userland::USERLAND_PAGE_SIZE;
 
 use crate::{
     backend::FileSystemBackend,
     node::{NodeId, Window},
+    store::{ByteStore, StoreId},
 };
 
 const ROOT: NodeId = NodeId::from_raw(0);
@@ -23,8 +25,18 @@ struct Slot {
 }
 
 enum Node {
-    File(Vec<u8>),
+    File(File),
     Directory(Vec<Option<Slot>>),
+}
+
+enum File {
+    Heap(Vec<u8>),
+    Backed {
+        store: StoreId,
+        len: usize,
+        capacity: usize,
+        pinned: bool,
+    },
 }
 
 /// Дерево в куче сервера. Узел переживает снятие последнего имени: за ним
@@ -65,17 +77,17 @@ impl RamFileSystem {
         }
     }
 
-    fn file(&self, node: NodeId) -> Result<&[u8], FileSystemError> {
+    fn file_node(&self, node: NodeId) -> Result<&File, FileSystemError> {
         match self.node(node)? {
-            Node::File(data) => Ok(data),
+            Node::File(file) => Ok(file),
             Node::Directory(_) => Err(FileSystemError::IsADirectory),
         }
     }
 
-    fn file_mut(&mut self, node: NodeId) -> Result<&mut Vec<u8>, FileSystemError> {
+    fn file_node_mut(&mut self, node: NodeId) -> Result<&mut File, FileSystemError> {
         let index = node.raw() as usize;
         match self.nodes.get_mut(index).ok_or(FileSystemError::NotFound)? {
-            Node::File(data) => Ok(data),
+            Node::File(file) => Ok(file),
             Node::Directory(_) => Err(FileSystemError::IsADirectory),
         }
     }
@@ -171,7 +183,7 @@ impl FileSystemBackend for RamFileSystem {
             return Err(FileSystemError::AlreadyExists);
         }
         let node = self.insert(match kind {
-            NodeKind::File => Node::File(Vec::new()),
+            NodeKind::File => Node::File(File::Heap(Vec::new())),
             NodeKind::Directory => Node::Directory(Vec::new()),
         })?;
         self.attach(directory, name, node)?;
@@ -217,9 +229,13 @@ impl FileSystemBackend for RamFileSystem {
 
     fn metadata(&self, node: NodeId) -> Result<NodeInfo, FileSystemError> {
         Ok(match self.node(node)? {
-            Node::File(data) => NodeInfo {
+            Node::File(File::Heap(data)) => NodeInfo {
                 kind: NodeKind::File,
                 size: data.len() as u64,
+            },
+            Node::File(File::Backed { len, .. }) => NodeInfo {
+                kind: NodeKind::File,
+                size: *len as u64,
             },
             Node::Directory(entries) => NodeInfo {
                 kind: NodeKind::Directory,
@@ -228,46 +244,124 @@ impl FileSystemBackend for RamFileSystem {
         })
     }
 
-    fn read_at(&self, node: NodeId, offset: u64, out: &mut [u8]) -> Result<usize, FileSystemError> {
-        let data = self.file(node)?;
+    fn read_at(
+        &self,
+        stores: &dyn ByteStore,
+        node: NodeId,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, FileSystemError> {
         let Ok(start) = usize::try_from(offset) else {
             return Ok(0);
         };
-        let Some(tail) = data.get(start..) else {
-            return Ok(0);
-        };
-        let count = tail.len().min(out.len());
-        out[..count].copy_from_slice(&tail[..count]);
-        Ok(count)
+        match self.file_node(node)? {
+            File::Heap(data) => {
+                let Some(tail) = data.get(start..) else {
+                    return Ok(0);
+                };
+                let count = tail.len().min(out.len());
+                out[..count].copy_from_slice(&tail[..count]);
+                Ok(count)
+            }
+            File::Backed { store, len, .. } => {
+                let Some(count) = len.checked_sub(start).map(|tail| tail.min(out.len())) else {
+                    return Ok(0);
+                };
+                stores.read(*store, start, &mut out[..count])?;
+                Ok(count)
+            }
+        }
     }
 
     fn write_at(
         &mut self,
+        stores: &mut dyn ByteStore,
         node: NodeId,
         offset: u64,
         data: &[u8],
     ) -> Result<usize, FileSystemError> {
-        let file = self.file_mut(node)?;
         let start = usize::try_from(offset).map_err(|_| FileSystemError::NoSpace)?;
-        write_into(file, start, data)?;
+        let file = self.file_node_mut(node)?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or(FileSystemError::NoSpace)?;
+        if end as u64 > FILE_SIZE_MAX {
+            return Err(FileSystemError::NoSpace);
+        }
+        if matches!(file, File::Backed { capacity, .. } if end > *capacity) {
+            let heap = heap_for_growth(file, stores)?;
+            write_into(heap, start, data)?;
+            return Ok(data.len());
+        }
+        match file {
+            File::Heap(file) => write_into(file, start, data)?,
+            File::Backed {
+                store,
+                len,
+                capacity,
+                ..
+            } => {
+                debug_assert!(end <= *capacity);
+                if start > *len {
+                    stores.zero(*store, *len, start - *len)?;
+                }
+                stores.write(*store, start, data)?;
+                *len = (*len).max(end);
+            }
+        }
         Ok(data.len())
     }
 
-    fn append(&mut self, node: NodeId, data: &[u8]) -> Result<u64, FileSystemError> {
-        let file = self.file_mut(node)?;
-        let offset = file.len();
-        write_into(file, offset, data)?;
+    fn append(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        node: NodeId,
+        data: &[u8],
+    ) -> Result<u64, FileSystemError> {
+        let offset = match self.file_node(node)? {
+            File::Heap(file) => file.len(),
+            File::Backed { len, .. } => *len,
+        };
+        self.write_at(stores, node, offset as u64, data)?;
         Ok(offset as u64)
     }
 
-    fn set_size(&mut self, node: NodeId, size: u64) -> Result<(), FileSystemError> {
-        let file = self.file_mut(node)?;
-        let len = usize::try_from(size).map_err(|_| FileSystemError::NoSpace)?;
-        if len < file.len() {
-            file.truncate(len);
-            return Ok(());
+    fn set_size(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        node: NodeId,
+        size: u64,
+    ) -> Result<(), FileSystemError> {
+        if size > FILE_SIZE_MAX {
+            return Err(FileSystemError::NoSpace);
         }
-        grow(file, len)
+        let len = usize::try_from(size).map_err(|_| FileSystemError::NoSpace)?;
+        let file = self.file_node_mut(node)?;
+        if matches!(file, File::Backed { capacity, .. } if len > *capacity) {
+            return grow(heap_for_growth(file, stores)?, len);
+        }
+        match file {
+            File::Heap(file) => {
+                if len < file.len() {
+                    file.truncate(len);
+                    return Ok(());
+                }
+                grow(file, len)
+            }
+            File::Backed {
+                store,
+                len: current,
+                capacity,
+                ..
+            } => {
+                debug_assert!(len <= *capacity);
+                if len > *current {
+                    stores.zero(*store, *current, len - *current)?;
+                }
+                *current = len;
+                Ok(())
+            }
+        }
     }
 
     fn list(
@@ -308,9 +402,109 @@ impl FileSystemBackend for RamFileSystem {
         })
     }
 
-    fn backing(&self, _node: NodeId) -> Result<Window, FileSystemError> {
-        Err(FileSystemError::NotSupported)
+    fn backing(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        node: NodeId,
+    ) -> Result<Window, FileSystemError> {
+        let file = self.file_node_mut(node)?;
+        if let File::Heap(data) = file {
+            if data.is_empty() {
+                return Err(FileSystemError::NotSupported);
+            }
+            let size = data.len();
+            let capacity_u64 = (size as u64).div_ceil(USERLAND_PAGE_SIZE) * USERLAND_PAGE_SIZE;
+            let capacity = usize::try_from(capacity_u64).map_err(|_| FileSystemError::NoSpace)?;
+            let store = stores.allocate(capacity)?;
+            if let Err(error) = stores.write(store, 0, data) {
+                stores.release(store);
+                return Err(error);
+            }
+            *file = File::Backed {
+                store,
+                len: size,
+                capacity,
+                pinned: false,
+            };
+        }
+        match file {
+            File::Heap(_) => unreachable!(),
+            File::Backed {
+                store,
+                len,
+                capacity,
+                pinned: _,
+            } if *len != 0 => Ok(Window {
+                store: *store,
+                offset: 0,
+                size: *capacity as u64,
+            }),
+            File::Backed { .. } => Err(FileSystemError::NotSupported),
+        }
     }
+
+    fn pin(&mut self, node: NodeId) -> Result<(), FileSystemError> {
+        match self.file_node_mut(node)? {
+            File::Heap(_) => Err(FileSystemError::NotSupported),
+            File::Backed { pinned, .. } => {
+                *pinned = true;
+                Ok(())
+            }
+        }
+    }
+
+    fn create_backed(
+        &mut self,
+        path: Path<'_>,
+        store: StoreId,
+        size: u64,
+        capacity: u64,
+    ) -> Result<NodeId, FileSystemError> {
+        let len = usize::try_from(size).map_err(|_| FileSystemError::NoSpace)?;
+        let capacity = usize::try_from(capacity).map_err(|_| FileSystemError::NoSpace)?;
+        if size > FILE_SIZE_MAX || len > capacity {
+            return Err(FileSystemError::NoSpace);
+        }
+        let (directory, name) = self.parent_of(path)?;
+        if self.locate(directory, name)?.is_some() {
+            return Err(FileSystemError::AlreadyExists);
+        }
+        let node = self.insert(Node::File(File::Backed {
+            store,
+            len,
+            capacity,
+            pinned: true,
+        }))?;
+        self.attach(directory, name, node)?;
+        Ok(node)
+    }
+}
+
+fn heap_for_growth<'a>(
+    file: &'a mut File,
+    stores: &mut dyn ByteStore,
+) -> Result<&'a mut Vec<u8>, FileSystemError> {
+    if let File::Backed {
+        store, len, pinned, ..
+    } = file
+    {
+        if *pinned {
+            return Err(FileSystemError::NoSpace);
+        }
+        let (store, len) = (*store, *len);
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| FileSystemError::NoSpace)?;
+        bytes.resize(len, 0);
+        stores.read(store, 0, &mut bytes)?;
+        stores.release(store);
+        *file = File::Heap(bytes);
+    }
+    let File::Heap(bytes) = file else {
+        unreachable!()
+    };
+    Ok(bytes)
 }
 
 fn grow(file: &mut Vec<u8>, len: usize) -> Result<(), FileSystemError> {
@@ -342,9 +536,23 @@ mod tests {
     use filesystem_abi::{
         DirCursor, DirEntry, ENTRY_HEADER_SIZE, FileSystemError, Listed, NodeKind, Path,
     };
+    use userland::USERLAND_PAGE_SIZE;
 
-    use super::{FILE_SIZE_MAX, NODE_LIMIT, RamFileSystem};
-    use crate::{backend::FileSystemBackend, node::NodeId};
+    use super::{FILE_SIZE_MAX, NODE_LIMIT, RamFileSystem as Backend};
+    use crate::{
+        ByteStore, HeapByteStore, backend::FileSystemBackend, node::NodeId, store::host::WithStore,
+    };
+
+    type RamFileSystem = WithStore<Backend>;
+
+    impl RamFileSystem {
+        fn new() -> Self {
+            Self {
+                backend: Backend::new(),
+                stores: HeapByteStore::new(),
+            }
+        }
+    }
 
     fn path(text: &str) -> Path<'_> {
         Path::new(text).expect("valid path")
@@ -833,9 +1041,95 @@ mod tests {
     }
 
     #[test]
-    fn backing_is_not_supported() {
+    fn empty_file_has_no_backing() {
         let mut fs = RamFileSystem::new();
         let sample = file(&mut fs, "/sample");
         assert_eq!(fs.backing(sample), Err(FileSystemError::NotSupported));
+    }
+
+    #[test]
+    fn nonempty_file_is_promoted_and_shares_its_bytes() {
+        let mut fs = RamFileSystem::new();
+        let sample = file(&mut fs, "/sample");
+        fs.write_at(sample, 0, b"before").expect("write");
+
+        let window = fs.backing(sample).expect("promote");
+        assert_eq!(window.offset, 0);
+        assert_eq!(window.size, USERLAND_PAGE_SIZE);
+        let mut bytes = [0; 6];
+        fs.stores
+            .read(window.store, 0, &mut bytes)
+            .expect("read store");
+        assert_eq!(&bytes, b"before");
+
+        fs.stores
+            .write(window.store, 0, b"mapped")
+            .expect("write store");
+        assert_eq!(read(&fs, sample, 0, 6), b"mapped");
+
+        fs.write_at(sample, 0, b"server").expect("write backend");
+        fs.stores
+            .read(window.store, 0, &mut bytes)
+            .expect("read store");
+        assert_eq!(&bytes, b"server");
+    }
+
+    #[test]
+    fn issued_backing_pins_capacity() {
+        let mut fs = RamFileSystem::new();
+        let sample = file(&mut fs, "/sample");
+        fs.write_at(sample, 0, b"body").expect("write");
+        fs.backing(sample).expect("promote");
+        fs.pin(sample).expect("pin");
+
+        assert_eq!(
+            fs.write_at(sample, USERLAND_PAGE_SIZE, b"x"),
+            Err(FileSystemError::NoSpace)
+        );
+        assert_eq!(
+            fs.set_size(sample, USERLAND_PAGE_SIZE + 1),
+            Err(FileSystemError::NoSpace)
+        );
+        assert_eq!(read(&fs, sample, 0, 8), b"body");
+        fs.set_size(sample, USERLAND_PAGE_SIZE)
+            .expect("fill capacity");
+        assert_eq!(fs.append(sample, b"x"), Err(FileSystemError::NoSpace));
+    }
+
+    #[test]
+    fn unissued_backing_can_return_to_the_heap_and_grow() {
+        let mut fs = RamFileSystem::new();
+        let sample = file(&mut fs, "/sample");
+        fs.write_at(sample, 0, b"body").expect("write");
+        fs.backing(sample).expect("promote");
+
+        assert_eq!(fs.write_at(sample, USERLAND_PAGE_SIZE, b"x"), Ok(1));
+        assert_eq!(fs.metadata(sample).expect("metadata").size, 4097);
+        assert_eq!(read(&fs, sample, 0, 4), b"body");
+        assert_eq!(read(&fs, sample, USERLAND_PAGE_SIZE, 1), b"x");
+    }
+
+    #[test]
+    fn file_can_be_created_over_an_existing_store() {
+        let mut fs = RamFileSystem::new();
+        let store = fs
+            .stores
+            .allocate(USERLAND_PAGE_SIZE as usize)
+            .expect("allocate store");
+        fs.stores
+            .write(store, 0, b"shared")
+            .expect("initialize store");
+        let sample = fs
+            .backend
+            .create_backed(path("/shared"), store, 6, USERLAND_PAGE_SIZE)
+            .expect("create backed file");
+
+        assert_eq!(read(&fs, sample, 0, 6), b"shared");
+        fs.stores.write(store, 0, b"mapped").expect("change store");
+        assert_eq!(read(&fs, sample, 0, 6), b"mapped");
+        assert_eq!(
+            fs.write_at(sample, USERLAND_PAGE_SIZE, b"x"),
+            Err(FileSystemError::NoSpace)
+        );
     }
 }
