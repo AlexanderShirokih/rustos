@@ -17,6 +17,17 @@ pub const LOG_TAG_MAX: usize = 64;
 pub const LOG_MESSAGE_MAX: usize =
     ipc::wire::FIELD_DATA_MAX - LOG_TAG_MAX - ipc::wire::FIELD_OVERHEAD;
 
+ipc::wire_value! {
+    /// Boot FDT: регион поверх страниц с блобом и его начало внутри региона.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct BootFdt {
+        /// Read-only регион, целиком покрывающий блоб.
+        pub region: ipc::wire::Cap,
+        /// Смещение первого байта блоба от начала региона.
+        pub offset: u32,
+    }
+}
+
 ipc::protocol! {
     /// Канал init-процесса к ядру.
     pub mod bootstrap {
@@ -36,8 +47,9 @@ ipc::protocol! {
         /// Выдаёт вызывателю read-only capability на регион поверх байт userland-образа.
         call fn acquire_userland_image() -> Result<ipc::wire::Cap, u32>;
 
-        /// Выдаёт вызывателю read-only capability на регион поверх байт boot FDT (DTB).
-        call fn acquire_boot_fdt() -> Result<ipc::wire::Cap, u32>;
+        /// Выдаёт вызывателю read-only capability на регион поверх байт boot FDT (DTB)
+        /// вместе со смещением блоба внутри региона.
+        call fn acquire_boot_fdt() -> Result<BootFdt, u32>;
 
         /// Выдаёт capability на Device-MMIO регион `index` (kernel-owned
         /// исключены). `Err` - индекс вне набора либо отказ выдачи.
@@ -56,7 +68,7 @@ mod tests {
     };
     use ipc_test::MockEnd;
 
-    use super::{LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap};
+    use super::{BootFdt, LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap};
 
     #[derive(Default)]
     struct Sink {
@@ -76,8 +88,11 @@ mod tests {
             Ok(Cap::from_raw(NonZeroU32::new(0x88).expect("non-zero")))
         }
 
-        fn acquire_boot_fdt(&mut self) -> Result<Cap, u32> {
-            Ok(Cap::from_raw(NonZeroU32::new(0x99).expect("non-zero")))
+        fn acquire_boot_fdt(&mut self) -> Result<BootFdt, u32> {
+            Ok(BootFdt {
+                region: Cap::from_raw(NonZeroU32::new(0x99).expect("non-zero")),
+                offset: 0x600,
+            })
         }
 
         fn acquire_device_memory(&mut self, index: u32) -> Result<Cap, u32> {
@@ -158,10 +173,13 @@ mod tests {
                     .expect("server wait");
                 bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
-            let cap = client.acquire_boot_fdt().expect("call ok");
+            let fdt = client.acquire_boot_fdt().expect("call ok");
             assert_eq!(
-                cap,
-                Ok(Cap::from_raw(NonZeroU32::new(0x99).expect("non-zero")))
+                fdt,
+                Ok(BootFdt {
+                    region: Cap::from_raw(NonZeroU32::new(0x99).expect("non-zero")),
+                    offset: 0x600,
+                })
             );
         });
     }

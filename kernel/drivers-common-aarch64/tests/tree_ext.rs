@@ -126,7 +126,7 @@ fn probe_context_ext_translates_reg_address_space() {
         regs: &[],
     };
 
-    let context = ProbeContext::new(uart, vec![root, soc, uart]);
+    let context = ProbeContext::new(uart, vec![root, soc, uart], None);
     let reg = context.get_address(0);
 
     assert_eq!(reg.offset, 0x1000_2000);
@@ -180,7 +180,7 @@ fn get_address_does_not_underflow_when_child_exceeds_offset() {
         regs: &[],
     };
 
-    let context = ProbeContext::new(uart, vec![root, soc, uart]);
+    let context = ProbeContext::new(uart, vec![root, soc, uart], None);
     // Не должно паниковать; offset - child насыщается до 0 -> результат == parent.
     let reg = context.get_address(0);
     assert_eq!(reg.offset, 0x2000_0000);

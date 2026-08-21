@@ -105,8 +105,19 @@ pub struct SystemImage {
     mapping: ReadOnlyMapping,
 }
 
+struct FdtMapping {
+    mapping: ReadOnlyMapping,
+    offset: usize,
+}
+
+impl FdtMapping {
+    fn blob(&self) -> Option<&[u8]> {
+        self.mapping.as_bytes().get(self.offset..)
+    }
+}
+
 struct DeviceAuthority {
-    description: Option<ReadOnlyMapping>,
+    description: Option<FdtMapping>,
     _region: Option<MemoryRegion>,
     lines: Option<IrqControl>,
     windows: Vec<GrantedWindow>,
@@ -239,15 +250,18 @@ impl DeviceAuthority {
 
     fn acquire(kernel: Handle) -> Result<Self, BootFailure> {
         let client = bootstrap::Client::new(PortTransport::client(kernel));
-        let cap = client
+        let fdt = client
             .acquire_boot_fdt()
             .ok()
             .and_then(Result::ok)
             .ok_or(BootFailure::DeviceAuthority)?;
-        let region = MemoryRegion::adopt(cap);
-        let description = region
-            .map_full_read_only()
-            .map_err(|_| BootFailure::DeviceAuthority)?;
+        let region = MemoryRegion::adopt(fdt.region);
+        let description = FdtMapping {
+            mapping: region
+                .map_full_read_only()
+                .map_err(|_| BootFailure::DeviceAuthority)?,
+            offset: fdt.offset as usize,
+        };
         let lines = client
             .acquire_irq_control()
             .ok()
@@ -265,12 +279,12 @@ impl DeviceAuthority {
         &self,
         body: impl FnOnce(&DeviceTreePlatform<'_>) -> Result<R, ResolveError>,
     ) -> Result<R, BootFailure> {
-        let description = self
+        let blob = self
             .description
             .as_ref()
+            .and_then(FdtMapping::blob)
             .ok_or(BootFailure::DeviceAuthority)?;
-        let tree = DeviceTree::from_bytes(description.as_bytes())
-            .map_err(|_| BootFailure::DeviceAuthority)?;
+        let tree = DeviceTree::from_bytes(blob).map_err(|_| BootFailure::DeviceAuthority)?;
         body(&DeviceTreePlatform::new(&tree, PLATFORM_BINDINGS)).map_err(BootFailure::Device)
     }
 

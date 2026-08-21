@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
 
-use bootstrap_abi::bootstrap;
+use bootstrap_abi::{BootFdt, bootstrap};
 use capability::{
     Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, IrqControl,
     KernelIpcBuffer, MeteringGrant, Port, Reply, Resource, Rights, ThreadTransport,
@@ -20,7 +20,10 @@ use ipc::{
     },
 };
 use klog::{info, warn};
-use memory::{AccessMask, MemoryRegion, page_round_up, physical_address::PageAlignedAddress};
+use memory::{
+    AccessMask, MemoryRegion, page_round_up,
+    physical_address::{PageAlignedAddress, PhysicalAddress},
+};
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
 use syscall::{IpcBuffer, Timeout, decode_tag, encode_tag};
@@ -49,6 +52,8 @@ pub struct BootstrapResources {
     pub irq_control: Arc<IrqControl>,
     pub image_region: Arc<MemoryRegion>,
     pub fdt_region: Arc<MemoryRegion>,
+    /// Смещение блоба DTB от начала `fdt_region`.
+    pub fdt_offset: u32,
     pub device_regions: Vec<Arc<MemoryRegion>>,
 }
 
@@ -59,18 +64,19 @@ pub enum BootstrapSpawnError {
     Program(ProgramDecodeError),
     Model(UserImageFromModelError),
     Spawn(SpawnUserError),
-    /// Размер образа не округляется до страницы в пределах адресного пространства.
+    /// База образа не выровнена на страницу либо размер не округляется до страницы
+    /// в пределах адресного пространства.
     ImageGeometry,
     /// Размер DTB не округляется до страницы в пределах адресного пространства.
     FdtGeometry,
 }
 
-/// Разбирает `blob` и спавнит процесс. `image_phys` - физбаза `blob` в initrd
-/// (4K-выровнена), поверх которой выдаётся read-only регион образа.
+/// Разбирает `blob` и спавнит процесс. `image_phys` - физбаза `blob` в initrd,
+/// поверх которой выдаётся read-only регион образа.
 pub fn spawn_process(
     launcher: &dyn UserProcessLauncher,
     blob: &'static [u8],
-    image_phys: PageAlignedAddress,
+    image_phys: PhysicalAddress,
     dtb: BootDtb,
     device_regions: Vec<Arc<MemoryRegion>>,
     irq_lines: IrqLineSpan,
@@ -107,21 +113,26 @@ pub fn spawn_process(
 
     // Read-only Normal-регион поверх байт образа; размер округлён до страницы
     // для маппинга. blob непуст (decode прошёл), поэтому размер ненулевой.
+    // Потребитель читает регион с нулевого смещения, поэтому база обязана
+    // совпадать с началом страницы.
+    let image_base =
+        PageAlignedAddress::new(image_phys).ok_or(BootstrapSpawnError::ImageGeometry)?;
     let image_size = NonZeroUsize::new(blob.len())
         .and_then(page_round_up)
         .ok_or(BootstrapSpawnError::ImageGeometry)?;
     let image_region = Arc::new(MemoryRegion::create_physical_normal(
-        image_phys,
+        image_base,
         image_size,
         AccessMask::R,
     ));
 
-    // Read-only Normal-регион поверх байт DTB. Память DTB зарезервирована раскладкой на весь срок
-    // ядра.
-    let fdt_size = page_round_up(dtb.size_bytes).ok_or(BootstrapSpawnError::FdtGeometry)?;
+    // Read-only Normal-регион поверх страниц с байтами DTB. Память DTB зарезервирована раскладкой
+    // на весь срок ядра.
+    let fdt = dtb.blob_region().ok_or(BootstrapSpawnError::FdtGeometry)?;
+    let fdt_offset = u32::try_from(fdt.offset).map_err(|_| BootstrapSpawnError::FdtGeometry)?;
     let fdt_region = Arc::new(MemoryRegion::create_physical_normal(
-        dtb.phys_base,
-        fdt_size,
+        fdt.base,
+        fdt.size,
         AccessMask::R,
     ));
 
@@ -148,6 +159,7 @@ pub fn spawn_process(
             irq_control,
             image_region,
             fdt_region,
+            fdt_offset,
             device_regions,
         },
     })
@@ -252,8 +264,13 @@ impl bootstrap::Service for BootstrapServer {
         ))
     }
 
-    fn acquire_boot_fdt(&mut self) -> Result<Cap, u32> {
-        self.vend(CapabilityTarget::Memory(self.resources.fdt_region.clone()))
+    fn acquire_boot_fdt(&mut self) -> Result<BootFdt, u32> {
+        let region = self.vend(CapabilityTarget::Memory(self.resources.fdt_region.clone()))?;
+
+        Ok(BootFdt {
+            region,
+            offset: self.resources.fdt_offset,
+        })
     }
 
     fn acquire_device_memory(&mut self, index: u32) -> Result<Cap, u32> {

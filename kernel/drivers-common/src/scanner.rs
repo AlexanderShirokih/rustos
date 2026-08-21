@@ -39,12 +39,16 @@ pub struct DriverHandle {
 
 pub struct EmbeddedDriversScanner {
     pub(crate) handles: BTreeMap<usize, DriverHandle>,
+    console_node: Option<usize>,
 }
 
 impl EmbeddedDriversScanner {
-    pub fn new() -> Self {
+    /// `console_node` - узел, назначенный загрузчиком консолью. `None` снимает
+    /// назначение и открывает роль консоли любому подходящему узлу.
+    pub fn new(console_node: Option<usize>) -> Self {
         Self {
             handles: BTreeMap::new(),
+            console_node,
         }
     }
 
@@ -91,7 +95,7 @@ impl EmbeddedDriversScanner {
 
         paths.push(node);
 
-        let mut context = ProbeContext::new(node, paths.clone());
+        let mut context = ProbeContext::new(node, paths.clone(), self.console_node);
         self.try_probe(&mut context, drivers).ok();
 
         for child in node.children() {
@@ -138,7 +142,7 @@ impl EmbeddedDriversScanner {
 
 impl Default for EmbeddedDriversScanner {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 

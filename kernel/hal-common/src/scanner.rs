@@ -1,14 +1,17 @@
-use collections::Vec;
 use fdt::devicetree::{DeviceTree, Node};
 use memory::physical_address::PhysicalAddress;
 
 use crate::boot::BootPayloadRange;
 
-const MAX_SERIAL_SCAN_DEPTH: usize = 128;
-
-/// Находит узел консоли из stdout-path или первый serial.
-pub fn find_console<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
-    stdout_node(device_tree).or_else(|| first_serial(device_tree))
+/// Возвращает узел, назначенный загрузчиком консолью в `/chosen/stdout-path`.
+/// `None` - назначения нет либо путь не разрешается в узел.
+pub fn designated_console<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
+    let chosen = device_tree.find("/chosen")?;
+    let raw = chosen.prop("stdout-path")?;
+    let path = raw.as_cstr()?;
+    // Суффикс за ':' - параметры линии, узла он не называет.
+    let trimmed = path.split(':').next().unwrap_or(path);
+    device_tree.find(trimmed)
 }
 
 /// Извлекает initial ramdisk из `/chosen` (linux-compatible протокол).
@@ -21,68 +24,11 @@ pub fn find_initrd_payload(device_tree: &DeviceTree<'_>) -> Option<BootPayloadRa
     BootPayloadRange::new(PhysicalAddress::new(start), size_bytes)
 }
 
-fn stdout_node<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
-    let chosen = device_tree.find("/chosen")?;
-    let raw = chosen.prop("stdout-path")?;
-    let path = raw.as_cstr()?;
-    let trimmed = path.split(':').next().unwrap_or(path);
-    device_tree.find(trimmed)
-}
-
-fn first_serial<'dt>(device_tree: &'dt DeviceTree<'dt>) -> Option<Node<'dt>> {
-    // Serial живёт и внутри шины (`/soc/serial@...`): обход берёт всё дерево.
-    // Итеративная форма держит стек ограниченным на недоверенном блобе.
-    let root = device_tree.root()?;
-    find_serial_iterative(root)
-}
-
-fn find_serial_iterative<'dt>(root: Node<'dt>) -> Option<Node<'dt>> {
-    let mut stack: Vec<Node<'dt>, MAX_SERIAL_SCAN_DEPTH> = Vec::new();
-    stack.push(root)?;
-
-    while !stack.is_empty() {
-        let node = stack.pop()?;
-
-        if is_serial(&node) {
-            return Some(node);
-        }
-
-        for child in node.children() {
-            if stack.push(child).is_none() {
-                break;
-            }
-        }
-    }
-
-    None
-}
-
-fn is_serial(node: &Node<'_>) -> bool {
-    let by_device_type = node
-        .prop("device_type")
-        .and_then(|prop| prop.as_cstr())
-        .is_some_and(|value| value == "serial");
-
-    let by_name = node.name().starts_with("serial");
-    let by_compat =
-        compatible_strings(node).any(|value| value.contains("serial") || value.contains("uart"));
-
-    by_device_type || by_name || by_compat
-}
-
-fn compatible_strings<'a>(node: &'a Node<'a>) -> impl Iterator<Item = &'a str> {
-    let data = node.prop("compatible").map_or(&[] as &[u8], |p| p.value());
-
-    data.split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .filter_map(|bytes| core::str::from_utf8(bytes).ok())
-}
-
 #[cfg(test)]
 mod tests {
     use fdt::devicetree::DeviceTree;
 
-    use super::{find_console, find_initrd_payload};
+    use super::{designated_console, find_initrd_payload};
     use crate::test_util::{
         StringPool, begin_node, build_chosen_dtb, build_chosen_dtb_32,
         build_chosen_dtb_with_payload, build_fdt, end_node, end_tree, push_prop_bytes,
@@ -190,39 +136,38 @@ mod tests {
     }
 
     #[test]
-    fn first_serial_finds_serial_inside_soc_bus() {
-        let dtb = build_console_dtb(None);
-        let tree = DeviceTree::from_bytes(&dtb).unwrap();
-
-        let console = find_console(&tree).expect("serial inside soc must be found");
-        assert_eq!(console.name(), "serial@2000");
-    }
-
-    #[test]
-    fn find_console_prefers_stdout_path() {
+    fn designation_resolves_a_full_path() {
         let dtb = build_console_dtb(Some("/soc/serial@2000:115200n8"));
         let tree = DeviceTree::from_bytes(&dtb).unwrap();
 
         // stdout-path с :-суффиксом должен резолвиться в узел.
-        let console = find_console(&tree).expect("stdout-path");
+        let console = designated_console(&tree).expect("stdout-path");
         assert_eq!(console.name(), "serial@2000");
     }
 
     #[test]
-    fn find_console_falls_back_to_first_serial_when_stdout_missing() {
-        // Нет /chosen -> stdout_node None -> fallback на first_serial.
+    fn designation_resolves_an_alias() {
+        // Форма Raspberry Pi: stdout-path называет алиас, а не путь.
+        let dtb = build_console_dtb(Some("serial0:115200n8"));
+        let tree = DeviceTree::from_bytes(&dtb).unwrap();
+
+        let console = designated_console(&tree).expect("alias stdout-path");
+        assert_eq!(console.name(), "serial@2000");
+    }
+
+    #[test]
+    fn designation_is_absent_without_stdout_path() {
         let dtb = build_console_dtb(None);
         let tree = DeviceTree::from_bytes(&dtb).unwrap();
 
-        let console = find_console(&tree).expect("fallback to serial");
-        assert_eq!(console.name(), "serial@2000");
+        assert!(designated_console(&tree).is_none());
     }
 
     #[test]
-    fn find_console_none_when_no_serial_present() {
-        // DTB без serial-узлов: /chosen без stdout-path, нет serial.
-        let dtb = build_chosen_dtb(None);
+    fn designation_is_absent_when_the_path_names_no_node() {
+        let dtb = build_console_dtb(Some("/soc/serial@9999"));
         let tree = DeviceTree::from_bytes(&dtb).unwrap();
-        assert!(find_console(&tree).is_none());
+
+        assert!(designated_console(&tree).is_none());
     }
 }

@@ -47,7 +47,7 @@ mod tests {
             Err(1)
         }
 
-        fn acquire_boot_fdt(&mut self) -> Result<ipc::wire::Cap, u32> {
+        fn acquire_boot_fdt(&mut self) -> Result<crate::BootFdt, u32> {
             Err(1)
         }
 

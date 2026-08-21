@@ -89,7 +89,7 @@ fn count_probe(context: &mut ProbeContext<ChainNode>) -> ProbeResult {
 fn scanner_accepts_tree_at_depth_limit() {
     VISITED.with(|visited| visited.set(0));
 
-    let mut scanner = EmbeddedDriversScanner::new();
+    let mut scanner = EmbeddedDriversScanner::new(None);
     let drivers = [DriverDescriptor {
         name: "counter",
         probe: count_probe as fn(&mut ProbeContext<ChainNode>) -> ProbeResult,
@@ -202,7 +202,7 @@ fn scanner_skips_disabled_nodes_and_their_subtrees() {
         children: Box::leak(Box::new([okay_implicit, disabled_bus, okay_leaf])),
     };
 
-    let mut scanner = EmbeddedDriversScanner::new();
+    let mut scanner = EmbeddedDriversScanner::new(None);
     let drivers = [DriverDescriptor {
         name: "spy",
         probe: record_id_probe as fn(&mut ProbeContext<StatusNode>) -> ProbeResult,
@@ -224,7 +224,7 @@ fn scanner_skips_disabled_nodes_and_their_subtrees() {
 fn scanner_rejects_tree_deeper_than_limit() {
     VISITED.with(|visited| visited.set(0));
 
-    let mut scanner = EmbeddedDriversScanner::new();
+    let mut scanner = EmbeddedDriversScanner::new(None);
     let drivers = [DriverDescriptor {
         name: "counter",
         probe: count_probe as fn(&mut ProbeContext<ChainNode>) -> ProbeResult,

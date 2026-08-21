@@ -97,7 +97,7 @@ fn probe_context_fold_sums_over_hierarchy() {
         id: 30,
         children: &[],
     };
-    let ctx = ProbeContext::new(n30, alloc::vec![n10, n20, n30]);
+    let ctx = ProbeContext::new(n30, alloc::vec![n10, n20, n30], None);
 
     let sum: usize = ctx.fold(|parent, node, _ctx| parent.map(|_| node.id()));
     assert_eq!(sum, 50);
@@ -106,6 +106,35 @@ fn probe_context_fold_sums_over_hierarchy() {
     assert!(ctx.parent(&n10).is_none());
     // parent() узла -> предыдущий в иерархии.
     assert_eq!(ctx.parent(&n30).map(DeviceNode::id), Some(20));
+}
+
+#[test]
+fn console_designation_singles_out_one_node() {
+    let designated = SimpleNode {
+        id: 20,
+        children: &[],
+    };
+    let other = SimpleNode {
+        id: 30,
+        children: &[],
+    };
+
+    let ctx = ProbeContext::new(designated, alloc::vec![designated], Some(20));
+    assert!(ctx.is_console());
+
+    let ctx = ProbeContext::new(other, alloc::vec![other], Some(20));
+    assert!(!ctx.is_console());
+}
+
+#[test]
+fn without_designation_every_node_may_be_the_console() {
+    let node = SimpleNode {
+        id: 30,
+        children: &[],
+    };
+
+    let ctx = ProbeContext::new(node, alloc::vec![node], None);
+    assert!(ctx.is_console());
 }
 
 #[test]
@@ -119,7 +148,7 @@ fn successful_probe_registers_handle() {
         probe: always_match as fn(&mut ProbeContext<SimpleNode>) -> ProbeResult,
     }];
 
-    let mut scanner = EmbeddedDriversScanner::new();
+    let mut scanner = EmbeddedDriversScanner::new(None);
     scanner.scan_and_probe(root, &drivers).unwrap();
 
     // IntoIterator выдаёт зарегистрированные хэндлы.
@@ -148,7 +177,7 @@ fn first_matching_driver_wins() {
         },
     ];
 
-    let mut scanner = EmbeddedDriversScanner::new();
+    let mut scanner = EmbeddedDriversScanner::new(None);
     scanner.scan_and_probe(root, &drivers).unwrap();
 
     let handles: Vec<_> = scanner.into_iter().collect();
@@ -173,7 +202,7 @@ fn skips_non_matching_driver_then_registers_matching() {
         },
     ];
 
-    let mut scanner = EmbeddedDriversScanner::new();
+    let mut scanner = EmbeddedDriversScanner::new(None);
     scanner.scan_and_probe(root, &drivers).unwrap();
 
     let handles: Vec<_> = scanner.into_iter().collect();
@@ -201,7 +230,7 @@ fn occupied_entry_keeps_first_registration_per_node() {
         probe: always_match as fn(&mut ProbeContext<SimpleNode>) -> ProbeResult,
     }];
 
-    let mut scanner = EmbeddedDriversScanner::new();
+    let mut scanner = EmbeddedDriversScanner::new(None);
     scanner.scan_and_probe(root, &drivers).unwrap();
 
     // id=0 и id=7 -> ровно два уникальных ключа (повторный id=7 в Occupied-ветке

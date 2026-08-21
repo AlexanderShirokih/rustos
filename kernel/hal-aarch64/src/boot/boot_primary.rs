@@ -77,9 +77,7 @@ enum PrimaryBootError {
     DtbParse,
     DtbRootMissing,
     DtbScanDepth,
-    UnalignedDtbBase,
     EmptyDtb,
-    UnalignedInitrdBase,
     BootStackExhausted,
     UnalignedLowerRoot,
 }
@@ -91,9 +89,7 @@ impl core::fmt::Display for PrimaryBootError {
             PrimaryBootError::DtbParse => "DTB at the handed-off address is not parseable",
             PrimaryBootError::DtbRootMissing => "DTB has no root node",
             PrimaryBootError::DtbScanDepth => "DTB nesting depth exceeds the supported limit",
-            PrimaryBootError::UnalignedDtbBase => "DTB base is not 4K-aligned",
             PrimaryBootError::EmptyDtb => "DTB totalsize is zero",
-            PrimaryBootError::UnalignedInitrdBase => "initrd base is not 4K-aligned",
             PrimaryBootError::BootStackExhausted => "pre-MMU phase used up the whole boot stack",
             PrimaryBootError::UnalignedLowerRoot => "identity root table PA is not 4K-aligned",
         };
@@ -164,7 +160,10 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
         },
     );
 
-    let mut driver_scanner = EmbeddedDriversScanner::new();
+    // Консоль назначает загрузчик через `/chosen/stdout-path`; без назначения
+    // роль остаётся за первым подходящим узлом.
+    let console_node = hal_common::scanner::designated_console(device_tree).map(|node| node.key());
+    let mut driver_scanner = EmbeddedDriversScanner::new(console_node);
     let root = adapt_to_fdt_tree(device_tree)
         .root()
         .ok_or(PrimaryBootError::DtbRootMissing)?;
@@ -195,7 +194,7 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
              ) = Box::leak(result.address_space_factory);
 
     let boot_dtb = BootDtb::new(
-        PageAlignedAddress::from_usize(dtb_phys).ok_or(PrimaryBootError::UnalignedDtbBase)?,
+        PhysicalAddress::new(dtb_phys),
         NonZeroUsize::new(device_tree.size()).ok_or(PrimaryBootError::EmptyDtb)?,
     );
 
@@ -203,9 +202,10 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
         let va = initrd_start + HIGHER_HALF_BASE;
         // SAFETY: initrd зарезервирован, фреймы не переиспользуются.
         let bytes = unsafe { core::slice::from_raw_parts(va as *const u8, initrd_size) };
-        let phys_base = PageAlignedAddress::from_usize(initrd_start)
-            .ok_or(PrimaryBootError::UnalignedInitrdBase)?;
-        Some(UserlandImage { bytes, phys_base })
+        Some(UserlandImage {
+            bytes,
+            phys_base: PhysicalAddress::new(initrd_start),
+        })
     } else {
         None
     };

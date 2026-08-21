@@ -32,7 +32,7 @@ pub(super) struct Gicv2Controller {
     pub(super) cpu_interface: MmioBound,
     pub(super) interrupt_lines: IrqBankCount,
     pub(super) handlers: BTreeMap<IrqNumber, BoundIrq>,
-    interface_masks: BTreeMap<u8, u8>,
+    interface_masks: BTreeMap<IpiAffinity, u8>,
 }
 
 pub(super) struct BoundIrq {
@@ -91,7 +91,7 @@ impl Gicv2Controller {
 
     fn learn_interface_mask(&mut self) -> Result<(), CpuInterfaceError> {
         // SAFETY: MPIDR_EL1 доступен на EL1 и только читается.
-        let aff0 = IpiAffinity::from_mpidr(unsafe { read_sysreg!(mpidr_el1) }).aff0;
+        let affinity = IpiAffinity::from_mpidr(unsafe { read_sysreg!(mpidr_el1) });
         // Соответствие CPU и маски его интерфейса объявляет железо: GICD_ITARGETSR
         // для SGI/PPI банкирован, поэтому на каждом CPU читается своё значение.
         let mask = (self.distributor.read_reg(GICD_ITARGETSR) & 0xFF) as u8;
@@ -99,7 +99,7 @@ impl Gicv2Controller {
             return Err(CpuInterfaceError::NotFound);
         }
 
-        self.interface_masks.insert(aff0, mask);
+        self.interface_masks.insert(affinity, mask);
         Ok(())
     }
 
@@ -124,15 +124,12 @@ impl Gicv2Controller {
             return Err(IpiError::NotAnIpi);
         }
 
-        let affinity = IpiAffinity::from_target(target);
-        if !affinity.is_single_cluster() {
-            return Err(IpiError::UnreachableTarget);
-        }
         // GICD_SGIR адресует CPU маской его интерфейса. Маску объявляет сам CPU на
-        // своей инициализации, до неё адресовать его нечем.
+        // своей инициализации, до неё адресовать его нечем. Ключ - affinity
+        // целиком: номер ядра лежит на уровне, который выбирает SoC.
         let target_list = *self
             .interface_masks
-            .get(&affinity.aff0)
+            .get(&IpiAffinity::from_target(target))
             .ok_or(IpiError::UnreachableTarget)?;
 
         // Записи, ради которых прерывание посылается, публикуются до его

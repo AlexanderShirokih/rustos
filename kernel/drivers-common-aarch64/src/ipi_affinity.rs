@@ -7,7 +7,7 @@ use drivers_common::services::interrupts::IpiTarget;
 /// Значение [`IpiTarget`] непрозрачно для арх-нейтрального слоя, и его
 /// раскладка объявлена здесь один раз: её заполняет платформенный слой и
 /// читают контроллеры прерываний.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IpiAffinity {
     pub aff0: u8,
     pub aff1: u8,
@@ -37,11 +37,6 @@ impl IpiAffinity {
                 | ((self.aff1 as u64) << 8)
                 | (self.aff0 as u64),
         )
-    }
-
-    /// `true`, если CPU адресуется одним `Aff0`: старшие уровни нулевые.
-    pub const fn is_single_cluster(self) -> bool {
-        self.aff1 == 0 && self.aff2 == 0 && self.aff3 == 0
     }
 }
 

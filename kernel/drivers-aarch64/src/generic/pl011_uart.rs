@@ -151,6 +151,10 @@ impl DriverFactory for UartPl011Factory {
 pub fn uart_pl011_probe(context: &mut FdtProbeContext<'_>) -> ProbeResult {
     drivers_common_aarch64::require_compatible(context.node(), &["arm,pl011"])?;
 
+    if !context.is_console() {
+        return Err(ProbeError::Unsupported("not the designated console"));
+    }
+
     let address = context
         .get_mmio_address(REG_UART_INDEX)
         .ok_or(ProbeError::MissingProperty("base address"))?;

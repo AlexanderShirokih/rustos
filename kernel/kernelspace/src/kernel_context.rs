@@ -9,34 +9,67 @@ use memory::{
     MemoryRegion,
     frame_allocator::FrameAllocator,
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
-    physical_address::PageAlignedAddress,
+    page_round_up,
+    physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::PageAlignedVirtualAddress,
 };
 use spin::Mutex;
 
 use crate::{services::mmio::MmioServiceImpl, syscall_bridge};
 
-/// Образ userland из initrd.
+/// Образ userland из initrd. База приходит от загрузчика и на страницу не выровнена.
 #[derive(Clone, Copy)]
 pub struct UserlandImage {
     pub bytes: &'static [u8],
-    pub phys_base: PageAlignedAddress,
+    pub phys_base: PhysicalAddress,
+}
+
+/// Страничный регион, целиком покрывающий блоб загрузчика.
+#[derive(Clone, Copy)]
+pub struct BlobRegion {
+    /// База региона, выровненная вниз до страницы.
+    pub base: PageAlignedAddress,
+    /// Размер региона, округлённый вверх до страницы.
+    pub size: NonZeroUsize,
+    /// Смещение первого байта блоба от базы региона.
+    pub offset: usize,
+}
+
+impl BlobRegion {
+    /// Строит покрывающий регион по точной базе блоба и его длине.
+    /// `None` - размер не округляется до страницы в пределах адресного пространства.
+    pub fn covering(phys_base: PhysicalAddress, size_bytes: NonZeroUsize) -> Option<Self> {
+        let base = PageAlignedAddress::aligned_down(phys_base);
+        let offset = phys_base.as_usize() - base.as_usize();
+        let span = NonZeroUsize::new(offset.checked_add(size_bytes.get())?)?;
+
+        Some(Self {
+            base,
+            size: page_round_up(span)?,
+            offset,
+        })
+    }
 }
 
 /// DTB от загрузчика: физдиапазон блоба (зарезервирован раскладкой на весь
-/// срок ядра).
+/// срок ядра). База приходит от загрузчика и на страницу не выровнена.
 #[derive(Clone, Copy)]
 pub struct BootDtb {
-    pub phys_base: PageAlignedAddress,
+    pub phys_base: PhysicalAddress,
     pub size_bytes: NonZeroUsize,
 }
 
 impl BootDtb {
-    pub fn new(phys_base: PageAlignedAddress, size_bytes: NonZeroUsize) -> Self {
+    pub fn new(phys_base: PhysicalAddress, size_bytes: NonZeroUsize) -> Self {
         Self {
             phys_base,
             size_bytes,
         }
+    }
+
+    /// Страничный регион под выдачу блоба userspace.
+    pub fn blob_region(&self) -> Option<BlobRegion> {
+        BlobRegion::covering(self.phys_base, self.size_bytes)
     }
 }
 

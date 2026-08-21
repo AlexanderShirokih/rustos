@@ -36,8 +36,8 @@ fn probe(log: &OwnedHandle) -> u64 {
         drop(OwnedHandle::adopt(cap));
         return EXIT_USERLAND_IMAGE;
     }
-    if let Ok(Ok(cap)) = bootstrap.acquire_boot_fdt() {
-        drop(OwnedHandle::adopt(cap));
+    if let Ok(Ok(fdt)) = bootstrap.acquire_boot_fdt() {
+        drop(OwnedHandle::adopt(fdt.region));
         return EXIT_BOOT_FDT;
     }
     if let Ok(Ok(cap)) = bootstrap.acquire_device_memory(0) {

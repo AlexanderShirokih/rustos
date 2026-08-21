@@ -94,7 +94,7 @@ fn probed_mask_for_status(status: Option<&'static [u8]>) -> u32 {
         name: "rec",
         probe: record as fn(&mut ProbeContext<Node>) -> ProbeResult,
     }];
-    let mut scanner = EmbeddedDriversScanner::new();
+    let mut scanner = EmbeddedDriversScanner::new(None);
     scanner.scan_and_probe(root, &drivers).unwrap();
     PROBED.with(Cell::get)
 }

@@ -207,7 +207,7 @@ fn real_fdt_get_address_translates_through_bus() {
     let serial = find_child(&soc, "serial@2000");
 
     // hierarchy: root -> soc -> serial.
-    let ctx = ProbeContext::new(serial, vec![root, soc, serial]);
+    let ctx = ProbeContext::new(serial, vec![root, soc, serial], None);
     let reg = ctx.get_address(0);
     // 0x1000_0000 (parent) + 0x2000 (offset) - 0x0 (child) = 0x1000_2000.
     assert_eq!(reg.offset, 0x1000_2000);
@@ -227,7 +227,7 @@ fn real_fdt_get_address_reg_index_out_of_bounds() {
     let soc = find_child(&root, "soc");
     let serial = find_child(&soc, "serial@2000");
 
-    let ctx = ProbeContext::new(serial, vec![root, soc, serial]);
+    let ctx = ProbeContext::new(serial, vec![root, soc, serial], None);
     // reg_index=5 за пределами -> address_space по умолчанию {0,0},
     // транслируется в parent (0x1000_0000) + 0 - child(0) = 0x1000_0000.
     let reg = ctx.get_address(5);
@@ -245,7 +245,7 @@ fn real_fdt_get_address_without_parent_bus() {
 
     // soc как одиночный узел (нет родителя в иерархии): bus_range = default {0,0,0},
     // reg у soc нет -> address_space {0,0} -> offset 0.
-    let ctx = ProbeContext::new(soc, vec![soc]);
+    let ctx = ProbeContext::new(soc, vec![soc], None);
     let reg = ctx.get_address(0);
     assert_eq!(reg.offset, 0);
     assert_eq!(reg.size, 0);

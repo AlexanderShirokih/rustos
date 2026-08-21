@@ -31,15 +31,27 @@ impl fmt::Display for ProbeError {
 pub struct ProbeContext<N: DeviceNode> {
     pub(crate) node: N,
     pub(crate) hierarchy: Vec<N>,
+    pub(crate) console_node: Option<N::Id>,
 }
 
 impl<N: DeviceNode> ProbeContext<N> {
-    pub fn new(node: N, hierarchy: Vec<N>) -> Self {
-        Self { node, hierarchy }
+    pub fn new(node: N, hierarchy: Vec<N>, console_node: Option<N::Id>) -> Self {
+        Self {
+            node,
+            hierarchy,
+            console_node,
+        }
     }
 
     pub fn node(&self) -> &N {
         &self.node
+    }
+
+    /// `true`, если загрузчик назначил консолью этот узел либо не назначил ни одного.
+    pub fn is_console(&self) -> bool {
+        self.console_node
+            .as_ref()
+            .is_none_or(|designated| *designated == self.node.id())
     }
 
     pub fn hierarchy(&self) -> &[N] {
