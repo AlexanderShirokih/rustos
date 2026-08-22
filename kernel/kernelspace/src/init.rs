@@ -14,7 +14,7 @@ use memory::MemoryRegion;
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
 use crate::{
-    bootstrap::{close_bootstrap_port, run_bootstrap, spawn_process},
+    bootstrap::{SERVER_STACK_PAGES, close_bootstrap_port, run_bootstrap, spawn_process},
     kernel_context::{BootDtb, KernelContext, UserlandImage},
     power,
     scheduler_bootstrap::KernelTimerSource,
@@ -107,7 +107,9 @@ fn bootstrap_chain(
     let resources = launch.resources;
     syscall_bridge::scheduler()
         .spawn(
-            SpawnConfig::new("bootstrap-log").priority(Priority::normal()),
+            SpawnConfig::new("bootstrap-log")
+                .priority(Priority::normal())
+                .stack_pages(SERVER_STACK_PAGES),
             move || run_bootstrap(&port, receiver, resources),
         )
         .map_err(|e| warn!("bootstrap-log task spawn failed: {:?}", e))?;

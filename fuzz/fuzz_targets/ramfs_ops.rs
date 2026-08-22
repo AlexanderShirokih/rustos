@@ -5,9 +5,12 @@
 //! прогона дерево сверяется с моделью целиком: пути, идентичность узлов, содержимое файлов,
 //! перечисление каталогов и узлы, пережившие снятие последнего имени.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::{Deref, DerefMut},
+};
 
-use filesystem::{FileSystemBackend, NodeId, RamFileSystem};
+use filesystem::{FileSystemBackend, HeapByteStore, NodeId, RamFileSystem as Backend};
 use filesystem_abi::{
     DirCursor, DirEntry, ENTRY_HEADER_SIZE, FileSystemError, Listed, NAME_MAX, NodeKind, PATH_MAX,
     Path,
@@ -33,6 +36,55 @@ const PAYLOAD_MAX: usize = 64;
 const LIST_CAPACITY_MAX: usize = 4 * (ENTRY_HEADER_SIZE + NAME_MAX);
 
 const LIST_BATCHES_MAX: usize = 2 * OPS_MAX;
+
+struct RamFileSystem {
+    backend: Backend,
+    stores: HeapByteStore,
+}
+
+impl RamFileSystem {
+    fn new() -> Self {
+        Self {
+            backend: Backend::new(),
+            stores: HeapByteStore::new(),
+        }
+    }
+
+    fn read_at(&self, node: NodeId, offset: u64, out: &mut [u8]) -> Result<usize, FileSystemError> {
+        self.backend.read_at(&self.stores, node, offset, out)
+    }
+
+    fn write_at(
+        &mut self,
+        node: NodeId,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, FileSystemError> {
+        self.backend.write_at(&mut self.stores, node, offset, data)
+    }
+
+    fn append(&mut self, node: NodeId, data: &[u8]) -> Result<u64, FileSystemError> {
+        self.backend.append(&mut self.stores, node, data)
+    }
+
+    fn set_size(&mut self, node: NodeId, size: u64) -> Result<(), FileSystemError> {
+        self.backend.set_size(&mut self.stores, node, size)
+    }
+}
+
+impl Deref for RamFileSystem {
+    type Target = Backend;
+
+    fn deref(&self) -> &Self::Target {
+        &self.backend
+    }
+}
+
+impl DerefMut for RamFileSystem {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.backend
+    }
+}
 
 struct ModelNode {
     node: NodeId,

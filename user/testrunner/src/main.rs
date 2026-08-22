@@ -10,7 +10,7 @@ use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap};
 use io::writer::Writer;
 use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
-use runtime::{PortTransport, process_exit, thread_exit};
+use runtime::{PortTransport, process_exit};
 use spin::{Mutex, Once};
 use syscall::Handle;
 
@@ -181,5 +181,7 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     let _ = write!(buf, "[TEST-PANIC] {info}");
     send_log_frame(&buf.bytes[..buf.len]);
     log_relay::shutdown_relays();
-    thread_exit(1)
+    // Прогон держит сервисные потоки, и снятия одного паникующего процессу мало:
+    // init ждёт завершения всего процесса.
+    process_exit(1)
 }

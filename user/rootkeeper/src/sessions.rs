@@ -9,10 +9,11 @@ use ipc::{
 };
 use rootkeeper_abi::rootkeeper;
 use runtime::{
-    BorrowedHandle, JoinHandle, OwnedHandle, Port, PortTransport, Priority, Timeout, spawn_owned,
+    BorrowedHandle, Error, JoinHandle, OwnedHandle, Port, PortTransport, Priority, Timeout,
+    spawn_owned,
 };
 use spin::Mutex;
-use syscall::Rights;
+use syscall::{Rights, SyscallError};
 
 const BROKER_STACK: u64 = 0x4000;
 const BROKER_SHUTDOWN_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -78,7 +79,17 @@ impl SessionBroker {
         control: BorrowedHandle<'_>,
         timeout: Timeout,
     ) -> runtime::Result<()> {
-        let control = control.duplicate(Rights::WRITE | Rights::TRANSFER, None)?;
+        // Корень control-порта принадлежит incarnation: отпустивший его компонент отзывает
+        // вместе с ним лиз supervisor, и `bind` по такому лизу закрыт. Место в реестре
+        // держит живой control-порт, а запуск компонента остаётся состоявшимся.
+        let control = match control.duplicate(Rights::WRITE | Rights::TRANSFER, None) {
+            Ok(control) => control,
+            Err(Error::Syscall(SyscallError::Revoked)) => {
+                self.withdraw(index);
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let mut registry = self.registry.lock();
         if let Some(provider) = registry
             .providers
@@ -97,6 +108,13 @@ impl SessionBroker {
             });
         }
         Ok(())
+    }
+
+    pub(crate) fn withdraw(&self, index: u16) {
+        self.registry
+            .lock()
+            .providers
+            .retain(|provider| provider.index != index);
     }
 
     pub(crate) fn shutdown(&mut self) {

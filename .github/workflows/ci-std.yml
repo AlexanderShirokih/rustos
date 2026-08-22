@@ -1,30 +1,21 @@
 name: CI std
 
-# Сборка `std` под таргет Molecular OS стоит дороже остальных проверок: она поднимает
-# core, alloc и саму стандартную библиотеку из исходников. На каждый PR она не нужна —
-# сломать её может только изменение того, из чего она собрана.
-#
-# `paths` в Actions задаётся на workflow, не на джобу, поэтому проверка вынесена из
-# основного `ci.yml` отдельным файлом.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 on:
   pull_request:
     paths:
-      # Сам оверлей и инструмент его наложения.
       - patches/std-molecular.patch
       - xtask/src/std_src.rs
-      # Пин toolchain: бамп сдвигает контексты в патче, и `git apply` перестаёт ложиться.
       - rust-toolchain.toml
-      # Спека таргета, под который собирается программа.
       - targets/aarch64-unknown-molecular.json
-      # Граф зависимостей `std`: крейт платформенного слоя и всё, что объявляет фичу
-      # `rustc-dep-of-std`. Оверлей разбирает их типы по вариантам, и новый вариант ломает
-      # сборку здесь.
       - lib/std-rt/**
       - lib/component-abi/**
       - lib/ipc/**
       - lib/log-abi/**
       - lib/syscall/**
-      # Программа, которой проверка собирает дерево, и настройки её workspace.
       - user/hello-std/**
       - user/Cargo.toml
       - user/.cargo/config.toml
@@ -39,14 +30,19 @@ permissions:
 jobs:
   std:
     name: std (aarch64-unknown-molecular)
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
-      # Оверлей накладывается через `git apply`, а checkout внутри контейнера
-      # оставляет каталог с чужим владельцем.
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: std
       - run: cargo xtask std-src --verify

@@ -489,6 +489,9 @@ fn root_file_system_failure_is_seen_by_the_supervisor() {
     let image = image();
     let bytes = boot_plan();
     let mut system = started(&image, &bytes);
+    // Загрузочное дерево маршрутизатор поднимает сам, и `bring_up` его монтирований не ждёт.
+    // Корневая файловая система, снятая до конца монтирования, уводит и маршрутизатор.
+    drop(await_tree(&system, RAM_MOUNT));
     kernel_tests::kassert!(terminate(&system, 1, ROUTER_EXIT_CODE));
 
     let supervised = system.supervise_turn(relay_thread());

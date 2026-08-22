@@ -332,11 +332,11 @@ impl FileSystemBackend for RamFileSystem {
         node: NodeId,
         size: u64,
     ) -> Result<(), FileSystemError> {
+        let file = self.file_node_mut(node)?;
         if size > FILE_SIZE_MAX {
             return Err(FileSystemError::NoSpace);
         }
         let len = usize::try_from(size).map_err(|_| FileSystemError::NoSpace)?;
-        let file = self.file_node_mut(node)?;
         if matches!(file, File::Backed { capacity, .. } if len > *capacity) {
             return grow(heap_for_growth(file, stores)?, len);
         }

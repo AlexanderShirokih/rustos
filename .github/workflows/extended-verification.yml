@@ -1,5 +1,9 @@
 name: Extended verification
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 on:
   schedule:
     - cron: "0 12 */3 * *"
@@ -27,13 +31,20 @@ env:
 jobs:
   userspace-stress:
     name: userspace stress (QEMU)
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: aarch64
       - run: >-
           cargo xtask stress
           --seed "${{ inputs.stress_seed || '1' }}"
@@ -43,8 +54,18 @@ jobs:
 
   fuzz:
     name: fuzz (${{ matrix.target }})
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -55,9 +76,6 @@ jobs:
           command -v g++ >/dev/null
           || (apt-get update && apt-get install -y --no-install-recommends g++)
       - run: cargo fuzz --version || cargo install cargo-fuzz --locked
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: fuzz
       - uses: actions/cache@v4
         with:
           path: fuzz/corpus/${{ matrix.target }}

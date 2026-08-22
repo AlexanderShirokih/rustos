@@ -37,6 +37,11 @@ use crate::{
 
 const ROOT_RESOURCE_SPAN: NonZeroUsize = NonZeroUsize::new(usize::MAX & !0xFFF).unwrap();
 
+/// Число страниц стека kernel-потока, исполняющего [`run_bootstrap`]. Обобщённый
+/// диспетчер `ipc` держит на стеке два инлайн-кадра контракта разом, и на
+/// операции `acquire_boot_fdt` замеренный high-water доходит до 18392 байт.
+pub const SERVER_STACK_PAGES: usize = 8;
+
 /// Запущенный bootstrap-процесс.
 pub struct BootstrapLaunch {
     pub port: Arc<Port>,
@@ -168,7 +173,8 @@ pub fn spawn_process(
 /// Цикл сервера bootstrap-port: kernel-поток аллоцирует kernel-резидентный
 /// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракт
 /// `Bootstrap`. `_receiver` - capability с `READ`: пока сервер работает, она
-/// держит ядро в множестве получателей порта.
+/// держит ядро в множестве получателей порта. Поток поднимается со стеком
+/// [`SERVER_STACK_PAGES`].
 pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: BootstrapResources) {
     let Some(table) = runtime().current_handle_table() else {
         warn!("bootstrap: no kernel handle-table; server not started");

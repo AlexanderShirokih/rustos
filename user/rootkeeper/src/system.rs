@@ -580,13 +580,22 @@ impl<'a> RootSystem<'a> {
         }
         if generation >= plan.launches() {
             let _ = kernel_log.log_str(LOG_TAG, "component restart limit reached");
-            return give_up(plan, exit_code);
+            return self.give_up(index, plan, exit_code);
         }
-        if self.launch(index).is_err() {
-            let _ = kernel_log.log_str(LOG_TAG, "component not restarted");
-            return give_up(plan, exit_code);
+        if let Err(failure) = self.launch(index) {
+            log_restart_failure(kernel_log, plan.name(), failure);
+            return self.give_up(index, plan, exit_code);
         }
         Supervised::Restarted { exit_code }
+    }
+
+    fn give_up(&self, index: u16, plan: PlanComponent<'_>, exit_code: Option<u32>) -> Supervised {
+        // Смены компоненту больше не будет, и сессию файловой системы он не выдаст.
+        self.broker.withdraw(index);
+        match plan.on_exhausted() {
+            OnExhausted::Halt => Supervised::Stopped(Stopped::Subsystem),
+            OnExhausted::Detach => Supervised::Abandoned { exit_code },
+        }
     }
 }
 
@@ -666,13 +675,6 @@ fn run_composition(
     }
 }
 
-const fn give_up(plan: PlanComponent<'_>, exit_code: Option<u32>) -> Supervised {
-    match plan.on_exhausted() {
-        OnExhausted::Halt => Supervised::Stopped(Stopped::Subsystem),
-        OnExhausted::Detach => Supervised::Abandoned { exit_code },
-    }
-}
-
 fn plan_needs_devices(plan: &BootPlan<'_>) -> bool {
     plan.components().any(|component| {
         component
@@ -747,6 +749,17 @@ fn log_device_conflict(
     )
     .is_ok()
     {
+        let _ = kernel_log.log_str(LOG_TAG, message.as_str());
+    }
+}
+
+fn log_restart_failure(
+    kernel_log: &bootstrap::Client<PortTransport>,
+    component: &str,
+    failure: BootFailure,
+) {
+    let mut message = LogBuffer::<EXIT_MESSAGE_MAX>::new();
+    if write!(message, "{component} not restarted: {}", failure.message()).is_ok() {
         let _ = kernel_log.log_str(LOG_TAG, message.as_str());
     }
 }

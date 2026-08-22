@@ -1,27 +1,33 @@
 name: CI
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 on:
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
 
-# Образ с зафиксированным toolchain + qemu + cargo-binutils/cargo-fuzz собирается отдельным
-# workflow (.github/workflows/ci-image.yml) и публикуется в GHCR как public —
-# поэтому pull анонимный, credentials/packages-права не нужны.
-
-# Наименьшие привилегии для GITHUB_TOKEN: джобам нужен только checkout.
-# Явный read-only нужен на случай, если дефолт Actions в репозитории — read/write
-# (джобы гоняют PR-код и сторонние actions). packages-доступ не требуется —
-# образ public и тянется анонимно.
 permissions:
   contents: read
 
 jobs:
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
       - run: cargo fmt --all --check
@@ -31,43 +37,63 @@ jobs:
 
   check-layers:
     name: check-layers
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
       - run: cargo xtask check-layers
 
   doc:
     name: doc links
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     env:
-      # Ссылка на переименованный или приватный элемент молча пропадает из документации,
-      # оставляя текст, который читателю некуда открыть.
       RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D warnings
     steps:
       - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps --workspace
-      # Отдельный workspace членом корневого не является: `--workspace` его не документирует.
       - run: cargo xtask userland doc --no-deps --workspace
 
   style:
     name: style
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      # Проверка перечисляет файлы через git, а checkout внутри контейнера
-      # оставляет каталог с чужим владельцем.
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: Swatinem/rust-cache@v2
       - run: cargo xtask style --all
-      # Снапшот принятых нарушений сокращается по каждому действующему правилу.
-      # Правило, заведённое этим же изменением, приносит свой долг однократно.
       - name: baseline does not grow
         run: |
           git show "origin/${GITHUB_BASE_REF:-main}:style-baseline.txt" \
@@ -82,28 +108,40 @@ jobs:
 
   clippy-host:
     name: clippy (host)
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: host
       - run: cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --all-targets --all-features -- -D warnings
-      # Отдельный workspace членом корневого не является: `--workspace` его не линтует.
       - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
   clippy-aarch64:
     name: clippy (aarch64)
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: aarch64
       - run: cargo clippy --workspace --exclude xtask --exclude ipc-test --exclude userland-build --exclude style-tool --exclude userland-image-tool --target aarch64-unknown-none -- -D warnings
-      # Отдельные workspace членами корневого не являются: `--workspace` их не линтует.
       - run: cargo xtask userland clippy --workspace --all-targets -- -D warnings
       - run: >-
           cargo clippy --manifest-path lib/std-rt/Cargo.toml
@@ -112,48 +150,79 @@ jobs:
 
   test:
     name: tests (host)
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: host
       - run: cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --all-features
 
   race:
     name: race (ThreadSanitizer)
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      # ThreadSanitizer раскладывает теневую память по фиксированным адресам и снимает ASLR
+      # вызовом personality(), который профиль seccomp по умолчанию запрещает.
+      options: >-
+        --security-opt seccomp=unconfined
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: race
       - run: cargo xtask race
 
   fuzz-build:
     name: fuzz targets (AddressSanitizer)
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
       - run: >-
           command -v g++ >/dev/null
           || (apt-get update && apt-get install -y --no-install-recommends g++)
       - run: cargo fuzz --version || cargo install cargo-fuzz --locked
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: fuzz
       - run: cargo fuzz build --fuzz-dir fuzz
 
   qemu-test:
     name: qemu-test (aarch64)
-    runs-on: ubuntu-latest
-    container: ghcr.io/alexandershirokih/molecular-ci:latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/alexandershirokih/molecular-ci:latest
+      options: >-
+        ${{ vars.CI_RUNNER && format('--volume /usr/local/bin/sccache:/usr/local/bin/sccache:ro
+        --volume /var/cache/ci/sccache:/sccache
+        --volume /var/cache/ci/target/{0}:/target
+        --env RUSTC_WRAPPER=/usr/local/bin/sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: aarch64
       - run: cargo xtask qemu-test
