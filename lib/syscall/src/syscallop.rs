@@ -228,6 +228,14 @@ pub enum SyscallOp {
     /// Возвращает `region_handle`.
     MemoryCreateVirtual = 0x60,
 
+    /// Деривация региона поверх того же PA с другим профилем памяти. Аргументы:
+    ///  - `arg0=region_handle` (требует `Rights::DUPLICATE`),
+    ///  - `arg1=profile_raw` (см. `MemoryProfile`).
+    ///
+    /// Профиль меняется в пределах некэшируемых: кэшируемый регион и переход к
+    /// нему отвергаются как `InvalidArgument`. Возвращает `region_handle`.
+    MemoryWithProfile = 0x61,
+
     /// Деривация узкого под-региона из Memory-региона. Аргументы:
     ///  - `arg0=region_handle` (требует `Rights::DUPLICATE`),
     ///  - `arg1=offset` (выровнен на страницу),
@@ -327,6 +335,7 @@ impl SyscallOp {
             0x55 => Some(Self::ThreadIpcBufferAddr),
             0x56 => Some(Self::ThreadYield),
             0x60 => Some(Self::MemoryCreateVirtual),
+            0x61 => Some(Self::MemoryWithProfile),
             0x62 => Some(Self::MemorySlice),
             0x63 => Some(Self::MemoryMap),
             0x64 => Some(Self::MemoryRemap),
@@ -383,8 +392,11 @@ mod tests {
             SyscallOp::from_raw(0x60),
             Some(SyscallOp::MemoryCreateVirtual)
         );
+        assert_eq!(
+            SyscallOp::from_raw(0x61),
+            Some(SyscallOp::MemoryWithProfile)
+        );
         assert_eq!(SyscallOp::from_raw(0x62), Some(SyscallOp::MemorySlice));
-        assert_eq!(SyscallOp::from_raw(0x61), None);
         assert_eq!(SyscallOp::from_raw(0x63), Some(SyscallOp::MemoryMap));
         assert_eq!(SyscallOp::from_raw(0x64), Some(SyscallOp::MemoryRemap));
         assert_eq!(SyscallOp::from_raw(0x65), Some(SyscallOp::MemoryAllocate));
@@ -407,7 +419,6 @@ mod tests {
         assert_eq!(SyscallOp::from_raw(3), None);
         assert_eq!(SyscallOp::from_raw(0x32), None);
         assert_eq!(SyscallOp::from_raw(0x57), None);
-        assert_eq!(SyscallOp::from_raw(0x61), None);
         assert_eq!(SyscallOp::from_raw(0x68), None);
         assert_eq!(SyscallOp::from_raw(0x6F), None);
         assert_eq!(SyscallOp::from_raw(0x49), None);

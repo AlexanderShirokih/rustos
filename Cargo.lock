@@ -523,6 +523,7 @@ version = "0.1.0"
 dependencies = [
  "collections",
  "spin",
+ "syscall",
 ]
 
 [[package]]

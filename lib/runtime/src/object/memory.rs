@@ -11,7 +11,7 @@ const _: () = assert!(
 use bootstrap_abi::DeviceWindow;
 use io::mmio::Mmio;
 use ipc::wire::Cap;
-use syscall::{MemoryAccess, SIGNALED, SyscallError, Timeout, UserMemFlags};
+use syscall::{MemoryAccess, MemoryProfile, SIGNALED, SyscallError, Timeout, UserMemFlags};
 
 use crate::{
     error::{Error, Result, unit, value},
@@ -26,7 +26,11 @@ const WORD: usize = mem::size_of::<u64>();
 
 fn head_len(base: *const u8, len: usize) -> usize {
     let offset = base.align_offset(WORD);
-    if offset == usize::MAX { len } else { offset.min(len) }
+    if offset == usize::MAX {
+        len
+    } else {
+        offset.min(len)
+    }
 }
 
 #[allow(clippy::cast_ptr_alignment)]
@@ -65,6 +69,8 @@ pub struct RegionInfo {
     pub base: u64,
     /// Backing региона.
     pub kind: RegionKind,
+    /// Профиль работы с памятью региона.
+    pub profile: MemoryProfile,
     /// Маска доступа региона.
     pub access: MemoryAccess,
 }
@@ -236,17 +242,28 @@ impl MemoryRegion {
             .map_err(Error::Syscall)
     }
 
+    /// Деривация региона поверх того же PA с профилем `profile`. Профиль
+    /// меняется в пределах некэшируемых. Требует `DUPLICATE` на хэндле региона.
+    pub fn with_profile(&self, profile: MemoryProfile) -> Result<MemoryRegion> {
+        svc::memory_with_profile(self.handle.as_raw(), profile.raw())
+            .map(|handle| MemoryRegion::from_handle(OwnedHandle::from_handle(handle)))
+            .map_err(Error::Syscall)
+    }
+
     /// Декодирует сырой возврат `memory_region_inspect` в [`RegionInfo`].
     pub fn inspect(&self) -> Result<RegionInfo> {
         let (size, secondary) = svc::memory_region_inspect(self.handle.as_raw());
         let size_bytes = value(size)?;
         let base = secondary & !0xFFF;
         let kind = RegionKind::from_tag((secondary >> 3) & 0x3);
+        let profile = MemoryProfile::from_raw((secondary >> 5) & 0x3)
+            .map_err(|_| Error::Syscall(SyscallError::InvalidArgument))?;
         let access = MemoryAccess::from_bits_truncate(secondary);
         Ok(RegionInfo {
             size_bytes,
             base,
             kind,
+            profile,
             access,
         })
     }

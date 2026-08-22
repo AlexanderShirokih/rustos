@@ -7,7 +7,7 @@ use drivers_common::services::mmio::{
 };
 use memory::{
     AccessMask, MemFlags, MemoryRegion, PAGE_SIZE,
-    mem_flags::{AccessMode, DeviceMemoryPermission, Owners},
+    mem_flags::{AccessMode, Owners, UncachedPermission},
     memory_mapper::MemoryMapper,
     physical_address::PageAlignedAddress,
     range_allocator::RangeAllocator,
@@ -42,7 +42,7 @@ impl MmioService for MmioServiceImpl {
     fn map_mmio(
         &self,
         address: MmioAddress,
-        permissions: Owners<DeviceMemoryPermission>,
+        permissions: Owners<UncachedPermission>,
     ) -> Result<MmioBound, MmioMapError> {
         let target_address = PageAlignedAddress::from_usize(address.base())
             .ok_or_else(|| MmioMapError("Mmio address is not aligned to 4K boundary".into()))?;
@@ -93,7 +93,7 @@ impl MmioService for MmioServiceImpl {
     }
 }
 
-fn access_mask_for_device(permissions: Owners<DeviceMemoryPermission>) -> AccessMask {
+fn access_mask_for_device(permissions: Owners<UncachedPermission>) -> AccessMask {
     match (permissions.kernel.access, permissions.user.access) {
         (AccessMode::Writable, _) | (_, AccessMode::Writable) => AccessMask::RW,
         (AccessMode::Readonly, _) | (_, AccessMode::Readonly) => AccessMask::R,
@@ -215,7 +215,7 @@ mod tests {
         let bound = service
             .map_mmio(
                 address,
-                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+                Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .expect("mmio mapping must succeed");
 
@@ -238,7 +238,9 @@ mod tests {
                 AccessMode::Writable => {}
                 _ => panic!("kernel MMIO mapping must remain writable"),
             },
-            MemFlags::Private(_) => panic!("mmio mapping must use device flags"),
+            MemFlags::Cached(_) | MemFlags::WriteCombining(_) => {
+                panic!("mmio mapping must use device flags")
+            }
         }
         drop(maps);
 
@@ -262,7 +264,7 @@ mod tests {
         let bound = service
             .map_mmio(
                 address,
-                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+                Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .expect("mmio mapping must succeed");
 
@@ -292,7 +294,7 @@ mod tests {
         let first = service
             .map_mmio(
                 address,
-                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+                Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .expect("first mmio mapping must succeed");
         let first_va = PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap();
@@ -301,7 +303,7 @@ mod tests {
         let second = service
             .map_mmio(
                 address,
-                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+                Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .expect("second mmio mapping must reuse freed VA");
 
@@ -360,10 +362,10 @@ mod tests {
         }
     }
 
-    fn user_owners(access: AccessMode) -> Owners<DeviceMemoryPermission> {
+    fn user_owners(access: AccessMode) -> Owners<UncachedPermission> {
         Owners {
-            kernel: DeviceMemoryPermission::default(),
-            user: DeviceMemoryPermission { access },
+            kernel: UncachedPermission::default(),
+            user: UncachedPermission { access },
         }
     }
 
@@ -377,7 +379,7 @@ mod tests {
         );
 
         let address = MmioAddress::new(0x0c17_0000, 0x1000).unwrap();
-        let perms = Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable());
+        let perms = Owners::<UncachedPermission>::kernel(UncachedPermission::writable());
 
         let Err(err) = service.map_mmio(address, perms) else {
             panic!("install must fail");
@@ -412,7 +414,7 @@ mod tests {
         let address = MmioAddress::new(0x0c17_0001, 0x1000).unwrap();
         let Err(err) = service.map_mmio(
             address,
-            Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+            Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
         ) else {
             panic!("unaligned MMIO base must be rejected");
         };
@@ -427,7 +429,7 @@ mod tests {
         let address = MmioAddress::new(0x0c17_0000, 0).unwrap();
         let Err(err) = service.map_mmio(
             address,
-            Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+            Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
         ) else {
             panic!("zero-size MMIO must be rejected");
         };
@@ -439,8 +441,8 @@ mod tests {
     fn access_mask_for_device_covers_kernel_user_readonly_and_none() {
         // Любой Writable (kernel или user) -> RW.
         assert_eq!(
-            access_mask_for_device(Owners::<DeviceMemoryPermission>::kernel(
-                DeviceMemoryPermission::writable()
+            access_mask_for_device(Owners::<UncachedPermission>::kernel(
+                UncachedPermission::writable()
             ))
             .bits(),
             AccessMask::RW.bits()
@@ -451,8 +453,8 @@ mod tests {
         );
         // Readonly без Writable -> R.
         assert_eq!(
-            access_mask_for_device(Owners::<DeviceMemoryPermission>::kernel(
-                DeviceMemoryPermission::readonly()
+            access_mask_for_device(Owners::<UncachedPermission>::kernel(
+                UncachedPermission::readonly()
             ))
             .bits(),
             AccessMask::R.bits()

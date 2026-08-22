@@ -37,13 +37,14 @@ pub use startup::receive_startup;
 pub use svc::{
     handle_close, handle_duplicate, ipc_buffer_addr, irq_ack, irq_mint, memory_allocate,
     memory_create_virtual, memory_free, memory_map, memory_region_inspect, memory_remap,
-    memory_slice, port_call, port_create, port_recv, port_reply, port_send, process_create,
-    process_exit, process_exit_code, process_load_image, process_resource_self, process_self,
-    process_start, process_terminate, signal_create, signal_set, signal_wait_many, signal_wait_one,
-    thread_create, thread_exit, thread_exit_code, thread_self, thread_terminate, thread_yield,
+    memory_slice, memory_with_profile, port_call, port_create, port_recv, port_reply, port_send,
+    process_create, process_exit, process_exit_code, process_load_image, process_resource_self,
+    process_self, process_start, process_terminate, signal_create, signal_set, signal_wait_many,
+    signal_wait_one, thread_create, thread_exit, thread_exit_code, thread_self, thread_terminate,
+    thread_yield,
 };
 pub use sync::{Condvar, Mutex, MutexGuard};
-pub use syscall::{MemoryAccess, Timeout, UserMemFlags};
+pub use syscall::{MemoryAccess, MemoryProfile, Timeout, UserMemFlags};
 
 #[global_allocator]
 static PROCESS_HEAP: heap::ProcessHeap = heap::ProcessHeap::new();

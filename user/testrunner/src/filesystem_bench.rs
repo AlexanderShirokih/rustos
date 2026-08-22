@@ -151,9 +151,13 @@ fn bench_ramfs_promoted_plane() {
     let client = connect(&capability);
     let _buffer = acquire(&client);
 
-    for (name, size) in ["/bench-promoted-a", "/bench-promoted-b", "/bench-promoted-c"]
-        .into_iter()
-        .zip(SIZES)
+    for (name, size) in [
+        "/bench-promoted-a",
+        "/bench-promoted-b",
+        "/bench-promoted-c",
+    ]
+    .into_iter()
+    .zip(SIZES)
     {
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::CREATE);
         // Ёмкость закрепляется по длине на момент выдачи: файл наполняется до неё заранее.
@@ -185,9 +189,13 @@ fn bench_ramfs_imported_plane() {
     let _buffer = acquire(&client);
     let resource = Resource::self_resource().expect("self resource");
 
-    for (name, size) in ["/bench-imported-a", "/bench-imported-b", "/bench-imported-c"]
-        .into_iter()
-        .zip(SIZES)
+    for (name, size) in [
+        "/bench-imported-a",
+        "/bench-imported-b",
+        "/bench-imported-c",
+    ]
+    .into_iter()
+    .zip(SIZES)
     {
         let bytes = (size as u64).div_ceil(USERLAND_PAGE_SIZE) * USERLAND_PAGE_SIZE;
         let region = resource

@@ -7,6 +7,8 @@ use memory::{
     mem_flags::{AccessMode, Executable, Owners},
 };
 
+use crate::memory_attribute::MemoryAttribute;
+
 /// Атрибуты памяти страницы/блока.
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -25,9 +27,6 @@ const AF_BIT: u64 = 1 << 10;
 const NG_BIT: u64 = 1 << 11;
 const PXN_BIT: u64 = 1 << 53;
 const UXN_BIT: u64 = 1 << 54;
-
-const ATTR_INDEX_NORMAL: u8 = 0;
-const ATTR_INDEX_DEVICE: u8 = 1;
 
 /// Режим совместного доступа к памяти (SH).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -108,16 +107,24 @@ impl Aarch64MemFlags {
 
     pub const fn from_memflags(flag: MemFlags) -> Self {
         match flag {
-            MemFlags::Private(Owners { kernel, user }) => Aarch64MemFlags::new()
-                .attr_index(ATTR_INDEX_NORMAL)
+            MemFlags::Cached(Owners { kernel, user }) => Aarch64MemFlags::new()
+                .attr_index(MemoryAttribute::Cached.index())
                 .sh(Shareability::Inner)
                 .ap(Self::map_access_flags(kernel.access, user.access))
                 .af(true)
                 .pxn(matches!(kernel.executable, Executable::NotAllowed))
                 .uxn(matches!(user.executable, Executable::NotAllowed)),
 
+            MemFlags::WriteCombining(Owners { kernel, user }) => Aarch64MemFlags::new()
+                .attr_index(MemoryAttribute::WriteCombining.index())
+                .sh(Shareability::Inner)
+                .ap(Self::map_access_flags(kernel.access, user.access))
+                .af(true)
+                .pxn(true)
+                .uxn(true),
+
             MemFlags::Device(Owners { kernel, user }) => Aarch64MemFlags::new()
-                .attr_index(ATTR_INDEX_DEVICE)
+                .attr_index(MemoryAttribute::Device.index())
                 .sh(Shareability::Inner)
                 .ap(Self::map_access_flags(kernel.access, user.access))
                 .af(true)

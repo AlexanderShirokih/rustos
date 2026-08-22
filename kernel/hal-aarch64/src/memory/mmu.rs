@@ -5,7 +5,6 @@ use memory::physical_address::PhysicalAddress;
 use crate::memory::regs::{
     common::{EL1, ExceptionLevel},
     id_aa64mmfr0::{AsidWidth, IdAa64Mmfr0},
-    mair,
     mair::MemoryAttributeIndirectionRegister,
     sctlr,
     sctlr::SystemControlRegister,
@@ -27,16 +26,6 @@ pub trait MmuConfig {
 
     /// Физический адрес корня таблиц страниц для верхней половины адресного пространства.
     fn higher_half_config(&self, asid_width: AsidWidth) -> AddressSpaceConfig<HigherHalf>;
-
-    /// Свойства памяти для обычной памяти (RAM)
-    fn normal_memory_config(&self) -> mair::NormalAttr {
-        mair::NormalAttr::WbRaWa
-    }
-
-    /// Свойства памяти для памяти устройств (MMIO)
-    fn device_memory_config(&self) -> mair::DeviceAttr {
-        mair::DeviceAttr::NgNre
-    }
 
     /// Конфигурация блока MMU
     fn mmu_config(&self) -> sctlr::SctlrBits {
@@ -116,10 +105,7 @@ impl Mmu<EL1> {
         Self::full_system_barrier();
 
         // 2) Запись слотов атрибутов памяти
-        Mair::set(mair::MairBits::combine(&[
-            mair::MairEntry::Normal(config.normal_memory_config()), // слот #0
-            mair::MairEntry::Device(config.device_memory_config()), // слот #1
-        ]));
+        Mair::set();
 
         // 3) Runtime-detect ширины ASID для TCR.AS. Глобальный аллокатор тегов
         // здесь не трогается: этот путь проходит каждый CPU, а аллокатор -

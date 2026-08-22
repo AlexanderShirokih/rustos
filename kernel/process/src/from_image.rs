@@ -104,7 +104,7 @@ mod tests {
 
     fn user_perms(flags: MemFlags) -> (bool, bool, bool) {
         match flags {
-            MemFlags::Private(owners) => (
+            MemFlags::Cached(owners) => (
                 matches!(
                     owners.user.access,
                     AccessMode::Readonly | AccessMode::Writable
@@ -112,7 +112,7 @@ mod tests {
                 matches!(owners.user.access, AccessMode::Writable),
                 matches!(owners.user.executable, Executable::Allowed),
             ),
-            MemFlags::Device(_) => (false, false, false),
+            MemFlags::WriteCombining(_) | MemFlags::Device(_) => (false, false, false),
         }
     }
 

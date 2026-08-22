@@ -5,7 +5,7 @@ use core::fmt::{Display, Formatter};
 
 use io::mmio::{Reg, VolatileInt};
 use memory::{
-    mem_flags::{DeviceMemoryPermission, Owners},
+    mem_flags::{Owners, UncachedPermission},
     virtual_address::PageAlignedVirtualAddress,
 };
 
@@ -146,7 +146,7 @@ pub trait MmioService: Send + Sync {
     fn map_mmio(
         &self,
         address: MmioAddress,
-        permissions: Owners<DeviceMemoryPermission>,
+        permissions: Owners<UncachedPermission>,
     ) -> Result<MmioBound, MmioMapError>;
 }
 

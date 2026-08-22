@@ -118,9 +118,11 @@ impl StoreTable {
         access: impl FnOnce(&Mapping) -> Result<T, FileSystemError>,
     ) -> Result<T, FileSystemError> {
         match self.store(id)? {
-            Store::Owned { mapping, .. } | Store::Imported { mapping: Some(mapping), .. } => {
-                access(mapping)
-            }
+            Store::Owned { mapping, .. }
+            | Store::Imported {
+                mapping: Some(mapping),
+                ..
+            } => access(mapping),
             Store::Initial(region) | Store::Imported { region, .. } => {
                 let mapping = region.map_full(flags).map_err(no_space)?;
                 access(&mapping)

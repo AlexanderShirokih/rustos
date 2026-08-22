@@ -7,6 +7,43 @@ pub enum AccessMode {
     Writable,
 }
 
+#[derive(Copy, Clone)]
+pub enum Executable {
+    Allowed,
+    NotAllowed,
+}
+
+/// Права владельца на кэшируемую память.
+#[derive(Copy, Clone)]
+pub struct CachedPermission {
+    pub access: AccessMode,
+    pub executable: Executable,
+}
+
+/// Права владельца на память вне кэша процессора. Исполнение не представимо.
+#[derive(Copy, Clone)]
+pub struct UncachedPermission {
+    pub access: AccessMode,
+}
+
+/// Права ядра и процесса на один и тот же диапазон.
+#[derive(Copy, Clone)]
+pub struct Owners<T: Default + Copy> {
+    pub kernel: T,
+    pub user: T,
+}
+
+/// Атрибуты страницы: профиль работы с памятью и права владельцев.
+#[derive(Copy, Clone)]
+pub enum MemFlags {
+    /// Кэшируемая память с обратной записью.
+    Cached(Owners<CachedPermission>),
+    /// Некэшируемая память с объединением записей.
+    WriteCombining(Owners<UncachedPermission>),
+    /// Регистры устройства.
+    Device(Owners<UncachedPermission>),
+}
+
 impl Display for AccessMode {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -15,12 +52,6 @@ impl Display for AccessMode {
             AccessMode::Writable => f.write_str("RW"),
         }
     }
-}
-
-#[derive(Copy, Clone)]
-pub enum Executable {
-    Allowed,
-    NotAllowed,
 }
 
 impl Display for Executable {
@@ -32,13 +63,7 @@ impl Display for Executable {
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct PrivateMemoryPermission {
-    pub access: AccessMode,
-    pub executable: Executable,
-}
-
-impl Default for PrivateMemoryPermission {
+impl Default for CachedPermission {
     fn default() -> Self {
         Self {
             access: AccessMode::None,
@@ -47,12 +72,7 @@ impl Default for PrivateMemoryPermission {
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct DeviceMemoryPermission {
-    pub access: AccessMode,
-}
-
-impl DeviceMemoryPermission {
+impl UncachedPermission {
     pub const fn readonly() -> Self {
         Self {
             access: AccessMode::Readonly,
@@ -66,13 +86,7 @@ impl DeviceMemoryPermission {
     }
 }
 
-impl Display for DeviceMemoryPermission {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "[DMA: {}]", self.access)
-    }
-}
-
-impl Default for DeviceMemoryPermission {
+impl Default for UncachedPermission {
     fn default() -> Self {
         Self {
             access: AccessMode::None,
@@ -80,15 +94,9 @@ impl Default for DeviceMemoryPermission {
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct Owners<T: Default + Copy> {
-    pub kernel: T,
-    pub user: T,
-}
-
-impl<T: Default + Copy + Display> Display for Owners<T> {
+impl Display for UncachedPermission {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "[kernel: {}; user: {}]", self.kernel, self.user)
+        write!(f, "{}", self.access)
     }
 }
 
@@ -101,22 +109,23 @@ impl<T: Default + Copy> Owners<T> {
     }
 }
 
-#[derive(Copy, Clone)]
-pub enum MemFlags {
-    Private(Owners<PrivateMemoryPermission>),
-    Device(Owners<DeviceMemoryPermission>),
+impl<T: Default + Copy + Display> Display for Owners<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        write!(f, "[kernel: {}; user: {}]", self.kernel, self.user)
+    }
 }
 
 impl MemFlags {
-    /// User read-only, без исполнения. Kernel-режим не имеет прав через user-mapping -
-    /// для kernel-side доступа используйте линейную карту higher-half.
+    /// User read-only, без исполнения. Kernel-режим не имеет прав через
+    /// user-mapping - для kernel-side доступа используйте линейную карту
+    /// higher-half.
     pub const fn user_ro() -> Self {
-        MemFlags::Private(Owners {
-            kernel: PrivateMemoryPermission {
+        MemFlags::Cached(Owners {
+            kernel: CachedPermission {
                 access: AccessMode::None,
                 executable: Executable::NotAllowed,
             },
-            user: PrivateMemoryPermission {
+            user: CachedPermission {
                 access: AccessMode::Readonly,
                 executable: Executable::NotAllowed,
             },
@@ -125,12 +134,12 @@ impl MemFlags {
 
     /// User read/write, без исполнения.
     pub const fn user_rw() -> Self {
-        MemFlags::Private(Owners {
-            kernel: PrivateMemoryPermission {
+        MemFlags::Cached(Owners {
+            kernel: CachedPermission {
                 access: AccessMode::None,
                 executable: Executable::NotAllowed,
             },
-            user: PrivateMemoryPermission {
+            user: CachedPermission {
                 access: AccessMode::Writable,
                 executable: Executable::NotAllowed,
             },
@@ -139,12 +148,12 @@ impl MemFlags {
 
     /// User read + execute (для исполняемых сегментов user-кода).
     pub const fn user_rx() -> Self {
-        MemFlags::Private(Owners {
-            kernel: PrivateMemoryPermission {
+        MemFlags::Cached(Owners {
+            kernel: CachedPermission {
                 access: AccessMode::None,
                 executable: Executable::NotAllowed,
             },
-            user: PrivateMemoryPermission {
+            user: CachedPermission {
                 access: AccessMode::Readonly,
                 executable: Executable::Allowed,
             },
@@ -154,12 +163,12 @@ impl MemFlags {
     /// Kernel read/write, без исполнения, без user-доступа. Использует
     /// kernel-heap для собственной арены и любые kernel-only данные.
     pub const fn kernel_rw() -> Self {
-        MemFlags::Private(Owners {
-            kernel: PrivateMemoryPermission {
+        MemFlags::Cached(Owners {
+            kernel: CachedPermission {
                 access: AccessMode::Writable,
                 executable: Executable::NotAllowed,
             },
-            user: PrivateMemoryPermission {
+            user: CachedPermission {
                 access: AccessMode::None,
                 executable: Executable::NotAllowed,
             },
@@ -171,17 +180,17 @@ impl MemFlags {
 mod tests {
     use super::*;
 
-    fn private_perms(flags: &MemFlags) -> &Owners<PrivateMemoryPermission> {
+    fn cached_perms(flags: &MemFlags) -> &Owners<CachedPermission> {
         match flags {
-            MemFlags::Private(p) => p,
-            MemFlags::Device(_) => panic!("expected Private flags"),
+            MemFlags::Cached(p) => p,
+            MemFlags::WriteCombining(_) | MemFlags::Device(_) => panic!("expected Cached flags"),
         }
     }
 
     #[test]
     fn user_ro_grants_only_user_read() {
         let flags = MemFlags::user_ro();
-        let p = private_perms(&flags);
+        let p = cached_perms(&flags);
         assert!(matches!(p.kernel.access, AccessMode::None));
         assert!(matches!(p.kernel.executable, Executable::NotAllowed));
         assert!(matches!(p.user.access, AccessMode::Readonly));
@@ -191,7 +200,7 @@ mod tests {
     #[test]
     fn user_rw_grants_user_write_no_exec() {
         let flags = MemFlags::user_rw();
-        let p = private_perms(&flags);
+        let p = cached_perms(&flags);
         assert!(matches!(p.kernel.access, AccessMode::None));
         assert!(matches!(p.user.access, AccessMode::Writable));
         assert!(matches!(p.user.executable, Executable::NotAllowed));
@@ -200,7 +209,7 @@ mod tests {
     #[test]
     fn user_rx_grants_user_read_and_exec() {
         let flags = MemFlags::user_rx();
-        let p = private_perms(&flags);
+        let p = cached_perms(&flags);
         assert!(matches!(p.kernel.access, AccessMode::None));
         assert!(matches!(p.user.access, AccessMode::Readonly));
         assert!(matches!(p.user.executable, Executable::Allowed));
@@ -213,7 +222,7 @@ mod tests {
             MemFlags::user_rw(),
             MemFlags::user_rx(),
         ] {
-            let p = private_perms(&flags);
+            let p = cached_perms(&flags);
             assert!(matches!(p.kernel.access, AccessMode::None));
             assert!(matches!(p.kernel.executable, Executable::NotAllowed));
         }
@@ -222,7 +231,7 @@ mod tests {
     #[test]
     fn kernel_rw_grants_only_kernel_write_no_exec() {
         let flags = MemFlags::kernel_rw();
-        let p = private_perms(&flags);
+        let p = cached_perms(&flags);
         assert!(matches!(p.kernel.access, AccessMode::Writable));
         assert!(matches!(p.kernel.executable, Executable::NotAllowed));
         assert!(matches!(p.user.access, AccessMode::None));

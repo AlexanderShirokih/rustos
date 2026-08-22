@@ -188,7 +188,7 @@ mod tests {
     use std::sync::Mutex;
 
     use io::writer::Writer;
-    use memory::mem_flags::{DeviceMemoryPermission, Owners};
+    use memory::mem_flags::{Owners, UncachedPermission};
 
     use super::*;
     use crate::services::{
@@ -206,7 +206,7 @@ mod tests {
         fn map_mmio(
             &self,
             _address: MmioAddress,
-            _permissions: Owners<DeviceMemoryPermission>,
+            _permissions: Owners<UncachedPermission>,
         ) -> Result<MmioBound, MmioMapError> {
             let cleanup = Box::new(|_, _| {});
             Ok(MmioBound::new(

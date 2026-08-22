@@ -550,7 +550,7 @@ where
 
         let user_exec = matches!(
             &flags,
-            MemFlags::Private(p) if matches!(
+            MemFlags::Cached(p) if matches!(
                 p.user.executable,
                 memory::mem_flags::Executable::Allowed
             )

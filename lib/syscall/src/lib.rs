@@ -9,6 +9,7 @@ mod handle;
 mod ipc_buffer;
 mod irq;
 mod memory;
+mod profile;
 mod resource;
 mod rights;
 mod signal;
@@ -24,6 +25,7 @@ pub use ipc_buffer::{
 };
 pub use irq::IrqTrigger;
 pub use memory::{MemoryAccess, PAGE_SIZE, USER_VA_END};
+pub use profile::{InvalidMemoryProfile, MemoryProfile};
 pub use resource::MAX_RESOURCE_DEPTH;
 pub use rights::Rights;
 pub use signal::{SIGNALED, WakeCount};

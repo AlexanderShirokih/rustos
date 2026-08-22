@@ -7,6 +7,7 @@ use core::{
 };
 
 use spin::Mutex;
+use syscall::MemoryProfile;
 
 use crate::{
     MemFlags,
@@ -54,11 +55,11 @@ pub trait BudgetRefund: Send + Sync {
     fn refund(&self);
 }
 
-/// Тип памяти региона
+/// Отказ смены профиля региона ([`MemoryRegion::with_profile`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryType {
-    Normal,
-    Device,
+pub enum ProfileChangeError {
+    /// Кэшируемый регион профиля не меняет.
+    CachedIsFixed,
 }
 
 /// PA-бэкинг региона.
@@ -69,11 +70,11 @@ pub enum MemoryBacking {
         first: usize,
     },
 
-    /// Фиксированный PA-диапазон: PA не принадлежит региону. `memory_type`
-    /// различает Device-MMIO и обычную cacheable RAM.
+    /// Фиксированный PA-диапазон: PA не принадлежит региону. `profile`
+    /// различает регистры устройства, некэшируемое окно и cacheable RAM.
     Physical {
         pa_base: PageAlignedAddress,
-        memory_type: MemoryType,
+        profile: MemoryProfile,
     },
 }
 
@@ -153,7 +154,7 @@ impl MemoryRegion {
             !access.allows(AccessMask::X),
             "device memory cannot be executable"
         );
-        Self::create_physical(pa_base, size, access, MemoryType::Device)
+        Self::create_physical(pa_base, size, access, MemoryProfile::Device)
     }
 
     /// Регион поверх фиксированного PA-диапазона обычной cacheable RAM.
@@ -162,23 +163,39 @@ impl MemoryRegion {
         size: NonZeroUsize,
         access: AccessMask,
     ) -> Self {
-        Self::create_physical(pa_base, size, access, MemoryType::Normal)
+        Self::create_physical(pa_base, size, access, MemoryProfile::Cached)
     }
 
     fn create_physical(
         pa_base: PageAlignedAddress,
         size: NonZeroUsize,
         access: AccessMask,
-        memory_type: MemoryType,
+        profile: MemoryProfile,
     ) -> Self {
         Self {
-            backing: MemoryBacking::Physical {
-                pa_base,
-                memory_type,
-            },
+            backing: MemoryBacking::Physical { pa_base, profile },
             size_bytes: size.get(),
             access_mask: access,
             refund: None,
+        }
+    }
+
+    /// Возвращает регион поверх того же PA-диапазона с профилем `profile`.
+    /// Профиль меняется в пределах [`MemoryProfile::WriteCombining`] и
+    /// [`MemoryProfile::Device`]. Результат разделяет владение бэкингом с
+    /// исходным регионом и отдельного `refund` не несёт.
+    pub fn with_profile(&self, profile: MemoryProfile) -> Result<Self, ProfileChangeError> {
+        match self.backing {
+            MemoryBacking::Physical {
+                pa_base,
+                profile: current,
+            } if current != MemoryProfile::Cached && profile != MemoryProfile::Cached => Ok(Self {
+                backing: MemoryBacking::Physical { pa_base, profile },
+                size_bytes: self.size_bytes,
+                access_mask: self.access_mask,
+                refund: None,
+            }),
+            _ => Err(ProfileChangeError::CachedIsFixed),
         }
     }
 
@@ -206,16 +223,13 @@ impl MemoryRegion {
         }
 
         match &self.backing {
-            MemoryBacking::Physical {
-                pa_base,
-                memory_type,
-            } => {
+            MemoryBacking::Physical { pa_base, profile } => {
                 let sub_pa = pa_base
                     .as_usize()
                     .checked_add(offset_bytes)
                     .and_then(PageAlignedAddress::from_usize)
                     .ok_or(RegionSliceError::OutOfBounds)?;
-                Ok(Self::create_physical(sub_pa, size, access, *memory_type))
+                Ok(Self::create_physical(sub_pa, size, access, *profile))
             }
             MemoryBacking::Virtual { owner, first } => Ok(Self {
                 backing: MemoryBacking::Virtual {
@@ -306,12 +320,12 @@ impl MemoryRegion {
         }
     }
 
-    /// Тип памяти региона. `Virtual` всегда `Normal`. Для `Physical` хранится в
-    /// бэкинге.
-    pub fn memory_type(&self) -> MemoryType {
+    /// Профиль работы с памятью региона. `Virtual` всегда `Cached`. Для
+    /// `Physical` хранится в бэкинге.
+    pub fn profile(&self) -> MemoryProfile {
         match self.backing {
-            MemoryBacking::Virtual { .. } => MemoryType::Normal,
-            MemoryBacking::Physical { memory_type, .. } => memory_type,
+            MemoryBacking::Virtual { .. } => MemoryProfile::Cached,
+            MemoryBacking::Physical { profile, .. } => profile,
         }
     }
 
@@ -618,14 +632,14 @@ mod tests {
             nz(0x4000),
             AccessMask::RW,
         );
-        assert_eq!(region.memory_type(), MemoryType::Device);
+        assert_eq!(region.profile(), MemoryProfile::Device);
         let sub = region
             .slice(0x1000, nz(0x1000), AccessMask::R)
             .expect("in-bounds slice with subset access");
         assert_eq!(sub.kind_tag(), 2);
         assert_eq!(sub.size_bytes(), 0x1000);
         assert_eq!(sub.access_mask().bits(), AccessMask::R.bits());
-        assert_eq!(sub.memory_type(), MemoryType::Device);
+        assert_eq!(sub.profile(), MemoryProfile::Device);
         match &sub.backing {
             MemoryBacking::Physical { pa_base, .. } => assert_eq!(pa_base.as_usize(), 0x4000_1000),
             MemoryBacking::Virtual { .. } => panic!("physical slice must stay physical"),
@@ -633,27 +647,137 @@ mod tests {
     }
 
     #[test]
-    fn create_physical_normal_is_normal_type() {
+    fn create_physical_normal_is_cached_profile() {
         let region = MemoryRegion::create_physical_normal(
             aligned_pa(0x4000_0000),
             nz(0x1000),
             AccessMask::R,
         );
-        assert_eq!(region.memory_type(), MemoryType::Normal);
+        assert_eq!(region.profile(), MemoryProfile::Cached);
     }
 
     #[test]
-    fn create_physical_device_stays_device_type() {
+    fn create_physical_device_stays_device_profile() {
         let region = MemoryRegion::create_physical_device(
             aligned_pa(0x4000_0000),
             nz(0x1000),
             AccessMask::R,
         );
-        assert_eq!(region.memory_type(), MemoryType::Device);
+        assert_eq!(region.profile(), MemoryProfile::Device);
     }
 
     #[test]
-    fn slice_physical_normal_preserves_normal_type() {
+    fn with_profile_moves_between_uncached_profiles() {
+        let region = MemoryRegion::create_physical_device(
+            aligned_pa(0x4000_0000),
+            nz(0x2000),
+            AccessMask::RW,
+        );
+        let combining = region
+            .with_profile(MemoryProfile::WriteCombining)
+            .expect("device window accepts write-combining");
+        assert_eq!(combining.profile(), MemoryProfile::WriteCombining);
+        assert_eq!(combining.physical_base(), region.physical_base());
+        assert_eq!(combining.size_bytes(), region.size_bytes());
+        assert_eq!(combining.access_mask(), region.access_mask());
+
+        let back = combining
+            .with_profile(MemoryProfile::Device)
+            .expect("write-combining window returns to device registers");
+        assert_eq!(back.profile(), MemoryProfile::Device);
+    }
+
+    // Regression guard: фреймы кэшируемого региона несёт линейная карта ядра,
+    // и второе отображение с иным кэшированием теряет когерентность.
+    #[test]
+    fn with_profile_refuses_to_leave_cached() {
+        let region = MemoryRegion::create_physical_normal(
+            aligned_pa(0x4000_0000),
+            nz(0x1000),
+            AccessMask::R,
+        );
+        assert_eq!(
+            region.with_profile(MemoryProfile::WriteCombining).err(),
+            Some(ProfileChangeError::CachedIsFixed)
+        );
+    }
+
+    #[test]
+    fn with_profile_refuses_to_enter_cached() {
+        let region = MemoryRegion::create_physical_device(
+            aligned_pa(0x4000_0000),
+            nz(0x1000),
+            AccessMask::R,
+        );
+        assert_eq!(
+            region.with_profile(MemoryProfile::Cached).err(),
+            Some(ProfileChangeError::CachedIsFixed)
+        );
+    }
+
+    #[test]
+    fn with_profile_refuses_virtual_backing() {
+        let fa = std::boxed::Box::leak(std::boxed::Box::new(MockFrameAllocator::with_limit(1)));
+        let region = MemoryRegion::create_virtual(fa, nz(1), AccessMask::RW).expect("alloc");
+        assert_eq!(
+            region.with_profile(MemoryProfile::WriteCombining).err(),
+            Some(ProfileChangeError::CachedIsFixed)
+        );
+    }
+
+    // Regression guard: деривация оставляет исходный регион живым, и оба окна
+    // одного PA обязаны остаться некэшируемыми.
+    #[test]
+    fn aliases_of_one_physical_range_never_mix_cached_and_uncached() {
+        let device = MemoryRegion::create_physical_device(
+            aligned_pa(0x4000_0000),
+            nz(0x1000),
+            AccessMask::RW,
+        );
+        let combining = device
+            .with_profile(MemoryProfile::WriteCombining)
+            .expect("device window accepts write-combining");
+
+        assert_eq!(device.physical_base(), combining.physical_base());
+        for alias in [&device, &combining] {
+            assert_ne!(alias.profile(), MemoryProfile::Cached);
+            assert_eq!(
+                alias.with_profile(MemoryProfile::Cached).err(),
+                Some(ProfileChangeError::CachedIsFixed)
+            );
+        }
+
+        let cached = MemoryRegion::create_physical_normal(
+            aligned_pa(0x4000_0000),
+            nz(0x1000),
+            AccessMask::R,
+        );
+        for profile in [MemoryProfile::WriteCombining, MemoryProfile::Device] {
+            assert_eq!(
+                cached.with_profile(profile).err(),
+                Some(ProfileChangeError::CachedIsFixed)
+            );
+        }
+    }
+
+    #[test]
+    fn with_profile_keeps_the_derived_window_sliceable() {
+        let region = MemoryRegion::create_physical_device(
+            aligned_pa(0x4000_0000),
+            nz(0x2000),
+            AccessMask::RW,
+        );
+        let combining = region
+            .with_profile(MemoryProfile::WriteCombining)
+            .expect("device window accepts write-combining");
+        let sub = combining
+            .slice(0x1000, nz(0x1000), AccessMask::R)
+            .expect("in-bounds slice");
+        assert_eq!(sub.profile(), MemoryProfile::WriteCombining);
+    }
+
+    #[test]
+    fn slice_physical_normal_preserves_cached_profile() {
         let region = MemoryRegion::create_physical_normal(
             aligned_pa(0x4000_0000),
             nz(0x2000),
@@ -662,7 +786,7 @@ mod tests {
         let sub = region
             .slice(0x1000, nz(0x1000), AccessMask::R)
             .expect("in-bounds slice");
-        assert_eq!(sub.memory_type(), MemoryType::Normal);
+        assert_eq!(sub.profile(), MemoryProfile::Cached);
     }
 
     #[test]
@@ -678,14 +802,14 @@ mod tests {
             .expect("install must succeed");
         let flags = mapper.mapped_flags.lock().unwrap();
         assert_eq!(flags.len(), 1);
-        assert!(matches!(flags[0], MemFlags::Private(_)));
+        assert!(matches!(flags[0], MemFlags::Cached(_)));
     }
 
     #[test]
-    fn virtual_region_is_normal_type() {
+    fn virtual_region_is_cached_profile() {
         let fa = std::boxed::Box::leak(std::boxed::Box::new(MockFrameAllocator::with_limit(1)));
         let region = MemoryRegion::create_virtual(fa, nz(1), AccessMask::RW).expect("alloc");
-        assert_eq!(region.memory_type(), MemoryType::Normal);
+        assert_eq!(region.profile(), MemoryProfile::Cached);
     }
 
     #[test]

@@ -34,10 +34,11 @@ pub mod virtual_address;
 pub use frame_bitmap::FrameBitmap;
 pub use mem_flags::MemFlags;
 pub use region::{
-    AccessMask, BudgetRefund, MemoryBacking, MemoryRegion, MemoryType, RegionCreateError,
+    AccessMask, BudgetRefund, MemoryBacking, MemoryRegion, ProfileChangeError, RegionCreateError,
     RegionSliceError, VirtualBacking,
 };
 pub use relocatable_ptr::RelocatablePtr;
+pub use syscall::MemoryProfile;
 pub use user_vm_allocator::{MappingTag, UserVmAllocator};
 pub use user_vm_context::{UserVmContext, WeakUserVmContext};
 

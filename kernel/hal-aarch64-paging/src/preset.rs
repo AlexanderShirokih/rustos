@@ -1,6 +1,9 @@
 //! Готовые пресеты атрибутов памяти.
 
-use crate::mem_flags::{Aarch64MemFlags, Access, Shareability};
+use crate::{
+    mem_flags::{Aarch64MemFlags, Access, Shareability},
+    memory_attribute::MemoryAttribute,
+};
 
 /// Исполняемый код ядра.
 pub struct KernelText;
@@ -24,7 +27,7 @@ impl KernelText {
             .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRW)
-            .attr_index(0)
+            .attr_index(MemoryAttribute::Cached.index())
             .pxn(false)
             .uxn(true)
     }
@@ -37,7 +40,7 @@ impl KernelData {
             .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRW)
-            .attr_index(0)
+            .attr_index(MemoryAttribute::Cached.index())
             .pxn(true)
             .uxn(true)
     }
@@ -50,7 +53,7 @@ impl KernelRoData {
             .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRO)
-            .attr_index(0)
+            .attr_index(MemoryAttribute::Cached.index())
             .pxn(false)
             .uxn(true)
     }
@@ -63,7 +66,7 @@ impl Heap {
             .af(true)
             .sh(Shareability::Inner)
             .ap(Access::KernelRW)
-            .attr_index(0)
+            .attr_index(MemoryAttribute::Cached.index())
             .pxn(true)
             .uxn(true)
     }
@@ -76,7 +79,7 @@ impl Mmio {
             .af(true)
             .sh(Shareability::None)
             .ap(Access::KernelRW)
-            .attr_index(1)
+            .attr_index(MemoryAttribute::Device.index())
             .pxn(true)
             .uxn(true)
     }

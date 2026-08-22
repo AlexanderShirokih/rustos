@@ -8,8 +8,8 @@ use alloc::{
 
 use collections::{LockCell, MutexCell};
 use drivers_common::{
-    BootServices, DeviceMemoryPermission, DeviceNode, Driver, DriverFactory, DriverRunError,
-    NodeProperty, Owners,
+    BootServices, DeviceNode, Driver, DriverFactory, DriverRunError, NodeProperty, Owners,
+    UncachedPermission,
     probe::{ProbeError, ProbeResult},
     services::mmio::{MmioAddress, MmioService},
 };
@@ -49,14 +49,14 @@ impl Gicv3 {
         let distributor = mmio
             .map_mmio(
                 self.distributor_address,
-                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+                Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .map_err(|err| err.to_string())?;
 
         let redistributor = mmio
             .map_mmio(
                 self.redistributor_address,
-                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+                Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .map_err(|err| err.to_string())?;
 

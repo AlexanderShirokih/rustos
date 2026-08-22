@@ -137,8 +137,8 @@ impl UserImage<'_> {
 
 fn segment_is_executable(flags: MemFlags) -> bool {
     match flags {
-        MemFlags::Private(p) => matches!(p.user.executable, memory::mem_flags::Executable::Allowed),
-        MemFlags::Device(_) => false,
+        MemFlags::Cached(p) => matches!(p.user.executable, memory::mem_flags::Executable::Allowed),
+        MemFlags::WriteCombining(_) | MemFlags::Device(_) => false,
     }
 }
 

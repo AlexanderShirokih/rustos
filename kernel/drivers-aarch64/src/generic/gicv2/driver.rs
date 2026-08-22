@@ -8,7 +8,7 @@ use alloc::{
 
 use collections::{LockCell, MutexCell};
 use drivers_common::{
-    BootServices, DeviceMemoryPermission, Driver, DriverFactory, DriverRunError, Owners,
+    BootServices, Driver, DriverFactory, DriverRunError, Owners, UncachedPermission,
     probe::{ProbeError, ProbeResult},
     services::mmio::{MmioAddress, MmioService},
 };
@@ -39,14 +39,14 @@ impl Gicv2 {
         let distributor = mmio
             .map_mmio(
                 self.distributor_address,
-                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+                Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .map_err(|err| err.to_string())?;
 
         let cpu_interface = mmio
             .map_mmio(
                 self.cpu_interface_address,
-                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+                Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .map_err(|err| err.to_string())?;
 

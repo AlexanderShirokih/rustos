@@ -14,7 +14,7 @@ use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
-    mem_flags::{AccessMode, Executable, Owners, PrivateMemoryPermission},
+    mem_flags::{AccessMode, CachedPermission, Executable, Owners},
     physical_address::PageAlignedAddress,
     virtual_address::PageAlignedVirtualAddress,
 };
@@ -32,12 +32,12 @@ use crate::{
 const PROBE_VA: usize = probe_va::ASID.base();
 
 fn user_rw_flags() -> MemFlags {
-    MemFlags::Private(Owners {
-        kernel: PrivateMemoryPermission {
+    MemFlags::Cached(Owners {
+        kernel: CachedPermission {
             access: AccessMode::Writable,
             executable: Executable::NotAllowed,
         },
-        user: PrivateMemoryPermission {
+        user: CachedPermission {
             access: AccessMode::Writable,
             executable: Executable::NotAllowed,
         },

@@ -1,56 +1,14 @@
 //! Memory Attribute Indirection Register
-//! Регистр, который описывает типы памяти (cacheable, device, write-back).
 //!
+//! Регистр, который описывает типы памяти (cacheable, device, write-back).
+//! Состав слотов задаёт `hal_aarch64_paging::memory_attribute`.
+
+use hal_aarch64_paging::memory_attribute::MemoryAttribute;
+
 use crate::{
-    combine_bits,
     memory::regs::common::{EL1, ExceptionLevel},
     write_sysreg,
 };
-
-/// Атрибуты обычной памяти (Normal).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum NormalAttr {
-    /// Write-Back, Read/Write-Allocate.
-    WbRaWa = 0xFF,
-}
-
-/// Атрибуты памяти устройств (Device).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum DeviceAttr {
-    /// Device-nGnRE.
-    NgNre = 0x04,
-}
-
-/// Запись MAIR (тип памяти).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MairEntry {
-    /// Обычная память.
-    Normal(NormalAttr),
-    /// Память устройств.
-    Device(DeviceAttr),
-}
-
-impl MairEntry {
-    const fn encode(self) -> u64 {
-        match self {
-            MairEntry::Normal(attr) => attr as u64,
-            MairEntry::Device(attr) => (attr as u64) << 8,
-        }
-    }
-}
-
-/// Скомбинированные биты MAIR.
-#[derive(Debug, Clone, Copy)]
-pub struct MairBits(u64);
-
-impl MairBits {
-    /// Объединяет записи MAIR в одно значение.
-    pub const fn combine(bits: &[MairEntry]) -> MairBits {
-        MairBits(combine_bits!(bits))
-    }
-}
 
 /// Регистр MAIR (Memory Attribute Indirection Register).
 pub struct MemoryAttributeIndirectionRegister<EL: ExceptionLevel> {
@@ -58,9 +16,10 @@ pub struct MemoryAttributeIndirectionRegister<EL: ExceptionLevel> {
 }
 
 impl MemoryAttributeIndirectionRegister<EL1> {
-    pub fn set(value: MairBits) {
+    /// Программирует все объявленные слоты атрибутов памяти.
+    pub fn set() {
         // SAFETY: Запись в MAIR_EL1 допустима на EL1 до включения MMU.
-        // Атрибуты памяти формируются из типобезопасных констант MairEntry.
-        unsafe { write_sysreg!(mair_el1, value.0) };
+        // Значение собрано из типобезопасной таблицы слотов `MemoryAttribute`.
+        unsafe { write_sysreg!(mair_el1, MemoryAttribute::mair_value()) };
     }
 }

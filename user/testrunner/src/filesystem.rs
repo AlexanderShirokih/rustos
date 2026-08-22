@@ -896,12 +896,12 @@ fn filesystem_ramfs_zeroes_the_gap_of_a_sparse_write() {
         .expect("sparse write within capacity");
     kernel_tests::kassert_eq!(written.count, 4);
 
-    let count = client.read(opened.fd, 0, 20).expect("read call").expect("read ok");
+    let count = client
+        .read(opened.fd, 0, 20)
+        .expect("read call")
+        .expect("read ok");
     kernel_tests::kassert_eq!(count, 20);
-    kernel_tests::kassert_eq!(
-        buffer_head(&data, 20),
-        b"head\0\0\0\0\0\0\0\0\0\0\0\0tail"
-    );
+    kernel_tests::kassert_eq!(buffer_head(&data, 20), b"head\0\0\0\0\0\0\0\0\0\0\0\0tail");
 }
 
 #[kernel_test]

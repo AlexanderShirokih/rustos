@@ -7,7 +7,7 @@ use core::{
 };
 
 use drivers_common::{
-    BootServices, DeviceMemoryPermission, Driver, DriverFactory, DriverRunError, Owners,
+    BootServices, Driver, DriverFactory, DriverRunError, Owners, UncachedPermission,
     probe::{ProbeError, ProbeResult},
     services::mmio::{MmioAddress, MmioBound},
 };
@@ -199,7 +199,7 @@ impl Driver for UartDmDriver {
         let bound = mmio
             .map_mmio(
                 self.address,
-                Owners::<DeviceMemoryPermission>::kernel(DeviceMemoryPermission::writable()),
+                Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .map_err(|e: drivers_common::services::mmio::MmioMapError| {
                 DriverRunError::Fatal(alloc::format!("{e}"))

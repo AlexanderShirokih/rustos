@@ -520,6 +520,26 @@ pub fn memory_create_virtual(
     Handle::from_syscall_return(ret)
 }
 
+/// Деривация региона поверх того же PA с профилем `profile_raw`: `region` -
+/// handle на исходный регион (требует `DUPLICATE`). Возврат: region handle
+/// либо `-(SyscallError)`.
+pub fn memory_with_profile(region: Handle, profile_raw: u64) -> Result<Handle, SyscallError> {
+    let ret: i64;
+    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
+    // region_handle, profile_raw; память ядру не передаётся.
+    unsafe {
+        asm!(
+            "svc #{op}",
+            op = const SyscallOp::MemoryWithProfile as u16,
+            in("x0") u64::from(region.raw()),
+            in("x1") profile_raw,
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    Handle::from_syscall_return(ret)
+}
+
 /// Деривация узкого под-региона: `region` - handle на исходный регион
 /// (требует `DUPLICATE`), `offset` - page-aligned смещение, `size_bytes`,
 /// `access_mask` (биты R/W/X, не шире гранта). Возврат: region handle либо

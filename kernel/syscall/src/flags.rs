@@ -1,6 +1,6 @@
 use memory::{
-    MemFlags, MemoryType,
-    mem_flags::{DeviceMemoryPermission, Owners},
+    MemFlags, MemoryProfile,
+    mem_flags::{Owners, UncachedPermission},
 };
 use syscall::UserMemFlags;
 
@@ -12,23 +12,24 @@ pub(super) const fn to_mem_flags(flags: UserMemFlags) -> MemFlags {
     }
 }
 
-pub(super) fn mem_flags_for(memory_type: MemoryType, flags: UserMemFlags) -> MemFlags {
-    match memory_type {
-        MemoryType::Normal => to_mem_flags(flags),
-        MemoryType::Device => {
-            // Device-память не исполняется, и `ReadExecute` сводится к read.
-            let user = match flags {
-                UserMemFlags::ReadWrite => DeviceMemoryPermission::writable(),
-                UserMemFlags::ReadOnly | UserMemFlags::ReadExecute => {
-                    DeviceMemoryPermission::readonly()
-                }
-            };
+pub(super) fn mem_flags_for(profile: MemoryProfile, flags: UserMemFlags) -> MemFlags {
+    match profile {
+        MemoryProfile::Cached => to_mem_flags(flags),
+        MemoryProfile::WriteCombining => MemFlags::WriteCombining(uncached_owners(flags)),
+        MemoryProfile::Device => MemFlags::Device(uncached_owners(flags)),
+    }
+}
 
-            MemFlags::Device(Owners {
-                kernel: DeviceMemoryPermission::default(),
-                user,
-            })
-        }
+fn uncached_owners(flags: UserMemFlags) -> Owners<UncachedPermission> {
+    // Память вне кэша не исполняется, и `ReadExecute` сводится к read.
+    let user = match flags {
+        UserMemFlags::ReadWrite => UncachedPermission::writable(),
+        UserMemFlags::ReadOnly | UserMemFlags::ReadExecute => UncachedPermission::readonly(),
+    };
+
+    Owners {
+        kernel: UncachedPermission::default(),
+        user,
     }
 }
 
@@ -46,12 +47,12 @@ mod tests {
     fn user_rwx(flags: MemFlags) -> UserRwx {
         use memory::mem_flags::{AccessMode, Executable};
         match flags {
-            MemFlags::Private(o) => UserRwx {
+            MemFlags::Cached(o) => UserRwx {
                 read: matches!(o.user.access, AccessMode::Readonly | AccessMode::Writable),
                 write: matches!(o.user.access, AccessMode::Writable),
                 exec: matches!(o.user.executable, Executable::Allowed),
             },
-            MemFlags::Device(_) => UserRwx {
+            MemFlags::WriteCombining(_) | MemFlags::Device(_) => UserRwx {
                 read: false,
                 write: false,
                 exec: false,
@@ -87,36 +88,50 @@ mod tests {
         );
     }
 
-    fn device_user_access(flags: MemFlags) -> memory::mem_flags::AccessMode {
+    fn uncached_user_access(flags: MemFlags) -> memory::mem_flags::AccessMode {
         match flags {
-            MemFlags::Device(o) => o.user.access,
-            MemFlags::Private(_) => panic!("device region must map to Device flags"),
+            MemFlags::WriteCombining(o) | MemFlags::Device(o) => o.user.access,
+            MemFlags::Cached(_) => panic!("uncached profile must map to uncached flags"),
         }
     }
 
     #[test]
-    fn normal_region_keeps_private_flags() {
+    fn cached_region_keeps_cached_flags() {
         assert!(matches!(
-            mem_flags_for(MemoryType::Normal, UserMemFlags::ReadWrite),
-            MemFlags::Private(_)
+            mem_flags_for(MemoryProfile::Cached, UserMemFlags::ReadWrite),
+            MemFlags::Cached(_)
         ));
     }
 
     #[test]
-    fn device_region_maps_to_device_flags() {
+    fn uncached_region_keeps_its_profile() {
+        assert!(matches!(
+            mem_flags_for(MemoryProfile::Device, UserMemFlags::ReadWrite),
+            MemFlags::Device(_)
+        ));
+        assert!(matches!(
+            mem_flags_for(MemoryProfile::WriteCombining, UserMemFlags::ReadWrite),
+            MemFlags::WriteCombining(_)
+        ));
+    }
+
+    #[test]
+    fn uncached_region_maps_to_uncached_flags() {
         use memory::mem_flags::AccessMode;
-        assert!(matches!(
-            device_user_access(mem_flags_for(MemoryType::Device, UserMemFlags::ReadWrite)),
-            AccessMode::Writable
-        ));
-        assert!(matches!(
-            device_user_access(mem_flags_for(MemoryType::Device, UserMemFlags::ReadOnly)),
-            AccessMode::Readonly
-        ));
-        // Execute не представим для device-памяти: сводится к read.
-        assert!(matches!(
-            device_user_access(mem_flags_for(MemoryType::Device, UserMemFlags::ReadExecute)),
-            AccessMode::Readonly
-        ));
+        for profile in [MemoryProfile::Device, MemoryProfile::WriteCombining] {
+            assert!(matches!(
+                uncached_user_access(mem_flags_for(profile, UserMemFlags::ReadWrite)),
+                AccessMode::Writable
+            ));
+            assert!(matches!(
+                uncached_user_access(mem_flags_for(profile, UserMemFlags::ReadOnly)),
+                AccessMode::Readonly
+            ));
+            // Execute не представим вне кэша: сводится к read.
+            assert!(matches!(
+                uncached_user_access(mem_flags_for(profile, UserMemFlags::ReadExecute)),
+                AccessMode::Readonly
+            ));
+        }
     }
 }

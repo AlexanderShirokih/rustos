@@ -8,8 +8,8 @@ use core::num::NonZeroUsize;
 use capability::{Capability, IpcError, ResourceBudgetRefund, RevocationHook, Rights};
 use collections::LockCell;
 use memory::{
-    AccessMask, MappingTag, MemoryRegion, PAGE_SIZE, RegionCreateError, RegionSliceError,
-    UserVmContext, WeakUserVmContext,
+    AccessMask, MappingTag, MemoryProfile, MemoryRegion, PAGE_SIZE, RegionCreateError,
+    RegionSliceError, UserVmContext, WeakUserVmContext,
     memory_mapper::{MemoryMappingError, MemoryRemappingError},
     range_allocator::{AllocateError, RangeError},
     virtual_address::PageAlignedVirtualAddress,
@@ -79,6 +79,10 @@ impl RevocationHook for MemoryMapping {
 
 fn parse_flags(raw: u64) -> Result<UserMemFlags, SyscallError> {
     UserMemFlags::from_raw(raw).map_err(|_| SyscallError::InvalidArgument)
+}
+
+fn parse_profile(raw: u64) -> Result<MemoryProfile, SyscallError> {
+    MemoryProfile::from_raw(raw).map_err(|_| SyscallError::InvalidArgument)
 }
 
 fn parse_size(size_bytes: u64) -> Result<NonZeroUsize, SyscallError> {
@@ -191,6 +195,29 @@ pub fn sys_memory_slice(
     Ok(u64::from(id.raw().get()))
 }
 
+/// `memory_with_profile(region_handle, profile) -> region_handle`
+///
+/// Деривация поверх того же PA с профилем `profile_raw`. Требует
+/// `Rights::DUPLICATE`, бюджет не списывает. Результат - производная капа
+/// источника: отзыв источника отзывает и её.
+pub fn sys_memory_with_profile(region_h: u64, profile_raw: u64) -> Result<u64, SyscallError> {
+    let region_id = parse_handle_id(region_h)?;
+    let profile = parse_profile(profile_raw)?;
+
+    let region = lookup_memory(region_id, Rights::DUPLICATE)?;
+    let derived = region
+        .with_profile(profile)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+
+    let table = capability::runtime()
+        .current_handle_table()
+        .ok_or(SyscallError::BadHandle)?;
+    let id = table
+        .with_lock(|tbl| tbl.derive(region_id, Arc::new(derived)))
+        .map_err(|rejected| map_ipc_error(rejected.release()))?;
+    Ok(u64::from(id.raw().get()))
+}
+
 /// `memory_allocate(resource_handle, size, flags) -> va`
 ///
 /// Анонимный маппинг без handle. Бюджет возвращается при `memory_free`/смерти AS.
@@ -290,7 +317,7 @@ pub fn sys_memory_map(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let mem_flags = mem_flags_for(region.memory_type(), flags);
+    let mem_flags = mem_flags_for(region.profile(), flags);
 
     let user_vm = runtime().current_user_vm().ok_or(SyscallError::WrongType)?;
 
@@ -417,7 +444,7 @@ pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<
         return Err(SyscallError::InvalidArgument);
     }
 
-    let mem_flags = mem_flags_for(region.memory_type(), flags);
+    let mem_flags = mem_flags_for(region.profile(), flags);
 
     user_vm
         .mapper()
@@ -467,18 +494,20 @@ pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError
 
 /// `memory_region_inspect(region_handle)`
 ///
-/// Primary возврат - `size_bytes`. Secondary - `base_pa | (kind_tag << 3) |
-/// access_bits`. `base_pa` page-aligned, и его младшие 12 бит свободны
-/// под `kind_tag` (биты 3..5) и `access_bits` (биты 0..3). Для `Virtual`
-/// `base_pa = 0`.
+/// Primary возврат - `size_bytes`. Secondary - `base_pa | (profile_raw << 5) |
+/// (kind_tag << 3) | access_bits`. `base_pa` page-aligned, и его младшие 12 бит
+/// свободны под `profile_raw` (биты 5..7), `kind_tag` (биты 3..5) и
+/// `access_bits` (биты 0..3). Для `Virtual` `base_pa = 0`.
 pub fn sys_memory_region_inspect(frame: &mut dyn SyscallFrame) {
     let result = (|| -> Result<(u64, u64), SyscallError> {
         let id = parse_handle_id(frame.arg(0))?;
         let region = lookup_memory(id, Rights::READ)?;
         let size = region.size_bytes() as u64;
         let base_pa = region.physical_base().map_or(0, |pa| pa.as_usize() as u64);
-        let secondary =
-            base_pa | (u64::from(region.kind_tag()) << 3) | u64::from(region.access_mask().bits());
+        let secondary = base_pa
+            | (region.profile().raw() << 5)
+            | (u64::from(region.kind_tag()) << 3)
+            | u64::from(region.access_mask().bits());
         Ok((size, secondary))
     })();
 
