@@ -4,9 +4,11 @@
 
 use core::panic::PanicInfo;
 
-use component_abi::component_manifest;
-use filesystem_abi::{FileSystemError, file_system_admin};
-use ipc::{Transport as _, wire::Cap};
+use component_abi::{SESSION_SCOPE_MAX, SessionError, component_manifest, component_sessions};
+use ipc::{
+    Transport as _,
+    wire::{Cap, Str},
+};
 use runtime::{OwnedHandle, Port, PortTransport, thread_exit};
 use syscall::{Handle, Rights, Timeout};
 
@@ -17,16 +19,18 @@ struct SessionlessAdmin {
 
 component_manifest! {
     struct UnresponsiveFileSystemStartup {
+        exports: "FileSystem",
+        establishes_sessions: true,
         slots: {},
     }
 }
 
-impl file_system_admin::Service for SessionlessAdmin {
-    fn bind(&mut self) -> Result<Cap, FileSystemError> {
+impl component_sessions::Service for SessionlessAdmin {
+    fn open_session(&mut self, _scope: Str<'_, SESSION_SCOPE_MAX>) -> Result<Cap, SessionError> {
         let session = self
             .service
             .duplicate(Rights::WRITE | Rights::TRANSFER, None)
-            .map_err(|_| FileSystemError::NoSpace)?;
+            .map_err(|_| SessionError::NoSpace)?;
         let cap = Cap::from_raw(session.as_raw().as_nonzero());
         self.vended = Some(session);
         Ok(cap)
@@ -51,7 +55,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
         service,
         vended: None,
     };
-    let delivered = file_system_admin::dispatch(&mut admin, &transport).is_ok();
+    let delivered = component_sessions::dispatch(&mut admin, &transport).is_ok();
     if let Some(session) = admin.vended.take() {
         if delivered {
             let _ = session.into_raw();

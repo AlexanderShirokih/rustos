@@ -1,9 +1,10 @@
-//! E2E файловой подсистемы: rootkeeper поднимает файловые системы, а маршрутизатор получает их
-//! сессии у supervisor и владеет таблицей монтирования.
+//! E2E файловой подсистемы: rootkeeper поднимает файловые системы, политика загрузки прививает
+//! их сессии маршрутизатору, а он владеет таблицей монтирования.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 use bootstrap_abi::bootstrap;
+use component_abi::{SESSION_SCOPE_MAX, component_sessions};
 use filesystem_abi::{
     AccessMode, DirCursor, DirEntry, FileSystemError, NAME_MAX, NodeDescriptor, NodeKind,
     OpenFlags, Opened, Path, file_system, namespace, namespace_admin,
@@ -32,10 +33,16 @@ const CLIENT_TIMEOUT: Timeout = Timeout::from_secs(2);
 const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture/program";
 
 const RAM_MOUNT: &str = "/tmp";
-const RAM_FILESYSTEM_PROGRAM: &str = "/boot/filesystem-ramfs";
-const UNRESPONSIVE_FILESYSTEM_PROGRAM: &str = "/boot/unresponsive-filesystem";
 const SPARE_MOUNT: &str = "/spare";
-const SPARE_FILESYSTEM_PROGRAM: &str = "/boot/spare-filesystem";
+
+const ROUTER: u16 = 0;
+const UNRESPONSIVE_FILESYSTEM: u16 = 2;
+const SPARE_FILESYSTEM: u16 = 3;
+
+const RAM_FILESYSTEM_NAME: &str = "filesystem-ramfs";
+
+const BOOT_TREE_ATTEMPTS: usize = 200;
+const BOOT_TREE_TURN: Timeout = Timeout::from_millis(10);
 
 const APPEND_OFFSET: u64 = u64::MAX;
 
@@ -67,26 +74,51 @@ struct NamespacePorts {
 static NAMESPACE_PORTS: Once<NamespacePorts> = Once::new();
 
 fn router_minter() -> BorrowedHandle<'static> {
-    namespace_roots().service_minter()
+    component_roots(ROUTER).service_minter()
 }
 
 fn router_admin() -> BorrowedHandle<'static> {
-    namespace_roots().control()
+    component_roots(ROUTER).control()
 }
 
 fn namespace_ports() -> &'static NamespacePorts {
     NAMESPACE_PORTS.call_once(start_namespace)
 }
 
-fn namespace_roots() -> &'static ComponentRoots {
+fn component_roots(index: u16) -> &'static ComponentRoots {
+    roots_of(namespace_ports(), index)
+}
+
+fn ram_filesystem() -> u16 {
     namespace_ports()
         .system
-        .component(0)
-        .expect("composition carries the namespace router")
+        .instance(RAM_FILESYSTEM_NAME)
+        .expect("stage 1 raised the file system of /tmp")
+}
+
+fn roots_of(ports: &NamespacePorts, index: u16) -> &ComponentRoots {
+    ports
+        .system
+        .component(index)
+        .expect("composition carries the component")
         .managed()
         .running()
-        .expect("namespace router is running")
+        .expect("component is running")
         .roots()
+}
+
+pub(crate) fn whole_export() -> Str<'static, SESSION_SCOPE_MAX> {
+    Str::new("").expect("the empty scope fits the bound")
+}
+
+fn filesystem_session(index: u16) -> OwnedHandle {
+    let session =
+        component_sessions::Client::new(PortTransport::client(component_roots(index).control()))
+            .with_wait(CALL_TIMEOUT)
+            .open_session(whole_export())
+            .expect("open_session call")
+            .expect("session established");
+    OwnedHandle::adopt(session)
 }
 
 fn namespace_admin_client(
@@ -102,14 +134,46 @@ fn start_namespace() -> NamespacePorts {
     let plan = image
         .plan(crate::rootkeeper_system::BOOT_PLAN_ENTRY)
         .expect("compiled boot plan decodes");
-    let system = RootSystem::bring_up(
+    let mut system = RootSystem::bring_up(
         image,
         plan,
         crate::bootstrap_handle(),
         crate::log_relay::component_log_session,
     )
     .expect("filesystem composition started");
-    NamespacePorts { system }
+    // Ступень 1 подаёт `init` транзакцией, и её операции обслуживает оборот композиции: сюита
+    // держит композицию статиком и своих оборотов не делает.
+    let relay = crate::log_relay::shared_relay_thread().expect("shared relay is running");
+    crate::rootkeeper_system::raise_stage_one(&mut system, relay);
+    let ports = NamespacePorts { system };
+    await_boot_tree(&ports);
+    ports
+}
+
+fn await_boot_tree(ports: &NamespacePorts) {
+    // Дерево имён загрузки прививает компонент композиции своим оборотом, и его префиксы
+    // становятся накрытыми не раньше.
+    for _ in 0..BOOT_TREE_ATTEMPTS {
+        let minter = roots_of(ports, ROUTER).service_minter();
+        if [Path::ROOT.as_str(), RAM_MOUNT]
+            .into_iter()
+            .all(|prefix| covers(minter, prefix))
+        {
+            return;
+        }
+        crate::rootkeeper_system::pause(BOOT_TREE_TURN);
+    }
+    panic!("boot tree is not mounted")
+}
+
+fn covers(minter: BorrowedHandle<'_>, prefix: &str) -> bool {
+    match namespace_client(minter).resolve(path(prefix)) {
+        Ok(Ok(session)) => {
+            drop(OwnedHandle::adopt(session));
+            true
+        }
+        _ => false,
+    }
 }
 
 fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
@@ -138,8 +202,12 @@ fn namespace_client(capability: BorrowedHandle<'_>) -> namespace::Client<PortTra
 }
 
 pub(crate) fn mount_ram_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
+    mount_filesystem(prefix, ram_filesystem())
+}
+
+fn mount_filesystem(prefix: &str, index: u16) -> Result<u32, FileSystemError> {
     namespace_admin_client(router_admin())
-        .mount(path(prefix), path(RAM_FILESYSTEM_PROGRAM))
+        .mount(path(prefix), filesystem_session(index))
         .expect("mount call")
 }
 
@@ -568,11 +636,8 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
 
 #[kernel_test]
 fn namespace_refuses_an_occupied_prefix_without_changing_the_table() {
-    let namespace = namespace_admin_client(router_admin());
-
-    let occupied = namespace
-        .mount(path(RAM_MOUNT), path(RAM_FILESYSTEM_PROGRAM))
-        .expect("mount call");
+    // Отвергнутое монтирование уносит переданную сессию: вернуть её отправителю нечем.
+    let occupied = mount_filesystem(RAM_MOUNT, ram_filesystem());
     kernel_tests::kassert_eq!(occupied, Err(FileSystemError::AlreadyExists));
 
     let mounted = namespace_client(router_minter())
@@ -580,6 +645,43 @@ fn namespace_refuses_an_occupied_prefix_without_changing_the_table() {
         .expect("resolve call")
         .expect("original mount remains");
     drop(OwnedHandle::adopt(mounted));
+}
+
+#[kernel_test]
+fn namespace_grafts_the_session_it_is_handed() {
+    const GRAFT_MOUNT: &str = "/grafted";
+    const GRAFT_ENTRY: &str = "/grafted-probe";
+
+    // Происхождение капы маршрутизатору неизвестно: под префиксом встаёт ровно тот сервер,
+    // чью сессию ему передали.
+    let handed = filesystem_session(ram_filesystem());
+    open(
+        &connect(&handed),
+        GRAFT_ENTRY,
+        AccessMode::ReadWrite,
+        OpenFlags::CREATE,
+    );
+    namespace_admin_client(router_admin())
+        .mount(path(GRAFT_MOUNT), handed)
+        .expect("mount call")
+        .expect("handed session grafted");
+
+    let grafted = session_for(GRAFT_MOUNT);
+    let opened = open(
+        &connect(&grafted),
+        GRAFT_ENTRY,
+        AccessMode::Read,
+        OpenFlags::NONE,
+    );
+    kernel_tests::kassert_eq!(opened.kind, NodeKind::File);
+
+    // Узел завела переданная сессия, и корневое монтирование его не содержит.
+    let absent = connect(&image_session())
+        .open(path(GRAFT_ENTRY), AccessMode::Read, OpenFlags::NONE)
+        .expect("open call");
+    kernel_tests::kassert_eq!(absent, Err(FileSystemError::NotFound));
+
+    unmount_filesystem(GRAFT_MOUNT).expect("grafted mount removed");
 }
 
 #[kernel_test]
@@ -602,11 +704,7 @@ fn namespace_rejects_admin_operations_on_the_service_port() {
 fn namespace_reports_an_unresponsive_mount() {
     const STUCK_MOUNT: &str = "/boot";
 
-    let namespace = namespace_admin_client(router_admin());
-    namespace
-        .mount(path(STUCK_MOUNT), path(UNRESPONSIVE_FILESYSTEM_PROGRAM))
-        .expect("mount call")
-        .expect("fixture mounted");
+    mount_filesystem(STUCK_MOUNT, UNRESPONSIVE_FILESYSTEM).expect("fixture mounted");
 
     // Сессия остаётся живой без обслуживающего потока: `open_root` не отвечает, и маршрутизатор
     // отпускает вызов по своему сроку.
@@ -616,10 +714,7 @@ fn namespace_reports_an_unresponsive_mount() {
     kernel_tests::kassert_eq!(resolved, Err(FileSystemError::Unresponsive));
 
     // Снятие отпускает зависшую сессию, и путь снова накрывает корневое монтирование.
-    namespace
-        .unmount(path(STUCK_MOUNT))
-        .expect("unmount call")
-        .expect("fixture unmounted");
+    unmount_filesystem(STUCK_MOUNT).expect("fixture unmounted");
     let rerouted = namespace_client(router_minter())
         .resolve(path(STUCK_MOUNT))
         .expect("resolve call")
@@ -1040,10 +1135,7 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
 
     // Занятые слоты сценарий не возвращает: закреплённые регионы держат их до конца жизни
     // процесса, поэтому дерево берётся отдельным экземпляром, а не общей точкой монтирования.
-    namespace_admin_client(router_admin())
-        .mount(path(SPARE_MOUNT), path(SPARE_FILESYSTEM_PROGRAM))
-        .expect("mount call")
-        .expect("fixture mounted");
+    mount_filesystem(SPARE_MOUNT, SPARE_FILESYSTEM).expect("fixture mounted");
     let capability = session_for(SPARE_MOUNT);
     let client = connect(&capability);
     // Буфер сессии заводится до наполнения: его маппинг занимает слот наравне с остальными.

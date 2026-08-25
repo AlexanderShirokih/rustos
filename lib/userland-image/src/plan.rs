@@ -4,6 +4,10 @@ use userland::entry_name;
 /// Путь записи образа, из которой rootkeeper читает план загрузочной композиции.
 pub const BOOT_PLAN_PATH: &str = "/boot/rootkeeper/plan";
 
+/// Каталог образа с записями ступени 1: одна запись плана на компонент, и владелец политики
+/// загрузки перечисляет их своей файловой сессией.
+pub const BOOT_STAGE_ONE_DIRECTORY: &str = "/boot/init/stage1";
+
 /// Имя записи с программой в каталоге компонента.
 pub const COMPONENT_PROGRAM_NAME: &str = "program";
 
@@ -22,7 +26,7 @@ pub fn component_name(record: &str) -> &str {
 }
 
 pub const BOOT_PLAN_MAGIC: [u8; 8] = *b"RKPLAN\0\0";
-pub const BOOT_PLAN_VERSION: u16 = 2;
+pub const BOOT_PLAN_VERSION: u16 = 5;
 
 pub(crate) const PLAN_HEADER_SIZE: usize = 16;
 pub(crate) const COMPONENT_HEADER_SIZE: usize = 40;
@@ -34,11 +38,14 @@ pub(crate) const SLOT_KIND_MMIO: u8 = 2;
 pub(crate) const SLOT_KIND_SERVICE: u8 = 3;
 pub(crate) const SLOT_KIND_DIRECTORY: u8 = 4;
 pub(crate) const SLOT_KIND_SUPERVISOR: u8 = 5;
+pub(crate) const SLOT_KIND_CONTROL: u8 = 6;
 
 pub(crate) const EXHAUSTED_HALT: u8 = 0;
 pub(crate) const EXHAUSTED_DETACH: u8 = 1;
 
-const INDEX_SIZE: usize = 2;
+pub(crate) const FLAG_ESTABLISHES_SESSIONS: u8 = 1;
+
+pub(crate) const NAME_LEN_SIZE: usize = 2;
 
 /// Исход компонента, исчерпавшего свои запуски.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,9 +68,9 @@ pub struct PlanDevice<'a> {
     pub resource: u16,
 }
 
-/// Строки совместимости устройства в порядке объявления.
+/// Строки записи в порядке объявления: длина `u16` LE и байты каждой.
 #[derive(Debug, Clone)]
-pub struct PlanSelectors<'a> {
+pub struct PlanNames<'a> {
     bytes: &'a [u8],
     cursor: usize,
     remaining: u16,
@@ -72,8 +79,8 @@ pub struct PlanSelectors<'a> {
 impl<'a> PlanDevice<'a> {
     /// Строки совместимости, любая из которых подходит драйверу.
     #[must_use]
-    pub const fn compatible(&self) -> PlanSelectors<'a> {
-        PlanSelectors {
+    pub const fn compatible(&self) -> PlanNames<'a> {
+        PlanNames {
             bytes: self.selectors,
             cursor: 0,
             remaining: self.selector_count,
@@ -81,7 +88,7 @@ impl<'a> PlanDevice<'a> {
     }
 }
 
-impl<'a> Iterator for PlanSelectors<'a> {
+impl<'a> Iterator for PlanNames<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -89,7 +96,7 @@ impl<'a> Iterator for PlanSelectors<'a> {
             return None;
         }
         let len = usize::from(read_u16(self.bytes, self.cursor).ok()?);
-        let at = self.cursor + 2;
+        let at = self.cursor + NAME_LEN_SIZE;
         let name = core::str::from_utf8(self.bytes.get(at..at + len)?).ok()?;
         self.remaining -= 1;
         self.cursor = at + len;
@@ -106,13 +113,15 @@ pub enum SlotSource<'a> {
     Irq(PlanDevice<'a>),
     /// MMIO-окно устройства.
     Mmio(PlanDevice<'a>),
-    /// Сессия service-порта компонента с номером `provider` в плане.
-    Service { provider: u16 },
-    /// Сессия файловой системы с каталогом компонента в роли корня. `provider`
-    /// хранит ребро к экспортёру Namespace, у которого rootkeeper запрашивает каталог.
-    Directory { provider: u16 },
+    /// Сессия service-порта экземпляра `provider`.
+    Service { provider: &'a str },
+    /// Сессия с каталогом компонента в роли корня. `provider` называет экземпляр,
+    /// у которого rootkeeper устанавливает её областью в этом каталоге.
+    Directory { provider: &'a str },
     /// Клиентская capability supervisor, поднявшего компонент.
     Supervisor,
+    /// Клиентская capability control-порта экземпляра `provider`.
+    Control { provider: &'a str },
 }
 
 /// Компонент загрузочной композиции.
@@ -122,12 +131,13 @@ pub struct PlanComponent<'a> {
     name: &'a str,
     slots: &'a [u8],
     slot_count: u16,
-    requires: &'a [u8],
     after: &'a [u8],
+    after_count: u16,
     memory_pages: u64,
     startup_timeout: Timeout,
     launches: u32,
     on_exhausted: OnExhausted,
+    establishes_sessions: bool,
 }
 
 /// План загрузочной композиции, разобранный из записи образа.
@@ -151,13 +161,6 @@ pub struct PlanSlots<'a> {
     bytes: &'a [u8],
     cursor: usize,
     remaining: u16,
-}
-
-/// Номера компонентов, на которые ссылается ребро.
-#[derive(Debug, Clone)]
-pub struct PlanEdges<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,21 +218,13 @@ impl<'a> PlanComponent<'a> {
         }
     }
 
-    /// Компоненты, чей сервис требуется этому.
+    /// Имена экземпляров, которые поднимаются раньше этого без обмена с ним.
     #[must_use]
-    pub const fn requires(&self) -> PlanEdges<'a> {
-        PlanEdges {
-            bytes: self.requires,
-            cursor: 0,
-        }
-    }
-
-    /// Компоненты, которые поднимаются раньше этого без обмена с ним.
-    #[must_use]
-    pub const fn after(&self) -> PlanEdges<'a> {
-        PlanEdges {
+    pub const fn after(&self) -> PlanNames<'a> {
+        PlanNames {
             bytes: self.after,
             cursor: 0,
+            remaining: self.after_count,
         }
     }
 
@@ -256,6 +251,13 @@ impl<'a> PlanComponent<'a> {
     #[must_use]
     pub const fn on_exhausted(&self) -> OnExhausted {
         self.on_exhausted
+    }
+
+    /// Компонент заводит сессии своего service-порта сам: supervisor просит их
+    /// операцией `ComponentSessions::open_session` на его control-порту.
+    #[must_use]
+    pub const fn establishes_sessions(&self) -> bool {
+        self.establishes_sessions
     }
 }
 
@@ -313,7 +315,7 @@ impl<'a> BootPlan<'a> {
 
         let mut cursor = PLAN_HEADER_SIZE;
         for _ in 0..count {
-            cursor = parse_component(bytes, cursor, count)?.end;
+            cursor = parse_component(bytes, cursor)?.end;
         }
         if cursor != bytes.len() {
             return Err(PlanDecodeError::InvalidLayout("trailing_bytes"));
@@ -331,7 +333,7 @@ impl<'a> Iterator for PlanComponents<'a> {
         }
         // Запись проверена декодированием плана целиком: повторный разбор
         // читает те же байты.
-        let parsed = parse_component(self.bytes, self.cursor, u16::MAX).ok()?;
+        let parsed = parse_component(self.bytes, self.cursor).ok()?;
         self.remaining -= 1;
         self.cursor = parsed.end;
         Some(parsed.component)
@@ -345,28 +347,14 @@ impl<'a> Iterator for PlanSlots<'a> {
         if self.remaining == 0 {
             return None;
         }
-        let parsed = parse_slot(self.bytes, self.cursor, u16::MAX).ok()?;
+        let parsed = parse_slot(self.bytes, self.cursor).ok()?;
         self.remaining -= 1;
         self.cursor = parsed.end;
         Some(parsed.source)
     }
 }
 
-impl Iterator for PlanEdges<'_> {
-    type Item = u16;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let index = read_u16(self.bytes, self.cursor).ok()?;
-        self.cursor += INDEX_SIZE;
-        Some(index)
-    }
-}
-
-fn parse_component(
-    bytes: &[u8],
-    at: usize,
-    count: u16,
-) -> Result<ParsedComponent<'_>, PlanDecodeError> {
+fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanDecodeError> {
     let header = bytes
         .get(at..at + COMPONENT_HEADER_SIZE)
         .ok_or(truncated(bytes, at + COMPONENT_HEADER_SIZE))?;
@@ -379,14 +367,17 @@ fn parse_component(
         EXHAUSTED_DETACH => OnExhausted::Detach,
         _ => return Err(PlanDecodeError::InvalidLayout("on_exhausted")),
     };
-    if header[5] != 0 || read_u64(header, 16)? != 0 {
+    if read_u16(header, 14)? != 0 || read_u64(header, 16)? != 0 {
         return Err(PlanDecodeError::InvalidLayout("reserved"));
+    }
+    let flags = header[5];
+    if flags & !FLAG_ESTABLISHES_SESSIONS != 0 {
+        return Err(PlanDecodeError::InvalidLayout("flags"));
     }
     let executable_len = usize::from(read_u16(header, 6)?);
     let name_len = usize::from(read_u16(header, 8)?);
     let slot_count = read_u16(header, 10)?;
-    let requires_count = read_u16(header, 12)?;
-    let after_count = read_u16(header, 14)?;
+    let after_count = read_u16(header, 12)?;
     let memory_pages = read_u64(header, 24)?;
     if memory_pages == 0 {
         return Err(PlanDecodeError::InvalidLayout("memory_pages"));
@@ -402,16 +393,17 @@ fn parse_component(
 
     let slots_at = cursor;
     for _ in 0..slot_count {
-        cursor = parse_slot(bytes, cursor, count)?.end;
+        cursor = parse_slot(bytes, cursor)?.end;
     }
     let slots = bytes
         .get(slots_at..cursor)
         .ok_or(truncated(bytes, cursor))?;
 
-    let requires = parse_edges(bytes, cursor, requires_count, count)?;
-    cursor += requires.len();
-    let after = parse_edges(bytes, cursor, after_count, count)?;
-    cursor += after.len();
+    let after_at = cursor;
+    cursor = parse_names(bytes, cursor, after_count, "edge")?;
+    let after = bytes
+        .get(after_at..cursor)
+        .ok_or(truncated(bytes, cursor))?;
 
     Ok(ParsedComponent {
         component: PlanComponent {
@@ -419,18 +411,19 @@ fn parse_component(
             name,
             slots,
             slot_count,
-            requires,
             after,
+            after_count,
             memory_pages,
             startup_timeout,
             launches,
             on_exhausted,
+            establishes_sessions: flags & FLAG_ESTABLISHES_SESSIONS != 0,
         },
         end: cursor,
     })
 }
 
-fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, PlanDecodeError> {
+fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, PlanDecodeError> {
     let header = bytes
         .get(at..at + SLOT_HEADER_SIZE)
         .ok_or(truncated(bytes, at + SLOT_HEADER_SIZE))?;
@@ -438,14 +431,17 @@ fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, Pla
     if header[1] != 0 || read_u16(header, 10)? != 0 {
         return Err(PlanDecodeError::InvalidLayout("reserved"));
     }
-    let provider = read_u16(header, 2)?;
+    let provider_len = usize::from(read_u16(header, 2)?);
     let instance = read_u16(header, 4)?;
     let resource = read_u16(header, 6)?;
     let selector_count = read_u16(header, 8)?;
 
     let cursor = at + SLOT_HEADER_SIZE;
     let device_kind = matches!(kind, SLOT_KIND_IRQ | SLOT_KIND_MMIO);
-    let provider_kind = matches!(kind, SLOT_KIND_SERVICE | SLOT_KIND_DIRECTORY);
+    let provider_kind = matches!(
+        kind,
+        SLOT_KIND_SERVICE | SLOT_KIND_DIRECTORY | SLOT_KIND_CONTROL
+    );
     if !device_kind && !provider_kind && kind != SLOT_KIND_USERLAND && kind != SLOT_KIND_SUPERVISOR
     {
         return Err(PlanDecodeError::InvalidLayout("slot_kind"));
@@ -456,29 +452,29 @@ fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, Pla
     if device_kind && selector_count == 0 {
         return Err(PlanDecodeError::InvalidLayout("slot_selector"));
     }
-    // Строки несёт только устройство: набор своих совместимостей.
+    // Строки совместимости несёт только устройство.
     if !device_kind && selector_count != 0 {
         return Err(PlanDecodeError::InvalidLayout("slot_strings"));
     }
-    if !provider_kind && provider != 0 {
-        return Err(PlanDecodeError::InvalidLayout("slot_provider"));
-    }
-    if provider_kind && provider >= count {
+    // Имя экземпляра-провайдера несут только слоты, которые он наполняет.
+    if !provider_kind && provider_len != 0 {
         return Err(PlanDecodeError::InvalidLayout("slot_provider"));
     }
 
     let (source, end) = match kind {
         SLOT_KIND_USERLAND => (SlotSource::Userland, cursor),
-        SLOT_KIND_SERVICE => (SlotSource::Service { provider }, cursor),
-        SLOT_KIND_DIRECTORY => (SlotSource::Directory { provider }, cursor),
+        SLOT_KIND_SERVICE | SLOT_KIND_DIRECTORY | SLOT_KIND_CONTROL => {
+            let (provider, end) = parse_str(bytes, cursor, provider_len, "slot_provider")?;
+            let source = match kind {
+                SLOT_KIND_SERVICE => SlotSource::Service { provider },
+                SLOT_KIND_DIRECTORY => SlotSource::Directory { provider },
+                _ => SlotSource::Control { provider },
+            };
+            (source, end)
+        }
         SLOT_KIND_SUPERVISOR => (SlotSource::Supervisor, cursor),
         SLOT_KIND_IRQ | SLOT_KIND_MMIO => {
-            let mut end = cursor;
-            for _ in 0..selector_count {
-                let len = usize::from(read_u16(bytes, end)?);
-                let (_, next) = parse_str(bytes, end + 2, len, "slot_selector")?;
-                end = next;
-            }
+            let end = parse_names(bytes, cursor, selector_count, "slot_selector")?;
             let device = PlanDevice {
                 selectors: bytes.get(cursor..end).ok_or(truncated(bytes, end))?,
                 selector_count,
@@ -498,15 +494,19 @@ fn parse_slot(bytes: &[u8], at: usize, count: u16) -> Result<ParsedSlot<'_>, Pla
     Ok(ParsedSlot { source, end })
 }
 
-fn parse_edges(bytes: &[u8], at: usize, edges: u16, count: u16) -> Result<&[u8], PlanDecodeError> {
-    let end = at + usize::from(edges) * INDEX_SIZE;
-    let raw = bytes.get(at..end).ok_or(truncated(bytes, end))?;
-    for index in 0..usize::from(edges) {
-        if read_u16(raw, index * INDEX_SIZE)? >= count {
-            return Err(PlanDecodeError::InvalidLayout("edge"));
-        }
+fn parse_names(
+    bytes: &[u8],
+    at: usize,
+    names: u16,
+    field: &'static str,
+) -> Result<usize, PlanDecodeError> {
+    let mut cursor = at;
+    for _ in 0..names {
+        let len = usize::from(read_u16(bytes, cursor)?);
+        let (_, next) = parse_str(bytes, cursor + NAME_LEN_SIZE, len, field)?;
+        cursor = next;
     }
-    Ok(raw)
+    Ok(cursor)
 }
 
 fn parse_str<'a>(
@@ -567,31 +567,34 @@ mod tests {
 
     const RTC_SELECTORS: &[&str] = &["arm,pl031", "arm,primecell"];
 
+    const IMAGE_FS_NAME: &str = "imagefs";
+    const ROUTER_NAME: &str = "router-a";
+
     fn router() -> ComponentSpec<'static> {
         ComponentSpec {
             executable: "/boot/namespace-router",
-            name: "router-a",
+            name: ROUTER_NAME,
             slots: &[],
-            requires: &[],
             after: &[],
             memory_pages: 2_048,
             startup_timeout: Timeout::from_millis(2_000),
             launches: 3,
             on_exhausted: OnExhausted::Halt,
+            establishes_sessions: false,
         }
     }
 
     fn image_filesystem() -> ComponentSpec<'static> {
         ComponentSpec {
             executable: "/boot/filesystem-imagefs",
-            name: "imagefs",
+            name: IMAGE_FS_NAME,
             slots: &[SlotSpec::Userland],
-            requires: &[],
             after: &[],
             memory_pages: 2_048,
             startup_timeout: Timeout::from_millis(2_000),
             launches: 3,
             on_exhausted: OnExhausted::Halt,
+            establishes_sessions: true,
         }
     }
 
@@ -610,14 +613,16 @@ mod tests {
                     instance: 0,
                     resource: 1,
                 }),
-                SlotSpec::Service { provider: 0 },
+                SlotSpec::Service {
+                    provider: IMAGE_FS_NAME,
+                },
             ],
-            requires: &[0],
-            after: &[0],
+            after: &[IMAGE_FS_NAME],
             memory_pages: 64,
             startup_timeout: Timeout::from_millis(1_000),
             launches: 1,
             on_exhausted: OnExhausted::Detach,
+            establishes_sessions: false,
         }
     }
 
@@ -638,15 +643,18 @@ mod tests {
         assert_eq!(filesystem.startup_timeout(), Timeout::from_millis(2_000));
         assert_eq!(filesystem.launches(), 3);
         assert_eq!(filesystem.on_exhausted(), OnExhausted::Halt);
+        assert!(filesystem.establishes_sessions());
         assert_eq!(
             filesystem.slots().collect::<Vec<_>>(),
             vec![SlotSource::Userland]
         );
-        assert_eq!(filesystem.requires().count(), 0);
+        assert_eq!(filesystem.after().count(), 0);
 
         let rtc = plan.component(1).expect("second component");
         assert_eq!(rtc.name(), "clock");
         assert_eq!(rtc.on_exhausted(), OnExhausted::Detach);
+        // Сессии драйвера состояния не несут: их минтит supervisor.
+        assert!(!rtc.establishes_sessions());
         assert_eq!(rtc.slot_count(), 3);
         let slots: Vec<SlotSource<'_>> = rtc.slots().collect();
         let SlotSource::Irq(line) = slots[0] else {
@@ -659,16 +667,22 @@ mod tests {
         };
         assert_eq!(window.compatible().collect::<Vec<_>>(), RTC_SELECTORS);
         assert_eq!(window.resource, 1);
-        assert_eq!(slots[2], SlotSource::Service { provider: 0 });
-        assert_eq!(rtc.requires().collect::<Vec<_>>(), vec![0]);
-        assert_eq!(rtc.after().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(
+            slots[2],
+            SlotSource::Service {
+                provider: IMAGE_FS_NAME
+            }
+        );
+        assert_eq!(rtc.after().collect::<Vec<_>>(), vec![IMAGE_FS_NAME]);
     }
 
     #[test]
     fn round_trip_carries_a_directory_slot_with_its_provider() {
         let consumer = ComponentSpec {
-            slots: &[SlotSpec::Directory { provider: 0 }],
-            requires: &[0],
+            slots: &[SlotSpec::Directory {
+                provider: ROUTER_NAME,
+            }],
+            after: &[],
             ..rtc()
         };
         let bytes = encode_plan(&[router(), consumer]).expect("encode plan");
@@ -677,9 +691,58 @@ mod tests {
         let consumer = plan.component(1).expect("second component");
         assert_eq!(
             consumer.slots().collect::<Vec<_>>(),
-            vec![SlotSource::Directory { provider: 0 }]
+            vec![SlotSource::Directory {
+                provider: ROUTER_NAME
+            }]
         );
-        assert_eq!(consumer.requires().collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
+    fn round_trip_carries_a_control_slot_with_its_provider() {
+        let consumer = ComponentSpec {
+            slots: &[SlotSpec::Control {
+                provider: ROUTER_NAME,
+            }],
+            after: &[],
+            ..rtc()
+        };
+        let bytes = encode_plan(&[router(), consumer]).expect("encode plan");
+
+        let plan = decode_plan(&bytes).expect("decode plan");
+        let consumer = plan.component(1).expect("second component");
+        assert_eq!(
+            consumer.slots().collect::<Vec<_>>(),
+            vec![SlotSource::Control {
+                provider: ROUTER_NAME
+            }]
+        );
+    }
+
+    #[test]
+    fn round_trip_names_a_provider_outside_the_record_of_its_consumer() {
+        // Имя работает сквозь ступени: провайдер лежит вне этой записи, и слот
+        // называет его именем экземпляра.
+        let consumer = ComponentSpec {
+            slots: &[SlotSpec::Service {
+                provider: "stage-zero-ramfs",
+            }],
+            after: &["stage-zero-router"],
+            ..rtc()
+        };
+        let bytes = encode_plan(&[consumer]).expect("encode plan");
+
+        let plan = decode_plan(&bytes).expect("decode plan");
+        let consumer = plan.component(0).expect("only component");
+        assert_eq!(
+            consumer.slots().collect::<Vec<_>>(),
+            vec![SlotSource::Service {
+                provider: "stage-zero-ramfs"
+            }]
+        );
+        assert_eq!(
+            consumer.after().collect::<Vec<_>>(),
+            vec!["stage-zero-router"]
+        );
     }
 
     #[test]
@@ -723,10 +786,10 @@ mod tests {
     #[test]
     fn decode_rejects_another_version() {
         let mut bytes = plan_bytes();
-        bytes[8..10].copy_from_slice(&3u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&9u16.to_le_bytes());
         assert_eq!(
             decode_plan(&bytes).expect_err("version must match"),
-            PlanDecodeError::InvalidVersion(3)
+            PlanDecodeError::InvalidVersion(9)
         );
     }
 
@@ -800,11 +863,23 @@ mod tests {
 
     #[test]
     fn decode_rejects_a_reserved_field_in_use() {
+        for offset in [14, 16] {
+            let mut bytes = plan_bytes();
+            bytes[PLAN_HEADER_SIZE + offset] = 1;
+            assert_eq!(
+                decode_plan(&bytes).expect_err("reserved bytes are zero"),
+                PlanDecodeError::InvalidLayout("reserved")
+            );
+        }
+    }
+
+    #[test]
+    fn decode_rejects_a_flag_outside_the_declared_set() {
         let mut bytes = plan_bytes();
-        bytes[PLAN_HEADER_SIZE + 5] = 1;
+        bytes[PLAN_HEADER_SIZE + 5] = 0b10;
         assert_eq!(
-            decode_plan(&bytes).expect_err("reserved bytes are zero"),
-            PlanDecodeError::InvalidLayout("reserved")
+            decode_plan(&bytes).expect_err("component flags are a closed set"),
+            PlanDecodeError::InvalidLayout("flags")
         );
     }
 
@@ -844,18 +919,37 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_a_directory_slot_naming_a_component_outside_the_composition() {
+    fn decode_rejects_a_provider_slot_without_a_name() {
         let component = ComponentSpec {
-            slots: &[SlotSpec::Directory { provider: 0 }],
+            slots: &[SlotSpec::Directory {
+                provider: ROUTER_NAME,
+            }],
             ..router()
         };
         let bytes = encode_plan(&[component]).expect("encode plan");
         let provider_at = first_slot_offset(&component) + 2;
         let mut broken = bytes;
-        broken[provider_at..provider_at + 2].copy_from_slice(&5u16.to_le_bytes());
+        broken[provider_at..provider_at + 2].copy_from_slice(&0u16.to_le_bytes());
 
         assert_eq!(
-            decode_plan(&broken).expect_err("provider is a component of the plan"),
+            decode_plan(&broken).expect_err("provider slot names its instance"),
+            PlanDecodeError::InvalidLayout("slot_provider")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_a_provider_name_on_a_slot_without_one() {
+        let component = ComponentSpec {
+            slots: &[SlotSpec::Userland],
+            ..router()
+        };
+        let bytes = encode_plan(&[component]).expect("encode plan");
+        let provider_at = first_slot_offset(&component) + 2;
+        let mut broken = bytes;
+        broken[provider_at..provider_at + 2].copy_from_slice(&4u16.to_le_bytes());
+
+        assert_eq!(
+            decode_plan(&broken).expect_err("only a provider slot names an instance"),
             PlanDecodeError::InvalidLayout("slot_provider")
         );
     }
@@ -866,13 +960,13 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_an_edge_outside_the_composition() {
+    fn decode_rejects_an_edge_without_a_name() {
         let bytes = plan_bytes();
-        let edge_at = bytes.len() - INDEX_SIZE;
+        let edge_at = bytes.len() - NAME_LEN_SIZE - IMAGE_FS_NAME.len();
         let mut broken = bytes;
-        broken[edge_at..].copy_from_slice(&5u16.to_le_bytes());
+        broken[edge_at..edge_at + NAME_LEN_SIZE].copy_from_slice(&0u16.to_le_bytes());
         assert_eq!(
-            decode_plan(&broken).expect_err("edges name components of the plan"),
+            decode_plan(&broken).expect_err("edges name instances"),
             PlanDecodeError::InvalidLayout("edge")
         );
     }
@@ -929,31 +1023,40 @@ mod tests {
             PlanEncodeError::EmptyComposition
         );
 
-        let unknown_provider = ComponentSpec {
-            slots: &[SlotSpec::Service { provider: 4 }],
+        let nameless_provider = ComponentSpec {
+            slots: &[SlotSpec::Service { provider: "" }],
             ..router()
         };
         assert_eq!(
-            encode_plan(&[unknown_provider]).expect_err("provider is a component of the plan"),
-            PlanEncodeError::IndexOutOfRange
+            encode_plan(&[nameless_provider]).expect_err("provider names an instance"),
+            PlanEncodeError::EmptyString
         );
 
-        let unknown_directory = ComponentSpec {
-            slots: &[SlotSpec::Directory { provider: 4 }],
+        let nameless_directory = ComponentSpec {
+            slots: &[SlotSpec::Directory { provider: "" }],
             ..router()
         };
         assert_eq!(
-            encode_plan(&[unknown_directory]).expect_err("provider is a component of the plan"),
-            PlanEncodeError::IndexOutOfRange
+            encode_plan(&[nameless_directory]).expect_err("provider names an instance"),
+            PlanEncodeError::EmptyString
         );
 
-        let unknown_edge = ComponentSpec {
-            requires: &[7],
+        let nameless_control = ComponentSpec {
+            slots: &[SlotSpec::Control { provider: "" }],
             ..router()
         };
         assert_eq!(
-            encode_plan(&[unknown_edge]).expect_err("edges name components of the plan"),
-            PlanEncodeError::IndexOutOfRange
+            encode_plan(&[nameless_control]).expect_err("provider names an instance"),
+            PlanEncodeError::EmptyString
+        );
+
+        let nameless_edge = ComponentSpec {
+            after: &[""],
+            ..router()
+        };
+        assert_eq!(
+            encode_plan(&[nameless_edge]).expect_err("edges name instances"),
+            PlanEncodeError::EmptyString
         );
     }
 }

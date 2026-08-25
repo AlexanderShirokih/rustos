@@ -17,7 +17,7 @@ const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 const PROBE_TURN: Timeout = Timeout::from_millis(10);
 
 const NO_STARTUP_EXIT_CODE: u64 = 1;
-const RESOLVE_FAILED_EXIT_CODE: u64 = 3;
+const NO_ANSWER_EXIT_CODE: u64 = 3;
 const PROVIDER_GONE_EXIT_CODE: u64 = 9;
 
 component_manifest! {
@@ -38,26 +38,28 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     let session = OwnedHandle::adopt(started.namespace);
     let namespace = namespace::Client::new(PortTransport::client(&session)).with_wait(CALL_TIMEOUT);
     let Some(path) = Str::<{ PATH_MAX }>::new(PROBE_PATH) else {
-        thread_exit(RESOLVE_FAILED_EXIT_CODE);
+        thread_exit(NO_ANSWER_EXIT_CODE);
     };
-    if !resolve(&namespace, path) {
-        thread_exit(RESOLVE_FAILED_EXIT_CODE);
+    if !answers(&namespace, path) {
+        thread_exit(NO_ANSWER_EXIT_CODE);
     }
 
-    // Провайдер разрешает путь, пока жив: его уход виден отказом транспорта.
-    while resolve(&namespace, path) {
+    // Провайдер отвечает по сессии слота, пока жив: его уход виден отказом транспорта, а путь
+    // вне таблицы монтирования - обычный ответ.
+    while answers(&namespace, path) {
         pause(PROBE_TURN);
     }
     thread_exit(PROVIDER_GONE_EXIT_CODE)
 }
 
-fn resolve(namespace: &namespace::Client<PortTransport>, path: Str<'_, { PATH_MAX }>) -> bool {
+fn answers(namespace: &namespace::Client<PortTransport>, path: Str<'_, { PATH_MAX }>) -> bool {
     match namespace.resolve(path) {
         Ok(Ok(session)) => {
             drop(OwnedHandle::adopt(session));
             true
         }
-        _ => false,
+        Ok(Err(_)) => true,
+        Err(_) => false,
     }
 }
 

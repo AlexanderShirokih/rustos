@@ -1,5 +1,5 @@
-//! Admin-контракты процессов файловой подсистемы: они живут всё время работы процесса
-//! и клиентским капам недоступны.
+//! Admin-контракт маршрутизатора имён: он живёт всё время работы процесса и клиентским капам
+//! недоступен.
 
 use crate::{error::FileSystemError, limits::PATH_MAX};
 
@@ -9,30 +9,16 @@ ipc::protocol! {
     pub mod namespace_admin {
         name = "NamespaceAdmin";
 
-        /// Монтирует под префикс `path` файловую систему, которую обслуживает программа
-        /// `program`. Занятый префикс - `AlreadyExists`.
+        /// Прививает под префикс `path` переданную сессию файловой системы. Занятый префикс -
+        /// `AlreadyExists`. Принадлежность капы файловой системе проверяет клиент: сессия чужого
+        /// порта отвечает ему `Unresponsive` на разборе пути.
         call fn mount(
             path: ipc::wire::Str<{ PATH_MAX }>,
-            program: ipc::wire::Str<{ PATH_MAX }>,
+            session: Cap,
         ) -> Result<u32, FileSystemError>;
 
         /// Снимает монтирование с префикса `path`. Незанятый префикс - `NotFound`.
         call fn unmount(path: ipc::wire::Str<{ PATH_MAX }>) -> Result<u32, FileSystemError>;
-    }
-}
-
-ipc::protocol! {
-    /// Установление сессий файловой системы владельцем компонента.
-    pub mod file_system_admin {
-        name = "FileSystemAdmin";
-
-        /// Заводит сессию и отдаёт capability сервисного порта под её значком. Значок
-        /// назначает сервер: политика допуска принадлежит владельцу файловой системы, и место
-        /// отказа - само установление сессии.
-        ///
-        /// Значения значков не переиспользуются: это отделяет отставший кадр ушедшей сессии
-        /// от живой.
-        call fn bind() -> Result<ipc::wire::Cap, FileSystemError>;
     }
 }
 
@@ -44,39 +30,19 @@ mod tests {
     use ipc::wire::{Cap, Str};
     use ipc_test::MockEnd;
 
-    use super::{FileSystemError, PATH_MAX, file_system_admin, namespace_admin};
+    use super::{FileSystemError, PATH_MAX, namespace_admin};
 
-    const SESSION_CAP: Cap = cap(0x25);
-
-    #[derive(Default)]
-    struct Sink {
-        binds: u32,
-    }
+    const SESSION: Cap = Cap::from_raw(NonZeroU32::new(0x41).expect("non-zero"));
 
     #[derive(Default)]
     struct RouterSink {
         mounted: Vec<std::string::String>,
     }
 
-    impl file_system_admin::Service for Sink {
-        fn bind(&mut self) -> Result<Cap, FileSystemError> {
-            self.binds += 1;
-            // Вторая сессия сверх квоты этой заглушки не заводится.
-            if self.binds > 1 {
-                return Err(FileSystemError::NoSpace);
-            }
-            Ok(SESSION_CAP)
-        }
-    }
-
     impl namespace_admin::Service for RouterSink {
-        fn mount(
-            &mut self,
-            path: Str<'_, PATH_MAX>,
-            program: Str<'_, PATH_MAX>,
-        ) -> Result<u32, FileSystemError> {
+        fn mount(&mut self, path: Str<'_, PATH_MAX>, session: Cap) -> Result<u32, FileSystemError> {
             self.mounted
-                .push(std::format!("mount {} {}", path.as_str(), program.as_str()));
+                .push(std::format!("mount {} {}", path.as_str(), session.raw()));
             Ok(0)
         }
 
@@ -84,10 +50,6 @@ mod tests {
             self.mounted.push(std::format!("unmount {}", path.as_str()));
             Ok(0)
         }
-    }
-
-    const fn cap(raw: u32) -> Cap {
-        Cap::from_raw(NonZeroU32::new(raw).expect("non-zero"))
     }
 
     #[test]
@@ -105,37 +67,16 @@ mod tests {
 
             let client = namespace_admin::Client::new(client_end);
             let path = Str::new("/tmp").expect("path within the bound");
-            let program = Str::new("/boot/filesystem-ramfs").expect("path within the bound");
-            assert_eq!(client.mount(path, program).expect("call"), Ok(0));
+            assert_eq!(client.mount(path, SESSION).expect("call"), Ok(0));
             assert_eq!(client.unmount(path).expect("call"), Ok(0));
             server.join().expect("server joins");
         });
         assert_eq!(
             sink.mounted,
             [
-                "mount /tmp /boot/filesystem-ramfs".to_string(),
+                std::format!("mount /tmp {}", SESSION.raw()),
                 "unmount /tmp".to_string()
             ]
         );
-    }
-
-    #[test]
-    fn bind_vends_the_session_capability_and_may_refuse() {
-        let (client_end, server_end) = MockEnd::pair();
-        let mut sink = Sink::default();
-        std::thread::scope(|scope| {
-            let server = scope.spawn(|| {
-                for _ in 0..2 {
-                    ipc::Transport::wait_readable(&server_end, ipc::Timeout::INFINITE)
-                        .expect("server wait");
-                    file_system_admin::dispatch(&mut sink, &server_end).expect("dispatch ok");
-                }
-            });
-
-            let client = file_system_admin::Client::new(client_end);
-            assert_eq!(client.bind().expect("call"), Ok(SESSION_CAP));
-            assert_eq!(client.bind().expect("call"), Err(FileSystemError::NoSpace));
-            server.join().expect("server joins");
-        });
     }
 }

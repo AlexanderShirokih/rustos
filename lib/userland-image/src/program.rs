@@ -94,7 +94,9 @@ impl<'a> Iterator for DecodedSegments<'a> {
     }
 }
 
-pub(crate) fn decode_program<'a>(
+/// Разбирает программу из байт `data`, называя её путём `path`. Длины сегментов проверяются
+/// против фактического среза, и байты за концом программы разбору не мешают.
+pub fn decode_program<'a>(
     path: &'a str,
     data: &'a [u8],
 ) -> Result<DecodedProgram<'a>, ProgramDecodeError> {
@@ -247,6 +249,19 @@ mod tests {
             decode_segment(&bytes, PROGRAM_HEADER_SIZE + SEGMENT_SIZE).expect("second descriptor");
         assert_eq!(first.file_offset, USERLAND_PAGE_SIZE);
         assert_eq!(second.file_offset, 2 * USERLAND_PAGE_SIZE);
+    }
+
+    #[test]
+    fn decode_reads_a_program_from_bytes_with_page_slack_past_its_end() {
+        let mut bytes = program_bytes();
+        let length = bytes.len();
+        bytes.resize(length + USERLAND_PAGE_SIZE as usize, 0);
+
+        let program =
+            decode_program(PATH, &bytes).expect("slack past the program is not a segment");
+        let segments: Vec<_> = program.segments().collect();
+        assert_eq!(segments[0].bytes, b"CODE");
+        assert_eq!(segments[1].bytes, b"RW");
     }
 
     #[test]

@@ -20,14 +20,14 @@ use userland::{
     Entry, Segment, SegmentPermissions, USERLAND_ENTRY_PATH_CAPACITY, USERLAND_PAGE_SIZE,
 };
 use userland_image::{
-    BOOT_PLAN_PATH, COMPONENT_PROGRAM_NAME, ImageRecord, USERLAND_IMAGE_VERSION, decode, encode,
-    encode_program,
+    BOOT_PLAN_PATH, BOOT_STAGE_ONE_DIRECTORY, COMPONENT_PROGRAM_NAME, ImageRecord,
+    USERLAND_IMAGE_VERSION, decode, encode, encode_program,
 };
 
 use crate::{
     manifest::ProgramManifest,
     mounts::compile_mount_table,
-    plan::{PlanProgram, compile_boot_plan},
+    plan::{PlanProgram, StageInstances, compile_stages},
 };
 
 const USERLAND_MANIFEST_VERSION: u16 = USERLAND_IMAGE_VERSION;
@@ -66,6 +66,7 @@ struct ImageManifest {
     #[serde(default)]
     files: Vec<ImageFile>,
     plan: Option<ImagePlan>,
+    stage1: Option<ImageStageOne>,
     #[serde(default)]
     mount_tables: Vec<ImageMountTable>,
 }
@@ -82,6 +83,12 @@ struct ImagePlan {
     source: PathBuf,
     #[serde(default = "default_plan_path")]
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageStageOne {
+    source: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,12 +271,30 @@ pub fn build_userland(
             manifest: &entry.manifest,
         })
         .collect();
-    let paths: Vec<&str> = built_programs.iter().map(|program| program.path).collect();
+    let instances = if let Some(plan) = &manifest.plan {
+        let stages = compile_stage_records(
+            project_root,
+            plan,
+            manifest.stage1.as_ref(),
+            &built_programs,
+        )?;
+        files.extend(stages.records);
+        stages.instances
+    } else {
+        // Ступень 1 связывается с экспортёрами ступени 0 по имени экземпляра, и дерево имён
+        // прививается сессиями компонентов: без плана называть их нечем.
+        ensure!(
+            manifest.stage1.is_none(),
+            "userland image manifest sets [stage1] without [plan]"
+        );
+        ensure!(
+            manifest.mount_tables.is_empty(),
+            "userland image manifest sets [[mount_tables]] without [plan]"
+        );
+        StageInstances::default()
+    };
     for table in &manifest.mount_tables {
-        files.push(compile_mount_table_record(project_root, table, &paths)?);
-    }
-    if let Some(plan) = &manifest.plan {
-        files.push(compile_plan_record(project_root, plan, &built_programs)?);
+        files.push(compile_mount_table_record(project_root, table, &instances)?);
     }
 
     let blob = assemble_userland_image(&built_entries, &files)?;
@@ -586,38 +611,75 @@ fn resolve_program(program: &ImageProgram, meta: &UserlandMetadata) -> Result<Re
     Ok(resolved)
 }
 
-fn compile_plan_record(
+struct StageRecords {
+    records: Vec<LoadedFile>,
+    instances: StageInstances,
+}
+
+fn compile_stage_records(
     project_root: &Path,
     plan: &ImagePlan,
+    stage_one: Option<&ImageStageOne>,
     programs: &[PlanProgram<'_>],
-) -> Result<LoadedFile> {
+) -> Result<StageRecords> {
     validate_image_path(&plan.path)?;
-    let source = project_root.join(&plan.source);
-    let text = fs::read_to_string(&source).with_context(|| {
+    let plan_source = project_root.join(&plan.source);
+    let plan_text = fs::read_to_string(&plan_source).with_context(|| {
         format!(
             "Failed to read boot plan '{}' of image record '{}'",
-            source.display(),
+            plan_source.display(),
             plan.path
         )
     })?;
-    let bytes = compile_boot_plan(&text, programs)
-        .with_context(|| format!("Failed to compile boot plan '{}'", source.display()))?;
-    Ok(LoadedFile {
+    let stage_one_source = stage_one.map(|stage| project_root.join(&stage.source));
+    let stage_one_text = stage_one_source
+        .as_ref()
+        .map(|source| {
+            fs::read_to_string(source)
+                .with_context(|| format!("Failed to read stage 1 '{}'", source.display()))
+        })
+        .transpose()?;
+    let stages =
+        compile_stages(&plan_text, stage_one_text.as_deref(), programs).with_context(|| {
+            match &stage_one_source {
+                Some(stage) => format!(
+                    "Failed to compile boot plan '{}' with stage 1 '{}'",
+                    plan_source.display(),
+                    stage.display()
+                ),
+                None => format!("Failed to compile boot plan '{}'", plan_source.display()),
+            }
+        })?;
+
+    let mut records = vec![LoadedFile {
         path: plan.path.clone(),
-        source,
-        bytes,
+        source: plan_source,
+        bytes: stages.plan,
+    }];
+    for record in stages.stage_one {
+        let path = format!("{BOOT_STAGE_ONE_DIRECTORY}/{}", record.name);
+        validate_image_path(&path).context("stage 1 component names an invalid image record")?;
+        records.push(LoadedFile {
+            path,
+            source: stage_one_source.clone().unwrap_or_default(),
+            bytes: record.bytes,
+        });
+    }
+    Ok(StageRecords {
+        records,
+        instances: stages.instances,
     })
 }
 
 fn compile_mount_table_record(
     project_root: &Path,
     table: &ImageMountTable,
-    programs: &[&str],
+    instances: &StageInstances,
 ) -> Result<LoadedFile> {
     let source = project_root.join(&table.source);
     let text = fs::read_to_string(&source)
         .with_context(|| format!("Failed to read mount table '{}'", source.display()))?;
-    let bytes = compile_mount_table(&text, programs)
+    let bytes = compile_mount_table(&text, instances)
         .with_context(|| format!("Failed to compile mount table '{}'", source.display()))?;
     Ok(LoadedFile {
         path: BOOT_MOUNT_TABLE_PATH.to_string(),
@@ -1045,6 +1107,7 @@ mod tests {
                 .collect(),
             files: Vec::new(),
             plan: None,
+            stage1: None,
             mount_tables: Vec::new(),
         }
     }

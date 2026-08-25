@@ -1,7 +1,12 @@
+use core::num::NonZeroU64;
+
 use ipc::{Transport, wire::IpcError};
 
 /// Граница числа слотов capability одного компонента.
 pub const COMPONENT_SLOT_MAX: usize = 8;
+
+/// Значок клиентской capability control-порта, оставшейся у supervisor.
+pub const CONTROL_LEASE_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("lease badge is non-zero");
 
 ipc::protocol! {
     /// Одноразовая стартовая транзакция компонента композиции: передача стартового
@@ -53,6 +58,14 @@ pub fn receive_startup_transaction<T: Transport>(
         }
     }
     Ok(receiver.started)
+}
+
+/// Уход значка `badge` на control-порту компонента - уход supervisor, и это событие
+/// терминально. Прочие значки порта выданы импортом его control-протокола, и их уход цикл
+/// приёма продолжает.
+#[must_use]
+pub const fn supervisor_gone(badge: u64) -> bool {
+    badge == CONTROL_LEASE_BADGE.get()
 }
 
 impl StartedComponent {
@@ -129,7 +142,9 @@ mod tests {
     };
     use ipc_test::MockEnd;
 
-    use super::{component_startup, receive_startup_transaction};
+    use super::{
+        CONTROL_LEASE_BADGE, component_startup, receive_startup_transaction, supervisor_gone,
+    };
 
     const LOG_CAP: Cap = cap(0x21);
     const CONTROL_CAP: Cap = cap(0x23);
@@ -252,5 +267,13 @@ mod tests {
         let (image, image_fate) = fake(0x35);
         assert_eq!(client.slot(image), Err(IpcError::PeerClosed));
         assert_eq!(image_fate.get(), Fate::Dropped);
+    }
+
+    #[test]
+    fn only_the_lease_badge_of_the_control_port_reports_the_supervisor() {
+        assert!(supervisor_gone(CONTROL_LEASE_BADGE.get()));
+        // Значок потребителя control-протокола цикл приёма провайдера не завершает.
+        assert!(!supervisor_gone(CONTROL_LEASE_BADGE.get() + 1));
+        assert!(!supervisor_gone(0));
     }
 }

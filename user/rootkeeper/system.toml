@@ -5,7 +5,6 @@ executable = "/boot/namespace-router"
 memory_limit = "2M"
 startup_timeout = "2s"
 on_failure = "restart 2 then halt"
-after = ["filesystem-imagefs", "filesystem-ramfs"]
 
 [[components]]
 executable = "/boot/filesystem-imagefs"
@@ -14,25 +13,7 @@ startup_timeout = "2s"
 on_failure = "halt"
 
 [[components]]
-executable = "/boot/filesystem-ramfs"
-memory_limit = "4M"
+executable = "/boot/init"
+memory_limit = "2M"
 startup_timeout = "2s"
-on_failure = "detach"
-
-[[components]]
-executable = "/boot/driver-pl031"
-memory_limit = "1M"
-startup_timeout = "2s"
-on_failure = "detach"
-
-[[components]]
-executable = "/boot/clock-std"
-memory_limit = "8M"
-startup_timeout = "2s"
-on_failure = "detach"
-
-[[components]]
-executable = "/boot/hello-std"
-memory_limit = "8M"
-startup_timeout = "2s"
-on_failure = "detach"
+on_failure = "halt"

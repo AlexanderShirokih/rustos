@@ -12,6 +12,7 @@ bench = false
 doctest = false
 
 [dependencies]
+component-abi = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }
 ipc = { workspace = true }

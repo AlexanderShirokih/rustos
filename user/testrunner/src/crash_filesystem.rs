@@ -24,6 +24,8 @@ const LOG_TAG: &str = "crashfs";
 
 component_manifest! {
     struct CrashFileSystemStartup {
+        exports: "FileSystem",
+        establishes_sessions: true,
         slots: {},
     }
 }

@@ -9,6 +9,7 @@ members = [
     "filesystem-imagefs",
     "filesystem-ramfs",
     "hello-std",
+    "init",
     "namespace-router",
     "rootkeeper",
     "std-selftest",
@@ -55,7 +56,7 @@ ipc = { path = "../lib/ipc" }
 log-abi = { path = "../lib/log-abi" }
 molecular-rt = { path = "../lib/std-rt" }
 rtc-abi = { path = "../lib/rtc-abi" }
-rootkeeper-abi = { path = "../lib/rootkeeper-abi" }
+supervisor-abi = { path = "../lib/supervisor-abi" }
 syscall = { path = "../lib/syscall" }
 test-harness-qemu = { path = "../lib/test-harness-qemu" }
 userland = { path = "../lib/userland" }

@@ -63,8 +63,26 @@ test = false
 bench = false
 
 [[bin]]
+name = "filesystem-consumer-fixture"
+path = "src/filesystem_consumer_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "directory-consumer-fixture"
 path = "src/directory_consumer_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "control-consumer-fixture"
+path = "src/control_consumer_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "supervisor-consumer-fixture"
+path = "src/supervisor_consumer_fixture.rs"
 test = false
 bench = false
 
@@ -124,6 +142,7 @@ runtime = { workspace = true }
 managed-component = { workspace = true }
 rootkeeper = { path = "../rootkeeper" }
 rtc-abi = { workspace = true }
+supervisor-abi = { workspace = true }
 userland = { workspace = true }
 userland-image = { workspace = true, features = ["alloc"] }
 userland-loader = { workspace = true }

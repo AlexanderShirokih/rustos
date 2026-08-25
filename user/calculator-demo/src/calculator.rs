@@ -9,7 +9,7 @@
 use core::panic::PanicInfo;
 
 use calculator_demo::calculator;
-use component_abi::component_manifest;
+use component_abi::{component_manifest, supervisor_gone};
 use ipc::{Transport as _, wire::IpcError};
 use runtime::{
     OwnedHandle, PortTransport, Priority, Thread, Timeout, exit_with_sibling, install_log, log_fmt,
@@ -95,14 +95,14 @@ fn watch_supervisor(control: &OwnedHandle, service_thread: &Thread) -> u32 {
             // Протокола на control-порту нет: пришедший кадр уходит без ответа,
             // а закрытие reply-объекта будит вызывателя.
             Ok(()) => transport.cancel_reply(),
-            // Отправитель на control-порту один - поднявший компонент
-            // supervisor. Его уход снимает процесс целиком.
-            Err(IpcError::SenderGone) => {
+            // Уход значка поднявшего компонент supervisor снимает процесс целиком.
+            Err(IpcError::SenderGone) if supervisor_gone(transport.peer_badge()) => {
                 log_line("supervisor gone");
                 exit_with_sibling(service_thread, SUPERVISOR_LOST_EXIT_CODE)
             }
-            // Покадровое исчерпание и пробуждение без кадра цикл не закрывают.
-            Err(IpcError::ResourceExhausted | IpcError::Timeout) => {}
+            // Покадровое исчерпание, пробуждение без кадра и уход чужого значка цикл не
+            // закрывают.
+            Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout) => {}
             // Прочий отказ приёма оставляет калькулятор без надзора и снимает
             // процесс отличимым кодом.
             Err(_) => {

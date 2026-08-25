@@ -2,8 +2,8 @@ version = 1
 
 [[mounts]]
 path = "/"
-program = "/boot/filesystem-imagefs"
+instance = "filesystem-imagefs"
 
 [[mounts]]
 path = "/tmp"
-program = "/boot/filesystem-ramfs"
+instance = "filesystem-ramfs"

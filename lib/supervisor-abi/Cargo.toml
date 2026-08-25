@@ -1,11 +1,10 @@
 [package]
-name = "rootkeeper-abi"
+name = "supervisor-abi"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-filesystem-abi = { workspace = true }
 ipc = { workspace = true }
 
 [dev-dependencies]

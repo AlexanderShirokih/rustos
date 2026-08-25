@@ -3,9 +3,10 @@ use alloc::vec::Vec;
 use syscall::Timeout;
 
 use crate::plan::{
-    BOOT_PLAN_MAGIC, BOOT_PLAN_VERSION, EXHAUSTED_DETACH, EXHAUSTED_HALT, OnExhausted,
-    PLAN_HEADER_SIZE, SLOT_KIND_DIRECTORY, SLOT_KIND_IRQ, SLOT_KIND_MMIO, SLOT_KIND_SERVICE,
-    SLOT_KIND_SUPERVISOR, SLOT_KIND_USERLAND,
+    BOOT_PLAN_MAGIC, BOOT_PLAN_VERSION, EXHAUSTED_DETACH, EXHAUSTED_HALT,
+    FLAG_ESTABLISHES_SESSIONS, OnExhausted, PLAN_HEADER_SIZE, SLOT_KIND_CONTROL,
+    SLOT_KIND_DIRECTORY, SLOT_KIND_IRQ, SLOT_KIND_MMIO, SLOT_KIND_SERVICE, SLOT_KIND_SUPERVISOR,
+    SLOT_KIND_USERLAND,
 };
 
 /// Устройство, названное слотом композиции.
@@ -28,13 +29,15 @@ pub enum SlotSpec<'a> {
     Irq(DeviceSpec<'a>),
     /// MMIO-окно устройства.
     Mmio(DeviceSpec<'a>),
-    /// Сессия service-порта компонента с номером `provider` в плане.
-    Service { provider: u16 },
+    /// Сессия service-порта экземпляра `provider`.
+    Service { provider: &'a str },
     /// Сессия файловой системы с каталогом компонента в роли корня, выданная
-    /// маршрутизатором имён с номером `provider` в плане.
-    Directory { provider: u16 },
+    /// экземпляром `provider` маршрутизатора имён.
+    Directory { provider: &'a str },
     /// Клиентская capability supervisor, поднявшего компонент.
     Supervisor,
+    /// Клиентская capability control-порта экземпляра `provider`.
+    Control { provider: &'a str },
 }
 
 /// Компонент композиции, укладываемый в план.
@@ -43,12 +46,14 @@ pub struct ComponentSpec<'a> {
     pub executable: &'a str,
     pub name: &'a str,
     pub slots: &'a [SlotSpec<'a>],
-    pub requires: &'a [u16],
-    pub after: &'a [u16],
+    /// Имена экземпляров, которые поднимаются раньше этого без обмена с ним.
+    pub after: &'a [&'a str],
     pub memory_pages: u64,
     pub startup_timeout: Timeout,
     pub launches: u32,
     pub on_exhausted: OnExhausted,
+    /// Компонент заводит сессии своего service-порта сам.
+    pub establishes_sessions: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +62,6 @@ pub enum PlanEncodeError {
     EmptyString,
     StringTooLong,
     TooManyEntries,
-    IndexOutOfRange,
     ZeroMemory,
     ZeroLaunches,
     UnboundedStartupTimeout,
@@ -77,7 +81,7 @@ pub fn encode_plan(components: &[ComponentSpec<'_>]) -> Result<Vec<u8>, PlanEnco
     bytes.extend_from_slice(&0u32.to_le_bytes());
 
     for component in components {
-        encode_component(&mut bytes, component, count)?;
+        encode_component(&mut bytes, component)?;
     }
     Ok(bytes)
 }
@@ -85,7 +89,6 @@ pub fn encode_plan(components: &[ComponentSpec<'_>]) -> Result<Vec<u8>, PlanEnco
 fn encode_component(
     bytes: &mut Vec<u8>,
     component: &ComponentSpec<'_>,
-    count: u16,
 ) -> Result<(), PlanEncodeError> {
     if component.memory_pages == 0 {
         return Err(PlanEncodeError::ZeroMemory);
@@ -100,7 +103,6 @@ fn encode_component(
     let executable_len = string_len(component.executable)?;
     let name_len = string_len(component.name)?;
     let slot_count = entry_count(component.slots.len())?;
-    let requires_count = entry_count(component.requires.len())?;
     let after_count = entry_count(component.after.len())?;
 
     bytes.extend_from_slice(&component.launches.to_le_bytes());
@@ -108,12 +110,16 @@ fn encode_component(
         OnExhausted::Halt => EXHAUSTED_HALT,
         OnExhausted::Detach => EXHAUSTED_DETACH,
     });
-    bytes.push(0);
+    bytes.push(if component.establishes_sessions {
+        FLAG_ESTABLISHES_SESSIONS
+    } else {
+        0
+    });
     bytes.extend_from_slice(&executable_len.to_le_bytes());
     bytes.extend_from_slice(&name_len.to_le_bytes());
     bytes.extend_from_slice(&slot_count.to_le_bytes());
-    bytes.extend_from_slice(&requires_count.to_le_bytes());
     bytes.extend_from_slice(&after_count.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
     bytes.extend_from_slice(&0u64.to_le_bytes());
     bytes.extend_from_slice(&component.memory_pages.to_le_bytes());
     bytes.extend_from_slice(&component.startup_timeout.raw().to_le_bytes());
@@ -121,59 +127,45 @@ fn encode_component(
     bytes.extend_from_slice(component.name.as_bytes());
 
     for slot in component.slots {
-        encode_slot(bytes, slot, count)?;
+        encode_slot(bytes, slot)?;
     }
-    for edges in [component.requires, component.after] {
-        for index in edges {
-            if *index >= count {
-                return Err(PlanEncodeError::IndexOutOfRange);
-            }
-            bytes.extend_from_slice(&index.to_le_bytes());
-        }
+    for edge in component.after {
+        encode_name(bytes, edge)?;
     }
     Ok(())
 }
 
-fn encode_slot(
-    bytes: &mut Vec<u8>,
-    slot: &SlotSpec<'_>,
-    count: u16,
-) -> Result<(), PlanEncodeError> {
+fn encode_slot(bytes: &mut Vec<u8>, slot: &SlotSpec<'_>) -> Result<(), PlanEncodeError> {
     let mut header = [0u8; 12];
-    let device = match slot {
-        SlotSpec::Userland => {
-            header[0] = SLOT_KIND_USERLAND;
-            None
-        }
+    let mut instance = None;
+    let mut device = None;
+    match slot {
+        SlotSpec::Userland => header[0] = SLOT_KIND_USERLAND,
         SlotSpec::Service { provider } => {
-            if *provider >= count {
-                return Err(PlanEncodeError::IndexOutOfRange);
-            }
             header[0] = SLOT_KIND_SERVICE;
-            header[2..4].copy_from_slice(&provider.to_le_bytes());
-            None
+            instance = Some(*provider);
         }
         SlotSpec::Directory { provider } => {
-            if *provider >= count {
-                return Err(PlanEncodeError::IndexOutOfRange);
-            }
             header[0] = SLOT_KIND_DIRECTORY;
-            header[2..4].copy_from_slice(&provider.to_le_bytes());
-            None
+            instance = Some(*provider);
         }
-        SlotSpec::Supervisor => {
-            header[0] = SLOT_KIND_SUPERVISOR;
-            None
+        SlotSpec::Control { provider } => {
+            header[0] = SLOT_KIND_CONTROL;
+            instance = Some(*provider);
         }
-        SlotSpec::Irq(device) => {
+        SlotSpec::Supervisor => header[0] = SLOT_KIND_SUPERVISOR,
+        SlotSpec::Irq(spec) => {
             header[0] = SLOT_KIND_IRQ;
-            Some(device)
+            device = Some(spec);
         }
-        SlotSpec::Mmio(device) => {
+        SlotSpec::Mmio(spec) => {
             header[0] = SLOT_KIND_MMIO;
-            Some(device)
+            device = Some(spec);
         }
-    };
+    }
+    if let Some(instance) = instance {
+        header[2..4].copy_from_slice(&string_len(instance)?.to_le_bytes());
+    }
     if let Some(device) = device {
         // Драйвер работает с семейством устройств: подходит любая из строк, и
         // выбор между ними принадлежит описанию платформы.
@@ -187,13 +179,21 @@ fn encode_slot(
     }
 
     bytes.extend_from_slice(&header);
+    if let Some(instance) = instance {
+        bytes.extend_from_slice(instance.as_bytes());
+    }
     if let Some(device) = device {
         for compatible in device.compatible {
-            let len = string_len(compatible)?;
-            bytes.extend_from_slice(&len.to_le_bytes());
-            bytes.extend_from_slice(compatible.as_bytes());
+            encode_name(bytes, compatible)?;
         }
     }
+    Ok(())
+}
+
+fn encode_name(bytes: &mut Vec<u8>, name: &str) -> Result<(), PlanEncodeError> {
+    let len = string_len(name)?;
+    bytes.extend_from_slice(&len.to_le_bytes());
+    bytes.extend_from_slice(name.as_bytes());
     Ok(())
 }
 

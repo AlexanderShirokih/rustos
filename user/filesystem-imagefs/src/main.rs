@@ -17,6 +17,8 @@ const LOG_TAG: &str = "imagefs";
 
 component_manifest! {
     struct ImageFileSystemStartup {
+        exports: "FileSystem",
+        establishes_sessions: true,
         slots: { image: userland },
     }
 }

@@ -103,6 +103,16 @@ impl FileSystemState {
         self.sessions.open(ClientId::from_raw(badge)).map(|_| ())
     }
 
+    pub(crate) fn open_session_at(
+        &mut self,
+        badge: u64,
+        scope: &str,
+    ) -> Result<(), FileSystemError> {
+        let root = Path::new(scope)?;
+        self.backend.lookup(root)?;
+        self.open_session_scoped(badge, window_scope(root))
+    }
+
     fn open_session_scoped(&mut self, badge: u64, scope: String) -> Result<(), FileSystemError> {
         let session = self.sessions.open(ClientId::from_raw(badge))?;
         session.attachment_mut().scope = scope;
@@ -397,19 +407,22 @@ impl file_system::Service for Serving<'_> {
         let (backend, _, session) = self.backend_stores_session()?;
         let root = scoped(&session.attachment().scope, path, &mut full)?;
         backend.lookup(root)?;
-        // Окно производной сессии - полный путь узла: сужение складывается, а
-        // расширить окно обратно производной нечем.
-        let scope = if root.is_root() {
-            String::new()
-        } else {
-            String::from(root.as_str())
-        };
+        let scope = window_scope(root);
         let (badge, capability) = mint_session(self.service, self.next_badge)?;
         // Сессия заводится до того, как её капа ушла клиенту: кадр по ней застанет
         // её заведённой.
         self.state.open_session_scoped(badge.get(), scope)?;
         Ok(vend(&mut self.frame.vended, capability))
     }
+}
+
+fn window_scope(root: Path<'_>) -> String {
+    // Окно сессии - полный путь узла: сужение складывается, а расширить окно обратно
+    // производной нечем.
+    if root.is_root() {
+        return String::new();
+    }
+    String::from(root.as_str())
 }
 
 pub(crate) fn access_for(mode: AccessMode, region: MemoryAccess) -> MemoryAccess {

@@ -1,39 +1,47 @@
 //! Композиция, которую rootkeeper поднимает при загрузке, и её supervisor.
 
-use alloc::{format, vec::Vec};
+use alloc::{boxed::Box, format, vec::Vec};
 use core::{
     fmt::{Arguments, Write as _},
     num::NonZeroU64,
 };
 
 use bootstrap_abi::bootstrap;
+use component_abi::{SESSION_SCOPE_MAX, component_sessions};
 use device_resolver::{
     DeviceMmio, DeviceSelector, DeviceTreePlatform, PlatformDescription, ResolveError, acquire_mmio,
 };
 use device_resolver_aarch64::PLATFORM_BINDINGS;
 use fdt::devicetree::DeviceTree;
-use filesystem_abi::{PATH_MAX, namespace};
 use ipc::wire::Str;
 use log_abi::{LogBuffer, log};
 use managed_component::{
     ComponentRoots, ComponentSlots, ManagedComponent, ManagedStartupError, launch_component,
 };
 use runtime::{
-    IrqControl, MemoryRegion, OwnedHandle, PortTransport, ReadOnlyMapping, Resource, Timeout,
-    wait_any,
+    BorrowedHandle, IrqControl, MemoryRegion, OwnedHandle, PortTransport, ReadOnlyMapping,
+    Resource, Timeout, wait_any,
 };
-use syscall::{Handle, Rights, SIGNALED, SyscallError, WaitItem};
+use supervisor_abi::ExtendError;
+use syscall::{Handle, Rights, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem};
 use userland_image::{
     BOOT_PLAN_PATH, BootPlan, COMPONENT_PROGRAM_NAME, DecodedImage, DecodedProgram, OnExhausted,
-    PlanComponent, PlanDecodeError, PlanDevice, SlotSource, decode, decode_plan,
+    PlanComponent, PlanDecodeError, PlanDevice, SlotSource, decode, decode_plan, decode_program,
 };
 
-use crate::{relay, sessions::SessionBroker};
+use crate::{
+    extension::{Answer, ExtensionPort, Request},
+    relay,
+};
 
 const LOG_TAG: &str = "supervisor";
 
 /// Конечный срок остановки компонента.
 pub const STOP_TIMEOUT: Timeout = Timeout::from_secs(5);
+
+const SUPERVISOR_WAITS: usize = 2;
+
+const WHOLE_EXPORT: &str = "";
 
 /// Источник делегированных лог-сессий компонентов.
 pub type LogSessions = fn(NonZeroU64) -> Option<OwnedHandle>;
@@ -64,10 +72,16 @@ pub enum BootFailure {
     Plan(PlanDecodeError),
     /// Зависимости плана не укладываются в порядок запуска.
     PlanOrder,
+    /// Запись компонента, поданная транзакцией расширения, не разобрана.
+    Record,
+    /// Имя экземпляра занято другим компонентом композиции.
+    Instance,
     /// В образе нет программы компонента.
     ProgramMissing,
     /// Корневой metering resource недоступен.
     Resource,
+    /// Резерв бюджета компонента не выделен либо композиция не помещается в набор ожидания.
+    Capacity,
     /// Полномочия провижининга устройств недоступны.
     DeviceAuthority,
     /// Описание платформы не дало ресурс, названный слотом.
@@ -76,9 +90,9 @@ pub enum BootFailure {
     DeviceBusy,
     /// Провайдер сервисного слота не поднят.
     Provider,
-    /// Broker сессий компонентов не поднят.
-    Broker,
-    /// Каталог компонента не выдан сессией файловой системы.
+    /// Провайдер не установил сессию сервисного слота.
+    Session,
+    /// Провайдер не установил сессию, суженную до каталога компонента.
     Directory,
     /// Capability слота не сминчена.
     Slot,
@@ -90,11 +104,19 @@ pub enum BootFailure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Supervised {
     /// Компонент ушёл с кодом `exit_code`, и композиция подняла его новую
-    /// incarnation.
-    Restarted { exit_code: Option<u32> },
-    /// Некритический компонент исчерпал запуски и снят с композиции, а сама
-    /// композиция осталась поднятой.
-    Abandoned { exit_code: Option<u32> },
+    /// incarnation вместе с `dependents` его потребителями.
+    Restarted {
+        exit_code: Option<u32>,
+        dependents: u16,
+    },
+    /// Некритический компонент исчерпал запуски и снят с композиции вместе с
+    /// `dependents` его потребителями, а сама композиция осталась поднятой.
+    Abandoned {
+        exit_code: Option<u32>,
+        dependents: u16,
+    },
+    /// Оборот обслужил операцию транзакции расширения композиции.
+    Extended,
     /// Композиция остановлена: восстановить её оборот supervisor не смог.
     Stopped(Stopped),
 }
@@ -116,6 +138,13 @@ impl FdtMapping {
     }
 }
 
+/// Определение компонента транзакцией расширения: запись плана с одним компонентом и регион,
+/// чьи байты начинаются его программой.
+pub struct Definition {
+    record: Box<[u8]>,
+    program: MemoryRegion,
+}
+
 struct DeviceAuthority {
     description: Option<FdtMapping>,
     _region: Option<MemoryRegion>,
@@ -128,11 +157,27 @@ struct GrantedWindow {
     owner: u16,
 }
 
+enum ComponentRecord<'a> {
+    Booted(PlanComponent<'a>),
+    Defined {
+        record: Box<[u8]>,
+        mapping: ReadOnlyMapping,
+        _region: MemoryRegion,
+    },
+}
+
 /// Компонент композиции вместе с его записью плана.
 pub struct Component<'a> {
     managed: ManagedComponent<ComponentRoots>,
-    plan: PlanComponent<'a>,
+    record: ComponentRecord<'a>,
     log: OwnedHandle,
+    owner: Option<NonZeroU64>,
+    charged_launches: u32,
+}
+
+struct Provider<'a> {
+    roots: &'a ComponentRoots,
+    plan: PlanComponent<'a>,
 }
 
 /// Поднятая композиция rootkeeper.
@@ -140,11 +185,12 @@ pub struct RootSystem<'a> {
     components: Vec<Component<'a>>,
     order: Vec<u16>,
     devices: DeviceAuthority,
+    extension: Option<ExtensionPort>,
     kernel: Handle,
     image: &'a SystemImage,
     entries: DecodedImage<'a>,
-    broker: SessionBroker,
-    _resource: Resource,
+    resource: Resource,
+    log_sessions: LogSessions,
 }
 
 /// Код, которым остановка композиции завершает её компоненты.
@@ -169,12 +215,36 @@ impl BootFailure {
             | Self::ProgramMissing => Stopped::BadImage,
             Self::DeviceAuthority | Self::Device(_) | Self::DeviceBusy => Stopped::Device,
             Self::LogSession
+            | Self::Record
+            | Self::Instance
             | Self::Resource
+            | Self::Capacity
             | Self::Provider
-            | Self::Broker
+            | Self::Session
             | Self::Directory
             | Self::Slot
             | Self::Launch(_) => Stopped::Startup,
+        }
+    }
+
+    /// Отказ операции транзакции расширения, соответствующий отказу подъёма.
+    #[must_use]
+    pub const fn refused(self) -> ExtendError {
+        match self {
+            Self::Image | Self::PlanMissing | Self::Plan(_) | Self::Record => {
+                ExtendError::BadRecord
+            }
+            Self::Instance => ExtendError::Duplicate,
+            Self::PlanOrder | Self::Provider => ExtendError::Unresolved,
+            Self::LogSession | Self::Resource | Self::Capacity => ExtendError::NoSpace,
+            Self::ProgramMissing
+            | Self::DeviceAuthority
+            | Self::Device(_)
+            | Self::DeviceBusy
+            | Self::Session
+            | Self::Directory
+            | Self::Slot
+            | Self::Launch(_) => ExtendError::NotStarted,
         }
     }
 
@@ -187,13 +257,16 @@ impl BootFailure {
             Self::PlanMissing => "boot plan record missing",
             Self::Plan(_) => "boot plan not decoded",
             Self::PlanOrder => "boot plan dependencies have no start order",
+            Self::Record => "component record not decoded",
+            Self::Instance => "instance name already taken",
             Self::ProgramMissing => "component program missing",
             Self::Resource => "root resource unavailable",
+            Self::Capacity => "component reserve not granted",
             Self::DeviceAuthority => "platform description unavailable",
             Self::Device(_) => "device not described by the platform",
             Self::DeviceBusy => "device resource taken by another component",
             Self::Provider => "service provider not running",
-            Self::Broker => "component session broker not started",
+            Self::Session => "service provider did not establish a session",
             Self::Directory => "component directory not granted",
             Self::Slot => "component slot not minted",
             Self::Launch(_) => "component not started",
@@ -238,6 +311,17 @@ impl SystemImage {
     }
 }
 
+impl Definition {
+    /// Копирует запись плана и берёт регион её программы во владение.
+    #[must_use]
+    pub fn new(record: &[u8], program: MemoryRegion) -> Self {
+        Self {
+            record: Box::from(record),
+            program,
+        }
+    }
+}
+
 impl DeviceAuthority {
     const fn absent() -> Self {
         Self {
@@ -246,6 +330,10 @@ impl DeviceAuthority {
             lines: None,
             windows: Vec::new(),
         }
+    }
+
+    const fn is_absent(&self) -> bool {
+        self.description.is_none()
     }
 
     fn acquire(kernel: Handle) -> Result<Self, BootFailure> {
@@ -367,11 +455,69 @@ impl DeviceAuthority {
     }
 }
 
+impl<'a> ComponentRecord<'a> {
+    fn defined(definition: Definition) -> Result<Self, BootFailure> {
+        let Definition { record, program } = definition;
+        // Загрузчик читает сегменты прямо из региона, и его страницы обязаны быть неизменны:
+        // маска доступа с записью отвергается отображением.
+        let mapping = program
+            .map_full_read_only()
+            .map_err(|_| BootFailure::Record)?;
+        Ok(Self::Defined {
+            record,
+            mapping,
+            _region: program,
+        })
+    }
+
+    fn plan(&self) -> Result<PlanComponent<'_>, BootFailure> {
+        match self {
+            Self::Booted(plan) => Ok(*plan),
+            Self::Defined { record, .. } => decode_plan(record)
+                .map_err(|_| BootFailure::Record)?
+                .component(0)
+                .ok_or(BootFailure::Record),
+        }
+    }
+
+    fn program(&self, entries: &DecodedImage<'a>) -> Result<DecodedProgram<'_>, BootFailure> {
+        let plan = self.plan()?;
+        match self {
+            Self::Booted(_) => {
+                let record = format!("{}/{COMPONENT_PROGRAM_NAME}", plan.executable());
+                entries
+                    .entry(&record)
+                    .and_then(|entry| entry.program().ok())
+                    .ok_or(BootFailure::ProgramMissing)
+            }
+            Self::Defined { mapping, .. } => decode_program(plan.executable(), mapping.as_bytes())
+                .map_err(|_| BootFailure::ProgramMissing),
+        }
+    }
+}
+
 impl Component<'_> {
     /// Managed-примитив компонента.
     #[must_use]
     pub const fn managed(&self) -> &ManagedComponent<ComponentRoots> {
         &self.managed
+    }
+}
+
+impl<'a> Provider<'a> {
+    fn of(components: &'a [Component<'_>], instance: &str) -> Result<Self, BootFailure> {
+        let index = find_instance(components, instance).ok_or(BootFailure::Provider)?;
+        let component = components
+            .get(usize::from(index))
+            .ok_or(BootFailure::Provider)?;
+        Ok(Self {
+            roots: component
+                .managed
+                .running()
+                .ok_or(BootFailure::Provider)?
+                .roots(),
+            plan: component.record.plan()?,
+        })
     }
 }
 
@@ -384,52 +530,37 @@ impl<'a> RootSystem<'a> {
         log_sessions: LogSessions,
     ) -> Result<Self, BootFailure> {
         let entries = image.entries()?;
-        let broker = SessionBroker::start().map_err(|_| BootFailure::Broker)?;
         let resource = Resource::self_resource().map_err(|_| BootFailure::Resource)?;
-        let order = start_order(&plan).ok_or(BootFailure::PlanOrder)?;
-        let devices = if plan_needs_devices(&plan) {
-            DeviceAuthority::acquire(kernel)?
-        } else {
-            DeviceAuthority::absent()
-        };
-
-        let mut components = Vec::with_capacity(usize::from(plan.len()));
-        for index in 0..plan.len() {
-            let component = plan.component(index).ok_or(BootFailure::PlanOrder)?;
-            let log = log_sessions(relay::component_badge(index)).ok_or(BootFailure::LogSession)?;
-            components.push(Component {
-                managed: ManagedComponent::new(&resource, component.memory_pages())
-                    .map_err(BootFailure::Launch)?,
-                plan: component,
-                log,
-            });
-        }
-
         let mut system = Self {
-            components,
-            order,
-            devices,
+            components: Vec::with_capacity(usize::from(plan.len())),
+            order: Vec::new(),
+            devices: DeviceAuthority::absent(),
+            extension: None,
             kernel,
             image,
             entries,
-            broker,
-            _resource: resource,
+            resource,
+            log_sessions,
         };
-        for index in system.order.clone() {
-            if let Err(failure) = system.launch(index) {
-                // Поднятые компоненты уходят вместе с загрузкой: иначе они
-                // держат линии и окна устройств за композицией, которой нет.
-                system.shutdown();
-                return Err(failure);
-            }
+        if let Err(failure) = system.compose(plan) {
+            // Поднятые компоненты уходят вместе с загрузкой: иначе они держат
+            // линии и окна устройств за композицией, которой нет.
+            system.shutdown();
+            return Err(failure);
         }
         Ok(system)
     }
 
-    /// Компонент с номером `index` в плане.
+    /// Компонент с номером `index` в наборе композиции.
     #[must_use]
     pub fn component(&self, index: u16) -> Option<&Component<'a>> {
         self.components.get(usize::from(index))
+    }
+
+    /// Номер компонента с именем экземпляра `instance`.
+    #[must_use]
+    pub fn instance(&self, instance: &str) -> Option<u16> {
+        find_instance(&self.components, instance)
     }
 
     /// Номера компонентов в порядке запуска. Остановка идёт в обратном.
@@ -438,17 +569,51 @@ impl<'a> RootSystem<'a> {
         &self.order
     }
 
-    /// Оборот supervisor: ждёт завершения любого компонента либо потока
-    /// `relay_thread`, записывает исход в журнал ядра и поднимает ушедшему
-    /// компоненту смену.
+    /// Поднимает набор транзакции расширения в топологическом порядке по объединению рёбер
+    /// набора и уже поднятых компонентов. Отказ любого шага снимает набор целиком, оставляя
+    /// поднятые компоненты нетронутыми.
+    pub fn extend(
+        &mut self,
+        caller: NonZeroU64,
+        definitions: Vec<Definition>,
+    ) -> Result<(), BootFailure> {
+        let first = self.components.len();
+        let order = self.order.clone();
+        if let Err(failure) = self.compose_extension(caller, definitions) {
+            self.discard(first, order);
+            return Err(failure);
+        }
+        Ok(())
+    }
+
+    /// Сессия компонента `instance` для вызывателя со значком `caller`. Компонент, которого
+    /// вызыватель не определял, недоступен.
+    pub fn caller_session(
+        &self,
+        caller: NonZeroU64,
+        instance: &str,
+    ) -> Result<OwnedHandle, BootFailure> {
+        let index = find_instance(&self.components, instance).ok_or(BootFailure::Provider)?;
+        let defined = self
+            .component(index)
+            .is_some_and(|component| component.owner == Some(caller));
+        if !defined {
+            return Err(BootFailure::Provider);
+        }
+        session(&self.components, instance, caller)
+    }
+
+    /// Оборот supervisor: ждёт завершения любого компонента, потока
+    /// `relay_thread` либо операции транзакции расширения, записывает исход в
+    /// журнал ядра и поднимает ушедшему компоненту смену.
     ///
     /// Завершение потока пересылки критично: восстановить его композиция не
     /// умеет.
     pub fn supervise_turn(&mut self, relay_thread: Handle) -> Supervised {
         let kernel_log = bootstrap::Client::new(PortTransport::client(self.kernel));
-        let mut waits = Vec::with_capacity(self.components.len() + 1);
+        let mut waits = Vec::with_capacity(self.components.len() + SUPERVISOR_WAITS);
         let mut watched: Vec<u16> = Vec::with_capacity(self.components.len());
-        for index in 0..self.plan_len() {
+        for index in 0..self.component_count() {
             let Some(running) = self.component(index).and_then(|c| c.managed.running()) else {
                 continue;
             };
@@ -456,15 +621,19 @@ impl<'a> RootSystem<'a> {
             watched.push(index);
         }
         waits.push(WaitItem::new(relay_thread, SIGNALED));
+        if let Some(posted) = self.extension.as_ref().map(ExtensionPort::posted) {
+            waits.push(WaitItem::new(posted, SIGNALED));
+        }
 
         match wait_any(&waits, Timeout::INFINITE) {
             Ok(index) if index < watched.len() => {
                 self.replace_component(watched[index], &kernel_log)
             }
-            Ok(_) => {
+            Ok(index) if index == watched.len() => {
                 log_exit(&kernel_log, "log relay", relay::exit_code());
                 Supervised::Stopped(Stopped::Subsystem)
             }
+            Ok(_) => self.serve_extension(),
             Err(_) => {
                 let _ = kernel_log.log_str(LOG_TAG, "supervisor wait failed");
                 Supervised::Stopped(Stopped::Subsystem)
@@ -474,87 +643,225 @@ impl<'a> RootSystem<'a> {
 
     /// Завершает компоненты композиции в порядке, обратном порядку запуска.
     pub fn shutdown(&mut self) {
-        for index in self.order.clone().into_iter().rev() {
-            if let Some(component) = self.components.get_mut(usize::from(index)) {
-                let _ = component.managed.stop(SHUTDOWN_EXIT_CODE, STOP_TIMEOUT);
-            }
+        if let Some(extension) = &mut self.extension {
+            extension.shutdown();
         }
-        self.broker.shutdown();
+        self.stop_from(0);
     }
 
-    fn launch(&mut self, index: u16) -> Result<(), BootFailure> {
-        let plan = self.component(index).ok_or(BootFailure::PlanOrder)?.plan;
-        let program = component_program(&self.entries, plan)?;
-        let slots = self.provision(index, plan)?;
-        {
-            let component = self
-                .components
-                .get_mut(usize::from(index))
-                .ok_or(BootFailure::PlanOrder)?;
-            launch_component(
-                &mut component.managed,
-                &program,
-                plan.name(),
-                &component.log,
-                plan.startup_timeout(),
-                slots,
-            )
-            .map_err(BootFailure::Launch)?;
+    fn compose(&mut self, plan: BootPlan<'a>) -> Result<(), BootFailure> {
+        if plan_needs_devices(&plan) {
+            self.devices = DeviceAuthority::acquire(self.kernel)?;
         }
-        let control = self
-            .component(index)
-            .and_then(|component| component.managed.running())
-            .ok_or(BootFailure::Provider)?
-            .roots()
-            .control();
-        self.broker
-            .publish(index, plan.executable(), control, plan.startup_timeout())
-            .map_err(|_| BootFailure::Broker)?;
+        self.extension = Some(ExtensionPort::start().map_err(|_| BootFailure::Slot)?);
+        for index in 0..plan.len() {
+            let component = plan.component(index).ok_or(BootFailure::PlanOrder)?;
+            let log = (self.log_sessions)(relay::component_badge(index))
+                .ok_or(BootFailure::LogSession)?;
+            let managed = ManagedComponent::new(&self.resource, component.memory_pages())
+                .map_err(|_| BootFailure::Capacity)?;
+            self.components.push(Component {
+                managed,
+                record: ComponentRecord::Booted(component),
+                log,
+                owner: None,
+                charged_launches: 1,
+            });
+        }
+        self.publish_names();
+        self.order = start_order(&self.components)?;
+        for index in self.order.clone() {
+            self.launch(index)?;
+        }
         Ok(())
     }
 
-    fn provision(
+    fn compose_extension(
         &mut self,
-        index: u16,
-        plan: PlanComponent<'a>,
-    ) -> Result<ComponentSlots, BootFailure> {
+        caller: NonZeroU64,
+        definitions: Vec<Definition>,
+    ) -> Result<(), BootFailure> {
+        let first = self.components.len();
+        if first + definitions.len() + SUPERVISOR_WAITS > WAIT_MANY_MAX_COUNT {
+            return Err(BootFailure::Capacity);
+        }
+        for definition in definitions {
+            let index = u16::try_from(self.components.len()).map_err(|_| BootFailure::Capacity)?;
+            let record = ComponentRecord::defined(definition)?;
+            let pages = {
+                let plan = record.plan()?;
+                if find_instance(&self.components, plan.name()).is_some() {
+                    return Err(BootFailure::Instance);
+                }
+                plan.memory_pages()
+            };
+            let log = (self.log_sessions)(relay::component_badge(index))
+                .ok_or(BootFailure::LogSession)?;
+            let managed =
+                ManagedComponent::new(&self.resource, pages).map_err(|_| BootFailure::Capacity)?;
+            self.components.push(Component {
+                managed,
+                record,
+                log,
+                owner: Some(caller),
+                charged_launches: 1,
+            });
+        }
+        self.publish_names();
+        if self.devices.is_absent() && self.needs_devices(first) {
+            self.devices = DeviceAuthority::acquire(self.kernel)?;
+        }
+        self.order = start_order(&self.components)?;
+        for index in self.order.clone() {
+            if usize::from(index) >= first {
+                self.launch(index)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn needs_devices(&self, first: usize) -> bool {
+        self.components[first..].iter().any(|component| {
+            component.record.plan().is_ok_and(|plan| {
+                plan.slots()
+                    .any(|slot| matches!(slot, SlotSource::Irq(_) | SlotSource::Mmio(_)))
+            })
+        })
+    }
+
+    fn discard(&mut self, first: usize, order: Vec<u16>) {
+        self.stop_from(first);
+        self.components.truncate(first);
+        self.publish_names();
+        self.order = order;
+    }
+
+    fn publish_names(&self) {
+        let names: Vec<&str> = self.components.iter().map(instance_name).collect();
+        relay::install_names(names.iter().copied());
+    }
+
+    fn stop_from(&mut self, first: usize) {
+        for index in self.order.clone().into_iter().rev() {
+            if usize::from(index) >= first {
+                self.stop(index);
+            }
+        }
+        // Компонент, до запуска которого подъём не дошёл, в порядке запуска не стоит.
+        for index in (first..self.components.len()).rev() {
+            if let Ok(index) = u16::try_from(index) {
+                self.stop(index);
+            }
+        }
+    }
+
+    fn stop(&mut self, index: u16) {
+        if let Some(component) = self.components.get_mut(usize::from(index)) {
+            let _ = component.managed.stop(SHUTDOWN_EXIT_CODE, STOP_TIMEOUT);
+        }
+    }
+
+    fn serve_extension(&mut self) -> Supervised {
+        let Some(request) = self
+            .extension
+            .as_ref()
+            .and_then(ExtensionPort::take_request)
+        else {
+            return Supervised::Extended;
+        };
+        let answer = match request {
+            Request::Commit {
+                caller,
+                definitions,
+            } => Answer::Extended(
+                self.extend(caller, definitions)
+                    .map_err(BootFailure::refused),
+            ),
+            Request::Session { caller, instance } => Answer::Session(
+                self.caller_session(caller, &instance)
+                    .map_err(refused_session),
+            ),
+        };
+        if let Some(extension) = &self.extension {
+            extension.answer(answer);
+        }
+        Supervised::Extended
+    }
+
+    fn launch(&mut self, index: u16) -> Result<(), BootFailure> {
+        let slots = self.provision(index)?;
+        let Self {
+            components,
+            entries,
+            ..
+        } = self;
+        let component = components
+            .get_mut(usize::from(index))
+            .ok_or(BootFailure::PlanOrder)?;
+        let Component {
+            managed,
+            record,
+            log,
+            ..
+        } = component;
+        let plan = record.plan()?;
+        let program = record.program(entries)?;
+        launch_component(
+            managed,
+            &program,
+            plan.name(),
+            log,
+            plan.startup_timeout(),
+            slots,
+        )
+        .map_err(BootFailure::Launch)
+    }
+
+    fn provision(&mut self, index: u16) -> Result<ComponentSlots, BootFailure> {
         let badge = relay::component_badge(index);
         let kernel_log = bootstrap::Client::new(PortTransport::client(self.kernel));
+        let Self {
+            components,
+            devices,
+            extension,
+            kernel,
+            image,
+            ..
+        } = self;
+        let plan = components
+            .get(usize::from(index))
+            .ok_or(BootFailure::PlanOrder)?
+            .record
+            .plan()?;
         let mut slots = ComponentSlots::default();
         for source in plan.slots() {
             let capability = match source {
-                SlotSource::Userland => self
-                    .image
+                SlotSource::Userland => image
                     .region()
                     .handle()
                     .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)
                     .map_err(|_| BootFailure::Slot)?,
-                SlotSource::Irq(device) => self.devices.line(device, plan.name(), &kernel_log)?,
+                SlotSource::Irq(device) => devices.line(device, plan.name(), &kernel_log)?,
                 SlotSource::Mmio(device) => {
-                    self.devices
-                        .window(self.kernel, device, index, plan.name(), &kernel_log)?
+                    devices.window(*kernel, device, index, plan.name(), &kernel_log)?
                 }
-                SlotSource::Service { provider } => self.session(provider, badge)?,
+                SlotSource::Service { provider } => session(components, provider, badge)?,
+                // Область слота-каталога назначает supervisor: путь берёт запись программы.
                 SlotSource::Directory { provider } => {
-                    component_area(&self.session(provider, badge)?, plan)?
+                    component_area(components, provider, plan.executable())?
                 }
-                SlotSource::Supervisor => self.broker.session().ok_or(BootFailure::Broker)?,
+                SlotSource::Supervisor => extension
+                    .as_ref()
+                    .and_then(|port| port.slot(badge))
+                    .ok_or(BootFailure::Slot)?,
+                SlotSource::Control { provider } => control_session(components, provider, badge)?,
             };
             slots.push(capability).map_err(BootFailure::Launch)?;
         }
         Ok(slots)
     }
 
-    fn session(&self, provider: u16, badge: NonZeroU64) -> Result<OwnedHandle, BootFailure> {
-        self.component(provider)
-            .and_then(|component| component.managed.running())
-            .ok_or(BootFailure::Provider)?
-            .roots()
-            .session(badge)
-            .map_err(|_| BootFailure::Slot)
-    }
-
-    fn plan_len(&self) -> u16 {
+    fn component_count(&self) -> u16 {
         u16::try_from(self.components.len()).unwrap_or(u16::MAX)
     }
 
@@ -563,39 +870,111 @@ impl<'a> RootSystem<'a> {
         index: u16,
         kernel_log: &bootstrap::Client<PortTransport>,
     ) -> Supervised {
+        // Слоты принадлежат incarnation, и капы ушедшей ядро отзывает: потребители уходят
+        // вместе с провайдером и поднимаются его сменой.
+        let group = self.dependents(index);
+        let dependents = u16::try_from(group.len()).unwrap_or(u16::MAX);
         let Some(component) = self.components.get_mut(usize::from(index)) else {
             return Supervised::Stopped(Stopped::Subsystem);
         };
-        let plan = component.plan;
         let exit_code = component
             .managed
             .running()
             .and_then(|running| running.process().exit_code().ok());
         let observed = component.managed.observe_exit(Timeout::POLL);
-        let generation = component.managed.generation();
+        let charged = component.charged_launches;
+
+        let Ok(plan) = component.record.plan() else {
+            return Supervised::Stopped(Stopped::Subsystem);
+        };
+        let launches = plan.launches();
+        let on_exhausted = plan.on_exhausted();
         log_exit(kernel_log, plan.name(), exit_code);
+
         if observed.is_err() {
             let _ = kernel_log.log_str(LOG_TAG, "component budget not returned");
             return Supervised::Stopped(Stopped::Subsystem);
         }
-        if generation >= plan.launches() {
+        if dependents > 0 {
+            log_takedown(kernel_log, plan.name(), dependents);
+        }
+        for &member in group.iter().rev() {
+            self.stop(member);
+        }
+        if charged >= launches {
             let _ = kernel_log.log_str(LOG_TAG, "component restart limit reached");
-            return self.give_up(index, plan, exit_code);
+            return give_up(on_exhausted, exit_code, dependents);
         }
         if let Err(failure) = self.launch(index) {
-            log_restart_failure(kernel_log, plan.name(), failure);
-            return self.give_up(index, plan, exit_code);
+            if let Some(plan) = self
+                .component(index)
+                .and_then(|component| component.record.plan().ok())
+            {
+                log_restart_failure(kernel_log, plan.name(), failure);
+            }
+            return give_up(on_exhausted, exit_code, dependents);
         }
-        Supervised::Restarted { exit_code }
+        self.charge_launch(index);
+        for member in group {
+            if self.launch(member).is_ok() {
+                continue;
+            }
+            let _ = kernel_log.log_str(LOG_TAG, "dependent component not restarted");
+            if self.halts(member) {
+                return Supervised::Stopped(Stopped::Subsystem);
+            }
+        }
+        Supervised::Restarted {
+            exit_code,
+            dependents,
+        }
     }
 
-    fn give_up(&self, index: u16, plan: PlanComponent<'_>, exit_code: Option<u32>) -> Supervised {
-        // Смены компоненту больше не будет, и сессию файловой системы он не выдаст.
-        self.broker.withdraw(index);
-        match plan.on_exhausted() {
-            OnExhausted::Halt => Supervised::Stopped(Stopped::Subsystem),
-            OnExhausted::Detach => Supervised::Abandoned { exit_code },
+    fn dependents(&self, index: u16) -> Vec<u16> {
+        let mut taken = alloc::vec![false; self.components.len()];
+        let Some(gone) = taken.get_mut(usize::from(index)) else {
+            return Vec::new();
+        };
+        *gone = true;
+        let mut group = Vec::new();
+        // Порядок запуска топологический, и один проход по нему замыкает потребителей
+        // транзитивно.
+        for &candidate in &self.order {
+            if candidate == index {
+                continue;
+            }
+            let Some(component) = self.components.get(usize::from(candidate)) else {
+                continue;
+            };
+            let depends = dependencies(component).is_ok_and(|mut edges| {
+                edges.any(|edge| {
+                    find_instance(&self.components, edge)
+                        .is_some_and(|provider| taken[usize::from(provider)])
+                })
+            });
+            if !depends {
+                continue;
+            }
+            taken[usize::from(candidate)] = true;
+            // Снятый компонент своей смены не получает: композиция держит его без запуска.
+            if component.managed.running().is_some() {
+                group.push(candidate);
+            }
         }
+        group
+    }
+
+    fn charge_launch(&mut self, index: u16) {
+        if let Some(component) = self.components.get_mut(usize::from(index)) {
+            component.charged_launches = component.charged_launches.saturating_add(1);
+        }
+    }
+
+    fn halts(&self, index: u16) -> bool {
+        self.components
+            .get(usize::from(index))
+            .and_then(|component| component.record.plan().ok())
+            .is_none_or(|plan| matches!(plan.on_exhausted(), OnExhausted::Halt))
     }
 }
 
@@ -639,7 +1018,6 @@ fn run(kernel: Handle, kernel_log: &bootstrap::Client<PortTransport>) -> Stopped
             return failure.stopped();
         }
     };
-    relay::install_names(plan.components().map(|component| component.name()));
 
     run_composition(&image, plan, kernel, relay_thread, &log)
 }
@@ -662,6 +1040,7 @@ fn run_composition(
                     Supervised::Abandoned { .. } => {
                         let _ = log.write_str(LOG_TAG, "component abandoned");
                     }
+                    Supervised::Extended => {}
                     Supervised::Stopped(stopped) => break stopped,
                 }
             };
@@ -675,6 +1054,23 @@ fn run_composition(
     }
 }
 
+const fn give_up(on_exhausted: OnExhausted, exit_code: Option<u32>, dependents: u16) -> Supervised {
+    match on_exhausted {
+        OnExhausted::Halt => Supervised::Stopped(Stopped::Subsystem),
+        OnExhausted::Detach => Supervised::Abandoned {
+            exit_code,
+            dependents,
+        },
+    }
+}
+
+const fn refused_session(failure: BootFailure) -> ExtendError {
+    match failure {
+        BootFailure::Provider => ExtendError::NotFound,
+        other => other.refused(),
+    }
+}
+
 fn plan_needs_devices(plan: &BootPlan<'_>) -> bool {
     plan.components().any(|component| {
         component
@@ -683,10 +1079,58 @@ fn plan_needs_devices(plan: &BootPlan<'_>) -> bool {
     })
 }
 
-fn start_order(plan: &BootPlan<'_>) -> Option<Vec<u16>> {
+fn session(
+    components: &[Component<'_>],
+    instance: &str,
+    badge: NonZeroU64,
+) -> Result<OwnedHandle, BootFailure> {
+    let provider = Provider::of(components, instance)?;
+    // Значки сессий провайдера с состоянием принадлежат ему одному: минтер супервизора на
+    // его service-порт значков не выдаёт.
+    if provider.plan.establishes_sessions() {
+        return open_session(
+            provider.roots.control(),
+            provider.plan.startup_timeout(),
+            WHOLE_EXPORT,
+        );
+    }
+    provider.roots.session(badge).map_err(|_| BootFailure::Slot)
+}
+
+fn component_area(
+    components: &[Component<'_>],
+    instance: &str,
+    scope: &str,
+) -> Result<OwnedHandle, BootFailure> {
+    let provider = Provider::of(components, instance)?;
+    // Сузить сессию до области умеет лишь тот, кто её и заводит: сминченный значок области
+    // не назначает.
+    if !provider.plan.establishes_sessions() {
+        return Err(BootFailure::Directory);
+    }
+    open_session(
+        provider.roots.control(),
+        provider.plan.startup_timeout(),
+        scope,
+    )
+    .map_err(|_| BootFailure::Directory)
+}
+
+fn control_session(
+    components: &[Component<'_>],
+    instance: &str,
+    badge: NonZeroU64,
+) -> Result<OwnedHandle, BootFailure> {
+    Provider::of(components, instance)?
+        .roots
+        .control_session(badge)
+        .map_err(|_| BootFailure::Slot)
+}
+
+fn start_order(components: &[Component<'_>]) -> Result<Vec<u16>, BootFailure> {
     // Порядок запуска топологический: компонент поднимается после всех, кого
-    // называют его requires и after.
-    let count = usize::from(plan.len());
+    // называют провайдеры его слотов и `after`.
+    let count = components.len();
     let mut started = alloc::vec![false; count];
     let mut order = Vec::with_capacity(count);
     while order.len() < count {
@@ -695,45 +1139,66 @@ fn start_order(plan: &BootPlan<'_>) -> Option<Vec<u16>> {
             if started[index] {
                 continue;
             }
-            let component = plan.component(u16::try_from(index).ok()?)?;
-            let ready = component
-                .requires()
-                .chain(component.after())
-                .all(|edge| started.get(usize::from(edge)).copied().unwrap_or(false));
+            let mut ready = true;
+            for edge in dependencies(&components[index])? {
+                let edge = find_instance(components, edge).ok_or(BootFailure::Provider)?;
+                ready &= started[usize::from(edge)];
+            }
             if ready {
                 started[index] = true;
-                order.push(u16::try_from(index).ok()?);
+                order.push(u16::try_from(index).map_err(|_| BootFailure::PlanOrder)?);
                 progress = true;
             }
         }
         if !progress {
-            return None;
+            return Err(BootFailure::PlanOrder);
         }
     }
-    Some(order)
+    Ok(order)
 }
 
-fn component_program<'a>(
-    entries: &DecodedImage<'a>,
-    plan: PlanComponent<'a>,
-) -> Result<DecodedProgram<'a>, BootFailure> {
-    let record = format!("{}/{COMPONENT_PROGRAM_NAME}", plan.executable());
-    entries
-        .entry(&record)
-        .and_then(|entry| entry.program().ok())
-        .ok_or(BootFailure::ProgramMissing)
+fn dependencies<'a>(
+    component: &'a Component<'_>,
+) -> Result<impl Iterator<Item = &'a str>, BootFailure> {
+    let plan = component.record.plan()?;
+    Ok(plan
+        .slots()
+        .filter_map(|slot| match slot {
+            SlotSource::Service { provider }
+            | SlotSource::Directory { provider }
+            | SlotSource::Control { provider } => Some(provider),
+            _ => None,
+        })
+        .chain(plan.after()))
 }
 
-fn component_area(
-    namespace_session: &OwnedHandle,
-    plan: PlanComponent<'_>,
+fn instance_name<'a>(component: &'a Component<'_>) -> &'a str {
+    component.record.plan().map_or("", |plan| plan.name())
+}
+
+fn find_instance(components: &[Component<'_>], instance: &str) -> Option<u16> {
+    components
+        .iter()
+        .position(|component| {
+            component
+                .record
+                .plan()
+                .is_ok_and(|plan| plan.name() == instance)
+        })
+        .and_then(|index| u16::try_from(index).ok())
+}
+
+fn open_session(
+    control: BorrowedHandle<'_>,
+    timeout: Timeout,
+    scope: &str,
 ) -> Result<OwnedHandle, BootFailure> {
-    let directory = Str::<PATH_MAX>::new(plan.executable()).ok_or(BootFailure::Directory)?;
-    let session = namespace::Client::new(PortTransport::client(namespace_session))
-        .with_wait(plan.startup_timeout())
-        .resolve(directory)
-        .map_err(|_| BootFailure::Directory)?
-        .map_err(|_| BootFailure::Directory)?;
+    let scope = Str::<SESSION_SCOPE_MAX>::new(scope).ok_or(BootFailure::Session)?;
+    let session = component_sessions::Client::new(PortTransport::client(control))
+        .with_wait(timeout)
+        .open_session(scope)
+        .map_err(|_| BootFailure::Session)?
+        .map_err(|_| BootFailure::Session)?;
     Ok(OwnedHandle::adopt(session))
 }
 
@@ -760,6 +1225,19 @@ fn log_restart_failure(
 ) {
     let mut message = LogBuffer::<EXIT_MESSAGE_MAX>::new();
     if write!(message, "{component} not restarted: {}", failure.message()).is_ok() {
+        let _ = kernel_log.log_str(LOG_TAG, message.as_str());
+    }
+}
+
+fn log_takedown(kernel_log: &bootstrap::Client<PortTransport>, component: &str, dependents: u16) {
+    let mut message = LogBuffer::<EXIT_MESSAGE_MAX>::new();
+    let plural = if dependents == 1 { "" } else { "s" };
+    if write!(
+        message,
+        "{component} takes down {dependents} dependent component{plural}"
+    )
+    .is_ok()
+    {
         let _ = kernel_log.log_str(LOG_TAG, message.as_str());
     }
 }

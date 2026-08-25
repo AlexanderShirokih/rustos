@@ -33,7 +33,10 @@ pub struct LogRelayThread {
 impl LogRelayThread {
     /// Заводит лог-порт и отдаёт его цикл новому потоку со стоком `sink`.
     /// `names` именует значки подсистем в журнале.
-    pub fn start<S: LogSink + Send + 'static>(names: SourceNames, sink: S) -> Result<Self> {
+    pub fn start<S: LogSink + Send + 'static, N: SourceNames + 'static>(
+        names: N,
+        sink: S,
+    ) -> Result<Self> {
         let root = Port::create()?.into_handle();
         let mut relay = LogRelay::new(root.duplicate(Rights::READ, None)?, names, sink);
         let thread = spawn_owned(

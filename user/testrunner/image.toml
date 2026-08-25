@@ -4,6 +4,9 @@ version = 1
 source = "user/testrunner/system.toml"
 path = "/boot/testrunner/plan"
 
+[stage1]
+source = "user/testrunner/stage1.toml"
+
 [[mount_tables]]
 source = "user/testrunner/namespace.toml"
 
@@ -54,8 +57,23 @@ path = "/boot/filesystem-client-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "filesystem-consumer-fixture"
+path = "/boot/filesystem-consumer-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "directory-consumer-fixture"
 path = "/boot/directory-consumer-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "control-consumer-fixture"
+path = "/boot/control-consumer-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "supervisor-consumer-fixture"
+path = "/boot/supervisor-consumer-fixture"
 
 [[programs]]
 package = "testrunner"
@@ -94,6 +112,10 @@ path = "/boot/driver-pl031"
 [[programs]]
 package = "namespace-router"
 path = "/boot/namespace-router"
+
+[[programs]]
+package = "init"
+path = "/boot/init"
 
 [[programs]]
 package = "filesystem-ramfs"

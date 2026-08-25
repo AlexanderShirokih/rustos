@@ -17,8 +17,8 @@ use core::{
 use bootstrap_abi::bootstrap;
 use ipc::wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf};
 use kernel_tests::kernel_test;
-use log_abi::{LOG_MESSAGE_MAX, log};
-use log_relay::{KernelLogSink, LogRelayThread, LogSink};
+use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
+use log_relay::{KernelLogSink, LogRelayThread, LogSink, SourceNames};
 use runtime::{
     MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Timeout, port_send,
 };
@@ -39,16 +39,30 @@ const UNNAMED_BADGE: NonZeroU64 =
 pub(crate) const SELFTEST_BADGE: NonZeroU64 =
     NonZeroU64::new(0x0400_0000).expect("badge is non-zero");
 
-fn shared_source_name(badge: u64) -> Option<&'static str> {
-    match badge {
-        _ if badge == ROUTER_BADGE.get() => Some("filesystem"),
-        _ if badge == SELFTEST_BADGE.get() => Some("std-selftest"),
-        _ => None,
+struct SharedSourceNames;
+
+struct TestSourceNames;
+
+impl SourceNames for SharedSourceNames {
+    fn name(&self, badge: u64) -> Option<LogBuffer<LOG_SOURCE_MAX>> {
+        match badge {
+            _ if badge == ROUTER_BADGE.get() => Some(source("filesystem")),
+            _ if badge == SELFTEST_BADGE.get() => Some(source("std-selftest")),
+            _ => None,
+        }
     }
 }
 
-fn test_source_name(badge: u64) -> Option<&'static str> {
-    (badge == NAMED_BADGE.get()).then_some("named-subsystem")
+impl SourceNames for TestSourceNames {
+    fn name(&self, badge: u64) -> Option<LogBuffer<LOG_SOURCE_MAX>> {
+        (badge == NAMED_BADGE.get()).then(|| source("named-subsystem"))
+    }
+}
+
+fn source(name: &str) -> LogBuffer<LOG_SOURCE_MAX> {
+    let mut buffer = LogBuffer::new();
+    buffer.push_str(name);
+    buffer
 }
 
 const LOG_CLIENT_FIXTURE: &str = "/boot/log-client-fixture/program";
@@ -84,11 +98,15 @@ pub(crate) fn shared_relay_thread() -> Option<syscall::Handle> {
     SHARED.lock().as_ref().map(|relay| relay.handle().as_raw())
 }
 
+pub(crate) fn scenario_relay_thread() -> Option<syscall::Handle> {
+    ACTIVE.lock().as_ref().map(|relay| relay.handle().as_raw())
+}
+
 pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<OwnedHandle> {
     let mut shared = SHARED.lock();
     let relay = shared.get_or_insert_with(|| {
         LogRelayThread::start(
-            shared_source_name,
+            SharedSourceNames,
             KernelLogSink::new(crate::bootstrap_handle()),
         )
         .expect("shared log relay starts")
@@ -131,14 +149,13 @@ impl LogSink for RecordingSink {
     }
 }
 
-pub(crate) fn start_component_relay<'a>(names: impl Iterator<Item = &'a str>) {
+pub(crate) fn start_component_relay() {
     // Имена источников ставит и читает сам rootkeeper: сценарий подменяет
     // только сток, чтобы прочитать пересланные строки.
     RECORDED.lock().clear();
     SINK_REFUSES.store(false, SeqCst);
-    rootkeeper::relay::install_names(names);
     *ACTIVE.lock() = Some(
-        LogRelayThread::start(rootkeeper::relay::source_name, RecordingSink)
+        LogRelayThread::start(rootkeeper::relay::ComponentNames, RecordingSink)
             .expect("component log relay starts"),
     );
 }
@@ -187,9 +204,8 @@ fn scenario_session(badge: NonZeroU64) -> OwnedHandle {
 fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> OwnedHandle)) {
     RECORDED.lock().clear();
     SINK_REFUSES.store(false, SeqCst);
-    *ACTIVE.lock() = Some(
-        LogRelayThread::start(test_source_name, RecordingSink).expect("test log relay starts"),
-    );
+    *ACTIVE.lock() =
+        Some(LogRelayThread::start(TestSourceNames, RecordingSink).expect("test log relay starts"));
 
     body(&scenario_session);
 
@@ -590,7 +606,7 @@ fn relay_drains_departed_badges_so_new_sessions_mint() {
 #[kernel_test]
 fn relay_stops_when_its_log_port_closes() {
     let relay =
-        LogRelayThread::start(test_source_name, RecordingSink).expect("test log relay starts");
+        LogRelayThread::start(TestSourceNames, RecordingSink).expect("test log relay starts");
     relay.shutdown(JOIN_TIMEOUT).expect("test log relay stops");
 }
 

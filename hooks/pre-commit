@@ -2,7 +2,7 @@
 # Pre-commit hook: форматирование Rust-кода и проверка кодстайла.
 #
 # Запускается автоматически перед `git commit`, если репозиторий настроен на
-# использование этой директории (см. README/BUILD.md):
+# использование этой директории:
 #
 #   git config core.hooksPath hooks
 #
@@ -32,11 +32,11 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 if [ "$rust_staged" = true ]; then
-    echo "pre-commit: cargo fmt --all --check"
-    if ! cargo fmt --all --check; then
+    echo "pre-commit: cargo xtask fmt --check"
+    if ! cargo xtask fmt --check; then
         echo >&2
         echo "pre-commit: formatting issues found." >&2
-        echo "pre-commit: fix them with: cargo fmt --all" >&2
+        echo "pre-commit: fix them with: cargo xtask fmt" >&2
         exit 1
     fi
 fi

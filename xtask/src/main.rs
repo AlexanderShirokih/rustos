@@ -2,6 +2,7 @@
 
 mod artifacts;
 mod context;
+mod fmt;
 mod fuzz;
 mod layers;
 mod qemu_test;
@@ -112,6 +113,12 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
         args: Vec<String>,
     },
+    /// Run rustfmt over the root workspace and every detached one
+    Fmt {
+        /// Report the files that need formatting instead of rewriting them
+        #[arg(long)]
+        check: bool,
+    },
     /// Check the layer rules between workspace crates
     CheckLayers,
     /// Materialize the patched `std` sources under target/std-src
@@ -188,6 +195,7 @@ fn main() -> Result<()> {
             println!("Done: {}", output.display());
         }
         Commands::Userland { args } => userland::run(&args)?,
+        Commands::Fmt { check } => fmt::run(check)?,
         Commands::CheckLayers => layers::run()?,
         Commands::StdSrc { force, verify } => {
             std_src::run(force)?;

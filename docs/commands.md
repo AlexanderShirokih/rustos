@@ -8,9 +8,9 @@
 | Host-clippy                         | `cargo clippy --workspace`                                                                                           |
 | AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --exclude style-tool --exclude userland-image-tool --target aarch64-unknown-none` |
 | Cargo в workspace userspace         | `cargo xtask userland <аргументы cargo>`                                                                             |
-| Форматирование                      | `cargo fmt --all --check`                                                                                            |
+| Форматирование                      | `cargo xtask fmt [--check]`                                                                                          |
 | Ссылки в документации               | `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" cargo doc --no-deps --workspace`                       |
-| Отделённые workspace                | см. [«Отделённые workspace»](#отделённые-workspace): свой прогон fmt и clippy на каждый                              |
+| Отделённые workspace                | см. [«Отделённые workspace»](#отделённые-workspace): fmt покрывает `cargo xtask fmt`, clippy идёт своим прогоном на каждый |
 | Исходники `std` с оверлеем          | `cargo xtask std-src [--force] [--verify]`                                                                           |
 | Проверка слоёв                      | `cargo xtask check-layers`                                                                                           |
 | Проверка кодстайла                  | `cargo xtask style [--all] [--staged] [--since <rev>]`                                                               |
@@ -223,12 +223,11 @@ workspace»](#отделённые-workspace)).
 | `lib/std-rt` | `molecular-rt`            | Собирается как зависимость `std`, граф зависимостей ему задаёт workspace `std`   |
 | `user/`      | программы образа и их `lib/` | Идёт под таргет Molecular OS, см. [architecture.md](architecture.md#таргеты-сборки) |
 
-`--workspace` их не видит, поэтому форматирование и clippy идут по manifest-пути:
+`--workspace` их не видит, поэтому форматирование и clippy идут по manifest-пути. Прогон
+форматирования по каждому собран в одну команду — [«Форматирование»](#форматирование), —
+а clippy остаётся отдельным вызовом: таргет и флаги сборки у каждого workspace свои.
 
 ```bash
-cargo fmt --manifest-path fuzz/Cargo.toml --all --check
-cargo fmt --manifest-path lib/std-rt/Cargo.toml --all --check
-cargo fmt --manifest-path user/Cargo.toml --all --check
 cargo clippy --manifest-path lib/std-rt/Cargo.toml \
              --target targets/aarch64-unknown-molecular.json \
              -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
@@ -252,6 +251,20 @@ cargo xtask userland doc --no-deps --workspace
 
 Политику линтов такой workspace обязан повторять в своём манифесте, наследовать
 её неоткуда. Совпадение с корневой сверяет `cargo xtask check-layers`.
+
+## Форматирование
+
+```bash
+cargo xtask fmt [--check]
+```
+
+Прогоняет rustfmt по корневому workspace и по каждому отделённому. `--check` печатает
+файлы, которые расходятся с `rustfmt.toml`, и завершается с ошибкой, ничего не переписав.
+Этот режим стоит в `hooks/pre-commit` и в CI.
+
+Список отделённых workspace команда берёт из `workspace.exclude` корневого манифеста —
+там же, где его берёт [`check-layers`](#проверка-слоёв). Голый `cargo fmt --all` видит
+только членов своего workspace, и отделённый до гейта не доходит.
 
 ## Проверка слоёв
 
@@ -321,3 +334,13 @@ cargo xtask style [--all | --staged | --since <rev>]
 становится находкой.
 
 Коды возврата: `1` — осталась находка уровня `deny`, `2` — отказ инструмента.
+
+## Хук pre-commit
+
+`hooks/pre-commit` гоняет перед коммитом обе проверки исходников:
+[`cargo xtask fmt --check`](#форматирование) и `cargo xtask style --staged`. Git берёт
+хуки из этой директории после
+
+```bash
+git config core.hooksPath hooks
+```

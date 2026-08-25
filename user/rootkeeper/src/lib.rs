@@ -3,11 +3,11 @@
 
 extern crate alloc;
 
+mod extension;
 pub mod relay;
-mod sessions;
 mod system;
 
 pub use system::{
-    BootFailure, Component, LogSessions, RootSystem, SHUTDOWN_EXIT_CODE, STOP_TIMEOUT, Stopped,
-    Supervised, SystemImage, supervise,
+    BootFailure, Component, Definition, LogSessions, RootSystem, SHUTDOWN_EXIT_CODE, STOP_TIMEOUT,
+    Stopped, Supervised, SystemImage, supervise,
 };

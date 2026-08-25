@@ -18,6 +18,8 @@ const LOG_TAG: &str = "sparefs";
 
 component_manifest! {
     struct SpareFileSystemStartup {
+        exports: "FileSystem",
+        establishes_sessions: true,
         slots: {},
     }
 }

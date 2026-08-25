@@ -1,10 +1,10 @@
-//! Запись дерева имён: упорядоченный список монтирований, который маршрутизатор
-//! читает из userland-образа при своём запуске.
+//! Запись дерева имён: упорядоченный список монтирований, который владелец политики
+//! загрузки читает из userland-образа при своём запуске.
 
 use alloc::vec::Vec;
 
-/// Путь записи образа, из которой маршрутизатор читает дерево имён загрузки.
-pub const BOOT_MOUNT_TABLE_PATH: &str = "/boot/namespace-router/mounts";
+/// Путь записи образа с деревом имён загрузки.
+pub const BOOT_MOUNT_TABLE_PATH: &str = "/boot/init/mounts";
 
 pub const MOUNT_TABLE_MAGIC: [u8; 8] = *b"NSMOUNT\0";
 pub const MOUNT_TABLE_VERSION: u16 = 1;
@@ -12,11 +12,11 @@ pub const MOUNT_TABLE_VERSION: u16 = 1;
 const TABLE_HEADER_SIZE: usize = 16;
 const MOUNT_HEADER_SIZE: usize = 4;
 
-/// Монтирование: префикс дерева имён и программа компонента файловой системы в плане.
+/// Монтирование: префикс дерева имён и имя экземпляра его файловой системы.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mount<'a> {
     pub path: &'a str,
-    pub program: &'a str,
+    pub instance: &'a str,
 }
 
 /// Дерево имён, разобранное из записи образа.
@@ -98,11 +98,11 @@ pub fn encode_mount_table(mounts: &[Mount<'_>]) -> Result<Vec<u8>, MountTableEnc
 
     for mount in mounts {
         let path_len = string_len(mount.path)?;
-        let program_len = string_len(mount.program)?;
+        let instance_len = string_len(mount.instance)?;
         bytes.extend_from_slice(&path_len.to_le_bytes());
-        bytes.extend_from_slice(&program_len.to_le_bytes());
+        bytes.extend_from_slice(&instance_len.to_le_bytes());
         bytes.extend_from_slice(mount.path.as_bytes());
-        bytes.extend_from_slice(mount.program.as_bytes());
+        bytes.extend_from_slice(mount.instance.as_bytes());
     }
     Ok(bytes)
 }
@@ -177,10 +177,10 @@ fn parse_mount(bytes: &[u8], at: usize) -> Result<(Mount<'_>, usize), MountTable
         .get(at..at + MOUNT_HEADER_SIZE)
         .ok_or(truncated(bytes, at + MOUNT_HEADER_SIZE))?;
     let path_len = usize::from(read_u16(header, 0)?);
-    let program_len = usize::from(read_u16(header, 2)?);
+    let instance_len = usize::from(read_u16(header, 2)?);
     let (path, cursor) = parse_str(bytes, at + MOUNT_HEADER_SIZE, path_len, "mount_path")?;
-    let (program, cursor) = parse_str(bytes, cursor, program_len, "mount_program")?;
-    Ok((Mount { path, program }, cursor))
+    let (instance, cursor) = parse_str(bytes, cursor, instance_len, "mount_instance")?;
+    Ok((Mount { path, instance }, cursor))
 }
 
 fn parse_str<'a>(
@@ -238,11 +238,11 @@ mod tests {
     const MOUNTS: &[Mount<'static>] = &[
         Mount {
             path: "/",
-            program: "/boot/filesystem-imagefs",
+            instance: "filesystem-imagefs",
         },
         Mount {
             path: "/tmp",
-            program: "/boot/filesystem-ramfs",
+            instance: "filesystem-ramfs",
         },
     ];
 
@@ -326,12 +326,12 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_a_mount_without_a_program() {
+    fn decode_rejects_a_mount_without_an_instance() {
         let mut bytes = table_bytes();
         bytes[TABLE_HEADER_SIZE + 2..TABLE_HEADER_SIZE + 4].copy_from_slice(&0u16.to_le_bytes());
         assert_eq!(
-            decode_mount_table(&bytes).expect_err("mount names its program"),
-            MountTableDecodeError::InvalidLayout("mount_program")
+            decode_mount_table(&bytes).expect_err("mount names its instance"),
+            MountTableDecodeError::InvalidLayout("mount_instance")
         );
     }
 
@@ -339,7 +339,7 @@ mod tests {
     fn encode_rejects_a_mount_without_a_path() {
         let nameless = [Mount {
             path: "",
-            program: "/boot/filesystem-ramfs",
+            instance: "filesystem-ramfs",
         }];
         assert_eq!(
             encode_mount_table(&nameless).expect_err("path must be non-empty"),

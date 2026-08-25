@@ -1,5 +1,7 @@
-//! Контракт запуска компонента композиции: одноразовый стартовый кадр, которым
-//! supervisor отдаёт компоненту его исходные capability и запись конфигурации.
+//! Контракты компонента композиции: одноразовый стартовый кадр, которым supervisor отдаёт
+//! компоненту его исходные capability и запись конфигурации, установление сессий его
+//! service-порта на control-порту вместе с их областью и значок, которым supervisor заклеймён
+//! на control-порту.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -8,6 +10,7 @@ extern crate std;
 
 mod declare;
 mod manifest;
+mod sessions;
 mod startup;
 
 pub use manifest::{
@@ -16,4 +19,5 @@ pub use manifest::{
     ManifestSlot, ManifestSlots, SlotDeclaration, SlotKind, SlotNames, decode_manifest,
     encode_manifest, manifest_len,
 };
+pub use sessions::{SESSION_SCOPE_MAX, SessionError, component_sessions};
 pub use startup::*;

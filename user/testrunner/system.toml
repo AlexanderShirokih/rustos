@@ -5,16 +5,9 @@ executable = "/boot/namespace-router"
 memory_limit = "2M"
 startup_timeout = "2s"
 on_failure = "restart 2 then halt"
-after = ["filesystem-imagefs", "filesystem-ramfs"]
 
 [[components]]
 executable = "/boot/filesystem-imagefs"
-memory_limit = "4M"
-startup_timeout = "2s"
-on_failure = "halt"
-
-[[components]]
-executable = "/boot/filesystem-ramfs"
 memory_limit = "4M"
 startup_timeout = "2s"
 on_failure = "halt"
@@ -28,5 +21,17 @@ on_failure = "halt"
 [[components]]
 executable = "/boot/spare-filesystem"
 memory_limit = "4M"
+startup_timeout = "2s"
+on_failure = "halt"
+
+[[components]]
+executable = "/boot/filesystem-consumer-fixture"
+memory_limit = "2M"
+startup_timeout = "2s"
+on_failure = "detach"
+
+[[components]]
+executable = "/boot/init"
+memory_limit = "2M"
 startup_timeout = "2s"
 on_failure = "halt"

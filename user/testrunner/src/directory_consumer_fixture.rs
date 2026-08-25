@@ -34,7 +34,7 @@ const PANIC_EXIT_CODE: u64 = 6;
 
 component_manifest! {
     struct AreaStartup {
-        slots: { area: directory },
+        slots: { area: directory(instance = "filesystem-imagefs") },
     }
 }
 

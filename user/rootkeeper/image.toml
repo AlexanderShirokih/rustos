@@ -3,6 +3,9 @@ version = 1
 [plan]
 source = "user/rootkeeper/system.toml"
 
+[stage1]
+source = "user/rootkeeper/stage1.toml"
+
 [[mount_tables]]
 source = "user/rootkeeper/namespace.toml"
 
@@ -18,6 +21,10 @@ path = "/boot/driver-pl031"
 [[programs]]
 package = "namespace-router"
 path = "/boot/namespace-router"
+
+[[programs]]
+package = "init"
+path = "/boot/init"
 
 [[programs]]
 package = "filesystem-imagefs"

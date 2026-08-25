@@ -17,6 +17,8 @@ const LOG_TAG: &str = "ramfs";
 
 component_manifest! {
     struct RamFileSystemStartup {
+        exports: "FileSystem",
+        establishes_sessions: true,
         slots: {},
     }
 }

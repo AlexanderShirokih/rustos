@@ -1,13 +1,11 @@
 use core::num::NonZeroU64;
 
-use component_abi::{COMPONENT_SLOT_MAX, component_startup};
+use component_abi::{COMPONENT_SLOT_MAX, CONTROL_LEASE_BADGE, component_startup};
 use runtime::{BorrowedHandle, OwnedHandle, Port, Timeout};
 use syscall::Rights;
 use userland::EntryView;
 
 use crate::component::{BoundedStartupTransport, ManagedComponent, ManagedStartupError};
-
-const CONTROL_LEASE_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("lease badge is non-zero");
 
 struct ComponentServers {
     control: OwnedHandle,
@@ -25,6 +23,7 @@ pub struct ComponentSlots {
 /// Capability roots компонента, остающиеся у supervisor.
 pub struct ComponentRoots {
     control: OwnedHandle,
+    control_minter: OwnedHandle,
     service_minter: OwnedHandle,
     servers: Option<ComponentServers>,
 }
@@ -58,22 +57,23 @@ impl ComponentRoots {
     /// Создаёт control- и service-порты компонента.
     ///
     /// Порты принадлежат одной incarnation: их корни уезжают её процессу, а
-    /// оставшиеся у supervisor стороны `READ` не несут.
+    /// оставшиеся у supervisor стороны `READ` не несут. Минтеры выводятся из
+    /// корня, пока тот у supervisor: заклеймённая капа значка уже не примет.
     pub fn create() -> Result<Self, ManagedStartupError> {
-        // Значок lease-капы control-порта: supervisor остаётся его единственным
-        // отправителем, и его уход завершает процесс компонента.
+        let minted = Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE;
+        // Значок lease-капы control-порта: уход этого значка компонент читает
+        // как уход supervisor и завершается.
         let control = Port::create()?;
-        let control_client = control.handle().duplicate(
-            Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE,
-            Some(CONTROL_LEASE_BADGE),
-        )?;
-        let service = Port::create()?;
-        let service_minter = service
+        let control_client = control
             .handle()
-            .duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, None)?;
+            .duplicate(minted, Some(CONTROL_LEASE_BADGE))?;
+        let control_minter = control.handle().duplicate(minted, None)?;
+        let service = Port::create()?;
+        let service_minter = service.handle().duplicate(minted, None)?;
 
         Ok(Self {
             control: control_client,
+            control_minter,
             service_minter,
             servers: Some(ComponentServers {
                 control: control.into_handle(),
@@ -85,6 +85,13 @@ impl ComponentRoots {
     /// Минтит клиентскую capability service-порта под значком `badge`.
     pub fn session(&self, badge: NonZeroU64) -> Result<OwnedHandle, runtime::Error> {
         self.service_minter
+            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
+    }
+
+    /// Минтит клиентскую capability control-порта под значком `badge`. Её
+    /// держатель зовёт протокол, который компонент обслуживает на этом порту.
+    pub fn control_session(&self, badge: NonZeroU64) -> Result<OwnedHandle, runtime::Error> {
+        self.control_minter
             .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
     }
 

@@ -131,6 +131,7 @@ dependencies = [
 name = "filesystem-server"
 version = "0.1.0"
 dependencies = [
+ "component-abi",
  "filesystem",
  "filesystem-abi",
  "ipc",
@@ -145,6 +146,20 @@ name = "hello-std"
 version = "0.1.0"
 dependencies = [
  "userland-build",
+]
+
+[[package]]
+name = "init"
+version = "0.1.0"
+dependencies = [
+ "component-abi",
+ "filesystem-abi",
+ "ipc",
+ "runtime",
+ "supervisor-abi",
+ "syscall",
+ "userland-build",
+ "userland-image",
 ]
 
 [[package]]
@@ -218,12 +233,9 @@ dependencies = [
  "filesystem-abi",
  "filesystem-server",
  "ipc",
- "rootkeeper-abi",
  "runtime",
- "spin",
  "syscall",
  "userland-build",
- "userland-image",
 ]
 
 [[package]]
@@ -249,28 +261,20 @@ name = "rootkeeper"
 version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
+ "component-abi",
  "device-resolver",
  "device-resolver-aarch64",
  "fdt",
- "filesystem-abi",
  "ipc",
  "log-abi",
  "log-relay",
  "managed-component",
- "rootkeeper-abi",
  "runtime",
  "spin",
+ "supervisor-abi",
  "syscall",
  "userland-build",
  "userland-image",
-]
-
-[[package]]
-name = "rootkeeper-abi"
-version = "0.1.0"
-dependencies = [
- "filesystem-abi",
- "ipc",
 ]
 
 [[package]]
@@ -316,6 +320,13 @@ version = "0.1.0"
 dependencies = [
  "syscall",
  "userland-build",
+]
+
+[[package]]
+name = "supervisor-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
 ]
 
 [[package]]
@@ -378,6 +389,7 @@ dependencies = [
  "rtc-abi",
  "runtime",
  "spin",
+ "supervisor-abi",
  "syscall",
  "test-harness-qemu",
  "userland",

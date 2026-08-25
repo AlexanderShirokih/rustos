@@ -1,7 +1,9 @@
-//! Обслуживание control-порта: установление сессий владельцем компонента.
+//! Обслуживание control-порта: установление сессий владельцем компонента вместе с областью,
+//! до которой сессия сужена.
 
-use filesystem_abi::{FileSystemError, file_system_admin};
-use ipc::wire::Cap;
+use component_abi::{SESSION_SCOPE_MAX, SessionError, component_sessions};
+use filesystem_abi::{FileSystemError, PATH_MAX};
+use ipc::wire::{Cap, Str};
 use runtime::OwnedHandle;
 
 use crate::{
@@ -9,12 +11,18 @@ use crate::{
     service::{mint_session, settle, vend},
 };
 
-pub(crate) struct Binding<'a> {
+const _: () = assert!(
+    // Область приходит контрактом компонента, а путём её делает контракт файловой системы.
+    SESSION_SCOPE_MAX <= PATH_MAX,
+    "session scope exceeds the path bound"
+);
+
+pub(crate) struct Establishing<'a> {
     shared: &'a Shared,
     vended: Option<OwnedHandle>,
 }
 
-impl<'a> Binding<'a> {
+impl<'a> Establishing<'a> {
     pub(crate) fn new(shared: &'a Shared) -> Self {
         Self {
             shared,
@@ -27,11 +35,25 @@ impl<'a> Binding<'a> {
     }
 }
 
-impl file_system_admin::Service for Binding<'_> {
-    fn bind(&mut self) -> Result<Cap, FileSystemError> {
-        let (badge, session) = mint_session(&self.shared.service, &self.shared.next_badge)?;
+impl component_sessions::Service for Establishing<'_> {
+    fn open_session(&mut self, scope: Str<'_, SESSION_SCOPE_MAX>) -> Result<Cap, SessionError> {
+        let (badge, session) =
+            mint_session(&self.shared.service, &self.shared.next_badge).map_err(refused)?;
         // Сессия заводится до того, как её капа ушла клиенту: кадр по ней застанет её заведённой.
-        self.shared.state.lock().open_session(badge.get())?;
+        let mut state = self.shared.state.lock();
+        let opened = match scope.as_str() {
+            "" => state.open_session(badge.get()),
+            path => state.open_session_at(badge.get(), path),
+        };
+        drop(state);
+        opened.map_err(refused)?;
         Ok(vend(&mut self.vended, session))
+    }
+}
+
+fn refused(error: FileSystemError) -> SessionError {
+    match error {
+        FileSystemError::NoSpace => SessionError::NoSpace,
+        _ => SessionError::Refused,
     }
 }

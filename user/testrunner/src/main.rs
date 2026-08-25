@@ -16,6 +16,7 @@ use syscall::Handle;
 
 mod address_space_isolation;
 mod clock;
+mod control_port;
 mod filesystem;
 mod filesystem_bench;
 mod filesystem_scope;

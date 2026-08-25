@@ -14,7 +14,6 @@ members = [
     "lib/ipc-test",
     "lib/log-abi",
     "lib/rtc-abi",
-    "lib/rootkeeper-abi",
     "lib/syscall",
     "kernel/kernelspace",
     "kernel/capability",
@@ -32,6 +31,7 @@ members = [
     "lib/fdt",
     "lib/filesystem",
     "lib/filesystem-abi",
+    "lib/supervisor-abi",
     "lib/userland",
     "lib/userland-build",
     "lib/userland-image",
@@ -90,6 +90,7 @@ drivers-aarch64 = { path = "kernel/drivers-aarch64" }
 kernelspace = { path = "kernel/kernelspace" }
 capability = { path = "kernel/capability" }
 scheduler = { path = "kernel/scheduler" }
+supervisor-abi = { path = "lib/supervisor-abi" }
 syscall = { path = "lib/syscall" }
 syscall-kernel = { path = "kernel/syscall" }
 test-harness-qemu = { path = "lib/test-harness-qemu" }
@@ -98,7 +99,6 @@ userland = { path = "lib/userland" }
 userland-build = { path = "lib/userland-build" }
 userland-image = { path = "lib/userland-image" }
 rtc-abi = { path = "lib/rtc-abi" }
-rootkeeper-abi = { path = "lib/rootkeeper-abi" }
 process = { path = "kernel/process" }
 userland-image-tool = { path = "tools/userland-image" }
 style-tool = { path = "tools/style" }

@@ -10,7 +10,7 @@
 use core::panic::PanicInfo;
 
 use calculator_demo::calculator;
-use component_abi::component_manifest;
+use component_abi::{component_manifest, supervisor_gone};
 use filesystem_abi::{AccessMode, OpenFlags, file_system};
 use ipc::{
     Transport as _,
@@ -45,7 +45,7 @@ component_manifest! {
         slots: {
             calculator: service(protocol = "Calculator"),
             clock: service(protocol = "Rtc"),
-            area: directory,
+            area: directory(instance = "filesystem-imagefs"),
         },
     }
 }
@@ -145,8 +145,8 @@ fn run(
 }
 
 fn turn(control: &PortTransport) -> Supervisor {
-    // Срок приёма на control-порту задаёт такт цикла, а уход supervisor -
-    // единственного отправителя порта - виден отказом того же приёма.
+    // Срок приёма на control-порту задаёт такт цикла, а уход значка supervisor
+    // виден отказом того же приёма.
     match control.wait_readable(TURN) {
         // Протокола на control-порту нет: пришедший кадр уходит без ответа, а
         // закрытие reply-объекта будит вызывателя.
@@ -154,8 +154,9 @@ fn turn(control: &PortTransport) -> Supervisor {
             control.cancel_reply();
             Supervisor::Alive
         }
-        // Покадровое исчерпание такт не рвёт.
+        // Покадровое исчерпание такт не рвёт, как и уход чужого значка.
         Err(IpcError::Timeout | IpcError::ResourceExhausted) => Supervisor::Alive,
+        Err(IpcError::SenderGone) if !supervisor_gone(control.peer_badge()) => Supervisor::Alive,
         Err(_) => Supervisor::Gone,
     }
 }

@@ -142,7 +142,7 @@ fn workspace_lints(manifest: &Path) -> Result<toml::Value> {
         .with_context(|| format!("{} declares no [workspace.lints]", manifest.display()))
 }
 
-fn detached_workspaces(root: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn detached_workspaces(root: &Path) -> Result<Vec<PathBuf>> {
     let manifest = root.join("Cargo.toml");
     let text = fs::read_to_string(&manifest)
         .with_context(|| format!("Failed to read {}", manifest.display()))?;

@@ -1,12 +1,13 @@
 //! Процесс файловой системы: компонентные порты, сессии клиентов и цикл обслуживания. Крейт
 //! держит всё, что у файловых систем общее: конкретная сводится к построению своего бекенда.
 //!
-//! Портов у процесса два. Control-порт устанавливает сессии по `bind`, service-порт обслуживает
-//! их и выдаёт производные по `open_root`. Control-порт обслуживает отдельный поток: это
-//! отвязывает rootkeeper от вызова, который сервисный поток обслуживает прямо сейчас.
+//! Портов у процесса два. Control-порт устанавливает сессии по `ComponentSessions::open_session`,
+//! service-порт обслуживает их и выдаёт производные по `open_root`. Control-порт обслуживает
+//! отдельный поток: это отвязывает rootkeeper от вызова, который сервисный поток обслуживает
+//! прямо сейчас.
 //!
 //! Клиентская сторона control-порта принадлежит rootkeeper и несёт его значок: её уход завершает
-//! процесс.
+//! процесс. Уход прочих значков этого порта обслуживание продолжает.
 
 #![no_std]
 
@@ -15,8 +16,9 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::sync::atomic::AtomicU64;
 
+use component_abi::{component_sessions, supervisor_gone};
 use filesystem::FileSystemBackend;
-use filesystem_abi::{file_system, file_system_admin};
+use filesystem_abi::file_system;
 use ipc::{
     Transport as _,
     wire::{Cap, IpcError},
@@ -34,7 +36,7 @@ mod error;
 mod service;
 mod store;
 
-use admin::Binding;
+use admin::Establishing;
 pub use error::{Error, Result};
 use service::{FileSystemState, Frame, Serving};
 pub use service::{settle, vend};
@@ -144,14 +146,15 @@ fn serve_admin(shared: &Shared) -> u32 {
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
-            // Отправитель на control-порту один - rootkeeper, поэтому его уход снимает процесс
-            // целиком.
-            Err(IpcError::SenderGone) => {
+            // Уход значка rootkeeper на control-порту снимает процесс целиком, а уход
+            // прочих значков порта цикл продолжает.
+            Err(IpcError::SenderGone) if supervisor_gone(transport.peer_badge()) => {
                 log_line("supervisor gone");
                 exit_with_sibling(&shared.sessions_thread, SUPERVISOR_LOST_EXIT_CODE)
             }
-            // Покадровое исчерпание и пробуждение без кадра цикл не закрывают.
-            Err(IpcError::ResourceExhausted | IpcError::Timeout) => continue,
+            // Покадровое исчерпание, пробуждение без кадра и уход чужого значка цикл не
+            // закрывают.
+            Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout) => continue,
             Err(IpcError::PeerClosed) => break,
             // Прочий отказ приёма оставляет процесс без установления сессий и уходит ненулевым
             // кодом потока, отличимым от закрытия порта.
@@ -160,9 +163,9 @@ fn serve_admin(shared: &Shared) -> u32 {
                 return 1;
             }
         }
-        let mut binding = Binding::new(shared);
-        let delivered = file_system_admin::dispatch(&mut binding, &transport).is_ok();
-        binding.end(delivered);
+        let mut establishing = Establishing::new(shared);
+        let delivered = component_sessions::dispatch(&mut establishing, &transport).is_ok();
+        establishing.end(delivered);
         transport.cancel_reply();
     }
     log_line("control port closed");

@@ -1,16 +1,19 @@
 //! Relay логирования rootkeeper: сток - bootstrap-капа ядра, которая процесс не
 //! покидает, а подсистемам достаются только лог-сессии.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use core::num::NonZeroU64;
 
-use log_relay::{KernelLogSink, LogRelayThread};
+use log_abi::{LOG_SOURCE_MAX, LogBuffer};
+use log_relay::{KernelLogSink, LogRelayThread, SourceNames};
 use runtime::{OwnedHandle, Result, Timeout};
 use spin::Mutex;
 use syscall::Handle;
 
 /// Значок лог-сессии супервизора.
 pub const SUPERVISOR_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
+
+const SUPERVISOR_NAME: &str = "rootkeeper";
 
 /// Значок лог-сессии компонента с номером `index` в плане.
 #[must_use]
@@ -20,22 +23,43 @@ pub fn component_badge(index: u16) -> NonZeroU64 {
 
 static RELAY: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 
-static COMPONENT_NAMES: Mutex<&'static [&'static str]> = Mutex::new(&[]);
+static COMPONENT_NAMES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Имена источников строк журнала композиции: значок лог-сессии - имя экземпляра, которому
+/// она выдана.
+pub struct ComponentNames;
+
+impl SourceNames for ComponentNames {
+    fn name(&self, badge: u64) -> Option<LogBuffer<LOG_SOURCE_MAX>> {
+        if badge == SUPERVISOR_BADGE.get() {
+            return Some(source(SUPERVISOR_NAME));
+        }
+        let index = badge.checked_sub(SUPERVISOR_BADGE.get() + 1)?;
+        let index = usize::try_from(index).ok()?;
+        COMPONENT_NAMES
+            .lock()
+            .get(index)
+            .map(|name| source(name.as_str()))
+    }
+}
 
 /// Заводит лог-порт и его выделенный поток. `kernel` - bootstrap-капа ядра:
 /// её видит только сток relay.
 pub fn start(kernel: Handle) -> Result<()> {
-    let relay = LogRelayThread::start(source_name, KernelLogSink::new(kernel))?;
+    let relay = LogRelayThread::start(ComponentNames, KernelLogSink::new(kernel))?;
     *RELAY.lock() = Some(relay);
     Ok(())
 }
 
-/// Называет источники строк журнала именами компонентов плана.
+/// Называет источники строк журнала именами компонентов набора композиции в его порядке.
+/// Набор пополняет транзакция расширения, и вызов повторяется на каждой его смене.
 pub fn install_names<'a>(ids: impl Iterator<Item = &'a str>) {
-    // Имена читает поток relay, переживающий разбор плана: копии живут всё
-    // время работы процесса.
-    let names: Vec<&'static str> = ids.map(|id| &*Box::leak(Box::<str>::from(id))).collect();
-    *COMPONENT_NAMES.lock() = Box::leak(names.into_boxed_slice());
+    // Имена читает поток relay, переживающий и разбор плана, и откат транзакции: таблица
+    // держит копии и уходит вместе со снятыми компонентами.
+    let names: Vec<String> = ids.map(String::from).collect();
+    // Освобождение прежней таблицы не выполняется под локом: куча общая с потоком relay.
+    let replaced = core::mem::replace(&mut *COMPONENT_NAMES.lock(), names);
+    drop(replaced);
 }
 
 /// Минтит лог-сессию со значком `badge`.
@@ -74,13 +98,8 @@ pub fn shutdown(timeout: Timeout) {
     }
 }
 
-/// Имя источника строк журнала по значку его лог-сессии.
-#[must_use]
-pub fn source_name(badge: u64) -> Option<&'static str> {
-    if badge == SUPERVISOR_BADGE.get() {
-        return Some("rootkeeper");
-    }
-    let index = badge.checked_sub(SUPERVISOR_BADGE.get() + 1)?;
-    let index = usize::try_from(index).ok()?;
-    COMPONENT_NAMES.lock().get(index).copied()
+fn source(name: &str) -> LogBuffer<LOG_SOURCE_MAX> {
+    let mut buffer = LogBuffer::new();
+    buffer.push_str(name);
+    buffer
 }

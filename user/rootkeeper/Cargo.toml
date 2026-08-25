@@ -21,17 +21,17 @@ doctest = false
 
 [dependencies]
 bootstrap-abi = { workspace = true }
+component-abi = { workspace = true }
 device-resolver = { workspace = true }
 device-resolver-aarch64 = { workspace = true }
 fdt = { workspace = true }
-filesystem-abi = { workspace = true }
 ipc = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }
 managed-component = { workspace = true }
 runtime = { workspace = true }
-rootkeeper-abi = { workspace = true }
 spin = { workspace = true }
+supervisor-abi = { workspace = true }
 syscall = { workspace = true }
 userland-image = { workspace = true }
 

@@ -4,20 +4,14 @@
 
 use alloc::{string::String, vec::Vec};
 
-use filesystem_abi::{
-    FileSystemError, MountTable as BootMountTable, PATH_MAX, Path, file_system, namespace,
-    namespace_admin,
-};
+use filesystem_abi::{FileSystemError, PATH_MAX, Path, file_system, namespace, namespace_admin};
 use filesystem_server::{settle, vend};
 use ipc::wire::{Cap, Str};
-use rootkeeper_abi::rootkeeper;
 use runtime::{Mutex, OwnedHandle, PortTransport, Timeout};
-
-use crate::error::{Error, Result as RouterResult};
+use syscall::Handle;
 
 const DONE: u32 = 0;
 const OPEN_ROOT_TIMEOUT: Timeout = Timeout::from_secs(1);
-const SESSION_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 struct Mount {
     prefix: String,
@@ -86,53 +80,52 @@ impl namespace::Service for Resolving<'_> {
 
 pub(crate) struct Administering<'a> {
     table: &'a Mutex<MountTable>,
-    supervisor: OwnedHandle,
+    received: Vec<OwnedHandle>,
 }
 
 impl<'a> Administering<'a> {
-    pub(crate) const fn new(table: &'a Mutex<MountTable>, supervisor: OwnedHandle) -> Self {
-        Self { table, supervisor }
+    pub(crate) const fn new(table: &'a Mutex<MountTable>) -> Self {
+        Self {
+            table,
+            received: Vec::new(),
+        }
     }
 
-    pub(crate) fn mount_boot_table(&mut self, table: BootMountTable<'_>) -> RouterResult<()> {
-        for mount in table {
-            let prefix = Path::new(mount.path).map_err(|_| Error::MountTable)?;
-            let program = Path::new(mount.program).map_err(|_| Error::MountTable)?;
-            self.mount_prefix(prefix, program)
-                .map_err(|_| Error::MountTable)?;
-        }
-        Ok(())
+    pub(crate) fn begin_frame(&mut self, capabilities: impl IntoIterator<Item = Handle>) {
+        self.received.clear();
+        self.received
+            .extend(capabilities.into_iter().map(OwnedHandle::from_handle));
     }
 
-    fn mount_prefix(
-        &mut self,
-        prefix: Path<'_>,
-        program: Path<'_>,
-    ) -> Result<u32, FileSystemError> {
-        if self.table.lock().covers(prefix) {
-            return Err(FileSystemError::AlreadyExists);
-        }
-        let session = rootkeeper::Client::new(PortTransport::client(&self.supervisor))
-            .with_wait(SESSION_TIMEOUT)
-            .file_system(Str::new(program.as_str()).ok_or(FileSystemError::InvalidPath)?)
-            .map_err(|_| FileSystemError::Unresponsive)??;
-        self.table.lock().mounts.push(Mount {
-            prefix: String::from(prefix.as_str()),
-            session: OwnedHandle::adopt(session),
-        });
-        Ok(DONE)
+    pub(crate) fn end_frame(&mut self) {
+        self.received.clear();
+    }
+
+    fn take(&mut self, session: Cap) -> Result<OwnedHandle, FileSystemError> {
+        let raw = session.raw().get();
+        let index = self
+            .received
+            .iter()
+            .position(|handle| handle.as_raw().raw() == raw)
+            .ok_or(FileSystemError::NotSupported)?;
+        Ok(self.received.swap_remove(index))
     }
 }
 
 impl namespace_admin::Service for Administering<'_> {
-    fn mount(
-        &mut self,
-        path: Str<'_, PATH_MAX>,
-        program: Str<'_, PATH_MAX>,
-    ) -> Result<u32, FileSystemError> {
+    fn mount(&mut self, path: Str<'_, PATH_MAX>, session: Cap) -> Result<u32, FileSystemError> {
         let prefix = Path::new(path.as_str())?;
-        let program = Path::new(program.as_str())?;
-        self.mount_prefix(prefix, program)
+        // Отвергнутое монтирование уносит переданную сессию: вернуть её отправителю нечем.
+        let session = self.take(session)?;
+        let mut table = self.table.lock();
+        if table.covers(prefix) {
+            return Err(FileSystemError::AlreadyExists);
+        }
+        table.mounts.push(Mount {
+            prefix: String::from(prefix.as_str()),
+            session,
+        });
+        Ok(DONE)
     }
 
     fn unmount(&mut self, path: Str<'_, PATH_MAX>) -> Result<u32, FileSystemError> {

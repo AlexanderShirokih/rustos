@@ -3,6 +3,9 @@ version = 1
 [plan]
 source = "user/calculator-demo/system.toml"
 
+[stage1]
+source = "user/calculator-demo/stage1.toml"
+
 [[mount_tables]]
 source = "user/calculator-demo/namespace.toml"
 
@@ -22,6 +25,14 @@ path = "/boot/namespace-router"
 [[programs]]
 package = "filesystem-imagefs"
 path = "/boot/filesystem-imagefs"
+
+[[programs]]
+package = "filesystem-ramfs"
+path = "/boot/filesystem-ramfs"
+
+[[programs]]
+package = "init"
+path = "/boot/init"
 
 [[programs]]
 package = "calculator-demo"

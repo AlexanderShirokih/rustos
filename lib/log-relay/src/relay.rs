@@ -30,18 +30,21 @@ pub trait LogSink {
     fn write(&mut self, source: &str, message: &str) -> Result<(), IpcError>;
 }
 
-/// Имя подсистемы по значку её лог-сессии. `None` - значок попадает в журнал
-/// числовой формой.
-pub type SourceNames = fn(u64) -> Option<&'static str>;
+/// Имена источников строк журнала: значок лог-сессии - имя его владельца. Имена принадлежат
+/// реализации, а relay уносит копию: его поток переживает смену состава композиции.
+pub trait SourceNames: Send {
+    /// Имя владельца значка `badge`. Отсутствие имени уводит значок в журнал числовой формой.
+    fn name(&self, badge: u64) -> Option<LogBuffer<LOG_SOURCE_MAX>>;
+}
 
-pub(crate) struct LogRelay<S: LogSink> {
+pub(crate) struct LogRelay<S: LogSink, N: SourceNames> {
     receiver: OwnedHandle,
-    names: SourceNames,
+    names: N,
     sink: S,
 }
 
-impl<S: LogSink> LogRelay<S> {
-    pub(crate) fn new(receiver: OwnedHandle, names: SourceNames, sink: S) -> Self {
+impl<S: LogSink, N: SourceNames> LogRelay<S, N> {
+    pub(crate) fn new(receiver: OwnedHandle, names: N, sink: S) -> Self {
         Self {
             receiver,
             names,
@@ -75,7 +78,7 @@ impl<S: LogSink> LogRelay<S> {
 
             // Значок и capability кадра читаются до пересылки: исходящий IPC
             // перезаписывает те же поля IPC-буфера потока.
-            let source = source_of(self.names, transport.peer_badge());
+            let source = source_of(&self.names, transport.peer_badge());
             discard_staged_caps(&transport);
 
             let mut forwarding = Forwarding {
@@ -125,11 +128,11 @@ impl<S: LogSink> log::Service for Forwarding<'_, S> {
     }
 }
 
-fn source_of(names: SourceNames, badge: u64) -> LogBuffer<LOG_SOURCE_MAX> {
+fn source_of<N: SourceNames>(names: &N, badge: u64) -> LogBuffer<LOG_SOURCE_MAX> {
     let mut source = LogBuffer::new();
-    match names(badge) {
+    match names.name(badge) {
         Some(name) => {
-            append_escaped(&mut source, name, false);
+            append_escaped(&mut source, name.as_str(), false);
         }
         None => {
             let _ = write!(source, "badge-{badge:016x}");

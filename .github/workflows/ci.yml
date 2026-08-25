@@ -30,10 +30,9 @@ jobs:
         --env CARGO_TARGET_DIR=/target', github.job) || '' }}
     steps:
       - uses: actions/checkout@v5
-      - run: cargo fmt --all --check
-      - run: cargo fmt --manifest-path fuzz/Cargo.toml --all --check
-      - run: cargo fmt --manifest-path lib/std-rt/Cargo.toml --all --check
-      - run: cargo fmt --manifest-path user/Cargo.toml --all --check
+      # Отделённые workspace членами корневого не являются: `--workspace` их не форматирует,
+      # и прогон по каждому берёт их список из `workspace.exclude` корневого манифеста.
+      - run: cargo xtask fmt --check
 
   check-layers:
     name: check-layers
