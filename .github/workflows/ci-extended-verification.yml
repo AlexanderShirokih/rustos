@@ -1,0 +1,72 @@
+name: Extended verification
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  schedule:
+    - cron: "0 12 */3 * *"
+  workflow_dispatch:
+    inputs:
+      stress_seed:
+        description: First deterministic userspace stress seed
+        required: false
+        type: number
+        default: 1
+      stress_seeds:
+        description: Number of userspace stress seeds
+        required: false
+        type: number
+        default: 64
+      stress_steps:
+        description: Operations per userspace stress seed
+        required: false
+        type: number
+        default: 256
+
+permissions:
+  contents: read
+
+jobs:
+  userspace-stress:
+    name: userspace stress (QEMU)
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      runner: ci-heavy
+      cache-scope: userspace-stress
+      timeout-minutes: 45
+      run: >-
+        cargo xtask stress
+        --seed "${{ inputs.stress_seed || 1 }}"
+        --seeds "${{ inputs.stress_seeds || 64 }}"
+        --steps "${{ inputs.stress_steps || 256 }}"
+        --timeout 900
+
+  qemu-test-gicv2:
+    name: qemu-test (GICv2)
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      runner: ci-heavy
+      cache-scope: qemu-test-gicv2
+      run: cargo xtask qemu-test --spec devices/spec/qemu-aarch64-test-gicv2.yaml
+
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fdt_parse_walk, ipc_wire_decode, ramfs_ops, userland_image_decode]
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      runner: ci-heavy
+      # Ноги матрицы делят пул. Общий каталог целей сводит их на блокировке
+      # каталога сборки, как только пул берёт две джобы разом.
+      cache-scope: fuzz-${{ matrix.target }}
+      timeout-minutes: 45
+      cache-path: fuzz/corpus/${{ matrix.target }}
+      cache-key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      cache-restore-keys: fuzz-corpus-${{ matrix.target }}-
+      artifact-name: fuzz-artifacts-${{ matrix.target }}
+      artifact-path: fuzz/artifacts/${{ matrix.target }}
+      run: cargo xtask fuzz "${{ matrix.target }}" --seconds 600

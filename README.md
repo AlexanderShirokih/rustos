@@ -21,6 +21,11 @@ Raspberry Pi 5 и на Android-телефоне (тестировалось на
 
 Платформенный код — boot, MMU, прерывания, context switch — изолирован через hardware abstraction layer (HAL); остальное ядро от конкретного железа не зависит.
 
+Имена в коде — таргет `aarch64-unknown-molecular`, `target_os = "molecular"`,
+модуль `std::os::molecular` — идут от `molecular`, внутреннего имени проекта.
+Система называется RustOS, проект — `molecular`; оба имени временные, подробнее
+в [docs/workspace.md](docs/workspace.md#наименование).
+
 ---
 
 ## Возможности
@@ -103,7 +108,9 @@ fn main() {
 - [docs/concurrency.md](docs/concurrency.md) — синхронизация потоков процесса: futex, `Mutex`, `Condvar`
 - [docs/environment.md](docs/environment.md) — toolchain, зависимости, device specs
 - [docs/commands.md](docs/commands.md) — команды сборки и тестирования
+- [docs/workspace.md](docs/workspace.md) — устройство репозитория: домены, слои, таргеты
 - [docs/code-style.md](docs/code-style.md) — соглашения по стилю кода
+- [docs/testing.md](docs/testing.md) — размещение тестов и выбор уровня
 - [Статья на Хабре](https://habr.com/ru/articles/962680/) — обзор проекта
 
 ---

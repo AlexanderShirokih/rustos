@@ -1,0 +1,118 @@
+name: CI container job
+
+# Единственное определение раннера, образа и монтирований кэша.
+
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: Check script; runs as a single step
+        required: true
+        type: string
+      cache-scope:
+        description: Path segment of the persistent CARGO_TARGET_DIR; equals the calling job's id
+        required: true
+        type: string
+      image:
+        description: Container image; a check of the image itself passes its own reference
+        required: false
+        type: string
+        default: ghcr.io/alexandershirokih/molecular-ci:latest
+      runner:
+        description: Label of the self-hosted pool; doubles as the root of that pool's caches
+        required: false
+        type: string
+        default: ci-pr
+      timeout-minutes:
+        description: Job timeout; cannot be set on a caller job that uses `uses:`
+        required: false
+        type: number
+        default: 30
+      fetch-depth:
+        description: Clone depth; 0 is required by checks that compare against the base branch
+        required: false
+        type: number
+        default: 1
+      seccomp-unconfined:
+        description: Drop the container seccomp profile
+        required: false
+        type: boolean
+        default: false
+      cache-path:
+        description: Path cached between runs; empty disables the cache step entirely
+        required: false
+        type: string
+        default: ''
+      cache-key:
+        description: Cache key; used only when cache-path is set
+        required: false
+        type: string
+        default: ''
+      cache-restore-keys:
+        description: Newline-separated key prefixes tried when cache-key misses
+        required: false
+        type: string
+        default: ''
+      artifact-name:
+        description: Name of the uploaded artifact; empty disables the upload step entirely
+        required: false
+        type: string
+        default: ''
+      artifact-path:
+        description: Path uploaded under artifact-name
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+# Вызываемый workflow не наследует `env` вызывающего: до него доходят только
+# собственные переменные уровня workflow, job'а и шага.
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  run:
+    runs-on: ${{ vars.CI_RUNNER && inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    container:
+      image: ${{ inputs.image }}
+      # `--user` задаёт владельца всего, что шаги создают в рабочей области: она
+      # общая с джобами вне контейнера, идущими от пользователя раннера. 1000 - его
+      # uid на хосте самостоятельных раннеров.
+      # CARGO_HOME образа принадлежит root и на запись недоступен; каталог реестра
+      # переносится на монтирование и переживает джобу.
+      options: >-
+        ${{ inputs.seccomp-unconfined && '--security-opt seccomp=unconfined' || '' }}
+        ${{ vars.CI_RUNNER && format('--user 1000:1000
+        --volume /var/cache/ci/{0}/cargo-home:/cargo
+        --volume /var/cache/ci/{0}/sccache:/sccache
+        --volume /var/cache/ci/{0}/target/{1}:/target
+        --env CARGO_HOME=/cargo
+        --env RUSTC_WRAPPER=sccache
+        --env SCCACHE_DIR=/sccache
+        --env SCCACHE_CACHE_SIZE=20G
+        --env CARGO_TARGET_DIR=/target', inputs.runner, inputs.cache-scope) || '' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - if: inputs.cache-path != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.cache-path }}
+          key: ${{ inputs.cache-key }}
+          restore-keys: ${{ inputs.cache-restore-keys }}
+
+      - run: ${{ inputs.run }}
+
+      - if: always() && inputs.artifact-name != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: ignore

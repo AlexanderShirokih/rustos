@@ -1,11 +1,5 @@
-# CI/dev-образ для сборки ядра.
-#
-# Содержит ТОЛЬКО окружение (toolchain + системные инструменты), но не
-# компилированные зависимости и не target/: они path-зависимы и инвалидируются
-# исходниками — их кэширует Swatinem/rust-cache в CI.
-#
-# Пересобирается только при изменении Dockerfile или rust-toolchain.toml
-# (см. .github/workflows/ci-image.yml).
+# CI/dev-образ для сборки ядра. Содержит только окружение: toolchain и
+# системные инструменты.
 FROM debian:bookworm-slim
 
 ENV RUSTUP_HOME=/usr/local/rustup \
@@ -45,5 +39,23 @@ RUN cd /tmp \
 # cargo-fuzz собирает и запускает fuzz-targets в CI.
 RUN cargo install cargo-binutils --locked \
     && cargo install cargo-fuzz --locked
+
+# sccache служит обёрткой компилятора: кэш монтируют снаружи, обёртка принадлежит образу.
+# Готовая сборка вместо `cargo install`: сборка из исходников требует заголовков OpenSSL.
+ARG SCCACHE_VERSION=0.17.0
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) target=x86_64-unknown-linux-musl ;; \
+        arm64) target=aarch64-unknown-linux-musl ;; \
+        *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && name="sccache-v${SCCACHE_VERSION}-${target}" \
+    && curl --proto '=https' --tlsv1.2 -sSfL \
+        "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${name}.tar.gz" \
+        | tar -xz -C /tmp \
+    && install -m 0755 "/tmp/${name}/sccache" /usr/local/bin/sccache \
+    && rm -rf "/tmp/${name}"
+
+ARG SIMILARITY_RS_VERSION=0.5.0
+RUN cargo install similarity-rs --locked --version "$SIMILARITY_RS_VERSION"
 
 WORKDIR /work

@@ -1,0 +1,214 @@
+name: CI
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: changes
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      std: ${{ steps.filter.outputs.std }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          # Значение по умолчанию отбрасывает отрицающие шаблоны, и фильтр перестаёт
+          # что-либо исключать.
+          predicate-quantifier: some-with-excludes
+          # Описание проверки и определение общего контейнера попадают под '**':
+          # их правка перезапускает проверки наравне с исходниками.
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+            std:
+              - patches/std-molecular.patch
+              - xtask/src/std_src.rs
+              - rust-toolchain.toml
+              - targets/aarch64-unknown-molecular.json
+              - lib/std-rt/**
+              - lib/component-abi/**
+              - lib/ipc/**
+              - lib/log-abi/**
+              - lib/syscall/**
+              - user/hello-std/**
+              - user/Cargo.toml
+              - user/.cargo/config.toml
+              - Dockerfile
+              - .github/workflows/ci-pr-checks.yml
+              - .github/workflows/ci-container-job.yml
+
+  fmt:
+    name: rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: fmt
+      timeout-minutes: 10
+      # Отделённые workspace членами корневого не являются: `--workspace` их не форматирует,
+      # и прогон по каждому берёт их список из `workspace.exclude` корневого манифеста.
+      run: cargo xtask fmt --check
+
+  check-layers:
+    name: check-layers
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: check-layers
+      timeout-minutes: 15
+      run: cargo xtask check-layers
+
+  doc:
+    name: doc links
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: doc
+      timeout-minutes: 20
+      run: |
+        export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings"
+        cargo doc --no-deps --workspace
+        cargo xtask userland doc --no-deps --workspace
+
+  style:
+    name: style
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: style
+      timeout-minutes: 15
+      fetch-depth: 0
+      run: cargo xtask style --all --base "origin/${GITHUB_BASE_REF:-main}"
+
+  similarity:
+    name: similarity
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: similarity
+      timeout-minutes: 15
+      fetch-depth: 0
+      run: cargo xtask similarity --base "origin/${GITHUB_BASE_REF:-main}"
+
+  clippy-host:
+    name: clippy (host)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: clippy-host
+      timeout-minutes: 30
+      run: |
+        cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --all-targets --all-features -- -D warnings
+        cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+
+  clippy-aarch64:
+    name: clippy (aarch64)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: clippy-aarch64
+      timeout-minutes: 30
+      run: |
+        cargo clippy --workspace --exclude xtask --exclude ipc-test --exclude userland-build --exclude style-tool --exclude userland-image-tool --target aarch64-unknown-none -- -D warnings
+        cargo xtask userland clippy --workspace --all-targets -- -D warnings
+        cargo clippy --manifest-path lib/std-rt/Cargo.toml --target targets/aarch64-unknown-molecular.json -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
+
+  test:
+    name: tests (host)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: test
+      timeout-minutes: 30
+      run: cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --all-features
+
+  race:
+    name: race (ThreadSanitizer)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: race
+      timeout-minutes: 45
+      # ThreadSanitizer раскладывает теневую память по фиксированным адресам и снимает ASLR
+      # вызовом personality(), который профиль seccomp по умолчанию запрещает.
+      seccomp-unconfined: true
+      run: cargo xtask race
+
+  fuzz-build:
+    name: fuzz targets (AddressSanitizer)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: fuzz-build
+      timeout-minutes: 30
+      run: cargo fuzz build --fuzz-dir fuzz
+
+  qemu-test:
+    name: qemu-test (aarch64)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: qemu-test
+      timeout-minutes: 30
+      run: cargo xtask qemu-test
+
+  std:
+    name: std (aarch64-unknown-molecular)
+    needs: changes
+    if: ${{ needs.changes.outputs.std == 'true' }}
+    uses: ./.github/workflows/ci-container-job.yml
+    with:
+      cache-scope: std
+      timeout-minutes: 60
+      run: cargo xtask std-src --verify
+
+  ci-check-requirements:
+    name: ci-check-requirements
+    if: ${{ always() }}
+    needs:
+      - changes
+      - fmt
+      - check-layers
+      - doc
+      - style
+      - similarity
+      - clippy-host
+      - clippy-aarch64
+      - test
+      - race
+      - fuzz-build
+      - qemu-test
+      - std
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Every check passed or was skipped by the path filter
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1

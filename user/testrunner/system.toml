@@ -1,37 +1,37 @@
 version = 1
 
 [[components]]
-executable = "/boot/namespace-router"
+executable = "namespace-router"
 memory_limit = "2M"
 startup_timeout = "2s"
 on_failure = "restart 2 then halt"
 
 [[components]]
-executable = "/boot/filesystem-imagefs"
+executable = "filesystem-imagefs"
 memory_limit = "4M"
 startup_timeout = "2s"
 on_failure = "halt"
 
 [[components]]
-executable = "/boot/unresponsive-filesystem"
+executable = "unresponsive-filesystem"
 memory_limit = "1M"
 startup_timeout = "2s"
 on_failure = "halt"
 
 [[components]]
-executable = "/boot/spare-filesystem"
+executable = "spare-filesystem"
 memory_limit = "4M"
 startup_timeout = "2s"
 on_failure = "halt"
 
 [[components]]
-executable = "/boot/filesystem-consumer-fixture"
+executable = "filesystem-consumer-fixture"
 memory_limit = "2M"
 startup_timeout = "2s"
 on_failure = "detach"
 
 [[components]]
-executable = "/boot/init"
+executable = "init"
 memory_limit = "2M"
 startup_timeout = "2s"
 on_failure = "halt"

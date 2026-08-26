@@ -1,7 +1,7 @@
 version = 1
 
 [[components]]
-executable = "/boot/filesystem-ramfs"
+executable = "filesystem-ramfs"
 memory_limit = "4M"
 startup_timeout = "2s"
 on_failure = "halt"

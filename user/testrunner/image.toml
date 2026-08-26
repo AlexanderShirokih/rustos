@@ -12,6 +12,7 @@ source = "user/testrunner/namespace.toml"
 
 [[programs]]
 package = "testrunner"
+bin = "testrunner"
 path = "/boot/testrunner"
 boot = true
 

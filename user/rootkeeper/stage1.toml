@@ -1,25 +1,25 @@
 version = 1
 
 [[components]]
-executable = "/boot/filesystem-ramfs"
+executable = "filesystem-ramfs"
 memory_limit = "4M"
 startup_timeout = "2s"
 on_failure = "detach"
 
 [[components]]
-executable = "/boot/driver-pl031"
+executable = "driver-pl031"
 memory_limit = "1M"
 startup_timeout = "2s"
 on_failure = "detach"
 
 [[components]]
-executable = "/boot/clock-std"
+executable = "clock-std"
 memory_limit = "8M"
 startup_timeout = "2s"
 on_failure = "detach"
 
 [[components]]
-executable = "/boot/hello-std"
+executable = "hello-std"
 memory_limit = "8M"
 startup_timeout = "2s"
 on_failure = "detach"

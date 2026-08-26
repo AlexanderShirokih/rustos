@@ -7,7 +7,7 @@ pub const COMPONENT_MANIFEST_SECTION: &str = ".component.manifest";
 pub const COMPONENT_MANIFEST_MAGIC: [u8; 8] = *b"CMPMFST\0";
 
 /// Версия формата записи манифеста.
-pub const COMPONENT_MANIFEST_VERSION: u16 = 5;
+pub const COMPONENT_MANIFEST_VERSION: u16 = 1;
 
 /// Размер заголовка записи манифеста в байтах.
 pub const COMPONENT_MANIFEST_HEADER_SIZE: usize = 16;

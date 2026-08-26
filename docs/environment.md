@@ -4,10 +4,11 @@
 
 Toolchain зафиксирован в `rust-toolchain.toml` до конкретной даты nightly; `rustup` подхватывает его автоматически при запуске `cargo`.
 
-Компоненты: `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt`, `rust-analyzer`. Target:
-`aarch64-unknown-none` — под ним идёт ядро. Программы userspace идут под таргет Molecular OS,
-он задан спекой `targets/aarch64-unknown-molecular.json` и ставить его через `rustup` нечем:
-`core` и `std` для него собираются из исходников компонента `rust-src`.
+Компоненты: `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt`,
+`rust-analyzer`. Через `rustup` ставится только `aarch64-unknown-none`, под
+которым идёт ядро: таргет программ userspace задан спекой в `targets/`, и `core`
+со `std` собираются для него из исходников компонента `rust-src`
+([workspace.md](workspace.md#таргеты-сборки)).
 
 ## Host-зависимости
 

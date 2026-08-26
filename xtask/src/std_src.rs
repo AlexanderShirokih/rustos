@@ -1,4 +1,4 @@
-//! Подготовка исходников, из которых собирается `std` под Molecular OS.
+//! Подготовка исходников, из которых собирается `std` под RustOS.
 //!
 //! Исходники берутся из компонента `rust-src` зафиксированного toolchain, копируются в
 //! `target/std-src` и патчатся оверлеем. Сам toolchain не трогается: sysroot общий, а копия
@@ -23,7 +23,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use userland_image_tool::USERLAND_WORKSPACE;
 
-use crate::context::project_root;
+use crate::{context::project_root, shell};
 
 const OVERLAY: &str = "patches/std-molecular.patch";
 
@@ -87,14 +87,10 @@ fn refresh_std_graph(root: &Path, library: &Path) -> Result<()> {
         for package in &packages {
             command.args(["--package", &package.name]);
         }
-        let status = command
+        command
             .current_dir(root.join(USERLAND_WORKSPACE))
-            .env("__CARGO_TESTS_ONLY_SRC_ROOT", library)
-            .status()
-            .context("Failed to run cargo clean for the std graph crates")?;
-        if !status.success() {
-            bail!("cargo clean for the std graph crates failed with {status}");
-        }
+            .env("__CARGO_TESTS_ONLY_SRC_ROOT", library);
+        shell::run(&mut command, "cargo clean for the std graph crates")?;
     }
 
     fs::write(&stamp_path, &stamp)
@@ -195,14 +191,9 @@ pub(crate) fn run(force: bool) -> Result<PathBuf> {
 }
 
 fn rust_src() -> Result<PathBuf> {
-    let output = Command::new("rustc")
-        .args(["--print", "sysroot"])
-        .output()
-        .context("Failed to run rustc --print sysroot")?;
-    if !output.status.success() {
-        bail!("rustc --print sysroot failed with {}", output.status);
-    }
-    let sysroot = String::from_utf8(output.stdout).context("sysroot path is not UTF-8")?;
+    let mut command = Command::new("rustc");
+    command.args(["--print", "sysroot"]);
+    let sysroot = shell::output(&mut command, "rustc --print sysroot")?;
     let library = Path::new(sysroot.trim()).join("lib/rustlib/src/rust/library");
     if !library.is_dir() {
         bail!(
@@ -252,19 +243,12 @@ fn copy_tree(source: &Path, dest: &Path) -> Result<()> {
 }
 
 fn apply_overlay(library: &Path, overlay: &Path) -> Result<()> {
-    let status = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["apply", "-p1"])
         .arg(overlay)
-        .current_dir(library)
-        .status()
-        .context("Failed to run git apply")?;
-    if !status.success() {
-        bail!(
-            "git apply {} failed with {}: the overlay does not match the toolchain pinned in \
-             rust-toolchain.toml, rebase it",
-            overlay.display(),
-            status
-        );
-    }
-    Ok(())
+        .current_dir(library);
+    shell::run(&mut command, &format!("git apply {}", overlay.display())).context(
+        "the overlay does not match the toolchain pinned in rust-toolchain.toml, rebase it",
+    )
 }

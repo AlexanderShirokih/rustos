@@ -1,27 +1,29 @@
 # AGENTS.md
 
-Машиночитаемый индекс документации проекта RustOS Mobile.
+Индекс документации проекта RustOS Mobile. Детальная документация — в
+[`docs/`](docs).
 
-> Детальная документация расположена в [`docs/`](docs). Этот файл служит точкой входа и кратким справочником для автоматизированных агентов и сопровождающих проекта.
-
-**Сборка проекта:** перед сборкой ядра, настройкой toolchain и запуском через `cargo xtask` необходимо прочитать [`commands.md`](docs/commands.md) — там полные инструкции по требованиям, сборке и запуску.
+**Перед сборкой** ядра, настройкой toolchain и запуском через `cargo xtask`
+читается [`commands.md`](docs/commands.md).
 
 ## Документация
 
-| Документ                                       | Описание                                                   |
-|------------------------------------------------|------------------------------------------------------------|
-| [`docs/commands.md`](docs/commands.md)         | Сборка, тестирование, линтинг                              |
-| [`docs/environment.md`](docs/environment.md)   | Настройка окружения и зависимости                          |
-| [`docs/architecture.md`](docs/architecture.md) | Принципы архитектуры: слои, newtype, compile-time гарантии |
-| [`docs/code-style.md`](docs/code-style.md)     | Стиль кода: структура файлов, комментарии, `no_std`        |
-| [`docs/syscalls.md`](docs/syscalls.md)         | ABI и полный реестр системных вызовов                      |
-| [`docs/ipc.md`](docs/ipc.md)                   | Формат типизированных IPC-контрактов поверх канала         |
-| [`docs/port.md`](docs/port.md)                 | Семантика `Port`: рандеву, значки, живость сторон          |
-| [`docs/userland.md`](docs/userland.md)         | Устройство userland: образ, рантайм, bootstrap             |
-| [`docs/concurrency.md`](docs/concurrency.md)   | Синхронизация потоков процесса: futex, `Mutex`, `Condvar`  |
-| [`docs/rootkeeper.md`](docs/rootkeeper.md)     | Супервизор: план композиции, слоты, ступени загрузки       |
-| [`docs/smp.md`](docs/smp.md)                   | Многопроцессорность: подъём ядер, per-CPU состояние, локи  |
-| [`docs/filesystem.md`](docs/filesystem.md)     | Файловая подсистема: маршрутизатор имён, серверы, сессии   |
+| Документ                                       | Описание                                                  |
+|------------------------------------------------|-----------------------------------------------------------|
+| [`docs/commands.md`](docs/commands.md)         | Команды сборки, запуска и проверок                        |
+| [`docs/environment.md`](docs/environment.md)   | Настройка окружения и зависимости                         |
+| [`docs/workspace.md`](docs/workspace.md)       | Устройство репозитория: домены, слои, таргеты, имена      |
+| [`docs/architecture.md`](docs/architecture.md) | Архитектура ядра: изоляция, полномочия, память, загрузка  |
+| [`docs/code-style.md`](docs/code-style.md)     | Стиль кода: структура файлов, комментарии, `no_std`       |
+| [`docs/testing.md`](docs/testing.md)           | Тесты: размещение, уровни, прогоны под QEMU               |
+| [`docs/syscalls.md`](docs/syscalls.md)         | ABI и полный реестр системных вызовов                     |
+| [`docs/ipc.md`](docs/ipc.md)                   | Формат типизированных IPC-контрактов поверх канала        |
+| [`docs/port.md`](docs/port.md)                 | Семантика `Port`: рандеву, значки, живость сторон         |
+| [`docs/userland.md`](docs/userland.md)         | Устройство userland: образ, рантайм, bootstrap            |
+| [`docs/concurrency.md`](docs/concurrency.md)   | Синхронизация потоков процесса: futex, `Mutex`, `Condvar` |
+| [`docs/rootkeeper.md`](docs/rootkeeper.md)     | Супервизор: план композиции, слоты, ступени загрузки      |
+| [`docs/smp.md`](docs/smp.md)                   | Многопроцессорность: подъём ядер, per-CPU состояние, локи |
+| [`docs/filesystem.md`](docs/filesystem.md)     | Файловая подсистема: маршрутизатор имён, серверы, сессии  |
 
 ## Навигация по коду
 
@@ -64,4 +66,8 @@ LSP-инструмент: в Claude Code это `LSP`, схема которог
 - Находки вне объёма задачи выносятся в отчёт, а не исправляются молча.
 - Пользовательский вывод (`println!`, `bail!`, `Display`, help-тексты) — только
   английский. Кириллица допустима исключительно в комментариях и документации.
+- Прозой система называется RustOS, идентификатор `molecular` — имя проекта и
+  встречается только в коде, путях и именах крейтов
+  ([workspace.md](docs/workspace.md#наименование)). Формы «Molecular OS»
+  быть не должно.
 - Сообщение коммита — одна строка на русском, без тела.

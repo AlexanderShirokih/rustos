@@ -3,27 +3,44 @@
 use std::{
     fs::File,
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use flate2::{Compression, write::GzEncoder};
 
-use crate::{context::BuildContext, shell::run_cmd};
+use crate::{
+    context::{BootFormat, BuildContext},
+    shell,
+};
 
-fn protocol_feature(boot_format: &str) -> &'static str {
-    match boot_format {
-        "linux_arm64" | "android_boot_v1" | "android_boot_v2" => "boot-linux-arm64",
-        "uefi" => "boot-uefi",
-        other => {
-            unreachable!("invalid boot.format '{other}' should have been rejected by load_spec")
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BootImageVersion {
+    V1,
+    V2,
+}
+
+impl BootImageVersion {
+    fn header_version(self) -> &'static str {
+        match self {
+            Self::V1 => "1",
+            Self::V2 => "2",
         }
     }
 }
 
+fn protocol_feature(boot_format: BootFormat) -> &'static str {
+    match boot_format {
+        BootFormat::LinuxArm64 | BootFormat::AndroidBootV1 | BootFormat::AndroidBootV2 => {
+            "boot-linux-arm64"
+        }
+        BootFormat::Uefi => "boot-uefi",
+    }
+}
+
 fn build_features(ctx: &BuildContext) -> String {
-    let mut features = vec![protocol_feature(ctx.spec.boot.format.as_str()).to_string()];
+    let mut features = vec![protocol_feature(ctx.spec.boot.format).to_string()];
     features.extend(ctx.spec.features.iter().cloned());
     if let Some(extra) = ctx.features.as_deref()
         && !extra.is_empty()
@@ -33,11 +50,10 @@ fn build_features(ctx: &BuildContext) -> String {
     features.join(",")
 }
 
-fn cargo_build(ctx: &BuildContext) -> Result<()> {
-    let features = build_features(ctx);
+fn hal_cargo(ctx: &BuildContext, subcommand: &str, features: &str) -> Command {
     let mut cmd = Command::new("cargo");
     cmd.args([
-        "build",
+        subcommand,
         "-p",
         "hal-aarch64",
         "--target",
@@ -45,30 +61,22 @@ fn cargo_build(ctx: &BuildContext) -> Result<()> {
         "--release",
         "--no-default-features",
         "--features",
-        &features,
+        features,
     ]);
     cmd.current_dir(&ctx.project_root)
         .env("DEVICE_SPEC", &ctx.spec_path)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    run_cmd(&mut cmd)?;
-    Ok(())
+    cmd
+}
+
+fn cargo_build(ctx: &BuildContext) -> Result<()> {
+    let mut cmd = hal_cargo(ctx, "build", &build_features(ctx));
+    shell::run(&mut cmd, "cargo build for hal-aarch64")
 }
 
 fn make_kernel_bin(ctx: &BuildContext) -> Result<()> {
-    let features = build_features(ctx);
-    let mut cmd = Command::new("cargo");
-    cmd.args([
-        "objcopy",
-        "--release",
-        "-p",
-        "hal-aarch64",
-        "--target",
-        "aarch64-unknown-none",
-        "--no-default-features",
-        "--features",
-        &features,
-    ]);
+    let mut cmd = hal_cargo(ctx, "objcopy", &build_features(ctx));
     cmd.args([
         "--",
         "--set-section-flags",
@@ -76,13 +84,8 @@ fn make_kernel_bin(ctx: &BuildContext) -> Result<()> {
         "-O",
         "binary",
     ])
-    .arg(ctx.kernel_bin())
-    .current_dir(&ctx.project_root)
-    .env("DEVICE_SPEC", &ctx.spec_path)
-    .stdout(Stdio::inherit())
-    .stderr(Stdio::inherit());
-    run_cmd(&mut cmd)?;
-    Ok(())
+    .arg(ctx.kernel_bin());
+    shell::run(&mut cmd, "cargo objcopy for hal-aarch64")
 }
 
 fn make_kernel_gz(ctx: &BuildContext) -> Result<()> {
@@ -97,79 +100,56 @@ fn make_kernel_gz(ctx: &BuildContext) -> Result<()> {
     Ok(())
 }
 
-fn make_boot_img_v1(ctx: &BuildContext) -> Result<()> {
+fn make_boot_img(ctx: &BuildContext, version: BootImageVersion) -> Result<()> {
     let dtb_path = ctx.dtb_path()?;
-
-    // Вычисление kernel_offset для boot.img header
     let base = ctx.spec.boot.base.unwrap_or(0);
-    let kernel_offset = ctx.spec.boot.offset.saturating_sub(base);
-    let kernel_offset_str = format!("{kernel_offset:#x}");
-
-    let mut output = File::create(ctx.kernel_gz_dtb())?;
-    let mut kernel = Vec::new();
-    let mut dtb = Vec::new();
-    File::open(ctx.kernel_gz())?.read_to_end(&mut kernel)?;
-    File::open(&dtb_path)?.read_to_end(&mut dtb)?;
-    output.write_all(&kernel)?;
-    output.write_all(&dtb)?;
+    let kernel_offset = format!("{:#x}", ctx.spec.boot.offset.saturating_sub(base));
 
     let mut cmd = Command::new("mkbootimg");
-    cmd.arg("--kernel")
-        .arg(ctx.kernel_gz_dtb())
-        .arg("--ramdisk")
+    cmd.arg("--kernel");
+    match version {
+        // Заголовок первой версии не несёт поля dtb, и дерево едет хвостом за ядром.
+        BootImageVersion::V1 => {
+            concat_files(&[&ctx.kernel_gz(), &dtb_path], &ctx.kernel_gz_dtb())?;
+            cmd.arg(ctx.kernel_gz_dtb());
+        }
+        BootImageVersion::V2 => {
+            cmd.arg(ctx.kernel_gz()).arg("--dtb").arg(&dtb_path);
+        }
+    }
+    cmd.arg("--ramdisk")
         .arg(ctx.userland_img())
         .args([
             "--base",
             "0x0",
             "--kernel_offset",
-            &kernel_offset_str,
+            &kernel_offset,
             "--ramdisk_offset",
             "0x01000000",
             "--pagesize",
             "4096",
             "--header_version",
-            "1",
+            version.header_version(),
         ])
         .arg("--output")
         .arg(ctx.boot_img())
         .current_dir(&ctx.project_root);
-    run_cmd(&mut cmd)?;
-
-    Ok(())
+    shell::run(&mut cmd, "mkbootimg")
 }
 
-fn make_boot_img_v2(ctx: &BuildContext) -> Result<()> {
-    let dtb_path = ctx.dtb_path()?;
-
-    // Вычисление kernel_offset для boot.img header
-    let base = ctx.spec.boot.base.unwrap_or(0);
-    let kernel_offset = ctx.spec.boot.offset.saturating_sub(base);
-    let kernel_offset_str = format!("{kernel_offset:#x}");
-
-    let mut cmd = Command::new("mkbootimg");
-    cmd.arg("--kernel")
-        .arg(ctx.kernel_gz())
-        .arg("--ramdisk")
-        .arg(ctx.userland_img())
-        .arg("--dtb")
-        .arg(dtb_path)
-        .args([
-            "--base",
-            "0x0",
-            "--kernel_offset",
-            &kernel_offset_str,
-            "--ramdisk_offset",
-            "0x01000000",
-            "--pagesize",
-            "4096",
-            "--header_version",
-            "2",
-        ])
-        .arg("--output")
-        .arg(ctx.boot_img())
-        .current_dir(&ctx.project_root);
-    run_cmd(&mut cmd)?;
-
+fn concat_files(sources: &[&Path], dest: &Path) -> Result<()> {
+    let mut output =
+        File::create(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
+    for source in sources {
+        let mut bytes = Vec::new();
+        File::open(source)
+            .with_context(|| format!("Failed to open {}", source.display()))?
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("Failed to read {}", source.display()))?;
+        output
+            .write_all(&bytes)
+            .with_context(|| format!("Failed to write {}", dest.display()))?;
+    }
     Ok(())
 }
 
@@ -179,16 +159,10 @@ pub(crate) fn build_binary(ctx: &BuildContext) -> Result<PathBuf> {
     Ok(ctx.kernel_bin())
 }
 
-pub(crate) fn build_android(ctx: &BuildContext) -> Result<PathBuf> {
+pub(crate) fn build_android(ctx: &BuildContext, version: BootImageVersion) -> Result<PathBuf> {
     cargo_build(ctx)?;
     make_kernel_bin(ctx)?;
     make_kernel_gz(ctx)?;
-
-    match ctx.spec.boot.format.as_str() {
-        "android_boot_v1" => make_boot_img_v1(ctx)?,
-        "android_boot_v2" => make_boot_img_v2(ctx)?,
-        _ => unreachable!(),
-    }
-
+    make_boot_img(ctx, version)?;
     Ok(ctx.boot_img())
 }

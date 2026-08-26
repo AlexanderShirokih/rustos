@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use anyhow::{Context as _, Result};
 
@@ -53,6 +56,16 @@ impl Baseline {
             .filter(|key| !seen.contains(*key))
             .cloned()
             .collect()
+    }
+
+    /// Число принятых записей по каждому правилу.
+    pub fn counts_by_rule(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for key in &self.keys {
+            let rule = key.split('|').next().unwrap_or(key.as_str());
+            *counts.entry(rule.to_owned()).or_insert(0) += 1;
+        }
+        counts
     }
 
     /// Число записей.

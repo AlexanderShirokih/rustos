@@ -15,7 +15,7 @@ use kernel_tests::kernel_test;
 use runtime::{
     JoinHandle, Port, Priority, Resource, Signal, Timeout, UserMemFlags, handle_close,
     handle_duplicate, port_call, port_recv, port_reply, port_send, signal_wait_one, spawn_owned,
-    thread_exit_code, thread_terminate,
+    thread_exit_code, thread_terminate, thread_yield,
 };
 use syscall::{Handle, Rights, SIGNALED, SYSCALL_RETURN_TIMEOUT};
 
@@ -50,6 +50,10 @@ const TERMINATE_ROUNDS: usize = 8;
 const VICTIM_TIMEOUT: Timeout = Timeout::from_secs(10);
 
 const VICTIM_EXIT_BASE: u32 = 100;
+
+const READY_YIELD_LIMIT: usize = 100_000;
+
+static VICTIMS_READY: AtomicU64 = AtomicU64::new(0);
 
 struct Arena {
     server: Handle,
@@ -400,11 +404,16 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
     let port = Port::create().expect("victim port");
     let server = port.handle().as_raw();
 
+    VICTIMS_READY.store(0, Release);
+
     let mut victims: Vec<JoinHandle> = Vec::with_capacity(VICTIMS);
     for _ in 0..VICTIMS {
         victims.push(
             spawn_owned(
                 move || {
+                    // За отметкой готовности у жертвы нет обращений к общему
+                    // состоянию процесса.
+                    VICTIMS_READY.fetch_add(1, Release);
                     let result = port_recv(server, VICTIM_TIMEOUT);
                     // Возврата быть не должно: отправителей у порта нет, и приём
                     // обязан прерваться снятием.
@@ -415,6 +424,19 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
             )
             .expect("victim thread spawns"),
         );
+    }
+
+    // Снятие потока не отпускает замки его процесса, а пролог потока держит
+    // мьютекс кучи. Готовая жертва прошла пролог и кучу отпустила.
+    let mut waits = 0;
+    while VICTIMS_READY.load(Acquire) != VICTIMS as u64 {
+        kernel_tests::kassert!(
+            waits < READY_YIELD_LIMIT,
+            "smp stress seed={seed} round={round}: only {} of {VICTIMS} victims ready",
+            VICTIMS_READY.load(Acquire)
+        );
+        waits += 1;
+        thread_yield();
     }
 
     for index in shuffled(VICTIMS, random) {

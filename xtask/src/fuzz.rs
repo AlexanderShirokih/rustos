@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Result, bail};
 use userland_image_tool::userland_image_seeds;
 
-use crate::{context::project_root, shell::run_cmd};
+use crate::{context::project_root, shell};
 
 const TARGETS: &[&str] = &[
     "fdt_parse_walk",
@@ -59,8 +59,7 @@ pub(crate) fn run(target: &str, seconds: u64) -> Result<()> {
         command.arg(format!("-dict={}", dictionary.display()));
     }
 
-    run_cmd(&mut command)?;
-    Ok(())
+    shell::run(&mut command, "cargo fuzz run")
 }
 
 fn write_seeds(fuzz_dir: &Path, target: &str) -> Result<Option<PathBuf>> {

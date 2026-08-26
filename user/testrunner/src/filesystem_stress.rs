@@ -1,8 +1,9 @@
 //! Воспроизводимый stress-прогон изменяемого дерева: операции контракта `FileSystem` идут в
 //! процесс ramfs по IPC, а их итоги сверяются с моделью дерева, которую прогон держит у себя.
 //!
-//! Каждый seed работает на своём монтировании: у свежего процесса файловой системы пустая арена
-//! узлов, и последовательность операций одного seed не зависит от того, что оставили соседние.
+//! Каждый seed работает на своём окне: монтирование прогона несёт сессию, суженную до каталога
+//! этого seed, и корнем для него становится сам каталог. Имена, оставленные соседними seed,
+//! в окно не попадают, и последовательность операций одного seed от них не зависит.
 
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 
@@ -14,7 +15,7 @@ use kernel_tests::kernel_test;
 use runtime::{Mapping, MemoryRegion, OwnedHandle, PortTransport, UserMemFlags};
 
 use crate::{
-    filesystem::{connect, mount_ram_filesystem, path, session_for, unmount_filesystem},
+    filesystem::{connect, mount_ram_filesystem_scoped, path, session_for, unmount_filesystem},
     stress::{SplitMix64, StressPlan, log_pass, log_seed},
 };
 
@@ -697,7 +698,7 @@ fn filesystem_ramfs_stress() {
 }
 
 fn run_seed(seed: u64, steps: u64) {
-    mount_ram_filesystem(STRESS_MOUNT).expect("mount of the run");
+    mount_ram_filesystem_scoped(STRESS_MOUNT, &scope_of(seed)).expect("mount of the run");
     let mut run = Run::new(seed).expect("session of the run");
     for step in 0..steps {
         let (operation, result) = run.step();
@@ -710,6 +711,10 @@ fn run_seed(seed: u64, steps: u64) {
     }
     drop(run);
     unmount_filesystem(STRESS_MOUNT).expect("unmount of the run");
+}
+
+fn scope_of(seed: u64) -> String {
+    format!("/seed-{seed}")
 }
 
 fn report(seed: u64, step: u64, operation: &'static str, mismatch: &Mismatch) -> ! {

@@ -1,21 +1,15 @@
 //! Двухпроходные QEMU-тесты: pass "kernel" и pass "userland".
 
-use std::{
-    io::{BufRead, BufReader},
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{path::Path, process::Command};
 
 use anyhow::{Context, Result, bail};
-use userland_image_tool::{BuildEnvironment, build_userland};
+use userland_image_tool::BuildEnvironment;
 
-use crate::{
-    artifacts::build_binary,
-    context::{BuildContext, image_manifest_path},
-    std_src,
-};
+use crate::{artifacts::build_binary, context::BuildContext, shell, userland};
 
 pub(crate) const DEFAULT_SPEC: &str = "devices/spec/qemu-aarch64-test.yaml";
+
+const TESTRUNNER_IMAGE: &str = "user/testrunner/image.toml";
 
 struct QemuPass<'a> {
     label: &'a str,
@@ -28,7 +22,7 @@ struct QemuPass<'a> {
 }
 
 pub(crate) fn qemu_test(timeout: u64, spec: &Path) -> Result<()> {
-    let image = Path::new("user/testrunner/image.toml");
+    let image = Path::new(TESTRUNNER_IMAGE);
     qemu_test_pass(QemuPass {
         label: "kernel",
         spec,
@@ -55,7 +49,7 @@ pub(crate) fn qemu_bench(timeout: u64) -> Result<()> {
         label: "bench",
         spec: Path::new(DEFAULT_SPEC),
         features: None,
-        image: Path::new("user/testrunner/image.toml"),
+        image: Path::new(TESTRUNNER_IMAGE),
         timeout,
         environment: &[BuildEnvironment {
             name: "TEST_PROFILE",
@@ -66,10 +60,9 @@ pub(crate) fn qemu_bench(timeout: u64) -> Result<()> {
 }
 
 pub(crate) fn qemu_stress(seed: u64, seeds: u64, steps: u64, timeout: u64) -> Result<()> {
-    let seed_count = seeds;
-    let seed = seed.to_string();
-    let seeds = seeds.to_string();
-    let steps = steps.to_string();
+    let first_seed = seed.to_string();
+    let seed_count = seeds.to_string();
+    let step_count = steps.to_string();
     let environment = [
         BuildEnvironment {
             name: "TEST_PROFILE",
@@ -77,15 +70,15 @@ pub(crate) fn qemu_stress(seed: u64, seeds: u64, steps: u64, timeout: u64) -> Re
         },
         BuildEnvironment {
             name: "STRESS_SEED",
-            value: &seed,
+            value: &first_seed,
         },
         BuildEnvironment {
             name: "STRESS_SEEDS",
-            value: &seeds,
+            value: &seed_count,
         },
         BuildEnvironment {
             name: "STRESS_STEPS",
-            value: &steps,
+            value: &step_count,
         },
     ];
     qemu_test_pass(QemuPass {
@@ -93,10 +86,10 @@ pub(crate) fn qemu_stress(seed: u64, seeds: u64, steps: u64, timeout: u64) -> Re
         spec: Path::new(DEFAULT_SPEC),
         // Короткий квант режет окно между операциями и расширяет чередования.
         features: Some(String::from("short-quantum")),
-        image: Path::new("user/testrunner/image.toml"),
+        image: Path::new(TESTRUNNER_IMAGE),
         timeout,
         environment: &environment,
-        expected_seeds: Some(seed_count),
+        expected_seeds: Some(seeds),
     })
 }
 
@@ -112,18 +105,9 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
     } = pass;
     println!("=== qemu-test pass: {label} ===");
 
-    let ctx = BuildContext::new(spec.to_path_buf(), features)?;
+    let ctx = BuildContext::new(spec, features)?;
 
-    let manifest_path = image_manifest_path(&ctx.project_root, image)?;
-    let std_src = std_src::materialize(false)?;
-    build_userland(
-        &ctx.project_root,
-        &manifest_path,
-        &ctx.build_dir,
-        &std_src,
-        environment,
-        &[],
-    )?;
+    userland::build_image(&ctx.project_root, &ctx.build_dir, image, environment, &[])?;
     build_binary(&ctx)?;
 
     let qemu_cmd = ctx
@@ -132,25 +116,13 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
         .first()
         .with_context(|| format!("No run commands in {}", spec.display()))?;
 
-    let full_cmd = format!("timeout {timeout} {qemu_cmd}");
-    let mut child = Command::new("sh")
-        .args(["-c", &full_cmd])
-        .current_dir(&ctx.project_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("Failed to launch QEMU")?;
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", &format!("timeout {timeout} {qemu_cmd}")])
+        .current_dir(&ctx.project_root);
 
-    let stdout = child.stdout.take().context("QEMU stdout not captured")?;
     let mut markers = TestMarkers::default();
-    for line in BufReader::new(stdout).lines() {
-        let line = line.context("Failed to read QEMU output")?;
-        println!("{line}");
-        markers.observe(&line);
-    }
-
-    let status = child.wait().context("Failed to wait for QEMU")?;
+    let status = shell::run_streaming(&mut command, "QEMU", |line| markers.observe(line))?;
     if !status.success() {
         let code = status.code().unwrap_or(1);
         if code == 124 {
@@ -235,5 +207,93 @@ impl TestMarkers {
         }
         println!("qemu-test pass '{label}': {announced} tests passed");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observe_all(lines: &[&str]) -> TestMarkers {
+        let mut markers = TestMarkers::default();
+        for line in lines {
+            markers.observe(line);
+        }
+        markers
+    }
+
+    fn full_run(count: usize) -> Vec<String> {
+        let mut lines = vec![format!("[I] [testrunner] [TEST-RUN: {count}]")];
+        for index in 0..count {
+            lines.push(format!("[I] [testrunner] [TEST-START: case_{index}]"));
+            lines.push(format!("[I] [testrunner] [TEST-PASS: case_{index}]"));
+        }
+        lines.push(format!("[I] [testrunner] [TEST-DONE: {count}]"));
+        lines
+    }
+
+    fn borrow(lines: &[String]) -> Vec<&str> {
+        lines.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn a_complete_run_verifies() {
+        let lines = full_run(3);
+        let markers = observe_all(&borrow(&lines));
+        assert_eq!(markers.announced, Some(3));
+        assert_eq!(markers.started, 3);
+        assert_eq!(markers.passed, 3);
+        assert!(markers.verify("kernel", None).is_ok());
+    }
+
+    #[test]
+    fn a_run_cut_short_is_refused() {
+        let mut lines = full_run(3);
+        lines.pop();
+        assert!(observe_all(&borrow(&lines)).verify("kernel", None).is_err());
+    }
+
+    #[test]
+    fn a_silently_skipped_test_is_refused() {
+        let lines = [
+            "[TEST-RUN: 2]",
+            "[TEST-START: case_0]",
+            "[TEST-PASS: case_0]",
+            "[TEST-DONE: 2]",
+        ];
+        assert!(observe_all(&lines).verify("kernel", None).is_err());
+    }
+
+    #[test]
+    fn a_reported_failure_is_refused() {
+        let mut lines = full_run(1);
+        lines.insert(1, "[TEST-FAIL: case_0]".to_string());
+        assert!(observe_all(&borrow(&lines)).verify("kernel", None).is_err());
+    }
+
+    #[test]
+    fn a_missing_run_marker_is_refused() {
+        assert!(
+            observe_all(&["[TEST-PASS: case_0]"])
+                .verify("kernel", None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_profile_announcing_no_tests_is_refused() {
+        let lines = ["[TEST-RUN: 0]", "[TEST-DONE: 0]"];
+        assert!(observe_all(&lines).verify("kernel", None).is_err());
+    }
+
+    #[test]
+    fn every_seed_reports_for_every_stress_test() {
+        let mut lines = full_run(2);
+        for _ in 0..4 {
+            lines.push("[STRESS-PASS: 7]".to_string());
+        }
+        let markers = observe_all(&borrow(&lines));
+        assert!(markers.verify("stress", Some(2)).is_ok());
+        assert!(markers.verify("stress", Some(3)).is_err());
     }
 }

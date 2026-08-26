@@ -112,13 +112,21 @@ pub(crate) fn whole_export() -> Str<'static, SESSION_SCOPE_MAX> {
 }
 
 fn filesystem_session(index: u16) -> OwnedHandle {
+    filesystem_session_at(index, whole_export())
+}
+
+fn filesystem_session_at(index: u16, scope: Str<'_, SESSION_SCOPE_MAX>) -> OwnedHandle {
     let session =
         component_sessions::Client::new(PortTransport::client(component_roots(index).control()))
             .with_wait(CALL_TIMEOUT)
-            .open_session(whole_export())
+            .open_session(scope)
             .expect("open_session call")
             .expect("session established");
     OwnedHandle::adopt(session)
+}
+
+fn session_scope(text: &str) -> Str<'_, SESSION_SCOPE_MAX> {
+    Str::new(text).expect("scope within bound")
 }
 
 fn namespace_admin_client(
@@ -203,6 +211,33 @@ fn namespace_client(capability: BorrowedHandle<'_>) -> namespace::Client<PortTra
 
 pub(crate) fn mount_ram_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
     mount_filesystem(prefix, ram_filesystem())
+}
+
+pub(crate) fn mount_ram_filesystem_scoped(
+    prefix: &str,
+    scope: &str,
+) -> Result<u32, FileSystemError> {
+    let index = ram_filesystem();
+    // Окно заводится по существующему узлу: каталог создаётся сессией на весь экспорт.
+    create_directory(index, scope);
+    namespace_admin_client(router_admin())
+        .mount(
+            path(prefix),
+            filesystem_session_at(index, session_scope(scope)),
+        )
+        .expect("mount call")
+}
+
+fn create_directory(index: u16, text: &str) {
+    let capability = filesystem_session(index);
+    let client = connect(&capability);
+    let opened = open(
+        &client,
+        text,
+        AccessMode::Read,
+        OpenFlags::CREATE | OpenFlags::DIRECTORY,
+    );
+    close(&client, &opened);
 }
 
 fn mount_filesystem(prefix: &str, index: u16) -> Result<u32, FileSystemError> {

@@ -26,7 +26,7 @@ pub fn component_name(record: &str) -> &str {
 }
 
 pub const BOOT_PLAN_MAGIC: [u8; 8] = *b"RKPLAN\0\0";
-pub const BOOT_PLAN_VERSION: u16 = 5;
+pub const BOOT_PLAN_VERSION: u16 = 1;
 
 pub(crate) const PLAN_HEADER_SIZE: usize = 16;
 pub(crate) const COMPONENT_HEADER_SIZE: usize = 40;

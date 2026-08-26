@@ -5,6 +5,7 @@ mod baseline;
 mod changeset;
 mod config;
 mod engine;
+mod growth;
 mod report;
 mod rule;
 mod rules;
@@ -22,6 +23,7 @@ pub use crate::{
     baseline::Baseline,
     config::Config,
     engine::{Engine, Outcome, Run, Selection},
+    growth::{Grown, grown_against},
     report::{Format, Report},
     rule::{Category, Finding, Rule, RuleMeta, Severity},
     rules::catalog::compiled,
