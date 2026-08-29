@@ -8,6 +8,6 @@ pub mod relay;
 mod system;
 
 pub use system::{
-    BootFailure, Component, Definition, LogSessions, RootSystem, SHUTDOWN_EXIT_CODE, STOP_TIMEOUT,
-    Stopped, Supervised, SystemImage, supervise,
+    BootFailure, BudgetFailure, Component, Definition, LogSessions, RootSystem, SHUTDOWN_EXIT_CODE,
+    STOP_TIMEOUT, SlotFailure, Stopped, Supervised, SystemImage, supervise,
 };

@@ -14,8 +14,8 @@ use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
 use managed_component::{ComponentRoots, ManagedComponent, ManagedFailure};
 use rootkeeper::{
-    BootFailure, Definition, RootSystem, SHUTDOWN_EXIT_CODE, Stopped, Supervised, SystemImage,
-    relay,
+    BootFailure, BudgetFailure, Definition, RootSystem, SHUTDOWN_EXIT_CODE, Stopped, Supervised,
+    SystemImage, relay,
 };
 use rtc_abi::rtc;
 use runtime::{MemoryAccess, MemoryRegion, OwnedHandle, PortTransport, Signal, Timeout};
@@ -104,9 +104,6 @@ const EXTENDER_SLOTS: &[SlotSpec<'static>] = &[
 const RAM_FS_RECORD: &str = "/boot/filesystem-ramfs/program";
 const RTC_RECORD: &str = "/boot/driver-pl031/program";
 const DEFINED_NAME: &str = "extended-ramfs";
-
-const CALLER: NonZeroU64 = NonZeroU64::new(101).expect("badge is non-zero");
-const OTHER_CALLER: NonZeroU64 = NonZeroU64::new(102).expect("badge is non-zero");
 
 const CYCLE_NAMES: [&str; 2] = ["cycle-head", "cycle-tail"];
 const CYCLE_HEAD_EDGE: [&str; 1] = [CYCLE_NAMES[1]];
@@ -341,6 +338,25 @@ fn program_window(image: &SystemImage, entry: &str) -> MemoryRegion {
         .region()
         .slice(record.data_offset(), size, MemoryAccess::READ)
         .expect("program window derives from the image region")
+}
+
+fn defined_ramfs() -> ComponentSpec<'static> {
+    ComponentSpec {
+        name: DEFINED_NAME,
+        ..ram_filesystem()
+    }
+}
+
+fn caller() -> NonZeroU64 {
+    relay::component_badge(0)
+}
+
+fn other_caller() -> NonZeroU64 {
+    relay::component_badge(1)
+}
+
+fn caller_outside_the_composition() -> NonZeroU64 {
+    relay::component_badge(u16::MAX)
 }
 
 fn definition(image: &SystemImage, entry: &str, component: ComponentSpec<'_>) -> Definition {
@@ -1176,7 +1192,7 @@ fn a_transaction_naming_a_taken_instance_raises_nothing() {
     let mut system = started(&image, &bytes);
 
     let refused = system.extend(
-        CALLER,
+        caller(),
         vec![definition(
             &image,
             RAM_FS_RECORD,
@@ -1203,7 +1219,7 @@ fn a_transaction_whose_edges_close_a_cycle_raises_nothing() {
     // Компоненты набора называют друг друга: порядок запуска из объединения рёбер не
     // выводится.
     let refused = system.extend(
-        CALLER,
+        caller(),
         vec![
             definition(
                 &image,
@@ -1241,7 +1257,7 @@ fn a_transaction_with_an_unresolved_edge_raises_nothing() {
     let mut system = started(&image, &bytes);
 
     let refused = system.extend(
-        CALLER,
+        caller(),
         vec![definition(
             &image,
             RAM_FS_RECORD,
@@ -1267,7 +1283,7 @@ fn a_transaction_past_the_supervisor_budget_raises_nothing() {
 
     // Резерв компонента режется из ресурса супервизора, и предел набора упирается в него.
     let refused = system.extend(
-        CALLER,
+        caller(),
         vec![definition(
             &image,
             RAM_FS_RECORD,
@@ -1279,7 +1295,7 @@ fn a_transaction_past_the_supervisor_budget_raises_nothing() {
         )],
     );
 
-    kernel_tests::kassert_eq!(refused, Err(BootFailure::Capacity));
+    kernel_tests::kassert_eq!(refused, Err(BootFailure::Budget(BudgetFailure::Reserve)));
     kernel_tests::kassert!(system.instance(GREEDY_NAME).is_none());
     kernel_tests::kassert!(alive(&system, 0));
     system.shutdown();
@@ -1294,11 +1310,11 @@ fn a_transaction_raises_a_device_component_the_plan_never_named() {
     let device = rtc_device(&[RTC_COMPATIBLE]);
 
     system
-        .extend(CALLER, vec![definition(&image, RTC_RECORD, rtc(&device))])
+        .extend(caller(), vec![definition(&image, RTC_RECORD, rtc(&device))])
         .expect("transaction raises the driver");
 
     let session = system
-        .caller_session(CALLER, RTC_NAME)
+        .caller_session(caller(), RTC_NAME)
         .expect("rtc session minted");
     let clock = rtc::Client::new(PortTransport::client(&session)).with_wait(RTC_CALL_TIMEOUT);
     kernel_tests::kassert!(clock.now().is_ok());
@@ -1316,25 +1332,67 @@ fn a_session_reaches_only_the_components_its_caller_defined() {
 
     system
         .extend(
-            CALLER,
-            vec![definition(
-                &image,
-                RAM_FS_RECORD,
-                ComponentSpec {
-                    name: DEFINED_NAME,
-                    ..ram_filesystem()
-                },
-            )],
+            caller(),
+            vec![definition(&image, RAM_FS_RECORD, defined_ramfs())],
         )
         .expect("transaction raises the component");
 
-    kernel_tests::kassert!(system.caller_session(CALLER, DEFINED_NAME).is_ok());
-    // Значок вызывателя - единственное правило допуска: чужой набор и композиция плана
-    // через него не достаются.
-    kernel_tests::kassert!(system.caller_session(OTHER_CALLER, DEFINED_NAME).is_err());
-    kernel_tests::kassert!(system.caller_session(CALLER, RAM_FS_NAME).is_err());
+    kernel_tests::kassert!(system.caller_session(caller(), DEFINED_NAME).is_ok());
+    // Значок вызывателя - единственное правило допуска: набор достаётся записи, которая
+    // его определила, а компоненты плана раздаёт статическое связывание.
+    kernel_tests::kassert!(system.caller_session(other_caller(), DEFINED_NAME).is_err());
+    kernel_tests::kassert!(system.caller_session(caller(), RAM_FS_NAME).is_err());
 
     system.shutdown();
+}
+
+#[kernel_test]
+fn a_transaction_of_a_badge_outside_the_composition_raises_nothing() {
+    let image = image();
+    let bytes = encode_plan(&[ram_filesystem()]).expect("scenario plan encodes");
+    let mut system = started(&image, &bytes);
+
+    let refused = system.extend(
+        caller_outside_the_composition(),
+        vec![definition(&image, RAM_FS_RECORD, defined_ramfs())],
+    );
+    kernel_tests::kassert_eq!(refused, Err(BootFailure::Caller));
+    // Значок супервизора стоит вне нумерации записей плана.
+    let refused = system.extend(
+        relay::SUPERVISOR_BADGE,
+        vec![definition(&image, RAM_FS_RECORD, defined_ramfs())],
+    );
+    kernel_tests::kassert_eq!(refused, Err(BootFailure::Caller));
+    kernel_tests::kassert!(system.component(1).is_none());
+
+    // Обслуживание переживает отказ: следующая транзакция идёт обычным порядком.
+    system
+        .extend(
+            caller(),
+            vec![definition(&image, RAM_FS_RECORD, defined_ramfs())],
+        )
+        .expect("transaction raises the component");
+    kernel_tests::kassert!(system.caller_session(caller(), DEFINED_NAME).is_ok());
+    kernel_tests::kassert!(
+        system
+            .caller_session(caller_outside_the_composition(), DEFINED_NAME)
+            .is_err()
+    );
+
+    system.shutdown();
+}
+
+#[kernel_test]
+fn a_component_badge_names_the_record_it_was_minted_from() {
+    kernel_tests::kassert!(relay::component_index(relay::SUPERVISOR_BADGE).is_none());
+    for index in [0, 1, u16::MAX] {
+        kernel_tests::kassert_eq!(
+            relay::component_index(relay::component_badge(index)),
+            Some(index)
+        );
+    }
+    let past_records = NonZeroU64::new(u64::from(u16::MAX) + 3).expect("badge is non-zero");
+    kernel_tests::kassert!(relay::component_index(past_records).is_none());
 }
 
 #[kernel_test]
@@ -1455,7 +1513,7 @@ fn a_transaction_raises_a_component_taking_its_directory_from_the_composition() 
 
     system
         .extend(
-            CALLER,
+            caller(),
             vec![definition(&image, AREA_RECORD, area_consumer())],
         )
         .expect("transaction raises the directory consumer");

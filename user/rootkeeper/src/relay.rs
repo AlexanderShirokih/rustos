@@ -21,6 +21,13 @@ pub fn component_badge(index: u16) -> NonZeroU64 {
     NonZeroU64::new(SUPERVISOR_BADGE.get() + 1 + u64::from(index)).expect("badge is non-zero")
 }
 
+/// Номер записи плана, которой принадлежит значок `badge`.
+#[must_use]
+pub fn component_index(badge: NonZeroU64) -> Option<u16> {
+    let index = badge.get().checked_sub(SUPERVISOR_BADGE.get() + 1)?;
+    u16::try_from(index).ok()
+}
+
 static RELAY: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 
 static COMPONENT_NAMES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -34,8 +41,7 @@ impl SourceNames for ComponentNames {
         if badge == SUPERVISOR_BADGE.get() {
             return Some(source(SUPERVISOR_NAME));
         }
-        let index = badge.checked_sub(SUPERVISOR_BADGE.get() + 1)?;
-        let index = usize::try_from(index).ok()?;
+        let index = usize::from(component_index(NonZeroU64::new(badge)?)?);
         COMPONENT_NAMES
             .lock()
             .get(index)

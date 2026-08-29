@@ -62,8 +62,6 @@ pub enum Stopped {
 /// Причина, по которой композиция не поднялась.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootFailure {
-    /// Лог-сессия компонента не выдана.
-    LogSession,
     /// Userland-образ недоступен либо не разобран.
     Image,
     /// В образе нет записи плана загрузочной композиции.
@@ -76,12 +74,12 @@ pub enum BootFailure {
     Record,
     /// Имя экземпляра занято другим компонентом композиции.
     Instance,
+    /// Значок вызывателя не отображается ни в одну запись композиции.
+    Caller,
     /// В образе нет программы компонента.
     ProgramMissing,
-    /// Корневой metering resource недоступен.
-    Resource,
-    /// Резерв бюджета компонента не выделен либо композиция не помещается в набор ожидания.
-    Capacity,
+    /// Ресурса композиции не хватило.
+    Budget(BudgetFailure),
     /// Полномочия провижининга устройств недоступны.
     DeviceAuthority,
     /// Описание платформы не дало ресурс, названный слотом.
@@ -90,14 +88,32 @@ pub enum BootFailure {
     DeviceBusy,
     /// Провайдер сервисного слота не поднят.
     Provider,
+    /// Слот компонента не наполнен.
+    Slot(SlotFailure),
+    /// Managed-запуск компонента не завершился.
+    Launch(ManagedStartupError),
+}
+
+/// Ресурс композиции, которого не хватило.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetFailure {
+    /// Лог-сессия компонента не выдана.
+    LogSession,
+    /// Корневой metering resource недоступен.
+    Root,
+    /// Резерв компонента не выделен либо композиция не помещается в набор ожидания.
+    Reserve,
+}
+
+/// Содержимое слота, которого компонент не получил.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotFailure {
     /// Провайдер не установил сессию сервисного слота.
     Session,
     /// Провайдер не установил сессию, суженную до каталога компонента.
     Directory,
     /// Capability слота не сминчена.
-    Slot,
-    /// Managed-запуск компонента не завершился.
-    Launch(ManagedStartupError),
+    Mint,
 }
 
 /// Исход одного оборота supervisor.
@@ -171,7 +187,7 @@ pub struct Component<'a> {
     managed: ManagedComponent<ComponentRoots>,
     record: ComponentRecord<'a>,
     log: OwnedHandle,
-    owner: Option<NonZeroU64>,
+    owner: Option<u16>,
     charged_launches: u32,
 }
 
@@ -214,15 +230,12 @@ impl BootFailure {
             | Self::PlanOrder
             | Self::ProgramMissing => Stopped::BadImage,
             Self::DeviceAuthority | Self::Device(_) | Self::DeviceBusy => Stopped::Device,
-            Self::LogSession
-            | Self::Record
+            Self::Record
             | Self::Instance
-            | Self::Resource
-            | Self::Capacity
+            | Self::Caller
+            | Self::Budget(_)
             | Self::Provider
-            | Self::Session
-            | Self::Directory
-            | Self::Slot
+            | Self::Slot(_)
             | Self::Launch(_) => Stopped::Startup,
         }
     }
@@ -235,15 +248,14 @@ impl BootFailure {
                 ExtendError::BadRecord
             }
             Self::Instance => ExtendError::Duplicate,
+            Self::Caller => ExtendError::NoTransaction,
             Self::PlanOrder | Self::Provider => ExtendError::Unresolved,
-            Self::LogSession | Self::Resource | Self::Capacity => ExtendError::NoSpace,
+            Self::Budget(_) => ExtendError::NoSpace,
             Self::ProgramMissing
             | Self::DeviceAuthority
             | Self::Device(_)
             | Self::DeviceBusy
-            | Self::Session
-            | Self::Directory
-            | Self::Slot
+            | Self::Slot(_)
             | Self::Launch(_) => ExtendError::NotStarted,
         }
     }
@@ -252,24 +264,41 @@ impl BootFailure {
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {
-            Self::LogSession => "log session not minted",
             Self::Image => "userland image unavailable",
             Self::PlanMissing => "boot plan record missing",
             Self::Plan(_) => "boot plan not decoded",
             Self::PlanOrder => "boot plan dependencies have no start order",
             Self::Record => "component record not decoded",
             Self::Instance => "instance name already taken",
+            Self::Caller => "caller badge outside the composition",
             Self::ProgramMissing => "component program missing",
-            Self::Resource => "root resource unavailable",
-            Self::Capacity => "component reserve not granted",
+            Self::Budget(budget) => budget.message(),
             Self::DeviceAuthority => "platform description unavailable",
             Self::Device(_) => "device not described by the platform",
             Self::DeviceBusy => "device resource taken by another component",
             Self::Provider => "service provider not running",
+            Self::Slot(slot) => slot.message(),
+            Self::Launch(_) => "component not started",
+        }
+    }
+}
+
+impl BudgetFailure {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::LogSession => "log session not minted",
+            Self::Root => "root resource unavailable",
+            Self::Reserve => "component reserve not granted",
+        }
+    }
+}
+
+impl SlotFailure {
+    const fn message(self) -> &'static str {
+        match self {
             Self::Session => "service provider did not establish a session",
             Self::Directory => "component directory not granted",
-            Self::Slot => "component slot not minted",
-            Self::Launch(_) => "component not started",
+            Self::Mint => "component slot not minted",
         }
     }
 }
@@ -395,7 +424,7 @@ impl DeviceAuthority {
                 log_device_conflict(kernel_log, owner, format_args!("irq line {number}"));
                 Err(BootFailure::DeviceBusy)
             }
-            Err(_) => Err(BootFailure::Slot),
+            Err(_) => Err(BootFailure::Slot(SlotFailure::Mint)),
         }
     }
 
@@ -530,7 +559,8 @@ impl<'a> RootSystem<'a> {
         log_sessions: LogSessions,
     ) -> Result<Self, BootFailure> {
         let entries = image.entries()?;
-        let resource = Resource::self_resource().map_err(|_| BootFailure::Resource)?;
+        let resource =
+            Resource::self_resource().map_err(|_| BootFailure::Budget(BudgetFailure::Root))?;
         let mut system = Self {
             components: Vec::with_capacity(usize::from(plan.len())),
             order: Vec::new(),
@@ -577,9 +607,10 @@ impl<'a> RootSystem<'a> {
         caller: NonZeroU64,
         definitions: Vec<Definition>,
     ) -> Result<(), BootFailure> {
+        let owner = self.caller_record(caller)?;
         let first = self.components.len();
         let order = self.order.clone();
-        if let Err(failure) = self.compose_extension(caller, definitions) {
+        if let Err(failure) = self.compose_extension(owner, definitions) {
             self.discard(first, order);
             return Err(failure);
         }
@@ -593,10 +624,11 @@ impl<'a> RootSystem<'a> {
         caller: NonZeroU64,
         instance: &str,
     ) -> Result<OwnedHandle, BootFailure> {
+        let owner = self.caller_record(caller)?;
         let index = find_instance(&self.components, instance).ok_or(BootFailure::Provider)?;
         let defined = self
             .component(index)
-            .is_some_and(|component| component.owner == Some(caller));
+            .is_some_and(|component| component.owner == Some(owner));
         if !defined {
             return Err(BootFailure::Provider);
         }
@@ -653,13 +685,14 @@ impl<'a> RootSystem<'a> {
         if plan_needs_devices(&plan) {
             self.devices = DeviceAuthority::acquire(self.kernel)?;
         }
-        self.extension = Some(ExtensionPort::start().map_err(|_| BootFailure::Slot)?);
+        self.extension =
+            Some(ExtensionPort::start().map_err(|_| BootFailure::Slot(SlotFailure::Mint))?);
         for index in 0..plan.len() {
             let component = plan.component(index).ok_or(BootFailure::PlanOrder)?;
             let log = (self.log_sessions)(relay::component_badge(index))
-                .ok_or(BootFailure::LogSession)?;
+                .ok_or(BootFailure::Budget(BudgetFailure::LogSession))?;
             let managed = ManagedComponent::new(&self.resource, component.memory_pages())
-                .map_err(|_| BootFailure::Capacity)?;
+                .map_err(|_| BootFailure::Budget(BudgetFailure::Reserve))?;
             self.components.push(Component {
                 managed,
                 record: ComponentRecord::Booted(component),
@@ -678,15 +711,16 @@ impl<'a> RootSystem<'a> {
 
     fn compose_extension(
         &mut self,
-        caller: NonZeroU64,
+        owner: u16,
         definitions: Vec<Definition>,
     ) -> Result<(), BootFailure> {
         let first = self.components.len();
         if first + definitions.len() + SUPERVISOR_WAITS > WAIT_MANY_MAX_COUNT {
-            return Err(BootFailure::Capacity);
+            return Err(BootFailure::Budget(BudgetFailure::Reserve));
         }
         for definition in definitions {
-            let index = u16::try_from(self.components.len()).map_err(|_| BootFailure::Capacity)?;
+            let index = u16::try_from(self.components.len())
+                .map_err(|_| BootFailure::Budget(BudgetFailure::Reserve))?;
             let record = ComponentRecord::defined(definition)?;
             let pages = {
                 let plan = record.plan()?;
@@ -696,14 +730,14 @@ impl<'a> RootSystem<'a> {
                 plan.memory_pages()
             };
             let log = (self.log_sessions)(relay::component_badge(index))
-                .ok_or(BootFailure::LogSession)?;
-            let managed =
-                ManagedComponent::new(&self.resource, pages).map_err(|_| BootFailure::Capacity)?;
+                .ok_or(BootFailure::Budget(BudgetFailure::LogSession))?;
+            let managed = ManagedComponent::new(&self.resource, pages)
+                .map_err(|_| BootFailure::Budget(BudgetFailure::Reserve))?;
             self.components.push(Component {
                 managed,
                 record,
                 log,
-                owner: Some(caller),
+                owner: Some(owner),
                 charged_launches: 1,
             });
         }
@@ -759,6 +793,12 @@ impl<'a> RootSystem<'a> {
         if let Some(component) = self.components.get_mut(usize::from(index)) {
             let _ = component.managed.stop(SHUTDOWN_EXIT_CODE, STOP_TIMEOUT);
         }
+    }
+
+    fn caller_record(&self, caller: NonZeroU64) -> Result<u16, BootFailure> {
+        relay::component_index(caller)
+            .filter(|index| *index < self.component_count())
+            .ok_or(BootFailure::Caller)
     }
 
     fn serve_extension(&mut self) -> Supervised {
@@ -840,7 +880,7 @@ impl<'a> RootSystem<'a> {
                     .region()
                     .handle()
                     .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)
-                    .map_err(|_| BootFailure::Slot)?,
+                    .map_err(|_| BootFailure::Slot(SlotFailure::Mint))?,
                 SlotSource::Irq(device) => devices.line(device, plan.name(), &kernel_log)?,
                 SlotSource::Mmio(device) => {
                     devices.window(*kernel, device, index, plan.name(), &kernel_log)?
@@ -853,7 +893,7 @@ impl<'a> RootSystem<'a> {
                 SlotSource::Supervisor => extension
                     .as_ref()
                     .and_then(|port| port.slot(badge))
-                    .ok_or(BootFailure::Slot)?,
+                    .ok_or(BootFailure::Slot(SlotFailure::Mint))?,
                 SlotSource::Control { provider } => control_session(components, provider, badge)?,
             };
             slots.push(capability).map_err(BootFailure::Launch)?;
@@ -1066,7 +1106,7 @@ const fn give_up(on_exhausted: OnExhausted, exit_code: Option<u32>, dependents: 
 
 const fn refused_session(failure: BootFailure) -> ExtendError {
     match failure {
-        BootFailure::Provider => ExtendError::NotFound,
+        BootFailure::Provider | BootFailure::Caller => ExtendError::NotFound,
         other => other.refused(),
     }
 }
@@ -1094,7 +1134,10 @@ fn session(
             WHOLE_EXPORT,
         );
     }
-    provider.roots.session(badge).map_err(|_| BootFailure::Slot)
+    provider
+        .roots
+        .session(badge)
+        .map_err(|_| BootFailure::Slot(SlotFailure::Mint))
 }
 
 fn component_area(
@@ -1106,14 +1149,14 @@ fn component_area(
     // Сузить сессию до области умеет лишь тот, кто её и заводит: сминченный значок области
     // не назначает.
     if !provider.plan.establishes_sessions() {
-        return Err(BootFailure::Directory);
+        return Err(BootFailure::Slot(SlotFailure::Directory));
     }
     open_session(
         provider.roots.control(),
         provider.plan.startup_timeout(),
         scope,
     )
-    .map_err(|_| BootFailure::Directory)
+    .map_err(|_| BootFailure::Slot(SlotFailure::Directory))
 }
 
 fn control_session(
@@ -1124,7 +1167,7 @@ fn control_session(
     Provider::of(components, instance)?
         .roots
         .control_session(badge)
-        .map_err(|_| BootFailure::Slot)
+        .map_err(|_| BootFailure::Slot(SlotFailure::Mint))
 }
 
 fn start_order(components: &[Component<'_>]) -> Result<Vec<u16>, BootFailure> {
@@ -1193,12 +1236,13 @@ fn open_session(
     timeout: Timeout,
     scope: &str,
 ) -> Result<OwnedHandle, BootFailure> {
-    let scope = Str::<SESSION_SCOPE_MAX>::new(scope).ok_or(BootFailure::Session)?;
+    let scope =
+        Str::<SESSION_SCOPE_MAX>::new(scope).ok_or(BootFailure::Slot(SlotFailure::Session))?;
     let session = component_sessions::Client::new(PortTransport::client(control))
         .with_wait(timeout)
         .open_session(scope)
-        .map_err(|_| BootFailure::Session)?
-        .map_err(|_| BootFailure::Session)?;
+        .map_err(|_| BootFailure::Slot(SlotFailure::Session))?
+        .map_err(|_| BootFailure::Slot(SlotFailure::Session))?;
     Ok(OwnedHandle::adopt(session))
 }
 
