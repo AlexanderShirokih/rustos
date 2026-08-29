@@ -95,14 +95,14 @@ jobs:
         --env SCCACHE_CACHE_SIZE=20G
         --env CARGO_TARGET_DIR=/target', inputs.runner, inputs.cache-scope) || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: ${{ inputs.fetch-depth }}
 
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - if: inputs.cache-path != ''
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ inputs.cache-path }}
           key: ${{ inputs.cache-key }}
