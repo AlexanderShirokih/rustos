@@ -3,7 +3,8 @@
 //!
 //! Каждый seed работает на своём окне: монтирование прогона несёт сессию, суженную до каталога
 //! этого seed, и корнем для него становится сам каталог. Имена, оставленные соседними seed,
-//! в окно не попадают, и последовательность операций одного seed от них не зависит.
+//! в окно не попадают, и последовательность операций одного seed от них не зависит. Окно
+//! снимается вместе с монтированием: арена узлов у процесса файловой системы одна на все seed.
 
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 
@@ -15,7 +16,9 @@ use kernel_tests::kernel_test;
 use runtime::{Mapping, MemoryRegion, OwnedHandle, PortTransport, UserMemFlags};
 
 use crate::{
-    filesystem::{connect, mount_ram_filesystem_scoped, path, session_for, unmount_filesystem},
+    filesystem::{
+        connect, mount_ram_filesystem_scoped, path, session_for, unmount_ram_filesystem_scoped,
+    },
     stress::{SplitMix64, StressPlan, log_pass, log_seed},
 };
 
@@ -531,6 +534,20 @@ impl Run {
         Ok(())
     }
 
+    fn clear(&mut self) -> Step {
+        // Окно сида не переживает свой прогон: узлы дерева возвращаются в арену, общую
+        // у всех сидов.
+        let names: Vec<String> = self.files.keys().cloned().collect();
+        for text in names.iter().map(String::as_str).chain(DIRECTORIES) {
+            self.session
+                .client
+                .unlink(path(text))
+                .map_err(|_| Mismatch::Call("unlink"))?
+                .map_err(Mismatch::refused("unlink of the window"))?;
+        }
+        Ok(())
+    }
+
     fn assert_listing(&mut self, text: &str) -> Step {
         let opened = self
             .session
@@ -698,7 +715,8 @@ fn filesystem_ramfs_stress() {
 }
 
 fn run_seed(seed: u64, steps: u64) {
-    mount_ram_filesystem_scoped(STRESS_MOUNT, &scope_of(seed)).expect("mount of the run");
+    let scope = scope_of(seed);
+    mount_ram_filesystem_scoped(STRESS_MOUNT, &scope).expect("mount of the run");
     let mut run = Run::new(seed).expect("session of the run");
     for step in 0..steps {
         let (operation, result) = run.step();
@@ -709,8 +727,11 @@ fn run_seed(seed: u64, steps: u64) {
     if let Err(mismatch) = run.verify() {
         report(seed, steps, "verify", &mismatch);
     }
+    if let Err(mismatch) = run.clear() {
+        report(seed, steps, "clear", &mismatch);
+    }
     drop(run);
-    unmount_filesystem(STRESS_MOUNT).expect("unmount of the run");
+    unmount_ram_filesystem_scoped(STRESS_MOUNT, &scope).expect("unmount of the run");
 }
 
 fn scope_of(seed: u64) -> String {

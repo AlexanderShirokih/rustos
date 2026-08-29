@@ -1,6 +1,10 @@
 //! Изменяемое дерево в памяти сервера: узлы в арене, файл - байтовый вектор,
 //! каталог - список слотов с надгробиями на месте удалённых записей. Надгробие
 //! переиспользуется под новое имя каталога.
+//!
+//! Ячейка арены переиспользуется под следующий узел, когда с прежнего снято имя
+//! и ушёл последний держатель. `NodeId` несёт поколение ячейки вместе с её
+//! номером: значение, выданное до переиспользования, до нового узла не достаёт.
 
 use alloc::{string::String, vec, vec::Vec};
 
@@ -18,6 +22,17 @@ const ROOT: NodeId = NodeId::from_raw(0);
 const FILE_SIZE_MAX: u64 = 16 * 1024 * 1024;
 
 const NODE_LIMIT: usize = 4096;
+
+const SLOT_BITS: u32 = 12;
+
+const SLOT_MASK: u32 = (1 << SLOT_BITS) - 1;
+
+const GENERATION_MAX: u32 = u32::MAX >> SLOT_BITS;
+
+const _: () = assert!(
+    // Номер ячейки занимает младшие биты идентификатора, поколение - остальные.
+    NODE_LIMIT == 1 << SLOT_BITS
+);
 
 struct Slot {
     name: String,
@@ -39,24 +54,86 @@ enum File {
     },
 }
 
+struct Live {
+    node: Node,
+    named: bool,
+    holders: u32,
+}
+
+enum Content {
+    Live(Live),
+    Free,
+}
+
+struct Cell {
+    generation: u32,
+    content: Content,
+}
+
+struct Placement {
+    index: usize,
+    name: String,
+}
+
 /// Дерево в куче сервера. Узел переживает снятие последнего имени: за ним
 /// закреплена идентичность уже открытых дескрипторов.
 pub struct RamFileSystem {
-    nodes: Vec<Node>,
+    nodes: Vec<Cell>,
+}
+
+impl Cell {
+    const fn root() -> Self {
+        Self {
+            generation: 0,
+            content: Content::Live(Live {
+                node: Node::Directory(Vec::new()),
+                named: true,
+                holders: 0,
+            }),
+        }
+    }
+
+    fn is_reusable(&self) -> bool {
+        // Исчерпанное поколение выводит ячейку из оборота: иначе идентификатор
+        // повторит значение жившего когда-то узла.
+        matches!(self.content, Content::Free) && self.generation <= GENERATION_MAX
+    }
 }
 
 impl RamFileSystem {
     /// Дерево из одного пустого корневого каталога.
     pub fn new() -> Self {
         Self {
-            nodes: vec![Node::Directory(Vec::new())],
+            nodes: vec![Cell::root()],
+        }
+    }
+
+    fn live(&self, id: NodeId) -> Result<&Live, FileSystemError> {
+        let cell = self
+            .nodes
+            .get((id.raw() & SLOT_MASK) as usize)
+            .filter(|cell| cell.generation == id.raw() >> SLOT_BITS)
+            .ok_or(FileSystemError::NotFound)?;
+        match &cell.content {
+            Content::Live(live) => Ok(live),
+            Content::Free => Err(FileSystemError::NotFound),
+        }
+    }
+
+    fn live_mut(&mut self, id: NodeId) -> Result<&mut Live, FileSystemError> {
+        let cell = self
+            .nodes
+            .get_mut((id.raw() & SLOT_MASK) as usize)
+            .filter(|cell| cell.generation == id.raw() >> SLOT_BITS)
+            .ok_or(FileSystemError::NotFound)?;
+        match &mut cell.content {
+            Content::Live(live) => Ok(live),
+            Content::Free => Err(FileSystemError::NotFound),
         }
     }
 
     fn node(&self, id: NodeId) -> Result<&Node, FileSystemError> {
-        self.nodes
-            .get(id.raw() as usize)
-            .ok_or(FileSystemError::NotFound)
+        Ok(&self.live(id)?.node)
     }
 
     fn entries(&self, directory: NodeId) -> Result<&[Option<Slot>], FileSystemError> {
@@ -70,8 +147,7 @@ impl RamFileSystem {
         &mut self,
         directory: NodeId,
     ) -> Result<&mut Vec<Option<Slot>>, FileSystemError> {
-        let index = directory.raw() as usize;
-        match self.nodes.get_mut(index).ok_or(FileSystemError::NotFound)? {
+        match &mut self.live_mut(directory)?.node {
             Node::Directory(entries) => Ok(entries),
             Node::File(_) => Err(FileSystemError::NotADirectory),
         }
@@ -85,11 +161,20 @@ impl RamFileSystem {
     }
 
     fn file_node_mut(&mut self, node: NodeId) -> Result<&mut File, FileSystemError> {
-        let index = node.raw() as usize;
-        match self.nodes.get_mut(index).ok_or(FileSystemError::NotFound)? {
+        match &mut self.live_mut(node)?.node {
             Node::File(file) => Ok(file),
             Node::Directory(_) => Err(FileSystemError::IsADirectory),
         }
+    }
+
+    fn entry_mut(
+        &mut self,
+        directory: NodeId,
+        index: usize,
+    ) -> Result<&mut Option<Slot>, FileSystemError> {
+        self.entries_mut(directory)?
+            .get_mut(index)
+            .ok_or(FileSystemError::NotFound)
     }
 
     fn locate(
@@ -114,44 +199,101 @@ impl RamFileSystem {
     }
 
     fn insert(&mut self, node: Node) -> Result<NodeId, FileSystemError> {
+        let live = Content::Live(Live {
+            node,
+            named: false,
+            holders: 0,
+        });
+        if let Some((slot, cell)) = self
+            .nodes
+            .iter_mut()
+            .enumerate()
+            .find(|(_, cell)| cell.is_reusable())
+        {
+            cell.content = live;
+            return Ok(node_id(slot, cell.generation));
+        }
         if self.nodes.len() >= NODE_LIMIT {
             return Err(FileSystemError::NoSpace);
         }
         self.nodes
             .try_reserve(1)
             .map_err(|_| FileSystemError::NoSpace)?;
-        let id = NodeId::from_raw(self.nodes.len() as u32);
-        self.nodes.push(node);
-        Ok(id)
+        let slot = self.nodes.len();
+        self.nodes.push(Cell {
+            generation: 0,
+            content: live,
+        });
+        Ok(node_id(slot, 0))
     }
 
-    fn attach(
-        &mut self,
-        directory: NodeId,
-        name: &str,
-        node: NodeId,
-    ) -> Result<(), FileSystemError> {
+    fn reserve(&mut self, directory: NodeId, name: &str) -> Result<Placement, FileSystemError> {
         let mut owned = String::new();
         owned
             .try_reserve_exact(name.len())
             .map_err(|_| FileSystemError::NoSpace)?;
         owned.push_str(name);
-        let slot = Some(Slot { name: owned, node });
 
         if let Some((index, _)) = self.locate(directory, name)? {
-            self.entries_mut(directory)?[index] = slot;
-            return Ok(());
+            return Ok(Placement { index, name: owned });
         }
         let entries = self.entries_mut(directory)?;
         if let Some(vacant) = entries.iter().position(Option::is_none) {
-            entries[vacant] = slot;
-            return Ok(());
+            return Ok(Placement {
+                index: vacant,
+                name: owned,
+            });
         }
         entries
             .try_reserve(1)
             .map_err(|_| FileSystemError::NoSpace)?;
-        entries.push(slot);
-        Ok(())
+        entries.push(None);
+        Ok(Placement {
+            index: entries.len() - 1,
+            name: owned,
+        })
+    }
+
+    fn place(
+        &mut self,
+        directory: NodeId,
+        placement: Placement,
+        node: NodeId,
+    ) -> Result<Option<NodeId>, FileSystemError> {
+        let slot = Slot {
+            name: placement.name,
+            node,
+        };
+        let displaced = self
+            .entry_mut(directory, placement.index)?
+            .replace(slot)
+            .map(|previous| previous.node);
+        self.live_mut(node)?.named = true;
+        Ok(displaced)
+    }
+
+    fn drop_name(&mut self, stores: &mut dyn ByteStore, node: NodeId) {
+        let Ok(live) = self.live_mut(node) else {
+            return;
+        };
+        live.named = false;
+        if live.holders == 0 {
+            self.discard(stores, node);
+        }
+    }
+
+    fn discard(&mut self, stores: &mut dyn ByteStore, node: NodeId) {
+        let Ok(live) = self.live(node) else {
+            return;
+        };
+        if let Node::File(File::Backed { store, .. }) = &live.node {
+            stores.release(*store);
+        }
+        let Some(cell) = self.nodes.get_mut((node.raw() & SLOT_MASK) as usize) else {
+            return;
+        };
+        cell.content = Content::Free;
+        cell.generation = cell.generation.saturating_add(1);
     }
 }
 
@@ -182,15 +324,21 @@ impl FileSystemBackend for RamFileSystem {
         if self.locate(directory, name)?.is_some() {
             return Err(FileSystemError::AlreadyExists);
         }
+        // Место записи готовится до заведения узла: узел попадает в арену сразу с именем.
+        let placement = self.reserve(directory, name)?;
         let node = self.insert(match kind {
             NodeKind::File => Node::File(File::Heap(Vec::new())),
             NodeKind::Directory => Node::Directory(Vec::new()),
         })?;
-        self.attach(directory, name, node)?;
+        self.place(directory, placement, node)?;
         Ok(node)
     }
 
-    fn unlink(&mut self, path: Path<'_>) -> Result<(), FileSystemError> {
+    fn unlink(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        path: Path<'_>,
+    ) -> Result<(), FileSystemError> {
         let (directory, name) = self.parent_of(path)?;
         let (index, node) = self
             .locate(directory, name)?
@@ -200,11 +348,17 @@ impl FileSystemBackend for RamFileSystem {
             return Err(FileSystemError::NotEmpty);
         }
         // Слот записи занимает надгробие: соседи по каталогу остаются на своих позициях.
-        self.entries_mut(directory)?[index] = None;
+        *self.entry_mut(directory, index)? = None;
+        self.drop_name(stores, node);
         Ok(())
     }
 
-    fn rename(&mut self, from: Path<'_>, to: Path<'_>) -> Result<(), FileSystemError> {
+    fn rename(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        from: Path<'_>,
+        to: Path<'_>,
+    ) -> Result<(), FileSystemError> {
         let (source, source_name) = self.parent_of(from)?;
         let (index, node) = self
             .locate(source, source_name)?
@@ -222,8 +376,12 @@ impl FileSystemBackend for RamFileSystem {
         {
             return Err(FileSystemError::IsADirectory);
         }
-        self.attach(target, target_name, node)?;
-        self.entries_mut(source)?[index] = None;
+        let placement = self.reserve(target, target_name)?;
+        let displaced = self.place(target, placement, node)?;
+        *self.entry_mut(source, index)? = None;
+        if let Some(displaced) = displaced {
+            self.drop_name(stores, displaced);
+        }
         Ok(())
     }
 
@@ -469,15 +627,39 @@ impl FileSystemBackend for RamFileSystem {
         if self.locate(directory, name)?.is_some() {
             return Err(FileSystemError::AlreadyExists);
         }
+        let placement = self.reserve(directory, name)?;
         let node = self.insert(Node::File(File::Backed {
             store,
             len,
             capacity,
             pinned: true,
         }))?;
-        self.attach(directory, name, node)?;
+        self.place(directory, placement, node)?;
         Ok(node)
     }
+
+    fn retain(&mut self, node: NodeId) -> Result<(), FileSystemError> {
+        let live = self.live_mut(node)?;
+        live.holders = live
+            .holders
+            .checked_add(1)
+            .ok_or(FileSystemError::TooManyOpenFiles)?;
+        Ok(())
+    }
+
+    fn release(&mut self, stores: &mut dyn ByteStore, node: NodeId) {
+        let Ok(live) = self.live_mut(node) else {
+            return;
+        };
+        live.holders = live.holders.saturating_sub(1);
+        if live.holders == 0 && !live.named {
+            self.discard(stores, node);
+        }
+    }
+}
+
+fn node_id(slot: usize, generation: u32) -> NodeId {
+    NodeId::from_raw((generation << SLOT_BITS) | slot as u32)
 }
 
 fn heap_for_growth<'a>(
@@ -538,7 +720,7 @@ mod tests {
     };
     use userland::USERLAND_PAGE_SIZE;
 
-    use super::{FILE_SIZE_MAX, NODE_LIMIT, RamFileSystem as Backend};
+    use super::{FILE_SIZE_MAX, NODE_LIMIT, RamFileSystem as Backend, SLOT_MASK};
     use crate::{
         ByteStore, HeapByteStore, backend::FileSystemBackend, node::NodeId, store::host::WithStore,
     };
@@ -584,6 +766,10 @@ mod tests {
             next: cursor(next),
             end,
         }
+    }
+
+    fn slot_of(node: NodeId) -> u32 {
+        node.raw() & SLOT_MASK
     }
 
     fn listing(
@@ -761,13 +947,90 @@ mod tests {
     fn unlink_removes_the_name_and_keeps_the_node() {
         let mut fs = RamFileSystem::new();
         let sample = file(&mut fs, "/sample");
+        fs.retain(sample).expect("retain");
         fs.write_at(sample, 0, b"body").expect("write");
 
         assert_eq!(fs.unlink(path("/sample")), Ok(()));
         assert_eq!(fs.lookup(path("/sample")), Err(FileSystemError::NotFound));
         assert_eq!(fs.unlink(path("/sample")), Err(FileSystemError::NotFound));
-        // Дескриптор закрепляет идентичность: узел переживает имя.
+        // Держатель закрепляет идентичность: узел переживает имя.
         assert_eq!(read(&fs, sample, 0, 16), b"body");
+    }
+
+    #[test]
+    fn unlink_of_a_node_without_holders_takes_it_out_of_the_arena() {
+        let mut fs = RamFileSystem::new();
+        let sample = file(&mut fs, "/sample");
+        fs.write_at(sample, 0, b"body").expect("write");
+
+        assert_eq!(fs.unlink(path("/sample")), Ok(()));
+        assert_eq!(fs.metadata(sample), Err(FileSystemError::NotFound));
+        assert_eq!(
+            fs.read_at(sample, 0, &mut [0; 4]),
+            Err(FileSystemError::NotFound)
+        );
+    }
+
+    #[test]
+    fn slot_is_reused_when_the_last_holder_is_gone() {
+        let mut fs = RamFileSystem::new();
+        let held = file(&mut fs, "/held");
+        fs.retain(held).expect("retain");
+        fs.unlink(path("/held")).expect("unlink");
+
+        // Слот занят до ухода держателя: соседнее имя заводится рядом.
+        let neighbour = file(&mut fs, "/neighbour");
+        assert_ne!(slot_of(neighbour), slot_of(held));
+        assert_eq!(fs.metadata(held).expect("metadata").kind, NodeKind::File);
+
+        fs.release(held);
+        let fresh = file(&mut fs, "/fresh");
+        assert_eq!(slot_of(fresh), slot_of(held));
+        assert_eq!(fs.metadata(held), Err(FileSystemError::NotFound));
+    }
+
+    #[test]
+    fn identifier_of_a_freed_node_does_not_reach_the_reused_slot() {
+        let mut fs = RamFileSystem::new();
+        let stale = file(&mut fs, "/stale");
+        fs.write_at(stale, 0, b"stale").expect("write");
+        fs.unlink(path("/stale")).expect("unlink");
+
+        let fresh = file(&mut fs, "/fresh");
+        fs.write_at(fresh, 0, b"fresh").expect("write");
+        // Слот тот же, поколение ушло вперёд: прежнее значение до нового узла не достаёт.
+        assert_eq!(slot_of(fresh), slot_of(stale));
+        assert_ne!(fresh, stale);
+        assert_eq!(fs.metadata(stale), Err(FileSystemError::NotFound));
+        assert_eq!(fs.retain(stale), Err(FileSystemError::NotFound));
+        assert_eq!(read(&fs, fresh, 0, 16), b"fresh");
+    }
+
+    #[test]
+    fn create_and_unlink_cycle_does_not_exhaust_the_arena() {
+        let mut fs = RamFileSystem::new();
+        for _ in 0..10 * NODE_LIMIT {
+            file(&mut fs, "/cycle");
+            fs.unlink(path("/cycle")).expect("unlink");
+        }
+        // Корень и ячейка снятого имени - всё, что занимает арена цикла.
+        assert_eq!(fs.backend.nodes.len(), 2);
+        assert!(fs.create(path("/cycle"), NodeKind::File).is_ok());
+    }
+
+    #[test]
+    fn backing_of_an_unlinked_node_leaves_with_it() {
+        let mut fs = RamFileSystem::new();
+        let sample = file(&mut fs, "/sample");
+        fs.write_at(sample, 0, b"body").expect("write");
+        let window = fs.backing(sample).expect("promote");
+
+        fs.unlink(path("/sample")).expect("unlink");
+        // Байты узла уходят вместе с ним: хранилище возвращается серверу.
+        assert_eq!(
+            fs.stores.read(window.store, 0, &mut [0; 4]),
+            Err(FileSystemError::NotFound)
+        );
     }
 
     #[test]
@@ -827,7 +1090,24 @@ mod tests {
             fs.lookup(path("/sample.new")),
             Err(FileSystemError::NotFound)
         );
-        assert_eq!(read(&fs, stale, 0, 16), b"");
+        // Замещённое имя было у узла единственным, держателей у него нет.
+        assert_eq!(fs.metadata(stale), Err(FileSystemError::NotFound));
+    }
+
+    #[test]
+    fn rename_keeps_a_held_node_of_the_replaced_name() {
+        let mut fs = RamFileSystem::new();
+        let fresh = file(&mut fs, "/sample.new");
+        let stale = file(&mut fs, "/sample");
+        fs.write_at(stale, 0, b"stale").expect("write");
+        fs.retain(stale).expect("retain");
+
+        assert_eq!(fs.rename(path("/sample.new"), path("/sample")), Ok(()));
+        assert_eq!(fs.lookup(path("/sample")), Ok(fresh));
+        assert_eq!(read(&fs, stale, 0, 16), b"stale");
+
+        fs.release(stale);
+        assert_eq!(fs.metadata(stale), Err(FileSystemError::NotFound));
     }
 
     #[test]

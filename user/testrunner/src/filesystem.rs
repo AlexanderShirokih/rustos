@@ -228,6 +228,17 @@ pub(crate) fn mount_ram_filesystem_scoped(
         .expect("mount call")
 }
 
+pub(crate) fn unmount_ram_filesystem_scoped(
+    prefix: &str,
+    scope: &str,
+) -> Result<u32, FileSystemError> {
+    let index = ram_filesystem();
+    let unmounted = unmount_filesystem(prefix)?;
+    // Корень окна лежит записью в каталоге над ним: снимает её сессия на весь экспорт.
+    remove_directory(index, scope);
+    Ok(unmounted)
+}
+
 fn create_directory(index: u16, text: &str) {
     let capability = filesystem_session(index);
     let client = connect(&capability);
@@ -238,6 +249,15 @@ fn create_directory(index: u16, text: &str) {
         OpenFlags::CREATE | OpenFlags::DIRECTORY,
     );
     close(&client, &opened);
+}
+
+fn remove_directory(index: u16, text: &str) {
+    let capability = filesystem_session(index);
+    let client = connect(&capability);
+    client
+        .unlink(path(text))
+        .expect("unlink call")
+        .expect("unlink of an emptied directory");
 }
 
 fn mount_filesystem(prefix: &str, index: u16) -> Result<u32, FileSystemError> {

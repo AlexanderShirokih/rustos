@@ -248,15 +248,33 @@ impl FileSystemBackend for ImageFileSystem {
         Err(self.refuse_new_name(path))
     }
 
-    fn unlink(&mut self, path: Path<'_>) -> Result<(), FileSystemError> {
+    fn unlink(
+        &mut self,
+        _stores: &mut dyn ByteStore,
+        path: Path<'_>,
+    ) -> Result<(), FileSystemError> {
         Err(self
             .locate_path(path)
             .err()
             .unwrap_or(FileSystemError::ReadOnly))
     }
 
-    fn rename(&mut self, from: Path<'_>, to: Path<'_>) -> Result<(), FileSystemError> {
+    fn rename(
+        &mut self,
+        _stores: &mut dyn ByteStore,
+        from: Path<'_>,
+        to: Path<'_>,
+    ) -> Result<(), FileSystemError> {
         Err(self.refuse_rename(from, to))
+    }
+
+    fn retain(&mut self, node: NodeId) -> Result<(), FileSystemError> {
+        self.locate(node)?;
+        Ok(())
+    }
+
+    fn release(&mut self, _stores: &mut dyn ByteStore, _node: NodeId) {
+        // Узлы дерева выведены из таблицы образа: держателей она не считает.
     }
 
     fn metadata(&self, node: NodeId) -> Result<NodeInfo, FileSystemError> {

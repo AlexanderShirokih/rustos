@@ -112,6 +112,11 @@ impl<A> Session<A> {
             .ok_or(FileSystemError::BadDescriptor)
     }
 
+    /// Узлы, открытые сессией к её уходу.
+    pub fn into_open_nodes(self) -> impl Iterator<Item = OpenNode> {
+        self.open_nodes.into_iter().filter_map(|slot| slot.node)
+    }
+
     /// Закрывает узел, освобождая его слот под выдачу со свежим поколением.
     pub fn close(&mut self, fd: NodeDescriptor) -> Result<OpenNode, FileSystemError> {
         let slot = self

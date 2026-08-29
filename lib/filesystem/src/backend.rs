@@ -24,12 +24,26 @@ pub trait FileSystemBackend {
 
     /// Снимает имя с узла. Если узла по пути нет, возвращает `NotFound`. Если это каталог с
     /// записями, возвращает `NotEmpty`. Если файловая система неизменяема, возвращает `ReadOnly`.
-    fn unlink(&mut self, path: Path<'_>) -> Result<(), FileSystemError>;
+    fn unlink(&mut self, stores: &mut dyn ByteStore, path: Path<'_>)
+    -> Result<(), FileSystemError>;
 
     /// Переносит узел под новое имя, замещая занятое. Если узла `from` нет, возвращает `NotFound`.
     /// Если имя `to` занято каталогом, возвращает `IsADirectory`. Если файловая система
     /// неизменяема, возвращает `ReadOnly`.
-    fn rename(&mut self, from: Path<'_>, to: Path<'_>) -> Result<(), FileSystemError>;
+    fn rename(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        from: Path<'_>,
+        to: Path<'_>,
+    ) -> Result<(), FileSystemError>;
+
+    /// Ставит на узел держателя. Узел живёт, пока за ним закреплено имя либо остался хотя бы один
+    /// держатель. Если узла в системе нет, возвращает `NotFound`.
+    fn retain(&mut self, node: NodeId) -> Result<(), FileSystemError>;
+
+    /// Снимает с узла держателя. Узел без имени и без держателей файловую систему покидает вместе
+    /// со своими байтами.
+    fn release(&mut self, stores: &mut dyn ByteStore, node: NodeId);
 
     /// Возвращает вид узла и его размер: длину файла в байтах либо число записей каталога. Если
     /// узла в системе нет, возвращает `NotFound`.

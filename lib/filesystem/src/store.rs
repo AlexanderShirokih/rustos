@@ -134,7 +134,7 @@ impl ByteStore for HeapByteStore {
 pub(crate) mod host {
     use core::ops::{Deref, DerefMut};
 
-    use filesystem_abi::FileSystemError;
+    use filesystem_abi::{FileSystemError, Path};
 
     use super::HeapByteStore;
     use crate::{
@@ -176,6 +176,22 @@ pub(crate) mod host {
 
         pub(crate) fn backing(&mut self, node: NodeId) -> Result<Window, FileSystemError> {
             self.backend.backing(&mut self.stores, node)
+        }
+
+        pub(crate) fn unlink(&mut self, path: Path<'_>) -> Result<(), FileSystemError> {
+            self.backend.unlink(&mut self.stores, path)
+        }
+
+        pub(crate) fn rename(
+            &mut self,
+            from: Path<'_>,
+            to: Path<'_>,
+        ) -> Result<(), FileSystemError> {
+            self.backend.rename(&mut self.stores, from, to)
+        }
+
+        pub(crate) fn release(&mut self, node: NodeId) {
+            self.backend.release(&mut self.stores, node);
         }
     }
 

@@ -4,6 +4,10 @@
 //! на `RamFileSystem` и на референсной модели дерева, а итоги сверяются пооперационно. В конце
 //! прогона дерево сверяется с моделью целиком: пути, идентичность узлов, содержимое файлов,
 //! перечисление каталогов и узлы, пережившие снятие последнего имени.
+//!
+//! Узел, теряющий имя, прогон удерживает держателем, а отдельная операция держателя снимает:
+//! идентификатор такого узла обязан перестать вести куда бы то ни было, а выданные когда-либо
+//! идентификаторы обязаны остаться различными и после переиспользования слота.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -69,6 +73,18 @@ impl RamFileSystem {
 
     fn set_size(&mut self, node: NodeId, size: u64) -> Result<(), FileSystemError> {
         self.backend.set_size(&mut self.stores, node, size)
+    }
+
+    fn unlink(&mut self, path: Path<'_>) -> Result<(), FileSystemError> {
+        self.backend.unlink(&mut self.stores, path)
+    }
+
+    fn rename(&mut self, from: Path<'_>, to: Path<'_>) -> Result<(), FileSystemError> {
+        self.backend.rename(&mut self.stores, from, to)
+    }
+
+    fn release(&mut self, node: NodeId) {
+        self.backend.release(&mut self.stores, node);
     }
 }
 
@@ -255,7 +271,7 @@ fuzz_target!(|data: &[u8]| {
         if Path::new(&path).is_err() {
             continue;
         }
-        match operation % 9 {
+        match operation % 10 {
             0 => lookup(&fs, &model, &path),
             1 => {
                 let kind = kind(input.byte());
@@ -283,6 +299,10 @@ fuzz_target!(|data: &[u8]| {
                 let offset = input.size();
                 let len = input.byte() as usize;
                 read_at(&fs, &model, &path, offset, len);
+            }
+            8 => {
+                let choice = input.byte() as usize;
+                release(&mut fs, &mut model, choice);
             }
             _ => {
                 let capacity = input.byte() as usize % LIST_CAPACITY_MAX;
@@ -358,10 +378,21 @@ fn expected_create(model: &Model, path: &str) -> Result<(), FileSystemError> {
 
 fn unlink(fs: &mut RamFileSystem, model: &mut Model, path: &str) {
     let expected = expected_unlink(model, path);
+    if expected.is_ok() {
+        hold(fs, model, path);
+    }
     assert_eq!(fs.unlink(path_of(path)), expected, "unlink {path}");
     if expected.is_ok() {
         model.detach(path);
     }
+}
+
+fn hold(fs: &mut RamFileSystem, model: &Model, path: &str) {
+    let Ok(node) = model.resolve(path) else {
+        return;
+    };
+    fs.retain(node.node)
+        .unwrap_or_else(|error| panic!("retain of {path}: {error:?}"));
 }
 
 fn expected_unlink(model: &Model, path: &str) -> Result<(), FileSystemError> {
@@ -378,13 +409,15 @@ fn rename(fs: &mut RamFileSystem, model: &mut Model, from: &str, to: &str) {
         return;
     }
     let expected = expected_rename(model, from, to);
+    if expected.is_ok() && from != to {
+        hold(fs, model, to);
+    }
     assert_eq!(
         fs.rename(path_of(from), path_of(to)),
         expected,
         "rename {from} -> {to}"
     );
     if expected.is_ok() && from != to {
-        // Замещённое имя теряет свой узел: он остаётся в дереве без единого имени.
         model.detach(to);
         move_subtree(model, from, to);
     }
@@ -409,6 +442,21 @@ fn expected_rename(model: &Model, from: &str, to: &str) -> Result<(), FileSystem
         return Err(FileSystemError::IsADirectory);
     }
     Ok(())
+}
+
+fn release(fs: &mut RamFileSystem, model: &mut Model, choice: usize) {
+    if model.orphans.is_empty() {
+        return;
+    }
+    let orphan = model.orphans.remove(choice % model.orphans.len());
+    fs.release(orphan.node);
+    // Уход последнего держателя безымянного узла уводит узел из арены, и его идентификатор
+    // больше никуда не ведёт.
+    assert_eq!(
+        fs.metadata(orphan.node),
+        Err(FileSystemError::NotFound),
+        "metadata of a released node"
+    );
 }
 
 fn move_subtree(model: &mut Model, from: &str, to: &str) {

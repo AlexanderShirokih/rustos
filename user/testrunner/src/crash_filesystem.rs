@@ -47,12 +47,29 @@ impl FileSystemBackend for CrashingFileSystem {
         self.inner.create(path, kind)
     }
 
-    fn unlink(&mut self, path: Path<'_>) -> Result<(), FileSystemError> {
-        self.inner.unlink(path)
+    fn unlink(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        path: Path<'_>,
+    ) -> Result<(), FileSystemError> {
+        self.inner.unlink(stores, path)
     }
 
-    fn rename(&mut self, _from: Path<'_>, _to: Path<'_>) -> Result<(), FileSystemError> {
+    fn rename(
+        &mut self,
+        _stores: &mut dyn ByteStore,
+        _from: Path<'_>,
+        _to: Path<'_>,
+    ) -> Result<(), FileSystemError> {
         kill_process_by_fault()
+    }
+
+    fn retain(&mut self, node: NodeId) -> Result<(), FileSystemError> {
+        self.inner.retain(node)
+    }
+
+    fn release(&mut self, stores: &mut dyn ByteStore, node: NodeId) {
+        self.inner.release(stores, node);
     }
 
     fn metadata(&self, node: NodeId) -> Result<NodeInfo, FileSystemError> {

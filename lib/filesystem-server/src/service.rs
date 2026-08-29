@@ -124,7 +124,38 @@ impl FileSystemState {
         if badge == 0 {
             return;
         }
-        self.sessions.remove(ClientId::from_raw(badge));
+        let Some(session) = self.sessions.remove(ClientId::from_raw(badge)) else {
+            return;
+        };
+        for open_node in session.into_open_nodes() {
+            self.backend.release(&mut self.stores, open_node.node);
+        }
+    }
+
+    fn open_node(
+        &mut self,
+        client: ClientId,
+        node: NodeId,
+        mode: AccessMode,
+    ) -> Result<NodeDescriptor, FileSystemError> {
+        self.backend.retain(node)?;
+        match self
+            .sessions
+            .get_mut(client)
+            .and_then(|session| session.open(OpenNode { node, mode }))
+        {
+            Ok(fd) => Ok(fd),
+            Err(error) => {
+                self.backend.release(&mut self.stores, node);
+                Err(error)
+            }
+        }
+    }
+
+    fn close_node(&mut self, client: ClientId, fd: NodeDescriptor) -> Result<(), FileSystemError> {
+        let open_node = self.sessions.get_mut(client)?.close(fd)?;
+        self.backend.release(&mut self.stores, open_node.node);
+        Ok(())
     }
 }
 
@@ -188,11 +219,6 @@ impl Serving<'_> {
         Ok(ClientId::from_raw(self.frame.badge))
     }
 
-    fn session(&mut self) -> Result<&mut Session<Attachment>, FileSystemError> {
-        let client = self.client()?;
-        self.state.sessions.get_mut(client)
-    }
-
     fn backend_stores_session(
         &mut self,
     ) -> Result<
@@ -246,6 +272,7 @@ impl file_system::Service for Serving<'_> {
         flags: OpenFlags,
     ) -> Result<Opened, FileSystemError> {
         let mut full = [0; PATH_MAX];
+        let client = self.client()?;
         let (backend, stores, session) = self.backend_stores_session()?;
         let scope = &session.attachment().scope;
         // Корень окна - запись каталога над ним: сессия его открывает, но не заводит.
@@ -260,14 +287,16 @@ impl file_system::Service for Serving<'_> {
         let opened = open_in_backend(backend, stores, path, mode, flags)?;
         let node = opened.node;
         let info = backend.metadata(node)?;
-        let fd = match self.session()?.open(OpenNode { node, mode }) {
+        let fd = match self.state.open_node(client, node, mode) {
             Ok(fd) => fd,
             Err(error) => {
                 // Узел, заведённый ради этого дескриптора, не переживает отказ его выдачи:
                 // откат не даёт отказному вызову оставить в дереве узел без дескриптора.
                 if opened.created {
-                    let (backend, _, _) = self.backend_stores_session()?;
-                    let _ = backend.unlink(path);
+                    let FileSystemState {
+                        backend, stores, ..
+                    } = &mut *self.state;
+                    let _ = backend.unlink(stores, path);
                 }
                 return Err(error);
             }
@@ -280,7 +309,8 @@ impl file_system::Service for Serving<'_> {
     }
 
     fn close(&mut self, fd: NodeDescriptor) -> Result<u32, FileSystemError> {
-        self.session()?.close(fd)?;
+        let client = self.client()?;
+        self.state.close_node(client, fd)?;
         Ok(DONE)
     }
 
@@ -345,19 +375,19 @@ impl file_system::Service for Serving<'_> {
         to: Str<'_, PATH_MAX>,
     ) -> Result<u32, FileSystemError> {
         let (mut full_from, mut full_to) = ([0; PATH_MAX], [0; PATH_MAX]);
-        let (backend, _, session) = self.backend_stores_session()?;
+        let (backend, stores, session) = self.backend_stores_session()?;
         let scope = &session.attachment().scope;
         let from = scoped_entry(scope, from, &mut full_from)?;
         let to = scoped_entry(scope, to, &mut full_to)?;
-        backend.rename(from, to)?;
+        backend.rename(stores, from, to)?;
         Ok(DONE)
     }
 
     fn unlink(&mut self, path: Str<'_, PATH_MAX>) -> Result<u32, FileSystemError> {
         let mut full = [0; PATH_MAX];
-        let (backend, _, session) = self.backend_stores_session()?;
+        let (backend, stores, session) = self.backend_stores_session()?;
         let path = scoped_entry(&session.attachment().scope, path, &mut full)?;
-        backend.unlink(path)?;
+        backend.unlink(stores, path)?;
         Ok(DONE)
     }
 
