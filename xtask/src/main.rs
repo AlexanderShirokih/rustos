@@ -2,6 +2,7 @@
 
 mod artifacts;
 mod build;
+mod check;
 mod context;
 mod fmt;
 mod fuzz;
@@ -20,7 +21,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use userland_image_tool::ExtraFile;
 
-use crate::{build::BuildArgs, similarity::SimilarityArgs, style::StyleArgs};
+use crate::{build::BuildArgs, check::CheckArgs, similarity::SimilarityArgs, style::StyleArgs};
 
 const STD_VERIFY_ARGS: [&str; 4] = ["build", "--release", "--package", "hello-std"];
 
@@ -33,6 +34,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run the main checks over the working tree
+    Check(CheckArgs),
     /// Build the kernel for a device
     Build(BuildArgs),
     /// Run the QEMU integration tests
@@ -117,6 +120,12 @@ fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Check(args) => {
+            let code = check::run(&args)?;
+            if code != 0 {
+                return Ok(ExitCode::from(code));
+            }
+        }
         Commands::Build(args) => build::run(args)?,
         Commands::QemuTest { timeout, spec } => qemu_test::qemu_test(timeout, &spec)?,
         Commands::Bench { timeout } => qemu_test::qemu_bench(timeout)?,

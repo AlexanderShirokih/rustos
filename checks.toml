@@ -1,0 +1,67 @@
+# Конфигурация `cargo xtask check`: набор проверок дерева, по одной записи на проверку.
+#
+# `heavy` помечает проверку, которой нужен инструмент вне обычной сборки: такие идут
+# только по `--all` или по имени. Скрипт из нескольких строк исполняется одним `bash -e`.
+
+[[check]]
+name = "fmt"
+run = "cargo xtask fmt --check"
+
+[[check]]
+name = "check-layers"
+run = "cargo xtask check-layers"
+
+[[check]]
+name = "doc"
+run = """
+export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings"
+cargo doc --no-deps --workspace
+cargo xtask userland doc --no-deps --workspace
+"""
+
+[[check]]
+name = "style"
+run = "cargo xtask style --all --base origin/main"
+
+[[check]]
+name = "similarity"
+run = "cargo xtask similarity --base origin/main"
+
+[[check]]
+name = "clippy-host"
+run = """
+cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --all-targets --all-features -- -D warnings
+cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+"""
+
+[[check]]
+name = "clippy-aarch64"
+run = """
+cargo clippy --workspace --exclude xtask --exclude ipc-test --exclude userland-build --exclude style-tool --exclude userland-image-tool --target aarch64-unknown-none -- -D warnings
+cargo xtask userland clippy --workspace --all-targets -- -D warnings
+cargo clippy --manifest-path lib/std-rt/Cargo.toml --target targets/aarch64-unknown-molecular.json -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
+"""
+
+[[check]]
+name = "test"
+run = "cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --all-features"
+
+[[check]]
+name = "race"
+heavy = true
+run = "cargo xtask race"
+
+[[check]]
+name = "fuzz-build"
+heavy = true
+run = "cargo fuzz build --fuzz-dir fuzz"
+
+[[check]]
+name = "qemu-test"
+heavy = true
+run = "cargo xtask qemu-test"
+
+[[check]]
+name = "std"
+heavy = true
+run = "cargo xtask std-src --verify"
