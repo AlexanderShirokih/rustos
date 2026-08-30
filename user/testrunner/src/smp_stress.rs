@@ -471,7 +471,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
 
 #[kernel_test(stress)]
 fn smp_port_brigade_stress() {
-    let plan = StressPlan::from_env();
+    let plan = StressPlan::load();
     for seed in plan.seeds() {
         log_seed(seed, plan.steps);
         run_brigade(seed, plan.steps);
@@ -481,7 +481,7 @@ fn smp_port_brigade_stress() {
 
 #[kernel_test(stress)]
 fn smp_terminate_blocked_threads_stress() {
-    let plan = StressPlan::from_env();
+    let plan = StressPlan::load();
     for seed in plan.seeds() {
         log_seed(seed, TERMINATE_ROUNDS as u64);
         let mut random = SplitMix64::new(seed);

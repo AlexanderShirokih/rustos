@@ -1,12 +1,15 @@
 name: Extended verification
 
+# Группа одновременности едина для планового и ручного запуска: при
+# `cancel-in-progress: false` два дорогих прогона встают в очередь.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 on:
   schedule:
-    - cron: "0 12 */3 * *"
+    # 01:00 MSK: окно, свободное от проверок pull request.
+    - cron: "0 22 */3 * *"
   workflow_dispatch:
     inputs:
       stress_seed:
@@ -23,6 +26,11 @@ on:
         description: Operations per userspace stress seed
         required: false
         type: number
+        default: 16384
+      stress_epoch:
+        description: Operations in one epoch of a seed
+        required: false
+        type: number
         default: 256
 
 permissions:
@@ -30,18 +38,27 @@ permissions:
 
 jobs:
   userspace-stress:
-    name: userspace stress (QEMU)
+    name: userspace stress (QEMU, shard ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     uses: ./.github/workflows/ci-container-job.yml
     with:
       runner: ci-heavy
+      # Образ и ядро у шардов одни. Второй шард берёт сборку первого, и scope
+      # кэша у них общий.
       cache-scope: userspace-stress
-      timeout-minutes: 45
+      timeout-minutes: 90
       run: >-
         cargo xtask stress
         --seed "${{ inputs.stress_seed || 1 }}"
         --seeds "${{ inputs.stress_seeds || 64 }}"
-        --steps "${{ inputs.stress_steps || 256 }}"
-        --timeout 900
+        --steps "${{ inputs.stress_steps || 16384 }}"
+        --epoch "${{ inputs.stress_epoch || 256 }}"
+        --shard "${{ matrix.shard }}"
+        --shards "${{ strategy.job-total }}"
+        --timeout 3600
 
   qemu-test-gicv2:
     name: qemu-test (GICv2)
@@ -56,7 +73,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fdt_parse_walk, ipc_wire_decode, ramfs_ops, userland_image_decode]
+        target:
+          [
+            fdt_parse_walk,
+            ipc_wire_decode,
+            ramfs_ops,
+            syscall_arg_decode,
+            userland_image_decode,
+          ]
     uses: ./.github/workflows/ci-container-job.yml
     with:
       runner: ci-heavy

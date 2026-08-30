@@ -13,6 +13,7 @@ filesystem = { path = "../lib/filesystem" }
 filesystem-abi = { path = "../lib/filesystem-abi" }
 ipc = { path = "../lib/ipc" }
 libfuzzer-sys = "0.4"
+syscall = { path = "../lib/syscall" }
 userland = { path = "../lib/userland" }
 userland-image = { path = "../lib/userland-image" }
 
@@ -43,6 +44,13 @@ bench = false
 [[bin]]
 name = "userland_image_decode"
 path = "fuzz_targets/userland_image_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "syscall_arg_decode"
+path = "fuzz_targets/syscall_arg_decode.rs"
 test = false
 doc = false
 bench = false

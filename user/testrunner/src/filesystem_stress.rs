@@ -704,7 +704,7 @@ impl Run {
 
 #[kernel_test(stress)]
 fn filesystem_ramfs_stress() {
-    let plan = StressPlan::from_env();
+    let plan = StressPlan::load();
     for seed in plan.seeds() {
         log_seed(seed, plan.steps);
         run_seed(seed, plan.steps);

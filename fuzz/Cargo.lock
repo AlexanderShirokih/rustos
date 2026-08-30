@@ -124,6 +124,7 @@ dependencies = [
  "filesystem-abi",
  "ipc",
  "libfuzzer-sys",
+ "syscall",
  "userland",
  "userland-image",
 ]

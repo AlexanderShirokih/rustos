@@ -15,6 +15,7 @@ const TARGETS: &[&str] = &[
     "fdt_parse_walk",
     "ipc_wire_decode",
     "ramfs_ops",
+    "syscall_arg_decode",
     "userland_image_decode",
 ];
 

@@ -64,6 +64,15 @@ enum Commands {
         /// Operations generated for each seed
         #[arg(long, default_value_t = 64)]
         steps: u64,
+        /// Operations in one epoch of a seed
+        #[arg(long, default_value_t = 16)]
+        epoch: u64,
+        /// Index of this shard of the seed range
+        #[arg(long, default_value_t = 0)]
+        shard: u64,
+        /// Number of shards the seed range is split into
+        #[arg(long, default_value_t = 1)]
+        shards: u64,
         /// Timeout in seconds
         #[arg(long, default_value_t = 120)]
         timeout: u64,
@@ -133,8 +142,11 @@ fn main() -> Result<ExitCode> {
             seed,
             seeds,
             steps,
+            epoch,
+            shard,
+            shards,
             timeout,
-        } => qemu_test::qemu_stress(seed, seeds, steps, timeout)?,
+        } => qemu_test::qemu_stress(seed, seeds, steps, epoch, shard, shards, timeout)?,
         Commands::Race => race::run()?,
         Commands::Fuzz { target, seconds } => fuzz::run(&target, seconds)?,
         Commands::BuildUserland { image, files } => {
