@@ -1,6 +1,7 @@
-//! E2E проверка `ResourceSplit` из EL0: выделенный бюджет отделён от
-//! исходного, его остаток возвращается закрытием производного ресурса, а
-//! потомок, стартованный с явным `resource_h`, метерится именно им.
+//! E2E проверка `ResourceSplit` из EL0: бюджет производного ресурса
+//! возвращается исходному его закрытием, а потомок, стартованный с явным
+//! `resource_h`, метерится именно им. Границу самого производного бюджета
+//! снимает проба в `resource_exhaustion`.
 
 use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, Priority, Process, Resource, Signal, ThreadEntry};
@@ -47,32 +48,6 @@ fn split_chain_depth_is_capped() {
         .create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW)
         .expect("leaf budget survives the refused split");
     drop(region);
-}
-
-#[kernel_test]
-fn split_budget_bounds_the_derived_resource() {
-    let parent = Resource::self_resource().expect("self metering resource");
-    let child = parent.split(CHILD_PAGES).expect("split");
-
-    let fits = child
-        .create_virtual(CHILD_PAGES * USERLAND_PAGE_SIZE, MemoryAccess::RW)
-        .expect("region within the derived budget");
-
-    // Бюджет производного исчерпан: следующая страница отвергается независимо
-    // от остатка исходного ресурса.
-    let over = child.create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW);
-    kernel_tests::kassert!(matches!(
-        over.err(),
-        Some(runtime::Error::Syscall(SyscallError::ResourceExhausted))
-    ));
-
-    // Исходный ресурс тем же запросом не ограничен.
-    let from_parent = parent
-        .create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW)
-        .expect("parent budget is untouched by the child exhaustion");
-
-    drop(fits);
-    drop(from_parent);
 }
 
 #[kernel_test]

@@ -42,6 +42,7 @@ mod port_transport;
 mod process_handles;
 mod process_lifecycle;
 mod process_start;
+mod resource_exhaustion;
 mod resource_split;
 mod ring_transport;
 mod rootkeeper_system;
