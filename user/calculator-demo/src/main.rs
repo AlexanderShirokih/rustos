@@ -11,14 +11,12 @@ use core::panic::PanicInfo;
 
 use calculator_demo::calculator;
 use component_abi::{component_manifest, supervisor_gone};
-use filesystem_abi::{AccessMode, OpenFlags, file_system};
-use ipc::{
-    Transport as _,
-    wire::{IpcError, Str},
-};
+use filesystem_abi::{AccessMode, OpenFlags};
+use filesystem_client::FileSystem;
+use ipc::{Transport as _, wire::IpcError};
 use rtc_abi::rtc;
 use runtime::{
-    MemoryRegion, OwnedHandle, PortTransport, Timeout, UserMemFlags, install_log, log_fmt,
+    FileSystemEnvironment, OwnedHandle, PortTransport, SessionPort, Timeout, install_log, log_fmt,
     log_line, thread_exit,
 };
 use syscall::Handle;
@@ -33,7 +31,6 @@ const MULTIPLIER: u64 = 7;
 
 const BANNER_RECORD: &str = "/banner";
 const BANNER_MAX: usize = 64;
-const BUFFER_SIZE: u32 = 4096;
 
 const NO_STARTUP_EXIT_CODE: u64 = 1;
 const CALCULATOR_LOST_EXIT_CODE: u64 = 3;
@@ -78,9 +75,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     let clock = rtc::Client::new(PortTransport::client(&clock_session)).with_wait(CALL_TIMEOUT);
 
     log_line("started");
-    announce(
-        &file_system::Client::new(PortTransport::client(&area_session)).with_wait(CALL_TIMEOUT),
-    );
+    announce(SessionPort::over(area_session));
     thread_exit(run(
         &calculator,
         &clock,
@@ -88,7 +83,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     ))
 }
 
-fn announce(area: &file_system::Client<PortTransport>) {
+fn announce(area: SessionPort) {
     // Запись лежит в собственном каталоге компонента, и его область - корень
     // сессии: имя отсчитывается от неё.
     let mut bytes = [0; BANNER_MAX];
@@ -98,23 +93,14 @@ fn announce(area: &file_system::Client<PortTransport>) {
     }
 }
 
-fn banner<'a>(
-    area: &file_system::Client<PortTransport>,
-    bytes: &'a mut [u8; BANNER_MAX],
-) -> Option<&'a str> {
-    let cap = area.acquire_buffer(BUFFER_SIZE).ok()?.ok()?;
-    // Регион переживает своё отображение: закрытая капа уносит и его.
-    let region = MemoryRegion::adopt(cap);
-    let buffer = region.map_full(UserMemFlags::ReadWrite).ok()?;
-    let opened = area
-        .open(Str::new(BANNER_RECORD)?, AccessMode::Read, OpenFlags::NONE)
-        .ok()?
+fn banner(area: SessionPort, bytes: &mut [u8; BANNER_MAX]) -> Option<&str> {
+    let mut area = FileSystem::windowed(FileSystemEnvironment, area).with_wait(CALL_TIMEOUT);
+    let mut record = area
+        .open(BANNER_RECORD, AccessMode::Read, OpenFlags::NONE)
         .ok()?;
-    let len = usize::try_from(opened.size).ok()?.min(BANNER_MAX);
-    let count = usize::try_from(area.read(opened.fd, 0, len as u32).ok()?.ok()?).ok()?;
+    let count = record.read(bytes).ok()?;
 
-    buffer.copy_out(&mut bytes[..count]).ok()?;
-    Some(core::str::from_utf8(&bytes[..count]).ok()?.trim_end())
+    Some(core::str::from_utf8(bytes.get(..count)?).ok()?.trim_end())
 }
 
 fn run(

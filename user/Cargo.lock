@@ -15,6 +15,7 @@ version = "0.1.0"
 dependencies = [
  "component-abi",
  "filesystem-abi",
+ "filesystem-client",
  "ipc",
  "rtc-abi",
  "runtime",
@@ -98,6 +99,14 @@ dependencies = [
 name = "filesystem-abi"
 version = "0.1.0"
 dependencies = [
+ "ipc",
+]
+
+[[package]]
+name = "filesystem-client"
+version = "0.1.0"
+dependencies = [
+ "filesystem-abi",
  "ipc",
 ]
 
@@ -290,6 +299,8 @@ version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
  "collections",
+ "filesystem-abi",
+ "filesystem-client",
  "io",
  "ipc",
  "log-abi",

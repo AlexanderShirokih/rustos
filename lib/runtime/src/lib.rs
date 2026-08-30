@@ -11,6 +11,7 @@
 extern crate alloc;
 
 mod error;
+mod filesystem;
 mod handle;
 mod heap;
 mod log;
@@ -20,6 +21,7 @@ mod startup;
 mod sync;
 
 pub use error::{Error, Result};
+pub use filesystem::{FileSystemEnvironment, SessionPort, SessionRegion};
 pub use handle::{BorrowedHandle, OwnedHandle};
 pub use log::{install_log, log_fmt, log_line};
 pub(crate) use molecular_rt as svc;

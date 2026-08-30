@@ -14,6 +14,8 @@ doctest = false
 [dependencies]
 bootstrap-abi = { workspace = true }
 collections = { workspace = true }
+filesystem-abi = { workspace = true }
+filesystem-client = { workspace = true }
 io = { workspace = true }
 ipc = { workspace = true }
 log-abi = { workspace = true }

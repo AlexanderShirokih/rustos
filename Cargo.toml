@@ -31,6 +31,7 @@ members = [
     "lib/fdt",
     "lib/filesystem",
     "lib/filesystem-abi",
+    "lib/filesystem-client",
     "lib/supervisor-abi",
     "lib/userland",
     "lib/userland-build",
@@ -79,6 +80,7 @@ klog = { path = "kernel/log" }
 fdt = { path = "lib/fdt" }
 filesystem = { path = "lib/filesystem" }
 filesystem-abi = { path = "lib/filesystem-abi" }
+filesystem-client = { path = "lib/filesystem-client" }
 memory = { path = "kernel/memory" }
 hal-common = { path = "kernel/hal-common" }
 hal-aarch64-asid = { path = "kernel/hal-aarch64-asid" }

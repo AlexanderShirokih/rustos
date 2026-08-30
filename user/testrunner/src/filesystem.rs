@@ -6,8 +6,8 @@ use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use bootstrap_abi::bootstrap;
 use component_abi::{SESSION_SCOPE_MAX, component_sessions};
 use filesystem_abi::{
-    AccessMode, DirCursor, DirEntry, FileSystemError, NAME_MAX, NodeDescriptor, NodeKind,
-    OpenFlags, Opened, Path, file_system, namespace, namespace_admin,
+    APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NAME_MAX, NodeDescriptor,
+    NodeKind, OpenFlags, Opened, Path, file_system, namespace, namespace_admin,
 };
 use ipc::{
     MessageLen, Transport,
@@ -43,8 +43,6 @@ const RAM_FILESYSTEM_NAME: &str = "filesystem-ramfs";
 
 const BOOT_TREE_ATTEMPTS: usize = 200;
 const BOOT_TREE_TURN: Timeout = Timeout::from_millis(10);
-
-const APPEND_OFFSET: u64 = u64::MAX;
 
 pub(crate) const BUFFER_SIZE: u32 = 4096;
 

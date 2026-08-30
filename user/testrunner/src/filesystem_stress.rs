@@ -9,8 +9,8 @@
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 
 use filesystem_abi::{
-    AccessMode, DirCursor, DirEntry, FileSystemError, NodeDescriptor, NodeKind, OpenFlags,
-    file_system,
+    APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NodeDescriptor, NodeKind,
+    OpenFlags, file_system,
 };
 use kernel_tests::kernel_test;
 use runtime::{Mapping, MemoryRegion, OwnedHandle, PortTransport, UserMemFlags};
@@ -37,8 +37,6 @@ const DESCRIPTORS_MAX: usize = 8;
 const DIRECTORIES: [&str; 2] = ["/d0", "/d1"];
 
 const FILE_NAMES: [&str; 4] = ["f0", "f1", "f2", "f3"];
-
-const APPEND_OFFSET: u64 = u64::MAX;
 
 const LIST_BATCHES_MAX: usize = 16;
 

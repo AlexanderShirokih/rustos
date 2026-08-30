@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+rustc-dep-of-std = ["dep:alloc", "dep:core", "ipc/rustc-dep-of-std"]
+
 [dependencies]
 ipc = { workspace = true }
+alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 
 [dev-dependencies]
 ipc-test = { workspace = true }

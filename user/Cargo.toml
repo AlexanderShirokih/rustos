@@ -51,6 +51,7 @@ device-resolver-aarch64 = { path = "../lib/device-resolver-aarch64" }
 fdt = { path = "../lib/fdt" }
 filesystem = { path = "../lib/filesystem" }
 filesystem-abi = { path = "../lib/filesystem-abi" }
+filesystem-client = { path = "../lib/filesystem-client" }
 io = { path = "../lib/io" }
 ipc = { path = "../lib/ipc" }
 log-abi = { path = "../lib/log-abi" }
