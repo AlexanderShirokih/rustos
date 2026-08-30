@@ -90,10 +90,6 @@ impl Iterator for Crlf<'_> {
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
-
-    use std::vec::Vec;
-
     use super::Crlf;
 
     #[test]

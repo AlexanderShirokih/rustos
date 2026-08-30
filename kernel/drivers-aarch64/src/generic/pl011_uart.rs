@@ -11,10 +11,10 @@ use drivers_common::{
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt};
 use io::{
     byte_sink::{ByteSink, Pending},
+    crlf::Crlf,
     mmio::Reg,
     writer::Writer,
 };
-use util::crlf::Crlf;
 
 use crate::register_driver;
 

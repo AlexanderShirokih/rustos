@@ -18,7 +18,6 @@ collections = { workspace = true }
 drivers-common = { workspace = true }
 drivers-common-aarch64 = { workspace = true }
 klog = { workspace = true }
-util = { workspace = true }
 spin = { workspace = true }
 
 [lints]

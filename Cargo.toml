@@ -35,7 +35,6 @@ members = [
     "lib/userland",
     "lib/userland-build",
     "lib/userland-image",
-    "lib/util",
     "tools/style",
     "tools/userland-image",
     "xtask",
@@ -81,7 +80,6 @@ fdt = { path = "lib/fdt" }
 filesystem = { path = "lib/filesystem" }
 filesystem-abi = { path = "lib/filesystem-abi" }
 memory = { path = "kernel/memory" }
-util = { path = "lib/util" }
 hal-common = { path = "kernel/hal-common" }
 hal-aarch64-asid = { path = "kernel/hal-aarch64-asid" }
 hal-aarch64-paging = { path = "kernel/hal-aarch64-paging" }
