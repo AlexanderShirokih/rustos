@@ -3,8 +3,9 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use kernel_objects::Signal;
 use kernel_tests::kernel_test;
-use runtime::{Condvar, Instant, Mutex, Priority, Signal, Timeout, spawn};
+use runtime::{Condvar, Instant, Mutex, Priority, Timeout, spawn};
 use syscall::{SIGNALED, WakeCount};
 
 const STACK_SIZE: u64 = 0x4000;

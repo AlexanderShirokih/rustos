@@ -7,25 +7,32 @@
 use component_abi::{StartedComponent, receive_startup_transaction};
 use syscall::Handle;
 
-use crate::{PortTransport, lock::Lock, log, process::take_bootstrap, svc};
+use crate::{
+    log,
+    process::{bootstrap_handle, clear_bootstrap},
+    svc,
+    svc::PortTransport,
+    sync::Mutex,
+};
 
-static STARTED: Lock<Option<StartedComponent>> = Lock::new(None);
+static STARTED: Mutex<Option<StartedComponent>> = Mutex::new(None);
 
 /// Принимает стартовый набор и оставляет от него лог-сессию.
 ///
 /// Вызывается точкой входа программы один раз до `main`. Процесс вне композиции порта в `x0`
-/// не получает, и вызов сразу возвращается.
+/// не получает, и вызов сразу возвращается. Стартовый хэндл, по которому набор не сложился,
+/// остаётся процессу. По нему корень композиции обращается к ядру.
 pub fn adopt_startup() {
-    let Some(bootstrap) = take_bootstrap() else {
+    let Some(bootstrap) = bootstrap_handle() else {
         return;
     };
-    let started = receive_startup_transaction(&PortTransport::server(bootstrap));
-    // Порт одноразовый: набор пришёл целиком либо не сложился, и второй попытки не будет.
+    let Ok(Some(started)) = receive_startup_transaction(&PortTransport::server(bootstrap)) else {
+        return;
+    };
+    // Порт одноразовый: набор пришёл целиком, и второй попытки по нему не будет.
+    clear_bootstrap();
     svc::handle_close(bootstrap);
-    let Ok(Some(started)) = started else {
-        return;
-    };
-    log::install(Handle::from_nonzero(started.log.raw()));
+    log::install(Handle::from_nonzero(started.log.raw()), "");
     *STARTED.lock() = Some(started);
 }
 

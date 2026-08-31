@@ -2,9 +2,12 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
-use runtime::{OwnedHandle, Signal, receive_startup, thread_exit};
+use kernel_objects::{OwnedHandle, Signal};
+use runtime::{receive_startup, thread_exit};
 use syscall::Handle;
 
 mod managed_fixture_protocol;

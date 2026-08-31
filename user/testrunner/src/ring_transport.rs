@@ -10,10 +10,9 @@
 
 use collections::SpscRing;
 use ipc::{Transport, wire::IpcError};
+use kernel_objects::{Resource, RingTransport, Signal};
 use kernel_tests::kernel_test;
-use runtime::{
-    MemoryAccess, Priority, Resource, RingTransport, Signal, Timeout, UserMemFlags, spawn,
-};
+use runtime::{MemoryAccess, Priority, Timeout, UserMemFlags, spawn};
 use syscall::Handle;
 
 const SLOT_PAYLOAD: usize = 4;

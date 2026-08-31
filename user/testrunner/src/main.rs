@@ -2,6 +2,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 extern crate alloc;
 
 use core::{fmt::Write as _, panic::PanicInfo};
@@ -25,6 +27,7 @@ mod fixture;
 mod fixture_protocol;
 mod futex;
 mod heap;
+mod heap_bench;
 mod ipc_buffer;
 mod ipc_raw;
 mod irq_provision;

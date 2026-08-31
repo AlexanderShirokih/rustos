@@ -46,7 +46,7 @@ impl<'a> Path<'a> {
         self.0.len() == 1
     }
 
-    /// Компоненты от корня. У корня их нет.
+    /// Компоненты пути от корня. У корня перечисление пусто.
     pub fn components(self) -> impl Iterator<Item = Component<'a>> {
         self.0[1..]
             .split(SEPARATOR)
@@ -54,7 +54,7 @@ impl<'a> Path<'a> {
             .map(Component)
     }
 
-    /// Родительский путь и последний компонент. У корня их нет.
+    /// Родительский путь и последний компонент. Для корня - `None`.
     pub fn split_last(self) -> Option<(Self, Component<'a>)> {
         if self.is_root() {
             return None;

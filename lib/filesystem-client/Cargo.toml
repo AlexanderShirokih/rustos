@@ -18,6 +18,10 @@ ipc = { workspace = true }
 alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 
+[target.'cfg(target_os = "molecular")'.dependencies]
+kernel-objects = { workspace = true }
+syscall = { workspace = true }
+
 [dev-dependencies]
 ipc-test = { workspace = true }
 

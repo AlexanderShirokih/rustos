@@ -42,7 +42,8 @@ jobs:
               - xtask/src/std_src.rs
               - rust-toolchain.toml
               - targets/aarch64-unknown-molecular.json
-              - lib/std-rt/**
+              - lib/runtime/**
+              - lib/syscall-user/**
               - lib/component-abi/**
               - lib/ipc/**
               - lib/log-abi/**
@@ -134,7 +135,8 @@ jobs:
       run: |
         cargo clippy --workspace --exclude xtask --exclude ipc-test --exclude userland-build --exclude style-tool --exclude userland-image-tool --target aarch64-unknown-none -- -D warnings
         cargo xtask userland clippy --workspace --all-targets -- -D warnings
-        cargo clippy --manifest-path lib/std-rt/Cargo.toml --target targets/aarch64-unknown-molecular.json -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
+        cargo clippy --manifest-path lib/runtime/Cargo.toml --target targets/aarch64-unknown-molecular.json -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
+        cargo clippy --manifest-path lib/syscall-user/Cargo.toml --target targets/aarch64-unknown-molecular.json -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
 
   test:
     name: tests (host)

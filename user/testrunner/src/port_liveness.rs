@@ -11,10 +11,11 @@ use core::{
 };
 
 use bootstrap_abi::bootstrap;
+use kernel_objects::{Error, MemoryRegion, OwnedHandle, Port, Process, Reply, Resource, Result};
 use kernel_tests::kernel_test;
 use runtime::{
-    Error, MemoryRegion, OwnedHandle, Port, PortTransport, Priority, Process, Reply, Resource,
-    Result, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr, port_call, port_send, spawn,
+    PortTransport, Priority, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr, port_call,
+    port_send, spawn,
 };
 use syscall::{Handle, Rights, SyscallError};
 use userland_image::{component_name, decode};

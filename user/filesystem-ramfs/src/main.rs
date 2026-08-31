@@ -5,12 +5,15 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
 use component_abi::component_manifest;
 use filesystem::RamFileSystem;
 use filesystem_server::{Error, Result, serve};
-use runtime::{OwnedHandle, PortTransport, log_fmt, thread_exit};
+use kernel_objects::OwnedHandle;
+use runtime::{PortTransport, log_fmt, thread_exit};
 use syscall::Handle;
 
 const LOG_TAG: &str = "ramfs";

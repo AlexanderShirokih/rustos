@@ -23,12 +23,12 @@ use ipc::{
     Transport as _,
     wire::{Cap, IpcError},
 };
+use kernel_objects::{MemoryRegion, OwnedHandle, ReadOnlyMapping, Resource, Thread};
 use runtime::{
-    MemoryRegion, Mutex, OwnedHandle, PortTransport, Priority, ReadOnlyMapping, Resource, Thread,
-    exit_with_sibling, install_log, log_line, spawn_owned,
+    Mutex, PortTransport, Priority, exit_with_sibling, install_log, log_line, spawn_owned,
 };
 use spin::Once;
-use syscall::Timeout;
+use syscall::{Handle, Timeout};
 
 mod admin;
 mod buffer;
@@ -70,7 +70,7 @@ pub fn serve<B>(
 where
     B: FileSystemBackend + Send + 'static,
 {
-    install_log(OwnedHandle::adopt(log), tag);
+    install_log(Handle::from_nonzero(log.raw()), tag);
     let control = OwnedHandle::adopt(control);
     let service = OwnedHandle::adopt(service);
     let backing = backing.map(MemoryRegion::adopt);
@@ -150,7 +150,10 @@ fn serve_admin(shared: &Shared) -> u32 {
             // прочих значков порта цикл продолжает.
             Err(IpcError::SenderGone) if supervisor_gone(transport.peer_badge()) => {
                 log_line("supervisor gone");
-                exit_with_sibling(&shared.sessions_thread, SUPERVISOR_LOST_EXIT_CODE)
+                exit_with_sibling(
+                    shared.sessions_thread.handle().as_raw(),
+                    SUPERVISOR_LOST_EXIT_CODE,
+                )
             }
             // Покадровое исчерпание, пробуждение без кадра и уход чужого значка цикл не
             // закрывают.

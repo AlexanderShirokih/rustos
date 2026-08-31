@@ -7,11 +7,12 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::SeqCst},
 };
 
+use kernel_objects::{Error, OwnedHandle, Port, Resource, Signal};
 use kernel_tests::kernel_test;
 use rootkeeper::SystemImage;
 use runtime::{
-    Error, JoinHandle, OwnedHandle, Port, Priority, Resource, Signal, Timeout, handle_close,
-    ipc_buffer_ptr, port_call, port_send, signal_create, signal_wait_one, spawn,
+    JoinHandle, Priority, Timeout, handle_close, ipc_buffer_ptr, port_call, port_send,
+    signal_create, signal_wait_one, spawn,
 };
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
 
@@ -397,7 +398,7 @@ fn wait_until_ready(state: &WorkerState) -> Result<(), FailureKind> {
 fn join(worker: JoinHandle) -> Result<(), FailureKind> {
     worker
         .join(JOIN_TIMEOUT)
-        .map_err(|error| FailureKind::from_error("join", JOIN_TIMEOUT, error, -1002))
+        .map_err(|error| FailureKind::from_error("join", JOIN_TIMEOUT, error.into(), -1002))
 }
 
 fn worker_outcome(state: &WorkerState) -> Result<(), FailureKind> {

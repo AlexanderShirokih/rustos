@@ -132,6 +132,7 @@ mod tests {
                 targets: vec![MetaTarget {
                     name: "kernel_tests".to_string(),
                     kind: vec!["lib".to_string()],
+                    src_path: PathBuf::from("lib/test-harness-qemu/src/lib.rs"),
                 }],
             }],
             workspace_metadata: None,

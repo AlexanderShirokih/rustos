@@ -1,8 +1,9 @@
 //! E2E проверка `SignalCreate`/`SignalSet`/`SignalWaitOne`/`SignalWaitMany`
 //! из EL0.
 
+use kernel_objects::{Signal, wait_any};
 use kernel_tests::kernel_test;
-use runtime::{Priority, Signal, Timeout, signal_set, spawn, wait_any};
+use runtime::{Priority, Timeout, signal_set, spawn};
 use syscall::{Handle, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem, WakeCount};
 
 const STACK_SIZE: u64 = 0x4000;
@@ -89,7 +90,7 @@ fn wait_many_blocks_until_another_thread_signals() {
     // Биты ещё не подняты: ожидание уходит в блокировку вместо немедленного возврата.
     kernel_tests::kassert!(matches!(
         wait_any(&items, Timeout::POLL),
-        Err(runtime::Error::Syscall(SyscallError::Timeout))
+        Err(kernel_objects::Error::Syscall(SyscallError::Timeout))
     ));
 
     let index = wait_any(&items, WAKE_TIMEOUT).expect("waiter must be woken by the signaler");
@@ -107,12 +108,16 @@ fn wait_many_rejects_a_set_outside_the_bound() {
 
     kernel_tests::kassert!(matches!(
         wait_any(&[], Timeout::POLL),
-        Err(runtime::Error::Syscall(SyscallError::InvalidArgument))
+        Err(kernel_objects::Error::Syscall(
+            SyscallError::InvalidArgument
+        ))
     ));
 
     let oversized = [item; WAIT_MANY_MAX_COUNT + 1];
     kernel_tests::kassert!(matches!(
         wait_any(&oversized, Timeout::POLL),
-        Err(runtime::Error::Syscall(SyscallError::InvalidArgument))
+        Err(kernel_objects::Error::Syscall(
+            SyscallError::InvalidArgument
+        ))
     ));
 }

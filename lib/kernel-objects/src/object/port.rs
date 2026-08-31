@@ -5,11 +5,12 @@ use core::num::NonZeroU64;
 use syscall::{
     Handle, IPC_BUFFER_DATA_MAX, IpcBuffer, Rights, SyscallError, Timeout, decode_tag, encode_tag,
 };
+use syscall_user::ipc_buffer_ptr;
 
 use crate::{
     error::{Error, Result, unit, value},
     handle::{BorrowedHandle, OwnedHandle},
-    ipc_buffer_ptr, svc,
+    svc,
 };
 
 fn store_body(body: &[u8]) -> Result<()> {

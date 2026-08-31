@@ -15,6 +15,7 @@ test = false
 bench = false
 
 [dependencies]
+kernel-objects = { workspace = true }
 component-abi = { workspace = true }
 filesystem = { workspace = true }
 filesystem-server = { workspace = true }

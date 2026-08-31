@@ -13,13 +13,11 @@ use ipc::{
     MessageLen, Transport,
     wire::{HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, Str, TERMINATOR},
 };
+use kernel_objects::{BorrowedHandle, MemoryRegion, OwnedHandle, Process, Resource, Signal};
 use kernel_tests::kernel_test;
 use managed_component::ComponentRoots;
 use rootkeeper::{RootSystem, SystemImage};
-use runtime::{
-    BorrowedHandle, MemoryRegion, OwnedHandle, PortTransport, Process, Resource, Signal, Timeout,
-    UserMemFlags, port_send,
-};
+use runtime::{PortTransport, Timeout, UserMemFlags, port_send};
 use spin::Once;
 use syscall::Rights;
 use userland::USERLAND_PAGE_SIZE;
@@ -394,7 +392,7 @@ fn close(client: &file_system::Client<PortTransport>, opened: &Opened) {
 
 pub(crate) fn write_all(
     client: &file_system::Client<PortTransport>,
-    buffer: &runtime::Mapping,
+    buffer: &kernel_objects::Mapping,
     opened: &Opened,
     offset: u64,
     payload: &[u8],
@@ -407,13 +405,13 @@ pub(crate) fn write_all(
     written.count
 }
 
-pub(crate) fn buffer_head(buffer: &runtime::Mapping, len: usize) -> Vec<u8> {
+pub(crate) fn buffer_head(buffer: &kernel_objects::Mapping, len: usize) -> Vec<u8> {
     let mut bytes = vec![0; len];
     buffer.copy_out(&mut bytes).expect("buffer head");
     bytes
 }
 
-fn buffer_bytes(buffer: &runtime::Mapping) -> Vec<u8> {
+fn buffer_bytes(buffer: &kernel_objects::Mapping) -> Vec<u8> {
     buffer_head(
         buffer,
         usize::try_from(buffer.size_bytes()).expect("buffer size fits usize"),
@@ -435,7 +433,7 @@ fn entry_name(index: usize) -> String {
 
 pub(crate) fn walk_directory(
     client: &file_system::Client<PortTransport>,
-    buffer: &runtime::Mapping,
+    buffer: &kernel_objects::Mapping,
     fd: NodeDescriptor,
 ) -> Vec<String> {
     let mut names = Vec::new();
@@ -1115,7 +1113,7 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
 
 fn create_filler_tree(
     client: &file_system::Client<PortTransport>,
-    data: &runtime::Mapping,
+    data: &kernel_objects::Mapping,
     names: &[String],
 ) {
     for name in names {

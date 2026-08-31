@@ -2,6 +2,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
 use component_abi::{SESSION_SCOPE_MAX, SessionError, component_manifest, component_sessions};
@@ -9,7 +11,8 @@ use ipc::{
     Transport as _,
     wire::{Cap, Str},
 };
-use runtime::{OwnedHandle, Port, PortTransport, thread_exit};
+use kernel_objects::{OwnedHandle, Port};
+use runtime::{PortTransport, thread_exit};
 use syscall::{Handle, Rights, Timeout};
 
 struct SessionlessAdmin {

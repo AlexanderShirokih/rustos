@@ -2,6 +2,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
 use runtime::{handle_close, thread_exit};

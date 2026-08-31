@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "molecular-rt"
+name = "runtime"
 version = "0.1.0"
 dependencies = [
  "component-abi",
@@ -36,6 +36,7 @@ dependencies = [
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
  "syscall",
+ "syscall-user",
 ]
 
 [[package]]
@@ -55,4 +56,13 @@ name = "syscall"
 version = "0.1.0"
 dependencies = [
  "rustc-std-workspace-core",
+]
+
+[[package]]
+name = "syscall-user"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "rustc-std-workspace-core",
+ "syscall",
 ]

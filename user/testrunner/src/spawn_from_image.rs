@@ -2,8 +2,9 @@
 
 use bootstrap_abi::bootstrap;
 use ipc::wire::IpcError;
+use kernel_objects::{MemoryRegion, OwnedHandle, Resource, Signal};
 use kernel_tests::kernel_test;
-use runtime::{MemoryRegion, OwnedHandle, PortTransport, Resource, Signal, Timeout};
+use runtime::{PortTransport, Timeout};
 use syscall::{Rights, SIGNALED, SyscallError};
 use userland::{Entry, EntryView, Segment, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE};
 use userland_image::{component_name, decode};
@@ -24,13 +25,13 @@ const PROCESS_CREATE_ROLLBACK_ATTEMPTS: usize = 80;
 
 #[derive(Debug)]
 enum StartupError {
-    Runtime(runtime::Error),
+    Runtime(kernel_objects::Error),
     Ipc,
     Injected,
 }
 
-impl From<runtime::Error> for StartupError {
-    fn from(error: runtime::Error) -> Self {
+impl From<kernel_objects::Error> for StartupError {
+    fn from(error: kernel_objects::Error) -> Self {
         Self::Runtime(error)
     }
 }
@@ -135,7 +136,9 @@ fn load_image_error_reclaims_each_created_process() {
         let initial = Signal::create().expect("initial capability").into_handle();
         kernel_tests::kassert!(matches!(
             load_entry(&invalid, None, &resource, initial),
-            Err(runtime::Error::Syscall(SyscallError::InvalidArgument))
+            Err(kernel_objects::Error::Syscall(
+                SyscallError::InvalidArgument
+            ))
         ));
     }
 }
@@ -172,7 +175,7 @@ fn start_error_reclaims_each_loaded_process() {
                 &write_only,
                 initial
             ),
-            Err(runtime::Error::Syscall(SyscallError::AccessDenied))
+            Err(kernel_objects::Error::Syscall(SyscallError::AccessDenied))
         ));
     }
 }
@@ -181,7 +184,7 @@ fn start_error_reclaims_each_loaded_process() {
 /// разбужен отказом.
 #[kernel_test]
 fn caller_wakes_when_server_dies_holding_reply() {
-    use runtime::{Error, Port};
+    use kernel_objects::{Error, Port};
     use syscall::SyscallError;
 
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
@@ -236,7 +239,7 @@ fn fail_startup_when_budget_returns<'a, E: EntryView<'a>>(
     for _ in 0..PROCESS_CLEANUP_RETRY_ATTEMPTS {
         let name = component_name(program.path());
         match launch_entry(program, Some(name), budget, |_| Err(StartupError::Injected)) {
-            Err(StartupError::Runtime(runtime::Error::Syscall(
+            Err(StartupError::Runtime(kernel_objects::Error::Syscall(
                 syscall::SyscallError::ResourceExhausted,
             ))) => {
                 let _ = timer.wait(SIGNALED, PROCESS_CLEANUP_RETRY);

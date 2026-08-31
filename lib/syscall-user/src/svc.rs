@@ -1,50 +1,193 @@
 //! Inline-asm реализация svc-обёрток.
+//!
+//! Ловушку ставят макросы: номер операции идёт immediate-полем `svc`, аргументы - в x0 и
+//! дальше по порядку, возврат - в x0. Обёртка остаётся типизированной подписью с обоснованием
+//! своего `unsafe`.
 
 use core::arch::asm;
+
+trait Argument {
+    fn to_register(self) -> u64;
+}
+
+impl Argument for u64 {
+    fn to_register(self) -> u64 {
+        self
+    }
+}
+
+impl Argument for u32 {
+    fn to_register(self) -> u64 {
+        u64::from(self)
+    }
+}
+
+impl Argument for u16 {
+    fn to_register(self) -> u64 {
+        u64::from(self)
+    }
+}
+
+impl Argument for Handle {
+    fn to_register(self) -> u64 {
+        u64::from(self.raw())
+    }
+}
+
+macro_rules! svc {
+    ($op:expr) => {{
+        let ret: i64;
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            lateout("x0") ret,
+            options(nostack),
+        );
+        ret
+    }};
+    ($op:expr, $x0:expr) => {{
+        let ret: i64;
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            in("x0") Argument::to_register($x0),
+            lateout("x0") ret,
+            options(nostack),
+        );
+        ret
+    }};
+    ($op:expr, $x0:expr, $x1:expr) => {{
+        let ret: i64;
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            in("x0") Argument::to_register($x0),
+            in("x1") Argument::to_register($x1),
+            lateout("x0") ret,
+            options(nostack),
+        );
+        ret
+    }};
+    ($op:expr, $x0:expr, $x1:expr, $x2:expr) => {{
+        let ret: i64;
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            in("x0") Argument::to_register($x0),
+            in("x1") Argument::to_register($x1),
+            in("x2") Argument::to_register($x2),
+            lateout("x0") ret,
+            options(nostack),
+        );
+        ret
+    }};
+    ($op:expr, $x0:expr, $x1:expr, $x2:expr, $x3:expr) => {{
+        let ret: i64;
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            in("x0") Argument::to_register($x0),
+            in("x1") Argument::to_register($x1),
+            in("x2") Argument::to_register($x2),
+            in("x3") Argument::to_register($x3),
+            lateout("x0") ret,
+            options(nostack),
+        );
+        ret
+    }};
+    ($op:expr, $x0:expr, $x1:expr, $x2:expr, $x3:expr, $x4:expr) => {{
+        let ret: i64;
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            in("x0") Argument::to_register($x0),
+            in("x1") Argument::to_register($x1),
+            in("x2") Argument::to_register($x2),
+            in("x3") Argument::to_register($x3),
+            in("x4") Argument::to_register($x4),
+            lateout("x0") ret,
+            options(nostack),
+        );
+        ret
+    }};
+    ($op:expr, $x0:expr, $x1:expr, $x2:expr, $x3:expr, $x4:expr, $x5:expr) => {{
+        let ret: i64;
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            in("x0") Argument::to_register($x0),
+            in("x1") Argument::to_register($x1),
+            in("x2") Argument::to_register($x2),
+            in("x3") Argument::to_register($x3),
+            in("x4") Argument::to_register($x4),
+            in("x5") Argument::to_register($x5),
+            lateout("x0") ret,
+            options(nostack),
+        );
+        ret
+    }};
+}
+
+macro_rules! svc_pair {
+    ($op:expr, $x0:expr) => {{
+        let primary: i64;
+        let secondary: u64;
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            in("x0") Argument::to_register($x0),
+            lateout("x0") primary,
+            lateout("x1") secondary,
+            options(nostack),
+        );
+        (primary, secondary)
+    }};
+    ($op:expr, $x0:expr, $x1:expr, $x2:expr) => {{
+        let primary: i64;
+        let secondary: u64;
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            in("x0") Argument::to_register($x0),
+            in("x1") Argument::to_register($x1),
+            in("x2") Argument::to_register($x2),
+            lateout("x0") primary,
+            lateout("x1") secondary,
+            options(nostack),
+        );
+        (primary, secondary)
+    }};
+}
+
+macro_rules! svc_noreturn {
+    ($op:expr, $x0:expr) => {
+        asm!(
+            "svc #{op}",
+            op = const $op as u16,
+            in("x0") Argument::to_register($x0),
+            options(noreturn, nostack),
+        )
+    };
+}
 
 use syscall::{Handle, IrqTrigger, SyscallError, SyscallOp, Timeout, WaitItem, WakeCount};
 
 /// Ждёт сигналы `signals` на capability target `handle`. [`Timeout::POLL`] -
 /// non-blocking poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
 pub fn signal_wait_one(handle: Handle, signals: u32, timeout: Timeout) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
     // в x0..x2: handle, маска сигналов, timeout_ns; память ядру не
     // передаётся. x0 на выходе: observed-маска (>=0) либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::SignalWaitOne as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") u64::from(signals),
-            in("x2") timeout.raw(),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::SignalWaitOne, handle, signals, timeout.raw()) }
 }
 
 /// Меняет биты сигналов capability target `handle`: `set`/`clear` - нижние 32 бита,
 /// `count` - политика пробуждения ([`WakeCount`]). Возврат: 0 либо
 /// `-(SyscallError)`.
 pub fn signal_set(handle: Handle, set: u32, clear: u32, count: WakeCount) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
     // в x0..x3: handle, set, clear, count; память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::SignalSet as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") u64::from(set),
-            in("x2") u64::from(clear),
-            in("x3") count.to_raw(),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::SignalSet, handle, set, clear, count.to_raw()) }
 }
 
 /// Ждёт сигналы на нескольких capability target: `items` - записи `[handle, mask]`,
@@ -52,58 +195,36 @@ pub fn signal_set(handle: Handle, set: u32, clear: u32, count: WakeCount) -> i64
 /// observed-маска сработавшего capability target (>=0 либо `-(SyscallError)`) и его индекс
 /// в `items`.
 pub fn signal_wait_many(items: &[WaitItem], timeout: Timeout) -> (i64, u64) {
-    let observed: i64;
-    let index: u64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
     // items_va, count, timeout_ns; ядро читает массив записей по x0
     // (wire-layout WaitItem) до возврата из svc. На выходе x0 -
     // observed-маска, x1 - индекс.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::SignalWaitMany as u16,
-            in("x0") items.as_ptr() as u64,
-            in("x1") items.len() as u64,
-            in("x2") timeout.raw(),
-            lateout("x0") observed,
-            lateout("x1") index,
-            options(nostack),
-        );
-    }
+    let (observed, index) = unsafe {
+        svc_pair!(
+            SyscallOp::SignalWaitMany,
+            items.as_ptr() as u64,
+            items.len() as u64,
+            timeout.raw()
+        )
+    };
     (observed, index)
 }
 
 /// Создаёт пустой `Signal` в текущей handle-таблице. Возврат: handle
 /// либо `-(SyscallError)`.
 pub fn signal_create() -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::SignalCreate as u16,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { svc!(SyscallOp::SignalCreate) };
     Handle::from_syscall_return(ret)
 }
 
 /// Создаёт `Port` в текущей таблице.
 /// Возврат: один port-handle либо `-(SyscallError)`.
 pub fn port_create() -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::PortCreate as u16,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { svc!(SyscallOp::PortCreate) };
     Handle::from_syscall_return(ret)
 }
 
@@ -114,21 +235,10 @@ pub fn port_create() -> Result<Handle, SyscallError> {
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
 pub fn port_send(handle: Handle, timeout: Timeout) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
     // timeout_ns; сообщение лежит в per-thread IPC-буфере (ядро читает
     // его само), память по указателю не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::PortSend as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") timeout.raw(),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::PortSend, handle, timeout.raw()) }
 }
 
 /// `recv` на port `handle`: блокирующий приём в IPC-буфер текущего
@@ -137,21 +247,10 @@ pub fn port_send(handle: Handle, timeout: Timeout) -> i64 {
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
 pub fn port_recv(handle: Handle, timeout: Timeout) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
     // timeout_ns; принятое сообщение ядро пишет в per-thread IPC-буфер
     // текущего потока.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::PortRecv as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") timeout.raw(),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::PortRecv, handle, timeout.raw()) }
 }
 
 /// `call` на port `handle`: блокирующий запрос-ответ. Сообщение из
@@ -161,57 +260,26 @@ pub fn port_recv(handle: Handle, timeout: Timeout) -> i64 {
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
 pub fn port_call(handle: Handle, timeout: Timeout) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
     // timeout_ns; запрос и ответ ходят через per-thread IPC-буфер текущего
     // потока.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::PortCall as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") timeout.raw(),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::PortCall, handle, timeout.raw()) }
 }
 
 /// `reply` на одноразовый `reply_handle`: доставляет ответ из IPC-буфера
 /// сервера вызывателю. Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
 pub fn port_reply(reply_handle: Handle) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - reply handle; ответ
     // лежит в per-thread IPC-буфере сервера.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::PortReply as u16,
-            in("x0") u64::from(reply_handle.raw()),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::PortReply, reply_handle) }
 }
 
 /// Изымает `handle` из текущей таблицы и закрывает его. Возврат: 0 либо
 /// `-(SyscallError)`.
 pub fn handle_close(handle: Handle) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
     // не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::HandleClose as u16,
-            in("x0") u64::from(handle.raw()),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::HandleClose, handle) }
 }
 
 /// Дублирует `handle` с правами `new_rights` (подмножество исходных,
@@ -226,56 +294,33 @@ pub fn handle_duplicate(
     new_rights: u32,
     badge: u64,
 ) -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
     // handle, new_rights (нижние 32 бита), badge (полные 64 бита); память
     // ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::HandleDuplicate as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") u64::from(new_rights),
-            in("x2") badge,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { svc!(SyscallOp::HandleDuplicate, handle, new_rights, badge) };
     Handle::from_syscall_return(ret)
 }
 
 /// Создаёт пустой user-процесс с именем `name` (UTF-8). Возврат: handle
 /// на `ProcessObject` либо `-(SyscallError)`.
 pub fn process_create(name: &[u8]) -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
     // name_va, name_len; ядро читает имя по x0 до возврата из svc.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ProcessCreate as u16,
-            in("x0") name.as_ptr() as u64,
-            in("x1") name.len() as u64,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe {
+        svc!(
+            SyscallOp::ProcessCreate,
+            name.as_ptr() as u64,
+            name.len() as u64
+        )
+    };
     Handle::from_syscall_return(ret)
 }
 
 /// Возвращает handle на собственный `ProcessObject` либо `-(SyscallError)`.
 pub fn process_self() -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ProcessSelf as u16,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { svc!(SyscallOp::ProcessSelf) };
     Handle::from_syscall_return(ret)
 }
 
@@ -283,17 +328,9 @@ pub fn process_self() -> Result<Handle, SyscallError> {
 /// (дефолтные права, включая `WRITE`). Возврат: resource-handle либо
 /// `-(SyscallError)` (`WrongType`, если процесс стартовал без метеринг-ресурса).
 pub fn process_resource_self() -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ProcessResourceSelf as u16,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { svc!(SyscallOp::ProcessResourceSelf) };
     Handle::from_syscall_return(ret)
 }
 
@@ -301,60 +338,34 @@ pub fn process_resource_self() -> Result<Handle, SyscallError> {
 /// `UserImageDescAbi` в `desc`. Требует `Rights::WRITE` на `handle`.
 /// Возврат: 0 либо `-(SyscallError)`.
 pub fn process_load_image(handle: Handle, desc: &[u8]) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
     // process_handle, desc_va, desc_len; ядро копирует дескриптор и массив
     // сегментов из user-памяти до возврата из svc.
     unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ProcessLoadImage as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") desc.as_ptr() as u64,
-            in("x2") desc.len() as u64,
-            lateout("x0") ret,
-            options(nostack),
-        );
+        svc!(
+            SyscallOp::ProcessLoadImage,
+            handle,
+            desc.as_ptr() as u64,
+            desc.len() as u64
+        )
     }
-    ret
 }
 
 /// Финальный exit-код процесса `handle`. Требует `Rights::READ`.
 /// Возврат: exit code (нижние 32 бита, zero-extended) либо `-(SyscallError)`.
 pub fn process_exit_code(handle: Handle) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
     // не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ProcessExitCode as u16,
-            in("x0") u64::from(handle.raw()),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::ProcessExitCode, handle) }
 }
 
 /// Завершает процесс `handle` с кодом `exit_code`: помечает завершёнными все
 /// его потоки, после декремента до нуля - и сам процесс.
 /// Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
 pub fn process_terminate(handle: Handle, exit_code: u64) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
     // handle, exit_code; память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ProcessTerminate as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") exit_code,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::ProcessTerminate, handle, exit_code) }
 }
 
 /// Стартует первый поток процесса `handle`: `bootstrap_handle` - HandleId
@@ -369,23 +380,19 @@ pub fn process_start(
     priority: u64,
     resource_handle: u64,
 ) -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x5. Ядро
     // переносит bootstrap_handle потомку до возврата.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ProcessStart as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") entry_pc,
-            in("x2") user_sp,
-            in("x3") bootstrap_handle,
-            in("x4") priority,
-            in("x5") resource_handle,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe {
+        svc!(
+            SyscallOp::ProcessStart,
+            handle,
+            entry_pc,
+            user_sp,
+            bootstrap_handle,
+            priority,
+            resource_handle
+        )
+    };
     Handle::from_syscall_return(ret)
 }
 
@@ -394,19 +401,9 @@ pub fn process_start(
 /// resource-handle либо `-(SyscallError)` (`ResourceExhausted` при нехватке
 /// бюджета).
 pub fn resource_split(resource: Handle, budget_pages: u64) -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1. x0 на
     // выходе - handle либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ResourceSplit as u16,
-            in("x0") u64::from(resource.raw()),
-            in("x1") budget_pages,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { svc!(SyscallOp::ResourceSplit, resource, budget_pages) };
     Handle::from_syscall_return(ret)
 }
 
@@ -420,58 +417,36 @@ pub fn thread_create(
     arg: u64,
     priority: u64,
 ) -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x4:
     // process_handle, entry_pc, user_sp, arg, priority; память ядру не
     // передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ThreadCreate as u16,
-            in("x0") u64::from(process.raw()),
-            in("x1") entry_pc,
-            in("x2") user_sp,
-            in("x3") arg,
-            in("x4") priority,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe {
+        svc!(
+            SyscallOp::ThreadCreate,
+            process,
+            entry_pc,
+            user_sp,
+            arg,
+            priority
+        )
+    };
     Handle::from_syscall_return(ret)
 }
 
 /// Возвращает handle на собственный `ThreadObject` либо `-(SyscallError)`.
 pub fn thread_self() -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - handle либо -(SyscallError).
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ThreadSelf as u16,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { svc!(SyscallOp::ThreadSelf) };
     Handle::from_syscall_return(ret)
 }
 
 /// Финальный exit-код потока `handle`. Требует `Rights::READ`.
 /// Возврат: exit code (нижние 32 бита, zero-extended) либо `-(SyscallError)`.
 pub fn thread_exit_code(handle: Handle) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
     // не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ThreadExitCode as u16,
-            in("x0") u64::from(handle.raw()),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::ThreadExitCode, handle) }
 }
 
 /// Завершает поток `handle` с кодом `exit_code` (нижние 32 бита).
@@ -479,20 +454,9 @@ pub fn thread_exit_code(handle: Handle) -> i64 {
 /// отвергается - для self-exit есть `thread_exit`.
 /// Возврат: 0 либо `-(SyscallError)`.
 pub fn thread_terminate(handle: Handle, exit_code: u64) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
     // handle, exit_code; память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ThreadTerminate as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") exit_code,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::ThreadTerminate, handle, exit_code) }
 }
 
 /// Создаёт Memory-регион с Virtual backing: `resource` - handle на
@@ -503,20 +467,16 @@ pub fn memory_create_virtual(
     size_bytes: u64,
     access_mask: u64,
 ) -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
     // память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MemoryCreateVirtual as u16,
-            in("x0") u64::from(resource.raw()),
-            in("x1") size_bytes,
-            in("x2") access_mask,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe {
+        svc!(
+            SyscallOp::MemoryCreateVirtual,
+            resource,
+            size_bytes,
+            access_mask
+        )
+    };
     Handle::from_syscall_return(ret)
 }
 
@@ -524,19 +484,9 @@ pub fn memory_create_virtual(
 /// handle на исходный регион (требует `DUPLICATE`). Возврат: region handle
 /// либо `-(SyscallError)`.
 pub fn memory_with_profile(region: Handle, profile_raw: u64) -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
     // region_handle, profile_raw; память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MemoryWithProfile as u16,
-            in("x0") u64::from(region.raw()),
-            in("x1") profile_raw,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { svc!(SyscallOp::MemoryWithProfile, region, profile_raw) };
     Handle::from_syscall_return(ret)
 }
 
@@ -550,102 +500,51 @@ pub fn memory_slice(
     size_bytes: u64,
     access_mask: u64,
 ) -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x3:
     // region_handle, offset, size_bytes, access_mask; память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MemorySlice as u16,
-            in("x0") u64::from(region.raw()),
-            in("x1") offset,
-            in("x2") size_bytes,
-            in("x3") access_mask,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe {
+        svc!(
+            SyscallOp::MemorySlice,
+            region,
+            offset,
+            size_bytes,
+            access_mask
+        )
+    };
     Handle::from_syscall_return(ret)
 }
 
 /// Маппит регион `handle` в текущий user-AS: `flags_raw` - `UserMemFlags`.
 /// Возврат: базовый VA либо `-(SyscallError)`.
 pub fn memory_map(handle: Handle, size_bytes: u64, flags_raw: u64) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
     // память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MemoryMap as u16,
-            in("x0") u64::from(handle.raw()),
-            in("x1") size_bytes,
-            in("x2") flags_raw,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::MemoryMap, handle, size_bytes, flags_raw) }
 }
 
 /// Меняет флаги существующего маппинга по `va`: `flags_raw` -
 /// `UserMemFlags`. Возврат: 0 либо `-(SyscallError)`.
 pub fn memory_remap(va: u64, size_bytes: u64, flags_raw: u64) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
     // память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MemoryRemap as u16,
-            in("x0") va,
-            in("x1") size_bytes,
-            in("x2") flags_raw,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::MemoryRemap, va, size_bytes, flags_raw) }
 }
 
 /// Выделяет анонимный регион и маппит его в свободный VA: `resource` - handle
 /// на метеринг-`Resource` (требует `WRITE`), `size_bytes`, `flags_raw` -
 /// `UserMemFlags`. Возврат: базовый VA либо `-(SyscallError)`.
 pub fn memory_allocate(resource: Handle, size_bytes: u64, flags_raw: u64) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
     // память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MemoryAllocate as u16,
-            in("x0") u64::from(resource.raw()),
-            in("x1") size_bytes,
-            in("x2") flags_raw,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::MemoryAllocate, resource, size_bytes, flags_raw) }
 }
 
 /// Снимает маппинг по `va` (page-aligned) длиной `size_bytes` и возвращает
 /// регион в free-list. Возврат: 0 либо `-(SyscallError)`.
 pub fn memory_free(va: u64, size_bytes: u64) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
     // va, size_bytes; память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MemoryFree as u16,
-            in("x0") va,
-            in("x1") size_bytes,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::MemoryFree, va, size_bytes) }
 }
 
 /// Инспектирует Memory-регион `handle`. Возврат: `(size_bytes,
@@ -654,39 +553,19 @@ pub fn memory_free(va: u64, size_bytes: u64) -> i64 {
 /// base_pa page-aligned, младшие 12 бит несут kind/access. Для `Virtual`
 /// base_pa = 0.
 pub fn memory_region_inspect(handle: Handle) -> (i64, u64) {
-    let primary: i64;
-    let secondary: u64;
     // SAFETY: svc-immediate несёт номер операции, x0 - handle; ядро пишет
     // size_bytes в x0, base|kind|access - в x1.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::MemoryRegionInspect as u16,
-            in("x0") u64::from(handle.raw()),
-            lateout("x0") primary,
-            lateout("x1") secondary,
-            options(nostack),
-        );
-    }
+    let (primary, secondary) = unsafe { svc_pair!(SyscallOp::MemoryRegionInspect, handle) };
     (primary, secondary)
 }
 
 /// Возвращает user-VA per-thread IPC-буфера текущего потока. Возврат:
 /// VA (>0) либо `-(SyscallError)`, если у потока нет буфера.
 pub fn ipc_buffer_addr() -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
     // выходе - user-VA буфера (>0) либо -(SyscallError). Память ядру не
     // передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ThreadIpcBufferAddr as u16,
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::ThreadIpcBufferAddr) }
 }
 
 /// Минтит `IrqLine` по полномочию `control` для линии `irq` с триггером
@@ -695,53 +574,25 @@ pub fn ipc_buffer_addr() -> i64 {
 /// ожидается через `signal_wait_one`/`signal_wait_many` прямо по возвращённому
 /// handle (бит `SIGNALED`).
 pub fn irq_mint(control: Handle, irq: u16, trigger: IrqTrigger) -> Result<Handle, SyscallError> {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - control handle,
     // x1 - номер линии, x2 - код триггера; память ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::IrqMint as u16,
-            in("x0") u64::from(control.raw()),
-            in("x1") u64::from(irq),
-            in("x2") u64::from(trigger.code()),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { svc!(SyscallOp::IrqMint, control, irq, trigger.code()) };
     Handle::from_syscall_return(ret)
 }
 
 /// Подтверждает прерывание на `line`: снимает latch `SIGNALED` и размаскирует
 /// линию. Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
 pub fn irq_ack(line: Handle) -> i64 {
-    let ret: i64;
     // SAFETY: svc-immediate несёт номер операции, x0 - line handle; память
     // ядру не передаётся.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::IrqAck as u16,
-            in("x0") u64::from(line.raw()),
-            lateout("x0") ret,
-            options(nostack),
-        );
-    }
-    ret
+    unsafe { svc!(SyscallOp::IrqAck, line) }
 }
 
 /// Завершает текущий поток с кодом `code`. Не возвращается.
 pub fn thread_exit(code: u64) -> ! {
     // SAFETY: ThreadExit не возвращается, поэтому asm помечен noreturn и
     // удовлетворяет `-> !`; x0 несёт exit code.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ThreadExit as u16,
-            in("x0") code,
-            options(noreturn, nostack),
-        )
-    }
+    unsafe { svc_noreturn!(SyscallOp::ThreadExit, code) }
 }
 
 /// Завершает текущий процесс со всеми его потоками с кодом `code`.
@@ -749,26 +600,12 @@ pub fn thread_exit(code: u64) -> ! {
 pub fn process_exit(code: u64) -> ! {
     // SAFETY: ProcessExit не возвращается, поэтому asm помечен noreturn и
     // удовлетворяет `-> !`; x0 несёт exit code.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ProcessExit as u16,
-            in("x0") code,
-            options(noreturn, nostack),
-        )
-    }
+    unsafe { svc_noreturn!(SyscallOp::ProcessExit, code) }
 }
 
 /// Уступает остаток кванта текущего потока.
 pub fn thread_yield() {
     // SAFETY: svc-immediate несёт номер операции, аргументов нет; память
     // ядру не передаётся, возврат не используется.
-    unsafe {
-        asm!(
-            "svc #{op}",
-            op = const SyscallOp::ThreadYield as u16,
-            lateout("x0") _,
-            options(nostack),
-        );
-    }
+    unsafe { svc!(SyscallOp::ThreadYield) };
 }

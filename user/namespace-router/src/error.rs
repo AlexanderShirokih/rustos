@@ -3,10 +3,11 @@
 use core::fmt::{Display, Formatter, Result as FmtResult};
 
 use ipc::wire::IpcError;
+use syscall::SyscallError;
 
 #[derive(Debug)]
 pub(crate) enum Error {
-    Runtime(runtime::Error),
+    Runtime(kernel_objects::Error),
     Ipc(IpcError),
     Start,
 }
@@ -33,9 +34,15 @@ impl Display for Error {
     }
 }
 
-impl From<runtime::Error> for Error {
-    fn from(error: runtime::Error) -> Self {
+impl From<kernel_objects::Error> for Error {
+    fn from(error: kernel_objects::Error) -> Self {
         Self::Runtime(error)
+    }
+}
+
+impl From<SyscallError> for Error {
+    fn from(error: SyscallError) -> Self {
+        Self::Runtime(error.into())
     }
 }
 

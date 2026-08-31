@@ -2,11 +2,14 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
 use filesystem_abi::{AccessMode, OpenFlags, file_system};
 use ipc::wire::Str;
-use runtime::{OwnedHandle, PortTransport, thread_exit};
+use kernel_objects::OwnedHandle;
+use runtime::{PortTransport, thread_exit};
 use syscall::{Handle, Timeout};
 
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);

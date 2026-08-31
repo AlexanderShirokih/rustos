@@ -5,8 +5,9 @@
 use alloc::{format, string::String};
 
 use filesystem_abi::{AccessMode, FileSystemError, NAME_MAX, NodeKind, OpenFlags, PATH_MAX};
+use kernel_objects::OwnedHandle;
 use kernel_tests::kernel_test;
-use runtime::{OwnedHandle, UserMemFlags};
+use runtime::UserMemFlags;
 
 use crate::filesystem::{
     BUFFER_SIZE, COMPONENT_DIRECTORY, IMAGE_FILE, IMAGE_FILE_BODY, acquire_buffer, buffer_head,

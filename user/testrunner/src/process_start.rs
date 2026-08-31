@@ -2,8 +2,9 @@
 //! загруженного образа отвергает `start`, переданный по значению хэндл
 //! закрывается обёрткой (его `Drop`) ровно один раз, не утекая.
 
+use kernel_objects::{Process, Signal, ThreadEntry};
 use kernel_tests::kernel_test;
-use runtime::{Priority, Process, Signal, ThreadEntry, handle_close, signal_set};
+use runtime::{Priority, handle_close, signal_set};
 use syscall::{Handle, SIGNALED, SyscallError, WakeCount};
 
 fn is_closed(handle: Handle) -> bool {

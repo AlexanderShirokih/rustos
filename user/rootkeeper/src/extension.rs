@@ -8,10 +8,8 @@ use ipc::{
     Transport as _,
     wire::{Bytes, Cap, IpcError, Str},
 };
-use runtime::{
-    Condvar, JoinHandle, MemoryRegion, Mutex, OwnedHandle, Port, PortTransport, Priority, Signal,
-    Timeout, spawn_owned,
-};
+use kernel_objects::{MemoryRegion, OwnedHandle, Port, Signal};
+use runtime::{Condvar, JoinHandle, Mutex, PortTransport, Priority, Timeout, spawn_owned};
 use supervisor_abi::{ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, supervisor};
 use syscall::{Handle, Rights, SIGNALED, WakeCount};
 use userland_image::decode_plan;
@@ -70,7 +68,7 @@ pub(crate) struct ExtensionPort {
 }
 
 impl Mailbox {
-    fn create() -> runtime::Result<Self> {
+    fn create() -> kernel_objects::Result<Self> {
         Ok(Self {
             posted: Signal::create()?,
             exchange: Mutex::new(Exchange::default()),
@@ -221,7 +219,7 @@ impl supervisor::Service for Serving {
 }
 
 impl ExtensionPort {
-    pub(crate) fn start() -> runtime::Result<Self> {
+    pub(crate) fn start() -> kernel_objects::Result<Self> {
         let root = Port::create()?.into_handle();
         let server = root.duplicate(Rights::READ, None)?;
         let mailbox = Arc::new(Mailbox::create()?);
@@ -267,8 +265,8 @@ impl ExtensionPort {
         let Some(thread) = self.thread.take() else {
             return;
         };
-        if thread.thread().join(SHUTDOWN_TIMEOUT).is_err() {
-            let _ = thread.thread().terminate(0);
+        if thread.wait(SHUTDOWN_TIMEOUT).is_err() {
+            let _ = thread.terminate(0);
         }
         let _ = thread.join(SHUTDOWN_TIMEOUT);
     }

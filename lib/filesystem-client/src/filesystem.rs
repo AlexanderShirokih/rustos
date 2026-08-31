@@ -61,8 +61,7 @@ impl<E: Environment> FileSystem<E> {
         }
     }
 
-    /// Фасад поверх выданной сессии. Пути отсчитываются от её корня, маршрутизатор не
-    /// участвует.
+    /// Фасад поверх выданной сессии: путь отсчитывается от её корня.
     pub fn windowed(environment: E, session: E::Transport) -> Self {
         Self {
             environment,
@@ -71,7 +70,7 @@ impl<E: Environment> FileSystem<E> {
         }
     }
 
-    /// Задаёт срок ожидания ответа на вызов. Сессии, открытые до вызова, его не замечают.
+    /// Задаёт срок ожидания ответа на вызов. Срок действует на сессии, открытые после него.
     #[must_use]
     pub fn with_wait(mut self, wait: Timeout) -> Self {
         self.wait = wait;
@@ -125,7 +124,7 @@ impl<E: Environment> FileSystem<E> {
             .entries()
     }
 
-    /// Снимает имя узла. Каталог с записями - `NotEmpty`.
+    /// Снимает имя узла. Каталог снимается пустым.
     pub fn remove(&mut self, path: &str) -> Result<()> {
         let path = Path::new(path)?;
         self.at_path(path, |session, root| {
@@ -134,8 +133,7 @@ impl<E: Environment> FileSystem<E> {
         Ok(())
     }
 
-    /// Удаляет узел вместе с поддеревом внутри его монтирования. Корень монтирования -
-    /// `InvalidPath`, обход прекращается на первом отказе.
+    /// Удаляет узел вместе с поддеревом внутри его монтирования.
     pub fn remove_tree(&mut self, path: &str) -> Result<()> {
         let path = Path::new(path)?;
         self.at_path(path, |session, root| {

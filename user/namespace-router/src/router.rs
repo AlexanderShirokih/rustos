@@ -7,7 +7,8 @@ use alloc::{string::String, vec::Vec};
 use filesystem_abi::{FileSystemError, PATH_MAX, Path, file_system, namespace, namespace_admin};
 use filesystem_server::{settle, vend};
 use ipc::wire::{Cap, Str};
-use runtime::{Mutex, OwnedHandle, PortTransport, Timeout};
+use kernel_objects::OwnedHandle;
+use runtime::{Mutex, PortTransport, Timeout};
 use syscall::Handle;
 
 const DONE: u32 = 0;

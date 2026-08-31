@@ -8,8 +8,9 @@ use core::{
 };
 
 use ipc::{Transport, wire::IpcError};
+use kernel_objects::{OwnedHandle, Port};
 use kernel_tests::kernel_test;
-use runtime::{OwnedHandle, Port, PortTransport, Priority, Timeout, spawn};
+use runtime::{PortTransport, Priority, Timeout, spawn};
 use syscall::Rights;
 
 use crate::startup_fixture_protocol::startup_fixture;

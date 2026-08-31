@@ -12,8 +12,8 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-impl From<runtime::Error> for Error {
-    fn from(_error: runtime::Error) -> Self {
+impl From<kernel_objects::Error> for Error {
+    fn from(_error: kernel_objects::Error) -> Self {
         Self::Runtime
     }
 }

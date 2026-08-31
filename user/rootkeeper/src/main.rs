@@ -2,6 +2,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 extern crate alloc;
 
 use core::panic::PanicInfo;

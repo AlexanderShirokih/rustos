@@ -14,6 +14,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 extern crate alloc;
 
 use alloc::{
@@ -37,10 +39,8 @@ use ipc::{
     Transport as _,
     wire::{Bytes, IpcError, Str},
 };
-use runtime::{
-    Mapping, MemoryRegion, OwnedHandle, PortTransport, Timeout, UserMemFlags, install_log, log_fmt,
-    log_line, thread_exit,
-};
+use kernel_objects::{Mapping, MemoryRegion, OwnedHandle};
+use runtime::{PortTransport, Timeout, UserMemFlags, install_log, log_fmt, log_line, thread_exit};
 use supervisor_abi::{ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, supervisor};
 use syscall::Handle;
 use userland_image::{BOOT_STAGE_ONE_DIRECTORY, COMPONENT_PROGRAM_NAME, decode, decode_plan};
@@ -70,7 +70,7 @@ component_manifest! {
 
 #[derive(Debug)]
 enum Error {
-    Runtime(runtime::Error),
+    Runtime(kernel_objects::Error),
     Ipc(IpcError),
     Start,
     MountTable,
@@ -119,7 +119,7 @@ fn run(startup: Handle) -> Result<u64> {
         service,
         control,
     } = handshake(startup)?;
-    install_log(log, LOG_TAG);
+    install_log(log.into_raw(), LOG_TAG);
     // Экспорта у ступени 0 нет, и серверная сторона service-порта живёт до конца процесса
     // без обслуживания.
     let _service = service;
@@ -453,8 +453,8 @@ impl Display for Error {
     }
 }
 
-impl From<runtime::Error> for Error {
-    fn from(error: runtime::Error) -> Self {
+impl From<kernel_objects::Error> for Error {
+    fn from(error: kernel_objects::Error) -> Self {
         Self::Runtime(error)
     }
 }

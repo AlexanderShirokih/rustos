@@ -16,11 +16,11 @@
 
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst};
 
+use kernel_objects::{Error, OwnedHandle, Port};
 use kernel_tests::kernel_test;
 use runtime::{
-    Error, JoinHandle, OwnedHandle, Port, Priority, Timeout, handle_duplicate, ipc_buffer_addr,
-    port_call, port_create, port_recv, port_send, signal_create, signal_set, signal_wait_one,
-    spawn,
+    JoinHandle, Priority, Timeout, handle_duplicate, ipc_buffer_addr, port_call, port_create,
+    port_recv, port_send, signal_create, signal_set, signal_wait_one, spawn,
 };
 use syscall::{Handle, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
 
@@ -405,6 +405,6 @@ fn call_finite_timeout_no_server_should_wait() {
     );
 }
 
-fn assert_timeout(result: runtime::Result<()>) {
+fn assert_timeout(result: kernel_objects::Result<()>) {
     kernel_tests::kassert!(matches!(result, Err(Error::Syscall(SyscallError::Timeout))));
 }

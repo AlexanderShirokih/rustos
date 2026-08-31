@@ -12,8 +12,9 @@ use filesystem_abi::{
     APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NodeDescriptor, NodeKind,
     OpenFlags, file_system,
 };
+use kernel_objects::{Mapping, MemoryRegion, OwnedHandle};
 use kernel_tests::kernel_test;
-use runtime::{Mapping, MemoryRegion, OwnedHandle, PortTransport, UserMemFlags};
+use runtime::{PortTransport, UserMemFlags};
 
 use crate::{
     filesystem::{

@@ -7,8 +7,9 @@
 use alloc::vec;
 
 use filesystem_abi::{AccessMode, OpenFlags, Opened, file_system};
+use kernel_objects::{MemoryRegion, Resource};
 use kernel_tests::{kernel_test, kreport};
-use runtime::{Instant, MemoryAccess, MemoryRegion, PortTransport, Resource, UserMemFlags};
+use runtime::{Instant, MemoryAccess, PortTransport, UserMemFlags};
 use userland::USERLAND_PAGE_SIZE;
 
 use crate::filesystem::{connect, open, path, ram_session};

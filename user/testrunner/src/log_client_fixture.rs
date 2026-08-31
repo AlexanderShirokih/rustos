@@ -5,11 +5,14 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
 use bootstrap_abi::bootstrap;
+use kernel_objects::OwnedHandle;
 use log_abi::log;
-use runtime::{OwnedHandle, PortTransport, thread_exit};
+use runtime::{PortTransport, thread_exit};
 use syscall::Handle;
 
 mod log_fixture_protocol;

@@ -10,7 +10,7 @@ use crate::{
     node::OpenNode,
 };
 
-/// Перечисление каталога, продолжающее обход позицией, которую вернул сервер.
+/// Обход каталога записями в порядке перечисления.
 pub struct Listing<'a, E: Environment> {
     node: OpenNode<'a, E>,
     chunk: Vec<u8>,
@@ -39,7 +39,7 @@ impl<'a, E: Environment> Listing<'a, E> {
         })
     }
 
-    /// Следующая запись каталога. `None` - сервер объявил перечисление законченным.
+    /// Следующая запись каталога. `None` - обход закончен.
     pub fn next_entry(&mut self) -> Result<Option<DirEntry<'_>>> {
         while self.remaining == 0 {
             if self.end {

@@ -3,8 +3,9 @@
 //! Сквозной прогон пути выдачи vend -> transfer -> install -> use из userspace.
 
 use bootstrap_abi::bootstrap;
+use kernel_objects::{Error, IrqControl, OwnedHandle};
 use kernel_tests::kernel_test;
-use runtime::{Error, IrqControl, OwnedHandle, PortTransport};
+use runtime::PortTransport;
 use syscall::{IrqTrigger, SyscallError};
 
 const SPI_BASE: u16 = 32;

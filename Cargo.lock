@@ -339,8 +339,10 @@ dependencies = [
  "filesystem-abi",
  "ipc",
  "ipc-test",
+ "kernel-objects",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
+ "syscall",
 ]
 
 [[package]]
@@ -491,6 +493,18 @@ name = "jod-thread"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a037eddb7d28de1d0fc42411f501b53b75838d313908078d6698d064f3029b24"
+
+[[package]]
+name = "kernel-objects"
+version = "0.1.0"
+dependencies = [
+ "bootstrap-abi",
+ "collections",
+ "io",
+ "ipc",
+ "syscall",
+ "syscall-user",
+]
 
 [[package]]
 name = "kernelspace"
@@ -1006,6 +1020,14 @@ dependencies = [
  "collections",
  "memory",
  "spin",
+ "syscall",
+]
+
+[[package]]
+name = "syscall-user"
+version = "0.1.0"
+dependencies = [
+ "ipc",
  "syscall",
 ]
 

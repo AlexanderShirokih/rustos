@@ -2,8 +2,9 @@
 //! `signal_create`, проверка закрытия - `signal_set` (non-blocking) на сыром
 //! id, который после закрытия даёт `BadHandle`.
 
+use kernel_objects::OwnedHandle;
 use kernel_tests::kernel_test;
-use runtime::{OwnedHandle, handle_close, signal_create, signal_set};
+use runtime::{handle_close, signal_create, signal_set};
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 
 fn mint() -> OwnedHandle {

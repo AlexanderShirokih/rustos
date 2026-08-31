@@ -31,7 +31,7 @@ filesystem-abi = { workspace = true }
 filesystem-client = { workspace = true }
 ipc = { workspace = true }
 rtc-abi = { workspace = true }
-runtime = { workspace = true }
+kernel-objects = { workspace = true }
 syscall = { workspace = true }
 
 [build-dependencies]

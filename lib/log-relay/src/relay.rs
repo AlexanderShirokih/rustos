@@ -4,8 +4,9 @@
 use core::fmt::Write as _;
 
 use ipc::{Transport as _, wire::IpcError};
+use kernel_objects::OwnedHandle;
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LOG_TAG_MAX, LogBuffer, log};
-use runtime::{OwnedHandle, PortTransport, handle_close};
+use runtime::{PortTransport, handle_close};
 use syscall::Timeout;
 
 const RELAY_SOURCE: &str = "log-relay";

@@ -17,8 +17,8 @@ dependencies = [
  "filesystem-abi",
  "filesystem-client",
  "ipc",
+ "kernel-objects",
  "rtc-abi",
- "runtime",
  "syscall",
  "userland-build",
 ]
@@ -28,9 +28,8 @@ name = "clock-std"
 version = "0.1.0"
 dependencies = [
  "component-abi",
- "molecular-rt",
+ "kernel-objects",
  "rtc-abi",
- "syscall",
  "userland-build",
 ]
 
@@ -73,6 +72,7 @@ dependencies = [
  "component-abi",
  "io",
  "ipc",
+ "kernel-objects",
  "rtc-abi",
  "runtime",
  "syscall",
@@ -108,6 +108,8 @@ version = "0.1.0"
 dependencies = [
  "filesystem-abi",
  "ipc",
+ "kernel-objects",
+ "syscall",
 ]
 
 [[package]]
@@ -118,6 +120,7 @@ dependencies = [
  "filesystem",
  "filesystem-server",
  "ipc",
+ "kernel-objects",
  "runtime",
  "syscall",
  "userland-build",
@@ -131,6 +134,7 @@ dependencies = [
  "filesystem",
  "filesystem-server",
  "ipc",
+ "kernel-objects",
  "runtime",
  "syscall",
  "userland-build",
@@ -144,6 +148,7 @@ dependencies = [
  "filesystem",
  "filesystem-abi",
  "ipc",
+ "kernel-objects",
  "runtime",
  "spin",
  "syscall",
@@ -164,6 +169,7 @@ dependencies = [
  "component-abi",
  "filesystem-abi",
  "ipc",
+ "kernel-objects",
  "runtime",
  "supervisor-abi",
  "syscall",
@@ -183,6 +189,18 @@ name = "ipc"
 version = "0.1.0"
 dependencies = [
  "syscall",
+]
+
+[[package]]
+name = "kernel-objects"
+version = "0.1.0"
+dependencies = [
+ "bootstrap-abi",
+ "collections",
+ "io",
+ "ipc",
+ "syscall",
+ "syscall-user",
 ]
 
 [[package]]
@@ -207,6 +225,7 @@ version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
  "ipc",
+ "kernel-objects",
  "log-abi",
  "runtime",
  "syscall",
@@ -218,20 +237,11 @@ version = "0.1.0"
 dependencies = [
  "component-abi",
  "ipc",
+ "kernel-objects",
  "runtime",
  "syscall",
  "userland",
  "userland-loader",
-]
-
-[[package]]
-name = "molecular-rt"
-version = "0.1.0"
-dependencies = [
- "component-abi",
- "ipc",
- "log-abi",
- "syscall",
 ]
 
 [[package]]
@@ -242,6 +252,7 @@ dependencies = [
  "filesystem-abi",
  "filesystem-server",
  "ipc",
+ "kernel-objects",
  "runtime",
  "syscall",
  "userland-build",
@@ -275,6 +286,7 @@ dependencies = [
  "device-resolver-aarch64",
  "fdt",
  "ipc",
+ "kernel-objects",
  "log-abi",
  "log-relay",
  "managed-component",
@@ -297,17 +309,11 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
- "bootstrap-abi",
- "collections",
- "filesystem-abi",
- "filesystem-client",
- "io",
+ "component-abi",
  "ipc",
  "log-abi",
- "molecular-rt",
- "spin",
  "syscall",
- "talc",
+ "syscall-user",
 ]
 
 [[package]]
@@ -356,10 +362,12 @@ name = "syscall"
 version = "0.1.0"
 
 [[package]]
-name = "talc"
-version = "4.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
+name = "syscall-user"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
+]
 
 [[package]]
 name = "test-harness-macros"
@@ -392,10 +400,10 @@ dependencies = [
  "filesystem-server",
  "io",
  "ipc",
+ "kernel-objects",
  "log-abi",
  "log-relay",
  "managed-component",
- "molecular-rt",
  "rootkeeper",
  "rtc-abi",
  "runtime",
@@ -438,6 +446,7 @@ dependencies = [
 name = "userland-loader"
 version = "0.1.0"
 dependencies = [
+ "kernel-objects",
  "runtime",
  "syscall",
  "userland",

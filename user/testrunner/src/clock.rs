@@ -1,7 +1,8 @@
 //! E2E монотонных часов из EL0.
 
+use kernel_objects::{Error, Signal};
 use kernel_tests::kernel_test;
-use runtime::{Error, Instant, Signal, Timeout};
+use runtime::{Instant, Timeout};
 use syscall::{SIGNALED, SyscallError};
 
 const PAUSE: Timeout = Timeout::from_millis(5);

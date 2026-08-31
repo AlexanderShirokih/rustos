@@ -1,28 +1,65 @@
+# Крейт собирается как зависимость `std`, поэтому живёт вне основного workspace.
+[workspace]
+
 [package]
 name = "runtime"
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
-# Крейт userspace, и его workspace — `user/`: оттуда идёт сборка под таргет RustOS.
-workspace = "../../user"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Код крейта содержит aarch64-асм, а `forced-target` вне корневого workspace недоступен. Без
+# ключа `arch` проверка слоёв считает крейт нейтральным. Ключом `process-state` крейт
+# объявляет, что держит состояние процесса.
+[package.metadata.molecular]
+arch = "aarch64"
+process-state = true
 
 [lib]
+path = "src/lib.rs"
 test = false
 bench = false
 doctest = false
 
+[features]
+rustc-dep-of-std = [
+    "dep:core",
+    "dep:alloc",
+    "component-abi/rustc-dep-of-std",
+    "ipc/rustc-dep-of-std",
+    "log-abi/rustc-dep-of-std",
+    "syscall/rustc-dep-of-std",
+    "syscall-user/rustc-dep-of-std",
+]
+
 [dependencies]
-bootstrap-abi = { workspace = true }
-collections = { workspace = true }
-filesystem-abi = { workspace = true }
-filesystem-client = { workspace = true }
-io = { workspace = true }
-ipc = { workspace = true }
-log-abi = { workspace = true }
-molecular-rt = { workspace = true }
-spin = { workspace = true }
-syscall = { workspace = true }
-talc = { workspace = true }
+component-abi = { path = "../component-abi" }
+ipc = { path = "../ipc" }
+log-abi = { path = "../log-abi" }
+syscall = { path = "../syscall" }
+syscall-user = { path = "../syscall-user" }
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
+alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
 
 [lints]
 workspace = true
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("molecular"))'] }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_docs_in_private_items = "allow"
+doc_markdown = "allow"
+inline_always = "allow"
+return_self_not_must_use = "allow"
+undocumented_unsafe_blocks = "warn"
+unwrap_used = "deny"
+cast_possible_truncation = "allow"
+cast_sign_loss = "warn"
+cast_lossless = "warn"

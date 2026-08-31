@@ -6,16 +6,16 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
 use component_abi::component_manifest;
 use io::mmio::{Mmio, Reg};
 use ipc::wire::IpcError;
+use kernel_objects::{IrqLine, MemoryRegion, OwnedHandle};
 use rtc_abi::rtc;
-use runtime::{
-    IrqLine, MemoryRegion, OwnedHandle, PortTransport, Timeout, UserMemFlags, install_log,
-    log_line, thread_exit,
-};
+use runtime::{PortTransport, Timeout, UserMemFlags, install_log, log_line, thread_exit};
 use syscall::Handle;
 
 mod error;
@@ -94,7 +94,7 @@ fn run(startup: Handle) -> Result<()> {
         RtcStartup::receive(&PortTransport::server(startup.borrow()))?.ok_or(Error::Start)?;
     drop(startup);
 
-    install_log(OwnedHandle::adopt(started.log), LOG_TAG);
+    install_log(Handle::from_nonzero(started.log.raw()), LOG_TAG);
     // Клиентская сторона control-порта остаётся у supervisor: серверная живёт
     // до конца процесса вместе с ней.
     let _control = OwnedHandle::adopt(started.control);

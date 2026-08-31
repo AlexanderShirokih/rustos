@@ -17,13 +17,13 @@ pub fn start(bootstrap: u32) {
     BOOTSTRAP.store(bootstrap, Ordering::Release);
 }
 
-/// Стартовый handle процесса, если точка входа его передала.
+/// Стартовый handle процесса, пока по нему не сложился стартовый набор компонента.
 pub fn bootstrap_handle() -> Option<Handle> {
     Handle::new(BOOTSTRAP.load(Ordering::Acquire))
 }
 
-pub(crate) fn take_bootstrap() -> Option<Handle> {
-    Handle::new(BOOTSTRAP.swap(0, Ordering::AcqRel))
+pub(crate) fn clear_bootstrap() {
+    BOOTSTRAP.store(0, Ordering::Release);
 }
 
 /// Завершает процесс со всеми его потоками. Не возвращается.

@@ -1,12 +1,13 @@
 diff -ruN a/std/Cargo.toml b/std/Cargo.toml
 --- a/std/Cargo.toml	2026-08-07 22:42:11.982085856 +0000
 +++ b/std/Cargo.toml	2026-08-10 18:37:47.249202613 +0000
-@@ -70,6 +70,9 @@
+@@ -70,6 +70,10 @@
      'rustc-dep-of-std',
  ], public = true }
  
 +[target.'cfg(target_os = "molecular")'.dependencies]
-+molecular-rt = { path = "../../../../lib/std-rt", features = ['rustc-dep-of-std'], public = true }
++runtime = { path = "../../../../lib/runtime", features = ['rustc-dep-of-std'], public = true }
++syscall-user = { path = "../../../../lib/syscall-user", features = ['rustc-dep-of-std'], public = true }
 +
  [target.'cfg(target_os = "motor")'.dependencies]
  moto-rt = { version = "0.16", features = ['rustc-dep-of-std'], public = true }
@@ -37,13 +38,16 @@ diff -ruN a/std/src/os/mod.rs b/std/src/os/mod.rs
 diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 --- a/std/src/os/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/os/molecular/mod.rs	2026-08-10 18:37:47.249314886 +0000
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,68 @@
 +//! RustOS-specific definitions.
 +//!
 +//! Процесс получает ресурсы системы стартовым набором capability, который композиция выдаёт
 +//! ему при запуске. Лог-сессию из набора забирает сама библиотека: по ней идут `stdout` и
 +//! `stderr`. Остальное - control- и service-порты компонента и слоты его плана - принадлежит
 +//! программе и выдаётся ей здесь.
++//!
++//! Корню композиции набора не выдают: у него остаётся стартовый хэндл, положенный ядром в
++//! точку входа.
 +//!
 +//! Capability названы сырым идентификатором: типизированные обёртки над ним и контракты IPC
 +//! живут в крейтах userspace, и программа берёт их своей зависимостью. Внутри библиотеки те же
@@ -55,7 +59,7 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +use crate::num::NonZeroU32;
 +
 +/// Граница числа слотов capability одного компонента.
-+pub const SLOT_MAX: usize = molecular_rt::component_abi::COMPONENT_SLOT_MAX;
++pub const SLOT_MAX: usize = runtime::component_abi::COMPONENT_SLOT_MAX;
 +
 +/// Идентификатор capability в таблице handle процесса.
 +pub type RawHandle = NonZeroU32;
@@ -89,12 +93,19 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +///
 +/// `None` - процесс запущен вне композиции, и набора ему никто не слал.
 +pub fn startup() -> Option<Startup> {
-+    let started = molecular_rt::startup()?;
-+    let mut slots = [None; SLOT_MAX];
++    let started = runtime::startup()?;
++    let mut slots: [Option<RawHandle>; SLOT_MAX] = [None; SLOT_MAX];
 +    for (place, slot) in slots.iter_mut().zip(started.slots()) {
 +        *place = Some(slot.raw());
 +    }
 +    Some(Startup { control: started.control.raw(), service: started.service.raw(), slots })
++}
++
++/// Стартовый хэндл, положенный ядром в точку входа процесса.
++///
++/// `None` - по хэндлу пришёл стартовый набор компонента, и приём его закрыл.
++pub fn start_handle() -> Option<RawHandle> {
++    RawHandle::new(runtime::bootstrap_handle()?.raw())
 +}
 diff -ruN a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
 --- a/std/src/sys/alloc/mod.rs	2026-08-07 22:42:12.130085865 +0000
@@ -127,12 +138,12 @@ diff -ruN a/std/src/sys/alloc/molecular.rs b/std/src/sys/alloc/molecular.rs
 +
 +#[inline]
 +pub unsafe fn alloc(layout: Layout) -> *mut u8 {
-+    unsafe { molecular_rt::alloc(layout.size(), layout.align()) }
++    unsafe { runtime::alloc(layout.size(), layout.align()) }
 +}
 +
 +#[inline]
 +pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
-+    unsafe { molecular_rt::dealloc(ptr, layout.size(), layout.align()) }
++    unsafe { runtime::dealloc(ptr, layout.size(), layout.align()) }
 +}
 +
 +#[inline]
@@ -147,7 +158,7 @@ diff -ruN a/std/src/sys/exit.rs b/std/src/sys/exit.rs
              }
          }
 +        target_os = "molecular" => {
-+            molecular_rt::exit(code)
++            runtime::exit(code)
 +        }
          target_os = "motor" => {
              moto_rt::process::exit(code)
@@ -172,10 +183,10 @@ diff -ruN a/std/src/sys/io/error/molecular.rs b/std/src/sys/io/error/molecular.r
 @@ -0,0 +1,75 @@
 +//! Отображение ошибок syscall-ABI в `io::ErrorKind`.
 +//!
-+//! Перечисление берётся из крейта ABI через `molecular-rt`, а не переписывается числами:
++//! Перечисление берётся из крейта ABI через `syscall-user`, а не переписывается числами:
 +//! новый вариант ломает сборку здесь, а не молча уезжает в `Uncategorized`.
 +
-+use molecular_rt::syscall::SyscallError;
++use syscall_user::syscall::SyscallError;
 +
 +use crate::io::ErrorKind;
 +
@@ -265,12 +276,12 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 @@ -0,0 +1,59 @@
 +//! Платформенный слой RustOS.
 +//!
-+//! Работу выполняет крейт `molecular-rt`: он же обслуживает userspace-программы вне `std`.
++//! Работу выполняет крейт `runtime`: он же обслуживает userspace-программы вне `std`.
 +//! Здесь только точка входа и перенос futex наружу, где его ждут реализации синхронизации.
 +
 +#![allow(unsafe_op_in_unsafe_fn)]
 +
-+pub use molecular_rt::futex;
++pub use runtime::futex;
 +
 +use crate::io;
 +
@@ -278,10 +289,10 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +#[cfg(not(test))]
 +#[unsafe(no_mangle)]
 +pub extern "C" fn _start(bootstrap: u32) -> ! {
-+    molecular_rt::start(bootstrap);
++    runtime::start(bootstrap);
 +    // Стартовый набор capability уходит рандеву с крайним сроком у supervisor, поэтому
 +    // принимается он до `main`.
-+    molecular_rt::adopt_startup();
++    runtime::adopt_startup();
 +
 +    unsafe extern "C" {
 +        fn main(argc: isize, argv: *const *const u8, sigpipe: u8) -> i32;
@@ -289,7 +300,7 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +    // Аргументов командной строки процесс пока не получает: ядро их не передаёт.
 +    let code = unsafe { main(0, crate::ptr::null(), 0) };
 +
-+    molecular_rt::exit(code)
++    runtime::exit(code)
 +}
 +
 +/// # Safety
@@ -305,7 +316,7 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +    // Для главного потока этот выход здесь: `rt::cleanup` зовут и возврат из `main`, и
 +    // `process::exit`. Без этого не отработали бы ни `Drop` у `thread_local!`, ни
 +    // `rt::thread_cleanup`.
-+    molecular_rt::tls::run_destructors();
++    runtime::tls::run_destructors();
 +    // Строку без перевода строки держит накопитель потока. Свой буфер `stdout` выталкивает
 +    // `rt::cleanup`, а `stderr` доходит до журнала только отсюда.
 +    crate::sys::stdio::flush_streams();
@@ -320,7 +331,7 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +}
 +
 +pub fn abort_internal() -> ! {
-+    molecular_rt::exit(-1)
++    runtime::exit(-1)
 +}
 diff -ruN a/std/src/sys/random/mod.rs b/std/src/sys/random/mod.rs
 --- a/std/src/sys/random/mod.rs	2026-08-07 22:42:12.150085866 +0000
@@ -361,7 +372,7 @@ diff -ruN a/std/src/sys/random/molecular.rs b/std/src/sys/random/molecular.rs
 +
 +pub fn hashmap_random_keys() -> (u64, u64) {
 +    let mut seed = [0; 16];
-+    molecular_rt::random::fill_bytes(&mut seed);
++    runtime::random::fill_bytes(&mut seed);
 +    let first = u64::from_ne_bytes(seed[..8].try_into().unwrap());
 +    let second = u64::from_ne_bytes(seed[8..].try_into().unwrap());
 +    (first, second)
@@ -383,8 +394,9 @@ diff -ruN a/std/src/sys/stdio/mod.rs b/std/src/sys/stdio/mod.rs
 diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 --- a/std/src/sys/stdio/molecular.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/stdio/molecular.rs	2026-08-10 18:37:47.249583975 +0000
-@@ -0,0 +1,136 @@
-+use molecular_rt::{ipc::wire::IpcError, log};
+@@ -0,0 +1,137 @@
++use runtime::log;
++use syscall_user::ipc::wire::IpcError;
 +
 +use crate::io::{self, BorrowedCursor};
 +use crate::str;
@@ -597,21 +609,18 @@ diff -ruN a/std/src/sys/thread/mod.rs b/std/src/sys/thread/mod.rs
 diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 --- a/std/src/sys/thread/molecular.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/thread/molecular.rs	2026-08-10 19:14:46.640556524 +0000
-@@ -0,0 +1,128 @@
-+use crate::alloc::{Layout, alloc, dealloc};
+@@ -0,0 +1,98 @@
 +use crate::io;
 +use crate::ptr::NonNull;
 +use crate::thread::ThreadInit;
 +use crate::time::Duration;
-+use crate::{cmp, mem};
++use crate::cmp;
 +
-+use molecular_rt::syscall::{Handle, SIGNALED, Timeout};
++use runtime::thread::{create, release_stack};
++use syscall_user::syscall::{Handle, Priority, SIGNALED, Timeout};
 +
 +/// Приоритет потока: тот же, с каким userspace поднимает свои рабочие потоки.
-+const PRIORITY: u64 = 1;
-+
-+/// Выравнивание вершины стека, которого требует AArch64 от SP.
-+const STACK_ALIGN: usize = 16;
++const PRIORITY: Priority = Priority::new(1);
 +
 +pub const DEFAULT_MIN_STACK_SIZE: usize = 256 * 1024;
 +
@@ -622,7 +631,7 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +pub struct Thread {
 +    handle: Handle,
 +    stack: NonNull<u8>,
-+    stack_layout: Layout,
++    stack_bytes: usize,
 +}
 +
 +// SAFETY: поля описывают чужой поток и его стек, и владение ими переносится целиком.
@@ -633,63 +642,36 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +impl Thread {
 +    // unsafe: see thread::Builder::spawn_unchecked for safety requirements
 +    pub unsafe fn new(stack: usize, init: Box<ThreadInit>) -> io::Result<Thread> {
-+        let rounded = cmp::max(stack, DEFAULT_MIN_STACK_SIZE)
-+            .checked_next_multiple_of(STACK_ALIGN)
-+            .and_then(|size| Layout::from_size_align(size, STACK_ALIGN).ok());
-+        let Some(stack_layout) = rounded else {
-+            return Err(io::const_error!(
-+                io::ErrorKind::InvalidInput,
-+                "thread stack size overflows its layout",
-+            ));
-+        };
-+        // SAFETY: размер ненулевой по построению границы снизу.
-+        let Some(base) = NonNull::new(unsafe { alloc(stack_layout) }) else {
-+            return Err(io::const_error!(
-+                io::ErrorKind::OutOfMemory,
-+                "thread stack not allocated",
-+            ));
-+        };
-+
-+        let start: extern "C" fn(usize) -> ! = start;
 +        let payload = Box::into_raw(init);
-+        let started = molecular_rt::process_self().and_then(|process| {
-+            let created = molecular_rt::thread_create(
-+                process,
-+                start as *const () as u64,
-+                base.addr().get() as u64 + stack_layout.size() as u64,
-+                payload as u64,
-+                PRIORITY,
-+            );
-+            // `ProcessSelf` ставит свежую запись таблицы handle на каждый вызов.
-+            molecular_rt::handle_close(process);
-+            created
-+        });
++        let started = create(
++            start,
++            payload as usize,
++            cmp::max(stack, DEFAULT_MIN_STACK_SIZE),
++            PRIORITY,
++        );
 +
 +        match started {
-+            Ok(handle) => Ok(Thread {
-+                handle,
-+                stack: base,
-+                stack_layout,
++            Ok(spawned) => Ok(Thread {
++                handle: spawned.thread(),
++                stack: spawned.stack(),
++                stack_bytes: spawned.stack_bytes(),
 +            }),
 +            Err(error) => {
 +                // Поток не стартовал: точку входа его аргумент не прочитает.
 +                // SAFETY: указатель только что из `Box::into_raw`, других владельцев нет.
 +                drop(unsafe { Box::from_raw(payload) });
-+                // SAFETY: тот же указатель и тот же layout, что у `alloc` выше.
-+                unsafe { dealloc(base.as_ptr(), stack_layout) };
 +                Err(io::Error::from_raw_os_error(error as i32))
 +            }
 +        }
 +    }
 +
 +    pub fn join(self) {
-+        let outcome = molecular_rt::signal_wait_one(self.handle, SIGNALED, Timeout::INFINITE);
++        let outcome = syscall_user::signal_wait_one(self.handle, SIGNALED, Timeout::INFINITE);
 +        assert!(outcome >= 0, "failed to join thread");
 +        // SAFETY: поток терминирован, и его стек больше никем не адресуется. Указатель и
-+        // layout - те же, с какими стек выделен.
-+        unsafe { dealloc(self.stack.as_ptr(), self.stack_layout) };
-+        molecular_rt::handle_close(self.handle);
-+        mem::forget(self);
++        // размер - те же, с какими стек выдан запуском.
++        unsafe { release_stack(self.stack, self.stack_bytes) };
++        syscall_user::handle_close(self.handle);
 +    }
 +}
 +
@@ -701,23 +683,23 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +    rust_start();
 +
 +    // Уход потока - последний момент, когда его локальные данные ещё адресуемы.
-+    molecular_rt::tls::run_destructors();
++    runtime::tls::run_destructors();
 +    crate::rt::thread_cleanup();
-+    molecular_rt::thread_exit(0)
++    syscall_user::thread_exit(0)
 +}
 +
 +pub fn yield_now() {
-+    molecular_rt::thread_yield();
++    syscall_user::thread_yield();
 +}
 +
 +pub fn sleep(dur: Duration) {
 +    // Адрес futex локален вызову, и разбудить по нему некому: ожидание истекает сроком.
 +    // Ложное пробуждение возвращает управление раньше, поэтому срок досчитывается.
-+    let idle = molecular_rt::Futex::new(0);
-+    let started = molecular_rt::Instant::now();
++    let idle = runtime::Futex::new(0);
++    let started = runtime::Instant::now();
 +    let mut remaining = dur;
-+    while molecular_rt::futex_wait(&idle, 0, Some(remaining)) {
-+        let elapsed = Duration::from_nanos(molecular_rt::Instant::now().as_nanos().wrapping_sub(
++    while runtime::futex_wait(&idle, 0, Some(remaining)) {
++        let elapsed = Duration::from_nanos(runtime::Instant::now().as_nanos().wrapping_sub(
 +            started.as_nanos(),
 +        ));
 +        let Some(left) = dur.checked_sub(elapsed) else {
@@ -730,13 +712,13 @@ diff -ruN a/std/src/sys/thread_local/key/molecular.rs b/std/src/sys/thread_local
 --- a/std/src/sys/thread_local/key/molecular.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/thread_local/key/molecular.rs	2026-08-10 18:37:47.249583975 +0000
 @@ -0,0 +1,27 @@
-+//! Ключи локальных данных потока обслуживает `molecular-rt` поверх `TPIDR_EL0`.
++//! Ключи локальных данных потока обслуживает `runtime` поверх `TPIDR_EL0`.
 +
-+pub type Key = molecular_rt::tls::Key;
++pub type Key = runtime::tls::Key;
 +
 +#[inline]
 +pub fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
-+    let key = molecular_rt::tls::create(dtor);
++    let key = runtime::tls::create(dtor);
 +    if key == 0 {
 +        rtabort!("out of TLS keys");
 +    }
@@ -745,17 +727,17 @@ diff -ruN a/std/src/sys/thread_local/key/molecular.rs b/std/src/sys/thread_local
 +
 +#[inline]
 +pub unsafe fn set(key: Key, value: *mut u8) {
-+    unsafe { molecular_rt::tls::set(key, value) }
++    unsafe { runtime::tls::set(key, value) }
 +}
 +
 +#[inline]
 +pub unsafe fn get(key: Key) -> *mut u8 {
-+    unsafe { molecular_rt::tls::get(key) }
++    unsafe { runtime::tls::get(key) }
 +}
 +
 +#[inline]
 +pub unsafe fn destroy(key: Key) {
-+    unsafe { molecular_rt::tls::destroy(key) }
++    unsafe { runtime::tls::destroy(key) }
 +}
 diff -ruN a/std/src/sys/thread_local/mod.rs b/std/src/sys/thread_local/mod.rs
 --- a/std/src/sys/thread_local/mod.rs	2026-08-07 22:42:12.150085866 +0000
@@ -812,7 +794,7 @@ diff -ruN a/std/src/sys/time/molecular.rs b/std/src/sys/time/molecular.rs
 +impl Instant {
 +    pub fn now() -> Instant {
 +        Instant(Duration::from_nanos(
-+            molecular_rt::Instant::now().as_nanos(),
++            runtime::Instant::now().as_nanos(),
 +        ))
 +    }
 +

@@ -2,14 +2,15 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
 use component_abi::component_manifest;
 use filesystem_abi::{FileSystemError, PATH_MAX, namespace_admin};
 use ipc::wire::Str;
-use runtime::{
-    OwnedHandle, Port, PortTransport, Signal, Timeout, install_log, log_fmt, thread_exit,
-};
+use kernel_objects::{OwnedHandle, Port, Signal};
+use runtime::{PortTransport, Timeout, install_log, log_fmt, thread_exit};
 use syscall::{Handle, SIGNALED};
 
 const LOG_TAG: &str = "mounts";
@@ -46,7 +47,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
     drop(startup);
-    install_log(OwnedHandle::adopt(started.log), LOG_TAG);
+    install_log(Handle::from_nonzero(started.log.raw()), LOG_TAG);
     drop(OwnedHandle::adopt(started.control));
     drop(OwnedHandle::adopt(started.service));
 

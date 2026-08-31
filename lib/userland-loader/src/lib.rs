@@ -15,10 +15,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
-use runtime::{
-    Error, Mapping, MemoryAccess, MemoryRegion, OwnedHandle, Port, Priority, Process, Resource,
-    Result, Signal, ThreadEntry, Timeout, UserMemFlags,
+use kernel_objects::{
+    Error, Mapping, MemoryRegion, OwnedHandle, Port, Process, Resource, Result, Signal, ThreadEntry,
 };
+use runtime::{MemoryAccess, Priority, Timeout, UserMemFlags};
 use syscall::{
     SEGMENT_ABI_VERSION, SIGNALED, SyscallError, USER_VA_END, UserImageDescAbi, UserSegmentAbi,
     encode_image_desc, encode_segment,

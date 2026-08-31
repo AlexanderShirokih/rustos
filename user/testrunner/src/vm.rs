@@ -7,8 +7,9 @@
 //! фактом прихода сигнала, здесь наблюдаются и выданный VA, и содержимое
 //! страницы.
 
+use kernel_objects::Resource;
 use kernel_tests::kernel_test;
-use runtime::{Resource, UserMemFlags};
+use runtime::UserMemFlags;
 
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0xC0DE_F00D_DEAD_BEEF;

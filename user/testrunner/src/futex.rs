@@ -7,9 +7,10 @@ use core::{
     time::Duration,
 };
 
+use kernel_objects::Signal;
 use kernel_tests::kernel_test;
 use runtime::{
-    Futex, Instant, JoinHandle, Priority, Signal, Timeout, futex_bucket, futex_wait,
+    Futex, Instant, JoinHandle, Priority, Timeout, futex_bucket, futex_wait,
     futex_wait_interleaved, futex_wait_without_slot, futex_wake, futex_wake_all, spawn_owned,
     thread_yield,
 };

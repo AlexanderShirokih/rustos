@@ -9,6 +9,7 @@ mod handle;
 mod ipc_buffer;
 mod irq;
 mod memory;
+mod priority;
 mod profile;
 mod resource;
 mod rights;
@@ -25,6 +26,7 @@ pub use ipc_buffer::{
 };
 pub use irq::IrqTrigger;
 pub use memory::{MemoryAccess, PAGE_SIZE, USER_VA_END};
+pub use priority::Priority;
 pub use profile::{InvalidMemoryProfile, MemoryProfile};
 pub use resource::MAX_RESOURCE_DEPTH;
 pub use rights::Rights;

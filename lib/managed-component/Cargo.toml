@@ -12,6 +12,7 @@ bench = false
 doctest = false
 
 [dependencies]
+kernel-objects = { workspace = true }
 component-abi = { workspace = true }
 ipc = { workspace = true }
 runtime = { workspace = true }

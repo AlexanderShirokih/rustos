@@ -20,6 +20,7 @@ bench = false
 doctest = false
 
 [dependencies]
+kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
 component-abi = { workspace = true }
 device-resolver = { workspace = true }

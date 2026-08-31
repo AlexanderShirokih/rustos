@@ -2,7 +2,7 @@
 //! архитектурно-зависимый крейт доступен только другому архитектурно-зависимому.
 
 use std::{
-    collections::{BTreeMap, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt,
 };
 
@@ -77,6 +77,10 @@ pub(super) enum Violation {
         from: String,
         to: String,
     },
+    ProcessState {
+        from: String,
+        to: String,
+    },
 }
 
 impl fmt::Display for Violation {
@@ -95,6 +99,10 @@ impl fmt::Display for Violation {
                 f,
                 "crate {from} (arch-neutral) -> crate {to} ({ARCH_SEGMENT}-specific)"
             ),
+            Self::ProcessState { from, to } => write!(
+                f,
+                "crate {from} (linked with std) -> crate {to} (owns the process state)"
+            ),
         }
     }
 }
@@ -104,6 +112,8 @@ struct CrateRules<'a> {
     dir: &'a str,
     domain: Domain,
     arch_specific: bool,
+    owns_process_state: bool,
+    links_std: bool,
 }
 
 impl<'a> CrateRules<'a> {
@@ -113,6 +123,8 @@ impl<'a> CrateRules<'a> {
             dir,
             domain: Domain::from_dir(top_dir)?,
             arch_specific: dir.split(['/', '-']).any(|segment| segment == ARCH_SEGMENT),
+            owns_process_state: false,
+            links_std: false,
         })
     }
 }
@@ -123,6 +135,8 @@ pub(super) fn check_layers(crates: &[WorkspaceCrate], edges: &[Edge]) -> Result<
         let mut crate_rules =
             CrateRules::from_dir(&krate.dir).with_context(|| format!("crate {}", krate.name))?;
         crate_rules.arch_specific |= krate.arch_specific;
+        crate_rules.owns_process_state |= krate.owns_process_state;
+        crate_rules.links_std |= krate.links_std;
         match rules.entry(krate.name.as_str()) {
             Entry::Vacant(slot) => {
                 slot.insert(crate_rules);
@@ -137,6 +151,8 @@ pub(super) fn check_layers(crates: &[WorkspaceCrate], edges: &[Edge]) -> Result<
                     );
                 }
                 slot.get_mut().arch_specific |= crate_rules.arch_specific;
+                slot.get_mut().owns_process_state |= crate_rules.owns_process_state;
+                slot.get_mut().links_std |= crate_rules.links_std;
             }
         }
     }
@@ -174,12 +190,67 @@ pub(super) fn check_layers(crates: &[WorkspaceCrate], edges: &[Edge]) -> Result<
             });
         }
     }
+    violations.extend(process_state_violations(&rules, edges));
     Ok(violations)
+}
+
+fn process_state_violations(
+    rules: &BTreeMap<&str, CrateRules<'_>>,
+    edges: &[Edge],
+) -> Vec<Violation> {
+    let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for edge in edges {
+        outgoing
+            .entry(edge.from.as_str())
+            .or_default()
+            .push(edge.to.as_str());
+    }
+
+    // Состояние процесса у крейта со стандартной библиотекой уже есть - её собственное, и
+    // вторая копия ломает механизмы, которые это состояние держат. Копия приходит и через
+    // промежуточный крейт, поэтому владельца ищет обход графа.
+    let mut violations = Vec::new();
+    for (&name, crate_rules) in rules {
+        if !crate_rules.links_std {
+            continue;
+        }
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut pending = vec![name];
+        while let Some(current) = pending.pop() {
+            for &next in outgoing.get(current).into_iter().flatten() {
+                if !seen.insert(next) {
+                    continue;
+                }
+                if rules
+                    .get(next)
+                    .is_some_and(|rules| rules.owns_process_state)
+                {
+                    violations.push(Violation::ProcessState {
+                        from: name.to_string(),
+                        to: next.to_string(),
+                    });
+                    continue;
+                }
+                pending.push(next);
+            }
+        }
+    }
+    violations
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain(name: &str, dir: &str) -> WorkspaceCrate {
+        WorkspaceCrate {
+            name: name.to_string(),
+            dir: dir.to_string(),
+            arch_specific: false,
+            owns_process_state: false,
+            links_std: false,
+        }
+    }
 
     fn crates() -> Vec<WorkspaceCrate> {
         [
@@ -196,11 +267,7 @@ mod tests {
             ("xtask", "xtask"),
             ("mobile-fuzz", "fuzz"),
         ]
-        .map(|(name, dir)| WorkspaceCrate {
-            name: name.to_string(),
-            dir: dir.to_string(),
-            arch_specific: false,
-        })
+        .map(|(name, dir)| plain(name, dir))
         .to_vec()
     }
 
@@ -216,19 +283,57 @@ mod tests {
 
     #[test]
     fn one_crate_in_two_directories_is_error() {
-        let crates = vec![
-            WorkspaceCrate {
-                name: "a-lib".to_string(),
-                dir: "lib/a-lib".to_string(),
-                arch_specific: false,
-            },
-            WorkspaceCrate {
-                name: "a-lib".to_string(),
-                dir: "kernel/a-lib".to_string(),
-                arch_specific: false,
-            },
-        ];
+        let crates = vec![plain("a-lib", "lib/a-lib"), plain("a-lib", "kernel/a-lib")];
         assert!(check_layers(&crates, &[]).is_err());
+    }
+
+    fn platform_crates() -> Vec<WorkspaceCrate> {
+        let mut crates = crates();
+        crates.push(WorkspaceCrate {
+            owns_process_state: true,
+            ..plain("platform", "lib/platform")
+        });
+        crates.push(WorkspaceCrate {
+            links_std: true,
+            ..plain("std-user", "user/std-user")
+        });
+        crates
+    }
+
+    #[test]
+    fn crate_with_std_takes_no_second_owner_of_the_process_state() {
+        let violations =
+            check_layers(&platform_crates(), &edges(&[("std-user", "platform")])).unwrap();
+        assert_eq!(
+            violations,
+            vec![Violation::ProcessState {
+                from: "std-user".to_string(),
+                to: "platform".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_process_state_owner_is_found_through_an_intermediate_crate() {
+        let violations = check_layers(
+            &platform_crates(),
+            &edges(&[("std-user", "a-lib"), ("a-lib", "platform")]),
+        )
+        .unwrap();
+        assert_eq!(
+            violations,
+            vec![Violation::ProcessState {
+                from: "std-user".to_string(),
+                to: "platform".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn crate_without_std_takes_the_process_state_layer() {
+        let violations =
+            check_layers(&platform_crates(), &edges(&[("a-user", "platform")])).unwrap();
+        assert!(violations.is_empty());
     }
 
     #[test]
@@ -362,14 +467,12 @@ mod tests {
     fn a_forced_target_crate_is_arch_specific_whatever_its_path() {
         let mut crates = crates();
         crates.push(WorkspaceCrate {
-            name: "arch-user".to_string(),
-            dir: "user/arch-user".to_string(),
             arch_specific: true,
+            ..plain("arch-user", "user/arch-user")
         });
         crates.push(WorkspaceCrate {
-            name: "arch-lib".to_string(),
-            dir: "lib/arch-lib".to_string(),
             arch_specific: true,
+            ..plain("arch-lib", "lib/arch-lib")
         });
 
         // Крейт, собираемый только под архитектуру, вправе зависеть от
@@ -383,11 +486,7 @@ mod tests {
 
     #[test]
     fn unknown_directory_is_error() {
-        let crates = vec![WorkspaceCrate {
-            name: "stray".to_string(),
-            dir: "scripts/stray".to_string(),
-            arch_specific: false,
-        }];
+        let crates = vec![plain("stray", "scripts/stray")];
         assert!(check_layers(&crates, &[]).is_err());
     }
 

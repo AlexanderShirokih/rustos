@@ -2,9 +2,12 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
-use runtime::{OwnedHandle, Port, Timeout, thread_exit};
+use kernel_objects::{OwnedHandle, Port};
+use runtime::{Timeout, thread_exit};
 use syscall::Handle;
 
 /// Программа-фикстура: принимает запрос и уходит, не ответив на него.

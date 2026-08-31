@@ -2,12 +2,15 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
 use component_abi::component_manifest;
 use filesystem_abi::{PATH_MAX, namespace};
 use ipc::wire::Str;
-use runtime::{OwnedHandle, PortTransport, Signal, Timeout, thread_exit};
+use kernel_objects::{OwnedHandle, Signal};
+use runtime::{PortTransport, Timeout, thread_exit};
 use syscall::{Handle, SIGNALED};
 
 const PROBE_PATH: &str = "/tmp";

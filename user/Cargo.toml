@@ -17,7 +17,6 @@ members = [
     "../lib/filesystem-server",
     "../lib/log-relay",
     "../lib/managed-component",
-    "../lib/runtime",
     "../lib/userland-loader",
 ]
 
@@ -33,10 +32,10 @@ publish = false
 [workspace.dependencies]
 # Внешние зависимости
 spin = "0.12.0"
-talc = { version = "4", default-features = false }
 
 # Крейты userspace
 filesystem-server = { path = "../lib/filesystem-server" }
+kernel-objects = { path = "../lib/kernel-objects" }
 log-relay = { path = "../lib/log-relay" }
 managed-component = { path = "../lib/managed-component" }
 runtime = { path = "../lib/runtime" }
@@ -55,10 +54,10 @@ filesystem-client = { path = "../lib/filesystem-client" }
 io = { path = "../lib/io" }
 ipc = { path = "../lib/ipc" }
 log-abi = { path = "../lib/log-abi" }
-molecular-rt = { path = "../lib/std-rt" }
 rtc-abi = { path = "../lib/rtc-abi" }
 supervisor-abi = { path = "../lib/supervisor-abi" }
 syscall = { path = "../lib/syscall" }
+syscall-user = { path = "../lib/syscall-user" }
 test-harness-qemu = { path = "../lib/test-harness-qemu" }
 userland = { path = "../lib/userland" }
 userland-build = { path = "../lib/userland-build" }

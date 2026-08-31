@@ -4,8 +4,9 @@
 //! Машинный код фикстур использует AArch64, соответствующий target этого
 //! `testrunner`.
 
+use kernel_objects::{Process, Resource, Signal};
 use kernel_tests::kernel_test;
-use runtime::{Process, Resource, Signal, Timeout};
+use runtime::Timeout;
 use syscall::SyscallOp;
 use userland::{Entry, Segment, SegmentPermissions};
 use userland_loader::load_entry;

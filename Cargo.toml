@@ -40,7 +40,7 @@ members = [
     "tools/userland-image",
     "xtask",
 ]
-exclude = ["fuzz", "lib/std-rt", "user"]
+exclude = ["fuzz", "lib/kernel-objects", "lib/runtime", "lib/syscall-user", "user"]
 
 [workspace.package]
 version = "0.1.0"
@@ -81,6 +81,7 @@ fdt = { path = "lib/fdt" }
 filesystem = { path = "lib/filesystem" }
 filesystem-abi = { path = "lib/filesystem-abi" }
 filesystem-client = { path = "lib/filesystem-client" }
+kernel-objects = { path = "lib/kernel-objects" }
 memory = { path = "kernel/memory" }
 hal-common = { path = "kernel/hal-common" }
 hal-aarch64-asid = { path = "kernel/hal-aarch64-asid" }

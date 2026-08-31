@@ -7,9 +7,8 @@
 
 use std::os::molecular;
 
-use molecular_rt::PortTransport;
+use kernel_objects::{OwnedHandle, PortTransport};
 use rtc_abi::rtc;
-use syscall::Handle;
 
 component_abi::component_manifest! {
     slots: { rtc: service(protocol = "Rtc") },
@@ -24,7 +23,11 @@ fn main() {
         println!("no Rtc session in the startup set");
         return;
     };
-    let clock = rtc::Client::new(PortTransport::client(Handle::from_nonzero(session)));
+    let Some(session) = OwnedHandle::from_raw(session.get()) else {
+        println!("the Rtc session slot carries no capability");
+        return;
+    };
+    let clock = rtc::Client::new(PortTransport::client(&session));
     match clock.now() {
         Ok(seconds) => println!("rtc reads {seconds}"),
         Err(error) => println!("rtc call failed: {error:?}"),

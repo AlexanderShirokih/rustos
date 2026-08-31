@@ -4,8 +4,9 @@
 
 use alloc::vec::Vec;
 
+use kernel_objects::{Error, MemoryRegion, Resource, Signal};
 use kernel_tests::kernel_test;
-use runtime::{Error, MemoryAccess, MemoryRegion, Resource, Signal};
+use runtime::MemoryAccess;
 use syscall::{HANDLE_TABLE_CAPACITY, SyscallError};
 use userland::USERLAND_PAGE_SIZE;
 
@@ -60,7 +61,7 @@ impl SaturatedBudget {
         self.granted.truncate(self.granted.len() - pages);
     }
 
-    fn request(&self, pages: u64) -> runtime::Result<MemoryRegion> {
+    fn request(&self, pages: u64) -> kernel_objects::Result<MemoryRegion> {
         self.resource
             .create_virtual(pages * USERLAND_PAGE_SIZE, MemoryAccess::RW)
     }

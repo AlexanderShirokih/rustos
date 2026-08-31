@@ -1,4 +1,4 @@
-//! E2E базового слоя `molecular-rt` из EL0: куча по классам размера, futex-взаимоисключение и
+//! E2E платформенного слоя из EL0: куча по классам размера, futex-взаимоисключение и
 //! локальные данные потока с деструкторами.
 //!
 //! Слой обслуживает стандартную библиотеку и вызывающих внутри дерева не имеет. Его исполняют
@@ -11,8 +11,7 @@ use core::{
 };
 
 use kernel_tests::kernel_test;
-use molecular_rt::{Lock, alloc as rt_alloc, dealloc as rt_dealloc};
-use runtime::{Priority, Timeout, spawn};
+use runtime::{Mutex, Priority, Timeout, alloc as rt_alloc, dealloc as rt_dealloc, spawn};
 
 const STACK_SIZE: u64 = 0x4000;
 
@@ -107,7 +106,7 @@ const LOCK_WORKERS: u64 = 4;
 
 const LOCK_ITERS: u64 = 500;
 
-static COUNTER: Lock<u64> = Lock::new(0);
+static COUNTER: Mutex<u64> = Mutex::new(0);
 
 extern "C" fn lock_worker(_arg: usize) -> u32 {
     for _ in 0..LOCK_ITERS {
@@ -117,7 +116,7 @@ extern "C" fn lock_worker(_arg: usize) -> u32 {
     0
 }
 
-/// Инкремент неатомарного счётчика под `Lock` не теряет ни одного шага.
+/// Инкремент неатомарного счётчика под `Mutex` не теряет ни одного шага.
 #[kernel_test]
 fn std_rt_lock_serialises_workers() {
     {
@@ -142,8 +141,8 @@ fn std_rt_lock_serialises_workers() {
 #[kernel_test]
 fn std_rt_start_publishes_the_bootstrap_handle() {
     let root = crate::bootstrap_handle();
-    molecular_rt::start(root.raw());
-    let published = molecular_rt::bootstrap_handle().expect("bootstrap handle is published");
+    runtime::start(root.raw());
+    let published = runtime::bootstrap_handle().expect("bootstrap handle is published");
     kernel_tests::kassert_eq!(published.raw(), root.raw());
 }
 
@@ -154,15 +153,15 @@ const RANDOM_MAX_LEN: usize = 17;
 fn std_rt_random_fills_buffers_of_any_length() {
     let mut buffer = [0u8; RANDOM_MAX_LEN];
     for len in 0..=RANDOM_MAX_LEN {
-        molecular_rt::random::fill_bytes(&mut buffer[..len]);
+        runtime::random::fill_bytes(&mut buffer[..len]);
     }
 
     // SplitMix64 биективен, а состояние сдвигается на каждый вызов: два подряд идущих слова
     // различаются всегда, поэтому проверка не плавает.
     let mut first = [0u8; 8];
     let mut second = [0u8; 8];
-    molecular_rt::random::fill_bytes(&mut first);
-    molecular_rt::random::fill_bytes(&mut second);
+    runtime::random::fill_bytes(&mut first);
+    runtime::random::fill_bytes(&mut second);
     kernel_tests::kassert!(first != second);
 }
 
@@ -185,16 +184,16 @@ extern "C" fn tls_worker(_arg: usize) -> u32 {
     let value = TLS_NEXT_VALUE.fetch_add(1, Relaxed);
 
     // SAFETY: ключ выдан `create` в спавнящем потоке до запуска рабочих.
-    if !unsafe { molecular_rt::get(key) }.is_null() {
+    if !unsafe { runtime::tls::get(key) }.is_null() {
         TLS_MISMATCHES.fetch_add(1, Relaxed);
     }
     // SAFETY: см. выше; значение - непрозрачный для слоя указатель.
-    unsafe { molecular_rt::set(key, value as usize as *mut u8) };
+    unsafe { runtime::tls::set(key, value as usize as *mut u8) };
 
     for _ in 0..64 {
         runtime::thread_yield();
         // SAFETY: ключ выдан `create`, слот принадлежит этому потоку.
-        if unsafe { molecular_rt::get(key) } as usize as u64 != value {
+        if unsafe { runtime::tls::get(key) } as usize as u64 != value {
             TLS_MISMATCHES.fetch_add(1, Relaxed);
         }
     }
@@ -206,7 +205,7 @@ extern "C" fn tls_worker(_arg: usize) -> u32 {
 /// гоняет деструктор.
 #[kernel_test]
 fn std_rt_thread_locals_are_private_and_destroyed() {
-    let key = molecular_rt::create(Some(count_destroyed));
+    let key = runtime::tls::create(Some(count_destroyed));
     kernel_tests::kassert!(key != 0);
     TLS_KEY.store(key as u64, Relaxed);
     TLS_MISMATCHES.store(0, Relaxed);
@@ -225,5 +224,5 @@ fn std_rt_thread_locals_are_private_and_destroyed() {
     kernel_tests::kassert_eq!(TLS_DESTROYED.load(Relaxed), TLS_WORKERS);
 
     // SAFETY: ключ выдан `create` выше, рабочие потоки завершены, больше им не пользуются.
-    unsafe { molecular_rt::destroy(key) };
+    unsafe { runtime::tls::destroy(key) };
 }

@@ -11,6 +11,7 @@ use filesystem_abi::{
     decode_mount_table, namespace,
 };
 use ipc::wire::IpcError;
+use kernel_objects::{MemoryRegion, OwnedHandle, Signal};
 use kernel_tests::kernel_test;
 use managed_component::{ComponentRoots, ManagedComponent, ManagedFailure};
 use rootkeeper::{
@@ -18,7 +19,7 @@ use rootkeeper::{
     SystemImage, relay,
 };
 use rtc_abi::rtc;
-use runtime::{MemoryAccess, MemoryRegion, OwnedHandle, PortTransport, Signal, Timeout};
+use runtime::{MemoryAccess, PortTransport, Timeout};
 use syscall::SIGNALED;
 use userland::USERLAND_PAGE_SIZE;
 use userland_image::{

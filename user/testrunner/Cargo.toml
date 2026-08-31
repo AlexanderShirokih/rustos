@@ -123,6 +123,7 @@ test = false
 bench = false
 
 [dependencies]
+kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
 collections = { workspace = true }
 component-abi = { workspace = true }
@@ -134,11 +135,10 @@ io = { workspace = true }
 ipc = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }
-molecular-rt = { workspace = true }
+runtime = { workspace = true }
 spin = { workspace = true }
 test-harness-qemu = { workspace = true }
 syscall = { workspace = true }
-runtime = { workspace = true }
 managed-component = { workspace = true }
 rootkeeper = { path = "../rootkeeper" }
 rtc-abi = { workspace = true }

@@ -3,7 +3,7 @@
 use ipc::wire::IpcError;
 use syscall::Handle;
 
-use crate::{OwnedHandle, PortTransport};
+use crate::{PortTransport, svc::handle_close};
 
 /// Принимает один кадр startup-протокола и закрывает стартовый порт.
 ///
@@ -13,9 +13,11 @@ pub fn receive_startup<T>(
     handle: Handle,
     dispatch: impl FnOnce(&mut Option<T>, &PortTransport) -> Result<(), IpcError>,
 ) -> Result<Option<T>, IpcError> {
-    let handle = OwnedHandle::from_handle(handle);
-    let transport = PortTransport::server(handle.borrow());
+    let transport = PortTransport::server(handle);
     let mut startup = None;
-    dispatch(&mut startup, &transport)?;
+    let received = dispatch(&mut startup, &transport);
+    // Порт одноразовый: кадр пришёл либо не сложился, и второй попытки по нему не будет.
+    handle_close(handle);
+    received?;
     Ok(startup)
 }

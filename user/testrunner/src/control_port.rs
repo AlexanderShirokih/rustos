@@ -4,9 +4,10 @@
 use core::num::NonZeroU64;
 
 use component_abi::{CONTROL_LEASE_BADGE, component_sessions, component_startup};
+use kernel_objects::{OwnedHandle, Port, Resource};
 use kernel_tests::kernel_test;
 use managed_component::ManagedStartupError;
-use runtime::{OwnedHandle, Port, PortTransport, Resource, Timeout};
+use runtime::{PortTransport, Timeout};
 use syscall::Rights;
 use userland_loader::launch_entry;
 

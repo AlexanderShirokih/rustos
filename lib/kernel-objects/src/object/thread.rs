@@ -1,40 +1,12 @@
 //! Типизированная обёртка над потоком ядра и параметры его запуска.
 
-use syscall::{SIGNALED, Timeout};
+use syscall::{Priority, SIGNALED, Timeout};
 
 use crate::{
     error::{Error, Result, unit, value},
     handle::{BorrowedHandle, OwnedHandle},
     svc,
 };
-
-/// Снимает поток `sibling` и уходит из текущего кодом `exit_code`.
-///
-/// Процесс уходит вместе со своим последним потоком: `ProcessTerminate` на
-/// собственный процесс ядро отвергает.
-pub fn exit_with_sibling(sibling: &Thread, exit_code: u32) -> ! {
-    let _ = sibling.terminate(exit_code);
-    svc::thread_exit(u64::from(exit_code))
-}
-
-/// Приоритет потока: занимает биты [0..8) ABI, биты [8..32) нулевые по
-/// построению, и отдельная проверка `priority > 0xFF` не нужна.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct Priority(u8);
-
-impl Priority {
-    /// Оборачивает значение приоритета.
-    pub const fn new(value: u8) -> Self {
-        Self(value)
-    }
-}
-
-impl From<Priority> for u64 {
-    fn from(priority: Priority) -> Self {
-        Self::from(priority.0)
-    }
-}
 
 /// Параметры запуска потока: точка входа, вершина стека, аргумент в X0 первой
 /// инструкции и приоритет.

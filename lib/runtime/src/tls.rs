@@ -119,7 +119,7 @@ pub fn run_destructors() {
 
     set_thread_pointer(0);
     // SAFETY: блок выдан `alloc` с этим layout и больше никому не виден.
-    unsafe { crate::alloc::dealloc(block.cast::<u8>(), size_of::<Block>(), align_of::<Block>()) };
+    unsafe { crate::heap::dealloc(block.cast::<u8>(), size_of::<Block>(), align_of::<Block>()) };
 }
 
 fn block() -> Option<*mut Block> {
@@ -135,7 +135,7 @@ fn installed_block() -> Option<*mut Block> {
     }
 
     // SAFETY: layout `Block` ненулевого размера; выравнивание — степень двойки.
-    let raw = unsafe { crate::alloc::alloc(size_of::<Block>(), align_of::<Block>()) };
+    let raw = unsafe { crate::heap::alloc(size_of::<Block>(), align_of::<Block>()) };
     if raw.is_null() {
         return None;
     }

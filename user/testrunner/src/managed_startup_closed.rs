@@ -2,9 +2,12 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
-use runtime::{OwnedHandle, thread_exit};
+use kernel_objects::OwnedHandle;
+use runtime::thread_exit;
 use syscall::Handle;
 
 #[unsafe(no_mangle)]

@@ -3,7 +3,8 @@
 use alloc::vec::Vec;
 
 use filesystem_abi::FileSystemError;
-use runtime::{Mapping, MemoryAccess, MemoryRegion, OwnedHandle, Resource, UserMemFlags};
+use kernel_objects::{Mapping, MemoryRegion, OwnedHandle, Resource};
+use runtime::{MemoryAccess, UserMemFlags};
 use syscall::Rights;
 use userland::USERLAND_PAGE_SIZE;
 

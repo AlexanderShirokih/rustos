@@ -2,13 +2,12 @@
 
 use bootstrap_abi::bootstrap;
 use ipc::{IntoWireHandle, wire::IpcError};
+use kernel_objects::{Error, MemoryRegion, OwnedHandle, ReadOnlyMapping, Resource, Signal};
 use kernel_tests::kernel_test;
 use managed_component::{
     BoundedStartupTransport, ManagedComponent, ManagedFailure, ManagedStartupError, ManagedStatus,
 };
-use runtime::{
-    Error, MemoryRegion, OwnedHandle, PortTransport, ReadOnlyMapping, Resource, Signal, Timeout,
-};
+use runtime::{PortTransport, Timeout};
 use syscall::{Rights, SIGNALED, SyscallError};
 use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
 use userland_image::{DecodedProgram, decode};

@@ -45,6 +45,7 @@ pub(super) struct MetaDependency {
 pub(super) struct MetaTarget {
     pub(super) name: String,
     pub(super) kind: Vec<String>,
+    pub(super) src_path: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,6 +53,8 @@ pub(super) struct WorkspaceCrate {
     pub(super) name: String,
     pub(super) dir: String,
     pub(super) arch_specific: bool,
+    pub(super) owns_process_state: bool,
+    pub(super) links_std: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,10 +87,13 @@ pub(super) fn collect_workspace(
             .manifest_path
             .parent()
             .with_context(|| format!("crate {}: manifest path has no parent", pkg.name))?;
+        let manifest = manifest_table(&pkg.manifest_path);
         crates.insert(WorkspaceCrate {
             name: pkg.name.clone(),
             dir: relative_dir(&pkg.name, manifest_dir, root)?,
-            arch_specific: workspace_arch || arch_specific_manifest(&pkg.manifest_path),
+            arch_specific: workspace_arch || arch_specific_manifest(manifest.as_ref()),
+            owns_process_state: process_state_manifest(manifest.as_ref()),
+            links_std: links_std(&pkg.targets)?,
         });
         // dependencies включает normal-, dev- и build-зависимости, path = Some отбирает
         // локальные. Дубликаты (normal + dev) схлопывает BTreeSet.
@@ -99,6 +105,8 @@ pub(super) fn collect_workspace(
                 name: dep.name.clone(),
                 dir: relative_dir(&dep.name, dep_path, root)?,
                 arch_specific: false,
+                owns_process_state: false,
+                links_std: false,
             });
             edges.insert(Edge {
                 from: pkg.name.clone(),
@@ -110,40 +118,83 @@ pub(super) fn collect_workspace(
 }
 
 pub(super) fn merge_crates(crates: BTreeSet<WorkspaceCrate>) -> Vec<WorkspaceCrate> {
-    // Пакет приходит с манифестом, цель path-зависимости - без него: признак
-    // архитектуры собирается по всем вхождениям крейта.
-    let mut merged: BTreeMap<(String, String), bool> = BTreeMap::new();
+    // Пакет приходит с манифестом, цель path-зависимости - без него: признаки крейта
+    // собираются по всем его вхождениям.
+    let mut merged: BTreeMap<(String, String), (bool, bool, bool)> = BTreeMap::new();
     for krate in crates {
-        let known = merged
-            .entry((krate.name, krate.dir))
-            .or_insert(krate.arch_specific);
-        *known |= krate.arch_specific;
+        let known = merged.entry((krate.name, krate.dir)).or_insert((
+            krate.arch_specific,
+            krate.owns_process_state,
+            krate.links_std,
+        ));
+        known.0 |= krate.arch_specific;
+        known.1 |= krate.owns_process_state;
+        known.2 |= krate.links_std;
     }
     merged
         .into_iter()
-        .map(|((name, dir), arch_specific)| WorkspaceCrate {
-            name,
-            dir,
-            arch_specific,
-        })
+        .map(
+            |((name, dir), (arch_specific, owns_process_state, links_std))| WorkspaceCrate {
+                name,
+                dir,
+                arch_specific,
+                owns_process_state,
+                links_std,
+            },
+        )
         .collect()
 }
 
-fn arch_specific_manifest(manifest: &Path) -> bool {
-    let Ok(text) = fs::read_to_string(manifest) else {
-        return false;
-    };
-    let Ok(table) = text.parse::<toml::Table>() else {
-        return false;
-    };
-    let Some(package) = table.get("package").and_then(toml::Value::as_table) else {
-        return false;
-    };
-    let forced = package
-        .get("forced-target")
+fn links_std(targets: &[MetaTarget]) -> Result<bool> {
+    const CODE_KINDS: [&str; 5] = ["lib", "rlib", "dylib", "bin", "proc-macro"];
+
+    for target in targets {
+        // Сборочный скрипт и цели проверок идут на хосте и о форме программы ничего не говорят.
+        if !target
+            .kind
+            .iter()
+            .any(|kind| CODE_KINDS.contains(&kind.as_str()))
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&target.src_path).with_context(|| {
+            format!(
+                "target {}: failed to read {}",
+                target.name,
+                target.src_path.display()
+            )
+        })?;
+        // Крейт без std несёт внутренний атрибут `no_std`: голым либо под `cfg_attr`,
+        // оставляющим std хостовым тестам.
+        if !source
+            .lines()
+            .any(|line| line.trim_start().starts_with("#![") && line.contains("no_std"))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn manifest_table(manifest: &Path) -> Option<toml::Table> {
+    let text = fs::read_to_string(manifest).ok()?;
+    text.parse::<toml::Table>().ok()
+}
+
+fn process_state_manifest(manifest: Option<&toml::Table>) -> bool {
+    molecular_key(manifest, "process-state")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn arch_specific_manifest(manifest: Option<&toml::Table>) -> bool {
+    let forced = manifest
+        .and_then(|table| table.get("package"))
+        .and_then(toml::Value::as_table)
+        .and_then(|package| package.get("forced-target"))
         .and_then(toml::Value::as_str)
         .is_some_and(|target| target.split('-').any(|segment| segment == ARCH_SEGMENT));
-    forced || declared_arch(package) == Some(ARCH_SEGMENT)
+    forced || molecular_key(manifest, "arch").and_then(toml::Value::as_str) == Some(ARCH_SEGMENT)
 }
 
 fn workspace_arch(meta: &CargoMetadata) -> Option<&str> {
@@ -154,14 +205,15 @@ fn workspace_arch(meta: &CargoMetadata) -> Option<&str> {
         .as_str()
 }
 
-fn declared_arch(package: &toml::Table) -> Option<&str> {
-    package
+fn molecular_key<'a>(manifest: Option<&'a toml::Table>, key: &str) -> Option<&'a toml::Value> {
+    manifest?
+        .get("package")
+        .and_then(toml::Value::as_table)?
         .get("metadata")
         .and_then(toml::Value::as_table)?
         .get("molecular")
         .and_then(toml::Value::as_table)?
-        .get("arch")
-        .and_then(toml::Value::as_str)
+        .get(key)
 }
 
 pub(super) fn relative_dir(name: &str, dir: &Path, root: &Path) -> Result<String> {

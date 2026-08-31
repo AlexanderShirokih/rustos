@@ -4,11 +4,12 @@
 //! своим стартовым кадром и своей лог-сессией. Итог её проверок - код выхода, а подробности
 //! провала уходят в журнал сообщением паники.
 
+use kernel_objects::Resource;
 use kernel_tests::kernel_test;
 use managed_component::{
     ComponentRoots, ComponentSlots, ManagedComponent, ManagedStatus, launch_component,
 };
-use runtime::{Resource, Timeout};
+use runtime::Timeout;
 
 use crate::{
     log_relay::SELFTEST_BADGE,

@@ -4,9 +4,8 @@ use alloc::vec::Vec;
 
 use filesystem::{ByteStore, StoreId, Window, insert_store};
 use filesystem_abi::{AccessMode, FileSystemError};
-use runtime::{
-    Mapping, MemoryAccess, MemoryRegion, OwnedHandle, RegionKind, Resource, UserMemFlags,
-};
+use kernel_objects::{Mapping, MemoryRegion, OwnedHandle, RegionKind, Resource};
+use runtime::{MemoryAccess, UserMemFlags};
 use syscall::Rights;
 use userland::USERLAND_PAGE_SIZE;
 

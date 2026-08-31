@@ -4,9 +4,10 @@
 use alloc::{string::String, vec::Vec};
 use core::num::NonZeroU64;
 
+use kernel_objects::{OwnedHandle, Result};
 use log_abi::{LOG_SOURCE_MAX, LogBuffer};
 use log_relay::{KernelLogSink, LogRelayThread, SourceNames};
-use runtime::{OwnedHandle, Result, Timeout};
+use runtime::Timeout;
 use spin::Mutex;
 use syscall::Handle;
 
@@ -83,7 +84,7 @@ pub fn delegated_session(badge: NonZeroU64) -> Option<OwnedHandle> {
 /// Waitable handle потока пересылки.
 #[must_use]
 pub fn thread_handle() -> Option<Handle> {
-    RELAY.lock().as_ref().map(|relay| relay.handle().as_raw())
+    RELAY.lock().as_ref().map(LogRelayThread::handle)
 }
 
 /// Финальный exit-код завершённого потока пересылки.

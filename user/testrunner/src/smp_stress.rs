@@ -11,11 +11,12 @@ use core::{
     },
 };
 
+use kernel_objects::{Port, Resource, Signal};
 use kernel_tests::kernel_test;
 use runtime::{
-    JoinHandle, Port, Priority, Resource, Signal, Timeout, UserMemFlags, handle_close,
-    handle_duplicate, port_call, port_recv, port_reply, port_send, signal_wait_one, spawn_owned,
-    thread_exit_code, thread_terminate, thread_yield,
+    JoinHandle, Priority, Timeout, UserMemFlags, handle_close, handle_duplicate, port_call,
+    port_recv, port_reply, port_send, signal_wait_one, spawn_owned, thread_exit_code,
+    thread_terminate, thread_yield,
 };
 use syscall::{Handle, Rights, SIGNALED, SYSCALL_RETURN_TIMEOUT};
 
@@ -124,9 +125,9 @@ fn answer_to(request: u64) -> u64 {
     request.rotate_left(17)
 }
 
-fn failure_code(error: &runtime::Error, fallback: i64) -> i64 {
+fn failure_code(error: &kernel_objects::Error, fallback: i64) -> i64 {
     match error {
-        runtime::Error::Syscall(error) => -i64::from(*error as u32),
+        kernel_objects::Error::Syscall(error) => -i64::from(*error as u32),
         _ => fallback,
     }
 }
@@ -441,7 +442,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
 
     for index in shuffled(VICTIMS, random) {
         let exit_code = VICTIM_EXIT_BASE + u32::try_from(index).unwrap_or(0);
-        let result = thread_terminate(victims[index].handle().as_raw(), u64::from(exit_code));
+        let result = thread_terminate(victims[index].handle(), u64::from(exit_code));
         kernel_tests::kassert!(
             result == 0,
             "smp stress seed={seed} round={round}: terminating victim {index} failed with {result}"
@@ -449,7 +450,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
     }
 
     for (index, victim) in victims.drain(..).enumerate() {
-        let handle = victim.handle().as_raw();
+        let handle = victim.handle();
         let waited = signal_wait_one(handle, SIGNALED, JOIN_TIMEOUT);
         kernel_tests::kassert!(
             waited >= 0,

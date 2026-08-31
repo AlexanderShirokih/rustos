@@ -1,9 +1,8 @@
-//! Фасад файловой подсистемы для программ userspace. Путь превращается в сессию файловой
-//! системы, дескриптор несёт свою позицию, а обход дерева и рекурсивное удаление идут поверх
-//! тех же сессий.
+//! Файловая подсистема, какой её видит программа: пути, открытые узлы и обход дерева.
+//! Разбор пути, сессии файловых систем и их буфер данных остаются внутри библиотеки.
 //!
-//! Крейт параметризован окружением вызывающего ([`Environment`]) и системных вызовов не делает.
-//! Capability он отдаёт наружу, а транспорт и отображение региона получает от окружения.
+//! Транспорт и отображения фасад берёт у [`Environment`]. Под таргетом системы окружение
+//! приходит вместе с библиотекой, на host его подставляет программа.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -19,9 +18,13 @@ mod listing;
 mod node;
 mod route;
 mod session;
+#[cfg(target_os = "molecular")]
+mod system;
 
 pub use environment::{Environment, SharedRegion};
 pub use error::{Failure, Result};
 pub use filesystem::FileSystem;
 pub use listing::Listing;
 pub use node::OpenNode;
+#[cfg(target_os = "molecular")]
+pub use system::{FileSystemEnvironment, SessionPort, SessionRegion};

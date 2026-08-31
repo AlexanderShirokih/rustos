@@ -10,7 +10,6 @@ mod memory;
 mod port;
 mod process;
 mod signal;
-mod spawn;
 mod thread;
 
 pub use irq::{IrqControl, IrqLine};
@@ -20,10 +19,9 @@ pub use memory::{
 pub use port::{Port, Reply, ServicePort};
 pub use process::Process;
 pub use signal::Signal;
-pub use spawn::{JoinHandle, spawn, spawn_owned};
-pub use thread::{Priority, Thread, ThreadEntry, exit_with_sibling};
+pub use thread::{Thread, ThreadEntry};
 
-pub(super) fn wait_signals(handle: Handle, mask: u32, timeout: Timeout) -> Result<u32> {
+pub(crate) fn wait_signals(handle: Handle, mask: u32, timeout: Timeout) -> Result<u32> {
     value(svc::signal_wait_one(handle, mask, timeout))
         .map(|observed| (observed & 0xFFFF_FFFF) as u32)
 }

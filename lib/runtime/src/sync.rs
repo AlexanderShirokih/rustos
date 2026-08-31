@@ -15,6 +15,7 @@
 
 use core::{
     cell::UnsafeCell,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::atomic::{
         AtomicU32,
@@ -22,7 +23,7 @@ use core::{
     },
 };
 
-use molecular_rt::{futex_wait, futex_wake, futex_wake_all};
+use crate::futex::{futex_wait, futex_wake, futex_wake_all};
 
 /// Взаимоисключающий доступ к `T` для userspace-потоков.
 pub struct Mutex<T> {
@@ -31,8 +32,14 @@ pub struct Mutex<T> {
 }
 
 /// RAII-владение залоченным `Mutex`: разблокирует при `Drop`.
+///
+/// Guard несёт `PhantomData<&mut T>`, чтобы авто-трейты считались по эксклюзивному доступу:
+/// guard `Sync` ровно при `T: Sync`. На одной ссылке `&Mutex<T>` они дают `Sync` уже при
+/// `T: Send`, и тогда два потока достают из `MutexGuard<Cell<_>>` по `&Cell<_>` через `Deref` -
+/// гонка в безопасном коде.
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
+    exclusive: PhantomData<&'a mut T>,
 }
 
 /// Уведомление потоков, ждущих изменения состояния под `Mutex`.
@@ -58,11 +65,17 @@ impl<T> Mutex<T> {
     /// Блокирует до получения эксклюзивного доступа и отдаёт guard.
     pub fn lock(&self) -> MutexGuard<'_, T> {
         if self.state.compare_exchange(0, 1, Acquire, Relaxed).is_ok() {
-            return MutexGuard { mutex: self };
+            return MutexGuard {
+                mutex: self,
+                exclusive: PhantomData,
+            };
         }
 
         self.lock_contended();
-        MutexGuard { mutex: self }
+        MutexGuard {
+            mutex: self,
+            exclusive: PhantomData,
+        }
     }
 
     fn lock_contended(&self) {

@@ -1,18 +1,33 @@
-//! Окружение фасада файловой подсистемы. Capability становится портом сессии и отображённым
-//! регионом её данных.
+//! Окружение фасада поверх объектов ядра: capability становится портом сессии и
+//! отображённым регионом её данных.
 
 use filesystem_abi::FileSystemError;
-use filesystem_client::{Environment, SharedRegion};
 use ipc::{
     MessageLen, Transport,
     wire::{Cap, IpcError},
 };
+use kernel_objects::{Mapping, MemoryRegion, OwnedHandle, PortTransport};
 use syscall::{Timeout, UserMemFlags};
 
-use crate::{Mapping, MemoryRegion, OwnedHandle, PortTransport};
+use crate::{
+    FileSystem,
+    environment::{Environment, SharedRegion},
+};
 
-/// Окружение фасада файловой подсистемы поверх объектов рантайма.
+/// Окружение фасада файловой подсистемы поверх объектов ядра.
 pub struct FileSystemEnvironment;
+
+impl FileSystem<FileSystemEnvironment> {
+    /// Фасад над сессией файловой системы: путь отсчитывается от корня её области.
+    pub fn windowed_session(session: OwnedHandle) -> Self {
+        Self::windowed(FileSystemEnvironment, SessionPort::over(session))
+    }
+
+    /// Фасад над маршрутизатором имён: путь разбирается по монтированиям.
+    pub fn routed_namespace(namespace: OwnedHandle) -> Self {
+        Self::routed(FileSystemEnvironment, SessionPort::over(namespace))
+    }
+}
 
 /// Порт сессии файловой системы, владеющий своим хэндлом.
 pub struct SessionPort {
@@ -20,7 +35,7 @@ pub struct SessionPort {
     _handle: OwnedHandle,
 }
 
-/// Отображённый регион данных сессии, владеющий своим региональным хэндлом.
+/// Отображённый регион данных сессии вместе с capability самого региона.
 pub struct SessionRegion {
     mapping: Mapping,
     _region: MemoryRegion,

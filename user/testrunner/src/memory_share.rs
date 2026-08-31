@@ -2,8 +2,9 @@
 //! регион уезжает потомку по порту отдельной capability и виден там как тот же
 //! физический фрейм, но по своему VA.
 
+use kernel_objects::Resource;
 use kernel_tests::kernel_test;
-use runtime::{MemoryAccess, Resource, UserMemFlags, handle_close};
+use runtime::{MemoryAccess, UserMemFlags, handle_close};
 use syscall::{Rights, SyscallError};
 
 use crate::{

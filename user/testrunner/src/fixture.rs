@@ -4,7 +4,8 @@
 use core::num::NonZeroU64;
 
 use bootstrap_abi::bootstrap;
-use runtime::{MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Result, Timeout};
+use kernel_objects::{MemoryRegion, OwnedHandle, Port, Process, Resource, Result};
+use runtime::{PortTransport, Timeout};
 use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
 use userland_image::{component_name, decode};
 use userland_loader::{launch_entry_retained, load_entry};

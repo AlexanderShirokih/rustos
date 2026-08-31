@@ -13,7 +13,8 @@ use filesystem_abi::{
     Opened, PATH_MAX, Path, Written, file_system, rebase,
 };
 use ipc::wire::{Cap, Str};
-use runtime::{MemoryAccess, MemoryRegion, MutexGuard, OwnedHandle, Resource};
+use kernel_objects::{MemoryRegion, OwnedHandle, Resource};
+use runtime::{MemoryAccess, MutexGuard};
 use syscall::{Handle, Rights};
 
 use crate::{buffer::DataBuffer, error::no_space, store::StoreTable};

@@ -9,6 +9,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 extern crate alloc;
 
 use core::panic::PanicInfo;
@@ -17,7 +19,8 @@ use component_abi::component_manifest;
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path};
 use filesystem_server::{Error, Result as ServerResult, serve};
-use runtime::{OwnedHandle, PortTransport, log_fmt, thread_exit};
+use kernel_objects::OwnedHandle;
+use runtime::{PortTransport, log_fmt, thread_exit};
 use syscall::{Handle, USER_VA_END};
 
 const LOG_TAG: &str = "crashfs";

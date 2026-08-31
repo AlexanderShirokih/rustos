@@ -2,6 +2,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 extern crate alloc;
 
 use alloc::{format, vec::Vec};
@@ -10,9 +12,8 @@ use core::panic::PanicInfo;
 use component_abi::component_manifest;
 use filesystem_abi::{AccessMode, NodeKind, OpenFlags, file_system};
 use ipc::wire::{Bytes, Str};
-use runtime::{
-    MemoryRegion, OwnedHandle, PortTransport, Timeout, install_log, log_fmt, thread_exit,
-};
+use kernel_objects::{MemoryRegion, OwnedHandle};
+use runtime::{PortTransport, Timeout, install_log, log_fmt, thread_exit};
 use supervisor_abi::{ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, supervisor};
 use syscall::Handle;
 use userland_image::{COMPONENT_PROGRAM_NAME, ComponentSpec, OnExhausted, encode_plan};
@@ -59,7 +60,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
     drop(startup);
-    install_log(OwnedHandle::adopt(started.log), LOG_TAG);
+    install_log(Handle::from_nonzero(started.log.raw()), LOG_TAG);
     drop(OwnedHandle::adopt(started.control));
     drop(OwnedHandle::adopt(started.service));
 

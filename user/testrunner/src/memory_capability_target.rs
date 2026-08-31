@@ -2,11 +2,9 @@
 //! `Resource`/`MemoryRegion`/`Mapping` из EL0.
 
 use bootstrap_abi::bootstrap;
+use kernel_objects::{MemoryRegion, RegionInfo, RegionKind, Resource};
 use kernel_tests::kernel_test;
-use runtime::{
-    MemoryAccess, MemoryProfile, MemoryRegion, PortTransport, RegionInfo, RegionKind, Resource,
-    UserMemFlags,
-};
+use runtime::{MemoryAccess, MemoryProfile, PortTransport, UserMemFlags};
 
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABE;

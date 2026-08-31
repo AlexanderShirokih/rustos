@@ -1,37 +1,139 @@
-//! Строки процесса в системный журнал по лог-капе из стартового кадра.
+//! Строки процесса в системный журнал.
+//!
+//! Лог-сессия приходит процессу стартовым кадром компонента, и до неё строки уходят в никуда.
+//! Тег источника процесс задаёт при установке сессии: пустой тег оставляет имя источника
+//! значку сессии, непустой называет источник сам.
 
-use core::fmt::Write as _;
+use core::{
+    fmt::Write as _,
+    slice, str,
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
+};
 
-use log_abi::{LOG_MESSAGE_MAX, LogBuffer, log};
-use spin::Once;
+use ipc::wire::IpcError;
+use log_abi::{LOG_MESSAGE_MAX, LineAssembler, LogBuffer, log};
+use syscall::Handle;
 
-use crate::{PortTransport, handle::OwnedHandle};
+use crate::{svc, svc::PortTransport, sync::Mutex};
 
-static LOG: Once<(OwnedHandle, &'static str)> = Once::new();
+static SESSION: AtomicU32 = AtomicU32::new(0);
 
-/// Запоминает лог-капу процесса и тег его строк. Повторный вызов ничего не
-/// меняет: капу приносит стартовый кадр, а он один.
-pub fn install_log(handle: OwnedHandle, tag: &'static str) {
-    LOG.call_once(|| (handle, tag));
+static TAG_ADDRESS: AtomicUsize = AtomicUsize::new(0);
+
+static TAG_LENGTH: AtomicUsize = AtomicUsize::new(0);
+
+/// Поток вывода, ведущий записи журнала построчно.
+///
+/// Запись журнала заводится по переводу строки, незавершённую строку отдаёт [`Stream::flush`].
+pub struct Stream {
+    lines: Mutex<LineAssembler<LOG_MESSAGE_MAX>>,
+}
+
+impl Stream {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            lines: Mutex::new(LineAssembler::new()),
+        }
+    }
+
+    /// Принимает кусок вывода и отдаёт журналу завершённые им строки.
+    pub fn write(&self, text: &str) -> Result<(), IpcError> {
+        self.emit(|lines, sink| lines.push(text, sink))
+    }
+
+    /// Отдаёт журналу незавершённую строку потока.
+    pub fn flush(&self) -> Result<(), IpcError> {
+        self.emit(|lines, sink| lines.flush(sink))
+    }
+
+    fn emit(
+        &self,
+        take: impl FnOnce(&mut LineAssembler<LOG_MESSAGE_MAX>, &mut dyn FnMut(&str)),
+    ) -> Result<(), IpcError> {
+        let Some(client) = client() else {
+            return Ok(());
+        };
+        let tag = tag();
+        let mut failure = None;
+        take(&mut self.lines.lock(), &mut |line| {
+            // Отказ первой записи возвращается вызывающему, остальные строки уходят следом:
+            // накопитель уже отдал их, и держать их негде.
+            let outcome = client.write_str(tag, line);
+            failure = failure.take().or_else(|| outcome.err());
+        });
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Default for Stream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Запоминает лог-сессию процесса и тег его строк.
+///
+/// Сессию приносит стартовый кадр, и он один: лишнюю капу вызов закрывает.
+pub fn install(handle: Handle, tag: &'static str) {
+    if SESSION
+        .compare_exchange(0, handle.raw(), Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        svc::handle_close(handle);
+        return;
+    }
+    TAG_ADDRESS.store(tag.as_ptr() as usize, Ordering::Relaxed);
+    // Длина публикуется последней, и по ней тег читают.
+    TAG_LENGTH.store(tag.len(), Ordering::Release);
+}
+
+/// Пишет текст в журнал построчно, не накапливая незавершённую строку.
+///
+/// Путь для вывода, которому накопитель недоступен: сообщения паники идут мимо потоков.
+pub fn write(text: &str) -> Result<(), IpcError> {
+    let Some(client) = client() else {
+        return Ok(());
+    };
+    let tag = tag();
+    for line in text.strip_suffix('\n').unwrap_or(text).split('\n') {
+        client.write_str(tag, line)?;
+    }
+    Ok(())
+}
+
+fn tag() -> &'static str {
+    let length = TAG_LENGTH.load(Ordering::Acquire);
+    if length == 0 {
+        return "";
+    }
+    let address = TAG_ADDRESS.load(Ordering::Relaxed);
+    // SAFETY: адрес и длина принадлежат одному `&'static str`, положенному `install`; байты
+    // живут до конца процесса, а непустая длина означает записанный адрес.
+    unsafe { str::from_utf8_unchecked(slice::from_raw_parts(address as *const u8, length)) }
+}
+
+fn client() -> Option<log::Client<PortTransport>> {
+    let handle = Handle::new(SESSION.load(Ordering::Acquire))?;
+    Some(log::Client::new(PortTransport::client(handle)))
 }
 
 /// Best-effort строка в журнал. До стартового кадра - no-op.
-pub fn log_line(message: &str) {
-    let Some((handle, tag)) = LOG.get() else {
-        return;
-    };
-    let client = log::Client::new(PortTransport::client(handle));
-    let _ = client.write_str(tag, message);
+pub fn line(message: &str) {
+    let _ = write(message);
 }
 
-/// Форматирует строку на стеке и отправляет её [`log_line`]. Строка длиннее
-/// кадра уходит несколькими кадрами.
-pub fn log_fmt(args: core::fmt::Arguments<'_>) {
+/// Форматирует строку на стеке и отправляет её [`line`]. Строка длиннее кадра уходит
+/// несколькими кадрами.
+pub fn fmt(args: core::fmt::Arguments<'_>) {
     let mut writer = LineWriter {
         buffer: LogBuffer::new(),
     };
     let _ = writer.write_fmt(args);
-    log_line(writer.buffer.as_str());
+    line(writer.buffer.as_str());
 }
 
 struct LineWriter {
@@ -51,7 +153,7 @@ impl core::fmt::Write for LineWriter {
                 // Символ не помещается даже в пустой накопитель: кадр его не несёт.
                 break;
             }
-            log_line(self.buffer.as_str());
+            line(self.buffer.as_str());
             self.buffer.clear();
         }
         Ok(())

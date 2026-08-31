@@ -1,4 +1,4 @@
-//! Открытый узел. Дескриптор сессии, его позиция и операции над содержимым.
+//! Открытый узел файловой системы: его дескриптор, позиция и операции над содержимым.
 
 use filesystem_abi::{
     APPEND_OFFSET, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, Opened,
@@ -53,8 +53,8 @@ impl<'a, E: Environment> OpenNode<'a, E> {
         self.position = position;
     }
 
-    /// Читает узел с текущей позиции, продвигая её на число прочитанных байт. Запрос крупнее
-    /// буфера сессии выполняется частями.
+    /// Читает узел с текущей позиции и продвигает её на число прочитанных байт. Прочитанного
+    /// бывает меньше, чем вмещает `dst`.
     pub fn read(&mut self, dst: &mut [u8]) -> Result<usize> {
         let mut done = 0;
         for chunk in dst.chunks_mut(self.session.capacity().max(1)) {
@@ -83,8 +83,8 @@ impl<'a, E: Environment> OpenNode<'a, E> {
         Ok(done)
     }
 
-    /// Пишет в узел с текущей позиции, продвигая её на число записанных байт. Запрос крупнее
-    /// буфера сессии выполняется частями.
+    /// Пишет в узел с текущей позиции и продвигает её на число записанных байт. Записанного
+    /// бывает меньше, чем несёт `src`.
     pub fn write(&mut self, src: &[u8]) -> Result<usize> {
         let mut done = 0;
         for chunk in src.chunks(self.session.capacity().max(1)) {
@@ -109,8 +109,8 @@ impl<'a, E: Environment> OpenNode<'a, E> {
         Ok(done)
     }
 
-    /// Дозаписывает байты в конец узла независимо от позиции. Запрос крупнее буфера сессии -
-    /// `BufferTooSmall`.
+    /// Дозаписывает байты в конец узла независимо от текущей позиции. Длина запроса
+    /// ограничена буфером данных сессии.
     pub fn append(&self, src: &[u8]) -> Result<Written> {
         if src.len() > self.session.capacity() {
             return Err(FileSystemError::BufferTooSmall.into());
@@ -129,7 +129,7 @@ impl<'a, E: Environment> OpenNode<'a, E> {
         Ok(self.session.client().stat(self.descriptor)??)
     }
 
-    /// Capability на регион с содержимым узла. Отображает его вызывающий.
+    /// Capability региона, на котором лежит содержимое узла.
     pub fn backing_memory(&self) -> Result<Cap> {
         Ok(self.session.client().backing_memory(self.descriptor)??)
     }

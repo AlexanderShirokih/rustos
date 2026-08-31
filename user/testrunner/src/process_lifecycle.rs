@@ -2,8 +2,9 @@
 //! публикует `N` как exit-код - и для потока текущего процесса, и для
 //! процесса-потомка целиком.
 
+use kernel_objects::{Process, Resource, Thread, ThreadEntry};
 use kernel_tests::kernel_test;
-use runtime::{Priority, Process, Resource, Thread, ThreadEntry, UserMemFlags, thread_exit};
+use runtime::{Priority, UserMemFlags, thread_exit};
 
 use crate::{
     fixture::{Fixture, JOIN_TIMEOUT},

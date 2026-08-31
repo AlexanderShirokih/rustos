@@ -10,6 +10,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 extern crate alloc;
 
 use core::panic::PanicInfo;
@@ -17,9 +19,10 @@ use core::panic::PanicInfo;
 use component_abi::{component_manifest, supervisor_gone};
 use filesystem_abi::{namespace, namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
+use kernel_objects::{OwnedHandle, Thread};
 use runtime::{
-    Mutex, OwnedHandle, PortTransport, Priority, Thread, exit_with_sibling, install_log, log_fmt,
-    log_line, spawn_owned, thread_exit,
+    Mutex, PortTransport, Priority, exit_with_sibling, install_log, log_fmt, log_line, spawn_owned,
+    thread_exit,
 };
 use syscall::{Handle, Timeout};
 
@@ -65,7 +68,7 @@ fn run(startup: Handle) -> Result<()> {
         service,
         control,
     } = handshake(startup)?;
-    install_log(log, LOG_TAG);
+    install_log(log.into_raw(), LOG_TAG);
 
     let admin_port = AdminPort {
         port: control,
@@ -83,7 +86,7 @@ fn run(startup: Handle) -> Result<()> {
     serve(&service);
     // Разбирать пути больше некому, и уход одного потока процесс не снимает:
     // supervisor узнаёт об уходе компонента только по его коду выхода.
-    exit_with_sibling(admin.thread(), SERVICE_PORT_FAILED_EXIT_CODE)
+    exit_with_sibling(admin.handle(), SERVICE_PORT_FAILED_EXIT_CODE)
 }
 
 fn serve(service: &OwnedHandle) {
@@ -134,7 +137,10 @@ fn serve_admin(mut admin: AdminPort) -> u32 {
             // с монтированиями.
             Err(IpcError::SenderGone) if supervisor_gone(transport.peer_badge()) => {
                 log_line("supervisor gone");
-                exit_with_sibling(&admin.service_thread, SUPERVISOR_LOST_EXIT_CODE)
+                exit_with_sibling(
+                    admin.service_thread.handle().as_raw(),
+                    SUPERVISOR_LOST_EXIT_CODE,
+                )
             }
             // Покадровое исчерпание и уход значка потребителя `NamespaceAdmin` порт не
             // закрывают.

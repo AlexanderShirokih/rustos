@@ -3,10 +3,9 @@
 use core::num::NonZeroU64;
 
 use ipc::wire::MESSAGE_INLINE_MAX;
-use runtime::{
-    BorrowedHandle, JoinHandle, OwnedHandle, Port, Priority, Result, Timeout, spawn_owned,
-};
-use syscall::Rights;
+use kernel_objects::{OwnedHandle, Port, Result};
+use runtime::{JoinHandle, Priority, Timeout, spawn_owned};
+use syscall::{Handle, Rights};
 
 use crate::relay::{LogRelay, LogSink, SourceNames};
 
@@ -67,15 +66,15 @@ impl LogRelayThread {
         )
     }
 
-    /// Заимствует waitable handle потока relay для supervisor loop.
+    /// Отдаёт waitable handle потока relay для supervisor loop.
     #[must_use]
-    pub fn handle(&self) -> BorrowedHandle<'_> {
+    pub fn handle(&self) -> Handle {
         self.thread.handle()
     }
 
     /// Возвращает финальный exit-код завершённого потока relay.
     pub fn exit_code(&self) -> Result<u32> {
-        self.thread.exit_code()
+        Ok(self.thread.exit_code()?)
     }
 
     /// Ждёт завершения цикла пересылки и закрывает лог-порт. Пока цикл жив, не
@@ -84,13 +83,13 @@ impl LogRelayThread {
         let Self { root, thread } = self;
         let waited = thread.join(timeout);
         drop(root);
-        waited
+        Ok(waited?)
     }
 
     /// Закрывает лог-порт и ждёт завершения цикла.
     pub fn shutdown(self, timeout: Timeout) -> Result<()> {
         let Self { root, thread } = self;
         drop(root);
-        thread.join(timeout)
+        Ok(thread.join(timeout)?)
     }
 }

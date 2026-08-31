@@ -4,7 +4,7 @@
 use component_abi::{SESSION_SCOPE_MAX, SessionError, component_sessions};
 use filesystem_abi::{FileSystemError, PATH_MAX};
 use ipc::wire::{Cap, Str};
-use runtime::OwnedHandle;
+use kernel_objects::OwnedHandle;
 
 use crate::{
     Shared,

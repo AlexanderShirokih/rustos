@@ -16,12 +16,11 @@ use core::{
 
 use bootstrap_abi::bootstrap;
 use ipc::wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf};
+use kernel_objects::{MemoryRegion, OwnedHandle, Port, Process, Resource};
 use kernel_tests::kernel_test;
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
 use log_relay::{KernelLogSink, LogRelayThread, LogSink, SourceNames};
-use runtime::{
-    MemoryRegion, OwnedHandle, Port, PortTransport, Process, Resource, Timeout, port_send,
-};
+use runtime::{PortTransport, Timeout, port_send};
 use spin::Mutex;
 use syscall::{HANDLE_TABLE_CAPACITY, Rights, SyscallError};
 use userland_image::{component_name, decode};
@@ -95,11 +94,11 @@ static ACTIVE: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 static SINK_REFUSES: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn shared_relay_thread() -> Option<syscall::Handle> {
-    SHARED.lock().as_ref().map(|relay| relay.handle().as_raw())
+    SHARED.lock().as_ref().map(LogRelayThread::handle)
 }
 
 pub(crate) fn scenario_relay_thread() -> Option<syscall::Handle> {
-    ACTIVE.lock().as_ref().map(|relay| relay.handle().as_raw())
+    ACTIVE.lock().as_ref().map(LogRelayThread::handle)
 }
 
 pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<OwnedHandle> {
@@ -286,7 +285,7 @@ fn exhaust_handle_table() -> (Port, Vec<OwnedHandle>) {
             Err(error) => {
                 kernel_tests::kassert!(matches!(
                     error,
-                    runtime::Error::Syscall(SyscallError::OutOfHandles)
+                    kernel_objects::Error::Syscall(SyscallError::OutOfHandles)
                 ));
                 break;
             }

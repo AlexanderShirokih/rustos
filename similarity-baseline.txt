@@ -21,16 +21,5 @@ kernel/memory/src/mem_flags.rs|method user_rw|kernel/memory/src/mem_flags.rs|met
 kernel/syscall/src/port.rs|function sys_port_call|kernel/syscall/src/port.rs|function sys_port_recv
 kernel/syscall/src/port.rs|function sys_port_call|kernel/syscall/src/port.rs|function sys_port_send
 kernel/syscall/src/port.rs|function sys_port_recv|kernel/syscall/src/port.rs|function sys_port_send
-lib/std-rt/src/svc.rs|function memory_allocate|lib/std-rt/src/svc.rs|function memory_map
-lib/std-rt/src/svc.rs|function port_call|lib/std-rt/src/svc.rs|function port_recv
-lib/std-rt/src/svc.rs|function port_call|lib/std-rt/src/svc.rs|function port_send
-lib/std-rt/src/svc.rs|function port_create|lib/std-rt/src/svc.rs|function signal_create
-lib/std-rt/src/svc.rs|function port_recv|lib/std-rt/src/svc.rs|function port_send
-lib/std-rt/src/svc.rs|function process_exit_code|lib/std-rt/src/svc.rs|function thread_exit_code
-lib/std-rt/src/svc.rs|function process_exit|lib/std-rt/src/svc.rs|function thread_exit
-lib/std-rt/src/svc.rs|function process_resource_self|lib/std-rt/src/svc.rs|function process_self
-lib/std-rt/src/svc.rs|function process_resource_self|lib/std-rt/src/svc.rs|function thread_self
-lib/std-rt/src/svc.rs|function process_self|lib/std-rt/src/svc.rs|function thread_self
-lib/std-rt/src/svc.rs|function process_terminate|lib/std-rt/src/svc.rs|function thread_terminate
 user/rootkeeper/src/system.rs|method acquire|user/rootkeeper/src/system.rs|method acquire
 user/testrunner/src/port.rs|function badge_client_a|user/testrunner/src/port.rs|function badge_client_b

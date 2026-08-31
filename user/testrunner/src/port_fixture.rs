@@ -10,6 +10,8 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::{
     panic::PanicInfo,
     sync::atomic::{AtomicU64, Ordering},
@@ -21,9 +23,10 @@ use fixture_protocol::{
     REPLY_BUDGET_EXHAUSTED, REPLY_DUPLICATE_FAILED, REPLY_MAP_FAILED, REPLY_OK,
     REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED, REQUEST_LEN, decode_request,
 };
+use kernel_objects::{Error, MemoryRegion, OwnedHandle, Port, Reply, Resource, Signal};
 use runtime::{
-    Error, MemoryAccess, MemoryRegion, OwnedHandle, Port, Priority, Reply, Resource, Signal,
-    Timeout, UserMemFlags, process_exit, signal_set, spawn_owned, thread_exit,
+    MemoryAccess, Priority, Timeout, UserMemFlags, process_exit, signal_set, spawn_owned,
+    thread_exit,
 };
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 use userland::USERLAND_PAGE_SIZE;

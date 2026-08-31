@@ -3,8 +3,9 @@
 //! `resource_h`, метерится именно им. Границу самого производного бюджета
 //! снимает проба в `resource_exhaustion`.
 
+use kernel_objects::{Process, Resource, Signal, ThreadEntry};
 use kernel_tests::kernel_test;
-use runtime::{MemoryAccess, Priority, Process, Resource, Signal, ThreadEntry};
+use runtime::{MemoryAccess, Priority};
 use syscall::{Rights, SyscallError};
 use userland::USERLAND_PAGE_SIZE;
 
@@ -39,7 +40,7 @@ fn split_chain_depth_is_capped() {
     };
     kernel_tests::kassert!(matches!(
         denied,
-        runtime::Error::Syscall(SyscallError::ResourceExhausted)
+        kernel_objects::Error::Syscall(SyscallError::ResourceExhausted)
     ));
 
     // Отказ по глубине не тронул бюджет листа: страница из него минтится и после.
@@ -96,7 +97,9 @@ fn child_stack_is_charged_to_the_image_budget() {
     let denied = Fixture::try_spawn_with_slack(0);
     kernel_tests::kassert_eq!(
         denied.err(),
-        Some(runtime::Error::Syscall(SyscallError::ResourceExhausted))
+        Some(kernel_objects::Error::Syscall(
+            SyscallError::ResourceExhausted
+        ))
     );
 }
 
@@ -123,7 +126,7 @@ fn starting_a_child_on_a_write_only_resource_is_denied() {
     let error = process.start(entry, bootstrap, Some(&write_only)).err();
     kernel_tests::kassert!(matches!(
         error,
-        Some(runtime::Error::Syscall(SyscallError::AccessDenied))
+        Some(kernel_objects::Error::Syscall(SyscallError::AccessDenied))
     ));
 
     // Контроль: тот же старт с полноправным ресурсом доходит до проверки
@@ -133,7 +136,7 @@ fn starting_a_child_on_a_write_only_resource_is_denied() {
     let error = process.start(entry, bootstrap, Some(&resource)).err();
     kernel_tests::kassert!(matches!(
         error,
-        Some(runtime::Error::Syscall(SyscallError::WrongType))
+        Some(kernel_objects::Error::Syscall(SyscallError::WrongType))
     ));
 }
 
@@ -170,6 +173,8 @@ fn split_of_zero_pages_is_rejected() {
 
     kernel_tests::kassert!(matches!(
         parent.split(0).err(),
-        Some(runtime::Error::Syscall(SyscallError::InvalidArgument))
+        Some(kernel_objects::Error::Syscall(
+            SyscallError::InvalidArgument
+        ))
     ));
 }

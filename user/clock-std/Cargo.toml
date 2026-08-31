@@ -16,9 +16,8 @@ bench = false
 
 [dependencies]
 component-abi = { workspace = true }
-molecular-rt = { workspace = true }
+kernel-objects = { workspace = true }
 rtc-abi = { workspace = true }
-syscall = { workspace = true }
 
 [build-dependencies]
 userland-build = { workspace = true }

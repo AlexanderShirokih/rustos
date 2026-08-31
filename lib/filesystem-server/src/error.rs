@@ -11,7 +11,7 @@ use syscall::SyscallError;
 #[derive(Debug)]
 pub enum Error {
     /// Отказ рантайма: syscall, маппинг либо спавн потока.
-    Runtime(runtime::Error),
+    Runtime(kernel_objects::Error),
     /// Отказ транспорта при обмене кадрами.
     Ipc(IpcError),
     /// Доменный отказ файловой системы на пути подъёма.
@@ -24,10 +24,10 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-pub(crate) fn no_space(error: runtime::Error) -> FileSystemError {
+pub(crate) fn no_space(error: kernel_objects::Error) -> FileSystemError {
     let out_of_resource = matches!(
         error,
-        runtime::Error::Syscall(
+        kernel_objects::Error::Syscall(
             SyscallError::OutOfMemory
                 | SyscallError::OutOfHandles
                 | SyscallError::ResourceExhausted
@@ -51,9 +51,15 @@ impl Display for Error {
     }
 }
 
-impl From<runtime::Error> for Error {
-    fn from(error: runtime::Error) -> Self {
+impl From<kernel_objects::Error> for Error {
+    fn from(error: kernel_objects::Error) -> Self {
         Self::Runtime(error)
+    }
+}
+
+impl From<SyscallError> for Error {
+    fn from(error: SyscallError) -> Self {
+        Self::Runtime(error.into())
     }
 }
 

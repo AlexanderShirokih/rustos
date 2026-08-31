@@ -1,5 +1,6 @@
 use ipc::{MessageLen, Transport, wire::IpcError};
-use runtime::{Error, Port, PortTransport, Process, Resource, Timeout};
+use kernel_objects::{Error, Port, Process, Resource};
+use runtime::{PortTransport, Timeout};
 use userland::EntryView;
 use userland_loader::launch_entry;
 

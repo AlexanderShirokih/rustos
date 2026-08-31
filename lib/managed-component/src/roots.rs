@@ -1,7 +1,8 @@
 use core::num::NonZeroU64;
 
 use component_abi::{COMPONENT_SLOT_MAX, CONTROL_LEASE_BADGE, component_startup};
-use runtime::{BorrowedHandle, OwnedHandle, Port, Timeout};
+use kernel_objects::{BorrowedHandle, OwnedHandle, Port};
+use runtime::Timeout;
 use syscall::Rights;
 use userland::EntryView;
 
@@ -83,14 +84,14 @@ impl ComponentRoots {
     }
 
     /// Минтит клиентскую capability service-порта под значком `badge`.
-    pub fn session(&self, badge: NonZeroU64) -> Result<OwnedHandle, runtime::Error> {
+    pub fn session(&self, badge: NonZeroU64) -> Result<OwnedHandle, kernel_objects::Error> {
         self.service_minter
             .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
     }
 
     /// Минтит клиентскую capability control-порта под значком `badge`. Её
     /// держатель зовёт протокол, который компонент обслуживает на этом порту.
-    pub fn control_session(&self, badge: NonZeroU64) -> Result<OwnedHandle, runtime::Error> {
+    pub fn control_session(&self, badge: NonZeroU64) -> Result<OwnedHandle, kernel_objects::Error> {
         self.control_minter
             .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
     }

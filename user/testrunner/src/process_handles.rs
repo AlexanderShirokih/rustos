@@ -2,8 +2,8 @@
 //! `Process::self_process`/`Thread::self_thread` возвращают валидные обёртки,
 //! `close` закрывает их без ошибок.
 
+use kernel_objects::{Process, Thread};
 use kernel_tests::kernel_test;
-use runtime::{Process, Thread};
 
 #[kernel_test]
 fn process_and_thread_self_handles() {

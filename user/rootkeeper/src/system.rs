@@ -14,14 +14,14 @@ use device_resolver::{
 use device_resolver_aarch64::PLATFORM_BINDINGS;
 use fdt::devicetree::DeviceTree;
 use ipc::wire::Str;
+use kernel_objects::{
+    BorrowedHandle, IrqControl, MemoryRegion, OwnedHandle, ReadOnlyMapping, Resource, wait_any,
+};
 use log_abi::{LogBuffer, log};
 use managed_component::{
     ComponentRoots, ComponentSlots, ManagedComponent, ManagedStartupError, launch_component,
 };
-use runtime::{
-    BorrowedHandle, IrqControl, MemoryRegion, OwnedHandle, PortTransport, ReadOnlyMapping,
-    Resource, Timeout, wait_any,
-};
+use runtime::{PortTransport, Timeout};
 use supervisor_abi::ExtendError;
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem};
 use userland_image::{
@@ -418,7 +418,7 @@ impl DeviceAuthority {
         let number = interrupt.line.number();
         match lines.mint(number, interrupt.trigger) {
             Ok(line) => Ok(line.into_handle()),
-            Err(runtime::Error::Syscall(SyscallError::AlreadyBound)) => {
+            Err(kernel_objects::Error::Syscall(SyscallError::AlreadyBound)) => {
                 // Линия принадлежит одному компоненту: занявший её держит
                 // capability, и второй bind ядро отвергает.
                 log_device_conflict(kernel_log, owner, format_args!("irq line {number}"));

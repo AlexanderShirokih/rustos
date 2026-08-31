@@ -2,15 +2,15 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+runtime::process_heap!();
+
 use core::panic::PanicInfo;
 
 use component_abi::component_manifest;
 use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system};
 use ipc::wire::Str;
-use runtime::{
-    MemoryRegion, OwnedHandle, PortTransport, Timeout, UserMemFlags, install_log, log_fmt,
-    thread_exit,
-};
+use kernel_objects::{MemoryRegion, OwnedHandle};
+use runtime::{PortTransport, Timeout, UserMemFlags, install_log, log_fmt, thread_exit};
 use syscall::Handle;
 
 const LOG_TAG: &str = "area";
@@ -48,7 +48,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
     drop(startup);
-    install_log(OwnedHandle::adopt(started.log), LOG_TAG);
+    install_log(Handle::from_nonzero(started.log.raw()), LOG_TAG);
     drop(OwnedHandle::adopt(started.control));
     drop(OwnedHandle::adopt(started.service));
 

@@ -12,6 +12,7 @@ bench = false
 doctest = false
 
 [dependencies]
+kernel-objects = { workspace = true }
 runtime = { workspace = true }
 userland = { workspace = true }
 syscall = { workspace = true }
