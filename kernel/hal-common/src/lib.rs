@@ -12,6 +12,7 @@
 //! подъёме CPU покрыты обычными тестами.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 
 pub mod boot;
 pub mod cpu;

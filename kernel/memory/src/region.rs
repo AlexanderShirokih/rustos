@@ -345,7 +345,11 @@ impl MemoryRegion {
                     }
                 }
                 let pages = self.size_bytes / PAGE_SIZE;
-                for (i, frame) in owner.frames[*first..*first + pages].iter().enumerate() {
+                let frames = owner
+                    .frames
+                    .get(*first..*first + pages)
+                    .ok_or(MemoryMappingError::VirtualMappingError)?;
+                for (i, frame) in frames.iter().enumerate() {
                     let target_va = va
                         .offset(i * PAGE_SIZE)
                         .ok_or(MemoryMappingError::VirtualMappingError)?;

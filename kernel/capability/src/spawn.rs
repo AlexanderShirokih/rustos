@@ -63,7 +63,7 @@ impl UserImageInstall {
             }
 
             // Попарное перекрытие сегментов.
-            for other in &self.segments[..i] {
+            for other in self.segments.iter().take(i) {
                 let other_start = other.va_base.as_usize();
                 let other_end = other_start
                     .checked_add(other.mapped_size)

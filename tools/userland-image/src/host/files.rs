@@ -64,7 +64,10 @@ impl FromStr for ExtraFile {
 impl FileSet {
     fn insert(&mut self, file: LoadedFile) -> Result<()> {
         if let Some(&position) = self.positions.get(&file.path) {
-            let present = &self.files[position];
+            let present = self
+                .files
+                .get(position)
+                .context("image file index lost its file")?;
             ensure!(
                 present.bytes == file.bytes,
                 "image path '{}' is filled by '{}' and '{}' with different content",

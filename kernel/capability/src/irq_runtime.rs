@@ -65,7 +65,10 @@ pub fn install_interrupts_control(control: Arc<dyn InterruptsControl>) {
 }
 
 /// Доступ к глобальному контроллеру. Паникует, если он ещё не установлен.
+#[allow(clippy::expect_used)]
 pub fn interrupts_control() -> &'static Arc<dyn InterruptsControl> {
+    // Контроллер ставится один раз на раннем шаге `kmain`, до первого обращения, и его
+    // отсутствие здесь означает сломанный порядок загрузки.
     IRQ_CONTROL
         .get()
         .expect("InterruptsControl not installed; install_interrupts_control() must run in kmain")

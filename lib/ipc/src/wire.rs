@@ -47,10 +47,12 @@ impl HandleSlots {
     #[must_use]
     pub fn from_received(ids: &[u32]) -> Self {
         let mut slots = Self::new();
-        for &id in ids.iter().take(MESSAGE_MAX_HANDLES) {
-            slots.ids[slots.count] = id;
-            slots.count += 1;
+        let mut count = 0;
+        for (slot, &id) in slots.ids.iter_mut().zip(ids) {
+            *slot = id;
+            count += 1;
         }
+        slots.count = count;
         slots
     }
 
@@ -80,13 +82,18 @@ impl HandleSlots {
             return Err(IpcError::InvalidValue);
         }
         self.taken.set(self.taken.get() | bit);
-        Ok(self.ids[position])
+        self.ids
+            .get(position)
+            .copied()
+            .ok_or(IpcError::InvalidValue)
     }
 
     /// Занятые слоты в порядке их выдачи.
     #[must_use]
     pub fn as_slice(&self) -> &[u32] {
-        &self.ids[..self.count]
+        // `count` растёт только вслед за занятым слотом и потому не превосходит длины
+        // массива; на невозможном `count` пустой набор безопаснее выдуманных хэндлов.
+        self.ids.get(..self.count).unwrap_or_default()
     }
 }
 
@@ -124,8 +131,11 @@ pub const FLAG_PEER_CLOSE: u16 = 1 << 1;
 /// Флаг: ответ несёт доменную ошибку `E`.
 pub const FLAG_DOMAIN_ERR: u16 = 1 << 3;
 
+/// Ширина дискриминанта закрытого enum как поля wire-типа.
+pub const ENUM_DISCRIMINANT_WIDTH: u8 = 2;
+
 /// Размер дискриминанта закрытого enum в сообщении (`u16` LE).
-pub const ENUM_DISCRIMINANT_SIZE: usize = 2;
+pub const ENUM_DISCRIMINANT_SIZE: usize = ENUM_DISCRIMINANT_WIDTH as usize;
 
 /// Ошибка кодека wire-формата и транспорта.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,12 +195,18 @@ impl Header {
     /// Записывает заголовок в первые [`HEADER_SIZE`] байт `buf`.
     /// `Truncated`, если буфер короче заголовка.
     pub fn encode(&self, buf: &mut [u8]) -> Result<(), IpcError> {
-        if buf.len() < HEADER_SIZE {
+        let Some((ordinal, rest)) = buf.split_first_chunk_mut::<ORDINAL_SIZE>() else {
             return Err(IpcError::Truncated);
-        }
-        buf[0..8].copy_from_slice(&self.ordinal.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.txid.to_le_bytes());
-        buf[12..14].copy_from_slice(&self.flags.to_le_bytes());
+        };
+        let Some((txid, rest)) = rest.split_first_chunk_mut::<TXID_SIZE>() else {
+            return Err(IpcError::Truncated);
+        };
+        let Some((flags, _)) = rest.split_first_chunk_mut::<FLAGS_SIZE>() else {
+            return Err(IpcError::Truncated);
+        };
+        *ordinal = self.ordinal.to_le_bytes();
+        *txid = self.txid.to_le_bytes();
+        *flags = self.flags.to_le_bytes();
         Ok(())
     }
 
@@ -301,9 +317,20 @@ impl<const N: usize> MessageBuf<N> {
         if self.pos + needed + 1 > N {
             return Err(IpcError::FrameOverflow);
         }
-        self.bytes[self.pos] = field_id;
-        self.bytes[self.pos + 1..self.pos + 3].copy_from_slice(&(data.len() as u16).to_le_bytes());
-        self.bytes[self.pos + 3..self.pos + 3 + data.len()].copy_from_slice(data);
+        let record = self
+            .bytes
+            .get_mut(self.pos..self.pos + needed)
+            .ok_or(IpcError::FrameOverflow)?;
+        let Some((id_slot, rest)) = record.split_first_mut() else {
+            return Err(IpcError::FrameOverflow);
+        };
+        let Some((len_slot, payload)) = rest.split_first_chunk_mut::<2>() else {
+            return Err(IpcError::FrameOverflow);
+        };
+        let data_len = u16::try_from(data.len()).map_err(|_| IpcError::FrameOverflow)?;
+        *id_slot = field_id;
+        *len_slot = data_len.to_le_bytes();
+        payload.copy_from_slice(data);
         self.pos += needed;
         self.last_field_id = field_id;
         Ok(())
@@ -314,10 +341,11 @@ impl<const N: usize> MessageBuf<N> {
         if self.terminated {
             return Ok(());
         }
-        if self.pos + 1 > N {
-            return Err(IpcError::FrameOverflow);
-        }
-        self.bytes[self.pos] = TERMINATOR;
+        let slot = self
+            .bytes
+            .get_mut(self.pos)
+            .ok_or(IpcError::FrameOverflow)?;
+        *slot = TERMINATOR;
         self.pos += 1;
         self.terminated = true;
         Ok(())

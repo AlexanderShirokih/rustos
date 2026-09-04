@@ -197,6 +197,7 @@ impl<R> ManagedComponent<R> {
                 Err(error) => return self.fail_startup(error),
             };
             let result = launch_entry(entry, Some(name), &child_resource, |startup| {
+                #[allow(clippy::expect_used)]
                 let component_roots = roots
                     .as_mut()
                     .expect("startup roots are present before delivery");
@@ -210,6 +211,7 @@ impl<R> ManagedComponent<R> {
 
             match result {
                 Ok(process) => Ok(RunningComponent {
+                    #[allow(clippy::expect_used)]
                     roots: roots
                         .take()
                         .expect("successful startup retains capability roots"),

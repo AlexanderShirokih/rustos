@@ -177,7 +177,7 @@ pub fn node_method(node: &Node<'_>) -> Option<StartMethod> {
         .and_then(|prop| prop.try_as_u64(0))?;
 
     Some(StartMethod::SpinTable {
-        release_address: release_address as usize,
+        release_address: usize::try_from(release_address).ok()?,
     })
 }
 

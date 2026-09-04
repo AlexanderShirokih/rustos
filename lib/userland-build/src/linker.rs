@@ -50,7 +50,10 @@ SECTIONS
 const GENERATED_NAME: &str = "userland.ld";
 
 /// Кладёт в сборку стандартный linker script программы userspace и передаёт его компоновщику.
+#[allow(clippy::expect_used)]
 pub fn emit_linker_script() {
+    // Отказ окружения или файловой системы прекращает сборку, и `cargo` читает именно
+    // панику скрипта.
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
     let linker_script = out_dir.join(GENERATED_NAME);
     fs::write(&linker_script, LINKER_SCRIPT).expect("write the linker script");

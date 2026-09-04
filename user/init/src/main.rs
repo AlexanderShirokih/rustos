@@ -29,7 +29,8 @@ use core::{
     panic::PanicInfo,
 };
 
-use component_abi::{component_manifest, supervisor_gone};
+use component_abi::supervisor_gone;
+use component_client::{ReceivedStartup, StartupError, component_manifest};
 use filesystem_abi::{
     AccessMode, BOOT_MOUNT_TABLE_PATH, DirCursor, DirEntry, FileSystemError, MountTable,
     NodeDescriptor, NodeKind, OpenFlags, Opened, PATH_MAX, Path, decode_mount_table, file_system,
@@ -80,16 +81,6 @@ enum Error {
 
 type Result<T> = core::result::Result<T, Error>;
 
-struct StartResources {
-    log: OwnedHandle,
-    image: OwnedHandle,
-    root: OwnedHandle,
-    mounts: OwnedHandle,
-    system: OwnedHandle,
-    service: OwnedHandle,
-    control: OwnedHandle,
-}
-
 struct Reading {
     files: file_system::Client<PortTransport>,
     buffer: Mapping,
@@ -110,16 +101,17 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 }
 
 fn run(startup: Handle) -> Result<u64> {
-    let StartResources {
-        log,
+    let ReceivedStartup { log, resources } =
+        InitStartup::receive(OwnedHandle::from_handle(startup))?;
+    install_log(log.into_raw(), LOG_TAG);
+    let InitStartup {
+        control,
+        service,
         image,
         root,
         mounts,
         system,
-        service,
-        control,
-    } = handshake(startup)?;
-    install_log(log.into_raw(), LOG_TAG);
+    } = resources;
     // Экспорта у ступени 0 нет, и серверная сторона service-порта живёт до конца процесса
     // без обслуживания.
     let _service = service;
@@ -412,21 +404,6 @@ fn park(control: &PortTransport) -> u64 {
     }
 }
 
-fn handshake(startup: Handle) -> Result<StartResources> {
-    let startup = OwnedHandle::from_handle(startup);
-    let started =
-        InitStartup::receive(&PortTransport::server(startup.borrow()))?.ok_or(Error::Start)?;
-    Ok(StartResources {
-        log: OwnedHandle::adopt(started.log),
-        image: OwnedHandle::adopt(started.image),
-        root: OwnedHandle::adopt(started.root),
-        mounts: OwnedHandle::adopt(started.mounts),
-        system: OwnedHandle::adopt(started.system),
-        service: OwnedHandle::adopt(started.service),
-        control: OwnedHandle::adopt(started.control),
-    })
-}
-
 impl Error {
     const fn exit_code(&self) -> u64 {
         match self {
@@ -462,6 +439,15 @@ impl From<kernel_objects::Error> for Error {
 impl From<IpcError> for Error {
     fn from(error: IpcError) -> Self {
         Self::Ipc(error)
+    }
+}
+
+impl From<StartupError> for Error {
+    fn from(error: StartupError) -> Self {
+        match error {
+            StartupError::Transport(error) => Self::Ipc(error),
+            _ => Self::Start,
+        }
     }
 }
 

@@ -1,4 +1,13 @@
 #![no_main]
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::missing_asserts_for_indexing,
+    clippy::cast_possible_truncation,
+    clippy::unwrap_in_result,
+    clippy::panic,
+    clippy::std_instead_of_core
+)]
 
 use ipc::wire::{FieldCursor, HEADER_SIZE, Header, value};
 use libfuzzer_sys::fuzz_target;

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::expect_used,
+    clippy::std_instead_of_core,
+    clippy::unwrap_in_result
+)]
+
 mod common;
 
 use std::{

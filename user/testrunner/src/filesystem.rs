@@ -1,5 +1,5 @@
-//! E2E файловой подсистемы: rootkeeper поднимает файловые системы, политика загрузки прививает
-//! их сессии маршрутизатору, а он владеет таблицей монтирования.
+//! E2E файловой подсистемы: rootkeeper поднимает файловые системы, политика загрузки монтирует их
+//! сессии маршрутизатору, а он владеет таблицей монтирования.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -145,8 +145,8 @@ fn start_namespace() -> NamespacePorts {
         crate::log_relay::component_log_session,
     )
     .expect("filesystem composition started");
-    // Ступень 1 подаёт `init` транзакцией, и её операции обслуживает оборот композиции: сюита
-    // держит композицию статиком и своих оборотов не делает.
+    // Ступень 1 подаёт `init` транзакцией, и оборот композиции обслуживает её операции. Сюита
+    // держит композицию статиком и не делает своих оборотов.
     let relay = crate::log_relay::shared_relay_thread().expect("shared relay is running");
     crate::rootkeeper_system::raise_stage_one(&mut system, relay);
     let ports = NamespacePorts { system };
@@ -155,8 +155,8 @@ fn start_namespace() -> NamespacePorts {
 }
 
 fn await_boot_tree(ports: &NamespacePorts) {
-    // Дерево имён загрузки прививает компонент композиции своим оборотом, и его префиксы
-    // становятся накрытыми не раньше.
+    // Компонент композиции монтирует дерево имён загрузки своим оборотом, и его префиксы становятся
+    // накрытыми не раньше.
     for _ in 0..BOOT_TREE_ATTEMPTS {
         let minter = roots_of(ports, ROUTER).service_minter();
         if [Path::ROOT.as_str(), RAM_MOUNT]
@@ -214,7 +214,7 @@ pub(crate) fn mount_ram_filesystem_scoped(
     scope: &str,
 ) -> Result<u32, FileSystemError> {
     let index = ram_filesystem();
-    // Окно заводится по существующему узлу: каталог создаётся сессией на весь экспорт.
+    // Окно открывается по существующему узлу. Каталог создаётся сессией на весь экспорт.
     create_directory(index, scope);
     namespace_admin_client(router_admin())
         .mount(
@@ -230,7 +230,7 @@ pub(crate) fn unmount_ram_filesystem_scoped(
 ) -> Result<u32, FileSystemError> {
     let index = ram_filesystem();
     let unmounted = unmount_filesystem(prefix)?;
-    // Корень окна лежит записью в каталоге над ним: снимает её сессия на весь экспорт.
+    // Корень окна лежит записью в каталоге над ним. Сессия на весь экспорт снимает её.
     remove_directory(index, scope);
     Ok(unmounted)
 }
@@ -444,8 +444,8 @@ pub(crate) fn walk_directory(
         if listed.end {
             return names;
         }
-        // Перечисление обязано продвинуться: иначе записи не помещаются в буфер и повтор вызова
-        // ничего не изменит.
+        // Перечисление обязано продвинуться, иначе записи не помещаются в буфер и повтор вызова не
+        // изменит ничего.
         kernel_tests::kassert!(listed.next.raw() > from.raw());
         from = listed.next;
     }
@@ -592,8 +592,8 @@ fn filesystem_lists_directory_across_batches() {
         if listed.end {
             break;
         }
-        // Перечисление обязано продвинуться: иначе записи не помещаются в
-        // буфер и повтор вызова ничего не изменит.
+        // Перечисление обязано продвинуться, иначе записи не помещаются в буфер и повтор вызова не
+        // изменит ничего.
         kernel_tests::kassert!(listed.count > 0 && listed.next.raw() > from.raw());
         from = listed.next;
     }
@@ -649,7 +649,7 @@ fn filesystem_rejects_write_through_a_read_only_descriptor() {
     let resized = client.set_size(opened.fd, 16).expect("set_size call");
     kernel_tests::kassert_eq!(resized, Err(FileSystemError::WrongMode));
 
-    // Усечение меняет узел: без режима записи оно отвергается ещё на открытии.
+    // Усечение меняет узел, поэтому без режима записи оно отвергается ещё на открытии.
     let truncated = client
         .open(path("/read-only"), AccessMode::Read, OpenFlags::TRUNCATE)
         .expect("open call");
@@ -677,7 +677,7 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
         .expect("create directory call")
         .expect("directory created");
 
-    // `/tmp/inner` отсутствует в imagefs: успешное окно доказывает выбор длинного префикса.
+    // `/tmp/inner` отсутствует в imagefs, поэтому успешное окно доказывает выбор длинного префикса.
     let ram = namespace
         .resolve(path("/tmp/inner"))
         .expect("resolve call")
@@ -687,7 +687,8 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
 
 #[kernel_test]
 fn namespace_refuses_an_occupied_prefix_without_changing_the_table() {
-    // Отвергнутое монтирование уносит переданную сессию: вернуть её отправителю нечем.
+    // Отвергнутое монтирование уносит сессию, которую ему передали, поэтому вернуть её отправителю
+    // нечем.
     let occupied = mount_filesystem(RAM_MOUNT, ram_filesystem());
     kernel_tests::kassert_eq!(occupied, Err(FileSystemError::AlreadyExists));
 
@@ -703,8 +704,8 @@ fn namespace_grafts_the_session_it_is_handed() {
     const GRAFT_MOUNT: &str = "/grafted";
     const GRAFT_ENTRY: &str = "/grafted-probe";
 
-    // Происхождение капы маршрутизатору неизвестно: под префиксом встаёт ровно тот сервер,
-    // чью сессию ему передали.
+    // Происхождение капы маршрутизатору неизвестно, поэтому под префиксом встаёт тот сервер, чью
+    // сессию ему передали.
     let handed = filesystem_session(ram_filesystem());
     open(
         &connect(&handed),
@@ -726,7 +727,7 @@ fn namespace_grafts_the_session_it_is_handed() {
     );
     kernel_tests::kassert_eq!(opened.kind, NodeKind::File);
 
-    // Узел завела переданная сессия, и корневое монтирование его не содержит.
+    // Переданная сессия создала узел, и корневое монтирование его не содержит.
     let absent = connect(&image_session())
         .open(path(GRAFT_ENTRY), AccessMode::Read, OpenFlags::NONE)
         .expect("open call");
@@ -737,13 +738,14 @@ fn namespace_grafts_the_session_it_is_handed() {
 
 #[kernel_test]
 fn namespace_rejects_admin_operations_on_the_service_port() {
-    // Управление таблицей монтирования живёт на control-порту: его ordinal service-порт не
-    // разбирает, и кадр отвергается целиком, не доходя до операции.
+    // Управление таблицей монтирования находится на control-порту, поэтому service-порт не
+    // разбирает его ordinal, и кадр отвергается целиком, не доходя до операции.
     let admin_on_service = namespace_admin_client(router_minter());
     let refused = admin_on_service.unmount(path("/"));
     kernel_tests::kassert_eq!(refused, Err(IpcError::PeerClosed));
 
-    // Отвергнутый кадр не тронул ни таблицу, ни цикл обслуживания: корень резолвится дальше.
+    // Отвергнутый кадр не тронул ни таблицу, ни цикл обслуживания, поэтому корень резолвится
+    // дальше.
     let mounted = namespace_client(router_minter())
         .resolve(path(IMAGE_FILE))
         .expect("resolve call")
@@ -757,14 +759,14 @@ fn namespace_reports_an_unresponsive_mount() {
 
     mount_filesystem(STUCK_MOUNT, UNRESPONSIVE_FILESYSTEM).expect("fixture mounted");
 
-    // Сессия остаётся живой без обслуживающего потока: `open_root` не отвечает, и маршрутизатор
-    // отпускает вызов по своему сроку.
+    // Сессия остаётся действующей без обслуживающего потока, поэтому `open_root` не отвечает, и
+    // маршрутизатор отпускает вызов по своему сроку.
     let resolved = namespace_client(router_minter())
         .resolve(path(STUCK_MOUNT))
         .expect("resolve call");
     kernel_tests::kassert_eq!(resolved, Err(FileSystemError::Unresponsive));
 
-    // Снятие отпускает зависшую сессию, и путь снова накрывает корневое монтирование.
+    // Снятие отпускает зависшую сессию, и корневое монтирование снова накрывает путь.
     unmount_filesystem(STUCK_MOUNT).expect("fixture unmounted");
     let rerouted = namespace_client(router_minter())
         .resolve(path(STUCK_MOUNT))
@@ -833,8 +835,8 @@ fn filesystem_lists_the_image_directory() {
 
     let names = walk_directory(&client, &buffer, directory.fd);
 
-    // Каждая программа образа лежит своим каталогом: под `/boot` перечисляются
-    // они, а её записи - внутри.
+    // Каждая программа образа лежит своим каталогом. Под `/boot` перечисляются они, а её записи -
+    // внутри.
     for expected in ["testrunner", "namespace-router"] {
         kernel_tests::kassert!(names.iter().any(|name| name.as_str() == expected));
     }
@@ -865,7 +867,7 @@ fn filesystem_mounts_hold_separate_trees() {
         OpenFlags::CREATE,
     );
 
-    // Монтирования держат разные процессы: узел одного в дереве другого не виден, а корень
+    // Разные процессы держат монтирования, поэтому узел одного в дереве другого не виден, а корень
     // каждого - корень его собственного монтирования.
     let absent = image
         .open(path("/only-in-ram"), AccessMode::Read, OpenFlags::NONE)
@@ -908,8 +910,8 @@ fn filesystem_hands_out_the_backing_window_of_an_image_file() {
         buffer_head(&buffer, count as usize)
     );
 
-    // Дескриптор открыт на чтение, регион образа - read-only: писать в страницы
-    // напрямую капа не даёт.
+    // Дескриптор открыт на чтение, регион образа - read-only, поэтому капа не даёт писать в
+    // страницы напрямую.
     kernel_tests::kassert!(window.map_full(UserMemFlags::ReadWrite).is_err());
 }
 
@@ -933,7 +935,7 @@ fn filesystem_serves_an_empty_file_from_the_image() {
         .expect("read ok");
     kernel_tests::kassert_eq!(count, 0);
 
-    // Файл без байт не занимает страниц образа: окна у него нет.
+    // Файл без байт не занимает страниц образа, поэтому у него нет окна.
     let refused = client
         .backing_memory(opened.fd)
         .expect("backing_memory call");
@@ -1032,7 +1034,7 @@ fn filesystem_ramfs_zeroes_the_gap_of_a_sparse_write() {
     let mapped = backing
         .map_full(UserMemFlags::ReadWrite)
         .expect("map ramfs backing");
-    // Разрыв заполнен через маппинг: запись за прежней длиной обязана вернуть туда нули.
+    // Разрыв заполнен через маппинг. Запись за прежней длиной обязана вернуть туда нули.
     mapped.copy_in_at(4, b"stale").expect("stale bytes");
 
     data.copy_in(b"tail").expect("payload into data buffer");
@@ -1184,32 +1186,34 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
     const REAP_ATTEMPTS: usize = 64;
     const REAP_TURN: Timeout = Timeout::from_millis(5);
 
-    // Занятые слоты сценарий не возвращает: закреплённые регионы держат их до конца жизни
-    // процесса, поэтому дерево берётся отдельным экземпляром, а не общей точкой монтирования.
+    // Сценарий не возвращает занятые слоты. Закреплённые регионы держат их до конца жизни процесса,
+    // поэтому дерево берётся отдельным экземпляром, а не общей точкой монтирования.
     mount_filesystem(SPARE_MOUNT, SPARE_FILESYSTEM).expect("fixture mounted");
     let capability = session_for(SPARE_MOUNT);
     let client = connect(&capability);
-    // Буфер сессии заводится до наполнения: его маппинг занимает слот наравне с остальными.
+    // Буфер сессии создаётся до наполнения, поэтому его маппинг занимает слот наравне с остальными.
     let data_region = acquire_buffer(&client);
     let data = data_region
         .map_full(UserMemFlags::ReadWrite)
         .expect("map data buffer");
 
-    // Дерево заводится заранее: под исчерпанными слотами куче сервера уже не вырасти. Слотов у
-    // адресного пространства конечное число, и наполнение упирается в них задолго до предела имён.
+    // Дерево создаётся заранее, потому что под исчерпанными слотами куче сервера уже не вырасти. У
+    // адресного пространства конечное число слотов, и наполнение упирается в них задолго до предела
+    // имён.
     let names: Vec<String> = (0..FILLER_LIMIT)
         .map(|index| format!("/filler-{index}"))
         .collect();
     create_filler_tree(&client, &data, &names);
-    // Освободит слот уход сессии, и капы берутся заранее: под исчерпанными слотами буфер уже не
-    // завести. Их несколько: за освободившийся слот состязаются и другие маппинги сервера.
+    // Закрытие сессии освободит слот, и капы берутся заранее, потому что под исчерпанными слотами
+    // буфер уже не создать. Их несколько. За освободившийся слот состязаются и другие маппинги
+    // сервера.
     let spare_sessions = buffered_sessions(SPARE_MOUNT, RELEASED_SESSIONS);
 
-    // Регион под содержимым файла сервер держит отображённым, и слоты уходят по одному на файл.
+    // Сервер держит регион под содержимым файла отображённым, и слоты пропадают по одному на файл.
     let fillers = occupy_mapping_slots(&client, &names);
     kernel_tests::kassert!(fillers.len() < FILLER_LIMIT);
 
-    // Отобразить принесённый регион серверу нечем, и файл всё равно заводится.
+    // Отобразить принесённый регион серверу нечем, и файл всё равно создаётся.
     client
         .create_backed(
             path(IMPORTED),
@@ -1226,8 +1230,8 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
         client.read(imported.fd, 0, length).expect("read call"),
         Err(FileSystemError::NoSpace)
     );
-    // Файл на резидентном регионе читается: сервер обслуживает сессию, и отказ выше принадлежит
-    // отложенному маппингу, а не циклу.
+    // Файл на резидентном регионе читается, потому что сервер обслуживает сессию, и отказ выше
+    // принадлежит отложенному маппингу, а не циклу.
     let resident = open(
         &client,
         fillers.last().expect("filling consumed at least one file"),
@@ -1241,8 +1245,8 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
     kernel_tests::kassert_eq!(count, 1);
     close(&client, &resident);
 
-    // Уход сессий возвращает слоты их буферов, а уборка идёт своим чередом: слот появляется не в
-    // тот же кадр.
+    // Закрытие сессий возвращает слоты их буферов, а уборка идёт своим чередом, поэтому слот
+    // появляется не в тот же кадр.
     drop(spare_sessions);
     let turn = Signal::create().expect("signal create");
     let mut read = client.read(imported.fd, 0, length).expect("read call");
@@ -1254,7 +1258,7 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
         read = client.read(imported.fd, 0, length).expect("read call");
     }
 
-    // Слот появился, и отложенный маппинг доносит содержимое принесённого региона.
+    // Слот появился, и отложенный маппинг доносит содержимое региона, который принесли.
     let count = read.expect("degraded store maps on demand");
     kernel_tests::kassert_eq!(count, length);
     kernel_tests::kassert_eq!(buffer_head(&data, PAYLOAD.len()), PAYLOAD);
@@ -1265,14 +1269,14 @@ fn filesystem_refuses_to_change_the_image() {
     let capability = image_session();
     let client = connect(&capability);
 
-    // Изменить образ нельзя, и дескриптор на запись не выдаётся: отказ приходит
-    // уже на открытии.
+    // Изменить образ нельзя, и дескриптор на запись не выдаётся, поэтому отказ приходит уже на
+    // открытии.
     let writable = client
         .open(path(IMAGE_FILE), AccessMode::ReadWrite, OpenFlags::NONE)
         .expect("open call");
     kernel_tests::kassert_eq!(writable, Err(FileSystemError::ReadOnly));
 
-    // Усечение без режима записи - ошибка режима: она первичнее неизменяемости дерева.
+    // Усечение без режима записи - ошибка режима, потому что она первичнее неизменяемости дерева.
     let truncated = client
         .open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::TRUNCATE)
         .expect("open call");
@@ -1286,7 +1290,7 @@ fn filesystem_refuses_to_change_the_image() {
     let removed = client.unlink(path(IMAGE_FILE)).expect("unlink call");
     kernel_tests::kassert_eq!(removed, Err(FileSystemError::ReadOnly));
 
-    // Причина пути важнее причины режима: те же отказы даёт изменяемое дерево.
+    // Причина пути важнее причины режима, потому что изменяемое дерево даёт те же отказы.
     let absent = client.unlink(path("/boot/absent")).expect("unlink call");
     kernel_tests::kassert_eq!(absent, Err(FileSystemError::NotFound));
 
@@ -1306,8 +1310,7 @@ fn filesystem_holds_a_descriptor_to_its_mode() {
         .expect("map data buffer");
 
     let opened = open(&client, "/write-only", AccessMode::Write, OpenFlags::CREATE);
-    // Режим записи работает: отказы ниже - про отсутствующий режим чтения, а не
-    // про сам дескриптор.
+    // Режим записи работает. Отказы ниже - про отсутствующий режим чтения, а не про сам дескриптор.
     let payload = b"mode";
     let count = write_all(&client, &buffer, &opened, 0, payload);
     kernel_tests::kassert_eq!(count, payload.len() as u32);
@@ -1318,7 +1321,7 @@ fn filesystem_holds_a_descriptor_to_its_mode() {
     let stated = client.stat(opened.fd).expect("stat call");
     kernel_tests::kassert_eq!(stated, Err(FileSystemError::WrongMode));
 
-    // Режим важнее наличия окна: у узла ramfs его нет, но проверяется режим.
+    // Режим важнее наличия окна. У узла ramfs нет его, но режим проверяется.
     let window = client
         .backing_memory(opened.fd)
         .expect("backing_memory call");
@@ -1417,8 +1420,8 @@ fn filesystem_isolates_descriptors_between_sessions() {
 fn filesystem_serves_on_after_an_undeliverable_reply() {
     let abandoned_capability = ram_session();
     let abandoned = connect_abandoning(&abandoned_capability);
-    // Ответа этот клиент не получит, но узел сервер обязан завести: иначе кадр
-    // не дошёл до обработчика и недоставленный ответ не проверен.
+    // Этот клиент не получит ответа, но сервер обязан создать узел, иначе кадр не дошёл до
+    // обработчика и недоставленный ответ не проверен.
     let _ = abandoned.open(
         path(ABANDONED_PATH),
         AccessMode::ReadWrite,
@@ -1441,9 +1444,9 @@ fn filesystem_serves_on_after_an_unknown_ordinal() {
             ..Tamper::NONE
         },
     );
-    // Такой операции контракт не описывает: сервер закрывает соединение кадром
-    // peer-close, без захода в вызов собственного порта. Аргументы вызова
-    // роли не играют - до операции кадр не доходит.
+    // Контракт не описывает такой операции, поэтому сервер закрывает соединение кадром peer-close,
+    // без захода в вызов собственного порта. Аргументы вызова не играют роли - до операции кадр не
+    // доходит.
     let refused = bogus.stat(NodeDescriptor::from_raw(0));
     kernel_tests::kassert_eq!(refused, Err(IpcError::PeerClosed));
 
@@ -1480,7 +1483,7 @@ fn send_unparsed_frame_with_capability(session: &OwnedHandle, capability: OwnedH
         .encode(&mut frame)
         .expect("frame header");
     frame[HEADER_SIZE] = TERMINATOR;
-    // Отправка идёт сырым syscall: транспорт сводит любой отказ сервера к PeerClosed.
+    // Отправка идёт сырым syscall, потому что транспорт сводит любой отказ сервера к PeerClosed.
     crate::ipc_raw::write_frame(&frame[..=HEADER_SIZE], &[capability.into_raw().raw()]);
     kernel_tests::kassert_eq!(port_send(session.as_raw(), CALL_TIMEOUT), 0);
 }
@@ -1490,7 +1493,7 @@ fn filesystem_closes_the_capability_of_an_unparsed_frame() {
     let capability = ram_session();
     let signal = Signal::create().expect("signal to ride the frames");
     for _ in 0..LEAK_FRAMES {
-        // Капа приехала в кадре, который не разобран: закрыть её больше некому.
+        // Капа оказалась в кадре, который не разобран, поэтому закрыть её больше некому.
         let rider = signal
             .handle()
             .duplicate(Rights::READ | Rights::TRANSFER, None)
@@ -1506,12 +1509,12 @@ fn filesystem_closes_the_capability_of_an_undelivered_reply() {
     let client = connect(&capability);
     let opened = open(&client, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
 
-    // Обе стороны говорят по одной капе, и дескриптор у них общий: разница только в том,
-    // что второй не ждёт ответа.
+    // Обе стороны говорят по одной капе, и дескриптор у них общий. Разница только в том, что второй
+    // не ждёт ответа.
     let abandoned = connect_abandoning(&capability);
     for _ in 0..LEAK_FRAMES {
-        // Окно уезжает в ответе, доставить который некому: выданный хэндл
-        // остаётся у сервера.
+        // Окно передаётся в ответе, доставить который некому, поэтому выданный хэндл остаётся у
+        // сервера.
         let _ = abandoned.backing_memory(opened.fd);
     }
     kernel_tests::kassert!(vends_a_buffer());
@@ -1585,9 +1588,9 @@ fn run_client_fixture() {
 
 #[kernel_test]
 fn filesystem_reaps_the_session_of_a_terminated_client() {
-    // Смерть процесса освобождает его капы: сессия уходит вместе с буфером и дескрипторами, без
-    // капы на процесс и без отдельного потока. Цикл сходится только на сервере, убирающем
-    // ушедшие сессии: их буферы держат бюджет монтирования.
+    // Завершение процесса освобождает его капы, поэтому сессия закрывается вместе с буфером и
+    // дескрипторами, без капы на процесс и без отдельного потока. Цикл сходится только на сервере,
+    // который убирает закрывшиеся сессии, потому что их буферы держат бюджет монтирования.
     for _ in 0..REAP_SESSIONS {
         run_client_fixture();
     }
@@ -1595,8 +1598,8 @@ fn filesystem_reaps_the_session_of_a_terminated_client() {
 
 #[kernel_test]
 fn filesystem_reaps_the_session_of_a_closed_capability() {
-    // Живой клиент закрыл единственную капу значка: для сервера это тот же уход стороны, что и
-    // смерть процесса.
+    // Живой клиент закрыл единственную капу значка. Для сервера это то же закрытие стороны, что и
+    // завершение процесса.
     for _ in 0..REAP_SESSIONS {
         take_and_drop_session();
     }
@@ -1613,7 +1616,7 @@ fn filesystem_reaps_only_the_session_of_the_gone_badge() {
         take_and_drop_session();
     }
 
-    // Значок наблюдателя не уходил: его сессия, дескрипторы и буфер на месте.
+    // Значок наблюдателя не пропадал, поэтому его сессия, дескрипторы и буфер на месте.
     let mine = keeper.stat(kept.fd).expect("stat call").expect("stat ok");
     kernel_tests::kassert_eq!(mine.kind, NodeKind::File);
     let occupied = keeper

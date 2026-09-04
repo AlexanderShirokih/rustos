@@ -3,7 +3,7 @@
 use ipc::{
     WireTyped, WireValue,
     schema::WireType,
-    wire::{ENUM_DISCRIMINANT_SIZE, HandleSlots, IpcError, MessageBuf, value},
+    wire::{ENUM_DISCRIMINANT_WIDTH, HandleSlots, IpcError, MessageBuf, value},
 };
 
 /// Причина отказа файловой операции.
@@ -111,7 +111,7 @@ impl<'a> WireValue<'a> for FileSystemError {
 }
 
 impl WireTyped for FileSystemError {
-    const WIRE_TYPE: WireType = WireType::Uint(ENUM_DISCRIMINANT_SIZE as u8);
+    const WIRE_TYPE: WireType = WireType::Uint(ENUM_DISCRIMINANT_WIDTH);
 }
 
 #[cfg(test)]

@@ -117,6 +117,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "startup-ownership-fixture"
+path = "src/startup_ownership_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "managed-startup-closed"
 path = "src/managed_startup_closed.rs"
 test = false
@@ -127,6 +133,7 @@ kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
 collections = { workspace = true }
 component-abi = { workspace = true }
+component-client = { workspace = true }
 device-resolver = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }

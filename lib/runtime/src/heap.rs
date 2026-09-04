@@ -42,26 +42,32 @@ impl FreeLists {
     }
 
     fn pop(&mut self, class: usize) -> *mut u8 {
-        let head = self.heads[class];
+        let Some(&head) = self.heads.get(class) else {
+            return core::ptr::null_mut();
+        };
         if head.is_null() {
             return head;
         }
         // SAFETY: свободный блок хранит указатель на следующий в своих первых 8 байтах;
         // блок не меньше MIN_CLASS и выровнен по своему классу, чтение корректно.
         #[allow(clippy::cast_ptr_alignment)]
-        unsafe {
-            self.heads[class] = head.cast::<*mut u8>().read();
+        let next = unsafe { head.cast::<*mut u8>().read() };
+        if let Some(slot) = self.heads.get_mut(class) {
+            *slot = next;
         }
         head
     }
 
     fn push(&mut self, class: usize, block: *mut u8) {
+        let Some(slot) = self.heads.get_mut(class) else {
+            return;
+        };
         // SAFETY: блок вышел из этого же класса, свободен и не меньше MIN_CLASS.
         #[allow(clippy::cast_ptr_alignment)]
         unsafe {
-            block.cast::<*mut u8>().write(self.heads[class]);
+            block.cast::<*mut u8>().write(*slot);
         }
-        self.heads[class] = block;
+        *slot = block;
     }
 
     fn refill(&mut self, class: usize) -> bool {

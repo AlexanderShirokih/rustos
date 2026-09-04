@@ -118,7 +118,7 @@ impl PortTransport {
             let ncaps = decode_tag(buf.tag).ncaps.min(IPC_BUFFER_MAX_CAPS);
             core::array::from_fn(|index| {
                 (index < ncaps)
-                    .then(|| Handle::new(buf.caps[index]))
+                    .then(|| buf.caps.get(index).copied().and_then(Handle::new))
                     .flatten()
             })
         }
@@ -138,7 +138,7 @@ impl PortTransport {
         if ret < 0 {
             return Err(map_recv_error(ret));
         }
-        #[allow(clippy::cast_sign_loss)]
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let reply = Handle::new(ret as u32);
         self.pending_reply.set(reply);
         Ok(())
@@ -157,7 +157,10 @@ impl PortTransport {
         // в пределах полей структуры.
         unsafe {
             let buf = &mut *ptr;
-            buf.data[..bytes.len()].copy_from_slice(bytes);
+            let Some(target) = buf.data.get_mut(..bytes.len()) else {
+                return Err(IpcError::Truncated);
+            };
+            target.copy_from_slice(bytes);
             for (slot, &raw) in buf.caps.iter_mut().zip(handles) {
                 *slot = raw;
             }
@@ -177,8 +180,14 @@ impl PortTransport {
             if len > bytes.len() || ncaps > handles.len() {
                 return Err(IpcError::Truncated);
             }
-            bytes[..len].copy_from_slice(&buf.data[..len]);
-            for (dst, &raw) in handles.iter_mut().zip(&buf.caps[..ncaps]) {
+            let (Some(target), Some(source)) = (bytes.get_mut(..len), buf.data.get(..len)) else {
+                return Err(IpcError::Truncated);
+            };
+            target.copy_from_slice(source);
+            let Some(caps) = buf.caps.get(..ncaps) else {
+                return Err(IpcError::Truncated);
+            };
+            for (dst, &raw) in handles.iter_mut().zip(caps) {
                 *dst = raw;
             }
             (len, ncaps)

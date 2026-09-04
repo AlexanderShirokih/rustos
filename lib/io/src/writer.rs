@@ -36,7 +36,7 @@ impl<S: ByteSink> Writer for BlockingWriter<'_, S> {
     fn write_all(&self, mut s: &[u8]) {
         while !s.is_empty() {
             match self.sink.try_write_slice(s) {
-                Ok(n) if n > 0 => s = &s[n..],
+                Ok(n) if n > 0 => s = s.get(n..).unwrap_or_default(),
                 _ => core::hint::spin_loop(),
             }
         }

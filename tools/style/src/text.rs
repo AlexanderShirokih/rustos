@@ -75,5 +75,7 @@ pub fn fingerprint(text: &str) -> String {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{:08x}", hash as u32)
+    #[allow(clippy::cast_possible_truncation)]
+    let fingerprint = hash as u32;
+    format!("{fingerprint:08x}")
 }

@@ -209,7 +209,10 @@ impl<E: Environment> FileSystem<E> {
         matches!(self.sessions, Sessions::Routed { .. })
     }
 
+    #[allow(clippy::expect_used)]
     fn session(&self) -> &Session<E> {
+        // Операция начинается с открытия окна либо с укладки сессии в кэш, и к этому месту
+        // сессия существует по построению.
         match &self.sessions {
             Sessions::Window(window) => {
                 opened_window(window.as_ref()).expect("the operation opened the window session")

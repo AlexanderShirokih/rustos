@@ -55,18 +55,15 @@ impl FrameBitmap {
 
     #[inline]
     fn write<F: Fn(u64) -> u64>(&mut self, index: usize, update: F) {
-        if index < self.bitmap.len() {
-            self.bitmap[index] = update(self.bitmap[index]);
+        if let Some(word) = self.bitmap.get_mut(index) {
+            *word = update(*word);
         }
     }
 
     #[inline]
     fn read(&self, offset: usize) -> u64 {
-        if offset < self.bitmap.len() {
-            self.bitmap[offset]
-        } else {
-            u64::MAX // За пределами - считаем все биты занятыми
-        }
+        // За пределами - считаем все биты занятыми
+        self.bitmap.get(offset).copied().unwrap_or(u64::MAX)
     }
 
     pub const fn start(&self) -> PageAlignedAddress {
@@ -277,17 +274,10 @@ impl FrameBitmap {
         let max_frame_num = self.base_frame.number() + region_frame_count;
 
         // Ищем первый свободный бит
-        let mut word_idx = 0;
-        while word_idx < self.bitmap.len() && self.bitmap[word_idx] == u64::MAX {
-            word_idx += 1;
-        }
-
-        if word_idx >= self.bitmap.len() {
-            return None;
-        }
+        let word_idx = self.bitmap.iter().position(|word| *word != u64::MAX)?;
 
         // Находим первый свободный бит в этом слове
-        let first_bit = (!self.bitmap[word_idx]).trailing_zeros() as usize;
+        let first_bit = (!self.read(word_idx)).trailing_zeros() as usize;
         let start_frame_num =
             self.base_frame.number() + word_idx * Self::BITS_PER_ENTRY + first_bit;
 
@@ -302,7 +292,7 @@ impl FrameBitmap {
         let mut b = first_bit;
 
         while count < max_count && w < self.bitmap.len() {
-            let word = self.bitmap[w];
+            let word = self.read(w);
             while b < Self::BITS_PER_ENTRY && count < max_count {
                 // Проверяем, не вышли ли за границу региона
                 let current_frame_num = self.base_frame.number() + w * Self::BITS_PER_ENTRY + b;
@@ -324,7 +314,7 @@ impl FrameBitmap {
             if current_frame_num >= max_frame_num {
                 break; // Достигли конца региона
             }
-            if b < Self::BITS_PER_ENTRY && (self.bitmap[w] & (1u64 << b)) != 0 {
+            if b < Self::BITS_PER_ENTRY && (self.read(w) & (1u64 << b)) != 0 {
                 break; // Встретили занятый бит
             }
             w += 1;

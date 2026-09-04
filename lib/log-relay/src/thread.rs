@@ -16,8 +16,8 @@ const RELAY_STACK_FRAME_BUFFERS: usize = 4;
 const RELAY_STACK_CALL_RESERVE: usize = 0x1000;
 
 const _: () = assert!(
-    RELAY_STACK as usize
-        >= RELAY_STACK_FRAME_BUFFERS * MESSAGE_INLINE_MAX + RELAY_STACK_CALL_RESERVE
+    RELAY_STACK
+        >= (RELAY_STACK_FRAME_BUFFERS * MESSAGE_INLINE_MAX + RELAY_STACK_CALL_RESERVE) as u64
 );
 
 /// Лог-порт с циклом пересылки в отдельном потоке. Корневая capability не

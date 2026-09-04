@@ -93,7 +93,7 @@ fn validate_component_directories(entries: &[BuiltEntry], files: &[LoadedFile]) 
     // назвать что-то вне её компонент не может.
     for (index, entry) in entries.iter().enumerate() {
         let directory = entry.program.path.as_str();
-        for earlier in &entries[..index] {
+        for earlier in entries.iter().take(index) {
             let other = earlier.program.path.as_str();
             ensure!(
                 !under_directory(directory, other) && !under_directory(other, directory),
@@ -148,9 +148,8 @@ fn validate_built_entries<'a>(entries: &'a [BuiltEntry], files: &[LoadedFile]) -
         .iter()
         .filter(|entry| entry.program.boot)
         .collect::<Vec<_>>();
-    match boot_entries.len() {
-        1 => {
-            let boot = boot_entries[0];
+    match boot_entries.as_slice() {
+        [boot] => {
             ensure!(
                 boot.segments
                     .iter()
@@ -160,8 +159,11 @@ fn validate_built_entries<'a>(entries: &'a [BuiltEntry], files: &[LoadedFile]) -
             );
             Ok(&boot.record_path)
         }
-        0 => bail!("userland image must contain exactly one boot entry; found none"),
-        count => bail!("userland image must contain exactly one boot entry; found {count}"),
+        [] => bail!("userland image must contain exactly one boot entry; found none"),
+        found => bail!(
+            "userland image must contain exactly one boot entry; found {}",
+            found.len()
+        ),
     }
 }
 

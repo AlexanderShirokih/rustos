@@ -125,7 +125,7 @@ impl SignalWaitCancel {
                     // Handle прошёл снимок источников, а к взведению исчез:
                     // закрыт или передан параллельно, и исход ожидания - `Canceled`.
                     if tbl.register_cancel(handle, cancel.clone()).is_err() {
-                        for &done in &self.handles[..registered] {
+                        for &done in self.handles.iter().take(registered) {
                             tbl.unregister_cancel(done, cancel.as_ref());
                         }
                         return Err(IpcError::Canceled);

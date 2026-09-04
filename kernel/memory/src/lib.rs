@@ -4,6 +4,15 @@
 //! аллокаторы фреймов, bump-аллокатор, аллокатор кучи и типы адресов.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::missing_asserts_for_indexing,
+        clippy::std_instead_of_core,
+        clippy::unwrap_in_result
+    )
+)]
+
 extern crate alloc;
 
 #[cfg(test)]

@@ -6,7 +6,8 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_abi::{SESSION_SCOPE_MAX, SessionError, component_manifest, component_sessions};
+use component_abi::{SESSION_SCOPE_MAX, SessionError, component_sessions};
+use component_client::{ReceivedStartup, component_manifest};
 use ipc::{
     Transport as _,
     wire::{Cap, Str},
@@ -43,15 +44,13 @@ impl component_sessions::Service for SessionlessAdmin {
 /// Программа-фикстура зависшей файловой системы: принимает стартовую транзакцию и замолкает.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(startup: Handle) -> ! {
-    let startup = OwnedHandle::from_handle(startup);
-    let Ok(Some(started)) =
-        UnresponsiveFileSystemStartup::receive(&PortTransport::server(startup.borrow()))
+    let Ok(ReceivedStartup { log, resources }) =
+        UnresponsiveFileSystemStartup::receive(OwnedHandle::from_handle(startup))
     else {
         thread_exit(1)
     };
-    drop(OwnedHandle::adopt(started.log));
-    let control = OwnedHandle::adopt(started.control);
-    let service = OwnedHandle::adopt(started.service);
+    drop(log);
+    let UnresponsiveFileSystemStartup { control, service } = resources;
     let transport = PortTransport::server(control.borrow());
     let _ = transport.wait_readable(Timeout::INFINITE);
     let mut admin = SessionlessAdmin {

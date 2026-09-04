@@ -25,7 +25,9 @@ pub fn fill_bytes(bytes: &mut [u8]) {
     seed_once();
     for chunk in bytes.chunks_mut(size_of::<u64>()) {
         let word = next().to_ne_bytes();
-        chunk.copy_from_slice(&word[..chunk.len()]);
+        if let Some(source) = word.get(..chunk.len()) {
+            chunk.copy_from_slice(source);
+        }
     }
 }
 

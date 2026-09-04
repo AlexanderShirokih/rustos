@@ -22,33 +22,31 @@ impl<'a> Crlf<'a> {
         let mut written = 0usize;
         let mut consumed = 0usize;
 
-        while written < out.len() {
+        while let Some(slot) = out.get_mut(written) {
             // Дописать отложенный '\n'
             if self.need_lf {
-                out[written] = b'\n';
+                *slot = b'\n';
                 written += 1;
                 self.need_lf = false;
                 continue;
             }
 
             // Источник кончился
-            if self.in_pos >= self.src.len() {
+            let Some(&b) = self.src.get(self.in_pos) else {
                 break;
-            }
-
-            let b = self.src[self.in_pos];
+            };
 
             if b == b'\n' {
                 // Не потребляем исходный байт, пока не выдали всю пару \r\n
                 // Пишем '\r' сейчас, '\n' - в следующей итерации/вызове.
-                out[written] = b'\r';
+                *slot = b'\r';
                 written += 1;
                 self.need_lf = true;
                 // '\n' из src считаем потреблённым, как только началась пара
                 self.in_pos += 1;
                 consumed += 1;
             } else {
-                out[written] = b;
+                *slot = b;
                 written += 1;
                 self.in_pos += 1;
                 consumed += 1;

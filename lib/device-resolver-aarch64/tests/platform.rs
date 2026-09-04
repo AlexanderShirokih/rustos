@@ -1,6 +1,8 @@
 //! Резолюция устройства платформы через реестр биндингов aarch64: specifier
 //! PL031 в описании qemu virt - `GIC_SPI 2 IRQ_TYPE_LEVEL_HIGH`.
 
+#![allow(clippy::cast_possible_truncation, clippy::expect_used)]
+
 use device_resolver::{
     DeviceMmio, DeviceSelector, DeviceTreePlatform, PlatformDescription, ResolveError,
 };

@@ -17,6 +17,7 @@ pub const SUPERVISOR_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non
 const SUPERVISOR_NAME: &str = "rootkeeper";
 
 /// Значок лог-сессии компонента с номером `index` в плане.
+#[allow(clippy::expect_used)]
 #[must_use]
 pub fn component_badge(index: u16) -> NonZeroU64 {
     NonZeroU64::new(SUPERVISOR_BADGE.get() + 1 + u64::from(index)).expect("badge is non-zero")

@@ -1,0 +1,21 @@
+[package]
+name = "component-client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+# Крейт userspace, и его workspace — `user/`: оттуда идёт сборка под таргет RustOS.
+workspace = "../../user"
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+component-abi = { workspace = true }
+ipc = { workspace = true }
+kernel-objects = { workspace = true }
+syscall = { workspace = true }
+
+[lints]
+workspace = true

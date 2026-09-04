@@ -112,7 +112,7 @@ impl Bucket {
     fn claim(&self) -> Option<u32> {
         for (index, slot) in self.slots.iter().enumerate() {
             if take_slot(slot, SLOT_FREE) {
-                return Some(index as u32);
+                return u32::try_from(index).ok();
             }
         }
         None
@@ -227,7 +227,9 @@ fn wait_until(
                 expected,
             };
             let woken = park(&parked, deadline, &mut between);
-            bucket.slots[slot as usize].store(SLOT_FREE, Release);
+            if let Some(taken) = bucket.slots.get(slot as usize) {
+                taken.store(SLOT_FREE, Release);
+            }
             return woken;
         }
 
@@ -264,7 +266,9 @@ fn slotless_round(
 
 fn park(parked: &Parked<'_>, deadline: &Deadline, between: &mut Option<impl FnOnce()>) -> bool {
     let bit = 1 << parked.slot;
-    let slot = &parked.bucket.slots[parked.slot as usize];
+    let Some(slot) = parked.bucket.slots.get(parked.slot as usize) else {
+        return false;
+    };
 
     loop {
         // Слот в SLOT_OWNED невиден будящим, и бит снимает только его владелец.
@@ -323,7 +327,9 @@ fn address_of(futex: &Futex) -> u64 {
     ptr::from_ref(futex) as usize as u64
 }
 
+#[allow(clippy::indexing_slicing)]
 fn bucket_for(address: u64) -> &'static Bucket {
+    // Сдвиг в `bucket_index` оставляет ровно `log2(BUCKETS)` бит, и индекс лежит в таблице.
     &TABLE[bucket_index(address)]
 }
 

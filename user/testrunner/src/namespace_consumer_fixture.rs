@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_abi::component_manifest;
+use component_client::{ReceivedStartup, component_manifest};
 use filesystem_abi::{PATH_MAX, namespace};
 use ipc::wire::Str;
 use kernel_objects::{OwnedHandle, Signal};
@@ -31,14 +31,14 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(startup: Handle) -> ! {
-    let startup = OwnedHandle::from_handle(startup);
-    let Ok(Some(started)) = ConsumerStartup::receive(&PortTransport::server(startup.borrow()))
+    let Ok(ReceivedStartup { log, resources }) =
+        ConsumerStartup::receive(OwnedHandle::from_handle(startup))
     else {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
-    drop(startup);
+    drop(log);
 
-    let session = OwnedHandle::adopt(started.namespace);
+    let session = resources.namespace;
     let namespace = namespace::Client::new(PortTransport::client(&session)).with_wait(CALL_TIMEOUT);
     let Some(path) = Str::<{ PATH_MAX }>::new(PROBE_PATH) else {
         thread_exit(NO_ANSWER_EXIT_CODE);

@@ -1,6 +1,10 @@
 //! Архитектурно-независимые типы user-process: образ, загрузчик, VM-аллокатор.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(clippy::missing_asserts_for_indexing, clippy::unwrap_in_result)
+)]
 
 extern crate alloc;
 #[cfg(test)]

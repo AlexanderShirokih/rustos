@@ -9,11 +9,11 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_abi::component_manifest;
+use component_client::{ReceivedStartup, component_manifest};
 use filesystem::ImageFileSystem;
 use filesystem_server::{Error, Result, serve};
 use kernel_objects::OwnedHandle;
-use runtime::{PortTransport, log_fmt, thread_exit};
+use runtime::{log_fmt, thread_exit};
 use syscall::Handle;
 
 const LOG_TAG: &str = "imagefs";
@@ -39,24 +39,20 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 }
 
 fn run(startup: Handle) -> Result<()> {
-    let startup = OwnedHandle::from_handle(startup);
-    let transport = PortTransport::server(startup.borrow());
-    let started = receive_startup(&transport)?;
+    let ReceivedStartup { log, resources } =
+        ImageFileSystemStartup::receive(OwnedHandle::from_handle(startup))
+            .map_err(|_| Error::Start)?;
     serve(
-        started.log,
-        started.control,
-        started.service,
-        Some(started.image),
+        log,
+        resources.control,
+        resources.service,
+        Some(resources.image),
         LOG_TAG,
         |backing| {
             let backing = backing.ok_or(Error::Start)?;
             Ok(ImageFileSystem::new(backing)?)
         },
     )
-}
-
-fn receive_startup<T: ipc::Transport>(transport: &T) -> Result<ImageFileSystemStartup> {
-    ImageFileSystemStartup::receive(transport)?.ok_or(Error::Start)
 }
 
 #[panic_handler]

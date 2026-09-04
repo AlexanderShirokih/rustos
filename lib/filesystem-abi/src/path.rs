@@ -105,9 +105,13 @@ pub fn rebase<'a>(
     if len == 0 {
         return Ok(Path::ROOT);
     }
-    out[..scope.len()].copy_from_slice(scope.as_bytes());
-    out[scope.len()..len].copy_from_slice(tail.as_bytes());
-    let joined = core::str::from_utf8(&out[..len]).map_err(|_| FileSystemError::InvalidPath)?;
+    let joined = out.get_mut(..len).ok_or(FileSystemError::InvalidPath)?;
+    let (scope_out, tail_out) = joined
+        .split_at_mut_checked(scope.len())
+        .ok_or(FileSystemError::InvalidPath)?;
+    scope_out.copy_from_slice(scope.as_bytes());
+    tail_out.copy_from_slice(tail.as_bytes());
+    let joined = core::str::from_utf8(joined).map_err(|_| FileSystemError::InvalidPath)?;
     Path::new(joined)
 }
 

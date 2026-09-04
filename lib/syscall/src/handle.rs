@@ -43,7 +43,7 @@ impl Handle {
     /// иначе декодированный `SyscallError`.
     pub const fn from_syscall_return(ret: i64) -> Result<Self, SyscallError> {
         if ret >= 1 && ret <= u32::MAX as i64 {
-            #[allow(clippy::cast_sign_loss)]
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             let handle = ret as u32;
             match NonZeroU32::new(handle) {
                 Some(nz) => Ok(Self(nz)),

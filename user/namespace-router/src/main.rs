@@ -16,7 +16,8 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use component_abi::{component_manifest, supervisor_gone};
+use component_abi::supervisor_gone;
+use component_client::{ReceivedStartup, component_manifest};
 use filesystem_abi::{namespace, namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
 use kernel_objects::{OwnedHandle, Thread};
@@ -29,7 +30,7 @@ use syscall::{Handle, Timeout};
 mod error;
 mod router;
 
-use error::{Error, Result};
+use error::Result;
 use router::{Administering, MountTable, Resolving};
 
 const LOG_TAG: &str = "router";
@@ -63,12 +64,10 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 }
 
 fn run(startup: Handle) -> Result<()> {
-    let StartResources {
-        log,
-        service,
-        control,
-    } = handshake(startup)?;
+    let ReceivedStartup { log, resources } =
+        RouterStartup::receive(OwnedHandle::from_handle(startup))?;
     install_log(log.into_raw(), LOG_TAG);
+    let RouterStartup { control, service } = resources;
 
     let admin_port = AdminPort {
         port: control,
@@ -156,23 +155,6 @@ fn serve_admin(mut admin: AdminPort) -> u32 {
     }
     log_line("control port closed");
     0
-}
-
-struct StartResources {
-    log: OwnedHandle,
-    service: OwnedHandle,
-    control: OwnedHandle,
-}
-
-fn handshake(startup: Handle) -> Result<StartResources> {
-    let startup = OwnedHandle::from_handle(startup);
-    let started =
-        RouterStartup::receive(&PortTransport::server(startup.borrow()))?.ok_or(Error::Start)?;
-    Ok(StartResources {
-        log: OwnedHandle::adopt(started.log),
-        service: OwnedHandle::adopt(started.service),
-        control: OwnedHandle::adopt(started.control),
-    })
 }
 
 #[panic_handler]

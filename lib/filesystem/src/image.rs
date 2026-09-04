@@ -306,7 +306,10 @@ impl FileSystemBackend for ImageFileSystem {
             return Ok(0);
         };
         let count = tail.len().min(out.len());
-        out[..count].copy_from_slice(&tail[..count]);
+        let (Some(target), Some(source)) = (out.get_mut(..count), tail.get(..count)) else {
+            return Ok(0);
+        };
+        target.copy_from_slice(source);
         Ok(count)
     }
 
@@ -357,19 +360,29 @@ impl FileSystemBackend for ImageFileSystem {
         for (index, entry) in self.entries_under(prefix, start) {
             // Имя проверено при разборе образа, и отказ значит нехватку
             // места: запись остаётся непросмотренной.
-            let Ok(len) = entry.encode(&mut out[written..]) else {
+            let cursor = u32::try_from(index).map_err(|_| FileSystemError::NoSpace)?;
+            let Some(rest) = out.get_mut(written..) else {
                 return Ok(Listed {
                     count,
-                    next: DirCursor::from_raw(index as u32),
+                    next: DirCursor::from_raw(cursor),
+                    end: false,
+                });
+            };
+            let Ok(len) = entry.encode(rest) else {
+                return Ok(Listed {
+                    count,
+                    next: DirCursor::from_raw(cursor),
                     end: false,
                 });
             };
             written += len;
             count += 1;
         }
+        let end =
+            u32::try_from(self.range_end(prefix, start)).map_err(|_| FileSystemError::NoSpace)?;
         Ok(Listed {
             count,
-            next: DirCursor::from_raw(self.range_end(prefix, start) as u32),
+            next: DirCursor::from_raw(end),
             end: true,
         })
     }
@@ -399,7 +412,9 @@ impl FileSystemBackend for ImageFileSystem {
 
 fn node_id(index: usize, depth: usize) -> NodeId {
     // Записей в образе не больше u16::MAX: пара (номер, глубина) укладывается в NodeId.
-    NodeId::from_raw(((index as u32) << DEPTH_BITS) | depth as u32)
+    #[allow(clippy::cast_possible_truncation)]
+    let packed = ((index as u32) << DEPTH_BITS) | depth as u32;
+    NodeId::from_raw(packed)
 }
 
 fn entry_under<'a>(path: &'a str, prefix: &str) -> Option<DirEntry<'a>> {

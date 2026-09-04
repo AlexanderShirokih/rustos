@@ -2,6 +2,7 @@
 //! обязаны держаться при одновременных запросах с разных CPU.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_in_result)]
 
 mod common;
 

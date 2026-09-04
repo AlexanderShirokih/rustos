@@ -37,13 +37,15 @@ pub(super) fn validate_stage_order(
 ) -> Result<()> {
     // Ступень 0 поднимается целиком до того, как её владелец политики загрузки подаст набор
     // ступени 1: назвать компонент ступени 1 её зависимость не может.
-    for index in 0..boundary {
-        for &edge in bindings[index].providers.iter().chain(&after[index]) {
+    let stage0 = bindings.iter().zip(after).zip(names).take(boundary);
+    for ((binding, after), name) in stage0 {
+        for &edge in binding.providers.iter().chain(after) {
+            let target = names
+                .get(edge)
+                .context("boot plan names a dependency outside the composition")?;
             ensure!(
                 edge < boundary,
-                "boot plan component '{}' depends on '{}', which stage 1 raises",
-                names[index],
-                names[edge]
+                "boot plan component '{name}' depends on '{target}', which stage 1 raises"
             );
         }
     }
@@ -57,30 +59,39 @@ pub(super) fn validate_acyclic(
 ) -> Result<()> {
     // Порядок запуска - топологический по объединению провайдеров слотов и
     // after: цикл делает его невыразимым.
-    let edges = |index: usize| bindings[index].providers.iter().chain(&after[index]);
+    let edges: Vec<Vec<usize>> = bindings
+        .iter()
+        .zip(after)
+        .map(|(binding, after)| binding.providers.iter().chain(after).copied().collect())
+        .collect();
+    let outside = || "boot plan names a dependency outside the composition";
     let mut dependents: Vec<usize> = vec![0; names.len()];
-    for index in 0..names.len() {
-        for &edge in edges(index) {
-            dependents[edge] += 1;
-        }
+    for &edge in edges.iter().flatten() {
+        *dependents.get_mut(edge).with_context(outside)? += 1;
     }
-    let mut ready: Vec<usize> = (0..names.len())
-        .filter(|index| dependents[*index] == 0)
+    let mut ready: Vec<usize> = dependents
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count == 0)
+        .map(|(index, _)| index)
         .collect();
     let mut ordered = 0;
     while let Some(index) = ready.pop() {
         ordered += 1;
-        for &edge in edges(index) {
-            dependents[edge] -= 1;
-            if dependents[edge] == 0 {
+        for &edge in edges.get(index).with_context(outside)? {
+            let dependent = dependents.get_mut(edge).with_context(outside)?;
+            *dependent -= 1;
+            if *dependent == 0 {
                 ready.push(edge);
             }
         }
     }
     if ordered != names.len() {
-        let looped: Vec<&str> = (0..names.len())
-            .filter(|index| dependents[*index] != 0)
-            .map(|index| names[index])
+        let looped: Vec<&str> = dependents
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count != 0)
+            .filter_map(|(index, _)| names.get(index).copied())
             .collect();
         bail!(
             "boot plan dependencies form a cycle over components: {}",

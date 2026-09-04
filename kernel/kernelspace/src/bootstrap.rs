@@ -378,7 +378,10 @@ fn store_kernel_buffer(
     if bytes.len() > buf.data.len() || handles.len() > buf.caps.len() {
         return Err(WireError::FrameOverflow);
     }
-    buf.data[..bytes.len()].copy_from_slice(bytes);
+    buf.data
+        .get_mut(..bytes.len())
+        .ok_or(WireError::FrameOverflow)?
+        .copy_from_slice(bytes);
     for (slot, &handle) in buf.caps.iter_mut().zip(handles) {
         *slot = handle;
     }
@@ -402,6 +405,9 @@ fn load_kernel_buffer(
     }
 
     let _ = handles;
-    bytes[..len].copy_from_slice(&buf.data[..len]);
+    let (Some(target), Some(source)) = (bytes.get_mut(..len), buf.data.get(..len)) else {
+        return Err(WireError::Truncated);
+    };
+    target.copy_from_slice(source);
     Ok(MessageLen::new(len, 0))
 }

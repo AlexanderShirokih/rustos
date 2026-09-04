@@ -1,3 +1,5 @@
+#![allow(clippy::indexing_slicing, clippy::std_instead_of_core)]
+
 use std::cell::Cell;
 
 use drivers_common::{

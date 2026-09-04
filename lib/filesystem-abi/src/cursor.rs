@@ -46,6 +46,7 @@ impl<'a> WireValue<'a> for DirCursor {
 }
 
 impl WireTyped for DirCursor {
+    #[allow(clippy::cast_possible_truncation)]
     const WIRE_TYPE: WireType = WireType::Uint(size_of::<u32>() as u8);
 }
 

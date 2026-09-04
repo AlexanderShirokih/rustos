@@ -1,3 +1,5 @@
+#![allow(clippy::std_instead_of_core, clippy::panic, clippy::expect_used)]
+
 use std::{
     env,
     fs::File,

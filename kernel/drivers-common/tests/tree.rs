@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::indexing_slicing)]
 
 use drivers_common::tree::{DeviceNode, DeviceTreeSource, NodeProperty};
 

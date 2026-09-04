@@ -1,6 +1,8 @@
+#![allow(clippy::expect_used)]
+
 use std::{collections::BTreeSet, path::Path};
 
-use style_tool::{Category, Config, Severity, compiled};
+use style_tool::{Config, Severity, compiled};
 
 fn style_toml() -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../style.toml"))
@@ -60,26 +62,18 @@ fn declared_rule_without_an_explanation_is_rejected() {
 }
 
 #[test]
-fn prose_rules_stay_at_warn() {
-    let catalog = compiled();
-    let Ok(mut config) = Config::parse(&style_toml(), &catalog) else {
-        panic!("style.toml must load");
-    };
-    for rule in config.catalog(compiled()) {
-        if rule.meta.category == Category::Prose {
-            assert_eq!(rule.meta.severity, Severity::Warn, "{}", rule.meta.id);
-        }
-    }
-}
-
-#[test]
-fn prose_rule_cannot_be_raised_to_deny() {
+fn prose_rule_is_raised_to_deny_by_configuration() {
     let catalog = compiled();
     let raised = "[rules]\ncomment_width = \"deny\"\n";
-    let Err(error) = Config::parse(raised, &catalog) else {
-        panic!("prose ceiling must hold");
+    let Ok(mut config) = Config::parse(raised, &catalog) else {
+        panic!("configuration must load");
     };
-    assert!(error.to_string().contains("ceiling"), "{error}");
+    let rule = config
+        .catalog(compiled())
+        .into_iter()
+        .find(|rule| rule.meta.id == "comment_width")
+        .expect("comment_width is compiled");
+    assert_eq!(config.level(&rule.meta), Some(Severity::Deny));
 }
 
 #[test]

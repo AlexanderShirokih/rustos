@@ -22,6 +22,7 @@ impl HandleId {
     pub(super) const SLOT_BITS: u32 = 16;
     pub(super) const SLOT_MASK: u32 = (1 << Self::SLOT_BITS) - 1;
     pub(super) const MAX_SLOT_INDEX: u32 = Self::SLOT_MASK;
+    #[allow(clippy::cast_possible_truncation)]
     pub(super) const MAX_GENERATION: u16 = ((1u32 << (32 - Self::SLOT_BITS)) - 1) as u16;
 
     const GENERATION_SCALE: NonZeroU32 = match NonZeroU32::new(1 << Self::SLOT_BITS) {

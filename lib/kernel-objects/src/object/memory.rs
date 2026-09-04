@@ -292,7 +292,9 @@ impl Mapping {
 
     /// MMIO-хэндлер по базовому VA маппинга (device-окна).
     pub fn mmio(&self) -> Mmio {
-        Mmio::new(self.va as usize)
+        #[allow(clippy::cast_possible_truncation)]
+        let base = self.va as usize;
+        Mmio::new(base)
     }
 
     /// Размер маппинга в байтах.
@@ -308,6 +310,7 @@ impl Mapping {
     /// региона нет отображений на запись ни в одном адресном пространстве.
     pub unsafe fn as_bytes(&self) -> &[u8] {
         let base = self.va as *const u8;
+        #[allow(clippy::expect_used)]
         let len = usize::try_from(self.size_bytes).expect("mapping size fits usize");
         // SAFETY: ядро установило маппинг на [va, va+size_bytes) и
         // инициализировало эту память. Срез заимствует диапазон на время `&self`
@@ -334,6 +337,7 @@ impl Mapping {
         // в другом адресном пространстве. Середина идёт словами по выровненному адресу, голова и
         // хвост - побайтно; каждый байт читается ровно один раз, а разрыв, наблюдаемый писателем
         // из другого адресного пространства, атомарен с точностью до слова.
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
         unsafe {
             for index in 0..head {
                 target.add(index).write(base.add(index).read_volatile());
@@ -371,6 +375,7 @@ impl Mapping {
         // в другом адресном пространстве. Середина идёт словами по выровненному адресу, голова и
         // хвост - побайтно; каждый байт пишется ровно один раз, а разрыв, наблюдаемый читателем
         // из другого адресного пространства, атомарен с точностью до слова.
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
         unsafe {
             for index in 0..head {
                 base.add(index).write_volatile(source.add(index).read());
@@ -399,6 +404,7 @@ impl Mapping {
         // выровненному адресу, голова и хвост - побайтно; каждый байт пишется ровно один раз, а
         // разрыв, наблюдаемый читателем из другого адресного пространства, атомарен с точностью
         // до слова.
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
         unsafe {
             for index in 0..head {
                 base.add(index).write_volatile(0);
@@ -417,12 +423,13 @@ impl Mapping {
     }
 
     fn range_ptr(&self, offset: usize, len: usize) -> Result<*mut u8> {
-        let size = usize::try_from(self.size_bytes).expect("mapping size fits usize");
+        let size = usize::try_from(self.size_bytes).map_err(|_| Error::OutOfBounds)?;
         let end = offset.checked_add(len).ok_or(Error::OutOfBounds)?;
         if end > size {
             return Err(Error::OutOfBounds);
         }
-        Ok((usize::try_from(self.va).expect("va fits usize") + offset) as *mut u8)
+        let base = usize::try_from(self.va).map_err(|_| Error::OutOfBounds)?;
+        Ok((base + offset) as *mut u8)
     }
 
     /// Меняет флаги маппинга на `flags`.

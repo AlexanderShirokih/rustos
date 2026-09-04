@@ -45,6 +45,7 @@ impl Mmio {
     #[inline(always)]
     pub fn read<T: VolatileInt>(&self, offset: usize) -> T {
         // SAFETY: вызывающий гарантирует корректность base + offset и выравнивание под T.
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
         unsafe {
             let p = self.base.add(offset) as *const T;
             core::ptr::read_volatile(p)
@@ -56,6 +57,7 @@ impl Mmio {
     #[inline(always)]
     pub fn write<T: VolatileInt>(&self, offset: usize, value: T) {
         // SAFETY: вызывающий гарантирует корректность base + offset и выравнивание под T.
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
         unsafe {
             let p = self.base.add(offset).cast::<T>();
             core::ptr::write_volatile(p, value);

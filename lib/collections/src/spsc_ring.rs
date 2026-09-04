@@ -257,9 +257,12 @@ impl SpscRing {
             cell.store(byte, Ordering::Relaxed);
         }
         // frame.len() <= slot_payload, а slot_payload вычисляется из region_len /
-        // slot_stride, что не превышает u32::MAX на практике; приведение as u32
-        // усекает, но значение заведомо в диапазоне по инварианту выше.
-        len_field.store(frame.len() as u32, Ordering::Relaxed);
+        // slot_stride, что не превышает u32::MAX на практике; кадр длиннее диапазона
+        // не публикуется вовсе.
+        let Ok(len) = u32::try_from(frame.len()) else {
+            return Err(RingError::TooLarge);
+        };
+        len_field.store(len, Ordering::Relaxed);
 
         between();
 

@@ -72,7 +72,7 @@ impl core::fmt::Write for FmtAdapter<'_> {
 fn iter_cases() -> &'static [TestCase] {
     // SAFETY: символы экспортируются линкер-скриптом тестового бинаря и
     // обрамляют секцию `.tests.kernel` со статиками, размещёнными
-    // `register_test!`. `end >= start` по конструкции скрипта.
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
     unsafe {
         let start = core::ptr::addr_of!(__tests_kernel_start);
         let end = core::ptr::addr_of!(__tests_kernel_end);

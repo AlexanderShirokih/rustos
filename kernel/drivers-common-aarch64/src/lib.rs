@@ -1,6 +1,7 @@
 //! Драйверы устройств AArch64.
 
 #![no_std]
+#![allow(clippy::cast_possible_truncation)]
 
 extern crate alloc;
 

@@ -192,7 +192,7 @@ fn copy_body(
     let mut copied = 0;
     while copied < len {
         let n = (len - copied).min(BODY_CHUNK);
-        let slice = &mut chunk[..n];
+        let slice = chunk.get_mut(..n).ok_or(IpcError::BufferTooSmall)?;
         read_bytes(sender, DATA_OFFSET + copied, slice)?;
         write_bytes(receiver, DATA_OFFSET + copied, slice)?;
         copied += n;

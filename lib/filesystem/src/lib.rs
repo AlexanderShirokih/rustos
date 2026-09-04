@@ -6,6 +6,10 @@
 //! монтированиям держит маршрутизатор имён.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(clippy::cast_possible_truncation, clippy::unwrap_in_result)
+)]
 
 extern crate alloc;
 

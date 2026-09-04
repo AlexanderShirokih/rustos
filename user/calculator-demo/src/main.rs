@@ -3,12 +3,11 @@
 //! секунду спрашивает произведение у калькулятора, время у часов реального
 //! времени и кладёт обе величины строкой в журнал.
 
-#![feature(molecular_ext)]
-
-use std::{os::molecular, process};
+use std::process;
 
 use calculator_demo::calculator;
-use component_abi::{component_manifest, supervisor_gone};
+use component_abi::supervisor_gone;
+use component_client::component_manifest;
 use filesystem_abi::{AccessMode, OpenFlags};
 use filesystem_client::FileSystem;
 use ipc::{Transport as _, wire::IpcError};
@@ -31,11 +30,13 @@ const CLOCK_LOST_EXIT_CODE: i32 = 4;
 const SUPERVISOR_LOST_EXIT_CODE: i32 = 7;
 
 component_manifest! {
-    slots: {
-        calculator: service(protocol = "Calculator"),
-        clock: service(protocol = "Rtc"),
-        area: directory(instance = "filesystem-imagefs"),
-    },
+    struct DemoStartup {
+        slots: {
+            calculator: service(protocol = "Calculator"),
+            clock: service(protocol = "Rtc"),
+            area: directory(instance = "filesystem-imagefs"),
+        },
+    }
 }
 
 enum Supervisor {
@@ -44,32 +45,23 @@ enum Supervisor {
 }
 
 fn main() {
-    let Some(startup) = molecular::startup() else {
-        process::exit(NO_STARTUP_EXIT_CODE);
-    };
-    let mut slots = startup.slots();
-    let (Some(calculator_session), Some(clock_session), Some(area_session), Some(control)) = (
-        slots
-            .next()
-            .and_then(|slot| OwnedHandle::from_raw(slot.get())),
-        slots
-            .next()
-            .and_then(|slot| OwnedHandle::from_raw(slot.get())),
-        slots
-            .next()
-            .and_then(|slot| OwnedHandle::from_raw(slot.get())),
-        OwnedHandle::from_raw(startup.control().get()),
-    ) else {
+    // До установки лог-сессии вывод не доходит до журнала, поэтому процесс называет отказ
+    // приёма кодом выхода.
+    let Ok(startup) = component_client_std::receive(DemoStartup::receive) else {
         process::exit(NO_STARTUP_EXIT_CODE);
     };
 
     let calculator =
-        calculator::Client::new(PortTransport::client(&calculator_session)).with_wait(CALL_TIMEOUT);
-    let clock = rtc::Client::new(PortTransport::client(&clock_session)).with_wait(CALL_TIMEOUT);
+        calculator::Client::new(PortTransport::client(&startup.calculator)).with_wait(CALL_TIMEOUT);
+    let clock = rtc::Client::new(PortTransport::client(&startup.clock)).with_wait(CALL_TIMEOUT);
 
     println!("started");
-    announce(area_session);
-    process::exit(run(&calculator, &clock, &PortTransport::server(&control)))
+    announce(startup.area);
+    process::exit(run(
+        &calculator,
+        &clock,
+        &PortTransport::server(&startup.control),
+    ))
 }
 
 fn announce(area: OwnedHandle) {

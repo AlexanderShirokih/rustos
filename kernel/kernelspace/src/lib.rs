@@ -4,6 +4,15 @@
 //! и точку входа `kmain`.
 
 #![no_std]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::std_instead_of_core,
+        clippy::unimplemented,
+        clippy::unwrap_in_result
+    )
+)]
+
 extern crate alloc;
 
 pub mod bootstrap;

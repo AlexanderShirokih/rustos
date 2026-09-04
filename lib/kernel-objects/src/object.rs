@@ -1,7 +1,7 @@
-use syscall::{Handle, Timeout, WaitItem};
+use syscall::{Handle, SyscallError, Timeout, WaitItem};
 
 use crate::{
-    error::{Result, value},
+    error::{Error, Result, value},
     svc,
 };
 
@@ -32,5 +32,5 @@ pub(crate) fn wait_signals(handle: Handle, mask: u32, timeout: Timeout) -> Resul
 pub fn wait_any(items: &[WaitItem], timeout: Timeout) -> Result<usize> {
     let (observed, index) = svc::signal_wait_many(items, timeout);
     value(observed)?;
-    Ok(usize::try_from(index).expect("wait index is an index into items"))
+    usize::try_from(index).map_err(|_| Error::Syscall(SyscallError::InvalidArgument))
 }

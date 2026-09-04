@@ -286,7 +286,9 @@ impl core::fmt::Display for CpuBootstrapError {
 /// количеством уровней приоритета.
 pub const fn lowest_priority(priority_levels: usize) -> Priority {
     assert!(priority_levels > 0, "priority_levels must be > 0");
-    Priority::new((priority_levels - 1) as u8)
+    #[allow(clippy::cast_possible_truncation)]
+    let lowest = (priority_levels - 1) as u8;
+    Priority::new(lowest)
 }
 
 impl<A, T> Scheduler<A, T, Uninit>
@@ -405,7 +407,10 @@ where
         // архитектурный контекст, который хранится в таблице потоков scheduler-а.
         // Preemption/IRQ здесь всё ещё замаскированы, как того требует `A::start`;
         // они будут разрешены только после входа в поток через trampoline.
-        unsafe { A::start(&*next_ptr) }
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
+        unsafe {
+            A::start(&*next_ptr)
+        }
     }
 }
 
@@ -1358,8 +1363,8 @@ where
 
         let arch = A::init_user(crate::UserEntry {
             kernel_stack_top: stack_top,
-            user_pc: VirtualAddress::new(entry.entry_pc as usize),
-            user_sp: VirtualAddress::new(entry.user_sp as usize),
+            user_pc: VirtualAddress::new(entry.entry_pc.try_into().unwrap_or(usize::MAX)),
+            user_sp: VirtualAddress::new(entry.user_sp.try_into().unwrap_or(usize::MAX)),
             arg: UserBootstrapArg(entry.arg),
         });
 
@@ -1517,7 +1522,9 @@ where
     fn reap_pending_threads(&mut self) {
         let mut idx = 0;
         while idx < self.pending_thread_removals.len() {
-            let tid = self.pending_thread_removals[idx];
+            let Some(&tid) = self.pending_thread_removals.get(idx) else {
+                break;
+            };
             if self.is_thread_held(tid)
                 || self
                     .threads
@@ -1556,7 +1563,9 @@ where
     fn release_pending_ipc_buffers(&mut self) {
         let mut idx = 0;
         while idx < self.pending_ipc_releases.len() {
-            let tid = self.pending_ipc_releases[idx];
+            let Some(&tid) = self.pending_ipc_releases.get(idx) else {
+                break;
+            };
             if self.is_thread_held(tid)
                 || self
                     .threads
@@ -2177,7 +2186,9 @@ where
         }
         let mut idx = 0;
         while idx < self.pending_process_removals.len() {
-            let pid = self.pending_process_removals[idx];
+            let Some(&pid) = self.pending_process_removals.get(idx) else {
+                break;
+            };
             if self.is_process_running(pid) {
                 idx += 1;
                 continue;
@@ -2253,8 +2264,10 @@ pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
             A::switch_address_space(handle);
         }
         // SAFETY: raw pointers подготовлены под scheduler-lock-ом, а поток, на
-        // который они смотрят, отмечен `previous` и до сюда не снимается.
-        unsafe { A::switch(&mut *prev, &*next) };
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
+        unsafe {
+            A::switch(&mut *prev, &*next);
+        }
     }
 
     // Ушедший в exit поток сюда не возвращается: отметку снимает и процесс

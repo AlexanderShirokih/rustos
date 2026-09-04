@@ -124,9 +124,9 @@ impl NodeExt for Node<'_> {
         )?;
 
         Some(Ranges {
-            child: child_addr as usize,
-            parent: parent_addr as usize,
-            size: size as usize,
+            child: usize::try_from(child_addr).ok()?,
+            parent: usize::try_from(parent_addr).ok()?,
+            size: usize::try_from(size).ok()?,
         })
     }
 
@@ -232,8 +232,8 @@ impl<'a> PropExt<'a> for Property<'a> {
             let size = self.try_read_cell(size_cells, base + address_cells)?;
 
             result.push(AddressSpace {
-                offset: address as usize,
-                size: size as usize,
+                offset: usize::try_from(address).ok()?,
+                size: usize::try_from(size).ok()?,
             });
         }
 

@@ -81,6 +81,12 @@ impl StartedComponent {
         let started = *self;
         (0..started.slot_count).map_while(move |index| started.slot(index))
     }
+
+    /// Слоты транзакции в порядке плана для манифеста, объявившего `declared` слотов.
+    /// Другое число слотов транзакции даёт `None`.
+    pub fn declared_slots(&self, declared: u16) -> Option<impl Iterator<Item = ipc::wire::Cap>> {
+        (self.slot_count == declared).then(|| self.slots())
+    }
 }
 
 impl StartupReceiver {
@@ -267,6 +273,93 @@ mod tests {
         let (image, image_fate) = fake(0x35);
         assert_eq!(client.slot(image), Err(IpcError::PeerClosed));
         assert_eq!(image_fate.get(), Fate::Dropped);
+    }
+
+    #[test]
+    fn the_declared_slots_arrive_in_the_order_of_the_plan() {
+        let (client_end, server_end) = MockEnd::pair();
+        let client = component_startup::Client::new(client_end);
+        client
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 2)
+            .expect("start write");
+        client.slot(IMAGE_CAP).expect("slot write");
+        client.slot(DEVICE_CAP).expect("slot write");
+
+        let started = receive_startup_transaction(&server_end)
+            .expect("dispatch ok")
+            .expect("transaction complete");
+
+        let slots: std::vec::Vec<Cap> = started
+            .declared_slots(2)
+            .expect("the set matches the declaration")
+            .collect();
+        assert_eq!(slots, [IMAGE_CAP, DEVICE_CAP]);
+    }
+
+    #[test]
+    fn a_transaction_short_of_the_declared_slots_is_refused() {
+        let (client_end, server_end) = MockEnd::pair();
+        let client = component_startup::Client::new(client_end);
+        client
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 1)
+            .expect("start write");
+        client.slot(IMAGE_CAP).expect("slot write");
+
+        let started = receive_startup_transaction(&server_end)
+            .expect("dispatch ok")
+            .expect("transaction complete");
+
+        assert!(started.declared_slots(2).is_none());
+    }
+
+    #[test]
+    fn a_transaction_past_the_declared_slots_is_refused() {
+        let (client_end, server_end) = MockEnd::pair();
+        let client = component_startup::Client::new(client_end);
+        client
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 2)
+            .expect("start write");
+        client.slot(IMAGE_CAP).expect("slot write");
+        client.slot(DEVICE_CAP).expect("slot write");
+
+        let started = receive_startup_transaction(&server_end)
+            .expect("dispatch ok")
+            .expect("transaction complete");
+
+        assert!(started.declared_slots(1).is_none());
+    }
+
+    #[test]
+    fn a_transaction_torn_after_the_base_frame_reports_the_transport_failure() {
+        let (client_end, server_end) = MockEnd::pair();
+        let client = component_startup::Client::new(client_end);
+        client
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 1)
+            .expect("start write");
+        // Отправитель ушёл между базовым кадром и обещанным слотом.
+        drop(client);
+
+        assert_eq!(
+            receive_startup_transaction(&server_end),
+            Err(IpcError::PeerClosed)
+        );
+    }
+
+    #[test]
+    fn a_second_base_frame_breaks_the_transaction() {
+        let (client_end, server_end) = MockEnd::pair();
+        let client = component_startup::Client::new(client_end);
+        client
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 1)
+            .expect("start write");
+        client
+            .start(LOG_CAP, CONTROL_CAP, SERVICE_CAP, 1)
+            .expect("start write");
+
+        assert_eq!(
+            receive_startup_transaction(&server_end).expect("dispatch ok"),
+            None
+        );
     }
 
     #[test]

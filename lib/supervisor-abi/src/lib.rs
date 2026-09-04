@@ -2,6 +2,10 @@
 //! программа подаёт записи плана и регионы их программ, и сессия поднятого ею компонента.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(clippy::cast_possible_truncation, clippy::unwrap_in_result)
+)]
 
 #[cfg(test)]
 extern crate std;
@@ -9,7 +13,7 @@ extern crate std;
 use ipc::{
     WireTyped, WireValue,
     schema::WireType,
-    wire::{ENUM_DISCRIMINANT_SIZE, HandleSlots, IpcError, MessageBuf, value},
+    wire::{ENUM_DISCRIMINANT_WIDTH, HandleSlots, IpcError, MessageBuf, value},
 };
 
 /// Предел записи плана одного компонента в байтах.
@@ -113,7 +117,7 @@ impl<'a> WireValue<'a> for ExtendError {
 }
 
 impl WireTyped for ExtendError {
-    const WIRE_TYPE: WireType = WireType::Uint(ENUM_DISCRIMINANT_SIZE as u8);
+    const WIRE_TYPE: WireType = WireType::Uint(ENUM_DISCRIMINANT_WIDTH);
 }
 
 #[cfg(test)]

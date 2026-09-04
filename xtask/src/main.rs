@@ -1,5 +1,7 @@
 //! CLI сборки и проверок ядра.
 
+#![allow(clippy::std_instead_of_core)]
+
 mod artifacts;
 mod build;
 mod check;

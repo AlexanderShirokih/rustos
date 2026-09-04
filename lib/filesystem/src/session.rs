@@ -93,14 +93,24 @@ impl<A> Session<A> {
     /// вызов по закрытому дескриптору не попадает в новый узел этого слота.
     pub fn open(&mut self, open_node: OpenNode) -> Result<NodeDescriptor, FileSystemError> {
         if let Some(slot) = self.open_nodes.iter().position(DescriptorSlot::is_vacant) {
-            return Ok(self.open_nodes[slot].occupy(slot as u32, open_node));
+            let index = u32::try_from(slot).map_err(|_| FileSystemError::TooManyOpenFiles)?;
+            let descriptor = self
+                .open_nodes
+                .get_mut(slot)
+                .ok_or(FileSystemError::TooManyOpenFiles)?;
+            return Ok(descriptor.occupy(index, open_node));
         }
         if self.open_nodes.len() >= OPEN_NODE_LIMIT {
             return Err(FileSystemError::TooManyOpenFiles);
         }
         self.open_nodes.push(DescriptorSlot::fresh());
         let slot = self.open_nodes.len() - 1;
-        Ok(self.open_nodes[slot].occupy(slot as u32, open_node))
+        let index = u32::try_from(slot).map_err(|_| FileSystemError::TooManyOpenFiles)?;
+        let descriptor = self
+            .open_nodes
+            .get_mut(slot)
+            .ok_or(FileSystemError::TooManyOpenFiles)?;
+        Ok(descriptor.occupy(index, open_node))
     }
 
     /// Узел, открытый под дескриптором `fd`. Дескриптор вне сессии либо с ушедшим

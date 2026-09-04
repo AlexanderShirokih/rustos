@@ -78,7 +78,13 @@ impl<const N: usize> Write for StaticString<N> {
         while to_copy > 0 && !s.is_char_boundary(to_copy) {
             to_copy -= 1;
         }
-        self.buf[self.len..self.len + to_copy].copy_from_slice(&s.as_bytes()[..to_copy]);
+        let (Some(target), Some(source)) = (
+            self.buf.get_mut(self.len..self.len + to_copy),
+            s.as_bytes().get(..to_copy),
+        ) else {
+            return Err(fmt::Error);
+        };
+        target.copy_from_slice(source);
         self.len += to_copy;
 
         Ok(())

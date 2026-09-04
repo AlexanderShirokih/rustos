@@ -1,3 +1,8 @@
+/// Переводит длину или смещение в тексте файла в тип смещения диапазона.
+pub fn offset(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 /// Полуинтервал байтовых смещений в тексте файла.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Span {
@@ -44,7 +49,7 @@ impl LineIndex {
         let mut starts = vec![0u32];
         for (offset, byte) in text.bytes().enumerate() {
             if byte == b'\n' {
-                starts.push(offset as u32 + 1);
+                starts.push(self::offset(offset + 1));
             }
         }
         LineIndex { starts }
@@ -74,11 +79,11 @@ impl LineIndex {
         let end = if line + 1 < self.line_count() {
             self.line_start(line + 1)
         } else {
-            text.len() as u32
+            self::offset(text.len())
         };
         let body = &text[start as usize..end as usize];
         let trimmed = body.trim_end_matches(['\n', '\r']);
-        Span::new(start, start + trimmed.len() as u32)
+        Span::new(start, start + self::offset(trimmed.len()))
     }
 
     /// Переводит смещение в позицию.
@@ -87,8 +92,8 @@ impl LineIndex {
         let start = self.line_start(line) as usize;
         let head = text.get(start..offset as usize).unwrap_or_default();
         Position {
-            line: line as u32 + 1,
-            column: head.chars().count() as u32 + 1,
+            line: self::offset(line + 1),
+            column: self::offset(head.chars().count() + 1),
         }
     }
 }

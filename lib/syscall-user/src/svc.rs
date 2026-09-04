@@ -1,6 +1,6 @@
 //! Inline-asm реализация svc-обёрток.
 //!
-//! Ловушку ставят макросы: номер операции идёт immediate-полем `svc`, аргументы - в x0 и
+//! Макросы ставят ловушку: номер операции идёт immediate-полем `svc`, аргументы - в x0 и
 //! дальше по порядку, возврат - в x0. Обёртка остаётся типизированной подписью с обоснованием
 //! своего `unsafe`.
 
@@ -175,9 +175,9 @@ use syscall::{Handle, IrqTrigger, SyscallError, SyscallOp, Timeout, WaitItem, Wa
 /// Ждёт сигналы `signals` на capability target `handle`. [`Timeout::POLL`] -
 /// non-blocking poll. Возврат: observed-маска (>=0) либо `-(SyscallError)`.
 pub fn signal_wait_one(handle: Handle, signals: u32, timeout: Timeout) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
-    // в x0..x2: handle, маска сигналов, timeout_ns; память ядру не
-    // передаётся. x0 на выходе: observed-маска (>=0) либо -(SyscallError).
+    // SAFETY: svc-immediate содержит номер операции (ESR.ISS). Аргументы лежат в x0..x2: handle,
+    // маска сигналов, timeout_ns. Память не передаётся ядру. x0 на выходе: observed-маска (>=0)
+    // либо -(SyscallError).
     unsafe { svc!(SyscallOp::SignalWaitOne, handle, signals, timeout.raw()) }
 }
 
@@ -185,8 +185,8 @@ pub fn signal_wait_one(handle: Handle, signals: u32, timeout: Timeout) -> i64 {
 /// `count` - политика пробуждения ([`WakeCount`]). Возврат: 0 либо
 /// `-(SyscallError)`.
 pub fn signal_set(handle: Handle, set: u32, clear: u32, count: WakeCount) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции (ESR.ISS), аргументы лежат
-    // в x0..x3: handle, set, clear, count; память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции (ESR.ISS). Аргументы лежат в x0..x3: handle,
+    // set, clear, count. Память не передаётся ядру.
     unsafe { svc!(SyscallOp::SignalSet, handle, set, clear, count.to_raw()) }
 }
 
@@ -195,10 +195,9 @@ pub fn signal_set(handle: Handle, set: u32, clear: u32, count: WakeCount) -> i64
 /// observed-маска сработавшего capability target (>=0 либо `-(SyscallError)`) и его индекс
 /// в `items`.
 pub fn signal_wait_many(items: &[WaitItem], timeout: Timeout) -> (i64, u64) {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
-    // items_va, count, timeout_ns; ядро читает массив записей по x0
-    // (wire-layout WaitItem) до возврата из svc. На выходе x0 -
-    // observed-маска, x1 - индекс.
+    // SAFETY: svc-immediate содержит номер операции. Аргументы в x0..x2: items_va, count,
+    // timeout_ns. Ядро читает массив записей по x0 (wire-layout WaitItem) до возврата из svc. На
+    // выходе x0 - observed-маска, x1 - индекс.
     let (observed, index) = unsafe {
         svc_pair!(
             SyscallOp::SignalWaitMany,
@@ -213,8 +212,8 @@ pub fn signal_wait_many(items: &[WaitItem], timeout: Timeout) -> (i64, u64) {
 /// Создаёт пустой `Signal` в текущей handle-таблице. Возврат: handle
 /// либо `-(SyscallError)`.
 pub fn signal_create() -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
-    // выходе - handle либо -(SyscallError).
+    // SAFETY: svc-immediate содержит номер операции. Нет аргументов. x0 на выходе - handle либо
+    // -(SyscallError).
     let ret = unsafe { svc!(SyscallOp::SignalCreate) };
     Handle::from_syscall_return(ret)
 }
@@ -222,8 +221,8 @@ pub fn signal_create() -> Result<Handle, SyscallError> {
 /// Создаёт `Port` в текущей таблице.
 /// Возврат: один port-handle либо `-(SyscallError)`.
 pub fn port_create() -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
-    // выходе - handle либо -(SyscallError).
+    // SAFETY: svc-immediate содержит номер операции. Нет аргументов. x0 на выходе - handle либо
+    // -(SyscallError).
     let ret = unsafe { svc!(SyscallOp::PortCreate) };
     Handle::from_syscall_return(ret)
 }
@@ -235,9 +234,8 @@ pub fn port_create() -> Result<Handle, SyscallError> {
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
 pub fn port_send(handle: Handle, timeout: Timeout) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
-    // timeout_ns; сообщение лежит в per-thread IPC-буфере (ядро читает
-    // его само), память по указателю не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, x0 - handle, x1 - timeout_ns. Сообщение лежит
+    // в per-thread IPC-буфере (ядро само читает его). Память не передаётся по указателю.
     unsafe { svc!(SyscallOp::PortSend, handle, timeout.raw()) }
 }
 
@@ -247,9 +245,8 @@ pub fn port_send(handle: Handle, timeout: Timeout) -> i64 {
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
 pub fn port_recv(handle: Handle, timeout: Timeout) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
-    // timeout_ns; принятое сообщение ядро пишет в per-thread IPC-буфер
-    // текущего потока.
+    // SAFETY: svc-immediate содержит номер операции, x0 - handle, x1 - timeout_ns. Ядро пишет
+    // принятое сообщение в per-thread IPC-буфер текущего потока.
     unsafe { svc!(SyscallOp::PortRecv, handle, timeout.raw()) }
 }
 
@@ -260,25 +257,23 @@ pub fn port_recv(handle: Handle, timeout: Timeout) -> i64 {
 /// [`SYSCALL_RETURN_TIMEOUT`](syscall::SYSCALL_RETURN_TIMEOUT) при
 /// истечении тайм-аута, либо `-(SyscallError)`.
 pub fn port_call(handle: Handle, timeout: Timeout) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, x0 - handle, x1 -
-    // timeout_ns; запрос и ответ ходят через per-thread IPC-буфер текущего
-    // потока.
+    // SAFETY: svc-immediate содержит номер операции, x0 - handle, x1 - timeout_ns. Запрос и ответ
+    // передаются через per-thread IPC-буфер текущего потока.
     unsafe { svc!(SyscallOp::PortCall, handle, timeout.raw()) }
 }
 
-/// `reply` на одноразовый `reply_handle`: доставляет ответ из IPC-буфера
-/// сервера вызывателю. Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
+/// `reply` на одноразовый `reply_handle` доставляет ответ из IPC-буфера сервера вызывателю. Требует
+/// `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
 pub fn port_reply(reply_handle: Handle) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, x0 - reply handle; ответ
-    // лежит в per-thread IPC-буфере сервера.
+    // SAFETY: svc-immediate содержит номер операции, x0 - reply handle. Ответ лежит в per-thread
+    // IPC-буфере сервера.
     unsafe { svc!(SyscallOp::PortReply, reply_handle) }
 }
 
 /// Изымает `handle` из текущей таблицы и закрывает его. Возврат: 0 либо
 /// `-(SyscallError)`.
 pub fn handle_close(handle: Handle) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
-    // не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, x0 - handle. Память не передаётся ядру.
     unsafe { svc!(SyscallOp::HandleClose, handle) }
 }
 
@@ -286,17 +281,16 @@ pub fn handle_close(handle: Handle) -> i64 {
 /// неизвестные биты отбрасываются) и значком `badge` (set-once: `0` - без
 /// значка / наследовать). Возврат: новый handle либо `-(SyscallError)`.
 ///
-/// Семантика `badge`: заклеймить можно только незаклеймённый источник.
-/// Заклеймённый наследует свой значок при `badge == 0`, а попытка
-/// переклеймить (`badge != 0` на уже заклеймённом) даёт `BadHandle`.
+/// Семантика `badge`: заклеймить можно только незаклеймённый источник. Источник, который уже
+/// заклеймён, наследует свой значок при `badge == 0`, а попытка переклеймить его (`badge != 0`)
+/// даёт `BadHandle`.
 pub fn handle_duplicate(
     handle: Handle,
     new_rights: u32,
     badge: u64,
 ) -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
-    // handle, new_rights (нижние 32 бита), badge (полные 64 бита); память
-    // ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции. Аргументы в x0..x2: handle, new_rights (нижние
+    // 32 бита), badge (полные 64 бита). Память не передаётся ядру.
     let ret = unsafe { svc!(SyscallOp::HandleDuplicate, handle, new_rights, badge) };
     Handle::from_syscall_return(ret)
 }
@@ -304,8 +298,8 @@ pub fn handle_duplicate(
 /// Создаёт пустой user-процесс с именем `name` (UTF-8). Возврат: handle
 /// на `ProcessObject` либо `-(SyscallError)`.
 pub fn process_create(name: &[u8]) -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
-    // name_va, name_len; ядро читает имя по x0 до возврата из svc.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x1: name_va, name_len. Ядро
+    // читает имя по x0 до возврата из svc.
     let ret = unsafe {
         svc!(
             SyscallOp::ProcessCreate,
@@ -318,8 +312,8 @@ pub fn process_create(name: &[u8]) -> Result<Handle, SyscallError> {
 
 /// Возвращает handle на собственный `ProcessObject` либо `-(SyscallError)`.
 pub fn process_self() -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
-    // выходе - handle либо -(SyscallError).
+    // SAFETY: svc-immediate содержит номер операции. Нет аргументов. x0 на выходе - handle либо
+    // -(SyscallError).
     let ret = unsafe { svc!(SyscallOp::ProcessSelf) };
     Handle::from_syscall_return(ret)
 }
@@ -328,8 +322,8 @@ pub fn process_self() -> Result<Handle, SyscallError> {
 /// (дефолтные права, включая `WRITE`). Возврат: resource-handle либо
 /// `-(SyscallError)` (`WrongType`, если процесс стартовал без метеринг-ресурса).
 pub fn process_resource_self() -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
-    // выходе - handle либо -(SyscallError).
+    // SAFETY: svc-immediate содержит номер операции. Нет аргументов. x0 на выходе - handle либо
+    // -(SyscallError).
     let ret = unsafe { svc!(SyscallOp::ProcessResourceSelf) };
     Handle::from_syscall_return(ret)
 }
@@ -338,9 +332,8 @@ pub fn process_resource_self() -> Result<Handle, SyscallError> {
 /// `UserImageDescAbi` в `desc`. Требует `Rights::WRITE` на `handle`.
 /// Возврат: 0 либо `-(SyscallError)`.
 pub fn process_load_image(handle: Handle, desc: &[u8]) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2:
-    // process_handle, desc_va, desc_len; ядро копирует дескриптор и массив
-    // сегментов из user-памяти до возврата из svc.
+    // SAFETY: svc-immediate содержит номер операции. Аргументы в x0..x2: process_handle, desc_va,
+    // desc_len. Ядро копирует дескриптор и массив сегментов из user-памяти до возврата из svc.
     unsafe {
         svc!(
             SyscallOp::ProcessLoadImage,
@@ -354,17 +347,15 @@ pub fn process_load_image(handle: Handle, desc: &[u8]) -> i64 {
 /// Финальный exit-код процесса `handle`. Требует `Rights::READ`.
 /// Возврат: exit code (нижние 32 бита, zero-extended) либо `-(SyscallError)`.
 pub fn process_exit_code(handle: Handle) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
-    // не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, x0 - handle. Память не передаётся ядру.
     unsafe { svc!(SyscallOp::ProcessExitCode, handle) }
 }
 
-/// Завершает процесс `handle` с кодом `exit_code`: помечает завершёнными все
-/// его потоки, после декремента до нуля - и сам процесс.
-/// Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
+/// Завершает процесс `handle` с кодом `exit_code`. Помечает завершёнными все его потоки, после
+/// декремента до нуля - и сам процесс. Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
 pub fn process_terminate(handle: Handle, exit_code: u64) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
-    // handle, exit_code; память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x1: handle, exit_code. Память
+    // не передаётся ядру.
     unsafe { svc!(SyscallOp::ProcessTerminate, handle, exit_code) }
 }
 
@@ -380,8 +371,8 @@ pub fn process_start(
     priority: u64,
     resource_handle: u64,
 ) -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x5. Ядро
-    // переносит bootstrap_handle потомку до возврата.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x5. Ядро переносит
+    // bootstrap_handle потомку до возврата.
     let ret = unsafe {
         svc!(
             SyscallOp::ProcessStart,
@@ -401,8 +392,8 @@ pub fn process_start(
 /// resource-handle либо `-(SyscallError)` (`ResourceExhausted` при нехватке
 /// бюджета).
 pub fn resource_split(resource: Handle, budget_pages: u64) -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1. x0 на
-    // выходе - handle либо -(SyscallError).
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x1. x0 на выходе - handle либо
+    // -(SyscallError).
     let ret = unsafe { svc!(SyscallOp::ResourceSplit, resource, budget_pages) };
     Handle::from_syscall_return(ret)
 }
@@ -417,9 +408,8 @@ pub fn thread_create(
     arg: u64,
     priority: u64,
 ) -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x4:
-    // process_handle, entry_pc, user_sp, arg, priority; память ядру не
-    // передаётся.
+    // SAFETY: svc-immediate содержит номер операции. Аргументы в x0..x4: process_handle, entry_pc,
+    // user_sp, arg, priority. Память не передаётся ядру.
     let ret = unsafe {
         svc!(
             SyscallOp::ThreadCreate,
@@ -435,8 +425,8 @@ pub fn thread_create(
 
 /// Возвращает handle на собственный `ThreadObject` либо `-(SyscallError)`.
 pub fn thread_self() -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
-    // выходе - handle либо -(SyscallError).
+    // SAFETY: svc-immediate содержит номер операции. Нет аргументов. x0 на выходе - handle либо
+    // -(SyscallError).
     let ret = unsafe { svc!(SyscallOp::ThreadSelf) };
     Handle::from_syscall_return(ret)
 }
@@ -444,18 +434,16 @@ pub fn thread_self() -> Result<Handle, SyscallError> {
 /// Финальный exit-код потока `handle`. Требует `Rights::READ`.
 /// Возврат: exit code (нижние 32 бита, zero-extended) либо `-(SyscallError)`.
 pub fn thread_exit_code(handle: Handle) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, x0 - handle; память ядру
-    // не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, x0 - handle. Память не передаётся ядру.
     unsafe { svc!(SyscallOp::ThreadExitCode, handle) }
 }
 
-/// Завершает поток `handle` с кодом `exit_code` (нижние 32 бита).
-/// Требует `Rights::WRITE`. Терминирование собственного потока через handle
-/// отвергается - для self-exit есть `thread_exit`.
+/// Завершает поток `handle` с кодом `exit_code` (нижние 32 бита). Требует `Rights::WRITE`.
+/// Отвергает терминирование собственного потока через handle - для self-exit есть `thread_exit`.
 /// Возврат: 0 либо `-(SyscallError)`.
 pub fn thread_terminate(handle: Handle, exit_code: u64) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
-    // handle, exit_code; память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x1: handle, exit_code. Память
+    // не передаётся ядру.
     unsafe { svc!(SyscallOp::ThreadTerminate, handle, exit_code) }
 }
 
@@ -467,8 +455,7 @@ pub fn memory_create_virtual(
     size_bytes: u64,
     access_mask: u64,
 ) -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
-    // память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x2. Память не передаётся ядру.
     let ret = unsafe {
         svc!(
             SyscallOp::MemoryCreateVirtual,
@@ -484,8 +471,8 @@ pub fn memory_create_virtual(
 /// handle на исходный регион (требует `DUPLICATE`). Возврат: region handle
 /// либо `-(SyscallError)`.
 pub fn memory_with_profile(region: Handle, profile_raw: u64) -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
-    // region_handle, profile_raw; память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x1: region_handle,
+    // profile_raw. Память не передаётся ядру.
     let ret = unsafe { svc!(SyscallOp::MemoryWithProfile, region, profile_raw) };
     Handle::from_syscall_return(ret)
 }
@@ -500,8 +487,8 @@ pub fn memory_slice(
     size_bytes: u64,
     access_mask: u64,
 ) -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x3:
-    // region_handle, offset, size_bytes, access_mask; память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x3: region_handle, offset,
+    // size_bytes, access_mask. Память не передаётся ядру.
     let ret = unsafe {
         svc!(
             SyscallOp::MemorySlice,
@@ -517,16 +504,14 @@ pub fn memory_slice(
 /// Маппит регион `handle` в текущий user-AS: `flags_raw` - `UserMemFlags`.
 /// Возврат: базовый VA либо `-(SyscallError)`.
 pub fn memory_map(handle: Handle, size_bytes: u64, flags_raw: u64) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
-    // память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x2. Память не передаётся ядру.
     unsafe { svc!(SyscallOp::MemoryMap, handle, size_bytes, flags_raw) }
 }
 
 /// Меняет флаги существующего маппинга по `va`: `flags_raw` -
 /// `UserMemFlags`. Возврат: 0 либо `-(SyscallError)`.
 pub fn memory_remap(va: u64, size_bytes: u64, flags_raw: u64) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
-    // память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x2. Память не передаётся ядру.
     unsafe { svc!(SyscallOp::MemoryRemap, va, size_bytes, flags_raw) }
 }
 
@@ -534,27 +519,26 @@ pub fn memory_remap(va: u64, size_bytes: u64, flags_raw: u64) -> i64 {
 /// на метеринг-`Resource` (требует `WRITE`), `size_bytes`, `flags_raw` -
 /// `UserMemFlags`. Возврат: базовый VA либо `-(SyscallError)`.
 pub fn memory_allocate(resource: Handle, size_bytes: u64, flags_raw: u64) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x2;
-    // память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x2. Память не передаётся ядру.
     unsafe { svc!(SyscallOp::MemoryAllocate, resource, size_bytes, flags_raw) }
 }
 
 /// Снимает маппинг по `va` (page-aligned) длиной `size_bytes` и возвращает
 /// регион в free-list. Возврат: 0 либо `-(SyscallError)`.
 pub fn memory_free(va: u64, size_bytes: u64) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, аргументы в x0..x1:
-    // va, size_bytes; память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x1: va, size_bytes. Память не
+    // передаётся ядру.
     unsafe { svc!(SyscallOp::MemoryFree, va, size_bytes) }
 }
 
 /// Инспектирует Memory-регион `handle`. Возврат: `(size_bytes,
 /// base_pa | (kind_tag << 3) | access_bits)` — первый элемент знаковый
 /// (`-(SyscallError)` при ошибке), второй валиден только при успехе.
-/// base_pa page-aligned, младшие 12 бит несут kind/access. Для `Virtual`
+/// base_pa page-aligned, младшие 12 бит содержат kind/access. Для `Virtual`
 /// base_pa = 0.
 pub fn memory_region_inspect(handle: Handle) -> (i64, u64) {
-    // SAFETY: svc-immediate несёт номер операции, x0 - handle; ядро пишет
-    // size_bytes в x0, base|kind|access - в x1.
+    // SAFETY: svc-immediate содержит номер операции, x0 - handle. Ядро пишет size_bytes в x0,
+    // base|kind|access - в x1.
     let (primary, secondary) = unsafe { svc_pair!(SyscallOp::MemoryRegionInspect, handle) };
     (primary, secondary)
 }
@@ -562,9 +546,8 @@ pub fn memory_region_inspect(handle: Handle) -> (i64, u64) {
 /// Возвращает user-VA per-thread IPC-буфера текущего потока. Возврат:
 /// VA (>0) либо `-(SyscallError)`, если у потока нет буфера.
 pub fn ipc_buffer_addr() -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, аргументов нет; x0 на
-    // выходе - user-VA буфера (>0) либо -(SyscallError). Память ядру не
-    // передаётся.
+    // SAFETY: svc-immediate содержит номер операции. Нет аргументов. x0 на выходе - user-VA буфера
+    // (>0) либо -(SyscallError). Память не передаётся ядру.
     unsafe { svc!(SyscallOp::ThreadIpcBufferAddr) }
 }
 
@@ -574,24 +557,23 @@ pub fn ipc_buffer_addr() -> i64 {
 /// ожидается через `signal_wait_one`/`signal_wait_many` прямо по возвращённому
 /// handle (бит `SIGNALED`).
 pub fn irq_mint(control: Handle, irq: u16, trigger: IrqTrigger) -> Result<Handle, SyscallError> {
-    // SAFETY: svc-immediate несёт номер операции, x0 - control handle,
-    // x1 - номер линии, x2 - код триггера; память ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, x0 - control handle, x1 - номер линии, x2 -
+    // код триггера. Память не передаётся ядру.
     let ret = unsafe { svc!(SyscallOp::IrqMint, control, irq, trigger.code()) };
     Handle::from_syscall_return(ret)
 }
 
-/// Подтверждает прерывание на `line`: снимает latch `SIGNALED` и размаскирует
-/// линию. Требует `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
+/// Подтверждает прерывание на `line`. Снимает latch `SIGNALED` и размаскирует линию. Требует
+/// `Rights::WRITE`. Возврат: 0 либо `-(SyscallError)`.
 pub fn irq_ack(line: Handle) -> i64 {
-    // SAFETY: svc-immediate несёт номер операции, x0 - line handle; память
-    // ядру не передаётся.
+    // SAFETY: svc-immediate содержит номер операции, x0 - line handle. Память не передаётся ядру.
     unsafe { svc!(SyscallOp::IrqAck, line) }
 }
 
 /// Завершает текущий поток с кодом `code`. Не возвращается.
 pub fn thread_exit(code: u64) -> ! {
     // SAFETY: ThreadExit не возвращается, поэтому asm помечен noreturn и
-    // удовлетворяет `-> !`; x0 несёт exit code.
+    // удовлетворяет `-> !`. x0 содержит exit code.
     unsafe { svc_noreturn!(SyscallOp::ThreadExit, code) }
 }
 
@@ -599,13 +581,13 @@ pub fn thread_exit(code: u64) -> ! {
 /// Не возвращается.
 pub fn process_exit(code: u64) -> ! {
     // SAFETY: ProcessExit не возвращается, поэтому asm помечен noreturn и
-    // удовлетворяет `-> !`; x0 несёт exit code.
+    // удовлетворяет `-> !`. x0 содержит exit code.
     unsafe { svc_noreturn!(SyscallOp::ProcessExit, code) }
 }
 
 /// Уступает остаток кванта текущего потока.
 pub fn thread_yield() {
-    // SAFETY: svc-immediate несёт номер операции, аргументов нет; память
-    // ядру не передаётся, возврат не используется.
+    // SAFETY: svc-immediate содержит номер операции. Нет аргументов. Память не передаётся ядру,
+    // возврат не используется.
     unsafe { svc!(SyscallOp::ThreadYield) };
 }

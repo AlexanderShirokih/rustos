@@ -56,9 +56,9 @@ pub fn decode_mount_table(bytes: &[u8]) -> Result<MountTable<'_>, MountTableDeco
             needed: TABLE_HEADER_SIZE,
             actual: bytes.len(),
         })?;
-    let magic: [u8; 8] = header[..8]
-        .try_into()
-        .map_err(|_| truncated(bytes, TABLE_HEADER_SIZE))?;
+    let magic = *header
+        .first_chunk::<8>()
+        .ok_or_else(|| truncated(bytes, TABLE_HEADER_SIZE))?;
     if magic != MOUNT_TABLE_MAGIC {
         return Err(MountTableDecodeError::InvalidMagic(magic));
     }
@@ -78,11 +78,16 @@ pub fn decode_mount_table(bytes: &[u8]) -> Result<MountTable<'_>, MountTableDeco
     }
     // Запись выдана окном своей страницы: хвост за таблицей - нули
     // дополнения, а всё прочее там - порча.
-    if bytes[cursor..].iter().any(|byte| *byte != 0) {
+    let trailing = bytes
+        .get(cursor..)
+        .ok_or(MountTableDecodeError::InvalidLayout("trailing_bytes"))?;
+    if trailing.iter().any(|byte| *byte != 0) {
         return Err(MountTableDecodeError::InvalidLayout("trailing_bytes"));
     }
     Ok(MountTable {
-        bytes: &bytes[TABLE_HEADER_SIZE..cursor],
+        bytes: bytes
+            .get(TABLE_HEADER_SIZE..cursor)
+            .ok_or(MountTableDecodeError::InvalidLayout("records"))?,
         count,
     })
 }

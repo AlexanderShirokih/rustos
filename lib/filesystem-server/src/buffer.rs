@@ -30,7 +30,7 @@ impl DataBuffer {
         let mapping = region
             .map(bytes, UserMemFlags::ReadWrite)
             .map_err(no_space)?;
-        let len = usize::try_from(bytes).expect("buffer size fits usize");
+        let len = usize::try_from(bytes).map_err(|_| FileSystemError::NoSpace)?;
         let mut staging = Vec::new();
         staging
             .try_reserve_exact(len)

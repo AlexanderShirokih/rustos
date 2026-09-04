@@ -56,7 +56,8 @@ impl<T, const N: usize> Vec<T, N> {
             return None;
         }
 
-        self.items[self.len] = Some(item);
+        let slot = self.items.get_mut(self.len)?;
+        *slot = Some(item);
         self.len += 1;
 
         Some(())
@@ -68,7 +69,7 @@ impl<T, const N: usize> Vec<T, N> {
         }
 
         self.len -= 1;
-        self.items[self.len].take()
+        self.items.get_mut(self.len)?.take()
     }
 
     pub fn truncate(&mut self, new_len: usize) {
@@ -77,8 +78,8 @@ impl<T, const N: usize> Vec<T, N> {
         }
 
         // очищаем "хвост"
-        for i in new_len..self.len {
-            self.items[i].take();
+        for slot in self.items.iter_mut().take(self.len).skip(new_len) {
+            slot.take();
         }
 
         self.len = new_len;
@@ -93,8 +94,8 @@ impl<T, const N: usize> Vec<T, N> {
     pub fn map_into<U>(self, mut map: impl FnMut(T) -> U) -> Vec<U, N> {
         let mut mapped: Vec<U, N> = Vec::new();
 
-        for item in self {
-            mapped.items[mapped.len] = Some(map(item));
+        for (slot, item) in mapped.items.iter_mut().zip(self) {
+            *slot = Some(map(item));
             mapped.len += 1;
         }
 
@@ -105,7 +106,9 @@ impl<T, const N: usize> Vec<T, N> {
 impl<T, const N: usize> Index<usize> for Vec<T, N> {
     type Output = T;
 
+    #[allow(clippy::panic)]
     fn index(&self, index: usize) -> &Self::Output {
+        // Паника вне границ - семантика самого `Index`, и вернуть вместо элемента нечего.
         let len = self.len;
         match self.get(index) {
             Some(item) => item,
@@ -115,7 +118,9 @@ impl<T, const N: usize> Index<usize> for Vec<T, N> {
 }
 
 impl<T, const N: usize> IndexMut<usize> for Vec<T, N> {
+    #[allow(clippy::panic)]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        // Паника вне границ - семантика самого `IndexMut`, и вернуть вместо элемента нечего.
         let len = self.len;
         match self.get_mut(index) {
             Some(item) => item,
@@ -150,7 +155,7 @@ impl<'a, T> Iterator for VecIter<'a, T> {
         } else {
             let index = self.index;
             self.index += 1;
-            self.items[index].as_ref()
+            self.items.get(index)?.as_ref()
         }
     }
 }
@@ -174,7 +179,7 @@ impl<T, const N: usize> Iterator for VecIntoIter<T, N> {
         if self.index >= self.vec.len() {
             None
         } else {
-            let item = self.vec.items[self.index].take();
+            let item = self.vec.items.get_mut(self.index)?.take();
             self.index += 1;
             item
         }

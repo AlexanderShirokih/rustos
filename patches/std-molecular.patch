@@ -38,74 +38,78 @@ diff -ruN a/std/src/os/mod.rs b/std/src/os/mod.rs
 diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 --- a/std/src/os/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/os/molecular/mod.rs	2026-08-10 18:37:47.249314886 +0000
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,72 @@
 +//! RustOS-specific definitions.
 +//!
 +//! Процесс получает ресурсы системы стартовым набором capability, который композиция выдаёт
-+//! ему при запуске. Лог-сессию из набора забирает сама библиотека: по ней идут `stdout` и
-+//! `stderr`. Остальное - control- и service-порты компонента и слоты его плана - принадлежит
-+//! программе и выдаётся ей здесь.
++//! ему одноразовым портом при запуске. Серверную сторону порта ядро кладёт в точку входа, и
++//! библиотека отдаёт её программе один раз владеющим значением: набор принимает и разбирает
++//! сама программа крейтами userspace.
 +//!
-+//! Корню композиции набора не выдают: у него остаётся стартовый хэндл, положенный ядром в
-+//! точку входа.
++//! Корню композиции набора не выдают: по тому же handle у него остаётся обращение к ядру.
 +//!
-+//! Capability названы сырым идентификатором: типизированные обёртки над ним и контракты IPC
-+//! живут в крейтах userspace, и программа берёт их своей зависимостью. Внутри библиотеки те же
-+//! крейты собраны отдельной копией - как `libc` внутри `std` на Unix, - и её типы наружу не
-+//! выходят.
++//! Лог-сессию набора программа возвращает библиотеке: по ней идут `stdout` и `stderr`.
++//!
++//! Типизированные обёртки над capability и контракты IPC живут в крейтах userspace, и
++//! программа берёт их своей зависимостью. Внутри библиотеки те же крейты собраны отдельной
++//! копией - как `libc` внутри `std` на Unix, - и её типы наружу не выходят.
 +
 +#![unstable(feature = "molecular_ext", issue = "none")]
 +
++use crate::mem::ManuallyDrop;
 +use crate::num::NonZeroU32;
-+
-+/// Граница числа слотов capability одного компонента.
-+pub const SLOT_MAX: usize = runtime::component_abi::COMPONENT_SLOT_MAX;
 +
 +/// Идентификатор capability в таблице handle процесса.
 +pub type RawHandle = NonZeroU32;
 +
-+/// Стартовый набор capability компонента композиции.
-+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-+pub struct Startup {
-+    control: RawHandle,
-+    service: RawHandle,
-+    slots: [Option<RawHandle>; SLOT_MAX],
++/// Владеет capability процесса и закрывает её в `Drop`.
++#[derive(Debug)]
++pub struct OwnedHandle {
++    handle: RawHandle,
 +}
 +
-+impl Startup {
-+    /// Серверная сторона control-порта: его клиентскую сторону держит supervisor.
-+    pub fn control(&self) -> RawHandle {
-+        self.control
++impl OwnedHandle {
++    /// Идентификатор владеемой capability.
++    pub fn as_raw(&self) -> RawHandle {
++        self.handle
 +    }
 +
-+    /// Серверная сторона service-порта: его сессии supervisor минтит клиентам компонента.
-+    pub fn service(&self) -> RawHandle {
-+        self.service
++    /// Отдаёт идентификатор владеемой capability и подавляет её закрытие.
++    pub fn into_raw(self) -> RawHandle {
++        ManuallyDrop::new(self).handle
 +    }
 +
-+    /// Capability слотов в порядке, в котором их объявил манифест компонента.
-+    pub fn slots(&self) -> impl Iterator<Item = RawHandle> {
-+        self.slots.into_iter().map_while(|slot| slot)
++    /// Усыновляет уже существующую запись таблицы handle процесса.
++    ///
++    /// # Safety
++    ///
++    /// `raw` называет открытую запись, владельца у которой больше нет.
++    pub unsafe fn from_raw(raw: RawHandle) -> Self {
++        Self { handle: raw }
 +    }
 +}
 +
-+/// Стартовый набор, который композиция выдала процессу.
++impl Drop for OwnedHandle {
++    fn drop(&mut self) {
++        runtime::handle_close(runtime::Handle::from_nonzero(self.handle));
++    }
++}
++
++/// Стартовый handle, положенный ядром в точку входа процесса.
 +///
-+/// `None` - процесс запущен вне композиции, и набора ему никто не слал.
-+pub fn startup() -> Option<Startup> {
-+    let started = runtime::startup()?;
-+    let mut slots: [Option<RawHandle>; SLOT_MAX] = [None; SLOT_MAX];
-+    for (place, slot) in slots.iter_mut().zip(started.slots()) {
-+        *place = Some(slot.raw());
-+    }
-+    Some(Startup { control: started.control.raw(), service: started.service.raw(), slots })
++/// Владение уходит вызывающему, и выдача одна: дальше `None`. `None` на первом вызове -
++/// процесс запущен без стартового handle.
++pub fn take_start_handle() -> Option<OwnedHandle> {
++    Some(OwnedHandle { handle: runtime::take_bootstrap()?.as_nonzero() })
 +}
 +
-+/// Стартовый хэндл, положенный ядром в точку входа процесса.
++/// Направляет `stdout` и `stderr` процесса в лог-сессию `session`.
 +///
-+/// `None` - по хэндлу пришёл стартовый набор компонента, и приём его закрыл.
-+pub fn start_handle() -> Option<RawHandle> {
-+    RawHandle::new(runtime::bootstrap_handle()?.raw())
++/// Сессию приносит стартовый набор компонента, и до установки вывод уходит в никуда. Имя
++/// источника остаётся за значком сессии. Повторная установка сохраняет первую сессию и
++/// закрывает переданную.
++pub fn install_log(session: OwnedHandle) {
++    runtime::install_log(runtime::Handle::from_nonzero(session.into_raw()), "");
 +}
 diff -ruN a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
 --- a/std/src/sys/alloc/mod.rs	2026-08-07 22:42:12.130085865 +0000
@@ -273,7 +277,7 @@ diff -ruN a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.rs
 diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 --- a/std/src/sys/pal/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/pal/molecular/mod.rs	2026-08-10 18:37:47.249510846 +0000
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,56 @@
 +//! Платформенный слой RustOS.
 +//!
 +//! Работу выполняет крейт `runtime`: он же обслуживает userspace-программы вне `std`.
@@ -290,9 +294,6 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +#[unsafe(no_mangle)]
 +pub extern "C" fn _start(bootstrap: u32) -> ! {
 +    runtime::start(bootstrap);
-+    // Стартовый набор capability уходит рандеву с крайним сроком у supervisor, поэтому
-+    // принимается он до `main`.
-+    runtime::adopt_startup();
 +
 +    unsafe extern "C" {
 +        fn main(argc: isize, argv: *const *const u8, sigpipe: u8) -> i32;

@@ -98,6 +98,11 @@ path = "/boot/managed-startup-closed"
 
 [[programs]]
 package = "testrunner"
+bin = "startup-ownership-fixture"
+path = "/boot/startup-ownership-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "crash-filesystem"
 path = "/boot/crash-filesystem"
 

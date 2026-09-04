@@ -1,3 +1,4 @@
+use component_client::StartupError;
 use ipc::wire::IpcError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,5 +22,14 @@ impl From<kernel_objects::Error> for Error {
 impl From<IpcError> for Error {
     fn from(_error: IpcError) -> Self {
         Self::Ipc
+    }
+}
+
+impl From<StartupError> for Error {
+    fn from(error: StartupError) -> Self {
+        match error {
+            StartupError::Transport(_) => Self::Ipc,
+            _ => Self::Start,
+        }
     }
 }

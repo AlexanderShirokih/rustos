@@ -46,7 +46,10 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
 
     let mut sorted: Vec<&ImageRecord<'_>> = records.iter().collect();
     sorted.sort_by(|left, right| left.path.cmp(right.path));
-    if sorted.windows(2).any(|pair| pair[0].path == pair[1].path) {
+    if sorted
+        .windows(2)
+        .any(|pair| matches!(pair, [left, right] if left.path == right.path))
+    {
         return Err(ImageEncodeError::DuplicatePath);
     }
     let boot_index = sorted
@@ -87,8 +90,11 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
         if let Some(&owner) = windows.get(record.data) {
             // Ноль в `alias_of` означает собственное окно, поэтому номер повторённой записи
             // едет увеличенным на единицу.
+            let owned = data_layout
+                .get(usize::from(owner))
+                .ok_or(ImageEncodeError::TooManyRecords)?;
             data_layout.push(DataWindow {
-                offset: data_layout[usize::from(owner)].offset,
+                offset: owned.offset,
                 size: data_size,
                 alias_of: owner + 1,
             });
@@ -145,7 +151,7 @@ pub fn encode_program<'a, E: EntryView<'a>>(entry: &E) -> Result<Vec<u8>, ImageE
         .checked_mul(SEGMENT_SIZE)
         .and_then(|size| size.checked_add(PROGRAM_HEADER_SIZE))
         .ok_or(ImageEncodeError::SizeOverflow)?;
-    if descriptors_end > USERLAND_PAGE_SIZE as usize {
+    if u64::try_from(descriptors_end).is_ok_and(|end| end > USERLAND_PAGE_SIZE) {
         return Err(ImageEncodeError::TooManySegments);
     }
 

@@ -14,6 +14,10 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[dependencies]
+component-client = { workspace = true }
+component-client-std = { workspace = true }
+
 [build-dependencies]
 userland-build = { workspace = true }
 

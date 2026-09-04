@@ -18,6 +18,7 @@ pub fn install_scheduler(service: Arc<dyn SchedulerService>) {
     let _ = SCHEDULER.call_once(|| service);
 }
 
+#[allow(clippy::expect_used)]
 pub fn scheduler() -> &'static Arc<dyn SchedulerService> {
     SCHEDULER
         .get()

@@ -5,6 +5,8 @@
 //!  - с allocator-ом создаётся ровно один backing-регион IPC-буфера;
 //!  - на ошибке `install` маппинга allocation откатывается, поток не создаётся.
 
+#![allow(clippy::expect_used)]
+
 mod common;
 
 use std::sync::Arc;

@@ -15,7 +15,8 @@ test = false
 bench = false
 
 [dependencies]
-component-abi = { workspace = true }
+component-client = { workspace = true }
+component-client-std = { workspace = true }
 kernel-objects = { workspace = true }
 rtc-abi = { workspace = true }
 

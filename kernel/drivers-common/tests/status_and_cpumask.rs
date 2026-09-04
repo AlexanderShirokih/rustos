@@ -2,6 +2,11 @@
 //! `"ok"`/`"okay"`/`"fail*"`/мусор и `CpuMask::cpu` overflow сдвига.
 
 #![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing,
+    clippy::std_instead_of_core
+)]
 
 use std::cell::Cell;
 

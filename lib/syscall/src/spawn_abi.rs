@@ -54,31 +54,36 @@ pub struct UserSegmentAbi {
 /// Декодирует ровно [`USER_IMAGE_DESC_SIZE`] байт в `UserImageDescAbi`.
 /// `None`, если буфер недостаточен.
 pub fn decode_image_desc(bytes: &[u8]) -> Option<UserImageDescAbi> {
-    if bytes.len() < USER_IMAGE_DESC_SIZE {
-        return None;
-    }
+    let (version, rest) = bytes.split_first_chunk::<4>()?;
+    let (segment_count, rest) = rest.split_first_chunk::<4>()?;
+    let (segments_va, rest) = rest.split_first_chunk::<8>()?;
+    let (entry_va, rest) = rest.split_first_chunk::<8>()?;
+    let (user_vm_base, rest) = rest.split_first_chunk::<8>()?;
+    let (user_vm_size, _) = rest.split_first_chunk::<8>()?;
     Some(UserImageDescAbi {
-        version: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-        segment_count: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
-        segments_va: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
-        entry_va: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
-        user_vm_base: u64::from_le_bytes(bytes[24..32].try_into().ok()?),
-        user_vm_size: u64::from_le_bytes(bytes[32..40].try_into().ok()?),
+        version: u32::from_le_bytes(*version),
+        segment_count: u32::from_le_bytes(*segment_count),
+        segments_va: u64::from_le_bytes(*segments_va),
+        entry_va: u64::from_le_bytes(*entry_va),
+        user_vm_base: u64::from_le_bytes(*user_vm_base),
+        user_vm_size: u64::from_le_bytes(*user_vm_size),
     })
 }
 
 /// Декодирует ровно [`USER_SEGMENT_SIZE`] байт в `UserSegmentAbi`.
 /// `None`, если буфер недостаточен.
 pub fn decode_segment(bytes: &[u8]) -> Option<UserSegmentAbi> {
-    if bytes.len() < USER_SEGMENT_SIZE {
-        return None;
-    }
+    let (region_handle, rest) = bytes.split_first_chunk::<4>()?;
+    let (flags, rest) = rest.split_first_chunk::<4>()?;
+    let (va_base, rest) = rest.split_first_chunk::<8>()?;
+    let (mapped_size, rest) = rest.split_first_chunk::<8>()?;
+    let (reserved, _) = rest.split_first_chunk::<8>()?;
     Some(UserSegmentAbi {
-        region_handle: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-        flags: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
-        va_base: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
-        mapped_size: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
-        reserved: u64::from_le_bytes(bytes[24..32].try_into().ok()?),
+        region_handle: u32::from_le_bytes(*region_handle),
+        flags: u32::from_le_bytes(*flags),
+        va_base: u64::from_le_bytes(*va_base),
+        mapped_size: u64::from_le_bytes(*mapped_size),
+        reserved: u64::from_le_bytes(*reserved),
     })
 }
 

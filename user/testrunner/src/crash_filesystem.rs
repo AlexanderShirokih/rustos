@@ -15,12 +15,12 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use component_abi::component_manifest;
+use component_client::{ReceivedStartup, component_manifest};
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path};
 use filesystem_server::{Error, Result as ServerResult, serve};
 use kernel_objects::OwnedHandle;
-use runtime::{PortTransport, log_fmt, thread_exit};
+use runtime::{log_fmt, thread_exit};
 use syscall::{Handle, USER_VA_END};
 
 const LOG_TAG: &str = "crashfs";
@@ -161,18 +161,18 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 }
 
 fn run(startup: Handle) -> ServerResult<()> {
-    let startup = OwnedHandle::from_handle(startup);
-    let started = CrashFileSystemStartup::receive(&PortTransport::server(startup.borrow()))?
-        .ok_or(Error::Start)?;
+    let ReceivedStartup { log, resources } =
+        CrashFileSystemStartup::receive(OwnedHandle::from_handle(startup))
+            .map_err(|_| Error::Start)?;
     let backend = |_| {
         Ok(CrashingFileSystem {
             inner: RamFileSystem::new(),
         })
     };
     serve(
-        started.log,
-        started.control,
-        started.service,
+        log,
+        resources.control,
+        resources.service,
         None,
         LOG_TAG,
         backend,

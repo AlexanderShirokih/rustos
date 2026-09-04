@@ -2,6 +2,7 @@
 //! композиции без копирования данных.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 
 #[cfg(any(test, feature = "alloc"))]
 extern crate alloc;

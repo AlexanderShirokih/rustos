@@ -43,8 +43,9 @@ pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallErr
     let user_vm = syscall_runtime()
         .current_user_vm()
         .ok_or(SyscallError::WrongType)?;
-    copy_in(&user_vm, name_va, &mut buf[..len])?;
-    let name = core::str::from_utf8(&buf[..len]).map_err(|_| SyscallError::InvalidArgument)?;
+    let target = buf.get_mut(..len).ok_or(SyscallError::InvalidArgument)?;
+    copy_in(&user_vm, name_va, target)?;
+    let name = core::str::from_utf8(target).map_err(|_| SyscallError::InvalidArgument)?;
 
     let table = runtime()
         .current_handle_table()
@@ -161,7 +162,7 @@ pub fn sys_process_load_image(
     desc_len: u64,
 ) -> Result<u64, SyscallError> {
     let process_id = parse_handle_id(process_h)?;
-    if desc_len as usize != USER_IMAGE_DESC_SIZE {
+    if desc_len != USER_IMAGE_DESC_SIZE as u64 {
         return Err(SyscallError::InvalidArgument);
     }
 
@@ -189,11 +190,14 @@ pub fn sys_process_load_image(
 
     let mut segments_buf = [0u8; MAX_SEGMENTS_PER_IMG * USER_SEGMENT_SIZE];
     let total = segment_count * USER_SEGMENT_SIZE;
-    copy_in(&user_vm, desc.segments_va, &mut segments_buf[..total])?;
+    let staging = segments_buf
+        .get_mut(..total)
+        .ok_or(SyscallError::InvalidArgument)?;
+    copy_in(&user_vm, desc.segments_va, staging)?;
 
     let mut segments: Vec<UserSegmentInstall> = Vec::with_capacity(segment_count);
-    for i in 0..segment_count {
-        let chunk = &segments_buf[i * USER_SEGMENT_SIZE..(i + 1) * USER_SEGMENT_SIZE];
+    let (chunks, _) = staging.as_chunks::<USER_SEGMENT_SIZE>();
+    for chunk in chunks {
         let seg = decode_segment(chunk).ok_or(SyscallError::InvalidArgument)?;
         if seg.reserved != 0 {
             return Err(SyscallError::InvalidArgument);
@@ -205,29 +209,37 @@ pub fn sys_process_load_image(
         let region = loader_table
             .with_lock(|tbl| tbl.get_object::<MemoryRegion>(region_handle_id, needed_rights))
             .map_err(map_ipc_error)?;
-        if region.size_bytes() != seg.mapped_size as usize {
+        if u64::try_from(region.size_bytes()).is_ok_and(|size| size != seg.mapped_size) {
             return Err(SyscallError::InvalidArgument);
         }
         if !region.access_mask().allows(access_mask_for(flags)) {
             return Err(SyscallError::AccessDenied);
         }
-        let va_base = PageAlignedVirtualAddress::from_usize(seg.va_base as usize)
+        let va_base = usize::try_from(seg.va_base)
+            .ok()
+            .and_then(PageAlignedVirtualAddress::from_usize)
             .ok_or(SyscallError::InvalidArgument)?;
         segments.push(UserSegmentInstall {
             va_base,
-            mapped_size: seg.mapped_size as usize,
+            mapped_size: usize::try_from(seg.mapped_size)
+                .map_err(|_| SyscallError::InvalidArgument)?,
             region,
             flags: to_mem_flags(flags),
         });
     }
 
-    let user_vm_base = PageAlignedVirtualAddress::from_usize(desc.user_vm_base as usize)
+    let user_vm_base = usize::try_from(desc.user_vm_base)
+        .ok()
+        .and_then(PageAlignedVirtualAddress::from_usize)
         .ok_or(SyscallError::InvalidArgument)?;
+    let entry = usize::try_from(desc.entry_va).map_err(|_| SyscallError::InvalidArgument)?;
+    let user_vm_size =
+        usize::try_from(desc.user_vm_size).map_err(|_| SyscallError::InvalidArgument)?;
     let install = UserImageInstall {
         segments,
-        entry: VirtualAddress::new(desc.entry_va as usize),
+        entry: VirtualAddress::new(entry),
         user_vm_base,
-        user_vm_size: desc.user_vm_size as usize,
+        user_vm_size,
     };
     syscall_runtime()
         .load_user_image_into(&process_object, &install)
@@ -398,7 +410,9 @@ fn start_err_to_syscall(err: &StartProcessError) -> SyscallError {
 }
 
 pub(super) fn exit_code_from_arg(raw: u64) -> i32 {
-    (raw as u32).cast_signed()
+    #[allow(clippy::cast_possible_truncation)]
+    let code = raw as u32;
+    code.cast_signed()
 }
 
 fn copy_in(user_vm: &UserVmContext, va: u64, dst: &mut [u8]) -> Result<(), SyscallError> {

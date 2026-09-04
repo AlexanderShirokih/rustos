@@ -16,7 +16,7 @@ pub(super) fn resolve_names<'a>(entries: &[&'a ComponentEntry]) -> Result<Vec<&'
     for (index, name) in names.iter().enumerate() {
         validate_name(name)?;
         ensure!(
-            !names[..index].contains(name),
+            !names.iter().take(index).any(|earlier| earlier == name),
             "boot plan names component '{name}' more than once"
         );
     }

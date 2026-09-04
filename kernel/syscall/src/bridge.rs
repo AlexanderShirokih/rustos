@@ -304,18 +304,24 @@ fn sys_signal_wait_many_impl(
         .ok_or(SyscallError::WrongType)?;
 
     let mut buf = [0u8; WAIT_MANY_MAX_COUNT * WAIT_MANY_ENTRY_SIZE];
-    copy_in(&user_vm, items_va, &mut buf[..bytes_total])?;
+    let target = buf
+        .get_mut(..bytes_total)
+        .ok_or(SyscallError::InvalidArgument)?;
+    copy_in(&user_vm, items_va, target)?;
 
     // Хвост `items` за `count` наружу не уходит (`&items[..count]`).
     let mut items: [(HandleId, u32); WAIT_MANY_MAX_COUNT] =
         [WAIT_MANY_PLACEHOLDER; WAIT_MANY_MAX_COUNT];
-    let (entries, _) = buf[..bytes_total].as_chunks::<WAIT_MANY_ENTRY_SIZE>();
+    let (entries, _) = buf
+        .get(..bytes_total)
+        .ok_or(SyscallError::InvalidArgument)?
+        .as_chunks::<WAIT_MANY_ENTRY_SIZE>();
     for (slot, entry) in items.iter_mut().zip(entries) {
         *slot = parse_wait_many_entry(*entry)?;
     }
 
-    let outcome =
-        capability::signal_wait_many(&items[..count], Some(timeout_ns)).map_err(map_ipc_error)?;
+    let waited = items.get(..count).ok_or(SyscallError::InvalidArgument)?;
+    let outcome = capability::signal_wait_many(waited, Some(timeout_ns)).map_err(map_ipc_error)?;
     Ok((outcome.index, outcome.observed))
 }
 
@@ -332,7 +338,9 @@ fn sys_handle_duplicate(handle: u64, new_rights: u64, badge: u64) -> Result<u64,
     Ok(u64::from(new_id.raw().get()))
 }
 
+#[allow(clippy::cast_possible_truncation)]
 const fn low_u32(raw: u64) -> u32 {
+    // Поля вызова занимают младшее слово аргумента, и старшая половина в них не участвует.
     raw as u32
 }
 

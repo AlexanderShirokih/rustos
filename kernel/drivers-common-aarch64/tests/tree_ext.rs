@@ -1,3 +1,5 @@
+#![allow(clippy::indexing_slicing)]
+
 use drivers_common::{DeviceNode, NodeProperty, probe::ProbeContext};
 use drivers_common_aarch64::{
     ProbeContextExt,

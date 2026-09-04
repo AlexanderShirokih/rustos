@@ -1,6 +1,8 @@
 //! Send-сторона cap: wire-id попадает в кадр, владение отдаётся при успешной
 //! передаче (relinquish), иначе закрывается через Drop.
 
+#![allow(clippy::std_instead_of_core)]
+
 use std::{cell::Cell, rc::Rc, thread};
 
 use ipc::{

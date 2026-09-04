@@ -9,6 +9,11 @@
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::multiple_unsafe_ops_per_block
+)]
 
 runtime::process_heap!();
 

@@ -7,6 +7,12 @@
 //! под ней покрыты набором `testrunner` отдельно.
 
 #![feature(molecular_ext)]
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::std_instead_of_core
+)]
 
 use std::{
     cell::Cell,
@@ -15,6 +21,17 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+use component_client::component_manifest;
+use component_client_std::into_std_handle;
+use kernel_objects::OwnedHandle;
+use syscall::Rights;
+
+component_manifest! {
+    struct SelftestStartup {
+        slots: {},
+    }
+}
 
 mod local {
     // Линт срабатывает на уже константном инициализаторе изнутри раскрытия макроса, куда
@@ -29,7 +46,9 @@ mod local {
 }
 
 fn main() {
-    startup_set_reaches_the_program();
+    let startup = startup_set_reaches_the_program();
+    the_start_handle_is_handed_out_once();
+    an_owned_handle_closes_its_capability(&startup);
     heap_serves_growing_collections();
     monotonic_clock_moves_forward();
     mutex_hands_out_exclusive_access();
@@ -42,9 +61,30 @@ fn main() {
     println!("checks passed");
 }
 
-fn startup_set_reaches_the_program() {
-    let startup = molecular::startup().expect("composition hands out the startup set");
-    assert_eq!(startup.slots().count(), 0, "the manifest declares no slots");
+fn startup_set_reaches_the_program() -> SelftestStartup {
+    // Приём и есть проверка, потому что он сверяет состав набора с объявлением манифеста и
+    // ставит лог-сессию, по которой идёт вывод остальных проверок.
+    component_client_std::receive(SelftestStartup::receive)
+        .expect("composition hands out the startup set")
+}
+
+fn the_start_handle_is_handed_out_once() {
+    assert!(
+        molecular::take_start_handle().is_none(),
+        "the start handle is handed out twice"
+    );
+}
+
+fn an_owned_handle_closes_its_capability(startup: &SelftestStartup) {
+    let spare = startup
+        .service
+        .duplicate(Rights::WRITE, None)
+        .expect("the service port duplicates");
+    let raw = spare.as_raw().raw();
+    drop(into_std_handle(spare));
+
+    let closed = OwnedHandle::from_raw(raw).expect("the duplicate names a table entry");
+    assert!(closed.close().is_err(), "the dropped handle stays open");
 }
 
 fn heap_serves_growing_collections() {

@@ -5,6 +5,7 @@
 //! в граф зависимостей стандартной библиотеки, а там ни то ни другое собраться не может.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 
 #[cfg(test)]
 extern crate std;

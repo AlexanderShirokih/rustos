@@ -22,7 +22,11 @@ fn store_body(body: &[u8]) -> Result<()> {
     // текущий поток - единственный, кто его трогает; запись в пределах полей.
     unsafe {
         let buf: &mut IpcBuffer = &mut *ptr;
-        buf.data[..body.len()].copy_from_slice(body);
+        let target = buf
+            .data
+            .get_mut(..body.len())
+            .ok_or(Error::Syscall(SyscallError::InvalidArgument))?;
+        target.copy_from_slice(body);
         buf.tag = encode_tag(body.len(), 0);
     }
     Ok(())
@@ -35,7 +39,10 @@ fn load_body(out: &mut [u8]) -> Result<usize> {
         let buf: &IpcBuffer = &*ptr;
         let len = decode_tag(buf.tag).len;
         let copy = len.min(out.len()).min(IPC_BUFFER_DATA_MAX);
-        out[..copy].copy_from_slice(&buf.data[..copy]);
+        let (Some(target), Some(source)) = (out.get_mut(..copy), buf.data.get(..copy)) else {
+            return Err(Error::Syscall(SyscallError::InvalidArgument));
+        };
+        target.copy_from_slice(source);
         // Наружу уходит длина кадра целиком: в `out` легло не больше его вместимости.
         Ok(len)
     }

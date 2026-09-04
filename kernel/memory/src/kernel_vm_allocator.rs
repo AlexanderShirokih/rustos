@@ -6,6 +6,7 @@
 //! aligned-аллокации.
 
 #![allow(unsafe_code)]
+#![allow(clippy::multiple_unsafe_ops_per_block)]
 
 use core::{alloc::Layout, mem::size_of, ptr::NonNull};
 

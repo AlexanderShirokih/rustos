@@ -35,28 +35,37 @@ impl ReadyQueue {
 
     pub fn push(&mut self, id: ThreadId, priority: Priority) {
         let level = self.priority_index(priority);
-        self.queues[level].push_back(id);
+        let Some(queue) = self.queues.get_mut(level) else {
+            return;
+        };
+        queue.push_back(id);
         self.bitmap |= Self::mask_for(level);
         self.len += 1;
     }
 
     pub fn pop_highest(&mut self) -> Option<(ThreadId, Priority)> {
         let level = self.highest_level()?;
-        let id = self.queues[level].pop_front()?;
-        if self.queues[level].is_empty() {
+        let queue = self.queues.get_mut(level)?;
+        let id = queue.pop_front()?;
+        let drained = queue.is_empty();
+        if drained {
             self.bitmap &= !Self::mask_for(level);
         }
         self.len = self.len.saturating_sub(1);
-        Some((id, Priority::new(level as u8)))
+        Some((id, Self::level_priority(level)?))
     }
 
     /// Удаляет все записи `id` на известном уровне приоритета.
     pub fn remove(&mut self, id: ThreadId, priority: Priority) -> bool {
         let level = self.priority_index(priority);
-        let before = self.queues[level].len();
-        self.queues[level].retain(|queued| *queued != id);
-        let removed = before - self.queues[level].len();
-        if self.queues[level].is_empty() {
+        let Some(queue) = self.queues.get_mut(level) else {
+            return false;
+        };
+        let before = queue.len();
+        queue.retain(|queued| *queued != id);
+        let removed = before - queue.len();
+        let drained = queue.is_empty();
+        if drained {
             self.bitmap &= !Self::mask_for(level);
         }
         self.len = self.len.saturating_sub(removed);
@@ -80,7 +89,7 @@ impl ReadyQueue {
             if let Some(thread) = queue.iter().copied().find(|id| accept(*id)) {
                 return Some(QueuedThread {
                     thread,
-                    priority: Priority::new(level as u8),
+                    priority: Self::level_priority(level)?,
                 });
             }
         }
@@ -88,8 +97,7 @@ impl ReadyQueue {
     }
 
     pub fn peek_highest_priority(&self) -> Option<Priority> {
-        let level = self.highest_level()?;
-        Some(Priority::new(level as u8))
+        Self::level_priority(self.highest_level()?)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -117,6 +125,10 @@ impl ReadyQueue {
             self.priority_levels
         );
         level
+    }
+
+    fn level_priority(level: usize) -> Option<Priority> {
+        u8::try_from(level).ok().map(Priority::new)
     }
 
     fn mask_for(level: usize) -> u32 {

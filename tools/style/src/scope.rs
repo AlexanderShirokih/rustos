@@ -41,6 +41,8 @@ pub struct FileMeta {
 pub enum Selector {
     /// Расширение имени файла.
     Extension(String),
+    /// Расширение имени файла совпадает с одним из перечисленных.
+    ExtensionAny(Vec<String>),
     /// Путь начинается с одного из префиксов.
     UnderAny(Vec<String>),
     /// Путь не начинается ни с одного из префиксов.
@@ -122,6 +124,9 @@ impl Selector {
     pub fn matches(&self, meta: &FileMeta) -> bool {
         match self {
             Selector::Extension(want) => extension(&meta.path).is_some_and(|got| got == want),
+            Selector::ExtensionAny(wants) => {
+                extension(&meta.path).is_some_and(|got| wants.iter().any(|want| want == got))
+            }
             Selector::UnderAny(prefixes) => under_any(&meta.path, prefixes),
             Selector::NotUnderAny(prefixes) => !under_any(&meta.path, prefixes),
             Selector::PackageAny(names) => in_package(meta, names),

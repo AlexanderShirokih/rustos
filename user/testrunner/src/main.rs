@@ -1,6 +1,15 @@
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::missing_asserts_for_indexing,
+    clippy::cast_possible_truncation,
+    clippy::unwrap_in_result,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::panic
+)]
 
 runtime::process_heap!();
 
@@ -54,6 +63,7 @@ mod simd_state;
 mod smp_stress;
 mod spawn_from_image;
 mod startup_fixture_protocol;
+mod startup_ownership;
 mod std_rt;
 mod std_selftest;
 mod stress;

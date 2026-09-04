@@ -39,7 +39,9 @@ const fn ticks_to_ns(ticks: u64, frequency: u64) -> u64 {
     if frequency == 0 {
         return 0;
     }
-    (ticks as u128 * NS_PER_SEC / frequency as u128) as u64
+    #[allow(clippy::cast_possible_truncation)]
+    let ns = (ticks as u128 * NS_PER_SEC / frequency as u128) as u64;
+    ns
 }
 
 fn frequency() -> u64 {

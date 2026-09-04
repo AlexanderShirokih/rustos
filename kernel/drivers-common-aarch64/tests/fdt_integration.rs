@@ -5,6 +5,7 @@
 //! `try_read_cell`, `is_compatible` и трансляцию адресов в `get_address`.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::cast_possible_truncation, clippy::panic)]
 
 use drivers_common::{DeviceNode, probe::ProbeContext};
 use drivers_common_aarch64::{

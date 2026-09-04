@@ -5,7 +5,7 @@ use crate::{
     view::{CommentView, SyntaxView, View},
 };
 
-/// Строка прозы, описывающей объявление.
+/// Строка текста, описывающего объявление.
 pub struct ProseLine {
     /// Диапазон токена комментария.
     pub span: Span,
@@ -13,7 +13,7 @@ pub struct ProseLine {
     pub text: String,
 }
 
-/// Собирает прозу объявлений файла, сгруппированную в блоки соседних строк.
+/// Собирает текст объявлений файла, сгруппированный в блоки соседних строк.
 pub fn blocks(source: &Source) -> Vec<Vec<ProseLine>> {
     let Some(view) = CommentView::of(source) else {
         return Vec::new();

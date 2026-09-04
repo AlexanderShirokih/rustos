@@ -287,7 +287,8 @@ fn scan(sweep: Sweep) -> Result<Scan> {
             continue;
         };
         let source = Source::new(meta, &text, Arc::clone(settings));
-        if source.parsed().errors > 0 {
+        let is_rust_source = path.extension().and_then(|ext| ext.to_str()) == Some("rs");
+        if is_rust_source && source.parsed().errors > 0 {
             if strict {
                 bail!(
                     "{} does not parse as Rust, style rules cannot be applied",
@@ -435,12 +436,16 @@ fn directive_findings(
     out
 }
 
+/// Правила самого движка: диагностика директив подавления, вне каталога и конфигурации.
+pub const ENGINE_RULES: [&str; 3] = [
+    "missing_style_reason",
+    "unknown_style_rule",
+    "unused_style_allow",
+];
+
 fn level_of(catalog: &[Rule], config: &Config, key: &str) -> Option<Severity> {
     let id = key.split('|').next()?;
-    if matches!(
-        id,
-        "missing_style_reason" | "unknown_style_rule" | "unused_style_allow"
-    ) {
+    if ENGINE_RULES.contains(&id) {
         return Some(Severity::Deny);
     }
     let rule = catalog.iter().find(|rule| rule.meta.id == id)?;

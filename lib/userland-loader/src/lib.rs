@@ -51,21 +51,15 @@ pub struct InitializedProcess {
 
 impl PendingLaunch {
     fn finish<E>(
-        mut self,
+        self,
         send: impl FnOnce(&Port) -> core::result::Result<(), E>,
     ) -> core::result::Result<Process, E>
     where
         E: From<Error>,
     {
-        if let Err(error) = send(self.startup()) {
-            return match self.rollback() {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(E::from(cleanup)),
-            };
-        }
-        let process = self.take_process();
-        self.startup = None;
-        Ok(process)
+        // Клиентская сторона порта уходит вместе с результатом, и стартовый кадр закрывает
+        // её как одноразовую.
+        self.retain(send).map(|initialized| initialized.process)
     }
 
     fn retain<E>(
@@ -75,24 +69,27 @@ impl PendingLaunch {
     where
         E: From<Error>,
     {
-        if let Err(error) = send(self.startup()) {
+        if let Err(error) = send(self.startup()?) {
             return match self.rollback() {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(E::from(cleanup)),
             };
         }
-        Ok(InitializedProcess {
-            process: self.take_process(),
-            startup: self.startup.take().expect("startup port is present"),
-        })
+        let process = self.take_process()?;
+        let startup = self.take_startup()?;
+        Ok(InitializedProcess { process, startup })
     }
 
-    fn startup(&self) -> &Port {
-        self.startup.as_ref().expect("startup port is present")
+    fn take_startup(&mut self) -> Result<Port> {
+        self.startup.take().ok_or_else(state_taken)
     }
 
-    fn take_process(&mut self) -> Process {
-        self.process.take().expect("launched process is present")
+    fn startup(&self) -> Result<&Port> {
+        self.startup.as_ref().ok_or_else(state_taken)
+    }
+
+    fn take_process(&mut self) -> Result<Process> {
+        self.process.take().ok_or_else(state_taken)
     }
 
     fn rollback(mut self) -> Result<()> {
@@ -121,12 +118,12 @@ impl PendingProcess {
         }
     }
 
-    fn process(&self) -> &Process {
-        self.process.as_ref().expect("created process is present")
+    fn process(&self) -> Result<&Process> {
+        self.process.as_ref().ok_or_else(state_taken)
     }
 
-    fn finish(mut self) -> Process {
-        self.process.take().expect("created process is present")
+    fn finish(mut self) -> Result<Process> {
+        self.process.take().ok_or_else(state_taken)
     }
 
     fn fail<T>(self, error: Error) -> Result<T> {
@@ -153,6 +150,10 @@ impl Drop for PendingProcess {
             let _ = process.terminate(STARTUP_FAILURE_EXIT_CODE);
         }
     }
+}
+
+fn state_taken() -> Error {
+    Error::Syscall(SyscallError::BadHandle)
 }
 
 fn terminate_and_join(process: &Process) -> Result<()> {
@@ -252,6 +253,7 @@ pub fn load_entry<'a, E: EntryView<'a>>(
 
         let abi = UserSegmentAbi {
             region_handle: region.handle().as_raw().raw(),
+            #[allow(clippy::cast_possible_truncation)]
             flags: permissions_to_flags(seg.permissions()).raw() as u32,
             va_base: seg.va_base(),
             mapped_size: mapped,
@@ -280,6 +282,7 @@ pub fn load_entry<'a, E: EntryView<'a>>(
     let stack = resource.create_virtual(stack_size, MemoryAccess::RW)?;
     let stack_abi = UserSegmentAbi {
         region_handle: stack.handle().as_raw().raw(),
+        #[allow(clippy::cast_possible_truncation)]
         flags: UserMemFlags::ReadWrite.raw() as u32,
         va_base: stack_top - stack_size,
         mapped_size: stack_size,
@@ -300,10 +303,10 @@ pub fn load_entry<'a, E: EntryView<'a>>(
 
     let name = name.unwrap_or_else(|| entry_name(entry.path()));
     let pending = PendingProcess::new(Process::create(name)?);
-    if let Err(error) = pending.process().load_image(&encode_image_desc(&desc)) {
+    if let Err(error) = pending.process()?.load_image(&encode_image_desc(&desc)) {
         return pending.fail(error);
     }
-    let thread = match pending.process().start(
+    let thread = match pending.process()?.start(
         ThreadEntry {
             entry_pc: entry.entry_va(),
             user_sp: stack_top,
@@ -322,7 +325,7 @@ pub fn load_entry<'a, E: EntryView<'a>>(
     drop(thread);
     drop(mappings);
     drop(regions);
-    Ok(pending.finish())
+    pending.finish()
 }
 
 fn permissions_to_flags(permissions: SegmentPermissions) -> UserMemFlags {

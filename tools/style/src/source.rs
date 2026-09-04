@@ -132,7 +132,7 @@ fn parse(text: &str, settings: &Settings, meta: &FileMeta) -> Parsed {
     let mut test_ranges: Vec<Span> = Vec::new();
 
     if file_is_test(meta) {
-        test_ranges.push(Span::new(0, text.len() as u32));
+        test_ranges.push(Span::new(0, crate::span::offset(text.len())));
     }
 
     for node in root.descendants() {

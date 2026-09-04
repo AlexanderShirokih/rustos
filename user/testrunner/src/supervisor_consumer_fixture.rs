@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::{format, vec::Vec};
 use core::panic::PanicInfo;
 
-use component_abi::component_manifest;
+use component_client::{ReceivedStartup, component_manifest};
 use filesystem_abi::{AccessMode, NodeKind, OpenFlags, file_system};
 use ipc::wire::{Bytes, Str};
 use kernel_objects::{MemoryRegion, OwnedHandle};
@@ -53,19 +53,17 @@ component_manifest! {
 /// поднятого компонента. `startup` приходит в x0 как HandleId одноразового startup-порта.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(startup: Handle) -> ! {
-    let startup = OwnedHandle::from_handle(startup);
-    let Ok(Some(started)) =
-        SupervisorConsumerStartup::receive(&PortTransport::server(startup.borrow()))
+    let Ok(ReceivedStartup { log, resources }) =
+        SupervisorConsumerStartup::receive(OwnedHandle::from_handle(startup))
     else {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
-    drop(startup);
-    install_log(Handle::from_nonzero(started.log.raw()), LOG_TAG);
-    drop(OwnedHandle::adopt(started.control));
-    drop(OwnedHandle::adopt(started.service));
+    install_log(log.into_raw(), LOG_TAG);
+    drop(resources.control);
+    drop(resources.service);
 
-    let files = OwnedHandle::adopt(started.files);
-    let system = OwnedHandle::adopt(started.system);
+    let files = resources.files;
+    let system = resources.system;
     thread_exit(raise(
         &file_system::Client::new(PortTransport::client(&files)).with_wait(CALL_TIMEOUT),
         &supervisor::Client::new(PortTransport::client(&system)).with_wait(CALL_TIMEOUT),

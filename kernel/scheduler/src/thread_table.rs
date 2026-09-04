@@ -97,7 +97,9 @@ impl<A: ArchContext> ThreadTable<A> {
     }
 
     fn slot_id(index: usize) -> ThreadId {
-        ThreadId::new(NonZeroU32::MIN.saturating_add(index as u32))
+        // Слотов не больше, чем вмещает `u32`: таблица растёт под тем же ограничением.
+        let slot = u32::try_from(index).unwrap_or(u32::MAX);
+        ThreadId::new(NonZeroU32::MIN.saturating_add(slot))
     }
 }
 

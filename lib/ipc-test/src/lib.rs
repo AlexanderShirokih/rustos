@@ -1,5 +1,13 @@
 //! Host-mock транспорта IPC поверх [`Transport`] для тестирования контрактов.
 
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::unwrap_in_result,
+    clippy::panic,
+    clippy::std_instead_of_core
+)]
+
 use std::{
     collections::VecDeque,
     sync::{Arc, Condvar, Mutex},

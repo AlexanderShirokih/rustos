@@ -1,6 +1,7 @@
 //! Host-тесты на интеграцию userspace-процессов в scheduler.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
 
 mod common;
 

@@ -59,7 +59,7 @@ fn validate_mounts(manifest: &MountTableManifest, instances: &StageInstances) ->
     for (index, mount) in manifest.mounts.iter().enumerate() {
         validate_image_path(&mount.path)
             .with_context(|| format!("mount '{}' is not a namespace prefix", mount.path))?;
-        for earlier in &manifest.mounts[..index] {
+        for earlier in manifest.mounts.iter().take(index) {
             ensure!(
                 earlier.path != mount.path,
                 "mount table covers '{}' more than once",

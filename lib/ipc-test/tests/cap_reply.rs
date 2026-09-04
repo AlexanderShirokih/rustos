@@ -2,6 +2,8 @@
 //! его при успешной reply-передаче (relinquish). Клиент получает Cap с тем же
 //! wire-id.
 
+#![allow(clippy::expect_used)]
+
 use std::{
     sync::{Arc, Mutex},
     thread,

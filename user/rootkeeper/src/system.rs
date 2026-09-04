@@ -658,9 +658,10 @@ impl<'a> RootSystem<'a> {
         }
 
         match wait_any(&waits, Timeout::INFINITE) {
-            Ok(index) if index < watched.len() => {
-                self.replace_component(watched[index], &kernel_log)
-            }
+            Ok(index) if index < watched.len() => match watched.get(index) {
+                Some(&component) => self.replace_component(component, &kernel_log),
+                None => Supervised::Stopped(Stopped::Subsystem),
+            },
             Ok(index) if index == watched.len() => {
                 log_exit(&kernel_log, "log relay", relay::exit_code());
                 Supervised::Stopped(Stopped::Subsystem)
@@ -755,7 +756,7 @@ impl<'a> RootSystem<'a> {
     }
 
     fn needs_devices(&self, first: usize) -> bool {
-        self.components[first..].iter().any(|component| {
+        self.components.iter().skip(first).any(|component| {
             component.record.plan().is_ok_and(|plan| {
                 plan.slots()
                     .any(|slot| matches!(slot, SlotSource::Irq(_) | SlotSource::Mmio(_)))
@@ -989,13 +990,16 @@ impl<'a> RootSystem<'a> {
             let depends = dependencies(component).is_ok_and(|mut edges| {
                 edges.any(|edge| {
                     find_instance(&self.components, edge)
-                        .is_some_and(|provider| taken[usize::from(provider)])
+                        .and_then(|provider| taken.get(usize::from(provider)).copied())
+                        .unwrap_or(false)
                 })
             });
             if !depends {
                 continue;
             }
-            taken[usize::from(candidate)] = true;
+            if let Some(slot) = taken.get_mut(usize::from(candidate)) {
+                *slot = true;
+            }
             // Снятый компонент своей смены не получает: композиция держит его без запуска.
             if component.managed.running().is_some() {
                 group.push(candidate);
@@ -1178,17 +1182,22 @@ fn start_order(components: &[Component<'_>]) -> Result<Vec<u16>, BootFailure> {
     let mut order = Vec::with_capacity(count);
     while order.len() < count {
         let mut progress = false;
-        for index in 0..count {
-            if started[index] {
+        for (index, component) in components.iter().enumerate() {
+            if started.get(index).copied().unwrap_or(true) {
                 continue;
             }
             let mut ready = true;
-            for edge in dependencies(&components[index])? {
+            for edge in dependencies(component)? {
                 let edge = find_instance(components, edge).ok_or(BootFailure::Provider)?;
-                ready &= started[usize::from(edge)];
+                ready &= started
+                    .get(usize::from(edge))
+                    .copied()
+                    .ok_or(BootFailure::Provider)?;
             }
             if ready {
-                started[index] = true;
+                if let Some(slot) = started.get_mut(index) {
+                    *slot = true;
+                }
                 order.push(u16::try_from(index).map_err(|_| BootFailure::PlanOrder)?);
                 progress = true;
             }

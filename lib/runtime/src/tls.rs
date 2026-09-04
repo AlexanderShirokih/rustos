@@ -41,8 +41,10 @@ pub fn create(dtor: Option<Dtor>) -> Key {
         NEXT_KEY.store(MAX_KEYS, Ordering::Relaxed);
         return 0;
     }
-    if let Some(dtor) = dtor {
-        DESTRUCTORS[key].store(dtor as usize, Ordering::Release);
+    if let Some(dtor) = dtor
+        && let Some(cell) = DESTRUCTORS.get(key)
+    {
+        cell.store(dtor as usize, Ordering::Release);
     }
     key
 }
@@ -55,7 +57,7 @@ pub fn create(dtor: Option<Dtor>) -> Key {
 pub unsafe fn get(key: Key) -> *mut u8 {
     match block() {
         // SAFETY: ключ меньше MAX_KEYS по контракту create, блок жив до конца потока.
-        Some(block) => unsafe { (*block).slots[key] },
+        Some(block) => unsafe { (*block).slots.get(key).copied().unwrap_or(ptr::null_mut()) },
         None => ptr::null_mut(),
     }
 }
@@ -69,8 +71,12 @@ pub unsafe fn set(key: Key, value: *mut u8) {
     let Some(block) = installed_block() else {
         return;
     };
-    // SAFETY: ключ меньше MAX_KEYS по контракту create, блок жив до конца потока.
-    unsafe { (*block).slots[key] = value };
+    // SAFETY: блок жив до конца потока, а слот берётся проверенным доступом.
+    unsafe {
+        if let Some(slot) = (*block).slots.get_mut(key) {
+            *slot = value;
+        }
+    }
 }
 
 /// Снимает ключ с учёта. Слоты живых потоков остаются на месте до их ухода.
@@ -82,7 +88,9 @@ pub unsafe fn destroy(key: Key) {
     if key == 0 || key >= MAX_KEYS {
         return;
     }
-    DESTRUCTORS[key].store(0, Ordering::Release);
+    if let Some(cell) = DESTRUCTORS.get(key) {
+        cell.store(0, Ordering::Release);
+    }
 }
 
 /// Гоняет деструкторы локальных данных уходящего потока и освобождает его блок.
@@ -94,14 +102,20 @@ pub fn run_destructors() {
     for _ in 0..DESTRUCTOR_ROUNDS {
         let mut pending = false;
         for (key, destructor) in DESTRUCTORS.iter().enumerate().skip(1) {
-            // SAFETY: блок жив, индекс в границах массива слотов.
-            let value = unsafe { (*block).slots[key] };
+            // SAFETY: блок жив, а слот берётся проверенным доступом.
+            let Some(value) = (unsafe { (*block).slots.get(key).copied() }) else {
+                continue;
+            };
             if value.is_null() {
                 continue;
             }
-            // SAFETY: см. выше; слот освобождается до вызова деструктора, чтобы повторный
-            // заход не увидел то же значение.
-            unsafe { (*block).slots[key] = ptr::null_mut() };
+            // SAFETY: см. выше. Слот освобождается до вызова деструктора, и повторный заход
+            // не увидит то же значение.
+            unsafe {
+                if let Some(slot) = (*block).slots.get_mut(key) {
+                    *slot = ptr::null_mut();
+                }
+            }
 
             let raw = destructor.load(Ordering::Acquire);
             if raw != 0 {

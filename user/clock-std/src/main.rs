@@ -1,33 +1,31 @@
 //! Компонент композиции на стандартной библиотеке: спрашивает время у драйвера RTC.
 //!
-//! Свой манифест программа объявляет сама, и он перекрывает пустую запись от `std`. Стартовый
-//! набор capability выдаёт `std::os::molecular` сырыми идентификаторами.
+//! Программа сама принимает стартовую транзакцию, тем же объявлением, что и программа без
+//! стандартной библиотеки. Библиотека отдаёт ей одноразовый стартовый handle и принимает
+//! лог-сессию набора под `stdout` и `stderr`.
 
-#![feature(molecular_ext)]
+use std::process;
 
-use std::os::molecular;
-
-use kernel_objects::{OwnedHandle, PortTransport};
+use component_client::component_manifest;
+use kernel_objects::PortTransport;
 use rtc_abi::rtc;
 
-component_abi::component_manifest! {
-    slots: { rtc: service(protocol = "Rtc") },
+const NO_STARTUP_EXIT_CODE: i32 = 1;
+
+component_manifest! {
+    struct ClockStartup {
+        slots: { rtc: service(protocol = "Rtc") },
+    }
 }
 
 fn main() {
-    let Some(startup) = molecular::startup() else {
-        println!("no startup set: the process runs outside the composition");
-        return;
+    // До установки лог-сессии вывод не доходит до журнала, поэтому процесс называет отказ
+    // приёма кодом выхода.
+    let Ok(startup) = component_client_std::receive(ClockStartup::receive) else {
+        process::exit(NO_STARTUP_EXIT_CODE);
     };
-    let Some(session) = startup.slots().next() else {
-        println!("no Rtc session in the startup set");
-        return;
-    };
-    let Some(session) = OwnedHandle::from_raw(session.get()) else {
-        println!("the Rtc session slot carries no capability");
-        return;
-    };
-    let clock = rtc::Client::new(PortTransport::client(&session));
+
+    let clock = rtc::Client::new(PortTransport::client(&startup.rtc));
     match clock.now() {
         Ok(seconds) => println!("rtc reads {seconds}"),
         Err(error) => println!("rtc call failed: {error:?}"),

@@ -1,4 +1,13 @@
 #![no_main]
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::missing_asserts_for_indexing,
+    clippy::cast_possible_truncation,
+    clippy::unwrap_in_result,
+    clippy::panic,
+    clippy::std_instead_of_core
+)]
 
 use libfuzzer_sys::fuzz_target;
 use userland::{EntryView, SegmentView};

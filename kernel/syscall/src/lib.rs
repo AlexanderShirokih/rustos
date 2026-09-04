@@ -3,6 +3,7 @@
 //! trap-фрейма и вызывает [`dispatch`].
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(test, allow(clippy::unimplemented, clippy::unwrap_in_result))]
 
 extern crate alloc;
 #[cfg(test)]

@@ -11,7 +11,7 @@ pub const FILE_ROOT: &str = "<file-root>";
 /// Возвращает путь объявления, накрывающего диапазон.
 pub fn item_path(source: &Source, span: Span) -> String {
     let root = &source.parsed().root;
-    let end = span.end.min(source.text.len() as u32);
+    let end = span.end.min(crate::span::offset(source.text.len()));
     let start = span.start.min(end);
     let range = TextRange::new(TextSize::from(start), TextSize::from(end));
     let Some(element) = root.covering_element(range).into_node().or_else(|| {

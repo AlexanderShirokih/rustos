@@ -33,20 +33,24 @@ impl<const WORDS: usize> BitSet<WORDS> {
     #[inline]
     pub fn set(&mut self, idx: usize) {
         let (w, b) = Self::split(idx);
-        self.words[w] |= 1u64 << b;
+        if let Some(word) = self.words.get_mut(w) {
+            *word |= 1u64 << b;
+        }
     }
 
     #[inline]
     pub fn clear(&mut self, idx: usize) {
         let (w, b) = Self::split(idx);
-        self.words[w] &= !(1u64 << b);
+        if let Some(word) = self.words.get_mut(w) {
+            *word &= !(1u64 << b);
+        }
     }
 
     #[must_use]
     #[inline]
     pub fn is_set(&self, idx: usize) -> bool {
         let (w, b) = Self::split(idx);
-        (self.words[w] >> b) & 1 == 1
+        self.words.get(w).is_some_and(|word| (word >> b) & 1 == 1)
     }
 
     #[inline]
@@ -57,7 +61,9 @@ impl<const WORDS: usize> BitSet<WORDS> {
     #[inline]
     fn split(idx: usize) -> (usize, u32) {
         debug_assert!(idx < Self::CAPACITY, "BitSet index out of range");
-        (idx / u64::BITS as usize, (idx % u64::BITS as usize) as u32)
+        #[allow(clippy::cast_possible_truncation)]
+        let bit = (idx % u64::BITS as usize) as u32;
+        (idx / u64::BITS as usize, bit)
     }
 }
 

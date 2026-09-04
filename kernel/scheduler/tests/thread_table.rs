@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::std_instead_of_core)]
+
 mod common;
 
 use std::num::NonZeroU32;

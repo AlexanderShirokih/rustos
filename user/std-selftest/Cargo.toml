@@ -15,6 +15,9 @@ test = false
 bench = false
 
 [dependencies]
+component-client = { workspace = true }
+component-client-std = { workspace = true }
+kernel-objects = { workspace = true }
 syscall = { workspace = true }
 
 [build-dependencies]

@@ -1,9 +1,17 @@
 # Конфигурация `cargo xtask style`.
 #
-# Правила категории прозы объявляются здесь данными: узор плюс сужающие
+# Правила категории `Prose` объявляются здесь данными: узор плюс сужающие
 # фильтры. Скомпилированные правила живут в `tools/style/src/rules`.
 
 [rules]
+fronted_negation = "deny"
+postposed_sam = "deny"
+colon_justification = "deny"
+animistic_verb = "deny"
+zavodit_verb = "deny"
+caps_emphasis = "deny"
+against_calque = "deny"
+non_ascii_punctuation = "deny"
 
 [[text]]
 id = "latin_apostrophe"
@@ -57,4 +65,162 @@ message = "definition through negation, name the thing itself"
 target = "attached"
 pattern = "(?i),\\s*а\\s+не\\b"
 strip = ["backticks"]
+
+[[text]]
+id = "fronted_negation"
+title = "the missing thing is fronted and the sentence closes with \"нет\""
+explain = """
+The clause puts the missing thing first, in the genitive, and closes with "нет": \
+"Узла по указанному пути нет.", "Списания нет.", "Совпадения нет." That is the marked, \
+emphatic order; russian technical prose keeps the direct one, where "нет" precedes what \
+is missing. Rewrite so that the sentence opens with the subject, the place or the \
+condition: "Узла по указанному пути нет." -> "По указанному пути нет узла."; "Поддержки \
+этой функции в системе нет." -> "Система не поддерживает эту функцию." Do not fix this \
+by moving "нет" to the front of the same fragment, and do not split the sentence in two; \
+restate it with the subject first. The rule ignores "Пока нет" and "Больше нет", where \
+the order carries the meaning.
+"""
+message = "object fronted before a sentence-final negation, restate with the subject first"
+target = "paragraph"
+extension = ["rs", "md"]
+pattern = "[а-яёА-ЯЁ]+ нет([.,;:)]|$)"
+unless = ["(Пока|Больше|Ещё|Уже) нет"]
+strip = ["backticks"]
 macro_bodies = "exclude"
+
+[[text]]
+id = "postposed_sam"
+title = "the sentence closes with 'сам' after the verb"
+explain = """
+"сессии компонент заводит сам", "безопасную точку поток отмечает сам": "сам" after \
+the verb at the end of the sentence turns a statement into a slogan. Put "сам" before \
+the verb and keep the direct order: "сессии компонент заводит сам" -> "компонент сам \
+создаёт сессии"; "безопасную точку поток отмечает сам" -> "поток сам отмечает \
+безопасную точку". Do not drop "сам" if it carries meaning (who does it), and do not \
+move it to the start of the sentence instead of before the verb.
+"""
+message = "'сам' after the verb at the end of the sentence, put it before the verb"
+target = "paragraph"
+extension = ["rs", "md"]
+pattern = "[а-яё]+ (сам|сама|само|сами)([.,;:)]|$)"
+strip = ["backticks"]
+macro_bodies = "exclude"
+
+[[text]]
+id = "colon_justification"
+title = "a clause after a colon argues instead of stating"
+explain = """
+"Порт-таймер заводится один на всё ожидание: приёмник ему не нужен." The clause \
+after the colon is the reason or consequence with the connective removed: "X: Y" \
+reads as "X, потому что Y". State it as one sentence in the direct order with the \
+connective written out, or as two full sentences each with its own subject and verb: \
+"Порт-таймер заводится один на всё ожидание: приёмник ему не нужен." -> "Один \
+порт-таймер обслуживает всё ожидание и не требует приёмника." In the prose of a \
+public declaration the contract states X alone and the reason is dropped. A colon \
+stays before an enumeration ("три случая: ...") and after a label ("Аргументы:", \
+"Возврат:", "SAFETY:"). Do not paper over the finding by replacing the colon with a \
+dash or a semicolon, and do not cut the sentence into two fragments at the colon \
+without rewriting either half.
+"""
+message = "clause after a colon argues the statement, write one direct sentence with the connective"
+target = "paragraph"
+extension = ["rs", "md"]
+pattern = "[а-яёА-ЯЁ`)]: [а-яё][^.:]*( не | нет[ .,;]|[а-яё]{2,}(ет|ют|ит|ят|ёт|ут|ется|ются|ится|ятся)\\b)"
+unless = ["(^|[.!?] )\\s*(Аргументы|Возврат|Пример|Контракт|Исход|Формат|Инвариант|Предусловие|Ошибки|SAFETY):"]
+strip = ["backticks"]
+macro_bodies = "exclude"
+
+[[text]]
+id = "animistic_verb"
+title = "an object of the code lives, carries, leaves or keeps silent"
+explain = """
+"NodeId несёт поколение ячейки", "учёт живёт под локом", "значение едет суб-кадром", \
+"вызов молчит": verbs of a living being or of travel describe behaviour by metaphor, \
+and the reader translates them back to the operation. Name the operation instead: \
+"NodeId несёт поколение ячейки." -> "NodeId содержит поколение ячейки." The same swap \
+applies throughout: несёт/несут -> содержит, включает, передаёт; живёт/живут -> \
+находится, хранится, действует; едет/едут -> передаётся; молчит/молчат -> ничего не \
+выводит, не отвечает; переживает -> сохраняется при; знает/не знает -> учитывает/не \
+различает; видит/смотрит -> получает, наблюдает; ходит -> передаётся; хочет/думает -> \
+условие, при котором операция выполняется; умирает -> завершается; роняет -> закрывает, \
+освобождает; прививает -> монтирует, присоединяет; умеет -> поддерживает. Project terms \
+stay as they are: "будит" (futex), "уход значка" (port liveness event), "снимает", \
+"держит", "поднимает". Do not paper over the finding by picking another metaphor \
+instead of the operation.
+"""
+message = "animistic verb, name the operation instead"
+target = "paragraph"
+extension = ["rs", "md"]
+pattern = "\\b(несёт|несут|живёт|живут|молчит|молчат|замолкает|роняет|роняют|переживает|переживают|переживёт|едет|едут|уезжает|приезжает|умирает|умер|умерла|течёт|утекает|знает|знают|умеет|умеют|помнит|забывает|видит|видят|смотрит|смотрят|глядит|глядят|слышит|слышат|чувствует|чувствуют|ходит|ходят|думает|думают|верит|верят|желает|желают|доверяет|хочет|хотят|просит|обещает|платит|прививает|привил|привила)\\b"
+strip = ["backticks"]
+macro_bodies = "exclude"
+
+[[text]]
+id = "zavodit_verb"
+title = "'заводит' stands for creating or opening"
+explain = """
+"заводит сессию", "заводит ключ", "заводит запись": the verb is colloquial and \
+ambiguous about what actually happens. Name the operation instead: "заводит сессию" \
+-> "создаёт сессию"; "заводит ключ" -> "выдаёт ключ" or "регистрирует ключ", depending \
+on which the code does; "заводит запись" -> "строит запись" or "открывает запись". Do \
+not fix this by swapping in another colloquialism ("плодит", "стартует") — name the \
+actual operation: создаёт, открывает, строит, выдаёт, регистрирует.
+"""
+message = "'заводит' used for creating, name the operation"
+target = "paragraph"
+extension = ["rs", "md"]
+pattern = "\\bзавод(ит|ят|ится|ятся|ить|ил|ила|или|ящ)"
+strip = ["backticks"]
+macro_bodies = "exclude"
+
+[[text]]
+id = "caps_emphasis"
+title = "a russian word is capitalised for emphasis"
+explain = """
+"создаёт ОДИН port", "поток НЕ владеет буфером": capital letters shout the word \
+instead of stating it. Emphasis belongs to the wording itself, or to bold in a \
+document: "создаёт ОДИН port" -> "создаёт ровно один port"; "поток НЕ владеет \
+буфером" -> "буфером владеет вызывающий". Latin abbreviations and identifiers keep \
+their own spelling, and so do russian abbreviations of units and hardware \
+(КБ, МБ, ГБ, ОЗУ, ФС, ОС) — those are listed in the veto of this rule.
+"""
+message = "russian word capitalised for emphasis, keep it in the normal case"
+target = "paragraph"
+extension = ["rs", "md"]
+pattern = "\\b[А-ЯЁ]{2,}\\b"
+unless = ["\\b(КБ|МБ|ГБ|ТБ|ОЗУ|ПЗУ|ФС|ОС|ЦП)\\b"]
+strip = ["backticks"]
+macro_bodies = "exclude"
+
+[[text]]
+id = "against_calque"
+title = "'против' stands for the english 'against'"
+explain = """
+"сборка против дерева", "проверка против схемы": the preposition is a calque of \
+english "against" and reads as opposition instead of comparison. Name the relation \
+the code has: "сборка против дерева" -> "сборка по дереву"; "проверка против \
+схемы" -> "проверка по схеме" or "сверка со схемой". The rule keeps "против" where \
+it means opposition ("против часовой стрелки").
+"""
+message = "'против' as a calque of against, name the relation instead"
+target = "paragraph"
+extension = ["rs", "md"]
+pattern = "\\bпротив\\b"
+unless = ["против часовой"]
+strip = ["backticks"]
+macro_bodies = "exclude"
+
+[[text]]
+id = "non_ascii_punctuation"
+title = "non-ascii punctuation in a source file"
+explain = """
+An em dash, an arrow and typographic quotes belong to the prose of a document. A \
+source file keeps ascii punctuation, and so does a commit message: write "-" instead \
+of "—", "->" instead of "→", and quote with "\"" instead of "«»". The rule covers \
+comments of a source file only; documents under docs/ keep their typography.
+"""
+message = "non-ascii punctuation in a source file, use the ascii form"
+target = "comment"
+extension = ["rs"]
+pattern = "[—–→«»“”]"
+strip = ["backticks"]

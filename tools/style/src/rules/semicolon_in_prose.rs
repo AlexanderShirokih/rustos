@@ -7,7 +7,7 @@ use crate::{
     text::{has_cyrillic, mask_backticks},
 };
 
-/// Точка с запятой не разделяет русскую прозу, описывающую объявление.
+/// Точка с запятой не разделяет русский текст, описывающий объявление.
 pub fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
@@ -62,7 +62,7 @@ fn run(source: &Source, out: &mut Vec<Finding>) {
                 if listed && masked[at + 1..].trim().is_empty() {
                     continue;
                 }
-                let start = line.span.start + (offset + at) as u32;
+                let start = line.span.start + crate::span::offset(offset + at);
                 out.push(Finding::new(
                     Span::new(start, start + 1),
                     "semicolon separates russian prose, use a full stop, a comma or a dash"

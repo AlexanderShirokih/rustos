@@ -1,5 +1,6 @@
 //! Общие моки и хелперы для интеграционных тестов hal-aarch64-paging.
 #![allow(unsafe_code)]
+#![allow(clippy::expect_used, clippy::std_instead_of_core)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

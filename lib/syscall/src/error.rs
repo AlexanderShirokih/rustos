@@ -118,7 +118,9 @@ impl SyscallError {
             return None;
         }
 
-        Self::from_code(ret.unsigned_abs() as u32)
+        #[allow(clippy::cast_possible_truncation)]
+        let code = ret.unsigned_abs() as u32;
+        Self::from_code(code)
     }
 }
 

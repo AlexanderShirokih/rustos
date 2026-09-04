@@ -110,7 +110,7 @@ impl UserImage<'_> {
                 return Err(UserImageError::StackOverlapsSegment);
             }
 
-            for other in &self.segments[..i] {
+            for other in self.segments.iter().take(i) {
                 let other_start = other.va_base.as_usize();
                 // `other` уже прошёл проверку overflow на своей итерации, поэтому
                 // checked_add тут не вернёт None; на всякий случай - overflow-ошибка.

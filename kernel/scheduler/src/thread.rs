@@ -163,10 +163,9 @@ impl<A: ArchContext> Thread<A> {
     }
 
     pub(super) fn defer_cleanup(&mut self) {
-        self.deferred_cleanup = self
-            .deferred_cleanup
-            .checked_add(1)
-            .expect("deferred cleanup counter overflow");
+        // Счётчик отложенных очисток растёт на единицу за удержание потока и падает вместе с
+        // ним: переполнить `u32` числом одновременных удержаний нечем.
+        self.deferred_cleanup = self.deferred_cleanup.saturating_add(1);
     }
 
     pub(super) fn finish_deferred_cleanup(&mut self) {

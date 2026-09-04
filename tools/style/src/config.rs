@@ -58,18 +58,15 @@ impl Config {
 
         let mut levels = BTreeMap::new();
         for (id, level) in raw.rules {
-            let Some(category) = known.get(&id) else {
+            if !known.contains_key(&id) {
                 bail!("unknown rule id in [rules]: {id}");
-            };
+            }
             let level = match level.as_str() {
                 "off" => None,
                 "warn" => Some(Severity::Warn),
                 "deny" => Some(Severity::Deny),
                 other => bail!("unknown level for rule {id}: {other}"),
             };
-            if level.is_some_and(|value| value > category.ceiling()) {
-                bail!("rule {id} cannot exceed the ceiling of its category");
-            }
             levels.insert(id, level);
         }
 
@@ -87,15 +84,6 @@ impl Config {
                 rule: entry.rule,
                 prefixes: entry.paths,
             });
-        }
-
-        for rule in compiled.iter().chain(declared.iter()) {
-            if rule.meta.severity > rule.meta.category.ceiling() {
-                bail!(
-                    "rule {} declares a level above the ceiling of its category",
-                    rule.meta.id
-                );
-            }
         }
 
         Ok(Config {
@@ -171,8 +159,8 @@ struct RawText {
     unless: Vec<String>,
     #[serde(default)]
     strip: Vec<String>,
-    #[serde(default)]
-    extension: Option<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    extension: Vec<String>,
     #[serde(default)]
     under: Vec<String>,
     #[serde(default)]
@@ -204,6 +192,7 @@ fn declare(raw: RawText) -> Result<Rule> {
         "doc" => TextTarget::Doc,
         "attached" => TextTarget::Attached,
         "line" => TextTarget::Line,
+        "paragraph" => TextTarget::Paragraph,
         other => bail!("unknown target for rule {}: {other}", raw.id),
     };
     let strip = raw
@@ -227,9 +216,12 @@ fn declare(raw: RawText) -> Result<Rule> {
         Some(other) => bail!("unknown macro_bodies for rule {}: {other}", raw.id),
     };
 
-    let mut selectors = vec![Selector::Extension(
-        raw.extension.unwrap_or_else(|| "rs".to_owned()),
-    )];
+    let extensions = if raw.extension.is_empty() {
+        vec!["rs".to_owned()]
+    } else {
+        raw.extension
+    };
+    let mut selectors = vec![Selector::ExtensionAny(extensions)];
     if !raw.under.is_empty() {
         selectors.push(Selector::UnderAny(raw.under));
     }
@@ -294,4 +286,39 @@ fn declare(raw: RawText) -> Result<Rule> {
 
 fn compile(pattern: &str, id: &str) -> Result<Regex> {
     Regex::new(pattern).with_context(|| format!("compile pattern of rule {id}"))
+}
+
+fn one_or_many<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OneOrMany;
+
+    impl<'de> serde::de::Visitor<'de> for OneOrMany {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or a list of strings")
+        }
+
+        fn visit_str<E: serde::de::Error>(
+            self,
+            value: &str,
+        ) -> std::result::Result<Vec<String>, E> {
+            Ok(vec![value.to_owned()])
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Vec<String>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(item) = seq.next_element::<String>()? {
+                out.push(item);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(OneOrMany)
 }

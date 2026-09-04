@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_abi::component_manifest;
+use component_client::{ReceivedStartup, component_manifest};
 use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system};
 use ipc::wire::Str;
 use kernel_objects::{MemoryRegion, OwnedHandle};
@@ -43,16 +43,16 @@ component_manifest! {
 /// HandleId одноразового startup-порта.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(startup: Handle) -> ! {
-    let startup = OwnedHandle::from_handle(startup);
-    let Ok(Some(started)) = AreaStartup::receive(&PortTransport::server(startup.borrow())) else {
+    let Ok(ReceivedStartup { log, resources }) =
+        AreaStartup::receive(OwnedHandle::from_handle(startup))
+    else {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
-    drop(startup);
-    install_log(Handle::from_nonzero(started.log.raw()), LOG_TAG);
-    drop(OwnedHandle::adopt(started.control));
-    drop(OwnedHandle::adopt(started.service));
+    install_log(log.into_raw(), LOG_TAG);
+    drop(resources.control);
+    drop(resources.service);
 
-    let area = OwnedHandle::adopt(started.area);
+    let area = resources.area;
     thread_exit(inspect(
         &file_system::Client::new(PortTransport::client(&area)).with_wait(CALL_TIMEOUT),
     ))

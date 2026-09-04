@@ -27,6 +27,8 @@ bench = false
 
 [dependencies]
 component-abi = { workspace = true }
+component-client = { workspace = true }
+component-client-std = { workspace = true }
 filesystem-abi = { workspace = true }
 filesystem-client = { workspace = true }
 ipc = { workspace = true }

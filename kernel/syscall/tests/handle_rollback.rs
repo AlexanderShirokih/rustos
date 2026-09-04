@@ -3,6 +3,13 @@
 //! (создавать процесс/поток, дренировать bootstrap-handle).
 
 #![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unimplemented,
+    clippy::unwrap_in_result
+)]
 
 use core::{
     num::NonZeroU64,

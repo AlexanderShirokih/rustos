@@ -2,6 +2,8 @@
 //! нейтральному крейту незачем знать контроллеры платформы. Первая ячейка
 //! specifier - номер линии, вторая - триггер.
 
+#![allow(clippy::cast_possible_truncation, clippy::expect_used)]
+
 use device_resolver::{
     ControllerBinding, ControllerBindings, ControllerId, DeviceInterrupt, DeviceMmio,
     DeviceSelector, DeviceTreePlatform, InterruptLine, InterruptSpecifier, PlatformDescription,

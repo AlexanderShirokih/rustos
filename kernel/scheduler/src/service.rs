@@ -243,7 +243,10 @@ where
         // SAFETY: как в `Scheduler::start` - указатель на контекст выбранного
         // потока подготовлен под локом, IRQ замаскированы, и вход в поток
         // происходит ровно один раз на этом CPU.
-        unsafe { A::start(&*next_ptr) }
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
+        unsafe {
+            A::start(&*next_ptr)
+        }
     }
 }
 

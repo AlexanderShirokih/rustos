@@ -1,4 +1,7 @@
-//! Статический валидатор конвенций кода: doc-дисциплина, язык литералов, проза комментариев.
+//! Статический валидатор конвенций кода: doc-дисциплина, язык литералов, формулировки
+//! комментариев.
+
+#![allow(clippy::std_instead_of_core)]
 
 mod anchor;
 mod baseline;
@@ -23,7 +26,7 @@ pub use crate::{
     baseline::Baseline,
     config::Config,
     engine::{Engine, Outcome, Run, Selection},
-    growth::{Grown, grown_against},
+    growth::{Comparison, Grown, NewRule, grown_against},
     report::{Format, Report},
     rule::{Category, Finding, Rule, RuleMeta, Severity},
     rules::catalog::compiled,

@@ -4,6 +4,12 @@
 
 #![allow(unsafe_code)]
 #![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::expect_used,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::unimplemented
+)]
 
 mod common;
 

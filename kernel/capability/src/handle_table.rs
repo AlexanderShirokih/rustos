@@ -224,7 +224,7 @@ impl HandleTable {
         let index = if let Some(index) = self.pop_free_slot() {
             index
         } else {
-            let index = self.slots.len() as u32;
+            let index = u32::try_from(self.slots.len()).ok()?;
             if index >= self.capacity {
                 // Отказ наступает до push: таблица остаётся неизменной.
                 return None;
@@ -346,7 +346,7 @@ impl HandleTable {
                     next_free: free_head,
                 },
             );
-            free_head = Some(idx as u32);
+            free_head = u32::try_from(idx).ok();
 
             if let SlotState::Occupied(handle) = taken {
                 drained.push_handle(handle);
@@ -471,7 +471,7 @@ impl HandleTable {
         drained: &mut DrainedHandles,
     ) -> Result<(), IpcError> {
         for (i, id) in ids.iter().enumerate() {
-            if ids[..i].iter().any(|prev| prev == id) {
+            if ids.iter().take(i).any(|prev| prev == id) {
                 return Err(IpcError::BadHandle);
             }
         }

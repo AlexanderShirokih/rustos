@@ -3,28 +3,37 @@ pub(super) fn glob_matches(glob: &str, path: &str) -> bool {
 }
 
 fn matches_bytes(glob: &[u8], path: &[u8]) -> bool {
-    match glob.first() {
-        None => path.is_empty(),
-        Some(b'*') if glob.get(1) == Some(&b'*') => {
-            let tail = &glob[2..];
-            if tail.first() == Some(&b'/') && matches_bytes(&tail[1..], path) {
-                return true;
-            }
-            (0..=path.len()).any(|split| matches_bytes(tail, &path[split..]))
+    if let Some(tail) = glob.strip_prefix(b"**") {
+        if let Some(rest) = tail.strip_prefix(b"/")
+            && matches_bytes(rest, path)
+        {
+            return true;
         }
-        Some(b'*') => {
+        return suffixes(path, path.len()).any(|rest| matches_bytes(tail, rest));
+    }
+
+    match glob.split_first() {
+        None => path.is_empty(),
+        Some((b'*', tail)) => {
             let component = path
                 .iter()
                 .position(|byte| *byte == b'/')
                 .unwrap_or(path.len());
-            (0..=component).any(|split| matches_bytes(&glob[1..], &path[split..]))
+            suffixes(path, component).any(|rest| matches_bytes(tail, rest))
         }
-        Some(b'?') => {
-            matches!(path.first(), Some(byte) if *byte != b'/')
-                && matches_bytes(&glob[1..], &path[1..])
-        }
-        Some(expected) => path.first() == Some(expected) && matches_bytes(&glob[1..], &path[1..]),
+        Some((b'?', tail)) => match path.split_first() {
+            Some((byte, path_tail)) => *byte != b'/' && matches_bytes(tail, path_tail),
+            None => false,
+        },
+        Some((expected, tail)) => match path.split_first() {
+            Some((byte, path_tail)) => byte == expected && matches_bytes(tail, path_tail),
+            None => false,
+        },
     }
+}
+
+fn suffixes(path: &[u8], last: usize) -> impl Iterator<Item = &[u8]> {
+    (0..=last).filter_map(move |split| path.get(split..))
 }
 
 #[cfg(test)]

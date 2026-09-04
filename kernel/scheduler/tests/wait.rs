@@ -4,6 +4,8 @@
 //! и idempotency, timeout-парк через `SleepQueue`, а также stale-entry skip в
 //! `wake_sleepers`.
 
+#![allow(clippy::std_instead_of_core)]
+
 mod common;
 
 use std::sync::atomic::AtomicU32;

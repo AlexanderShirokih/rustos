@@ -1,4 +1,5 @@
 #![allow(unsafe_code)]
+#![allow(clippy::multiple_unsafe_ops_per_block)]
 
 use crate::virtual_address::VirtualAddress;
 

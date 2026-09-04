@@ -69,6 +69,7 @@ impl<'a> WireValue<'a> for AccessMode {
 }
 
 impl WireTyped for AccessMode {
+    #[allow(clippy::cast_possible_truncation)]
     const WIRE_TYPE: WireType = WireType::Uint(size_of::<u8>() as u8);
 }
 

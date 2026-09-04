@@ -5,6 +5,7 @@
 //! `KernelRuntime`: создание Port-хендла и корректный `IpcError`-маппинг.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result)]
 
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 use std::sync::{Arc, Mutex, OnceLock};

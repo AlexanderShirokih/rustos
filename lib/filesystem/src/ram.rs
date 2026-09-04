@@ -418,14 +418,20 @@ impl FileSystemBackend for RamFileSystem {
                     return Ok(0);
                 };
                 let count = tail.len().min(out.len());
-                out[..count].copy_from_slice(&tail[..count]);
+                let (Some(target), Some(source)) = (out.get_mut(..count), tail.get(..count)) else {
+                    return Ok(0);
+                };
+                target.copy_from_slice(source);
                 Ok(count)
             }
             File::Backed { store, len, .. } => {
                 let Some(count) = len.checked_sub(start).map(|tail| tail.min(out.len())) else {
                     return Ok(0);
                 };
-                stores.read(*store, start, &mut out[..count])?;
+                let target = out
+                    .get_mut(..count)
+                    .ok_or(FileSystemError::BufferTooSmall)?;
+                stores.read(*store, start, target)?;
                 Ok(count)
             }
         }
@@ -542,10 +548,18 @@ impl FileSystemBackend for RamFileSystem {
             };
             // Имя проверено при создании, и отказ значит нехватку места: слот
             // записи остаётся непросмотренным.
-            let Ok(len) = record.encode(&mut out[written..]) else {
+            let cursor = u32::try_from(index).map_err(|_| FileSystemError::NoSpace)?;
+            let Some(rest) = out.get_mut(written..) else {
                 return Ok(Listed {
                     count,
-                    next: DirCursor::from_raw(index as u32),
+                    next: DirCursor::from_raw(cursor),
+                    end: false,
+                });
+            };
+            let Ok(len) = record.encode(rest) else {
+                return Ok(Listed {
+                    count,
+                    next: DirCursor::from_raw(cursor),
                     end: false,
                 });
             };
@@ -553,9 +567,10 @@ impl FileSystemBackend for RamFileSystem {
             count += 1;
         }
         // `from` за последним слотом не отматывает перечисление назад.
+        let end = u32::try_from(entries.len().max(start)).map_err(|_| FileSystemError::NoSpace)?;
         Ok(Listed {
             count,
-            next: DirCursor::from_raw(entries.len().max(start) as u32),
+            next: DirCursor::from_raw(end),
             end: true,
         })
     }
@@ -659,7 +674,9 @@ impl FileSystemBackend for RamFileSystem {
 }
 
 fn node_id(slot: usize, generation: u32) -> NodeId {
-    NodeId::from_raw((generation << SLOT_BITS) | slot as u32)
+    #[allow(clippy::cast_possible_truncation)]
+    let packed = (generation << SLOT_BITS) | slot as u32;
+    NodeId::from_raw(packed)
 }
 
 fn heap_for_growth<'a>(
@@ -707,7 +724,9 @@ fn write_into(file: &mut Vec<u8>, start: usize, data: &[u8]) -> Result<(), FileS
         .checked_add(data.len())
         .ok_or(FileSystemError::NoSpace)?;
     grow(file, end)?;
-    file[start..end].copy_from_slice(data);
+    file.get_mut(start..end)
+        .ok_or(FileSystemError::NoSpace)?
+        .copy_from_slice(data);
     Ok(())
 }
 
@@ -1226,7 +1245,7 @@ mod tests {
             fs.rename(path("/data/b"), path("/data/a")).expect("rename");
         }
 
-        // Имя ходит между двумя слотами, каталог за них не растёт.
+        // Имя переносится между двумя слотами, каталог за них не растёт.
         assert_eq!(fs.metadata(data).expect("metadata").size, 1);
         assert!(listing(&fs, data, cursor(2), 64).0.is_empty());
     }

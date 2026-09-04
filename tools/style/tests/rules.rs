@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
 use std::path::Path;
 
 use style_tool::{Config, Rule, check_one, compiled};
@@ -431,6 +433,247 @@ fn expect_outside_the_kernel_is_out_of_scope() {
         &rule("expect_in_kernel"),
         Path::new("lib/demo/src/demo.rs"),
         "pub fn install(slot: Option<u8>) -> u8 {\n    slot.expect(\"installed\")\n}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn fronted_negation_is_reported() {
+    let hits = check(
+        &declared("fronted_negation"),
+        "/// Приёмника у неё нет.\npub fn thing() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn direct_order_technical_sentences_are_accepted() {
+    let hits = check(
+        &declared("fronted_negation"),
+        "/// У процесса два порта. Сессия не даёт приёма.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn subject_first_negation_is_accepted() {
+    let hits = check(
+        &declared("fronted_negation"),
+        "/// У неё нет приёмника.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn subject_first_predicate_of_absence_is_accepted() {
+    let hits = check(
+        &declared("fronted_negation"),
+        "/// Буфер не нужен. Эта операция не требуется.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn short_reply_is_accepted() {
+    let hits = check(
+        &declared("fronted_negation"),
+        "/// Пока нет.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn an_excepted_sentence_leaves_the_next_one_of_the_paragraph_reported() {
+    let hits = check(
+        &declared("fronted_negation"),
+        "/// Пока нет. Поддержки этой функции в системе нет.\npub fn thing() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn paragraph_target_joins_a_sentence_split_across_two_doc_lines() {
+    let source = concat!(
+        "/// Такого узла по пути\n",
+        "/// нет.\n",
+        "pub fn thing() {}\n"
+    );
+    let hits = check(&declared("fronted_negation"), source);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn blank_doc_comment_line_breaks_the_paragraph() {
+    let source = concat!(
+        "/// Такого узла по пути\n",
+        "///\n",
+        "/// нет.\n",
+        "pub fn thing() {}\n"
+    );
+    let hits = check(&declared("fronted_negation"), source);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn postposed_sam_is_reported() {
+    let hits = check(
+        &declared("postposed_sam"),
+        "/// Поток отмечает точку сам.\npub fn thing() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn sam_before_the_verb_is_accepted() {
+    let hits = check(
+        &declared("postposed_sam"),
+        "/// Поток сам отмечает точку.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn colon_justification_is_reported() {
+    let hits = check(
+        &declared("colon_justification"),
+        "/// Порт-таймер заводится один на всё ожидание: приёмник ему не нужен.\npub fn thing() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn label_before_the_colon_is_accepted() {
+    let hits = check(
+        &declared("colon_justification"),
+        "/// Аргументы: путь не абсолютный.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn label_in_the_second_sentence_of_a_paragraph_is_accepted() {
+    let hits = check(
+        &declared("colon_justification"),
+        "/// Создаёт объект. Аргументы: путь не абсолютный.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn enumeration_after_the_colon_without_a_verb_is_accepted() {
+    let hits = check(
+        &declared("colon_justification"),
+        "/// Три уровня: ядро, библиотека, пользователь.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn colon_inside_backticks_is_not_a_clause_boundary() {
+    let hits = check(
+        &declared("colon_justification"),
+        "/// См. `Foo: bar` пример.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn a_verb_in_the_next_sentence_does_not_justify_an_earlier_colon() {
+    let hits = check(
+        &declared("colon_justification"),
+        "/// Значение получено: код. Автор проверяет результат отдельно.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn animistic_verb_is_reported() {
+    let hits = check(
+        &declared("animistic_verb"),
+        "/// NodeId несёт поколение ячейки.\npub fn thing() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn named_operation_instead_of_a_metaphor_is_accepted() {
+    let hits = check(
+        &declared("animistic_verb"),
+        "/// NodeId содержит поколение ячейки.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn project_term_budit_is_accepted() {
+    let hits = check(
+        &declared("animistic_verb"),
+        "/// Futex будит поток.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn zavodit_verb_is_reported() {
+    let hits = check(
+        &declared("zavodit_verb"),
+        "/// Компонент заводит сессию.\npub fn thing() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn named_operation_instead_of_zavodit_is_accepted() {
+    let hits = check(
+        &declared("zavodit_verb"),
+        "/// Компонент создаёт сессию.\npub fn thing() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn markdown_paragraph_joins_lines_separated_by_a_line_break_without_a_blank_line() {
+    let hits = check_one(
+        &declared("fronted_negation"),
+        Path::new("docs/demo.md"),
+        "Такого узла по пути\nнет.\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn markdown_fenced_code_is_excluded_from_paragraph_text() {
+    let hits = check_one(
+        &declared("zavodit_verb"),
+        Path::new("docs/demo.md"),
+        "```rust\nКомпонент заводит сессию.\n```\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn a_verb_of_perception_is_reported() {
+    let hits = check(
+        &declared("animistic_verb"),
+        "/// Наружу крейт смотрит модулем.\npub fn thing() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn a_verb_of_gait_is_reported() {
+    let hits = check(
+        &declared("animistic_verb"),
+        "/// Типы через эту границу не ходят.\npub fn thing() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn the_operation_itself_is_accepted() {
+    let hits = check(
+        &declared("animistic_verb"),
+        "/// Типы через эту границу не передаются.\npub fn thing() {}\n",
     );
     assert!(hits.is_empty(), "{hits:?}");
 }

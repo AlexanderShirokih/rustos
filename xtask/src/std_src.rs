@@ -179,7 +179,7 @@ fn stamp_tree(dir: &Path, stamp: &mut String) -> Result<()> {
             metadata.len(),
             modified.as_nanos()
         )
-        .expect("writing to a String does not fail");
+        .context("Failed to write the source stamp")?;
     }
     Ok(())
 }

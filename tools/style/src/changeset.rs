@@ -98,24 +98,23 @@ fn collect_diff(
 
     let mut index = 0;
     let mut touched: Vec<PathBuf> = Vec::new();
-    while index < fields.len() {
-        let code = fields[index];
+    while let Some(code) = fields.get(index).copied() {
         index += 1;
         if code.starts_with('R') || code.starts_with('C') {
-            if index + 1 >= fields.len() {
+            let (Some(from), Some(to)) = (fields.get(index), fields.get(index + 1)) else {
                 break;
-            }
-            let from = PathBuf::from(fields[index]);
-            let to = PathBuf::from(fields[index + 1]);
+            };
+            let from = PathBuf::from(from);
+            let to = PathBuf::from(to);
             index += 2;
             renames.push((from, to.clone()));
             touched.push(to);
             continue;
         }
-        if index >= fields.len() {
+        let Some(path) = fields.get(index) else {
             break;
-        }
-        let path = PathBuf::from(fields[index]);
+        };
+        let path = PathBuf::from(path);
         index += 1;
         if code.starts_with('D') {
             lines.entry(path).or_default();

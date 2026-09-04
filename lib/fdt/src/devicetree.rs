@@ -69,9 +69,10 @@ impl<'a> Property<'a> {
     /// Возвращает значение как строку (без терминального нуля).
     pub fn as_cstr(&self) -> Option<&'a str> {
         let bytes = self.value;
-        let len = bytes.len().saturating_sub(1);
+        // Хвостовой `\0` в строку не входит; пустое значение даёт пустую строку.
+        let text = bytes.split_last().map_or(&[][..], |(_, head)| head);
 
-        str::from_utf8(&bytes[..len]).ok()
+        str::from_utf8(text).ok()
     }
 
     pub fn try_as_u32(&self, offset: usize) -> Option<u32> {
@@ -91,9 +92,12 @@ impl<'a> Property<'a> {
         let bytes = self.value;
 
         match bytes.len() {
-            4 => self.try_as_u32(0).unwrap_or(0) as usize,
+            4 => self.try_as_u32(0).map_or(0, |value| value as usize),
 
-            8 => self.try_as_u64(0).unwrap_or(0) as usize,
+            8 => self
+                .try_as_u64(0)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(0),
 
             _ => 0,
         }
@@ -270,8 +274,8 @@ impl Iterator for MemoryReservationIter<'_> {
 
         self.position += 2 * size_of::<u64>();
         Some(ReservedRange {
-            address: address as usize,
-            size: size as usize,
+            address: usize::try_from(address).ok()?,
+            size: usize::try_from(size).ok()?,
         })
     }
 }
@@ -498,7 +502,7 @@ impl<'a> DeviceTreeWalker<'a> {
         // фактическими границами буфера вместо паники на OOB.
         let start = offset.min(buf.len());
         let end = start.saturating_add(length).min(buf.len());
-        let value = &buf[start..end];
+        let value = buf.get(start..end).unwrap_or_default();
         ValueNode::Property(Property { name, value })
     }
 }

@@ -3,6 +3,7 @@
 //! thread-local.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::std_instead_of_core)]
 
 mod common;
 

@@ -5,6 +5,11 @@
 
 #![no_std]
 #![allow(unsafe_code)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 
 extern crate alloc;
 

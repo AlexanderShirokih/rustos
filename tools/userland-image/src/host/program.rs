@@ -38,7 +38,7 @@ pub(super) fn resolve_programs(
     }
 
     for (index, program) in resolved.iter().enumerate() {
-        for earlier in &resolved[..index] {
+        for earlier in resolved.iter().take(index) {
             // Ключ уникальности - пара пакета и bin-таргета: одно имя таргета
             // могут объявить разные пакеты.
             ensure!(

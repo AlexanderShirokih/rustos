@@ -99,7 +99,9 @@ impl<'a> DecodedImage<'a> {
                 actual: bytes.len(),
             });
         }
-        let bytes = &bytes[..total_size];
+        let bytes = bytes
+            .get(..total_size)
+            .ok_or(invalid_layout(None, "total_size"))?;
 
         let table_end = table_end(header.entry_count).ok_or(invalid_layout(None, "table_size"))?;
         if table_end > total_size {
@@ -180,7 +182,10 @@ impl<'a> DecodedImage<'a> {
         }
     }
 
+    #[allow(clippy::expect_used)]
     fn entry_at(&self, index: usize) -> DecodedEntry<'a> {
+        // Каждая запись разобрана и проверена в `decode`, а образ неизменяем, и повторный
+        // разбор по индексу внутри таблицы отказать уже не может.
         parse_entry(self.bytes, self.header.entry_count, index)
             .expect("entries were validated during decode")
     }

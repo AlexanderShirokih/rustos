@@ -113,7 +113,10 @@ fn tag() -> &'static str {
     let address = TAG_ADDRESS.load(Ordering::Relaxed);
     // SAFETY: адрес и длина принадлежат одному `&'static str`, положенному `install`; байты
     // живут до конца процесса, а непустая длина означает записанный адрес.
-    unsafe { str::from_utf8_unchecked(slice::from_raw_parts(address as *const u8, length)) }
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
+    unsafe {
+        str::from_utf8_unchecked(slice::from_raw_parts(address as *const u8, length))
+    }
 }
 
 fn client() -> Option<log::Client<PortTransport>> {

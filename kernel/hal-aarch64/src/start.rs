@@ -7,6 +7,13 @@
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::panic,
+    clippy::expect_used
+)]
 
 extern crate alloc;
 

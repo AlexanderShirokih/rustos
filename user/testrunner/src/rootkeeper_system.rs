@@ -235,7 +235,7 @@ fn boot_init() -> ComponentSpec<'static> {
 }
 
 fn plan_bytes(on_exhausted: OnExhausted, launches: u32) -> Vec<u8> {
-    // Файловой системы `/tmp` в плане нет: её поднимает `init` записью ступени 1.
+    // В плане нет файловой системы `/tmp`, потому что `init` поднимает её записью ступени 1.
     encode_plan(&[
         router(on_exhausted, launches),
         image_filesystem(),
@@ -366,9 +366,9 @@ fn definition(image: &SystemImage, entry: &str, component: ComponentSpec<'_>) ->
 }
 
 pub(crate) fn raise_stage_one(system: &mut RootSystem<'_>, relay: syscall::Handle) {
-    // Оборот обслуживает по одной операции транзакции, и `init` подаёт их две: набор ступени 1
-    // и сессию его файловой системы под монтирование. Исходы компонентов приходят тем же
-    // оборотом и в счёт не идут.
+    // Оборот обслуживает по одной операции транзакции, и `init` подаёт их две: набор ступени 1 и
+    // сессию его файловой системы под монтирование. Исходы компонентов приходят тем же оборотом и
+    // не идут в счёт.
     let mut served = 0;
     for _ in 0..EXTENSION_TURNS {
         if served == STAGE_ONE_OPERATIONS {
@@ -446,7 +446,7 @@ fn try_mount(system: &RootSystem<'_>, prefix: &str) -> Result<OwnedHandle, FileS
 }
 
 fn await_tree(system: &RootSystem<'_>, prefix: &str) -> OwnedHandle {
-    // Дерево имён поднимает сам маршрутизатор, и стартовый кадр только доставлен: путь
+    // Маршрутизатор сам поднимает дерево имён. Стартовый кадр только доставлен, поэтому путь
     // становится накрытым его оборотами.
     for _ in 0..RESTART_ATTEMPTS {
         match try_mount(system, prefix) {
@@ -458,7 +458,7 @@ fn await_tree(system: &RootSystem<'_>, prefix: &str) -> OwnedHandle {
 }
 
 fn await_unmounted(system: &RootSystem<'_>, prefix: &str) {
-    // Монтирование снимает потребитель своим оборотом, и путь перестаёт быть накрытым.
+    // Потребитель снимает монтирование своим оборотом, и путь перестаёт быть накрытым.
     for _ in 0..RESTART_ATTEMPTS {
         if matches!(try_mount(system, prefix), Err(FileSystemError::NotFound)) {
             return;
@@ -513,8 +513,8 @@ fn two_instances_of_one_program_run_under_their_own_names() {
     ])
     .expect("scenario plan encodes");
     let decoded = plan(&bytes);
-    // Имена источников журнала выводит сам rootkeeper из записей набора: строка
-    // приходит под именем экземпляра, а не под путём его программы.
+    // Rootkeeper сам выводит имена источников журнала из записей набора, поэтому строка приходит
+    // под именем экземпляра, а не под путём его программы.
     crate::log_relay::start_component_relay();
 
     let mut system = RootSystem::bring_up(
@@ -559,7 +559,8 @@ fn compiled_plan_carries_the_boot_composition() {
     kernel_tests::kassert_eq!(router.startup_timeout(), ROUTER_STARTUP_TIMEOUT);
     kernel_tests::kassert_eq!(router.launches(), ROUTER_INCARNATIONS);
     kernel_tests::kassert_eq!(router.on_exhausted(), OnExhausted::Halt);
-    // Файловых систем маршрутизатор не знает: слотов и рёбер у него в композиции нет.
+    // Маршрутизатор не учитывает файловые системы, потому что у него в композиции нет слотов и
+    // рёбер.
     kernel_tests::kassert!(router.slots().next().is_none());
     kernel_tests::kassert!(router.after().next().is_none());
 
@@ -571,20 +572,20 @@ fn compiled_plan_carries_the_boot_composition() {
     let slots: Vec<SlotSource<'_>> = imagefs.slots().collect();
     kernel_tests::kassert_eq!(slots, [SlotSource::Userland]);
 
-    // Ступень 0 сжата до корня дерева имён: файловой системы `/tmp` в плане нет.
+    // Ступень 0 сжата до корня дерева имён, потому что в плане нет файловой системы `/tmp`.
     kernel_tests::kassert!(
         !plan
             .components()
             .any(|component| component.executable() == RAM_FS_PROGRAM)
     );
 
-    // Экспортёров `FileSystem` в композиции несколько, и слот потребителя связан с тем
-    // экземпляром, которого назвал его манифест.
+    // В композиции несколько экспортёров `FileSystem`, и слот потребителя связан с тем экземпляром,
+    // которого назвал его манифест.
     let reader = plan.component(4).expect("plan carries the file reader");
     kernel_tests::kassert_eq!(reader.executable(), READER_PROGRAM);
     kernel_tests::kassert_eq!(reader.slots().collect::<Vec<_>>(), READER_SOURCES);
 
-    // Политику загрузки несёт `init`: корень он берёт слотом по имени экземпляра, таблицу
+    // `init` определяет политику загрузки: корень он берёт слотом по имени экземпляра, таблицу
     // монтирований - записью своего каталога, а ступень 1 подаёт слотом супервизора.
     let init = plan.component(5).expect("plan carries init");
     kernel_tests::kassert_eq!(init.executable(), INIT_PROGRAM);
@@ -611,7 +612,7 @@ fn compiled_mount_table_carries_the_boot_tree() {
 fn boot_without_a_plan_record_names_its_failure() {
     let image = image();
 
-    // Образ прогона несёт план по своему пути: записи загрузочного плана в нём нет.
+    // Образ прогона содержит план по своему пути, а в нём нет записи загрузочного плана.
     let missing = image.plan(BOOT_PLAN_PATH).err();
     kernel_tests::kassert_eq!(missing, Some(BootFailure::PlanMissing));
     kernel_tests::kassert_eq!(missing.map(BootFailure::stopped), Some(Stopped::BadImage));
@@ -621,7 +622,7 @@ fn boot_without_a_plan_record_names_its_failure() {
 fn boot_with_a_corrupted_plan_record_names_its_failure() {
     let image = image();
 
-    // Запись программы планом не является: её байты декодер отвергает.
+    // Запись программы не является планом, поэтому декодер отвергает её байты.
     let corrupted = image.plan(BOOT_MOUNT_TABLE_PATH).err();
     kernel_tests::kassert!(matches!(
         corrupted,
@@ -648,15 +649,15 @@ fn supervisor_restarts_the_router_with_a_fresh_namespace() {
             dependents: 1,
         }
     );
-    // Сессия принадлежит файловой системе, а не маршрутизатору: его смена её не отзывает.
+    // Сессия принадлежит файловой системе, а не маршрутизатору, поэтому его смена не отзывает её.
     kernel_tests::kassert!(matches!(probe(&session), Ok(Ok(_))));
     kernel_tests::kassert_eq!(managed(&system, 0).generation(), 2);
-    // Монтирования принадлежат incarnation, и держатель control-слота ушёл вместе с ней:
-    // свежее дерево имён наполняет его смена.
+    // Монтирования принадлежат incarnation, и держатель control-слота завершился вместе с ней. Его
+    // смена наполняет свежее дерево имён.
     kernel_tests::kassert_eq!(managed(&system, init).generation(), 2);
-    // Статически связанный корень прививается слотом свежей incarnation.
+    // Статически связанный корень монтируется слотом свежей incarnation.
     kernel_tests::kassert!(matches!(probe(&await_tree(&system, ROOT_MOUNT)), Ok(Ok(_))));
-    // Ступень 1 осталась в композиции, и сессию её файловой системы отдаёт оборот транзакции.
+    // Ступень 1 осталась в композиции, и оборот транзакции отдаёт сессию её файловой системы.
     raise_stage_one(&mut system, relay_thread());
     kernel_tests::kassert!(matches!(probe(&await_tree(&system, RAM_MOUNT)), Ok(Ok(_))));
     system.shutdown();
@@ -665,7 +666,7 @@ fn supervisor_restarts_the_router_with_a_fresh_namespace() {
 #[kernel_test]
 fn a_consumer_taken_down_with_its_provider_keeps_its_launch_limit() {
     let image = image();
-    // Потребитель без перезапусков: собственный отказ снял бы композицию исходом `halt`.
+    // Потребитель без перезапусков, потому что собственный отказ снял бы композицию исходом `halt`.
     let bytes = encode_plan(&[
         router(OnExhausted::Halt, ROUTER_INCARNATIONS),
         ComponentSpec {
@@ -689,8 +690,8 @@ fn a_consumer_taken_down_with_its_provider_keeps_its_launch_limit() {
                 dependents: 1,
             }
         );
-        // Предел считает запуски, отнесённые к отказам самого компонента: чужие перезапуски
-        // его не тратят.
+        // Предел считает запуски, отнесённые к отказам самого компонента, поэтому чужие перезапуски
+        // не тратят его.
         kernel_tests::kassert_eq!(managed(&system, 1).generation(), incarnation);
         kernel_tests::kassert!(alive(&system, 1));
     }
@@ -721,7 +722,7 @@ fn a_provider_restart_reaches_the_consumer_of_its_consumer() {
     kernel_tests::kassert!(terminate_router(&system));
     let supervised = system.supervise_turn(relay_thread());
 
-    // Снятие транзитивно: потребитель потребителя уходит с провайдером и поднимается его
+    // Снятие транзитивно. Потребитель потребителя завершается с провайдером и поднимается его
     // сменой.
     kernel_tests::kassert_eq!(
         supervised,
@@ -754,7 +755,7 @@ fn a_consumer_departure_leaves_its_provider_alone() {
     kernel_tests::kassert!(terminate(&system, 1, DEPENDENT_EXIT_CODE));
     let supervised = system.supervise_turn(relay_thread());
 
-    // Ребро зависимости одностороннее: уход потребителя провайдера не касается.
+    // Ребро зависимости одностороннее, потому что завершение потребителя не касается провайдера.
     kernel_tests::kassert_eq!(
         supervised,
         Supervised::Abandoned {
@@ -788,7 +789,7 @@ fn supervisor_stops_the_composition_at_the_router_restart_limit() {
     // Исчерпав предел запусков, композиция останавливается и сохраняет код выхода последней
     // incarnation.
     kernel_tests::kassert_eq!(supervised, Supervised::Stopped(Stopped::Subsystem));
-    // Остановил композицию именно предел запусков: рестарт, отказавший раньше, оставил бы
+    // Предел запусков остановил композицию, потому что рестарт, отказавший раньше, оставил бы
     // меньшее число попыток.
     kernel_tests::kassert_eq!(managed(&system, 0).generation(), ROUTER_INCARNATIONS);
     kernel_tests::kassert_eq!(
@@ -823,8 +824,8 @@ fn optional_component_without_restarts_leaves_the_composition_up() {
 
     let supervised = system.supervise_turn(relay_thread());
 
-    // Некритический компонент снимается с композиции, а сама композиция остаётся
-    // поднятой: её поток пересылки жив и продолжает выдавать сессии.
+    // Некритический компонент снимается с композиции, а композиция сама остаётся поднятой, потому
+    // что её поток пересылки жив и продолжает выдавать сессии.
     kernel_tests::kassert_eq!(
         supervised,
         Supervised::Abandoned {
@@ -833,8 +834,8 @@ fn optional_component_without_restarts_leaves_the_composition_up() {
         }
     );
     kernel_tests::kassert!(managed(&system, 0).running().is_none());
-    // Провайдера в композиции больше нет, и его потребитель остаётся снятым: взять слот у
-    // ушедшего некому.
+    // В композиции больше нет провайдера, и его потребитель остаётся снятым, потому что взять слот
+    // у завершившегося некому.
     let init = system.instance(INIT_NAME).expect("plan carries init");
     kernel_tests::kassert!(managed(&system, init).running().is_none());
     system.shutdown();
@@ -855,8 +856,9 @@ fn router_restart_keeps_file_system_components_and_their_sessions() {
     kernel_tests::kassert!(terminate_router(&system));
     system.supervise_turn(relay_thread());
 
-    // Файловые системы принадлежат композиции rootkeeper: смена router не меняет их generation
-    // и не отзывает уже выданную сессию. Компонент ступени 1 живёт в ней наравне с плановым.
+    // Файловые системы принадлежат композиции rootkeeper, поэтому смена router не меняет их
+    // generation и не отзывает уже выданную сессию. Компонент ступени 1 находится в ней наравне с
+    // плановым.
     kernel_tests::kassert_eq!(managed(&system, 1).generation(), 1);
     kernel_tests::kassert_eq!(managed(&system, raised).generation(), 1);
     kernel_tests::kassert!(matches!(probe(&session), Ok(Ok(_))));
@@ -868,7 +870,7 @@ fn root_file_system_failure_is_seen_by_the_supervisor() {
     let image = image();
     let bytes = boot_plan();
     let mut system = started(&image, &bytes);
-    // Дерево наполняет отдельный компонент, и `bring_up` его монтирований не ждёт. Корневая
+    // Отдельный компонент наполняет дерево, и `bring_up` не ждёт его монтирований. Корневая
     // файловая система, снятая до конца монтирования, уводит и маршрутизатор.
     raise_stage_one(&mut system, relay_thread());
     drop(await_tree(&system, RAM_MOUNT));
@@ -902,8 +904,8 @@ fn a_device_component_serves_time_over_a_minted_session() {
 
     kernel_tests::kassert!(ticked >= now);
     drop(session);
-    // Линию устройства освобождает уход процесса драйвера: следующий минт той
-    // же линии иначе получает AlreadyBound.
+    // Завершение процесса драйвера освобождает линию устройства. Следующий минт той же линии иначе
+    // получает AlreadyBound.
     system.shutdown();
 }
 
@@ -926,8 +928,8 @@ fn a_device_outside_the_platform_description_names_the_boot_failure() {
 fn two_components_taking_one_device_line_name_the_conflict() {
     let image = image();
     let device = rtc_device(&[RTC_COMPATIBLE]);
-    // Экземпляр устройства у обоих нулевой: описание платформы приводит их к
-    // одному узлу, и линию получает тот, кто поднялся первым.
+    // Экземпляр устройства у обоих нулевой, поэтому описание платформы приводит их к одному узлу, и
+    // тот, кто поднялся первым, получает линию.
     let bytes = encode_plan(&[
         rtc(&device),
         ComponentSpec {
@@ -947,8 +949,8 @@ fn two_components_taking_one_device_line_name_the_conflict() {
 fn two_components_taking_one_device_window_name_the_conflict() {
     let image = image();
     let device = rtc_device(&[RTC_COMPATIBLE]);
-    // Второй компонент называет одно окно с первым, линии не касаясь:
-    // исключительность окна держит учёт композиции, а не ядро.
+    // Второй компонент называет одно окно с первым, линии не касаясь, потому что исключительность
+    // окна держит учёт композиции, а не ядро.
     let window = [device[1]];
     let bytes = encode_plan(&[
         rtc(&device),
@@ -969,8 +971,8 @@ fn two_components_taking_one_device_window_name_the_conflict() {
 #[kernel_test]
 fn a_service_slot_carries_the_provider_session_and_stops_before_it() {
     let image = image();
-    // Потребитель стоит в плане первым, а поднимается вторым: сессию слота
-    // supervisor минтит из уже поднятого провайдера.
+    // Потребитель стоит в плане первым, а поднимается вторым, потому что supervisor минтит сессию
+    // слота из уже поднятого провайдера.
     let bytes = encode_plan(&[
         ComponentSpec {
             executable: CONSUMER_PROGRAM,
@@ -993,15 +995,15 @@ fn a_service_slot_carries_the_provider_session_and_stops_before_it() {
     let mut system = started(&image, &bytes);
 
     kernel_tests::kassert_eq!(system.start_order(), &[1, 2, 3, 0][..]);
-    // Потребитель разрешает путь по сессии слота, пока провайдер жив: отказ
-    // первого resolve увёл бы его собственным кодом.
+    // Потребитель разрешает путь по сессии слота, пока провайдер жив. Отказ первого resolve увёл бы
+    // его собственным кодом.
     pause(CONSUMER_TURN);
     kernel_tests::kassert!(alive(&system, 0));
 
     system.shutdown();
 
-    // Остановка обратна порядку запуска: потребитель снят раньше провайдера и
-    // ухода его сессии увидеть не успел.
+    // Остановка обратна порядку запуска. Потребитель снят раньше провайдера и не успел увидеть
+    // закрытия его сессии.
     kernel_tests::kassert_eq!(
         managed(&system, 0).failure(),
         Some(ManagedFailure::Exit(SHUTDOWN_EXIT_CODE))
@@ -1011,22 +1013,21 @@ fn a_service_slot_carries_the_provider_session_and_stops_before_it() {
 #[kernel_test]
 fn a_service_slot_of_a_file_system_carries_a_session_it_established_itself() {
     let image = image();
-    // Потребитель стоит в плане первым, а поднимается вторым: сессию слота supervisor берёт
-    // у уже поднятой файловой системы её операцией установления.
+    // Потребитель стоит в плане первым, а поднимается вторым, потому что supervisor берёт сессию
+    // слота у уже поднятой файловой системы её операцией установления.
     let bytes = encode_plan(&[reader(), image_filesystem()]).expect("scenario plan encodes");
     let mut system = started(&image, &bytes);
     kernel_tests::kassert_eq!(system.start_order(), &[1, 0][..]);
 
-    // Значки супервизора на service-порт файловой системы не попадают: сессию слота она завела
-    // сама, а сминченная капа кадром сессии не заводит.
+    // Значки супервизора не попадают на service-порт файловой системы, потому что она сама создала
+    // сессию слота, а сминченная капа кадром сессии не создаёт.
     let files = roots(&system, 1);
     for badge in [PROBE_BADGE, relay::component_badge(0)] {
         let minted = files.session(badge).expect("session minted");
         kernel_tests::kassert_eq!(probe(&minted), Ok(Err(FileSystemError::NoSession)));
     }
 
-    // Потребитель прочитал запись образа сессией слота: прочие исходы он уносит своим кодом
-    // выхода.
+    // Потребитель прочитал запись образа сессией слота. Он уносит прочие исходы своим кодом выхода.
     let read = system.supervise_turn(relay_thread());
     kernel_tests::kassert_eq!(
         read,
@@ -1042,8 +1043,8 @@ fn a_service_slot_of_a_file_system_carries_a_session_it_established_itself() {
 #[kernel_test]
 fn a_service_slot_names_its_provider_among_two_exporters() {
     let image = image();
-    // Экспортёров `FileSystem` в композиции двое, и слот называет третью запись именем
-    // экземпляра: сессию слота даёт именно она.
+    // В композиции двое экспортёров `FileSystem`, и слот называет третью запись именем экземпляра.
+    // Она даёт сессию слота.
     let bytes = encode_plan(&[reader(), ram_filesystem(), image_filesystem()])
         .expect("scenario plan encodes");
     let mut system = started(&image, &bytes);
@@ -1096,12 +1097,12 @@ fn a_control_slot_reaches_the_admin_protocol_of_its_provider() {
     .expect("scenario plan encodes");
     let mut system = started(&image, &bytes);
     kernel_tests::kassert_eq!(system.start_order(), &[0, 1, 3, 2][..]);
-    // Префикс потребителя прививает `init` сессией компонента ступени 1.
+    // `init` монтирует префикс потребителя сессией компонента ступени 1.
     raise_stage_one(&mut system, relay_thread());
 
-    // Потребитель зовёт `NamespaceAdmin::unmount` капабилити control-слота: снятое
-    // монтирование видно с service-порта того же провайдера, а отказ вызова он уносит
-    // собственным кодом выхода.
+    // Потребитель зовёт `NamespaceAdmin::unmount` капабилити control-слота, поэтому снятое
+    // монтирование видно с service-порта того же провайдера, а он уносит отказ вызова собственным
+    // кодом выхода.
     await_unmounted(&system, RAM_MOUNT);
 
     kernel_tests::kassert!(terminate(&system, 2, MOUNTS_EXIT_CODE));
@@ -1114,8 +1115,8 @@ fn a_control_slot_reaches_the_admin_protocol_of_its_provider() {
         }
     );
 
-    // Уход значка потребителя control-порт провайдера не закрывает: терминален лишь уход
-    // значка супервизора, и маршрутизатор продолжает разбирать пути.
+    // Завершение значка потребителя не закрывает control-порт провайдера, потому что лишь
+    // завершение значка супервизора терминально, и маршрутизатор продолжает разбирать пути.
     pause(CONSUMER_TURN);
     kernel_tests::kassert!(alive(&system, 0));
     kernel_tests::kassert!(try_mount(&system, ROOT_MOUNT).is_ok());
@@ -1126,14 +1127,14 @@ fn a_control_slot_reaches_the_admin_protocol_of_its_provider() {
 #[kernel_test]
 fn a_directory_slot_carries_the_component_area_to_every_incarnation() {
     let image = image();
-    // Потребитель стоит в плане первым, а поднимается вторым: область его каталога
-    // supervisor берёт у названной слотом файловой системы, и дерева имён ей не нужно.
+    // Потребитель стоит в плане первым, а поднимается вторым, потому что supervisor берёт область
+    // его каталога у названной слотом файловой системы, и ей не нужно дерева имён.
     let bytes = encode_plan(&[area_consumer(), image_filesystem()]).expect("scenario plan encodes");
     let mut system = started(&image, &bytes);
     kernel_tests::kassert_eq!(system.start_order(), &[1, 0][..]);
 
-    // Компонент читает свою запись сессией каталога и сам проверяет, что путь
-    // наружу область не выражает: прочие исходы он уносит своим кодом выхода.
+    // Компонент читает свою запись сессией каталога и сам проверяет, что область не выражает
+    // путь наружу. Он уносит прочие исходы своим кодом выхода.
     let first = await_turn(&mut system);
     kernel_tests::kassert_eq!(
         first,
@@ -1143,7 +1144,7 @@ fn a_directory_slot_carries_the_component_area_to_every_incarnation() {
         }
     );
 
-    // Область выдаётся заново: следующая incarnation получает свежую сессию корневой ФС.
+    // Область выдаётся заново. Следующая incarnation получает свежую сессию корневой ФС.
     let second = await_turn(&mut system);
     kernel_tests::kassert_eq!(
         second,
@@ -1163,9 +1164,9 @@ fn a_transaction_raises_a_component_from_the_program_region_of_its_definer() {
     let mut system = started(&image, &bytes);
     kernel_tests::kassert_eq!(system.start_order(), &[1, 0][..]);
 
-    // Компонент берёт байты программы регионом своей файловой сессии, определяет её
-    // экземпляром композиции и работает с сессией поднятого компонента: прочие исходы он
-    // уносит собственным кодом выхода.
+    // Компонент берёт байты программы регионом своей файловой сессии, определяет её экземпляром
+    // композиции и работает с сессией поднятого компонента. Он уносит прочие исходы собственным
+    // кодом выхода.
     let raised = await_turn(&mut system);
 
     kernel_tests::kassert_eq!(
@@ -1179,8 +1180,8 @@ fn a_transaction_raises_a_component_from_the_program_region_of_its_definer() {
         .instance(DEFINED_NAME)
         .expect("the transaction added the component to the composition");
     kernel_tests::kassert!(alive(&system, defined));
-    // Порядок пересчитан по объединению рёбер: компонент набора без зависимостей встал
-    // раньше потребителя файловой системы, который его определил.
+    // Порядок пересчитан по объединению рёбер. Компонент набора без зависимостей встал раньше
+    // потребителя файловой системы, который определил его.
     kernel_tests::kassert_eq!(system.start_order(), &[1, 2, 0][..]);
 
     system.shutdown();
@@ -1217,8 +1218,8 @@ fn a_transaction_whose_edges_close_a_cycle_raises_nothing() {
     let bytes = encode_plan(&[ram_filesystem()]).expect("scenario plan encodes");
     let mut system = started(&image, &bytes);
 
-    // Компоненты набора называют друг друга: порядок запуска из объединения рёбер не
-    // выводится.
+    // Компоненты набора называют друг друга, поэтому порядок запуска не выводится из объединения
+    // рёбер.
     let refused = system.extend(
         caller(),
         vec![
@@ -1305,7 +1306,7 @@ fn a_transaction_past_the_supervisor_budget_raises_nothing() {
 #[kernel_test]
 fn a_transaction_raises_a_device_component_the_plan_never_named() {
     let image = image();
-    // Устройств план не называет, и полномочия провижининга supervisor берёт под набор.
+    // План не называет устройств, и supervisor берёт полномочия провижининга под набор.
     let bytes = encode_plan(&[ram_filesystem()]).expect("scenario plan encodes");
     let mut system = started(&image, &bytes);
     let device = rtc_device(&[RTC_COMPATIBLE]);
@@ -1321,7 +1322,7 @@ fn a_transaction_raises_a_device_component_the_plan_never_named() {
     kernel_tests::kassert!(clock.now().is_ok());
 
     drop(session);
-    // Линию устройства освобождает уход процесса драйвера.
+    // Завершение процесса драйвера освобождает линию устройства.
     system.shutdown();
 }
 
@@ -1339,8 +1340,8 @@ fn a_session_reaches_only_the_components_its_caller_defined() {
         .expect("transaction raises the component");
 
     kernel_tests::kassert!(system.caller_session(caller(), DEFINED_NAME).is_ok());
-    // Значок вызывателя - единственное правило допуска: набор достаётся записи, которая
-    // его определила, а компоненты плана раздаёт статическое связывание.
+    // Значок вызывателя - единственное правило допуска. Набор достаётся записи, которая определила
+    // его, а статическое связывание раздаёт компоненты плана.
     kernel_tests::kassert!(system.caller_session(other_caller(), DEFINED_NAME).is_err());
     kernel_tests::kassert!(system.caller_session(caller(), RAM_FS_NAME).is_err());
 
@@ -1366,7 +1367,7 @@ fn a_transaction_of_a_badge_outside_the_composition_raises_nothing() {
     kernel_tests::kassert_eq!(refused, Err(BootFailure::Caller));
     kernel_tests::kassert!(system.component(1).is_none());
 
-    // Обслуживание переживает отказ: следующая транзакция идёт обычным порядком.
+    // Обслуживание сохраняется при отказе, поэтому следующая транзакция идёт обычным порядком.
     system
         .extend(
             caller(),
@@ -1400,7 +1401,7 @@ fn a_component_badge_names_the_record_it_was_minted_from() {
 fn an_optional_component_leaves_the_composition_and_a_critical_one_stops_it() {
     let image = image();
     let device = rtc_device(&[RTC_COMPATIBLE]);
-    // Драйвер стоит в плане первым, а поднимается вторым: порядок задаёт `after`.
+    // Драйвер стоит в плане первым, а поднимается вторым, потому что `after` задаёт порядок.
     let bytes = encode_plan(&[
         ComponentSpec {
             after: &[ROUTER_NAME],
@@ -1445,8 +1446,8 @@ fn compiled_stage_one_carries_one_component_per_record() {
         .expect("image carries the stage 1 record");
     let plan = decode_plan(record.data()).expect("stage 1 record decodes");
 
-    // `define` принимает запись плана ровно с одним компонентом, и такой её кодирует сборка:
-    // владелец политики загрузки записи не перекодирует.
+    // `define` принимает запись плана ровно с одним компонентом, и сборка кодирует её такой,
+    // поэтому владелец политики загрузки не перекодирует записи.
     kernel_tests::kassert_eq!(plan.len(), 1);
     let ramfs = plan.component(0).expect("record carries its component");
     kernel_tests::kassert_eq!(ramfs.executable(), RAM_FS_PROGRAM);
@@ -1459,7 +1460,7 @@ fn init_raises_stage_one_from_the_image_and_mounts_its_file_system() {
     let image = image();
     let bytes = boot_plan();
     let mut system = started(&image, &bytes);
-    // Ступень 0 несёт один корень: файловой системы `/tmp` в композиции плана нет.
+    // Ступень 0 содержит один корень, потому что в композиции плана нет файловой системы `/tmp`.
     kernel_tests::kassert!(system.instance(RAM_FS_NAME).is_none());
 
     raise_stage_one(&mut system, relay_thread());
@@ -1468,8 +1469,8 @@ fn init_raises_stage_one_from_the_image_and_mounts_its_file_system() {
         .instance(RAM_FS_NAME)
         .expect("the transaction added the stage 1 file system");
     kernel_tests::kassert!(alive(&system, raised));
-    // Сессию поднятого компонента `init` взял у супервизора и привил её сам: статического
-    // слота под этот префикс у него нет.
+    // `init` взял сессию поднятого компонента у супервизора и сам присоединил её, потому что у него
+    // нет статического слота под этот префикс.
     let temp = await_tree(&system, RAM_MOUNT);
     kernel_tests::kassert!(matches!(probe(&temp), Ok(Ok(_))));
 
@@ -1492,7 +1493,7 @@ fn a_stage_one_component_logs_under_its_instance_name() {
     raise_stage_one(&mut system, scenario_relay_thread());
 
     kernel_tests::kassert!(system.instance(RAM_FS_NAME).is_some());
-    // Имена источников ставит supervisor по набору композиции, а не по одному плану:
+    // Supervisor ставит имена источников по набору композиции, а не по одному плану, поэтому
     // компонент транзакции пишет под своим именем, а не под `badge-<hex>`.
     let sources = crate::log_relay::await_component_sources(&[RAM_FS_NAME]);
     kernel_tests::kassert!(
@@ -1519,8 +1520,7 @@ fn a_transaction_raises_a_component_taking_its_directory_from_the_composition() 
         )
         .expect("transaction raises the directory consumer");
 
-    // Компонент читает свою запись сессией каталога: прочие исходы он уносит своим кодом
-    // выхода.
+    // Компонент читает свою запись сессией каталога. Он уносит прочие исходы своим кодом выхода.
     let read = await_turn(&mut system);
     kernel_tests::kassert_eq!(
         read,

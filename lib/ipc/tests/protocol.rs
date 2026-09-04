@@ -3,6 +3,12 @@
 //! доменную ошибку (DOMAIN_ERR), неизвестный ordinal (PEER_CLOSE), cast, event
 //! и txid-корреляцию (R2).
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::expect_used,
+    clippy::std_instead_of_core
+)]
+
 use std::{
     cell::RefCell,
     sync::{

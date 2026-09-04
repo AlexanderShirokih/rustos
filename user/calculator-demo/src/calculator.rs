@@ -2,12 +2,11 @@
 //! Лог-сессия, control-порт и сервисный порт приходят стартовым набором, и слоты
 //! компоненту не нужны.
 
-#![feature(molecular_ext)]
-
-use std::{os::molecular, process, thread};
+use std::{process, thread};
 
 use calculator_demo::calculator;
-use component_abi::{component_manifest, supervisor_gone};
+use component_abi::supervisor_gone;
+use component_client::component_manifest;
 use ipc::{Transport as _, wire::IpcError};
 use kernel_objects::{OwnedHandle, PortTransport};
 use syscall::Timeout;
@@ -18,8 +17,10 @@ const SERVICE_PORT_FAILED_EXIT_CODE: i32 = 4;
 const SUPERVISOR_LOST_EXIT_CODE: i32 = 7;
 
 component_manifest! {
-    exports: "Calculator",
-    slots: {},
+    struct CalculatorStartup {
+        exports: "Calculator",
+        slots: {},
+    }
 }
 
 struct Calculator;
@@ -31,13 +32,11 @@ impl calculator::Service for Calculator {
 }
 
 fn main() {
-    let Some(startup) = molecular::startup() else {
-        process::exit(NO_STARTUP_EXIT_CODE);
-    };
-    let (Some(control), Some(service)) = (
-        OwnedHandle::from_raw(startup.control().get()),
-        OwnedHandle::from_raw(startup.service().get()),
-    ) else {
+    // До установки лог-сессии вывод не доходит до журнала, поэтому процесс называет отказ
+    // приёма кодом выхода.
+    let Ok(CalculatorStartup { control, service }) =
+        component_client_std::receive(CalculatorStartup::receive)
+    else {
         process::exit(NO_STARTUP_EXIT_CODE);
     };
 

@@ -3,6 +3,8 @@
 //! Содержит трейты, типы и макросы для реализации драйверов.
 
 #![no_std]
+#![cfg_attr(test, allow(clippy::unwrap_in_result))]
+
 extern crate alloc;
 
 pub mod driver;

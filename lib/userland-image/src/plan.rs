@@ -297,7 +297,9 @@ impl<'a> BootPlan<'a> {
                 needed: PLAN_HEADER_SIZE,
                 actual: bytes.len(),
             })?;
-        let magic: [u8; 8] = header[..8].try_into().map_err(|_| truncated(bytes, 8))?;
+        let magic = *header
+            .first_chunk::<8>()
+            .ok_or_else(|| truncated(bytes, 8))?;
         if magic != BOOT_PLAN_MAGIC {
             return Err(PlanDecodeError::InvalidMagic(magic));
         }
@@ -362,7 +364,7 @@ fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanD
     if launches == 0 {
         return Err(PlanDecodeError::InvalidLayout("launches"));
     }
-    let on_exhausted = match header[4] {
+    let on_exhausted = match *header.get(4).ok_or(truncated(bytes, at + 5))? {
         EXHAUSTED_HALT => OnExhausted::Halt,
         EXHAUSTED_DETACH => OnExhausted::Detach,
         _ => return Err(PlanDecodeError::InvalidLayout("on_exhausted")),
@@ -370,7 +372,7 @@ fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanD
     if read_u16(header, 14)? != 0 || read_u64(header, 16)? != 0 {
         return Err(PlanDecodeError::InvalidLayout("reserved"));
     }
-    let flags = header[5];
+    let flags = *header.get(5).ok_or(truncated(bytes, at + 6))?;
     if flags & !FLAG_ESTABLISHES_SESSIONS != 0 {
         return Err(PlanDecodeError::InvalidLayout("flags"));
     }
@@ -427,8 +429,11 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, PlanDecodeError
     let header = bytes
         .get(at..at + SLOT_HEADER_SIZE)
         .ok_or(truncated(bytes, at + SLOT_HEADER_SIZE))?;
-    let kind = header[0];
-    if header[1] != 0 || read_u16(header, 10)? != 0 {
+    let Some((kind, rest)) = header.split_first() else {
+        return Err(truncated(bytes, at + SLOT_HEADER_SIZE));
+    };
+    let kind = *kind;
+    if rest.first() != Some(&0) || read_u16(header, 10)? != 0 {
         return Err(PlanDecodeError::InvalidLayout("reserved"));
     }
     let provider_len = usize::from(read_u16(header, 2)?);

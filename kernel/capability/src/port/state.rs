@@ -125,7 +125,9 @@ impl PortState {
             debug_assert!(false, "release of an unregistered badge");
             return;
         };
-        let record = &mut self.badges[index];
+        let Some(record) = self.badges.get_mut(index) else {
+            return;
+        };
         record.holders = record.holders.saturating_sub(1);
         if record.holders > 0 {
             return;

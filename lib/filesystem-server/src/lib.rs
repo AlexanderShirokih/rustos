@@ -19,16 +19,13 @@ use core::sync::atomic::AtomicU64;
 use component_abi::{component_sessions, supervisor_gone};
 use filesystem::FileSystemBackend;
 use filesystem_abi::file_system;
-use ipc::{
-    Transport as _,
-    wire::{Cap, IpcError},
-};
+use ipc::{Transport as _, wire::IpcError};
 use kernel_objects::{MemoryRegion, OwnedHandle, ReadOnlyMapping, Resource, Thread};
 use runtime::{
     Mutex, PortTransport, Priority, exit_with_sibling, install_log, log_line, spawn_owned,
 };
 use spin::Once;
-use syscall::{Handle, Timeout};
+use syscall::Timeout;
 
 mod admin;
 mod buffer;
@@ -60,20 +57,18 @@ struct Shared {
 /// `control` и `service` приходят компонентной стартовой транзакцией. `found` строит бекенд из
 /// `Some(bytes)` отображённого региона либо из `None` для автономного бекенда.
 pub fn serve<B>(
-    log: Cap,
-    control: Cap,
-    service: Cap,
-    backing: Option<Cap>,
+    log: OwnedHandle,
+    control: OwnedHandle,
+    service: OwnedHandle,
+    backing: Option<OwnedHandle>,
     tag: &'static str,
     found: impl FnOnce(Option<&'static [u8]>) -> Result<B>,
 ) -> Result<()>
 where
     B: FileSystemBackend + Send + 'static,
 {
-    install_log(Handle::from_nonzero(log.raw()), tag);
-    let control = OwnedHandle::adopt(control);
-    let service = OwnedHandle::adopt(service);
-    let backing = backing.map(MemoryRegion::adopt);
+    install_log(log.into_raw(), tag);
+    let backing = backing.map(MemoryRegion::from_handle);
     let bytes = match backing.as_ref() {
         Some(backing) => {
             let mapping = backing.map_full_read_only()?;

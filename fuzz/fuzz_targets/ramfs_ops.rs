@@ -9,6 +9,16 @@
 //! идентификатор такого узла обязан перестать вести куда бы то ни было, а выданные когда-либо
 //! идентификаторы обязаны остаться различными и после переиспользования слота.
 
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::missing_asserts_for_indexing,
+    clippy::cast_possible_truncation,
+    clippy::unwrap_in_result,
+    clippy::panic,
+    clippy::std_instead_of_core
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::{Deref, DerefMut},

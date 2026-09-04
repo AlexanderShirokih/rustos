@@ -1,6 +1,12 @@
 #![allow(dead_code)]
 #![allow(unsafe_code)]
 #![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::std_instead_of_core,
+    clippy::unwrap_in_result
+)]
 
 use std::{
     cell::{Cell, RefCell},

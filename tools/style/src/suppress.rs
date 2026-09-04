@@ -26,11 +26,14 @@ const INLINE: &str = "style:allow";
 const WHOLE_FILE: &str = "style:allow-file";
 
 impl Suppressions {
-    /// Собирает директивы подавления по комментариям файла.
+    /// Собирает директивы подавления по комментариям Rust-файла.
     pub fn collect(source: &Source) -> Suppressions {
+        if source.meta.path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            return Suppressions { zones: Vec::new() };
+        }
         let parsed = source.parsed();
         let lines = source.lines();
-        let end = source.text.len() as u32;
+        let end = crate::span::offset(source.text.len());
         let mut zones = Vec::new();
 
         for comment in &parsed.comments {

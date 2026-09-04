@@ -35,27 +35,30 @@ impl<'a> Cursor<'a> {
 
     pub fn read_cstr_at(&self, offset: usize) -> &'a str {
         let buffer = self.buffer;
-        if offset >= buffer.len() {
+        let Some(tail) = buffer.get(offset..) else {
             return "";
-        }
-        let mut end = offset;
-        while end < buffer.len() && buffer[end] != 0 {
-            end += 1;
-        }
-        core::str::from_utf8(&buffer[offset..end]).unwrap_or("")
+        };
+        let len = tail
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(tail.len());
+        tail.get(..len)
+            .and_then(|text| core::str::from_utf8(text).ok())
+            .unwrap_or("")
     }
 
     pub fn read_cstr_here(&mut self) -> &'a str {
         let start = self.position;
-        let buf = self.buffer;
-        if start >= buf.len() {
+        let Some(tail) = self.buffer.get(start..) else {
             return "";
-        }
-        let mut end = start;
-        while end < buf.len() && buf[end] != 0 {
-            end += 1;
-        }
-        self.position = end + 1; // перескочить '\0'
-        core::str::from_utf8(&buf[start..end]).unwrap_or("")
+        };
+        let len = tail
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(tail.len());
+        self.position = start + len + 1; // перескочить '\0'
+        tail.get(..len)
+            .and_then(|text| core::str::from_utf8(text).ok())
+            .unwrap_or("")
     }
 }

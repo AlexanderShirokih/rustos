@@ -5,7 +5,7 @@ use ipc::{
     WireTyped, WireValue,
     schema::WireType,
     wire::{
-        BODY_MAX, ENUM_DISCRIMINANT_SIZE, FIELD_OVERHEAD, HandleSlots, IpcError, MessageBuf, value,
+        BODY_MAX, ENUM_DISCRIMINANT_WIDTH, FIELD_OVERHEAD, HandleSlots, IpcError, MessageBuf, value,
     },
 };
 
@@ -79,7 +79,7 @@ impl<'a> WireValue<'a> for SessionError {
 }
 
 impl WireTyped for SessionError {
-    const WIRE_TYPE: WireType = WireType::Uint(ENUM_DISCRIMINANT_SIZE as u8);
+    const WIRE_TYPE: WireType = WireType::Uint(ENUM_DISCRIMINANT_WIDTH);
 }
 
 #[cfg(test)]

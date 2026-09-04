@@ -137,13 +137,14 @@ fn std_rt_lock_serialises_workers() {
     kernel_tests::kassert_eq!(*counter, LOCK_WORKERS * LOCK_ITERS);
 }
 
-/// Стартовый handle доезжает от точки входа до потребителя.
+/// Стартовый handle доезжает от точки входа до потребителя и уходит первому вызову.
 #[kernel_test]
-fn std_rt_start_publishes_the_bootstrap_handle() {
+fn std_rt_start_hands_out_the_bootstrap_handle_once() {
     let root = crate::bootstrap_handle();
     runtime::start(root.raw());
-    let published = runtime::bootstrap_handle().expect("bootstrap handle is published");
+    let published = runtime::take_bootstrap().expect("bootstrap handle is published");
     kernel_tests::kassert_eq!(published.raw(), root.raw());
+    kernel_tests::kassert!(runtime::take_bootstrap().is_none());
 }
 
 const RANDOM_MAX_LEN: usize = 17;

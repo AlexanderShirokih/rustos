@@ -2,6 +2,7 @@
 
 use core::fmt::{Display, Formatter, Result as FmtResult};
 
+use component_client::StartupError;
 use ipc::wire::IpcError;
 use syscall::SyscallError;
 
@@ -49,5 +50,14 @@ impl From<SyscallError> for Error {
 impl From<IpcError> for Error {
     fn from(error: IpcError) -> Self {
         Self::Ipc(error)
+    }
+}
+
+impl From<StartupError> for Error {
+    fn from(error: StartupError) -> Self {
+        match error {
+            StartupError::Transport(error) => Self::Ipc(error),
+            _ => Self::Start,
+        }
     }
 }

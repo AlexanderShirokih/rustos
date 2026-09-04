@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use memory::{
     aligned::Aligned,
     memory_range::MemoryRange,

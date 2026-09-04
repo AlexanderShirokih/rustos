@@ -10,7 +10,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_abi::component_manifest;
+use component_client::{ReceivedStartup, component_manifest};
 use io::mmio::{Mmio, Reg};
 use ipc::wire::IpcError;
 use kernel_objects::{IrqLine, MemoryRegion, OwnedHandle};
@@ -20,7 +20,7 @@ use syscall::Handle;
 
 mod error;
 
-use error::{Error, Result};
+use error::Result;
 
 const LOG_TAG: &str = "rtc";
 
@@ -89,19 +89,16 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 }
 
 fn run(startup: Handle) -> Result<()> {
-    let startup = OwnedHandle::from_handle(startup);
-    let started =
-        RtcStartup::receive(&PortTransport::server(startup.borrow()))?.ok_or(Error::Start)?;
-    drop(startup);
-
-    install_log(Handle::from_nonzero(started.log.raw()), LOG_TAG);
+    let ReceivedStartup { log, resources } =
+        RtcStartup::receive(OwnedHandle::from_handle(startup))?;
+    install_log(log.into_raw(), LOG_TAG);
     // Клиентская сторона control-порта остаётся у supervisor: серверная живёт
     // до конца процесса вместе с ней.
-    let _control = OwnedHandle::adopt(started.control);
-    let service = OwnedHandle::adopt(started.service);
+    let _control = resources.control;
+    let service = resources.service;
 
-    let line = IrqLine::from_handle(OwnedHandle::adopt(started.line));
-    let window = MemoryRegion::from_handle(OwnedHandle::adopt(started.window));
+    let line = IrqLine::from_handle(resources.line);
+    let window = MemoryRegion::from_handle(resources.window);
     let mapping = window.map_full(UserMemFlags::ReadWrite)?;
     let mut driver = Pl031 {
         device: mapping.mmio(),

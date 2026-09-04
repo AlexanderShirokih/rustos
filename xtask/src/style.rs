@@ -86,18 +86,24 @@ pub(crate) fn run(args: StyleArgs) -> Result<i32> {
 }
 
 fn compare_baseline(base: &str) -> Result<()> {
-    let Some(grown) = grown_against(Path::new("."), base)? else {
+    let Some(comparison) = grown_against(Path::new("."), base)? else {
         eprintln!("style: {base} carries no baseline snapshot, nothing to compare");
         return Ok(());
     };
 
-    for rule in &grown {
+    for rule in &comparison.new {
+        eprintln!(
+            "{}: {} accepted findings, rule is new against {base}",
+            rule.rule, rule.accepted
+        );
+    }
+    for rule in &comparison.grown {
         eprintln!(
             "{}: {} accepted findings, was {}",
             rule.rule, rule.accepted, rule.was
         );
     }
-    if !grown.is_empty() {
+    if !comparison.grown.is_empty() {
         bail!("the baseline snapshot grew against {base}, fix the code instead");
     }
     Ok(())

@@ -293,6 +293,7 @@ impl<'a> Iterator for SlotNames<'a> {
 }
 
 /// Длина записи манифеста с заголовком, обслуживаемыми протоколами и слотами.
+#[allow(clippy::indexing_slicing)]
 #[must_use]
 pub const fn manifest_len(slots: &[SlotDeclaration], export: &str, control: &str) -> usize {
     let mut len = COMPONENT_MANIFEST_HEADER_SIZE + export.len() + control.len();
@@ -313,6 +314,7 @@ pub const fn manifest_len(slots: &[SlotDeclaration], export: &str, control: &str
 /// Кодирует запись манифеста целиком. `LEN` равна [`manifest_len`]. `export` и `control`
 /// называют протоколы service- и control-порта, а `establishes_sessions` объявляет, что
 /// сессии своего service-порта компонент заводит сам.
+#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation)]
 #[must_use]
 pub const fn encode_manifest<const LEN: usize>(
     slots: &[SlotDeclaration],
@@ -383,7 +385,9 @@ pub const fn encode_manifest<const LEN: usize>(
     bytes
 }
 
+#[allow(clippy::indexing_slicing)]
 const fn write_bytes<const LEN: usize>(bytes: &mut [u8; LEN], at: usize, text: &[u8]) -> usize {
+    // Запись идёт в `const fn`, где срезы по `get` недоступны, а длину проверил вызывающий.
     let mut index = 0;
     while index < text.len() {
         bytes[at + index] = text[index];
@@ -401,9 +405,9 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDe
             actual: bytes.len(),
         });
     }
-    let magic: [u8; 8] = bytes[..COMPONENT_MANIFEST_MAGIC.len()]
-        .try_into()
-        .map_err(|_| ManifestDecodeError::InvalidLayout("magic"))?;
+    let magic = *bytes
+        .first_chunk::<8>()
+        .ok_or(ManifestDecodeError::InvalidLayout("magic"))?;
     if magic != COMPONENT_MANIFEST_MAGIC {
         return Err(ManifestDecodeError::InvalidMagic(magic));
     }
@@ -411,14 +415,16 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDe
     if version != COMPONENT_MANIFEST_VERSION {
         return Err(ManifestDecodeError::InvalidVersion(version));
     }
-    if bytes[OFFSET_RESERVED..COMPONENT_MANIFEST_HEADER_SIZE]
-        .iter()
-        .any(|byte| *byte != 0)
-    {
+    let reserved = bytes
+        .get(OFFSET_RESERVED..COMPONENT_MANIFEST_HEADER_SIZE)
+        .ok_or(ManifestDecodeError::InvalidLayout("reserved"))?;
+    if reserved.iter().any(|byte| *byte != 0) {
         return Err(ManifestDecodeError::InvalidLayout("reserved"));
     }
 
-    let flags = bytes[OFFSET_FLAGS];
+    let flags = *bytes
+        .get(OFFSET_FLAGS)
+        .ok_or(ManifestDecodeError::InvalidLayout("flags"))?;
     if flags & !FLAG_ESTABLISHES_SESSIONS != 0 {
         return Err(ManifestDecodeError::InvalidLayout("flags"));
     }
@@ -428,9 +434,15 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDe
         return Err(ManifestDecodeError::InvalidLayout("slot count"));
     }
 
-    let export_end = COMPONENT_MANIFEST_HEADER_SIZE + usize::from(bytes[OFFSET_EXPORT_LEN]);
+    let export_len = *bytes
+        .get(OFFSET_EXPORT_LEN)
+        .ok_or(ManifestDecodeError::InvalidLayout("export length"))?;
+    let control_len = *bytes
+        .get(OFFSET_CONTROL_LEN)
+        .ok_or(ManifestDecodeError::InvalidLayout("control length"))?;
+    let export_end = COMPONENT_MANIFEST_HEADER_SIZE + usize::from(export_len);
     let export = parse_protocol(bytes, COMPONENT_MANIFEST_HEADER_SIZE, export_end, "export")?;
-    let control_end = export_end + usize::from(bytes[OFFSET_CONTROL_LEN]);
+    let control_end = export_end + usize::from(control_len);
     let control = parse_protocol(bytes, export_end, control_end, "control")?;
 
     let mut cursor = control_end;
@@ -482,10 +494,11 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, ManifestDecodeE
                 needed: at + COMPONENT_SLOT_HEADER_SIZE,
                 actual: bytes.len(),
             })?;
-    let kind =
-        SlotKind::from_byte(header[0]).ok_or(ManifestDecodeError::InvalidLayout("slot kind"))?;
-    let resource = u16::from_le_bytes([header[1], header[2]]);
-    let name_count = header[3];
+    let [kind, resource_low, resource_high, name_count] = *header else {
+        return Err(ManifestDecodeError::InvalidLayout("slot header"));
+    };
+    let kind = SlotKind::from_byte(kind).ok_or(ManifestDecodeError::InvalidLayout("slot kind"))?;
+    let resource = u16::from_le_bytes([resource_low, resource_high]);
 
     // Устройство названо хотя бы одной совместимостью, импорт протокола - его именем и
     // необязательным именем экземпляра, каталог - именем экземпляра-провайдера, а у
@@ -547,7 +560,12 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, ManifestDecodeE
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    // На неполном буфере поле читается нулём, и разбор падает дальше, на несовпадении
+    // значения.
+    bytes
+        .get(offset..)
+        .and_then(<[u8]>::first_chunk::<2>)
+        .map_or(0, |field| u16::from_le_bytes(*field))
 }
 
 #[cfg(test)]

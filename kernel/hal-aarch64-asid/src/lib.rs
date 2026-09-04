@@ -8,6 +8,8 @@
 //! inner-shareable домене).
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(test, allow(clippy::std_instead_of_core))]
+#![allow(clippy::cast_possible_truncation)]
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

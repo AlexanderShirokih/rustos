@@ -41,9 +41,17 @@ impl<'a> DirEntry<'a> {
         let Some(record) = out.get_mut(..len) else {
             return Err(IpcError::Truncated);
         };
-        record[0] = self.kind.as_wire();
-        record[1..ENTRY_HEADER_SIZE].copy_from_slice(&value::encode_u16(self.name.len() as u16));
-        record[ENTRY_HEADER_SIZE..].copy_from_slice(self.name.as_bytes());
+        let Some((kind, rest)) = record.split_first_mut() else {
+            return Err(IpcError::Truncated);
+        };
+        let Some((name_len, name)) = rest.split_first_chunk_mut::<2>() else {
+            return Err(IpcError::Truncated);
+        };
+        let encoded_name_len =
+            u16::try_from(self.name.len()).map_err(|_| IpcError::InvalidValue)?;
+        *kind = self.kind.as_wire();
+        *name_len = value::encode_u16(encoded_name_len);
+        name.copy_from_slice(self.name.as_bytes());
         Ok(len)
     }
 
@@ -53,8 +61,11 @@ impl<'a> DirEntry<'a> {
         let Some(header) = data.get(..ENTRY_HEADER_SIZE) else {
             return Err(IpcError::Truncated);
         };
-        let kind = NodeKind::from_wire(header[0]).ok_or(IpcError::InvalidValue)?;
-        let name_len = value::decode_u16(&header[1..])? as usize;
+        let Some((kind, name_len)) = header.split_first() else {
+            return Err(IpcError::Truncated);
+        };
+        let kind = NodeKind::from_wire(*kind).ok_or(IpcError::InvalidValue)?;
+        let name_len = usize::from(value::decode_u16(name_len)?);
         if name_len > NAME_MAX {
             return Err(IpcError::InvalidValue);
         }

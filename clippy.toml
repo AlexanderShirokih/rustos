@@ -1,1 +1,6 @@
+# Тестовый код выведен из-под запретов рабочего кода: в тесте паника сообщает о
+# провале, а индексация известной длины выражает ожидание.
 allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

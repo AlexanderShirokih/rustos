@@ -44,8 +44,10 @@ pub trait ByteStore {
 /// Кладёт значение в первый свободный слот таблицы хранилищ и возвращает его идентификатор.
 pub fn insert_store<T>(slots: &mut Vec<Option<T>>, value: T) -> Result<StoreId, FileSystemError> {
     if let Some(index) = slots.iter().position(Option::is_none) {
-        slots[index] = Some(value);
-        return Ok(StoreId::from_raw(index as u32));
+        let id = StoreId::from_raw(u32::try_from(index).map_err(|_| FileSystemError::NoSpace)?);
+        let slot = slots.get_mut(index).ok_or(FileSystemError::NoSpace)?;
+        *slot = Some(value);
+        return Ok(id);
     }
     slots.try_reserve(1).map_err(|_| FileSystemError::NoSpace)?;
     let id = StoreId::from_raw(u32::try_from(slots.len()).map_err(|_| FileSystemError::NoSpace)?);

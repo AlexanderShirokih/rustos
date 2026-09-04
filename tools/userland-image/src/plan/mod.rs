@@ -9,7 +9,7 @@ mod source;
 #[cfg(test)]
 mod tests;
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context as _, Result, anyhow, ensure};
 use supervisor_abi::PLAN_RECORD_MAX;
 use userland_image::{ComponentSpec, encode_plan};
 
@@ -88,7 +88,7 @@ impl<'a> Composition<'a> {
         let declarations: Vec<&ProgramManifest> =
             executables.iter().map(|program| program.manifest).collect();
         validate_composition(&names, &declarations)?;
-        for name in &names[boundary..] {
+        for name in names.iter().skip(boundary) {
             validate_record_name(name)?;
         }
 
@@ -164,35 +164,62 @@ impl<'a> Composition<'a> {
 
         let after_names: Vec<Vec<&str>> = after
             .iter()
-            .map(|edges| edges.iter().map(|&edge| names[edge]).collect())
-            .collect();
+            .map(|edges| {
+                edges
+                    .iter()
+                    .map(|&edge| {
+                        names
+                            .get(edge)
+                            .copied()
+                            .context("boot plan names a dependency outside the composition")
+                    })
+                    .collect()
+            })
+            .collect::<Result<_>>()?;
         let policies = self
             .instances
             .iter()
             .map(|instance| compile_policy(instance.entry, instance.name))
             .collect::<Result<Vec<_>>>()?;
-        let components: Vec<ComponentSpec<'_>> = (0..self.instances.len())
-            .map(|index| ComponentSpec {
-                executable: self.instances[index].program.path,
-                name: names[index],
-                slots: &bindings[index].slots,
-                after: &after_names[index],
-                memory_pages: policies[index].memory_pages,
-                startup_timeout: policies[index].startup_timeout,
-                launches: policies[index].launches,
-                on_exhausted: policies[index].on_exhausted,
-                establishes_sessions: declarations[index].establishes_sessions,
-            })
+        let components: Vec<ComponentSpec<'_>> = self
+            .instances
+            .iter()
+            .zip(&names)
+            .zip(&bindings)
+            .zip(&after_names)
+            .zip(&policies)
+            .zip(&declarations)
+            .map(
+                |(((((instance, name), binding), after), policy), declared)| ComponentSpec {
+                    executable: instance.program.path,
+                    name,
+                    slots: &binding.slots,
+                    after,
+                    memory_pages: policy.memory_pages,
+                    startup_timeout: policy.startup_timeout,
+                    launches: policy.launches,
+                    on_exhausted: policy.on_exhausted,
+                    establishes_sessions: declared.establishes_sessions,
+                },
+            )
             .collect();
 
-        let plan = encode_plan(&components[..self.boundary])
+        // Граница ступеней равна длине набора ступени 0 и не выходит за состав. Состав
+        // приходит из манифеста, и сборка всё же спрашивает, а не режет.
+        let (stage_zero_components, stage_one_components) = components
+            .split_at_checked(self.boundary)
+            .context("boot plan stage boundary is outside the composition")?;
+        let (stage_zero_names, stage_one_names) = names
+            .split_at_checked(self.boundary)
+            .context("boot plan stage boundary is outside the composition")?;
+        let plan = encode_plan(stage_zero_components)
             .map_err(|err| anyhow!("failed to serialize boot plan: {err:?}"))?;
         Ok(CompiledStages {
             plan,
-            stage_one: encode_stage_one(&components[self.boundary..])?,
+            stage_one: encode_stage_one(stage_one_components)?,
             instances: StageInstances {
-                stage_zero: owned_names(&names[..self.boundary]),
-                stage_one: owned_names(&names[self.boundary..]),
+                stage_zero: owned_names(stage_zero_names),
+                stage_one: owned_names(stage_one_names),
             },
         })
     }

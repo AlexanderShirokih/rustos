@@ -321,7 +321,7 @@ impl file_system::Service for Serving<'_> {
         let count = Self::buffer(session)?.publish(len as usize, |out| {
             backend.read_at(stores, open_node.node, offset, out)
         })?;
-        Ok(count as u32)
+        u32::try_from(count).map_err(|_| FileSystemError::BufferTooSmall)
     }
 
     fn write(
@@ -338,12 +338,12 @@ impl file_system::Service for Serving<'_> {
                 // Сколько байт легло, знает бекенд: дозапись отдаёт только их смещение, а длину
                 // даёт выросшая длина узла.
                 let size = backend.metadata(open_node.node)?.size;
-                return Ok(Written {
-                    count: size.saturating_sub(at) as u32,
-                    offset: at,
-                });
+                let count = u32::try_from(size.saturating_sub(at))
+                    .map_err(|_| FileSystemError::BufferTooSmall)?;
+                return Ok(Written { count, offset: at });
             }
-            let count = backend.write_at(stores, open_node.node, offset, data)? as u32;
+            let written = backend.write_at(stores, open_node.node, offset, data)?;
+            let count = u32::try_from(written).map_err(|_| FileSystemError::BufferTooSmall)?;
             Ok(Written { count, offset })
         })
     }

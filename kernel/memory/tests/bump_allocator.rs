@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use core::alloc::Layout;
 
 use memory::{

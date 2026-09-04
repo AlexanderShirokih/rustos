@@ -69,7 +69,9 @@ fn harness_exit(code: u32) -> ! {
 }
 
 /// Подключает harness к ядру и запускает все зарегистрированные кейсы.
+#[allow(clippy::expect_used)]
 pub fn run(kernel: &mut KernelContext) -> ! {
+    // Без консоли и её адаптера сообщить о результате прогона нечем.
     kernel.with_runtime_state(|services, _| {
         let console = services
             .require_console()

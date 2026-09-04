@@ -3,6 +3,14 @@
 //! ответов, флаги открытия, правила пути и раскладка записи каталога в буфере данных.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::cast_possible_truncation,
+        clippy::missing_asserts_for_indexing,
+        clippy::unwrap_in_result
+    )
+)]
 
 extern crate alloc;
 #[cfg(test)]

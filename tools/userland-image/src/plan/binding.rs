@@ -54,11 +54,14 @@ impl Port {
 }
 
 impl<'a> ComponentBinding<'a> {
-    fn provided_by(&mut self, provider: usize, names: &[&'a str]) -> &'a str {
+    fn provided_by(&mut self, provider: usize, names: &[&'a str]) -> Result<&'a str> {
         // Импорт сервиса и каталог компонента поднимают провайдера раньше
         // потребителя: ребро выводится из связывания.
         self.providers.push(provider);
-        names[provider]
+        names
+            .get(provider)
+            .copied()
+            .context("boot plan resolves a provider outside the composition")
     }
 }
 
@@ -85,19 +88,19 @@ pub(super) fn compile_slots<'a>(
             SlotKind::Service => {
                 let provider = find_provider(name, Port::Service, compatible, declarations, names)?;
                 SlotSpec::Service {
-                    provider: binding.provided_by(provider, names),
+                    provider: binding.provided_by(provider, names)?,
                 }
             }
             SlotKind::Control => {
                 let provider = find_provider(name, Port::Control, compatible, declarations, names)?;
                 SlotSpec::Control {
-                    provider: binding.provided_by(provider, names),
+                    provider: binding.provided_by(provider, names)?,
                 }
             }
             SlotKind::Directory => {
                 let provider = find_area(name, compatible, declarations, names)?;
                 SlotSpec::Directory {
-                    provider: binding.provided_by(provider, names),
+                    provider: binding.provided_by(provider, names)?,
                 }
             }
             SlotKind::Supervisor => SlotSpec::Supervisor,
@@ -125,7 +128,7 @@ fn find_provider(
         None => find_only_provider(name, port, protocol, declarations, names)?,
     };
     ensure!(
-        names[index] != name,
+        names.get(index).copied() != Some(name),
         "boot plan component '{name}' imports the {} it {} itself",
         port.import_noun(),
         port.provider_verb()
@@ -151,8 +154,11 @@ fn find_instance(
                  '{instance}', which the composition does not contain"
             )
         })?;
+    let declared = declarations
+        .get(index)
+        .context("boot plan resolves a provider outside the composition")?;
     ensure!(
-        port.served_protocol(declarations[index]) == Some(protocol),
+        port.served_protocol(declared) == Some(protocol),
         "boot plan component '{name}' imports {imported} '{protocol}' from instance \
          '{instance}', which {} no such protocol",
         port.provider_verb()
@@ -179,13 +185,16 @@ fn find_area(
             )
         })?;
     ensure!(
-        names[index] != name,
+        names.get(index).copied() != Some(name),
         "boot plan component '{name}' takes its directory from itself"
     );
     // Каталог приходит сессией, суженной до него, и сузить её умеет лишь тот, кто её
     // заводит сам.
+    let provider = declarations
+        .get(index)
+        .context("boot plan resolves a provider outside the composition")?;
     ensure!(
-        declarations[index].establishes_sessions,
+        provider.establishes_sessions,
         "boot plan component '{name}' takes its directory from instance '{instance}', \
          which does not establish its own sessions"
     );
@@ -214,7 +223,10 @@ fn find_only_provider(
                 port.provider_verb()
             );
         }
-        let providers: Vec<&str> = providers.iter().map(|index| names[*index]).collect();
+        let providers: Vec<&str> = providers
+            .iter()
+            .filter_map(|index| names.get(*index).copied())
+            .collect();
         bail!(
             "boot plan component '{name}' imports {imported} '{protocol}', \
              which {} components {}: {}",

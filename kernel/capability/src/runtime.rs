@@ -110,6 +110,7 @@ pub fn install_runtime(rt: Arc<dyn KernelRuntime>) {
 }
 
 /// Доступ к глобальному runtime. Паникует, если он ещё не установлен.
+#[allow(clippy::expect_used)]
 pub fn runtime() -> &'static Arc<dyn KernelRuntime> {
     RUNTIME
         .get()

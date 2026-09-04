@@ -67,6 +67,7 @@ impl<'a> WireValue<'a> for NodeDescriptor {
 }
 
 impl WireTyped for NodeDescriptor {
+    #[allow(clippy::cast_possible_truncation)]
     const WIRE_TYPE: WireType = WireType::Uint(size_of::<u32>() as u8);
 }
 

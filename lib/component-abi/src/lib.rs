@@ -4,6 +4,14 @@
 //! на control-порту.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::cast_possible_truncation,
+        clippy::std_instead_of_core,
+        clippy::unwrap_in_result
+    )
+)]
 
 #[cfg(test)]
 extern crate std;

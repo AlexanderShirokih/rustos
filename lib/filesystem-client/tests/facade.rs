@@ -1,6 +1,14 @@
 //! Поведение фасада на парном транспорте: разбор пути и кэш сессий, буфер данных, дескрипторы
 //! с их позицией, обход каталога и операции над деревом.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::std_instead_of_core,
+    clippy::unwrap_in_result
+)]
+
 use std::{
     collections::BTreeMap,
     string::String,

@@ -79,23 +79,25 @@ impl<'a> Iterator for DecodedSegments<'a> {
         if self.remaining == 0 {
             return None;
         }
-        let wire = decode_segment(self.data, self.next_offset).expect("segments were validated");
+        // Образ читается из чужой памяти, и неполная запись обрывает перечисление вместо
+        // паники.
+        let wire = decode_segment(self.data, self.next_offset)?;
         self.next_offset += SEGMENT_SIZE;
         self.remaining -= 1;
 
-        let start = usize::try_from(wire.file_offset).expect("segment offset was validated");
-        let size = usize::try_from(wire.file_size).expect("segment size was validated");
+        let start = usize::try_from(wire.file_offset).ok()?;
+        let size = usize::try_from(wire.file_size).ok()?;
         Some(Segment {
             va_base: wire.va_base,
             mem_size: wire.mem_size,
-            permissions: decode_permissions(wire.flags).expect("segment flags were validated"),
-            bytes: &self.data[start..start + size],
+            permissions: decode_permissions(wire.flags)?,
+            bytes: self.data.get(start..start + size)?,
         })
     }
 }
 
 /// Разбирает программу из байт `data`, называя её путём `path`. Длины сегментов проверяются
-/// против фактического среза, и байты за концом программы разбору не мешают.
+/// по фактическому срезу, и байты за концом программы разбору не мешают.
 pub fn decode_program<'a>(
     path: &'a str,
     data: &'a [u8],
@@ -116,7 +118,7 @@ pub fn decode_program<'a>(
         .ok_or(ProgramDecodeError::InvalidLayout("segments_size_overflow"))?;
     // Заголовок и дескрипторы занимают первую страницу записи, данные сегментов
     // начинаются за ней.
-    if descriptors_end > USERLAND_PAGE_SIZE as usize {
+    if u64::try_from(descriptors_end).is_ok_and(|end| end > USERLAND_PAGE_SIZE) {
         return Err(ProgramDecodeError::InvalidLayout("descriptors_exceed_page"));
     }
     if descriptors_end > data.len() {

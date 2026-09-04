@@ -21,7 +21,13 @@ impl<const N: usize> LogBuffer<N> {
     /// и возвращает его длину в байтах.
     pub fn push_str(&mut self, text: &str) -> usize {
         let take = fitting_prefix(text, N - self.len);
-        self.bytes[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
+        let (Some(target), Some(source)) = (
+            self.bytes.get_mut(self.len..self.len + take),
+            text.as_bytes().get(..take),
+        ) else {
+            return 0;
+        };
+        target.copy_from_slice(source);
         self.len += take;
         take
     }

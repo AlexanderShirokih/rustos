@@ -4,6 +4,8 @@
 //! нужный одному файлу, виден остальным как `dead_code` - отсюда
 //! `#[allow(dead_code)]` на элементах ниже.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 use std::sync::Arc;
 
 use memory::{

@@ -3,6 +3,14 @@
 //! несовпадение `mapped_size`, `AccessDenied` при слабой access-mask.
 
 #![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unimplemented,
+    clippy::unwrap_in_result
+)]
 
 use core::{num::NonZeroUsize, sync::atomic::AtomicU32};
 use std::sync::{Arc, Mutex, OnceLock};

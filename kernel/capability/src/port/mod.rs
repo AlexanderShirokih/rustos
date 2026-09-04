@@ -6,12 +6,11 @@
 //! Хендлы переносятся кросс-процессно через handle-таблицы
 //! (см. [`ipc_buffer_xfer`](super::ipc_buffer_xfer)).
 //!
-//! Парковка/пробуждение используют [`ParkWaker`](super::wait): CAS на
-//! `state` (REGISTERED -> SIGNALED/CANCELED) выбирает ровно одного победителя
-//! в гонке match/cancel.
+//! Парковка/пробуждение используют [`ParkWaker`](super::wait). CAS на `state` (REGISTERED ->
+//! SIGNALED/CANCELED) выбирает ровно одного победителя в гонке match/cancel.
 //!
 //! Порт считает своих держателей: получателей (capability с правом `READ`) и отправителей каждого
-//! значка (capability со значком и правом `WRITE`). Учёт живёт под локом очереди, и
+//! значка (capability со значком и правом `WRITE`). Учёт находится под локом очереди, и
 //! изменение множества и разбор очереди атомарны. Операция удерживает учёт своей стороны от
 //! снимка capability до доставки или постановки в очередь ([`OperationHold`]).
 
@@ -96,8 +95,8 @@ pub(crate) struct ParkCtx {
 
 impl ParkCtx {
     pub(crate) fn for_current(runtime: &Arc<dyn KernelRuntime>) -> Self {
-        // Вызов идёт вне queue-лока: `current_wait_token` берёт scheduler-лок, а обратное
-        // ребро занято терминацией потока (`PortCancel`).
+        // Вызов идёт вне queue-лока, потому что `current_wait_token` берёт scheduler-лок, а
+        // обратное ребро занято терминацией потока (`PortCancel`).
         let token = runtime.current_wait_token();
         Self {
             waker: Arc::new(ParkWaker::new(runtime.clone(), token)),
@@ -194,7 +193,7 @@ impl Port {
             if holder.released.load(Ordering::Acquire) {
                 return Err(IpcError::Revoked);
             }
-            // Значок учитывается до получателя: его отказ оставляет множество получателей
+            // Значок учитывается до получателя, поэтому его отказ оставляет множество получателей
             // нетронутым.
             if let Some(badge) = holder.badge {
                 state.register_badge(badge.get())?;
@@ -209,12 +208,12 @@ impl Port {
 
     fn reacquire_holder(self: &Arc<Self>, holder: &PortHolder) -> Option<Arc<dyn HolderTicket>> {
         let counted = self.inner.with_lock(|state| {
-            // Снятый учёт вторым токеном не оживает: `release` выставляет флаг до захвата
-            // лока, поэтому сброшенный под локом флаг означает живого держателя.
+            // Снятый учёт вторым токеном не оживает. `release` выставляет флаг до захвата лока,
+            // поэтому сброшенный под локом флаг означает живого держателя.
             if holder.released.load(Ordering::Acquire) {
                 return false;
             }
-            // Запись живого значка существует: в ней учтён как минимум сам холдер.
+            // Запись живого значка существует, поэтому в ней учтён как минимум сам холдер.
             if let Some(badge) = holder.badge
                 && state.register_badge(badge.get()).is_err()
             {
@@ -260,9 +259,9 @@ impl Port {
                 Ok(None) => {}
             }
 
-            // Матч и постановка в очередь - разные захваты queue-лока: между ними берётся
-            // wait-token. Изменившееся в это окно состояние отвергает постановку, и цикл
-            // повторяет матч.
+            // Матч и постановка в очередь - разные захваты queue-лока, поэтому между ними берётся
+            // wait-token. Изменившееся в это окно состояние отвергает постановку, и цикл повторяет
+            // матч.
             let ctx = ParkCtx::for_current(runtime);
             let waiter = Waiter {
                 kind: SendKind::Send,
@@ -374,7 +373,8 @@ impl Port {
     }
 
     pub(crate) fn remove_waiter(&self, waker: &Arc<ParkWaker>) -> bool {
-        // Waiter не роняется под локом порта: его транспорт держит capability-таблицу.
+        // Waiter не освобождается под локом порта, потому что его транспорт держит
+        // capability-таблицу.
         let removed = self.inner.with_lock(|state| state.take_by_waker(waker));
         removed.is_some()
     }
@@ -475,7 +475,7 @@ fn resolve_send_recv(
             waker.claim_timeout();
             return Err(IpcError::Timeout);
         }
-        // Waiter забран матчером: исход публикуется, дожидаемся сигнала.
+        // Waiter забран матчером, поэтому исход публикуется, дожидаемся сигнала.
         wait_resolved(runtime, waker);
     }
     outcome_to_result(outcome)
@@ -504,10 +504,8 @@ pub fn port_send(
 }
 
 /// Реализует call, блокирующий поток до reply. Ответ оказывается в IPC-буфере вызывателя.
-/// `timeout_ns` ограничивает всю операцию (ожидание получателя + ожидание
-/// reply);
-/// семантика значений и `hold` - как у [`port_send`].
-/// На истечении - [`IpcError::Timeout`].
+/// `timeout_ns` ограничивает всю операцию (ожидание получателя + ожидание reply). Семантика
+/// значений и `hold` - как у [`port_send`]. На истечении - [`IpcError::Timeout`].
 pub fn port_call(
     port: &Arc<Port>,
     caller: &ThreadTransport,
@@ -540,8 +538,8 @@ fn resolve_call(
         match outcome.raw() {
             OutcomeSlot::PENDING | OutcomeSlot::DELIVERING => {
                 let park_ns = match remaining_until(runtime, deadline_ns) {
-                    // Из очереди уводит истёкший дедлайн; в переносе уйти нельзя и на
-                    // нём, поэтому парковка перевзводится коротким шагом.
+                    // Истёкший дедлайн уводит из очереди. В переносе уйти нельзя и на нём, поэтому
+                    // парковка перевзводится коротким шагом.
                     Some(0) => {
                         if port.remove_waiter(waker) {
                             waker.claim_timeout();
@@ -570,10 +568,9 @@ fn resolve_call(
     }
 }
 
-/// `recv`: блокирующая. Возвращает `Some(reply)`, если встречным был `call`. Семантика
-/// `timeout_ns` и `hold` - как у [`port_send`], на истечении - [`IpcError::Timeout`].
-/// [`IpcError::SenderGone`] - кадра нет, а в `IpcBuffer.badge` лежит значок, чьи отправители
-/// исчезли.
+/// `recv`: блокирующая. Возвращает `Some(reply)`, если встречным был `call`. Семантика `timeout_ns`
+/// и `hold` - как у [`port_send`], на истечении - [`IpcError::Timeout`]. [`IpcError::SenderGone`] -
+/// нет кадра, а в `IpcBuffer.badge` лежит значок, чьи отправители исчезли.
 pub fn port_recv(
     port: &Arc<Port>,
     receiver: &ThreadTransport,
@@ -935,8 +932,8 @@ mod tests {
         };
         assert!(!ep.queue_is_empty());
 
-        // Терминация заблокированного потока: scheduler зовёт PortCancel,
-        // снимающий Waiter с очереди - матчер позже не доставит в мёртвый поток.
+        // Терминация заблокированного потока: scheduler зовёт PortCancel, который снимает Waiter с
+        // очереди - матчер позже не доставит в мёртвый поток.
         let cancel = PortCancel {
             port: ep.clone(),
             waker: waker.clone(),
@@ -1001,8 +998,8 @@ mod tests {
         let call_action = ep.call(&transport(BASE_A), ctx, None);
         assert!(matches!(call_action, CallAction::Park { .. }));
 
-        // Получатель забрал запрос -> вызывающая сторона в фазе 2 (AWAITING_REPLY); его
-        // Waiter уже не в очереди, поэтому remove_waiter в cancel - no-op.
+        // Получатель забрал запрос -> вызывающая сторона в фазе 2 (AWAITING_REPLY). Его Waiter уже
+        // не в очереди, поэтому remove_waiter в cancel - no-op.
         let RecvAction::Done { reply: Some(reply) } = ep.recv(&transport(BASE_B), &rt, None) else {
             panic!("recv must return a reply for call");
         };
@@ -1157,7 +1154,7 @@ mod tests {
         let result = resolve_call(&ep, &dyn_rt, &ctx.waker, &ctx.outcome, Some(1000));
 
         assert_eq!(result, Err(IpcError::Timeout));
-        // Единственная перепарковка - ровно на остаток до дедлайна (1000 - 500).
+        // Единственная перепарковка - на остаток до дедлайна (1000 - 500).
         assert_eq!(rt.parks(), alloc::vec![Some(500)]);
         assert_eq!(ctx.outcome.raw(), OutcomeSlot::TIMEDOUT);
     }
@@ -1180,8 +1177,8 @@ mod tests {
         assert_eq!(ctx.outcome.raw(), OutcomeSlot::TIMEDOUT);
     }
 
-    /// Бессрочный приём тайм-аута не знает: пробуждение, заставшее waiter в очереди,
-    /// возвращает поток в ожидание.
+    /// Пробуждение, заставшее waiter бессрочного приёма в очереди, возвращает поток в
+    /// ожидание.
     #[test]
     fn resolve_recv_without_deadline_waits_out_a_wake_without_resolution() {
         let rt = DeadlineRuntime::arc(0);
@@ -1247,7 +1244,7 @@ mod tests {
             CallAction::Park { .. }
         ));
 
-        // Разрешение приходит следующей парковкой: сервер забирает запрос и отвечает.
+        // Разрешение приходит следующей парковкой. Сервер забирает запрос и отвечает.
         let (server, server_rt) = (ep.clone(), dyn_rt.clone());
         rt.set_first_park_hook(Box::new(move || {
             let RecvAction::Done { reply: Some(reply) } =
@@ -1278,7 +1275,7 @@ mod tests {
         let result = resolve_send_recv(&ep, &dyn_rt, &waker, &outcome, Some(1000));
 
         assert_eq!(result, Err(IpcError::Timeout));
-        // Единственная перепарковка - ровно на остаток до дедлайна (1000 - 500).
+        // Единственная перепарковка - на остаток до дедлайна (1000 - 500).
         assert_eq!(rt.parks(), alloc::vec![Some(500)]);
         assert!(ep.queue_is_empty());
     }
@@ -1345,8 +1342,8 @@ mod tests {
             panic!("recv must park");
         };
 
-        // Бессрочная парковка дедлайна не имеет: получателя обязано разбудить
-        // само обнуление множества.
+        // Бессрочная парковка не имеет дедлайна, поэтому само обнуление множества обязано разбудить
+        // получателя.
         drop(receiver);
 
         assert_eq!(outcome.get(), Some(RendezvousOutcome::PeerGone));
@@ -1360,7 +1357,7 @@ mod tests {
         let root = root_capability(&ep);
         let client = badged_capability(&root, BADGE_A);
 
-        // Получателя в момент ухода нет - событие ждёт очередного recv.
+        // В момент ухода нет получателя - событие ждёт очередного recv.
         drop(client);
 
         let picked = ep.recv(&transport(BASE_B), &rt, None);
@@ -1446,7 +1443,7 @@ mod tests {
             panic!("send must park");
         };
 
-        // Кадр снесённой сессии серверу не достаётся.
+        // Кадр снесённой сессии не достаётся серверу.
         drop(client);
 
         assert_eq!(sender.get(), Some(RendezvousOutcome::PeerGone));
@@ -1537,7 +1534,7 @@ mod tests {
         let ep = Port::new();
         let root = root_capability(&ep);
 
-        // Записи с держателями потолком не ограничены.
+        // Записи с держателями не ограничены потолком.
         let live: Vec<Capability> = (1..=EXTRA_BADGE)
             .map(|badge| badged_capability(&root, badge))
             .collect();
@@ -1630,8 +1627,8 @@ mod tests {
             .insert(moved.into_iter().next().expect("single capability"))
             .expect("insert into recipient");
 
-        // Учёт снимает отзыв: производная капа жива у получателя, но её
-        // держатель уже снят каскадом от закрытого корня.
+        // Отзыв снимает учёт. Производная капа жива у получателя, но её держатель уже снят каскадом
+        // от закрытого корня.
         grantor
             .remove(root)
             .expect("remove the root capability")
@@ -1664,7 +1661,7 @@ mod tests {
         let access = table.get_port(id, Rights::READ).expect("port is readable");
         assert!(access.hold.is_some());
 
-        // Пока удержание живо, закрытие последней capability множества получателей не обнуляет.
+        // Пока удержание живо, закрытие последней capability не обнуляет множества получателей.
         table
             .remove(id)
             .expect("remove the receiver capability")
@@ -1735,7 +1732,7 @@ mod tests {
         let ep = Port::new();
         let receiver = receiver_capability(&ep);
 
-        // Отзыв снял учёт этой capability, и удержание его не оживляет.
+        // Отзыв снял учёт этой capability, и удержание не оживляет его.
         revoke_subtree(receiver.node());
 
         assert!(receiver.hold_for_operation().is_none());
@@ -1783,7 +1780,7 @@ mod tests {
 
         let sent = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, hold);
 
-        // Сервер видит кадр, а событие об уходе - следующим.
+        // Сервер получает кадр, а событие об уходе - следующим.
         assert!(matches!(sent, SendAction::Done));
         assert_eq!(server.get(), Some(RendezvousOutcome::Delivered));
         assert!(
@@ -1801,7 +1798,7 @@ mod tests {
         let hold = client.hold_for_operation();
         drop(client);
 
-        // Получателя нет: кадр встаёт в очередь, и уход значка снимает его оттуда.
+        // Нет получателя, поэтому кадр встаёт в очередь, и уход значка снимает его оттуда.
         let SendAction::Park {
             outcome: sender, ..
         } = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, hold)
@@ -1810,7 +1807,7 @@ mod tests {
         };
         assert_eq!(sender.get(), Some(RendezvousOutcome::PeerGone));
 
-        // Серверу достаётся событие об уходе, кадра снесённой сессии за ним нет.
+        // Событие об уходе достаётся серверу, за ним нет кадра снесённой сессии.
         assert!(
             matches!(ep.recv(&transport(BASE_B), &rt, None), RecvAction::SenderGone { badge } if badge == BADGE_A)
         );
