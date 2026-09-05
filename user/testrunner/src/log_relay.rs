@@ -134,9 +134,8 @@ impl LogSink for RecordingSink {
         let kernel = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
         let forwarded = kernel.log_str(source, message);
         // Двусторонний вызов ядра перезаписывает значок в IPC-буфере потока.
-        if let Ok(Ok(cap)) = kernel.acquire_userland_image() {
-            drop(OwnedHandle::adopt(cap));
-        }
+        // Выданный образ закрывает ответ: значок буфера здесь важнее самой capability.
+        let _ = kernel.acquire_userland_image();
         RECORDED.lock().push(Record {
             source: source.to_string(),
             message: message.to_string(),
@@ -296,11 +295,12 @@ fn exhaust_handle_table() -> (Port, Vec<OwnedHandle>) {
 
 fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
     let kernel = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let cap = kernel
+    let mut response = kernel
         .acquire_userland_image()
-        .expect("acquire_userland_image call")
-        .expect("image vend");
-    let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
+        .expect("acquire_userland_image call");
+    let capability = response.value.expect("image vend");
+    let cap = response.claim(capability).expect("capability owner");
+    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode userland image");
     let program = image

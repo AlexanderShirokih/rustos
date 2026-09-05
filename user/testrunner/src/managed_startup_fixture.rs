@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use kernel_objects::{OwnedHandle, Signal};
+use kernel_objects::Signal;
 use runtime::{receive_startup, thread_exit};
 use syscall::Handle;
 
@@ -34,16 +34,19 @@ impl managed_fixture::Service for Option<ManagedFixtureArgs> {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(startup: Handle) -> ! {
     let received = receive_startup(startup, managed_fixture::dispatch);
-    let Ok(Some(ManagedFixtureArgs {
+    let Ok(Some(mut frame)) = received else {
+        thread_exit(u64::from(u32::MAX));
+    };
+    let ManagedFixtureArgs {
         authority,
         exit_code,
         keep_running,
-    })) = received
-    else {
+    } = frame.value;
+
+    let Some(authority) = frame.claim(authority) else {
         thread_exit(u64::from(u32::MAX));
     };
-
-    let authority = Signal::from_handle(OwnedHandle::adopt(authority));
+    let authority = Signal::from_handle(authority.into());
     if authority.notify_all().is_err() {
         thread_exit(u64::from(u32::MAX - 1));
     }

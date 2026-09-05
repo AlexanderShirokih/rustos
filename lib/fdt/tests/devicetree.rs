@@ -275,8 +275,8 @@ fn reg_single_entry() {
     let list = reg.try_as_reg_list::<8>(cells).unwrap();
 
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].offset, 0x00);
-    assert_eq!(list[0].size, 0x4000_0000);
+    assert_eq!(list.get(0).unwrap().offset, 0x00);
+    assert_eq!(list.get(0).unwrap().size, 0x4000_0000);
 }
 
 #[test]
@@ -326,8 +326,8 @@ fn nested_children() {
     let reg = children[0].prop("reg").unwrap();
     let list = reg.try_as_reg_list::<4>(cells).unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].offset, 0x1000_0000);
-    assert_eq!(list[0].size, 0x1000);
+    assert_eq!(list.get(0).unwrap().offset, 0x1000_0000);
+    assert_eq!(list.get(0).unwrap().size, 0x1000);
 }
 
 #[test]
@@ -358,11 +358,11 @@ fn reg_two_banks_stride4() {
     let list = reg.try_as_reg_list::<8>(cells).unwrap();
     assert_eq!(list.len(), 2);
 
-    assert_eq!(list[0].offset, 0x8000_0000);
-    assert_eq!(list[0].size, 0x8000_0000);
+    assert_eq!(list.get(0).unwrap().offset, 0x8000_0000);
+    assert_eq!(list.get(0).unwrap().size, 0x8000_0000);
 
-    assert_eq!(list[1].offset, 0x1_0000_0000);
-    assert_eq!(list[1].size, 0x8000_0000);
+    assert_eq!(list.get(1).unwrap().offset, 0x1_0000_0000);
+    assert_eq!(list.get(1).unwrap().size, 0x8000_0000);
 }
 
 #[test]
@@ -380,8 +380,8 @@ fn reg_list_n_limits_result() {
 
     let limited = reg.try_as_reg_list::<1>(cells).unwrap();
     assert_eq!(limited.len(), 1);
-    assert_eq!(limited[0].offset, full[0].offset);
-    assert_eq!(limited[0].size, full[0].size);
+    assert_eq!(limited.get(0).unwrap().offset, full.get(0).unwrap().offset);
+    assert_eq!(limited.get(0).unwrap().size, full.get(0).unwrap().size);
 }
 
 fn build_dtb_with_reservations(reservations: &[(u64, u64)]) -> Vec<u8> {

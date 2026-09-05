@@ -8,10 +8,10 @@ use std::process;
 use calculator_demo::calculator;
 use component_abi::supervisor_gone;
 use component_client::component_manifest;
-use filesystem_abi::{AccessMode, OpenFlags};
+use filesystem_abi::{AccessMode, OpenFlags, Path};
 use filesystem_client::FileSystem;
 use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::{OwnedHandle, PortTransport};
+use kernel_objects::{OwnedHandle, PortTransport, ReceivedFrame};
 use rtc_abi::rtc;
 use syscall::Timeout;
 
@@ -21,7 +21,10 @@ const TURN: Timeout = Timeout::from_secs(1);
 
 const MULTIPLIER: u64 = 7;
 
-const BANNER_RECORD: &str = "/banner";
+const BANNER_RECORD: Path<'static> = match Path::new("/banner") {
+    Ok(record) => record,
+    Err(_) => panic!("the banner path keeps the form of the contract"),
+};
 const BANNER_MAX: usize = 64;
 
 const NO_STARTUP_EXIT_CODE: i32 = 1;
@@ -75,7 +78,7 @@ fn announce(area: OwnedHandle) {
 }
 
 fn banner(area: OwnedHandle, bytes: &mut [u8; BANNER_MAX]) -> Option<&str> {
-    let mut area = FileSystem::windowed_session(area).with_wait(CALL_TIMEOUT);
+    let mut area = FileSystem::windowed(area).with_wait(CALL_TIMEOUT);
     let mut record = area
         .open(BANNER_RECORD, AccessMode::Read, OpenFlags::NONE)
         .ok()?;
@@ -100,7 +103,10 @@ fn run(
             println!("clock gone");
             return CLOCK_LOST_EXIT_CODE;
         };
-        println!("{step} * {MULTIPLIER} = {product}, rtc {now}s");
+        println!(
+            "{step} * {MULTIPLIER} = {}, rtc {}s",
+            product.value, now.value
+        );
         if matches!(turn(control), Supervisor::Gone) {
             println!("supervisor gone");
             return SUPERVISOR_LOST_EXIT_CODE;
@@ -113,10 +119,10 @@ fn turn(control: &PortTransport) -> Supervisor {
     // Срок приёма на control-порту задаёт такт цикла, а уход значка supervisor
     // виден отказом того же приёма.
     match control.wait_readable(TURN) {
-        // Протокола на control-порту нет: пришедший кадр уходит без ответа, а
-        // закрытие reply-объекта будит вызывателя.
+        // Control-порт протокола не обслуживает, и пришедший кадр уходит без ответа.
+        // Владеющий кадр закрывает его ресурсы и будит вызывателя.
         Ok(()) => {
-            control.cancel_reply();
+            drop(ReceivedFrame::take(control));
             Supervisor::Alive
         }
         // Покадровое исчерпание такт не рвёт, как и уход чужого значка.

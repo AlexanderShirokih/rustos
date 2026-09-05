@@ -1,10 +1,10 @@
-//! Открытый узел файловой системы: его дескриптор, позиция и операции над содержимым.
+//! Открытый узел файловой системы: его сессия, дескриптор, позиция и операции над
+//! содержимым.
 
 use filesystem_abi::{
-    APPEND_OFFSET, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, Opened,
-    Written,
+    APPEND_OFFSET, FileSystemError, NodeDescriptor, NodeInfo, NodeKind, Opened, Written,
 };
-use ipc::wire::Cap;
+use ipc::wire::IpcError;
 
 use crate::{
     environment::{Environment, SharedRegion},
@@ -13,17 +13,17 @@ use crate::{
     session::Session,
 };
 
-/// Узел, открытый в сессии. Дескриптор закрывается вместе с объектом.
-pub struct OpenNode<'a, E: Environment> {
-    session: &'a Session<E>,
+/// Узел, открытый в собственной сессии. Дескриптор и сессия закрываются вместе с объектом.
+pub struct OpenNode<E: Environment> {
+    session: Session<E>,
     descriptor: NodeDescriptor,
     kind: NodeKind,
     size: u64,
     position: u64,
 }
 
-impl<'a, E: Environment> OpenNode<'a, E> {
-    pub(crate) fn new(session: &'a Session<E>, opened: Opened) -> Self {
+impl<E: Environment> OpenNode<E> {
+    pub(crate) fn new(session: Session<E>, opened: Opened) -> Self {
         Self {
             session,
             descriptor: opened.fd,
@@ -62,7 +62,8 @@ impl<'a, E: Environment> OpenNode<'a, E> {
             let count = self
                 .session
                 .client()
-                .read(self.descriptor, self.position, requested)??;
+                .read(self.descriptor, self.position, requested)?
+                .value?;
             let count = usize::try_from(count).unwrap_or(0).min(chunk.len());
             if count == 0 {
                 break;
@@ -84,16 +85,17 @@ impl<'a, E: Environment> OpenNode<'a, E> {
     }
 
     /// Пишет в узел с текущей позиции и продвигает её на число записанных байт. Записанного
-    /// бывает меньше, чем несёт `src`.
+    /// бывает меньше, чем содержит `src`.
     pub fn write(&mut self, src: &[u8]) -> Result<usize> {
         let mut done = 0;
         for chunk in src.chunks(self.session.capacity().max(1)) {
             self.session.region().write_at(0, chunk)?;
             let requested = self.session.wire_len(chunk.len());
-            let written =
-                self.session
-                    .client()
-                    .write(self.descriptor, self.position, requested)??;
+            let written = self
+                .session
+                .client()
+                .write(self.descriptor, self.position, requested)?
+                .value?;
             let count = usize::try_from(written.count).unwrap_or(0).min(chunk.len());
             if count == 0 {
                 break;
@@ -109,46 +111,50 @@ impl<'a, E: Environment> OpenNode<'a, E> {
         Ok(done)
     }
 
-    /// Дозаписывает байты в конец узла независимо от текущей позиции. Длина запроса
-    /// ограничена буфером данных сессии.
+    /// Дозаписывает байты в конец узла независимо от текущей позиции одной файловой
+    /// операцией. Срез длиннее буфера данных сессии дозаписывается помещающимся префиксом.
+    /// Исход содержит длину этого префикса, а остаток дозаписывает следующий вызов.
     pub fn append(&self, src: &[u8]) -> Result<Written> {
-        if src.len() > self.session.capacity() {
-            return Err(FileSystemError::BufferTooSmall.into());
-        }
-        self.session.region().write_at(0, src)?;
+        let head = src
+            .get(..src.len().min(self.session.capacity()))
+            .ok_or(FileSystemError::BufferTooSmall)?;
+        self.session.region().write_at(0, head)?;
 
-        let len = u32::try_from(src.len()).unwrap_or(u32::MAX);
+        let len = self.session.wire_len(head.len());
         Ok(self
             .session
             .client()
-            .write(self.descriptor, APPEND_OFFSET, len)??)
+            .write(self.descriptor, APPEND_OFFSET, len)?
+            .value?)
     }
 
     /// Метаданные узла.
     pub fn metadata(&self) -> Result<NodeInfo> {
-        Ok(self.session.client().stat(self.descriptor)??)
+        Ok(self.session.client().stat(self.descriptor)?.value?)
     }
 
     /// Capability региона, на котором лежит содержимое узла.
-    pub fn backing_memory(&self) -> Result<Cap> {
-        Ok(self.session.client().backing_memory(self.descriptor)??)
+    pub fn backing_memory(&self) -> Result<E::Handle> {
+        let mut response = self.session.client().backing_memory(self.descriptor)?;
+        let capability = response.value?;
+        Ok(response.claim(capability).ok_or(IpcError::InvalidValue)?)
     }
 
     /// Обход каталога с начала перечисления.
-    pub fn entries(self) -> Result<Listing<'a, E>> {
+    pub fn entries(self) -> Result<Listing<E>> {
         Listing::new(self)
     }
 
-    pub(crate) fn session(&self) -> &'a Session<E> {
-        self.session
+    pub(crate) fn session(&self) -> &Session<E> {
+        &self.session
     }
 
-    pub(crate) fn list(&self, from: DirCursor) -> Result<Listed> {
-        Ok(self.session.client().list(self.descriptor, from)??)
+    pub(crate) fn descriptor(&self) -> NodeDescriptor {
+        self.descriptor
     }
 }
 
-impl<E: Environment> Drop for OpenNode<'_, E> {
+impl<E: Environment> Drop for OpenNode<E> {
     fn drop(&mut self) {
         let _ = self.session.client().close(self.descriptor);
     }

@@ -15,7 +15,6 @@ doctest = false
 component-abi = { workspace = true }
 ipc = { workspace = true }
 kernel-objects = { workspace = true }
-syscall = { workspace = true }
 
 [lints]
 workspace = true

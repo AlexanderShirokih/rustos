@@ -106,7 +106,10 @@ fn call_cap_dropped_on_peer_closed() {
     let client = cap_proto::Client::new(client_end);
     let (handle, fate) = fake(5);
 
-    assert_eq!(client.exchange(handle), Err(IpcError::PeerClosed));
+    assert_eq!(
+        client.exchange(handle).map(|response| response.value),
+        Err(IpcError::PeerClosed)
+    );
     assert_eq!(fate.get(), Fate::Dropped);
 }
 
@@ -124,9 +127,9 @@ fn call_cap_relinquished_on_ok() {
     let client = cap_proto::Client::new(client_end);
     let (handle, fate) = fake(42);
 
-    let reply = client.exchange(handle).expect("exchange ok");
+    let response = client.exchange(handle).expect("exchange ok");
 
-    assert_eq!(reply, 42);
+    assert_eq!(response.value, 42);
     assert_eq!(fate.get(), Fate::Relinquished);
     server.join().expect("server join");
 }

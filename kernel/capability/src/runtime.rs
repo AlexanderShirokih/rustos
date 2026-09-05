@@ -112,6 +112,8 @@ pub fn install_runtime(rt: Arc<dyn KernelRuntime>) {
 /// Доступ к глобальному runtime. Паникует, если он ещё не установлен.
 #[allow(clippy::expect_used)]
 pub fn runtime() -> &'static Arc<dyn KernelRuntime> {
+    // Runtime ставится до запуска планировщика, а вызывающие исполняются на его
+    // потоках, и отсутствие runtime здесь означает сломанный порядок загрузки.
     RUNTIME
         .get()
         .expect("KernelRuntime not installed; install_runtime() must be called in kmain")

@@ -95,7 +95,7 @@ fn raise(
     };
     // Композиция ступени 0 через транзакцию не достаётся: её компоненты вызыватель не
     // определял.
-    match system.session(stage_zero) {
+    match system.session(stage_zero).map(|response| response.value) {
         Ok(Err(ExtendError::NotFound)) => {}
         Ok(Ok(_)) => return LEAKED_EXIT_CODE,
         Ok(Err(error)) => {
@@ -109,13 +109,18 @@ fn raise(
     }
 
     let session = match system.session(name) {
-        Ok(Ok(session)) => OwnedHandle::adopt(session),
-        Ok(Err(error)) => {
-            log_fmt(format_args!(
-                "session of the defined component refused: {error:?}"
-            ));
-            return REFUSED_EXIT_CODE;
-        }
+        Ok(mut response) => match response.value {
+            Ok(session) => match response.claim(session) {
+                Some(session) => OwnedHandle::from(session),
+                None => return REFUSED_EXIT_CODE,
+            },
+            Err(error) => {
+                log_fmt(format_args!(
+                    "session of the defined component refused: {error:?}"
+                ));
+                return REFUSED_EXIT_CODE;
+            }
+        },
         Err(error) => {
             log_fmt(format_args!("supervisor port unreachable: {error:?}"));
             return UNRESPONSIVE_EXIT_CODE;
@@ -129,9 +134,13 @@ fn commit(
     record: Bytes<'_, PLAN_RECORD_MAX>,
     program: MemoryRegion,
 ) -> Option<u64> {
-    let opened = system.begin();
-    let defined = opened.and_then(|_| system.define(record, program.into_handle()));
-    let committed = defined.and_then(|_| system.commit());
+    let opened = system.begin().map(|response| response.value);
+    let defined = opened.and_then(|_| {
+        system
+            .define(record, program.into_handle())
+            .map(|response| response.value)
+    });
+    let committed = defined.and_then(|_| system.commit().map(|response| response.value));
     match committed {
         Ok(Ok(_)) => None,
         Ok(Err(error)) => {
@@ -151,12 +160,14 @@ fn program_region(files: &file_system::Client<PortTransport>) -> Option<MemoryRe
     let opened = files
         .open(path, AccessMode::Read, OpenFlags::NONE)
         .ok()?
+        .value
         .ok()?;
     if opened.kind != NodeKind::File {
         return None;
     }
-    let region = files.backing_memory(opened.fd).ok()?.ok()?;
-    Some(MemoryRegion::adopt(region))
+    let mut response = files.backing_memory(opened.fd).ok()?;
+    let region = response.value.ok()?;
+    Some(MemoryRegion::from_handle(response.claim(region)?.into()))
 }
 
 fn defined_record() -> Option<Vec<u8>> {
@@ -178,7 +189,10 @@ fn serves(raised: &file_system::Client<PortTransport>) -> u64 {
     let Some(path) = Str::new(CREATED_FILE) else {
         return REFUSED_EXIT_CODE;
     };
-    match raised.open(path, AccessMode::ReadWrite, OpenFlags::CREATE) {
+    match raised
+        .open(path, AccessMode::ReadWrite, OpenFlags::CREATE)
+        .map(|response| response.value)
+    {
         Ok(Ok(opened)) if opened.kind == NodeKind::File => OK_EXIT_CODE,
         Ok(Ok(_)) => REFUSED_EXIT_CODE,
         Ok(Err(error)) => {

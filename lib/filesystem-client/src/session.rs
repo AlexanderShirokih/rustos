@@ -1,7 +1,7 @@
 //! Сессия файловой системы. Клиент контракта и отображённый регион её данных.
 
 use filesystem_abi::file_system;
-use ipc::{Timeout, wire::Cap};
+use ipc::{Timeout, wire::IpcError};
 
 use crate::{
     environment::{Environment, SharedRegion},
@@ -17,13 +17,16 @@ pub(crate) struct Session<E: Environment> {
 }
 
 impl<E: Environment> Session<E> {
-    pub(crate) fn establish(environment: &E, session: Cap, wait: Timeout) -> Result<Self> {
+    pub(crate) fn establish(environment: &E, session: E::Handle, wait: Timeout) -> Result<Self> {
         Self::over(environment, environment.connect(session)?, wait)
     }
 
     pub(crate) fn over(environment: &E, transport: E::Transport, wait: Timeout) -> Result<Self> {
         let client = file_system::Client::new(transport).with_wait(wait);
-        let region = environment.map(client.acquire_buffer(BUFFER_SIZE)??)?;
+        let mut response = client.acquire_buffer(BUFFER_SIZE)?;
+        let capability = response.value?;
+        let received = response.claim(capability).ok_or(IpcError::InvalidValue)?;
+        let region = environment.map(received)?;
         let capacity = u32::try_from(region.size())
             .unwrap_or(u32::MAX)
             .min(BUFFER_SIZE);

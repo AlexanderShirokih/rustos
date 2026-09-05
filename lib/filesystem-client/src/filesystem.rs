@@ -6,16 +6,22 @@ use alloc::{
 };
 
 use filesystem_abi::{
-    AccessMode, FileSystemError, NodeInfo, OpenFlags, Opened, Path, SEPARATOR, namespace,
+    AccessMode, FileSystemError, NodeDescriptor, NodeInfo, NodeKind, OpenFlags, Opened, Path,
+    SEPARATOR, namespace,
 };
 use ipc::{
     Timeout,
-    wire::{Cap, Str},
+    wire::{IpcError, Str},
 };
 
 use crate::{
-    cache::SessionCache, environment::Environment, error::Result, listing::Listing, node::OpenNode,
-    route, session::Session,
+    cache::SessionCache,
+    environment::Environment,
+    error::Result,
+    listing::{Listing, Walk},
+    node::OpenNode,
+    route,
+    session::Session,
 };
 
 const SESSIONS: usize = 4;
@@ -44,13 +50,14 @@ enum Window<E: Environment> {
 
 struct Pending {
     path: String,
+    kind: NodeKind,
     emptied: bool,
 }
 
 impl<E: Environment> FileSystem<E> {
     /// Фасад поверх маршрутизатора имён. Маршрутизатор разбирает путь, фасад хранит
     /// сессии разобранных каталогов.
-    pub fn routed(environment: E, namespace: E::Transport) -> Self {
+    pub fn routed_with_environment(environment: E, namespace: E::Transport) -> Self {
         Self {
             environment,
             sessions: Sessions::Routed {
@@ -61,8 +68,8 @@ impl<E: Environment> FileSystem<E> {
         }
     }
 
-    /// Фасад поверх выданной сессии: путь отсчитывается от её корня.
-    pub fn windowed(environment: E, session: E::Transport) -> Self {
+    /// Фасад поверх выданной сессии. Путь отсчитывается от корня этой сессии.
+    pub fn windowed_with_environment(environment: E, session: E::Transport) -> Self {
         Self {
             environment,
             sessions: Sessions::Window(Some(Window::Pending(session))),
@@ -83,81 +90,99 @@ impl<E: Environment> FileSystem<E> {
         self
     }
 
-    /// Открывает узел по пути.
+    /// Открывает узел по пути. Узел получает отдельную сессию.
     pub fn open(
         &mut self,
-        path: &str,
+        path: Path<'_>,
         mode: AccessMode,
         flags: OpenFlags,
-    ) -> Result<OpenNode<'_, E>> {
-        let path = Path::new(path)?;
-        let opened = self.at_path(path, |session, root| {
-            Ok(session
-                .client()
-                .open(route::within(path, root)?, mode, flags)??)
-        })?;
-        Ok(OpenNode::new(self.session(), opened))
-    }
-
-    /// Создаёт каталог по пути.
-    pub fn create_directory(&mut self, path: &str) -> Result<()> {
-        self.open(
-            path,
-            AccessMode::Read,
-            OpenFlags::CREATE | OpenFlags::DIRECTORY,
-        )?;
-        Ok(())
-    }
-
-    /// Метаданные узла по пути.
-    pub fn metadata(&mut self, path: &str) -> Result<NodeInfo> {
-        let node = self.open(path, AccessMode::Read, OpenFlags::NONE)?;
-        Ok(NodeInfo {
-            kind: node.kind(),
-            size: node.size(),
+    ) -> Result<OpenNode<E>> {
+        let wait = self.wait;
+        self.at_path(path, |environment, session, root| {
+            open_owned(
+                environment,
+                session,
+                route::within(path, root)?,
+                mode,
+                flags,
+                wait,
+            )
         })
     }
 
-    /// Обход каталога по пути.
-    pub fn read_directory(&mut self, path: &str) -> Result<Listing<'_, E>> {
+    /// Создаёт каталог по пути.
+    pub fn create_directory(&mut self, path: Path<'_>) -> Result<()> {
+        self.at_path(path, |_, session, root| {
+            let opened = open_in(
+                session,
+                route::within(path, root)?,
+                OpenFlags::CREATE | OpenFlags::DIRECTORY,
+            )?;
+            close_in(session, opened.fd);
+            Ok(())
+        })
+    }
+
+    /// Метаданные узла по пути.
+    pub fn metadata(&mut self, path: Path<'_>) -> Result<NodeInfo> {
+        self.at_path(path, |_, session, root| {
+            let opened = open_in(session, route::within(path, root)?, OpenFlags::NONE)?;
+            close_in(session, opened.fd);
+            Ok(NodeInfo {
+                kind: opened.kind,
+                size: opened.size,
+            })
+        })
+    }
+
+    /// Обход каталога по пути. Обход получает отдельную сессию.
+    pub fn read_directory(&mut self, path: Path<'_>) -> Result<Listing<E>> {
         self.open(path, AccessMode::Read, OpenFlags::DIRECTORY)?
             .entries()
     }
 
-    /// Снимает имя узла. Каталог снимается пустым.
-    pub fn remove(&mut self, path: &str) -> Result<()> {
-        let path = Path::new(path)?;
-        self.at_path(path, |session, root| {
-            Ok(session.client().unlink(route::within(path, root)?)??)
-        })?;
-        Ok(())
+    /// Снимает имя файла. Каталог по этому пути возвращает `IsADirectory`.
+    pub fn remove_file(&mut self, path: Path<'_>) -> Result<()> {
+        self.remove_node(path, NodeKind::File)
     }
 
-    /// Удаляет узел вместе с поддеревом внутри его монтирования.
-    pub fn remove_tree(&mut self, path: &str) -> Result<()> {
-        let path = Path::new(path)?;
-        self.at_path(path, |session, root| {
+    /// Снимает имя пустого каталога. Файл по этому пути возвращает `NotADirectory`.
+    pub fn remove_directory(&mut self, path: Path<'_>) -> Result<()> {
+        self.remove_node(path, NodeKind::Directory)
+    }
+
+    /// Удаляет каталог вместе с поддеревом внутри его монтирования. Файл по этому пути
+    /// возвращает `NotADirectory`.
+    pub fn remove_tree(&mut self, path: Path<'_>) -> Result<()> {
+        self.at_path(path, |_, session, root| {
             remove_tree_in(session, route::within(path, root)?.as_str())
-        })?;
-        Ok(())
+        })
     }
 
     /// Переименовывает узел в пределах одного монтирования.
-    pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
-        let from = Path::new(from)?;
-        let to = Path::new(to)?;
-        self.at_root(route::common_directory(from, to)?, &|session, root| {
+    pub fn rename(&mut self, from: Path<'_>, to: Path<'_>) -> Result<()> {
+        self.at_root(route::common_directory(from, to)?, &|_, session, root| {
             Ok(session
                 .client()
-                .rename(route::within(from, root)?, route::within(to, root)?)??)
+                .rename(
+                    route::wire(route::within(from, root)?)?,
+                    route::wire(route::within(to, root)?)?,
+                )?
+                .value?)
         })?;
         Ok(())
+    }
+
+    fn remove_node(&mut self, path: Path<'_>, expected: NodeKind) -> Result<()> {
+        self.at_path(path, |_, session, root| {
+            unlink(session, route::within(path, root)?, expected)
+        })
     }
 
     fn at_path<T>(
         &mut self,
         path: Path<'_>,
-        operation: impl Fn(&Session<E>, Path<'_>) -> Result<T>,
+        operation: impl Fn(&E, &Session<E>, Path<'_>) -> Result<T>,
     ) -> Result<T> {
         let outcome = self.at_root(route::directory_of(path), &operation);
         if path.is_root() || !self.asks_the_router() {
@@ -174,7 +199,7 @@ impl<E: Environment> FileSystem<E> {
     fn at_root<T>(
         &mut self,
         directory: Path<'_>,
-        operation: &impl Fn(&Session<E>, Path<'_>) -> Result<T>,
+        operation: &impl Fn(&E, &Session<E>, Path<'_>) -> Result<T>,
     ) -> Result<T> {
         let Self {
             environment,
@@ -185,12 +210,12 @@ impl<E: Environment> FileSystem<E> {
             Sessions::Window(window) => {
                 open_window(window, environment, *wait)?;
 
-                return operation(opened_window(window.as_ref())?, Path::ROOT);
+                return operation(environment, opened_window(window.as_ref())?, Path::ROOT);
             }
             Sessions::Routed { namespace, cache } => (namespace, cache),
         };
         if let Some(session) = cache.promote(directory) {
-            match operation(session, directory) {
+            match operation(environment, session, directory) {
                 Err(failure) if failure.peer_gone() || failure.name_missing() => {
                     cache.forget_head();
                 }
@@ -200,27 +225,13 @@ impl<E: Environment> FileSystem<E> {
         let resolved = resolve::<E>(namespace, directory)?;
         let session = Session::establish(environment, resolved, *wait)?;
 
-        let outcome = operation(&session, directory);
+        let outcome = operation(environment, &session, directory);
         cache.insert(directory, session);
         outcome
     }
 
     fn asks_the_router(&self) -> bool {
         matches!(self.sessions, Sessions::Routed { .. })
-    }
-
-    #[allow(clippy::expect_used)]
-    fn session(&self) -> &Session<E> {
-        // Операция начинается с открытия окна либо с укладки сессии в кэш, и к этому месту
-        // сессия существует по построению.
-        match &self.sessions {
-            Sessions::Window(window) => {
-                opened_window(window.as_ref()).expect("the operation opened the window session")
-            }
-            Sessions::Routed { cache, .. } => {
-                cache.head().expect("the operation left its session cached")
-            }
-        }
     }
 }
 
@@ -250,9 +261,32 @@ fn opened_window<E: Environment>(window: Option<&Window<E>>) -> Result<&Session<
 fn resolve<E: Environment>(
     namespace: &namespace::Client<E::Transport>,
     directory: Path<'_>,
-) -> Result<Cap> {
+) -> Result<E::Handle> {
     let path = Str::new(directory.as_str()).ok_or(FileSystemError::InvalidPath)?;
-    Ok(namespace.resolve(path)??)
+    let mut response = namespace.resolve(path)?;
+    let capability = response.value?;
+    Ok(response.claim(capability).ok_or(IpcError::InvalidValue)?)
+}
+
+fn open_owned<E: Environment>(
+    environment: &E,
+    session: &Session<E>,
+    within: Path<'_>,
+    mode: AccessMode,
+    flags: OpenFlags,
+    wait: Timeout,
+) -> Result<OpenNode<E>> {
+    let (directory, leaf) = route::split_scope(within)?;
+    let mut response = session.client().open_root(route::wire(directory)?)?;
+    let capability = response.value?;
+    let scoped = response.claim(capability).ok_or(IpcError::InvalidValue)?;
+
+    let scoped = Session::establish(environment, scoped, wait)?;
+    let opened = scoped
+        .client()
+        .open(route::wire(leaf)?, mode, flags)?
+        .value?;
+    Ok(OpenNode::new(scoped, opened))
 }
 
 fn remove_tree_in<E: Environment>(session: &Session<E>, root: &str) -> Result<()> {
@@ -264,50 +298,72 @@ fn remove_tree_in<E: Environment>(session: &Session<E>, root: &str) -> Result<()
     let mut pending = Vec::new();
     pending.push(Pending {
         path: root.to_string(),
+        kind: NodeKind::Directory,
         emptied: false,
     });
     while let Some(item) = pending.pop() {
         let path = Path::new(&item.path)?;
-        if item.emptied {
-            unlink(session, path)?;
+        if item.emptied || !item.kind.is_directory() {
+            unlink(session, path, item.kind)?;
             continue;
         }
 
-        let opened = open(session, path, OpenFlags::NONE)?;
-        if !opened.kind.is_directory() {
-            drop(OpenNode::new(session, opened));
-            unlink(session, path)?;
-            continue;
-        }
-
+        // Флаг каталога требует его вида у корня обхода, а у дочернего узла - совпадения с
+        // видом, который вернул обход.
+        let opened = open_in(session, path, OpenFlags::DIRECTORY)?;
         // Позиция перечисления переживает удаление только до первого снятого имени.
         let mut children = Vec::new();
-        let mut listing = OpenNode::new(session, opened).entries()?;
-        while let Some(entry) = listing.next_entry()? {
-            children.push(child(path, entry.name)?);
-        }
-        drop(listing);
+        let listed = children_of(session, opened.fd, path, &mut children);
+        close_in(session, opened.fd);
+        listed?;
 
         pending.push(Pending {
             path: item.path,
+            kind: NodeKind::Directory,
             emptied: true,
         });
-        pending.extend(children.into_iter().map(|path| Pending {
+        pending.extend(children.into_iter().map(|(path, kind)| Pending {
             path,
+            kind,
             emptied: false,
         }));
     }
     Ok(())
 }
 
-fn open<E: Environment>(session: &Session<E>, path: Path<'_>, flags: OpenFlags) -> Result<Opened> {
-    let name = Str::new(path.as_str()).ok_or(FileSystemError::InvalidPath)?;
-    Ok(session.client().open(name, AccessMode::Read, flags)??)
+fn children_of<E: Environment>(
+    session: &Session<E>,
+    descriptor: NodeDescriptor,
+    directory: Path<'_>,
+    children: &mut Vec<(String, NodeKind)>,
+) -> Result<()> {
+    let mut walk = Walk::new(session.capacity())?;
+    while let Some(entry) = walk.next_entry(session, descriptor)? {
+        children.push((child(directory, entry.name)?, entry.kind));
+    }
+    Ok(())
 }
 
-fn unlink<E: Environment>(session: &Session<E>, path: Path<'_>) -> Result<()> {
-    let name = Str::new(path.as_str()).ok_or(FileSystemError::InvalidPath)?;
-    session.client().unlink(name)??;
+fn open_in<E: Environment>(
+    session: &Session<E>,
+    path: Path<'_>,
+    flags: OpenFlags,
+) -> Result<Opened> {
+    Ok(session
+        .client()
+        .open(route::wire(path)?, AccessMode::Read, flags)?
+        .value?)
+}
+
+fn close_in<E: Environment>(session: &Session<E>, descriptor: NodeDescriptor) {
+    let _ = session.client().close(descriptor);
+}
+
+fn unlink<E: Environment>(session: &Session<E>, path: Path<'_>, expected: NodeKind) -> Result<()> {
+    session
+        .client()
+        .unlink(route::wire(path)?, expected)?
+        .value?;
     Ok(())
 }
 

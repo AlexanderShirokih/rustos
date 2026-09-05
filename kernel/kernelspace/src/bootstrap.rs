@@ -9,7 +9,7 @@ use bootstrap_abi::{BootFdt, bootstrap};
 use capability::{
     Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, IrqControl,
     KernelIpcBuffer, MeteringGrant, Port, Reply, Resource, Rights, ThreadTransport,
-    default_rights_for, port_recv, port_send, runtime,
+    default_rights_for, interrupts_control, port_recv, port_send, runtime,
 };
 use collections::{LockCell, MutexCell};
 use drivers_common::services::interrupts::IrqLineSpan;
@@ -74,6 +74,8 @@ pub enum BootstrapSpawnError {
     ImageGeometry,
     /// Размер DTB не округляется до страницы в пределах адресного пространства.
     FdtGeometry,
+    /// Контроллер прерываний для IRQ-capability не установлен.
+    InterruptsUnavailable,
 }
 
 /// Разбирает `blob` и спавнит процесс. `image_phys` - физбаза `blob` в initrd,
@@ -114,7 +116,10 @@ pub fn spawn_process(
         1 << 20,
     );
 
-    let irq_control = IrqControl::new(irq_lines.first.raw(), irq_lines.last.raw());
+    let interrupts = interrupts_control()
+        .ok_or(BootstrapSpawnError::InterruptsUnavailable)?
+        .clone();
+    let irq_control = IrqControl::new(interrupts, irq_lines.first.raw(), irq_lines.last.raw());
 
     // Read-only Normal-регион поверх байт образа; размер округлён до страницы
     // для маппинга. blob непуст (decode прошёл), поэтому размер ненулевой.
@@ -332,6 +337,10 @@ impl KernelPortTransport {
 }
 
 impl Transport for KernelPortTransport {
+    type Resources = ();
+
+    fn take_resources(&self) {}
+
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), WireError> {
         let Some(reply) = self.pending_reply.with_lock(Option::take) else {
             warn!("bootstrap: write_message without a pending reply");

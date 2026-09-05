@@ -64,12 +64,24 @@ pub fn install_interrupts_control(control: Arc<dyn InterruptsControl>) {
     let _ = IRQ_CONTROL.call_once(|| control);
 }
 
-/// Доступ к глобальному контроллеру. Паникует, если он ещё не установлен.
-#[allow(clippy::expect_used)]
-pub fn interrupts_control() -> &'static Arc<dyn InterruptsControl> {
-    // Контроллер ставится один раз на раннем шаге `kmain`, до первого обращения, и его
-    // отсутствие здесь означает сломанный порядок загрузки.
-    IRQ_CONTROL
-        .get()
-        .expect("InterruptsControl not installed; install_interrupts_control() must run in kmain")
+/// Доступ к глобальному контроллеру. `None` до установки.
+pub fn interrupts_control() -> Option<&'static Arc<dyn InterruptsControl>> {
+    IRQ_CONTROL.get()
+}
+
+#[cfg(test)]
+pub(crate) struct StubInterruptsControl;
+
+#[cfg(test)]
+impl InterruptsControl for StubInterruptsControl {
+    fn bind_line(
+        &self,
+        _irq: u16,
+        _trigger: IrqTrigger,
+        _sink: Arc<dyn IrqSink>,
+    ) -> Result<IrqBindToken, IpcError> {
+        Ok(IrqBindToken::new(()))
+    }
+    fn mask(&self, _irq: u16) {}
+    fn unmask(&self, _irq: u16) {}
 }

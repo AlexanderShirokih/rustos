@@ -5,7 +5,7 @@
 
 use capability::{
     Capability, Port, PortAccess, Reply, Rights, ThreadTransport, install_handle, port_call,
-    port_recv, port_send, runtime,
+    port_recv, port_send, release_delivered, runtime,
 };
 use collections::LockCell;
 use memory::virtual_address::VirtualAddress;
@@ -93,7 +93,12 @@ pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
             let reply_id = context
                 .handle_table
                 .with_lock(|tbl| tbl.insert(h))
-                .map_err(|rejected| map_ipc_error(rejected.release()))?;
+                .map_err(|rejected| {
+                    // Capability рандеву уже перенесены в таблицу получателя, а приём без
+                    // reply завершается отказом: без отката набор остался бы без владельца.
+                    let _ = release_delivered(&transport);
+                    map_ipc_error(rejected.release())
+                })?;
             Ok(u64::from(reply_id.raw().get()))
         }
     }

@@ -88,8 +88,6 @@ animistic_verb|kernel/syscall/src/port.rs|sys_port_call|c81604be
 animistic_verb|kernel/syscall/src/process.rs|sys_resource_split|b8b92cc1
 animistic_verb|kernel/syscall/src/thread.rs|<file-root>|ba82d894
 animistic_verb|kernel/syscall/tests/process_load_image.rs|rejects_access_denied_when_region_mask_too_weak|c81604be
-animistic_verb|lib/collections/src/spsc_ring.rs|tests::make_ring|ba82d894
-animistic_verb|lib/collections/src/spsc_ring.rs|tests::race_producer_and_consumer_preserve_order_and_completeness|ba82d894
 animistic_verb|lib/component-abi/src/manifest.rs|COMPONENT_MANIFEST_SECTION|c81604be
 animistic_verb|lib/component-abi/src/manifest.rs|ComponentManifest<'a>::establishes_sessions|416f93a6
 animistic_verb|lib/component-abi/src/manifest.rs|SlotDeclaration::control|c81604be
@@ -104,13 +102,11 @@ animistic_verb|lib/filesystem-abi/src/protocol.rs|<file-root>|0b27a2d3
 animistic_verb|lib/filesystem-abi/src/protocol.rs|<file-root>|c81604be
 animistic_verb|lib/filesystem-client/src/filesystem.rs|remove_tree_in|b734f949
 animistic_verb|lib/filesystem-client/src/lib.rs|<file-root>|0be5455c
-animistic_verb|lib/filesystem-client/src/node.rs|OpenNode<'a, E>::write|c81604be
 animistic_verb|lib/filesystem-server/src/lib.rs|<file-root>|c81604be
-animistic_verb|lib/filesystem-server/src/lib.rs|serve_sessions|b734f949
 animistic_verb|lib/filesystem-server/src/lib.rs|serve_sessions|c81604be
-animistic_verb|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::acquire_buffer|b734f949
-animistic_verb|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::open|b734f949
-animistic_verb|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::write|0b27a2d3
+animistic_verb|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::acquire_buffer|b734f949
+animistic_verb|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::open|b734f949
+animistic_verb|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::write|0b27a2d3
 animistic_verb|lib/filesystem-server/src/store.rs|StoreTable::import|ba82d894
 animistic_verb|lib/filesystem/src/backend.rs|FileSystemBackend::retain|ba82d894
 animistic_verb|lib/filesystem/src/image.rs|ImageFileSystem::new|c81604be
@@ -141,7 +137,6 @@ animistic_verb|lib/log-abi/src/line.rs|LineAssembler<N>::fill|c81604be
 animistic_verb|lib/log-relay/src/kernel_sink.rs|KernelLogSink|ba82d894
 animistic_verb|lib/log-relay/src/relay.rs|LogRelay<S, N>::receive_loop|c81604be
 animistic_verb|lib/log-relay/src/relay.rs|SourceNames|b734f949
-animistic_verb|lib/log-relay/src/relay.rs|discard_staged_caps|c81604be
 animistic_verb|lib/log-relay/src/thread.rs|LogRelayThread::delegated_session|73c0214c
 animistic_verb|lib/managed-component/src/component.rs|ManagedComponent<R>::launch|ba82d894
 animistic_verb|lib/managed-component/src/component.rs|ManagedStartupError::TooManySlots|c81604be
@@ -186,7 +181,6 @@ animistic_verb|user/init/src/main.rs|graft_root|c81604be
 animistic_verb|user/init/src/main.rs|raise_stage_one|ef9955d6
 animistic_verb|user/init/src/main.rs|run|ba82d894
 animistic_verb|user/namespace-router/src/main.rs|<file-root>|ba82d894
-animistic_verb|user/namespace-router/src/main.rs|serve|b734f949
 animistic_verb|user/namespace-router/src/main.rs|serve|c81604be
 animistic_verb|user/rootkeeper/src/relay.rs|start|0be5455c
 animistic_verb|user/rootkeeper/src/system.rs|DeviceAuthority::first_match|c81604be
@@ -556,9 +550,6 @@ colon_justification|lib/filesystem-abi/src/path.rs|tests::rebase_rejects_a_path_
 colon_justification|lib/filesystem-abi/src/protocol.rs|<file-root>|952328ff
 colon_justification|lib/filesystem-abi/src/protocol.rs|<file-root>|a2547d6f
 colon_justification|lib/filesystem-abi/src/protocol.rs|<file-root>|be7d326f
-colon_justification|lib/filesystem-client/src/filesystem.rs|FileSystem<E>::windowed|885cf824
-colon_justification|lib/filesystem-client/src/system.rs|FileSystem<FileSystemEnvironment>::routed_namespace|e9d7eabd
-colon_justification|lib/filesystem-client/src/system.rs|FileSystem<FileSystemEnvironment>::windowed_session|7de3c004
 colon_justification|lib/filesystem-server/src/admin.rs|<Establishing<'_> as component_sessions::Service>::open_session|8785f6a1
 colon_justification|lib/filesystem-server/src/buffer.rs|DataBuffer::publish|358191ba
 colon_justification|lib/filesystem-server/src/buffer.rs|DataBuffer::snapshot|36a77f7a
@@ -567,13 +558,12 @@ colon_justification|lib/filesystem-server/src/lib.rs|<file-root>|c436980a
 colon_justification|lib/filesystem-server/src/lib.rs|<file-root>|d00cdc67
 colon_justification|lib/filesystem-server/src/lib.rs|serve_sessions|d7127dd7
 colon_justification|lib/filesystem-server/src/lib.rs|serve_sessions|e7437f12
-colon_justification|lib/filesystem-server/src/lib.rs|serve_sessions|ede45169
-colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::acquire_buffer|809af89d
-colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::list|54adbf22
-colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::open_root|8785f6a1
-colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::open|2f3a3a49
-colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::open|d386754e
-colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::write|01b1721a
+colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::acquire_buffer|809af89d
+colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::list|54adbf22
+colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::open_root|8785f6a1
+colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::open|2f3a3a49
+colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::open|d386754e
+colon_justification|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::write|01b1721a
 colon_justification|lib/filesystem-server/src/service.rs|FileSystemState::remove_session|0538709d
 colon_justification|lib/filesystem-server/src/service.rs|access_for|fb86217f
 colon_justification|lib/filesystem-server/src/service.rs|mint_session|dbca0d78
@@ -648,7 +638,6 @@ colon_justification|lib/log-abi/src/line.rs|LineAssembler|242f3bec
 colon_justification|lib/log-relay/src/relay.rs|<file-root>|d1f63de3
 colon_justification|lib/log-relay/src/relay.rs|LogRelay<S, N>::receive_loop|c41d12dd
 colon_justification|lib/log-relay/src/relay.rs|LogRelay<S, N>::receive_loop|f98ce5de
-colon_justification|lib/log-relay/src/relay.rs|LogRelay<S, N>::receive_loop|fd8c82a4
 colon_justification|lib/log-relay/src/relay.rs|SINK_FAILURE_LIMIT|0c51069b
 colon_justification|lib/log-relay/src/relay.rs|SourceNames|028bf200
 colon_justification|lib/log-relay/src/thread.rs|LogRelayThread|cfdf9359
@@ -681,8 +670,6 @@ colon_justification|lib/supervisor-abi/src/lib.rs|INSTANCE_NAME_MAX|3b8d6bbf
 colon_justification|lib/syscall-user/src/ipc_buffer.rs|<file-root>|2fdb2e58
 colon_justification|lib/syscall-user/src/port_transport.rs|<PortTransport as Transport>::write_message|7676b15f
 colon_justification|lib/syscall-user/src/port_transport.rs|<file-root>|ce736fcd
-colon_justification|lib/syscall-user/src/port_transport.rs|PortTransport::cancel_reply|e5c60c29
-colon_justification|lib/syscall-user/src/port_transport.rs|PortTransport::peer_badge|a685ec16
 colon_justification|lib/syscall-user/src/svc.rs|<file-root>|f820848b
 colon_justification|lib/syscall/src/error.rs|SyscallError::AlreadyBound|9ee7cfea
 colon_justification|lib/syscall/src/error.rs|SyscallError::SenderGone|e9530736
@@ -744,23 +731,18 @@ colon_justification|tools/userland-image/src/plan/tests.rs|plan_binds_a_director
 colon_justification|tools/userland-image/src/plan/tests.rs|plan_orders_an_importer_after_its_exporter|bccf9d0b
 colon_justification|tools/userland-image/src/plan/tests.rs|plan_rejects_a_directory_slot_from_an_instance_without_own_sessions|6e52e337
 colon_justification|tools/userland-image/src/plan/tests.rs|stage_one_binds_a_slot_to_an_exporter_of_stage_zero|b73fd758
-colon_justification|user/calculator-demo/src/calculator.rs|watch_supervisor|4a49fd63
 colon_justification|user/calculator-demo/src/main.rs|announce|6c589801
-colon_justification|user/calculator-demo/src/main.rs|turn|bbd0ba0f
 colon_justification|user/clock-std/src/main.rs|<file-root>|8b865ce9
 colon_justification|user/driver-pl031/src/main.rs|Pl031::arm|d45fa123
 colon_justification|user/driver-pl031/src/main.rs|serve|9661c496
 colon_justification|user/init/src/main.rs|<file-root>|1651e8d5
 colon_justification|user/init/src/main.rs|<file-root>|c7fa1865
 colon_justification|user/init/src/main.rs|Reading::list|bfa5c0ee
-colon_justification|user/init/src/main.rs|park|f4249c47
 colon_justification|user/init/src/main.rs|raise_stage_one|cab16225
 colon_justification|user/init/src/main.rs|run|b00697e5
 colon_justification|user/namespace-router/src/main.rs|<file-root>|fe3575f2
 colon_justification|user/namespace-router/src/main.rs|serve|9082f531
-colon_justification|user/namespace-router/src/main.rs|serve|ede45169
 colon_justification|user/rootkeeper/src/extension.rs|<file-root>|5562db16
-colon_justification|user/rootkeeper/src/extension.rs|serve|2bc26c0e
 colon_justification|user/rootkeeper/src/relay.rs|install_names|bddf1afa
 colon_justification|user/rootkeeper/src/relay.rs|shutdown|94f2b658
 colon_justification|user/rootkeeper/src/relay.rs|start|1679cfa0
@@ -885,9 +867,7 @@ colon_justification|xtask/src/similarity.rs|<file-root>|6c142d68
 colon_justification|xtask/src/similarity.rs|baseline_at|d083ed19
 colon_justification|xtask/src/std_src.rs|<file-root>|9cb50a03
 colon_justification|xtask/src/std_src.rs|refresh_std_graph|5decc5db
-expect_in_kernel|kernel/capability/src/irq_runtime.rs|interrupts_control|7190aad8
 expect_in_kernel|kernel/capability/src/runtime.rs|runtime|7190aad8
-expect_in_kernel|kernel/kernelspace/src/syscall_bridge.rs|scheduler|7190aad8
 expect_in_kernel|kernel/syscall/src/runtime.rs|runtime|7190aad8
 fronted_negation|AGENTS.md|<file-root>|b41b74c9
 fronted_negation|docs/code-style.md|<file-root>|2a0314bf
@@ -927,7 +907,6 @@ fronted_negation|lib/runtime/src/heap.rs|class_of|b1e522a3
 fronted_negation|lib/runtime/src/random.rs|<file-root>|9c7ad851
 fronted_negation|lib/runtime/src/thread.rs|spawn_owned|5fb03dc0
 fronted_negation|lib/runtime/src/thread.rs|spawn|5fb03dc0
-fronted_negation|lib/runtime/src/tls.rs|installed_block|5fb03dc0
 fronted_negation|lib/syscall-user/src/port_transport.rs|<PortTransport as Transport>::write_message|4e168c7d
 fronted_negation|lib/syscall/src/error.rs|SYSCALL_RETURN_TIMEOUT|77a891f9
 fronted_negation|lib/syscall/src/error.rs|SyscallError::SenderGone|2001f8cb
@@ -939,10 +918,7 @@ fronted_negation|lib/syscall/src/syscallop.rs|SyscallOp::ThreadYield|96d6fc59
 fronted_negation|lib/userland-image/src/image.rs|tests::decode_rejects_an_alias_of_a_record_it_does_not_follow|0e5bd563
 fronted_negation|tools/style/src/changeset.rs|Selection::All|53738016
 fronted_negation|tools/userland-image/src/host/image.rs|validate_component_directories|0751840b
-fronted_negation|user/calculator-demo/src/calculator.rs|watch_supervisor|f357dac7
-fronted_negation|user/calculator-demo/src/main.rs|turn|f357dac7
 fronted_negation|user/init/src/main.rs|<file-root>|ba8a5325
-fronted_negation|user/init/src/main.rs|park|f357dac7
 fronted_negation|user/rootkeeper/src/system.rs|RootSystem<'a>::bring_up|30811897
 fronted_negation|user/testrunner/src/ipc_buffer.rs|ipc_buffer_roundtrip|50008426
 fronted_negation|user/testrunner/src/memory_share.rs|memory_region_shared_with_child|1c77a6bc
@@ -1043,9 +1019,9 @@ zavodit_verb|lib/component-abi/src/manifest.rs|encode_manifest|4eeda0eb
 zavodit_verb|lib/component-abi/src/sessions.rs|<file-root>|4eeda0eb
 zavodit_verb|lib/component-abi/src/sessions.rs|tests::<Component as component_sessions::Service>::open_session|4eeda0eb
 zavodit_verb|lib/filesystem-server/src/admin.rs|<Establishing<'_> as component_sessions::Service>::open_session|4eeda0eb
-zavodit_verb|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::acquire_buffer|4eeda0eb
-zavodit_verb|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::open_root|4eeda0eb
-zavodit_verb|lib/filesystem-server/src/service.rs|<Serving<'_> as file_system::Service>::open|4eeda0eb
+zavodit_verb|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::acquire_buffer|4eeda0eb
+zavodit_verb|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::open_root|4eeda0eb
+zavodit_verb|lib/filesystem-server/src/service.rs|<Serving<'_, '_> as file_system::Service>::open|4eeda0eb
 zavodit_verb|lib/filesystem/src/ram.rs|tests::slot_is_reused_when_the_last_holder_is_gone|4eeda0eb
 zavodit_verb|lib/filesystem/src/session.rs|SessionTable<A>::open|4eeda0eb
 zavodit_verb|lib/log-abi/src/line.rs|LineAssembler<N>::flush|4eeda0eb

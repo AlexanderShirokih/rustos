@@ -54,8 +54,9 @@ impl FileSystemBackend for CrashingFileSystem {
         &mut self,
         stores: &mut dyn ByteStore,
         path: Path<'_>,
+        expected: NodeKind,
     ) -> Result<(), FileSystemError> {
-        self.inner.unlink(stores, path)
+        self.inner.unlink(stores, path, expected)
     }
 
     fn rename(

@@ -1,7 +1,7 @@
 //! Обслуживание сервисного порта: трансляция операций контракта `FileSystem` в модель
 //! `lib/filesystem` поверх состояния, разделённого с control-потоком.
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, string::String};
 use core::{
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering::Relaxed},
@@ -13,9 +13,9 @@ use filesystem_abi::{
     Opened, PATH_MAX, Path, Written, file_system, rebase,
 };
 use ipc::wire::{Cap, Str};
-use kernel_objects::{MemoryRegion, OwnedHandle, Resource};
+use kernel_objects::{MemoryRegion, OwnedHandle, ReceivedFrame, Resource};
 use runtime::{MemoryAccess, MutexGuard};
-use syscall::{Handle, Rights};
+use syscall::Rights;
 
 use crate::{buffer::DataBuffer, error::no_space, store::StoreTable};
 
@@ -37,15 +37,14 @@ pub(crate) struct FileSystemState {
 
 #[derive(Default)]
 pub(crate) struct Frame {
-    badge: u64,
-    received: Vec<OwnedHandle>,
     vended: Option<OwnedHandle>,
     pending_pin: Option<NodeId>,
 }
 
-pub(crate) struct Serving<'a> {
+pub(crate) struct Serving<'a, 'f> {
     pub(crate) state: MutexGuard<'a, FileSystemState>,
     pub(crate) frame: &'a mut Frame,
+    pub(crate) received: &'a mut ReceivedFrame<'f>,
     pub(crate) service: &'a OwnedHandle,
     pub(crate) next_badge: &'a AtomicU64,
 }
@@ -161,15 +160,7 @@ impl FileSystemState {
 }
 
 impl Frame {
-    pub(crate) fn begin(&mut self, badge: u64, caps: impl IntoIterator<Item = Handle>) {
-        self.badge = badge;
-        self.received.clear();
-        self.received
-            .extend(caps.into_iter().map(OwnedHandle::from_handle));
-    }
-
     pub(crate) fn end(&mut self, delivered: bool, state: &mut FileSystemState) {
-        self.received.clear();
         if delivered {
             if let Some(node) = self.pending_pin.take() {
                 let pinned = state.backend.pin(node);
@@ -179,16 +170,6 @@ impl Frame {
             self.pending_pin = None;
         }
         settle(&mut self.vended, delivered);
-    }
-
-    fn take(&mut self, capability: Cap) -> Result<OwnedHandle, FileSystemError> {
-        let raw = capability.raw().get();
-        let index = self
-            .received
-            .iter()
-            .position(|handle| handle.as_raw().raw() == raw)
-            .ok_or(FileSystemError::NotSupported)?;
-        Ok(self.received.swap_remove(index))
     }
 }
 
@@ -212,12 +193,13 @@ pub fn vend(vended: &mut Option<OwnedHandle>, handle: OwnedHandle) -> Cap {
     Cap::from_raw(id)
 }
 
-impl Serving<'_> {
+impl Serving<'_, '_> {
     fn client(&self) -> Result<ClientId, FileSystemError> {
-        if self.frame.badge == 0 {
+        let badge = self.received.badge();
+        if badge == 0 {
             return Err(FileSystemError::NoSession);
         }
-        Ok(ClientId::from_raw(self.frame.badge))
+        Ok(ClientId::from_raw(badge))
     }
 
     fn backend_stores_session(
@@ -248,7 +230,7 @@ impl Serving<'_> {
     }
 }
 
-impl file_system::Service for Serving<'_> {
+impl file_system::Service for Serving<'_, '_> {
     fn acquire_buffer(&mut self, size: u32) -> Result<Cap, FileSystemError> {
         let client = self.client()?;
         let FileSystemState {
@@ -297,7 +279,7 @@ impl file_system::Service for Serving<'_> {
                     let FileSystemState {
                         backend, stores, ..
                     } = &mut *self.state;
-                    let _ = backend.unlink(stores, path);
+                    let _ = backend.unlink(stores, path, info.kind);
                 }
                 return Err(error);
             }
@@ -384,11 +366,15 @@ impl file_system::Service for Serving<'_> {
         Ok(DONE)
     }
 
-    fn unlink(&mut self, path: Str<'_, PATH_MAX>) -> Result<u32, FileSystemError> {
+    fn unlink(
+        &mut self,
+        path: Str<'_, PATH_MAX>,
+        expected: NodeKind,
+    ) -> Result<u32, FileSystemError> {
         let mut full = [0; PATH_MAX];
         let (backend, stores, session) = self.backend_stores_session()?;
         let path = scoped_entry(&session.attachment().scope, path, &mut full)?;
-        backend.unlink(stores, path)?;
+        backend.unlink(stores, path, expected)?;
         Ok(DONE)
     }
 
@@ -412,7 +398,11 @@ impl file_system::Service for Serving<'_> {
             return Err(FileSystemError::ReadOnly);
         }
 
-        let region = MemoryRegion::from_handle(self.frame.take(region)?);
+        let region = MemoryRegion::from_handle(
+            self.received
+                .claim(region)
+                .ok_or(FileSystemError::NotSupported)?,
+        );
         let FileSystemState {
             backend, stores, ..
         } = &mut *self.state;

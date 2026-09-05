@@ -19,10 +19,13 @@ const CHAIN_WINDOW: &str = "/scope-chain";
 const ROOT_WINDOW: &str = "/scope-root";
 
 fn open_root(capability: &OwnedHandle, text: &str) -> Result<OwnedHandle, FileSystemError> {
-    connect(capability)
+    let mut response = connect(capability)
         .open_root(path(text))
-        .expect("open_root call")
-        .map(OwnedHandle::adopt)
+        .expect("open_root call");
+    let window = response.value?;
+    Ok(OwnedHandle::from(
+        response.claim(window).expect("capability owner"),
+    ))
 }
 
 fn window_of(capability: &OwnedHandle, text: &str) -> OwnedHandle {
@@ -41,7 +44,10 @@ fn filesystem_scopes_a_session_to_an_image_directory() {
     let opened = open(&scoped, "/sample", AccessMode::Read, OpenFlags::NONE);
     kernel_tests::kassert_eq!(opened.kind, NodeKind::File);
     kernel_tests::kassert_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
-    let unread = scoped.read(opened.fd, 0, BUFFER_SIZE).expect("read call");
+    let unread = scoped
+        .read(opened.fd, 0, BUFFER_SIZE)
+        .expect("read call")
+        .value;
     kernel_tests::kassert_eq!(unread, Err(FileSystemError::NoBuffer));
 
     let region = acquire_buffer(&scoped);
@@ -51,6 +57,7 @@ fn filesystem_scopes_a_session_to_an_image_directory() {
     let count = scoped
         .read(opened.fd, 0, BUFFER_SIZE)
         .expect("read call")
+        .value
         .expect("read ok");
     kernel_tests::kassert_eq!(buffer_head(&buffer, count as usize), IMAGE_FILE_BODY);
 
@@ -72,13 +79,15 @@ fn filesystem_scoped_session_stays_inside_its_window() {
     // в дереве образа отсутствует.
     let absolute = scoped
         .open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(absolute, Err(FileSystemError::NotFound));
 
     // Подъём из окна запрещён формой пути: `..` не проходит правила контракта.
     let escape = scoped
         .open(path("/../sample"), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(escape, Err(FileSystemError::InvalidPath));
 
     // Границы PATH_MAX принадлежат полному пути: хвост в границах кадра, но окно
@@ -91,13 +100,15 @@ fn filesystem_scoped_session_stays_inside_its_window() {
     }
     let overflow = scoped
         .open(path(&tail), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(overflow, Err(FileSystemError::InvalidPath));
 
     // Тот же хвост без окна валиден: отказ выше - про границу, а не про форму.
     let unscoped = connect(&capability)
         .open(path(&tail), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(unscoped, Err(FileSystemError::NotFound));
 }
 
@@ -139,13 +150,18 @@ fn filesystem_scoped_windows_narrow_and_compose() {
     // Путь соседнего уровня в узком окне не существует: расширить окно обратно нечем.
     let outside = scoped
         .open(path("/inner/leaf"), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(outside, Err(FileSystemError::NotFound));
 
     // Уход производных сессий не трогает родительскую: её дескрипторы живы.
     drop(second);
     drop(first);
-    let alive = client.stat(leaf.fd).expect("stat call").expect("stat ok");
+    let alive = client
+        .stat(leaf.fd)
+        .expect("stat call")
+        .value
+        .expect("stat ok");
     kernel_tests::kassert_eq!(alive.size, payload.len() as u64);
 }
 
@@ -183,10 +199,12 @@ fn filesystem_scoped_session_writes_through_its_window() {
     scoped
         .rename(path("/fresh"), path("/renamed"))
         .expect("rename call")
+        .value
         .expect("rename ok");
     scoped
-        .unlink(path("/renamed"))
+        .unlink(path("/renamed"), NodeKind::File)
         .expect("unlink call")
+        .value
         .expect("unlink ok");
     let removed = client
         .open(
@@ -194,7 +212,8 @@ fn filesystem_scoped_session_writes_through_its_window() {
             AccessMode::Read,
             OpenFlags::NONE,
         )
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(removed, Err(FileSystemError::NotFound));
 }
 
@@ -209,7 +228,8 @@ fn filesystem_open_root_accepts_any_existing_node() {
     kernel_tests::kassert_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
     kernel_tests::kassert_eq!(
         file.open(path("/child"), AccessMode::Read, OpenFlags::NONE)
-            .expect("open call"),
+            .expect("open call")
+            .value,
         Err(FileSystemError::NotADirectory)
     );
     kernel_tests::kassert_eq!(
@@ -238,15 +258,20 @@ fn filesystem_scoped_session_cannot_name_its_own_root() {
     let scoped = connect(&window);
 
     // Корень окна - запись каталога над ним: операция над именем его не называет.
-    let removed = scoped.unlink(path("/")).expect("unlink call");
+    let removed = scoped
+        .unlink(path("/"), NodeKind::Directory)
+        .expect("unlink call")
+        .value;
     kernel_tests::kassert_eq!(removed, Err(FileSystemError::InvalidPath));
     let moved = scoped
         .rename(path("/"), path("/inside"))
-        .expect("rename call");
+        .expect("rename call")
+        .value;
     kernel_tests::kassert_eq!(moved, Err(FileSystemError::InvalidPath));
     let onto = scoped
         .rename(path("/inside"), path("/"))
-        .expect("rename call");
+        .expect("rename call")
+        .value;
     kernel_tests::kassert_eq!(onto, Err(FileSystemError::InvalidPath));
 
     // Отказы не тронули дерево родителя: каталог окна на месте.
@@ -255,11 +280,13 @@ fn filesystem_scoped_session_cannot_name_its_own_root() {
 
     // Корень окна сессия открывает, но не заводит: снятый родителем каталог не возвращается.
     client
-        .unlink(path(ROOT_WINDOW))
+        .unlink(path(ROOT_WINDOW), NodeKind::Directory)
         .expect("unlink call")
+        .value
         .expect("unlink ok");
     let recreated = scoped
         .open(path("/"), AccessMode::ReadWrite, OpenFlags::CREATE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(recreated, Err(FileSystemError::NotFound));
 }

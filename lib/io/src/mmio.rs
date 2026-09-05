@@ -44,24 +44,20 @@ impl Mmio {
     /// Требует корректного выравнивания и валидного диапазона.
     #[inline(always)]
     pub fn read<T: VolatileInt>(&self, offset: usize) -> T {
-        // SAFETY: вызывающий гарантирует корректность base + offset и выравнивание под T.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            let p = self.base.add(offset) as *const T;
-            core::ptr::read_volatile(p)
-        }
+        // SAFETY: вызывающий гарантирует, что `base + offset` лежит в окне регистров.
+        let p = unsafe { self.base.add(offset) }.cast::<T>();
+        // SAFETY: адрес лежит в окне регистров и выровнен под `T` по контракту вызывающего.
+        unsafe { core::ptr::read_volatile(p) }
     }
 
     /// Volatile-запись типа `T` по смещению (в байтах).
     /// Требует корректного выравнивания и валидного диапазона.
     #[inline(always)]
     pub fn write<T: VolatileInt>(&self, offset: usize, value: T) {
-        // SAFETY: вызывающий гарантирует корректность base + offset и выравнивание под T.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            let p = self.base.add(offset).cast::<T>();
-            core::ptr::write_volatile(p, value);
-        }
+        // SAFETY: вызывающий гарантирует, что `base + offset` лежит в окне регистров.
+        let p = unsafe { self.base.add(offset) }.cast::<T>();
+        // SAFETY: адрес лежит в окне регистров и выровнен под `T` по контракту вызывающего.
+        unsafe { core::ptr::write_volatile(p, value) };
     }
 
     /// Читает значение из регистра.

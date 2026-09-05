@@ -1,5 +1,4 @@
 #![allow(unsafe_code)]
-#![allow(clippy::multiple_unsafe_ops_per_block)]
 
 use crate::virtual_address::VirtualAddress;
 
@@ -33,22 +32,20 @@ impl<T: ?Sized> RelocatablePtr<T> {
         let offset = new_base.as_usize();
         // Fat pointer = [data_ptr, vtable_ptr]
         let relocated_raw = [self.raw[0] + offset, self.raw[1] + offset];
-        // SAFETY: caller гарантирует, что новый базовый адрес замаплен и хранит валидный объект `T`
-        // (контракт `unsafe fn`); `relocated_raw` имеет размер и layout `*const T`,
+        // SAFETY: `relocated_raw` имеет размер и layout `*const T`, поэтому
         // `transmute_copy` корректно собирает fat pointer из пары usize.
-        unsafe {
-            let relocated_ptr: *const T = core::mem::transmute_copy(&relocated_raw);
-            &*relocated_ptr
-        }
+        let relocated_ptr: *const T = unsafe { core::mem::transmute_copy(&relocated_raw) };
+        // SAFETY: caller гарантирует, что новый базовый адрес замаплен и хранит
+        // валидный объект `T` (контракт `unsafe fn`).
+        unsafe { &*relocated_ptr }
     }
 
     pub fn get(&self) -> &'static T {
-        // SAFETY: `self.raw` был создан в `new` из живой `&'static T`-ссылки и не изменялся.
-        // Указатель остаётся валидным на всё время жизни `'static`, layout пары usize совпадает
-        // с `*const T`.
-        unsafe {
-            let ptr: *const T = core::mem::transmute_copy(&self.raw);
-            &*ptr
-        }
+        // SAFETY: `self.raw` создан в `new` из `*const T` и не изменялся; layout
+        // пары usize совпадает с `*const T`.
+        let ptr: *const T = unsafe { core::mem::transmute_copy(&self.raw) };
+        // SAFETY: указатель получен из живой `&'static T`-ссылки в `new` и
+        // остаётся валидным на всё время жизни `'static`.
+        unsafe { &*ptr }
     }
 }

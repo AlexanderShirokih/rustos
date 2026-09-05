@@ -103,6 +103,16 @@ path = "/boot/startup-ownership-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "startup-stale-buffer-fixture"
+path = "/boot/startup-stale-buffer-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "handle-table-full-fixture"
+path = "/boot/handle-table-full-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "crash-filesystem"
 path = "/boot/crash-filesystem"
 

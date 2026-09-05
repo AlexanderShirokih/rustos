@@ -131,7 +131,7 @@ fn spin_while(mut hold: impl FnMut() -> bool) {
 }
 
 fn wait_until(mut ready: impl FnMut() -> bool) -> bool {
-    let scheduler = syscall_bridge::scheduler();
+    let scheduler = syscall_bridge::scheduler().expect("scheduler installed");
     for _ in 0..WAIT_STEPS {
         if ready() {
             return true;
@@ -144,7 +144,7 @@ fn wait_until(mut ready: impl FnMut() -> bool) -> bool {
 fn run_workers() -> Option<Arc<Run>> {
     let workers = smp::online_cpus();
     let run = Arc::new(Run::new());
-    let scheduler = syscall_bridge::scheduler();
+    let scheduler = syscall_bridge::scheduler()?;
 
     for _ in 0..workers {
         let run = run.clone();
@@ -189,7 +189,7 @@ fn a_backlog_on_one_cpu_is_drained_by_migration() {
     let online = smp::online_cpus();
     let anchors = online - 1;
     let worker_count = online + 1;
-    let scheduler = syscall_bridge::scheduler();
+    let scheduler = syscall_bridge::scheduler().expect("scheduler installed");
     let backlog = Arc::new(Backlog::new(worker_count));
 
     // Занятые соседи выравнивают загрузку: новые потоки остаются на этом CPU.
@@ -255,7 +255,7 @@ fn free_frames() -> usize {
 }
 
 fn load_cycle() {
-    let scheduler = syscall_bridge::scheduler();
+    let scheduler = syscall_bridge::scheduler().expect("scheduler installed");
     let done = Arc::new(AtomicUsize::new(0));
 
     for _ in 0..AUDIT_THREADS {
@@ -276,7 +276,7 @@ fn load_cycle() {
 fn settled_free_frames() -> usize {
     // Реап потока откладывается, пока его не отпустят все CPU, поэтому сразу
     // после круга остаток ещё меняется: замер берётся, когда он осел.
-    let scheduler = syscall_bridge::scheduler();
+    let scheduler = syscall_bridge::scheduler().expect("scheduler installed");
     let mut last = free_frames();
     let mut matches = 0;
     for _ in 0..WAIT_STEPS {

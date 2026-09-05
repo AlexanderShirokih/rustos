@@ -13,7 +13,31 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
-use ipc::{MessageLen, Timeout, Transport, wire::IpcError};
+use ipc::{
+    MessageLen, ReceivedResources, Timeout, Transport,
+    wire::{Cap, HandleSlots, IpcError},
+};
+
+/// Набор символических capability host-транспорта.
+#[derive(Debug, Default)]
+pub struct MockResources {
+    handles: Vec<Cap>,
+}
+
+impl ReceivedResources for MockResources {
+    type Handle = Cap;
+
+    fn claim(&mut self, cap: Cap) -> Option<Cap> {
+        self.handles
+            .iter()
+            .position(|&handle| handle == cap)
+            .map(|index| self.handles.remove(index))
+    }
+
+    fn retain_decoded(&mut self, slots: &HandleSlots) {
+        self.handles.retain(|cap| slots.decoded(cap.raw().get()));
+    }
+}
 
 struct Frame {
     bytes: Vec<u8>,
@@ -48,6 +72,7 @@ impl Shared {
 pub struct MockEnd {
     outbox: Arc<Shared>,
     inbox: Arc<Shared>,
+    received: Mutex<MockResources>,
 }
 
 impl MockEnd {
@@ -59,10 +84,12 @@ impl MockEnd {
         let a = MockEnd {
             outbox: Arc::clone(&ab),
             inbox: Arc::clone(&ba),
+            received: Mutex::default(),
         };
         let b = MockEnd {
             outbox: ba,
             inbox: ab,
+            received: Mutex::default(),
         };
         (a, b)
     }
@@ -85,6 +112,12 @@ impl Drop for MockEnd {
 }
 
 impl Transport for MockEnd {
+    type Resources = MockResources;
+
+    fn take_resources(&self) -> MockResources {
+        core::mem::take(&mut *self.received.lock().expect("received resources mutex"))
+    }
+
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
         let mut pipe = self.outbox.pipe.lock().expect("mutex not poisoned");
         if !pipe.receiver_open {
@@ -115,6 +148,14 @@ impl Transport for MockEnd {
         }
         bytes[..frame.bytes.len()].copy_from_slice(&frame.bytes);
         handles[..frame.handles.len()].copy_from_slice(&frame.handles);
+        self.received
+            .lock()
+            .expect("received resources mutex")
+            .handles = frame
+            .handles
+            .iter()
+            .filter_map(|&raw| core::num::NonZeroU32::new(raw).map(Cap::from_raw))
+            .collect();
         Ok(MessageLen::new(frame.bytes.len(), frame.handles.len()))
     }
 

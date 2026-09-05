@@ -241,12 +241,11 @@ where
 
         A::switch_address_space(address_space);
         // SAFETY: как в `Scheduler::start` - указатель на контекст выбранного
-        // потока подготовлен под локом, IRQ замаскированы, и вход в поток
-        // происходит ровно один раз на этом CPU.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            A::start(&*next_ptr)
-        }
+        // потока подготовлен под локом и хранится в таблице потоков.
+        let next = unsafe { &*next_ptr };
+        // SAFETY: IRQ замаскированы, и вход в поток происходит ровно один раз
+        // на этом CPU.
+        unsafe { A::start(next) }
     }
 }
 

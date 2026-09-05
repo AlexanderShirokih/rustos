@@ -7,9 +7,8 @@ use alloc::{string::String, vec::Vec};
 use filesystem_abi::{FileSystemError, PATH_MAX, Path, file_system, namespace, namespace_admin};
 use filesystem_server::{settle, vend};
 use ipc::wire::{Cap, Str};
-use kernel_objects::OwnedHandle;
+use kernel_objects::{OwnedHandle, ReceivedFrame};
 use runtime::{Mutex, PortTransport, Timeout};
-use syscall::Handle;
 
 const DONE: u32 = 0;
 const OPEN_ROOT_TIMEOUT: Timeout = Timeout::from_secs(1);
@@ -71,53 +70,37 @@ impl namespace::Service for Resolving<'_> {
             .ok_or(FileSystemError::NotFound)?;
         let prefix = Path::new(&mount.prefix)?;
         let tail = path.strip_prefix(prefix).ok_or(FileSystemError::NotFound)?;
-        let session = file_system::Client::new(PortTransport::client(&mount.session))
+        let mut response = file_system::Client::new(PortTransport::client(&mount.session))
             .with_wait(OPEN_ROOT_TIMEOUT)
             .open_root(Str::new(tail.as_str()).ok_or(FileSystemError::InvalidPath)?)
-            .map_err(|_| FileSystemError::Unresponsive)??;
-        Ok(vend(&mut self.vended, OwnedHandle::adopt(session)))
+            .map_err(|_| FileSystemError::Unresponsive)?;
+        let session = response.value?;
+        let owned = response
+            .claim(session)
+            .ok_or(FileSystemError::Unresponsive)?;
+        Ok(vend(&mut self.vended, owned.into()))
     }
 }
 
-pub(crate) struct Administering<'a> {
+pub(crate) struct Administering<'a, 'f> {
     table: &'a Mutex<MountTable>,
-    received: Vec<OwnedHandle>,
+    received: &'a mut ReceivedFrame<'f>,
 }
 
-impl<'a> Administering<'a> {
-    pub(crate) const fn new(table: &'a Mutex<MountTable>) -> Self {
-        Self {
-            table,
-            received: Vec::new(),
-        }
-    }
-
-    pub(crate) fn begin_frame(&mut self, capabilities: impl IntoIterator<Item = Handle>) {
-        self.received.clear();
-        self.received
-            .extend(capabilities.into_iter().map(OwnedHandle::from_handle));
-    }
-
-    pub(crate) fn end_frame(&mut self) {
-        self.received.clear();
-    }
-
-    fn take(&mut self, session: Cap) -> Result<OwnedHandle, FileSystemError> {
-        let raw = session.raw().get();
-        let index = self
-            .received
-            .iter()
-            .position(|handle| handle.as_raw().raw() == raw)
-            .ok_or(FileSystemError::NotSupported)?;
-        Ok(self.received.swap_remove(index))
+impl<'a, 'f> Administering<'a, 'f> {
+    pub(crate) fn new(table: &'a Mutex<MountTable>, received: &'a mut ReceivedFrame<'f>) -> Self {
+        Self { table, received }
     }
 }
 
-impl namespace_admin::Service for Administering<'_> {
+impl namespace_admin::Service for Administering<'_, '_> {
     fn mount(&mut self, path: Str<'_, PATH_MAX>, session: Cap) -> Result<u32, FileSystemError> {
         let prefix = Path::new(path.as_str())?;
         // Отвергнутое монтирование уносит переданную сессию: вернуть её отправителю нечем.
-        let session = self.take(session)?;
+        let session = self
+            .received
+            .claim(session)
+            .ok_or(FileSystemError::NotSupported)?;
         let mut table = self.table.lock();
         if table.covers(prefix) {
             return Err(FileSystemError::AlreadyExists);

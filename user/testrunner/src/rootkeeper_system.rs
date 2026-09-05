@@ -438,11 +438,15 @@ fn try_mount(system: &RootSystem<'_>, prefix: &str) -> Result<OwnedHandle, FileS
         .expect("namespace session minted");
     // Отказ транспорта на пути к ещё не обслуживающему порт маршрутизатору неотличим
     // для клиента от неотвечающего монтирования.
-    let session = namespace::Client::new(PortTransport::client(&namespace))
+    let mut resolved = namespace::Client::new(PortTransport::client(&namespace))
         .with_wait(CALL_TIMEOUT)
         .resolve(path(prefix))
-        .map_err(|_| FileSystemError::Unresponsive)??;
-    Ok(OwnedHandle::adopt(session))
+        .map_err(|_| FileSystemError::Unresponsive)?;
+    let session = resolved.value?;
+    let session = resolved
+        .claim(session)
+        .ok_or(FileSystemError::Unresponsive)?;
+    Ok(OwnedHandle::from(session))
 }
 
 fn await_tree(system: &RootSystem<'_>, prefix: &str) -> OwnedHandle {
@@ -487,11 +491,13 @@ pub(crate) fn pause(timeout: Timeout) {
 }
 
 fn probe(session: &OwnedHandle) -> Result<Result<Opened, FileSystemError>, IpcError> {
-    connect(session).open(
-        path(Path::ROOT.as_str()),
-        AccessMode::Read,
-        OpenFlags::DIRECTORY,
-    )
+    connect(session)
+        .open(
+            path(Path::ROOT.as_str()),
+            AccessMode::Read,
+            OpenFlags::DIRECTORY,
+        )
+        .map(|response| response.value)
 }
 
 fn terminate_router(system: &RootSystem<'_>) -> bool {
@@ -897,10 +903,10 @@ fn a_device_component_serves_time_over_a_minted_session() {
         .session(PROBE_BADGE)
         .expect("rtc session minted");
     let clock = rtc::Client::new(PortTransport::client(&session)).with_wait(RTC_CALL_TIMEOUT);
-    let now = clock.now().expect("rtc answers the time");
+    let now = clock.now().expect("rtc answers the time").value;
     // Будильник устройства снимается реальным прерыванием линии, сминченной
     // супервизором по описанию платформы.
-    let ticked = clock.tick().expect("rtc alarm fires");
+    let ticked = clock.tick().expect("rtc alarm fires").value;
 
     kernel_tests::kassert!(ticked >= now);
     drop(session);

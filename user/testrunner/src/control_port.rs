@@ -68,12 +68,13 @@ fn a_control_port_outlives_every_sender_but_the_supervisor_lease() {
 
     // Провайдер обслуживает control-порт значку импорта: ответ ставит его цикл приёма в
     // известное состояние до ухода значка.
-    let session = component_sessions::Client::new(PortTransport::client(&guest))
+    let mut response = component_sessions::Client::new(PortTransport::client(&guest))
         .with_wait(CALL_TIMEOUT)
         .open_session(whole_export())
-        .expect("control port answers the import")
-        .expect("session established");
-    drop(OwnedHandle::adopt(session));
+        .expect("control port answers the import");
+    let capability = response.value.expect("session established");
+    let session = response.claim(capability).expect("capability owner");
+    drop(OwnedHandle::from(session));
 
     drop(guest);
     // Уход значка импорта провайдера не завершает.

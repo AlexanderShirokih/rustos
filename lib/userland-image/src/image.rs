@@ -48,6 +48,7 @@ pub enum ImageDecodeError {
 pub struct DecodedImage<'a> {
     bytes: &'a [u8],
     header: ImageHeader,
+    boot: DecodedEntry<'a>,
 }
 
 /// Запись таблицы: путь и байты содержимого. Что это за содержимое, знает тот,
@@ -108,10 +109,9 @@ impl<'a> DecodedImage<'a> {
             return Err(invalid_layout(None, "table_bounds"));
         }
 
-        let image = Self { bytes, header };
         let mut previous_path: Option<&str> = None;
         let mut data_end: u64 = 0;
-        for index in 0..image.entry_count() {
+        for index in 0..usize::from(header.entry_count) {
             let entry = parse_entry(bytes, header.entry_count, index)?;
             // Записи отсортированы строго по возрастанию пути: на этом стоит
             // двоичный поиск, а строгость запрещает дубликаты путей.
@@ -148,7 +148,12 @@ impl<'a> DecodedImage<'a> {
                 }
             }
         }
-        Ok(image)
+        let boot = parse_entry(bytes, header.entry_count, usize::from(header.boot_index))?;
+        Ok(Self {
+            bytes,
+            header,
+            boot,
+        })
     }
 
     pub fn entry_count(&self) -> usize {
@@ -157,7 +162,7 @@ impl<'a> DecodedImage<'a> {
 
     /// Запись, с которой поднимается bootstrap-процесс.
     pub fn boot_entry(&self) -> DecodedEntry<'a> {
-        self.entry_at(usize::from(self.header.boot_index))
+        self.boot
     }
 
     /// Возвращает запись с заданным путём двоичным поиском по таблице.
@@ -165,7 +170,7 @@ impl<'a> DecodedImage<'a> {
         let (mut low, mut high) = (0, self.entry_count());
         while low < high {
             let middle = low + (high - low) / 2;
-            let entry = self.entry_at(middle);
+            let entry = self.entry_at(middle)?;
             match entry.path.cmp(path) {
                 core::cmp::Ordering::Less => low = middle + 1,
                 core::cmp::Ordering::Greater => high = middle,
@@ -182,12 +187,11 @@ impl<'a> DecodedImage<'a> {
         }
     }
 
-    #[allow(clippy::expect_used)]
-    fn entry_at(&self, index: usize) -> DecodedEntry<'a> {
-        // Каждая запись разобрана и проверена в `decode`, а образ неизменяем, и повторный
-        // разбор по индексу внутри таблицы отказать уже не может.
-        parse_entry(self.bytes, self.header.entry_count, index)
-            .expect("entries were validated during decode")
+    fn entry_at(&self, index: usize) -> Option<DecodedEntry<'a>> {
+        if index >= self.entry_count() {
+            return None;
+        }
+        parse_entry(self.bytes, self.header.entry_count, index).ok()
     }
 }
 
@@ -215,10 +219,7 @@ impl<'a> Iterator for DecodedEntries<'a> {
     type Item = DecodedEntry<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.next_index == self.image.entry_count() {
-            return None;
-        }
-        let entry = self.image.entry_at(self.next_index);
+        let entry = self.image.entry_at(self.next_index)?;
         self.next_index += 1;
         Some(entry)
     }

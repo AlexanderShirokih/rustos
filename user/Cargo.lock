@@ -57,7 +57,6 @@ dependencies = [
  "component-abi",
  "ipc",
  "kernel-objects",
- "syscall",
 ]
 
 [[package]]

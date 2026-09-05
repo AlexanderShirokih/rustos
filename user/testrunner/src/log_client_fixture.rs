@@ -31,20 +31,25 @@ pub extern "C" fn _start(log: Handle) -> ! {
 
 fn probe(log: &OwnedHandle) -> u64 {
     let bootstrap = bootstrap::Client::new(PortTransport::client(log.borrow()));
-    if let Ok(Ok(cap)) = bootstrap.acquire_irq_control() {
-        drop(OwnedHandle::adopt(cap));
+    // Выданную capability закрывает ответ: пробе довольно самого факта выдачи.
+    if let Ok(response) = bootstrap.acquire_irq_control()
+        && response.value.is_ok()
+    {
         return EXIT_IRQ_CONTROL;
     }
-    if let Ok(Ok(cap)) = bootstrap.acquire_userland_image() {
-        drop(OwnedHandle::adopt(cap));
+    if let Ok(response) = bootstrap.acquire_userland_image()
+        && response.value.is_ok()
+    {
         return EXIT_USERLAND_IMAGE;
     }
-    if let Ok(Ok(fdt)) = bootstrap.acquire_boot_fdt() {
-        drop(OwnedHandle::adopt(fdt.region));
+    if let Ok(response) = bootstrap.acquire_boot_fdt()
+        && response.value.is_ok()
+    {
         return EXIT_BOOT_FDT;
     }
-    if let Ok(Ok(cap)) = bootstrap.acquire_device_memory(0) {
-        drop(OwnedHandle::adopt(cap));
+    if let Ok(response) = bootstrap.acquire_device_memory(0)
+        && response.value.is_ok()
+    {
         return EXIT_DEVICE_MEMORY;
     }
 

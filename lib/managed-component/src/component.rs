@@ -86,6 +86,12 @@ impl From<IpcError> for ManagedStartupError {
 }
 
 impl Transport for BoundedStartupTransport {
+    type Resources = <PortTransport as Transport>::Resources;
+
+    fn take_resources(&self) -> Self::Resources {
+        self.inner.take_resources()
+    }
+
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
         self.inner.write_message(bytes, handles)
     }
@@ -193,33 +199,18 @@ impl<R> ManagedComponent<R> {
                 Err(error) => return self.fail_startup(error.into()),
             };
             let mut roots = match create_roots() {
-                Ok(roots) => Some(roots),
+                Ok(roots) => roots,
                 Err(error) => return self.fail_startup(error),
             };
-            let result = launch_entry(entry, Some(name), &child_resource, |startup| {
-                #[allow(clippy::expect_used)]
-                let component_roots = roots
-                    .as_mut()
-                    .expect("startup roots are present before delivery");
+            launch_entry(entry, Some(name), &child_resource, |startup| {
                 let transport = bounded_transport(startup, startup_timeout);
-                let result = send_startup(transport, component_roots);
-                if result.is_err() {
-                    roots = None;
-                }
-                result
-            });
-
-            match result {
-                Ok(process) => Ok(RunningComponent {
-                    #[allow(clippy::expect_used)]
-                    roots: roots
-                        .take()
-                        .expect("successful startup retains capability roots"),
-                    process,
-                    resource: child_resource,
-                }),
-                Err(error) => Err(error),
-            }
+                send_startup(transport, &mut roots)
+            })
+            .map(|process| RunningComponent {
+                roots,
+                process,
+                resource: child_resource,
+            })
         };
 
         match launch {

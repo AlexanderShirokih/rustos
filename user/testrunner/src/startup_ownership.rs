@@ -1,62 +1,44 @@
 //! Владение capability стартовой транзакции. Приём, не сложившийся в контракт, закрывает всё,
-//! что транзакция уже доставила.
+//! что транзакция уже доставила, и не трогает ресурсы предыдущей операции программы.
 //!
-//! Каждая доставляемая capability выведена из порта вызывающего под своим значком, и уход
-//! последнего держателя значка виден отказом приёма на этом порту.
+//! Каждая доставляемая capability выведена из порта вызывающего под своим значком
+//! ([`Watched`]), и уход последнего держателя значка виден
+//! отказом приёма на этом порту.
 
-use core::num::NonZeroU64;
+use core::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicI64, Ordering::SeqCst},
+};
 
 use component_abi::component_startup;
-use ipc::wire::IpcError;
-use kernel_objects::{Error, OwnedHandle, Port, Process, Resource};
+use ipc::{Transport as _, wire::IpcError};
+use kernel_objects::Process;
 use kernel_tests::kernel_test;
-use managed_component::ManagedStartupError;
 use runtime::{PortTransport, Timeout};
-use syscall::{Rights, SyscallError};
-use userland_loader::{InitializedProcess, launch_entry_retained};
 
-use crate::managed_startup::{image_mapping, image_program};
+use crate::{
+    fixture_frames::{launch_entry, send_raw_frame},
+    watched_capability::Watched,
+};
 
 const FIXTURE_ENTRY: &str = "/boot/startup-ownership-fixture/program";
+const STALE_BUFFER_ENTRY: &str = "/boot/startup-stale-buffer-fixture/program";
 const FIXTURE_NAME: &str = "startup-ownership";
+const STALE_BUFFER_NAME: &str = "startup-stale-buffer";
 
-const DELIVERY_TIMEOUT: Timeout = Timeout::from_secs(1);
-const CLOSURE_TIMEOUT: Timeout = Timeout::from_secs(5);
+const CALL_TIMEOUT: Timeout = Timeout::from_secs(5);
+
+const CALL_REFUSED: i64 = 1;
+const CALL_TIMED_OUT: i64 = 2;
+const CALL_ANSWERED: i64 = 3;
+
+static UNEXPECTED_CALL: AtomicI64 = AtomicI64::new(i64::MIN);
 
 const LOG_BADGE: NonZeroU64 = NonZeroU64::new(0x71).expect("badge is non-zero");
 const CONTROL_BADGE: NonZeroU64 = NonZeroU64::new(0x72).expect("badge is non-zero");
 const SERVICE_BADGE: NonZeroU64 = NonZeroU64::new(0x73).expect("badge is non-zero");
 const FIRST_SLOT_BADGE: NonZeroU64 = NonZeroU64::new(0x74).expect("badge is non-zero");
 const SECOND_SLOT_BADGE: NonZeroU64 = NonZeroU64::new(0x75).expect("badge is non-zero");
-const STARTUP_LEASE_BADGE: NonZeroU64 = NonZeroU64::new(0x76).expect("badge is non-zero");
-
-struct Watched {
-    port: Port,
-    badge: NonZeroU64,
-}
-
-impl Watched {
-    fn create(badge: NonZeroU64) -> Self {
-        Self {
-            port: Port::create().expect("watched port"),
-            badge,
-        }
-    }
-
-    fn deliver(&self) -> OwnedHandle {
-        self.port
-            .handle()
-            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(self.badge))
-            .expect("delivered capability minted")
-    }
-
-    fn assert_closed(&self) {
-        kernel_tests::kassert!(matches!(
-            self.port.recv(CLOSURE_TIMEOUT).err(),
-            Some(Error::Syscall(SyscallError::SenderGone))
-        ));
-    }
-}
 
 /// Состав транзакции сверх объявления закрывает весь доставленный набор.
 #[kernel_test]
@@ -108,28 +90,128 @@ fn a_refused_frame_closes_the_capability_it_carried() {
     slot.assert_closed();
 }
 
+/// Доставленный кадр, чей разбор отказал, закрывает все свои capability, включая не
+/// названные его телом.
+#[kernel_test]
+fn a_corrupted_delivered_frame_closes_every_capability_it_carried() {
+    let first = Watched::create(LOG_BADGE);
+    let second = Watched::create(CONTROL_BADGE);
+    let third = Watched::create(SERVICE_BADGE);
+    let fourth = Watched::create(FIRST_SLOT_BADGE);
+
+    // Ординал базового кадра при пустом теле отказывает разбором параметров уже после
+    // переноса capability.
+    let _fixture = launch_entry(FIXTURE_ENTRY, FIXTURE_NAME, |transport| {
+        let carried = alloc::vec![
+            first.deliver(),
+            second.deliver(),
+            third.deliver(),
+            fourth.deliver(),
+        ];
+        send_raw_frame(&transport, 0, carried)
+    });
+
+    first.assert_closed();
+    second.assert_closed();
+    third.assert_closed();
+    fourth.assert_closed();
+}
+
+/// Неожиданный вызов стартового порта reply-объекта не оставляет, и вызывающий получает
+/// отказ, не дожидаясь конца процесса получателя.
+#[kernel_test]
+fn an_unexpected_call_refuses_its_caller() {
+    UNEXPECTED_CALL.store(i64::MIN, SeqCst);
+
+    let _fixture = launch_entry(FIXTURE_ENTRY, FIXTURE_NAME, |transport| {
+        // Кадр приходит вызовом, а не штатным `cast`, и его разбор отказывает.
+        send_raw_frame(&transport, 1, alloc::vec::Vec::new())?;
+        let answered = transport.wait_readable(CALL_TIMEOUT);
+        UNEXPECTED_CALL.store(
+            match answered {
+                Ok(()) => CALL_ANSWERED,
+                Err(IpcError::Timeout) => CALL_TIMED_OUT,
+                Err(_) => CALL_REFUSED,
+            },
+            SeqCst,
+        );
+        Ok(())
+    });
+
+    kernel_tests::kassert_eq!(UNEXPECTED_CALL.load(SeqCst), CALL_REFUSED);
+}
+
+/// Отказ первого приёма транзакции не трогает capability предыдущей операции программы.
+#[kernel_test]
+fn a_refused_first_receive_leaves_an_earlier_capability_alone() {
+    let kept = Watched::create(FIRST_SLOT_BADGE);
+
+    // Кадр до приёма транзакции забирает фикстура, его capability принадлежит ей, а
+    // транзакция обрывается без единого своего кадра.
+    let _fixture = launch_entry(STALE_BUFFER_ENTRY, STALE_BUFFER_NAME, |transport| {
+        component_startup::Client::new(transport).slot(kept.deliver())
+    });
+
+    kept.assert_alive();
+}
+
 fn launch(
     send: impl FnOnce(&component_startup::Client<PortTransport>) -> Result<(), IpcError>,
 ) -> Process {
-    let mapping = image_mapping();
-    let program = image_program(&mapping, FIXTURE_ENTRY);
-    let resource = Resource::self_resource().expect("self metering resource");
+    launch_entry(FIXTURE_ENTRY, FIXTURE_NAME, move |transport| {
+        send(&component_startup::Client::new(transport))
+    })
+}
 
-    let InitializedProcess { process, startup } = launch_entry_retained(
-        &program,
-        Some(FIXTURE_NAME),
-        &resource,
-        STARTUP_LEASE_BADGE,
-        move |startup| -> Result<(), ManagedStartupError> {
-            let transport =
-                PortTransport::client(startup.handle()).with_send_timeout(DELIVERY_TIMEOUT);
-            send(&component_startup::Client::new(transport)).map_err(ManagedStartupError::from)
-        },
-    )
-    .expect("startup transaction delivered");
+struct CallInsteadOfCast<'a>(&'a PortTransport);
 
-    // Транзакция одноразовая, и уход значка стартового порта виден компоненту отказом
-    // приёма. Так обрывается транзакция, оставленная без обещанного слота.
-    drop(startup);
-    process
+impl ipc::Transport for CallInsteadOfCast<'_> {
+    type Resources = <PortTransport as ipc::Transport>::Resources;
+
+    fn take_resources(&self) -> Self::Resources {
+        self.0.take_resources()
+    }
+
+    fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
+        let mut bytes = bytes.to_vec();
+        let mut header = ipc::wire::Header::decode(&bytes)?;
+        header.txid = 1;
+        header.encode(&mut bytes)?;
+        self.0.write_message(&bytes, handles)
+    }
+
+    fn read_message(
+        &self,
+        bytes: &mut [u8],
+        handles: &mut [u32],
+    ) -> Result<ipc::MessageLen, IpcError> {
+        self.0.read_message(bytes, handles)
+    }
+
+    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
+        self.0.wait_readable(timeout)
+    }
+}
+
+/// Корректное тело start не должно удерживать reply до получения обещанного слота.
+#[kernel_test]
+fn a_valid_start_sent_as_call_does_not_wait_for_the_next_frame() {
+    let log = Watched::create(LOG_BADGE);
+    let control = Watched::create(CONTROL_BADGE);
+    let service = Watched::create(SERVICE_BADGE);
+    let outcome = core::cell::Cell::new(None);
+    let _fixture = launch_entry(FIXTURE_ENTRY, FIXTURE_NAME, |transport| {
+        component_startup::Client::new(CallInsteadOfCast(&transport)).start(
+            log.deliver(),
+            control.deliver(),
+            service.deliver(),
+            1,
+        )?;
+        outcome.set(Some(transport.wait_readable(CALL_TIMEOUT)));
+        Ok(())
+    });
+    log.assert_closed();
+    control.assert_closed();
+    service.assert_closed();
+    kernel_tests::kassert!(matches!(outcome.get(), Some(Err(error)) if error != IpcError::Timeout));
 }

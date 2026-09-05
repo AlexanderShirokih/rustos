@@ -8,7 +8,7 @@ use ipc::{
     Transport as _,
     wire::{Bytes, Cap, IpcError, Str},
 };
-use kernel_objects::{MemoryRegion, OwnedHandle, Port, Signal};
+use kernel_objects::{MemoryRegion, OwnedHandle, Port, ReceivedFrame, Signal};
 use runtime::{Condvar, JoinHandle, Mutex, PortTransport, Priority, Timeout, spawn_owned};
 use supervisor_abi::{ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, supervisor};
 use syscall::{Handle, Rights, SIGNALED, WakeCount};
@@ -54,9 +54,14 @@ struct Staged {
     definitions: Vec<Definition>,
 }
 
-struct Serving {
+struct Extending {
     mailbox: Arc<Mailbox>,
     staged: Vec<Staged>,
+}
+
+struct Serving<'a, 'f> {
+    extending: &'a mut Extending,
+    received: &'a mut ReceivedFrame<'f>,
     caller: Option<NonZeroU64>,
     vended: Option<OwnedHandle>,
 }
@@ -113,7 +118,7 @@ impl Mailbox {
     }
 }
 
-impl Serving {
+impl Extending {
     fn transaction(&mut self, caller: NonZeroU64) -> Option<&mut Staged> {
         self.staged
             .iter_mut()
@@ -143,7 +148,9 @@ impl Serving {
         staged.definitions.push(Definition::new(record, program));
         Ok(0)
     }
+}
 
+impl Serving<'_, '_> {
     fn vend(&mut self, handle: OwnedHandle) -> Cap {
         let id = handle.as_raw().as_nonzero();
         self.vended = Some(handle);
@@ -162,11 +169,11 @@ impl Serving {
     }
 }
 
-impl supervisor::Service for Serving {
+impl supervisor::Service for Serving<'_, '_> {
     fn begin(&mut self) -> Result<u32, ExtendError> {
         let caller = self.caller.ok_or(ExtendError::NoTransaction)?;
-        self.discard(caller);
-        self.staged.push(Staged {
+        self.extending.discard(caller);
+        self.extending.staged.push(Staged {
             caller,
             definitions: Vec::new(),
         });
@@ -178,23 +185,30 @@ impl supervisor::Service for Serving {
         record: Bytes<'_, PLAN_RECORD_MAX>,
         program: Cap,
     ) -> Result<u32, ExtendError> {
-        // Ядро переносит капу региона в таблицу до разбора кадра, и усыновление закрывает её
-        // на любом отказе операции.
-        let program = MemoryRegion::adopt(program);
+        // Капу региона передаёт принятый кадр, и её перенос закрывает регион на любом
+        // отказе операции.
+        let program = self
+            .received
+            .claim(program)
+            .map(MemoryRegion::from_handle)
+            .ok_or(ExtendError::BadRecord)?;
         let Some(caller) = self.caller else {
             return Err(ExtendError::NoTransaction);
         };
-        let staged = self.stage(caller, record.as_bytes(), program);
+        let staged = self.extending.stage(caller, record.as_bytes(), program);
         if staged.is_err() {
-            self.discard(caller);
+            self.extending.discard(caller);
         }
         staged
     }
 
     fn commit(&mut self) -> Result<u32, ExtendError> {
         let caller = self.caller.ok_or(ExtendError::NoTransaction)?;
-        let definitions = self.take(caller).ok_or(ExtendError::NoTransaction)?;
-        let answered = self.mailbox.ask(Request::Commit {
+        let definitions = self
+            .extending
+            .take(caller)
+            .ok_or(ExtendError::NoTransaction)?;
+        let answered = self.extending.mailbox.ask(Request::Commit {
             caller,
             definitions,
         });
@@ -206,7 +220,7 @@ impl supervisor::Service for Serving {
 
     fn session(&mut self, component: Str<'_, INSTANCE_NAME_MAX>) -> Result<Cap, ExtendError> {
         let caller = self.caller.ok_or(ExtendError::NotFound)?;
-        let answered = self.mailbox.ask(Request::Session {
+        let answered = self.extending.mailbox.ask(Request::Session {
             caller,
             instance: String::from(component.as_str()),
         });
@@ -280,26 +294,31 @@ impl Drop for ExtensionPort {
 
 fn serve(server: OwnedHandle, mailbox: Arc<Mailbox>) {
     let transport = PortTransport::server(server.borrow());
-    let mut serving = Serving {
+    let mut extending = Extending {
         mailbox,
         staged: Vec::new(),
-        caller: None,
-        vended: None,
     };
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
+            // Приём выше доставил кадр, и его capability, значок и незавершённый ответ
+            // принадлежат владеющему кадру до конца обработки.
             Ok(()) => {
-                // Значок кадра читается до диспетчеризации: исходящий IPC перезаписывает то же
-                // поле IPC-буфера потока.
-                serving.caller = NonZeroU64::new(transport.peer_badge());
+                let Some(mut received) = ReceivedFrame::take(&transport) else {
+                    continue;
+                };
+                let mut serving = Serving {
+                    caller: NonZeroU64::new(received.badge()),
+                    extending: &mut extending,
+                    received: &mut received,
+                    vended: None,
+                };
                 let delivered = supervisor::dispatch(&mut serving, &transport).is_ok();
                 serving.end_frame(delivered);
-                transport.cancel_reply();
             }
             Err(IpcError::SenderGone) => {
                 // Уход значка вызывателя снимает его набор вместе с регионами его программ.
                 if let Some(gone) = NonZeroU64::new(transport.peer_badge()) {
-                    serving.discard(gone);
+                    extending.discard(gone);
                 }
             }
             Err(IpcError::ResourceExhausted | IpcError::Timeout) => {}

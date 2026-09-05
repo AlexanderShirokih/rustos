@@ -27,7 +27,7 @@ fn main() {
 
     let clock = rtc::Client::new(PortTransport::client(&startup.rtc));
     match clock.now() {
-        Ok(seconds) => println!("rtc reads {seconds}"),
+        Ok(response) => println!("rtc reads {}", response.value),
         Err(error) => println!("rtc call failed: {error:?}"),
     }
 }

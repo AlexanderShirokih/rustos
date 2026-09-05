@@ -17,6 +17,7 @@ use crate::{
     descriptor::NodeDescriptor,
     error::FileSystemError,
     flags::OpenFlags,
+    kind::NodeKind,
     limits::PATH_MAX,
     mode::AccessMode,
     reply::{Listed, NodeInfo, Opened, Written},
@@ -86,8 +87,13 @@ ipc::protocol! {
             to: ipc::wire::Str<{ PATH_MAX }>,
         ) -> Result<u32, FileSystemError>;
 
-        /// Удаляет узел по пути. Каталог с записями - `NotEmpty`.
-        call fn unlink(path: ipc::wire::Str<{ PATH_MAX }>) -> Result<u32, FileSystemError>;
+        /// Удаляет узел по пути, вид которого совпал с `expected`. Ожидание файла при
+        /// фактическом каталоге - `IsADirectory`, ожидание каталога при фактическом файле -
+        /// `NotADirectory`. Каталог с записями - `NotEmpty`.
+        call fn unlink(
+            path: ipc::wire::Str<{ PATH_MAX }>,
+            expected: NodeKind,
+        ) -> Result<u32, FileSystemError>;
 
         /// Заводит файл под `path` поверх переданного RW-региона без копирования. `size` задаёт
         /// начальную длину и не может превышать ёмкость региона.
@@ -127,10 +133,9 @@ mod tests {
     use ipc_test::MockEnd;
 
     use super::{
-        AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, OpenFlags,
-        Opened, PATH_MAX, Written, file_system,
+        AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind,
+        OpenFlags, Opened, PATH_MAX, Written, file_system,
     };
-    use crate::kind::NodeKind;
 
     const BUFFER_CAP: Cap = cap(0x11);
     const BACKING_CAP: Cap = cap(0x22);
@@ -198,6 +203,7 @@ mod tests {
         },
         Unlink {
             path: String,
+            expected: NodeKind,
         },
         CreateBacked {
             path: String,
@@ -297,9 +303,14 @@ mod tests {
             Ok(DONE)
         }
 
-        fn unlink(&mut self, path: Str<'_, { PATH_MAX }>) -> Result<u32, FileSystemError> {
+        fn unlink(
+            &mut self,
+            path: Str<'_, { PATH_MAX }>,
+            expected: NodeKind,
+        ) -> Result<u32, FileSystemError> {
             self.record(Call::Unlink {
                 path: path.as_str().to_string(),
+                expected,
             });
             Ok(DONE)
         }
@@ -363,15 +374,19 @@ mod tests {
 
     #[test]
     fn acquire_buffer_round_trip() {
-        let (result, calls) = with_service(|client| client.acquire_buffer(4096).expect("call ok"));
-        assert_eq!(result, Ok(BUFFER_CAP));
+        let (mut result, calls) =
+            with_service(|client| client.acquire_buffer(4096).expect("call ok"));
+        assert_eq!(result.value, Ok(BUFFER_CAP));
+        assert_eq!(result.claim(BUFFER_CAP), Some(BUFFER_CAP));
+        // Повторный запрос той же capability ответ уже не находит.
+        assert_eq!(result.claim(BUFFER_CAP), None);
         assert_eq!(calls, [Call::AcquireBuffer { size: 4096 }]);
     }
 
     #[test]
     fn domain_error_round_trips_as_fs_error() {
         let (result, calls) = with_service(|client| client.acquire_buffer(0).expect("call ok"));
-        assert_eq!(result, Err(FileSystemError::NoSpace));
+        assert_eq!(result.value, Err(FileSystemError::NoSpace));
         assert_eq!(calls, [Call::AcquireBuffer { size: 0 }]);
     }
 
@@ -387,7 +402,7 @@ mod tests {
                 )
                 .expect("call ok")
         });
-        assert_eq!(result, Ok(OPENED));
+        assert_eq!(result.value, Ok(OPENED));
         assert_eq!(
             calls,
             [Call::Open {
@@ -410,7 +425,7 @@ mod tests {
                 )
                 .expect("call ok")
         });
-        assert_eq!(result, Ok(OPENED));
+        assert_eq!(result.value, Ok(OPENED));
         assert_eq!(
             calls,
             [Call::Open {
@@ -424,14 +439,14 @@ mod tests {
     #[test]
     fn close_round_trip() {
         let (result, calls) = with_service(|client| client.close(FD).expect("call ok"));
-        assert_eq!(result, Ok(DONE));
+        assert_eq!(result.value, Ok(DONE));
         assert_eq!(calls, [Call::Close { fd: FD }]);
     }
 
     #[test]
     fn read_round_trip() {
         let (result, calls) = with_service(|client| client.read(FD, 1024, 4096).expect("call ok"));
-        assert_eq!(result, Ok(READ_COUNT));
+        assert_eq!(result.value, Ok(READ_COUNT));
         assert_eq!(
             calls,
             [Call::Read {
@@ -446,7 +461,7 @@ mod tests {
     fn write_round_trip() {
         let (result, calls) =
             with_service(|client| client.write(FD, u64::MAX, 12).expect("call ok"));
-        assert_eq!(result, Ok(WRITTEN));
+        assert_eq!(result.value, Ok(WRITTEN));
         assert_eq!(
             calls,
             [Call::Write {
@@ -460,14 +475,14 @@ mod tests {
     #[test]
     fn set_size_round_trip() {
         let (result, calls) = with_service(|client| client.set_size(FD, 8192).expect("call ok"));
-        assert_eq!(result, Ok(DONE));
+        assert_eq!(result.value, Ok(DONE));
         assert_eq!(calls, [Call::SetSize { fd: FD, size: 8192 }]);
     }
 
     #[test]
     fn stat_round_trip() {
         let (result, calls) = with_service(|client| client.stat(FD).expect("call ok"));
-        assert_eq!(result, Ok(NODE_INFO));
+        assert_eq!(result.value, Ok(NODE_INFO));
         assert_eq!(calls, [Call::Stat { fd: FD }]);
     }
 
@@ -475,7 +490,7 @@ mod tests {
     fn list_round_trip() {
         let from = DirCursor::from_raw(2);
         let (result, calls) = with_service(|client| client.list(FD, from).expect("call ok"));
-        assert_eq!(result, Ok(LISTED));
+        assert_eq!(result.value, Ok(LISTED));
         assert_eq!(calls, [Call::List { fd: FD, from }]);
     }
 
@@ -489,7 +504,7 @@ mod tests {
                 )
                 .expect("call ok")
         });
-        assert_eq!(result, Ok(DONE));
+        assert_eq!(result.value, Ok(DONE));
         assert_eq!(
             calls,
             [Call::Rename {
@@ -503,22 +518,29 @@ mod tests {
     fn unlink_round_trip() {
         let (result, calls) = with_service(|client| {
             client
-                .unlink(Str::new("/store/a").expect("path within bound"))
+                .unlink(
+                    Str::new("/store/a").expect("path within bound"),
+                    NodeKind::File,
+                )
                 .expect("call ok")
         });
-        assert_eq!(result, Ok(DONE));
+        assert_eq!(result.value, Ok(DONE));
         assert_eq!(
             calls,
             [Call::Unlink {
                 path: "/store/a".to_string(),
+                expected: NodeKind::File,
             }]
         );
     }
 
     #[test]
     fn backing_memory_round_trip() {
-        let (result, calls) = with_service(|client| client.backing_memory(FD).expect("call ok"));
-        assert_eq!(result, Ok(BACKING_CAP));
+        let (mut result, calls) =
+            with_service(|client| client.backing_memory(FD).expect("call ok"));
+        assert_eq!(result.value, Ok(BACKING_CAP));
+        assert_eq!(result.claim(BACKING_CAP), Some(BACKING_CAP));
+        assert_eq!(result.claim(BACKING_CAP), None);
         assert_eq!(calls, [Call::BackingMemory { fd: FD }]);
     }
 
@@ -533,7 +555,7 @@ mod tests {
                 )
                 .expect("call ok")
         });
-        assert_eq!(result, Ok(DONE));
+        assert_eq!(result.value, Ok(DONE));
         assert_eq!(
             calls,
             [Call::CreateBacked {
@@ -546,12 +568,14 @@ mod tests {
 
     #[test]
     fn open_root_round_trip() {
-        let (result, calls) = with_service(|client| {
+        let (mut result, calls) = with_service(|client| {
             client
                 .open_root(Str::new("/window").expect("path within bound"))
                 .expect("call ok")
         });
-        assert_eq!(result, Ok(SCOPED_CAP));
+        assert_eq!(result.value, Ok(SCOPED_CAP));
+        assert_eq!(result.claim(SCOPED_CAP), Some(SCOPED_CAP));
+        assert_eq!(result.claim(SCOPED_CAP), None);
         assert_eq!(
             calls,
             [Call::OpenRoot {

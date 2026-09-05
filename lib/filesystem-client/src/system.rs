@@ -2,11 +2,8 @@
 //! отображённым регионом её данных.
 
 use filesystem_abi::FileSystemError;
-use ipc::{
-    MessageLen, Transport,
-    wire::{Cap, IpcError},
-};
-use kernel_objects::{Mapping, MemoryRegion, OwnedHandle, PortTransport};
+use ipc::{MessageLen, Transport, wire::IpcError};
+use kernel_objects::{Mapping, MemoryRegion, OwnedHandle, PortTransport, ReceivedHandle};
 use syscall::{Timeout, UserMemFlags};
 
 use crate::{
@@ -18,14 +15,14 @@ use crate::{
 pub struct FileSystemEnvironment;
 
 impl FileSystem<FileSystemEnvironment> {
-    /// Фасад над сессией файловой системы: путь отсчитывается от корня её области.
-    pub fn windowed_session(session: OwnedHandle) -> Self {
-        Self::windowed(FileSystemEnvironment, SessionPort::over(session))
+    /// Фасад над сессией файловой системы. Путь отсчитывается от корня её области.
+    pub fn windowed(session: OwnedHandle) -> Self {
+        Self::windowed_with_environment(FileSystemEnvironment, SessionPort::over(session))
     }
 
-    /// Фасад над маршрутизатором имён: путь разбирается по монтированиям.
-    pub fn routed_namespace(namespace: OwnedHandle) -> Self {
-        Self::routed(FileSystemEnvironment, SessionPort::over(namespace))
+    /// Фасад над маршрутизатором имён. Путь разбирается по монтированиям.
+    pub fn routed(namespace: OwnedHandle) -> Self {
+        Self::routed_with_environment(FileSystemEnvironment, SessionPort::over(namespace))
     }
 }
 
@@ -52,6 +49,12 @@ impl SessionPort {
 }
 
 impl Transport for SessionPort {
+    type Resources = <PortTransport as Transport>::Resources;
+
+    fn take_resources(&self) -> Self::Resources {
+        self.transport.take_resources()
+    }
+
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
         self.transport.write_message(bytes, handles)
     }
@@ -84,16 +87,17 @@ impl SharedRegion for SessionRegion {
 }
 
 impl Environment for FileSystemEnvironment {
+    type Handle = ReceivedHandle;
     type Transport = SessionPort;
     type Region = SessionRegion;
 
-    fn connect(&self, port: Cap) -> Result<SessionPort, FileSystemError> {
-        Ok(SessionPort::over(OwnedHandle::adopt(port)))
+    fn connect(&self, port: ReceivedHandle) -> Result<SessionPort, FileSystemError> {
+        Ok(SessionPort::over(port.into()))
     }
 
-    fn map(&self, region: Cap) -> Result<SessionRegion, FileSystemError> {
+    fn map(&self, region: ReceivedHandle) -> Result<SessionRegion, FileSystemError> {
         // Маппинг жив, пока открыта капа региона.
-        let region = MemoryRegion::adopt(region);
+        let region = MemoryRegion::from_handle(region.into());
         let mapping = region
             .map_full(UserMemFlags::ReadWrite)
             .map_err(|_| FileSystemError::NoSpace)?;

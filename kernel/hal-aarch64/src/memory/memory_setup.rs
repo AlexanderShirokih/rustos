@@ -181,7 +181,7 @@ impl MemorySetup<Installed> {
         GLOBAL_ALLOCATOR.set_freeze();
 
         // SAFETY: bump инициализирован и заморожен, конкурентного доступа нет
-        let bump_used = unsafe { GLOBAL_ALLOCATOR.get_bump() }.used();
+        let bump_used = unsafe { GLOBAL_ALLOCATOR.with_bump(|bump| bump.used()) };
         let bump_start = PageAlignedAddress::aligned_down(bump_used.start());
         let bump_end = PageAlignedAddress::aligned_up(bump_used.end());
 

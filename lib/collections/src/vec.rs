@@ -1,5 +1,3 @@
-use core::ops::{Index, IndexMut};
-
 /// Вектор фиксированной ёмкости без аллокаций.
 ///
 /// Хранит до `N` элементов на стеке. Используется в no_std окружении
@@ -103,32 +101,6 @@ impl<T, const N: usize> Vec<T, N> {
     }
 }
 
-impl<T, const N: usize> Index<usize> for Vec<T, N> {
-    type Output = T;
-
-    #[allow(clippy::panic)]
-    fn index(&self, index: usize) -> &Self::Output {
-        // Паника вне границ - семантика самого `Index`, и вернуть вместо элемента нечего.
-        let len = self.len;
-        match self.get(index) {
-            Some(item) => item,
-            None => panic!("index out of bounds: index {index} >= len {len}"),
-        }
-    }
-}
-
-impl<T, const N: usize> IndexMut<usize> for Vec<T, N> {
-    #[allow(clippy::panic)]
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        // Паника вне границ - семантика самого `IndexMut`, и вернуть вместо элемента нечего.
-        let len = self.len;
-        match self.get_mut(index) {
-            Some(item) => item,
-            None => panic!("index out of bounds: index {index} >= len {len}"),
-        }
-    }
-}
-
 /// Итератор по ссылкам на элементы вектора.
 pub struct VecIter<'a, T> {
     items: &'a [Option<T>],
@@ -226,10 +198,7 @@ mod tests {
 
         let mapped: Vec<u32, 4> = vec.map_into(|item| u32::from(item) * 10);
 
-        assert_eq!(mapped.len(), 3);
-        assert_eq!(mapped[0], 10);
-        assert_eq!(mapped[1], 20);
-        assert_eq!(mapped[2], 30);
+        assert!(mapped.iter().copied().eq([10, 20, 30]));
     }
 
     #[test]
@@ -242,6 +211,6 @@ mod tests {
         let mapped: Vec<u8, 3> = vec.map_into(|item| item);
 
         assert_eq!(mapped.len(), 3);
-        assert_eq!(mapped[2], 9);
+        assert_eq!(mapped.get(2), Some(&9));
     }
 }

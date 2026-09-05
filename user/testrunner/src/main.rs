@@ -33,6 +33,7 @@ mod filesystem_bench;
 mod filesystem_scope;
 mod filesystem_stress;
 mod fixture;
+mod fixture_frames;
 mod fixture_protocol;
 mod futex;
 mod heap;
@@ -54,6 +55,7 @@ mod port_transport;
 mod process_handles;
 mod process_lifecycle;
 mod process_start;
+mod received_frame;
 mod resource_exhaustion;
 mod resource_split;
 mod ring_transport;
@@ -71,6 +73,7 @@ mod sync;
 mod thread_pointer;
 mod thread_yield;
 mod vm;
+mod watched_capability;
 
 static BOOTSTRAP_HANDLE: Once<Handle> = Once::new();
 

@@ -91,12 +91,13 @@ impl Fixture {
 
     fn spawn_metered_by(metering: &Metering<'_>, launch: &Launch) -> Result<Self> {
         let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-        let cap = client
+        let mut response = client
             .acquire_userland_image()
-            .expect("acquire_userland_image call")
-            .expect("vend ok");
+            .expect("acquire_userland_image call");
+        let capability = response.value.expect("vend ok");
+        let cap = response.claim(capability).expect("capability owner");
 
-        let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
+        let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
         let mapping = region.map_full_read_only().expect("map image read-only");
         let image = decode(mapping.as_bytes()).expect("decode acquired image");
         let program = image

@@ -44,7 +44,7 @@ pub use handle::{Capability, HandleId};
 pub use handle_table::{
     DrainedHandles, HandleReservation, HandleTable, ObjectAccess, RejectedInsert,
 };
-pub use ipc_buffer_xfer::transfer_rendezvous;
+pub use ipc_buffer_xfer::{release_delivered, transfer_rendezvous};
 pub use irq_control::IrqControl;
 pub use irq_line::IrqLine;
 pub use irq_runtime::{

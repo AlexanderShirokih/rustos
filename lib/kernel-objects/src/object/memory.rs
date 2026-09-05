@@ -1,5 +1,10 @@
 //! Типизированные обёртки над метеринг-ресурсом, регионами памяти и их
 //! маппингами.
+//!
+//! Те же страницы бывают отображены в другом адресном пространстве, и доступ к маппингу
+//! идёт volatile. Середина диапазона передаётся словами по выровненному адресу,
+//! голова до границы слова и хвост - побайтно. Каждый байт передаётся ровно один раз, а
+//! разрыв, наблюдаемый из другого адресного пространства, атомарен с точностью до слова.
 
 use core::mem;
 
@@ -10,7 +15,6 @@ const _: () = assert!(
 
 use bootstrap_abi::DeviceWindow;
 use io::mmio::Mmio;
-use ipc::wire::Cap;
 use syscall::{MemoryAccess, MemoryProfile, SIGNALED, SyscallError, Timeout, UserMemFlags};
 
 use crate::{
@@ -33,11 +37,38 @@ fn head_len(base: *const u8, len: usize) -> usize {
     }
 }
 
-#[allow(clippy::cast_ptr_alignment)]
 unsafe fn word_ptr(base: *mut u8, index: usize) -> *mut u64 {
-    // SAFETY: вызывающий даёт индекс внутри маппинга, смещённый на `head_len` от базы и кратный
-    // размеру слова, поэтому адрес выровнен на слово.
-    unsafe { base.add(index).cast::<u64>() }
+    // SAFETY: вызывающий даёт индекс в диапазоне, проверенном `range_ptr`, отстоящий от `head_len`
+    // на целое число слов. Адрес выровнен на слово, потому что `head_len` отсчитан `align_offset`
+    // от базы.
+    unsafe { base.add(index) }.cast()
+}
+
+unsafe fn read_bytes(base: *const u8, start: usize, dst: &mut [u8]) {
+    for (offset, byte) in dst.iter_mut().enumerate() {
+        // SAFETY: вызывающий даёт диапазон `[start, start + dst.len())`, проверенный `range_ptr`.
+        let source = unsafe { base.add(start + offset) };
+        // SAFETY: адрес лежит в маппинге, установленном ядром.
+        *byte = unsafe { source.read_volatile() };
+    }
+}
+
+unsafe fn write_bytes(base: *mut u8, start: usize, src: &[u8]) {
+    for (offset, &byte) in src.iter().enumerate() {
+        // SAFETY: вызывающий даёт диапазон `[start, start + src.len())`, проверенный `range_ptr`.
+        let target = unsafe { base.add(start + offset) };
+        // SAFETY: адрес лежит в маппинге, установленном ядром.
+        unsafe { target.write_volatile(byte) };
+    }
+}
+
+unsafe fn zero_bytes(base: *mut u8, start: usize, len: usize) {
+    for offset in 0..len {
+        // SAFETY: вызывающий даёт диапазон `[start, start + len)`, проверенный `range_ptr`.
+        let target = unsafe { base.add(start + offset) };
+        // SAFETY: адрес лежит в маппинге, установленном ядром.
+        unsafe { target.write_volatile(0) };
+    }
 }
 
 /// Backing региона памяти, декодированный из `kind_tag` вызова `inspect`.
@@ -191,11 +222,6 @@ impl MemoryRegion {
         Self { handle }
     }
 
-    /// Усыновляет capability региона, доставленный по IPC.
-    pub fn adopt(cap: Cap) -> Self {
-        Self::from_handle(OwnedHandle::adopt(cap))
-    }
-
     /// Заимствование хэндла на время одного вызова.
     pub fn handle(&self) -> BorrowedHandle<'_> {
         self.handle.borrow()
@@ -274,11 +300,13 @@ impl MemoryRegion {
     }
 }
 
-impl DeviceWindow for MemoryRegion {
-    fn adopt(cap: Cap) -> Self {
-        Self::adopt(cap)
+impl From<syscall_user::ReceivedHandle> for MemoryRegion {
+    fn from(handle: syscall_user::ReceivedHandle) -> Self {
+        Self::from_handle(handle.into())
     }
+}
 
+impl DeviceWindow<syscall_user::ReceivedHandle> for MemoryRegion {
     fn base(&self) -> Option<u64> {
         self.inspect().ok().map(|info| info.base)
     }
@@ -310,8 +338,9 @@ impl Mapping {
     /// региона нет отображений на запись ни в одном адресном пространстве.
     pub unsafe fn as_bytes(&self) -> &[u8] {
         let base = self.va as *const u8;
-        #[allow(clippy::expect_used)]
-        let len = usize::try_from(self.size_bytes).expect("mapping size fits usize");
+        // Проверка в голове модуля исключает 32-битный таргет, и приведение не усекает значение.
+        #[allow(clippy::cast_possible_truncation)]
+        let len = self.size_bytes as usize;
         // SAFETY: ядро установило маппинг на [va, va+size_bytes) и
         // инициализировало эту память. Срез заимствует диапазон на время `&self`
         // и не переживёт unmap/Drop, а неизменность страниц на это время
@@ -331,28 +360,19 @@ impl Mapping {
         let len = dst.len();
         let base = self.range_ptr(offset, len)?;
         let head = head_len(base, len);
-        let target = dst.as_mut_ptr();
-        // SAFETY: [va, va+len) лежит в маппинге, установленном ядром, а `target` покрывает
-        // столько же байт. Сторона маппинга читается volatile: те же страницы бывают отображены
-        // в другом адресном пространстве. Середина идёт словами по выровненному адресу, голова и
-        // хвост - побайтно; каждый байт читается ровно один раз, а разрыв, наблюдаемый писателем
-        // из другого адресного пространства, атомарен с точностью до слова.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            for index in 0..head {
-                target.add(index).write(base.add(index).read_volatile());
-            }
-            let mut index = head;
-            while index + WORD <= len {
-                let word = word_ptr(base, index).read_volatile();
-                target.add(index).cast::<u64>().write_unaligned(word);
-                index += WORD;
-            }
-            while index < len {
-                target.add(index).write(base.add(index).read_volatile());
-                index += 1;
-            }
+        let (head_bytes, rest) = dst.split_at_mut(head);
+        let (words, tail) = rest.as_chunks_mut::<WORD>();
+        // SAFETY: `[0, head)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { read_bytes(base, 0, head_bytes) };
+        for (number, chunk) in words.iter_mut().enumerate() {
+            // SAFETY: слово отстоит от `head` на `number` слов и лежит в диапазоне, проверенном
+            // `range_ptr`.
+            let word = unsafe { word_ptr(base, head + number * WORD) };
+            // SAFETY: слово лежит в маппинге, установленном ядром.
+            *chunk = unsafe { word.read_volatile() }.to_ne_bytes();
         }
+        // SAFETY: хвост `[len - tail.len(), len)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { read_bytes(base, len - tail.len(), tail) };
         Ok(())
     }
 
@@ -369,28 +389,19 @@ impl Mapping {
         let len = src.len();
         let base = self.range_ptr(offset, len)?;
         let head = head_len(base, len);
-        let source = src.as_ptr();
-        // SAFETY: [va, va+len) лежит в маппинге, установленном ядром, а `source` покрывает
-        // столько же байт. Сторона маппинга пишется volatile: те же страницы бывают отображены
-        // в другом адресном пространстве. Середина идёт словами по выровненному адресу, голова и
-        // хвост - побайтно; каждый байт пишется ровно один раз, а разрыв, наблюдаемый читателем
-        // из другого адресного пространства, атомарен с точностью до слова.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            for index in 0..head {
-                base.add(index).write_volatile(source.add(index).read());
-            }
-            let mut index = head;
-            while index + WORD <= len {
-                let word = source.add(index).cast::<u64>().read_unaligned();
-                word_ptr(base, index).write_volatile(word);
-                index += WORD;
-            }
-            while index < len {
-                base.add(index).write_volatile(source.add(index).read());
-                index += 1;
-            }
+        let (head_bytes, rest) = src.split_at(head);
+        let (words, tail) = rest.as_chunks::<WORD>();
+        // SAFETY: `[0, head)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { write_bytes(base, 0, head_bytes) };
+        for (number, chunk) in words.iter().enumerate() {
+            // SAFETY: слово отстоит от `head` на `number` слов и лежит в диапазоне, проверенном
+            // `range_ptr`.
+            let word = unsafe { word_ptr(base, head + number * WORD) };
+            // SAFETY: слово лежит в маппинге, установленном ядром.
+            unsafe { word.write_volatile(u64::from_ne_bytes(*chunk)) };
         }
+        // SAFETY: хвост `[len - tail.len(), len)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { write_bytes(base, len - tail.len(), tail) };
         Ok(())
     }
 
@@ -399,26 +410,19 @@ impl Mapping {
     pub fn zero_at(&self, offset: usize, len: usize) -> Result<()> {
         let base = self.range_ptr(offset, len)?;
         let head = head_len(base, len);
-        // SAFETY: [va, va+len) лежит в маппинге, установленном ядром. Запись идёт volatile: те
-        // же страницы бывают отображены в другом адресном пространстве. Середина идёт словами по
-        // выровненному адресу, голова и хвост - побайтно; каждый байт пишется ровно один раз, а
-        // разрыв, наблюдаемый читателем из другого адресного пространства, атомарен с точностью
-        // до слова.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            for index in 0..head {
-                base.add(index).write_volatile(0);
-            }
-            let mut index = head;
-            while index + WORD <= len {
-                word_ptr(base, index).write_volatile(0);
-                index += WORD;
-            }
-            while index < len {
-                base.add(index).write_volatile(0);
-                index += 1;
-            }
+        let words = (len - head) / WORD;
+        let tail_start = head + words * WORD;
+        // SAFETY: `[0, head)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { zero_bytes(base, 0, head) };
+        for number in 0..words {
+            // SAFETY: слово отстоит от `head` на `number` слов и лежит в диапазоне, проверенном
+            // `range_ptr`.
+            let word = unsafe { word_ptr(base, head + number * WORD) };
+            // SAFETY: слово лежит в маппинге, установленном ядром.
+            unsafe { word.write_volatile(0) };
         }
+        // SAFETY: хвост `[tail_start, len)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { zero_bytes(base, tail_start, len - tail_start) };
         Ok(())
     }
 

@@ -8,7 +8,6 @@ use core::panic::PanicInfo;
 
 use filesystem_abi::{AccessMode, OpenFlags, file_system};
 use ipc::wire::Str;
-use kernel_objects::OwnedHandle;
 use runtime::{PortTransport, thread_exit};
 use syscall::{Handle, Timeout};
 
@@ -30,15 +29,20 @@ pub extern "C" fn _start(service: Handle) -> ! {
 fn populate_session(service: Handle) -> bool {
     let client = file_system::Client::new(PortTransport::client(service)).with_wait(CALL_TIMEOUT);
 
-    let Ok(Ok(buffer)) = client.acquire_buffer(BUFFER_SIZE) else {
+    // Выданный буфер закрывает ответ: фикстуре довольно самой выдачи.
+    let Ok(response) = client.acquire_buffer(BUFFER_SIZE) else {
         return false;
     };
-    drop(OwnedHandle::adopt(buffer));
+    if response.value.is_err() {
+        return false;
+    }
 
     let Some(path) = Str::new(PATH) else {
         return false;
     };
-    let opened = client.open(path, AccessMode::ReadWrite, OpenFlags::CREATE);
+    let opened = client
+        .open(path, AccessMode::ReadWrite, OpenFlags::CREATE)
+        .map(|response| response.value);
     matches!(opened, Ok(Ok(_)))
 }
 

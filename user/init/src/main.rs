@@ -40,7 +40,7 @@ use ipc::{
     Transport as _,
     wire::{Bytes, IpcError, Str},
 };
-use kernel_objects::{Mapping, MemoryRegion, OwnedHandle};
+use kernel_objects::{Mapping, MemoryRegion, OwnedHandle, ReceivedFrame};
 use runtime::{PortTransport, Timeout, UserMemFlags, install_log, log_fmt, log_line, thread_exit};
 use supervisor_abi::{ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, supervisor};
 use syscall::Handle;
@@ -183,8 +183,12 @@ fn graft_raised(
             continue;
         }
         let instance = Str::<INSTANCE_NAME_MAX>::new(mount.instance).ok_or(Error::MountTable)?;
-        let session = accepted("stage 1 session", supervisor.session(instance))?;
-        graft(admin, mount.path, OwnedHandle::adopt(session))?;
+        let mut response = supervisor.session(instance)?;
+        let session = accepted("stage 1 session", response.value)?;
+        let handle = response
+            .claim(session)
+            .ok_or(Error::Ipc(IpcError::InvalidValue))?;
+        graft(admin, mount.path, handle.into())?;
     }
     Ok(())
 }
@@ -195,7 +199,7 @@ fn graft(
     session: OwnedHandle,
 ) -> Result<()> {
     let prefix = Str::<PATH_MAX>::new(path).ok_or(Error::MountTable)?;
-    admin.mount(prefix, session)?.map_err(|error| {
+    admin.mount(prefix, session)?.value.map_err(|error| {
         log_fmt(format_args!("mount of {path} refused: {error:?}"));
         Error::Mount
     })?;
@@ -210,7 +214,7 @@ fn raise_stage_one(
     if records.is_empty() {
         return Ok(());
     }
-    accepted("stage 1 transaction", supervisor.begin())?;
+    accepted("stage 1 transaction", supervisor.begin()?.value)?;
     for record in &records {
         // Запись плана едет супервизору ровно такой, какой её закодировала сборка: путь
         // программы компонента `init` берёт из неё же.
@@ -218,10 +222,10 @@ fn raise_stage_one(
         let bytes = Bytes::<PLAN_RECORD_MAX>::new(record).ok_or(Error::StageOne)?;
         accepted(
             "stage 1 component",
-            supervisor.define(bytes, program.into_handle()),
+            supervisor.define(bytes, program.into_handle())?.value,
         )?;
     }
-    match supervisor.commit()? {
+    match supervisor.commit()?.value {
         Ok(_) => Ok(()),
         // Набор ступени 1 принадлежит композиции, и свежая incarnation застаёт его поднятым.
         Err(ExtendError::Duplicate) => {
@@ -247,13 +251,23 @@ impl Reading {
     fn derive(root: &OwnedHandle) -> Result<Self> {
         let files = file_system::Client::new(PortTransport::client(root)).with_wait(CALL_TIMEOUT);
         let window = Str::<PATH_MAX>::new(Path::ROOT.as_str()).ok_or(Error::StageOne)?;
-        let session = OwnedHandle::adopt(answered("root window", files.open_root(window))?);
+        let mut response = files.open_root(window)?;
+        let session = answered("root window", response.value)?;
+        let session = OwnedHandle::from(
+            response
+                .claim(session)
+                .ok_or(Error::Ipc(IpcError::InvalidValue))?,
+        );
         let files =
             file_system::Client::new(PortTransport::client(&session)).with_wait(CALL_TIMEOUT);
-        let region = MemoryRegion::adopt(answered(
-            "stage 1 data buffer",
-            files.acquire_buffer(BUFFER_SIZE),
-        )?);
+        let mut response = files.acquire_buffer(BUFFER_SIZE)?;
+        let region = answered("stage 1 data buffer", response.value)?;
+        let region = MemoryRegion::from_handle(
+            response
+                .claim(region)
+                .ok_or(Error::Ipc(IpcError::InvalidValue))?
+                .into(),
+        );
         let buffer = region.map_full(UserMemFlags::ReadWrite)?;
         Ok(Self {
             files,
@@ -283,9 +297,13 @@ impl Reading {
             log_fmt(format_args!("stage 1 program {path} is not a file"));
             return Err(Error::StageOne);
         }
-        let region = answered("stage 1 program", self.files.backing_memory(opened.fd))?;
+        let mut response = self.files.backing_memory(opened.fd)?;
+        let region = answered("stage 1 program", response.value)?;
+        let region = response
+            .claim(region)
+            .ok_or(Error::Ipc(IpcError::InvalidValue))?;
         self.close(opened.fd)?;
-        Ok(MemoryRegion::adopt(region))
+        Ok(MemoryRegion::from_handle(region.into()))
     }
 
     fn open_stage_one(&self) -> Result<Option<Opened>> {
@@ -293,6 +311,7 @@ impl Reading {
         match self
             .files
             .open(path, AccessMode::Read, OpenFlags::DIRECTORY)?
+            .value
         {
             Ok(opened) => Ok(Some(opened)),
             Err(FileSystemError::NotFound) => Ok(None),
@@ -308,7 +327,7 @@ impl Reading {
         let mut page = vec![0; BUFFER_SIZE as usize];
         let mut from = DirCursor::START;
         loop {
-            let listed = answered("stage 1 listing", self.files.list(fd, from))?;
+            let listed = answered("stage 1 listing", self.files.list(fd, from)?.value)?;
             self.buffer.copy_out(&mut page)?;
             collect_names(&page, listed.count, &mut names)?;
             if listed.end {
@@ -327,7 +346,7 @@ impl Reading {
     fn record(&self, path: &str) -> Result<Vec<u8>> {
         let opened = self.node(path, OpenFlags::NONE)?;
         let len = u32::try_from(opened.size).map_err(|_| Error::StageOne)?;
-        let count = answered("stage 1 record", self.files.read(opened.fd, 0, len))?;
+        let count = answered("stage 1 record", self.files.read(opened.fd, 0, len)?.value)?;
         self.close(opened.fd)?;
         let mut bytes = vec![0; count as usize];
         self.buffer.copy_out(&mut bytes)?;
@@ -338,6 +357,7 @@ impl Reading {
         let name = Str::<PATH_MAX>::new(path).ok_or(Error::StageOne)?;
         self.files
             .open(name, AccessMode::Read, flags)?
+            .value
             .map_err(|error| {
                 log_fmt(format_args!("stage 1 record {path} refused: {error:?}"));
                 Error::StageOne
@@ -345,7 +365,7 @@ impl Reading {
     }
 
     fn close(&self, fd: NodeDescriptor) -> Result<()> {
-        answered("stage 1 descriptor", self.files.close(fd))?;
+        answered("stage 1 descriptor", self.files.close(fd)?.value)?;
         Ok(())
     }
 }
@@ -363,21 +383,15 @@ fn collect_names(page: &[u8], count: u32, names: &mut Vec<String>) -> Result<()>
     Ok(())
 }
 
-fn answered<T>(
-    operation: &str,
-    answered: core::result::Result<core::result::Result<T, FileSystemError>, IpcError>,
-) -> Result<T> {
-    answered?.map_err(|error| {
+fn answered<T>(operation: &str, answered: core::result::Result<T, FileSystemError>) -> Result<T> {
+    answered.map_err(|error| {
         log_fmt(format_args!("{operation} refused: {error:?}"));
         Error::StageOne
     })
 }
 
-fn accepted<T>(
-    operation: &str,
-    answered: core::result::Result<core::result::Result<T, ExtendError>, IpcError>,
-) -> Result<T> {
-    answered?.map_err(|error| {
+fn accepted<T>(operation: &str, answered: core::result::Result<T, ExtendError>) -> Result<T> {
+    answered.map_err(|error| {
         log_fmt(format_args!("{operation} refused: {error:?}"));
         Error::StageOne
     })
@@ -386,9 +400,9 @@ fn accepted<T>(
 fn park(control: &PortTransport) -> u64 {
     loop {
         match control.wait_readable(Timeout::INFINITE) {
-            // Протокола на control-порту нет: пришедший кадр уходит без ответа, а закрытие
-            // reply-объекта будит вызывателя.
-            Ok(()) => control.cancel_reply(),
+            // Control-порт протокола не обслуживает, и пришедший кадр уходит без ответа.
+            // Владеющий кадр закрывает его ресурсы и будит вызывателя.
+            Ok(()) => drop(ReceivedFrame::take(control)),
             // Уход значка поднявшего компонент supervisor снимает процесс.
             Err(IpcError::SenderGone) if supervisor_gone(control.peer_badge()) => {
                 log_line("supervisor gone");

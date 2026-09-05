@@ -15,6 +15,13 @@
 //! предшествующего `wait_readable` блокируется бессрочно.
 //! One-way отправка отдельно настраивается через
 //! [`PortTransport::with_send_timeout`].
+//!
+//! Ресурсы кадра транспорт отдаёт только после его доставки. [`Delivery`] возникает на
+//! состоявшемся рандеву и достаётся один раз, а отказ приёма прав на прежнее содержимое
+//! буфера не даёт. Владение этими ресурсами принимает `kernel_objects::ReceivedFrame` на
+//! серверном приёме, [`Transport::take_resources`] на клиентском ответе и
+//! `runtime::receive_startup` на стартовом кадре. Невзятую доставку транспорт сам
+//! закрывает.
 
 use core::cell::Cell;
 
@@ -28,6 +35,7 @@ use syscall::{
 };
 
 use crate::{
+    Delivery,
     ipc_buffer::ipc_buffer_ptr,
     svc::{handle_close, port_call, port_recv, port_reply, port_send},
 };
@@ -52,6 +60,7 @@ pub struct PortTransport {
     handle: Handle,
     phase: Cell<Phase>,
     pending_reply: Cell<Option<Handle>>,
+    delivered: Cell<Option<Delivery>>,
     send_timeout: Timeout,
 }
 
@@ -73,6 +82,7 @@ impl PortTransport {
             handle,
             phase: Cell::new(phase),
             pending_reply: Cell::new(None),
+            delivered: Cell::new(None),
             send_timeout: Timeout::INFINITE,
         }
     }
@@ -91,49 +101,69 @@ impl PortTransport {
         self.send_timeout
     }
 
-    /// Значок (badge) port-хэндла, через который пришёл принятый кадр. `0` -
-    /// отправитель слал через незаклеймённую копию.
+    /// Значок (badge) ушедшей стороны при отказе приёма `SenderGone`. Ядро положило в буфер
+    /// значок, чьи отправители исчезли, а кадр не доставило. Значок доставленного кадра
+    /// отдаёт [`Delivery::badge`].
     ///
-    /// Действителен после `wait_readable` и до следующей операции над
-    /// IPC-буфером текущего потока: любой `port_send`/`port_call`/`port_recv`
-    /// (в том числе строка в лог из обработчика) перезапишет поле.
+    /// Значение действительно до следующей операции над IPC-буфером текущего потока. Любой
+    /// `port_send`/`port_call`/`port_recv` перезаписывает это поле.
     #[must_use]
     pub fn peer_badge(&self) -> u64 {
         // SAFETY: см. `load_buffer`. Здесь только чтение поля буфера.
         ipc_buffer_ptr().map_or(0, |ptr| unsafe { (*ptr).badge })
     }
 
-    /// Capability принятого кадра: ядро перенесло их в таблицу текущего
-    /// процесса при рандеву: закрыть их - дело получателя.
+    /// Передаёт владение ресурсами доставленного кадра. Кадр отдаётся один раз,
+    /// и приём, не дошедший до доставки, кадра не оставляет.
     ///
-    /// Действительны там же, где [`peer_badge`](Self::peer_badge).
+    /// Невзятую доставку транспорт закрывает до следующей операции либо при уничтожении.
     #[must_use]
-    pub fn staged_caps(&self) -> [Option<Handle>; IPC_BUFFER_MAX_CAPS] {
+    pub fn take_delivery(&self) -> Option<Delivery> {
+        self.delivered.take()
+    }
+
+    /// Закрывает незавершённый reply названного кадра и будит вызывателя отказом вместо
+    /// бессрочной парковки. No-op, когда ответ уже отправлен, встречный был `cast` либо
+    /// reply принадлежит другому кадру.
+    pub fn finish_reply(&self, reply: Option<Handle>) {
+        let Some(reply) = reply else {
+            return;
+        };
+        if self.pending_reply.get() != Some(reply) {
+            return;
+        }
+        self.pending_reply.set(None);
+        let _ = handle_close(reply);
+    }
+
+    fn record_delivery(&self, reply: Option<Handle>) {
         let Some(ptr) = ipc_buffer_ptr() else {
-            return [None; IPC_BUFFER_MAX_CAPS];
+            return;
         };
         // SAFETY: см. `load_buffer`. Здесь только чтение полей буфера.
-        unsafe {
+        let (badge, caps) = unsafe {
             let buf = &*ptr;
             let ncaps = decode_tag(buf.tag).ncaps.min(IPC_BUFFER_MAX_CAPS);
-            core::array::from_fn(|index| {
+            let caps = core::array::from_fn(|index| {
                 (index < ncaps)
                     .then(|| buf.caps.get(index).copied().and_then(Handle::new))
                     .flatten()
-            })
-        }
+            });
+            (buf.badge, caps)
+        };
+        self.delivered.set(Some(Delivery::new(badge, caps, reply)));
     }
 
-    /// Закрывает сохранённый reply-объект: ответа по нему уже не будет, а
-    /// закрытие будит вызывателя отказом вместо бессрочной парковки.
-    /// No-op, когда ответ уже отправлен либо встречный был `cast`.
-    pub fn cancel_reply(&self) {
+    fn discard_pending_reply(&self) {
         if let Some(reply) = self.pending_reply.take() {
             let _ = handle_close(reply);
         }
     }
 
     fn recv_into_buffer(&self, timeout: Timeout) -> Result<(), IpcError> {
+        drop(self.delivered.take());
+        // Предыдущий запрос завершён без ответа до ожидания следующего отправителя.
+        self.discard_pending_reply();
         let ret = port_recv(self.handle, timeout);
         if ret < 0 {
             return Err(map_recv_error(ret));
@@ -141,6 +171,7 @@ impl PortTransport {
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let reply = Handle::new(ret as u32);
         self.pending_reply.set(reply);
+        self.record_delivery(reply);
         Ok(())
     }
 
@@ -215,7 +246,19 @@ fn map_send_result(ret: i64) -> Result<(), IpcError> {
     }
 }
 
+impl Drop for PortTransport {
+    fn drop(&mut self) {
+        self.discard_pending_reply();
+    }
+}
+
 impl Transport for PortTransport {
+    type Resources = Delivery;
+
+    fn take_resources(&self) -> Delivery {
+        self.take_delivery().unwrap_or_default()
+    }
+
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
         if handles.len() > MESSAGE_MAX_HANDLES {
             return Err(IpcError::FrameOverflow);
@@ -232,6 +275,7 @@ impl Transport for PortTransport {
             return map_send_result(port_reply(reply));
         }
 
+        drop(self.delivered.take());
         Self::store_buffer(bytes, handles)?;
         if header.txid != 0 {
             // Two-way клиентский запрос: запрос уложен в IPC-буфер, но сам
@@ -281,6 +325,7 @@ impl Transport for PortTransport {
                 }
                 map_send_result(ret)?;
                 self.phase.set(Phase::ClientResponseReady);
+                self.record_delivery(None);
                 Ok(())
             }
             // Без отложенного call (например, после уже полученного ответа) -

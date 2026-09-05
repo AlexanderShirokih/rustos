@@ -56,7 +56,7 @@ pub struct PopOutcome {
 pub struct SpscRing {
     head: *const AtomicU32,
     tail: *const AtomicU32,
-    slots: *const u8,
+    slots: *const AtomicU32,
     slot_stride: usize,
     slot_payload: usize,
     capacity: usize,
@@ -127,11 +127,11 @@ impl SpscRing {
         if base.is_null() {
             return None;
         }
-        // Выравнивание под AtomicU32: head/tail и поля len слотов читаются как
-        // AtomicU32, поэтому база (и, как следствие, кратные ей смещения) должна
-        // быть выровнена. slot_stride кратен размеру AtomicU32, что сохраняет
-        // выравнивание полей len во всех слотах.
-        if !(base as usize).is_multiple_of(align_of::<AtomicU32>()) {
+        // head/tail и поля len слотов читаются как AtomicU32, поэтому база (и, как
+        // следствие, кратные ей смещения) должна быть выровнена. slot_stride кратен
+        // размеру AtomicU32, что сохраняет выравнивание полей len во всех слотах.
+        let head: *mut AtomicU32 = base.cast();
+        if !head.is_aligned() {
             return None;
         }
 
@@ -153,21 +153,16 @@ impl SpscRing {
             return None;
         }
 
-        // SAFETY: проверено `region_len >= header`, поэтому `base..base+header`
-        // лежит в пределах региона; `base` выровнен под AtomicU32 (проверка
-        // выше); head/tail не пересекаются и расположены подряд. Регион замаплен
-        // RW на всё время жизни `SpscRing` (контракт вызывающего), доступ к нему
-        // далее идёт только через возвращаемые атомик-указатели.
-        // Выравнивание базы под AtomicU32 проверено выше, поэтому cast корректен.
-        #[allow(clippy::cast_ptr_alignment)]
-        let head = base.cast::<AtomicU32>();
-        // SAFETY: смещение на один AtomicU32 от выровненной базы остаётся в
-        // пределах заголовка (`header == 2 * size_of::<AtomicU32>()`) и сохраняет
-        // выравнивание.
+        // SAFETY: проверено `region_len >= header`, поэтому смещение на один
+        // AtomicU32 от выровненной базы остаётся в пределах заголовка
+        // (`header == 2 * size_of::<AtomicU32>()`) и сохраняет выравнивание.
         let tail = unsafe { head.add(1) };
-        // SAFETY: смещение `header` байт лежит в пределах региона (region_len >=
-        // header + slot_stride, т.к. slots_fit >= 1); это начало массива слотов.
-        let slots = unsafe { base.add(header) };
+        // SAFETY: смещение на два AtomicU32 - это `header` байт от базы, и оно лежит
+        // в пределах региона (region_len >= header + slot_stride, т.к. slots_fit >= 1);
+        // там начинается массив слотов.
+        // Регион замаплен RW на всё время жизни `SpscRing` (контракт
+        // вызывающего), доступ к нему далее идёт только через атомик-указатели.
+        let slots = unsafe { head.add(2) };
 
         Some(Self {
             head: head.cast_const(),
@@ -349,30 +344,26 @@ impl SpscRing {
     fn slot_len_ref(&self, slot: usize) -> &AtomicU32 {
         // SAFETY: slot < capacity, поэтому смещение `slot * slot_stride` от
         // начала массива слотов лежит в пределах региона. slot_stride кратен
-        // size_of::<AtomicU32>(), а база региона выровнена под AtomicU32 -
-        // значит поле len каждого слота тоже выровнено. Регион замаплен RW.
-        let ptr = unsafe { self.slots.add(slot * self.slot_stride) };
-        // SAFETY: см. выше - `ptr` валиден, выровнен под AtomicU32 и не null.
-        // Выравнивание поля len кратно AtomicU32 (проверено в `from_raw`).
-        #[allow(clippy::cast_ptr_alignment)]
-        unsafe {
-            &*ptr.cast::<AtomicU32>()
-        }
+        // size_of::<AtomicU32>(), а массив слотов выровнен под AtomicU32
+        // (проверка в `from_raw`) - значит поле len каждого слота тоже выровнено.
+        let ptr = unsafe { self.slots.byte_add(slot * self.slot_stride) };
+        // SAFETY: `ptr` валиден, выровнен под AtomicU32 и указывает в регион,
+        // замапленный RW на время жизни `SpscRing`.
+        unsafe { &*ptr }
     }
 
     #[inline]
     fn slot_payload_ref(&self, slot: usize) -> &[AtomicU8] {
         // SAFETY: payload идёт сразу за полем len слота; диапазон
         // `[base_слота + size_of::<AtomicU32>(), .. + slot_payload)` лежит в
-        // пределах региона (slot_stride == size_of::<AtomicU32>() + slot_payload,
-        // а сам слот целиком влезает в регион). AtomicU8 имеет выравнивание 1.
-        // Регион замаплен RW на время жизни `SpscRing`.
+        // пределах региона (slot_stride >= size_of::<AtomicU32>() + slot_payload,
+        // а сам слот целиком влезает в регион).
         let ptr = unsafe {
             self.slots
-                .add(slot * self.slot_stride + size_of::<AtomicU32>())
+                .byte_add(slot * self.slot_stride + size_of::<AtomicU32>())
         };
-        // SAFETY: см. выше - `ptr` указывает на `slot_payload` валидных
-        // последовательных AtomicU8 в пределах региона.
+        // SAFETY: `ptr` указывает на `slot_payload` последовательных байт региона,
+        // замапленного RW на время жизни `SpscRing`; AtomicU8 имеет выравнивание 1.
         unsafe { core::slice::from_raw_parts(ptr.cast::<AtomicU8>(), self.slot_payload) }
     }
 }
@@ -391,9 +382,8 @@ const fn prev_power_of_two(n: usize) -> usize {
 extern crate std;
 
 #[cfg(test)]
-#[allow(clippy::undocumented_unsafe_blocks)]
 mod tests {
-    use std::{sync::Arc, thread, vec::Vec};
+    use std::{boxed::Box, sync::Arc, thread, vec::Vec};
 
     use super::*;
 
@@ -405,19 +395,42 @@ mod tests {
     }
 
     impl Region {
-        fn new() -> std::boxed::Box<Region> {
-            std::boxed::Box::new(Region {
+        fn new() -> Box<Region> {
+            Box::new(Region {
                 bytes: [0u8; REGION_BYTES],
             })
         }
     }
 
-    // SAFETY: `region` живёт дольше возвращаемого кольца, замаплен RW, выровнен под
-    // страницу. В каждом тесте над одним регионом существует не более одного producer
-    // и одного consumer.
-    unsafe fn make_ring(region: &mut Region, region_len: usize, slot_payload: usize) -> SpscRing {
-        let base = region.bytes.as_mut_ptr();
-        unsafe { SpscRing::from_raw(base, region_len, slot_payload) }.expect("ring must construct")
+    struct OwnedRing {
+        ring: SpscRing,
+        _region: Box<Region>,
+    }
+
+    impl OwnedRing {
+        fn new(region_len: usize, slot_payload: usize) -> Self {
+            assert!(region_len <= REGION_BYTES, "region must hold the ring");
+            let mut region = Region::new();
+            let base = region.bytes.as_mut_ptr();
+            // SAFETY: регион принадлежит значению и освобождается после кольца,
+            // `Box` держит его по одному адресу, а страничное выравнивание
+            // удовлетворяет AtomicU32. Регион оборачивается только здесь, роли
+            // producer и consumer распределяет тест.
+            let ring = unsafe { SpscRing::from_raw(base, region_len, slot_payload) }
+                .expect("ring must construct");
+            Self {
+                ring,
+                _region: region,
+            }
+        }
+    }
+
+    impl core::ops::Deref for OwnedRing {
+        type Target = SpscRing;
+
+        fn deref(&self) -> &SpscRing {
+            &self.ring
+        }
     }
 
     #[test]
@@ -426,8 +439,10 @@ mod tests {
         let base = region.bytes.as_mut_ptr();
         // Заголовок есть, но ни одного слота.
         let len = SpscRing::header_bytes();
+        // SAFETY: регион остаётся выделенным до конца теста, а кольцо над ним не создаётся.
         assert!(unsafe { SpscRing::from_raw(base, len, 16) }.is_none());
         // Меньше заголовка.
+        // SAFETY: регион остаётся выделенным до конца теста, а кольцо над ним не создаётся.
         assert!(unsafe { SpscRing::from_raw(base, 1, 16) }.is_none());
     }
 
@@ -435,18 +450,19 @@ mod tests {
     fn from_raw_rejects_misaligned_base() {
         let mut region = Region::new();
         // Сдвигаем базу на 1 байт - нарушаем выравнивание под AtomicU32.
+        // SAFETY: смещение на один байт остаётся в пределах региона.
         let base = unsafe { region.bytes.as_mut_ptr().add(1) };
+        // SAFETY: регион остаётся выделенным до конца теста, а кольцо над ним не создаётся.
         assert!(unsafe { SpscRing::from_raw(base, 4096, 16) }.is_none());
     }
 
     #[test]
     fn capacity_is_floored_power_of_two() {
-        let mut region = Region::new();
         let slot_payload = 16usize;
         let stride = SpscRing::slot_bytes(slot_payload);
         // Дадим место ровно под 5 слотов -> capacity должна стать 4.
         let len = SpscRing::header_bytes() + 5 * stride;
-        let ring = unsafe { make_ring(&mut region, len, slot_payload) };
+        let ring = OwnedRing::new(len, slot_payload);
         assert_eq!(ring.capacity(), 4);
         assert_eq!(ring.slot_payload(), slot_payload);
     }
@@ -456,8 +472,7 @@ mod tests {
         // slot_payload не кратен align_of::<AtomicU32>(): страйд должен
         // допаддиться, иначе поле len слота 1+ окажется невыровненным и доступ
         // к нему как к AtomicU32 паникует в debug. Прогоняем через слоты 1..3.
-        let mut region = Region::new();
-        let ring = unsafe { make_ring(&mut region, 4096, 1) };
+        let ring = OwnedRing::new(4096, 1);
         for i in 0..16u8 {
             ring.try_push(&[i]).expect("push");
             let mut buf = [0u8; 1];
@@ -468,8 +483,7 @@ mod tests {
 
     #[test]
     fn push_pop_round_trip_preserves_content_and_len() {
-        let mut region = Region::new();
-        let ring = unsafe { make_ring(&mut region, 4096, 32) };
+        let ring = OwnedRing::new(4096, 32);
         assert!(ring.is_empty());
 
         let frame = b"hello spsc ring";
@@ -486,8 +500,7 @@ mod tests {
 
     #[test]
     fn empty_frame_round_trips() {
-        let mut region = Region::new();
-        let ring = unsafe { make_ring(&mut region, 4096, 8) };
+        let ring = OwnedRing::new(4096, 8);
         ring.try_push(&[]).expect("push empty");
         let mut buf = [0xAAu8; 4];
         let popped = ring.try_pop(&mut buf).expect("pop empty");
@@ -496,8 +509,7 @@ mod tests {
 
     #[test]
     fn too_large_frame_is_rejected() {
-        let mut region = Region::new();
-        let ring = unsafe { make_ring(&mut region, 4096, 8) };
+        let ring = OwnedRing::new(4096, 8);
         let frame = [0u8; 9];
         assert_eq!(ring.try_push(&frame), Err(RingError::TooLarge));
         assert!(ring.is_empty());
@@ -505,8 +517,7 @@ mod tests {
 
     #[test]
     fn pop_into_short_buffer_is_rejected() {
-        let mut region = Region::new();
-        let ring = unsafe { make_ring(&mut region, 4096, 16) };
+        let ring = OwnedRing::new(4096, 16);
         ring.try_push(&[1, 2, 3, 4, 5]).expect("push");
         let mut buf = [0u8; 4];
         assert_eq!(ring.try_pop(&mut buf), Err(RingError::TooLarge));
@@ -517,20 +528,18 @@ mod tests {
 
     #[test]
     fn pop_on_empty_is_rejected() {
-        let mut region = Region::new();
-        let ring = unsafe { make_ring(&mut region, 4096, 16) };
+        let ring = OwnedRing::new(4096, 16);
         let mut buf = [0u8; 16];
         assert_eq!(ring.try_pop(&mut buf), Err(RingError::Empty));
     }
 
     #[test]
     fn push_on_full_is_rejected() {
-        let mut region = Region::new();
         let slot_payload = 8usize;
         let stride = SpscRing::slot_bytes(slot_payload);
         // Ровно 4 слота.
         let len = SpscRing::header_bytes() + 4 * stride;
-        let ring = unsafe { make_ring(&mut region, len, slot_payload) };
+        let ring = OwnedRing::new(len, slot_payload);
         assert_eq!(ring.capacity(), 4);
 
         for i in 0..4u8 {
@@ -542,11 +551,10 @@ mod tests {
 
     #[test]
     fn wraparound_over_many_elements() {
-        let mut region = Region::new();
         let slot_payload = 8usize;
         let stride = SpscRing::slot_bytes(slot_payload);
         let len = SpscRing::header_bytes() + 4 * stride;
-        let ring = unsafe { make_ring(&mut region, len, slot_payload) };
+        let ring = OwnedRing::new(len, slot_payload);
         assert_eq!(ring.capacity(), 4);
 
         // Прогоняем заметно больше capacity элементов попеременно.
@@ -564,11 +572,10 @@ mod tests {
 
     #[test]
     fn wraparound_with_partial_fills() {
-        let mut region = Region::new();
         let slot_payload = 4usize;
         let stride = SpscRing::slot_bytes(slot_payload);
         let len = SpscRing::header_bytes() + 4 * stride;
-        let ring = unsafe { make_ring(&mut region, len, slot_payload) };
+        let ring = OwnedRing::new(len, slot_payload);
 
         let mut next_push = 0u32;
         let mut next_pop = 0u32;
@@ -600,8 +607,7 @@ mod tests {
 
     #[test]
     fn wake_consumer_flag_only_on_push_into_drained_ring() {
-        let mut region = Region::new();
-        let ring = unsafe { make_ring(&mut region, 4096, 8) };
+        let ring = OwnedRing::new(4096, 8);
 
         assert!(ring.try_push(&[1]).unwrap().wake_consumer);
         assert!(!ring.try_push(&[2]).unwrap().wake_consumer);
@@ -619,8 +625,7 @@ mod tests {
 
     #[test]
     fn ring_drained_during_publication_still_requests_wake() {
-        let mut region = Region::new();
-        let ring = unsafe { make_ring(&mut region, 4096, 8) };
+        let ring = OwnedRing::new(4096, 8);
 
         ring.try_push(&[1]).expect("first push");
 
@@ -640,8 +645,7 @@ mod tests {
 
     #[test]
     fn ring_kept_full_during_publication_does_not_request_wake() {
-        let mut region = Region::new();
-        let ring = unsafe { make_ring(&mut region, 4096, 8) };
+        let ring = OwnedRing::new(4096, 8);
 
         ring.try_push(&[1]).expect("first push");
 
@@ -654,18 +658,14 @@ mod tests {
     fn race_producer_and_consumer_preserve_order_and_completeness() {
         const N: u32 = 100_000;
 
-        let mut region = Region::new();
         let slot_payload = 4usize;
         let stride = SpscRing::slot_bytes(slot_payload);
         // Небольшое кольцо - намеренно заставляем producer/consumer бороться.
         let len = SpscRing::header_bytes() + 16 * stride;
-        let base = region.bytes.as_mut_ptr();
 
-        // Producer и consumer держат отдельные значения SpscRing над одним
-        // регионом. Сам буфер не двигается (Box), указатель валиден всё время:
-        // `region` живёт до конца теста, оба потока завершаются через join до его дропа.
-        let producer =
-            Arc::new(unsafe { SpscRing::from_raw(base, len, slot_payload).expect("ring") });
+        // Producer и consumer делят одно кольцо: `Arc` держит регион, пока не
+        // завершится последний из потоков.
+        let producer = Arc::new(OwnedRing::new(len, slot_payload));
         let consumer = Arc::clone(&producer);
 
         let producer_handle = thread::spawn(move || {
@@ -745,13 +745,11 @@ mod tests {
         const FRAME_BYTES: usize = 256;
         const WAKE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
-        let mut region = Region::new();
         let stride = SpscRing::slot_bytes(FRAME_BYTES);
         // Два слота: кольцо вычерпывается досуха на каждом круге.
         let len = SpscRing::header_bytes() + 2 * stride;
-        let base = region.bytes.as_mut_ptr();
 
-        let ring = Arc::new(unsafe { SpscRing::from_raw(base, len, FRAME_BYTES).expect("ring") });
+        let ring = Arc::new(OwnedRing::new(len, FRAME_BYTES));
         let producer = Arc::clone(&ring);
         let consumer = Arc::clone(&ring);
         let producer_signal = Arc::new(StickySignal::new());
@@ -827,9 +825,8 @@ mod tests {
         assert_eq!(SpscRing::slot_bytes(16), 4 + 16);
         assert_eq!(SpscRing::region_bytes(4, 16), 8 + 4 * 20);
         // Регион ровно нужного размера конструируется и даёт ровно эту capacity.
-        let mut region = Region::new();
         let bytes = SpscRing::region_bytes(8, 12);
-        let ring = unsafe { make_ring(&mut region, bytes, 12) };
+        let ring = OwnedRing::new(bytes, 12);
         assert_eq!(ring.capacity(), 8);
     }
 

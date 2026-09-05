@@ -7,10 +7,12 @@
 #![no_std]
 #![allow(unsafe_code)]
 
+mod delivery;
 mod ipc_buffer;
 mod port_transport;
 mod svc;
 
+pub use delivery::{Delivery, ReceivedHandle};
 pub use ipc;
 pub use ipc_buffer::ipc_buffer_ptr;
 pub use port_transport::PortTransport;

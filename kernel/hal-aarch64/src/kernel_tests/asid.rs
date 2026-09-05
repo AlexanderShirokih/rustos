@@ -44,16 +44,16 @@ fn user_rw_flags() -> MemFlags {
     })
 }
 
-fn allocate_probe_page() -> (*mut u8, PageAlignedAddress) {
+fn allocate_probe_page() -> (*mut u64, PageAlignedAddress) {
     let fa = syscall_bridge::frame_allocator().expect("FrameAllocator must be installed");
     // Фрейм течёт намеренно: после маппинга в user-AS вернуть его нельзя.
     let frame = fa.allocate_frame().expect("RAM frame available");
     let pa = frame.page_address();
-    let ptr = (HIGHER_HALF_BASE + pa.as_usize()) as *mut u8;
+    let ptr = (HIGHER_HALF_BASE + pa.as_usize()) as *mut u64;
     // SAFETY: linear higher-half-маппинг покрывает все RAM-фреймы;
     // фрейм только что выдан и эксклюзивно наш.
     unsafe {
-        core::ptr::write_bytes(ptr, 0, PAGE_SIZE);
+        core::ptr::write_bytes(ptr, 0, PAGE_SIZE / size_of::<u64>());
     }
     (ptr, pa)
 }
@@ -88,7 +88,7 @@ fn asid_of(ttbr0: u64) -> u64 {
     (ttbr0 >> 48) & 0xFFFF
 }
 
-fn make_user_as_with_probe_page(va: usize, sentinel: u64) -> (Arc<AddressSpace>, *mut u8) {
+fn make_user_as_with_probe_page(va: usize, sentinel: u64) -> (Arc<AddressSpace>, *mut u64) {
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
     let user_as = AddressSpace::new_user(factory).expect("create user AS");
@@ -101,9 +101,8 @@ fn make_user_as_with_probe_page(va: usize, sentinel: u64) -> (Arc<AddressSpace>,
         .expect("map_exact probe page");
 
     // SAFETY: kheap - свежевыделенная страница, эксклюзивно владеемая нами.
-    #[allow(clippy::cast_ptr_alignment)]
     unsafe {
-        kheap.cast::<u64>().write_volatile(sentinel);
+        kheap.write_volatile(sentinel);
     }
 
     (user_as, kheap)
@@ -160,9 +159,8 @@ fn rollover_smoke() {
 
     let (shared_kheap, shared_pa) = allocate_probe_page();
     // SAFETY: shared_kheap - свежевыделенная страница, эксклюзивно владеемая.
-    #[allow(clippy::cast_ptr_alignment)]
     unsafe {
-        shared_kheap.cast::<u64>().write_volatile(0x5555);
+        shared_kheap.write_volatile(0x5555);
     }
 
     let factory =

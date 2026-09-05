@@ -5,8 +5,6 @@
 //! `protocol!` собирает дескриптор в const-контексте и проверяет по нему сам контракт:
 //! бюджет кадра, пространство `field_id` и совместимость с транспортной плоскостью.
 
-#![allow(clippy::indexing_slicing)]
-
 /// Размер заголовка кадра в байтах (`ordinal` + `txid` + `flags`).
 pub const HEADER_SIZE: usize = 14;
 
@@ -88,10 +86,10 @@ pub const fn max_data_len(field_type: WireType) -> usize {
 
 const fn max_body_len(fields: &[WireType]) -> usize {
     let mut total = 1;
-    let mut index = 0;
-    while index < fields.len() {
-        total += FIELD_OVERHEAD + max_data_len(fields[index]);
-        index += 1;
+    let mut pending = fields;
+    while let [field, tail @ ..] = pending {
+        total += FIELD_OVERHEAD + max_data_len(*field);
+        pending = tail;
     }
     total
 }
@@ -102,19 +100,18 @@ const fn max_body_len(fields: &[WireType]) -> usize {
 /// объявления, до первой передачи.
 #[must_use]
 pub const fn fits_body_budget(desc: &ProtocolDesc, body_max: usize) -> bool {
-    let mut index = 0;
-    while index < desc.operations.len() {
-        let fields = desc.operations[index].fields;
+    let mut operations = desc.operations;
+    while let [operation, tail @ ..] = operations {
         let mut total = 1;
-        let mut field = 0;
-        while field < fields.len() {
-            total += FIELD_OVERHEAD + max_data_len(fields[field].field_type);
-            field += 1;
+        let mut fields = operation.fields;
+        while let [field, others @ ..] = fields {
+            total += FIELD_OVERHEAD + max_data_len(field.field_type);
+            fields = others;
         }
         if total > body_max {
             return false;
         }
-        index += 1;
+        operations = tail;
     }
     true
 }
@@ -122,12 +119,12 @@ pub const fn fits_body_budget(desc: &ProtocolDesc, body_max: usize) -> bool {
 /// Обходится ли контракт односторонними операциями, которые несёт SPSC-кольцо.
 #[must_use]
 pub const fn is_one_way(desc: &ProtocolDesc) -> bool {
-    let mut index = 0;
-    while index < desc.operations.len() {
-        if matches!(desc.operations[index].kind, Kind::Call) {
+    let mut operations = desc.operations;
+    while let [operation, tail @ ..] = operations {
+        if matches!(operation.kind, Kind::Call) {
             return false;
         }
-        index += 1;
+        operations = tail;
     }
     true
 }
@@ -135,19 +132,18 @@ pub const fn is_one_way(desc: &ProtocolDesc) -> bool {
 /// Умещаются ли позиционные `field_id` операций и их вложенных агрегатов в `field_id_max`.
 #[must_use]
 pub const fn fits_field_id_space(desc: &ProtocolDesc, field_id_max: u8) -> bool {
-    let mut index = 0;
-    while index < desc.operations.len() {
-        let fields = desc.operations[index].fields;
-        let mut field = 0;
-        while field < fields.len() {
-            if fields[field].field_id > field_id_max
-                || !type_fits_field_id_space(fields[field].field_type, field_id_max)
+    let mut operations = desc.operations;
+    while let [operation, tail @ ..] = operations {
+        let mut fields = operation.fields;
+        while let [field, others @ ..] = fields {
+            if field.field_id > field_id_max
+                || !type_fits_field_id_space(field.field_type, field_id_max)
             {
                 return false;
             }
-            field += 1;
+            fields = others;
         }
-        index += 1;
+        operations = tail;
     }
     true
 }
@@ -161,12 +157,12 @@ pub const fn type_fits_field_id_space(field_type: WireType, field_id_max: u8) ->
     if fields.len() > field_id_max as usize {
         return false;
     }
-    let mut index = 0;
-    while index < fields.len() {
-        if !type_fits_field_id_space(fields[index], field_id_max) {
+    let mut pending = fields;
+    while let [field, tail @ ..] = pending {
+        if !type_fits_field_id_space(*field, field_id_max) {
             return false;
         }
-        index += 1;
+        pending = tail;
     }
     true
 }

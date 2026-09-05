@@ -293,20 +293,18 @@ impl<'a> Iterator for SlotNames<'a> {
 }
 
 /// Длина записи манифеста с заголовком, обслуживаемыми протоколами и слотами.
-#[allow(clippy::indexing_slicing)]
 #[must_use]
 pub const fn manifest_len(slots: &[SlotDeclaration], export: &str, control: &str) -> usize {
     let mut len = COMPONENT_MANIFEST_HEADER_SIZE + export.len() + control.len();
-    let mut index = 0;
-    while index < slots.len() {
+    let mut pending = slots;
+    while let [slot, tail @ ..] = pending {
         len += COMPONENT_SLOT_HEADER_SIZE;
-        let names = slots[index].names;
-        let mut name = 0;
-        while name < names.len() {
-            len += 1 + names[name].len();
-            name += 1;
+        let mut names = slot.names;
+        while let [name, others @ ..] = names {
+            len += 1 + name.len();
+            names = others;
         }
-        index += 1;
+        pending = tail;
     }
     len
 }
@@ -314,7 +312,6 @@ pub const fn manifest_len(slots: &[SlotDeclaration], export: &str, control: &str
 /// Кодирует запись манифеста целиком. `LEN` равна [`manifest_len`]. `export` и `control`
 /// называют протоколы service- и control-порта, а `establishes_sessions` объявляет, что
 /// сессии своего service-порта компонент заводит сам.
-#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation)]
 #[must_use]
 pub const fn encode_manifest<const LEN: usize>(
     slots: &[SlotDeclaration],
@@ -330,70 +327,65 @@ pub const fn encode_manifest<const LEN: usize>(
         LEN == manifest_len(slots, export, control),
         "record length covers the header, the served protocols and every slot"
     );
-    assert!(
-        export.len() <= u8::MAX as usize,
-        "export name fits its field"
-    );
-    assert!(
-        control.len() <= u8::MAX as usize,
-        "control protocol name fits its field"
-    );
+
+    let mut header = [0; COMPONENT_MANIFEST_HEADER_SIZE];
+    let (magic, _) = header.split_at_mut(COMPONENT_MANIFEST_MAGIC.len());
+    magic.copy_from_slice(&COMPONENT_MANIFEST_MAGIC);
+    let version = COMPONENT_MANIFEST_VERSION.to_le_bytes();
+    header[OFFSET_VERSION] = version[0];
+    header[OFFSET_VERSION + 1] = version[1];
+    // Число слотов ограничено `COMPONENT_SLOT_MAX` проверкой выше.
+    #[allow(clippy::cast_possible_truncation)]
+    let count = (slots.len() as u16).to_le_bytes();
+    header[OFFSET_SLOT_COUNT] = count[0];
+    header[OFFSET_SLOT_COUNT + 1] = count[1];
+    header[OFFSET_EXPORT_LEN] = len_byte(export.len());
+    header[OFFSET_CONTROL_LEN] = len_byte(control.len());
+    if establishes_sessions {
+        header[OFFSET_FLAGS] = FLAG_ESTABLISHES_SESSIONS;
+    }
 
     let mut bytes = [0; LEN];
-    let mut index = 0;
-    while index < COMPONENT_MANIFEST_MAGIC.len() {
-        bytes[index] = COMPONENT_MANIFEST_MAGIC[index];
-        index += 1;
-    }
-    let version = COMPONENT_MANIFEST_VERSION.to_le_bytes();
-    bytes[OFFSET_VERSION] = version[0];
-    bytes[OFFSET_VERSION + 1] = version[1];
-    let count = (slots.len() as u16).to_le_bytes();
-    bytes[OFFSET_SLOT_COUNT] = count[0];
-    bytes[OFFSET_SLOT_COUNT + 1] = count[1];
-    bytes[OFFSET_EXPORT_LEN] = export.len() as u8;
-    bytes[OFFSET_CONTROL_LEN] = control.len() as u8;
-    if establishes_sessions {
-        bytes[OFFSET_FLAGS] = FLAG_ESTABLISHES_SESSIONS;
-    }
+    let mut rest: &mut [u8] = &mut bytes;
+    rest = write_bytes(rest, &header);
+    rest = write_bytes(rest, export.as_bytes());
+    rest = write_bytes(rest, control.as_bytes());
 
-    let mut at = COMPONENT_MANIFEST_HEADER_SIZE;
-    at = write_bytes(&mut bytes, at, export.as_bytes());
-    at = write_bytes(&mut bytes, at, control.as_bytes());
-
-    let mut slot = 0;
-    while slot < slots.len() {
-        let declaration = &slots[slot];
-        bytes[at] = declaration.kind as u8;
+    let mut pending = slots;
+    while let [declaration, tail @ ..] = pending {
         let resource = declaration.resource.to_le_bytes();
-        bytes[at + 1] = resource[0];
-        bytes[at + 2] = resource[1];
-        bytes[at + 3] = declaration.names.len() as u8;
-        at += COMPONENT_SLOT_HEADER_SIZE;
+        let slot_header = [
+            declaration.kind as u8,
+            resource[0],
+            resource[1],
+            len_byte(declaration.names.len()),
+        ];
+        rest = write_bytes(rest, &slot_header);
 
-        let mut name = 0;
-        while name < declaration.names.len() {
-            let text = declaration.names[name].as_bytes();
+        let mut names = declaration.names;
+        while let [name, others @ ..] = names {
+            let text = name.as_bytes();
             assert!(!text.is_empty(), "slot name is non-empty");
-            assert!(text.len() <= u8::MAX as usize, "slot name fits its field");
-            bytes[at] = text.len() as u8;
-            at = write_bytes(&mut bytes, at + 1, text);
-            name += 1;
+            rest = write_bytes(rest, &[len_byte(text.len())]);
+            rest = write_bytes(rest, text);
+            names = others;
         }
-        slot += 1;
+        pending = tail;
     }
     bytes
 }
 
-#[allow(clippy::indexing_slicing)]
-const fn write_bytes<const LEN: usize>(bytes: &mut [u8; LEN], at: usize, text: &[u8]) -> usize {
-    // Запись идёт в `const fn`, где срезы по `get` недоступны, а длину проверил вызывающий.
-    let mut index = 0;
-    while index < text.len() {
-        bytes[at + index] = text[index];
-        index += 1;
-    }
-    at + text.len()
+#[allow(clippy::cast_possible_truncation)]
+const fn len_byte(len: usize) -> u8 {
+    assert!(len <= u8::MAX as usize, "field length fits a byte");
+    len as u8
+}
+
+const fn write_bytes<'a>(bytes: &'a mut [u8], text: &[u8]) -> &'a mut [u8] {
+    // `LEN` равна `manifest_len`, и остаток буфера покрывает `text`.
+    let (written, rest) = bytes.split_at_mut(text.len());
+    written.copy_from_slice(text);
+    rest
 }
 
 /// Разбирает запись манифеста. Буфер разбирается целиком: хвост сверх записи

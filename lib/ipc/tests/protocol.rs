@@ -88,13 +88,13 @@ fn round_trip<R: Send>(
 #[test]
 fn two_way_without_error_round_trip() {
     let (result, _server) = round_trip(1, |client| client.add(7, 35));
-    assert_eq!(result, Ok(42));
+    assert_eq!(result.map(|response| response.value), Ok(42));
 }
 
 #[test]
 fn two_way_domain_success() {
     let (result, _server) = round_trip(1, |client| client.div(84, 2));
-    assert_eq!(result, Ok(Ok(42)));
+    assert_eq!(result.map(|response| response.value), Ok(Ok(42)));
 }
 
 #[test]
@@ -105,8 +105,11 @@ fn two_way_domain_error_keeps_channel() {
         let ok = client.add(20, 22);
         (err, ok)
     });
-    assert_eq!(result.0, Ok(Err(ERR_DIVIDE_BY_ZERO)));
-    assert_eq!(result.1, Ok(42));
+    assert_eq!(
+        result.0.map(|response| response.value),
+        Ok(Err(ERR_DIVIDE_BY_ZERO))
+    );
+    assert_eq!(result.1.map(|response| response.value), Ok(42));
 }
 
 #[test]
@@ -114,7 +117,7 @@ fn two_way_bounded_str_param() {
     let (result, _server) = round_trip(1, |client| {
         client.echo_len(Str::<16>::new("hello").expect("within bound"))
     });
-    assert_eq!(result, Ok(5));
+    assert_eq!(result.map(|response| response.value), Ok(5));
 }
 
 #[test]
@@ -213,7 +216,7 @@ fn mismatched_txid_is_skipped() {
     // Клиент шлёт add (его запрос осядет в очереди сервера, тут не читается) и
     // читает ответ: кадр с чужим txid отброшен, принят кадр с txid=1 (R2).
     let result = client.add(0, 0);
-    assert_eq!(result, Ok(42));
+    assert_eq!(result.map(|response| response.value), Ok(42));
 }
 
 #[test]
@@ -418,6 +421,10 @@ impl CastOutcome {
 }
 
 impl Transport for CastOutcome {
+    type Resources = ();
+
+    fn take_resources(&self) {}
+
     fn write_message(&self, _bytes: &[u8], handles: &[u32]) -> Result<(), ipc::wire::IpcError> {
         self.handles.borrow_mut().extend_from_slice(handles);
         self.result
@@ -529,16 +536,21 @@ fn cap_param_and_return_round_trip() {
             }
         });
         let sent = ipc::wire::Cap::from_raw(std::num::NonZeroU32::new(0x1234).expect("non-zero"));
-        let echoed = client.echo_cap(sent).expect("echo ok");
-        assert_eq!(echoed.raw().get(), 0x1234);
+        let mut echoed = client.echo_cap(sent).expect("echo ok");
+        assert_eq!(echoed.value.raw().get(), 0x1234);
 
-        let acquired = client.acquire(true).expect("acquire ok");
+        let mut acquired = client.acquire(true).expect("acquire ok");
         assert_eq!(
-            acquired,
+            acquired.value,
             Ok(ipc::wire::Cap::from_raw(
                 std::num::NonZeroU32::new(0x55).expect("non-zero")
             ))
         );
+        assert_eq!(echoed.claim(echoed.value), Some(sent));
+        assert_eq!(echoed.claim(echoed.value), None);
+        let cap = acquired.value.expect("acquired capability");
+        assert_eq!(acquired.claim(cap), Some(cap));
+        assert_eq!(acquired.claim(cap), None);
         server.join().expect("server thread");
     });
 }
@@ -556,7 +568,7 @@ fn cap_domain_error_carries_no_handle() {
             cap_proto::dispatch(&mut srv, &server_end).expect("dispatch ok");
         });
         let acquired = client.acquire(false).expect("acquire ok");
-        assert_eq!(acquired, Err(7));
+        assert_eq!(acquired.value, Err(7));
         server.join().expect("server thread");
     });
 }
@@ -624,9 +636,12 @@ fn aggregate_carries_a_capability_alongside_scalars() {
             vendor::dispatch(&mut VendorServer, &server_end).expect("dispatch ok");
         });
 
-        let vended = client.vend(7).expect("vend ok");
-        assert_eq!(vended.prefix_len, 7);
-        assert_eq!(vended.session.raw().get(), 0x5151);
+        let mut vended = client.vend(7).expect("vend ok");
+        assert_eq!(vended.value.prefix_len, 7);
+        let session = vended.value.session;
+        assert_eq!(session.raw().get(), 0x5151);
+        assert_eq!(vended.claim(session), Some(session));
+        assert_eq!(vended.claim(session), None);
 
         server.join().expect("server joins");
     });
@@ -682,7 +697,7 @@ fn aggregate_param_and_return_round_trip() {
         let moved = client
             .translate(Point { x: 10, y: 20 }, 3, 4)
             .expect("translate ok");
-        assert_eq!(moved, Point { x: 13, y: 24 });
+        assert_eq!(moved.value, Point { x: 13, y: 24 });
 
         // Вложенный агрегат: рекурсивный суб-кадр в параметре и возврате.
         let flipped = client
@@ -692,7 +707,7 @@ fn aggregate_param_and_return_round_trip() {
             })
             .expect("flip ok");
         assert_eq!(
-            flipped,
+            flipped.value,
             Segment {
                 from: Point { x: 3, y: 4 },
                 to: Point { x: 1, y: 2 },
@@ -704,7 +719,7 @@ fn aggregate_param_and_return_round_trip() {
             value: 40,
         };
         let len = client.label_len(tagged).expect("label_len ok");
-        assert_eq!(len, 42);
+        assert_eq!(len.value, 42);
 
         server.join().expect("server thread");
     });
@@ -822,7 +837,7 @@ fn protocol_level_default_timeout_times_out() {
     let (client_end, _server_end) = MockEnd::pair();
     let client = timed::Client::new(client_end);
     assert_eq!(client.wait(), ipc::Timeout::POLL);
-    assert_eq!(client.ping(), Err(IpcError::Timeout));
+    assert!(matches!(client.ping(), Err(IpcError::Timeout)));
 }
 
 #[test]
@@ -831,7 +846,7 @@ fn per_call_timeout_override_times_out() {
     let client = mixed::Client::new(client_end);
     // Дефолт клиента бессрочный, но `quick` несёт собственный timeout_ns = 0.
     assert_eq!(client.wait(), ipc::Timeout::INFINITE);
-    assert_eq!(client.quick(), Err(IpcError::Timeout));
+    assert!(matches!(client.quick(), Err(IpcError::Timeout)));
 }
 
 #[test]
@@ -840,5 +855,133 @@ fn with_wait_builder_overrides_default() {
     let client = calc::Client::new(client_end).with_wait(ipc::Timeout::POLL);
     assert_eq!(client.wait(), ipc::Timeout::POLL);
     // Сервера нет -> two-way call истекает по тайм-ауту.
-    assert_eq!(client.add(1, 2), Err(IpcError::Timeout));
+    assert!(matches!(client.add(1, 2), Err(IpcError::Timeout)));
+}
+
+const STAGED_CAP: u32 = 0x9191;
+
+struct TrackedResources {
+    caps: Vec<ipc::wire::Cap>,
+    closed: Arc<AtomicUsize>,
+}
+
+impl ipc::ReceivedResources for TrackedResources {
+    type Handle = ipc::wire::Cap;
+
+    fn claim(&mut self, cap: ipc::wire::Cap) -> Option<ipc::wire::Cap> {
+        let index = self.caps.iter().position(|&held| held == cap)?;
+        Some(self.caps.remove(index))
+    }
+
+    fn retain_decoded(&mut self, slots: &ipc::wire::HandleSlots) {
+        let closed = &self.closed;
+        self.caps.retain(|cap| {
+            let decoded = slots.decoded(cap.raw().get());
+            if !decoded {
+                closed.fetch_add(1, Ordering::SeqCst);
+            }
+            decoded
+        });
+    }
+}
+
+impl Drop for TrackedResources {
+    fn drop(&mut self) {
+        self.closed.fetch_add(self.caps.len(), Ordering::SeqCst);
+    }
+}
+
+struct StagedAggregate {
+    request: RefCell<Option<Header>>,
+    delivered: std::cell::Cell<bool>,
+    closed: Arc<AtomicUsize>,
+}
+
+impl StagedAggregate {
+    fn new(closed: Arc<AtomicUsize>) -> Self {
+        Self {
+            request: RefCell::new(None),
+            delivered: std::cell::Cell::new(false),
+            closed,
+        }
+    }
+
+    fn reply_frame(header: &Header) -> Vec<u8> {
+        // Суб-кадр агрегата содержит поле capability и обрывается терминатором до `prefix_len`.
+        let mut aggregate = vec![1u8];
+        aggregate.extend_from_slice(&1u16.to_le_bytes());
+        aggregate.push(0);
+        aggregate.push(ipc::wire::TERMINATOR);
+
+        let mut frame = vec![0u8; ipc::wire::HEADER_SIZE];
+        Header::new(header.ordinal, header.txid, ipc::wire::FLAG_RESPONSE)
+            .encode(&mut frame)
+            .expect("reply header");
+        frame.push(1u8);
+        frame.extend_from_slice(&(aggregate.len() as u16).to_le_bytes());
+        frame.extend_from_slice(&aggregate);
+        frame.push(ipc::wire::TERMINATOR);
+        frame
+    }
+}
+
+impl Transport for StagedAggregate {
+    type Resources = TrackedResources;
+
+    fn take_resources(&self) -> TrackedResources {
+        let caps = if self.delivered.replace(false) {
+            vec![ipc::wire::Cap::from_raw(
+                std::num::NonZeroU32::new(STAGED_CAP).expect("non-zero"),
+            )]
+        } else {
+            Vec::new()
+        };
+        TrackedResources {
+            caps,
+            closed: Arc::clone(&self.closed),
+        }
+    }
+
+    fn write_message(&self, bytes: &[u8], _handles: &[u32]) -> Result<(), ipc::wire::IpcError> {
+        *self.request.borrow_mut() = Some(Header::decode(bytes)?);
+        Ok(())
+    }
+
+    fn read_message(
+        &self,
+        bytes: &mut [u8],
+        handles: &mut [u32],
+    ) -> Result<ipc::MessageLen, ipc::wire::IpcError> {
+        let request = self
+            .request
+            .borrow()
+            .ok_or(ipc::wire::IpcError::WouldBlock)?;
+        let frame = Self::reply_frame(&request);
+        let Some(target) = bytes.get_mut(..frame.len()) else {
+            return Err(ipc::wire::IpcError::Truncated);
+        };
+        target.copy_from_slice(&frame);
+        let Some(slot) = handles.first_mut() else {
+            return Err(ipc::wire::IpcError::Truncated);
+        };
+        *slot = STAGED_CAP;
+        self.delivered.set(true);
+        Ok(ipc::MessageLen::new(frame.len(), 1))
+    }
+
+    fn wait_readable(&self, _timeout: ipc::Timeout) -> Result<(), ipc::wire::IpcError> {
+        Ok(())
+    }
+}
+
+/// Отказ разбора после уже взятой capability агрегата закрывает ресурсы кадра целиком.
+#[test]
+fn an_aggregate_decode_failure_closes_the_delivered_capability() {
+    let closed = Arc::new(AtomicUsize::new(0));
+    let client = vendor::Client::new(StagedAggregate::new(Arc::clone(&closed)));
+
+    let refused = client.vend(7).err().expect("aggregate is incomplete");
+
+    assert_eq!(refused, ipc::wire::IpcError::MissingField);
+    assert_eq!(closed.load(Ordering::SeqCst), 1);
 }

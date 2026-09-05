@@ -20,7 +20,7 @@ use component_abi::{component_sessions, supervisor_gone};
 use filesystem::FileSystemBackend;
 use filesystem_abi::file_system;
 use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::{MemoryRegion, OwnedHandle, ReadOnlyMapping, Resource, Thread};
+use kernel_objects::{MemoryRegion, OwnedHandle, ReadOnlyMapping, ReceivedFrame, Resource, Thread};
 use runtime::{
     Mutex, PortTransport, Priority, exit_with_sibling, install_log, log_line, spawn_owned,
 };
@@ -98,7 +98,6 @@ where
 
 fn serve_sessions(shared: &Shared) {
     let transport = PortTransport::server(shared.service.borrow());
-    let mut frame = Frame::default();
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
@@ -116,22 +115,22 @@ fn serve_sessions(shared: &Shared) {
                 return;
             }
         }
-        frame.begin(
-            transport.peer_badge(),
-            transport.staged_caps().into_iter().flatten(),
-        );
+        // Приём выше доставил кадр, и его capability вместе с незавершённым ответом
+        // принадлежат владеющему кадру до конца обработки.
+        let Some(mut received) = ReceivedFrame::take(&transport) else {
+            continue;
+        };
+        let mut frame = Frame::default();
         let mut serving = Serving {
             state: shared.state.lock(),
             frame: &mut frame,
+            received: &mut received,
             service: &shared.service,
             next_badge: &shared.next_badge,
         };
         let delivered = file_system::dispatch(&mut serving, &transport).is_ok();
         drop(serving);
         frame.end(delivered, &mut shared.state.lock());
-        // Reply-объект не переживает свой кадр: закрытие неотправленного ответа будит
-        // припаркованного вызывателя.
-        transport.cancel_reply();
     }
     log_line("service port closed");
 }
@@ -161,10 +160,11 @@ fn serve_admin(shared: &Shared) -> u32 {
                 return 1;
             }
         }
+        let received = ReceivedFrame::take(&transport);
         let mut establishing = Establishing::new(shared);
         let delivered = component_sessions::dispatch(&mut establishing, &transport).is_ok();
         establishing.end(delivered);
-        transport.cancel_reply();
+        drop(received);
     }
     log_line("control port closed");
     0

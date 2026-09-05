@@ -2,7 +2,7 @@
 
 use core::{marker::PhantomData, mem::ManuallyDrop, num::NonZeroU64};
 
-use ipc::{IntoWireHandle, wire::Cap};
+use ipc::IntoWireHandle;
 use syscall::{Handle, RawHandle, Rights};
 
 use crate::{
@@ -40,11 +40,6 @@ impl OwnedHandle {
         Handle::new(raw).map(Self::from_handle)
     }
 
-    /// Усыновляет capability, доставленный по IPC, во владение.
-    pub fn adopt(cap: Cap) -> Self {
-        Self::from_handle(Handle::from_nonzero(cap.raw()))
-    }
-
     /// Владеемый хэндл для укладки в аргумент syscall.
     pub fn as_raw(&self) -> Handle {
         self.handle
@@ -79,6 +74,12 @@ impl OwnedHandle {
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         let _ = svc::handle_close(self.handle);
+    }
+}
+
+impl From<syscall_user::ReceivedHandle> for OwnedHandle {
+    fn from(received: syscall_user::ReceivedHandle) -> Self {
+        Self::from_handle(received.into_raw())
     }
 }
 

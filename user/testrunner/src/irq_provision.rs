@@ -24,11 +24,12 @@ const PRIVATE_IRQ_MAX: u16 = SPI_BASE - 1;
 fn acquire_irq_control_and_mint_line() {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
 
-    let cap = client
+    let mut response = client
         .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
-    let control = IrqControl::from_handle(OwnedHandle::adopt(cap));
+        .expect("acquire_irq_control call");
+    let capability = response.value.expect("vend ok");
+    let cap = response.claim(capability).expect("capability owner");
+    let control = IrqControl::from_handle(OwnedHandle::from(cap));
 
     // Успешный минт доказывает, что доставленный capability установлен ядром в таблицу процесса.
     let line = control
@@ -43,11 +44,12 @@ fn acquire_irq_control_and_mint_line() {
 #[kernel_test]
 fn minting_a_line_twice_names_the_taken_line() {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let cap = client
+    let mut response = client
         .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
-    let control = IrqControl::from_handle(OwnedHandle::adopt(cap));
+        .expect("acquire_irq_control call");
+    let capability = response.value.expect("vend ok");
+    let cap = response.claim(capability).expect("capability owner");
+    let control = IrqControl::from_handle(OwnedHandle::from(cap));
     let line = control
         .mint(SPARE_IRQ, IrqTrigger::Level)
         .expect("mint IrqLine");
@@ -83,11 +85,12 @@ fn first_line_outside(control: &IrqControl) -> u16 {
 #[kernel_test]
 fn irq_band_ends_at_the_platform_line_count() {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let cap = client
+    let mut response = client
         .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
-    let control = IrqControl::from_handle(OwnedHandle::adopt(cap));
+        .expect("acquire_irq_control call");
+    let capability = response.value.expect("vend ok");
+    let cap = response.claim(capability).expect("capability owner");
+    let control = IrqControl::from_handle(OwnedHandle::from(cap));
 
     let outside = first_line_outside(&control);
 
@@ -104,11 +107,12 @@ fn irq_band_ends_at_the_platform_line_count() {
 #[kernel_test]
 fn irq_band_starts_above_the_private_lines() {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let cap = client
+    let mut response = client
         .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
-    let control = IrqControl::from_handle(OwnedHandle::adopt(cap));
+        .expect("acquire_irq_control call");
+    let capability = response.value.expect("vend ok");
+    let cap = response.claim(capability).expect("capability owner");
+    let control = IrqControl::from_handle(OwnedHandle::from(cap));
 
     // Нижний край полосы архитектурно фиксирован SPI_BASE: `PRIVATE_IRQ_MAX` -
     // последняя приватная линия CPU, вне полосы на любой машине.

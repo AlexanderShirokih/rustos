@@ -95,6 +95,15 @@ impl HandleSlots {
         // массива; на невозможном `count` пустой набор безопаснее выдуманных хэндлов.
         self.ids.get(..self.count).unwrap_or_default()
     }
+
+    /// Определяет, потребило ли декодирование слот указанного хэндла.
+    #[must_use]
+    pub fn decoded(&self, raw: u32) -> bool {
+        self.as_slice()
+            .iter()
+            .enumerate()
+            .any(|(index, &id)| id == raw && self.taken.get() & (1u8 << index) != 0)
+    }
 }
 
 impl Default for HandleSlots {

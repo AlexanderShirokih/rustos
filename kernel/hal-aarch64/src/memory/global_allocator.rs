@@ -69,12 +69,16 @@ impl GlobalKernelAllocator {
     }
 
     // SAFETY: caller держит фазу >= PHASE_BUMP, в которой bump-аллокатор
-    // инициализирован, и не допускает конкурентного доступа к нему.
-    #[allow(clippy::mut_from_ref)]
-    pub(crate) unsafe fn get_bump(&self) -> &mut BumpAllocator {
-        // SAFETY: caller гарантирует инициализацию `bump` (фаза >= PHASE_BUMP) и отсутствие гонок;
-        // `assume_init_mut` корректен.
-        unsafe { (*self.bump.get()).assume_init_mut() }
+    // инициализирован, и не допускает конкурентного доступа к нему на время
+    // вызова `f`; `f` не выполняет аллокацию, потому что повторный вход даёт
+    // вторую `&mut` на слот.
+    pub(crate) unsafe fn with_bump<R>(&self, f: impl FnOnce(&mut BumpAllocator) -> R) -> R {
+        // SAFETY: caller гарантирует отсутствие других ссылок на слот на время
+        // вызова; `UnsafeCell::get` отдаёт валидный указатель на него.
+        let slot = unsafe { &mut *self.bump.get() };
+        // SAFETY: caller гарантирует фазу >= PHASE_BUMP, в которой `set_bump`
+        // уже записал аллокатор в слот.
+        f(unsafe { slot.assume_init_mut() })
     }
 
     // SAFETY: caller держит фазу PHASE_HEAP, в которой слот heap инициализирован.
@@ -94,8 +98,9 @@ impl GlobalKernelAllocator {
 unsafe impl GlobalAlloc for GlobalKernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match self.phase.load(Ordering::Acquire) {
-            // SAFETY: фаза PHASE_BUMP гарантирует, что bump инициализирован
-            PHASE_BUMP => match unsafe { self.get_bump() }.allocate(layout) {
+            // SAFETY: фаза PHASE_BUMP гарантирует, что bump инициализирован, а
+            // до включения MMU доступ к нему однопоточен.
+            PHASE_BUMP => match unsafe { self.with_bump(|bump| bump.allocate(layout)) } {
                 Ok(ptr) => ptr.as_ptr(),
                 Err(_) => core::ptr::null_mut(),
             },

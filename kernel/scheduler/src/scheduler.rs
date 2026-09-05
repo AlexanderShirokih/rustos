@@ -405,12 +405,10 @@ where
         // SAFETY: `prepare_first_thread_start` под scheduler-lock выбирает первый
         // runnable поток и возвращает указатель на его уже инициализированный
         // архитектурный контекст, который хранится в таблице потоков scheduler-а.
-        // Preemption/IRQ здесь всё ещё замаскированы, как того требует `A::start`;
-        // они будут разрешены только после входа в поток через trampoline.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            A::start(&*next_ptr)
-        }
+        let next = unsafe { &*next_ptr };
+        // SAFETY: preemption/IRQ здесь всё ещё замаскированы, как того требует
+        // `A::start`; они разрешаются только после входа в поток через trampoline.
+        unsafe { A::start(next) }
     }
 }
 
@@ -2263,11 +2261,16 @@ pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
         if let AddressSpaceTransition::Switch(handle) = address_space {
             A::switch_address_space(handle);
         }
-        // SAFETY: raw pointers подготовлены под scheduler-lock-ом, а поток, на
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            A::switch(&mut *prev, &*next);
-        }
+        // SAFETY: `prev` подготовлен под scheduler-lock-ом и указывает на живой
+        // контекст текущего потока; отложенный `ScheduleAction` даёт на него
+        // эксклюзивное владение.
+        let prev = unsafe { &mut *prev };
+        // SAFETY: `next` подготовлен под тем же локом и указывает на живой
+        // контекст, отличный от `prev`.
+        let next = unsafe { &*next };
+        // SAFETY: preemption выключен, оба контекста принадлежат `ThreadStack`
+        // и живы до завершения переключения.
+        unsafe { A::switch(prev, next) };
     }
 
     // Ушедший в exit поток сюда не возвращается: отметку снимает и процесс

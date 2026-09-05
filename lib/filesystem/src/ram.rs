@@ -338,12 +338,16 @@ impl FileSystemBackend for RamFileSystem {
         &mut self,
         stores: &mut dyn ByteStore,
         path: Path<'_>,
+        expected: NodeKind,
     ) -> Result<(), FileSystemError> {
         let (directory, name) = self.parent_of(path)?;
         let (index, node) = self
             .locate(directory, name)?
             .ok_or(FileSystemError::NotFound)?;
         let info = self.metadata(node)?;
+        if info.kind != expected {
+            return Err(crate::backend::kind_mismatch(expected));
+        }
         if info.kind.is_directory() && info.size != 0 {
             return Err(FileSystemError::NotEmpty);
         }
@@ -866,7 +870,10 @@ mod tests {
             fs.create(Path::ROOT, NodeKind::Directory),
             Err(FileSystemError::InvalidPath)
         );
-        assert_eq!(fs.unlink(Path::ROOT), Err(FileSystemError::InvalidPath));
+        assert_eq!(
+            fs.unlink(Path::ROOT, NodeKind::Directory),
+            Err(FileSystemError::InvalidPath)
+        );
     }
 
     #[test]
@@ -969,9 +976,12 @@ mod tests {
         fs.retain(sample).expect("retain");
         fs.write_at(sample, 0, b"body").expect("write");
 
-        assert_eq!(fs.unlink(path("/sample")), Ok(()));
+        assert_eq!(fs.unlink(path("/sample"), NodeKind::File), Ok(()));
         assert_eq!(fs.lookup(path("/sample")), Err(FileSystemError::NotFound));
-        assert_eq!(fs.unlink(path("/sample")), Err(FileSystemError::NotFound));
+        assert_eq!(
+            fs.unlink(path("/sample"), NodeKind::File),
+            Err(FileSystemError::NotFound)
+        );
         // Держатель закрепляет идентичность: узел переживает имя.
         assert_eq!(read(&fs, sample, 0, 16), b"body");
     }
@@ -982,7 +992,7 @@ mod tests {
         let sample = file(&mut fs, "/sample");
         fs.write_at(sample, 0, b"body").expect("write");
 
-        assert_eq!(fs.unlink(path("/sample")), Ok(()));
+        assert_eq!(fs.unlink(path("/sample"), NodeKind::File), Ok(()));
         assert_eq!(fs.metadata(sample), Err(FileSystemError::NotFound));
         assert_eq!(
             fs.read_at(sample, 0, &mut [0; 4]),
@@ -995,7 +1005,7 @@ mod tests {
         let mut fs = RamFileSystem::new();
         let held = file(&mut fs, "/held");
         fs.retain(held).expect("retain");
-        fs.unlink(path("/held")).expect("unlink");
+        fs.unlink(path("/held"), NodeKind::File).expect("unlink");
 
         // Слот занят до ухода держателя: соседнее имя заводится рядом.
         let neighbour = file(&mut fs, "/neighbour");
@@ -1013,7 +1023,7 @@ mod tests {
         let mut fs = RamFileSystem::new();
         let stale = file(&mut fs, "/stale");
         fs.write_at(stale, 0, b"stale").expect("write");
-        fs.unlink(path("/stale")).expect("unlink");
+        fs.unlink(path("/stale"), NodeKind::File).expect("unlink");
 
         let fresh = file(&mut fs, "/fresh");
         fs.write_at(fresh, 0, b"fresh").expect("write");
@@ -1030,7 +1040,7 @@ mod tests {
         let mut fs = RamFileSystem::new();
         for _ in 0..10 * NODE_LIMIT {
             file(&mut fs, "/cycle");
-            fs.unlink(path("/cycle")).expect("unlink");
+            fs.unlink(path("/cycle"), NodeKind::File).expect("unlink");
         }
         // Корень и ячейка снятого имени - всё, что занимает арена цикла.
         assert_eq!(fs.backend.nodes.len(), 2);
@@ -1044,7 +1054,7 @@ mod tests {
         fs.write_at(sample, 0, b"body").expect("write");
         let window = fs.backing(sample).expect("promote");
 
-        fs.unlink(path("/sample")).expect("unlink");
+        fs.unlink(path("/sample"), NodeKind::File).expect("unlink");
         // Байты узла уходят вместе с ним: хранилище возвращается серверу.
         assert_eq!(
             fs.stores.read(window.store, 0, &mut [0; 4]),
@@ -1058,7 +1068,10 @@ mod tests {
         let data = directory(&mut fs, "/data");
         file(&mut fs, "/data/sample");
 
-        assert_eq!(fs.unlink(path("/data")), Err(FileSystemError::NotEmpty));
+        assert_eq!(
+            fs.unlink(path("/data"), NodeKind::Directory),
+            Err(FileSystemError::NotEmpty)
+        );
         // Отказ не тронул ни имя каталога, ни его содержимое.
         assert_eq!(fs.lookup(path("/data")), Ok(data));
         assert_eq!(listing(&fs, data, DirCursor::START, 64).0, ["sample"]);
@@ -1071,11 +1084,31 @@ mod tests {
         let data = directory(&mut fs, "/data");
         file(&mut fs, "/data/sample");
 
-        fs.unlink(path("/data/sample")).expect("unlink the entry");
+        fs.unlink(path("/data/sample"), NodeKind::File)
+            .expect("unlink the entry");
         // Надгробие не считается записью: каталог пуст.
         assert_eq!(fs.metadata(data).expect("metadata").size, 0);
-        assert_eq!(fs.unlink(path("/data")), Ok(()));
+        assert_eq!(fs.unlink(path("/data"), NodeKind::Directory), Ok(()));
         assert_eq!(fs.lookup(path("/data")), Err(FileSystemError::NotFound));
+    }
+
+    #[test]
+    fn unlink_of_a_kind_that_does_not_match_keeps_the_name() {
+        let mut fs = RamFileSystem::new();
+        let data = directory(&mut fs, "/data");
+        let sample = file(&mut fs, "/sample");
+
+        assert_eq!(
+            fs.unlink(path("/data"), NodeKind::File),
+            Err(FileSystemError::IsADirectory)
+        );
+        assert_eq!(
+            fs.unlink(path("/sample"), NodeKind::Directory),
+            Err(FileSystemError::NotADirectory)
+        );
+
+        assert_eq!(fs.lookup(path("/data")), Ok(data));
+        assert_eq!(fs.lookup(path("/sample")), Ok(sample));
     }
 
     #[test]
@@ -1211,7 +1244,7 @@ mod tests {
         for name in ["a", "b", "c"] {
             file(&mut fs, &(String::from("/data/") + name));
         }
-        fs.unlink(path("/data/b")).expect("unlink");
+        fs.unlink(path("/data/b"), NodeKind::File).expect("unlink");
         file(&mut fs, "/data/d");
 
         // Соседи надгробия не сдвинулись, а новая запись переиспользовала его слот.
@@ -1257,7 +1290,7 @@ mod tests {
         for name in ["a", "b", "c", "d", "e"] {
             file(&mut fs, &(String::from("/data/") + name));
         }
-        fs.unlink(path("/data/b")).expect("unlink");
+        fs.unlink(path("/data/b"), NodeKind::File).expect("unlink");
 
         // Надгробие в слоте 1 занимает слот, не давая записи: первый заход из
         // двух записей доходит до слота 3 вместо слота 2.

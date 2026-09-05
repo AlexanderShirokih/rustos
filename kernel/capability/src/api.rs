@@ -9,7 +9,6 @@ use super::{
     handle_table::{HandleTable, RejectedInsert},
     irq_control::IrqControl,
     irq_line::IrqLine,
-    irq_runtime::interrupts_control,
     runtime::{installed_runtime, runtime},
     signal::Signal,
     wait::{
@@ -359,7 +358,7 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
 /// `control_handle`.
 /// Требует [`Rights::WRITE`] на `IrqControl`-хендле и попадания `irq` в его
 /// диапазон (`permits`).
-/// Привязка линии идёт через установленный [`interrupts_control`]. Возвращает
+/// Привязка линии идёт через контроллер полномочия. Возвращает
 /// handle на свежий `IrqLine` со стартовыми правами
 /// [`default_rights_for`](super::rights::default_rights_for).
 pub fn irq_mint(
@@ -374,7 +373,7 @@ pub fn irq_mint(
         return Err(IpcError::AccessDenied);
     }
 
-    let line = IrqLine::bind(interrupts_control().clone(), irq, trigger)?;
+    let line = IrqLine::bind(control.interrupts().clone(), irq, trigger)?;
     let handle = Capability::new_with_default_rights(line);
     table
         .with_lock(|tbl| tbl.insert(handle))
@@ -974,27 +973,6 @@ mod tests {
         mock().reset();
     }
 
-    fn ensure_irq_control() {
-        use std::sync::OnceLock;
-        static INSTALLED: OnceLock<()> = OnceLock::new();
-        INSTALLED.get_or_init(|| {
-            struct StubControl;
-            impl crate::InterruptsControl for StubControl {
-                fn bind_line(
-                    &self,
-                    _irq: u16,
-                    _trigger: IrqTrigger,
-                    _sink: Arc<dyn crate::IrqSink>,
-                ) -> Result<crate::IrqBindToken, IpcError> {
-                    Ok(crate::IrqBindToken::new(()))
-                }
-                fn mask(&self, _irq: u16) {}
-                fn unmask(&self, _irq: u16) {}
-            }
-            crate::install_interrupts_control(Arc::new(StubControl));
-        });
-    }
-
     fn irq_control_handle(
         rights: Rights,
         lo: u16,
@@ -1004,7 +982,11 @@ mod tests {
         let id = table
             .with_lock(|tbl| {
                 tbl.insert(Capability::new(
-                    CapabilityTarget::IrqControl(crate::IrqControl::new(lo, hi)),
+                    CapabilityTarget::IrqControl(crate::IrqControl::new(
+                        Arc::new(crate::irq_runtime::StubInterruptsControl),
+                        lo,
+                        hi,
+                    )),
                     rights,
                 ))
             })
@@ -1015,7 +997,6 @@ mod tests {
     #[test]
     fn irq_mint_returns_irq_line_handle() {
         let _guard = test_lock();
-        ensure_irq_control();
         let (table, ctl_id) = irq_control_handle(Rights::WRITE, 32, 64);
         mock().configure(Some(table.clone()), None);
 
@@ -1034,7 +1015,6 @@ mod tests {
     #[test]
     fn irq_mint_out_of_band_is_access_denied() {
         let _guard = test_lock();
-        ensure_irq_control();
         let (table, ctl_id) = irq_control_handle(Rights::WRITE, 32, 64);
         mock().configure(Some(table), None);
 
@@ -1049,7 +1029,6 @@ mod tests {
     #[test]
     fn irq_mint_without_write_is_access_denied() {
         let _guard = test_lock();
-        ensure_irq_control();
         let (table, ctl_id) = irq_control_handle(Rights::READ, 32, 64);
         mock().configure(Some(table), None);
 
@@ -1064,7 +1043,6 @@ mod tests {
     #[test]
     fn irq_mint_on_non_control_is_wrong_type() {
         let _guard = test_lock();
-        ensure_irq_control();
         let (table, id, _sig) = install_signal_handle(Rights::WRITE);
         mock().configure(Some(table), None);
 
@@ -1079,7 +1057,6 @@ mod tests {
     #[test]
     fn irq_ack_on_armed_line_is_wrong_type() {
         let _guard = test_lock();
-        ensure_irq_control();
         let (table, ctl_id) = irq_control_handle(Rights::WRITE, 32, 64);
         mock().configure(Some(table), None);
 

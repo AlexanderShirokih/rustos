@@ -15,6 +15,7 @@ pub mod codec;
 pub mod handle;
 mod ordinal;
 mod protocol;
+mod response;
 pub mod schema;
 pub mod transport;
 pub mod wire;
@@ -24,5 +25,6 @@ pub use handle::{IntoWireHandle, WireReplyHandle};
 pub use ordinal::ordinal_of;
 #[doc(hidden)]
 pub use protocol::{__protocol_reject, __protocol_release};
+pub use response::{ReceivedResources, Response};
 pub use syscall::Timeout;
 pub use transport::{MessageLen, Transport};

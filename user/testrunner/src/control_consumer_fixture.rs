@@ -70,7 +70,7 @@ fn unmount(admin: &namespace_admin::Client<PortTransport>) -> Option<u64> {
         return Some(ADMIN_REFUSED_EXIT_CODE);
     };
     for _ in 0..MOUNT_ATTEMPTS {
-        match admin.unmount(prefix) {
+        match admin.unmount(prefix).map(|response| response.value) {
             Ok(Ok(_)) => return None,
             // Дерево имён загрузки прививает компонент композиции своим оборотом, и до него
             // префикс не занят.

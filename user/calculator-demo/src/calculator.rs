@@ -8,7 +8,7 @@ use calculator_demo::calculator;
 use component_abi::supervisor_gone;
 use component_client::component_manifest;
 use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::{OwnedHandle, PortTransport};
+use kernel_objects::{OwnedHandle, PortTransport, ReceivedFrame};
 use syscall::Timeout;
 
 const NO_STARTUP_EXIT_CODE: i32 = 1;
@@ -66,9 +66,9 @@ fn watch_supervisor(control: &OwnedHandle) -> ! {
     let transport = PortTransport::server(control);
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
-            // Протокола на control-порту нет: пришедший кадр уходит без ответа,
-            // а закрытие reply-объекта будит вызывателя.
-            Ok(()) => transport.cancel_reply(),
+            // Control-порт протокола не обслуживает, и пришедший кадр уходит без ответа.
+            // Владеющий кадр закрывает его ресурсы и будит вызывателя.
+            Ok(()) => drop(ReceivedFrame::take(&transport)),
             // Уход значка поднявшего компонент supervisor снимает процесс целиком.
             Err(IpcError::SenderGone) if supervisor_gone(transport.peer_badge()) => {
                 println!("supervisor gone");

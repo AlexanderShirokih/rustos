@@ -80,9 +80,12 @@ fn reply_cap_relinquished_on_ok() {
     };
 
     let client = cap_source::Client::new(client_end);
-    let cap = client.get_cap().expect("get_cap ok");
+    let mut response = client.get_cap().expect("get_cap ok");
+    let cap = response.value;
 
     assert_eq!(cap.raw().get(), 77);
+    assert_eq!(response.claim(cap), Some(cap));
+    assert_eq!(response.claim(cap), None);
     server.join().expect("join");
     assert_eq!(*fate.lock().expect("mutex"), Fate::Relinquished);
 }

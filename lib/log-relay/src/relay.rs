@@ -4,9 +4,9 @@
 use core::fmt::Write as _;
 
 use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::OwnedHandle;
+use kernel_objects::{OwnedHandle, ReceivedFrame};
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LOG_TAG_MAX, LogBuffer, log};
-use runtime::{PortTransport, handle_close};
+use runtime::PortTransport;
 use syscall::Timeout;
 
 const RELAY_SOURCE: &str = "log-relay";
@@ -77,10 +77,12 @@ impl<S: LogSink, N: SourceNames> LogRelay<S, N> {
                 Err(_) => return "stopped: log port receive failed",
             }
 
-            // Значок и capability кадра читаются до пересылки: исходящий IPC
-            // перезаписывает те же поля IPC-буфера потока.
-            let source = source_of(&self.names, transport.peer_badge());
-            discard_staged_caps(&transport);
+            // Приём выше доставил кадр. Capability контракт не передаёт, и владеющий кадр
+            // закрывает их вместе с незавершённым ответом.
+            let Some(received) = ReceivedFrame::take(&transport) else {
+                continue;
+            };
+            let source = source_of(&self.names, received.badge());
 
             let mut forwarding = Forwarding {
                 sink: &mut self.sink,
@@ -89,8 +91,7 @@ impl<S: LogSink, N: SourceNames> LogRelay<S, N> {
             };
             let _ = log::dispatch(&mut forwarding, &transport);
             let forwarded = forwarding.forwarded;
-            // Закрытие неотправленного ответа будит припаркованного вызывателя.
-            transport.cancel_reply();
+            drop(received);
 
             match forwarded {
                 // Кадр вне контракта до стока не доходит и следа в журнале не
@@ -215,12 +216,4 @@ fn escape_character(character: char, brackets: bool) -> LogBuffer<ESCAPED_CHARAC
         }
     }
     escaped
-}
-
-fn discard_staged_caps(transport: &PortTransport) {
-    // Capability, приехавшие с кадром, ядро уже положило в таблицу relay. Контракт их
-    // не несёт, и дальше они не идут.
-    for handle in transport.staged_caps().into_iter().flatten() {
-        let _ = handle_close(handle);
-    }
 }

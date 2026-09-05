@@ -218,12 +218,14 @@ mod tests {
             let record = Bytes::new(RECORD).expect("record within the bound");
             let defined = Str::new(DEFINED).expect("instance name within the bound");
             let absent = Str::new("stage-zero").expect("instance name within the bound");
-            assert_eq!(client.begin().expect("call"), Ok(0));
-            assert_eq!(client.define(record, PROGRAM).expect("call"), Ok(0));
-            assert_eq!(client.commit().expect("call"), Ok(0));
-            assert_eq!(client.session(defined).expect("call"), Ok(SESSION));
+            assert_eq!(client.begin().expect("call").value, Ok(0));
+            assert_eq!(client.define(record, PROGRAM).expect("call").value, Ok(0));
+            assert_eq!(client.commit().expect("call").value, Ok(0));
+            let mut session = client.session(defined).expect("call");
+            assert_eq!(session.value, Ok(SESSION));
+            assert_eq!(session.claim(SESSION), Some(SESSION));
             assert_eq!(
-                client.session(absent).expect("call"),
+                client.session(absent).expect("call").value,
                 Err(ExtendError::NotFound)
             );
             server.join().expect("server joins");
@@ -244,7 +246,7 @@ mod tests {
             let client = supervisor::Client::new(client_end);
             let record = Bytes::new(RECORD).expect("record within the bound");
             assert_eq!(
-                client.define(record, PROGRAM).expect("call"),
+                client.define(record, PROGRAM).expect("call").value,
                 Err(ExtendError::NoTransaction)
             );
             server.join().expect("server joins");

@@ -54,10 +54,16 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 }
 
 fn read_record(client: &file_system::Client<PortTransport>) -> u64 {
-    let Ok(Ok(cap)) = client.acquire_buffer(BUFFER_SIZE) else {
+    let Ok(mut response) = client.acquire_buffer(BUFFER_SIZE) else {
         return NO_BUFFER_EXIT_CODE;
     };
-    let region = MemoryRegion::adopt(cap);
+    let Ok(capability) = response.value else {
+        return NO_BUFFER_EXIT_CODE;
+    };
+    let Some(cap) = response.claim(capability) else {
+        return NO_BUFFER_EXIT_CODE;
+    };
+    let region = MemoryRegion::from_handle(cap.into());
     let Ok(buffer) = region.map_full(UserMemFlags::ReadWrite) else {
         return NO_BUFFER_EXIT_CODE;
     };
@@ -65,13 +71,19 @@ fn read_record(client: &file_system::Client<PortTransport>) -> u64 {
     let Some(path) = Str::new(RECORD) else {
         return RECORD_UNREADABLE_EXIT_CODE;
     };
-    let Ok(Ok(opened)) = client.open(path, AccessMode::Read, OpenFlags::NONE) else {
+    let Ok(Ok(opened)) = client
+        .open(path, AccessMode::Read, OpenFlags::NONE)
+        .map(|response| response.value)
+    else {
         return RECORD_UNREADABLE_EXIT_CODE;
     };
     if opened.kind != NodeKind::File || opened.size != RECORD_BODY.len() as u64 {
         return RECORD_UNREADABLE_EXIT_CODE;
     }
-    let Ok(Ok(count)) = client.read(opened.fd, 0, BUFFER_SIZE) else {
+    let Ok(Ok(count)) = client
+        .read(opened.fd, 0, BUFFER_SIZE)
+        .map(|response| response.value)
+    else {
         return RECORD_UNREADABLE_EXIT_CODE;
     };
     let mut body = [0; RECORD_BODY.len()];

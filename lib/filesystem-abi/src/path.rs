@@ -9,6 +9,13 @@ use crate::{
 /// Разделитель компонентов пути.
 pub const SEPARATOR: char = '/';
 
+const SEPARATOR_BYTE: u8 = b'/';
+
+const _: () = assert!(
+    SEPARATOR as u32 == SEPARATOR_BYTE as u32,
+    "the separator byte differs from the separator"
+);
+
 /// Абсолютный путь, форму и границы которого проверил [`Path::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Path<'a>(&'a str);
@@ -22,17 +29,16 @@ impl<'a> Path<'a> {
     pub const ROOT: Self = Self("/");
 
     /// Проверяет форму и границы пути. Нарушение любого правила - `InvalidPath`.
-    pub fn new(text: &'a str) -> Result<Self, FileSystemError> {
+    /// Константный путь программы проверяется на сборке.
+    pub const fn new(text: &'a str) -> Result<Self, FileSystemError> {
         if text.len() > PATH_MAX {
             return Err(FileSystemError::InvalidPath);
         }
-        let tail = text
-            .strip_prefix(SEPARATOR)
-            .ok_or(FileSystemError::InvalidPath)?;
-        if !tail.is_empty() {
-            for name in tail.split(SEPARATOR) {
-                validate_name(name)?;
-            }
+        let [SEPARATOR_BYTE, tail @ ..] = text.as_bytes() else {
+            return Err(FileSystemError::InvalidPath);
+        };
+        if !tail.is_empty() && !validate_names(tail) {
+            return Err(FileSystemError::InvalidPath);
         }
         Ok(Self(text))
     }
@@ -115,11 +121,33 @@ pub fn rebase<'a>(
     Path::new(joined)
 }
 
-fn validate_name(name: &str) -> Result<(), FileSystemError> {
-    if name.is_empty() || name.len() > NAME_MAX || name == "." || name == ".." {
-        return Err(FileSystemError::InvalidPath);
+const fn validate_names(tail: &[u8]) -> bool {
+    let mut rest = tail;
+    let mut len = 0;
+    let mut dots = 0;
+    loop {
+        let Some((&byte, next)) = rest.split_first() else {
+            return valid_name(len, dots);
+        };
+        if byte == SEPARATOR_BYTE {
+            if !valid_name(len, dots) {
+                return false;
+            }
+            len = 0;
+            dots = 0;
+        } else {
+            len += 1;
+            if byte == b'.' {
+                dots += 1;
+            }
+        }
+        rest = next;
     }
-    Ok(())
+}
+
+const fn valid_name(len: usize, dots: usize) -> bool {
+    // Имя целиком из одной либо двух точек - это `.` и `..`, которых путь контракта не допускает.
+    len != 0 && len <= NAME_MAX && !(dots == len && len <= 2)
 }
 
 #[cfg(test)]
@@ -148,6 +176,17 @@ mod tests {
     fn absolute_path_splits_into_components() {
         assert_eq!(components("/boot/init"), ["boot", "init"]);
         assert_eq!(components("/data"), ["data"]);
+    }
+
+    #[test]
+    fn a_constant_path_is_checked_at_build_time() {
+        const SAMPLE: Path<'static> = match Path::new("/data/sample") {
+            Ok(path) => path,
+            Err(_) => panic!("the constant path keeps the form of the contract"),
+        };
+
+        assert_eq!(SAMPLE.as_str(), "/data/sample");
+        assert_eq!(components(SAMPLE.as_str()), ["data", "sample"]);
     }
 
     #[test]

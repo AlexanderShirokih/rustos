@@ -25,6 +25,9 @@ const MAX_CLASS: usize = MIN_CLASS << (CLASS_COUNT - 1);
 
 const CHUNK: usize = MAX_CLASS;
 
+const _: () = assert!(MIN_CLASS >= core::mem::size_of::<*mut u8>());
+const _: () = assert!(MIN_CLASS >= core::mem::align_of::<*mut u8>());
+
 static HEAP: Mutex<FreeLists> = Mutex::new(FreeLists::new());
 
 struct FreeLists {
@@ -48,10 +51,10 @@ impl FreeLists {
         if head.is_null() {
             return head;
         }
-        // SAFETY: свободный блок хранит указатель на следующий в своих первых 8 байтах;
-        // блок не меньше MIN_CLASS и выровнен по своему классу, чтение корректно.
-        #[allow(clippy::cast_ptr_alignment)]
-        let next = unsafe { head.cast::<*mut u8>().read() };
+        let link: *mut *mut u8 = head.cast();
+        // SAFETY: блок свободен, не меньше MIN_CLASS и выровнен по своему классу, а класс не
+        // меньше размера и выравнивания указателя (проверки в голове модуля).
+        let next = unsafe { link.read() };
         if let Some(slot) = self.heads.get_mut(class) {
             *slot = next;
         }
@@ -62,11 +65,10 @@ impl FreeLists {
         let Some(slot) = self.heads.get_mut(class) else {
             return;
         };
-        // SAFETY: блок вышел из этого же класса, свободен и не меньше MIN_CLASS.
-        #[allow(clippy::cast_ptr_alignment)]
-        unsafe {
-            block.cast::<*mut u8>().write(*slot);
-        }
+        let link: *mut *mut u8 = block.cast();
+        // SAFETY: блок вышел из этого же класса и свободен: он не меньше MIN_CLASS и выровнен по
+        // классу, а класс не меньше размера и выравнивания указателя (проверки в голове модуля).
+        unsafe { link.write(*slot) };
         *slot = block;
     }
 

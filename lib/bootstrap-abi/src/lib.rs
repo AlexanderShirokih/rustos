@@ -133,11 +133,13 @@ mod tests {
                     .expect("server wait");
                 bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
-            let cap = client.acquire_irq_control().expect("call ok");
+            let mut response = client.acquire_irq_control().expect("call ok");
             assert_eq!(
-                cap,
+                response.value,
                 Ok(Cap::from_raw(NonZeroU32::new(0x77).expect("non-zero")))
             );
+            let cap = response.value.expect("IRQ control");
+            assert_eq!(response.claim(cap), Some(cap));
         });
     }
 
@@ -153,11 +155,13 @@ mod tests {
                     .expect("server wait");
                 bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
-            let cap = client.acquire_userland_image().expect("call ok");
+            let mut response = client.acquire_userland_image().expect("call ok");
             assert_eq!(
-                cap,
+                response.value,
                 Ok(Cap::from_raw(NonZeroU32::new(0x88).expect("non-zero")))
             );
+            let cap = response.value.expect("userland image");
+            assert_eq!(response.claim(cap), Some(cap));
         });
     }
 
@@ -173,14 +177,16 @@ mod tests {
                     .expect("server wait");
                 bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
-            let fdt = client.acquire_boot_fdt().expect("call ok");
+            let mut response = client.acquire_boot_fdt().expect("call ok");
             assert_eq!(
-                fdt,
+                response.value,
                 Ok(BootFdt {
                     region: Cap::from_raw(NonZeroU32::new(0x99).expect("non-zero")),
                     offset: 0x600,
                 })
             );
+            let cap = response.value.expect("boot FDT").region;
+            assert_eq!(response.claim(cap), Some(cap));
         });
     }
 
@@ -197,11 +203,13 @@ mod tests {
                 bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
             // Аргумент index доезжает до сервера и влияет на ответный Cap.
-            let cap = client.acquire_device_memory(1).expect("call ok");
+            let mut response = client.acquire_device_memory(1).expect("call ok");
             assert_eq!(
-                cap,
+                response.value,
                 Ok(Cap::from_raw(NonZeroU32::new(0x91).expect("non-zero")))
             );
+            let cap = response.value.expect("device memory");
+            assert_eq!(response.claim(cap), Some(cap));
         });
     }
 
@@ -218,7 +226,7 @@ mod tests {
                 bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
             let result = client.acquire_device_memory(9).expect("call ok");
-            assert_eq!(result, Err(7));
+            assert_eq!(result.value, Err(7));
         });
     }
 }

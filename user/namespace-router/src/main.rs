@@ -20,7 +20,7 @@ use component_abi::supervisor_gone;
 use component_client::{ReceivedStartup, component_manifest};
 use filesystem_abi::{namespace, namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::{OwnedHandle, Thread};
+use kernel_objects::{OwnedHandle, ReceivedFrame, Thread};
 use runtime::{
     Mutex, PortTransport, Priority, exit_with_sibling, install_log, log_fmt, log_line, spawn_owned,
     thread_exit,
@@ -69,14 +69,10 @@ fn run(startup: Handle) -> Result<()> {
     install_log(log.into_raw(), LOG_TAG);
     let RouterStartup { control, service } = resources;
 
-    let admin_port = AdminPort {
-        port: control,
-        administering: Administering::new(&MOUNTS),
-        service_thread: Thread::self_thread()?,
-    };
+    let service_thread = Thread::self_thread()?;
     // Control-поток разделяет время жизни процесса и владеет собственным стеком.
     let admin = spawn_owned(
-        move || serve_admin(admin_port),
+        move || serve_admin(&control, &service_thread),
         ADMIN_STACK,
         Priority::new(1),
     )?;
@@ -104,42 +100,35 @@ fn serve(service: &OwnedHandle) {
                 return;
             }
         }
+        // Приём выше доставил кадр, и его незавершённый ответ принадлежит владеющему кадру
+        // до конца обработки.
+        let received = ReceivedFrame::take(&transport);
         let mut resolving = Resolving::new(&MOUNTS);
         let delivered = namespace::dispatch(&mut resolving, &transport).is_ok();
         resolving.end_frame(delivered);
-        // Reply-объект не переживает свой кадр: закрытие неотправленного ответа будит
-        // припаркованного вызывателя.
-        transport.cancel_reply();
+        drop(received);
     }
     log_line("service port closed");
 }
 
-struct AdminPort {
-    port: OwnedHandle,
-    administering: Administering<'static>,
-    service_thread: Thread,
-}
-
-fn serve_admin(mut admin: AdminPort) -> u32 {
-    let transport = PortTransport::server(admin.port.borrow());
+fn serve_admin(port: &OwnedHandle, service_thread: &Thread) -> u32 {
+    let transport = PortTransport::server(port.borrow());
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
+            // Приём выше доставил кадр, и его capability вместе с незавершённым ответом
+            // принадлежат владеющему кадру до конца обработки.
             Ok(()) => {
-                admin
-                    .administering
-                    .begin_frame(transport.staged_caps().into_iter().flatten());
-                let _ = namespace_admin::dispatch(&mut admin.administering, &transport);
-                admin.administering.end_frame();
-                transport.cancel_reply();
+                let Some(mut received) = ReceivedFrame::take(&transport) else {
+                    continue;
+                };
+                let mut administering = Administering::new(&MOUNTS, &mut received);
+                let _ = namespace_admin::dispatch(&mut administering, &transport);
             }
             // Уход значка поднявшего маршрутизатор supervisor снимает процесс целиком вместе
             // с монтированиями.
             Err(IpcError::SenderGone) if supervisor_gone(transport.peer_badge()) => {
                 log_line("supervisor gone");
-                exit_with_sibling(
-                    admin.service_thread.handle().as_raw(),
-                    SUPERVISOR_LOST_EXIT_CODE,
-                )
+                exit_with_sibling(service_thread.handle().as_raw(), SUPERVISOR_LOST_EXIT_CODE)
             }
             // Покадровое исчерпание и уход значка потребителя `NamespaceAdmin` порт не
             // закрывают.

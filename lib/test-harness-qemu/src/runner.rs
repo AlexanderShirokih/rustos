@@ -70,15 +70,14 @@ impl core::fmt::Write for FmtAdapter<'_> {
 }
 
 fn iter_cases() -> &'static [TestCase] {
-    // SAFETY: символы экспортируются линкер-скриптом тестового бинаря и
-    // обрамляют секцию `.tests.kernel` со статиками, размещёнными
-    #[allow(clippy::multiple_unsafe_ops_per_block)]
-    unsafe {
-        let start = core::ptr::addr_of!(__tests_kernel_start);
-        let end = core::ptr::addr_of!(__tests_kernel_end);
-        let len = usize::try_from(end.offset_from(start)).unwrap_or(0);
-        core::slice::from_raw_parts(start, len)
-    }
+    let start = core::ptr::addr_of!(__tests_kernel_start);
+    let end = core::ptr::addr_of!(__tests_kernel_end);
+    // SAFETY: оба символа экспортирует линкер-скрипт тестового бинаря, они обрамляют секцию
+    // `.tests.kernel` и лежат в одном образе.
+    let len = usize::try_from(unsafe { end.offset_from(start) }).unwrap_or(0);
+    // SAFETY: секция хранит `len` статиков `TestCase`, размещённых линкером подряд, и остаётся
+    // отображённой до конца прогона.
+    unsafe { core::slice::from_raw_parts(start, len) }
 }
 
 fn run_case(case: &TestCase) {

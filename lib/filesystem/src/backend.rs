@@ -22,10 +22,16 @@ pub trait FileSystemBackend {
     /// Если файловая система неизменяема, возвращает `ReadOnly`.
     fn create(&mut self, path: Path<'_>, kind: NodeKind) -> Result<NodeId, FileSystemError>;
 
-    /// Снимает имя с узла. Если узла по пути нет, возвращает `NotFound`. Если это каталог с
+    /// Снимает имя с узла вида `expected`. Вид сравнивается там же, где снимается имя. Если
+    /// узла по пути нет, возвращает `NotFound`. Если вид не совпал, возвращает `IsADirectory`
+    /// при ожидании файла и `NotADirectory` при ожидании каталога. Если это каталог с
     /// записями, возвращает `NotEmpty`. Если файловая система неизменяема, возвращает `ReadOnly`.
-    fn unlink(&mut self, stores: &mut dyn ByteStore, path: Path<'_>)
-    -> Result<(), FileSystemError>;
+    fn unlink(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        path: Path<'_>,
+        expected: NodeKind,
+    ) -> Result<(), FileSystemError>;
 
     /// Переносит узел под новое имя, замещая занятое. Если узла `from` нет, возвращает `NotFound`.
     /// Если имя `to` занято каталогом, возвращает `IsADirectory`. Если файловая система
@@ -126,5 +132,12 @@ pub trait FileSystemBackend {
         _capacity: u64,
     ) -> Result<NodeId, FileSystemError> {
         Err(FileSystemError::NotSupported)
+    }
+}
+
+pub(crate) const fn kind_mismatch(expected: NodeKind) -> FileSystemError {
+    match expected {
+        NodeKind::File => FileSystemError::IsADirectory,
+        NodeKind::Directory => FileSystemError::NotADirectory,
     }
 }

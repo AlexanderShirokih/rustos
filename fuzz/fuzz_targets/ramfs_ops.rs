@@ -85,8 +85,8 @@ impl RamFileSystem {
         self.backend.set_size(&mut self.stores, node, size)
     }
 
-    fn unlink(&mut self, path: Path<'_>) -> Result<(), FileSystemError> {
-        self.backend.unlink(&mut self.stores, path)
+    fn unlink(&mut self, path: Path<'_>, expected: NodeKind) -> Result<(), FileSystemError> {
+        self.backend.unlink(&mut self.stores, path, expected)
     }
 
     fn rename(&mut self, from: Path<'_>, to: Path<'_>) -> Result<(), FileSystemError> {
@@ -287,7 +287,10 @@ fuzz_target!(|data: &[u8]| {
                 let kind = kind(input.byte());
                 create(&mut fs, &mut model, &path, kind);
             }
-            2 => unlink(&mut fs, &mut model, &path),
+            2 => {
+                let expected = kind(input.byte());
+                unlink(&mut fs, &mut model, &path, expected);
+            }
             3 => {
                 let to = input.path(&long_name);
                 rename(&mut fs, &mut model, &path, &to);
@@ -386,13 +389,13 @@ fn expected_create(model: &Model, path: &str) -> Result<(), FileSystemError> {
     Ok(())
 }
 
-fn unlink(fs: &mut RamFileSystem, model: &mut Model, path: &str) {
-    let expected = expected_unlink(model, path);
-    if expected.is_ok() {
+fn unlink(fs: &mut RamFileSystem, model: &mut Model, path: &str, expected: NodeKind) {
+    let outcome = expected_unlink(model, path, expected);
+    if outcome.is_ok() {
         hold(fs, model, path);
     }
-    assert_eq!(fs.unlink(path_of(path)), expected, "unlink {path}");
-    if expected.is_ok() {
+    assert_eq!(fs.unlink(path_of(path), expected), outcome, "unlink {path}");
+    if outcome.is_ok() {
         model.detach(path);
     }
 }
@@ -405,9 +408,15 @@ fn hold(fs: &mut RamFileSystem, model: &Model, path: &str) {
         .unwrap_or_else(|error| panic!("retain of {path}: {error:?}"));
 }
 
-fn expected_unlink(model: &Model, path: &str) -> Result<(), FileSystemError> {
+fn expected_unlink(model: &Model, path: &str, expected: NodeKind) -> Result<(), FileSystemError> {
     model.directory_of(path)?;
     let node = model.nodes.get(path).ok_or(FileSystemError::NotFound)?;
+    if node.kind != expected {
+        return Err(match expected {
+            NodeKind::File => FileSystemError::IsADirectory,
+            NodeKind::Directory => FileSystemError::NotADirectory,
+        });
+    }
     if node.kind == NodeKind::Directory && !model.children(path).is_empty() {
         return Err(FileSystemError::NotEmpty);
     }

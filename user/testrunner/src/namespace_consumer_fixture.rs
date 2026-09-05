@@ -56,14 +56,8 @@ pub extern "C" fn _start(startup: Handle) -> ! {
 }
 
 fn answers(namespace: &namespace::Client<PortTransport>, path: Str<'_, { PATH_MAX }>) -> bool {
-    match namespace.resolve(path) {
-        Ok(Ok(session)) => {
-            drop(OwnedHandle::adopt(session));
-            true
-        }
-        Ok(Err(_)) => true,
-        Err(_) => false,
-    }
+    // Доменный отказ - тоже ответ; выданную сессию закрывает сам ответ.
+    namespace.resolve(path).is_ok()
 }
 
 fn pause(timeout: Timeout) {

@@ -160,16 +160,14 @@ mod tests {
             });
 
             let client = component_sessions::Client::new(client_end);
+            let mut session = client.open_session(scope_of("")).expect("call");
+            assert_eq!(session.value, Ok(SESSION_CAP));
+            assert_eq!(session.claim(SESSION_CAP), Some(SESSION_CAP));
+            let mut scoped = client.open_session(scope_of(SCOPE)).expect("call");
+            assert_eq!(scoped.value, Ok(SCOPED_CAP));
+            assert_eq!(scoped.claim(SCOPED_CAP), Some(SCOPED_CAP));
             assert_eq!(
-                client.open_session(scope_of("")).expect("call"),
-                Ok(SESSION_CAP)
-            );
-            assert_eq!(
-                client.open_session(scope_of(SCOPE)).expect("call"),
-                Ok(SCOPED_CAP)
-            );
-            assert_eq!(
-                client.open_session(scope_of(SCOPE)).expect("call"),
+                client.open_session(scope_of(SCOPE)).expect("call").value,
                 Err(SessionError::Refused)
             );
             server.join().expect("server joins");

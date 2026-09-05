@@ -28,6 +28,12 @@ impl MessageLen {
 /// `bytes` - кадр (заголовок + тело), `handles` - транспортный вектор
 /// портов кадра.
 pub trait Transport {
+    /// Владелец ресурсов одного доставленного кадра.
+    type Resources: crate::ReceivedResources;
+
+    /// Однократно передаёт доставленные ресурсы независимо от результата разбора кадра.
+    fn take_resources(&self) -> Self::Resources;
+
     /// Отправляет один кадр и его handle-вектор дальнему концу.
     /// `PeerClosed`, если дальний конец закрыт.
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError>;

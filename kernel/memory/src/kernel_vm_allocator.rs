@@ -6,7 +6,6 @@
 //! aligned-аллокации.
 
 #![allow(unsafe_code)]
-#![allow(clippy::multiple_unsafe_ops_per_block)]
 
 use core::{alloc::Layout, mem::size_of, ptr::NonNull};
 
@@ -52,17 +51,18 @@ impl FreeBlock {
         let new_block_offset = block_header_size + aligned_size;
         let new_block_size = self.size - aligned_size - block_header_size;
 
+        // Арена не является Rust-аллокацией, и провенанс `&mut self` покрывает только
+        // заголовок, поэтому адрес соседнего блока считается через `usize`.
+        let new_ptr =
+            (core::ptr::from_mut::<FreeBlock>(self) as usize + new_block_offset) as *mut FreeBlock;
         // SAFETY: проверка `self.size >= aligned_size + min_remaining` выше
         // гарантирует, что `new_block_offset` лежит внутри выделенной
-        // области, подходящей для записи `FreeBlock`.
-        let new_block_ptr = unsafe {
-            let base_ptr = core::ptr::from_mut::<FreeBlock>(self) as usize;
-            let new_ptr = (base_ptr + new_block_offset) as *mut FreeBlock;
-
-            *new_ptr = FreeBlock::from_size(new_block_size);
-
-            NonNull::new_unchecked(new_ptr)
-        };
+        // области, подходящей для записи `FreeBlock`; область принадлежит
+        // аллокатору эксклюзивно.
+        unsafe { new_ptr.write(FreeBlock::from_size(new_block_size)) };
+        // SAFETY: арена лежит в kernel-VA верхней половины, поэтому смещение от
+        // адреса `self` не заворачивается через ноль.
+        let new_block_ptr = unsafe { NonNull::new_unchecked(new_ptr) };
 
         self.size = aligned_size;
 
@@ -124,7 +124,9 @@ impl HeapAllocator {
         }
 
         let block_va = self.arena_top;
-        let block_va_start = block_va.as_usize();
+        let block_ptr = block_va.as_usize() as *mut FreeBlock;
+        // Нулевой адрес в kernel-VA не замаплен, и блок на нём не адресуем.
+        let block = NonNull::new(block_ptr).ok_or(AllocationError::OutOfMemory)?;
 
         self.kernel_mapper
             .map(block_va, pages_needed, &[], MemFlags::kernel_rw())
@@ -135,13 +137,11 @@ impl HeapAllocator {
         self.current_size += bytes;
 
         let block_size = bytes - size_of::<FreeBlock>();
-        // SAFETY: `[block_va_start, block_va_start + bytes)` только что
-        // замаплен подряд как kernel-RW и обнулён mapper-ом.
-        unsafe {
-            let block_ptr = block_va_start as *mut FreeBlock;
-            *block_ptr = FreeBlock::from_size(block_size);
-            self.add_to_free_list(NonNull::new_unchecked(block_ptr));
-        }
+        // SAFETY: `[block_va, block_va + bytes)` только что замаплен подряд
+        // как kernel-RW и обнулён mapper-ом; страница выровнена сильнее
+        // `FreeBlock`.
+        unsafe { block_ptr.write(FreeBlock::from_size(block_size)) };
+        self.add_to_free_list(block);
 
         Ok(())
     }
@@ -152,101 +152,101 @@ impl HeapAllocator {
 
         while let Some(block_ptr) = current {
             // SAFETY: узлы free-list-а - валидные `FreeBlock` в замапленной
-            // арене, эксклюзивно принадлежат аллокатору пока в списке.
-            unsafe {
-                let block = block_ptr.as_ptr();
+            // арене, эксклюзивно принадлежат аллокатору пока в списке; на время
+            // итерации на узел нет других ссылок.
+            let block = unsafe { &mut *block_ptr.as_ptr() };
 
-                if (*block).size >= size {
-                    if let Some(prev_ptr) = prev {
-                        (*prev_ptr.as_ptr()).next = (*block).next;
-                    } else {
-                        self.free_list_head = (*block).next;
-                    }
-
-                    if let Some(new_block_ptr) = (*block).split(size) {
-                        self.add_to_free_list(new_block_ptr);
-                    }
-
-                    return Some(block_ptr);
+            if block.size >= size {
+                let next = block.next;
+                if let Some(prev_ptr) = prev {
+                    // SAFETY: `prev_ptr` - узел free-list-а, отличный от
+                    // `block_ptr`; запись поля `next` не пересекается с `block`.
+                    unsafe { (*prev_ptr.as_ptr()).next = next };
+                } else {
+                    self.free_list_head = next;
                 }
 
-                prev = current;
-                current = (*block).next;
+                if let Some(new_block_ptr) = block.split(size) {
+                    self.add_to_free_list(new_block_ptr);
+                }
+
+                return Some(block_ptr);
             }
+
+            prev = current;
+            current = block.next;
         }
 
         None
     }
 
     fn add_to_free_list(&mut self, block_ptr: NonNull<FreeBlock>) {
+        let block_addr = block_ptr.as_ptr() as usize;
+        let mut prev: Option<NonNull<FreeBlock>> = None;
+        let mut current = self.free_list_head;
+
+        while let Some(current_ptr) = current {
+            if current_ptr.as_ptr() as usize >= block_addr {
+                break;
+            }
+            prev = current;
+            // SAFETY: `current_ptr` - узел free-list-а: валидный `FreeBlock`
+            // в замапленной арене, принадлежащий аллокатору.
+            current = unsafe { (*current_ptr.as_ptr()).next };
+        }
+
         // SAFETY: `block_ptr` - валидный `FreeBlock` в замапленной арене,
         // эксклюзивно принадлежит аллокатору.
-        unsafe {
-            (*block_ptr.as_ptr()).next = None;
-
-            let block_addr = block_ptr.as_ptr() as usize;
-            let mut prev: Option<NonNull<FreeBlock>> = None;
-            let mut current = self.free_list_head;
-
-            while let Some(current_ptr) = current {
-                if current_ptr.as_ptr() as usize >= block_addr {
-                    break;
-                }
-                prev = current;
-                current = (*current_ptr.as_ptr()).next;
-            }
-
-            (*block_ptr.as_ptr()).next = current;
-            if let Some(prev_ptr) = prev {
-                (*prev_ptr.as_ptr()).next = Some(block_ptr);
-            } else {
-                self.free_list_head = Some(block_ptr);
-            }
-
-            let coalesce_from = if let Some(prev_ptr) = prev {
-                if Self::blocks_are_adjacent(prev_ptr, block_ptr) {
-                    Self::merge_adjacent_blocks(prev_ptr, block_ptr);
-                    prev_ptr
-                } else {
-                    block_ptr
-                }
-            } else {
-                block_ptr
-            };
-
-            Self::coalesce_next_blocks(coalesce_from);
+        unsafe { (*block_ptr.as_ptr()).next = current };
+        if let Some(prev_ptr) = prev {
+            // SAFETY: `prev_ptr` - узел free-list-а перед точкой вставки,
+            // отличный от `block_ptr`.
+            unsafe { (*prev_ptr.as_ptr()).next = Some(block_ptr) };
+        } else {
+            self.free_list_head = Some(block_ptr);
         }
+
+        let coalesce_from = match prev {
+            Some(prev_ptr) if Self::blocks_are_adjacent(prev_ptr, block_ptr) => {
+                Self::merge_adjacent_blocks(prev_ptr, block_ptr);
+                prev_ptr
+            }
+            _ => block_ptr,
+        };
+
+        Self::coalesce_next_blocks(coalesce_from);
     }
 
     fn blocks_are_adjacent(left_ptr: NonNull<FreeBlock>, right_ptr: NonNull<FreeBlock>) -> bool {
-        // SAFETY: оба указателя - узлы free-list-а; чтение `left.size`
-        // корректно, `right_ptr` не разыменовывается.
-        unsafe {
-            let left_end =
-                left_ptr.as_ptr() as usize + size_of::<FreeBlock>() + (*left_ptr.as_ptr()).size;
-            left_end == right_ptr.as_ptr() as usize
-        }
+        // SAFETY: `left_ptr` - узел free-list-а, чтение `size` корректно;
+        // `right_ptr` не разыменовывается.
+        let left_size = unsafe { (*left_ptr.as_ptr()).size };
+        let left_end = left_ptr.as_ptr() as usize + size_of::<FreeBlock>() + left_size;
+        left_end == right_ptr.as_ptr() as usize
     }
 
     fn merge_adjacent_blocks(left_ptr: NonNull<FreeBlock>, right_ptr: NonNull<FreeBlock>) {
+        // SAFETY: `right_ptr` - узел free-list-а; заголовок копируется, и
+        // после поглощения к нему никто не обращается.
+        let right = unsafe { *right_ptr.as_ptr() };
         // SAFETY: caller проверил, что `right_ptr` идёт сразу за `left_ptr`;
-        // оба - узлы free-list-а аллокатора.
-        unsafe {
-            (*left_ptr.as_ptr()).size += size_of::<FreeBlock>() + (*right_ptr.as_ptr()).size;
-            (*left_ptr.as_ptr()).next = (*right_ptr.as_ptr()).next;
-        }
+        // `left_ptr` - узел free-list-а, на него нет других ссылок.
+        let left = unsafe { &mut *left_ptr.as_ptr() };
+        left.size += size_of::<FreeBlock>() + right.size;
+        left.next = right.next;
     }
 
     fn coalesce_next_blocks(block_ptr: NonNull<FreeBlock>) {
-        // SAFETY: `block_ptr` - узел free-list-а; читается только `.next`
-        // и поглощается, если соседи VA-смежны.
-        unsafe {
-            while let Some(next_ptr) = (*block_ptr.as_ptr()).next {
-                if !Self::blocks_are_adjacent(block_ptr, next_ptr) {
-                    break;
-                }
-                Self::merge_adjacent_blocks(block_ptr, next_ptr);
+        loop {
+            // SAFETY: `block_ptr` - узел free-list-а; читается только `.next`.
+            let next = unsafe { (*block_ptr.as_ptr()).next };
+            let Some(next_ptr) = next else {
+                break;
+            };
+            if !Self::blocks_are_adjacent(block_ptr, next_ptr) {
+                break;
             }
+            Self::merge_adjacent_blocks(block_ptr, next_ptr);
         }
     }
 
@@ -287,25 +287,27 @@ impl HeapAllocator {
     }
 
     fn setup_allocated_block(block_ptr: NonNull<FreeBlock>, align: usize) -> NonNull<u8> {
+        let data_start = block_ptr.as_ptr() as usize + size_of::<FreeBlock>();
+        let min_user_addr = data_start + HEADER_PTR_SIZE;
+        let aligned_user_addr = align_up(min_user_addr, align);
+        let user_ptr = aligned_user_addr as *mut u8;
+        let header_slot = (aligned_user_addr - HEADER_PTR_SIZE) as *mut u8;
+
+        let header_ptr_value: *mut FreeBlock = block_ptr.as_ptr();
         // SAFETY: блок только что вытащен из free-list-а; запрошенный
         // `alloc_size = size + align` гарантирует, что aligned-user-ptr
         // и предшествующий ему `HEADER_PTR_SIZE`-слот лежат внутри блока.
+        // Источник - локальная переменная, области не пересекаются.
         unsafe {
-            let data_start = block_ptr.as_ptr().cast::<u8>().add(size_of::<FreeBlock>());
-
-            let min_user_addr = data_start as usize + HEADER_PTR_SIZE;
-            let aligned_user_addr = align_up(min_user_addr, align);
-            let user_ptr = aligned_user_addr as *mut u8;
-
-            let header_ptr_value: *mut FreeBlock = block_ptr.as_ptr();
             core::ptr::copy_nonoverlapping(
                 core::ptr::from_ref(&header_ptr_value).cast::<u8>(),
-                user_ptr.sub(HEADER_PTR_SIZE),
+                header_slot,
                 HEADER_PTR_SIZE,
             );
-
-            NonNull::new_unchecked(user_ptr)
         }
+        // SAFETY: `user_ptr` лежит выше ненулевого `block_ptr` внутри того же
+        // блока.
+        unsafe { NonNull::new_unchecked(user_ptr) }
     }
 
     /// Освобождает блок и обнуляет header-указатель для защиты от
@@ -317,30 +319,35 @@ impl HeapAllocator {
             return;
         }
 
-        // SAFETY: `ptr` в замапленной арене; перед ним setup_allocated_block
-        // записал `*mut FreeBlock`. Побайтовое копирование избегает cast
-        // в более строго выровненный указатель.
+        let header_slot = ptr.as_ptr().wrapping_sub(HEADER_PTR_SIZE);
+        let mut block_ptr: *mut FreeBlock = core::ptr::null_mut();
+        // SAFETY: `ptr` в замапленной арене; перед ним `setup_allocated_block`
+        // записал `*mut FreeBlock`. Побайтовое копирование в локальную
+        // переменную обходится без cast в более строго выровненный указатель.
         unsafe {
-            let header_addr = ptr.as_ptr().sub(HEADER_PTR_SIZE);
-
-            let mut block_ptr: *mut FreeBlock = core::ptr::null_mut();
             core::ptr::copy_nonoverlapping(
-                header_addr,
+                header_slot,
                 core::ptr::from_mut(&mut block_ptr).cast::<u8>(),
                 HEADER_PTR_SIZE,
             );
-
-            if let Some(block) = NonNull::new(block_ptr) {
-                let zero: *mut FreeBlock = core::ptr::null_mut();
-                core::ptr::copy_nonoverlapping(
-                    core::ptr::from_ref(&zero).cast::<u8>(),
-                    header_addr,
-                    HEADER_PTR_SIZE,
-                );
-
-                self.add_to_free_list(block);
-            }
         }
+
+        let Some(block) = NonNull::new(block_ptr) else {
+            return;
+        };
+
+        let zero: *mut FreeBlock = core::ptr::null_mut();
+        // SAFETY: `header_slot` - тот же слот в замапленной арене, что
+        // прочитан выше; источник - локальная переменная.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                core::ptr::from_ref(&zero).cast::<u8>(),
+                header_slot,
+                HEADER_PTR_SIZE,
+            );
+        }
+
+        self.add_to_free_list(block);
     }
 
     pub const fn current_size(&self) -> usize {

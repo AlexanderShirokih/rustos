@@ -46,12 +46,13 @@ impl From<IpcError> for StartupError {
 fn launch_child_delivers_startup_frame() {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
 
-    let cap = client
+    let mut response = client
         .acquire_userland_image()
-        .expect("acquire_userland_image call")
-        .expect("vend ok");
+        .expect("acquire_userland_image call");
+    let capability = response.value.expect("vend ok");
+    let cap = response.claim(capability).expect("capability owner");
 
-    let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
+    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
@@ -82,12 +83,13 @@ fn launch_child_delivers_startup_frame() {
 fn failed_startup_returns_child_budget() {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
 
-    let cap = client
+    let mut response = client
         .acquire_userland_image()
-        .expect("acquire_userland_image call")
-        .expect("vend ok");
+        .expect("acquire_userland_image call");
+    let capability = response.value.expect("vend ok");
+    let cap = response.claim(capability).expect("capability owner");
 
-    let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
+    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
@@ -146,11 +148,12 @@ fn load_image_error_reclaims_each_created_process() {
 #[kernel_test]
 fn start_error_reclaims_each_loaded_process() {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let cap = client
+    let mut response = client
         .acquire_userland_image()
-        .expect("acquire_userland_image call")
-        .expect("vend ok");
-    let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
+        .expect("acquire_userland_image call");
+    let capability = response.value.expect("vend ok");
+    let cap = response.claim(capability).expect("capability owner");
+    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
@@ -188,11 +191,12 @@ fn caller_wakes_when_server_dies_holding_reply() {
     use syscall::SyscallError;
 
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let cap = client
+    let mut response = client
         .acquire_userland_image()
-        .expect("acquire_userland_image call")
-        .expect("vend ok");
-    let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
+        .expect("acquire_userland_image call");
+    let capability = response.value.expect("vend ok");
+    let cap = response.claim(capability).expect("capability owner");
+    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image

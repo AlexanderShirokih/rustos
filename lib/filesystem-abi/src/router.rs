@@ -93,11 +93,12 @@ mod tests {
 
     #[test]
     fn resolve_carries_the_session_opened_on_the_path() {
-        let (mounted, resolved) = with_router(1, |client| {
+        let (mut mounted, resolved) = with_router(1, |client| {
             client.resolve(path("/boot/sample")).expect("call")
         });
 
-        assert_eq!(mounted, Ok(SESSION_CAP));
+        assert_eq!(mounted.value, Ok(SESSION_CAP));
+        assert_eq!(mounted.claim(SESSION_CAP), Some(SESSION_CAP));
         assert_eq!(resolved, ["/boot/sample".to_string()]);
     }
 
@@ -105,6 +106,6 @@ mod tests {
     fn resolve_reports_a_path_no_mount_covers() {
         let (mounted, _) = with_router(1, |client| client.resolve(path("/nowhere")).expect("call"));
 
-        assert_eq!(mounted, Err(FileSystemError::NotFound));
+        assert_eq!(mounted.value, Err(FileSystemError::NotFound));
     }
 }

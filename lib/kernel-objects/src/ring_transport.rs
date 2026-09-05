@@ -62,6 +62,10 @@ impl RingTransport {
 }
 
 impl Transport for RingTransport {
+    type Resources = ();
+
+    fn take_resources(&self) {}
+
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
         if !handles.is_empty() {
             return Err(IpcError::FrameOverflow);

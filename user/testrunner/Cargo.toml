@@ -123,6 +123,18 @@ test = false
 bench = false
 
 [[bin]]
+name = "startup-stale-buffer-fixture"
+path = "src/startup_stale_buffer_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "handle-table-full-fixture"
+path = "src/handle_table_full_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "managed-startup-closed"
 path = "src/managed_startup_closed.rs"
 test = false

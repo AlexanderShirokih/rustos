@@ -1,18 +1,12 @@
 //! Поиск device-окна по базовому PA: FDT даёт координаты устройства, право
 //! на MMIO - cap из набора ядра. Связь между ними - совпадение базы.
 
-use ipc::{
-    Transport,
-    wire::{Cap, IpcError},
-};
+use ipc::{ReceivedResources, Transport, wire::IpcError};
 
 use crate::bootstrap;
 
-/// Окно device-памяти, восстановимое из транспортного cap.
-pub trait DeviceWindow: Sized {
-    /// Усыновляет cap окна во владение.
-    fn adopt(cap: Cap) -> Self;
-
+/// Окно device-памяти, построенное из доставленной capability `H`.
+pub trait DeviceWindow<H>: Sized + From<H> {
     /// Базовый PA окна. `None`, если окно не инспектируется.
     fn base(&self) -> Option<u64>;
 }
@@ -20,15 +14,18 @@ pub trait DeviceWindow: Sized {
 impl<T: Transport> bootstrap::Client<T> {
     /// Находит device-окно с базой `base` перебором `acquire_device_memory`.
     /// `Ok(None)` - набор исчерпан (индекс вне набора либо отказ выдачи).
-    pub fn acquire_device_memory_by_base<W: DeviceWindow>(
+    pub fn acquire_device_memory_by_base<
+        W: DeviceWindow<<T::Resources as ReceivedResources>::Handle>,
+    >(
         &self,
         base: u64,
     ) -> Result<Option<W>, IpcError> {
         for index in 0.. {
-            let Ok(cap) = self.acquire_device_memory(index)? else {
+            let mut response = self.acquire_device_memory(index)?;
+            let Ok(cap) = response.value else {
                 return Ok(None);
             };
-            let window = W::adopt(cap);
+            let window = W::from(response.claim(cap).ok_or(IpcError::InvalidValue)?);
             if window.base() == Some(base) {
                 return Ok(Some(window));
             }
@@ -84,11 +81,13 @@ mod tests {
         cap: Cap,
     }
 
-    impl DeviceWindow for FakeWindow {
-        fn adopt(cap: Cap) -> Self {
+    impl From<Cap> for FakeWindow {
+        fn from(cap: Cap) -> Self {
             Self { cap }
         }
+    }
 
+    impl DeviceWindow<Cap> for FakeWindow {
         fn base(&self) -> Option<u64> {
             if self.cap.raw().get() == 0x90 {
                 return None;

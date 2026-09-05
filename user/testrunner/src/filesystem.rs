@@ -112,13 +112,14 @@ fn filesystem_session(index: u16) -> OwnedHandle {
 }
 
 fn filesystem_session_at(index: u16, scope: Str<'_, SESSION_SCOPE_MAX>) -> OwnedHandle {
-    let session =
+    let mut response =
         component_sessions::Client::new(PortTransport::client(component_roots(index).control()))
             .with_wait(CALL_TIMEOUT)
             .open_session(scope)
-            .expect("open_session call")
-            .expect("session established");
-    OwnedHandle::adopt(session)
+            .expect("open_session call");
+    let capability = response.value.expect("session established");
+    let session = response.claim(capability).expect("capability owner");
+    OwnedHandle::from(session)
 }
 
 fn session_scope(text: &str) -> Str<'_, SESSION_SCOPE_MAX> {
@@ -171,18 +172,16 @@ fn await_boot_tree(ports: &NamespacePorts) {
 }
 
 fn covers(minter: BorrowedHandle<'_>, prefix: &str) -> bool {
-    match namespace_client(minter).resolve(path(prefix)) {
-        Ok(Ok(session)) => {
-            drop(OwnedHandle::adopt(session));
-            true
-        }
-        _ => false,
-    }
+    // Выданную сессию закрывает ответ: проверке довольно покрытия префикса.
+    let Ok(resolved) = namespace_client(minter).resolve(path(prefix)) else {
+        return false;
+    };
+    resolved.value.is_ok()
 }
 
 fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
     let bootstrap = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let region = MemoryRegion::adopt(acquire_image(&bootstrap));
+    let region = MemoryRegion::from_handle(acquire_image(&bootstrap));
     let mapping = region.map_full_read_only().expect("map userland image");
     let image = decode(mapping.as_bytes()).expect("decode userland image");
     let program = image
@@ -194,11 +193,12 @@ fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
     load_entry(&program, Some(component_name(path)), &resource, start).expect("spawn from image")
 }
 
-fn acquire_image(bootstrap: &bootstrap::Client<PortTransport>) -> ipc::wire::Cap {
-    bootstrap
+fn acquire_image(bootstrap: &bootstrap::Client<PortTransport>) -> OwnedHandle {
+    let mut response = bootstrap
         .acquire_userland_image()
-        .expect("acquire_userland_image call")
-        .expect("image vend")
+        .expect("acquire_userland_image call");
+    let capability = response.value.expect("image vend");
+    OwnedHandle::from(response.claim(capability).expect("capability owner"))
 }
 
 fn namespace_client(capability: BorrowedHandle<'_>) -> namespace::Client<PortTransport> {
@@ -222,6 +222,7 @@ pub(crate) fn mount_ram_filesystem_scoped(
             filesystem_session_at(index, session_scope(scope)),
         )
         .expect("mount call")
+        .value
 }
 
 pub(crate) fn unmount_ram_filesystem_scoped(
@@ -251,8 +252,9 @@ fn remove_directory(index: u16, text: &str) {
     let capability = filesystem_session(index);
     let client = connect(&capability);
     client
-        .unlink(path(text))
+        .unlink(path(text), NodeKind::Directory)
         .expect("unlink call")
+        .value
         .expect("unlink of an emptied directory");
 }
 
@@ -260,20 +262,23 @@ fn mount_filesystem(prefix: &str, index: u16) -> Result<u32, FileSystemError> {
     namespace_admin_client(router_admin())
         .mount(path(prefix), filesystem_session(index))
         .expect("mount call")
+        .value
 }
 
 pub(crate) fn unmount_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
     namespace_admin_client(router_admin())
         .unmount(path(prefix))
         .expect("unmount call")
+        .value
 }
 
 pub(crate) fn session_for(text: &str) -> OwnedHandle {
-    let session = namespace_client(router_minter())
+    let mut response = namespace_client(router_minter())
         .resolve(path(text))
-        .expect("resolve call")
-        .expect("path is covered by a mount");
-    OwnedHandle::adopt(session)
+        .expect("resolve call");
+    let capability = response.value.expect("path is covered by a mount");
+    let session = response.claim(capability).expect("capability owner");
+    OwnedHandle::from(session)
 }
 
 pub(crate) fn ram_session() -> OwnedHandle {
@@ -326,6 +331,12 @@ impl Tamper {
 }
 
 impl Transport for Tampered {
+    type Resources = <PortTransport as Transport>::Resources;
+
+    fn take_resources(&self) -> Self::Resources {
+        self.port.take_resources()
+    }
+
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
         let mut frame = [0u8; MESSAGE_INLINE_MAX];
         let len = self.tamper.apply(bytes, &mut frame)?;
@@ -360,11 +371,12 @@ fn connect_abandoning(capability: &OwnedHandle) -> file_system::Client<Tampered>
 }
 
 pub(crate) fn acquire_buffer(client: &file_system::Client<PortTransport>) -> MemoryRegion {
-    let cap = client
+    let mut response = client
         .acquire_buffer(BUFFER_SIZE)
-        .expect("acquire_buffer call")
-        .expect("buffer granted");
-    MemoryRegion::adopt(cap)
+        .expect("acquire_buffer call");
+    let capability = response.value.expect("buffer granted");
+    let cap = response.claim(capability).expect("capability owner");
+    MemoryRegion::from_handle(cap.into())
 }
 
 pub(crate) fn path(text: &str) -> Str<'_, { filesystem_abi::PATH_MAX }> {
@@ -380,6 +392,7 @@ pub(crate) fn open(
     client
         .open(path(text), mode, flags)
         .expect("open call")
+        .value
         .expect("open ok")
 }
 
@@ -387,6 +400,7 @@ fn close(client: &file_system::Client<PortTransport>, opened: &Opened) {
     client
         .close(opened.fd)
         .expect("close call")
+        .value
         .expect("close ok");
 }
 
@@ -401,6 +415,7 @@ pub(crate) fn write_all(
     let written = client
         .write(opened.fd, offset, payload.len() as u32)
         .expect("write call")
+        .value
         .expect("write ok");
     written.count
 }
@@ -439,7 +454,11 @@ pub(crate) fn walk_directory(
     let mut names = Vec::new();
     let mut from = DirCursor::START;
     loop {
-        let listed = client.list(fd, from).expect("list call").expect("list ok");
+        let listed = client
+            .list(fd, from)
+            .expect("list call")
+            .value
+            .expect("list ok");
         collect_entries(&buffer_bytes(buffer), listed.count, &mut names);
         if listed.end {
             return names;
@@ -473,7 +492,11 @@ fn filesystem_creates_and_writes_a_file() {
     let count = write_all(&client, &buffer, &opened, 0, payload);
     kernel_tests::kassert_eq!(count, payload.len() as u32);
 
-    let info = client.stat(opened.fd).expect("stat call").expect("stat ok");
+    let info = client
+        .stat(opened.fd)
+        .expect("stat call")
+        .value
+        .expect("stat ok");
     kernel_tests::kassert_eq!(info.size, payload.len() as u64);
 
     let again = client
@@ -482,7 +505,8 @@ fn filesystem_creates_and_writes_a_file() {
             AccessMode::Read,
             OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
         )
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(again, Err(FileSystemError::AlreadyExists));
 }
 
@@ -505,6 +529,7 @@ fn filesystem_reads_at_offset() {
     let count = client
         .read(opened.fd, 4, 6)
         .expect("read call")
+        .value
         .expect("read ok");
     kernel_tests::kassert_eq!(count, 6);
     kernel_tests::kassert_eq!(buffer_head(&buffer, 6), b"456789");
@@ -512,6 +537,7 @@ fn filesystem_reads_at_offset() {
     let tail = client
         .read(opened.fd, payload.len() as u64, 4)
         .expect("read call")
+        .value
         .expect("read ok");
     kernel_tests::kassert_eq!(tail, 0);
 }
@@ -542,13 +568,18 @@ fn filesystem_stats_file_and_directory() {
     );
     write_all(&client, &buffer, &file, 0, b"stat");
 
-    let file_info = client.stat(file.fd).expect("stat call").expect("stat ok");
+    let file_info = client
+        .stat(file.fd)
+        .expect("stat call")
+        .value
+        .expect("stat ok");
     kernel_tests::kassert_eq!(file_info.kind, NodeKind::File);
     kernel_tests::kassert_eq!(file_info.size, 4);
 
     let directory_info = client
         .stat(directory.fd)
         .expect("stat call")
+        .value
         .expect("stat ok");
     kernel_tests::kassert_eq!(directory_info.kind, NodeKind::Directory);
     kernel_tests::kassert_eq!(directory_info.size, 1);
@@ -586,6 +617,7 @@ fn filesystem_lists_directory_across_batches() {
         let listed = client
             .list(directory.fd, from)
             .expect("list call")
+            .value
             .expect("list ok");
         batches += 1;
         collect_entries(&buffer_bytes(&buffer), listed.count, &mut names);
@@ -617,15 +649,20 @@ fn filesystem_unlinks_a_file() {
     );
     close(&client, &opened);
     client
-        .unlink(path("/removed"))
+        .unlink(path("/removed"), NodeKind::File)
         .expect("unlink call")
+        .value
         .expect("unlink ok");
 
     let reopened = client
         .open(path("/removed"), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(reopened, Err(FileSystemError::NotFound));
-    let again = client.unlink(path("/removed")).expect("unlink call");
+    let again = client
+        .unlink(path("/removed"), NodeKind::File)
+        .expect("unlink call")
+        .value;
     kernel_tests::kassert_eq!(again, Err(FileSystemError::NotFound));
 }
 
@@ -643,16 +680,18 @@ fn filesystem_rejects_write_through_a_read_only_descriptor() {
     buffer.copy_in(payload).expect("payload into the buffer");
     let written = client
         .write(opened.fd, 0, payload.len() as u32)
-        .expect("write call");
+        .expect("write call")
+        .value;
     kernel_tests::kassert_eq!(written, Err(FileSystemError::WrongMode));
 
-    let resized = client.set_size(opened.fd, 16).expect("set_size call");
+    let resized = client.set_size(opened.fd, 16).expect("set_size call").value;
     kernel_tests::kassert_eq!(resized, Err(FileSystemError::WrongMode));
 
     // Усечение меняет узел, поэтому без режима записи оно отвергается ещё на открытии.
     let truncated = client
         .open(path("/read-only"), AccessMode::Read, OpenFlags::TRUNCATE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(truncated, Err(FileSystemError::WrongMode));
 }
 
@@ -661,11 +700,12 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
     let namespace = namespace_client(router_minter());
 
     // Каталог образа существует только в корневой imagefs.
-    let image = namespace
+    let mut response = namespace
         .resolve(path(IMAGE_DIRECTORY))
-        .expect("resolve call")
-        .expect("root mount covers the path");
-    drop(OwnedHandle::adopt(image));
+        .expect("resolve call");
+    let capability = response.value.expect("root mount covers the path");
+    let image = response.claim(capability).expect("capability owner");
+    drop(OwnedHandle::from(image));
 
     let ram = ram_session();
     connect(&ram)
@@ -675,14 +715,14 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
             OpenFlags::CREATE | OpenFlags::DIRECTORY,
         )
         .expect("create directory call")
+        .value
         .expect("directory created");
 
     // `/tmp/inner` отсутствует в imagefs, поэтому успешное окно доказывает выбор длинного префикса.
-    let ram = namespace
-        .resolve(path("/tmp/inner"))
-        .expect("resolve call")
-        .expect("ram mount covers the path");
-    drop(OwnedHandle::adopt(ram));
+    let mut response = namespace.resolve(path("/tmp/inner")).expect("resolve call");
+    let capability = response.value.expect("ram mount covers the path");
+    let ram = response.claim(capability).expect("capability owner");
+    drop(OwnedHandle::from(ram));
 }
 
 #[kernel_test]
@@ -692,11 +732,12 @@ fn namespace_refuses_an_occupied_prefix_without_changing_the_table() {
     let occupied = mount_filesystem(RAM_MOUNT, ram_filesystem());
     kernel_tests::kassert_eq!(occupied, Err(FileSystemError::AlreadyExists));
 
-    let mounted = namespace_client(router_minter())
+    let mut response = namespace_client(router_minter())
         .resolve(path(RAM_MOUNT))
-        .expect("resolve call")
-        .expect("original mount remains");
-    drop(OwnedHandle::adopt(mounted));
+        .expect("resolve call");
+    let capability = response.value.expect("original mount remains");
+    let mounted = response.claim(capability).expect("capability owner");
+    drop(OwnedHandle::from(mounted));
 }
 
 #[kernel_test]
@@ -716,6 +757,7 @@ fn namespace_grafts_the_session_it_is_handed() {
     namespace_admin_client(router_admin())
         .mount(path(GRAFT_MOUNT), handed)
         .expect("mount call")
+        .value
         .expect("handed session grafted");
 
     let grafted = session_for(GRAFT_MOUNT);
@@ -730,7 +772,8 @@ fn namespace_grafts_the_session_it_is_handed() {
     // Переданная сессия создала узел, и корневое монтирование его не содержит.
     let absent = connect(&image_session())
         .open(path(GRAFT_ENTRY), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(absent, Err(FileSystemError::NotFound));
 
     unmount_filesystem(GRAFT_MOUNT).expect("grafted mount removed");
@@ -741,16 +784,21 @@ fn namespace_rejects_admin_operations_on_the_service_port() {
     // Управление таблицей монтирования находится на control-порту, поэтому service-порт не
     // разбирает его ordinal, и кадр отвергается целиком, не доходя до операции.
     let admin_on_service = namespace_admin_client(router_minter());
-    let refused = admin_on_service.unmount(path("/"));
+    let refused = admin_on_service
+        .unmount(path("/"))
+        .map(|response| response.value);
     kernel_tests::kassert_eq!(refused, Err(IpcError::PeerClosed));
 
     // Отвергнутый кадр не тронул ни таблицу, ни цикл обслуживания, поэтому корень резолвится
     // дальше.
-    let mounted = namespace_client(router_minter())
+    let mut response = namespace_client(router_minter())
         .resolve(path(IMAGE_FILE))
-        .expect("resolve call")
+        .expect("resolve call");
+    let capability = response
+        .value
         .expect("root mount survives the rejected frame");
-    drop(OwnedHandle::adopt(mounted));
+    let mounted = response.claim(capability).expect("capability owner");
+    drop(OwnedHandle::from(mounted));
 }
 
 #[kernel_test]
@@ -763,16 +811,18 @@ fn namespace_reports_an_unresponsive_mount() {
     // маршрутизатор отпускает вызов по своему сроку.
     let resolved = namespace_client(router_minter())
         .resolve(path(STUCK_MOUNT))
-        .expect("resolve call");
+        .expect("resolve call")
+        .value;
     kernel_tests::kassert_eq!(resolved, Err(FileSystemError::Unresponsive));
 
     // Снятие отпускает зависшую сессию, и корневое монтирование снова накрывает путь.
     unmount_filesystem(STUCK_MOUNT).expect("fixture unmounted");
-    let rerouted = namespace_client(router_minter())
+    let mut response = namespace_client(router_minter())
         .resolve(path(STUCK_MOUNT))
-        .expect("resolve call")
-        .expect("root mount covers the path again");
-    drop(OwnedHandle::adopt(rerouted));
+        .expect("resolve call");
+    let capability = response.value.expect("root mount covers the path again");
+    let rerouted = response.claim(capability).expect("capability owner");
+    drop(OwnedHandle::from(rerouted));
 }
 
 #[kernel_test]
@@ -786,13 +836,17 @@ fn unmount_only_removes_the_route_and_keeps_existing_sessions_alive() {
     let opened = connect(&session)
         .open(path("/"), AccessMode::Read, OpenFlags::NONE)
         .expect("existing session still answers")
+        .value
         .expect("existing session keeps its root");
     kernel_tests::kassert_eq!(opened.kind, NodeKind::Directory);
-    let rerouted = namespace_client(router_minter())
+    let mut response = namespace_client(router_minter())
         .resolve(path(DETACHED_MOUNT))
-        .expect("resolve call")
+        .expect("resolve call");
+    let capability = response
+        .value
         .expect("root mount covers the path after unmount");
-    drop(OwnedHandle::adopt(rerouted));
+    let rerouted = response.claim(capability).expect("capability owner");
+    drop(OwnedHandle::from(rerouted));
 }
 
 #[kernel_test]
@@ -811,6 +865,7 @@ fn filesystem_reads_a_file_from_the_image() {
     let count = client
         .read(opened.fd, 0, BUFFER_SIZE)
         .expect("read call")
+        .value
         .expect("read ok");
     kernel_tests::kassert_eq!(count, IMAGE_FILE_BODY.len() as u32);
     kernel_tests::kassert_eq!(buffer_head(&buffer, count as usize), IMAGE_FILE_BODY);
@@ -871,11 +926,13 @@ fn filesystem_mounts_hold_separate_trees() {
     // каждого - корень его собственного монтирования.
     let absent = image
         .open(path("/only-in-ram"), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(absent, Err(FileSystemError::NotFound));
     let foreign = ram
         .open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(foreign, Err(FileSystemError::NotFound));
 }
 
@@ -892,14 +949,15 @@ fn filesystem_hands_out_the_backing_window_of_an_image_file() {
     let count = client
         .read(opened.fd, 0, BUFFER_SIZE)
         .expect("read call")
+        .value
         .expect("read ok");
 
-    let window = MemoryRegion::adopt(
-        client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("window granted"),
-    );
+    let mut response = client
+        .backing_memory(opened.fd)
+        .expect("backing_memory call");
+    let capability = response.value.expect("window granted");
+    let window =
+        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
     let mapped = window
         .map_full(UserMemFlags::ReadOnly)
         .expect("map backing window");
@@ -925,20 +983,26 @@ fn filesystem_serves_an_empty_file_from_the_image() {
     kernel_tests::kassert_eq!(opened.kind, NodeKind::File);
     kernel_tests::kassert_eq!(opened.size, 0);
 
-    let info = client.stat(opened.fd).expect("stat call").expect("stat ok");
+    let info = client
+        .stat(opened.fd)
+        .expect("stat call")
+        .value
+        .expect("stat ok");
     kernel_tests::kassert_eq!(info.kind, NodeKind::File);
     kernel_tests::kassert_eq!(info.size, 0);
 
     let count = client
         .read(opened.fd, 0, BUFFER_SIZE)
         .expect("read call")
+        .value
         .expect("read ok");
     kernel_tests::kassert_eq!(count, 0);
 
     // Файл без байт не занимает страниц образа, поэтому у него нет окна.
     let refused = client
         .backing_memory(opened.fd)
-        .expect("backing_memory call");
+        .expect("backing_memory call")
+        .value;
     kernel_tests::kassert_eq!(refused, Err(FileSystemError::NotSupported));
 }
 
@@ -955,7 +1019,8 @@ fn filesystem_has_no_backing_window_for_an_empty_ramfs_file() {
     );
     let refused = client
         .backing_memory(opened.fd)
-        .expect("backing_memory call");
+        .expect("backing_memory call")
+        .value;
     kernel_tests::kassert_eq!(refused, Err(FileSystemError::NotSupported));
 }
 
@@ -975,12 +1040,12 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
     );
     write_all(&client, &data, &opened, 0, b"before");
 
-    let backing = MemoryRegion::adopt(
-        client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("backing granted"),
-    );
+    let mut response = client
+        .backing_memory(opened.fd)
+        .expect("backing_memory call");
+    let capability = response.value.expect("backing granted");
+    let backing =
+        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
     let mapped = backing
         .map_full(UserMemFlags::ReadWrite)
         .expect("map ramfs backing");
@@ -988,6 +1053,7 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
     let count = client
         .read(opened.fd, 0, 6)
         .expect("read call")
+        .value
         .expect("read ok");
     kernel_tests::kassert_eq!(count, 6);
     kernel_tests::kassert_eq!(buffer_head(&data, 6), b"mapped");
@@ -998,7 +1064,8 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
     data.copy_in(b"x").expect("payload into data buffer");
     let beyond = client
         .write(opened.fd, mapped.size_bytes(), 1)
-        .expect("write call");
+        .expect("write call")
+        .value;
     kernel_tests::kassert_eq!(beyond, Err(FileSystemError::NoSpace));
 
     let growing = open(
@@ -1010,6 +1077,7 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
     let written = client
         .write(growing.fd, mapped.size_bytes(), 1)
         .expect("write call")
+        .value
         .expect("unmapped file grows");
     kernel_tests::kassert_eq!(written.count, 1);
 }
@@ -1025,12 +1093,12 @@ fn filesystem_ramfs_zeroes_the_gap_of_a_sparse_write() {
     let opened = open(&client, "/sparse", AccessMode::ReadWrite, OpenFlags::CREATE);
     write_all(&client, &data, &opened, 0, b"head");
 
-    let backing = MemoryRegion::adopt(
-        client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("backing granted"),
-    );
+    let mut response = client
+        .backing_memory(opened.fd)
+        .expect("backing_memory call");
+    let capability = response.value.expect("backing granted");
+    let backing =
+        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
     let mapped = backing
         .map_full(UserMemFlags::ReadWrite)
         .expect("map ramfs backing");
@@ -1041,12 +1109,14 @@ fn filesystem_ramfs_zeroes_the_gap_of_a_sparse_write() {
     let written = client
         .write(opened.fd, 16, 4)
         .expect("write call")
+        .value
         .expect("sparse write within capacity");
     kernel_tests::kassert_eq!(written.count, 4);
 
     let count = client
         .read(opened.fd, 0, 20)
         .expect("read call")
+        .value
         .expect("read ok");
     kernel_tests::kassert_eq!(count, 20);
     kernel_tests::kassert_eq!(buffer_head(&data, 20), b"head\0\0\0\0\0\0\0\0\0\0\0\0tail");
@@ -1067,6 +1137,7 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
     creator
         .create_backed(path("/client-region"), region.into_handle(), 6)
         .expect("create_backed call")
+        .value
         .expect("create backed file");
 
     let reader_capability = ram_session();
@@ -1084,6 +1155,7 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
     let count = reader
         .read(opened.fd, 0, 6)
         .expect("read call")
+        .value
         .expect("read ok");
     kernel_tests::kassert_eq!(count, 6);
     kernel_tests::kassert_eq!(buffer_head(&data, 6), b"client");
@@ -1092,6 +1164,7 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
     let count = reader
         .read(opened.fd, 0, 6)
         .expect("read call")
+        .value
         .expect("read ok");
     kernel_tests::kassert_eq!(count, 6);
     kernel_tests::kassert_eq!(buffer_head(&data, 6), b"mapped");
@@ -1099,12 +1172,12 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
     write_all(&reader, &data, &opened, 0, b"server");
     kernel_tests::kassert_eq!(buffer_head(&mapped, 6), b"server");
 
-    let shared = MemoryRegion::adopt(
-        reader
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("backing granted"),
-    );
+    let mut response = reader
+        .backing_memory(opened.fd)
+        .expect("backing_memory call");
+    let capability = response.value.expect("backing granted");
+    let shared =
+        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
     kernel_tests::kassert!(
         shared
             .handle()
@@ -1136,9 +1209,9 @@ fn occupy_mapping_slots(
             .backing_memory(opened.fd)
             .expect("backing_memory call");
         close(client, &opened);
-        match backed {
-            Ok(cap) => {
-                drop(OwnedHandle::adopt(cap));
+        // Ответ сам владеет выданным окном независимо от следующего вызова и закрывает его.
+        match backed.value {
+            Ok(_) => {
                 occupied.push(name.clone());
             }
             Err(error) => {
@@ -1154,11 +1227,11 @@ fn buffered_sessions(mount: &str, count: usize) -> Vec<OwnedHandle> {
     (0..count)
         .map(|_| {
             let capability = session_for(mount);
-            let buffer = connect(&capability)
+            let granted = connect(&capability)
                 .acquire_buffer(BUFFER_SIZE)
-                .expect("acquire_buffer call")
-                .expect("buffer granted");
-            drop(OwnedHandle::adopt(buffer));
+                .expect("acquire_buffer call");
+            // Выданный буфер закрывает ответ, а сессию держит её собственная capability.
+            granted.value.expect("buffer granted");
             capability
         })
         .collect()
@@ -1221,13 +1294,17 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
             PAYLOAD.len() as u64,
         )
         .expect("create_backed call")
+        .value
         .expect("registration outlives the refused mapping");
 
     let imported = open(&client, IMPORTED, AccessMode::ReadWrite, OpenFlags::NONE);
     let length = PAYLOAD.len() as u32;
     // Без резидентного маппинга обращение идёт за слотом и упирается в то же исчерпание.
     kernel_tests::kassert_eq!(
-        client.read(imported.fd, 0, length).expect("read call"),
+        client
+            .read(imported.fd, 0, length)
+            .expect("read call")
+            .value,
         Err(FileSystemError::NoSpace)
     );
     // Файл на резидентном регионе читается, потому что сервер обслуживает сессию, и отказ выше
@@ -1241,6 +1318,7 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
     let count = client
         .read(resident.fd, 0, 1)
         .expect("read call")
+        .value
         .expect("resident store reads");
     kernel_tests::kassert_eq!(count, 1);
     close(&client, &resident);
@@ -1249,13 +1327,19 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
     // появляется не в тот же кадр.
     drop(spare_sessions);
     let turn = Signal::create().expect("signal create");
-    let mut read = client.read(imported.fd, 0, length).expect("read call");
+    let mut read = client
+        .read(imported.fd, 0, length)
+        .expect("read call")
+        .value;
     for _ in 0..REAP_ATTEMPTS {
         if read.is_ok() {
             break;
         }
         let _ = turn.wait(syscall::SIGNALED, REAP_TURN);
-        read = client.read(imported.fd, 0, length).expect("read call");
+        read = client
+            .read(imported.fd, 0, length)
+            .expect("read call")
+            .value;
     }
 
     // Слот появился, и отложенный маппинг доносит содержимое региона, который принесли.
@@ -1273,30 +1357,40 @@ fn filesystem_refuses_to_change_the_image() {
     // открытии.
     let writable = client
         .open(path(IMAGE_FILE), AccessMode::ReadWrite, OpenFlags::NONE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(writable, Err(FileSystemError::ReadOnly));
 
     // Усечение без режима записи - ошибка режима, потому что она первичнее неизменяемости дерева.
     let truncated = client
         .open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::TRUNCATE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(truncated, Err(FileSystemError::WrongMode));
 
     let created = client
         .open(path("/boot/fresh"), AccessMode::Write, OpenFlags::CREATE)
-        .expect("open call");
+        .expect("open call")
+        .value;
     kernel_tests::kassert_eq!(created, Err(FileSystemError::ReadOnly));
 
-    let removed = client.unlink(path(IMAGE_FILE)).expect("unlink call");
+    let removed = client
+        .unlink(path(IMAGE_FILE), NodeKind::File)
+        .expect("unlink call")
+        .value;
     kernel_tests::kassert_eq!(removed, Err(FileSystemError::ReadOnly));
 
     // Причина пути важнее причины режима, потому что изменяемое дерево даёт те же отказы.
-    let absent = client.unlink(path("/boot/absent")).expect("unlink call");
+    let absent = client
+        .unlink(path("/boot/absent"), NodeKind::File)
+        .expect("unlink call")
+        .value;
     kernel_tests::kassert_eq!(absent, Err(FileSystemError::NotFound));
 
     let through_a_file = client
-        .unlink(path("/boot/testrunner/sample/inner"))
-        .expect("unlink call");
+        .unlink(path("/boot/testrunner/sample/inner"), NodeKind::File)
+        .expect("unlink call")
+        .value;
     kernel_tests::kassert_eq!(through_a_file, Err(FileSystemError::NotADirectory));
 }
 
@@ -1315,16 +1409,17 @@ fn filesystem_holds_a_descriptor_to_its_mode() {
     let count = write_all(&client, &buffer, &opened, 0, payload);
     kernel_tests::kassert_eq!(count, payload.len() as u32);
 
-    let read = client.read(opened.fd, 0, 4).expect("read call");
+    let read = client.read(opened.fd, 0, 4).expect("read call").value;
     kernel_tests::kassert_eq!(read, Err(FileSystemError::WrongMode));
 
-    let stated = client.stat(opened.fd).expect("stat call");
+    let stated = client.stat(opened.fd).expect("stat call").value;
     kernel_tests::kassert_eq!(stated, Err(FileSystemError::WrongMode));
 
     // Режим важнее наличия окна. У узла ramfs нет его, но режим проверяется.
     let window = client
         .backing_memory(opened.fd)
-        .expect("backing_memory call");
+        .expect("backing_memory call")
+        .value;
     kernel_tests::kassert_eq!(window, Err(FileSystemError::WrongMode));
 
     let directory = open(
@@ -1335,7 +1430,8 @@ fn filesystem_holds_a_descriptor_to_its_mode() {
     );
     let listed = client
         .list(directory.fd, DirCursor::START)
-        .expect("list call");
+        .expect("list call")
+        .value;
     kernel_tests::kassert_eq!(listed, Err(FileSystemError::WrongMode));
 }
 
@@ -1362,11 +1458,16 @@ fn filesystem_appends_to_the_end_of_a_file() {
     let written = client
         .write(opened.fd, APPEND_OFFSET, tail.len() as u32)
         .expect("write call")
+        .value
         .expect("write ok");
     kernel_tests::kassert_eq!(written.offset, head.len() as u64);
     kernel_tests::kassert_eq!(written.count, tail.len() as u32);
 
-    let info = client.stat(opened.fd).expect("stat call").expect("stat ok");
+    let info = client
+        .stat(opened.fd)
+        .expect("stat call")
+        .value
+        .expect("stat ok");
     kernel_tests::kassert_eq!(info.size, (head.len() + tail.len()) as u64);
 }
 
@@ -1390,9 +1491,13 @@ fn filesystem_rejects_a_stale_descriptor_after_slot_reuse() {
     );
 
     // Слот занят другим узлом, а отставший вызов закрытым дескриптором до него не достаёт.
-    let refused = client.stat(stale.fd).expect("stat call");
+    let refused = client.stat(stale.fd).expect("stat call").value;
     kernel_tests::kassert_eq!(refused, Err(FileSystemError::BadDescriptor));
-    let alive = client.stat(fresh.fd).expect("stat call").expect("stat ok");
+    let alive = client
+        .stat(fresh.fd)
+        .expect("stat call")
+        .value
+        .expect("stat ok");
     kernel_tests::kassert_eq!(alive.kind, NodeKind::File);
 }
 
@@ -1409,10 +1514,14 @@ fn filesystem_isolates_descriptors_between_sessions() {
         AccessMode::ReadWrite,
         OpenFlags::CREATE,
     );
-    let mine = owner.stat(opened.fd).expect("stat call").expect("stat ok");
+    let mine = owner
+        .stat(opened.fd)
+        .expect("stat call")
+        .value
+        .expect("stat ok");
     kernel_tests::kassert_eq!(mine.kind, NodeKind::File);
 
-    let foreign = stranger.stat(opened.fd).expect("stat call");
+    let foreign = stranger.stat(opened.fd).expect("stat call").value;
     kernel_tests::kassert_eq!(foreign, Err(FileSystemError::BadDescriptor));
 }
 
@@ -1447,7 +1556,9 @@ fn filesystem_serves_on_after_an_unknown_ordinal() {
     // Контракт не описывает такой операции, поэтому сервер закрывает соединение кадром peer-close,
     // без захода в вызов собственного порта. Аргументы вызова не играют роли - до операции кадр не
     // доходит.
-    let refused = bogus.stat(NodeDescriptor::from_raw(0));
+    let refused = bogus
+        .stat(NodeDescriptor::from_raw(0))
+        .map(|response| response.value);
     kernel_tests::kassert_eq!(refused, Err(IpcError::PeerClosed));
 
     let capability = ram_session();
@@ -1473,7 +1584,9 @@ fn filesystem_releases_the_reply_of_an_unparsed_frame() {
     );
     // Кадр без полей до обработчика не доходит. Закрытие reply-объекта будит
     // вызывателя отказом до его собственного тайм-аута.
-    let refused = malformed.stat(NodeDescriptor::from_raw(0));
+    let refused = malformed
+        .stat(NodeDescriptor::from_raw(0))
+        .map(|response| response.value);
     kernel_tests::kassert_eq!(refused, Err(IpcError::PeerClosed));
 }
 
@@ -1543,39 +1656,44 @@ fn filesystem_does_not_pin_an_undelivered_backing() {
     let grown = client
         .write(opened.fd, USERLAND_PAGE_SIZE, 1)
         .expect("write call")
+        .value
         .expect("undelivered backing does not pin");
     kernel_tests::kassert_eq!(grown.count, 1);
 
-    let backing = MemoryRegion::adopt(
-        client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("backing granted"),
-    );
+    let mut response = client
+        .backing_memory(opened.fd)
+        .expect("backing_memory call");
+    let capability = response.value.expect("backing granted");
+    let backing =
+        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
     let capacity = backing.inspect().expect("inspect backing").size_bytes;
     data.copy_in(b"y").expect("payload into data buffer");
-    let pinned = client.write(opened.fd, capacity, 1).expect("write call");
+    let pinned = client
+        .write(opened.fd, capacity, 1)
+        .expect("write call")
+        .value;
     kernel_tests::kassert_eq!(pinned, Err(FileSystemError::NoSpace));
 }
 
 fn vends_a_buffer() -> bool {
     let capability = image_session();
     let client = connect(&capability);
-    let Ok(Ok(buffer)) = client.acquire_buffer(BUFFER_SIZE) else {
+    // Выданный буфер закрывает ответ: проверке довольно факта выдачи.
+    let Ok(granted) = client.acquire_buffer(BUFFER_SIZE) else {
         return false;
     };
-    drop(OwnedHandle::adopt(buffer));
-    true
+    granted.value.is_ok()
 }
 
 fn take_and_drop_session() {
     let capability = ram_session();
     let client = connect(&capability);
-    let buffer = client
+    let mut response = client
         .acquire_buffer(REAP_BUFFER_SIZE)
-        .expect("acquire_buffer call")
-        .expect("buffer granted");
-    drop(OwnedHandle::adopt(buffer));
+        .expect("acquire_buffer call");
+    let capability = response.value.expect("buffer granted");
+    let buffer = response.claim(capability).expect("capability owner");
+    drop(OwnedHandle::from(buffer));
 }
 
 fn run_client_fixture() {
@@ -1617,11 +1735,16 @@ fn filesystem_reaps_only_the_session_of_the_gone_badge() {
     }
 
     // Значок наблюдателя не пропадал, поэтому его сессия, дескрипторы и буфер на месте.
-    let mine = keeper.stat(kept.fd).expect("stat call").expect("stat ok");
+    let mine = keeper
+        .stat(kept.fd)
+        .expect("stat call")
+        .value
+        .expect("stat ok");
     kernel_tests::kassert_eq!(mine.kind, NodeKind::File);
     let occupied = keeper
         .acquire_buffer(BUFFER_SIZE)
-        .expect("acquire_buffer call");
+        .expect("acquire_buffer call")
+        .value;
     kernel_tests::kassert_eq!(occupied, Err(FileSystemError::AlreadyExists));
     drop(keeper_buffer);
 }

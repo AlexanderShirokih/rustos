@@ -67,8 +67,8 @@ mod tests {
 
             let client = namespace_admin::Client::new(client_end);
             let path = Str::new("/tmp").expect("path within the bound");
-            assert_eq!(client.mount(path, SESSION).expect("call"), Ok(0));
-            assert_eq!(client.unmount(path).expect("call"), Ok(0));
+            assert_eq!(client.mount(path, SESSION).expect("call").value, Ok(0));
+            assert_eq!(client.unmount(path).expect("call").value, Ok(0));
             server.join().expect("server joins");
         });
         assert_eq!(

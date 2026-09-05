@@ -548,7 +548,7 @@ macro_rules! __protocol_client_method {
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , [$($encode:tt)*] , [$($release_param:tt)*] } )*]) => {
         $(#[$doc])*
         pub fn $op(&self $(, $param: $sig_ty)*)
-            -> ::core::result::Result<$read, $crate::wire::IpcError>
+            -> ::core::result::Result<$crate::Response<$read, T::Resources>, $crate::wire::IpcError>
         {
             let txid = self.alloc_txid();
             // Срок ожидания ответа: дефолт клиента, если операция не задала собственный.
@@ -574,7 +574,9 @@ macro_rules! __protocol_client_method {
             let mut bytes = [0u8; $crate::wire::MESSAGE_INLINE_MAX];
             let mut handles = [0u32; $crate::wire::MESSAGE_MAX_HANDLES];
             loop {
-                let len = self.transport.read_message(&mut bytes, &mut handles)?;
+                let read = self.transport.read_message(&mut bytes, &mut handles);
+                let mut resources = self.transport.take_resources();
+                let len = read?;
                 let frame = &bytes[..len.bytes];
                 let header = $crate::wire::Header::decode(frame)?;
                 if header.has_flag($crate::wire::FLAG_PEER_CLOSE) {
@@ -582,12 +584,15 @@ macro_rules! __protocol_client_method {
                 }
                 // Ответ обязан нести RESPONSE и тот же txid, иначе кадр отброшен.
                 if !header.has_flag($crate::wire::FLAG_RESPONSE) || header.txid != txid {
+                    ::core::mem::drop(resources);
                     self.transport.wait_readable(wait)?;
                     continue;
                 }
                 let body = &frame[$crate::wire::HEADER_SIZE..];
                 let slots = $crate::wire::HandleSlots::from_received(&handles[..len.handles]);
-                return <$read as $crate::WireReply>::read_reply(&header, body, &slots);
+                let value = <$read as $crate::WireReply>::read_reply(&header, body, &slots)?;
+                $crate::ReceivedResources::retain_decoded(&mut resources, &slots);
+                return ::core::result::Result::Ok($crate::Response::new(value, resources));
             }
         }
     };

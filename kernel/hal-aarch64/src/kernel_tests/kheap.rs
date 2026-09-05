@@ -27,8 +27,10 @@ fn empty_user_as_drop_cycle_does_not_block_aligned_kheap_alloc() {
     // SAFETY: layout валиден; ptr - свежевыделенный, эксклюзивно наш.
     let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
     kernel_tests::kassert!(!ptr.is_null());
+    kernel_tests::kassert!(ptr.addr().is_multiple_of(PAGE_SIZE));
 
-    // SAFETY: 4K-страница, выровнена на 4K - запись u64 безопасна.
+    // SAFETY: проверка выше подтвердила выравнивание на 4K, запись u64
+    // корректна; страница эксклюзивно наша.
     #[allow(clippy::cast_ptr_alignment)]
     unsafe {
         ptr.cast::<u64>().write_volatile(0xDEAD_BEEF_CAFE_BABE);
@@ -54,8 +56,10 @@ fn many_aligned_kheap_allocs_after_drop_cycle_succeed() {
         // SAFETY: layout валиден.
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
         kernel_tests::kassert!(!ptr.is_null());
+        kernel_tests::kassert!(ptr.addr().is_multiple_of(PAGE_SIZE));
         // Уникальный pattern, чтобы поймать overlap между аллокациями.
-        // SAFETY: 4K-страница, выровнена на 4K.
+        // SAFETY: проверка выше подтвердила выравнивание на 4K, запись u64
+        // корректна.
         #[allow(clippy::cast_ptr_alignment)]
         unsafe {
             ptr.cast::<u64>().write_volatile(0xA000_0000 + i);

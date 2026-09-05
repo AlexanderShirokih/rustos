@@ -307,12 +307,12 @@ impl SystemImage {
     /// Забирает у ядра capability образа и отображает его read-only.
     pub fn acquire(kernel: Handle) -> Result<Self, BootFailure> {
         let client = bootstrap::Client::new(PortTransport::client(kernel));
-        let cap = client
+        let mut response = client
             .acquire_userland_image()
-            .ok()
-            .and_then(Result::ok)
-            .ok_or(BootFailure::Image)?;
-        let region = MemoryRegion::adopt(cap);
+            .map_err(|_| BootFailure::Image)?;
+        let cap = response.value.map_err(|_| BootFailure::Image)?;
+        let handle = response.claim(cap).ok_or(BootFailure::Image)?;
+        let region = MemoryRegion::from_handle(handle.into());
         let mapping = region
             .map_full_read_only()
             .map_err(|_| BootFailure::Image)?;
@@ -367,27 +367,29 @@ impl DeviceAuthority {
 
     fn acquire(kernel: Handle) -> Result<Self, BootFailure> {
         let client = bootstrap::Client::new(PortTransport::client(kernel));
-        let fdt = client
+        let mut response = client
             .acquire_boot_fdt()
-            .ok()
-            .and_then(Result::ok)
+            .map_err(|_| BootFailure::DeviceAuthority)?;
+        let fdt = response.value.map_err(|_| BootFailure::DeviceAuthority)?;
+        let handle = response
+            .claim(fdt.region)
             .ok_or(BootFailure::DeviceAuthority)?;
-        let region = MemoryRegion::adopt(fdt.region);
+        let region = MemoryRegion::from_handle(handle.into());
         let description = FdtMapping {
             mapping: region
                 .map_full_read_only()
                 .map_err(|_| BootFailure::DeviceAuthority)?,
             offset: fdt.offset as usize,
         };
-        let lines = client
+        let mut response = client
             .acquire_irq_control()
-            .ok()
-            .and_then(Result::ok)
-            .ok_or(BootFailure::DeviceAuthority)?;
+            .map_err(|_| BootFailure::DeviceAuthority)?;
+        let lines = response.value.map_err(|_| BootFailure::DeviceAuthority)?;
+        let lines = response.claim(lines).ok_or(BootFailure::DeviceAuthority)?;
         Ok(Self {
             description: Some(description),
             _region: Some(region),
-            lines: Some(IrqControl::from_handle(OwnedHandle::adopt(lines))),
+            lines: Some(IrqControl::from_handle(lines.into())),
             windows: Vec::new(),
         })
     }
@@ -1247,12 +1249,17 @@ fn open_session(
 ) -> Result<OwnedHandle, BootFailure> {
     let scope =
         Str::<SESSION_SCOPE_MAX>::new(scope).ok_or(BootFailure::Slot(SlotFailure::Session))?;
-    let session = component_sessions::Client::new(PortTransport::client(control))
+    let mut response = component_sessions::Client::new(PortTransport::client(control))
         .with_wait(timeout)
         .open_session(scope)
-        .map_err(|_| BootFailure::Slot(SlotFailure::Session))?
         .map_err(|_| BootFailure::Slot(SlotFailure::Session))?;
-    Ok(OwnedHandle::adopt(session))
+    let session = response
+        .value
+        .map_err(|_| BootFailure::Slot(SlotFailure::Session))?;
+    let handle = response
+        .claim(session)
+        .ok_or(BootFailure::Slot(SlotFailure::Session))?;
+    Ok(handle.into())
 }
 
 fn log_device_conflict(

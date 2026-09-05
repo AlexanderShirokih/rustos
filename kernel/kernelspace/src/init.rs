@@ -106,6 +106,7 @@ fn bootstrap_chain(
     let port = launch.port.clone();
     let resources = launch.resources;
     syscall_bridge::scheduler()
+        .ok_or_else(|| warn!("scheduler missing; bootstrap-log task not started"))?
         .spawn(
             SpawnConfig::new("bootstrap-log")
                 .priority(Priority::normal())

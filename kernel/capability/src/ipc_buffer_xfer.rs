@@ -284,6 +284,32 @@ pub fn transfer_rendezvous(
     Ok(())
 }
 
+/// Закрывает capability доставленного кадра в таблице получателя и обнуляет тег его буфера.
+///
+/// Приём, отказавший после переноса, кадр получателю не отдаёт, и его набор остаётся без
+/// владельца.
+pub fn release_delivered(receiver: &ThreadTransport) -> Result<(), IpcError> {
+    let tag = read_tag(receiver)?;
+    let ncaps = decode_tag(tag).ncaps.min(IPC_BUFFER_MAX_CAPS);
+    let ids = read_caps(receiver, ncaps)?;
+    // Сброс тега предшествует закрытию, и получатель не наблюдает доставленный кадр ни на
+    // одном исходе.
+    write_tag(receiver, encode_tag(0, 0))?;
+
+    for raw in ids {
+        let Some(nz) = NonZeroU32::new(raw) else {
+            continue;
+        };
+        let drained = receiver
+            .handle_table
+            .with_lock(|tbl| tbl.remove(HandleId::from_raw(nz)));
+        if let Ok(drained) = drained {
+            drained.release();
+        }
+    }
+    Ok(())
+}
+
 fn transfer_caps(
     sender: &ThreadTransport,
     receiver: &ThreadTransport,

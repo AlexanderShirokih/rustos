@@ -14,7 +14,7 @@ use filesystem_abi::{
 use userland_image::{ImageDecodeError, decode};
 
 use crate::{
-    backend::FileSystemBackend,
+    backend::{FileSystemBackend, kind_mismatch},
     node::{NodeId, Window},
     store::{ByteStore, StoreId},
 };
@@ -206,6 +206,14 @@ impl<'a> Located<'a> {
         self.prefix_len() == self.record.path.as_str().len()
     }
 
+    fn kind(self) -> NodeKind {
+        if self.is_file() {
+            NodeKind::File
+        } else {
+            NodeKind::Directory
+        }
+    }
+
     fn prefix(self) -> &'a str {
         &self.record.path.as_str()[..self.prefix_len()]
     }
@@ -252,11 +260,13 @@ impl FileSystemBackend for ImageFileSystem {
         &mut self,
         _stores: &mut dyn ByteStore,
         path: Path<'_>,
+        expected: NodeKind,
     ) -> Result<(), FileSystemError> {
-        Err(self
-            .locate_path(path)
-            .err()
-            .unwrap_or(FileSystemError::ReadOnly))
+        let node = self.locate_path(path)?;
+        if node.kind() != expected {
+            return Err(kind_mismatch(expected));
+        }
+        Err(FileSystemError::ReadOnly)
     }
 
     fn rename(
@@ -817,7 +827,7 @@ mod tests {
             Err(FileSystemError::ReadOnly)
         );
         assert_eq!(
-            fs.unlink(path("/data/sample")),
+            fs.unlink(path("/data/sample"), NodeKind::File),
             Err(FileSystemError::ReadOnly)
         );
         assert_eq!(
@@ -835,11 +845,11 @@ mod tests {
     fn changing_a_path_that_does_not_resolve_reports_the_path() {
         let mut fs = image();
         assert_eq!(
-            fs.unlink(path("/data/absent")),
+            fs.unlink(path("/data/absent"), NodeKind::File),
             Err(FileSystemError::NotFound)
         );
         assert_eq!(
-            fs.unlink(path("/data/sample/x")),
+            fs.unlink(path("/data/sample/x"), NodeKind::File),
             Err(FileSystemError::NotADirectory)
         );
         assert_eq!(
@@ -871,13 +881,41 @@ mod tests {
     }
 
     #[test]
+    fn unlink_of_a_kind_that_does_not_match_reports_the_kind() {
+        let mut fs = image();
+        assert_eq!(
+            fs.unlink(path("/boot"), NodeKind::File),
+            Err(FileSystemError::IsADirectory)
+        );
+        assert_eq!(
+            fs.unlink(path("/data/sample"), NodeKind::Directory),
+            Err(FileSystemError::NotADirectory)
+        );
+        assert_eq!(
+            fs.unlink(path("/boot"), NodeKind::Directory),
+            Err(FileSystemError::ReadOnly)
+        );
+        assert_eq!(
+            fs.unlink(path("/data/sample"), NodeKind::File),
+            Err(FileSystemError::ReadOnly)
+        );
+        assert_eq!(
+            fs.unlink(path("/data/absent"), NodeKind::Directory),
+            Err(FileSystemError::NotFound)
+        );
+    }
+
+    #[test]
     fn changing_the_name_of_the_root_is_rejected() {
         let mut fs = image();
         assert_eq!(
             fs.create(Path::ROOT, NodeKind::Directory),
             Err(FileSystemError::InvalidPath)
         );
-        assert_eq!(fs.unlink(Path::ROOT), Err(FileSystemError::InvalidPath));
+        assert_eq!(
+            fs.unlink(Path::ROOT, NodeKind::Directory),
+            Err(FileSystemError::InvalidPath)
+        );
         assert_eq!(
             fs.rename(Path::ROOT, path("/fresh")),
             Err(FileSystemError::InvalidPath)

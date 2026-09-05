@@ -153,10 +153,9 @@ fn installed_block() -> Option<*mut Block> {
     if raw.is_null() {
         return None;
     }
-    // Память запрошена под `align_of::<Block>()`, поэтому каст выравнивание не нарушает.
-    #[allow(clippy::cast_ptr_alignment)]
-    let block = raw.cast::<Block>();
-    // SAFETY: свежая память под `Block`, других владельцев нет.
+    let block: *mut Block = raw.cast();
+    // SAFETY: память выдана `alloc` под размер и выравнивание `Block` и принадлежит только
+    // этому блоку.
     unsafe {
         block.write(Block {
             slots: [ptr::null_mut(); MAX_KEYS],

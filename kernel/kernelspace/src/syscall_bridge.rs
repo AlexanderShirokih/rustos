@@ -18,11 +18,8 @@ pub fn install_scheduler(service: Arc<dyn SchedulerService>) {
     let _ = SCHEDULER.call_once(|| service);
 }
 
-#[allow(clippy::expect_used)]
-pub fn scheduler() -> &'static Arc<dyn SchedulerService> {
-    SCHEDULER
-        .get()
-        .expect("SchedulerService must be installed via syscall_bridge::install_scheduler")
+pub fn scheduler() -> Option<&'static Arc<dyn SchedulerService>> {
+    SCHEDULER.get()
 }
 
 pub fn install_address_space_factory(factory: &'static (dyn AddressSpaceFactory + Send + Sync)) {
@@ -121,12 +118,13 @@ mod tests {
 
     #[test]
     fn scheduler_install_getter_and_double_install_panic() {
-        assert!(catch_unwind(scheduler).is_err());
+        assert!(scheduler().is_none());
 
         let service: Arc<dyn SchedulerService> = Arc::new(DummyScheduler);
         install_scheduler(service);
 
-        assert_eq!(scheduler().current().map(|id| id.raw().get()), Some(1));
+        let current = scheduler().and_then(|s| s.current());
+        assert_eq!(current.map(|id| id.raw().get()), Some(1));
 
         let again: Arc<dyn SchedulerService> = Arc::new(DummyScheduler);
         assert!(catch_unwind(AssertUnwindSafe(|| install_scheduler(again))).is_err());

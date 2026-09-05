@@ -92,15 +92,12 @@ impl MmioBound {
             return;
         }
 
+        let ptr: *mut T = self.virtual_address.as_ptr::<T>().wrapping_byte_add(offset);
         // SAFETY: `MmioBound` владеет замапленным `[virtual_address; mmio_address.size]`-регионом
         // (инвариант `MmioService::map_mmio`); проверка выше оставила
         // `offset + size_of::<T>()` внутри региона и выровненным,
         // `write_volatile` корректен для MMIO.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            let ptr: *mut T = self.virtual_address.as_ptr::<T>().byte_add(offset);
-            ptr.write_volatile(val);
-        }
+        unsafe { ptr.write_volatile(val) };
     }
 
     pub fn write_reg<T: VolatileInt>(&self, reg: Reg<T>, val: T) {
@@ -113,13 +110,10 @@ impl MmioBound {
             return T::default();
         }
 
+        let ptr: *const T = self.virtual_address.as_ptr::<T>().wrapping_byte_add(offset);
         // SAFETY: см. `write` - регион замаплен и принадлежит этому `MmioBound`,
         // проверка выше оставила регистр внутри региона, `read_volatile` корректен для MMIO.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            let ptr = self.virtual_address.as_ptr::<T>().byte_add(offset);
-            ptr.read_volatile()
-        }
+        unsafe { ptr.read_volatile() }
     }
 
     pub fn read_reg<T: VolatileInt>(&self, reg: Reg<T>) -> T {

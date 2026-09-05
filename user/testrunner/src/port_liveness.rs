@@ -72,11 +72,12 @@ fn assert_sender_gone(result: Result<Option<Reply>>, badge: u64) {
 
 fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let cap = client
+    let mut response = client
         .acquire_userland_image()
-        .expect("acquire_userland_image call")
-        .expect("vend ok");
-    let region = MemoryRegion::from_handle(OwnedHandle::adopt(cap));
+        .expect("acquire_userland_image call");
+    let capability = response.value.expect("vend ok");
+    let cap = response.claim(capability).expect("capability owner");
+    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let program = image
