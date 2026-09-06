@@ -68,6 +68,7 @@ struct World {
     scoping_fails: AtomicBool,
     claims_fail: AtomicBool,
     mappings_allowed: AtomicUsize,
+    transfers_allowed: AtomicUsize,
 }
 
 impl Filesystem {
@@ -114,6 +115,7 @@ impl World {
             scoping_fails: AtomicBool::new(false),
             claims_fail: AtomicBool::new(false),
             mappings_allowed: AtomicUsize::new(usize::MAX),
+            transfers_allowed: AtomicUsize::new(usize::MAX),
         })
     }
 
@@ -266,6 +268,19 @@ impl SessionServer {
             .ok_or(FileSystemError::BadDescriptor)
     }
 
+    fn transfer(&self) -> Result<(), FileSystemError> {
+        let allowed = self.world.transfers_allowed.load(Ordering::SeqCst);
+        if allowed == 0 {
+            return Err(FileSystemError::Unresponsive);
+        }
+        if allowed != usize::MAX {
+            self.world
+                .transfers_allowed
+                .store(allowed - 1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
     fn data(&self) -> Result<MutexGuard<'_, Vec<u8>>, FileSystemError> {
         Ok(self
             .buffer
@@ -348,6 +363,7 @@ impl file_system::Service for SessionServer {
 
     fn read(&mut self, fd: NodeDescriptor, offset: u64, len: u32) -> Result<u32, FileSystemError> {
         self.world.reads.fetch_add(1, Ordering::SeqCst);
+        self.transfer()?;
         let path = self.path_of(fd)?;
         let tree = self.filesystem.tree();
         let Some(Node::File(bytes)) = tree.get(&path) else {
@@ -373,6 +389,7 @@ impl file_system::Service for SessionServer {
         offset: u64,
         len: u32,
     ) -> Result<Written, FileSystemError> {
+        self.transfer()?;
         let path = self.path_of(fd)?;
         let chunk = self
             .data()?
@@ -952,6 +969,59 @@ fn write_beyond_the_buffer_goes_in_parts() {
     assert_eq!(
         read_all(&mut filesystem, "/data/first", body.len()),
         body.as_bytes()
+    );
+}
+
+// Отказ файлового сервиса на второй порции не скрывает уже прочитанные байты и сдвиг
+// позиции.
+#[test]
+fn a_refused_second_read_part_returns_the_first() {
+    let body = "f".repeat(BUFFER_SIZE as usize * 2);
+    let world = World::new(&[("/data", Node::Directory), ("/data/first", file(&body))]);
+    let mut filesystem = routed(&world);
+    let mut node = filesystem
+        .open(path("/data/first"), AccessMode::Read, OpenFlags::NONE)
+        .expect("open");
+    world.transfers_allowed.store(1, Ordering::SeqCst);
+    let mut bytes = std::vec![0; body.len()];
+
+    assert_eq!(node.read(&mut bytes).expect("read"), BUFFER_SIZE as usize);
+    assert_eq!(node.position(), u64::from(BUFFER_SIZE));
+    assert_eq!(
+        node.read(&mut bytes).err(),
+        Some(Failure::FileSystem(FileSystemError::Unresponsive))
+    );
+    assert_eq!(node.position(), u64::from(BUFFER_SIZE));
+}
+
+// Отказ файлового сервиса на второй порции не скрывает уже записанные байты и сдвиг
+// позиции.
+#[test]
+fn a_refused_second_write_part_returns_the_first() {
+    let body = "g".repeat(BUFFER_SIZE as usize * 2);
+    let world = World::new(&[("/data", Node::Directory), ("/data/first", file(""))]);
+    let mut filesystem = routed(&world);
+    let mut node = filesystem
+        .open(path("/data/first"), AccessMode::ReadWrite, OpenFlags::NONE)
+        .expect("open");
+    world.transfers_allowed.store(1, Ordering::SeqCst);
+
+    assert_eq!(
+        node.write(body.as_bytes()).expect("write"),
+        BUFFER_SIZE as usize
+    );
+    assert_eq!(node.position(), u64::from(BUFFER_SIZE));
+    assert_eq!(
+        node.write(body.as_bytes()).err(),
+        Some(Failure::FileSystem(FileSystemError::Unresponsive))
+    );
+    assert_eq!(node.position(), u64::from(BUFFER_SIZE));
+    drop(node);
+    world.transfers_allowed.store(usize::MAX, Ordering::SeqCst);
+
+    assert_eq!(
+        read_all(&mut filesystem, "/data/first", body.len()),
+        &body.as_bytes()[..BUFFER_SIZE as usize]
     );
 }
 

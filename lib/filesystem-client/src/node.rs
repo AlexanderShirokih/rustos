@@ -53,29 +53,19 @@ impl<E: Environment> OpenNode<E> {
         self.position = position;
     }
 
-    /// Читает узел с текущей позиции и продвигает её на число прочитанных байт. Прочитанного
-    /// бывает меньше, чем вмещает `dst`.
+    /// Читает узел с текущей позиции и продвигает её на число прочитанных байт. Возвращает
+    /// число прочитанных байт, которое может быть меньше, чем вмещает `dst`, либо ошибку,
+    /// если не удаётся прочитать ни одного байта.
     pub fn read(&mut self, dst: &mut [u8]) -> Result<usize> {
         let mut done = 0;
         for chunk in dst.chunks_mut(self.session.capacity().max(1)) {
-            let requested = self.session.wire_len(chunk.len());
-            let count = self
-                .session
-                .client()
-                .read(self.descriptor, self.position, requested)?
-                .value?;
-            let count = usize::try_from(count).unwrap_or(0).min(chunk.len());
-            if count == 0 {
-                break;
-            }
-            let Some(head) = chunk.get_mut(..count) else {
-                break;
+            let count = match self.read_chunk(chunk) {
+                Ok(0) => break,
+                Ok(count) => count,
+                Err(_) if done > 0 => break,
+                Err(error) => return Err(error),
             };
-            self.session.region().read_at(0, head)?;
-
-            self.position = self
-                .position
-                .saturating_add(u64::try_from(count).unwrap_or(0));
+            self.advance(count);
             done += count;
             if count < chunk.len() {
                 break;
@@ -84,31 +74,56 @@ impl<E: Environment> OpenNode<E> {
         Ok(done)
     }
 
-    /// Пишет в узел с текущей позиции и продвигает её на число записанных байт. Записанного
-    /// бывает меньше, чем содержит `src`.
+    /// Пишет в узел с текущей позиции и продвигает её на число записанных байт. Возвращает
+    /// число записанных байт, которое может быть меньше, чем содержит `src`, либо ошибку,
+    /// если не удаётся записать ни одного байта.
     pub fn write(&mut self, src: &[u8]) -> Result<usize> {
         let mut done = 0;
         for chunk in src.chunks(self.session.capacity().max(1)) {
-            self.session.region().write_at(0, chunk)?;
-            let requested = self.session.wire_len(chunk.len());
-            let written = self
-                .session
-                .client()
-                .write(self.descriptor, self.position, requested)?
-                .value?;
-            let count = usize::try_from(written.count).unwrap_or(0).min(chunk.len());
-            if count == 0 {
-                break;
-            }
-            self.position = self
-                .position
-                .saturating_add(u64::try_from(count).unwrap_or(0));
+            let count = match self.write_chunk(chunk) {
+                Ok(0) => break,
+                Ok(count) => count,
+                Err(_) if done > 0 => break,
+                Err(error) => return Err(error),
+            };
+            self.advance(count);
             done += count;
             if count < chunk.len() {
                 break;
             }
         }
         Ok(done)
+    }
+
+    fn read_chunk(&self, chunk: &mut [u8]) -> Result<usize> {
+        let requested = self.session.wire_len(chunk.len());
+        let count = self
+            .session
+            .client()
+            .read(self.descriptor, self.position, requested)?
+            .value?;
+        let count = usize::try_from(count).unwrap_or(0).min(chunk.len());
+        if let Some(head) = chunk.get_mut(..count) {
+            self.session.region().read_at(0, head)?;
+        }
+        Ok(count)
+    }
+
+    fn write_chunk(&self, chunk: &[u8]) -> Result<usize> {
+        self.session.region().write_at(0, chunk)?;
+        let requested = self.session.wire_len(chunk.len());
+        let written = self
+            .session
+            .client()
+            .write(self.descriptor, self.position, requested)?
+            .value?;
+        Ok(usize::try_from(written.count).unwrap_or(0).min(chunk.len()))
+    }
+
+    fn advance(&mut self, count: usize) {
+        self.position = self
+            .position
+            .saturating_add(u64::try_from(count).unwrap_or(0));
     }
 
     /// Дозаписывает байты в конец узла независимо от текущей позиции одной файловой
