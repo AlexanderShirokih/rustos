@@ -9,14 +9,18 @@ pub use syscall::{SIGNALED, WakeCount};
 
 use super::wait::{Waitable, Waker};
 
-/// Синальный примитив ядра.
+/// Слово из 32 сигнальных бит со списком ожидающих.
+///
+/// Ожидающий регистрируется под маской и будится, когда пересечение маски с поднятыми битами
+/// становится ненулевым. Биты держатся до явного снятия, и опоздавший ожидающий получает
+/// пробуждение сразу при регистрации.
 pub struct Signal {
     bits: AtomicU32,
     waiters: MutexCell<WaiterList>,
 }
 
 impl Signal {
-    /// Создаёт новый `Signal` с очищенными сигналами.
+    /// Создаёт `Signal` с нулевым словом бит и пустым списком ожидающих.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::with_bits(0))
     }
@@ -66,8 +70,9 @@ impl Signal {
         }
     }
 
-    /// Регистрирует waiter. Если требуемые сигналы уже присутствуют,
-    /// waiter вызывается немедленно.
+    /// Регистрирует waiter под маской `mask`. Если требуемые сигналы уже присутствуют, waiter
+    /// вызывается немедленно и в список не попадает. Снятие такого waiter через
+    /// [`remove_waiter`](Self::remove_waiter) отвечает `false`. Пробуждение идёт вне лока списка.
     pub fn register_waiter(&self, mask: u32, waker: Arc<dyn Waker>) {
         // Будить waker нужно вне waiters-лока.
         let already_signaled = self.waiters.with_lock(|wl| {

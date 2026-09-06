@@ -7,10 +7,12 @@ pub trait ReceivedResources {
     /// Владеющая capability платформы.
     type Handle;
 
-    /// Передаёт capability одному потребителю.
+    /// Передаёт владение capability одному потребителю. Отданная либо чужая `cap` -
+    /// `None`.
     fn claim(&mut self, cap: Cap) -> Option<Self::Handle>;
 
-    /// Закрывает ресурсы, которые не потреблены полностью успешным декодированием.
+    /// Закрывает доставленные capability, которых разбор кадра не потребил. Потреблённые
+    /// слоты называет `slots`. Отказ разбора закрывает капы кадра целиком, минуя этот вызов.
     fn retain_decoded(&mut self, slots: &HandleSlots);
 }
 
@@ -18,6 +20,7 @@ pub trait ReceivedResources {
 /// Невостребованные capability закрываются вместе с ответом.
 #[derive(Debug)]
 pub struct Response<T, R: ReceivedResources> {
+    /// Декодированное значение ответа.
     pub value: T,
     resources: R,
 }

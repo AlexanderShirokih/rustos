@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::{format, vec::Vec};
 use core::panic::PanicInfo;
 
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{AccessMode, NodeKind, OpenFlags, file_system};
 use ipc::wire::{Bytes, Str};
 use kernel_objects::{MemoryRegion, OwnedHandle};
@@ -48,7 +48,7 @@ component_manifest! {
     }
 }
 
-/// Программа-потребитель транзакции расширения: берёт регионом байты программы файловой
+/// Программа-потребитель транзакции расширения берёт регионом байты программы файловой
 /// системы, определяет её компонентом композиции, поднимает набор и работает с сессией
 /// поднятого компонента. `startup` приходит в x0 как HandleId одноразового startup-порта.
 #[unsafe(no_mangle)]
@@ -93,7 +93,7 @@ fn raise(
     let Some(stage_zero) = Str::<INSTANCE_NAME_MAX>::new(STAGE_ZERO_NAME) else {
         return REFUSED_EXIT_CODE;
     };
-    // Композиция ступени 0 через транзакцию не достаётся: её компоненты вызыватель не
+    // Композиция ступени 0 через транзакцию не достаётся. Её компоненты вызыватель не
     // определял.
     match system.session(stage_zero).map(|response| response.value) {
         Ok(Err(ExtendError::NotFound)) => {}

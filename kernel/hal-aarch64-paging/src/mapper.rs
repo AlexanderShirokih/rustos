@@ -118,13 +118,16 @@ pub struct PageMapper<A: TableAlloc> {
 impl<A: TableAlloc> PageMapper<A> {
     /// Создаёт маппер с заданной корневой таблицей и аллокатором.
     ///
-    /// Table-флаги (PXNTable/UXNTable/APTable) оставляем нулевыми: эти биты
-    /// являются иерархическим **ужесточением** (могут только запрещать), и если
-    /// поставить, например, UXNTable=1, то любая leaf-страница ниже становится
-    /// non-executable для EL0 даже при UXN=0 в leaf-дескрипторе. Это ломает
-    /// userspace-маппинги, у которых leaf явно UXN=0 (UserRX). Защита kernel-only
-    /// страниц обеспечивается leaf-флагами (`Heap::flags`/`KernelData::flags`/
-    /// `KernelRoData::flags` и пр. уже выставляют `uxn(true)`/`pxn(true)`).
+    /// `root` указывает на таблицу уровня L0, доступную по этому адресу. Она должна
+    /// оставаться действительной на всё время жизни `PageMapper` - последующие вызовы
+    /// разыменовывают её напрямую.
+    ///
+    /// Table-флаги (PXNTable/UXNTable/APTable) остаются нулевыми. Эти биты - иерархическое
+    /// ужесточение и только запрещают: UXNTable=1 делает любую leaf-страницу ниже
+    /// non-executable для EL0 даже при UXN=0 в leaf-дескрипторе, и это ломает
+    /// userspace-маппинги, у которых leaf явно UXN=0 (UserRX). Kernel-only страницы защищают
+    /// leaf-флаги. `Heap::flags`, `KernelData::flags`, `KernelRoData::flags` и прочие уже
+    /// выставляют `uxn(true)`.
     pub fn new(root: *mut PageTable<L0>, alloc: A) -> Self {
         Self {
             root,
@@ -149,6 +152,9 @@ impl<A: TableAlloc> PageMapper<A> {
     }
 
     /// Создаёт маппинг виртуального адреса на физический.
+    ///
+    /// Уже занятая запись (Table/Block/Page) не заменяется. Вызов на такую запись возвращает
+    /// [`MapError::AlreadyMapped`]. TLB не инвалидируется.
     pub fn map_page<const SHIFT: u8, P: MapLeaf<SHIFT>>(
         &mut self,
         virt: AlignedVirtualAddress<SHIFT>,
@@ -333,7 +339,7 @@ pub unsafe fn update_l3_flags(
     // всегда `0b11`), `[4:2]` `AttrIndx`, `[5]` `NS`, `[7:6]` `AP`, `[9:8]` `SH`,
     // `[10]` `AF`, `[11]` `nG`, `[47:12]` PA, `[53]` `PXN`, `[54]` `UXN`.
     // Маска удерживает PA, desc-type и `nG`: бит `nG` принадлежит владеющему AS и
-    // переживает `remap`. Остальные биты берутся из `new_flags`.
+    // остаётся неизменным при `remap`. Остальные биты берутся из `new_flags`.
     let preserved = raw & LEAF_PA_AND_DESC_MASK;
     let new_raw = preserved | (new_flags.bits() & !LEAF_PA_AND_DESC_MASK);
     let entry = Entry::<L3, Page>::from_raw_unchecked(new_raw);
@@ -367,6 +373,13 @@ const HIGH_HALF_MASK: usize = 0xFFFF_0000_0000_0000;
 /// Снимает leaf-записи в `[va, va + size)`. Опустевшие L1/L2/L3
 /// возвращаются через `visitor.on_free_table`. Block-leaf снимается
 /// только целиком. Partial -> [`UnmapError::UnsupportedPartialBlock`].
+///
+/// Отказ на середине диапазона не отменяет уже обработанные leaf-записи этого вызова. Они
+/// остаются снятыми. `visitor` уже получил по ним вызовы `on_leaf`.
+///
+/// TLB не инвалидируется. Вызывающий инвалидирует его после снятия записей. До инвалидации
+/// трансляции по снятым записям могут сохраняться в TLB тех CPU, где адресное пространство
+/// активно.
 ///
 /// # Safety
 /// `root` валиден, `alloc.table_ptr` транслирует PA->VA для всех subtree,

@@ -38,8 +38,8 @@ pub fn bootstrap_this_cpu() -> Result<(), CpuBootstrapError> {
         .bootstrap()
 }
 
-/// Отдаёт текущий CPU планировщику. Возвращается, только если планировщик не
-/// опубликован: сам вход не возвращается.
+/// Отдаёт текущий CPU планировщику. Управление возвращается, только если планировщик не
+/// опубликован. Успешный вход в планировщик не возвращается.
 pub fn enter_scheduler() -> CpuBootstrapError {
     match CPU_ENTRY.get() {
         Some(entry) => entry.enter(),
@@ -70,7 +70,7 @@ pub fn bind_reschedule_ipi(
     Ok(())
 }
 
-/// Тот, кто умеет перевыбрать поток на текущем CPU.
+/// Интерфейс перевыбора потока на текущем CPU.
 pub trait RescheduleTarget: Send + Sync {
     fn on_reschedule(&self);
 }

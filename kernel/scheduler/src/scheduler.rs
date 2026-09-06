@@ -36,7 +36,7 @@ use crate::{
 const DEFAULT_TIME_SLICE_TICKS: u32 = 1;
 const IPC_BUFFER_PAGES: NonZeroUsize = NonZeroUsize::MIN;
 const MIN_DONOR_LOAD: usize = 2;
-/// Длина кванта по умолчанию (нс). Экспонируется для тестов.
+/// Квант (нс), который `SchedulerConfig::new` подставляет без `with_quantum_ns`.
 pub const DEFAULT_QUANTUM_NS: u64 = 10_000_000;
 
 struct ChildHandleSlot {
@@ -164,7 +164,8 @@ pub trait SchedulerStage {}
 
 /// Планировщик создан, но per-CPU состояние ещё не установлено.
 pub struct Uninit;
-/// Per-CPU состояние установлено. Доступен `spawn` и регистрация сервисов.
+/// Per-CPU состояние установлено. Доступны `spawn` и `handle`, которым
+/// вызывающий регистрирует планировщик как `SchedulerService`/`KernelRuntime`.
 pub struct Bootstrapped;
 /// Произошёл первый context switch. Доступны yield, sleep, exit.
 pub struct Running;
@@ -283,7 +284,7 @@ impl core::fmt::Display for CpuBootstrapError {
 }
 
 /// Возвращает приоритет, используемый для idle-потока в scheduler с указанным
-/// количеством уровней приоритета.
+/// количеством уровней приоритета. Паникует при `priority_levels == 0`.
 pub const fn lowest_priority(priority_levels: usize) -> Priority {
     assert!(priority_levels > 0, "priority_levels must be > 0");
     #[allow(clippy::cast_possible_truncation)]
@@ -332,7 +333,7 @@ where
 
     /// Создаёт per-CPU state, idle-поток и устанавливает CPU-local указатель.
     /// Должен вызываться при замаскированных IRQ. На отказе возвращает исходный
-    /// планировщик: в `Bootstrapped` он не переходит.
+    /// планировщик. В `Bootstrapped` он не переходит.
     pub fn bootstrap(self) -> Result<Scheduler<A, T, Bootstrapped>, (Self, CpuBootstrapError)> {
         if let Err(e) = self.inner.with_lock(SchedulerInner::bootstrap_current_cpu) {
             return Err((self, e));
@@ -373,7 +374,10 @@ where
         result
     }
 
-    /// Выполняет первый switch через `A::switch`, возвращая управление вызывающему.
+    /// Переводит `Bootstrapped` в `Running`. Если в очереди есть поток кроме
+    /// idle, выполняет первый context switch через `A::switch`, иначе
+    /// остаётся на idle. Возвращает управление вызывающему, в отличие от
+    /// [`Self::start`].
     pub fn run(self) -> Scheduler<A, T, Running> {
         let running = Scheduler {
             inner: self.inner,
@@ -391,7 +395,7 @@ where
         running
     }
 
-    /// Канонический boot-путь: выбирает первый поток и не возвращается. `Err(self)`
+    /// Канонический boot-путь выбирает первый поток и не возвращается. `Err(self)`
     /// - нет per-CPU state либо выбранного потока нет в таблице.
     pub fn start(self) -> Result<core::convert::Infallible, Self> {
         <A::Cpu as ArchCpu>::disable_preemption();
@@ -428,7 +432,7 @@ where
 
     /// Тестовый разрез [`Self::yield_now`]: `between` вызывается в окне, где
     /// вытесненный поток уже стоит в очереди готовых, а указатель на его
-    /// контекст живёт вне scheduler-лока.
+    /// контекст остаётся вне scheduler-лока.
     #[doc(hidden)]
     pub fn yield_now_interleaved(&self, between: impl FnOnce()) {
         with_preemption_disabled::<A::Cpu, _>(|| {
@@ -469,7 +473,7 @@ where
 
     /// Тестовый разрез [`Self::exit_current`]: `between` вызывается в окне
     /// между подготовкой переключения и его выполнением - там, где указатель
-    /// на контекст уходящего потока живёт вне scheduler-лока.
+    /// на контекст уходящего потока остаётся вне scheduler-лока.
     #[doc(hidden)]
     pub fn exit_current_interleaved(&self, exit_code: i32, between: impl FnOnce()) {
         // Bare disable: preempt должен оставаться выключенным до
@@ -681,7 +685,7 @@ where
         let cpu_ptr = core::ptr::from_mut::<Cpu>(&mut cpu).cast::<()>();
 
         // SAFETY: указатель ведёт в кучу, а не в `Box`, поэтому перемещение
-        // `Box` в таблицу ниже его не сдвигает; сама таблица живёт столько же,
+        // `Box` в таблицу ниже его не сдвигает; сама таблица существует столько же,
         // сколько планировщик.
         if let Err(e) = unsafe { <A::Cpu as ArchCpu>::install_cpu_local(cpu_ptr) } {
             self.drop_prepared_thread(idle_id);
@@ -739,7 +743,7 @@ where
             return false;
         }
 
-        // Привязка переезжает вместе с потоком: все пути пробуждения ставят
+        // Привязка переезжает вместе с потоком. Все пути пробуждения ставят
         // поток в очередь того CPU, который записан в его affinity.
         if let Some(migrated) = self.threads.get_mut(thread) {
             migrated.set_cpu_affinity(own_id);
@@ -791,7 +795,7 @@ where
         let Some(cpu) = self.cpu_by_id_mut(target) else {
             return;
         };
-        // Idle-поток в очереди не стоит: он выбирается, когда очередь пуста.
+        // Idle-поток в очереди не стоит. Он выбирается, когда очередь пуста.
         if cpu.idle() == id {
             return;
         }
@@ -935,7 +939,7 @@ where
         }) {
             Ok(thread) => (thread.id(), thread.thread_object().clone()),
             Err(e) => {
-                // Откат: без потока thread_count=1 никогда не обнулится и AS не освободится.
+                // Без отката thread_count=1 никогда не обнулится, и AS не освободится.
                 self.processes.remove(process_id);
                 self.deferred_handles.push_rolled_back(initial_handle);
                 return Err(PreparedUserProcessError::Spawn(e));
@@ -1010,7 +1014,7 @@ where
 
     fn rollback_intern(&mut self, pid: ProcessId, is_new: bool) {
         if is_new {
-            // Процесс заведён этим же спавном и хэндлов никому не отдал: его
+            // Процесс заведён этим же спавном и хэндлов никому не отдал. Его
             // разрушение никого не будит и карантина `pending_process_drops`
             // не требует. Стартовый хэндл уходит в `deferred_handles`.
             self.processes.remove(pid);
@@ -1268,8 +1272,9 @@ where
 
         signals.push_thread(thread_object, exit_code);
 
-        // На нуле поднимаем terminated процесса ДО `cleanup_pending_process_removals`
-        // (вызов из `switch_to_next`); `Arc<ProcessObject>` переживёт удаление из таблицы.
+        // На нуле поднимаем terminated процесса до `cleanup_pending_process_removals`
+        // (вызов из `switch_to_next`); `Arc<ProcessObject>` остаётся валидным после удаления
+        // из таблицы.
         if self
             .processes
             .get(exiting_pid)
@@ -1328,7 +1333,7 @@ where
         process_object: &Arc<ProcessObject>,
         entry: capability::UserThreadEntry,
     ) -> Result<(ThreadId, Arc<ThreadObject>), SpawnError> {
-        // Терминация необратима: снимаемый процесс новых потоков не получает.
+        // Терминация необратима. Снимаемый процесс новых потоков не получает.
         if process_object.terminated() {
             return Err(SpawnError::ProcessTerminated);
         }
@@ -1474,7 +1479,7 @@ where
 
     fn release_ipc_buffer(&mut self, thread_id: ThreadId) {
         // Для потока, заблокированного на Port, caller снимает `Waiter` с
-        // очереди Port до вызова: иначе матчер пишет в уже снятый VA.
+        // очереди Port до вызова. Иначе матчер пишет в уже снятый VA.
         let Some(thread) = self.threads.get(thread_id) else {
             return;
         };
@@ -1673,7 +1678,8 @@ where
             return Err(LoadImageError::WrongState);
         }
 
-        // До маппинга: невалидный образ не должен оставлять процесс полузагруженным.
+        // Проверка геометрии идёт до маппинга. Невалидный образ не должен оставлять процесс
+        // полузагруженным.
         install.validate_geometry()?;
 
         let mapper_arc = process
@@ -1705,7 +1711,7 @@ where
         process
             .set_user_vm(vm)
             .map_err(|_| LoadImageError::WrongState)?;
-        // Регионы образа держит процесс: их бюджет возвращается вызывающему,
+        // Регионы образа держит процесс. Их бюджет возвращается вызывающему,
         // когда процесс уходит. Стек - такой же сегмент.
         let segments: Vec<Arc<MemoryRegion>> =
             install.segments.iter().map(|s| s.region.clone()).collect();
@@ -1768,7 +1774,7 @@ where
 
         // Validate и drain в разных with_lock-окнах; на гонке (другой syscall
         // закрыл handle между шагами) откатываем prepared thread и резервацию.
-        // Изъятое уходит в отложенные: пробуждение cancel-целей снятого слота
+        // Изъятое уходит в отложенные. Пробуждение cancel-целей снятого слота
         // берёт scheduler-лок, который держится здесь.
         let mut drained = DrainedHandles::empty();
         let taken = loader_handle_table.with_lock(|tbl| {
@@ -1892,7 +1898,7 @@ where
             return;
         };
         let process_object = process.process_object().clone();
-        // Пометка ставится под scheduler-локом: её же читают отказы
+        // Пометка ставится под scheduler-локом. Её же читают отказы
         // `ProcessStart`/`ThreadCreate`. Дренаж таблицы и пробуждения
         // наблюдателей под этим локом не выполняются.
         process_object.mark_terminated(exit_code);
@@ -1952,7 +1958,7 @@ where
             let Some(thread) = self.threads.get_mut(entry.thread_id) else {
                 continue;
             };
-            // Сравниваем дедлайны: если поток уже разбужен по signal-стороне
+            // Сравниваем дедлайны. Если поток уже разбужен по signal-стороне
             // и снова ушёл в Sleeping с другим wakeup_at_ns - старая stale-entry
             // не должна тригернуть преждевременное пробуждение.
             if !matches!(
@@ -2036,8 +2042,9 @@ where
             return ScheduleAction::None;
         };
         cpu.set_current(next_id);
-        // Взводится до выхода из-под лока: ниже из `prev` берётся указатель,
-        // который переживёт лок, и до конца переключения поток снимать нельзя.
+        // Взводится до выхода из-под лока. Ниже из `prev` берётся указатель,
+        // который остаётся действительным после лока, и до конца переключения поток снимать
+        // нельзя.
         cpu.set_previous(Some(prev_id));
 
         if let Some(next) = self.threads.get_mut(next_id) {
@@ -2213,7 +2220,7 @@ struct TrampolinePayload {
 pub(super) fn release_deferred_handles<A: ArchContext, T: TimerSource>(
     inner: &MutexCell<SchedulerInner<A, T>>,
 ) {
-    // Разрушение capability не выполняется под scheduler-локом: их `Drop`,
+    // Разрушение capability не выполняется под scheduler-локом. Их `Drop`,
     // отзыв и пробуждение cancel-целей берут тот же лок.
     inner
         .with_lock(SchedulerInner::take_deferred_handles)
@@ -2226,7 +2233,7 @@ pub(super) fn notify_pending_cpus<A: ArchContext, T: TimerSource>(
 ) {
     let mut pending = inner.with_lock(SchedulerInner::take_pending_wakeups);
 
-    // Отправка не выполняется под scheduler-локом: она идёт через контроллер
+    // Отправка не выполняется под scheduler-локом. Она идёт через контроллер
     // прерываний, который берёт свои локи, а обработчик прерывания берёт ту же
     // пару в обратном порядке.
     while pending != 0 {
@@ -2246,7 +2253,7 @@ pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
     inner: &MutexCell<SchedulerInner<A, T>>,
     action: ScheduleAction<A>,
 ) {
-    // До переключения: биты собраны под локом, а вход в поток, стартующий
+    // Биты собраны под локом до переключения. Вход в поток, стартующий
     // впервые, не возвращается и хвост функции не исполняет.
     notify_pending_cpus(inner);
 
@@ -2256,7 +2263,7 @@ pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
         address_space,
     } = action
     {
-        // Process-switch: активируем AS ДО context_switch, чтобы возобновляемый
+        // Process-switch: активируем AS до context_switch, чтобы возобновляемый
         // user-thread проснулся уже в своём адресном пространстве.
         if let AddressSpaceTransition::Switch(handle) = address_space {
             A::switch_address_space(handle);
@@ -2273,8 +2280,8 @@ pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
         unsafe { A::switch(prev, next) };
     }
 
-    // Ушедший в exit поток сюда не возвращается: отметку снимает и процесс
-    // роняет тот поток, который следующим пройдёт через переключение.
+    // Ушедший в exit поток сюда не возвращается. Отметку снимает и процесс
+    // освобождает тот поток, который следующим пройдёт через переключение.
     let dropped = inner.with_lock(SchedulerInner::finish_switch);
     // Снятые процессы роняются не под scheduler-локом: `Drop` их capability
     // будит припаркованные потоки через тот же лок.

@@ -144,8 +144,8 @@ pub fn sys_memory_create_virtual(
         .ok_or(SyscallError::OutOfMemory)?;
     let region = MemoryRegion::create_virtual(fa, pages, access)
         .map_err(|e| region_create_err_to_syscall(&e))?;
-    // Метерим после выделения: на нехватке бюджета регион дропается (фреймы
-    // возвращаются в FA), списания нет. Списать раньше нельзя - refund живёт
+    // Метерим после выделения. На нехватке бюджета регион дропается (фреймы
+    // возвращаются в FA), и нет списания. Списать раньше нельзя - refund существует
     // только на регионе, а до его создания утёк бы при OOM фреймов.
     resource
         .try_consume(pages.get() as u64)
@@ -164,8 +164,8 @@ pub fn sys_memory_create_virtual(
 /// Деривация узкого под-региона `[offset, offset+size)`. Требует
 /// `Rights::DUPLICATE` на исходном регионе. Запрошенный доступ не шире гранта
 /// (права хендла, суженные access-маской региона). Нарезка ничего не
-/// аллоцирует - бюджет не списывается, обязательства возврата под-регион не несёт.
-/// Под-регион - производная капа источника: отзыв источника отзывает и её.
+/// аллоцирует - бюджет не списывается, обязательства возврата под-регион не содержит.
+/// Под-регион - производная капа источника. Отзыв источника отзывает и её.
 pub fn sys_memory_slice(
     region_h: u64,
     offset_raw: u64,
@@ -199,7 +199,7 @@ pub fn sys_memory_slice(
 ///
 /// Деривация поверх того же PA с профилем `profile_raw`. Требует
 /// `Rights::DUPLICATE`, бюджет не списывает. Результат - производная капа
-/// источника: отзыв источника отзывает и её.
+/// источника. Отзыв источника отзывает и её.
 pub fn sys_memory_with_profile(region_h: u64, profile_raw: u64) -> Result<u64, SyscallError> {
     let region_id = parse_handle_id(region_h)?;
     let profile = parse_profile(profile_raw)?;
@@ -252,8 +252,8 @@ pub fn sys_memory_allocate(
 
     let region = MemoryRegion::create_virtual(fa, pages_count, access)
         .map_err(|e| region_create_err_to_syscall(&e))?;
-    // Метерим после выделения: на нехватке бюджета регион дропается (фреймы
-    // возвращаются в FA), списания нет.
+    // Метерим после выделения. На нехватке бюджета регион дропается (фреймы
+    // возвращаются в FA), и нет списания.
     resource
         .try_consume(pages_count.get() as u64)
         .map_err(map_ipc_error)?;
@@ -274,7 +274,7 @@ pub fn sys_memory_allocate(
                     flags: mem_flags,
                     region: region.clone(),
                     grant,
-                    // Анонимный fastpath без публичной капы: отзывать нечего,
+                    // Анонимный fastpath без публичной капы. Отзывать нечего,
                     // маппинг снимается только при memory_free/смерти AS.
                     revocation: None,
                 },
@@ -349,7 +349,7 @@ pub fn sys_memory_map(
         return Err(map_err_to_syscall(&e));
     }
 
-    // Привязываем отзыв: маппинг живёт ровно столько, сколько авторизовавшая
+    // Привязываем отзыв. Маппинг действует ровно столько, сколько авторизовавшая
     // его капа. Если капа отозвана в гонке после lookup, регистрация падает -
     // тогда маппинг снимается и syscall возвращает ошибку (а не живой VA на
     // отозванную капу).
@@ -376,9 +376,9 @@ fn register_mapping_revocation(
     cap_id: capability::HandleId,
     mut tag: MappingTag,
 ) -> Result<(), SyscallError> {
-    // Снимок AS получателя держится слабым: сильную ссылку на сам
+    // Снимок AS получателя держится слабым. Сильную ссылку на сам
     // `MemoryMapping` хранит `MappingTag::revocation`, и weak-ссылка разрывает
-    // цикл `MappingTag -> MemoryMapping -> AS -> MappingTag`. Иначе AS течёт
+    // цикл `MappingTag -> MemoryMapping -> AS -> MappingTag`. Иначе AS не освобождается
     // после передачи капы, когда `HandleTable::Drop` процесса её уже не
     // отзывает.
     let mapping = Arc::new(MemoryMapping {

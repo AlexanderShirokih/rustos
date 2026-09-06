@@ -1,6 +1,12 @@
+//! Запись манифеста компонента: раскладка байт секции, её сборка и разбор.
+//!
+//! [`manifest_len`] считает длину записи, [`encode_manifest`] собирает её в const-контексте
+//! под `static` программы, [`decode_manifest`] разбирает байты секции в
+//! [`ComponentManifest`] со слотами и протоколами портов.
+
 use crate::startup::COMPONENT_SLOT_MAX;
 
-/// Имя ELF-секции, в которой программа компонента несёт свой манифест.
+/// Имя ELF-секции, в которой программа компонента содержит свой манифест.
 pub const COMPONENT_MANIFEST_SECTION: &str = ".component.manifest";
 
 /// Магия записи манифеста компонента.
@@ -46,8 +52,8 @@ pub enum SlotKind {
     Control = 6,
 }
 
-/// Слот, объявленный программой: вид, номер ресурса устройства и имена, по
-/// которым композиция ищет источник - строки совместимости у устройства, имя
+/// Слот, который объявляет программа. Слот называет вид capability, номер ресурса устройства
+/// и имена, по которым композиция ищет источник - строки совместимости у устройства, имя
 /// протокола и необязательное имя экземпляра у импорта.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlotDeclaration {
@@ -56,7 +62,7 @@ pub struct SlotDeclaration {
     names: &'static [&'static str],
 }
 
-/// Слот записи манифеста.
+/// Слот, разобранный из записи манифеста. Имена слота заимствованы из байт записи.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManifestSlot<'a> {
     kind: SlotKind,
@@ -83,7 +89,8 @@ pub struct ComponentManifest<'a> {
     establishes_sessions: bool,
 }
 
-/// Слоты манифеста в порядке приёма.
+/// Слоты манифеста в порядке объявления - в этом же порядке capability слотов приходят
+/// стартовой транзакцией.
 #[derive(Debug, Clone)]
 pub struct ManifestSlots<'a> {
     bytes: &'a [u8],
@@ -98,7 +105,8 @@ pub enum ManifestDecodeError {
     InvalidMagic([u8; 8]),
     /// Версия формата записи не поддерживается.
     InvalidVersion(u16),
-    /// Байт меньше, чем требует запись.
+    /// Длина буфера расходится с длиной записи. `needed` называет конец записи, `actual` -
+    /// длину буфера, и хвост сверх записи отвергается этой же ошибкой.
     Truncated { needed: usize, actual: usize },
     /// Поле записи вне множества своих значений.
     InvalidLayout(&'static str),
@@ -156,7 +164,7 @@ impl SlotDeclaration {
         }
     }
 
-    /// Сессия компонента, экспортирующего протокол. `protocol` несёт имя
+    /// Сессия компонента, экспортирующего протокол. `protocol` содержит имя
     /// протокола, а за ним - необязательное имя экземпляра-экспортёра.
     #[must_use]
     pub const fn service(protocol: &'static [&'static str]) -> Self {
@@ -189,7 +197,7 @@ impl SlotDeclaration {
     }
 
     /// Клиентская capability control-порта компонента, обслуживающего протокол.
-    /// `protocol` несёт имя протокола, а за ним - необязательное имя
+    /// `protocol` содержит имя протокола, а за ним - необязательное имя
     /// экземпляра-провайдера.
     #[must_use]
     pub const fn control(protocol: &'static [&'static str]) -> Self {
@@ -226,7 +234,7 @@ impl<'a> ManifestSlot<'a> {
 }
 
 impl<'a> ComponentManifest<'a> {
-    /// Слоты в порядке приёма.
+    /// Слоты в порядке объявления.
     #[must_use]
     pub const fn slots(&self) -> ManifestSlots<'a> {
         ManifestSlots {
@@ -254,8 +262,9 @@ impl<'a> ComponentManifest<'a> {
         self.control
     }
 
-    /// Компонент устанавливает сессии своего service-порта сам: композиция просит их
-    /// операцией `ComponentSessions::open_session` на его control-порту.
+    /// Объявил ли компонент, что сессии своего service-порта он создаёт по запросу операции
+    /// `ComponentSessions::open_session` на своём control-порту. Без этого объявления сессии
+    /// выдаются клиентам помимо компонента.
     #[must_use]
     pub const fn establishes_sessions(&self) -> bool {
         self.establishes_sessions
@@ -311,7 +320,7 @@ pub const fn manifest_len(slots: &[SlotDeclaration], export: &str, control: &str
 
 /// Кодирует запись манифеста целиком. `LEN` равна [`manifest_len`]. `export` и `control`
 /// называют протоколы service- и control-порта, а `establishes_sessions` объявляет, что
-/// сессии своего service-порта компонент заводит сам.
+/// сессии своего service-порта компонент сам создаёт.
 #[must_use]
 pub const fn encode_manifest<const LEN: usize>(
     slots: &[SlotDeclaration],
@@ -388,8 +397,7 @@ const fn write_bytes<'a>(bytes: &'a mut [u8], text: &[u8]) -> &'a mut [u8] {
     rest
 }
 
-/// Разбирает запись манифеста. Буфер разбирается целиком: хвост сверх записи
-/// отвергается.
+/// Разбирает запись манифеста. Буфер разбирается целиком. Хвост сверх записи отвергается.
 pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDecodeError> {
     if bytes.len() < COMPONENT_MANIFEST_HEADER_SIZE {
         return Err(ManifestDecodeError::Truncated {

@@ -2,8 +2,8 @@
 //!
 //! Машинно-читаемое описание контракта (операции, поля, ordinal),
 //! достаточное для генерации совместимого клиента без чтения исходника.
-//! `protocol!` собирает дескриптор в const-контексте и проверяет по нему сам контракт:
-//! бюджет кадра, пространство `field_id` и совместимость с транспортной плоскостью.
+//! `protocol!` собирает дескриптор в const-контексте и проверяет по нему бюджет кадра,
+//! пространство `field_id` и совместимость контракта с транспортной плоскостью.
 
 /// Размер заголовка кадра в байтах (`ordinal` + `txid` + `flags`).
 pub const HEADER_SIZE: usize = 14;
@@ -35,7 +35,7 @@ pub enum WireType {
     BoundedStr(usize),
     /// Bounded байтовая строка с границей длины `N`.
     BoundedBytes(usize),
-    /// Capability: handle едет вне тела, в поле - индекс в handle-массиве.
+    /// Capability: handle передаётся вне тела, в поле - индекс в handle-массиве.
     Capability,
     /// Агрегат: поля в порядке объявления, каждое - вложенный `WireType`.
     Aggregate(&'static [WireType]),
@@ -44,7 +44,8 @@ pub enum WireType {
 /// Описание одного поля операции: позиционный `field_id` и тип значения.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FieldDesc {
-    /// Позиционный идентификатор поля (`1..=254`).
+    /// Позиционный идентификатор поля (`1..=254`). Снятый параметр операции оставляет свой
+    /// идентификатор занятым.
     pub field_id: u8,
     /// Тип значения поля в сообщении.
     pub field_type: WireType,
@@ -79,7 +80,7 @@ pub const fn max_data_len(field_type: WireType) -> usize {
         WireType::Uint(width) | WireType::Int(width) => width as usize,
         WireType::Bool | WireType::Capability => 1,
         WireType::BoundedStr(bound) | WireType::BoundedBytes(bound) => bound,
-        // Агрегат едет вложенным суб-кадром: его поля со своими накладными расходами.
+        // Агрегат передаётся вложенным суб-кадром: его поля со своими накладными расходами.
         WireType::Aggregate(fields) => max_body_len(fields),
     }
 }
@@ -96,7 +97,7 @@ const fn max_body_len(fields: &[WireType]) -> usize {
 
 /// Укладывается ли кадр самой объёмной операции в `body_max` байт тела.
 ///
-/// Границы bounded-типов известны в const-контексте: предел контракта считается на месте
+/// Границы bounded-типов известны в const-контексте. Предел контракта считается на месте
 /// объявления, до первой передачи.
 #[must_use]
 pub const fn fits_body_budget(desc: &ProtocolDesc, body_max: usize) -> bool {
@@ -116,7 +117,7 @@ pub const fn fits_body_budget(desc: &ProtocolDesc, body_max: usize) -> bool {
     true
 }
 
-/// Обходится ли контракт односторонними операциями, которые несёт SPSC-кольцо.
+/// Обходится ли контракт односторонними операциями, которые поддерживает SPSC-кольцо.
 #[must_use]
 pub const fn is_one_way(desc: &ProtocolDesc) -> bool {
     let mut operations = desc.operations;

@@ -32,7 +32,7 @@ fn validate_component(name: &str, declared: &ProgramManifest) -> Result<()> {
         !declared.establishes_sessions || declared.export.is_some(),
         "boot plan component '{name}' establishes its own sessions without exporting a protocol"
     );
-    // Кадр порта разбирает один dispatch, и незнакомый ordinal он отвергает: два протокола
+    // Кадр порта разбирает один dispatch, и незнакомый ordinal он отвергает. Два протокола
     // на одном порту не складываются, а установление сессий занимает control-порт.
     if let Some(control) = &declared.control {
         ensure!(
@@ -69,7 +69,7 @@ fn validate_supervisor_limits(count: usize, declarations: &[&ProgramManifest]) -
         .map(|declared| declared.slots.len())
         .sum();
     // Оценка сверху: постоянные капы supervisor, постоянные капы каждого компонента и
-    // по капе на слот. Временные капы подъёма живут не дольше одного компонента.
+    // по капе на слот. Временные капы подъёма существуют не дольше одного компонента.
     let handles = SUPERVISOR_HANDLES + count * COMPONENT_HANDLES + slots;
     ensure!(
         handles <= HANDLE_TABLE_CAPACITY as usize,

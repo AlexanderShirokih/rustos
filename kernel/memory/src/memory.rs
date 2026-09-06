@@ -1,8 +1,9 @@
 use crate::virtual_address::AlignedVirtualAddress;
 
-/// Трейт для низкоуровневых операций с памятью.
+/// Трейт для низкоуровневых операций с кэшем данных. Реализация зависит от архитектуры:
+/// набор кэш-инструкций у платформ разный.
 pub trait MemoryAccessProvider {
-    /// Очищает кэш для указанного адреса.
+    /// Пишет данные по адресу `address` из кэша в память, не инвалидируя строку.
     fn clean_cache<const SHIFT: u8>(&self, address: AlignedVirtualAddress<SHIFT>);
 
     /// Инвалидирует весь кэш.

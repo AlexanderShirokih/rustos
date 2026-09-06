@@ -1,6 +1,6 @@
-//! Программа-фикстура падающего монтирования: изменяемое дерево, которое обращается по
-//! невалидному адресу на переносе имени. Ядро завершает виновный процесс целиком, и
-//! rootkeeper наблюдает отказ компонента файловой системы.
+//! Программа-фикстура падающего монтирования представляет собой изменяемое дерево, которое
+//! обращается по невалидному адресу на переносе имени. Ядро завершает виновный процесс
+//! целиком, и rootkeeper наблюдает отказ компонента файловой системы.
 //!
 //! Перенос выбран за то, что сервер зовёт его только по запросу клиента: `unlink` он вызывает
 //! ещё и откатом неудавшегося `open` с `CREATE`.
@@ -15,7 +15,7 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path};
 use filesystem_server::{Error, Result as ServerResult, serve};

@@ -4,7 +4,10 @@
 
 use alloc::{string::String, vec::Vec};
 
-use filesystem_abi::{FileSystemError, PATH_MAX, Path, file_system, namespace, namespace_admin};
+use filesystem_abi::{
+    FileSystemError, PATH_MAX, Path, ResolvedPair, common_directory, file_system, namespace,
+    namespace_admin,
+};
 use filesystem_server::{settle, vend};
 use ipc::wire::{Cap, Str};
 use kernel_objects::{OwnedHandle, ReceivedFrame};
@@ -27,13 +30,17 @@ impl MountTable {
         Self { mounts: Vec::new() }
     }
 
-    fn longest_prefix(&self, path: Path<'_>) -> Option<&Mount> {
+    fn longest_prefix(&self, path: Path<'_>) -> Option<usize> {
+        // Позиция различает записи, и два префикса одной файловой системы дают разные
+        // монтирования.
         self.mounts
             .iter()
-            .filter(|mount| {
+            .enumerate()
+            .filter(|(_, mount)| {
                 Path::new(&mount.prefix).is_ok_and(|prefix| path.strip_prefix(prefix).is_some())
             })
-            .max_by_key(|mount| mount.prefix.len())
+            .max_by_key(|(_, mount)| mount.prefix.len())
+            .map(|(index, _)| index)
     }
 
     fn covers(&self, prefix: Path<'_>) -> bool {
@@ -59,17 +66,8 @@ impl<'a> Resolving<'a> {
     pub(crate) fn end_frame(&mut self, delivered: bool) {
         settle(&mut self.vended, delivered);
     }
-}
 
-impl namespace::Service for Resolving<'_> {
-    fn resolve(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap, FileSystemError> {
-        let path = Path::new(path.as_str())?;
-        let table = self.table.lock();
-        let mount = table
-            .longest_prefix(path)
-            .ok_or(FileSystemError::NotFound)?;
-        let prefix = Path::new(&mount.prefix)?;
-        let tail = path.strip_prefix(prefix).ok_or(FileSystemError::NotFound)?;
+    fn open_scope(&mut self, mount: &Mount, tail: Path<'_>) -> Result<Cap, FileSystemError> {
         let mut response = file_system::Client::new(PortTransport::client(&mount.session))
             .with_wait(OPEN_ROOT_TIMEOUT)
             .open_root(Str::new(tail.as_str()).ok_or(FileSystemError::InvalidPath)?)
@@ -79,6 +77,50 @@ impl namespace::Service for Resolving<'_> {
             .claim(session)
             .ok_or(FileSystemError::Unresponsive)?;
         Ok(vend(&mut self.vended, owned.into()))
+    }
+}
+
+impl namespace::Service for Resolving<'_> {
+    fn resolve(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap, FileSystemError> {
+        let path = Path::new(path.as_str())?;
+        let table = self.table.lock();
+        let index = table
+            .longest_prefix(path)
+            .ok_or(FileSystemError::NotFound)?;
+        let mount = table.mounts.get(index).ok_or(FileSystemError::NotFound)?;
+        let prefix = Path::new(&mount.prefix)?;
+        let tail = path.strip_prefix(prefix).ok_or(FileSystemError::NotFound)?;
+        self.open_scope(mount, tail)
+    }
+
+    fn resolve_pair(
+        &mut self,
+        from: Str<'_, PATH_MAX>,
+        to: Str<'_, PATH_MAX>,
+    ) -> Result<ResolvedPair, FileSystemError> {
+        let from = Path::new(from.as_str())?;
+        let to = Path::new(to.as_str())?;
+        let table = self.table.lock();
+        let first = table
+            .longest_prefix(from)
+            .ok_or(FileSystemError::NotFound)?;
+        let second = table.longest_prefix(to).ok_or(FileSystemError::NotFound)?;
+        if first != second {
+            return Err(FileSystemError::CrossMount);
+        }
+        let mount = table.mounts.get(first).ok_or(FileSystemError::NotFound)?;
+        let prefix = Path::new(&mount.prefix)?;
+        // Общий каталог пары может лежать выше корня монтирования, и сессия не поднимается над ним.
+        let common = common_directory(from, to)?;
+        let scope = common.strip_prefix(prefix).map_or(prefix, |_| common);
+        let tail = scope
+            .strip_prefix(prefix)
+            .ok_or(FileSystemError::NotFound)?;
+
+        let session = self.open_scope(mount, tail)?;
+        let root_len =
+            u32::try_from(scope.as_str().len()).map_err(|_| FileSystemError::InvalidPath)?;
+        Ok(ResolvedPair { session, root_len })
     }
 }
 

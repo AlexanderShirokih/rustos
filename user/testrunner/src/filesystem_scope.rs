@@ -1,4 +1,4 @@
-//! E2E scoped-сессий: `open_root` выдаёт сессию-окно узла, и пути её кадров живут
+//! E2E scoped-сессий: `open_root` выдаёт сессию-окно узла, и пути её кадров лежат
 //! внутри окна. Сужение складывается по цепочке производных, а расширить окно обратно
 //! производная сессия не может.
 
@@ -40,7 +40,7 @@ fn filesystem_scopes_a_session_to_an_image_directory() {
     let window = window_of(&capability, COMPONENT_DIRECTORY);
     let scoped = connect(&window);
 
-    // Буфер данных у производной сессии свой: буфер родительской ей не достаётся.
+    // Буфер данных у производной сессии свой. Буфер родительской сессии ей не достаётся.
     let opened = open(&scoped, "/sample", AccessMode::Read, OpenFlags::NONE);
     kernel_tests::kassert_eq!(opened.kind, NodeKind::File);
     kernel_tests::kassert_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
@@ -90,7 +90,7 @@ fn filesystem_scoped_session_stays_inside_its_window() {
         .value;
     kernel_tests::kassert_eq!(escape, Err(FileSystemError::InvalidPath));
 
-    // Границы PATH_MAX принадлежат полному пути: хвост в границах кадра, но окно
+    // Границы PATH_MAX принадлежат полному пути. Хвост в границах кадра, но окно
     // удлиняет его за предел.
     let mut tail = String::new();
     while tail.len() + COMPONENT_DIRECTORY.len() <= PATH_MAX {
@@ -104,7 +104,7 @@ fn filesystem_scoped_session_stays_inside_its_window() {
         .value;
     kernel_tests::kassert_eq!(overflow, Err(FileSystemError::InvalidPath));
 
-    // Тот же хвост без окна валиден: отказ выше - про границу, а не про форму.
+    // Тот же хвост без окна валиден. Отказ выше - про границу, а не про форму.
     let unscoped = connect(&capability)
         .open(path(&tail), AccessMode::Read, OpenFlags::NONE)
         .expect("open call")
@@ -140,7 +140,7 @@ fn filesystem_scoped_windows_narrow_and_compose() {
     let payload = b"windowed";
     write_all(&client, &buffer, &leaf, 0, payload);
 
-    // Сужение складывается: окно, открытое из окна, отсчитывается от него.
+    // Сужение складывается. Окно, открытое из окна, отсчитывается от него.
     let first = window_of(&capability, &format!("{CHAIN_WINDOW}/outer"));
     let second = window_of(&first, "/inner");
     let scoped = connect(&second);
@@ -237,7 +237,7 @@ fn filesystem_open_root_accepts_any_existing_node() {
         Some(FileSystemError::NotFound)
     );
 
-    // Корень как окно - то же дерево: производная сессия видит его целиком.
+    // Корень как окно - то же дерево. Производная сессия получает его целиком.
     let window = window_of(&capability, "/");
     let scoped = connect(&window);
     let opened = open(&scoped, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
@@ -257,7 +257,7 @@ fn filesystem_scoped_session_cannot_name_its_own_root() {
     let window = window_of(&capability, ROOT_WINDOW);
     let scoped = connect(&window);
 
-    // Корень окна - запись каталога над ним: операция над именем его не называет.
+    // Корень окна - запись каталога над ним. Операция над именем его не называет.
     let removed = scoped
         .unlink(path("/"), NodeKind::Directory)
         .expect("unlink call")
@@ -278,7 +278,7 @@ fn filesystem_scoped_session_cannot_name_its_own_root() {
     let alive = open(&client, ROOT_WINDOW, AccessMode::Read, OpenFlags::DIRECTORY);
     kernel_tests::kassert_eq!(alive.kind, NodeKind::Directory);
 
-    // Корень окна сессия открывает, но не заводит: снятый родителем каталог не возвращается.
+    // Корень окна сессия открывает, но не создаёт. Снятый родителем каталог не возвращается.
     client
         .unlink(path(ROOT_WINDOW), NodeKind::Directory)
         .expect("unlink call")

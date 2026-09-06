@@ -32,12 +32,10 @@ impl<const N: usize> StaticString<N> {
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
     }
 
-    /// Количество записанных байт.
     pub const fn len(&self) -> usize {
         self.len
     }
 
-    /// Возвращает `true`, если строка пуста.
     pub const fn is_empty(&self) -> bool {
         self.len == 0
     }

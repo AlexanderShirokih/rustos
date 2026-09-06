@@ -38,7 +38,7 @@ pub struct BuildEnvironment<'a> {
 pub const USERLAND_WORKSPACE: &str = "user";
 
 /// Собирает userland-образ под `target`, передавая `environment` каждому cargo-процессу
-/// сборки. `extra_files` добавляются в образ поверх файлов манифеста, `std_src` — дерево
+/// сборки. `extra_files` добавляются в образ поверх файлов манифеста, `std_src` - дерево
 /// `library`, из которого сборка поднимает стандартную библиотеку.
 pub fn build_userland(
     project_root: &Path,

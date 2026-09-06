@@ -2,10 +2,15 @@ use syscall::Rights;
 
 use super::target::CapabilityTarget;
 
-/// Стартовый набор прав для свежесозданного capability target данного типа.
+/// Стартовый набор прав для capability на объект `obj`. Набор зависит от вида объекта, а для
+/// региона памяти - ещё и от его маски доступа: `READ`, `WRITE` и `EXECUTE` выдаются лишь те,
+/// что регион допускает.
+///
+/// Берётся при создании капы без явных прав и при выводе производной, где сужается правами
+/// источника ([`Capability::derive`](super::Capability::derive)).
 pub fn default_rights_for(obj: &CapabilityTarget) -> Rights {
     match obj {
-        // Полный набор «сигнальных» прав (READ|WRITE|DUPLICATE|TRANSFER):
+        // Полный набор "сигнальных" прав (READ|WRITE|DUPLICATE|TRANSFER):
         // - Signal сигналуем пользователем; Process/Thread терминацию поднимает
         //   только ядро (через bound-Signal), но WRITE оставлен под terminate-op;
         // - IrqControl: WRITE гейтит минт IrqLine, READ для инспекции,

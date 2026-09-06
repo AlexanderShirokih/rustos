@@ -436,8 +436,9 @@ impl Gicv3Controller {
     }
 
     pub(super) fn set_config(&self, irq: IrqNumber, trigger: TriggerType) {
-        // PPI приватна для CPU и живёт в GICR_ICFGR1 своего redistributor, SPI -
-        // в GICD_ICFGR распределителя; триггер SGI задан архитектурой.
+        // PPI приватна для CPU. Бит конфигурации PPI лежит в GICR_ICFGR1 своего
+        // redistributor, бит SPI - в GICD_ICFGR распределителя, триггер SGI задан
+        // архитектурой.
         match IrqType::from_irq_number(irq) {
             IrqType::Ppi => self.set_private_config(irq, trigger),
             IrqType::Spi => self.set_shared_config(irq, trigger),

@@ -18,8 +18,8 @@ pub(crate) trait HolderTicket: RevocationHook {
     fn reacquire(&self) -> Option<Arc<dyn HolderTicket>>;
 }
 
-/// Удержание учёта стороны объекта на время операции: снимается по `Drop` и переживает capability,
-/// от которой взято.
+/// Удержание учёта стороны объекта на время операции. Снимается по `Drop`. Учёт держится
+/// независимо от capability, от которой взято удержание, и сохраняется после её закрытия.
 #[must_use = "OperationHold keeps the object side counted until the operation ends"]
 pub struct OperationHold(Arc<dyn HolderTicket>);
 
@@ -35,7 +35,11 @@ impl Drop for OperationHold {
     }
 }
 
-/// capability target (capability target) - единица, к которой ядро выдаёт права.
+/// Объект ядра, на который выдаётся [`Capability`](super::Capability). Права и значок хендла
+/// применяются к этому объекту.
+///
+/// Клон варианта делит объект с оригиналом. Вариант задаёт и набор применимых операций. Ожидание
+/// сигналов доступно на `Signal`, `Process`, `Thread` и `IrqLine`. `Port` ведёт учёт держателей.
 #[derive(Clone)]
 pub enum CapabilityTarget {
     Signal(Arc<Signal>),
@@ -49,8 +53,12 @@ pub enum CapabilityTarget {
     IrqLine(Arc<IrqLine>),
 }
 
-/// Объект ядра, извлекаемый из своего варианта [`CapabilityTarget`].
-/// Единственная точка соответствия "тип объекта - вариант enum".
+/// Объект ядра, извлекаемый из своего варианта [`CapabilityTarget`]. Обратен `From<Arc<T>>`,
+/// которым объект в этот вариант заворачивается.
+///
+/// Реализация задаёт пару "тип - вариант", по которой
+/// [`HandleTable::get_object`](super::HandleTable::get_object) проверяет тип хендла и отвергает
+/// чужой с [`IpcError::WrongType`](super::IpcError::WrongType).
 pub trait TargetObject: Send + Sync {
     /// Объект этого типа внутри `target`. `None` - вариант другого вида.
     fn from_target(target: &CapabilityTarget) -> Option<&Arc<Self>>;

@@ -144,9 +144,9 @@ fn race_block_allocations_never_overlap_single_frames() {
     let doubled = {
         let allocator = Arc::clone(&allocator);
         let owners = Arc::clone(&owners);
-        // Половина соперников берёт смежные блоки, половина - одиночные фреймы:
-        // блочный путь ищет свободный участок, одиночный идёт от подсказки, и
-        // общий у них только битмап.
+        // Половина соперников берёт смежные блоки, половина - одиночные фреймы. Блочный
+        // путь ищет свободный участок, одиночный идёт от подсказки, и общий у них только
+        // битмап.
         contend(move |index| {
             let (frame, count) = if index % 2 == 0 {
                 allocator.allocate_frames(BLOCK_FRAMES)?

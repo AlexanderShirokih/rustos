@@ -37,7 +37,7 @@ impl StartError {
             StartError::MethodUnknown | StartError::ReleaseAddressUnmapped(_) => false,
             // Разбор ответа PSCI: часть кодов оставляет CPU нетронутым.
             StartError::PsciRejected(status) => status.may_have_started(),
-            // Ответ не разобран или CPU молчит: судить об итоге не по чему.
+            // Ответ не разобран, или CPU не отвечает. Судить об итоге не по чему.
             StartError::PsciMalformed(_) | StartError::NotReady => true,
         }
     }

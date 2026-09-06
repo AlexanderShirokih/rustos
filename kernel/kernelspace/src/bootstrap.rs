@@ -45,7 +45,7 @@ pub const SERVER_STACK_PAGES: usize = 8;
 /// Запущенный bootstrap-процесс.
 pub struct BootstrapLaunch {
     pub port: Arc<Port>,
-    /// Capability получателя: пока она жива, порт считает ядро возможным
+    /// Пока capability получателя жива, порт считает ядро возможным
     /// получателем.
     pub receiver: Capability,
     pub info: UserProcessLaunchInfo,
@@ -192,8 +192,8 @@ pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: Bootstr
 
     loop {
         match bootstrap::dispatch(&mut server, &transport) {
-            // Уход значка приём не прерывает: сессий по значкам сервер не
-            // держит, и убирать ему нечего.
+            // Сервер не держит сессий по значкам, и убирать ему нечего. Уход значка поэтому
+            // приём не прерывает.
             Ok(()) | Err(WireError::SenderGone) => {}
             Err(WireError::PeerClosed) => {
                 info!("bootstrap: port closed, exiting");
@@ -226,7 +226,7 @@ pub fn close_bootstrap_port(port: &Arc<Port>, timeout_ns: u64) -> Result<(), Ker
         .map_err(|_| KernelIpcError::MessageTooBig)?;
 
     let sender = ThreadTransport::new_kernel(buffer, table);
-    // Кадр закрытия идёт без значка - учёта отправителя у него нет.
+    // Кадр закрытия идёт без значка - у него нет учёта отправителя.
     port_send(port, &sender, runtime(), Some(timeout_ns), None)
 }
 

@@ -13,12 +13,16 @@ use crate::handle_close;
 /// Ресурсы доставленного кадра. Незавершённым reply владеет транспорт.
 #[derive(Debug, Default)]
 pub struct Delivery {
+    /// Значок порт-handle отправителя, `0` у незаклеймённого.
     pub badge: u64,
+    /// Reply-handle кадра, `Some` только у встречного `call`. Значение здесь дублирует
+    /// запись транспорта, и закрывает reply транспорт.
     pub reply: Option<Handle>,
     caps: [Option<ReceivedHandle>; IPC_BUFFER_MAX_CAPS],
 }
 
-/// Единственный владелец полученного хэндла до передачи объектной обёртке.
+/// Единственный владелец полученного хэндла до передачи объектной обёртке. Невзятый
+/// [`ReceivedHandle`] закрывает свой handle при разрушении.
 #[derive(Debug)]
 pub struct ReceivedHandle {
     handle: Handle,
@@ -64,7 +68,8 @@ impl ReceivedResources for Delivery {
 }
 
 impl ReceivedHandle {
-    /// Передаёт владение в объектную обёртку, подавляя закрытие текущим владельцем.
+    /// Передаёт владение в объектную обёртку, подавляя закрытие текущим владельцем. Закрыть
+    /// такой handle - обязанность нового владельца.
     pub fn into_raw(self) -> Handle {
         ManuallyDrop::new(self).handle
     }

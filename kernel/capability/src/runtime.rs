@@ -23,6 +23,11 @@ pub struct UserThreadEntry {
 }
 
 /// Состояния парковки потока, ожидающего сигнала на capability target.
+///
+/// Значения кладутся в `ready_flag`, переданный в
+/// [`block_current_until`](KernelRuntime::block_current_until). `REGISTERED` держит поток
+/// заблокированным, остальные три разрешают возврат и называют исход ожидания. Переход из
+/// `REGISTERED` идёт одним CAS, и в гонке сигнала, тайм-аута и отмены исход достаётся одному.
 pub struct ParkState;
 
 impl ParkState {
@@ -78,7 +83,7 @@ pub trait KernelRuntime: Send + Sync {
     /// Не возвращается.
     fn exit_current_process(&self, exit_code: i32) -> !;
 
-    /// Уступает остаток кванта: текущий поток встаёт в конец своей
+    /// Уступает остаток кванта. Текущий поток встаёт в конец своей
     /// ready-очереди и остаётся runnable.
     fn yield_current(&self);
 
@@ -87,7 +92,7 @@ pub trait KernelRuntime: Send + Sync {
     /// wakeup-deadline через тот же `SleepQueue`, что и `sleep_ns`.
     fn block_current_until(&self, ready_flag: &AtomicU32, timeout_ns: Option<u64>);
 
-    /// Будит ранее заблокированный поток: переводит в `Ready` и помещает
+    /// Будит ранее заблокированный поток, переводя его в `Ready` и помещая
     /// в ready_queue.
     fn unblock(&self, token: WaitToken);
 
@@ -100,7 +105,8 @@ pub trait KernelRuntime: Send + Sync {
 
 static RUNTIME: Once<Arc<dyn KernelRuntime>> = Once::new();
 
-/// Устанавливает глобальный runtime.
+/// Устанавливает глобальный runtime. Вызывается один раз в kmain, до первой операции над
+/// хендлами. Повторный вызов паникует.
 pub fn install_runtime(rt: Arc<dyn KernelRuntime>) {
     assert!(
         RUNTIME.get().is_none(),

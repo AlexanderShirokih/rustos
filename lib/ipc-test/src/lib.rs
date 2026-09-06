@@ -1,4 +1,8 @@
-//! Host-mock транспорта IPC поверх [`Transport`] для тестирования контрактов.
+//! Объявляет [`MockEnd`] - реализацию [`Transport`] на хосте для тестов IPC-контрактов.
+//!
+//! [`MockEnd::pair`] отдаёт два связанных конца канала. Кадры между ними идут очередью под
+//! мьютексом, а ожидание готовности снимает condvar. Тест разводит стороны контракта по
+//! потокам и берёт ресурсы принятого кадра набором [`MockResources`].
 
 #![allow(
     clippy::expect_used,
@@ -18,7 +22,8 @@ use ipc::{
     wire::{Cap, HandleSlots, IpcError},
 };
 
-/// Набор символических capability host-транспорта.
+/// Capability последнего принятого кадра как символические значения. [`Cap`] владения не
+/// держит, и невостребованное значение host-mock просто отбрасывает.
 #[derive(Debug, Default)]
 pub struct MockResources {
     handles: Vec<Cap>,
@@ -68,7 +73,12 @@ impl Shared {
     }
 }
 
-/// Один конец host-mock канала: пишет в `outbox`, читает из `inbox`.
+/// Один конец host-mock канала. Записанный кадр встаёт в очередь второго конца, а чтение
+/// снимает кадр, записанный вторым концом.
+///
+/// `wait_readable` с [`Timeout::POLL`] возвращает `Timeout` на пустой очереди, любой другой
+/// срок блокирует поток до кадра либо до закрытия. Закрытие конца отдаёт второму
+/// `PeerClosed`. Запись отвергается сразу, чтение - после того, как очередь опустеет.
 pub struct MockEnd {
     outbox: Arc<Shared>,
     inbox: Arc<Shared>,
@@ -142,7 +152,7 @@ impl Transport for MockEnd {
             };
         };
         if frame.bytes.len() > bytes.len() || frame.handles.len() > handles.len() {
-            // Кадр не помещается: вернуть его в очередь, не теряя.
+            // Кадр не помещается. Он возвращается в очередь без потери.
             pipe.frames.push_front(frame);
             return Err(IpcError::Truncated);
         }
@@ -260,7 +270,7 @@ mod tests {
             b.read_message(&mut bytes, &mut handles),
             Err(IpcError::Truncated)
         );
-        // Кадр не потерян: с достаточным буфером читается.
+        // Кадр не потерян. С достаточным буфером он читается.
         let mut big = [0u8; 8];
         let len = b.read_message(&mut big, &mut handles).expect("read ok");
         assert_eq!(len.bytes, 4);

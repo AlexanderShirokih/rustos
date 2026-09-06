@@ -1,4 +1,4 @@
-//! Компонент композиции на стандартной библиотеке: спрашивает время у драйвера RTC.
+//! Компонент композиции на стандартной библиотеке спрашивает время у драйвера RTC.
 //!
 //! Программа сама принимает стартовую транзакцию, тем же объявлением, что и программа без
 //! стандартной библиотеки. Библиотека отдаёт ей одноразовый стартовый handle и принимает
@@ -6,7 +6,7 @@
 
 use std::process;
 
-use component_client::component_manifest;
+use component_startup::component_manifest;
 use kernel_objects::PortTransport;
 use rtc_abi::rtc;
 
@@ -21,7 +21,7 @@ component_manifest! {
 fn main() {
     // До установки лог-сессии вывод не доходит до журнала, поэтому процесс называет отказ
     // приёма кодом выхода.
-    let Ok(startup) = component_client_std::receive(ClockStartup::receive) else {
+    let Ok(startup) = component_startup_std::receive(ClockStartup::receive) else {
         process::exit(NO_STARTUP_EXIT_CODE);
     };
 

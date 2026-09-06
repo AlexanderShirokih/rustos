@@ -16,7 +16,7 @@ bench = false
 
 [dependencies]
 kernel-objects = { workspace = true }
-component-client = { workspace = true }
+component-startup = { workspace = true }
 filesystem = { workspace = true }
 filesystem-server = { workspace = true }
 runtime = { workspace = true }

@@ -53,7 +53,7 @@ pub(crate) fn mint_session(
     service: &OwnedHandle,
     next_badge: &AtomicU64,
 ) -> Result<(NonZeroU64, OwnedHandle), FileSystemError> {
-    // Значения значков не переиспользуются: счётчик только растёт.
+    // Значения значков не переиспользуются. Счётчик только растёт.
     let badge = NonZeroU64::MIN.saturating_add(next_badge.fetch_add(1, Relaxed));
     let session = service
         .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
@@ -78,7 +78,7 @@ fn scoped_entry<'a>(
     tail: Str<'a, PATH_MAX>,
     out: &'a mut [u8; PATH_MAX],
 ) -> Result<Path<'a>, FileSystemError> {
-    // Корень окна - запись каталога над ним: операция над именем его не называет. Корень
+    // Корень окна - запись каталога над ним. Операция над именем его не называет. Корень
     // монтирования у сессии без окна отвергает бекенд.
     if !scope.is_empty() && Path::new(tail.as_str())?.is_root() {
         return Err(FileSystemError::InvalidPath);
@@ -120,7 +120,7 @@ impl FileSystemState {
     }
 
     pub(crate) fn remove_session(&mut self, badge: u64) {
-        // Нулевой значок ядро выдаёт кадру без значка: сессии за ним нет.
+        // Нулевой значок ядро выдаёт кадру без значка. За ним сессия отсутствует.
         if badge == 0 {
             return;
         }
@@ -173,8 +173,9 @@ impl Frame {
     }
 }
 
-/// Разрешает судьбу выданной capability: доставленный ответ переносит её ядром получателю, а
-/// недоставленный оставляет за сервером, и закрыть её больше некому.
+/// Закрывает выданную capability, когда ответ не доставлен. Доставленный ответ переносит её
+/// получателю ядром, и сервер отпускает свой хэндл без закрытия. Вызов идёт один раз на кадр,
+/// после обработки.
 pub fn settle(vended: &mut Option<OwnedHandle>, delivered: bool) {
     let Some(handle) = vended.take() else {
         return;
@@ -186,7 +187,9 @@ pub fn settle(vended: &mut Option<OwnedHandle>, delivered: bool) {
     }
 }
 
-/// Укладывает хэндл в кадр ответа, оставляя владение за отвечающим до конца кадра.
+/// Укладывает хэндл в кадр ответа, оставляя владение за отвечающим до конца кадра. Дальше хэндл
+/// принимает [`settle`]. Кадр отвечает одной capability, и повторный вызов по тому же `vended`
+/// закрывает прежнюю.
 pub fn vend(vended: &mut Option<OwnedHandle>, handle: OwnedHandle) -> Cap {
     let id = handle.as_raw().as_nonzero();
     *vended = Some(handle);
@@ -237,8 +240,8 @@ impl file_system::Service for Serving<'_, '_> {
             stores, sessions, ..
         } = &mut *self.state;
         let session = sessions.get_mut(client)?;
-        // Буфер заводится один раз за сессию: раскладка под уже выданной клиенту капой
-        // переживает любой вызов.
+        // Буфер создаётся один раз за сессию. Раскладка под уже выданной клиенту капой
+        // сохраняется при любом вызове.
         if session.attachment().buffer.is_some() {
             return Err(FileSystemError::AlreadyExists);
         }
@@ -258,7 +261,7 @@ impl file_system::Service for Serving<'_, '_> {
         let client = self.client()?;
         let (backend, stores, session) = self.backend_stores_session()?;
         let scope = &session.attachment().scope;
-        // Корень окна - запись каталога над ним: сессия его открывает, но не заводит.
+        // Корень окна - запись каталога над ним. Сессия его открывает, но не создаёт.
         let names_window_root = !scope.is_empty() && Path::new(path.as_str())?.is_root();
         let path = scoped(scope, path, &mut full)?;
         if mode.writable() && !backend.is_mutable() {
@@ -273,8 +276,8 @@ impl file_system::Service for Serving<'_, '_> {
         let fd = match self.state.open_node(client, node, mode) {
             Ok(fd) => fd,
             Err(error) => {
-                // Узел, заведённый ради этого дескриптора, не переживает отказ его выдачи:
-                // откат не даёт отказному вызову оставить в дереве узел без дескриптора.
+                // Узел, заведённый ради этого дескриптора, не сохраняется при отказе его выдачи.
+                // Откат не даёт отказному вызову оставить в дереве узел без дескриптора.
                 if opened.created {
                     let FileSystemState {
                         backend, stores, ..
@@ -317,8 +320,8 @@ impl file_system::Service for Serving<'_, '_> {
         Self::buffer(session)?.snapshot(len as usize, |data| {
             if offset == APPEND {
                 let at = backend.append(stores, open_node.node, data)?;
-                // Сколько байт легло, знает бекенд: дозапись отдаёт только их смещение, а длину
-                // даёт выросшая длина узла.
+                // Бекенд определяет число уложенных байт. Дозапись отдаёт только их смещение, а
+                // длину даёт выросшая длина узла.
                 let size = backend.metadata(open_node.node)?.size;
                 let count = u32::try_from(size.saturating_sub(at))
                     .map_err(|_| FileSystemError::BufferTooSmall)?;
@@ -347,7 +350,7 @@ impl file_system::Service for Serving<'_, '_> {
         let (backend, _, session) = self.backend_stores_session()?;
         let open_node = readable(session.get(fd)?)?;
         let buffer = Self::buffer(session)?;
-        // Пачка записей занимает буфер целиком: сколько их уместилось, решает перечисление.
+        // Пачка записей занимает буфер целиком. Сколько их уместилось, решает перечисление.
         let room = buffer.size();
         buffer.publish(room, |out| backend.list(open_node.node, from, out))
     }
@@ -430,15 +433,15 @@ impl file_system::Service for Serving<'_, '_> {
         backend.lookup(root)?;
         let scope = window_scope(root);
         let (badge, capability) = mint_session(self.service, self.next_badge)?;
-        // Сессия заводится до того, как её капа ушла клиенту: кадр по ней застанет
-        // её заведённой.
+        // Сессия создаётся до того, как её капа ушла клиенту. Кадр по ней застанет
+        // её созданной.
         self.state.open_session_scoped(badge.get(), scope)?;
         Ok(vend(&mut self.frame.vended, capability))
     }
 }
 
 fn window_scope(root: Path<'_>) -> String {
-    // Окно сессии - полный путь узла: сужение складывается, а расширить окно обратно
+    // Окно сессии - полный путь узла. Сужение складывается, а расширить окно обратно
     // производной нечем.
     if root.is_root() {
         return String::new();
@@ -452,7 +455,7 @@ pub(crate) fn access_for(mode: AccessMode, region: MemoryAccess) -> MemoryAccess
     } else {
         MemoryAccess::READ
     };
-    // Доступ производной капы шире регионного ядро отвергает: пересечение считает сервер.
+    // Доступ производной капы шире регионного ядро отвергает. Пересечение считает сервер.
     MemoryAccess::from_bits_truncate(requested.raw() & region.raw())
 }
 

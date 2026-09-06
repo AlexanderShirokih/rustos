@@ -25,23 +25,28 @@ impl StoreId {
 
 /// Хранилище байт, чьё владение и способ доступа определяет файловый сервер.
 pub trait ByteStore {
-    /// Выделяет хранилище ровно на `size` байт.
+    /// Выделяет хранилище ровно на `size` байт. Нехватка ресурса либо объём, не подошедший
+    /// реализации, - `NoSpace`.
     fn allocate(&mut self, size: usize) -> Result<StoreId, FileSystemError>;
 
-    /// Копирует байты хранилища со смещения `offset` в `out`.
+    /// Копирует байты хранилища со смещения `offset` в `out`. Незнакомое хранилище - `NotFound`,
+    /// диапазон за его границей - `NoSpace`.
     fn read(&self, store: StoreId, offset: usize, out: &mut [u8]) -> Result<(), FileSystemError>;
 
-    /// Копирует `data` в хранилище со смещения `offset`.
+    /// Копирует `data` в хранилище со смещения `offset`. Незнакомое хранилище - `NotFound`,
+    /// диапазон за его границей - `NoSpace`.
     fn write(&mut self, store: StoreId, offset: usize, data: &[u8]) -> Result<(), FileSystemError>;
 
-    /// Заполняет нулями диапазон хранилища.
+    /// Заполняет нулями диапазон хранилища. Незнакомое хранилище - `NotFound`, диапазон за его
+    /// границей - `NoSpace`.
     fn zero(&mut self, store: StoreId, offset: usize, len: usize) -> Result<(), FileSystemError>;
 
     /// Освобождает хранилище. Неизвестный идентификатор игнорируется.
     fn release(&mut self, store: StoreId);
 }
 
-/// Кладёт значение в первый свободный слот таблицы хранилищ и возвращает его идентификатор.
+/// Кладёт значение в первый свободный слот таблицы хранилищ и возвращает идентификатор этого
+/// слота. Нехватка памяти под новый слот - `NoSpace`.
 pub fn insert_store<T>(slots: &mut Vec<Option<T>>, value: T) -> Result<StoreId, FileSystemError> {
     if let Some(index) = slots.iter().position(Option::is_none) {
         let id = StoreId::from_raw(u32::try_from(index).map_err(|_| FileSystemError::NoSpace)?);

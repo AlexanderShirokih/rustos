@@ -12,8 +12,8 @@ impl ArchCpu for Aarch64Cpu {
     }
 
     unsafe fn install_cpu_local(scheduler_cpu: *mut ()) -> Result<(), CpuLocalError> {
-        // Per-CPU блок платформенного слоя установлен раньше: его ставит
-        // boot-путь CPU, а планировщик лишь добавляет своё состояние.
+        // Per-CPU блок платформенного слоя установлен раньше. Его ставит boot-путь
+        // CPU, а планировщик лишь добавляет своё состояние.
         let local = cpu::current().ok_or(CpuLocalError::NotInstalled)?;
         local.set_scheduler(scheduler_cpu);
         Ok(())
@@ -28,7 +28,7 @@ impl ArchCpu for Aarch64Cpu {
     }
 
     fn send_reschedule(target: CpuId) {
-        // Контроллер адресует CPU по affinity, а не по номеру ядра: перевод
+        // Контроллер адресует CPU по affinity, а не по номеру ядра. Перевод
         // делает таблица топологии.
         let Some(affinity) = cpu::affinity(target.as_index()) else {
             warn!(

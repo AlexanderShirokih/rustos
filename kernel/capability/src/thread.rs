@@ -1,6 +1,6 @@
 //! `Thread` capability target: lifecycle-объект потока.
 //!
-//! Симметричен [`ProcessObject`](super::process::ProcessObject): завершение
+//! Симметричен [`ProcessObject`](super::process::ProcessObject). Завершение
 //! наблюдается через bound-[`Signal`] (`termination_signal`).
 
 use alloc::sync::Arc;
@@ -12,14 +12,14 @@ pub struct ThreadObject {
 }
 
 impl ThreadObject {
-    /// Создаёт новый `ThreadObject`.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: TerminationState::new(),
         })
     }
 
-    /// Идемпотентно публикует `code` и помечает поток завершённым.
+    /// Публикует `code`, помечает поток завершённым и будит наблюдателей. Повторный вызов -
+    /// no-op, и код первой пометки сохраняется.
     pub fn signal_terminated(&self, code: i32) {
         self.inner.signal_terminated(code);
     }

@@ -80,7 +80,7 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
 
     let mut data_cursor = path_cursor;
     let mut data_layout: Vec<DataWindow> = Vec::with_capacity(sorted.len());
-    // Одинаковое содержимое кладётся в образ один раз: повторившая его запись
+    // Одинаковое содержимое кладётся в образ один раз, а повторившая его запись
     // ссылается на запись, открывшую окно.
     let mut windows: BTreeMap<&[u8], u16> = BTreeMap::new();
     let mut placed: Vec<(u64, &[u8])> = Vec::new();
@@ -89,7 +89,7 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
             u64::try_from(record.data.len()).map_err(|_| ImageEncodeError::SizeOverflow)?;
         if let Some(&owner) = windows.get(record.data) {
             // Ноль в `alias_of` означает собственное окно, поэтому номер повторённой записи
-            // едет увеличенным на единицу.
+            // хранится увеличенным на единицу.
             let owned = data_layout
                 .get(usize::from(owner))
                 .ok_or(ImageEncodeError::TooManyRecords)?;

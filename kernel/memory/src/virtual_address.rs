@@ -8,7 +8,7 @@ use crate::{
     physical_address::AlignedPhysicalAddress,
 };
 
-/// Адрес виртуальной памяти.
+/// Адрес виртуальной памяти без гарантии выравнивания.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct VirtualAddress(usize);
@@ -43,7 +43,8 @@ impl Address for VirtualAddress {
     }
 }
 
-/// Виртуальный адрес, выровненный на 2^SHIFT байт.
+/// Виртуальный адрес, выровненный на `Self::ALIGNMENT` (`1 << SHIFT` байт). `new` и
+/// `from_usize` отклоняют невыровненное значение, `new_unchecked` принимает любое.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct AlignedVirtualAddress<const SHIFT: u8>(VirtualAddress);
@@ -100,15 +101,17 @@ impl<const SHIFT: u8> AlignedVirtualAddress<SHIFT> {
         Self::new(VirtualAddress::new(self.as_usize() + bytes))
     }
 
-    /// Создаёт выровненный адрес, выравнивая вниз.
+    /// Округляет `address` вниз до кратного `Self::ALIGNMENT`. Результат не больше
+    /// входа, так что операция определена для любого `address`.
     pub const fn aligned_down(address: VirtualAddress) -> Self {
         Self(VirtualAddress::new(
             (address.as_usize() / Self::ALIGNMENT) * Self::ALIGNMENT,
         ))
     }
 
-    /// Сдвигает адрес на `count` блоков выравнивания. Результат выровнен по построению,
-    /// переполнение адресного пространства заворачивается.
+    /// Сдвигает адрес на `count` блоков выравнивания. Результат выровнен по построению.
+    /// Переполнение адресного пространства заворачивается в релизе - `debug_assert`
+    /// ловит его в debug-сборке.
     pub const fn add_blocks(&self, count: usize) -> Self {
         debug_assert!(
             match count.checked_mul(Self::ALIGNMENT) {

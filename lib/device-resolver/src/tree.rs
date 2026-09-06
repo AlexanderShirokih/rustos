@@ -38,8 +38,8 @@ struct Search<'a> {
 }
 
 impl<'a> DeviceTreePlatform<'a> {
-    /// Читает описание из `tree`, толкуя ячейки прерываний по реестру
-    /// `bindings`.
+    /// Собирает описание платформы из дерева `tree` и толкует ячейки прерываний дерева по
+    /// реестру `bindings`.
     #[must_use]
     pub const fn new(tree: &'a DeviceTree<'a>, bindings: ControllerBindings) -> Self {
         Self { tree, bindings }

@@ -60,6 +60,12 @@ impl<'a> Path<'a> {
             .map(Component)
     }
 
+    /// Каталог, которому принадлежит путь. Для корневого каталога возвращает сам корень.
+    pub fn directory(self) -> Self {
+        self.split_last()
+            .map_or(Self::ROOT, |(directory, _)| directory)
+    }
+
     /// Родительский путь и последний компонент. Для корня - `None`.
     pub fn split_last(self) -> Option<(Self, Component<'a>)> {
         if self.is_root() {
@@ -94,9 +100,9 @@ impl<'a> Component<'a> {
     }
 }
 
-/// Полный путь `tail`, пересаженный под окно `scope`: корень окна равен `scope`,
-/// а границы `PATH_MAX` принадлежат полному пути - окно, удлинившее путь за
-/// предел, даёт `InvalidPath`. Результат живёт в `out`.
+/// Полный путь `tail`, пересаженный под окно `scope`. Корнем результата становится `scope`, а
+/// корень `tail` называет само окно. Граница `PATH_MAX` принадлежит полному пути, и окно,
+/// удлинившее путь за предел, даёт `InvalidPath`. Результат хранится в `out`.
 pub fn rebase<'a>(
     scope: Path<'_>,
     tail: Path<'_>,
@@ -119,6 +125,33 @@ pub fn rebase<'a>(
     tail_out.copy_from_slice(tail.as_bytes());
     let joined = core::str::from_utf8(joined).map_err(|_| FileSystemError::InvalidPath)?;
     Path::new(joined)
+}
+
+/// Ближайший общий каталог двух путей: совпадающие компоненты их каталогов. Пути без общего
+/// компонента сходятся в корне.
+pub fn common_directory<'a>(
+    first: Path<'a>,
+    second: Path<'_>,
+) -> Result<Path<'a>, FileSystemError> {
+    let first = first.directory();
+    let mut names = second.directory().components();
+
+    let mut len = 0;
+    for name in first.components() {
+        if names.next().map(Component::as_str) != Some(name.as_str()) {
+            break;
+        }
+        len += SEPARATOR.len_utf8() + name.as_str().len();
+    }
+    if len == 0 {
+        return Ok(Path::ROOT);
+    }
+
+    let text = first
+        .as_str()
+        .get(..len)
+        .ok_or(FileSystemError::InvalidPath)?;
+    Path::new(text)
 }
 
 const fn validate_names(tail: &[u8]) -> bool {
@@ -275,6 +308,46 @@ mod tests {
     }
 
     #[test]
+    fn directory_drops_the_last_component() {
+        let directory =
+            |text: &'static str| Path::new(text).expect("valid path").directory().as_str();
+        assert_eq!(directory("/data/sample"), "/data");
+        assert_eq!(directory("/data"), "/");
+        assert_eq!(directory("/"), "/");
+    }
+
+    fn common(first: &str, second: &str) -> Result<String, FileSystemError> {
+        let first = Path::new(first).expect("valid path");
+        let second = Path::new(second).expect("valid path");
+        super::common_directory(first, second).map(|path| String::from(path.as_str()))
+    }
+
+    #[test]
+    fn common_directory_keeps_the_shared_components() {
+        assert_eq!(
+            common("/data/a/first", "/data/b/second").as_deref(),
+            Ok("/data")
+        );
+        assert_eq!(
+            common("/data/a/first", "/data/a/second").as_deref(),
+            Ok("/data/a")
+        );
+    }
+
+    #[test]
+    fn common_directory_falls_back_to_the_root() {
+        assert_eq!(common("/a/first", "/b/second").as_deref(), Ok("/"));
+        assert_eq!(common("/first", "/second").as_deref(), Ok("/"));
+        // Каталог одной стороны лежит выше другой, и общим остаётся корень.
+        assert_eq!(common("/data", "/data/b/second").as_deref(), Ok("/"));
+    }
+
+    #[test]
+    fn common_directory_does_not_split_a_shared_name_prefix() {
+        assert_eq!(common("/datastore/a", "/data/b").as_deref(), Ok("/"));
+    }
+
+    #[test]
     fn root_prefix_matches_every_path() {
         let path = Path::new("/data/sample").expect("valid path");
         assert_eq!(path.strip_prefix(Path::ROOT), Some(path));
@@ -310,7 +383,7 @@ mod tests {
 
     #[test]
     fn rebase_rejects_a_path_past_the_bound() {
-        // Оба пути в границах, а их сумма - нет: предел принадлежит полному пути.
+        // Оба пути в границах, а их сумма - нет. Предел принадлежит полному пути.
         let scope = String::from("/") + &"s".repeat(NAME_MAX);
         let mut tail = String::new();
         while tail.len() + scope.len() <= PATH_MAX {

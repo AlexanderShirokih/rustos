@@ -39,7 +39,7 @@ impl component_sessions::Service for Establishing<'_> {
     fn open_session(&mut self, scope: Str<'_, SESSION_SCOPE_MAX>) -> Result<Cap, SessionError> {
         let (badge, session) =
             mint_session(&self.shared.service, &self.shared.next_badge).map_err(refused)?;
-        // Сессия заводится до того, как её капа ушла клиенту: кадр по ней застанет её заведённой.
+        // Сессия создаётся до того, как её капа ушла клиенту. Кадр по ней застанет её созданной.
         let mut state = self.shared.state.lock();
         let opened = match scope.as_str() {
             "" => state.open_session(badge.get()),

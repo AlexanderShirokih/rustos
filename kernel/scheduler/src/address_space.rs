@@ -21,7 +21,7 @@ impl AddressSpace {
     }
 
     /// Capability для передачи в [`super::ArchContext::switch_address_space`].
-    /// Для kernel-AS — `None`.
+    /// Для kernel-AS - `None`.
     pub fn handle(&self) -> Option<AddressSpaceHandle> {
         match self {
             Self::Kernel => None,
@@ -37,7 +37,7 @@ impl AddressSpace {
         }
     }
 
-    /// `Arc` на user-mapper для использования вне scheduler-lock. Для kernel-AS — `None`.
+    /// `Arc` на user-mapper для использования вне scheduler-lock. Для kernel-AS - `None`.
     pub fn mapper_arc(&self) -> Option<Arc<dyn MemoryMapper + Send + Sync>> {
         match self {
             Self::Kernel => None,

@@ -1,6 +1,6 @@
 //! Декодирование сырого syscall-op в kernel-side ошибку.
 //!
-//! Набор и нумерация операций - часть ABI и живут в [`syscall::SyscallOp`].
+//! Набор и нумерация операций - часть ABI и находятся в [`syscall::SyscallOp`].
 
 use syscall::SyscallError;
 pub use syscall::SyscallOp;

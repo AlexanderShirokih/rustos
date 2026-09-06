@@ -5,7 +5,7 @@
 
 use std::process;
 
-use component_client::component_manifest;
+use component_startup::component_manifest;
 
 const NO_STARTUP_EXIT_CODE: i32 = 1;
 
@@ -18,7 +18,7 @@ component_manifest! {
 fn main() {
     // До установки лог-сессии вывод не доходит до журнала, поэтому процесс называет отказ
     // приёма кодом выхода.
-    let Ok(_startup) = component_client_std::receive(HelloStartup::receive) else {
+    let Ok(_startup) = component_startup_std::receive(HelloStartup::receive) else {
         process::exit(NO_STARTUP_EXIT_CODE);
     };
 

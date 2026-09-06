@@ -1,9 +1,8 @@
 [package]
-name = "component-client"
+name = "component-startup"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-# Крейт userspace, и его workspace — `user/`: оттуда идёт сборка под таргет RustOS.
 workspace = "../../user"
 
 [lib]

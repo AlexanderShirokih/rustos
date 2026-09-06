@@ -1,3 +1,13 @@
+//! Собирает драйверы устройств AArch64 в секцию `.drivers.kernel` и отдаёт их список ядру.
+//!
+//! [`register_driver!`] кладёт дескриптор драйвера в эту секцию на этапе компоновки.
+//! [`drivers`] отдаёт список, который линкер собрал из этой секции. По этому списку
+//! `kernelspace` ведёт проходы подъёма.
+//!
+//! Здесь лежат драйверы generic-периферии ARM - таймер, GICv2, GICv3, UART PL011 - и UART DM
+//! платформы Qualcomm. Только этот из крейтов драйверов обращается к регистрам устройств.
+//! `drivers-common` и `drivers-common-aarch64` разбирают описания устройств.
+
 #![no_std]
 #![allow(unsafe_code)]
 #![allow(
@@ -31,8 +41,9 @@ pub fn drivers() -> &'static [DriverInfo<FdtProbeFn>] {
 
         // SAFETY: символы `__drivers_kernel_start`/`__drivers_kernel_end` объявлены линкером
         // и охватывают единый секционный массив `.drivers.kernel`, заполненный `DriverInfo`-ами
-        // через `register_driver!`. `offset_from` корректен: оба указателя из одного объекта,
-        // `start <= end` гарантировано раскладкой секции; результат не отрицателен.
+        // через `register_driver!`. Оба указателя происходят из одного объекта. Раскладка
+        // секции гарантирует `start <= end`, поэтому `offset_from` корректен и результат не
+        // отрицателен.
         unsafe {
             let start = core::ptr::from_ref(&__drivers_kernel_start);
             let end = core::ptr::from_ref(&__drivers_kernel_end);
@@ -42,6 +53,10 @@ pub fn drivers() -> &'static [DriverInfo<FdtProbeFn>] {
     }
 }
 
+/// Порождает статик `DriverInfo<FdtProbeFn>` в секции `.drivers.kernel`.
+///
+/// Имя записи берётся из `stringify!($symbol)`. Поле `probe` хранит выражение `probe`,
+/// приведённое к `FdtProbeFn`. Срез между границами секции собирает [`drivers`].
 #[macro_export]
 macro_rules! register_driver {
     ($symbol:ident, probe = $probe:expr) => {

@@ -6,8 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_abi::component_startup;
-use component_client::component_manifest;
+use component_startup::component_manifest;
 use ipc::{Transport as _, wire::Cap};
 use kernel_objects::{OwnedHandle, Port, PortTransport, ReceivedFrame};
 use runtime::{Timeout, thread_exit};
@@ -28,7 +27,7 @@ component_manifest! {
 #[derive(Default)]
 struct EarlierFrame(Option<Cap>);
 
-impl component_startup::Service for EarlierFrame {
+impl component_abi::component_startup::Service for EarlierFrame {
     fn start(&mut self, log: Cap, _control: Cap, _service: Cap, _slot_count: u16) {
         self.0 = Some(log);
     }
@@ -68,7 +67,7 @@ fn earlier_capability(startup: &OwnedHandle) -> Option<OwnedHandle> {
     transport.wait_readable(EARLIER_FRAME_TIMEOUT).ok()?;
     let mut received = ReceivedFrame::take(&transport)?;
     let mut frame = EarlierFrame::default();
-    let _ = component_startup::dispatch(&mut frame, &transport);
+    let _ = component_abi::component_startup::dispatch(&mut frame, &transport);
     received.claim(frame.0?)
 }
 

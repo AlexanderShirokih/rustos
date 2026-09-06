@@ -46,7 +46,7 @@ const fn ticks_to_ns(ticks: u64, frequency: u64) -> u64 {
 
 fn frequency() -> u64 {
     // Частота задана платформой на всё время работы, поэтому гонка на заполнении кэша
-    // безобидна: обе стороны пишут одно значение.
+    // безобидна. Обе стороны пишут одно значение.
     let cached = CACHED_FREQUENCY.load(Ordering::Relaxed);
     if cached != 0 {
         return cached;

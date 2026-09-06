@@ -6,7 +6,7 @@ Toolchain зафиксирован в `rust-toolchain.toml` до конкрет�
 
 Компоненты: `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt`,
 `rust-analyzer`. Через `rustup` ставится только `aarch64-unknown-none`, под
-которым идёт ядро: таргет программ userspace задан спекой в `targets/`, и `core`
+которым идёт ядро. Таргет программ userspace задан спекой в `targets/`, и `core`
 со `std` собираются для него из исходников компонента `rust-src`
 ([workspace.md](workspace.md#таргеты-сборки)).
 

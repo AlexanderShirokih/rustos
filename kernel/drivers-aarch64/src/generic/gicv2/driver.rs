@@ -1,5 +1,3 @@
-//! Драйвер GICv2: точка входа, фабрика и probe-функция.
-
 use alloc::{
     boxed::Box,
     string::{String, ToString},
@@ -17,7 +15,8 @@ use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatibl
 use super::{controller::Gicv2Controller, service::GicInterruptsService};
 use crate::register_driver;
 
-/// Драйвер Generic Interrupt Controller v2.
+/// `Driver`, который мапит GICD/GICC, инициализирует `Gicv2Controller` и
+/// публикует его как `InterruptsService` через `BootServices`.
 pub struct Gicv2 {
     distributor_address: MmioAddress,
     cpu_interface_address: MmioAddress,

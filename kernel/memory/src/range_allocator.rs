@@ -25,10 +25,14 @@ pub const DEFAULT_LIVE_REGION_CAPACITY: usize = 64;
 const DEFAULT_PREALLOCATED_LIVE_REGIONS: usize = 4;
 const DEFAULT_PREALLOCATED_FREE_RANGES: usize = DEFAULT_PREALLOCATED_LIVE_REGIONS + 1;
 
+/// Ошибки [`RangeAllocator::allocate`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocateError {
+    /// Ни один свободный диапазон арены не вмещает запрошенный размер.
     NotEnoughSpace,
+    /// Запрошенный размер не кратен размеру страницы.
     UnalignedSize,
+    /// Таблица живых регионов заполнена до `capacity`.
     OutOfSlots,
 }
 
@@ -42,9 +46,13 @@ impl Display for AllocateError {
     }
 }
 
+/// Ошибки [`RangeAllocator::free`], [`RangeAllocator::lookup`] и [`RangeAllocator::set_tag`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeError {
+    /// По `base` нет аллоцированного диапазона с таким же `size_bytes` - несовпадение
+    /// размера при верном `base` даёт тот же исход.
     NotFound,
+    /// Запрошенный размер не кратен размеру страницы.
     UnalignedSize,
 }
 
@@ -113,8 +121,9 @@ impl FreeRange {
     }
 }
 
-/// First-fit аллокатор VA-диапазонов с честным `free` и автоматическим
-/// слиянием соседних свободных областей.
+/// First-fit аллокатор VA-диапазонов. `free` принимает `base` и `size_bytes` в точности
+/// как у выданного диапазона - иное сочетание отказывает [`RangeError::NotFound`].
+/// Освобождённый диапазон сразу сливается с соседними свободными.
 pub struct RangeAllocator<Tag: Clone> {
     arena_start: PageAlignedVirtualAddress,
     arena_end: VirtualAddress,
@@ -556,7 +565,7 @@ mod tests {
         let mut a = allocator();
         let ra = a.allocate(nz(PAGE_SIZE), 0).unwrap();
         let rb = a.allocate(nz(PAGE_SIZE), 0).unwrap();
-        // free B первым: получится отдельный free между A и хвостом арены.
+        // Сначала освобождается B. Получится отдельный free между A и хвостом арены.
         a.free(rb.base(), nz(rb.size_bytes())).unwrap();
         // free A: должен слиться вправо с диапазоном B (а тот в свою очередь
         // с хвостом арены) - итого один свободный диапазон.

@@ -29,7 +29,7 @@ extern "C" fn badge_client(_arg: usize) -> u32 {
     let badged = adopt_port(&BADGED_RAW);
     let plain = adopt_port(&PLAIN_RAW);
 
-    // Рандеву: порядок приёма сервером совпадает с порядком отправок.
+    // При рандеву порядок приёма сервером совпадает с порядком отправок.
     let first = badged.send_bytes(b"badged", Timeout::INFINITE);
     let second = plain.send_bytes(b"plain", Timeout::INFINITE);
 
@@ -61,7 +61,7 @@ fn server_reads_badge_of_receiving_handle() {
 
     let client = spawn(badge_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
 
-    // Значки снимаются в локальные переменные до проверок: провал kassert
+    // Значки снимаются в локальные переменные до проверок. Провал kassert
     // логирует строку, а это port_send, перезаписывающий буфер.
     let server = PortTransport::server(port.handle());
     server

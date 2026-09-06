@@ -112,7 +112,7 @@ impl Arena {
 }
 
 fn request_of(caller: usize, step: u64) -> u64 {
-    // Номер вызывающего и номер шага в одном значении: ответ, пришедший
+    // Номер вызывающего и номер шага лежат в одном значении. Ответ, пришедший
     // чужому потоку или перепутанный с другим шагом, виден по нему.
     ((caller as u64) << 56) | (step & 0x00FF_FFFF_FFFF_FFFF)
 }
@@ -141,7 +141,7 @@ fn sleep(budget: Timeout) {
 fn caller(arena: &Arena, index: usize, steps: u64, seed: u64) -> u32 {
     let mut random = SplitMix64::new(seed);
     for step in 0..steps {
-        // Срок выбирается на каждый вызов: короткий уводит вызывающего раньше
+        // Срок выбирается на каждый вызов. Короткий уводит вызывающего раньше
         // ответа, и равенство итогов проверяется на этой гонке.
         let pick = (random.next() % CALL_TIMEOUTS_MS.len() as u64) as usize;
         let timeout = Timeout::from_millis(CALL_TIMEOUTS_MS[pick]);
@@ -193,7 +193,7 @@ fn responder(arena: &Arena) -> u32 {
                 } else if port_reply(reply) == 0 {
                     arena.replies_ok.fetch_add(1, Relaxed);
                 } else {
-                    // Вызывающий ушёл по сроку раньше ответа: его вызов
+                    // Вызывающий ушёл по сроку раньше ответа. Его вызов
                     // успешным не считался, и равенство итогов сохраняется.
                     arena.replies_lost.fetch_add(1, Relaxed);
                 }
@@ -212,7 +212,7 @@ fn responder(arena: &Arena) -> u32 {
 }
 
 fn mapper(arena: &Arena) -> u32 {
-    // Карта адресов у потоков процесса общая: снятие идёт теми же вызовами,
+    // Карта адресов у потоков процесса общая. Снятие идёт теми же вызовами,
     // что чужие установки на соседних CPU.
     while arena.callers_running() {
         let resource = match Resource::self_resource() {
@@ -260,7 +260,7 @@ fn handle_churn(arena: &Arena) -> u32 {
             arena.failed(closed);
             break;
         }
-        // Закрытый хэндл больше не адресует объект: слот мог достаться соседу,
+        // Закрытый хэндл больше не адресует объект. Слот мог достаться соседу,
         // и поколение отсекает обращение по устаревшему идентификатору.
         if port_send(derived, Timeout::POLL) == 0 {
             arena.mismatched.fetch_add(1, Relaxed);
@@ -298,7 +298,7 @@ fn await_brigade(arena: &Arena, workers: u64, seed: u64) {
 
 fn run_brigade(seed: u64, steps: u64) {
     let port = Port::create().expect("stress port");
-    // Клиентской стороне нужно и право множиться: роль хэндлов заводит от неё
+    // Клиентской стороне нужно и право множиться. Хэндлы создают от неё
     // производные, пока по ней идут вызовы.
     let client = port
         .handle()
@@ -416,7 +416,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
                     // состоянию процесса.
                     VICTIMS_READY.fetch_add(1, Release);
                     let result = port_recv(server, VICTIM_TIMEOUT);
-                    // Возврата быть не должно: отправителей у порта нет, и приём
+                    // Возврата быть не должно. У порта нет отправителей, и приём
                     // обязан прерваться снятием.
                     u32::from(result != 0)
                 },

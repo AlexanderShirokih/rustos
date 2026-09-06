@@ -150,7 +150,7 @@ kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
 collections = { workspace = true }
 component-abi = { workspace = true }
-component-client = { workspace = true }
+component-startup = { workspace = true }
 device-resolver = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }

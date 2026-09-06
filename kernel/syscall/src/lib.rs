@@ -1,6 +1,12 @@
-//! Syscall-слой ядра: [`SyscallFrame`], [`SyscallOp`], [`SyscallError`],
-//! [`dispatch`]. Платформенный слой реализует `SyscallFrame` для своего
-//! trap-фрейма и вызывает [`dispatch`].
+//! Читает из trap-фрейма номер операции и аргументы, исполняет операцию ядра и кладёт
+//! результат обратно во фрейм.
+//!
+//! Платформенный слой реализует [`SyscallFrame`] для своего trap-фрейма и передаёт фрейм в
+//! [`dispatch`]. Номер операции назван [`SyscallOp`], отказ - [`SyscallError`]. Оба типа
+//! объявлены ABI-крейтом `syscall` и реэкспортированы отсюда.
+//!
+//! [`install_runtime`] связывает слой с планировщиком реализацией [`SyscallRuntime`]. Подъём
+//! ядра вызывает её один раз до первого системного вызова.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(test, allow(clippy::unimplemented, clippy::unwrap_in_result))]

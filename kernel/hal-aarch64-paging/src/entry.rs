@@ -56,8 +56,8 @@ pub struct Entry<L: Level, K: Kind> {
     _p: PhantomData<(L, K)>,
 }
 
-// Entry - `#[repr(transparent)]` обёртка над `u64`; параметры `L`/`K` живут только в `PhantomData`,
-// поэтому Copy/Clone безусловны.
+// Entry - `#[repr(transparent)]` обёртка над `u64`; параметры `L`/`K` остаются только в
+// `PhantomData`, поэтому Copy/Clone безусловны.
 impl<L: Level, K: Kind> Copy for Entry<L, K> {}
 impl<L: Level, K: Kind> Clone for Entry<L, K> {
     fn clone(&self) -> Self {
@@ -202,7 +202,10 @@ fn desc_type(raw: u64) -> u64 {
     raw & 0b11
 }
 
-/// Декодирует сырое значение в типизированную запись.
+/// Декодирует сырое значение в типизированную запись по битам `[1:0]`: `0b00` - `Invalid`,
+/// `0b11` - `Table`, `0b01` - `Block` там, где уровень его поддерживает ([`DecodeBlock`]) и
+/// [`DecodeError::WrongKind`] на прочих уровнях. Остальные значения `[1:0]` дают
+/// [`DecodeError::Reserved`].
 pub fn decode<L>(raw: u64) -> Result<AnyEntry<L>, DecodeError>
 where
     L: Level + seal::CanTable + DecodeBlock,

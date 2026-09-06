@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system};
 use ipc::wire::Str;
 use kernel_objects::{MemoryRegion, OwnedHandle};
@@ -38,7 +38,7 @@ component_manifest! {
     }
 }
 
-/// Программа-потребитель файловой области: читает свою запись сессией каталога
+/// Программа-потребитель файловой области читает свою запись сессией каталога
 /// и проверяет, что путь наружу область не выражает. `startup` приходит в x0 как
 /// HandleId одноразового startup-порта.
 #[unsafe(no_mangle)]

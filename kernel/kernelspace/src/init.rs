@@ -100,8 +100,8 @@ fn bootstrap_chain(
 
     info!("bootstrap process spawned:");
 
-    // Capability получателя живёт ровно столько, сколько работает сервер:
-    // его уход объявляет порт без получателей.
+    // Capability получателя действительна, пока работает сервер. Её уход переводит порт
+    // в состояние без получателей.
     let receiver = launch.receiver;
     let port = launch.port.clone();
     let resources = launch.resources;

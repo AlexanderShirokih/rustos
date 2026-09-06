@@ -31,7 +31,7 @@ pub(crate) struct StoreTable {
 impl StoreTable {
     pub(crate) fn new(resource: Resource, initial: Option<MemoryRegion>) -> Self {
         let mut stores = Vec::new();
-        // Регион точки монтирования ложится первым: окна бекенда адресуют его как `StoreId::MOUNT`.
+        // Регион точки монтирования ложится первым. Окна бекенда адресуют его как `StoreId::MOUNT`.
         if let Some(region) = initial {
             stores.push(Some(Store::Initial(region)));
         }
@@ -60,7 +60,7 @@ impl StoreTable {
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(no_space)?;
         drop(probe);
-        // Маппинг живёт вместе с именем. Отказ ядра регистрацию не срывает: такой регион
+        // Маппинг существует вместе с именем. Отказ ядра регистрацию не срывает. Такой регион
         // отображается на время операции.
         let mapping = region.map_full(UserMemFlags::ReadWrite).ok();
 

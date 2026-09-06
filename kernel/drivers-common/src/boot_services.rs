@@ -51,6 +51,12 @@ impl Display for BootServicesError {
     }
 }
 
+/// Реестр boot-time сервисов, которые драйверы читают и заполняют в `Driver::run`.
+///
+/// `set_*` ставит сервис не больше одного раза. Повторный вызов возвращает
+/// `BootServicesError::Duplicate`. `require_*` берёт уже поднятый сервис. Его
+/// отсутствие возвращает `BootServicesError::Missing`. `kernelspace` откладывает
+/// драйвер до следующего прохода подъёма.
 pub struct BootServices {
     mmio: Option<Arc<dyn MmioService>>,
     console: Option<Arc<dyn ConsoleService>>,

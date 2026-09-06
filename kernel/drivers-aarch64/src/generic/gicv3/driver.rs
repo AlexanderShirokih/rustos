@@ -1,5 +1,3 @@
-//! Драйвер GICv3: точка входа, фабрика и probe-функция.
-
 use alloc::{
     boxed::Box,
     string::{String, ToString},
@@ -22,7 +20,8 @@ use super::{
 };
 use crate::register_driver;
 
-/// Драйвер Generic Interrupt Controller v3.
+/// `Driver`, который мапит GICD и Redistributor, инициализирует `Gicv3Controller` и
+/// публикует его как `InterruptsService` через `BootServices`.
 pub struct Gicv3 {
     distributor_address: MmioAddress,
     redistributor_address: MmioAddress,

@@ -1,7 +1,7 @@
 //! E2E проверка per-thread IPC-буфера из EL0:
 //! - main-поток получает адрес буфера через `ipc_buffer_ptr()`, пишет паттерн
 //!   в `data`/`tag`/`caps` и читает обратно (round-trip);
-//! - sibling-поток в том же процессе получает СВОЙ адрес через raw-syscall
+//! - sibling-поток в том же процессе получает свой адрес через raw-syscall
 //!   `ipc_buffer_addr()` - адреса двух потоков должны различаться.
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -21,8 +21,8 @@ fn ipc_buffer_roundtrip() {
     kernel_tests::kassert!(!ptr.is_null());
 
     // SAFETY: ядро замаппило IPC-буфер user-RW размером в одну страницу;
-    // запись/чтение полей структуры лежат в его границах. Поток - один
-    // владелец буфера, гонок нет.
+    // запись/чтение полей структуры лежат в его границах. Поток - единственный
+    // владелец буфера, гонки исключены.
     unsafe {
         let buf = &mut *ptr;
         buf.tag = encode_tag(IPC_BUFFER_DATA_MAX, 2);
@@ -42,7 +42,7 @@ fn ipc_buffer_roundtrip() {
 }
 
 extern "C" fn sibling_worker(_arg: usize) -> u32 {
-    // Raw-syscall, НЕ кэширующий accessor: кэш в `runtime` процесс-глобальный,
+    // Raw-syscall, не кэширующий accessor: кэш в `runtime` процесс-глобальный,
     // а буфер per-thread - для второго потока нужен свой VA напрямую.
     let ret = ipc_buffer_addr();
     let va = u64::try_from(ret).unwrap_or(0);

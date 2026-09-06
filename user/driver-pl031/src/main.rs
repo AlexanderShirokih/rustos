@@ -10,7 +10,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use io::mmio::{Mmio, Reg};
 use ipc::wire::IpcError;
 use kernel_objects::{IrqLine, MemoryRegion, OwnedHandle};
@@ -52,7 +52,7 @@ struct Pl031 {
 
 impl Pl031 {
     fn arm(&self) {
-        // Будильник ставится через ALARM_TICKS тиков: запас покрывает запись
+        // Будильник ставится на ALARM_TICKS тиков вперёд. Запас покрывает запись
         // регистра между чтением времени и разрешением прерывания.
         let now = self.device.read_reg(RTC_DATA);
         self.device
@@ -92,8 +92,8 @@ fn run(startup: Handle) -> Result<()> {
     let ReceivedStartup { log, resources } =
         RtcStartup::receive(OwnedHandle::from_handle(startup))?;
     install_log(log.into_raw(), LOG_TAG);
-    // Клиентская сторона control-порта остаётся у supervisor: серверная живёт
-    // до конца процесса вместе с ней.
+    // Клиентская сторона control-порта остаётся у supervisor. Серверная сторона
+    // остаётся открытой до конца процесса вместе с ней.
     let _control = resources.control;
     let service = resources.service;
 
@@ -112,8 +112,8 @@ fn run(startup: Handle) -> Result<()> {
 
 fn serve(service: &OwnedHandle, driver: &mut Pl031) {
     let transport = PortTransport::server(service.borrow());
-    // Ни один исход кадра не несёт: драйвер не хранит сессий, а уход значка и
-    // покадровое исчерпание порт не закрывают. Прочий отказ терминален.
+    // Драйвер не хранит сессий. Уход значка и покадровое исчерпание порт не закрывают, а
+    // прочий отказ терминален.
     while matches!(
         rtc::dispatch(driver, &transport),
         Ok(()) | Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout)

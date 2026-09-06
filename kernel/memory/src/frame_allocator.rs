@@ -30,30 +30,36 @@ pub enum ReserveFrameError {
     },
 }
 
-/// Трейт аллокатора фреймов физической памяти.
+/// Трейт аллокатора фреймов физической памяти. Методы принимают `&self`. Реализация
+/// отвечает за синхронизацию доступа к своему состоянию.
 pub trait FrameAllocator {
-    /// Резервирует область физической памяти начиная с указанного адреса.
-    /// Помечает фреймы как занятые без проверки их текущего состояния.
+    /// Резервирует диапазон `[from_inclusive, to_exclusive)`. Помечает каждый фрейм диапазона
+    /// занятым без проверки его прежнего состояния - вызов идемпотентен для уже занятых
+    /// фреймов. Отказывает [`ReserveFrameError::OutOfTargetBoundary`], если диапазон не
+    /// умещается целиком в одном управляемом регионе.
     fn reserve_frames_exact(
         &self,
         from_inclusive: Frame,
         to_exclusive: Frame,
     ) -> Result<Frame, ReserveFrameError>;
 
-    /// Выделяет свободный фрейм
+    /// Выделяет свободный фрейм из любого управляемого региона.
     fn allocate_frame(&self) -> Option<Frame>;
 
-    /// Выделяет до `max_count` смежных страниц.
-    /// Возвращает (первый фрейм, количество выделенных).
+    /// Выделяет до `max_count` смежных фреймов внутри одного управляемого региона. Диапазон
+    /// не продолжается в соседний регион, даже если тот примыкает вплотную. Возвращает
+    /// первый фрейм диапазона и число выделенных фреймов. При отсутствии участка - `None`.
     fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)>;
 
-    /// Освобождает фрейм
+    /// Освобождает выделенный фрейм. Повторный вызов на тот же фрейм отказывает
+    /// [`FrameError::NotAllocated`] - операция не идемпотентна.
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError>;
 
     fn is_allocated(&self, frame: Frame) -> bool;
 }
 
-/// Максимальное количество регионов памяти.
+/// Предельное число регионов, которое вмещает [`PhysicalFrameAllocator`]: `new` отказывает
+/// [`FrameAllocatorInitError::TooManyRegions`] на большем числе.
 pub const MAX_REGIONS: usize = 24;
 
 /// Ошибки инициализации [`PhysicalFrameAllocator`].
@@ -67,8 +73,9 @@ pub enum FrameAllocatorInitError {
 
 /// Менеджер физической памяти.
 ///
-/// Управляет выделением и освобождением фреймов физической памяти
-/// в заданных регионах ОЗУ. Поддерживает несколько регионов.
+/// Управляет выделением и освобождением фреймов физической памяти в заданных регионах ОЗУ,
+/// до [`MAX_REGIONS`] штук. Параметр `L` определяет стратегию блокировки битмапа каждого
+/// региона.
 pub struct PhysicalFrameAllocator<L: LockCell<FrameBitmap>> {
     regions: Vec<L, MAX_REGIONS>,
     next_frame_hint: AtomicUsize,
@@ -181,7 +188,10 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
     pub unsafe fn relocate_inner_pointers_by_offset(&self, offset: usize) {
         for region in &self.regions {
             region.with_lock(|bitmap| {
-                // SAFETY: Выполняется в post-MMU фазе до первого использования allocator.
+                // SAFETY: relocate_ptr_by_offset требует однократного вызова после MMU и
+                // уже выполненного linear mapping в higher-half со смещением offset -
+                // это гарантирует контракт вызывающей функции (см. `# Safety` выше);
+                // цикл вызывает его один раз на регион.
                 unsafe { bitmap.relocate_ptr_by_offset(offset) };
             });
         }

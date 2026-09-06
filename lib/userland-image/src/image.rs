@@ -51,8 +51,8 @@ pub struct DecodedImage<'a> {
     boot: DecodedEntry<'a>,
 }
 
-/// Запись таблицы: путь и байты содержимого. Что это за содержимое, знает тот,
-/// кто его разбирает.
+/// Запись таблицы хранит путь и байты содержимого. Вид содержимого определяет тот, кто его
+/// разбирает.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodedEntry<'a> {
     path: &'a str,
@@ -113,8 +113,8 @@ impl<'a> DecodedImage<'a> {
         let mut data_end: u64 = 0;
         for index in 0..usize::from(header.entry_count) {
             let entry = parse_entry(bytes, header.entry_count, index)?;
-            // Записи отсортированы строго по возрастанию пути: на этом стоит
-            // двоичный поиск, а строгость запрещает дубликаты путей.
+            // Записи отсортированы строго по возрастанию пути. Порядок нужен двоичному поиску
+            // по таблице. Строгость запрещает дубликаты путей.
             if previous_path.is_some_and(|previous| previous >= entry.path) {
                 return Err(invalid_layout(Some(index), "path_order"));
             }
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn decode_rejects_unsorted_table() {
         let mut bytes = image_bytes();
-        // Меняем местами описания путей у двух записей: таблица перестаёт возрастать.
+        // Меняем местами описания путей у двух записей, и таблица перестаёт возрастать.
         let second = IMAGE_HEADER_SIZE + RECORD_SIZE;
         let first_path: [u8; 12] = bytes[IMAGE_HEADER_SIZE..IMAGE_HEADER_SIZE + 12]
             .try_into()
@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn decode_rejects_overlapping_data_windows() {
         let mut bytes = image_bytes();
-        // Окно второй записи сажается на окно первой: границы образа и таблицы
+        // Окно второй записи сажается на окно первой, а границы образа и таблицы
         // при этом не нарушены.
         let first_data_offset = record_field(&bytes, 0, 12);
         patch(
@@ -707,7 +707,7 @@ mod tests {
     fn decode_rejects_an_alias_of_a_record_it_does_not_follow() {
         let mut bytes = image_bytes();
         alias_record(&mut bytes, 1, 0);
-        // Запись ссылается на себя: окно повторено, но его владельца в таблице нет.
+        // Запись ссылается на себя. Окно повторено, но в таблице нет её владельца.
         patch_alias(&mut bytes, 1, 2);
 
         assert_eq!(
@@ -745,7 +745,7 @@ mod tests {
         assert_eq!(record_alias(&bytes, 2), 2);
         assert_eq!(record_alias(&bytes, 3), 2);
 
-        // Владельцем окна объявляется сам псевдоним: цепочка ссылок образу не принадлежит.
+        // Владельцем окна объявляется сам псевдоним, а цепочка ссылок образу не принадлежит.
         patch_alias(&mut bytes, 3, 3);
         assert_eq!(
             decode(&bytes).expect_err("alias of an alias must fail"),

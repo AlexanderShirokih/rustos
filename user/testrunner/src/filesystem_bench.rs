@@ -117,8 +117,8 @@ fn bench_call_floor() {
 
 #[kernel_test(bench)]
 fn bench_plain_memory() {
-    // Опорная строка стенда: во сколько обходятся проходы по обычной памяти, из которых сложены
-    // staging-копии сервера.
+    // Опорная строка стенда показывает, во сколько обходятся проходы по обычной памяти, из
+    // которых сложены staging-копии сервера.
     for size in SIZES {
         let source = vec![0u8; size];
         let mut target = vec![0u8; size];
@@ -169,7 +169,7 @@ fn bench_ramfs_promoted_plane() {
     .zip(SIZES)
     {
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::CREATE);
-        // Ёмкость закрепляется по длине на момент выдачи: файл наполняется до неё заранее.
+        // Ёмкость закрепляется по длине на момент выдачи. Файл наполняется до неё заранее.
         fill(&client, &opened, size);
         let mut response = client
             .backing_memory(opened.fd)

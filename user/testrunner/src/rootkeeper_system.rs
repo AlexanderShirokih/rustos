@@ -591,7 +591,7 @@ fn compiled_plan_carries_the_boot_composition() {
     kernel_tests::kassert_eq!(reader.executable(), READER_PROGRAM);
     kernel_tests::kassert_eq!(reader.slots().collect::<Vec<_>>(), READER_SOURCES);
 
-    // `init` определяет политику загрузки: корень он берёт слотом по имени экземпляра, таблицу
+    // `init` определяет политику загрузки. Корень он берёт слотом по имени экземпляра, таблицу
     // монтирований - записью своего каталога, а ступень 1 подаёт слотом супервизора.
     let init = plan.component(5).expect("plan carries init");
     kernel_tests::kassert_eq!(init.executable(), INIT_PROGRAM);

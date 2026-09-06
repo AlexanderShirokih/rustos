@@ -36,7 +36,7 @@ pub fn metering_handle() -> Option<Handle> {
         return Some(cached);
     }
 
-    // `ProcessResourceSelf` ставит свежий handle на каждый вызов: кэш держит первый,
+    // `ProcessResourceSelf` ставит свежий handle на каждый вызов. Кэш держит первый,
     // проигравшая гонку сторона закрывает свой дубль.
     let fresh = svc::process_resource_self().ok()?;
     match METERING.compare_exchange(0, fresh.raw(), Ordering::AcqRel, Ordering::Acquire) {

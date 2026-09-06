@@ -222,7 +222,7 @@ fn thread_terminate_on_self_handle_is_access_denied() {
 
 #[test]
 fn process_terminate_on_other_handle_succeeds() {
-    // Контроль: терминирование ДРУГОГО процесса (не current) проходит.
+    // Терминирование другого процесса (не current) проходит.
     let _g = test_lock();
     let rt = runtime();
     *rt.current_process.lock().unwrap() = Some(ProcessObject::new());

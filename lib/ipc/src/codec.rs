@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Значение, занимающее одну запись поля.
-/// Заимствование результата декодирования из `data` несёт lifetime `'a`.
+/// Заимствование результата декодирования из `data` имеет lifetime `'a`.
 /// Для owned-типов (целые, `bool`) `'a` не задействован.
 pub trait WireValue<'a>: Sized {
     /// Кодирует значение в `data` и дописывает запись `field_id` в `buf`.
@@ -26,12 +26,12 @@ pub trait WireValue<'a>: Sized {
     fn from_field(data: &'a [u8], handles: &HandleSlots) -> Result<Self, IpcError>;
 }
 
-/// Значение ответа two-way операции: занимает единственную запись поля кадра-ответа.
+/// Значение ответа two-way операции занимает единственную запись поля кадра-ответа.
 ///
-/// Значение едет как есть, а доменная ошибка `Result<T, E>` - под флагом
+/// Значение передаётся как есть, а доменная ошибка `Result<T, E>` - под флагом
 /// [`FLAG_DOMAIN_ERR`] с телом из `E`.
 pub trait WireReply<'a>: Sized {
-    /// Флаги заголовка, которые несёт этот ответ поверх `FLAG_RESPONSE`.
+    /// Флаги заголовка, которые содержит этот ответ поверх `FLAG_RESPONSE`.
     fn reply_flags(&self) -> u16;
 
     /// Кодирует значение в тело ответа.
@@ -42,6 +42,7 @@ pub trait WireReply<'a>: Sized {
     ) -> Result<(), IpcError>;
 
     /// Восстанавливает значение из тела ответа, разбирая флаги заголовка.
+    /// Пустое тело ответа - `MissingField`.
     fn read_reply(header: &Header, body: &'a [u8], handles: &HandleSlots)
     -> Result<Self, IpcError>;
 }

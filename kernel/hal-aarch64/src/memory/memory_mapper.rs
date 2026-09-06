@@ -237,7 +237,8 @@ where
                 remaining -= l3_page;
             }
 
-            // SAFETY: barrier-only.
+            // SAFETY: `dsb ish` - inner-shareable барьер без операндов, не модифицирует
+            // регистры и не обращается к памяти напрямую (preserves_flags, nostack).
             unsafe {
                 core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             }
@@ -266,8 +267,8 @@ where
         va: PageAlignedVirtualAddress,
         mapped_pages: usize,
     ) {
-        // Промежуточные L1/L2/L3-таблицы этого же цикла остаются на месте:
-        // пустая таблица не меняет семантику маппинга и уходит при Drop AS.
+        // Промежуточные L1/L2/L3-таблицы этого же цикла остаются на месте. Пустая
+        // таблица не меняет семантику маппинга и уходит при Drop AS.
         for i in 0..mapped_pages {
             let page_va = va.add_blocks(i);
             // Ошибка walker по только что замапленной странице означает, что
@@ -294,8 +295,8 @@ where
         match self.kind {
             AddressSpaceKind::User => {
                 let asid = unpack_asid(self.asid_tag.load(Ordering::Acquire));
-                // Нулевой тег означает AS, который ни разу не активировался:
-                // его трансляций в TLB нет.
+                // Нулевой тег означает AS, который ни разу не активировался, поэтому TLB не
+                // содержит его трансляций.
                 if asid != 0 {
                     TranslationLookasideBuffer::<EL1>::invalidate_va_asid(va, asid);
                 }
@@ -609,7 +610,9 @@ where
             }
 
             if user_exec {
-                // SAFETY: barrier-only.
+                // SAFETY: `dsb ish`/`isb` - inner-shareable барьер и pipeline-синхронизация,
+                // без операндов; не модифицируют регистры и не обращаются к памяти напрямую
+                // (preserves_flags, nostack).
                 unsafe {
                     core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
                 }

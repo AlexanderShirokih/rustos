@@ -1,7 +1,7 @@
 //! E2E живости сторон port из EL0: отказ отправителю на порту без получателей
 //! и событие об уходе значка.
 //!
-//! Роль стороны задаётся правами капы: серверный поток теста держит корневую
+//! Роль стороны задаётся правами капы. Серверный поток теста держит корневую
 //! капу с `READ`, клиент получает минт с `WRITE` и значком. Клиентские потоки
 //! обращаются к капе по сырому HandleId: аргумент потока - не хэндл.
 
@@ -97,7 +97,7 @@ static REFUSED_FRESH_CALL: AtomicI64 = AtomicI64::new(i64::MIN);
 
 extern "C" fn refused_client(_arg: usize) -> u32 {
     let client = client_capability(&REFUSED_CLIENT_CAP);
-    // Рандеву-подтверждение: сервер роняет свою капу, только узнав, что поток
+    // Рандеву-подтверждение. Сервер закрывает свою капу, только узнав, что поток
     // дошёл до порта.
     REFUSED_HANDSHAKE.store(port_send(client, SERVE_TIMEOUT), SeqCst);
     REFUSED_PARKED_CALL.store(port_call(client, SERVE_TIMEOUT), SeqCst);
@@ -108,7 +108,7 @@ extern "C" fn refused_client(_arg: usize) -> u32 {
 #[kernel_test]
 fn sender_is_refused_when_the_last_receiver_goes() {
     let port = Port::create().expect("port create");
-    // Значка у клиентской капы нет: множество получателей считается отдельно от
+    // У клиентской капы нет значка. Множество получателей считается отдельно от
     // множеств значков.
     let client = port
         .handle()
@@ -172,7 +172,7 @@ extern "C" fn living_client(_arg: usize) -> u32 {
 
     let framed = port_send(badged, SERVE_TIMEOUT);
     let closed = handle_close(badged);
-    // Кадр без значка после закрытия: им клиент подтверждает, что жив.
+    // Кадр без значка после закрытия. Им клиент подтверждает, что жив.
     let alive = port_send(plain, SERVE_TIMEOUT);
     let released = handle_close(plain);
 
@@ -191,7 +191,7 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
         .handle()
         .duplicate(Rights::WRITE, None)
         .expect("mint unbadged capability");
-    // Обе капы отданы клиенту: закрывает их он.
+    // Обе капы отданы клиенту. Закрывает их он.
     LIVING_CLIENT_BADGED_CAP.store(badged.into_raw().raw(), SeqCst);
     LIVING_CLIENT_PLAIN_CAP.store(plain.into_raw().raw(), SeqCst);
     LIVING_CLIENT_RESULT.store(i64::MIN, SeqCst);
@@ -254,8 +254,8 @@ fn departed_badge_waits_for_the_busy_server() {
     kernel_tests::kassert_eq!(SERVED_CLIENT_RESULT.load(SeqCst), 0);
 }
 
-/// Сервер-потомок узнаёт об уходе клиента без capability на его процесс:
-/// закрытие клиентской капы завершает фикстуру, и родителю не нужен terminate.
+/// Сервер-потомок узнаёт об уходе клиента без capability на его процесс.
+/// Закрытие клиентской капы завершает фикстуру, и родителю не нужен terminate.
 #[kernel_test]
 fn served_child_exits_when_its_client_capability_goes() {
     let fixture = Fixture::spawn();
@@ -270,7 +270,7 @@ fn served_child_exits_when_its_client_capability_goes() {
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 }
 
-/// Уход значка на bootstrap-порту не закрывает kernel-сервер: следующий кадр
+/// Уход значка на bootstrap-порту не закрывает kernel-сервер. Следующий кадр
 /// принимает он же.
 #[kernel_test]
 fn kernel_server_serves_past_a_departed_badge() {

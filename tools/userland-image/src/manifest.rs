@@ -17,7 +17,7 @@ pub(crate) struct ManifestSlot {
 
 impl ProgramManifest {
     pub(crate) fn from_record(record: &ComponentManifest<'_>) -> Self {
-        // Строки копируются: байты ELF живут только на время чтения файла, а
+        // Строки копируются, потому что байты ELF доступны только на время чтения файла, а
         // связывание идёт над всеми программами образа сразу.
         Self {
             slots: record

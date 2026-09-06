@@ -132,7 +132,7 @@ fn shard_subrange(seed: u64, seeds: u64, shard: u64, shards: u64) -> Result<Seed
     if shard >= shards {
         bail!("--shard {shard} is out of range for {shards} shards");
     }
-    // Деление нацело обязательно: потерянный хвост диапазона оставляет все
+    // Деление нацело обязательно, потому что потерянный хвост диапазона оставляет все
     // шарды зелёными.
     if !seeds.is_multiple_of(shards) {
         bail!("--seeds {seeds} does not divide into {shards} shards");

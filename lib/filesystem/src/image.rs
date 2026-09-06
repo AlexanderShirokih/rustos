@@ -40,7 +40,7 @@ pub enum ImageFileSystemError {
     Decode(ImageDecodeError),
     /// Путь записи не годится в путь контракта либо оказался корнем.
     EntryPath { index: usize },
-    /// В образе нет записей: корню дерева не на что опереться.
+    /// Образ не содержит ни одной записи.
     EmptyImage,
 }
 
@@ -57,15 +57,16 @@ struct Located<'a> {
     depth: usize,
 }
 
-/// Дерево имён поверх образа: записи его таблицы. Дерево выводится из путей,
-/// отдельной структуры под него нет.
+/// Дерево имён поверх таблицы образа. Каталог существует, пока его называет
+/// путь хотя бы одной записи, и дерево обходится без отдельной структуры под
+/// каталоги.
 pub struct ImageFileSystem {
     entries: Vec<Record>,
 }
 
 impl ImageFileSystem {
     /// Строит дерево из записей образа. Если путь записи нарушает правила контракта либо
-    /// оказался корнем, возвращает `EntryPath`. Если образ не несёт ни одной записи, возвращает
+    /// оказался корнем, возвращает `EntryPath`. Если образ не содержит ни одной записи, возвращает
     /// `EmptyImage`.
     pub fn new(image: &'static [u8]) -> Result<Self, ImageFileSystemError> {
         let decoded = decode(image).map_err(ImageFileSystemError::Decode)?;
@@ -239,7 +240,7 @@ impl FileSystemBackend for ImageFileSystem {
             return Ok(node_id(index, depth));
         }
         // Между путём каталога и его содержимым лежат имена, начинающиеся с
-        // байта меньше разделителя ("/boot.old" перед "/boot/init"): границу
+        // байта меньше разделителя ("/boot.old" перед "/boot/init"). Границу
         // задаёт путь каталога вместе с разделителем.
         let index = self
             .entries
@@ -284,7 +285,7 @@ impl FileSystemBackend for ImageFileSystem {
     }
 
     fn release(&mut self, _stores: &mut dyn ByteStore, _node: NodeId) {
-        // Узлы дерева выведены из таблицы образа: держателей она не считает.
+        // Узлы дерева выведены из таблицы образа. Держателей она не считает.
     }
 
     fn metadata(&self, node: NodeId) -> Result<NodeInfo, FileSystemError> {
@@ -524,7 +525,7 @@ mod tests {
 
     fn image_from(records: &[ImageRecord<'_>]) -> Result<ImageFileSystem, ImageFileSystemError> {
         let bytes = encode(records, records[0].path).expect("encode image");
-        // Байты живут до конца процесса, как регион образа в сервере.
+        // Байты остаются в памяти до конца процесса, как регион образа в сервере.
         ImageFileSystem::new(Vec::leak(bytes))
     }
 
@@ -658,7 +659,7 @@ mod tests {
                 .size,
             SAMPLE.len() as u64
         );
-        // Каталог "/boot" несёт файл "init" и каталог "lib".
+        // Каталог "/boot" содержит файл "init" и каталог "lib".
         assert_eq!(fs.metadata(node(&fs, "/boot")).expect("metadata").size, 2);
         assert_eq!(
             fs.metadata(node(&fs, "/boot/lib")).expect("metadata").size,
@@ -806,7 +807,7 @@ mod tests {
         .expect("decode image");
 
         // Пустая запись стоит на том же смещении, что и следующая за ней, а
-        // хвостовая - за концом образа: своих страниц у них нет.
+        // хвостовая - за концом образа. У них нет своих страниц.
         for text in ["/data/blank", "/data/tail"] {
             let empty = node(&fs, text);
             let info = fs.metadata(empty).expect("metadata");
@@ -860,7 +861,7 @@ mod tests {
             fs.create(path("/data/sample/fresh"), NodeKind::File),
             Err(FileSystemError::NotADirectory)
         );
-        // Занятое имя - причина пути: заведение имени его не меняет.
+        // Занятое имя - причина пути. Заведение имени его не меняет.
         assert_eq!(
             fs.create(path("/data/sample"), NodeKind::File),
             Err(FileSystemError::AlreadyExists)
@@ -983,8 +984,8 @@ mod tests {
         ])
         .expect("decode image");
 
-        // Запись, совпавшая с путём целиком, - файл: каталога с тем же именем в
-        // перечислении нет, а вложенная запись достаётся по своему пути.
+        // Запись, совпавшая с путём целиком, - файл. Перечисление не содержит каталога с тем
+        // же именем, а вложенная запись достаётся по своему пути.
         let info = fs.metadata(node(&fs, "/a")).expect("metadata");
         assert_eq!((info.kind, info.size), (NodeKind::File, 4));
         assert_eq!(read(&fs, node(&fs, "/a/deep"), 0, 8), b"deep");

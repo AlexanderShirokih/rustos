@@ -207,7 +207,7 @@ fn condvar_notify_is_not_stolen_by_a_later_waiter() {
         .notify_all()
         .expect("release the thief");
 
-    // Исход жертвы проверяется после снятия вора: оба потока обязаны уйти до
+    // Исход жертвы проверяется после снятия вора. Оба потока обязаны уйти до
     // выхода из кадра, которому принадлежит `shared`.
     let victim_joined = victim.join(JOIN_TIMEOUT);
 
@@ -291,7 +291,7 @@ fn condvar_notify_one_releases_waiters_one_by_one() {
         released_in_turn = wait_for_count(&shared.progress, &shared.released, released);
     }
 
-    // Снимаем оставшихся: оба потока обязаны уйти до выхода из кадра, которому
+    // Снимаем оставшихся. Оба потока обязаны уйти до выхода из кадра, которому
     // принадлежит `shared`, и тогда отказ приходит сообщением, без зависания.
     {
         let mut guard = shared.tokens.lock();

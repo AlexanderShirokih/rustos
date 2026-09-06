@@ -39,7 +39,6 @@ pub fn adapt_to_fdt_tree<'a>(device_tree: &'a DeviceTree<'a>) -> FdtTree<'a> {
 }
 
 impl<'dt> FdtTree<'dt> {
-    /// Возвращает корневой узел.
     pub fn root(&self) -> Option<FdtNode<'dt>> {
         self.inner.root().map(FdtNode::new)
     }

@@ -34,7 +34,7 @@ fn bitmap_relocate_round_trip_preserves_length_and_access() {
         bitmap.relocate_ptr_by_offset(KNOWN_OFFSET);
     }
 
-    // Длина и состояние сохранились: буфер доступен и данные не повреждены.
+    // Длина и состояние сохранились. Буфер доступен, данные не повреждены.
     assert_eq!(bitmap.remaining(), remaining_before);
     for i in 10..20 {
         assert!(
@@ -63,7 +63,7 @@ fn allocator_relocate_round_trip_keeps_allocator_usable() {
         allocator.relocate_inner_pointers_by_offset(KNOWN_OFFSET);
     }
 
-    // Аллокатор продолжает выделять и помнит ранее выделенный фрейм.
+    // Аллокатор продолжает выделять, а ранее выделенный фрейм остаётся занятым.
     assert!(allocator.is_allocated(before));
     let after = allocator.allocate_frame().expect("frame after relocation");
     assert_ne!(before, after);

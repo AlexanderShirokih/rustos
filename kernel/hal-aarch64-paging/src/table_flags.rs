@@ -12,12 +12,14 @@ impl TableFlags {
         Self(0)
     }
 
-    /// Устанавливает PXNTable - запрет исполнения для EL1.
+    /// Устанавливает бит PXNTable - запрет исполнения для EL1. `on = false` бит не снимает.
+    /// Выставленный раньше бит остаётся.
     pub const fn pxn_table(self, on: bool) -> Self {
         if on { Self(self.0 | (1 << 59)) } else { self }
     }
 
-    /// Устанавливает UXNTable - запрет исполнения для EL0.
+    /// Устанавливает бит UXNTable - запрет исполнения для EL0. `on = false` бит не снимает.
+    /// Выставленный раньше бит остаётся.
     pub const fn uxn_table(self, on: bool) -> Self {
         if on { Self(self.0 | (1 << 60)) } else { self }
     }

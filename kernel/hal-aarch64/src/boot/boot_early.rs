@@ -84,7 +84,7 @@ pub(super) fn boot_main(boot_info: &BootInfo) -> Result<(), ()> {
 }
 
 // SAFETY: MMU включён, TTBR1 содержит корректный маппинг higher-half, TTBR0 покрывает
-// текущий PC — identity mapping ещё нужен для инструкции `br x0`.
+// текущий PC, потому что identity mapping ещё нужен для инструкции `br x0`.
 #[unsafe(naked)]
 unsafe extern "C" fn jump_to_higher_half(
     _dtb_phys: usize,

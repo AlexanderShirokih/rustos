@@ -1,7 +1,11 @@
 /// Кладёт запись манифеста компонента в секцию его программы.
 ///
 /// Служебный вход. Программа объявляет манифест макросом
-/// `component_client::component_manifest!`, раскрытие которого вызывает этот.
+/// `component_startup::component_manifest!`, раскрытие которого вызывает этот.
+///
+/// Раскрытие порождает `static` с байтами записи из [`encode_manifest`](crate::encode_manifest).
+/// Имя секции [`COMPONENT_MANIFEST_SECTION`](crate::COMPONENT_MANIFEST_SECTION) проставляется
+/// сборкой под таргет системы, а на хосте `static` остаётся вне секции.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __component_manifest_record {

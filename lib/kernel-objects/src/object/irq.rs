@@ -64,7 +64,7 @@ impl IrqLine {
         super::wait_signals(self.handle.as_raw(), SIGNALED, timeout)
     }
 
-    /// Подтверждает прерывание: снимает latch `SIGNALED` и размаскирует линию.
+    /// Снимает latch `SIGNALED` и размаскирует линию, подтверждая тем самым прерывание.
     /// Требует `Rights::WRITE`.
     pub fn ack(&self) -> Result<()> {
         unit(svc::irq_ack(self.handle.as_raw()))

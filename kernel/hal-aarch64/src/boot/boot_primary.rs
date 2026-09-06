@@ -42,7 +42,8 @@ const SCHED_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 64).with_quantum_
 pub(super) struct BootHandoff {
     pub dtb_phys: usize,
     pub higher_root_pa: usize,
-    /// Корень identity-таблиц: по нему вторичные CPU переживают включение MMU.
+    /// Корень identity-таблиц, по которому вторичные CPU проходят включение MMU без смены
+    /// адресации.
     pub lower_root_pa: usize,
     pub frame_allocator_phys: usize,
     pub initrd_start: usize,
@@ -147,8 +148,8 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
     let device_tree: &'static fdt::devicetree::DeviceTree =
         unsafe { core::mem::transmute(&device_tree) };
 
-    // До этой точки логический идентификатор CPU известен только по
-    // умолчанию: подсистемы с per-CPU состоянием идут ниже.
+    // До этой точки логический идентификатор CPU задан только значением по умолчанию,
+    // поэтому подсистемы с per-CPU состоянием инициализируются ниже.
     init_cpu_topology(device_tree);
 
     crate::smp::prepare(
@@ -297,7 +298,7 @@ fn init_cpu_topology(device_tree: &'static fdt::devicetree::DeviceTree<'static>)
 fn device_window_to_region(window: &AddressSpace) -> Option<Arc<MemoryRegion>> {
     let base = PageAlignedAddress::from_usize(window.offset)?;
     // Округление вверх опирается на постраничную изоляцию device-окон от
-    // kernel-owned MMIO — она держится на плоской раскладке платформы.
+    // kernel-owned MMIO, а она держится на плоской раскладке платформы.
     let size = page_round_up(NonZeroUsize::new(window.size)?)?;
     Some(Arc::new(MemoryRegion::create_physical_device(
         base,

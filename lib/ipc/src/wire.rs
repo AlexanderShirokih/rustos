@@ -1,5 +1,5 @@
 //! Wire-формат сообщения: заголовок, тело (table-of-fields), кодек значений,
-//! стековый буфер и типизированные порты.
+//! стековый буфер кадра и слоты capability.
 //!
 //! Все целые - little-endian. Кадр (заголовок + тело) укладывается в
 //! [`MESSAGE_INLINE_MAX`]. Кодирование без heap.
@@ -8,8 +8,8 @@ use core::{cell::Cell, num::NonZeroU32};
 
 pub use crate::schema::{FIELD_OVERHEAD, HEADER_SIZE};
 
-/// Максимальная длина кадра (заголовок + тело) в байтах: кадр заполняет тело
-/// IPC-буфера, и равен [`syscall::IPC_BUFFER_DATA_MAX`].
+/// Максимальная длина кадра (заголовок + тело) в байтах. Кадр заполняет тело IPC-буфера.
+/// Это значение равно [`syscall::IPC_BUFFER_DATA_MAX`].
 pub const MESSAGE_INLINE_MAX: usize = syscall::IPC_BUFFER_DATA_MAX;
 
 /// Максимум хэндлов в транспортном векторе кадра.
@@ -21,7 +21,7 @@ const _: () = assert!(
 );
 
 /// Слоты capability сообщения. Значение-капа кладёт сюда сырой handle-id, а в
-/// тело пишет его индекс: сами хэндлы едут отдельным массивом кадра, минуя байты
+/// тело пишет его индекс. Сами хэндлы передаются отдельным массивом кадра, минуя байты
 /// тела. Один набор общий для всего сообщения, включая вложенные суб-кадры
 /// агрегатов.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,9 +41,9 @@ impl HandleSlots {
         }
     }
 
-    /// Набор для декодирования: хэндлы, приехавшие с кадром. Ядро не доставляет
+    /// Набор для декодирования: хэндлы, доставленные с кадром. Ядро доставляет не
     /// больше [`syscall::IPC_BUFFER_MAX_CAPS`] хэндлов, и все они умещаются в
-    /// слоты.
+    /// слоты. Хвост `ids` сверх [`MESSAGE_MAX_HANDLES`] в набор не попадает.
     #[must_use]
     pub fn from_received(ids: &[u32]) -> Self {
         let mut slots = Self::new();
@@ -116,8 +116,8 @@ impl Default for HandleSlots {
 pub const BODY_MAX: usize = MESSAGE_INLINE_MAX - HEADER_SIZE;
 
 /// Максимум `data` одиночного поля, занимающего кадр целиком:
-/// `BODY_MAX - FIELD_OVERHEAD - 1` (терминатор). Длина поля - `u16` LE, и она
-/// должна укладываться в её диапазон.
+/// `BODY_MAX - FIELD_OVERHEAD - 1` (терминатор). Длина записи хранится как `u16`
+/// LE, и `FIELD_DATA_MAX` укладывается в диапазон `u16`.
 pub const FIELD_DATA_MAX: usize = BODY_MAX - FIELD_OVERHEAD - 1;
 
 const _: () = assert!(FIELD_DATA_MAX <= u16::MAX as usize);
@@ -131,13 +131,13 @@ pub const FIELD_ID_MIN: u8 = 1;
 /// Максимальный допустимый `field_id` записи.
 pub const FIELD_ID_MAX: u8 = 254;
 
-/// Флаг: кадр - ответ на two-way вызов.
+/// Кадр с этим флагом - ответ на two-way вызов.
 pub const FLAG_RESPONSE: u16 = 1 << 0;
 
 /// Флаг: peer завершает соединение этим последним кадром.
 pub const FLAG_PEER_CLOSE: u16 = 1 << 1;
 
-/// Флаг: ответ несёт доменную ошибку `E`.
+/// Ответ с этим флагом содержит доменную ошибку `E`.
 pub const FLAG_DOMAIN_ERR: u16 = 1 << 3;
 
 /// Ширина дискриминанта закрытого enum как поля wire-типа.
@@ -149,7 +149,7 @@ pub const ENUM_DISCRIMINANT_SIZE: usize = ENUM_DISCRIMINANT_WIDTH as usize;
 /// Ошибка кодека wire-формата и транспорта.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcError {
-    /// Буфер усечён: для чтения/записи не хватает байт.
+    /// Буфер усечён. Для чтения/записи не хватает байт.
     Truncated,
     /// Запись/кадр превысили бюджет [`MESSAGE_INLINE_MAX`].
     FrameOverflow,
@@ -306,7 +306,9 @@ impl<const N: usize> MessageBuf<N> {
     }
 
     /// Записывает запись поля `field_id` с телом `data`.
-    /// Держит строго возрастающий `field_id`. Нарушение - `FieldOrder`.
+    /// Держит строго возрастающий `field_id` в диапазоне `1..=254`. Нарушение
+    /// порядка, `field_id` вне диапазона и запись после [`MessageBuf::finish`] -
+    /// `FieldOrder`. `data` длиннее [`FIELD_DATA_MAX`] - `InvalidValue`.
     /// Превышение бюджета кадра - `FrameOverflow`.
     pub fn write_field(&mut self, field_id: u8, data: &[u8]) -> Result<(), IpcError> {
         if self.terminated {
@@ -361,8 +363,9 @@ impl<const N: usize> MessageBuf<N> {
     }
 }
 
-/// Курсор последовательного чтения тела: итерирует записи полей.
-/// Неизвестный `field_id` вызывающий пропускает через [`FieldCursor::next_field`].
+/// Курсор последовательного чтения тела итерирует записи полей.
+/// Запись с неизвестным `field_id` курсор проходит по её длине и отдаёт
+/// вызывающему наравне с прочими. Разбор такой записи вызывающий пропускает.
 #[derive(Debug, Clone)]
 pub struct FieldCursor<'a> {
     body: &'a [u8],
@@ -428,7 +431,11 @@ impl<'a> FieldCursor<'a> {
 }
 
 /// Нетипизированный capability: сырой `u32`-идентификатор хэндла в сообщении.
-/// В теле едет индекс в handle-массиве. Сам id - вне тела.
+/// В теле передаётся индекс в handle-массиве. Сам id - вне тела.
+///
+/// Значение хэндлом не владеет. Закрытие принятого хэндла остаётся за
+/// [`ReceivedResources`](crate::ReceivedResources) кадра, а реализация
+/// [`relinquish`](crate::IntoWireHandle::relinquish) для `Cap` пуста.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cap {
@@ -511,10 +518,10 @@ impl<'a, const N: usize> Bytes<'a, N> {
     }
 }
 
-/// [`Str`] с границей [`FIELD_DATA_MAX`] — максимум для одного поля.
+/// [`Str`] с границей [`FIELD_DATA_MAX`] - максимум для одного поля.
 pub type FieldStr<'a> = Str<'a, FIELD_DATA_MAX>;
 
-/// [`Bytes`] с границей [`FIELD_DATA_MAX`] — максимум для одного поля.
+/// [`Bytes`] с границей [`FIELD_DATA_MAX`] - максимум для одного поля.
 pub type FieldBytes<'a> = Bytes<'a, FIELD_DATA_MAX>;
 
 /// Кодирование значений в `data` записи поля. Все целые - LE.
@@ -772,7 +779,7 @@ mod tests {
         buf.write_field(9, &encode_u8(0x42)).expect("ok");
         buf.finish().expect("ok");
 
-        // Декодер знает только id=1 и id=9, id=5 пропускает по len.
+        // Декодер обрабатывает только id=1 и id=9, id=5 пропускает по len.
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let mut seen_1 = None;
         let mut seen_9 = None;

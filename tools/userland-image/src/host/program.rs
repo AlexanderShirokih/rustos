@@ -39,7 +39,7 @@ pub(super) fn resolve_programs(
 
     for (index, program) in resolved.iter().enumerate() {
         for earlier in resolved.iter().take(index) {
-            // Ключ уникальности - пара пакета и bin-таргета: одно имя таргета
+            // Ключ уникальности - пара пакета и bin-таргета, потому что одно имя таргета
             // могут объявить разные пакеты.
             ensure!(
                 (&program.package, &program.bin) != (&earlier.package, &earlier.bin),
@@ -320,7 +320,7 @@ mod tests {
                 .to_string()
         };
 
-        // Правила пути берутся из контракта: сборка отвергает путь, на котором
+        // Правила пути берутся из контракта. Сборка отвергает путь, на котором
         // сервер не поднимет дерево имён.
         let overlong = String::from("/boot/") + &"n".repeat(NAME_MAX + 1);
         for path in [overlong.as_str(), "boot/rootkeeper", "/boot/../rootkeeper"] {

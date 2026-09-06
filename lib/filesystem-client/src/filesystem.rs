@@ -28,7 +28,8 @@ const SESSIONS: usize = 4;
 
 const WAIT: Timeout = Timeout::from_secs(2);
 
-/// Файловая подсистема, с которой работает программа.
+/// Файловая подсистема, с которой работает программа. Фасад держит сессии разобранных каталогов
+/// и закрывает их вместе с собой.
 pub struct FileSystem<E: Environment> {
     environment: E,
     sessions: Sessions<E>,
@@ -68,7 +69,8 @@ impl<E: Environment> FileSystem<E> {
         }
     }
 
-    /// Фасад поверх выданной сессии. Путь отсчитывается от корня этой сессии.
+    /// Фасад поверх выданной сессии. Путь отсчитывается от корня этой сессии, а буфер данных она
+    /// получает при первой операции.
     pub fn windowed_with_environment(environment: E, session: E::Transport) -> Self {
         Self {
             environment,
@@ -90,7 +92,8 @@ impl<E: Environment> FileSystem<E> {
         self
     }
 
-    /// Открывает узел по пути. Узел получает отдельную сессию.
+    /// Открывает узел по пути. `mode` задаёт режим доступа, `flags` - действия над деревом имён.
+    /// Узел получает отдельную сессию, и она закрывается вместе с [`OpenNode`].
     pub fn open(
         &mut self,
         path: Path<'_>,
@@ -110,7 +113,8 @@ impl<E: Environment> FileSystem<E> {
         })
     }
 
-    /// Создаёт каталог по пути.
+    /// Создаёт каталог по пути. Существующий каталог отказом не отвечает, а файл под этим именем
+    /// возвращает `NotADirectory`.
     pub fn create_directory(&mut self, path: Path<'_>) -> Result<()> {
         self.at_path(path, |_, session, root| {
             let opened = open_in(
@@ -135,7 +139,8 @@ impl<E: Environment> FileSystem<E> {
         })
     }
 
-    /// Обход каталога по пути. Обход получает отдельную сессию.
+    /// Обход каталога по пути. Обход получает отдельную сессию, файл по этому пути возвращает
+    /// `NotADirectory`.
     pub fn read_directory(&mut self, path: Path<'_>) -> Result<Listing<E>> {
         self.open(path, AccessMode::Read, OpenFlags::DIRECTORY)?
             .entries()
@@ -152,25 +157,38 @@ impl<E: Environment> FileSystem<E> {
     }
 
     /// Удаляет каталог вместе с поддеревом внутри его монтирования. Файл по этому пути
-    /// возвращает `NotADirectory`.
+    /// возвращает `NotADirectory`, корень сессии - `InvalidPath`. Отказ посреди обхода
+    /// оставляет снятой уже пройденную часть поддерева.
     pub fn remove_tree(&mut self, path: Path<'_>) -> Result<()> {
         self.at_path(path, |_, session, root| {
             remove_tree_in(session, route::within(path, root)?.as_str())
         })
     }
 
-    /// Переименовывает узел в пределах одного монтирования.
+    /// Переименовывает узел в пределах одного монтирования. Пути под разными монтированиями
+    /// возвращают `CrossMount`, и файловая система при этом не вызывается.
     pub fn rename(&mut self, from: Path<'_>, to: Path<'_>) -> Result<()> {
-        self.at_root(route::common_directory(from, to)?, &|_, session, root| {
-            Ok(session
-                .client()
-                .rename(
-                    route::wire(route::within(from, root)?)?,
-                    route::wire(route::within(to, root)?)?,
-                )?
-                .value?)
-        })?;
-        Ok(())
+        let Self {
+            environment,
+            sessions,
+            wait,
+        } = self;
+        let namespace = match sessions {
+            Sessions::Window(window) => {
+                open_window(window, environment, *wait)?;
+                // Корень окна и есть корень пары.
+                return rename_in(opened_window(window.as_ref())?, from, to);
+            }
+            Sessions::Routed { namespace, .. } => namespace,
+        };
+
+        let mut response = namespace.resolve_pair(route::wire(from)?, route::wire(to)?)?;
+        let pair = response.value?;
+        // Корень проверяется до переноса capability: непринятая сессия уходит с кадром ответа.
+        let (from, to) = scoped(from, to, pair.root_len)?;
+        let session = response.claim(pair.session).ok_or(IpcError::InvalidValue)?;
+
+        rename_in(&Session::establish(environment, session, *wait)?, from, to)
     }
 
     fn remove_node(&mut self, path: Path<'_>, expected: NodeKind) -> Result<()> {
@@ -184,13 +202,13 @@ impl<E: Environment> FileSystem<E> {
         path: Path<'_>,
         operation: impl Fn(&E, &Session<E>, Path<'_>) -> Result<T>,
     ) -> Result<T> {
-        let outcome = self.at_root(route::directory_of(path), &operation);
+        let outcome = self.at_root(path.directory(), &operation);
         if path.is_root() || !self.asks_the_router() {
             return outcome;
         }
         match outcome {
             // Путь, равный корню монтирования, в родительской файловой системе имени не
-            // имеет, и маршрутизатор разбирает его сам.
+            // имеет, и маршрутизатор сам разбирает его.
             Err(failure) if failure.name_missing() => self.at_root(path, &operation),
             outcome => outcome,
         }
@@ -268,6 +286,31 @@ fn resolve<E: Environment>(
     Ok(response.claim(capability).ok_or(IpcError::InvalidValue)?)
 }
 
+fn scoped<'a, 'b>(from: Path<'a>, to: Path<'b>, root_len: u32) -> Result<(Path<'a>, Path<'b>)> {
+    let len = usize::try_from(root_len).map_err(|_| IpcError::InvalidValue)?;
+    let head = from.as_str().get(..len).ok_or(IpcError::InvalidValue)?;
+    let tail = to.as_str().get(..len).ok_or(IpcError::InvalidValue)?;
+    if head != tail {
+        return Err(IpcError::InvalidValue.into());
+    }
+    // Корень совпал с обеими сторонами по границе компонента: `/` подходит любому пути.
+    let first = from
+        .strip_prefix(Path::new(head).map_err(|_| IpcError::InvalidValue)?)
+        .ok_or(IpcError::InvalidValue)?;
+    let second = to
+        .strip_prefix(Path::new(tail).map_err(|_| IpcError::InvalidValue)?)
+        .ok_or(IpcError::InvalidValue)?;
+    Ok((first, second))
+}
+
+fn rename_in<E: Environment>(session: &Session<E>, from: Path<'_>, to: Path<'_>) -> Result<()> {
+    session
+        .client()
+        .rename(route::wire(from)?, route::wire(to)?)?
+        .value?;
+    Ok(())
+}
+
 fn open_owned<E: Environment>(
     environment: &E,
     session: &Session<E>,
@@ -311,7 +354,8 @@ fn remove_tree_in<E: Environment>(session: &Session<E>, root: &str) -> Result<()
         // Флаг каталога требует его вида у корня обхода, а у дочернего узла - совпадения с
         // видом, который вернул обход.
         let opened = open_in(session, path, OpenFlags::DIRECTORY)?;
-        // Позиция перечисления переживает удаление только до первого снятого имени.
+        // Позиция перечисления остаётся действительной при удалении только до первого снятого
+        // имени.
         let mut children = Vec::new();
         let listed = children_of(session, opened.fd, path, &mut children);
         close_in(session, opened.fd);

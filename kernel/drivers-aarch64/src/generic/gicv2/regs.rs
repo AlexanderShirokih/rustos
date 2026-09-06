@@ -1,4 +1,5 @@
-//! Определения регистров GICv2 и вспомогательные типы.
+//! Смещения регистров GICD/GICC, которые открывает `controller`, и `IrqType` -
+//! классификация номера прерывания на SGI/PPI/SPI/spurious по диапазону.
 
 use drivers_common::services::interrupts::IrqNumber;
 use io::mmio::Reg;

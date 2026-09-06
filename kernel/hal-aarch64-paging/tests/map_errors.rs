@@ -98,7 +98,7 @@ fn map_page_needs_smaller_pages_when_table_present() {
 
 #[test]
 fn map_page_out_of_memory_on_alloc_exhaustion() {
-    // Буфер всего на 1 страницу: после выделения root-таблицы у MockAlloc
+    // Буфер всего на 1 страницу, поэтому после выделения root-таблицы у MockAlloc
     // не осталось страниц под L1/L2/L3 -> ensure_next вернёт OutOfMemory.
     let buf = allocate_buffer(1);
     let (mut mapper, _) = make_mapper(buf);

@@ -10,7 +10,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use filesystem::RamFileSystem;
 use filesystem_server::{Error, Result, serve};
 use kernel_objects::OwnedHandle;

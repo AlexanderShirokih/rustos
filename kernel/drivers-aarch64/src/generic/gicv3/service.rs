@@ -1,4 +1,5 @@
-//! Адаптер InterruptsService для GICv3.
+//! Переводит вызовы `InterruptsService` в операции над заблокированным
+//! [`Gicv3Controller`] и хранит таблицу обработчиков привязанных линий.
 
 use alloc::sync::Arc;
 

@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{FileSystemError, PATH_MAX, namespace_admin};
 use ipc::wire::Str;
 use kernel_objects::{OwnedHandle, Port, Signal};
@@ -34,8 +34,8 @@ component_manifest! {
     }
 }
 
-/// Программа-потребитель control-протокола: снимает монтирование у маршрутизатора имён
-/// капабилити своего control-слота и паркуется до снятия. Успех вызова читается по таблице
+/// Программа-потребитель control-протокола снимает монтирование у маршрутизатора имён
+/// капабилити своего control-слота и после снятия паркуется. Успех вызова читается по таблице
 /// монтирования провайдера, а его отказ уносит ненулевой код выхода. `startup` приходит в x0
 /// как HandleId одноразового startup-порта.
 #[unsafe(no_mangle)]
@@ -57,7 +57,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
         thread_exit(code);
     }
 
-    // Парковка без кадров: у свежего порта нет отправителей, его приём не вернётся никогда.
+    // Парковка идёт без кадров. У свежего порта нет отправителей, и приём не вернётся никогда.
     let Ok(parking) = Port::create() else {
         thread_exit(NO_PARKING_EXIT_CODE);
     };
@@ -72,7 +72,7 @@ fn unmount(admin: &namespace_admin::Client<PortTransport>) -> Option<u64> {
     for _ in 0..MOUNT_ATTEMPTS {
         match admin.unmount(prefix).map(|response| response.value) {
             Ok(Ok(_)) => return None,
-            // Дерево имён загрузки прививает компонент композиции своим оборотом, и до него
+            // Дерево имён загрузки присоединяет компонент композиции своим оборотом, и до него
             // префикс не занят.
             Ok(Err(FileSystemError::NotFound)) => pause(MOUNT_TURN),
             Ok(Err(error)) => {

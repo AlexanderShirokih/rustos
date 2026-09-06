@@ -2,20 +2,22 @@ use core::num::NonZeroU32;
 
 use crate::SyscallError;
 
-/// Сырой HandleId syscall-ABI: 32-битный индекс записи в handle-таблице, где
-/// `0` означает невалидный handle.
+/// Сырой HandleId syscall-ABI. Значение упаковывает номер слота таблицы в биты `[0..16)`
+/// и поколение записи в биты `[16..32)`, `0` означает невалидный handle. Пара
+/// проверяется ядром при обращении, несовпадение поколения даёт `BadHandle`.
 pub type RawHandle = u32;
 
-/// Ёмкость handle-таблицы процесса: заполненная таблица отвечает `OutOfHandles`.
+/// Ёмкость handle-таблицы процесса. Заполненная таблица отвечает `OutOfHandles`.
 pub const HANDLE_TABLE_CAPACITY: u32 = 1024;
 
-/// Capability процесса: непрозрачный идентификатор записи в handle-таблице.
+/// Capability процесса: непрозрачный идентификатор записи в handle-таблице. Значение
+/// действительно только в таблице того процесса, который его получил.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Handle(NonZeroU32);
 
 impl Handle {
-    /// Оборачивает сырой HandleId. `None` при нулевом значении.
+    /// `None` при нулевом значении.
     pub const fn new(raw: RawHandle) -> Option<Self> {
         match NonZeroU32::new(raw) {
             Some(nz) => Some(Self(nz)),
@@ -23,24 +25,23 @@ impl Handle {
         }
     }
 
-    /// Оборачивает заведомо ненулевой HandleId.
     pub const fn from_nonzero(raw: NonZeroU32) -> Self {
         Self(raw)
     }
 
-    /// Сырое 32-битное значение.
+    /// Значение для укладки в аргумент syscall.
     pub const fn raw(self) -> u32 {
         self.0.get()
     }
 
-    /// Сырое значение с сохранённым инвариантом ненулевости.
     pub const fn as_nonzero(self) -> NonZeroU32 {
         self.0
     }
 
     /// Разбирает знаковый возврат системного вызова:
     /// значение в `1..=u32::MAX` - валидный handle,
-    /// иначе декодированный `SyscallError`.
+    /// иначе декодированный [`SyscallError`]. Возврат `0`, значение вне
+    /// `-(u32::MAX)..=u32::MAX` и неизвестный код отказа дают `BadSyscall`.
     pub const fn from_syscall_return(ret: i64) -> Result<Self, SyscallError> {
         if ret >= 1 && ret <= u32::MAX as i64 {
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -64,6 +65,10 @@ pub const WAIT_MANY_MAX_COUNT: usize = 256;
 
 /// Запись массива `SignalWaitMany`: capability target `handle` и маска ожидаемых сигналов
 /// `mask`.
+///
+/// Раскладка записи в памяти - 8 байт, `handle` в `[0..4)` и `mask` в `[4..8)`, оба
+/// little-endian. Ядро читает массив таких записей по указателю `items_va`. Повтор
+/// одного handle в массиве допустим.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct WaitItem {

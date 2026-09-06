@@ -1,6 +1,6 @@
 //! E2E проверка границ процесса из EL0: выдача сверх бюджета метеринг-ресурса
 //! и создание объекта при заполненной таблице handle отвергаются ошибкой,
-//! освобождение возвращает выданное, а процесс отказ переживает.
+//! освобождение возвращает выданное, а процесс после отказа продолжает работу.
 
 use alloc::vec::Vec;
 
@@ -23,8 +23,8 @@ pub(crate) struct SaturatedBudget {
 
 impl SaturatedBudget {
     pub(crate) fn probe() -> Self {
-        // Производный ресурс - капа, деривированная от хэндла исходного:
-        // закрытие исходного отзывает его, поэтому проба держит оба.
+        // Производный ресурс - капа, деривированная от хэндла исходного. Закрытие
+        // исходного отзывает его, поэтому проба держит оба.
         let origin = Resource::self_resource().expect("self metering resource");
         let resource = origin.split(PROBE_BUDGET_PAGES).expect("split");
         let mut granted = Vec::new();
@@ -96,7 +96,7 @@ fn budget_exhaustion_is_refused_by_its_own_code() {
         );
     }
 
-    // Исчерпан производный бюджет, а не исходный: тот же запрос по исходному
+    // Исчерпан производный бюджет, а не исходный. Тот же запрос по исходному
     // ресурсу проходит, и процесс после отказа выполняется.
     let region = probe
         .origin()
@@ -121,7 +121,7 @@ fn a_partial_release_returns_exactly_what_was_freed() {
     let mut probe = SaturatedBudget::probe();
     probe.release(PARTIAL_RELEASE_PAGES);
 
-    // Снятое вернулось целиком: запрос ровно на него проходит одним регионом.
+    // Снятое вернулось целиком. Запрос ровно на него проходит одним регионом.
     let regained = probe
         .request(PARTIAL_RELEASE_PAGES)
         .expect("the released pages are back in the budget");
@@ -156,7 +156,7 @@ fn a_full_handle_table_refuses_the_next_object() {
 
     kernel_tests::kassert_eq!(refusal, Some(Error::Syscall(SyscallError::OutOfHandles)));
 
-    // Процесс отказ пережил: освобождённая таблица снова принимает объекты.
+    // Процесс отказ пережил. Освобождённая таблица снова принимает объекты.
     let signal = Signal::create().expect("the table takes objects after the refusal");
     drop(signal);
 }
@@ -166,8 +166,8 @@ fn closing_a_handle_makes_room_after_the_refusal() {
     let (mut held, _) = fill_handle_table();
     held.pop().expect("the table took at least one object");
 
-    // Место, освобождённое одним закрытием, принимает ровно один объект:
-    // второе создание снова упирается в заполненную таблицу.
+    // Место, освобождённое одним закрытием, принимает ровно один объект. Второе
+    // создание снова упирается в заполненную таблицу.
     let taken = Signal::create();
     let over = Signal::create().err();
     let slot_taken = taken.is_ok();

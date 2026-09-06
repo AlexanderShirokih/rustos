@@ -58,11 +58,11 @@ impl ComponentRoots {
     /// Создаёт control- и service-порты компонента.
     ///
     /// Порты принадлежат одной incarnation: их корни уезжают её процессу, а
-    /// оставшиеся у supervisor стороны `READ` не несут. Минтеры выводятся из
+    /// оставшиеся у supervisor стороны `READ` не дают. Минтеры выводятся из
     /// корня, пока тот у supervisor: заклеймённая капа значка уже не примет.
     pub fn create() -> Result<Self, ManagedStartupError> {
         let minted = Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE;
-        // Значок lease-капы control-порта: уход этого значка компонент читает
+        // Значок lease-капы control-порта. Уход этого значка компонент читает
         // как уход supervisor и завершается.
         let control = Port::create()?;
         let control_client = control
@@ -114,7 +114,7 @@ impl ComponentRoots {
         log: &OwnedHandle,
         slots: ComponentSlots,
     ) -> Result<(), ManagedStartupError> {
-        // Значок лог-сессии set-once: производная несёт значок компонента, а
+        // Значок лог-сессии set-once: производная содержит значок компонента, а
         // `DUPLICATE` нужно ему для делегирования своим потомкам.
         let log = log.duplicate(Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE, None)?;
         let servers = self

@@ -4,7 +4,9 @@ use crate::virtual_address::VirtualAddress;
 
 /// Указатель, который можно релоцировать между адресными пространствами.
 ///
-/// Корректно работает с fat pointers (dyn Trait).
+/// Работает с fat pointers - `dyn Trait` и срезами. Bound `T: ?Sized` пропускает и
+/// `Sized`-типы, но для них `new` читает `[usize; 2]` из однословного `*const T` -
+/// подставлять `Sized T` нельзя.
 pub struct RelocatablePtr<T: ?Sized> {
     raw: [usize; 2],
     _marker: core::marker::PhantomData<*const T>,
@@ -13,9 +15,11 @@ pub struct RelocatablePtr<T: ?Sized> {
 impl<T: ?Sized> RelocatablePtr<T> {
     pub fn new(r: &'static T) -> Self {
         // Копирование fat pointer как [data, vtable]
-        // SAFETY: `*const T` для `T: ?Sized` представляется парой usize (data, vtable);
-        // `transmute_copy` читает ровно `size_of::<*const T>()` байт из локальной переменной
-        // того же размера, не нарушая алиасинга.
+        // SAFETY: для действительно безразмерного `T` (dyn Trait, срез) `*const T` -
+        // пара usize (data, vtable/len), того же размера, что и `[usize; 2]`, поэтому
+        // `transmute_copy` не читает за пределы источника и не нарушает алиасинга.
+        // Вызывающий `new` отвечает за то, что `T` не `Sized` - bound `T: ?Sized`
+        // это не проверяет.
         let raw: [usize; 2] = unsafe { core::mem::transmute_copy(&core::ptr::from_ref::<T>(r)) };
         Self {
             raw,

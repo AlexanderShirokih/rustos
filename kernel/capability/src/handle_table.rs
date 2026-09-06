@@ -71,8 +71,8 @@ impl DrainedHandles {
         }
     }
 
-    /// Освобождает изъятое: ожидания слотов отменяются с
-    /// [`IpcError::Canceled`](IpcError::Canceled), оставшиеся capability разрушаются вместе с
+    /// Освобождает изъятое. Ожидания слотов отменяются с
+    /// [`IpcError::Canceled`](IpcError::Canceled), а оставшиеся capability разрушаются вместе с
     /// поддеревьями.
     pub fn release(self) {
         for waiter in self.waiters {
@@ -84,7 +84,7 @@ impl DrainedHandles {
         drop(self.handles);
     }
 
-    /// Отдаёт capability новому владельцу: поддеревья не отзываются. Cancel-цели остаются за
+    /// Отдаёт capability новому владельцу. Поддеревья не отзываются, а cancel-цели остаются за
     /// [`Self::release`].
     pub fn take_handles(&mut self) -> Vec<Capability> {
         core::mem::take(&mut self.handles)
@@ -150,7 +150,7 @@ pub struct ObjectAccess<T> {
     pub rights: Rights,
 }
 
-/// Линейный токен на зарезервированный слот: потребляется по значению ровно одним
+/// Линейный токен на зарезервированный слот. Потребляется по значению ровно одним
 /// из `commit_reserved`/`release_reservation`. Забытая резервация удерживает слот.
 #[derive(Debug)]
 pub struct HandleReservation {
@@ -172,6 +172,8 @@ impl HandleTable {
         Self::with_capacity(Self::DEFAULT_CAPACITY)
     }
 
+    /// Таблица на `capacity` слотов. Слот адресуется 16 битами [`HandleId`], и значения выше
+    /// `65536` урезаются до этого потолка.
     pub fn with_capacity(capacity: u32) -> Self {
         let capacity = capacity.min(HandleId::MAX_SLOT_INDEX + 1);
         Self {
@@ -185,7 +187,8 @@ impl HandleTable {
         self.capacity
     }
 
-    /// Текущее число занятых слотов. Используется только в тестах.
+    /// Текущее число занятых слотов. Зарезервированные слоты в него не входят, а отозванная
+    /// capability считается до своего закрытия.
     pub fn live_count(&self) -> usize {
         self.slots
             .iter()
@@ -193,8 +196,9 @@ impl HandleTable {
             .count()
     }
 
-    /// Регистрирует handle, возвращая стабильный идентификатор. На `OutOfHandles` объект остаётся
-    /// в [`RejectedInsert`].
+    /// Регистрирует handle, возвращая стабильный идентификатор. Владение `handle` переходит
+    /// таблице. На `OutOfHandles` объект остаётся в [`RejectedInsert`], и вызывающий забирает его
+    /// либо разрушает.
     pub fn insert(&mut self, handle: Capability) -> Result<HandleId, RejectedInsert> {
         let Some((index, slot)) = self.claim_slot() else {
             return Err(RejectedInsert {
@@ -229,7 +233,7 @@ impl HandleTable {
                 // Отказ наступает до push: таблица остаётся неизменной.
                 return None;
             }
-            // Состояние - заглушка: вызывающий перезаписывает его сразу.
+            // Состояние - заглушка. Вызывающий перезаписывает его сразу.
             self.slots.push(Slot::fresh(SlotState::Reserved));
             index
         };
@@ -238,8 +242,9 @@ impl HandleTable {
         Some((index, slot))
     }
 
-    /// Вставляет `handle` в зарезервированный слот. Чужой живой слот не затирается: при
-    /// несовпадении резервации `handle` уходит в `rejected`.
+    /// Вставляет `handle` в зарезервированный слот. Чужой живой слот не затирается. При
+    /// несовпадении резервации `handle` помещается в `rejected`, и возвращённый [`HandleId`]
+    /// к содержимому таблицы отношения уже не имеет.
     // Токен по значению: его потребление и есть закрытие резервации.
     #[allow(clippy::needless_pass_by_value)]
     pub fn commit_reserved(
@@ -356,8 +361,12 @@ impl HandleTable {
         self.free_head = free_head;
     }
 
-    /// Регистрирует cancel-target на слот `id`. При закрытии/передаче
-    /// handle target получит `cancel()`.
+    /// Регистрирует cancel-target на слот `id`. При закрытии либо передаче handle таблица снимает
+    /// цель в [`DrainedHandles`], а вызов `cancel()` делает уже [`DrainedHandles::release`].
+    ///
+    /// Регистрация держит `Arc` до снятия слота. Освобождение слота очищает список целей, и
+    /// следующий владелец слота чужих целей не наследует. На неизвестном либо устаревшем `id` -
+    /// [`IpcError::BadHandle`].
     pub fn register_cancel(
         &mut self,
         id: HandleId,
@@ -377,8 +386,13 @@ impl HandleTable {
         Ok(())
     }
 
-    /// Регистрирует [`RevocationHook`] на узле деривации капы `id`. При
-    /// отзыве капы (close/Drop любого её предка) hook получит `revoke()`.
+    /// Регистрирует [`RevocationHook`] на узле деривации капы `id`. Закрытие этой капы либо
+    /// любого её предка вызывает `revoke()`.
+    ///
+    /// Хук хранится как `Weak`, и `Arc` хука держит вызывающий. Разрушение предка помимо закрытия
+    /// хендла обрывает цепочку без вызова `revoke()`, и операции по капе отвечают
+    /// [`IpcError::Revoked`]. Тем же кодом отвергается регистрация на уже отозванной капе, на
+    /// неизвестном `id` - [`IpcError::BadHandle`].
     pub fn register_revocation_hook(
         &self,
         id: HandleId,
@@ -404,7 +418,11 @@ impl HandleTable {
         }
     }
 
-    /// Проверка прав без проверки типа.
+    /// Запись по `id` с проверкой прав и без проверки типа объекта.
+    ///
+    /// [`IpcError::BadHandle`] - слота с таким `id` в таблице уже нет либо поколение слота другое.
+    /// [`IpcError::Revoked`] - отозван сам узел деривации капы либо один из его предков.
+    /// [`IpcError::AccessDenied`] - права записи не покрывают `need`.
     pub fn get(&self, id: HandleId, need: Rights) -> Result<&Capability, IpcError> {
         let handle = self.lookup(id)?;
         if !handle.rights().contains(need) {
@@ -426,7 +444,7 @@ impl HandleTable {
             .ok_or(IpcError::WrongType)
     }
 
-    /// Извлекает снимок port-capability для одной операции, с проверкой прав и типа: учёт стороны
+    /// Извлекает снимок port-capability для одной операции, проверяя права и тип. Учёт стороны
     /// удерживается с этого момента и до снятия [`OperationHold`](super::OperationHold).
     pub fn get_port(&self, id: HandleId, need: Rights) -> Result<PortAccess, IpcError> {
         let handle = self.get(id, need)?;
@@ -464,6 +482,9 @@ impl HandleTable {
 
     /// Атомарно проверяет, что все `ids` существуют, имеют `min_rights` и нет дубликатов, затем
     /// изымает их в `drained`. Капы для переноса отдаёт [`DrainedHandles::take_handles`].
+    ///
+    /// Проверка идёт до первого изъятия, и отказ на ней оставляет таблицу неизменной. Cancel-цели
+    /// изъятых слотов уходят в тот же `drained` и снимаются его освобождением.
     pub fn try_drain_for_transfer(
         &mut self,
         ids: &[HandleId],
@@ -507,7 +528,11 @@ impl HandleTable {
 
     /// Регистрирует capability на объект `target`, выведенный из объекта
     /// записи `id`, производной от неё ([`Capability::derive`]). Происхождение
-    /// проверяется здесь: объект, не выведенный из объекта записи, - `WrongType`.
+    /// проверяется здесь. Объект, не выведенный из объекта записи, приводит к `WrongType`.
+    ///
+    /// Проверяемых пар две. `Resource` выводится из `Resource`, названного его родителем при
+    /// [`split`](super::Resource::split). Регион памяти выводится из региона, который его
+    /// содержит. Пара других видов отвергается тем же `WrongType`.
     pub fn derive(
         &mut self,
         id: HandleId,
@@ -963,7 +988,7 @@ mod tests {
             .insert(memory_handle(Rights::DUPLICATE | Rights::READ))
             .unwrap();
 
-        // Окно вне источника: происхождение от объекта записи не подтверждено.
+        // Окно взято вне источника. Происхождение от объекта записи не подтверждено.
         let foreign = Arc::new(MemoryRegion::create_physical_device(
             memory::physical_address::PageAlignedAddress::from_usize(0x8000_0000).unwrap(),
             NonZeroUsize::new(4096).unwrap(),

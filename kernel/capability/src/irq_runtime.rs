@@ -1,6 +1,6 @@
-//! Архитектурно-независимый мост к контроллеру прерываний — sibling [`KernelRuntime`].
+//! Архитектурно-независимый мост к контроллеру прерываний - sibling [`KernelRuntime`].
 //!
-//! Capability-крейт не зависит от `drivers-common`: он говорит «сырыми» `u16`
+//! Capability-крейт не зависит от `drivers-common`: он говорит "сырыми" `u16`
 //! номерами линий через [`InterruptsControl`], а kernelspace ставит адаптер,
 //! форвардящий вызовы в `InterruptsService`. Так IRQ-capability остаётся
 //! архитектурно-независимой и юнит-тестируемой с мок-контроллером.
@@ -12,16 +12,16 @@ use syscall::IrqTrigger;
 
 use super::errors::IpcError;
 
-/// Приёмник аппаратного прерывания: мост к [`IrqLine::on_fire`](super::IrqLine).
-/// Реализация держит `Weak<IrqLine>`, и срабатывание в гонке с закрытием
-/// линии становится no-op.
+/// Приёмник аппаратного прерывания, через который контроллер доводит срабатывание до
+/// [`IrqLine`](super::IrqLine). Реализация держит `Weak<IrqLine>`, и срабатывание в гонке с
+/// закрытием линии становится no-op.
 pub trait IrqSink: Send + Sync {
     /// Вызывается из IRQ-контекста при срабатывании линии.
     fn fire(&self);
 }
 
 /// Контроллер прерываний с точки зрения capability-слоя: привязка линии к
-/// `sink` и маск/анмаск по «сырому» номеру. Ставится один раз в kmain.
+/// `sink` и маск/анмаск по "сырому" номеру. Ставится один раз в kmain.
 pub trait InterruptsControl: Send + Sync {
     /// Привязывает линию `irq` с триггером `trigger` так, что её срабатывания
     /// зовут `sink.fire()`, и возвращает RAII-токен, чей drop снимает привязку
@@ -40,10 +40,12 @@ pub trait InterruptsControl: Send + Sync {
     fn unmask(&self, irq: u16);
 }
 
-/// Непрозрачный RAII-развязчик линии. Дроп токена снимает привязку: на стороне
+/// Непрозрачный RAII-развязчик линии. Дроп токена снимает привязку. На стороне
 /// kernelspace это дропает `IrqBound`, чей cleanup отключает линию и удаляет
-/// обработчик. Токен владеется единственным `Arc<IrqLine>` — `IrqBound` (FnOnce)
-/// нельзя клонировать, и несколько хендлов разделяют линию через `Arc`.
+/// обработчик.
+///
+/// Токен хранит сам [`IrqLine`](super::IrqLine), клонированию не подлежит, и все капы на линию
+/// делят один объект с ним. Развязка идёт при разрушении последней такой капы.
 pub struct IrqBindToken(#[allow(dead_code)] Box<dyn Send>);
 
 impl IrqBindToken {
@@ -55,7 +57,8 @@ impl IrqBindToken {
 
 static IRQ_CONTROL: Once<Arc<dyn InterruptsControl>> = Once::new();
 
-/// Ставит глобальный контроллер прерываний (один раз, в kmain).
+/// Ставит глобальный контроллер прерываний. Вызывается один раз, в kmain. Повторный вызов
+/// паникует.
 pub fn install_interrupts_control(control: Arc<dyn InterruptsControl>) {
     assert!(
         IRQ_CONTROL.get().is_none(),

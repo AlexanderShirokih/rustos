@@ -41,7 +41,8 @@ pub struct UserImage<'a> {
 pub enum UserImageError {
     /// `mapped_size` сегмента или его база не выровнены на 4К.
     MisalignedSegment,
-    /// Размер user-стека или его база не выровнены на 4К.
+    /// `user_stack_size` не кратен 4К или равен нулю, `user_stack_top` не выровнена на
+    /// 4К, либо `user_stack_size` превышает `user_stack_top`.
     MisalignedStack,
     /// `init_bytes.len() > mapped_size`.
     InitBytesExceedMapped,
@@ -281,8 +282,8 @@ mod tests {
 
     #[test]
     fn validate_rejects_entry_on_exclusive_segment_end() {
-        // entry == seg_end (exclusive граница) не должен считаться "внутри"
-        // сегмента: проверка `entry < seg_end`, поэтому образ отвергается.
+        // entry == seg_end (exclusive граница) не считается точкой внутри сегмента.
+        // Проверка `entry < seg_end` поэтому отвергает такой образ.
         let segs = [rx_segment(0x4000_0000, PAGE, &[])];
         let image = make_image(&segs, 0x4000_0000 + PAGE);
         assert_eq!(image.validate(), Err(UserImageError::EntryNotInExecSegment));

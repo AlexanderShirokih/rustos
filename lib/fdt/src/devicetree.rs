@@ -87,7 +87,8 @@ impl<'a> Property<'a> {
         ))
     }
 
-    /// Возвращает значение как `usize` (4 или 8 байт big-endian).
+    /// Возвращает значение как `usize` (4 или 8 байт big-endian). Любая другая длина и
+    /// значение, не умещающееся в `usize`, дают 0.
     pub fn as_usize(&self) -> usize {
         let bytes = self.value;
 
@@ -117,12 +118,13 @@ pub enum DtError {
     /// Неверная сигнатура (magic) в заголовке.
     InvalidMagic(u32),
 
-    /// total_size в заголовке выходит за пределы MAX_DTB_SIZE или превышает
-    /// длину переданного буфера.
+    /// total_size в заголовке меньше минимального заголовка (24 байта), больше
+    /// MAX_DTB_SIZE либо превышает длину переданного буфера.
     Incomplete {
         /// Ожидаемый размер из заголовка.
         total_size: usize,
-        /// Фактический размер буфера.
+        /// Размер проверенного буфера: 24 байта заголовка для `from_ptr`, длина среза
+        /// для `from_bytes`.
         actual: usize,
     },
 }
@@ -130,6 +132,9 @@ pub enum DtError {
 impl<'a> DeviceTree<'a> {
     const MAX_DTB_SIZE: usize = 2 * 1024 * 1024;
 
+    /// Разбирает FDT-blob по адресу `address`. Вызывающий гарантирует, что по этому адресу
+    /// лежит валидный FDT и что память остаётся читаемой весь срок жизни результата. Срок
+    /// не связан заимствованием ни с одним аргументом.
     pub fn from_ptr(address: usize) -> Result<Self, DtError> {
         if address == 0 {
             return Err(DtError::InvalidMagic(0));
@@ -162,6 +167,8 @@ impl<'a> DeviceTree<'a> {
         Ok(DeviceTree { buffer, header })
     }
 
+    /// Разбирает FDT-blob из `buffer`. Результат заимствует `buffer` на весь свой срок
+    /// жизни.
     pub fn from_bytes(buffer: &'a [u8]) -> Result<Self, DtError> {
         let mut cur = Cursor::new(buffer);
         let header = FdtHeader::read_checked(&mut cur)?;
@@ -200,8 +207,8 @@ impl<'a> DeviceTree<'a> {
         }
     }
 
-    /// Ищет узел в списке структур. Принимает как абсолютный путь, так и alias
-    /// Например: find("serial10"), find("/soc@107c000000/serial@7d001000")
+    /// Ищет узел по пути в списке структур либо по имени в разделе `aliases`.
+    /// Пример: алиасу `serial0` соответствует путь `/soc/serial@1000`.
     pub fn find(&'a self, path: &str) -> Option<Node<'a>> {
         // Пытаемся найти в списке узлов
         let node = self.find_node(path);

@@ -50,7 +50,8 @@ impl AccessMask {
     }
 }
 
-/// Возврат метеринг-бюджета на `Drop` региона.
+/// Возврат метеринг-бюджета при `Drop` владельца региона - вызывается не более одного
+/// раза на `Arc`.
 pub trait BudgetRefund: Send + Sync {
     fn refund(&self);
 }
@@ -58,11 +59,11 @@ pub trait BudgetRefund: Send + Sync {
 /// Отказ смены профиля региона ([`MemoryRegion::with_profile`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileChangeError {
-    /// Кэшируемый регион профиля не меняет.
+    /// `with_profile` отказывает при переходе в `Cached` и при переходе из `Cached`.
     CachedIsFixed,
 }
 
-/// PA-бэкинг региона.
+/// PA-бэкинг региона - откуда берётся физическая память и кто ею владеет.
 pub enum MemoryBacking {
     /// Анонимные фреймы, выделенные из `FrameAllocator`.
     Virtual {
@@ -86,8 +87,10 @@ pub struct VirtualBacking {
     refund: Mutex<Option<Arc<dyn BudgetRefund>>>,
 }
 
+/// Ошибки [`MemoryRegion::create_virtual`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegionCreateError {
+    /// Аллокация фрейма через `fa` отказала. Уже выделенные фреймы возвращены в `fa`.
     OutOfMemory,
 }
 
@@ -144,7 +147,8 @@ impl MemoryRegion {
         })
     }
 
-    /// Регион поверх фиксированного PA-диапазона Device-MMIO.
+    /// Регион поверх фиксированного PA-диапазона Device-MMIO. `access` не должен
+    /// разрешать `X` - `debug_assert` проверяет это только в debug-сборке.
     pub fn create_physical_device(
         pa_base: PageAlignedAddress,
         size: NonZeroUsize,
@@ -183,7 +187,7 @@ impl MemoryRegion {
     /// Возвращает регион поверх того же PA-диапазона с профилем `profile`.
     /// Профиль меняется в пределах [`MemoryProfile::WriteCombining`] и
     /// [`MemoryProfile::Device`]. Результат разделяет владение бэкингом с
-    /// исходным регионом и отдельного `refund` не несёт.
+    /// исходным регионом и отдельного `refund` не хранит.
     pub fn with_profile(&self, profile: MemoryProfile) -> Result<Self, ProfileChangeError> {
         match self.backing {
             MemoryBacking::Physical {
@@ -202,7 +206,7 @@ impl MemoryRegion {
     /// Возвращает под-регион `[offset_bytes, offset_bytes + size)` с маской
     /// доступа `access`. `offset_bytes` должен быть выровнен на страницу, окно
     /// должно умещаться внутри исходного региона, `access` - не шире исходного.
-    /// Результат разделяет владение бэкингом с исходным регионом и отдельного `refund` не несёт.
+    /// Результат разделяет владение бэкингом с исходным регионом и отдельного `refund` не хранит.
     pub fn slice(
         &self,
         offset_bytes: usize,
@@ -303,7 +307,8 @@ impl MemoryRegion {
         }
     }
 
-    /// Численный 8-битный тег вариантов backing.
+    /// Тег варианта backing, стабильный для ABI: `1` - Virtual, `2` - Physical.
+    /// Значение зашито в пользовательский wire-формат - смена чисел ломает ABI.
     pub fn kind_tag(&self) -> u8 {
         match self.backing {
             MemoryBacking::Virtual { .. } => 1,
@@ -329,8 +334,10 @@ impl MemoryRegion {
         }
     }
 
-    /// Маппит регион в `mapper` начиная с `va` со флагами `flags`.
-    /// При ошибке посередине цикла уже замапленные leaf-страницы откатываются.
+    /// Маппит регион в `mapper` начиная с `va` со флагами `flags`. Для `Virtual`-бэкинга
+    /// маппит по фрейму в цикле и откатывает уже замапленные leaf-страницы при ошибке
+    /// посередине. Для `Physical`-бэкинга это один вызов `map_exact` на весь диапазон -
+    /// откат частичного отказа определяет реализация `mapper`.
     pub fn install(
         &self,
         mapper: &dyn MemoryMapper,
@@ -691,7 +698,7 @@ mod tests {
         assert_eq!(back.profile(), MemoryProfile::Device);
     }
 
-    // Regression guard: фреймы кэшируемого региона несёт линейная карта ядра,
+    // Regression guard: линейная карта ядра содержит фреймы кэшируемого региона,
     // и второе отображение с иным кэшированием теряет когерентность.
     #[test]
     fn with_profile_refuses_to_leave_cached() {
@@ -955,7 +962,7 @@ mod tests {
         assert_eq!(fa.deallocated().len(), 0);
 
         drop(region);
-        // Virtual-регион под бюджет: на Drop И возвращает фреймы в FA, И
+        // Virtual-регион под бюджет. На Drop И возвращает фреймы в FA, И
         // возвращает метеринг-бюджет ровно один раз.
         assert_eq!(refund.0.load(Ordering::Acquire), 1);
         assert_eq!(fa.deallocated().len(), 2);

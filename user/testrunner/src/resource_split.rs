@@ -43,7 +43,7 @@ fn split_chain_depth_is_capped() {
         kernel_objects::Error::Syscall(SyscallError::ResourceExhausted)
     ));
 
-    // Отказ по глубине не тронул бюджет листа: страница из него минтится и после.
+    // Отказ по глубине не тронул бюджет листа. Страница из него минтится и после.
     let leaf = held.last().expect("chain is non-empty");
     let region = leaf
         .create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW)
@@ -55,7 +55,7 @@ fn split_chain_depth_is_capped() {
 fn closing_the_derived_resource_returns_its_budget() {
     let parent = Resource::self_resource().expect("self metering resource");
 
-    // Бюджет исходного ресурса конечен: цикл сходится, только если закрытие
+    // Бюджет исходного ресурса конечен. Цикл сходится, только если закрытие
     // производного возвращает страницы.
     for _ in 0..64 {
         let child = parent.split(CHILD_PAGES).expect("split");
@@ -72,7 +72,7 @@ fn child_started_with_a_resource_is_metered_by_it() {
     let metered = Fixture::spawn_with_slack(FIXTURE_SLACK_PAGES);
     let oversized = metered.budget_pages() * OVERSIZE_FACTOR;
 
-    // Потомок на ресурсе родителя запрос проводит: он упирается в корневой
+    // Потомок на ресурсе родителя запрос проводит. Он упирается в корневой
     // бюджет, которому такой размер по силам.
     let inherited = Fixture::spawn();
     kernel_tests::kassert_eq!(
@@ -81,7 +81,7 @@ fn child_started_with_a_resource_is_metered_by_it() {
     );
     kernel_tests::kassert_eq!(inherited.request_status(OP_EXIT, 0, &[]), REPLY_OK);
 
-    // Тот же запрос у потомка на отделённом бюджете отвергается: метеринг идёт
+    // Тот же запрос у потомка на отделённом бюджете отвергается. Метеринг идёт
     // по переданному ресурсу, минуя корневой.
     kernel_tests::kassert_eq!(
         metered.request_status(OP_ALLOCATE_PAGES, oversized, &[]),
@@ -92,7 +92,7 @@ fn child_started_with_a_resource_is_metered_by_it() {
 
 #[kernel_test]
 fn child_stack_is_charged_to_the_image_budget() {
-    // Бюджет ровно на сегменты образа: стек - такой же сегмент, оплатить его
+    // Бюджет ровно на сегменты образа. Стек - такой же сегмент, оплатить его
     // нечем, и загрузка отказывает вместо того, чтобы взять фреймы мимо учёта.
     let denied = Fixture::try_spawn_with_slack(0);
     kernel_tests::kassert_eq!(
@@ -129,7 +129,7 @@ fn starting_a_child_on_a_write_only_resource_is_denied() {
         Some(kernel_objects::Error::Syscall(SyscallError::AccessDenied))
     ));
 
-    // Контроль: тот же старт с полноправным ресурсом доходит до проверки
+    // Для контроля тот же старт с полноправным ресурсом доходит до проверки
     // состояния процесса и отказывает другим кодом. Разные исходы на одном
     // вызове и показывают, что `AccessDenied` пришёл от прав на `resource_h`.
     let bootstrap = Signal::create().expect("signal create").into_handle();
@@ -158,7 +158,7 @@ fn granted_resource_rights_shrink_to_the_passing_handle() {
     );
     kernel_tests::kassert_eq!(child.request_status(OP_EXIT, 0, &[]), REPLY_OK);
 
-    // Контроль: у потомка на полноправном ресурсе та же проба проходит.
+    // Для контроля у потомка на полноправном ресурсе та же проба проходит.
     let entitled = Fixture::spawn();
     kernel_tests::kassert_eq!(
         entitled.request_status(OP_DUPLICATE_TRANSFER_CAP, 0, &[]),

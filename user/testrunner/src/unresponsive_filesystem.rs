@@ -7,7 +7,7 @@ runtime::process_heap!();
 use core::panic::PanicInfo;
 
 use component_abi::{SESSION_SCOPE_MAX, SessionError, component_sessions};
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use ipc::{
     Transport as _,
     wire::{Cap, Str},
@@ -41,7 +41,8 @@ impl component_sessions::Service for SessionlessAdmin {
     }
 }
 
-/// Программа-фикстура зависшей файловой системы: принимает стартовую транзакцию и замолкает.
+/// Программа-фикстура зависшей файловой системы принимает стартовую транзакцию и
+/// перестаёт отвечать.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(startup: Handle) -> ! {
     let Ok(ReceivedStartup { log, resources }) =
@@ -66,7 +67,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
         }
     }
 
-    // Парковка без кадров: у свежего порта нет отправителей, его приём не вернётся никогда.
+    // Парковка идёт без кадров. У свежего порта нет отправителей, и приём не вернётся никогда.
     let Ok(parking) = Port::create() else {
         thread_exit(1)
     };

@@ -11,7 +11,7 @@
 //! - (a) send/recv round-trip тела;
 //! - (b) call/reply round-trip;
 //! - (c) перенос Signal-хендла через port и проверка идентичности
-//!   объекта на стороне получателя (сигнал, поднятый ДО переноса, виден);
+//!   объекта на стороне получателя (сигнал, поднятый до переноса, виден);
 //! - (d) порядок "получатель пришёл первым" и "отправитель пришёл первым".
 
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst};
@@ -129,9 +129,9 @@ fn send_recv_round_trip_sender_first() {
     EP_RAW.store(u64::from(ep.handle().as_raw().raw()), SeqCst);
 
     let worker = spawn_worker(sender_worker);
-    // Биас: ждём, пока worker объявит готовность (он блокируется в send сразу
+    // Ждём, пока worker объявит готовность (он блокируется в send сразу
     // после). Корректность не зависит от порядка - recv смэтчит припаркованного
-    // отправителя либо припаркуется сам.
+    // отправителя либо сам припаркуется.
     while WORKER_READY.load(SeqCst) == 0 {
         core::hint::spin_loop();
     }
@@ -237,7 +237,7 @@ fn call_reply_round_trip() {
 
 extern "C" fn cap_sender_worker(_arg: usize) -> u32 {
     let va = ipc_va();
-    // Создаём Signal и поднимаем сигнал ДО переноса: бит должен
+    // Создаём Signal и поднимаем сигнал до переноса. Бит должен
     // "уехать" вместе с объектом и быть видим получателю - это доказывает
     // идентичность capability target (свежий объект бита бы не имел).
     let notif = signal_create().expect("signal_create");
@@ -281,7 +281,7 @@ fn cap_transfer_through_port() {
     let received_raw = unsafe { read_cap(va, 0) };
     let received = Handle::new(received_raw).expect("received cap handle");
 
-    // Идентичность: бит, поднятый отправителем ДО переноса, виден здесь.
+    // Идентичность: бит, поднятый отправителем до переноса, виден здесь.
     let observed = signal_wait_one(received, SIGNALED, Timeout::POLL);
     let bit = i64::from(SIGNALED);
     kernel_tests::kassert!(observed & bit == bit);
@@ -291,7 +291,7 @@ fn cap_transfer_through_port() {
 }
 
 // --- (e) badge round-trip: сервер минтит две badged-копии, два клиента ---
-//        шлют через свои копии, сервер видит РАЗНЫЕ badge.
+//        шлют через свои копии, сервер получает разные badge.
 
 const BADGE_A: u64 = 0xA11CE;
 const BADGE_B: u64 = 0xB0B;
@@ -333,7 +333,7 @@ fn badge_round_trip_two_clients() {
     let ep = Port::create().expect("port create");
     let ep_raw = ep.handle().as_raw();
 
-    // Минтим две badged-копии (set-once: оригинал незаклеймён -> копии несут
+    // Минтим две badged-копии (set-once: оригинал незаклеймён -> копии получают
     // заданный badge). Права сужаем до WRITE - клиенту нужен только send.
     let copy_a = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_A).expect("mint badged copy A");
     let copy_b = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_B).expect("mint badged copy B");
@@ -391,7 +391,7 @@ fn recv_poll_no_sender_should_wait() {
 #[kernel_test]
 fn recv_finite_timeout_no_sender_should_wait() {
     let ep = Port::create().expect("port create");
-    // 10 мс - заведомо истечёт, отправителя нет.
+    // 10 мс - заведомо истечёт, отправитель не появится.
     assert_timeout(ep.recv(Timeout::from_millis(10)).map(|_| ()));
 }
 

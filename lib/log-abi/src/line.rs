@@ -2,7 +2,7 @@
 
 use crate::LogBuffer;
 
-/// Накопитель строк: завершённые уходят наружу, незавершённый остаток копится.
+/// Накопитель строк. Завершённые уходят наружу, незавершённый остаток копится.
 pub struct LineAssembler<const N: usize> {
     buffer: LogBuffer<N>,
 }
@@ -29,7 +29,7 @@ impl<const N: usize> LineAssembler<N> {
         self.fill(rest, &mut emit);
     }
 
-    /// Отдаёт незавершённый остаток. Пустой накопитель записи не заводит.
+    /// Отдаёт незавершённый остаток. Пустой накопитель записи не создаёт.
     pub fn flush(&mut self, mut emit: impl FnMut(&str)) {
         if !self.buffer.is_empty() {
             emit(self.buffer.as_str());
@@ -42,7 +42,7 @@ impl<const N: usize> LineAssembler<N> {
         while !rest.is_empty() {
             let taken = self.buffer.push_str(rest);
             if taken == 0 && self.buffer.is_empty() {
-                // Символ не помещается даже в пустой накопитель: кадр его не несёт.
+                // Символ не помещается даже в пустой накопитель. Кадр его не содержит.
                 return;
             }
             rest = &rest[taken..];

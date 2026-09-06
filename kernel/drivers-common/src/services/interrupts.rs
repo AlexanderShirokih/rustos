@@ -84,7 +84,7 @@ pub struct IrqBound {
 }
 
 impl IrqBound {
-    /// RAII-развязка привязанной линии: дроп исполняет `cleanup`.
+    /// RAII-развязка привязанной линии. Дроп исполняет `cleanup`.
     pub fn new<F>(cleanup: F) -> Self
     where
         F: FnOnce() + Send + 'static,
@@ -118,9 +118,8 @@ pub enum IrqRegistrationError {
 
 /// Адрес CPU в понятиях контроллера прерываний.
 ///
-/// Контроллер адресует CPU по-своему, и с нумерацией ядра это не связано:
-/// значение для него готовит платформенный слой: на ARM это affinity целевого
-/// процессора.
+/// Контроллер адресует CPU по-своему, и с нумерацией ядра это не связано. Значение для него
+/// готовит платформенный слой (на ARM это affinity целевого процессора).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct IpiTarget(u64);
@@ -138,7 +137,7 @@ impl IpiTarget {
 /// Ошибки отправки межпроцессорного прерывания.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpiError {
-    /// Контроллер не умеет адресовать другой CPU.
+    /// Контроллер не поддерживает адресацию другого CPU.
     Unsupported,
     /// Номер вне диапазона межпроцессорных прерываний.
     NotAnIpi,
@@ -227,7 +226,7 @@ pub trait InterruptsService: Send + Sync {
     fn assignable_lines(&self) -> IrqLineSpan;
 
     /// Маскирует (запрещает) линию `irq` на контроллере, не снимая привязку.
-    /// Используется уровневым IRQ-протоколом: линия маскируется при срабатывании и размаскируется
+    /// Используется уровневым IRQ-протоколом. Линия маскируется при срабатывании и размаскируется
     /// на `ack`.
     fn mask(&self, irq: IrqNumber);
 
@@ -243,7 +242,7 @@ pub trait InterruptsService: Send + Sync {
 
     /// Отправляет межпроцессорное прерывание `irq` процессору `target`.
     ///
-    /// Линия должна быть привязана как обычная: доставленное прерывание
+    /// Линия должна быть привязана как обычная. Доставленное прерывание
     /// приходит на общий путь диспетчеризации.
     fn send_ipi(&self, _irq: IrqNumber, _target: IpiTarget) -> Result<(), IpiError> {
         Err(IpiError::Unsupported)

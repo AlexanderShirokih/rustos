@@ -1,3 +1,9 @@
+//! Стартовая транзакция компонента и её приём.
+//!
+//! Контракт [`component_startup`] переносит стартовый набор capability базовым кадром и
+//! кадром на каждый слот. Принятая транзакция собирается в [`StartedComponent`], а до конца
+//! транзакции приём доводит [`receive_startup_transaction`].
+
 use core::num::NonZeroU64;
 
 use ipc::{Transport, wire::IpcError};
@@ -16,28 +22,38 @@ ipc::protocol! {
 
         /// Открывает транзакцию: лог-сессия, серверные стороны control- и
         /// service-портов компонента и число слотов, которые придут следом.
+        ///
+        /// Каждый параметр-`Cap` передаёт владеющий хэндл. `slot_count` сверх
+        /// [`COMPONENT_SLOT_MAX`](crate::COMPONENT_SLOT_MAX) и второй базовый кадр ломают
+        /// транзакцию.
         cast fn start(log: Cap, control: Cap, service: Cap, slot_count: u16);
 
         /// Отдаёт capability очередного слота в порядке плана.
+        ///
+        /// Слот до базового кадра и слот сверх обещанного `slot_count` ломают транзакцию.
         cast fn slot(capability: Cap);
     }
 }
 
 /// Capability и параметры принятой стартовой транзакции. Семантику позиции
-/// слота знает сам компонент.
+/// слота определяет сам компонент.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartedComponent {
     /// Делегированная log-сессия.
     pub log: ipc::wire::Cap,
-    /// Серверная сторона control-порта: его клиентскую сторону держит supervisor.
+    /// Серверная сторона control-порта. Его клиентскую сторону держит supervisor.
     pub control: ipc::wire::Cap,
-    /// Серверная сторона service-порта: его сессии supervisor минтит клиентам.
+    /// Серверная сторона service-порта. Сессии этого порта выдаются клиентам помимо
+    /// компонента, пока манифест не объявил `establishes_sessions`.
     pub service: ipc::wire::Cap,
     slots: [Option<ipc::wire::Cap>; COMPONENT_SLOT_MAX],
     slot_count: u16,
 }
 
 /// Приёмник стартовой транзакции: базовый кадр и ровно `slot_count` слотов.
+///
+/// Приёмник реализует `component_startup::Service`, и нарушенный порядок кадров даёт `None`
+/// из [`receive_startup_transaction`].
 #[derive(Debug, Default)]
 pub struct StartupReceiver {
     started: Option<StartedComponent>,
@@ -61,8 +77,8 @@ pub fn receive_startup_transaction<T: Transport>(
 }
 
 /// Уход значка `badge` на control-порту компонента - уход supervisor, и это событие
-/// терминально. Прочие значки порта выданы импортом его control-протокола, и их уход цикл
-/// приёма продолжает.
+/// терминально. Прочие значки порта выданы импортом его control-протокола, и после их ухода
+/// цикл приёма продолжается.
 #[must_use]
 pub const fn supervisor_gone(badge: u64) -> bool {
     badge == CONTROL_LEASE_BADGE.get()

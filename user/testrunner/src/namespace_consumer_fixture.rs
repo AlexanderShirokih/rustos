@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{PATH_MAX, namespace};
 use ipc::wire::Str;
 use kernel_objects::{OwnedHandle, Signal};
@@ -47,7 +47,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
         thread_exit(NO_ANSWER_EXIT_CODE);
     }
 
-    // Провайдер отвечает по сессии слота, пока жив: его уход виден отказом транспорта, а путь
+    // Провайдер отвечает по сессии слота, пока жив. Его уход виден отказом транспорта, а путь
     // вне таблицы монтирования - обычный ответ.
     while answers(&namespace, path) {
         pause(PROBE_TURN);

@@ -21,7 +21,8 @@ impl EntryPos {
     }
 }
 
-/// Битовая карта для отслеживания статуса выделения фреймов
+/// Битовая карта для отслеживания статуса выделения фреймов одного региона физической
+/// памяти.
 pub struct FrameBitmap {
     bitmap: Box<[u64]>,
     free: usize,
@@ -74,7 +75,9 @@ impl FrameBitmap {
         self.target_region
     }
 
-    /// Помечает область фреймов как выделенную
+    /// Помечает `[from_inclusive, to_exclusive)` занятыми. Подсчёт свободных фреймов
+    /// идемпотентен для уже занятых фреймов диапазона. Вырожденный диапазон
+    /// (`from_inclusive >= to_exclusive`) не меняет состояние.
     pub fn set_range_unchecked(&mut self, from_inclusive: Frame, to_exclusive: Frame) {
         let from = from_inclusive.number();
         let to = to_exclusive.number();

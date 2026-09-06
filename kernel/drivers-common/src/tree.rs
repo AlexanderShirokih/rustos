@@ -1,4 +1,4 @@
-/// Абстракция свойства узла.
+/// Одно свойство узла дерева устройств: имя и сырые байты значения.
 pub trait NodeProperty {
     fn name(&self) -> &str;
 
@@ -7,7 +7,8 @@ pub trait NodeProperty {
     fn as_cstr(&self) -> Option<&str>;
 }
 
-/// Абстракция узла дерева устройств.
+/// Узел дерева устройств. Тип реализует `Copy`, и копия указывает на тот же узел тем же
+/// лёгким хэндлом. Поддерево при копировании остаётся на месте.
 pub trait DeviceNode: Copy {
     /// Тип идентификатора узла для ключей registry/map.
     type Id: Clone + Ord + Eq + core::fmt::Debug;
@@ -29,7 +30,7 @@ pub trait DeviceNode: Copy {
     fn children(&self) -> Self::ChildIter<'_>;
 }
 
-/// Абстракция источника дерева устройств.
+/// Источник дерева устройств: корневой узел и перечисление всех узлов дерева.
 pub trait DeviceTreeSource {
     type Node<'a>: DeviceNode
     where

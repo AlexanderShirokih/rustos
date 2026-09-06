@@ -386,7 +386,7 @@ mod tests {
         };
         assert!(format!("{err}").contains("Mapping error"));
 
-        // Откат вернул VA в арену: следующая попытка снова выделяет тот же стартовый VA.
+        // Откат вернул VA в арену. Следующая попытка снова выделяет тот же стартовый VA.
         assert!(
             service.map_mmio(address, perms).is_err(),
             "install must fail again"

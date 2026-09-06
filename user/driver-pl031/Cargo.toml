@@ -16,7 +16,7 @@ bench = false
 
 [dependencies]
 kernel-objects = { workspace = true }
-component-client = { workspace = true }
+component-startup = { workspace = true }
 io = { workspace = true }
 ipc = { workspace = true }
 rtc-abi = { workspace = true }

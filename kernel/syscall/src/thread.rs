@@ -1,7 +1,7 @@
 //! Обработчики Thread-syscall: create/self/exit_code/terminate.
 //!
-//! `ThreadExit` живёт в [`bridge`](super::bridge) рядом с диспатчером,
-//! т.к. имеет not-returning контракт.
+//! `ThreadExit` находится в [`bridge`](super::bridge) рядом с диспатчером и
+//! имеет not-returning контракт (`-> !`).
 
 use capability::{CapabilityTarget, Rights, UserThreadEntry, runtime};
 use collections::LockCell;

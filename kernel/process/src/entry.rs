@@ -1,4 +1,5 @@
-//! Параметры первого входа в user-thread - вход для `ArchContext::init_user`.
+//! Параметры первого входа в user-thread по ABI: точка входа, вершина стека и первый
+//! аргумент.
 
 use core::ptr::NonNull;
 
@@ -6,8 +7,8 @@ use memory::virtual_address::VirtualAddress;
 
 use crate::image::UserImage;
 
-/// Первый аргумент user-thread по ABI. `ArchContext::init_user` кладёт его
-/// в нужный регистр.
+/// Первый аргумент user-thread по ABI - код входа в user-режим кладёт его в
+/// ABI-определённый регистр.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct UserBootstrapArg(pub u64);
@@ -18,7 +19,7 @@ impl UserBootstrapArg {
 
 /// Параметры первого входа в user-thread.
 pub struct UserEntry {
-    /// Вершина kernel-стека потока: на ней работает syscall-обработчик.
+    /// Вершина kernel-стека потока, на которой работает syscall-обработчик.
     pub kernel_stack_top: NonNull<u8>,
     /// User entry point - куда передаётся управление при первом входе в user-режим.
     pub user_pc: VirtualAddress,

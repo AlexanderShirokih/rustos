@@ -226,7 +226,7 @@ pub fn preemption_enabled() -> bool {
     PREEMPTION_ENABLED.with(Cell::get)
 }
 
-/// Моделирует контекст аппаратного IRQ-обработчика: вход маскирует
+/// Моделирует контекст аппаратного IRQ-обработчика. Вход маскирует
 /// preemption, выход (`eret`) восстанавливает состояние, которое было на входе.
 pub fn with_simulated_irq<R>(f: impl FnOnce() -> R) -> R {
     let was_enabled = MockCpu::preemption_enabled();

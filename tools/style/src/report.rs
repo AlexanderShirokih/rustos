@@ -91,7 +91,7 @@ pub fn label(severity: Severity) -> &'static str {
     }
 }
 
-/// Упорядочивает отчёты: путь, строка, колонка, правило, отпечаток.
+/// Упорядочивает отчёты: путь, строка, колонка, правило, отпечаток, номер повтора.
 pub fn sort(reports: &mut [Report]) {
     reports.sort_by(|left, right| {
         left.path

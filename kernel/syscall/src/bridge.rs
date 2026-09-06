@@ -37,7 +37,7 @@ pub trait SyscallFrame {
     fn origin(&self) -> Origin;
 }
 
-/// Главная точка входа: декодирует op, диспатчит на handler, кодирует результат.
+/// Главная точка входа декодирует op, диспатчит на handler и кодирует результат.
 /// Для `ThreadExit` и `ProcessExit` не возвращается.
 #[allow(clippy::too_many_lines)]
 pub fn dispatch(frame: &mut dyn SyscallFrame) {
@@ -161,7 +161,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::thread::sys_thread_self();
             frame.set_return(encode_return(r));
         }
-        // Не возвращается: текущий поток помечается Terminated и
+        // Не возвращается. Текущий поток помечается Terminated и
         // планировщик делает context switch на следующий.
         SyscallOp::ThreadExit => sys_thread_exit(frame.arg(0)),
         SyscallOp::ThreadExitCode => {

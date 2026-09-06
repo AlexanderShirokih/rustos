@@ -17,7 +17,7 @@ bench = false
 [dependencies]
 kernel-objects = { workspace = true }
 component-abi = { workspace = true }
-component-client = { workspace = true }
+component-startup = { workspace = true }
 filesystem-abi = { workspace = true }
 filesystem-server = { workspace = true }
 ipc = { workspace = true }

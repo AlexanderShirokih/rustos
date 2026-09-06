@@ -1,4 +1,4 @@
-//! Живость control-порта компонента: терминален уход значка супервизора, а уход прочих
+//! У control-порта компонента уход значка супервизора терминален, а уход прочих
 //! отправителей порта обслуживание продолжает.
 
 use core::num::NonZeroU64;
@@ -38,7 +38,7 @@ fn a_control_port_outlives_every_sender_but_the_supervisor_lease() {
     let control = Port::create().expect("control port");
     let service = Port::create().expect("service port");
     let minted = Rights::WRITE | Rights::TRANSFER;
-    // Оба значка выведены из незаклеймённого корня: заклеймённая капа второго значка
+    // Оба значка выведены из незаклеймённого корня. Заклеймённая капа второго значка
     // не принимает.
     let lease = control
         .handle()
@@ -66,7 +66,7 @@ fn a_control_port_outlives_every_sender_but_the_supervisor_lease() {
     )
     .expect("startup frame delivered");
 
-    // Провайдер обслуживает control-порт значку импорта: ответ ставит его цикл приёма в
+    // Провайдер обслуживает control-порт значку импорта. Ответ ставит его цикл приёма в
     // известное состояние до ухода значка.
     let mut response = component_sessions::Client::new(PortTransport::client(&guest))
         .with_wait(CALL_TIMEOUT)

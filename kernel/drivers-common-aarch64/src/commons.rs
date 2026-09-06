@@ -1,4 +1,4 @@
-//! Общие утилиты для драйверов.
+//! Сверка узла FDT со списком строк совместимости и доступ к его MMIO-окнам из probe-функции.
 
 use drivers_common::{
     DeviceNode, NodeProperty,
@@ -13,7 +13,8 @@ use crate::{
 
 pub type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
 
-/// Расширение ProbeContext для работы с адресами регистров.
+/// Добавляет `ProbeContext`-у чтение `reg`-записи узла как переведённого через
+/// bus/root [`AddressSpace`].
 pub trait ProbeContextExt {
     fn get_address(&self, reg_index: usize) -> AddressSpace;
 
@@ -48,7 +49,7 @@ where
             .unwrap_or(AddressSpace { offset: 0, size: 0 });
 
         // Трансляция child -> parent: parent + (offset - child).
-        // FDT недоверенный: при offset < child saturating_sub даёт 0 вместо
+        // FDT недоверен, поэтому saturating_sub даёт 0 при offset < child вместо
         // underflow, а saturating_add защищает от переполнения адреса.
         let translated = bus_range
             .parent

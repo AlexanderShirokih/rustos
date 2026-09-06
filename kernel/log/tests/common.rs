@@ -4,8 +4,8 @@ use std::sync::{Mutex, PoisonError};
 
 use io::writer::Writer;
 
-/// Writer-протоколист: копит нормальный и панический каналы раздельно,
-/// фиксируя, какой стороной writer шла запись.
+/// Writer-протоколист, который копит нормальный и панический каналы раздельно и
+/// фиксирует, какой стороной writer шла запись.
 #[derive(Default)]
 pub struct Recorder {
     normal: Mutex<String>,

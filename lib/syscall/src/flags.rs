@@ -1,4 +1,5 @@
-/// Кодировка прав доступа к user-памяти в syscall ABI.
+/// Кодировка прав доступа к user-памяти в syscall ABI. Множество замкнуто, и ядро
+/// отвергает значение вне него как `InvalidArgument`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum UserMemFlags {
@@ -7,6 +8,7 @@ pub enum UserMemFlags {
     ReadExecute = 2,
 }
 
+/// Значение вне множества флагов доступа.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidUserMemFlags;
 

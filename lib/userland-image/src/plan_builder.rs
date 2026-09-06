@@ -12,7 +12,7 @@ use crate::plan::{
 /// Устройство, названное слотом композиции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceSpec<'a> {
-    /// Строки совместимости драйвера: подходит любая из них.
+    /// Драйверу подходит любая из перечисленных строк совместимости.
     pub compatible: &'a [&'a str],
     /// Номер экземпляра среди устройств той же совместимости.
     pub instance: u16,
@@ -52,7 +52,7 @@ pub struct ComponentSpec<'a> {
     pub startup_timeout: Timeout,
     pub launches: u32,
     pub on_exhausted: OnExhausted,
-    /// Компонент заводит сессии своего service-порта сам.
+    /// Компонент сам создаёт сессии своего service-порта.
     pub establishes_sessions: bool,
 }
 
@@ -167,7 +167,7 @@ fn encode_slot(bytes: &mut Vec<u8>, slot: &SlotSpec<'_>) -> Result<(), PlanEncod
         header[2..4].copy_from_slice(&string_len(instance)?.to_le_bytes());
     }
     if let Some(device) = device {
-        // Драйвер работает с семейством устройств: подходит любая из строк, и
+        // Драйвер работает с семейством устройств. Драйверу подходит любая из строк, а
         // выбор между ними принадлежит описанию платформы.
         if device.compatible.is_empty() {
             return Err(PlanEncodeError::EmptyString);

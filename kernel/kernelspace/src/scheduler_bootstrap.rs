@@ -217,13 +217,13 @@ where
 /// Причина отказа [`bootstrap_scheduler`].
 #[derive(Debug)]
 pub enum BootstrapSchedulerError {
-    /// Таймер недоступен: планировщику не на чем считать кванты.
+    /// Таймер недоступен. Планировщику не на чем считать кванты.
     TimerUnavailable(drivers_common::BootServicesError),
     /// Не удалось создать per-CPU состояние планировщика на boot CPU.
     IdleThread(scheduler::CpuBootstrapError),
     /// `SchedulerService` уже зарегистрирован.
     ServiceRegistration(drivers_common::BootServicesError),
-    /// Контроллер прерываний недоступен: без него CPU не разбудить.
+    /// Контроллер прерываний недоступен. Без него CPU не разбудить.
     InterruptsUnavailable(drivers_common::BootServicesError),
     /// Не удалось привязать reschedule-IPI.
     RescheduleIpi(drivers_common::services::interrupts::IrqRegistrationError),

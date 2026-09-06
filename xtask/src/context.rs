@@ -53,7 +53,7 @@ pub(crate) struct BuildContext {
     pub(crate) spec: DeviceSpec,
     pub(crate) features: Option<String>,
     pub(crate) arch: ArchEntry,
-    pub(crate) platform_manifest: PathBuf,
+    pub(crate) platform_dir: PathBuf,
 }
 
 impl BuildContext {
@@ -64,8 +64,7 @@ impl BuildContext {
         let spec = load_spec(&spec_path)?;
         let arch = spec_arch(&spec, &layers::arch_registry(&project_root)?)
             .with_context(|| spec_path.display().to_string())?;
-        let platform_manifest =
-            layers::workspace_of_profile(&project_root, Profile::Platform)?.join("Cargo.toml");
+        let platform_dir = layers::workspace_of_profile(&project_root, Profile::Platform)?;
 
         let build_dir = build_dir(&project_root)?;
 
@@ -76,7 +75,7 @@ impl BuildContext {
             spec,
             features,
             arch,
-            platform_manifest,
+            platform_dir,
         })
     }
 

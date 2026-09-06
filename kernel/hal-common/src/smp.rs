@@ -18,7 +18,7 @@ pub enum PsciConduit {
     Smc,
 }
 
-/// Отказ `CPU_ON`. Успех сюда не входит: его выражает `Ok` разбора.
+/// Отказ `CPU_ON`. Успех сюда не входит. Его выражает `Ok` разбора.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PsciFailure {
     NotSupported,
@@ -63,9 +63,9 @@ impl PsciFailure {
             // CPU уже включён или включается - возможно, по переданной точке входа.
             Self::AlreadyOn
             | Self::OnPending
-            // Отказ реализации: на каком шаге - не сказано.
+            // Отказ реализации не называет шаг, на котором он произошёл.
             | Self::InternalFailure
-            // Код вне спецификации: судить об итоге не по чему.
+            // Код вне спецификации не позволяет судить об итоге.
             | Self::Unknown(_) => true,
             // Вызов отклонён до старта: CPU не тронут.
             Self::NotSupported

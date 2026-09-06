@@ -1,5 +1,5 @@
 //! Приоритетное вытеснение в `on_tick` (`scheduler.rs:789`,
-//! `prio < current.priority()`). Базовые round-robin/time-slice кейсы живут в
+//! `prio < current.priority()`). Базовые round-robin/time-slice кейсы находятся в
 //! `tests/scheduler.rs`. Здесь проверяется именно выбор более приоритетного
 //! потока при тике.
 

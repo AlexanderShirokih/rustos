@@ -5,7 +5,7 @@
 //! своей границе, а класс от страницы и выше - по странице. Чанк приходит от ядра
 //! страничновыровненным, и класс делит его нацело.
 //!
-//! Чанк под класс ядру не возвращается: освобождённый блок уходит в список своего класса и
+//! Чанк под класс ядру не возвращается. Освобождённый блок уходит в список своего класса и
 //! ждёт следующей аллокации. Ядру возвращаются только крупные блоки.
 
 use core::alloc::{GlobalAlloc, Layout};
@@ -89,7 +89,7 @@ impl FreeLists {
 ///
 /// # Safety
 ///
-/// Контракт `GlobalAlloc`: `size` ненулевой, `align` — степень двойки.
+/// Контракт `GlobalAlloc`: `size` ненулевой, `align` - степень двойки.
 pub unsafe fn alloc(size: usize, align: usize) -> *mut u8 {
     let Some(class) = class_of(size, align) else {
         return large_alloc(size, align);
@@ -143,7 +143,7 @@ const fn class_size(class: usize) -> usize {
 }
 
 fn class_of(size: usize, align: usize) -> Option<usize> {
-    // Выравнивания строже страницы у чанка нет.
+    // У чанка нет выравниваний строже страницы.
     if align > PAGE_SIZE {
         return None;
     }

@@ -60,13 +60,11 @@ impl Mmio {
         unsafe { core::ptr::write_volatile(p, value) };
     }
 
-    /// Читает значение из регистра.
     #[inline(always)]
     pub fn read_reg<T: VolatileInt>(&self, reg: Reg<T>) -> T {
         self.read::<T>(reg.offset)
     }
 
-    /// Записывает значение в регистр.
     #[inline(always)]
     pub fn write_reg<T: VolatileInt>(&self, reg: Reg<T>, v: T) {
         self.write::<T>(reg.offset, v);

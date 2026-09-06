@@ -14,8 +14,8 @@ name = "calculator-demo"
 version = "0.1.0"
 dependencies = [
  "component-abi",
- "component-client",
- "component-client-std",
+ "component-startup",
+ "component-startup-std",
  "filesystem-abi",
  "filesystem-client",
  "ipc",
@@ -29,8 +29,8 @@ dependencies = [
 name = "clock-std"
 version = "0.1.0"
 dependencies = [
- "component-client",
- "component-client-std",
+ "component-startup",
+ "component-startup-std",
  "kernel-objects",
  "rtc-abi",
  "userland-build",
@@ -51,7 +51,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "component-client"
+name = "component-startup"
 version = "0.1.0"
 dependencies = [
  "component-abi",
@@ -60,10 +60,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "component-client-std"
+name = "component-startup-std"
 version = "0.1.0"
 dependencies = [
- "component-client",
+ "component-startup",
 ]
 
 [[package]]
@@ -88,7 +88,7 @@ dependencies = [
 name = "driver-pl031"
 version = "0.1.0"
 dependencies = [
- "component-client",
+ "component-startup",
  "io",
  "ipc",
  "kernel-objects",
@@ -135,7 +135,7 @@ dependencies = [
 name = "filesystem-imagefs"
 version = "0.1.0"
 dependencies = [
- "component-client",
+ "component-startup",
  "filesystem",
  "filesystem-server",
  "kernel-objects",
@@ -148,7 +148,7 @@ dependencies = [
 name = "filesystem-ramfs"
 version = "0.1.0"
 dependencies = [
- "component-client",
+ "component-startup",
  "filesystem",
  "filesystem-server",
  "kernel-objects",
@@ -176,8 +176,8 @@ dependencies = [
 name = "hello-std"
 version = "0.1.0"
 dependencies = [
- "component-client",
- "component-client-std",
+ "component-startup",
+ "component-startup-std",
  "userland-build",
 ]
 
@@ -186,7 +186,7 @@ name = "init"
 version = "0.1.0"
 dependencies = [
  "component-abi",
- "component-client",
+ "component-startup",
  "filesystem-abi",
  "ipc",
  "kernel-objects",
@@ -269,7 +269,7 @@ name = "namespace-router"
 version = "0.1.0"
 dependencies = [
  "component-abi",
- "component-client",
+ "component-startup",
  "filesystem-abi",
  "filesystem-server",
  "ipc",
@@ -355,8 +355,8 @@ dependencies = [
 name = "std-selftest"
 version = "0.1.0"
 dependencies = [
- "component-client",
- "component-client-std",
+ "component-startup",
+ "component-startup-std",
  "kernel-objects",
  "syscall",
  "userland-build",
@@ -417,7 +417,7 @@ dependencies = [
  "bootstrap-abi",
  "collections",
  "component-abi",
- "component-client",
+ "component-startup",
  "device-resolver",
  "filesystem",
  "filesystem-abi",

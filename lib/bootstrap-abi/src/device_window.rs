@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn uninspectable_window_is_skipped_not_matched() {
-        // База 0 принадлежала бы окну 0x90, но оно без base - совпадения нет.
+        // База 0 принадлежала бы окну 0x90, но окно без base никогда не совпадает.
         let found = with_vendor(|client| {
             client
                 .acquire_device_memory_by_base::<FakeWindow>(0)

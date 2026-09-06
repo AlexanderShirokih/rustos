@@ -1,16 +1,32 @@
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
 /// Набор прав, ассоциированных с конкретным capability.
+///
+/// Права снимаются при дупликации и никогда не расширяются: `HandleDuplicate` принимает
+/// только подмножество прав источника. Стартовый набор зависит от рода объекта, и
+/// операция syscall-слоя называет требуемые ею биты.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 #[repr(transparent)]
 pub struct Rights(u32);
 
 impl Rights {
+    /// Пустой набор. `HandleClose` прав не требует, прочие операции на таком handle
+    /// отвечают `AccessDenied`.
     pub const NONE: Self = Self(0);
+    /// Право снять с handle копию и вывести из него производную капу. Гейтит
+    /// `HandleDuplicate`, `MemorySlice`, `MemoryWithProfile` и `ResourceSplit`.
     pub const DUPLICATE: Self = Self(1 << 0);
+    /// Право отдать handle другому процессу. Гейтит перенос через `IpcBuffer.caps` и
+    /// стартовый handle в `ProcessStart`.
     pub const TRANSFER: Self = Self(1 << 1);
+    /// Право получать с объекта. Гейтит `PortRecv`, ожидание сигналов, чтение exit-кода и
+    /// инспекцию региона, у Memory-региона разрешает маппинг на чтение.
     pub const READ: Self = Self(1 << 2);
+    /// Право воздействовать на объект. Гейтит `PortSend`, `PortCall`, `PortReply`,
+    /// `SignalSet`, терминацию, списание с `Resource`, `IrqAck` и загрузку образа.
     pub const WRITE: Self = Self(1 << 3);
+    /// Право на исполняемый маппинг Memory-региона. В стартовый набор входит только у
+    /// региона с битом X в access-маске.
     pub const EXECUTE: Self = Self(1 << 4);
 
     const ALL_BITS: u32 =
@@ -28,7 +44,8 @@ impl Rights {
         self.0
     }
 
-    /// Принимает произвольный набор битов, отбрасывая неизвестные позиции.
+    /// Принимает произвольный набор битов, отбрасывая неизвестные позиции. Так ядро
+    /// разбирает `new_rights` в `HandleDuplicate`, и мусор в старших битах отказа не даёт.
     pub const fn from_bits_truncate(bits: u32) -> Self {
         Self(bits & Self::ALL_BITS)
     }

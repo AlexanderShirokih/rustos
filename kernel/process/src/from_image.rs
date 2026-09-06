@@ -12,10 +12,16 @@ use userland::{
 
 use crate::image::{UserImage, UserSegment};
 
+/// Ошибки [`user_image_parts_from_entry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserImageFromModelError {
+    /// Семантическая модель не прошла `validate_entry`. Причина хранится в связанном
+    /// `UserlandValidationError`.
     Semantic(UserlandValidationError),
+    /// Размер сегмента (`mem_size`) не помещается в `usize` либо переполняет `usize`
+    /// при округлении до страницы.
     SegmentSizeOverflow,
+    /// Поле модели (`va_base`, `entry_va` или `stack_size`) не помещается в `usize`.
     FieldOverflow,
 }
 

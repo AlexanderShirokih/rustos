@@ -80,7 +80,7 @@ fn borrow_duplicate_is_independent() {
         .expect("borrow duplicate must succeed");
     let original_raw = original.as_raw();
 
-    // Дубликат поверх заимствования независим: его Drop не трогает оригинал.
+    // Дубликат поверх заимствования независим. Его Drop не трогает оригинал.
     drop(duplicate);
 
     kernel_tests::kassert_eq!(signal_set(original_raw, SIGNALED, 0, WakeCount::None), 0);

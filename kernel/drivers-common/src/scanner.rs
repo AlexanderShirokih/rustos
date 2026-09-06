@@ -16,10 +16,13 @@ fn is_node_enabled<N: DeviceNode>(node: &N) -> bool {
     matches!(prop.as_cstr(), Some("okay" | "ok"))
 }
 
-/// Функция пробирования runtime-драйвера.
+/// Проверяет узел на совместимость с драйвером и строит его фабрику при совпадении.
+///
+/// `scan_and_probe` перебирает описания драйверов в порядке списка и берёт первое,
+/// для которого `probe` вернула `Ok`. Несовпадение или `Err` уводит обход к следующему
+/// описанию, и узел остаётся в обходе.
 pub type ProbeFn<N> = fn(&mut ProbeContext<N>) -> ProbeResult;
 
-/// Дескриптор runtime-драйвера.
 pub type DriverInfo<P> = DriverDescriptor<P>;
 
 pub const MAX_DEVICE_TREE_DEPTH: usize = 128;

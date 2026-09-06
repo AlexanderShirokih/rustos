@@ -7,12 +7,12 @@ use alloc::{
 
 use crate::{BootServices, BootServicesError, ServiceKind};
 
-/// Дескриптор драйвера, связывающий имя и probe-функцию.
+/// Дескриптор драйвера: имя записи и функция пробирования узла на устройство.
 #[repr(C)]
 pub struct DriverDescriptor<P> {
-    /// Имя драйвера.
+    /// Имя записи в реестре поднятых драйверов и в логе инициализации.
     pub name: &'static str,
-    /// Функция пробирования.
+    /// Пробует узел и возвращает фабрику драйвера при совпадении, ошибку - при отказе.
     pub probe: P,
 }
 
@@ -35,7 +35,16 @@ impl DriverRunError {
     }
 }
 
-/// Трейт драйвера устройства
+/// Реализация настраивает устройство и публикует свой сервис в [`BootServices`].
+///
+/// `kernelspace` вызывает `run` на каждом проходе подъёма. Реализация проверяет нужные сервисы
+/// через `require_*` раньше первого обращения к железу.
+///
+/// Результат `run` решает дальнейшее действие `kernelspace`:
+/// - `Ok(())` - `kernelspace` больше не вызывает `run` для этого драйвера;
+/// - `DriverRunError::MissingService` - `kernelspace` вызывает `run` того же экземпляра снова
+///   на следующем проходе;
+/// - `DriverRunError::Fatal` - `kernelspace` останавливает подъём целиком.
 pub trait Driver {
     fn run(&mut self, _services: &mut BootServices) -> Result<(), DriverRunError> {
         Ok(())

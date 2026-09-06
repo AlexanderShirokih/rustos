@@ -68,8 +68,8 @@ pub trait SyscallRuntime: Send + Sync {
         exit_code: i32,
     ) -> Result<(), IpcError>;
 
-    /// Устанавливает регионы образа в child AS, маппит user-стек и
-    /// прикрепляет per-process `UserVmAllocator`.
+    /// Устанавливает сегменты образа в child AS и прикрепляет per-process
+    /// `UserVmAllocator` для его user-VA диапазона.
     fn load_user_image_into(
         &self,
         process: &Arc<ProcessObject>,

@@ -14,7 +14,7 @@ use memory::{aligned::Aligned, physical_address::PageAlignedAddress};
 
 const PAGE_SIZE: usize = PageAlignedAddress::ALIGNMENT;
 
-/// Минимальный `TableAlloc` для тестов: выделяет страницы из `'static`-буфера.
+/// Минимальный `TableAlloc` для тестов, который выделяет страницы из `'static`-буфера.
 /// PA = индекс страницы * 4 КБ. Реальный VA = `base + PA` (как higher-half mapping).
 pub struct MockAlloc {
     base: usize,

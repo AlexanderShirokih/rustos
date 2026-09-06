@@ -1,5 +1,5 @@
-//! Проводка ASID до железа: аллокатор ASID покрыт host-тестами
-//! `hal-aarch64-asid`, здесь проверяется, что выданное им значение доезжает до
+//! Модуль проверяет проводку ASID до железа. Аллокатор ASID покрыт host-тестами
+//! `hal-aarch64-asid`, а здесь проверяется, что выданное им значение доезжает до
 //! `TTBR0_EL1[63:48]`, что `TCR_EL1.AS` согласован с обнаруженной шириной ASID
 //! и что цепочка переключений не портит трансляции (rollover).
 //!
@@ -46,7 +46,7 @@ fn user_rw_flags() -> MemFlags {
 
 fn allocate_probe_page() -> (*mut u64, PageAlignedAddress) {
     let fa = syscall_bridge::frame_allocator().expect("FrameAllocator must be installed");
-    // Фрейм течёт намеренно: после маппинга в user-AS вернуть его нельзя.
+    // Фрейм намеренно не освобождается: после маппинга в user-AS вернуть его нельзя.
     let frame = fa.allocate_frame().expect("RAM frame available");
     let pa = frame.page_address();
     let ptr = (HIGHER_HALF_BASE + pa.as_usize()) as *mut u64;

@@ -133,7 +133,7 @@ pub enum Supervised {
     },
     /// Оборот обслужил операцию транзакции расширения композиции.
     Extended,
-    /// Композиция остановлена: восстановить её оборот supervisor не смог.
+    /// Оборот supervisor не смог восстановить композицию, и она остановлена.
     Stopped(Stopped),
 }
 
@@ -154,8 +154,8 @@ impl FdtMapping {
     }
 }
 
-/// Определение компонента транзакцией расширения: запись плана с одним компонентом и регион,
-/// чьи байты начинаются его программой.
+/// Определение компонента транзакцией расширения содержит запись плана с одним компонентом
+/// и регион, чьи байты начинаются его программой.
 pub struct Definition {
     record: Box<[u8]>,
     program: MemoryRegion,
@@ -421,7 +421,7 @@ impl DeviceAuthority {
         match lines.mint(number, interrupt.trigger) {
             Ok(line) => Ok(line.into_handle()),
             Err(kernel_objects::Error::Syscall(SyscallError::AlreadyBound)) => {
-                // Линия принадлежит одному компоненту: занявший её держит
+                // Линия принадлежит одному компоненту. Занявший её держит
                 // capability, и второй bind ядро отвергает.
                 log_device_conflict(kernel_log, owner, format_args!("irq line {number}"));
                 Err(BootFailure::DeviceBusy)
@@ -452,8 +452,8 @@ impl DeviceAuthority {
         }
         let client = bootstrap::Client::new(PortTransport::client(kernel));
         let region: MemoryRegion = acquire_mmio(&client, window).map_err(BootFailure::Device)?;
-        // Смена incarnation забирает окно заново, и запись владельца остаётся
-        // одна: учёт ведётся по компоненту плана, а не по его запуску.
+        // Смена incarnation забирает окно заново, и запись владельца остаётся одна. Учёт
+        // ведётся по компоненту плана, а не по его запуску.
         if !self
             .windows
             .iter()
@@ -469,8 +469,8 @@ impl DeviceAuthority {
         device: PlanDevice<'_>,
         body: impl Fn(&DeviceTreePlatform<'_>, DeviceSelector<'_>) -> Result<R, ResolveError> + Copy,
     ) -> Result<R, BootFailure> {
-        // Драйвер объявил семейство: описание платформы решает, какая из его
-        // совместимостей стоит на этой машине. Причину отказа несёт последняя.
+        // Драйвер объявляет семейство совместимостей, а описание платформы решает, какая
+        // из них стоит на этой машине. Причину отказа содержит последняя.
         let mut failure = BootFailure::Device(ResolveError::DeviceNotFound);
         for compatible in device.compatible() {
             let selector = DeviceSelector {
@@ -489,8 +489,8 @@ impl DeviceAuthority {
 impl<'a> ComponentRecord<'a> {
     fn defined(definition: Definition) -> Result<Self, BootFailure> {
         let Definition { record, program } = definition;
-        // Загрузчик читает сегменты прямо из региона, и его страницы обязаны быть неизменны:
-        // маска доступа с записью отвергается отображением.
+        // Загрузчик читает сегменты прямо из региона, и его страницы обязаны быть неизменны.
+        // Маска доступа с записью отвергается отображением.
         let mapping = program
             .map_full_read_only()
             .map_err(|_| BootFailure::Record)?;
@@ -575,8 +575,8 @@ impl<'a> RootSystem<'a> {
             log_sessions,
         };
         if let Err(failure) = system.compose(plan) {
-            // Поднятые компоненты уходят вместе с загрузкой: иначе они держат
-            // линии и окна устройств за композицией, которой нет.
+            // Поднятые компоненты уходят вместе с неудавшейся загрузкой. Иначе они держат
+            // линии и окна устройств несуществующей композиции.
             system.shutdown();
             return Err(failure);
         }
@@ -637,12 +637,11 @@ impl<'a> RootSystem<'a> {
         session(&self.components, instance, caller)
     }
 
-    /// Оборот supervisor: ждёт завершения любого компонента, потока
-    /// `relay_thread` либо операции транзакции расширения, записывает исход в
-    /// журнал ядра и поднимает ушедшему компоненту смену.
+    /// Оборот supervisor. Ждёт завершения любого компонента, потока `relay_thread` либо
+    /// операции транзакции расширения, записывает исход в журнал ядра и поднимает ушедшему
+    /// компоненту смену.
     ///
-    /// Завершение потока пересылки критично: восстановить его композиция не
-    /// умеет.
+    /// Завершение потока пересылки критично. Композиция не восстанавливает его.
     pub fn supervise_turn(&mut self, relay_thread: Handle) -> Supervised {
         let kernel_log = bootstrap::Client::new(PortTransport::client(self.kernel));
         let mut waits = Vec::with_capacity(self.components.len() + SUPERVISOR_WAITS);
@@ -913,8 +912,9 @@ impl<'a> RootSystem<'a> {
         index: u16,
         kernel_log: &bootstrap::Client<PortTransport>,
     ) -> Supervised {
-        // Слоты принадлежат incarnation, и капы ушедшей ядро отзывает: потребители уходят
-        // вместе с провайдером и поднимаются его сменой.
+        // Слоты принадлежат incarnation, и капы ушедшей ядро отзывает. Уход провайдера снимает
+        // потребителей, а они получают новую incarnation только вместе с его собственным
+        // перезапуском.
         let group = self.dependents(index);
         let dependents = u16::try_from(group.len()).unwrap_or(u16::MAX);
         let Some(component) = self.components.get_mut(usize::from(index)) else {
@@ -1002,7 +1002,7 @@ impl<'a> RootSystem<'a> {
             if let Some(slot) = taken.get_mut(usize::from(candidate)) {
                 *slot = true;
             }
-            // Снятый компонент своей смены не получает: композиция держит его без запуска.
+            // Снятый компонент своей смены не получает. Композиция держит его без запуска.
             if component.managed.running().is_some() {
                 group.push(candidate);
             }
@@ -1028,7 +1028,7 @@ impl<'a> RootSystem<'a> {
 pub fn supervise(kernel: Handle) -> Stopped {
     let kernel_log = bootstrap::Client::new(PortTransport::client(kernel));
     if relay::start(kernel).is_err() {
-        // Отказ relay идёт в bootstrap-канал: по отказавшему пути диагностика не проходит.
+        // Отказ relay идёт в bootstrap-канал. По отказавшему пути диагностика не проходит.
         let _ = kernel_log.log_str(LOG_TAG, "log relay not started");
         return Stopped::Startup;
     }
@@ -1131,7 +1131,7 @@ fn session(
     badge: NonZeroU64,
 ) -> Result<OwnedHandle, BootFailure> {
     let provider = Provider::of(components, instance)?;
-    // Значки сессий провайдера с состоянием принадлежат ему одному: минтер супервизора на
+    // Значки сессий провайдера с состоянием принадлежат ему одному. Минтер супервизора на
     // его service-порт значков не выдаёт.
     if provider.plan.establishes_sessions() {
         return open_session(
@@ -1152,7 +1152,7 @@ fn component_area(
     scope: &str,
 ) -> Result<OwnedHandle, BootFailure> {
     let provider = Provider::of(components, instance)?;
-    // Сузить сессию до области умеет лишь тот, кто её и заводит: сминченный значок области
+    // Сузить сессию до области может лишь тот, кто её и создаёт. Сминченный значок области
     // не назначает.
     if !provider.plan.establishes_sessions() {
         return Err(BootFailure::Slot(SlotFailure::Directory));
@@ -1177,8 +1177,8 @@ fn control_session(
 }
 
 fn start_order(components: &[Component<'_>]) -> Result<Vec<u16>, BootFailure> {
-    // Порядок запуска топологический: компонент поднимается после всех, кого
-    // называют провайдеры его слотов и `after`.
+    // Порядок запуска топологический. Компонент поднимается после всех, кого называют
+    // провайдеры его слотов и `after`.
     let count = components.len();
     let mut started = alloc::vec![false; count];
     let mut order = Vec::with_capacity(count);

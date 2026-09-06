@@ -188,7 +188,7 @@ impl StressPlan {
 }
 
 pub(crate) const fn epoch_seed(seed: u64, epoch: u64) -> u64 {
-    // Нулевая эпоха идёт по seed прогона: падение дальней эпохи повторяется
+    // Нулевая эпоха идёт по seed прогона. Падение дальней эпохи повторяется
     // прогоном одной эпохи по напечатанному значению.
     seed ^ epoch.wrapping_mul(GOLDEN_GAMMA)
 }
@@ -465,7 +465,7 @@ fn signal_set_wait(signal: &Signal, waiter: Handle, payload: u64) -> Result<(), 
         .set(SIGNALED, 0, WakeCount::All)
         .map_err(|error| FailureKind::from_error("set", OPERATION_TIMEOUT, error, -1302))?;
     join(worker)?;
-    // Сигнал переживает шаг в пуле, и снятый бит возвращает следующему ждущему
+    // Сигнал сохраняется между шагами в пуле, и снятый бит возвращает следующему ждущему
     // блокировку до `set`: порядок пробуждения остаётся под проверкой.
     signal
         .set(0, SIGNALED, WakeCount::All)
@@ -554,7 +554,7 @@ pub(crate) struct Step {
 
 pub(crate) fn choose(random: &mut SplitMix64, pool_len: usize) -> Step {
     // Вид шага, элемент пула и вариант операции приходят из одной
-    // последовательности: прогон повторяется по seed целиком.
+    // последовательности. Прогон повторяется по seed целиком.
     let payload = random.next();
     let selector = random.next();
     let variant = random.next();
@@ -650,7 +650,7 @@ fn received_badge() -> u64 {
 }
 
 fn drain_departed_badge(port: &Port, badge: NonZeroU64) -> Result<(), FailureKind> {
-    // Порт переживает свою переданную сторону, и кадр её ухода приходит той же
+    // Порт существует дольше своей переданной стороны, и кадр её ухода приходит той же
     // очередью, что и сообщения: следующая операция над портом взяла бы его.
     match port.recv(OPERATION_TIMEOUT) {
         Err(Error::Syscall(SyscallError::SenderGone)) if received_badge() == badge.get() => Ok(()),
@@ -1015,8 +1015,8 @@ fn the_same_seed_repeats_the_step_sequence() {
     let sequence_of_the_seed = sequence(0x51ED);
     kernel_tests::kassert_eq!(sequence_of_the_seed, sequence(0x51ED));
 
-    // Освобождение идёт по выбору генератора: элемент, созданный раньше,
-    // переживает созданный позже.
+    // Освобождение идёт по выбору генератора. Элемент, созданный раньше, освобождается
+    // позже созданного после него.
     kernel_tests::kassert!(
         sequence_of_the_seed
             .iter()

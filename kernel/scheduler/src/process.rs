@@ -13,7 +13,7 @@ use syscall::MAX_PROCESS_NAME_LEN;
 use super::address_space::AddressSpace;
 use crate::ProcessId;
 
-/// Имя процесса: непустая строка не длиннее [`MAX_PROCESS_NAME_LEN`].
+/// Имя процесса является непустой строкой не длиннее [`MAX_PROCESS_NAME_LEN`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessName<'a>(&'a str);
 
@@ -110,7 +110,8 @@ impl Process {
         self.handle_table.with_lock(|t| t.live_count() == 0)
     }
 
-    /// `Arc` per-process аллокатора user-VA. `None` для kernel-процессов.
+    /// `Arc` per-process аллокатора user-VA. `None` до загрузки образа и для
+    /// kernel-процессов.
     pub fn user_vm(&self) -> Option<&Arc<MutexCell<UserVmAllocator>>> {
         self.user_vm.as_ref()
     }
@@ -227,7 +228,7 @@ impl ProcessTable {
             .checked_add(1)
             .ok_or(ProcessTableError::OutOfIds)?;
 
-        // Слот выбирается до фабрики: на переполнении её побочных эффектов не будет.
+        // Слот выбирается до фабрики. На переполнении её побочных эффектов не будет.
         let index = if let Some(index) = self.slots.iter().position(Option::is_none) {
             index
         } else {

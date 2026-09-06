@@ -1,6 +1,6 @@
 //! Подъём вторичных CPU.
 //!
-//! CPU поднимаются по одному: следующий стартует после того, как предыдущий
+//! CPU поднимаются по одному. Следующий стартует после того, как предыдущий
 //! доложил о выходе в post-MMU код.
 
 mod entry;
@@ -23,7 +23,7 @@ const READY_TIMEOUT_MS: u64 = 500;
 
 /// Корни трансляции, которыми стартующий CPU включает MMU.
 pub struct TranslationRoots {
-    /// Корень identity-отображения: он держит PC живым в момент включения MMU.
+    /// Корень identity-отображения, который покрывает текущий PC в момент включения MMU.
     pub lower: PageAlignedAddress,
     /// Корень higher-half.
     pub higher: PageAlignedAddress,
@@ -43,9 +43,8 @@ pub fn prepare(device_tree: &'static DeviceTree<'static>, roots: &TranslationRoo
 
 /// Поднимает все CPU из таблицы топологии, кроме текущего.
 ///
-/// Вызывается boot CPU после инициализации контроллера прерываний: стартующий
-/// CPU настраивает свой интерфейс контроллера, а тот требует уже настроенного
-/// distributor.
+/// Вызывается boot CPU после инициализации контроллера прерываний. Стартующий CPU
+/// настраивает свой интерфейс контроллера, а тот требует уже настроенного distributor.
 pub fn start_secondaries() {
     let Some(device_tree) = DEVICE_TREE.get().copied() else {
         warn!("SMP: bring-up requested before the device tree was published");

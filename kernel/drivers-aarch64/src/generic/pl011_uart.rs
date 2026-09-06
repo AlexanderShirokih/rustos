@@ -1,4 +1,5 @@
-//! Драйвер UART PL011 (ARM PrimeCell).
+//! `ByteSink`/`Writer` поверх регистров UART PL011 (ARM PrimeCell) и boot-`Driver`,
+//! который мапит их и публикует получившийся writer консолью ядра.
 
 use alloc::{boxed::Box, sync::Arc};
 use core::hint::spin_loop;
@@ -37,7 +38,8 @@ const CR_RXE: u32 = 1 << 9;
 
 const REG_UART_INDEX: usize = 0;
 
-/// Драйвер UART PL011.
+/// Пишет байты в MMIO-регистры PL011, блокируясь на переполненном TX FIFO и
+/// заменяя `'\n'` на `"\r\n"` через [`Crlf`].
 pub struct UartPl011 {
     mmio: MmioBound,
 }

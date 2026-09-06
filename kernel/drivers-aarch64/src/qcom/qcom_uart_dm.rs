@@ -1,4 +1,5 @@
-//! Драйвер Qualcomm UART DM (Data Mover).
+//! `ByteSink`/`Writer` поверх регистров Qualcomm UART DM (Data Mover) и boot-`Driver`,
+//! который мапит их и публикует получившийся writer консолью ядра.
 
 use alloc::{boxed::Box, sync::Arc};
 use core::{
@@ -38,7 +39,9 @@ const REG_UART_INDEX: usize = 0;
 
 const TX_SEQUENCE_SPIN_LIMIT: usize = 1_000_000;
 
-/// Драйвер Qualcomm UART DM.
+/// Пишет байты через регистры UART DM словами до 4 байт: `NCF_TX`/`CR` объявляют размер
+/// и стартуют передачу, `TF` принимает слово целиком. `Crlf` заменяет `'\n'` на `"\r\n"`.
+/// Конкурентные вызовы `try_write*` сериализует захват `tx_sequence_claimed`.
 pub struct UartDm {
     mmio: MmioBound,
     tx_sequence_claimed: AtomicBool,
@@ -55,7 +58,7 @@ impl UartDm {
     }
 
     fn claim_tx_sequence(&self) -> TxSequenceClaim<'_> {
-        // Ожидание без предела: таймаут не доказывает смерть владельца.
+        // Ожидание не ограничено по времени, потому что таймаут не доказывает смерть владельца.
         loop {
             if let Some(claim) = self.try_claim_tx_sequence() {
                 return claim;
@@ -74,8 +77,8 @@ impl UartDm {
 
         // Захват переходит силой, и вызывающий гарантирует, что вытесняемый
         // владелец не возобновится. Брошенная последовательность не мешает
-        // свежей: слово, не поданное в TF, передачу не начинает, а поданное
-        // дренируется железом и наблюдается через SR_TXEMT.
+        // свежей, потому что непереданное в TF слово передачу не начинает, а
+        // поданное дренируется железом и наблюдается через SR_TXEMT.
         self.tx_sequence_claimed.swap(true, Ordering::Acquire);
         TxSequenceClaim(self)
     }

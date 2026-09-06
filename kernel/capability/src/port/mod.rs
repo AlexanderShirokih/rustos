@@ -45,7 +45,16 @@ use super::{
     wait::{CancelTarget, ParkWaker, deadline_after, park_until_deadline, remaining_until},
 };
 
-/// Port - объект, реализующий синхронный обмен сообщениями.
+/// Объект синхронного обмена сообщениями. Отправитель и получатель встречаются на нём рандеву,
+/// и сообщение переносится напрямую между их IPC-буферами.
+///
+/// Порт держит очередь заблокированных сторон одного рода. Пока у порта есть держатели с
+/// правом [`Rights::READ`], отправитель встаёт в очередь. Когда таких держателей не остаётся,
+/// отправка отвергается кодом [`IpcError::PeerClosed`], а очередь снимается - её стороны
+/// будятся тем же кодом.
+///
+/// [`IpcError`] здесь и ниже - ошибки операций над объектами ядра из этого крейта. Слой
+/// контрактов `ipc` держит собственный одноимённый wire-тип.
 pub struct Port {
     inner: MutexCell<PortState>,
 }
@@ -81,7 +90,8 @@ impl RevocationHook for PortHolder {
     }
 }
 
-/// Снимок port-capability для одной операции: объект, значок хендла и удержание учёта его стороны.
+/// Снимок port-capability на одну операцию. Держит объект, значок хендла и учёт той стороны
+/// порта, которую этот хендл представляет.
 pub struct PortAccess {
     pub port: Arc<Port>,
     pub badge: u64,
@@ -360,7 +370,9 @@ impl Port {
         action
     }
 
-    /// Будит всех ждущих с исходом `PeerGone`.
+    /// Будит всех ждущих с исходом `PeerGone`, и их операции возвращают
+    /// [`IpcError::PeerClosed`]. Очередь порта остаётся пустой, учёт держателей не трогается.
+    /// Пробуждение идёт вне лока порта. Вызывается и по `Drop` порта.
     pub fn cancel_all(&self) {
         let wakes = self.inner.with_lock(|state| {
             let mut wakes = Vec::new();
@@ -483,6 +495,11 @@ fn resolve_send_recv(
 
 /// Реализует send из IPC-буфера отправителя. `hold` - удержание учёта его стороны, снимаемое после
 /// доставки или постановки в очередь.
+///
+/// `timeout_ns = None` держит отправителя в очереди бессрочно, `Some(d)` ограничивает ожидание
+/// `d` наносекундами, `Some(0)` оставляет только немедленную доставку. Истечение срока даёт
+/// [`IpcError::Timeout`]. Порт без держателей с правом `READ` отвечает [`IpcError::PeerClosed`],
+/// и уход последнего такого держателя из-под ждущего отправителя даёт тот же код.
 pub fn port_send(
     port: &Arc<Port>,
     sender: &ThreadTransport,
@@ -1057,7 +1074,7 @@ mod tests {
         let abandoned = cancel
             .take_abandoned_reply()
             .expect("cancel yields the abandoned reply");
-        // Слот опустошён: нормальный путь изъятия того же reply не получит.
+        // Слот опустошён, и нормальный путь изъятия того же reply уже ничего не найдёт.
         assert!(reply_slot.take().is_none());
         assert!(cancel.take_abandoned_reply().is_none());
 
@@ -1261,7 +1278,7 @@ mod tests {
         assert_eq!(rt.parks(), alloc::vec![None]);
     }
 
-    /// Приём со сроком: пробуждение раньше дедлайна досыпает остаток.
+    /// Приём со сроком. Пробуждение раньше дедлайна досыпает остаток.
     #[test]
     fn resolve_recv_woken_early_sleeps_the_remainder_before_timing_out() {
         let rt = DeadlineRuntime::arc(500);

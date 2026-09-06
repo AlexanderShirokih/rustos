@@ -127,7 +127,7 @@ mod tests {
                 uncached_user_access(mem_flags_for(profile, UserMemFlags::ReadOnly)),
                 AccessMode::Readonly
             ));
-            // Execute не представим вне кэша: сводится к read.
+            // Execute вне кэша не представим и сводится к read.
             assert!(matches!(
                 uncached_user_access(mem_flags_for(profile, UserMemFlags::ReadExecute)),
                 AccessMode::Readonly

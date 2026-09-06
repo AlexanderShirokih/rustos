@@ -12,8 +12,8 @@ use crate::node::NodeId;
 
 const OPEN_NODE_LIMIT: usize = 64;
 
-/// Ключ, по которому сервер узнаёт клиента своей сессии. Значение назначает
-/// сервер.
+/// Ключ клиента в таблице сессий. Значение назначает сервер при выдаче
+/// клиенту capability его сессии.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClientId(u64);
 
@@ -38,7 +38,7 @@ impl DescriptorSlot {
     }
 
     fn is_vacant(&self) -> bool {
-        // Исчерпанное поколение выводит слот из оборота: иначе дескриптор повторит значение
+        // Исчерпанное поколение выводит слот из оборота. Иначе дескриптор повторит значение
         // жившего когда-то.
         self.node.is_none() && self.generation < u16::MAX
     }
@@ -57,8 +57,8 @@ impl DescriptorSlot {
     }
 }
 
-/// Состояние одного клиента: его открытые узлы и прикрепление `A`, которое
-/// вешает на клиента сервер.
+/// Открытые узлы одного клиента вместе с прикреплением `A`, которое
+/// сервер держит при сессии.
 pub struct Session<A> {
     attachment: A,
     open_nodes: Vec<DescriptorSlot>,
@@ -88,8 +88,8 @@ impl<A> Session<A> {
         &mut self.attachment
     }
 
-    /// Открывает дескриптор, занимая освободившийся слот. Сверх потолка -
-    /// `TooManyOpenFiles`. Значение дескриптора несёт поколение слота: отставший
+    /// Открывает дескриптор, занимая свободный слот. Сверх потолка -
+    /// `TooManyOpenFiles`. Значение дескриптора содержит поколение слота. Отставший
     /// вызов по закрытому дескриптору не попадает в новый узел этого слота.
     pub fn open(&mut self, open_node: OpenNode) -> Result<NodeDescriptor, FileSystemError> {
         if let Some(slot) = self.open_nodes.iter().position(DescriptorSlot::is_vacant) {
@@ -122,7 +122,7 @@ impl<A> Session<A> {
             .ok_or(FileSystemError::BadDescriptor)
     }
 
-    /// Узлы, открытые сессией к её уходу.
+    /// Забирает у сессии её открытые узлы. Держателей с этих узлов снимает вызывающий.
     pub fn into_open_nodes(self) -> impl Iterator<Item = OpenNode> {
         self.open_nodes.into_iter().filter_map(|slot| slot.node)
     }
@@ -160,7 +160,9 @@ impl<A> SessionTable<A> {
         self.sessions.get(&client)
     }
 
-    /// Забывает сессию вместе с её открытыми узлами и прикреплением.
+    /// Снимает сессию с таблицы и отдаёт её вызывающему вместе с открытыми узлами и
+    /// прикреплением. Держателей узлов снимает вызывающий, обойдя
+    /// [`Session::into_open_nodes`]. Незнакомый ключ - `None`.
     pub fn remove(&mut self, client: ClientId) -> Option<Session<A>> {
         self.sessions.remove(&client)
     }
@@ -174,10 +176,10 @@ impl<A> SessionTable<A> {
 }
 
 impl<A: Default> SessionTable<A> {
-    /// Заводит сессию клиента с прикреплением по умолчанию. Занятый ключ -
+    /// Создаёт сессию клиента с прикреплением по умолчанию. Занятый ключ -
     /// `AlreadyExists`.
     ///
-    /// Единственный способ завести сессию. Кадр сессии не заводит: явность отделяет
+    /// Единственный способ создать сессию. Кадр сессии не создаёт. Явность отделяет
     /// отставший кадр ушедшего клиента от живой сессии и от убранной, чьё событие
     /// об уходе уже прочитано.
     pub fn open(&mut self, client: ClientId) -> Result<&mut Session<A>, FileSystemError> {

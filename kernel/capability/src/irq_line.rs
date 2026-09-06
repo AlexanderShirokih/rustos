@@ -1,14 +1,14 @@
 //! `IrqLine` capability target: привязанная аппаратная линия прерывания.
 //!
-//! Носит «сырой» номер линии, bound-[`Signal`] (бит `SIGNALED`), состояние
+//! Содержит "сырой" номер линии, bound-[`Signal`] (бит `SIGNALED`), состояние
 //! ARMED/FIRED и RAII-токен развязки. Доставка переиспользует `Signal`:
 //! объект ожидается напрямую через
 //! [`as_waitable`](super::CapabilityTarget::as_waitable), отдельный
 //! `Signal`-хендл наружу не выдаётся, и подделать срабатывание нельзя.
 //!
-//! Уровневый протокол (линии GIC level-sensitive): при срабатывании линия
-//! маскируется СИНХРОННО (до возврата из IRQ-обработчика) и поднимается
-//! `SIGNALED`. [`ack`](IrqLine::ack) снимает latch и размаскирует линию.
+//! Уровневый протокол (линии GIC level-sensitive). При срабатывании линия маскируется
+//! синхронно (до возврата из IRQ-обработчика) и поднимается `SIGNALED`. [`ack`](IrqLine::ack)
+//! снимает latch и размаскирует линию.
 
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -36,8 +36,11 @@ pub struct IrqLine {
 impl IrqLine {
     /// Привязывает линию `irq` с триггером `trigger` через `control` и
     /// возвращает готовый объект.
-    /// При срабатывании линии вызывается `on_fire`. На ошибке
-    /// привязки объект дропается, не оставляя зависшей линии.
+    ///
+    /// С этого момента срабатывание линии маскирует её на контроллере и поднимает `SIGNALED` на
+    /// сигнале, который отдаёт [`event_signal`](Self::event_signal). Занятая линия отвергается с
+    /// [`IpcError::AlreadyBound`]. На отказе привязки объект разрушается здесь же, и линия на
+    /// контроллере остаётся свободной.
     pub fn bind(
         control: Arc<dyn InterruptsControl>,
         irq: u16,
@@ -66,14 +69,14 @@ impl IrqLine {
         {
             return;
         }
-        // Маска ДО сигнала: к моменту пробуждения драйвера линия тиха
+        // Маска до сигнала: к моменту пробуждения драйвера линия тиха
         // (для level-линии это обязательно, иначе interrupt storm).
         self.control.mask(self.irq);
         self.signal.signal(SIGNALED, 0);
     }
 
-    /// Подтверждает обработку: снимает latch `SIGNALED`, затем размаскирует
-    /// линию. Вне состояния FIRED — `WrongType` (нечего подтверждать, защита
+    /// Подтверждает обработку. Снимает latch `SIGNALED`, затем размаскирует
+    /// линию. Вне состояния FIRED - `WrongType` (нечего подтверждать, защита
     /// от двойного `unmask`).
     pub fn ack(&self) -> Result<(), IpcError> {
         if self
@@ -83,14 +86,15 @@ impl IrqLine {
         {
             return Err(IpcError::WrongType);
         }
-        // Снять latch ДО unmask: пока линия замаскирована, потерять
+        // Снять latch до unmask: пока линия замаскирована, потерять
         // следующее срабатывание невозможно.
         self.signal.signal(0, SIGNALED);
         self.control.unmask(self.irq);
         Ok(())
     }
 
-    /// bound-`Signal` для ожидания (через `as_waitable`).
+    /// bound-`Signal` для ожидания (через `as_waitable`). Бит `SIGNALED` поднят с момента
+    /// срабатывания линии и до [`ack`](Self::ack). Хендлом наружу этот сигнал не выдаётся.
     pub fn event_signal(&self) -> Arc<Signal> {
         self.signal.clone()
     }

@@ -2,7 +2,7 @@
 //! и граница полномочий выданной лог-сессии.
 //!
 //! Сток тестового relay записывает пересланные строки и делает встречный
-//! двусторонний вызов ядра: он перезаписывает значок в IPC-буфере потока, и
+//! двусторонний вызов ядра. Он перезаписывает значок в IPC-буфере потока, и
 //! записанный источник проверяет, что relay снял значок до пересылки.
 
 use alloc::{
@@ -119,7 +119,7 @@ pub(crate) fn shutdown_relays() {
 }
 
 fn stop(slot: &Mutex<Option<LogRelayThread>>) {
-    // Путь завершения прогона не ждёт лока: ожидание превращает провал теста в зависание.
+    // Путь завершения прогона не ждёт лока. Ожидание превращает провал теста в зависание.
     if let Some(mut held) = slot.try_lock()
         && let Some(relay) = held.take()
     {
@@ -217,7 +217,7 @@ fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> OwnedHandle)) {
 }
 
 fn wait_for_records(count: usize) -> Vec<Record> {
-    // Порт-таймер заводится один на всё ожидание: приёмник ему не нужен.
+    // Порт-таймер создаётся один на всё ожидание. Приёмник ему не нужен.
     let idle = Port::create().expect("port create");
     let mut waited = 0;
     loop {
@@ -477,7 +477,7 @@ fn relay_forwards_an_empty_message_once() {
     });
 }
 
-// Уход сессии relay не останавливает: следующая сессия обслуживается.
+// Уход сессии relay не останавливает. Следующая сессия обслуживается.
 #[kernel_test]
 fn relay_serves_past_a_departed_session() {
     with_relay(|session| {
@@ -493,7 +493,7 @@ fn relay_serves_past_a_departed_session() {
     });
 }
 
-// Кадр вне контракта отвергается по одному: следующий валидный кадр relay
+// Кадр вне контракта отвергается по одному. Следующий валидный кадр relay
 // пересылает.
 #[kernel_test]
 fn relay_rejects_one_bad_frame_and_serves_the_next() {
@@ -518,7 +518,7 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
             .handle()
             .duplicate(Rights::WRITE | Rights::TRANSFER, None)
             .expect("writer side");
-        // Корневая капа - единственный получатель: она уезжает кадром.
+        // Корневая капа - единственный получатель. Она передаётся кадром.
         kernel_tests::kassert_eq!(send_log_frame_with_cap(&logger, carried.into_handle()), 0);
         wait_for_records(1);
 
@@ -558,7 +558,7 @@ fn relay_serves_after_receiver_resource_exhaustion() {
 }
 
 // Лог-капа не даёт полномочий bootstrap-контракта, и попытки их взять relay
-// переживает.
+// отклоняет.
 #[kernel_test]
 fn log_session_denies_bootstrap_operations() {
     with_relay(|session| {
@@ -578,7 +578,7 @@ fn log_session_denies_bootstrap_operations() {
     });
 }
 
-// Уходящие сессии не копят непрочтённых событий: минт новых продолжает
+// Уходящие сессии не копят непрочтённых событий. Минт новых продолжает
 // проходить и после смены их числа, кратного ёмкости таблицы.
 #[kernel_test]
 fn relay_drains_departed_badges_so_new_sessions_mint() {
@@ -600,7 +600,7 @@ fn relay_drains_departed_badges_so_new_sessions_mint() {
     });
 }
 
-// Закрытие лог-порта владельцем завершает цикл relay штатно: сторона приёма
+// Закрытие лог-порта владельцем завершает цикл relay штатно. Сторона приёма
 // отзывается каскадом от корневой капы.
 #[kernel_test]
 fn relay_stops_when_its_log_port_closes() {

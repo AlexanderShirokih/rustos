@@ -572,8 +572,8 @@ fn from_bytes_rejects_inflated_total_size() {
 
 #[test]
 fn walker_does_not_panic_on_inflated_property_length() {
-    // Свойство с length, выходящим за пределы буфера, не должно паниковать:
-    // обходчик просто завершит итерацию (read_u32/срез вернут None).
+    // Свойство с length, выходящим за пределы буфера, не паникует, потому что
+    // обходчик просто завершает итерацию (read_u32/срез вернут None).
     let mut buf = Vec::new();
     let strings = b"reg\0";
     let mut st = Vec::new();

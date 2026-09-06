@@ -43,7 +43,7 @@ pub enum BootError {
     Scheduler(BootstrapSchedulerError),
     /// Не удалось создать init-поток.
     InitProcess(scheduler::SpawnError),
-    /// Планировщику нечего запускать: первый поток не выбрался.
+    /// Первый поток не выбрался, и запускать планировщику нечего.
     NoRunnableThread,
 }
 
@@ -138,7 +138,7 @@ where
 
     init_task(&scheduler, context).map_err(BootError::InitProcess)?;
 
-    // Подъём идёт последним: стартующий CPU настраивает свой интерфейс
+    // Подъём идёт последним. Стартующий CPU настраивает свой интерфейс
     // контроллера прерываний и сразу входит в планировщик, поэтому к этому
     // моменту готовы должны быть оба.
     <A::Cpu as ArchCpu>::start_secondaries();
@@ -191,7 +191,7 @@ fn bind_console(kernel: &mut KernelContext, buffered: &BufferedWriter) {
     kernel.with_runtime_state(|services, _| {
         if let Some(console) = services.console() {
             let console = console as Arc<dyn io::writer::Writer + Send + Sync>;
-            // Сток паники указывает на драйвер консоли напрямую: путь паники
+            // Сток паники указывает на драйвер консоли напрямую. Путь паники
             // не проходит через локи `STDOUT` и `BufferedWriter`.
             klog::set_panic_stdout(console.clone());
             buffered.attach(&console);

@@ -8,7 +8,7 @@ pub fn is_cyrillic(ch: char) -> bool {
     matches!(ch, '\u{0400}'..='\u{04ff}')
 }
 
-/// Возвращает маску: для каждого байта — лежит ли он внутри обратных кавычек.
+/// Возвращает маску, отмечающую для каждого байта, лежит ли он внутри обратных кавычек.
 pub fn backtick_mask(text: &str) -> Vec<bool> {
     let mut mask = vec![false; text.len()];
     let mut open: Option<usize> = None;

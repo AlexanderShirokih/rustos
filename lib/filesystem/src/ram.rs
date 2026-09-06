@@ -3,8 +3,8 @@
 //! переиспользуется под новое имя каталога.
 //!
 //! Ячейка арены переиспользуется под следующий узел, когда с прежнего снято имя
-//! и ушёл последний держатель. `NodeId` несёт поколение ячейки вместе с её
-//! номером: значение, выданное до переиспользования, до нового узла не достаёт.
+//! и ушёл последний держатель. `NodeId` содержит поколение ячейки вместе с её
+//! номером. Значение, выданное до переиспользования, до нового узла не достаёт.
 
 use alloc::{string::String, vec, vec::Vec};
 
@@ -75,8 +75,8 @@ struct Placement {
     name: String,
 }
 
-/// Дерево в куче сервера. Узел переживает снятие последнего имени: за ним
-/// закреплена идентичность уже открытых дескрипторов.
+/// Дерево в куче сервера. Узел со снятым именем остаётся в системе, пока на нём есть хотя бы
+/// один держатель, и освобождается вместе с последним из них.
 pub struct RamFileSystem {
     nodes: Vec<Cell>,
 }
@@ -94,7 +94,7 @@ impl Cell {
     }
 
     fn is_reusable(&self) -> bool {
-        // Исчерпанное поколение выводит ячейку из оборота: иначе идентификатор
+        // Исчерпанное поколение выводит ячейку из оборота. Иначе идентификатор
         // повторит значение жившего когда-то узла.
         matches!(self.content, Content::Free) && self.generation <= GENERATION_MAX
     }
@@ -324,7 +324,7 @@ impl FileSystemBackend for RamFileSystem {
         if self.locate(directory, name)?.is_some() {
             return Err(FileSystemError::AlreadyExists);
         }
-        // Место записи готовится до заведения узла: узел попадает в арену сразу с именем.
+        // Место записи готовится до заведения узла. Узел попадает в арену сразу с именем.
         let placement = self.reserve(directory, name)?;
         let node = self.insert(match kind {
             NodeKind::File => Node::File(File::Heap(Vec::new())),
@@ -351,7 +351,7 @@ impl FileSystemBackend for RamFileSystem {
         if info.kind.is_directory() && info.size != 0 {
             return Err(FileSystemError::NotEmpty);
         }
-        // Слот записи занимает надгробие: соседи по каталогу остаются на своих позициях.
+        // Слот записи занимает надгробие. Соседи по каталогу остаются на своих позициях.
         *self.entry_mut(directory, index)? = None;
         self.drop_name(stores, node);
         Ok(())
@@ -982,7 +982,7 @@ mod tests {
             fs.unlink(path("/sample"), NodeKind::File),
             Err(FileSystemError::NotFound)
         );
-        // Держатель закрепляет идентичность: узел переживает имя.
+        // Держатель закрепляет идентичность. Узел остаётся после того, как имя снято.
         assert_eq!(read(&fs, sample, 0, 16), b"body");
     }
 
@@ -1007,7 +1007,7 @@ mod tests {
         fs.retain(held).expect("retain");
         fs.unlink(path("/held"), NodeKind::File).expect("unlink");
 
-        // Слот занят до ухода держателя: соседнее имя заводится рядом.
+        // Слот занят до ухода держателя. Соседнее имя создаётся рядом.
         let neighbour = file(&mut fs, "/neighbour");
         assert_ne!(slot_of(neighbour), slot_of(held));
         assert_eq!(fs.metadata(held).expect("metadata").kind, NodeKind::File);
@@ -1027,7 +1027,7 @@ mod tests {
 
         let fresh = file(&mut fs, "/fresh");
         fs.write_at(fresh, 0, b"fresh").expect("write");
-        // Слот тот же, поколение ушло вперёд: прежнее значение до нового узла не достаёт.
+        // Слот тот же, поколение ушло вперёд. Прежнее значение до нового узла не достаёт.
         assert_eq!(slot_of(fresh), slot_of(stale));
         assert_ne!(fresh, stale);
         assert_eq!(fs.metadata(stale), Err(FileSystemError::NotFound));
@@ -1055,7 +1055,7 @@ mod tests {
         let window = fs.backing(sample).expect("promote");
 
         fs.unlink(path("/sample"), NodeKind::File).expect("unlink");
-        // Байты узла уходят вместе с ним: хранилище возвращается серверу.
+        // Байты узла уходят вместе с ним. Хранилище возвращается серверу.
         assert_eq!(
             fs.stores.read(window.store, 0, &mut [0; 4]),
             Err(FileSystemError::NotFound)
@@ -1142,7 +1142,7 @@ mod tests {
             fs.lookup(path("/sample.new")),
             Err(FileSystemError::NotFound)
         );
-        // Замещённое имя было у узла единственным, держателей у него нет.
+        // Замещённое имя было у узла единственным. У узла не осталось держателей.
         assert_eq!(fs.metadata(stale), Err(FileSystemError::NotFound));
     }
 
@@ -1292,7 +1292,7 @@ mod tests {
         }
         fs.unlink(path("/data/b"), NodeKind::File).expect("unlink");
 
-        // Надгробие в слоте 1 занимает слот, не давая записи: первый заход из
+        // Надгробие в слоте 1 занимает слот, не давая записи. Первый заход из
         // двух записей доходит до слота 3 вместо слота 2.
         let room = 2 * (ENTRY_HEADER_SIZE + 1);
         let mut seen = Vec::new();
@@ -1319,7 +1319,7 @@ mod tests {
         let data = directory(&mut fs, "/data");
         file(&mut fs, "/data/a");
 
-        // Запись не помещается: перечисление стоит на своём слоте, и повтор с
+        // Запись не помещается. Перечисление стоит на своём слоте, и повтор с
         // тем же буфером не сдвинет его.
         let (names, batch) = listing(&fs, data, DirCursor::START, ENTRY_HEADER_SIZE);
         assert!(names.is_empty());

@@ -22,7 +22,6 @@ pub struct ProcessObject {
 }
 
 impl ProcessObject {
-    /// Создаёт новый `ProcessObject`.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: TerminationState::new(),
@@ -30,7 +29,8 @@ impl ProcessObject {
         })
     }
 
-    /// Задаёт метеринг текущему процессу.
+    /// Задаёт метеринг-грант этого процесса. Грант ставится один раз. На занятом слоте вызов
+    /// сохраняет прежний грант и разрушает `grant`.
     pub fn set_metering(&self, grant: MeteringGrant) {
         self.metering.with_lock(|slot| {
             if slot.is_none() {
@@ -48,22 +48,29 @@ impl ProcessObject {
             .with_lock(|slot| slot.as_ref().map(|grant| Arc::clone(&grant.resource)))
     }
 
-    /// Отвязывает metering-грант от объекта процесса.
+    /// Отвязывает метеринг-грант от объекта процесса и открывает слот под новый грант. Когда на
+    /// ресурс гранта не остаётся ссылок, невыбранный бюджет возвращается родительскому ресурсу.
     pub fn clear_metering(&self) {
         self.metering.with_lock(Option::take);
     }
 
-    /// Публикует `code` и помечает процесс завершённым. Повторный вызов - no-op.
+    /// Публикует `code`, помечает процесс завершённым и будит наблюдателей. Повторный вызов -
+    /// no-op, и код первой пометки сохраняется.
     pub fn signal_terminated(&self, code: i32) {
         self.inner.signal_terminated(code);
     }
 
-    /// Помечает процесс завершённым и публикует `code`. Наблюдателей не будит.
+    /// Помечает процесс завершённым и публикует `code`. Наблюдателей будит парный
+    /// [`wake_terminated`](Self::wake_terminated), вызываемый уже вне scheduler-лока. Повторный
+    /// вызов - no-op, и код первой пометки сохраняется.
     pub fn mark_terminated(&self, code: i32) {
         self.inner.mark_terminated(code);
     }
 
-    /// Будит наблюдателей завершения процесса.
+    /// Будит наблюдателей завершения процесса. Вызывается после
+    /// [`mark_terminated`](Self::mark_terminated) и вне scheduler-лока. Пока bound-`Signal` не
+    /// материализован обращением к [`termination_signal`](Self::termination_signal), вызов -
+    /// no-op.
     pub fn wake_terminated(&self) {
         self.inner.wake_terminated();
     }

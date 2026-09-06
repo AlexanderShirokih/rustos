@@ -65,7 +65,7 @@ impl DataBuffer {
             .staging
             .get_mut(..len)
             .ok_or(FileSystemError::BufferTooSmall)?;
-        // Байты, до которых не дошёл `fill`, уходят клиенту нулями: данные
+        // Байты, до которых не дошёл `fill`, уходят клиенту нулями. Данные
         // предыдущей операции сессии в его буфер не просачиваются.
         head.fill(0);
         let value = fill(head)?;
@@ -84,7 +84,7 @@ impl DataBuffer {
             .staging
             .get_mut(..len)
             .ok_or(FileSystemError::BufferTooSmall)?;
-        // Страницы буфера отображены и у клиента, который пишет в них в любой момент: кадр
+        // Страницы буфера отображены и у клиента, который пишет в них в любой момент. Кадр
         // работает с приватной копией.
         self.mapping
             .copy_out(head)

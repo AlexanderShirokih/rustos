@@ -55,7 +55,7 @@ pub struct BusRange {
 
 /// Адресные расширения поверх узла (для MMIO-инициализации драйверов).
 pub trait NodeAddressExt: DeviceNode {
-    /// Возвращает размерность ячеек этого узла.
+    /// Читает `#address-cells`/`#size-cells` узла и возвращает их размерность.
     fn cells_size(&self) -> Option<CellsSize>;
     /// Читает `ranges` и возвращает трансляцию child -> parent.
     fn range_to_parent(&self, parent_cells: CellsSize) -> Option<BusRange>;

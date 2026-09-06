@@ -53,7 +53,9 @@ impl OwnedHandle {
         }
     }
 
-    /// Дублирует через заимствование.
+    /// Дублирует хэндл с правами `rights` (подмножество исходных) и значком `badge`.
+    /// Требует право `DUPLICATE`. Возвращает независимый `OwnedHandle`, и закрытие
+    /// дубликата не трогает оригинал.
     pub fn duplicate(&self, rights: Rights, badge: Option<NonZeroU64>) -> Result<OwnedHandle> {
         self.borrow().duplicate(rights, badge)
     }
@@ -120,7 +122,7 @@ impl BorrowedHandle<'_> {
         svc::handle_duplicate(
             self.handle,
             rights.into(),
-            // Отсутствие значка ABI задаёт нулём: производная capability наследует значок
+            // ABI задаёт отсутствие значка нулём. Производная capability наследует значок
             // источника.
             badge.map_or(UNBADGED, NonZeroU64::get),
         )

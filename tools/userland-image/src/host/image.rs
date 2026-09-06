@@ -89,8 +89,8 @@ fn build_program_blob(entry: &BuiltEntry) -> Result<Vec<u8>> {
 }
 
 fn validate_component_directories(entries: &[BuiltEntry], files: &[LoadedFile]) -> Result<()> {
-    // Каталог компонента - его файловая область: чужих записей в ней нет, и
-    // назвать что-то вне её компонент не может.
+    // Каталог компонента - его файловая область. В ней нет чужих записей, и
+    // компонент не может назвать что-то вне её.
     for (index, entry) in entries.iter().enumerate() {
         let directory = entry.program.path.as_str();
         for earlier in entries.iter().take(index) {

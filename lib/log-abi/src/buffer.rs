@@ -74,7 +74,7 @@ pub fn chunks<const N: usize>(text: &str) -> impl Iterator<Item = &str> {
         if done {
             return None;
         }
-        // Символ, не влезающий в N целиком, всё равно уезжает одним куском:
+        // Символ, не влезающий в N целиком, всё равно выходит одним куском:
         // резать его нельзя, а терять - тем более.
         let take = match fitting_prefix(rest, N) {
             0 => rest.chars().next().map_or(0, char::len_utf8),

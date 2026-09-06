@@ -42,6 +42,8 @@ impl Reply {
     ///
     /// Повторный `reply` на том же объекте вернёт [`IpcError::BadHandle`].
     /// На провале переноса вызывающая сторона будится с точной причиной отказа.
+    /// [`IpcError::PeerClosed`] - вызыватель ушёл по тайм-ауту либо отмене, и ответ приложить
+    /// уже некуда.
     pub fn reply(&self, server: &ThreadTransport) -> Result<(), IpcError> {
         if self
             .used
@@ -71,8 +73,10 @@ impl Reply {
         }
     }
 
-    /// Инвалидирует Reply без ответа: будит вызывателя с `PeerGone`.
-    /// No-op, если Reply уже использован.
+    /// Инвалидирует Reply без ответа и будит вызывателя с `PeerGone`. `call` вызывателя выходит
+    /// из этого исхода по [`IpcError::PeerClosed`]. No-op, если Reply уже использован.
+    ///
+    /// Вызывается и по `Drop`. Брошенный сервером Reply вызывателя в блокировке не оставляет.
     pub fn cancel(&self) {
         if self
             .used

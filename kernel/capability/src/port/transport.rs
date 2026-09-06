@@ -52,6 +52,8 @@ impl ThreadTransport {
         }
     }
 
+    /// Транспорт kernel-потока с телом в [`KernelIpcBuffer`]. Маппинг user-AS такому потоку не
+    /// требуется.
     pub fn new_kernel(buffer: KernelIpcBuffer, handle_table: Arc<MutexCell<HandleTable>>) -> Self {
         Self {
             access: BufferAccess::Kernel { buffer },
@@ -60,6 +62,8 @@ impl ThreadTransport {
         }
     }
 
+    /// Ставит значок port-хендла, через который идёт операция. При переносе сообщения значок
+    /// записывается в `IpcBuffer.badge` получателя. `0` означает "без значка".
     pub fn with_badge(mut self, badge: u64) -> Self {
         self.badge = badge;
         self

@@ -6,7 +6,7 @@ use std::{process, thread};
 
 use calculator_demo::calculator;
 use component_abi::supervisor_gone;
-use component_client::component_manifest;
+use component_startup::component_manifest;
 use ipc::{Transport as _, wire::IpcError};
 use kernel_objects::{OwnedHandle, PortTransport, ReceivedFrame};
 use syscall::Timeout;
@@ -35,12 +35,12 @@ fn main() {
     // До установки лог-сессии вывод не доходит до журнала, поэтому процесс называет отказ
     // приёма кодом выхода.
     let Ok(CalculatorStartup { control, service }) =
-        component_client_std::receive(CalculatorStartup::receive)
+        component_startup_std::receive(CalculatorStartup::receive)
     else {
         process::exit(NO_STARTUP_EXIT_CODE);
     };
 
-    // Поток control-порта живёт до конца процесса: join ему не нужен.
+    // Поток control-порта выполняется до конца процесса и не нуждается в join.
     thread::spawn(move || watch_supervisor(&control));
 
     println!("started");

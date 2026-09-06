@@ -1659,8 +1659,8 @@ fn process_terminate_drains_handle_table_held_outside_process() {
     handle.start_user_process(&process, spec).expect("start ok");
 
     let pid = scheduler.process_id_for(&process).expect("process id");
-    // Этот клон играет роль замороженного кадра: он переживает и удаление
-    // процесса из таблицы, и разрушение самого `Process`.
+    // Этот клон играет роль замороженного кадра. Он сохраняется при удалении
+    // процесса из таблицы и при разрушении самого `Process`.
     let frozen_frame_table = scheduler.process_handle_table(pid).expect("handle table");
     assert_eq!(frozen_frame_table.with_lock(|tbl| tbl.live_count()), 1);
 
@@ -1864,8 +1864,8 @@ fn exiting_thread_and_its_address_space_survive_reap_from_another_cpu() {
     assert_eq!(running.current(), Some(victim));
     let pid = running.thread_process_id(victim).expect("owning pid");
 
-    // Окно между подготовкой переключения и его выполнением: указатель на
-    // контекст уходящего потока живёт вне лока, а `current` первого CPU уже
+    // Окно между подготовкой переключения и его выполнением. Указатель на
+    // контекст уходящего потока находится вне лока, а `current` первого CPU уже
     // переставлен на следующий поток.
     running.exit_current_interleaved(0, || {
         set_current_cpu(second);
@@ -2141,7 +2141,7 @@ fn an_idle_cpu_steals_a_queued_thread_from_a_backlogged_one() {
         .ok()
         .expect("bootstrap must succeed in tests");
 
-    // Потоки заводятся до подъёма второго CPU: оба достаются первому.
+    // Потоки создаются до подъёма второго CPU: оба достаются первому.
     let busy = scheduler
         .spawn(SpawnConfig::new("busy"), || {})
         .expect("spawn busy");
@@ -2272,7 +2272,7 @@ fn a_backlog_appearing_after_a_cpu_went_idle_is_migrated() {
     let running = scheduler.run();
     assert_eq!(running.current(), Some(first));
 
-    // Оба потока уходят в сон: первый CPU остаётся без работы, и перекос
+    // Оба потока уходят в сон. Первый CPU остаётся без работы, и перекос
     // возникает позже, на их общем пробуждении.
     running.sleep_ns(100);
     running.sleep_ns(100);
@@ -2316,8 +2316,8 @@ fn a_thread_whose_context_is_still_being_saved_is_not_stolen() {
     let handle = running.handle();
     let second = bootstrap_cpu(&handle, 1);
 
-    // Окно переключения: вытесненный поток уже стоит в очереди готовых, а
-    // указатель на его контекст живёт вне scheduler-лока.
+    // Окно переключения. Вытесненный поток уже стоит в очереди готовых, а
+    // указатель на его контекст находится вне scheduler-лока.
     running.yield_now_interleaved(|| {
         set_current_cpu(second);
         with_simulated_irq(|| handle.on_timer_tick(1));
@@ -2409,7 +2409,7 @@ fn a_cpu_left_without_work_steals_without_waiting_for_a_tick() {
     with_simulated_irq(|| handle.on_timer_tick(1));
     assert_eq!(running.current(), Some(first_queued));
 
-    // Поток второго CPU уходит спать: работу он ищет тут же, на том же уходе
+    // Поток второго CPU уходит спать. Работу он ищет тут же, на том же уходе
     // в idle.
     running.sleep_ns(100);
     assert_eq!(
@@ -2524,7 +2524,7 @@ fn a_terminated_thread_stops_counting_towards_the_load_of_its_cpu() {
         .expect("terminate the queued thread");
 
     // Постановка идёт к наименее загруженному CPU, а при равной загрузке
-    // остаётся на текущем: терминированный поток загрузку больше не создаёт.
+    // остаётся на текущем. Терминированный поток загрузку больше не создаёт.
     let next =
         SchedulerServiceExt::spawn(&handle, SpawnConfig::new("next"), || {}).expect("spawn next");
     assert_eq!(

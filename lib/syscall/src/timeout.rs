@@ -2,35 +2,40 @@ const NS_PER_SEC: u64 = 1_000_000_000;
 const NS_PER_MILLI: u64 = 1_000_000;
 const NS_PER_MICRO: u64 = 1_000;
 
-/// Типизированный фасад над `timeout_ns` блокирующих syscall.
+/// Типизированный фасад над `timeout_ns` блокирующих syscall. Значение отсчитывается от
+/// момента вызова, два sentinel-значения выделены под poll и бессрочное ожидание.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Timeout(u64);
 
 impl Timeout {
-    /// Не блокироваться: операция завершается немедленно, иначе возвращается
+    /// Операция завершается немедленно. Без готовой встречной стороны возврат -
     /// [`crate::SYSCALL_RETURN_TIMEOUT`].
     pub const POLL: Self = Self(0);
 
     /// Ждать бессрочно (не занимает слот в sleeper-heap).
     pub const INFINITE: Self = Self(u64::MAX);
 
-    /// Дедлайн в наносекундах.
+    /// Относительный дедлайн в наносекундах. `u64::MAX` совпадает с [`Self::INFINITE`],
+    /// `0` - с [`Self::POLL`].
     pub const fn from_ns(ns: u64) -> Self {
         Self(ns)
     }
 
-    /// Дедлайн в микросекундах.
+    /// Относительный дедлайн в микросекундах. Переполнение наносекунд насыщает значение
+    /// до [`Self::INFINITE`].
     pub const fn from_micros(micros: u64) -> Self {
         Self(micros.saturating_mul(NS_PER_MICRO))
     }
 
-    /// Дедлайн в миллисекундах.
+    /// Относительный дедлайн в миллисекундах. Переполнение наносекунд насыщает значение
+    /// до [`Self::INFINITE`].
     pub const fn from_millis(millis: u64) -> Self {
         Self(millis.saturating_mul(NS_PER_MILLI))
     }
 
-    /// Дедлайн в секундах.
+    /// Относительный дедлайн в секундах. Переполнение наносекунд насыщает значение до
+    /// [`Self::INFINITE`].
     pub const fn from_secs(secs: u64) -> Self {
         Self(secs.saturating_mul(NS_PER_SEC))
     }
@@ -47,7 +52,7 @@ impl Timeout {
 pub const PORT_TIMEOUT_INFINITE: u64 = Timeout::INFINITE.raw();
 
 /// ABI-значение `timeout_ns` блокирующих Port-syscall "не блокироваться"
-/// (poll): операция завершается немедленно, иначе возвращается
+/// (poll). Операция завершается немедленно, и без готовой встречной стороны возврат -
 /// [`crate::SYSCALL_RETURN_TIMEOUT`].
 pub const PORT_TIMEOUT_POLL: u64 = Timeout::POLL.raw();
 

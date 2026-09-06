@@ -1,7 +1,7 @@
-//! Стенд стандартной библиотеки: программу гоняет `testrunner` управляемым компонентом.
+//! Стенд стандартной библиотеки. Программу запускает `testrunner` управляемым компонентом.
 //!
-//! Проверки идут обычными `assert!`. Провал роняет программу паникой, её сообщение уходит в
-//! журнал через `stderr`, а вызывающий видит ненулевой код выхода. Успех — код ноль.
+//! Проверки идут обычными `assert!`. Провал завершает программу паникой, её сообщение уходит
+//! в журнал через `stderr`, а вызывающий получает ненулевой код выхода. Успех - код ноль.
 //!
 //! Проверяется поверхность самой `std` поверх платформенного слоя. Его примитивы
 //! под ней покрыты набором `testrunner` отдельно.
@@ -22,8 +22,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use component_client::component_manifest;
-use component_client_std::into_std_handle;
+use component_startup::component_manifest;
+use component_startup_std::into_std_handle;
 use kernel_objects::OwnedHandle;
 use syscall::Rights;
 
@@ -64,7 +64,7 @@ fn main() {
 fn startup_set_reaches_the_program() -> SelftestStartup {
     // Приём и есть проверка, потому что он сверяет состав набора с объявлением манифеста и
     // ставит лог-сессию, по которой идёт вывод остальных проверок.
-    component_client_std::receive(SelftestStartup::receive)
+    component_startup_std::receive(SelftestStartup::receive)
         .expect("composition hands out the startup set")
 }
 

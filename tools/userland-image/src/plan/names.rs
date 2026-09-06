@@ -9,7 +9,7 @@ pub(super) fn resolve_names<'a>(entries: &[&'a ComponentEntry]) -> Result<Vec<&'
         .iter()
         .map(|component| match &component.name {
             Some(name) => name.as_str(),
-            // Умолчание имени экземпляра — идентичность программы.
+            // Умолчание имени экземпляра - идентичность программы.
             None => component.executable.as_str(),
         })
         .collect();
@@ -32,7 +32,7 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
         name.is_ascii() && !name.contains('/'),
         "boot plan component name '{name}' must be ASCII without '/'"
     );
-    // Именем экземпляра зовётся его процесс: имя длиннее ёмкости `ProcessCreate`
+    // Именем экземпляра зовётся его процесс. Имя длиннее ёмкости `ProcessCreate`
     // не поднялось бы на устройстве.
     ensure!(
         name.len() <= MAX_PROCESS_NAME_LEN,

@@ -1,4 +1,4 @@
-//! Гонки между CPU за состояние планировщика: один std-поток моделирует один
+//! Гонки между CPU за состояние планировщика. Один std-поток моделирует один
 //! CPU, а `MockCpu` держит его идентификатор и CPU-local указатель в
 //! thread-local.
 
@@ -183,7 +183,7 @@ fn race_terminating_a_thread_while_cpus_tick_never_loses_its_slot() {
         );
     }
 
-    // Слоты вернулись в оборот: пул заводится заново целиком.
+    // Слоты вернулись в оборот. Пул создаётся заново целиком.
     let refilled = fill_pool(&running, POOL);
     assert_eq!(refilled.len(), POOL);
 }

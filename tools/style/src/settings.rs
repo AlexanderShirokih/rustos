@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result};
 
 /// Числа и словари, которыми правила параметризуются вместо литералов в коде.
 pub struct Settings {
-    /// Предельная ширина строки, источник — `rustfmt.toml`.
+    /// Предельная ширина строки, источник - `rustfmt.toml`.
     pub max_width: usize,
     /// Предельный объём комментария на тестовой функции.
     pub test_comment_max_lines: usize,

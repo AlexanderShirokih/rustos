@@ -29,8 +29,9 @@ pub struct UserSegmentInstall {
 
 /// Описание образа, которое планировщик установит в child AS.
 pub struct UserImageInstall {
+    /// Сегменты образа. Порядок произволен, пересечения запрещены.
     pub segments: Vec<UserSegmentInstall>,
-    /// PC первого user-инструкции.
+    /// Адрес первой user-инструкции.
     pub entry: VirtualAddress,
     /// База диапазона user_vm-аллокатора.
     pub user_vm_base: PageAlignedVirtualAddress,
@@ -39,7 +40,11 @@ pub struct UserImageInstall {
 }
 
 impl UserImageInstall {
-    /// Проверяет структурную геометрию образа.
+    /// Проверяет геометрию образа до установки его в адресное пространство. Размер каждого
+    /// сегмента ненулевой и кратен странице, сегменты не пересекаются между собой и с окном
+    /// `user_vm`, границы диапазонов не переполняют `usize`.
+    ///
+    /// Содержимое регионов и права маппинга здесь не проверяются.
     pub fn validate_geometry(&self) -> Result<(), LoadImageError> {
         use LoadImageError::{InvalidGeometry, UserVmRangeOverflow};
 
@@ -80,9 +85,15 @@ impl UserImageInstall {
 
 /// Параметры старта первого user-потока.
 pub struct UserStartSpec {
+    /// Точка входа и приоритет. Поле `arg` заполняется идентификатором, под которым
+    /// перенесённый handle оказался в таблице нового процесса.
     pub entry: UserThreadEntry,
+    /// Таблица загрузчика, из которой handle забирается.
     pub loader_handle_table: Arc<MutexCell<HandleTable>>,
+    /// Стартовый handle в таблице загрузчика. Требует `Rights::TRANSFER` и переносится в
+    /// таблицу нового процесса. Отказ проверки прав оставляет handle загрузчику.
     pub handle_id: HandleId,
+    /// Метеринг-грант нового процесса. `None` оставляет процесс без учёта физпамяти.
     pub metering_grant: Option<MeteringGrant>,
 }
 
@@ -123,7 +134,7 @@ mod tests {
         UserSegmentInstall {
             va_base: PageAlignedVirtualAddress::from_usize(va_base).expect("aligned"),
             mapped_size,
-            // Геометрию считают поля выше: сам регион в ней не участвует.
+            // Геометрию считают поля выше. Сам регион в ней не участвует.
             region: Arc::new(MemoryRegion::create_physical_normal(
                 memory::physical_address::PageAlignedAddress::from_usize(0x8000_0000)
                     .expect("aligned"),

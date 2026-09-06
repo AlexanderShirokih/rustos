@@ -31,7 +31,8 @@ pub struct Resource {
 
 impl Resource {
     /// Создаёт ресурс с диапазоном `[pa_base, pa_base + size_bytes)`, потолком
-    /// доступа `access_mask` и начальным бюджетом `budget_pages` страниц.
+    /// доступа `access_mask` и начальным бюджетом `budget_pages` страниц. Ресурс корневой, его
+    /// бюджет ни с кого не списывается, и глубина деривации под ним начинается с нуля.
     pub fn new(
         pa_base: PageAlignedAddress,
         size_bytes: NonZeroUsize,
@@ -88,7 +89,8 @@ impl Resource {
         self.budget.load(Ordering::Acquire)
     }
 
-    /// Атомарно списывает `amount` страниц с бюджета, если их хватает.
+    /// Атомарно списывает `amount` страниц с бюджета, если их хватает. На нехватке -
+    /// [`IpcError::ResourceExhausted`], и бюджет остаётся прежним. Бюджет родителя не трогается.
     pub fn try_consume(&self, amount: u64) -> Result<(), IpcError> {
         let mut current = self.budget.load(Ordering::Acquire);
         loop {
@@ -108,7 +110,9 @@ impl Resource {
         }
     }
 
-    /// Парная к [`try_consume`](Self::try_consume): возвращает `amount` страниц в бюджет.
+    /// Операция, парная к [`try_consume`](Self::try_consume), возвращает `amount` страниц в
+    /// бюджет. Начальный бюджет потолком не служит, и сложение насыщается на `u64::MAX`. Парность
+    /// вызовов остаётся за вызывающим.
     pub fn release(&self, amount: u64) {
         let mut current = self.budget.load(Ordering::Acquire);
         loop {
@@ -125,6 +129,11 @@ impl Resource {
         }
     }
 
+    /// Разрешает ли ресурс минт региона `[pa_base, pa_base + size_bytes)` с доступом
+    /// `access_mask`. Запрошенный диапазон обязан лежать внутри диапазона ресурса, а
+    /// `access_mask` - входить в его потолок доступа. Переполнение границы диапазона отвергается.
+    ///
+    /// Бюджет здесь не проверяется. Списание делает [`try_consume`](Self::try_consume).
     pub fn permits(
         &self,
         pa_base: PageAlignedAddress,
@@ -150,7 +159,7 @@ impl Resource {
 
 impl Drop for Resource {
     fn drop(&mut self) {
-        // Раскрутка цепочки рекурсивна: её глубину ограничивает `split`.
+        // Раскрутка цепочки рекурсивна. Её глубину ограничивает `split`.
         if let Some(parent) = &self.parent {
             parent.release(*self.budget.get_mut());
         }
@@ -166,8 +175,8 @@ pub struct ResourceBudgetRefund {
 impl ResourceBudgetRefund {
     pub fn new(resource: &Arc<Resource>, pages: u64) -> Arc<Self> {
         Arc::new(Self {
-            // Ссылка сильная: ресурс переживает выданные из него регионы и отдаёт родителю
-            // весь свой бюджет, включая неизрасходованный остаток.
+            // Ссылка сильная. Ресурс остаётся в памяти дольше выданных из него регионов и
+            // отдаёт родителю весь свой бюджет, включая неизрасходованный остаток.
             resource: Arc::clone(resource),
             pages,
         })
@@ -372,7 +381,7 @@ mod tests {
                 .with_refund(ResourceBudgetRefund::new(&child, 4));
 
         drop(child);
-        // Регион держит дочерний ресурс: его страницы родителю ещё не
+        // Регион держит дочерний ресурс. Его страницы родителю ещё не
         // вернулись.
         assert_eq!(parent.remaining_budget(), 6);
 
@@ -382,7 +391,7 @@ mod tests {
 
     #[test]
     fn split_depth_is_capped() {
-        // Закрытая капа объект не убивает: его держит поле `parent` потомка, и потолок
+        // Закрытая капа не убивает объект. Его держит поле `parent` потомка, а потолок
         // отбирает у userspace длину цепочки в куче ядра.
         let root = Resource::new(pa(0x4000_0000), nz(0x1000), AccessMask::RW, u64::MAX);
         let mut leaf = Arc::clone(&root);
@@ -394,7 +403,7 @@ mod tests {
             leaf.split(1).err(),
             Some(IpcError::ResourceExhausted)
         ));
-        // Отказ по глубине бюджета не тронул: лист расходует свой сам.
+        // Отказ по глубине не тронул бюджет листа. Лист сам расходует свой бюджет.
         assert_eq!(leaf.remaining_budget(), 1);
     }
 

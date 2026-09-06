@@ -405,7 +405,7 @@ fn memory_map_rolls_back_va_and_keeps_region_frames_on_install_failure() {
     );
     assert_eq!(res, Err(SyscallError::OutOfMemory.as_return_value()));
 
-    // Регион всё ещё жив в таблице, поэтому его фреймы НЕ освобождаются;
+    // Регион всё ещё жив в таблице, поэтому его фреймы не освобождаются;
     // освобождается только VA-диапазон.
     assert_eq!(
         fa.outstanding(),

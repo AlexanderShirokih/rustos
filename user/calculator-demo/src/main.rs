@@ -1,13 +1,17 @@
-//! Демо композиции: компонент-клиент двух сервисов и своей файловой области.
-//! Читает запись собственного каталога сессией файловой системы, а дальше раз в
-//! секунду спрашивает произведение у калькулятора, время у часов реального
-//! времени и кладёт обе величины строкой в журнал.
+//! Демонстрационный компонент композиции: клиент калькулятора, клиент часов реального
+//! времени и читатель собственной файловой области.
+//!
+//! На старте программа печатает запись `/banner` своего каталога. Дальше раз в секунду она
+//! спрашивает произведение у калькулятора и время у часов. Обе величины уходят строкой в
+//! журнал.
+//!
+//! Отказ каждого из трёх контрагентов программа называет своим кодом выхода.
 
 use std::process;
 
 use calculator_demo::calculator;
 use component_abi::supervisor_gone;
-use component_client::component_manifest;
+use component_startup::component_manifest;
 use filesystem_abi::{AccessMode, OpenFlags, Path};
 use filesystem_client::FileSystem;
 use ipc::{Transport as _, wire::IpcError};
@@ -25,6 +29,7 @@ const BANNER_RECORD: Path<'static> = match Path::new("/banner") {
     Ok(record) => record,
     Err(_) => panic!("the banner path keeps the form of the contract"),
 };
+
 const BANNER_MAX: usize = 64;
 
 const NO_STARTUP_EXIT_CODE: i32 = 1;
@@ -50,7 +55,7 @@ enum Supervisor {
 fn main() {
     // До установки лог-сессии вывод не доходит до журнала, поэтому процесс называет отказ
     // приёма кодом выхода.
-    let Ok(startup) = component_client_std::receive(DemoStartup::receive) else {
+    let Ok(startup) = component_startup_std::receive(DemoStartup::receive) else {
         process::exit(NO_STARTUP_EXIT_CODE);
     };
 
@@ -68,8 +73,8 @@ fn main() {
 }
 
 fn announce(area: OwnedHandle) {
-    // Запись лежит в собственном каталоге компонента, и его область - корень
-    // сессии: имя отсчитывается от неё.
+    // Запись лежит в собственном каталоге компонента. Область windowed-сессии совпадает с
+    // этим каталогом, и имя отсчитывается от его корня.
     let mut bytes = [0; BANNER_MAX];
     match banner(area, &mut bytes) {
         Some(text) => println!("banner: {text}"),

@@ -1,7 +1,7 @@
 //! Общий lifecycle-стейт Process/Thread: exit-код + bound-`Signal`.
 //!
 //! Завершение наблюдается через [`Signal`], материализуемый по требованию
-//! (`termination_signal`): ненаблюдаемый объект не аллоцирует `Signal` вовсе.
+//! (`termination_signal`). Ненаблюдаемый объект не аллоцирует `Signal` вовсе.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};

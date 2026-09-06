@@ -1,14 +1,14 @@
-//! Владелец политики загрузки: монтирует статически связанный корень, разматывает из файлов
-//! ступень 1 транзакцией супервизора и прививает маршрутизатору имён сессии её файловых
+//! Владелец политики загрузки монтирует статически связанный корень, разматывает из файлов
+//! ступень 1 транзакцией супервизора и присоединяет к маршрутизатору имён сессии её файловых
 //! систем.
 //!
-//! Таблица монтирований едет записью каталога программы: на её чтении корень ещё не
-//! смонтирован, и каталога у компонента нет. Корень приходит слотом по имени экземпляра, а
-//! всё остальное дерево - сессиями компонентов, которые поднял сам `init`.
+//! Таблица монтирований передаётся записью каталога программы. К моменту её чтения корень
+//! ещё не смонтирован, и у компонента нет каталога. Корень приходит слотом по имени экземпляра,
+//! а всё остальное дерево - сессиями компонентов, которые поднял сам `init`.
 //!
 //! Уход маршрутизатора уносит дерево имён и снимает держателя его control-слота, и свежая
-//! incarnation `init` применяет таблицу заново. Ступень 1 переживает смену incarnation: её
-//! набор принадлежит композиции, и повторный `commit` отвечает `Duplicate`.
+//! incarnation `init` применяет таблицу заново. Ступень 1 сохраняется при смене incarnation:
+//! её набор принадлежит композиции, и повторный `commit` отвечает `Duplicate`.
 
 #![no_std]
 #![no_main]
@@ -30,7 +30,7 @@ use core::{
 };
 
 use component_abi::supervisor_gone;
-use component_client::{ReceivedStartup, StartupError, component_manifest};
+use component_startup::{ReceivedStartup, StartupError, component_manifest};
 use filesystem_abi::{
     AccessMode, BOOT_MOUNT_TABLE_PATH, DirCursor, DirEntry, FileSystemError, MountTable,
     NodeDescriptor, NodeKind, OpenFlags, Opened, PATH_MAX, Path, decode_mount_table, file_system,
@@ -112,8 +112,8 @@ fn run(startup: Handle) -> Result<u64> {
         mounts,
         system,
     } = resources;
-    // Экспорта у ступени 0 нет, и серверная сторона service-порта живёт до конца процесса
-    // без обслуживания.
+    // Экспорта у ступени 0 нет. Серверная сторона service-порта остаётся открытой до конца
+    // процесса без обслуживания.
     let _service = service;
 
     let region = MemoryRegion::from_handle(image);
@@ -124,8 +124,8 @@ fn run(startup: Handle) -> Result<u64> {
     let supervisor =
         supervisor::Client::new(PortTransport::client(&system)).with_wait(CALL_TIMEOUT);
 
-    // Монтирование забирает сессию слота, а записи ступени 1 читаются после него: окно корня
-    // даёт вторую сессию той же файловой системы.
+    // Монтирование забирает сессию слота, а записи ступени 1 читаются после него. Окно
+    // корня даёт для этого вторую сессию той же файловой системы.
     let reading = Reading::derive(&root)?;
     graft_root(&admin, table, root)?;
     log_line("boot root mounted");
@@ -157,8 +157,8 @@ fn graft_root(
     table: MountTable<'_>,
     root: OwnedHandle,
 ) -> Result<()> {
-    // Сминченная сессия не несёт `DUPLICATE`, и статически связанный корень прививается ровно
-    // к одному префиксу.
+    // Сминченная сессия не содержит право `DUPLICATE`, и статически связанный корень
+    // прививается ровно к одному префиксу.
     let mut root = Some(root);
     for mount in table {
         if mount.instance != ROOT_FILE_SYSTEM {
@@ -216,7 +216,7 @@ fn raise_stage_one(
     }
     accepted("stage 1 transaction", supervisor.begin()?.value)?;
     for record in &records {
-        // Запись плана едет супервизору ровно такой, какой её закодировала сборка: путь
+        // Запись плана передаётся супервизору ровно такой, какой её закодировала сборка. Путь
         // программы компонента `init` берёт из неё же.
         let program = reading.program_region(executable(record)?)?;
         let bytes = Bytes::<PLAN_RECORD_MAX>::new(record).ok_or(Error::StageOne)?;
@@ -278,7 +278,7 @@ impl Reading {
     }
 
     fn stage_one_records(&self) -> Result<Vec<Vec<u8>>> {
-        // Образ без каталога ступени 1 несёт одну ступень 0.
+        // Образ без каталога ступени 1 содержит только ступень 0.
         let Some(directory) = self.open_stage_one()? else {
             return Ok(Vec::new());
         };
@@ -333,8 +333,8 @@ impl Reading {
             if listed.end {
                 return Ok(names);
             }
-            // Перечисление обязано продвинуться: иначе записи не помещаются в буфер и повтор
-            // вызова ничего не изменит.
+            // Перечисление обязано продвинуться. Иначе записи не помещаются в буфер, и
+            // повтор вызова ничего не изменит.
             if listed.next.raw() <= from.raw() {
                 log_line("stage 1 listing does not advance");
                 return Err(Error::StageOne);

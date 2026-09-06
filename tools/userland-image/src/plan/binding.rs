@@ -56,7 +56,7 @@ impl Port {
 impl<'a> ComponentBinding<'a> {
     fn provided_by(&mut self, provider: usize, names: &[&'a str]) -> Result<&'a str> {
         // Импорт сервиса и каталог компонента поднимают провайдера раньше
-        // потребителя: ребро выводится из связывания.
+        // потребителя, а ребро выводится из связывания.
         self.providers.push(provider);
         names
             .get(provider)
@@ -188,8 +188,8 @@ fn find_area(
         names.get(index).copied() != Some(name),
         "boot plan component '{name}' takes its directory from itself"
     );
-    // Каталог приходит сессией, суженной до него, и сузить её умеет лишь тот, кто её
-    // заводит сам.
+    // Каталог приходит сессией, суженной до него, и сузить её может лишь тот, кто её
+    // сам создаёт.
     let provider = declarations
         .get(index)
         .context("boot plan resolves a provider outside the composition")?;

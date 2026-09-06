@@ -71,7 +71,7 @@ impl<'a> Composition<'a> {
         programs: &[PlanProgram<'a>],
     ) -> Result<Self> {
         let boundary = stage_zero.components.len();
-        // Связывание идёт над объединением ступеней: слот ступени 1 называет экспортёра
+        // Связывание идёт над объединением ступеней. Слот ступени 1 называет экспортёра
         // ступени 0 именем экземпляра, и имя занято набором целиком.
         let entries: Vec<&ComponentEntry> = stage_zero
             .components
@@ -92,8 +92,8 @@ impl<'a> Composition<'a> {
             validate_record_name(name)?;
         }
 
-        // Строки совместимости переживают слоты, которые на них ссылаются: слот
-        // плана несёт срез объявления, а не копию.
+        // Строки совместимости существуют дольше слотов, которые на них ссылаются. Слот
+        // плана хранит срез объявления, а не копию.
         let selectors: Vec<Vec<Vec<&str>>> = declarations
             .iter()
             .map(|declared| {
@@ -243,7 +243,8 @@ fn encode_stage_one(components: &[ComponentSpec<'_>]) -> Result<Vec<StageOneReco
             let name = component.name;
             let bytes = encode_plan(core::slice::from_ref(component))
                 .map_err(|err| anyhow!("failed to serialize stage 1 record: {err:?}"))?;
-            // Запись едет супервизору полем кадра `define`, и его ёмкость - потолок ступени 1.
+            // Запись передаётся супервизору полем кадра `define`, и ёмкость поля задаёт
+            // потолок ступени 1.
             ensure!(
                 bytes.len() <= PLAN_RECORD_MAX,
                 "stage 1 component '{name}' encodes to {} bytes; \

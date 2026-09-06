@@ -1,11 +1,11 @@
 //! Транспорт ipc-контрактов поверх синхронного `Port` + per-thread
 //! IPC-буфер.
 //!
-//! `PortTransport` использует рандеву-примитив ядра (`port_send`/`recv`/`call`/`reply`):
-//! сообщение всегда лежит в per-thread IPC-буфере текущего потока, а сами syscalls блокируют до
+//! `PortTransport` использует рандеву-примитив ядра (`port_send`/`recv`/`call`/`reply`).
+//! Сообщение всегда лежит в per-thread IPC-буфере текущего потока, а сами syscalls блокируют до
 //! встречи.
-//! Поскольку методы [`Transport`] принимают `&self`, а семантика
-//! клиента и сервера различается, роль задаётся явно при конструировании
+//! Методы [`Transport`] принимают `&self`, а семантика клиента и сервера различается.
+//! Роль задаётся явно при конструировании
 //! ([`PortTransport::client`] / [`PortTransport::server`]).
 //!
 //! Тайм-аут типизированного IPC доступен через `wait_readable(timeout)`:
@@ -16,7 +16,7 @@
 //! One-way отправка отдельно настраивается через
 //! [`PortTransport::with_send_timeout`].
 //!
-//! Ресурсы кадра транспорт отдаёт только после его доставки. [`Delivery`] возникает на
+//! Ресурсы кадра транспорт отдаёт только после доставки этого кадра. [`Delivery`] возникает на
 //! состоявшемся рандеву и достаётся один раз, а отказ приёма прав на прежнее содержимое
 //! буфера не даёт. Владение этими ресурсами принимает `kernel_objects::ReceivedFrame` на
 //! серверном приёме, [`Transport::take_resources`] на клиентском ответе и
@@ -56,6 +56,9 @@ impl Phase {
 }
 
 /// Порт ipc-контракта поверх синхронного port.
+///
+/// Транспорт заимствует port-handle: разрушение транспорта закрывает лишь незавершённый
+/// reply, а сам port-handle остаётся за тем, кто его открыл.
 pub struct PortTransport {
     handle: Handle,
     phase: Cell<Phase>,
@@ -65,13 +68,15 @@ pub struct PortTransport {
 }
 
 impl PortTransport {
-    /// Клиентская сторона порта: отправитель `cast`/`call`.
+    /// Клиентская сторона порта: отправитель `cast`/`call`. Handle требует
+    /// `Rights::WRITE`.
     #[must_use]
     pub fn client(handle: impl Into<Handle>) -> Self {
         Self::with_phase(handle.into(), Phase::ClientIdle)
     }
 
-    /// Серверная сторона порта: получатель `recv`, отвечающий `reply`.
+    /// Серверная сторона порта: получатель `recv`, отвечающий `reply`. Handle требует
+    /// `Rights::READ`.
     #[must_use]
     pub fn server(handle: impl Into<Handle>) -> Self {
         Self::with_phase(handle.into(), Phase::ServerIdle)
@@ -267,8 +272,8 @@ impl Transport for PortTransport {
 
         // Ответ сервера: тело уже в IPC-буфере, доставляем его вызывателю
         // через сохранённый reply-handle. Наружу серверная сторона иначе не
-        // пишет, и по этому пути идёт любой её кадр: без сохранённого reply
-        // адресата у него нет.
+        // пишет, и по этому пути идёт любой её кадр, потому что без
+        // сохранённого reply у него нет адресата.
         if header.has_flag(ipc::wire::FLAG_RESPONSE) || self.phase.get().is_server() {
             Self::store_buffer(bytes, handles)?;
             let reply = self.pending_reply.take().ok_or(IpcError::PeerClosed)?;

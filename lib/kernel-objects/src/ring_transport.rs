@@ -6,7 +6,7 @@
 //! consumer. Роль задаётся при конструировании
 //! ([`RingTransport::producer`] / [`RingTransport::consumer`]).
 //!
-//! Запись не блокируется: при полном кольце возвращается `WouldBlock`.
+//! Запись не блокируется. При полном кольце возвращается `WouldBlock`.
 //! Capability через кольцо не передаются - `write_message` с непустым
 //! handle-вектором отвергается, `read_message` отдаёт ноль хэндлов.
 
@@ -33,7 +33,7 @@ pub struct RingTransport {
 }
 
 impl RingTransport {
-    /// Producer-конец: пишет кадры в кольцо, будит consumer.
+    /// Producer-конец пишет кадры в кольцо и будит consumer.
     #[must_use]
     pub fn producer(ring: SpscRing, data: Handle) -> Self {
         Self {
@@ -43,14 +43,14 @@ impl RingTransport {
         }
     }
 
-    /// Producer-конец по заимствованному "data"-сигналу: переадресует к
+    /// Producer-конец по заимствованному "data"-сигналу переадресует к
     /// [`RingTransport::producer`], беря сырой хэндл из заимствования.
     #[must_use]
     pub fn producer_signal(ring: SpscRing, data: BorrowedHandle<'_>) -> Self {
         Self::producer(ring, data.as_raw())
     }
 
-    /// Consumer-конец: читает кадры из кольца, спит на "data"-сигнале.
+    /// Consumer-конец читает кадры из кольца и спит на "data"-сигнале.
     #[must_use]
     pub fn consumer(ring: SpscRing, data: Handle) -> Self {
         Self {
@@ -75,7 +75,7 @@ impl Transport for RingTransport {
             Role::Producer => match self.ring.try_push(bytes) {
                 Ok(PushOutcome { wake_consumer }) => {
                     // Consumer будим только когда на момент публикации других
-                    // кадров не осталось: под нагрузкой кольцо непусто и
+                    // кадров не осталось. Под нагрузкой кольцо непусто, поэтому
                     // syscall не нужен.
                     if wake_consumer {
                         signal_set(self.data, SIGNALED, 0, WakeCount::One);
@@ -111,7 +111,7 @@ impl Transport for RingTransport {
                     return Ok(());
                 }
                 // Чистим "data" (нужны права WRITE) и перечитываем кольцо перед
-                // сном: producer публикует кадр ДО set, поэтому recheck-after-clear
+                // сном: producer публикует кадр до set, поэтому recheck-after-clear
                 // не даёт проспать кадр, запушенный между check и clear. Провал
                 // clear пробрасываем, иначе оставшийся SIGNALED крутил бы busy-spin.
                 if signal_set(self.data, 0, SIGNALED, WakeCount::None) < 0 {

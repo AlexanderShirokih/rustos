@@ -9,7 +9,7 @@ impl Address for PhysicalAddress {
     }
 }
 
-/// Адрес физической памяти
+/// Адрес физической памяти без гарантии выравнивания.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PhysicalAddress(usize);
@@ -44,13 +44,11 @@ impl PhysicalAddress {
         Self(self.0 + x)
     }
 
-    /// Добавляет значение с проверкой переполнения
     #[inline]
     pub fn checked_add(&self, x: usize) -> Option<Self> {
         self.0.checked_add(x).map(Self)
     }
 
-    /// Вычитает значение с проверкой переполнения
     #[inline]
     pub fn checked_sub(&self, x: usize) -> Option<Self> {
         self.0.checked_sub(x).map(Self)
@@ -80,8 +78,8 @@ impl From<usize> for PhysicalAddress {
     }
 }
 
-/// Выровненный физический адрес
-/// Гарантирует, что адрес выровнен на заданную границу
+/// Физический адрес, выровненный на границу `Self::ALIGNMENT` (`1 << SHIFT` байт).
+/// `new` и `from_usize` отклоняют невыровненное значение, `new_unchecked` принимает любое.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AlignedPhysicalAddress<const SHIFT: u8>(usize);
@@ -106,18 +104,21 @@ impl<const SHIFT: u8> AlignedPhysicalAddress<SHIFT> {
         }
     }
 
-    /// Создаёт выровненный адрес без проверки выравнивания
+    /// Собирает `Self` из `address` без проверки выравнивания. Вызывающий отвечает за
+    /// то, что `address` уже кратен `Self::ALIGNMENT` - иначе нарушается инвариант типа.
     pub const fn new_unchecked(address: PhysicalAddress) -> Self {
         Self(address.0)
     }
 
-    /// Создаёт выровненный адрес, выравнивая вниз
+    /// Округляет `address` вниз до кратного `Self::ALIGNMENT`. Деление не переполняет
+    /// `usize` ни при каком `address`.
     pub const fn aligned_down(address: PhysicalAddress) -> Self {
         let aligned = (address.0 / Self::ALIGNMENT) * Self::ALIGNMENT;
         Self(aligned)
     }
 
-    /// Создаёт выровненный адрес, выравнивая вверх
+    /// Округляет `address` вверх до кратного `Self::ALIGNMENT`. Переполняет `usize`,
+    /// если `address` отстоит от `usize::MAX` меньше чем на `Self::ALIGNMENT`.
     pub const fn aligned_up(address: PhysicalAddress) -> Self {
         let aligned = address.0.div_ceil(Self::ALIGNMENT) * Self::ALIGNMENT;
         Self(aligned)

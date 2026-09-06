@@ -420,7 +420,7 @@ fn rejects_access_denied_when_region_mask_too_weak() {
     let (rt, stub) = runtimes();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
     let pid = insert_process(&table);
-    // Хендл несёт READ|WRITE|EXECUTE (проходит проверку прав на строке :178),
+    // Хендл содержит READ|WRITE|EXECUTE (проходит проверку прав на строке :178),
     // но access-mask региона - только RW, поэтому проверка маски на :184
     // отвергает запрос сегмента на RX (flags=2) именно как AccessDenied.
     let region = insert_region_with_rights(

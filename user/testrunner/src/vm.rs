@@ -25,7 +25,7 @@ fn allocate_write_then_remap_readonly() {
 
     let slot = usize::try_from(mapping.va()).expect("positive va fits usize") as *mut u64;
     // SAFETY: allocate выдал RW-страницу PAGE_SIZE байт; 8-байтные доступы по
-    // её базе лежат в границах, других владельцев нет.
+    // её базе лежат в границах, а другие владельцы отсутствуют.
     unsafe {
         slot.write_volatile(PATTERN);
         kernel_tests::kassert_eq!(slot.read_volatile(), PATTERN);

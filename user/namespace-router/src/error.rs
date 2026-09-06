@@ -2,7 +2,7 @@
 
 use core::fmt::{Display, Formatter, Result as FmtResult};
 
-use component_client::StartupError;
+use component_startup::StartupError;
 use ipc::wire::IpcError;
 use syscall::SyscallError;
 

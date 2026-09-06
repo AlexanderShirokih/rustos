@@ -12,7 +12,8 @@ use crate::{
     virtual_address::PageAlignedVirtualAddress,
 };
 
-/// Снимок per-process user-памяти, передаваемый syscall-handler-ам.
+/// Хэндл на per-process user-память, передаваемый syscall-handler-ам. Mapper и
+/// аллокатор диапазонов общие через `Arc` с другими держателями контекста.
 pub struct UserVmContext {
     mapper: Arc<dyn MemoryMapper + Send + Sync>,
     allocator: Arc<MutexCell<UserVmAllocator>>,
@@ -30,8 +31,9 @@ impl UserVmContext {
         &*self.mapper
     }
 
-    /// Клонирует `Arc` на mapper - нужен слою port-IPC, чтобы хранить
-    /// транспорт заблокированного потока (кросс-AS rendezvous).
+    /// Клонирует `Arc` на mapper. Вызывающий получает сильную ссылку, не привязанную к
+    /// времени жизни `&self`. Единственный держатель такой ссылки - слой port-IPC: он
+    /// хранит её в транспорте заблокированного потока (кросс-AS rendezvous).
     pub fn mapper_arc(&self) -> Arc<dyn MemoryMapper + Send + Sync> {
         self.mapper.clone()
     }
@@ -40,7 +42,7 @@ impl UserVmContext {
         &self.allocator
     }
 
-    /// Единый teardown маппинга: снимает PTE и возвращает range в аллокатор.
+    /// Единый teardown маппинга. Снимает PTE и возвращает range в аллокатор.
     /// Зовётся из `memory_free` и из отзыва капы. Идемпотентен: `NotMapped`/
     /// `NotFound` трактуются как успех (двойной close / гонка close-vs-free).
     pub fn unmap_range(&self, base: PageAlignedVirtualAddress, size: NonZeroUsize) {
@@ -49,7 +51,7 @@ impl UserVmContext {
             Err(e) => {
                 // Выровненный range из аллокатора не бывает misaligned/block-mapped.
                 // В release это no-op: range всё равно возвращаем в аллокатор -
-                // удерживать его занятым (а с ним и `Arc` региона) смысла нет,
+                // держать его занятым (а с ним и `Arc` региона) бессмысленно, раз
                 // PTE в желаемое состояние уже не вернуть.
                 debug_assert!(false, "unmap_range: unexpected unmap error: {e:?}");
             }
@@ -73,8 +75,9 @@ impl UserVmContext {
         }
     }
 
-    /// Слабый снимок, не удерживающий AS живым. Нужен отзыву: хук маппинга
-    /// иначе образует цикл с аллокатором, который этот же хук и хранит.
+    /// Слабый хэндл, не удерживающий AS живым. Отзыв капы (revocation) использует именно
+    /// такой хэндл, а сам отзыв хранится в аллокаторе через `MappingTag.revocation` -
+    /// weak предотвращает цикл: аллокатор -> тег -> отзыв -> аллокатор.
     pub fn downgrade(&self) -> WeakUserVmContext {
         WeakUserVmContext {
             mapper: Arc::downgrade(&self.mapper),

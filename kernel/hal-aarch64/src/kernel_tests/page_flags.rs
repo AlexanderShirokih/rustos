@@ -109,12 +109,12 @@ fn user_page_flags_map_and_remap() {
 
     // AS ни разу не активировался, его entries в TLB нет - drop безопасен.
     // Фрейм страницы пришёл от вызывающего, drop leaf-дескрипторов в FA его
-    // не возвращает: отдаём сами.
+    // не возвращает: сами отдаём.
     drop(user_as);
     let _ = fa.deallocate_frame(frame);
 }
 
-// Regression guard: индекс слота в PTE и состав MAIR_EL1 живут в разных
+// Regression guard: индекс слота в PTE и состав MAIR_EL1 определены в разных
 // крейтах, и разошедшись, переводят страницу в чужой тип памяти без отказа.
 #[kernel_test]
 fn user_page_profiles_select_their_mair_slots() {

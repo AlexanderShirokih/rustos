@@ -464,8 +464,8 @@ fn mapper_map_partial_oom_rollback() {
     // `Box::leak` нужен, чтобы поднять lifetime обёртки до `'static` -
     // `MemoryMapper::as_any` требует `Self: 'static`, иначе trait-impl на
     // `Aarch64MemoryMapper<'a, ...>` не подходит для `dyn Any`. В QEMU-runner-е
-    // утечка приемлема: тест-сюита не возвращается, а аллокатор переживёт
-    // выход через semihosting.
+    // утечка приемлема. Тест-сюита не возвращается, а аллокатор остаётся
+    // валидным после выхода через semihosting.
     let capped: &'static CappedAllocator<'static> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(CappedAllocator::new(real_fa, 5)));
 

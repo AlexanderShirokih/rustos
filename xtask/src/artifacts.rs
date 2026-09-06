@@ -52,20 +52,19 @@ fn build_features(ctx: &BuildContext) -> String {
 
 fn hal_cargo(ctx: &BuildContext, subcommand: &str, features: &str) -> Command {
     let mut cmd = Command::new("cargo");
-    cmd.arg(subcommand)
-        .arg("--manifest-path")
-        .arg(&ctx.platform_manifest)
-        .args([
-            "-p",
-            &ctx.kernel_package(),
-            "--target",
-            &ctx.arch.bare,
-            "--release",
-            "--no-default-features",
-            "--features",
-            features,
-        ]);
-    cmd.current_dir(&ctx.project_root)
+    cmd.arg(subcommand).args([
+        "-p",
+        &ctx.kernel_package(),
+        "--target",
+        &ctx.arch.bare,
+        "--release",
+        "--no-default-features",
+        "--features",
+        features,
+    ]);
+    // cargo objcopy разбирает аргументы своим парсером и не поддерживает --manifest-path,
+    // поэтому платформенный workspace задаётся рабочим каталогом.
+    cmd.current_dir(&ctx.platform_dir)
         .env("DEVICE_SPEC", &ctx.spec_path)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -116,7 +115,7 @@ fn make_boot_img(ctx: &BuildContext, version: BootImageVersion) -> Result<()> {
     let mut cmd = Command::new("mkbootimg");
     cmd.arg("--kernel");
     match version {
-        // Заголовок первой версии не несёт поля dtb, и дерево едет хвостом за ядром.
+        // Заголовок первой версии не содержит поля dtb, и дерево присоединяется хвостом за ядром.
         BootImageVersion::V1 => {
             concat_files(&[&ctx.kernel_gz(), &dtb_path], &ctx.kernel_gz_dtb())?;
             cmd.arg(ctx.kernel_gz_dtb());

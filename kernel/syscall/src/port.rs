@@ -107,7 +107,7 @@ pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
 pub(super) fn sys_port_call(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let context = current_ipc_context()?;
-    // Badge вызывателя идёт на сторону сервера; reply badge не несёт.
+    // Badge вызывателя идёт на сторону сервера; reply badge вызов не передаёт.
     let PortAccess { port, badge, hold } = context
         .handle_table
         .with_lock(|tbl| tbl.get_port(id, Rights::WRITE))

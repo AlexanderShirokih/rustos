@@ -21,8 +21,12 @@ fn current_table() -> Result<Arc<MutexCell<HandleTable>>, IpcError> {
     runtime().current_handle_table().ok_or(IpcError::BadHandle)
 }
 
-/// Устанавливает [`Capability`] в handle-таблицу текущего процесса и
-/// возвращает свежий [`HandleId`]
+/// Устанавливает [`Capability`] в handle-таблицу текущего процесса и возвращает свежий
+/// [`HandleId`].
+///
+/// Владение `handle` переходит таблице. На исчерпании таблицы объект разрушается здесь же, и
+/// вызывающий получает [`IpcError::OutOfHandles`]. Пока планировщик не отдаёт таблицу текущего
+/// потока - [`IpcError::BadHandle`].
 pub fn install_handle(handle: Capability) -> Result<HandleId, IpcError> {
     current_table()?
         .with_lock(|tbl| tbl.insert(handle))
@@ -32,6 +36,10 @@ pub fn install_handle(handle: Capability) -> Result<HandleId, IpcError> {
 /// Атомарно меняет биты сигнального состояния `Signal` (поднимает `set`,
 /// снимает `clear`) и будит ожидающих согласно [`WakeCount`].
 /// Требует [`Rights::WRITE`] на handle.
+///
+/// Бит, названный в обеих масках, остаётся поднятым. Биты применяются при любом `count`, и
+/// [`WakeCount::None`] лишь оставляет ожидающих в списке. Хендл другого вида даёт `WrongType`.
+/// Событие терминации процесса либо потока этой операцией не подделывается.
 pub fn signal_set(
     handle_id: HandleId,
     set: u32,
@@ -53,8 +61,17 @@ pub fn signal_set(
 }
 
 /// Ждёт пока на capability target, к которому относится `handle_id`, не поднимется
-/// хотя бы один бит из `signals`. На `timeout_ns = Some(0)` - poll.
-/// `Canceled` - handle закрыт или передан до сигнала.
+/// хотя бы один бит из `signals`. Возвращает наблюдённые биты в пересечении с `signals`.
+///
+/// Требует [`Rights::READ`]. Ожидание применимо к `Signal`, `Process`, `Thread` и `IrqLine`,
+/// прочие виды объекта отвергаются с `WrongType`.
+///
+/// Значения `timeout_ns`:
+///  - `None` - ждать бессрочно,
+///  - `Some(0)` - опрос без парковки, пустой опрос отвечает `Timeout`,
+///  - прочее - относительный дедлайн.
+///
+/// Handle, закрытый либо переданный до прихода сигнала, снимает ожидание кодом `Canceled`.
 pub fn signal_wait_one(
     handle_id: HandleId,
     signals: u32,
@@ -213,8 +230,11 @@ impl Drop for ArmedWait {
 }
 
 /// Ждёт пока хотя бы на одном из `items` не поднимется бит из его
-/// маски. Дубликаты `HandleId` допустимы. На `timeout_ns = Some(0)` -
-/// poll. `Canceled` - один из handle закрыт или передан до сигнала.
+/// маски. Дубликаты `HandleId` допустимы. Семантика `timeout_ns` и требования к хендлам - как у
+/// [`signal_wait_one`]. `Canceled` - один из handle закрыт или передан до сигнала.
+///
+/// Пустой `items` отвергается с `BadHandle`, набор длиннее `u32::MAX` - с `MessageTooBig`.
+/// Опрос до парковки идёт по порядку `items`, и среди готовых сразу побеждает первый по счёту.
 pub fn signal_wait_many(
     items: &[(HandleId, u32)],
     timeout_ns: Option<u64>,
@@ -295,6 +315,11 @@ fn peek_ready(sources: &[Arc<dyn Waitable>], items: &[(HandleId, u32)]) -> Optio
 
 /// Закрывает handle и изымает его из таблицы. На несуществующем id - `BadHandle`.
 /// Прав на handle не требует.
+///
+/// Закрытие отзывает поддерево деривации капы. Производные от неё хендлы в чужих таблицах
+/// перестают быть валидными и отвечают [`IpcError::Revoked`]. Ожидания, зарегистрированные на
+/// этом слоте, снимаются с `Canceled`. Слот уходит в свободный список и при следующей выдаче
+/// получает новое поколение.
 pub fn handle_close(handle_id: HandleId) -> Result<(), IpcError> {
     current_table()?
         .with_lock(|tbl| tbl.remove(handle_id))?
@@ -331,7 +356,7 @@ pub fn process_exit(exit_code: i32) -> ! {
     runtime().exit_current_process(exit_code)
 }
 
-/// Уступает остаток кванта текущего потока: поток встаёт в конец своей
+/// Уступает остаток кванта текущего потока. Поток переходит в конец своей
 /// ready-очереди и остаётся runnable.
 pub fn thread_yield() {
     runtime().yield_current();
@@ -351,16 +376,19 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
 
 // Завершение Process/Thread наблюдается ожиданием прямо по их handle через
 // `CapabilityTarget::as_waitable` (bound-Signal терминации материализуется
-// лениво) — отдельная op материализации Signal-хендла больше не нужна.
+// лениво) - отдельная op материализации Signal-хендла больше не нужна.
 // Подделать событие нельзя: `signal_set` строго принимает только `Signal`.
 
 /// Минтит [`IrqLine`] для линии `irq` с триггером `trigger` по полномочию
 /// `control_handle`.
 /// Требует [`Rights::WRITE`] на `IrqControl`-хендле и попадания `irq` в его
 /// диапазон (`permits`).
-/// Привязка линии идёт через контроллер полномочия. Возвращает
+/// Линия привязывается к контроллеру, который держит полномочие. Возвращает
 /// handle на свежий `IrqLine` со стартовыми правами
 /// [`default_rights_for`](super::rights::default_rights_for).
+///
+/// Разделяемых линий в проекте не существует, и минт уже привязанной линии отвергается с
+/// [`IpcError::AlreadyBound`]. Отвязка идёт по разрушению последней капы на `IrqLine`.
 pub fn irq_mint(
     control_handle: HandleId,
     irq: u16,
@@ -603,7 +631,7 @@ mod tests {
         mock().reset();
     }
 
-    /// Бессрочное ожидание сигнала тайм-аута не знает: пробуждение, не принёсшее
+    /// Бессрочное ожидание сигнала не ограничено тайм-аутом. Пробуждение, не принёсшее
     /// сигнала, возвращает поток в ожидание.
     #[test]
     fn signal_wait_without_deadline_waits_out_a_wake_without_a_signal() {
@@ -931,9 +959,9 @@ mod tests {
 
     #[test]
     fn signal_set_on_process_handle_cannot_forge_termination() {
-        // Security-инвариант (теперь структурный): даже с WRITE на Process-хендле
-        // нельзя поднять SIGNALED на bound-Signal терминации — signal_set строго
-        // принимает только Signal, а наружу Signal-таргет терминации не выдаётся.
+        // Право WRITE на Process-хендле не даёт поднять SIGNALED на bound-Signal
+        // терминации. Функция signal_set принимает только Signal, а Signal-таргет
+        // терминации не выдаётся наружу.
         let _guard = test_lock();
         let table = Arc::new(MutexCell::new(HandleTable::new()));
         let id = table
@@ -1061,7 +1089,7 @@ mod tests {
         mock().configure(Some(table), None);
 
         let line_id = irq_mint(ctl_id, 40, IrqTrigger::Level).expect("mint ok");
-        // Свежеминченная линия в ARMED — подтверждать нечего.
+        // Свежеминченная линия в ARMED, подтверждать нечего.
         assert_eq!(irq_ack(line_id), Err(IpcError::WrongType));
 
         mock().reset();

@@ -54,20 +54,20 @@ fn bench_heap_alloc_free() {
 
 #[kernel_test(bench)]
 fn bench_heap_live_set() {
-    // Оборот живых блоков: куча держит LIVE занятых и отдаёт по одному на круг, поэтому
-    // замер видит переиспользование списка свободных, а не первую выдачу.
+    // Куча держит LIVE занятых блоков и отдаёт по одному на круг. Поэтому замер измеряет
+    // переиспользование списка свободных, а не первую выдачу.
     for size in SIZES {
         let layout = layout_of(size);
         let mut live = [core::ptr::null_mut(); LIVE];
         for slot in &mut live {
-            // SAFETY: см. bench_heap_alloc_free; блоки живут до конца замера.
+            // SAFETY: см. bench_heap_alloc_free; блоки остаются действительными до конца замера.
             *slot = unsafe { alloc(layout) };
             assert!(!slot.is_null(), "heap block");
         }
 
         let mut cursor = 0;
         let elapsed = nanos_per_op(rounds_for(size), || {
-            // SAFETY: слот несёт блок этого же layout, выданный выше либо кругом раньше.
+            // SAFETY: в слоте лежит блок этого же layout, выданный выше либо кругом раньше.
             unsafe {
                 dealloc(live[cursor], layout);
                 let block = alloc(layout);

@@ -22,19 +22,21 @@ use std::{
 
 use filesystem_abi::{
     APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, Listed, NAME_MAX,
-    NodeDescriptor, NodeInfo, NodeKind, OpenFlags, Opened, PATH_MAX, Path, Written, file_system,
-    namespace,
+    NodeDescriptor, NodeInfo, NodeKind, OpenFlags, Opened, PATH_MAX, Path, ResolvedPair, Written,
+    common_directory, file_system, namespace,
 };
 use filesystem_client::{Environment, Failure, FileSystem, SharedRegion};
 use ipc::{
     MessageLen, Timeout, Transport,
-    wire::{Cap, IpcError, Str},
+    wire::{Cap, HEADER_SIZE, IpcError, Str},
 };
 use ipc_test::{MockEnd, MockResources};
 
 const BUFFER_SIZE: u32 = 4096;
 
 const ROOT: &str = "/";
+
+const TRUNCATED_BODY: usize = 4;
 
 type Shared = Arc<Mutex<Vec<u8>>>;
 
@@ -58,6 +60,7 @@ struct World {
     sessions: Mutex<BTreeMap<u32, MockEnd>>,
     buffers: Mutex<BTreeMap<u32, Shared>>,
     resolved: Mutex<Vec<String>>,
+    pair_root_len: Mutex<Option<u32>>,
     protected: Mutex<Option<String>>,
     swapped: Mutex<Option<(String, Node)>>,
     next_cap: AtomicU32,
@@ -67,6 +70,7 @@ struct World {
     poison: AtomicBool,
     scoping_fails: AtomicBool,
     claims_fail: AtomicBool,
+    truncates_pair: AtomicBool,
     mappings_allowed: AtomicUsize,
     transfers_allowed: AtomicUsize,
 }
@@ -105,6 +109,7 @@ impl World {
             sessions: Mutex::new(BTreeMap::new()),
             buffers: Mutex::new(BTreeMap::new()),
             resolved: Mutex::new(Vec::new()),
+            pair_root_len: Mutex::new(None),
             protected: Mutex::new(None),
             swapped: Mutex::new(None),
             next_cap: AtomicU32::new(1),
@@ -114,6 +119,7 @@ impl World {
             poison: AtomicBool::new(false),
             scoping_fails: AtomicBool::new(false),
             claims_fail: AtomicBool::new(false),
+            truncates_pair: AtomicBool::new(false),
             mappings_allowed: AtomicUsize::new(usize::MAX),
             transfers_allowed: AtomicUsize::new(usize::MAX),
         })
@@ -132,12 +138,7 @@ impl World {
     }
 
     fn covering(&self, path: &str) -> Option<(&Arc<Filesystem>, String)> {
-        // Выбор монтирования повторяет маршрутизатор, беря самый длинный совпавший префикс.
-        let mount = self
-            .mounts
-            .iter()
-            .filter(|mount| under(mount.prefix.as_str(), path))
-            .max_by_key(|mount| mount.prefix.len())?;
+        let mount = self.mounts.get(self.covering_index(path)?)?;
         let tail = if mount.prefix == ROOT {
             String::from(path)
         } else {
@@ -148,9 +149,32 @@ impl World {
         Some((&mount.filesystem, tail))
     }
 
+    fn covering_index(&self, path: &str) -> Option<usize> {
+        // Позиция различает записи, и два префикса одной файловой системы дают разные
+        // монтирования.
+        self.mounts
+            .iter()
+            .enumerate()
+            .filter(|(_, mount)| under(mount.prefix.as_str(), path))
+            .max_by_key(|(_, mount)| mount.prefix.len())
+            .map(|(index, _)| index)
+    }
+
+    fn truncates_the_pair_reply(&self) {
+        self.truncates_pair.store(true, Ordering::SeqCst);
+    }
+
+    fn answers_pair_root_len(&self, len: u32) {
+        *self.pair_root_len.lock().expect("mutex not poisoned") = Some(len);
+    }
+
     fn cap(&self) -> Cap {
         let raw = self.next_cap.fetch_add(1, Ordering::SeqCst);
         Cap::from_raw(core::num::NonZeroU32::new(raw).expect("capability id is non-zero"))
+    }
+
+    fn minted(&self) -> u32 {
+        self.next_cap.load(Ordering::SeqCst) - 1
     }
 
     fn transports(&self) -> usize {
@@ -231,7 +255,12 @@ impl Transport for TrackedEnd {
     }
 
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError> {
-        self.end.read_message(bytes, handles)
+        let mut len = self.end.read_message(bytes, handles)?;
+        if self.world.truncates_pair.load(Ordering::SeqCst) {
+            // Обрезанный после заголовка ответ не даёт декодировать агрегат пары.
+            len.bytes = len.bytes.min(HEADER_SIZE + TRUNCATED_BODY);
+        }
+        Ok(len)
     }
 
     fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
@@ -569,6 +598,60 @@ impl namespace::Service for Router {
             None => return Err(FileSystemError::NotFound),
         }
         Ok(self.world.session(Arc::clone(filesystem), root))
+    }
+
+    fn resolve_pair(
+        &mut self,
+        from: Str<'_, { PATH_MAX }>,
+        to: Str<'_, { PATH_MAX }>,
+    ) -> Result<ResolvedPair, FileSystemError> {
+        let mut resolved = self.world.resolved.lock().expect("mutex not poisoned");
+        resolved.push(String::from(from.as_str()));
+        resolved.push(String::from(to.as_str()));
+        drop(resolved);
+
+        let first = self
+            .world
+            .covering_index(from.as_str())
+            .ok_or(FileSystemError::NotFound)?;
+        let second = self
+            .world
+            .covering_index(to.as_str())
+            .ok_or(FileSystemError::NotFound)?;
+        if first != second {
+            return Err(FileSystemError::CrossMount);
+        }
+
+        let mount = self
+            .world
+            .mounts
+            .get(first)
+            .ok_or(FileSystemError::NotFound)?;
+        let prefix = Path::new(&mount.prefix)?;
+        // Общий каталог пары может лежать выше корня монтирования, и сессия не поднимается над ним.
+        let common = common_directory(Path::new(from.as_str())?, Path::new(to.as_str())?)?;
+        let scope = common.strip_prefix(prefix).map_or(prefix, |_| common);
+        let tail = scope
+            .strip_prefix(prefix)
+            .ok_or(FileSystemError::NotFound)?;
+        match mount.filesystem.tree().get(tail.as_str()) {
+            Some(Node::Directory) => {}
+            Some(Node::File(_)) => return Err(FileSystemError::NotADirectory),
+            None => return Err(FileSystemError::NotFound),
+        }
+
+        let root_len = self
+            .world
+            .pair_root_len
+            .lock()
+            .expect("mutex not poisoned")
+            .unwrap_or(scope.as_str().len() as u32);
+        Ok(ResolvedPair {
+            session: self
+                .world
+                .session(Arc::clone(&mount.filesystem), String::from(tail.as_str())),
+            root_len,
+        })
     }
 }
 
@@ -1557,5 +1640,176 @@ fn rename_between_directories_runs_on_their_common_root() {
 
     assert!(!world.holds("/data/left/first"));
     assert!(world.holds("/data/right/second"));
-    assert_eq!(world.resolves(), [String::from("/data")]);
+    // Обе стороны уходят маршрутизатору одним решением, а не общим предком, вычисленным заранее.
+    assert_eq!(
+        world.resolves(),
+        [
+            String::from("/data/left/first"),
+            String::from("/data/right/second")
+        ]
+    );
+}
+
+#[test]
+fn rename_across_mounts_leaves_the_parent_filesystem_untouched() {
+    // Общий предок пары лежит над монтированием, и разбор по нему увёл бы `rename` в родительскую
+    // файловую систему с одноимёнными узлами.
+    let world = World::mounted(&[
+        (
+            ROOT,
+            &[
+                ("/data", Node::Directory),
+                ("/data/left", Node::Directory),
+                ("/data/left/first", file("parent")),
+                ("/data/right", Node::Directory),
+            ],
+        ),
+        ("/data/left", &[("/first", file("mounted"))]),
+    ]);
+    let mut filesystem = routed(&world);
+
+    let refused = filesystem.rename(path("/data/left/first"), path("/data/right/second"));
+
+    assert!(matches!(
+        refused,
+        Err(Failure::FileSystem(FileSystemError::CrossMount))
+    ));
+    // Файловая система не получила вызов, и под пару не выдано ни одной capability.
+    assert_eq!(world.minted(), 0);
+    assert!(world.tree().contains_key("/data/left/first"));
+    assert!(!world.tree().contains_key("/data/right/second"));
+    assert!(world.holds("/data/left/first"));
+}
+
+#[test]
+fn rename_inside_a_window_stays_on_its_root() {
+    let world = World::new(&[("/window", Node::Directory), ("/window/first", file("one"))]);
+    let mut filesystem = windowed(&world, "/window");
+
+    filesystem
+        .rename(path("/first"), path("/second"))
+        .expect("rename");
+
+    assert!(world.tree().contains_key("/window/second"));
+    // Окно само определяет корень пары и не обращается к маршрутизатору.
+    assert!(world.resolves().is_empty());
+}
+
+#[test]
+fn rename_accepts_the_root_as_the_common_scope() {
+    let world = World::new(&[("/first", file("one"))]);
+    let mut filesystem = routed(&world);
+
+    filesystem
+        .rename(path("/first"), path("/second"))
+        .expect("rename");
+
+    assert!(world.holds("/second"));
+    assert!(!world.holds("/first"));
+}
+
+#[test]
+fn rename_refuses_a_root_length_outside_the_paths() {
+    let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
+    // Испорченный ответ маршрутизатора ставит длину корня за границей обоих путей.
+    world.answers_pair_root_len(64);
+    let mut filesystem = routed(&world);
+
+    let refused = filesystem.rename(path("/data/first"), path("/data/second"));
+
+    assert!(matches!(
+        refused,
+        Err(Failure::Transport(IpcError::InvalidValue))
+    ));
+    assert!(world.holds("/data/first"));
+}
+
+#[test]
+fn rename_refuses_a_zero_root_length() {
+    let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
+    // Корень пары начинается с разделителя, поэтому пустой префикс путём не является.
+    world.answers_pair_root_len(0);
+    let mut filesystem = routed(&world);
+
+    let refused = filesystem.rename(path("/data/first"), path("/data/second"));
+
+    assert!(matches!(
+        refused,
+        Err(Failure::Transport(IpcError::InvalidValue))
+    ));
+    assert!(world.holds("/data/first"));
+}
+
+#[test]
+fn rename_refuses_a_root_length_breaking_a_character() {
+    let world = World::new(&[("/данные", Node::Directory), ("/данные/first", file("one"))]);
+    // Длина попадает в середину двухбайтового символа имени.
+    world.answers_pair_root_len(2);
+    let mut filesystem = routed(&world);
+
+    let refused = filesystem.rename(path("/данные/first"), path("/данные/second"));
+
+    assert!(matches!(
+        refused,
+        Err(Failure::Transport(IpcError::InvalidValue))
+    ));
+    assert!(world.holds("/данные/first"));
+}
+
+#[test]
+fn rename_refuses_equal_lengths_over_different_prefixes() {
+    let world = World::mounted(&[(
+        ROOT,
+        &[
+            ("/left", Node::Directory),
+            ("/left/first", file("one")),
+            ("/right", Node::Directory),
+        ],
+    )]);
+    // Префиксы одной длины различаются, поэтому корень пары не накрывает обе стороны.
+    world.answers_pair_root_len(5);
+    let mut filesystem = routed(&world);
+
+    let refused = filesystem.rename(path("/left/first"), path("/right/second"));
+
+    assert!(matches!(
+        refused,
+        Err(Failure::Transport(IpcError::InvalidValue))
+    ));
+    assert!(world.holds("/left/first"));
+    assert!(!world.holds("/right/second"));
+}
+
+#[test]
+fn rename_refuses_a_root_length_off_the_component_boundary() {
+    let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
+    // Длина обрывает имя монтирования на середине компонента.
+    world.answers_pair_root_len(3);
+    let mut filesystem = routed(&world);
+
+    let refused = filesystem.rename(path("/data/first"), path("/data/second"));
+
+    assert!(matches!(
+        refused,
+        Err(Failure::Transport(IpcError::InvalidValue))
+    ));
+    assert!(world.holds("/data/first"));
+}
+
+#[test]
+fn rename_refuses_a_pair_reply_that_does_not_decode() {
+    let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
+    world.truncates_the_pair_reply();
+    let mut filesystem = routed(&world);
+
+    let refused = filesystem.rename(path("/data/first"), path("/data/second"));
+
+    // Сессия не принята из неразобранного кадра, и файловая система вызова не видела.
+    assert!(matches!(
+        refused,
+        Err(Failure::Transport(IpcError::Truncated))
+    ));
+    assert_eq!(world.transports(), 1);
+    assert!(world.holds("/data/first"));
+    assert!(!world.holds("/data/second"));
 }

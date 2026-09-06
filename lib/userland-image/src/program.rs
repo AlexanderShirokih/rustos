@@ -34,7 +34,7 @@ pub enum ProgramDecodeError {
 }
 
 /// Программа, разобранная из содержимого записи образа. Путь приходит от
-/// записи: сам блоб его не несёт.
+/// записи. Сам блоб пути не содержит.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodedProgram<'a> {
     path: &'a str,

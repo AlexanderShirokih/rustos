@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{AccessMode, NodeKind, OpenFlags, file_system};
 use ipc::wire::Str;
 use kernel_objects::{MemoryRegion, OwnedHandle};
@@ -34,7 +34,7 @@ component_manifest! {
     }
 }
 
-/// Программа-потребитель файловой системы: читает запись образа сессией сервисного слота.
+/// Программа-потребитель файловой системы читает запись образа сессией сервисного слота.
 /// `startup` приходит в x0 как HandleId одноразового startup-порта.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(startup: Handle) -> ! {

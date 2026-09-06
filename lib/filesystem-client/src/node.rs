@@ -128,7 +128,8 @@ impl<E: Environment> OpenNode<E> {
 
     /// Дозаписывает байты в конец узла независимо от текущей позиции одной файловой
     /// операцией. Срез длиннее буфера данных сессии дозаписывается помещающимся префиксом.
-    /// Исход содержит длину этого префикса, а остаток дозаписывает следующий вызов.
+    /// Исход содержит длину этого префикса, а остаток дозаписывает следующий вызов. Позиция
+    /// чтения-записи остаётся прежней.
     pub fn append(&self, src: &[u8]) -> Result<Written> {
         let head = src
             .get(..src.len().min(self.session.capacity()))
@@ -143,12 +144,15 @@ impl<E: Environment> OpenNode<E> {
             .value?)
     }
 
-    /// Метаданные узла.
+    /// Метаданные узла на сервере сейчас. Значения [`kind`](Self::kind) и [`size`](Self::size)
+    /// остаются от открытия.
     pub fn metadata(&self) -> Result<NodeInfo> {
         Ok(self.session.client().stat(self.descriptor)?.value?)
     }
 
-    /// Capability региона, на котором лежит содержимое узла.
+    /// Capability региона, на котором лежит содержимое узла. Права выводятся из режима открытия.
+    /// После выдачи длина узла за ёмкость региона не растёт. Пустой узел и файловая система без
+    /// такого региона возвращают `NotSupported`.
     pub fn backing_memory(&self) -> Result<E::Handle> {
         let mut response = self.session.client().backing_memory(self.descriptor)?;
         let capability = response.value?;

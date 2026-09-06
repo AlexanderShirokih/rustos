@@ -75,7 +75,7 @@ pub fn sys_process_self() -> Result<u64, SyscallError> {
 }
 
 /// Capability на метеринг-`Resource` текущего процесса. Права капы - те, с которыми ресурс
-/// передали при старте: шире прав передавшего хэндла процессу не достаётся.
+/// передали при старте. Шире прав передавшего хэндла процессу не достаётся.
 /// `WrongType`, если процесс стартовал без метеринг-ресурса.
 pub fn sys_process_resource_self() -> Result<u64, SyscallError> {
     let process = syscall_runtime()
@@ -108,7 +108,7 @@ pub fn sys_resource_split(resource_h: u64, budget_pages: u64) -> Result<u64, Sys
     let parent = table
         .with_lock(|tbl| tbl.get_object::<Resource>(resource_id, Rights::WRITE))
         .map_err(map_ipc_error)?;
-    // Отказ деривации роняет производный ресурс, и его Drop возвращает
+    // Отказ деривации освобождает производный ресурс, и его Drop возвращает
     // списанные страницы исходному.
     let child = parent.split(budget_pages).map_err(map_ipc_error)?;
 
@@ -317,7 +317,7 @@ pub fn sys_process_start(
     // Предрезерв слота отказывал бы на штатном пути: caller-table бывает полна, и
     // освобождает её как раз drain переданного bootstrap-хэндла. Но освобождённый
     // слот может и не переиспользоваться - на MAX_GENERATION pop_free_slot выводит
-    // его из оборота. Тогда потомок уже запущен, а хэндла на него нет, и старт
+    // его из оборота. Тогда потомок уже запущен, а на него нет хэндла, и старт
     // откатывается терминацией.
     let insert_result = loader_table.with_lock(|tbl| {
         tbl.insert(Capability::new_with_default_rights(

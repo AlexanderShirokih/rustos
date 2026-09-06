@@ -43,7 +43,7 @@ fn load_body(out: &mut [u8]) -> Result<usize> {
             return Err(Error::Syscall(SyscallError::InvalidArgument));
         };
         target.copy_from_slice(source);
-        // Наружу уходит длина кадра целиком: в `out` легло не больше его вместимости.
+        // Наружу уходит длина кадра целиком. В `out` при этом легло не больше его вместимости.
         Ok(len)
     }
 }
@@ -64,7 +64,7 @@ pub struct Reply {
 /// создателя остаётся клиентский минт.
 #[derive(Debug)]
 pub struct ServicePort {
-    /// Серверная сторона: корневая capability, переносится серверу целиком.
+    /// Серверная сторона - корневая capability, переносимая серверу целиком.
     /// Её уход лишает порт получателей.
     pub server: OwnedHandle,
     /// Клиентская сторона: `send`/`call` под значком сессии.
@@ -79,7 +79,7 @@ impl Port {
             .map_err(Error::Syscall)
     }
 
-    /// Создаёт порт и разделяет его стороны: клиентская capability минтится как
+    /// Создаёт порт и разделяет его стороны. Клиентская capability минтится как
     /// `WRITE | TRANSFER` со значком `badge`, серверной остаётся корневая
     /// capability. `None` даёт клиента без значка.
     pub fn create_service(badge: Option<NonZeroU64>) -> Result<ServicePort> {
@@ -111,7 +111,7 @@ impl Port {
 
     /// Принимает сообщение в IPC-буфер текущего потока, блокируясь до `timeout`.
     /// `Some(Reply)`, если встречный был `call`, иначе `None`. `SenderGone`:
-    /// кадра нет, значок ушедшей стороны лежит в `IpcBuffer.badge`.
+    /// нет кадра, значок ушедшей стороны лежит в `IpcBuffer.badge`.
     pub fn recv(&self, timeout: Timeout) -> Result<Option<Reply>> {
         let reply_raw = value(svc::port_recv(self.handle.as_raw(), timeout))?;
         #[allow(clippy::cast_possible_truncation)]
@@ -121,8 +121,8 @@ impl Port {
         }))
     }
 
-    /// Запрос-ответ: сообщение из IPC-буфера текущего потока, ответ оказывается
-    /// там же. `timeout` ограничивает всю операцию.
+    /// Отправляет сообщение из IPC-буфера текущего потока и получает ответ туда же.
+    /// `timeout` ограничивает всю операцию.
     pub fn call(&self, timeout: Timeout) -> Result<()> {
         unit(svc::port_call(self.handle.as_raw(), timeout))
     }

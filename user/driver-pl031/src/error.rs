@@ -1,4 +1,4 @@
-use component_client::StartupError;
+use component_startup::StartupError;
 use ipc::wire::IpcError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

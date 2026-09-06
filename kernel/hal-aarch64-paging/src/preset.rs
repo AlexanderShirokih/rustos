@@ -21,7 +21,8 @@ pub struct Mmio;
 pub struct Heap;
 
 impl KernelText {
-    /// Возвращает флаги для исполняемого кода ядра.
+    /// EL1 читает и пишет. EL0 доступа не получает. Исполнение разрешено из EL1 и
+    /// запрещено из EL0.
     pub const fn flags() -> Aarch64MemFlags {
         Aarch64MemFlags::new()
             .af(true)
@@ -34,7 +35,7 @@ impl KernelText {
 }
 
 impl KernelData {
-    /// Возвращает флаги для данных ядра.
+    /// EL1 читает и пишет. EL0 доступа не получает. Исполнение запрещено на обоих уровнях.
     pub const fn flags() -> Aarch64MemFlags {
         Aarch64MemFlags::new()
             .af(true)
@@ -47,7 +48,8 @@ impl KernelData {
 }
 
 impl KernelRoData {
-    /// Возвращает флаги для константных данных ядра.
+    /// EL1 читает. EL0 доступа не получает. Исполнение разрешено из EL1 (`pxn` не
+    /// установлен) и запрещено из EL0.
     pub const fn flags() -> Aarch64MemFlags {
         Aarch64MemFlags::new()
             .af(true)
@@ -60,7 +62,7 @@ impl KernelRoData {
 }
 
 impl Heap {
-    /// Возвращает флаги для кучи ядра.
+    /// EL1 читает и пишет. EL0 доступа не получает. Исполнение запрещено на обоих уровнях.
     pub const fn flags() -> Aarch64MemFlags {
         Aarch64MemFlags::new()
             .af(true)
@@ -73,7 +75,8 @@ impl Heap {
 }
 
 impl Mmio {
-    /// Возвращает флаги для MMIO-регионов.
+    /// EL1 читает и пишет. EL0 доступа не получает. Исполнение запрещено на обоих
+    /// уровнях. Память не кэшируется и не разделяется между наблюдателями.
     pub const fn flags() -> Aarch64MemFlags {
         Aarch64MemFlags::new()
             .af(true)

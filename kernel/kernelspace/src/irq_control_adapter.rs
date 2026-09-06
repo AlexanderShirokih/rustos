@@ -1,7 +1,7 @@
 //! Адаптер `capability::InterruptsControl` поверх `drivers_common`-сервиса.
 //!
 //! Единственное место, где встречаются архитектурно-независимый capability-слой и
-//! drivers-common: capability говорит «сырыми» `u16`, адаптер заворачивает их в
+//! drivers-common: capability говорит "сырыми" `u16`, адаптер заворачивает их в
 //! `IrqNumber`, строит `IrqBinding` с мостом `IrqHandler -> IrqSink` и хранит
 //! возвращённый `IrqBound` внутри `IrqBindToken`. Так capability-крейт остаётся
 //! без зависимости на drivers-common.

@@ -11,8 +11,8 @@ pub const BOOT_STAGE_ONE_DIRECTORY: &str = "/boot/init/stage1";
 /// Имя записи с программой в каталоге компонента.
 pub const COMPONENT_PROGRAM_NAME: &str = "program";
 
-/// Имя компонента, которому принадлежит запись: каталог записи с программой.
-/// Запись вне каталога компонента названа собственным именем.
+/// Имя записи `program` внутри каталога компонента - имя этого каталога. Любая другая
+/// запись, в том числе другой файл того же каталога, названа собственным именем.
 #[must_use]
 pub fn component_name(record: &str) -> &str {
     match record.rsplit_once('/') {
@@ -56,7 +56,7 @@ pub enum OnExhausted {
     Detach,
 }
 
-/// Устройство описания платформы, названное слотом: набор совместимостей, с
+/// Устройство описания платформы называется слотом и объединяет набор совместимостей, с
 /// которыми работает драйвер, вместе с номерами экземпляра и ресурса.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanDevice<'a> {
@@ -181,7 +181,7 @@ struct ParsedSlot<'a> {
     end: usize,
 }
 
-/// Декодирует запись плана. Буфер разбирается целиком: хвост сверх плана
+/// Декодирует запись плана. Буфер разбирается целиком, а хвост сверх плана
 /// отвергается.
 pub fn decode_plan(bytes: &[u8]) -> Result<BootPlan<'_>, PlanDecodeError> {
     BootPlan::decode(bytes)
@@ -195,7 +195,7 @@ impl<'a> PlanComponent<'a> {
         self.executable
     }
 
-    /// Имя экземпляра: им композиция называет компонент, и под ним его
+    /// Композиция называет компонент этим именем экземпляра. Под тем же именем идут его
     /// процесс и строки журнала.
     #[must_use]
     pub const fn name(&self) -> &'a str {
@@ -228,7 +228,7 @@ impl<'a> PlanComponent<'a> {
         }
     }
 
-    /// Предел памяти компонента в страницах: об него метрится всё, что процесс
+    /// Предел памяти компонента задан в страницах, и об него метрится всё, что процесс
     /// занимает.
     #[must_use]
     pub const fn memory_pages(&self) -> u64 {
@@ -241,7 +241,7 @@ impl<'a> PlanComponent<'a> {
         self.startup_timeout
     }
 
-    /// Предел числа запусков: первый запуск считается.
+    /// Первый запуск входит в предел числа запусков.
     #[must_use]
     pub const fn launches(&self) -> u32 {
         self.launches
@@ -253,7 +253,7 @@ impl<'a> PlanComponent<'a> {
         self.on_exhausted
     }
 
-    /// Компонент заводит сессии своего service-порта сам: supervisor просит их
+    /// Компонент сам создаёт сессии своего service-порта: supervisor открывает их
     /// операцией `ComponentSessions::open_session` на его control-порту.
     #[must_use]
     pub const fn establishes_sessions(&self) -> bool {
@@ -268,7 +268,7 @@ impl<'a> BootPlan<'a> {
         self.count
     }
 
-    /// Композиция плана пуста не бывает: декодер отвергает такую запись.
+    /// Декодер отвергает пустую композицию плана.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.count == 0
@@ -333,7 +333,7 @@ impl<'a> Iterator for PlanComponents<'a> {
         if self.remaining == 0 {
             return None;
         }
-        // Запись проверена декодированием плана целиком: повторный разбор
+        // Запись уже проверена декодированием плана целиком, а повторный разбор
         // читает те же байты.
         let parsed = parse_component(self.bytes, self.cursor).ok()?;
         self.remaining -= 1;
@@ -457,11 +457,11 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, PlanDecodeError
     if device_kind && selector_count == 0 {
         return Err(PlanDecodeError::InvalidLayout("slot_selector"));
     }
-    // Строки совместимости несёт только устройство.
+    // Строки совместимости задаёт только устройство.
     if !device_kind && selector_count != 0 {
         return Err(PlanDecodeError::InvalidLayout("slot_strings"));
     }
-    // Имя экземпляра-провайдера несут только слоты, которые он наполняет.
+    // Имя экземпляра-провайдера задают только слоты, которые он наполняет.
     if !provider_kind && provider_len != 0 {
         return Err(PlanDecodeError::InvalidLayout("slot_provider"));
     }
@@ -658,7 +658,7 @@ mod tests {
         let rtc = plan.component(1).expect("second component");
         assert_eq!(rtc.name(), "clock");
         assert_eq!(rtc.on_exhausted(), OnExhausted::Detach);
-        // Сессии драйвера состояния не несут: их минтит supervisor.
+        // Драйвер состояния сессии не создаёт, а их минтит supervisor.
         assert!(!rtc.establishes_sessions());
         assert_eq!(rtc.slot_count(), 3);
         let slots: Vec<SlotSource<'_>> = rtc.slots().collect();
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn round_trip_names_a_provider_outside_the_record_of_its_consumer() {
-        // Имя работает сквозь ступени: провайдер лежит вне этой записи, и слот
+        // Имя работает сквозь ступени. Провайдер лежит вне этой записи, а слот
         // называет его именем экземпляра.
         let consumer = ComponentSpec {
             slots: &[SlotSpec::Service {

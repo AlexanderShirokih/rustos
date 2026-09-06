@@ -189,7 +189,7 @@ pub fn launch_entry<'a, V: EntryView<'a>, E: From<Error>>(
 /// Загружает `entry`, отправляет startup-кадр и возвращает процесс с
 /// сохранённой клиентской стороной порта под значком `lease`.
 ///
-/// Значок делает исчезновение вызывающего наблюдаемым: потомок, оставшийся без
+/// Значок делает исчезновение вызывающего наблюдаемым. Потомок, оставшийся без
 /// держателей `lease`, получает `SenderGone` очередным приёмом на этом порту.
 /// Ошибка callback проходит тот же cleanup, что и у [`launch_entry`].
 pub fn launch_entry_retained<'a, V: EntryView<'a>, E: From<Error>>(
@@ -222,7 +222,7 @@ fn prepare_launch<'a, V: EntryView<'a>>(
 ///
 /// Сегменты копируются в свежие приватные регионы. `resource` оплачивает их и
 /// становится метеринг-ресурсом потомка. `name` называет процесс, а без имени
-/// он зовётся по записи программы. `initial` — начальная capability. `Ok`
+/// он зовётся по записи программы. `initial` - начальная capability. `Ok`
 /// означает, что хэндл передан потомку.
 pub fn load_entry<'a, E: EntryView<'a>>(
     entry: &E,
@@ -277,7 +277,7 @@ pub fn load_entry<'a, E: EntryView<'a>>(
     )
     .ok_or(Error::Syscall(SyscallError::InvalidArgument))?;
 
-    // Стек - обычный сегмент: ядро о нём отдельно не знает, а его страницы
+    // Стек - обычный сегмент, который ядро отдельно не выделяет, а его страницы
     // оплачивает тот же `resource`, что и остальной образ.
     let stack = resource.create_virtual(stack_size, MemoryAccess::RW)?;
     let stack_abi = UserSegmentAbi {

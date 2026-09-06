@@ -37,7 +37,7 @@ pub struct Aarch64AddressSpaceFactory {
 }
 
 // SAFETY: `frame_allocator` - `&'static`-shared аллокатор, сериализующий
-// доступ к битмапам внутри `&self`-методов; изменяемых полей в фабрике нет.
+// доступ к битмапам внутри `&self`-методов; фабрика не содержит изменяемых полей.
 unsafe impl Send for Aarch64AddressSpaceFactory {}
 // SAFETY: см. `Send`.
 unsafe impl Sync for Aarch64AddressSpaceFactory {}

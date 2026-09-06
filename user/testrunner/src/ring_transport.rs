@@ -38,8 +38,8 @@ extern "C" fn consumer_worker(arg: usize) -> u32 {
     let shared = unsafe { &*(arg as *const Shared) };
 
     let base = shared.region_va as *mut u8;
-    // SAFETY: страница-носитель замаплена RW главным потоком и живёт до конца
-    // теста; `region_len <= PAGE_SIZE`, поэтому кольцо лежит в её границах.
+    // SAFETY: страница-носитель замаплена RW главным потоком и остаётся действительной
+    // до конца теста; `region_len <= PAGE_SIZE`, поэтому кольцо лежит в её границах.
     // Этот consumer - единственный consumer-конец над ней (SPSC-инвариант:
     // один producer + один consumer).
     let ring = unsafe { SpscRing::from_raw(base, shared.region_len, SLOT_PAYLOAD) }
@@ -61,7 +61,7 @@ extern "C" fn consumer_worker(arg: usize) -> u32 {
                 }
                 next += 1;
             }
-            // Гонка: проснулись, но кадр ещё не виден - повторяем.
+            // Из-за гонки поток просыпается, но кадр ещё не виден - повторяем.
             Err(IpcError::WouldBlock) => core::hint::spin_loop(),
             Err(_) => return 1,
         }
@@ -96,9 +96,9 @@ fn ring_transport_round_trip() {
         ok: core::sync::atomic::AtomicBool::new(false),
     };
 
-    // Producer-конец: главный поток оборачивает тот же регион в producer-кольцо.
+    // На producer-конце главный поток оборачивает тот же регион в producer-кольцо.
     let base = shared.region_va as *mut u8;
-    // SAFETY: страница только что замаплена RW и живёт до конца теста;
+    // SAFETY: страница только что замаплена RW и остаётся действительной до конца теста;
     // `region_len <= PAGE_SIZE`, кольцо в её границах; главный поток -
     // единственный producer-конец над ней.
     let producer_ring =

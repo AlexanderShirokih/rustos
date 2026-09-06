@@ -217,7 +217,7 @@ fn caller_wakes_when_server_dies_holding_reply() {
     .expect("spawn holder from image");
 
     let mut out = [0u8; 8];
-    // Кадр уже принят, поэтому вызыватель снят с очереди порта: его будит снос
+    // Кадр уже принят, поэтому вызыватель снят с очереди порта. Его будит снос
     // reply-хэндла вместе с таблицей ушедшего сервера, а не пустое множество
     // получателей. Тайм-аут страхует от вечной парковки, исход - `PeerClosed`.
     let result = service.client.call_bytes(b"x", &mut out, CALL_TIMEOUT);

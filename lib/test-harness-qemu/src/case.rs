@@ -23,6 +23,10 @@ pub enum TestKind {
 
 /// Регистрирует тест-кейс в секции `.tests.kernel`.
 ///
+/// Раскрытие кладёт в эту секцию статик `$symbol: TestCase { name: $name, run: $run,
+/// kind: $kind }`. [`crate::runner::run_tests`] обходит секцию между линкер-символами
+/// `__tests_kernel_start` и `__tests_kernel_end` и берёт из неё записи выбранного `kind`.
+///
 /// Обычно вызывается не напрямую, а через атрибут `kernel_test`.
 ///
 /// ```ignore

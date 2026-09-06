@@ -2,7 +2,7 @@
 
 use core::arch::global_asm;
 
-// .pushsection/.popsection: секция .head не утекает в последующие global_asm-блоки.
+// .pushsection/.popsection: секция .head не распространяется на последующие global_asm-блоки.
 global_asm!(
     r#"
         .pushsection .head, "ax"

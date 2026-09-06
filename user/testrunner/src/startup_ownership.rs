@@ -193,7 +193,7 @@ impl ipc::Transport for CallInsteadOfCast<'_> {
     }
 }
 
-/// Корректное тело start не должно удерживать reply до получения обещанного слота.
+/// Корректное тело start не удерживает reply до получения обещанного слота.
 #[kernel_test]
 fn a_valid_start_sent_as_call_does_not_wait_for_the_next_frame() {
     let log = Watched::create(LOG_BADGE);

@@ -160,8 +160,8 @@ impl MemFlags {
         })
     }
 
-    /// Kernel read/write, без исполнения, без user-доступа. Использует
-    /// kernel-heap для собственной арены и любые kernel-only данные.
+    /// Kernel read/write, без исполнения, без user-доступа. Подходит для kernel-heap:
+    /// собственной арены и произвольных kernel-only данных.
     pub const fn kernel_rw() -> Self {
         MemFlags::Cached(Owners {
             kernel: CachedPermission {

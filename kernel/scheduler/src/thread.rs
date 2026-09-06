@@ -137,7 +137,8 @@ impl<A: ArchContext> Thread<A> {
         &self.target
     }
 
-    /// User-VA per-thread IPC-буфера. `None` у kernel-потоков.
+    /// User-VA per-thread IPC-буфера. `None`, пока [`Self::set_ipc_buffer`]
+    /// не вызван. Kernel-потокам буфер не назначают вовсе.
     pub fn ipc_buffer_va(&self) -> Option<PageAlignedVirtualAddress> {
         self.ipc_buffer.as_ref().map(IpcBufferSlot::user_va)
     }

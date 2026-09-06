@@ -1,4 +1,4 @@
-//! Per-thread IPC-буфер: страница user-памяти, через которую
+//! Per-thread IPC-буфер - страница user-памяти, через которую
 //! Port-syscalls обмениваются короткими сообщениями.
 //!
 //! Структура [`IpcBuffer`] разделяется ядром и userspace. Буфер маппится ядром по
@@ -22,7 +22,8 @@ use core::cmp::min;
 
 use crate::memory::PAGE_SIZE;
 
-/// Максимум переносимых/принимаемых handle в [`IpcBuffer::caps`].
+/// Максимум переносимых/принимаемых handle в [`IpcBuffer::caps`]. Значение укладывается в
+/// четырёхбитовое поле `ncaps` тега.
 pub const IPC_BUFFER_MAX_CAPS: usize = 4;
 
 /// Максимум байт тела сообщения в [`IpcBuffer::data`]: остаток страницы за
@@ -38,13 +39,19 @@ const TAG_NCAPS_MASK: u64 = 0xF;
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct IpcBuffer {
-    /// `len(bytes)` в `[0..16)`, `ncaps` в `[16..20)`, флаги в `[20..)`.
+    /// `len(bytes)` в `[0..16)`, `ncaps` в `[16..20)`, флаги в `[20..)`. Собирается
+    /// [`encode_tag`], разбирается [`decode_tag`].
     pub tag: u64,
-    /// HandleId для переноса/приёма.
+    /// Сырые HandleId для переноса, значимы первые `ncaps` элементов. На отправке ядро
+    /// изымает эти handle из таблицы отправителя и вставляет в таблицу получателя, каждый
+    /// требует `Rights::TRANSFER`. Отказ переноса оставляет их у отправителя, повтор одного
+    /// handle в наборе - `BadHandle`.
     pub caps: [u32; IPC_BUFFER_MAX_CAPS],
-    /// Тело сообщения.
+    /// Тело сообщения, значимы первые `len` байт.
     pub data: [u8; IPC_BUFFER_DATA_MAX],
-    /// Badge отправителя, через который пришло сообщение. При отправке игнорируется.
+    /// Badge порт-handle отправителя, `0` у незаклеймённого. Пишется ядром на приёме,
+    /// на отправке не читается. Отказ `SenderGone` кладёт сюда значок ушедшей стороны,
+    /// оставляя `tag`, `data` и `caps` без изменений.
     pub badge: u64,
 }
 
@@ -54,7 +61,6 @@ const _: () = assert!(
 );
 
 impl IpcBuffer {
-    /// Создает устой буфер.
     pub const fn zeroed() -> Self {
         Self {
             tag: 0,
@@ -65,7 +71,8 @@ impl IpcBuffer {
     }
 }
 
-/// Упаковывает `len` (длина тела) и `ncaps` (число handle) в `tag`.
+/// Упаковывает `len` (длина тела) и `ncaps` (число handle) в `tag`. Значение сверх
+/// [`IPC_BUFFER_DATA_MAX`] и [`IPC_BUFFER_MAX_CAPS`] обрезается до предела без отказа.
 pub const fn encode_tag(len: usize, ncaps: usize) -> u64 {
     let len = min(len, IPC_BUFFER_DATA_MAX);
     let ncaps = min(ncaps, IPC_BUFFER_MAX_CAPS);
@@ -80,7 +87,8 @@ pub struct DecodedTag {
     pub ncaps: usize,
 }
 
-/// Распаковывает `tag` обратно в [`DecodedTag`].
+/// Распаковывает `tag` обратно в [`DecodedTag`]. Поля берутся из битов как есть, и
+/// прочитанный из буфера `tag` сверяется с пределами на месте применения.
 pub const fn decode_tag(tag: u64) -> DecodedTag {
     DecodedTag {
         len: (tag & TAG_LEN_MASK) as usize,

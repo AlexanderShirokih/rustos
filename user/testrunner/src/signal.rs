@@ -45,7 +45,7 @@ fn wait_blocks_until_another_thread_signals() {
     let worker =
         spawn(delayed_signaler, raw, STACK_SIZE, Priority::new(1)).expect("spawn signaler");
 
-    // Бит ещё не поднят: ожидание уйдёт в блокировку, а не вернётся сразу.
+    // Бит ещё не поднят. Ожидание уйдёт в блокировку, а не вернётся сразу.
     kernel_tests::kassert!(signal.wait(SIGNALED, Timeout::POLL).is_err());
 
     let observed = signal
@@ -87,7 +87,7 @@ fn wait_many_blocks_until_another_thread_signals() {
         WaitItem::new(idle.handle().as_raw(), SIGNALED),
         WaitItem::new(target.handle().as_raw(), SIGNALED),
     ];
-    // Биты ещё не подняты: ожидание уходит в блокировку вместо немедленного возврата.
+    // Биты ещё не подняты. Ожидание уходит в блокировку вместо немедленного возврата.
     kernel_tests::kassert!(matches!(
         wait_any(&items, Timeout::POLL),
         Err(kernel_objects::Error::Syscall(SyscallError::Timeout))

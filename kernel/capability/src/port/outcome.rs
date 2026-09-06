@@ -1,7 +1,7 @@
 //! Исход рандеву и его атомарный слот-арбитр.
 //!
-//! [`OutcomeSlot`] - общая с вызывателем ячейка состояния: матчер, reply и
-//! тайм-аут соревнуются CAS-переходами, побеждает ровно одна сторона.
+//! [`OutcomeSlot`] - общая с вызывателем ячейка состояния. Матчер, reply и
+//! тайм-аут соревнуются CAS-переходами, и побеждает ровно одна сторона.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -136,8 +136,8 @@ impl OutcomeSlot {
         self.cancel_waiters.fetch_add(1, Ordering::AcqRel);
         loop {
             match self.raw() {
-                // Перенос уже закоммичен и держит IPC-буфер: отмена не обрывает его,
-                // а ждёт терминального исхода.
+                // Перенос уже закоммичен и держит IPC-буфер. Отмена не обрывает его, а ждёт
+                // терминального исхода.
                 Self::DELIVERING => core::hint::spin_loop(),
                 Self::AWAITING_REPLY => {
                     if self.try_timeout() {

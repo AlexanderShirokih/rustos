@@ -1,5 +1,5 @@
 //! При `OutOfHandles` в caller-table syscall `ProcessCreate`,
-//! `ThreadCreate`, `ProcessStart` НЕ должны выполнять сторонних эффектов
+//! `ThreadCreate`, `ProcessStart` не должны выполнять сторонних эффектов
 //! (создавать процесс/поток, дренировать bootstrap-handle).
 
 #![allow(clippy::unwrap_used)]
@@ -515,7 +515,7 @@ fn process_start_succeeds_when_drain_frees_caller_slot() {
     let (rt, stub) = shared_runtime();
     stub.reset_counters();
 
-    // capacity=2: свободных слотов нет; drain bootstrap-handle-а освободит ровно один.
+    // capacity=2: нет свободных слотов; drain bootstrap-handle-а освободит ровно один.
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(2)));
     let process_id = install_process_handle(&table);
     let bootstrap_id = table

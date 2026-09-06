@@ -8,8 +8,9 @@ use memory::{
 use crate::image::UserImage;
 
 /// Готовит per-process [`UserVmAllocator`] на "дыре" между концом верхнего
-/// сегмента образа и базой user-стека (отсюда выдаётся `vm_allocate`). `None`,
-/// если дыры нет - у таких процессов `vm_*` всегда вернут `OutOfMemory`.
+/// сегмента образа и базой user-стека (отсюда выдаются `memory_allocate` и
+/// `memory_map`). `None`, если дыры нет - у таких процессов оба системных
+/// вызова всегда вернут `OutOfMemory`.
 pub fn build_user_vm_allocator(image: &UserImage<'_>) -> Option<UserVmAllocator> {
     let window = userland::user_vm_window(
         image

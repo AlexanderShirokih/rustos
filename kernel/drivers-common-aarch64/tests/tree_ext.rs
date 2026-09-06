@@ -135,8 +135,8 @@ fn probe_context_ext_translates_reg_address_space() {
     assert_eq!(reg.size, 0x1000);
 }
 
-/// Регресс: недоверенный FDT задаёт `child > offset`, и `parent + offset - child`
-/// без защиты уходит в underflow. Вычисление насыщается.
+/// Недоверенный FDT способен задать `child > offset`. Вычисление `parent + offset - child`
+/// насыщается и underflow не даёт.
 #[test]
 fn get_address_does_not_underflow_when_child_exceeds_offset() {
     let uart = TestNode {

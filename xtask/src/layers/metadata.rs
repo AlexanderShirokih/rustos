@@ -198,7 +198,7 @@ pub(super) fn collect_workspace(
 }
 
 pub(super) fn merge_crates(crates: BTreeSet<WorkspaceCrate>) -> Result<Vec<WorkspaceCrate>> {
-    // Пакет приходит с манифестом, цель path-зависимости - без него: признаки крейта
+    // Пакет приходит с манифестом, цель path-зависимости - без него. Признаки крейта
     // собираются по всем его вхождениям.
     let mut merged: BTreeMap<(String, String), WorkspaceCrate> = BTreeMap::new();
     for krate in crates {
@@ -309,7 +309,7 @@ fn links_std(targets: &[MetaTarget]) -> Result<bool> {
                 target.src_path.display()
             )
         })?;
-        // Крейт без std несёт внутренний атрибут `no_std`: голым либо под `cfg_attr`,
+        // Крейт без std содержит внутренний атрибут `no_std`: голым либо под `cfg_attr`,
         // оставляющим std хостовым тестам.
         if !source
             .lines()

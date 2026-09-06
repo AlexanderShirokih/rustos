@@ -1,7 +1,7 @@
 //! Абстракция транспортного канала.
 //!
 //! [`Transport`] реализуется платформенным адаптером поверх syscall-ов канала.
-//! Кадр кодируется в `bytes`, порты - в отдельном `handles`-векторе.
+//! Кадр кодируется в `bytes`, capability - в отдельном `handles`-векторе.
 
 use syscall::Timeout;
 
@@ -24,9 +24,9 @@ impl MessageLen {
     }
 }
 
-/// Порт двунаправленного канала сообщений.
+/// Двунаправленный канал сообщений под контрактом.
 /// `bytes` - кадр (заголовок + тело), `handles` - транспортный вектор
-/// портов кадра.
+/// capability кадра.
 pub trait Transport {
     /// Владелец ресурсов одного доставленного кадра.
     type Resources: crate::ReceivedResources;
@@ -39,7 +39,7 @@ pub trait Transport {
     fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError>;
 
     /// Принимает один кадр в `bytes` и его хэндлы в `handles`.
-    /// `WouldBlock`, если кадра нет. `PeerClosed` после закрытия и опустошения.
+    /// `WouldBlock`, если нет кадра. `PeerClosed` после закрытия и опустошения.
     /// `Truncated`, если буфер короче кадра или хэндлов больше места.
     fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError>;
 

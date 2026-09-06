@@ -10,7 +10,7 @@ use kernel_objects::{OwnedHandle, Port};
 use runtime::{Timeout, thread_exit};
 use syscall::Handle;
 
-/// Программа-фикстура: принимает запрос и уходит, не ответив на него.
+/// Программа-фикстура принимает запрос и уходит, не ответив на него.
 /// `thread_exit` не разматывает стек, и reply-хэндл остаётся в таблице
 /// процесса до её разрушения.
 #[unsafe(no_mangle)]

@@ -491,3 +491,27 @@ fn a_scalar_reply_closes_extra_capabilities() {
     watched.assert_closed();
     worker.join(JOIN_TIMEOUT).expect("reply worker joins");
 }
+
+/// Разобранный ответ, у которого capability не забрали, закрывает её вместе с собой.
+#[kernel_test]
+fn an_unclaimed_reply_capability_closes_with_its_answer() {
+    let service = Port::create_service(None).expect("port create");
+    let watched = Watched::create(FIRST_BADGE);
+    let vending = Exchange::with_capability(service.server.as_raw(), watched.deliver());
+    let worker = spawn(
+        vending_worker,
+        core::ptr::from_ref(&vending) as usize,
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn vendor");
+
+    let client = frame_probe::Client::new(PortTransport::client(service.client.handle()))
+        .with_wait(CALL_TIMEOUT);
+    let answer = client.request().expect("answered");
+    watched.assert_alive();
+    drop(answer);
+
+    watched.assert_closed();
+    worker.join(JOIN_TIMEOUT).expect("vendor joins");
+}

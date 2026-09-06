@@ -1,9 +1,9 @@
-//! Программа-фикстура с портовым протоколом: обслуживает запросы родителя
+//! Программа-фикстура с портовым протоколом обслуживает запросы родителя
 //! в собственном адресном пространстве.
 //!
-//! Нужна тестам, которым мало одного exit-кода потомка: изоляции адресных
+//! Нужна тестам, которым мало одного exit-кода потомка, и даёт изоляцию адресных
 //! пространств (слот в `.bss` лежит на одном и том же VA у всех экземпляров
-//! этого бинаря) и разделяемой памяти (регион приходит capability в
+//! этого бинаря) и разделяемую память (регион приходит capability в
 //! `caps[0]`).
 
 #![no_std]
@@ -56,7 +56,7 @@ pub extern "C" fn _start(root: Handle) -> ! {
     loop {
         let reply = match port.recv(Timeout::INFINITE) {
             Ok(Some(reply)) => reply,
-            // Значок сессии ушёл: родитель закрыл клиентскую капу либо умер.
+            // Значок сессии ушёл: родитель закрыл клиентскую капу либо завершился.
             Err(Error::Syscall(SyscallError::SenderGone)) => thread_exit(0),
             _ => thread_exit(EXIT_RECV_FAILED),
         };
@@ -117,7 +117,7 @@ fn start_parked_sibling() -> bool {
     if spawned.is_err() {
         return false;
     }
-    // Возврат отложен до того, как сосед встал в ожидание: без этого
+    // Возврат отложен до того, как сосед встал в ожидание. Без этого
     // `ProcessExit` снимал бы поток, ни разу не получавший CPU.
     ready.wait(SIGNALED, PARK_TIMEOUT).is_ok()
 }
@@ -127,7 +127,7 @@ fn park_forever(ready: Handle) -> u32 {
         return 1;
     };
     let _ = signal_set(ready, SIGNALED, 0, WakeCount::All);
-    // Пробуждения у этого сигнала нет ни одного: поток снимает `ProcessExit`.
+    // Пробуждения у этого сигнала нет ни одного. Поток снимает `ProcessExit`.
     let _ = signal.wait(SIGNALED, Timeout::INFINITE);
     0
 }
@@ -169,7 +169,7 @@ fn map_check(cap: u32, expected: u64) -> u8 {
         return REPLY_MAP_FAILED;
     };
     let region = MemoryRegion::from_handle(handle);
-    // Размер берётся из самого региона: договорённость о нём с родителем была
+    // Размер берётся из самого региона. Договорённость о нём с родителем была
     // бы вторым источником истины, а ядро требует точного совпадения.
     let Ok(mapping) = region.map_full(UserMemFlags::ReadWrite) else {
         return REPLY_MAP_FAILED;
@@ -177,7 +177,7 @@ fn map_check(cap: u32, expected: u64) -> u8 {
 
     let slot = usize::try_from(mapping.va()).expect("positive va fits usize") as *mut u64;
     // SAFETY: регион не меньше страницы, маппинг покрывает его целиком; чтение
-    // и запись первых 8 байт лежат в его границах, других владельцев нет.
+    // и запись первых 8 байт лежат в его границах, а другие владельцы отсутствуют.
     let observed = unsafe {
         let observed = slot.read_volatile();
         slot.write_volatile(!expected);

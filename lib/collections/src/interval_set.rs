@@ -146,12 +146,10 @@ impl<T: Ord + Copy, const N: usize> StaticIntervalSet<T, N> {
         self.ranges.is_empty()
     }
 
-    /// Возвращает интервал по индексу.
     pub fn get(&self, index: usize) -> Option<&Interval<T>> {
         self.ranges.get(index)
     }
 
-    /// Итератор по интервалам.
     pub fn iter(&self) -> impl Iterator<Item = &Interval<T>> {
         self.ranges.iter()
     }
@@ -180,12 +178,10 @@ impl<T: Ord + Copy> IntervalSet<T> {
         self.ranges.is_empty()
     }
 
-    /// Возвращает интервал по индексу.
     pub fn get(&self, index: usize) -> Option<&Interval<T>> {
         self.ranges.get(index)
     }
 
-    /// Итератор по интервалам.
     pub fn iter(&self) -> impl Iterator<Item = &Interval<T>> {
         self.ranges.iter()
     }
@@ -213,8 +209,9 @@ where
     let mut out = S::new();
     let mut pending = true;
 
-    // Хранимые интервалы упорядочены и не пересекаются: каждый строго слева от `incoming`,
-    // касается его или строго справа. `incoming` встаёт перед первым строго правым.
+    // Хранимые интервалы упорядочены и не пересекаются. Каждый лежит строго слева от
+    // `incoming`, касается его либо лежит строго справа. `incoming` встаёт перед первым
+    // строго правым.
     for item in ranges.iter().copied() {
         if pending {
             if item.overlaps_or_touches(&incoming) {

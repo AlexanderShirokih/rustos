@@ -1,6 +1,6 @@
-//! Маршрутизатор имён владеет таблицей монтирования: под префиксом живёт сессия обслуживающей
-//! его файловой системы, а клиентам он выдаёт окна на запрошенные пути. Данные клиенты передают
-//! напрямую файловым системам.
+//! Маршрутизатор имён владеет таблицей монтирования. Под префиксом в ней хранится сессия
+//! обслуживающей его файловой системы, а клиентам он выдаёт окна на запрошенные пути. Данные
+//! клиенты передают напрямую файловым системам.
 //!
 //! Одноразовый startup-порт передаёт service- и control-порты. Service-порт разбирает пути
 //! клиентов, а control-порт обслуживает `NamespaceAdmin` для тех, чей слот назвал этот протокол.
@@ -17,7 +17,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 use component_abi::supervisor_gone;
-use component_client::{ReceivedStartup, component_manifest};
+use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{namespace, namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
 use kernel_objects::{OwnedHandle, ReceivedFrame, Thread};
@@ -89,8 +89,7 @@ fn serve(service: &OwnedHandle) {
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
-            // Ни один исход кадра не несёт: покадровое исчерпание и пробуждение без кадра
-            // порт не закрывают.
+            // Уход значка, покадровое исчерпание и пробуждение без кадра порт не закрывают.
             Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout) => {
                 continue;
             }

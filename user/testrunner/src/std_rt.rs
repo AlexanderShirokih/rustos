@@ -149,7 +149,7 @@ fn std_rt_start_hands_out_the_bootstrap_handle_once() {
 
 const RANDOM_MAX_LEN: usize = 17;
 
-/// Буфер любой длины заполняется целиком, а хвост короче слова не роняет генератор.
+/// Буфер любой длины заполняется целиком, а хвост короче слова генератор не отвергает.
 #[kernel_test]
 fn std_rt_random_fills_buffers_of_any_length() {
     let mut buffer = [0u8; RANDOM_MAX_LEN];
@@ -157,7 +157,7 @@ fn std_rt_random_fills_buffers_of_any_length() {
         runtime::random::fill_bytes(&mut buffer[..len]);
     }
 
-    // SplitMix64 биективен, а состояние сдвигается на каждый вызов: два подряд идущих слова
+    // SplitMix64 биективен, а состояние сдвигается на каждый вызов. Два подряд идущих слова
     // различаются всегда, поэтому проверка не плавает.
     let mut first = [0u8; 8];
     let mut second = [0u8; 8];
@@ -202,8 +202,8 @@ extern "C" fn tls_worker(_arg: usize) -> u32 {
     0
 }
 
-/// Значение под ключом принадлежит потоку и переживает переключения контекста, а уход потока
-/// гоняет деструктор.
+/// Значение под ключом принадлежит потоку и сохраняется через переключения контекста, а уход
+/// потока вызывает деструктор.
 #[kernel_test]
 fn std_rt_thread_locals_are_private_and_destroyed() {
     let key = runtime::tls::create(Some(count_destroyed));

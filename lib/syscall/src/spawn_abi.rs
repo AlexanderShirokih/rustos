@@ -4,19 +4,31 @@
 //! через `u32::from_le_bytes`/`u64::from_le_bytes`, не полагаясь на
 //! `repr(C)`-layout.
 
+/// Единственная версия, которую принимает `ProcessLoadImage` в поле
+/// [`UserImageDescAbi::version`]. Другое значение даёт `InvalidArgument`.
 pub const SEGMENT_ABI_VERSION: u32 = 1;
+
+/// Потолок [`UserImageDescAbi::segment_count`]. Пустой и превышающий потолок образ
+/// `ProcessLoadImage` отвергает как `InvalidArgument`.
 pub const MAX_SEGMENTS_PER_IMG: usize = 16;
 
-/// Ёмкость имени процесса в `ProcessCreate`, в байтах UTF-8.
+/// Ёмкость имени процесса в `ProcessCreate`, в байтах UTF-8. Длина вне `1..=64` даёт
+/// `InvalidArgument`.
 pub const MAX_PROCESS_NAME_LEN: usize = 64;
 
-/// Размер сериализованной `UserImageDescAbi` в байтах: `4 + 4 + 8*4 = 40`.
+/// Размер сериализованной [`UserImageDescAbi`] в байтах: `4 + 4 + 8*4 = 40`. Аргумент
+/// `desc_len` у `ProcessLoadImage` равен этому размеру, иначе - `InvalidArgument`.
 pub const USER_IMAGE_DESC_SIZE: usize = 40;
-/// Размер сериализованной `UserSegmentAbi` в байтах.
+/// Размер сериализованной [`UserSegmentAbi`] в байтах: `4 + 4 + 8*3 = 32`. Шаг массива
+/// сегментов по [`UserImageDescAbi::segments_va`] равен этому размеру.
 pub const USER_SEGMENT_SIZE: usize = 32;
 
 /// Описание образа: версия ABI, ссылка на массив сегментов, параметры
 /// стека и user-vm.
+///
+/// Смещения полей в сериализованном виде: `version` в `[0..4)`, `segment_count` в
+/// `[4..8)`, `segments_va` в `[8..16)`, `entry_va` в `[16..24)`, `user_vm_base` в
+/// `[24..32)`, `user_vm_size` в `[32..40)`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserImageDescAbi {
@@ -24,7 +36,8 @@ pub struct UserImageDescAbi {
     pub version: u32,
     /// Число сегментов. Должно лежать в `1..=MAX_SEGMENTS_PER_IMG`.
     pub segment_count: u32,
-    /// User-указатель на массив сегментов длиной `segment_count`.
+    /// User-указатель на массив из `segment_count` сериализованных [`UserSegmentAbi`]
+    /// по [`USER_SEGMENT_SIZE`] байт каждая. Ядро копирует массив до возврата из syscall.
     pub segments_va: u64,
     /// PC первой user-инструкции.
     pub entry_va: u64,
@@ -36,23 +49,29 @@ pub struct UserImageDescAbi {
 
 /// Один сегмент: handle на `Memory`-регион в loader-таблице + флаги
 /// доступа + VA в child AS + размер.
+///
+/// Смещения полей в сериализованном виде: `region_handle` в `[0..4)`, `flags` в
+/// `[4..8)`, `va_base` в `[8..16)`, `mapped_size` в `[16..24)`, `reserved` в `[24..32)`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserSegmentAbi {
-    /// `HandleId` региона в loader-таблице.
+    /// `HandleId` региона в таблице вызывающего `ProcessLoadImage`. Handle остаётся у
+    /// вызывающего, ядро устанавливает регион в child AS по нему. Требует `Rights::WRITE`
+    /// и права по `flags`.
     pub region_handle: u32,
     /// Флаги: `0 = RW`, `1 = RO`, `2 = RX` (см. [`UserMemFlags`](crate::UserMemFlags)).
+    /// Значение вне этих трёх даёт `InvalidArgument`.
     pub flags: u32,
     /// База в child AS (4K-выровнена).
     pub va_base: u64,
-    /// Замапливаемый размер (равен `region.size_bytes()`).
+    /// Замапливаемый размер. Расхождение с размером региона даёт `InvalidArgument`.
     pub mapped_size: u64,
-    /// Зарезервировано. Должно быть `0`.
+    /// Зарезервировано. Ненулевое значение даёт `InvalidArgument`.
     pub reserved: u64,
 }
 
-/// Декодирует ровно [`USER_IMAGE_DESC_SIZE`] байт в `UserImageDescAbi`.
-/// `None`, если буфер недостаточен.
+/// Декодирует первые [`USER_IMAGE_DESC_SIZE`] байт в [`UserImageDescAbi`], хвост за ними
+/// не разбирает. `None` на буфере короче этого размера.
 pub fn decode_image_desc(bytes: &[u8]) -> Option<UserImageDescAbi> {
     let (version, rest) = bytes.split_first_chunk::<4>()?;
     let (segment_count, rest) = rest.split_first_chunk::<4>()?;
@@ -70,8 +89,8 @@ pub fn decode_image_desc(bytes: &[u8]) -> Option<UserImageDescAbi> {
     })
 }
 
-/// Декодирует ровно [`USER_SEGMENT_SIZE`] байт в `UserSegmentAbi`.
-/// `None`, если буфер недостаточен.
+/// Декодирует первые [`USER_SEGMENT_SIZE`] байт в [`UserSegmentAbi`], хвост за ними не
+/// разбирает. `None` на буфере короче этого размера.
 pub fn decode_segment(bytes: &[u8]) -> Option<UserSegmentAbi> {
     let (region_handle, rest) = bytes.split_first_chunk::<4>()?;
     let (flags, rest) = rest.split_first_chunk::<4>()?;
@@ -87,7 +106,7 @@ pub fn decode_segment(bytes: &[u8]) -> Option<UserSegmentAbi> {
     })
 }
 
-/// Кодирует `UserImageDescAbi` в ровно [`USER_IMAGE_DESC_SIZE`] байт.
+/// Кодирует [`UserImageDescAbi`] в ровно [`USER_IMAGE_DESC_SIZE`] байт.
 pub fn encode_image_desc(desc: &UserImageDescAbi) -> [u8; USER_IMAGE_DESC_SIZE] {
     let mut bytes = [0u8; USER_IMAGE_DESC_SIZE];
     bytes[0..4].copy_from_slice(&desc.version.to_le_bytes());
@@ -99,7 +118,7 @@ pub fn encode_image_desc(desc: &UserImageDescAbi) -> [u8; USER_IMAGE_DESC_SIZE] 
     bytes
 }
 
-/// Кодирует `UserSegmentAbi` в ровно [`USER_SEGMENT_SIZE`] байт.
+/// Кодирует [`UserSegmentAbi`] в ровно [`USER_SEGMENT_SIZE`] байт.
 pub fn encode_segment(seg: &UserSegmentAbi) -> [u8; USER_SEGMENT_SIZE] {
     let mut bytes = [0u8; USER_SEGMENT_SIZE];
     bytes[0..4].copy_from_slice(&seg.region_handle.to_le_bytes());

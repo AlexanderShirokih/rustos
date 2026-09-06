@@ -34,9 +34,9 @@ use crate::{
     },
 };
 
-/// Аллокатор фреймов pre-MMU фазы. Спинлок здесь неприменим: он построен на
-/// exclusive-инструкциях, а с выключенным MMU память ведёт себя как
-/// Device-nGnRnE. Исполнение в этой фазе однопоточно.
+/// Аллокатор фреймов pre-MMU фазы. Спинлок здесь неприменим. Он построен на
+/// exclusive-инструкциях, а с выключенным MMU память имеет тип Device-nGnRnE. Исполнение в
+/// этой фазе однопоточно.
 pub type BootFrameAllocator = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
 
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
@@ -110,7 +110,7 @@ impl MemorySetup<Early> {
             .map_err(|()| MemorySetupError::OutOfMemory)?;
 
         // Находим самую большую свободную область
-        // Свободная RAM ещё ничего не содержит: сброс строк идёт до первой
+        // Свободная RAM ещё ничего не содержит, поэтому сброс строк идёт до первой
         // записи, чтобы оставленная загрузчиком грязная строка не вытеснилась
         // поверх неё позднее.
         for interval in free_regions.iter() {
@@ -180,7 +180,7 @@ impl MemorySetup<Installed> {
         // Резервирование памяти, использованной bump аллокатором.
         GLOBAL_ALLOCATOR.set_freeze();
 
-        // SAFETY: bump инициализирован и заморожен, конкурентного доступа нет
+        // SAFETY: bump инициализирован и заморожен, конкурентный доступ отсутствует
         let bump_used = unsafe { GLOBAL_ALLOCATOR.with_bump(|bump| bump.used()) };
         let bump_start = PageAlignedAddress::aligned_down(bump_used.start());
         let bump_end = PageAlignedAddress::aligned_up(bump_used.end());
@@ -388,8 +388,8 @@ impl MemorySetup<Enabled> {
         let higher_ptr_phys =
             PageAlignedVirtualAddress::identity(higher_root_pa).as_ptr::<PageTable<L0>>();
         // SAFETY: `higher_ptr_phys` - валидный указатель на PageTable<L0> в higher-half
-        // identity-region. Сдвиг на `higher_half_base` корректен: страница принадлежит замапленному
-        // региону.
+        // identity-region. Сдвиг на `higher_half_base` корректен, потому что страница принадлежит
+        // замапленному региону.
         let higher_ptr_rel = unsafe { higher_ptr_phys.byte_add(higher_half_base.as_usize()) };
 
         // Слот статический: `set_heap` идёт при global allocator в PHASE_FROZEN,
@@ -445,7 +445,7 @@ impl MemorySetup<Enabled> {
             boot.relocate_inner_pointers_by_offset(higher_half_base.as_usize());
         }
 
-        // Аллокатор живёт в статике: куча ядра строится поверх него.
+        // Аллокатор размещён в статике. Куча ядра строится поверх него.
         FRAME_ALLOCATOR.call_once(|| boot.into_locked())
     }
 }

@@ -826,6 +826,145 @@ fn namespace_reports_an_unresponsive_mount() {
 }
 
 #[kernel_test]
+fn namespace_resolves_a_pair_to_the_session_of_their_common_directory() {
+    let session = ram_session();
+    let ram = connect(&session);
+    close(
+        &ram,
+        &open(
+            &ram,
+            "/pair-left",
+            AccessMode::Read,
+            OpenFlags::CREATE | OpenFlags::DIRECTORY,
+        ),
+    );
+    close(
+        &ram,
+        &open(
+            &ram,
+            "/pair-left/first",
+            AccessMode::ReadWrite,
+            OpenFlags::CREATE,
+        ),
+    );
+
+    let namespace = namespace_client(router_minter());
+    let mut response = namespace
+        .resolve_pair(path("/tmp/pair-left/first"), path("/tmp/pair-right/second"))
+        .expect("resolve_pair call");
+    let pair = response.value.expect("one mount covers the pair");
+    // Общий каталог пары - `/tmp`, и его длина отсчитывается от корня дерева имён.
+    kernel_tests::kassert_eq!(pair.root_len, RAM_MOUNT.len() as u32);
+    let scope = OwnedHandle::from(response.claim(pair.session).expect("capability owner"));
+
+    let opened = open(
+        &connect(&scope),
+        "/pair-left/first",
+        AccessMode::Read,
+        OpenFlags::NONE,
+    );
+    kernel_tests::kassert_eq!(opened.kind, NodeKind::File);
+}
+
+#[kernel_test]
+fn namespace_keeps_the_pair_scope_inside_the_mount_root() {
+    // Общий каталог `/tmp` и `/tmp/inside` - корень дерева имён, который лежит выше монтирования.
+    let pair = namespace_client(router_minter())
+        .resolve_pair(path(RAM_MOUNT), path("/tmp/inside"))
+        .expect("resolve_pair call")
+        .value
+        .expect("one mount covers the pair");
+    kernel_tests::kassert_eq!(pair.root_len, RAM_MOUNT.len() as u32);
+}
+
+#[kernel_test]
+fn namespace_reports_a_pair_under_different_mounts() {
+    const SECOND_MOUNT: &str = "/paired-second";
+
+    mount_ram_filesystem(SECOND_MOUNT).expect("second mount added");
+    let namespace = namespace_client(router_minter());
+
+    let across = namespace
+        .resolve_pair(path("/tmp/first"), path("/paired-second/second"))
+        .expect("resolve_pair call")
+        .value
+        .map(|pair| pair.root_len);
+    kernel_tests::kassert_eq!(across, Err(FileSystemError::CrossMount));
+
+    // Отказ пары не тронул таблицу, и каждая сторона по-прежнему разбирается поодиночке.
+    let mut response = namespace
+        .resolve(path("/paired-second/second"))
+        .expect("resolve call");
+    let capability = response.value.expect("second mount covers the path");
+    drop(OwnedHandle::from(
+        response.claim(capability).expect("capability owner"),
+    ));
+
+    unmount_filesystem(SECOND_MOUNT).expect("second mount removed");
+}
+
+#[kernel_test]
+fn namespace_closes_the_session_of_an_undelivered_pair_reply() {
+    let abandoned = namespace::Client::new(Tampered {
+        port: PortTransport::client(router_minter()),
+        tamper: Tamper {
+            one_way: true,
+            ..Tamper::NONE
+        },
+    })
+    .with_wait(CALL_TIMEOUT);
+    for _ in 0..LEAK_FRAMES {
+        // Сессию общего каталога маршрутизатор открывает до ответа, доставить который некому.
+        let _ = abandoned.resolve_pair(path("/tmp/first"), path("/tmp/second"));
+    }
+
+    // Таблица маршрутизатора не исчерпана, поэтому недоставленный ответ каждый раз закрывал
+    // выданную сессию.
+    kernel_tests::kassert!(covers(router_minter(), RAM_MOUNT));
+    // Провайдер снял эти сессии по уходу значка и по-прежнему обслуживает новую.
+    let session = ram_session();
+    let client = connect(&session);
+    close(
+        &client,
+        &open(
+            &client,
+            "/undelivered-pair",
+            AccessMode::ReadWrite,
+            OpenFlags::CREATE,
+        ),
+    );
+}
+
+#[kernel_test]
+fn namespace_pair_scope_survives_a_table_change() {
+    const PAIRED_MOUNT: &str = "/paired-detached";
+
+    mount_ram_filesystem(PAIRED_MOUNT).expect("fixture mounted");
+    let mut response = namespace_client(router_minter())
+        .resolve_pair(
+            path("/paired-detached/first"),
+            path("/paired-detached/second"),
+        )
+        .expect("resolve_pair call");
+    let pair = response.value.expect("fixture covers the pair");
+    let scope = OwnedHandle::from(response.claim(pair.session).expect("capability owner"));
+
+    unmount_filesystem(PAIRED_MOUNT).expect("fixture unmounted");
+
+    // Выданная сессия держит решённый scope, и снятие записи её не трогает.
+    let client = connect(&scope);
+    close(
+        &client,
+        &open(&client, "/first", AccessMode::ReadWrite, OpenFlags::CREATE),
+    );
+    client
+        .rename(path("/first"), path("/second"))
+        .expect("rename call")
+        .value
+        .expect("rename inside the issued scope");
+}
+
+#[kernel_test]
 fn unmount_only_removes_the_route_and_keeps_existing_sessions_alive() {
     const DETACHED_MOUNT: &str = "/boot";
 

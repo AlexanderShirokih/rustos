@@ -214,7 +214,7 @@ fn mismatched_txid_is_skipped() {
         .expect("write good ok");
 
     // Клиент шлёт add (его запрос осядет в очереди сервера, тут не читается) и
-    // читает ответ: кадр с чужим txid отброшен, принят кадр с txid=1 (R2).
+    // читает ответ. Кадр с чужим txid отброшен, принят кадр с txid=1 (R2).
     let result = client.add(0, 0);
     assert_eq!(result.map(|response| response.value), Ok(42));
 }
@@ -844,7 +844,7 @@ fn protocol_level_default_timeout_times_out() {
 fn per_call_timeout_override_times_out() {
     let (client_end, _server_end) = MockEnd::pair();
     let client = mixed::Client::new(client_end);
-    // Дефолт клиента бессрочный, но `quick` несёт собственный timeout_ns = 0.
+    // Дефолт клиента бессрочный, но `quick` задаёт собственный timeout_ns = 0.
     assert_eq!(client.wait(), ipc::Timeout::INFINITE);
     assert!(matches!(client.quick(), Err(IpcError::Timeout)));
 }

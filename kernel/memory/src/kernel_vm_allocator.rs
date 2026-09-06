@@ -18,9 +18,13 @@ const MIN_ALLOC_SIZE: usize = 16;
 const ALLOC_ALIGN: usize = 8;
 const HEADER_PTR_SIZE: usize = size_of::<*mut FreeBlock>();
 
+/// Ошибки [`HeapAllocator::allocate`].
 #[derive(Debug, Clone)]
 pub enum AllocationError {
+    /// Арена исчерпана: не хватило VA-места под `expand` либо аллокатор фреймов
+    /// отказал при маппинге новых страниц.
     OutOfMemory,
+    /// Запрошен нулевой размер (`layout.size() == 0`).
     InvalidLayout,
 }
 
@@ -310,8 +314,9 @@ impl HeapAllocator {
         unsafe { NonNull::new_unchecked(user_ptr) }
     }
 
-    /// Освобождает блок и обнуляет header-указатель для защиты от
-    /// double-free. Указатели вне арены игнорируются.
+    /// Освобождает блок и обнуляет header-указатель. Повторный вызов с тем же `ptr`
+    /// не меняет состояние - обнулённый указатель служит меткой double-free. Указатели
+    /// вне арены игнорируются.
     pub fn deallocate(&mut self, ptr: NonNull<u8>) {
         let addr = ptr.as_ptr() as usize;
         let arena_start = self.arena.base.as_usize();

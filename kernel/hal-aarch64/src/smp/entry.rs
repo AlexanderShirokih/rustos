@@ -31,7 +31,7 @@ pub(super) fn entry_point_physical() -> usize {
 }
 
 // SAFETY: вход по физическому адресу с выключенными MMU и кэшами. Регистры
-// при входе параметров не несут - spin-table их не передаёт, а `context_id`
+// при входе не содержат параметров - spin-table их не передаёт, а `context_id`
 // из PSCI не используется, поэтому идентификатор берётся из блока передачи.
 #[unsafe(naked)]
 unsafe extern "C" fn secondary_start() {
@@ -181,7 +181,7 @@ extern "C" fn secondary_main(cpu_id: u64) -> ! {
 
 fn bring_up(cpu_id: u64) -> BringUpFailure {
     // Идентификатор берётся из таблицы топологии по собственному affinity и
-    // сверяется со слотом: расхождение значит, что слот уже переиспользован под
+    // сверяется со слотом. Расхождение значит, что слот уже переиспользован под
     // другой CPU.
     let Some(id) = cpu::confirm_current_id(cpu_id) else {
         return BringUpFailure::UnclaimedHandoff(cpu_id);
@@ -195,8 +195,8 @@ fn bring_up(cpu_id: u64) -> BringUpFailure {
         return BringUpFailure::NoCpuInterface { id, error };
     }
 
-    // Per-CPU состояние планировщика поднимается до отметки о готовности:
-    // отказ здесь ещё возвращается, а после отметки boot CPU уже считает CPU
+    // Per-CPU состояние планировщика поднимается до отметки о готовности. Отказ
+    // здесь ещё возвращается, а после отметки boot CPU уже считает CPU
     // рабочим.
     if let Err(error) = kernelspace::sched_bridge::bootstrap_this_cpu() {
         return BringUpFailure::NoSchedulerState { id, error };
@@ -204,13 +204,13 @@ fn bring_up(cpu_id: u64) -> BringUpFailure {
 
     info!("CPU {} is online", id.raw());
 
-    // Отметка перед входом в планировщик: вход не возвращается, а слот
+    // Отметка происходит перед входом в планировщик, потому что вход не возвращается, а слот
     // параметров нужно освободить под следующий CPU.
     if !handoff::ONLINE.mark_online() {
         return BringUpFailure::BringUpClosed(id);
     }
 
-    // Вход не возвращается: CPU уходит в свой idle-поток и дальше живёт под
+    // Вход не возвращается: CPU уходит в свой idle-поток и дальше работает под
     // управлением планировщика, размаскировав IRQ.
     BringUpFailure::NoScheduler {
         id,

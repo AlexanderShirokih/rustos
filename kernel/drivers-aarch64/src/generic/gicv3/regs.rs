@@ -1,4 +1,5 @@
-//! Определения MMIO-регистров GICv3 и вспомогательные типы.
+//! Смещения регистров GICD/GICR, которые открывает `controller`, раскладка бит
+//! `GICR_TYPER` в [`FrameOwner`] и `IrqType` - классификация номера прерывания.
 
 use drivers_common::services::interrupts::IrqNumber;
 use drivers_common_aarch64::{affinity_frames::FrameOwner, ipi_affinity::IpiAffinity};

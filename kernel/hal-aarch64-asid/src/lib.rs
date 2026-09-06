@@ -1,11 +1,20 @@
-//! Аллокатор идентификаторов адресного пространства (ASID) для AArch64.
+//! Раздаёт адресным пространствам AArch64 идентификаторы ASID и отслеживает их
+//! переиспользование.
 //!
-//! Выдаёт per-AS 16-битный ASID с monotonic generation в одном 64-битном теге.
-//! Тег хранится во владеющем `AtomicU64` и обновляется с помощью CAS, чтобы
-//! hot-path активации AS был lock-free для уже активированных пространств.
-//! При переполнении набора свободных ASID generation увеличивается, bitmap
-//! обнуляется и вызывается callback (на железе - full-flush TLB во всём
-//! inner-shareable домене).
+//! [`GlobalAsidAllocator`] выдаёт по [`AsidWidth`] 8- либо 16-битный ASID вместе с номером
+//! поколения. Пара упакована в один 64-битный тег, который владелец адресного пространства
+//! держит в своём `AtomicU64`.
+//!
+//! `acquire` берёт общий лок аллокатора на каждом вызове. Под локом тег текущего поколения
+//! принимается как есть, а устаревший заменяется свежевыделенным. Свежий тег публикуется в
+//! слоте владельца по CAS. Проигранный CAS означает чужой параллельный `acquire`, и вызов
+//! повторяется с новым значением слота.
+//!
+//! Когда свободные ASID кончаются, номер поколения растёт, набор свободных обнуляется и
+//! вызывается заданный callback. На железе этот callback сбрасывает TLB во всём
+//! inner-shareable домене.
+//!
+//! Ширину ASID определяет платформенный слой и передаёт её в `init` до первого `acquire`.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(test, allow(clippy::std_instead_of_core))]
@@ -106,6 +115,9 @@ impl<const CPUS: usize> core::fmt::Debug for GlobalAsidAllocator<CPUS> {
 }
 
 impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
+    /// `on_rollover` выполняется под локом аллокатора, на CPU, чей `acquire` довёл диапазон
+    /// ASID до исчерпания. Вызов внутри него `acquire`/`release` этого же аллокатора
+    /// повторно берёт тот же лок и приводит к deadlock.
     pub const fn new(on_rollover: fn()) -> Self {
         Self {
             state: MutexCell::new(AsidAllocatorState::new()),
@@ -133,12 +145,21 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
         self.max_asid.load(Ordering::Acquire) as u16
     }
 
-    /// `tag_slot` - `AtomicU64` владельца AS, `cpu_id` - индекс текущего CPU.
-    /// Возвращает (asid, raw_tag).
+    /// Отдаёт CPU `cpu_id` действующий ASID адресного пространства и отмечает его активным.
+    /// Аргументы:
+    ///  - `tag_slot` - `AtomicU64`, в котором владелец AS хранит свой тег,
+    ///  - `cpu_id` - индекс текущего CPU.
     ///
-    /// Hot-path и slow-path выполняются под общим lock: помимо state
-    /// апдейтится `active[cpu_id]`, и две операции должны быть атомарны
-    /// относительно конкурентного rollover на другом CPU.
+    /// Тег из `tag_slot` переиспользуется, пока его поколение совпадает с текущим. Иначе
+    /// выделяется свежий ASID. Возвращается пара `(asid, raw_tag)`.
+    ///
+    /// Оба пути идут под общим локом. Вместе с состоянием аллокатора вызов меняет и
+    /// `active[cpu_id]`, а эти две записи обязаны быть атомарны относительно rollover,
+    /// идущего на другом CPU.
+    ///
+    /// Вызов с `cpu_id` вне диапазона `0..CPUS` паникует в debug-сборке (`debug_assert`). В
+    /// release он возвращает `(0, 0)` вместо выделения ASID. Ноль здесь - тот же резерв, что
+    /// и в [`AsidWidth::max_asid`], и успешный вызов его не отдаёт.
     pub fn acquire(&self, tag_slot: &AtomicU64, cpu_id: u16) -> (u16, u64) {
         let Some(active_slot) = self.active.get(cpu_id as usize) else {
             debug_assert!(false, "cpu_id is outside the per-CPU table");
@@ -299,7 +320,7 @@ mod tests {
     #[test]
     fn race_rollover_never_reuses_an_asid_active_on_another_cpu() {
         // Узкий диапазон: rollover наступает за сотни выдач, а не за 65 тысяч,
-        // и держатели переживают его многократно за прогон.
+        // и держатели проходят его многократно за прогон.
         let alloc = Arc::new(make(AsidWidth::Bits8, count_race_rollover));
         RACE_ROLLOVERS.store(0, Ordering::SeqCst);
 
@@ -320,7 +341,7 @@ mod tests {
                 let cpu_id = index as u16;
                 let mut reused = Vec::new();
                 for iteration in 0..RACE_MAX_ITERS {
-                    // Своя отметка снимается до выдачи: после неё прежний ASID
+                    // Своя отметка снимается до выдачи, поэтому после неё прежний ASID
                     // держателем не занят, и чужая выдача его законно берёт.
                     active[index].store(0, Ordering::Release);
                     let (asid, _tag) = alloc.acquire(&slot, cpu_id);
@@ -330,7 +351,7 @@ mod tests {
                     // Rollover обязан зарезервировать ASID, активные на чужих
                     // CPU: снятый бит означает, что ASID ушёл в свободные и
                     // будет выдан второму адресному пространству. Отметку
-                    // сосед ставит после своей выдачи, а аллокатор знает её с
+                    // сосед ставит после своей выдачи, а аллокатор учитывает её с
                     // самой выдачи, поэтому опубликованный ASID активен.
                     alloc.state.with_lock(|state| {
                         for (other, slot) in active.iter().enumerate() {
@@ -345,7 +366,7 @@ mod tests {
                     });
 
                     // Держатель работает, пока диапазон не пройден нужное
-                    // число раз: на медленной машине это дольше, а не реже.
+                    // число раз. На медленной машине это дольше, а не реже.
                     if iteration >= RACE_MIN_ITERS
                         && RACE_ROLLOVERS.load(Ordering::SeqCst) >= RACE_ROLLOVER_TARGET
                     {
@@ -537,7 +558,7 @@ mod tests {
         // Отпускаем самый первый ASID.
         alloc.release(tag0);
 
-        // Следующая выдача НЕ должна сразу переиспользовать asid0 (до rollover).
+        // Следующая выдача не должна сразу переиспользовать asid0 (до rollover).
         let s = AtomicU64::new(0);
         let (asid_next, _) = alloc.acquire(&s, 0);
         assert_ne!(

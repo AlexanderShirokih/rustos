@@ -12,7 +12,7 @@ const OWNER_DROP_EXIT_CODE: u32 = 1;
 pub enum ManagedStatus {
     /// Startup-транзакция ещё не завершена.
     Launching,
-    /// Startup-кадр доставлен, а launcher владеет экземпляром запуска.
+    /// Startup-кадр доставлен, а компонент владеет запущенным экземпляром.
     Running,
     /// Процесс штатно завершился с кодом `0`.
     Exited,
@@ -31,7 +31,7 @@ pub enum ManagedStartupError {
     InvalidState,
     /// Managed startup требует конечного send timeout.
     InfiniteTimeout,
-    /// Слотов компонента больше, чем несёт стартовая транзакция.
+    /// Слотов компонента больше, чем содержит стартовая транзакция.
     TooManySlots,
 }
 
@@ -66,6 +66,10 @@ enum ManagedState<R> {
 }
 
 /// Managed-компонент с capability roots конкретного типа `R`.
+///
+/// Состояние - [`ManagedStatus`]: [`Self::new`] создаёт его в `Launching`, дальше
+/// переходами ведают [`Self::launch`] и [`Self::observe_exit`]. Уход значения из
+/// области видимости завершает работающий процесс.
 pub struct ManagedComponent<R> {
     state: ManagedState<R>,
     reserve: Resource,
@@ -123,7 +127,7 @@ impl<R> ManagedComponent<R> {
     /// Резервирует `budget_pages` страниц под компонент и создаёт его в
     /// состоянии [`ManagedStatus::Launching`].
     ///
-    /// Резерв принадлежит компоненту до его уничтожения: каждый запуск нарезает
+    /// Резерв принадлежит компоненту до его уничтожения. Каждый запуск нарезает
     /// ресурс экземпляра из него. Резерв - капа-
     /// потомок `parent_resource`, и закрытие родительской капы его отзывает.
     pub fn new(parent_resource: &Resource, budget_pages: u64) -> Result<Self, ManagedStartupError> {
@@ -135,13 +139,14 @@ impl<R> ManagedComponent<R> {
         })
     }
 
-    /// Номер текущей попытки запуска: первый запуск даёт `1`.
+    /// Номер текущей попытки запуска. Первый запуск даёт `1`.
     #[must_use]
     pub const fn generation(&self) -> u32 {
         self.generation
     }
 
-    /// Текущее состояние компонента.
+    /// Текущее состояние компонента. Переходы делают [`Self::launch`] и
+    /// [`Self::observe_exit`].
     #[must_use]
     pub const fn status(&self) -> ManagedStatus {
         match self.state {
@@ -175,6 +180,9 @@ impl<R> ManagedComponent<R> {
     /// Запуск начинает новую incarnation и поднимает [`generation`](Self::generation).
     /// `name` называет процесс экземпляра. Компонент в состоянии `Running` уже
     /// владеет экземпляром, и повторный запуск отвергается `InvalidState`.
+    ///
+    /// Успешный запуск переводит компонент в [`ManagedStatus::Running`]. Отказ
+    /// переводит его в [`ManagedStatus::Failed`] с причиной [`ManagedFailure::Startup`].
     pub fn launch<'a, V: EntryView<'a>>(
         &mut self,
         entry: &V,
@@ -191,7 +199,7 @@ impl<R> ManagedComponent<R> {
         }
         self.generation += 1;
 
-        // Ресурс экземпляра живёт в этом блоке: неудачный запуск освобождает его
+        // Ресурс экземпляра ограничен этим блоком. Неудачный запуск освобождает его
         // концом блока, до подтверждения возврата бюджета.
         let launch = {
             let child_resource = match self.reserve.split(self.budget_pages) {
@@ -228,6 +236,8 @@ impl<R> ManagedComponent<R> {
     }
 
     /// Завершает живой экземпляр и ждёт его с конечным сроком.
+    ///
+    /// Итоговое состояние подчиняется правилу [`Self::observe_exit`].
     pub fn stop(&mut self, exit_code: u32, timeout: Timeout) -> Result<(), ManagedStartupError> {
         let running = self.running().ok_or(ManagedStartupError::InvalidState)?;
         running
@@ -238,6 +248,9 @@ impl<R> ManagedComponent<R> {
     }
 
     /// Ждёт завершения `Running`-процесса и сохраняет его exit code.
+    ///
+    /// Код `0` переводит компонент в [`ManagedStatus::Exited`], любой другой - в
+    /// [`ManagedStatus::Failed`] с причиной [`ManagedFailure::Exit`].
     pub fn observe_exit(&mut self, timeout: Timeout) -> Result<(), ManagedStartupError> {
         let exit_code = match &self.state {
             ManagedState::Running(running) => {
@@ -272,7 +285,7 @@ impl<R> ManagedComponent<R> {
 
     fn confirm_budget_return(&self) -> Result<(), Error> {
         // До уничтожения последнего объекта ушедшего поддерева страницы резерву
-        // не принадлежат: возврат подтверждается повторным выделением лимита.
+        // не принадлежат. Возврат подтверждается повторным выделением лимита.
         self.reserve
             .split_when_available(self.budget_pages, BUDGET_RETURN_TIMEOUT)
             .map(drop)

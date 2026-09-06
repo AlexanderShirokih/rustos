@@ -1,5 +1,3 @@
-//! Драйвер ARM Generic Timer: точка входа, фабрика и probe-функция.
-
 use alloc::{boxed::Box, format, string::String, sync::Arc};
 
 use drivers_common::{
@@ -26,7 +24,8 @@ const TIMER_IRQ_PRIORITY: IrqPriority = IrqPriority::HIGHEST;
 
 const VIRTUAL_TIMER_SPEC_INDEX: usize = 2;
 
-/// Runtime-драйвер ARM Generic Timer.
+/// `Driver`, который на `run` привязывает IRQ virtual timer, полученный от probe, и
+/// публикует `ArmGenericTimerState` как `TimerService` через `BootServices`.
 pub struct ArmGenericTimerDriver {
     interrupt: GicInterrupt,
     irq_bound: Option<IrqBound>,

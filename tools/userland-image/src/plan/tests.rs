@@ -378,7 +378,7 @@ fn stage_one_record_carries_one_component() {
 fn stage_one_binds_a_slot_to_an_exporter_of_stage_zero() {
     let stages = Image::new().staged(&plan(&[router()]), &plan(&[consumer()]));
 
-    // Имена экземпляров работают сквозь ступени: провайдер слота стоит в плане.
+    // Имена экземпляров работают сквозь ступени, а провайдер слота стоит в плане.
     assert_eq!(
         slots_of(&stages.stage_one[0].bytes, 0),
         [SlotSource::Service { provider: ROUTER }]
@@ -618,7 +618,7 @@ fn plan_rejects_a_named_import_of_an_instance_that_exports_nothing() {
 
 #[test]
 fn plan_orders_an_importer_after_its_exporter() {
-    // Потребитель стоит в записи первым, а зависит от провайдера: ребро
+    // Потребитель стоит в записи первым, а зависит от провайдера. Ребро
     // ведёт вперёд по плану, и порядок остаётся выразимым.
     let bytes = compiled(&plan(&[consumer(), router()]));
 
@@ -691,7 +691,7 @@ fn plan_binds_a_control_import_to_the_component_serving_it() {
         .with(ADMIN, admin)
         .compiled(&plan(&[router(), Component::new(ADMIN)]));
 
-    // Ребро зависимости выведено из связывания: провайдер поднимается раньше того, кто
+    // Ребро зависимости выведено из связывания. Провайдер поднимается раньше того, кто
     // зовёт его админ-операции.
     assert_eq!(
         slots_of(&bytes, 1),
@@ -843,7 +843,7 @@ fn plan_binds_a_directory_slot_to_the_named_instance() {
         .with(AREA, area_declaration())
         .compiled(&plan(&[image_filesystem(), Component::new(AREA)]));
 
-    // Ребро зависимости выведено из связывания: файловая система поднимается
+    // Ребро зависимости выведено из связывания. Файловая система поднимается
     // раньше того, кому выдаёт каталог.
     assert_eq!(
         slots_of(&bytes, 1),
@@ -880,8 +880,8 @@ fn plan_rejects_a_directory_slot_naming_an_instance_outside_the_composition() {
 fn plan_rejects_a_directory_slot_from_an_instance_without_own_sessions() {
     let area = declaration(vec![slot(SlotKind::Directory, 0, &[ROUTER])], None);
 
-    // Область назначает supervisor, а сужает её сам провайдер: сминченный значок
-    // области не несёт.
+    // Область назначает supervisor, а сужает её сам провайдер. Просто сминченный значок
+    // области не предоставляет.
     assert_eq!(
         Image::new()
             .with(AREA, area)
@@ -895,7 +895,7 @@ fn plan_rejects_a_directory_slot_from_an_instance_without_own_sessions() {
 
 #[test]
 fn plan_rejects_a_directory_slot_of_a_component_the_provider_waits_for() {
-    // Компонент, которого файловая система ждёт сама, каталога от неё не
+    // Компонент, которого сама ждёт файловая система, каталога от неё не
     // получает: порядок запуска такой композиции невыразим.
     assert_eq!(
         Image::new()
@@ -940,8 +940,8 @@ fn a_component_keeps_its_name_when_the_program_moves() {
 
     let plan = decoded(&bytes);
     let router = plan.component(0).expect("router");
-    // Запись плана несёт размещение, а имя экземпляра идёт от идентичности:
-    // перемещение программы описание композиции не трогает.
+    // Запись плана хранит размещение, а имя экземпляра идёт от идентичности.
+    // Перемещение программы описание композиции не трогает.
     assert_eq!(router.executable(), ELSEWHERE);
     assert_eq!(router.name(), MOVED);
 }
@@ -970,7 +970,7 @@ fn one_program_carries_two_named_instances() {
     assert_eq!(first.executable(), second.executable());
     assert_eq!(first.name(), "names-boot");
     assert_eq!(second.name(), "names-spare");
-    // Каталог у экземпляров общий, а значит и файлы: запись каталога
+    // Каталог у экземпляров общий, а значит и файлы. Запись каталога
     // называет программа, а не композиция.
     assert_eq!(
         first.slots().collect::<Vec<_>>(),

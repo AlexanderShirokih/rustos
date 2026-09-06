@@ -84,8 +84,8 @@ impl ArmGenericTimerState {
 
     fn write_cntv_tval_el0(value: u32) {
         // SAFETY: Запись в CNTV_TVAL_EL0 программирует относительный дедлайн virtual timer.
-        // Аппаратно устанавливает CNTV_CVAL_EL0 = CNTVCT_EL0 + TVAL. ISB гарантирует
-        // что следующая инструкция видит актуальное значение таймера.
+        // Аппаратно устанавливает CNTV_CVAL_EL0 = CNTVCT_EL0 + TVAL. ISB гарантирует,
+        // что следующая инструкция выполняется уже с обновлённым значением регистра.
         unsafe {
             write_sysreg!(cntv_tval_el0, u64::from(value));
             core::arch::asm!("isb", options(nomem, nostack, preserves_flags));

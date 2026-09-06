@@ -56,7 +56,7 @@ fn aarch64_user_memory_mapper_isolates_mappings() {
         .map_page(virt, phys, user_rw_flags())
         .expect("map_page in A");
 
-    // mapper_a знает страницу.
+    // mapper_a уже отображает страницу.
     mapper_a
         .walk_to_l3_leaf(virt)
         .expect("A must walk to leaf after map");

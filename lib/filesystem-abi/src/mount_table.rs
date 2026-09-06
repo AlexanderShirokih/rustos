@@ -1,4 +1,4 @@
-//! Запись дерева имён: упорядоченный список монтирований, который владелец политики
+//! Запись дерева имён задаёт упорядоченный список монтирований, который владелец политики
 //! загрузки читает из userland-образа при своём запуске.
 
 use alloc::vec::Vec;
@@ -34,21 +34,29 @@ pub struct Mounts<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountTableDecodeError {
+    /// Начало записи отличается от [`MOUNT_TABLE_MAGIC`]. Значение содержит прочитанные байты.
     InvalidMagic([u8; 8]),
+    /// Формат записи отличается от [`MOUNT_TABLE_VERSION`].
     InvalidVersion(u16),
+    /// Запись обрывается раньше, чем кончается объявленная в ней раскладка.
     Truncated { needed: usize, actual: usize },
+    /// Поле записи нарушает раскладку: пустая строка, не-UTF-8, ненулевой резерв заголовка либо
+    /// ненулевой хвост за таблицей. Значение называет поле.
     InvalidLayout(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountTableEncodeError {
+    /// Префикс либо имя экземпляра пусты.
     EmptyString,
+    /// Префикс либо имя экземпляра длиннее, чем выражает `u16` заголовка записи.
     StringTooLong,
+    /// Монтирований больше, чем выражает счётчик заголовка таблицы.
     TooManyMounts,
 }
 
-/// Декодирует дерево имён. Буфер разбирается целиком: хвост сверх таблицы
-/// отвергается.
+/// Декодирует дерево имён. Буфер разбирается целиком, а хвост сверх таблицы
+/// принимается только нулевым.
 pub fn decode_mount_table(bytes: &[u8]) -> Result<MountTable<'_>, MountTableDecodeError> {
     let header = bytes
         .get(..TABLE_HEADER_SIZE)
@@ -92,7 +100,8 @@ pub fn decode_mount_table(bytes: &[u8]) -> Result<MountTable<'_>, MountTableDeco
     })
 }
 
-/// Кодирует дерево имён в запись образа.
+/// Кодирует дерево имён в запись образа, сохраняя порядок монтирований. Пустая таблица даёт
+/// один заголовок.
 pub fn encode_mount_table(mounts: &[Mount<'_>]) -> Result<Vec<u8>, MountTableEncodeError> {
     let count = u16::try_from(mounts.len()).map_err(|_| MountTableEncodeError::TooManyMounts)?;
     let mut bytes = Vec::with_capacity(TABLE_HEADER_SIZE);
@@ -119,7 +128,6 @@ impl<'a> MountTable<'a> {
         usize::from(self.count)
     }
 
-    /// Дерево без монтирований не накрывает ни одного пути.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.count == 0
@@ -319,7 +327,7 @@ mod tests {
 
     #[test]
     fn decode_reads_a_table_padded_with_zeroes() {
-        // Запись выдана окном страницы: за таблицей идут нули дополнения.
+        // Запись выдана окном страницы. За таблицей идут нули дополнения.
         let bytes = table_bytes();
         let mut padded = bytes.clone();
         padded.resize(bytes.len() + 64, 0);

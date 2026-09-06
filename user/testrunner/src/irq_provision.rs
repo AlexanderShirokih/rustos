@@ -56,7 +56,7 @@ fn minting_a_line_twice_names_the_taken_line() {
 
     let taken = control.mint(SPARE_IRQ, IrqTrigger::Level);
 
-    // Занятая линия - отдельный отказ: исчерпание бюджета памяти к ней отношения не имеет.
+    // Занятая линия - отдельный отказ. Исчерпание бюджета памяти к ней отношения не имеет.
     kernel_tests::kassert_eq!(
         taken.err(),
         Some(Error::Syscall(SyscallError::AlreadyBound))
@@ -95,7 +95,7 @@ fn irq_band_ends_at_the_platform_line_count() {
     let outside = first_line_outside(&control);
 
     // Край полосы совпадает с числом линий контроллера, и на qemu virt их меньше
-    // архитектурного предела: край ровно в SPI_MAX + 1 отмечает полосу-литерал.
+    // архитектурного предела. Край ровно в SPI_MAX + 1 отмечает полосу-литерал.
     kernel_tests::kassert!(outside > PL031_IRQ);
     kernel_tests::kassert!(outside < SPI_MAX + 1);
     kernel_tests::kassert_eq!(

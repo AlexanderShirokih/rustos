@@ -44,10 +44,10 @@ pub enum Shareability {
 /// Права доступа (`AP[2:1]`).
 ///
 /// Кодировка соответствует ARMv8-A Architecture Reference Manual (D5.5.3,
-/// stage-1 attributes table). Раньше у проекта значения `KernelRO`/`UserRW`
-/// были перепутаны местами относительно стандарта - это приводило к тому,
-/// что `UserRW`-маппинг на практике становился `KernelRO`, и user-mode
-/// получал permission fault при первой же инструкции.
+/// stage-1 attributes table). Раньше в проекте значения `KernelRO` и `UserRW`
+/// стояли переставлены местами относительно стандарта. `UserRW`-маппинг на
+/// практике становился `KernelRO`, и user-mode получал permission fault при
+/// первой же инструкции.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Access {
     /// EL1 RW, EL0 нет доступа.
@@ -181,7 +181,8 @@ impl Aarch64MemFlags {
         self.field(AP_SHIFT, AP_MASK, ap as u64)
     }
 
-    /// Устанавливает индекс MAIR для атрибутов памяти.
+    /// Устанавливает индекс MAIR для атрибутов памяти. Значение шире трёх бит молча
+    /// обрезается. Годный `idx` даёт [`MemoryAttribute::index`].
     pub const fn attr_index(self, idx: u8) -> Self {
         self.field(ATTR_IDX_SHIFT, ATTR_IDX_MASK, idx as u64)
     }

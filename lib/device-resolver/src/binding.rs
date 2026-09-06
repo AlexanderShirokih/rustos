@@ -50,7 +50,7 @@ impl<'a> InterruptSpecifier<'a> {
 }
 
 impl ControllerBinding {
-    /// Объявляет биндинг контроллера, узел которого несёт одну из
+    /// Объявляет биндинг контроллера, узел которого содержит одну из
     /// совместимостей `compatible`.
     #[must_use]
     pub const fn new(compatible: &'static [&'static str], decode: SpecifierDecoder) -> Self {

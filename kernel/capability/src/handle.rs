@@ -62,7 +62,7 @@ impl HandleId {
 /// права, с которыми эта capability может быть использована, и значок (badge).
 ///
 /// `badge` - свойство capability: разные capability на один и тот же
-/// `Port` несут разные значки. `0` означает "без значка". На приёме
+/// `Port` различаются значком. `0` означает "без значка". На приёме
 /// сообщения ядро доставляет значок port-capability отправителя получателю.
 pub struct Capability {
     pub(super) target: CapabilityTarget,
@@ -82,11 +82,14 @@ impl core::fmt::Debug for Capability {
 }
 
 impl Capability {
-    /// Создаёт незаклеймённую capability (`badge == 0`).
+    /// Создаёт незаклеймённую capability (`badge == 0`) с правами `rights`.
+    ///
+    /// Capability становится корнем графа деривации. Потомки от [`duplicate`](Self::duplicate) и
+    /// [`derive`](Self::derive) отзываются вместе с ней. Сам корень отзывается своим закрытием.
     pub fn new(target: CapabilityTarget, rights: Rights) -> Self {
         let node = RevNode::new_root();
-        // Корневой узел ещё не виден другим потокам: учёт вводится сразу с билетом,
-        // отзыв не может опередить регистрацию хука.
+        // Корневой узел ещё не виден другим потокам. Учёт вводится сразу с билетом,
+        // поэтому отзыв не может опередить регистрацию хука.
         let holder = target.counted_holder_ticket(rights);
         if let Some(ticket) = &holder {
             let hook: Weak<dyn HolderTicket> = Arc::downgrade(ticket);
@@ -155,7 +158,7 @@ impl Capability {
     /// Создаёт копию capability с подмножеством прав и (опционально) значком.
     ///
     /// [`IpcError::AccessDenied`] - нет права [`Rights::DUPLICATE`] либо запрошенные права не
-    /// подмножество существующих. [`IpcError::ResourceExhausted`] - объект не заводит учёта под
+    /// подмножество существующих. [`IpcError::ResourceExhausted`] - объект не открывает учёт под
     /// новый значок. [`IpcError::Revoked`] - исходная capability отозвана, в том числе
     /// параллельно с дупликацией.
     pub fn duplicate(&self, new_rights: Rights, new_badge: u64) -> Result<Self, IpcError> {
@@ -186,7 +189,7 @@ impl Capability {
     }
 
     /// Создаёт capability на объект `target`, выведенный из объекта этой капы,
-    /// узлом-потомком: отзыв источника отзывает и производную.
+    /// узлом-потомком. Отзыв источника отзывает и производную.
     ///
     /// Права - стартовые для `target` ([`default_rights_for`]), суженные
     /// правами источника. Значок источника не наследуется: объект другой.

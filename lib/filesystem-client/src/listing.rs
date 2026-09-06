@@ -31,7 +31,8 @@ impl<E: Environment> Listing<E> {
         Ok(Self { node, walk })
     }
 
-    /// Следующая запись каталога. `None` - обход закончен.
+    /// Следующая запись каталога. `None` - обход закончен. Запись, которая длиннее буфера данных
+    /// сессии, останавливает обход ответом `BufferTooSmall`.
     pub fn next_entry(&mut self) -> Result<Option<DirEntry<'_>>> {
         let Self { node, walk } = self;
         walk.next_entry(node.session(), node.descriptor())
