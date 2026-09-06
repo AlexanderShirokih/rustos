@@ -2,55 +2,71 @@
 #
 # `heavy` помечает проверку, которой нужен инструмент вне обычной сборки: такие идут
 # только по `--all` или по имени. Скрипт из нескольких строк исполняется одним `bash -e`.
+#
+# `lane` называет очередь проверки. Очереди идут параллельно, проверки внутри очереди —
+# одна за другой. Очередь `cargo` держит проверки, которые запускают cargo и делят с ним
+# каталог сборки. Очередь `sources` держит проверки, которые только читают исходники.
 
 [[check]]
 name = "fmt"
+lane = "sources"
 run = "cargo xtask fmt --check"
 
 [[check]]
 name = "check-layers"
+lane = "sources"
 run = "cargo xtask check-layers"
 
 [[check]]
 name = "doc"
+lane = "cargo"
 run = "cargo xtask doc"
 
 [[check]]
 name = "style"
+lane = "sources"
 run = "cargo xtask style --all --base origin/main"
 
 [[check]]
 name = "similarity"
+lane = "sources"
 run = "cargo xtask similarity --base origin/main"
 
 [[check]]
 name = "clippy-host"
+lane = "cargo"
 run = "cargo xtask clippy --host"
 
 [[check]]
 name = "clippy-target"
+lane = "cargo"
 run = "cargo xtask clippy --target"
 
 [[check]]
 name = "test"
+lane = "cargo"
 run = "cargo xtask test"
 
 [[check]]
 name = "race"
+lane = "cargo"
 heavy = true
 run = "cargo xtask race"
 
 [[check]]
 name = "fuzz-build"
+lane = "cargo"
 heavy = true
 run = "cargo fuzz build --fuzz-dir fuzz"
 
 [[check]]
 name = "qemu-test"
+lane = "cargo"
 heavy = true
 run = "cargo xtask qemu-test"
 
 [[check]]
 name = "std"
+lane = "cargo"
 heavy = true
 run = "cargo xtask std-src --verify"

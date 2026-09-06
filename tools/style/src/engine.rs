@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
 };
 
 use anyhow::{Result, bail};
@@ -257,6 +258,23 @@ struct Scan {
     notes: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+struct Pass<'a> {
+    workspace: &'a Workspace,
+    changeset: &'a Changeset,
+    config: &'a Config,
+    active: &'a [&'a Rule],
+    settings: &'a Arc<Settings>,
+    strict: bool,
+    vocabulary: Vocabulary<'a>,
+}
+
+struct Part {
+    reports: Vec<Report>,
+    directives: Vec<Report>,
+    notes: Vec<String>,
+}
+
 fn scan(sweep: Sweep) -> Result<Scan> {
     let Sweep {
         workspace,
@@ -269,21 +287,79 @@ fn scan(sweep: Sweep) -> Result<Scan> {
         known,
         running,
     } = sweep;
+    let pass = Pass {
+        workspace,
+        changeset,
+        config,
+        active,
+        settings,
+        strict,
+        vocabulary: Vocabulary { known, running },
+    };
+
+    // Файлы разбираются независимо друг от друга, а разбор занимает большую часть прогона.
+    // Дерево делится на доли по числу ядер. Доли складываются в порядке деления, и порядок
+    // файлов внутри доли сохраняется, поэтому отчёт не зависит от числа потоков.
+    let size = files.len().div_ceil(shares(files.len())).max(1);
+    let parts: Vec<Result<Part>> = thread::scope(|scope| {
+        let handles: Vec<_> = files
+            .chunks(size)
+            .map(|share| scope.spawn(move || sweep_share(pass, share)))
+            .collect();
+        handles.into_iter().map(join).collect()
+    });
+
+    let mut reports: Vec<Report> = Vec::new();
+    let mut directives: Vec<Report> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    for part in parts {
+        let mut part = part?;
+        reports.append(&mut part.reports);
+        directives.append(&mut part.directives);
+        notes.append(&mut part.notes);
+    }
+
+    reports.append(&mut directives);
+    Ok(Scan { reports, notes })
+}
+
+fn shares(files: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    cores.min(files).max(1)
+}
+
+fn join<T>(handle: thread::ScopedJoinHandle<'_, T>) -> T {
+    match handle.join() {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn sweep_share(pass: Pass, files: &[PathBuf]) -> Result<Part> {
+    let Pass {
+        workspace,
+        changeset,
+        config,
+        active,
+        settings,
+        strict,
+        vocabulary,
+    } = pass;
     let mut reports: Vec<Report> = Vec::new();
     let mut directives: Vec<Report> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
 
     for path in files {
-        let meta = workspace.meta(&path);
+        let meta = workspace.meta(path);
         let matching: Vec<&&Rule> = active
             .iter()
             .filter(|rule| rule.applies.scope.matches(&meta))
-            .filter(|rule| !config.is_exempt(&rule.meta.id, &path))
+            .filter(|rule| !config.is_exempt(&rule.meta.id, path))
             .collect();
         if matching.is_empty() {
             continue;
         }
-        let Some(text) = changeset.read(workspace, &path) else {
+        let Some(text) = changeset.read(workspace, path) else {
             continue;
         };
         let source = Source::new(meta, &text, Arc::clone(settings));
@@ -316,22 +392,25 @@ fn scan(sweep: Sweep) -> Result<Scan> {
                 {
                     continue;
                 }
-                file_reports.push(make(&source, &path, &rule.meta.id, level, &finding));
+                file_reports.push(make(&source, path, &rule.meta.id, level, &finding));
             }
         }
 
         directives.extend(directive_findings(
             &source,
-            &path,
+            path,
             &mut suppressions,
-            Vocabulary { known, running },
+            vocabulary,
             &mut file_reports,
         ));
         reports.append(&mut file_reports);
     }
 
-    reports.append(&mut directives);
-    Ok(Scan { reports, notes })
+    Ok(Part {
+        reports,
+        directives,
+        notes,
+    })
 }
 
 pub(crate) fn passes(rule: &Rule, source: &Source, at: Span) -> bool {
