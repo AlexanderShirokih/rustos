@@ -1,4 +1,5 @@
-//! Спека устройства и контекст сборки: пути артефактов и корень workspace.
+//! Спека устройства и контекст сборки: пути артефактов, корень дерева и платформа ядра по
+//! полю `arch` спеки.
 
 use std::{
     fs,
@@ -9,8 +10,11 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::layers::{self, ArchEntry, Profile};
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct DeviceSpec {
+    pub(crate) device: DeviceSection,
     pub(crate) boot: BootSection,
     #[serde(default)]
     pub(crate) features: Vec<String>,
@@ -18,6 +22,11 @@ pub(crate) struct DeviceSpec {
     pub(crate) run: Vec<String>,
     #[serde(default)]
     pub(crate) debug: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeviceSection {
+    pub(crate) arch: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -43,6 +52,8 @@ pub(crate) struct BuildContext {
     pub(crate) spec_path: PathBuf,
     pub(crate) spec: DeviceSpec,
     pub(crate) features: Option<String>,
+    pub(crate) arch: ArchEntry,
+    pub(crate) platform_manifest: PathBuf,
 }
 
 impl BuildContext {
@@ -51,6 +62,10 @@ impl BuildContext {
 
         let spec_path = resolve(&project_root, spec_path, "Device spec")?;
         let spec = load_spec(&spec_path)?;
+        let arch = spec_arch(&spec, &layers::arch_registry(&project_root)?)
+            .with_context(|| spec_path.display().to_string())?;
+        let platform_manifest =
+            layers::workspace_of_profile(&project_root, Profile::Platform)?.join("Cargo.toml");
 
         let build_dir = build_dir(&project_root)?;
 
@@ -60,7 +75,13 @@ impl BuildContext {
             spec_path,
             spec,
             features,
+            arch,
+            platform_manifest,
         })
+    }
+
+    pub(crate) fn kernel_package(&self) -> String {
+        kernel_package(&self.arch)
     }
 
     pub(crate) fn kernel_bin(&self) -> PathBuf {
@@ -134,4 +155,47 @@ fn resolve(project_root: &Path, path: &Path, what: &str) -> Result<PathBuf> {
 fn load_spec(path: &Path) -> Result<DeviceSpec> {
     let file = File::open(path).context("Failed to open spec file")?;
     serde_yaml::from_reader(file).context("Failed to parse YAML")
+}
+
+fn kernel_package(arch: &ArchEntry) -> String {
+    format!("hal-{}", arch.name)
+}
+
+fn spec_arch(spec: &DeviceSpec, registry: &[ArchEntry]) -> Result<ArchEntry> {
+    layers::registered(&spec.device.arch, registry)
+        .cloned()
+        .context("device.arch")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(arch: &str) -> DeviceSpec {
+        let text = format!(
+            "device:\n  name: Test\n  arch: {arch}\nboot:\n  format: linux_arm64\n  offset: 0x40200000\n"
+        );
+        serde_yaml::from_str(&text).expect("spec parses")
+    }
+
+    fn registry() -> Vec<ArchEntry> {
+        vec![ArchEntry {
+            name: "aarch64".to_string(),
+            bare: "aarch64-unknown-none".to_string(),
+            system: "targets/aarch64-unknown-molecular.json".to_string(),
+        }]
+    }
+
+    #[test]
+    fn a_second_architecture_selects_its_own_kernel_package_and_target() {
+        let mut registry = registry();
+        registry.push(ArchEntry {
+            name: "riscv64".to_string(),
+            bare: "riscv64gc-unknown-none-elf".to_string(),
+            system: "targets/riscv64-unknown-molecular.json".to_string(),
+        });
+        let entry = spec_arch(&spec("riscv64"), &registry).unwrap();
+        assert_eq!(kernel_package(&entry), "hal-riscv64");
+        assert_eq!(entry.bare, "riscv64gc-unknown-none-elf");
+    }
 }

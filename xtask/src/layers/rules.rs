@@ -1,5 +1,5 @@
 //! Таблица разрешённых рёбер: домен крейта задаётся его верхней директорией, а
-//! архитектурно-зависимый крейт доступен только другому архитектурно-зависимому.
+//! архитектурно-зависимый крейт доступен только крейту той же архитектуры.
 
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
@@ -8,10 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::layers::{
-    ARCH_SEGMENT,
-    metadata::{Edge, WorkspaceCrate},
-};
+use crate::layers::metadata::{Edge, WorkspaceCrate};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Domain {
@@ -75,7 +72,9 @@ pub(super) enum Violation {
     },
     Arch {
         from: String,
+        from_arch: Option<String>,
         to: String,
+        to_arch: String,
     },
     ProcessState {
         from: String,
@@ -95,10 +94,21 @@ impl fmt::Display for Violation {
                 f,
                 "crate {from} (domain {from_domain}) -> crate {to} (domain {to_domain})"
             ),
-            Self::Arch { from, to } => write!(
-                f,
-                "crate {from} (arch-neutral) -> crate {to} ({ARCH_SEGMENT}-specific)"
-            ),
+            Self::Arch {
+                from,
+                from_arch,
+                to,
+                to_arch,
+            } => {
+                let from_arch = from_arch.as_ref().map_or_else(
+                    || "arch-neutral".to_string(),
+                    |arch| format!("{arch}-specific"),
+                );
+                write!(
+                    f,
+                    "crate {from} ({from_arch}) -> crate {to} ({to_arch}-specific)"
+                )
+            }
             Self::ProcessState { from, to } => write!(
                 f,
                 "crate {from} (linked with std) -> crate {to} (owns the process state)"
@@ -111,20 +121,20 @@ impl fmt::Display for Violation {
 struct CrateRules<'a> {
     dir: &'a str,
     domain: Domain,
-    arch_specific: bool,
+    arch: Option<&'a str>,
     owns_process_state: bool,
     links_std: bool,
 }
 
 impl<'a> CrateRules<'a> {
-    fn from_dir(dir: &'a str) -> Result<Self> {
-        let top_dir = dir.split('/').next().unwrap_or_default();
+    fn of(krate: &'a WorkspaceCrate) -> Result<Self> {
+        let top_dir = krate.dir.split('/').next().unwrap_or_default();
         Ok(Self {
-            dir,
+            dir: &krate.dir,
             domain: Domain::from_dir(top_dir)?,
-            arch_specific: dir.split(['/', '-']).any(|segment| segment == ARCH_SEGMENT),
-            owns_process_state: false,
-            links_std: false,
+            arch: krate.arch.as_deref(),
+            owns_process_state: krate.owns_process_state,
+            links_std: krate.links_std,
         })
     }
 }
@@ -132,11 +142,7 @@ impl<'a> CrateRules<'a> {
 pub(super) fn check_layers(crates: &[WorkspaceCrate], edges: &[Edge]) -> Result<Vec<Violation>> {
     let mut rules: BTreeMap<&str, CrateRules<'_>> = BTreeMap::new();
     for krate in crates {
-        let mut crate_rules =
-            CrateRules::from_dir(&krate.dir).with_context(|| format!("crate {}", krate.name))?;
-        crate_rules.arch_specific |= krate.arch_specific;
-        crate_rules.owns_process_state |= krate.owns_process_state;
-        crate_rules.links_std |= krate.links_std;
+        let crate_rules = CrateRules::of(krate).with_context(|| format!("crate {}", krate.name))?;
         match rules.entry(krate.name.as_str()) {
             Entry::Vacant(slot) => {
                 slot.insert(crate_rules);
@@ -150,7 +156,9 @@ pub(super) fn check_layers(crates: &[WorkspaceCrate], edges: &[Edge]) -> Result<
                         crate_rules.dir
                     );
                 }
-                slot.get_mut().arch_specific |= crate_rules.arch_specific;
+                if crate_rules.arch.is_some() {
+                    slot.get_mut().arch = crate_rules.arch;
+                }
                 slot.get_mut().owns_process_state |= crate_rules.owns_process_state;
                 slot.get_mut().links_std |= crate_rules.links_std;
             }
@@ -183,10 +191,15 @@ pub(super) fn check_layers(crates: &[WorkspaceCrate], edges: &[Edge]) -> Result<
                 to_domain: to_rules.domain,
             });
         }
-        if !from_rules.arch_specific && to_rules.arch_specific {
+        // Зависимость допустима, когда она нейтральна или её архитектура совпадает.
+        if let Some(to_arch) = to_rules.arch
+            && from_rules.arch != Some(to_arch)
+        {
             violations.push(Violation::Arch {
                 from: edge.from.clone(),
+                from_arch: from_rules.arch.map(str::to_owned),
                 to: edge.to.clone(),
+                to_arch: to_arch.to_owned(),
             });
         }
     }
@@ -246,20 +259,25 @@ mod tests {
         WorkspaceCrate {
             name: name.to_string(),
             dir: dir.to_string(),
-            arch_specific: false,
+            arch: None,
             owns_process_state: false,
             links_std: false,
         }
     }
 
+    fn arch(name: &str, dir: &str, arch: &str) -> WorkspaceCrate {
+        WorkspaceCrate {
+            arch: Some(arch.to_string()),
+            ..plain(name, dir)
+        }
+    }
+
     fn crates() -> Vec<WorkspaceCrate> {
-        [
+        let mut crates = [
             ("a-lib", "lib/a-lib"),
             ("b-lib", "lib/b-lib"),
             ("a-kernel", "kernel/a-kernel"),
             ("b-kernel", "kernel/b-kernel"),
-            ("hal-arch", "kernel/hal-aarch64"),
-            ("hal-arch-paging", "kernel/hal-aarch64-paging"),
             ("a-user", "user/a-user"),
             ("b-user", "user/b-user"),
             ("a-tools", "tools/a-tools"),
@@ -268,7 +286,15 @@ mod tests {
             ("mobile-fuzz", "fuzz"),
         ]
         .map(|(name, dir)| plain(name, dir))
-        .to_vec()
+        .to_vec();
+        crates.push(arch("hal-arch", "kernel/hal-aarch64", "aarch64"));
+        crates.push(arch(
+            "hal-arch-paging",
+            "kernel/hal-aarch64-paging",
+            "aarch64",
+        ));
+        crates.push(arch("hal-other", "kernel/hal-riscv64", "riscv64"));
+        crates
     }
 
     fn edges(pairs: &[(&str, &str)]) -> Vec<Edge> {
@@ -438,6 +464,25 @@ mod tests {
     }
 
     #[test]
+    fn a_crate_of_one_arch_cannot_depend_on_a_crate_of_another() {
+        let edges = edges(&[("hal-other", "hal-arch-paging")]);
+        let violations = check_layers(&crates(), &edges).unwrap();
+        assert_eq!(
+            violations,
+            vec![Violation::Arch {
+                from: "hal-other".to_string(),
+                from_arch: Some("riscv64".to_string()),
+                to: "hal-arch-paging".to_string(),
+                to_arch: "aarch64".to_string(),
+            }]
+        );
+        assert_eq!(
+            violations[0].to_string(),
+            "crate hal-other (riscv64-specific) -> crate hal-arch-paging (aarch64-specific)"
+        );
+    }
+
+    #[test]
     fn domain_violation_lists_crates_and_domains() {
         let edges = edges(&[("a-user", "a-kernel")]);
         let violations = check_layers(&crates(), &edges).unwrap();
@@ -466,14 +511,8 @@ mod tests {
     #[test]
     fn a_forced_target_crate_is_arch_specific_whatever_its_path() {
         let mut crates = crates();
-        crates.push(WorkspaceCrate {
-            arch_specific: true,
-            ..plain("arch-user", "user/arch-user")
-        });
-        crates.push(WorkspaceCrate {
-            arch_specific: true,
-            ..plain("arch-lib", "lib/arch-lib")
-        });
+        crates.push(arch("arch-user", "user/arch-user", "aarch64"));
+        crates.push(arch("arch-lib", "lib/arch-lib", "aarch64"));
 
         // Крейт, собираемый только под архитектуру, вправе зависеть от
         // архитектурного, а нейтральный - нет.

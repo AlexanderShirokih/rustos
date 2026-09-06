@@ -106,11 +106,11 @@ pub unsafe fn alloc(size: usize, align: usize) -> *mut u8 {
     heap.pop(class)
 }
 
-/// Возвращает блок, выданный [`alloc`] с теми же `size` и `align`.
+/// Возвращает блок, выданный [`alloc()`] с теми же `size` и `align`.
 ///
 /// # Safety
 ///
-/// `block` выдан [`alloc`] с этими `size` и `align` и ещё не освобождался.
+/// `block` выдан [`alloc()`] с этими `size` и `align` и ещё не освобождался.
 pub unsafe fn dealloc(block: *mut u8, size: usize, align: usize) {
     match class_of(size, align) {
         Some(class) => HEAP.lock().push(class, block),

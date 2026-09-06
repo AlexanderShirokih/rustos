@@ -128,7 +128,7 @@ pub fn line(message: &str) {
     let _ = write(message);
 }
 
-/// Форматирует строку на стеке и отправляет её [`line`]. Строка длиннее кадра уходит
+/// Форматирует строку на стеке и отправляет её [`line()`]. Строка длиннее кадра уходит
 /// несколькими кадрами.
 pub fn fmt(args: core::fmt::Arguments<'_>) {
     let mut writer = LineWriter {

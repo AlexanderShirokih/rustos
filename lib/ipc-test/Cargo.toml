@@ -3,6 +3,7 @@ name = "ipc-test"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+workspace = "../../tools"
 
 [dependencies]
 ipc = { workspace = true }

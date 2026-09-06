@@ -9,6 +9,7 @@ mod context;
 mod fmt;
 mod fuzz;
 mod layers;
+mod lint;
 mod qemu_test;
 mod race;
 mod shell;
@@ -23,7 +24,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use userland_image_tool::ExtraFile;
 
-use crate::{build::BuildArgs, check::CheckArgs, similarity::SimilarityArgs, style::StyleArgs};
+use crate::{
+    build::BuildArgs, check::CheckArgs, lint::ClippyArgs, similarity::SimilarityArgs,
+    style::StyleArgs,
+};
 
 const STD_VERIFY_ARGS: [&str; 4] = ["build", "--release", "--package", "hello-std"];
 
@@ -94,6 +98,9 @@ enum Commands {
         /// Relative path to the image manifest
         #[arg(long, default_value = "user/rootkeeper/image.toml")]
         image: PathBuf,
+        /// Registered architecture to build for; default is the first registered one
+        #[arg(long, value_name = "NAME")]
+        arch: Option<String>,
         /// Extra image file as 'path=source'; repeat for several files
         #[arg(long = "file", value_name = "PATH=SOURCE")]
         files: Vec<ExtraFile>,
@@ -112,6 +119,12 @@ enum Commands {
     },
     /// Check the layer rules between workspace crates
     CheckLayers,
+    /// Run clippy over every workspace by its build profile
+    Clippy(ClippyArgs),
+    /// Run the host tests of every workspace whose profile has them
+    Test,
+    /// Run rustdoc over every workspace by its build profile
+    Doc,
     /// Materialize the patched `std` sources under target/std-src
     StdSrc {
         /// Rebuild the tree even when the overlay and the toolchain are unchanged
@@ -120,6 +133,9 @@ enum Commands {
         /// Build the image program that runs on `std` to prove the tree works
         #[arg(long)]
         verify: bool,
+        /// Verify for the named architecture only; default is every registered one
+        #[arg(long, value_name = "NAME", requires = "verify")]
+        arch: Option<String>,
     },
     /// Check the code style conventions
     Style(StyleArgs),
@@ -151,19 +167,34 @@ fn main() -> Result<ExitCode> {
         } => qemu_test::qemu_stress(seed, seeds, steps, epoch, shard, shards, timeout)?,
         Commands::Race => race::run()?,
         Commands::Fuzz { target, seconds } => fuzz::run(&target, seconds)?,
-        Commands::BuildUserland { image, files } => {
-            let output = userland::build_standalone_image(&image, &files)?;
+        Commands::BuildUserland { image, arch, files } => {
+            let output = userland::build_standalone_image(&image, arch.as_deref(), &files)?;
             println!("Done: {}", output.display());
         }
         Commands::Userland { args } => userland::run(&args)?,
         Commands::Fmt { check } => fmt::run(check)?,
         Commands::CheckLayers => layers::run()?,
-        Commands::StdSrc { force, verify } => {
+        Commands::Clippy(args) => lint::clippy(&args)?,
+        Commands::Test => lint::test()?,
+        Commands::Doc => lint::doc()?,
+        Commands::StdSrc {
+            force,
+            verify,
+            arch,
+        } => {
             std_src::run(force)?;
             if verify {
                 // Оверлей обязан не только ложиться, но и давать дерево, из которого
-                // собирается программа образа.
-                userland::run(&STD_VERIFY_ARGS.map(String::from))?;
+                // собирается программа образа, под системным таргетом каждой архитектуры.
+                let root = context::project_root();
+                let registry = layers::arch_registry(&root)?;
+                let selected: Vec<&layers::ArchEntry> = match &arch {
+                    Some(name) => vec![layers::registered(name, &registry)?],
+                    None => registry.iter().collect(),
+                };
+                for entry in selected {
+                    userland::run_for_arch(entry, &STD_VERIFY_ARGS.map(String::from))?;
+                }
             }
         }
         Commands::Similarity(args) => similarity::run(args)?,

@@ -14,8 +14,8 @@ use std::{
 
 use anyhow::{Context, Result};
 
-pub use self::files::ExtraFile;
 pub(crate) use self::image::validate_image_path;
+pub use self::{build::UserlandTarget, files::ExtraFile};
 use self::{
     build::build_program,
     files::collect_files,
@@ -23,7 +23,7 @@ use self::{
     program::resolve_programs,
     records::{compile_mount_table_record, compile_stage_records},
     source::load_manifest,
-    workspace::{load_workspace_metadata, userland_target, userland_workspace},
+    workspace::{load_workspace_metadata, userland_workspace},
 };
 use crate::plan::{PlanProgram, StageInstances};
 
@@ -37,7 +37,7 @@ pub struct BuildEnvironment<'a> {
 /// Каталог workspace программ образа относительно корня проекта.
 pub const USERLAND_WORKSPACE: &str = "user";
 
-/// Собирает userland-образ, передавая `environment` каждому cargo-процессу
+/// Собирает userland-образ под `target`, передавая `environment` каждому cargo-процессу
 /// сборки. `extra_files` добавляются в образ поверх файлов манифеста, `std_src` — дерево
 /// `library`, из которого сборка поднимает стандартную библиотеку.
 pub fn build_userland(
@@ -45,12 +45,12 @@ pub fn build_userland(
     manifest_path: &Path,
     build_dir: &Path,
     std_src: &Path,
+    target: &UserlandTarget,
     environment: &[BuildEnvironment<'_>],
     extra_files: &[ExtraFile],
 ) -> Result<PathBuf> {
     let manifest = load_manifest(manifest_path)?;
     let userland_root = userland_workspace(project_root);
-    let target = userland_target(&userland_root)?;
     let workspace = load_workspace_metadata(&userland_root)?;
     let programs = resolve_programs(&manifest.programs, &workspace.packages)?;
     let mut files = collect_files(project_root, &manifest.files, extra_files)?;
@@ -62,7 +62,7 @@ pub fn build_userland(
             build_program(
                 &userland_root,
                 &workspace.target_directory,
-                &target,
+                target,
                 std_src,
                 program,
                 environment,

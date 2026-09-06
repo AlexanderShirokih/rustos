@@ -52,17 +52,19 @@ fn build_features(ctx: &BuildContext) -> String {
 
 fn hal_cargo(ctx: &BuildContext, subcommand: &str, features: &str) -> Command {
     let mut cmd = Command::new("cargo");
-    cmd.args([
-        subcommand,
-        "-p",
-        "hal-aarch64",
-        "--target",
-        "aarch64-unknown-none",
-        "--release",
-        "--no-default-features",
-        "--features",
-        features,
-    ]);
+    cmd.arg(subcommand)
+        .arg("--manifest-path")
+        .arg(&ctx.platform_manifest)
+        .args([
+            "-p",
+            &ctx.kernel_package(),
+            "--target",
+            &ctx.arch.bare,
+            "--release",
+            "--no-default-features",
+            "--features",
+            features,
+        ]);
     cmd.current_dir(&ctx.project_root)
         .env("DEVICE_SPEC", &ctx.spec_path)
         .stdout(Stdio::inherit())
@@ -72,7 +74,10 @@ fn hal_cargo(ctx: &BuildContext, subcommand: &str, features: &str) -> Command {
 
 fn cargo_build(ctx: &BuildContext) -> Result<()> {
     let mut cmd = hal_cargo(ctx, "build", &build_features(ctx));
-    shell::run(&mut cmd, "cargo build for hal-aarch64")
+    shell::run(
+        &mut cmd,
+        &format!("cargo build for {}", ctx.kernel_package()),
+    )
 }
 
 fn make_kernel_bin(ctx: &BuildContext) -> Result<()> {
@@ -85,7 +90,10 @@ fn make_kernel_bin(ctx: &BuildContext) -> Result<()> {
         "binary",
     ])
     .arg(ctx.kernel_bin());
-    shell::run(&mut cmd, "cargo objcopy for hal-aarch64")
+    shell::run(
+        &mut cmd,
+        &format!("cargo objcopy for {}", ctx.kernel_package()),
+    )
 }
 
 fn make_kernel_gz(ctx: &BuildContext) -> Result<()> {

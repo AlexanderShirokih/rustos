@@ -6,7 +6,6 @@ animistic_verb|docs/code-style.md|<file-root>|b8b92cc1
 animistic_verb|docs/code-style.md|<file-root>|ba82d894
 animistic_verb|docs/code-style.md|<file-root>|c81604be
 animistic_verb|docs/commands.md|<file-root>|0be5455c
-animistic_verb|docs/commands.md|<file-root>|0be5455c#2
 animistic_verb|docs/commands.md|<file-root>|5fb4c281
 animistic_verb|docs/commands.md|<file-root>|88c0fe79
 animistic_verb|docs/commands.md|<file-root>|b8b92cc1
@@ -22,13 +21,10 @@ animistic_verb|docs/ipc.md|<file-root>|c81604be#3
 animistic_verb|docs/ipc.md|<file-root>|c81604be#4
 animistic_verb|docs/rootkeeper.md|<file-root>|58e0d445
 animistic_verb|docs/testing.md|<file-root>|b8b92cc1
-animistic_verb|docs/workspace.md|<file-root>|0be5455c
 animistic_verb|docs/workspace.md|<file-root>|233cf234
 animistic_verb|docs/workspace.md|<file-root>|74615d86
 animistic_verb|docs/workspace.md|<file-root>|ba82d894
 animistic_verb|docs/workspace.md|<file-root>|ba82d894#2
-animistic_verb|docs/workspace.md|<file-root>|ba82d894#3
-animistic_verb|docs/workspace.md|<file-root>|c81604be
 animistic_verb|fuzz/fuzz_targets/ramfs_ops.rs|verify|b734f949
 animistic_verb|kernel/capability/src/api.rs|tests::signal_wait_without_deadline_waits_out_a_wake_without_a_signal|0b27a2d3
 animistic_verb|kernel/capability/src/errors.rs|IpcError::Revoked|9670ba5e
@@ -258,13 +254,10 @@ colon_justification|docs/code-style.md|<file-root>|244d49e9
 colon_justification|docs/code-style.md|<file-root>|78a5138e
 colon_justification|docs/code-style.md|<file-root>|9c9e45ff
 colon_justification|docs/code-style.md|<file-root>|d96b9115
-colon_justification|docs/commands.md|<file-root>|126e122a
 colon_justification|docs/commands.md|<file-root>|16d41b37
 colon_justification|docs/commands.md|<file-root>|51628a21
 colon_justification|docs/commands.md|<file-root>|56ba3029
-colon_justification|docs/commands.md|<file-root>|61d0f1a6
 colon_justification|docs/commands.md|<file-root>|665eae08
-colon_justification|docs/commands.md|<file-root>|6eebdf29
 colon_justification|docs/commands.md|<file-root>|7d7b178a
 colon_justification|docs/commands.md|<file-root>|d1cff4b0
 colon_justification|docs/concurrency.md|<file-root>|67ce564d
@@ -339,7 +332,6 @@ colon_justification|docs/userland.md|<file-root>|38426ec6
 colon_justification|docs/userland.md|<file-root>|5f2b55da
 colon_justification|docs/userland.md|<file-root>|8f6923b8
 colon_justification|docs/userland.md|<file-root>|f37183e5
-colon_justification|docs/workspace.md|<file-root>|1911ad51
 colon_justification|docs/workspace.md|<file-root>|1974a033
 colon_justification|docs/workspace.md|<file-root>|d584e861
 colon_justification|fuzz/fuzz_targets/ramfs_ops.rs|<file-root>|0d097d10
@@ -871,10 +863,8 @@ expect_in_kernel|kernel/capability/src/runtime.rs|runtime|7190aad8
 expect_in_kernel|kernel/syscall/src/runtime.rs|runtime|7190aad8
 fronted_negation|AGENTS.md|<file-root>|b41b74c9
 fronted_negation|docs/code-style.md|<file-root>|2a0314bf
-fronted_negation|docs/commands.md|<file-root>|4e168917
 fronted_negation|docs/ipc.md|<file-root>|150f87bf
 fronted_negation|docs/rootkeeper.md|<file-root>|627692cd
-fronted_negation|docs/workspace.md|<file-root>|d047e7be
 fronted_negation|kernel/capability/src/errors.rs|IpcError::SenderGone|2001f8cb
 fronted_negation|kernel/drivers-common/src/services/mmio.rs|<MmioBound as Sync>|50008426
 fronted_negation|kernel/hal-aarch64/src/cpu.rs|try_current_id|0751a96d

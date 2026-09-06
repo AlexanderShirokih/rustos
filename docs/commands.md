@@ -5,17 +5,16 @@
 | Действие                            | Команда                                                                                                              |
 |-------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | Основные проверки одной командой    | `cargo xtask check [--all] [--only <name>] [--list] [--fail-fast]`                                                    |
-| Host-тесты                          | `cargo test --workspace`                                                                                             |
-| Host-clippy                         | `cargo clippy --workspace`                                                                                           |
-| AArch64 clippy                      | `cargo clippy --workspace --exclude xtask --exclude userland-build --exclude ipc-test --exclude style-tool --exclude userland-image-tool --target aarch64-unknown-none` |
+| Host-тесты по всем workspace        | `cargo xtask test`                                                                                                   |
+| Clippy по всем workspace            | `cargo xtask clippy [--host] [--target] [--arch <name>]`                                                             |
 | Cargo в workspace userspace         | `cargo xtask userland <аргументы cargo>`                                                                             |
 | Форматирование                      | `cargo xtask fmt [--check]`                                                                                          |
-| Ссылки в документации               | `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" cargo doc --no-deps --workspace`                       |
-| Исходники `std` с оверлеем          | `cargo xtask std-src [--force] [--verify]`                                                                           |
+| Документация по всем workspace      | `cargo xtask doc`                                                                                                     |
+| Исходники `std` с оверлеем          | `cargo xtask std-src [--force] [--verify [--arch <name>]]`                                                           |
 | Проверка слоёв                      | `cargo xtask check-layers`                                                                                           |
 | Проверка кодстайла                  | `cargo xtask style [--all] [--staged] [--since <rev>] [--base <rev>]`                                                |
 | Поиск дублирующегося кода           | `cargo xtask similarity [--write-baseline] [--no-baseline] [--base <rev>]`                                           |
-| Сборка userland                     | `cargo xtask build-userland [--image <путь>] [--file <путь>=<источник>]`                                             |
+| Сборка userland                     | `cargo xtask build-userland [--image <путь>] [--arch <name>] [--file <путь>=<источник>]`                                          |
 | Загрузочный образ (userland + ядро) | `cargo xtask build devices/spec/<device>.yaml [--image <путь>] [--file <путь>=<источник>]`                           |
 | Запуск после сборки                 | `cargo xtask build devices/spec/<device>.yaml --run`                                                                 |
 | QEMU integration tests              | `cargo xtask qemu-test [--timeout <сек>] [--spec <путь>]`                                                            |
@@ -24,9 +23,9 @@
 | Host race под ThreadSanitizer       | `cargo xtask race`                                                                                                    |
 | Ограниченный fuzz-прогон            | `cargo xtask fuzz <target> [--seconds <сек>]`                                                                         |
 
-Отделённые workspace `--workspace` не видит: форматирование покрывает
-`cargo xtask fmt`, clippy идёт своим прогоном на каждый
-([«Отделённые workspace»](#отделённые-workspace)).
+Отделённые workspace в `--workspace` не входят. По всем workspace идут
+`cargo xtask fmt`, `cargo xtask clippy`, `cargo xtask doc` и `cargo xtask test`
+([«Clippy и тесты по профилю»](#clippy-и-тесты-по-профилю)).
 
 Отдельные команды таблицы нужны, когда проверяется одна вещь. Дифф целиком
 проходит через [`cargo xtask check`](#основные-проверки).
@@ -62,10 +61,11 @@ cargo xtask build <spec> [--run] [--debug] [--features <features>] [--image <п�
 ```
 
 Читает YAML-спеку устройства, собирает `target/build/userland.img`, затем
-собирает `hal-aarch64` под `aarch64-unknown-none --release` и упаковывает
-результат по правилам `boot.format`. Программы образа идут под свой таргет, и
-стандартная библиотека поднимается им из исходников, которые готовит
-`cargo xtask std-src` ([workspace.md](workspace.md#таргеты-сборки)).
+собирает пакет `hal-<arch>` под target архитектуры из поля `arch` спеки с
+`--release` из workspace `kernel/platform` и упаковывает результат по правилам
+`boot.format`. Программы образа идут под свой таргет, и стандартная библиотека
+поднимается им из исходников, которые готовит `cargo xtask std-src`
+([workspace.md](workspace.md#таргеты-сборки)).
 
 | Флаг                       | Назначение                                                                                                                           |
 |----------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
@@ -92,7 +92,7 @@ cargo xtask build devices/spec/xiaomi-lavender.yaml --image user/calculator-demo
 ## Userland
 
 ```
-cargo xtask build-userland [--image <путь>] [--file <путь>=<источник>]
+cargo xtask build-userland [--image <путь>] [--arch <name>] [--file <путь>=<источник>]
 ```
 
 Собирает только `target/build/userland.img`. Флаги те же, что у `build`. Состав
@@ -108,7 +108,7 @@ cargo xtask build-userland --file /boot/rootkeeper/motd=user/rootkeeper/motd.txt
 Уровни тестов и выбор прохода для нового теста — в [testing.md](testing.md).
 
 ```bash
-cargo test --workspace
+cargo xtask test
 cargo xtask qemu-test [--timeout <сек>] [--spec <путь>]
 ```
 
@@ -190,7 +190,7 @@ cargo xtask fuzz userland_image_decode --seconds 60
 ## Исходники `std` с оверлеем
 
 ```bash
-cargo xtask std-src [--force] [--verify]
+cargo xtask std-src [--force] [--verify [--arch <name>]]
 ```
 
 Копирует дерево `library` из компонента `rust-src` зафиксированного toolchain в
@@ -205,7 +205,8 @@ sysroot общий, копия принадлежит сборке. Повтор
 `lib/runtime` иначе молча уходит в собранный `std` старой версией. По отпечатку
 их файлов эти пакеты чистятся `cargo clean`.
 
-`--verify` дополнительно собирает `hello-std`. Этим ловится расхождение оверлея
+`--verify` дополнительно собирает `hello-std` под системный таргет каждой записи
+реестра архитектур, `--arch` сужает прогон до одной. Этим ловится расхождение оверлея
 с пином из `rust-toolchain.toml`, из-за которого `git apply` перестаёт ложиться,
 и поломка дерева, которая ложится, но не собирается. Проверка стоит дороже
 остальных — она поднимает `core`, `alloc` и саму стандартную библиотеку из
@@ -215,20 +216,28 @@ sysroot общий, копия принадлежит сборке. Повтор
 Команда печатает путь к дереву `library`; сборкой по нему распоряжается
 `cargo xtask userland`.
 
-## Отделённые workspace
-
-Состав и назначение — в [workspace.md](workspace.md#отделённые-workspace). Cargo
-над ними запускается по manifest-пути:
+## Clippy и тесты по профилю
 
 ```bash
-cargo clippy --manifest-path lib/runtime/Cargo.toml \
-             --target targets/aarch64-unknown-molecular.json \
-             -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
+cargo xtask clippy [--host] [--target] [--arch <name>]
+cargo xtask doc
+cargo xtask test
 ```
 
-Крейты, собираемые внутрь `std`, линтуются под тем же таргетом, под который их
-собирает она: готового `core` для него нет, поэтому `core` и `alloc` идут из
-исходников.
+Команды обходят все workspace и запускают cargo в каждом по его профилю
+([workspace.md](workspace.md#профили-сборки)); таргеты берутся из реестра
+архитектур.
+
+| Флаг            | Назначение                                                          |
+|-----------------|---------------------------------------------------------------------|
+| `--host`        | Только хостовая сторона: профили `common`, `host`, `fuzz`           |
+| `--target`      | Только целевая сторона: каждая архитектура реестра                  |
+| `--arch <name>` | Целевая сторона одной архитектуры; повторяется по числу архитектур   |
+
+`cargo xtask test` гонит хостовые тесты профилей `common` и `host`. Остальные
+профили проверяются под QEMU.
+
+## Cargo в workspace userspace
 
 Таргет и флаги сборки `std` workspace `user/` держит в `user/.cargo/config.toml`,
 а путь к дереву исходников приходит переменной окружения. И то и другое ставит
@@ -264,10 +273,6 @@ cargo xtask check-layers
 (по `cargo metadata`) с правилами слоёв из [workspace.md](workspace.md#домены).
 При нарушениях печатает запрещённые рёбра и завершается с ошибкой.
 
-Заодно она сверяет таблицу `[workspace.lints]` каждого отделённого workspace с
-корневой: наследовать её вне корневого дерева нечем, а разойдясь, крейт
-собирается по более слабым правилам.
-
 Каждая объявленная path-зависимость сверяется с исходниками пакета: манифест
 задаёт граф, по которому идёт проверка слоёв, и ребро без единой ссылки в коде
 этот граф искажает.
@@ -275,7 +280,7 @@ cargo xtask check-layers
 ## Ссылки в документации
 
 ```bash
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" cargo doc --no-deps --workspace
+cargo xtask doc
 ```
 
 Ссылка на переименованный или приватный элемент молча пропадает из документации,

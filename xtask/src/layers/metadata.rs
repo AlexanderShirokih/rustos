@@ -1,9 +1,11 @@
-//! Чтение `cargo metadata` и сбор из него списка крейтов и рёбер зависимостей.
+//! Чтение `cargo metadata`, сбор из него списка крейтов и рёбер зависимостей и реестр
+//! архитектур корневого манифеста.
 //!
-//! Архитектурно-зависимый крейт узнаётся по сегменту `aarch64` в пути, по `forced-target` на
-//! этот триплет либо по ключу `metadata.molecular.arch`. Ключ нужен крейтам отделённых
-//! workspace: `forced-target` задаёт триплет всем сборкам крейта, а такой крейт собирает чужой
-//! workspace под свой таргет. Ключ читается и у пакета, и у workspace целиком.
+//! Архитектура крейта - имя записи реестра, и узнаётся она по сегменту имени крейта или его
+//! пути, по `forced-target`, равному bare-таргету записи, либо по ключу
+//! `metadata.molecular.arch`. Ключ нужен крейтам отделённых workspace: `forced-target` задаёт
+//! триплет всем сборкам крейта, а такой крейт собирает чужой workspace под свой таргет. Ключ
+//! читается и у пакета, и у workspace целиком.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -15,7 +17,15 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::{layers::ARCH_SEGMENT, shell};
+use crate::shell;
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ArchEntry {
+    pub(crate) name: String,
+    pub(crate) bare: String,
+    pub(crate) system: String,
+}
 
 #[derive(Deserialize)]
 pub(super) struct CargoMetadata {
@@ -52,15 +62,63 @@ pub(super) struct MetaTarget {
 pub(super) struct WorkspaceCrate {
     pub(super) name: String,
     pub(super) dir: String,
-    pub(super) arch_specific: bool,
+    pub(super) arch: Option<String>,
     pub(super) owns_process_state: bool,
     pub(super) links_std: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Member {
+    pub(super) name: String,
+    pub(super) links_std: bool,
+    pub(super) proc_macro: bool,
+    pub(super) forced_target: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Edge {
     pub(super) from: String,
     pub(super) to: String,
+}
+
+pub(crate) fn read_manifest(manifest: &Path) -> Result<toml::Table> {
+    let text = fs::read_to_string(manifest)
+        .with_context(|| format!("Failed to read {}", manifest.display()))?;
+    text.parse::<toml::Table>()
+        .with_context(|| format!("Failed to parse {}", manifest.display()))
+}
+
+pub(crate) fn arch_registry(root: &Path) -> Result<Vec<ArchEntry>> {
+    let manifest = root.join("Cargo.toml");
+    parse_arch_registry(&read_manifest(&manifest)?)
+        .with_context(|| format!("{}: architecture registry", manifest.display()))
+}
+
+fn parse_arch_registry(manifest: &toml::Table) -> Result<Vec<ArchEntry>> {
+    let entries = manifest
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .and_then(|workspace| workspace.get("metadata"))
+        .and_then(toml::Value::as_table)
+        .and_then(|metadata| metadata.get("molecular"))
+        .and_then(toml::Value::as_table)
+        .and_then(|molecular| molecular.get("arch"))
+        .context("no [[workspace.metadata.molecular.arch]] entries")?;
+    let registry: Vec<ArchEntry> = entries
+        .clone()
+        .try_into()
+        .context("malformed [[workspace.metadata.molecular.arch]] entry")?;
+    if registry.is_empty() {
+        bail!("the architecture registry is empty");
+    }
+
+    let mut names = BTreeSet::new();
+    for entry in &registry {
+        if !names.insert(entry.name.as_str()) {
+            bail!("architecture `{}` is registered twice", entry.name);
+        }
+    }
+    Ok(registry)
 }
 
 pub(super) fn load_metadata(dir: &Path) -> Result<CargoMetadata> {
@@ -78,22 +136,43 @@ pub(super) fn load_metadata(dir: &Path) -> Result<CargoMetadata> {
 pub(super) fn collect_workspace(
     meta: &CargoMetadata,
     root: &Path,
+    registry: &[ArchEntry],
     crates: &mut BTreeSet<WorkspaceCrate>,
     edges: &mut BTreeSet<Edge>,
-) -> Result<()> {
-    let workspace_arch = workspace_arch(meta) == Some(ARCH_SEGMENT);
+) -> Result<Vec<Member>> {
+    let workspace_arch = workspace_arch(meta, registry)?;
+    let mut members = Vec::new();
     for pkg in &meta.packages {
         let manifest_dir = pkg
             .manifest_path
             .parent()
             .with_context(|| format!("crate {}: manifest path has no parent", pkg.name))?;
-        let manifest = manifest_table(&pkg.manifest_path);
+        let manifest = read_manifest(&pkg.manifest_path).ok();
+        let dir = relative_dir(&pkg.name, manifest_dir, root)?;
+        let forced_target = forced_target(manifest.as_ref());
+        let declared = declared_arch(
+            &pkg.name,
+            forced_target.as_deref(),
+            manifest.as_ref(),
+            registry,
+        )?;
         crates.insert(WorkspaceCrate {
             name: pkg.name.clone(),
-            dir: relative_dir(&pkg.name, manifest_dir, root)?,
-            arch_specific: workspace_arch || arch_specific_manifest(manifest.as_ref()),
+            dir: dir.clone(),
+            arch: crate_arch(
+                &pkg.name,
+                &dir,
+                registry,
+                [workspace_arch.clone(), declared].into_iter().flatten(),
+            )?,
             owns_process_state: process_state_manifest(manifest.as_ref()),
             links_std: links_std(&pkg.targets)?,
+        });
+        members.push(Member {
+            name: pkg.name.clone(),
+            links_std: links_std(&pkg.targets)?,
+            proc_macro: is_proc_macro(&pkg.targets),
+            forced_target,
         });
         // dependencies включает normal-, dev- и build-зависимости, path = Some отбирает
         // локальные. Дубликаты (normal + dev) схлопывает BTreeSet.
@@ -101,10 +180,11 @@ pub(super) fn collect_workspace(
             let Some(dep_path) = &dep.path else { continue };
             // Цель path-зависимости попадает в список наравне с членами workspace: домен
             // крейта задает его расположение.
+            let dep_dir = relative_dir(&dep.name, dep_path, root)?;
             crates.insert(WorkspaceCrate {
                 name: dep.name.clone(),
-                dir: relative_dir(&dep.name, dep_path, root)?,
-                arch_specific: false,
+                arch: crate_arch(&dep.name, &dep_dir, registry, [])?,
+                dir: dep_dir,
                 owns_process_state: false,
                 links_std: false,
             });
@@ -114,35 +194,100 @@ pub(super) fn collect_workspace(
             });
         }
     }
-    Ok(())
+    Ok(members)
 }
 
-pub(super) fn merge_crates(crates: BTreeSet<WorkspaceCrate>) -> Vec<WorkspaceCrate> {
+pub(super) fn merge_crates(crates: BTreeSet<WorkspaceCrate>) -> Result<Vec<WorkspaceCrate>> {
     // Пакет приходит с манифестом, цель path-зависимости - без него: признаки крейта
     // собираются по всем его вхождениям.
-    let mut merged: BTreeMap<(String, String), (bool, bool, bool)> = BTreeMap::new();
+    let mut merged: BTreeMap<(String, String), WorkspaceCrate> = BTreeMap::new();
     for krate in crates {
-        let known = merged.entry((krate.name, krate.dir)).or_insert((
-            krate.arch_specific,
-            krate.owns_process_state,
-            krate.links_std,
-        ));
-        known.0 |= krate.arch_specific;
-        known.1 |= krate.owns_process_state;
-        known.2 |= krate.links_std;
+        let key = (krate.name.clone(), krate.dir.clone());
+        let Some(known) = merged.get_mut(&key) else {
+            merged.insert(key, krate);
+            continue;
+        };
+        match (&known.arch, &krate.arch) {
+            (Some(known_arch), Some(arch)) if known_arch != arch => bail!(
+                "crate {}: architecture `{known_arch}` conflicts with `{arch}`",
+                krate.name
+            ),
+            (None, Some(arch)) => known.arch = Some(arch.clone()),
+            _ => {}
+        }
+        known.owns_process_state |= krate.owns_process_state;
+        known.links_std |= krate.links_std;
     }
-    merged
-        .into_iter()
-        .map(
-            |((name, dir), (arch_specific, owns_process_state, links_std))| WorkspaceCrate {
-                name,
-                dir,
-                arch_specific,
-                owns_process_state,
-                links_std,
-            },
-        )
-        .collect()
+    Ok(merged.into_values().collect())
+}
+
+fn crate_arch(
+    name: &str,
+    dir: &str,
+    registry: &[ArchEntry],
+    declared: impl IntoIterator<Item = String>,
+) -> Result<Option<String>> {
+    let mut arch: Option<String> = registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .find(|arch| {
+            name.split('-').any(|segment| segment == *arch)
+                || dir.split(['/', '-']).any(|segment| segment == *arch)
+        })
+        .map(str::to_owned);
+    for value in declared {
+        match &arch {
+            Some(known) if known != &value => {
+                bail!("crate {name}: architecture `{known}` conflicts with `{value}`")
+            }
+            Some(_) => {}
+            None => arch = Some(value),
+        }
+    }
+    Ok(arch)
+}
+
+fn declared_arch(
+    name: &str,
+    forced_target: Option<&str>,
+    manifest: Option<&toml::Table>,
+    registry: &[ArchEntry],
+) -> Result<Option<String>> {
+    let mut declared = None;
+    if let Some(target) = forced_target {
+        let entry = registry
+            .iter()
+            .find(|entry| entry.bare == target)
+            .with_context(|| {
+                format!("crate {name}: forced-target `{target}` names no registered architecture")
+            })?;
+        declared = Some(entry.name.clone());
+    }
+    if let Some(value) = molecular_key(manifest, "arch").and_then(toml::Value::as_str) {
+        let entry = registered(value, registry)
+            .with_context(|| format!("crate {name}: metadata.molecular.arch"))?;
+        match &declared {
+            Some(known) if known != &entry.name => bail!(
+                "crate {name}: forced-target names `{known}`, metadata.molecular.arch names `{}`",
+                entry.name
+            ),
+            _ => declared = Some(entry.name.clone()),
+        }
+    }
+    Ok(declared)
+}
+
+pub(crate) fn registered<'a>(name: &str, registry: &'a [ArchEntry]) -> Result<&'a ArchEntry> {
+    registry
+        .iter()
+        .find(|entry| entry.name == name)
+        .with_context(|| {
+            let known: Vec<&str> = registry.iter().map(|entry| entry.name.as_str()).collect();
+            format!(
+                "architecture `{name}` is not registered; registered: {}",
+                known.join(", ")
+            )
+        })
 }
 
 fn links_std(targets: &[MetaTarget]) -> Result<bool> {
@@ -176,9 +321,10 @@ fn links_std(targets: &[MetaTarget]) -> Result<bool> {
     Ok(false)
 }
 
-fn manifest_table(manifest: &Path) -> Option<toml::Table> {
-    let text = fs::read_to_string(manifest).ok()?;
-    text.parse::<toml::Table>().ok()
+fn is_proc_macro(targets: &[MetaTarget]) -> bool {
+    targets
+        .iter()
+        .any(|target| target.kind.iter().any(|kind| kind == "proc-macro"))
 }
 
 fn process_state_manifest(manifest: Option<&toml::Table>) -> bool {
@@ -187,22 +333,25 @@ fn process_state_manifest(manifest: Option<&toml::Table>) -> bool {
         .unwrap_or(false)
 }
 
-fn arch_specific_manifest(manifest: Option<&toml::Table>) -> bool {
-    let forced = manifest
-        .and_then(|table| table.get("package"))
-        .and_then(toml::Value::as_table)
-        .and_then(|package| package.get("forced-target"))
+fn forced_target(manifest: Option<&toml::Table>) -> Option<String> {
+    manifest?
+        .get("package")
+        .and_then(toml::Value::as_table)?
+        .get("forced-target")
         .and_then(toml::Value::as_str)
-        .is_some_and(|target| target.split('-').any(|segment| segment == ARCH_SEGMENT));
-    forced || molecular_key(manifest, "arch").and_then(toml::Value::as_str) == Some(ARCH_SEGMENT)
+        .map(str::to_owned)
 }
 
-fn workspace_arch(meta: &CargoMetadata) -> Option<&str> {
-    meta.workspace_metadata
-        .as_ref()?
-        .get("molecular")?
-        .get("arch")?
-        .as_str()
+fn workspace_arch(meta: &CargoMetadata, registry: &[ArchEntry]) -> Result<Option<String>> {
+    let Some(value) = meta
+        .workspace_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("molecular")?.get("arch")?.as_str())
+    else {
+        return Ok(None);
+    };
+    let entry = registered(value, registry).context("workspace.metadata.molecular.arch")?;
+    Ok(Some(entry.name.clone()))
 }
 
 fn molecular_key<'a>(manifest: Option<&'a toml::Table>, key: &str) -> Option<&'a toml::Value> {
@@ -240,6 +389,14 @@ mod tests {
 
     type PackageSpec<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
 
+    fn registry() -> Vec<ArchEntry> {
+        vec![ArchEntry {
+            name: "aarch64".to_string(),
+            bare: "aarch64-unknown-none".to_string(),
+            system: "targets/aarch64-unknown-molecular.json".to_string(),
+        }]
+    }
+
     fn metadata(packages: &[PackageSpec<'_>]) -> CargoMetadata {
         CargoMetadata {
             packages: packages
@@ -272,25 +429,135 @@ mod tests {
             .collect()
     }
 
+    fn collect(meta: &CargoMetadata) -> Result<(BTreeSet<WorkspaceCrate>, BTreeSet<Edge>)> {
+        let mut crates = BTreeSet::new();
+        let mut edges = BTreeSet::new();
+        collect_workspace(
+            meta,
+            Path::new("/repo"),
+            &registry(),
+            &mut crates,
+            &mut edges,
+        )?;
+        Ok((crates, edges))
+    }
+
+    fn registry_of(text: &str) -> Result<Vec<ArchEntry>> {
+        parse_arch_registry(&text.parse::<toml::Table>()?)
+    }
+
+    #[test]
+    fn a_repeated_name_is_refused() {
+        let text = "
+[[workspace.metadata.molecular.arch]]
+name = \"aarch64\"
+bare = \"aarch64-unknown-none\"
+system = \"targets/aarch64-unknown-molecular.json\"
+
+[[workspace.metadata.molecular.arch]]
+name = \"aarch64\"
+bare = \"aarch64-unknown-none-softfloat\"
+system = \"targets/aarch64-unknown-molecular.json\"
+";
+        let error = registry_of(text).unwrap_err();
+        assert!(error.to_string().contains("registered twice"), "{error}");
+    }
+
     #[test]
     fn workspace_arch_key_marks_every_member() {
         let mut meta = metadata(&[("a-program", "/repo/user/a-program", &[])]);
         meta.workspace_metadata = Some(serde_json::json!({ "molecular": { "arch": "aarch64" } }));
-        let mut collected_crates = BTreeSet::new();
-        let mut collected_edges = BTreeSet::new();
-        collect_workspace(
-            &meta,
-            Path::new("/repo"),
-            &mut collected_crates,
-            &mut collected_edges,
-        )
-        .unwrap();
+        let (collected_crates, _) = collect(&meta).unwrap();
 
         let member = collected_crates
             .iter()
             .find(|krate| krate.name == "a-program")
             .expect("member is collected");
-        assert!(member.arch_specific);
+        assert_eq!(member.arch.as_deref(), Some("aarch64"));
+    }
+
+    #[test]
+    fn the_arch_segment_of_the_path_names_the_registered_arch() {
+        let registry = registry();
+        assert_eq!(
+            crate_arch("hal", "kernel/hal-aarch64", &registry, []).unwrap(),
+            Some("aarch64".to_string())
+        );
+        assert_eq!(
+            crate_arch("a-lib", "lib/a-lib", &registry, []).unwrap(),
+            None
+        );
+        // Сегмент вне реестра архитектурой не считается, так как имя её называть не обязано.
+        assert_eq!(
+            crate_arch("hal-riscv64", "kernel/hal-riscv64", &registry, []).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_declared_arch_that_contradicts_the_path_is_error() {
+        let mut registry = registry();
+        registry.push(ArchEntry {
+            name: "riscv64".to_string(),
+            bare: "riscv64gc-unknown-none-elf".to_string(),
+            system: "targets/riscv64-unknown-molecular.json".to_string(),
+        });
+        let error = crate_arch(
+            "hal-riscv64",
+            "kernel/hal-riscv64",
+            &registry,
+            ["aarch64".to_string()],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("conflicts"), "{error}");
+    }
+
+    #[test]
+    fn a_second_registered_architecture_is_read_from_the_name_and_the_forced_target() {
+        let mut registry = registry();
+        registry.push(ArchEntry {
+            name: "riscv64".to_string(),
+            bare: "riscv64gc-unknown-none-elf".to_string(),
+            system: "targets/riscv64-unknown-molecular.json".to_string(),
+        });
+        let declared = declared_arch(
+            "hal-riscv64",
+            Some("riscv64gc-unknown-none-elf"),
+            None,
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(declared.as_deref(), Some("riscv64"));
+        let arch = crate_arch("hal-riscv64", "kernel/hal-riscv64", &registry, declared).unwrap();
+        assert_eq!(arch.as_deref(), Some("riscv64"));
+    }
+
+    #[test]
+    fn a_forced_target_outside_the_registry_is_error() {
+        let error = declared_arch(
+            "hal-riscv64",
+            Some("riscv64gc-unknown-none-elf"),
+            None,
+            &registry(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("riscv64gc-unknown-none-elf"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn merging_two_architectures_of_one_crate_is_error() {
+        let krate = |arch: &str| WorkspaceCrate {
+            name: "hal".to_string(),
+            dir: "kernel/hal".to_string(),
+            arch: Some(arch.to_string()),
+            owns_process_state: false,
+            links_std: false,
+        };
+        let crates: BTreeSet<WorkspaceCrate> = [krate("aarch64"), krate("riscv64")].into();
+        assert!(merge_crates(crates).is_err());
     }
 
     #[test]
@@ -318,15 +585,7 @@ mod tests {
             "/repo/kernel/a-kernel",
             &[("a-lib", "/repo/lib/a-lib")],
         )]);
-        let mut collected_crates = BTreeSet::new();
-        let mut collected_edges = BTreeSet::new();
-        collect_workspace(
-            &meta,
-            Path::new("/repo"),
-            &mut collected_crates,
-            &mut collected_edges,
-        )
-        .unwrap();
+        let (collected_crates, collected_edges) = collect(&meta).unwrap();
 
         let dirs: Vec<(&str, &str)> = collected_crates
             .iter()
@@ -349,16 +608,6 @@ mod tests {
             "/repo/kernel/a-kernel",
             &[("vendored", "/vendor/vendored")],
         )]);
-        let mut collected_crates = BTreeSet::new();
-        let mut collected_edges = BTreeSet::new();
-        assert!(
-            collect_workspace(
-                &meta,
-                Path::new("/repo"),
-                &mut collected_crates,
-                &mut collected_edges,
-            )
-            .is_err()
-        );
+        assert!(collect(&meta).is_err());
     }
 }

@@ -498,3 +498,192 @@ impl Drop for AnonymousMapping {
         let _ = svc::memory_free(self.va, self.size_bytes);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::mem::ManuallyDrop;
+
+    use super::*;
+
+    const BUFFER_BYTES: usize = 64;
+    const UNTOUCHED: u8 = 0xAA;
+    const SHIFTS: core::ops::Range<usize> = 0..WORD;
+    const LEN_MAX: usize = 40;
+
+    #[repr(align(8))]
+    struct WordAlignedBuffer([u8; BUFFER_BYTES]);
+
+    impl WordAlignedBuffer {
+        fn untouched() -> Self {
+            Self([UNTOUCHED; BUFFER_BYTES])
+        }
+
+        fn base(&mut self) -> *mut u8 {
+            self.0.as_mut_ptr()
+        }
+
+        fn mapping(&mut self) -> ManuallyDrop<Mapping> {
+            let va = u64::try_from(self.base().expose_provenance()).unwrap();
+            let size_bytes = u64::try_from(BUFFER_BYTES).unwrap();
+            // Освобождение в `Drop` подавлено, ядро эти страницы не выдавало.
+            ManuallyDrop::new(Mapping { va, size_bytes })
+        }
+    }
+
+    fn lens() -> impl Iterator<Item = usize> {
+        (0..=16).chain([24, 32, LEN_MAX])
+    }
+
+    fn untouched_except(offset: usize, bytes: &[u8]) -> [u8; BUFFER_BYTES] {
+        let mut expected = [UNTOUCHED; BUFFER_BYTES];
+        expected[offset..offset + bytes.len()].copy_from_slice(bytes);
+        expected
+    }
+
+    fn source_bytes() -> [u8; LEN_MAX + 1] {
+        let mut pattern = [0; LEN_MAX + 1];
+        let mut byte: u8 = 1;
+        for slot in &mut pattern {
+            *slot = byte;
+            byte = byte.wrapping_add(3);
+        }
+        pattern
+    }
+    #[test]
+    fn head_len_reaches_word_boundary_within_len() {
+        let mut buffer = WordAlignedBuffer::untouched();
+        let aligned = buffer.base();
+
+        for shift in SHIFTS {
+            for len in lens() {
+                let base = aligned.wrapping_add(shift);
+                let head = head_len(base, len);
+
+                assert!(head <= len, "shift {shift}, len {len}: head {head}");
+                assert_eq!(
+                    head,
+                    ((WORD - shift) % WORD).min(len),
+                    "shift {shift}, len {len}"
+                );
+                assert!(
+                    head == len || base.wrapping_add(head).addr() % WORD == 0,
+                    "shift {shift}, len {len}: head {head} ends off the word boundary"
+                );
+            }
+        }
+    }
+    #[test]
+    fn head_len_is_len_when_range_ends_before_word_boundary() {
+        let mut buffer = WordAlignedBuffer::untouched();
+        let base = buffer.base().wrapping_add(3);
+
+        assert_eq!(head_len(base, 2), 2);
+        assert_eq!(head_len(base, 5), 5);
+        assert_eq!(head_len(base, 6), 5);
+    }
+    #[test]
+    fn copy_in_at_writes_exactly_the_range() {
+        let pattern = source_bytes();
+
+        for shift in SHIFTS {
+            for len in lens() {
+                let mut buffer = WordAlignedBuffer::untouched();
+                let mapping = buffer.mapping();
+                // Источник берётся с невыровненного адреса, и слова из него читаются без учёта
+                // выравнивания.
+                let source = &pattern[1..=len];
+
+                mapping.copy_in_at(shift, source).unwrap();
+
+                assert_eq!(
+                    buffer.0,
+                    untouched_except(shift, source),
+                    "shift {shift}, len {len}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn copy_out_at_reads_back_written_range() {
+        let pattern = source_bytes();
+
+        for shift in SHIFTS {
+            for len in lens() {
+                let mut buffer = WordAlignedBuffer::untouched();
+                let mapping = buffer.mapping();
+                let source = &pattern[1..=len];
+                mapping.copy_in_at(shift, source).unwrap();
+                // Приёмник берётся с невыровненного адреса, и слова в него пишутся без учёта
+                // выравнивания.
+                let mut target = [UNTOUCHED; BUFFER_BYTES];
+
+                mapping.copy_out_at(shift, &mut target[1..=len]).unwrap();
+
+                assert_eq!(
+                    target,
+                    untouched_except(1, source),
+                    "shift {shift}, len {len}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn zero_at_clears_exactly_the_range() {
+        for shift in SHIFTS {
+            for len in lens() {
+                let mut buffer = WordAlignedBuffer::untouched();
+                let mapping = buffer.mapping();
+
+                mapping.zero_at(shift, len).unwrap();
+
+                let zeros = [0; LEN_MAX];
+                assert_eq!(
+                    buffer.0,
+                    untouched_except(shift, &zeros[..len]),
+                    "shift {shift}, len {len}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn range_beyond_mapping_is_out_of_bounds() {
+        let mut buffer = WordAlignedBuffer::untouched();
+        let mapping = buffer.mapping();
+        let mut target = [UNTOUCHED; 8];
+
+        assert_eq!(
+            mapping.copy_in_at(BUFFER_BYTES, &[1]),
+            Err(Error::OutOfBounds)
+        );
+        assert_eq!(
+            mapping.copy_in_at(BUFFER_BYTES - 4, &[1; 5]),
+            Err(Error::OutOfBounds)
+        );
+        assert_eq!(
+            mapping.copy_out_at(BUFFER_BYTES - 7, &mut target),
+            Err(Error::OutOfBounds)
+        );
+        assert_eq!(
+            mapping.copy_out_at(usize::MAX, &mut target[..1]),
+            Err(Error::OutOfBounds)
+        );
+        assert_eq!(
+            mapping.zero_at(0, BUFFER_BYTES + 1),
+            Err(Error::OutOfBounds)
+        );
+        assert_eq!(mapping.zero_at(usize::MAX, 1), Err(Error::OutOfBounds));
+
+        assert_eq!(buffer.0, [UNTOUCHED; BUFFER_BYTES]);
+        assert_eq!(target, [UNTOUCHED; 8]);
+    }
+    #[test]
+    fn range_ending_at_mapping_size_is_accepted() {
+        let mut buffer = WordAlignedBuffer::untouched();
+        let mapping = buffer.mapping();
+
+        assert_eq!(mapping.copy_in_at(BUFFER_BYTES, &[]), Ok(()));
+        assert_eq!(mapping.zero_at(0, BUFFER_BYTES), Ok(()));
+
+        assert_eq!(buffer.0, [0; BUFFER_BYTES]);
+    }
+}

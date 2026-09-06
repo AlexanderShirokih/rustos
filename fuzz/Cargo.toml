@@ -58,13 +58,13 @@ bench = false
 [workspace]
 members = ["."]
 
+[workspace.metadata.molecular]
+profile = "fuzz"
+
 # Таблица повторяет корневую дословно, комментарии к отдельным правилам лежат там же.
-# Расхождение ловит `cargo xtask check-layers`.
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unsafe_code = "deny"
-# Имя `molecular` в `target_os` задаёт спека таргета в `targets/`, встроенным rustc его не знает:
-# хостовая сборка иначе ругается на `target_os` из кода, общего с userspace.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("molecular"))'] }
 
 [workspace.lints.clippy]
@@ -79,8 +79,6 @@ inline_always = "allow"
 return_self_not_must_use = "allow"
 undocumented_unsafe_blocks = "warn"
 multiple_unsafe_ops_per_block = "deny"
-# Операции, паникующие на неверном значении, запрещены рабочему коду. Тестовый выведен
-# из-под запрета `clippy.toml` и снятиями в корнях крейтов.
 unwrap_used = "deny"
 unwrap_in_result = "deny"
 expect_used = "deny"
@@ -89,7 +87,6 @@ missing_asserts_for_indexing = "deny"
 panic = "deny"
 todo = "deny"
 unimplemented = "deny"
-# Крейт `no_std` обращается к `core`, а хостовые инструменты снимают запрет в своём корне.
 std_instead_of_core = "deny"
 cast_sign_loss = "warn"
 cast_lossless = "warn"

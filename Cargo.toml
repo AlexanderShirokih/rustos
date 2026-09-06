@@ -1,17 +1,15 @@
 [workspace]
 resolver = "3"
 members = [
-    "kernel/drivers-aarch64",
     "kernel/drivers-common",
     "kernel/drivers-common-aarch64",
-    "kernel/hal-aarch64",
     "kernel/hal-aarch64-asid",
     "kernel/hal-aarch64-paging",
     "kernel/hal-common",
     "lib/bootstrap-abi",
     "lib/io",
     "lib/ipc",
-    "lib/ipc-test",
+    "lib/kernel-objects",
     "lib/log-abi",
     "lib/rtc-abi",
     "lib/syscall",
@@ -34,13 +32,26 @@ members = [
     "lib/filesystem-client",
     "lib/supervisor-abi",
     "lib/userland",
-    "lib/userland-build",
     "lib/userland-image",
-    "tools/style",
-    "tools/userland-image",
-    "xtask",
 ]
-exclude = ["fuzz", "lib/kernel-objects", "lib/runtime", "lib/syscall-user", "user"]
+# `lib/ipc-test` и `lib/syscall-user` лежат внутри каталога корня, но принадлежат другим workspace.
+exclude = [
+    "fuzz",
+    "kernel/platform",
+    "lib/ipc-test",
+    "lib/std-runtime",
+    "lib/syscall-user",
+    "tools",
+    "user",
+]
+
+[workspace.metadata.molecular]
+profile = "common"
+
+[[workspace.metadata.molecular.arch]]
+name = "aarch64"
+bare = "aarch64-unknown-none"
+system = "targets/aarch64-unknown-molecular.json"
 
 [workspace.package]
 version = "0.1.0"
@@ -88,13 +99,13 @@ hal-aarch64-asid = { path = "kernel/hal-aarch64-asid" }
 hal-aarch64-paging = { path = "kernel/hal-aarch64-paging" }
 drivers-common = { path = "kernel/drivers-common" }
 drivers-common-aarch64 = { path = "kernel/drivers-common-aarch64" }
-drivers-aarch64 = { path = "kernel/drivers-aarch64" }
 kernelspace = { path = "kernel/kernelspace" }
 capability = { path = "kernel/capability" }
 scheduler = { path = "kernel/scheduler" }
 supervisor-abi = { path = "lib/supervisor-abi" }
 syscall = { path = "lib/syscall" }
 syscall-kernel = { path = "kernel/syscall" }
+syscall-user = { path = "lib/syscall-user" }
 test-harness-qemu = { path = "lib/test-harness-qemu" }
 test-harness-macros = { path = "lib/test-harness-macros" }
 userland = { path = "lib/userland" }
@@ -128,8 +139,8 @@ return_self_not_must_use = "allow"
 # Ядерные unsafe-линты
 undocumented_unsafe_blocks = "warn"
 multiple_unsafe_ops_per_block = "deny"
-# Операции, паникующие на неверном значении: рабочему коду они запрещены, тестовый выведен
-# из-под запрета `clippy.toml` и снятиями в корнях крейтов.
+# Операции, паникующие на неверном значении, запрещены рабочему коду. Тестовый код выведен
+# из-под запрета.
 unwrap_used = "deny"
 unwrap_in_result = "deny"
 expect_used = "deny"

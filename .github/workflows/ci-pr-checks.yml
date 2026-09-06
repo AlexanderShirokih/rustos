@@ -42,6 +42,7 @@ jobs:
               - xtask/src/std_src.rs
               - rust-toolchain.toml
               - targets/aarch64-unknown-molecular.json
+              - lib/std-runtime/**
               - lib/runtime/**
               - lib/syscall-user/**
               - lib/component-abi/**
@@ -85,10 +86,7 @@ jobs:
     with:
       cache-scope: doc
       timeout-minutes: 20
-      run: |
-        export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings"
-        cargo doc --no-deps --workspace
-        cargo xtask userland doc --no-deps --workspace
+      run: cargo xtask doc
 
   style:
     name: style
@@ -120,23 +118,23 @@ jobs:
     with:
       cache-scope: clippy-host
       timeout-minutes: 30
-      run: |
-        cargo clippy --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --all-targets --all-features -- -D warnings
-        cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+      run: cargo xtask clippy --host
 
-  clippy-aarch64:
-    name: clippy (aarch64)
+  clippy-target:
+    name: clippy (${{ matrix.arch }})
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
+    # Матрица повторяет реестр архитектур корневого манифеста, расхождение ловит
+    # `cargo xtask check-layers`. Вариант падает независимо от остальных.
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64]
     uses: ./.github/workflows/ci-container-job.yml
     with:
-      cache-scope: clippy-aarch64
+      cache-scope: clippy-${{ matrix.arch }}
       timeout-minutes: 30
-      run: |
-        cargo clippy --workspace --exclude xtask --exclude ipc-test --exclude userland-build --exclude style-tool --exclude userland-image-tool --target aarch64-unknown-none -- -D warnings
-        cargo xtask userland clippy --workspace --all-targets -- -D warnings
-        cargo clippy --manifest-path lib/runtime/Cargo.toml --target targets/aarch64-unknown-molecular.json -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
-        cargo clippy --manifest-path lib/syscall-user/Cargo.toml --target targets/aarch64-unknown-molecular.json -Zbuild-std=core,alloc -Zjson-target-spec -- -D warnings
+      run: cargo xtask clippy --arch ${{ matrix.arch }}
 
   test:
     name: tests (host)
@@ -146,7 +144,7 @@ jobs:
     with:
       cache-scope: test
       timeout-minutes: 30
-      run: cargo test --workspace --exclude drivers-aarch64 --exclude hal-aarch64 --all-features
+      run: cargo xtask test
 
   race:
     name: race (ThreadSanitizer)
@@ -182,14 +180,19 @@ jobs:
       run: cargo xtask qemu-test
 
   std:
-    name: std (aarch64-unknown-molecular)
+    name: std (${{ matrix.arch }})
     needs: changes
     if: ${{ needs.changes.outputs.std == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64]
     uses: ./.github/workflows/ci-container-job.yml
     with:
+      # Каталог кэша под новым именем scope на раннере нужно создавать заранее.
       cache-scope: std
       timeout-minutes: 60
-      run: cargo xtask std-src --verify
+      run: cargo xtask std-src --verify --arch ${{ matrix.arch }}
 
   ci-check-requirements:
     name: ci-check-requirements
@@ -202,7 +205,7 @@ jobs:
       - style
       - similarity
       - clippy-host
-      - clippy-aarch64
+      - clippy-target
       - test
       - race
       - fuzz-build

@@ -166,7 +166,14 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
 
     let ctx = BuildContext::new(spec, features)?;
 
-    userland::build_image(&ctx.project_root, &ctx.build_dir, image, environment, files)?;
+    userland::build_image(
+        &ctx.project_root,
+        &ctx.build_dir,
+        image,
+        &ctx.arch,
+        environment,
+        files,
+    )?;
     build_binary(&ctx)?;
 
     let qemu_cmd = ctx

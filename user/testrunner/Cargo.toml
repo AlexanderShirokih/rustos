@@ -8,6 +8,11 @@ build = "build.rs"
 [package.metadata.userland]
 stack_size = 65536
 
+# Крейт поднимает систему `rootkeeper`, зависимую от архитектуры через биндинги
+# контроллеров прерываний, и проверяет её вместе с ней.
+[package.metadata.molecular]
+arch = "aarch64"
+
 [[bin]]
 name = "testrunner"
 path = "src/main.rs"

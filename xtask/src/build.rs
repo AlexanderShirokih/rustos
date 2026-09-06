@@ -23,7 +23,7 @@ pub(crate) struct BuildArgs {
     /// Debug after the build (commands from 'debug' in the YAML)
     #[arg(long)]
     debug: bool,
-    /// Extra `hal-aarch64` cargo features (comma-separated)
+    /// Extra kernel cargo features (comma-separated)
     #[arg(long)]
     features: Option<String>,
     /// Relative path to the userland image manifest
@@ -40,6 +40,7 @@ pub(crate) fn run(args: BuildArgs) -> Result<()> {
         &ctx.project_root,
         &ctx.build_dir,
         &args.image,
+        &ctx.arch,
         &[],
         &args.files,
     )?;

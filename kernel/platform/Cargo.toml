@@ -1,0 +1,77 @@
+[workspace]
+resolver = "3"
+members = ["../drivers-aarch64", "../hal-aarch64"]
+
+[workspace.metadata.molecular]
+profile = "platform"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+# Внешние зависимости
+spin = "0.12.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Крейты этого workspace
+drivers-aarch64 = { path = "../drivers-aarch64" }
+
+# Крейты корневого workspace
+capability = { path = "../capability" }
+collections = { path = "../../lib/collections" }
+drivers-common = { path = "../drivers-common" }
+drivers-common-aarch64 = { path = "../drivers-common-aarch64" }
+fdt = { path = "../../lib/fdt" }
+hal-aarch64-asid = { path = "../hal-aarch64-asid" }
+hal-aarch64-paging = { path = "../hal-aarch64-paging" }
+hal-common = { path = "../hal-common" }
+io = { path = "../../lib/io" }
+kernelspace = { path = "../kernelspace" }
+klog = { path = "../log" }
+memory = { path = "../memory" }
+process = { path = "../process" }
+scheduler = { path = "../scheduler" }
+syscall = { path = "../../lib/syscall" }
+syscall-kernel = { path = "../syscall" }
+test-harness-qemu = { path = "../../lib/test-harness-qemu" }
+
+# Таблица повторяет корневую дословно, комментарии к отдельным правилам лежат там же.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("molecular"))'] }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_docs_in_private_items = "allow"
+doc_markdown = "allow"
+inline_always = "allow"
+return_self_not_must_use = "allow"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "deny"
+unwrap_used = "deny"
+unwrap_in_result = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+missing_asserts_for_indexing = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+std_instead_of_core = "deny"
+cast_sign_loss = "warn"
+cast_lossless = "warn"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+debug = true
+opt-level = 2

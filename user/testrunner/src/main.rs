@@ -61,6 +61,7 @@ mod resource_split;
 mod ring_transport;
 mod rootkeeper_system;
 mod signal;
+#[cfg(target_arch = "aarch64")]
 mod simd_state;
 mod smp_stress;
 mod spawn_from_image;
@@ -70,6 +71,7 @@ mod std_rt;
 mod std_selftest;
 mod stress;
 mod sync;
+#[cfg(target_arch = "aarch64")]
 mod thread_pointer;
 mod thread_yield;
 mod vm;

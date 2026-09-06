@@ -6,4 +6,4 @@ rustflags = [
 linker = "rust-lld"
 
 [alias]
-xtask = "run --package xtask --target-dir target/xtask --"
+xtask = "run --manifest-path tools/Cargo.toml --package xtask --target-dir target/xtask --"

@@ -6,6 +6,7 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 forced-target = "aarch64-unknown-none"
+workspace = "../platform"
 
 [[bin]]
 name = "kernel-aarch64"

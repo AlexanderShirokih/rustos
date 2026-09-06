@@ -3,7 +3,18 @@
 //! Макросы ставят ловушку: номер операции идёт immediate-полем `svc`, аргументы - в x0 и
 //! дальше по порядку, возврат - в x0. Обёртка остаётся типизированной подписью с обоснованием
 //! своего `unsafe`.
+//!
+//! Ловушка существует только под RustOS на aarch64. На любом другом таргете макросы отдают
+//! код `BadSyscall`, и крейт собирается для линтов и хостовых тестов зависимых крейтов.
+//! Блоки `unsafe` обёрток при этом остаются без unsafe-операции, и предупреждение о них снято
+//! на весь модуль.
 
+#![cfg_attr(
+    not(all(target_os = "molecular", target_arch = "aarch64")),
+    allow(unused_unsafe)
+)]
+
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
 use core::arch::asm;
 
 trait Argument {
@@ -34,6 +45,7 @@ impl Argument for Handle {
     }
 }
 
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
 macro_rules! svc {
     ($op:expr) => {{
         let ret: i64;
@@ -128,6 +140,7 @@ macro_rules! svc {
     }};
 }
 
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
 macro_rules! svc_pair {
     ($op:expr, $x0:expr) => {{
         let primary: i64;
@@ -159,6 +172,7 @@ macro_rules! svc_pair {
     }};
 }
 
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
 macro_rules! svc_noreturn {
     ($op:expr, $x0:expr) => {
         asm!(
@@ -168,6 +182,36 @@ macro_rules! svc_noreturn {
             options(noreturn, nostack),
         )
     };
+}
+
+#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
+macro_rules! svc {
+    ($op:expr $(, $arg:expr)*) => {{
+        let _: u16 = $op as u16;
+        $(let _: u64 = Argument::to_register($arg);)*
+        let ret: i64 = -(SyscallError::BadSyscall as i64);
+        ret
+    }};
+}
+
+#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
+macro_rules! svc_pair {
+    ($op:expr $(, $arg:expr)*) => {{
+        let _: u16 = $op as u16;
+        $(let _: u64 = Argument::to_register($arg);)*
+        (-(SyscallError::BadSyscall as i64), 0u64)
+    }};
+}
+
+#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
+macro_rules! svc_noreturn {
+    ($op:expr, $x0:expr) => {{
+        let _: u16 = $op as u16;
+        let _: u64 = Argument::to_register($x0);
+        loop {
+            core::hint::spin_loop();
+        }
+    }};
 }
 
 use syscall::{Handle, IrqTrigger, SyscallError, SyscallOp, Timeout, WaitItem, WakeCount};

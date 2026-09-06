@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -9,8 +8,6 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::USERLAND_WORKSPACE;
-
-const CARGO_CONFIG: &str = ".cargo/config.toml";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,22 +48,6 @@ pub(super) struct WorkspaceMetadata {
 
 pub(super) fn userland_workspace(project_root: &Path) -> PathBuf {
     project_root.join(USERLAND_WORKSPACE)
-}
-
-pub(super) fn userland_target(userland_root: &Path) -> Result<String> {
-    let config_path = userland_root.join(CARGO_CONFIG);
-    let text = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read {}", config_path.display()))?;
-    let config: toml::Table = text
-        .parse()
-        .with_context(|| format!("Failed to parse {}", config_path.display()))?;
-    config
-        .get("build")
-        .and_then(toml::Value::as_table)
-        .and_then(|build| build.get("target"))
-        .and_then(toml::Value::as_str)
-        .map(String::from)
-        .with_context(|| format!("{} declares no build.target", config_path.display()))
 }
 
 pub(super) fn load_workspace_metadata(project_root: &Path) -> Result<WorkspaceMetadata> {

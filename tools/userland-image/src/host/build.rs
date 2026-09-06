@@ -34,21 +34,50 @@ pub(super) struct BuiltSegment {
     pub(super) permissions: SegmentPermissions,
 }
 
+/// Таргет сборки программ образа: спека системного таргета и архитектура, которую обязан
+/// нести собранный ELF.
+#[derive(Clone, Debug)]
+pub struct UserlandTarget {
+    pub spec: PathBuf,
+    pub architecture: Architecture,
+}
+
+impl UserlandTarget {
+    /// Таргет по спеке `spec` и имени архитектуры реестра дерева.
+    pub fn new(spec: PathBuf, architecture: &str) -> Result<Self> {
+        let architecture = match architecture {
+            "aarch64" => Architecture::Aarch64,
+            "riscv64" => Architecture::Riscv64,
+            other => bail!("architecture '{other}' has no ELF machine mapping"),
+        };
+        Ok(Self { spec, architecture })
+    }
+
+    pub(super) fn directory_name(&self) -> Result<&str> {
+        self.spec
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .with_context(|| format!("target spec '{}' has no name", self.spec.display()))
+    }
+}
+
 pub(super) fn build_program(
     userland_root: &Path,
     target_directory: &Path,
-    target: &str,
+    target: &UserlandTarget,
     std_src: &Path,
     program: &ResolvedProgram,
     environment: &[BuildEnvironment<'_>],
 ) -> Result<BuiltEntry> {
-    run_userland_build(userland_root, std_src, program, environment)?;
-    let binary_path = userland_binary_path(target_directory, target, &program.bin);
-    read_and_extract_entry(&binary_path, program)
+    run_userland_build(userland_root, target, std_src, program, environment)?;
+    let binary_path =
+        userland_binary_path(target_directory, target.directory_name()?, &program.bin);
+    read_and_extract_entry(&binary_path, program, target.architecture)
 }
 
 fn run_userland_build(
     userland_root: &Path,
+    target: &UserlandTarget,
     std_src: &Path,
     program: &ResolvedProgram,
     environment: &[BuildEnvironment<'_>],
@@ -62,7 +91,9 @@ fn run_userland_build(
             "--bin",
             &program.bin,
             "--release",
+            "--target",
         ])
+        .arg(&target.spec)
         // Cargo читает конфигурацию таргета по рабочему каталогу процесса.
         .current_dir(userland_root)
         .env("__CARGO_TESTS_ONLY_SRC_ROOT", std_src)
@@ -91,7 +122,11 @@ pub(super) fn userland_binary_path(target_directory: &Path, target: &str, bin: &
     target_directory.join(target).join("release").join(bin)
 }
 
-fn read_and_extract_entry(path: &Path, program: &ResolvedProgram) -> Result<BuiltEntry> {
+fn read_and_extract_entry(
+    path: &Path,
+    program: &ResolvedProgram,
+    architecture: Architecture,
+) -> Result<BuiltEntry> {
     let mut payload = Vec::new();
     File::open(path)
         .with_context(|| format!("Failed to open userland ELF '{}'", path.display()))?
@@ -111,7 +146,7 @@ fn read_and_extract_entry(path: &Path, program: &ResolvedProgram) -> Result<Buil
         )
     })?;
 
-    validate_file(&file, &program.path)?;
+    validate_file(&file, &program.path, architecture)?;
     let entry_va = file.entry();
     let segments = extract_segments(&file, &program.path)?;
     let manifest = extract_manifest(&file, &program.path)?;
@@ -147,14 +182,15 @@ fn extract_manifest(file: &object::File<'_>, entry: &str) -> Result<ProgramManif
     Ok(ProgramManifest::from_record(&manifest))
 }
 
-fn validate_file(file: &object::File<'_>, entry: &str) -> Result<()> {
+fn validate_file(file: &object::File<'_>, entry: &str, architecture: Architecture) -> Result<()> {
     ensure!(
         file.format() == BinaryFormat::Elf,
         "userland entry '{entry}' payload is not ELF"
     );
     ensure!(
-        file.architecture() == Architecture::Aarch64,
-        "userland entry '{entry}' payload must target AArch64"
+        file.architecture() == architecture,
+        "userland entry '{entry}' payload must target {architecture:?}, found {:?}",
+        file.architecture()
     );
     ensure!(
         file.kind() == ObjectKind::Executable,

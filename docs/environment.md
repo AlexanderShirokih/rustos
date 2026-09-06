@@ -30,3 +30,22 @@ sudo apt-get install -y gcc libc6-dev qemu-system-arm
 Для Android boot image дополнительно нужен `mkbootimg` из Android platform-tools.
 
 CI использует Docker-образ, описанный в `Dockerfile`.
+
+## rust-analyzer
+
+Дерево состоит из шести workspace по профилям сборки
+([workspace.md](workspace.md#профили-сборки)), а rust-analyzer открывает один.
+Остальные подключаются настройкой `linkedProjects`:
+
+```json
+{
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml",
+    "tools/Cargo.toml",
+    "kernel/platform/Cargo.toml",
+    "lib/std-runtime/Cargo.toml",
+    "user/Cargo.toml",
+    "fuzz/Cargo.toml"
+  ]
+}
+```

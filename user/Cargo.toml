@@ -22,9 +22,9 @@ members = [
     "../lib/userland-loader",
 ]
 
-# `check-layers` метит крейты workspace архитектурными по этому ключу.
+# Архитектурно зависимый крейт объявляет архитектуру ключом `arch` своего манифеста.
 [workspace.metadata.molecular]
-arch = "aarch64"
+profile = "userland"
 
 [workspace.package]
 version = "0.1.0"
@@ -39,13 +39,12 @@ spin = "0.12.0"
 component-client = { path = "../lib/component-client" }
 component-client-std = { path = "../lib/component-client-std" }
 filesystem-server = { path = "../lib/filesystem-server" }
-kernel-objects = { path = "../lib/kernel-objects" }
 log-relay = { path = "../lib/log-relay" }
 managed-component = { path = "../lib/managed-component" }
 runtime = { path = "../lib/runtime" }
 userland-loader = { path = "../lib/userland-loader" }
 
-# Крейты корневого workspace. Пути сверяет `cargo xtask check-layers`.
+# Крейты корневого workspace
 bootstrap-abi = { path = "../lib/bootstrap-abi" }
 collections = { path = "../lib/collections" }
 component-abi = { path = "../lib/component-abi" }
@@ -57,6 +56,7 @@ filesystem-abi = { path = "../lib/filesystem-abi" }
 filesystem-client = { path = "../lib/filesystem-client" }
 io = { path = "../lib/io" }
 ipc = { path = "../lib/ipc" }
+kernel-objects = { path = "../lib/kernel-objects" }
 log-abi = { path = "../lib/log-abi" }
 rtc-abi = { path = "../lib/rtc-abi" }
 supervisor-abi = { path = "../lib/supervisor-abi" }
@@ -68,12 +68,9 @@ userland-build = { path = "../lib/userland-build" }
 userland-image = { path = "../lib/userland-image" }
 
 # Таблица повторяет корневую дословно, комментарии к отдельным правилам лежат там же.
-# Расхождение ловит `cargo xtask check-layers`.
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unsafe_code = "deny"
-# Имя `molecular` в `target_os` задаёт спека таргета в `targets/`, встроенным rustc его не знает:
-# хостовая сборка иначе ругается на `target_os` из кода, общего с userspace.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("molecular"))'] }
 
 [workspace.lints.clippy]
@@ -88,8 +85,6 @@ inline_always = "allow"
 return_self_not_must_use = "allow"
 undocumented_unsafe_blocks = "warn"
 multiple_unsafe_ops_per_block = "deny"
-# Операции, паникующие на неверном значении: рабочему коду они запрещены, тестовый выведен
-# из-под запрета `clippy.toml` и снятиями в корнях крейтов.
 unwrap_used = "deny"
 unwrap_in_result = "deny"
 expect_used = "deny"
@@ -98,8 +93,6 @@ missing_asserts_for_indexing = "deny"
 panic = "deny"
 todo = "deny"
 unimplemented = "deny"
-# Крейты `no_std`: обращение к `std` там - отклонение, хостовые инструменты снимают запрет
-# в корне крейта.
 std_instead_of_core = "deny"
 cast_sign_loss = "warn"
 cast_lossless = "warn"
