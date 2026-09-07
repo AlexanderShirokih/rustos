@@ -1,11 +1,17 @@
-//! Self-terminate через handle отвергается с `AccessDenied`
-//! (`process.rs:116`, `thread.rs:107`): self-exit обязан идти через
-//! `ThreadExit` либо `ProcessExit`, выполняющие context switch.
+//! Операции syscall над хендлом собственного процесса и потока.
+//!
+//! Self-terminate через handle отвергается с `AccessDenied` в `sys_process_terminate` и
+//! `sys_thread_terminate`: self-exit обязан идти через `ThreadExit` либо `ProcessExit`,
+//! выполняющие context switch. Капа, которую выдаёт `ProcessSelf`, держателем процесса не
+//! считается.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result)]
 
-use core::{num::NonZeroU64, sync::atomic::AtomicU32};
+use core::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicU32, Ordering},
+};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use capability::{
@@ -17,10 +23,14 @@ use collections::{LockCell, MutexCell};
 use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use syscall_kernel::{Origin, SyscallError, SyscallFrame, SyscallOp, SyscallRuntime};
 
+const ORPHANED_EXIT_CODE: i32 = -2;
+
 struct SelfRuntime {
     handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
     current_process: Mutex<Option<Arc<ProcessObject>>>,
     current_thread: Mutex<Option<Arc<ThreadObject>>>,
+    orphaned: AtomicU32,
+    exited_cpu: AtomicU32,
 }
 
 impl SelfRuntime {
@@ -29,7 +39,17 @@ impl SelfRuntime {
             handle_table: Mutex::new(None),
             current_process: Mutex::new(None),
             current_thread: Mutex::new(None),
+            orphaned: AtomicU32::new(0),
+            exited_cpu: AtomicU32::new(0),
         }
+    }
+
+    fn take_orphaned(&self) -> u32 {
+        self.orphaned.swap(0, Ordering::AcqRel)
+    }
+
+    fn take_exited_cpu(&self) -> u32 {
+        self.exited_cpu.swap(0, Ordering::AcqRel)
     }
 }
 
@@ -54,6 +74,22 @@ impl KernelRuntime for SelfRuntime {
     fn unblock(&self, _t: WaitToken) {}
     fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
     fn clear_blocked_cancel(&self) {}
+    fn release_process_holder(&self, process: &Arc<capability::ProcessObject>) {
+        process.signal_terminated(ORPHANED_EXIT_CODE);
+        self.orphaned.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn exit_if_terminated(&self) {
+        if self
+            .current_process
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|process| process.terminated())
+        {
+            self.exited_cpu.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 }
 
 impl SyscallRuntime for SelfRuntime {
@@ -241,4 +277,150 @@ fn process_terminate_on_other_handle_succeeds() {
     *rt.handle_table.lock().unwrap() = Some(table);
 
     assert_eq!(terminate(SyscallOp::ProcessTerminate, pid), Ok(0));
+}
+
+fn close(handle: HandleId) -> Result<u64, i64> {
+    let mut frame = TestFrame {
+        op: SyscallOp::HandleClose as u16,
+        args: [u64::from(handle.raw().get()), 0, 0, 0, 0, 0],
+        ret: 0,
+    };
+    syscall_kernel::dispatch(&mut frame);
+    if frame.ret >= 0 {
+        Ok(u64::try_from(frame.ret).unwrap())
+    } else {
+        Err(frame.ret)
+    }
+}
+
+fn process_self() -> Result<HandleId, i64> {
+    let mut frame = TestFrame {
+        op: SyscallOp::ProcessSelf as u16,
+        args: [0; 6],
+        ret: 0,
+    };
+    syscall_kernel::dispatch(&mut frame);
+    if frame.ret >= 0 {
+        let raw = u32::try_from(frame.ret).unwrap();
+        Ok(HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap()))
+    } else {
+        Err(frame.ret)
+    }
+}
+
+#[test]
+fn closing_the_self_capability_leaves_the_process_running() {
+    let _g = test_lock();
+    let rt = runtime();
+    let process = ProcessObject::new();
+    *rt.current_process.lock().unwrap() = Some(process.clone());
+    *rt.current_thread.lock().unwrap() = None;
+
+    let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
+    *rt.handle_table.lock().unwrap() = Some(table.clone());
+    let owner = table
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Process(process.clone()),
+                Rights::READ | Rights::WRITE,
+            ))
+        })
+        .expect("insert owner handle");
+    rt.take_orphaned();
+
+    let self_handle = process_self().expect("process_self");
+    assert_eq!(close(self_handle), Ok(0));
+    assert_eq!(rt.take_orphaned(), 0);
+    assert!(!process.terminated());
+
+    assert_eq!(close(owner), Ok(0));
+    assert_eq!(rt.take_orphaned(), 1);
+    assert!(process.terminated());
+}
+
+#[test]
+fn closing_the_last_holder_of_the_current_process_exits_the_cpu() {
+    let _g = test_lock();
+    let rt = runtime();
+    let process = ProcessObject::new();
+    *rt.current_process.lock().unwrap() = Some(process.clone());
+    *rt.current_thread.lock().unwrap() = None;
+
+    // Единственный учитываемый держатель лежит в таблице самого процесса. Такую капу
+    // кладёт туда перенос по IPC либо стартовый хэндл `ProcessStart`.
+    let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
+    *rt.handle_table.lock().unwrap() = Some(table.clone());
+    let owner = table
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Process(process.clone()),
+                Rights::READ | Rights::WRITE,
+            ))
+        })
+        .expect("insert owner handle");
+    rt.take_orphaned();
+    rt.take_exited_cpu();
+
+    assert_eq!(close(owner), Ok(0));
+
+    assert_eq!(rt.take_orphaned(), 1);
+    assert_eq!(
+        rt.take_exited_cpu(),
+        1,
+        "the dispatcher must take the terminated process off the CPU instead of returning"
+    );
+}
+
+#[test]
+fn a_syscall_of_a_live_process_returns_normally() {
+    let _g = test_lock();
+    let rt = runtime();
+    let process = ProcessObject::new();
+    *rt.current_process.lock().unwrap() = Some(process);
+    *rt.current_thread.lock().unwrap() = None;
+
+    let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
+    *rt.handle_table.lock().unwrap() = Some(table);
+    rt.take_exited_cpu();
+
+    let self_handle = process_self().expect("process_self");
+    assert_eq!(close(self_handle), Ok(0));
+
+    assert_eq!(rt.take_exited_cpu(), 0);
+}
+
+#[test]
+fn closing_the_last_holder_reports_the_removal_to_the_observer() {
+    let _g = test_lock();
+    let rt = runtime();
+    let process = ProcessObject::new();
+    *rt.current_process.lock().unwrap() = Some(ProcessObject::new());
+    *rt.current_thread.lock().unwrap() = None;
+
+    let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
+    *rt.handle_table.lock().unwrap() = Some(table.clone());
+    let owner = table
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Process(process.clone()),
+                Rights::READ | Rights::WRITE,
+            ))
+        })
+        .expect("insert owner handle");
+    let observer = table
+        .with_lock(|tbl| {
+            tbl.insert(Capability::new(
+                CapabilityTarget::Process(process.clone()),
+                Rights::READ,
+            ))
+        })
+        .expect("insert observer handle");
+    let signal = process.termination_signal();
+    rt.take_orphaned();
+
+    assert_eq!(close(owner), Ok(0));
+
+    assert_eq!(signal.peek() & capability::SIGNALED, capability::SIGNALED);
+    assert_eq!(process.exit_code(), ORPHANED_EXIT_CODE);
+    assert_eq!(close(observer), Ok(0));
 }

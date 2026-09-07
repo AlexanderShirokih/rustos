@@ -26,6 +26,16 @@ pub const OP_DUPLICATE_TRANSFER_CAP: u8 = 6;
 /// Поднять поток, паркующийся бессрочно, ответить [`REPLY_OK`] либо
 /// [`REPLY_SPAWN_FAILED`] и завершить процесс целиком с кодом из аргумента.
 pub const OP_PROCESS_EXIT: u8 = 7;
+/// Оставить капу из `caps[0]` в таблице фикстуры до конца жизни фикстуры. Ответ -
+/// [`REPLY_OK`] либо [`REPLY_HOLD_FAILED`].
+pub const OP_HOLD_CAP: u8 = 8;
+/// Открыть капу на собственный процесс и оставить её в таблице до конца жизни
+/// фикстуры. Ответ - [`REPLY_OK`] либо [`REPLY_HOLD_FAILED`].
+pub const OP_HOLD_SELF: u8 = 9;
+/// Закрыть капу из `caps[0]` и ответить [`REPLY_OK`]. Закрытие капы, которая держит
+/// процесс фикстуры, снимает этот процесс. Ответ на такой запрос не приходит. Запрос
+/// без капы завершает фикстуру.
+pub const OP_CLOSE_CAP: u8 = 10;
 
 /// Длина запроса: опкод и `u64`-аргумент.
 pub const REQUEST_LEN: usize = 1 + 8;
@@ -48,6 +58,8 @@ pub const REPLY_ACCESS_DENIED: u8 = 5;
 pub const REPLY_DUPLICATE_FAILED: u8 = 6;
 /// `OP_PROCESS_EXIT`: паркующийся поток не поднялся.
 pub const REPLY_SPAWN_FAILED: u8 = 7;
+/// `OP_HOLD_CAP` и `OP_HOLD_SELF`: капу удержать не на чем.
+pub const REPLY_HOLD_FAILED: u8 = 8;
 
 /// Сериализует запрос в кадр фиксированной длины.
 pub fn encode_request(op: u8, arg: u64) -> [u8; REQUEST_LEN] {

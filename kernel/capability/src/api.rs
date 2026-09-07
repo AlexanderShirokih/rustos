@@ -349,6 +349,14 @@ pub fn thread_exit(exit_code: i32) -> ! {
     runtime().exit_current_thread(exit_code)
 }
 
+/// Снимает текущий поток с CPU, когда ядро пометило этот поток завершённым.
+/// Возвращается, когда текущий поток жив либо рантайм не установлен.
+pub fn exit_if_terminated() {
+    if let Some(runtime) = installed_runtime() {
+        runtime.exit_if_terminated();
+    }
+}
+
 /// Завершает все потоки текущего процесса с заданным `exit_code`, поднимает
 /// `SIGNALED` на их lifecycle-object и lifecycle-object процесса, освобождает
 /// ресурсы процесса и переключает контекст на следующий runnable. Не возвращается.
@@ -448,6 +456,7 @@ mod tests {
         handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
         block_hook: Mutex<Option<BlockHook>>,
         blocked_cancel: Mutex<Option<Arc<dyn CancelTarget>>>,
+        orphaned: Mutex<Vec<Arc<ProcessObject>>>,
     }
 
     impl MockRuntime {
@@ -456,7 +465,12 @@ mod tests {
                 handle_table: Mutex::new(None),
                 block_hook: Mutex::new(None),
                 blocked_cancel: Mutex::new(None),
+                orphaned: Mutex::new(Vec::new()),
             }
+        }
+
+        fn take_orphaned(&self) -> Vec<Arc<ProcessObject>> {
+            core::mem::take(&mut *self.orphaned.lock().unwrap())
         }
 
         fn configure(
@@ -471,6 +485,7 @@ mod tests {
         fn reset(&self) {
             self.configure(None, None);
             *self.blocked_cancel.lock().unwrap() = None;
+            self.orphaned.lock().unwrap().clear();
         }
 
         fn cancel_blocked(&self) {
@@ -523,6 +538,10 @@ mod tests {
         fn clear_blocked_cancel(&self) {
             *self.blocked_cancel.lock().unwrap() = None;
         }
+
+        fn release_process_holder(&self, process: &Arc<ProcessObject>) {
+            self.orphaned.lock().unwrap().push(process.clone());
+        }
     }
 
     fn mock() -> &'static MockRuntime {
@@ -554,6 +573,81 @@ mod tests {
             })
             .unwrap();
         (table, id, signal)
+    }
+
+    #[test]
+    fn last_process_holder_leaving_reports_to_runtime() {
+        let _guard = test_lock();
+        mock().reset();
+
+        let process = ProcessObject::new();
+        let first = Capability::new(
+            CapabilityTarget::Process(process.clone()),
+            Rights::READ | Rights::WRITE | Rights::DUPLICATE,
+        );
+        let second = first.duplicate(Rights::READ | Rights::WRITE, 0).unwrap();
+        assert_eq!(process.holder_count(), 2);
+
+        drop(first);
+        assert!(mock().take_orphaned().is_empty());
+
+        drop(second);
+        let orphaned = mock().take_orphaned();
+        assert_eq!(orphaned.len(), 1);
+        assert!(Arc::ptr_eq(&orphaned[0], &process));
+    }
+
+    #[test]
+    fn observer_without_write_does_not_hold_the_process() {
+        let _guard = test_lock();
+        mock().reset();
+
+        let process = ProcessObject::new();
+        let observer = Capability::new(CapabilityTarget::Process(process.clone()), Rights::READ);
+        assert_eq!(process.holder_count(), 0);
+
+        drop(observer);
+        assert!(mock().take_orphaned().is_empty());
+    }
+
+    #[test]
+    fn unheld_capability_leaves_the_process_untouched() {
+        let _guard = test_lock();
+        mock().reset();
+
+        let process = ProcessObject::new();
+        let holder = Capability::new(
+            CapabilityTarget::Process(process.clone()),
+            Rights::READ | Rights::WRITE,
+        );
+        let unheld = Capability::new_unheld_process(process.clone(), Rights::READ | Rights::WRITE);
+        assert_eq!(process.holder_count(), 1);
+
+        drop(unheld);
+        assert_eq!(process.holder_count(), 1);
+        assert!(mock().take_orphaned().is_empty());
+
+        drop(holder);
+        assert_eq!(mock().take_orphaned().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_of_an_unheld_capability_stays_unheld() {
+        let _guard = test_lock();
+        mock().reset();
+
+        let process = ProcessObject::new();
+        let unheld = Capability::new_unheld_process(
+            process.clone(),
+            Rights::READ | Rights::WRITE | Rights::DUPLICATE,
+        );
+
+        let copy = unheld.duplicate(Rights::READ | Rights::WRITE, 0).unwrap();
+        assert_eq!(process.holder_count(), 0);
+
+        drop(copy);
+        drop(unheld);
+        assert!(mock().take_orphaned().is_empty());
     }
 
     #[test]

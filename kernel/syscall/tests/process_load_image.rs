@@ -76,6 +76,7 @@ impl KernelRuntime for TableRuntime {
     fn unblock(&self, _token: WaitToken) {}
     fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
     fn clear_blocked_cancel(&self) {}
+    fn release_process_holder(&self, _process: &Arc<capability::ProcessObject>) {}
 }
 
 struct CannedMapper {

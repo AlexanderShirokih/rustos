@@ -242,6 +242,8 @@ where
     pending_thread_removals: Vec<ThreadId>,
     pending_ipc_releases: Vec<ThreadId>,
     deferred_handles: DeferredHandles,
+    pending_orphans: Vec<Arc<ProcessObject>>,
+    orphan_drain_taken: bool,
     pending_wakeups: u16,
     quantum_ns: u64,
     time_slice_ticks: u32,
@@ -323,6 +325,8 @@ where
                 pending_thread_removals: Vec::new(),
                 pending_ipc_releases: Vec::new(),
                 deferred_handles: DeferredHandles::default(),
+                pending_orphans: Vec::new(),
+                orphan_drain_taken: false,
                 pending_wakeups: 0,
                 quantum_ns: config.quantum_ns(),
                 time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
@@ -1918,6 +1922,35 @@ where
         let mut signals = DeferredSignals::default();
         self.collect_thread_termination(thread_object, exit_code, &mut signals);
         signals
+    }
+
+    pub(crate) fn push_pending_orphan(&mut self, process: Arc<ProcessObject>) {
+        self.pending_orphans.push(process);
+    }
+
+    pub(crate) fn next_pending_orphan(
+        &mut self,
+        draining: &mut bool,
+    ) -> Option<Arc<ProcessObject>> {
+        // Очередь вычерпывается одним вызывающим. Признак `orphan_drain_taken` снимается
+        // под тем же локом, под которым очередь наблюдалась пустой, поэтому положенный в
+        // неё параллельно процесс достаётся текущему циклу либо следующему.
+        if !*draining {
+            if self.orphan_drain_taken {
+                return None;
+            }
+
+            self.orphan_drain_taken = true;
+            *draining = true;
+        }
+
+        let next = self.pending_orphans.pop();
+        if next.is_none() {
+            self.orphan_drain_taken = false;
+            *draining = false;
+        }
+
+        next
     }
 
     pub(crate) fn terminate_process_object(

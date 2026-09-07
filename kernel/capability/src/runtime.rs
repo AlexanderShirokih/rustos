@@ -7,7 +7,7 @@ use collections::{MutexCell, StaticString};
 use spin::Once;
 use syscall::MAX_PROCESS_NAME_LEN;
 
-use super::{HandleTable, wait::CancelTarget};
+use super::{HandleTable, process::ProcessObject, wait::CancelTarget};
 
 /// Параметры первого входа в user-поток.
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +101,13 @@ pub trait KernelRuntime: Send + Sync {
 
     /// Снимает cancel-хук блокировки с текущего потока.
     fn clear_blocked_cancel(&self);
+
+    /// Сообщает об уходе последнего держателя незавершённого `process`.
+    fn release_process_holder(&self, process: &Arc<ProcessObject>);
+
+    /// Снимает текущий поток с CPU, когда этот поток помечен завершённым.
+    /// Возвращается, когда текущий поток жив.
+    fn exit_if_terminated(&self) {}
 }
 
 static RUNTIME: Once<Arc<dyn KernelRuntime>> = Once::new();

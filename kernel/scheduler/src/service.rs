@@ -25,6 +25,10 @@ use crate::{
 
 const NO_CURRENT_THREAD_TOKEN: WaitToken = WaitToken::new(core::num::NonZeroU64::MAX);
 
+/// Код завершения процесса, снятого по уходу последнего держателя capability на него.
+/// Отличен от кода отката старта и кода необработанного исключения.
+pub const ORPHANED_EXIT_CODE: i32 = -2;
+
 /// Снимок IPC-контекста текущего потока: user-VM его процесса, VA IPC-буфера
 /// и handle-таблица (см. [`SchedulerHandle::current_ipc_context`]).
 pub struct CurrentIpcContext {
@@ -63,6 +67,22 @@ where
         let completed = signals.emit();
         self.inner
             .with_lock(|inner| inner.finish_deferred_cleanup(&completed));
+    }
+
+    fn drain_pending_orphans(&self) {
+        let mut draining = false;
+
+        while let Some(process) = self
+            .inner
+            .with_lock(|inner| inner.next_pending_orphan(&mut draining))
+        {
+            let signals = self
+                .inner
+                .with_lock(|inner| inner.terminate_process_object(&process, ORPHANED_EXIT_CODE));
+            self.emit_deferred_signals(signals);
+        }
+
+        notify_pending_cpus(&self.inner);
     }
 
     pub(crate) fn new(inner: Arc<collections::MutexCell<SchedulerInner<A, T>>>) -> Self {
@@ -408,6 +428,29 @@ where
     fn clear_blocked_cancel(&self) {
         self.inner
             .with_lock(SchedulerInner::clear_current_blocked_cancel);
+    }
+
+    fn release_process_holder(&self, process: &Arc<ProcessObject>) {
+        self.inner
+            .with_lock(|inner| inner.push_pending_orphan(process.clone()));
+        self.drain_pending_orphans();
+    }
+
+    fn exit_if_terminated(&self) {
+        with_preemption_disabled::<A::Cpu, _>(|| {
+            let action = self.inner.with_lock(|inner| {
+                // Пометку ставит `terminate_process_object`, он же снимает поток
+                // с очередей и ставит поток в pending-removal. Переключение
+                // контекста остаётся за этим методом.
+                if !inner.current_is_terminated() {
+                    return ScheduleAction::None;
+                }
+
+                let now_ns = inner.now_ns();
+                inner.finish_exit_current(now_ns)
+            });
+            perform_schedule_action(&self.inner, action);
+        });
     }
 }
 

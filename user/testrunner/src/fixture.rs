@@ -190,7 +190,12 @@ impl Fixture {
     /// Закрывает клиентскую сторону порта и оставляет процесс потомка. Значок
     /// сессии уходит, и потомок сам завершается.
     pub fn into_process(self) -> Process {
-        self.process
+        self.into_parts().0
+    }
+
+    /// Разбирает фикстуру на процесс потомка и клиентскую сторону его порта.
+    pub fn into_parts(self) -> (Process, Port) {
+        (self.process, self.port)
     }
 }
 

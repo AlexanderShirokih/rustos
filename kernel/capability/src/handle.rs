@@ -5,6 +5,7 @@ use syscall::Rights;
 
 use super::{
     errors::IpcError,
+    process::ProcessObject,
     rev_node::RevNode,
     rights::default_rights_for,
     target::{CapabilityTarget, HolderTicket, OperationHold},
@@ -70,6 +71,7 @@ pub struct Capability {
     badge: u64,
     node: Arc<RevNode>,
     holder: Option<Arc<dyn HolderTicket>>,
+    unheld: bool,
 }
 
 impl core::fmt::Debug for Capability {
@@ -101,6 +103,23 @@ impl Capability {
             badge: 0,
             node,
             holder,
+            unheld: false,
+        }
+    }
+
+    /// Создаёт незаклеймённую capability на `process` с правами `rights`, не учитываемую в
+    /// держателях процесса.
+    ///
+    /// Права и набор операций - как у [`new`](Self::new), но время жизни процесса такая
+    /// capability не продлевает. Только `Process` допускает неучтённую capability.
+    pub fn new_unheld_process(process: Arc<ProcessObject>, rights: Rights) -> Self {
+        Self {
+            target: CapabilityTarget::Process(process),
+            rights,
+            badge: 0,
+            node: RevNode::new_root(),
+            holder: None,
+            unheld: true,
         }
     }
 
@@ -178,13 +197,20 @@ impl Capability {
         };
         let node = RevNode::new_child(&self.node).ok_or(IpcError::Revoked)?;
         let target = self.target.clone();
-        let holder = Self::armed_holder(&target, new_rights, NonZeroU64::new(badge), &node)?;
+
+        let holder = if self.unheld {
+            None
+        } else {
+            Self::armed_holder(&target, new_rights, NonZeroU64::new(badge), &node)?
+        };
+
         Ok(Self {
             target,
             rights: new_rights,
             badge,
             node,
             holder,
+            unheld: self.unheld,
         })
     }
 
@@ -208,6 +234,7 @@ impl Capability {
             badge: 0,
             node,
             holder,
+            unheld: false,
         })
     }
 }

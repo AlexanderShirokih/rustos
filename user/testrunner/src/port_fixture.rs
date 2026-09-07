@@ -23,12 +23,13 @@ use core::{
 };
 
 use fixture_protocol::{
-    OP_ALLOCATE_PAGES, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT, OP_MAP_CHECK, OP_PROCESS_EXIT,
-    OP_READ_SLOT, OP_WRITE_SLOT, READ_REPLY_LEN, REPLY_ACCESS_DENIED, REPLY_ALLOCATE_FAILED,
-    REPLY_BUDGET_EXHAUSTED, REPLY_DUPLICATE_FAILED, REPLY_MAP_FAILED, REPLY_OK,
-    REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED, REQUEST_LEN, decode_request,
+    OP_ALLOCATE_PAGES, OP_CLOSE_CAP, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT, OP_HOLD_CAP, OP_HOLD_SELF,
+    OP_MAP_CHECK, OP_PROCESS_EXIT, OP_READ_SLOT, OP_WRITE_SLOT, READ_REPLY_LEN,
+    REPLY_ACCESS_DENIED, REPLY_ALLOCATE_FAILED, REPLY_BUDGET_EXHAUSTED, REPLY_DUPLICATE_FAILED,
+    REPLY_HOLD_FAILED, REPLY_MAP_FAILED, REPLY_OK, REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED,
+    REQUEST_LEN, decode_request,
 };
-use kernel_objects::{Error, MemoryRegion, OwnedHandle, Port, Reply, Resource, Signal};
+use kernel_objects::{Error, MemoryRegion, OwnedHandle, Port, Process, Reply, Resource, Signal};
 use runtime::{
     MemoryAccess, Priority, Timeout, UserMemFlags, process_exit, signal_set, spawn_owned,
     thread_exit,
@@ -85,6 +86,21 @@ pub extern "C" fn _start(root: Handle) -> ! {
                 let cap = if ncaps == 1 { ipc_raw::read_cap(0) } else { 0 };
                 answer(reply, &[map_check(cap, arg)]);
             }
+            OP_HOLD_CAP => {
+                let cap = if ncaps == 1 { ipc_raw::read_cap(0) } else { 0 };
+                answer(reply, &[hold_cap(cap)]);
+            }
+            OP_HOLD_SELF => answer(reply, &[hold_self()]),
+            OP_CLOSE_CAP => {
+                let cap = if ncaps == 1 { ipc_raw::read_cap(0) } else { 0 };
+                let Some(handle) = OwnedHandle::from_raw(cap) else {
+                    thread_exit(EXIT_BAD_REQUEST)
+                };
+                // Закрытие последнего держателя снимает процесс фикстуры. Ответ
+                // ниже тогда не исполняется.
+                drop(handle);
+                answer(reply, &[REPLY_OK]);
+            }
             OP_ALLOCATE_PAGES => answer(reply, &[allocate_pages(arg)]),
             OP_DUPLICATE_TRANSFER_CAP => answer(reply, &[duplicate_transfer_cap()]),
             OP_EXIT => {
@@ -136,6 +152,24 @@ fn answer(reply: Reply, body: &[u8]) {
     ipc_raw::write_frame(body, &[]);
     if reply.reply().is_err() {
         thread_exit(EXIT_REPLY_FAILED)
+    }
+}
+
+fn hold_cap(cap: u32) -> u8 {
+    let Some(handle) = OwnedHandle::from_raw(cap) else {
+        return REPLY_HOLD_FAILED;
+    };
+    let _ = handle.into_raw();
+    REPLY_OK
+}
+
+fn hold_self() -> u8 {
+    match Process::self_process() {
+        Ok(process) => {
+            let _ = process.into_handle().into_raw();
+            REPLY_OK
+        }
+        Err(_) => REPLY_HOLD_FAILED,
     }
 }
 

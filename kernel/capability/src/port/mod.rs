@@ -21,7 +21,7 @@ mod transport;
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     num::NonZeroU64,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicU8, Ordering},
 };
 
 use collections::{LockCell, MutexCell};
@@ -29,7 +29,7 @@ use syscall::Rights;
 
 #[cfg(test)]
 use self::state::DEPARTED_BADGE_LIMIT;
-use self::state::{PortState, ReceiverWaiter, RecvPick, SenderWaiter, Waiter};
+use self::state::{PendingWake, PortState, ReceiverWaiter, RecvPick, SenderWaiter, Waiter};
 pub use self::transport::{KernelIpcBuffer, ThreadTransport};
 pub(crate) use self::{
     outcome::{OutcomeSlot, RendezvousOutcome, SendKind},
@@ -59,12 +59,26 @@ pub struct Port {
     inner: MutexCell<PortState>,
 }
 
+const HOLDER_UNCOUNTED: u8 = 0;
+const HOLDER_COUNTED: u8 = 1;
+const HOLDER_RELEASED: u8 = 2;
+
 struct PortHolder {
     port: Arc<Port>,
     receiver: bool,
     badge: Option<NonZeroU64>,
-    counted: AtomicBool,
-    released: AtomicBool,
+    state: AtomicU8,
+}
+
+impl PortHolder {
+    fn uncount(&self, state: &mut PortState, wakes: &mut Vec<PendingWake>) {
+        if self.receiver {
+            state.release_receiver(wakes);
+        }
+        if let Some(badge) = self.badge {
+            state.release_badge(badge.get(), wakes);
+        }
+    }
 }
 
 impl HolderTicket for PortHolder {
@@ -73,7 +87,9 @@ impl HolderTicket for PortHolder {
     }
 
     fn release(&self) {
-        if self.released.swap(true, Ordering::AcqRel) {
+        // Учёт снимает только тот вызов, который застал его поднятым. Параллельная активация
+        // сама снимает свой учёт на неудачном CAS.
+        if self.state.swap(HOLDER_RELEASED, Ordering::AcqRel) != HOLDER_COUNTED {
             return;
         }
         self.port.release_holder(self);
@@ -157,7 +173,7 @@ impl Port {
     pub(super) fn holder_ticket(self: &Arc<Self>, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
         rights
             .contains(Rights::READ)
-            .then(|| self.make_ticket(true, None, false))
+            .then(|| self.make_ticket(true, None, HOLDER_UNCOUNTED))
     }
 
     pub(super) fn counted_holder_ticket(
@@ -168,7 +184,7 @@ impl Port {
             return None;
         }
         self.inner.with_lock(PortState::add_receiver);
-        Some(self.make_ticket(true, None, true))
+        Some(self.make_ticket(true, None, HOLDER_COUNTED))
     }
 
     pub(super) fn badged_holder_ticket(
@@ -179,48 +195,65 @@ impl Port {
         if !rights.contains(Rights::WRITE) {
             return self.holder_ticket(rights);
         }
-        Some(self.make_ticket(rights.contains(Rights::READ), Some(badge), false))
+        Some(self.make_ticket(rights.contains(Rights::READ), Some(badge), HOLDER_UNCOUNTED))
     }
 
     fn make_ticket(
         self: &Arc<Self>,
         receiver: bool,
         badge: Option<NonZeroU64>,
-        counted: bool,
+        state: u8,
     ) -> Arc<dyn HolderTicket> {
         Arc::new(PortHolder {
             port: self.clone(),
             receiver,
             badge,
-            counted: AtomicBool::new(counted),
-            released: AtomicBool::new(false),
+            state: AtomicU8::new(state),
         })
     }
 
     fn activate_holder(&self, holder: &PortHolder) -> Result<(), IpcError> {
-        self.inner.with_lock(|state| {
-            // Билет, отозванный между созданием и активацией, отвергается без следов в учёте.
-            if holder.released.load(Ordering::Acquire) {
-                return Err(IpcError::Revoked);
-            }
+        let (result, wakes) = self.inner.with_lock(|state| {
+            let mut wakes = Vec::new();
             // Значок учитывается до получателя, поэтому его отказ оставляет множество получателей
             // нетронутым.
-            if let Some(badge) = holder.badge {
-                state.register_badge(badge.get())?;
+            if let Some(badge) = holder.badge
+                && let Err(e) = state.register_badge(badge.get())
+            {
+                return (Err(e), wakes);
             }
             if holder.receiver {
                 state.add_receiver();
             }
-            holder.counted.store(true, Ordering::Release);
-            Ok(())
-        })
+            // Отзыв читает состояние вне лока и до подъёма учёта его не снимает, поэтому билет,
+            // отозванный между созданием и активацией, забирает поднятый учёт обратно под тем
+            // же локом.
+            if holder
+                .state
+                .compare_exchange(
+                    HOLDER_UNCOUNTED,
+                    HOLDER_COUNTED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                holder.uncount(state, &mut wakes);
+                return (Err(IpcError::Revoked), wakes);
+            }
+            (Ok(()), wakes)
+        });
+        for wake in wakes {
+            wake.wake();
+        }
+        result
     }
 
     fn reacquire_holder(self: &Arc<Self>, holder: &PortHolder) -> Option<Arc<dyn HolderTicket>> {
         let counted = self.inner.with_lock(|state| {
-            // Снятый учёт вторым токеном не оживает. `release` выставляет флаг до захвата лока,
-            // поэтому сброшенный под локом флаг означает живого держателя.
-            if holder.released.load(Ordering::Acquire) {
+            // Снятый учёт вторым токеном не оживает. `release` помечает билет снятым до захвата
+            // лока, поэтому HOLDER_COUNTED под локом означает живого держателя.
+            if holder.state.load(Ordering::Acquire) != HOLDER_COUNTED {
                 return false;
             }
             // Запись живого значка существует, поэтому в ней учтён как минимум сам холдер.
@@ -234,21 +267,13 @@ impl Port {
             }
             true
         });
-        counted.then(|| self.make_ticket(holder.receiver, holder.badge, true))
+        counted.then(|| self.make_ticket(holder.receiver, holder.badge, HOLDER_COUNTED))
     }
 
     fn release_holder(&self, holder: &PortHolder) {
         let wakes = self.inner.with_lock(|state| {
             let mut wakes = Vec::new();
-            if !holder.counted.load(Ordering::Acquire) {
-                return wakes;
-            }
-            if holder.receiver {
-                state.release_receiver(&mut wakes);
-            }
-            if let Some(badge) = holder.badge {
-                state.release_badge(badge.get(), &mut wakes);
-            }
+            holder.uncount(state, &mut wakes);
             wakes
         });
         for wake in wakes {
@@ -734,6 +759,7 @@ mod tests {
         }
         fn set_blocked_cancel(&self, _cancel: Arc<dyn CancelTarget>) {}
         fn clear_blocked_cancel(&self) {}
+        fn release_process_holder(&self, _process: &Arc<crate::ProcessObject>) {}
     }
 
     struct DeadlineRuntime {
@@ -789,6 +815,7 @@ mod tests {
         fn unblock(&self, _t: WaitToken) {}
         fn set_blocked_cancel(&self, _cancel: Arc<dyn CancelTarget>) {}
         fn clear_blocked_cancel(&self) {}
+        fn release_process_holder(&self, _process: &Arc<crate::ProcessObject>) {}
     }
 
     fn transport(base: usize) -> ThreadTransport {
@@ -1741,6 +1768,35 @@ mod tests {
         drop(receiver);
         assert_eq!(sender.get(), Some(RendezvousOutcome::PeerGone));
         assert!(ep.queue_is_empty());
+    }
+
+    #[test]
+    fn releasing_an_unactivated_badged_ticket_leaves_a_co_held_badge_intact() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let root = root_capability(&ep);
+        let sender = badged_capability(&root, BADGE_A);
+        let RecvAction::Park {
+            outcome: receiver, ..
+        } = ep.recv(&transport(BASE_B), &rt, None)
+        else {
+            panic!("recv must park");
+        };
+
+        let ticket = ep
+            .badged_holder_ticket(
+                Rights::WRITE,
+                NonZeroU64::new(BADGE_A).expect("nonzero badge"),
+            )
+            .expect("port hands out badged tickets");
+        ticket.release();
+        assert_eq!(ticket.activate().unwrap_err(), IpcError::Revoked);
+
+        assert!(receiver.get().is_none());
+
+        // Откат вернул учёт значка к одному держателю, поэтому его закрытие - уход значка.
+        drop(sender);
+        assert_eq!(receiver.get(), Some(RendezvousOutcome::SenderGone(BADGE_A)));
     }
 
     #[test]

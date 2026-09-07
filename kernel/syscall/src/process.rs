@@ -9,7 +9,8 @@ use core::num::NonZeroU32;
 use capability::{
     Capability, CapabilityTarget, DrainedHandles, HandleId, HandleReservation, HandleTable,
     LoadImageError, MeteringGrant, ProcessObject, Resource, Rights, StartProcessError,
-    UserImageInstall, UserSegmentInstall, UserStartSpec, UserThreadEntry, install_handle, runtime,
+    UserImageInstall, UserSegmentInstall, UserStartSpec, UserThreadEntry, default_rights_for,
+    install_handle, runtime,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
@@ -67,11 +68,15 @@ pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallErr
     ))
 }
 
+/// Capability на собственный процесс вызывающего.
 pub fn sys_process_self() -> Result<u64, SyscallError> {
     let process = syscall_runtime()
         .current_process_object()
         .ok_or(SyscallError::WrongType)?;
-    install_object_handle(CapabilityTarget::Process(process))
+    let rights = default_rights_for(&CapabilityTarget::Process(process.clone()));
+    let handle_id =
+        install_handle(Capability::new_unheld_process(process, rights)).map_err(map_ipc_error)?;
+    Ok(u64::from(handle_id.raw().get()))
 }
 
 /// Capability на метеринг-`Resource` текущего процесса. Права капы - те, с которыми ресурс

@@ -301,6 +301,7 @@ mod tests {
         }
         fn set_blocked_cancel(&self, _cancel: Arc<dyn CancelTarget>) {}
         fn clear_blocked_cancel(&self) {}
+        fn release_process_holder(&self, _process: &Arc<crate::ProcessObject>) {}
     }
 
     fn make_waker(runtime: Arc<dyn KernelRuntime>) -> Arc<ParkWaker> {

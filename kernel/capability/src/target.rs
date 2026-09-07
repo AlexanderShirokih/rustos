@@ -39,7 +39,8 @@ impl Drop for OperationHold {
 /// применяются к этому объекту.
 ///
 /// Клон варианта делит объект с оригиналом. Вариант задаёт и набор применимых операций. Ожидание
-/// сигналов доступно на `Signal`, `Process`, `Thread` и `IrqLine`. `Port` ведёт учёт держателей.
+/// сигналов доступно на `Signal`, `Process`, `Thread` и `IrqLine`. `Port` и `Process` ведут учёт
+/// держателей.
 #[derive(Clone)]
 pub enum CapabilityTarget {
     Signal(Arc<Signal>),
@@ -110,8 +111,8 @@ impl CapabilityTarget {
     pub(crate) fn holder_ticket(&self, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
         match self {
             Self::Port(port) => port.holder_ticket(rights),
+            Self::Process(process) => process.holder_ticket(rights),
             Self::Signal(_)
-            | Self::Process(_)
             | Self::Thread(_)
             | Self::Memory(_)
             | Self::Resource(_)
@@ -124,8 +125,8 @@ impl CapabilityTarget {
     pub(crate) fn counted_holder_ticket(&self, rights: Rights) -> Option<Arc<dyn HolderTicket>> {
         match self {
             Self::Port(port) => port.counted_holder_ticket(rights),
+            Self::Process(process) => process.counted_holder_ticket(rights),
             Self::Signal(_)
-            | Self::Process(_)
             | Self::Thread(_)
             | Self::Memory(_)
             | Self::Resource(_)
@@ -142,8 +143,8 @@ impl CapabilityTarget {
     ) -> Option<Arc<dyn HolderTicket>> {
         match self {
             Self::Port(port) => port.badged_holder_ticket(rights, badge),
+            Self::Process(process) => process.holder_ticket(rights),
             Self::Signal(_)
-            | Self::Process(_)
             | Self::Thread(_)
             | Self::Memory(_)
             | Self::Resource(_)
@@ -254,11 +255,16 @@ mod tests {
     }
 
     #[test]
-    fn holders_are_counted_by_ports_only() {
+    fn holders_are_counted_by_ports_and_processes() {
         let ticket = CapabilityTarget::Port(Port::new())
             .holder_ticket(Rights::READ)
             .expect("port counts holders");
         assert!(ticket.activate().is_ok());
+        assert!(
+            CapabilityTarget::Process(ProcessObject::new())
+                .holder_ticket(Rights::WRITE)
+                .is_some()
+        );
         assert!(
             CapabilityTarget::Signal(Signal::new())
                 .holder_ticket(Rights::READ)
@@ -267,12 +273,24 @@ mod tests {
     }
 
     #[test]
-    fn badged_holders_are_counted_by_ports_only() {
+    fn process_holder_needs_the_write_right() {
+        let process = CapabilityTarget::Process(ProcessObject::new());
+        assert!(process.holder_ticket(Rights::READ).is_none());
+        assert!(process.counted_holder_ticket(Rights::READ).is_none());
+    }
+
+    #[test]
+    fn badged_holders_are_counted_by_ports_and_processes() {
         let badge = NonZeroU64::MIN;
         let ticket = CapabilityTarget::Port(Port::new())
             .badged_holder_ticket(Rights::WRITE, badge)
             .expect("port counts badged holders");
         assert!(ticket.activate().is_ok());
+        assert!(
+            CapabilityTarget::Process(ProcessObject::new())
+                .badged_holder_ticket(Rights::WRITE, badge)
+                .is_some()
+        );
         assert!(
             CapabilityTarget::Signal(Signal::new())
                 .badged_holder_ticket(Rights::WRITE, badge)

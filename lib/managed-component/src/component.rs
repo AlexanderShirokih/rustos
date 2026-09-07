@@ -5,7 +5,6 @@ use userland::EntryView;
 use userland_loader::launch_entry;
 
 const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
-const OWNER_DROP_EXIT_CODE: u32 = 1;
 
 /// Наблюдаемое состояние managed-компонента.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +68,8 @@ enum ManagedState<R> {
 ///
 /// Состояние - [`ManagedStatus`]: [`Self::new`] создаёт его в `Launching`, дальше
 /// переходами ведают [`Self::launch`] и [`Self::observe_exit`]. Уход значения из
-/// области видимости завершает работающий процесс.
+/// области видимости закрывает handle процесса. Ядро снимает такой процесс как оставшийся
+/// без держателя.
 pub struct ManagedComponent<R> {
     state: ManagedState<R>,
     reserve: Resource,
@@ -249,8 +249,8 @@ impl<R> ManagedComponent<R> {
 
     /// Ждёт завершения `Running`-процесса и сохраняет его exit code.
     ///
-    /// Код `0` переводит компонент в [`ManagedStatus::Exited`], любой другой - в
-    /// [`ManagedStatus::Failed`] с причиной [`ManagedFailure::Exit`].
+    /// Код `0` переводит компонент в [`ManagedStatus::Exited`], любой другой -
+    /// [`ManagedFailure::Exit`].
     pub fn observe_exit(&mut self, timeout: Timeout) -> Result<(), ManagedStartupError> {
         let exit_code = match &self.state {
             ManagedState::Running(running) => {
@@ -294,14 +294,6 @@ impl<R> ManagedComponent<R> {
     fn fail_startup(&mut self, error: ManagedStartupError) -> Result<(), ManagedStartupError> {
         self.state = ManagedState::Failed(ManagedFailure::Startup(error));
         Err(error)
-    }
-}
-
-impl<R> Drop for ManagedComponent<R> {
-    fn drop(&mut self) {
-        if let ManagedState::Running(running) = &self.state {
-            let _ = running.process.terminate(OWNER_DROP_EXIT_CODE);
-        }
     }
 }
 

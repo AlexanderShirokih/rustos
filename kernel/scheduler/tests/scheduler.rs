@@ -96,6 +96,45 @@ impl capability::KernelRuntime for ForwardingRuntime {
     fn clear_blocked_cancel(&self) {
         self.with(|rt| rt.clear_blocked_cancel());
     }
+
+    fn release_process_holder(&self, process: &Arc<capability::ProcessObject>) {
+        // Таблицы теста отдают capability уже после снятия аренды, и сообщать об уходе
+        // держателя некому.
+        if let Some(rt) = self.inner.read().unwrap().as_ref() {
+            rt.release_process_holder(process);
+        }
+    }
+
+    fn exit_if_terminated(&self) {
+        self.with(|rt| rt.exit_if_terminated());
+    }
+}
+
+struct RuntimeLease {
+    forwarder: Arc<ForwardingRuntime>,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl RuntimeLease {
+    fn take(runtime: Arc<dyn capability::KernelRuntime>) -> Self {
+        static LOCK: Mutex<()> = Mutex::new(());
+
+        let guard = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let forwarder = install_forwarding_runtime();
+        forwarder.set(runtime);
+        Self {
+            forwarder,
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for RuntimeLease {
+    fn drop(&mut self) {
+        self.forwarder.clear();
+    }
 }
 
 fn install_forwarding_runtime() -> Arc<ForwardingRuntime> {
@@ -806,8 +845,6 @@ fn current_process_object_returns_running_process_object() {
 
 #[test]
 fn kernel_thread_completion_signals_terminated() {
-    let forwarder = install_forwarding_runtime();
-
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
@@ -824,7 +861,7 @@ fn kernel_thread_completion_signals_terminated() {
     assert_eq!(running.current(), Some(id));
     assert!(!target.terminated());
 
-    forwarder.set(Arc::new(handle));
+    let _runtime = RuntimeLease::take(Arc::new(handle));
 
     let prev_hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));
@@ -834,8 +871,6 @@ fn kernel_thread_completion_signals_terminated() {
         result.is_err(),
         "thread_exit must not return when scheduler::switch is a no-op"
     );
-
-    forwarder.clear();
 
     assert!(target.terminated());
     assert_eq!(target.exit_code(), 0);
@@ -1616,8 +1651,360 @@ fn load_user_image_into_keeps_segment_frames_alive_after_caller_drops_arc() {
     );
 }
 
-// Кадр port-syscall убитого в парковке recv потока держит клон таблицы, и
-// `Drop for HandleTable` не наступает: capability освобождает дренаж терминации.
+fn user_process_with_thread(
+    handle: &SchedulerHandle<MockContext, MockTimerSource>,
+    name: &str,
+) -> (
+    Arc<capability::ProcessObject>,
+    Arc<capability::ThreadObject>,
+) {
+    let process = handle
+        .create_empty_process(name)
+        .expect("create_empty_process");
+    mark_process_loaded(handle, &process);
+    let thread = handle
+        .create_user_thread(
+            &process,
+            capability::UserThreadEntry {
+                entry_pc: 0x4000_0000,
+                user_sp: 0x4001_0000,
+                arg: 0,
+                priority: 1,
+            },
+        )
+        .expect("create_user_thread");
+    (process, thread)
+}
+
+fn process_holder(process: &Arc<capability::ProcessObject>) -> capability::Capability {
+    capability::Capability::new(
+        capability::CapabilityTarget::Process(process.clone()),
+        capability::Rights::READ | capability::Rights::WRITE | capability::Rights::DUPLICATE,
+    )
+}
+
+fn put_handle(
+    table: &Arc<collections::MutexCell<capability::HandleTable>>,
+    handle: capability::Capability,
+) -> capability::HandleId {
+    use collections::LockCell;
+
+    table
+        .with_lock(|tbl| tbl.insert(handle))
+        .expect("insert handle")
+}
+
+fn take_handle(
+    table: &Arc<collections::MutexCell<capability::HandleTable>>,
+    id: capability::HandleId,
+) {
+    use collections::LockCell;
+
+    table
+        .with_lock(|tbl| tbl.remove(id))
+        .expect("remove handle")
+        .release();
+}
+
+#[test]
+fn last_process_holder_leaving_terminates_the_process() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
+
+    let (process, thread) = user_process_with_thread(&handle, "held");
+    let pid = scheduler.process_id_for(&process).expect("process id");
+    let holder = process_holder(&process);
+    assert!(!process.terminated());
+
+    drop(holder);
+
+    assert!(process.terminated());
+    assert_eq!(process.exit_code(), scheduler::ORPHANED_EXIT_CODE);
+    assert!(thread.terminated());
+    assert_eq!(thread.exit_code(), scheduler::ORPHANED_EXIT_CODE);
+
+    let running = scheduler.run();
+    running.yield_now();
+    assert!(
+        running.process_object_for(pid).is_none(),
+        "removed process must be reclaimed from the table"
+    );
+    assert_eq!(
+        factory.released(),
+        factory.created(),
+        "address space of the removed process must be released"
+    );
+}
+
+#[test]
+fn orphaning_the_current_process_exits_the_cpu_at_the_syscall_boundary() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
+
+    let orphaned = scheduler
+        .spawn(
+            SpawnConfig::new("u").address_space(SpawnAddressSpace::User),
+            || {},
+        )
+        .expect("spawn u");
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(orphaned));
+
+    let pid = running.thread_process_id(orphaned).expect("owning pid");
+    let process = running.process_object_for(pid).expect("process object");
+    let holder = process_holder(&process);
+    let switches_before = switch_count();
+
+    drop(holder);
+
+    assert!(process.terminated());
+    assert_eq!(
+        running.current(),
+        Some(orphaned),
+        "the holder leaving marks the thread but keeps it on the CPU"
+    );
+    assert_eq!(switch_count(), switches_before);
+
+    capability::KernelRuntime::exit_if_terminated(&handle);
+
+    assert_eq!(
+        switch_count(),
+        switches_before + 1,
+        "the terminated current must leave the CPU before the syscall returns"
+    );
+    assert_ne!(running.current(), Some(orphaned));
+}
+
+#[test]
+fn a_process_closing_its_last_holder_on_itself_is_removed() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let first = scheduler
+        .spawn(SpawnConfig::new("first"), || {})
+        .expect("spawn first");
+    let second = scheduler
+        .spawn(SpawnConfig::new("second"), || {})
+        .expect("spawn second");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(first));
+    let handle = running.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
+    let first_object = running.thread_object_for(first).expect("first target");
+    let pid = running.thread_process_id(first).expect("process id");
+    let process = running.process_object_for(pid).expect("process target");
+    let table = {
+        use capability::KernelRuntime;
+        handle
+            .current_handle_table()
+            .expect("current process handle table")
+    };
+    let own = put_handle(&table, process_holder(&process));
+
+    // Закрытие последней капы на собственный процесс из-под своего же потока.
+    take_handle(&table, own);
+
+    assert!(process.terminated());
+    assert_eq!(process.exit_code(), scheduler::ORPHANED_EXIT_CODE);
+    assert!(first_object.terminated());
+    assert_eq!(
+        running.current(),
+        Some(first),
+        "the closing thread finishes its turn"
+    );
+
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(running.current(), Some(second));
+}
+
+#[test]
+fn orphan_removal_cascades_down_the_handle_tables() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
+
+    let (root, _) = user_process_with_thread(&handle, "root");
+    let (middle, _) = user_process_with_thread(&handle, "middle");
+    let (leaf, _) = user_process_with_thread(&handle, "leaf");
+    let root_pid = scheduler.process_id_for(&root).expect("root pid");
+    let middle_pid = scheduler.process_id_for(&middle).expect("middle pid");
+    put_handle(
+        &scheduler
+            .process_handle_table(root_pid)
+            .expect("root table"),
+        process_holder(&middle),
+    );
+    put_handle(
+        &scheduler
+            .process_handle_table(middle_pid)
+            .expect("middle table"),
+        process_holder(&leaf),
+    );
+
+    drop(process_holder(&root));
+
+    for process in [&root, &middle, &leaf] {
+        assert!(process.terminated());
+        assert_eq!(process.exit_code(), scheduler::ORPHANED_EXIT_CODE);
+    }
+}
+
+#[test]
+fn a_process_kept_by_another_holder_survives_the_cascade() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
+
+    let (root, _) = user_process_with_thread(&handle, "root");
+    let (middle, _) = user_process_with_thread(&handle, "middle");
+    let (leaf, _) = user_process_with_thread(&handle, "leaf");
+    let root_pid = scheduler.process_id_for(&root).expect("root pid");
+    let middle_pid = scheduler.process_id_for(&middle).expect("middle pid");
+    put_handle(
+        &scheduler
+            .process_handle_table(root_pid)
+            .expect("root table"),
+        process_holder(&middle),
+    );
+    put_handle(
+        &scheduler
+            .process_handle_table(middle_pid)
+            .expect("middle table"),
+        process_holder(&leaf),
+    );
+    let outsider = process_holder(&leaf);
+
+    drop(process_holder(&root));
+
+    assert!(root.terminated());
+    assert!(middle.terminated());
+    assert!(!leaf.terminated(), "a live holder keeps the leaf running");
+
+    drop(outsider);
+    assert!(leaf.terminated());
+    assert_eq!(leaf.exit_code(), scheduler::ORPHANED_EXIT_CODE);
+}
+
+#[test]
+fn a_process_capability_without_write_does_not_hold() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
+
+    let (process, _) = user_process_with_thread(&handle, "observed");
+    let observer = capability::Capability::new(
+        capability::CapabilityTarget::Process(process.clone()),
+        capability::Rights::READ,
+    );
+    let holder = process_holder(&process);
+
+    drop(observer);
+    assert!(!process.terminated(), "an observer does not hold a process");
+
+    drop(holder);
+    assert!(process.terminated());
+}
+
+#[test]
+fn a_finished_process_keeps_its_exit_code_when_the_holder_leaves() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
+
+    let (process, _) = user_process_with_thread(&handle, "finished");
+    let holder = process_holder(&process);
+    handle
+        .terminate_process(&process, 5)
+        .expect("terminate_process");
+
+    drop(holder);
+
+    assert_eq!(process.exit_code(), 5);
+}
+
+#[test]
+fn revoking_the_root_capability_takes_the_derived_holder_away() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
+
+    let (process, _) = user_process_with_thread(&handle, "revoked");
+    let table = Arc::new(collections::MutexCell::new(capability::HandleTable::new()));
+    let root_id = put_handle(&table, process_holder(&process));
+    {
+        use collections::LockCell;
+
+        table
+            .with_lock(|tbl| {
+                tbl.duplicate(
+                    root_id,
+                    capability::Rights::READ | capability::Rights::WRITE,
+                    0,
+                )
+            })
+            .expect("duplicate the holder");
+    }
+    assert!(!process.terminated());
+
+    take_handle(&table, root_id);
+
+    assert!(
+        process.terminated(),
+        "the derived holder is revoked together with its root"
+    );
+    assert_eq!(process.exit_code(), scheduler::ORPHANED_EXIT_CODE);
+}
+
+#[test]
+fn a_process_without_a_capability_lives_until_it_is_terminated() {
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let handle = scheduler.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
+
+    let (process, _) = user_process_with_thread(&handle, "bootstrap");
+    let running = scheduler.run();
+    running.yield_now();
+    assert!(!process.terminated());
+
+    running
+        .handle()
+        .terminate_process(&process, 3)
+        .expect("terminate_process");
+
+    assert!(process.terminated());
+    assert_eq!(process.exit_code(), 3);
+}
+
 #[test]
 fn process_terminate_drains_handle_table_held_outside_process() {
     use capability::{Capability, CapabilityTarget, Port, Rights, UserStartSpec, UserThreadEntry};
@@ -2053,7 +2440,7 @@ fn deferred_cancel_quarantines_remote_process_cleanup() {
 }
 
 #[test]
-fn terminated_current_rejects_late_cancel_and_leaves_the_cpu() {
+fn terminated_current_rejects_late_cancel_and_exits_the_cpu() {
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
