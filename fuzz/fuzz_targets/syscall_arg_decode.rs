@@ -9,10 +9,13 @@
     clippy::std_instead_of_core
 )]
 
+use core::num::NonZeroU32;
+
 use libfuzzer_sys::fuzz_target;
 use syscall::{
     Handle, MemoryProfile, Rights, SyscallError, SyscallOp, Timeout, UserMemFlags, WaitItem,
     decode_image_desc, decode_segment, decode_tag, encode_image_desc, encode_segment, encode_tag,
+    kind,
 };
 
 const ARG_COUNT: usize = 6;
@@ -55,9 +58,9 @@ fn decode_arg(arg: u64) {
     let _ = Rights::from_bits_truncate(low);
     let _ = SyscallError::from_code(low);
     let _ = SyscallError::from_return(signed);
-    let _ = Handle::from_syscall_return(signed);
-    if let Some(handle) = Handle::new(low) {
-        let _ = WaitItem::new(handle, (arg >> 32) as u32);
+    let _ = Handle::<kind::Signal>::from_syscall_return(signed);
+    if let Some(raw) = NonZeroU32::new(low) {
+        let _ = WaitItem::new(Handle::<kind::Signal>::from_abi(raw), (arg >> 32) as u32);
     }
 }
 

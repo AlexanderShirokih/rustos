@@ -2,9 +2,8 @@
 //! обслуживающей его файловой системы, а клиентам он выдаёт окна на запрошенные пути. Данные
 //! клиенты передают напрямую файловым системам.
 //!
-//! Одноразовый startup-порт передаёт service- и control-порты. Service-порт разбирает пути
-//! клиентов, а control-порт обслуживает `NamespaceAdmin` для тех, чей слот назвал этот протокол.
-//! Control-порт обслуживает отдельный поток.
+//! Startup-порт остаётся на всю incarnation. Экспорт `service` разбирает пути клиентов,
+//! экспорт `admin` обслуживает `NamespaceAdmin` отдельным потоком.
 
 #![no_std]
 #![no_main]
@@ -16,16 +15,15 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use component_abi::supervisor_gone;
 use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{namespace, namespace_admin};
 use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::{OwnedHandle, ReceivedFrame, Thread};
+use kernel_objects::{Port, ReceivedFrame};
 use runtime::{
     Mutex, PortTransport, Priority, exit_with_sibling, install_log, log_fmt, log_line, spawn_owned,
     thread_exit,
 };
-use syscall::{Handle, Timeout};
+use syscall::{Handle, Timeout, kind};
 
 mod error;
 mod router;
@@ -37,23 +35,20 @@ const LOG_TAG: &str = "router";
 
 const ADMIN_STACK: u64 = 0x4000;
 
-const SUPERVISOR_LOST_EXIT_CODE: u32 = 7;
-
 const SERVICE_PORT_FAILED_EXIT_CODE: u32 = 9;
 
 static MOUNTS: Mutex<MountTable> = Mutex::new(MountTable::new());
 
 component_manifest! {
     struct RouterStartup {
-        exports: "Namespace",
-        controls: "NamespaceAdmin",
+        exports: { service: "Namespace", admin: "NamespaceAdmin" },
         slots: {},
     }
 }
 
-/// `startup` приходит в x0 как HandleId одноразового startup-порта.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     match run(startup) {
         Ok(()) => thread_exit(0),
         Err(error) => {
@@ -63,19 +58,19 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     }
 }
 
-fn run(startup: Handle) -> Result<()> {
-    let ReceivedStartup { log, resources } =
-        RouterStartup::receive(OwnedHandle::from_handle(startup))?;
+fn run(startup: Handle<kind::Port>) -> Result<()> {
+    let ReceivedStartup { log, resources } = RouterStartup::receive(Port::from_handle(startup))?;
     install_log(log.into_raw(), LOG_TAG);
-    let RouterStartup { control, service } = resources;
+    let RouterStartup {
+        startup,
+        service,
+        admin,
+    } = resources;
 
-    let service_thread = Thread::self_thread()?;
-    // Control-поток разделяет время жизни процесса и владеет собственным стеком.
-    let admin = spawn_owned(
-        move || serve_admin(&control, &service_thread),
-        ADMIN_STACK,
-        Priority::new(1),
-    )?;
+    // Startup-порт открыт всю incarnation, и по нему supervisor запрашивает сессии экспортов.
+    let _startup = startup;
+    // Admin-поток разделяет время жизни процесса и владеет собственным стеком.
+    let admin = spawn_owned(move || serve_admin(&admin), ADMIN_STACK, Priority::new(1))?;
     log_line("started");
 
     serve(&service);
@@ -84,7 +79,7 @@ fn run(startup: Handle) -> Result<()> {
     exit_with_sibling(admin.handle(), SERVICE_PORT_FAILED_EXIT_CODE)
 }
 
-fn serve(service: &OwnedHandle) {
+fn serve(service: &Port) {
     let transport = PortTransport::server(service.borrow());
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
@@ -110,7 +105,7 @@ fn serve(service: &OwnedHandle) {
     log_line("service port closed");
 }
 
-fn serve_admin(port: &OwnedHandle, service_thread: &Thread) -> u32 {
+fn serve_admin(port: &Port) -> u32 {
     let transport = PortTransport::server(port.borrow());
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
@@ -123,12 +118,6 @@ fn serve_admin(port: &OwnedHandle, service_thread: &Thread) -> u32 {
                 let mut administering = Administering::new(&MOUNTS, &mut received);
                 let _ = namespace_admin::dispatch(&mut administering, &transport);
             }
-            // Уход значка поднявшего маршрутизатор supervisor снимает процесс целиком вместе
-            // с монтированиями.
-            Err(IpcError::SenderGone) if supervisor_gone(transport.peer_badge()) => {
-                log_line("supervisor gone");
-                exit_with_sibling(service_thread.handle().as_raw(), SUPERVISOR_LOST_EXIT_CODE)
-            }
             // Покадровое исчерпание и уход значка потребителя `NamespaceAdmin` порт не
             // закрывают.
             Err(IpcError::SenderGone | IpcError::ResourceExhausted) => {}
@@ -136,12 +125,12 @@ fn serve_admin(port: &OwnedHandle, service_thread: &Thread) -> u32 {
             // Прочий отказ приёма оставляет маршрутизатор без управления таблицей и уходит
             // ненулевым кодом потока, отличимым от закрытия порта.
             Err(_) => {
-                log_line("control port failed");
+                log_line("admin port failed");
                 return 1;
             }
         }
     }
-    log_line("control port closed");
+    log_line("admin port closed");
     0
 }
 

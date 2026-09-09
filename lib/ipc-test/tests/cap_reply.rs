@@ -11,13 +11,14 @@ use std::{
 
 use ipc::{IntoWireHandle, Transport};
 use ipc_test::MockEnd;
+use syscall::kind;
 
 ipc::protocol! {
     // Источник capability: ответ отдаёт владение хэндлом.
     mod cap_source {
         name = "CapSource";
 
-        call fn get_cap() -> Cap;
+        call fn get_cap() -> Cap<kind::Port>;
     }
 }
 
@@ -34,6 +35,8 @@ struct FakeHandle {
 }
 
 impl IntoWireHandle for FakeHandle {
+    type Kind = kind::Port;
+
     fn wire_id(&self) -> u32 {
         self.id
     }
@@ -56,7 +59,7 @@ struct Source {
 }
 
 impl cap_source::Service for Source {
-    fn get_cap(&mut self) -> impl IntoWireHandle {
+    fn get_cap(&mut self) -> impl IntoWireHandle<Kind = kind::Port> {
         FakeHandle {
             id: self.id,
             fate: Arc::clone(&self.fate),

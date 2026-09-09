@@ -5,13 +5,14 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     fmt::Write as _,
+    num::NonZeroU32,
     sync::atomic::{
         AtomicI64, AtomicU64,
         Ordering::{Acquire, Relaxed, Release},
     },
 };
 
-use kernel_objects::{Port, Resource, Signal};
+use kernel_objects::{Port, Resource, Signal, kind};
 use kernel_tests::kernel_test;
 use runtime::{
     JoinHandle, Priority, Timeout, UserMemFlags, handle_close, handle_duplicate, port_call,
@@ -57,8 +58,8 @@ const READY_YIELD_LIMIT: usize = 100_000;
 static VICTIMS_READY: AtomicU64 = AtomicU64::new(0);
 
 struct Arena {
-    server: Handle,
-    client: Handle,
+    server: Handle<kind::Port>,
+    client: Handle<kind::Port>,
     callers_live: AtomicU64,
     calls_ok: AtomicU64,
     replies_ok: AtomicU64,
@@ -73,7 +74,7 @@ struct Arena {
 }
 
 impl Arena {
-    fn new(server: Handle, client: Handle) -> Self {
+    fn new(server: Handle<kind::Port>, client: Handle<kind::Port>) -> Self {
         Self {
             server,
             client,
@@ -181,7 +182,10 @@ fn responder(arena: &Arena) -> u32 {
             break;
         }
         let request = read_payload();
-        let reply = u32::try_from(result).ok().and_then(Handle::new);
+        let reply = u32::try_from(result)
+            .ok()
+            .and_then(NonZeroU32::new)
+            .map(Handle::<kind::Reply>::from_abi);
         match (request, reply) {
             (Some(request), Some(reply)) => {
                 if caller_of(request) >= CALLERS {
@@ -301,10 +305,9 @@ fn run_brigade(seed: u64, steps: u64) {
     // Клиентской стороне нужно и право множиться. Хэндлы создают от неё
     // производные, пока по ней идут вызовы.
     let client = port
-        .handle()
         .duplicate(Rights::WRITE | Rights::DUPLICATE, None)
         .expect("client side of the stress port");
-    let arena = Arc::new(Arena::new(port.handle().as_raw(), client.as_raw()));
+    let arena = Arc::new(Arena::new(port.as_raw(), client.as_raw()));
 
     let mut random = SplitMix64::new(seed);
     let mut workers: Vec<JoinHandle> = Vec::with_capacity(BRIGADE);
@@ -403,7 +406,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
     // Жертвы блокируются в приёме на порту, которому никто не шлёт, и
     // снимаются прямо из syscall потоком, идущим на другом CPU.
     let port = Port::create().expect("victim port");
-    let server = port.handle().as_raw();
+    let server = port.as_raw();
 
     VICTIMS_READY.store(0, Release);
 

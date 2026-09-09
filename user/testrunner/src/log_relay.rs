@@ -16,7 +16,7 @@ use core::{
 
 use bootstrap_abi::bootstrap;
 use ipc::wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf};
-use kernel_objects::{MemoryRegion, OwnedHandle, Port, Process, Resource};
+use kernel_objects::{MemoryRegion, Port, Process, Resource, kind};
 use kernel_tests::kernel_test;
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
 use log_relay::{KernelLogSink, LogRelayThread, LogSink, SourceNames};
@@ -93,15 +93,15 @@ static ACTIVE: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 
 static SINK_REFUSES: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn shared_relay_thread() -> Option<syscall::Handle> {
+pub(crate) fn shared_relay_thread() -> Option<syscall::Handle<kind::Thread>> {
     SHARED.lock().as_ref().map(LogRelayThread::handle)
 }
 
-pub(crate) fn scenario_relay_thread() -> Option<syscall::Handle> {
+pub(crate) fn scenario_relay_thread() -> Option<syscall::Handle<kind::Thread>> {
     ACTIVE.lock().as_ref().map(LogRelayThread::handle)
 }
 
-pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<OwnedHandle> {
+pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<Port> {
     let mut shared = SHARED.lock();
     let relay = shared.get_or_insert_with(|| {
         LogRelayThread::start(
@@ -158,7 +158,7 @@ pub(crate) fn start_component_relay() {
     );
 }
 
-pub(crate) fn component_scenario_session(badge: NonZeroU64) -> Option<OwnedHandle> {
+pub(crate) fn component_scenario_session(badge: NonZeroU64) -> Option<Port> {
     ACTIVE.lock().as_ref()?.delegated_session(badge).ok()
 }
 
@@ -189,7 +189,7 @@ pub(crate) fn stop_component_relay() {
     rootkeeper::relay::install_names(core::iter::empty());
 }
 
-fn scenario_session(badge: NonZeroU64) -> OwnedHandle {
+fn scenario_session(badge: NonZeroU64) -> Port {
     // Лок ACTIVE не удерживается за пределами минта.
     ACTIVE
         .lock()
@@ -199,7 +199,7 @@ fn scenario_session(badge: NonZeroU64) -> OwnedHandle {
         .expect("log session")
 }
 
-fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> OwnedHandle)) {
+fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> Port)) {
     RECORDED.lock().clear();
     SINK_REFUSES.store(false, SeqCst);
     *ACTIVE.lock() =
@@ -236,13 +236,13 @@ fn wait_for_records(count: usize) -> Vec<Record> {
     }
 }
 
-fn write_log(session: &OwnedHandle, tag: &str, message: &str) {
+fn write_log(session: &Port, tag: &str, message: &str) {
     log::Client::new(PortTransport::client(session))
         .write_str(tag, message)
         .expect("log frame delivered");
 }
 
-fn send_unknown_ordinal(session: &OwnedHandle) {
+fn send_unknown_ordinal(session: &Port) {
     let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
     frame
         .write_header(&Header::new(log::write::ORDINAL ^ 1, 0, 0))
@@ -252,7 +252,7 @@ fn send_unknown_ordinal(session: &OwnedHandle) {
     kernel_tests::kassert_eq!(port_send(session.as_raw(), SEND_TIMEOUT), 0);
 }
 
-fn send_log_frame_with_cap(session: &OwnedHandle, cap: OwnedHandle) -> i64 {
+fn send_log_frame_with_cap(session: &Port, cap: Port) -> i64 {
     let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
     frame
         .write_header(&Header::new(log::write::ORDINAL, 0, 0))
@@ -270,16 +270,16 @@ fn send_log_frame_with_cap(session: &OwnedHandle, cap: OwnedHandle) -> i64 {
     ipc_raw::write_frame(frame.as_bytes(), &[carried.raw()]);
     let sent = port_send(session.as_raw(), SEND_TIMEOUT);
     if sent < 0 {
-        drop(OwnedHandle::from_handle(carried));
+        drop(Port::from_handle(carried));
     }
     sent
 }
 
-fn exhaust_handle_table() -> (Port, Vec<OwnedHandle>) {
+fn exhaust_handle_table() -> (Port, Vec<Port>) {
     let source = Port::create().expect("filler port");
     let mut handles = Vec::new();
     loop {
-        match source.handle().duplicate(Rights::TRANSFER, None) {
+        match source.duplicate(Rights::TRANSFER, None) {
             Ok(handle) => handles.push(handle),
             Err(error) => {
                 kernel_tests::kassert!(matches!(
@@ -293,14 +293,14 @@ fn exhaust_handle_table() -> (Port, Vec<OwnedHandle>) {
     (source, handles)
 }
 
-fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
+fn spawn_image_entry(path: &str, start: Port) -> Process {
     let kernel = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let mut response = kernel
         .acquire_userland_image()
         .expect("acquire_userland_image call");
     let capability = response.value.expect("image vend");
     let cap = response.claim(capability).expect("capability owner");
-    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
+    let region = MemoryRegion::from(cap);
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode userland image");
     let program = image
@@ -515,11 +515,10 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
         let logger = session(NAMED_BADGE);
         let carried = Port::create().expect("carried port");
         let writer = carried
-            .handle()
             .duplicate(Rights::WRITE | Rights::TRANSFER, None)
             .expect("writer side");
         // Корневая капа - единственный получатель. Она передаётся кадром.
-        kernel_tests::kassert_eq!(send_log_frame_with_cap(&logger, carried.into_handle()), 0);
+        kernel_tests::kassert_eq!(send_log_frame_with_cap(&logger, carried), 0);
         wait_for_records(1);
 
         // Закрытие корневой капы отзывает выведенную из неё клиентскую, а

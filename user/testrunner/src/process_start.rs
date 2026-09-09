@@ -2,12 +2,12 @@
 //! загруженного образа отвергает `start`, переданный по значению хэндл
 //! закрывается обёрткой (его `Drop`) ровно один раз, не утекая.
 
-use kernel_objects::{Process, Signal, ThreadEntry};
+use kernel_objects::{Process, Signal, ThreadEntry, kind};
 use kernel_tests::kernel_test;
 use runtime::{Priority, handle_close, signal_set};
 use syscall::{Handle, SIGNALED, SyscallError, WakeCount};
 
-fn is_closed(handle: Handle) -> bool {
+fn is_closed(handle: Handle<kind::Signal>) -> bool {
     signal_set(handle, SIGNALED, 0, WakeCount::None) == SyscallError::BadHandle.as_return_value()
 }
 
@@ -15,7 +15,7 @@ fn is_closed(handle: Handle) -> bool {
 fn start_error_closes_passed_handles() {
     let process = Process::create("start-error").expect("process create must succeed");
 
-    let owned = Signal::create().expect("signal create").into_handle();
+    let owned = Signal::create().expect("signal create");
     let stale = owned.as_raw();
 
     let entry = ThreadEntry {

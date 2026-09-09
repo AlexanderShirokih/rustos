@@ -8,7 +8,6 @@ publish.workspace = true
 
 [lib]
 bench = false
-doctest = false
 
 [dependencies]
 bootstrap-abi = { workspace = true }

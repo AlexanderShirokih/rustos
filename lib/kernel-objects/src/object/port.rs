@@ -1,15 +1,16 @@
 //! Типизированная обёртка над rendezvous-эндпоинтом ядра и одноразовым reply.
 
-use core::num::NonZeroU64;
+use core::num::{NonZeroU32, NonZeroU64};
 
 use syscall::{
     Handle, IPC_BUFFER_DATA_MAX, IpcBuffer, Rights, SyscallError, Timeout, decode_tag, encode_tag,
+    kind,
 };
 use syscall_user::ipc_buffer_ptr;
 
 use crate::{
     error::{Error, Result, unit, value},
-    handle::{BorrowedHandle, OwnedHandle},
+    handle::OwnedHandle,
     svc,
 };
 
@@ -49,33 +50,27 @@ fn load_body(out: &mut [u8]) -> Result<usize> {
 }
 
 /// Владеет хэндлом `Port` (synchronous rendezvous-IPC) и закрывает его на drop.
-#[derive(Debug)]
-pub struct Port {
-    handle: OwnedHandle,
-}
+pub type Port = OwnedHandle<kind::Port>;
 
 /// Владеет одноразовым reply-хэндлом, выданным `recv` встречного `call`.
-#[derive(Debug)]
-pub struct Reply {
-    handle: OwnedHandle,
-}
+pub type Reply = OwnedHandle<kind::Reply>;
 
 /// Порт с разделёнными сторонами: корневая capability отдаётся серверу, у
-/// создателя остаётся клиентский минт.
+/// создателя остаётся клиентский минт. Роль сторон различают их права.
 #[derive(Debug)]
 pub struct ServicePort {
     /// Серверная сторона - корневая capability, переносимая серверу целиком.
     /// Её уход лишает порт получателей.
-    pub server: OwnedHandle,
+    pub server: Port,
     /// Клиентская сторона: `send`/`call` под значком сессии.
     pub client: Port,
 }
 
-impl Port {
+impl OwnedHandle<kind::Port> {
     /// Создаёт `Port` в текущей таблице.
     pub fn create() -> Result<Self> {
         svc::port_create()
-            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
+            .map(Self::from_handle)
             .map_err(Error::Syscall)
     }
 
@@ -85,51 +80,36 @@ impl Port {
     pub fn create_service(badge: Option<NonZeroU64>) -> Result<ServicePort> {
         let port = Self::create()?;
         let client = port
-            .handle()
+            .borrow()
             .duplicate(Rights::WRITE | Rights::TRANSFER, badge)?;
         Ok(ServicePort {
-            server: port.into_handle(),
-            client: Self::from_handle(client),
+            server: port,
+            client,
         })
-    }
-
-    /// Берёт во владение хэндл `Port`.
-    pub fn from_handle(handle: OwnedHandle) -> Self {
-        Self { handle }
-    }
-
-    /// Заимствование хэндла на время одного вызова.
-    pub fn handle(&self) -> BorrowedHandle<'_> {
-        self.handle.borrow()
     }
 
     /// Отправляет сообщение из IPC-буфера текущего потока, блокируясь до
     /// `timeout`.
     pub fn send(&self, timeout: Timeout) -> Result<()> {
-        unit(svc::port_send(self.handle.as_raw(), timeout))
+        unit(svc::port_send(self.as_raw(), timeout))
     }
 
     /// Принимает сообщение в IPC-буфер текущего потока, блокируясь до `timeout`.
     /// `Some(Reply)`, если встречный был `call`, иначе `None`. `SenderGone`:
     /// нет кадра, значок ушедшей стороны лежит в `IpcBuffer.badge`.
     pub fn recv(&self, timeout: Timeout) -> Result<Option<Reply>> {
-        let reply_raw = value(svc::port_recv(self.handle.as_raw(), timeout))?;
+        let reply_raw = value(svc::port_recv(self.as_raw(), timeout))?;
         #[allow(clippy::cast_possible_truncation)]
         let reply_id = reply_raw as u32;
-        Ok(Handle::new(reply_id).map(|handle| Reply {
-            handle: OwnedHandle::from_handle(handle),
-        }))
+        // Граница ABI: неотрицательный возврат называет reply-handle встречного `call`.
+        Ok(NonZeroU32::new(reply_id)
+            .map(|id| Reply::from_handle(Handle::<kind::Reply>::from_abi(id))))
     }
 
     /// Отправляет сообщение из IPC-буфера текущего потока и получает ответ туда же.
     /// `timeout` ограничивает всю операцию.
     pub fn call(&self, timeout: Timeout) -> Result<()> {
-        unit(svc::port_call(self.handle.as_raw(), timeout))
-    }
-
-    /// Отдаёт владеемый хэндл.
-    pub fn into_handle(self) -> OwnedHandle {
-        self.handle
+        unit(svc::port_call(self.as_raw(), timeout))
     }
 
     /// Шлёт тело без caps: пишет `body` в IPC-буфер и вызывает [`send`](Self::send).
@@ -156,16 +136,11 @@ impl Port {
     }
 }
 
-impl Reply {
+impl OwnedHandle<kind::Reply> {
     /// Доставляет ответ из IPC-буфера сервера вызывателю. Ядро снимает reply-хэндл
     /// безусловно, и повторный `Drop`-close подавлен.
     pub fn reply(self) -> Result<()> {
-        unit(svc::port_reply(self.handle.into_raw()))
-    }
-
-    /// Отдаёт владеемый reply-хэндл.
-    pub fn into_handle(self) -> OwnedHandle {
-        self.handle
+        unit(svc::port_reply(self.into_raw()))
     }
 
     /// Отвечает телом без caps: пишет `body` в IPC-буфер и вызывает

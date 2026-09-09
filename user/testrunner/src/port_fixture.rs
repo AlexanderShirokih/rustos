@@ -18,6 +18,7 @@
 runtime::process_heap!();
 
 use core::{
+    num::NonZeroU32,
     panic::PanicInfo,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -29,7 +30,9 @@ use fixture_protocol::{
     REPLY_HOLD_FAILED, REPLY_MAP_FAILED, REPLY_OK, REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED,
     REQUEST_LEN, decode_request,
 };
-use kernel_objects::{Error, MemoryRegion, OwnedHandle, Port, Process, Reply, Resource, Signal};
+use kernel_objects::{
+    Error, MemoryRegion, OwnedHandle, Port, Process, Reply, Resource, Signal, kind,
+};
 use runtime::{
     MemoryAccess, Priority, Timeout, UserMemFlags, process_exit, signal_set, spawn_owned,
     thread_exit,
@@ -51,8 +54,8 @@ const EXIT_REPLY_FAILED: u64 = 103;
 const EXIT_SPAWN_FAILED: u64 = 104;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(root: Handle) -> ! {
-    let port = Port::from_handle(OwnedHandle::from_handle(root));
+pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
+    let port = Port::from_handle(root);
 
     loop {
         let reply = match port.recv(Timeout::INFINITE) {
@@ -93,7 +96,7 @@ pub extern "C" fn _start(root: Handle) -> ! {
             OP_HOLD_SELF => answer(reply, &[hold_self()]),
             OP_CLOSE_CAP => {
                 let cap = if ncaps == 1 { ipc_raw::read_cap(0) } else { 0 };
-                let Some(handle) = OwnedHandle::from_raw(cap) else {
+                let Some(handle) = owned_of::<kind::Any>(cap) else {
                     thread_exit(EXIT_BAD_REQUEST)
                 };
                 // Закрытие последнего держателя снимает процесс фикстуры. Ответ
@@ -124,7 +127,7 @@ fn start_parked_sibling() -> bool {
     let Ok(ready) = Signal::create() else {
         return false;
     };
-    let ready_handle = ready.handle().as_raw();
+    let ready_handle = ready.as_raw();
     let spawned = spawn_owned(
         move || park_forever(ready_handle),
         PARKED_STACK_SIZE,
@@ -138,7 +141,7 @@ fn start_parked_sibling() -> bool {
     ready.wait(SIGNALED, PARK_TIMEOUT).is_ok()
 }
 
-fn park_forever(ready: Handle) -> u32 {
+fn park_forever(ready: Handle<kind::Signal>) -> u32 {
     let Ok(signal) = Signal::create() else {
         return 1;
     };
@@ -146,6 +149,12 @@ fn park_forever(ready: Handle) -> u32 {
     // Пробуждения у этого сигнала нет ни одного. Поток снимает `ProcessExit`.
     let _ = signal.wait(SIGNALED, Timeout::INFINITE);
     0
+}
+
+fn owned_of<K: kernel_objects::ObjectKind>(raw: u32) -> Option<OwnedHandle<K>> {
+    NonZeroU32::new(raw)
+        .map(Handle::from_abi)
+        .map(OwnedHandle::from_handle)
 }
 
 fn answer(reply: Reply, body: &[u8]) {
@@ -156,7 +165,7 @@ fn answer(reply: Reply, body: &[u8]) {
 }
 
 fn hold_cap(cap: u32) -> u8 {
-    let Some(handle) = OwnedHandle::from_raw(cap) else {
+    let Some(handle) = owned_of::<kind::Any>(cap) else {
         return REPLY_HOLD_FAILED;
     };
     let _ = handle.into_raw();
@@ -166,7 +175,7 @@ fn hold_cap(cap: u32) -> u8 {
 fn hold_self() -> u8 {
     match Process::self_process() {
         Ok(process) => {
-            let _ = process.into_handle().into_raw();
+            let _ = process.into_raw();
             REPLY_OK
         }
         Err(_) => REPLY_HOLD_FAILED,
@@ -188,10 +197,7 @@ fn duplicate_transfer_cap() -> u8 {
     let Ok(resource) = Resource::self_resource() else {
         return REPLY_DUPLICATE_FAILED;
     };
-    match resource
-        .handle()
-        .duplicate(Rights::WRITE | Rights::TRANSFER, None)
-    {
+    match resource.duplicate(Rights::WRITE | Rights::TRANSFER, None) {
         Ok(_) => REPLY_OK,
         Err(Error::Syscall(SyscallError::AccessDenied)) => REPLY_ACCESS_DENIED,
         Err(_) => REPLY_DUPLICATE_FAILED,
@@ -199,10 +205,10 @@ fn duplicate_transfer_cap() -> u8 {
 }
 
 fn map_check(cap: u32, expected: u64) -> u8 {
-    let Some(handle) = OwnedHandle::from_raw(cap) else {
+    let Some(region) = owned_of::<kind::MemoryRegion>(cap) else {
         return REPLY_MAP_FAILED;
     };
-    let region = MemoryRegion::from_handle(handle);
+    let region = MemoryRegion::from_handle(region.into_raw());
     // Размер берётся из самого региона. Договорённость о нём с родителем была
     // бы вторым источником истины, а ядро требует точного совпадения.
     let Ok(mapping) = region.map_full(UserMemFlags::ReadWrite) else {

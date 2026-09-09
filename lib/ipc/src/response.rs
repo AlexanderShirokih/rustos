@@ -1,15 +1,17 @@
 //! Значение декодированного кадра и владение его ресурсами.
 
+use syscall::ObjectKind;
+
 use crate::wire::{Cap, HandleSlots};
 
 /// Владелец доставленных ресурсов, независимый от следующей операции транспорта.
 pub trait ReceivedResources {
-    /// Владеющая capability платформы.
-    type Handle;
+    /// Владеющая capability платформы для вида объекта `K`.
+    type Handle<K: ObjectKind>;
 
-    /// Передаёт владение capability одному потребителю. Отданная либо чужая `cap` -
-    /// `None`.
-    fn claim(&mut self, cap: Cap) -> Option<Self::Handle>;
+    /// Передаёт владение capability одному потребителю. Вид владельца задаёт вид поля.
+    /// Отданная либо чужая `cap` - `None`.
+    fn claim<K: ObjectKind>(&mut self, cap: Cap<K>) -> Option<Self::Handle<K>>;
 
     /// Закрывает доставленные capability, которых разбор кадра не потребил. Потреблённые
     /// слоты называет `slots`. Отказ разбора закрывает капы кадра целиком, минуя этот вызов.
@@ -31,16 +33,17 @@ impl<T, R: ReceivedResources> Response<T, R> {
         Self { value, resources }
     }
 
-    /// Переносит capability кадра во владеющий объект. Повторный запрос возвращает `None`.
-    pub fn claim(&mut self, cap: Cap) -> Option<R::Handle> {
+    /// Переносит capability кадра во владеющий объект вида поля. Повторный запрос
+    /// возвращает `None`.
+    pub fn claim<K: ObjectKind>(&mut self, cap: Cap<K>) -> Option<R::Handle<K>> {
         self.resources.claim(cap)
     }
 }
 
 impl ReceivedResources for () {
-    type Handle = core::convert::Infallible;
+    type Handle<K: ObjectKind> = core::convert::Infallible;
 
-    fn claim(&mut self, _cap: Cap) -> Option<Self::Handle> {
+    fn claim<K: ObjectKind>(&mut self, _cap: Cap<K>) -> Option<Self::Handle<K>> {
         None
     }
 

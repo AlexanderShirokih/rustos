@@ -50,7 +50,7 @@ fn thread_exit_publishes_exit_code() {
 
     let entry: extern "C" fn(usize) -> ! = exiting_entry;
     let thread = Thread::create(
-        process.handle(),
+        process.borrow(),
         ThreadEntry {
             entry_pc: entry as *const () as u64,
             user_sp: stack.va() + STACK_SIZE,
@@ -127,7 +127,7 @@ fn removing_a_holder_removes_the_processes_it_held() {
 
     // Капа передаётся переносом. Дубликат - производная нашей корневой капы, и её
     // закрытие отзывает дубликат напрямую, минуя каскад.
-    let child_cap = child_process.into_handle().into_raw().raw();
+    let child_cap = child_process.into_raw().raw();
     kernel_tests::kassert_eq!(
         supervisor.request_status(OP_HOLD_CAP, 0, &[child_cap]),
         REPLY_OK
@@ -145,7 +145,7 @@ fn closing_the_last_holder_from_inside_leaves_the_request_unanswered() {
     let (process, port) = Fixture::spawn().into_parts();
 
     // Капа передаётся переносом. Единственный держатель остаётся в таблице фикстуры.
-    let own_cap = process.into_handle().into_raw().raw();
+    let own_cap = process.into_raw().raw();
     ipc_raw::write_frame(&encode_request(OP_CLOSE_CAP, 0), &[own_cap]);
 
     kernel_tests::kassert!(matches!(

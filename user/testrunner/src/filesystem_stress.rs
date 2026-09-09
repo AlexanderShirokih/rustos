@@ -12,7 +12,7 @@ use filesystem_abi::{
     APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NodeDescriptor, NodeKind,
     OpenFlags, file_system,
 };
-use kernel_objects::{Mapping, MemoryRegion, OwnedHandle};
+use kernel_objects::{Mapping, MemoryRegion, Port};
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, UserMemFlags};
 
@@ -54,7 +54,7 @@ struct Session {
     client: file_system::Client<PortTransport>,
     buffer: Mapping,
     _region: MemoryRegion,
-    _capability: OwnedHandle,
+    _capability: Port,
 }
 
 struct Descriptor {
@@ -102,7 +102,7 @@ impl Session {
         let granted = response
             .claim(granted)
             .ok_or(Mismatch::Model("granted buffer is not delivered"))?;
-        let region = MemoryRegion::from_handle(granted.into());
+        let region = MemoryRegion::from(granted);
         let buffer = region
             .map_full(UserMemFlags::ReadWrite)
             .map_err(|_| Mismatch::Model("data buffer is not mapped"))?;

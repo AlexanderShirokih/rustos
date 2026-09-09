@@ -2,9 +2,9 @@
 //! раскладки структур, которые стороны передают друг другу.
 //!
 //! [`SyscallOp`] называет номер операции, [`SyscallError`] - код отказа, [`Rights`] - права
-//! capability, [`Handle`] - номер в таблице процесса. [`IpcBuffer`] задаёт раскладку буфера
-//! IPC потока, [`UserImageDescAbi`] и [`UserSegmentAbi`] - раскладку образа процесса при
-//! запуске.
+//! capability, [`Handle`] - номер в таблице процесса вместе с меткой вида объекта из
+//! [`kind`]. [`IpcBuffer`] задаёт раскладку буфера IPC потока, [`UserImageDescAbi`] и
+//! [`UserSegmentAbi`] - раскладку образа процесса при запуске.
 //!
 //! Крейт не делает системных вызовов и не зависит от архитектуры. Обёртки вызовов лежат в
 //! `syscall-user`, разбор со стороны ядра - в `syscall-kernel`.
@@ -17,6 +17,7 @@ mod flags;
 mod handle;
 mod ipc_buffer;
 mod irq;
+pub mod kind;
 mod memory;
 mod priority;
 mod profile;
@@ -34,6 +35,7 @@ pub use ipc_buffer::{
     DecodedTag, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, IpcBuffer, decode_tag, encode_tag,
 };
 pub use irq::IrqTrigger;
+pub use kind::{ObjectKind, WaitableKind};
 pub use memory::{MemoryAccess, PAGE_SIZE, USER_VA_END};
 pub use priority::Priority;
 pub use profile::{InvalidMemoryProfile, MemoryProfile};

@@ -31,6 +31,7 @@ use ipc::{
     wire::{Cap, HEADER_SIZE, IpcError, Str},
 };
 use ipc_test::{MockEnd, MockResources};
+use syscall::{Handle, ObjectKind, kind};
 
 const BUFFER_SIZE: u32 = 4096;
 
@@ -168,9 +169,11 @@ impl World {
         *self.pair_root_len.lock().expect("mutex not poisoned") = Some(len);
     }
 
-    fn cap(&self) -> Cap {
+    fn cap<K: ObjectKind>(&self) -> Cap<K> {
         let raw = self.next_cap.fetch_add(1, Ordering::SeqCst);
-        Cap::from_raw(core::num::NonZeroU32::new(raw).expect("capability id is non-zero"))
+        Cap::from_handle(Handle::from_abi(
+            core::num::NonZeroU32::new(raw).expect("capability id is non-zero"),
+        ))
     }
 
     fn minted(&self) -> u32 {
@@ -206,7 +209,7 @@ impl World {
         client
     }
 
-    fn session(self: &Arc<Self>, filesystem: Arc<Filesystem>, root: String) -> Cap {
+    fn session(self: &Arc<Self>, filesystem: Arc<Filesystem>, root: String) -> Cap<kind::Port> {
         let cap = self.cap();
         let end = self.session_end_in(filesystem, root);
         self.sessions
@@ -321,7 +324,7 @@ impl SessionServer {
 }
 
 impl file_system::Service for SessionServer {
-    fn acquire_buffer(&mut self, size: u32) -> Result<Cap, FileSystemError> {
+    fn acquire_buffer(&mut self, size: u32) -> Result<Cap<kind::MemoryRegion>, FileSystemError> {
         let shared: Shared = Arc::new(Mutex::new(std::vec![0; size as usize]));
         let cap = self.world.cap();
         self.world
@@ -551,17 +554,23 @@ impl file_system::Service for SessionServer {
     fn create_backed(
         &mut self,
         _path: Str<'_, { PATH_MAX }>,
-        _region: Cap,
+        _region: Cap<kind::MemoryRegion>,
         _size: u64,
     ) -> Result<u32, FileSystemError> {
         Err(FileSystemError::NotSupported)
     }
 
-    fn backing_memory(&mut self, _fd: NodeDescriptor) -> Result<Cap, FileSystemError> {
+    fn backing_memory(
+        &mut self,
+        _fd: NodeDescriptor,
+    ) -> Result<Cap<kind::MemoryRegion>, FileSystemError> {
         Err(FileSystemError::NotSupported)
     }
 
-    fn open_root(&mut self, path: Str<'_, { PATH_MAX }>) -> Result<Cap, FileSystemError> {
+    fn open_root(
+        &mut self,
+        path: Str<'_, { PATH_MAX }>,
+    ) -> Result<Cap<kind::Port>, FileSystemError> {
         if self.world.scoping_fails.load(Ordering::SeqCst) {
             return Err(FileSystemError::NotFound);
         }
@@ -580,7 +589,7 @@ struct Router {
 }
 
 impl namespace::Service for Router {
-    fn resolve(&mut self, path: Str<'_, { PATH_MAX }>) -> Result<Cap, FileSystemError> {
+    fn resolve(&mut self, path: Str<'_, { PATH_MAX }>) -> Result<Cap<kind::Port>, FileSystemError> {
         self.world
             .resolved
             .lock()
@@ -660,11 +669,11 @@ struct TestEnvironment {
 }
 
 impl Environment for TestEnvironment {
-    type Handle = Cap;
+    type Handle<K: ObjectKind> = Cap<K>;
     type Transport = TrackedEnd;
     type Region = TestBuffer;
 
-    fn connect(&self, port: Cap) -> Result<TrackedEnd, FileSystemError> {
+    fn connect(&self, port: Cap<kind::Port>) -> Result<TrackedEnd, FileSystemError> {
         let end = self
             .world
             .sessions
@@ -675,7 +684,7 @@ impl Environment for TestEnvironment {
         Ok(TrackedEnd::new(&self.world, end))
     }
 
-    fn map(&self, region: Cap) -> Result<TestBuffer, FileSystemError> {
+    fn map(&self, region: Cap<kind::MemoryRegion>) -> Result<TestBuffer, FileSystemError> {
         if self.world.mappings_allowed.load(Ordering::SeqCst) == 0 {
             return Err(FileSystemError::NoSpace);
         }

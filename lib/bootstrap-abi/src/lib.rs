@@ -18,6 +18,7 @@ mod device_window;
 mod log;
 
 pub use device_window::DeviceWindow;
+use syscall::kind;
 
 /// Граница тега источника в [`bootstrap::log`].
 pub const LOG_TAG_MAX: usize = 64;
@@ -31,7 +32,7 @@ ipc::wire_value! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct BootFdt {
         /// Read-only регион, целиком покрывающий блоб.
-        pub region: ipc::wire::Cap,
+        pub region: ipc::wire::Cap<kind::MemoryRegion>,
         /// Смещение первого байта блоба от начала региона.
         pub offset: u32,
     }
@@ -51,10 +52,10 @@ ipc::protocol! {
 
         /// Выдаёт копию корневого `IrqControl` в таблицу вызывателя (оригинал
         /// остаётся у ядра). `Err` - ненулевой код ошибки выдачи.
-        call fn acquire_irq_control() -> Result<ipc::wire::Cap, u32>;
+        call fn acquire_irq_control() -> Result<ipc::wire::Cap<kind::IrqControl>, u32>;
 
         /// Выдаёт вызывателю read-only capability на регион поверх байт userland-образа.
-        call fn acquire_userland_image() -> Result<ipc::wire::Cap, u32>;
+        call fn acquire_userland_image() -> Result<ipc::wire::Cap<kind::MemoryRegion>, u32>;
 
         /// Выдаёт вызывателю read-only capability на регион поверх байт boot FDT (DTB)
         /// вместе со смещением блоба внутри региона.
@@ -62,7 +63,7 @@ ipc::protocol! {
 
         /// Выдаёт capability на Device-MMIO регион `index` (kernel-owned
         /// исключены). `Err` - индекс вне набора либо отказ выдачи.
-        call fn acquire_device_memory(index: u32) -> Result<ipc::wire::Cap, u32>;
+        call fn acquire_device_memory(index: u32) -> Result<ipc::wire::Cap<kind::MemoryRegion>, u32>;
     }
 }
 
@@ -76,8 +77,13 @@ mod tests {
         wire::{Cap, Str},
     };
     use ipc_test::MockEnd;
+    use syscall::{Handle, ObjectKind, kind};
 
     use super::{BootFdt, LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap};
+
+    fn cap<K: ObjectKind>(raw: u32) -> Cap<K> {
+        Cap::from_handle(Handle::from_abi(NonZeroU32::new(raw).expect("non-zero")))
+    }
 
     #[derive(Default)]
     struct Sink {
@@ -89,29 +95,27 @@ mod tests {
             self.last_log = Some(format!("[{}] {}", tag.as_str(), message.as_str()));
         }
 
-        fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
-            Ok(Cap::from_raw(NonZeroU32::new(0x77).expect("non-zero")))
+        fn acquire_irq_control(&mut self) -> Result<Cap<kind::IrqControl>, u32> {
+            Ok(cap(0x77))
         }
 
-        fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
-            Ok(Cap::from_raw(NonZeroU32::new(0x88).expect("non-zero")))
+        fn acquire_userland_image(&mut self) -> Result<Cap<kind::MemoryRegion>, u32> {
+            Ok(cap(0x88))
         }
 
         fn acquire_boot_fdt(&mut self) -> Result<BootFdt, u32> {
             Ok(BootFdt {
-                region: Cap::from_raw(NonZeroU32::new(0x99).expect("non-zero")),
+                region: cap(0x99),
                 offset: 0x600,
             })
         }
 
-        fn acquire_device_memory(&mut self, index: u32) -> Result<Cap, u32> {
+        fn acquire_device_memory(&mut self, index: u32) -> Result<Cap<kind::MemoryRegion>, u32> {
             // Зеркалит сервер: за пределами набора - Err; иначе Cap, кодирующий индекс.
             if index >= 2 {
                 return Err(7);
             }
-            Ok(Cap::from_raw(
-                NonZeroU32::new(0x90 + index).expect("non-zero"),
-            ))
+            Ok(cap(0x90 + index))
         }
     }
 
@@ -143,10 +147,7 @@ mod tests {
                 bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
             let mut response = client.acquire_irq_control().expect("call ok");
-            assert_eq!(
-                response.value,
-                Ok(Cap::from_raw(NonZeroU32::new(0x77).expect("non-zero")))
-            );
+            assert_eq!(response.value, Ok(cap(0x77)));
             let cap = response.value.expect("IRQ control");
             assert_eq!(response.claim(cap), Some(cap));
         });
@@ -165,10 +166,7 @@ mod tests {
                 bootstrap::dispatch(&mut sink, &server_end).expect("dispatch ok");
             });
             let mut response = client.acquire_userland_image().expect("call ok");
-            assert_eq!(
-                response.value,
-                Ok(Cap::from_raw(NonZeroU32::new(0x88).expect("non-zero")))
-            );
+            assert_eq!(response.value, Ok(cap(0x88)));
             let cap = response.value.expect("userland image");
             assert_eq!(response.claim(cap), Some(cap));
         });
@@ -190,7 +188,7 @@ mod tests {
             assert_eq!(
                 response.value,
                 Ok(BootFdt {
-                    region: Cap::from_raw(NonZeroU32::new(0x99).expect("non-zero")),
+                    region: cap(0x99),
                     offset: 0x600,
                 })
             );
@@ -213,10 +211,7 @@ mod tests {
             });
             // Аргумент index доезжает до сервера и влияет на ответный Cap.
             let mut response = client.acquire_device_memory(1).expect("call ok");
-            assert_eq!(
-                response.value,
-                Ok(Cap::from_raw(NonZeroU32::new(0x91).expect("non-zero")))
-            );
+            assert_eq!(response.value, Ok(cap(0x91)));
             let cap = response.value.expect("device memory");
             assert_eq!(response.claim(cap), Some(cap));
         });

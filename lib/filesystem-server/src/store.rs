@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use filesystem::{ByteStore, StoreId, Window, insert_store};
 use filesystem_abi::{AccessMode, FileSystemError};
-use kernel_objects::{Mapping, MemoryRegion, OwnedHandle, RegionKind, Resource};
+use kernel_objects::{Mapping, MemoryRegion, RegionKind, Resource};
 use runtime::{MemoryAccess, UserMemFlags};
 use syscall::Rights;
 use userland::USERLAND_PAGE_SIZE;
@@ -56,7 +56,6 @@ impl StoreTable {
         }
         // Проверка прав не оставляет за собой маппинг.
         let probe = region
-            .handle()
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(no_space)?;
         drop(probe);
@@ -73,7 +72,7 @@ impl StoreTable {
         &self,
         window: Window,
         mode: AccessMode,
-    ) -> Result<OwnedHandle, FileSystemError> {
+    ) -> Result<MemoryRegion, FileSystemError> {
         let store = self.store(window.store)?;
         let region = match store {
             Store::Initial(region)
@@ -85,7 +84,6 @@ impl StoreTable {
         if matches!(store, Store::Initial(_)) {
             return region
                 .slice(window.offset, size, access_for(mode, info.access))
-                .map(MemoryRegion::into_handle)
                 .map_err(no_space);
         }
         if window.offset != 0 || size != info.size_bytes {
@@ -96,7 +94,7 @@ impl StoreTable {
             rights |= Rights::WRITE;
         }
         // Клиент получает производную без DUPLICATE; корень остаётся у сервера и отзывает её.
-        region.handle().duplicate(rights, None).map_err(no_space)
+        region.duplicate(rights, None).map_err(no_space)
     }
 
     fn insert(&mut self, store: Store) -> Result<StoreId, FileSystemError> {

@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use component_abi::COMPONENT_SLOT_MAX;
+use component_abi::{COMPONENT_EXPORT_MAX, COMPONENT_SLOT_MAX};
 use syscall::{HANDLE_TABLE_CAPACITY, MAX_RESOURCE_DEPTH, WAIT_MANY_MAX_COUNT};
 
 use crate::manifest::ProgramManifest;
@@ -29,18 +29,15 @@ fn validate_component(name: &str, declared: &ProgramManifest) -> Result<()> {
         declared.slots.len()
     );
     ensure!(
-        !declared.establishes_sessions || declared.export.is_some(),
+        declared.exports.len() <= COMPONENT_EXPORT_MAX,
+        "boot plan component '{name}' declares {} exports; \
+         the startup transaction carries {COMPONENT_EXPORT_MAX}",
+        declared.exports.len()
+    );
+    ensure!(
+        !declared.establishes_sessions || !declared.exports.is_empty(),
         "boot plan component '{name}' establishes its own sessions without exporting a protocol"
     );
-    // Кадр порта разбирает один dispatch, и незнакомый ordinal он отвергает. Два протокола
-    // на одном порту не складываются, а установление сессий занимает control-порт.
-    if let Some(control) = &declared.control {
-        ensure!(
-            !declared.establishes_sessions,
-            "boot plan component '{name}' serves control protocol '{control}' and establishes \
-             its own sessions; the control port carries one protocol"
-        );
-    }
     validate_resource_depth(name, COMPONENT_RESOURCE_LEVELS)
 }
 

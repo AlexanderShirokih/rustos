@@ -8,9 +8,8 @@ use filesystem_abi::{
     FileSystemError, PATH_MAX, Path, ResolvedPair, common_directory, file_system, namespace,
     namespace_admin,
 };
-use filesystem_server::{settle, vend};
 use ipc::wire::{Cap, Str};
-use kernel_objects::{OwnedHandle, ReceivedFrame};
+use kernel_objects::{OwnedHandle, Port, ReceivedFrame, kind, settle, vend};
 use runtime::{Mutex, PortTransport, Timeout};
 
 const DONE: u32 = 0;
@@ -18,7 +17,7 @@ const OPEN_ROOT_TIMEOUT: Timeout = Timeout::from_secs(1);
 
 struct Mount {
     prefix: String,
-    session: OwnedHandle,
+    session: Port,
 }
 
 pub(crate) struct MountTable {
@@ -52,7 +51,7 @@ impl MountTable {
 
 pub(crate) struct Resolving<'a> {
     table: &'a Mutex<MountTable>,
-    vended: Option<OwnedHandle>,
+    vended: Option<OwnedHandle<kind::Any>>,
 }
 
 impl<'a> Resolving<'a> {
@@ -67,7 +66,11 @@ impl<'a> Resolving<'a> {
         settle(&mut self.vended, delivered);
     }
 
-    fn open_scope(&mut self, mount: &Mount, tail: Path<'_>) -> Result<Cap, FileSystemError> {
+    fn open_scope(
+        &mut self,
+        mount: &Mount,
+        tail: Path<'_>,
+    ) -> Result<Cap<kind::Port>, FileSystemError> {
         let mut response = file_system::Client::new(PortTransport::client(&mount.session))
             .with_wait(OPEN_ROOT_TIMEOUT)
             .open_root(Str::new(tail.as_str()).ok_or(FileSystemError::InvalidPath)?)
@@ -76,12 +79,12 @@ impl<'a> Resolving<'a> {
         let owned = response
             .claim(session)
             .ok_or(FileSystemError::Unresponsive)?;
-        Ok(vend(&mut self.vended, owned.into()))
+        Ok(vend(&mut self.vended, Port::from(owned)))
     }
 }
 
 impl namespace::Service for Resolving<'_> {
-    fn resolve(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap, FileSystemError> {
+    fn resolve(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap<kind::Port>, FileSystemError> {
         let path = Path::new(path.as_str())?;
         let table = self.table.lock();
         let index = table
@@ -136,7 +139,11 @@ impl<'a, 'f> Administering<'a, 'f> {
 }
 
 impl namespace_admin::Service for Administering<'_, '_> {
-    fn mount(&mut self, path: Str<'_, PATH_MAX>, session: Cap) -> Result<u32, FileSystemError> {
+    fn mount(
+        &mut self,
+        path: Str<'_, PATH_MAX>,
+        session: Cap<kind::Port>,
+    ) -> Result<u32, FileSystemError> {
         let prefix = Path::new(path.as_str())?;
         // Отвергнутое монтирование уносит переданную сессию: вернуть её отправителю нечем.
         let session = self

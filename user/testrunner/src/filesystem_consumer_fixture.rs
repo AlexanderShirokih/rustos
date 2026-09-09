@@ -9,7 +9,7 @@ use core::panic::PanicInfo;
 use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{AccessMode, NodeKind, OpenFlags, file_system};
 use ipc::wire::Str;
-use kernel_objects::{MemoryRegion, OwnedHandle};
+use kernel_objects::{MemoryRegion, Port, kind};
 use runtime::{PortTransport, Timeout, UserMemFlags, install_log, log_fmt, thread_exit};
 use syscall::Handle;
 
@@ -35,17 +35,16 @@ component_manifest! {
 }
 
 /// Программа-потребитель файловой системы читает запись образа сессией сервисного слота.
-/// `startup` приходит в x0 как HandleId одноразового startup-порта.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     let Ok(ReceivedStartup { log, resources }) =
-        FileSystemConsumerStartup::receive(OwnedHandle::from_handle(startup))
+        FileSystemConsumerStartup::receive(Port::from_handle(startup))
     else {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
     install_log(log.into_raw(), LOG_TAG);
-    drop(resources.control);
-    drop(resources.service);
+    drop(resources.startup);
 
     let files = resources.files;
     thread_exit(read_record(
@@ -63,7 +62,7 @@ fn read_record(client: &file_system::Client<PortTransport>) -> u64 {
     let Some(cap) = response.claim(capability) else {
         return NO_BUFFER_EXIT_CODE;
     };
-    let region = MemoryRegion::from_handle(cap.into());
+    let region = MemoryRegion::from(cap);
     let Ok(buffer) = region.map_full(UserMemFlags::ReadWrite) else {
         return NO_BUFFER_EXIT_CODE;
     };

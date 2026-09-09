@@ -49,7 +49,7 @@ ipc::protocol! {
         /// округляется вверх до страницы, нулевой либо превышающий потолок сервера - `NoSpace`.
         /// Сессия получает буфер один раз, повторный вызов - `AlreadyExists`. Регион остаётся за
         /// сервером, и закрытие сессии отзывает выданную capability.
-        call fn acquire_buffer(size: u32) -> Result<ipc::wire::Cap, FileSystemError>;
+        call fn acquire_buffer(size: u32) -> Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
 
         /// Открывает узел по пути внутри монтирования. `mode` задаёт режим доступа дескриптора,
         /// `flags` - действия над деревом имён. Дескриптор держит узел до `close` и адресует тот
@@ -137,7 +137,7 @@ ipc::protocol! {
         /// `ReadOnly`.
         call fn create_backed(
             path: ipc::wire::Str<{ PATH_MAX }>,
-            region: Cap,
+            region: Cap<syscall::kind::MemoryRegion>,
             size: u64,
         ) -> Result<u32, FileSystemError>;
 
@@ -147,7 +147,9 @@ ipc::protocol! {
         ///
         /// Доставленный ответ закрепляет ёмкость узла за регионом. Запись и `set_size` за
         /// пределом этой ёмкости отвечают `NoSpace`.
-        call fn backing_memory(fd: NodeDescriptor) -> Result<ipc::wire::Cap, FileSystemError>;
+        call fn backing_memory(
+            fd: NodeDescriptor,
+        ) -> Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
 
         /// Отдаёт capability свежей сессии, корнем которой становится узел `path`. Путь
         /// отсчитывается от корня вызванной сессии, и окно производной сессии только сужается.
@@ -156,7 +158,7 @@ ipc::protocol! {
         /// Дескрипторы и буфер данных у производной сессии свои.
         call fn open_root(
             path: ipc::wire::Str<{ PATH_MAX }>,
-        ) -> Result<ipc::wire::Cap, FileSystemError>;
+        ) -> Result<ipc::wire::Cap<syscall::kind::Port>, FileSystemError>;
     }
 }
 
@@ -181,10 +183,10 @@ mod tests {
         OpenFlags, Opened, PATH_MAX, Written, file_system,
     };
 
-    const BUFFER_CAP: Cap = cap(0x11);
-    const BACKING_CAP: Cap = cap(0x22);
-    const SCOPED_CAP: Cap = cap(0x33);
-    const IMPORT_CAP: Cap = cap(0x44);
+    const BUFFER_CAP: Cap<syscall::kind::MemoryRegion> = cap(0x11);
+    const BACKING_CAP: Cap<syscall::kind::MemoryRegion> = cap(0x22);
+    const SCOPED_CAP: Cap<syscall::kind::Port> = cap(0x33);
+    const IMPORT_CAP: Cap<syscall::kind::MemoryRegion> = cap(0x44);
     const READ_COUNT: u32 = 512;
     const DONE: u32 = 0;
     const FD: NodeDescriptor = NodeDescriptor::from_raw(7);
@@ -273,7 +275,10 @@ mod tests {
     }
 
     impl file_system::Service for Recorder {
-        fn acquire_buffer(&mut self, size: u32) -> Result<Cap, FileSystemError> {
+        fn acquire_buffer(
+            &mut self,
+            size: u32,
+        ) -> Result<Cap<syscall::kind::MemoryRegion>, FileSystemError> {
             self.record(Call::AcquireBuffer { size });
             if size == 0 {
                 return Err(FileSystemError::NoSpace);
@@ -362,7 +367,7 @@ mod tests {
         fn create_backed(
             &mut self,
             path: Str<'_, { PATH_MAX }>,
-            region: Cap,
+            region: Cap<syscall::kind::MemoryRegion>,
             size: u64,
         ) -> Result<u32, FileSystemError> {
             self.record(Call::CreateBacked {
@@ -373,12 +378,18 @@ mod tests {
             Ok(DONE)
         }
 
-        fn backing_memory(&mut self, fd: NodeDescriptor) -> Result<Cap, FileSystemError> {
+        fn backing_memory(
+            &mut self,
+            fd: NodeDescriptor,
+        ) -> Result<Cap<syscall::kind::MemoryRegion>, FileSystemError> {
             self.record(Call::BackingMemory { fd });
             Ok(BACKING_CAP)
         }
 
-        fn open_root(&mut self, path: Str<'_, { PATH_MAX }>) -> Result<Cap, FileSystemError> {
+        fn open_root(
+            &mut self,
+            path: Str<'_, { PATH_MAX }>,
+        ) -> Result<Cap<syscall::kind::Port>, FileSystemError> {
             self.record(Call::OpenRoot {
                 path: path.as_str().to_string(),
             });
@@ -386,8 +397,11 @@ mod tests {
         }
     }
 
-    const fn cap(raw: u32) -> Cap {
-        Cap::from_raw(NonZeroU32::new(raw).expect("non-zero"))
+    const fn cap<K: syscall::ObjectKind>(raw: u32) -> Cap<K> {
+        match NonZeroU32::new(raw) {
+            Some(id) => Cap::from_handle(syscall::Handle::from_abi(id)),
+            None => panic!("non-zero"),
+        }
     }
 
     fn with_service<R>(body: impl FnOnce(&file_system::Client<MockEnd>) -> R) -> (R, Vec<Call>) {

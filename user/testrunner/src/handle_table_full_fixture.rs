@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use kernel_objects::{OwnedHandle, Port, Signal};
+use kernel_objects::{Port, Signal, kind};
 use runtime::{Timeout, handle_close, thread_exit};
 use syscall::Handle;
 
@@ -16,11 +16,11 @@ const RECEIVED_EXIT_CODE: u64 = 3;
 
 /// Программа-фикстура заполненной таблицы handle. Она оставляет ровно один свободный слот,
 /// его занимает capability доставленного кадра, и для reply-объекта вызова места уже не
-/// остаётся. Процесс паркуется, оставляя таблицу живой для наблюдения вызывающим. `startup`
-/// приходит в x0 как HandleId одноразового startup-порта.
+/// остаётся. Процесс паркуется, оставляя таблицу живой для наблюдения вызывающим.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
-    let port = Port::from_handle(OwnedHandle::from_handle(startup));
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
+    let port = Port::from_handle(startup);
     // Порт парковки создаётся до заполнения таблицы, потому что свободных слотов после
     // него не останется.
     let Ok(parking) = Port::create() else {
@@ -42,10 +42,10 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     thread_exit(NO_PARKING_EXIT_CODE)
 }
 
-fn fill_handle_table() -> Option<Handle> {
+fn fill_handle_table() -> Option<Handle<kind::Signal>> {
     let mut last = None;
     while let Ok(signal) = Signal::create() {
-        last = Some(signal.into_handle().into_raw());
+        last = Some(signal.into_raw());
     }
     last
 }

@@ -39,11 +39,13 @@ mod tests {
             self.last_log = Some(format!("[{}] {}", tag.as_str(), message.as_str()));
         }
 
-        fn acquire_irq_control(&mut self) -> Result<ipc::wire::Cap, u32> {
+        fn acquire_irq_control(&mut self) -> Result<ipc::wire::Cap<crate::kind::IrqControl>, u32> {
             Err(1)
         }
 
-        fn acquire_userland_image(&mut self) -> Result<ipc::wire::Cap, u32> {
+        fn acquire_userland_image(
+            &mut self,
+        ) -> Result<ipc::wire::Cap<crate::kind::MemoryRegion>, u32> {
             Err(1)
         }
 
@@ -51,7 +53,10 @@ mod tests {
             Err(1)
         }
 
-        fn acquire_device_memory(&mut self, _index: u32) -> Result<ipc::wire::Cap, u32> {
+        fn acquire_device_memory(
+            &mut self,
+            _index: u32,
+        ) -> Result<ipc::wire::Cap<crate::kind::MemoryRegion>, u32> {
             Err(1)
         }
     }

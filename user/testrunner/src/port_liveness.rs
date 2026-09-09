@@ -6,12 +6,12 @@
 //! обращаются к капе по сырому HandleId: аргумент потока - не хэндл.
 
 use core::{
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst},
 };
 
 use bootstrap_abi::bootstrap;
-use kernel_objects::{Error, MemoryRegion, OwnedHandle, Port, Process, Reply, Resource, Result};
+use kernel_objects::{Error, MemoryRegion, Port, Process, Reply, Resource, Result, kind};
 use kernel_tests::kernel_test;
 use runtime::{
     PortTransport, Priority, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr, port_call,
@@ -58,8 +58,10 @@ fn pause(budget: Timeout) {
     kernel_tests::kassert!(matches!(waited, Err(Error::Syscall(SyscallError::Timeout))));
 }
 
-fn client_capability(slot: &AtomicU32) -> Handle {
-    Handle::new(slot.load(SeqCst)).expect("client capability id")
+fn client_capability(slot: &AtomicU32) -> Handle<kind::Port> {
+    NonZeroU32::new(slot.load(SeqCst))
+        .map(Handle::from_abi)
+        .expect("client capability id")
 }
 
 fn assert_sender_gone(result: Result<Option<Reply>>, badge: u64) {
@@ -70,14 +72,14 @@ fn assert_sender_gone(result: Result<Option<Reply>>, badge: u64) {
     kernel_tests::kassert_eq!(received_badge(), badge);
 }
 
-fn spawn_image_entry(path: &str, start: OwnedHandle) -> Process {
+fn spawn_image_entry(path: &str, start: Port) -> Process {
     let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
     let mut response = client
         .acquire_userland_image()
         .expect("acquire_userland_image call");
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
-    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
+    let region = MemoryRegion::from(cap);
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let program = image
@@ -111,7 +113,6 @@ fn sender_is_refused_when_the_last_receiver_goes() {
     // У клиентской капы нет значка. Множество получателей считается отдельно от
     // множеств значков.
     let client = port
-        .handle()
         .duplicate(Rights::WRITE, None)
         .expect("mint client capability");
     REFUSED_CLIENT_CAP.store(client.as_raw().raw(), SeqCst);
@@ -147,7 +148,6 @@ fn badge_departs_when_the_client_process_dies() {
     let port = Port::create().expect("port create");
     // TRANSFER нужен, чтобы капа ушла потомку стартовым хэндлом.
     let client = port
-        .handle()
         .duplicate(Rights::WRITE | Rights::TRANSFER, Some(DYING_CLIENT_BADGE))
         .expect("mint client capability");
     let process = spawn_image_entry("/boot/badge-client/program", client);
@@ -184,11 +184,9 @@ extern "C" fn living_client(_arg: usize) -> u32 {
 fn badge_departs_when_a_living_client_closes_its_capability() {
     let port = Port::create().expect("port create");
     let badged = port
-        .handle()
         .duplicate(Rights::WRITE, Some(LIVING_CLIENT_BADGE))
         .expect("mint badged capability");
     let plain = port
-        .handle()
         .duplicate(Rights::WRITE, None)
         .expect("mint unbadged capability");
     // Обе капы отданы клиенту. Закрывает их он.
@@ -229,7 +227,6 @@ extern "C" fn served_client(_arg: usize) -> u32 {
 fn departed_badge_waits_for_the_busy_server() {
     let port = Port::create().expect("port create");
     let badged = port
-        .handle()
         .duplicate(Rights::WRITE, Some(SERVED_CLIENT_BADGE))
         .expect("mint badged capability");
     SERVED_CLIENT_CAP.store(badged.into_raw().raw(), SeqCst);
@@ -274,7 +271,7 @@ fn served_child_exits_when_its_client_capability_goes() {
 /// принимает он же.
 #[kernel_test]
 fn kernel_server_serves_past_a_departed_badge() {
-    let session = OwnedHandle::from_handle(
+    let session = Port::from_handle(
         handle_duplicate(
             crate::bootstrap_handle(),
             Rights::WRITE.into(),
@@ -315,11 +312,9 @@ extern "C" fn second_client(_arg: usize) -> u32 {
 fn departed_badge_names_the_session_that_left() {
     let port = Port::create().expect("port create");
     let first = port
-        .handle()
         .duplicate(Rights::WRITE, Some(FIRST_CLIENT_BADGE))
         .expect("mint first client capability");
     let second = port
-        .handle()
         .duplicate(Rights::WRITE, Some(SECOND_CLIENT_BADGE))
         .expect("mint second client capability");
     FIRST_CLIENT_CAP.store(first.as_raw().raw(), SeqCst);

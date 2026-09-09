@@ -7,7 +7,7 @@ use core::{
 };
 
 use bootstrap_abi::bootstrap;
-use component_abi::{SESSION_SCOPE_MAX, component_sessions};
+use component_abi::{SESSION_SCOPE_MAX, component_startup};
 use device_resolver::{
     DeviceMmio, DeviceSelector, DeviceTreePlatform, PlatformDescription, ResolveError, acquire_mmio,
 };
@@ -15,7 +15,8 @@ use device_resolver_aarch64::PLATFORM_BINDINGS;
 use fdt::devicetree::DeviceTree;
 use ipc::wire::Str;
 use kernel_objects::{
-    BorrowedHandle, IrqControl, MemoryRegion, OwnedHandle, ReadOnlyMapping, Resource, wait_any,
+    BorrowedHandle, IrqControl, IrqLine, MemoryRegion, Port, ReadOnlyMapping, Resource, kind,
+    wait_any,
 };
 use log_abi::{LogBuffer, log};
 use managed_component::{
@@ -42,9 +43,10 @@ pub const STOP_TIMEOUT: Timeout = Timeout::from_secs(5);
 const SUPERVISOR_WAITS: usize = 2;
 
 const WHOLE_EXPORT: &str = "";
+const SINGLE_EXPORT: u16 = 0;
 
 /// Источник делегированных лог-сессий компонентов.
-pub type LogSessions = fn(NonZeroU64) -> Option<OwnedHandle>;
+pub type LogSessions = fn(NonZeroU64) -> Option<Port>;
 
 /// Исход прохода supervisor: этим кодом ядро гасит машину.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,13 +188,14 @@ enum ComponentRecord<'a> {
 pub struct Component<'a> {
     managed: ManagedComponent<ComponentRoots>,
     record: ComponentRecord<'a>,
-    log: OwnedHandle,
+    log: Port,
     owner: Option<u16>,
     charged_launches: u32,
 }
 
 struct Provider<'a> {
     roots: &'a ComponentRoots,
+    startup: BorrowedHandle<'a, kind::Port>,
     plan: PlanComponent<'a>,
 }
 
@@ -202,7 +205,7 @@ pub struct RootSystem<'a> {
     order: Vec<u16>,
     devices: DeviceAuthority,
     extension: Option<ExtensionPort>,
-    kernel: Handle,
+    kernel: Handle<kind::Port>,
     image: &'a SystemImage,
     entries: DecodedImage<'a>,
     resource: Resource,
@@ -305,14 +308,13 @@ impl SlotFailure {
 
 impl SystemImage {
     /// Забирает у ядра capability образа и отображает его read-only.
-    pub fn acquire(kernel: Handle) -> Result<Self, BootFailure> {
+    pub fn acquire(kernel: Handle<kind::Port>) -> Result<Self, BootFailure> {
         let client = bootstrap::Client::new(PortTransport::client(kernel));
         let mut response = client
             .acquire_userland_image()
             .map_err(|_| BootFailure::Image)?;
         let cap = response.value.map_err(|_| BootFailure::Image)?;
-        let handle = response.claim(cap).ok_or(BootFailure::Image)?;
-        let region = MemoryRegion::from_handle(handle.into());
+        let region = MemoryRegion::from(response.claim(cap).ok_or(BootFailure::Image)?);
         let mapping = region
             .map_full_read_only()
             .map_err(|_| BootFailure::Image)?;
@@ -365,16 +367,17 @@ impl DeviceAuthority {
         self.description.is_none()
     }
 
-    fn acquire(kernel: Handle) -> Result<Self, BootFailure> {
+    fn acquire(kernel: Handle<kind::Port>) -> Result<Self, BootFailure> {
         let client = bootstrap::Client::new(PortTransport::client(kernel));
         let mut response = client
             .acquire_boot_fdt()
             .map_err(|_| BootFailure::DeviceAuthority)?;
         let fdt = response.value.map_err(|_| BootFailure::DeviceAuthority)?;
-        let handle = response
-            .claim(fdt.region)
-            .ok_or(BootFailure::DeviceAuthority)?;
-        let region = MemoryRegion::from_handle(handle.into());
+        let region = MemoryRegion::from(
+            response
+                .claim(fdt.region)
+                .ok_or(BootFailure::DeviceAuthority)?,
+        );
         let description = FdtMapping {
             mapping: region
                 .map_full_read_only()
@@ -389,7 +392,7 @@ impl DeviceAuthority {
         Ok(Self {
             description: Some(description),
             _region: Some(region),
-            lines: Some(IrqControl::from_handle(lines.into())),
+            lines: Some(IrqControl::from(lines)),
             windows: Vec::new(),
         })
     }
@@ -412,14 +415,14 @@ impl DeviceAuthority {
         device: PlanDevice<'_>,
         owner: &str,
         kernel_log: &bootstrap::Client<PortTransport>,
-    ) -> Result<OwnedHandle, BootFailure> {
+    ) -> Result<IrqLine, BootFailure> {
         let interrupt = self.first_match(device, |platform, selector| {
             platform.interrupt(selector, device.resource)
         })?;
         let lines = self.lines.as_ref().ok_or(BootFailure::DeviceAuthority)?;
         let number = interrupt.line.number();
         match lines.mint(number, interrupt.trigger) {
-            Ok(line) => Ok(line.into_handle()),
+            Ok(line) => Ok(line),
             Err(kernel_objects::Error::Syscall(SyscallError::AlreadyBound)) => {
                 // Линия принадлежит одному компоненту. Занявший её держит
                 // capability, и второй bind ядро отвергает.
@@ -432,12 +435,12 @@ impl DeviceAuthority {
 
     fn window(
         &mut self,
-        kernel: Handle,
+        kernel: Handle<kind::Port>,
         device: PlanDevice<'_>,
         owner: u16,
         name: &str,
         kernel_log: &bootstrap::Client<PortTransport>,
-    ) -> Result<OwnedHandle, BootFailure> {
+    ) -> Result<MemoryRegion, BootFailure> {
         let window = self.first_match(device, |platform, selector| {
             platform.mmio(selector, device.resource)
         })?;
@@ -461,7 +464,7 @@ impl DeviceAuthority {
         {
             self.windows.push(GrantedWindow { window, owner });
         }
-        Ok(region.into_handle())
+        Ok(region)
     }
 
     fn first_match<R>(
@@ -541,12 +544,10 @@ impl<'a> Provider<'a> {
         let component = components
             .get(usize::from(index))
             .ok_or(BootFailure::Provider)?;
+        let running = component.managed.running().ok_or(BootFailure::Provider)?;
         Ok(Self {
-            roots: component
-                .managed
-                .running()
-                .ok_or(BootFailure::Provider)?
-                .roots(),
+            roots: running.roots(),
+            startup: running.startup(),
             plan: component.record.plan()?,
         })
     }
@@ -557,7 +558,7 @@ impl<'a> RootSystem<'a> {
     pub fn bring_up(
         image: &'a SystemImage,
         plan: BootPlan<'a>,
-        kernel: Handle,
+        kernel: Handle<kind::Port>,
         log_sessions: LogSessions,
     ) -> Result<Self, BootFailure> {
         let entries = image.entries()?;
@@ -619,22 +620,29 @@ impl<'a> RootSystem<'a> {
         Ok(())
     }
 
-    /// Сессия компонента `instance` для вызывателя со значком `caller`. Компонент, которого
-    /// вызыватель не определял, недоступен.
+    /// Сессия экспорта `protocol` компонента `instance` для вызывателя со значком `caller`.
+    /// Компонент, которого вызыватель не определял, и протокол вне его экспортов
+    /// недоступны.
     pub fn caller_session(
         &self,
         caller: NonZeroU64,
         instance: &str,
-    ) -> Result<OwnedHandle, BootFailure> {
+        protocol: &str,
+    ) -> Result<Port, BootFailure> {
         let owner = self.caller_record(caller)?;
         let index = find_instance(&self.components, instance).ok_or(BootFailure::Provider)?;
-        let defined = self
-            .component(index)
-            .is_some_and(|component| component.owner == Some(owner));
-        if !defined {
+        let component = self.component(index).ok_or(BootFailure::Provider)?;
+        if component.owner != Some(owner) {
             return Err(BootFailure::Provider);
         }
-        session(&self.components, instance, caller)
+        let export = component
+            .record
+            .plan()?
+            .exports()
+            .position(|export| export == protocol)
+            .ok_or(BootFailure::Provider)?;
+        let export = u8::try_from(export).map_err(|_| BootFailure::Provider)?;
+        session(&self.components, instance, export, caller)
     }
 
     /// Оборот supervisor. Ждёт завершения любого компонента, потока `relay_thread` либо
@@ -642,7 +650,7 @@ impl<'a> RootSystem<'a> {
     /// компоненту смену.
     ///
     /// Завершение потока пересылки критично. Композиция не восстанавливает его.
-    pub fn supervise_turn(&mut self, relay_thread: Handle) -> Supervised {
+    pub fn supervise_turn(&mut self, relay_thread: Handle<kind::Thread>) -> Supervised {
         let kernel_log = bootstrap::Client::new(PortTransport::client(self.kernel));
         let mut waits = Vec::with_capacity(self.components.len() + SUPERVISOR_WAITS);
         let mut watched: Vec<u16> = Vec::with_capacity(self.components.len());
@@ -650,7 +658,7 @@ impl<'a> RootSystem<'a> {
             let Some(running) = self.component(index).and_then(|c| c.managed.running()) else {
                 continue;
             };
-            waits.push(WaitItem::new(running.process().handle().as_raw(), SIGNALED));
+            waits.push(WaitItem::new(running.process().as_raw(), SIGNALED));
             watched.push(index);
         }
         waits.push(WaitItem::new(relay_thread, SIGNALED));
@@ -819,8 +827,12 @@ impl<'a> RootSystem<'a> {
                 self.extend(caller, definitions)
                     .map_err(BootFailure::refused),
             ),
-            Request::Session { caller, instance } => Answer::Session(
-                self.caller_session(caller, &instance)
+            Request::Session {
+                caller,
+                instance,
+                protocol,
+            } => Answer::Session(
+                self.caller_session(caller, &instance, &protocol)
                     .map_err(refused_session),
             ),
         };
@@ -854,6 +866,7 @@ impl<'a> RootSystem<'a> {
             plan.name(),
             log,
             plan.startup_timeout(),
+            plan.exports().count(),
             slots,
         )
         .map_err(BootFailure::Launch)
@@ -877,28 +890,34 @@ impl<'a> RootSystem<'a> {
             .plan()?;
         let mut slots = ComponentSlots::default();
         for source in plan.slots() {
-            let capability = match source {
-                SlotSource::Userland => image
-                    .region()
-                    .handle()
-                    .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)
-                    .map_err(|_| BootFailure::Slot(SlotFailure::Mint))?,
-                SlotSource::Irq(device) => devices.line(device, plan.name(), &kernel_log)?,
-                SlotSource::Mmio(device) => {
-                    devices.window(*kernel, device, index, plan.name(), &kernel_log)?
+            match source {
+                SlotSource::Userland => slots.push(
+                    image
+                        .region()
+                        .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)
+                        .map_err(|_| BootFailure::Slot(SlotFailure::Mint))?,
+                ),
+                SlotSource::Irq(device) => {
+                    slots.push(devices.line(device, plan.name(), &kernel_log)?)
                 }
-                SlotSource::Service { provider } => session(components, provider, badge)?,
+                SlotSource::Mmio(device) => {
+                    slots.push(devices.window(*kernel, device, index, plan.name(), &kernel_log)?)
+                }
+                SlotSource::Service { provider, export } => {
+                    slots.push(session(components, provider, export, badge)?)
+                }
                 // Область слота-каталога назначает supervisor: путь берёт запись программы.
                 SlotSource::Directory { provider } => {
-                    component_area(components, provider, plan.executable())?
+                    slots.push(component_area(components, provider, plan.executable())?)
                 }
-                SlotSource::Supervisor => extension
-                    .as_ref()
-                    .and_then(|port| port.slot(badge))
-                    .ok_or(BootFailure::Slot(SlotFailure::Mint))?,
-                SlotSource::Control { provider } => control_session(components, provider, badge)?,
-            };
-            slots.push(capability).map_err(BootFailure::Launch)?;
+                SlotSource::Supervisor => slots.push(
+                    extension
+                        .as_ref()
+                        .and_then(|port| port.slot(badge))
+                        .ok_or(BootFailure::Slot(SlotFailure::Mint))?,
+                ),
+            }
+            .map_err(BootFailure::Launch)?;
         }
         Ok(slots)
     }
@@ -1025,7 +1044,7 @@ impl<'a> RootSystem<'a> {
 }
 
 /// Поднимает систему и держит её до завершения критического компонента.
-pub fn supervise(kernel: Handle) -> Stopped {
+pub fn supervise(kernel: Handle<kind::Port>) -> Stopped {
     let kernel_log = bootstrap::Client::new(PortTransport::client(kernel));
     if relay::start(kernel).is_err() {
         // Отказ relay идёт в bootstrap-канал. По отказавшему пути диагностика не проходит.
@@ -1037,7 +1056,7 @@ pub fn supervise(kernel: Handle) -> Stopped {
     stopped
 }
 
-fn run(kernel: Handle, kernel_log: &bootstrap::Client<PortTransport>) -> Stopped {
+fn run(kernel: Handle<kind::Port>, kernel_log: &bootstrap::Client<PortTransport>) -> Stopped {
     let Some(session) = relay::session(relay::SUPERVISOR_BADGE) else {
         let _ = kernel_log.log_str(LOG_TAG, "supervisor log session not minted");
         return Stopped::Startup;
@@ -1071,8 +1090,8 @@ fn run(kernel: Handle, kernel_log: &bootstrap::Client<PortTransport>) -> Stopped
 fn run_composition(
     image: &SystemImage,
     plan: BootPlan<'_>,
-    kernel: Handle,
-    relay_thread: Handle,
+    kernel: Handle<kind::Port>,
+    relay_thread: Handle<kind::Thread>,
     log: &log::Client<PortTransport>,
 ) -> Stopped {
     match RootSystem::bring_up(image, plan, kernel, relay::delegated_session) {
@@ -1128,21 +1147,23 @@ fn plan_needs_devices(plan: &BootPlan<'_>) -> bool {
 fn session(
     components: &[Component<'_>],
     instance: &str,
+    export: u8,
     badge: NonZeroU64,
-) -> Result<OwnedHandle, BootFailure> {
+) -> Result<Port, BootFailure> {
     let provider = Provider::of(components, instance)?;
     // Значки сессий провайдера с состоянием принадлежат ему одному. Минтер супервизора на
-    // его service-порт значков не выдаёт.
+    // порт его экспорта значков не выдаёт.
     if provider.plan.establishes_sessions() {
         return open_session(
-            provider.roots.control(),
+            provider.startup,
             provider.plan.startup_timeout(),
+            u16::from(export),
             WHOLE_EXPORT,
         );
     }
     provider
         .roots
-        .session(badge)
+        .session(usize::from(export), badge)
         .map_err(|_| BootFailure::Slot(SlotFailure::Mint))
 }
 
@@ -1150,30 +1171,21 @@ fn component_area(
     components: &[Component<'_>],
     instance: &str,
     scope: &str,
-) -> Result<OwnedHandle, BootFailure> {
+) -> Result<Port, BootFailure> {
     let provider = Provider::of(components, instance)?;
     // Сузить сессию до области может лишь тот, кто её и создаёт. Сминченный значок области
     // не назначает.
     if !provider.plan.establishes_sessions() {
         return Err(BootFailure::Slot(SlotFailure::Directory));
     }
+    // Слот-каталог протокола не называет, и каталог приходит сессией единственного экспорта.
     open_session(
-        provider.roots.control(),
+        provider.startup,
         provider.plan.startup_timeout(),
+        SINGLE_EXPORT,
         scope,
     )
     .map_err(|_| BootFailure::Slot(SlotFailure::Directory))
-}
-
-fn control_session(
-    components: &[Component<'_>],
-    instance: &str,
-    badge: NonZeroU64,
-) -> Result<OwnedHandle, BootFailure> {
-    Provider::of(components, instance)?
-        .roots
-        .control_session(badge)
-        .map_err(|_| BootFailure::Slot(SlotFailure::Mint))
 }
 
 fn start_order(components: &[Component<'_>]) -> Result<Vec<u16>, BootFailure> {
@@ -1218,9 +1230,9 @@ fn dependencies<'a>(
     Ok(plan
         .slots()
         .filter_map(|slot| match slot {
-            SlotSource::Service { provider }
-            | SlotSource::Directory { provider }
-            | SlotSource::Control { provider } => Some(provider),
+            SlotSource::Service { provider, .. } | SlotSource::Directory { provider } => {
+                Some(provider)
+            }
             _ => None,
         })
         .chain(plan.after()))
@@ -1243,15 +1255,16 @@ fn find_instance(components: &[Component<'_>], instance: &str) -> Option<u16> {
 }
 
 fn open_session(
-    control: BorrowedHandle<'_>,
+    startup: BorrowedHandle<'_, kind::Port>,
     timeout: Timeout,
+    export: u16,
     scope: &str,
-) -> Result<OwnedHandle, BootFailure> {
+) -> Result<Port, BootFailure> {
     let scope =
         Str::<SESSION_SCOPE_MAX>::new(scope).ok_or(BootFailure::Slot(SlotFailure::Session))?;
-    let mut response = component_sessions::Client::new(PortTransport::client(control))
+    let mut response = component_startup::Client::new(PortTransport::client(startup))
         .with_wait(timeout)
-        .open_session(scope)
+        .open_session(export, scope)
         .map_err(|_| BootFailure::Slot(SlotFailure::Session))?;
     let session = response
         .value

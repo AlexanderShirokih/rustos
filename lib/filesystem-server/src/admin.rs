@@ -1,15 +1,12 @@
-//! Обслуживание control-порта: установление сессий владельцем компонента вместе с областью,
-//! до которой сессия сужена.
+//! Обслуживание startup-порта после стартовой транзакции: установление сессий владельцем
+//! компонента вместе с областью, до которой сессия сужена.
 
-use component_abi::{SESSION_SCOPE_MAX, SessionError, component_sessions};
+use component_abi::{SESSION_SCOPE_MAX, SessionError, component_startup};
 use filesystem_abi::{FileSystemError, PATH_MAX};
 use ipc::wire::{Cap, Str};
-use kernel_objects::OwnedHandle;
+use kernel_objects::{OwnedHandle, kind, settle, vend};
 
-use crate::{
-    Shared,
-    service::{mint_session, settle, vend},
-};
+use crate::{Shared, service::mint_session};
 
 const _: () = assert!(
     // Область приходит контрактом компонента, а путём её делает контракт файловой системы.
@@ -19,7 +16,7 @@ const _: () = assert!(
 
 pub(crate) struct Establishing<'a> {
     shared: &'a Shared,
-    vended: Option<OwnedHandle>,
+    vended: Option<OwnedHandle<kind::Any>>,
 }
 
 impl<'a> Establishing<'a> {
@@ -35,8 +32,24 @@ impl<'a> Establishing<'a> {
     }
 }
 
-impl component_sessions::Service for Establishing<'_> {
-    fn open_session(&mut self, scope: Str<'_, SESSION_SCOPE_MAX>) -> Result<Cap, SessionError> {
+impl component_startup::Service for Establishing<'_> {
+    fn begin(&mut self, _log: Cap<kind::Port>, _export_count: u16, _slot_count: u16) {
+        // Стартовая транзакция уже принята, и её кадры на рабочей фазе ответа не имеют.
+    }
+
+    fn export(&mut self, _capability: Cap<kind::Port>) {}
+
+    fn slot(&mut self, _capability: Cap<kind::Any>) {}
+
+    fn open_session(
+        &mut self,
+        export: u16,
+        scope: Str<'_, SESSION_SCOPE_MAX>,
+    ) -> Result<Cap<kind::Port>, SessionError> {
+        // Экспорт у файловой системы один.
+        if export != 0 {
+            return Err(SessionError::Refused);
+        }
         let (badge, session) =
             mint_session(&self.shared.service, &self.shared.next_badge).map_err(refused)?;
         // Сессия создаётся до того, как её капа ушла клиенту. Кадр по ней застанет её созданной.

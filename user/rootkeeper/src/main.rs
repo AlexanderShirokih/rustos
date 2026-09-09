@@ -10,11 +10,11 @@ use core::panic::PanicInfo;
 
 use rootkeeper::{STOP_TIMEOUT, Stopped, relay, supervise};
 use runtime::thread_exit;
-use syscall::Handle;
+use syscall::{Handle, kind};
 
 /// `root` приходит в x0 как HandleId bootstrap Port, переданного ядром.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(root: Handle) -> ! {
+pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
     thread_exit(supervise(root).into())
 }
 

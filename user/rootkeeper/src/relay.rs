@@ -4,12 +4,12 @@
 use alloc::{string::String, vec::Vec};
 use core::num::NonZeroU64;
 
-use kernel_objects::{OwnedHandle, Result};
+use kernel_objects::{Port, Result};
 use log_abi::{LOG_SOURCE_MAX, LogBuffer};
 use log_relay::{KernelLogSink, LogRelayThread, SourceNames};
 use runtime::Timeout;
 use spin::Mutex;
-use syscall::Handle;
+use syscall::{Handle, kind};
 
 /// Значок лог-сессии супервизора.
 pub const SUPERVISOR_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
@@ -53,7 +53,7 @@ impl SourceNames for ComponentNames {
 
 /// Создаёт лог-порт и его выделенный поток. `kernel` - bootstrap-капа ядра, которую
 /// получает только сток relay.
-pub fn start(kernel: Handle) -> Result<()> {
+pub fn start(kernel: Handle<kind::Port>) -> Result<()> {
     let relay = LogRelayThread::start(ComponentNames, KernelLogSink::new(kernel))?;
     *RELAY.lock() = Some(relay);
     Ok(())
@@ -72,19 +72,19 @@ pub fn install_names<'a>(ids: impl Iterator<Item = &'a str>) {
 
 /// Минтит лог-сессию со значком `badge`.
 #[must_use]
-pub fn session(badge: NonZeroU64) -> Option<OwnedHandle> {
+pub fn session(badge: NonZeroU64) -> Option<Port> {
     RELAY.lock().as_ref()?.session(badge).ok()
 }
 
 /// Минтит лог-сессию подсистемы, раздающей логирование своим процессам.
 #[must_use]
-pub fn delegated_session(badge: NonZeroU64) -> Option<OwnedHandle> {
+pub fn delegated_session(badge: NonZeroU64) -> Option<Port> {
     RELAY.lock().as_ref()?.delegated_session(badge).ok()
 }
 
 /// Waitable handle потока пересылки.
 #[must_use]
-pub fn thread_handle() -> Option<Handle> {
+pub fn thread_handle() -> Option<Handle<kind::Thread>> {
     RELAY.lock().as_ref().map(LogRelayThread::handle)
 }
 

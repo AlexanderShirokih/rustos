@@ -1,5 +1,7 @@
 //! Кодирование полей протокола.
 
+use syscall::{Handle, ObjectKind};
+
 use crate::{
     schema::WireType,
     wire::{
@@ -209,11 +211,11 @@ impl<'a, const N: usize> WireValue<'a> for Bytes<'a, N> {
     }
 }
 
-impl WireTyped for Cap {
+impl<K: ObjectKind> WireTyped for Cap<K> {
     const WIRE_TYPE: WireType = WireType::Capability;
 }
 
-impl<'a> WireValue<'a> for Cap {
+impl<'a, K: ObjectKind> WireValue<'a> for Cap<K> {
     fn write_as_field<const N: usize>(
         &self,
         buf: &mut MessageBuf<N>,
@@ -227,12 +229,14 @@ impl<'a> WireValue<'a> for Cap {
     fn from_field(data: &'a [u8], handles: &HandleSlots) -> Result<Self, IpcError> {
         let raw = handles.take(value::decode_port_index(data)?)?;
         let id = core::num::NonZeroU32::new(raw).ok_or(IpcError::InvalidValue)?;
-        Ok(Cap::from_raw(id))
+        Ok(Cap::from_handle(Handle::from_abi(id)))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use syscall::{Handle, kind};
+
     use super::WireValue;
     use crate::wire::{
         Bytes, Cap, FieldCursor, HandleSlots, IpcError, MESSAGE_INLINE_MAX, MessageBuf, Str,
@@ -326,7 +330,9 @@ mod tests {
     }
     #[test]
     fn cap_round_trip_through_the_handle_slots() {
-        let cap = Cap::from_raw(core::num::NonZeroU32::new(0x2A).expect("non-zero"));
+        let cap = Cap::<kind::Port>::from_handle(Handle::from_abi(
+            core::num::NonZeroU32::new(0x2A).expect("non-zero"),
+        ));
         let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
         let mut handles = HandleSlots::new();
         cap.write_as_field(&mut buf, FIELD_ID, &mut handles)
@@ -340,14 +346,16 @@ mod tests {
         let field = cursor.next_field().expect("ok").expect("present");
         let received = HandleSlots::from_received(handles.as_slice());
         assert_eq!(
-            <Cap as WireValue>::from_field(field.data, &received),
+            <Cap<kind::Port> as WireValue>::from_field(field.data, &received),
             Ok(cap)
         );
     }
 
     #[test]
     fn cap_from_field_consumes_its_slot_once() {
-        let cap = Cap::from_raw(core::num::NonZeroU32::new(0x2A).expect("non-zero"));
+        let cap = Cap::<kind::Port>::from_handle(Handle::from_abi(
+            core::num::NonZeroU32::new(0x2A).expect("non-zero"),
+        ));
         let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
         let mut handles = HandleSlots::new();
         cap.write_as_field(&mut buf, FIELD_ID, &mut handles)
@@ -358,12 +366,12 @@ mod tests {
         let field = cursor.next_field().expect("ok").expect("present");
         let received = HandleSlots::from_received(handles.as_slice());
         assert_eq!(
-            <Cap as WireValue>::from_field(field.data, &received),
+            <Cap<kind::Port> as WireValue>::from_field(field.data, &received),
             Ok(cap)
         );
         // Второе поле с тем же индексом - это второй владелец того же хэндла.
         assert_eq!(
-            <Cap as WireValue>::from_field(field.data, &received),
+            <Cap<kind::Port> as WireValue>::from_field(field.data, &received),
             Err(IpcError::InvalidValue)
         );
     }
@@ -376,7 +384,7 @@ mod tests {
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("ok").expect("present");
         assert_eq!(
-            <Cap as WireValue>::from_field(field.data, &HandleSlots::new()),
+            <Cap<kind::Port> as WireValue>::from_field(field.data, &HandleSlots::new()),
             Err(IpcError::InvalidValue)
         );
     }

@@ -14,9 +14,11 @@
 /// односторонняя операция от клиента к серверу, `event fn` - односторонняя операция от
 /// сервера к клиенту.
 ///
-/// Параметр, объявленный словом `Cap`, и возврат `-> Cap` передают владеющий хэндл через
-/// [`IntoWireHandle`](crate::IntoWireHandle). Всякий другой параметр кодируется как
-/// [`WireValue`](crate::WireValue), а форма ответа - как [`WireReply`](crate::WireReply).
+/// Параметр, объявленный словом `Cap<K>`, и возврат `-> Cap<K>` передают владеющий хэндл
+/// вида `K` через [`IntoWireHandle`](crate::IntoWireHandle). Всякий другой параметр
+/// кодируется как [`WireValue`](crate::WireValue), а форма ответа - как
+/// [`WireReply`](crate::WireReply). Тот же тип, записанный квалифицированным путём
+/// `ipc::wire::Cap<K>`, идёт общей веткой и владения не передаёт.
 ///
 /// Заголовок объявления задаёт ключи. `name = "Proto"` называет протокол и входит в
 /// каноническое имя каждой операции, `plane = ring` переводит контракт на SPSC-кольцо,
@@ -88,9 +90,9 @@
 /// раз, и второе поле кадра с тем же индексом отвергается как `InvalidValue`. Капы, которых
 /// разбор не потребил, закрываются вместе с кадром, и отдельной очистки обработчик не делает.
 ///
-/// Объявление операции, отдающей владеющий хэндл. Слово `Cap` в возврате выбирает
-/// [`IntoWireHandle`](crate::IntoWireHandle) на серверной стороне, а клиент забирает хэндл у
-/// [`Response`](crate::Response) вызовом `claim`:
+/// Объявление операции, отдающей владеющий хэндл. Слово `Cap<K>` в возврате выбирает
+/// [`IntoWireHandle`](crate::IntoWireHandle) вида `K` на серверной стороне, а клиент
+/// забирает хэндл того же вида у [`Response`](crate::Response) вызовом `claim`:
 ///
 /// ```ignore
 /// ipc::protocol! {
@@ -98,12 +100,82 @@
 ///         name = "Vault";
 ///
 ///         /// Открывает сессию хранилища и отдаёт её порт.
-///         call fn open() -> Cap;
+///         call fn open() -> Cap<syscall::kind::Port>;
 ///     }
 /// }
 ///
-/// // Сервис реализует `fn open(&mut self) -> impl IntoWireHandle`.
-/// // Клиент получает `Response<Cap, _>` и забирает хэндл вызовом `claim`.
+/// // Сервис реализует `fn open(&mut self) -> impl IntoWireHandle<Kind = kind::Port>`.
+/// // Клиент получает `Response<Cap<kind::Port>, _>` и забирает хэндл вызовом `claim`.
+/// ```
+///
+/// Раскрытие сохраняет объявленный вид в владеющем аргументе, прямом ответе, `Result` и
+/// вложенном агрегате. Реализация сервиса, объявляющая тот же вид, собирается:
+///
+/// ```no_run
+/// use syscall::{Handle, kind};
+///
+/// ipc::wire_value! {
+///     pub struct Bound {
+///         pub session: ipc::wire::Cap<kind::Port>,
+///     }
+/// }
+///
+/// ipc::protocol! {
+///     mod store {
+///         name = "Store";
+///
+///         cast fn attach(region: Cap<kind::MemoryRegion>);
+///         call fn open() -> Cap<kind::Port>;
+///         call fn acquire() -> Result<ipc::wire::Cap<kind::MemoryRegion>, u32>;
+///         call fn bind() -> Bound;
+///     }
+/// }
+///
+/// fn cap<K: syscall::ObjectKind>() -> ipc::wire::Cap<K> {
+///     ipc::wire::Cap::from_handle(Handle::from_abi(core::num::NonZeroU32::MIN))
+/// }
+///
+/// struct Server;
+///
+/// impl store::Service for Server {
+///     fn attach(&mut self, _region: ipc::wire::Cap<kind::MemoryRegion>) {}
+///
+///     fn open(&mut self) -> impl ipc::IntoWireHandle<Kind = kind::Port> {
+///         cap::<kind::Port>()
+///     }
+///
+///     fn acquire(&mut self) -> Result<ipc::wire::Cap<kind::MemoryRegion>, u32> {
+///         Ok(cap())
+///     }
+///
+///     fn bind(&mut self) -> Bound {
+///         Bound { session: cap() }
+///     }
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// Владеющий аргумент другого вида раскрытие отвергает:
+///
+/// ```compile_fail
+/// use syscall::kind;
+///
+/// ipc::protocol! {
+///     mod store {
+///         name = "Store";
+///
+///         cast fn attach(region: Cap<kind::MemoryRegion>);
+///     }
+/// }
+///
+/// struct Server;
+///
+/// impl store::Service for Server {
+///     fn attach(&mut self, _region: ipc::wire::Cap<kind::Port>) {}
+/// }
+///
+/// fn main() {}
 /// ```
 #[macro_export]
 macro_rules! protocol {
@@ -157,12 +229,13 @@ macro_rules! protocol {
 
     (@ops $ctx:tt [$($done:tt)*]
         $(#[$doc:meta])* call $(( wait = $wait:literal ))? fn $op:ident ( $($params:tt)* )
-            -> Cap ; $($rest:tt)*
+            -> Cap < $kind:ty > ; $($rest:tt)*
     ) => {
         $crate::protocol!(@params
             ctx = $ctx done = [$($done)*] rest = [$($rest)*]
             head = [call $op [$(#[$doc])*]
-                    [$crate::wire::Cap] [impl $crate::IntoWireHandle]
+                    [$crate::wire::Cap<$kind>]
+                    [impl $crate::IntoWireHandle<Kind = $kind>]
                     [$crate::WireReplyHandle] [$crate::IntoWireHandle::relinquish]
                     [$($wait)?]]
             acc = [] id = $crate::wire::FIELD_ID_MIN;
@@ -210,11 +283,13 @@ macro_rules! protocol {
 
     (@params ctx = $ctx:tt done = $done:tt rest = $rest:tt
         head = $head:tt acc = [$($acc:tt)*] id = $id:expr;
-        $param:ident : Cap $(, $($more:tt)*)?
+        $param:ident : Cap < $kind:ty > $(, $($more:tt)*)?
     ) => {
         $crate::protocol!(@params
             ctx = $ctx done = $done rest = $rest head = $head
-            acc = [$($acc)* { $id , $param , impl $crate::IntoWireHandle , $crate::wire::Cap ,
+            acc = [$($acc)* { $id , $param ,
+                              impl $crate::IntoWireHandle<Kind = $kind> ,
+                              $crate::wire::Cap<$kind> ,
                               [$crate::IntoWireHandle] , [$crate::IntoWireHandle::relinquish] }]
             id = $id + 1u8;
             $($($more)*)?

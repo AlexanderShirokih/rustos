@@ -6,6 +6,7 @@ publish.workspace = true
 workspace = "../../tools"
 
 [dependencies]
+syscall = { workspace = true }
 ipc = { workspace = true }
 
 [lints]

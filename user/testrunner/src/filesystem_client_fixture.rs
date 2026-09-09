@@ -9,7 +9,7 @@ use core::panic::PanicInfo;
 use filesystem_abi::{AccessMode, OpenFlags, file_system};
 use ipc::wire::Str;
 use runtime::{PortTransport, thread_exit};
-use syscall::{Handle, Timeout};
+use syscall::{Handle, Timeout, kind};
 
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -22,11 +22,11 @@ const PATH: &str = "/fixture";
 /// узнаёт об уходе значка сессии. `service` - заклеймённая капа сервисного
 /// порта.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(service: Handle) -> ! {
+pub extern "C" fn _start(service: Handle<kind::Port>) -> ! {
     thread_exit(u64::from(!populate_session(service)))
 }
 
-fn populate_session(service: Handle) -> bool {
+fn populate_session(service: Handle<kind::Port>) -> bool {
     let client = file_system::Client::new(PortTransport::client(service)).with_wait(CALL_TIMEOUT);
 
     // Выданный буфер закрывает ответ: фикстуре довольно самой выдачи.

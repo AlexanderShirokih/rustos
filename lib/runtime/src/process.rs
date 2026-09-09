@@ -2,9 +2,9 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use syscall::Handle;
+use syscall::{Handle, kind};
 
-use crate::svc;
+use crate::{restore, svc};
 
 static METERING: AtomicU32 = AtomicU32::new(0);
 
@@ -21,8 +21,8 @@ pub fn start(bootstrap: u32) {
 ///
 /// По этому handle компонент композиции принимает стартовый набор capability, а корень
 /// композиции обращается к ядру. Владение уходит вызывающему, и выдача одна.
-pub fn take_bootstrap() -> Option<Handle> {
-    Handle::new(BOOTSTRAP.swap(0, Ordering::AcqRel))
+pub fn take_bootstrap() -> Option<Handle<kind::Any>> {
+    restore(BOOTSTRAP.swap(0, Ordering::AcqRel))
 }
 
 /// Завершает процесс со всеми его потоками. Не возвращается.
@@ -31,8 +31,8 @@ pub fn exit(code: i32) -> ! {
 }
 
 /// Кэшированный handle метеринг-ресурса процесса.
-pub fn metering_handle() -> Option<Handle> {
-    if let Some(cached) = Handle::new(METERING.load(Ordering::Acquire)) {
+pub fn metering_handle() -> Option<Handle<kind::Resource>> {
+    if let Some(cached) = restore(METERING.load(Ordering::Acquire)) {
         return Some(cached);
     }
 
@@ -43,7 +43,7 @@ pub fn metering_handle() -> Option<Handle> {
         Ok(_) => Some(fresh),
         Err(existing) => {
             svc::handle_close(fresh);
-            Handle::new(existing)
+            restore(existing)
         }
     }
 }

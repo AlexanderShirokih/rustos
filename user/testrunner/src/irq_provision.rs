@@ -3,7 +3,7 @@
 //! Сквозной прогон пути выдачи vend -> transfer -> install -> use из userspace.
 
 use bootstrap_abi::bootstrap;
-use kernel_objects::{Error, IrqControl, OwnedHandle};
+use kernel_objects::{Error, IrqControl};
 use kernel_tests::kernel_test;
 use runtime::PortTransport;
 use syscall::{IrqTrigger, SyscallError};
@@ -29,7 +29,7 @@ fn acquire_irq_control_and_mint_line() {
         .expect("acquire_irq_control call");
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
-    let control = IrqControl::from_handle(OwnedHandle::from(cap));
+    let control = IrqControl::from(cap);
 
     // Успешный минт доказывает, что доставленный capability установлен ядром в таблицу процесса.
     let line = control
@@ -49,7 +49,7 @@ fn minting_a_line_twice_names_the_taken_line() {
         .expect("acquire_irq_control call");
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
-    let control = IrqControl::from_handle(OwnedHandle::from(cap));
+    let control = IrqControl::from(cap);
     let line = control
         .mint(SPARE_IRQ, IrqTrigger::Level)
         .expect("mint IrqLine");
@@ -90,7 +90,7 @@ fn irq_band_ends_at_the_platform_line_count() {
         .expect("acquire_irq_control call");
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
-    let control = IrqControl::from_handle(OwnedHandle::from(cap));
+    let control = IrqControl::from(cap);
 
     let outside = first_line_outside(&control);
 
@@ -112,7 +112,7 @@ fn irq_band_starts_above_the_private_lines() {
         .expect("acquire_irq_control call");
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
-    let control = IrqControl::from_handle(OwnedHandle::from(cap));
+    let control = IrqControl::from(cap);
 
     // Нижний край полосы архитектурно фиксирован SPI_BASE: `PRIVATE_IRQ_MAX` -
     // последняя приватная линия CPU, вне полосы на любой машине.

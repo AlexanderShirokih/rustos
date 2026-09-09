@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+mod atomic_handle;
 mod clock;
 // Стандартная библиотека берёт futex по пути модуля. Её реализации мьютекса, condvar, rwlock и
 // парковки потока импортируют `crate::sys::futex::{self, ...}`.
@@ -25,6 +26,7 @@ pub mod sync;
 pub mod thread;
 pub mod tls;
 
+pub(crate) use atomic_handle::restore;
 pub use clock::Instant;
 pub use futex::{
     Futex, futex_bucket, futex_wait, futex_wait_interleaved, futex_wait_without_slot, futex_wake,
@@ -35,7 +37,9 @@ pub use log::{fmt as log_fmt, install as install_log, line as log_line};
 pub use process::{exit, metering_handle, start, take_bootstrap};
 pub use startup::receive_startup;
 pub use sync::{Condvar, Mutex, MutexGuard};
-pub use syscall::{Handle, MemoryAccess, MemoryProfile, Priority, Timeout, UserMemFlags};
+pub use syscall::{
+    Handle, MemoryAccess, MemoryProfile, ObjectKind, Priority, Timeout, UserMemFlags, kind,
+};
 pub(crate) use syscall_user as svc;
 pub use syscall_user::{
     PortTransport, handle_close, handle_duplicate, ipc_buffer_addr, ipc_buffer_ptr, irq_ack,

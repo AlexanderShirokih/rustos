@@ -16,7 +16,7 @@
 
 use std::os::molecular;
 
-use component_startup::{OwnedHandle, ReceivedStartup, StartupError};
+use component_startup::{Port, ReceivedStartup, StartupError};
 
 mod handle;
 
@@ -28,11 +28,12 @@ pub use handle::into_std_handle;
 ///
 /// `receive` - приёмник из объявления `component_startup::component_manifest!`.
 pub fn receive<T>(
-    receive: impl FnOnce(OwnedHandle) -> Result<ReceivedStartup<T>, StartupError>,
+    receive: impl FnOnce(Port) -> Result<ReceivedStartup<T>, StartupError>,
 ) -> Result<T, StartupError> {
     let startup = molecular::take_start_handle().ok_or(StartupError::MissingStartHandle)?;
-    let startup =
-        OwnedHandle::from_raw(startup.into_raw().get()).ok_or(StartupError::MissingStartHandle)?;
+    // Стартовый handle стандартной библиотеки содержит только номер записи. Вид порта задан
+    // контрактом стартовой транзакции, и здесь он применяется к принятой записи.
+    let startup = Port::from_handle(component_startup::Handle::from_abi(startup.into_raw()));
 
     let received = receive(startup)?;
     molecular::install_log(into_std_handle(received.log));

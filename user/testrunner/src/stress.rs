@@ -3,11 +3,12 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     fmt::{self, Write as _},
-    num::NonZeroU64,
+    marker::PhantomData,
+    num::{NonZeroU32, NonZeroU64},
     sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::SeqCst},
 };
 
-use kernel_objects::{Error, OwnedHandle, Port, Resource, Signal};
+use kernel_objects::{Error, ObjectKind, Port, Resource, Signal, kind};
 use kernel_tests::kernel_test;
 use rootkeeper::SystemImage;
 use runtime::{
@@ -269,45 +270,47 @@ impl fmt::Display for StepFailure {
     }
 }
 
-struct WorkerState {
+struct WorkerState<K: ObjectKind> {
     handle: u32,
     payload: u64,
     ready: AtomicBool,
     result: AtomicI64,
     observed: AtomicU64,
+    kind: PhantomData<K>,
 }
 
-impl WorkerState {
-    fn new(handle: Handle, payload: u64) -> Arc<Self> {
+impl<K: ObjectKind> WorkerState<K> {
+    fn new(handle: Handle<K>, payload: u64) -> Arc<Self> {
         Arc::new(Self {
             handle: handle.raw(),
             payload,
             ready: AtomicBool::new(false),
             result: AtomicI64::new(i64::MIN),
             observed: AtomicU64::new(0),
+            kind: PhantomData,
         })
     }
 
-    fn handle(&self) -> Option<Handle> {
-        Handle::new(self.handle)
+    fn handle(&self) -> Option<Handle<K>> {
+        NonZeroU32::new(self.handle).map(Handle::from_abi)
     }
 }
 
-fn worker_state(arg: usize) -> Arc<WorkerState> {
+fn worker_state<K: ObjectKind>(arg: usize) -> Arc<WorkerState<K>> {
     // SAFETY: arg получен из Arc::into_raw в spawn_worker ровно для этого потока;
     // from_raw забирает ту самую ссылку и освобождает её на выходе из worker.
-    unsafe { Arc::from_raw(arg as *const WorkerState) }
+    unsafe { Arc::from_raw(arg as *const WorkerState<K>) }
 }
 
-fn spawn_worker(
+fn spawn_worker<K: ObjectKind>(
     entry: extern "C" fn(usize) -> u32,
-    state: &Arc<WorkerState>,
+    state: &Arc<WorkerState<K>>,
     spawn_error: i64,
 ) -> Result<JoinHandle, FailureKind> {
     let arg = Arc::into_raw(Arc::clone(state)) as usize;
     spawn(entry, arg, STACK_SIZE, Priority::new(1)).map_err(|_| {
         // SAFETY: поток не стартовал, ссылку из into_raw забрать больше некому.
-        drop(unsafe { Arc::from_raw(arg as *const WorkerState) });
+        drop(unsafe { Arc::from_raw(arg as *const WorkerState<K>) });
         FailureKind::violated(spawn_error)
     })
 }
@@ -343,7 +346,7 @@ pub(crate) fn read_payload() -> Option<u64> {
 }
 
 extern "C" fn send_worker(arg: usize) -> u32 {
-    let state = worker_state(arg);
+    let state = worker_state::<kind::Port>(arg);
     state.ready.store(true, SeqCst);
     if !write_payload(state.payload) {
         state.result.store(-1000, SeqCst);
@@ -357,7 +360,7 @@ extern "C" fn send_worker(arg: usize) -> u32 {
 }
 
 extern "C" fn call_worker(arg: usize) -> u32 {
-    let state = worker_state(arg);
+    let state = worker_state::<kind::Port>(arg);
     state.ready.store(true, SeqCst);
     if !write_payload(state.payload) {
         state.result.store(-1000, SeqCst);
@@ -374,7 +377,7 @@ extern "C" fn call_worker(arg: usize) -> u32 {
 }
 
 extern "C" fn signal_wait_worker(arg: usize) -> u32 {
-    let state = worker_state(arg);
+    let state = worker_state::<kind::Signal>(arg);
     state.ready.store(true, SeqCst);
     let result = state.handle().map_or(-1001, |handle| {
         signal_wait_one(handle, SIGNALED, OPERATION_TIMEOUT)
@@ -383,7 +386,7 @@ extern "C" fn signal_wait_worker(arg: usize) -> u32 {
     0
 }
 
-fn wait_until_ready(state: &WorkerState) -> Result<(), FailureKind> {
+fn wait_until_ready<K: ObjectKind>(state: &WorkerState<K>) -> Result<(), FailureKind> {
     for _ in 0..READY_SPIN_LIMIT {
         if state.ready.load(SeqCst) {
             return Ok(());
@@ -401,7 +404,7 @@ fn join(worker: JoinHandle) -> Result<(), FailureKind> {
         .map_err(|error| FailureKind::from_error("join", JOIN_TIMEOUT, error.into(), -1002))
 }
 
-fn worker_outcome(state: &WorkerState) -> Result<(), FailureKind> {
+fn worker_outcome<K: ObjectKind>(state: &WorkerState<K>) -> Result<(), FailureKind> {
     match state.result.load(SeqCst) {
         0 => Ok(()),
         result => Err(FailureKind::from_return(
@@ -412,7 +415,11 @@ fn worker_outcome(state: &WorkerState) -> Result<(), FailureKind> {
     }
 }
 
-fn port_send_recv(port: &Port, sender: Handle, payload: u64) -> Result<(), FailureKind> {
+fn port_send_recv(
+    port: &Port,
+    sender: Handle<kind::Port>,
+    payload: u64,
+) -> Result<(), FailureKind> {
     let state = WorkerState::new(sender, payload);
     let worker = spawn_worker(send_worker, &state, -1101)?;
     wait_until_ready(&state)?;
@@ -428,7 +435,11 @@ fn port_send_recv(port: &Port, sender: Handle, payload: u64) -> Result<(), Failu
     worker_outcome(&state)
 }
 
-fn port_call_reply(port: &Port, sender: Handle, payload: u64) -> Result<(), FailureKind> {
+fn port_call_reply(
+    port: &Port,
+    sender: Handle<kind::Port>,
+    payload: u64,
+) -> Result<(), FailureKind> {
     let state = WorkerState::new(sender, payload);
     let worker = spawn_worker(call_worker, &state, -1201)?;
     wait_until_ready(&state)?;
@@ -456,7 +467,11 @@ fn port_call_reply(port: &Port, sender: Handle, payload: u64) -> Result<(), Fail
     }
 }
 
-fn signal_set_wait(signal: &Signal, waiter: Handle, payload: u64) -> Result<(), FailureKind> {
+fn signal_set_wait(
+    signal: &Signal,
+    waiter: Handle<kind::Signal>,
+    payload: u64,
+) -> Result<(), FailureKind> {
     let state = WorkerState::new(waiter, payload);
     let worker = spawn_worker(signal_wait_worker, &state, -1301)?;
     wait_until_ready(&state)?;
@@ -507,7 +522,6 @@ fn signal_close_wait(payload: u64) -> Result<(), FailureKind> {
 fn port_peer_close(payload: u64) -> Result<(), FailureKind> {
     let port = Port::create().map_err(|_| FailureKind::violated(-1500))?;
     let client = port
-        .handle()
         .duplicate(Rights::WRITE, Some(NonZeroU64::MIN.saturating_add(payload)))
         .map_err(|_| FailureKind::violated(-1501))?;
     let state = WorkerState::new(client.as_raw(), payload);
@@ -599,35 +613,36 @@ impl PoolItem {
         }
     }
 
-    fn own_handle(&self) -> Handle {
-        match self {
-            Self::Port(port) => port.handle().as_raw(),
-            Self::Signal(signal) => signal.handle().as_raw(),
-        }
-    }
-
-    fn derive(&self, badge: NonZeroU64) -> Result<OwnedHandle, StepFailure> {
-        // Порту передаётся право слать, сигналу - право ждать.
+    fn derive(&self, badge: NonZeroU64) -> Result<Self, StepFailure> {
+        // Порту передаётся право слать, сигналу - право ждать. Производная того же вида,
+        // что и её источник.
         match self {
             Self::Port(port) => port
-                .handle()
                 .duplicate(Rights::WRITE, Some(badge))
+                .map(Self::Port)
                 .map_err(|_| StepFailure::of("derive", FailureKind::violated(-1700))),
             Self::Signal(signal) => signal
-                .handle()
                 .duplicate(Rights::READ, Some(badge))
+                .map(Self::Signal)
                 .map_err(|_| StepFailure::of("derive", FailureKind::violated(-1701))),
         }
     }
 
-    fn exercise(&self, handle: Handle, variant: u64, payload: u64) -> Result<(), StepFailure> {
-        match self {
-            Self::Port(port) if variant.is_multiple_of(2) => port_send_recv(port, handle, payload)
-                .map_err(|kind| StepFailure::of("port_send_recv", kind)),
-            Self::Port(port) => port_call_reply(port, handle, payload)
-                .map_err(|kind| StepFailure::of("port_call_reply", kind)),
-            Self::Signal(signal) => signal_set_wait(signal, handle, payload)
-                .map_err(|kind| StepFailure::of("signal_set_wait", kind)),
+    fn exercise(&self, sender: &Self, variant: u64, payload: u64) -> Result<(), StepFailure> {
+        match (self, sender) {
+            (Self::Port(port), Self::Port(client)) if variant.is_multiple_of(2) => {
+                port_send_recv(port, client.as_raw(), payload)
+                    .map_err(|kind| StepFailure::of("port_send_recv", kind))
+            }
+            (Self::Port(port), Self::Port(client)) => {
+                port_call_reply(port, client.as_raw(), payload)
+                    .map_err(|kind| StepFailure::of("port_call_reply", kind))
+            }
+            (Self::Signal(signal), Self::Signal(waiter)) => {
+                signal_set_wait(signal, waiter.as_raw(), payload)
+                    .map_err(|kind| StepFailure::of("signal_set_wait", kind))
+            }
+            _ => Err(StepFailure::of("exercise", FailureKind::violated(-1704))),
         }
     }
 
@@ -698,13 +713,13 @@ impl Pool {
             }
             StepKind::Use => {
                 let item = &self.items[step.index];
-                item.exercise(item.own_handle(), step.variant, step.payload)
+                item.exercise(item, step.variant, step.payload)
             }
             StepKind::Transfer => {
                 let item = &self.items[step.index];
                 let badge = NonZeroU64::MIN.saturating_add(step.payload);
                 let derived = item.derive(badge)?;
-                item.exercise(derived.as_raw(), step.variant, step.payload)?;
+                item.exercise(&derived, step.variant, step.payload)?;
                 drop(derived);
                 item.drain_departure(badge)
             }
@@ -1043,7 +1058,6 @@ fn an_operation_out_of_time_is_not_a_violated_assertion() {
 fn a_refused_operation_is_not_an_expiry() {
     let signal = Signal::create().expect("signal of the probe");
     let blind = signal
-        .handle()
         .duplicate(Rights::WRITE, None)
         .expect("a derived handle without READ");
 

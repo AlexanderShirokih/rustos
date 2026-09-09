@@ -4,9 +4,8 @@ use syscall::Timeout;
 
 use crate::plan::{
     BOOT_PLAN_MAGIC, BOOT_PLAN_VERSION, EXHAUSTED_DETACH, EXHAUSTED_HALT,
-    FLAG_ESTABLISHES_SESSIONS, OnExhausted, PLAN_HEADER_SIZE, SLOT_KIND_CONTROL,
-    SLOT_KIND_DIRECTORY, SLOT_KIND_IRQ, SLOT_KIND_MMIO, SLOT_KIND_SERVICE, SLOT_KIND_SUPERVISOR,
-    SLOT_KIND_USERLAND,
+    FLAG_ESTABLISHES_SESSIONS, OnExhausted, PLAN_HEADER_SIZE, SLOT_KIND_DIRECTORY, SLOT_KIND_IRQ,
+    SLOT_KIND_MMIO, SLOT_KIND_SERVICE, SLOT_KIND_SUPERVISOR, SLOT_KIND_USERLAND,
 };
 
 /// Устройство, названное слотом композиции.
@@ -29,15 +28,13 @@ pub enum SlotSpec<'a> {
     Irq(DeviceSpec<'a>),
     /// MMIO-окно устройства.
     Mmio(DeviceSpec<'a>),
-    /// Сессия service-порта экземпляра `provider`.
-    Service { provider: &'a str },
+    /// Сессия порта экспорта `export` экземпляра `provider`.
+    Service { provider: &'a str, export: u8 },
     /// Сессия файловой системы с каталогом компонента в роли корня, выданная
     /// экземпляром `provider` маршрутизатора имён.
     Directory { provider: &'a str },
     /// Клиентская capability supervisor, поднявшего компонент.
     Supervisor,
-    /// Клиентская capability control-порта экземпляра `provider`.
-    Control { provider: &'a str },
 }
 
 /// Компонент композиции, укладываемый в план.
@@ -46,13 +43,15 @@ pub struct ComponentSpec<'a> {
     pub executable: &'a str,
     pub name: &'a str,
     pub slots: &'a [SlotSpec<'a>],
+    /// Протоколы экспортов компонента в порядке объявления.
+    pub exports: &'a [&'a str],
     /// Имена экземпляров, которые поднимаются раньше этого без обмена с ним.
     pub after: &'a [&'a str],
     pub memory_pages: u64,
     pub startup_timeout: Timeout,
     pub launches: u32,
     pub on_exhausted: OnExhausted,
-    /// Компонент сам создаёт сессии своего service-порта.
+    /// Компонент сам создаёт сессии своих экспортов.
     pub establishes_sessions: bool,
 }
 
@@ -104,6 +103,7 @@ fn encode_component(
     let name_len = string_len(component.name)?;
     let slot_count = entry_count(component.slots.len())?;
     let after_count = entry_count(component.after.len())?;
+    let export_count = entry_count(component.exports.len())?;
 
     bytes.extend_from_slice(&component.launches.to_le_bytes());
     bytes.push(match component.on_exhausted {
@@ -119,7 +119,7 @@ fn encode_component(
     bytes.extend_from_slice(&name_len.to_le_bytes());
     bytes.extend_from_slice(&slot_count.to_le_bytes());
     bytes.extend_from_slice(&after_count.to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&export_count.to_le_bytes());
     bytes.extend_from_slice(&0u64.to_le_bytes());
     bytes.extend_from_slice(&component.memory_pages.to_le_bytes());
     bytes.extend_from_slice(&component.startup_timeout.raw().to_le_bytes());
@@ -128,6 +128,9 @@ fn encode_component(
 
     for slot in component.slots {
         encode_slot(bytes, slot)?;
+    }
+    for export in component.exports {
+        encode_name(bytes, export)?;
     }
     for edge in component.after {
         encode_name(bytes, edge)?;
@@ -141,16 +144,13 @@ fn encode_slot(bytes: &mut Vec<u8>, slot: &SlotSpec<'_>) -> Result<(), PlanEncod
     let mut device = None;
     match slot {
         SlotSpec::Userland => header[0] = SLOT_KIND_USERLAND,
-        SlotSpec::Service { provider } => {
+        SlotSpec::Service { provider, export } => {
             header[0] = SLOT_KIND_SERVICE;
+            header[1] = *export;
             instance = Some(*provider);
         }
         SlotSpec::Directory { provider } => {
             header[0] = SLOT_KIND_DIRECTORY;
-            instance = Some(*provider);
-        }
-        SlotSpec::Control { provider } => {
-            header[0] = SLOT_KIND_CONTROL;
             instance = Some(*provider);
         }
         SlotSpec::Supervisor => header[0] = SLOT_KIND_SUPERVISOR,

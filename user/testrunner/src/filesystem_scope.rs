@@ -5,7 +5,7 @@
 use alloc::{format, string::String};
 
 use filesystem_abi::{AccessMode, FileSystemError, NAME_MAX, NodeKind, OpenFlags, PATH_MAX};
-use kernel_objects::OwnedHandle;
+use kernel_objects::Port;
 use kernel_tests::kernel_test;
 use runtime::UserMemFlags;
 
@@ -18,17 +18,17 @@ const WRITE_WINDOW: &str = "/scope-write";
 const CHAIN_WINDOW: &str = "/scope-chain";
 const ROOT_WINDOW: &str = "/scope-root";
 
-fn open_root(capability: &OwnedHandle, text: &str) -> Result<OwnedHandle, FileSystemError> {
+fn open_root(capability: &Port, text: &str) -> Result<Port, FileSystemError> {
     let mut response = connect(capability)
         .open_root(path(text))
         .expect("open_root call");
     let window = response.value?;
-    Ok(OwnedHandle::from(
+    Ok(Port::from(
         response.claim(window).expect("capability owner"),
     ))
 }
 
-fn window_of(capability: &OwnedHandle, text: &str) -> OwnedHandle {
+fn window_of(capability: &Port, text: &str) -> Port {
     open_root(capability, text).expect("window granted")
 }
 

@@ -164,6 +164,7 @@ name = "component-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]
@@ -235,6 +236,7 @@ name = "filesystem-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]
@@ -299,6 +301,7 @@ name = "ipc-test"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]
@@ -691,6 +694,7 @@ name = "supervisor-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]

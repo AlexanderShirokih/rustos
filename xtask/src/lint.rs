@@ -15,7 +15,7 @@ use clap::Args;
 use crate::{
     context::project_root,
     layers::{ArchEntry, Profile, Workspace, arch_registry, registered, workspaces},
-    shell, std_src,
+    race, shell, std_src,
 };
 
 #[derive(Args)]
@@ -63,9 +63,10 @@ pub(crate) fn clippy(args: &ClippyArgs) -> Result<()> {
 
 pub(crate) fn test() -> Result<()> {
     let root = project_root();
+    let host = race::host_target()?;
     let mut invocations = Vec::new();
     for workspace in workspaces(&root)? {
-        invocations.extend(test_commands(&workspace, &root));
+        invocations.extend(test_commands(&workspace, &root, &host));
     }
     run_all(&invocations, "test")
 }
@@ -197,7 +198,7 @@ fn clippy_commands(workspace: &Workspace, side: Side<'_>, root: &Path) -> Vec<In
     }
 }
 
-fn test_commands(workspace: &Workspace, root: &Path) -> Vec<Invocation> {
+fn test_commands(workspace: &Workspace, root: &Path, host: &str) -> Vec<Invocation> {
     match workspace.profile {
         Profile::Common | Profile::Host => vec![cargo_in(
             root,
@@ -205,9 +206,17 @@ fn test_commands(workspace: &Workspace, root: &Path) -> Vec<Invocation> {
             "test",
             &["--workspace", "--all-features"],
         )],
+        // Примеры объявления компонента проверяют раскрытие макроса, и запускает их host-target.
+        // Команда идёт из корня, потому что таргет userland задан конфигурацией его каталога.
+        Profile::Userland => vec![cargo_in(
+            root,
+            &workspace.dir.join("Cargo.toml"),
+            "test",
+            &["-p", "component-startup", "--doc", "--target", host],
+        )],
         // Платформенные крейты проверяет `cargo xtask qemu-test`, рантайм `std` и программы
         // образа - проход userland под QEMU, fuzz-цели - их прогон.
-        Profile::Platform | Profile::StdRuntime | Profile::Userland | Profile::Fuzz => Vec::new(),
+        Profile::Platform | Profile::StdRuntime | Profile::Fuzz => Vec::new(),
     }
 }
 
@@ -335,7 +344,7 @@ mod tests {
         (
             lines(&clippy_commands(&workspace, Side::Host, root)),
             lines(&clippy_commands(&workspace, Side::Arch(&registry[0]), root)),
-            lines(&test_commands(&workspace, root)),
+            lines(&test_commands(&workspace, root, "host-triple")),
         )
     }
 
@@ -403,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn the_userland_profile_lints_from_its_directory_against_the_std_sources() {
+    fn the_userland_profile_lints_from_its_directory_and_runs_its_doctests_on_the_host() {
         let (host, arch, tests) = table(Profile::Userland, "/repo/user");
         assert!(host.is_empty());
         assert_eq!(
@@ -412,7 +421,12 @@ mod tests {
                 "/repo/user: cargo clippy --target /repo/targets/aarch64-unknown-molecular.json --workspace --all-targets -- -D warnings [std-src]"
             ]
         );
-        assert!(tests.is_empty());
+        assert_eq!(
+            tests,
+            [
+                "/repo: cargo test --manifest-path /repo/user/Cargo.toml -p component-startup --doc --target host-triple"
+            ]
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 use core::fmt::Write as _;
 
 use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::{OwnedHandle, ReceivedFrame};
+use kernel_objects::{Port, ReceivedFrame};
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LOG_TAG_MAX, LogBuffer, log};
 use runtime::PortTransport;
 use syscall::Timeout;
@@ -39,13 +39,13 @@ pub trait SourceNames: Send {
 }
 
 pub(crate) struct LogRelay<S: LogSink, N: SourceNames> {
-    receiver: OwnedHandle,
+    receiver: Port,
     names: N,
     sink: S,
 }
 
 impl<S: LogSink, N: SourceNames> LogRelay<S, N> {
-    pub(crate) fn new(receiver: OwnedHandle, names: N, sink: S) -> Self {
+    pub(crate) fn new(receiver: Port, names: N, sink: S) -> Self {
         Self {
             receiver,
             names,

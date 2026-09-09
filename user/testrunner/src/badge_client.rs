@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use kernel_objects::{OwnedHandle, Port};
+use kernel_objects::{Port, kind};
 use runtime::{Timeout, thread_exit};
 use syscall::Handle;
 
@@ -14,8 +14,8 @@ use syscall::Handle;
 /// `thread_exit` не разматывает стек, и капа остаётся в таблице процесса
 /// до её разрушения.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(client: Handle) -> ! {
-    let port = Port::from_handle(OwnedHandle::from_handle(client));
+pub extern "C" fn _start(client: Handle<kind::Port>) -> ! {
+    let port = Port::from_handle(client);
     let sent = port.send_bytes(b"badged", Timeout::INFINITE);
     thread_exit(u64::from(sent.is_err()))
 }

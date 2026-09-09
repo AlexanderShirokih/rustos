@@ -217,7 +217,7 @@ fn missing<'a>(expected: &'a BTreeSet<String>, reported: &BTreeSet<String>) -> V
         .collect()
 }
 
-fn host_target() -> Result<String> {
+pub(crate) fn host_target() -> Result<String> {
     let mut command = Command::new("rustc");
     command.arg("-vV");
     let version = shell::output(&mut command, "rustc -vV")?;

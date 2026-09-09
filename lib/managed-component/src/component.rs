@@ -1,8 +1,8 @@
 use ipc::{MessageLen, Transport, wire::IpcError};
-use kernel_objects::{Error, Port, Process, Resource};
+use kernel_objects::{BorrowedHandle, Error, Port, Process, Resource, kind};
 use runtime::{PortTransport, Timeout};
 use userland::EntryView;
-use userland_loader::launch_entry;
+use userland_loader::{InitializedProcess, launch_entry_retained};
 
 const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
@@ -11,7 +11,7 @@ const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
 pub enum ManagedStatus {
     /// Startup-транзакция ещё не завершена.
     Launching,
-    /// Startup-кадр доставлен, а компонент владеет запущенным экземпляром.
+    /// Startup-транзакция доставлена, а компонент владеет запущенным экземпляром.
     Running,
     /// Процесс штатно завершился с кодом `0`.
     Exited,
@@ -32,6 +32,8 @@ pub enum ManagedStartupError {
     InfiniteTimeout,
     /// Слотов компонента больше, чем содержит стартовая транзакция.
     TooManySlots,
+    /// Экспортов компонента больше, чем содержит стартовая транзакция.
+    TooManyExports,
 }
 
 /// Причина состояния [`ManagedStatus::Failed`].
@@ -49,10 +51,11 @@ pub struct RunningComponent<R> {
     roots: R,
     process: Process,
     resource: Resource,
+    startup: Port,
 }
 
-/// Единственный transport одноразового startup-кадра. Его конечный send
-/// timeout задаёт [`ManagedComponent`], а вызывающий не может его заменить.
+/// Транспорт стартовой транзакции с конечным send timeout, который задаёт
+/// [`ManagedComponent`]. Вызывающий не может заменить timeout.
 pub struct BoundedStartupTransport {
     inner: PortTransport,
 }
@@ -120,6 +123,13 @@ impl<R> RunningComponent<R> {
     #[must_use]
     pub const fn process(&self) -> &Process {
         &self.process
+    }
+
+    /// Заимствует клиентскую сторону startup-порта. Порт открыт всю incarnation, и по нему
+    /// supervisor запрашивает у компонента сессии его экспортов.
+    #[must_use]
+    pub fn startup(&self) -> BorrowedHandle<'_, kind::Port> {
+        self.startup.borrow()
     }
 }
 
@@ -210,14 +220,17 @@ impl<R> ManagedComponent<R> {
                 Ok(roots) => roots,
                 Err(error) => return self.fail_startup(error),
             };
-            launch_entry(entry, Some(name), &child_resource, |startup| {
+            // Supervisor не ставит значка на startup-порт, и снятие компонента по уходу его
+            // держателя выполняет ядро.
+            launch_entry_retained(entry, Some(name), &child_resource, None, |startup| {
                 let transport = bounded_transport(startup, startup_timeout);
                 send_startup(transport, &mut roots)
             })
-            .map(|process| RunningComponent {
+            .map(|InitializedProcess { process, startup }| RunningComponent {
                 roots,
                 process,
                 resource: child_resource,
+                startup,
             })
         };
 
@@ -269,8 +282,10 @@ impl<R> ManagedComponent<R> {
             roots,
             process,
             resource,
+            startup,
         } = running;
         drop(roots);
+        drop(startup);
         drop(process);
         drop(resource);
         let cleanup = self.confirm_budget_return();
@@ -300,6 +315,6 @@ impl<R> ManagedComponent<R> {
 fn bounded_transport(startup: &Port, timeout: Timeout) -> BoundedStartupTransport {
     debug_assert_ne!(timeout, Timeout::INFINITE);
     BoundedStartupTransport {
-        inner: PortTransport::client(startup.handle()).with_send_timeout(timeout),
+        inner: PortTransport::client(startup.borrow()).with_send_timeout(timeout),
     }
 }

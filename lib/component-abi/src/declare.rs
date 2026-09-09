@@ -10,8 +10,7 @@
 #[macro_export]
 macro_rules! __component_manifest_record {
     (
-        export = [$($export:literal)?]
-        control = [$($control:literal)?]
+        exports = [$($export:literal),*]
         establishes = [$($establishes:literal)?]
         slots { $($kind:ident $(($($parameter:tt)*))?),* }
     ) => {
@@ -19,11 +18,10 @@ macro_rules! __component_manifest_record {
             const SLOTS: &[$crate::SlotDeclaration] = &[$(
                 $crate::__component_manifest_record!(@slot $kind $(($($parameter)*))?)
             ),*];
-            const EXPORT: &str = $crate::__component_manifest_record!(@protocol $($export)?);
-            const CONTROL: &str = $crate::__component_manifest_record!(@protocol $($control)?);
+            const EXPORTS: &[&str] = &[$($export),*];
             const ESTABLISHES_SESSIONS: bool =
                 $crate::__component_manifest_record!(@establishes $($establishes)?);
-            const RECORD_LEN: usize = $crate::manifest_len(SLOTS, EXPORT, CONTROL);
+            const RECORD_LEN: usize = $crate::manifest_len(SLOTS, EXPORTS);
 
             // Секцию читает сборщик образа из ELF программы, и кладёт её только сборка под
             // таргет системы: на хосте образ не собирается, а имя секции там своё.
@@ -33,11 +31,9 @@ macro_rules! __component_manifest_record {
             )]
             #[used]
             static MANIFEST: [u8; RECORD_LEN] =
-                $crate::encode_manifest(SLOTS, EXPORT, CONTROL, ESTABLISHES_SESSIONS);
+                $crate::encode_manifest(SLOTS, EXPORTS, ESTABLISHES_SESSIONS);
         };
     };
-    (@protocol) => { "" };
-    (@protocol $protocol:literal) => { $protocol };
     (@establishes) => { false };
     (@establishes $establishes:literal) => { $establishes };
     (@slot userland) => { $crate::SlotDeclaration::userland() };
@@ -59,12 +55,6 @@ macro_rules! __component_manifest_record {
     (@slot service(protocol = $protocol:literal, instance = $instance:literal)) => {
         $crate::SlotDeclaration::service(&[$protocol, $instance])
     };
-    (@slot control(protocol = $protocol:literal)) => {
-        $crate::SlotDeclaration::control(&[$protocol])
-    };
-    (@slot control(protocol = $protocol:literal, instance = $instance:literal)) => {
-        $crate::SlotDeclaration::control(&[$protocol, $instance])
-    };
     (@slot directory(instance = $instance:literal)) => {
         $crate::SlotDeclaration::directory(&[$instance])
     };
@@ -77,35 +67,37 @@ mod tests {
         COMPONENT_MANIFEST_SECTION, SlotKind, decode_manifest, encode_manifest, manifest_len,
     };
 
+    const NO_EXPORTS: &[&str] = &[];
+    const TWO_EXPORTS: &[&str] = &["Namespace", "NamespaceAdmin"];
+
     const FILE_SYSTEM_SLOTS: &[crate::SlotDeclaration] = &[crate::SlotDeclaration::userland()];
-    const FILE_SYSTEM_LEN: usize = manifest_len(FILE_SYSTEM_SLOTS, "", "");
+    const FILE_SYSTEM_LEN: usize = manifest_len(FILE_SYSTEM_SLOTS, NO_EXPORTS);
 
     const NAMED_SLOTS: &[crate::SlotDeclaration] = &[crate::__component_manifest_record!(
         @slot service(protocol = "FileSystem", instance = "ramfs")
     )];
-    const NAMED_LEN: usize = manifest_len(NAMED_SLOTS, "", "");
+    const NAMED_LEN: usize = manifest_len(NAMED_SLOTS, NO_EXPORTS);
 
     const ADMIN_SLOTS: &[crate::SlotDeclaration] = &[crate::__component_manifest_record!(
-        @slot control(protocol = "NamespaceAdmin", instance = "namespace-router")
+        @slot service(protocol = "NamespaceAdmin", instance = "namespace-router")
     )];
-    const ADMIN_LEN: usize = manifest_len(ADMIN_SLOTS, "Namespace", "NamespaceAdmin");
+    const ADMIN_LEN: usize = manifest_len(ADMIN_SLOTS, TWO_EXPORTS);
 
     const DEVICE_SLOTS: &[crate::SlotDeclaration] = &[
         crate::__component_manifest_record!(@slot irq(compatible = ["arm,pl031", "arm,primecell"])),
         crate::__component_manifest_record!(@slot mmio(compatible = ["arm,pl031"], resource = 1)),
     ];
-    const DEVICE_LEN: usize = manifest_len(DEVICE_SLOTS, "", "");
+    const DEVICE_LEN: usize = manifest_len(DEVICE_SLOTS, NO_EXPORTS);
 
     crate::__component_manifest_record! {
-        export = ["FileSystem"]
-        control = []
+        exports = ["FileSystem"]
         establishes = [true]
         slots { userland }
     }
 
     #[test]
     fn a_named_service_slot_declares_its_protocol_and_instance() {
-        let bytes: [u8; NAMED_LEN] = encode_manifest(NAMED_SLOTS, "", "", false);
+        let bytes: [u8; NAMED_LEN] = encode_manifest(NAMED_SLOTS, NO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let slot = manifest.slots().next().expect("service slot");
@@ -117,15 +109,16 @@ mod tests {
     }
 
     #[test]
-    fn a_control_slot_declares_its_protocol_beside_the_served_one() {
-        let bytes: [u8; ADMIN_LEN] =
-            encode_manifest(ADMIN_SLOTS, "Namespace", "NamespaceAdmin", false);
+    fn a_declaration_encodes_every_export_in_its_order() {
+        let bytes: [u8; ADMIN_LEN] = encode_manifest(ADMIN_SLOTS, TWO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
-        assert_eq!(manifest.export(), Some("Namespace"));
-        assert_eq!(manifest.control(), Some("NamespaceAdmin"));
-        let slot = manifest.slots().next().expect("control slot");
-        assert_eq!(slot.kind(), SlotKind::Control);
+        assert_eq!(
+            manifest.exports().collect::<std::vec::Vec<_>>(),
+            ["Namespace", "NamespaceAdmin"]
+        );
+        let slot = manifest.slots().next().expect("service slot");
+        assert_eq!(slot.kind(), SlotKind::Service);
         assert_eq!(
             slot.names().collect::<std::vec::Vec<_>>(),
             ["NamespaceAdmin", "namespace-router"]
@@ -134,7 +127,7 @@ mod tests {
 
     #[test]
     fn a_device_declaration_keeps_the_order_of_its_slots() {
-        let bytes: [u8; DEVICE_LEN] = encode_manifest(DEVICE_SLOTS, "", "", false);
+        let bytes: [u8; DEVICE_LEN] = encode_manifest(DEVICE_SLOTS, NO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let kinds: std::vec::Vec<SlotKind> = manifest.slots().map(|slot| slot.kind()).collect();
@@ -142,14 +135,14 @@ mod tests {
     }
 
     #[test]
-    fn a_declaration_encodes_its_slots_and_export() {
+    fn a_declaration_without_exports_encodes_its_slots() {
         // Имя секции макрос пишет литералом: `link_section` берёт только его.
         assert_eq!(COMPONENT_MANIFEST_SECTION, ".component.manifest");
-        let bytes: [u8; FILE_SYSTEM_LEN] = encode_manifest(FILE_SYSTEM_SLOTS, "", "", false);
+        let bytes: [u8; FILE_SYSTEM_LEN] = encode_manifest(FILE_SYSTEM_SLOTS, NO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
-        assert_eq!(manifest.export(), None);
-        assert_eq!(manifest.control(), None);
+        assert_eq!(manifest.export_count(), 0);
+        assert_eq!(manifest.exports().count(), 0);
         let slot = manifest.slots().next().expect("userland slot");
         assert_eq!(slot.kind(), SlotKind::Userland);
     }

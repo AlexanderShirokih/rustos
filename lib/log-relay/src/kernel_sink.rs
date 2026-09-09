@@ -3,7 +3,7 @@
 use bootstrap_abi::bootstrap;
 use ipc::wire::IpcError;
 use runtime::PortTransport;
-use syscall::Handle;
+use syscall::{Handle, kind};
 
 use crate::relay::LogSink;
 
@@ -19,11 +19,11 @@ const _: () = assert!(
 /// Сток поверх bootstrap-капы ядра. Капа остаётся в процессе-владельце relay и
 /// сохраняется дольше цикла пересылки: клиентам лог-порта она недоступна.
 pub struct KernelLogSink {
-    bootstrap: Handle,
+    bootstrap: Handle<kind::Port>,
 }
 
 impl KernelLogSink {
-    pub fn new(bootstrap: Handle) -> Self {
+    pub fn new(bootstrap: Handle<kind::Port>) -> Self {
         Self { bootstrap }
     }
 }

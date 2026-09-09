@@ -20,6 +20,8 @@ const SELFTEST_ENTRY: &str = "/boot/std-selftest/program";
 
 const INSTANCE_NAME: &str = "std-selftest";
 
+const SELFTEST_EXPORTS: usize = 0;
+
 const DELIVERY_TIMEOUT: Timeout = Timeout::from_secs(1);
 
 const PROCESS_TIMEOUT: Timeout = Timeout::from_secs(10);
@@ -45,6 +47,7 @@ fn std_selftest_program_passes_its_checks() {
         INSTANCE_NAME,
         &log,
         DELIVERY_TIMEOUT,
+        SELFTEST_EXPORTS,
         ComponentSlots::default(),
     )
     .expect("startup frame delivered");

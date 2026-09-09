@@ -1,13 +1,10 @@
 //! Процесс файловой системы: компонентные порты, сессии клиентов и цикл обслуживания. Крейт
 //! держит всё, что у файловых систем общее. Конкретная сводится к построению своего бекенда.
 //!
-//! Портов у процесса два. Control-порт устанавливает сессии по `ComponentSessions::open_session`,
-//! service-порт обслуживает их и выдаёт производные по `open_root`. Control-порт обслуживает
-//! отдельный поток. Вызов rootkeeper не ждёт вызова, который сервисный поток обслуживает
-//! прямо сейчас.
-//!
-//! Клиентская сторона control-порта принадлежит rootkeeper и содержит его значок. Её уход
-//! завершает процесс. Уход прочих значков этого порта обслуживание продолжает.
+//! Портов у процесса два. Startup-порт устанавливает сессии по
+//! `ComponentStartup::open_session`, порт экспорта обслуживает их и выдаёт производные по
+//! `open_root`. Startup-порт обслуживает отдельный поток. Вызов rootkeeper не ждёт вызова,
+//! который сервисный поток обслуживает прямо сейчас.
 
 #![no_std]
 
@@ -16,14 +13,12 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::sync::atomic::AtomicU64;
 
-use component_abi::{component_sessions, supervisor_gone};
+use component_abi::component_startup;
 use filesystem::FileSystemBackend;
 use filesystem_abi::file_system;
 use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::{MemoryRegion, OwnedHandle, ReadOnlyMapping, ReceivedFrame, Resource, Thread};
-use runtime::{
-    Mutex, PortTransport, Priority, exit_with_sibling, install_log, log_line, spawn_owned,
-};
+use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, ReceivedFrame, Resource};
+use runtime::{Mutex, PortTransport, Priority, install_log, log_line, spawn_owned};
 use spin::Once;
 use syscall::Timeout;
 
@@ -36,35 +31,28 @@ mod store;
 use admin::Establishing;
 pub use error::{Error, Result};
 use service::{FileSystemState, Frame, Serving};
-pub use service::{settle, vend};
 
 const ADMIN_STACK: u64 = 0x4000;
-
-const SUPERVISOR_LOST_EXIT_CODE: u32 = 2;
 
 static IMAGE: Once<ReadOnlyMapping> = Once::new();
 
 struct Shared {
     state: Mutex<FileSystemState>,
-    service: OwnedHandle,
-    admin: OwnedHandle,
-    sessions_thread: Thread,
+    service: Port,
+    startup: Port,
     next_badge: AtomicU64,
 }
 
 /// Поднимает файловую систему и обслуживает её до закрытия service-порта.
 ///
-/// `control` и `service` приходят компонентной стартовой транзакцией, `backing` - регион с
+/// `startup` и `service` приходят компонентной стартовой транзакцией, `backing` - регион с
 /// байтами дерева, `tag` - имя процесса в строках лога. `found` строит бекенд из `Some(bytes)`
 /// отображённого региона либо из `None` для автономного бекенда.
-///
-/// Уход значка rootkeeper с control-порта снимает процесс целиком, и управление сюда не
-/// возвращается.
 pub fn serve<B>(
-    log: OwnedHandle,
-    control: OwnedHandle,
-    service: OwnedHandle,
-    backing: Option<OwnedHandle>,
+    log: Port,
+    startup: Port,
+    service: Port,
+    backing: Option<MemoryRegion>,
     tag: &'static str,
     found: impl FnOnce(Option<&'static [u8]>) -> Result<B>,
 ) -> Result<()>
@@ -72,7 +60,6 @@ where
     B: FileSystemBackend + Send + 'static,
 {
     install_log(log.into_raw(), tag);
-    let backing = backing.map(MemoryRegion::from_handle);
     let bytes = match backing.as_ref() {
         Some(backing) => {
             let mapping = backing.map_full_read_only()?;
@@ -89,11 +76,10 @@ where
             Resource::self_resource()?,
         )),
         service,
-        admin: control,
-        sessions_thread: Thread::self_thread()?,
+        startup,
         next_badge: AtomicU64::new(0),
     }));
-    // Control-поток разделяет время жизни процесса и владеет собственным стеком.
+    // Поток startup-порта разделяет время жизни процесса и владеет собственным стеком.
     let _ = spawn_owned(move || serve_admin(shared), ADMIN_STACK, Priority::new(1))?;
     log_line("started");
     serve_sessions(shared);
@@ -141,36 +127,27 @@ fn serve_sessions(shared: &Shared) {
 }
 
 fn serve_admin(shared: &Shared) -> u32 {
-    let transport = PortTransport::server(shared.admin.borrow());
+    let transport = PortTransport::server(shared.startup.borrow());
     loop {
         match transport.wait_readable(Timeout::INFINITE) {
             Ok(()) => {}
-            // Уход значка rootkeeper на control-порту снимает процесс целиком, а уход
-            // прочих значков порта цикл продолжает.
-            Err(IpcError::SenderGone) if supervisor_gone(transport.peer_badge()) => {
-                log_line("supervisor gone");
-                exit_with_sibling(
-                    shared.sessions_thread.handle().as_raw(),
-                    SUPERVISOR_LOST_EXIT_CODE,
-                )
-            }
-            // Покадровое исчерпание, пробуждение без кадра и уход чужого значка цикл не
-            // закрывают.
+            // Покадровое исчерпание, пробуждение без кадра и уход значка потребителя цикл не
+            // закрывают, потому что снятие компонента по уходу его держателя выполняет ядро.
             Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout) => continue,
             Err(IpcError::PeerClosed) => break,
             // Прочий отказ приёма оставляет процесс без установления сессий и уходит ненулевым
             // кодом потока, отличимым от закрытия порта.
             Err(_) => {
-                log_line("control port failed");
+                log_line("startup port failed");
                 return 1;
             }
         }
         let received = ReceivedFrame::take(&transport);
         let mut establishing = Establishing::new(shared);
-        let delivered = component_sessions::dispatch(&mut establishing, &transport).is_ok();
+        let delivered = component_startup::dispatch(&mut establishing, &transport).is_ok();
         establishing.end(delivered);
         drop(received);
     }
-    log_line("control port closed");
+    log_line("startup port closed");
     0
 }

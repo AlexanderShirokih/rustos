@@ -6,6 +6,8 @@
 
 use core::{cell::Cell, num::NonZeroU32};
 
+use syscall::{Handle, ObjectKind, kind};
+
 pub use crate::schema::{FIELD_OVERHEAD, HEADER_SIZE};
 
 /// Максимальная длина кадра (заголовок + тело) в байтах. Кадр заполняет тело IPC-буфера.
@@ -430,29 +432,63 @@ impl<'a> FieldCursor<'a> {
     }
 }
 
-/// Нетипизированный capability: сырой `u32`-идентификатор хэндла в сообщении.
-/// В теле передаётся индекс в handle-массиве. Сам id - вне тела.
+/// Поле-capability кадра, помеченное видом объекта `K`. В теле передаётся индекс в
+/// handle-массиве. Сам id - вне тела.
 ///
-/// Значение хэндлом не владеет. Закрытие принятого хэндла остаётся за
+/// Вид задаётся объявлением поля контракта и в кадр не записывается. Значение хэндлом не
+/// владеет. Закрытие принятого хэндла остаётся за
 /// [`ReceivedResources`](crate::ReceivedResources) кадра, а реализация
 /// [`relinquish`](crate::IntoWireHandle::relinquish) для `Cap` пуста.
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cap {
-    raw: NonZeroU32,
+pub struct Cap<K: ObjectKind> {
+    handle: Handle<K>,
 }
 
-impl Cap {
-    /// Оборачивает сырой handle-id в capability.
+impl<K: ObjectKind> Cap<K> {
+    /// Помечает уже полученный handle как поле кадра. Вид сохраняется.
     #[must_use]
-    pub const fn from_raw(raw: NonZeroU32) -> Self {
-        Self { raw }
+    pub const fn from_handle(handle: Handle<K>) -> Self {
+        Self { handle }
+    }
+
+    /// Handle поля вместе с его видом.
+    #[must_use]
+    pub const fn as_handle(self) -> Handle<K> {
+        self.handle
     }
 
     /// Сырой handle-id capability.
     #[must_use]
     pub const fn raw(self) -> NonZeroU32 {
-        self.raw
+        self.handle.as_nonzero()
+    }
+
+    /// Снимает статическую метку вида, сохраняя идентификатор.
+    #[must_use]
+    pub const fn erase(self) -> Cap<kind::Any> {
+        Cap::from_handle(self.handle.erase())
+    }
+}
+
+impl<K: ObjectKind> Clone for Cap<K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<K: ObjectKind> Copy for Cap<K> {}
+
+impl<K: ObjectKind> PartialEq for Cap<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+    }
+}
+
+impl<K: ObjectKind> Eq for Cap<K> {}
+
+impl<K: ObjectKind> core::fmt::Debug for Cap<K> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Cap").field(&self.handle).finish()
     }
 }
 

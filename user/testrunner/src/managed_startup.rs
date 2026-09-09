@@ -2,7 +2,7 @@
 
 use bootstrap_abi::bootstrap;
 use ipc::{IntoWireHandle, wire::IpcError};
-use kernel_objects::{Error, MemoryRegion, OwnedHandle, ReadOnlyMapping, Resource, Signal};
+use kernel_objects::{Error, MemoryRegion, ReadOnlyMapping, Resource, Signal, kind};
 use kernel_tests::kernel_test;
 use managed_component::{
     BoundedStartupTransport, ManagedComponent, ManagedFailure, ManagedStartupError, ManagedStatus,
@@ -33,7 +33,7 @@ struct FixtureRoots {
 }
 
 struct TrackedAuthority<'a> {
-    handle: Option<OwnedHandle>,
+    handle: Option<Signal>,
     sender_cleanup: &'a Signal,
     relinquished: bool,
 }
@@ -50,9 +50,8 @@ impl FixtureRoots {
         })
     }
 
-    fn child_authority(&self) -> Result<OwnedHandle, ManagedStartupError> {
+    fn child_authority(&self) -> Result<Signal, ManagedStartupError> {
         self.authority
-            .handle()
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(ManagedStartupError::from)
     }
@@ -60,13 +59,13 @@ impl FixtureRoots {
     fn from_observer(observer: &Signal) -> Result<Self, ManagedStartupError> {
         let rights = Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE;
         Ok(Self {
-            authority: Signal::from_handle(observer.handle().duplicate(rights, None)?),
+            authority: observer.duplicate(rights, None)?,
         })
     }
 }
 
 impl<'a> TrackedAuthority<'a> {
-    fn new(handle: OwnedHandle, sender_cleanup: &'a Signal) -> Self {
+    fn new(handle: Signal, sender_cleanup: &'a Signal) -> Self {
         Self {
             handle: Some(handle),
             sender_cleanup,
@@ -86,6 +85,8 @@ impl Drop for TrackedAuthority<'_> {
 }
 
 impl IntoWireHandle for TrackedAuthority<'_> {
+    type Kind = kind::Signal;
+
     fn wire_id(&self) -> u32 {
         self.handle
             .as_ref()
@@ -368,7 +369,7 @@ pub(crate) fn image_mapping() -> ImageMapping {
         .expect("acquire_userland_image call");
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
-    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
+    let region = MemoryRegion::from(cap);
     let mapping = region.map_full_read_only().expect("map image read-only");
     ImageMapping {
         mapping,

@@ -5,6 +5,7 @@ use filesystem_abi::{
     APPEND_OFFSET, FileSystemError, NodeDescriptor, NodeInfo, NodeKind, Opened, Written,
 };
 use ipc::wire::IpcError;
+use syscall::kind;
 
 use crate::{
     environment::{Environment, SharedRegion},
@@ -153,7 +154,7 @@ impl<E: Environment> OpenNode<E> {
     /// Capability региона, на котором лежит содержимое узла. Права выводятся из режима открытия.
     /// После выдачи длина узла за ёмкость региона не растёт. Пустой узел и файловая система без
     /// такого региона возвращают `NotSupported`.
-    pub fn backing_memory(&self) -> Result<E::Handle> {
+    pub fn backing_memory(&self) -> Result<E::Handle<kind::MemoryRegion>> {
         let mut response = self.session.client().backing_memory(self.descriptor)?;
         let capability = response.value?;
         Ok(response.claim(capability).ok_or(IpcError::InvalidValue)?)

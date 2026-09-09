@@ -12,7 +12,7 @@
 
 use collections::{PopOutcome, PushOutcome, RingError, SpscRing};
 use ipc::{MessageLen, Transport, wire::IpcError};
-use syscall::{Handle, SIGNALED, SYSCALL_RETURN_TIMEOUT, Timeout, WakeCount};
+use syscall::{Handle, SIGNALED, SYSCALL_RETURN_TIMEOUT, Timeout, WakeCount, kind};
 
 use crate::{
     handle::BorrowedHandle,
@@ -28,14 +28,14 @@ enum Role {
 /// Потоковый транспорт ipc-контракта поверх SPSC-кольца в shared memory.
 pub struct RingTransport {
     ring: SpscRing,
-    data: Handle,
+    data: Handle<kind::Signal>,
     role: Role,
 }
 
 impl RingTransport {
     /// Producer-конец пишет кадры в кольцо и будит consumer.
     #[must_use]
-    pub fn producer(ring: SpscRing, data: Handle) -> Self {
+    pub fn producer(ring: SpscRing, data: Handle<kind::Signal>) -> Self {
         Self {
             ring,
             data,
@@ -46,13 +46,13 @@ impl RingTransport {
     /// Producer-конец по заимствованному "data"-сигналу переадресует к
     /// [`RingTransport::producer`], беря сырой хэндл из заимствования.
     #[must_use]
-    pub fn producer_signal(ring: SpscRing, data: BorrowedHandle<'_>) -> Self {
+    pub fn producer_signal(ring: SpscRing, data: BorrowedHandle<'_, kind::Signal>) -> Self {
         Self::producer(ring, data.as_raw())
     }
 
     /// Consumer-конец читает кадры из кольца и спит на "data"-сигнале.
     #[must_use]
-    pub fn consumer(ring: SpscRing, data: Handle) -> Self {
+    pub fn consumer(ring: SpscRing, data: Handle<kind::Signal>) -> Self {
         Self {
             ring,
             data,

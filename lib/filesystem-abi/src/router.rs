@@ -11,7 +11,7 @@ ipc::wire_value! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ResolvedPair {
         /// Сессия, открытая на общем каталоге пары либо на корне их монтирования.
-        pub session: ipc::wire::Cap,
+        pub session: ipc::wire::Cap<syscall::kind::Port>,
         /// Длина пути, на котором открыта сессия.
         pub root_len: u32,
     }
@@ -32,7 +32,7 @@ ipc::protocol! {
         /// `Unresponsive`.
         call fn resolve(
             path: ipc::wire::Str<{ PATH_MAX }>,
-        ) -> Result<ipc::wire::Cap, FileSystemError>;
+        ) -> Result<ipc::wire::Cap<syscall::kind::Port>, FileSystemError>;
 
         /// Разбирает оба пути по одному снимку таблицы и отдаёт сессию их общего каталога.
         /// Общий каталог выше корня монтирования корнем сессии не становится, и тогда сессия
@@ -66,7 +66,7 @@ mod tests {
 
     use super::{FileSystemError, PATH_MAX, ResolvedPair, namespace};
 
-    const SESSION_CAP: Cap = cap(0x31);
+    const SESSION_CAP: Cap<syscall::kind::Port> = cap(0x31);
 
     const MOUNTS: [&str; 2] = ["/boot", "/data"];
 
@@ -75,7 +75,10 @@ mod tests {
     }
 
     impl namespace::Service for Router {
-        fn resolve(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap, FileSystemError> {
+        fn resolve(
+            &mut self,
+            path: Str<'_, PATH_MAX>,
+        ) -> Result<Cap<syscall::kind::Port>, FileSystemError> {
             self.resolved
                 .lock()
                 .expect("mutex not poisoned")
@@ -115,8 +118,11 @@ mod tests {
         })
     }
 
-    const fn cap(raw: u32) -> Cap {
-        Cap::from_raw(NonZeroU32::new(raw).expect("non-zero"))
+    const fn cap<K: syscall::ObjectKind>(raw: u32) -> Cap<K> {
+        match NonZeroU32::new(raw) {
+            Some(id) => Cap::from_handle(syscall::Handle::from_abi(id)),
+            None => panic!("non-zero"),
+        }
     }
 
     fn path(text: &str) -> Str<'_, PATH_MAX> {

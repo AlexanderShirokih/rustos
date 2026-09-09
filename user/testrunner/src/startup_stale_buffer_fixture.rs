@@ -6,9 +6,13 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
+use component_abi::{SESSION_SCOPE_MAX, SessionError};
 use component_startup::component_manifest;
-use ipc::{Transport as _, wire::Cap};
-use kernel_objects::{OwnedHandle, Port, PortTransport, ReceivedFrame};
+use ipc::{
+    Transport as _,
+    wire::{Cap, Str},
+};
+use kernel_objects::{OwnedHandle, Port, PortTransport, ReceivedFrame, kind};
 use runtime::{Timeout, thread_exit};
 use syscall::Handle;
 
@@ -25,25 +29,37 @@ component_manifest! {
 }
 
 #[derive(Default)]
-struct EarlierFrame(Option<Cap>);
+struct EarlierFrame(Option<Cap<kind::Any>>);
 
 impl component_abi::component_startup::Service for EarlierFrame {
-    fn start(&mut self, log: Cap, _control: Cap, _service: Cap, _slot_count: u16) {
-        self.0 = Some(log);
+    fn begin(&mut self, log: Cap<kind::Port>, _export_count: u16, _slot_count: u16) {
+        self.0 = Some(log.erase());
     }
 
-    fn slot(&mut self, capability: Cap) {
+    fn export(&mut self, capability: Cap<kind::Port>) {
+        self.0 = Some(capability.erase());
+    }
+
+    fn slot(&mut self, capability: Cap<kind::Any>) {
         self.0 = Some(capability);
+    }
+
+    fn open_session(
+        &mut self,
+        _export: u16,
+        _scope: Str<'_, SESSION_SCOPE_MAX>,
+    ) -> Result<Cap<kind::Port>, SessionError> {
+        Err(SessionError::Refused)
     }
 }
 
 /// Программа-фикстура старого содержимого IPC-буфера. Она принимает свой кадр до стартовой
 /// транзакции и держит его capability, пока приём транзакции отказывает. Процесс паркуется,
-/// оставляя таблицу handle живой для наблюдения вызывающим. `startup` приходит в x0 как
-/// HandleId одноразового startup-порта.
+/// оставляя таблицу handle живой для наблюдения вызывающим.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
-    let startup = OwnedHandle::from_handle(startup);
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
+    let startup = Port::from_handle(startup);
     let Some(kept) = earlier_capability(&startup) else {
         thread_exit(NO_EARLIER_FRAME_EXIT_CODE);
     };
@@ -62,7 +78,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     thread_exit(NO_PARKING_EXIT_CODE)
 }
 
-fn earlier_capability(startup: &OwnedHandle) -> Option<OwnedHandle> {
+fn earlier_capability(startup: &Port) -> Option<OwnedHandle<kind::Any>> {
     let transport = PortTransport::server(startup);
     transport.wait_readable(EARLIER_FRAME_TIMEOUT).ok()?;
     let mut received = ReceivedFrame::take(&transport)?;

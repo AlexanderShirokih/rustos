@@ -26,7 +26,6 @@ test = false
 bench = false
 
 [dependencies]
-component-abi = { workspace = true }
 component-startup = { workspace = true }
 component-startup-std = { workspace = true }
 filesystem-abi = { workspace = true }

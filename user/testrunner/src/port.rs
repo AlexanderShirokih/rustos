@@ -14,9 +14,12 @@
 //!   объекта на стороне получателя (сигнал, поднятый до переноса, виден);
 //! - (d) порядок "получатель пришёл первым" и "отправитель пришёл первым".
 
-use core::sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst};
+use core::{
+    num::NonZeroU32,
+    sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst},
+};
 
-use kernel_objects::{Error, OwnedHandle, Port};
+use kernel_objects::{Error, Port, kind};
 use kernel_tests::kernel_test;
 use runtime::{
     JoinHandle, Priority, Timeout, handle_duplicate, ipc_buffer_addr, port_call, port_create,
@@ -93,8 +96,12 @@ unsafe fn read_badge(va: usize) -> u64 {
     unsafe { ((va + BADGE_OFF) as *const u64).read_volatile() }
 }
 
-fn ep_handle() -> Handle {
-    Handle::new(EP_RAW.load(SeqCst) as u32).expect("port handle present")
+fn port_of(raw: u32) -> Option<Handle<kind::Port>> {
+    NonZeroU32::new(raw).map(Handle::from_abi)
+}
+
+fn ep_handle() -> Handle<kind::Port> {
+    port_of(EP_RAW.load(SeqCst) as u32).expect("port handle present")
 }
 
 fn spawn_worker(entry: extern "C" fn(usize) -> u32) -> JoinHandle {
@@ -126,7 +133,7 @@ extern "C" fn sender_worker(_arg: usize) -> u32 {
 #[kernel_test]
 fn send_recv_round_trip_sender_first() {
     let ep = Port::create().expect("port create");
-    EP_RAW.store(u64::from(ep.handle().as_raw().raw()), SeqCst);
+    EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
 
     let worker = spawn_worker(sender_worker);
     // Ждём, пока worker объявит готовность (он блокируется в send сразу
@@ -170,7 +177,7 @@ extern "C" fn receiver_worker(_arg: usize) -> u32 {
 #[kernel_test]
 fn send_recv_round_trip_receiver_first() {
     let ep = Port::create().expect("port create");
-    EP_RAW.store(u64::from(ep.handle().as_raw().raw()), SeqCst);
+    EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
 
     let worker = spawn_worker(receiver_worker);
     while WORKER_READY.load(SeqCst) == 0 {
@@ -189,7 +196,7 @@ fn send_recv_round_trip_receiver_first() {
 extern "C" fn server_worker(_arg: usize) -> u32 {
     // Сервер - единственный владелец Port (усыновляет id, закроет на drop);
     // main оперирует тем же id сырым call и не закрывает.
-    let ep = Port::from_handle(OwnedHandle::from_raw(EP_RAW.load(SeqCst) as u32).expect("port id"));
+    let ep = Port::from_handle(port_of(EP_RAW.load(SeqCst) as u32).expect("port id"));
     WORKER_READY.store(1, SeqCst);
     let mut buf = [0u8; 8];
     let Ok((len, Some(reply))) = ep.recv_bytes(&mut buf, Timeout::INFINITE) else {
@@ -259,7 +266,7 @@ extern "C" fn cap_sender_worker(_arg: usize) -> u32 {
 #[kernel_test]
 fn cap_transfer_through_port() {
     let ep = Port::create().expect("port create");
-    EP_RAW.store(u64::from(ep.handle().as_raw().raw()), SeqCst);
+    EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
 
     let worker = spawn_worker(cap_sender_worker);
     while WORKER_READY.load(SeqCst) == 0 {
@@ -279,7 +286,9 @@ fn cap_transfer_through_port() {
     // Получили новый HandleId на ту же Signal.
     // SAFETY: собственный буфер.
     let received_raw = unsafe { read_cap(va, 0) };
-    let received = Handle::new(received_raw).expect("received cap handle");
+    let received = NonZeroU32::new(received_raw)
+        .map(Handle::<kind::Signal>::from_abi)
+        .expect("received cap handle");
 
     // Идентичность: бит, поднятый отправителем до переноса, виден здесь.
     let observed = signal_wait_one(received, SIGNALED, Timeout::POLL);
@@ -304,7 +313,7 @@ static CLIENT_B_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
 extern "C" fn badge_client_a(_arg: usize) -> u32 {
     let va = ipc_va();
-    let h = Handle::new(EP_BADGED_A.load(SeqCst) as u32).expect("badged copy A");
+    let h = port_of(EP_BADGED_A.load(SeqCst) as u32).expect("badged copy A");
     // SAFETY: собственный буфер.
     unsafe {
         write_msg(va, b"a", &[]);
@@ -317,7 +326,7 @@ extern "C" fn badge_client_a(_arg: usize) -> u32 {
 
 extern "C" fn badge_client_b(_arg: usize) -> u32 {
     let va = ipc_va();
-    let h = Handle::new(EP_BADGED_B.load(SeqCst) as u32).expect("badged copy B");
+    let h = port_of(EP_BADGED_B.load(SeqCst) as u32).expect("badged copy B");
     // SAFETY: собственный буфер.
     unsafe {
         write_msg(va, b"b", &[]);
@@ -331,7 +340,7 @@ extern "C" fn badge_client_b(_arg: usize) -> u32 {
 #[kernel_test]
 fn badge_round_trip_two_clients() {
     let ep = Port::create().expect("port create");
-    let ep_raw = ep.handle().as_raw();
+    let ep_raw = ep.as_raw();
 
     // Минтим две badged-копии (set-once: оригинал незаклеймён -> копии получают
     // заданный badge). Права сужаем до WRITE - клиенту нужен только send.

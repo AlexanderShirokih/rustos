@@ -2,6 +2,7 @@
 
 use filesystem_abi::file_system;
 use ipc::{Timeout, wire::IpcError};
+use syscall::kind;
 
 use crate::{
     environment::{Environment, SharedRegion},
@@ -17,7 +18,11 @@ pub(crate) struct Session<E: Environment> {
 }
 
 impl<E: Environment> Session<E> {
-    pub(crate) fn establish(environment: &E, session: E::Handle, wait: Timeout) -> Result<Self> {
+    pub(crate) fn establish(
+        environment: &E,
+        session: E::Handle<kind::Port>,
+        wait: Timeout,
+    ) -> Result<Self> {
         Self::over(environment, environment.connect(session)?, wait)
     }
 

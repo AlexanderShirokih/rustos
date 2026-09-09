@@ -22,7 +22,7 @@ use core::{
     time::Duration,
 };
 
-use syscall::{Handle, SYSCALL_RETURN_TIMEOUT, Timeout, WakeCount};
+use syscall::{Handle, SYSCALL_RETURN_TIMEOUT, Timeout, WakeCount, kind};
 
 use crate::{
     clock::Instant,
@@ -64,7 +64,7 @@ struct Bucket {
 
 struct Parked<'a> {
     bucket: &'static Bucket,
-    signal: Handle,
+    signal: Handle<kind::Signal>,
     slot: u32,
     address: u64,
     futex: &'a Futex,
@@ -86,11 +86,11 @@ impl Bucket {
         }
     }
 
-    fn signal(&self) -> Option<Handle> {
-        Handle::new(self.signal.load(Acquire))
+    fn signal(&self) -> Option<Handle<kind::Signal>> {
+        crate::restore(self.signal.load(Acquire))
     }
 
-    fn signal_installed(&self) -> Option<Handle> {
+    fn signal_installed(&self) -> Option<Handle<kind::Signal>> {
         if let Some(handle) = self.signal() {
             return Some(handle);
         }
@@ -104,7 +104,7 @@ impl Bucket {
             Err(existing) => {
                 // Гонку выиграл другой поток: свежий хэндл лишний.
                 let _ = handle_close(created);
-                Handle::new(existing)
+                crate::restore(existing)
             }
         }
     }

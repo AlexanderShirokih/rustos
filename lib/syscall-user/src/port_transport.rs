@@ -23,7 +23,7 @@
 //! `runtime::receive_startup` на стартовом кадре. Невзятую доставку транспорт сам
 //! закрывает.
 
-use core::cell::Cell;
+use core::{cell::Cell, num::NonZeroU32};
 
 use ipc::{
     MessageLen, Transport,
@@ -31,7 +31,7 @@ use ipc::{
 };
 use syscall::{
     Handle, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, SYSCALL_RETURN_TIMEOUT, SyscallError,
-    Timeout, decode_tag, encode_tag,
+    Timeout, decode_tag, encode_tag, kind,
 };
 
 use crate::{
@@ -60,9 +60,9 @@ impl Phase {
 /// Транспорт заимствует port-handle: разрушение транспорта закрывает лишь незавершённый
 /// reply, а сам port-handle остаётся за тем, кто его открыл.
 pub struct PortTransport {
-    handle: Handle,
+    handle: Handle<kind::Port>,
     phase: Cell<Phase>,
-    pending_reply: Cell<Option<Handle>>,
+    pending_reply: Cell<Option<Handle<kind::Reply>>>,
     delivered: Cell<Option<Delivery>>,
     send_timeout: Timeout,
 }
@@ -71,18 +71,18 @@ impl PortTransport {
     /// Клиентская сторона порта: отправитель `cast`/`call`. Handle требует
     /// `Rights::WRITE`.
     #[must_use]
-    pub fn client(handle: impl Into<Handle>) -> Self {
+    pub fn client(handle: impl Into<Handle<kind::Port>>) -> Self {
         Self::with_phase(handle.into(), Phase::ClientIdle)
     }
 
     /// Серверная сторона порта: получатель `recv`, отвечающий `reply`. Handle требует
     /// `Rights::READ`.
     #[must_use]
-    pub fn server(handle: impl Into<Handle>) -> Self {
+    pub fn server(handle: impl Into<Handle<kind::Port>>) -> Self {
         Self::with_phase(handle.into(), Phase::ServerIdle)
     }
 
-    fn with_phase(handle: Handle, phase: Phase) -> Self {
+    fn with_phase(handle: Handle<kind::Port>, phase: Phase) -> Self {
         Self {
             handle,
             phase: Cell::new(phase),
@@ -130,7 +130,7 @@ impl PortTransport {
     /// Закрывает незавершённый reply названного кадра и будит вызывателя отказом вместо
     /// бессрочной парковки. No-op, когда ответ уже отправлен, встречный был `cast` либо
     /// reply принадлежит другому кадру.
-    pub fn finish_reply(&self, reply: Option<Handle>) {
+    pub fn finish_reply(&self, reply: Option<Handle<kind::Reply>>) {
         let Some(reply) = reply else {
             return;
         };
@@ -141,7 +141,7 @@ impl PortTransport {
         let _ = handle_close(reply);
     }
 
-    fn record_delivery(&self, reply: Option<Handle>) {
+    fn record_delivery(&self, reply: Option<Handle<kind::Reply>>) {
         let Some(ptr) = ipc_buffer_ptr() else {
             return;
         };
@@ -151,7 +151,13 @@ impl PortTransport {
             let ncaps = decode_tag(buf.tag).ncaps.min(IPC_BUFFER_MAX_CAPS);
             let caps = core::array::from_fn(|index| {
                 (index < ncaps)
-                    .then(|| buf.caps.get(index).copied().and_then(Handle::new))
+                    .then(|| {
+                        buf.caps
+                            .get(index)
+                            .copied()
+                            .and_then(NonZeroU32::new)
+                            .map(Handle::<kind::Any>::from_abi)
+                    })
                     .flatten()
             });
             (buf.badge, caps)
@@ -174,7 +180,8 @@ impl PortTransport {
             return Err(map_recv_error(ret));
         }
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let reply = Handle::new(ret as u32);
+        // Граница ABI: неотрицательный возврат `port_recv` называет reply-handle кадра.
+        let reply = NonZeroU32::new(ret as u32).map(Handle::<kind::Reply>::from_abi);
         self.pending_reply.set(reply);
         self.record_delivery(reply);
         Ok(())

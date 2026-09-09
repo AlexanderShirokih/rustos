@@ -19,7 +19,7 @@ use component_startup::{ReceivedStartup, component_manifest};
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path};
 use filesystem_server::{Error, Result as ServerResult, serve};
-use kernel_objects::OwnedHandle;
+use kernel_objects::{Port, kind};
 use runtime::{log_fmt, thread_exit};
 use syscall::{Handle, USER_VA_END};
 
@@ -27,7 +27,7 @@ const LOG_TAG: &str = "crashfs";
 
 component_manifest! {
     struct CrashFileSystemStartup {
-        exports: "FileSystem",
+        exports: { service: "FileSystem" },
         establishes_sessions: true,
         slots: {},
     }
@@ -149,9 +149,9 @@ fn kill_process_by_fault() -> ! {
     thread_exit(1)
 }
 
-/// `startup` приходит в x0 как HandleId одноразового startup-порта.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     match run(startup) {
         Ok(()) => thread_exit(0),
         Err(error) => {
@@ -161,10 +161,9 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     }
 }
 
-fn run(startup: Handle) -> ServerResult<()> {
+fn run(startup: Handle<kind::Port>) -> ServerResult<()> {
     let ReceivedStartup { log, resources } =
-        CrashFileSystemStartup::receive(OwnedHandle::from_handle(startup))
-            .map_err(|_| Error::Start)?;
+        CrashFileSystemStartup::receive(Port::from_handle(startup)).map_err(|_| Error::Start)?;
     let backend = |_| {
         Ok(CrashingFileSystem {
             inner: RamFileSystem::new(),
@@ -172,7 +171,7 @@ fn run(startup: Handle) -> ServerResult<()> {
     };
     serve(
         log,
-        resources.control,
+        resources.startup,
         resources.service,
         None,
         LOG_TAG,

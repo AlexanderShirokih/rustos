@@ -1,24 +1,20 @@
 //! Калькулятор: компонент композиции, экспортирующий протокол `Calculator`.
-//! Лог-сессия, control-порт и сервисный порт приходят стартовым набором, и слоты
+//! Лог-сессия, startup-порт и порт экспорта приходят стартовым набором, и слоты
 //! компоненту не нужны.
 
-use std::{process, thread};
+use std::process;
 
 use calculator_demo::calculator;
-use component_abi::supervisor_gone;
 use component_startup::component_manifest;
-use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::{OwnedHandle, PortTransport, ReceivedFrame};
-use syscall::Timeout;
+use ipc::wire::IpcError;
+use kernel_objects::{Port, PortTransport};
 
 const NO_STARTUP_EXIT_CODE: i32 = 1;
-const CONTROL_PORT_FAILED_EXIT_CODE: i32 = 3;
 const SERVICE_PORT_FAILED_EXIT_CODE: i32 = 4;
-const SUPERVISOR_LOST_EXIT_CODE: i32 = 7;
 
 component_manifest! {
     struct CalculatorStartup {
-        exports: "Calculator",
+        exports: { service: "Calculator" },
         slots: {},
     }
 }
@@ -34,14 +30,14 @@ impl calculator::Service for Calculator {
 fn main() {
     // До установки лог-сессии вывод не доходит до журнала, поэтому процесс называет отказ
     // приёма кодом выхода.
-    let Ok(CalculatorStartup { control, service }) =
+    let Ok(CalculatorStartup { startup, service }) =
         component_startup_std::receive(CalculatorStartup::receive)
     else {
         process::exit(NO_STARTUP_EXIT_CODE);
     };
 
-    // Поток control-порта выполняется до конца процесса и не нуждается в join.
-    thread::spawn(move || watch_supervisor(&control));
+    // Startup-порт открыт всю incarnation, и его серверная сторона держится до конца процесса.
+    let _startup = startup;
 
     println!("started");
     serve(&service);
@@ -50,7 +46,7 @@ fn main() {
     process::exit(SERVICE_PORT_FAILED_EXIT_CODE)
 }
 
-fn serve(service: &OwnedHandle) {
+fn serve(service: &Port) {
     let transport = PortTransport::server(service);
     let mut calculator = Calculator;
     // Порт остаётся открытым, пока кадр доставлен, значок ушёл либо бюджет
@@ -60,29 +56,4 @@ fn serve(service: &OwnedHandle) {
         Ok(()) | Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout)
     ) {}
     println!("service port closed");
-}
-
-fn watch_supervisor(control: &OwnedHandle) -> ! {
-    let transport = PortTransport::server(control);
-    loop {
-        match transport.wait_readable(Timeout::INFINITE) {
-            // Control-порт протокола не обслуживает, и пришедший кадр уходит без ответа.
-            // Владеющий кадр закрывает его ресурсы и будит вызывателя.
-            Ok(()) => drop(ReceivedFrame::take(&transport)),
-            // Уход значка поднявшего компонент supervisor снимает процесс целиком.
-            Err(IpcError::SenderGone) if supervisor_gone(transport.peer_badge()) => {
-                println!("supervisor gone");
-                process::exit(SUPERVISOR_LOST_EXIT_CODE)
-            }
-            // Покадровое исчерпание, пробуждение без кадра и уход чужого значка цикл не
-            // закрывают.
-            Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout) => {}
-            // Прочий отказ приёма оставляет калькулятор без надзора и снимает
-            // процесс отличимым кодом.
-            Err(_) => {
-                println!("control port failed");
-                process::exit(CONTROL_PORT_FAILED_EXIT_CODE)
-            }
-        }
-    }
 }

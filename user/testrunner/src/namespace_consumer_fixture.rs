@@ -9,7 +9,7 @@ use core::panic::PanicInfo;
 use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{PATH_MAX, namespace};
 use ipc::wire::Str;
-use kernel_objects::{OwnedHandle, Signal};
+use kernel_objects::{Port, Signal, kind};
 use runtime::{PortTransport, Timeout, thread_exit};
 use syscall::{Handle, SIGNALED};
 
@@ -30,9 +30,9 @@ component_manifest! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     let Ok(ReceivedStartup { log, resources }) =
-        ConsumerStartup::receive(OwnedHandle::from_handle(startup))
+        ConsumerStartup::receive(Port::from_handle(startup))
     else {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };

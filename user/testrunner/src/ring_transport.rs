@@ -10,7 +10,7 @@
 
 use collections::SpscRing;
 use ipc::{Transport, wire::IpcError};
-use kernel_objects::{Resource, RingTransport, Signal};
+use kernel_objects::{Resource, RingTransport, Signal, kind};
 use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, Priority, Timeout, UserMemFlags, spawn};
 use syscall::Handle;
@@ -28,7 +28,7 @@ const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 struct Shared {
     region_va: u64,
     region_len: usize,
-    data: Handle,
+    data: Handle<kind::Signal>,
     ok: core::sync::atomic::AtomicBool,
 }
 
@@ -92,7 +92,7 @@ fn ring_transport_round_trip() {
     let shared = Shared {
         region_va: mapping.va(),
         region_len,
-        data: data_signal.handle().as_raw(),
+        data: data_signal.as_raw(),
         ok: core::sync::atomic::AtomicBool::new(false),
     };
 
@@ -103,7 +103,7 @@ fn ring_transport_round_trip() {
     // единственный producer-конец над ней.
     let producer_ring =
         unsafe { SpscRing::from_raw(base, region_len, SLOT_PAYLOAD) }.expect("producer ring");
-    let producer = RingTransport::producer_signal(producer_ring, data_signal.handle());
+    let producer = RingTransport::producer_signal(producer_ring, data_signal.borrow());
 
     // Спавним consumer-поток в текущем процессе.
     let arg = (&raw const shared) as usize;

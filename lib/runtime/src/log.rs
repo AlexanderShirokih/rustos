@@ -12,7 +12,7 @@ use core::{
 
 use ipc::wire::IpcError;
 use log_abi::{LOG_MESSAGE_MAX, LineAssembler, LogBuffer, log};
-use syscall::Handle;
+use syscall::{Handle, kind};
 
 use crate::{svc, svc::PortTransport, sync::Mutex};
 
@@ -79,7 +79,7 @@ impl Default for Stream {
 ///
 /// Сессию приносит стартовый кадр, и он один. Повторный вызов закрывает переданный
 /// handle.
-pub fn install(handle: Handle, tag: &'static str) {
+pub fn install(handle: Handle<kind::Port>, tag: &'static str) {
     if SESSION
         .compare_exchange(0, handle.raw(), Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -120,7 +120,7 @@ fn tag() -> &'static str {
 }
 
 fn client() -> Option<log::Client<PortTransport>> {
-    let handle = Handle::new(SESSION.load(Ordering::Acquire))?;
+    let handle = crate::restore(SESSION.load(Ordering::Acquire))?;
     Some(log::Client::new(PortTransport::client(handle)))
 }
 

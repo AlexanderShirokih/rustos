@@ -6,7 +6,7 @@
 //! ещё не смонтирован, и у компонента нет каталога. Корень приходит слотом по имени экземпляра,
 //! а всё остальное дерево - сессиями компонентов, которые поднял сам `init`.
 //!
-//! Уход маршрутизатора уносит дерево имён и снимает держателя его control-слота, и свежая
+//! Уход маршрутизатора уносит дерево имён и снимает держателя его admin-слота, и свежая
 //! incarnation `init` применяет таблицу заново. Ступень 1 сохраняется при смене incarnation:
 //! её набор принадлежит композиции, и повторный `commit` отвечает `Duplicate`.
 
@@ -29,21 +29,19 @@ use core::{
     panic::PanicInfo,
 };
 
-use component_abi::supervisor_gone;
-use component_startup::{ReceivedStartup, StartupError, component_manifest};
+use component_startup::{ReceivedStartup, StartupError, component_manifest, park};
 use filesystem_abi::{
     AccessMode, BOOT_MOUNT_TABLE_PATH, DirCursor, DirEntry, FileSystemError, MountTable,
     NodeDescriptor, NodeKind, OpenFlags, Opened, PATH_MAX, Path, decode_mount_table, file_system,
     namespace_admin,
 };
-use ipc::{
-    Transport as _,
-    wire::{Bytes, IpcError, Str},
-};
-use kernel_objects::{Mapping, MemoryRegion, OwnedHandle, ReceivedFrame};
+use ipc::wire::{Bytes, IpcError, Str};
+use kernel_objects::{Mapping, MemoryRegion, Port};
 use runtime::{PortTransport, Timeout, UserMemFlags, install_log, log_fmt, log_line, thread_exit};
-use supervisor_abi::{ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, supervisor};
-use syscall::Handle;
+use supervisor_abi::{
+    ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, PROTOCOL_NAME_MAX, supervisor,
+};
+use syscall::{Handle, kind};
 use userland_image::{BOOT_STAGE_ONE_DIRECTORY, COMPONENT_PROGRAM_NAME, decode, decode_plan};
 
 const LOG_TAG: &str = "init";
@@ -52,18 +50,16 @@ const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const ROOT_FILE_SYSTEM: &str = "filesystem-imagefs";
 
+const FILE_SYSTEM_PROTOCOL: &str = "FileSystem";
+
 const BUFFER_SIZE: u32 = 4096;
-
-const SUPERVISOR_LOST_EXIT_CODE: u64 = 7;
-
-const CONTROL_PORT_FAILED_EXIT_CODE: u64 = 9;
 
 component_manifest! {
     struct InitStartup {
         slots: {
             image: userland,
             root: service(protocol = "FileSystem", instance = "filesystem-imagefs"),
-            mounts: control(protocol = "NamespaceAdmin", instance = "namespace-router"),
+            mounts: service(protocol = "NamespaceAdmin", instance = "namespace-router"),
             system: supervisor,
         },
     }
@@ -85,14 +81,14 @@ struct Reading {
     files: file_system::Client<PortTransport>,
     buffer: Mapping,
     _region: MemoryRegion,
-    _session: OwnedHandle,
+    _session: Port,
 }
 
-/// `startup` приходит в x0 как HandleId одноразового startup-порта.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     match run(startup) {
-        Ok(exit_code) => thread_exit(exit_code),
+        Ok(()) => thread_exit(0),
         Err(error) => {
             log_fmt(format_args!("stopped: {error}"));
             thread_exit(error.exit_code())
@@ -100,23 +96,18 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     }
 }
 
-fn run(startup: Handle) -> Result<u64> {
-    let ReceivedStartup { log, resources } =
-        InitStartup::receive(OwnedHandle::from_handle(startup))?;
+fn run(startup: Handle<kind::Port>) -> Result<()> {
+    let ReceivedStartup { log, resources } = InitStartup::receive(Port::from_handle(startup))?;
     install_log(log.into_raw(), LOG_TAG);
     let InitStartup {
-        control,
-        service,
+        startup,
         image,
         root,
         mounts,
         system,
     } = resources;
-    // Экспорта у ступени 0 нет. Серверная сторона service-порта остаётся открытой до конца
-    // процесса без обслуживания.
-    let _service = service;
 
-    let region = MemoryRegion::from_handle(image);
+    let region = image;
     let mapping = region.map_full_read_only()?;
     let table = boot_table(mapping.as_bytes())?;
     let admin =
@@ -138,7 +129,7 @@ fn run(startup: Handle) -> Result<u64> {
 
     // Компонент, вышедший с нулём, композиция поднимает заново по политике плана, а повторное
     // монтирование его префиксов отвечает `AlreadyExists`.
-    Ok(park(&PortTransport::server(control.borrow())))
+    park(startup)
 }
 
 fn boot_table(image: &[u8]) -> Result<MountTable<'_>> {
@@ -155,7 +146,7 @@ fn boot_table(image: &[u8]) -> Result<MountTable<'_>> {
 fn graft_root(
     admin: &namespace_admin::Client<PortTransport>,
     table: MountTable<'_>,
-    root: OwnedHandle,
+    root: Port,
 ) -> Result<()> {
     // Сминченная сессия не содержит право `DUPLICATE`, и статически связанный корень
     // прививается ровно к одному префиксу.
@@ -183,21 +174,19 @@ fn graft_raised(
             continue;
         }
         let instance = Str::<INSTANCE_NAME_MAX>::new(mount.instance).ok_or(Error::MountTable)?;
-        let mut response = supervisor.session(instance)?;
+        let protocol =
+            Str::<PROTOCOL_NAME_MAX>::new(FILE_SYSTEM_PROTOCOL).ok_or(Error::MountTable)?;
+        let mut response = supervisor.session(instance, protocol)?;
         let session = accepted("stage 1 session", response.value)?;
         let handle = response
             .claim(session)
             .ok_or(Error::Ipc(IpcError::InvalidValue))?;
-        graft(admin, mount.path, handle.into())?;
+        graft(admin, mount.path, Port::from(handle))?;
     }
     Ok(())
 }
 
-fn graft(
-    admin: &namespace_admin::Client<PortTransport>,
-    path: &str,
-    session: OwnedHandle,
-) -> Result<()> {
+fn graft(admin: &namespace_admin::Client<PortTransport>, path: &str, session: Port) -> Result<()> {
     let prefix = Str::<PATH_MAX>::new(path).ok_or(Error::MountTable)?;
     admin.mount(prefix, session)?.value.map_err(|error| {
         log_fmt(format_args!("mount of {path} refused: {error:?}"));
@@ -222,7 +211,7 @@ fn raise_stage_one(
         let bytes = Bytes::<PLAN_RECORD_MAX>::new(record).ok_or(Error::StageOne)?;
         accepted(
             "stage 1 component",
-            supervisor.define(bytes, program.into_handle())?.value,
+            supervisor.define(bytes, program)?.value,
         )?;
     }
     match supervisor.commit()?.value {
@@ -248,12 +237,12 @@ fn executable(record: &[u8]) -> Result<&str> {
 }
 
 impl Reading {
-    fn derive(root: &OwnedHandle) -> Result<Self> {
+    fn derive(root: &Port) -> Result<Self> {
         let files = file_system::Client::new(PortTransport::client(root)).with_wait(CALL_TIMEOUT);
         let window = Str::<PATH_MAX>::new(Path::ROOT.as_str()).ok_or(Error::StageOne)?;
         let mut response = files.open_root(window)?;
         let session = answered("root window", response.value)?;
-        let session = OwnedHandle::from(
+        let session = Port::from(
             response
                 .claim(session)
                 .ok_or(Error::Ipc(IpcError::InvalidValue))?,
@@ -262,11 +251,10 @@ impl Reading {
             file_system::Client::new(PortTransport::client(&session)).with_wait(CALL_TIMEOUT);
         let mut response = files.acquire_buffer(BUFFER_SIZE)?;
         let region = answered("stage 1 data buffer", response.value)?;
-        let region = MemoryRegion::from_handle(
+        let region = MemoryRegion::from(
             response
                 .claim(region)
-                .ok_or(Error::Ipc(IpcError::InvalidValue))?
-                .into(),
+                .ok_or(Error::Ipc(IpcError::InvalidValue))?,
         );
         let buffer = region.map_full(UserMemFlags::ReadWrite)?;
         Ok(Self {
@@ -303,7 +291,7 @@ impl Reading {
             .claim(region)
             .ok_or(Error::Ipc(IpcError::InvalidValue))?;
         self.close(opened.fd)?;
-        Ok(MemoryRegion::from_handle(region.into()))
+        Ok(MemoryRegion::from(region))
     }
 
     fn open_stage_one(&self) -> Result<Option<Opened>> {
@@ -395,27 +383,6 @@ fn accepted<T>(operation: &str, answered: core::result::Result<T, ExtendError>) 
         log_fmt(format_args!("{operation} refused: {error:?}"));
         Error::StageOne
     })
-}
-
-fn park(control: &PortTransport) -> u64 {
-    loop {
-        match control.wait_readable(Timeout::INFINITE) {
-            // Control-порт протокола не обслуживает, и пришедший кадр уходит без ответа.
-            // Владеющий кадр закрывает его ресурсы и будит вызывателя.
-            Ok(()) => drop(ReceivedFrame::take(control)),
-            // Уход значка поднявшего компонент supervisor снимает процесс.
-            Err(IpcError::SenderGone) if supervisor_gone(control.peer_badge()) => {
-                log_line("supervisor gone");
-                return SUPERVISOR_LOST_EXIT_CODE;
-            }
-            // Покадровое исчерпание и уход чужого значка парковку не рвут.
-            Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout) => {}
-            Err(_) => {
-                log_line("control port failed");
-                return CONTROL_PORT_FAILED_EXIT_CODE;
-            }
-        }
-    }
 }
 
 impl Error {

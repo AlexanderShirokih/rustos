@@ -4,7 +4,7 @@
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 use bootstrap_abi::bootstrap;
-use component_abi::{SESSION_SCOPE_MAX, component_sessions};
+use component_abi::{SESSION_SCOPE_MAX, component_startup};
 use filesystem_abi::{
     APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NAME_MAX, NodeDescriptor,
     NodeKind, OpenFlags, Opened, Path, file_system, namespace, namespace_admin,
@@ -13,9 +13,11 @@ use ipc::{
     MessageLen, Transport,
     wire::{HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, Str, TERMINATOR},
 };
-use kernel_objects::{BorrowedHandle, MemoryRegion, OwnedHandle, Process, Resource, Signal};
+use kernel_objects::{
+    BorrowedHandle, MemoryRegion, OwnedHandle, Port, Process, Resource, Signal, kind,
+};
 use kernel_tests::kernel_test;
-use managed_component::ComponentRoots;
+use managed_component::{ComponentRoots, RunningComponent};
 use rootkeeper::{RootSystem, SystemImage};
 use runtime::{PortTransport, Timeout, UserMemFlags, port_send};
 use spin::Once;
@@ -34,6 +36,11 @@ const RAM_MOUNT: &str = "/tmp";
 const SPARE_MOUNT: &str = "/spare";
 
 const ROUTER: u16 = 0;
+
+const NAMESPACE_EXPORT: usize = 0;
+const NAMESPACE_ADMIN_EXPORT: usize = 1;
+
+const SINGLE_EXPORT: u16 = 0;
 const UNRESPONSIVE_FILESYSTEM: u16 = 2;
 const SPARE_FILESYSTEM: u16 = 3;
 
@@ -69,12 +76,18 @@ struct NamespacePorts {
 
 static NAMESPACE_PORTS: Once<NamespacePorts> = Once::new();
 
-fn router_minter() -> BorrowedHandle<'static> {
-    component_roots(ROUTER).service_minter()
+fn router_minter() -> BorrowedHandle<'static, kind::Port> {
+    export_minter(component_roots(ROUTER), NAMESPACE_EXPORT)
 }
 
-fn router_admin() -> BorrowedHandle<'static> {
-    component_roots(ROUTER).control()
+fn router_admin() -> BorrowedHandle<'static, kind::Port> {
+    export_minter(component_roots(ROUTER), NAMESPACE_ADMIN_EXPORT)
+}
+
+fn export_minter(roots: &ComponentRoots, export: usize) -> BorrowedHandle<'_, kind::Port> {
+    roots
+        .export_minter(export)
+        .expect("component exports the protocol")
 }
 
 fn namespace_ports() -> &'static NamespacePorts {
@@ -82,7 +95,11 @@ fn namespace_ports() -> &'static NamespacePorts {
 }
 
 fn component_roots(index: u16) -> &'static ComponentRoots {
-    roots_of(namespace_ports(), index)
+    component_running(index).roots()
+}
+
+fn component_running(index: u16) -> &'static RunningComponent<ComponentRoots> {
+    running_of(namespace_ports(), index)
 }
 
 fn ram_filesystem() -> u16 {
@@ -92,7 +109,7 @@ fn ram_filesystem() -> u16 {
         .expect("stage 1 raised the file system of /tmp")
 }
 
-fn roots_of(ports: &NamespacePorts, index: u16) -> &ComponentRoots {
+fn running_of(ports: &NamespacePorts, index: u16) -> &RunningComponent<ComponentRoots> {
     ports
         .system
         .component(index)
@@ -100,26 +117,25 @@ fn roots_of(ports: &NamespacePorts, index: u16) -> &ComponentRoots {
         .managed()
         .running()
         .expect("component is running")
-        .roots()
 }
 
 pub(crate) fn whole_export() -> Str<'static, SESSION_SCOPE_MAX> {
     Str::new("").expect("the empty scope fits the bound")
 }
 
-fn filesystem_session(index: u16) -> OwnedHandle {
+fn filesystem_session(index: u16) -> Port {
     filesystem_session_at(index, whole_export())
 }
 
-fn filesystem_session_at(index: u16, scope: Str<'_, SESSION_SCOPE_MAX>) -> OwnedHandle {
+fn filesystem_session_at(index: u16, scope: Str<'_, SESSION_SCOPE_MAX>) -> Port {
     let mut response =
-        component_sessions::Client::new(PortTransport::client(component_roots(index).control()))
+        component_startup::Client::new(PortTransport::client(component_running(index).startup()))
             .with_wait(CALL_TIMEOUT)
-            .open_session(scope)
+            .open_session(SINGLE_EXPORT, scope)
             .expect("open_session call");
     let capability = response.value.expect("session established");
     let session = response.claim(capability).expect("capability owner");
-    OwnedHandle::from(session)
+    Port::from(session)
 }
 
 fn session_scope(text: &str) -> Str<'_, SESSION_SCOPE_MAX> {
@@ -127,7 +143,7 @@ fn session_scope(text: &str) -> Str<'_, SESSION_SCOPE_MAX> {
 }
 
 fn namespace_admin_client(
-    capability: BorrowedHandle<'_>,
+    capability: BorrowedHandle<'_, kind::Port>,
 ) -> namespace_admin::Client<PortTransport> {
     namespace_admin::Client::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
@@ -159,7 +175,7 @@ fn await_boot_tree(ports: &NamespacePorts) {
     // Компонент композиции монтирует дерево имён загрузки своим оборотом, и его префиксы становятся
     // накрытыми не раньше.
     for _ in 0..BOOT_TREE_ATTEMPTS {
-        let minter = roots_of(ports, ROUTER).service_minter();
+        let minter = export_minter(running_of(ports, ROUTER).roots(), NAMESPACE_EXPORT);
         if [Path::ROOT.as_str(), RAM_MOUNT]
             .into_iter()
             .all(|prefix| covers(minter, prefix))
@@ -171,7 +187,7 @@ fn await_boot_tree(ports: &NamespacePorts) {
     panic!("boot tree is not mounted")
 }
 
-fn covers(minter: BorrowedHandle<'_>, prefix: &str) -> bool {
+fn covers(minter: BorrowedHandle<'_, kind::Port>, prefix: &str) -> bool {
     // Выданную сессию закрывает ответ: проверке довольно покрытия префикса.
     let Ok(resolved) = namespace_client(minter).resolve(path(prefix)) else {
         return false;
@@ -179,9 +195,9 @@ fn covers(minter: BorrowedHandle<'_>, prefix: &str) -> bool {
     resolved.value.is_ok()
 }
 
-fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
+fn spawn_from_image(path: &str, start: Port) -> Process {
     let bootstrap = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let region = MemoryRegion::from_handle(acquire_image(&bootstrap));
+    let region = acquire_image(&bootstrap);
     let mapping = region.map_full_read_only().expect("map userland image");
     let image = decode(mapping.as_bytes()).expect("decode userland image");
     let program = image
@@ -193,15 +209,17 @@ fn spawn_from_image(path: &str, start: OwnedHandle) -> Process {
     load_entry(&program, Some(component_name(path)), &resource, start).expect("spawn from image")
 }
 
-fn acquire_image(bootstrap: &bootstrap::Client<PortTransport>) -> OwnedHandle {
+fn acquire_image(bootstrap: &bootstrap::Client<PortTransport>) -> MemoryRegion {
     let mut response = bootstrap
         .acquire_userland_image()
         .expect("acquire_userland_image call");
     let capability = response.value.expect("image vend");
-    OwnedHandle::from(response.claim(capability).expect("capability owner"))
+    MemoryRegion::from(response.claim(capability).expect("capability owner"))
 }
 
-fn namespace_client(capability: BorrowedHandle<'_>) -> namespace::Client<PortTransport> {
+fn namespace_client(
+    capability: BorrowedHandle<'_, kind::Port>,
+) -> namespace::Client<PortTransport> {
     namespace::Client::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
@@ -272,24 +290,24 @@ pub(crate) fn unmount_filesystem(prefix: &str) -> Result<u32, FileSystemError> {
         .value
 }
 
-pub(crate) fn session_for(text: &str) -> OwnedHandle {
+pub(crate) fn session_for(text: &str) -> Port {
     let mut response = namespace_client(router_minter())
         .resolve(path(text))
         .expect("resolve call");
     let capability = response.value.expect("path is covered by a mount");
     let session = response.claim(capability).expect("capability owner");
-    OwnedHandle::from(session)
+    Port::from(session)
 }
 
-pub(crate) fn ram_session() -> OwnedHandle {
+pub(crate) fn ram_session() -> Port {
     session_for(RAM_MOUNT)
 }
 
-pub(crate) fn image_session() -> OwnedHandle {
+pub(crate) fn image_session() -> Port {
     session_for(Path::ROOT.as_str())
 }
 
-pub(crate) fn connect(capability: &OwnedHandle) -> file_system::Client<PortTransport> {
+pub(crate) fn connect(capability: &Port) -> file_system::Client<PortTransport> {
     file_system::Client::new(PortTransport::client(capability)).with_wait(CALL_TIMEOUT)
 }
 
@@ -352,7 +370,7 @@ impl Transport for Tampered {
     }
 }
 
-fn connect_tampered(capability: &OwnedHandle, tamper: Tamper) -> file_system::Client<Tampered> {
+fn connect_tampered(capability: &Port, tamper: Tamper) -> file_system::Client<Tampered> {
     file_system::Client::new(Tampered {
         port: PortTransport::client(capability),
         tamper,
@@ -360,7 +378,7 @@ fn connect_tampered(capability: &OwnedHandle, tamper: Tamper) -> file_system::Cl
     .with_wait(CALL_TIMEOUT)
 }
 
-fn connect_abandoning(capability: &OwnedHandle) -> file_system::Client<Tampered> {
+fn connect_abandoning(capability: &Port) -> file_system::Client<Tampered> {
     connect_tampered(
         capability,
         Tamper {
@@ -376,7 +394,7 @@ pub(crate) fn acquire_buffer(client: &file_system::Client<PortTransport>) -> Mem
         .expect("acquire_buffer call");
     let capability = response.value.expect("buffer granted");
     let cap = response.claim(capability).expect("capability owner");
-    MemoryRegion::from_handle(cap.into())
+    MemoryRegion::from(cap)
 }
 
 pub(crate) fn path(text: &str) -> Str<'_, { filesystem_abi::PATH_MAX }> {
@@ -705,7 +723,7 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
         .expect("resolve call");
     let capability = response.value.expect("root mount covers the path");
     let image = response.claim(capability).expect("capability owner");
-    drop(OwnedHandle::from(image));
+    drop(Port::from(image));
 
     let ram = ram_session();
     connect(&ram)
@@ -722,7 +740,7 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
     let mut response = namespace.resolve(path("/tmp/inner")).expect("resolve call");
     let capability = response.value.expect("ram mount covers the path");
     let ram = response.claim(capability).expect("capability owner");
-    drop(OwnedHandle::from(ram));
+    drop(Port::from(ram));
 }
 
 #[kernel_test]
@@ -737,7 +755,7 @@ fn namespace_refuses_an_occupied_prefix_without_changing_the_table() {
         .expect("resolve call");
     let capability = response.value.expect("original mount remains");
     let mounted = response.claim(capability).expect("capability owner");
-    drop(OwnedHandle::from(mounted));
+    drop(Port::from(mounted));
 }
 
 #[kernel_test]
@@ -781,8 +799,9 @@ fn namespace_grafts_the_session_it_is_handed() {
 
 #[kernel_test]
 fn namespace_rejects_admin_operations_on_the_service_port() {
-    // Управление таблицей монтирования находится на control-порту, поэтому service-порт не
-    // разбирает его ordinal, и кадр отвергается целиком, не доходя до операции.
+    // Управление таблицей монтирования находится на порту экспорта `NamespaceAdmin`, поэтому
+    // порт `Namespace` его ordinal не разбирает, и кадр отвергается целиком, не доходя до
+    // операции.
     let admin_on_service = namespace_admin_client(router_minter());
     let refused = admin_on_service
         .unmount(path("/"))
@@ -798,7 +817,7 @@ fn namespace_rejects_admin_operations_on_the_service_port() {
         .value
         .expect("root mount survives the rejected frame");
     let mounted = response.claim(capability).expect("capability owner");
-    drop(OwnedHandle::from(mounted));
+    drop(Port::from(mounted));
 }
 
 #[kernel_test]
@@ -822,7 +841,7 @@ fn namespace_reports_an_unresponsive_mount() {
         .expect("resolve call");
     let capability = response.value.expect("root mount covers the path again");
     let rerouted = response.claim(capability).expect("capability owner");
-    drop(OwnedHandle::from(rerouted));
+    drop(Port::from(rerouted));
 }
 
 #[kernel_test]
@@ -855,7 +874,7 @@ fn namespace_resolves_a_pair_to_the_session_of_their_common_directory() {
     let pair = response.value.expect("one mount covers the pair");
     // Общий каталог пары - `/tmp`, и его длина отсчитывается от корня дерева имён.
     kernel_tests::kassert_eq!(pair.root_len, RAM_MOUNT.len() as u32);
-    let scope = OwnedHandle::from(response.claim(pair.session).expect("capability owner"));
+    let scope = Port::from(response.claim(pair.session).expect("capability owner"));
 
     let opened = open(
         &connect(&scope),
@@ -896,7 +915,7 @@ fn namespace_reports_a_pair_under_different_mounts() {
         .resolve(path("/paired-second/second"))
         .expect("resolve call");
     let capability = response.value.expect("second mount covers the path");
-    drop(OwnedHandle::from(
+    drop(Port::from(
         response.claim(capability).expect("capability owner"),
     ));
 
@@ -947,7 +966,7 @@ fn namespace_pair_scope_survives_a_table_change() {
         )
         .expect("resolve_pair call");
     let pair = response.value.expect("fixture covers the pair");
-    let scope = OwnedHandle::from(response.claim(pair.session).expect("capability owner"));
+    let scope = Port::from(response.claim(pair.session).expect("capability owner"));
 
     unmount_filesystem(PAIRED_MOUNT).expect("fixture unmounted");
 
@@ -985,7 +1004,7 @@ fn unmount_only_removes_the_route_and_keeps_existing_sessions_alive() {
         .value
         .expect("root mount covers the path after unmount");
     let rerouted = response.claim(capability).expect("capability owner");
-    drop(OwnedHandle::from(rerouted));
+    drop(Port::from(rerouted));
 }
 
 #[kernel_test]
@@ -1095,8 +1114,7 @@ fn filesystem_hands_out_the_backing_window_of_an_image_file() {
         .backing_memory(opened.fd)
         .expect("backing_memory call");
     let capability = response.value.expect("window granted");
-    let window =
-        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
+    let window = MemoryRegion::from(response.claim(capability).expect("capability owner"));
     let mapped = window
         .map_full(UserMemFlags::ReadOnly)
         .expect("map backing window");
@@ -1183,8 +1201,7 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
         .backing_memory(opened.fd)
         .expect("backing_memory call");
     let capability = response.value.expect("backing granted");
-    let backing =
-        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
+    let backing = MemoryRegion::from(response.claim(capability).expect("capability owner"));
     let mapped = backing
         .map_full(UserMemFlags::ReadWrite)
         .expect("map ramfs backing");
@@ -1236,8 +1253,7 @@ fn filesystem_ramfs_zeroes_the_gap_of_a_sparse_write() {
         .backing_memory(opened.fd)
         .expect("backing_memory call");
     let capability = response.value.expect("backing granted");
-    let backing =
-        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
+    let backing = MemoryRegion::from(response.claim(capability).expect("capability owner"));
     let mapped = backing
         .map_full(UserMemFlags::ReadWrite)
         .expect("map ramfs backing");
@@ -1274,7 +1290,7 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
         .expect("map shared region");
     mapped.copy_in(b"client").expect("initialize region");
     creator
-        .create_backed(path("/client-region"), region.into_handle(), 6)
+        .create_backed(path("/client-region"), region, 6)
         .expect("create_backed call")
         .value
         .expect("create backed file");
@@ -1315,11 +1331,9 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
         .backing_memory(opened.fd)
         .expect("backing_memory call");
     let capability = response.value.expect("backing granted");
-    let shared =
-        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
+    let shared = MemoryRegion::from(response.claim(capability).expect("capability owner"));
     kernel_tests::kassert!(
         shared
-            .handle()
             .duplicate(Rights::READ | Rights::TRANSFER, None)
             .is_err()
     );
@@ -1362,7 +1376,7 @@ fn occupy_mapping_slots(
     occupied
 }
 
-fn buffered_sessions(mount: &str, count: usize) -> Vec<OwnedHandle> {
+fn buffered_sessions(mount: &str, count: usize) -> Vec<Port> {
     (0..count)
         .map(|_| {
             let capability = session_for(mount);
@@ -1376,7 +1390,7 @@ fn buffered_sessions(mount: &str, count: usize) -> Vec<OwnedHandle> {
         .collect()
 }
 
-fn region_carrying(payload: &[u8]) -> OwnedHandle {
+fn region_carrying(payload: &[u8]) -> MemoryRegion {
     let resource = Resource::self_resource().expect("self resource");
     let region = resource
         .create_virtual(USERLAND_PAGE_SIZE, runtime::MemoryAccess::RW)
@@ -1386,7 +1400,7 @@ fn region_carrying(payload: &[u8]) -> OwnedHandle {
         .expect("map imported region");
     mapped.copy_in(payload).expect("payload into the region");
     drop(mapped);
-    region.into_handle()
+    region
 }
 
 #[kernel_test]
@@ -1729,7 +1743,10 @@ fn filesystem_releases_the_reply_of_an_unparsed_frame() {
     kernel_tests::kassert_eq!(refused, Err(IpcError::PeerClosed));
 }
 
-fn send_unparsed_frame_with_capability(session: &OwnedHandle, capability: OwnedHandle) {
+fn send_unparsed_frame_with_capability<K: kernel_objects::ObjectKind>(
+    session: &Port,
+    capability: OwnedHandle<K>,
+) {
     let mut frame = [0u8; MESSAGE_INLINE_MAX];
     Header::new(u64::MAX, 0, 0)
         .encode(&mut frame)
@@ -1747,7 +1764,6 @@ fn filesystem_closes_the_capability_of_an_unparsed_frame() {
     for _ in 0..LEAK_FRAMES {
         // Капа оказалась в кадре, который не разобран, поэтому закрыть её больше некому.
         let rider = signal
-            .handle()
             .duplicate(Rights::READ | Rights::TRANSFER, None)
             .expect("capability for the frame");
         send_unparsed_frame_with_capability(&capability, rider);
@@ -1803,8 +1819,7 @@ fn filesystem_does_not_pin_an_undelivered_backing() {
         .backing_memory(opened.fd)
         .expect("backing_memory call");
     let capability = response.value.expect("backing granted");
-    let backing =
-        MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
+    let backing = MemoryRegion::from(response.claim(capability).expect("capability owner"));
     let capacity = backing.inspect().expect("inspect backing").size_bytes;
     data.copy_in(b"y").expect("payload into data buffer");
     let pinned = client
@@ -1832,7 +1847,7 @@ fn take_and_drop_session() {
         .expect("acquire_buffer call");
     let capability = response.value.expect("buffer granted");
     let buffer = response.claim(capability).expect("capability owner");
-    drop(OwnedHandle::from(buffer));
+    drop(MemoryRegion::from(buffer));
 }
 
 fn run_client_fixture() {

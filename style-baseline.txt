@@ -12,7 +12,7 @@ tuple_in_public_signature|kernel/scheduler/src/thread_table.rs|ThreadTable<A>::s
 tuple_in_public_signature|lib/filesystem-abi/src/path.rs|Path<'a>::split_last|c31ae8d9
 tuple_in_public_signature|lib/io/src/crlf.rs|Crlf<'a>::fill|88dfe246
 tuple_in_public_signature|lib/io/src/crlf.rs|Crlf<'a>::pack_u32_le|09f708a2
-tuple_in_public_signature|lib/kernel-objects/src/object/port.rs|Port::recv_bytes|0ac8677f
+tuple_in_public_signature|lib/kernel-objects/src/object/port.rs|OwnedHandle<kind::Port>::recv_bytes|0ac8677f
 tuple_in_public_signature|lib/syscall-user/src/svc.rs|memory_region_inspect|e79b63e0
 tuple_in_public_signature|lib/syscall-user/src/svc.rs|signal_wait_many|e79b63e0
 tuple_in_public_signature|lib/userland/src/lib.rs|user_vm_window|a0da3b7c

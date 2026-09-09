@@ -1,77 +1,41 @@
 //! Типизированные обёртки над IRQ-полномочием и линией прерывания ядра.
 
-use syscall::{IrqTrigger, SIGNALED, Timeout};
+use syscall::{IrqTrigger, SIGNALED, Timeout, kind};
 
 use crate::{
     error::{Error, Result, unit},
-    handle::{BorrowedHandle, OwnedHandle},
+    handle::OwnedHandle,
     svc,
 };
 
 /// Владеет хэндлом полномочия `IrqControl` и закрывает его на drop.
-#[derive(Debug)]
-pub struct IrqControl {
-    handle: OwnedHandle,
-}
+pub type IrqControl = OwnedHandle<kind::IrqControl>;
 
 /// Владеет хэндлом линии прерывания и закрывает его на drop. Закрытие снимает
 /// биндинг линии в ядре.
-#[derive(Debug)]
-pub struct IrqLine {
-    handle: OwnedHandle,
-}
+pub type IrqLine = OwnedHandle<kind::IrqLine>;
 
-impl IrqControl {
-    /// Берёт во владение хэндл `IrqControl`.
-    pub fn from_handle(handle: OwnedHandle) -> Self {
-        Self { handle }
-    }
-
-    /// Заимствование хэндла на время одного вызова.
-    pub fn handle(&self) -> BorrowedHandle<'_> {
-        self.handle.borrow()
-    }
-
+impl OwnedHandle<kind::IrqControl> {
     /// Минтит линию `irq` с триггером `trigger` по полномочию. Требует
     /// `Rights::WRITE` и попадания `irq` в диапазон полномочия. Уже занятая
     /// линия - `AlreadyBound`.
     pub fn mint(&self, irq: u16, trigger: IrqTrigger) -> Result<IrqLine> {
-        svc::irq_mint(self.handle.as_raw(), irq, trigger)
-            .map(|handle| IrqLine::from_handle(OwnedHandle::from_handle(handle)))
+        svc::irq_mint(self.as_raw(), irq, trigger)
+            .map(IrqLine::from_handle)
             .map_err(Error::Syscall)
-    }
-
-    /// Отдаёт владеемый хэндл.
-    pub fn into_handle(self) -> OwnedHandle {
-        self.handle
     }
 }
 
-impl IrqLine {
-    /// Берёт во владение хэндл `IrqLine`.
-    pub fn from_handle(handle: OwnedHandle) -> Self {
-        Self { handle }
-    }
-
-    /// Заимствование хэндла на время одного вызова.
-    pub fn handle(&self) -> BorrowedHandle<'_> {
-        self.handle.borrow()
-    }
-
+impl OwnedHandle<kind::IrqLine> {
     /// Ждёт срабатывания линии до `timeout`. Возвращает наблюдаемую маску,
     /// тайм-аут - `Err`.
     pub fn wait(&self, timeout: Timeout) -> Result<u32> {
-        super::wait_signals(self.handle.as_raw(), SIGNALED, timeout)
+        super::wait_signals(self.as_raw(), SIGNALED, timeout)
     }
 
     /// Снимает latch `SIGNALED` и размаскирует линию, подтверждая тем самым прерывание.
     /// Требует `Rights::WRITE`.
     pub fn ack(&self) -> Result<()> {
-        unit(svc::irq_ack(self.handle.as_raw()))
-    }
-
-    /// Отдаёт владеемый хэндл.
-    pub fn into_handle(self) -> OwnedHandle {
-        self.handle
+        unit(svc::irq_ack(self.as_raw()))
     }
 }

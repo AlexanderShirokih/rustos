@@ -21,22 +21,28 @@ use ipc::{
     MessageLen, ReceivedResources, Timeout, Transport,
     wire::{Cap, HandleSlots, IpcError},
 };
+use syscall::{Handle, ObjectKind, kind};
 
 /// Capability последнего принятого кадра как символические значения. [`Cap`] владения не
-/// держит, и невостребованное значение host-mock просто отбрасывает.
+/// держит, и невостребованное значение host-mock просто отбрасывает. Вид результата задаёт
+/// вид поля контракта, а фактический объект ядра мок не проверяет.
 #[derive(Debug, Default)]
 pub struct MockResources {
-    handles: Vec<Cap>,
+    handles: Vec<Cap<kind::Any>>,
 }
 
 impl ReceivedResources for MockResources {
-    type Handle = Cap;
+    type Handle<K: ObjectKind> = Cap<K>;
 
-    fn claim(&mut self, cap: Cap) -> Option<Cap> {
+    fn claim<K: ObjectKind>(&mut self, cap: Cap<K>) -> Option<Cap<K>> {
+        let erased = cap.erase();
         self.handles
             .iter()
-            .position(|&handle| handle == cap)
-            .map(|index| self.handles.remove(index))
+            .position(|&handle| handle == erased)
+            .map(|index| {
+                self.handles.remove(index);
+                cap
+            })
     }
 
     fn retain_decoded(&mut self, slots: &HandleSlots) {
@@ -164,7 +170,10 @@ impl Transport for MockEnd {
             .handles = frame
             .handles
             .iter()
-            .filter_map(|&raw| core::num::NonZeroU32::new(raw).map(Cap::from_raw))
+            .filter_map(|&raw| {
+                core::num::NonZeroU32::new(raw)
+                    .map(|id| Cap::from_handle(Handle::<kind::Any>::from_abi(id)))
+            })
             .collect();
         Ok(MessageLen::new(frame.bytes.len(), frame.handles.len()))
     }

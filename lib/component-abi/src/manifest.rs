@@ -4,7 +4,7 @@
 //! под `static` программы, [`decode_manifest`] разбирает байты секции в
 //! [`ComponentManifest`] со слотами и протоколами портов.
 
-use crate::startup::COMPONENT_SLOT_MAX;
+use crate::startup::{COMPONENT_EXPORT_MAX, COMPONENT_SLOT_MAX};
 
 /// Имя ELF-секции, в которой программа компонента содержит свой манифест.
 pub const COMPONENT_MANIFEST_SECTION: &str = ".component.manifest";
@@ -23,10 +23,9 @@ pub const COMPONENT_SLOT_HEADER_SIZE: usize = 4;
 
 const OFFSET_VERSION: usize = 8;
 const OFFSET_SLOT_COUNT: usize = 10;
-const OFFSET_EXPORT_LEN: usize = 12;
+const OFFSET_EXPORT_COUNT: usize = 12;
 const OFFSET_FLAGS: usize = 13;
-const OFFSET_CONTROL_LEN: usize = 14;
-const OFFSET_RESERVED: usize = 15;
+const OFFSET_RESERVED: usize = 14;
 
 const FLAG_ESTABLISHES_SESSIONS: u8 = 1;
 
@@ -48,8 +47,6 @@ pub enum SlotKind {
     Directory = 4,
     /// Клиентская capability supervisor, поднявшего компонент.
     Supervisor = 5,
-    /// Клиентская capability control-порта другого компонента.
-    Control = 6,
 }
 
 /// Слот, который объявляет программа. Слот называет вид capability, номер ресурса устройства
@@ -71,9 +68,9 @@ pub struct ManifestSlot<'a> {
     name_count: u8,
 }
 
-/// Имена слота в порядке объявления.
+/// Имена записи в порядке объявления: длина `u8` и байты каждого.
 #[derive(Debug, Clone)]
-pub struct SlotNames<'a> {
+pub struct ManifestNames<'a> {
     bytes: &'a [u8],
     cursor: usize,
     remaining: u8,
@@ -84,8 +81,8 @@ pub struct SlotNames<'a> {
 pub struct ComponentManifest<'a> {
     slots: &'a [u8],
     slot_count: u16,
-    export: Option<&'a str>,
-    control: Option<&'a str>,
+    exports: &'a [u8],
+    export_count: u8,
     establishes_sessions: bool,
 }
 
@@ -121,7 +118,6 @@ impl SlotKind {
             3 => Some(Self::Service),
             4 => Some(Self::Directory),
             5 => Some(Self::Supervisor),
-            6 => Some(Self::Control),
             _ => None,
         }
     }
@@ -195,18 +191,6 @@ impl SlotDeclaration {
             names: &[],
         }
     }
-
-    /// Клиентская capability control-порта компонента, обслуживающего протокол.
-    /// `protocol` содержит имя протокола, а за ним - необязательное имя
-    /// экземпляра-провайдера.
-    #[must_use]
-    pub const fn control(protocol: &'static [&'static str]) -> Self {
-        Self {
-            kind: SlotKind::Control,
-            resource: 0,
-            names: protocol,
-        }
-    }
 }
 
 impl<'a> ManifestSlot<'a> {
@@ -224,8 +208,8 @@ impl<'a> ManifestSlot<'a> {
 
     /// Имена слота: строки совместимости устройства либо имя протокола.
     #[must_use]
-    pub const fn names(&self) -> SlotNames<'a> {
-        SlotNames {
+    pub const fn names(&self) -> ManifestNames<'a> {
+        ManifestNames {
             bytes: self.names,
             cursor: 0,
             remaining: self.name_count,
@@ -250,20 +234,25 @@ impl<'a> ComponentManifest<'a> {
         self.slot_count
     }
 
-    /// Протокол, который компонент обслуживает на своём service-порту.
+    /// Протоколы экспортов компонента в порядке объявления. В этом же порядке серверные
+    /// стороны их портов приходят стартовой транзакцией.
     #[must_use]
-    pub const fn export(&self) -> Option<&'a str> {
-        self.export
+    pub const fn exports(&self) -> ManifestNames<'a> {
+        ManifestNames {
+            bytes: self.exports,
+            cursor: 0,
+            remaining: self.export_count,
+        }
     }
 
-    /// Протокол, который компонент обслуживает на своём control-порту.
+    /// Число экспортов компонента.
     #[must_use]
-    pub const fn control(&self) -> Option<&'a str> {
-        self.control
+    pub const fn export_count(&self) -> u8 {
+        self.export_count
     }
 
-    /// Объявил ли компонент, что сессии своего service-порта он создаёт по запросу операции
-    /// `ComponentSessions::open_session` на своём control-порту. Без этого объявления сессии
+    /// Объявил ли компонент, что сессии своих экспортов он создаёт по запросу операции
+    /// `ComponentStartup::open_session` на своём startup-порту. Без этого объявления сессии
     /// выдаются клиентам помимо компонента.
     #[must_use]
     pub const fn establishes_sessions(&self) -> bool {
@@ -285,7 +274,7 @@ impl<'a> Iterator for ManifestSlots<'a> {
     }
 }
 
-impl<'a> Iterator for SlotNames<'a> {
+impl<'a> Iterator for ManifestNames<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -301,10 +290,15 @@ impl<'a> Iterator for SlotNames<'a> {
     }
 }
 
-/// Длина записи манифеста с заголовком, обслуживаемыми протоколами и слотами.
+/// Длина записи манифеста с заголовком, протоколами экспортов и слотами.
 #[must_use]
-pub const fn manifest_len(slots: &[SlotDeclaration], export: &str, control: &str) -> usize {
-    let mut len = COMPONENT_MANIFEST_HEADER_SIZE + export.len() + control.len();
+pub const fn manifest_len(slots: &[SlotDeclaration], exports: &[&str]) -> usize {
+    let mut len = COMPONENT_MANIFEST_HEADER_SIZE;
+    let mut protocols = exports;
+    while let [export, tail @ ..] = protocols {
+        len += 1 + export.len();
+        protocols = tail;
+    }
     let mut pending = slots;
     while let [slot, tail @ ..] = pending {
         len += COMPONENT_SLOT_HEADER_SIZE;
@@ -318,14 +312,13 @@ pub const fn manifest_len(slots: &[SlotDeclaration], export: &str, control: &str
     len
 }
 
-/// Кодирует запись манифеста целиком. `LEN` равна [`manifest_len`]. `export` и `control`
-/// называют протоколы service- и control-порта, а `establishes_sessions` объявляет, что
-/// сессии своего service-порта компонент сам создаёт.
+/// Кодирует запись манифеста целиком. `LEN` равна [`manifest_len`]. `exports` называет
+/// протоколы экспортов в порядке объявления, а `establishes_sessions` объявляет, что
+/// сессии своих экспортов компонент сам создаёт.
 #[must_use]
 pub const fn encode_manifest<const LEN: usize>(
     slots: &[SlotDeclaration],
-    export: &str,
-    control: &str,
+    exports: &[&str],
     establishes_sessions: bool,
 ) -> [u8; LEN] {
     assert!(
@@ -333,8 +326,12 @@ pub const fn encode_manifest<const LEN: usize>(
         "slot count fits the frame"
     );
     assert!(
-        LEN == manifest_len(slots, export, control),
-        "record length covers the header, the served protocols and every slot"
+        exports.len() <= COMPONENT_EXPORT_MAX,
+        "export count fits the frame"
+    );
+    assert!(
+        LEN == manifest_len(slots, exports),
+        "record length covers the header, every export and every slot"
     );
 
     let mut header = [0; COMPONENT_MANIFEST_HEADER_SIZE];
@@ -348,8 +345,7 @@ pub const fn encode_manifest<const LEN: usize>(
     let count = (slots.len() as u16).to_le_bytes();
     header[OFFSET_SLOT_COUNT] = count[0];
     header[OFFSET_SLOT_COUNT + 1] = count[1];
-    header[OFFSET_EXPORT_LEN] = len_byte(export.len());
-    header[OFFSET_CONTROL_LEN] = len_byte(control.len());
+    header[OFFSET_EXPORT_COUNT] = len_byte(exports.len());
     if establishes_sessions {
         header[OFFSET_FLAGS] = FLAG_ESTABLISHES_SESSIONS;
     }
@@ -357,8 +353,15 @@ pub const fn encode_manifest<const LEN: usize>(
     let mut bytes = [0; LEN];
     let mut rest: &mut [u8] = &mut bytes;
     rest = write_bytes(rest, &header);
-    rest = write_bytes(rest, export.as_bytes());
-    rest = write_bytes(rest, control.as_bytes());
+
+    let mut protocols = exports;
+    while let [export, tail @ ..] = protocols {
+        let text = export.as_bytes();
+        assert!(!text.is_empty(), "export protocol is non-empty");
+        rest = write_bytes(rest, &[len_byte(text.len())]);
+        rest = write_bytes(rest, text);
+        protocols = tail;
+    }
 
     let mut pending = slots;
     while let [declaration, tail @ ..] = pending {
@@ -434,18 +437,20 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDe
         return Err(ManifestDecodeError::InvalidLayout("slot count"));
     }
 
-    let export_len = *bytes
-        .get(OFFSET_EXPORT_LEN)
-        .ok_or(ManifestDecodeError::InvalidLayout("export length"))?;
-    let control_len = *bytes
-        .get(OFFSET_CONTROL_LEN)
-        .ok_or(ManifestDecodeError::InvalidLayout("control length"))?;
-    let export_end = COMPONENT_MANIFEST_HEADER_SIZE + usize::from(export_len);
-    let export = parse_protocol(bytes, COMPONENT_MANIFEST_HEADER_SIZE, export_end, "export")?;
-    let control_end = export_end + usize::from(control_len);
-    let control = parse_protocol(bytes, export_end, control_end, "control")?;
+    let export_count = *bytes
+        .get(OFFSET_EXPORT_COUNT)
+        .ok_or(ManifestDecodeError::InvalidLayout("export count"))?;
+    if usize::from(export_count) > COMPONENT_EXPORT_MAX {
+        return Err(ManifestDecodeError::InvalidLayout("export count"));
+    }
+    let exports_end = parse_names(
+        bytes,
+        COMPONENT_MANIFEST_HEADER_SIZE,
+        export_count,
+        "export",
+    )?;
 
-    let mut cursor = control_end;
+    let mut cursor = exports_end;
     for _ in 0..slot_count {
         cursor = parse_slot(bytes, cursor)?.end;
     }
@@ -458,27 +463,43 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDe
 
     Ok(ComponentManifest {
         slots: bytes
-            .get(control_end..cursor)
+            .get(exports_end..cursor)
             .ok_or(ManifestDecodeError::InvalidLayout("slots"))?,
         slot_count,
-        export,
-        control,
+        exports: bytes
+            .get(COMPONENT_MANIFEST_HEADER_SIZE..exports_end)
+            .ok_or(ManifestDecodeError::InvalidLayout("exports"))?,
+        export_count,
         establishes_sessions: flags & FLAG_ESTABLISHES_SESSIONS != 0,
     })
 }
 
-fn parse_protocol<'a>(
-    bytes: &'a [u8],
+fn parse_names(
+    bytes: &[u8],
     at: usize,
-    end: usize,
+    count: u8,
     field: &'static str,
-) -> Result<Option<&'a str>, ManifestDecodeError> {
-    let name = bytes.get(at..end).ok_or(ManifestDecodeError::Truncated {
-        needed: end,
-        actual: bytes.len(),
-    })?;
-    let name = core::str::from_utf8(name).map_err(|_| ManifestDecodeError::InvalidLayout(field))?;
-    Ok((!name.is_empty()).then_some(name))
+) -> Result<usize, ManifestDecodeError> {
+    let mut cursor = at;
+    for _ in 0..count {
+        let len = usize::from(*bytes.get(cursor).ok_or(ManifestDecodeError::Truncated {
+            needed: cursor + 1,
+            actual: bytes.len(),
+        })?);
+        if len == 0 {
+            return Err(ManifestDecodeError::InvalidLayout(field));
+        }
+        let end = cursor + 1 + len;
+        let name = bytes
+            .get(cursor + 1..end)
+            .ok_or(ManifestDecodeError::Truncated {
+                needed: end,
+                actual: bytes.len(),
+            })?;
+        core::str::from_utf8(name).map_err(|_| ManifestDecodeError::InvalidLayout(field))?;
+        cursor = end;
+    }
+    Ok(cursor)
 }
 
 struct ParsedSlot<'a> {
@@ -516,9 +537,6 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, ManifestDecodeE
         SlotKind::Service if name_count == 0 || name_count > PROTOCOL_NAME_MAX || resource != 0 => {
             return Err(ManifestDecodeError::InvalidLayout("service slot"));
         }
-        SlotKind::Control if name_count == 0 || name_count > PROTOCOL_NAME_MAX || resource != 0 => {
-            return Err(ManifestDecodeError::InvalidLayout("control slot"));
-        }
         kind if kind.names_device() && name_count == 0 => {
             return Err(ManifestDecodeError::InvalidLayout("device slot"));
         }
@@ -526,25 +544,7 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, ManifestDecodeE
     }
 
     let names_at = at + COMPONENT_SLOT_HEADER_SIZE;
-    let mut cursor = names_at;
-    for _ in 0..name_count {
-        let len = usize::from(*bytes.get(cursor).ok_or(ManifestDecodeError::Truncated {
-            needed: cursor + 1,
-            actual: bytes.len(),
-        })?);
-        if len == 0 {
-            return Err(ManifestDecodeError::InvalidLayout("slot name"));
-        }
-        let end = cursor + 1 + len;
-        let name = bytes
-            .get(cursor + 1..end)
-            .ok_or(ManifestDecodeError::Truncated {
-                needed: end,
-                actual: bytes.len(),
-            })?;
-        core::str::from_utf8(name).map_err(|_| ManifestDecodeError::InvalidLayout("slot name"))?;
-        cursor = end;
-    }
+    let cursor = parse_names(bytes, names_at, name_count, "slot name")?;
 
     Ok(ParsedSlot {
         slot: ManifestSlot {
@@ -580,12 +580,17 @@ mod tests {
     const NAMED_ADMIN: &[&str] = &["NamespaceAdmin", "namespace-router"];
     const IMAGE_FS: &[&str] = &["filesystem-imagefs"];
 
+    const NO_EXPORTS: &[&str] = &[];
+    const ONE_EXPORT: &[&str] = &["Namespace"];
+    const TWO_EXPORTS: &[&str] = &["Namespace", "NamespaceAdmin"];
+    const FILE_SYSTEM: &[&str] = &["FileSystem"];
+
     const DEVICE_SLOTS: &[SlotDeclaration] =
         &[SlotDeclaration::irq(RTC, 0), SlotDeclaration::mmio(RTC, 1)];
-    const DEVICE_LEN: usize = manifest_len(DEVICE_SLOTS, "", "");
+    const DEVICE_LEN: usize = manifest_len(DEVICE_SLOTS, NO_EXPORTS);
 
     fn device_record() -> [u8; DEVICE_LEN] {
-        encode_manifest(DEVICE_SLOTS, "", "", false)
+        encode_manifest(DEVICE_SLOTS, NO_EXPORTS, false)
     }
 
     fn names<'a>(slot: &ManifestSlot<'a>) -> Vec<&'a str> {
@@ -605,17 +610,18 @@ mod tests {
         assert_eq!(slots[1].kind(), SlotKind::Mmio);
         assert_eq!(slots[1].resource(), 1);
         assert_eq!(names(&slots[1]), RTC);
-        assert_eq!(manifest.export(), None);
+        assert_eq!(manifest.exports().count(), 0);
     }
 
     #[test]
     fn a_record_carries_the_exported_protocol() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::userland()];
-        const LEN: usize = manifest_len(SLOTS, "Namespace", "");
-        let bytes: [u8; LEN] = encode_manifest(SLOTS, "Namespace", "", false);
+        const LEN: usize = manifest_len(SLOTS, ONE_EXPORT);
+        let bytes: [u8; LEN] = encode_manifest(SLOTS, ONE_EXPORT, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
-        assert_eq!(manifest.export(), Some("Namespace"));
+        assert_eq!(manifest.export_count(), 1);
+        assert_eq!(manifest.exports().collect::<Vec<_>>(), ["Namespace"]);
         let slots: Vec<ManifestSlot<'_>> = manifest.slots().collect();
         assert_eq!(slots[0].kind(), SlotKind::Userland);
         assert_eq!(names(&slots[0]), Vec::<&str>::new());
@@ -624,14 +630,14 @@ mod tests {
     #[test]
     fn a_record_carries_the_declaration_of_own_sessions() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::userland()];
-        const LEN: usize = manifest_len(SLOTS, "FileSystem", "");
-        let bytes: [u8; LEN] = encode_manifest(SLOTS, "FileSystem", "", true);
+        const LEN: usize = manifest_len(SLOTS, FILE_SYSTEM);
+        let bytes: [u8; LEN] = encode_manifest(SLOTS, FILE_SYSTEM, true);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         assert!(manifest.establishes_sessions());
-        assert_eq!(manifest.export(), Some("FileSystem"));
+        assert_eq!(manifest.exports().collect::<Vec<_>>(), ["FileSystem"]);
 
-        let minted: [u8; LEN] = encode_manifest(SLOTS, "FileSystem", "", false);
+        let minted: [u8; LEN] = encode_manifest(SLOTS, FILE_SYSTEM, false);
         assert!(
             !decode_manifest(&minted)
                 .expect("record decodes")
@@ -640,23 +646,44 @@ mod tests {
     }
 
     #[test]
-    fn a_record_carries_the_protocols_of_both_ports_apart() {
+    fn a_record_carries_every_export_in_the_order_of_the_declaration() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::userland()];
-        const LEN: usize = manifest_len(SLOTS, "Namespace", "NamespaceAdmin");
-        let bytes: [u8; LEN] = encode_manifest(SLOTS, "Namespace", "NamespaceAdmin", false);
+        const LEN: usize = manifest_len(SLOTS, TWO_EXPORTS);
+        let bytes: [u8; LEN] = encode_manifest(SLOTS, TWO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
-        assert_eq!(manifest.export(), Some("Namespace"));
-        assert_eq!(manifest.control(), Some("NamespaceAdmin"));
+        assert_eq!(manifest.export_count(), 2);
+        assert_eq!(
+            manifest.exports().collect::<Vec<_>>(),
+            ["Namespace", "NamespaceAdmin"]
+        );
         assert_eq!(manifest.slots().count(), 1);
     }
 
     #[test]
-    fn a_record_without_a_control_protocol_names_none() {
-        let bytes = device_record();
+    fn an_export_count_past_the_bound_is_refused() {
+        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::userland()];
+        const LEN: usize = manifest_len(SLOTS, TWO_EXPORTS);
+        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, TWO_EXPORTS, false);
+        bytes[OFFSET_EXPORT_COUNT] = 9;
 
-        let manifest = decode_manifest(&bytes).expect("record decodes");
-        assert_eq!(manifest.control(), None);
+        assert_eq!(
+            decode_manifest(&bytes),
+            Err(ManifestDecodeError::InvalidLayout("export count"))
+        );
+    }
+
+    #[test]
+    fn an_empty_export_name_is_refused() {
+        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::userland()];
+        const LEN: usize = manifest_len(SLOTS, TWO_EXPORTS);
+        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, TWO_EXPORTS, false);
+        bytes[COMPONENT_MANIFEST_HEADER_SIZE] = 0;
+
+        assert_eq!(
+            decode_manifest(&bytes),
+            Err(ManifestDecodeError::InvalidLayout("export"))
+        );
     }
 
     #[test]
@@ -673,8 +700,8 @@ mod tests {
     #[test]
     fn a_directory_slot_carries_its_provider() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::directory(IMAGE_FS)];
-        const LEN: usize = manifest_len(SLOTS, "", "");
-        let bytes: [u8; LEN] = encode_manifest(SLOTS, "", "", false);
+        const LEN: usize = manifest_len(SLOTS, NO_EXPORTS);
+        let bytes: [u8; LEN] = encode_manifest(SLOTS, NO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let slots: Vec<ManifestSlot<'_>> = manifest.slots().collect();
@@ -685,8 +712,8 @@ mod tests {
     #[test]
     fn a_directory_slot_without_a_provider_is_refused() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::directory(IMAGE_FS)];
-        const LEN: usize = manifest_len(SLOTS, "", "");
-        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, "", "", false);
+        const LEN: usize = manifest_len(SLOTS, NO_EXPORTS);
+        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, NO_EXPORTS, false);
         bytes[COMPONENT_MANIFEST_HEADER_SIZE + 3] = 0;
 
         assert_eq!(
@@ -698,8 +725,8 @@ mod tests {
     #[test]
     fn a_service_slot_carries_its_protocol() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::service(NAMESPACE)];
-        const LEN: usize = manifest_len(SLOTS, "", "");
-        let bytes: [u8; LEN] = encode_manifest(SLOTS, "", "", false);
+        const LEN: usize = manifest_len(SLOTS, NO_EXPORTS);
+        let bytes: [u8; LEN] = encode_manifest(SLOTS, NO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let slots: Vec<ManifestSlot<'_>> = manifest.slots().collect();
@@ -710,8 +737,8 @@ mod tests {
     #[test]
     fn a_service_slot_carries_the_named_instance_past_its_protocol() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::service(NAMED_FILE_SYSTEM)];
-        const LEN: usize = manifest_len(SLOTS, "", "");
-        let bytes: [u8; LEN] = encode_manifest(SLOTS, "", "", false);
+        const LEN: usize = manifest_len(SLOTS, NO_EXPORTS);
+        let bytes: [u8; LEN] = encode_manifest(SLOTS, NO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let slots: Vec<ManifestSlot<'_>> = manifest.slots().collect();
@@ -722,8 +749,8 @@ mod tests {
     #[test]
     fn a_service_slot_without_names_is_refused() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::service(NAMESPACE)];
-        const LEN: usize = manifest_len(SLOTS, "", "");
-        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, "", "", false);
+        const LEN: usize = manifest_len(SLOTS, NO_EXPORTS);
+        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, NO_EXPORTS, false);
         bytes[COMPONENT_MANIFEST_HEADER_SIZE + 3] = 0;
 
         assert_eq!(
@@ -733,34 +760,21 @@ mod tests {
     }
 
     #[test]
-    fn a_control_slot_carries_the_named_instance_past_its_protocol() {
-        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::control(NAMED_ADMIN)];
-        const LEN: usize = manifest_len(SLOTS, "", "");
-        let bytes: [u8; LEN] = encode_manifest(SLOTS, "", "", false);
+    fn a_service_slot_naming_the_admin_export_carries_its_instance() {
+        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::service(NAMED_ADMIN)];
+        const LEN: usize = manifest_len(SLOTS, NO_EXPORTS);
+        let bytes: [u8; LEN] = encode_manifest(SLOTS, NO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let slots: Vec<ManifestSlot<'_>> = manifest.slots().collect();
-        assert_eq!(slots[0].kind(), SlotKind::Control);
+        assert_eq!(slots[0].kind(), SlotKind::Service);
         assert_eq!(names(&slots[0]), ["NamespaceAdmin", "namespace-router"]);
     }
 
     #[test]
-    fn a_control_slot_past_a_protocol_and_an_instance_is_refused() {
-        const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::control(NAMED_ADMIN)];
-        const LEN: usize = manifest_len(SLOTS, "", "");
-        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, "", "", false);
-        bytes[COMPONENT_MANIFEST_HEADER_SIZE + 3] = 3;
-
-        assert_eq!(
-            decode_manifest(&bytes),
-            Err(ManifestDecodeError::InvalidLayout("control slot"))
-        );
-    }
-
-    #[test]
     fn a_record_without_slots_decodes() {
-        const LEN: usize = manifest_len(&[], "", "");
-        let bytes: [u8; LEN] = encode_manifest(&[], "", "", false);
+        const LEN: usize = manifest_len(&[], NO_EXPORTS);
+        let bytes: [u8; LEN] = encode_manifest(&[], NO_EXPORTS, false);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         assert_eq!(manifest.slots().count(), 0);
@@ -783,12 +797,13 @@ mod tests {
     #[test]
     fn another_version_is_refused() {
         let mut bytes = device_record();
-        bytes[OFFSET_VERSION] = 9;
-
-        assert_eq!(
-            decode_manifest(&bytes),
-            Err(ManifestDecodeError::InvalidVersion(9))
-        );
+        for version in [2, 9] {
+            bytes[OFFSET_VERSION] = version;
+            assert_eq!(
+                decode_manifest(&bytes),
+                Err(ManifestDecodeError::InvalidVersion(u16::from(version)))
+            );
+        }
     }
 
     #[test]
@@ -805,12 +820,14 @@ mod tests {
     #[test]
     fn an_unknown_slot_kind_is_refused() {
         let mut bytes = device_record();
-        bytes[COMPONENT_MANIFEST_HEADER_SIZE] = 9;
-
-        assert_eq!(
-            decode_manifest(&bytes),
-            Err(ManifestDecodeError::InvalidLayout("slot kind"))
-        );
+        // Вид 6 называл слот на control-порт, и декодер его больше не принимает.
+        for kind in [6, 9] {
+            bytes[COMPONENT_MANIFEST_HEADER_SIZE] = kind;
+            assert_eq!(
+                decode_manifest(&bytes),
+                Err(ManifestDecodeError::InvalidLayout("slot kind"))
+            );
+        }
     }
 
     #[test]
@@ -827,8 +844,8 @@ mod tests {
     #[test]
     fn a_service_slot_past_a_protocol_and_an_instance_is_refused() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::service(NAMED_FILE_SYSTEM)];
-        const LEN: usize = manifest_len(SLOTS, "", "");
-        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, "", "", false);
+        const LEN: usize = manifest_len(SLOTS, NO_EXPORTS);
+        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, NO_EXPORTS, false);
         bytes[COMPONENT_MANIFEST_HEADER_SIZE + 3] = 3;
 
         assert_eq!(
@@ -840,8 +857,8 @@ mod tests {
     #[test]
     fn a_userland_slot_with_a_resource_is_refused() {
         const SLOTS: &[SlotDeclaration] = &[SlotDeclaration::userland()];
-        const LEN: usize = manifest_len(SLOTS, "", "");
-        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, "", "", false);
+        const LEN: usize = manifest_len(SLOTS, NO_EXPORTS);
+        let mut bytes: [u8; LEN] = encode_manifest(SLOTS, NO_EXPORTS, false);
         bytes[COMPONENT_MANIFEST_HEADER_SIZE + 1] = 1;
 
         assert_eq!(

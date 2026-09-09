@@ -56,7 +56,7 @@ fn load_synthetic_child(resource: &Resource, path: &str, code: &[u8]) -> Process
         stack_size: PAGE_SIZE,
         segments: &segments,
     };
-    let bootstrap = Signal::create().expect("signal create").into_handle();
+    let bootstrap = Signal::create().expect("signal create");
     load_entry(&entry, None, resource, bootstrap).expect("load_entry spawns child")
 }
 

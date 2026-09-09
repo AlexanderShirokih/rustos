@@ -13,6 +13,7 @@ use ipc::{
     Timeout,
     wire::{IpcError, Str},
 };
+use syscall::kind;
 
 use crate::{
     cache::SessionCache,
@@ -279,7 +280,7 @@ fn opened_window<E: Environment>(window: Option<&Window<E>>) -> Result<&Session<
 fn resolve<E: Environment>(
     namespace: &namespace::Client<E::Transport>,
     directory: Path<'_>,
-) -> Result<E::Handle> {
+) -> Result<E::Handle<kind::Port>> {
     let path = Str::new(directory.as_str()).ok_or(FileSystemError::InvalidPath)?;
     let mut response = namespace.resolve(path)?;
     let capability = response.value?;

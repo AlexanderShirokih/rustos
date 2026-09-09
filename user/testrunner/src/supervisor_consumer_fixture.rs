@@ -12,9 +12,11 @@ use core::panic::PanicInfo;
 use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{AccessMode, NodeKind, OpenFlags, file_system};
 use ipc::wire::{Bytes, Str};
-use kernel_objects::{MemoryRegion, OwnedHandle};
+use kernel_objects::{MemoryRegion, Port, kind};
 use runtime::{PortTransport, Timeout, install_log, log_fmt, thread_exit};
-use supervisor_abi::{ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, supervisor};
+use supervisor_abi::{
+    ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, PROTOCOL_NAME_MAX, supervisor,
+};
 use syscall::Handle;
 use userland_image::{COMPONENT_PROGRAM_NAME, ComponentSpec, OnExhausted, encode_plan};
 
@@ -25,6 +27,8 @@ const CALL_TIMEOUT: Timeout = Timeout::from_secs(15);
 const RAM_FS_PROGRAM: &str = "/boot/filesystem-ramfs";
 const DEFINED_NAME: &str = "extended-ramfs";
 const STAGE_ZERO_NAME: &str = "filesystem-imagefs";
+
+const FILE_SYSTEM_PROTOCOL: &str = "FileSystem";
 
 const DEFINED_MEMORY_PAGES: u64 = 1_024;
 const DEFINED_STARTUP_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -50,17 +54,17 @@ component_manifest! {
 
 /// Программа-потребитель транзакции расширения берёт регионом байты программы файловой
 /// системы, определяет её компонентом композиции, поднимает набор и работает с сессией
-/// поднятого компонента. `startup` приходит в x0 как HandleId одноразового startup-порта.
+/// поднятого компонента.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     let Ok(ReceivedStartup { log, resources }) =
-        SupervisorConsumerStartup::receive(OwnedHandle::from_handle(startup))
+        SupervisorConsumerStartup::receive(Port::from_handle(startup))
     else {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
     install_log(log.into_raw(), LOG_TAG);
-    drop(resources.control);
-    drop(resources.service);
+    drop(resources.startup);
 
     let files = resources.files;
     let system = resources.system;
@@ -93,9 +97,15 @@ fn raise(
     let Some(stage_zero) = Str::<INSTANCE_NAME_MAX>::new(STAGE_ZERO_NAME) else {
         return REFUSED_EXIT_CODE;
     };
+    let Some(protocol) = Str::<PROTOCOL_NAME_MAX>::new(FILE_SYSTEM_PROTOCOL) else {
+        return REFUSED_EXIT_CODE;
+    };
     // Композиция ступени 0 через транзакцию не достаётся. Её компоненты вызыватель не
     // определял.
-    match system.session(stage_zero).map(|response| response.value) {
+    match system
+        .session(stage_zero, protocol)
+        .map(|response| response.value)
+    {
         Ok(Err(ExtendError::NotFound)) => {}
         Ok(Ok(_)) => return LEAKED_EXIT_CODE,
         Ok(Err(error)) => {
@@ -108,10 +118,10 @@ fn raise(
         }
     }
 
-    let session = match system.session(name) {
+    let session = match system.session(name, protocol) {
         Ok(mut response) => match response.value {
             Ok(session) => match response.claim(session) {
-                Some(session) => OwnedHandle::from(session),
+                Some(session) => Port::from(session),
                 None => return REFUSED_EXIT_CODE,
             },
             Err(error) => {
@@ -137,7 +147,7 @@ fn commit(
     let opened = system.begin().map(|response| response.value);
     let defined = opened.and_then(|_| {
         system
-            .define(record, program.into_handle())
+            .define(record, program)
             .map(|response| response.value)
     });
     let committed = defined.and_then(|_| system.commit().map(|response| response.value));
@@ -167,7 +177,7 @@ fn program_region(files: &file_system::Client<PortTransport>) -> Option<MemoryRe
     }
     let mut response = files.backing_memory(opened.fd).ok()?;
     let region = response.value.ok()?;
-    Some(MemoryRegion::from_handle(response.claim(region)?.into()))
+    Some(MemoryRegion::from(response.claim(region)?))
 }
 
 fn defined_record() -> Option<Vec<u8>> {
@@ -175,6 +185,7 @@ fn defined_record() -> Option<Vec<u8>> {
         executable: RAM_FS_PROGRAM,
         name: DEFINED_NAME,
         slots: &[],
+        exports: &[FILE_SYSTEM_PROTOCOL],
         after: &[],
         memory_pages: DEFINED_MEMORY_PAGES,
         startup_timeout: DEFINED_STARTUP_TIMEOUT,

@@ -8,8 +8,8 @@ use kernel_tests::kernel_test;
 #[kernel_test]
 fn process_and_thread_self_handles() {
     let process = Process::self_process().expect("process_self handle");
-    process.into_handle().close().expect("process handle close");
+    process.close().expect("process handle close");
 
     let thread = Thread::self_thread().expect("thread_self handle");
-    thread.into_handle().close().expect("thread handle close");
+    thread.close().expect("thread handle close");
 }

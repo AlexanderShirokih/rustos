@@ -35,7 +35,7 @@ const CALL_ANSWERED: i64 = 3;
 static UNEXPECTED_CALL: AtomicI64 = AtomicI64::new(i64::MIN);
 
 const LOG_BADGE: NonZeroU64 = NonZeroU64::new(0x71).expect("badge is non-zero");
-const CONTROL_BADGE: NonZeroU64 = NonZeroU64::new(0x72).expect("badge is non-zero");
+const EXPORT_BADGE: NonZeroU64 = NonZeroU64::new(0x72).expect("badge is non-zero");
 const SERVICE_BADGE: NonZeroU64 = NonZeroU64::new(0x73).expect("badge is non-zero");
 const FIRST_SLOT_BADGE: NonZeroU64 = NonZeroU64::new(0x74).expect("badge is non-zero");
 const SECOND_SLOT_BADGE: NonZeroU64 = NonZeroU64::new(0x75).expect("badge is non-zero");
@@ -44,39 +44,47 @@ const SECOND_SLOT_BADGE: NonZeroU64 = NonZeroU64::new(0x75).expect("badge is non
 #[kernel_test]
 fn a_set_past_the_declaration_closes_every_delivered_capability() {
     let log = Watched::create(LOG_BADGE);
-    let control = Watched::create(CONTROL_BADGE);
-    let service = Watched::create(SERVICE_BADGE);
     let first = Watched::create(FIRST_SLOT_BADGE);
     let second = Watched::create(SECOND_SLOT_BADGE);
 
     // Манифест фикстуры объявляет один слот, а транзакция содержит два.
     let _fixture = launch(|client| {
-        client.start(log.deliver(), control.deliver(), service.deliver(), 2)?;
-        client.slot(first.deliver())?;
-        client.slot(second.deliver())
+        client.begin(log.deliver(), 0, 2)?;
+        client.slot(first.deliver().erase())?;
+        client.slot(second.deliver().erase())
     });
 
     log.assert_closed();
-    control.assert_closed();
-    service.assert_closed();
     first.assert_closed();
     second.assert_closed();
+}
+
+/// Экспорт сверх объявления закрывает весь доставленный набор.
+#[kernel_test]
+fn an_export_past_the_declaration_closes_every_delivered_capability() {
+    let log = Watched::create(LOG_BADGE);
+    let export = Watched::create(EXPORT_BADGE);
+
+    // Манифест фикстуры экспортов не объявляет, а базовый кадр называет один экспорт, и
+    // транзакция его доставляет.
+    let _fixture = launch(|client| {
+        client.begin(log.deliver(), 1, 1)?;
+        client.export(export.deliver())
+    });
+
+    log.assert_closed();
+    export.assert_closed();
 }
 
 /// Обрыв транзакции после базового кадра закрывает уже доставленный набор.
 #[kernel_test]
 fn a_transaction_torn_after_the_base_frame_closes_its_capabilities() {
     let log = Watched::create(LOG_BADGE);
-    let control = Watched::create(CONTROL_BADGE);
-    let service = Watched::create(SERVICE_BADGE);
 
     // Обещанный слот не приходит, и уход значка стартового порта обрывает приём компонента.
-    let _fixture =
-        launch(|client| client.start(log.deliver(), control.deliver(), service.deliver(), 1));
+    let _fixture = launch(|client| client.begin(log.deliver(), 0, 1));
 
     log.assert_closed();
-    control.assert_closed();
-    service.assert_closed();
 }
 
 /// Кадр, отвергнутый приёмником, закрывает capability, которую транспорт с ним доставил.
@@ -85,7 +93,7 @@ fn a_refused_frame_closes_the_capability_it_carried() {
     let slot = Watched::create(FIRST_SLOT_BADGE);
 
     // Слот до базового кадра приёмник отвергает.
-    let _fixture = launch(|client| client.slot(slot.deliver()));
+    let _fixture = launch(|client| client.slot(slot.deliver().erase()));
 
     slot.assert_closed();
 }
@@ -95,7 +103,7 @@ fn a_refused_frame_closes_the_capability_it_carried() {
 #[kernel_test]
 fn a_corrupted_delivered_frame_closes_every_capability_it_carried() {
     let first = Watched::create(LOG_BADGE);
-    let second = Watched::create(CONTROL_BADGE);
+    let second = Watched::create(EXPORT_BADGE);
     let third = Watched::create(SERVICE_BADGE);
     let fourth = Watched::create(FIRST_SLOT_BADGE);
 
@@ -103,10 +111,10 @@ fn a_corrupted_delivered_frame_closes_every_capability_it_carried() {
     // переноса capability.
     let _fixture = launch_entry(FIXTURE_ENTRY, FIXTURE_NAME, |transport| {
         let carried = alloc::vec![
-            first.deliver(),
-            second.deliver(),
-            third.deliver(),
-            fourth.deliver(),
+            first.deliver().erase(),
+            second.deliver().erase(),
+            third.deliver().erase(),
+            fourth.deliver().erase(),
         ];
         send_raw_frame(&transport, 0, carried)
     });
@@ -149,7 +157,7 @@ fn a_refused_first_receive_leaves_an_earlier_capability_alone() {
     // Кадр до приёма транзакции забирает фикстура, его capability принадлежит ей, а
     // транзакция обрывается без единого своего кадра.
     let _fixture = launch_entry(STALE_BUFFER_ENTRY, STALE_BUFFER_NAME, |transport| {
-        component_startup::Client::new(transport).slot(kept.deliver())
+        component_startup::Client::new(transport).slot(kept.deliver().erase())
     });
 
     kept.assert_alive();
@@ -193,25 +201,16 @@ impl ipc::Transport for CallInsteadOfCast<'_> {
     }
 }
 
-/// Корректное тело start не удерживает reply до получения обещанного слота.
+/// Корректное тело базового кадра не удерживает reply до получения обещанного слота.
 #[kernel_test]
-fn a_valid_start_sent_as_call_does_not_wait_for_the_next_frame() {
+fn a_valid_begin_sent_as_call_does_not_wait_for_the_next_frame() {
     let log = Watched::create(LOG_BADGE);
-    let control = Watched::create(CONTROL_BADGE);
-    let service = Watched::create(SERVICE_BADGE);
     let outcome = core::cell::Cell::new(None);
     let _fixture = launch_entry(FIXTURE_ENTRY, FIXTURE_NAME, |transport| {
-        component_startup::Client::new(CallInsteadOfCast(&transport)).start(
-            log.deliver(),
-            control.deliver(),
-            service.deliver(),
-            1,
-        )?;
+        component_startup::Client::new(CallInsteadOfCast(&transport)).begin(log.deliver(), 0, 1)?;
         outcome.set(Some(transport.wait_readable(CALL_TIMEOUT)));
         Ok(())
     });
     log.assert_closed();
-    control.assert_closed();
-    service.assert_closed();
     kernel_tests::kassert!(matches!(outcome.get(), Some(Err(error)) if error != IpcError::Timeout));
 }

@@ -38,7 +38,6 @@ pub(crate) const SLOT_KIND_MMIO: u8 = 2;
 pub(crate) const SLOT_KIND_SERVICE: u8 = 3;
 pub(crate) const SLOT_KIND_DIRECTORY: u8 = 4;
 pub(crate) const SLOT_KIND_SUPERVISOR: u8 = 5;
-pub(crate) const SLOT_KIND_CONTROL: u8 = 6;
 
 pub(crate) const EXHAUSTED_HALT: u8 = 0;
 pub(crate) const EXHAUSTED_DETACH: u8 = 1;
@@ -113,15 +112,14 @@ pub enum SlotSource<'a> {
     Irq(PlanDevice<'a>),
     /// MMIO-окно устройства.
     Mmio(PlanDevice<'a>),
-    /// Сессия service-порта экземпляра `provider`.
-    Service { provider: &'a str },
+    /// Сессия порта экспорта `export` экземпляра `provider`. Номер экспорта - его позиция
+    /// среди экспортов провайдера.
+    Service { provider: &'a str, export: u8 },
     /// Сессия с каталогом компонента в роли корня. `provider` называет экземпляр,
     /// у которого rootkeeper устанавливает её областью в этом каталоге.
     Directory { provider: &'a str },
     /// Клиентская capability supervisor, поднявшего компонент.
     Supervisor,
-    /// Клиентская capability control-порта экземпляра `provider`.
-    Control { provider: &'a str },
 }
 
 /// Компонент загрузочной композиции.
@@ -131,6 +129,8 @@ pub struct PlanComponent<'a> {
     name: &'a str,
     slots: &'a [u8],
     slot_count: u16,
+    exports: &'a [u8],
+    export_count: u16,
     after: &'a [u8],
     after_count: u16,
     memory_pages: u64,
@@ -218,6 +218,17 @@ impl<'a> PlanComponent<'a> {
         }
     }
 
+    /// Протоколы экспортов компонента в порядке объявления. В этом же порядке супервизор
+    /// создаёт их порты.
+    #[must_use]
+    pub const fn exports(&self) -> PlanNames<'a> {
+        PlanNames {
+            bytes: self.exports,
+            cursor: 0,
+            remaining: self.export_count,
+        }
+    }
+
     /// Имена экземпляров, которые поднимаются раньше этого без обмена с ним.
     #[must_use]
     pub const fn after(&self) -> PlanNames<'a> {
@@ -253,8 +264,8 @@ impl<'a> PlanComponent<'a> {
         self.on_exhausted
     }
 
-    /// Компонент сам создаёт сессии своего service-порта: supervisor открывает их
-    /// операцией `ComponentSessions::open_session` на его control-порту.
+    /// Компонент сам создаёт сессии своих экспортов: supervisor открывает их операцией
+    /// `ComponentStartup::open_session` на его startup-порту.
     #[must_use]
     pub const fn establishes_sessions(&self) -> bool {
         self.establishes_sessions
@@ -369,7 +380,7 @@ fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanD
         EXHAUSTED_DETACH => OnExhausted::Detach,
         _ => return Err(PlanDecodeError::InvalidLayout("on_exhausted")),
     };
-    if read_u16(header, 14)? != 0 || read_u64(header, 16)? != 0 {
+    if read_u64(header, 16)? != 0 {
         return Err(PlanDecodeError::InvalidLayout("reserved"));
     }
     let flags = *header.get(5).ok_or(truncated(bytes, at + 6))?;
@@ -380,6 +391,7 @@ fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanD
     let name_len = usize::from(read_u16(header, 8)?);
     let slot_count = read_u16(header, 10)?;
     let after_count = read_u16(header, 12)?;
+    let export_count = read_u16(header, 14)?;
     let memory_pages = read_u64(header, 24)?;
     if memory_pages == 0 {
         return Err(PlanDecodeError::InvalidLayout("memory_pages"));
@@ -401,6 +413,12 @@ fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanD
         .get(slots_at..cursor)
         .ok_or(truncated(bytes, cursor))?;
 
+    let exports_at = cursor;
+    cursor = parse_names(bytes, cursor, export_count, "export")?;
+    let exports = bytes
+        .get(exports_at..cursor)
+        .ok_or(truncated(bytes, cursor))?;
+
     let after_at = cursor;
     cursor = parse_names(bytes, cursor, after_count, "edge")?;
     let after = bytes
@@ -413,6 +431,8 @@ fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanD
             name,
             slots,
             slot_count,
+            exports,
+            export_count,
             after,
             after_count,
             memory_pages,
@@ -433,7 +453,8 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, PlanDecodeError
         return Err(truncated(bytes, at + SLOT_HEADER_SIZE));
     };
     let kind = *kind;
-    if rest.first() != Some(&0) || read_u16(header, 10)? != 0 {
+    let export = *rest.first().ok_or(truncated(bytes, at + 2))?;
+    if read_u16(header, 10)? != 0 {
         return Err(PlanDecodeError::InvalidLayout("reserved"));
     }
     let provider_len = usize::from(read_u16(header, 2)?);
@@ -443,10 +464,12 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, PlanDecodeError
 
     let cursor = at + SLOT_HEADER_SIZE;
     let device_kind = matches!(kind, SLOT_KIND_IRQ | SLOT_KIND_MMIO);
-    let provider_kind = matches!(
-        kind,
-        SLOT_KIND_SERVICE | SLOT_KIND_DIRECTORY | SLOT_KIND_CONTROL
-    );
+    let provider_kind = matches!(kind, SLOT_KIND_SERVICE | SLOT_KIND_DIRECTORY);
+    // Номер экспорта провайдера называет только слот сервиса, а каталог приходит сессией
+    // единственного экспорта.
+    if kind != SLOT_KIND_SERVICE && export != 0 {
+        return Err(PlanDecodeError::InvalidLayout("slot_export"));
+    }
     if !device_kind && !provider_kind && kind != SLOT_KIND_USERLAND && kind != SLOT_KIND_SUPERVISOR
     {
         return Err(PlanDecodeError::InvalidLayout("slot_kind"));
@@ -468,12 +491,12 @@ fn parse_slot(bytes: &[u8], at: usize) -> Result<ParsedSlot<'_>, PlanDecodeError
 
     let (source, end) = match kind {
         SLOT_KIND_USERLAND => (SlotSource::Userland, cursor),
-        SLOT_KIND_SERVICE | SLOT_KIND_DIRECTORY | SLOT_KIND_CONTROL => {
+        SLOT_KIND_SERVICE | SLOT_KIND_DIRECTORY => {
             let (provider, end) = parse_str(bytes, cursor, provider_len, "slot_provider")?;
-            let source = match kind {
-                SLOT_KIND_SERVICE => SlotSource::Service { provider },
-                SLOT_KIND_DIRECTORY => SlotSource::Directory { provider },
-                _ => SlotSource::Control { provider },
+            let source = if kind == SLOT_KIND_SERVICE {
+                SlotSource::Service { provider, export }
+            } else {
+                SlotSource::Directory { provider }
             };
             (source, end)
         }
@@ -575,11 +598,15 @@ mod tests {
     const IMAGE_FS_NAME: &str = "imagefs";
     const ROUTER_NAME: &str = "router-a";
 
+    const ROUTER_EXPORTS: &[&str] = &["Namespace", "NamespaceAdmin"];
+    const FILE_SYSTEM_EXPORTS: &[&str] = &["FileSystem"];
+
     fn router() -> ComponentSpec<'static> {
         ComponentSpec {
             executable: "/boot/namespace-router",
             name: ROUTER_NAME,
             slots: &[],
+            exports: ROUTER_EXPORTS,
             after: &[],
             memory_pages: 2_048,
             startup_timeout: Timeout::from_millis(2_000),
@@ -594,6 +621,7 @@ mod tests {
             executable: "/boot/filesystem-imagefs",
             name: IMAGE_FS_NAME,
             slots: &[SlotSpec::Userland],
+            exports: FILE_SYSTEM_EXPORTS,
             after: &[],
             memory_pages: 2_048,
             startup_timeout: Timeout::from_millis(2_000),
@@ -620,8 +648,10 @@ mod tests {
                 }),
                 SlotSpec::Service {
                     provider: IMAGE_FS_NAME,
+                    export: 0,
                 },
             ],
+            exports: &[],
             after: &[IMAGE_FS_NAME],
             memory_pages: 64,
             startup_timeout: Timeout::from_millis(1_000),
@@ -633,6 +663,11 @@ mod tests {
 
     fn plan_bytes() -> Vec<u8> {
         encode_plan(&[image_filesystem(), rtc()]).expect("encode plan")
+    }
+
+    fn first_slot_at() -> usize {
+        let component = image_filesystem();
+        PLAN_HEADER_SIZE + COMPONENT_HEADER_SIZE + component.executable.len() + component.name.len()
     }
 
     #[test]
@@ -649,6 +684,7 @@ mod tests {
         assert_eq!(filesystem.launches(), 3);
         assert_eq!(filesystem.on_exhausted(), OnExhausted::Halt);
         assert!(filesystem.establishes_sessions());
+        assert_eq!(filesystem.exports().collect::<Vec<_>>(), vec!["FileSystem"]);
         assert_eq!(
             filesystem.slots().collect::<Vec<_>>(),
             vec![SlotSource::Userland]
@@ -660,6 +696,7 @@ mod tests {
         assert_eq!(rtc.on_exhausted(), OnExhausted::Detach);
         // Драйвер состояния сессии не создаёт, а их минтит supervisor.
         assert!(!rtc.establishes_sessions());
+        assert_eq!(rtc.exports().count(), 0);
         assert_eq!(rtc.slot_count(), 3);
         let slots: Vec<SlotSource<'_>> = rtc.slots().collect();
         let SlotSource::Irq(line) = slots[0] else {
@@ -675,7 +712,8 @@ mod tests {
         assert_eq!(
             slots[2],
             SlotSource::Service {
-                provider: IMAGE_FS_NAME
+                provider: IMAGE_FS_NAME,
+                export: 0
             }
         );
         assert_eq!(rtc.after().collect::<Vec<_>>(), vec![IMAGE_FS_NAME]);
@@ -703,10 +741,11 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_carries_a_control_slot_with_its_provider() {
+    fn round_trip_carries_a_slot_on_the_second_export_of_its_provider() {
         let consumer = ComponentSpec {
-            slots: &[SlotSpec::Control {
+            slots: &[SlotSpec::Service {
                 provider: ROUTER_NAME,
+                export: 1,
             }],
             after: &[],
             ..rtc()
@@ -714,12 +753,38 @@ mod tests {
         let bytes = encode_plan(&[router(), consumer]).expect("encode plan");
 
         let plan = decode_plan(&bytes).expect("decode plan");
+        let provider = plan.component(0).expect("first component");
+        assert_eq!(
+            provider.exports().collect::<Vec<_>>(),
+            vec!["Namespace", "NamespaceAdmin"]
+        );
         let consumer = plan.component(1).expect("second component");
         assert_eq!(
             consumer.slots().collect::<Vec<_>>(),
-            vec![SlotSource::Control {
-                provider: ROUTER_NAME
+            vec![SlotSource::Service {
+                provider: ROUTER_NAME,
+                export: 1
             }]
+        );
+    }
+
+    #[test]
+    fn a_plan_of_another_version_is_refused() {
+        let mut bytes = plan_bytes();
+        bytes[8] = 2;
+
+        assert_eq!(decode_plan(&bytes), Err(PlanDecodeError::InvalidVersion(2)));
+    }
+
+    #[test]
+    fn an_export_number_on_a_slot_without_an_export_is_refused() {
+        let mut bytes = plan_bytes();
+        // Первый слот первого компонента - `Userland`, и он номера экспорта не хранит.
+        bytes[first_slot_at() + 1] = 1;
+
+        assert_eq!(
+            decode_plan(&bytes),
+            Err(PlanDecodeError::InvalidLayout("slot_export"))
         );
     }
 
@@ -730,6 +795,7 @@ mod tests {
         let consumer = ComponentSpec {
             slots: &[SlotSpec::Service {
                 provider: "stage-zero-ramfs",
+                export: 0,
             }],
             after: &["stage-zero-router"],
             ..rtc()
@@ -741,7 +807,8 @@ mod tests {
         assert_eq!(
             consumer.slots().collect::<Vec<_>>(),
             vec![SlotSource::Service {
-                provider: "stage-zero-ramfs"
+                provider: "stage-zero-ramfs",
+                export: 0
             }]
         );
         assert_eq!(
@@ -868,14 +935,12 @@ mod tests {
 
     #[test]
     fn decode_rejects_a_reserved_field_in_use() {
-        for offset in [14, 16] {
-            let mut bytes = plan_bytes();
-            bytes[PLAN_HEADER_SIZE + offset] = 1;
-            assert_eq!(
-                decode_plan(&bytes).expect_err("reserved bytes are zero"),
-                PlanDecodeError::InvalidLayout("reserved")
-            );
-        }
+        let mut bytes = plan_bytes();
+        bytes[PLAN_HEADER_SIZE + 16] = 1;
+        assert_eq!(
+            decode_plan(&bytes).expect_err("reserved bytes are zero"),
+            PlanDecodeError::InvalidLayout("reserved")
+        );
     }
 
     #[test]
@@ -1029,7 +1094,10 @@ mod tests {
         );
 
         let nameless_provider = ComponentSpec {
-            slots: &[SlotSpec::Service { provider: "" }],
+            slots: &[SlotSpec::Service {
+                provider: "",
+                export: 0,
+            }],
             ..router()
         };
         assert_eq!(
@@ -1046,12 +1114,12 @@ mod tests {
             PlanEncodeError::EmptyString
         );
 
-        let nameless_control = ComponentSpec {
-            slots: &[SlotSpec::Control { provider: "" }],
+        let nameless_export = ComponentSpec {
+            exports: &[""],
             ..router()
         };
         assert_eq!(
-            encode_plan(&[nameless_control]).expect_err("provider names an instance"),
+            encode_plan(&[nameless_export]).expect_err("exports name protocols"),
             PlanEncodeError::EmptyString
         );
 

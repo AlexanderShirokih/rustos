@@ -3,8 +3,8 @@ use component_abi::{ComponentManifest, SlotKind};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ProgramManifest {
     pub slots: Vec<ManifestSlot>,
-    pub export: Option<String>,
-    pub control: Option<String>,
+    /// Протоколы экспортов в порядке объявления. Позиция протокола - номер его экспорта.
+    pub exports: Vec<String>,
     pub establishes_sessions: bool,
 }
 
@@ -28,8 +28,7 @@ impl ProgramManifest {
                     names: slot.names().map(String::from).collect(),
                 })
                 .collect(),
-            export: record.export().map(String::from),
-            control: record.control().map(String::from),
+            exports: record.exports().map(String::from).collect(),
             establishes_sessions: record.establishes_sessions(),
         }
     }
@@ -47,15 +46,15 @@ mod tests {
             SlotDeclaration::userland(),
             SlotDeclaration::irq(&["arm,pl031", "arm,primecell"], 2),
             SlotDeclaration::service(&["Namespace"]),
-            SlotDeclaration::control(&["NamespaceAdmin", "namespace-router"]),
+            SlotDeclaration::service(&["NamespaceAdmin", "namespace-router"]),
         ];
-        const LEN: usize = manifest_len(SLOTS, "FileSystem", "FileSystemAdmin");
-        let bytes: [u8; LEN] = encode_manifest(SLOTS, "FileSystem", "FileSystemAdmin", true);
+        const EXPORTS: &[&str] = &["FileSystem", "FileSystemAdmin"];
+        const LEN: usize = manifest_len(SLOTS, EXPORTS);
+        let bytes: [u8; LEN] = encode_manifest(SLOTS, EXPORTS, true);
 
         let manifest = ProgramManifest::from_record(&decode_manifest(&bytes).expect("decodes"));
 
-        assert_eq!(manifest.export.as_deref(), Some("FileSystem"));
-        assert_eq!(manifest.control.as_deref(), Some("FileSystemAdmin"));
+        assert_eq!(manifest.exports, ["FileSystem", "FileSystemAdmin"]);
         assert!(manifest.establishes_sessions);
         assert_eq!(manifest.slots.len(), 4);
         assert_eq!(manifest.slots[0].kind, SlotKind::Userland);
@@ -65,7 +64,7 @@ mod tests {
         assert_eq!(manifest.slots[1].names, ["arm,pl031", "arm,primecell"]);
         assert_eq!(manifest.slots[2].kind, SlotKind::Service);
         assert_eq!(manifest.slots[2].names, ["Namespace"]);
-        assert_eq!(manifest.slots[3].kind, SlotKind::Control);
+        assert_eq!(manifest.slots[3].kind, SlotKind::Service);
         assert_eq!(
             manifest.slots[3].names,
             ["NamespaceAdmin", "namespace-router"]

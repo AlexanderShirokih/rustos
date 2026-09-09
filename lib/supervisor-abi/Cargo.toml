@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 ipc = { workspace = true }
+syscall = { workspace = true }
 
 [dev-dependencies]
 ipc-test = { workspace = true }

@@ -8,10 +8,12 @@ use ipc::{
     Transport as _,
     wire::{Bytes, Cap, IpcError, Str},
 };
-use kernel_objects::{MemoryRegion, OwnedHandle, Port, ReceivedFrame, Signal};
+use kernel_objects::{MemoryRegion, OwnedHandle, Port, ReceivedFrame, Signal, kind, settle, vend};
 use runtime::{Condvar, JoinHandle, Mutex, PortTransport, Priority, Timeout, spawn_owned};
-use supervisor_abi::{ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, supervisor};
-use syscall::{Handle, Rights, SIGNALED, WakeCount};
+use supervisor_abi::{
+    ExtendError, INSTANCE_NAME_MAX, PLAN_RECORD_MAX, PROTOCOL_NAME_MAX, supervisor,
+};
+use syscall::{Handle, Rights, SIGNALED, WakeCount, kind as object_kind};
 use userland_image::decode_plan;
 
 use crate::system::Definition;
@@ -28,12 +30,13 @@ pub(crate) enum Request {
     Session {
         caller: NonZeroU64,
         instance: String,
+        protocol: String,
     },
 }
 
 pub(crate) enum Answer {
     Extended(Result<(), ExtendError>),
-    Session(Result<OwnedHandle, ExtendError>),
+    Session(Result<Port, ExtendError>),
 }
 
 #[derive(Default)]
@@ -63,11 +66,11 @@ struct Serving<'a, 'f> {
     extending: &'a mut Extending,
     received: &'a mut ReceivedFrame<'f>,
     caller: Option<NonZeroU64>,
-    vended: Option<OwnedHandle>,
+    vended: Option<OwnedHandle<kind::Any>>,
 }
 
 pub(crate) struct ExtensionPort {
-    root: Option<OwnedHandle>,
+    root: Option<Port>,
     thread: Option<JoinHandle>,
     mailbox: Arc<Mailbox>,
 }
@@ -151,21 +154,8 @@ impl Extending {
 }
 
 impl Serving<'_, '_> {
-    fn vend(&mut self, handle: OwnedHandle) -> Cap {
-        let id = handle.as_raw().as_nonzero();
-        self.vended = Some(handle);
-        Cap::from_raw(id)
-    }
-
     fn end_frame(&mut self, delivered: bool) {
-        let Some(handle) = self.vended.take() else {
-            return;
-        };
-        if delivered {
-            let _ = handle.into_raw();
-        } else {
-            let _ = handle.close();
-        }
+        settle(&mut self.vended, delivered);
     }
 }
 
@@ -183,15 +173,11 @@ impl supervisor::Service for Serving<'_, '_> {
     fn define(
         &mut self,
         record: Bytes<'_, PLAN_RECORD_MAX>,
-        program: Cap,
+        program: Cap<kind::MemoryRegion>,
     ) -> Result<u32, ExtendError> {
         // Капу региона передаёт принятый кадр, и её перенос закрывает регион на любом
         // отказе операции.
-        let program = self
-            .received
-            .claim(program)
-            .map(MemoryRegion::from_handle)
-            .ok_or(ExtendError::BadRecord)?;
+        let program = self.received.claim(program).ok_or(ExtendError::BadRecord)?;
         let Some(caller) = self.caller else {
             return Err(ExtendError::NoTransaction);
         };
@@ -218,14 +204,19 @@ impl supervisor::Service for Serving<'_, '_> {
         }
     }
 
-    fn session(&mut self, component: Str<'_, INSTANCE_NAME_MAX>) -> Result<Cap, ExtendError> {
+    fn session(
+        &mut self,
+        component: Str<'_, INSTANCE_NAME_MAX>,
+        protocol: Str<'_, PROTOCOL_NAME_MAX>,
+    ) -> Result<Cap<kind::Port>, ExtendError> {
         let caller = self.caller.ok_or(ExtendError::NotFound)?;
         let answered = self.extending.mailbox.ask(Request::Session {
             caller,
             instance: String::from(component.as_str()),
+            protocol: String::from(protocol.as_str()),
         });
         match answered {
-            Some(Answer::Session(Ok(handle))) => Ok(self.vend(handle)),
+            Some(Answer::Session(Ok(handle))) => Ok(vend(&mut self.vended, handle)),
             Some(Answer::Session(Err(error))) => Err(error),
             _ => Err(ExtendError::NotFound),
         }
@@ -234,7 +225,7 @@ impl supervisor::Service for Serving<'_, '_> {
 
 impl ExtensionPort {
     pub(crate) fn start() -> kernel_objects::Result<Self> {
-        let root = Port::create()?.into_handle();
+        let root = Port::create()?;
         let server = root.duplicate(Rights::READ, None)?;
         let mailbox = Arc::new(Mailbox::create()?);
         let serving = Arc::clone(&mailbox);
@@ -253,15 +244,15 @@ impl ExtensionPort {
         })
     }
 
-    pub(crate) fn slot(&self, badge: NonZeroU64) -> Option<OwnedHandle> {
+    pub(crate) fn slot(&self, badge: NonZeroU64) -> Option<Port> {
         self.root
             .as_ref()?
             .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
             .ok()
     }
 
-    pub(crate) fn posted(&self) -> Handle {
-        self.mailbox.posted.handle().as_raw()
+    pub(crate) fn posted(&self) -> Handle<object_kind::Signal> {
+        self.mailbox.posted.as_raw()
     }
 
     pub(crate) fn take_request(&self) -> Option<Request> {
@@ -292,7 +283,7 @@ impl Drop for ExtensionPort {
     }
 }
 
-fn serve(server: OwnedHandle, mailbox: Arc<Mailbox>) {
+fn serve(server: Port, mailbox: Arc<Mailbox>) {
     let transport = PortTransport::server(server.borrow());
     let mut extending = Extending {
         mailbox,

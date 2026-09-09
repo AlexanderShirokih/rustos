@@ -7,13 +7,13 @@ name = "bootstrap-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]
 name = "calculator-demo"
 version = "0.1.0"
 dependencies = [
- "component-abi",
  "component-startup",
  "component-startup-std",
  "filesystem-abi",
@@ -48,6 +48,7 @@ name = "component-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]
@@ -57,6 +58,7 @@ dependencies = [
  "component-abi",
  "ipc",
  "kernel-objects",
+ "syscall",
 ]
 
 [[package]]
@@ -119,6 +121,7 @@ name = "filesystem-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]
@@ -185,7 +188,6 @@ dependencies = [
 name = "init"
 version = "0.1.0"
 dependencies = [
- "component-abi",
  "component-startup",
  "filesystem-abi",
  "ipc",
@@ -268,10 +270,8 @@ dependencies = [
 name = "namespace-router"
 version = "0.1.0"
 dependencies = [
- "component-abi",
  "component-startup",
  "filesystem-abi",
- "filesystem-server",
  "ipc",
  "kernel-objects",
  "runtime",
@@ -367,6 +367,7 @@ name = "supervisor-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]

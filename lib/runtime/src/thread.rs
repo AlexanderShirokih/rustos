@@ -7,7 +7,7 @@
 use alloc::boxed::Box;
 use core::ptr::NonNull;
 
-use syscall::{Handle, Priority, SIGNALED, SyscallError, Timeout};
+use syscall::{Handle, Priority, SIGNALED, SyscallError, Timeout, kind};
 
 use crate::{
     heap::{alloc, dealloc},
@@ -22,7 +22,7 @@ const STACK_ALIGN: usize = 16;
 
 /// Поднятый поток: его handle и стек, выданный кучей процесса.
 pub struct Spawned {
-    thread: Handle,
+    thread: Handle<kind::Thread>,
     stack: NonNull<u8>,
     stack_bytes: usize,
 }
@@ -30,7 +30,7 @@ pub struct Spawned {
 impl Spawned {
     /// Handle поднятого потока.
     #[must_use]
-    pub const fn thread(&self) -> Handle {
+    pub const fn thread(&self) -> Handle<kind::Thread> {
         self.thread
     }
 
@@ -112,7 +112,7 @@ pub unsafe fn release_stack(stack: NonNull<u8>, stack_bytes: usize) {
 ///
 /// Процесс уходит вместе со своим последним потоком: `ProcessTerminate` на собственный
 /// процесс ядро отвергает.
-pub fn exit_with_sibling(sibling: Handle, exit_code: u32) -> ! {
+pub fn exit_with_sibling(sibling: Handle<kind::Thread>, exit_code: u32) -> ! {
     let _ = thread_terminate(sibling, u64::from(exit_code));
     thread_exit(u64::from(exit_code))
 }
@@ -194,7 +194,7 @@ pub fn spawn(
 /// `join` ждёт терминации и возвращает стек куче. `Drop` закрывает хэндл, а уход без `join`
 /// оставляет стек выданным: поток мог ещё выполняться на нём.
 pub struct JoinHandle {
-    thread: Handle,
+    thread: Handle<kind::Thread>,
     stack: NonNull<u8>,
     stack_bytes: usize,
 }
@@ -208,7 +208,7 @@ unsafe impl Sync for JoinHandle {}
 
 impl JoinHandle {
     /// Handle потока. Его принимает [`exit_with_sibling`].
-    pub const fn handle(&self) -> Handle {
+    pub const fn handle(&self) -> Handle<kind::Thread> {
         self.thread
     }
 

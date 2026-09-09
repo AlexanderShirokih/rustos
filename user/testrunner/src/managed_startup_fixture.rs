@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use kernel_objects::Signal;
+use kernel_objects::{Signal, kind};
 use runtime::{receive_startup, thread_exit};
 use syscall::Handle;
 
@@ -16,13 +16,13 @@ use ipc::wire::Cap;
 use managed_fixture_protocol::managed_fixture;
 
 struct ManagedFixtureArgs {
-    authority: Cap,
+    authority: Cap<syscall::kind::Signal>,
     exit_code: u32,
     keep_running: bool,
 }
 
 impl managed_fixture::Service for Option<ManagedFixtureArgs> {
-    fn start(&mut self, authority: Cap, exit_code: u32, keep_running: bool) {
+    fn start(&mut self, authority: Cap<syscall::kind::Signal>, exit_code: u32, keep_running: bool) {
         *self = Some(ManagedFixtureArgs {
             authority,
             exit_code,
@@ -32,7 +32,7 @@ impl managed_fixture::Service for Option<ManagedFixtureArgs> {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     let received = receive_startup(startup, managed_fixture::dispatch);
     let Ok(Some(mut frame)) = received else {
         thread_exit(u64::from(u32::MAX));
@@ -46,7 +46,7 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     let Some(authority) = frame.claim(authority) else {
         thread_exit(u64::from(u32::MAX));
     };
-    let authority = Signal::from_handle(authority.into());
+    let authority = Signal::from(authority);
     if authority.notify_all().is_err() {
         thread_exit(u64::from(u32::MAX - 1));
     }

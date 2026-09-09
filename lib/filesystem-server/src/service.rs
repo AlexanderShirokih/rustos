@@ -1,5 +1,5 @@
 //! Обслуживание сервисного порта: трансляция операций контракта `FileSystem` в модель
-//! `lib/filesystem` поверх состояния, разделённого с control-потоком.
+//! `lib/filesystem` поверх состояния, разделённого с потоком startup-порта.
 
 use alloc::{boxed::Box, string::String};
 use core::{
@@ -13,7 +13,9 @@ use filesystem_abi::{
     Opened, PATH_MAX, Path, Written, file_system, rebase,
 };
 use ipc::wire::{Cap, Str};
-use kernel_objects::{MemoryRegion, OwnedHandle, ReceivedFrame, Resource};
+use kernel_objects::{
+    MemoryRegion, OwnedHandle, Port, ReceivedFrame, Resource, kind, settle, vend,
+};
 use runtime::{MemoryAccess, MutexGuard};
 use syscall::Rights;
 
@@ -37,7 +39,7 @@ pub(crate) struct FileSystemState {
 
 #[derive(Default)]
 pub(crate) struct Frame {
-    vended: Option<OwnedHandle>,
+    vended: Option<OwnedHandle<kind::Any>>,
     pending_pin: Option<NodeId>,
 }
 
@@ -45,14 +47,14 @@ pub(crate) struct Serving<'a, 'f> {
     pub(crate) state: MutexGuard<'a, FileSystemState>,
     pub(crate) frame: &'a mut Frame,
     pub(crate) received: &'a mut ReceivedFrame<'f>,
-    pub(crate) service: &'a OwnedHandle,
+    pub(crate) service: &'a Port,
     pub(crate) next_badge: &'a AtomicU64,
 }
 
 pub(crate) fn mint_session(
-    service: &OwnedHandle,
+    service: &Port,
     next_badge: &AtomicU64,
-) -> Result<(NonZeroU64, OwnedHandle), FileSystemError> {
+) -> Result<(NonZeroU64, Port), FileSystemError> {
     // Значения значков не переиспользуются. Счётчик только растёт.
     let badge = NonZeroU64::MIN.saturating_add(next_badge.fetch_add(1, Relaxed));
     let session = service
@@ -173,29 +175,6 @@ impl Frame {
     }
 }
 
-/// Закрывает выданную capability, когда ответ не доставлен. Доставленный ответ переносит её
-/// получателю ядром, и сервер отпускает свой хэндл без закрытия. Вызов идёт один раз на кадр,
-/// после обработки.
-pub fn settle(vended: &mut Option<OwnedHandle>, delivered: bool) {
-    let Some(handle) = vended.take() else {
-        return;
-    };
-    if delivered {
-        let _ = handle.into_raw();
-    } else {
-        let _ = handle.close();
-    }
-}
-
-/// Укладывает хэндл в кадр ответа, оставляя владение за отвечающим до конца кадра. Дальше хэндл
-/// принимает [`settle`]. Кадр отвечает одной capability, и повторный вызов по тому же `vended`
-/// закрывает прежнюю.
-pub fn vend(vended: &mut Option<OwnedHandle>, handle: OwnedHandle) -> Cap {
-    let id = handle.as_raw().as_nonzero();
-    *vended = Some(handle);
-    Cap::from_raw(id)
-}
-
 impl Serving<'_, '_> {
     fn client(&self) -> Result<ClientId, FileSystemError> {
         let badge = self.received.badge();
@@ -234,7 +213,7 @@ impl Serving<'_, '_> {
 }
 
 impl file_system::Service for Serving<'_, '_> {
-    fn acquire_buffer(&mut self, size: u32) -> Result<Cap, FileSystemError> {
+    fn acquire_buffer(&mut self, size: u32) -> Result<Cap<kind::MemoryRegion>, FileSystemError> {
         let client = self.client()?;
         let FileSystemState {
             stores, sessions, ..
@@ -384,7 +363,7 @@ impl file_system::Service for Serving<'_, '_> {
     fn create_backed(
         &mut self,
         path: Str<'_, PATH_MAX>,
-        region: Cap,
+        region: Cap<kind::MemoryRegion>,
         size: u64,
     ) -> Result<u32, FileSystemError> {
         let client = self.client()?;
@@ -401,11 +380,10 @@ impl file_system::Service for Serving<'_, '_> {
             return Err(FileSystemError::ReadOnly);
         }
 
-        let region = MemoryRegion::from_handle(
-            self.received
-                .claim(region)
-                .ok_or(FileSystemError::NotSupported)?,
-        );
+        let region = self
+            .received
+            .claim(region)
+            .ok_or(FileSystemError::NotSupported)?;
         let FileSystemState {
             backend, stores, ..
         } = &mut *self.state;
@@ -417,7 +395,10 @@ impl file_system::Service for Serving<'_, '_> {
         Ok(DONE)
     }
 
-    fn backing_memory(&mut self, fd: NodeDescriptor) -> Result<Cap, FileSystemError> {
+    fn backing_memory(
+        &mut self,
+        fd: NodeDescriptor,
+    ) -> Result<Cap<kind::MemoryRegion>, FileSystemError> {
         let (backend, stores, session) = self.backend_stores_session()?;
         let open_node = readable(session.get(fd)?)?;
         let window = backend.backing(stores, open_node.node)?;
@@ -426,7 +407,7 @@ impl file_system::Service for Serving<'_, '_> {
         Ok(vend(&mut self.frame.vended, slice))
     }
 
-    fn open_root(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap, FileSystemError> {
+    fn open_root(&mut self, path: Str<'_, PATH_MAX>) -> Result<Cap<kind::Port>, FileSystemError> {
         let mut full = [0; PATH_MAX];
         let (backend, _, session) = self.backend_stores_session()?;
         let root = scoped(&session.attachment().scope, path, &mut full)?;

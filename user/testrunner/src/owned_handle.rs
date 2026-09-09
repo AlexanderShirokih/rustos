@@ -2,17 +2,17 @@
 //! `signal_create`, проверка закрытия - `signal_set` (non-blocking) на сыром
 //! id, который после закрытия даёт `BadHandle`.
 
-use kernel_objects::OwnedHandle;
+use kernel_objects::{Signal, kind};
 use kernel_tests::kernel_test;
 use runtime::{handle_close, signal_create, signal_set};
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 
-fn mint() -> OwnedHandle {
+fn mint() -> Signal {
     let handle = signal_create().expect("signal_create must succeed");
-    OwnedHandle::from_handle(handle)
+    Signal::from_handle(handle)
 }
 
-fn is_closed(handle: Handle) -> bool {
+fn is_closed(handle: Handle<kind::Signal>) -> bool {
     signal_set(handle, SIGNALED, 0, WakeCount::None) == SyscallError::BadHandle.as_return_value()
 }
 

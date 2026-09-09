@@ -6,6 +6,6 @@ ipc::protocol! {
         name = "ManagedFixture";
 
         /// Передаёт authority, код завершения и режим удержания процесса.
-        cast fn start(authority: Cap, exit_code: u32, keep_running: bool);
+        cast fn start(authority: Cap<syscall::kind::Signal>, exit_code: u32, keep_running: bool);
     }
 }

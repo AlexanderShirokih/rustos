@@ -8,10 +8,10 @@ use core::num::NonZeroU64;
 use device_resolver::ResolveError;
 use filesystem_abi::{
     AccessMode, BOOT_MOUNT_TABLE_PATH, FileSystemError, Mount, OpenFlags, Opened, Path,
-    decode_mount_table, namespace,
+    decode_mount_table, namespace, namespace_admin,
 };
 use ipc::wire::IpcError;
-use kernel_objects::{MemoryRegion, OwnedHandle, Signal};
+use kernel_objects::{MemoryRegion, Port, Signal, kind};
 use kernel_tests::kernel_test;
 use managed_component::{ComponentRoots, ManagedComponent, ManagedFailure};
 use rootkeeper::{
@@ -74,6 +74,15 @@ const AREA_READ_EXIT_CODE: u32 = 0;
 
 const AREA_RECORD: &str = "/boot/directory-consumer-fixture/program";
 
+const FILE_SYSTEM_PROTOCOL: &str = "FileSystem";
+const RTC_PROTOCOL: &str = "Rtc";
+const FILE_SYSTEM_EXPORTS: &[&str] = &[FILE_SYSTEM_PROTOCOL];
+const ROUTER_EXPORTS: &[&str] = &["Namespace", "NamespaceAdmin"];
+const RTC_EXPORTS: &[&str] = &[RTC_PROTOCOL];
+
+const FIRST_EXPORT: u8 = 0;
+const ADMIN_EXPORT: u8 = 1;
+
 const AREA_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Directory {
     provider: IMAGE_FS_NAME,
 }];
@@ -85,9 +94,11 @@ const READER_READ_EXIT_CODE: u32 = 0;
 
 const READER_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Service {
     provider: IMAGE_FS_NAME,
+    export: FIRST_EXPORT,
 }];
 const READER_SOURCES: &[SlotSource<'static>] = &[SlotSource::Service {
     provider: IMAGE_FS_NAME,
+    export: FIRST_EXPORT,
 }];
 
 const EXTENDER_PROGRAM: &str = "/boot/supervisor-consumer-fixture";
@@ -98,6 +109,7 @@ const EXTENDER_RAISED_EXIT_CODE: u32 = 0;
 const EXTENDER_SLOTS: &[SlotSpec<'static>] = &[
     SlotSpec::Service {
         provider: IMAGE_FS_NAME,
+        export: FIRST_EXPORT,
     },
     SlotSpec::Supervisor,
 ];
@@ -111,7 +123,10 @@ const CYCLE_HEAD_EDGE: [&str; 1] = [CYCLE_NAMES[1]];
 const CYCLE_TAIL_EDGE: [&str; 1] = [CYCLE_NAMES[0]];
 
 const ORPHAN_NAME: &str = "orphan";
-const ORPHAN_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Service { provider: "ghost" }];
+const ORPHAN_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Service {
+    provider: "ghost",
+    export: FIRST_EXPORT,
+}];
 
 const GREEDY_NAME: &str = "greedy";
 const GREEDY_MEMORY_PAGES: u64 = u64::MAX / 2;
@@ -127,8 +142,9 @@ const MOUNTS_NAME: &str = "control-consumer-fixture";
 const MOUNTS_MEMORY_PAGES: u64 = 256;
 const MOUNTS_EXIT_CODE: u32 = 61;
 
-const MOUNTS_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Control {
+const MOUNTS_SLOTS: &[SlotSpec<'static>] = &[SlotSpec::Service {
     provider: ROUTER_NAME,
+    export: ADMIN_EXPORT,
 }];
 
 const BOOT_TREE: &[Mount<'static>] = &[
@@ -161,9 +177,11 @@ const INIT_SLOTS: &[SlotSpec<'static>] = &[
     SlotSpec::Userland,
     SlotSpec::Service {
         provider: IMAGE_FS_NAME,
+        export: FIRST_EXPORT,
     },
-    SlotSpec::Control {
+    SlotSpec::Service {
         provider: ROUTER_NAME,
+        export: ADMIN_EXPORT,
     },
     SlotSpec::Supervisor,
 ];
@@ -171,9 +189,11 @@ const INIT_SOURCES: &[SlotSource<'static>] = &[
     SlotSource::Userland,
     SlotSource::Service {
         provider: IMAGE_FS_NAME,
+        export: FIRST_EXPORT,
     },
-    SlotSource::Control {
+    SlotSource::Service {
         provider: ROUTER_NAME,
+        export: ADMIN_EXPORT,
     },
     SlotSource::Supervisor,
 ];
@@ -183,6 +203,7 @@ fn router(on_exhausted: OnExhausted, launches: u32) -> ComponentSpec<'static> {
         executable: ROUTER_PROGRAM,
         name: ROUTER_NAME,
         slots: &[],
+        exports: ROUTER_EXPORTS,
         after: &[],
         memory_pages: ROUTER_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -197,6 +218,7 @@ fn image_filesystem() -> ComponentSpec<'static> {
         executable: IMAGE_FS_PROGRAM,
         name: IMAGE_FS_NAME,
         slots: USERLAND_SLOT,
+        exports: FILE_SYSTEM_EXPORTS,
         after: &[],
         memory_pages: FILE_SYSTEM_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -211,6 +233,7 @@ fn ram_filesystem() -> ComponentSpec<'static> {
         executable: RAM_FS_PROGRAM,
         name: RAM_FS_NAME,
         slots: &[],
+        exports: FILE_SYSTEM_EXPORTS,
         after: &[],
         memory_pages: FILE_SYSTEM_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -225,6 +248,7 @@ fn boot_init() -> ComponentSpec<'static> {
         executable: INIT_PROGRAM,
         name: INIT_NAME,
         slots: INIT_SLOTS,
+        exports: &[],
         after: &[],
         memory_pages: INIT_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -262,6 +286,7 @@ fn reader() -> ComponentSpec<'static> {
         executable: READER_PROGRAM,
         name: READER_NAME,
         slots: READER_SLOTS,
+        exports: &[],
         after: &[],
         memory_pages: READER_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -276,6 +301,7 @@ fn mount_admin() -> ComponentSpec<'static> {
         executable: MOUNTS_PROGRAM,
         name: MOUNTS_NAME,
         slots: MOUNTS_SLOTS,
+        exports: &[],
         after: &[],
         memory_pages: MOUNTS_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -290,6 +316,7 @@ fn rtc<'a>(slots: &'a [SlotSpec<'a>]) -> ComponentSpec<'a> {
         executable: RTC_PROGRAM,
         name: RTC_NAME,
         slots,
+        exports: RTC_EXPORTS,
         after: &[],
         memory_pages: RTC_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -304,6 +331,7 @@ fn area_consumer() -> ComponentSpec<'static> {
         executable: AREA_PROGRAM,
         name: AREA_NAME,
         slots: AREA_SLOTS,
+        exports: &[],
         after: &[],
         memory_pages: AREA_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -318,6 +346,7 @@ fn extender() -> ComponentSpec<'static> {
         executable: EXTENDER_PROGRAM,
         name: EXTENDER_NAME,
         slots: EXTENDER_SLOTS,
+        exports: &[],
         after: &[],
         memory_pages: EXTENDER_MEMORY_PAGES,
         startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -365,7 +394,7 @@ fn definition(image: &SystemImage, entry: &str, component: ComponentSpec<'_>) ->
     Definition::new(&record, program_window(image, entry))
 }
 
-pub(crate) fn raise_stage_one(system: &mut RootSystem<'_>, relay: syscall::Handle) {
+pub(crate) fn raise_stage_one(system: &mut RootSystem<'_>, relay: syscall::Handle<kind::Thread>) {
     // Оборот обслуживает по одной операции транзакции, и `init` подаёт их две: набор ступени 1 и
     // сессию его файловой системы под монтирование. Исходы компонентов приходят тем же оборотом и
     // не идут в счёт.
@@ -424,17 +453,17 @@ fn roots<'a>(system: &'a RootSystem<'_>, index: u16) -> &'a ComponentRoots {
         .roots()
 }
 
-fn relay_thread() -> syscall::Handle {
+fn relay_thread() -> syscall::Handle<kind::Thread> {
     crate::log_relay::shared_relay_thread().expect("shared relay is running")
 }
 
-fn scenario_relay_thread() -> syscall::Handle {
+fn scenario_relay_thread() -> syscall::Handle<kind::Thread> {
     crate::log_relay::scenario_relay_thread().expect("scenario relay is running")
 }
 
-fn try_mount(system: &RootSystem<'_>, prefix: &str) -> Result<OwnedHandle, FileSystemError> {
+fn try_mount(system: &RootSystem<'_>, prefix: &str) -> Result<Port, FileSystemError> {
     let namespace = roots(system, 0)
-        .session(PROBE_BADGE)
+        .session(usize::from(FIRST_EXPORT), PROBE_BADGE)
         .expect("namespace session minted");
     // Отказ транспорта на пути к ещё не обслуживающему порт маршрутизатору неотличим
     // для клиента от неотвечающего монтирования.
@@ -446,10 +475,10 @@ fn try_mount(system: &RootSystem<'_>, prefix: &str) -> Result<OwnedHandle, FileS
     let session = resolved
         .claim(session)
         .ok_or(FileSystemError::Unresponsive)?;
-    Ok(OwnedHandle::from(session))
+    Ok(Port::from(session))
 }
 
-fn await_tree(system: &RootSystem<'_>, prefix: &str) -> OwnedHandle {
+fn await_tree(system: &RootSystem<'_>, prefix: &str) -> Port {
     // Маршрутизатор сам поднимает дерево имён. Стартовый кадр только доставлен, поэтому путь
     // становится накрытым его оборотами.
     for _ in 0..RESTART_ATTEMPTS {
@@ -490,7 +519,7 @@ pub(crate) fn pause(timeout: Timeout) {
     let _ = timer.wait(SIGNALED, timeout);
 }
 
-fn probe(session: &OwnedHandle) -> Result<Result<Opened, FileSystemError>, IpcError> {
+fn probe(session: &Port) -> Result<Result<Opened, FileSystemError>, IpcError> {
     connect(session)
         .open(
             path(Path::ROOT.as_str()),
@@ -658,7 +687,7 @@ fn supervisor_restarts_the_router_with_a_fresh_namespace() {
     // Сессия принадлежит файловой системе, а не маршрутизатору, поэтому его смена не отзывает её.
     kernel_tests::kassert!(matches!(probe(&session), Ok(Ok(_))));
     kernel_tests::kassert_eq!(managed(&system, 0).generation(), 2);
-    // Монтирования принадлежат incarnation, и держатель control-слота завершился вместе с ней. Его
+    // Монтирования принадлежат incarnation, и держатель слота завершился вместе с ней. Его
     // смена наполняет свежее дерево имён.
     kernel_tests::kassert_eq!(managed(&system, init).generation(), 2);
     // Статически связанный корень монтируется слотом свежей incarnation.
@@ -900,7 +929,7 @@ fn a_device_component_serves_time_over_a_minted_session() {
     let mut system = started(&image, &bytes);
 
     let session = roots(&system, 0)
-        .session(PROBE_BADGE)
+        .session(usize::from(FIRST_EXPORT), PROBE_BADGE)
         .expect("rtc session minted");
     let clock = rtc::Client::new(PortTransport::client(&session)).with_wait(RTC_CALL_TIMEOUT);
     let now = clock.now().expect("rtc answers the time").value;
@@ -985,7 +1014,9 @@ fn a_service_slot_carries_the_provider_session_and_stops_before_it() {
             name: CONSUMER_NAME,
             slots: &[SlotSpec::Service {
                 provider: ROUTER_NAME,
+                export: FIRST_EXPORT,
             }],
+            exports: &[],
             after: &[],
             memory_pages: CONSUMER_MEMORY_PAGES,
             startup_timeout: ROUTER_STARTUP_TIMEOUT,
@@ -1029,7 +1060,9 @@ fn a_service_slot_of_a_file_system_carries_a_session_it_established_itself() {
     // сессию слота, а сминченная капа кадром сессии не создаёт.
     let files = roots(&system, 1);
     for badge in [PROBE_BADGE, relay::component_badge(0)] {
-        let minted = files.session(badge).expect("session minted");
+        let minted = files
+            .session(usize::from(FIRST_EXPORT), badge)
+            .expect("session minted");
         kernel_tests::kassert_eq!(probe(&minted), Ok(Err(FileSystemError::NoSession)));
     }
 
@@ -1075,7 +1108,10 @@ fn a_service_slot_naming_an_instance_outside_the_composition_names_the_boot_fail
     let image = image();
     let bytes = encode_plan(&[
         ComponentSpec {
-            slots: &[SlotSpec::Service { provider: "ghost" }],
+            slots: &[SlotSpec::Service {
+                provider: "ghost",
+                export: FIRST_EXPORT,
+            }],
             ..reader()
         },
         image_filesystem(),
@@ -1089,7 +1125,7 @@ fn a_service_slot_naming_an_instance_outside_the_composition_names_the_boot_fail
 }
 
 #[kernel_test]
-fn a_control_slot_reaches_the_admin_protocol_of_its_provider() {
+fn a_service_slot_of_the_admin_export_reaches_the_admin_protocol_of_its_provider() {
     let image = image();
     let bytes = encode_plan(&[
         router(OnExhausted::Halt, 1),
@@ -1106,10 +1142,21 @@ fn a_control_slot_reaches_the_admin_protocol_of_its_provider() {
     // `init` монтирует префикс потребителя сессией компонента ступени 1.
     raise_stage_one(&mut system, relay_thread());
 
-    // Потребитель зовёт `NamespaceAdmin::unmount` капабилити control-слота, поэтому снятое
-    // монтирование видно с service-порта того же провайдера, а он уносит отказ вызова собственным
-    // кодом выхода.
+    // Потребитель зовёт `NamespaceAdmin::unmount` капабилити слота второго экспорта, поэтому
+    // снятое монтирование видно на порту первого экспорта того же провайдера, а он уносит отказ
+    // вызова собственным кодом выхода.
     await_unmounted(&system, RAM_MOUNT);
+
+    // Экспорт `Namespace` административной операции не разбирает, и держатель его сессии
+    // кадр административного ordinal провайдеру не проведёт.
+    let namespace = roots(&system, 0)
+        .session(usize::from(FIRST_EXPORT), PROBE_BADGE)
+        .expect("namespace session minted");
+    let refused = namespace_admin::Client::new(PortTransport::client(&namespace))
+        .with_wait(CALL_TIMEOUT)
+        .unmount(path(ROOT_MOUNT))
+        .map(|response| response.value);
+    kernel_tests::kassert_eq!(refused, Err(IpcError::PeerClosed));
 
     kernel_tests::kassert!(terminate(&system, 2, MOUNTS_EXIT_CODE));
     let gone = await_turn(&mut system);
@@ -1121,8 +1168,8 @@ fn a_control_slot_reaches_the_admin_protocol_of_its_provider() {
         }
     );
 
-    // Завершение значка потребителя не закрывает control-порт провайдера, потому что лишь
-    // завершение значка супервизора терминально, и маршрутизатор продолжает разбирать пути.
+    // Завершение значка потребителя порт экспорта провайдера не закрывает, и маршрутизатор
+    // продолжает разбирать пути.
     pause(CONSUMER_TURN);
     kernel_tests::kassert!(alive(&system, 0));
     kernel_tests::kassert!(try_mount(&system, ROOT_MOUNT).is_ok());
@@ -1322,7 +1369,7 @@ fn a_transaction_raises_a_device_component_the_plan_never_named() {
         .expect("transaction raises the driver");
 
     let session = system
-        .caller_session(caller(), RTC_NAME)
+        .caller_session(caller(), RTC_NAME, RTC_PROTOCOL)
         .expect("rtc session minted");
     let clock = rtc::Client::new(PortTransport::client(&session)).with_wait(RTC_CALL_TIMEOUT);
     kernel_tests::kassert!(clock.now().is_ok());
@@ -1345,11 +1392,23 @@ fn a_session_reaches_only_the_components_its_caller_defined() {
         )
         .expect("transaction raises the component");
 
-    kernel_tests::kassert!(system.caller_session(caller(), DEFINED_NAME).is_ok());
+    kernel_tests::kassert!(
+        system
+            .caller_session(caller(), DEFINED_NAME, FILE_SYSTEM_PROTOCOL)
+            .is_ok()
+    );
     // Значок вызывателя - единственное правило допуска. Набор достаётся записи, которая определила
     // его, а статическое связывание раздаёт компоненты плана.
-    kernel_tests::kassert!(system.caller_session(other_caller(), DEFINED_NAME).is_err());
-    kernel_tests::kassert!(system.caller_session(caller(), RAM_FS_NAME).is_err());
+    kernel_tests::kassert!(
+        system
+            .caller_session(other_caller(), DEFINED_NAME, FILE_SYSTEM_PROTOCOL)
+            .is_err()
+    );
+    kernel_tests::kassert!(
+        system
+            .caller_session(caller(), RAM_FS_NAME, FILE_SYSTEM_PROTOCOL)
+            .is_err()
+    );
 
     system.shutdown();
 }
@@ -1380,10 +1439,18 @@ fn a_transaction_of_a_badge_outside_the_composition_raises_nothing() {
             vec![definition(&image, RAM_FS_RECORD, defined_ramfs())],
         )
         .expect("transaction raises the component");
-    kernel_tests::kassert!(system.caller_session(caller(), DEFINED_NAME).is_ok());
     kernel_tests::kassert!(
         system
-            .caller_session(caller_outside_the_composition(), DEFINED_NAME)
+            .caller_session(caller(), DEFINED_NAME, FILE_SYSTEM_PROTOCOL)
+            .is_ok()
+    );
+    kernel_tests::kassert!(
+        system
+            .caller_session(
+                caller_outside_the_composition(),
+                DEFINED_NAME,
+                FILE_SYSTEM_PROTOCOL,
+            )
             .is_err()
     );
 

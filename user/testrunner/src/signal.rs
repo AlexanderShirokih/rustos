@@ -1,7 +1,9 @@
 //! E2E проверка `SignalCreate`/`SignalSet`/`SignalWaitOne`/`SignalWaitMany`
 //! из EL0.
 
-use kernel_objects::{Signal, wait_any};
+use core::num::NonZeroU32;
+
+use kernel_objects::{Signal, kind, wait_any};
 use kernel_tests::kernel_test;
 use runtime::{Priority, Timeout, signal_set, spawn};
 use syscall::{Handle, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem, WakeCount};
@@ -31,7 +33,9 @@ fn sleep(budget: Timeout) {
 
 extern "C" fn delayed_signaler(raw: usize) -> u32 {
     sleep(WORKER_DELAY);
-    let handle = Handle::new(raw as u32).expect("signal handle id");
+    let handle = NonZeroU32::new(raw as u32)
+        .map(Handle::<kind::Signal>::from_abi)
+        .expect("signal handle id");
     u32::from(signal_set(handle, SIGNALED, 0, WakeCount::All) != 0)
 }
 
@@ -40,7 +44,7 @@ extern "C" fn delayed_signaler(raw: usize) -> u32 {
 #[kernel_test]
 fn wait_blocks_until_another_thread_signals() {
     let signal = Signal::create().expect("signal create must succeed");
-    let raw = signal.handle().as_raw().raw() as usize;
+    let raw = signal.as_raw().raw() as usize;
 
     let worker =
         spawn(delayed_signaler, raw, STACK_SIZE, Priority::new(1)).expect("spawn signaler");
@@ -67,8 +71,8 @@ fn wait_many_returns_the_index_of_the_raised_signal() {
         .expect("signal set must succeed");
 
     let items = [
-        WaitItem::new(idle.handle().as_raw(), SIGNALED),
-        WaitItem::new(raised.handle().as_raw(), SIGNALED),
+        WaitItem::new(idle.as_raw(), SIGNALED),
+        WaitItem::new(raised.as_raw(), SIGNALED),
     ];
     let index = wait_any(&items, Timeout::POLL).expect("raised entry satisfies the wait");
     kernel_tests::kassert_eq!(index, 1);
@@ -78,14 +82,14 @@ fn wait_many_returns_the_index_of_the_raised_signal() {
 fn wait_many_blocks_until_another_thread_signals() {
     let idle = Signal::create().expect("idle signal create");
     let target = Signal::create().expect("target signal create");
-    let raw = target.handle().as_raw().raw() as usize;
+    let raw = target.as_raw().raw() as usize;
 
     let worker =
         spawn(delayed_signaler, raw, STACK_SIZE, Priority::new(1)).expect("spawn signaler");
 
     let items = [
-        WaitItem::new(idle.handle().as_raw(), SIGNALED),
-        WaitItem::new(target.handle().as_raw(), SIGNALED),
+        WaitItem::new(idle.as_raw(), SIGNALED),
+        WaitItem::new(target.as_raw(), SIGNALED),
     ];
     // Биты ещё не подняты. Ожидание уходит в блокировку вместо немедленного возврата.
     kernel_tests::kassert!(matches!(
@@ -104,7 +108,7 @@ fn wait_many_blocks_until_another_thread_signals() {
 #[kernel_test]
 fn wait_many_rejects_a_set_outside_the_bound() {
     let signal = Signal::create().expect("signal create");
-    let item = WaitItem::new(signal.handle().as_raw(), SIGNALED);
+    let item = WaitItem::new(signal.as_raw(), SIGNALED);
 
     kernel_tests::kassert!(matches!(
         wait_any(&[], Timeout::POLL),

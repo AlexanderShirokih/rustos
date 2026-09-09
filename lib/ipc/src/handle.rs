@@ -5,6 +5,9 @@
 /// реализатор обязан больше его не закрывать. При неуспехе `relinquish` не
 /// зовётся. Значение роняется, и любая очистка идёт через его `Drop`.
 pub trait IntoWireHandle {
+    /// Вид отправляемого объекта. Он связывает источник с объявленным видом поля.
+    type Kind: syscall::ObjectKind;
+
     /// Wire-id хэндла для записи в исходящий handle-вектор. Не потребляет.
     fn wire_id(&self) -> u32;
 
@@ -51,7 +54,9 @@ impl<H: IntoWireHandle> WireReplyHandle for H {
     }
 }
 
-impl IntoWireHandle for crate::wire::Cap {
+impl<K: syscall::ObjectKind> IntoWireHandle for crate::wire::Cap<K> {
+    type Kind = K;
+
     fn wire_id(&self) -> u32 {
         self.raw().get()
     }

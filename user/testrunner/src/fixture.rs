@@ -4,7 +4,7 @@
 use core::num::NonZeroU64;
 
 use bootstrap_abi::bootstrap;
-use kernel_objects::{MemoryRegion, OwnedHandle, Port, Process, Resource, Result};
+use kernel_objects::{MemoryRegion, Port, Process, Resource, Result};
 use runtime::{PortTransport, Timeout};
 use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
 use userland_image::{component_name, decode};
@@ -97,7 +97,7 @@ impl Fixture {
         let capability = response.value.expect("vend ok");
         let cap = response.claim(capability).expect("capability owner");
 
-        let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
+        let region = MemoryRegion::from(cap);
         let mapping = region.map_full_read_only().expect("map image read-only");
         let image = decode(mapping.as_bytes()).expect("decode acquired image");
         let program = image
@@ -143,7 +143,7 @@ impl Fixture {
                     &program,
                     Some(component_name(FIXTURE_ENTRY)),
                     resource,
-                    FIXTURE_LEASE_BADGE,
+                    Some(FIXTURE_LEASE_BADGE),
                     |startup| {
                         ipc_raw::write_frame(
                             &encode_request(OP_WRITE_SLOT, LEASE_START_PROBE),

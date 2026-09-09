@@ -3,9 +3,9 @@
 use core::num::NonZeroU64;
 
 use ipc::wire::MESSAGE_INLINE_MAX;
-use kernel_objects::{OwnedHandle, Port, Result};
+use kernel_objects::{Port, Result};
 use runtime::{JoinHandle, Priority, Timeout, spawn_owned};
-use syscall::{Handle, Rights};
+use syscall::{Handle, Rights, kind};
 
 use crate::relay::{LogRelay, LogSink, SourceNames};
 
@@ -25,7 +25,7 @@ const _: () = assert!(
 /// отправители паркуются и на уже мёртвом цикле. Владелец закрывает её через
 /// `shutdown` либо `wait`.
 pub struct LogRelayThread {
-    root: OwnedHandle,
+    root: Port,
     thread: JoinHandle,
 }
 
@@ -36,7 +36,7 @@ impl LogRelayThread {
         names: N,
         sink: S,
     ) -> Result<Self> {
-        let root = Port::create()?.into_handle();
+        let root = Port::create()?;
         let mut relay = LogRelay::new(root.duplicate(Rights::READ, None)?, names, sink);
         let thread = spawn_owned(
             move || {
@@ -51,7 +51,7 @@ impl LogRelayThread {
 
     /// Лог-сессия со значком `badge`: отправка и перенос кадром. Приёма и минта
     /// производных сессия не даёт.
-    pub fn session(&self, badge: NonZeroU64) -> Result<OwnedHandle> {
+    pub fn session(&self, badge: NonZeroU64) -> Result<Port> {
         self.root
             .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
     }
@@ -59,7 +59,7 @@ impl LogRelayThread {
     /// Лог-сессия подсистемы, раздающей логирование своим процессам: к правам
     /// сессии добавлен минт производных. Значок set-once, и производные содержат
     /// тот же `badge`.
-    pub fn delegated_session(&self, badge: NonZeroU64) -> Result<OwnedHandle> {
+    pub fn delegated_session(&self, badge: NonZeroU64) -> Result<Port> {
         self.root.duplicate(
             Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE,
             Some(badge),
@@ -68,7 +68,7 @@ impl LogRelayThread {
 
     /// Отдаёт waitable handle потока relay для supervisor loop.
     #[must_use]
-    pub fn handle(&self) -> Handle {
+    pub fn handle(&self) -> Handle<kind::Thread> {
         self.thread.handle()
     }
 

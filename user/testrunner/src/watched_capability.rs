@@ -5,7 +5,7 @@
 
 use core::num::NonZeroU64;
 
-use kernel_objects::{Error, OwnedHandle, Port};
+use kernel_objects::{Error, Port};
 use runtime::Timeout;
 use syscall::{Rights, SyscallError};
 
@@ -26,9 +26,8 @@ impl Watched {
         }
     }
 
-    pub(crate) fn deliver(&self) -> OwnedHandle {
+    pub(crate) fn deliver(&self) -> Port {
         self.port
-            .handle()
             .duplicate(Rights::WRITE | Rights::TRANSFER, Some(self.badge))
             .expect("delivered capability minted")
     }

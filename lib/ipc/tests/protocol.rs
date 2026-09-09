@@ -20,9 +20,16 @@ use std::{
 
 use ipc::{
     Transport,
-    wire::{Bytes, Header, Str},
+    wire::{Bytes, Cap, Header, Str},
 };
 use ipc_test::MockEnd;
+use syscall::{Handle, ObjectKind, kind};
+
+fn cap_of<K: ObjectKind>(raw: u32) -> Cap<K> {
+    Cap::from_handle(Handle::from_abi(
+        std::num::NonZeroU32::new(raw).expect("non-zero"),
+    ))
+}
 
 const ERR_DIVIDE_BY_ZERO: u32 = 1;
 
@@ -392,8 +399,10 @@ ipc::protocol! {
     mod cap_proto {
         name = "CapProto";
 
-        call fn echo_cap(c: Cap) -> Cap;
-        call fn acquire(ok: bool) -> Result<ipc::wire::Cap, u32>;
+        call fn echo_cap(c: Cap<kind::Port>) -> Cap<kind::Port>;
+        call fn acquire(ok: bool) -> Result<ipc::wire::Cap<kind::MemoryRegion>, u32>;
+        // Квалифицированный путь идёт общей веткой: ответ не передаёт владения.
+        call fn peek() -> ipc::wire::Cap<kind::Port>;
     }
 }
 
@@ -402,7 +411,7 @@ ipc::protocol! {
     mod owned_cast {
         name = "OwnedCast";
 
-        cast fn deliver(capability: Cap);
+        cast fn deliver(capability: Cap<kind::Port>);
     }
 }
 
@@ -456,6 +465,8 @@ impl Drop for TrackedHandle {
 }
 
 impl ipc::IntoWireHandle for TrackedHandle {
+    type Kind = kind::Port;
+
     fn wire_id(&self) -> u32 {
         self.raw
     }
@@ -506,18 +517,19 @@ fn timed_out_cast_drops_owned_handle_without_relinquishing() {
 struct CapServer;
 
 impl cap_proto::Service for CapServer {
-    fn echo_cap(&mut self, c: ipc::wire::Cap) -> impl ipc::IntoWireHandle {
+    fn echo_cap(
+        &mut self,
+        c: ipc::wire::Cap<kind::Port>,
+    ) -> impl ipc::IntoWireHandle<Kind = kind::Port> {
         c
     }
 
-    fn acquire(&mut self, ok: bool) -> Result<ipc::wire::Cap, u32> {
-        if ok {
-            Ok(ipc::wire::Cap::from_raw(
-                std::num::NonZeroU32::new(0x55).expect("non-zero"),
-            ))
-        } else {
-            Err(7)
-        }
+    fn peek(&mut self) -> ipc::wire::Cap<kind::Port> {
+        cap_of(0x99)
+    }
+
+    fn acquire(&mut self, ok: bool) -> Result<ipc::wire::Cap<kind::MemoryRegion>, u32> {
+        if ok { Ok(cap_of(0x55)) } else { Err(7) }
     }
 }
 
@@ -535,17 +547,12 @@ fn cap_param_and_return_round_trip() {
                 cap_proto::dispatch(&mut srv, &server_end).expect("dispatch ok");
             }
         });
-        let sent = ipc::wire::Cap::from_raw(std::num::NonZeroU32::new(0x1234).expect("non-zero"));
+        let sent = cap_of::<kind::Port>(0x1234);
         let mut echoed = client.echo_cap(sent).expect("echo ok");
         assert_eq!(echoed.value.raw().get(), 0x1234);
 
         let mut acquired = client.acquire(true).expect("acquire ok");
-        assert_eq!(
-            acquired.value,
-            Ok(ipc::wire::Cap::from_raw(
-                std::num::NonZeroU32::new(0x55).expect("non-zero")
-            ))
-        );
+        assert_eq!(acquired.value, Ok(cap_of::<kind::MemoryRegion>(0x55)));
         assert_eq!(echoed.claim(echoed.value), Some(sent));
         assert_eq!(echoed.claim(echoed.value), None);
         let cap = acquired.value.expect("acquired capability");
@@ -599,7 +606,7 @@ ipc::wire_value! {
 ipc::wire_value! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct Vended {
-        session: ipc::wire::Cap,
+        session: ipc::wire::Cap<kind::Port>,
         prefix_len: u32,
     }
 }
@@ -618,7 +625,7 @@ struct VendorServer;
 impl vendor::Service for VendorServer {
     fn vend(&mut self, prefix_len: u32) -> Vended {
         Vended {
-            session: ipc::wire::Cap::from_raw(std::num::NonZeroU32::new(0x5151).expect("non-zero")),
+            session: cap_of(0x5151),
             prefix_len,
         }
     }
@@ -861,16 +868,21 @@ fn with_wait_builder_overrides_default() {
 const STAGED_CAP: u32 = 0x9191;
 
 struct TrackedResources {
-    caps: Vec<ipc::wire::Cap>,
+    caps: Vec<ipc::wire::Cap<kind::Any>>,
     closed: Arc<AtomicUsize>,
 }
 
 impl ipc::ReceivedResources for TrackedResources {
-    type Handle = ipc::wire::Cap;
+    type Handle<K: syscall::ObjectKind> = ipc::wire::Cap<K>;
 
-    fn claim(&mut self, cap: ipc::wire::Cap) -> Option<ipc::wire::Cap> {
-        let index = self.caps.iter().position(|&held| held == cap)?;
-        Some(self.caps.remove(index))
+    fn claim<K: syscall::ObjectKind>(
+        &mut self,
+        cap: ipc::wire::Cap<K>,
+    ) -> Option<ipc::wire::Cap<K>> {
+        let erased = cap.erase();
+        let index = self.caps.iter().position(|&held| held == erased)?;
+        self.caps.remove(index);
+        Some(cap)
     }
 
     fn retain_decoded(&mut self, slots: &ipc::wire::HandleSlots) {
@@ -930,9 +942,7 @@ impl Transport for StagedAggregate {
 
     fn take_resources(&self) -> TrackedResources {
         let caps = if self.delivered.replace(false) {
-            vec![ipc::wire::Cap::from_raw(
-                std::num::NonZeroU32::new(STAGED_CAP).expect("non-zero"),
-            )]
+            vec![cap_of::<kind::Any>(STAGED_CAP)]
         } else {
             Vec::new()
         };

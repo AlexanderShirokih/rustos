@@ -12,7 +12,7 @@ use ipc::{
     Transport as _,
     wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf},
 };
-use kernel_objects::{OwnedHandle, Process, Resource};
+use kernel_objects::{OwnedHandle, Process, Resource, kind};
 use managed_component::ManagedStartupError;
 use runtime::{PortTransport, Timeout};
 use userland_loader::{InitializedProcess, launch_entry_retained};
@@ -36,10 +36,10 @@ pub(crate) fn launch_entry(
         &program,
         Some(name),
         &resource,
-        STARTUP_LEASE_BADGE,
+        Some(STARTUP_LEASE_BADGE),
         move |startup| -> Result<(), ManagedStartupError> {
             let transport =
-                PortTransport::client(startup.handle()).with_send_timeout(DELIVERY_TIMEOUT);
+                PortTransport::client(startup.as_raw()).with_send_timeout(DELIVERY_TIMEOUT);
             send(transport).map_err(ManagedStartupError::from)
         },
     )
@@ -54,10 +54,10 @@ pub(crate) fn launch_entry(
 pub(crate) fn send_raw_frame(
     transport: &PortTransport,
     txid: u32,
-    carried: Vec<OwnedHandle>,
+    carried: Vec<OwnedHandle<kind::Any>>,
 ) -> Result<(), IpcError> {
     let mut frame = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-    frame.write_header(&Header::new(component_startup::start::ORDINAL, txid, 0))?;
+    frame.write_header(&Header::new(component_startup::begin::ORDINAL, txid, 0))?;
     frame.finish()?;
 
     let handles: Vec<u32> = carried.iter().map(|handle| handle.as_raw().raw()).collect();

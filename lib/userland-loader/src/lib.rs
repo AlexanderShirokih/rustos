@@ -187,19 +187,20 @@ pub fn launch_entry<'a, V: EntryView<'a>, E: From<Error>>(
 }
 
 /// Загружает `entry`, отправляет startup-кадр и возвращает процесс с
-/// сохранённой клиентской стороной порта под значком `lease`.
+/// сохранённой клиентской стороной порта под значком `badge`.
 ///
-/// Значок делает исчезновение вызывающего наблюдаемым. Потомок, оставшийся без
-/// держателей `lease`, получает `SenderGone` очередным приёмом на этом порту.
+/// Значок делает исчезновение вызывающего наблюдаемым, и потомок, оставшийся без
+/// его держателей, получает `SenderGone` очередным приёмом на этом порту. Без значка
+/// уход вызывающего для потомка ничем не отличается от прочих отправителей.
 /// Ошибка callback проходит тот же cleanup, что и у [`launch_entry`].
 pub fn launch_entry_retained<'a, V: EntryView<'a>, E: From<Error>>(
     entry: &V,
     name: Option<&str>,
     resource: &Resource,
-    lease: NonZeroU64,
+    badge: Option<NonZeroU64>,
     startup: impl FnOnce(&Port) -> core::result::Result<(), E>,
 ) -> core::result::Result<InitializedProcess, E> {
-    prepare_launch(entry, name, resource, Some(lease))
+    prepare_launch(entry, name, resource, badge)
         .map_err(E::from)?
         .retain(startup)
 }
@@ -224,11 +225,11 @@ fn prepare_launch<'a, V: EntryView<'a>>(
 /// становится метеринг-ресурсом потомка. `name` называет процесс, а без имени
 /// он зовётся по записи программы. `initial` - начальная capability. `Ok`
 /// означает, что хэндл передан потомку.
-pub fn load_entry<'a, E: EntryView<'a>>(
+pub fn load_entry<'a, E: EntryView<'a>, K: kernel_objects::ObjectKind>(
     entry: &E,
     name: Option<&str>,
     resource: &Resource,
-    initial: OwnedHandle,
+    initial: OwnedHandle<K>,
 ) -> Result<Process> {
     // Регионы, маппинги и буфер сегментов держим живыми до возврата из
     // `start`: регионы должны существовать до установки в child-AS.
@@ -252,7 +253,7 @@ pub fn load_entry<'a, E: EntryView<'a>>(
         }
 
         let abi = UserSegmentAbi {
-            region_handle: region.handle().as_raw().raw(),
+            region_handle: region.as_raw().raw(),
             #[allow(clippy::cast_possible_truncation)]
             flags: permissions_to_flags(seg.permissions()).raw() as u32,
             va_base: seg.va_base(),
@@ -281,7 +282,7 @@ pub fn load_entry<'a, E: EntryView<'a>>(
     // оплачивает тот же `resource`, что и остальной образ.
     let stack = resource.create_virtual(stack_size, MemoryAccess::RW)?;
     let stack_abi = UserSegmentAbi {
-        region_handle: stack.handle().as_raw().raw(),
+        region_handle: stack.as_raw().raw(),
         #[allow(clippy::cast_possible_truncation)]
         flags: UserMemFlags::ReadWrite.raw() as u32,
         va_base: stack_top - stack_size,

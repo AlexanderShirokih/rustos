@@ -37,7 +37,6 @@ fn memory_region_shared_with_child() {
     // Потомку передаётся производная, а не корень. Корень остаётся у родителя и
     // держит регион живым, пока потомок с ним работает.
     let lease = region
-        .handle()
         .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
         .expect("duplicate region handle for child");
     let leased_raw = lease.as_raw();

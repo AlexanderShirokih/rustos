@@ -24,8 +24,8 @@ use std::{
 
 use component_startup::component_manifest;
 use component_startup_std::into_std_handle;
-use kernel_objects::OwnedHandle;
-use syscall::Rights;
+use kernel_objects::Port;
+use syscall::{Handle, Rights};
 
 component_manifest! {
     struct SelftestStartup {
@@ -77,13 +77,14 @@ fn the_start_handle_is_handed_out_once() {
 
 fn an_owned_handle_closes_its_capability(startup: &SelftestStartup) {
     let spare = startup
-        .service
+        .startup
         .duplicate(Rights::WRITE, None)
-        .expect("the service port duplicates");
+        .expect("the startup port duplicates");
     let raw = spare.as_raw().raw();
     drop(into_std_handle(spare));
 
-    let closed = OwnedHandle::from_raw(raw).expect("the duplicate names a table entry");
+    let raw = core::num::NonZeroU32::new(raw).expect("the duplicate names a table entry");
+    let closed = Port::from_handle(Handle::from_abi(raw));
     assert!(closed.close().is_err(), "the dropped handle stays open");
 }
 

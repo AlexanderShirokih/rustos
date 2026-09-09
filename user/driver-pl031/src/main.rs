@@ -13,10 +13,10 @@ use core::panic::PanicInfo;
 use component_startup::{ReceivedStartup, component_manifest};
 use io::mmio::{Mmio, Reg};
 use ipc::wire::IpcError;
-use kernel_objects::{IrqLine, MemoryRegion, OwnedHandle};
+use kernel_objects::{IrqLine, Port};
 use rtc_abi::rtc;
 use runtime::{PortTransport, Timeout, UserMemFlags, install_log, log_line, thread_exit};
-use syscall::Handle;
+use syscall::{Handle, kind};
 
 mod error;
 
@@ -37,7 +37,7 @@ const ALARM_LOST_EXIT_CODE: u32 = 5;
 
 component_manifest! {
     struct RtcStartup {
-        exports: "Rtc",
+        exports: { service: "Rtc" },
         slots: {
             line: irq(compatible = ["arm,pl031"]),
             window: mmio(compatible = ["arm,pl031"]),
@@ -82,23 +82,22 @@ impl rtc::Service for Pl031 {
     }
 }
 
-/// `startup` приходит в x0 как HandleId одноразового startup-порта.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     thread_exit(u64::from(run(startup).is_err()))
 }
 
-fn run(startup: Handle) -> Result<()> {
-    let ReceivedStartup { log, resources } =
-        RtcStartup::receive(OwnedHandle::from_handle(startup))?;
+fn run(startup: Handle<kind::Port>) -> Result<()> {
+    let ReceivedStartup { log, resources } = RtcStartup::receive(Port::from_handle(startup))?;
     install_log(log.into_raw(), LOG_TAG);
-    // Клиентская сторона control-порта остаётся у supervisor. Серверная сторона
+    // Клиентскую сторону startup-порта supervisor держит всю incarnation. Серверная
     // остаётся открытой до конца процесса вместе с ней.
-    let _control = resources.control;
+    let _startup = resources.startup;
     let service = resources.service;
 
-    let line = IrqLine::from_handle(resources.line);
-    let window = MemoryRegion::from_handle(resources.window);
+    let line = resources.line;
+    let window = resources.window;
     let mapping = window.map_full(UserMemFlags::ReadWrite)?;
     let mut driver = Pl031 {
         device: mapping.mmio(),
@@ -110,7 +109,7 @@ fn run(startup: Handle) -> Result<()> {
     Ok(())
 }
 
-fn serve(service: &OwnedHandle, driver: &mut Pl031) {
+fn serve(service: &Port, driver: &mut Pl031) {
     let transport = PortTransport::server(service.borrow());
     // Драйвер не хранит сессий. Уход значка и покадровое исчерпание порт не закрывают, а
     // прочий отказ терминален.

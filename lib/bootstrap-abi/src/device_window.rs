@@ -2,6 +2,7 @@
 //! на MMIO - cap из набора ядра. Связь между ними - совпадение базы.
 
 use ipc::{ReceivedResources, Transport, wire::IpcError};
+use syscall::kind;
 
 use crate::bootstrap;
 
@@ -15,7 +16,7 @@ impl<T: Transport> bootstrap::Client<T> {
     /// Находит device-окно с базой `base` перебором `acquire_device_memory`.
     /// `Ok(None)` - набор исчерпан (индекс вне набора либо отказ выдачи).
     pub fn acquire_device_memory_by_base<
-        W: DeviceWindow<<T::Resources as ReceivedResources>::Handle>,
+        W: DeviceWindow<<T::Resources as ReceivedResources>::Handle<kind::MemoryRegion>>,
     >(
         &self,
         base: u64,
@@ -41,8 +42,13 @@ mod tests {
 
     use ipc::{Transport, wire::Cap};
     use ipc_test::MockEnd;
+    use syscall::{Handle, ObjectKind, kind};
 
     use super::DeviceWindow;
+
+    fn cap<K: ObjectKind>(raw: u32) -> Cap<K> {
+        Cap::from_handle(Handle::from_abi(NonZeroU32::new(raw).expect("non-zero")))
+    }
     use crate::bootstrap;
 
     struct Vendor;
@@ -55,11 +61,11 @@ mod tests {
         ) {
         }
 
-        fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
+        fn acquire_irq_control(&mut self) -> Result<Cap<kind::IrqControl>, u32> {
             Err(1)
         }
 
-        fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
+        fn acquire_userland_image(&mut self) -> Result<Cap<kind::MemoryRegion>, u32> {
             Err(1)
         }
 
@@ -67,27 +73,25 @@ mod tests {
             Err(1)
         }
 
-        fn acquire_device_memory(&mut self, index: u32) -> Result<Cap, u32> {
+        fn acquire_device_memory(&mut self, index: u32) -> Result<Cap<kind::MemoryRegion>, u32> {
             if index >= 2 {
                 return Err(7);
             }
-            Ok(Cap::from_raw(
-                NonZeroU32::new(0x90 + index).expect("non-zero"),
-            ))
+            Ok(cap(0x90 + index))
         }
     }
 
     struct FakeWindow {
-        cap: Cap,
+        cap: Cap<kind::MemoryRegion>,
     }
 
-    impl From<Cap> for FakeWindow {
-        fn from(cap: Cap) -> Self {
+    impl From<Cap<kind::MemoryRegion>> for FakeWindow {
+        fn from(cap: Cap<kind::MemoryRegion>) -> Self {
             Self { cap }
         }
     }
 
-    impl DeviceWindow<Cap> for FakeWindow {
+    impl DeviceWindow<Cap<kind::MemoryRegion>> for FakeWindow {
         fn base(&self) -> Option<u64> {
             if self.cap.raw().get() == 0x90 {
                 return None;

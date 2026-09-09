@@ -6,13 +6,13 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use kernel_objects::OwnedHandle;
+use kernel_objects::{Port, kind};
 use runtime::thread_exit;
 use syscall::Handle;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
-    if OwnedHandle::from_handle(startup).close().is_err() {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
+    if Port::from_handle(startup).close().is_err() {
         thread_exit(u64::from(u32::MAX));
     }
     loop {

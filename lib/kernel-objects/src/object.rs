@@ -1,4 +1,4 @@
-use syscall::{Handle, SyscallError, Timeout, WaitItem};
+use syscall::{Handle, SyscallError, Timeout, WaitItem, WaitableKind};
 
 use crate::{
     error::{Error, Result, value},
@@ -21,7 +21,11 @@ pub use process::Process;
 pub use signal::Signal;
 pub use thread::{Thread, ThreadEntry};
 
-pub(crate) fn wait_signals(handle: Handle, mask: u32, timeout: Timeout) -> Result<u32> {
+pub(crate) fn wait_signals<K: WaitableKind>(
+    handle: Handle<K>,
+    mask: u32,
+    timeout: Timeout,
+) -> Result<u32> {
     value(svc::signal_wait_one(handle, mask, timeout))
         .map(|observed| (observed & 0xFFFF_FFFF) as u32)
 }

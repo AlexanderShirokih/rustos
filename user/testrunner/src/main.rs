@@ -31,11 +31,10 @@ use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, process_exit};
 use spin::{Mutex, Once};
-use syscall::Handle;
+use syscall::{Handle, kind};
 
 mod address_space_isolation;
 mod clock;
-mod control_port;
 mod filesystem;
 mod filesystem_bench;
 mod filesystem_scope;
@@ -56,6 +55,7 @@ mod managed_fixture_protocol;
 mod managed_startup;
 mod memory_capability_target;
 mod memory_share;
+mod mismatched_kind;
 mod owned_handle;
 mod port;
 mod port_liveness;
@@ -75,6 +75,7 @@ mod smp_stress;
 mod spawn_from_image;
 mod startup_fixture_protocol;
 mod startup_ownership;
+mod startup_port;
 mod std_rt;
 mod std_selftest;
 mod stress;
@@ -85,7 +86,7 @@ mod thread_yield;
 mod vm;
 mod watched_capability;
 
-static BOOTSTRAP_HANDLE: Once<Handle> = Once::new();
+static BOOTSTRAP_HANDLE: Once<Handle<kind::Port>> = Once::new();
 
 struct LogBuffer {
     len: usize,
@@ -153,7 +154,7 @@ fn send_log_frame(payload: &[u8]) {
     }
 }
 
-pub(crate) fn bootstrap_handle() -> Handle {
+pub(crate) fn bootstrap_handle() -> Handle<kind::Port> {
     *BOOTSTRAP_HANDLE
         .get()
         .expect("bootstrap handle set in _start")
@@ -167,7 +168,7 @@ fn runner_exit(code: u32) -> ! {
 
 /// `root` приходит в x0 как HandleId WRITE-конца канала, переданного ядром при спавне.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(root: Handle) -> ! {
+pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
     BOOTSTRAP_HANDLE.call_once(|| root);
     kernel_tests::runner::install_writer(&LOG_WRITER);
     kernel_tests::runner::install_exit(runner_exit);

@@ -19,11 +19,11 @@ const _: () = assert!(
 
 use bootstrap_abi::DeviceWindow;
 use io::mmio::Mmio;
-use syscall::{MemoryAccess, MemoryProfile, SIGNALED, SyscallError, Timeout, UserMemFlags};
+use syscall::{MemoryAccess, MemoryProfile, SIGNALED, SyscallError, Timeout, UserMemFlags, kind};
 
 use crate::{
     error::{Error, Result, unit, value},
-    handle::{BorrowedHandle, OwnedHandle},
+    handle::OwnedHandle,
     object::Signal,
     svc,
 };
@@ -111,16 +111,10 @@ pub struct RegionInfo {
 }
 
 /// Владеет хэндлом метеринг-`Resource` и закрывает его на drop.
-#[derive(Debug)]
-pub struct Resource {
-    handle: OwnedHandle,
-}
+pub type Resource = OwnedHandle<kind::Resource>;
 
 /// Владеет хэндлом региона памяти и закрывает его на drop.
-#[derive(Debug)]
-pub struct MemoryRegion {
-    handle: OwnedHandle,
-}
+pub type MemoryRegion = OwnedHandle<kind::MemoryRegion>;
 
 /// Маппинг региона в текущий AS. Освобождается в `Drop` через `memory_free`.
 #[derive(Debug)]
@@ -144,29 +138,19 @@ pub struct AnonymousMapping {
     size_bytes: u64,
 }
 
-impl Resource {
+impl OwnedHandle<kind::Resource> {
     /// Свежий handle на метеринг-`Resource` текущего процесса.
     pub fn self_resource() -> Result<Self> {
         let handle = svc::process_resource_self()?;
-        Ok(Self::from_handle(OwnedHandle::from_handle(handle)))
-    }
-
-    /// Берёт во владение хэндл `Resource`.
-    pub fn from_handle(handle: OwnedHandle) -> Self {
-        Self { handle }
-    }
-
-    /// Заимствование хэндла на время одного вызова.
-    pub fn handle(&self) -> BorrowedHandle<'_> {
-        self.handle.borrow()
+        Ok(Self::from_handle(handle))
     }
 
     /// Выделяет `budget_pages` страниц бюджета в отдельный `Resource` с тем же
     /// физдиапазоном и потолком доступа. Страницы возвращаются исходному
     /// ресурсу, когда производный уходит.
     pub fn split(&self, budget_pages: u64) -> Result<Self> {
-        svc::resource_split(self.handle.as_raw(), budget_pages)
-            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
+        svc::resource_split(self.as_raw(), budget_pages)
+            .map(Self::from_handle)
             .map_err(Error::Syscall)
     }
 
@@ -198,46 +182,23 @@ impl Resource {
 
     /// Создаёт регион с Virtual backing размера `size_bytes` и маской `access`.
     pub fn create_virtual(&self, size_bytes: u64, access: MemoryAccess) -> Result<MemoryRegion> {
-        svc::memory_create_virtual(self.handle.as_raw(), size_bytes, access.raw())
-            .map(|handle| MemoryRegion::from_handle(OwnedHandle::from_handle(handle)))
+        svc::memory_create_virtual(self.as_raw(), size_bytes, access.raw())
+            .map(MemoryRegion::from_handle)
             .map_err(Error::Syscall)
     }
 
     /// Выделяет анонимный регион размера `size_bytes` и сразу маппит его на
     /// свободный VA с флагами `flags`.
     pub fn allocate(&self, size_bytes: u64, flags: UserMemFlags) -> Result<AnonymousMapping> {
-        let va = value(svc::memory_allocate(
-            self.handle.as_raw(),
-            size_bytes,
-            flags.raw(),
-        ))?;
+        let va = value(svc::memory_allocate(self.as_raw(), size_bytes, flags.raw()))?;
         Ok(AnonymousMapping { va, size_bytes })
-    }
-
-    /// Отдаёт владеемый хэндл.
-    pub fn into_handle(self) -> OwnedHandle {
-        self.handle
     }
 }
 
-impl MemoryRegion {
-    /// Берёт во владение хэндл `MemoryRegion`.
-    pub fn from_handle(handle: OwnedHandle) -> Self {
-        Self { handle }
-    }
-
-    /// Заимствование хэндла на время одного вызова.
-    pub fn handle(&self) -> BorrowedHandle<'_> {
-        self.handle.borrow()
-    }
-
+impl OwnedHandle<kind::MemoryRegion> {
     /// Маппит регион на свободный VA: `size_bytes` байт с флагами `flags`.
     pub fn map(&self, size_bytes: u64, flags: UserMemFlags) -> Result<Mapping> {
-        let va = value(svc::memory_map(
-            self.handle.as_raw(),
-            size_bytes,
-            flags.raw(),
-        ))?;
+        let va = value(svc::memory_map(self.as_raw(), size_bytes, flags.raw()))?;
         Ok(Mapping { va, size_bytes })
     }
 
@@ -267,22 +228,22 @@ impl MemoryRegion {
         size_bytes: u64,
         access: MemoryAccess,
     ) -> Result<MemoryRegion> {
-        svc::memory_slice(self.handle.as_raw(), offset, size_bytes, access.raw())
-            .map(|handle| MemoryRegion::from_handle(OwnedHandle::from_handle(handle)))
+        svc::memory_slice(self.as_raw(), offset, size_bytes, access.raw())
+            .map(MemoryRegion::from_handle)
             .map_err(Error::Syscall)
     }
 
     /// Деривация региона поверх того же PA с профилем `profile`. Профиль
     /// меняется в пределах некэшируемых. Требует `DUPLICATE` на хэндле региона.
     pub fn with_profile(&self, profile: MemoryProfile) -> Result<MemoryRegion> {
-        svc::memory_with_profile(self.handle.as_raw(), profile.raw())
-            .map(|handle| MemoryRegion::from_handle(OwnedHandle::from_handle(handle)))
+        svc::memory_with_profile(self.as_raw(), profile.raw())
+            .map(MemoryRegion::from_handle)
             .map_err(Error::Syscall)
     }
 
     /// Декодирует сырой возврат `memory_region_inspect` в [`RegionInfo`].
     pub fn inspect(&self) -> Result<RegionInfo> {
-        let (size, secondary) = svc::memory_region_inspect(self.handle.as_raw());
+        let (size, secondary) = svc::memory_region_inspect(self.as_raw());
         let size_bytes = value(size)?;
         let base = secondary & !0xFFF;
         let kind = RegionKind::from_tag((secondary >> 3) & 0x3);
@@ -297,20 +258,9 @@ impl MemoryRegion {
             access,
         })
     }
-
-    /// Отдаёт владеемый хэндл.
-    pub fn into_handle(self) -> OwnedHandle {
-        self.handle
-    }
 }
 
-impl From<syscall_user::ReceivedHandle> for MemoryRegion {
-    fn from(handle: syscall_user::ReceivedHandle) -> Self {
-        Self::from_handle(handle.into())
-    }
-}
-
-impl DeviceWindow<syscall_user::ReceivedHandle> for MemoryRegion {
+impl DeviceWindow<syscall_user::ReceivedHandle<kind::MemoryRegion>> for MemoryRegion {
     fn base(&self) -> Option<u64> {
         self.inspect().ok().map(|info| info.base)
     }

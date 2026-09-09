@@ -3,17 +3,18 @@
 //! Владеющие типы программы и стандартной библиотеки объявлены в разных копиях графа, и
 //! значение одного нельзя передать как значение другого. Границу проходит только сырой
 //! идентификатор записи, а safe-конструктора владельца из него нет ни у одной стороны.
-//! Запрет на `unsafe` снят только здесь, и дальше этого модуля снятие не идёт.
+//! Запрет на `unsafe` снят только здесь, и дальше этого модуля снятие не идёт. Владелец
+//! стандартной библиотеки не хранит метку вида, и на этой границе она теряется.
 
 #![allow(unsafe_code)]
 
 use std::os::molecular;
 
-use component_startup::OwnedHandle;
+use component_startup::{ObjectKind, OwnedHandle};
 
 /// Отдаёт capability стандартной библиотеке владеющим значением.
 #[must_use]
-pub fn into_std_handle(handle: OwnedHandle) -> molecular::OwnedHandle {
+pub fn into_std_handle<K: ObjectKind>(handle: OwnedHandle<K>) -> molecular::OwnedHandle {
     // SAFETY: `into_raw` отдаёт запись таблицы процесса и подавляет её закрытие: усыновляющий
     // владелец у записи единственный.
     unsafe { molecular::OwnedHandle::from_raw(handle.into_raw().as_nonzero()) }

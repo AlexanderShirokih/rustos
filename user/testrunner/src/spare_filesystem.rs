@@ -13,7 +13,7 @@ use core::panic::PanicInfo;
 use component_startup::{ReceivedStartup, component_manifest};
 use filesystem::RamFileSystem;
 use filesystem_server::{Error, Result, serve};
-use kernel_objects::OwnedHandle;
+use kernel_objects::{Port, kind};
 use runtime::{log_fmt, thread_exit};
 use syscall::Handle;
 
@@ -21,15 +21,15 @@ const LOG_TAG: &str = "sparefs";
 
 component_manifest! {
     struct SpareFileSystemStartup {
-        exports: "FileSystem",
+        exports: { service: "FileSystem" },
         establishes_sessions: true,
         slots: {},
     }
 }
 
-/// `startup` приходит в x0 как HandleId одноразового startup-порта.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     match run(startup) {
         Ok(()) => thread_exit(0),
         Err(error) => {
@@ -39,13 +39,12 @@ pub extern "C" fn _start(startup: Handle) -> ! {
     }
 }
 
-fn run(startup: Handle) -> Result<()> {
+fn run(startup: Handle<kind::Port>) -> Result<()> {
     let ReceivedStartup { log, resources } =
-        SpareFileSystemStartup::receive(OwnedHandle::from_handle(startup))
-            .map_err(|_| Error::Start)?;
+        SpareFileSystemStartup::receive(Port::from_handle(startup)).map_err(|_| Error::Start)?;
     serve(
         log,
-        resources.control,
+        resources.startup,
         resources.service,
         None,
         LOG_TAG,

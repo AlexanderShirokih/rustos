@@ -45,7 +45,7 @@ fn acquire(client: &file_system::Client<PortTransport>) -> MemoryRegion {
         .expect("acquire_buffer call");
     let capability = response.value.expect("buffer granted");
     let cap = response.claim(capability).expect("capability owner");
-    MemoryRegion::from_handle(cap.into())
+    MemoryRegion::from(cap)
 }
 
 fn fill(client: &file_system::Client<PortTransport>, opened: &Opened, size: usize) {
@@ -175,8 +175,7 @@ fn bench_ramfs_promoted_plane() {
             .backing_memory(opened.fd)
             .expect("backing_memory call");
         let capability = response.value.expect("backing granted");
-        let backing =
-            MemoryRegion::from_handle(response.claim(capability).expect("capability owner").into());
+        let backing = MemoryRegion::from(response.claim(capability).expect("capability owner"));
         let mapped = backing
             .map_full(UserMemFlags::ReadWrite)
             .expect("map promoted backing");
@@ -211,7 +210,7 @@ fn bench_ramfs_imported_plane() {
             .create_virtual(bytes, MemoryAccess::RW)
             .expect("create imported region");
         client
-            .create_backed(path(name), region.into_handle(), size as u64)
+            .create_backed(path(name), region, size as u64)
             .expect("create_backed call")
             .value
             .expect("create backed file");
@@ -236,7 +235,7 @@ fn bench_ramfs_imported_scales_with_region() {
             .create_virtual(pages * USERLAND_PAGE_SIZE, MemoryAccess::RW)
             .expect("create imported region");
         client
-            .create_backed(path(name), region.into_handle(), PROBE as u64)
+            .create_backed(path(name), region, PROBE as u64)
             .expect("create_backed call")
             .value
             .expect("create backed file");

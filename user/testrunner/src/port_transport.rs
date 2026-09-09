@@ -3,12 +3,12 @@
 //! сервер читает `peer_badge` сразу после приёма.
 
 use core::{
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst},
 };
 
 use ipc::{Transport, wire::IpcError};
-use kernel_objects::{OwnedHandle, Port};
+use kernel_objects::Port;
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, Priority, Timeout, spawn};
 use syscall::Rights;
@@ -39,7 +39,11 @@ extern "C" fn badge_client(_arg: usize) -> u32 {
 
 fn adopt_port(raw: &AtomicU64) -> Port {
     let id = u32::try_from(raw.load(SeqCst)).expect("HandleId fits u32");
-    Port::from_handle(OwnedHandle::from_raw(id).expect("minted port copy"))
+    Port::from_handle(
+        NonZeroU32::new(id)
+            .map(syscall::Handle::from_abi)
+            .expect("minted port copy"),
+    )
 }
 
 #[kernel_test]
@@ -48,11 +52,9 @@ fn server_reads_badge_of_receiving_handle() {
     // Права сужены до WRITE: клиенту нужен только send. Оригинал незаклеймён,
     // и badge=0 у копии оставляет её незаклеймённой.
     let badged = port
-        .handle()
         .duplicate(Rights::WRITE, Some(BADGE))
         .expect("mint badged copy");
     let plain = port
-        .handle()
         .duplicate(Rights::WRITE, None)
         .expect("mint unbadged copy");
     BADGED_RAW.store(u64::from(badged.into_raw().raw()), SeqCst);
@@ -63,7 +65,7 @@ fn server_reads_badge_of_receiving_handle() {
 
     // Значки снимаются в локальные переменные до проверок. Провал kassert
     // логирует строку, а это port_send, перезаписывающий буфер.
-    let server = PortTransport::server(port.handle());
+    let server = PortTransport::server(port.as_raw());
     server
         .wait_readable(RECV_TIMEOUT)
         .expect("frame from badged copy");
@@ -85,10 +87,10 @@ fn server_reads_badge_of_receiving_handle() {
 #[kernel_test]
 fn client_cast_timeout_when_receiver_stays_open_without_recv() {
     let service = Port::create_service(None).expect("port create");
-    let default = PortTransport::client(service.client.handle());
+    let default = PortTransport::client(service.client.as_raw());
     kernel_tests::kassert_eq!(default.send_timeout(), Timeout::INFINITE);
 
-    let bounded = PortTransport::client(service.client.handle()).with_send_timeout(Timeout::POLL);
+    let bounded = PortTransport::client(service.client.as_raw()).with_send_timeout(Timeout::POLL);
     kernel_tests::kassert_eq!(bounded.send_timeout(), Timeout::POLL);
     let client = startup_fixture::Client::new(bounded);
 
@@ -98,7 +100,7 @@ fn client_cast_timeout_when_receiver_stays_open_without_recv() {
 #[kernel_test]
 fn client_cast_reports_peer_close_when_receiver_closes_before_recv() {
     let service = Port::create_service(None).expect("port create");
-    let bounded = PortTransport::client(service.client.handle()).with_send_timeout(Timeout::POLL);
+    let bounded = PortTransport::client(service.client.as_raw()).with_send_timeout(Timeout::POLL);
     drop(service.server);
 
     let client = startup_fixture::Client::new(bounded);

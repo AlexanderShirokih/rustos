@@ -91,7 +91,7 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +
 +impl Drop for OwnedHandle {
 +    fn drop(&mut self) {
-+        runtime::handle_close(runtime::Handle::from_nonzero(self.handle));
++        runtime::handle_close(runtime::Handle::<runtime::kind::Any>::from_abi(self.handle));
 +    }
 +}
 +
@@ -109,7 +109,7 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +/// источника остаётся за значком сессии. Повторная установка сохраняет первую сессию и
 +/// закрывает переданную.
 +pub fn install_log(session: OwnedHandle) {
-+    runtime::install_log(runtime::Handle::from_nonzero(session.into_raw()), "");
++    runtime::install_log(runtime::Handle::from_abi(session.into_raw()), "");
 +}
 diff -ruN a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
 --- a/std/src/sys/alloc/mod.rs	2026-08-07 22:42:12.130085865 +0000
@@ -618,7 +618,7 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +use crate::cmp;
 +
 +use runtime::thread::{create, release_stack};
-+use syscall_user::syscall::{Handle, Priority, SIGNALED, Timeout};
++use syscall_user::syscall::{Handle, Priority, SIGNALED, Timeout, kind};
 +
 +/// Приоритет потока: тот же, с каким userspace поднимает свои рабочие потоки.
 +const PRIORITY: Priority = Priority::new(1);
@@ -630,7 +630,7 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +/// `join` освобождает стек. Поток, брошенный без `join`, остаётся отвязанным, и стек с ним:
 +/// на нём поток ещё может исполняться.
 +pub struct Thread {
-+    handle: Handle,
++    handle: Handle<kind::Thread>,
 +    stack: NonNull<u8>,
 +    stack_bytes: usize,
 +}

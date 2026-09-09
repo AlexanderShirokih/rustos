@@ -176,6 +176,10 @@ impl<'a> Composition<'a> {
                     .collect()
             })
             .collect::<Result<_>>()?;
+        let exports: Vec<Vec<&str>> = declarations
+            .iter()
+            .map(|declared| declared.exports.iter().map(String::as_str).collect())
+            .collect();
         let policies = self
             .instances
             .iter()
@@ -189,17 +193,21 @@ impl<'a> Composition<'a> {
             .zip(&after_names)
             .zip(&policies)
             .zip(&declarations)
+            .zip(&exports)
             .map(
-                |(((((instance, name), binding), after), policy), declared)| ComponentSpec {
-                    executable: instance.program.path,
-                    name,
-                    slots: &binding.slots,
-                    after,
-                    memory_pages: policy.memory_pages,
-                    startup_timeout: policy.startup_timeout,
-                    launches: policy.launches,
-                    on_exhausted: policy.on_exhausted,
-                    establishes_sessions: declared.establishes_sessions,
+                |((((((instance, name), binding), after), policy), declared), exports)| {
+                    ComponentSpec {
+                        executable: instance.program.path,
+                        name,
+                        slots: &binding.slots,
+                        exports,
+                        after,
+                        memory_pages: policy.memory_pages,
+                        startup_timeout: policy.startup_timeout,
+                        launches: policy.launches,
+                        on_exhausted: policy.on_exhausted,
+                        establishes_sessions: declared.establishes_sessions,
+                    }
                 },
             )
             .collect();

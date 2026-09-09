@@ -158,25 +158,25 @@ fn slot(kind: SlotKind, resource: u16, names: &[&str]) -> ManifestSlot {
 }
 
 fn declaration(slots: Vec<ManifestSlot>, export: Option<&str>) -> ProgramManifest {
+    exporting(slots, &export.into_iter().collect::<Vec<_>>())
+}
+
+fn exporting(slots: Vec<ManifestSlot>, exports: &[&str]) -> ProgramManifest {
     ProgramManifest {
         slots,
-        export: export.map(String::from),
-        control: None,
+        exports: exports.iter().map(|export| String::from(*export)).collect(),
         establishes_sessions: false,
     }
 }
 
 fn router_declaration() -> ProgramManifest {
-    ProgramManifest {
-        control: Some(String::from(NAMESPACE_ADMIN_PROTOCOL)),
-        ..declaration(
-            vec![
-                slot(SlotKind::Userland, 0, &[]),
-                slot(SlotKind::Supervisor, 0, &[]),
-            ],
-            Some(NAMESPACE_PROTOCOL),
-        )
-    }
+    exporting(
+        vec![
+            slot(SlotKind::Userland, 0, &[]),
+            slot(SlotKind::Supervisor, 0, &[]),
+        ],
+        &[NAMESPACE_PROTOCOL, NAMESPACE_ADMIN_PROTOCOL],
+    )
 }
 
 fn device_declaration() -> ProgramManifest {
@@ -381,7 +381,10 @@ fn stage_one_binds_a_slot_to_an_exporter_of_stage_zero() {
     // Имена экземпляров работают сквозь ступени, а провайдер слота стоит в плане.
     assert_eq!(
         slots_of(&stages.stage_one[0].bytes, 0),
-        [SlotSource::Service { provider: ROUTER }]
+        [SlotSource::Service {
+            provider: ROUTER,
+            export: 0
+        }]
     );
 }
 
@@ -522,7 +525,8 @@ fn plan_carries_the_declaration_of_own_sessions() {
     assert_eq!(
         reader.slots().collect::<Vec<_>>(),
         [SlotSource::Service {
-            provider: FILE_SYSTEM
+            provider: FILE_SYSTEM,
+            export: 0
         }]
     );
 }
@@ -550,7 +554,10 @@ fn plan_binds_an_imported_protocol_to_its_exporter() {
 
     assert_eq!(
         slots_of(&bytes, 1),
-        [SlotSource::Service { provider: ROUTER }]
+        [SlotSource::Service {
+            provider: ROUTER,
+            export: 0
+        }]
     );
 }
 
@@ -574,7 +581,10 @@ fn plan_binds_a_named_import_to_the_instance_it_names() {
 
     assert_eq!(
         slots_of(&bytes, 2),
-        [SlotSource::Service { provider: TWIN }]
+        [SlotSource::Service {
+            provider: TWIN,
+            export: 0
+        }]
     );
 }
 
@@ -624,7 +634,10 @@ fn plan_orders_an_importer_after_its_exporter() {
 
     assert_eq!(
         slots_of(&bytes, 0),
-        [SlotSource::Service { provider: ROUTER }]
+        [SlotSource::Service {
+            provider: ROUTER,
+            export: 0
+        }]
     );
 }
 
@@ -681,10 +694,10 @@ fn plan_rejects_a_component_importing_what_it_exports() {
 }
 
 #[test]
-fn plan_binds_a_control_import_to_the_component_serving_it() {
+fn plan_binds_an_import_to_the_second_export_of_its_provider() {
     const ADMIN: &str = "mount-admin";
     let admin = declaration(
-        vec![slot(SlotKind::Control, 0, &[NAMESPACE_ADMIN_PROTOCOL])],
+        vec![slot(SlotKind::Service, 0, &[NAMESPACE_ADMIN_PROTOCOL])],
         None,
     );
     let bytes = Image::new()
@@ -695,18 +708,21 @@ fn plan_binds_a_control_import_to_the_component_serving_it() {
     // зовёт его админ-операции.
     assert_eq!(
         slots_of(&bytes, 1),
-        [SlotSource::Control { provider: ROUTER }]
+        [SlotSource::Service {
+            provider: ROUTER,
+            export: 1
+        }]
     );
 }
 
 #[test]
-fn plan_binds_a_named_control_import_to_the_instance_it_names() {
+fn plan_binds_a_named_admin_import_to_the_instance_it_names() {
     const TWIN: &str = "namespace-router-twin";
     const ADMIN: &str = "mount-admin";
 
     let admin = declaration(
         vec![slot(
-            SlotKind::Control,
+            SlotKind::Service,
             0,
             &[NAMESPACE_ADMIN_PROTOCOL, TWIN],
         )],
@@ -723,117 +739,10 @@ fn plan_binds_a_named_control_import_to_the_instance_it_names() {
 
     assert_eq!(
         slots_of(&bytes, 2),
-        [SlotSource::Control { provider: TWIN }]
-    );
-}
-
-#[test]
-fn plan_rejects_a_control_import_no_component_serves() {
-    const ADMIN: &str = "mount-admin";
-    let admin = declaration(
-        vec![slot(SlotKind::Control, 0, &[NAMESPACE_ADMIN_PROTOCOL])],
-        None,
-    );
-
-    assert_eq!(
-        Image::new()
-            .with(ADMIN, admin)
-            .rejected(&plan(&[rtc(), Component::new(ADMIN)])),
-        format!(
-            "boot plan component 'mount-admin' imports control protocol \
-             '{NAMESPACE_ADMIN_PROTOCOL}', \
-             which no component of the composition serves"
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_named_control_import_of_an_instance_that_serves_nothing() {
-    const ADMIN: &str = "mount-admin";
-    let admin = declaration(
-        vec![slot(
-            SlotKind::Control,
-            0,
-            &[NAMESPACE_ADMIN_PROTOCOL, DRIVER],
-        )],
-        None,
-    );
-
-    assert_eq!(
-        Image::new()
-            .with(ADMIN, admin)
-            .rejected(&plan(&[router(), rtc(), Component::new(ADMIN)])),
-        format!(
-            "boot plan component 'mount-admin' imports control protocol \
-             '{NAMESPACE_ADMIN_PROTOCOL}' from instance '{DRIVER}', \
-             which serves no such protocol"
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_control_import_of_an_instance_outside_the_composition() {
-    const ADMIN: &str = "mount-admin";
-    let admin = declaration(
-        vec![slot(
-            SlotKind::Control,
-            0,
-            &[NAMESPACE_ADMIN_PROTOCOL, "ghost"],
-        )],
-        None,
-    );
-
-    assert_eq!(
-        Image::new()
-            .with(ADMIN, admin)
-            .rejected(&plan(&[router(), Component::new(ADMIN)])),
-        format!(
-            "boot plan component 'mount-admin' imports control protocol \
-             '{NAMESPACE_ADMIN_PROTOCOL}' from instance 'ghost', \
-             which the composition does not contain"
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_component_importing_the_control_protocol_it_serves() {
-    const SELF_BOUND: &str = "self-administered";
-    let manifest = ProgramManifest {
-        control: Some(String::from(NAMESPACE_ADMIN_PROTOCOL)),
-        ..declaration(
-            vec![slot(SlotKind::Control, 0, &[NAMESPACE_ADMIN_PROTOCOL])],
-            None,
-        )
-    };
-
-    assert_eq!(
-        Image::new()
-            .with(SELF_BOUND, manifest)
-            .rejected(&plan(&[Component::new(SELF_BOUND)])),
-        "boot plan component 'self-administered' imports the control protocol it serves itself"
-    );
-}
-
-#[test]
-fn plan_rejects_a_control_protocol_beside_own_session_establishment() {
-    const CROWDED: &str = "crowded-control";
-    let crowded = ProgramManifest {
-        control: Some(String::from(NAMESPACE_ADMIN_PROTOCOL)),
-        establishes_sessions: true,
-        ..declaration(vec![], Some(FILE_SYSTEM_PROTOCOL))
-    };
-
-    // Кадры двух протоколов на одном порту разбирает один dispatch, и незнакомый
-    // ordinal он отвергает.
-    assert_eq!(
-        Image::new()
-            .with(CROWDED, crowded)
-            .rejected(&plan(&[Component::new(CROWDED)])),
-        format!(
-            "boot plan component 'crowded-control' serves control protocol \
-             '{NAMESPACE_ADMIN_PROTOCOL}' and establishes its own sessions; \
-             the control port carries one protocol"
-        )
+        [SlotSource::Service {
+            provider: TWIN,
+            export: 1
+        }]
     );
 }
 
@@ -872,6 +781,34 @@ fn plan_rejects_a_directory_slot_naming_an_instance_outside_the_composition() {
         format!(
             "boot plan component '{AREA}' takes its directory from instance \
              '{IMAGE_FS}', which the composition does not contain"
+        )
+    );
+}
+
+#[test]
+fn plan_rejects_a_directory_slot_from_an_instance_with_two_exports() {
+    const CROWDED: &str = "crowded-filesystem";
+    let crowded = ProgramManifest {
+        establishes_sessions: true,
+        ..exporting(
+            vec![slot(SlotKind::Userland, 0, &[])],
+            &[FILE_SYSTEM_PROTOCOL, NAMESPACE_ADMIN_PROTOCOL],
+        )
+    };
+    let area = declaration(vec![slot(SlotKind::Directory, 0, &[CROWDED])], None);
+
+    // Слот-каталог протокола не называет, и выбрать экспорт провайдера ему нечем.
+    assert_eq!(
+        Image::new()
+            .with(CROWDED, crowded)
+            .with(AREA, area)
+            .rejected(&plan(&[
+                image_filesystem().executable(CROWDED),
+                Component::new(AREA)
+            ])),
+        format!(
+            "boot plan component '{AREA}' takes its directory from instance \
+             '{CROWDED}', which exports 2 protocols; the directory slot names none"
         )
     );
 }

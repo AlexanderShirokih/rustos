@@ -13,6 +13,7 @@ core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core
 syscall = { workspace = true }
 
 [dev-dependencies]
+syscall = { workspace = true }
 ipc-test = { workspace = true }
 
 [lints]

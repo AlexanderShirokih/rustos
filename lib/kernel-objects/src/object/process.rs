@@ -1,76 +1,60 @@
 //! Типизированная обёртка над процессом ядра.
 
-use syscall::{SIGNALED, Timeout};
+use syscall::{SIGNALED, Timeout, kind};
 
 use crate::{
     error::{Error, Result, unit, value},
-    handle::{BorrowedHandle, OwnedHandle},
+    handle::OwnedHandle,
     object::{Resource, Thread, ThreadEntry},
     svc,
 };
 
 /// Владеет хэндлом `Process` и закрывает его на drop.
-#[derive(Debug)]
-pub struct Process {
-    handle: OwnedHandle,
-}
+pub type Process = OwnedHandle<kind::Process>;
 
-impl Process {
+impl OwnedHandle<kind::Process> {
     /// Создаёт пустой процесс с именем `name`.
     pub fn create(name: &str) -> Result<Self> {
         svc::process_create(name.as_bytes())
-            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
+            .map(Self::from_handle)
             .map_err(Error::Syscall)
     }
 
     /// Возвращает обёртку над собственным процессом.
     pub fn self_process() -> Result<Self> {
         svc::process_self()
-            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
+            .map(Self::from_handle)
             .map_err(Error::Syscall)
-    }
-
-    /// Берёт во владение хэндл `Process`.
-    pub fn from_handle(handle: OwnedHandle) -> Self {
-        Self { handle }
-    }
-
-    /// Заимствование хэндла на время одного вызова.
-    pub fn handle(&self) -> BorrowedHandle<'_> {
-        self.handle.borrow()
     }
 
     /// Загружает образ в процесс из сериализованного дескриптора `desc`.
     pub fn load_image(&self, desc: &[u8]) -> Result<()> {
-        unit(svc::process_load_image(self.handle.as_raw(), desc))
+        unit(svc::process_load_image(self.as_raw(), desc))
     }
 
     /// Запускает первый поток процесса с параметрами `entry`, передавая потомку
     /// стартовый хэндл-канал `handle`. `resource` задаёт метеринг-ресурс
     /// потомка, `None` отдаёт ему ресурс вызывающего. На `Ok` ядро забрало
     /// `handle` (ушёл потомку), на `Err` он закрывается своим `Drop`.
-    pub fn start(
+    pub fn start<K: syscall::ObjectKind>(
         &self,
         entry: ThreadEntry,
-        handle: OwnedHandle,
+        handle: OwnedHandle<K>,
         resource: Option<&Resource>,
     ) -> Result<Thread> {
-        let bootstrap_handle = u64::from(handle.as_raw().raw());
-        let resource_handle = resource.map_or(0, |r| u64::from(r.handle().as_raw().raw()));
-
         let result = svc::process_start(
-            self.handle.as_raw(),
+            self.as_raw(),
             entry.entry_pc,
             entry.user_sp,
-            bootstrap_handle,
+            handle.as_raw(),
             u64::from(entry.priority),
-            resource_handle,
+            resource.map(Resource::as_raw),
         );
 
         match result {
             Ok(thread) => {
                 let _ = handle.into_raw();
-                Ok(Thread::from_handle(OwnedHandle::from_handle(thread)))
+                Ok(Thread::from_handle(thread))
             }
             Err(e) => Err(Error::Syscall(e)),
         }
@@ -78,24 +62,16 @@ impl Process {
 
     /// Блокирует до терминации процесса либо тайм-аута.
     pub fn join(&self, timeout: Timeout) -> Result<()> {
-        super::wait_signals(self.handle.as_raw(), SIGNALED, timeout).map(|_| ())
+        super::wait_signals(self.as_raw(), SIGNALED, timeout).map(|_| ())
     }
 
     /// Финальный exit-код завершённого процесса.
     pub fn exit_code(&self) -> Result<u32> {
-        value(svc::process_exit_code(self.handle.as_raw())).map(|code| (code & 0xFFFF_FFFF) as u32)
+        value(svc::process_exit_code(self.as_raw())).map(|code| (code & 0xFFFF_FFFF) as u32)
     }
 
     /// Завершает процесс с кодом `exit_code`.
     pub fn terminate(&self, exit_code: u32) -> Result<()> {
-        unit(svc::process_terminate(
-            self.handle.as_raw(),
-            u64::from(exit_code),
-        ))
-    }
-
-    /// Отдаёт владеемый хэндл.
-    pub fn into_handle(self) -> OwnedHandle {
-        self.handle
+        unit(svc::process_terminate(self.as_raw(), u64::from(exit_code)))
     }
 }

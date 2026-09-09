@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use filesystem_abi::FileSystemError;
-use kernel_objects::{Mapping, MemoryRegion, OwnedHandle, Resource};
+use kernel_objects::{Mapping, MemoryRegion, Resource};
 use runtime::{MemoryAccess, UserMemFlags};
 use syscall::Rights;
 use userland::USERLAND_PAGE_SIZE;
@@ -43,11 +43,10 @@ impl DataBuffer {
         })
     }
 
-    pub(crate) fn share(&self) -> Result<OwnedHandle, FileSystemError> {
+    pub(crate) fn share(&self) -> Result<MemoryRegion, FileSystemError> {
         // Права клиента без `DUPLICATE`: производную капу он не переминчивает, и закрытие корневой
         // капы сервером отзывает её.
         self.region
-            .handle()
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(no_space)
     }

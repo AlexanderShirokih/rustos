@@ -10,7 +10,7 @@ runtime::process_heap!();
 use core::panic::PanicInfo;
 
 use bootstrap_abi::bootstrap;
-use kernel_objects::OwnedHandle;
+use kernel_objects::{Port, kind};
 use log_abi::log;
 use runtime::{PortTransport, thread_exit};
 use syscall::Handle;
@@ -24,12 +24,12 @@ use log_fixture_protocol::{
 
 /// `log` приходит в x0 как HandleId лог-сессии.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(log: Handle) -> ! {
-    let log = OwnedHandle::from_handle(log);
+pub extern "C" fn _start(log: Handle<kind::Port>) -> ! {
+    let log = Port::from_handle(log);
     thread_exit(probe(&log))
 }
 
-fn probe(log: &OwnedHandle) -> u64 {
+fn probe(log: &Port) -> u64 {
     let bootstrap = bootstrap::Client::new(PortTransport::client(log.borrow()));
     // Выданную capability закрывает ответ: пробе довольно самого факта выдачи.
     if let Ok(response) = bootstrap.acquire_irq_control()

@@ -7,7 +7,7 @@ runtime::process_heap!();
 use core::panic::PanicInfo;
 
 use component_startup::component_manifest;
-use kernel_objects::{OwnedHandle, Port};
+use kernel_objects::{Port, kind};
 use runtime::{Timeout, thread_exit};
 use syscall::Handle;
 
@@ -22,10 +22,11 @@ component_manifest! {
 
 /// Программа-фикстура владения стартовым набором. Приём, не сложившийся в контракт, закрывает
 /// уже доставленные capability, и процесс паркуется, оставляя таблицу handle живой для
-/// наблюдения вызывающим. `startup` приходит в x0 как HandleId одноразового startup-порта.
+/// наблюдения вызывающим.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
-    if OwnershipStartup::receive(OwnedHandle::from_handle(startup)).is_ok() {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
+    if OwnershipStartup::receive(Port::from_handle(startup)).is_ok() {
         thread_exit(RECEIVED_EXIT_CODE);
     }
 

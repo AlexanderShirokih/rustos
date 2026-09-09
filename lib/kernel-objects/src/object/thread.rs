@@ -1,6 +1,6 @@
 //! Типизированная обёртка над потоком ядра и параметры его запуска.
 
-use syscall::{Priority, SIGNALED, Timeout};
+use syscall::{Priority, SIGNALED, Timeout, kind};
 
 use crate::{
     error::{Error, Result, unit, value},
@@ -23,14 +23,11 @@ pub struct ThreadEntry {
 }
 
 /// Владеет хэндлом `Thread` и закрывает его на drop.
-#[derive(Debug)]
-pub struct Thread {
-    handle: OwnedHandle,
-}
+pub type Thread = OwnedHandle<kind::Thread>;
 
-impl Thread {
+impl OwnedHandle<kind::Thread> {
     /// Создаёт поток в процессе `process` с параметрами `entry`.
-    pub fn create(process: BorrowedHandle<'_>, entry: ThreadEntry) -> Result<Self> {
+    pub fn create(process: BorrowedHandle<'_, kind::Process>, entry: ThreadEntry) -> Result<Self> {
         svc::thread_create(
             process.as_raw(),
             entry.entry_pc,
@@ -38,47 +35,29 @@ impl Thread {
             entry.arg,
             u64::from(entry.priority),
         )
-        .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
+        .map(Self::from_handle)
         .map_err(Error::Syscall)
     }
 
     /// Возвращает обёртку над собственным потоком.
     pub fn self_thread() -> Result<Self> {
         svc::thread_self()
-            .map(|handle| Self::from_handle(OwnedHandle::from_handle(handle)))
+            .map(Self::from_handle)
             .map_err(Error::Syscall)
-    }
-
-    /// Берёт во владение хэндл `Thread`.
-    pub fn from_handle(handle: OwnedHandle) -> Self {
-        Self { handle }
-    }
-
-    /// Заимствование хэндла на время одного вызова.
-    pub fn handle(&self) -> BorrowedHandle<'_> {
-        self.handle.borrow()
     }
 
     /// Финальный exit-код завершённого потока.
     pub fn exit_code(&self) -> Result<u32> {
-        value(svc::thread_exit_code(self.handle.as_raw())).map(|code| (code & 0xFFFF_FFFF) as u32)
+        value(svc::thread_exit_code(self.as_raw())).map(|code| (code & 0xFFFF_FFFF) as u32)
     }
 
     /// Блокирует до терминации потока (`SIGNALED`) либо тайм-аута.
     pub fn join(&self, timeout: Timeout) -> Result<()> {
-        super::wait_signals(self.handle.as_raw(), SIGNALED, timeout).map(|_| ())
+        super::wait_signals(self.as_raw(), SIGNALED, timeout).map(|_| ())
     }
 
     /// Завершает поток с кодом `exit_code`.
     pub fn terminate(&self, exit_code: u32) -> Result<()> {
-        unit(svc::thread_terminate(
-            self.handle.as_raw(),
-            u64::from(exit_code),
-        ))
-    }
-
-    /// Отдаёт владеемый хэндл.
-    pub fn into_handle(self) -> OwnedHandle {
-        self.handle
+        unit(svc::thread_terminate(self.as_raw(), u64::from(exit_code)))
     }
 }

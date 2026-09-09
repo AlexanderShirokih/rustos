@@ -106,14 +106,11 @@ fn child_stack_is_charged_to_the_image_budget() {
 #[kernel_test]
 fn starting_a_child_on_a_write_only_resource_is_denied() {
     let resource = Resource::self_resource().expect("self metering resource");
-    let write_only = Resource::from_handle(
-        resource
-            .handle()
-            .duplicate(Rights::WRITE, None)
-            .expect("write-only resource capability"),
-    );
+    let write_only = resource
+        .duplicate(Rights::WRITE, None)
+        .expect("write-only resource capability");
     let process = Process::create("resource-rights").expect("process create");
-    let bootstrap = Signal::create().expect("signal create").into_handle();
+    let bootstrap = Signal::create().expect("signal create");
 
     let entry = ThreadEntry {
         entry_pc: 0,
@@ -132,7 +129,7 @@ fn starting_a_child_on_a_write_only_resource_is_denied() {
     // Для контроля тот же старт с полноправным ресурсом доходит до проверки
     // состояния процесса и отказывает другим кодом. Разные исходы на одном
     // вызове и показывают, что `AccessDenied` пришёл от прав на `resource_h`.
-    let bootstrap = Signal::create().expect("signal create").into_handle();
+    let bootstrap = Signal::create().expect("signal create");
     let error = process.start(entry, bootstrap, Some(&resource)).err();
     kernel_tests::kassert!(matches!(
         error,
@@ -145,12 +142,9 @@ fn granted_resource_rights_shrink_to_the_passing_handle() {
     // Ресурс отдан хэндлом без `TRANSFER`: капа, которую потомок снимет через
     // `ProcessResourceSelf`, не шире прав этого хэндла, и разослать её потомок не может.
     let parent = Resource::self_resource().expect("self metering resource");
-    let untransferable = Resource::from_handle(
-        parent
-            .handle()
-            .duplicate(Rights::WRITE | Rights::DUPLICATE, None)
-            .expect("resource capability without TRANSFER"),
-    );
+    let untransferable = parent
+        .duplicate(Rights::WRITE | Rights::DUPLICATE, None)
+        .expect("resource capability without TRANSFER");
     let child = Fixture::spawn_on(&untransferable);
     kernel_tests::kassert_eq!(
         child.request_status(OP_DUPLICATE_TRANSFER_CAP, 0, &[]),

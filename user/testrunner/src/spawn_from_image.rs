@@ -2,7 +2,7 @@
 
 use bootstrap_abi::bootstrap;
 use ipc::wire::IpcError;
-use kernel_objects::{MemoryRegion, OwnedHandle, Resource, Signal};
+use kernel_objects::{MemoryRegion, Resource, Signal};
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, Timeout};
 use syscall::{Rights, SIGNALED, SyscallError};
@@ -52,7 +52,7 @@ fn launch_child_delivers_startup_frame() {
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
 
-    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
+    let region = MemoryRegion::from(cap);
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
@@ -67,7 +67,7 @@ fn launch_child_delivers_startup_frame() {
         Some(component_name(STARTUP_FIXTURE)),
         &resource,
         |startup| -> Result<(), StartupError> {
-            startup_fixture::Client::new(PortTransport::client(startup.handle()))
+            startup_fixture::Client::new(PortTransport::client(startup.as_raw()))
                 .start(STARTUP_VALUE)?;
             Ok(())
         },
@@ -89,7 +89,7 @@ fn failed_startup_returns_child_budget() {
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
 
-    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
+    let region = MemoryRegion::from(cap);
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
@@ -135,7 +135,7 @@ fn load_image_error_reclaims_each_created_process() {
     let resource = Resource::self_resource().expect("self metering resource");
 
     for _ in 0..PROCESS_CREATE_ROLLBACK_ATTEMPTS {
-        let initial = Signal::create().expect("initial capability").into_handle();
+        let initial = Signal::create().expect("initial capability");
         kernel_tests::kassert!(matches!(
             load_entry(&invalid, None, &resource, initial),
             Err(kernel_objects::Error::Syscall(
@@ -153,7 +153,7 @@ fn start_error_reclaims_each_loaded_process() {
         .expect("acquire_userland_image call");
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
-    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
+    let region = MemoryRegion::from(cap);
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image
@@ -163,14 +163,12 @@ fn start_error_reclaims_each_loaded_process() {
         .expect("child entry is a program");
 
     let root = Resource::self_resource().expect("self metering resource");
-    let write_only = Resource::from_handle(
-        root.handle()
-            .duplicate(Rights::WRITE, None)
-            .expect("resource without duplicate right"),
-    );
+    let write_only = root
+        .duplicate(Rights::WRITE, None)
+        .expect("resource without duplicate right");
 
     for _ in 0..PROCESS_CREATE_ROLLBACK_ATTEMPTS {
-        let initial = Signal::create().expect("initial capability").into_handle();
+        let initial = Signal::create().expect("initial capability");
         kernel_tests::kassert!(matches!(
             load_entry(
                 &child,
@@ -196,7 +194,7 @@ fn caller_wakes_when_server_dies_holding_reply() {
         .expect("acquire_userland_image call");
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
-    let region = MemoryRegion::from_handle(OwnedHandle::from(cap));
+    let region = MemoryRegion::from(cap);
     let mapping = region.map_full_read_only().expect("map image read-only");
     let image = decode(mapping.as_bytes()).expect("decode acquired image");
     let child = image

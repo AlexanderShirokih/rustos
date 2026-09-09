@@ -239,14 +239,16 @@ struct BootstrapServer {
 }
 
 impl BootstrapServer {
-    fn vend(&self, target: CapabilityTarget) -> Result<Cap, u32> {
+    fn vend<K: syscall::ObjectKind>(&self, target: CapabilityTarget) -> Result<Cap<K>, u32> {
+        // Таблица ядра хранит запись без статической метки вида. Вид называет операция
+        // контракта, и выдача применяет его к номеру записи.
         let cap = Capability::new_with_default_rights(target);
         let id = self
             .table
             .with_lock(|tbl| tbl.insert(cap))
             .map_err(|_| ACQUIRE_FAILED)?;
 
-        Ok(Cap::from_raw(id.raw()))
+        Ok(Cap::from_handle(syscall::Handle::from_abi(id.raw())))
     }
 }
 
@@ -263,13 +265,13 @@ impl bootstrap::Service for BootstrapServer {
         }
     }
 
-    fn acquire_irq_control(&mut self) -> Result<Cap, u32> {
+    fn acquire_irq_control(&mut self) -> Result<Cap<syscall::kind::IrqControl>, u32> {
         self.vend(CapabilityTarget::IrqControl(
             self.resources.irq_control.clone(),
         ))
     }
 
-    fn acquire_userland_image(&mut self) -> Result<Cap, u32> {
+    fn acquire_userland_image(&mut self) -> Result<Cap<syscall::kind::MemoryRegion>, u32> {
         self.vend(CapabilityTarget::Memory(
             self.resources.image_region.clone(),
         ))
@@ -284,7 +286,10 @@ impl bootstrap::Service for BootstrapServer {
         })
     }
 
-    fn acquire_device_memory(&mut self, index: u32) -> Result<Cap, u32> {
+    fn acquire_device_memory(
+        &mut self,
+        index: u32,
+    ) -> Result<Cap<syscall::kind::MemoryRegion>, u32> {
         let region = self
             .resources
             .device_regions

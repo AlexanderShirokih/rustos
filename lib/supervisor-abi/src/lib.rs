@@ -5,8 +5,9 @@
 //! открывает её, `define` подаёт запись плана вместе с capability на регион программы,
 //! `commit` применяет накопленное. Отказ любого шага назван [`ExtendError`].
 //!
-//! Операция `session` отдаёт capability сессии компонента по имени его экземпляра. Границы
-//! записи плана и имени заданы [`PLAN_RECORD_MAX`] и [`INSTANCE_NAME_MAX`].
+//! Операция `session` отдаёт capability сессии экспорта компонента по имени его экземпляра и
+//! протоколу этого экспорта. Границы записи плана и имён заданы [`PLAN_RECORD_MAX`],
+//! [`INSTANCE_NAME_MAX`] и [`PROTOCOL_NAME_MAX`].
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -22,12 +23,16 @@ use ipc::{
     schema::WireType,
     wire::{ENUM_DISCRIMINANT_WIDTH, HandleSlots, IpcError, MessageBuf, value},
 };
+use syscall::kind;
 
 /// Предел записи плана одного компонента в байтах.
 pub const PLAN_RECORD_MAX: usize = 2048;
 
 /// Предел имени экземпляра в байтах. Под этим именем идёт процесс компонента.
 pub const INSTANCE_NAME_MAX: usize = 64;
+
+/// Предел имени протокола в байтах. Протокол называет экспорт компонента.
+pub const PROTOCOL_NAME_MAX: usize = 64;
 
 /// Причина, по которой супервизор отклонил операцию транзакции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +50,8 @@ pub enum ExtendError {
     NoSpace,
     /// Компонент набора не поднялся.
     NotStarted,
-    /// Компонента с таким именем вызыватель не определял.
+    /// Компонента с таким именем вызыватель не определял либо названного протокола нет
+    /// среди его экспортов.
     NotFound,
 }
 
@@ -74,18 +80,20 @@ ipc::protocol! {
         /// программы разбору не мешает.
         call fn define(
             record: ipc::wire::Bytes<{ PLAN_RECORD_MAX }>,
-            program: Cap,
+            program: Cap<kind::MemoryRegion>,
         ) -> Result<u32, ExtendError>;
 
         /// Проверяет набор целиком и поднимает его в топологическом порядке. Отказ снимает
         /// транзакцию, не поднимая ни одного компонента набора.
         call fn commit() -> Result<u32, ExtendError>;
 
-        /// Отдаёт сессию компонента `component` тем же путём, каким супервизор наполняет
-        /// слот `service`. Компонент, которого вызыватель не определял, - `NotFound`.
+        /// Отдаёт сессию экспорта `protocol` компонента `component` тем же путём, каким
+        /// супервизор наполняет слот `service`. Компонент, которого вызыватель не
+        /// определял, и протокол вне его экспортов - `NotFound`.
         call fn session(
             component: ipc::wire::Str<{ INSTANCE_NAME_MAX }>,
-        ) -> Result<ipc::wire::Cap, ExtendError>;
+            protocol: ipc::wire::Str<{ PROTOCOL_NAME_MAX }>,
+        ) -> Result<ipc::wire::Cap<kind::Port>, ExtendError>;
     }
 }
 
@@ -135,19 +143,21 @@ mod tests {
 
     use ipc::wire::{Bytes, Cap, HandleSlots, MESSAGE_INLINE_MAX, MessageBuf, Str};
     use ipc_test::MockEnd;
+    use syscall::{Handle, ObjectKind, kind};
 
     use super::{
-        ExtendError, INSTANCE_NAME_MAX, IpcError, PLAN_RECORD_MAX, VARIANTS, WireValue, supervisor,
-        value,
+        ExtendError, INSTANCE_NAME_MAX, IpcError, PLAN_RECORD_MAX, PROTOCOL_NAME_MAX, VARIANTS,
+        WireValue, supervisor, value,
     };
 
-    const PROGRAM: Cap = cap(0x51);
-    const SESSION: Cap = cap(0x52);
+    const PROGRAM: Cap<kind::MemoryRegion> = cap(0x51);
+    const SESSION: Cap<kind::Port> = cap(0x52);
 
     const FIELD_ID: u8 = 1;
 
     const RECORD: &[u8] = b"RKPLAN\0\0record";
     const DEFINED: &str = "extended-ramfs";
+    const EXPORT: &str = "FileSystem";
 
     #[derive(Default)]
     struct Supervisor {
@@ -155,8 +165,11 @@ mod tests {
         defined: Vec<String>,
     }
 
-    const fn cap(raw: u32) -> Cap {
-        Cap::from_raw(NonZeroU32::new(raw).expect("non-zero"))
+    const fn cap<K: ObjectKind>(raw: u32) -> Cap<K> {
+        match NonZeroU32::new(raw) {
+            Some(id) => Cap::from_handle(Handle::from_abi(id)),
+            None => panic!("non-zero"),
+        }
     }
 
     impl supervisor::Service for Supervisor {
@@ -169,7 +182,7 @@ mod tests {
         fn define(
             &mut self,
             record: Bytes<'_, PLAN_RECORD_MAX>,
-            program: Cap,
+            program: Cap<kind::MemoryRegion>,
         ) -> Result<u32, ExtendError> {
             if !self.open {
                 return Err(ExtendError::NoTransaction);
@@ -189,8 +202,13 @@ mod tests {
             Ok(0)
         }
 
-        fn session(&mut self, component: Str<'_, INSTANCE_NAME_MAX>) -> Result<Cap, ExtendError> {
-            if self.defined.iter().any(|name| name == component.as_str()) {
+        fn session(
+            &mut self,
+            component: Str<'_, INSTANCE_NAME_MAX>,
+            protocol: Str<'_, PROTOCOL_NAME_MAX>,
+        ) -> Result<Cap<kind::Port>, ExtendError> {
+            let known = self.defined.iter().any(|name| name == component.as_str());
+            if known && protocol.as_str() == EXPORT {
                 Ok(SESSION)
             } else {
                 Err(ExtendError::NotFound)
@@ -215,7 +233,7 @@ mod tests {
         let mut supervisor = Supervisor::default();
         std::thread::scope(|scope| {
             let server = scope.spawn(|| {
-                for _ in 0..5 {
+                for _ in 0..6 {
                     ipc::Transport::wait_readable(&server_end, ipc::Timeout::INFINITE)
                         .expect("server wait");
                     supervisor::dispatch(&mut supervisor, &server_end).expect("dispatch ok");
@@ -226,14 +244,20 @@ mod tests {
             let record = Bytes::new(RECORD).expect("record within the bound");
             let defined = Str::new(DEFINED).expect("instance name within the bound");
             let absent = Str::new("stage-zero").expect("instance name within the bound");
+            let exported = Str::new(EXPORT).expect("protocol name within the bound");
+            let foreign = Str::new("Rtc").expect("protocol name within the bound");
             assert_eq!(client.begin().expect("call").value, Ok(0));
             assert_eq!(client.define(record, PROGRAM).expect("call").value, Ok(0));
             assert_eq!(client.commit().expect("call").value, Ok(0));
-            let mut session = client.session(defined).expect("call");
+            let mut session = client.session(defined, exported).expect("call");
             assert_eq!(session.value, Ok(SESSION));
             assert_eq!(session.claim(SESSION), Some(SESSION));
             assert_eq!(
-                client.session(absent).expect("call").value,
+                client.session(absent, exported).expect("call").value,
+                Err(ExtendError::NotFound)
+            );
+            assert_eq!(
+                client.session(defined, foreign).expect("call").value,
                 Err(ExtendError::NotFound)
             );
             server.join().expect("server joins");

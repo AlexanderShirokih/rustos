@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "ipc-test",
+ "syscall",
 ]
 
 [[package]]
@@ -34,6 +35,7 @@ dependencies = [
  "ipc",
  "ipc-test",
  "rustc-std-workspace-core",
+ "syscall",
 ]
 
 [[package]]
@@ -97,6 +99,7 @@ dependencies = [
  "ipc-test",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
+ "syscall",
 ]
 
 [[package]]
@@ -156,6 +159,7 @@ name = "ipc-test"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]
@@ -305,6 +309,7 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "ipc-test",
+ "syscall",
 ]
 
 [[package]]

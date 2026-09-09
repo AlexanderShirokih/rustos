@@ -1,42 +1,41 @@
 use core::num::NonZeroU64;
 
-use component_abi::{COMPONENT_SLOT_MAX, CONTROL_LEASE_BADGE, component_startup};
-use kernel_objects::{BorrowedHandle, OwnedHandle, Port};
+use component_abi::{COMPONENT_EXPORT_MAX, COMPONENT_SLOT_MAX, component_startup};
+use kernel_objects::{BorrowedHandle, ObjectKind, OwnedHandle, Port, kind};
 use runtime::Timeout;
 use syscall::Rights;
 use userland::EntryView;
 
 use crate::component::{BoundedStartupTransport, ManagedComponent, ManagedStartupError};
 
-struct ComponentServers {
-    control: OwnedHandle,
-    service: OwnedHandle,
-}
-
 /// Capability слотов компонента в порядке плана. Недоставленные слоты
 /// закрываются вместе с ней.
 #[derive(Default)]
 pub struct ComponentSlots {
-    slots: [Option<OwnedHandle>; COMPONENT_SLOT_MAX],
+    slots: [Option<OwnedHandle<kind::Any>>; COMPONENT_SLOT_MAX],
     count: u16,
 }
 
-/// Capability roots компонента, остающиеся у supervisor.
+/// Capability roots компонента, остающиеся у supervisor: по минтеру на каждый экспорт и
+/// серверные стороны их портов до отправки стартовой транзакции.
 pub struct ComponentRoots {
-    control: OwnedHandle,
-    control_minter: OwnedHandle,
-    service_minter: OwnedHandle,
-    servers: Option<ComponentServers>,
+    minters: [Option<Port>; COMPONENT_EXPORT_MAX],
+    export_count: usize,
+    servers: Option<[Option<Port>; COMPONENT_EXPORT_MAX]>,
 }
 
 impl ComponentSlots {
-    /// Добавляет capability очередным слотом.
-    pub fn push(&mut self, capability: OwnedHandle) -> Result<(), ManagedStartupError> {
+    /// Добавляет capability очередным слотом. Слоты одного плана разных видов, и вид
+    /// снимается на входе в общий массив.
+    pub fn push<K: ObjectKind>(
+        &mut self,
+        capability: OwnedHandle<K>,
+    ) -> Result<(), ManagedStartupError> {
         let place = self
             .slots
             .get_mut(usize::from(self.count))
             .ok_or(ManagedStartupError::TooManySlots)?;
-        *place = Some(capability);
+        *place = Some(capability.erase());
         self.count += 1;
         Ok(())
     }
@@ -55,63 +54,65 @@ impl ComponentSlots {
 }
 
 impl ComponentRoots {
-    /// Создаёт control- и service-порты компонента.
+    /// Создаёт по порту на каждый из `export_count` экспортов компонента.
     ///
     /// Порты принадлежат одной incarnation: их корни уезжают её процессу, а
     /// оставшиеся у supervisor стороны `READ` не дают. Минтеры выводятся из
     /// корня, пока тот у supervisor: заклеймённая капа значка уже не примет.
-    pub fn create() -> Result<Self, ManagedStartupError> {
+    pub fn create(export_count: usize) -> Result<Self, ManagedStartupError> {
+        if export_count > COMPONENT_EXPORT_MAX {
+            return Err(ManagedStartupError::TooManyExports);
+        }
         let minted = Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE;
-        // Значок lease-капы control-порта. Уход этого значка компонент читает
-        // как уход supervisor и завершается.
-        let control = Port::create()?;
-        let control_client = control
-            .handle()
-            .duplicate(minted, Some(CONTROL_LEASE_BADGE))?;
-        let control_minter = control.handle().duplicate(minted, None)?;
-        let service = Port::create()?;
-        let service_minter = service.handle().duplicate(minted, None)?;
+        let mut minters: [Option<Port>; COMPONENT_EXPORT_MAX] = core::array::from_fn(|_| None);
+        let mut servers: [Option<Port>; COMPONENT_EXPORT_MAX] = core::array::from_fn(|_| None);
+        for (minter, server) in minters.iter_mut().zip(&mut servers).take(export_count) {
+            let port = Port::create()?;
+            *minter = Some(port.duplicate(minted, None)?);
+            *server = Some(port);
+        }
 
         Ok(Self {
-            control: control_client,
-            control_minter,
-            service_minter,
-            servers: Some(ComponentServers {
-                control: control.into_handle(),
-                service: service.into_handle(),
-            }),
+            minters,
+            export_count,
+            servers: Some(servers),
         })
     }
 
-    /// Минтит клиентскую capability service-порта под значком `badge`.
-    pub fn session(&self, badge: NonZeroU64) -> Result<OwnedHandle, kernel_objects::Error> {
-        self.service_minter
+    /// Число экспортов компонента.
+    #[must_use]
+    pub const fn export_count(&self) -> usize {
+        self.export_count
+    }
+
+    /// Минтит клиентскую capability порта экспорта `export` под значком `badge`.
+    pub fn session(&self, export: usize, badge: NonZeroU64) -> Result<Port, kernel_objects::Error> {
+        self.minter(export)?
             .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
     }
 
-    /// Минтит клиентскую capability control-порта под значком `badge`. Её
-    /// держатель зовёт протокол, который компонент обслуживает на этом порту.
-    pub fn control_session(&self, badge: NonZeroU64) -> Result<OwnedHandle, kernel_objects::Error> {
-        self.control_minter
-            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
+    /// Заимствует минтер клиентских сессий порта экспорта `export`.
+    pub fn export_minter(
+        &self,
+        export: usize,
+    ) -> Result<BorrowedHandle<'_, kind::Port>, kernel_objects::Error> {
+        Ok(self.minter(export)?.borrow())
     }
 
-    /// Заимствует постоянную клиентскую сторону control-порта.
-    #[must_use]
-    pub fn control(&self) -> BorrowedHandle<'_> {
-        self.control.borrow()
-    }
-
-    /// Заимствует минтер клиентских сессий service-порта.
-    #[must_use]
-    pub fn service_minter(&self) -> BorrowedHandle<'_> {
-        self.service_minter.borrow()
+    fn minter(&self, export: usize) -> Result<&Port, kernel_objects::Error> {
+        self.minters
+            .get(export)
+            .filter(|_| export < self.export_count)
+            .and_then(Option::as_ref)
+            .ok_or(kernel_objects::Error::Syscall(
+                syscall::SyscallError::BadHandle,
+            ))
     }
 
     fn send_startup(
         &mut self,
         transport: BoundedStartupTransport,
-        log: &OwnedHandle,
+        log: &Port,
         slots: ComponentSlots,
     ) -> Result<(), ManagedStartupError> {
         // Значок лог-сессии set-once: производная содержит значок компонента, а
@@ -122,7 +123,10 @@ impl ComponentRoots {
             .take()
             .ok_or(ManagedStartupError::InvalidState)?;
         let client = component_startup::Client::new(transport);
-        client.start(log, servers.control, servers.service, slots.len())?;
+        client.begin(log, export_count(self.export_count)?, slots.len())?;
+        for server in servers.into_iter().flatten() {
+            client.export(server)?;
+        }
         for slot in slots.slots.into_iter().flatten() {
             client.slot(slot)?;
         }
@@ -130,22 +134,27 @@ impl ComponentRoots {
     }
 }
 
-/// Поднимает incarnation компонента: свежие порты, производная лог-сессия,
-/// конечный срок стартового рандеву и слоты плана. `name` называет процесс
-/// экземпляра.
+fn export_count(count: usize) -> Result<u16, ManagedStartupError> {
+    u16::try_from(count).map_err(|_| ManagedStartupError::TooManyExports)
+}
+
+/// Поднимает incarnation компонента: порт на каждый из `export_count` экспортов,
+/// производная лог-сессия, конечный срок стартового рандеву и слоты плана. `name`
+/// называет процесс экземпляра.
 pub fn launch_component<'a, V: EntryView<'a>>(
     component: &mut ManagedComponent<ComponentRoots>,
     program: &V,
     name: &str,
-    log: &OwnedHandle,
+    log: &Port,
     startup_timeout: Timeout,
+    export_count: usize,
     slots: ComponentSlots,
 ) -> Result<(), ManagedStartupError> {
     component.launch(
         program,
         name,
         startup_timeout,
-        ComponentRoots::create,
+        move || ComponentRoots::create(export_count),
         move |transport, roots| roots.send_startup(transport, log, slots),
     )
 }

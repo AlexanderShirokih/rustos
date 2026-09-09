@@ -6,10 +6,10 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use syscall::Handle;
+use syscall::{Handle, kind};
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(_startup: Handle) -> ! {
+pub extern "C" fn _start(_startup: Handle<kind::Port>) -> ! {
     loop {
         core::hint::spin_loop();
     }

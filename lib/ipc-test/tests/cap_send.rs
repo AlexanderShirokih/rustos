@@ -10,14 +10,15 @@ use ipc::{
     wire::{Cap, IpcError},
 };
 use ipc_test::MockEnd;
+use syscall::kind;
 
 ipc::protocol! {
     // Контракт передачи capability в запросе.
     mod cap_proto {
         name = "CapProto";
 
-        cast fn send_cap(cap: Cap);
-        call fn exchange(cap: Cap) -> u64;
+        cast fn send_cap(cap: Cap<kind::Port>);
+        call fn exchange(cap: Cap<kind::MemoryRegion>) -> u64;
     }
 }
 
@@ -28,12 +29,15 @@ enum Fate {
     Dropped,
 }
 
-struct FakeHandle {
+struct FakeHandle<K: syscall::ObjectKind> {
     id: u32,
     fate: Rc<Cell<Fate>>,
+    kind: core::marker::PhantomData<K>,
 }
 
-impl IntoWireHandle for FakeHandle {
+impl<K: syscall::ObjectKind> IntoWireHandle for FakeHandle<K> {
+    type Kind = K;
+
     fn wire_id(&self) -> u32 {
         self.id
     }
@@ -44,7 +48,7 @@ impl IntoWireHandle for FakeHandle {
     }
 }
 
-impl Drop for FakeHandle {
+impl<K: syscall::ObjectKind> Drop for FakeHandle<K> {
     fn drop(&mut self) {
         self.fate.set(Fate::Dropped);
     }
@@ -53,19 +57,20 @@ impl Drop for FakeHandle {
 struct Echo;
 
 impl cap_proto::Service for Echo {
-    fn send_cap(&mut self, _cap: Cap) {}
+    fn send_cap(&mut self, _cap: Cap<kind::Port>) {}
 
-    fn exchange(&mut self, cap: Cap) -> u64 {
+    fn exchange(&mut self, cap: Cap<kind::MemoryRegion>) -> u64 {
         u64::from(cap.raw().get())
     }
 }
 
-fn fake(id: u32) -> (FakeHandle, Rc<Cell<Fate>>) {
+fn fake<K: syscall::ObjectKind>(id: u32) -> (FakeHandle<K>, Rc<Cell<Fate>>) {
     let fate = Rc::new(Cell::new(Fate::Pending));
     (
         FakeHandle {
             id,
             fate: Rc::clone(&fate),
+            kind: core::marker::PhantomData,
         },
         fate,
     )
@@ -75,7 +80,7 @@ fn fake(id: u32) -> (FakeHandle, Rc<Cell<Fate>>) {
 fn cast_cap_relinquished_on_ok() {
     let (client_end, server_end) = MockEnd::pair();
     let client = cap_proto::Client::new(client_end);
-    let (handle, fate) = fake(42);
+    let (handle, fate) = fake::<kind::Port>(42);
 
     client.send_cap(handle).expect("send ok");
 
@@ -93,7 +98,7 @@ fn cast_cap_dropped_on_peer_closed() {
     let (client_end, server_end) = MockEnd::pair();
     drop(server_end);
     let client = cap_proto::Client::new(client_end);
-    let (handle, fate) = fake(7);
+    let (handle, fate) = fake::<kind::Port>(7);
 
     assert_eq!(client.send_cap(handle), Err(IpcError::PeerClosed));
     assert_eq!(fate.get(), Fate::Dropped);
@@ -104,7 +109,7 @@ fn call_cap_dropped_on_peer_closed() {
     let (client_end, server_end) = MockEnd::pair();
     drop(server_end);
     let client = cap_proto::Client::new(client_end);
-    let (handle, fate) = fake(5);
+    let (handle, fate) = fake::<kind::MemoryRegion>(5);
 
     assert_eq!(
         client.exchange(handle).map(|response| response.value),
@@ -125,7 +130,7 @@ fn call_cap_relinquished_on_ok() {
     });
 
     let client = cap_proto::Client::new(client_end);
-    let (handle, fate) = fake(42);
+    let (handle, fate) = fake::<kind::MemoryRegion>(42);
 
     let response = client.exchange(handle).expect("exchange ok");
 

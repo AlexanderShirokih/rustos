@@ -17,7 +17,7 @@ ipc::protocol! {
         /// ему `Unresponsive` на разборе пути.
         call fn mount(
             path: ipc::wire::Str<{ PATH_MAX }>,
-            session: Cap,
+            session: Cap<syscall::kind::Port>,
         ) -> Result<u32, FileSystemError>;
 
         /// Снимает монтирование с префикса `path` и закрывает капу его сессии. Незанятый
@@ -34,10 +34,14 @@ mod tests {
 
     use ipc::wire::{Cap, Str};
     use ipc_test::MockEnd;
+    use syscall::{Handle, kind};
 
     use super::{FileSystemError, PATH_MAX, namespace_admin};
 
-    const SESSION: Cap = Cap::from_raw(NonZeroU32::new(0x41).expect("non-zero"));
+    const SESSION: Cap<kind::Port> = match NonZeroU32::new(0x41) {
+        Some(id) => Cap::from_handle(Handle::from_abi(id)),
+        None => panic!("non-zero"),
+    };
 
     #[derive(Default)]
     struct RouterSink {
@@ -45,7 +49,11 @@ mod tests {
     }
 
     impl namespace_admin::Service for RouterSink {
-        fn mount(&mut self, path: Str<'_, PATH_MAX>, session: Cap) -> Result<u32, FileSystemError> {
+        fn mount(
+            &mut self,
+            path: Str<'_, PATH_MAX>,
+            session: Cap<kind::Port>,
+        ) -> Result<u32, FileSystemError> {
             self.mounted
                 .push(std::format!("mount {} {}", path.as_str(), session.raw()));
             Ok(0)

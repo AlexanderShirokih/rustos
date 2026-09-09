@@ -67,7 +67,7 @@ fn memory_with_profile_retypes_a_device_window() {
         .expect("acquire_device_memory call");
     let capability = response.value.expect("vend ok");
     let cap = response.claim(capability).expect("capability owner");
-    let window = MemoryRegion::from_handle(cap.into());
+    let window = MemoryRegion::from(cap);
 
     let device = window.inspect().expect("inspect device window");
     kernel_tests::kassert_eq!(device.kind, RegionKind::Physical);

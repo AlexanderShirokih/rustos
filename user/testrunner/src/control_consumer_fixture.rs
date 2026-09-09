@@ -9,7 +9,7 @@ use core::panic::PanicInfo;
 use component_startup::{ReceivedStartup, component_manifest};
 use filesystem_abi::{FileSystemError, PATH_MAX, namespace_admin};
 use ipc::wire::Str;
-use kernel_objects::{OwnedHandle, Port, Signal};
+use kernel_objects::{Port, Signal, kind};
 use runtime::{PortTransport, Timeout, install_log, log_fmt, thread_exit};
 use syscall::{Handle, SIGNALED};
 
@@ -30,24 +30,23 @@ const PANIC_EXIT_CODE: u64 = 6;
 
 component_manifest! {
     struct ControlConsumerStartup {
-        slots: { mounts: control(protocol = "NamespaceAdmin", instance = "namespace-router") },
+        slots: { mounts: service(protocol = "NamespaceAdmin", instance = "namespace-router") },
     }
 }
 
-/// Программа-потребитель control-протокола снимает монтирование у маршрутизатора имён
-/// капабилити своего control-слота и после снятия паркуется. Успех вызова читается по таблице
-/// монтирования провайдера, а его отказ уносит ненулевой код выхода. `startup` приходит в x0
-/// как HandleId одноразового startup-порта.
+/// Программа-потребитель административного протокола снимает монтирование у маршрутизатора
+/// имён капабилити своего слота и после снятия паркуется. Успех вызова читается по таблице
+/// монтирования провайдера, а его отказ уносит ненулевой код выхода.
+/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle) -> ! {
+pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
     let Ok(ReceivedStartup { log, resources }) =
-        ControlConsumerStartup::receive(OwnedHandle::from_handle(startup))
+        ControlConsumerStartup::receive(Port::from_handle(startup))
     else {
         thread_exit(NO_STARTUP_EXIT_CODE);
     };
     install_log(log.into_raw(), LOG_TAG);
-    drop(resources.control);
-    drop(resources.service);
+    drop(resources.startup);
 
     let mounts = resources.mounts;
     let failure = unmount(
