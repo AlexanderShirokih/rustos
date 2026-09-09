@@ -3,13 +3,15 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 
 use anyhow::{Context, Result};
 
-use crate::layers::metadata::{CargoMetadata, MetaDependency, relative_dir};
+use crate::{
+    layers::metadata::{CargoMetadata, MetaDependency, relative_dir},
+    sources::rust_sources,
+};
 
 pub(super) fn unused_dependencies(metas: &[CargoMetadata], root: &Path) -> Result<Vec<String>> {
     let lib_names = lib_target_names(metas);
@@ -28,7 +30,7 @@ pub(super) fn unused_dependencies(metas: &[CargoMetadata], root: &Path) -> Resul
             if paths.is_empty() {
                 continue;
             }
-            let sources = read_sources(manifest_dir)?;
+            let sources = rust_sources(manifest_dir)?;
             for dep in paths {
                 // В коде зависимость зовут либо переименованием из манифеста, либо именем её
                 // lib-цели: у пакета оно вправе отличаться от собственного.
@@ -65,31 +67,6 @@ fn lib_target_names(metas: &[CargoMetadata]) -> BTreeMap<&str, &String> {
         }
     }
     names
-}
-
-fn read_sources(dir: &Path) -> Result<Vec<String>> {
-    let mut sources = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let entries = fs::read_dir(&current)
-            .with_context(|| format!("Failed to read {}", current.display()))?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_type()?.is_dir() {
-                // В `target` лежат чужие сборочные артефакты, и крейт их не объявлял.
-                if path.file_name().is_some_and(|name| name != "target") {
-                    stack.push(path);
-                }
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                sources.push(
-                    fs::read_to_string(&path)
-                        .with_context(|| format!("Failed to read {}", path.display()))?,
-                );
-            }
-        }
-    }
-    Ok(sources)
 }
 
 fn mentions_crate(sources: &[String], dep: &str) -> bool {

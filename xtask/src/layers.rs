@@ -20,7 +20,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 pub(crate) use crate::layers::{
-    metadata::{ArchEntry, arch_registry, read_manifest, registered},
+    metadata::{
+        ArchEntry, WorkspacePackage, arch_registry, read_manifest, registered, workspace_packages,
+    },
     profiles::Profile,
 };
 

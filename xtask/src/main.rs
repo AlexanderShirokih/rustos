@@ -17,6 +17,7 @@ mod qemu_test;
 mod race;
 mod shell;
 mod similarity;
+mod sources;
 mod std_src;
 mod style;
 mod userland;

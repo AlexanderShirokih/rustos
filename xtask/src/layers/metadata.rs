@@ -68,6 +68,13 @@ pub(super) struct WorkspaceCrate {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspacePackage {
+    pub(crate) name: String,
+    pub(crate) dir: PathBuf,
+    pub(crate) forced_target: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Member {
     pub(super) name: String,
     pub(super) links_std: bool,
@@ -131,6 +138,24 @@ pub(super) fn load_metadata(dir: &Path) -> Result<CargoMetadata> {
         &format!("cargo metadata in {}", dir.display()),
     )?;
     serde_json::from_str(&metadata).context("Failed to parse cargo metadata")
+}
+
+pub(crate) fn workspace_packages(dir: &Path) -> Result<Vec<WorkspacePackage>> {
+    let meta = load_metadata(dir)?;
+    meta.packages
+        .iter()
+        .map(|pkg| {
+            let manifest_dir = pkg
+                .manifest_path
+                .parent()
+                .with_context(|| format!("crate {}: manifest path has no parent", pkg.name))?;
+            Ok(WorkspacePackage {
+                name: pkg.name.clone(),
+                dir: manifest_dir.to_path_buf(),
+                forced_target: forced_target(read_manifest(&pkg.manifest_path).ok().as_ref()),
+            })
+        })
+        .collect()
 }
 
 pub(super) fn collect_workspace(
